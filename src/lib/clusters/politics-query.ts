@@ -238,8 +238,12 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
       .returns<EmbeddedClusterRow[]>();
 
     if (error) {
-      console.warn("[clusters] embedded select error:", error.message);
-      return { bundles: [], breakingBundles: [], prefilterCount: 0 };
+      // Throw — never return an empty result for a failed query. The
+      // caller is wrapped in `"use cache"`, and a returned empty would be
+      // cached as truth for the full cluster-feed window (empty homepage
+      // for minutes after one Supabase blip). A throw keeps the bad value
+      // out of the cache and lets Next serve the last good entry.
+      throw new Error(`[clusters] embedded select error: ${error.message}`);
     }
     const clusterRows = data ?? [];
     if (clusterRows.length === 0)
@@ -479,8 +483,10 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
       prefilterCount: clusterRows.length,
     };
   } catch (err) {
+    // Rethrow (see the select-error comment above): swallowing here would
+    // let `use cache` store an empty feed as truth.
     console.warn("[clusters] unexpected error:", err);
-    return { bundles: [], breakingBundles: [], prefilterCount: 0 };
+    throw err;
   }
 }
 

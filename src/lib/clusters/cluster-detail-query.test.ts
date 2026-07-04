@@ -395,13 +395,9 @@ describe("getClusterDetail row shaping", () => {
 });
 
 describe("getClusterDetail error handling", () => {
-  it("returns null when the cluster row errors", async () => {
-    responses.clusters = {
-      maybeSingle: { data: null, error: { message: "boom" } },
-    };
-    const result = await getClusterDetail("cluster-1");
-    expect(result).toBeNull();
-  });
+  // NOTE: "cluster row errors → null" was the old contract; errors now
+  // throw (see the cache-poisoning tests below). Only a genuine
+  // maybeSingle miss maps to null/notFound.
 
   it("returns null when the cluster is not found (maybeSingle → null)", async () => {
     responses.clusters = { maybeSingle: { data: null, error: null } };
@@ -411,20 +407,46 @@ describe("getClusterDetail error handling", () => {
     expect(result).toBeNull();
   });
 
-  it("still renders a detail when members or sources query errored", async () => {
-    // The builder logs the members/sources error but should NOT bail —
-    // the page just gets empty arrays for those sub-queries.
+  it("throws when the cluster query errors — a transient failure must not cache as a 404", async () => {
+    // Returning null here makes the page call notFound(), and `"use cache"`
+    // would pin that null for the detail TTL — i.e. a real cluster serves
+    // a cached 404 for minutes after a single Supabase blip. Throwing keeps
+    // the bad result out of the cache.
+    responses.clusters = {
+      maybeSingle: { data: null, error: { message: "cluster boom" } },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    await expect(getClusterDetail("cluster-1")).rejects.toThrow(
+      /cluster boom/,
+    );
+  });
+
+  it("throws when the members query errors — a memberless detail must not be cached", async () => {
     responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
     responses.cluster_articles = {
       returns: { data: null, error: { message: "members boom" } },
     };
+    responses.sources = { returns: { data: [], error: null } };
+
+    await expect(getClusterDetail("cluster-1")).rejects.toThrow(
+      /members boom/,
+    );
+  });
+
+  it("still renders when only the supplemental sources query errored", async () => {
+    // The 144-source directory is supplemental (MediaDna dimming) — a
+    // failure there degrades gracefully to an empty list rather than
+    // taking down the whole detail page.
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = {
       returns: { data: null, error: { message: "sources boom" } },
     };
 
     const result = await getClusterDetail("cluster-1");
     expect(result).not.toBeNull();
-    expect(result!.members).toEqual([]);
     expect(result!.allSources).toEqual([]);
     expect(result!.cluster.id).toBe("cluster-1");
   });

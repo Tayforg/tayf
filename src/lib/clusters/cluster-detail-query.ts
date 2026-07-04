@@ -160,11 +160,13 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     ]);
 
     if (clusterRes.error) {
-      console.warn(
-        "[cluster-detail] cluster query error:",
-        clusterRes.error.message
+      // Throw — returning null here reads as "no such cluster", the page
+      // calls notFound(), and `"use cache"` pins that null for the detail
+      // TTL: a real cluster would serve a cached 404 for minutes after a
+      // transient failure. A throw keeps the bad result out of the cache.
+      throw new Error(
+        `[cluster-detail] cluster query error: ${clusterRes.error.message}`
       );
-      return null;
     }
     if (!clusterRes.data) {
       // No such cluster — let the page call `notFound()`.
@@ -172,12 +174,15 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     }
 
     if (membersRes.error) {
-      console.warn(
-        "[cluster-detail] members query error:",
-        membersRes.error.message
+      // Members are the page's content — a memberless detail must not be
+      // rendered and cached. Same rationale as the cluster query above.
+      throw new Error(
+        `[cluster-detail] members query error: ${membersRes.error.message}`
       );
     }
     if (sourcesRes.error) {
+      // Supplemental only (MediaDna source-directory dimming) — degrade to
+      // an empty list rather than failing the whole page.
       console.warn(
         "[cluster-detail] sources query error:",
         sourcesRes.error.message
@@ -277,8 +282,9 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       allSources: sourcesRes.data ?? [],
     };
   } catch (err) {
+    // Rethrow — swallowing to null would cache a 404 for a real cluster.
     console.warn("[cluster-detail] unexpected error:", err);
-    return null;
+    throw err;
   }
 }
 
