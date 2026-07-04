@@ -6,7 +6,7 @@ import { AlertTriangle, ArrowLeft } from "lucide-react";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { MediaDna } from "@/components/story/media-dna";
-import { ClusterStance } from "@/components/story/cluster-stance";
+import { FramingComparison } from "@/components/story/framing-comparison";
 import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption";
 import { ShareButton } from "@/components/story/share-button";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
@@ -245,7 +245,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 so stories covered only by untagged outlets won't get an empty
                 wrapper. Kept inside the hero section (below the summary) so
                 the chips read as part of the cluster's "at-a-glance" header
-                instead of colliding with the richer ClusterStance grid. */}
+                instead of colliding with the framing comparison below. */}
             {uniqueRatedSources.length > 0 && (
               <div className="space-y-1.5">
                 <div className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80">
@@ -284,9 +284,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
         </>
       )}
 
-      {/* Chart — Bu Haberde Kim Var? (members grouped by Medya DNA zone) */}
-      <div className="rounded-xl border border-border/60 bg-card/40 p-4 hover-lift animate-fade-up stagger-1">
-        <ClusterStance members={members} />
+      {/* "Aynı Haber, Farklı Dünyalar" — per-zone framing comparison. The
+          outlets' own headlines side by side; replaces the old chip-only
+          ClusterStance grid. */}
+      <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 hover-lift animate-fade-up stagger-1">
+        <FramingComparison members={members} />
       </div>
 
       <div className="h-px bg-gradient-to-r from-transparent via-brand/20 to-transparent my-6" />
