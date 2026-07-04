@@ -1,6 +1,16 @@
+import type { Metadata } from "next";
 import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
 import { Eye } from "lucide-react";
+
+// Own metadata so the page doesn't inherit the root layout's title and
+// `canonical: "/"` (which would mark this page a duplicate of the homepage).
+export const metadata: Metadata = {
+  title: "Kör Noktalar",
+  description:
+    "Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Türk medyasındaki kör noktaları tek ekranda görün.",
+  alternates: { canonical: "/blindspots" },
+};
 
 import {
   ClusterCard,
@@ -120,6 +130,7 @@ type EmbeddedClusterArticle = {
 type EmbeddedClusterRow = {
   id: string;
   title_tr: string;
+  title_tr_neutral: string | null;
   summary_tr: string;
   bias_distribution: unknown;
   is_blindspot: boolean;
@@ -153,7 +164,7 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
     const { data, error } = await supabase
       .from("clusters")
       .select(
-        `id, title_tr, summary_tr, bias_distribution, is_blindspot, blindspot_side, article_count, first_published, updated_at,
+        `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, article_count, first_published, updated_at,
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash,
@@ -173,8 +184,10 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
       .returns<EmbeddedClusterRow[]>();
 
     if (error) {
-      console.error("[blindspots] embedded select error", error.message);
-      return { bundles: [] };
+      // Throw — this fetcher is wrapped in `"use cache"`; returning an
+      // empty list on a transient failure would cache "no blindspots" for
+      // the full revalidate window. Same rule as politics-query.
+      throw new Error(`[blindspots] embedded select error: ${error.message}`);
     }
 
     const clusterRows = data ?? [];
@@ -295,7 +308,12 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
       bundles.push({
         cluster: {
           id: c.id,
-          title_tr: c.title_tr,
+          // Same coalesce as politics-query: prefer the LLM-neutralized
+          // headline over the first-arriving outlet's raw framing. The
+          // blindspot feed is exactly where a partisan seed title hurts
+          // most. (SEO_PATTERN above still tests the raw title on purpose
+          // — it detects the *story format*, which a rewrite doesn't change.)
+          title_tr: c.title_tr_neutral ?? c.title_tr,
           summary_tr: c.summary_tr,
           bias_distribution: normalizeDistribution(c.bias_distribution),
           is_blindspot: c.is_blindspot,
@@ -326,8 +344,9 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
 
     return { bundles };
   } catch (err) {
+    // Rethrow — swallowing would let `use cache` store an empty page.
     console.error("[blindspots] unexpected error", err);
-    return { bundles: [] };
+    throw err;
   }
 }
 

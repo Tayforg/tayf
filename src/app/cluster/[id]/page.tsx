@@ -9,6 +9,7 @@ import { MediaDna } from "@/components/story/media-dna";
 import { ClusterStance } from "@/components/story/cluster-stance";
 import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption";
 import { ShareButton } from "@/components/story/share-button";
+import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { SourceChips } from "@/components/source/source-chips";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import {
@@ -54,6 +55,13 @@ export async function generateMetadata({
     // double-suffix to `title — Tayf — Tayf` (caught by gstack site audit).
     title: cluster.title_tr,
     description,
+    // Without an explicit canonical, Next's metadata inheritance propagates
+    // the root layout's `canonical: "/"` here — telling crawlers every
+    // cluster page is a duplicate of the homepage and deindexing the long
+    // tail. Same pattern as source/[slug].
+    alternates: {
+      canonical: `/cluster/${id}`,
+    },
     openGraph: {
       title: cluster.title_tr,
       description,
@@ -218,6 +226,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 <span className="text-muted-foreground/60">•</span>
                 <span>{cluster.article_count} kaynak</span>
                 <ShareButton clusterId={id} title={cluster.title_tr} />
+                <BookmarkButton clusterId={id} />
               </div>
             </div>
 

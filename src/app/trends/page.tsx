@@ -1,6 +1,16 @@
+import type { Metadata } from "next";
 import { cacheLife } from "next/cache";
 
 import { PageHero } from "@/components/ui/page-hero";
+
+// Own metadata so the page doesn't inherit the root layout's title and
+// `canonical: "/"` (which would mark this page a duplicate of the homepage).
+export const metadata: Metadata = {
+  title: "Medya DNA Trendi",
+  description:
+    "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi.",
+  alternates: { canonical: "/trends" },
+};
 import { ZONE_META } from "@/lib/bias/config";
 import { createServerClient } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
