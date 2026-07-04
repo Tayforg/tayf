@@ -1,6 +1,7 @@
 import { AlertTriangle, Clock, Users } from "lucide-react";
 import Link from "next/link";
 
+import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { ZONE_META } from "@/lib/bias/config";
@@ -202,8 +203,18 @@ export function ClusterCard({
   // would hydrate as invalid HTML and break both links). The member article
   // titles + source names remain visible as a preview; the full outbound
   // links live on the detail page instead.
+  //
+  // The bookmark control is a positioned SIBLING of the Link (inside a
+  // relative wrapper) for the same reason — a <button> inside an <a> is
+  // invalid interactive nesting.
   return (
-    <Link
+    <div className="relative">
+      <BookmarkButton
+        clusterId={cluster.id}
+        variant="overlay"
+        className="absolute right-3 top-3 z-10"
+      />
+      <Link
       href={`/cluster/${cluster.id}`}
       className={`hover-lift group block min-h-[44px] touch-manipulation rounded-xl ring-1 ${
         cluster.is_blindspot
@@ -324,6 +335,7 @@ export function ClusterCard({
           )}
         </div>
       </article>
-    </Link>
+      </Link>
+    </div>
   );
 }
