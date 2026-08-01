@@ -43,8 +43,7 @@ const POLITICS_CATEGORIES: readonly NewsCategory[] = ["politika", "son_dakika"];
 // reorder. With CANDIDATE_LIMIT=60 the top of the list was being eaten by
 // stale Bahçeli-speech duplicates and a SEO listicle ("ENGELLİ ÖTV…"),
 // while the day's actual top stories (139 İmamoğlu/İBB articles, 122
-// Üsküdar, 98 YSK ara seçim) sat just below the cut. See
-// team/logs/quality/07-coverage-breadth.md for the full diagnosis.
+// Üsküdar, 98 YSK ara seçim) sat just below the cut.
 const CANDIDATE_LIMIT = 200;
 const DISPLAY_LIMIT = 30;
 
@@ -73,7 +72,6 @@ const DOMINANCE_THRESHOLD = 0.6;
 // cap) all use the cluster's TOTAL article count and ignore VELOCITY —
 // without this term a 24-hour-old story with 15 sources spread across
 // the day still beats a 30-minute-old breaking story with 10 sources.
-// See team/logs/quality/07-coverage-breadth.md for the diagnostic.
 const W_VELOCITY = 1.0;
 
 // R6 "Son Dakika" surfacing: clusters whose `first_published` falls
@@ -116,8 +114,7 @@ export interface ClusterBundle {
   effectiveArticleCount?: number;
   /**
    * R3 source-fairness cap: the cluster's article count after capping
-   * any single source at 10% of the total. Per A8
-   * (`team/logs/quality/08-source-diversity.md`), haberler-com produces
+   * any single source at 10% of the total. Per A8, haberler-com produces
    * 20.5% of all 24h articles and dominates 16 of 30 home clusters,
    * structurally distorting every quality metric. With this cap a cluster
    * of 5 haberler + 1 BBC + 1 BirGün ranks like a 3-source cluster
@@ -330,7 +327,7 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
       // `effectiveSourceCount`. R1's scoreCluster reads it alongside
       // R2's `effectiveArticleCount` and uses min(R3, R2) so we apply
       // the more aggressive of the two normalisations without
-      // double-discounting. See team/logs/quality/08-source-diversity.md.
+      // double-discounting.
       const fairness = applySourceFairnessCap(
         sortedMembers.map((m) => ({
           source: { id: m.sources?.id ?? m.source_id },
@@ -558,7 +555,7 @@ function detectWireRedistribution(
 
 /**
  * Cap any single source at 10% of a cluster's article count for ranking
- * purposes. A8 (`team/logs/quality/08-source-diversity.md`) found that
+ * purposes. A8 found that
  * haberler-com produces 20.5% of all 24h articles, dominates 16 of the
  * top 30 home clusters, and inflates every "cross-bias" / "N sources"
  * metric Tayf reports. After this cap, a cluster of 5 haberler + 1 BBC
