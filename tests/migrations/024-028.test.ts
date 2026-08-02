@@ -354,7 +354,7 @@ describe("pgmq exposure tripwire (all migrations, static)", () => {
     const leak = /grant[^;]*\bpgmq\b[^;]*\bto\b[^;]*\b(anon|authenticated|public)\b/i;
     const offenders = files.filter((f) => {
       const sql = read(f)
-        .split("\n")
+        .split(/\r?\n/)
         .map((line) => line.replace(/--.*$/, ""))
         .join("\n");
       return leak.test(sql);

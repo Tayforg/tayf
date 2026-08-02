@@ -25,7 +25,7 @@ import type {
 // fall in a single Medya DNA zone (iktidar / muhalefet / bagimsiz). The
 // other half of the political spectrum is essentially absent — they didn't
 // cover the story at all. This is the Tayf adaptation of Ground News's
-// signature "Blindspot" feature; see team/logs/ground-news-research.md §3.
+// signature "Blindspot" feature.
 //
 // Data path mirrors politics-query.ts: a single embedded PostgREST select
 // pulls clusters → cluster_articles → articles → sources in one round-trip,
