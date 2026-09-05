@@ -2,25 +2,32 @@ import { ImageResponse } from "next/og";
 
 import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { zoneOf } from "@/lib/bias/config";
-import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
+import { dominantZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import type { MediaDnaZone } from "@/types";
 
 // File-route OG card for /cluster/[id].
 //
 // Next.js 16 auto-registers this as the page segment's
-// `openGraph.images[0]` (and `twitter.images[0]` if a sibling
-// `twitter-image.tsx` is added). The page's `generateMetadata` does NOT
-// need to set `openGraph.images` for this to be wired in — the file
-// convention does that on its own. We deliberately leave the cluster
-// page's existing `firstImage` fallback in place; the framework merges
-// our generated image into the same array.
+// `openGraph.images[0]` (and, via the sibling `twitter-image.tsx`
+// re-export, `twitter.images[0]`) — but ONLY when the segment's own
+// metadata does NOT set an `images` key on `openGraph`/`twitter`.
+// `mergeStaticMetadata` in `next/dist/lib/metadata/resolve-metadata.js`
+// gates the file convention on `!source.openGraph?.hasOwnProperty(
+// 'images')` (same check for twitter). The cluster page's
+// `generateMetadata` used to set `openGraph.images`/`twitter.images`
+// (even as `[]`), which — despite this file's old top-comment claiming
+// the framework "merges" the two — silently disabled this card and left
+// social crawlers showing the raw article photo instead. `page.tsx` no
+// longer sets those keys, so this generated card actually ships now.
 //
 // Tailwind is NOT supported by Satori (the engine behind ImageResponse),
 // so every visual rule below is an inline `style` prop. Only flexbox
 // and a subset of CSS properties render — no `display: grid`, no
 // pseudo-elements, no fancy gradients beyond linear. We also skip
 // custom font fetching to keep build dependencies minimal: Satori
-// falls back to its bundled sans-serif which renders Turkish
-// diacritics (ç ğ ı ö ş ü) correctly.
+// falls back to its bundled Geist-Regular, which renders Turkish
+// diacritics (ç ğ ı ö ş ü) correctly — but only ships weight 400, so the
+// `fontWeight` values below render lighter than the numbers suggest.
 
 export const alt = "Tayf — haber kümesi kartı";
 export const size = { width: 1200, height: 630 };
@@ -30,23 +37,6 @@ interface ImageProps {
   // Next.js 16: dynamic-route `params` is a Promise. Same shape as the
   // page component itself — keeps the contract obvious.
   params: Promise<{ id: string }>;
-}
-
-// The DB stores 10 fine-grained bias categories; the public-facing UI
-// (BiasSpectrum, MediaDNA, ClusterStance) collapses those into 3 zones
-// (iktidar / bağımsız / muhalefet) via `zoneOf`. We do the same here so
-// the OG card matches what users see on the page.
-type ZoneCounts = Record<MediaDnaZone, number>;
-
-function distributionToZones(distribution: BiasDistribution): ZoneCounts {
-  const zones: ZoneCounts = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
-  for (const [bias, count] of Object.entries(distribution) as [
-    BiasCategory,
-    number,
-  ][]) {
-    zones[zoneOf(bias)] += count;
-  }
-  return zones;
 }
 
 // Zone presentation tokens — the Tailwind class strings in
@@ -105,18 +95,32 @@ export default async function Image({ params }: ImageProps) {
   }
 
   const { cluster } = detail;
-  const zones = distributionToZones(cluster.bias_distribution);
+  const zones = zoneCountsOf(cluster.bias_distribution);
+  const percents = zonePercents(zones);
   const zoneTotal = zones.iktidar + zones.bagimsiz + zones.muhalefet;
   // Guard against div-by-zero on a freshly clustered row whose
   // bias_distribution hasn't been backfilled yet.
   const safeTotal = zoneTotal > 0 ? zoneTotal : 1;
 
-  // Trim very long Turkish headlines so they fit in the 2-line title
-  // box at fontSize 64. Roughly 110 characters before Satori starts
-  // pushing things off-canvas at this size.
+  // Blindspot ribbon zone: prefer the reported `blindspot_side`; a
+  // freshly-flagged row without one yet falls back to whichever zone
+  // covered the story the most (same rule `buildShareText` uses).
+  const ribbonZone: MediaDnaZone | null = cluster.is_blindspot
+    ? cluster.blindspot_side
+      ? zoneOf(cluster.blindspot_side)
+      : (dominantZone(zones) ?? "iktidar")
+    : null;
+
+  // Trim very long Turkish headlines so they fit in the title box.
+  // Roughly 110 characters before Satori starts pushing things
+  // off-canvas at fontSize 64 — tighter once the blindspot ribbon shrinks
+  // the title to fontSize 56, since the ribbon and top row also compete
+  // for vertical space in the column.
+  const titleFontSize = ribbonZone ? 56 : 64;
+  const titleMaxChars = ribbonZone ? 95 : 110;
   const title =
-    cluster.title_tr.length > 110
-      ? cluster.title_tr.slice(0, 107) + "…"
+    cluster.title_tr.length > titleMaxChars
+      ? cluster.title_tr.slice(0, titleMaxChars - 3) + "…"
       : cluster.title_tr;
 
   return new ImageResponse(
@@ -138,6 +142,7 @@ export default async function Image({ params }: ImageProps) {
         <div
           style={{
             display: "flex",
+            flexShrink: 0,
             alignItems: "center",
             justifyContent: "space-between",
             width: "100%",
@@ -186,6 +191,31 @@ export default async function Image({ params }: ImageProps) {
           </div>
         </div>
 
+        {/* Blindspot ribbon — only when this cluster is a "kör nokta"
+            (covered by a single Medya DNA zone). Sits between the top
+            row and the title so it reads as the headline claim. */}
+        {ribbonZone && (
+          <div
+            style={{
+              display: "flex",
+              flexShrink: 0,
+              alignItems: "center",
+              alignSelf: "flex-start",
+              marginTop: 28,
+              padding: "10px 22px",
+              borderRadius: 999,
+              background: "rgba(245,158,11,0.16)",
+              border: "1px solid rgba(245,158,11,0.45)",
+              color: "#fcd34d",
+              fontSize: 26,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+            }}
+          >
+            KÖR NOKTA — sadece {ZONE_STYLE[ribbonZone].label} yazdı
+          </div>
+        )}
+
         {/* Title — flex-grow pushes the bias breakdown to the bottom. */}
         <div
           style={{
@@ -199,11 +229,13 @@ export default async function Image({ params }: ImageProps) {
           <div
             style={{
               display: "flex",
-              fontSize: 64,
+              fontSize: titleFontSize,
               fontWeight: 800,
               lineHeight: 1.1,
               letterSpacing: "-0.025em",
               color: "#fafafa",
+              overflow: "hidden",
+              lineClamp: 3,
             }}
           >
             {title}
@@ -216,6 +248,7 @@ export default async function Image({ params }: ImageProps) {
         <div
           style={{
             display: "flex",
+            flexShrink: 0,
             flexDirection: "column",
             width: "100%",
           }}
@@ -258,7 +291,7 @@ export default async function Image({ params }: ImageProps) {
           >
             {(["iktidar", "bagimsiz", "muhalefet"] as MediaDnaZone[]).map(
               (zone) => {
-                const pct = Math.round((zones[zone] / safeTotal) * 100);
+                const pct = percents[zone];
                 return (
                   <div
                     key={zone}

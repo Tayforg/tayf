@@ -6,9 +6,14 @@ import { Share2, Check } from "lucide-react";
 interface ShareButtonProps {
   clusterId: string;
   title: string;
+  // Optional bias-argument line from `buildShareText` (src/lib/clusters/
+  // share.ts) — e.g. "12 kaynak · %70 iktidar · ...". When present it
+  // rides along with both the native share sheet and the clipboard
+  // fallback so the story argues itself before the recipient clicks.
+  text?: string;
 }
 
-export function ShareButton({ clusterId, title }: ShareButtonProps) {
+export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
   const [copied, setCopied] = useState(false);
 
   async function handleShare() {
@@ -16,7 +21,7 @@ export function ShareButton({ clusterId, title }: ShareButtonProps) {
     // Try native share first (mobile)
     if (navigator.share) {
       try {
-        await navigator.share({ title, url });
+        await navigator.share(text ? { title, text, url } : { title, url });
         return;
       } catch {
         // user cancelled; fall through to clipboard
@@ -24,7 +29,7 @@ export function ShareButton({ clusterId, title }: ShareButtonProps) {
     }
     // Clipboard fallback
     try {
-      await navigator.clipboard.writeText(url);
+      await navigator.clipboard.writeText(text ? `${text}\n${url}` : url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -37,7 +42,6 @@ export function ShareButton({ clusterId, title }: ShareButtonProps) {
       type="button"
       onClick={handleShare}
       className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
-      aria-label="Bağlantıyı kopyala"
     >
       {copied ? (
         <>
