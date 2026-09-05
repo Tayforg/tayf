@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Telescope, Eye, Settings } from "lucide-react";
+import { Telescope, Eye, Bookmark, Settings } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 
 const baseLink =
@@ -27,6 +27,7 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
 
   const isHome = pathname === "/";
   const isBlindspots = pathname?.startsWith("/blindspots") ?? false;
+  const isSaved = pathname?.startsWith("/saved") ?? false;
   const isAdmin = pathname?.startsWith("/admin") ?? false;
 
   return (
@@ -47,6 +48,15 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
       >
         <Eye className="h-3.5 w-3.5" />
         <span className="hidden sm:inline">Kör Noktalar</span>
+      </Link>
+      <Separator orientation="vertical" className="h-3 mx-0.5" />
+      <Link
+        href="/saved"
+        aria-current={isSaved ? "page" : undefined}
+        className={`${baseLink} ${isSaved ? active : inactive}`}
+      >
+        <Bookmark className="h-3.5 w-3.5" />
+        <span className="hidden sm:inline">Kaydedilenler</span>
       </Link>
       {showAdmin && (
         <>

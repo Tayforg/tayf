@@ -1,6 +1,16 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
+
+// Own metadata so the page doesn't inherit the root layout's title and
+// `canonical: "/"` (which would mark this page a duplicate of the homepage).
+export const metadata: Metadata = {
+  title: "Kaynaklar",
+  description:
+    "Tayf'ın izlediği 144 Türk haber kaynağı — yanlılık kategorisi, son 7 günlük aktivite ve son görülme zamanıyla birlikte.",
+  alternates: { canonical: "/sources" },
+};
 
 import { PageHero } from "@/components/ui/page-hero";
 import { BiasBadge } from "@/components/story/bias-badge";

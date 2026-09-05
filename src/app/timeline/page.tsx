@@ -1,7 +1,17 @@
+import type { Metadata } from "next";
 import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
+
+// Own metadata so the page doesn't inherit the root layout's title and
+// `canonical: "/"` (which would mark this page a duplicate of the homepage).
+export const metadata: Metadata = {
+  title: "Zaman çizelgesi",
+  description:
+    "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı.",
+  alternates: { canonical: "/timeline" },
+};
 import { createServerClient } from "@/lib/supabase/server";
 
 // /timeline — chronological feed of every cluster Tayf has minted in the

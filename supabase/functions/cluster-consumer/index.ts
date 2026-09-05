@@ -43,6 +43,11 @@ import {
   MIN_SHARED_ENTITIES,
   TIME_WINDOW_HOURS,
 } from "../_shared/cluster/constants.ts";
+import {
+  BIAS_KEYS,
+  type BiasKey,
+  detectBlindspot,
+} from "../_shared/cluster/blindspot.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -78,12 +83,9 @@ const CLUSTER_CONTEXT_TTL_MS = 60_000;      // refresh rolling-window context
 
 const POLITICS_CATEGORIES = ["politika", "son_dakika"];
 
-const BIAS_KEYS = [
-  "pro_government", "gov_leaning", "state_media", "center",
-  "opposition_leaning", "opposition", "nationalist",
-  "islamist_conservative", "pro_kurdish", "international",
-] as const;
-type BiasKey = (typeof BIAS_KEYS)[number];
+// BIAS_KEYS / BiasKey / detectBlindspot now live in
+// ../_shared/cluster/blindspot.ts (imported above) so the zone-based
+// blindspot rule is pure, unit-tested, and shared.
 
 // ---------------------------------------------------------------------------
 // DB row shapes (narrow, only what the consumer reads/writes)
@@ -179,14 +181,6 @@ function buildBiasDistribution(biasLabels: Array<BiasKey | null | undefined>): R
     if (b && b in dist) dist[b as BiasKey]++;
   }
   return dist;
-}
-
-function detectBlindspot(dist: Record<BiasKey, number>): { is_blindspot: boolean; blindspot_side: BiasKey | null } {
-  const entries = (Object.entries(dist) as Array<[BiasKey, number]>).filter(([, n]) => n > 0);
-  if (entries.length === 1) {
-    return { is_blindspot: true, blindspot_side: entries[0][0] };
-  }
-  return { is_blindspot: false, blindspot_side: null };
 }
 
 function summaryFallback(description: string | null | undefined): string {

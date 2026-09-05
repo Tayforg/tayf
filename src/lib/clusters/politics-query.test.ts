@@ -588,14 +588,13 @@ describe("importance ranking", () => {
 // ---------------------------------------------------------------------------
 
 describe("getPoliticsClusters error handling", () => {
-  it("returns an empty result when the query errors", async () => {
+  it("throws when the query errors — an empty feed must never be cached as truth", async () => {
+    // The caller is wrapped in `"use cache"`: a thrown error prevents the
+    // bad value from entering the cache (Next serves the last good entry),
+    // whereas returning {bundles: []} would pin an empty homepage for the
+    // full revalidate window after a single Supabase blip.
     response = { data: null, error: { message: "db down" } };
-    const result = await getPoliticsClusters();
-    expect(result).toEqual({
-      bundles: [],
-      breakingBundles: [],
-      prefilterCount: 0,
-    });
+    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
   });
 
   it("returns an empty result when the query returns no rows", async () => {
