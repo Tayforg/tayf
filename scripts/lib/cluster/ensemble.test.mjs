@@ -278,8 +278,8 @@ describe("score — final score combination and threshold", () => {
     expect(r.components.tfidfScore).toBe(0);
   });
 
-  it("MATCH_THRESHOLD is the configured knob (0.48 in current tuning)", () => {
-    expect(MATCH_THRESHOLD).toBe(0.48);
+  it("MATCH_THRESHOLD is the configured knob (0.40 in current tuning)", () => {
+    expect(MATCH_THRESHOLD).toBe(0.40);
   });
 
   it("a pair with full Jaccard + aligned time clears MATCH_THRESHOLD", () => {
