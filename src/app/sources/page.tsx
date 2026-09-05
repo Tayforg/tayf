@@ -23,16 +23,13 @@ import type { BiasCategory, Source } from "@/types";
 // grouped by bias category, with a 7-day article count and a "last seen"
 // timestamp per source.
 //
-// Server Component. Two cached round-trips:
-//   1. `sources` — every active row + logo
-//   2. `articles` — id-less rows from the last 7 days, source_id + published_at
-//      only, aggregated in-memory into per-source counts and a max(published_at).
-//
-// Aggregating client-side avoids running 144 individual count() queries
-// (Supabase has no native group-by + count for the JS client without a SQL
-// view), and the 7-day cap caps the row count at a few thousand even on a
-// busy day, so the bandwidth is dwarfed by the round-trip overhead a per-
-// source query loop would cost.
+// Server Component. One cached round-trip: every active source with two
+// aliased embeds of `articles` — `stats` (7-day count) and `latest` (the
+// single newest row). Both aggregate in Postgres, so the result is 118 rows
+// regardless of article volume. The previous version pulled every article
+// row from the last week and counted in memory; PostgREST caps a response
+// at 1000 rows, so at ~45k articles/week it silently counted only the
+// newest 1000 and reported "0 haber" for most sources.
 //
 // Cached at the data layer with `unstable_cache` for 5 minutes — the source
 // directory shifts on the order of weeks, and the recent-activity counter
@@ -75,48 +72,27 @@ async function getSources(): Promise<GroupedSources> {
     Date.now() - 7 * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  // Fire both round-trips in parallel: the activity rollup never depends
-  // on the source list (we group by source_id either way).
-  const [sourcesResult, activityResult] = await Promise.all([
-    supabase
-      .from("sources")
-      .select("id, name, slug, url, rss_url, bias, logo_url, active")
-      .eq("active", true)
-      .order("name", { ascending: true }),
-    supabase
-      .from("articles")
-      .select("source_id, published_at")
-      .gte("published_at", sevenDaysAgo),
-  ]);
+  const { data, error } = await supabase
+    .from("sources")
+    .select(
+      "id, name, slug, url, rss_url, bias, logo_url, active, stats:articles(count), latest:articles(published_at)",
+    )
+    .eq("active", true)
+    .gte("stats.published_at", sevenDaysAgo)
+    .gte("latest.published_at", sevenDaysAgo)
+    .order("published_at", { referencedTable: "latest", ascending: false })
+    .limit(1, { referencedTable: "latest" })
+    .order("name", { ascending: true });
 
-  if (sourcesResult.error) {
-    throw new Error(
-      `sources query failed: ${sourcesResult.error.message}`,
-    );
-  }
-  if (activityResult.error) {
-    throw new Error(
-      `activity query failed: ${activityResult.error.message}`,
-    );
+  if (error) {
+    throw new Error(`sources query failed: ${error.message}`);
   }
 
-  const sourceRows = (sourcesResult.data ?? []) as Source[];
-  const activityRows = (activityResult.data ?? []) as Array<{
-    source_id: string;
-    published_at: string;
-  }>;
-
-  // In-memory rollup. One pass over the activity rows, two writes per row
-  // (count++, max(published_at)). O(n) where n = articles in the last week.
-  const counts = new Map<string, number>();
-  const lastSeen = new Map<string, string>();
-  for (const row of activityRows) {
-    counts.set(row.source_id, (counts.get(row.source_id) ?? 0) + 1);
-    const prev = lastSeen.get(row.source_id);
-    if (!prev || row.published_at > prev) {
-      lastSeen.set(row.source_id, row.published_at);
-    }
-  }
+  type Row = Source & {
+    stats: Array<{ count: number }>;
+    latest: Array<{ published_at: string }>;
+  };
+  const sourceRows = (data ?? []) as unknown as Row[];
 
   // Group sources by bias. Unknown bias values (shouldn't happen — DB has
   // a CHECK constraint — but we narrow defensively) are dropped silently.
@@ -124,10 +100,11 @@ async function getSources(): Promise<GroupedSources> {
   for (const source of sourceRows) {
     const bias = source.bias as BiasCategory;
     if (!(bias in grouped)) continue;
+    const { stats, latest, ...rest } = source;
     grouped[bias].push({
-      ...source,
-      articleCount7d: counts.get(source.id) ?? 0,
-      lastPublishedAt: lastSeen.get(source.id) ?? null,
+      ...rest,
+      articleCount7d: stats[0]?.count ?? 0,
+      lastPublishedAt: latest[0]?.published_at ?? null,
     });
   }
 
