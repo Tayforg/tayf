@@ -99,7 +99,7 @@ src/
 |---|---|---|
 | `NEXT_PUBLIC_SUPABASE_URL` | Yes | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Supabase service role key |
-| `NEXT_PUBLIC_SITE_URL` | No | Public URL for sitemap/RSS (defaults to `http://localhost:3000`) |
+| `NEXT_PUBLIC_SITE_URL` | Yes | Public origin for sitemap/RSS and for resolving `og:image`/`twitter:image` to absolute URLs. Falls back to `https://$VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then `http://localhost:3000` — the latter breaks social card previews in production |
 | `CRON_SECRET` | No | Bearer token for protecting cron endpoints |
 
 ## Scripts

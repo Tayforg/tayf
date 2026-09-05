@@ -17,6 +17,8 @@ import {
   summarizeSurprises,
 } from "@/lib/bias/cross-spectrum";
 import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
+import { buildShareText } from "@/lib/clusters/share";
+import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { formatTurkishTimeAgo } from "@/lib/time";
 
 interface PageProps {
@@ -40,9 +42,7 @@ export async function generateMetadata({
     return { title: "Sayfa bulunamadı" };
   }
 
-  const { cluster, members } = detail;
-  const firstImage = members.find((m) => m.article.image_url)?.article
-    .image_url;
+  const { cluster } = detail;
   // Trim summary so the description stays well under the ~160 char SERP cap
   // even after the article-count prefix.
   const description = `${cluster.article_count} kaynaktan haberler. ${
@@ -67,7 +67,13 @@ export async function generateMetadata({
       description,
       type: "article",
       url: `/cluster/${id}`,
-      images: firstImage ? [{ url: firstImage }] : [],
+      // Deliberately no `images` key here (not even `[]`): Next's
+      // `mergeStaticMetadata` (next/dist/lib/metadata/resolve-metadata.js)
+      // only wires in the generated `opengraph-image.tsx` card when this
+      // object has NO OWN `images` property. Setting one — as this used
+      // to, pointing at the raw first article photo — silently disabled
+      // the generated Medya DNA card. See the comment atop
+      // `opengraph-image.tsx` for the full rule.
       locale: "tr_TR",
       siteName: "Tayf",
     },
@@ -75,7 +81,8 @@ export async function generateMetadata({
       card: "summary_large_image",
       title: cluster.title_tr,
       description,
-      images: firstImage ? [firstImage] : [],
+      // Same reasoning as `openGraph.images` above — omitted so the
+      // `twitter-image.tsx` file convention wires in automatically.
     },
   };
 }
@@ -134,6 +141,16 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // `BiasDistribution` at the boundary, so it's safe to use directly here.
   const biasDistribution = cluster.bias_distribution;
 
+  // Share loop: argue the bias story in the share text itself, before the
+  // click — computed server-side so it's identical for every visitor
+  // (no client-side zone math duplicated in `ShareButton`).
+  const shareText = buildShareText({
+    articleCount: cluster.article_count,
+    distribution: biasDistribution,
+    isBlindspot: cluster.is_blindspot,
+    blindspotSide: cluster.blindspot_side,
+  });
+
   // Schema.org NewsArticle structured data. Lets Google surface the
   // cluster in news-rich results and gives social previews a clean
   // headline/date/image triple. Authors are listed as the source
@@ -186,7 +203,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           pill) so context carries over from the list. */}
       <section className="rounded-xl border border-border/60 bg-card/40 overflow-hidden">
         <div className="flex flex-col sm:flex-row">
-          <div className="sm:shrink-0 w-full sm:w-96 h-56 sm:h-72 bg-muted">
+          <div className="sm:shrink-0 w-full sm:w-96 h-44 sm:h-72 bg-muted">
             <ClusterCardImage
               src={heroSrc}
               srcs={heroCandidates.slice(1)}
@@ -225,7 +242,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 <span>{formatTurkishTimeAgo(cluster.updated_at)}</span>
                 <span className="text-muted-foreground/60">•</span>
                 <span>{cluster.article_count} kaynak</span>
-                <ShareButton clusterId={id} title={cluster.title_tr} />
+                <ShareButton
+                  clusterId={id}
+                  title={cluster.title_tr}
+                  text={shareText}
+                />
                 <BookmarkButton clusterId={id} />
               </div>
             </div>
@@ -233,6 +254,16 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             <div className="spectrum-glow">
               <BiasSpectrum distribution={biasDistribution} />
             </div>
+
+            {/* "Karşı tarafı oku" — a one-tap next action for a visitor
+                landing from a shared link, placed directly under the
+                spectrum and above the summary so it clears the fold on a
+                667px-tall viewport (the mobile hero image above is capped
+                at h-44 for the same reason). */}
+            <ReadAcrossSpectrum
+              members={members}
+              isBlindspot={cluster.is_blindspot}
+            />
 
             {cluster.summary_tr && (
               <p className="text-sm sm:text-base text-muted-foreground leading-relaxed">
