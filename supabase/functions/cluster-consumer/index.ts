@@ -35,6 +35,7 @@ import {
   type FingerprintBundle,
 } from "../_shared/cluster/fingerprint.ts";
 import { extractEntities } from "../_shared/cluster/entities.ts";
+import { bandKeys, LSH_BANDS } from "../_shared/cluster/lsh.ts";
 import { TfidfIndex } from "../_shared/cluster/tfidf.ts";
 import { score } from "../_shared/cluster/ensemble.ts";
 import {
@@ -147,6 +148,13 @@ interface ClusterContext {
   indices: {
     byFingerprint: Map<string, string[]>;
     byEntity: Map<string, string[]>;
+    // LSH bands over the seed/latest MinHash signatures. Third candidate
+    // route: without it, near-duplicate articles sharing fewer than
+    // MIN_SHARED_ENTITIES whitelist entities were never scored at all.
+    // Keyed on seed+latest only, matching what the ensemble actually
+    // compares against below — admitting a cluster whose seed and latest
+    // will not score buys nothing.
+    byBand: Map<string, string[]>;
   };
 }
 
@@ -194,6 +202,9 @@ function buildMemberIndicesFromRows(
 ) {
   const byFingerprint = new Map<string, string[]>();
   const byEntity = new Map<string, string[]>();
+  // Populated by the caller from the seed/latest signatures — see
+  // loadClusterContext. Created here so the indices object has one shape.
+  const byBand = new Map<string, string[]>();
   const fpSeen = new Set<string>();
   const entSeen = new Set<string>();
 
@@ -221,7 +232,7 @@ function buildMemberIndicesFromRows(
     }
   }
 
-  return { byFingerprint, byEntity };
+  return { byFingerprint, byEntity, byBand };
 }
 
 async function inChunked<R>(
@@ -282,7 +293,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     seedByCluster: new Map(),
     latestByCluster: new Map(),
     sourceIdsByCluster: new Map(),
-    indices: { byFingerprint: new Map(), byEntity: new Map() },
+    indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map() },
   };
 
   if (clusters.length === 0) return emptyCtx;
@@ -375,6 +386,23 @@ async function loadClusterContext(): Promise<ClusterContext> {
 
   const indices = buildMemberIndicesFromRows(caRows, memberArticles);
 
+  // Band the seed/latest signatures computed above. Done here rather than in
+  // buildMemberIndicesFromRows because signatures are not persisted — only
+  // seed and latest get one recomputed per context load, and those are
+  // precisely the two the ensemble scores against.
+  for (const byCluster of [seedByCluster, latestByCluster]) {
+    for (const [clusterId, art] of byCluster.entries()) {
+      for (const key of bandKeys(art.signature)) {
+        const list = indices.byBand.get(key);
+        if (!list) {
+          indices.byBand.set(key, [clusterId]);
+        } else if (!list.includes(clusterId)) {
+          list.push(clusterId);
+        }
+      }
+    }
+  }
+
   return {
     fetchedAt: Date.now(),
     clusters,
@@ -417,7 +445,14 @@ async function getSourceLookup(): Promise<Map<string, SourceRow>> {
 // waiting for the TTL to expire)
 // ---------------------------------------------------------------------------
 
-function addMemberToIndices(clusterId: string, article: { fingerprint: string | null; entities: string[] | null }) {
+function addMemberToIndices(
+  clusterId: string,
+  article: {
+    fingerprint: string | null;
+    entities: string[] | null;
+    signature?: Uint32Array | null;
+  },
+) {
   if (!clusterContextCache) return;
   const idx = clusterContextCache.indices;
   if (article.fingerprint) {
@@ -432,6 +467,17 @@ function addMemberToIndices(clusterId: string, article: { fingerprint: string | 
     if (!list.includes(clusterId)) {
       list.push(clusterId);
       idx.byEntity.set(ent, list);
+    }
+  }
+  // Band the member too, so a cluster created earlier in THIS invocation is
+  // reachable by the next dequeued article without waiting for the context
+  // TTL. Two same-outlet near-duplicates arriving in one batch was a
+  // reproducible miss before this.
+  for (const key of bandKeys(article.signature)) {
+    const list = idx.byBand.get(key) || [];
+    if (!list.includes(clusterId)) {
+      list.push(clusterId);
+      idx.byBand.set(key, list);
     }
   }
 }
@@ -493,6 +539,27 @@ function findCandidateClusters(
       const prev = candidates.get(id) ?? 0;
       candidates.set(id, Math.max(prev, shared));
     }
+  }
+
+  // LSH route. Half the corpus carries fewer than MIN_SHARED_ENTITIES
+  // whitelist entities, so without this a near-duplicate whose strict
+  // fingerprint differs by one character is never scored at all. Bands are a
+  // proxy for jaccard: more shared bands means more similar, so the count is
+  // used as the sort weight. It is deliberately damped below the entity
+  // weight — an entity agreement is semantic, a band agreement is lexical, so
+  // when the candidate list is trimmed to MAX_CANDIDATE_CLUSTERS the entity
+  // hits should survive first.
+  const bandCounts = new Map<string, number>();
+  for (const key of bandKeys(article.signature)) {
+    const hit = indices.byBand.get(key);
+    if (!hit) continue;
+    for (const id of hit) {
+      bandCounts.set(id, (bandCounts.get(id) || 0) + 1);
+    }
+  }
+  for (const [id, bands] of bandCounts.entries()) {
+    const prev = candidates.get(id) ?? 0;
+    candidates.set(id, Math.max(prev, bands / LSH_BANDS));
   }
 
   return [...candidates.entries()]
