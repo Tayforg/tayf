@@ -32,6 +32,7 @@ await initSentry("cluster-consumer");
 import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts";
 import {
   fingerprint,
+  titleTokens,
   type FingerprintBundle,
 } from "../_shared/cluster/fingerprint.ts";
 import { extractEntities } from "../_shared/cluster/entities.ts";
@@ -43,6 +44,8 @@ import {
   MAX_CANDIDATE_CLUSTERS,
   MIN_SHARED_ENTITIES,
   TIME_WINDOW_HOURS,
+  TOKEN_CANDIDATE_MIN_SHARED,
+  TOKEN_MIN_LEN,
 } from "../_shared/cluster/constants.ts";
 import {
   BIAS_KEYS,
@@ -69,7 +72,7 @@ const BATCH_SIZE = 2;
 // stopgap — the durable fix is to persist the MinHash signature at ingest
 // so the consumer reads instead of recomputing, which would let the full
 // 48h window back in. Tracked as a follow-up.
-const CONTEXT_CLUSTER_CAP = 60;
+const CONTEXT_CLUSTER_CAP = 200;             // was 60; replay showed +7pt recall at 200, and 200 clusters x ~3 members is far under the limit the unbounded load hit
 const VT_SECONDS = 60;                      // visibility timeout per message
 // Poison contract (shared with image-consumer): a message is permanently
 // failed once read_ct EXCEEDS this — i.e. on its 4th read.
@@ -155,6 +158,7 @@ interface ClusterContext {
     // compares against below — admitting a cluster whose seed and latest
     // will not score buys nothing.
     byBand: Map<string, string[]>;
+    byToken: Map<string, string[]>;
   };
 }
 
@@ -205,8 +209,10 @@ function buildMemberIndicesFromRows(
   // Populated by the caller from the seed/latest signatures — see
   // loadClusterContext. Created here so the indices object has one shape.
   const byBand = new Map<string, string[]>();
+  const byToken = new Map<string, string[]>();
   const fpSeen = new Set<string>();
   const entSeen = new Set<string>();
+  const tokSeen = new Set<string>();
 
   for (const row of caRows) {
     const art = memberArticles.get(row.article_id);
@@ -230,9 +236,18 @@ function buildMemberIndicesFromRows(
         byEntity.set(ent, list);
       }
     }
+    for (const tok of titleTokens(art.title, TOKEN_MIN_LEN)) {
+      const key = `${row.cluster_id}|${tok}`;
+      if (tokSeen.has(key)) continue;
+      tokSeen.add(key);
+      const list = byToken.get(tok) || [];
+      list.push(row.cluster_id);
+      byToken.set(tok, list);
+    }
   }
 
   return { byFingerprint, byEntity, byBand };
+  return { byFingerprint, byEntity, byToken };
 }
 
 async function inChunked<R>(
@@ -294,6 +309,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     latestByCluster: new Map(),
     sourceIdsByCluster: new Map(),
     indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map() },
+    indices: { byFingerprint: new Map(), byEntity: new Map(), byToken: new Map() },
   };
 
   if (clusters.length === 0) return emptyCtx;
@@ -449,6 +465,7 @@ function addMemberToIndices(
   clusterId: string,
   article: {
     fingerprint: string | null;
+    title: string;
     entities: string[] | null;
     signature?: Uint32Array | null;
   },
@@ -478,6 +495,13 @@ function addMemberToIndices(
     if (!list.includes(clusterId)) {
       list.push(clusterId);
       idx.byBand.set(key, list);
+    }
+  }
+  for (const tok of titleTokens(article.title, TOKEN_MIN_LEN)) {
+    const list = idx.byToken.get(tok) || [];
+    if (!list.includes(clusterId)) {
+      list.push(clusterId);
+      idx.byToken.set(tok, list);
     }
   }
 }
@@ -560,6 +584,24 @@ function findCandidateClusters(
   for (const [id, bands] of bandCounts.entries()) {
     const prev = candidates.get(id) ?? 0;
     candidates.set(id, Math.max(prev, bands / LSH_BANDS));
+  }
+
+  // Title-token votes: lets stories with no whitelisted entity at all
+  // (a dead actor, a ferry sinking, a journalist's arrest) reach the
+  // scorer. The scorer still decides; this only widens the funnel.
+  const tokenCounts = new Map<string, number>();
+  for (const tok of titleTokens(article.title, TOKEN_MIN_LEN)) {
+    const hit = indices.byToken.get(tok);
+    if (!hit) continue;
+    for (const id of hit) {
+      tokenCounts.set(id, (tokenCounts.get(id) || 0) + 1);
+    }
+  }
+  for (const [id, shared] of tokenCounts.entries()) {
+    if (shared >= TOKEN_CANDIDATE_MIN_SHARED) {
+      const prev = candidates.get(id) ?? 0;
+      candidates.set(id, Math.max(prev, shared));
+    }
   }
 
   return [...candidates.entries()]

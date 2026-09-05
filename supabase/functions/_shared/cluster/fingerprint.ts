@@ -98,6 +98,22 @@ export function stemTurkish(token: string): string {
 // Shingling
 // ---------------------------------------------------------------------------
 
+
+/**
+ * Candidate-generation tokens for a headline: normalized, stemmed, digits
+ * and short tokens dropped. Used by the cluster consumer's inverted index so
+ * two outlets covering the same story can meet even when neither headline
+ * contains a whitelisted entity.
+ */
+export function titleTokens(title: string | null | undefined, minLen = 4): Set<string> {
+  const out = new Set<string>();
+  for (const tok of normalizeTurkish(title).split(" ")) {
+    if (tok.length < minLen || /^d+$/.test(tok)) continue;
+    out.add(stemTurkish(tok));
+  }
+  return out;
+}
+
 export function shingleSet(
   title: string | null | undefined,
   description: string | null | undefined,

@@ -44,3 +44,19 @@ describe("ensemble precision: generic entity overlap is not a story", () => {
     expect(isMatch(r)).toBe(false);
   });
 });
+
+describe("candidate generation: title tokens reach stories the entity whitelist misses", () => {
+  it("two headlines about the same unlisted person share enough tokens to become candidates", async () => {
+    const { titleTokens } = await import("../../../supabase/functions/_shared/cluster/fingerprint.ts");
+    const { extractEntities } = await import("../../../supabase/functions/_shared/cluster/entities.ts");
+    const { TOKEN_CANDIDATE_MIN_SHARED } = await import("../../../supabase/functions/_shared/cluster/constants.ts");
+    const a = "Oyuncu Serhat Mustafa Kılıç evinde ölü bulundu";
+    const b = "Ünlü oyuncu Serhat Kılıç'tan acı haber: evinde ölü bulundu";
+    // Neither headline carries a whitelisted entity, so the entity gate alone
+    // could never propose them to the scorer.
+    expect(extractEntities(a)).toEqual([]);
+    expect(extractEntities(b)).toEqual([]);
+    const shared = [...titleTokens(a)].filter((t) => titleTokens(b).has(t));
+    expect(shared.length).toBeGreaterThanOrEqual(TOKEN_CANDIDATE_MIN_SHARED);
+  });
+});
