@@ -53,6 +53,17 @@ export const MATCH_THRESHOLD = 0.40;               // was 0.48 (Sept-2026 replay
 export const TIME_WINDOW_HOURS = 48;               // articles older than this can't match
 export const MIN_SHARED_ENTITIES = 1;              // was 2 (Sept-2026 replay); entity-vote floor for ensemble candidacy
 
+// Sept-2026: candidate generation used to depend solely on the ~150-token
+// entity whitelist, which left 34% of politics articles with no candidate
+// cluster at all. Member titles are now also indexed by their normalized,
+// stemmed tokens (length >= TOKEN_MIN_LEN, digits excluded); a cluster
+// becomes a candidate when it shares TOKEN_CANDIDATE_MIN_SHARED such tokens
+// with the incoming title. Replay: 33% -> 43% of articles in multi-source
+// clusters at cap 60, with token-only matches (no shared entity) still
+// dominated by true pairs.
+export const TOKEN_CANDIDATE_MIN_SHARED = 2;
+export const TOKEN_MIN_LEN = 4;
+
 // W5-A3: lowered 0.6 → 0.5. V4 §7 #2: "MinHash Jaccard ≥ 0.6 is still too
 // strict for Turkish rewording. R3's measured ceiling was 70/71 distinct
 // fingerprints; mine is 123/173. The Jaccard tier is only catching exact-

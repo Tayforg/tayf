@@ -163,6 +163,22 @@ export function stemTurkish(token) {
  * Returns an empty set for empty input, and a single-element set
  * containing the full canonical string for inputs shorter than n chars.
  */
+
+/**
+ * Candidate-generation tokens for a headline: normalized, stemmed, digits
+ * and short tokens dropped. Used by the cluster consumer's inverted index so
+ * two outlets covering the same story can meet even when neither headline
+ * contains a whitelisted entity.
+ */
+export function titleTokens(title, minLen = 4) {
+  const out = new Set();
+  for (const tok of normalizeTurkish(title).split(" ")) {
+    if (tok.length < minLen || /^d+$/.test(tok)) continue;
+    out.add(stemTurkish(tok));
+  }
+  return out;
+}
+
 export function shingleSet(title, description, n = 4) {
   const norm = normalizeTurkish(`${title || ""} ${description || ""}`);
   const shingles = new Set();
