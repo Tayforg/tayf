@@ -36,9 +36,22 @@
 // hot entity sets but describe different actions. The three knobs below are
 // re-tuned per V4's recommendations; MATCH_THRESHOLD stays at 0.48.
 
-export const MATCH_THRESHOLD = 0.48;               // unchanged (R3 §5.3 — V4 kept this)
+// Sept-2026 recall re-tune. A 48h replay of prod politics articles (3014
+// articles, 87 live sources) showed only 17% of articles ever joined a
+// multi-source cluster. Two causes, both structural:
+//   (a) 60% of articles carry 0-1 whitelist entities, so the 2-shared-entity
+//       candidate gate silently excluded 80% of them from scoring at all.
+//   (b) With ENTITY_WEIGHT 0.60 and the /3 noise floor, a pair sharing one
+//       entity capped the entity lane at 0.20, so identical headlines from two
+//       outlets (tfidf 0.69) scored 0.47 < 0.48. Unrelated stories sharing two
+//       generic entities (turkiye+bakan) scored 0.44 on entities alone.
+// Text similarity is the signal; entities are the tiebreaker. Re-weighting
+// 0.70/0.30 at threshold 0.40 with a 1-entity gate doubled recall (17% -> 33%
+// of articles in multi-source clusters) with the marginal band still
+// dominated by true matches. Regression: tests/functions/_shared/ensemble-recall.test.ts
+export const MATCH_THRESHOLD = 0.40;               // was 0.48 (Sept-2026 replay)
 export const TIME_WINDOW_HOURS = 48;               // articles older than this can't match
-export const MIN_SHARED_ENTITIES = 2;              // entity-vote floor for ensemble candidacy
+export const MIN_SHARED_ENTITIES = 1;              // was 2 (Sept-2026 replay); entity-vote floor for ensemble candidacy
 
 // W5-A3: lowered 0.6 → 0.5. V4 §7 #2: "MinHash Jaccard ≥ 0.6 is still too
 // strict for Turkish rewording. R3's measured ceiling was 70/71 distinct
@@ -54,8 +67,8 @@ export const MINHASH_SOFT_ACCEPT_JACCARD = 0.5;    // was 0.6 (W5 V4 §7 #2)
 // the entity score can dominate." A small tfidf bump + entity trim gives
 // the lexical signal more pull without changing the formula shape.
 // Weights still sum to 1.0 so the primary lane stays in [0,1].
-export const TFIDF_WEIGHT = 0.40;                  // was 0.35 (W5 V4 §7 #3)
-export const ENTITY_WEIGHT = 0.60;                 // was 0.65 (W5 V4 §7 #3)
+export const TFIDF_WEIGHT = 0.70;                  // was 0.40 (Sept-2026 replay)
+export const ENTITY_WEIGHT = 0.30;                 // was 0.60 (Sept-2026 replay)
 
 export const MINHASH_SIG_K = 64;                   // MinHash signature length (must match fingerprint.mjs)
 

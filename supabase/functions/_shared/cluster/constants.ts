@@ -9,14 +9,27 @@
 
 // --- Weighted ensemble tunables -------------------------------------------
 
-export const MATCH_THRESHOLD = 0.48;
+// Sept-2026 recall re-tune. A 48h replay of prod politics articles (3014
+// articles, 87 live sources) showed only 17% of articles ever joined a
+// multi-source cluster. Two causes, both structural:
+//   (a) 60% of articles carry 0-1 whitelist entities, so the 2-shared-entity
+//       candidate gate silently excluded 80% of them from scoring at all.
+//   (b) With ENTITY_WEIGHT 0.60 and the /3 noise floor, a pair sharing one
+//       entity capped the entity lane at 0.20, so identical headlines from two
+//       outlets (tfidf 0.69) scored 0.47 < 0.48. Unrelated stories sharing two
+//       generic entities (turkiye+bakan) scored 0.44 on entities alone.
+// Text similarity is the signal; entities are the tiebreaker. Re-weighting
+// 0.70/0.30 at threshold 0.40 with a 1-entity gate doubled recall (17% -> 33%
+// of articles in multi-source clusters) with the marginal band still
+// dominated by true matches. Regression: tests/functions/_shared/ensemble-recall.test.ts
+export const MATCH_THRESHOLD = 0.40;
 export const TIME_WINDOW_HOURS = 48;
-export const MIN_SHARED_ENTITIES = 2;
+export const MIN_SHARED_ENTITIES = 1;
 
 export const MINHASH_SOFT_ACCEPT_JACCARD = 0.5;
 
-export const TFIDF_WEIGHT = 0.40;
-export const ENTITY_WEIGHT = 0.60;
+export const TFIDF_WEIGHT = 0.70;
+export const ENTITY_WEIGHT = 0.30;
 
 export const MINHASH_SIG_K = 64;
 
