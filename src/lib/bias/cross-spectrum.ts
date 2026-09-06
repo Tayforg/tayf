@@ -1,5 +1,5 @@
 import type { Source, MediaDnaZone } from "@/types";
-import { zoneOf } from "./config";
+import { zoneOf, BLINDSPOT, SURPRISE } from "./config";
 
 /**
  * Result of the "unexpected cross-spectrum coverage" detector.
@@ -11,7 +11,7 @@ export interface CrossSpectrumResult {
   dominantZone: MediaDnaZone | null; // null if no clear dominant
   dominantPct: number; // 0..1
   surpriseOutlets: Source[]; // sources whose zone is OPPOSITE to dominant
-  blindspotCandidate: boolean; // true when dominantPct >= 0.85 (no opposition coverage)
+  blindspotCandidate: boolean; // true when dominantPct >= BLINDSPOT.dominantShare (contract)
 }
 
 /**
@@ -32,16 +32,15 @@ const OPPOSITE: Record<MediaDnaZone, MediaDnaZone | null> = {
  */
 export function detectCrossSpectrum(
   memberSources: Source[],
-  // A6 (06-surprise-quality.md): raised 0.45 → 0.65 to stop balanced 5-vs-4
-  // clusters from firing a "surprise" caption. At 0.45 the detector had a
-  // 17% true-positive rate; at 0.65 + the guards below it cuts false
-  // positives ~5× while still catching the Milli Gazete / BirGün-Barrack
-  // class of real cross-spectrum surprises.
-  dominantThreshold = 0.65,
+  // Contract default (SURPRISE.dominantShare in the bias-zone contract):
+  // 0.55 fired 98× in 14 days of production data vs 48× at 0.65, the extra
+  // firings being 55–64% majority splits rather than real surprises.
+  dominantThreshold = SURPRISE.dominantShare,
 ): CrossSpectrumResult {
-  // A6: minimum-source-count guard. 4-member clusters where a single
-  // opposite voice flips verdicts are too noisy to be trusted.
-  if (memberSources.length < 5) {
+  // Contract minimum-source-count guard (SURPRISE.minSources). Clusters
+  // below this floor where a single opposite voice flips verdicts are too
+  // noisy to be trusted.
+  if (memberSources.length < SURPRISE.minSources) {
     return {
       dominantZone: null,
       dominantPct: 0,
@@ -85,14 +84,14 @@ export function detectCrossSpectrum(
     ? memberSources.filter((s) => zoneOf(s.bias) === opposite)
     : [];
 
-  // A6: minimum-margin guard. Even after the threshold + size floor, kill
-  // anything where the dominant zone only barely outnumbers the opposite
-  // zone — most 4-vs-2 / 3-vs-1 firings in A6's sample were noise (wire
-  // copy, nationalist mis-zoning, or self-reporting). Require an absolute
-  // margin of ≥ 3 to fire.
+  // Contract minimum-margin guard (SURPRISE.minMargin). Even after the
+  // threshold + size floor, kill anything where the dominant zone only
+  // barely outnumbers the opposite zone — most 4-vs-2 / 3-vs-1 firings in
+  // production were noise (wire copy, nationalist mis-zoning, or
+  // self-reporting).
   const dominantCount = counts[dominantZone];
   const oppositeCount = opposite ? counts[opposite] : 0;
-  if (dominantCount - oppositeCount < 3) {
+  if (dominantCount - oppositeCount < SURPRISE.minMargin) {
     return {
       dominantZone: null,
       dominantPct: 0,
@@ -101,11 +100,12 @@ export function detectCrossSpectrum(
     };
   }
 
-  // "Kör nokta" candidate: a single zone owns >= 85% of the cluster, so the
-  // opposite half of the spectrum is essentially absent. The DB-level
-  // is_blindspot field is owned elsewhere; this flag is just a hint for the
-  // UI/caption layer.
-  const blindspotCandidate = dominantPct >= 0.85;
+  // "Kör nokta" candidate: a single zone owns >= BLINDSPOT.dominantShare of
+  // the cluster (the same share the DB-level is_blindspot flag uses), so
+  // the opposite half of the spectrum is essentially absent. The DB flag
+  // itself is owned elsewhere; this is just a hint for the UI/caption
+  // layer.
+  const blindspotCandidate = dominantPct >= BLINDSPOT.dominantShare;
 
   return { dominantZone, dominantPct, surpriseOutlets, blindspotCandidate };
 }

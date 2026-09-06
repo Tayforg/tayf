@@ -5,9 +5,19 @@ import {
   BIAS_COLORS,
   BIAS_ORDER,
   BIAS_TO_ZONE,
+  BLINDSPOT,
+  SURPRISE,
+  tallyZones,
   ZONE_META,
   zoneOf,
 } from "./config";
+import {
+  BIAS_KEYS,
+  BIAS_TO_ZONE as CONTRACT_BIAS_TO_ZONE,
+  BLINDSPOT as CONTRACT_BLINDSPOT,
+  SURPRISE as CONTRACT_SURPRISE,
+  tallyZones as contractTallyZones,
+} from "../../../supabase/functions/_shared/cluster/blindspot";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
 const ALL_BIASES: BiasCategory[] = [
@@ -147,6 +157,36 @@ describe("BIAS_TO_ZONE / zoneOf", () => {
     expect(zoneOf("gov_leaning")).toBe("iktidar");
     expect(zoneOf("state_media")).toBe("iktidar");
     expect(zoneOf("islamist_conservative")).toBe("iktidar");
+  });
+});
+
+describe("contract re-exports (supabase/functions/_shared/cluster/blindspot.ts)", () => {
+  it("BIAS_TO_ZONE is the SAME object as the contract's export, not a copy", () => {
+    expect(BIAS_TO_ZONE).toBe(CONTRACT_BIAS_TO_ZONE);
+  });
+
+  it("BLINDSPOT re-export equals the contract's", () => {
+    expect(BLINDSPOT).toBe(CONTRACT_BLINDSPOT);
+    expect(BLINDSPOT).toEqual(CONTRACT_BLINDSPOT);
+  });
+
+  it("SURPRISE re-export equals the contract's", () => {
+    expect(SURPRISE).toBe(CONTRACT_SURPRISE);
+    expect(SURPRISE).toEqual(CONTRACT_SURPRISE);
+  });
+
+  it("tallyZones re-export is the contract's function", () => {
+    expect(tallyZones).toBe(contractTallyZones);
+  });
+
+  it("every BiasCategory in src/types is a contract BIAS_KEY and vice-versa", () => {
+    // Guards the `satisfies Record<BiasCategory, MediaDnaZone>` assertion in
+    // config.ts: if either union grows or shrinks without updating the
+    // other, this fails loudly instead of the `satisfies` silently
+    // widening one side.
+    const appKeys = ALL_BIASES.slice().sort();
+    const contractKeys = (BIAS_KEYS as readonly string[]).slice().sort();
+    expect(appKeys).toEqual(contractKeys);
   });
 });
 

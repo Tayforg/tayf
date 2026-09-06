@@ -671,7 +671,7 @@ async function addArticleToCluster(
       }
       type DupRow = { article: { source_id: string | null } | null };
       existingSources = new Set(
-        ((dupRes.data ?? []) as DupRow[])
+        ((dupRes.data ?? []) as unknown as DupRow[])
           .map((r) => r.article?.source_id)
           .filter((x): x is string => Boolean(x)),
       );

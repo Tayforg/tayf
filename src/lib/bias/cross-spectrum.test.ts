@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { detectCrossSpectrum, summarizeSurprises } from "./cross-spectrum";
+import { BLINDSPOT, SURPRISE } from "./config";
 import type { Source, BiasCategory } from "@/types";
 
 function mkSource(id: string, name: string, bias: BiasCategory): Source {
@@ -88,31 +89,47 @@ describe("detectCrossSpectrum", () => {
     expect(empty.surpriseOutlets).toHaveLength(0);
   });
 
-  it("uses the post-A6 0.65 threshold (no dominant below it)", () => {
-    // 5 sources at 60% iktidar → below 0.65 threshold → null
-    const below = detectCrossSpectrum([
+  it("uses the SURPRISE.dominantShare threshold from the contract (no dominant below it)", () => {
+    // 3×pro_government + center + international: no muhalefet source at
+    // all, so the minMargin guard never rejects this fixture and the
+    // threshold check is what actually discriminates the two runs. At
+    // 60% iktidar: passes at 0.55, fails at 0.65/default.
+    const sources = [
       mkSource("s1", "A", "pro_government"),
       mkSource("s2", "B", "pro_government"),
       mkSource("s3", "C", "pro_government"),
-      mkSource("s4", "D", "opposition"),
-      mkSource("s5", "E", "opposition"),
-    ]);
-    expect(below.dominantZone).toBeNull();
-    expect(below.surpriseOutlets).toHaveLength(0);
+      mkSource("s4", "D", "center"),
+      mkSource("s5", "E", "international"),
+    ];
+    expect(0.55).toBeLessThan(SURPRISE.dominantShare);
 
-    // 5 sources at 80% iktidar → clears threshold, size floor, and margin
-    const above = detectCrossSpectrum([
-      mkSource("s1", "A", "pro_government"),
-      mkSource("s2", "B", "pro_government"),
-      mkSource("s3", "C", "pro_government"),
-      mkSource("s4", "D", "pro_government"),
-      mkSource("s5", "E", "opposition"),
-    ]);
-    expect(above.dominantZone).toBe("iktidar");
-    expect(above.dominantPct).toBeCloseTo(0.8, 5);
+    const atLowThreshold = detectCrossSpectrum(sources, 0.55);
+    expect(atLowThreshold.dominantZone).toBe("iktidar");
+
+    const atContractThreshold = detectCrossSpectrum(sources, SURPRISE.dominantShare);
+    expect(atContractThreshold.dominantZone).toBeNull();
+    expect(atContractThreshold.surpriseOutlets).toHaveLength(0);
   });
 
-  it("sets blindspotCandidate when dominantPct >= 0.85", () => {
+  it("takes its default threshold from SURPRISE, not a hardcoded literal", () => {
+    // Same margin-guard-proof fixture as above. If the default ever
+    // reverted to 0.55 (the exact regression this contract removes), this
+    // test would fail because withDefault would then diverge from
+    // withExplicit(SURPRISE.dominantShare).
+    const sources = [
+      mkSource("s1", "A", "pro_government"),
+      mkSource("s2", "B", "pro_government"),
+      mkSource("s3", "C", "pro_government"),
+      mkSource("s4", "D", "center"),
+      mkSource("s5", "E", "international"),
+    ];
+    const withDefault = detectCrossSpectrum(sources);
+    const withExplicit = detectCrossSpectrum(sources, SURPRISE.dominantShare);
+    expect(withDefault).toEqual(withExplicit);
+    expect(withDefault.dominantZone).toBeNull();
+  });
+
+  it("sets blindspotCandidate when dominantPct >= BLINDSPOT.dominantShare", () => {
     // 9 iktidar + 1 muhalefet → 90% iktidar dominance
     const sources = [
       mkSource("s1", "Sabah", "pro_government"),
@@ -128,14 +145,14 @@ describe("detectCrossSpectrum", () => {
     ];
     const result = detectCrossSpectrum(sources);
     expect(result.dominantZone).toBe("iktidar");
-    expect(result.dominantPct).toBeGreaterThanOrEqual(0.85);
+    expect(result.dominantPct).toBeGreaterThanOrEqual(BLINDSPOT.dominantShare);
     expect(result.blindspotCandidate).toBe(true);
     expect(result.surpriseOutlets.map((s) => s.name)).toContain("Sözcü");
   });
 
-  it("does NOT set blindspotCandidate below 0.85", () => {
-    // 8 sources at 75% iktidar — clears the 0.65 threshold and the size +
-    // margin guards, but stays under the 0.85 blindspot line.
+  it("does NOT set blindspotCandidate below BLINDSPOT.dominantShare", () => {
+    // 8 sources at 75% iktidar — clears the SURPRISE threshold and the size
+    // + margin guards, but stays under the BLINDSPOT.dominantShare line.
     const sources = [
       mkSource("s1", "Sabah", "pro_government"),
       mkSource("s2", "A Haber", "pro_government"),
@@ -149,6 +166,7 @@ describe("detectCrossSpectrum", () => {
     const result = detectCrossSpectrum(sources);
     expect(result.dominantZone).toBe("iktidar");
     expect(result.dominantPct).toBeCloseTo(0.75, 5);
+    expect(0.75).toBeLessThan(BLINDSPOT.dominantShare);
     expect(result.blindspotCandidate).toBe(false);
   });
 });

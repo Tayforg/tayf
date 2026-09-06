@@ -1,8 +1,8 @@
 import { ImageResponse } from "next/og";
 
 import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
-import { zoneOf } from "@/lib/bias/config";
-import { dominantZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import { tallyZones, zoneOf } from "@/lib/bias/config";
+import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
 import type { MediaDnaZone } from "@/types";
 
 // File-route OG card for /cluster/[id].
@@ -102,14 +102,19 @@ export default async function Image({ params }: ImageProps) {
   // bias_distribution hasn't been backfilled yet.
   const safeTotal = zoneTotal > 0 ? zoneTotal : 1;
 
-  // Blindspot ribbon zone: prefer the reported `blindspot_side`; a
+  // Blindspot ribbon zone + share: prefer the reported `blindspot_side`; a
   // freshly-flagged row without one yet falls back to whichever zone
-  // covered the story the most (same rule `buildShareText` uses).
+  // covered the story the most (same rule `buildShareText` uses). The DB
+  // flag now fires at >= BLINDSPOT.dominantShare (80%), so the ribbon says
+  // "sadece {Zone} yazdı" only at an exact 100% share and "%{share} {Zone}"
+  // otherwise.
+  const tally = tallyZones(cluster.bias_distribution);
   const ribbonZone: MediaDnaZone | null = cluster.is_blindspot
     ? cluster.blindspot_side
       ? zoneOf(cluster.blindspot_side)
-      : (dominantZone(zones) ?? "iktidar")
+      : (tally.dominantZone ?? "iktidar")
     : null;
+  const ribbonShare = Math.round(tally.dominantShare * 100);
 
   // Trim very long Turkish headlines so they fit in the title box.
   // Roughly 110 characters before Satori starts pushing things
@@ -192,8 +197,9 @@ export default async function Image({ params }: ImageProps) {
         </div>
 
         {/* Blindspot ribbon — only when this cluster is a "kör nokta"
-            (covered by a single Medya DNA zone). Sits between the top
-            row and the title so it reads as the headline claim. */}
+            (one Medya DNA zone holds ≥ BLINDSPOT.dominantShare of the
+            sources). Sits between the top row and the title so it reads
+            as the headline claim. */}
         {ribbonZone && (
           <div
             style={{
@@ -212,7 +218,9 @@ export default async function Image({ params }: ImageProps) {
               letterSpacing: "0.04em",
             }}
           >
-            KÖR NOKTA — sadece {ZONE_STYLE[ribbonZone].label} yazdı
+            {ribbonShare === 100
+              ? `KÖR NOKTA — sadece ${ZONE_STYLE[ribbonZone].label} yazdı`
+              : `KÖR NOKTA — %${ribbonShare} ${ZONE_STYLE[ribbonZone].label}`}
           </div>
         )}
 

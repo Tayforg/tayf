@@ -108,8 +108,8 @@ export function score(
 ): ScoreResult {
   const { aSourceSlug, bSourceSlug } = opts || {};
   const sourcePenalty = Math.min(
-    (aSourceSlug && SOURCE_PENALTIES[aSourceSlug]) ?? 1,
-    (bSourceSlug && SOURCE_PENALTIES[bSourceSlug]) ?? 1,
+    aSourceSlug ? SOURCE_PENALTIES[aSourceSlug] ?? 1 : 1,
+    bSourceSlug ? SOURCE_PENALTIES[bSourceSlug] ?? 1 : 1,
   );
 
   // 1. Strict fingerprint auto-accept.

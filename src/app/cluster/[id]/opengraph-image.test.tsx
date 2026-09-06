@@ -158,6 +158,34 @@ describe("cluster opengraph-image", () => {
     expect(titleMatch![0].length).toBeLessThanOrEqual(95);
   });
 
+  it("shows the %share form (not 'sadece') when the DB flag fires below 100%", async () => {
+    // 4-of-5 = 80% share, the contract's minimum flagging threshold.
+    getClusterDetail.mockResolvedValueOnce(
+      mkDetail({
+        article_count: 5,
+        bias_distribution: {
+          pro_government: 4,
+          gov_leaning: 0,
+          state_media: 0,
+          center: 0,
+          opposition_leaning: 0,
+          opposition: 1,
+          nationalist: 0,
+          islamist_conservative: 0,
+          pro_kurdish: 0,
+          international: 0,
+        },
+      }),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: "x" }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("KÖR NOKTA — %80 İktidar");
+    expect(text).not.toContain("sadece İktidar yazdı");
+  });
+
   it("falls back to a 200 PNG when the cluster no longer exists", async () => {
     getClusterDetail.mockResolvedValueOnce(null);
     const { default: Image } = await import("./opengraph-image");

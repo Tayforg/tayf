@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { dominantZone, zoneCountsOf, zonePercents } from "./zone-summary";
+import { zoneCountsOf, zonePercents } from "./zone-summary";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import type { BiasDistribution } from "@/types";
 
@@ -70,29 +70,5 @@ describe("zonePercents", () => {
       bagimsiz: 0,
       muhalefet: 0,
     });
-  });
-});
-
-describe("dominantZone", () => {
-  it("picks the zone with the most members", () => {
-    expect(dominantZone({ iktidar: 1, bagimsiz: 5, muhalefet: 2 })).toBe(
-      "bagimsiz",
-    );
-  });
-
-  it("breaks a three-way tie toward iktidar", () => {
-    expect(dominantZone({ iktidar: 3, bagimsiz: 3, muhalefet: 3 })).toBe(
-      "iktidar",
-    );
-  });
-
-  it("breaks a tie between bagimsiz and muhalefet toward bagimsiz", () => {
-    expect(dominantZone({ iktidar: 0, bagimsiz: 3, muhalefet: 3 })).toBe(
-      "bagimsiz",
-    );
-  });
-
-  it("returns null when every zone is empty", () => {
-    expect(dominantZone({ iktidar: 0, bagimsiz: 0, muhalefet: 0 })).toBeNull();
   });
 });

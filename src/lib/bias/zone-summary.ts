@@ -70,22 +70,3 @@ export function zonePercents(
 
   return percents;
 }
-
-/**
- * The zone with the most members. Ties resolve in `ZONE_ORDER` (iktidar,
- * bagimsiz, muhalefet — first strictly-greater wins). Null when every
- * zone is empty.
- */
-export function dominantZone(
-  counts: Record<MediaDnaZone, number>,
-): MediaDnaZone | null {
-  let best: MediaDnaZone | null = null;
-  let bestCount = 0;
-  for (const zone of ZONE_ORDER) {
-    if (counts[zone] > bestCount) {
-      best = zone;
-      bestCount = counts[zone];
-    }
-  }
-  return best;
-}

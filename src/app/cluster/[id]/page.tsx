@@ -100,11 +100,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // once (a single outlet can publish multiple articles in a cluster);
   // that's fine — `detectCrossSpectrum` treats each row as a vote.
   const memberSources = members.map((m) => m.source);
-  // Threshold 0.55 chosen after RECON: no top-5 cluster clears the 0.70
-  // default (Fidan is highest at 58.8%). 0.55 is strict enough that a
-  // genuinely mixed-coverage story still stays silent, but the biggest
-  // partisan stories now surface their cross-spectrum outliers.
-  const surpriseResult = detectCrossSpectrum(memberSources, 0.55);
+  // Uses the default threshold — SURPRISE.dominantShare in the bias-zone
+  // contract (supabase/functions/_shared/cluster/blindspot.ts).
+  const surpriseResult = detectCrossSpectrum(memberSources);
   const surpriseLines = summarizeSurprises(
     surpriseResult,
     cluster.title_tr,
