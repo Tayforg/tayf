@@ -1,6 +1,7 @@
 "use client";
 
 import { Bookmark } from "lucide-react";
+import { track } from "@/lib/track";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
 
@@ -28,13 +29,18 @@ export function BookmarkButton({
   // useSyncExternalStore behavior, no hydration mismatch.
   const saved = has(clusterId);
 
+  function handleToggle() {
+    track("bookmark", { clusterId, kind: saved ? "remove" : "add" });
+    toggle(clusterId);
+  }
+
   const label = saved ? "Kaydedilenlerden çıkar" : "Hikâyeyi kaydet";
 
   if (variant === "overlay") {
     return (
       <button
         type="button"
-        onClick={() => toggle(clusterId)}
+        onClick={handleToggle}
         aria-label={label}
         aria-pressed={saved}
         title={label}
@@ -53,7 +59,7 @@ export function BookmarkButton({
   return (
     <button
       type="button"
-      onClick={() => toggle(clusterId)}
+      onClick={handleToggle}
       aria-label={label}
       aria-pressed={saved}
       className={`inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium transition-colors ${

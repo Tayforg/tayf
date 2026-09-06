@@ -3,6 +3,7 @@ import { Newspaper, SearchX } from "lucide-react";
 
 import { SearchBar } from "@/components/filters/search-bar";
 import { ClusterCard } from "@/components/story/cluster-card";
+import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { PageHero } from "@/components/ui/page-hero";
 import {
   getPoliticsClusters,
@@ -146,6 +147,11 @@ export default async function HomePage({
   // searching for a specific story won't see an irrelevant strip.
   const breaking = safePage === 1 ? filteredBreaking : [];
 
+  // Feeds the "N yeni haber" pill: only clusters actually rendered on this page.
+  const renderedTimestamps = [...breaking, ...paged].map(
+    (b) => b.cluster.first_published
+  );
+
   // Time buckets are computed on the PAGED slice only — each page is
   // self-contained, so the bucket headings reflect what's actually on
   // screen rather than the full filtered set.
@@ -194,6 +200,8 @@ export default async function HomePage({
         title="Haberler"
         subtitle="Aynı olayı kaç farklı kaynak, hangi bakış açısıyla ele alıyor? Ensemble kümeleme ile birleştirilmiş güncel politika haberleri."
       />
+
+      <NewSinceLastVisit timestamps={renderedTimestamps} />
 
       <SearchBar />
 

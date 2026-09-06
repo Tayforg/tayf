@@ -63,6 +63,10 @@ export function Footer() {
             144 kaynak
           </span>
         </div>
+
+        <p className="mt-3 text-[10px] text-muted-foreground/40 leading-relaxed">
+          Çerez kullanmıyoruz; ziyaret sayıları anonim olarak ölçülür (Vercel Web Analytics).
+        </p>
       </div>
     </footer>
   );

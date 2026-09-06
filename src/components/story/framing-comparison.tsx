@@ -1,6 +1,7 @@
 import { ExternalLink } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
+import { TrackedLink } from "@/components/ui/tracked-link";
 import { groupMembersByZone } from "@/lib/clusters/framing";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
@@ -14,7 +15,7 @@ import type { MediaDnaZone } from "@/types";
  * headlines for this story, newest first. The reader compares the actual
  * editorial voices side by side instead of decoding an abstract bias bar.
  *
- * Server Component, zero client JS: overflow beyond VISIBLE_PER_ZONE is
+ * Server Component (headline anchors are TrackedLink client islands): overflow beyond VISIBLE_PER_ZONE is
  * disclosed via native <details>/<summary>. An empty zone renders an
  * explicit "silence" state — on a bias-transparency site, the absence of
  * coverage IS content.
@@ -53,7 +54,9 @@ function HeadlineEntry({
   const meta = ZONE_META[zone];
   return (
     <li className="border-b border-border/30 last:border-0">
-      <a
+      <TrackedLink
+        event="outbound"
+        data={{ zone, kind: "member" }}
         href={member.article.url}
         target="_blank"
         rel="noopener noreferrer"
@@ -88,7 +91,7 @@ function HeadlineEntry({
         >
           {member.article.title}
         </span>
-      </a>
+      </TrackedLink>
     </li>
   );
 }

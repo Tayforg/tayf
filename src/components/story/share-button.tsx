@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Share2, Check } from "lucide-react";
+import { track } from "@/lib/track";
 
 interface ShareButtonProps {
   clusterId: string;
@@ -22,11 +23,13 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
     if (navigator.share) {
       try {
         await navigator.share(text ? { title, text, url } : { title, url });
+        track("share", { clusterId, kind: "native" });
         return;
       } catch {
         // user cancelled; fall through to clipboard
       }
     }
+    track("share", { clusterId, kind: "clipboard" });
     // Clipboard fallback
     try {
       await navigator.clipboard.writeText(text ? `${text}\n${url}` : url);

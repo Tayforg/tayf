@@ -1,6 +1,7 @@
 import { ExternalLink } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
+import { TrackedLink } from "@/components/ui/tracked-link";
 import { pickOtherSide } from "@/lib/clusters/read-across";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
@@ -16,7 +17,7 @@ import { formatTurkishTimeAgo } from "@/lib/time";
  * dominant-zone share under BLINDSPOT.dominantShare) doesn't meet the
  * product's blindspot definition.
  *
- * Server Component, zero client JS — rendered in page.tsx directly under
+ * Server Component (the anchor is a tiny TrackedLink client island) — rendered in page.tsx directly under
  * `<BiasSpectrum>` so it's above the fold.
  */
 
@@ -61,7 +62,9 @@ export function ReadAcrossSpectrum({
   }
 
   return (
-    <a
+    <TrackedLink
+      event="cta_other_side"
+      data={{ zone }}
       href={member.article.url}
       target="_blank"
       rel="noopener noreferrer"
@@ -80,6 +83,6 @@ export function ReadAcrossSpectrum({
       <span className="shrink-0 text-[10px] tabular-nums opacity-70">
         {formatTurkishTimeAgo(member.article.published_at)}
       </span>
-    </a>
+    </TrackedLink>
   );
 }
