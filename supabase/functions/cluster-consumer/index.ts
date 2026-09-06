@@ -246,8 +246,7 @@ function buildMemberIndicesFromRows(
     }
   }
 
-  return { byFingerprint, byEntity, byBand };
-  return { byFingerprint, byEntity, byToken };
+  return { byFingerprint, byEntity, byBand, byToken };
 }
 
 async function inChunked<R>(
@@ -308,8 +307,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     seedByCluster: new Map(),
     latestByCluster: new Map(),
     sourceIdsByCluster: new Map(),
-    indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map() },
-    indices: { byFingerprint: new Map(), byEntity: new Map(), byToken: new Map() },
+    indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map(), byToken: new Map() },
   };
 
   if (clusters.length === 0) return emptyCtx;
