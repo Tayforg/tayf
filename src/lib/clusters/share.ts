@@ -28,8 +28,9 @@ export function buildShareText(input: {
   distribution: BiasDistribution;
   isBlindspot: boolean;
   blindspotSide: BiasCategory | null;
+  wire?: { isWireRedistribution: boolean; memberCount: number };
 }): string {
-  const { articleCount, distribution, isBlindspot, blindspotSide } = input;
+  const { articleCount, distribution, isBlindspot, blindspotSide, wire } = input;
   const counts = zoneCountsOf(distribution);
   const percents = zonePercents(counts);
 
@@ -52,6 +53,10 @@ export function buildShareText(input: {
       share === 100
         ? ` · Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
         : ` · Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
+  }
+
+  if (wire?.isWireRedistribution) {
+    text += ` · tek kaynaktan ${wire.memberCount} kopya`;
   }
 
   return text;

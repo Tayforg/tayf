@@ -95,6 +95,8 @@ function renderClusterCard(
         sources={bundle.sources}
         index={idx}
         isAging={hoursAgo > 48}
+        isWireRedistribution={bundle.isWireRedistribution}
+        effectiveArticleCount={bundle.effectiveArticleCount}
       />
     </div>
   );

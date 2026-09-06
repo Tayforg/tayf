@@ -27,6 +27,7 @@ import {
   zoneTallyOf,
   type EmbeddedArticle,
 } from "@/lib/clusters/blindspot-feed";
+import { wireSignalOf } from "@/lib/clusters/wire";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
@@ -69,6 +70,8 @@ interface BlindspotBundle {
   sources: ClusterCardSource[];
   dominantZone: MediaDnaZone;
   dominantPct: number;
+  isWireRedistribution: boolean;
+  effectiveArticleCount: number;
 }
 
 async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
@@ -147,6 +150,9 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
       }
       const dominantZone: MediaDnaZone = tally.dominantZone;
       const dominantPct = tally.dominantShare;
+      const wire = wireSignalOf(
+        deduped.map((m) => ({ id: m.id, content_hash: m.content_hash })),
+      );
 
       // Re-sort newest-first for the rendered list, matching ClusterCard's
       // expected ordering.
@@ -195,6 +201,8 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
         sources: Array.from(sourceMap.values()),
         dominantZone,
         dominantPct,
+        isWireRedistribution: wire.isWireRedistribution,
+        effectiveArticleCount: wire.effectiveArticleCount,
       });
 
       if (bundles.length >= DISPLAY_LIMIT) break;
@@ -329,6 +337,8 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
         sources={bundle.sources}
         index={index}
         isAging={isAging}
+        isWireRedistribution={bundle.isWireRedistribution}
+        effectiveArticleCount={bundle.effectiveArticleCount}
       />
     </div>
   );

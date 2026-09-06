@@ -30,8 +30,8 @@ vi.mock("next/og", () => ({
 }));
 
 function collectText(node: unknown, out: string[] = []): string[] {
-  if (typeof node === "string") {
-    out.push(node);
+  if (typeof node === "string" || typeof node === "number") {
+    out.push(String(node));
     return out;
   }
   if (Array.isArray(node)) {
@@ -45,13 +45,17 @@ function collectText(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
-function mkDetail(overrides: Partial<ClusterDetail["cluster"]>): ClusterDetail {
+function mkDetail(
+  overrides: Partial<ClusterDetail["cluster"]>,
+  wireOverrides?: Partial<ClusterDetail["wire"]>,
+): ClusterDetail {
+  const article_count = overrides.article_count ?? 4;
   return {
     cluster: {
       id: "x",
       title_tr: "Test kümesi başlığı",
       summary_tr: "Özet",
-      article_count: 4,
+      article_count,
       bias_distribution: {
         pro_government: 4,
         gov_leaning: 0,
@@ -72,6 +76,12 @@ function mkDetail(overrides: Partial<ClusterDetail["cluster"]>): ClusterDetail {
     },
     members: [],
     allSources: [],
+    wire: {
+      isWireRedistribution: false,
+      effectiveArticleCount: article_count,
+      memberCount: article_count,
+      ...wireOverrides,
+    },
   };
 }
 
@@ -184,6 +194,54 @@ describe("cluster opengraph-image", () => {
     const text = collectText(captured).join("");
     expect(text).toContain("KÖR NOKTA — %80 İktidar");
     expect(text).not.toContain("sadece İktidar yazdı");
+  });
+
+  it("shows the honest source count and the wire-redistribution pill", async () => {
+    getClusterDetail.mockResolvedValueOnce(
+      mkDetail(
+        { article_count: 7, is_blindspot: false, blindspot_side: null },
+        { isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 7 },
+      ),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: "x" }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("1 kaynak");
+    expect(text).toContain("7 kopya · tek kaynak");
+  });
+
+  it("omits the wire pill when the cluster is not a wire redistribution", async () => {
+    getClusterDetail.mockResolvedValueOnce(
+      mkDetail(
+        { article_count: 5, is_blindspot: false, blindspot_side: null },
+        { isWireRedistribution: false, effectiveArticleCount: 5, memberCount: 5 },
+      ),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: "x" }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("5 kaynak");
+    expect(text).not.toContain("kopya");
+  });
+
+  it("renders both the blindspot ribbon and the wire pill together (densest layout)", async () => {
+    getClusterDetail.mockResolvedValueOnce(
+      mkDetail(
+        { article_count: 7 },
+        { isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 7 },
+      ),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: "x" }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
+    expect(text).toContain("7 kopya · tek kaynak");
   });
 
   it("falls back to a 200 PNG when the cluster no longer exists", async () => {

@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { AlertTriangle, ArrowLeft } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Copy } from "lucide-react";
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
@@ -11,6 +11,7 @@ import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption"
 import { ShareButton } from "@/components/story/share-button";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { SourceChips } from "@/components/source/source-chips";
+import { OwnershipLine } from "@/components/story/ownership-line";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import {
   detectCrossSpectrum,
@@ -42,10 +43,10 @@ export async function generateMetadata({
     return { title: "Sayfa bulunamadı" };
   }
 
-  const { cluster } = detail;
+  const { cluster, wire } = detail;
   // Trim summary so the description stays well under the ~160 char SERP cap
   // even after the article-count prefix.
-  const description = `${cluster.article_count} kaynaktan haberler. ${
+  const description = `${wire.effectiveArticleCount} kaynaktan haberler. ${
     cluster.summary_tr?.slice(0, 160) ?? ""
   }`;
 
@@ -93,7 +94,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   const detail = await getClusterDetail(id);
   if (!detail) notFound();
 
-  const { cluster, members, allSources } = detail;
+  const { cluster, members, allSources, wire } = detail;
 
   // Derive inputs for the cross-spectrum surprise detector from the
   // member list. `memberSources` may contain the same source more than
@@ -143,10 +144,14 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // click — computed server-side so it's identical for every visitor
   // (no client-side zone math duplicated in `ShareButton`).
   const shareText = buildShareText({
-    articleCount: cluster.article_count,
+    articleCount: wire.effectiveArticleCount,
     distribution: biasDistribution,
     isBlindspot: cluster.is_blindspot,
     blindspotSide: cluster.blindspot_side,
+    wire: {
+      isWireRedistribution: wire.isWireRedistribution,
+      memberCount: wire.memberCount,
+    },
   });
 
   // Schema.org NewsArticle structured data. Lets Google surface the
@@ -239,7 +244,20 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
                 <span>{formatTurkishTimeAgo(cluster.updated_at)}</span>
                 <span className="text-muted-foreground/60">•</span>
-                <span>{cluster.article_count} kaynak</span>
+                <span>{wire.effectiveArticleCount} kaynak</span>
+                {/* wire-redistribution: violet, not amber — amber above is
+                    reserved for the Kör nokta ribbon so the two claims
+                    (single-source dispatch vs. one-sided coverage) don't
+                    collapse into one visual cue. */}
+                {wire.isWireRedistribution && (
+                  <span
+                    className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-700 dark:text-violet-400 font-medium"
+                    title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
+                  >
+                    <Copy className="h-3 w-3" />
+                    Tek kaynaktan dağıtıldı · {wire.memberCount} kopya
+                  </span>
+                )}
                 <ShareButton
                   clusterId={id}
                   title={cluster.title_tr}
@@ -252,6 +270,8 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             <div className="spectrum-glow">
               <BiasSpectrum distribution={biasDistribution} />
             </div>
+
+            <OwnershipLine members={members} />
 
             {/* "Karşı tarafı oku" — a one-tap next action for a visitor
                 landing from a shared link, placed directly under the
