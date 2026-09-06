@@ -10,6 +10,10 @@ import {
   tallyZones,
   ZONE_META,
   zoneOf,
+  SOURCE_KINDS,
+  VOTING_SOURCE_KINDS,
+  isVotingKind,
+  normalizeSourceKind,
 } from "./config";
 import {
   BIAS_KEYS,
@@ -18,6 +22,7 @@ import {
   SURPRISE as CONTRACT_SURPRISE,
   tallyZones as contractTallyZones,
 } from "../../../supabase/functions/_shared/cluster/blindspot";
+import { SOURCE_KINDS as CONTRACT_SOURCE_KINDS } from "../../../supabase/functions/_shared/cluster/source-kind";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
 const ALL_BIASES: BiasCategory[] = [
@@ -50,7 +55,7 @@ describe("BIAS_LABELS", () => {
 
   it("uses the known canonical labels for a few anchor entries", () => {
     expect(BIAS_LABELS.pro_government).toBe("Hükümete Yakın");
-    expect(BIAS_LABELS.center).toBe("Bağımsız");
+    expect(BIAS_LABELS.center).toBe("Merkez");
     expect(BIAS_LABELS.opposition).toBe("Muhalefet");
     expect(BIAS_LABELS.nationalist).toBe("Milliyetçi");
   });
@@ -69,6 +74,10 @@ describe("BIAS_SHORT_LABELS", () => {
     expect(
       BIAS_SHORT_LABELS.islamist_conservative.length
     ).toBeLessThan(BIAS_LABELS.islamist_conservative.length);
+  });
+
+  it("uses the renamed center label", () => {
+    expect(BIAS_SHORT_LABELS.center).toBe("Merkez");
   });
 
   it("matches the full label for most entries (only islamist shortened)", () => {
@@ -190,6 +199,35 @@ describe("contract re-exports (supabase/functions/_shared/cluster/blindspot.ts)"
   });
 });
 
+describe("source-kind re-exports", () => {
+  it("SOURCE_KINDS is the SAME object as the contract's export, not a copy", () => {
+    expect(SOURCE_KINDS).toBe(CONTRACT_SOURCE_KINDS);
+  });
+
+  it("VOTING_SOURCE_KINDS equals the voting kinds (outlet, wire)", () => {
+    expect(VOTING_SOURCE_KINDS).toEqual(["outlet", "wire"]);
+  });
+
+  it("the app SourceKind union has exactly the same members as SOURCE_KINDS", () => {
+    // Guards the `satisfies readonly SourceKind[]` assertion in config.ts in
+    // both directions: if either union grows or shrinks without updating
+    // the other, `satisfies` would silently widen one side instead of
+    // failing loudly, so we spell out the app union as a literal array here.
+    const appKinds = ["outlet", "aggregator", "wire", "niche"];
+    expect(new Set(SOURCE_KINDS)).toEqual(new Set(appKinds));
+  });
+
+  it("isVotingKind distinguishes voting from non-voting kinds", () => {
+    expect(isVotingKind("aggregator")).toBe(false);
+    // Legacy rows/selects without a kind column keep voting.
+    expect(isVotingKind(undefined)).toBe(true);
+  });
+
+  it("normalizeSourceKind falls back to outlet for null/bogus values", () => {
+    expect(normalizeSourceKind(null)).toBe("outlet");
+  });
+});
+
 describe("ZONE_META", () => {
   it("has an entry for each zone", () => {
     for (const zone of ALL_ZONES) {
@@ -215,6 +253,9 @@ describe("ZONE_META", () => {
 
   it("uses the expected Turkish labels", () => {
     expect(ZONE_META.iktidar.label).toBe("İktidar");
+    // Intentionally NOT renamed alongside BIAS_LABELS.center → "Merkez": the
+    // zone label is a separate concept (a Medya DNA zone, not a bias
+    // category) and stays "Bağımsız" per the source-kind product decision.
     expect(ZONE_META.bagimsiz.label).toBe("Bağımsız");
     expect(ZONE_META.muhalefet.label).toBe("Muhalefet");
   });

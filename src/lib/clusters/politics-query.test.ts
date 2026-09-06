@@ -78,6 +78,7 @@ interface MkClusterOpts {
     sourceId: string;
     sourceName?: string;
     bias?: string;
+    kind?: string | null;
     category?: string;
     content_hash?: string | null;
     published_at?: string;
@@ -112,6 +113,7 @@ function mkCluster(opts: MkClusterOpts) {
           name: m.sourceName ?? `Source ${m.sourceId}`,
           bias: m.bias ?? "center",
           logo_url: null,
+          kind: m.kind,
         },
       },
     })),
@@ -152,6 +154,8 @@ describe("getPoliticsClusters query shape", () => {
     // Verify the R2 wire-collapse needs content_hash (and the builder
     // still selects it even though it's not rendered directly).
     expect(selectArg).toMatch(/\bcontent_hash\b/);
+    // sources embed must carry kind (voting vs non-voting source).
+    expect(selectArg).toMatch(/sources\s*\([^)]*\bkind\b/);
     // H2 neutral-headline column.
     expect(selectArg).toMatch(/\btitle_tr_neutral\b/);
 
@@ -583,6 +587,48 @@ describe("importance ranking", () => {
     expect(bundles).toHaveLength(2);
     expect(bundles[0].cluster.id).toBe("fresh");
     expect(bundles[1].cluster.id).toBe("old");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Zone-diversity ranking is source-kind aware (R1 diversity bonus)
+// ---------------------------------------------------------------------------
+
+describe("zone-diversity ranking (source-kind aware)", () => {
+  it("an aggregator's bias must not fabricate a zone for the R1 diversity bonus", async () => {
+    // Cluster A (listed first): 3 pro_government outlets + 1 "center"
+    // member whose kind is "aggregator" — that member never votes, so it
+    // must not count toward zone diversity either. Real zones = 1
+    // (iktidar only).
+    const clusterA = mkCluster({
+      id: "cluster-a",
+      members: [
+        { id: "a1", sourceId: "sa1", bias: "pro_government" },
+        { id: "a2", sourceId: "sa2", bias: "pro_government" },
+        { id: "a3", sourceId: "sa3", bias: "pro_government" },
+        { id: "a4", sourceId: "sa4", bias: "center", kind: "aggregator" },
+      ],
+    });
+    // Cluster B: 3 pro_government outlets + 1 opposition outlet (votes).
+    // Real zones = 2 (iktidar + muhalefet).
+    const clusterB = mkCluster({
+      id: "cluster-b",
+      members: [
+        { id: "b1", sourceId: "sb1", bias: "pro_government" },
+        { id: "b2", sourceId: "sb2", bias: "pro_government" },
+        { id: "b3", sourceId: "sb3", bias: "pro_government" },
+        { id: "b4", sourceId: "sb4", bias: "opposition" },
+      ],
+    });
+    response = { data: [clusterA, clusterB], error: null };
+
+    const { bundles } = await getPoliticsClusters();
+    // B has real zone-diversity 2 vs A's 1 (the aggregator doesn't count),
+    // so B must outrank A. Without the fix both would score zones=2, tie
+    // on every other term, and A's input position would win the stable
+    // sort instead.
+    expect(bundles[0].cluster.id).toBe("cluster-b");
+    expect(bundles[1].cluster.id).toBe("cluster-a");
   });
 });
 

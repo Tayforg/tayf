@@ -1,4 +1,5 @@
 import type { Source, MediaDnaZone } from "@/types";
+import { isVotingSource } from "@/lib/sources/kind";
 import { zoneOf, BLINDSPOT, SURPRISE } from "./config";
 
 /**
@@ -37,10 +38,16 @@ export function detectCrossSpectrum(
   // firings being 55–64% majority splits rather than real surprises.
   dominantThreshold = SURPRISE.dominantShare,
 ): CrossSpectrumResult {
+  // Non-voting kinds (aggregator, niche) are cluster members but never
+  // vote — they must neither dominate a zone nor register as a surprise.
+  // Filter up front so every count/size/margin check below only ever sees
+  // voting sources, even when a caller passes the full member list.
+  const voters = memberSources.filter(isVotingSource);
+
   // Contract minimum-source-count guard (SURPRISE.minSources). Clusters
   // below this floor where a single opposite voice flips verdicts are too
   // noisy to be trusted.
-  if (memberSources.length < SURPRISE.minSources) {
+  if (voters.length < SURPRISE.minSources) {
     return {
       dominantZone: null,
       dominantPct: 0,
@@ -55,10 +62,10 @@ export function detectCrossSpectrum(
     bagimsiz: 0,
     muhalefet: 0,
   };
-  for (const s of memberSources) counts[zoneOf(s.bias)]++;
+  for (const s of voters) counts[zoneOf(s.bias)]++;
 
   // Find dominant zone — must clear the threshold AND be the largest.
-  const total = memberSources.length;
+  const total = voters.length;
   let dominantZone: MediaDnaZone | null = null;
   let dominantPct = 0;
   for (const zone of Object.keys(counts) as MediaDnaZone[]) {
@@ -81,7 +88,7 @@ export function detectCrossSpectrum(
   // Members in the opposite zone are the surprises.
   const opposite = OPPOSITE[dominantZone];
   const surpriseOutlets = opposite
-    ? memberSources.filter((s) => zoneOf(s.bias) === opposite)
+    ? voters.filter((s) => zoneOf(s.bias) === opposite)
     : [];
 
   // Contract minimum-margin guard (SURPRISE.minMargin). Even after the

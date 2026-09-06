@@ -1,5 +1,9 @@
-import type { BiasCategory, MediaDnaZone } from "@/types";
+import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 import { BIAS_TO_ZONE as CONTRACT_BIAS_TO_ZONE } from "../../../supabase/functions/_shared/cluster/blindspot";
+import {
+  SOURCE_KINDS as CONTRACT_SOURCE_KINDS,
+  VOTING_SOURCE_KINDS as CONTRACT_VOTING_SOURCE_KINDS,
+} from "../../../supabase/functions/_shared/cluster/source-kind";
 
 // Single source of truth for all bias label / color / spectrum-order data
 // AND the bias → Medya DNA zone mapping. Both used to live in separate
@@ -15,7 +19,7 @@ export const BIAS_LABELS: Record<BiasCategory, string> = {
   gov_leaning: "Hükümete Meyilli",
   state_media: "Devlet Medyası",
   islamist_conservative: "İslamcı/Muhafazakâr",
-  center: "Bağımsız",
+  center: "Merkez",
   international: "Uluslararası",
   pro_kurdish: "Kürt Yanlısı",
   opposition_leaning: "Muhalefete Meyilli",
@@ -33,7 +37,7 @@ export const BIAS_SHORT_LABELS: Record<BiasCategory, string> = {
   gov_leaning: "Hükümete Meyilli",
   state_media: "Devlet Medyası",
   islamist_conservative: "İslamcı/Muh.",
-  center: "Bağımsız",
+  center: "Merkez",
   international: "Uluslararası",
   pro_kurdish: "Kürt Yanlısı",
   opposition_leaning: "Muhalefete Meyilli",
@@ -184,6 +188,24 @@ export const BIAS_TO_ZONE = CONTRACT_BIAS_TO_ZONE satisfies Record<
 >;
 
 export { BLINDSPOT, SURPRISE, tallyZones } from "../../../supabase/functions/_shared/cluster/blindspot";
+
+// ===========================================================================
+// Source-kind contract re-exports
+// ===========================================================================
+//
+// Which kinds of source VOTE in bias_distribution, blindspot/surprise
+// detection and the trends view. Defined in
+// supabase/functions/_shared/cluster/source-kind.ts; `satisfies` keeps the
+// app-side `SourceKind` union in lockstep with the contract's SOURCE_KINDS
+// tuple. src/lib/sources/kind.ts builds the UI-facing helpers on top of
+// these re-exports.
+export const SOURCE_KINDS = CONTRACT_SOURCE_KINDS satisfies readonly SourceKind[];
+export const VOTING_SOURCE_KINDS = CONTRACT_VOTING_SOURCE_KINDS satisfies readonly SourceKind[];
+export {
+  DEFAULT_SOURCE_KIND,
+  isVotingKind,
+  normalizeSourceKind,
+} from "../../../supabase/functions/_shared/cluster/source-kind";
 
 /**
  * Per-zone presentation tokens.

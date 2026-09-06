@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import type { Source, MediaDnaZone } from "@/types";
 import { zoneOf, ZONE_META, BIAS_LABELS } from "@/lib/bias/config";
+import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 
 /**
  * Chart 1 — Medya DNA'sı.
@@ -24,6 +25,11 @@ import { zoneOf, ZONE_META, BIAS_LABELS } from "@/lib/bias/config";
  *
  * The proportional 3-segment top bar always reflects the FULL directory
  * distribution regardless of toggle state.
+ *
+ * Non-voting kinds (toplayıcı / niş) still get highlighted like any other
+ * participating source, but render at `opacity-50` instead of full opacity
+ * and carry a small kind label — a visual reminder that they're cluster
+ * members without being counted in bias_distribution / blindspot / trends.
  */
 
 interface MediaDnaProps {
@@ -65,6 +71,15 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
   }
 
   const total = sources.length;
+
+  // Only show the legend when a non-voting chip is actually rendered: in
+  // collapsed mode that means a participating aggregator/niche source; in
+  // expanded mode any non-voting source in the directory.
+  const showsNonVotingChip = sources.some(
+    (s) =>
+      !isVotingSource(s) &&
+      (showAll || (highlightSlugs !== undefined && highlightSlugs.has(s.slug))),
+  );
 
   return (
     <div className="space-y-3">
@@ -138,6 +153,8 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                   // sky/amber/etc into a section that should read as a
                   // single zone tone.
                   const biasLabel = BIAS_LABELS[source.bias];
+                  const isVoting = isVotingSource(source);
+                  const kindLabel = SOURCE_KIND_META[sourceKindOf(source)].label;
                   // In collapsed mode every visible chip is a participant,
                   // so they're all full-opacity. In expanded mode we dim
                   // the non-participating ones so the directory still
@@ -149,9 +166,11 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                   return (
                     <span
                       key={source.id}
-                      title={`${source.name} — ${biasLabel}`}
+                      title={`${source.name} — ${biasLabel}${
+                        isVoting ? "" : ` · ${kindLabel} · yanlılık dağılımına sayılmaz`
+                      }`}
                       className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-opacity duration-300 ${meta.chipBg} ${meta.chipText} ${meta.chipBorder} ${
-                        isHighlighted ? "opacity-100" : "opacity-30"
+                        isHighlighted ? (isVoting ? "opacity-100" : "opacity-50") : "opacity-30"
                       }`}
                     >
                       <span
@@ -159,6 +178,11 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                         aria-hidden="true"
                       />
                       {source.name}
+                      {!isVoting && (
+                        <span className="ml-0.5 text-[9px] uppercase tracking-wider opacity-70">
+                          {kindLabel}
+                        </span>
+                      )}
                     </span>
                   );
                 })}
@@ -172,6 +196,13 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
           );
         })}
       </div>
+
+      {showsNonVotingChip && (
+        <p className="text-[10px] text-muted-foreground/70">
+          Soluk gösterilen toplayıcı / niş kaynaklar kümelerde listelenir ama
+          yanlılık dağılımına sayılmaz.
+        </p>
+      )}
 
       {/* Toggle: collapsed ↔ expanded. Hidden when there's no filter to
           collapse to (highlightSlugs missing/empty) — in that case the

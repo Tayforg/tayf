@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
+import { normalizeSourceKind } from "@/lib/bias/config";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, Source } from "@/types";
@@ -15,7 +16,11 @@ import type { BiasCategory, BiasDistribution, Source } from "@/types";
 //   collapses that to two parallel round-trips by using a PostgREST
 //   embedded select for members (cluster_articles → articles → sources
 //   in one shot) and firing the sources directory query alongside it
-//   with Promise.all.
+//   with Promise.all. Both selects also carry `kind` (aggregator/wire/
+//   niche/outlet) so the page can partition voting vs non-voting members
+//   without a third round-trip; `allSources[i].kind` passes through the
+//   raw CHECK-constrained column, while every member's `source.kind` is
+//   normalized via `normalizeSourceKind` so it's always a real `SourceKind`.
 //
 //   Wrapped in `unstable_cache` with a 30s TTL keyed per cluster id so
 //   repeat hits within the TTL skip Supabase entirely.
@@ -106,6 +111,7 @@ type EmbeddedSourceRow = {
   bias: BiasCategory;
   logo_url: string | null;
   active: boolean;
+  kind: string | null;
 };
 
 type EmbeddedArticleRow = {
@@ -151,14 +157,14 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         .select(
           `article:articles (
              id, title, url, published_at, image_url, content_hash,
-             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active )
+             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind )
            )`
         )
         .eq("cluster_id", id)
         .returns<EmbeddedClusterArticleRow[]>(),
       supabase
         .from("sources")
-        .select("id, name, slug, url, rss_url, bias, logo_url, active")
+        .select("id, name, slug, url, rss_url, bias, logo_url, active, kind")
         .eq("active", true)
         .order("name")
         .returns<Source[]>(),
@@ -216,6 +222,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           bias: source.bias,
           logo_url: source.logo_url,
           active: source.active,
+          kind: normalizeSourceKind(source.kind),
         },
         article: {
           id: article.id,

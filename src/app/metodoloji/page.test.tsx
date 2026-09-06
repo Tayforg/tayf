@@ -29,6 +29,20 @@ function collectText(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
+/** Collects every `href` prop found anywhere in a React element tree. */
+function collectHrefs(node: unknown, out: string[] = []): string[] {
+  if (Array.isArray(node)) {
+    for (const child of node) collectHrefs(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { props?: { href?: unknown; children?: ReactNode } };
+    if (typeof el.props?.href === "string") out.push(el.props.href);
+    if (el.props?.children !== undefined) collectHrefs(el.props.children, out);
+  }
+  return out;
+}
+
 describe("/metodoloji page", () => {
   it("renders every bias-zone contract number and label from the shared config", async () => {
     const { default: MethodologyPage } = await import("./page");
@@ -64,6 +78,13 @@ describe("/metodoloji page", () => {
     // Stale-literal regression guard: this threshold used to be spelled
     // out as a word instead of interpolated from BLINDSPOT.minSources.
     expect(text).not.toMatch(/Beş kaynak/);
+
+    // Source-kind sentence: aggregator/niche kinds are cluster members but
+    // never vote in the spectrum, blindspot or surprise calculations.
+    expect(text).toContain(
+      "yanlılık dağılımına, kör nokta ve sürpriz hesaplarına sayılmaz",
+    );
+    expect(collectHrefs(tree)).toContain("/sources");
   });
 
   it("shows the mailto link only when NEXT_PUBLIC_CONTACT_EMAIL is set", async () => {

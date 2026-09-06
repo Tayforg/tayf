@@ -1,6 +1,6 @@
-import { BLINDSPOT, tallyZones } from "@/lib/bias/config";
+import { BLINDSPOT, isVotingKind, tallyZones } from "@/lib/bias/config";
 import type { ZoneTally } from "../../../supabase/functions/_shared/cluster/blindspot";
-import type { BiasCategory, NewsCategory } from "@/types";
+import type { BiasCategory, NewsCategory, SourceKind } from "@/types";
 
 // Pure filtering/tallying logic for /blindspots, extracted from page.tsx so
 // it can be unit-tested independently of the DB fetch and JSX.
@@ -9,6 +9,10 @@ export type EmbeddedSource = {
   id: string;
   name: string;
   bias: BiasCategory;
+  // Optional so the existing `sources(id, bias)` fixtures (no kind column)
+  // keep compiling. `zoneTallyOf` treats a missing/null kind as voting via
+  // `isVotingKind`.
+  kind?: SourceKind | null;
 };
 
 export type EmbeddedArticle = {
@@ -23,11 +27,11 @@ export type EmbeddedArticle = {
   sources: EmbeddedSource | null;
 };
 
-export type FeedCluster = {
+type FeedCluster = {
   title_tr: string;
 };
 
-export type FeedFilterResult = {
+type FeedFilterResult = {
   ok: boolean;
   reason?: "min_sources" | "seo_pattern" | "wire_dedup" | "dunya_share" | "politics_share";
 };
@@ -95,7 +99,10 @@ export function passesFeedFilters(
 export function zoneTallyOf(deduped: EmbeddedArticle[]): ZoneTally {
   const dist: Partial<Record<BiasCategory, number>> = {};
   for (const m of deduped) {
-    if (!m.sources) continue;
+    // Non-voting kinds (aggregator, niche) are cluster members but never
+    // vote — they don't count toward bias_distribution, blindspot/surprise
+    // detection or the live tally here.
+    if (!m.sources || !isVotingKind(m.sources.kind)) continue;
     dist[m.sources.bias] = (dist[m.sources.bias] ?? 0) + 1;
   }
   return tallyZones(dist);

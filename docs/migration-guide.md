@@ -622,6 +622,48 @@ select public.recompute_blindspot_flags();
 
 ---
 
+## Source kinds (034): apply first, redeploy second, recompute third
+
+`034_source_kind.sql` adds `sources.kind` (`outlet | aggregator | wire | niche`, default `'outlet'`), backfills it on the 38 seeded aggregator/wire/niche sources by slug, recreates `trends_daily_bias_counts` filtered to `s.kind in ('outlet', 'wire')`, and ships `public.recompute_bias_distribution(p_since)` — a re-runnable function that re-derives `clusters.bias_distribution` from voting members only. Only `outlet` and `wire` sources vote in `bias_distribution`, blindspot/surprise detection, and the trends view; `aggregator` and `niche` sources remain cluster members (they still count toward `article_count` / "N kaynak") but never move a vote. The contract lives in `supabase/functions/_shared/cluster/source-kind.ts`; `tests/migrations/zone-parity.test.ts` fails the build if the migration's CHECK list, voting filters, or seed parity drift from it.
+
+**The order is REVERSED relative to 032.** 032 was safe to redeploy the function first because it only *added* a function — nothing already deployed depended on a column that didn't exist yet. This migration is different: the new `cluster-consumer` build selects `sources.kind` in its source lookup (`getSourceLookup`), so if that build reaches production before the column exists, every drain invocation 500s on an undefined-column error the moment it tries to read sources. So here the migration goes first, and the function redeploy follows it:
+
+1. **Apply the migration first:**
+
+   ```bash
+   supabase db push
+   # ...or the one-at-a-time psql pattern from step 1 above:
+   psql "$DATABASE_URL" -f supabase/migrations/034_source_kind.sql
+   ```
+
+2. **Redeploy `cluster-consumer` second**, now that the column it selects exists:
+
+   ```bash
+   supabase functions deploy cluster-consumer --project-ref "$PROJECT_REF" --no-verify-jwt
+   ```
+
+3. **Re-run both recompute functions third.** Between step 1 and step 2, the still-deployed *old* consumer kept writing all-sources distributions (it has no notion of `kind` yet) for every cluster it touched — so the migration's own one-time backfill (which ran as part of step 1, before the redeploy) is now stale for that window. Re-run and confirm both return 0 on a second call:
+
+   ```sql
+   select public.recompute_bias_distribution(now() - interval '48 hours');
+   select public.recompute_blindspot_flags();
+   -- Expect: 0 the second time you run this pair. If either returns
+   -- non-zero on the first call here, that's expected — it's catching the
+   -- old consumer's writes from the step 1 → step 2 window. Re-run once
+   -- more and confirm both settle at 0.
+   ```
+
+Clusters last touched more than 48h before you run step 3 keep their pre-034 (all-sources) `bias_distribution` **by design** — the 48h window matches 031/032's convention and keeps the recompute cheap. A full rebuild is available for an off-peak run:
+
+```sql
+select public.recompute_bias_distribution('1970-01-01');
+select public.recompute_blindspot_flags();
+```
+
+`supabase/seed_sources.sql` now carries a `kind` column for every seeded row, so a fresh environment (`supabase db reset`, or a new project seeded from scratch) gets the correct source kinds without needing this migration's slug-keyed UPDATE at all — the seed file is the source of truth for new installs, 034's VALUES list is the backfill for the existing production database.
+
+---
+
 ## Owner sign-off checklist
 
 Before declaring the migration complete:
@@ -636,3 +678,5 @@ Before declaring the migration complete:
 - [ ] No `node scripts/*-worker.mjs` processes running anywhere
 - [ ] At least one cluster created in the last 15 minutes (`select count(*) from clusters where created_at > now() - interval '15 minutes'`)
 - [ ] At least one image backfilled in the last 15 minutes (`select count(*) from articles where image_url is not null and updated_at > now() - interval '15 minutes'`)
+- [ ] Migration 034 applied, `cluster-consumer` redeployed, and both `select public.recompute_bias_distribution(now() - interval '48 hours');` / `select public.recompute_blindspot_flags();` return 0 on a second call
+- [ ] `select kind, count(*) from sources group by kind order by kind;` shows non-zero `aggregator`, `wire`, and `niche` counts alongside `outlet`

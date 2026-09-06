@@ -5,7 +5,7 @@ import {
   zoneTallyOf,
   type EmbeddedArticle,
 } from "./blindspot-feed";
-import type { BiasCategory, NewsCategory } from "@/types";
+import type { BiasCategory, NewsCategory, SourceKind } from "@/types";
 
 function article(overrides: Partial<EmbeddedArticle> & { id: string }): EmbeddedArticle {
   return {
@@ -21,8 +21,8 @@ function article(overrides: Partial<EmbeddedArticle> & { id: string }): Embedded
   };
 }
 
-function source(id: string, bias: BiasCategory) {
-  return { id, name: id, bias };
+function source(id: string, bias: BiasCategory, kind?: SourceKind) {
+  return { id, name: id, bias, kind };
 }
 
 describe("dedupeBySource", () => {
@@ -183,5 +183,30 @@ describe("zoneTallyOf", () => {
 
     expect(tally.dominantZone).toBe("iktidar");
     expect(tally.dominantCategory).toBe("pro_government");
+  });
+
+  it("ignores aggregator/niche members", () => {
+    const deduped = [
+      article({ id: "a", sources: source("a", "pro_government", "outlet") }),
+      article({ id: "b", sources: source("b", "pro_government", "outlet") }),
+      article({ id: "c", sources: source("c", "pro_government", "outlet") }),
+      article({ id: "d", sources: source("d", "pro_government", "outlet") }),
+      article({ id: "e", sources: source("e", "center", "aggregator") }),
+    ];
+    const tally = zoneTallyOf(deduped);
+
+    expect(tally.total).toBe(4);
+    expect(tally.counts.bagimsiz).toBe(0);
+  });
+
+  it("wire members vote", () => {
+    const deduped = [
+      article({ id: "a", sources: source("a", "opposition", "wire") }),
+      article({ id: "b", sources: source("b", "opposition", "outlet") }),
+    ];
+    const tally = zoneTallyOf(deduped);
+
+    expect(tally.total).toBe(2);
+    expect(tally.dominantZone).toBe("muhalefet");
   });
 });

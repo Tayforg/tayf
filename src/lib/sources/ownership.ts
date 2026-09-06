@@ -21,13 +21,13 @@ export const OWNER_GROUPS: Record<string, string> = {
   independent: "Bağımsız",
 };
 
-export interface OwnerGroupBucket {
+interface OwnerGroupBucket {
   ownerGroup: string;
   label: string;
   sources: Source[];
 }
 
-export interface OwnerGroupSummary {
+interface OwnerGroupSummary {
   groups: OwnerGroupBucket[];
   taggedSourceCount: number;
   totalSourceCount: number;
