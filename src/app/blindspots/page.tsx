@@ -20,108 +20,30 @@ import {
 } from "@/components/story/cluster-card";
 import { PageHero } from "@/components/ui/page-hero";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import { ZONE_META, zoneOf } from "@/lib/bias/config";
+import { BLINDSPOT, ZONE_META } from "@/lib/bias/config";
+import {
+  dedupeBySource,
+  passesFeedFilters,
+  zoneTallyOf,
+  type EmbeddedArticle,
+} from "@/lib/clusters/blindspot-feed";
 import { createServerClient } from "@/lib/supabase/server";
-import type {
-  BiasCategory,
-  BiasDistribution,
-  MediaDnaZone,
-  NewsCategory,
-} from "@/types";
+import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
 // /blindspots — Tayf's "Kör Noktalar" feed.
 //
-// A "kör nokta" is a story cluster where ≥85% of the participating outlets
-// fall in a single Medya DNA zone (iktidar / muhalefet / bagimsiz). The
-// other half of the political spectrum is essentially absent — they didn't
-// cover the story at all. This is the Tayf adaptation of Ground News's
-// signature "Blindspot" feature.
-//
-// Data path mirrors politics-query.ts: a single embedded PostgREST select
-// pulls clusters → cluster_articles → articles → sources in one round-trip,
-// then we filter in JS for clusters whose dominant zone share ≥ 0.85 AND
-// article_count ≥ 3 (Wave-1 minimum to call something a "story" rather than
-// a stray report). The shape returned is a strict superset of ClusterBundle
-// so we can hand it straight to <ClusterCard> via composition.
-
-// A6-BLINDR: loosened 0.85 → 0.80 so a 4-of-5 split (80% share)
-// qualifies. At 0.85 with MIN=4 we had 3 entries; 0.80 lifted to 7;
-// combined with MIN=5 this lands in the 4-6 target range. The task
-// option of 0.55 was rejected as obviously destructive: a 55% lean
-// is not a blindspot, it's a normal political split.
-const DOMINANT_ZONE_THRESHOLD = 0.8;
-// B-FIX (A5 fix #2): require ≥N distinct sources before a cluster can
-// claim "the other side ignored it." A5 found all 8 of the day's
-// blindspot clusters had only 3–5 articles; at that scale "absence" is
-// noise, not signal. Bumped from 3 → 6 per the A5 recommendation.
-// A6-BLINDR: the ≥6 gate over-corrected (8 → 0 → 1 entry). The wire
-// dedup, SEO, dunya, and 24h-delay filters already carry most of the
-// precision load, so loosened 6 → 5 to recover brand-presence without
-// reintroducing the 3-source noise floor.
-const MIN_ARTICLE_COUNT = 5;
-// Pre-filter floor for the embedded select. We still pull rows with
-// ≥3 articles so the in-JS dedupe pass has headroom; the real ≥6 gate
-// is enforced after same-source dedupe below.
+// A "kör nokta" is a cluster where the contract's BLINDSPOT rule fires:
+// ≥minSources distinct outlets, one Medya DNA zone holding ≥dominantShare
+// of them (see supabase/functions/_shared/cluster/blindspot.ts). The DB's
+// `is_blindspot` flag implements the same rule and is used as a cheap
+// pre-filter; we still recompute the live tally after dedupe so a story
+// that has since balanced out can never surface here. On top of the
+// contract we keep this feed's own quality filters (SEO explainers, wire
+// redistribution, dunya/politics category share) and a 24h delay so the
+// absent side has time to catch up before we call something a blindspot.
 const PREFILTER_MIN_ARTICLE_COUNT = 3;
-const CANDIDATE_LIMIT = 80;
+const CANDIDATE_LIMIT = 200;
 const DISPLAY_LIMIT = 30;
-const POLITICS_CATEGORIES: readonly NewsCategory[] = [
-  "politika",
-  "son_dakika",
-];
-
-// B-FIX (A5 fix #3): SEO format filter. A5 found "kimdir / kaç yaşında /
-// son dakika: / canlı / ne dedi" titles are SEO search-intent explainers,
-// not coverage blindspots — iktidar outlets simply don't publish
-// "who-is-our-own-guy" explainers. Matching titles are dropped before
-// they reach the page (e.g. bf90987a "MHP İl Başkanı … kimdir?").
-const SEO_PATTERN =
-  /kimdir|kaç yaşında|nedir\?|ne zaman|kaç bin|kaç tl|son dakika.*?:|canlı|ne dedi/i;
-
-// B-FIX (A5 fix #4): wire-redistribution dedup threshold. Mirrors the
-// detector R2 added to politics-query.ts: when fewer than 50% of the
-// cluster's deduped members carry distinct content_hashes, the cluster
-// is one AA/DHA/IHA wire copy amplified by N outlets — not N independent
-// reports. Kills the b9e4047c / 536cb1d4 / 9f8704b0 wire false-positives.
-const WIRE_UNIQUE_HASH_RATIO = 0.5;
-
-// B-FIX (A5 fix #5): category guard. A5 found 959b3cfc (Pakistan /
-// Ortadoğu / Oman foreign-affairs) was tagged `politika` and surfaced
-// as a Turkish-politics blindspot. Drop clusters where >50% of the
-// deduped members live in the `dunya` category — the substance is
-// foreign affairs, not domestic politics, so a one-sided iktidar share
-// is meaningless as a "blindspot."
-const DUNYA_CATEGORY_SHARE_LIMIT = 0.5;
-
-// B-FIX (A5 fix #1): 24-hour delay. A5 found 6 of 8 clusters were under
-// 24h old; the time-lag artifact 805acddc was a story iktidar AND
-// muhalefet covered, but the muhalefet copies hadn't clustered yet.
-// Waiting 24h gives the absent side time to catch up so we only flag
-// real coverage gaps. A6-BLINDR: tried 12h but it made results worse
-// (3 → 0) because the `updated_at desc` + 80-candidate cap let fresh
-// sub-24h clusters crowd out qualifying older ones; kept at 24h.
-const BLINDSPOT_AGE_DELAY_MS = 24 * 3600 * 1000;
-
-type EmbeddedSource = {
-  id: string;
-  name: string;
-  bias: BiasCategory;
-};
-
-type EmbeddedArticle = {
-  id: string;
-  title: string;
-  url: string;
-  image_url: string | null;
-  published_at: string;
-  source_id: string;
-  category: NewsCategory;
-  // B-FIX (A5 fix #4): used by the wire-redistribution dedup pass below.
-  // Same NULL handling as politics-query.ts: a null hash is treated as a
-  // unique pseudo-hash so legacy rows aren't collapsed into wire.
-  content_hash: string | null;
-  sources: EmbeddedSource | null;
-};
 
 type EmbeddedClusterArticle = {
   articles: EmbeddedArticle | null;
@@ -158,7 +80,7 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
     // PostgREST `.lt('first_published', …)` filter so the work is done in
     // the database, not after the round-trip.
     const blindspotCutoffIso = new Date(
-      Date.now() - BLINDSPOT_AGE_DELAY_MS
+      Date.now() - BLINDSPOT.feedDelayHours * 3600 * 1000
     ).toISOString();
 
     const { data, error } = await supabase
@@ -172,12 +94,14 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
            )
          )`
       )
-      // B-FIX (A5 fix #2): pre-filter floor only — the real ≥6 gate runs
-      // after same-source dedupe in JS so a cluster of 7 articles from 4
-      // unique outlets is correctly rejected.
+      // Cheap DB-side floor before the in-JS dedupe pass; the real
+      // BLINDSPOT.minSources gate runs on the deduped, live-tallied set.
       .gte("article_count", PREFILTER_MIN_ARTICLE_COUNT)
-      // B-FIX (A5 fix #1): 24-hour delay. Time-lag artifacts get 24h to
-      // be caught up by the absent side before we call them blindspots.
+      // The DB flag implements the same core rule as a pre-filter — the
+      // live tally below still re-checks it after dedupe.
+      .eq("is_blindspot", true)
+      // 24-hour delay: time-lag artifacts get time to be caught up by the
+      // absent side before we call them blindspots.
       .lt("first_published", blindspotCutoffIso)
       .order("updated_at", { ascending: false })
       .limit(CANDIDATE_LIMIT)
@@ -206,85 +130,23 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
       // distribution is computed against unique outlets — otherwise a
       // single outlet that happens to publish twice would inflate its
       // own zone's share.
-      const sortedAsc = [...members].sort(
-        (a, b) =>
-          new Date(a.published_at).getTime() -
-          new Date(b.published_at).getTime()
-      );
-      const seen = new Set<string>();
-      const deduped: EmbeddedArticle[] = [];
-      for (const m of sortedAsc) {
-        const sid = m.sources?.id ?? m.source_id;
-        if (seen.has(sid)) continue;
-        seen.add(sid);
-        deduped.push(m);
+      const deduped = dedupeBySource(members);
+
+      if (!passesFeedFilters({ title_tr: c.title_tr }, deduped).ok) continue;
+
+      // Live tally over unique outlets — re-checked against the contract
+      // so a cluster whose `is_blindspot` flag has gone stale (the story
+      // balanced out since it was flagged) can never surface here.
+      const tally = zoneTallyOf(deduped);
+      if (
+        !tally.dominantZone ||
+        tally.total < BLINDSPOT.minSources ||
+        tally.dominantShare < BLINDSPOT.dominantShare
+      ) {
+        continue;
       }
-
-      // B-FIX (A5 fix #2): require ≥6 distinct outlets after dedupe. A5
-      // showed 3-source clusters are too small to call "the other side
-      // ignored it" — at that scale absence is sampling noise. Bumped
-      // from 3 → 6 per the A5 recommendation.
-      if (deduped.length < MIN_ARTICLE_COUNT) continue;
-
-      // B-FIX (A5 fix #3): SEO format filter. "kimdir / kaç yaşında / son
-      // dakika: / canlı / ne dedi" titles are search-intent explainers,
-      // not coverage gaps. Iktidar outlets don't publish "who is our own
-      // guy" pieces — they publish the appointment. Drop these before
-      // they reach the page (kills bf90987a "MHP İl Başkanı … kimdir?").
-      if (SEO_PATTERN.test(c.title_tr)) continue;
-
-      // B-FIX (A5 fix #4): wire-redistribution dedup. Mirrors R2's
-      // detector in politics-query.ts: when fewer than 50% of the
-      // deduped members carry distinct content_hashes, the cluster is
-      // one wire copy amplified by N outlets. NULL hashes are treated as
-      // unique pseudo-hashes (same as politics-query.ts) so legacy rows
-      // are never mis-flagged. Kills b9e4047c / 536cb1d4 / 9f8704b0.
-      const distinctHashes = new Set(
-        deduped.map((m) => m.content_hash ?? `__null__:${m.id}`)
-      ).size;
-      if (distinctHashes / deduped.length < WIRE_UNIQUE_HASH_RATIO) continue;
-
-      // B-FIX (A5 fix #5): category guard. A5 found 959b3cfc (Pakistan /
-      // Oman foreign-affairs) was tagged `politika` and surfaced as a
-      // domestic-politics blindspot. Drop clusters whose `dunya` share
-      // exceeds 50% — the substance is foreign affairs, not Turkish
-      // politics, so a one-sided iktidar share carries no signal.
-      const dunyaCount = deduped.filter((m) => m.category === "dunya").length;
-      if (dunyaCount / deduped.length > DUNYA_CATEGORY_SHARE_LIMIT) continue;
-
-      // Soft topical filter: only consider clusters whose majority is
-      // politics/breaking-news. Tayf's clustering pipeline isn't gated by
-      // category, so without this filter the page would surface e.g.
-      // sports clusters from a single zone — not the spirit of the
-      // feature.
-      const politicsHits = deduped.filter((m) =>
-        POLITICS_CATEGORIES.includes(m.category)
-      ).length;
-      if (politicsHits / deduped.length < 0.6) continue;
-
-      // Per-zone tally over unique outlets only.
-      const counts: Record<MediaDnaZone, number> = {
-        iktidar: 0,
-        muhalefet: 0,
-        bagimsiz: 0,
-      };
-      for (const m of deduped) {
-        if (!m.sources) continue;
-        counts[zoneOf(m.sources.bias)]++;
-      }
-      const total = deduped.length;
-
-      let dominantZone: MediaDnaZone | null = null;
-      let dominantPct = 0;
-      for (const z of Object.keys(counts) as MediaDnaZone[]) {
-        const pct = counts[z] / total;
-        if (pct > dominantPct) {
-          dominantZone = z;
-          dominantPct = pct;
-        }
-      }
-
-      if (!dominantZone || dominantPct < DOMINANT_ZONE_THRESHOLD) continue;
+      const dominantZone: MediaDnaZone = tally.dominantZone;
+      const dominantPct = tally.dominantShare;
 
       // Re-sort newest-first for the rendered list, matching ClusterCard's
       // expected ordering.
@@ -311,7 +173,7 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
           // Same coalesce as politics-query: prefer the LLM-neutralized
           // headline over the first-arriving outlet's raw framing. The
           // blindspot feed is exactly where a partisan seed title hurts
-          // most. (SEO_PATTERN above still tests the raw title on purpose
+          // most. (passesFeedFilters still tests the raw title on purpose
           // — it detects the *story format*, which a rewrite doesn't change.)
           title_tr: c.title_tr_neutral ?? c.title_tr,
           summary_tr: c.summary_tr,
@@ -437,7 +299,9 @@ interface BlindspotCardProps {
 // for free.
 function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
   const meta = ZONE_META[bundle.dominantZone];
-  const pctLabel = `${Math.round(bundle.dominantPct * 100)}%`;
+  const pct = Math.round(bundle.dominantPct * 100);
+  const pctLabel = `%${pct}`;
+  const chipLabel = pct < 100 ? `${pctLabel} ${meta.label}` : `Sadece ${meta.label} yazdı`;
 
   return (
     <div
@@ -449,11 +313,13 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
             className={`inline-flex items-center gap-1.5 rounded-full ${meta.chipBg} ${meta.chipBorder} border px-2.5 py-1 text-[11px] font-serif font-semibold ${meta.chipText}`}
           >
             <Eye className="h-3 w-3" aria-hidden="true" />
-            Sadece {meta.label} yazdı
+            {chipLabel}
           </span>
-          <span className="text-[11px] text-muted-foreground">
-            <span className="font-mono">{pctLabel}</span> tek tarafta
-          </span>
+          {pct === 100 && (
+            <span className="text-[11px] text-muted-foreground">
+              <span className="font-mono">{pctLabel}</span> tek tarafta
+            </span>
+          )}
         </div>
       </div>
 

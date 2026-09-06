@@ -43,6 +43,19 @@ describe("buildShareText", () => {
     expect(text).toContain("Kör nokta: sadece muhalefet yazdı");
   });
 
+  it("uses the %share form (not 'sadece') when the DB flag fires below 100%", () => {
+    // 4-of-5 = 80% share, the contract's minimum flagging threshold.
+    const text = buildShareText({
+      articleCount: 5,
+      distribution: dist({ pro_government: 4, opposition: 1 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+    });
+    expect(text).toBe(
+      "5 kaynak · %80 iktidar · %0 bağımsız · %20 muhalefet · Kör nokta: iktidar ağırlıklı",
+    );
+  });
+
   it("handles a zero distribution without throwing", () => {
     const text = buildShareText({
       articleCount: 0,

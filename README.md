@@ -123,11 +123,17 @@ Migration files in `supabase/migrations/`:
 - `024_pgmq_setup.sql` — installs `pgmq`, creates `cluster_work` + `image_backfill` queues, `worker_checkpoint` table, `worker_metrics` view
 - `025_worker_triggers.sql` — `AFTER INSERT` triggers on `articles` that enqueue cluster/image work
 - `026_unify_content_hash_v2.sql` — backfills any sha256 hashes to the canonical sha1-of-shingles form + `CHECK (length(content_hash) = 40)`
+- `027_cluster_link_atomic.sql` — `cluster_link_atomic()` SECURITY DEFINER RPC serializing `cluster_articles` insert + `clusters` recompute under a per-cluster advisory lock
+- `028_drop_worker_checkpoint.sql` — clean-drop of the never-wired `worker_checkpoint` table on databases that applied the original 024
+- `029_public_pgmq_wrappers.sql` — `public.pgmq_*` SECURITY DEFINER shims so the service-role PostgREST client can reach `pgmq` without exposing the schema directly
+- `030_newsletter_rls.sql` — RLS policies for the newsletter tables
+- `031_zone_based_blindspot_backfill.sql` — superseded by 032; the interim single-zone-only blindspot rule (>= 5 sources AND exactly one Medya DNA zone has any coverage)
+- `032_blindspot_contract_recompute.sql` — `recompute_blindspot_flags()`, the re-runnable backfill for the one-bias-zone contract (>= 5 sources AND dominant zone share >= 0.8) in `supabase/functions/_shared/cluster/blindspot.ts`
 
 ## Key files
 
-- `src/lib/bias/config.ts` — single source of truth for the 10 bias categories (labels, colors, spectrum order)
-- `src/lib/bias/zones.ts` — 10-bias → 3-zone (Hükümet / Bağımsız / Muhalefet) Medya DNA mapping
+- `supabase/functions/_shared/cluster/blindspot.ts` — the bias-zone contract: BIAS_TO_ZONE, BLINDSPOT, SURPRISE, tallyZones — everything else re-exports from here
+- `src/lib/bias/config.ts` — single source of truth for the 10 bias categories (labels, colors, spectrum order); re-exports BIAS_TO_ZONE, BLINDSPOT, SURPRISE, tallyZones from the contract module
 - `src/lib/bias/cross-spectrum.ts` — surprise detector ("opposition outlet ran with the government framing")
 - `src/lib/clusters/cluster-detail-query.ts` / `politics-query.ts` — cached data layer with server-side dedupe
 - `supabase/functions/ingest/` — RSS fan-out + normalize + upsert (charset-aware)

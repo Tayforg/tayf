@@ -213,7 +213,7 @@ interface CrossSpectrumResult {
   dominantZone: MediaDnaZone | null;
   dominantPct: number;            // 0..1
   surpriseOutlets: Source[];      // opposite-zone members
-  blindspotCandidate: boolean;    // true when dominantPct ≥ 0.85
+  blindspotCandidate: boolean;    // true when dominantPct ≥ BLINDSPOT.dominantShare (0.8)
 }
 ```
 

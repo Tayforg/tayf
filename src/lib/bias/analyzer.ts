@@ -1,4 +1,4 @@
-import type { BiasCategory, BiasDistribution } from "@/types";
+import type { BiasDistribution } from "@/types";
 
 const EMPTY_DISTRIBUTION: BiasDistribution = {
   pro_government: 0,
@@ -15,33 +15,4 @@ const EMPTY_DISTRIBUTION: BiasDistribution = {
 
 export function emptyBiasDistribution(): BiasDistribution {
   return { ...EMPTY_DISTRIBUTION };
-}
-
-export function calculateBiasDistribution(
-  biasLabels: BiasCategory[]
-): BiasDistribution {
-  const distribution = emptyBiasDistribution();
-  for (const bias of biasLabels) {
-    distribution[bias]++;
-  }
-  return distribution;
-}
-
-export function detectBlindspot(distribution: BiasDistribution): {
-  isBlindspot: boolean;
-  blindspotSide: BiasCategory | null;
-} {
-  const categories = Object.entries(distribution) as [BiasCategory, number][];
-  const nonZero = categories.filter(([, count]) => count > 0);
-
-  // Blindspot = only one bias category covers this story
-  const sole = nonZero.length === 1 ? nonZero[0] : null;
-  if (sole) {
-    return {
-      isBlindspot: true,
-      blindspotSide: sole[0],
-    };
-  }
-
-  return { isBlindspot: false, blindspotSide: null };
 }

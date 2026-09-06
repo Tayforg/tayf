@@ -12,8 +12,9 @@ import { formatTurkishTimeAgo } from "@/lib/time";
  * least likely to have already seen, or renders a neutral empty-state
  * message when that pole has zero coverage — only using the "kör nokta"
  * wording when `cluster.is_blindspot` is true, since a zero-coverage pole
- * on a non-blindspot cluster (below the 5-source floor, or with two
- * active zones) doesn't meet the product's blindspot definition.
+ * on a non-blindspot cluster (below BLINDSPOT.minSources, or with the
+ * dominant-zone share under BLINDSPOT.dominantShare) doesn't meet the
+ * product's blindspot definition.
  *
  * Server Component, zero client JS — rendered in page.tsx directly under
  * `<BiasSpectrum>` so it's above the fold.

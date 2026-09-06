@@ -38,3 +38,31 @@ jobs:
 
       - name: Test
         run: npm test
+
+  deno:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Mirrors the `check` job: read-only, so least-privilege token.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: denoland/setup-deno@v2
+        with:
+          # Match supabase/config.toml's deno_version (Deno 2 major) — the
+          # Edge Functions run on whatever the Supabase platform ships for
+          # that major, so pin the same one here rather than "latest".
+          deno-version: "2"
+
+      - name: deno check ingest
+        working-directory: supabase/functions/ingest
+        run: deno check index.ts
+
+      - name: deno check cluster-consumer
+        working-directory: supabase/functions/cluster-consumer
+        run: deno check index.ts
+
+      - name: deno check image-consumer
+        working-directory: supabase/functions/image-consumer
+        run: deno check index.ts

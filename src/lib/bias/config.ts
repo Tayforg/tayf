@@ -1,4 +1,5 @@
 import type { BiasCategory, MediaDnaZone } from "@/types";
+import { BIAS_TO_ZONE as CONTRACT_BIAS_TO_ZONE } from "../../../supabase/functions/_shared/cluster/blindspot";
 
 // Single source of truth for all bias label / color / spectrum-order data
 // AND the bias → Medya DNA zone mapping. Both used to live in separate
@@ -162,7 +163,8 @@ export const BIAS_ORDER: BiasCategory[] = [
 ];
 
 // ===========================================================================
-// Medya DNA zone mapping (formerly src/lib/bias/zones.ts)
+// Medya DNA zone mapping + editorial rules — re-exported from the shared
+// contract so Next, the Deno consumer and (via the parity test) SQL agree.
 // ===========================================================================
 
 /**
@@ -171,19 +173,17 @@ export const BIAS_ORDER: BiasCategory[] = [
  * - iktidar   → pro-government / state-aligned voices (incl. nationalist MHP as Cumhur İttifakı ally)
  * - bagimsiz  → center, international, pro-Kurdish (treated as independent)
  * - muhalefet → opposition voices
+ *
+ * Defined in supabase/functions/_shared/cluster/blindspot.ts; `satisfies`
+ * keeps the app-side `BiasCategory` / `MediaDnaZone` unions in lockstep
+ * with the contract's key sets.
  */
-export const BIAS_TO_ZONE: Record<BiasCategory, MediaDnaZone> = {
-  pro_government: "iktidar",
-  gov_leaning: "iktidar",
-  state_media: "iktidar",
-  islamist_conservative: "iktidar",
-  nationalist: "iktidar", // MOVED per A6 finding: MHP is a Cumhur İttifakı ally of AKP-led iktidar, so nationalist outlets (Aydınlık/Yeniçağ/Bengütürk) covering MHP positively should not flag as cross-spectrum surprise.
-  center: "bagimsiz",
-  international: "bagimsiz",
-  pro_kurdish: "bagimsiz",
-  opposition_leaning: "muhalefet",
-  opposition: "muhalefet",
-};
+export const BIAS_TO_ZONE = CONTRACT_BIAS_TO_ZONE satisfies Record<
+  BiasCategory,
+  MediaDnaZone
+>;
+
+export { BLINDSPOT, SURPRISE, tallyZones } from "../../../supabase/functions/_shared/cluster/blindspot";
 
 /**
  * Per-zone presentation tokens.

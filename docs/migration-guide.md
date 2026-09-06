@@ -583,6 +583,39 @@ A *destructive* rollback (drop the queues + remove the triggers + drop `cluster_
 
 ---
 
+## Before merging: redeploy cluster-consumer, then apply 032
+
+The bias-zone contract (`supabase/functions/_shared/cluster/blindspot.ts`) unified the four blindspot/surprise definitions that had drifted apart in production. Landing it requires both a function redeploy and a DB step. Merging to `main` deploys the Next app immediately, and the `/blindspots` page's `.eq("is_blindspot", true)` prefilter means production's `is_blindspot` values matter the moment that deploy lands — so do these two steps **before** merging, in this order:
+
+```bash
+# 1. Redeploy cluster-consumer FIRST. Only this function imports the
+#    contract module (grep over ingest/, image-consumer/, _shared/ finds no
+#    other importer) — it is bundled into the function at deploy time, not
+#    loaded at runtime from the repo, so a DB-only apply does NOT change
+#    what a running function does.
+supabase functions deploy cluster-consumer --project-ref "$PROJECT_REF"
+
+# 2. Apply migration 032 (idempotent — recompute_blindspot_flags() only
+#    touches rows whose is_blindspot / blindspot_side actually change).
+#    Running this after the redeploy means it also backfills any clusters
+#    the new consumer already wrote under the new rule.
+supabase db push
+# ...or the one-at-a-time psql pattern from step 1 above:
+psql "$DATABASE_URL" -f supabase/migrations/032_blindspot_contract_recompute.sql
+```
+
+**Why the order matters:** the pg_cron `cluster-drain` job fires every minute (see AGENTS.md), so if 032 ran first, the still-deployed old consumer would keep writing old-rule flags between the DB step and the redeploy, and the backfill would already be done — no second pass would ever correct them. Redeploying first means every row the consumer writes from that point on already follows the contract, and 032's backfill catches everything else in one pass. Any future edit to `BIAS_TO_ZONE`, `BLINDSPOT`, or `SURPRISE` in that file needs the same two-step treatment: a function redeploy, then a new migration (mirroring 032) to recompute stored data. `tests/migrations/zone-parity.test.ts` catches drift between the SQL copies and the contract module, but it cannot catch a stale deploy — that's an operator step, not a CI one.
+
+**Verification:**
+
+```sql
+select public.recompute_blindspot_flags();
+-- Expect: 0. If it returns non-zero here, 032 hasn't actually finished
+-- backfilling everything — re-run once more and confirm 0.
+```
+
+---
+
 ## Owner sign-off checklist
 
 Before declaring the migration complete:
