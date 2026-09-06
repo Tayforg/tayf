@@ -1,9 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { detectCrossSpectrum, summarizeSurprises } from "./cross-spectrum";
 import { BLINDSPOT, SURPRISE } from "./config";
-import type { Source, BiasCategory } from "@/types";
+import type { Source, BiasCategory, SourceKind } from "@/types";
 
-function mkSource(id: string, name: string, bias: BiasCategory): Source {
+function mkSource(id: string, name: string, bias: BiasCategory, kind?: SourceKind): Source {
   return {
     id,
     name,
@@ -13,6 +13,7 @@ function mkSource(id: string, name: string, bias: BiasCategory): Source {
     bias,
     logo_url: null,
     active: true,
+    kind,
   };
 }
 
@@ -168,6 +169,42 @@ describe("detectCrossSpectrum", () => {
     expect(result.dominantPct).toBeCloseTo(0.75, 5);
     expect(0.75).toBeLessThan(BLINDSPOT.dominantShare);
     expect(result.blindspotCandidate).toBe(false);
+  });
+});
+
+describe("detectCrossSpectrum — non-voting members are ignored", () => {
+  it("a non-voting aggregator does not count toward the minimum-source floor", () => {
+    // 4 iktidar outlets (voters) + 1 muhalefet aggregator (non-voter).
+    // Only 4 voters — below SURPRISE.minSources (5) — so nothing is flagged
+    // even though the raw member count is 5.
+    const sources = [
+      mkSource("s1", "Sabah", "pro_government", "outlet"),
+      mkSource("s2", "A Haber", "pro_government", "outlet"),
+      mkSource("s3", "TRT", "state_media", "outlet"),
+      mkSource("s4", "Milliyet", "gov_leaning", "outlet"),
+      mkSource("s5", "Bir Toplayıcı", "opposition", "aggregator"),
+    ];
+    const result = detectCrossSpectrum(sources);
+    expect(result.dominantZone).toBeNull();
+    expect(result.surpriseOutlets).toHaveLength(0);
+  });
+
+  it("a non-voting niche outlet neither dominates nor surprises", () => {
+    // 5 iktidar outlets (voters) + 1 muhalefet niche outlet (non-voter).
+    // The niche source must not appear in surpriseOutlets, and the
+    // dominant share is computed over voters only (5/5 = 1.0), not 5/6.
+    const sources = [
+      mkSource("s1", "Sabah", "pro_government", "outlet"),
+      mkSource("s2", "A Haber", "pro_government", "outlet"),
+      mkSource("s3", "TRT", "state_media", "outlet"),
+      mkSource("s4", "Milliyet", "gov_leaning", "outlet"),
+      mkSource("s5", "Yeni Şafak", "islamist_conservative", "outlet"),
+      mkSource("s6", "Bir Spor Sitesi", "opposition", "niche"),
+    ];
+    const result = detectCrossSpectrum(sources);
+    expect(result.dominantZone).toBe("iktidar");
+    expect(result.dominantPct).toBe(1);
+    expect(result.surpriseOutlets).toHaveLength(0);
   });
 });
 

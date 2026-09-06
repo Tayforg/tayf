@@ -2,7 +2,7 @@ import { groupMembersByZone } from "@/lib/clusters/framing";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import type { MediaDnaZone } from "@/types";
 
-export interface OtherSidePick {
+interface OtherSidePick {
   zone: "iktidar" | "muhalefet";
   member: ClusterDetailMember | null;
   counts: Record<MediaDnaZone, number>;

@@ -93,7 +93,7 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash,
-             sources ( id, name, bias )
+             sources ( id, name, bias, kind )
            )
          )`
       )

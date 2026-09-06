@@ -36,6 +36,7 @@ const CHANGELOG = [
   "Metodoloji sayfası eklendi: etiketleme, kör nokta, sürpriz kesişim, tek kaynak, güvenilirlik ve başlık tarafsızlaştırma kuralları tek sayfada toplandı.",
   "Başlık tarafsızlaştırma şeffaflaştırıldı: her kümede özgün başlığa erişim ve kullanılan istem (prompt) şablonu eklendi.",
   "Düzeltme ve itiraz formu eklendi.",
+  "Kaynak türleri eklendi: toplayıcı ve niş kaynaklar artık yanlılık dağılımına, kör nokta ve sürpriz hesaplarına sayılmıyor; yanlılık kategorisi \"Bağımsız\" yerine \"Merkez\" olarak adlandırıldı.",
 ];
 
 const cardClass = "rounded-xl border border-border/60 bg-card/40 p-5 sm:p-6";
@@ -119,6 +120,19 @@ export default function MethodologyPage() {
             sayılır — MHP, Cumhur İttifakı&apos;nın bir ortağıdır, dolayısıyla
             milliyetçi bir kaynağın MHP&apos;yi olumlu haber yapması
             spektrumlar-arası bir sürpriz sayılmaz.
+          </p>
+          <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
+            Toplayıcı (ör. Haberler.com, Onedio) ve niş (spor, finans,
+            kurumsal) türündeki kaynaklar kümelerde listelenir ama yanlılık
+            dağılımına, kör nokta ve sürpriz hesaplarına sayılmaz; hangi
+            kaynağın hangi türde olduğu{" "}
+            <Link
+              href="/sources"
+              className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+            >
+              Kaynaklar
+            </Link>{" "}
+            sayfasında işaretlidir.
           </p>
         </div>
       </section>
@@ -312,7 +326,7 @@ export default function MethodologyPage() {
 
       <section className="space-y-2 border-t border-border/30 pt-6">
         <p className="text-xs text-muted-foreground/70">
-          Son güncelleme: 2026-09-06
+          Son güncelleme: 2026-09-07
         </p>
         <ul className="list-disc pl-5 text-xs text-muted-foreground/70 space-y-1">
           {CHANGELOG.map((entry) => (

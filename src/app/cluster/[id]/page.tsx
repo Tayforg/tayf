@@ -21,6 +21,7 @@ import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { buildShareText } from "@/lib/clusters/share";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { formatTurkishTimeAgo } from "@/lib/time";
+import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise and must be awaited.
@@ -96,11 +97,21 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
   const { cluster, members, allSources, wire } = detail;
 
-  // Derive inputs for the cross-spectrum surprise detector from the
-  // member list. `memberSources` may contain the same source more than
-  // once (a single outlet can publish multiple articles in a cluster);
-  // that's fine — `detectCrossSpectrum` treats each row as a vote.
-  const memberSources = members.map((m) => m.source);
+  // Toplayıcı / niş kaynaklar are cluster members but never vote — split
+  // them out once here so every voting-sensitive computation below reads
+  // from `votingMembers` while member-count/listing computations keep
+  // reading from the full `members` list.
+  const { voting: votingMembers, nonVoting: nonVotingMembers } =
+    partitionByVote(members);
+
+  // Derive inputs for the cross-spectrum surprise detector from only the
+  // VOTING member list. `detectCrossSpectrum` also filters internally via
+  // `isVotingSource`, so passing the full list would be safe too — this
+  // just keeps the page's own intent explicit. `memberSources` may
+  // contain the same source more than once (a single outlet can publish
+  // multiple articles in a cluster); that's fine — `detectCrossSpectrum`
+  // treats each row as a vote.
+  const memberSources = votingMembers.map((m) => m.source);
   // Uses the default threshold — SURPRISE.dominantShare in the bias-zone
   // contract (supabase/functions/_shared/cluster/blindspot.ts).
   const surpriseResult = detectCrossSpectrum(memberSources);
@@ -112,15 +123,19 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
   // Set of slugs that actually appear in this cluster — used by MediaDna
   // to highlight participating outlets and dim the rest of the 144-source
-  // directory.
-  const highlightSlugs = new Set(memberSources.map((s) => s.slug));
+  // directory. Built over ALL members (not just voting ones) so aggregator
+  // / niche chips still light up in Medya DNA — they're just dimmed there,
+  // never counted in the vote.
+  const highlightSlugs = new Set(members.map((m) => m.source.slug));
 
   // A1-CHIPWIRE: compact factuality + ownership lineage strip. One entry per
-  // unique participating source, filtered to those we've hand-tagged in
+  // unique participating source (ALL members, voting or not — factuality/
+  // ownership are properties of the source, unrelated to whether its kind
+  // votes in the spectrum), filtered to those we've hand-tagged in
   // `SOURCE_METADATA` — `<SourceChips>` no-ops for unknown slugs, so filtering
   // here just prevents empty `<li>` wrappers from bloating the markup.
   const uniqueRatedSources = Array.from(
-    new Map(memberSources.map((s) => [s.slug, s])).values(),
+    new Map(members.map((m) => [m.source.slug, m.source])).values(),
   ).filter((s) => getSourceMetadata(s.slug) !== null);
 
   // Hero image — pass the FULL list of candidate image URLs so the
@@ -139,6 +154,33 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // (`cluster-detail-query.ts`) already normalizes it to a proper
   // `BiasDistribution` at the boundary, so it's safe to use directly here.
   const biasDistribution = cluster.bias_distribution;
+  // Sum of every bias key = how many votes the STORED distribution carries.
+  // Zero means either nobody classified wrote, or (pre-034 rows) the
+  // distribution simply hasn't been touched yet.
+  const distributionTotal = Object.values(biasDistribution).reduce(
+    (a, b) => a + b,
+    0,
+  );
+  // The stored jsonb is voting-only just for rows the post-034 consumer wrote
+  // or the 48h backfill touched; older clusters still carry all-member counts
+  // (one vote per article, every kind). `members` is deduped per source while
+  // votes are per article, so equality here is a conservative "the bar agrees
+  // with the live partition" check: a pre-034 row with >=1 non-voting member
+  // can never satisfy it, and a post-034 row with duplicate-source articles
+  // merely falls back to the neutral caption below.
+  const distributionIsVotingOnly = distributionTotal === votingMembers.length;
+  const spectrumCaption: string | null =
+    distributionTotal === 0
+      ? votingMembers.length === 0
+        ? "Bu kümede sınıflandırılan kaynak yok — yalnızca toplayıcı / niş kaynaklar yazdı"
+        : null
+      : distributionIsVotingOnly
+        ? `Spektrum ${distributionTotal} sınıflandırılmış kaynaktan oluşturuldu${
+            nonVotingMembers.length > 0
+              ? ` · ${nonVotingMembers.length} toplayıcı / niş kaynak sayılmadı`
+              : ""
+          }`
+        : `Spektrum ${distributionTotal} kaynaktan oluşturuldu`;
 
   // Share loop: argue the bias story in the share text itself, before the
   // click — computed server-side so it's identical for every visitor
@@ -291,6 +333,18 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
             <div className="spectrum-glow">
               <BiasSpectrum distribution={biasDistribution} />
+              {/* Spectrum caption: how many classified (voting) sources the
+                  bar above was built from, plus how many toplayıcı / niş
+                  members were left out of it. `BiasSpectrum` itself returns
+                  null at total 0, so this caption is what carries the
+                  "nobody classified covered this" message in that case.
+                  A stored distribution that does not match the live voting
+                  partition (a pre-034 row the 48h backfill hasn't reached
+                  yet) gets the neutral "Spektrum N kaynaktan oluşturuldu"
+                  caption instead, with no exclusion claim. */}
+              {spectrumCaption && (
+                <p className="mt-1.5 text-[11px] text-muted-foreground">{spectrumCaption}</p>
+              )}
             </div>
 
             <OwnershipLine members={members} />
@@ -299,9 +353,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 landing from a shared link, placed directly under the
                 spectrum and above the summary so it clears the fold on a
                 667px-tall viewport (the mobile hero image above is capped
-                at h-44 for the same reason). */}
+                at h-44 for the same reason). Only voting members are
+                candidates — an aggregator/niche member labelled center
+                must never become the "karşı taraf". */}
             <ReadAcrossSpectrum
-              members={members}
+              members={votingMembers}
               isBlindspot={cluster.is_blindspot}
             />
 
@@ -357,10 +413,63 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
       {/* "Aynı Haber, Farklı Dünyalar" — per-zone framing comparison. The
           outlets' own headlines side by side; replaces the old chip-only
-          ClusterStance grid. */}
-      <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 hover-lift animate-fade-up stagger-1">
-        <FramingComparison members={members} />
-      </div>
+          ClusterStance grid. Voting members only — an aggregator/niche
+          member labelled center must never fill the Bağımsız column.
+          Omitted entirely when no voting member exists — the spectrum
+          caption already says only toplayıcı / niş sources wrote, and an
+          empty three-column card would read as broken. */}
+      {votingMembers.length > 0 && (
+        <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 hover-lift animate-fade-up stagger-1">
+          <FramingComparison members={votingMembers} />
+        </div>
+      )}
+
+      {/* Toplayıcı / niş kaynaklar — cluster members whose kind never votes
+          in the spectrum above, kept visible but visually separated and
+          dimmed so the distinction is legible without hiding them. */}
+      {nonVotingMembers.length > 0 && (
+        <section
+          aria-label="Toplayıcı / niş kaynaklar"
+          className="rounded-xl border border-dashed border-border/50 bg-card/20 p-4 opacity-70 animate-fade-up stagger-2"
+        >
+          <div className="flex items-baseline justify-between gap-2">
+            <h3 className="font-serif text-sm font-semibold">
+              Toplayıcı / niş kaynaklar
+            </h3>
+            <span className="text-[10px] tabular-nums text-muted-foreground">
+              {nonVotingMembers.length} kaynak · spektruma sayılmaz
+            </span>
+          </div>
+          <ul className="mt-2 flex flex-wrap gap-x-3 gap-y-1.5">
+            {nonVotingMembers.map((m) => (
+              <li key={m.article.id}>
+                <a
+                  href={m.article.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={m.article.title}
+                  className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground underline decoration-dotted underline-offset-2"
+                >
+                  <span className="font-mono text-[10px] uppercase tracking-wider">
+                    {m.source.name}
+                  </span>
+                  <span className="rounded-full border border-border/50 px-1.5 text-[10px]">
+                    {SOURCE_KIND_META[sourceKindOf(m.source)].label}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[10px] text-muted-foreground/70">
+            <Link
+              href="/metodoloji#kaynaklar"
+              className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+            >
+              Neden sayılmıyor?
+            </Link>
+          </p>
+        </section>
+      )}
 
       <div className="h-px bg-gradient-to-r from-transparent via-brand/20 to-transparent my-6" />
 

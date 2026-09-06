@@ -52,6 +52,7 @@ import {
   type BiasKey,
   detectBlindspot,
 } from "../_shared/cluster/blindspot.ts";
+import { type SourceKind, votingBiasKeys } from "../_shared/cluster/source-kind.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -90,6 +91,12 @@ const POLITICS_CATEGORIES = ["politika", "son_dakika"];
 // BIAS_KEYS / BiasKey / detectBlindspot now live in
 // ../_shared/cluster/blindspot.ts (imported above) so the zone-based
 // blindspot rule is pure, unit-tested, and shared.
+//
+// The kind -> vote rule (which source kinds count toward bias_distribution
+// and therefore blindspot/surprise detection) lives in
+// ../_shared/cluster/source-kind.ts. Aggregator/niche members still become
+// cluster_articles rows — article_count counts them, membership is
+// unaffected — they just never contribute a bias vote.
 
 // ---------------------------------------------------------------------------
 // DB row shapes (narrow, only what the consumer reads/writes)
@@ -120,6 +127,7 @@ interface SourceRow {
   bias: BiasKey | null;
   name: string | null;
   slug: string | null;
+  kind: SourceKind | null;
 }
 
 interface ClusterRow {
@@ -445,7 +453,7 @@ async function getSourceLookup(): Promise<Map<string, SourceRow>> {
   if (sourceLookupCache && now - sourceLookupCache.fetchedAt < SOURCE_LOOKUP_TTL_MS) {
     return sourceLookupCache.lookup;
   }
-  const res = await supabase.from("sources").select("id, bias, name, slug");
+  const res = await supabase.from("sources").select("id, bias, name, slug, kind");
   if (res.error) throw new Error(`sources: ${res.error.message}`);
   const rows = (res.data ?? []) as SourceRow[];
   const lookup = new Map(rows.map((s) => [s.id, s]));
@@ -649,8 +657,15 @@ async function createCluster(
   sourceLookup: Map<string, SourceRow>,
   article: EnrichedArticle,
 ): Promise<string> {
-  const bias = (article.source_id && sourceLookup.get(article.source_id)?.bias) || "center";
-  const dist = buildBiasDistribution([bias as BiasKey]);
+  const src = article.source_id ? sourceLookup.get(article.source_id) : undefined;
+  // Unknown source rows keep the legacy "center" fallback and vote; a known
+  // source votes only when its kind does (outlet/wire). A null bias on a
+  // known row still falls back to center, as before.
+  const dist = buildBiasDistribution(
+    src ? votingBiasKeys([{ bias: src.bias ?? "center", kind: src.kind }]) : ["center"],
+  );
+  // dist now contains voting sources only, so the blindspot verdict below
+  // is over classified (outlet/wire) sources.
   const { is_blindspot, blindspot_side } = detectBlindspot(dist);
 
   const insertRes = await supabase
@@ -762,10 +777,12 @@ async function addArticleToCluster(
   }
   type AggRow = { id: string; source_id: string | null; published_at: string };
   const arts = (artRes.data ?? []) as AggRow[];
-  const biasLabels = arts
-    .map((a) => (a.source_id ? sourceLookup.get(a.source_id)?.bias ?? null : null))
-    .filter((b): b is BiasKey => Boolean(b));
+  const biasLabels = votingBiasKeys(
+    arts.map((a) => (a.source_id ? sourceLookup.get(a.source_id) ?? null : null)),
+  );
   const dist = buildBiasDistribution(biasLabels);
+  // dist now contains voting sources only, so the blindspot verdict below
+  // is over classified (outlet/wire) sources.
   const { is_blindspot, blindspot_side } = detectBlindspot(dist);
 
   const timestamps = arts

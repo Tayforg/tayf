@@ -6,13 +6,14 @@ import type {
   ClusterCardSource,
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import { zoneOf } from "@/lib/bias/config";
+import { isVotingKind, zoneOf } from "@/lib/bias/config";
 import { createServerClient } from "@/lib/supabase/server";
 import type {
   BiasCategory,
   BiasDistribution,
   MediaDnaZone,
   NewsCategory,
+  SourceKind,
 } from "@/types";
 import { detectWireRedistribution } from "./wire";
 
@@ -161,6 +162,7 @@ type EmbeddedSource = {
   name: string;
   bias: BiasCategory;
   logo_url: string | null;
+  kind: SourceKind | null;
 };
 
 type EmbeddedArticle = {
@@ -226,7 +228,7 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash,
-             sources ( id, name, bias, logo_url )
+             sources ( id, name, bias, logo_url, kind )
            )
          )`
       )
@@ -556,7 +558,11 @@ function applySourceFairnessCap(
 function computeDistinctZones(members: EmbeddedArticle[]): number {
   const zones = new Set<MediaDnaZone>();
   for (const m of members) {
-    if (m.sources?.bias) zones.add(zoneOf(m.sources.bias));
+    // An aggregator or niche source labelled e.g. "center" must not
+    // fabricate a bagimsiz zone for the R1 diversity bonus — it never
+    // votes, so it must never widen the diversity count either.
+    if (!m.sources || !isVotingKind(m.sources.kind)) continue;
+    zones.add(zoneOf(m.sources.bias));
   }
   return zones.size;
 }

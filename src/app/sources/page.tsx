@@ -15,6 +15,7 @@ export const metadata: Metadata = {
 import { PageHero } from "@/components/ui/page-hero";
 import { BiasBadge } from "@/components/story/bias-badge";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
+import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, Source } from "@/types";
@@ -35,6 +36,12 @@ import type { BiasCategory, Source } from "@/types";
 // directory shifts on the order of weeks, and the recent-activity counter
 // only needs to feel "fresh", not real-time. The route segment `revalidate`
 // below layers ISR on top so cold renders are also bounded.
+//
+// Each row also carries `kind` (outlet/aggregator/wire/niche — migration
+// 034). Only "outlet" and "wire" vote in bias_distribution / blindspot /
+// trends; the page surfaces a "Sınıflandırılan: N/M" line up top and a
+// per-card kind badge (dimmed for aggregator/niche) so a reader can see at
+// a glance which sources feed the numbers and which are along for the ride.
 
 interface SourceRow extends Source {
   articleCount7d: number;
@@ -75,7 +82,7 @@ async function getSources(): Promise<GroupedSources> {
   const { data, error } = await supabase
     .from("sources")
     .select(
-      "id, name, slug, url, rss_url, bias, logo_url, active, stats:articles(count), latest:articles(published_at)",
+      "id, name, slug, url, rss_url, bias, logo_url, active, kind, stats:articles(count), latest:articles(published_at)",
     )
     .eq("active", true)
     .gte("stats.published_at", sevenDaysAgo)
@@ -125,6 +132,13 @@ export default async function SourcesPage() {
     (acc, bias) => acc + (grouped[bias]?.length ?? 0),
     0,
   );
+  // How many of the active directory actually feed bias_distribution /
+  // blindspot / trends — aggregator and niche sources are listed below but
+  // never counted (migration 034 / src/lib/sources/kind.ts).
+  const votingSources = BIAS_ORDER.reduce(
+    (acc, bias) => acc + (grouped[bias] ?? []).filter(isVotingSource).length,
+    0,
+  );
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
@@ -133,6 +147,20 @@ export default async function SourcesPage() {
         title="Kaynaklar"
         subtitle={`Tayf ${totalSources} Türk haber kaynağını izliyor. Her biri bir siyasi duruşa yerleştirilmiş.`}
       />
+      <p className="text-xs text-muted-foreground">
+        Sınıflandırılan:{" "}
+        <span className="font-mono">
+          {votingSources}/{totalSources}
+        </span>{" "}
+        aktif kaynak — toplayıcı ve niş yayınlar kümelerde listelenir,
+        yanlılık dağılımına sayılmaz.{" "}
+        <Link
+          href="/metodoloji#kaynaklar"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          Neden?
+        </Link>
+      </p>
 
       {BIAS_ORDER.map((bias) => {
         const bucket = grouped[bias] ?? [];
@@ -150,11 +178,14 @@ export default async function SourcesPage() {
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
-              {bucket.map((source, srcIdx) => (
-                <div
-                  key={source.id}
-                  className={`group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6}`}
-                >
+              {bucket.map((source, srcIdx) => {
+                const kind = sourceKindOf(source);
+                const voting = isVotingSource(source);
+                const cardClassName = voting
+                  ? `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6}`
+                  : `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6} opacity-70`;
+                return (
+                  <div key={source.id} className={cardClassName}>
                   <Link
                     href={`/source/${source.slug}`}
                     className="block"
@@ -176,7 +207,17 @@ export default async function SourcesPage() {
                         <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-5">
                           {source.name}
                         </p>
-                        <BiasBadge bias={source.bias} size="sm" />
+                        <div className="flex flex-wrap items-center gap-1">
+                          <BiasBadge bias={source.bias} size="sm" />
+                          {kind !== "outlet" && (
+                            <span
+                              className="inline-flex items-center rounded-full border border-border/60 bg-muted/40 px-1.5 py-0 text-[10px] text-muted-foreground"
+                              title={SOURCE_KIND_META[kind].description}
+                            >
+                              {SOURCE_KIND_META[kind].label}
+                            </span>
+                          )}
+                        </div>
                         <p className="text-muted-foreground">
                           <span className="font-mono text-[10px]">son 7 günde {source.articleCount7d} haber</span>
                         </p>
@@ -202,7 +243,8 @@ export default async function SourcesPage() {
                     ↗
                   </a>
                 </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         );

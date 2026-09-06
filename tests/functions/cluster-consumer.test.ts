@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the cluster-consumer Edge Function.
@@ -169,7 +171,11 @@ const { fakeArticles, supabaseFakeClient, supabaseFakeCalls } = await vi.hoisted
         },
         clusters: [],
         cluster_articles: [],
-        sources: [],
+        sources: [
+          { id: "src-outlet", bias: "pro_government", name: "Outlet", slug: "outlet", kind: "outlet" },
+          { id: "src-agg", bias: "center", name: "Aggregator", slug: "agg", kind: "aggregator" },
+          { id: "src-wire", bias: "state_media", name: "Wire", slug: "wire", kind: "wire" },
+        ],
       },
     });
     return {
@@ -229,6 +235,34 @@ async function importHandler(): Promise<((req: Request) => Promise<Response>) | 
     __registeredHandler?: (req: Request) => Promise<Response>;
   }).__registeredHandler;
   return reg ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Reads back the bias_distribution the SUT actually wrote for whichever
+// message was just drained. A brand-new cluster writes it via the
+// `clusters` insert patch (createCluster); an existing cluster writes it via
+// the `cluster_link_atomic` RPC's `p_bias_distribution` arg
+// (addArticleToCluster). Both paths apply the same voting rule
+// (source-kind.ts), so preferring the rpc value whenever one was recorded
+// keeps the assertions correct even if an LSH band collision against a
+// cluster left in the module-level cache by an earlier test routes the
+// article to the match path instead of the create path.
+// ---------------------------------------------------------------------------
+function lastWrittenDistribution(): Record<string, number> | undefined {
+  const linkCalls = supabaseFakeCalls.rpc.filter(
+    (r) => r.name === "cluster_link_atomic",
+  );
+  if (linkCalls.length > 0) {
+    const last = linkCalls[linkCalls.length - 1];
+    return (
+      last.args as { p_bias_distribution?: Record<string, number> } | undefined
+    )?.p_bias_distribution;
+  }
+  const clusterInserts = supabaseFakeCalls.insert("clusters");
+  const last = clusterInserts[clusterInserts.length - 1];
+  return (
+    last?.patch as { bias_distribution?: Record<string, number> } | undefined
+  )?.bias_distribution;
 }
 
 describe("cluster-consumer Edge Function", () => {
@@ -392,6 +426,123 @@ describe("cluster-consumer Edge Function", () => {
     expect(res.status).toBe(401);
     // Queue must be untouched when auth fails.
     expect(pgmqState.archived.length + pgmqState.deleted.length).toBe(0);
+  });
+
+  it("an aggregator-kind source never votes in bias_distribution", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    pgmqState.pending = [
+      { msg_id: 201, read_ct: 1, message: { article_id: "art-agg" } },
+    ];
+    fakeArticles["art-agg"] = {
+      id: "art-agg",
+      source_id: "src-agg",
+      title: "Zeytinyağı ihracatında rekor bekleniyor",
+      description: "Body",
+      url: "https://example.com/agg",
+      category: "politika",
+      published_at: new Date().toISOString(),
+    };
+
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+    const dist = lastWrittenDistribution();
+    expect(dist).toBeDefined();
+    for (const value of Object.values(dist ?? {})) {
+      expect(value).toBe(0);
+    }
+
+    const clusterInserts = supabaseFakeCalls.insert("clusters");
+    if (clusterInserts.length > 0) {
+      const patch = clusterInserts[clusterInserts.length - 1].patch as {
+        is_blindspot?: boolean;
+        blindspot_side?: string | null;
+      };
+      expect(patch.is_blindspot).toBe(false);
+      expect(patch.blindspot_side).toBeNull();
+    }
+
+    expect([...pgmqState.archived, ...pgmqState.deleted]).toContain(201);
+    expect(
+      supabaseFakeCalls.insert("cluster_articles").length +
+        supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic")
+          .length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("an outlet-kind source votes with its bias", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    pgmqState.pending = [
+      { msg_id: 202, read_ct: 1, message: { article_id: "art-outlet" } },
+    ];
+    fakeArticles["art-outlet"] = {
+      id: "art-outlet",
+      source_id: "src-outlet",
+      title: "Kuraklık barajları vurdu",
+      description: "Body",
+      url: "https://example.com/outlet",
+      category: "politika",
+      published_at: new Date().toISOString(),
+    };
+
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+    const dist = lastWrittenDistribution();
+    expect(dist).toBeDefined();
+    expect(dist?.pro_government).toBe(1);
+    for (const [key, value] of Object.entries(dist ?? {})) {
+      if (key === "pro_government") continue;
+      expect(value).toBe(0);
+    }
+  });
+
+  it("a wire-kind source votes", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    pgmqState.pending = [
+      { msg_id: 203, read_ct: 1, message: { article_id: "art-wire" } },
+    ];
+    fakeArticles["art-wire"] = {
+      id: "art-wire",
+      source_id: "src-wire",
+      title: "Limanda yangın söndürüldü",
+      description: "Body",
+      url: "https://example.com/wire",
+      category: "politika",
+      published_at: new Date().toISOString(),
+    };
+
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+    const dist = lastWrittenDistribution();
+    expect(dist).toBeDefined();
+    expect(dist?.state_media).toBe(1);
+    for (const [key, value] of Object.entries(dist ?? {})) {
+      if (key === "state_media") continue;
+      expect(value).toBe(0);
+    }
+  });
+
+  it("the sources lookup selects the kind column", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    pgmqState.pending = [];
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+    const src = readFileSync(
+      resolve(__dirname, "../../supabase/functions/cluster-consumer/index.ts"),
+      "utf8",
+    );
+    expect(src).toMatch(/from\("sources"\)\.select\("id, bias, name, slug, kind"\)/);
   });
 });
 

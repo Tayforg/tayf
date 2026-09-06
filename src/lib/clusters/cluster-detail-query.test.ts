@@ -213,12 +213,17 @@ describe("getClusterDetail query shape", () => {
     expect(embedded).toMatch(/article:articles/);
     expect(embedded).toMatch(/source:sources/);
     expect(embedded).toMatch(/\bcontent_hash\b/);
+    // The member embed must carry `kind` (voting vs non-voting source).
+    expect(embedded).toMatch(/source:sources\s*\([^)]*\bkind\b/);
     const membersEq = membersCall!.steps.find((s) => s.method === "eq");
     expect(membersEq!.args).toEqual(["cluster_id", "cluster-1"]);
 
     // sources query: active=true, ordered by name.
     const sourcesCall = callLog.find((c) => c.table === "sources");
     expect(sourcesCall).toBeTruthy();
+    const sourcesSelect = sourcesCall!.steps.find((s) => s.method === "select");
+    expect(sourcesSelect).toBeTruthy();
+    expect(sourcesSelect!.args[0] as string).toMatch(/\bkind\b/);
     const activeEq = sourcesCall!.steps.find((s) => s.method === "eq");
     expect(activeEq!.args).toEqual(["active", true]);
     const orderStep = sourcesCall!.steps.find((s) => s.method === "order");
@@ -409,6 +414,34 @@ describe("getClusterDetail row shaping", () => {
     const result = await getClusterDetail("cluster-1");
     expect(result!.members).toHaveLength(1);
     expect(result!.members[0].source.id).toBe("s-ok");
+  });
+
+  it("normalizes each member's source kind", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a-aggregator", "s-aggregator", "2026-04-17T10:00:00Z", {
+            source: { kind: "aggregator" },
+          }),
+          mkEmbeddedMember("a-null-kind", "s-null-kind", "2026-04-17T09:00:00Z", {
+            source: { kind: null },
+          }),
+          // No `kind` key at all — same as the pre-migration select shape.
+          mkEmbeddedMember("a-no-kind", "s-no-kind", "2026-04-17T08:00:00Z"),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    const bySource = Object.fromEntries(
+      result!.members.map((m) => [m.source.id, m.source.kind])
+    );
+    expect(bySource["s-aggregator"]).toBe("aggregator");
+    expect(bySource["s-null-kind"]).toBe("outlet");
+    expect(bySource["s-no-kind"]).toBe("outlet");
   });
 });
 
