@@ -94,7 +94,7 @@ export default async function Image({ params }: ImageProps) {
     );
   }
 
-  const { cluster } = detail;
+  const { cluster, wire } = detail;
   const zones = zoneCountsOf(cluster.bias_distribution);
   const percents = zonePercents(zones);
   const zoneTotal = zones.iktidar + zones.bagimsiz + zones.muhalefet;
@@ -182,17 +182,48 @@ export default async function Image({ params }: ImageProps) {
           <div
             style={{
               display: "flex",
+              flexShrink: 0,
               alignItems: "center",
-              padding: "10px 22px",
-              borderRadius: 999,
-              background: "rgba(250,250,250,0.08)",
-              border: "1px solid rgba(250,250,250,0.18)",
-              fontSize: 24,
-              fontWeight: 600,
-              color: "#e4e4e7",
+              gap: 12,
             }}
           >
-            {cluster.article_count} kaynak
+            <div
+              style={{
+                display: "flex",
+                flexShrink: 0,
+                alignItems: "center",
+                padding: "10px 22px",
+                borderRadius: 999,
+                background: "rgba(250,250,250,0.08)",
+                border: "1px solid rgba(250,250,250,0.18)",
+                fontSize: 24,
+                fontWeight: 600,
+                color: "#e4e4e7",
+              }}
+            >
+              {wire.effectiveArticleCount} kaynak
+            </div>
+            {/* wire-redistribution: violet, not amber — amber is reserved
+                for the Kör nokta ribbon below so the two claims never
+                render as one repeated style. */}
+            {wire.isWireRedistribution && (
+              <div
+                style={{
+                  display: "flex",
+                  flexShrink: 0,
+                  alignItems: "center",
+                  padding: "10px 22px",
+                  borderRadius: 999,
+                  background: "rgba(139,92,246,0.16)",
+                  border: "1px solid rgba(139,92,246,0.45)",
+                  fontSize: 20,
+                  fontWeight: 600,
+                  color: "#c4b5fd",
+                }}
+              >
+                {wire.memberCount} kopya · tek kaynak
+              </div>
+            )}
           </div>
         </div>
 

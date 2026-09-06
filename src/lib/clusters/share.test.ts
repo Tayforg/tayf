@@ -56,6 +56,30 @@ describe("buildShareText", () => {
     );
   });
 
+  it("appends the wire-redistribution suffix when wire.isWireRedistribution is true", () => {
+    const text = buildShareText({
+      articleCount: 2,
+      distribution: dist({ pro_government: 2 }),
+      isBlindspot: false,
+      blindspotSide: null,
+      wire: { isWireRedistribution: true, memberCount: 7 },
+    });
+    expect(text).toBe(
+      "2 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet · tek kaynaktan 7 kopya",
+    );
+  });
+
+  it("omits the wire suffix when wire.isWireRedistribution is false", () => {
+    const text = buildShareText({
+      articleCount: 2,
+      distribution: dist({ pro_government: 2 }),
+      isBlindspot: false,
+      blindspotSide: null,
+      wire: { isWireRedistribution: false, memberCount: 2 },
+    });
+    expect(text).not.toContain("kopya");
+  });
+
   it("handles a zero distribution without throwing", () => {
     const text = buildShareText({
       articleCount: 0,

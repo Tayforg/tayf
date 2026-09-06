@@ -146,6 +146,7 @@ function mkEmbeddedMember(
       url: `https://example.com/${articleId}`,
       published_at: publishedAt,
       image_url: null,
+      content_hash: null,
       source: mkSource(sourceId, overrides.source ?? {}),
       ...(overrides.article ?? {}),
     },
@@ -211,6 +212,7 @@ describe("getClusterDetail query shape", () => {
       .args[0] as string;
     expect(embedded).toMatch(/article:articles/);
     expect(embedded).toMatch(/source:sources/);
+    expect(embedded).toMatch(/\bcontent_hash\b/);
     const membersEq = membersCall!.steps.find((s) => s.method === "eq");
     expect(membersEq!.args).toEqual(["cluster_id", "cluster-1"]);
 
@@ -460,5 +462,159 @@ describe("getClusterDetail error handling", () => {
     expect(result!.members).toEqual([]);
     expect(result!.allSources).toEqual([]);
     expect(result!.cluster.article_count).toBe(0); // post-dedupe count
+  });
+});
+
+describe("getClusterDetail wire signal", () => {
+  it("flags wire redistribution when 5 members collapse to 2 distinct hashes", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+          mkEmbeddedMember("a2", "s2", "2026-04-17T09:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+          mkEmbeddedMember("a3", "s3", "2026-04-17T08:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+          mkEmbeddedMember("a4", "s4", "2026-04-17T07:00:00Z", {
+            article: { content_hash: "hash-b" },
+          }),
+          mkEmbeddedMember("a5", "s5", "2026-04-17T06:00:00Z", {
+            article: { content_hash: "hash-b" },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.wire.isWireRedistribution).toBe(true);
+    expect(result!.wire.effectiveArticleCount).toBe(2);
+    expect(result!.wire.memberCount).toBe(5);
+  });
+
+  it("does not flag wire redistribution when 5 members have 5 distinct hashes", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z", {
+            article: { content_hash: "hash-1" },
+          }),
+          mkEmbeddedMember("a2", "s2", "2026-04-17T09:00:00Z", {
+            article: { content_hash: "hash-2" },
+          }),
+          mkEmbeddedMember("a3", "s3", "2026-04-17T08:00:00Z", {
+            article: { content_hash: "hash-3" },
+          }),
+          mkEmbeddedMember("a4", "s4", "2026-04-17T07:00:00Z", {
+            article: { content_hash: "hash-4" },
+          }),
+          mkEmbeddedMember("a5", "s5", "2026-04-17T06:00:00Z", {
+            article: { content_hash: "hash-5" },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.wire.isWireRedistribution).toBe(false);
+    expect(result!.wire.effectiveArticleCount).toBe(5);
+    expect(result!.wire.memberCount).toBe(5);
+  });
+
+  it("never collapses null content_hash members into a wire signal", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z", {
+            article: { content_hash: null },
+          }),
+          mkEmbeddedMember("a2", "s2", "2026-04-17T09:00:00Z", {
+            article: { content_hash: null },
+          }),
+          mkEmbeddedMember("a3", "s3", "2026-04-17T08:00:00Z", {
+            article: { content_hash: null },
+          }),
+          mkEmbeddedMember("a4", "s4", "2026-04-17T07:00:00Z", {
+            article: { content_hash: null },
+          }),
+          mkEmbeddedMember("a5", "s5", "2026-04-17T06:00:00Z", {
+            article: { content_hash: null },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.wire.isWireRedistribution).toBe(false);
+    expect(result!.wire.effectiveArticleCount).toBe(5);
+  });
+
+  it("never flags wire when fewer than 3 members share the same hash", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+          mkEmbeddedMember("a2", "s2", "2026-04-17T09:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.wire.isWireRedistribution).toBe(false);
+    expect(result!.wire.effectiveArticleCount).toBe(2);
+    expect(result!.wire.memberCount).toBe(2);
+  });
+
+  it("computes the wire signal over per-source-deduped members, not raw rows", async () => {
+    // 4 raw rows, but 3 of them share source s1 (same-source dedupe keeps
+    // only the earliest). Raw: 2 unique hashes / 4 rows = 0.5 → would read
+    // as wire if computed before dedupe. After dedupe: 2 members (s1, s2),
+    // below the 3-member wire floor, so it must NOT be flagged.
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+          mkEmbeddedMember("a2", "s1", "2026-04-17T09:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+          mkEmbeddedMember("a3", "s1", "2026-04-17T08:00:00Z", {
+            article: { content_hash: "hash-a" },
+          }),
+          mkEmbeddedMember("a4", "s2", "2026-04-17T07:00:00Z", {
+            article: { content_hash: "hash-b" },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.cluster.article_count).toBe(2);
+    expect(result!.wire.memberCount).toBe(2);
+    expect(result!.wire.effectiveArticleCount).toBe(2);
+    expect(result!.wire.isWireRedistribution).toBe(false);
   });
 });

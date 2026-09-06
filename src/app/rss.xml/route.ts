@@ -19,8 +19,12 @@ export async function GET(): Promise<Response> {
     .map((b) => {
       const link = `${baseUrl}/cluster/${b.cluster.id}`;
       const title = escapeXml(b.cluster.title_tr ?? "Başlıksız");
+      const honestCount = b.effectiveArticleCount ?? b.cluster.article_count;
+      const wireNote = b.isWireRedistribution
+        ? ` Tek kaynaktan ${b.cluster.article_count} kopya.`
+        : "";
       const description = escapeXml(
-        `${b.cluster.article_count} kaynaktan haberler. ${(b.cluster.summary_tr ?? "").slice(0, 240)}`
+        `${honestCount} kaynaktan haberler.${wireNote} ${(b.cluster.summary_tr ?? "").slice(0, 240)}`
       );
       const pubDate = new Date(b.cluster.first_published).toUTCString();
       return `    <item>

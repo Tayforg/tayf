@@ -41,6 +41,7 @@ function blindspotDetail(): ClusterDetail {
     },
     members: [],
     allSources: [],
+    wire: { isWireRedistribution: false, effectiveArticleCount: 7, memberCount: 7 },
   };
 }
 
@@ -53,6 +54,21 @@ async function pngBytes(res: Response): Promise<Uint8Array> {
 describe("cluster opengraph-image (real Satori render)", () => {
   it("renders the blindspot ribbon card to a real PNG", async () => {
     getClusterDetail.mockResolvedValueOnce(blindspotDetail());
+    const { default: Image } = await import("./opengraph-image");
+
+    const bytes = await pngBytes(
+      await Image({ params: Promise.resolve({ id: "x" }) }),
+    );
+
+    expect(Array.from(bytes.slice(0, 8))).toEqual(PNG_SIGNATURE);
+    expect(bytes.byteLength).toBeGreaterThan(10_000);
+  });
+
+  it("renders the densest layout — blindspot ribbon + wire pill + chips — to a real PNG", async () => {
+    getClusterDetail.mockResolvedValueOnce({
+      ...blindspotDetail(),
+      wire: { isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 7 },
+    });
     const { default: Image } = await import("./opengraph-image");
 
     const bytes = await pngBytes(

@@ -1,4 +1,4 @@
-import { AlertTriangle, Clock, Users } from "lucide-react";
+import { AlertTriangle, Clock, Copy, Users } from "lucide-react";
 import Link from "next/link";
 
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
@@ -83,6 +83,10 @@ interface ClusterCardProps {
    * this once per request and pass the resulting boolean down.
    */
   isAging?: boolean;
+  /** True when the cluster is one wire dispatch reprinted by N outlets. */
+  isWireRedistribution?: boolean;
+  /** Honest source count (distinct dispatches) when `isWireRedistribution`. */
+  effectiveArticleCount?: number;
 }
 
 const MAX_VISIBLE_ARTICLES = 4;
@@ -104,6 +108,8 @@ interface ClusterMetaBadgesProps {
   isBlindspot: boolean;
   dominantZone?: MediaDnaZone | null;
   dominantPct?: number;
+  isWireRedistribution?: boolean;
+  effectiveArticleCount?: number;
 }
 
 function ClusterMetaBadges({
@@ -112,18 +118,35 @@ function ClusterMetaBadges({
   isBlindspot,
   dominantZone,
   dominantPct,
+  isWireRedistribution,
+  effectiveArticleCount,
 }: ClusterMetaBadgesProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 text-[11px]">
       <span className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground">
         <Users className="h-3 w-3" />
-        {articleCount} kaynak
+        {effectiveArticleCount ?? articleCount} kaynak
       </span>
 
       <span className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground">
         <Clock className="h-3 w-3" />
         {formatTurkishTimeAgo(firstPublished)}
       </span>
+
+      {/* wire-redistribution: violet is the only palette hue not already
+          bound to a Medya DNA zone, a bias category, or the Kör nokta
+          signal (see cluster/[id]/page.tsx and opengraph-image.tsx) — amber
+          is reserved for Kör nokta below so the two claims stay visually
+          distinct. */}
+      {isWireRedistribution && (
+        <span
+          className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-700 dark:text-violet-400 font-medium"
+          title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
+        >
+          <Copy className="h-3 w-3" />
+          Tek kaynaktan dağıtıldı · {articleCount} kopya
+        </span>
+      )}
 
       {dominantZone && dominantPct !== undefined && dominantPct >= 0.6 && (
         <span
@@ -150,6 +173,8 @@ export function ClusterCard({
   sources,
   index = PRIORITY_CARD_COUNT,
   isAging = false,
+  isWireRedistribution,
+  effectiveArticleCount,
 }: ClusterCardProps) {
   const sourceById = new Map(sources.map((s) => [s.id, s]));
 
@@ -267,6 +292,8 @@ export function ClusterCard({
                 firstPublished={cluster.first_published}
                 updatedAt={cluster.updated_at}
                 isBlindspot={false}
+                isWireRedistribution={isWireRedistribution}
+                effectiveArticleCount={effectiveArticleCount}
               />
             </div>
 

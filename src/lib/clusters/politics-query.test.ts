@@ -340,6 +340,9 @@ describe("wire-collapse detection", () => {
     const b = bundles[0];
     expect(b.isWireRedistribution).toBe(true);
     expect(b.effectiveArticleCount).toBe(2); // distinct hashes
+    // Pins the card's "N kopya" (which reads article_count, not
+    // wire.memberCount) to the actual post-dedupe member count.
+    expect(b.cluster.article_count).toBe(4);
   });
 
   it("does NOT mark a cluster with <3 members as wire", async () => {

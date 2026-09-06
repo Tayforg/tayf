@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
+import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, Source } from "@/types";
 
@@ -27,6 +28,7 @@ export interface ClusterDetailMember {
     url: string;
     published_at: string;
     image_url: string | null;
+    content_hash: string | null;
   };
 }
 
@@ -44,6 +46,7 @@ export interface ClusterDetail {
   };
   members: ClusterDetailMember[];
   allSources: Source[]; // all 144, for MediaDNA rendering
+  wire: WireSignal;
 }
 
 // Row shape of the cluster query. Matches the columns selected below.
@@ -110,6 +113,7 @@ type EmbeddedArticleRow = {
   url: string;
   published_at: string;
   image_url: string | null;
+  content_hash: string | null;
   source: EmbeddedSourceRow | null;
 };
 
@@ -145,7 +149,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         .from("cluster_articles")
         .select(
           `article:articles (
-             id, title, url, published_at, image_url,
+             id, title, url, published_at, image_url, content_hash,
              source:sources ( id, name, slug, url, rss_url, bias, logo_url, active )
            )`
         )
@@ -218,6 +222,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           url: article.url,
           published_at: article.published_at,
           image_url: article.image_url,
+          content_hash: article.content_hash,
         },
       });
     }
@@ -280,6 +285,12 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       },
       members: dedupedMembers,
       allSources: sourcesRes.data ?? [],
+      wire: wireSignalOf(
+        dedupedMembers.map((m) => ({
+          id: m.article.id,
+          content_hash: m.article.content_hash,
+        }))
+      ),
     };
   } catch (err) {
     // Rethrow — swallowing to null would cache a 404 for a real cluster.
