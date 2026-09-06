@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, startTransition } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
+import { track } from "@/lib/track";
 
 export function SearchBar() {
   const router = useRouter();
@@ -10,6 +11,8 @@ export function SearchBar() {
   const searchParams = useSearchParams();
   const inputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState(searchParams.get("q") ?? "");
+  // One "search" event per empty→non-empty transition, none on landing with ?q=.
+  const searchedRef = useRef(Boolean(searchParams.get("q")));
 
   // Global `/` shortcut focuses the input
   useEffect(() => {
@@ -26,9 +29,12 @@ export function SearchBar() {
   // Debounced URL update (300ms)
   useEffect(() => {
     const t = setTimeout(() => {
+      const q = value.trim();
+      if (q && !searchedRef.current) track("search");
+      searchedRef.current = q.length > 0;
       const params = new URLSearchParams(searchParams.toString());
-      if (value.trim()) {
-        params.set("q", value.trim());
+      if (q) {
+        params.set("q", q);
       } else {
         params.delete("q");
       }

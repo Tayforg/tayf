@@ -4,6 +4,7 @@ import { DM_Serif_Display, Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/g
 import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { KbdShortcuts } from "@/components/kbd-shortcuts";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 // Editorial serif for headlines — authoritative, warm character.
@@ -112,6 +113,8 @@ export default function RootLayout({
         <main className="flex-1">{children}</main>
         <Footer />
         <KbdShortcuts />
+        {/* Dev builds would load va.vercel-scripts.com, which the CSP script-src blocks. */}
+        {process.env.NODE_ENV === "production" ? <Analytics /> : null}
       </body>
     </html>
   );
