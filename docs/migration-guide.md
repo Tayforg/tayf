@@ -124,12 +124,12 @@ If you skip this step, the smoke curl at the end of step 2 returns the PostgREST
 
 ## 2. Deploy the Supabase Edge Functions
 
-Three Deno-runtime functions need to ship: `ingest`, `cluster-consumer`, `image-consumer`. Each handler enforces an explicit bearer check against `SUPABASE_SERVICE_ROLE_KEY` (see `supabase/functions/_shared/auth.ts`), so the deploys do NOT pass `--no-verify-jwt` — Supabase's edge gateway runs its own JWT verification on top, and pg_cron's payload (step 3) carries the service-role JWT that satisfies both layers.
+Three Deno-runtime functions need to ship: `ingest`, `cluster-consumer`, `image-consumer`. Production runs all three with `verify_jwt=false` (confirmed via the management API on 2026-09-06): the pg_cron drains send `WORKER_CRON_SECRET`, which is not a JWT, so the edge gateway must not verify JWTs — the handlers do their own constant-time bearer check in `supabase/functions/_shared/auth.ts`. Always pass `--no-verify-jwt`; the CLI defaults to `verify_jwt=true` when the flag is omitted and `config.toml` sets nothing, and a deploy without it silently turns the gateway check on and stalls every drain with 401s.
 
 ```bash
-supabase functions deploy ingest
-supabase functions deploy cluster-consumer
-supabase functions deploy image-consumer
+supabase functions deploy ingest --project-ref <ref> --no-verify-jwt
+supabase functions deploy cluster-consumer --project-ref <ref> --no-verify-jwt
+supabase functions deploy image-consumer --project-ref <ref> --no-verify-jwt
 ```
 
 If `supabase link` was skipped in step 0, append `--project-ref "$PROJECT_REF"` to each.
@@ -165,7 +165,7 @@ curl -sS -X POST -H "Authorization: Bearer $SR" \
   "https://$PROJECT_REF.functions.supabase.co/ingest"
 ```
 
-A 401 means the bearer check rejected the request — re-check that `SUPABASE_SERVICE_ROLE_KEY` in the Edge Function secrets matches the key in `$SR`. A 403 from the gateway means the JWT layer rejected it before the handler ran — confirm the deploys did NOT pass `--no-verify-jwt`.
+A 401 means the bearer check rejected the request — re-check that `SUPABASE_SERVICE_ROLE_KEY` in the Edge Function secrets matches the key in `$SR`. A 401 from the gateway itself (before the handler logs anything) means a deploy re-enabled JWT verification — redeploy with `--no-verify-jwt`.
 
 **Smoke-test that `pgmq` is reachable via PostgREST.** This confirms step 1a took effect — if the schema is not exposed, the response below is `PGRST202` and operator tooling that reads queue depth will silently fail.
 
