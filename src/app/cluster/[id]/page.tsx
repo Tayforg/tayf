@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Copy } from "lucide-react";
 
+import { BiasBadge } from "@/components/story/bias-badge";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { MediaDna } from "@/components/story/media-dna";
@@ -19,6 +20,10 @@ import {
 } from "@/lib/bias/cross-spectrum";
 import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { buildShareText } from "@/lib/clusters/share";
+import {
+  describeForMeta,
+  summaryAttribution,
+} from "@/lib/clusters/summary-attribution";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
@@ -44,12 +49,18 @@ export async function generateMetadata({
     return { title: "Sayfa bulunamadı" };
   }
 
-  const { cluster, wire } = detail;
-  // Trim summary so the description stays well under the ~160 char SERP cap
-  // even after the article-count prefix.
-  const description = `${wire.effectiveArticleCount} kaynaktan haberler. ${
-    cluster.summary_tr?.slice(0, 160) ?? ""
-  }`;
+  const { cluster, members, wire } = detail;
+  // Attributed summary (or null when blank / a bare wire copy) — see
+  // summary-attribution.ts. describeForMeta keeps the result under the
+  // ~160 char SERP cap on its own.
+  const description = describeForMeta({
+    count: wire.effectiveArticleCount,
+    attribution: summaryAttribution({
+      summary: cluster.summary_tr,
+      members,
+      wire,
+    }),
+  });
 
   return {
     // Plain title — the root layout's `title.template = "%s — Tayf"` adds
@@ -196,6 +207,14 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     },
   });
 
+  // Attributed cluster summary — see summary-attribution.ts. Null hides the
+  // summary block entirely (blank text, or a bare wire-copy nobody wrote).
+  const summary = summaryAttribution({
+    summary: cluster.summary_tr,
+    members,
+    wire,
+  });
+
   // Schema.org NewsArticle structured data. Lets Google surface the
   // cluster in news-rich results and gives social previews a clean
   // headline/date/image triple. Authors are listed as the source
@@ -207,7 +226,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     headline: cluster.title_tr,
     datePublished: cluster.first_published,
     dateModified: cluster.updated_at,
-    description: cluster.summary_tr ?? undefined,
+    description: describeForMeta({
+      count: wire.effectiveArticleCount,
+      attribution: summary,
+    }),
     image: heroSrc ? [heroSrc] : undefined,
     publisher: {
       "@type": "Organization",
@@ -361,10 +383,25 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               isBlindspot={cluster.is_blindspot}
             />
 
-            {cluster.summary_tr && (
-              <p className="text-sm sm:text-base text-muted-foreground leading-relaxed">
-                {cluster.summary_tr}
-              </p>
+            {/* Summary attribution (idea #7): clusters.summary_tr is one
+                outlet's raw RSS description, not Tayf's own words — it must
+                carry a byline. `summary` is null for a blank summary or a
+                bare wire-copy nobody actually wrote (summary-attribution.ts). */}
+            {summary && (
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
+                  <span>
+                    Özet —{" "}
+                    {summary.source ? summary.source.name : "Kaynak açıklaması"}
+                  </span>
+                  {summary.source && (
+                    <BiasBadge bias={summary.source.bias} size="sm" />
+                  )}
+                </div>
+                <p className="text-sm sm:text-base text-muted-foreground leading-relaxed">
+                  {summary.text}
+                </p>
+              </div>
             )}
 
             {/* A1-CHIPWIRE: factuality + ownership lineage per participating

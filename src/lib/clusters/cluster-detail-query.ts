@@ -34,6 +34,8 @@ export interface ClusterDetailMember {
     published_at: string;
     image_url: string | null;
     content_hash: string | null;
+    // Raw RSS description; the cluster summary is the seed article's copy of it.
+    description?: string | null;
   };
 }
 
@@ -121,6 +123,7 @@ type EmbeddedArticleRow = {
   published_at: string;
   image_url: string | null;
   content_hash: string | null;
+  description: string | null;
   source: EmbeddedSourceRow | null;
 };
 
@@ -156,7 +159,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         .from("cluster_articles")
         .select(
           `article:articles (
-             id, title, url, published_at, image_url, content_hash,
+             id, title, url, published_at, image_url, content_hash, description,
              source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind )
            )`
         )
@@ -231,6 +234,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           published_at: article.published_at,
           image_url: article.image_url,
           content_hash: article.content_hash,
+          description: article.description ?? null,
         },
       });
     }
