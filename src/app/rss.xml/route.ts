@@ -43,7 +43,7 @@ export async function GET(): Promise<Response> {
     <title>Tayf — Türkiye Haber Analizi</title>
     <link>${baseUrl}/</link>
     <atom:link href="${baseUrl}/rss.xml" rel="self" type="application/rss+xml" />
-    <description>Aynı haber, farklı dünyalar. 144 Türk kaynağından otomatik kümelenmiş haberler.</description>
+    <description>Aynı haber, farklı dünyalar. 144 Türk kaynağından otomatik kümelenmiş haberler. Başlıklar yapay zekâ ile tarafsızlaştırılmıştır (tayfhaber.com/metodoloji).</description>
     <language>tr-TR</language>
     <lastBuildDate>${now}</lastBuildDate>
 ${items}

@@ -20,6 +20,7 @@ function blindspotDetail(): ClusterDetail {
       id: "x",
       title_tr:
         "Cumhurbaşkanı Erdoğan, Şanlıurfa'daki güneş enerjisi santrali açılışında muhalefete yüklendi; İstanbul'da öğretmenler grev kararı aldı",
+      title_original: null,
       summary_tr: "Özet",
       article_count: 7,
       bias_distribution: {

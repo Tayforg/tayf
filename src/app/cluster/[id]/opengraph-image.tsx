@@ -323,8 +323,27 @@ export default async function Image({ params }: ImageProps) {
           <div
             style={{
               display: "flex",
+              justifyContent: "flex-end",
+              marginTop: 14,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                flexShrink: 0,
+                fontSize: 16,
+                fontWeight: 500,
+                color: "rgba(250,250,250,0.35)",
+              }}
+            >
+              tayfhaber.com/metodoloji
+            </div>
+          </div>
+          <div
+            style={{
+              display: "flex",
               justifyContent: "space-between",
-              marginTop: 20,
+              marginTop: 12,
               gap: 16,
             }}
           >

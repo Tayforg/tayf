@@ -36,6 +36,7 @@ export interface ClusterDetail {
   cluster: {
     id: string;
     title_tr: string;
+    title_original: string | null;
     summary_tr: string;
     article_count: number;
     bias_distribution: BiasDistribution;
@@ -273,6 +274,17 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           clusterRow.title_tr_neutral && clusterRow.title_tr_neutral.trim().length > 0
             ? clusterRow.title_tr_neutral
             : clusterRow.title_tr,
+        // Set only when the neutral rewrite actually replaced the original
+        // title, so the page can offer "Özgün başlık" disclosure — null
+        // means there's nothing to disclose (no rewrite happened, or the
+        // rewrite produced the same text as the original, which discloses
+        // nothing new).
+        title_original:
+          clusterRow.title_tr_neutral &&
+          clusterRow.title_tr_neutral.trim().length > 0 &&
+          clusterRow.title_tr_neutral.trim() !== clusterRow.title_tr.trim()
+            ? clusterRow.title_tr
+            : null,
         summary_tr: clusterRow.summary_tr,
         // The DB-stored article_count may be stale between the recluster
         // pass and this page render. Reflect the post-dedupe truth.

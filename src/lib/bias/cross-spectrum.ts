@@ -117,16 +117,10 @@ export function detectCrossSpectrum(
  */
 export function summarizeSurprises(
   result: CrossSpectrumResult,
-  clusterTitle: string,
+  _clusterTitle: string,
   max = 2,
 ): string[] {
   if (!result.dominantZone || result.surpriseOutlets.length === 0) return [];
-
-  const dominantLabel = {
-    iktidar: "iktidara yakın",
-    muhalefet: "muhalefet yanlısı",
-    bagimsiz: "bağımsız",
-  }[result.dominantZone];
 
   const oppositeShort = {
     iktidar: "iktidar",
@@ -135,6 +129,20 @@ export function summarizeSurprises(
   }[result.dominantZone === "iktidar" ? "muhalefet" : "iktidar"];
 
   return result.surpriseOutlets.slice(0, max).map((s) => {
-    return `⚡ ${s.name} (${oppositeShort}) bu ${dominantLabel} habere yer verdi: "${clusterTitle}"`;
+    return `${s.name} (${oppositeShort}) ${deDa(s.name)} bu habere yer verdi`;
   });
+}
+
+// Turkish "de/da" clitic vowel harmony: the clitic agrees with the last
+// vowel of the word it attaches to (the outlet name here) — back vowels
+// (a, ı, o, u) take "da", front vowels (e, i, ö, ü) take "de": Sabah, Star,
+// Akşam, Posta take "da"; Habertürk, Cumhuriyet, BirGün take "de".
+// Hardcoding "de" reads as a typo to any Turkish reader. Names ending in
+// "TV" are read "te-ve", so they take "de" regardless of the spelling;
+// other acronym-style names with no vowel match default to "de".
+const BACK_VOWEL = /[aıou][^aeıioöuü]*$/i;
+const READ_AS_TE_VE = /tv$/i;
+function deDa(name: string): "da" | "de" {
+  if (READ_AS_TE_VE.test(name)) return "de";
+  return BACK_VOWEL.test(name) ? "da" : "de";
 }

@@ -146,6 +146,28 @@ Newsletter email signup.
 
 ---
 
+### `POST /api/corrections`
+
+Reader-submitted correction or objection, from the `/metodoloji#duzeltme` form.
+
+**Rate limit**: 5-token bucket, 5/hour refill.
+
+**Body**: `{ "url": "https://...", "message": "...", "email"?: "...", "clusterId"?: "uuid", "website"?: "" }`
+
+- `url`: absolute `http(s)` URL, ≤ 512 chars.
+- `message`: 10–2000 chars.
+- `email`: optional, ≤ 254 chars, simple regex.
+- `clusterId`: optional uuid.
+- `website`: honeypot — non-empty returns `200 {ok:true}` without inserting.
+
+**Response** `201`: `{ "ok": true }`
+**Response** `400`: validation failure.
+**Response** `429`: rate limit exhausted.
+
+Rows are inserted into `public.corrections` (service-role only, no PostgREST access for anon/authenticated) and reviewed in `/admin`.
+
+---
+
 ### `GET /rss.xml`
 
 RSS 2.0 feed of the top 30 politics clusters. Cached 5 minutes.

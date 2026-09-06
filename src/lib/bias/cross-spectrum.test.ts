@@ -183,13 +183,11 @@ describe("summarizeSurprises", () => {
     const result = detectCrossSpectrum(sources);
     const lines = summarizeSurprises(result, "Sample story", 2);
     expect(lines.length).toBeGreaterThan(0);
-    // post-A6 template:
-    //   "⚡ Name (muhalefet) bu iktidara yakın habere yer verdi: "title""
+    // post-disclosure template: "Name (muhalefet) de bu habere yer verdi"
     expect(lines[0]).toMatch(/Sözcü/);
     expect(lines[0]).toMatch(/\(muhalefet\)/);
-    expect(lines[0]).toMatch(/iktidara yakın/);
-    expect(lines[0]).toMatch(/habere yer verdi/);
-    expect(lines[0]).toMatch(/Sample story/);
+    expect(lines[0]).toMatch(/de bu habere yer verdi/);
+    expect(lines[0]).not.toMatch(/⚡/);
   });
 
   it("renders the inverse template for muhalefet-dominant clusters", () => {
@@ -205,8 +203,20 @@ describe("summarizeSurprises", () => {
     expect(lines.length).toBeGreaterThan(0);
     expect(lines[0]).toMatch(/Sabah/);
     expect(lines[0]).toMatch(/\(iktidar\)/);
-    expect(lines[0]).toMatch(/muhalefet yanlısı/);
-    expect(lines[0]).toMatch(/Karşı manşet/);
+    // Sabah takes the back-vowel clitic "da", not "de" (vowel harmony).
+    expect(lines[0]).toMatch(/da bu habere yer verdi/);
+  });
+
+  it("reads a trailing TV as te-ve and picks the front-vowel clitic", () => {
+    const sources = [
+      mkSource("s1", "Sabah", "pro_government"),
+      mkSource("s2", "Star", "pro_government"),
+      mkSource("s3", "Akşam", "gov_leaning"),
+      mkSource("s4", "Yeni Şafak", "pro_government"),
+      mkSource("s5", "Halk TV", "opposition_leaning"),
+    ];
+    const lines = summarizeSurprises(detectCrossSpectrum(sources), "x", 2);
+    expect(lines[0]).toMatch(/^Halk TV \(muhalefet\) de bu habere yer verdi/);
   });
 
   it("returns [] when there are no surprises or no dominant", () => {
