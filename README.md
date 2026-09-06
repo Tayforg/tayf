@@ -129,6 +129,7 @@ Migration files in `supabase/migrations/`:
 - `030_newsletter_rls.sql` — RLS policies for the newsletter tables
 - `031_zone_based_blindspot_backfill.sql` — superseded by 032; the interim single-zone-only blindspot rule (>= 5 sources AND exactly one Medya DNA zone has any coverage)
 - `032_blindspot_contract_recompute.sql` — `recompute_blindspot_flags()`, the re-runnable backfill for the one-bias-zone contract (>= 5 sources AND dominant zone share >= 0.8) in `supabase/functions/_shared/cluster/blindspot.ts`
+- `033_corrections.sql` — `corrections` table backing `POST /api/corrections` (RLS enabled, no anon/authenticated access)
 
 ## Key files
 

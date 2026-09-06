@@ -54,6 +54,7 @@ function mkDetail(
     cluster: {
       id: "x",
       title_tr: "Test kümesi başlığı",
+      title_original: null,
       summary_tr: "Özet",
       article_count,
       bias_distribution: {
@@ -242,6 +243,16 @@ describe("cluster opengraph-image", () => {
     const text = collectText(captured).join("");
     expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
     expect(text).toContain("7 kopya · tek kaynak");
+  });
+
+  it("shows the muted methodology link in the bottom-right", async () => {
+    getClusterDetail.mockResolvedValueOnce(mkDetail({}));
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: "x" }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("tayfhaber.com/metodoloji");
   });
 
   it("falls back to a 200 PNG when the cluster no longer exists", async () => {

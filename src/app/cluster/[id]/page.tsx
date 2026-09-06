@@ -241,6 +241,22 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               <h1 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-[1.05] text-foreground">
                 {cluster.title_tr}
               </h1>
+              {cluster.title_original && (
+                <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                  <Link
+                    href="/metodoloji#basliklar"
+                    className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                  >
+                    AI ile tarafsızlaştırıldı
+                  </Link>
+                  <details className="inline">
+                    <summary className="inline cursor-pointer list-none underline decoration-dotted underline-offset-2 hover:text-foreground">
+                      Özgün başlık
+                    </summary>
+                    <span className="block mt-1">{cluster.title_original}</span>
+                  </details>
+                </div>
+              )}
               <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
                 <span>{formatTurkishTimeAgo(cluster.updated_at)}</span>
                 <span className="text-muted-foreground/60">•</span>
@@ -264,6 +280,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   text={shareText}
                 />
                 <BookmarkButton clusterId={id} />
+                <Link
+                  href={`/metodoloji?cluster=${id}#duzeltme`}
+                  className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+                >
+                  Düzeltme talebi
+                </Link>
               </div>
             </div>
 

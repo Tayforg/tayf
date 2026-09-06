@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { requireAdminSession } from "@/lib/admin/session";
 import { AdminPanel } from "@/components/admin/admin-panel";
+import { CorrectionsList } from "@/components/admin/corrections-list";
 
 export const metadata: Metadata = {
   title: "Admin Panel",
@@ -15,5 +16,12 @@ export default async function AdminPage() {
   // the API route.
   await requireAdminSession();
 
-  return <AdminPanel />;
+  return (
+    <>
+      <AdminPanel />
+      <div className="mx-auto w-full max-w-5xl px-4 pb-10">
+        <CorrectionsList />
+      </div>
+    </>
+  );
 }

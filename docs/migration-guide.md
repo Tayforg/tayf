@@ -616,6 +616,12 @@ select public.recompute_blindspot_flags();
 
 ---
 
+## After merging: apply 033
+
+`033_corrections.sql` adds the `corrections` table backing `POST /api/corrections` (the `/metodoloji#duzeltme` form). Apply it after this merge lands: `supabase db push` or `psql "$DATABASE_URL" -f supabase/migrations/033_corrections.sql`. No function redeploy needed — the route reads/writes via `createServerClient()` directly.
+
+---
+
 ## Owner sign-off checklist
 
 Before declaring the migration complete:

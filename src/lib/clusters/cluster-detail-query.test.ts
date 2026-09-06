@@ -283,6 +283,7 @@ describe("getClusterDetail row shaping", () => {
     };
     let result = await getClusterDetail("cluster-1");
     expect(result!.cluster.title_tr).toBe("neutral version");
+    expect(result!.cluster.title_original).toBe("orig");
 
     // 2. neutral present but whitespace-only → falls back
     callLog = [];
@@ -294,6 +295,7 @@ describe("getClusterDetail row shaping", () => {
     };
     result = await getClusterDetail("cluster-1");
     expect(result!.cluster.title_tr).toBe("orig");
+    expect(result!.cluster.title_original).toBeNull();
 
     // 3. neutral null → falls back
     callLog = [];
@@ -305,6 +307,20 @@ describe("getClusterDetail row shaping", () => {
     };
     result = await getClusterDetail("cluster-1");
     expect(result!.cluster.title_tr).toBe("orig");
+    expect(result!.cluster.title_original).toBeNull();
+
+    // 4. neutral equals title_tr → nothing was actually replaced, so
+    // there's nothing to disclose.
+    callLog = [];
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({ title_tr: "Aynı", title_tr_neutral: "Aynı" }),
+        error: null,
+      },
+    };
+    result = await getClusterDetail("cluster-1");
+    expect(result!.cluster.title_tr).toBe("Aynı");
+    expect(result!.cluster.title_original).toBeNull();
   });
 
   it("normalizes malformed bias_distribution blobs to the empty shape", async () => {

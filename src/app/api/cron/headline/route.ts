@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { buildHeadlinePrompt, HEADLINE_MIN_ARTICLE_COUNT } from "@/lib/headline/prompt";
 
 // Boot-time guard. The route is FAIL-CLOSED on a missing `CRON_SECRET` (503
 // on every invocation), but in production that failure is otherwise only
@@ -64,7 +65,9 @@ const LLM_BATCH = 5;
 // after dedupe / nulls.
 const MEMBER_TITLES_CAP = 16;
 
-const MIN_ARTICLE_COUNT = 3;
+// Re-exported from src/lib/headline/prompt.ts so /metodoloji can state the
+// threshold without hardcoding a literal that could drift from this gate.
+const MIN_ARTICLE_COUNT = HEADLINE_MIN_ARTICLE_COUNT;
 
 // Vendor URL + model id default to the current upstream provider, but operators
 // can swap providers without a code change by setting LLM_API_URL / LLM_MODEL
@@ -103,26 +106,7 @@ async function rewriteClusterHeadline(input: {
     throw new Error("LLM API key not set");
   }
 
-  const memberTitles = input.member_titles
-    .slice(0, 8)
-    .map((t, i) => `${i + 1}. ${t}`)
-    .join("\n");
-
-  const prompt = `Aşağıda 8 farklı Türk haber kaynağının aynı haber için yazdığı başlıklar var. Bu haberleri toplu bir tarafsız başlığa indirgemen gerekiyor.
-
-KURALLAR:
-- En fazla 80 karakter
-- Tarafsız, olgusal, sıfat içermeyen
-- Hiçbir kaynağın tonunu kopyalama
-- Açık şekilde olayı anlat
-- "Şok!", "Son dakika!", "Kahreden..." gibi clickbait yasak
-- Türkçe olmalı
-- Sadece başlığı yaz, başka açıklama yok
-
-KAYNAK BAŞLIKLARI:
-${memberTitles}
-
-TARAFSIZ TOPLU BAŞLIK:`;
+  const prompt = buildHeadlinePrompt(input.member_titles);
 
   const res = await fetch(LLM_API_URL, {
     method: "POST",

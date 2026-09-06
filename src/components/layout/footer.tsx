@@ -6,6 +6,8 @@ const NAV_LINKS = [
   { href: "/sources", label: "Kaynaklar" },
   { href: "/timeline", label: "Zaman Akışı" },
   { href: "/trends", label: "Trendler" },
+  { href: "/metodoloji", label: "Metodoloji" },
+  { href: "/metodoloji#duzeltme", label: "İletişim" },
 ] as const;
 
 export function Footer() {
