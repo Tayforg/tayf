@@ -157,7 +157,12 @@ export interface PoliticsClustersResult {
 // object, which in turn has a nested `sources` object. PostgREST uses
 // the declared FK relationships (cluster_articles → articles,
 // articles → sources) to build the join automatically.
-type EmbeddedSource = {
+//
+// Exported (with the row/select/builder trio below) so search-query.ts
+// can query the same embedded shape and reuse the identical row → bundle
+// assembly — full-text search results render through the same ClusterCard
+// shape as the politics feed.
+export type EmbeddedSource = {
   id: string;
   name: string;
   bias: BiasCategory;
@@ -165,7 +170,7 @@ type EmbeddedSource = {
   kind: SourceKind | null;
 };
 
-type EmbeddedArticle = {
+export type EmbeddedArticle = {
   id: string;
   title: string;
   url: string;
@@ -186,11 +191,11 @@ type EmbeddedArticle = {
   sources: EmbeddedSource | null;
 };
 
-type EmbeddedClusterArticle = {
+export type EmbeddedClusterArticle = {
   articles: EmbeddedArticle | null;
 };
 
-type EmbeddedClusterRow = {
+export type EmbeddedClusterRow = {
   id: string;
   title_tr: string;
   /**
@@ -211,6 +216,18 @@ type EmbeddedClusterRow = {
   cluster_articles: EmbeddedClusterArticle[] | null;
 };
 
+// Embedded PostgREST select string: cluster → cluster_articles → articles
+// → sources. Exported so search-query.ts's full-text query walks the exact
+// same join shape (and therefore can feed its rows through
+// `buildClusterBundle` below unchanged).
+export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, article_count, first_published, updated_at,
+         cluster_articles (
+           articles (
+             id, title, url, image_url, published_at, source_id, category, content_hash,
+             sources ( id, name, bias, logo_url, kind )
+           )
+         )`;
+
 // Internal (uncached) implementation. The exported `getPoliticsClusters`
 // wraps this with `unstable_cache` below.
 async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
@@ -223,15 +240,7 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
     // four sequential queries.
     const { data, error } = await supabase
       .from("clusters")
-      .select(
-        `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, article_count, first_published, updated_at,
-         cluster_articles (
-           articles (
-             id, title, url, image_url, published_at, source_id, category, content_hash,
-             sources ( id, name, bias, logo_url, kind )
-           )
-         )`
-      )
+      .select(CLUSTER_EMBED_SELECT)
       .gte("article_count", 2)
       .order("updated_at", { ascending: false })
       .limit(CANDIDATE_LIMIT)
@@ -258,150 +267,19 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
     for (const c of clusterRows) {
       // Flatten nested cluster_articles → articles into a plain member
       // list, dropping any null joins (should not happen but defensive).
-      const members: EmbeddedArticle[] = [];
-      for (const ca of c.cluster_articles ?? []) {
-        if (ca.articles) members.push(ca.articles);
-      }
+      const members = flattenClusterMembers(c);
       if (members.length === 0) continue;
 
       // Politics majority filter — must match the old behaviour exactly
-      // (≥60% politika/son_dakika members).
+      // (≥60% politika/son_dakika members). Runs on the RAW (pre-dedupe)
+      // member list, same as before extracting buildClusterBundle below —
+      // search-query.ts has no equivalent gate, it searches all clusters.
       const hits = members.filter((m) =>
         POLITICS_CATEGORIES.includes(m.category)
       ).length;
       if (hits / members.length < POLITICS_THRESHOLD) continue;
 
-      // Sort by published_at ASC FIRST so the dedupe pass below
-      // deterministically keeps the EARLIEST article per source.
-      const sortedMembers = [...members].sort(
-        (a, b) =>
-          new Date(a.published_at).getTime() -
-          new Date(b.published_at).getTime()
-      );
-
-      // Server-side dedupe (defense in depth):
-      // If the cluster has multiple articles from the same source, keep
-      // the earliest one. R2's audit found 1.87% of clusters have this —
-      // the proper DB fix is D6, this is a guard so the UI never sees
-      // the same (cluster_id, source_id) pair twice. Dedupe BEFORE the
-      // ~4-card slice in ClusterCard so e.g. "Akşam" never shows twice.
-      const seenSources = new Set<string>();
-      const dedupedMembers: EmbeddedArticle[] = [];
-      for (const m of sortedMembers) {
-        const sourceId = m.sources?.id ?? m.source_id;
-        if (seenSources.has(sourceId)) continue;
-        seenSources.add(sourceId);
-        dedupedMembers.push(m);
-      }
-      const droppedDupes = sortedMembers.length - dedupedMembers.length;
-      if (droppedDupes > 0) {
-        console.log(
-          `[politics-query] dropped ${droppedDupes} duplicate source(s) for cluster ${c.id}`
-        );
-      }
-
-      // Re-sort newest-first for display, matching the previous order-by.
-      dedupedMembers.sort(
-        (a, b) =>
-          new Date(b.published_at).getTime() -
-          new Date(a.published_at).getTime()
-      );
-
-      // R2 wire-redistribution detection. Run on the post-source-dedupe
-      // member list (so we collapse "1 wire copy across 5 outlets", not
-      // "1 outlet that double-published the same wire"). The result is
-      // attached to the bundle below and consumed by R1's scoreCluster
-      // via `effectiveArticleCount` so a wire-only cluster competes
-      // against the candidate pool with its honest 1-source footprint.
-      const wire = detectWireRedistribution(dedupedMembers);
-      if (wire.isWire) {
-        console.log(
-          `[politics-query] wire-collapse: cluster ${c.id} ` +
-            `(${dedupedMembers.length} members → ${wire.uniqueHashes} unique hashes)`
-        );
-      }
-
-      // R3 source-fairness cap. A8 found haberler-com produces 20.5%
-      // of all 24h articles and dominates 16 of 30 home clusters; the
-      // mission worked example is "5 haberler + 1 BBC + 1 BirGün should
-      // rank like a 3-source cluster, not a 7-source one." That example
-      // is BEFORE R2's same-source dedupe (which collapses the 5 haberler
-      // copies down to 1) — so we run the cap on the PRE-DEDUPE member
-      // list, which preserves the lopsided source distribution the cap
-      // is supposed to neutralise. Cap each source at ceil(total * 0.1)
-      // (floored to 1, so a 3-article cluster still permits 1 per
-      // source) and surface the corrected count via
-      // `effectiveSourceCount`. R1's scoreCluster reads it alongside
-      // R2's `effectiveArticleCount` and uses min(R3, R2) so we apply
-      // the more aggressive of the two normalisations without
-      // double-discounting.
-      const fairness = applySourceFairnessCap(
-        sortedMembers.map((m) => ({
-          source: { id: m.sources?.id ?? m.source_id },
-        }))
-      );
-
-      // Collect per-cluster sources (deduped) from the embedded join so
-      // ClusterCard can resolve source_name/bias without another query.
-      const sourceMap = new Map<string, ClusterCardSource>();
-      for (const m of dedupedMembers) {
-        if (m.sources && !sourceMap.has(m.sources.id)) {
-          sourceMap.set(m.sources.id, {
-            id: m.sources.id,
-            name: m.sources.name,
-            bias: m.sources.bias,
-            logo_url: m.sources.logo_url,
-          });
-        }
-      }
-
-      const bundle: ClusterBundle = {
-        cluster: {
-          id: c.id,
-          // H2 neutral-headline coalesce: prefer the LLM-rewritten neutral
-          // title once H2-WORKER has produced it. Falls back to the original
-          // seed-inherited title for clusters that haven't been rewritten yet.
-          // Empty strings are coalesced too — an empty neutral title would
-          // mean the rewriter wrote junk and we'd rather show the original.
-          title_tr:
-            c.title_tr_neutral && c.title_tr_neutral.trim().length > 0
-              ? c.title_tr_neutral
-              : c.title_tr,
-          summary_tr: c.summary_tr,
-          bias_distribution: normalizeDistribution(c.bias_distribution),
-          is_blindspot: c.is_blindspot,
-          blindspot_side: c.blindspot_side,
-          // The DB-stored article_count may be stale between the recluster
-          // pass and this render. Reflect the post-dedupe truth so the
-          // "N kaynak" label matches the rendered list.
-          article_count: dedupedMembers.length,
-          first_published: c.first_published,
-          updated_at: c.updated_at,
-        },
-        articles: dedupedMembers.map((m) => ({
-          id: m.id,
-          title: m.title,
-          url: m.url,
-          image_url: m.image_url,
-          published_at: m.published_at,
-          source_id: m.source_id,
-        })),
-        sources: Array.from(sourceMap.values()),
-        // R2 wire-collapse fields. effectiveArticleCount is the count
-        // R1's scoreCluster reads — equal to the deduped member count
-        // for normal clusters, dropped to the unique-hash count for
-        // wire redistributions.
-        isWireRedistribution: wire.isWire,
-        effectiveArticleCount: wire.isWire
-          ? wire.uniqueHashes
-          : dedupedMembers.length,
-        // R3 source-fairness fields. effectiveSourceCount is the
-        // post-cap article count (each source contributes at most
-        // ceil(total * 0.1) articles). cappedSources is the list of
-        // source ids that exceeded the threshold and were trimmed.
-        effectiveSourceCount: fairness.effectiveCount,
-        cappedSources: fairness.cappedSources,
-      };
+      const { bundle, dedupedMembers } = buildClusterBundle(c, members);
 
       // Stash the deduped members on the bundle so the scorer below can
       // reach published_at + sources.bias without re-flattening. We use a
@@ -488,6 +366,175 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
     console.warn("[clusters] unexpected error:", err);
     throw err;
   }
+}
+
+// Flattens one embedded cluster row's nested cluster_articles → articles
+// into a plain member list, dropping any null joins (should not happen
+// but defensive). Exported so search-query.ts's rows can feed the same
+// path into buildClusterBundle below.
+export function flattenClusterMembers(
+  c: EmbeddedClusterRow
+): EmbeddedArticle[] {
+  const members: EmbeddedArticle[] = [];
+  for (const ca of c.cluster_articles ?? []) {
+    if (ca.articles) members.push(ca.articles);
+  }
+  return members;
+}
+
+export interface ClusterBundleBuildResult {
+  bundle: ClusterBundle;
+  /** Post-dedupe, newest-first member list (used for R1/R4 scoring here). */
+  dedupedMembers: EmbeddedArticle[];
+}
+
+/**
+ * Turns one embedded cluster row + its (already flattened) member list
+ * into a ClusterBundle: same-source dedupe (earliest article per source
+ * wins), R2 wire-redistribution detection, R3 source-fairness cap, and
+ * the ClusterCard-shaped cluster/articles/sources fields.
+ *
+ * Extracted verbatim from fetchPoliticsClusters's per-row loop (no
+ * behaviour change) so search-query.ts can reuse it — full-text search
+ * results render through the identical ClusterCard shape. Callers own any
+ * pre-filtering (e.g. this file's politics-majority gate below); this
+ * function assumes `members` is already the candidate set for the row.
+ */
+export function buildClusterBundle(
+  c: EmbeddedClusterRow,
+  members: EmbeddedArticle[]
+): ClusterBundleBuildResult {
+  // Sort by published_at ASC FIRST so the dedupe pass below
+  // deterministically keeps the EARLIEST article per source.
+  const sortedMembers = [...members].sort(
+    (a, b) =>
+      new Date(a.published_at).getTime() - new Date(b.published_at).getTime()
+  );
+
+  // Server-side dedupe (defense in depth):
+  // If the cluster has multiple articles from the same source, keep
+  // the earliest one. R2's audit found 1.87% of clusters have this —
+  // the proper DB fix is D6, this is a guard so the UI never sees
+  // the same (cluster_id, source_id) pair twice. Dedupe BEFORE the
+  // ~4-card slice in ClusterCard so e.g. "Akşam" never shows twice.
+  const seenSources = new Set<string>();
+  const dedupedMembers: EmbeddedArticle[] = [];
+  for (const m of sortedMembers) {
+    const sourceId = m.sources?.id ?? m.source_id;
+    if (seenSources.has(sourceId)) continue;
+    seenSources.add(sourceId);
+    dedupedMembers.push(m);
+  }
+  const droppedDupes = sortedMembers.length - dedupedMembers.length;
+  if (droppedDupes > 0) {
+    console.log(
+      `[politics-query] dropped ${droppedDupes} duplicate source(s) for cluster ${c.id}`
+    );
+  }
+
+  // Re-sort newest-first for display, matching the previous order-by.
+  dedupedMembers.sort(
+    (a, b) =>
+      new Date(b.published_at).getTime() - new Date(a.published_at).getTime()
+  );
+
+  // R2 wire-redistribution detection. Run on the post-source-dedupe
+  // member list (so we collapse "1 wire copy across 5 outlets", not
+  // "1 outlet that double-published the same wire"). The result is
+  // attached to the bundle below and consumed by R1's scoreCluster
+  // via `effectiveArticleCount` so a wire-only cluster competes
+  // against the candidate pool with its honest 1-source footprint.
+  const wire = detectWireRedistribution(dedupedMembers);
+  if (wire.isWire) {
+    console.log(
+      `[politics-query] wire-collapse: cluster ${c.id} ` +
+        `(${dedupedMembers.length} members → ${wire.uniqueHashes} unique hashes)`
+    );
+  }
+
+  // R3 source-fairness cap. A8 found haberler-com produces 20.5%
+  // of all 24h articles and dominates 16 of 30 home clusters; the
+  // mission worked example is "5 haberler + 1 BBC + 1 BirGün should
+  // rank like a 3-source cluster, not a 7-source one." That example
+  // is BEFORE R2's same-source dedupe (which collapses the 5 haberler
+  // copies down to 1) — so we run the cap on the PRE-DEDUPE member
+  // list, which preserves the lopsided source distribution the cap
+  // is supposed to neutralise. Cap each source at ceil(total * 0.1)
+  // (floored to 1, so a 3-article cluster still permits 1 per
+  // source) and surface the corrected count via
+  // `effectiveSourceCount`. R1's scoreCluster reads it alongside
+  // R2's `effectiveArticleCount` and uses min(R3, R2) so we apply
+  // the more aggressive of the two normalisations without
+  // double-discounting.
+  const fairness = applySourceFairnessCap(
+    sortedMembers.map((m) => ({
+      source: { id: m.sources?.id ?? m.source_id },
+    }))
+  );
+
+  // Collect per-cluster sources (deduped) from the embedded join so
+  // ClusterCard can resolve source_name/bias without another query.
+  const sourceMap = new Map<string, ClusterCardSource>();
+  for (const m of dedupedMembers) {
+    if (m.sources && !sourceMap.has(m.sources.id)) {
+      sourceMap.set(m.sources.id, {
+        id: m.sources.id,
+        name: m.sources.name,
+        bias: m.sources.bias,
+        logo_url: m.sources.logo_url,
+      });
+    }
+  }
+
+  const bundle: ClusterBundle = {
+    cluster: {
+      id: c.id,
+      // H2 neutral-headline coalesce: prefer the LLM-rewritten neutral
+      // title once H2-WORKER has produced it. Falls back to the original
+      // seed-inherited title for clusters that haven't been rewritten yet.
+      // Empty strings are coalesced too — an empty neutral title would
+      // mean the rewriter wrote junk and we'd rather show the original.
+      title_tr:
+        c.title_tr_neutral && c.title_tr_neutral.trim().length > 0
+          ? c.title_tr_neutral
+          : c.title_tr,
+      summary_tr: c.summary_tr,
+      bias_distribution: normalizeDistribution(c.bias_distribution),
+      is_blindspot: c.is_blindspot,
+      blindspot_side: c.blindspot_side,
+      // The DB-stored article_count may be stale between the recluster
+      // pass and this render. Reflect the post-dedupe truth so the
+      // "N kaynak" label matches the rendered list.
+      article_count: dedupedMembers.length,
+      first_published: c.first_published,
+      updated_at: c.updated_at,
+    },
+    articles: dedupedMembers.map((m) => ({
+      id: m.id,
+      title: m.title,
+      url: m.url,
+      image_url: m.image_url,
+      published_at: m.published_at,
+      source_id: m.source_id,
+    })),
+    sources: Array.from(sourceMap.values()),
+    // R2 wire-collapse fields. effectiveArticleCount is the count
+    // R1's scoreCluster reads — equal to the deduped member count
+    // for normal clusters, dropped to the unique-hash count for
+    // wire redistributions.
+    isWireRedistribution: wire.isWire,
+    effectiveArticleCount: wire.isWire
+      ? wire.uniqueHashes
+      : dedupedMembers.length,
+    // R3 source-fairness fields. effectiveSourceCount is the
+    // post-cap article count (each source contributes at most
+    // ceil(total * 0.1) articles). cappedSources is the list of
+    // source ids that exceeded the threshold and were trimmed.
+    effectiveSourceCount: fairness.effectiveCount,
+    cappedSources: fairness.cappedSources,
+  };
+
+  return { bundle, dedupedMembers };
 }
 
 function normalizeDistribution(raw: unknown): BiasDistribution {
