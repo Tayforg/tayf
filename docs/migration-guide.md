@@ -632,6 +632,83 @@ select public.recompute_blindspot_flags();
 
 ---
 
+## Weekly digest newsletter (040): apply migration, set env vars, redeploy
+
+Double-opt-in newsletter signup plus a Saturday-morning digest cron. Three new routes (`POST /api/newsletter`, `GET /api/newsletter/confirm`, `GET /api/newsletter/unsubscribe`), one new cron (`GET /api/cron/digest`, see `vercel.ts`), and one migration (`040_newsletter_tokens.sql`). No function redeploy needed — every route reads/writes via `createServerClient()` directly, same as `033_corrections.sql`.
+
+**1. Apply the migration:**
+
+```bash
+supabase db push
+# ...or the one-at-a-time psql pattern from step 1 above:
+psql "$DATABASE_URL" -f supabase/migrations/040_newsletter_tokens.sql
+```
+
+`040` adds `confirm_token`, `unsubscribe_token`, `confirmed_at`, and `last_sent_at` to `newsletter_subscribers`, backfills tokens for any pre-existing rows with `gen_random_uuid()::text`, and installs a trigger that keeps the legacy `confirmed` boolean in lockstep with `confirmed_at` (`confirmed_at is not null <=> confirmed`) regardless of which column a future write path sets. RLS from `030_newsletter_rls.sql` already denies anon/authenticated on this table — the new columns inherit that; only `service_role` touches them.
+
+**Verification:**
+
+```sql
+select confirm_token, unsubscribe_token, confirmed, confirmed_at
+  from newsletter_subscribers limit 5;
+-- Expect: both tokens non-null on every row (including pre-existing ones),
+-- and confirmed = (confirmed_at is not null) for each row.
+```
+
+**2. Set the new Vercel env vars:**
+
+```bash
+# Required for outbound mail (confirm links + the weekly digest). Without
+# it, sendEmail() no-ops with { skipped: true } and warns once — signups
+# and digests still "succeed" but nothing is actually mailed.
+vercel env add RESEND_API_KEY production
+
+# Optional — defaults to "Tayf <bulten@tayfhaber.com>" if unset.
+vercel env add NEWSLETTER_FROM production
+
+# Usually already set from earlier in this guide (it resolves og:image /
+# canonical links too). The confirm/unsubscribe/digest emails build their
+# links from this — set it to the real production origin, not localhost.
+vercel env add NEXT_PUBLIC_SITE_URL production
+```
+
+| Env var               | Default (if unset)                    | Notes                                                                                  |
+| ---------------------- | -------------------------------------- | --------------------------------------------------------------------------------------- |
+| `RESEND_API_KEY`       | *(none — sending is skipped)*          | `src/lib/email/resend.ts` calls `https://api.resend.com/emails`. Missing key = soft no-op, never a thrown error. |
+| `NEWSLETTER_FROM`      | `Tayf <bulten@tayfhaber.com>`          | Must be a domain verified in the Resend dashboard, or sends will bounce even with a valid key. |
+| `NEXT_PUBLIC_SITE_URL` | `https://<VERCEL_PROJECT_PRODUCTION_URL>` or `http://localhost:3000` | Shared with `metadataBase` (see `src/lib/site-url.ts`); confirm/unsubscribe/digest links are built from it. |
+
+**3. Redeploy** so the env vars and the new `/api/cron/digest` cron entry attach:
+
+```bash
+vercel --prod
+```
+
+After this deploy, Vercel's Cron Jobs page should list `/api/cron/headline` (every 5 minutes) **and** `/api/cron/digest` (`0 6 * * 6` — Saturday 06:00 UTC / 09:00 TRT).
+
+**Verification** — same `$CRON_SECRET` from the headline-cron section above gates this route too:
+
+```bash
+# Should return 401 (no auth header).
+curl -sS -o /dev/null -w "%{http_code}\n" "https://<your-tayf-domain>/api/cron/digest"
+
+# Should return 200 with { sent, skipped }.
+curl -sS -H "Authorization: Bearer $CRON_SECRET" "https://<your-tayf-domain>/api/cron/digest"
+```
+
+Manually exercise the signup flow once against production before calling this done:
+
+```bash
+curl -sS -X POST -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com"}' \
+  "https://<your-tayf-domain>/api/newsletter"
+# Expect: {"success":true} and a "Tayf bültenine kaydını onayla" email in
+# your inbox within a few seconds (skip this check if RESEND_API_KEY is
+# intentionally unset in this environment).
+```
+
+Click the confirm link in that email and confirm it redirects to `/?bulten=onaylandi` (not `/?bulten=gecersiz` — a mismatch there usually means `NEXT_PUBLIC_SITE_URL` doesn't match the domain you're testing against, so the link points at the wrong host).
+
 ## Retention (037)
 
 `037_retention.sql` adds `clusters.is_archived` (boolean, default `false`) and a partial index (`clusters_active_updated_idx` on `updated_at desc where is_archived = false`) alongside it, plus two functions:
@@ -677,3 +754,7 @@ Before declaring the migration complete:
 - [ ] At least one image backfilled in the last 15 minutes (`select count(*) from articles where image_url is not null and updated_at > now() - interval '15 minutes'`)
 - [ ] Migration 034 applied, `cluster-consumer` redeployed, and both `select public.recompute_bias_distribution(now() - interval '48 hours');` / `select public.recompute_blindspot_flags();` return 0 on a second call
 - [ ] `select kind, count(*) from sources group by kind order by kind;` shows non-zero `aggregator`, `wire`, and `niche` counts alongside `outlet`
+- [ ] Migration 040 applied — every `newsletter_subscribers` row has both `confirm_token` and `unsubscribe_token` set
+- [ ] `RESEND_API_KEY`, `NEWSLETTER_FROM` (if overriding the default), and `NEXT_PUBLIC_SITE_URL` set on Vercel production
+- [ ] `vercel --prod` deploy landed with `/api/cron/digest` (`0 6 * * 6`) alongside `/api/cron/headline` in the Cron Jobs dashboard
+- [ ] A manual `POST /api/newsletter` test delivered a confirm email whose link redirects to `/?bulten=onaylandi` on click

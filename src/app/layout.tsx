@@ -5,6 +5,7 @@ import { Header } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { KbdShortcuts } from "@/components/kbd-shortcuts";
 import { Analytics } from "@vercel/analytics/next";
+import { siteUrl } from "@/lib/site-url";
 import "./globals.css";
 
 // Editorial serif for headlines — authoritative, warm character.
@@ -32,12 +33,8 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ??
-      (process.env.VERCEL_PROJECT_PRODUCTION_URL
-        ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
-        : "http://localhost:3000"),
-  ),
+  // Same origin the newsletter/digest links are built from (src/lib/site-url.ts).
+  metadataBase: new URL(siteUrl()),
   title: {
     default: "Tayf — Türkiye Haber Analizi",
     template: "%s — Tayf",
