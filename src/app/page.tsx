@@ -9,6 +9,7 @@ import {
   getPoliticsClusters,
   type ClusterBundle,
 } from "@/lib/clusters/politics-query";
+import { searchClusters } from "@/lib/clusters/search-query";
 
 // Home route — this IS the news view.
 // Previously a separate "Haberler" article feed lived here, but the user
@@ -124,6 +125,17 @@ export default async function HomePage({
   const filteredBreaking = breakingBundles.filter(matchesNeedle);
   const filtered = bundles.filter(matchesNeedle);
 
+  // Full-text fallback: the in-memory title filter above only sees the
+  // already-fetched top clusters (CANDIDATE_LIMIT in politics-query), so
+  // a query matching an older/lower-ranked story finds nothing there.
+  // When that happens, fall back to a full-text search across ALL
+  // clusters (search-query.ts, backed by migration 035's tsvector
+  // index) before giving up and showing the empty state.
+  const archiveBundles =
+    q && filtered.length === 0 && filteredBreaking.length === 0
+      ? await searchClusters(q)
+      : [];
+
   // Dedupe: a cluster that's both "breaking" (< 2h) AND in the top-30
   // ranked set would otherwise render twice. The Son Dakika strip wins
   // — we remove those ids from the main ranked list so each cluster
@@ -205,7 +217,19 @@ export default async function HomePage({
 
       <SearchBar />
 
-      {bundles.length === 0 && breakingBundles.length === 0 ? (
+      {archiveBundles.length > 0 ? (
+        <section className="space-y-3">
+          <div className="flex items-center gap-3">
+            <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+              Arşivden: {archiveBundles.length} sonuç
+            </h2>
+            <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
+          </div>
+          <div className="space-y-4">
+            {archiveBundles.map((b, idx) => renderClusterCard(b, idx, nowMs))}
+          </div>
+        </section>
+      ) : bundles.length === 0 && breakingBundles.length === 0 ? (
         <EmptyClusters />
       ) : filtered.length === 0 && filteredBreaking.length === 0 ? (
         <EmptySearch query={q} />
