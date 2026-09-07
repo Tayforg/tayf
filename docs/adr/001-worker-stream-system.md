@@ -62,7 +62,7 @@ The branch is structured so that the cutover is fully reversible — no migratio
 1. **Pre-deploy (no production change)** — review the branch, run `tsc` + `vitest`, lint the migrations.
 2. **Database** — apply `024_pgmq_setup.sql`, `025_worker_triggers.sql`, `026_unify_content_hash_v2.sql` in order. Migration 026 deletes nothing — it adds a permissive dual-regime `content_hash` CHECK (`NOT VALID`, no validate lock). Take a database snapshot first as routine hygiene.
 3. **Edge Functions** — `supabase functions deploy ingest cluster-consumer image-consumer` with `SENTRY_DSN`, `SERVICE_ROLE_KEY`, and `app.service_role_key` GUC configured.
-4. **pg_cron** — install three jobs (`ingest-drain`, `cluster-drain`, `image-drain`). The exact `cron.schedule(...)` statements are in [`../migration-guide.md`](../migration-guide.md) step 3.
+4. **pg_cron** — install three jobs (`ingest-drain`, `cluster-drain`, `image-drain`). The exact `cron.schedule(...)` statements are in `supabase/migrations/038_cron_schedules.sql`; see [`../migration-guide.md`](../migration-guide.md) step 3 for how to apply it.
 5. **Vercel** — deploy the branch; `/api/cron/headline` is the only Vercel cron in the new pipeline.
 6. **Decommission** — stop the tmux workers on the VM; the `scripts/*-worker.mjs` runners have already been deleted from the repo. The cluster reference libraries under `scripts/lib/cluster/*.mjs` are intentionally retained as the parity-test golden vector for `tests/functions/_shared/cluster.test.ts`.
 

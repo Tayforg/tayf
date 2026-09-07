@@ -85,6 +85,12 @@ const nextConfig: NextConfig = {
     },
   },
   async headers() {
+    // Dev HMR needs eval; drop it in production since Vercel Web Analytics
+    // loads same-origin from /_vercel/insights/script.js (no host to add).
+    const scriptSrc =
+      process.env.NODE_ENV === "production"
+        ? "script-src 'self' 'unsafe-inline'"
+        : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
     return [
       {
         source: "/(.*)",
@@ -93,9 +99,7 @@ const nextConfig: NextConfig = {
             key: "Content-Security-Policy",
             value: [
               "default-src 'self'",
-              // Next.js dev HMR uses inline scripts and eval; tighten via nonces in a
-              // future middleware-based pass.
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+              scriptSrc,
               "style-src 'self' 'unsafe-inline'",
               // Permissive img-src: Tayf renders favicons via Google S2 plus cover
               // images from ~144 Turkish news CDNs (see images.remotePatterns note).

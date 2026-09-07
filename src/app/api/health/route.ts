@@ -166,7 +166,8 @@ async function safeProbe<T>(
   }
 }
 
-export const GET = withApiErrors(async (request?: Request) => {
+// Next's route validator rejects optional params; guards below still allow GET().
+export const GET = withApiErrors(async (request: Request) => {
   // Next.js 16 with cacheComponents prerenders GET handlers at build time.
   // Touching `request.headers` during prerender raises
   // `NEXT_PRERENDER_INTERRUPTED`, which `withApiErrors` re-throws through

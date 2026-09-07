@@ -142,6 +142,13 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 SUPABASE_ANON_KEY=<anon-key>
 # Optional: Sentry DSN (Deno-side SDK; populated when observability lands).
 SENTRY_DSN=https://...@sentry.io/...
+# Lets cluster-consumer push a targeted Next.js cache revalidation once per
+# drain instead of waiting on cacheLife TTLs. CRON_SECRET here MUST be the
+# same value set on Vercel in step 4 below — it's the bearer /api/revalidate
+# checks. Omit either var and the consumer just skips the POST (logged,
+# never fails the drain).
+REVALIDATE_URL=https://www.tayfhaber.com/api/revalidate
+CRON_SECRET=<same value as the Vercel CRON_SECRET in step 4>
 ```
 
 Then push to Supabase:
@@ -188,89 +195,50 @@ Expected: an empty JSON array `[]` (no messages currently waiting past the visib
 
 ## 3. Schedule pg_cron drains for the consumers
 
-pg_cron + pg_net live in Supabase but are NOT installed by the portable migrations (they're project-scoped extensions whose grants differ between Supabase Free and Pro). Schedule them once via the Supabase Dashboard → SQL Editor:
+pg_cron + pg_net live in Supabase but are NOT installed by the portable migrations (they're project-scoped extensions whose grants differ between Supabase Free and Pro; local Postgres via `supabase start` has neither). Both extensions are pre-installed on Supabase Pro; on Free, enable them under Database → Extensions first.
+
+As of migration 038, the schedule itself is applied as a migration instead of hand-run SQL in the Dashboard — the migration is idempotent (safe to re-run after editing a schedule or job body) and is a no-op with a NOTICE on any database missing pg_cron or pg_net. Two Supabase Vault secrets must exist **before** you apply it — create them once via the Supabase Dashboard → SQL Editor. Neither value is ever written into a migration file or into git; the job bodies read them from `vault.decrypted_secrets` at run time:
 
 ```sql
--- Run in Supabase Dashboard → SQL Editor.
--- Both extensions are pre-installed on Supabase Pro; on Free, enable
--- them under Database → Extensions first.
-
--- Stash the service-role key in a database-level setting so the cron
--- payload can reference it without baking the literal into pg_cron's
--- jobname (which is logged in cron.job_run_details, readable to any DB
--- role with usage on cron). The setting itself lives in
--- pg_db_role_setting, readable only by superuser / the bootstrap role.
-alter database postgres set app.service_role_key = '<paste service-role key here>';
-
--- Drain cluster_work every minute. current_setting(..., true) returns
--- NULL instead of raising when the setting is unset, so the cron job's
--- HTTP request goes out with an empty bearer (handler responds 401) and
--- the failure mode is visible in Edge Function logs rather than as a
--- SQL exception buried in cron.job_run_details.
-SELECT cron.schedule(
-  'cluster-drain',
-  '* * * * *',
-  $$ SELECT net.http_post(
-       url := 'https://<PROJECT_REF>.functions.supabase.co/cluster-consumer',
-       headers := jsonb_build_object(
-         'Authorization',
-         'Bearer ' || coalesce(current_setting('app.service_role_key', true), '')
-       )
-     ) $$
-);
-
--- Drain image_backfill every five minutes (lower priority, larger pages).
-SELECT cron.schedule(
-  'image-drain',
-  '*/5 * * * *',
-  $$ SELECT net.http_post(
-       url := 'https://<PROJECT_REF>.functions.supabase.co/image-consumer',
-       headers := jsonb_build_object(
-         'Authorization',
-         'Bearer ' || coalesce(current_setting('app.service_role_key', true), '')
-       )
-     ) $$
-);
-
--- Drive the ingest Edge Function every 3 minutes. This is the canonical
--- ingest entry point now that the legacy Vercel /api/cron/ingest route
--- has been retired — there is no other scheduled invoker, so missing
--- this schedule means RSS articles stop flowing.
-SELECT cron.schedule(
-  'ingest-drain',
-  '*/3 * * * *',
-  $$ SELECT net.http_post(
-       url := 'https://<PROJECT_REF>.functions.supabase.co/ingest',
-       headers := jsonb_build_object(
-         'Authorization',
-         'Bearer ' || coalesce(current_setting('app.service_role_key', true), '')
-       )
-     ) $$
-);
+-- Run in Supabase Dashboard → SQL Editor, once per project, before applying 038.
+select vault.create_secret('<paste service-role key here>', 'service_role_key');
+select vault.create_secret('https://<PROJECT_REF>.supabase.co/functions/v1', 'functions_base_url');
 ```
 
-Substitute `<PROJECT_REF>` literally before running — the SQL editor does not expand shell variables.
+Then apply the migration:
+
+```bash
+supabase db push
+# ...or the one-at-a-time psql pattern from step 1 above:
+psql "$DATABASE_URL" -f supabase/migrations/038_cron_schedules.sql
+```
+
+`038_cron_schedules.sql` schedules `ingest-drain` (`*/3 * * * *`), `cluster-drain` (`* * * * *`), and `image-drain` (`*/5 * * * *`) — same names, schedules, and `net.http_post` shape as before — plus a fourth job, `prune-nightly` (`10 4 * * *`, i.e. 04:10 UTC), that calls the two retention functions from migration 037 (`select public.prune_singleton_clusters(); select public.trim_pgmq_archives();`). Each of the three drain job bodies reads the `service_role_key` and `functions_base_url` Vault secrets at run time, so no project URL or token is baked into the migration file. `prune-nightly` only calls the two 037 functions and needs neither secret. If either secret is missing when pg_cron **is** installed, the migration raises an exception at apply time rather than scheduling a job that 401s or 404s forever.
+
+If you need to change a schedule or a job's body later, edit `038_cron_schedules.sql` and re-apply it — it unschedules each of the four jobs by name before rescheduling, so there's no duplicate-jobname error from pg_cron.
 
 **Verification:**
 
 ```sql
--- All three rows should appear; `active = true`.
+-- All four rows should appear; `active = true`.
 select jobname, schedule, active from cron.job
-  where jobname in ('cluster-drain', 'image-drain', 'ingest-drain');
+  where jobname in ('cluster-drain', 'image-drain', 'ingest-drain', 'prune-nightly');
 
--- After ~3 minutes, this should show recent runs with `status = 'succeeded'`.
+-- After ~3 minutes, this should show recent runs with `status = 'succeeded'`
+-- for the three drains; prune-nightly won't have a run until 04:10 UTC.
 select jobname, status, return_message, start_time
   from cron.job_run_details
-  where jobname in ('cluster-drain', 'image-drain', 'ingest-drain')
+  where jobname in ('cluster-drain', 'image-drain', 'ingest-drain', 'prune-nightly')
   order by start_time desc limit 10;
 ```
 
-If you ever need to remove a schedule (for example to re-create it with a different URL):
+If you ever need to remove a schedule by hand rather than re-applying 038 (for example while debugging):
 
 ```sql
 SELECT cron.unschedule('cluster-drain');
 SELECT cron.unschedule('image-drain');
 SELECT cron.unschedule('ingest-drain');
+SELECT cron.unschedule('prune-nightly');
 ```
 
 ---
@@ -454,8 +422,8 @@ If any step lags, jump to the next section.
      order by start_time desc limit 5;
    ```
 
-   - `status = 'failed'` with `return_message` showing an HTTP 401 → bearer header was empty or wrong. Re-run `alter database postgres set app.service_role_key = '<key>';` against the **same** database the cron jobs target.
-   - `status = 'failed'` with `return_message = 'unrecognized configuration parameter "app.service_role_key"'` → you did NOT use `current_setting('app.service_role_key', true)` (the `missing_ok` argument). Re-run the `cron.schedule` block with the snippet exactly as written above.
+   - `status = 'failed'` with `return_message` showing an HTTP 401 → the `service_role_key` Vault secret is empty or wrong. Update it (`select vault.update_secret(id, '<key>') from vault.secrets where name = 'service_role_key'`) and re-apply 038.
+   - `status = 'failed'` with a 404 → the `functions_base_url` Vault secret is wrong; it must end in `/functions/v1`.
    - `status = 'failed'` with HTTP 500 → bug in the consumer. Check Edge Function logs in the Supabase Dashboard.
 
 2. Is `cluster_work` accumulating without being drained?
@@ -550,7 +518,7 @@ Fastest path first: if the breakage is in the Vercel deploy, `vercel rollback <p
 
 If the new system misbehaves and you need to revert to the legacy per-worker scripts:
 
-1. Pause the pg_cron jobs (don't delete them — pausing is reversible):
+1. Pause the pg_cron jobs (don't delete them — pausing is reversible). `prune-nightly` can stay active during this rollback — it never calls the Edge Functions, only the 037 retention functions — so it's fine to leave out of this list:
 
    ```sql
    update cron.job set active = false where jobname in ('cluster-drain', 'image-drain', 'ingest-drain');
@@ -741,6 +709,32 @@ curl -sS -X POST -H "Content-Type: application/json" \
 
 Click the confirm link in that email and confirm it redirects to `/?bulten=onaylandi` (not `/?bulten=gecersiz` — a mismatch there usually means `NEXT_PUBLIC_SITE_URL` doesn't match the domain you're testing against, so the link points at the wrong host).
 
+## Retention (037)
+
+`037_retention.sql` adds `clusters.is_archived` (boolean, default `false`) and a partial index (`clusters_active_updated_idx` on `updated_at desc where is_archived = false`) alongside it, plus two functions:
+
+- **`public.prune_singleton_clusters(retention_days int default 30, batch int default 5000)`** — flags clusters that never grew past a single source (`article_count = 1`) and have been stale for more than `retention_days` as `is_archived = true`, working in batches of `batch` rows so a first run against a large backlog doesn't take one long-held table lock. Returns the total number of rows flagged.
+- **`public.trim_pgmq_archives(keep_days int default 7)`** — deletes rows older than `keep_days` from pgmq's own archive tables (`pgmq.a_cluster_work`, `pgmq.a_image_backfill` — the DLQ-lite audit trail described in `supabase/functions/_shared/pgmq.ts`), which otherwise grow forever. No-op (not an error) on a database without pgmq installed. Returns the number of rows deleted.
+
+**What "archived" means — and does not mean:** archiving is a flag flip, never a delete. `is_archived = true` clusters and their member articles stay in the database untouched; nothing in this migration or in 038's nightly schedule issues a `DELETE` against `clusters`, `cluster_articles`, or `articles`. The intent is for future home/politics-list queries to filter `is_archived = false` (mirroring the new partial index) so stale one-source noise stops competing for space in those lists — that query-side filtering is a follow-up, not part of this migration.
+
+Both functions are `SECURITY DEFINER` with `search_path = ''` and are granted to `service_role` only (revoked from `anon`, `authenticated`, `public`), matching the convention in migrations 032 and 034.
+
+**Running it manually.** Migration 038 schedules `prune-nightly` at 04:10 UTC to call both functions in sequence, but either is safe to invoke by hand at any time, e.g. after a bulk backfill or while tuning the retention window:
+
+```sql
+-- Flag stale singletons under the default 30-day window, 5000-row batches.
+select public.prune_singleton_clusters();
+
+-- Or override either parameter:
+select public.prune_singleton_clusters(retention_days => 14, batch => 2000);
+
+-- Trim pgmq's archive tables past the default 7-day window.
+select public.trim_pgmq_archives();
+```
+
+Both return an integer count (rows flagged / rows deleted); `0` is a valid, unremarkable result once the backlog is caught up.
+
 ---
 
 ## Owner sign-off checklist
@@ -749,8 +743,9 @@ Before declaring the migration complete:
 
 - [ ] `supabase functions deploy cluster-consumer` / `ingest` / `image-consumer` all returned success
 - [ ] Migrations 024, 025, 026 applied; verification SQL above returned the expected rows (including `worker_metrics`)
-- [ ] `cron.job` shows `cluster-drain`, `image-drain`, and `ingest-drain` with `active = true`
+- [ ] `cron.job` shows `cluster-drain`, `image-drain`, `ingest-drain`, and `prune-nightly` with `active = true`
 - [ ] `cron.job_run_details` shows recent runs with `status = 'succeeded'`
+- [ ] Migrations 037 and 038 applied; Vault secrets `service_role_key` and `functions_base_url` existed before 038 (see "Retention (037)" and section 3 above)
 - [ ] `CRON_SECRET` and `ANTHROPIC_API_KEY` env vars are set on Vercel production
 - [ ] `vercel --prod` deploy landed with the new `/api/cron/headline` schedule and no legacy cron entries
 - [ ] `/api/health` reports `clustering.lag_minutes < 15`

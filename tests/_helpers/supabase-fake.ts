@@ -126,6 +126,7 @@ export interface BuilderState {
   lte: Array<{ col: string; val: unknown }>;
   contains: Array<{ col: string; val: unknown }>;
   containedBy: Array<{ col: string; val: unknown }>;
+  textSearch: Array<{ col: string; query: string; opts: unknown }>;
   order: Array<{ col: string; opts: unknown }>;
   limit: number | null;
   range: { from: number; to: number } | null;
@@ -150,6 +151,7 @@ function freshState(table: string): BuilderState {
     lte: [],
     contains: [],
     containedBy: [],
+    textSearch: [],
     order: [],
     limit: null,
     range: null,
@@ -210,6 +212,7 @@ const CHAINABLE = new Set([
   "lte",
   "contains",
   "containedBy",
+  "textSearch",
   "match",
   "filter",
   "or",
@@ -343,6 +346,13 @@ function makeBuilder(
               break;
             case "containedBy":
               state.containedBy.push({ col: String(args[0]), val: args[1] });
+              break;
+            case "textSearch":
+              state.textSearch.push({
+                col: String(args[0]),
+                query: String(args[1]),
+                opts: args[2],
+              });
               break;
             case "order":
               state.order.push({ col: String(args[0]), opts: args[1] });
