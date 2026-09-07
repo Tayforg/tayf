@@ -214,10 +214,14 @@ beforeEach(() => {
   supabaseFakeCalls.rpc.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
+  // Unset by default so tests that don't opt in never trigger a real fetch.
+  delete process.env.REVALIDATE_URL;
+  delete process.env.CRON_SECRET;
 });
 
 afterEach(() => {
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 // ---------------------------------------------------------------------------
@@ -543,6 +547,64 @@ describe("cluster-consumer Edge Function", () => {
       "utf8",
     );
     expect(src).toMatch(/from\("sources"\)\.select\("id, bias, name, slug, kind"\)/);
+  });
+
+  it("POSTs once to REVALIDATE_URL with cluster tags after a drain that changes clusters, and not when nothing changed", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    process.env.REVALIDATE_URL = "https://example.test/api/revalidate";
+    process.env.CRON_SECRET = "test-cron-secret";
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    pgmqState.pending = [
+      { msg_id: 301, read_ct: 1, message: { article_id: "art-revalidate" } },
+    ];
+    fakeArticles["art-revalidate"] = {
+      id: "art-revalidate",
+      title: "Yeni haber",
+      description: "Body",
+      url: "https://example.com/revalidate",
+      category: "politika",
+      published_at: new Date().toISOString(),
+    };
+
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+    // Exactly one revalidation POST for the whole drain, not one per article.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://example.test/api/revalidate");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>).authorization).toBe(
+      "Bearer test-cron-secret",
+    );
+    const body = JSON.parse(init.body as string) as { tags: string[] };
+    expect(body.tags).toContain("clusters-politics");
+    expect(body.tags).toContain("clusters");
+    expect(body.tags.some((t) => /^cluster-detail:/.test(t))).toBe(true);
+
+    // A second drain with nothing pending must not fire another POST.
+    fetchMock.mockClear();
+    pgmqState.pending = [];
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("caps the revalidation tag payload at 100, reserving room for the 2 static tags", async () => {
+    // /api/revalidate's MAX_TAGS is 100; a big drain must never overflow it.
+    await importHandler();
+    const mod = await import("../../supabase/functions/cluster-consumer/index.ts");
+    const ids = Array.from({ length: 150 }, (_, i) => `id-${i}`);
+    const tags = mod.buildRevalidationTags(ids);
+    expect(tags.length).toBe(100);
+    expect(tags[0]).toBe("clusters-politics");
+    expect(tags[1]).toBe("clusters");
+    expect(tags.slice(2)).toEqual(
+      ids.slice(0, 98).map((id) => `cluster-detail:${id}`),
+    );
   });
 });
 

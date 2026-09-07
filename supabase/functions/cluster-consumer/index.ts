@@ -838,7 +838,14 @@ function buildTfidfForArticle(
 
 type ProcessResult = "matched" | "created" | "skipped" | "not-found" | "not-politics";
 
-async function processArticle(articleId: string): Promise<ProcessResult> {
+// Carries the touched cluster id alongside the outcome so drainQueue can
+// build the revalidation tag list without re-deriving it from scratch.
+interface ProcessOutcome {
+  result: ProcessResult;
+  clusterId?: string;
+}
+
+async function processArticle(articleId: string): Promise<ProcessOutcome> {
   const artRes = await supabase
     .from("articles")
     .select(
@@ -849,10 +856,10 @@ async function processArticle(articleId: string): Promise<ProcessResult> {
   if (artRes.error) {
     throw new Error(`processArticle fetch: ${artRes.error.message}`);
   }
-  if (!artRes.data) return "not-found";
+  if (!artRes.data) return { result: "not-found" };
   const raw = artRes.data as ArticleRow;
   if (!raw.category || !POLITICS_CATEGORIES.includes(raw.category)) {
-    return "not-politics";
+    return { result: "not-politics" };
   }
 
   try {
@@ -867,7 +874,7 @@ async function processArticle(articleId: string): Promise<ProcessResult> {
   }
 }
 
-async function clusterArticle(raw: ArticleRow): Promise<ProcessResult> {
+async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
   // Idempotency is enforced inside `cluster_link_atomic` via the
   // (cluster_id, article_id) primary key + per-cluster advisory lock:
   // a duplicate INSERT is a no-op but the recompute still runs, which
@@ -896,7 +903,7 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessResult> {
           continue;
         }
         addMemberToIndices(clusterId, article);
-        return "matched";
+        return { result: "matched", clusterId };
       } catch (err) {
         console.warn(
           `[cluster-consumer] fp-fast-path error ${article.id}: ${err instanceof Error ? err.message : err}`,
@@ -981,7 +988,7 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessResult> {
         continue;
       }
       addMemberToIndices(cand.clusterId, article);
-      return "matched";
+      return { result: "matched", clusterId: cand.clusterId };
     }
   }
 
@@ -999,7 +1006,7 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessResult> {
     category: article.category,
     signature: article.signature ?? undefined,
   });
-  return "created";
+  return { result: "created", clusterId: newId };
 }
 
 // ---------------------------------------------------------------------------
@@ -1019,6 +1026,57 @@ interface InvocationSummary {
   budgeted_out: boolean;
 }
 
+// /api/revalidate rejects payloads over MAX_TAGS; reserve room for the two
+// static tags so a large drain never overflows the cap into a 400.
+const MAX_REVALIDATION_TAGS = 100;
+const STATIC_REVALIDATION_TAGS = ["clusters-politics", "clusters"];
+
+export function buildRevalidationTags(clusterIds: string[]): string[] {
+  return [
+    ...STATIC_REVALIDATION_TAGS,
+    ...clusterIds
+      .slice(0, MAX_REVALIDATION_TAGS - STATIC_REVALIDATION_TAGS.length)
+      .map((id) => `cluster-detail:${id}`),
+  ];
+}
+
+// Fire-and-forget Next.js cache revalidation for the clusters this drain
+// touched. Best-effort: any failure (missing env, network, non-2xx) is
+// logged and swallowed — a stale cache page is far cheaper than a failed
+// drain that leaves the queue backed up.
+async function triggerRevalidation(clusterIds: string[]): Promise<void> {
+  const revalidateUrl = Deno.env.get("REVALIDATE_URL");
+  const cronSecret = Deno.env.get("CRON_SECRET");
+  if (!revalidateUrl || !cronSecret) {
+    console.warn(
+      "[cluster-consumer] REVALIDATE_URL/CRON_SECRET unset; skipping revalidation",
+    );
+    return;
+  }
+
+  const tags = buildRevalidationTags(clusterIds);
+  try {
+    const res = await fetch(revalidateUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${cronSecret}`,
+      },
+      body: JSON.stringify({ tags }),
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!res.ok) {
+      console.warn(
+        `[cluster-consumer] revalidation POST returned ${res.status}`,
+      );
+    }
+  } catch (err) {
+    console.warn(
+      `[cluster-consumer] revalidation POST failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
 async function drainQueue(): Promise<InvocationSummary> {
   const startedAt = Date.now();
   const summary: InvocationSummary = {
@@ -1036,6 +1094,11 @@ async function drainQueue(): Promise<InvocationSummary> {
 
   // Best-effort depth sample for the drain summary log (audit O13).
   const before = await queueDepth(supabase, QUEUE_NAME);
+
+  // Clusters touched (matched or created) this invocation — fed to the
+  // once-per-drain revalidation POST below so Next.js drops its stale
+  // cluster-detail / clusters-politics caches without waiting on TTL.
+  const touchedClusterIds = new Set<string>();
 
   // Force-warm cluster context once at the top of the invocation so the
   // per-message path is read-only against the cache (cheap).
@@ -1092,15 +1155,17 @@ async function drainQueue(): Promise<InvocationSummary> {
       }
 
       try {
-        const result = await processArticle(articleId);
+        const outcome = await processArticle(articleId);
         await archive(supabase, QUEUE_NAME, msg.msg_id);
         summary.drained += 1;
-        switch (result) {
+        switch (outcome.result) {
           case "matched":
             summary.matched += 1;
+            if (outcome.clusterId) touchedClusterIds.add(outcome.clusterId);
             break;
           case "created":
             summary.created += 1;
+            if (outcome.clusterId) touchedClusterIds.add(outcome.clusterId);
             break;
           case "skipped":
             summary.skipped += 1;
@@ -1153,6 +1218,10 @@ async function drainQueue(): Promise<InvocationSummary> {
     // If the batch came back smaller than BATCH_SIZE, the queue is drained
     // for now — exit the loop instead of paging on more empty reads.
     if (messages.length < BATCH_SIZE) break;
+  }
+
+  if (summary.matched + summary.created > 0) {
+    await triggerRevalidation([...touchedClusterIds]);
   }
 
   summary.duration_ms = Date.now() - startedAt;

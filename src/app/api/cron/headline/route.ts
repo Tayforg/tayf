@@ -1,4 +1,5 @@
 import { connection, NextResponse } from "next/server";
+import { revalidateTag } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
@@ -207,6 +208,8 @@ export const GET = withApiErrors(async (request: Request) => {
   let skipped = 0;
   let errored = 0;
   const perCluster: Record<string, { status: string; error?: string }> = {};
+  // Ids actually rewrote this cycle — drives the revalidateTag calls below.
+  const rewroteIds: string[] = [];
 
   // Sequential. The LLM API is fine with bursts but cost-conscious mode
   // wants serialised retries; one bad cluster shouldn't blow the whole
@@ -293,6 +296,21 @@ export const GET = withApiErrors(async (request: Request) => {
 
     perCluster[c.id] = { status: "rewrote" };
     rewrote++;
+    rewroteIds.push(c.id);
+  }
+
+  // Push fresh titles out now instead of waiting on the cluster-feed
+  // cacheLife window. Best-effort: a throw here must not undo the DB writes
+  // above or turn a successful cron cycle into a 500.
+  try {
+    for (const id of rewroteIds) {
+      revalidateTag(`cluster-detail:${id}`, "max");
+    }
+    if (rewroteIds.length > 0) {
+      revalidateTag("clusters-politics", "max");
+    }
+  } catch (err) {
+    console.error("[headline-cron] revalidateTag failed", err);
   }
 
   return NextResponse.json({
