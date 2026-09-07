@@ -48,6 +48,8 @@ export interface FetchResult {
   notModified?: boolean;
   etag?: string | null;
   lastModified?: string | null;
+  /** SHA-256 hex digest of the raw (pre-decode) response body on a 2xx. */
+  bodyHash?: string;
   error?: string;
 }
 
@@ -61,9 +63,28 @@ export interface FetchOptions {
   conditionalCache?: Map<string, ConditionalCacheEntry>;
   /** Per-fetch timeout in milliseconds. Default 10 000. */
   timeoutMs?: number;
+  /** Last body hash we stored for this source (migration 041). A 2xx whose
+   * body hashes the same is treated as not-modified BEFORE decode/parse. */
+  knownBodyHash?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+// Hashing the raw bytes (not the decoded text) is both cheaper and much
+// smaller to carry on `FetchResult` than the body itself (migration 041) --
+// the caller only needs to know "did this change since last time", not the
+// content.
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // Cast needed: TS's lib.dom BufferSource type wants an
+  // ArrayBufferView<ArrayBuffer> specifically, but `bytes` here is typed as
+  // Uint8Array<ArrayBufferLike> (it may be backed by a SharedArrayBuffer in
+  // principle) even though in practice it never is — it's always the sole
+  // Uint8Array wrapping a fresh `response.arrayBuffer()` result.
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 const DEFAULT_UA =
   "Mozilla/5.0 (compatible; Tayf/1.0; +https://tayf.app) ingest-edge";
@@ -171,10 +192,7 @@ export async function fetchFeed(
   }
 
   const buf = new Uint8Array(await response.arrayBuffer());
-  const { text: xml, charset } = decodeRssBody(
-    buf,
-    response.headers.get("content-type"),
-  );
+  const bodyHash = await sha256Hex(buf);
 
   // Refresh conditional-GET cache only on 2xx with a body.
   const etag = response.headers.get("etag");
@@ -185,6 +203,28 @@ export async function fetchFeed(
       lastModified: lastModified ?? undefined,
     });
   }
+
+  // Body-hash short-circuit (migration 041): an outlet that reissues
+  // byte-identical XML without changing ETag / Last-Modified still costs a
+  // full charset-decode + XML parse every cycle unless we catch it here,
+  // BEFORE either of those run — this is the exact population the hash
+  // exists for (outlets that ignore validators).
+  if (opts.knownBodyHash && opts.knownBodyHash === bodyHash) {
+    return {
+      source,
+      items: [],
+      status: response.status,
+      notModified: true,
+      bodyHash,
+      etag,
+      lastModified,
+    };
+  }
+
+  const { text: xml, charset } = decodeRssBody(
+    buf,
+    response.headers.get("content-type"),
+  );
 
   let items: RawFeedItem[] = [];
   try {
@@ -197,6 +237,7 @@ export async function fetchFeed(
       charset,
       etag,
       lastModified,
+      bodyHash,
       error: err instanceof Error ? `parse error: ${err.message}` : "parse error",
     };
   }
@@ -208,6 +249,7 @@ export async function fetchFeed(
     charset,
     etag,
     lastModified,
+    bodyHash,
   };
 }
 

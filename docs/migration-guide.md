@@ -762,6 +762,41 @@ curl -sS -X POST -H "Content-Type: application/json" \
 
 Click the confirm link in that email and confirm it redirects to `/?bulten=onaylandi` (not `/?bulten=gecersiz` — a mismatch there usually means `NEXT_PUBLIC_SITE_URL` doesn't match the domain you're testing against, so the link points at the wrong host).
 
+## Ingest fetch state (041): apply migration, then redeploy `ingest`
+
+`041_source_fetch_state.sql` adds five additive columns to `sources` — `fetch_etag`, `fetch_last_modified`, `fetch_body_hash`, `fetch_last_status`, `fetch_last_at` — so the `ingest` Edge Function's conditional-GET state survives a cold start instead of living only in the module-scope `conditionalCache` Map, which is empty every time a fresh instance spins up. Without this, pg_cron's 3-minute poke was re-fetching and re-parsing all ~118 feeds (~5,300 items) on most cycles when only ~5-30 articles were ever actually new, and most runs were hitting `546 WORKER_RESOURCE_LIMIT` before `ingest_cycles` ever got a row. The updated function also fetches the raw feed body's SHA-256 and short-circuits BEFORE decoding/parsing when it matches the stored `fetch_body_hash` (outlets that reissue byte-identical XML without changing ETag/Last-Modified), flushes fetch-state validators mid-cycle (not only in the cycle-end `finally`, which a 546 kill skips) so progress survives a resource-limit kill, and drops rows sharing a `(source_id, content_hash)` pair with either an earlier row in the same chunk OR an already-stored article under a different `url` — the latter via one `articles` lookup per chunk, since `on_conflict=url` alone can't see that constraint — before either upsert path can hit `articles_source_content_hash_key` (logged as `dedupedInBatch`, not a DB column — 039 shipped before this field existed).
+
+No RLS change: `sources` is already publicly readable (017), and none of these five values are secrets. The migration also creates `public.ingest_set_source_fetch_state(jsonb)` (SECURITY DEFINER, service_role only — 034's shell), which the function calls to write those five columns back in one round trip: a PostgREST upsert can't do a partial-row write on `sources`, because Postgres checks its NOT NULL columns (`name`, `slug`, …) before the ON CONFLICT arbiter and rejects the payload with 23502.
+
+1. **Apply the migration:**
+
+   ```bash
+   supabase db push
+   # ...or the one-at-a-time psql pattern from step 1 above:
+   psql "$DATABASE_URL" -f supabase/migrations/041_source_fetch_state.sql
+   ```
+
+2. **Redeploy `ingest`:**
+
+   ```bash
+   supabase functions deploy ingest --project-ref "$PROJECT_REF"
+   ```
+
+**Verification:**
+
+```sql
+-- Recently polled sources should show a real status and a fresh timestamp
+-- within a few cycles of the redeploy.
+select slug, fetch_last_status, fetch_last_at
+  from sources
+  order by fetch_last_at desc nulls last
+  limit 10;
+```
+
+If `fetch_last_at` is still null on every row after a few cycles, the write-back is failing: look for `source fetch-state write failed` in the `ingest` function logs (most likely the function was redeployed before 041 was applied, so the RPC doesn't exist yet).
+
+Also check the ratio of `200` to `546` in `net._http_response` for the pg_cron job that pokes `ingest` (Supabase Dashboard → Database → Extensions → pg_net, or query `net._http_response` directly) — it should shift heavily toward `200` within the first few cycles after redeploy, since most sources now short-circuit on a `304` or an unchanged body hash instead of doing a full parse/normalize/upsert pass.
+
 ## Retention (037)
 
 `037_retention.sql` adds `clusters.is_archived` (boolean, default `false`) and a partial index (`clusters_active_updated_idx` on `updated_at desc where is_archived = false`) alongside it, plus two functions:
@@ -813,3 +848,4 @@ Before declaring the migration complete:
 - [ ] `RESEND_API_KEY`, `NEWSLETTER_FROM` (if overriding the default), and `NEXT_PUBLIC_SITE_URL` set on Vercel production
 - [ ] `vercel --prod` deploy landed with `/api/cron/digest` (`0 6 * * 6`) alongside `/api/cron/headline` in the Cron Jobs dashboard
 - [ ] A manual `POST /api/newsletter` test delivered a confirm email whose link redirects to `/?bulten=onaylandi` on click
+- [ ] Migration 041 applied and `ingest` redeployed — `select slug, fetch_last_status, fetch_last_at from sources order by fetch_last_at desc nulls last limit 10;` shows recent timestamps; the `200`-vs-`546` ratio in `net._http_response` for the `ingest` cron job has shifted toward `200`
