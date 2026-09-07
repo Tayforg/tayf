@@ -53,8 +53,10 @@ const UPSERT_BATCH = 500;
 // tighter FETCH_DEADLINE_MS so rows that were fetched and normalized
 // always have at least a 10 s write window — without the reserve, a
 // deadline elapsing mid-fetch dropped every assembled row on the floor
-// (audit S13).
-const CYCLE_DEADLINE_MS = 60_000;
+// (audit S13). pg_cron invokes this function through net.http_post with a
+// 60 s timeout (migration 038); returning at 50 s keeps the response and
+// the cycle summary inside that window instead of racing it.
+const CYCLE_DEADLINE_MS = 50_000;
 const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
 
 // ---------------------------------------------------------------------------
