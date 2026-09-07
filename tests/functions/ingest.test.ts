@@ -92,6 +92,22 @@ const EXPECTED_TITLE = "Türkçe başlık: şirin İğne çağı";
 
 const upserted: Array<Record<string, unknown>> = [];
 
+// Rows the SUT writes to `ingest_cycles` (migration 039's best-effort
+// per-cycle telemetry row — supabase/functions/ingest/index.ts's
+// `recordIngestCycle`). Tracked the same way `upserted` tracks `articles`.
+const ingestCycleInserts: Array<Record<string, unknown>> = [];
+
+// When set, the "sources" branch of `settle()` below returns this as a
+// Supabase `error` instead of the fake roster — used to exercise the
+// `runCycleBody` failure path (the `sourcesError` throw) and confirm
+// `ingest_cycles` still gets a row via the `finally` in `runCycle`.
+let forcedSourcesError: string | null = null;
+
+// When set, the "ingest_cycles" `insert()` mock below returns this as an
+// error instead of recording the row — used to prove `recordIngestCycle`'s
+// try/catch absorbs a telemetry-write failure instead of failing the cycle.
+let forcedIngestCyclesInsertError: string | null = null;
+
 // Per-test source roster. The ingest handler reads from `sources` via
 // `.from("sources").select(...).eq("active", true).order("slug")` and
 // awaits the chain directly — so the chainable mock terminates via `then`.
@@ -105,6 +121,9 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
       const chain: Record<string, unknown> = {};
       const settle = () => {
         if (table === "sources") {
+          if (forcedSourcesError) {
+            return { data: null, error: { message: forcedSourcesError } };
+          }
           return { data: [...fakeSources], error: null };
         }
         return { data: null, error: null };
@@ -144,7 +163,19 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
           };
           return builder;
         },
-        insert: () => Promise.resolve({ data: null, error: null }),
+        insert: (rows: unknown) => {
+          if (table === "ingest_cycles") {
+            if (forcedIngestCyclesInsertError) {
+              return Promise.resolve({
+                data: null,
+                error: { message: forcedIngestCyclesInsertError },
+              });
+            }
+            const arr = Array.isArray(rows) ? rows : [rows];
+            for (const r of arr) ingestCycleInserts.push(r as Record<string, unknown>);
+          }
+          return Promise.resolve({ data: null, error: null });
+        },
         update: () => chain,
       });
       return chain;
@@ -237,6 +268,9 @@ function installFetchStub() {
 
 beforeEach(() => {
   upserted.length = 0;
+  ingestCycleInserts.length = 0;
+  forcedSourcesError = null;
+  forcedIngestCyclesInsertError = null;
   fakeSources.length = 0;
   for (const k of Object.keys(fetchResponses)) delete fetchResponses[k];
   for (const k of Object.keys(fetcherItems)) delete fetcherItems[k];
@@ -427,6 +461,53 @@ describe("ingest Edge Function", () => {
     expect(checked).toBeGreaterThan(0);
   });
 
+  it("adds a canonicalized canonical_url alongside the raw url [migration 039]", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-canon",
+      name: "Canon Fixture",
+      slug: "canon-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/canon.rss",
+      active: true,
+    });
+
+    // Raw link carries an uppercase `www.` host, a tracking param
+    // (utm_source), a non-tracking param (keep), and a fragment — every
+    // rule canonicalizeUrl() applies gets exercised in one fixture.
+    const rawLink =
+      "https://WWW.Example.com/canon/1/?utm_source=rss&keep=1#frag";
+    fetchResponses["https://example.com/canon.rss"] = {
+      status: 200,
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+      body:
+        '<?xml version="1.0" encoding="utf-8"?>' +
+        "<rss><channel><item>" +
+        "<title>Canon</title>" +
+        `<link>${rawLink}</link>` +
+        "</item></channel></rss>",
+    };
+
+    const fixtureItems: MockFeedItem[] = [
+      { title: "Canon", link: rawLink, pubDate: "Mon, 01 Jan 2024 00:00:00 GMT" },
+    ];
+    fetcherItems["https://example.com/canon.rss"] = fixtureItems;
+
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(upserted.length).toBe(fixtureItems.length);
+
+    const row = upserted[0] as { url?: string; canonical_url?: string };
+    // The raw absolute url is untouched.
+    expect(row.url).toBe(rawLink);
+    // canonical_url: host lowercased + www-stripped, utm_source removed
+    // (tracking), `keep` param retained (not a tracking key), trailing
+    // slash trimmed, fragment dropped.
+    expect(row.canonical_url).toBe("https://example.com/canon/1?keep=1");
+  });
+
   it("upserts with ON CONFLICT DO NOTHING semantics (re-run is a no-op)", async () => {
     const handler = await importIngestHandler();
     expect(handler).toBeDefined();
@@ -483,5 +564,138 @@ describe("ingest Edge Function", () => {
     );
     expect(res.status).toBe(401);
     expect(upserted).toHaveLength(0);
+    // The auth gate rejects before runCycle ever starts, so no ingest_cycles
+    // row should be written for a request that never reached a cycle.
+    expect(ingestCycleInserts).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ingest_cycles telemetry (migration 039) — one best-effort row per cycle,
+// written from `recordIngestCycle` on both the success and the failure path.
+// ---------------------------------------------------------------------------
+
+describe("ingest_cycles telemetry [migration 039]", () => {
+  it("writes one ingest_cycles row summarizing a successful cycle", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-telemetry",
+      name: "Telemetry Fixture",
+      slug: "telemetry-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/telemetry.rss",
+      active: true,
+    });
+    fetchResponses["https://example.com/telemetry.rss"] = {
+      status: 200,
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+      body:
+        '<?xml version="1.0" encoding="utf-8"?>' +
+        "<rss><channel><item>" +
+        "<title>Telemetry</title><link>https://example.com/telemetry/1</link>" +
+        "</item></channel></rss>",
+    };
+    fetcherItems["https://example.com/telemetry.rss"] = [
+      { title: "Telemetry", link: "https://example.com/telemetry/1" },
+    ];
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+
+    // Tripwire: exactly one row per cycle, not zero and not one per source.
+    expect(ingestCycleInserts).toHaveLength(1);
+    const row = ingestCycleInserts[0] as {
+      started_at?: string;
+      fetched?: number;
+      inserted?: number;
+      row_errors?: number;
+      failed?: number;
+      duration_ms?: number;
+    };
+    expect(typeof row.started_at).toBe("string");
+    expect(Number.isNaN(Date.parse(row.started_at ?? ""))).toBe(false);
+    expect(row.fetched).toBe(1);
+    expect(row.inserted).toBeGreaterThanOrEqual(1);
+    expect(row.row_errors).toBe(0);
+    expect(row.failed).toBe(0);
+    expect(typeof row.duration_ms).toBe("number");
+    expect(row.duration_ms as number).toBeGreaterThanOrEqual(0);
+  });
+
+  it("still writes an ingest_cycles row when the cycle throws (sources fetch failure)", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    // Force the `sources` select to come back with an error so
+    // `runCycleBody` throws before any fetch/upsert work happens — this is
+    // the failure path the `finally` in `runCycle` must still cover.
+    forcedSourcesError = "sources table unreachable (test-forced)";
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    // The thrown error propagates to the handler's outer catch, which
+    // reports it as a 500 (supabase/functions/ingest/index.ts's Deno.serve
+    // callback) — the telemetry write must not mask or swallow that.
+    expect(res.status).toBe(500);
+
+    expect(ingestCycleInserts).toHaveLength(1);
+    const row = ingestCycleInserts[0] as {
+      fetched?: number;
+      failed?: number;
+      row_errors?: number;
+      duration_ms?: number;
+    };
+    expect(row.fetched).toBe(0);
+    expect(row.failed).toBe(0);
+    expect(row.row_errors).toBe(0);
+    expect(typeof row.duration_ms).toBe("number");
+  });
+
+  it("does not fail the cycle when the ingest_cycles insert itself errors", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-telemetry-fail",
+      name: "Telemetry Fail Fixture",
+      slug: "telemetry-fail-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/telemetry-fail.rss",
+      active: true,
+    });
+    fetchResponses["https://example.com/telemetry-fail.rss"] = {
+      status: 200,
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+      body:
+        '<?xml version="1.0" encoding="utf-8"?>' +
+        "<rss><channel><item>" +
+        "<title>T</title><link>https://example.com/telemetry-fail/1</link>" +
+        "</item></channel></rss>",
+    };
+    fetcherItems["https://example.com/telemetry-fail.rss"] = [
+      { title: "T", link: "https://example.com/telemetry-fail/1" },
+    ];
+
+    // Simulate the ingest_cycles insert coming back with a Supabase error
+    // (e.g. an RLS/grant misconfiguration) and assert the outer request
+    // still resolves 200 — recordIngestCycle logs and swallows it rather
+    // than letting a telemetry-write failure fail the cycle.
+    forcedIngestCyclesInsertError = "simulated ingest_cycles insert failure";
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+    expect(upserted.length).toBe(1);
+    // The error path never pushes into the tracking array.
+    expect(ingestCycleInserts).toHaveLength(0);
   });
 });

@@ -89,10 +89,21 @@ interface Metrics {
      * itself an upstream bug).
      */
     oldestPendingNeutralAgeSec: number | null;
+    /** Latest cluster_quality_snapshots row (039), or null before the first audit run. */
+    quality: {
+      takenAt: string;
+      singletonRate: number;
+      clusterCount: number;
+      blindspotFlipRate: number;
+    } | null;
   };
   sources: {
     total: number;
     active: number;
+  };
+  ingest: {
+    /** sum(row_errors) over ingest_cycles finished in the last hour; 0 when empty. */
+    rowErrorsLastHour: number;
   };
 }
 
@@ -126,6 +137,22 @@ export const GET = withApiErrors(async (request: Request) => {
     .limit(1)
     .maybeSingle();
 
+  // 039: latest quality snapshot for the dashboard card; null before the
+  // first `audit-clusters.mjs --persist` run.
+  const latestQualitySnapshotQuery = supabase
+    .from("cluster_quality_snapshots")
+    .select("taken_at, singleton_rate, cluster_count, blindspot_flip_rate")
+    .order("taken_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  // 039: row_errors summed client-side (no head-count aggregate over a sum
+  // in supabase-js) — cheap, at most one row per ingest cycle per hour.
+  const ingestRowErrorsQuery = supabase
+    .from("ingest_cycles")
+    .select("row_errors")
+    .gte("finished_at", new Date(Date.now() - 3600_000).toISOString());
+
   // Run all the counts in parallel.
   const queries = [
     { name: "articlesTotal", q: supabase.from("articles").select("*", { count: "exact", head: true }) },
@@ -142,10 +169,13 @@ export const GET = withApiErrors(async (request: Request) => {
     { name: "sourcesTotal", q: supabase.from("sources").select("*", { count: "exact", head: true }) },
     { name: "sourcesActive", q: supabase.from("sources").select("*", { count: "exact", head: true }).eq("active", true) },
   ];
-  const [results, oldestPendingNeutralRes] = await Promise.all([
-    Promise.all(queries.map((entry) => entry.q)),
-    oldestPendingNeutralQuery,
-  ]);
+  const [results, oldestPendingNeutralRes, latestQualitySnapshotRes, ingestRowErrorsRes] =
+    await Promise.all([
+      Promise.all(queries.map((entry) => entry.q)),
+      oldestPendingNeutralQuery,
+      latestQualitySnapshotQuery,
+      ingestRowErrorsQuery,
+    ]);
 
   // Surface any per-query Supabase errors instead of silently dropping them
   // into `?? 0` — the previous shape would flatline a metric on RPC failure
@@ -193,6 +223,48 @@ export const GET = withApiErrors(async (request: Request) => {
     });
   }
 
+  // Migration 039 adds cluster_quality_snapshots and ingest_cycles. During a
+  // partially-applied migration window (this branch deployed to Vercel
+  // before 039 lands on Supabase — see docs/migration-guide.md), PostgREST
+  // reports the missing table as an *error* (PGRST205 / Postgres 42P01), not
+  // empty data. Treat that one code as "no data yet" so the rest of this
+  // pre-existing endpoint keeps working instead of hard-503ing; any other
+  // error still fails closed below.
+  const isMissingTable = (error: { code?: string } | null) =>
+    error?.code === "PGRST205" || error?.code === "42P01";
+
+  if (latestQualitySnapshotRes.error && !isMissingTable(latestQualitySnapshotRes.error)) {
+    console.error(
+      "[metrics] supabase latest-quality-snapshot query failure",
+      latestQualitySnapshotRes.error,
+    );
+    return apiError(503, "metrics query failed", {
+      code: "METRICS_QUERY_FAILED",
+      details: { queries: ["latestQualitySnapshot"] },
+    });
+  }
+  if (latestQualitySnapshotRes.error) {
+    console.warn(
+      "[metrics] cluster_quality_snapshots not found yet (migration 039 pending) — reporting quality: null",
+    );
+  }
+
+  if (ingestRowErrorsRes.error && !isMissingTable(ingestRowErrorsRes.error)) {
+    console.error(
+      "[metrics] supabase ingest-row-errors query failure",
+      ingestRowErrorsRes.error,
+    );
+    return apiError(503, "metrics query failed", {
+      code: "METRICS_QUERY_FAILED",
+      details: { queries: ["ingestRowErrors"] },
+    });
+  }
+  if (ingestRowErrorsRes.error) {
+    console.warn(
+      "[metrics] ingest_cycles not found yet (migration 039 pending) — reporting rowErrorsLastHour: 0",
+    );
+  }
+
   const clustersCount = clustersTotal.count ?? 0;
   const multiClusterCount = clustersMulti.count ?? 0;
   const totalArticles = articlesTotal.count ?? 0;
@@ -209,6 +281,28 @@ export const GET = withApiErrors(async (request: Request) => {
         Math.floor((Date.now() - new Date(oldestPendingFirstPublished).getTime()) / 1000),
       )
     : null;
+
+  const qualityRow = latestQualitySnapshotRes.data as {
+    taken_at: string;
+    singleton_rate: number | null;
+    cluster_count: number | null;
+    blindspot_flip_rate: number | null;
+  } | null;
+  const quality = qualityRow
+    ? {
+        takenAt: qualityRow.taken_at,
+        singletonRate: qualityRow.singleton_rate ?? 0,
+        clusterCount: qualityRow.cluster_count ?? 0,
+        blindspotFlipRate: qualityRow.blindspot_flip_rate ?? 0,
+      }
+    : null;
+
+  const ingestRowErrorRows =
+    (ingestRowErrorsRes.data as { row_errors: number | null }[] | null) ?? [];
+  const rowErrorsLastHour = ingestRowErrorRows.reduce(
+    (sum, row) => sum + (row.row_errors ?? 0),
+    0,
+  );
 
   const body: Metrics = {
     timestamp: new Date().toISOString(),
@@ -237,10 +331,14 @@ export const GET = withApiErrors(async (request: Request) => {
         ? Math.round((neutralizedCount / eligibleCount) * 100) / 100
         : 1,
       oldestPendingNeutralAgeSec: oldestPendingAgeSec,
+      quality,
     },
     sources: {
       total: sourcesTotal.count ?? 0,
       active: sourcesActive.count ?? 0,
+    },
+    ingest: {
+      rowErrorsLastHour,
     },
   };
 

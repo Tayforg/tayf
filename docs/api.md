@@ -43,14 +43,17 @@ Live counts for articles, clusters, and sources.
 {
   "timestamp": "...",
   "articles": { "total": 22000, "last24h": 850, "lastHour": 42, "politicsNullImage": 250, "politicsTotal": 12500, "withImage": 20500, "politicsImageMissingRatio": 0.02 },
-  "clusters": { "total": 1200, "multiArticle": 980, "blindspots": 12, "avgArticlesPerCluster": 18.33, "avgArticlesPerMultiCluster": 22.22, "neutralizedEligible": 700, "neutralized": 665, "neutralizedRatio": 0.95, "oldestPendingNeutralAgeSec": 480 },
-  "sources": { "total": 144, "active": 140 }
+  "clusters": { "total": 1200, "multiArticle": 980, "blindspots": 12, "avgArticlesPerCluster": 18.33, "avgArticlesPerMultiCluster": 22.22, "neutralizedEligible": 700, "neutralized": 665, "neutralizedRatio": 0.95, "oldestPendingNeutralAgeSec": 480, "quality": { "takenAt": "2026-09-08T03:00:00.000Z", "singletonRate": 0.25, "clusterCount": 80, "blindspotFlipRate": 0.0 } },
+  "sources": { "total": 144, "active": 140 },
+  "ingest": { "rowErrorsLastHour": 0 }
 }
 ```
 
 - `politicsImageMissingRatio`: `politicsNullImage / politicsTotal` (politics tier = `politika` + `son_dakika`), 2 decimals; 0 when `politicsTotal` is 0
 - `avgArticlesPerCluster` averages over ALL clusters (singletons included); `avgArticlesPerMultiCluster` averages only over multi-article clusters — `(total articles - singleton clusters) / multiArticle`, 2 decimals, 0 when `multiArticle` is 0
 - `neutralizedRatio`: `neutralized / neutralizedEligible`, 2 decimals; `oldestPendingNeutralAgeSec` is null when no eligible cluster is awaiting a neutral headline
+- `quality` (migration 039): summary of the latest `cluster_quality_snapshots` row (written by `node scripts/audit-clusters.mjs --json --persist`) — `null` before the first audit run, or during a partially-applied 039 migration window
+- `ingest.rowErrorsLastHour` (migration 039): `sum(row_errors)` over `ingest_cycles` rows finished in the last hour; `0` when the table is empty or not yet migrated
 
 ---
 

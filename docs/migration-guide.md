@@ -632,6 +632,36 @@ select public.recompute_blindspot_flags();
 
 ---
 
+## Quality telemetry (039): apply before this branch reaches Vercel, then redeploy `ingest`
+
+`039_quality_telemetry.sql` adds two new tables and one additive column, backing the daily cluster-quality audit and per-cycle ingest health:
+
+- `public.cluster_quality_snapshots` — one row per `node scripts/audit-clusters.mjs --json --persist` run. `GET /api/metrics` reads the latest row for `clusters.quality`.
+- `public.ingest_cycles` — one row per `ingest` Edge Function cycle, written best-effort (errors logged and swallowed, never fail the cycle) at cycle end on both the success and the failure path. `GET /api/metrics` sums `row_errors` over rows finished in the last hour for `ingest.rowErrorsLastHour`.
+- `articles.canonical_url` — nullable, additive column populated from the normaliser's existing `canonicalizeUrl()` helper.
+
+Both tables follow the 030/032/033 pattern: RLS enabled, no policies, explicit revoke from `anon`/`authenticated` — every reader/writer is `service_role`.
+
+> **This migration also gates the Vercel deploy, not just `ingest`.** `GET /api/metrics` (`src/app/api/metrics/route.ts`) queries both new tables unconditionally. Per the ordering invariant at the top of this document, merging/deploying this branch to Vercel before 039 is applied leaves `/api/metrics` reading tables that don't exist yet. The route treats a missing-relation error (PostgREST `PGRST205` / Postgres `42P01`) on *just those two queries* as "no data yet" rather than a hard failure, so `/api/metrics` keeps serving its pre-existing fields during the gap — but `clusters.quality` and `ingest.rowErrorsLastHour` won't populate until 039 lands, so apply it first regardless.
+
+**Apply the migration before redeploying `ingest` (and before deploying this branch's Vercel changes), in this order** (same reasoning as migration 034 — the deployed function/route must never select or write a column/table that doesn't exist yet):
+
+1. **Apply the migration first:**
+
+   ```bash
+   supabase db push
+   # ...or the one-at-a-time psql pattern from step 1 above:
+   psql "$DATABASE_URL" -f supabase/migrations/039_quality_telemetry.sql
+   ```
+
+2. **Redeploy `ingest` second.** The updated function writes `canonical_url` in every `articles` upsert and inserts into `ingest_cycles` at the end of each cycle. If the function reached production before the migration, the `canonical_url` key in the upsert payload would make PostgREST reject the whole batch (`column "canonical_url" of relation "articles" does not exist"`) — the per-row fallback in `runCycleBody` would then fail every row too, so ingestion would silently stop inserting until the migration lands. The `ingest_cycles` insert itself is safe either way (it is wrapped in a try/catch and only logs on failure), but there is no reason to take the `canonical_url` risk — apply the migration first.
+
+   ```bash
+   supabase functions deploy ingest --project-ref "$PROJECT_REF"
+   ```
+
+**Two new GitHub Actions repository secrets** are needed for `.github/workflows/cluster-audit.yml` (the scheduled `node scripts/audit-clusters.mjs --json --persist` run that writes into `cluster_quality_snapshots`): `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. Add them at **Settings → Secrets and variables → Actions → New repository secret**: `SUPABASE_URL` = `https://$PROJECT_REF.supabase.co` (the same value as `NEXT_PUBLIC_SUPABASE_URL` in `.env.local` — note `$PROJECT_REF` above is the bare project ref, not a URL, so it needs the `https://` / `.supabase.co` wrapping) and `SUPABASE_SERVICE_ROLE_KEY` = the value held in `$SR` above — the workflow needs the service-role key specifically (not the anon key) since both new tables revoke all PostgREST access from `anon`/`authenticated`.
+
 ## Weekly digest newsletter (040): apply migration, set env vars, redeploy
 
 Double-opt-in newsletter signup plus a Saturday-morning digest cron. Three new routes (`POST /api/newsletter`, `GET /api/newsletter/confirm`, `GET /api/newsletter/unsubscribe`), one new cron (`GET /api/cron/digest`, see `vercel.ts`), and one migration (`040_newsletter_tokens.sql`). No function redeploy needed — every route reads/writes via `createServerClient()` directly, same as `033_corrections.sql`.
@@ -649,6 +679,16 @@ psql "$DATABASE_URL" -f supabase/migrations/040_newsletter_tokens.sql
 **Verification:**
 
 ```sql
+-- Both should exist and be empty (or near-empty) immediately after the
+-- migration, before any cron/workflow run has landed a row yet.
+select count(*) from public.cluster_quality_snapshots;
+select count(*) from public.ingest_cycles;
+-- articles.canonical_url exists and is null for every pre-existing row:
+select count(*) from public.articles where canonical_url is not null;
+```
+
+After the next `ingest-drain` cron tick, `select count(*) from public.ingest_cycles;` should be non-zero and `canonical_url is not null` should hold for every article inserted since the redeploy.
+
 select confirm_token, unsubscribe_token, confirmed, confirmed_at
   from newsletter_subscribers limit 5;
 -- Expect: both tokens non-null on every row (including pre-existing ones),
@@ -754,6 +794,8 @@ Before declaring the migration complete:
 - [ ] At least one image backfilled in the last 15 minutes (`select count(*) from articles where image_url is not null and updated_at > now() - interval '15 minutes'`)
 - [ ] Migration 034 applied, `cluster-consumer` redeployed, and both `select public.recompute_bias_distribution(now() - interval '48 hours');` / `select public.recompute_blindspot_flags();` return 0 on a second call
 - [ ] `select kind, count(*) from sources group by kind order by kind;` shows non-zero `aggregator`, `wire`, and `niche` counts alongside `outlet`
+- [ ] Migration 039 applied before this branch was deployed to Vercel AND before `ingest` was redeployed (`GET /api/metrics` reads `cluster_quality_snapshots`/`ingest_cycles` unconditionally); `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set as GitHub Actions repository secrets; `select count(*) from public.ingest_cycles;` is non-zero after the next `ingest-drain` tick
+
 - [ ] Migration 040 applied — every `newsletter_subscribers` row has both `confirm_token` and `unsubscribe_token` set
 - [ ] `RESEND_API_KEY`, `NEWSLETTER_FROM` (if overriding the default), and `NEXT_PUBLIC_SITE_URL` set on Vercel production
 - [ ] `vercel --prod` deploy landed with `/api/cron/digest` (`0 6 * * 6`) alongside `/api/cron/headline` in the Cron Jobs dashboard

@@ -1,0 +1,5902 @@
+{
+  "seed": 20260908,
+  "note": "Deterministic synthetic corpus — regenerate with `node scripts/gen-audit-fixture.mjs`.",
+  "sources": [
+    {
+      "id": "src-01",
+      "slug": "pro-government-1",
+      "name": "pro-government-1",
+      "bias": "pro_government",
+      "active": true
+    },
+    {
+      "id": "src-02",
+      "slug": "pro-government-2",
+      "name": "pro-government-2",
+      "bias": "pro_government",
+      "active": true
+    },
+    {
+      "id": "src-03",
+      "slug": "pro-government-3",
+      "name": "pro-government-3",
+      "bias": "pro_government",
+      "active": true
+    },
+    {
+      "id": "src-04",
+      "slug": "pro-government-4",
+      "name": "pro-government-4",
+      "bias": "pro_government",
+      "active": true
+    },
+    {
+      "id": "src-05",
+      "slug": "pro-government-5",
+      "name": "pro-government-5",
+      "bias": "pro_government",
+      "active": true
+    },
+    {
+      "id": "src-06",
+      "slug": "pro-government-6",
+      "name": "pro-government-6",
+      "bias": "pro_government",
+      "active": true
+    },
+    {
+      "id": "src-07",
+      "slug": "gov-leaning-1",
+      "name": "gov-leaning-1",
+      "bias": "gov_leaning",
+      "active": true
+    },
+    {
+      "id": "src-08",
+      "slug": "gov-leaning-2",
+      "name": "gov-leaning-2",
+      "bias": "gov_leaning",
+      "active": true
+    },
+    {
+      "id": "src-09",
+      "slug": "gov-leaning-3",
+      "name": "gov-leaning-3",
+      "bias": "gov_leaning",
+      "active": true
+    },
+    {
+      "id": "src-10",
+      "slug": "gov-leaning-4",
+      "name": "gov-leaning-4",
+      "bias": "gov_leaning",
+      "active": true
+    },
+    {
+      "id": "src-11",
+      "slug": "state-media-1",
+      "name": "state-media-1",
+      "bias": "state_media",
+      "active": true
+    },
+    {
+      "id": "src-12",
+      "slug": "state-media-2",
+      "name": "state-media-2",
+      "bias": "state_media",
+      "active": true
+    },
+    {
+      "id": "src-13",
+      "slug": "center-1",
+      "name": "center-1",
+      "bias": "center",
+      "active": true
+    },
+    {
+      "id": "src-14",
+      "slug": "center-2",
+      "name": "center-2",
+      "bias": "center",
+      "active": true
+    },
+    {
+      "id": "src-15",
+      "slug": "center-3",
+      "name": "center-3",
+      "bias": "center",
+      "active": true
+    },
+    {
+      "id": "src-16",
+      "slug": "center-4",
+      "name": "center-4",
+      "bias": "center",
+      "active": true
+    },
+    {
+      "id": "src-17",
+      "slug": "center-5",
+      "name": "center-5",
+      "bias": "center",
+      "active": true
+    },
+    {
+      "id": "src-18",
+      "slug": "opposition-leaning-1",
+      "name": "opposition-leaning-1",
+      "bias": "opposition_leaning",
+      "active": true
+    },
+    {
+      "id": "src-19",
+      "slug": "opposition-leaning-2",
+      "name": "opposition-leaning-2",
+      "bias": "opposition_leaning",
+      "active": true
+    },
+    {
+      "id": "src-20",
+      "slug": "opposition-leaning-3",
+      "name": "opposition-leaning-3",
+      "bias": "opposition_leaning",
+      "active": true
+    },
+    {
+      "id": "src-21",
+      "slug": "opposition-leaning-4",
+      "name": "opposition-leaning-4",
+      "bias": "opposition_leaning",
+      "active": true
+    },
+    {
+      "id": "src-22",
+      "slug": "opposition-leaning-5",
+      "name": "opposition-leaning-5",
+      "bias": "opposition_leaning",
+      "active": true
+    },
+    {
+      "id": "src-23",
+      "slug": "opposition-1",
+      "name": "opposition-1",
+      "bias": "opposition",
+      "active": true
+    },
+    {
+      "id": "src-24",
+      "slug": "opposition-2",
+      "name": "opposition-2",
+      "bias": "opposition",
+      "active": true
+    },
+    {
+      "id": "src-25",
+      "slug": "opposition-3",
+      "name": "opposition-3",
+      "bias": "opposition",
+      "active": true
+    },
+    {
+      "id": "src-26",
+      "slug": "opposition-4",
+      "name": "opposition-4",
+      "bias": "opposition",
+      "active": true
+    },
+    {
+      "id": "src-27",
+      "slug": "opposition-5",
+      "name": "opposition-5",
+      "bias": "opposition",
+      "active": true
+    },
+    {
+      "id": "src-28",
+      "slug": "opposition-6",
+      "name": "opposition-6",
+      "bias": "opposition",
+      "active": true
+    },
+    {
+      "id": "src-29",
+      "slug": "nationalist-1",
+      "name": "nationalist-1",
+      "bias": "nationalist",
+      "active": true
+    },
+    {
+      "id": "src-30",
+      "slug": "nationalist-2",
+      "name": "nationalist-2",
+      "bias": "nationalist",
+      "active": true
+    },
+    {
+      "id": "src-31",
+      "slug": "nationalist-3",
+      "name": "nationalist-3",
+      "bias": "nationalist",
+      "active": true
+    },
+    {
+      "id": "src-32",
+      "slug": "islamist-conservative-1",
+      "name": "islamist-conservative-1",
+      "bias": "islamist_conservative",
+      "active": true
+    },
+    {
+      "id": "src-33",
+      "slug": "islamist-conservative-2",
+      "name": "islamist-conservative-2",
+      "bias": "islamist_conservative",
+      "active": true
+    },
+    {
+      "id": "src-34",
+      "slug": "islamist-conservative-3",
+      "name": "islamist-conservative-3",
+      "bias": "islamist_conservative",
+      "active": true
+    },
+    {
+      "id": "src-35",
+      "slug": "pro-kurdish-1",
+      "name": "pro-kurdish-1",
+      "bias": "pro_kurdish",
+      "active": true
+    },
+    {
+      "id": "src-36",
+      "slug": "pro-kurdish-2",
+      "name": "pro-kurdish-2",
+      "bias": "pro_kurdish",
+      "active": true
+    },
+    {
+      "id": "src-37",
+      "slug": "pro-kurdish-3",
+      "name": "pro-kurdish-3",
+      "bias": "pro_kurdish",
+      "active": true
+    },
+    {
+      "id": "src-38",
+      "slug": "international-1",
+      "name": "international-1",
+      "bias": "international",
+      "active": true
+    },
+    {
+      "id": "src-39",
+      "slug": "international-2",
+      "name": "international-2",
+      "bias": "international",
+      "active": true
+    },
+    {
+      "id": "src-40",
+      "slug": "international-3",
+      "name": "international-3",
+      "bias": "international",
+      "active": true
+    }
+  ],
+  "articles": [
+    {
+      "id": "art-0001",
+      "source_id": "src-33",
+      "title": "AKP lideri Erdoğan Ankara'da beklenen mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da beklenen mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T13:08:36.568Z",
+      "fingerprint": "8a9ca2acf256d5229f9afc680780137b5d09ae5d",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0002",
+      "source_id": "src-16",
+      "title": "AKP lideri Erdoğan Ankara'da sürpriz mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da sürpriz mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T13:52:46.528Z",
+      "fingerprint": "82eda20457a3abab6c8a9cd08d7e27d74e28022b",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0003",
+      "source_id": "src-31",
+      "title": "Dışişleri'nden gündem yaratan bir konuda flaş açıklama",
+      "description": "Dışişleri'nden gündem yaratan bir konuda flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T14:14:19.783Z",
+      "fingerprint": "b2c4c3350c775dbd5854352dea5f7228b2d41f05",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0004",
+      "source_id": "src-35",
+      "title": "CHP lideri Kılıçdaroğlu İstanbul'da flaş açıklama yaptı",
+      "description": "CHP lideri Kılıçdaroğlu İstanbul'da flaş açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:13:49.358Z",
+      "fingerprint": "fa091279ae8582edf27c4d51958f9698b66afac8",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0005",
+      "source_id": "src-37",
+      "title": "TCMB faiz kararını açıkladı: sürpriz adım",
+      "description": "TCMB faiz kararını açıkladı: sürpriz adım Detaylar haberimizde.",
+      "published_at": "2026-09-06T08:23:17.410Z",
+      "fingerprint": "d99fedc3d42b9593b5a727463e456087c623b246",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0006",
+      "source_id": "src-09",
+      "title": "Merkez Bankası enflasyon raporunda kritik uyarısı yaptı",
+      "description": "Merkez Bankası enflasyon raporunda kritik uyarısı yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T08:54:13.662Z",
+      "fingerprint": "adc4ac23d751e7bac3b92d4a1c83cda585c4d389",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0007",
+      "source_id": "src-23",
+      "title": "Bahçeli'den Meclis kürsüsünde önemli sözler",
+      "description": "Bahçeli'den Meclis kürsüsünde önemli sözler Detaylar haberimizde.",
+      "published_at": "2026-09-07T13:05:17.611Z",
+      "fingerprint": "dc6e9a239bd7127257c34226aad040923f81f016",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0008",
+      "source_id": "src-13",
+      "title": "İBB Başkanı İmamoğlu gündem yaratan bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu gündem yaratan bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T20:14:48.157Z",
+      "fingerprint": "05c4e9186bb33710322328361ef78b0cbdb9248d",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0009",
+      "source_id": "src-14",
+      "title": "Türkiye'den ABD ve Rusya'ya kritik mesaj",
+      "description": "Türkiye'den ABD ve Rusya'ya kritik mesaj Detaylar haberimizde.",
+      "published_at": "2026-09-06T06:19:16.684Z",
+      "fingerprint": "3eee190e140d2deae6b83db2a4468ff7b14d324a",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0010",
+      "source_id": "src-04",
+      "title": "Dışişleri'nden tartışmalı bir konuda flaş açıklama",
+      "description": "Dışişleri'nden tartışmalı bir konuda flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T06:44:03.725Z",
+      "fingerprint": "c88e2e25c709d140ba41163da9b16fc2f57e8c7c",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0011",
+      "source_id": "src-24",
+      "title": "DEM'den Diyarbakır'da tartışmalı bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da tartışmalı bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:15:19.501Z",
+      "fingerprint": "95c215333bd45786034bc63109d23c94076f5396",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0012",
+      "source_id": "src-13",
+      "title": "Diyarbakır'da DEM Parti beklenen bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti beklenen bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:35:38.228Z",
+      "fingerprint": "5b7bc6f12230f6ed782190e8fb61c543e9a5ec23",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0013",
+      "source_id": "src-37",
+      "title": "AFAD Kayseri'de sert bir tatbikat düzenledi",
+      "description": "AFAD Kayseri'de sert bir tatbikat düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-06T16:01:06.078Z",
+      "fingerprint": "a822253bc1bc2f09728d3e15e5bafd9a8a910e54",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0014",
+      "source_id": "src-18",
+      "title": "Seçim Kurulu'ndan İzmir için yeni karar geldi",
+      "description": "Seçim Kurulu'ndan İzmir için yeni karar geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T09:20:28.544Z",
+      "fingerprint": "d21e860733e9b67b58b0d2a5e3b892fe10f4b89e",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0015",
+      "source_id": "src-09",
+      "title": "TSK Şanlıurfa sınırında yeni bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında yeni bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:25:45.957Z",
+      "fingerprint": "7dca4d55ac1bdf8d75ff01c03b2d9a54d8c26961",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0016",
+      "source_id": "src-35",
+      "title": "TSK Şanlıurfa sınırında flaş bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında flaş bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:37:50.876Z",
+      "fingerprint": "1ddcd36da9ca8e16865a41e98869a0da974805be",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0017",
+      "source_id": "src-37",
+      "title": "Şanlıurfa'da TSK yeni bir açıklama yaptı",
+      "description": "Şanlıurfa'da TSK yeni bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T20:21:13.731Z",
+      "fingerprint": "2145af226098bf1a31475a2e67f4b6e8cecad879",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0018",
+      "source_id": "src-17",
+      "title": "Borsa İstanbul'da önemli bir hareketlilik yaşandı",
+      "description": "Borsa İstanbul'da önemli bir hareketlilik yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-06T20:52:49.049Z",
+      "fingerprint": "a4155301986524e79287359ca8e75c547a1a0329",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0019",
+      "source_id": "src-37",
+      "title": "CHP Genel Başkanı Özel Bursa'da sert konuştu",
+      "description": "CHP Genel Başkanı Özel Bursa'da sert konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-07T14:16:58.941Z",
+      "fingerprint": "5afea539d3071bc5982911771b79218bbe045db0",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0020",
+      "source_id": "src-27",
+      "title": "Yargıtay önemli davasında karar verdi",
+      "description": "Yargıtay önemli davasında karar verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T04:08:56.239Z",
+      "fingerprint": "260005a75a4bd9119651880c815fcd2fc86f4b1a",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0021",
+      "source_id": "src-27",
+      "title": "Danıştay'dan gündem yaratan bir karar çıktı",
+      "description": "Danıştay'dan gündem yaratan bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-07T04:48:55.004Z",
+      "fingerprint": "1e08043e1ef51a7ca2b556a3dccb75b8c1b2dbe9",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0022",
+      "source_id": "src-10",
+      "title": "AFAD'dan deprem bölgesinde sert bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde sert bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T02:13:50.481Z",
+      "fingerprint": "560a5f0079781afbd29898204e48f9ee6ae9e046",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0023",
+      "source_id": "src-29",
+      "title": "AFAD Kayseri'de sürpriz bir tatbikat düzenledi",
+      "description": "AFAD Kayseri'de sürpriz bir tatbikat düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-07T02:30:12.104Z",
+      "fingerprint": "a609958b3c03d49390f8849a2feef1ceb0769c46",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0024",
+      "source_id": "src-01",
+      "title": "Camilerde sürpriz bir uygulama başladı",
+      "description": "Camilerde sürpriz bir uygulama başladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T09:09:01.103Z",
+      "fingerprint": "6a963efd121840e4849127606d9f11ba6344b614",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0025",
+      "source_id": "src-33",
+      "title": "Borsa İstanbul'da kritik bir hareketlilik yaşandı",
+      "description": "Borsa İstanbul'da kritik bir hareketlilik yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-06T10:03:43.144Z",
+      "fingerprint": "4eef746567f3736b10b03aa239e928fe24b2496f",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0026",
+      "source_id": "src-29",
+      "title": "BIST100'de dolar ve dikkat çeken etkisi görüldü",
+      "description": "BIST100'de dolar ve dikkat çeken etkisi görüldü Detaylar haberimizde.",
+      "published_at": "2026-09-06T10:40:26.315Z",
+      "fingerprint": "1fbdf86ad252da50f7512d24f08c79aea52a5ea7",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0027",
+      "source_id": "src-07",
+      "title": "Cumhurbaşkanı Erdoğan Ankara'da dikkat çeken açıklamalarda bulundu",
+      "description": "Cumhurbaşkanı Erdoğan Ankara'da dikkat çeken açıklamalarda bulundu Detaylar haberimizde.",
+      "published_at": "2026-09-07T08:03:50.748Z",
+      "fingerprint": "3843cadb2150f2a5de946031d5123847681df88f",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0028",
+      "source_id": "src-26",
+      "title": "AKP lideri Erdoğan Ankara'da tartışmalı mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da tartışmalı mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T08:40:39.714Z",
+      "fingerprint": "6100c345ecf9a64f63c957bc256d90000ca70983",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0029",
+      "source_id": "src-18",
+      "title": "Erdoğan, AKP grup toplantısında beklenen konuştu",
+      "description": "Erdoğan, AKP grup toplantısında beklenen konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-07T09:00:03.900Z",
+      "fingerprint": "537e4c707cdba703f868259eb3932ab644b77f93",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0030",
+      "source_id": "src-10",
+      "title": "Türkiye'den ABD ve Rusya'ya flaş mesaj",
+      "description": "Türkiye'den ABD ve Rusya'ya flaş mesaj Detaylar haberimizde.",
+      "published_at": "2026-09-07T09:55:56.934Z",
+      "fingerprint": "fa3cdfa4a4bb073874546daca497ee804ea60f23",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0031",
+      "source_id": "src-21",
+      "title": "CHP lideri Kılıçdaroğlu İstanbul'da beklenen açıklama yaptı",
+      "description": "CHP lideri Kılıçdaroğlu İstanbul'da beklenen açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:24:41.986Z",
+      "fingerprint": "487206772c4ef6ba51b5ae45e443de62970c2ff4",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0032",
+      "source_id": "src-02",
+      "title": "CHP lideri Kılıçdaroğlu İstanbul'da kritik açıklama yaptı",
+      "description": "CHP lideri Kılıçdaroğlu İstanbul'da kritik açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:47:17.888Z",
+      "fingerprint": "0357fbb24993c1fc16745af80b61ed9ae1f60f5a",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0033",
+      "source_id": "src-22",
+      "title": "TCMB faiz kararını açıkladı: sürpriz adım",
+      "description": "TCMB faiz kararını açıkladı: sürpriz adım Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:06:59.747Z",
+      "fingerprint": "d99fedc3d42b9593b5a727463e456087c623b246",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0034",
+      "source_id": "src-26",
+      "title": "TCMB'den faiz ve enflasyon konusunda sert açıklama",
+      "description": "TCMB'den faiz ve enflasyon konusunda sert açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:46:06.954Z",
+      "fingerprint": "450266da2d52742a69d64eb65e57b23da3c87c44",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0035",
+      "source_id": "src-27",
+      "title": "MHP lideri Bahçeli Meclis'te sürpriz konuştu",
+      "description": "MHP lideri Bahçeli Meclis'te sürpriz konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-07T07:23:32.372Z",
+      "fingerprint": "7c04f1fa6309bdd57de6663f73e308451e886e59",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0036",
+      "source_id": "src-01",
+      "title": "İBB Başkanı İmamoğlu önemli bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu önemli bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-07T20:10:17.536Z",
+      "fingerprint": "3e5746efa248f30b3474ab89ecdf5564ffd7ddb4",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0037",
+      "source_id": "src-40",
+      "title": "Dışişleri Bakanlığı'ndan tartışmalı açıklama",
+      "description": "Dışişleri Bakanlığı'ndan tartışmalı açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:28:47.937Z",
+      "fingerprint": "a06f84ac7406158d2037cbd49dbd21ae3f5d7178",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0038",
+      "source_id": "src-33",
+      "title": "Dışişleri Bakanlığı'ndan flaş açıklama",
+      "description": "Dışişleri Bakanlığı'ndan flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:41:49.014Z",
+      "fingerprint": "0e9027577d87df33a61140defbf02c12b00d6e13",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0039",
+      "source_id": "src-30",
+      "title": "Dışişleri'nden önemli bir konuda flaş açıklama",
+      "description": "Dışişleri'nden önemli bir konuda flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:27:05.746Z",
+      "fingerprint": "e1ae8dfd9af55af3af8b8c86a3ce0654169b31c9",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0040",
+      "source_id": "src-28",
+      "title": "Türkiye'den ABD ve Rusya'ya sert mesaj",
+      "description": "Türkiye'den ABD ve Rusya'ya sert mesaj Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:49:56.527Z",
+      "fingerprint": "85f191745c0cdc84aa26f74a73145c3914c66ae8",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0041",
+      "source_id": "src-09",
+      "title": "Diyarbakır'da DEM Parti sert bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti sert bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:03:19.251Z",
+      "fingerprint": "1a5332b353fc00d3641a7d10f7ed742caad6b417",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0042",
+      "source_id": "src-39",
+      "title": "DEM Parti Diyarbakır'da kritik açıklaması yaptı",
+      "description": "DEM Parti Diyarbakır'da kritik açıklaması yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:40:31.914Z",
+      "fingerprint": "cf3903cb34d293604674ea9eb770889b9b06a1a0",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0043",
+      "source_id": "src-25",
+      "title": "DEM Parti Diyarbakır'da kritik açıklaması yaptı",
+      "description": "DEM Parti Diyarbakır'da kritik açıklaması yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T06:17:55.611Z",
+      "fingerprint": "cf3903cb34d293604674ea9eb770889b9b06a1a0",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0044",
+      "source_id": "src-33",
+      "title": "İzmir'de YSK tartışmalı bir açıklama yaptı",
+      "description": "İzmir'de YSK tartışmalı bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T17:28:13.079Z",
+      "fingerprint": "491fbf8ef4f66105021ba3a425c206805cd7c44c",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0045",
+      "source_id": "src-09",
+      "title": "YSK İzmir'deki seçimle ilgili kritik kararını açıkladı",
+      "description": "YSK İzmir'deki seçimle ilgili kritik kararını açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T17:59:32.907Z",
+      "fingerprint": "845904159344556835c9da1c754be1d1a176c916",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0046",
+      "source_id": "src-05",
+      "title": "Şanlıurfa'da TSK tartışmalı bir açıklama yaptı",
+      "description": "Şanlıurfa'da TSK tartışmalı bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:16:40.944Z",
+      "fingerprint": "a50e393a4ef5ca61d2ad71bed7a741ca9c13dab2",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0047",
+      "source_id": "src-15",
+      "title": "TSK Şanlıurfa sınırında tartışmalı bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında tartışmalı bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:38:03.086Z",
+      "fingerprint": "dc017377dd768dab06bba0ccb0c2b057a9c12f7f",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0048",
+      "source_id": "src-07",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında sert hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında sert hareket Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:29:59.964Z",
+      "fingerprint": "0547f67dddfd535d5ad99b3ff33cdb4130f07bda",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0049",
+      "source_id": "src-22",
+      "title": "CHP Genel Başkanı Özel Bursa'da yeni konuştu",
+      "description": "CHP Genel Başkanı Özel Bursa'da yeni konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:25:48.068Z",
+      "fingerprint": "af38c16a37711a323e9244c3425c78f6d79c2cec",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0050",
+      "source_id": "src-40",
+      "title": "CHP'li Özel Bursa mitinginde yeni bir açıklama yaptı",
+      "description": "CHP'li Özel Bursa mitinginde yeni bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:54:06.563Z",
+      "fingerprint": "1a9e58effcb267bbe4c0808553b477a19b95c36f",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0051",
+      "source_id": "src-31",
+      "title": "Yargıtay sürpriz davasında karar verdi",
+      "description": "Yargıtay sürpriz davasında karar verdi Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:19:24.901Z",
+      "fingerprint": "e1d9c90537cc981b6d5776c47887271c4dd0e8c2",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0052",
+      "source_id": "src-32",
+      "title": "Danıştay'dan beklenen bir karar çıktı",
+      "description": "Danıştay'dan beklenen bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:37:38.724Z",
+      "fingerprint": "63ed614334e1849cdcf1ee3148567db9bfaa945f",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0053",
+      "source_id": "src-06",
+      "title": "Kayseri'de AFAD'dan sürpriz açıklama geldi",
+      "description": "Kayseri'de AFAD'dan sürpriz açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T19:11:14.494Z",
+      "fingerprint": "f9441ffcc8bb970cc57102fc64051ca47ef4fb72",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0054",
+      "source_id": "src-35",
+      "title": "AFAD'dan deprem bölgesinde sürpriz bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde sürpriz bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T19:50:02.899Z",
+      "fingerprint": "c492bcd46bcdd7ee5cc43e700a5eba90209f67e2",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0055",
+      "source_id": "src-24",
+      "title": "Camilerde kritik bir uygulama başladı",
+      "description": "Camilerde kritik bir uygulama başladı Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:08:53.054Z",
+      "fingerprint": "b7dfae8371116f8b6ea303e5cf66f3e8cce3e0fe",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0056",
+      "source_id": "src-32",
+      "title": "Borsa'da flaş sonrası sert hareket",
+      "description": "Borsa'da flaş sonrası sert hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:15:30.704Z",
+      "fingerprint": "6376c2195b0aff079301aa990d04f00ecbad15dd",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0057",
+      "source_id": "src-25",
+      "title": "BIST100'de dolar ve yeni etkisi görüldü",
+      "description": "BIST100'de dolar ve yeni etkisi görüldü Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:38:36.471Z",
+      "fingerprint": "1bf99c2249eb0d164405d215c71f4bca7a30af75",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0058",
+      "source_id": "src-11",
+      "title": "Borsa İstanbul'da flaş bir hareketlilik yaşandı",
+      "description": "Borsa İstanbul'da flaş bir hareketlilik yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:21:37.958Z",
+      "fingerprint": "cfd50201d134bd4741f339ed6035a752cfb32faa",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0059",
+      "source_id": "src-28",
+      "title": "AKP lideri Erdoğan Ankara'da sert mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da sert mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:20:52.883Z",
+      "fingerprint": "a642055803ed08c8e96cf13ee6f0a8e12f0fa47c",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0060",
+      "source_id": "src-10",
+      "title": "Cumhurbaşkanı Erdoğan Ankara'da flaş açıklamalarda bulundu",
+      "description": "Cumhurbaşkanı Erdoğan Ankara'da flaş açıklamalarda bulundu Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:57:41.471Z",
+      "fingerprint": "792bfdc8095c479fb4d179ddb54ffb96c2465920",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0061",
+      "source_id": "src-20",
+      "title": "CHP lideri Kılıçdaroğlu İstanbul'da önemli açıklama yaptı",
+      "description": "CHP lideri Kılıçdaroğlu İstanbul'da önemli açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:02:54.068Z",
+      "fingerprint": "c38dd5820ccf641e9c16cbd58688d3423736000b",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0062",
+      "source_id": "src-30",
+      "title": "TCMB faiz kararını açıkladı: sürpriz adım",
+      "description": "TCMB faiz kararını açıkladı: sürpriz adım Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:19:48.799Z",
+      "fingerprint": "d99fedc3d42b9593b5a727463e456087c623b246",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0063",
+      "source_id": "src-31",
+      "title": "TCMB'den faiz ve enflasyon konusunda tartışmalı açıklama",
+      "description": "TCMB'den faiz ve enflasyon konusunda tartışmalı açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:35:42.596Z",
+      "fingerprint": "f04359db5f3a3cc05ddb49f4482cd410c86917a7",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0064",
+      "source_id": "src-20",
+      "title": "Bahçeli'den Meclis kürsüsünde beklenen sözler",
+      "description": "Bahçeli'den Meclis kürsüsünde beklenen sözler Detaylar haberimizde.",
+      "published_at": "2026-09-07T22:18:53.119Z",
+      "fingerprint": "cb041c8c457c830ab176335320b7b60e2e18787f",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0065",
+      "source_id": "src-19",
+      "title": "İBB Başkanı İmamoğlu tartışmalı bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu tartışmalı bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:22:51.300Z",
+      "fingerprint": "6d6a68e9b7e058e6bfec64bfa86faa23fbe32de3",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0066",
+      "source_id": "src-10",
+      "title": "Türkiye'den ABD ve Rusya'ya önemli mesaj",
+      "description": "Türkiye'den ABD ve Rusya'ya önemli mesaj Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:02:41.502Z",
+      "fingerprint": "0b1370669019dd32e164857feaf491f5970f1dcd",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0067",
+      "source_id": "src-40",
+      "title": "Dışişleri Bakanlığı'ndan sürpriz açıklama",
+      "description": "Dışişleri Bakanlığı'ndan sürpriz açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:59:45.473Z",
+      "fingerprint": "22d216124b302f94e44d6eca8b0e5bb00d2beb8f",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0068",
+      "source_id": "src-04",
+      "title": "Dışişleri'nden dikkat çeken bir konuda flaş açıklama",
+      "description": "Dışişleri'nden dikkat çeken bir konuda flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T02:28:36.088Z",
+      "fingerprint": "d2290155983e5752a2d7d1716a756c9fb365d855",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0069",
+      "source_id": "src-20",
+      "title": "DEM'den Diyarbakır'da tartışmalı bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da tartışmalı bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:11:08.420Z",
+      "fingerprint": "95c215333bd45786034bc63109d23c94076f5396",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0070",
+      "source_id": "src-38",
+      "title": "Seçim Kurulu'ndan İzmir için beklenen karar geldi",
+      "description": "Seçim Kurulu'ndan İzmir için beklenen karar geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T17:27:52.597Z",
+      "fingerprint": "16ca663b805540110217930e5d88577373983610",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0071",
+      "source_id": "src-26",
+      "title": "Seçim Kurulu'ndan İzmir için önemli karar geldi",
+      "description": "Seçim Kurulu'ndan İzmir için önemli karar geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T17:55:22.816Z",
+      "fingerprint": "2749aea915de788cb104fd37fafa83a969f97e4e",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0072",
+      "source_id": "src-09",
+      "title": "Şanlıurfa'da TSK sürpriz bir açıklama yaptı",
+      "description": "Şanlıurfa'da TSK sürpriz bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:01:49.880Z",
+      "fingerprint": "00229d5b2a4af4df14869dbc146c6da5beb84e50",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0073",
+      "source_id": "src-38",
+      "title": "TSK Şanlıurfa sınırında sert bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında sert bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:55:56.813Z",
+      "fingerprint": "687a5de7a4565af95ecfcba1a0b4d0826ded58cd",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0074",
+      "source_id": "src-34",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında tartışmalı hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında tartışmalı hareket Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:16:56.522Z",
+      "fingerprint": "bb6494783ce72f73cc732e491ba94eea82a15dc8",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0075",
+      "source_id": "src-01",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında tartışmalı hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında tartışmalı hareket Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:48:49.298Z",
+      "fingerprint": "bb6494783ce72f73cc732e491ba94eea82a15dc8",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0076",
+      "source_id": "src-18",
+      "title": "CHP'li Özel Bursa mitinginde tartışmalı bir açıklama yaptı",
+      "description": "CHP'li Özel Bursa mitinginde tartışmalı bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:06:51.258Z",
+      "fingerprint": "75cc6fd26d26c5d5816a3d9ecbb73f292e205a23",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0077",
+      "source_id": "src-14",
+      "title": "CHP Genel Başkanı Özel Bursa'da tartışmalı konuştu",
+      "description": "CHP Genel Başkanı Özel Bursa'da tartışmalı konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:31:41.731Z",
+      "fingerprint": "ba6acda80b9a10aa7528c7d44b1aa95b6c4557a0",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0078",
+      "source_id": "src-10",
+      "title": "Özgür Özel'den Bursa'da dikkat çeken çıkış geldi",
+      "description": "Özgür Özel'den Bursa'da dikkat çeken çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T19:26:07.015Z",
+      "fingerprint": "59fe728bae4eab46af91ad94e8c387a6ce11e7d9",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0079",
+      "source_id": "src-29",
+      "title": "Yargıtay flaş davasında karar verdi",
+      "description": "Yargıtay flaş davasında karar verdi Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:16:06.455Z",
+      "fingerprint": "d3cb109d3258486aca3b92bf5615181788a64539",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0080",
+      "source_id": "src-05",
+      "title": "AFAD Kayseri'de flaş bir tatbikat düzenledi",
+      "description": "AFAD Kayseri'de flaş bir tatbikat düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-06T08:15:03.491Z",
+      "fingerprint": "0958331cd58cb4d59606f068a8224dacc8d15cf5",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0081",
+      "source_id": "src-33",
+      "title": "AFAD'dan deprem bölgesinde gündem yaratan bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde gündem yaratan bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-06T08:44:02.090Z",
+      "fingerprint": "9e51137c2f0300572440ac13765e99dc40a38d75",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0082",
+      "source_id": "src-19",
+      "title": "Kayseri'de AFAD'dan sürpriz açıklama geldi",
+      "description": "Kayseri'de AFAD'dan sürpriz açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T09:03:33.717Z",
+      "fingerprint": "f9441ffcc8bb970cc57102fc64051ca47ef4fb72",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0083",
+      "source_id": "src-10",
+      "title": "Diyanet İşleri Başkanlığı'ndan sürpriz açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan sürpriz açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:19:11.662Z",
+      "fingerprint": "32a27386c67064345bd665178a00a6ec55c110a9",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0084",
+      "source_id": "src-33",
+      "title": "Diyanet'ten Ramazan öncesi dikkat çeken bir duyuru",
+      "description": "Diyanet'ten Ramazan öncesi dikkat çeken bir duyuru Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:53:14.327Z",
+      "fingerprint": "1f56422b63b8a012c03e76ce29b471796a30bb96",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0085",
+      "source_id": "src-18",
+      "title": "Diyanet İşleri Başkanlığı'ndan dikkat çeken açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan dikkat çeken açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-08T02:11:23.454Z",
+      "fingerprint": "9e495924d3bd163cb603a3a37cf4fd2d507302d0",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0086",
+      "source_id": "src-10",
+      "title": "Diyanet İşleri Başkanlığı'ndan yeni açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan yeni açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-08T02:48:44.021Z",
+      "fingerprint": "43ceeee781ca51025f127860183baaed4155406c",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0087",
+      "source_id": "src-33",
+      "title": "BIST100'de dolar ve tartışmalı etkisi görüldü",
+      "description": "BIST100'de dolar ve tartışmalı etkisi görüldü Detaylar haberimizde.",
+      "published_at": "2026-09-06T12:05:51.185Z",
+      "fingerprint": "fa3ddcd7bcc3ac80f7387d4ecb5d54b172a997d0",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0088",
+      "source_id": "src-14",
+      "title": "AKP lideri Erdoğan Ankara'da yeni mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da yeni mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T07:15:57.744Z",
+      "fingerprint": "e1e6c08b4a6e1c825f7ea9895453ea5af512b4fa",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0089",
+      "source_id": "src-32",
+      "title": "CHP'den İstanbul'da sürpriz çıkışı geldi",
+      "description": "CHP'den İstanbul'da sürpriz çıkışı geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T11:13:28.656Z",
+      "fingerprint": "a3d52f171d19b1a8774f4d02d09635b4db5ec7c7",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0090",
+      "source_id": "src-35",
+      "title": "TCMB faiz kararını açıkladı: beklenen adım",
+      "description": "TCMB faiz kararını açıkladı: beklenen adım Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:11:00.355Z",
+      "fingerprint": "c7b894b0cfb73668690a5f590a5761921ff9ac26",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0091",
+      "source_id": "src-34",
+      "title": "TCMB faiz kararını açıkladı: beklenen adım",
+      "description": "TCMB faiz kararını açıkladı: beklenen adım Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:48:53.723Z",
+      "fingerprint": "c7b894b0cfb73668690a5f590a5761921ff9ac26",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0092",
+      "source_id": "src-24",
+      "title": "MHP grubunda sert bir tartışma yaşandı",
+      "description": "MHP grubunda sert bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-06T08:26:52.031Z",
+      "fingerprint": "663f8d1acfa724771d46c909a90e742ac77ce0dd",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0093",
+      "source_id": "src-14",
+      "title": "İmamoğlu, İstanbul'da flaş bir konuda konuştu",
+      "description": "İmamoğlu, İstanbul'da flaş bir konuda konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-08T02:07:51.719Z",
+      "fingerprint": "064668ad649d081d15e8585a5078bfa66293648a",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0094",
+      "source_id": "src-01",
+      "title": "CHP'li İmamoğlu'ndan tartışmalı açıklama geldi",
+      "description": "CHP'li İmamoğlu'ndan tartışmalı açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-08T02:58:28.289Z",
+      "fingerprint": "1c55e296e77366ac74b30dd245a550062ddf6075",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0095",
+      "source_id": "src-16",
+      "title": "CHP'li İmamoğlu'ndan sürpriz açıklama geldi",
+      "description": "CHP'li İmamoğlu'ndan sürpriz açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-08T03:07:09.606Z",
+      "fingerprint": "e4ee27274afbb9a053c97e66ead994be8bd7c20a",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0096",
+      "source_id": "src-11",
+      "title": "Dışişleri Bakanlığı'ndan dikkat çeken açıklama",
+      "description": "Dışişleri Bakanlığı'ndan dikkat çeken açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:18:16.458Z",
+      "fingerprint": "b86047d9aca1eee7275e076eb866e0b0c4a8dd64",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0097",
+      "source_id": "src-10",
+      "title": "DEM'den Diyarbakır'da tartışmalı bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da tartışmalı bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:04:18.928Z",
+      "fingerprint": "95c215333bd45786034bc63109d23c94076f5396",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0098",
+      "source_id": "src-14",
+      "title": "DEM'den Diyarbakır'da gündem yaratan bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da gündem yaratan bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:51:37.375Z",
+      "fingerprint": "9d443edecf0bb17d63e0c9aef668734b8b035e0d",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0099",
+      "source_id": "src-16",
+      "title": "YSK İzmir'deki seçimle ilgili tartışmalı kararını açıkladı",
+      "description": "YSK İzmir'deki seçimle ilgili tartışmalı kararını açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:07:11.819Z",
+      "fingerprint": "017f271c301a54393d254a828b3a7c74e159f9a8",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0100",
+      "source_id": "src-31",
+      "title": "İzmir'de YSK önemli bir açıklama yaptı",
+      "description": "İzmir'de YSK önemli bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:55:13.231Z",
+      "fingerprint": "6441eb567d604246a32b987dd9fb66f7a98d04d0",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0101",
+      "source_id": "src-21",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında dikkat çeken hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında dikkat çeken hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T13:05:26.565Z",
+      "fingerprint": "e2ac2b6a627ca564023022362915749c6988cc18",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0102",
+      "source_id": "src-34",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında beklenen hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında beklenen hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T13:58:09.893Z",
+      "fingerprint": "25f1416f0fb3aac348627170fd2ecb240a3323e6",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0103",
+      "source_id": "src-20",
+      "title": "TSK Şanlıurfa sınırında flaş bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında flaş bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:21:01.528Z",
+      "fingerprint": "1ddcd36da9ca8e16865a41e98869a0da974805be",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0104",
+      "source_id": "src-18",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında yeni hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında yeni hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:57:03.077Z",
+      "fingerprint": "b24dd860f28570fd8860891ae14f1d512fa85061",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0105",
+      "source_id": "src-39",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında dikkat çeken hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında dikkat çeken hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:23:13.775Z",
+      "fingerprint": "e2ac2b6a627ca564023022362915749c6988cc18",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0106",
+      "source_id": "src-37",
+      "title": "Şanlıurfa'da TSK sert bir açıklama yaptı",
+      "description": "Şanlıurfa'da TSK sert bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:42:13.182Z",
+      "fingerprint": "f6e96c6d3c06f96596413f991e01cde34e6cdedb",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0107",
+      "source_id": "src-04",
+      "title": "Şanlıurfa'da TSK beklenen bir açıklama yaptı",
+      "description": "Şanlıurfa'da TSK beklenen bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T16:29:57.891Z",
+      "fingerprint": "31cafef06111468830c83f0878c77cb05d80084f",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0108",
+      "source_id": "src-20",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında yeni hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında yeni hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T16:39:49.966Z",
+      "fingerprint": "b24dd860f28570fd8860891ae14f1d512fa85061",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0109",
+      "source_id": "src-27",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında kritik hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında kritik hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T17:00:52.843Z",
+      "fingerprint": "7ddea600986ab3399154c47f37bdb76c4e48511e",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0110",
+      "source_id": "src-01",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında önemli hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında önemli hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T17:44:06.594Z",
+      "fingerprint": "00d52325f92534c57609693986552a28c5a79daf",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0111",
+      "source_id": "src-04",
+      "title": "Şanlıurfa'da TSK kritik bir açıklama yaptı",
+      "description": "Şanlıurfa'da TSK kritik bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:29:47.231Z",
+      "fingerprint": "f6e1ff0e0810dbb9d0f1a6f27345fb518c81bf3c",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0112",
+      "source_id": "src-29",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında gündem yaratan hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında gündem yaratan hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:41:47.403Z",
+      "fingerprint": "6f785cc4538613196b067662333f1b157c310c31",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0113",
+      "source_id": "src-08",
+      "title": "CHP Genel Başkanı Özel Bursa'da tartışmalı konuştu",
+      "description": "CHP Genel Başkanı Özel Bursa'da tartışmalı konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:19:18.683Z",
+      "fingerprint": "ba6acda80b9a10aa7528c7d44b1aa95b6c4557a0",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0114",
+      "source_id": "src-08",
+      "title": "CHP'li Özel Bursa mitinginde dikkat çeken bir açıklama yaptı",
+      "description": "CHP'li Özel Bursa mitinginde dikkat çeken bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:58:57.767Z",
+      "fingerprint": "b587805caa2d18899de6fe54458b80e866cfceb0",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0115",
+      "source_id": "src-15",
+      "title": "CHP'li Özel Bursa mitinginde flaş bir açıklama yaptı",
+      "description": "CHP'li Özel Bursa mitinginde flaş bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T22:07:41.987Z",
+      "fingerprint": "77203614feef9905f62ea6cfdb34752f69cc4da5",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0116",
+      "source_id": "src-33",
+      "title": "CHP Genel Başkanı Özel Bursa'da önemli konuştu",
+      "description": "CHP Genel Başkanı Özel Bursa'da önemli konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T22:49:11.424Z",
+      "fingerprint": "a9aaaa65a3dcbdc26ed8f17899148829ae99fff1",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0117",
+      "source_id": "src-36",
+      "title": "Danıştay'dan flaş bir karar çıktı",
+      "description": "Danıştay'dan flaş bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-07T23:28:12.232Z",
+      "fingerprint": "b4f61ff931f803be6a9329587d6eb2aefd43ea11",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0118",
+      "source_id": "src-24",
+      "title": "Danıştay'dan kritik bir karar çıktı",
+      "description": "Danıştay'dan kritik bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-07T23:41:01.172Z",
+      "fingerprint": "76facbd551e30145aefd40f6ffea661f4262f619",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0119",
+      "source_id": "src-37",
+      "title": "Danıştay'dan kritik bir karar çıktı",
+      "description": "Danıştay'dan kritik bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:24:59.449Z",
+      "fingerprint": "76facbd551e30145aefd40f6ffea661f4262f619",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0120",
+      "source_id": "src-27",
+      "title": "Danıştay'dan gündem yaratan bir karar çıktı",
+      "description": "Danıştay'dan gündem yaratan bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:41:45.232Z",
+      "fingerprint": "1e08043e1ef51a7ca2b556a3dccb75b8c1b2dbe9",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0121",
+      "source_id": "src-34",
+      "title": "Adalet Bakanlığı'ndan beklenen bir açıklama geldi",
+      "description": "Adalet Bakanlığı'ndan beklenen bir açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:02:08.692Z",
+      "fingerprint": "a111909b0f491d711d993d86871e10277fa8c314",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0122",
+      "source_id": "src-04",
+      "title": "Danıştay'dan önemli bir karar çıktı",
+      "description": "Danıştay'dan önemli bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:31:50.911Z",
+      "fingerprint": "29349b3c9a07ad621d89ab74c3e8e5da3dd05f79",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0123",
+      "source_id": "src-27",
+      "title": "Adalet Bakanlığı'ndan dikkat çeken bir açıklama geldi",
+      "description": "Adalet Bakanlığı'ndan dikkat çeken bir açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-08T02:07:24.417Z",
+      "fingerprint": "c79ed0d09be6a7f3e9de66c81f7cdde22c663248",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0124",
+      "source_id": "src-38",
+      "title": "Yargıtay yeni davasında karar verdi",
+      "description": "Yargıtay yeni davasında karar verdi Detaylar haberimizde.",
+      "published_at": "2026-09-08T02:55:42.650Z",
+      "fingerprint": "b9e772a03db36734990f917c01337a62737cac44",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0125",
+      "source_id": "src-20",
+      "title": "Kayseri'de AFAD'dan sert açıklama geldi",
+      "description": "Kayseri'de AFAD'dan sert açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:16:11.676Z",
+      "fingerprint": "128b12cc5f753e2f6b187866cbf3c742f09748b0",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0126",
+      "source_id": "src-02",
+      "title": "Diyanet İşleri Başkanlığı'ndan flaş açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T21:15:32.764Z",
+      "fingerprint": "ff90b5263be8047cc5f80fb8d8afb04159f182aa",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0127",
+      "source_id": "src-03",
+      "title": "Diyanet'ten Ramazan öncesi dikkat çeken bir duyuru",
+      "description": "Diyanet'ten Ramazan öncesi dikkat çeken bir duyuru Detaylar haberimizde.",
+      "published_at": "2026-09-07T21:33:07.167Z",
+      "fingerprint": "1f56422b63b8a012c03e76ce29b471796a30bb96",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0128",
+      "source_id": "src-15",
+      "title": "Diyanet İşleri Başkanlığı'ndan sürpriz açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan sürpriz açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T22:00:45.125Z",
+      "fingerprint": "32a27386c67064345bd665178a00a6ec55c110a9",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0129",
+      "source_id": "src-31",
+      "title": "Diyanet İşleri Başkanlığı'ndan yeni açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan yeni açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T22:49:41.036Z",
+      "fingerprint": "43ceeee781ca51025f127860183baaed4155406c",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0130",
+      "source_id": "src-02",
+      "title": "Borsa İstanbul'da önemli bir hareketlilik yaşandı",
+      "description": "Borsa İstanbul'da önemli bir hareketlilik yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:24:44.465Z",
+      "fingerprint": "a4155301986524e79287359ca8e75c547a1a0329",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0131",
+      "source_id": "src-34",
+      "title": "Borsa'da yeni sonrası sert hareket",
+      "description": "Borsa'da yeni sonrası sert hareket Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:55:35.616Z",
+      "fingerprint": "657c5bd6d0b1ca2218b32cca72f9e1d53a3c4138",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0132",
+      "source_id": "src-16",
+      "title": "Borsa İstanbul'da önemli bir hareketlilik yaşandı",
+      "description": "Borsa İstanbul'da önemli bir hareketlilik yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-07T17:08:15.605Z",
+      "fingerprint": "a4155301986524e79287359ca8e75c547a1a0329",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0133",
+      "source_id": "src-12",
+      "title": "BIST100'de dolar ve beklenen etkisi görüldü",
+      "description": "BIST100'de dolar ve beklenen etkisi görüldü Detaylar haberimizde.",
+      "published_at": "2026-09-07T17:50:31.247Z",
+      "fingerprint": "532c2ac3e996024da9c7c885164725883305c394",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0134",
+      "source_id": "src-39",
+      "title": "Erdoğan, AKP grup toplantısında kritik konuştu",
+      "description": "Erdoğan, AKP grup toplantısında kritik konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:09:36.642Z",
+      "fingerprint": "90064781cc2256e990999de87623fa5ab5e15322",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0135",
+      "source_id": "src-06",
+      "title": "AKP lideri Erdoğan Ankara'da önemli mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da önemli mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-06T15:56:37.759Z",
+      "fingerprint": "40f34beb63e47207d394c14d7adbb238da824237",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0136",
+      "source_id": "src-16",
+      "title": "Cumhurbaşkanı Erdoğan Ankara'da gündem yaratan açıklamalarda bulundu",
+      "description": "Cumhurbaşkanı Erdoğan Ankara'da gündem yaratan açıklamalarda bulundu Detaylar haberimizde.",
+      "published_at": "2026-09-06T16:16:13.549Z",
+      "fingerprint": "44aba9f276fbc57ca4696adae1316d1da99996cd",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0137",
+      "source_id": "src-33",
+      "title": "Kılıçdaroğlu, CHP il binasında gündem yaratan konuştu",
+      "description": "Kılıçdaroğlu, CHP il binasında gündem yaratan konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:16:09.646Z",
+      "fingerprint": "6453fca484ebf9ef5fc661452b0191a099c98a51",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0138",
+      "source_id": "src-14",
+      "title": "CHP lideri Kılıçdaroğlu İstanbul'da tartışmalı açıklama yaptı",
+      "description": "CHP lideri Kılıçdaroğlu İstanbul'da tartışmalı açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:50:07.811Z",
+      "fingerprint": "94e701c968133ec42896a3bb7ec521ff3b405970",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0139",
+      "source_id": "src-33",
+      "title": "Merkez Bankası enflasyon raporunda dikkat çeken uyarısı yaptı",
+      "description": "Merkez Bankası enflasyon raporunda dikkat çeken uyarısı yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:22:15.918Z",
+      "fingerprint": "a4fa17bc3e3f32b14c0cb4bc8a9d720231230cc2",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0140",
+      "source_id": "src-12",
+      "title": "TCMB'den faiz ve enflasyon konusunda gündem yaratan açıklama",
+      "description": "TCMB'den faiz ve enflasyon konusunda gündem yaratan açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:36:39.567Z",
+      "fingerprint": "4b116b58a8da6de35b488c0f64dff77421d04534",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0141",
+      "source_id": "src-31",
+      "title": "MHP grubunda gündem yaratan bir tartışma yaşandı",
+      "description": "MHP grubunda gündem yaratan bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-07T04:28:14.735Z",
+      "fingerprint": "c178a2cd34fca00d614789471302aef31ee9dd6a",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0142",
+      "source_id": "src-39",
+      "title": "MHP lideri Bahçeli Meclis'te flaş konuştu",
+      "description": "MHP lideri Bahçeli Meclis'te flaş konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-07T04:36:01.192Z",
+      "fingerprint": "08f406908cead0aaac68489a05474771b3e2ba35",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0143",
+      "source_id": "src-12",
+      "title": "MHP grubunda beklenen bir tartışma yaşandı",
+      "description": "MHP grubunda beklenen bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:03:31.302Z",
+      "fingerprint": "2afd2bab6a7f194177b9738c7f9394b48b1984db",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0144",
+      "source_id": "src-05",
+      "title": "Bahçeli'den Meclis kürsüsünde gündem yaratan sözler",
+      "description": "Bahçeli'den Meclis kürsüsünde gündem yaratan sözler Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:45:48.346Z",
+      "fingerprint": "d4664b30553ccfddb3ffe79456fd35398d133546",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0145",
+      "source_id": "src-30",
+      "title": "İmamoğlu, İstanbul'da dikkat çeken bir konuda konuştu",
+      "description": "İmamoğlu, İstanbul'da dikkat çeken bir konuda konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T16:01:29.713Z",
+      "fingerprint": "d1f99b2e53fff9edf0e37b9603ab02d43ac91c1e",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0146",
+      "source_id": "src-33",
+      "title": "CHP'li İmamoğlu'ndan dikkat çeken açıklama geldi",
+      "description": "CHP'li İmamoğlu'ndan dikkat çeken açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T16:59:14.356Z",
+      "fingerprint": "eb400fd9c6c2ca0d26a78a5d94e93ae72876f100",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0147",
+      "source_id": "src-34",
+      "title": "Türkiye'den ABD ve Rusya'ya dikkat çeken mesaj",
+      "description": "Türkiye'den ABD ve Rusya'ya dikkat çeken mesaj Detaylar haberimizde.",
+      "published_at": "2026-09-07T11:09:06.884Z",
+      "fingerprint": "b9befa228779577bc685c1a675a7dd0f6c121c02",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0148",
+      "source_id": "src-07",
+      "title": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T18:02:18.337Z",
+      "fingerprint": "d3c6fb216ed5ce47cd4d0d43389fdd0402517d3d",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0149",
+      "source_id": "src-13",
+      "title": "DEM'den Diyarbakır'da önemli bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da önemli bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T18:54:18.847Z",
+      "fingerprint": "c6b881c39999270df6c5eb8e8104189d683bf028",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0150",
+      "source_id": "src-31",
+      "title": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T19:04:53.568Z",
+      "fingerprint": "d3c6fb216ed5ce47cd4d0d43389fdd0402517d3d",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0151",
+      "source_id": "src-03",
+      "title": "Diyarbakır'da DEM Parti dikkat çeken bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti dikkat çeken bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T19:57:02.356Z",
+      "fingerprint": "9c7536e23c851788f804b1ea872ff650ff065dd6",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0152",
+      "source_id": "src-10",
+      "title": "DEM'den Diyarbakır'da yeni bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da yeni bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T20:01:35.876Z",
+      "fingerprint": "7f05258251b62080dc30c3936fd7422490349ca1",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0153",
+      "source_id": "src-16",
+      "title": "DEM Parti Diyarbakır'da tartışmalı açıklaması yaptı",
+      "description": "DEM Parti Diyarbakır'da tartışmalı açıklaması yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T20:58:44.131Z",
+      "fingerprint": "3ef18ec5ebd80b10894a1d89cf5f8e00f189e5f9",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0154",
+      "source_id": "src-36",
+      "title": "Diyarbakır'da DEM Parti tartışmalı bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti tartışmalı bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T21:20:31.392Z",
+      "fingerprint": "c4dbccf26dc93df26b18b6c91132ec1c3a706114",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0155",
+      "source_id": "src-06",
+      "title": "YSK İzmir'deki seçimle ilgili önemli kararını açıkladı",
+      "description": "YSK İzmir'deki seçimle ilgili önemli kararını açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T11:22:27.304Z",
+      "fingerprint": "0a4b8750c3795aacf9b9570802e946e3d7fb1b5f",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0156",
+      "source_id": "src-05",
+      "title": "TSK Şanlıurfa sınırında sert bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında sert bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:08:11.063Z",
+      "fingerprint": "687a5de7a4565af95ecfcba1a0b4d0826ded58cd",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0157",
+      "source_id": "src-08",
+      "title": "TSK Şanlıurfa sınırında tartışmalı bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında tartışmalı bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:53:01.914Z",
+      "fingerprint": "dc017377dd768dab06bba0ccb0c2b057a9c12f7f",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0158",
+      "source_id": "src-24",
+      "title": "TSK Şanlıurfa sınırında beklenen bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında beklenen bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:29:12.613Z",
+      "fingerprint": "de97345a9467f20854e5eea2c3419aece1ebbe75",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0159",
+      "source_id": "src-28",
+      "title": "Özgür Özel'den Bursa'da beklenen çıkış geldi",
+      "description": "Özgür Özel'den Bursa'da beklenen çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:03:21.690Z",
+      "fingerprint": "25af3779cc459f45431c16f2c67b7152cfd63bb1",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0160",
+      "source_id": "src-05",
+      "title": "CHP Genel Başkanı Özel Bursa'da beklenen konuştu",
+      "description": "CHP Genel Başkanı Özel Bursa'da beklenen konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:36:19.366Z",
+      "fingerprint": "33099e42472973683fca837907aa8499ad59213d",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0161",
+      "source_id": "src-21",
+      "title": "Özgür Özel'den Bursa'da sürpriz çıkış geldi",
+      "description": "Özgür Özel'den Bursa'da sürpriz çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T02:14:26.134Z",
+      "fingerprint": "00370ec8e29dee63961a52bd2660f9c292576414",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0162",
+      "source_id": "src-27",
+      "title": "Adalet Bakanlığı'ndan sert bir açıklama geldi",
+      "description": "Adalet Bakanlığı'ndan sert bir açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T06:29:28.130Z",
+      "fingerprint": "166c41454791ea000a3661b28f66ded2a676581d",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0163",
+      "source_id": "src-39",
+      "title": "Danıştay'dan gündem yaratan bir karar çıktı",
+      "description": "Danıştay'dan gündem yaratan bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-06T06:31:24.685Z",
+      "fingerprint": "1e08043e1ef51a7ca2b556a3dccb75b8c1b2dbe9",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0164",
+      "source_id": "src-28",
+      "title": "Yargıtay kritik davasında karar verdi",
+      "description": "Yargıtay kritik davasında karar verdi Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:08:13.643Z",
+      "fingerprint": "ffb20307442a1f7524ee452b75c2e4b7e4eabe78",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0165",
+      "source_id": "src-10",
+      "title": "Adalet Bakanlığı'ndan gündem yaratan bir açıklama geldi",
+      "description": "Adalet Bakanlığı'ndan gündem yaratan bir açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:49:47.622Z",
+      "fingerprint": "031f47effaa9417d43a3829043710f32184594c8",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0166",
+      "source_id": "src-35",
+      "title": "Kayseri'de AFAD'dan kritik açıklama geldi",
+      "description": "Kayseri'de AFAD'dan kritik açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T13:16:19.328Z",
+      "fingerprint": "6ac6cd203f19edebc2381cee6d21b80d909ac5be",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0167",
+      "source_id": "src-12",
+      "title": "AFAD'dan deprem bölgesinde önemli bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde önemli bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T13:58:41.386Z",
+      "fingerprint": "b25dc7860f2ac049022cd95680d8fd360c289ddc",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0168",
+      "source_id": "src-03",
+      "title": "AFAD'dan deprem bölgesinde yeni bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde yeni bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T14:20:32.471Z",
+      "fingerprint": "1be076dda4444ad6cbdf4a5678c9daee5a733590",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0169",
+      "source_id": "src-10",
+      "title": "AFAD Kayseri'de sert bir tatbikat düzenledi",
+      "description": "AFAD Kayseri'de sert bir tatbikat düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-07T14:56:14.408Z",
+      "fingerprint": "a822253bc1bc2f09728d3e15e5bafd9a8a910e54",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0170",
+      "source_id": "src-14",
+      "title": "AFAD Kayseri'de beklenen bir tatbikat düzenledi",
+      "description": "AFAD Kayseri'de beklenen bir tatbikat düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-07T15:22:40.539Z",
+      "fingerprint": "25398319177d138dac3e2fc1356a28edfdb3eb3e",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0171",
+      "source_id": "src-06",
+      "title": "AFAD'dan deprem bölgesinde sert bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde sert bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T15:53:13.440Z",
+      "fingerprint": "560a5f0079781afbd29898204e48f9ee6ae9e046",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0172",
+      "source_id": "src-14",
+      "title": "Kayseri'de AFAD'dan önemli açıklama geldi",
+      "description": "Kayseri'de AFAD'dan önemli açıklama geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:24:11.347Z",
+      "fingerprint": "afbef3449d29f74c63910d0c78a7f4aef093b064",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0173",
+      "source_id": "src-06",
+      "title": "AFAD'dan deprem bölgesinde flaş bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde flaş bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:53:44.270Z",
+      "fingerprint": "fa074ac90bf22e55ed19e65fd6c5f27a71cbbc64",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0174",
+      "source_id": "src-33",
+      "title": "Diyanet'ten Ramazan öncesi gündem yaratan bir duyuru",
+      "description": "Diyanet'ten Ramazan öncesi gündem yaratan bir duyuru Detaylar haberimizde.",
+      "published_at": "2026-09-07T07:13:06.244Z",
+      "fingerprint": "3b62337b76ac5edb621800cf0cbd917fc5331360",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0175",
+      "source_id": "src-30",
+      "title": "Diyanet'ten Ramazan öncesi flaş bir duyuru",
+      "description": "Diyanet'ten Ramazan öncesi flaş bir duyuru Detaylar haberimizde.",
+      "published_at": "2026-09-07T07:48:29.736Z",
+      "fingerprint": "1e34e5e6dcccd0fbbdba989bb03cd8abe1a5c138",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0176",
+      "source_id": "src-32",
+      "title": "BIST100'de dolar ve dikkat çeken etkisi görüldü",
+      "description": "BIST100'de dolar ve dikkat çeken etkisi görüldü Detaylar haberimizde.",
+      "published_at": "2026-09-06T17:14:45.004Z",
+      "fingerprint": "1fbdf86ad252da50f7512d24f08c79aea52a5ea7",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0177",
+      "source_id": "src-40",
+      "title": "Borsa'da flaş sonrası sert hareket",
+      "description": "Borsa'da flaş sonrası sert hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T17:34:04.816Z",
+      "fingerprint": "6376c2195b0aff079301aa990d04f00ecbad15dd",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0178",
+      "source_id": "src-29",
+      "title": "AKP lideri Erdoğan Ankara'da dikkat çeken mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da dikkat çeken mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T23:19:38.731Z",
+      "fingerprint": "52876309faa2c8c1db88133957cbf7ccba53e006",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0179",
+      "source_id": "src-17",
+      "title": "AKP lideri Erdoğan Ankara'da yeni mesajı verdi",
+      "description": "AKP lideri Erdoğan Ankara'da yeni mesajı verdi Detaylar haberimizde.",
+      "published_at": "2026-09-07T23:31:12.257Z",
+      "fingerprint": "e1e6c08b4a6e1c825f7ea9895453ea5af512b4fa",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0180",
+      "source_id": "src-15",
+      "title": "Erdoğan, AKP grup toplantısında gündem yaratan konuştu",
+      "description": "Erdoğan, AKP grup toplantısında gündem yaratan konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:04:13.880Z",
+      "fingerprint": "9ab3d014b7e88f514352724ec05f9bc5c94d78f3",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0181",
+      "source_id": "src-40",
+      "title": "CHP'den İstanbul'da sert çıkışı geldi",
+      "description": "CHP'den İstanbul'da sert çıkışı geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T15:25:21.088Z",
+      "fingerprint": "ea1af6f7a79d211723cb919b43834befca205af3",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0182",
+      "source_id": "src-18",
+      "title": "CHP'den İstanbul'da sert çıkışı geldi",
+      "description": "CHP'den İstanbul'da sert çıkışı geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T15:36:15.765Z",
+      "fingerprint": "ea1af6f7a79d211723cb919b43834befca205af3",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0183",
+      "source_id": "src-30",
+      "title": "CHP'den İstanbul'da flaş çıkışı geldi",
+      "description": "CHP'den İstanbul'da flaş çıkışı geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:28:22.115Z",
+      "fingerprint": "45a98a02bbc424e0698160687e38717dfa5d185c",
+      "entities": [
+        "kilicdaroglu",
+        "chp",
+        "istanbul"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0184",
+      "source_id": "src-03",
+      "title": "Merkez Bankası enflasyon raporunda önemli uyarısı yaptı",
+      "description": "Merkez Bankası enflasyon raporunda önemli uyarısı yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T02:10:00.483Z",
+      "fingerprint": "ca717cbfd7a4b0f31501fbe64fdc6e2ad0e86a47",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0185",
+      "source_id": "src-03",
+      "title": "TCMB'den faiz ve enflasyon konusunda önemli açıklama",
+      "description": "TCMB'den faiz ve enflasyon konusunda önemli açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T02:45:09.760Z",
+      "fingerprint": "747d94e611f578ade6bbe667098efe53654ef78a",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0186",
+      "source_id": "src-27",
+      "title": "Bahçeli'den Meclis kürsüsünde flaş sözler",
+      "description": "Bahçeli'den Meclis kürsüsünde flaş sözler Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:26:43.335Z",
+      "fingerprint": "4e2c7891dfa076a3103c4727e399bcd5e9fa818e",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0187",
+      "source_id": "src-08",
+      "title": "MHP grubunda dikkat çeken bir tartışma yaşandı",
+      "description": "MHP grubunda dikkat çeken bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-08T01:55:39.509Z",
+      "fingerprint": "e80e1735e08a0501766d441170b5df81d74ae13e",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0188",
+      "source_id": "src-12",
+      "title": "İmamoğlu, İstanbul'da sert bir konuda konuştu",
+      "description": "İmamoğlu, İstanbul'da sert bir konuda konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T13:02:18.174Z",
+      "fingerprint": "e7299c0f90fdbf2075546aac6b3ff250dc41a34e",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0189",
+      "source_id": "src-37",
+      "title": "İBB Başkanı İmamoğlu flaş bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu flaş bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T13:46:01.897Z",
+      "fingerprint": "ad83aad9b9ab394b9d2fd206fdc7a56e676be882",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0190",
+      "source_id": "src-34",
+      "title": "İBB Başkanı İmamoğlu kritik bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu kritik bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:09:57.584Z",
+      "fingerprint": "e737b97e517788f96c8da149d44eefdfc61a6da8",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0191",
+      "source_id": "src-22",
+      "title": "İmamoğlu, İstanbul'da kritik bir konuda konuştu",
+      "description": "İmamoğlu, İstanbul'da kritik bir konuda konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:58:59.035Z",
+      "fingerprint": "8a24310d56e36ab08aef813dd539f126bbe474c4",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0192",
+      "source_id": "src-04",
+      "title": "Türkiye'den ABD ve Rusya'ya sert mesaj",
+      "description": "Türkiye'den ABD ve Rusya'ya sert mesaj Detaylar haberimizde.",
+      "published_at": "2026-09-06T06:10:48.944Z",
+      "fingerprint": "85f191745c0cdc84aa26f74a73145c3914c66ae8",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0193",
+      "source_id": "src-07",
+      "title": "Türkiye'den ABD ve Rusya'ya sert mesaj",
+      "description": "Türkiye'den ABD ve Rusya'ya sert mesaj Detaylar haberimizde.",
+      "published_at": "2026-09-06T06:32:32.911Z",
+      "fingerprint": "85f191745c0cdc84aa26f74a73145c3914c66ae8",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0194",
+      "source_id": "src-39",
+      "title": "Dışişleri Bakanlığı'ndan flaş açıklama",
+      "description": "Dışişleri Bakanlığı'ndan flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:22:09.648Z",
+      "fingerprint": "0e9027577d87df33a61140defbf02c12b00d6e13",
+      "entities": [
+        "disisleri",
+        "abd",
+        "rusya"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0195",
+      "source_id": "src-18",
+      "title": "DEM'den Diyarbakır'da kritik bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da kritik bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T10:01:25.425Z",
+      "fingerprint": "6e6682ffe94c20468458137d57d667a762ee5578",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0196",
+      "source_id": "src-01",
+      "title": "Diyarbakır'da DEM Parti flaş bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti flaş bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T10:50:09.849Z",
+      "fingerprint": "b11bb6a31b0ee2549406955f8e6d46938f8ac0b9",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0197",
+      "source_id": "src-09",
+      "title": "Diyarbakır'da DEM Parti önemli bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti önemli bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T11:01:51.213Z",
+      "fingerprint": "6fb4e57b35c9e165c56fecec12059dc3eff12b80",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0198",
+      "source_id": "src-10",
+      "title": "DEM'den Diyarbakır'da flaş bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da flaş bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T11:37:16.387Z",
+      "fingerprint": "1f83d2719cdaa0e0951d5d040fb8d0116c399359",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0199",
+      "source_id": "src-21",
+      "title": "DEM'den Diyarbakır'da sert bir çıkış geldi",
+      "description": "DEM'den Diyarbakır'da sert bir çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T12:08:20.838Z",
+      "fingerprint": "f8acfdc1d7d36f3aaa89dbac7bafacb6d6ea3b99",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0200",
+      "source_id": "src-37",
+      "title": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T12:50:21.050Z",
+      "fingerprint": "d3c6fb216ed5ce47cd4d0d43389fdd0402517d3d",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0201",
+      "source_id": "src-07",
+      "title": "Diyarbakır'da DEM Parti gündem yaratan bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti gündem yaratan bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T13:11:11.265Z",
+      "fingerprint": "0f8f9adaa34960caeee09ecb358c443c07643d2a",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0202",
+      "source_id": "src-08",
+      "title": "Seçim Kurulu'ndan İzmir için önemli karar geldi",
+      "description": "Seçim Kurulu'ndan İzmir için önemli karar geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:24:19.721Z",
+      "fingerprint": "2749aea915de788cb104fd37fafa83a969f97e4e",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0203",
+      "source_id": "src-31",
+      "title": "Seçim Kurulu'ndan İzmir için yeni karar geldi",
+      "description": "Seçim Kurulu'ndan İzmir için yeni karar geldi Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:38:09.171Z",
+      "fingerprint": "d21e860733e9b67b58b0d2a5e3b892fe10f4b89e",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0204",
+      "source_id": "src-05",
+      "title": "TSK Şanlıurfa sınırında dikkat çeken bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında dikkat çeken bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:11:29.685Z",
+      "fingerprint": "6ad63157c60238daf56fa2e255b98247b84e7de9",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0205",
+      "source_id": "src-10",
+      "title": "TSK Şanlıurfa sınırında tartışmalı bir operasyon düzenledi",
+      "description": "TSK Şanlıurfa sınırında tartışmalı bir operasyon düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:58:30.805Z",
+      "fingerprint": "dc017377dd768dab06bba0ccb0c2b057a9c12f7f",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0206",
+      "source_id": "src-20",
+      "title": "CHP Genel Başkanı Özel Bursa'da dikkat çeken konuştu",
+      "description": "CHP Genel Başkanı Özel Bursa'da dikkat çeken konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:20:09.585Z",
+      "fingerprint": "32e7220872531acd7d669608a71b43ae173f6b69",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0207",
+      "source_id": "src-05",
+      "title": "CHP'li Özel Bursa mitinginde sert bir açıklama yaptı",
+      "description": "CHP'li Özel Bursa mitinginde sert bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T07:51:32.074Z",
+      "fingerprint": "b35121b29d7d477b1e9f61538d807d5577e348ce",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0208",
+      "source_id": "src-03",
+      "title": "TCMB'den faiz ve enflasyon konusunda sürpriz açıklama",
+      "description": "TCMB'den faiz ve enflasyon konusunda sürpriz açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T20:00:00.000Z",
+      "fingerprint": "b7f55156dbf0b2f3e5a0f3eee33bb7a86a0f59f8",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0209",
+      "source_id": "src-39",
+      "title": "İBB Başkanı İmamoğlu sert bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu sert bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T12:00:00.000Z",
+      "fingerprint": "ebbdebfee479eceeeefae0842c1ddddbb43643dd",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0210",
+      "source_id": "src-04",
+      "title": "Bahçeli'den Meclis kürsüsünde dikkat çeken sözler",
+      "description": "Bahçeli'den Meclis kürsüsünde dikkat çeken sözler Detaylar haberimizde.",
+      "published_at": "2026-09-06T06:00:00.000Z",
+      "fingerprint": "c8f87894abe69963440f2b2b00c70b785c7e44d8",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0211",
+      "source_id": "src-24",
+      "title": "Danıştay'dan kritik bir karar çıktı",
+      "description": "Danıştay'dan kritik bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-06T22:00:00.000Z",
+      "fingerprint": "76facbd551e30145aefd40f6ffea661f4262f619",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0212",
+      "source_id": "src-29",
+      "title": "Erdoğan, AKP grup toplantısında sert konuştu",
+      "description": "Erdoğan, AKP grup toplantısında sert konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-07T04:00:00.000Z",
+      "fingerprint": "bd094217659c132f38b01ad173d0a39eeb202ef4",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0213",
+      "source_id": "src-21",
+      "title": "TCMB faiz kararını açıkladı: dikkat çeken adım",
+      "description": "TCMB faiz kararını açıkladı: dikkat çeken adım Detaylar haberimizde.",
+      "published_at": "2026-09-06T12:00:00.000Z",
+      "fingerprint": "df0bd9d0db10cea12537c6e17f88d37a9d296857",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0214",
+      "source_id": "src-05",
+      "title": "BIST100'de dolar ve dikkat çeken etkisi görüldü",
+      "description": "BIST100'de dolar ve dikkat çeken etkisi görüldü Detaylar haberimizde.",
+      "published_at": "2026-09-08T03:00:00.000Z",
+      "fingerprint": "1fbdf86ad252da50f7512d24f08c79aea52a5ea7",
+      "entities": [
+        "bist",
+        "borsa",
+        "dolar"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0215",
+      "source_id": "src-33",
+      "title": "AFAD'dan deprem bölgesinde yeni bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde yeni bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T15:00:00.000Z",
+      "fingerprint": "1be076dda4444ad6cbdf4a5678c9daee5a733590",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0216",
+      "source_id": "src-16",
+      "title": "Diyarbakır'da DEM Parti flaş bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti flaş bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T14:00:00.000Z",
+      "fingerprint": "b11bb6a31b0ee2549406955f8e6d46938f8ac0b9",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0217",
+      "source_id": "src-10",
+      "title": "Diyanet İşleri Başkanlığı'ndan beklenen açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan beklenen açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-07T18:00:00.000Z",
+      "fingerprint": "a2f7c6a731b05cc38f21669a9b859a78e71ce8d4",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0218",
+      "source_id": "src-40",
+      "title": "İBB Başkanı İmamoğlu yeni bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu yeni bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-08T03:00:00.000Z",
+      "fingerprint": "d37353bd17b73426b88857340fb9bc03951b8028",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0219",
+      "source_id": "src-17",
+      "title": "Özgür Özel'den Bursa'da beklenen çıkış geldi",
+      "description": "Özgür Özel'den Bursa'da beklenen çıkış geldi Detaylar haberimizde.",
+      "published_at": "2026-09-06T12:00:00.000Z",
+      "fingerprint": "25af3779cc459f45431c16f2c67b7152cfd63bb1",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0220",
+      "source_id": "src-32",
+      "title": "MHP grubunda dikkat çeken bir tartışma yaşandı",
+      "description": "MHP grubunda dikkat çeken bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-08T00:00:00.000Z",
+      "fingerprint": "e80e1735e08a0501766d441170b5df81d74ae13e",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0221",
+      "source_id": "src-34",
+      "title": "İmamoğlu, İstanbul'da kritik bir konuda konuştu",
+      "description": "İmamoğlu, İstanbul'da kritik bir konuda konuştu Detaylar haberimizde.",
+      "published_at": "2026-09-06T11:00:00.000Z",
+      "fingerprint": "8a24310d56e36ab08aef813dd539f126bbe474c4",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0222",
+      "source_id": "src-06",
+      "title": "Cumhurbaşkanı Erdoğan Ankara'da kritik açıklamalarda bulundu",
+      "description": "Cumhurbaşkanı Erdoğan Ankara'da kritik açıklamalarda bulundu Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:00:00.000Z",
+      "fingerprint": "a6b983e8d91adf851175c2772ccddfb5f8c9b554",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0223",
+      "source_id": "src-34",
+      "title": "Bahçeli'den Meclis kürsüsünde tartışmalı sözler",
+      "description": "Bahçeli'den Meclis kürsüsünde tartışmalı sözler Detaylar haberimizde.",
+      "published_at": "2026-09-07T21:00:00.000Z",
+      "fingerprint": "46fc26d982d66dbe64f0b9c21573ec926af56488",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0224",
+      "source_id": "src-33",
+      "title": "Türk Silahlı Kuvvetleri'nden Suriye sınırında kritik hareket",
+      "description": "Türk Silahlı Kuvvetleri'nden Suriye sınırında kritik hareket Detaylar haberimizde.",
+      "published_at": "2026-09-06T09:00:00.000Z",
+      "fingerprint": "7ddea600986ab3399154c47f37bdb76c4e48511e",
+      "entities": [
+        "tsk",
+        "suriye",
+        "sanliurfa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0225",
+      "source_id": "src-15",
+      "title": "İBB Başkanı İmamoğlu dikkat çeken bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu dikkat çeken bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:00:00.000Z",
+      "fingerprint": "0c8eae1b690b01c5b4748403a83f82d085b4c0a5",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0226",
+      "source_id": "src-12",
+      "title": "CHP'li Özel Bursa mitinginde gündem yaratan bir açıklama yaptı",
+      "description": "CHP'li Özel Bursa mitinginde gündem yaratan bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T06:00:00.000Z",
+      "fingerprint": "3fcff5f206c9f120d8461280aa74a0484cbc2ca1",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0227",
+      "source_id": "src-29",
+      "title": "CHP'li Özel Bursa mitinginde kritik bir açıklama yaptı",
+      "description": "CHP'li Özel Bursa mitinginde kritik bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T21:00:00.000Z",
+      "fingerprint": "bdf42c902ba21b0176a7c3f9f5ceff958999c786",
+      "entities": [
+        "ozel",
+        "chp",
+        "bursa"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0228",
+      "source_id": "src-33",
+      "title": "Cumhurbaşkanı Erdoğan Ankara'da sürpriz açıklamalarda bulundu",
+      "description": "Cumhurbaşkanı Erdoğan Ankara'da sürpriz açıklamalarda bulundu Detaylar haberimizde.",
+      "published_at": "2026-09-07T22:00:00.000Z",
+      "fingerprint": "1b653d9726e5d883996c5c11037863ad3a3c7fd5",
+      "entities": [
+        "erdogan",
+        "akp",
+        "ankara"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0229",
+      "source_id": "src-17",
+      "title": "TCMB faiz kararını açıkladı: kritik adım",
+      "description": "TCMB faiz kararını açıkladı: kritik adım Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:00:00.000Z",
+      "fingerprint": "fea262e94daabb8ce2abac949611dc901a84be8e",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0230",
+      "source_id": "src-20",
+      "title": "MHP grubunda sürpriz bir tartışma yaşandı",
+      "description": "MHP grubunda sürpriz bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-07T23:00:00.000Z",
+      "fingerprint": "124a73a44062806719b6bdecf37a2339f1fabeec",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0231",
+      "source_id": "src-03",
+      "title": "AFAD Kayseri'de kritik bir tatbikat düzenledi",
+      "description": "AFAD Kayseri'de kritik bir tatbikat düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-08T03:00:00.000Z",
+      "fingerprint": "19798743f5233e5594182214ba2ec9bf660ff816",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0232",
+      "source_id": "src-10",
+      "title": "MHP grubunda dikkat çeken bir tartışma yaşandı",
+      "description": "MHP grubunda dikkat çeken bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:00:00.000Z",
+      "fingerprint": "e80e1735e08a0501766d441170b5df81d74ae13e",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0233",
+      "source_id": "src-03",
+      "title": "Danıştay'dan önemli bir karar çıktı",
+      "description": "Danıştay'dan önemli bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-06T21:00:00.000Z",
+      "fingerprint": "29349b3c9a07ad621d89ab74c3e8e5da3dd05f79",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0234",
+      "source_id": "src-39",
+      "title": "İBB Başkanı İmamoğlu flaş bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu flaş bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T23:00:00.000Z",
+      "fingerprint": "ad83aad9b9ab394b9d2fd206fdc7a56e676be882",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0235",
+      "source_id": "src-07",
+      "title": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T13:00:00.000Z",
+      "fingerprint": "d3c6fb216ed5ce47cd4d0d43389fdd0402517d3d",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0236",
+      "source_id": "src-17",
+      "title": "YSK İzmir'deki seçimle ilgili sert kararını açıkladı",
+      "description": "YSK İzmir'deki seçimle ilgili sert kararını açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-07T05:00:00.000Z",
+      "fingerprint": "56304d7035bb67388b7f4ab02a41592dd9c6cb68",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0237",
+      "source_id": "src-01",
+      "title": "MHP grubunda yeni bir tartışma yaşandı",
+      "description": "MHP grubunda yeni bir tartışma yaşandı Detaylar haberimizde.",
+      "published_at": "2026-09-07T12:00:00.000Z",
+      "fingerprint": "738febcfce326982f6b7efcbf7569958cea4446d",
+      "entities": [
+        "mhp",
+        "bahceli",
+        "meclis"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0238",
+      "source_id": "src-12",
+      "title": "İBB Başkanı İmamoğlu kritik bir projeyi açıkladı",
+      "description": "İBB Başkanı İmamoğlu kritik bir projeyi açıkladı Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:00:00.000Z",
+      "fingerprint": "e737b97e517788f96c8da149d44eefdfc61a6da8",
+      "entities": [
+        "imamoglu",
+        "istanbul",
+        "chp"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0239",
+      "source_id": "src-08",
+      "title": "Diyanet İşleri Başkanlığı'ndan gündem yaratan açıklama",
+      "description": "Diyanet İşleri Başkanlığı'ndan gündem yaratan açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T08:00:00.000Z",
+      "fingerprint": "0c8bf82a2dd72e242d7f61ded9483db36e386225",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0240",
+      "source_id": "src-07",
+      "title": "AFAD'dan deprem bölgesinde sert bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde sert bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-06T13:00:00.000Z",
+      "fingerprint": "560a5f0079781afbd29898204e48f9ee6ae9e046",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0241",
+      "source_id": "src-25",
+      "title": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti kritik bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-07T23:00:00.000Z",
+      "fingerprint": "d3c6fb216ed5ce47cd4d0d43389fdd0402517d3d",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0242",
+      "source_id": "src-40",
+      "title": "DEM Parti Diyarbakır'da sert açıklaması yaptı",
+      "description": "DEM Parti Diyarbakır'da sert açıklaması yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T09:00:00.000Z",
+      "fingerprint": "1aabb9b20c58e12c22ffc25f416c3ecb0e55f1bb",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0243",
+      "source_id": "src-21",
+      "title": "İzmir'de YSK dikkat çeken bir açıklama yaptı",
+      "description": "İzmir'de YSK dikkat çeken bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T09:00:00.000Z",
+      "fingerprint": "98908edda00e5b605270a9a99b16b1d05601d6e3",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0244",
+      "source_id": "src-28",
+      "title": "AFAD Kayseri'de kritik bir tatbikat düzenledi",
+      "description": "AFAD Kayseri'de kritik bir tatbikat düzenledi Detaylar haberimizde.",
+      "published_at": "2026-09-07T16:00:00.000Z",
+      "fingerprint": "19798743f5233e5594182214ba2ec9bf660ff816",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0245",
+      "source_id": "src-31",
+      "title": "Diyarbakır'da DEM Parti sert bir açıklama yaptı",
+      "description": "Diyarbakır'da DEM Parti sert bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T17:00:00.000Z",
+      "fingerprint": "1a5332b353fc00d3641a7d10f7ed742caad6b417",
+      "entities": [
+        "dem",
+        "hdp",
+        "diyarbakir"
+      ],
+      "category": "son_dakika"
+    },
+    {
+      "id": "art-0246",
+      "source_id": "src-34",
+      "title": "İzmir'de YSK önemli bir açıklama yaptı",
+      "description": "İzmir'de YSK önemli bir açıklama yaptı Detaylar haberimizde.",
+      "published_at": "2026-09-06T18:00:00.000Z",
+      "fingerprint": "6441eb567d604246a32b987dd9fb66f7a98d04d0",
+      "entities": [
+        "ysk",
+        "secim",
+        "izmir"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0247",
+      "source_id": "src-31",
+      "title": "TCMB'den faiz ve enflasyon konusunda flaş açıklama",
+      "description": "TCMB'den faiz ve enflasyon konusunda flaş açıklama Detaylar haberimizde.",
+      "published_at": "2026-09-06T20:00:00.000Z",
+      "fingerprint": "98ea3062e69ee69d6b7f9736cbfcf49353f71c1a",
+      "entities": [
+        "tcmb",
+        "faiz",
+        "enflasyon"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0248",
+      "source_id": "src-17",
+      "title": "Danıştay'dan kritik bir karar çıktı",
+      "description": "Danıştay'dan kritik bir karar çıktı Detaylar haberimizde.",
+      "published_at": "2026-09-07T04:14:27.993Z",
+      "fingerprint": "76facbd551e30145aefd40f6ffea661f4262f619",
+      "entities": [
+        "danistay",
+        "adalet",
+        "yargitay"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0249",
+      "source_id": "src-01",
+      "title": "AFAD'dan deprem bölgesinde dikkat çeken bir uyarı",
+      "description": "AFAD'dan deprem bölgesinde dikkat çeken bir uyarı Detaylar haberimizde.",
+      "published_at": "2026-09-07T01:58:06.006Z",
+      "fingerprint": "9f4b175171f32008d434553fac9206b713dc54f7",
+      "entities": [
+        "afad",
+        "deprem",
+        "kayseri"
+      ],
+      "category": "politika"
+    },
+    {
+      "id": "art-0250",
+      "source_id": "src-12",
+      "title": "Camilerde önemli bir uygulama başladı",
+      "description": "Camilerde önemli bir uygulama başladı Detaylar haberimizde.",
+      "published_at": "2026-09-06T09:07:41.574Z",
+      "fingerprint": "a44a36dec6a1466c632212171078b96a4d57fe24",
+      "entities": [
+        "diyanet",
+        "ramazan",
+        "cami"
+      ],
+      "category": "politika"
+    }
+  ],
+  "links": [
+    {
+      "cluster_id": "cl-001",
+      "article_id": "art-0001",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-001",
+      "article_id": "art-0002",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-001",
+      "article_id": "art-0003",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-002",
+      "article_id": "art-0004",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-003",
+      "article_id": "art-0005",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-003",
+      "article_id": "art-0006",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-004",
+      "article_id": "art-0007",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-005",
+      "article_id": "art-0008",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-006",
+      "article_id": "art-0009",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-006",
+      "article_id": "art-0010",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-007",
+      "article_id": "art-0011",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "center": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-007",
+      "article_id": "art-0012",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "center": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-007",
+      "article_id": "art-0013",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "center": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-008",
+      "article_id": "art-0014",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-009",
+      "article_id": "art-0015",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "pro_kurdish": 2,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-009",
+      "article_id": "art-0016",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "pro_kurdish": 2,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-009",
+      "article_id": "art-0017",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "pro_kurdish": 2,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-009",
+      "article_id": "art-0018",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "pro_kurdish": 2,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-010",
+      "article_id": "art-0019",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-011",
+      "article_id": "art-0020",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 2
+      }
+    },
+    {
+      "cluster_id": "cl-011",
+      "article_id": "art-0021",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 2
+      }
+    },
+    {
+      "cluster_id": "cl-012",
+      "article_id": "art-0022",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-012",
+      "article_id": "art-0023",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-013",
+      "article_id": "art-0024",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-014",
+      "article_id": "art-0025",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-014",
+      "article_id": "art-0026",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-015",
+      "article_id": "art-0027",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "opposition": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-015",
+      "article_id": "art-0028",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "opposition": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-015",
+      "article_id": "art-0029",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "opposition": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-015",
+      "article_id": "art-0030",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "opposition": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-016",
+      "article_id": "art-0031",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-016",
+      "article_id": "art-0032",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-017",
+      "article_id": "art-0033",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-017",
+      "article_id": "art-0034",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-018",
+      "article_id": "art-0035",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-019",
+      "article_id": "art-0036",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-020",
+      "article_id": "art-0037",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "islamist_conservative": 1,
+        "nationalist": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-020",
+      "article_id": "art-0038",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "islamist_conservative": 1,
+        "nationalist": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-020",
+      "article_id": "art-0039",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "islamist_conservative": 1,
+        "nationalist": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-020",
+      "article_id": "art-0040",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "islamist_conservative": 1,
+        "nationalist": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-021",
+      "article_id": "art-0041",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-021",
+      "article_id": "art-0042",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-021",
+      "article_id": "art-0043",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-022",
+      "article_id": "art-0044",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-022",
+      "article_id": "art-0045",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-023",
+      "article_id": "art-0046",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "center": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-023",
+      "article_id": "art-0047",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "center": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-023",
+      "article_id": "art-0048",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "center": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-024",
+      "article_id": "art-0049",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-024",
+      "article_id": "art-0050",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-025",
+      "article_id": "art-0051",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-025",
+      "article_id": "art-0052",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-026",
+      "article_id": "art-0053",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-026",
+      "article_id": "art-0054",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-027",
+      "article_id": "art-0055",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-028",
+      "article_id": "art-0056",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "opposition": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-028",
+      "article_id": "art-0057",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "opposition": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-028",
+      "article_id": "art-0058",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "opposition": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-029",
+      "article_id": "art-0059",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-029",
+      "article_id": "art-0060",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-030",
+      "article_id": "art-0061",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-031",
+      "article_id": "art-0062",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 2,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-031",
+      "article_id": "art-0063",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 2,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-032",
+      "article_id": "art-0064",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-033",
+      "article_id": "art-0065",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-034",
+      "article_id": "art-0066",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-034",
+      "article_id": "art-0067",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-034",
+      "article_id": "art-0068",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-035",
+      "article_id": "art-0069",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-036",
+      "article_id": "art-0070",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-036",
+      "article_id": "art-0071",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-037",
+      "article_id": "art-0072",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "islamist_conservative": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-037",
+      "article_id": "art-0073",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "islamist_conservative": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-037",
+      "article_id": "art-0074",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "islamist_conservative": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-037",
+      "article_id": "art-0075",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "international": 1,
+        "islamist_conservative": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-038",
+      "article_id": "art-0076",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "center": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-038",
+      "article_id": "art-0077",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "center": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-038",
+      "article_id": "art-0078",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "center": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-039",
+      "article_id": "art-0079",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-040",
+      "article_id": "art-0080",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-040",
+      "article_id": "art-0081",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-040",
+      "article_id": "art-0082",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-041",
+      "article_id": "art-0083",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-041",
+      "article_id": "art-0084",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-041",
+      "article_id": "art-0085",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-041",
+      "article_id": "art-0086",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-042",
+      "article_id": "art-0087",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-043",
+      "article_id": "art-0088",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-044",
+      "article_id": "art-0089",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-045",
+      "article_id": "art-0090",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-045",
+      "article_id": "art-0091",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-046",
+      "article_id": "art-0092",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-047",
+      "article_id": "art-0093",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 2,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-047",
+      "article_id": "art-0094",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 2,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-047",
+      "article_id": "art-0095",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 2,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-048",
+      "article_id": "art-0096",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-049",
+      "article_id": "art-0097",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-049",
+      "article_id": "art-0098",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-050",
+      "article_id": "art-0099",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-050",
+      "article_id": "art-0100",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0101",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0102",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0103",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0104",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0105",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0106",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0107",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0108",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0109",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0110",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0111",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-051",
+      "article_id": "art-0112",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "opposition_leaning": 4,
+        "islamist_conservative": 1,
+        "international": 1,
+        "pro_kurdish": 1,
+        "pro_government": 3,
+        "opposition": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-052",
+      "article_id": "art-0113",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-052",
+      "article_id": "art-0114",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-052",
+      "article_id": "art-0115",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-052",
+      "article_id": "art-0116",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0117",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0118",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0119",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0120",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0121",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0122",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0123",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-053",
+      "article_id": "art-0124",
+      "is_blindspot": true,
+      "bias_distribution": {
+        "pro_kurdish": 2,
+        "opposition": 3,
+        "islamist_conservative": 1,
+        "pro_government": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-054",
+      "article_id": "art-0125",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-055",
+      "article_id": "art-0126",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 2,
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-055",
+      "article_id": "art-0127",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 2,
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-055",
+      "article_id": "art-0128",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 2,
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-055",
+      "article_id": "art-0129",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 2,
+        "center": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-056",
+      "article_id": "art-0130",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "islamist_conservative": 1,
+        "center": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-056",
+      "article_id": "art-0131",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "islamist_conservative": 1,
+        "center": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-056",
+      "article_id": "art-0132",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "islamist_conservative": 1,
+        "center": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-056",
+      "article_id": "art-0133",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "islamist_conservative": 1,
+        "center": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-057",
+      "article_id": "art-0134",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "pro_government": 1,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-057",
+      "article_id": "art-0135",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "pro_government": 1,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-057",
+      "article_id": "art-0136",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "pro_government": 1,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-058",
+      "article_id": "art-0137",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-058",
+      "article_id": "art-0138",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-059",
+      "article_id": "art-0139",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-059",
+      "article_id": "art-0140",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "state_media": 1
+      }
+    },
+    {
+      "cluster_id": "cl-060",
+      "article_id": "art-0141",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "international": 1,
+        "state_media": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-060",
+      "article_id": "art-0142",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "international": 1,
+        "state_media": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-060",
+      "article_id": "art-0143",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "international": 1,
+        "state_media": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-060",
+      "article_id": "art-0144",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "international": 1,
+        "state_media": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-061",
+      "article_id": "art-0145",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-061",
+      "article_id": "art-0146",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-062",
+      "article_id": "art-0147",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1
+      }
+    },
+    {
+      "cluster_id": "cl-063",
+      "article_id": "art-0148",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 2,
+        "nationalist": 1,
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-063",
+      "article_id": "art-0149",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 2,
+        "nationalist": 1,
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-063",
+      "article_id": "art-0150",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 2,
+        "nationalist": 1,
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-063",
+      "article_id": "art-0151",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 2,
+        "nationalist": 1,
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-063",
+      "article_id": "art-0152",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 2,
+        "nationalist": 1,
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-063",
+      "article_id": "art-0153",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 2,
+        "nationalist": 1,
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-063",
+      "article_id": "art-0154",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 2,
+        "center": 2,
+        "nationalist": 1,
+        "pro_government": 1,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-064",
+      "article_id": "art-0155",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-065",
+      "article_id": "art-0156",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-065",
+      "article_id": "art-0157",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-065",
+      "article_id": "art-0158",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1,
+        "opposition": 1
+      }
+    },
+    {
+      "cluster_id": "cl-066",
+      "article_id": "art-0159",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "pro_government": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-066",
+      "article_id": "art-0160",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "pro_government": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-066",
+      "article_id": "art-0161",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "pro_government": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-067",
+      "article_id": "art-0162",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 2,
+        "international": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-067",
+      "article_id": "art-0163",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 2,
+        "international": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-067",
+      "article_id": "art-0164",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 2,
+        "international": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-067",
+      "article_id": "art-0165",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 2,
+        "international": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0166",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0167",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0168",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0169",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0170",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0171",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0172",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-068",
+      "article_id": "art-0173",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_kurdish": 1,
+        "state_media": 1,
+        "pro_government": 3,
+        "gov_leaning": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-069",
+      "article_id": "art-0174",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-069",
+      "article_id": "art-0175",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-070",
+      "article_id": "art-0176",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-070",
+      "article_id": "art-0177",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "islamist_conservative": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-071",
+      "article_id": "art-0178",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-071",
+      "article_id": "art-0179",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-071",
+      "article_id": "art-0180",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 1,
+        "center": 2
+      }
+    },
+    {
+      "cluster_id": "cl-072",
+      "article_id": "art-0181",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "opposition_leaning": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-072",
+      "article_id": "art-0182",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "opposition_leaning": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-072",
+      "article_id": "art-0183",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "international": 1,
+        "opposition_leaning": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-073",
+      "article_id": "art-0184",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 2
+      }
+    },
+    {
+      "cluster_id": "cl-073",
+      "article_id": "art-0185",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 2
+      }
+    },
+    {
+      "cluster_id": "cl-074",
+      "article_id": "art-0186",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-074",
+      "article_id": "art-0187",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-075",
+      "article_id": "art-0188",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "state_media": 1,
+        "pro_kurdish": 1,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-075",
+      "article_id": "art-0189",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "state_media": 1,
+        "pro_kurdish": 1,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-075",
+      "article_id": "art-0190",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "state_media": 1,
+        "pro_kurdish": 1,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-075",
+      "article_id": "art-0191",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "state_media": 1,
+        "pro_kurdish": 1,
+        "islamist_conservative": 1,
+        "opposition_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-076",
+      "article_id": "art-0192",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-076",
+      "article_id": "art-0193",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-076",
+      "article_id": "art-0194",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1,
+        "international": 1
+      }
+    },
+    {
+      "cluster_id": "cl-077",
+      "article_id": "art-0195",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 2,
+        "pro_government": 1,
+        "gov_leaning": 3,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-077",
+      "article_id": "art-0196",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 2,
+        "pro_government": 1,
+        "gov_leaning": 3,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-077",
+      "article_id": "art-0197",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 2,
+        "pro_government": 1,
+        "gov_leaning": 3,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-077",
+      "article_id": "art-0198",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 2,
+        "pro_government": 1,
+        "gov_leaning": 3,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-077",
+      "article_id": "art-0199",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 2,
+        "pro_government": 1,
+        "gov_leaning": 3,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-077",
+      "article_id": "art-0200",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 2,
+        "pro_government": 1,
+        "gov_leaning": 3,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-077",
+      "article_id": "art-0201",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 2,
+        "pro_government": 1,
+        "gov_leaning": 3,
+        "pro_kurdish": 1
+      }
+    },
+    {
+      "cluster_id": "cl-078",
+      "article_id": "art-0202",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-078",
+      "article_id": "art-0203",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "gov_leaning": 1,
+        "nationalist": 1
+      }
+    },
+    {
+      "cluster_id": "cl-079",
+      "article_id": "art-0204",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-079",
+      "article_id": "art-0205",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "pro_government": 1,
+        "gov_leaning": 1
+      }
+    },
+    {
+      "cluster_id": "cl-080",
+      "article_id": "art-0206",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-080",
+      "article_id": "art-0207",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-031",
+      "article_id": "art-0248",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "nationalist": 2,
+        "center": 1
+      }
+    },
+    {
+      "cluster_id": "cl-032",
+      "article_id": "art-0249",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "pro_government": 1
+      }
+    },
+    {
+      "cluster_id": "cl-033",
+      "article_id": "art-0250",
+      "is_blindspot": false,
+      "bias_distribution": {
+        "opposition_leaning": 1,
+        "state_media": 1
+      }
+    }
+  ]
+}

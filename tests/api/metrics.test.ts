@@ -38,10 +38,16 @@ vi.mock("next/server", async (importOriginal) => {
 interface CountResponse {
   count: number | null;
   // Round-6 P1 added a maybeSingle() query for the oldest pending neutral
-  // cluster — that surface returns `data`, not `count`. Keep `data`
-  // optional on the same record so we can keep the single fake.
-  data?: { first_published: string | null } | null;
-  error: { message: string } | null;
+  // cluster, and 039 added a maybeSingle() quality-snapshot query and a
+  // plain-select row-errors query — those surfaces return `data`, not
+  // `count`. Keep `data` loose enough to cover all three shapes on the
+  // same fake array.
+  data?:
+    | { first_published: string | null }
+    | { taken_at: string; singleton_rate: number | null; cluster_count: number | null; blindspot_flip_rate: number | null }
+    | { row_errors: number | null }[]
+    | null;
+  error: { message: string; code?: string } | null;
 }
 
 // Default counts, in the order the route issues them. Matches the
@@ -66,6 +72,20 @@ const DEFAULT_COUNTS: CountResponse[] = [
   // 13 oldestPendingNeutral — null data means "no pending row"; the
   // route renders this as `oldestPendingNeutralAgeSec: null`.
   { count: null, data: null, error: null },
+  // 14 latestQualitySnapshot — a present row; the route renders this as
+  // `clusters.quality`.
+  {
+    count: null,
+    data: {
+      taken_at: "2026-09-08T03:00:00.000Z",
+      singleton_rate: 0.42,
+      cluster_count: 80,
+      blindspot_flip_rate: 0.05,
+    },
+    error: null,
+  },
+  // 15 ingestRowErrors — two cycles finished in the last hour.
+  { count: null, data: [{ row_errors: 2 }, { row_errors: 1 }], error: null },
 ];
 
 let currentCounts: CountResponse[] = [...DEFAULT_COUNTS];
@@ -197,15 +217,24 @@ describe("GET /api/metrics", () => {
       // 7 / 10 = 0.70 — well below the 0.9 page threshold the docs
       // call out as the headline-cron drift signal.
       neutralizedRatio: 0.7,
-      // null because the fake's index-12 row returns data: null,
+      // null because the fake's index-13 row returns data: null,
       // meaning "no pending row at all".
       oldestPendingNeutralAgeSec: null,
+      quality: {
+        takenAt: "2026-09-08T03:00:00.000Z",
+        singletonRate: 0.42,
+        clusterCount: 80,
+        blindspotFlipRate: 0.05,
+      },
     });
 
     expect(body.sources).toEqual({
       total: 8,
       active: 7,
     });
+
+    // 2 + 1 = 3 row_errors across the two ingest_cycles rows fetched.
+    expect(body.ingest).toEqual({ rowErrorsLastHour: 3 });
   });
 
   it("returns the no-store cache header so auth-gated data is not CDN-cached", async () => {
@@ -233,6 +262,9 @@ describe("GET /api/metrics", () => {
     expect(body.clusters.blindspots).toBe(0);
     expect(body.sources.total).toBe(0);
     expect(body.sources.active).toBe(0);
+    // No data on either fake row: no snapshot yet, no ingest_cycles rows.
+    expect(body.clusters.quality).toBeNull();
+    expect(body.ingest.rowErrorsLastHour).toBe(0);
   });
 
   it("sets avgArticlesPerCluster to 0 when there are no clusters (avoids div-by-zero)", async () => {
@@ -282,5 +314,71 @@ describe("GET /api/metrics", () => {
     const { body } = await callGet();
     expect(body.clusters.multiArticle).toBe(0);
     expect(body.clusters.avgArticlesPerMultiCluster).toBe(0);
+  });
+
+  it("sets clusters.quality to null before the first audit-clusters --persist run", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[14] = { count: null, data: null, error: null }; // latestQualitySnapshot
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.clusters.quality).toBeNull();
+  });
+
+  it("sets ingest.rowErrorsLastHour to 0 when ingest_cycles is empty", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[15] = { count: null, data: [], error: null }; // ingestRowErrors
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.ingest.rowErrorsLastHour).toBe(0);
+  });
+
+  it("treats a missing row_errors value on an ingest_cycles row as 0", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[15] = {
+      count: null,
+      data: [{ row_errors: null }, { row_errors: 4 }],
+      error: null,
+    };
+    const { body } = await callGet();
+    expect(body.ingest.rowErrorsLastHour).toBe(4);
+  });
+
+  it("returns 503 when the latest-quality-snapshot query errors", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[14] = { count: null, error: { message: "boom" } }; // latestQualitySnapshot
+    const { status, body } = await callGet();
+    expect(status).toBe(503);
+    expect(body.code).toBe("METRICS_QUERY_FAILED");
+    expect(body.details.queries).toEqual(["latestQualitySnapshot"]);
+  });
+
+  it("returns 503 when the ingest-row-errors query errors", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[15] = { count: null, error: { message: "boom" } }; // ingestRowErrors
+    const { status, body } = await callGet();
+    expect(status).toBe(503);
+    expect(body.code).toBe("METRICS_QUERY_FAILED");
+    expect(body.details.queries).toEqual(["ingestRowErrors"]);
+  });
+
+  // Migration 039 window: cluster_quality_snapshots / ingest_cycles don't
+  // exist yet if this branch reaches Vercel before 039 lands on Supabase.
+  // PostgREST reports that as an error (missing-relation code), not empty
+  // data — the route treats those two specific codes as "no data yet"
+  // instead of 503ing the whole endpoint (docs/migration-guide.md F2).
+  it("treats a missing cluster_quality_snapshots table (PGRST205) as quality: null instead of 503", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[14] = { count: null, data: null, error: { message: "not found", code: "PGRST205" } };
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.clusters.quality).toBeNull();
+  });
+
+  it("treats a missing ingest_cycles table (Postgres 42P01) as rowErrorsLastHour: 0 instead of 503", async () => {
+    currentCounts = [...DEFAULT_COUNTS];
+    currentCounts[15] = { count: null, data: null, error: { message: "relation does not exist", code: "42P01" } };
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.ingest.rowErrorsLastHour).toBe(0);
   });
 });
