@@ -145,17 +145,16 @@ describe("migration 038_cron_schedules.sql (static)", () => {
     expect(sql).toMatch(/raise\s+notice/i);
   });
 
-  it("reads the base URL and bearer via current_setting — never a literal secret or project URL", () => {
-    expect(sql).toMatch(/current_setting\(\s*'app\.service_role_key'\s*,\s*true\s*\)/);
-    expect(sql).toMatch(/current_setting\(\s*'app\.functions_base_url'\s*,\s*true\s*\)/);
-    expect(sql.toLowerCase()).not.toMatch(/supabase\.co/);
-    // No hardcoded bearer token — only the auth-scheme prefix concatenated
-    // with a current_setting() call, never a literal token after it.
+  it("reads the base URL and bearer from Vault — never a literal secret or project URL", () => {
+    expect(sql).toMatch(/vault\.decrypted_secrets\s+where\s+name\s*=\s*'service_role_key'/);
+    expect(sql).toMatch(/vault\.decrypted_secrets\s+where\s+name\s*=\s*'functions_base_url'/);
+    // Only placeholder URLs (<ref>) may appear, never a real project host.
+    expect(sql.toLowerCase()).not.toMatch(/[a-z0-9]{20}\.supabase\.co/);
     expect(sql).not.toMatch(/Bearer\s+[A-Za-z0-9._-]{20,}/);
   });
 
-  it("raises an exception at apply time when a required setting is null (pg_cron present)", () => {
-    expect(sql).toMatch(/is\s+null\s+then\s*[\s\S]{0,20}raise\s+exception/i);
+  it("raises an exception at apply time when a Vault secret is missing (pg_cron present)", () => {
+    expect(sql).toMatch(/if\s+not\s+exists\s*\(select 1 from vault\.decrypted_secrets[^)]*\)\s*then\s*[\s\S]{0,20}raise\s+exception/i);
   });
 
   it("prune-nightly calls both retention functions from 037", () => {

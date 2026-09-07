@@ -190,12 +190,12 @@ Expected: an empty JSON array `[]` (no messages currently waiting past the visib
 
 pg_cron + pg_net live in Supabase but are NOT installed by the portable migrations (they're project-scoped extensions whose grants differ between Supabase Free and Pro; local Postgres via `supabase start` has neither). Both extensions are pre-installed on Supabase Pro; on Free, enable them under Database → Extensions first.
 
-As of migration 038, the schedule itself is applied as a migration instead of hand-run SQL in the Dashboard — the migration is idempotent (safe to re-run after editing a schedule or job body) and is a no-op with a NOTICE on any database missing pg_cron or pg_net. Two database-level settings must exist **before** you apply it — set them once via the Supabase Dashboard → SQL Editor. Neither value is ever written into a migration file or into git; they live only in `pg_db_role_setting`, readable to superuser / the bootstrap role:
+As of migration 038, the schedule itself is applied as a migration instead of hand-run SQL in the Dashboard — the migration is idempotent (safe to re-run after editing a schedule or job body) and is a no-op with a NOTICE on any database missing pg_cron or pg_net. Two Supabase Vault secrets must exist **before** you apply it — create them once via the Supabase Dashboard → SQL Editor. Neither value is ever written into a migration file or into git; the job bodies read them from `vault.decrypted_secrets` at run time:
 
 ```sql
 -- Run in Supabase Dashboard → SQL Editor, once per project, before applying 038.
-alter database postgres set app.service_role_key = '<paste service-role key here>';
-alter database postgres set app.functions_base_url = 'https://<PROJECT_REF>.functions.supabase.co';
+select vault.create_secret('<paste service-role key here>', 'service_role_key');
+select vault.create_secret('https://<PROJECT_REF>.supabase.co/functions/v1', 'functions_base_url');
 ```
 
 Then apply the migration:
@@ -206,7 +206,7 @@ supabase db push
 psql "$DATABASE_URL" -f supabase/migrations/038_cron_schedules.sql
 ```
 
-`038_cron_schedules.sql` schedules `ingest-drain` (`*/3 * * * *`), `cluster-drain` (`* * * * *`), and `image-drain` (`*/5 * * * *`) — same names, schedules, and `net.http_post` shape as before — plus a fourth job, `prune-nightly` (`10 4 * * *`, i.e. 04:10 UTC), that calls the two retention functions from migration 037 (`select public.prune_singleton_clusters(); select public.trim_pgmq_archives();`). Each of the three drain job bodies reads both `app.service_role_key` and `app.functions_base_url` via `current_setting(..., true)` at run time — same NULL-not-raise behavior as before, now covering the base URL too so no project URL is baked into the migration file. `prune-nightly` only calls the two 037 functions and needs neither setting. If either setting is missing when pg_cron **is** installed, the migration raises an exception at apply time rather than scheduling a job that 401s or 404s forever.
+`038_cron_schedules.sql` schedules `ingest-drain` (`*/3 * * * *`), `cluster-drain` (`* * * * *`), and `image-drain` (`*/5 * * * *`) — same names, schedules, and `net.http_post` shape as before — plus a fourth job, `prune-nightly` (`10 4 * * *`, i.e. 04:10 UTC), that calls the two retention functions from migration 037 (`select public.prune_singleton_clusters(); select public.trim_pgmq_archives();`). Each of the three drain job bodies reads the `service_role_key` and `functions_base_url` Vault secrets at run time, so no project URL or token is baked into the migration file. `prune-nightly` only calls the two 037 functions and needs neither secret. If either secret is missing when pg_cron **is** installed, the migration raises an exception at apply time rather than scheduling a job that 401s or 404s forever.
 
 If you need to change a schedule or a job's body later, edit `038_cron_schedules.sql` and re-apply it — it unschedules each of the four jobs by name before rescheduling, so there's no duplicate-jobname error from pg_cron.
 
@@ -415,8 +415,8 @@ If any step lags, jump to the next section.
      order by start_time desc limit 5;
    ```
 
-   - `status = 'failed'` with `return_message` showing an HTTP 401 → bearer header was empty or wrong. Re-run `alter database postgres set app.service_role_key = '<key>';` against the **same** database the cron jobs target.
-   - `status = 'failed'` with `return_message = 'unrecognized configuration parameter "app.service_role_key"'` → you did NOT use `current_setting('app.service_role_key', true)` (the `missing_ok` argument). Re-apply `supabase/migrations/038_cron_schedules.sql` (its job bodies use the `missing_ok` form); if you hand-edited the job, `cron.unschedule` it and re-apply 038.
+   - `status = 'failed'` with `return_message` showing an HTTP 401 → the `service_role_key` Vault secret is empty or wrong. Update it (`select vault.update_secret(id, '<key>') from vault.secrets where name = 'service_role_key'`) and re-apply 038.
+   - `status = 'failed'` with a 404 → the `functions_base_url` Vault secret is wrong; it must end in `/functions/v1`.
    - `status = 'failed'` with HTTP 500 → bug in the consumer. Check Edge Function logs in the Supabase Dashboard.
 
 2. Is `cluster_work` accumulating without being drained?
@@ -661,7 +661,7 @@ Before declaring the migration complete:
 - [ ] Migrations 024, 025, 026 applied; verification SQL above returned the expected rows (including `worker_metrics`)
 - [ ] `cron.job` shows `cluster-drain`, `image-drain`, `ingest-drain`, and `prune-nightly` with `active = true`
 - [ ] `cron.job_run_details` shows recent runs with `status = 'succeeded'`
-- [ ] Migrations 037 and 038 applied; `app.service_role_key` and `app.functions_base_url` were set before 038 (see "Retention (037)" and section 3 above)
+- [ ] Migrations 037 and 038 applied; Vault secrets `service_role_key` and `functions_base_url` existed before 038 (see "Retention (037)" and section 3 above)
 - [ ] `CRON_SECRET` and `ANTHROPIC_API_KEY` env vars are set on Vercel production
 - [ ] `vercel --prod` deploy landed with the new `/api/cron/headline` schedule and no legacy cron entries
 - [ ] `/api/health` reports `clustering.lag_minutes < 15`
