@@ -30,6 +30,7 @@
 // Pure JS, only depends on node:crypto.
 
 import { createHash } from "node:crypto";
+import { MINHASH_SIG_K } from "./constants.mjs";
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -323,6 +324,44 @@ export function jaccardFromSignatures(sigA, sigB) {
     if (sigA[i] === sigB[i]) matches++;
   }
   return matches / k;
+}
+
+// Bump when hash params change — baseHash32, coefficient seeds, k, shingle
+// n. Stored rows with another version are recomputed rather than reused.
+export const MINHASH_VERSION = 1;
+
+/**
+ * Plain-number array for the `articles.minhash_sig` bigint[] column.
+ * @param {Uint32Array} sig
+ * @returns {number[]}
+ */
+export function serializeSignature(sig) {
+  return Array.from(sig);
+}
+
+/**
+ * Reconstructs a MinHash signature from a stored `articles.minhash_sig` /
+ * `minhash_version` pair. Returns null unless the version matches
+ * MINHASH_VERSION and the value is an array of MINHASH_SIG_K uint32s —
+ * otherwise the caller must recompute. Accepts digit-string elements (some
+ * pg drivers int8-stringify bigint[] members) by coercing with `Number`.
+ * @param {unknown} value
+ * @param {unknown} version
+ * @returns {Uint32Array | null}
+ */
+export function deserializeSignature(value, version) {
+  if (version !== MINHASH_VERSION) return null;
+  if (!Array.isArray(value) || value.length !== MINHASH_SIG_K) return null;
+  const sig = new Uint32Array(MINHASH_SIG_K);
+  for (let i = 0; i < MINHASH_SIG_K; i++) {
+    const v = value[i];
+    const n = typeof v === "string" ? Number(v) : v;
+    if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > 0xFFFFFFFF) {
+      return null;
+    }
+    sig[i] = n;
+  }
+  return sig;
 }
 
 // ---------------------------------------------------------------------------

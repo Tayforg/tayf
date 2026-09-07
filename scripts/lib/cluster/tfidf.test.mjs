@@ -197,6 +197,114 @@ describe("TfidfIndex — df tracking on replacement", () => {
   });
 });
 
+describe("TfidfIndex — query / cosineQuery", () => {
+  // 4-doc Turkish corpus, reused from the existing test/self-test strings
+  // above and tfidf.mjs's own self-test block.
+  const DOCS = [
+    ["a", "Erdogan AKP grup toplantisinda konustu"],
+    ["b", "Cumhurbaskani Erdogan AKP grup toplantisinda aciklama yapti"],
+    ["c", "Galatasaray Fenerbahce macinda 3-1 galip geldi"],
+    ["d", "Galatasaray Fenerbahce derbisinde 3 gol atti"],
+  ];
+
+  function buildIndex() {
+    const idx = new TfidfIndex();
+    for (const [id, text] of DOCS) idx.addDoc(id, text);
+    return idx;
+  }
+
+  it("is byte-exact against addDoc(q)+finalize()+cosine(q, other) for every doc as query", () => {
+    for (const [qid, qtext] of DOCS) {
+      const idx = buildIndex();
+      const q = idx.query(qtext);
+      for (const [otherId] of DOCS) {
+        if (otherId === qid) continue;
+        const viaCosineQuery = idx.cosineQuery(q, otherId);
+
+        const fresh = buildIndex();
+        fresh.addDoc("__query__", qtext);
+        fresh.finalize();
+        const viaFreshCosine = fresh.cosine("__query__", otherId);
+
+        expect(viaCosineQuery).toBe(viaFreshCosine);
+      }
+    }
+  });
+
+  it("query() does not mutate size(), df, or finalized", () => {
+    const idx = buildIndex();
+    idx.finalize();
+    const sizeBefore = idx.size();
+    const dfSnapshot = new Map(idx.df);
+
+    idx.query("Erdogan yeni bir aciklama yapti bugun");
+
+    expect(idx.size()).toBe(sizeBefore);
+    expect(idx.finalized).toBe(true);
+    expect(idx.df.size).toBe(dfSnapshot.size);
+    for (const [term, count] of dfSnapshot.entries()) {
+      expect(idx.df.get(term)).toBe(count);
+    }
+  });
+
+  it("works when finalize() was never called", () => {
+    const idx = buildIndex();
+    expect(idx.finalized).toBe(false);
+    const q = idx.query(DOCS[0][1]);
+    const cos = idx.cosineQuery(q, "b");
+    expect(idx.finalized).toBe(false);
+    expect(cos).toBeGreaterThan(0);
+  });
+
+  it("returns 0 for an empty-text query", () => {
+    const idx = buildIndex();
+    const q = idx.query("");
+    expect(idx.cosineQuery(q, "a")).toBe(0);
+    const qNull = idx.query(null);
+    expect(idx.cosineQuery(qNull, "a")).toBe(0);
+  });
+
+  it("returns 0 for an unknown doc id", () => {
+    const idx = buildIndex();
+    const q = idx.query(DOCS[0][1]);
+    expect(idx.cosineQuery(q, "does-not-exist")).toBe(0);
+  });
+
+  it("with selfId already indexed matches addDoc(sameId)+finalize()+cosine (replace, not a 2nd doc)", () => {
+    // Re-processing an article that is already a doc in the index (e.g. the
+    // seed/latest of its own cluster, or a re-delivered message) must be
+    // scored as a REPLACE of that doc — same N, df backed out then re-added
+    // — not as if it were a brand-new (N+1)th document.
+    const freshTextForA = "Erdogan yeni bir aciklama yapti grup toplantisinda";
+    for (const [otherId] of DOCS) {
+      if (otherId === "a") continue;
+      const idx = buildIndex();
+      const q = idx.query(freshTextForA, "a");
+      const viaCosineQuery = idx.cosineQuery(q, otherId);
+
+      const replaced = buildIndex();
+      replaced.addDoc("a", freshTextForA); // replace, same id
+      replaced.finalize();
+      const viaReplaceCosine = replaced.cosine("a", otherId);
+
+      expect(viaCosineQuery).toBe(viaReplaceCosine);
+    }
+  });
+
+  it("with selfId === id uses the query's own tf as the doc side, matching a self-replace", () => {
+    // cosine("a", "a") has a bit-exact idA===idB shortcut (always exactly 1)
+    // that cosineQuery has no equivalent for, so this checks closeness
+    // rather than the toBe used above — the point is confirming the
+    // docTf=q.tf branch lands at ~1, not chasing float-identical output.
+    const freshTextForA = "Erdogan yeni bir aciklama yapti grup toplantisinda";
+    const idx = buildIndex();
+    const q = idx.query(freshTextForA, "a");
+    const viaCosineQuery = idx.cosineQuery(q, "a");
+
+    expect(viaCosineQuery).toBeCloseTo(1, 10);
+  });
+});
+
 describe("TfidfIndex — finalize on empty corpus", () => {
   it("handles zero-doc corpus without throwing", () => {
     const idx = new TfidfIndex();

@@ -13,6 +13,14 @@
 
 import { normalizeTurkish, stemTurkish } from "./fingerprint.mjs";
 
+/**
+ * A one-off query bag-of-words.
+ * `selfId`, when set, is the doc id this query's text stands in for when
+ * that id is already indexed (e.g. re-processing an article that is already
+ * the seed/latest of its cluster) — see cosineQuery.
+ * @typedef {{ tf: Map<string, number>, selfId?: string }} TfidfQuery
+ */
+
 export class TfidfIndex {
   constructor() {
     /** @type {Map<string, Map<string, number>>} docId → term → raw tf */
@@ -28,6 +36,50 @@ export class TfidfIndex {
     this.finalized = false;
   }
 
+  // Tokenize + count once: normalizeTurkish -> split -> stemTurkish -> tf
+  // map, insertion order = first occurrence. Shared by addDoc() and query()
+  // so both sides of a cosine tokenize identically.
+  //
+  // Stemming conflates Turkish surface forms ("mecliste", "meclisten",
+  // "meclisin" → "meclis") for better TF-IDF cosine on paraphrased
+  // articles. stemTurkish is conservative — only nominal suffixes with a
+  // minimum stem length guard to avoid over-conflation.
+  /**
+   * @param {string | null | undefined} text
+   * @returns {Map<string, number>}
+   */
+  tokenize(text) {
+    const norm = normalizeTurkish(text || "");
+    const tf = new Map();
+    if (!norm) return tf;
+    const tokens = norm.split(" ").filter(Boolean).map(stemTurkish);
+    for (const t of tokens) {
+      tf.set(t, (tf.get(t) || 0) + 1);
+    }
+    return tf;
+  }
+
+  // Shared dot/(nA*nB) cosine over two pre-weighted term maps + norms.
+  // Iterates the smaller map so op order (and therefore float rounding) is
+  // identical between cosine() and cosineQuery().
+  /**
+   * @param {Map<string, number>} a
+   * @param {number} nA
+   * @param {Map<string, number>} b
+   * @param {number} nB
+   * @returns {number}
+   */
+  cosineOf(a, nA, b, nB) {
+    if (nA === 0 || nB === 0) return 0;
+    const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+    let dot = 0;
+    for (const [term, w] of small.entries()) {
+      const other = big.get(term);
+      if (other !== undefined) dot += w * other;
+    }
+    return dot / (nA * nB);
+  }
+
   addDoc(id, text) {
     if (this.finalized) {
       // Allow re-use: invalidate finalized state, the caller can call finalize() again.
@@ -36,19 +88,12 @@ export class TfidfIndex {
       this.norms.clear();
       this.idf.clear();
     }
-    const norm = normalizeTurkish(text || "");
-    if (!norm) {
-      this.docs.set(id, new Map());
+    const tf = this.tokenize(text);
+    if (tf.size === 0) {
+      // Matches the pre-refactor early-return: replacing a doc with empty
+      // text does NOT back out its old df contributions (unchanged quirk).
+      this.docs.set(id, tf);
       return;
-    }
-    // Stem each token to conflate Turkish surface forms ("mecliste",
-    // "meclisten", "meclisin" → "meclis") for better TF-IDF cosine on
-    // paraphrased articles. stemTurkish is conservative — only nominal
-    // suffixes with a minimum stem length guard to avoid over-conflation.
-    const tokens = norm.split(" ").filter(Boolean).map(stemTurkish);
-    const tf = new Map();
-    for (const t of tokens) {
-      tf.set(t, (tf.get(t) || 0) + 1);
     }
     // df update — only count each term once per doc.
     if (this.docs.has(id)) {
@@ -108,15 +153,70 @@ export class TfidfIndex {
     if (!a || !b) return 0;
     const nA = this.norms.get(idA) || 0;
     const nB = this.norms.get(idB) || 0;
-    if (nA === 0 || nB === 0) return 0;
-    // Iterate over the smaller vector.
-    const [small, big] = a.size <= b.size ? [a, b] : [b, a];
-    let dot = 0;
-    for (const [term, w] of small.entries()) {
-      const other = big.get(term);
-      if (other !== undefined) dot += w * other;
+    return this.cosineOf(a, nA, b, nB);
+  }
+
+  // Tokenizes `text` once, without touching docs/df/finalized — safe to call
+  // whether or not finalize() has run yet. Pass `selfId` when `text` is a
+  // fresher version of a doc already indexed under that id, so cosineQuery
+  // does not double-count it.
+  /**
+   * @param {string | null | undefined} text
+   * @param {string} [selfId]
+   * @returns {TfidfQuery}
+   */
+  query(text, selfId) {
+    return { tf: this.tokenize(text), selfId };
+  }
+
+  // Cosine between a one-off query and indexed doc `id`, scored as if the
+  // query were momentarily added to the corpus (N' = docs+1, df' bumped by
+  // 1 for terms the query contains) without mutating the index. This
+  // reproduces exactly what `addDoc(query); finalize(); cosine(query, id)`
+  // would have computed on a fresh index holding the same docs — UNLESS
+  // `q.selfId` is already indexed, in which case that add is really a
+  // *replace* (N unchanged, that doc's own df contribution backed out
+  // first), matching addDoc's replace semantics instead of double-counting.
+  /**
+   * @param {TfidfQuery} q
+   * @param {string} id
+   * @returns {number}
+   */
+  cosineQuery(q, id) {
+    const d = this.docs.get(id);
+    if (!d) return 0;
+    const self = q.selfId !== undefined ? this.docs.get(q.selfId) : undefined;
+    const N = this.docs.size + (self ? 0 : 1);
+    const idfOf = (t) =>
+      Math.log(
+        (N + 1) / ((this.df.get(t) || 0) - (self?.has(t) ? 1 : 0) + (q.tf.has(t) ? 1 : 0) + 1),
+      ) + 1;
+
+    const qw = new Map();
+    let nQ = 0;
+    for (const [term, count] of q.tf.entries()) {
+      const w = count * idfOf(term);
+      if (w !== 0) {
+        qw.set(term, w);
+        nQ += w * w;
+      }
     }
-    return dot / (nA * nB);
+    // If `id` is the doc the query is replacing, its current weights ARE
+    // the query's — use q.tf, not the stale indexed `d`.
+    const docTf = id === q.selfId ? q.tf : d;
+    const dw = new Map();
+    let nD = 0;
+    for (const [term, count] of docTf.entries()) {
+      const w = count * idfOf(term);
+      if (w !== 0) {
+        dw.set(term, w);
+        nD += w * w;
+      }
+    }
+    nQ = Math.sqrt(nQ);
+    nD = Math.sqrt(nD);
+    if (nQ === 0 || nD === 0) return 0;
+    return this.cosineOf(qw, nQ, dw, nD);
   }
 
   size() {

@@ -7,7 +7,11 @@ import {
   minhashSignature,
   jaccardFromSignatures,
   fingerprint,
+  MINHASH_VERSION,
+  serializeSignature,
+  deserializeSignature,
 } from "./fingerprint.mjs";
+import { MINHASH_SIG_K } from "./constants.mjs";
 
 describe("normalizeTurkish", () => {
   it("returns empty string for empty or nullish input", () => {
@@ -355,5 +359,78 @@ describe("fingerprint (bundled)", () => {
     expect(a.shingles.size).toBe(b.shingles.size);
     for (const s of a.shingles) expect(b.shingles.has(s)).toBe(true);
     for (let i = 0; i < 64; i++) expect(a.signature[i]).toBe(b.signature[i]);
+  });
+});
+
+describe("serializeSignature / deserializeSignature", () => {
+  it("MINHASH_VERSION is 1", () => {
+    expect(MINHASH_VERSION).toBe(1);
+  });
+
+  it("round-trips a real fingerprint signature with jaccard 1 against the original", () => {
+    const bundle = fingerprint("Erdogan AKP grup toplantisi", "kabine aciklamasi yapti");
+    const serialized = serializeSignature(bundle.signature);
+    expect(Array.isArray(serialized)).toBe(true);
+    expect(serialized.length).toBe(MINHASH_SIG_K);
+
+    const restored = deserializeSignature(serialized, MINHASH_VERSION);
+    expect(restored).toBeInstanceOf(Uint32Array);
+    expect(restored.length).toBe(MINHASH_SIG_K);
+    for (let i = 0; i < MINHASH_SIG_K; i++) {
+      expect(restored[i]).toBe(bundle.signature[i]);
+    }
+    expect(jaccardFromSignatures(bundle.signature, restored)).toBe(1);
+  });
+
+  it("rejects a version that does not match MINHASH_VERSION", () => {
+    const serialized = serializeSignature(minhashSignature(new Set(["abcd"]), MINHASH_SIG_K));
+    expect(deserializeSignature(serialized, 0)).toBe(null);
+    expect(deserializeSignature(serialized, 2)).toBe(null);
+    expect(deserializeSignature(serialized, "1")).toBe(null);
+    expect(deserializeSignature(serialized, null)).toBe(null);
+    expect(deserializeSignature(serialized, undefined)).toBe(null);
+  });
+
+  it("rejects arrays of the wrong length", () => {
+    const short = new Array(MINHASH_SIG_K - 1).fill(0);
+    const long = new Array(MINHASH_SIG_K + 1).fill(0);
+    expect(deserializeSignature(short, MINHASH_VERSION)).toBe(null);
+    expect(deserializeSignature(long, MINHASH_VERSION)).toBe(null);
+  });
+
+  it("rejects non-array values", () => {
+    expect(deserializeSignature("not an array", MINHASH_VERSION)).toBe(null);
+    expect(deserializeSignature(null, MINHASH_VERSION)).toBe(null);
+    expect(deserializeSignature(undefined, MINHASH_VERSION)).toBe(null);
+    expect(deserializeSignature({}, MINHASH_VERSION)).toBe(null);
+  });
+
+  it("rejects arrays containing an out-of-range or non-integer element", () => {
+    const base = () => new Array(MINHASH_SIG_K).fill(0);
+    const withNegative = base();
+    withNegative[0] = -1;
+    expect(deserializeSignature(withNegative, MINHASH_VERSION)).toBe(null);
+
+    const withOverflow = base();
+    withOverflow[0] = 2 ** 32;
+    expect(deserializeSignature(withOverflow, MINHASH_VERSION)).toBe(null);
+
+    const withFloat = base();
+    withFloat[0] = 1.5;
+    expect(deserializeSignature(withFloat, MINHASH_VERSION)).toBe(null);
+
+    const withNonNumericString = base();
+    withNonNumericString[0] = "x";
+    expect(deserializeSignature(withNonNumericString, MINHASH_VERSION)).toBe(null);
+  });
+
+  it("accepts digit-string elements (int8-stringifying pg drivers)", () => {
+    const bundle = fingerprint("Galatasaray Fenerbahce derbisi", "3-1 galip geldi");
+    const serialized = serializeSignature(bundle.signature).map(String);
+    const restored = deserializeSignature(serialized, MINHASH_VERSION);
+    expect(restored).toBeInstanceOf(Uint32Array);
+    for (let i = 0; i < MINHASH_SIG_K; i++) {
+      expect(restored[i]).toBe(bundle.signature[i]);
+    }
   });
 });

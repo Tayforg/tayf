@@ -31,7 +31,11 @@ import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 await initSentry("cluster-consumer");
 import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts";
 import {
+  deserializeSignature,
   fingerprint,
+  MINHASH_VERSION,
+  serializeSignature,
+  strictFingerprint,
   titleTokens,
   type FingerprintBundle,
 } from "../_shared/cluster/fingerprint.ts";
@@ -60,19 +64,19 @@ import { type SourceKind, votingBiasKeys } from "../_shared/cluster/source-kind.
 
 const QUEUE_NAME = "cluster_work";
 // Messages processed per invocation. Kept small because each article is
-// scored against the full cluster context (a per-article TF-IDF build), so
-// large batches push a single invocation past the Edge compute limit. The
-// cluster-drain pg_cron fires every minute, so a small batch still clears
-// the backlog quickly and keeps steady state.
+// scored against the full cluster context, so large batches push a single
+// invocation past the Edge compute limit. The cluster-drain pg_cron fires
+// every minute, so a small batch still clears the backlog quickly and keeps
+// steady state.
 const BATCH_SIZE = 2;
 // Upper bound on clusters held in the in-memory rolling context — see
 // loadClusterContext. The context build fingerprints seed+latest of every
 // included cluster on each cold invocation, and that per-invocation CPU is
 // what trips the Edge Function compute limit (546): ~800 fingerprints at
-// cap 400 exceeds it, ~300 at cap 150 stays under with margin. This is a
-// stopgap — the durable fix is to persist the MinHash signature at ingest
-// so the consumer reads instead of recomputing, which would let the full
-// 48h window back in. Tracked as a follow-up.
+// cap 400 exceeds it, ~300 at cap 150 stays under with margin. Signatures
+// are read from articles.minhash_sig (filled lazily by persistEnrichment)
+// and only rows without a valid stored signature are recomputed; raising
+// the cap is a separate follow-up.
 const CONTEXT_CLUSTER_CAP = 200;             // was 60; replay showed +7pt recall at 200, and 200 clusters x ~3 members is far under the limit the unbounded load hit
 const VT_SECONDS = 60;                      // visibility timeout per message
 // Poison contract (shared with image-consumer): a message is permanently
@@ -116,7 +120,7 @@ interface ArticleRow {
 }
 
 interface EnrichedArticle extends ArticleRow {
-  // signature is computed in-memory; there is no DB column yet.
+  // signature is persisted to articles.minhash_sig by persistEnrichment.
   signature: Uint32Array | null;
   // entities normalised to non-null after enrichment.
   entities: string[];
@@ -148,6 +152,8 @@ interface ClusterMemberArticle {
   entities: string[] | null;
   category: string | null;
   signature?: Uint32Array;
+  minhash_sig?: number[] | null;
+  minhash_version?: number | null;
 }
 
 interface ClusterContext {
@@ -168,6 +174,9 @@ interface ClusterContext {
     byBand: Map<string, string[]>;
     byToken: Map<string, string[]>;
   };
+  // Built once per context over seed+latest docs; incoming articles score
+  // via cosineQuery instead of triggering a per-message rebuild.
+  tfidf: TfidfIndex;
 }
 
 interface QueueMessage {
@@ -193,6 +202,20 @@ function hoursBetween(aIso: string, bIso: string): number {
     Math.abs(new Date(aIso).getTime() - new Date(bIso).getTime()) /
     (1000 * 60 * 60)
   );
+}
+
+// Reuse the persisted MinHash when its version matches; recompute otherwise.
+function attachSignature(art: ClusterMemberArticle): void {
+  if (art.signature) return;
+  const stored = deserializeSignature(art.minhash_sig, art.minhash_version);
+  if (stored) {
+    art.signature = stored;
+    if (!art.fingerprint) art.fingerprint = strictFingerprint(art.title || "", art.description || "");
+    return;
+  }
+  const fp = fingerprint(art.title || "", art.description || "");
+  art.signature = fp.signature;
+  if (!art.fingerprint) art.fingerprint = fp.strict;
 }
 
 function buildBiasDistribution(biasLabels: Array<BiasKey | null | undefined>): Record<BiasKey, number> {
@@ -309,6 +332,10 @@ async function loadClusterContext(): Promise<ClusterContext> {
     clusters.push(...((res.data ?? []) as ClusterRow[]));
   }
 
+  // Constructed once per loadClusterContext call (not once per branch): the
+  // empty-path returns below hand back this same untouched instance, and the
+  // full path populates it in place instead of allocating a second one.
+  const tfidf = new TfidfIndex();
   const emptyCtx: ClusterContext = {
     fetchedAt: Date.now(),
     clusters: [],
@@ -316,6 +343,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     latestByCluster: new Map(),
     sourceIdsByCluster: new Map(),
     indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map(), byToken: new Map() },
+    tfidf,
   };
 
   if (clusters.length === 0) return emptyCtx;
@@ -336,7 +364,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
 
   const articleRows = await inChunked<ClusterMemberArticle & { source_id: string | null }>(
     "articles",
-    "id, source_id, title, description, published_at, fingerprint, entities, category",
+    "id, source_id, title, description, published_at, fingerprint, entities, category, minhash_sig, minhash_version",
     "id",
     allArticleIds,
     100,
@@ -374,11 +402,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
       }
     }
     if (seed) {
-      if (!seed.signature) {
-        const fp = fingerprint(seed.title || "", seed.description || "");
-        seed.signature = fp.signature;
-        if (!seed.fingerprint) seed.fingerprint = fp.strict;
-      }
+      attachSignature(seed);
       seedByCluster.set(clusterId, seed);
     }
   }
@@ -399,19 +423,17 @@ async function loadClusterContext(): Promise<ClusterContext> {
       }
     }
     if (latest) {
-      const fp = fingerprint(latest.title || "", latest.description || "");
-      latest.signature = fp.signature;
-      if (!latest.fingerprint) latest.fingerprint = fp.strict;
+      attachSignature(latest);
       latestByCluster.set(clusterId, latest);
     }
   }
 
   const indices = buildMemberIndicesFromRows(caRows, memberArticles);
 
-  // Band the seed/latest signatures computed above. Done here rather than in
-  // buildMemberIndicesFromRows because signatures are not persisted — only
-  // seed and latest get one recomputed per context load, and those are
-  // precisely the two the ensemble scores against.
+  // Band the seed/latest signatures. Seed/latest signatures come from
+  // articles.minhash_sig when valid (attachSignature above) and are
+  // recomputed only for rows without one — those are precisely the two the
+  // ensemble scores against.
   for (const byCluster of [seedByCluster, latestByCluster]) {
     for (const [clusterId, art] of byCluster.entries()) {
       for (const key of bandKeys(art.signature)) {
@@ -425,6 +447,18 @@ async function loadClusterContext(): Promise<ClusterContext> {
     }
   }
 
+  // Populate the single tfidf instance declared above (built once per
+  // context load); the ensemble path vectorizes each incoming article
+  // against it via query()/cosineQuery() instead of rebuilding it per
+  // message. Seeds first, then latests — same order the old per-message
+  // build used.
+  for (const seed of seedByCluster.values()) {
+    tfidf.addDoc(seed.id, `${seed.title || ""} ${seed.description || ""}`);
+  }
+  for (const latest of latestByCluster.values()) {
+    tfidf.addDoc(latest.id, `${latest.title || ""} ${latest.description || ""}`);
+  }
+
   return {
     fetchedAt: Date.now(),
     clusters,
@@ -432,6 +466,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     latestByCluster,
     sourceIdsByCluster,
     indices,
+    tfidf,
   };
 }
 
@@ -525,6 +560,9 @@ function markClusterHasSource(clusterId: string, sourceId: string | null) {
 function registerNewClusterInCache(clusterId: string, seed: ClusterMemberArticle) {
   if (!clusterContextCache) return;
   clusterContextCache.seedByCluster.set(clusterId, seed);
+  // Makes the cluster scorable by the next message dequeued in this same
+  // invocation — the old per-message rebuild included it implicitly.
+  clusterContextCache.tfidf.addDoc(seed.id, `${seed.title || ""} ${seed.description || ""}`);
   addMemberToIndices(clusterId, seed);
   clusterContextCache.sourceIdsByCluster.set(
     clusterId,
@@ -638,6 +676,8 @@ async function persistEnrichment(article: EnrichedArticle): Promise<void> {
   const update = {
     fingerprint: article.fingerprint,
     entities: article.entities,
+    minhash_sig: article.signature ? serializeSignature(article.signature) : null,
+    minhash_version: article.signature ? MINHASH_VERSION : null,
   };
   const res = await supabase.from("articles").update(update).eq("id", article.id);
   if (res.error) {
@@ -814,28 +854,6 @@ async function addArticleToCluster(
 // Per-message processing
 // ---------------------------------------------------------------------------
 
-/**
- * Build a per-cycle TF-IDF index that includes the article being scored plus
- * every seed/latest member of the rolling-window clusters. Doing this once
- * per message is wasteful in absolute terms but the seed/latest set is in
- * the low thousands at worst, and the TfidfIndex is pure in-memory math.
- */
-function buildTfidfForArticle(
-  article: EnrichedArticle,
-  ctx: ClusterContext,
-): TfidfIndex {
-  const idx = new TfidfIndex();
-  for (const [, seed] of ctx.seedByCluster.entries()) {
-    idx.addDoc(seed.id, `${seed.title || ""} ${seed.description || ""}`);
-  }
-  for (const [, latest] of ctx.latestByCluster.entries()) {
-    idx.addDoc(latest.id, `${latest.title || ""} ${latest.description || ""}`);
-  }
-  idx.addDoc(article.id, `${article.title || ""} ${article.description || ""}`);
-  idx.finalize();
-  return idx;
-}
-
 type ProcessResult = "matched" | "created" | "skipped" | "not-found" | "not-politics";
 
 // Carries the touched cluster id alongside the outcome so drainQueue can
@@ -914,8 +932,17 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
     }
   }
 
-  // Ensemble path.
-  const tfidf = buildTfidfForArticle(article, ctx);
+  // Ensemble path. The context's TF-IDF index is built once per
+  // loadClusterContext; vectorize this article against it instead of
+  // rebuilding the index per message.
+  // Pass article.id as selfId: if this article is already indexed in
+  // ctx.tfidf (a re-delivered message, or a re-processed existing
+  // seed/latest — clusterArticle explicitly supports both), cosineQuery
+  // must treat this as a replace, not a second doc in the corpus.
+  const tfidfQuery = ctx.tfidf.query(
+    `${article.title || ""} ${article.description || ""}`,
+    article.id,
+  );
   const candidateIds = findCandidateClusters(article, indices);
   const articleFp = { strict: article.fingerprint, signature: article.signature };
   const aSourceSlug = article.source_id
@@ -933,7 +960,7 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
     if (hoursDeltaSeed > TIME_WINDOW_HOURS) continue;
 
     const seedFp = { strict: seed.fingerprint, signature: seed.signature ?? null };
-    const tfidfCosineSeed = tfidf.cosine(article.id, seed.id);
+    const tfidfCosineSeed = ctx.tfidf.cosineQuery(tfidfQuery, seed.id);
     const bSourceSlugSeed = seed.source_id
       ? sourceLookup.get(seed.source_id)?.slug ?? null
       : null;
@@ -953,7 +980,7 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
       const hoursDeltaLatest = hoursBetween(article.published_at, latest.published_at);
       if (hoursDeltaLatest <= TIME_WINDOW_HOURS) {
         const latestFp = { strict: latest.fingerprint, signature: latest.signature ?? null };
-        const tfidfCosineLatest = tfidf.cosine(article.id, latest.id);
+        const tfidfCosineLatest = ctx.tfidf.cosineQuery(tfidfQuery, latest.id);
         const bSourceSlugLatest = latest.source_id
           ? sourceLookup.get(latest.source_id)?.slug ?? null
           : null;
