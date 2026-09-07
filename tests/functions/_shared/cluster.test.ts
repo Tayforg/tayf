@@ -47,6 +47,8 @@ interface ClusterSide {
     addDoc(id: string, text: string | null | undefined): void;
     finalize(): void;
     cosine(idA: string, idB: string): number;
+    query(text: string | null | undefined): { tf: Map<string, number> };
+    cosineQuery(q: { tf: Map<string, number> }, id: string): number;
   };
   score(
     a: unknown,
@@ -56,6 +58,9 @@ interface ClusterSide {
     tfidfCosine: number,
     hoursDelta: number,
   ): { score: number; components: Record<string, unknown> };
+  MINHASH_VERSION: number;
+  serializeSignature(sig: Uint32Array): number[];
+  deserializeSignature(value: unknown, version: unknown): Uint32Array | null;
 }
 
 let legacy: ClusterSide | null = null;
@@ -180,6 +185,9 @@ beforeAll(async () => {
       fingerprint: legacyFingerprint.fingerprint,
       TfidfIndex: legacyTfidf.TfidfIndex,
       score: legacyEnsemble.score,
+      MINHASH_VERSION: legacyFingerprint.MINHASH_VERSION,
+      serializeSignature: legacyFingerprint.serializeSignature,
+      deserializeSignature: legacyFingerprint.deserializeSignature,
     };
     port = {
       strictFingerprint: portFingerprint.strictFingerprint,
@@ -187,6 +195,9 @@ beforeAll(async () => {
       fingerprint: portFingerprint.fingerprint,
       TfidfIndex: portTfidf.TfidfIndex,
       score: portEnsemble.score,
+      MINHASH_VERSION: portFingerprint.MINHASH_VERSION,
+      serializeSignature: portFingerprint.serializeSignature,
+      deserializeSignature: portFingerprint.deserializeSignature,
     };
 
     // Smoke-check the constants line up — if the .ts port drifts numerically
@@ -356,6 +367,101 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
                 `pair (${aArt.id}, ${bArt.id}): component ${key} — legacy=${String(lv)}, port=${String(pv)}`,
               );
             }
+          }
+        }
+      }
+      expect(mismatches).toEqual([]);
+    });
+  });
+
+  describe("MinHash signature persistence — MINHASH_VERSION", () => {
+    it("matches between the .mjs reference and the Deno port", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      expect(port.MINHASH_VERSION).toBe(legacy.MINHASH_VERSION);
+    });
+  });
+
+  describe("MinHash signature persistence — cross-implementation round trip", () => {
+    for (const article of articles) {
+      it(`legacy-serialized signature deserializes correctly on the port, and vice versa (${article.id})`, () => {
+        if (!legacy || !port) expect.fail("cluster libs not loaded");
+        const legacyFp = legacy.fingerprint(article.title, article.description);
+        const portFp = port.fingerprint(article.title, article.description);
+
+        // legacy.serialize -> port.deserialize must equal the port's own
+        // fresh signature for the same article, elementwise.
+        const legacySerialized = legacy.serializeSignature(legacyFp.signature);
+        const restoredOnPort = port.deserializeSignature(
+          legacySerialized,
+          port.MINHASH_VERSION,
+        );
+        expect(restoredOnPort).not.toBeNull();
+        for (let i = 0; i < portFp.signature.length; i++) {
+          expect(restoredOnPort![i]).toBe(portFp.signature[i]);
+        }
+
+        // And the reverse: port.serialize -> legacy.deserialize must equal
+        // the legacy's own fresh signature.
+        const portSerialized = port.serializeSignature(portFp.signature);
+        const restoredOnLegacy = legacy.deserializeSignature(
+          portSerialized,
+          legacy.MINHASH_VERSION,
+        );
+        expect(restoredOnLegacy).not.toBeNull();
+        for (let i = 0; i < legacyFp.signature.length; i++) {
+          expect(restoredOnLegacy![i]).toBe(legacyFp.signature[i]);
+        }
+      });
+    }
+  });
+
+  describe("TfidfIndex.cosineQuery leave-one-out parity", () => {
+    it("legacy.cosineQuery === port.cosineQuery === legacy per-article build, for every (query, doc) pair", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+
+      // Leave-one-out: for each article treated as the "incoming" query,
+      // the context index holds only the OTHER 9 articles (S = 9), mirroring
+      // production where ctx.tfidf never contains the incoming article
+      // itself. 10 queries * 9 others = 90 ordered pairs.
+      const mismatches: string[] = [];
+      for (const queryArticle of articles) {
+        const others = articles.filter((a) => a.id !== queryArticle.id);
+        const queryText = entityText(queryArticle);
+
+        const legacyCtx = new legacy.TfidfIndex();
+        const portCtx = new port.TfidfIndex();
+        for (const other of others) {
+          const text = entityText(other);
+          legacyCtx.addDoc(other.id, text);
+          portCtx.addDoc(other.id, text);
+        }
+        const legacyQuery = legacyCtx.query(queryText);
+        const portQuery = portCtx.query(queryText);
+
+        // Legacy per-article build — the pre-persistence behaviour this
+        // migration replaces: a fresh index over S=9 docs plus the incoming
+        // query article, finalized, then a plain cosine() call.
+        const rebuilt = new legacy.TfidfIndex();
+        for (const other of others) {
+          rebuilt.addDoc(other.id, entityText(other));
+        }
+        rebuilt.addDoc(queryArticle.id, queryText);
+        rebuilt.finalize();
+
+        for (const docArticle of others) {
+          const viaLegacyCosineQuery = legacyCtx.cosineQuery(legacyQuery, docArticle.id);
+          const viaPortCosineQuery = portCtx.cosineQuery(portQuery, docArticle.id);
+          const viaLegacyRebuild = rebuilt.cosine(queryArticle.id, docArticle.id);
+
+          if (
+            viaLegacyCosineQuery !== viaPortCosineQuery ||
+            viaLegacyCosineQuery !== viaLegacyRebuild
+          ) {
+            mismatches.push(
+              `query=${queryArticle.id} doc=${docArticle.id}: ` +
+                `legacy.cosineQuery=${viaLegacyCosineQuery}, port.cosineQuery=${viaPortCosineQuery}, ` +
+                `legacy.rebuild=${viaLegacyRebuild}`,
+            );
           }
         }
       }

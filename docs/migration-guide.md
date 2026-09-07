@@ -632,6 +632,19 @@ select public.recompute_blindspot_flags();
 
 ---
 
+## MinHash signature (036): apply first, redeploy second
+
+`036_minhash_signature.sql` adds two nullable columns to `articles`: `minhash_sig` (`bigint[]`, the k=64 MinHash over 4-gram shingles) and `minhash_version` (`smallint`, must match `MINHASH_VERSION` in `supabase/functions/_shared/cluster/fingerprint.ts`). No backfill — the consumer fills both lazily via `persistEnrichment` as it (re)processes each article; rows nobody has reprocessed yet just keep recomputing their signature on every cold start until they are, exactly as today.
+
+Same order and reason as 034 — the new `cluster-consumer` build selects and writes these columns, so deploying it before the migration lands turns every drain into an undefined-column 500:
+
+1. **Apply the migration first:** `supabase db push` (or `psql "$DATABASE_URL" -f supabase/migrations/036_minhash_signature.sql`).
+2. **Redeploy `cluster-consumer` second:** `supabase functions deploy cluster-consumer --project-ref "$PROJECT_REF" --no-verify-jwt`.
+
+No recompute step is needed afterward — unlike 034, nothing here changes what an already-stored row means, so there is nothing stale to backfill.
+
+Whenever the MinHash's hash parameters change (`baseHash32`, coefficient seeds, `k`, or the shingle `n`), bump `MINHASH_VERSION` in `fingerprint.ts` — stored rows carrying the old version stop being reused and are recomputed on their next pass, the same lazy path a never-processed row takes today.
+
 ## Quality telemetry (039): apply before this branch reaches Vercel, then redeploy `ingest`
 
 `039_quality_telemetry.sql` adds two new tables and one additive column, backing the daily cluster-quality audit and per-cycle ingest health:
