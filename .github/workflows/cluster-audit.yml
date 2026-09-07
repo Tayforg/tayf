@@ -1,0 +1,47 @@
+name: Cluster Quality Audit
+
+on:
+  schedule:
+    # 03:00 UTC daily — off-peak, well clear of the hourly ingest/cluster
+    # drains. workflow_dispatch below covers ad-hoc runs.
+    - cron: "0 3 * * *"
+  workflow_dispatch: {}
+
+# Read-only checkout + a Supabase write via the service-role key passed as
+# a secret env var, not a token grant — the job needs no GITHUB_TOKEN
+# permissions beyond checking out the repo.
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Match ci.yml's pin to the Node 24 family.
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run cluster quality audit
+        env:
+          # scripts/audit-clusters.mjs reads SUPABASE_URL directly (falls
+          # back to NEXT_PUBLIC_SUPABASE_URL for local dev).
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: node scripts/audit-clusters.mjs --json --persist > audit-report.json
+
+      # always() so a --persist failure (report already computed/printed)
+      # still preserves the JSON for triage instead of skipping the upload.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cluster-quality-report
+          path: audit-report.json
+          if-no-files-found: ignore
+          retention-days: 30

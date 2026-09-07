@@ -26,7 +26,7 @@
 import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
-import { normalizeArticles } from "../_shared/rss/normalize.ts";
+import { canonicalizeUrl, normalizeArticles } from "../_shared/rss/normalize.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
@@ -113,6 +113,43 @@ interface CycleStats {
   durationMs: number;
 }
 
+// The normaliser computes a canonical form of `url` internally (for
+// category classification) but the `NormalizedArticle` it returns only
+// carries the raw absolute `url`. We recompute the canonical form here
+// (same pure `canonicalizeUrl` the normaliser uses) so it can ride along
+// in the same upsert as an additive `canonical_url` column (migration 039)
+// without changing the normaliser's public shape.
+type IngestArticleRow = NormalizedArticle & { canonical_url: string | null };
+
+// Best-effort telemetry write: one row per cycle in `ingest_cycles`
+// (migration 039), regardless of whether the cycle finished cleanly or
+// `runCycle` is unwinding through a thrown error. Errors here are logged
+// and swallowed — a telemetry outage must never fail (or re-fail) a cycle.
+async function recordIngestCycle(
+  supabase: ReturnType<typeof createServiceClient>,
+  startedAt: number,
+  stats: CycleStats,
+): Promise<void> {
+  try {
+    const { error } = await supabase.from("ingest_cycles").insert({
+      started_at: new Date(startedAt).toISOString(),
+      fetched: stats.fetched,
+      inserted: stats.inserted,
+      row_errors: stats.rowErrors,
+      failed: stats.failed,
+      // Fall back to an on-the-spot measurement for the (should-not-happen)
+      // case where an unguarded throw unwinds before stats.durationMs was
+      // ever assigned.
+      duration_ms: stats.durationMs || Date.now() - startedAt,
+    });
+    if (error) {
+      console.error(`[ingest] ingest_cycles insert failed: ${error.message}`);
+    }
+  } catch (err) {
+    console.error("[ingest] ingest_cycles insert threw", err);
+  }
+}
+
 async function runCycle(): Promise<CycleStats> {
   const startedAt = Date.now();
   const deadline = startedAt + CYCLE_DEADLINE_MS;
@@ -132,6 +169,25 @@ async function runCycle(): Promise<CycleStats> {
     durationMs: 0,
   };
 
+  // The `finally` below fires on every exit from this point on — the two
+  // early returns, the final return, and any throw (including the
+  // `sourcesError` throw right after this block) — so `ingest_cycles` gets
+  // exactly one best-effort row per invocation on both the success and the
+  // failure path (product decision for migration 039).
+  try {
+    return await runCycleBody(supabase, startedAt, deadline, fetchDeadline, stats);
+  } finally {
+    await recordIngestCycle(supabase, startedAt, stats);
+  }
+}
+
+async function runCycleBody(
+  supabase: ReturnType<typeof createServiceClient>,
+  startedAt: number,
+  deadline: number,
+  fetchDeadline: number,
+  stats: CycleStats,
+): Promise<CycleStats> {
   const { data: sources, error: sourcesError } = await supabase
     .from("sources")
     .select("id, name, slug, url, rss_url")
@@ -150,7 +206,7 @@ async function runCycle(): Promise<CycleStats> {
     return stats;
   }
 
-  const allRows: NormalizedArticle[] = [];
+  const allRows: IngestArticleRow[] = [];
   // Per-source intra-cycle de-dup so two section-slug variants of the same
   // article inside one feed collapse before the upsert. Keyed by
   // `${source_id}\x1f${content_hash}`.
@@ -183,7 +239,11 @@ async function runCycle(): Promise<CycleStats> {
         const key = `${row.source_id}\x1f${row.content_hash}`;
         if (seenIntraCycle.has(key)) continue;
         seenIntraCycle.add(key);
-        allRows.push(row);
+        // Additive: canonicalizeUrl never throws (it catches internally and
+        // falls back to the raw URL), so this is always a string in
+        // practice — the column stays nullable for any future producer
+        // that can't compute one.
+        allRows.push({ ...row, canonical_url: canonicalizeUrl(row.url, source.slug) });
       }
     },
     fetchDeadline,
