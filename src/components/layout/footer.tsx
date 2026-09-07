@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { NewsletterForm } from "@/components/newsletter/newsletter-form";
+
 const NAV_LINKS = [
   { href: "/", label: "Haberler" },
   { href: "/blindspots", label: "Kör Noktalar" },
@@ -62,6 +64,10 @@ export function Footer() {
           <span className="text-[10px] text-muted-foreground/40 font-mono">
             144 kaynak
           </span>
+        </div>
+
+        <div className="mt-8 pt-6 border-t border-border/20 max-w-sm">
+          <NewsletterForm />
         </div>
 
         <p className="mt-3 text-[10px] text-muted-foreground/40 leading-relaxed">
