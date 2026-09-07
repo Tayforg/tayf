@@ -142,6 +142,13 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 SUPABASE_ANON_KEY=<anon-key>
 # Optional: Sentry DSN (Deno-side SDK; populated when observability lands).
 SENTRY_DSN=https://...@sentry.io/...
+# Lets cluster-consumer push a targeted Next.js cache revalidation once per
+# drain instead of waiting on cacheLife TTLs. CRON_SECRET here MUST be the
+# same value set on Vercel in step 4 below — it's the bearer /api/revalidate
+# checks. Omit either var and the consumer just skips the POST (logged,
+# never fails the drain).
+REVALIDATE_URL=https://www.tayfhaber.com/api/revalidate
+CRON_SECRET=<same value as the Vercel CRON_SECRET in step 4>
 ```
 
 Then push to Supabase:

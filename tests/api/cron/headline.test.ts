@@ -1,5 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+// revalidateTag: mocked so we can assert the post-batch cache invalidation
+// (cluster-detail:<id> per rewrote cluster + clusters-politics once) without
+// touching a real Next.js cache.
+const { revalidateTagMock } = vi.hoisted(() => ({
+  revalidateTagMock: vi.fn(),
+}));
+
+vi.mock("next/cache", () => ({
+  revalidateTag: revalidateTagMock,
+}));
+
 // ---------------------------------------------------------------------------
 // Contract tests for /api/cron/headline (Vercel cron, runtime: nodejs).
 //
@@ -207,6 +218,7 @@ beforeEach(() => {
   supabaseFake.fake.calls.mutations.length = 0;
   supabaseFake.fake.calls.rpc.length = 0;
   timingSafeEqualSpy.mockClear();
+  revalidateTagMock.mockClear();
   installLlmFetchSpy();
 });
 
@@ -359,6 +371,29 @@ describe("GET /api/cron/headline", () => {
     expect(patch.title_tr_neutral).not.toBeNull();
     expect(typeof patch.title_tr_neutral).toBe("string");
     expect((patch.title_tr_neutral as string).length).toBeGreaterThan(0);
+
+    // Cache invalidation: one cluster-detail tag per rewrote cluster, plus
+    // clusters-politics once, both on the "max" cache profile.
+    expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:c1", "max");
+    expect(revalidateTagMock).toHaveBeenCalledWith("clusters-politics", "max");
+    expect(revalidateTagMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not revalidate any tag when there are no candidates (no-op)", async () => {
+    process.env.CRON_SECRET = "shhh";
+    setTableResponse("clusters", { data: [], error: null });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const res = await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(revalidateTagMock).not.toHaveBeenCalled();
   });
 
   it("uses a constant-time comparator (no timing leak via early-exit on first byte)", async () => {
