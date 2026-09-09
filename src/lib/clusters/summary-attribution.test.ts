@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { findSeedMember, summaryAttribution, describeForMeta } from "./summary-attribution";
+import {
+  findSeedMember,
+  summaryAttribution,
+  summaryAttributionWithoutMembers,
+  describeForMeta,
+} from "./summary-attribution";
 import type { ClusterDetailMember } from "./cluster-detail-query";
 import type { Source } from "@/types";
 
@@ -47,5 +52,95 @@ describe("describeForMeta", () => {
   it("truncates on a word boundary and pins the source/no-source prefixes", () => {
     expect(describeForMeta({ count: 2, attribution: { text: "bir iki üç dört", source: src("AA") } }, 24)).toBe("2 kaynak. AA: bir iki…");
     expect(describeForMeta({ count: 2, attribution: { text: "bir iki üç dört", source: null } }, 40)).toBe("2 kaynak. Kaynak açıklaması: bir iki…");
+  });
+});
+describe("describeForMeta base override", () => {
+  it("uses base as the leading sentence instead of '{count} kaynak.'", () => {
+    expect(
+      describeForMeta({
+        count: 3,
+        attribution: { text: "AA metni", source: src("Anadolu Ajansi") },
+        base: "3 kaynaktan haberler.",
+      }),
+    ).toBe("3 kaynaktan haberler. Anadolu Ajansi: AA metni");
+  });
+  it("returns the base as-is when there is no attribution", () => {
+    expect(
+      describeForMeta({
+        count: 1,
+        attribution: null,
+        base: "1 kaynaktan haberler. Tek kaynaktan 5 kopya.",
+      }),
+    ).toBe("1 kaynaktan haberler. Tek kaynaktan 5 kopya.");
+  });
+  it("falls back to the generic 'Kaynak açıklaması' label under a base override when no source matched", () => {
+    expect(
+      describeForMeta({
+        count: 3,
+        attribution: { text: "metin", source: null },
+        base: "3 kaynaktan haberler.",
+      }),
+    ).toBe("3 kaynaktan haberler. Kaynak açıklaması: metin");
+  });
+  it("truncates a base-overridden description on a word boundary", () => {
+    const result = describeForMeta(
+      {
+        count: 2,
+        attribution: {
+          text: "bir iki üç dört beş altı yedi sekiz dokuz on",
+          source: null,
+        },
+        base: "2 kaynaktan haberler.",
+      },
+      70,
+    );
+    expect(result.length).toBeLessThanOrEqual(70);
+    expect(result.endsWith("…")).toBe(true);
+    expect(result.startsWith("2 kaynaktan haberler. Kaynak açıklaması:")).toBe(true);
+  });
+});
+describe("summaryAttribution with a lighter member shape", () => {
+  it("accepts a member lighter than ClusterDetailMember", () => {
+    expect(
+      summaryAttribution({
+        summary: "Özet",
+        members: [
+          {
+            source: { name: "AA", bias: "center" },
+            article: { published_at: T0, content_hash: null, description: "Özet" },
+          },
+        ],
+        wire: { isWireRedistribution: false },
+      }),
+    ).toEqual({ text: "Özet", source: { name: "AA", bias: "center" } });
+  });
+});
+describe("summaryAttributionWithoutMembers", () => {
+  const notWire = { isWireRedistribution: false };
+  const wire = { isWireRedistribution: true };
+  it("hides blank text", () => {
+    expect(summaryAttributionWithoutMembers({ summary: "  ", wire: notWire })).toBeNull();
+  });
+  it("hides wholesale on any wire redistribution — no members to run the majority check on", () => {
+    expect(summaryAttributionWithoutMembers({ summary: "AA metni", wire })).toBeNull();
+  });
+  it("attributes to no one (generic label) when non-wire", () => {
+    expect(summaryAttributionWithoutMembers({ summary: " Özet ", wire: notWire })).toEqual({
+      text: "Özet",
+      source: null,
+    });
+  });
+  it("is strictly more conservative than summaryAttribution: hides what the member-aware path would show", () => {
+    const seed = member("a", T0, "AA metni", "h1");
+    const members = [
+      seed,
+      member("b", "2026-09-06T10:10:00Z", null, "h2"),
+      member("c", "2026-09-06T10:20:00Z", null, "h2"),
+    ];
+    expect(summaryAttribution({ summary: "AA metni", members, wire })).toEqual({
+      text: "AA metni",
+      source: seed.source,
+    });
+    expect(summaryAttributionWithoutMembers({ summary: "AA metni", wire })).toBeNull();
   });
 });

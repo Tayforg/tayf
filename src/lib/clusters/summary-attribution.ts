@@ -1,6 +1,5 @@
-import type { ClusterDetailMember } from "./cluster-detail-query";
 import type { WireSignal } from "./wire";
-import type { Source } from "@/types";
+import type { BiasCategory } from "@/types";
 
 // clusters.summary_tr is the seed article's raw RSS description — one
 // outlet's words, not Tayf's. It must be attributed to that outlet or
@@ -9,11 +8,24 @@ import type { Source } from "@/types";
 // descriptions; first_published is min(published_at) over all members and
 // moves when an older article joins late, so it is not used for attribution.
 
+// Structural subset of ClusterDetailMember (cluster-detail-query.ts): the
+// cluster page's members satisfy this shape as-is, and lighter callers
+// (e.g. an RSS-only member projection) can satisfy it without fetching or
+// typing the full Source/article shape the detail page needs.
+export interface SummaryMember {
+  source: { name: string; bias: BiasCategory };
+  article: {
+    published_at: string;
+    content_hash: string | null;
+    description?: string | null;
+  };
+}
+
 /** Member whose article description equals the summary text; earliest wins ties. */
 export function findSeedMember(
-  members: ClusterDetailMember[],
+  members: SummaryMember[],
   summary: string,
-): ClusterDetailMember | null {
+): SummaryMember | null {
   const text = summary.trim();
   if (text.length === 0) return null;
   const candidates = members
@@ -27,7 +39,7 @@ export function findSeedMember(
 }
 
 /** Non-null content_hash counts among members — for finding the wire dispatch's hash. */
-function contentHashCounts(members: ClusterDetailMember[]): Map<string, number> {
+function contentHashCounts(members: SummaryMember[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const m of members) {
     const hash = m.article.content_hash;
@@ -39,7 +51,7 @@ function contentHashCounts(members: ClusterDetailMember[]): Map<string, number> 
 
 export interface SummaryAttribution {
   text: string;
-  source: Source | null;
+  source: SummaryMember["source"] | null;
 }
 
 /** Null hides the summary: blank text, or a wire copy the seed source didn't write. */
@@ -49,7 +61,7 @@ export function summaryAttribution({
   wire,
 }: {
   summary: string;
-  members: ClusterDetailMember[];
+  members: SummaryMember[];
   wire: Pick<WireSignal, "isWireRedistribution">;
 }): SummaryAttribution | null {
   const text = summary.trim();
@@ -72,20 +84,29 @@ export function summaryAttribution({
 
 const ELLIPSIS = "…";
 
-/** Meta/JSON-LD description: source count, plus attribution when present, word-truncated to `max`. */
+/**
+ * Meta/JSON-LD description: source count, plus attribution when present,
+ * word-truncated to `max`. `base`, when supplied, replaces the default
+ * "{count} kaynak." leading sentence — used by callers (e.g. the RSS feed)
+ * that already compose their own honest count/wire-note prefix. `count` is
+ * still required so `base`-less callers keep the original default; it is
+ * ignored once `base` is present. `base` only overrides the leading
+ * sentence, never the attribution prefix or the truncation behaviour.
+ */
 export function describeForMeta(
   {
     count,
     attribution,
-  }: { count: number; attribution: SummaryAttribution | null },
+    base,
+  }: { count: number; attribution: SummaryAttribution | null; base?: string },
   max = 160,
 ): string {
-  const base = `${count} kaynak.`;
-  if (!attribution) return base;
+  const head = base ?? `${count} kaynak.`;
+  if (!attribution) return head;
 
   const prefix = attribution.source
-    ? `${base} ${attribution.source.name}: `
-    : `${base} Kaynak açıklaması: `;
+    ? `${head} ${attribution.source.name}: `
+    : `${head} Kaynak açıklaması: `;
   const full = prefix + attribution.text;
   if (full.length <= max) return full;
 
@@ -93,4 +114,29 @@ export function describeForMeta(
   const lastSpace = truncated.lastIndexOf(" ");
   const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
   return cut + ELLIPSIS;
+}
+
+/**
+ * DEGRADED fallback for callers with no member rows (feed surfaces, or a
+ * lookup failure). Strictly more conservative than summaryAttribution: it
+ * can never name an outlet (no members to run findSeedMember against), and
+ * it hides the summary wholesale on any wire redistribution because the
+ * per-seed content_hash majority check cannot run without members — so it
+ * may hide a summary the member-aware path would show. That divergence is
+ * intentional, not a bug to reconcile: the caller has strictly less
+ * information, so it must be strictly less willing to publish someone
+ * else's words as attributed or unattributed fact.
+ */
+export function summaryAttributionWithoutMembers({
+  summary,
+  wire,
+}: {
+  summary: string;
+  members?: never;
+  wire: Pick<WireSignal, "isWireRedistribution">;
+}): SummaryAttribution | null {
+  const text = summary.trim();
+  if (text.length === 0) return null;
+  if (wire.isWireRedistribution) return null;
+  return { text, source: null };
 }
