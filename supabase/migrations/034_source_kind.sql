@@ -70,7 +70,8 @@ update public.sources s
     ('ajans-haber', 'aggregator'), ('haber3', 'aggregator'), ('son-dakika', 'aggregator'),
     ('beyaz-gazete', 'aggregator'),
     ('anadolu-ajansi', 'wire'), ('dha', 'wire'), ('iha', 'wire'), ('turkiye-haber-ajansi', 'wire'),
-    ('mezopotamya-ajansi', 'wire'), ('bha', 'wire'),
+    -- mezopotamya: corrected by hand in production 2026-09-08; re-applying here is a no-op
+    ('mezopotamya', 'wire'), ('bha', 'wire'),
     ('a-spor', 'niche'), ('fotomac', 'niche'), ('fanatik', 'niche'), ('ntv-spor', 'niche'),
     ('ajansspor', 'niche'), ('fotospor', 'niche'), ('kontraspor', 'niche'),
     ('bigpara', 'niche'), ('bloomberg-ht', 'niche'), ('finansal-gundem', 'niche'),

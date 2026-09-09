@@ -153,7 +153,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('İlke TV', 'ilke-tv', 'https://ilketv.com.tr', 'https://ilketv.com.tr/feed/', 'islamist_conservative', 'outlet', true),
 
   -- Pro-Kurdish
-  ('Mezopotamya Ajansı', 'mezopotamya-ajansi', 'https://mezopotamyaajansi43.com', 'https://mezopotamyaajansi43.com/feed/', 'pro_kurdish', 'wire', false),
+  ('Mezopotamya Ajansı', 'mezopotamya', 'https://mezopotamyaajansi43.com', 'https://mezopotamyaajansi43.com/feed/', 'pro_kurdish', 'wire', false),
   ('BHA', 'bha', 'https://bha.net.tr', 'https://bha.net.tr/rss', 'pro_kurdish', 'wire', true),
   ('Rûdaw Türkçe', 'rudaw-turkce', 'http://rudaw.net', 'http://rudaw.net/turkish/rss?type=top', 'pro_kurdish', 'outlet', true),
 
