@@ -44,16 +44,24 @@ export function AdminPanel() {
   const [dialogMode, setDialogMode] = useState<"add" | "edit">("add");
   const [editSource, setEditSource] = useState<SourceItem>(EMPTY_SOURCE);
 
-  const fetchStats = useCallback(async () => {
-    try {
-      const res = await fetch("/api/admin");
-      const data = await res.json();
-      setStats(data);
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
+  // Promise-chained (not async/await): react-hooks/set-state-in-effect
+  // flags a function that directly calls a setState setter as part of its
+  // own synchronous body when that function is invoked from an effect —
+  // which async/await bodies do (the setState calls sit in the same
+  // function, just after an `await`). Nesting the setState calls inside
+  // `.then()`/`.finally()` callbacks keeps this a genuine "sync external
+  // system with an effect" pattern (per
+  // https://react.dev/learn/you-might-not-need-an-effect#fetching-data)
+  // without changing resolution order, error handling, or the
+  // `Promise<void>` return type `await fetchStats()` callers below rely on.
+  const fetchStats = useCallback(() => {
+    return fetch("/api/admin")
+      .then((res) => res.json())
+      .then((data) => setStats(data))
+      .catch(() => {
+        // ignore
+      })
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {

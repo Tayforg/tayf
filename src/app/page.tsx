@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Newspaper, SearchX } from "lucide-react";
 
 import { SearchBar } from "@/components/filters/search-bar";
+import { currentTimeMs } from "@/lib/time";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { PageHero } from "@/components/ui/page-hero";
@@ -175,7 +176,7 @@ export default async function HomePage({
   // article today used to show up under "Bugün" even though the news
   // was stale. Bucketing on `first_published` makes the header labels
   // reflect when the story actually broke.
-  const nowMs = Date.now();
+  const nowMs = currentTimeMs();
   const grouped = new Map<BucketKey, ClusterBundle[]>();
   for (const def of BUCKETS) grouped.set(def.key, []);
   for (const bundle of paged) {
