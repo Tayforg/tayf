@@ -57,3 +57,8 @@ export function formatTurkishTimeAgo(dateISO: string): string {
   const years = Math.floor(deltaMs / YEAR_MS);
   return `${years} yıl önce`;
 }
+
+/** Request-time clock for Server Components (react-hooks/purity forbids Date.now() in render). */
+export function currentTimeMs(): number {
+  return Date.now();
+}
