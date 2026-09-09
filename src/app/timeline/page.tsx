@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
-import { cacheLife, cacheTag } from "next/cache";
 import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
+import { getRecentClusters, type ClusterRow } from "@/lib/clusters/timeline-query";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
@@ -12,28 +12,20 @@ export const metadata: Metadata = {
     "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı.",
   alternates: { canonical: "/timeline" },
 };
-import { createServerClient } from "@/lib/supabase/server";
 
 // /timeline — chronological feed of every cluster Tayf has minted in the
 // last 24 hours, grouped by the hour the cluster first published. Acts as a
 // "what's been happening" timestamp wall complementing /clusters (which
 // ranks by article_count) and /blindspots (which filters by coverage gap).
 //
-// Server Component. One round-trip via createServerClient. Hour bucketing
-// is done in-memory off the `first_published` timestamp, then rendered as a
-// list of <section> blocks — one per hour, newest first.
+// Server Component. Query lives in @/lib/clusters/timeline-query so it can
+// be unit tested without rendering JSX. Hour bucketing is done in-memory
+// off the `first_published` timestamp, then rendered as a list of
+// <section> blocks — one per hour, newest first.
 //
 // Cached at the route segment with `revalidate = 60` so the wall feels
 // near-live without slamming Supabase on every navigation. The 100-row
 // LIMIT keeps the payload bounded even on a busy news day.
-
-interface ClusterRow {
-  id: string;
-  title_tr: string;
-  title_tr_neutral: string | null;
-  article_count: number;
-  first_published: string;
-}
 
 interface HourBucket {
   // ISO of the top-of-hour the rows in this bucket belong to. Used as the
@@ -95,32 +87,6 @@ function bucketByHour(rows: ClusterRow[]): HourBucket[] {
     hourISO,
     rows: rowsForHour,
   }));
-}
-
-async function getRecentClusters(): Promise<ClusterRow[]> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag("clusters");
-
-  const supabase = createServerClient();
-
-  // Window: last 24 hours, anchored at request time. The 60-second segment
-  // revalidate means the window can drift by ~1 minute between cache fills,
-  // which is well below the hour-bucket resolution.
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-  const { data, error } = await supabase
-    .from("clusters")
-    .select("id, title_tr, title_tr_neutral, article_count, first_published")
-    .gt("first_published", since)
-    .order("first_published", { ascending: false })
-    .limit(100);
-
-  if (error) {
-    throw new Error(`timeline query failed: ${error.message}`);
-  }
-
-  return (data ?? []) as ClusterRow[];
 }
 
 export default async function TimelinePage() {

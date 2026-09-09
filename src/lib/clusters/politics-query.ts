@@ -241,6 +241,9 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
     const { data, error } = await supabase
       .from("clusters")
       .select(CLUSTER_EMBED_SELECT)
+      // Archived (migration 037) clusters are excluded from every reader-facing
+      // surface; the detail page still resolves them so shared links never 404.
+      .eq("is_archived", false)
       .gte("article_count", 2)
       .order("updated_at", { ascending: false })
       .limit(CANDIDATE_LIMIT)

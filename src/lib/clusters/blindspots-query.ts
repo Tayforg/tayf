@@ -95,6 +95,9 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
       // The DB flag implements the same core rule as a pre-filter — the
       // live tally below still re-checks it after dedupe.
       .eq("is_blindspot", true)
+      // Archived (migration 037) clusters are excluded from every reader-facing
+      // surface; the detail page still resolves them so shared links never 404.
+      .eq("is_archived", false)
       // 24-hour delay: time-lag artifacts get time to be caught up by the
       // absent side before we call them blindspots.
       .lt("first_published", blindspotCutoffIso)
