@@ -162,6 +162,10 @@ describe("getPoliticsClusters query shape", () => {
     // ≥2 members, newest clusters first, capped at 200 (CANDIDATE_LIMIT).
     const gte = steps.find((s) => s.method === "gte");
     expect(gte!.args).toEqual(["article_count", 2]);
+    // Archived clusters (migration 037) never reach the home feed / RSS.
+    expect(steps.filter((s) => s.method === "eq").map((s) => s.args)).toEqual(
+      [["is_archived", false]]
+    );
     const order = steps.find((s) => s.method === "order");
     expect(order!.args).toEqual([
       "updated_at",

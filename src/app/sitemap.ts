@@ -63,6 +63,10 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
          articles ( image_url, published_at )
        )`
     )
+    // Archived clusters stay reachable by direct link but are deliberately
+    // withdrawn from crawler discovery, so a soft-deleted story stops
+    // competing for index budget without any URL starting to 404.
+    .eq("is_archived", false)
     .gte("article_count", 2)
     .order("updated_at", { ascending: false })
     .limit(CLUSTER_LIMIT)

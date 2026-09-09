@@ -123,6 +123,7 @@ describe("searchClusters query shape", () => {
       { col: "search_tsv", query: "İmamoğlu", opts: { config: "turkish", type: "websearch" } },
     ]);
     expect(state.gte).toEqual([{ col: "article_count", val: 2 }]);
+    expect(state.eq).toEqual([{ col: "is_archived", val: false }]);
     expect(state.order).toEqual([
       { col: "article_count", opts: { ascending: false } },
       { col: "updated_at", opts: { ascending: false } },
