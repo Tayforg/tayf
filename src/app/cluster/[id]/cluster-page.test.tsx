@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 
 import type {
@@ -75,6 +75,74 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
+/**
+ * Finds the first element in the tree that carries a `credits` prop (i.e.
+ * the `<ClusterCardImage>` element) and returns that prop. R1-F1 moved the
+ * hero credit line into the client component, keyed by image URL, so it
+ * always names the outlet whose photo is actually on screen — this walker
+ * reads the prop the server passed down rather than rendered text, since
+ * `ClusterCardImage` itself ("use client") isn't expanded in this
+ * server-side element tree.
+ */
+function findCredits(
+  node: unknown,
+): Record<string, { href: string; name: string }> | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findCredits(child);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    const el = node as {
+      props?: { credits?: unknown; children?: ReactNode };
+    };
+    if (el.props?.credits !== undefined) {
+      return el.props.credits as Record<string, { href: string; name: string }>;
+    }
+    if (el.props?.children !== undefined) {
+      return findCredits(el.props.children);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Walks the tree (same shape as `collectHrefs`) looking for the
+ * `<script type="application/ld+json">` element and returns its
+ * `dangerouslySetInnerHTML.__html` string, or `null` if none is found.
+ */
+function findJsonLd(node: unknown): string | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findJsonLd(child);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as {
+      props?: {
+        type?: unknown;
+        dangerouslySetInnerHTML?: { __html?: unknown };
+        children?: ReactNode;
+      };
+    };
+    if (
+      el.props?.type === "application/ld+json" &&
+      typeof el.props.dangerouslySetInnerHTML?.__html === "string"
+    ) {
+      return el.props.dangerouslySetInnerHTML.__html;
+    }
+    if (el.props?.children !== undefined) {
+      const found = findJsonLd(el.props.children);
+      if (found !== null) return found;
+    }
+  }
+  return null;
+}
+
 function emptyDistribution(): BiasDistribution {
   return {
     pro_government: 0,
@@ -108,6 +176,7 @@ function makeMember(
   id: string,
   source: Source,
   publishedAt = "2026-09-06T12:00:00.000Z",
+  imageUrl: string | null = null,
 ): ClusterDetailMember {
   return {
     source,
@@ -116,7 +185,7 @@ function makeMember(
       title: `${source.name} başlığı`,
       url: `https://example.com/articles/${id}`,
       published_at: publishedAt,
-      image_url: null,
+      image_url: imageUrl,
       content_hash: `hash-${id}`,
     },
   };
@@ -138,6 +207,20 @@ function makeCluster(overrides: {
     updated_at: "2026-09-06T12:00:00.000Z",
   };
 }
+
+// jsonLd's `image` field is `${siteUrl()}/cluster/${id}/opengraph-image` —
+// siteUrl() reads NEXT_PUBLIC_SITE_URL, so pin it for a deterministic
+// assertion below (mirrors the save/restore style in tests/api/sitemap.test.ts).
+const ORIGINAL_SITE_URL_ENV = process.env.NEXT_PUBLIC_SITE_URL;
+
+beforeEach(() => {
+  process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+});
+
+afterEach(() => {
+  if (ORIGINAL_SITE_URL_ENV === undefined) delete process.env.NEXT_PUBLIC_SITE_URL;
+  else process.env.NEXT_PUBLIC_SITE_URL = ORIGINAL_SITE_URL_ENV;
+});
 
 describe("ClusterDetailPage — source-kind UI", () => {
   it("shows the non-voting row, the spectrum caption and kind labels for a mixed cluster", async () => {
@@ -283,5 +366,140 @@ describe("ClusterDetailPage — source-kind UI", () => {
     expect(text).not.toContain("toplayıcı / niş kaynak sayılmadı");
     expect(text).not.toContain("sınıflandırılmış kaynaktan");
     expect(text).toContain("Toplayıcı / niş kaynaklar");
+  });
+});
+
+describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
+  it("escapes < so a hostile title cannot break out of the script tag", async () => {
+    const source = makeSource({ id: "s-outlet", slug: "s-outlet", name: "Outlet Gazete" });
+    const members: ClusterDetailMember[] = [makeMember("a-outlet", source)];
+
+    const cluster = makeCluster({ bias_distribution: emptyDistribution() });
+    cluster.title_tr = "Kriz </script><script>alert('xss')</script> büyüyor";
+    cluster.summary_tr = "<img src=x onerror=alert(1)> özet";
+
+    const detail: ClusterDetail = {
+      cluster,
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 1,
+        memberCount: 1,
+      },
+    };
+
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const html = findJsonLd(tree);
+
+    expect(html).not.toBeNull();
+    expect(html!.includes("<")).toBe(false);
+    expect(html!).toContain("\\u003c");
+    const parsed = JSON.parse(html!);
+    expect(parsed["@type"]).toBe("NewsArticle");
+    expect(parsed.headline).toBe(
+      "Kriz </script><script>alert('xss')</script> büyüyor",
+    );
+  });
+
+  it("points the JSON-LD image at the Tayf OG card, never the outlet photo", async () => {
+    const source = makeSource({ id: "s-outlet", slug: "s-outlet", name: "Outlet Gazete" });
+    const members: ClusterDetailMember[] = [
+      makeMember(
+        "a-outlet",
+        source,
+        "2026-09-06T12:00:00.000Z",
+        "https://cdn.outlet.example/foto.jpg",
+      ),
+    ];
+
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 1,
+        memberCount: 1,
+      },
+    };
+
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const html = findJsonLd(tree);
+
+    expect(html).not.toBeNull();
+    expect(JSON.parse(html!).image).toEqual([
+      "https://tayf.test/cluster/c1/opengraph-image",
+    ]);
+    expect(html!).not.toContain("cdn.outlet.example");
+  });
+
+  it("passes the outlet as a per-URL credit to ClusterCardImage when a hero image exists", async () => {
+    const source = makeSource({ id: "s-outlet", slug: "s-outlet", name: "Outlet Gazete" });
+    const members: ClusterDetailMember[] = [
+      makeMember(
+        "a-outlet",
+        source,
+        "2026-09-06T12:00:00.000Z",
+        "https://cdn.outlet.example/foto.jpg",
+      ),
+    ];
+
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 1,
+        memberCount: 1,
+      },
+    };
+
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const credits = findCredits(tree);
+
+    // R1-F1: the credit is keyed by image URL and handed to the client
+    // component (which renders it from the same `idx` state driving the
+    // visible image) rather than rendered as static server text — this
+    // guarantees the credit can never name the wrong outlet after the
+    // client-side fallback chain advances past the first candidate.
+    expect(credits).toEqual({
+      "https://cdn.outlet.example/foto.jpg": {
+        href: "https://example.com/articles/a-outlet",
+        name: "Outlet Gazete",
+      },
+    });
+  });
+
+  it("passes an empty credits map when no member has an image", async () => {
+    const source = makeSource({ id: "s-outlet", slug: "s-outlet", name: "Outlet Gazete" });
+    const members: ClusterDetailMember[] = [makeMember("a-outlet", source)];
+
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 1,
+        memberCount: 1,
+      },
+    };
+
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const text = collectText(tree).join("");
+    const credits = findCredits(tree);
+
+    expect(text).not.toContain("Görsel:");
+    expect(credits).toEqual({});
   });
 });

@@ -27,6 +27,8 @@ import {
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
+import { serializeJsonLd } from "@/lib/seo/json-ld";
+import { siteUrl } from "@/lib/site-url";
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise and must be awaited.
@@ -161,6 +163,20 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   const heroMember = members.find((m) => !!m.article.image_url) ?? null;
   const heroAlt = heroMember?.article.title ?? cluster.title_tr;
 
+  // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the exact image
+  // URL rather than tied to `heroMember`/`heroSrc` alone, so the credit
+  // `ClusterCardImage` renders always names the outlet whose photo is
+  // actually on screen — even after its client-side fallback chain
+  // advances past the first candidate when a CDN 404s. First member to
+  // claim a URL wins, matching the `Set`-based dedup order
+  // `ClusterCardImage` applies to (src, ...srcs) internally.
+  const heroCredits: Record<string, { href: string; name: string }> = {};
+  for (const m of members) {
+    const url = m.article.image_url;
+    if (!url) continue;
+    heroCredits[url] ??= { href: m.article.url, name: m.source.name };
+  }
+
   // bias_distribution is stored as jsonb in Postgres but the query layer
   // (`cluster-detail-query.ts`) already normalizes it to a proper
   // `BiasDistribution` at the boundary, so it's safe to use directly here.
@@ -230,7 +246,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       count: wire.effectiveArticleCount,
       attribution: summary,
     }),
-    image: heroSrc ? [heroSrc] : undefined,
+    // Always the generated Medya DNA card from opengraph-image.tsx (already
+    // the live og:image for this route) — never the outlet's raw CDN photo.
+    // Pointing schema.org `image` at that photo advertised someone else's
+    // photograph as this page's primary image (deck TOP-4 / SEC-05 sibling
+    // finding). siteUrl() is required because schema.org `image` must be an
+    // absolute URL.
+    image: [`${siteUrl()}/cluster/${id}/opengraph-image`],
     publisher: {
       "@type": "Organization",
       name: "Tayf",
@@ -243,13 +265,21 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
   return (
     <>
-      {/* JSON.stringify is safe here — values come from our own DB
-          (cluster row + sources), not user input. dangerouslySetInnerHTML
-          is the only way to embed JSON-LD without React escaping the
-          angle brackets and breaking the schema. */}
+      {/* This is finding SEC-05: values here are NOT guaranteed script-safe
+          just because they "come from our own DB". `title_tr` is only
+          protected by an upstream `stripTags()` pass over the raw RSS feed,
+          and `title_tr_neutral` (the LLM-rewritten headline — see
+          cluster-detail-query.ts) has no such guard at all, so a "</script"
+          substring can reach here. The escape therefore happens at this
+          render boundary instead, via `serializeJsonLd` (src/lib/seo/
+          json-ld.ts), which turns every "<" into the JSON-safe "\u003c"
+          so it can never terminate the element early.
+          dangerouslySetInnerHTML is still the only way to embed JSON-LD
+          without React re-escaping the (already-safe) angle brackets and
+          breaking the schema. */}
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }}
       />
       <div className="container mx-auto px-5 sm:px-4 py-8 max-w-5xl space-y-8">
       {/* Back nav rendered inline (instead of importing ClusterBackNav) so
@@ -270,7 +300,15 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           pill) so context carries over from the list. */}
       <section className="rounded-xl border border-border/60 bg-card/40 overflow-hidden">
         <div className="flex flex-col sm:flex-row">
-          <div className="sm:shrink-0 w-full sm:w-96 h-44 sm:h-72 bg-muted">
+          <div className="sm:shrink-0 w-full sm:w-96">
+            {/* Credit line (deck TOP-3 / quick win): rendered by
+                ClusterCardImage itself, keyed off the same `idx`/
+                `candidates[idx]` state that drives the visible image (see
+                R1-F1) — so it always names the outlet whose photo is
+                actually on screen, including after the client-side
+                fallback chain advances past `heroSrc`. Only appears for
+                the tier-1 real-photo branch; never for the logo or
+                placeholder tiers. */}
             <ClusterCardImage
               src={heroSrc}
               srcs={heroCandidates.slice(1)}
@@ -282,12 +320,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               logoAlt={
                 heroMember?.source.name ?? members[0]?.source.name ?? "Kaynak"
               }
+              credits={heroCredits}
               alt={heroAlt}
               width={768}
               height={576}
               sizes="(min-width: 640px) 384px, 100vw"
               priority
-              className="h-full w-full object-cover"
+              className="h-44 sm:h-72 w-full object-cover"
             />
           </div>
 

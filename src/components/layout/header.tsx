@@ -11,11 +11,26 @@ export async function Header() {
 
   return (
     <header className="sticky top-0 z-50 border-b border-border/40 bg-background/90 backdrop-blur-xl">
+      {/* Skip link: first focusable element in the document (Header is the
+          first element in <body>). Target is <main id="main"> in
+          src/app/layout.tsx. `focus:fixed` + `focus:z-[60]` keep the
+          revealed link above the sticky (z-50) header without making the
+          header `relative`. WCAG 2.4.1 Bypass Blocks. */}
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[60] focus:rounded-md focus:border focus:border-border focus:bg-background focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+      >
+        İçeriğe atla
+      </a>
+
       {/* Thin brand accent line at the very top */}
       <div className="h-[2px] bg-gradient-to-r from-red-500/80 via-brand to-emerald-500/80" />
 
       <div className="container mx-auto flex h-14 items-center justify-between px-4 sm:px-6">
-        <Link href="/" className="group flex items-center gap-3">
+        <Link
+          href="/"
+          className="group flex items-center gap-3 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
           {/* Logo mark — spectrum bars */}
           <div className="flex gap-[2px] h-7 items-end shrink-0">
             <div className="w-[3px] h-3 rounded-full bg-red-500/70 group-hover:h-5 transition-all duration-300" />
