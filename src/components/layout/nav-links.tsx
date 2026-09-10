@@ -6,7 +6,7 @@ import { Telescope, Eye, Bookmark, Settings } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 
 const baseLink =
-  "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors";
+  "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const inactive =
   "text-foreground/80 hover:text-foreground hover:bg-muted/50";
 const active = "bg-foreground/10 text-foreground font-medium";
@@ -38,6 +38,7 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
         className={`${baseLink} ${isHome ? active : inactive}`}
       >
         <Telescope className="h-3.5 w-3.5" />
+        <span className="sr-only sm:hidden">Haberler</span>
         <span className="hidden sm:inline">Haberler</span>
       </Link>
       <Separator orientation="vertical" className="h-3 mx-0.5" />
@@ -47,6 +48,7 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
         className={`${baseLink} ${isBlindspots ? active : inactive}`}
       >
         <Eye className="h-3.5 w-3.5" />
+        <span className="sr-only sm:hidden">Kör Noktalar</span>
         <span className="hidden sm:inline">Kör Noktalar</span>
       </Link>
       <Separator orientation="vertical" className="h-3 mx-0.5" />
@@ -56,6 +58,7 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
         className={`${baseLink} ${isSaved ? active : inactive}`}
       >
         <Bookmark className="h-3.5 w-3.5" />
+        <span className="sr-only sm:hidden">Kaydedilenler</span>
         <span className="hidden sm:inline">Kaydedilenler</span>
       </Link>
       {showAdmin && (
@@ -64,7 +67,7 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
           <Link
             href="/admin"
             aria-current={isAdmin ? "page" : undefined}
-            className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors ${
+            className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
               isAdmin
                 ? active
                 : "text-muted-foreground/60 hover:text-foreground hover:bg-muted/50"

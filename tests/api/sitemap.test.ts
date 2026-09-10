@@ -71,6 +71,17 @@ describe("sitemap query shape", () => {
     ]);
     expect(state.limit).toBe(1000);
   });
+
+  it("no longer joins cluster_articles into the query", async () => {
+    await sitemap();
+
+    const state = fixture.lastState as BuilderState;
+    const select = String(state.selectArgs[0] ?? "");
+    expect(select).toContain("id");
+    expect(select).toContain("updated_at");
+    expect(select).not.toContain("cluster_articles");
+    expect(select).not.toContain("image_url");
+  });
 });
 
 describe("sitemap output", () => {
@@ -110,5 +121,33 @@ describe("sitemap output", () => {
     expect(urls).toContain("https://tayf.test/cluster/active-1");
     expect(urls).not.toContain("https://tayf.test/cluster/archived-1");
     expect(urls).toContain("https://tayf.test/");
+  });
+});
+
+describe("sitemap image entries", () => {
+  it("emits no images key even when the join data is present in the row", async () => {
+    fixture.data = [
+      {
+        id: "active-1",
+        is_archived: false,
+        updated_at: "2026-04-18T11:00:00.000Z",
+        cluster_articles: [
+          {
+            articles: {
+              image_url: "https://cdn.outlet.example/foto.jpg",
+              published_at: "2026-04-18T10:00:00.000Z",
+            },
+          },
+        ],
+      },
+    ];
+
+    const entries = await sitemap();
+
+    expect(entries.every((e) => !("images" in e))).toBe(true);
+    const c = entries.find((e) => e.url === "https://tayf.test/cluster/active-1");
+    expect(c).toBeDefined();
+    expect(c?.images).toBeUndefined();
+    expect(JSON.stringify(entries)).not.toContain("cdn.outlet.example");
   });
 });

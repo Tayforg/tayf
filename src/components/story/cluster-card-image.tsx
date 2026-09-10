@@ -68,6 +68,18 @@ interface ClusterCardImageProps {
    * when the logo tier is rendered; ignored otherwise.
    */
   logoAlt?: string;
+  /**
+   * Optional per-candidate-URL photo credit, keyed by the exact image
+   * URL (matching an entry in `candidates`, i.e. `src`/`srcs`). Rendered
+   * as a caption BELOW the image — only in the tier-1 (real photo)
+   * branch, and only for the URL actually on screen (`currentSrc`), so
+   * the credit always names the outlet whose photo the viewer sees even
+   * after the fallback chain below advances `idx` past the first
+   * candidate. Omitted entirely (no caption, byte-identical output to
+   * before this prop existed) when this map has no entry for
+   * `currentSrc` — including every call site that doesn't pass it.
+   */
+  credits?: Record<string, { href: string; name: string }>;
   alt: string;
   className?: string;
   /** True for above-the-fold cards so the browser preloads the asset. */
@@ -90,6 +102,7 @@ export function ClusterCardImage({
   srcs,
   logoSrc,
   logoAlt,
+  credits,
   alt,
   className,
   priority = false,
@@ -194,30 +207,50 @@ export function ClusterCardImage({
   // explicit fallback to empty string is defensive for TS only — the
   // runtime path never hits it.
   if (!currentSrc) return null;
+  // Keyed by `currentSrc` (not `src`/`heroSrc`) so the credit tracks
+  // whichever candidate is actually on screen right now, including after
+  // `onError` below has advanced `idx` past the first one.
+  const credit = credits?.[currentSrc];
   return (
-    <div
-      className={`${className ?? ""} relative rounded-lg overflow-hidden ${GRADIENT_CLASSES}`}
-    >
-      <Image
-        key={currentSrc}
-        src={currentSrc}
-        alt={alt}
-        width={width}
-        height={height}
-        sizes={sizes}
-        className={`absolute inset-0 h-full w-full object-cover transition-all duration-500 group-hover:scale-105 ${loaded ? "opacity-100" : "opacity-0"}`}
-        // Next.js 16 deprecated `priority` in favour of `preload` + loading.
-        preload={priority}
-        loading={priority ? "eager" : "lazy"}
-        onError={() => {
-          // Reset loaded state and advance to the next candidate. If we
-          // walk past the end, `currentSrc` becomes undefined and the
-          // next render either drops to the logo tier or the placeholder.
-          setLoaded(false);
-          setIdx((i) => i + 1);
-        }}
-        onLoad={() => setLoaded(true)}
-      />
-    </div>
+    <>
+      <div
+        className={`${className ?? ""} relative rounded-lg overflow-hidden ${GRADIENT_CLASSES}`}
+      >
+        <Image
+          key={currentSrc}
+          src={currentSrc}
+          alt={alt}
+          width={width}
+          height={height}
+          sizes={sizes}
+          className={`absolute inset-0 h-full w-full object-cover transition-all duration-500 group-hover:scale-105 ${loaded ? "opacity-100" : "opacity-0"}`}
+          // Next.js 16 deprecated `priority` in favour of `preload` + loading.
+          preload={priority}
+          loading={priority ? "eager" : "lazy"}
+          onError={() => {
+            // Reset loaded state and advance to the next candidate. If we
+            // walk past the end, `currentSrc` becomes undefined and the
+            // next render either drops to the logo tier or the placeholder.
+            setLoaded(false);
+            setIdx((i) => i + 1);
+          }}
+          onLoad={() => setLoaded(true)}
+        />
+      </div>
+      {credit && (
+        <p className="px-3 py-1.5 text-[11px] text-muted-foreground">
+          Görsel:{" "}
+          <a
+            href={credit.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            {credit.name}
+          </a>{" "}
+          sayfasından
+        </p>
+      )}
+    </>
   );
 }

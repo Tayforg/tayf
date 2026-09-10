@@ -190,6 +190,8 @@
     @apply font-sans;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    /* Keep the sticky h-14 header from covering a focused/anchored target (WCAG 2.2 SC 2.4.11) */
+    scroll-padding-top: 3.5rem;
   }
 
   /* Editorial heading typography */

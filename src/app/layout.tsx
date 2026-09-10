@@ -107,7 +107,10 @@ export default function RootLayout({
         <Suspense>
           <Header />
         </Suspense>
-        <main className="flex-1">{children}</main>
+        {/* id is the skip-link target (header.tsx); tabIndex={-1} makes it programmatically focusable so Safari actually moves focus, not just scroll */}
+        <main id="main" tabIndex={-1} className="flex-1">
+          {children}
+        </main>
         <Footer />
         <KbdShortcuts />
         {/* Dev builds would load va.vercel-scripts.com, which the CSP script-src blocks. */}
