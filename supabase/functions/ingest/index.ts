@@ -108,9 +108,15 @@ async function runPool<T>(
           if (i >= items.length) return;
           try {
             await worker(items[i] as T, i);
-          } catch {
-            // Worker is expected to absorb its own errors; this is the
-            // safety net so one pathological row cannot kill the pool.
+          } catch (err) {
+            // Safety net so one pathological row cannot kill the pool; log +
+            // capture so a throwing worker is not swallowed (see _shared/sentry.ts).
+            console.error(
+              "[ingest] worker threw",
+              (items[i] as { slug?: string }).slug ?? i,
+              err,
+            );
+            captureException("ingest", err);
           }
         }
       })(),

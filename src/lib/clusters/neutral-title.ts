@@ -29,7 +29,11 @@ const STOP = new Set([
 
 function tokens(title: string): Set<string> {
   let s = "";
-  for (const ch of title.toLowerCase()) s += DIACRITICS[ch] ?? ch;
+  // Locale-aware lowercasing matches cleanHeadline's toLocaleUpperCase("tr")
+  // below: plain toLowerCase() turns "İ" into "i" + a combining dot-above
+  // (U+0307) instead of "i", which the a-z0-9 filter then strips, silently
+  // corrupting tokens for any title starting a word with a dotted capital I.
+  for (const ch of title.toLocaleLowerCase("tr")) s += DIACRITICS[ch] ?? ch;
   const out = new Set<string>();
   for (const t of s.replace(/[^a-z0-9]+/g, " ").split(" ")) {
     if (t.length >= 3 && !STOP.has(t)) out.add(t);
