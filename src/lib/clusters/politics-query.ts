@@ -174,6 +174,14 @@ export type EmbeddedSource = {
   bias: BiasCategory;
   logo_url: string | null;
   kind: SourceKind | null;
+  /**
+   * BL-13 per-source rights flags (migration 047). `undefined` (legacy
+   * fixtures/rows predating the column) is treated as `true` (allowed)
+   * by every gate below — see the `articles` mapping in
+   * `buildClusterBundle`.
+   */
+  image_allowed?: boolean;
+  excerpt_allowed?: boolean;
 };
 
 export type EmbeddedArticle = {
@@ -230,7 +238,7 @@ export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr,
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash,
-             sources ( id, name, bias, logo_url, kind )
+             sources ( id, name, bias, logo_url, kind, image_allowed, excerpt_allowed )
            )
          )`;
 
@@ -568,7 +576,13 @@ export function buildClusterBundle(
       id: m.id,
       title: m.title,
       url: m.url,
-      image_url: m.image_url,
+      // BL-13 rights gate: a source that has asked Tayf not to reuse its
+      // photos gets image_allowed = false — null the URL here so it can
+      // never surface as a hero/card image candidate for ANY downstream
+      // consumer of this bundle (cluster-card.tsx picks its hero from
+      // this exact field). `undefined` (legacy rows/fixtures predating
+      // migration 047) is treated as allowed so nothing regresses.
+      image_url: m.sources?.image_allowed === false ? null : m.image_url,
       published_at: m.published_at,
       source_id: m.source_id,
     })),

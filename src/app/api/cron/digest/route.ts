@@ -7,6 +7,12 @@ import { isMailConfigured, sendBatch } from "@/lib/email/resend";
 import { siteUrl } from "@/lib/site-url";
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
+import { getRssSummaryMembers } from "@/lib/clusters/rss-summary-attribution";
+import {
+  summaryAttribution,
+  summaryAttributionWithoutMembers,
+  type SummaryMember,
+} from "@/lib/clusters/summary-attribution";
 import {
   buildDigestHtml,
   type DigestBlindspotItem,
@@ -94,28 +100,52 @@ function redactEmails(s: string): string {
   return s.replace(/[^\s@"'<>()]+@[^\s@"'<>()]+/g, "[e-posta gizlendi]");
 }
 
-function toClusterItem(bundle: {
-  cluster: { id: string; title_tr: string; summary_tr: string; bias_distribution: DigestClusterItem["biasDistribution"] };
-  articles: unknown[];
-}): DigestClusterItem {
+function toClusterItem(
+  bundle: {
+    cluster: { id: string; title_tr: string; bias_distribution: DigestClusterItem["biasDistribution"] };
+    articles: unknown[];
+  },
+  summary: string,
+): DigestClusterItem {
   return {
     id: bundle.cluster.id,
     title: bundle.cluster.title_tr,
-    summary: bundle.cluster.summary_tr,
+    summary,
     articleCount: bundle.articles.length,
     biasDistribution: bundle.cluster.bias_distribution,
   };
 }
 
-function toBlindspotItem(bundle: BlindspotBundle): DigestBlindspotItem {
+function toBlindspotItem(bundle: BlindspotBundle, summary: string): DigestBlindspotItem {
   return {
     id: bundle.cluster.id,
     title: bundle.cluster.title_tr,
-    summary: bundle.cluster.summary_tr,
+    summary,
     biasDistribution: bundle.cluster.bias_distribution,
     dominantZone: bundle.dominantZone,
     dominantPct: bundle.dominantPct,
   };
+}
+
+// BL-13 rights gate: clusters.summary_tr is the seed article's raw RSS
+// description — one outlet's words, not Tayf's. rss.xml and the cluster
+// detail page never render it verbatim; they run it through
+// summaryAttribution (member-aware) or, absent members,
+// summaryAttributionWithoutMembers (see summary-attribution.ts). The
+// digest email reuses the exact same pipeline instead of a third,
+// ungated path — `membersByCluster` is looked up once per cron tick via
+// getRssSummaryMembers, bounded to the clusters this email actually sends.
+function resolveSummary(
+  bundle: { cluster: { id: string; summary_tr: string }; isWireRedistribution?: boolean },
+  membersByCluster: Record<string, SummaryMember[]>,
+): string {
+  const summary = bundle.cluster.summary_tr;
+  const wire = { isWireRedistribution: bundle.isWireRedistribution === true };
+  const members = membersByCluster[bundle.cluster.id];
+  const attribution = members
+    ? summaryAttribution({ summary, members, wire })
+    : summaryAttributionWithoutMembers({ summary, wire });
+  return attribution?.text ?? "";
 }
 
 export const GET = withApiErrors(async (request: Request) => {
@@ -179,13 +209,32 @@ export const GET = withApiErrors(async (request: Request) => {
     getBlindspots(),
   ]);
 
-  const topClusters = [...politicsResult.bundles]
+  const topClusterBundles = [...politicsResult.bundles]
     .sort((a, b) => b.cluster.article_count - a.cluster.article_count)
-    .slice(0, TOP_CLUSTER_COUNT)
-    .map(toClusterItem);
+    .slice(0, TOP_CLUSTER_COUNT);
 
-  const topBlindspot = blindspotResult.bundles[0]
-    ? toBlindspotItem(blindspotResult.bundles[0])
+  const topBlindspotBundle = blindspotResult.bundles[0] ?? null;
+
+  // BL-13: resolve the rights-gated attribution once, for exactly the
+  // clusters this tick's email will render.
+  const attributionClusterIds = topClusterBundles.map((b) => b.cluster.id);
+  if (
+    topBlindspotBundle &&
+    topBlindspotBundle.cluster.summary_tr.trim().length > 0
+  ) {
+    attributionClusterIds.push(topBlindspotBundle.cluster.id);
+  }
+  const membersByCluster = await getRssSummaryMembers(attributionClusterIds);
+
+  const topClusters = topClusterBundles.map((bundle) =>
+    toClusterItem(bundle, resolveSummary(bundle, membersByCluster)),
+  );
+
+  const topBlindspot = topBlindspotBundle
+    ? toBlindspotItem(
+        topBlindspotBundle,
+        resolveSummary(topBlindspotBundle, membersByCluster),
+      )
     : null;
 
   const origin = siteUrl();

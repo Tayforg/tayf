@@ -106,6 +106,8 @@ interface MkClusterOpts {
     content_hash?: string | null;
     published_at?: string;
     image_url?: string | null;
+    /** BL-13 rights gate — omit for "flag absent, treated as allowed". */
+    image_allowed?: boolean;
   }>;
 }
 
@@ -137,6 +139,7 @@ function mkCluster(opts: MkClusterOpts) {
           bias: m.bias ?? "center",
           logo_url: null,
           kind: m.kind,
+          image_allowed: m.image_allowed,
         },
       },
     })),
@@ -181,6 +184,9 @@ describe("getPoliticsClusters query shape", () => {
     expect(selectArg).toMatch(/\bcontent_hash\b/);
     // sources embed must carry kind (voting vs non-voting source).
     expect(selectArg).toMatch(/sources\s*\([^)]*\bkind\b/);
+    // BL-13: sources embed must carry both rights flags.
+    expect(selectArg).toMatch(/sources\s*\([^)]*\bimage_allowed\b/);
+    expect(selectArg).toMatch(/sources\s*\([^)]*\bexcerpt_allowed\b/);
     // H2 neutral-headline column.
     expect(selectArg).toMatch(/\btitle_tr_neutral\b/);
 
@@ -309,6 +315,70 @@ describe("same-source dedupe + newest-first ordering", () => {
     expect(b.cluster.article_count).toBe(2);
     // Sources list matches.
     expect(b.sources.map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// BL-13 — per-source rights gate on the hero/card image candidate list
+// ---------------------------------------------------------------------------
+
+describe("BL-13 image_allowed gate", () => {
+  it("nulls image_url for a member whose source has image_allowed: false, leaving other members untouched", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            {
+              id: "a-blocked",
+              sourceId: "s-blocked",
+              image_url: "https://cdn.blocked.example/foto.jpg",
+              image_allowed: false,
+              published_at: iso(5 * 60 * 1000),
+            },
+            {
+              id: "a-allowed",
+              sourceId: "s-allowed",
+              image_url: "https://cdn.allowed.example/foto.jpg",
+              image_allowed: true,
+              published_at: iso(10 * 60 * 1000),
+            },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    const byId = Object.fromEntries(bundles[0].articles.map((a) => [a.id, a]));
+    // Blocked source's image never surfaces as a candidate.
+    expect(byId["a-blocked"].image_url).toBeNull();
+    // The allowed source's image is untouched.
+    expect(byId["a-allowed"].image_url).toBe(
+      "https://cdn.allowed.example/foto.jpg",
+    );
+  });
+
+  it("leaves image_url untouched when image_allowed is absent (legacy fixture, treated as allowed)", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            {
+              id: "a-legacy",
+              sourceId: "s-legacy",
+              image_url: "https://cdn.legacy.example/foto.jpg",
+              // image_allowed intentionally omitted.
+            },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].articles[0].image_url).toBe(
+      "https://cdn.legacy.example/foto.jpg",
+    );
   });
 });
 

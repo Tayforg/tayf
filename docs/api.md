@@ -89,7 +89,21 @@ Admin actions. Rate limited: 20-token bucket, 0.2 tokens/sec refill.
 | `toggle_source` | `slug`, `active` | Enable/disable a source |
 | `add_source` | `name`, `slug`, `url`, `rss_url`, `bias` | Add new source |
 | `update_source` | `id`, + optional fields | Update source fields |
+| `set_source_rights` | `slug`, `image_allowed?`, `excerpt_allowed?` | Set per-source rights flags (BL-13) |
 | `delete_source` | `id` | Delete source and its articles |
+
+`set_source_rights` (BL-13): operator toggle for outlets that have asked Tayf not to use their photos or excerpted text. At least one of `image_allowed` / `excerpt_allowed` is required, both must be booleans when present, and only those two columns on `sources` are ever written. `404` when `slug` does not match an existing source. These flags are read-side gates consumed elsewhere (hero/card image selection, summary attribution) — this action only writes them.
+
+```bash
+curl -sS -X POST https://tayfhaber.com/api/admin \
+  -H "Cookie: admin_session=<admin session cookie value>" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"set_source_rights","slug":"example-outlet","image_allowed":false}'
+# -> 200 {"slug":"example-outlet","image_allowed":false,"excerpt_allowed":true}
+```
+
+**Response** `400`: invalid `slug`, no flag provided, or a non-boolean flag value.
+**Response** `404`: no source with that `slug`.
 
 ---
 

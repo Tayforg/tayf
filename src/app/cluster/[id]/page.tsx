@@ -156,11 +156,23 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // Previously we picked only the first non-null image and hit the
   // placeholder any time that specific URL happened to be broken, even
   // if 14 other members of the cluster had working images.
-  const heroCandidates = members
+  //
+  // BL-13 rights gate: drop any member whose source has asked Tayf not to
+  // reuse its photos (image_allowed: false) before candidates are built,
+  // so a blocked outlet's image can never become the hero (or a
+  // fallback) — the next eligible member's image is used instead, or no
+  // hero image at all when none remain. `undefined` (fixtures/rows
+  // predating migration 047, or a source not covered by the supplemental
+  // sources query error path) is treated as allowed — see
+  // cluster-detail-query.ts's `imageEligibleMembers`, whose gate this
+  // mirrors (inlined rather than imported so this page keeps its own
+  // module mock in tests unaffected).
+  const imageEligible = members.filter((m) => m.source.image_allowed !== false);
+  const heroCandidates = imageEligible
     .map((m) => m.article.image_url)
     .filter((u): u is string => typeof u === "string" && u.length > 0);
   const heroSrc = heroCandidates[0] ?? null;
-  const heroMember = members.find((m) => !!m.article.image_url) ?? null;
+  const heroMember = imageEligible.find((m) => !!m.article.image_url) ?? null;
   const heroAlt = heroMember?.article.title ?? cluster.title_tr;
 
   // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the exact image
@@ -169,9 +181,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // actually on screen — even after its client-side fallback chain
   // advances past the first candidate when a CDN 404s. First member to
   // claim a URL wins, matching the `Set`-based dedup order
-  // `ClusterCardImage` applies to (src, ...srcs) internally.
+  // `ClusterCardImage` applies to (src, ...srcs) internally. Built from
+  // `imageEligible` (not `members`) so a blocked outlet's photo can never
+  // be credited even indirectly.
   const heroCredits: Record<string, { href: string; name: string }> = {};
-  for (const m of members) {
+  for (const m of imageEligible) {
     const url = m.article.image_url;
     if (!url) continue;
     heroCredits[url] ??= { href: m.article.url, name: m.source.name };

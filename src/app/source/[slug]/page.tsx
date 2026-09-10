@@ -54,7 +54,7 @@ async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
 
     const { data: sourceRow, error: sourceError } = await supabase
       .from("sources")
-      .select("id, name, slug, url, rss_url, bias, logo_url, active")
+      .select("id, name, slug, url, rss_url, bias, logo_url, active, image_allowed, excerpt_allowed")
       .eq("slug", slug)
       .maybeSingle();
 
@@ -240,7 +240,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
                   rel="noopener noreferrer"
                   className="flex items-start gap-3 p-3 sm:p-4"
                 >
-                  {article.image_url ? (
+                  {article.image_url && source.image_allowed !== false ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={article.image_url}
@@ -255,7 +255,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
                     <p className="text-sm font-semibold leading-snug line-clamp-2 group-hover:text-foreground">
                       {article.title}
                     </p>
-                    {article.description ? (
+                    {source.excerpt_allowed !== false && article.description ? (
                       <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
                         {article.description}
                       </p>

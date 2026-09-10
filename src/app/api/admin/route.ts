@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
   apiError,
+  apiNotFound,
   apiServerError,
   apiUnauthorized,
   withApiErrors,
@@ -173,6 +174,49 @@ export const POST = withApiErrors(async (request: Request) => {
       const { error } = await supabase.from("sources").update(updates).eq("id", id);
       if (error) return apiServerError(error);
       return NextResponse.json({ success: true, message: `${name || "Source"} updated` });
+    }
+
+    // Per-source rights flags (BL-13). Operator-only toggle for outlets that
+    // have asked not to have their photos or excerpted text used — the two
+    // columns are consumed read-side by the image and excerpt gates (owned
+    // by a separate pack), not by this route. Only `image_allowed` /
+    // `excerpt_allowed` may ever be written here; nothing else on `sources`
+    // is reachable through this action.
+    case "set_source_rights": {
+      const { slug, image_allowed, excerpt_allowed } = body;
+      if (!isValidSourceSlug(slug)) return apiBadRequest("Invalid slug");
+
+      const updates: Record<string, boolean> = {};
+      if (image_allowed !== undefined) {
+        if (typeof image_allowed !== "boolean") {
+          return apiBadRequest("image_allowed must be a boolean");
+        }
+        updates.image_allowed = image_allowed;
+      }
+      if (excerpt_allowed !== undefined) {
+        if (typeof excerpt_allowed !== "boolean") {
+          return apiBadRequest("excerpt_allowed must be a boolean");
+        }
+        updates.excerpt_allowed = excerpt_allowed;
+      }
+      if (Object.keys(updates).length === 0) {
+        return apiBadRequest("image_allowed or excerpt_allowed is required");
+      }
+
+      const { data, error } = await supabase
+        .from("sources")
+        .update(updates)
+        .eq("slug", slug)
+        .select("slug, image_allowed, excerpt_allowed")
+        .maybeSingle();
+      if (error) return apiServerError(error);
+      if (!data) return apiNotFound("Source not found");
+
+      return NextResponse.json({
+        slug: data.slug,
+        image_allowed: data.image_allowed,
+        excerpt_allowed: data.excerpt_allowed,
+      });
     }
 
     case "delete_source": {

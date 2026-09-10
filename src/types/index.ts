@@ -62,6 +62,17 @@ export interface Source {
    * as "outlet" (a voting kind).
    */
   kind?: SourceKind;
+  /**
+   * BL-13 per-source rights flags (migration 047): `false` when this
+   * outlet has asked Tayf not to reuse its photos (`image_allowed`) or
+   * its article text (`excerpt_allowed`). The DB column is `NOT NULL
+   * DEFAULT true`; both are optional here (same pattern as `kind` above)
+   * so fixtures/fakes that predate the column keep compiling. Every
+   * read-path gate treats `undefined` the same as `true` (never
+   * suppress) so nothing regresses.
+   */
+  image_allowed?: boolean;
+  excerpt_allowed?: boolean;
 }
 
 export interface Article {

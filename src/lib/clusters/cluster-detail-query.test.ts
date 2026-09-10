@@ -115,7 +115,8 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 });
 
 // Import AFTER mocks are declared.
-import { getClusterDetail } from "./cluster-detail-query";
+import { getClusterDetail, imageEligibleMembers } from "./cluster-detail-query";
+import type { ClusterDetailMember } from "./cluster-detail-query";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -240,6 +241,9 @@ describe("getClusterDetail query shape", () => {
     expect(embedded).toMatch(/\bcontent_hash\b/);
     // The member embed must carry `kind` (voting vs non-voting source).
     expect(embedded).toMatch(/source:sources\s*\([^)]*\bkind\b/);
+    // BL-13: the member embed must carry both rights flags.
+    expect(embedded).toMatch(/source:sources\s*\([^)]*\bimage_allowed\b/);
+    expect(embedded).toMatch(/source:sources\s*\([^)]*\bexcerpt_allowed\b/);
     const membersEq = membersCall!.steps.find((s) => s.method === "eq");
     expect(membersEq!.args).toEqual(["cluster_id", "cluster-1"]);
 
@@ -467,6 +471,72 @@ describe("getClusterDetail row shaping", () => {
     expect(bySource["s-aggregator"]).toBe("aggregator");
     expect(bySource["s-null-kind"]).toBe("outlet");
     expect(bySource["s-no-kind"]).toBe("outlet");
+  });
+});
+
+describe("BL-13 per-source rights flags", () => {
+  it("threads image_allowed/excerpt_allowed through to each member's source, defaulting missing flags to true", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a-blocked", "s-blocked", "2026-04-17T10:00:00Z", {
+            source: { image_allowed: false, excerpt_allowed: false },
+          }),
+          // Legacy row: no rights columns in the select response at all —
+          // must be treated exactly like `true`.
+          mkEmbeddedMember("a-legacy", "s-legacy", "2026-04-17T09:00:00Z"),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    const bySource = Object.fromEntries(
+      result!.members.map((m) => [m.source.id, m.source]),
+    );
+    expect(bySource["s-blocked"].image_allowed).toBe(false);
+    expect(bySource["s-blocked"].excerpt_allowed).toBe(false);
+    expect(bySource["s-legacy"].image_allowed).toBe(true);
+    expect(bySource["s-legacy"].excerpt_allowed).toBe(true);
+  });
+});
+
+describe("BL-13 imageEligibleMembers", () => {
+  function member(id: string, imageAllowed: boolean | undefined): ClusterDetailMember {
+    return {
+      source: {
+        id,
+        name: id,
+        slug: id,
+        url: "https://x",
+        rss_url: "https://x/r",
+        bias: "center",
+        logo_url: null,
+        active: true,
+        image_allowed: imageAllowed,
+      },
+      article: {
+        id,
+        title: id,
+        url: "https://x",
+        published_at: "2026-04-17T10:00:00Z",
+        image_url: `https://cdn.example/${id}.jpg`,
+        content_hash: null,
+      },
+    };
+  }
+
+  it("drops a member whose source has image_allowed: false", () => {
+    const blocked = member("s-blocked", false);
+    const allowed = member("s-allowed", true);
+    expect(imageEligibleMembers([blocked, allowed])).toEqual([allowed]);
+  });
+
+  it("keeps a member whose source has image_allowed absent (legacy, treated as allowed)", () => {
+    const legacy = member("s-legacy", undefined);
+    expect(imageEligibleMembers([legacy])).toEqual([legacy]);
   });
 });
 

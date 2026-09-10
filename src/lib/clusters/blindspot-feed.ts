@@ -13,6 +13,11 @@ export type EmbeddedSource = {
   // keep compiling. `zoneTallyOf` treats a missing/null kind as voting via
   // `isVotingKind`.
   kind?: SourceKind | null;
+  // BL-13 per-source rights flags (migration 047). Optional so existing
+  // fixtures predating the columns keep compiling — `undefined` is treated
+  // as allowed by the same rule politics-query.ts's buildClusterBundle uses.
+  image_allowed?: boolean;
+  excerpt_allowed?: boolean;
 };
 
 export type EmbeddedArticle = {

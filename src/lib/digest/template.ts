@@ -78,9 +78,13 @@ function storyBlock(item: DigestClusterItem, siteUrl: string): string {
         <a href="${link}" style="color:#18181b;text-decoration:none;font-size:17px;font-weight:600;line-height:1.35;font-family:Georgia,'Times New Roman',serif;">
           ${escapeHtml(item.title)}
         </a>
-        <p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
+        ${
+          item.summary.length > 0
+            ? `<p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
           ${escapeHtml(item.summary)}
-        </p>
+        </p>`
+            : ""
+        }
         ${zoneBar(item.biasDistribution)}
         <p style="margin:2px 0 0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
           ${item.articleCount} kaynak
@@ -103,9 +107,13 @@ function blindspotBlock(item: DigestBlindspotItem, siteUrl: string): string {
         <a href="${link}" style="color:#18181b;text-decoration:none;font-size:17px;font-weight:600;line-height:1.35;font-family:Georgia,'Times New Roman',serif;">
           ${escapeHtml(item.title)}
         </a>
-        <p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
+        ${
+          item.summary.length > 0
+            ? `<p style="margin:6px 0 0;color:#52525b;font-size:14px;line-height:1.5;font-family:Arial,Helvetica,sans-serif;">
           ${escapeHtml(item.summary)}
-        </p>
+        </p>`
+            : ""
+        }
         ${zoneBar(item.biasDistribution)}
         <p style="margin:2px 0 0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
           ${pct < 100 ? `%${pct} ${zoneLabel}` : `Sadece ${zoneLabel} yazdı`}
