@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SourceChips } from "./source-chips";
+import { SourceChips, ownershipLabel } from "./source-chips";
 
 // SourceChips is a synchronous function component (no hooks, no async) so
 // it can be called directly as a plain function and its returned React
@@ -113,5 +113,13 @@ describe("SourceChips", () => {
     expect(collectText(truncatedLabel[0]).join(" ")).toContain(
       "Turkuvaz Medya (Kalyon Grubu)",
     );
+  });
+});
+
+describe("ownershipLabel", () => {
+  it("disambiguates the independent-owner value from the Bağımsız zone", () => {
+    expect(ownershipLabel("Bağımsız")).toBe("Bağımsız sahiplik");
+    expect(ownershipLabel("Bağımsız (hükümete yakın)")).toBe("Bağımsız sahiplik (hükümete yakın)");
+    expect(ownershipLabel("Demirören Medya")).toBe("Demirören Medya");
   });
 });

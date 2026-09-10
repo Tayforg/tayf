@@ -247,11 +247,14 @@ export const ZONE_META: Record<
     dot: "bg-zinc-400",
     chipBg: "bg-zinc-500/15",
     chipHover: "hover:bg-zinc-500/25",
-    chipText: "text-zinc-700 dark:text-zinc-300",
-    chipBorder: "border-zinc-500/20",
-    zoneBg: "bg-zinc-500/10",
-    zoneBorder: "border-zinc-500/30",
-    zoneLabel: "text-zinc-700 dark:text-zinc-300",
+    // dark:text-zinc-400 (not -300) matches BIAS_COLORS.center's dark-mode
+    // shade above — zinc-300 sits too close to the dark theme's near-white
+    // --foreground to read as tinted next to the red/emerald zones.
+    chipText: "text-zinc-700 dark:text-zinc-400",
+    chipBorder: "border-zinc-500/30",
+    zoneBg: "bg-zinc-500/20",
+    zoneBorder: "border-zinc-400/40",
+    zoneLabel: "text-zinc-700 dark:text-zinc-400",
   },
   muhalefet: {
     label: "Muhalefet",

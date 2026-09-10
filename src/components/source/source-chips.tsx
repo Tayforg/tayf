@@ -69,6 +69,13 @@ const OWNERSHIP_CLASS =
 const UNCLASSIFIED_CLASS =
   "bg-muted/40 text-muted-foreground border-border/60";
 
+// "Bağımsız" is also the name of the middle Medya DNA zone; as a bare chip
+// next to a bias badge it reads as a political position. Spell out that
+// this one is about ownership. Every other owner name is unambiguous.
+export function ownershipLabel(ownership: string): string {
+  return ownership.replace(/^Bağımsız/, "Bağımsız sahiplik");
+}
+
 export interface SourceChipsProps {
   /** Source slug (matches `slug` column in the `sources` table). */
   slug: string;
@@ -144,7 +151,7 @@ export function SourceChips({
           className={cn(CHIP_BASE, OWNERSHIP_CLASS)}
           title={`Sahiplik: ${meta.ownership}`}
         >
-          <span className={CHIP_LABEL_CLASS}>{meta.ownership}</span>
+          <span className={CHIP_LABEL_CLASS}>{ownershipLabel(meta.ownership)}</span>
         </span>
       )}
     </span>
