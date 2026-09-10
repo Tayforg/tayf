@@ -10,6 +10,7 @@ import {
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
 import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
+import { captureServerException } from "@/lib/sentry/server";
 
 // Boot-time guard. The route is FAIL-CLOSED on a missing `CRON_SECRET` (503
 // on every invocation), but in production that failure is otherwise only
@@ -160,7 +161,7 @@ async function rewriteClusterHeadline(input: {
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`LLM API ${res.status}: ${text}`);
+    throw new Error(`LLM API ${res.status}: ${text.slice(0, 500)}`);
   }
 
   const data = (await res.json()) as {
@@ -284,6 +285,7 @@ export const GET = withApiErrors(async (request: Request) => {
       // table/column names. Log the detail for triage and hand a generic
       // tag back to the caller. Same pattern as `apiServerError`.
       console.error("[headline-cron] member-fetch", c.id, memberErr);
+      captureServerException(memberErr, { clusterId: c.id, mode });
       perCluster[c.id] = { status: "errored", error: "member-fetch-failed" };
       errored++;
       continue;
@@ -318,13 +320,15 @@ export const GET = withApiErrors(async (request: Request) => {
     } catch (err) {
       // Keep the raw `err` out of the response body — it can carry vendor
       // identifiers, prompt fragments, or upstream rate-limit details that
-      // we do not want to leak to the caller. The full message still
-      // reaches Sentry + Edge logs via console.error below.
+      // we do not want to leak to the caller. The full message is captured
+      // explicitly via captureServerException below and also logged to
+      // Edge/Vercel logs via console.error.
       console.error(
         "[headline-cron] LLM call failed for cluster",
         c.id,
         err,
       );
+      captureServerException(err, { clusterId: c.id, mode });
       perCluster[c.id] = {
         status: "errored",
         error: "rewriteClusterHeadline failed",
@@ -363,6 +367,7 @@ export const GET = withApiErrors(async (request: Request) => {
 
     if (writeErr) {
       console.error("[headline-cron] write", c.id, writeErr);
+      captureServerException(writeErr, { clusterId: c.id, mode });
       perCluster[c.id] = { status: "errored", error: "write-failed" };
       errored++;
       continue;

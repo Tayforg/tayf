@@ -15,6 +15,19 @@ vi.mock("next/cache", () => ({
   revalidateTag: revalidateTagMock,
 }));
 
+// captureServerException: mocked so per-cluster error sites can be asserted
+// without a real Sentry SDK / DSN.
+// The write-error capture site (route.ts) is not exercised: the table fake
+// serves the pick SELECT and the per-row UPDATE from the same fixture, so a
+// write-only error cannot be injected.
+const { captureServerExceptionMock } = vi.hoisted(() => ({
+  captureServerExceptionMock: vi.fn(),
+}));
+
+vi.mock("@/lib/sentry/server", () => ({
+  captureServerException: captureServerExceptionMock,
+}));
+
 // ---------------------------------------------------------------------------
 // Contract tests for /api/cron/headline (Vercel cron, runtime: nodejs).
 //
@@ -241,6 +254,7 @@ beforeEach(() => {
   supabaseFake.dbAccessLog.length = 0;
   timingSafeEqualSpy.mockClear();
   revalidateTagMock.mockClear();
+  captureServerExceptionMock.mockClear();
   installLlmFetchSpy();
 });
 
@@ -400,6 +414,62 @@ describe("GET /api/cron/headline", () => {
     expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:c1", "max");
     expect(revalidateTagMock).toHaveBeenCalledWith("clusters-politics", "max");
     expect(revalidateTagMock).toHaveBeenCalledTimes(2);
+    // Happy path: nothing errored, so no Sentry capture.
+    expect(captureServerExceptionMock).not.toHaveBeenCalled();
+  });
+
+  it("captures the member-fetch error via captureServerException with the cluster id", async () => {
+    process.env.CRON_SECRET = "shhh";
+    setTableResponse("clusters", {
+      data: [
+        {
+          id: "c1",
+          title_tr: "Original TR",
+          summary_tr: "Original summary",
+          title_tr_neutral: null,
+          title_neutral_at: null,
+          article_count: 4,
+        },
+      ],
+      error: null,
+    });
+    setTableResponse("cluster_articles", {
+      data: null,
+      error: { message: "cluster_articles read failed" },
+    });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const res = await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { errored?: number };
+    expect(body.errored).toBe(1);
+    expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+    expect(captureServerExceptionMock).toHaveBeenCalledWith(expect.anything(), { clusterId: "c1", mode: "llm" });
+  });
+
+  it("captures the LLM failure via captureServerException and returns the generic error tag", async () => {
+    process.env.CRON_SECRET = "shhh";
+    setTableResponse("clusters", { data: [{ id: "c1", title_tr: "Original TR", summary_tr: "Original summary", title_tr_neutral: null, title_neutral_at: null, article_count: 4 }], error: null });
+    setTableResponse("cluster_articles", { data: [{ articles: { title: "Headline A", published_at: "2026-01-01T00:00:00Z" } }], error: null });
+    // Override the beforeEach spy: LLM_API_URL now answers 500.
+    vi.mocked(globalThis.fetch).mockImplementation(async () => new Response("upstream boom", { status: 500 }));
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("route has no handler");
+    const res = await handler(new Request("http://example.com/api/cron/headline", { headers: { Authorization: "Bearer shhh" } }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { errored?: number; clusters?: Record<string, { error?: string }> };
+    expect(body.errored).toBe(1);
+    expect(body.clusters?.c1?.error).toBe("rewriteClusterHeadline failed");
+    expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+    expect(captureServerExceptionMock).toHaveBeenCalledWith(expect.anything(), { clusterId: "c1", mode: "llm" });
   });
 
   it("does not revalidate any tag when there are no candidates (no-op)", async () => {
@@ -488,6 +558,10 @@ describe("GET /api/cron/headline", () => {
       (a) => a.table === "clusters" && a.state.order.length > 0,
     );
     expect(pick).toBeDefined();
+    // LLM mode targets title_neutral_at (not the extractive
+    // title_tr_neutral column) — see the symmetric extractive-mode
+    // assertion below.
+    expect(pick!.state.is).toContainEqual({ col: "title_neutral_at", val: null });
     expect(pick!.state.eq).toContainEqual({ col: "is_archived", val: false });
     expect(pick!.state.order).toContainEqual({
       col: "updated_at",
@@ -504,6 +578,7 @@ describe("GET /api/cron/headline", () => {
       col: "article_count",
       val: HEADLINE_MIN_ARTICLE_COUNT,
     });
+    expect(pick!.state.limit).toBe(5);
   });
 
   it("writes title_neutral_model and title_neutral_prompt_version alongside title_tr_neutral", async () => {
@@ -637,5 +712,39 @@ describe("GET /api/cron/headline — extractive mode (no LLM key)", () => {
     expect(patch.title_neutral_model).toBe("extractive-v1");
     expect(patch.title_neutral_at).toBeUndefined();
     expect(patch.title_neutral_prompt_version).toBeUndefined();
+  });
+
+  it("pick query filters is_archived=false, targets title_tr_neutral, and orders by updated_at desc (recency-first)", async () => {
+    process.env.CRON_SECRET = "shhh";
+    delete process.env.ANTHROPIC_API_KEY;
+    setTableResponse("clusters", { data: [], error: null });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("route has no handler");
+
+    await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+
+    // The pick query is the only "clusters" access that calls `.order()`
+    // (the per-row `.update()` calls never do).
+    const pick = supabaseFake.dbAccessLog.find(
+      (a) => a.table === "clusters" && a.state.order.length > 0,
+    );
+    expect(pick).toBeDefined();
+    // Extractive mode targets title_tr_neutral (not the LLM-mode
+    // title_neutral_at column) — symmetric with the LLM-mode assertion
+    // above.
+    expect(pick!.state.is).toContainEqual({ col: "title_tr_neutral", val: null });
+    expect(pick!.state.eq).toContainEqual({ col: "is_archived", val: false });
+    expect(pick!.state.gte).toContainEqual({ col: "article_count", val: 2 });
+    expect(pick!.state.limit).toBe(50);
+    expect(pick!.state.order).toContainEqual({
+      col: "updated_at",
+      opts: expect.objectContaining({ ascending: false }),
+    });
   });
 });

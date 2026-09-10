@@ -30,4 +30,12 @@ Sentry.init({
   release: process.env.SENTRY_RELEASE ?? process.env.VERCEL_GIT_COMMIT_SHA,
   tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0.1),
   debug: process.env.SENTRY_DEBUG === "1",
+
+  // The SDK attaches every incoming request header to route-handler
+  // events; drop the cron bearer and cookies before they leave the process.
+  beforeSend(event) {
+    const h = event.request?.headers;
+    if (h) { delete h.authorization; delete h.cookie; }
+    return event;
+  },
 });

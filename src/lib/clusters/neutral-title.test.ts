@@ -62,4 +62,33 @@ describe("pickNeutralTitle", () => {
   it("falls back to the raw title when cleaning leaves too little", () => {
     expect(pickNeutralTitle([{ title: "SON DAKİKA! Deprem" }])).toBe("SON DAKİKA! Deprem");
   });
+
+  it("lowercases dotted İ with the tr locale so 'İstanbul' and 'istanbul' share a token", () => {
+    // Plain toLowerCase() maps İ to "i" + U+0307; the [^a-z0-9] filter then
+    // splits it, so "İstanbul" tokenized to "stanbul" and never matched
+    // "istanbul". Old code picked the Ankara title here.
+    const picked = pickNeutralTitle([
+      { title: "Ankara'da deprem oldu" },
+      { title: "İstanbul'da deprem oldu" },
+      { title: "istanbul'da yangın çıktı" },
+    ]);
+    expect(picked).toBe("İstanbul'da deprem oldu");
+  });
+
+  it("regression: 'İlk' and 'ilk' get equal centrality against a third title", () => {
+    // With the tr-locale fix both variants tokenize identically, so they
+    // tie for centrality against the (equally related) third title and the
+    // scoring loop's strict `>` comparison keeps the first-listed member,
+    // "Depremde İlk...". Before the fix, "İlk" tokenized to nothing useful
+    // (the dotted-I got split off by the diacritics/ASCII filter) while
+    // "ilk" tokenized correctly and shared "ilk" with the third title, so
+    // the lowercase variant won unfairly — this assertion catches that
+    // regression if the locale-aware lowercasing is ever reverted.
+    const picked = pickNeutralTitle([
+      { title: "Depremde İlk yardım ekipleri bölgeye ulaştı" },
+      { title: "Depremde ilk yardım ekipleri bölgeye ulaştı" },
+      { title: "Yılın ilk karı bugün yağdı" },
+    ]);
+    expect(picked).toBe("Depremde İlk yardım ekipleri bölgeye ulaştı");
+  });
 });
