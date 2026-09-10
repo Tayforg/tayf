@@ -23,6 +23,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 let mockBundles: unknown[] = [];
 let mockMembers: Record<string, unknown> = {};
+let mockMemberLookupFailed = false;
 let memberLookupCalls: string[][] = [];
 // Default mirrors production reality per the neutralizer-honesty audit:
 // zero clusters have ever been neutralized, so the AI-disclosure sentence
@@ -41,7 +42,7 @@ vi.mock("@/lib/clusters/politics-query", () => ({
 vi.mock("@/lib/clusters/rss-summary-attribution", () => ({
   getRssSummaryMembers: vi.fn(async (ids: string[]) => {
     memberLookupCalls.push(ids);
-    return mockMembers;
+    return { members: mockMembers, lookupFailed: mockMemberLookupFailed };
   }),
 }));
 
@@ -53,6 +54,7 @@ vi.mock("@/lib/headline/status", () => ({
 beforeEach(() => {
   mockBundles = [];
   mockMembers = {};
+  mockMemberLookupFailed = false;
   memberLookupCalls = [];
   mockNeutralStatus = { neutralized: 0, eligible: 0 };
 });
@@ -286,5 +288,38 @@ describe("GET /rss.xml", () => {
 
     expect(desc.length).toBeLessThanOrEqual(400);
     expect(desc.endsWith("…")).toBe(true);
+  });
+
+  describe("BL-13 fail-closed on a failed member lookup", () => {
+    it("omits the summary text for every cluster when getRssSummaryMembers reports lookupFailed, even for text an allowed member would show", async () => {
+      mockBundles = [
+        bundle({ id: "fail1", summary: "AA metni", articleCount: 3, effectiveArticleCount: 3, isWireRedistribution: false }),
+      ];
+      // No entry for fail1 at all — mirrors what a real failed lookup
+      // returns (an empty members map) — but flagged as a failure.
+      mockMembers = {};
+      mockMemberLookupFailed = true;
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const xml = await (await GET()).text();
+      const desc = parseItems(xml)[0]!.description;
+
+      expect(desc).not.toContain("AA metni");
+      expect(desc).toBe("3 kaynaktan haberler.");
+    });
+
+    it("control: renders the attributed summary when the lookup succeeds (lookupFailed: false) with an allowed member", async () => {
+      mockBundles = [
+        bundle({ id: "ok1", summary: "AA metni", articleCount: 3, effectiveArticleCount: 3, isWireRedistribution: false }),
+      ];
+      mockMembers = { ok1: [member("Anadolu Ajansı", T0, "AA metni")] };
+      mockMemberLookupFailed = false;
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const xml = await (await GET()).text();
+      const desc = parseItems(xml)[0]!.description;
+
+      expect(desc).toBe("3 kaynaktan haberler. Anadolu Ajansı: AA metni");
+    });
   });
 });

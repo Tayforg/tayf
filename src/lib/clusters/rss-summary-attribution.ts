@@ -112,22 +112,43 @@ async function cachedRssSummaryMembers(
   return result;
 }
 
+export interface RssSummaryMembersResult {
+  members: Record<string, SummaryMember[]>;
+  /**
+   * True only when the batched Supabase lookup itself errored/threw for
+   * THIS request — never true just because a requested cluster id has no
+   * matching rows. Callers must not conflate the two: `members[id]` being
+   * absent is ambiguous on its own (see summary-attribution.ts's
+   * resolveSummaryAttribution), but `lookupFailed` disambiguates it. A
+   * caller that ignores this flag and always falls back to
+   * summaryAttributionWithoutMembers on a missing entry would render
+   * clusters.summary_tr verbatim — with no excerpt_allowed check at all —
+   * for every cluster whenever this lookup fails, defeating the BL-13
+   * rights gate.
+   */
+  lookupFailed: boolean;
+}
+
 // Public, uncached entry point. Lives OUTSIDE the cache boundary so a
 // failure is never memoised: it catches whatever `cachedRssSummaryMembers`
-// throws, logs it, and returns {} for THIS request only — the next
-// request gets a fresh attempt instead of a cached failure. Fail-closed on
-// honesty, not availability: a degraded {} makes every caller fall back to
-// summaryAttributionWithoutMembers, which can only hide or generically
-// label a summary — never invent an outlet.
+// throws, logs it, and returns `{ members: {}, lookupFailed: true }` for
+// THIS request only — the next request gets a fresh attempt instead of a
+// cached failure. `lookupFailed` is the fail-closed-on-rights signal
+// callers must check before falling back to summaryAttributionWithoutMembers
+// (see that function and resolveSummaryAttribution in
+// summary-attribution.ts): an empty `members` result alone is ambiguous
+// between "no attributable members" (safe to degrade) and "the lookup
+// broke" (must hide the excerpt, not degrade to it).
 export async function getRssSummaryMembers(
   clusterIds: string[],
-): Promise<Record<string, SummaryMember[]>> {
-  if (clusterIds.length === 0) return {};
+): Promise<RssSummaryMembersResult> {
+  if (clusterIds.length === 0) return { members: {}, lookupFailed: false };
 
   try {
-    return await cachedRssSummaryMembers(clusterIds);
+    const members = await cachedRssSummaryMembers(clusterIds);
+    return { members, lookupFailed: false };
   } catch (err) {
     console.warn("[rss-summary-attribution] lookup failed:", err);
-    return {};
+    return { members: {}, lookupFailed: true };
   }
 }

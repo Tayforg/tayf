@@ -9,8 +9,7 @@ import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
 import { getRssSummaryMembers } from "@/lib/clusters/rss-summary-attribution";
 import {
-  summaryAttribution,
-  summaryAttributionWithoutMembers,
+  resolveSummaryAttribution,
   type SummaryMember,
 } from "@/lib/clusters/summary-attribution";
 import {
@@ -130,21 +129,23 @@ function toBlindspotItem(bundle: BlindspotBundle, summary: string): DigestBlinds
 // BL-13 rights gate: clusters.summary_tr is the seed article's raw RSS
 // description — one outlet's words, not Tayf's. rss.xml and the cluster
 // detail page never render it verbatim; they run it through
-// summaryAttribution (member-aware) or, absent members,
-// summaryAttributionWithoutMembers (see summary-attribution.ts). The
-// digest email reuses the exact same pipeline instead of a third,
-// ungated path — `membersByCluster` is looked up once per cron tick via
-// getRssSummaryMembers, bounded to the clusters this email actually sends.
+// resolveSummaryAttribution's member-aware / degraded / fail-closed
+// dispatch (see summary-attribution.ts). The digest email reuses the exact
+// same pipeline instead of a third, ungated path — `membersByCluster` is
+// looked up once per cron tick via getRssSummaryMembers, bounded to the
+// clusters this email actually sends. `lookupFailed` must be threaded
+// through: a missing `members` entry alone doesn't tell you whether that
+// cluster has no attributable members (safe to degrade) or the whole
+// lookup errored (must hide the excerpt, never render summary_tr raw).
 function resolveSummary(
   bundle: { cluster: { id: string; summary_tr: string }; isWireRedistribution?: boolean },
   membersByCluster: Record<string, SummaryMember[]>,
+  lookupFailed: boolean,
 ): string {
   const summary = bundle.cluster.summary_tr;
   const wire = { isWireRedistribution: bundle.isWireRedistribution === true };
   const members = membersByCluster[bundle.cluster.id];
-  const attribution = members
-    ? summaryAttribution({ summary, members, wire })
-    : summaryAttributionWithoutMembers({ summary, wire });
+  const attribution = resolveSummaryAttribution({ summary, members, lookupFailed, wire });
   return attribution?.text ?? "";
 }
 
@@ -224,16 +225,17 @@ export const GET = withApiErrors(async (request: Request) => {
   ) {
     attributionClusterIds.push(topBlindspotBundle.cluster.id);
   }
-  const membersByCluster = await getRssSummaryMembers(attributionClusterIds);
+  const { members: membersByCluster, lookupFailed: memberLookupFailed } =
+    await getRssSummaryMembers(attributionClusterIds);
 
   const topClusters = topClusterBundles.map((bundle) =>
-    toClusterItem(bundle, resolveSummary(bundle, membersByCluster)),
+    toClusterItem(bundle, resolveSummary(bundle, membersByCluster, memberLookupFailed)),
   );
 
   const topBlindspot = topBlindspotBundle
     ? toBlindspotItem(
         topBlindspotBundle,
-        resolveSummary(topBlindspotBundle, membersByCluster),
+        resolveSummary(topBlindspotBundle, membersByCluster, memberLookupFailed),
       )
     : null;
 

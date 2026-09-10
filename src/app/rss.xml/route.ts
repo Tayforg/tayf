@@ -2,8 +2,7 @@ import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 import { getRssSummaryMembers } from "@/lib/clusters/rss-summary-attribution";
 import {
   describeForMeta,
-  summaryAttribution,
-  summaryAttributionWithoutMembers,
+  resolveSummaryAttribution,
 } from "@/lib/clusters/summary-attribution";
 import { getNeutralizedStatus } from "@/lib/headline/status";
 
@@ -47,7 +46,8 @@ export async function GET(): Promise<Response> {
   const attributable = feed
     .filter((b) => (b.cluster.summary_tr ?? "").trim().length > 0)
     .map((b) => b.cluster.id);
-  const membersByCluster = await getRssSummaryMembers(attributable);
+  const { members: membersByCluster, lookupFailed: memberLookupFailed } =
+    await getRssSummaryMembers(attributable);
 
   const items = feed
     .map((b) => {
@@ -63,9 +63,17 @@ export async function GET(): Promise<Response> {
       // Never fall back to the raw unattributed summary: a missing/failed
       // lookup degrades to the generic label or hides the summary, but
       // must never publish someone else's words as if they were Tayf's.
-      const attribution = members
-        ? summaryAttribution({ summary, members, wire })
-        : summaryAttributionWithoutMembers({ summary, wire });
+      // BL-13: when the whole members lookup failed (memberLookupFailed),
+      // a missing `members` entry must hide the excerpt rather than
+      // degrade to summaryAttributionWithoutMembers, which cannot re-run
+      // the excerpt_allowed gate and would otherwise publish a
+      // rights-blocked outlet's raw text whenever the lookup errors.
+      const attribution = resolveSummaryAttribution({
+        summary,
+        members,
+        lookupFailed: memberLookupFailed,
+        wire,
+      });
       const description = escapeXml(
         describeForMeta(
           { count: honestCount, attribution, base: `${honestCount} kaynaktan haberler.${wireNote}` },

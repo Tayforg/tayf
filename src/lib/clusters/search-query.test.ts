@@ -11,6 +11,24 @@ vi.mock("next/cache", () => ({
   cacheTag: vi.fn(),
 }));
 
+// Feed-health-gated blindspot suppression (Pack C) — mirrors
+// politics-query.test.ts's mock exactly: getZoneFeedHealth() is
+// stubbed (its own Supabase round-trip against `sources` is covered by
+// feed-health.test.ts) while shouldSuppressBlindspot/degradedSilentZone
+// stay REAL via importOriginal, so these are integration tests of the
+// suppression wiring inside buildClusterBundle, not just of the mock.
+const feedHealth = vi.hoisted(() => ({
+  getZoneFeedHealth: vi.fn(async () => null as unknown),
+}));
+
+vi.mock("./feed-health", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./feed-health")>();
+  return {
+    ...actual,
+    getZoneFeedHealth: feedHealth.getZoneFeedHealth,
+  };
+});
+
 // Mutable fixture the `clusters` table resolver reads on every query, plus
 // the last builder state it saw — lets tests assert on the exact
 // select/textSearch/filter/order/limit chain without a bespoke fake.
@@ -39,6 +57,7 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { searchClusters } from "./search-query";
+import type { ZoneFeedHealth } from "./feed-health";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -50,6 +69,8 @@ beforeEach(() => {
   fixture.error = null;
   fixture.throwOnQuery = false;
   fixture.lastState = null;
+  feedHealth.getZoneFeedHealth.mockReset();
+  feedHealth.getZoneFeedHealth.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -68,6 +89,9 @@ function mkRow(opts: {
   title_tr?: string;
   title_tr_neutral?: string | null;
   category?: string;
+  bias_distribution?: unknown;
+  is_blindspot?: boolean;
+  blindspot_side?: unknown;
   members: Array<{ id: string; sourceId: string; content_hash?: string | null }>;
 }) {
   return {
@@ -75,9 +99,9 @@ function mkRow(opts: {
     title_tr: opts.title_tr ?? `Cluster ${opts.id}`,
     title_tr_neutral: opts.title_tr_neutral ?? null,
     summary_tr: "summary",
-    bias_distribution: {},
-    is_blindspot: false,
-    blindspot_side: null,
+    bias_distribution: opts.bias_distribution ?? {},
+    is_blindspot: opts.is_blindspot ?? false,
+    blindspot_side: opts.blindspot_side ?? null,
     article_count: opts.members.length,
     first_published: "2026-04-18T10:00:00.000Z",
     updated_at: "2026-04-18T11:00:00.000Z",
@@ -251,5 +275,69 @@ describe("row assembly", () => {
     fixture.data = [];
     const result = await searchClusters("hiçbirşey");
     expect(result).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feed-health-gated blindspot suppression (Pack C) — search results thread
+// the same `health` the home feed uses through buildClusterBundle, mirrored
+// from politics-query.test.ts's "feed-health gated blindspot suppression"
+// cases so a suppressed cluster never disagrees between the home feed and
+// a search result.
+// ---------------------------------------------------------------------------
+
+describe("feed-health gated blindspot suppression (search results)", () => {
+  function mkHealth(overrides: {
+    iktidar?: boolean;
+    bagimsiz?: boolean;
+    muhalefet?: boolean;
+  }): ZoneFeedHealth {
+    const healthy = { total: 10, healthy: 10, healthyShare: 1, degraded: false };
+    const degraded = { total: 10, healthy: 2, healthyShare: 0.2, degraded: true };
+    return {
+      iktidar: overrides.iktidar ? degraded : healthy,
+      bagimsiz: overrides.bagimsiz ? degraded : healthy,
+      muhalefet: overrides.muhalefet ? degraded : healthy,
+    };
+  }
+
+  it("withdraws is_blindspot/blindspot_side when the silent pole zone is degraded", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: true }));
+    fixture.data = [
+      mkRow({
+        id: "suppressed",
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        bias_distribution: { pro_government: 9, opposition: 1 },
+        members: [
+          { id: "a1", sourceId: "s1" },
+          { id: "a2", sourceId: "s2" },
+        ],
+      }),
+    ];
+    const result = await searchClusters("deprem");
+    expect(result).toHaveLength(1);
+    expect(result[0]?.cluster.is_blindspot).toBe(false);
+    expect(result[0]?.cluster.blindspot_side).toBeNull();
+  });
+
+  it("leaves is_blindspot/blindspot_side untouched when feed health is unknown (null passthrough)", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(null);
+    fixture.data = [
+      mkRow({
+        id: "unaffected-unknown-health",
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        bias_distribution: { pro_government: 9, opposition: 1 },
+        members: [
+          { id: "a1", sourceId: "s1" },
+          { id: "a2", sourceId: "s2" },
+        ],
+      }),
+    ];
+    const result = await searchClusters("deprem");
+    expect(result).toHaveLength(1);
+    expect(result[0]?.cluster.is_blindspot).toBe(true);
+    expect(result[0]?.cluster.blindspot_side).toBe("pro_government");
   });
 });

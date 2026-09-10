@@ -97,4 +97,42 @@ describe("getNeutralizedStatus", () => {
 
     await expect(getNeutralizedStatus()).resolves.toBeNull();
   });
+
+  describe("logging (silent-failure fix)", () => {
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      warnSpy.mockRestore();
+    });
+
+    it("warns once with a PII-free message on a Supabase query error", async () => {
+      fixture.error = { message: "canceling statement due to statement timeout" };
+
+      await getNeutralizedStatus();
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const [message] = warnSpy.mock.calls[0] as [string];
+      expect(message).toBe(
+        "[headline-status] unavailable: canceling statement due to statement timeout",
+      );
+      // No row/user data — only the query-level diagnostic string.
+      expect(message).not.toMatch(/@/);
+    });
+
+    it("warns once with a PII-free message when Supabase env vars are missing (catch path)", async () => {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+      await getNeutralizedStatus();
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const [message] = warnSpy.mock.calls[0] as [string];
+      expect(message.startsWith("[headline-status] unavailable: ")).toBe(true);
+      expect(message).not.toMatch(/@/);
+    });
+  });
 });

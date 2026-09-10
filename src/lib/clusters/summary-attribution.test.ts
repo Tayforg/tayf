@@ -4,6 +4,7 @@ import {
   summaryAttribution,
   summaryAttributionWithoutMembers,
   describeForMeta,
+  resolveSummaryAttribution,
 } from "./summary-attribution";
 import type { ClusterDetailMember } from "./cluster-detail-query";
 import type { Source } from "@/types";
@@ -186,5 +187,68 @@ describe("summaryAttributionWithoutMembers", () => {
       source: seed.source,
     });
     expect(summaryAttributionWithoutMembers({ summary: "AA metni", wire })).toBeNull();
+  });
+});
+
+describe("resolveSummaryAttribution (BL-13 fail-closed dispatch)", () => {
+  const notWire = { isWireRedistribution: false };
+
+  it("uses the member-aware path when members are present, regardless of lookupFailed", () => {
+    const seed = member("a", T0, "AA metni");
+    expect(
+      resolveSummaryAttribution({
+        summary: "AA metni",
+        members: [seed],
+        lookupFailed: false,
+        wire: notWire,
+      }),
+    ).toEqual({ text: "AA metni", source: seed.source });
+  });
+
+  it("hides the excerpt entirely when members are absent because the lookup FAILED — never falls back to the raw summary", () => {
+    expect(
+      resolveSummaryAttribution({
+        summary: "AA metni",
+        members: undefined,
+        lookupFailed: true,
+        wire: notWire,
+      }),
+    ).toBeNull();
+  });
+
+  it("hides on a failed lookup even for text that a real member would have allowed to show", () => {
+    // Same text a successful, allowed-source lookup would render (see the
+    // "uses the member-aware path" case above) — the only difference is
+    // lookupFailed: true, and that alone must suppress the excerpt.
+    expect(
+      resolveSummaryAttribution({
+        summary: "AA metni",
+        members: undefined,
+        lookupFailed: true,
+        wire: notWire,
+      }),
+    ).toBeNull();
+  });
+
+  it("falls back to the degraded generic-label path when members are absent because the cluster genuinely has none (lookup succeeded)", () => {
+    expect(
+      resolveSummaryAttribution({
+        summary: "AA metni",
+        members: undefined,
+        lookupFailed: false,
+        wire: notWire,
+      }),
+    ).toEqual({ text: "AA metni", source: null });
+  });
+
+  it("degraded path still hides wholesale on wire redistribution when lookup succeeded with no members", () => {
+    expect(
+      resolveSummaryAttribution({
+        summary: "AA metni",
+        members: undefined,
+        lookupFailed: false,
+        wire: { isWireRedistribution: true },
+      }),
+    ).toBeNull();
   });
 });

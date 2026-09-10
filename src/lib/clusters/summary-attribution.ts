@@ -164,6 +164,38 @@ export function describeForMeta(
 }
 
 /**
+ * Tri-state summary resolution shared by every caller with a batched,
+ * possibly-failing members lookup (rss.xml, the digest cron).
+ *
+ * `lookupFailed` is the BL-13 fail-closed distinction this function exists
+ * to centralize: `members` being absent for a cluster is ambiguous on its
+ * own — it means either "the lookup ran and this cluster genuinely has no
+ * attributable members" (safe to degrade via summaryAttributionWithoutMembers,
+ * which can still show the generic label) or "the whole lookup failed"
+ * (summaryAttributionWithoutMembers would then render clusters.summary_tr
+ * verbatim with no excerpt_allowed check at all, since that gate only runs
+ * inside summaryAttribution against real member rows). A source with
+ * excerpt_allowed: false must never have its text rendered just because its
+ * cluster's member lookup happened to error — so a failed lookup hides the
+ * excerpt entirely instead of falling through to the degraded path.
+ */
+export function resolveSummaryAttribution({
+  summary,
+  members,
+  lookupFailed,
+  wire,
+}: {
+  summary: string;
+  members: SummaryMember[] | undefined;
+  lookupFailed: boolean;
+  wire: Pick<WireSignal, "isWireRedistribution">;
+}): SummaryAttribution | null {
+  if (members) return summaryAttribution({ summary, members, wire });
+  if (lookupFailed) return null;
+  return summaryAttributionWithoutMembers({ summary, wire });
+}
+
+/**
  * DEGRADED fallback for callers with no member rows (feed surfaces, or a
  * lookup failure). Strictly more conservative than summaryAttribution: it
  * can never name an outlet (no members to run findSeedMember against), and
