@@ -74,6 +74,7 @@ function mkDetail(
       blindspot_side: "pro_government",
       first_published: "2026-07-01T10:00:00Z",
       updated_at: "2026-07-01T12:00:00Z",
+      is_archived: false,
       ...overrides,
     },
     members: [],

@@ -85,7 +85,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
     <div className="space-y-3">
       {/* Header */}
       <div>
-        <h3 className="text-sm font-semibold">Medya DNA&apos;sı</h3>
+        <h2 className="text-sm font-semibold">Medya DNA&apos;sı</h2>
         <p className="text-[11px] text-muted-foreground mt-0.5">
           Kaynakların hükümete göre temel duruşu. Haberden habere değişmez.
         </p>
