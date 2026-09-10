@@ -77,8 +77,15 @@ vi.mock("next/server", async (importOriginal) => {
 const sendEmailMock = vi.hoisted(() =>
   vi.fn(async () => ({ ok: true as const, id: "email_test" })),
 );
+// isMailConfigured defaults to `true` here so every test in the mocked
+// suites below exercises the "key is configured" path without each one
+// having to set RESEND_API_KEY. The unmocked describe block further down
+// uses vi.doUnmock to bypass this factory entirely and exercise the real
+// isMailConfigured() against a deleted RESEND_API_KEY.
+const isMailConfiguredMock = vi.hoisted(() => vi.fn(() => true));
 vi.mock("@/lib/email/resend", () => ({
   sendEmail: sendEmailMock,
+  isMailConfigured: isMailConfiguredMock,
 }));
 
 const ORIGINAL_ENV = { ...process.env };
@@ -92,6 +99,8 @@ beforeEach(() => {
   dbState.existingSubscriber = null;
   dbState.forceInsertError = false;
   sendEmailMock.mockClear();
+  isMailConfiguredMock.mockClear();
+  isMailConfiguredMock.mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -340,5 +349,43 @@ describe("GET /api/newsletter/unsubscribe", () => {
     expect(res.headers.get("location")).toBe(
       "https://tayfhaber.com/?bulten=gecersiz",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unmocked resend module: exercises the REAL isMailConfigured() (and real
+// sendEmail, though it must never be reached) against a deleted
+// RESEND_API_KEY. The blanket `@/lib/email/resend` mock above is exactly why
+// the original fail-open bug shipped undetected — every other suite in this
+// file simulates "key is configured" and never proves the gate itself works.
+// ---------------------------------------------------------------------------
+describe("POST /api/newsletter — RESEND_API_KEY unset (real resend module)", () => {
+  beforeEach(() => {
+    vi.doUnmock("@/lib/email/resend");
+  });
+
+  afterEach(() => {
+    // Restore the mocked module for every other describe block in this file.
+    vi.doMock("@/lib/email/resend", () => ({
+      sendEmail: sendEmailMock,
+      isMailConfigured: isMailConfiguredMock,
+    }));
+    delete process.env.RESEND_API_KEY;
+  });
+
+  it("returns 503 with the standard error shape and inserts nothing", async () => {
+    delete process.env.RESEND_API_KEY;
+    vi.resetModules();
+
+    const mod = await import("@/app/api/newsletter/route");
+    const res = await mod.POST(
+      postRequest({ email: "probe+gate@example.com" }, "198.51.100.21"),
+    );
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe("Newsletter is not configured");
+
+    expect(supabaseFake.calls.insert("newsletter_subscribers")).toHaveLength(0);
   });
 });

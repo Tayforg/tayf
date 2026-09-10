@@ -75,6 +75,10 @@ vi.mock("@/lib/site-url", () => ({
 
 vi.mock("@/lib/email/resend", () => ({
   sendBatch: vi.fn(),
+  // Default true (mail configured) so every pre-existing test in this file
+  // keeps exercising the normal send path unchanged; the RESEND_API_KEY-
+  // absent test below overrides this per-case.
+  isMailConfigured: vi.fn(() => true),
 }));
 
 const ORIGINAL_ENV = { ...process.env };
@@ -89,8 +93,10 @@ beforeEach(async () => {
   // vi.resetModules() (afterEach) re-evaluates route.ts but the mocked
   // "@/lib/email/resend" module factory only runs once, so the same
   // vi.fn() instance carries call history across tests without this.
-  const { sendBatch } = await import("@/lib/email/resend");
+  const { sendBatch, isMailConfigured } = await import("@/lib/email/resend");
   (sendBatch as unknown as Mock).mockReset();
+  (isMailConfigured as unknown as Mock).mockReset();
+  (isMailConfigured as unknown as Mock).mockReturnValue(true);
 });
 
 afterEach(() => {
@@ -216,6 +222,34 @@ describe("GET /api/cron/digest", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ sent: 0, skipped: 0 });
     expect(sendBatch).not.toHaveBeenCalled();
+  });
+
+  it("short-circuits with skipped:true and performs no Supabase query when RESEND_API_KEY is not set", async () => {
+    process.env.CRON_SECRET = "shhh";
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "never@example.com", unsubscribe_token: "t1", last_sent_at: null },
+    ];
+
+    const { sendBatch, isMailConfigured } = await import("@/lib/email/resend");
+    (isMailConfigured as unknown as Mock).mockReturnValue(false);
+
+    const fromSpy = vi.spyOn(supabaseFake.fake.client, "from");
+
+    const mod = await importRoute();
+    const res = await mod.GET(req("shhh"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      skipped: true,
+      reason: "RESEND_API_KEY not set",
+      sent: 0,
+    });
+
+    // Fail-closed means fail BEFORE touching the database: no subscriber
+    // select, no last_sent_at update, no send attempt at all.
+    expect(fromSpy).not.toHaveBeenCalled();
+    expect(sendBatch).not.toHaveBeenCalled();
+
+    fromSpy.mockRestore();
   });
 
   describe("logging", () => {

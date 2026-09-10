@@ -3,7 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
-import { sendBatch } from "@/lib/email/resend";
+import { isMailConfigured, sendBatch } from "@/lib/email/resend";
 import { siteUrl } from "@/lib/site-url";
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
@@ -19,6 +19,16 @@ import {
 if (process.env.NODE_ENV === "production" && !process.env.CRON_SECRET) {
   console.warn(
     "[digest-cron] CRON_SECRET is not set; route will fail-closed with 503 on every invocation",
+  );
+}
+
+// Same rationale, for the other secret this route can't function without:
+// a missing RESEND_API_KEY is otherwise only visible per-request (a
+// {skipped:true} body on every invocation), so surface it once at
+// module-load too.
+if (process.env.NODE_ENV === "production" && !isMailConfigured()) {
+  console.warn(
+    "[digest-cron] RESEND_API_KEY is not set; digests are disabled",
   );
 }
 
@@ -124,6 +134,18 @@ export const GET = withApiErrors(async (request: Request) => {
   if (!rl.allowed) {
     return apiError(429, "Too many requests", {
       details: { retryAfterMs: rl.retryAfterMs },
+    });
+  }
+
+  // Fail closed, same rule as the footer form and POST /api/newsletter: no
+  // Resend key means no promise this route can keep, so it stops here —
+  // before ever touching Supabase — rather than reporting a fake
+  // {sent: 0, skipped: 0} that reads as "ran fine, nobody was due".
+  if (!isMailConfigured()) {
+    return NextResponse.json({
+      skipped: true,
+      reason: "RESEND_API_KEY not set",
+      sent: 0,
     });
   }
 
