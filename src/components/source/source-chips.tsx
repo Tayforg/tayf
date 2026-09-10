@@ -55,7 +55,13 @@ const FACTUALITY_DOT: Record<Factuality, string> = {
 };
 
 const CHIP_BASE =
-  "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap";
+  "inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium leading-none whitespace-nowrap max-w-full min-w-0";
+
+// `truncate` alone isn't enough inside a flex container: a flex item's
+// default `min-width: auto` floors it at its content's natural (nowrap)
+// width, so `overflow-hidden`/`text-ellipsis` never has anything to clip.
+// `min-w-0` removes that floor so the label can actually shrink and ellide.
+const CHIP_LABEL_CLASS = "truncate min-w-0";
 
 const OWNERSHIP_CLASS =
   "bg-zinc-500/10 text-zinc-700 border-zinc-500/20 dark:text-zinc-300";
@@ -90,14 +96,17 @@ export function SourceChips({
     if (!showUnclassified) return null;
     return (
       <span
-        className={cn("inline-flex items-center gap-1", className)}
-        aria-label="Kaynak bilgisi"
+        className={cn(
+          "inline-flex flex-wrap items-center gap-1 min-w-0 max-w-full",
+          className,
+        )}
+        role="group" aria-label="Kaynak bilgisi"
       >
         <span
           className={cn(CHIP_BASE, UNCLASSIFIED_CLASS)}
           title={UNCLASSIFIED_TITLE_TR}
         >
-          {UNCLASSIFIED_LABEL_TR}
+          <span className={CHIP_LABEL_CLASS}>{UNCLASSIFIED_LABEL_TR}</span>
         </span>
       </span>
     );
@@ -107,8 +116,11 @@ export function SourceChips({
 
   return (
     <span
-      className={cn("inline-flex items-center gap-1", className)}
-      aria-label="Kaynak bilgisi"
+      className={cn(
+        "inline-flex flex-wrap items-center gap-1 min-w-0 max-w-full",
+        className,
+      )}
+      role="group" aria-label="Kaynak bilgisi"
     >
       {meta.factuality !== null && (
         <span
@@ -122,7 +134,9 @@ export function SourceChips({
             )}
             aria-hidden="true"
           />
-          {FACTUALITY_LABELS[meta.factuality]}
+          <span className={CHIP_LABEL_CLASS}>
+            {FACTUALITY_LABELS[meta.factuality]}
+          </span>
         </span>
       )}
       {meta.ownership !== null && (
@@ -130,7 +144,7 @@ export function SourceChips({
           className={cn(CHIP_BASE, OWNERSHIP_CLASS)}
           title={`Sahiplik: ${meta.ownership}`}
         >
-          {meta.ownership}
+          <span className={CHIP_LABEL_CLASS}>{meta.ownership}</span>
         </span>
       )}
     </span>

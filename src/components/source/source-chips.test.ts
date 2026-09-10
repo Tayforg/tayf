@@ -9,7 +9,15 @@ import { SourceChips } from "./source-chips";
 // repo to render a `.tsx` test anyway.
 
 interface MinimalNode {
-  props?: { children?: unknown };
+  props?: {
+    children?: unknown;
+    className?: string;
+    title?: string;
+  };
+}
+
+function isNode(value: unknown): value is MinimalNode {
+  return typeof value === "object" && value !== null && "props" in value;
 }
 
 function collectText(node: unknown): string[] {
@@ -27,6 +35,25 @@ function collectText(node: unknown): string[] {
     return collectText(maybe.props?.children);
   }
   return [];
+}
+
+// Walks the element tree (including the root `node` itself) and returns
+// every node — element or child — matching `predicate`. Used to locate a
+// specific chip (e.g. by its `title`) or a specific className fragment
+// without a DOM.
+function findAll(
+  node: unknown,
+  predicate: (n: MinimalNode) => boolean,
+): MinimalNode[] {
+  if (node === null || node === undefined || typeof node === "boolean") {
+    return [];
+  }
+  if (Array.isArray(node)) {
+    return node.flatMap((child) => findAll(child, predicate));
+  }
+  if (!isNode(node)) return [];
+  const self = predicate(node) ? [node] : [];
+  return self.concat(findAll(node.props?.children, predicate));
 }
 
 describe("SourceChips", () => {
@@ -56,5 +83,35 @@ describe("SourceChips", () => {
     const text = collectText(el).join(" ");
     expect(text).not.toContain("sınıflandırılmamış");
     expect(text).toContain("Karışık doğruluk");
+  });
+
+  it("wraps the chip group instead of overflowing on one line", () => {
+    const el = SourceChips({ slug: "sabah" }) as MinimalNode;
+    expect(el.props?.className ?? "").toContain("flex-wrap");
+  });
+
+  it("truncates a long ownership chip label instead of overflowing", () => {
+    const el = SourceChips({ slug: "sabah" });
+    const [ownershipChip] = findAll(
+      el,
+      (n) =>
+        typeof n.props?.title === "string" &&
+        n.props.title.startsWith("Sahiplik:"),
+    );
+    expect(ownershipChip).toBeDefined();
+
+    const truncatedLabel = findAll(
+      ownershipChip?.props?.children,
+      (n) =>
+        typeof n.props?.className === "string" &&
+        n.props.className.includes("truncate"),
+    );
+    expect(truncatedLabel.length).toBeGreaterThan(0);
+
+    // The full label must still be present in the DOM (assistive tech reads
+    // the real text, only the visual box clips it).
+    expect(collectText(truncatedLabel[0]).join(" ")).toContain(
+      "Turkuvaz Medya (Kalyon Grubu)",
+    );
   });
 });
