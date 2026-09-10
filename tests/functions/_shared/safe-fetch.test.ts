@@ -355,14 +355,16 @@ describe("safeFetch", () => {
     expect(result.body).toContain("og:image");
   });
 
-  // Round-6 P1 regression (DNS-rebinding TOCTOU): for plain HTTP the dial
-  // MUST be rewritten to the validated literal IP so the platform `fetch`
-  // cannot re-resolve the hostname and get steered onto a private target
-  // between our allow-check and the socket open. The original Host must be
-  // preserved so virtual-hosted servers still route. The happy-path test
-  // above only proves the request succeeds — it never proves the pin
-  // actually happened, which is the gap this case closes.
-  it("pins the HTTP dial to the validated literal IP and preserves the Host header", async () => {
+  // Regression (production defect, PR #43): earlier revisions rewrote the
+  // HTTP dial to the validated literal IP and set a "host" header to
+  // preserve virtual hosting. Deno's fetch treats `Host` as a forbidden
+  // header and silently drops it, so the origin received `Host: <ip>` and
+  // any Cloudflare-fronted / vhosted target answered 403 — 14 of 118
+  // http: feeds started failing. The fix: still DNS-validate (via
+  // resolveAndPin) so a blocked resolution is rejected, but dial the
+  // HOSTNAME URL exactly as the HTTPS path does, and do not set a host
+  // header at all.
+  it("dials the hostname URL for plain HTTP (no IP-literal rewrite, no host header)", async () => {
     const PUBLIC_IP = "93.184.216.34";
     stubResolveDns([PUBLIC_IP]);
     const fetchStub = queueFetchResponses([
@@ -372,69 +374,31 @@ describe("safeFetch", () => {
       }),
     ]);
 
-    await safeFetch("http://example.com/path");
+    const result = await safeFetch("http://example.com/path");
 
     expect(fetchStub).toHaveBeenCalledTimes(1);
     const [dialUrl, init] = fetchStub.mock.calls[0];
-    // The socket must be opened against the literal IP, not the hostname,
-    // so a second (attacker-controlled) resolution can't redirect the dial.
-    expect(dialUrl).toContain(PUBLIC_IP);
-    expect(dialUrl).not.toContain("example.com");
-    expect(dialUrl).toBe("http://93.184.216.34/path");
-    // Host header carries the original hostname for correct vhost routing.
+    // The socket is opened against the hostname URL, not the resolved
+    // literal — mirroring the HTTPS path exactly.
+    expect(dialUrl).toBe("http://example.com/path");
+    expect(dialUrl).not.toContain(PUBLIC_IP);
+    // No host header is set (Deno's fetch would silently drop it anyway,
+    // which was the root cause of the production 403s).
     const headers = new Headers((init as RequestInit).headers);
-    expect(headers.get("host")).toBe("example.com");
+    expect(headers.has("host")).toBe(false);
+    // finalUrl must reflect the hostname URL, not an IP literal.
+    expect(result.finalUrl).toBe("http://example.com/path");
   });
 
-  // Rebinding follow-up: the allow-check resolves the hostname to a public IP
-  // and pins the dial to that exact validated literal. Because `fetch` is then
-  // handed the literal — never the hostname — a subsequent resolution that
-  // flips to a private IP can never steer the socket. We model the flip as
-  // firing only on a lookup AFTER the pin has been chosen; the pin is built
-  // from the resolutions safeFetch performs (validate + resolveAndPin), so a
-  // later flip is exactly the re-resolution that pinning makes unreachable.
-  //
-  // Limitation: resolveAndPin owns the resolution that selects the pin IP, so
-  // we cannot inject the flip strictly between "allow-check" and "pin-select"
-  // without reaching into module internals; the meaningful guarantee proven
-  // here is that the dial is a validated literal (so a re-resolving client is
-  // bypassed), reinforced by the single-pin assertions above.
-  it("dials the pinned public literal even when DNS later flips to a private IP (rebinding)", async () => {
-    const PUBLIC_IP = "93.184.216.34";
-    // safeFetch performs three "A" lookups before the socket open (validate,
-    // then resolveAndPin's own allow-check + pin-select). Every one of those
-    // returns the public IP, so the pin is the validated public literal. Any
-    // FURTHER lookup — the kind a re-resolving fetch would do — flips to
-    // RFC1918, which pinning ensures is never honoured at the socket layer.
-    let resolveCount = 0;
-    const resolveDns = vi.fn(async (_host: string, recordType: string) => {
-      if (recordType === "AAAA") {
-        throw new Error("NotFound");
-      }
-      if (recordType === "A") {
-        resolveCount += 1;
-        return resolveCount > 3 ? ["10.0.0.5"] : [PUBLIC_IP];
-      }
-      throw new Error(`unexpected record type ${recordType}`);
-    });
-    vi.stubGlobal("Deno", { resolveDns, serve: vi.fn() });
-
-    const fetchStub = queueFetchResponses([
-      new Response("<html><head></head></html>", {
-        status: 200,
-        headers: { "Content-Type": "text/html" },
-      }),
-    ]);
-
-    await safeFetch("http://rebind.example/path");
-
-    expect(fetchStub).toHaveBeenCalledTimes(1);
-    const [dialUrl] = fetchStub.mock.calls[0];
-    // The pinned public literal is dialled; the would-be private flip
-    // (10.0.0.5) never reaches the socket because the dial is a literal.
-    expect(dialUrl).toBe(`http://${PUBLIC_IP}/path`);
-    expect(dialUrl).not.toContain("10.0.0.5");
-    expect(dialUrl).not.toContain("rebind.example");
+  // The DNS-validation step for plain HTTP must still reject a hostname
+  // whose resolution is blocked, even though the dial itself is no longer
+  // pinned to the literal. This proves resolveAndPin's allow-check still
+  // runs on the http: path.
+  it("still rejects an HTTP hostname whose resolution is blocked, even without pinning the dial", async () => {
+    stubResolveDns(["10.0.0.5"]);
+    await expect(safeFetch("http://rebind.example/path")).rejects.toBeInstanceOf(
+      SafeFetchError,
+    );
   });
 
   // Documented trade-off: HTTPS is NOT pinned. The hostname stays in the URL
