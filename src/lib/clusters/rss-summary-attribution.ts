@@ -19,7 +19,14 @@ import type { SummaryMember } from "./summary-attribution";
 // pass; factoring a shared helper is follow-up debt, not silently
 // copy-pasted without this note.
 
-type EmbeddedSourceRow = { name: string; bias: BiasCategory };
+// BL-13: `excerpt_allowed` optional/undefined is treated as allowed by
+// dedupeBySource below and by summaryAttribution's own gate — see
+// summary-attribution.ts.
+type EmbeddedSourceRow = {
+  name: string;
+  bias: BiasCategory;
+  excerpt_allowed?: boolean;
+};
 
 type EmbeddedArticleRow = {
   source_id: string;
@@ -47,7 +54,11 @@ function dedupeBySource(rows: EmbeddedArticleRow[]): SummaryMember[] {
     const source = row.sources;
     if (!source) continue;
     members.push({
-      source: { name: source.name, bias: source.bias },
+      source: {
+        name: source.name,
+        bias: source.bias,
+        excerpt_allowed: source.excerpt_allowed,
+      },
       article: {
         published_at: row.published_at,
         content_hash: row.content_hash,
@@ -77,7 +88,7 @@ async function cachedRssSummaryMembers(
   const { data, error } = await supabase
     .from("cluster_articles")
     .select(
-      `cluster_id, articles ( source_id, published_at, content_hash, description, sources ( name, bias ) )`,
+      `cluster_id, articles ( source_id, published_at, content_hash, description, sources ( name, bias, excerpt_allowed ) )`,
     )
     .in("cluster_id", clusterIds)
     .returns<Row[]>();

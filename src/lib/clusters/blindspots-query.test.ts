@@ -66,24 +66,39 @@ const ORIGINAL_ENV = { ...process.env };
 // BLINDSPOT.dominantShare (0.8) with a clean 5/5 zone.
 // ---------------------------------------------------------------------------
 
-function mkMember(clusterId: string, index: number, bias: BiasCategory) {
+function mkMember(
+  clusterId: string,
+  index: number,
+  bias: BiasCategory,
+  overrides: { image_url?: string | null; image_allowed?: boolean } = {},
+) {
   const sourceId = `${clusterId}-s${index}`;
   return {
     articles: {
       id: `${clusterId}-a${index}`,
       title: `Haber ${clusterId}-${index}`,
       url: `https://example.com/${clusterId}-${index}`,
-      image_url: null,
+      image_url: overrides.image_url ?? null,
       published_at: `2026-01-0${index + 1}T00:00:00.000Z`,
       source_id: sourceId,
       category: "politika",
       content_hash: null,
-      sources: { id: sourceId, name: `Kaynak ${sourceId}`, bias, kind: "outlet" },
+      sources: {
+        id: sourceId,
+        name: `Kaynak ${sourceId}`,
+        bias,
+        kind: "outlet",
+        image_allowed: overrides.image_allowed,
+      },
     },
   };
 }
 
-function mkBlindspotClusterRow(id: string, bias: BiasCategory) {
+function mkBlindspotClusterRow(
+  id: string,
+  bias: BiasCategory,
+  memberOverrides: Array<{ image_url?: string | null; image_allowed?: boolean }> = [],
+) {
   return {
     id,
     title_tr: `Örnek başlık ${id}`,
@@ -95,7 +110,9 @@ function mkBlindspotClusterRow(id: string, bias: BiasCategory) {
     article_count: 5,
     first_published: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-05T00:00:00.000Z",
-    cluster_articles: Array.from({ length: 5 }, (_, i) => mkMember(id, i, bias)),
+    cluster_articles: Array.from({ length: 5 }, (_, i) =>
+      mkMember(id, i, bias, memberOverrides[i] ?? {}),
+    ),
   };
 }
 
@@ -134,6 +151,39 @@ describe("getBlindspots query shape", () => {
       { col: "updated_at", opts: { ascending: false } },
     ]);
     expect(state.limit).toBe(200);
+
+    // BL-13: sources embed must carry both rights flags.
+    const selectArg = state.selectArgs[0] as string;
+    expect(selectArg).toMatch(/sources\s*\([^)]*\bimage_allowed\b/);
+    expect(selectArg).toMatch(/sources\s*\([^)]*\bexcerpt_allowed\b/);
+  });
+});
+
+describe("getBlindspots BL-13 image_allowed gate", () => {
+  it("nulls image_url for a member whose source has image_allowed: false, leaving an allowed member's image untouched", async () => {
+    fixture.data = [
+      mkBlindspotClusterRow("cluster-gate", "pro_government", [
+        {
+          image_url: "https://cdn.blocked.example/foto.jpg",
+          image_allowed: false,
+        },
+        {
+          image_url: "https://cdn.allowed.example/foto.jpg",
+          image_allowed: true,
+        },
+      ]),
+    ];
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const byId = Object.fromEntries(
+      bundles[0]!.articles.map((a) => [a.id, a]),
+    );
+    expect(byId["cluster-gate-a0"]?.image_url).toBeNull();
+    expect(byId["cluster-gate-a1"]?.image_url).toBe(
+      "https://cdn.allowed.example/foto.jpg",
+    );
   });
 });
 

@@ -13,7 +13,17 @@ import type { BiasCategory } from "@/types";
 // (e.g. an RSS-only member projection) can satisfy it without fetching or
 // typing the full Source/article shape the detail page needs.
 export interface SummaryMember {
-  source: { name: string; bias: BiasCategory };
+  source: {
+    name: string;
+    bias: BiasCategory;
+    /**
+     * BL-13 per-source rights flag (migration 047): `false` when this
+     * outlet has asked Tayf not to reuse its article text. `undefined`
+     * (a fixture/caller predating the column) is treated as `true`
+     * (allowed) — see `matchingCandidates` below.
+     */
+    excerpt_allowed?: boolean;
+  };
   article: {
     published_at: string;
     content_hash: string | null;
@@ -21,21 +31,42 @@ export interface SummaryMember {
   };
 }
 
-/** Member whose article description equals the summary text; earliest wins ties. */
-export function findSeedMember(
+/**
+ * Members whose article description exactly equals the summary text,
+ * sorted earliest-first (ties broken by publish time). Internal helper —
+ * both `findSeedMember` (rights-eligible pick) and `summaryAttribution`
+ * (rights-blocked-entirely detection) need the full matching set.
+ */
+function matchingCandidates(
   members: SummaryMember[],
-  summary: string,
-): SummaryMember | null {
-  const text = summary.trim();
-  if (text.length === 0) return null;
-  const candidates = members
+  text: string,
+): SummaryMember[] {
+  return members
     .filter((m) => (m.article.description ?? "").trim() === text)
     .sort(
       (a, b) =>
         new Date(a.article.published_at).getTime() -
         new Date(b.article.published_at).getTime(),
     );
-  return candidates[0] ?? null;
+}
+
+/**
+ * Member whose article description equals the summary, earliest on ties;
+ * null otherwise.
+ *
+ * BL-13 rights gate: a member whose source has `excerpt_allowed === false`
+ * is skipped in favor of the next matching member — that outlet's text
+ * must never be attributed or rendered as its own. `undefined` (older
+ * fakes / legacy rows without the column) is treated as allowed.
+ */
+export function findSeedMember(
+  members: SummaryMember[],
+  summary: string,
+): SummaryMember | null {
+  const text = summary.trim();
+  if (text.length === 0) return null;
+  const candidates = matchingCandidates(members, text);
+  return candidates.find((m) => m.source.excerpt_allowed !== false) ?? null;
 }
 
 /** Non-null content_hash counts among members — for finding the wire dispatch's hash. */
@@ -66,6 +97,22 @@ export function summaryAttribution({
 }): SummaryAttribution | null {
   const text = summary.trim();
   if (text.length === 0) return null;
+
+  // BL-13 rights gate: every member whose description literally matches
+  // this excerpt has a source that has asked Tayf not to reuse its text —
+  // the excerpt IS that outlet's copy verbatim, so merely hiding
+  // attribution (falling through to the generic "Kaynak açıklaması"
+  // label below) would still publish it. Hide the excerpt entirely
+  // instead. When there's no literal match at all (the common case —
+  // `summary` wasn't copied verbatim from any current member), this does
+  // not apply; that's the pre-existing "attribute to no one" path below.
+  const literalMatches = matchingCandidates(members, text);
+  if (
+    literalMatches.length > 0 &&
+    literalMatches.every((m) => m.source.excerpt_allowed === false)
+  ) {
+    return null;
+  }
 
   const seedMember = findSeedMember(members, text);
 

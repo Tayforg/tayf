@@ -327,6 +327,108 @@ describe("POST /api/admin", () => {
       expect(res.status).toBe(401);
     });
   });
+
+  describe("set_source_rights", () => {
+    it("401s without a session", async () => {
+      __adminAuthed = false;
+      const res = await postAdmin({
+        action: "set_source_rights",
+        slug: "test-source",
+        image_allowed: false,
+      });
+      expect(res.status).toBe(401);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects an invalid slug with no write", async () => {
+      const res = await postAdmin({
+        action: "set_source_rights",
+        slug: "Not A Valid Slug!",
+        image_allowed: false,
+      });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects a missing slug with no write", async () => {
+      const res = await postAdmin({ action: "set_source_rights", image_allowed: false });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects a payload with neither flag with no write", async () => {
+      const res = await postAdmin({ action: "set_source_rights", slug: "test-source" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects a non-boolean image_allowed with no write", async () => {
+      const res = await postAdmin({
+        action: "set_source_rights",
+        slug: "test-source",
+        image_allowed: "false",
+      });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects a non-boolean excerpt_allowed with no write", async () => {
+      const res = await postAdmin({
+        action: "set_source_rights",
+        slug: "test-source",
+        excerpt_allowed: 0,
+      });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("404s an unknown slug with no write recorded as applied", async () => {
+      setTableResponse("sources", { data: null, error: null });
+      const res = await postAdmin({
+        action: "set_source_rights",
+        slug: "does-not-exist",
+        image_allowed: false,
+      });
+      expect(res.status).toBe(404);
+    });
+
+    it("updates only the two columns and returns the updated row on success", async () => {
+      setTableResponse("sources", {
+        data: { slug: "test-source", image_allowed: false, excerpt_allowed: true },
+        error: null,
+      });
+      const res = await postAdmin({
+        action: "set_source_rights",
+        slug: "test-source",
+        image_allowed: false,
+        excerpt_allowed: true,
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual({ slug: "test-source", image_allowed: false, excerpt_allowed: true });
+
+      expect(writes.length).toBe(1);
+      const write = writes[0];
+      expect(write?.table).toBe("sources");
+      expect(write?.op).toBe("update");
+      expect(write?.payload).toEqual({ image_allowed: false, excerpt_allowed: true });
+    });
+
+    it("writes only the provided flag on a partial update", async () => {
+      setTableResponse("sources", {
+        data: { slug: "test-source", image_allowed: true, excerpt_allowed: false },
+        error: null,
+      });
+      const res = await postAdmin({
+        action: "set_source_rights",
+        slug: "test-source",
+        excerpt_allowed: false,
+      });
+      expect(res.status).toBe(200);
+      expect(writes.length).toBe(1);
+      expect(writes[0]?.payload).toEqual({ excerpt_allowed: false });
+    });
+  });
 });
 
 // Auth gate — the admin session check runs before any rate limiting or

@@ -113,6 +113,23 @@ export interface ClusterDetail {
   blindspotSuppressed: boolean;
 }
 
+/**
+ * BL-13 rights gate: members whose source has `image_allowed === false`
+ * must never be offered as a hero/card image candidate — that outlet has
+ * asked Tayf not to reuse its photos. `undefined` (a fixture/row predating
+ * migration 047) is treated as allowed so nothing regresses. Exported so
+ * the cluster detail page derives its hero-candidate list (and per-URL
+ * photo credits) from one tested source of truth instead of re-deriving
+ * the gate inline; callers should build `heroCandidates`/`heroCredits`
+ * from this filtered list, falling back to the next eligible member or to
+ * no image at all when it's empty.
+ */
+export function imageEligibleMembers(
+  members: ClusterDetailMember[]
+): ClusterDetailMember[] {
+  return members.filter((m) => m.source.image_allowed !== false);
+}
+
 // Row shape of the cluster query. Matches the columns selected below.
 // `bias_distribution` is stored as Postgres jsonb, so we type it as `unknown`
 // at the query boundary and narrow via `normalizeDistribution` before
@@ -170,6 +187,13 @@ type EmbeddedSourceRow = {
   logo_url: string | null;
   active: boolean;
   kind: string | null;
+  /**
+   * BL-13 per-source rights flags (migration 047). `undefined` (a fixture
+   * predating the column, or a legacy select shape) is treated as `true`
+   * (allowed) when building `ClusterDetailMember.source` below.
+   */
+  image_allowed?: boolean;
+  excerpt_allowed?: boolean;
 };
 
 type EmbeddedArticleRow = {
@@ -216,7 +240,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         .select(
           `article:articles (
              id, title, url, published_at, image_url, content_hash, description,
-             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind )
+             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed )
            )`
         )
         .eq("cluster_id", id)
@@ -308,6 +332,13 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           logo_url: source.logo_url,
           active: source.active,
           kind: normalizeSourceKind(source.kind),
+          // BL-13 rights gate: default missing flags to `true` (allowed)
+          // right at the query boundary so every downstream consumer
+          // (imageEligibleMembers below, summary-attribution.ts) always
+          // sees a concrete boolean instead of having to re-derive the
+          // "undefined means allowed" rule itself.
+          image_allowed: source.image_allowed ?? true,
+          excerpt_allowed: source.excerpt_allowed ?? true,
         },
         article: {
           id: article.id,

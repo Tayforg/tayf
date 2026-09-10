@@ -116,7 +116,7 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash,
-             sources ( id, name, bias, kind )
+             sources ( id, name, bias, kind, image_allowed, excerpt_allowed )
            )
          )`
       )
@@ -236,7 +236,13 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
           id: m.id,
           title: m.title,
           url: m.url,
-          image_url: m.image_url,
+          // BL-13 rights gate: a source that has asked Tayf not to reuse its
+          // photos gets image_allowed = false — null the URL here, mirroring
+          // politics-query.ts's buildClusterBundle, so it can never surface
+          // as a hero/card image candidate for ClusterCard. `undefined`
+          // (legacy rows/fixtures predating migration 047) is treated as
+          // allowed so nothing regresses.
+          image_url: m.sources?.image_allowed === false ? null : m.image_url,
           published_at: m.published_at,
           source_id: m.source_id,
         })),

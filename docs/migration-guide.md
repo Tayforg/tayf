@@ -852,3 +852,10 @@ Before declaring the migration complete:
 - [ ] `vercel --prod` deploy landed with `/api/cron/digest` (`0 6 * * 6`) alongside `/api/cron/headline` in the Cron Jobs dashboard
 - [ ] A manual `POST /api/newsletter` test delivered a confirm email whose link redirects to `/?bulten=onaylandi` on click
 - [ ] Migration 041 applied and `ingest` redeployed — `select slug, fetch_last_status, fetch_last_at from sources order by fetch_last_at desc nulls last limit 10;` shows recent timestamps; the `200`-vs-`546` ratio in `net._http_response` for the `ingest` cron job has shifted toward `200`
+
+---
+
+## Docs / See also
+
+- [`key-rotation.md`](key-rotation.md) — rotation runbook for every secret this system uses (Vercel env, GitHub Actions secrets, Supabase Vault, Edge Function secrets).
+- [`backup-posture.md`](backup-posture.md) — what Supabase backs up automatically, what isn't backed up at all, the nightly jobs a restore has to be reconciled with, and the quarterly restore-drill procedure.

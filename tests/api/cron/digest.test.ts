@@ -69,6 +69,15 @@ vi.mock("@/lib/clusters/blindspots-query", () => ({
   getBlindspots: vi.fn(async () => ({ bundles: [] })),
 }));
 
+// BL-13: rights-attribution member lookup. Default resolves to no members
+// found for any cluster id, so pre-existing tests (which don't care about
+// summary text) fall through to summaryAttributionWithoutMembers's
+// non-wire, non-empty-text path unchanged. Per-test overrides below drive
+// the actual gate.
+vi.mock("@/lib/clusters/rss-summary-attribution", () => ({
+  getRssSummaryMembers: vi.fn(async () => ({})),
+}));
+
 vi.mock("@/lib/site-url", () => ({
   siteUrl: () => "https://test.tayfhaber.com",
 }));
@@ -97,6 +106,11 @@ beforeEach(async () => {
   (sendBatch as unknown as Mock).mockReset();
   (isMailConfigured as unknown as Mock).mockReset();
   (isMailConfigured as unknown as Mock).mockReturnValue(true);
+  const { getRssSummaryMembers } = await import(
+    "@/lib/clusters/rss-summary-attribution"
+  );
+  (getRssSummaryMembers as unknown as Mock).mockReset();
+  (getRssSummaryMembers as unknown as Mock).mockResolvedValue({});
 });
 
 afterEach(() => {
@@ -250,6 +264,78 @@ describe("GET /api/cron/digest", () => {
     expect(sendBatch).not.toHaveBeenCalled();
 
     fromSpy.mockRestore();
+  });
+
+  describe("BL-13 excerpt_allowed gate", () => {
+    it("does not render clusters.summary_tr in the email when every matching member's source has excerpt_allowed: false", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+      ];
+
+      const { getRssSummaryMembers } = await import(
+        "@/lib/clusters/rss-summary-attribution"
+      );
+      (getRssSummaryMembers as unknown as Mock).mockResolvedValue({
+        c1: [
+          {
+            source: { name: "Blocked Kaynak", bias: "center", excerpt_allowed: false },
+            article: {
+              published_at: "2026-01-01T00:00:00Z",
+              content_hash: null,
+              description: "Test summary",
+            },
+          },
+        ],
+      });
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      expect(res.status).toBe(200);
+
+      const html = (sendBatch as unknown as Mock).mock.calls[0]![0][0].html as string;
+      expect(html).not.toContain("Test summary");
+    });
+
+    it("control: renders clusters.summary_tr when the matching member's source allows excerpt reuse", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+      ];
+
+      const { getRssSummaryMembers } = await import(
+        "@/lib/clusters/rss-summary-attribution"
+      );
+      (getRssSummaryMembers as unknown as Mock).mockResolvedValue({
+        c1: [
+          {
+            source: { name: "Allowed Kaynak", bias: "center", excerpt_allowed: true },
+            article: {
+              published_at: "2026-01-01T00:00:00Z",
+              content_hash: null,
+              description: "Test summary",
+            },
+          },
+        ],
+      });
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      expect(res.status).toBe(200);
+
+      const html = (sendBatch as unknown as Mock).mock.calls[0]![0][0].html as string;
+      expect(html).toContain("Test summary");
+    });
   });
 
   describe("logging", () => {

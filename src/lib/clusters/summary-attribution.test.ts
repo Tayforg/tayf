@@ -24,6 +24,18 @@ describe("findSeedMember", () => {
     expect(findSeedMember([member("c", T0, "Başka metin")], "Özet")).toBeNull();
     expect(findSeedMember([member("c", T0, null)], "  ")).toBeNull();
   });
+
+  it("BL-13: skips a matching member whose source has excerpt_allowed: false, falling back to the next matching member", () => {
+    const blocked = member("blocked", "2026-09-06T09:59:20.000Z", "Özet"); // earliest, but blocked
+    blocked.source.excerpt_allowed = false;
+    const allowed = member("allowed", "2026-09-06T10:00:40.000Z", "Özet"); // later, but eligible
+    expect(findSeedMember([blocked, allowed], "Özet")).toBe(allowed);
+  });
+
+  it("BL-13: matches normally when excerpt_allowed is absent (legacy, treated as allowed)", () => {
+    const legacy = member("legacy", T0, "Özet");
+    expect(findSeedMember([legacy], "Özet")).toBe(legacy);
+  });
 });
 describe("summaryAttribution", () => {
   const notWire = { isWireRedistribution: false };
@@ -45,6 +57,38 @@ describe("summaryAttribution", () => {
     expect(summaryAttribution({ summary: "AA metni", members, wire })).toEqual({ text: "AA metni", source: seed.source });
   });
 });
+describe("BL-13 excerpt_allowed gate on summaryAttribution", () => {
+  const notWire = { isWireRedistribution: false };
+
+  it("hides the excerpt entirely when the only matching member's source has excerpt_allowed: false", () => {
+    const blocked = member("blocked", T0, "AA metni");
+    blocked.source.excerpt_allowed = false;
+    expect(
+      summaryAttribution({ summary: "AA metni", members: [blocked], wire: notWire }),
+    ).toBeNull();
+  });
+
+  it("falls back to the next eligible matching member instead of hiding the excerpt", () => {
+    const blocked = member("blocked", "2026-09-06T09:59:20.000Z", "AA metni");
+    blocked.source.excerpt_allowed = false;
+    const allowed = member("allowed", "2026-09-06T10:00:40.000Z", "AA metni");
+    expect(
+      summaryAttribution({
+        summary: "AA metni",
+        members: [blocked, allowed],
+        wire: notWire,
+      }),
+    ).toEqual({ text: "AA metni", source: allowed.source });
+  });
+
+  it("shows the excerpt unaffected when excerpt_allowed is absent (legacy, treated as allowed)", () => {
+    const legacy = member("legacy", T0, "AA metni");
+    expect(
+      summaryAttribution({ summary: "AA metni", members: [legacy], wire: notWire }),
+    ).toEqual({ text: "AA metni", source: legacy.source });
+  });
+});
+
 describe("describeForMeta", () => {
   it("returns just the count when there is no attribution", () => {
     expect(describeForMeta({ count: 3, attribution: null })).toBe("3 kaynak.");
