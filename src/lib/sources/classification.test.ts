@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isClassifiedSource,
+  countClassifiedSources,
   UNCLASSIFIED_LABEL_TR,
   UNCLASSIFIED_TITLE_TR,
 } from "./classification";
@@ -20,6 +21,26 @@ describe("isClassifiedSource", () => {
 
   it("is false for an empty slug", () => {
     expect(isClassifiedSource("")).toBe(false);
+  });
+});
+
+describe("countClassifiedSources", () => {
+  it("counts tagged slugs only", () => {
+    expect(countClassifiedSources(["sabah", "anadolu-ajansi"])).toBe(2);
+  });
+
+  it("excludes slugs with no metadata entry", () => {
+    expect(countClassifiedSources(["sabah", "bilinmeyen-kaynak"])).toBe(1);
+  });
+
+  it("is 0 for an empty list", () => {
+    expect(countClassifiedSources([])).toBe(0);
+  });
+
+  it("is 0 when every slug is unknown", () => {
+    expect(
+      countClassifiedSources(["bilinmeyen-kaynak", "baska-bilinmeyen"]),
+    ).toBe(0);
   });
 });
 

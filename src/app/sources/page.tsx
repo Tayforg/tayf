@@ -17,6 +17,7 @@ import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceChips } from "@/components/source/source-chips";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
+import { countClassifiedSources } from "@/lib/sources/classification";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, Source } from "@/types";
@@ -43,11 +44,11 @@ import type { BiasCategory, Source } from "@/types";
 // trends; the page surfaces a "Yanlılık dağılımına sayılan: N/M" line up
 // top and a per-card kind badge (dimmed for aggregator/niche) so a reader
 // can see at a glance which sources feed the numbers and which are along
-// for the ride. This is a separate axis from the per-card "sınıflandırılmamış"
-// chip below (factuality/ownership tagging, src/lib/sources/classification.ts)
-// — deliberately worded without the shared "sınıflandır-" root so the two
-// independent signals don't read as contradicting each other on the same
-// card.
+// for the ride. This is a separate axis from factuality/ownership tagging
+// (src/lib/sources/classification.ts): only ~30 of the 118 sources carry a
+// hand-tagged factuality/ownership chip, so that coverage is reported once,
+// directory-wide ("N/M kaynak etiketli"), instead of a per-card
+// "sınıflandırılmamış" chip that would otherwise dominate most cards.
 
 interface SourceRow extends Source {
   articleCount7d: number;
@@ -145,6 +146,10 @@ export default async function SourcesPage() {
     (acc, bias) => acc + (grouped[bias] ?? []).filter(isVotingSource).length,
     0,
   );
+  const allSlugs = BIAS_ORDER.flatMap(
+    (bias) => (grouped[bias] ?? []).map((source) => source.slug),
+  );
+  const classifiedSources = countClassifiedSources(allSlugs);
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
@@ -168,9 +173,12 @@ export default async function SourcesPage() {
         </Link>
       </p>
       <p className="text-xs text-muted-foreground">
-        Doğruluk ve sahiplik bilgisi henüz girilmemiş kaynaklar kartlarında
-        “sınıflandırılmamış” etiketi taşır; bu etiket kaynağın yanlılık
-        konumundan bağımsızdır.
+        Doğruluk ve sahiplik etiketi girilen kaynak:{" "}
+        <span className="font-mono">
+          {classifiedSources}/{totalSources}
+        </span>{" "}
+        — etiketi olmayan kaynaklar henüz sınıflandırılmadı; bu, yanlılık
+        konumundan bağımsız bir bilgidir.
       </p>
 
       {BIAS_ORDER.map((bias) => {
@@ -188,7 +196,7 @@ export default async function SourcesPage() {
               </span>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 min-[480px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
               {bucket.map((source, srcIdx) => {
                 const kind = sourceKindOf(source);
                 const voting = isVotingSource(source);
@@ -218,7 +226,7 @@ export default async function SourcesPage() {
                         <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-5">
                           {source.name}
                         </p>
-                        <div className="flex flex-wrap items-center gap-1">
+                        <div className="flex flex-wrap items-center gap-1 min-w-0">
                           <BiasBadge bias={source.bias} size="sm" />
                           {kind !== "outlet" && (
                             <span
@@ -228,18 +236,14 @@ export default async function SourcesPage() {
                               {SOURCE_KIND_META[kind].label}
                             </span>
                           )}
-                          <SourceChips slug={source.slug} showUnclassified />
+                          <SourceChips slug={source.slug} />
                         </div>
                         <p className="text-muted-foreground">
                           <span className="font-mono text-[10px]">son 7 günde {source.articleCount7d} haber</span>
                         </p>
-                        {source.lastPublishedAt ? (
+                        {source.lastPublishedAt && (
                           <p className="text-[10px] text-muted-foreground/70">
                             {formatTurkishTimeAgo(source.lastPublishedAt)}
-                          </p>
-                        ) : (
-                          <p className="text-[10px] text-muted-foreground/70">
-                            son 7 günde aktivite yok
                           </p>
                         )}
                       </div>

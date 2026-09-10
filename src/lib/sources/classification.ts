@@ -20,3 +20,15 @@ export function isClassifiedSource(slug: string): boolean {
   if (!meta) return false;
   return meta.factuality !== null || meta.ownership !== null;
 }
+
+/**
+ * Counts how many of the given slugs are classified per
+ * `isClassifiedSource`. Used by `/sources` to report directory-wide
+ * coverage ("N/M kaynak etiketli") instead of a per-card
+ * "sınıflandırılmamış" chip.
+ */
+export function countClassifiedSources(
+  slugs: ReadonlyArray<string>,
+): number {
+  return slugs.filter(isClassifiedSource).length;
+}
