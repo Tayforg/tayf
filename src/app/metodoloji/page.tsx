@@ -20,6 +20,7 @@ import {
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_TEMPLATE,
 } from "@/lib/headline/prompt";
+import { getNeutralizedStatus } from "@/lib/headline/status";
 
 // /metodoloji — Tayf's methodology + trust page. Every number on this page
 // is imported from the same contract modules the pipeline runs on
@@ -116,7 +117,13 @@ function SectionHeading({
 
 const taggedSources = Object.values(SOURCE_METADATA);
 
-export default function MethodologyPage() {
+export default async function MethodologyPage() {
+  // Honesty gate (Pack B): the status line below must never claim
+  // AI-neutralization without live evidence. getNeutralizedStatus() never
+  // throws; a null (unknown) status renders nothing, same as the footer's
+  // ActiveSourceCount rule ("a number we cannot stand behind is worse than
+  // no number").
+  const neutralStatus = await getNeutralizedStatus();
   const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
   const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
   const surpriseSharePct = Math.round(SURPRISE.dominantShare * 100);
@@ -390,6 +397,13 @@ export default function MethodologyPage() {
           meta="LLM"
         />
         <div className={cardClass + " space-y-3"}>
+          {neutralStatus !== null && (
+            <p className={proseClass}>
+              {neutralStatus.neutralized > 0
+                ? `Şu ana kadar ${neutralStatus.neutralized} kümenin başlığı tarafsızlaştırıldı.`
+                : "Bu adım şu anda kapalı: üretimde hiçbir başlık tarafsızlaştırılmadı."}
+            </p>
+          )}
           <p className={proseClass}>
             En az {HEADLINE_MIN_ARTICLE_COUNT} kaynağı olan kümeler için, üye
             makalelerin başlıkları bir LLM&apos;e gönderilir ve LLM,

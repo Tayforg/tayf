@@ -3,9 +3,14 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // ---------------------------------------------------------------------------
 // GET /rss.xml
 //
-// Covers two things:
-//   1. The channel-level AI-disclosure sentence (unchanged behaviour).
-//   2. Per-item summary attribution: clusters.summary_tr is one outlet's
+// Covers three things:
+//   1. The channel-level AI-disclosure sentence — now conditional on
+//      getNeutralizedStatus() actually reporting a non-zero neutralized
+//      count, instead of an unconditional claim (Pack B: neutralizer
+//      honesty). See src/lib/headline/status.ts.
+//   2. The channel-level source-count wording carries no hardcoded number
+//      (e.g. no stale "144 Türk kaynağından").
+//   3. Per-item summary attribution: clusters.summary_tr is one outlet's
 //      raw copy, not Tayf's — it must be attributed to that outlet, shown
 //      generically, or hidden, never spliced in unattributed. See
 //      src/lib/clusters/summary-attribution.ts and rss-summary-attribution.ts.
@@ -19,6 +24,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 let mockBundles: unknown[] = [];
 let mockMembers: Record<string, unknown> = {};
 let memberLookupCalls: string[][] = [];
+// Default mirrors production reality per the neutralizer-honesty audit:
+// zero clusters have ever been neutralized, so the AI-disclosure sentence
+// must be absent unless a test opts into a non-zero count.
+let mockNeutralStatus: { neutralized: number; eligible: number } | null = {
+  neutralized: 0,
+  eligible: 0,
+};
 
 vi.mock("@/lib/clusters/politics-query", () => ({
   getPoliticsClusters: vi.fn(async () => ({ bundles: mockBundles })),
@@ -33,10 +45,16 @@ vi.mock("@/lib/clusters/rss-summary-attribution", () => ({
   }),
 }));
 
+// Also "use cache" — same reason as above.
+vi.mock("@/lib/headline/status", () => ({
+  getNeutralizedStatus: vi.fn(async () => mockNeutralStatus),
+}));
+
 beforeEach(() => {
   mockBundles = [];
   mockMembers = {};
   memberLookupCalls = [];
+  mockNeutralStatus = { neutralized: 0, eligible: 0 };
 });
 
 const T0 = "2026-04-17T08:00:00.000Z";
@@ -95,7 +113,7 @@ function escapeRegExp(s: string): string {
 }
 
 describe("GET /rss.xml", () => {
-  it("appends the AI-disclosure sentence to the channel description exactly once", async () => {
+  function singleClusterBundle() {
     mockBundles = [
       {
         cluster: {
@@ -110,6 +128,31 @@ describe("GET /rss.xml", () => {
       },
     ];
     mockMembers = {};
+  }
+
+  it("omits the AI-disclosure sentence and any hardcoded source count while neutralized is 0", async () => {
+    singleClusterBundle();
+    mockNeutralStatus = { neutralized: 0, eligible: 10 };
+
+    const { GET } = await import("@/app/rss.xml/route");
+    const res = await GET();
+    const xml = await res.text();
+
+    expect(xml).not.toContain("tarafsızlaştır");
+    expect(xml).not.toContain("144");
+
+    // Still lives inside the channel-level <description>, not an <item>.
+    const channelDescMatch = xml.match(
+      /<channel>[\s\S]*?<description>([\s\S]*?)<\/description>/,
+    );
+    expect(channelDescMatch).not.toBeNull();
+    expect(channelDescMatch![1]).not.toContain("tarafsızlaştır");
+    expect(channelDescMatch![1]).not.toContain("144");
+  });
+
+  it("appends the AI-disclosure sentence to the channel description exactly once once neutralized > 0", async () => {
+    singleClusterBundle();
+    mockNeutralStatus = { neutralized: 3, eligible: 10 };
 
     const { GET } = await import("@/app/rss.xml/route");
     const res = await GET();
@@ -120,6 +163,7 @@ describe("GET /rss.xml", () => {
 
     const occurrences = xml.split(sentence).length - 1;
     expect(occurrences).toBe(1);
+    expect(xml).not.toContain("144");
 
     // Must live inside the channel-level <description>, not an <item>.
     const channelDescMatch = xml.match(
@@ -127,6 +171,17 @@ describe("GET /rss.xml", () => {
     );
     expect(channelDescMatch).not.toBeNull();
     expect(channelDescMatch![1]).toContain(sentence);
+  });
+
+  it("omits the AI-disclosure sentence when getNeutralizedStatus() returns null (unknown status)", async () => {
+    singleClusterBundle();
+    mockNeutralStatus = null;
+
+    const { GET } = await import("@/app/rss.xml/route");
+    const res = await GET();
+    const xml = await res.text();
+
+    expect(xml).not.toContain("tarafsızlaştır");
   });
 
   it("attributes, hides, or degrades item summaries per cluster, and looks up members only for non-blank summaries", async () => {

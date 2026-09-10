@@ -4,7 +4,11 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
-import { buildHeadlinePrompt, HEADLINE_MIN_ARTICLE_COUNT } from "@/lib/headline/prompt";
+import {
+  buildHeadlinePrompt,
+  HEADLINE_MIN_ARTICLE_COUNT,
+  HEADLINE_PROMPT_VERSION,
+} from "@/lib/headline/prompt";
 
 // Boot-time guard. The route is FAIL-CLOSED on a missing `CRON_SECRET` (503
 // on every invocation), but in production that failure is otherwise only
@@ -14,6 +18,17 @@ import { buildHeadlinePrompt, HEADLINE_MIN_ARTICLE_COUNT } from "@/lib/headline/
 if (process.env.NODE_ENV === "production" && !process.env.CRON_SECRET) {
   console.warn(
     "[headline-cron] CRON_SECRET is not set; route will fail-closed with 503 on every invocation",
+  );
+}
+
+// Same boot-time visibility for a missing LLM key: the per-request gate
+// below soft no-ops (200 {skipped:true}) rather than erroring, which is the
+// correct fail-safe behaviour but easy to miss in a request-log-only view —
+// an operator staring at the boot log should be able to tell at a glance
+// why neutral titles never show up. Idempotent: runs once per module init.
+if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
+  console.warn(
+    "[headline-cron] ANTHROPIC_API_KEY is not set; neutral titles are disabled",
   );
 }
 
@@ -163,6 +178,22 @@ export const GET = withApiErrors(async (request: Request) => {
     });
   }
 
+  // HEADLINE_PAUSED kill switch — an explicit, reversible pause that does
+  // not require touching ANTHROPIC_API_KEY (removing the key would work too,
+  // but that also removes the capability entirely and is a bigger change to
+  // undo). Any non-empty value other than the literal string "false" pauses;
+  // unset or "false" is a no-op so existing deployments are unaffected.
+  // Zero DB access either way — checked before the Supabase client is even
+  // constructed.
+  const paused = process.env.HEADLINE_PAUSED;
+  if (paused && paused !== "false") {
+    return NextResponse.json({
+      skipped: true,
+      reason: "paused",
+      timestamp: new Date().toISOString(),
+    });
+  }
+
   // No API key → soft no-op. The cron will keep firing every 5 minutes,
   // so an operator that drops a key into Vercel env vars and redeploys
   // gets healing on the very next tick — no manual kick needed.
@@ -176,15 +207,21 @@ export const GET = withApiErrors(async (request: Request) => {
 
   const supabase = createServerClient();
 
-  // 1. Pick the next batch of clusters needing a neutral title. Ordered by
-  // article_count DESC so the most-visible (multi-source) clusters get
-  // rewritten first — same priority order as the tmux worker.
+  // 1. Pick the next batch of clusters needing a neutral title.
+  // `.eq("is_archived", false)` mirrors the filter every reader-facing
+  // surface already applies (src/lib/clusters/politics-query.ts) — without
+  // it the drain could spend LLM budget rewriting a cluster no reader will
+  // ever see. Ordered by updated_at DESC (recency-first) rather than
+  // article_count DESC so today's stories get rewritten before an old,
+  // large historical pile. `.gte("article_count", MIN_ARTICLE_COUNT)` is
+  // unchanged so migration 019's partial index still applies.
   const { data: clustersData, error: pickError } = await supabase
     .from("clusters")
     .select("id, title_tr, summary_tr, article_count")
     .is("title_neutral_at", null)
+    .eq("is_archived", false)
     .gte("article_count", MIN_ARTICLE_COUNT)
-    .order("article_count", { ascending: false })
+    .order("updated_at", { ascending: false })
     .limit(LLM_BATCH);
 
   if (pickError) {
@@ -284,6 +321,11 @@ export const GET = withApiErrors(async (request: Request) => {
       .update({
         title_tr_neutral: neutral,
         title_neutral_at: new Date().toISOString(),
+        // Provenance (migration 046): the model id actually used for this
+        // rewrite and the prompt-template version that produced it, so a
+        // rewrite can never land without an audit trail.
+        title_neutral_model: LLM_MODEL,
+        title_neutral_prompt_version: HEADLINE_PROMPT_VERSION,
       })
       .eq("id", c.id);
 

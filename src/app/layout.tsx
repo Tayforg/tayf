@@ -40,7 +40,7 @@ export const metadata: Metadata = {
     template: "%s — Tayf",
   },
   description:
-    "Aynı haber, farklı dünyalar. 144 Türk kaynağından otomatik kümelenmiş politika haberleri, medya yanlılığı analizi ve kör nokta tespiti.",
+    "Aynı haber, farklı dünyalar. Türk haber kaynaklarından otomatik kümelenmiş politika haberleri, medya yanlılığı analizi ve kör nokta tespiti.",
   keywords: [
     "haber",
     "türkiye",

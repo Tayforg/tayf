@@ -5,6 +5,7 @@ import {
   summaryAttribution,
   summaryAttributionWithoutMembers,
 } from "@/lib/clusters/summary-attribution";
+import { getNeutralizedStatus } from "@/lib/headline/status";
 
 // Visible cap for the composed <description> (prefix + wire note + outlet
 // name + summary), word-boundary-truncated with an ellipsis by
@@ -25,6 +26,18 @@ export async function GET(): Promise<Response> {
   const { bundles } = await getPoliticsClusters();
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
   const now = new Date().toUTCString();
+
+  // Honesty gate (Pack B): only claim AI-neutralization once at least one
+  // cluster has actually been rewritten in production. A number/claim we
+  // cannot stand behind is worse than making none — see
+  // src/components/layout/footer.tsx's ActiveSourceCount for the same rule
+  // applied to the source count. getNeutralizedStatus() never throws; a
+  // null (unknown) status is treated the same as "no evidence yet".
+  const neutralStatus = await getNeutralizedStatus();
+  const neutralSentence =
+    neutralStatus && neutralStatus.neutralized > 0
+      ? " Başlıklar yapay zekâ ile tarafsızlaştırılmıştır (tayfhaber.com/metodoloji)."
+      : "";
 
   const feed = bundles.slice(0, 30);
 
@@ -76,7 +89,7 @@ export async function GET(): Promise<Response> {
     <title>Tayf — Türkiye Haber Analizi</title>
     <link>${baseUrl}/</link>
     <atom:link href="${baseUrl}/rss.xml" rel="self" type="application/rss+xml" />
-    <description>Aynı haber, farklı dünyalar. 144 Türk kaynağından otomatik kümelenmiş haberler. Başlıklar yapay zekâ ile tarafsızlaştırılmıştır (tayfhaber.com/metodoloji).</description>
+    <description>Aynı haber, farklı dünyalar. Türkiye haber kaynaklarından otomatik kümelenmiş haberler.${neutralSentence}</description>
     <language>tr-TR</language>
     <lastBuildDate>${now}</lastBuildDate>
 ${items}

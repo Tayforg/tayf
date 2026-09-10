@@ -1,4 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  HEADLINE_MIN_ARTICLE_COUNT,
+  HEADLINE_PROMPT_VERSION,
+} from "@/lib/headline/prompt";
 
 // revalidateTag: mocked so we can assert the post-batch cache invalidation
 // (cluster-detail:<id> per rewrote cluster + clusters-politics once) without
@@ -97,9 +101,24 @@ const supabaseFake = await vi.hoisted(async () => {
     count?: number | null;
     error?: { message: string } | null;
   }> = {};
+  // Every resolver invocation (SELECT *and* the terminal `await` of an
+  // UPDATE both route through here — see tests/_helpers/supabase-fake.ts's
+  // `resolve()`) is logged with its accumulated builder state. This is the
+  // single source of truth for two things this suite needs to assert on:
+  //   1. "zero DB access" for the HEADLINE_PAUSED short-circuit — the log
+  //      must stay empty.
+  //   2. the pick query's predicates (`.eq('is_archived', false)`,
+  //      `.order('updated_at', ...)`) — identified by `order.length > 0`,
+  //      since only the pick query calls `.order()`; the per-row `.update()`
+  //      calls only ever `.eq('id', ...)`.
+  const dbAccessLog: Array<{
+    table: string;
+    state: import("../../_helpers/supabase-fake").BuilderState;
+  }> = [];
   const fake = helper.createSupabaseFake({
     tables: {
-      clusters: (_state) => {
+      clusters: (state) => {
+        dbAccessLog.push({ table: "clusters", state });
         const r = tableData["clusters"] ?? { data: [], count: 0, error: null };
         return {
           data: r.data ?? [],
@@ -107,7 +126,8 @@ const supabaseFake = await vi.hoisted(async () => {
           count: r.count ?? null,
         };
       },
-      cluster_articles: (_state) => {
+      cluster_articles: (state) => {
+        dbAccessLog.push({ table: "cluster_articles", state });
         const r =
           tableData["cluster_articles"] ?? { data: [], count: 0, error: null };
         return {
@@ -118,7 +138,7 @@ const supabaseFake = await vi.hoisted(async () => {
       },
     },
   });
-  return { fake, tableData };
+  return { fake, tableData, dbAccessLog };
 });
 
 vi.mock("@supabase/supabase-js", () => ({
@@ -211,12 +231,14 @@ beforeEach(() => {
   // path returns null and the test never observes the fetch spy.
   process.env.ANTHROPIC_API_KEY = "sk-ant-test";
   delete process.env.CRON_SECRET;
+  delete process.env.HEADLINE_PAUSED;
   for (const k of Object.keys(tableResponses)) delete tableResponses[k];
   _updateCallsStore.length = 0;
   // Reset the shared Supabase fake's mutation log so each test observes
   // only its own writes.
   supabaseFake.fake.calls.mutations.length = 0;
   supabaseFake.fake.calls.rpc.length = 0;
+  supabaseFake.dbAccessLog.length = 0;
   timingSafeEqualSpy.mockClear();
   revalidateTagMock.mockClear();
   installLlmFetchSpy();
@@ -233,6 +255,7 @@ afterEach(() => {
     "SUPABASE_SERVICE_ROLE_KEY",
     "CRON_SECRET",
     "ANTHROPIC_API_KEY",
+    "HEADLINE_PAUSED",
   ]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -394,6 +417,142 @@ describe("GET /api/cron/headline", () => {
     );
     expect(res.status).toBe(200);
     expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
+  it("HEADLINE_PAUSED kill switch: returns {skipped:true, reason:'paused'} and touches no DB", async () => {
+    process.env.CRON_SECRET = "shhh";
+    process.env.HEADLINE_PAUSED = "true";
+    // If the pause check were bypassed, the route would try to read this —
+    // leaving it unset means any accidental DB read surfaces as an empty
+    // (not error) result rather than a false-positive pass.
+    setTableResponse("clusters", { data: [], error: null });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const res = await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { skipped?: boolean; reason?: string };
+    expect(body.skipped).toBe(true);
+    expect(body.reason).toBe("paused");
+    // Zero DB access: no SELECT (pick query, member-titles query) and no
+    // UPDATE was ever issued against Supabase.
+    expect(supabaseFake.dbAccessLog).toHaveLength(0);
+    expect(supabaseFake.fake.calls.mutations).toHaveLength(0);
+    expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
+  it("HEADLINE_PAUSED='false' does NOT pause (only a non-empty value other than the literal 'false' pauses)", async () => {
+    process.env.CRON_SECRET = "shhh";
+    process.env.HEADLINE_PAUSED = "false";
+    setTableResponse("clusters", { data: [], error: null });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const res = await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { skipped?: boolean; reason?: string };
+    // Falls through to the normal "no candidates" no-op path, not paused.
+    expect(body.reason).not.toBe("paused");
+    expect(supabaseFake.dbAccessLog.length).toBeGreaterThan(0);
+  });
+
+  it("pick query filters is_archived=false and orders by updated_at desc (recency-first)", async () => {
+    process.env.CRON_SECRET = "shhh";
+    setTableResponse("clusters", { data: [], error: null });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+
+    // The pick query is the only "clusters" access that calls `.order()`
+    // (the per-row `.update()` calls never do).
+    const pick = supabaseFake.dbAccessLog.find(
+      (a) => a.table === "clusters" && a.state.order.length > 0,
+    );
+    expect(pick).toBeDefined();
+    expect(pick!.state.eq).toContainEqual({ col: "is_archived", val: false });
+    expect(pick!.state.order).toContainEqual({
+      col: "updated_at",
+      opts: expect.objectContaining({ ascending: false }),
+    });
+    // article_count DESC must be gone from the ordering (recency-first,
+    // not popularity-first).
+    expect(
+      pick!.state.order.some((o) => o.col === "article_count"),
+    ).toBe(false);
+    // The MIN_ARTICLE_COUNT gate (migration 019's partial index) must
+    // still apply.
+    expect(pick!.state.gte).toContainEqual({
+      col: "article_count",
+      val: HEADLINE_MIN_ARTICLE_COUNT,
+    });
+  });
+
+  it("writes title_neutral_model and title_neutral_prompt_version alongside title_tr_neutral", async () => {
+    process.env.CRON_SECRET = "shhh";
+    setTableResponse("clusters", {
+      data: [
+        {
+          id: "c1",
+          title_tr: "Original TR",
+          summary_tr: "Original summary",
+          title_tr_neutral: null,
+          title_neutral_at: null,
+          article_count: 4,
+        },
+      ],
+      error: null,
+    });
+    setTableResponse("cluster_articles", {
+      data: [
+        {
+          articles: { title: "Headline A", published_at: "2026-01-01T00:00:00Z" },
+        },
+      ],
+      error: null,
+    });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const res = await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const clusterUpdate = updateCalls.find((u) => u.table === "clusters");
+    expect(clusterUpdate).toBeDefined();
+    const patch = clusterUpdate!.patch as {
+      title_neutral_model?: unknown;
+      title_neutral_prompt_version?: unknown;
+    };
+    // Model id actually used — the existing LLM_MODEL env override / default,
+    // not a hardcoded literal, so this stays true if the default ever moves.
+    expect(patch.title_neutral_model).toBe(
+      process.env.LLM_MODEL ?? "claude-haiku-4-5-20251001",
+    );
+    expect(patch.title_neutral_prompt_version).toBe(HEADLINE_PROMPT_VERSION);
   });
 
   it("uses a constant-time comparator (no timing leak via early-exit on first byte)", async () => {
