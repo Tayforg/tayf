@@ -15,14 +15,13 @@ const NAV_LINKS = [
 ] as const;
 
 async function ActiveSourceCount() {
-  let count: number;
-  try {
-    count = await getDeliveringSourceCount();
-  } catch {
-    // A number Tayf can't stand behind is worse than no number — render
-    // nothing rather than fall back to a stale or made-up count.
-    return null;
-  }
+  const count = await getDeliveringSourceCount();
+
+  // A number Tayf can't stand behind is worse than no number — render
+  // nothing rather than fall back to a stale or made-up count. (The count
+  // fetcher itself never throws; it returns null on a Supabase error — see
+  // src/lib/sources/active-count.ts.)
+  if (count === null) return null;
 
   return (
     <span
