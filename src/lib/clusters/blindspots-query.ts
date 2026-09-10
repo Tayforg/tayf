@@ -13,9 +13,40 @@ import {
   zoneTallyOf,
   type EmbeddedArticle,
 } from "@/lib/clusters/blindspot-feed";
+import {
+  degradedSilentZone,
+  getZoneFeedHealth,
+  shouldSuppressBlindspot,
+  type ZoneFeedHealth,
+} from "@/lib/clusters/feed-health";
 import { wireSignalOf } from "@/lib/clusters/wire";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
+
+// Names the pole zone whose degraded feeds caused a blindspot to be
+// suppressed, via the shared `degradedSilentZone` helper (feed-health.ts)
+// so this call site can't drift from cluster-detail-query.ts /
+// politics-query.ts on which zone a suppression log names.
+function logSuppression(
+  clusterId: string,
+  dominantZone: MediaDnaZone,
+  health: ZoneFeedHealth | null | undefined,
+): void {
+  const silentZone = health ? degradedSilentZone(dominantZone, health) : null;
+  if (!silentZone || !health) {
+    // Cannot happen right after shouldSuppressBlindspot returned true (same
+    // underlying condition) — kept as a total branch that logs without
+    // inventing a zone rather than assuming one.
+    console.log(
+      `[feed-health] suppressed blindspot for cluster ${clusterId} (silent zone unknown)`,
+    );
+    return;
+  }
+  const stats = health[silentZone];
+  console.log(
+    `[feed-health] suppressed blindspot for cluster ${clusterId} (silent zone ${silentZone}: ${stats.healthy}/${stats.total} feeds healthy)`,
+  );
+}
 
 // Fetcher for /blindspots — extracted out of the page component so the
 // cluster-page.test.ts-style unit tests can exercise it without rendering
@@ -115,6 +146,11 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
     const clusterRows = data ?? [];
     if (clusterRows.length === 0) return { bundles: [] };
 
+    // Fetched once per build (not per cluster) — feed-health.ts's own
+    // "use cache" already makes this cheap, but there's no reason to pay
+    // for it when there are zero candidates.
+    const health = await getZoneFeedHealth();
+
     const bundles: BlindspotBundle[] = [];
 
     for (const c of clusterRows) {
@@ -144,6 +180,17 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
         continue;
       }
       const dominantZone: MediaDnaZone = tally.dominantZone;
+
+      // A degraded-feed cluster never enters the /blindspots feed at all
+      // (and therefore never becomes the digest's featured blindspot):
+      // per 032_blindspot_contract_recompute.sql:21-23, blindspot_side is
+      // the side that DID cover, so the silent side is the opposite pole,
+      // not blindspot_side — shouldSuppressBlindspot owns that logic.
+      if (shouldSuppressBlindspot(dominantZone, health)) {
+        logSuppression(c.id, dominantZone, health);
+        continue;
+      }
+
       const dominantPct = tally.dominantShare;
       const wire = wireSignalOf(
         deduped.map((m) => ({ id: m.id, content_hash: m.content_hash })),

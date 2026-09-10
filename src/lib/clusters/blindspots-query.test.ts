@@ -32,10 +32,72 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+// feed-health.ts is owned by a concurrent worker in this pack — mocked here
+// so this suite never depends on its real (possibly-Supabase-backed)
+// implementation. Default (set in beforeEach) is "health unknown, never
+// suppress" so the pre-existing query-shape test below is unaffected.
+// `degradedSilentZone` is kept REAL (imported via importOriginal, mirroring
+// politics-query.test.ts) — it's pure and has no Supabase dependency, and
+// blindspots-query.ts's own logSuppression calls it directly.
+const feedHealthMock = vi.hoisted(() => ({
+  getZoneFeedHealth: vi.fn(),
+  shouldSuppressBlindspot: vi.fn(),
+}));
+
+vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/feed-health")>();
+  return {
+    ...actual,
+    getZoneFeedHealth: feedHealthMock.getZoneFeedHealth,
+    shouldSuppressBlindspot: feedHealthMock.shouldSuppressBlindspot,
+  };
+});
+
 import { getBlindspots } from "./blindspots-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
+import type { BiasCategory } from "@/types";
 
 const ORIGINAL_ENV = { ...process.env };
+
+// ---------------------------------------------------------------------------
+// Fixture builders for the feed-health suppression tests below. Each row
+// carries 5 distinct-source members of the same bias category so the live
+// re-tally (zoneTallyOf) clears BLINDSPOT.minSources (5) and
+// BLINDSPOT.dominantShare (0.8) with a clean 5/5 zone.
+// ---------------------------------------------------------------------------
+
+function mkMember(clusterId: string, index: number, bias: BiasCategory) {
+  const sourceId = `${clusterId}-s${index}`;
+  return {
+    articles: {
+      id: `${clusterId}-a${index}`,
+      title: `Haber ${clusterId}-${index}`,
+      url: `https://example.com/${clusterId}-${index}`,
+      image_url: null,
+      published_at: `2026-01-0${index + 1}T00:00:00.000Z`,
+      source_id: sourceId,
+      category: "politika",
+      content_hash: null,
+      sources: { id: sourceId, name: `Kaynak ${sourceId}`, bias, kind: "outlet" },
+    },
+  };
+}
+
+function mkBlindspotClusterRow(id: string, bias: BiasCategory) {
+  return {
+    id,
+    title_tr: `Örnek başlık ${id}`,
+    title_tr_neutral: null,
+    summary_tr: "Özet",
+    bias_distribution: {},
+    is_blindspot: true,
+    blindspot_side: bias,
+    article_count: 5,
+    first_published: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-05T00:00:00.000Z",
+    cluster_articles: Array.from({ length: 5 }, (_, i) => mkMember(id, i, bias)),
+  };
+}
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
@@ -43,6 +105,10 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  feedHealthMock.getZoneFeedHealth.mockReset();
+  feedHealthMock.shouldSuppressBlindspot.mockReset();
+  feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
+  feedHealthMock.shouldSuppressBlindspot.mockReturnValue(false);
 });
 
 afterEach(() => {
@@ -68,5 +134,123 @@ describe("getBlindspots query shape", () => {
       { col: "updated_at", opts: { ascending: false } },
     ]);
     expect(state.limit).toBe(200);
+  });
+});
+
+describe("getBlindspots feed-health suppression", () => {
+  it("fetches health once and drops a cluster whose silent pole shouldSuppressBlindspot flags, logging once", async () => {
+    const health = {
+      iktidar: { total: 10, healthy: 9, healthyShare: 0.9, degraded: false },
+      muhalefet: { total: 10, healthy: 2, healthyShare: 0.2, degraded: true },
+      bagimsiz: { total: 5, healthy: 5, healthyShare: 1, degraded: false },
+    };
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue(health);
+    // Suppress the cluster whose dominant zone is "iktidar" (silent pole
+    // muhalefet is degraded above); the "muhalefet"-dominant cluster's
+    // silent pole (iktidar) is healthy, so it stays.
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+
+    fixture.data = [
+      mkBlindspotClusterRow("cluster-suppress", "pro_government"),
+      mkBlindspotClusterRow("cluster-keep", "opposition"),
+    ];
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { bundles } = await getBlindspots();
+
+      expect(bundles.map((b) => b.cluster.id)).toEqual(["cluster-keep"]);
+      expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+      expect(feedHealthMock.shouldSuppressBlindspot).toHaveBeenCalledWith(
+        "iktidar",
+        health,
+      );
+      expect(feedHealthMock.shouldSuppressBlindspot).toHaveBeenCalledWith(
+        "muhalefet",
+        health,
+      );
+
+      const suppressionLogs = logSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("[feed-health] suppressed blindspot"),
+      );
+      expect(suppressionLogs).toHaveLength(1);
+      expect(suppressionLogs[0]?.[0]).toContain(
+        "suppressed blindspot for cluster cluster-suppress",
+      );
+      expect(suppressionLogs[0]?.[0]).toContain("muhalefet");
+      expect(suppressionLogs[0]?.[0]).toContain("2/10 feeds healthy");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("names the actually-degraded pole (not a hardcoded 'iktidar') when the dominant zone is bagimsiz", async () => {
+    // 5 "center" members -> zoneTallyOf's live re-tally picks "bagimsiz" as
+    // the dominant zone. shouldSuppressBlindspot still fires because a pole
+    // (muhalefet) is degraded — the suppression log must name THAT pole,
+    // not "iktidar" by hardcoded default.
+    const health = {
+      iktidar: { total: 8, healthy: 8, healthyShare: 1, degraded: false },
+      muhalefet: { total: 10, healthy: 2, healthyShare: 0.2, degraded: true },
+      bagimsiz: { total: 5, healthy: 5, healthyShare: 1, degraded: false },
+    };
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue(health);
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "bagimsiz",
+    );
+
+    fixture.data = [mkBlindspotClusterRow("cluster-bagimsiz", "center")];
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { bundles } = await getBlindspots();
+
+      expect(bundles).toEqual([]);
+      const suppressionLogs = logSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("[feed-health] suppressed blindspot"),
+      );
+      expect(suppressionLogs).toHaveLength(1);
+      expect(suppressionLogs[0]?.[0]).toContain(
+        "suppressed blindspot for cluster cluster-bagimsiz",
+      );
+      expect(suppressionLogs[0]?.[0]).toContain("muhalefet");
+      expect(suppressionLogs[0]?.[0]).toContain("2/10 feeds healthy");
+      expect(suppressionLogs[0]?.[0]).not.toContain("silent zone iktidar");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("passes every candidate through unaffected when health is null (unknown)", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
+    // Mirrors the real contract: shouldSuppressBlindspot is false whenever
+    // health is null/undefined, regardless of zone.
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (_zone: string, health: unknown) => health != null,
+    );
+
+    fixture.data = [
+      mkBlindspotClusterRow("cluster-a", "pro_government"),
+      mkBlindspotClusterRow("cluster-b", "opposition"),
+    ];
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const { bundles } = await getBlindspots();
+
+      expect(bundles.map((b) => b.cluster.id).sort()).toEqual([
+        "cluster-a",
+        "cluster-b",
+      ]);
+      expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+      const suppressionLogs = logSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("[feed-health] suppressed blindspot"),
+      );
+      expect(suppressionLogs).toHaveLength(0);
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 });

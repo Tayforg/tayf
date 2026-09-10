@@ -43,6 +43,7 @@ function blindspotDetail(): ClusterDetail {
     members: [],
     allSources: [],
     wire: { isWireRedistribution: false, effectiveArticleCount: 7, memberCount: 7 },
+    blindspotSuppressed: false,
   };
 }
 

@@ -108,7 +108,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   const detail = await getClusterDetail(id);
   if (!detail) notFound();
 
-  const { cluster, members, allSources, wire } = detail;
+  const { cluster, members, allSources, wire, blindspotSuppressed } = detail;
 
   // Toplayıcı / niş kaynaklar are cluster members but never vote — split
   // them out once here so every voting-sensitive computation below reads
@@ -420,6 +420,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
             <ReadAcrossSpectrum
               members={votingMembers}
               isBlindspot={cluster.is_blindspot}
+              feedDegraded={blindspotSuppressed}
             />
 
             {/* Summary attribution (idea #7): clusters.summary_tr is one

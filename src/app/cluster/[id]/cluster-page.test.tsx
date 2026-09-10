@@ -265,6 +265,7 @@ describe("ClusterDetailPage — source-kind UI", () => {
         effectiveArticleCount: 3,
         memberCount: 3,
       },
+      blindspotSuppressed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -304,6 +305,7 @@ describe("ClusterDetailPage — source-kind UI", () => {
         effectiveArticleCount: 1,
         memberCount: 1,
       },
+      blindspotSuppressed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -355,6 +357,7 @@ describe("ClusterDetailPage — source-kind UI", () => {
         effectiveArticleCount: 2,
         memberCount: 2,
       },
+      blindspotSuppressed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -387,6 +390,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         effectiveArticleCount: 1,
         memberCount: 1,
       },
+      blindspotSuppressed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -424,6 +428,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         effectiveArticleCount: 1,
         memberCount: 1,
       },
+      blindspotSuppressed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -458,6 +463,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         effectiveArticleCount: 1,
         memberCount: 1,
       },
+      blindspotSuppressed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -491,6 +497,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         effectiveArticleCount: 1,
         memberCount: 1,
       },
+      blindspotSuppressed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);

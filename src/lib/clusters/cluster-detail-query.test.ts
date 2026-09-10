@@ -93,6 +93,27 @@ vi.mock("@/lib/supabase/server", () => ({
   createServerClient: vi.fn(() => makeFakeClient()),
 }));
 
+// feed-health.ts is owned by a concurrent worker in this pack — mocked here
+// so this suite never depends on its real (possibly-Supabase-backed)
+// implementation. Default (set in beforeEach) is "health unknown, never
+// suppress" so every pre-existing test below is unaffected.
+// `degradedSilentZone` is kept REAL (imported via importOriginal, mirroring
+// politics-query.test.ts) — it's pure and has no Supabase dependency, and
+// cluster-detail-query.ts's own logSuppression calls it directly.
+const feedHealthMock = vi.hoisted(() => ({
+  getZoneFeedHealth: vi.fn(),
+  shouldSuppressBlindspot: vi.fn(),
+}));
+
+vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/clusters/feed-health")>();
+  return {
+    ...actual,
+    getZoneFeedHealth: feedHealthMock.getZoneFeedHealth,
+    shouldSuppressBlindspot: feedHealthMock.shouldSuppressBlindspot,
+  };
+});
+
 // Import AFTER mocks are declared.
 import { getClusterDetail } from "./cluster-detail-query";
 
@@ -156,6 +177,10 @@ function mkEmbeddedMember(
 beforeEach(() => {
   callLog = [];
   responses = {};
+  feedHealthMock.getZoneFeedHealth.mockReset();
+  feedHealthMock.shouldSuppressBlindspot.mockReset();
+  feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
+  feedHealthMock.shouldSuppressBlindspot.mockReturnValue(false);
 });
 
 // ---------------------------------------------------------------------------
@@ -665,5 +690,124 @@ describe("getClusterDetail wire signal", () => {
     expect(result!.wire.memberCount).toBe(2);
     expect(result!.wire.effectiveArticleCount).toBe(2);
     expect(result!.wire.isWireRedistribution).toBe(false);
+  });
+});
+
+describe("getClusterDetail feed-health suppression", () => {
+  // A shared link must never show a blindspot claim the /blindspots feed has
+  // already withdrawn — same gate, applied to the DB-stored `is_blindspot`
+  // flag instead of a live re-tally.
+
+  it("withdraws the is_blindspot claim when the silent pole is degraded, logging once", async () => {
+    const health = {
+      iktidar: { total: 10, healthy: 9, healthyShare: 0.9, degraded: false },
+      muhalefet: { total: 10, healthy: 2, healthyShare: 0.2, degraded: true },
+      bagimsiz: { total: 5, healthy: 5, healthyShare: 1, degraded: false },
+    };
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue(health);
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (zone: string) => zone === "iktidar",
+    );
+
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          // Dominant zone must be derivable as "iktidar" from the
+          // distribution alone (mirrors politics-query's zone-summary
+          // derivation) — 5 pro_government votes, nothing else.
+          bias_distribution: { pro_government: 5 },
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getClusterDetail("cluster-1");
+
+      expect(result!.cluster.is_blindspot).toBe(false);
+      // The DB invariant (migration 032) is blindspot_side non-null only
+      // when is_blindspot is true — a withdrawn claim must not still
+      // expose the side it withdrew (mirrors politics-query.ts).
+      expect(result!.cluster.blindspot_side).toBeNull();
+      // Lets the page distinguish this from a genuine non-blindspot so it
+      // can explain the withdrawal instead of silently changing wording.
+      expect(result!.blindspotSuppressed).toBe(true);
+      expect(feedHealthMock.shouldSuppressBlindspot).toHaveBeenCalledWith(
+        "iktidar",
+        health,
+      );
+
+      const suppressionLogs = logSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("[feed-health] suppressed blindspot"),
+      );
+      expect(suppressionLogs).toHaveLength(1);
+      expect(suppressionLogs[0]?.[0]).toContain(
+        "suppressed blindspot for cluster cluster-1",
+      );
+      expect(suppressionLogs[0]?.[0]).toContain("muhalefet");
+      expect(suppressionLogs[0]?.[0]).toContain("2/10 feeds healthy");
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("leaves is_blindspot unaffected when health is null (unknown)", async () => {
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
+    // Mirrors the real contract: shouldSuppressBlindspot is false whenever
+    // health is null/undefined, regardless of zone.
+    feedHealthMock.shouldSuppressBlindspot.mockImplementation(
+      (_zone: string, health: unknown) => health != null,
+    );
+
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "opposition",
+          bias_distribution: { opposition: 5 },
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getClusterDetail("cluster-1");
+
+      expect(result!.cluster.is_blindspot).toBe(true);
+      // Passthrough: health unknown -> the DB-stored side is untouched
+      // (mirrors politics-query.test.ts's null-health passthrough case).
+      expect(result!.cluster.blindspot_side).toBe("opposition");
+      expect(result!.blindspotSuppressed).toBe(false);
+      const suppressionLogs = logSpy.mock.calls.filter((args) =>
+        String(args[0]).includes("[feed-health] suppressed blindspot"),
+      );
+      expect(suppressionLogs).toHaveLength(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("never calls shouldSuppressBlindspot for a cluster that isn't already a blindspot", async () => {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({ is_blindspot: false, blindspot_side: null }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+
+    expect(result!.cluster.is_blindspot).toBe(false);
+    expect(feedHealthMock.shouldSuppressBlindspot).not.toHaveBeenCalled();
   });
 });

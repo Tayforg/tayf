@@ -24,6 +24,12 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 interface ReadAcrossSpectrumProps {
   members: ClusterDetailMember[];
   isBlindspot: boolean;
+  // True when the feed-health gate withdrew this cluster's blindspot claim
+  // for this render (see cluster-detail-query.ts's suppression block) —
+  // lets the empty state explain the silence as a possible infrastructure
+  // gap instead of silently falling back to the generic "no news yet"
+  // wording a genuine non-blindspot gets.
+  feedDegraded?: boolean;
 }
 
 // Literal Tailwind class strings per pole, drawn from the same red /
@@ -41,19 +47,27 @@ const POLE_STYLE: Record<"iktidar" | "muhalefet", string> = {
 export function ReadAcrossSpectrum({
   members,
   isBlindspot,
+  feedDegraded = false,
 }: ReadAcrossSpectrumProps) {
   const { zone, member, counts } = pickOtherSide(members);
   const zoneLabel = ZONE_META[zone].label;
 
   if (!member) {
     const bothPolesEmpty = counts.iktidar === 0 && counts.muhalefet === 0;
+    // Pack C: a suppressed blindspot (feed-health gate withdrew the claim,
+    // see cluster-detail-query.ts) is NOT a genuine "no coverage" case —
+    // say so instead of silently falling back to the generic wording a
+    // real non-blindspot gets.
+    const degradedSuffix = feedDegraded
+      ? " — bu taraftaki bazı kaynaklara şu an ulaşamıyoruz"
+      : "";
     const emptyText = bothPolesEmpty
       ? isBlindspot
         ? "İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı"
         : "İki kutupta da henüz haber yok"
       : isBlindspot
-        ? `Bu tarafta haber yok — kör nokta (${zoneLabel})`
-        : `${zoneLabel} tarafında henüz haber yok`;
+        ? `İzlediğimiz kaynaklar arasında bu tarafta haber yok — kör nokta (${zoneLabel})`
+        : `${zoneLabel} tarafında henüz haber yok${degradedSuffix}`;
     return (
       <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground/60">
         {emptyText}

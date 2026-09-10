@@ -2,9 +2,59 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { normalizeSourceKind } from "@/lib/bias/config";
+import { zoneCountsOf } from "@/lib/bias/zone-summary";
+import {
+  degradedSilentZone,
+  getZoneFeedHealth,
+  shouldSuppressBlindspot,
+  type ZoneFeedHealth,
+} from "@/lib/clusters/feed-health";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { createServerClient } from "@/lib/supabase/server";
-import type { BiasCategory, BiasDistribution, Source } from "@/types";
+import type { BiasCategory, BiasDistribution, MediaDnaZone, Source } from "@/types";
+
+// Names the pole zone whose degraded feeds caused a blindspot to be
+// suppressed, via the shared `degradedSilentZone` helper (feed-health.ts)
+// so this call site can't drift from blindspots-query.ts /
+// politics-query.ts on which zone a suppression log names.
+function logSuppression(
+  clusterId: string,
+  dominantZone: MediaDnaZone,
+  health: ZoneFeedHealth | null | undefined,
+): void {
+  const silentZone = health ? degradedSilentZone(dominantZone, health) : null;
+  if (!silentZone || !health) {
+    // Cannot happen right after shouldSuppressBlindspot returned true (same
+    // underlying condition) — kept as a total branch that logs without
+    // inventing a zone rather than assuming one.
+    console.log(
+      `[feed-health] suppressed blindspot for cluster ${clusterId} (silent zone unknown)`,
+    );
+    return;
+  }
+  const stats = health[silentZone];
+  console.log(
+    `[feed-health] suppressed blindspot for cluster ${clusterId} (silent zone ${silentZone}: ${stats.healthy}/${stats.total} feeds healthy)`,
+  );
+}
+
+/**
+ * Derive the dominant Medya DNA zone from an already-normalized
+ * `BiasDistribution`, reusing `zoneCountsOf` (src/lib/bias/zone-summary.ts)
+ * instead of a second tally implementation. Ties break in `ZONE_ORDER`
+ * (iktidar, bagimsiz, muhalefet), matching the contract's own tie-break.
+ */
+function dominantZoneOf(distribution: BiasDistribution): MediaDnaZone | null {
+  const counts = zoneCountsOf(distribution);
+  const order: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
+  let best: MediaDnaZone | null = null;
+  for (const zone of order) {
+    if (counts[zone] > 0 && (best === null || counts[zone] > counts[best])) {
+      best = zone;
+    }
+  }
+  return best;
+}
 
 // Cluster detail fetcher used by /clusters/[id].
 //
@@ -55,6 +105,12 @@ export interface ClusterDetail {
   members: ClusterDetailMember[];
   allSources: Source[]; // all 144, for MediaDNA rendering
   wire: WireSignal;
+  // True only when the feed-health gate withdrew this cluster's blindspot
+  // claim for this render (see the suppression block below) — lets the
+  // page distinguish "genuinely not a blindspot" from "was a blindspot,
+  // but the silent pole's feeds are too broken to trust the silence" so it
+  // can show a different explanation instead of silently changing wording.
+  blindspotSuppressed: boolean;
 }
 
 // Row shape of the cluster query. Matches the columns selected below.
@@ -204,6 +260,32 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     }
 
     const clusterRow = clusterRes.data;
+    const distribution = normalizeDistribution(clusterRow.bias_distribution);
+
+    // Read-path-only suppression, mirroring /blindspots: a shared link must
+    // never show a blindspot claim the feed has already withdrawn. This
+    // never writes clusters.is_blindspot — only the value returned here.
+    // Only pay for the health fetch when the DB already flagged the
+    // cluster (the common case is not a blindspot at all).
+    let isBlindspot = clusterRow.is_blindspot;
+    let blindspotSide = clusterRow.blindspot_side;
+    let blindspotSuppressed = false;
+    if (isBlindspot) {
+      const dominantZone = dominantZoneOf(distribution);
+      if (dominantZone) {
+        const health = await getZoneFeedHealth();
+        if (shouldSuppressBlindspot(dominantZone, health)) {
+          isBlindspot = false;
+          // Mirror the DB invariant (migration 032): blindspot_side is
+          // non-null only when is_blindspot is true. politics-query.ts's
+          // buildClusterBundle nulls both together for the same reason —
+          // a withdrawn claim must not still expose the side it withdrew.
+          blindspotSide = null;
+          blindspotSuppressed = true;
+          logSuppression(id, dominantZone, health);
+        }
+      }
+    }
 
     // Normalize the embedded shape to the ClusterDetailMember contract.
     // Drop rows where the embedded article or its source is null —
@@ -300,9 +382,9 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         // The DB-stored article_count may be stale between the recluster
         // pass and this page render. Reflect the post-dedupe truth.
         article_count: dedupedMembers.length,
-        bias_distribution: normalizeDistribution(clusterRow.bias_distribution),
-        is_blindspot: clusterRow.is_blindspot,
-        blindspot_side: clusterRow.blindspot_side,
+        bias_distribution: distribution,
+        is_blindspot: isBlindspot,
+        blindspot_side: blindspotSide,
         first_published: clusterRow.first_published,
         updated_at: clusterRow.updated_at,
       },
@@ -314,6 +396,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           content_hash: m.article.content_hash,
         }))
       ),
+      blindspotSuppressed,
     };
   } catch (err) {
     // Rethrow — swallowing to null would cache a 404 for a real cluster.

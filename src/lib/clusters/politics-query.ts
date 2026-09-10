@@ -6,7 +6,7 @@ import type {
   ClusterCardSource,
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import { isVotingKind, zoneOf } from "@/lib/bias/config";
+import { isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
 import { createServerClient } from "@/lib/supabase/server";
 import type {
   BiasCategory,
@@ -15,6 +15,12 @@ import type {
   NewsCategory,
   SourceKind,
 } from "@/types";
+import {
+  degradedSilentZone,
+  getZoneFeedHealth,
+  shouldSuppressBlindspot,
+  type ZoneFeedHealth,
+} from "./feed-health";
 import { detectWireRedistribution } from "./wire";
 
 // Politics-filtered cluster fetcher used by the /clusters page.
@@ -234,6 +240,12 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
   try {
     const supabase = createServerClient();
 
+    // Feed-health gate (Pack C): fetched once per feed build, not per
+    // cluster. `null` means "health unknown" — buildClusterBundle below
+    // treats that identically to "no health data at all" (fail open, no
+    // suppression). Never throws (see feed-health.ts's file header).
+    const health = await getZoneFeedHealth();
+
     // Single round-trip: cluster → cluster_articles → articles → sources.
     // The nested shape is produced by PostgREST following the foreign
     // keys declared in migrations 001-003. This replaces the previous
@@ -282,7 +294,7 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
       ).length;
       if (hits / members.length < POLITICS_THRESHOLD) continue;
 
-      const { bundle, dedupedMembers } = buildClusterBundle(c, members);
+      const { bundle, dedupedMembers } = buildClusterBundle(c, members, health);
 
       // Stash the deduped members on the bundle so the scorer below can
       // reach published_at + sources.bias without re-flattening. We use a
@@ -402,10 +414,21 @@ export interface ClusterBundleBuildResult {
  * results render through the identical ClusterCard shape. Callers own any
  * pre-filtering (e.g. this file's politics-majority gate below); this
  * function assumes `members` is already the candidate set for the row.
+ *
+ * `health` (Pack C, feed-health-gated blindspots) is an OPTIONAL third
+ * parameter that defaults to `undefined` — omitting it (every caller
+ * before this pack) means "no suppression", so no existing behaviour
+ * changes. When provided, a `is_blindspot` cluster whose silent pole zone
+ * is degraded has its blindspot claim withdrawn for this read: the
+ * returned bundle's `is_blindspot` is forced `false` and `blindspot_side`
+ * `null`. This is READ-PATH ONLY — the underlying `clusters.is_blindspot`
+ * / `blindspot_side` columns are never written here or anywhere in this
+ * pack.
  */
 export function buildClusterBundle(
   c: EmbeddedClusterRow,
-  members: EmbeddedArticle[]
+  members: EmbeddedArticle[],
+  health?: ZoneFeedHealth | null,
 ): ClusterBundleBuildResult {
   // Sort by published_at ASC FIRST so the dedupe pass below
   // deterministically keeps the EARLIEST article per source.
@@ -489,6 +512,35 @@ export function buildClusterBundle(
     }
   }
 
+  const biasDistribution = normalizeDistribution(c.bias_distribution);
+
+  // Pack C feed-health gate — READ PATH ONLY, never writes
+  // clusters.is_blindspot / blindspot_side (those columns stay exactly as
+  // migrations 023/031/032 computed them). When the cluster is currently
+  // flagged a blindspot AND we have live feed health, withdraw the claim
+  // for THIS render if the silent pole zone's feeds are too broken for its
+  // silence to mean anything. `health` undefined/null (no caller passed
+  // it, or getZoneFeedHealth() itself failed open) => never suppress.
+  let isBlindspot = c.is_blindspot;
+  let blindspotSide = c.blindspot_side;
+  if (isBlindspot && health) {
+    // Dominant zone derived from the already-normalized bias_distribution
+    // via the existing zone-summary helper (tallyZones, re-exported from
+    // @/lib/bias/config) — no second tally implementation.
+    const dominantZone = tallyZones(biasDistribution).dominantZone;
+    if (dominantZone && shouldSuppressBlindspot(dominantZone, health)) {
+      const silentZone = degradedSilentZone(dominantZone, health);
+      if (silentZone) {
+        const { healthy, total } = health[silentZone];
+        console.info(
+          `[feed-health] suppressed blindspot for cluster ${c.id} (silent zone ${silentZone}: ${healthy}/${total} feeds healthy)`,
+        );
+      }
+      isBlindspot = false;
+      blindspotSide = null;
+    }
+  }
+
   const bundle: ClusterBundle = {
     cluster: {
       id: c.id,
@@ -502,9 +554,9 @@ export function buildClusterBundle(
           ? c.title_tr_neutral
           : c.title_tr,
       summary_tr: c.summary_tr,
-      bias_distribution: normalizeDistribution(c.bias_distribution),
-      is_blindspot: c.is_blindspot,
-      blindspot_side: c.blindspot_side,
+      bias_distribution: biasDistribution,
+      is_blindspot: isBlindspot,
+      blindspot_side: blindspotSide,
       // The DB-stored article_count may be stale between the recluster
       // pass and this render. Reflect the post-dedupe truth so the
       // "N kaynak" label matches the rendered list.
