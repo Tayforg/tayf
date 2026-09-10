@@ -259,4 +259,14 @@ describe("ZONE_META", () => {
     expect(ZONE_META.bagimsiz.label).toBe("Bağımsız");
     expect(ZONE_META.muhalefet.label).toBe("Muhalefet");
   });
+
+  it("gives bagimsiz visibly tinted dark-mode tokens (matches BIAS_COLORS.center's zinc-400 convention, not near-white zinc-300)", () => {
+    expect(ZONE_META.bagimsiz.zoneLabel).toContain("dark:text-zinc-400");
+    expect(ZONE_META.bagimsiz.zoneLabel).not.toContain("dark:text-zinc-300");
+    expect(ZONE_META.bagimsiz.chipText).toContain("dark:text-zinc-400");
+    expect(ZONE_META.bagimsiz.chipText).not.toContain("dark:text-zinc-300");
+    expect(ZONE_META.bagimsiz.zoneBg).toBe("bg-zinc-500/20");
+    expect(ZONE_META.bagimsiz.zoneBorder).toBe("border-zinc-400/40");
+    expect(ZONE_META.bagimsiz.chipBorder).toBe("border-zinc-500/30");
+  });
 });

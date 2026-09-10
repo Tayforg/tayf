@@ -43,6 +43,51 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
+/** Collects every `id` prop found anywhere in a React element tree. */
+function collectIds(node: unknown, out: string[] = []): string[] {
+  if (Array.isArray(node)) {
+    for (const child of node) collectIds(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { props?: { id?: unknown; children?: ReactNode } };
+    if (typeof el.props?.id === "string") out.push(el.props.id);
+    if (el.props?.children !== undefined) collectIds(el.props.children, out);
+  }
+  return out;
+}
+
+/**
+ * Walks every prop (className, href, children text, etc.) of every element
+ * in the tree and collects every string value found, recursing into nested
+ * elements and arrays. Unlike `collectText`, this also sees strings that
+ * were passed through a prop (e.g. a `PageHero subtitle`) rather than
+ * rendered as a JSX child.
+ */
+function collectStringProps(node: unknown, out: string[] = []): string[] {
+  if (typeof node === "string") {
+    out.push(node);
+    return out;
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) collectStringProps(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { props?: Record<string, unknown> };
+    if (el.props && typeof el.props === "object") {
+      for (const value of Object.values(el.props)) {
+        if (typeof value === "string") {
+          out.push(value);
+        } else if (value && typeof value === "object") {
+          collectStringProps(value, out);
+        }
+      }
+    }
+  }
+  return out;
+}
+
 describe("/metodoloji page", () => {
   it("renders every bias-zone contract number and label from the shared config", async () => {
     const { default: MethodologyPage } = await import("./page");
@@ -106,5 +151,26 @@ describe("/metodoloji page", () => {
     } else {
       process.env.NEXT_PUBLIC_CONTACT_EMAIL = original;
     }
+  });
+
+  // Regression guard: a table-of-contents pill pointing at a renamed or
+  // removed section id would silently break in-page navigation.
+  it("links every table-of-contents pill to a section id that exists on the page", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = MethodologyPage();
+    const ids = collectIds(tree);
+    const anchors = collectHrefs(tree).filter((href) => href.startsWith("#"));
+    expect(anchors.length).toBeGreaterThanOrEqual(7);
+    for (const href of anchors) expect(ids).toContain(href.slice(1));
+  });
+
+  // Regression guard: catches the stale "144 Türk haber kaynağı" claim
+  // (the count belongs on /sources, which computes it live) and a bias-zone
+  // column rendered as bare text without its contract dot colour.
+  it("never hard-codes a source count and marks each Medya DNA zone with its contract dot colour", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const strings = collectStringProps(MethodologyPage()).join(" ");
+    expect(strings).not.toMatch(/\d+\s*Türk haber kaynağ/);
+    for (const zone of Object.values(ZONE_META)) expect(strings).toContain(zone.dot);
   });
 });
