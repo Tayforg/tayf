@@ -75,11 +75,67 @@ if (typeof cleanupTimer.unref === "function") {
   cleanupTimer.unref();
 }
 
-/** Extract a client identifier from a Request. Falls back to "anon". */
+const MAX_KEY_LENGTH = 100;
+
+// Cheap shape check: IPv4, IPv6 (incl. brackets/zone id) and nothing else.
+// This keeps a garbage header value from poisoning the bucket key space
+// (e.g. an attacker sending a multi-KB string as x-real-ip).
+function isIpish(value: string): boolean {
+  return /^[0-9a-fA-F.:%[\]]{1,64}$/.test(value);
+}
+
+function normalizeIp(value: string | null): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  if (!isIpish(trimmed)) return null;
+  return trimmed.toLowerCase().slice(0, MAX_KEY_LENGTH);
+}
+
+/**
+ * Extract a client identifier from a Request. Falls back to "anon".
+ *
+ * Resolution order (first non-null wins):
+ *   1. `x-real-ip` — set by the Vercel edge, not client-controllable.
+ *   2. `x-vercel-forwarded-for`, first entry — also platform-set.
+ *   3. `x-forwarded-for`, LAST entry — the hop nearest our own edge. The
+ *      leftmost entry on a generic XFF chain is whatever the client sent,
+ *      so an attacker can rotate it to mint a fresh bucket per request for
+ *      every limiter (admin-post, corrections-post, newsletter-post,
+ *      cron-digest, cron-headline, revalidate-post, health-anon). We keep
+ *      this fallback (rather than dropping XFF) because if the
+ *      platform-set headers above turn out to be absent in production,
+ *      removing it would collapse every client into a single "anon"
+ *      bucket and 429 everyone on the two public forms.
+ *   4. "anon"
+ *
+ * OPEN VERIFICATION ITEM: which of `x-real-ip` / `x-vercel-forwarded-for`
+ * Vercel actually sets on this project has not yet been confirmed on a
+ * preview deploy. Until that's checked, treat step 3 as the effective,
+ * safety-net behavior — do not claim spoof-resistance in production based
+ * on steps 1-2 alone.
+ *
+ * NOTE: this limiter is still process-local (see module docstring above);
+ * durable limiting across replicas needs Upstash/Redis and is out of scope
+ * here.
+ */
 export function clientKey(req: Request): string {
+  const realIp = normalizeIp(req.headers.get("x-real-ip"));
+  if (realIp) return realIp;
+
+  const vercelForwarded = req.headers.get("x-vercel-forwarded-for");
+  if (vercelForwarded) {
+    const first = normalizeIp(vercelForwarded.split(",")[0] ?? null);
+    if (first) return first;
+  }
+
   const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) return forwarded.split(",")[0]!.trim();
-  const real = req.headers.get("x-real-ip");
-  if (real) return real;
+  if (forwarded) {
+    const parts = forwarded.split(",");
+    const lastPart = parts.length > 0 ? parts[parts.length - 1] : undefined;
+    const last = normalizeIp(lastPart ?? null);
+    if (last) return last;
+  }
+
   return "anon";
 }

@@ -27,6 +27,17 @@ function resetTableResponses() {
   for (const k of Object.keys(tableResponses)) delete tableResponses[k];
 }
 
+// Recorded writes, so tests can assert a mutation never reached the DB (or,
+// on the happy path, assert exactly what payload was written) without
+// tracking call order across the whole chain.
+interface RecordedWrite {
+  table: string;
+  op: "insert" | "update" | "delete";
+  payload: unknown;
+}
+
+let writes: RecordedWrite[] = [];
+
 vi.mock("@supabase/supabase-js", () => ({
   createClient: () => ({
     from: (table: string) => {
@@ -39,9 +50,18 @@ vi.mock("@supabase/supabase-js", () => ({
         Promise.resolve(resp()).then(onFul, onRej);
       Object.assign(chain, {
         select: () => chain,
-        insert: () => chain,
-        update: () => chain,
-        delete: () => chain,
+        insert: (payload: unknown) => {
+          writes.push({ table, op: "insert", payload });
+          return chain;
+        },
+        update: (payload: unknown) => {
+          writes.push({ table, op: "update", payload });
+          return chain;
+        },
+        delete: () => {
+          writes.push({ table, op: "delete", payload: undefined });
+          return chain;
+        },
         upsert: () => chain,
         order: () => chain,
         limit: () => chain,
@@ -97,6 +117,7 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   delete process.env.CRON_SECRET;
   resetTableResponses();
+  writes = [];
   __adminAuthed = true;
 });
 
@@ -171,6 +192,140 @@ describe("POST /api/admin", () => {
     });
     const res = await mod.POST(req);
     expect(res.status).toBe(400);
+  });
+
+  async function postAdmin(body: unknown) {
+    const mod = await import("@/app/api/admin/route");
+    const req = new Request("http://example.com/api/admin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return mod.POST(req);
+  }
+
+  const validAddSource = {
+    action: "add_source",
+    name: "Test",
+    slug: "test-source",
+    url: "https://test.example.com",
+    rss_url: "https://test.example.com/rss",
+    bias: "center",
+  };
+
+  describe("add_source validation", () => {
+    it("rejects an SSRF-shaped rss_url (link-local metadata) with no write", async () => {
+      const res = await postAdmin({
+        ...validAddSource,
+        rss_url: "http://169.254.169.254/latest/meta-data",
+      });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects an rss_url pointing at localhost with no write", async () => {
+      const res = await postAdmin({ ...validAddSource, rss_url: "https://localhost/feed.xml" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects a plain-http url with no write", async () => {
+      const res = await postAdmin({ ...validAddSource, url: "http://example.com" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects a javascript: url with no write", async () => {
+      const res = await postAdmin({ ...validAddSource, url: "javascript:alert(1)" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects a url over the length cap with no write", async () => {
+      const res = await postAdmin({
+        ...validAddSource,
+        url: "https://example.com/" + "a".repeat(600),
+      });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects an unknown bias with no write", async () => {
+      const res = await postAdmin({ ...validAddSource, bias: "definitely-not-a-bias" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects an unknown kind with no write", async () => {
+      const res = await postAdmin({ ...validAddSource, kind: "spy" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("accepts a valid payload, writing exactly one insert with no kind key", async () => {
+      const res = await postAdmin(validAddSource);
+      expect(res.status).toBe(200);
+      expect(writes.length).toBe(1);
+      const write = writes[0];
+      expect(write?.table).toBe("sources");
+      expect(write?.op).toBe("insert");
+      expect(write?.payload).toEqual({
+        name: "Test",
+        slug: "test-source",
+        url: "https://test.example.com",
+        rss_url: "https://test.example.com/rss",
+        bias: "center",
+        active: true,
+      });
+      expect(write?.payload).not.toHaveProperty("kind");
+    });
+
+    it("accepts a valid payload with kind, writing kind into the insert payload", async () => {
+      const res = await postAdmin({ ...validAddSource, kind: "wire" });
+      expect(res.status).toBe(200);
+      expect(writes.length).toBe(1);
+      const write = writes[0] as { payload: Record<string, unknown> };
+      expect(write.payload.kind).toBe("wire");
+    });
+  });
+
+  describe("update_source validation", () => {
+    it("rejects a private-range rss_url with no write", async () => {
+      const res = await postAdmin({ action: "update_source", id: "s1", rss_url: "https://10.0.0.5/feed" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects an unknown bias with no write", async () => {
+      const res = await postAdmin({ action: "update_source", id: "s1", bias: "nope" });
+      expect(res.status).toBe(400);
+      expect(writes.length).toBe(0);
+    });
+
+    it("rejects an id-only update with 'No fields to update' and no write", async () => {
+      const res = await postAdmin({ action: "update_source", id: "s1" });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe("No fields to update");
+      expect(writes.length).toBe(0);
+    });
+
+    it("writes exactly the provided fields on a partial update", async () => {
+      const res = await postAdmin({ action: "update_source", id: "s1", name: "New name" });
+      expect(res.status).toBe(200);
+      expect(writes.length).toBe(1);
+      const write = writes[0];
+      expect(write?.op).toBe("update");
+      expect(write?.payload).toEqual({ name: "New name" });
+    });
+  });
+
+  describe("auth precedence", () => {
+    it("401s an invalid-payload POST before validation runs", async () => {
+      __adminAuthed = false;
+      const res = await postAdmin({ action: "add_source", ...validAddSource, rss_url: "not a url" });
+      expect(res.status).toBe(401);
+    });
   });
 });
 

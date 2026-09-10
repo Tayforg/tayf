@@ -22,8 +22,13 @@ import { normalizeArticles } from "../../supabase/functions/_shared/rss/normaliz
 //      doesn't lose the decoded characters between fetcher → normalizer →
 //      Supabase upsert.
 //   3. SSRF / safety guards (rejecting feeds whose URL resolves into
-//      RFC1918 / 169.254 space) — partial coverage; B5 owns the full
-//      `safe-fetch` and tests it more deeply in image-consumer.test.ts.
+//      RFC1918 / 169.254 space) — the real guard now lives IN `fetchFeed`
+//      itself (SEC-01: fetchFeed routes through the shared `safeResponse`
+//      primitive, the same one the og-image path uses) and is covered
+//      directly, against the real fetcher module, in fetcher.test.ts. This
+//      file only proves that a guard rejection (`fetchFeed` returning
+//      `{ status: 0, error }`) propagates correctly through the mocked
+//      fetcher into the ingest cycle's fetch-state write and failure count.
 //
 // All Supabase + pgmq surfaces are mocked. No network. No live feeds.
 // ---------------------------------------------------------------------------
@@ -1077,6 +1082,49 @@ describe("ingest conditional-fetch state [migration 041]", () => {
       expect(body.rowErrors).toBe(0);
     },
   );
+
+  it("propagates an SSRF guard rejection as fetch_last_status 0 without disturbing stored validators [SEC-01]", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-sec01-ssrf",
+      name: "SSRF Fixture",
+      slug: "ssrf-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/ssrf.rss",
+      active: true,
+      fetch_etag: 'W/"seeded"',
+      fetch_last_modified: "Mon, 01 Jan 2024 00:00:00 GMT",
+      fetch_body_hash: "seeded-hash",
+    });
+    // fetchFeed is mocked in this file (see the top-of-file vi.mock) — this
+    // override simulates the real (unmocked, fetcher.test.ts-covered)
+    // guard's rejection shape for a literal link-local target: status 0,
+    // no items, an error string identifying the blocked range.
+    fetcherResultOverrides["https://example.com/ssrf.rss"] = {
+      status: 0,
+      error: "URL rejected: literal IP in blocked range (link-local 169.254.0.0/16)",
+    };
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    const body = (await res.json()) as { failed?: number };
+
+    expect(body.failed).toBeGreaterThanOrEqual(1);
+    expect(sourceFetchStateWrites).toHaveLength(1);
+    expect(sourceFetchStateWrites[0]?.fn).toBe("ingest_set_source_fetch_state");
+    const row = sourceFetchStateWrites[0]?.rows.find(
+      (r) => r.id === "src-sec01-ssrf",
+    );
+    expect(row).toBeDefined();
+    expect(row?.fetch_last_status).toBe(0);
+    // A guard rejection carries no fresh validators (it never reached a
+    // 2xx), so the write must keep whatever was already stored rather than
+    // blanking it to null.
+    expect(row?.fetch_etag).toBe('W/"seeded"');
+  });
 });
 
 // ---------------------------------------------------------------------------
