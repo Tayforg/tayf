@@ -236,6 +236,7 @@ function makeCluster(overrides: {
     id: "c1",
     title_tr: "Test kümesi",
     title_original: null,
+    title_method: null,
     summary_tr: "Test özeti",
     article_count: 3,
     bias_distribution: overrides.bias_distribution,

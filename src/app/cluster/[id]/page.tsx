@@ -367,7 +367,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     href="/metodoloji#basliklar"
                     className="underline decoration-dotted underline-offset-2 hover:text-foreground"
                   >
-                    AI ile tarafsızlaştırıldı
+                    {cluster.title_method === "extractive"
+                      ? "Kaynak başlıklarından seçildi"
+                      : "AI ile tarafsızlaştırıldı"}
                   </Link>
                   <details className="inline">
                     <summary className="inline cursor-pointer list-none underline decoration-dotted underline-offset-2 hover:text-foreground">

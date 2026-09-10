@@ -318,6 +318,24 @@ describe("getClusterDetail row shaping", () => {
     let result = await getClusterDetail("cluster-1");
     expect(result!.cluster.title_tr).toBe("neutral version");
     expect(result!.cluster.title_original).toBe("orig");
+    expect(result!.cluster.title_method).toBe("llm");
+
+    // 1b. extractive provenance → labelled as such, still discloses original
+    callLog = [];
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          title_tr: "orig",
+          title_tr_neutral: "picked version",
+          title_neutral_model: "extractive-v1",
+        }),
+        error: null,
+      },
+    };
+    result = await getClusterDetail("cluster-1");
+    expect(result!.cluster.title_tr).toBe("picked version");
+    expect(result!.cluster.title_original).toBe("orig");
+    expect(result!.cluster.title_method).toBe("extractive");
 
     // 2. neutral present but whitespace-only → falls back
     callLog = [];

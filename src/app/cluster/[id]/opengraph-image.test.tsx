@@ -55,6 +55,7 @@ function mkDetail(
       id: "x",
       title_tr: "Test kümesi başlığı",
       title_original: null,
+      title_method: null,
       summary_tr: "Özet",
       article_count,
       bias_distribution: {

@@ -414,6 +414,16 @@ export default async function MethodologyPage() {
             tarafsızlaştırıldı&quot; rozetinin altında her zaman
             görüntülenebilir.
           </p>
+          <p className={proseClass}>
+            LLM kapalıyken ara bir adım çalışır: en az 2 kaynağı olan kümeler
+            için üye başlıklar arasından diğerlerine en çok benzeyen, en az
+            sansasyonel olanı seçilir ve kaynağın üslup işaretleri
+            (&quot;Son dakika&quot;, ünlem, büyük harf, &quot;Başkan
+            Erdoğan&quot; gibi ev stili) temizlenir. Bu bir sentez değildir
+            ve yapay zekâ kullanmaz; küme sayfasında &quot;Kaynak
+            başlıklarından seçildi&quot; olarak etiketlenir ve yukarıdaki
+            sayıma dahil edilmez.
+          </p>
           <details className="group rounded-lg ring-1 ring-border/50 bg-muted/20">
             <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground list-none [&::-webkit-details-marker]:hidden hover:text-foreground">
               <span

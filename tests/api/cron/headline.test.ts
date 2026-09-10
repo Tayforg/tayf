@@ -585,3 +585,57 @@ describe("GET /api/cron/headline", () => {
     expect(timingSafeEqualSpy).toHaveBeenCalled();
   });
 });
+
+describe("GET /api/cron/headline — extractive mode (no LLM key)", () => {
+  it("writes a cleaned member headline with extractive provenance, no title_neutral_at, and never calls the LLM", async () => {
+    process.env.CRON_SECRET = "shhh";
+    delete process.env.ANTHROPIC_API_KEY;
+    setTableResponse("clusters", {
+      data: [
+        {
+          id: "c1",
+          title_tr: "Original TR",
+          summary_tr: "",
+          title_tr_neutral: null,
+          title_neutral_at: null,
+          article_count: 2,
+        },
+      ],
+      error: null,
+    });
+    setTableResponse("cluster_articles", {
+      data: [
+        { articles: { title: "Atama kararları Resmi Gazete'de!", published_at: "2026-01-01T00:00:00Z" } },
+        { articles: { title: "Atama kararları Resmi Gazete'de yayımlandı", published_at: "2026-01-02T00:00:00Z" } },
+      ],
+      error: null,
+    });
+
+    const mod = await tryImportRoute();
+    const handler = mod?.GET ?? mod?.POST;
+    if (!handler) throw new Error("route has no handler");
+    const res = await handler(
+      new Request("http://example.com/api/cron/headline", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { mode?: string; rewrote?: number };
+    expect(body.mode).toBe("extractive");
+    expect(body.rewrote).toBe(1);
+    expect(llmFetchSpy).not.toHaveBeenCalled();
+
+    const clusterUpdate = updateCalls.find((u) => u.table === "clusters");
+    expect(clusterUpdate).toBeDefined();
+    const patch = clusterUpdate!.patch as {
+      title_tr_neutral?: unknown;
+      title_neutral_at?: unknown;
+      title_neutral_model?: unknown;
+      title_neutral_prompt_version?: unknown;
+    };
+    expect(patch.title_tr_neutral).toBe("Atama kararları Resmi Gazete'de yayımlandı");
+    expect(patch.title_neutral_model).toBe("extractive-v1");
+    expect(patch.title_neutral_at).toBeUndefined();
+    expect(patch.title_neutral_prompt_version).toBeUndefined();
+  });
+});

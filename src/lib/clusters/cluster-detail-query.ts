@@ -1,3 +1,4 @@
+import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 import { cacheLife, cacheTag } from "next/cache";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
@@ -94,6 +95,10 @@ export interface ClusterDetail {
     id: string;
     title_tr: string;
     title_original: string | null;
+    /** How the displayed title was produced when it differs from the
+     *  original: "llm" for a model rewrite, "extractive" for a cleaned
+     *  member headline. null when title_original is null. */
+    title_method: "llm" | "extractive" | null;
     summary_tr: string;
     article_count: number;
     bias_distribution: BiasDistribution;
@@ -145,6 +150,10 @@ type ClusterRow = {
    * win as soon as they exist without overwriting the original.
    */
   title_tr_neutral: string | null;
+  /** Provenance for title_tr_neutral (migration 046): an LLM model id, or
+   *  EXTRACTIVE_MODEL_ID when the headline cron picked a member headline
+   *  instead of calling an LLM. NULL when nothing was written. */
+  title_neutral_model: string | null;
   summary_tr: string;
   article_count: number;
   bias_distribution: unknown;
@@ -231,7 +240,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       supabase
         .from("clusters")
         .select(
-          "id, title_tr, title_tr_neutral, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, first_published, updated_at"
+          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, first_published, updated_at"
         )
         .eq("id", id)
         .maybeSingle<ClusterRow>(),
@@ -408,6 +417,14 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           clusterRow.title_tr_neutral.trim().length > 0 &&
           clusterRow.title_tr_neutral.trim() !== clusterRow.title_tr.trim()
             ? clusterRow.title_tr
+            : null,
+        title_method:
+          clusterRow.title_tr_neutral &&
+          clusterRow.title_tr_neutral.trim().length > 0 &&
+          clusterRow.title_tr_neutral.trim() !== clusterRow.title_tr.trim()
+            ? clusterRow.title_neutral_model === EXTRACTIVE_MODEL_ID
+              ? "extractive"
+              : "llm"
             : null,
         summary_tr: clusterRow.summary_tr,
         // The DB-stored article_count may be stale between the recluster

@@ -9,6 +9,7 @@ import {
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
+import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
 
 // Boot-time guard. The route is FAIL-CLOSED on a missing `CRON_SECRET` (503
 // on every invocation), but in production that failure is otherwise only
@@ -21,14 +22,14 @@ if (process.env.NODE_ENV === "production" && !process.env.CRON_SECRET) {
   );
 }
 
-// Same boot-time visibility for a missing LLM key: the per-request gate
-// below soft no-ops (200 {skipped:true}) rather than erroring, which is the
-// correct fail-safe behaviour but easy to miss in a request-log-only view —
-// an operator staring at the boot log should be able to tell at a glance
-// why neutral titles never show up. Idempotent: runs once per module init.
+// Same boot-time visibility for a missing LLM key: without it the route runs
+// in extractive mode (picks and cleans a member headline, see
+// src/lib/clusters/neutral-title.ts) rather than calling an LLM. Correct
+// fail-safe behaviour, but an operator staring at the boot log should be
+// able to tell at a glance why titles are extractive. Idempotent.
 if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
   console.warn(
-    "[headline-cron] ANTHROPIC_API_KEY is not set; neutral titles are disabled",
+    "[headline-cron] ANTHROPIC_API_KEY is not set; running in extractive mode",
   );
 }
 
@@ -47,6 +48,18 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * result into `clusters.title_tr_neutral` and stamps
  * `title_neutral_at = now()`. The LLM cost stays under $1/month at the
  * default cadence — keep the batch small.
+ *
+ * EXTRACTIVE MODE
+ * ---------------
+ * With no ANTHROPIC_API_KEY the route does not go idle: it picks the most
+ * central, least sensational member headline and strips the outlet's
+ * framing from it (`src/lib/clusters/neutral-title.ts`). That costs
+ * nothing, so it covers 2+ source clusters in a bigger batch. It fills
+ * `title_tr_neutral` and stamps `title_neutral_model = "extractive-v1"`
+ * but leaves `title_neutral_at` NULL — so nothing that counts "AI
+ * neutralized" (rss.xml, /metodoloji, /api/metrics) counts these, and
+ * enabling the LLM later re-titles the same clusters. The extractive title
+ * is a floor, not a verdict.
  *
  * AUTH
  * ----
@@ -75,6 +88,13 @@ const headlineLimit = createRateLimiter("cron-headline", {
 // so a transient 5xx doesn't blow the whole cycle and so monthly spend
 // stays bounded.
 const LLM_BATCH = 5;
+
+// Extractive mode has no per-cluster cost, so it covers every multi-source
+// cluster and drains faster. Selection is on title_tr_neutral IS NULL, which
+// migration 019's partial index does not cover; at ~100k clusters with the
+// is_archived + article_count filters the scan is still milliseconds.
+const EXTRACTIVE_MIN_ARTICLE_COUNT = 2;
+const EXTRACTIVE_BATCH = 50;
 
 // Same `MEMBER_TITLES_CAP` as the tmux worker. The rewriter slices to 8
 // internally; we ask for a couple extra so the slice is meaningful even
@@ -194,16 +214,12 @@ export const GET = withApiErrors(async (request: Request) => {
     });
   }
 
-  // No API key → soft no-op. The cron will keep firing every 5 minutes,
+  // No API key → extractive mode. The cron keeps firing every 5 minutes,
   // so an operator that drops a key into Vercel env vars and redeploys
-  // gets healing on the very next tick — no manual kick needed.
-  if (!process.env.ANTHROPIC_API_KEY) {
-    return NextResponse.json({
-      skipped: true,
-      reason: "LLM API key not set",
-      timestamp: new Date().toISOString(),
-    });
-  }
+  // gets LLM titles on the very next tick — no manual kick needed.
+  const mode: "llm" | "extractive" = process.env.ANTHROPIC_API_KEY
+    ? "llm"
+    : "extractive";
 
   const supabase = createServerClient();
 
@@ -218,11 +234,14 @@ export const GET = withApiErrors(async (request: Request) => {
   const { data: clustersData, error: pickError } = await supabase
     .from("clusters")
     .select("id, title_tr, summary_tr, article_count")
-    .is("title_neutral_at", null)
+    .is(mode === "llm" ? "title_neutral_at" : "title_tr_neutral", null)
     .eq("is_archived", false)
-    .gte("article_count", MIN_ARTICLE_COUNT)
+    .gte(
+      "article_count",
+      mode === "llm" ? MIN_ARTICLE_COUNT : EXTRACTIVE_MIN_ARTICLE_COUNT,
+    )
     .order("updated_at", { ascending: false })
-    .limit(LLM_BATCH);
+    .limit(mode === "llm" ? LLM_BATCH : EXTRACTIVE_BATCH);
 
   if (pickError) {
     return apiServerError(pickError);
@@ -233,6 +252,7 @@ export const GET = withApiErrors(async (request: Request) => {
   if (clusters.length === 0) {
     return NextResponse.json({
       success: true,
+      mode,
       rewrote: 0,
       skipped: 0,
       errored: 0,
@@ -289,9 +309,12 @@ export const GET = withApiErrors(async (request: Request) => {
       continue;
     }
 
-    let neutral: string;
+    let neutral: string | null;
     try {
-      neutral = await rewriteClusterHeadline({ member_titles: memberTitles });
+      neutral =
+        mode === "llm"
+          ? await rewriteClusterHeadline({ member_titles: memberTitles })
+          : pickNeutralTitle(items);
     } catch (err) {
       // Keep the raw `err` out of the response body — it can carry vendor
       // identifiers, prompt fragments, or upstream rate-limit details that
@@ -318,15 +341,24 @@ export const GET = withApiErrors(async (request: Request) => {
 
     const { error: writeErr } = await supabase
       .from("clusters")
-      .update({
-        title_tr_neutral: neutral,
-        title_neutral_at: new Date().toISOString(),
-        // Provenance (migration 046): the model id actually used for this
-        // rewrite and the prompt-template version that produced it, so a
-        // rewrite can never land without an audit trail.
-        title_neutral_model: LLM_MODEL,
-        title_neutral_prompt_version: HEADLINE_PROMPT_VERSION,
-      })
+      .update(
+        mode === "llm"
+          ? {
+              title_tr_neutral: neutral,
+              title_neutral_at: new Date().toISOString(),
+              // Provenance (migration 046): the model id actually used for
+              // this rewrite and the prompt-template version that produced
+              // it, so a rewrite can never land without an audit trail.
+              title_neutral_model: LLM_MODEL,
+              title_neutral_prompt_version: HEADLINE_PROMPT_VERSION,
+            }
+          : {
+              // No title_neutral_at: an extractive pick is not an AI
+              // neutralization and must not be counted as one.
+              title_tr_neutral: neutral,
+              title_neutral_model: EXTRACTIVE_MODEL_ID,
+            },
+      )
       .eq("id", c.id);
 
     if (writeErr) {
@@ -357,6 +389,7 @@ export const GET = withApiErrors(async (request: Request) => {
 
   return NextResponse.json({
     success: true,
+    mode,
     rewrote,
     skipped,
     errored,
