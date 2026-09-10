@@ -65,6 +65,7 @@ export async function generateMetadata({
       members,
       wire,
     }),
+    title: cluster.title_tr,
   });
 
   return {
@@ -80,6 +81,14 @@ export async function generateMetadata({
     alternates: {
       canonical: `/cluster/${id}`,
     },
+    // seo-3: an archived cluster (migration 037's retention cron) still
+    // serves a real 200 — old shared links must keep working — but it must
+    // stop competing for crawl budget / index slots against live clusters.
+    // Omitted entirely (undefined) for non-archived clusters so metadata
+    // inheritance from the root layout's default robots stays in effect.
+    ...(cluster.is_archived
+      ? { robots: { index: false, follow: true } }
+      : {}),
     openGraph: {
       title: cluster.title_tr,
       description,
@@ -262,6 +271,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     description: describeForMeta({
       count: wire.effectiveArticleCount,
       attribution: summary,
+      title: cluster.title_tr,
     }),
     // Always the generated Medya DNA card from opengraph-image.tsx (already
     // the live og:image for this route) — never the outlet's raw CDN photo.
@@ -529,9 +539,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
           className="rounded-xl border border-dashed border-border/50 bg-card/20 p-4 opacity-70 animate-fade-up stagger-2"
         >
           <div className="flex items-baseline justify-between gap-2">
-            <h3 className="font-serif text-sm font-semibold">
+            <h2 className="font-serif text-sm font-semibold">
               Toplayıcı / niş kaynaklar
-            </h3>
+            </h2>
             <span className="text-[10px] tabular-nums text-muted-foreground">
               {nonVotingMembers.length} kaynak · spektruma sayılmaz
             </span>

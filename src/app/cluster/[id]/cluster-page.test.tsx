@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import type {
   ClusterDetail,
@@ -7,6 +8,7 @@ import type {
 } from "@/lib/clusters/cluster-detail-query";
 import type { BiasDistribution, Source } from "@/types";
 import { FramingComparison } from "@/components/story/framing-comparison";
+import { MediaDna } from "@/components/story/media-dna";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -40,7 +42,7 @@ vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
 }));
 
-import ClusterDetailPage from "./page";
+import ClusterDetailPage, { generateMetadata } from "./page";
 
 /** Collects every string/number leaf under a React element tree. */
 function collectText(node: unknown, out: string[] = []): string[] {
@@ -180,6 +182,47 @@ function findJsonLd(node: unknown): string | null {
   return null;
 }
 
+/**
+ * Collects every heading tag (h1..h6) reachable from the page tree, in
+ * document order — for the react-1 outline check. Calling a Server
+ * Component function directly (as `ClusterDetailPage` is called throughout
+ * this file) leaves nested custom components unexpanded in the returned
+ * element tree, so the two components on this page that can carry a
+ * heading are special-cased: `FramingComparison` is a plain, hookless
+ * function — safe to call directly and recurse into its return value.
+ * `MediaDna` is a "use client" component that calls `useState`, so it's
+ * rendered through `renderToStaticMarkup` instead, which provides the real
+ * hook dispatcher a direct call would lack.
+ */
+function collectHeadings(node: unknown, out: string[] = []): string[] {
+  if (Array.isArray(node)) {
+    for (const child of node) collectHeadings(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: { children?: ReactNode } };
+    if (typeof el.type === "string" && /^h[1-6]$/.test(el.type)) {
+      out.push(el.type);
+    }
+    if (el.type === FramingComparison) {
+      const rendered = (FramingComparison as (props: unknown) => ReactNode)(
+        el.props,
+      );
+      collectHeadings(rendered, out);
+      return out;
+    }
+    if (el.type === MediaDna) {
+      const markup = renderToStaticMarkup(
+        node as Parameters<typeof renderToStaticMarkup>[0],
+      );
+      for (const m of markup.match(/<h[1-6]\b/g) ?? []) out.push(m.slice(1));
+      return out;
+    }
+    if (el.props?.children !== undefined) collectHeadings(el.props.children, out);
+  }
+  return out;
+}
+
 function emptyDistribution(): BiasDistribution {
   return {
     pro_government: 0,
@@ -231,12 +274,15 @@ function makeMember(
 
 function makeCluster(overrides: {
   bias_distribution: BiasDistribution;
+  is_archived?: boolean;
+  title_original?: string | null;
+  title_method?: ClusterDetail["cluster"]["title_method"];
 }): ClusterDetail["cluster"] {
   return {
     id: "c1",
     title_tr: "Test kümesi",
-    title_original: null,
-    title_method: null,
+    title_original: overrides.title_original ?? null,
+    title_method: overrides.title_method ?? null,
     summary_tr: "Test özeti",
     article_count: 3,
     bias_distribution: overrides.bias_distribution,
@@ -244,6 +290,7 @@ function makeCluster(overrides: {
     blindspot_side: null,
     first_published: "2026-09-06T10:00:00.000Z",
     updated_at: "2026-09-06T12:00:00.000Z",
+    is_archived: overrides.is_archived ?? false,
   };
 }
 
@@ -605,5 +652,138 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         name: "İzinli Kaynak",
       },
     });
+  });
+});
+
+describe("generateMetadata — seo-3 archived noindex", () => {
+  it("marks robots index:false, follow:true when the cluster is archived (page itself still serves 200)", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution(), is_archived: true }),
+      members,
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+  });
+
+  it("leaves robots unset (inherits the root layout) when the cluster is not archived", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution(), is_archived: false }),
+      members,
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    expect(metadata.robots).toBeUndefined();
+  });
+});
+
+describe("ClusterDetailPage — title provenance label (tests-2)", () => {
+  it("shows the LLM-neutralized label, not the extractive one, when title_method is 'llm'", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({
+        bias_distribution: emptyDistribution(),
+        title_original: "orig",
+        title_method: "llm",
+      }),
+      members,
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const text = collectText(tree).join("");
+
+    expect(text).toContain("AI ile tarafsızlaştırıldı");
+    expect(text).not.toContain("Kaynak başlıklarından seçildi");
+  });
+
+  it("shows the extractive label, not the LLM one, when title_method is 'extractive'", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({
+        bias_distribution: emptyDistribution(),
+        title_original: "orig",
+        title_method: "extractive",
+      }),
+      members,
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const text = collectText(tree).join("");
+
+    expect(text).toContain("Kaynak başlıklarından seçildi");
+    expect(text).not.toContain("AI ile tarafsızlaştırıldı");
+  });
+});
+
+describe("ClusterDetailPage — heading outline (react-1)", () => {
+  it("has exactly one h1 and no h3 that isn't preceded by an h2", async () => {
+    const outlet = makeSource({
+      id: "s-outlet",
+      slug: "s-outlet",
+      name: "Outlet Gazete",
+      bias: "pro_government",
+      kind: "outlet",
+    });
+    const aggregator = makeSource({
+      id: "s-aggregator",
+      slug: "s-aggregator",
+      name: "Haberler.com",
+      bias: "center",
+      kind: "aggregator",
+    });
+    const members: ClusterDetailMember[] = [
+      makeMember("a-outlet", outlet),
+      makeMember("a-aggregator", aggregator),
+    ];
+
+    const distribution = emptyDistribution();
+    distribution.pro_government = 1;
+
+    const detail: ClusterDetail = {
+      // Voting + non-voting members so FramingComparison AND the
+      // Toplayıcı/niş section both render. Only FramingComparison and
+      // MediaDna are expanded by collectHeadings — they are the only page
+      // children that render a heading today (grep `<h[1-6]` under
+      // src/components when the page's component set changes).
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members,
+      allSources: [outlet, aggregator],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 2, memberCount: 2 },
+      blindspotSuppressed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const headings = collectHeadings(tree);
+
+    expect(headings.filter((h) => h === "h1")).toHaveLength(1);
+
+    let sawH2 = false;
+    for (const h of headings) {
+      if (h === "h2") sawH2 = true;
+      if (h === "h3") expect(sawH2).toBe(true);
+    }
   });
 });

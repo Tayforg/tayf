@@ -131,6 +131,15 @@ export function summaryAttribution({
 
 const ELLIPSIS = "…";
 
+/** Word-boundary truncation shared by every `describeForMeta` branch. */
+function truncateWords(full: string, max: number): string {
+  if (full.length <= max) return full;
+  const truncated = full.slice(0, Math.max(0, max - 1));
+  const lastSpace = truncated.lastIndexOf(" ");
+  const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
+  return cut + ELLIPSIS;
+}
+
 /**
  * Meta/JSON-LD description: source count, plus attribution when present,
  * word-truncated to `max`. `base`, when supplied, replaces the default
@@ -139,28 +148,40 @@ const ELLIPSIS = "…";
  * still required so `base`-less callers keep the original default; it is
  * ignored once `base` is present. `base` only overrides the leading
  * sentence, never the attribution prefix or the truncation behaviour.
+ *
+ * seo-2: when there's no attribution AND no `base` override, every such
+ * cluster used to share the identical generic "{count} kaynak." meta
+ * description — bad for unique-per-page SEO. `title`, when supplied, is
+ * used instead to build a per-cluster fallback sentence. `base`-supplying
+ * callers (rss.xml) are unaffected: the fallback only fires when `base` is
+ * absent, so their own composed prefix always wins.
  */
 export function describeForMeta(
   {
     count,
     attribution,
     base,
-  }: { count: number; attribution: SummaryAttribution | null; base?: string },
+    title,
+  }: {
+    count: number;
+    attribution: SummaryAttribution | null;
+    base?: string;
+    title?: string;
+  },
   max = 160,
 ): string {
   const head = base ?? `${count} kaynak.`;
-  if (!attribution) return head;
+  if (!attribution) {
+    if (base === undefined && title && title.trim().length > 0) {
+      return truncateWords(`${count} kaynak, tek haber: ${title.trim()}`, max);
+    }
+    return head;
+  }
 
   const prefix = attribution.source
     ? `${head} ${attribution.source.name}: `
     : `${head} Kaynak açıklaması: `;
-  const full = prefix + attribution.text;
-  if (full.length <= max) return full;
-
-  const truncated = full.slice(0, Math.max(0, max - 1));
-  const lastSpace = truncated.lastIndexOf(" ");
-  const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
-  return cut + ELLIPSIS;
+  return truncateWords(prefix + attribution.text, max);
 }
 
 /**

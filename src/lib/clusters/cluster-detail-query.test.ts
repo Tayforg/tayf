@@ -137,6 +137,7 @@ function mkClusterRow(overrides: Record<string, unknown> = {}) {
     blindspot_side: null,
     first_published: "2026-04-17T08:00:00Z",
     updated_at: "2026-04-17T12:00:00Z",
+    is_archived: false,
     ...overrides,
   };
 }
@@ -225,6 +226,9 @@ describe("getClusterDetail query shape", () => {
     expect(selectArg).toMatch(/\bis_blindspot\b/);
     expect(selectArg).toMatch(/\bblindspot_side\b/);
     expect(selectArg).toMatch(/\bbias_distribution\b/);
+    // seo-3: archived clusters must be marked noindex on the detail page —
+    // the select must fetch is_archived so the page can read it.
+    expect(selectArg).toMatch(/\bis_archived\b/);
     const clusterEq = clustersCall!.steps.find((s) => s.method === "eq");
     expect(clusterEq!.args).toEqual(["id", "cluster-1"]);
     expect(
@@ -489,6 +493,30 @@ describe("getClusterDetail row shaping", () => {
     expect(bySource["s-aggregator"]).toBe("aggregator");
     expect(bySource["s-null-kind"]).toBe("outlet");
     expect(bySource["s-no-kind"]).toBe("outlet");
+  });
+});
+
+describe("seo-3 is_archived pass-through", () => {
+  it("threads is_archived: true from the row to cluster.is_archived", async () => {
+    responses.clusters = {
+      maybeSingle: { data: mkClusterRow({ is_archived: true }), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.cluster.is_archived).toBe(true);
+  });
+
+  it("threads is_archived: false from the row to cluster.is_archived", async () => {
+    responses.clusters = {
+      maybeSingle: { data: mkClusterRow({ is_archived: false }), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.cluster.is_archived).toBe(false);
   });
 });
 

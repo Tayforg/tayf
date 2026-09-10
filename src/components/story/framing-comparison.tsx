@@ -103,9 +103,9 @@ export function FramingComparison({ members }: FramingComparisonProps) {
   return (
     <div className="space-y-4">
       <div>
-        <h3 className="font-serif text-base font-bold tracking-tight">
+        <h2 className="font-serif text-base font-bold tracking-tight">
           Aynı Haber, Farklı Dünyalar
-        </h3>
+        </h2>
         <p className="mt-0.5 text-[11px] text-muted-foreground">
           {total} kaynağın kendi manşetleri, yan yana — her sütun bir
           medya dünyası.

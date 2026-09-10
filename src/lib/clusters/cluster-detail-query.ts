@@ -106,6 +106,8 @@ export interface ClusterDetail {
     blindspot_side: BiasCategory | null;
     first_published: string;
     updated_at: string;
+    /** seo-3 (migration 037): archived → noindex,follow on the detail page. */
+    is_archived: boolean;
   };
   members: ClusterDetailMember[];
   allSources: Source[]; // all 144, for MediaDNA rendering
@@ -161,6 +163,9 @@ type ClusterRow = {
   blindspot_side: BiasCategory | null;
   first_published: string;
   updated_at: string;
+  /** seo-3 (migration 037): true once the retention cron has archived this
+   *  cluster — the detail page still serves it but must go noindex. */
+  is_archived: boolean;
 };
 
 /**
@@ -240,7 +245,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       supabase
         .from("clusters")
         .select(
-          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, first_published, updated_at"
+          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, first_published, updated_at, is_archived"
         )
         .eq("id", id)
         .maybeSingle<ClusterRow>(),
@@ -435,6 +440,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         blindspot_side: blindspotSide,
         first_published: clusterRow.first_published,
         updated_at: clusterRow.updated_at,
+        is_archived: clusterRow.is_archived,
       },
       members: dedupedMembers,
       allSources: sourcesRes.data ?? [],

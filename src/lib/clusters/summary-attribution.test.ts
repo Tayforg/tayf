@@ -144,6 +144,47 @@ describe("describeForMeta base override", () => {
     expect(result.startsWith("2 kaynaktan haberler. Kaynak açıklaması:")).toBe(true);
   });
 });
+describe("describeForMeta title fallback (seo-2 unique descriptions)", () => {
+  it("falls back to a per-cluster description built from the title when there is no attribution and no base", () => {
+    const result = describeForMeta({
+      count: 4,
+      attribution: null,
+      title: "Uzun bir haber başlığı burada duruyor",
+    });
+    expect(result).toContain("Uzun bir haber başlığı burada duruyor");
+    expect(result.length).toBeLessThanOrEqual(160);
+  });
+
+  it("gives two different titles (same count) different descriptions", () => {
+    const a = describeForMeta({ count: 4, attribution: null, title: "Başlık A" });
+    const b = describeForMeta({ count: 4, attribution: null, title: "Başlık B" });
+    expect(a).not.toBe(b);
+  });
+
+  it("keeps the bare '{count} kaynak.' when both attribution and title are absent", () => {
+    expect(describeForMeta({ count: 5, attribution: null })).toBe("5 kaynak.");
+  });
+
+  it("truncates the title fallback on a word boundary with the ellipsis, like the attribution path", () => {
+    const longTitle =
+      "bir iki üç dört beş altı yedi sekiz dokuz on onbir oniki onüç ondört onbeş";
+    const result = describeForMeta({ count: 2, attribution: null, title: longTitle }, 40);
+    expect(result.length).toBeLessThanOrEqual(40);
+    expect(result.endsWith("…")).toBe(true);
+  });
+
+  it("prefers an explicit base over the title fallback — rss.xml's own prefix is unaffected", () => {
+    expect(
+      describeForMeta({
+        count: 5,
+        attribution: null,
+        title: "Bir başlık",
+        base: "5 kaynaktan haberler.",
+      }),
+    ).toBe("5 kaynaktan haberler.");
+  });
+});
+
 describe("summaryAttribution with a lighter member shape", () => {
   it("accepts a member lighter than ClusterDetailMember", () => {
     expect(
