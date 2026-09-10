@@ -119,7 +119,7 @@ function normalizeIp(value: string | null): string | null {
  * durable limiting across replicas needs Upstash/Redis and is out of scope
  * here.
  */
-export function clientKey(req: Request): string {
+export function clientKey(req: { headers: Pick<Headers, "get"> }): string {
   const realIp = normalizeIp(req.headers.get("x-real-ip"));
   if (realIp) return realIp;
 

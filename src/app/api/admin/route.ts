@@ -84,15 +84,20 @@ export const POST = withApiErrors(async (request: Request) => {
 
   switch (action) {
     case "nuke_articles": {
-      await supabase.from("cluster_articles").delete().gte("cluster_id", "00000000-0000-0000-0000-000000000000");
-      await supabase.from("clusters").delete().gte("id", "00000000-0000-0000-0000-000000000000");
-      await supabase.from("articles").delete().gte("id", "00000000-0000-0000-0000-000000000000");
+      const { error: caError } = await supabase.from("cluster_articles").delete().gte("cluster_id", "00000000-0000-0000-0000-000000000000");
+      if (caError) return apiServerError(caError);
+      const { error: clError } = await supabase.from("clusters").delete().gte("id", "00000000-0000-0000-0000-000000000000");
+      if (clError) return apiServerError(clError);
+      const { error: arError } = await supabase.from("articles").delete().gte("id", "00000000-0000-0000-0000-000000000000");
+      if (arError) return apiServerError(arError);
       return NextResponse.json({ success: true, message: "All articles and clusters deleted" });
     }
 
     case "nuke_clusters": {
-      await supabase.from("cluster_articles").delete().gte("cluster_id", "00000000-0000-0000-0000-000000000000");
-      await supabase.from("clusters").delete().gte("id", "00000000-0000-0000-0000-000000000000");
+      const { error: caError } = await supabase.from("cluster_articles").delete().gte("cluster_id", "00000000-0000-0000-0000-000000000000");
+      if (caError) return apiServerError(caError);
+      const { error: clError } = await supabase.from("clusters").delete().gte("id", "00000000-0000-0000-0000-000000000000");
+      if (clError) return apiServerError(clError);
       return NextResponse.json({ success: true, message: "All clusters deleted" });
     }
 

@@ -91,6 +91,13 @@ const nextConfig: NextConfig = {
       process.env.NODE_ENV === "production"
         ? "script-src 'self' 'unsafe-inline'"
         : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
+    // connect-src allows local Supabase (54321) only outside production —
+    // that origin is dev-only (`supabase start`) and has no reason to be
+    // in the production CSP.
+    const connectSrc =
+      process.env.NODE_ENV === "production"
+        ? "connect-src 'self' https: ws: wss:"
+        : "connect-src 'self' https: http://127.0.0.1:54321 ws: wss:";
     return [
       {
         source: "/(.*)",
@@ -105,9 +112,10 @@ const nextConfig: NextConfig = {
               // images from ~144 Turkish news CDNs (see images.remotePatterns note).
               "img-src 'self' data: blob: https:",
               "font-src 'self' data:",
-              // connect-src allows local Supabase (54321) plus arbitrary https/ws for
-              // RSS-driven previews and dev HMR sockets.
-              "connect-src 'self' https: http://127.0.0.1:54321 ws: wss:",
+              // connect-src allows arbitrary https/ws for RSS-driven previews and
+              // dev HMR sockets; local Supabase (54321) is added only outside
+              // production (see `connectSrc` above).
+              connectSrc,
               "frame-ancestors 'self'",
               "base-uri 'self'",
               "form-action 'self'",

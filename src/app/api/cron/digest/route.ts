@@ -8,6 +8,7 @@ import { siteUrl } from "@/lib/site-url";
 import { getPoliticsClusters } from "@/lib/clusters/politics-query";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
 import { getRssSummaryMembers } from "@/lib/clusters/rss-summary-attribution";
+import { captureServerException } from "@/lib/sentry/server";
 import {
   resolveSummaryAttribution,
   type SummaryMember,
@@ -280,6 +281,10 @@ export const GET = withApiErrors(async (request: Request) => {
           .eq("id", row.id);
         if (updateError) {
           console.error("[digest-cron] last_sent_at update failed", row.id, updateError);
+          captureServerException(
+            new Error(redactEmails(updateError.message).slice(0, 300)),
+            { subscriberId: row.id, code: updateError.code },
+          );
         }
       } else {
         // Missing API key (`skipped: true`) or a failed send (`ok: false`)
@@ -297,11 +302,11 @@ export const GET = withApiErrors(async (request: Request) => {
           // above) and capped because it's Resend's raw response body — not
           // under Tayf's control, and not guaranteed free of the address
           // that failed to send.
-          console.error(
-            "[digest-cron] send failed",
-            row.id,
-            redactEmails(result.error).slice(0, 300),
-          );
+          const safeError = redactEmails(result.error).slice(0, 300);
+          console.error("[digest-cron] send failed", row.id, safeError);
+          captureServerException(new Error(safeError), {
+            subscriberId: row.id,
+          });
         }
       }
     }

@@ -90,6 +90,13 @@ vi.mock("@/lib/email/resend", () => ({
   isMailConfigured: vi.fn(() => true),
 }));
 
+// (H) silent-failures-3: per-item catch sites report to Sentry with a
+// subscriberId (never an email) in the context. Mocked so these tests don't
+// depend on a real Sentry init.
+vi.mock("@/lib/sentry/server", () => ({
+  captureServerException: vi.fn(),
+}));
+
 const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(async () => {
@@ -106,6 +113,8 @@ beforeEach(async () => {
   (sendBatch as unknown as Mock).mockReset();
   (isMailConfigured as unknown as Mock).mockReset();
   (isMailConfigured as unknown as Mock).mockReturnValue(true);
+  const { captureServerException } = await import("@/lib/sentry/server");
+  (captureServerException as unknown as Mock).mockReset();
   const { getRssSummaryMembers } = await import(
     "@/lib/clusters/rss-summary-attribution"
   );
@@ -496,6 +505,56 @@ describe("GET /api/cron/digest", () => {
       expect(await res.json()).toEqual({ sent: 1, skipped: 0 });
 
       expect(warnSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Sentry reporting (H)", () => {
+    it("reports a per-subscriber send failure with subscriberId (never an email) in the context", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+        { id: "s2", email: "fails@example.com", unsubscribe_token: "t2", last_sent_at: null },
+      ];
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map((m) =>
+          m.to === "fails@example.com"
+            ? { ok: false, error: "Resend 500" }
+            : { ok: true, id: "resend-id" },
+        ),
+      );
+
+      const { captureServerException } = await import("@/lib/sentry/server");
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      expect(await res.json()).toEqual({ sent: 1, skipped: 1 });
+
+      expect(captureServerException).toHaveBeenCalledTimes(1);
+      const [, context] = (captureServerException as unknown as Mock).mock.calls[0]!;
+      expect(context).toEqual({ subscriberId: "s2" });
+      expect(JSON.stringify(context)).not.toContain("@");
+    });
+
+    it("does not report to Sentry on the all-success happy path", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+      ];
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+
+      const { captureServerException } = await import("@/lib/sentry/server");
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      expect(await res.json()).toEqual({ sent: 1, skipped: 0 });
+
+      expect(captureServerException).not.toHaveBeenCalled();
     });
   });
 });

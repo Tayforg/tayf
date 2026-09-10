@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { clientKey, createRateLimiter } from "./rate-limit";
 
 function req(headers: Record<string, string>): Request {
@@ -58,6 +58,10 @@ describe("clientKey", () => {
 });
 
 describe("createRateLimiter", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("allows up to capacity then blocks, and tracks independent keys", () => {
     const check = createRateLimiter("test-rate-limit-w3", {
       capacity: 2,
@@ -73,5 +77,44 @@ describe("createRateLimiter", () => {
 
     // Independent bucket for a different key.
     expect(check("bob")).toEqual({ allowed: true, retryAfterMs: 0 });
+  });
+
+  it("refills linearly over time and unblocks once a full token has accrued", () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+
+    const check = createRateLimiter("test-rate-limit-refill", {
+      capacity: 2,
+      refillPerSecond: 0.5,
+    });
+
+    // Exhaust the bucket.
+    expect(check("carol")).toEqual({ allowed: true, retryAfterMs: 0 });
+    expect(check("carol")).toEqual({ allowed: true, retryAfterMs: 0 });
+    const exhausted = check("carol");
+    expect(exhausted.allowed).toBe(false);
+
+    // 1000ms at 0.5 tokens/sec = 0.5 tokens accrued — still under 1, blocked.
+    now += 1000;
+    const stillBlocked = check("carol");
+    expect(stillBlocked.allowed).toBe(false);
+    expect(stillBlocked.retryAfterMs).toBe(1000);
+
+    // Another 1000ms (2000ms total) = 1 full token accrued — allowed again.
+    now += 1000;
+    expect(check("carol")).toEqual({ allowed: true, retryAfterMs: 0 });
+  });
+
+  it("never refills when refillPerSecond is 0, so retryAfterMs is Infinity", () => {
+    const check = createRateLimiter("test-rate-limit-zero-refill", {
+      capacity: 1,
+      refillPerSecond: 0,
+    });
+
+    expect(check("dave")).toEqual({ allowed: true, retryAfterMs: 0 });
+    // 0 tokens/sec means the bucket can never recover on its own.
+    const blocked = check("dave");
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.retryAfterMs).toBe(Infinity);
   });
 });
