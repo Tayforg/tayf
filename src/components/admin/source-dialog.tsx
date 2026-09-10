@@ -1,5 +1,6 @@
 "use client";
 
+import { useId } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -38,6 +39,13 @@ export function SourceDialog({
   onSave: () => void;
   saving: boolean;
 }) {
+  const id = useId();
+  const nameId = `${id}-name`;
+  const slugId = `${id}-slug`;
+  const urlId = `${id}-url`;
+  const rssUrlId = `${id}-rss-url`;
+  const biasId = `${id}-bias`;
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -49,8 +57,9 @@ export function SourceDialog({
 
         <div className="space-y-3 py-2">
           <div className="space-y-1.5">
-            <Label className="text-xs">Kaynak Adı</Label>
+            <Label htmlFor={nameId} className="text-xs">Kaynak Adı</Label>
             <Input
+              id={nameId}
               placeholder="Örn: Hürriyet"
               value={source.name}
               onChange={(e) => onChange({ ...source, name: e.target.value })}
@@ -59,8 +68,9 @@ export function SourceDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs">Slug (otomatik oluşturulur)</Label>
+            <Label htmlFor={slugId} className="text-xs">Slug (otomatik oluşturulur)</Label>
             <Input
+              id={slugId}
               placeholder="Örn: hurriyet"
               value={source.slug}
               onChange={(e) => onChange({ ...source, slug: e.target.value })}
@@ -69,8 +79,9 @@ export function SourceDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs">Web Sitesi URL</Label>
+            <Label htmlFor={urlId} className="text-xs">Web Sitesi URL</Label>
             <Input
+              id={urlId}
               placeholder="https://www.hurriyet.com.tr"
               value={source.url}
               onChange={(e) => onChange({ ...source, url: e.target.value })}
@@ -79,8 +90,9 @@ export function SourceDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs">RSS Feed URL</Label>
+            <Label htmlFor={rssUrlId} className="text-xs">RSS Feed URL</Label>
             <Input
+              id={rssUrlId}
               placeholder="https://www.hurriyet.com.tr/rss/anasayfa"
               value={source.rss_url}
               onChange={(e) => onChange({ ...source, rss_url: e.target.value })}
@@ -89,14 +101,14 @@ export function SourceDialog({
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs">Yanlılık Etiketi</Label>
+            <Label htmlFor={biasId} className="text-xs">Yanlılık Etiketi</Label>
             <Select
               value={source.bias}
               onValueChange={(value) =>
                 value && onChange({ ...source, bias: value })
               }
             >
-              <SelectTrigger className="h-8 text-sm">
+              <SelectTrigger id={biasId} className="h-8 text-sm">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

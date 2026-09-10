@@ -429,6 +429,55 @@ describe("POST /api/admin", () => {
       expect(writes[0]?.payload).toEqual({ excerpt_allowed: false });
     });
   });
+
+  describe("nuke actions", () => {
+    it("nuke_articles deletes cluster_articles, then clusters, then articles, in order", async () => {
+      const res = await postAdmin({ action: "nuke_articles" });
+      expect(res.status).toBe(200);
+      const order = writes
+        .filter((w) => ["cluster_articles", "clusters", "articles"].includes(w.table))
+        .map((w) => w.table);
+      expect(order).toEqual(["cluster_articles", "clusters", "articles"]);
+      expect(writes.every((w) => w.op === "delete")).toBe(true);
+    });
+
+    it("nuke_clusters deletes cluster_articles then clusters, and never touches articles", async () => {
+      const res = await postAdmin({ action: "nuke_clusters" });
+      expect(res.status).toBe(200);
+      const order = writes
+        .filter((w) => ["cluster_articles", "clusters", "articles"].includes(w.table))
+        .map((w) => w.table);
+      expect(order).toEqual(["cluster_articles", "clusters"]);
+      expect(writes.some((w) => w.table === "articles")).toBe(false);
+    });
+
+    it("nuke_articles 401s without a session, with no delete issued", async () => {
+      __adminAuthed = false;
+      const res = await postAdmin({ action: "nuke_articles" });
+      expect(res.status).toBe(401);
+      expect(writes.length).toBe(0);
+    });
+
+    it("nuke_clusters 401s without a session, with no delete issued", async () => {
+      __adminAuthed = false;
+      const res = await postAdmin({ action: "nuke_clusters" });
+      expect(res.status).toBe(401);
+      expect(writes.length).toBe(0);
+    });
+
+    it("returns 500 and never issues the articles delete when the clusters delete fails", async () => {
+      setTableResponse("clusters", {
+        data: [],
+        count: 0,
+        error: { message: "clusters delete failed" },
+      });
+      const res = await postAdmin({ action: "nuke_articles" });
+      expect(res.status).toBe(500);
+      expect(writes.some((w) => w.table === "cluster_articles")).toBe(true);
+      expect(writes.some((w) => w.table === "clusters")).toBe(true);
+      expect(writes.some((w) => w.table === "articles")).toBe(false);
+    });
+  });
 });
 
 // Auth gate — the admin session check runs before any rate limiting or

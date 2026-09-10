@@ -8,6 +8,7 @@ import { BiasBadge } from "@/components/story/bias-badge";
 import { BIAS_LABELS } from "@/lib/bias/config";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
+import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import type { Source } from "@/types";
 
 // /source/[slug] — single-source profile page.
@@ -240,7 +241,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
                   rel="noopener noreferrer"
                   className="flex items-start gap-3 p-3 sm:p-4"
                 >
-                  {article.image_url && source.image_allowed !== false ? (
+                  {articleImageEligible(article, source) ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
                       src={article.image_url}
@@ -255,7 +256,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
                     <p className="text-sm font-semibold leading-snug line-clamp-2 group-hover:text-foreground">
                       {article.title}
                     </p>
-                    {source.excerpt_allowed !== false && article.description ? (
+                    {articleExcerptEligible(article, source) ? (
                       <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
                         {article.description}
                       </p>

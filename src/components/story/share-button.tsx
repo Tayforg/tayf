@@ -41,22 +41,22 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
   }
 
   return (
-    <button
-      type="button"
-      onClick={handleShare}
-      className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
-    >
-      {copied ? (
-        <>
+    <>
+      <button
+        type="button"
+        onClick={handleShare}
+        className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {copied ? (
           <Check className="h-3 w-3 text-emerald-500" />
-          <span>Kopyalandı</span>
-        </>
-      ) : (
-        <>
+        ) : (
           <Share2 className="h-3 w-3" />
-          <span>Paylaş</span>
-        </>
-      )}
-    </button>
+        )}
+        <span>{copied ? "Kopyalandı" : "Paylaş"}</span>
+      </button>
+      <span className="sr-only" role="status" aria-live="polite">
+        {copied ? "Kopyalandı" : ""}
+      </span>
+    </>
   );
 }
