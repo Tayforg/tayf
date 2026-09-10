@@ -330,14 +330,28 @@ Returns hand-tagged `{ factuality: "high"|"mixed"|"low"|null, ownership: string|
 
 ---
 
-### `formatTurkishTimeAgo(dateISO)`
+### `formatTurkishTimeAgo(dateISO, opts?)`
 
 ```typescript
 // src/lib/time.ts
-function formatTurkishTimeAgo(dateISO: string): string
+function formatTurkishTimeAgo(
+  dateISO: string,
+  opts?: { absoluteAfterMs?: number; now?: number },
+): string
 ```
 
-Returns Turkish relative time: `"az önce"`, `"5 dakika önce"`, `"2 saat önce"`, `"3 gün önce"`, etc.
+Returns Turkish relative time: `"az önce"`, `"5 dakika önce"`, `"2 saat önce"`, `"3 gün önce"`, etc. Once the delta reaches `opts.absoluteAfterMs` (default `ABSOLUTE_AFTER_MS`, 48 hours), it stops climbing and instead returns an absolute date via `formatTurkishDate(dateISO)` — a two-week-old cluster should read as a dated event, not "14 gün önce". `opts.now` defaults to `Date.now()` and exists so callers/tests can pin the "current" instant without faking global timers.
+
+---
+
+### `formatTurkishDate(dateISO)`
+
+```typescript
+// src/lib/time.ts
+function formatTurkishDate(dateISO: string): string
+```
+
+Absolute Turkish date, e.g. `"2 Eylül 2026"`. The `Intl.DateTimeFormat` timezone is pinned to `Europe/Istanbul` — this helper runs in both server components (UTC on Vercel) and client components (the visitor's local zone), and an unpinned formatter would render a different calendar day server- vs. client-side for any timestamp near local midnight, causing a hydration mismatch. Returns `""` for an unparseable input, same guard as `formatTurkishTimeAgo`.
 
 ---
 

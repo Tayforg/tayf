@@ -8,12 +8,13 @@ import { connection } from "next/server";
 export const metadata: Metadata = {
   title: "Kaynaklar",
   description:
-    "Tayf'ın izlediği 144 Türk haber kaynağı — yanlılık kategorisi, son 7 günlük aktivite ve son görülme zamanıyla birlikte.",
+    "Tayf'ın izlediği Türk haber kaynakları — yanlılık kategorisi, son 7 günlük aktivite ve son görülme zamanıyla birlikte.",
   alternates: { canonical: "/sources" },
 };
 
 import { PageHero } from "@/components/ui/page-hero";
 import { BiasBadge } from "@/components/story/bias-badge";
+import { SourceChips } from "@/components/source/source-chips";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { formatTurkishTimeAgo } from "@/lib/time";
@@ -39,9 +40,14 @@ import type { BiasCategory, Source } from "@/types";
 //
 // Each row also carries `kind` (outlet/aggregator/wire/niche — migration
 // 034). Only "outlet" and "wire" vote in bias_distribution / blindspot /
-// trends; the page surfaces a "Sınıflandırılan: N/M" line up top and a
-// per-card kind badge (dimmed for aggregator/niche) so a reader can see at
-// a glance which sources feed the numbers and which are along for the ride.
+// trends; the page surfaces a "Yanlılık dağılımına sayılan: N/M" line up
+// top and a per-card kind badge (dimmed for aggregator/niche) so a reader
+// can see at a glance which sources feed the numbers and which are along
+// for the ride. This is a separate axis from the per-card "sınıflandırılmamış"
+// chip below (factuality/ownership tagging, src/lib/sources/classification.ts)
+// — deliberately worded without the shared "sınıflandır-" root so the two
+// independent signals don't read as contradicting each other on the same
+// card.
 
 interface SourceRow extends Source {
   articleCount7d: number;
@@ -148,7 +154,7 @@ export default async function SourcesPage() {
         subtitle={`Tayf ${totalSources} Türk haber kaynağını izliyor. Her biri bir siyasi duruşa yerleştirilmiş.`}
       />
       <p className="text-xs text-muted-foreground">
-        Sınıflandırılan:{" "}
+        Yanlılık dağılımına sayılan:{" "}
         <span className="font-mono">
           {votingSources}/{totalSources}
         </span>{" "}
@@ -160,6 +166,11 @@ export default async function SourcesPage() {
         >
           Neden?
         </Link>
+      </p>
+      <p className="text-xs text-muted-foreground">
+        Doğruluk ve sahiplik bilgisi henüz girilmemiş kaynaklar kartlarında
+        “sınıflandırılmamış” etiketi taşır; bu etiket kaynağın yanlılık
+        konumundan bağımsızdır.
       </p>
 
       {BIAS_ORDER.map((bias) => {
@@ -217,6 +228,7 @@ export default async function SourcesPage() {
                               {SOURCE_KIND_META[kind].label}
                             </span>
                           )}
+                          <SourceChips slug={source.slug} showUnclassified />
                         </div>
                         <p className="text-muted-foreground">
                           <span className="font-mono text-[10px]">son 7 günde {source.articleCount7d} haber</span>

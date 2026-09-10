@@ -28,8 +28,21 @@
 //                                                      # into cluster_quality_snapshots
 //   HOURS=24 node scripts/audit-clusters.mjs          # narrower window
 //   MAX_PAIRS=50000 node scripts/audit-clusters.mjs   # cap pair scoring
+//
+// --persist exit-code contract: when --persist is given, this script also
+// runs the zero-output alarm (scripts/lib/audit/zero-output.mjs) after the
+// snapshot insert — a pipeline can be green (no thrown errors) while
+// silently producing nothing, e.g. no cluster gaining a neutral title, or
+// ingest_cycles logging zero rows over the last 24h. If either check fails,
+// the script sets a non-zero `process.exitCode` (still lets stdout flush,
+// so --json --persist > audit-report.json stays a complete artifact) and
+// the CI workflow (.github/workflows/cluster-audit.yml) fails the job on
+// purpose — that failure notification IS the pager. Without --persist, the
+// alarm does not run (a plain read-only audit stays a plain read-only
+// audit).
 
 import { computeReport } from "./lib/audit/report.mjs";
+import { evaluateZeroOutput, ZERO_OUTPUT_WINDOW_HOURS } from "./lib/audit/zero-output.mjs";
 import { TIME_WINDOW_HOURS } from "./lib/cluster/constants.mjs";
 import { createClient } from "@supabase/supabase-js";
 
@@ -200,6 +213,51 @@ async function main() {
     });
     if (error) throw new Error(`persist cluster_quality_snapshots: ${error.message}`);
     if (!args.json) console.log("\npersisted 1 row to public.cluster_quality_snapshots");
+
+    await runZeroOutputChecks();
+  }
+}
+
+// ---- 5. Zero-output alarm (persist-only) -----------------------------------
+//
+// Not part of the persisted snapshot row or the report JSON on purpose:
+// cluster_quality_snapshots' columns mirror computeReport() 1:1 (migration
+// 039) and must not drift by growing ad-hoc alarm fields.
+//
+// Every line below goes to console.error, never console.log: the CI step
+// redirects stdout to audit-report.json (`--json --persist > audit-report.json`),
+// so a stray stdout line here would corrupt that JSON artifact.
+async function runZeroOutputChecks() {
+  const since = new Date(Date.now() - ZERO_OUTPUT_WINDOW_HOURS * 3_600_000).toISOString();
+
+  const neutralRes = await supabase
+    .from("clusters")
+    .select("*", { count: "exact", head: true })
+    .gte("title_neutral_at", since);
+  if (neutralRes.error) console.error(`[zero-output] neutral-title query failed: ${neutralRes.error.message}`);
+  const neutralTitles24h = neutralRes.error ? null : neutralRes.count;
+
+  const ingestRes = await supabase
+    .from("ingest_cycles")
+    .select("*", { count: "exact", head: true })
+    .gte("finished_at", since);
+  if (ingestRes.error) console.error(`[zero-output] ingest_cycles query failed: ${ingestRes.error.message}`);
+  const ingestCycles24h = ingestRes.error ? null : ingestRes.count;
+
+  const anthropicKeyPresent = Boolean((process.env.ANTHROPIC_API_KEY ?? "").trim());
+
+  const { failures, lines } = evaluateZeroOutput({
+    neutralTitles24h,
+    ingestCycles24h,
+    anthropicKeyPresent,
+  });
+
+  for (const line of lines) console.error(line);
+
+  if (failures.length > 0) {
+    console.error("[zero-output] FAIL");
+    for (const f of failures) console.error(`  - ${f}`);
+    process.exitCode = 1;
   }
 }
 

@@ -118,7 +118,7 @@ describe("/sources page — source-kind UI", () => {
     const text = collectText(tree).join("");
     const hrefs = collectHrefs(tree);
 
-    expect(text).toContain("Sınıflandırılan: ");
+    expect(text).toContain("Yanlılık dağılımına sayılan: ");
     expect(text).toContain("2/3");
     expect(text).toContain("aktif kaynak");
     expect(text).toContain("Toplayıcı");
