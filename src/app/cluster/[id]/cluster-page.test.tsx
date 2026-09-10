@@ -12,21 +12,30 @@ import { FramingComparison } from "@/components/story/framing-comparison";
 // Module mocks
 // ---------------------------------------------------------------------------
 //
-// @/lib/clusters/cluster-detail-query: the whole point. Replaced with a
-// `vi.fn()` so each test controls exactly what `ClusterDetailPage` sees
-// without a real Supabase round-trip. Type-only imports of
-// `ClusterDetail`/`ClusterDetailMember` from this same specifier (used by
-// framing.ts, read-across.ts, ownership-line.tsx, etc.) are erased at
-// compile time, so mocking the runtime export here doesn't touch them.
+// @/lib/clusters/cluster-detail-query: the whole point. `getClusterDetail`
+// is replaced with a `vi.fn()` so each test controls exactly what
+// `ClusterDetailPage` sees without a real Supabase round-trip.
+// `imageEligibleMembers` (the BL-13 hero-image gate the page now imports
+// instead of re-implementing inline) is kept REAL via `importOriginal` —
+// otherwise the page's `imageEligibleMembers(members)` call would blow up
+// on an undefined export. Type-only imports of `ClusterDetail`/
+// `ClusterDetailMember` from this same specifier (used by framing.ts,
+// read-across.ts, ownership-line.tsx, etc.) are erased at compile time, so
+// mocking the runtime export here doesn't touch them.
 //
 // next/navigation: `notFound()` is imported by the page but never invoked
 // in these fixtures (every fixture resolves to a non-null detail) — mocked
 // anyway per the worker brief so importing it never depends on a live
 // Next.js request context.
 const getClusterDetail = vi.fn();
-vi.mock("@/lib/clusters/cluster-detail-query", () => ({
-  getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
-}));
+vi.mock("@/lib/clusters/cluster-detail-query", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/clusters/cluster-detail-query")>();
+  return {
+    ...actual,
+    getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
+  };
+});
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
 }));
@@ -109,6 +118,34 @@ function findCredits(
 }
 
 /**
+ * Like `findCredits` but returns the `src` prop of the same element (the
+ * `<ClusterCardImage>` element carries both) — used to assert which image
+ * (if any) was chosen as the hero, e.g. that a BL-13-blocked source's
+ * photo was never selected.
+ */
+function findHeroSrc(node: unknown): string | null | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findHeroSrc(child);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    const el = node as {
+      props?: { credits?: unknown; src?: string | null; children?: ReactNode };
+    };
+    if (el.props?.credits !== undefined) {
+      return el.props.src ?? null;
+    }
+    if (el.props?.children !== undefined) {
+      return findHeroSrc(el.props.children);
+    }
+  }
+  return undefined;
+}
+
+/**
  * Walks the tree (same shape as `collectHrefs`) looking for the
  * `<script type="application/ld+json">` element and returns its
  * `dangerouslySetInnerHTML.__html` string, or `null` if none is found.
@@ -169,6 +206,7 @@ function makeSource(overrides: Partial<Source> & { id: string }): Source {
     logo_url: overrides.logo_url ?? null,
     active: overrides.active ?? true,
     kind: overrides.kind,
+    image_allowed: overrides.image_allowed,
   };
 }
 
@@ -508,5 +546,63 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
 
     expect(text).not.toContain("Görsel:");
     expect(credits).toEqual({});
+  });
+
+  it("BL-13: never selects or credits a hero image from a source with image_allowed=false", async () => {
+    // Blocked outlet's article is the FIRST member (newest `published_at`,
+    // so it would win the hero slot if the gate were skipped) — proves the
+    // page derives `heroCandidates`/`heroCredits` from the real, imported
+    // `imageEligibleMembers` gate rather than an inline reimplementation.
+    const blocked = makeSource({
+      id: "s-blocked",
+      slug: "s-blocked",
+      name: "Engelli Kaynak",
+      image_allowed: false,
+    });
+    const allowed = makeSource({
+      id: "s-allowed",
+      slug: "s-allowed",
+      name: "İzinli Kaynak",
+    });
+    const members: ClusterDetailMember[] = [
+      makeMember(
+        "a-blocked",
+        blocked,
+        "2026-09-06T13:00:00.000Z",
+        "https://cdn.blocked.example/foto.jpg",
+      ),
+      makeMember(
+        "a-allowed",
+        allowed,
+        "2026-09-06T12:00:00.000Z",
+        "https://cdn.allowed.example/foto.jpg",
+      ),
+    ];
+
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [blocked, allowed],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 2,
+        memberCount: 2,
+      },
+      blindspotSuppressed: false,
+    };
+
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const heroSrc = findHeroSrc(tree);
+    const credits = findCredits(tree);
+
+    expect(heroSrc).toBe("https://cdn.allowed.example/foto.jpg");
+    expect(credits).toEqual({
+      "https://cdn.allowed.example/foto.jpg": {
+        href: "https://example.com/articles/a-allowed",
+        name: "İzinli Kaynak",
+      },
+    });
   });
 });

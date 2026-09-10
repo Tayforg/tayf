@@ -46,6 +46,14 @@ export async function getNeutralizedStatus(): Promise<{
     ]);
 
     if (eligibleRes.error || neutralizedRes.error) {
+      // PII-free: Supabase's error.message is a query-level diagnostic
+      // (timeout, connection refused, etc.), never row data. Logged so a
+      // silent "do not claim" degradation is at least visible in Vercel
+      // function logs instead of vanishing indistinguishably from "0
+      // clusters neutralized yet".
+      const message =
+        eligibleRes.error?.message ?? neutralizedRes.error?.message ?? "unknown error";
+      console.warn(`[headline-status] unavailable: ${message}`);
       return null;
     }
 
@@ -53,9 +61,11 @@ export async function getNeutralizedStatus(): Promise<{
       eligible: eligibleRes.count ?? 0,
       neutralized: neutralizedRes.count ?? 0,
     };
-  } catch {
+  } catch (err) {
     // createServerClient() throws when Supabase env vars are missing; that
     // is still a "do not claim" condition, not a build-time failure.
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[headline-status] unavailable: ${message}`);
     return null;
   }
 }

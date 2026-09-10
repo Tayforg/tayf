@@ -18,7 +18,10 @@ import {
   detectCrossSpectrum,
   summarizeSurprises,
 } from "@/lib/bias/cross-spectrum";
-import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
+import {
+  getClusterDetail,
+  imageEligibleMembers,
+} from "@/lib/clusters/cluster-detail-query";
 import { buildShareText } from "@/lib/clusters/share";
 import {
   describeForMeta,
@@ -163,11 +166,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // fallback) — the next eligible member's image is used instead, or no
   // hero image at all when none remain. `undefined` (fixtures/rows
   // predating migration 047, or a source not covered by the supplemental
-  // sources query error path) is treated as allowed — see
-  // cluster-detail-query.ts's `imageEligibleMembers`, whose gate this
-  // mirrors (inlined rather than imported so this page keeps its own
-  // module mock in tests unaffected).
-  const imageEligible = members.filter((m) => m.source.image_allowed !== false);
+  // sources query error path) is treated as allowed. Delegated to
+  // cluster-detail-query.ts's unit-tested `imageEligibleMembers` (single
+  // source of truth for the gate) rather than re-implemented here —
+  // cluster-page.test.tsx's module mock preserves it via `importOriginal`.
+  const imageEligible = imageEligibleMembers(members);
   const heroCandidates = imageEligible
     .map((m) => m.article.image_url)
     .filter((u): u is string => typeof u === "string" && u.length > 0);
