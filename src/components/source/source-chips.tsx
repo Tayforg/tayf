@@ -1,4 +1,9 @@
 import { getSourceMetadata, type Factuality } from "@/lib/sources/factuality";
+import {
+  isClassifiedSource,
+  UNCLASSIFIED_LABEL_TR,
+  UNCLASSIFIED_TITLE_TR,
+} from "@/lib/sources/classification";
 import { cn } from "@/lib/utils";
 
 /**
@@ -55,17 +60,50 @@ const CHIP_BASE =
 const OWNERSHIP_CLASS =
   "bg-zinc-500/10 text-zinc-700 border-zinc-500/20 dark:text-zinc-300";
 
+const UNCLASSIFIED_CLASS =
+  "bg-muted/40 text-muted-foreground border-border/60";
+
 export interface SourceChipsProps {
   /** Source slug (matches `slug` column in the `sources` table). */
   slug: string;
   /** Optional extra classes appended to the wrapping flex row. */
   className?: string;
+  /**
+   * Opt-in: when the slug has no tagged factuality/ownership, render a
+   * single muted "sınıflandırılmamış" chip instead of nothing. Defaults to
+   * `false` so existing consumers (e.g. the cluster detail page, which
+   * pre-filters to slugs it already knows are tagged) keep rendering
+   * byte-identically.
+   */
+  showUnclassified?: boolean;
 }
 
-export function SourceChips({ slug, className }: SourceChipsProps) {
+export function SourceChips({
+  slug,
+  className,
+  showUnclassified = false,
+}: SourceChipsProps) {
   const meta = getSourceMetadata(slug);
+  const classified = isClassifiedSource(slug);
+
+  if (!classified) {
+    if (!showUnclassified) return null;
+    return (
+      <span
+        className={cn("inline-flex items-center gap-1", className)}
+        aria-label="Kaynak bilgisi"
+      >
+        <span
+          className={cn(CHIP_BASE, UNCLASSIFIED_CLASS)}
+          title={UNCLASSIFIED_TITLE_TR}
+        >
+          {UNCLASSIFIED_LABEL_TR}
+        </span>
+      </span>
+    );
+  }
+
   if (!meta) return null;
-  if (meta.factuality === null && meta.ownership === null) return null;
 
   return (
     <span

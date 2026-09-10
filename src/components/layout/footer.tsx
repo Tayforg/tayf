@@ -1,6 +1,8 @@
 import Link from "next/link";
+import { Suspense } from "react";
 
 import { NewsletterForm } from "@/components/newsletter/newsletter-form";
+import { getDeliveringSourceCount } from "@/lib/sources/active-count";
 
 const NAV_LINKS = [
   { href: "/", label: "Haberler" },
@@ -11,6 +13,26 @@ const NAV_LINKS = [
   { href: "/metodoloji", label: "Metodoloji" },
   { href: "/metodoloji#duzeltme", label: "İletişim" },
 ] as const;
+
+async function ActiveSourceCount() {
+  let count: number;
+  try {
+    count = await getDeliveringSourceCount();
+  } catch {
+    // A number Tayf can't stand behind is worse than no number — render
+    // nothing rather than fall back to a stale or made-up count.
+    return null;
+  }
+
+  return (
+    <span
+      className="text-[10px] text-muted-foreground/40 font-mono"
+      title="Son 7 günde en az bir haber gönderen aktif kaynak sayısı"
+    >
+      son 7 günde {count} kaynak
+    </span>
+  );
+}
 
 export function Footer() {
   return (
@@ -30,7 +52,7 @@ export function Footer() {
               </span>
             </div>
             <p className="text-[11px] text-muted-foreground/60 max-w-xs leading-relaxed">
-              Aynı haber, farklı dünyalar. 144 Türk kaynağından otomatik
+              Aynı haber, farklı dünyalar. Türk haber kaynaklarından otomatik
               kümelenmiş politika haberleri ve medya yanlılığı analizi.
             </p>
           </div>
@@ -61,9 +83,9 @@ export function Footer() {
             2026 Tayf
           </span>
           <div className="h-[1px] flex-1 mx-6 bg-gradient-to-r from-red-500/10 via-brand/15 to-emerald-500/10" />
-          <span className="text-[10px] text-muted-foreground/40 font-mono">
-            144 kaynak
-          </span>
+          <Suspense fallback={null}>
+            <ActiveSourceCount />
+          </Suspense>
         </div>
 
         <div className="mt-8 pt-6 border-t border-border/20 max-w-sm">

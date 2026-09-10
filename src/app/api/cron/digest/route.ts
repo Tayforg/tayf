@@ -76,6 +76,14 @@ function isDue(row: Pick<SubscriberRow, "last_sent_at">, nowMs: number): boolean
   return nowMs - new Date(row.last_sent_at).getTime() >= RESEND_INTERVAL_MS;
 }
 
+// `result.error` (below) is Resend's raw HTTP response body, not a string
+// we control — a validation error can echo the submitted `to` address back
+// in its message. Strip anything email-shaped before it ever reaches
+// `console.error` so a subscriber address can't leak through this path.
+function redactEmails(s: string): string {
+  return s.replace(/[^\s@"'<>()]+@[^\s@"'<>()]+/g, "[e-posta gizlendi]");
+}
+
 function toClusterItem(bundle: {
   cluster: { id: string; title_tr: string; summary_tr: string; bias_distribution: DigestClusterItem["biasDistribution"] };
   articles: unknown[];
@@ -206,10 +214,28 @@ export const GET = withApiErrors(async (request: Request) => {
         // again on the next tick instead of silently losing a week.
         skipped++;
         if (result && "error" in result) {
-          console.error("[digest-cron] send failed", row.email, result.error);
+          // Subscriber addresses must never reach Vercel function logs
+          // (tests/guards/no-pii-logging.test.ts enforces this repo-wide).
+          // `row.id` is a random uuid — an opaque identifier with no PII,
+          // and the same key an operator needs to find the row for a DSAR;
+          // it matches the success line above (:201). Do NOT hash it:
+          // hashing a uuid adds no privacy and only breaks log <-> row
+          // correlation. `result.error` is redacted (see `redactEmails`
+          // above) and capped because it's Resend's raw response body — not
+          // under Tayf's control, and not guaranteed free of the address
+          // that failed to send.
+          console.error(
+            "[digest-cron] send failed",
+            row.id,
+            redactEmails(result.error).slice(0, 300),
+          );
         }
       }
     }
+  }
+
+  if (skipped > 0) {
+    console.warn("[digest-cron] send failures", { sent, skipped });
   }
 
   return NextResponse.json({ sent, skipped });

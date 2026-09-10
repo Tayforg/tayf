@@ -217,4 +217,126 @@ describe("GET /api/cron/digest", () => {
     expect(await res.json()).toEqual({ sent: 0, skipped: 0 });
     expect(sendBatch).not.toHaveBeenCalled();
   });
+
+  describe("logging", () => {
+    let errSpy: ReturnType<typeof vi.spyOn>;
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
+    it("never logs a subscriber's e-mail address, even on a send failure", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+        { id: "s2", email: "fails@example.com", unsubscribe_token: "t2", last_sent_at: null },
+      ];
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map((m) =>
+          m.to === "fails@example.com"
+            ? { ok: false, error: "Resend 500" }
+            : { ok: true, id: "resend-id" },
+        ),
+      );
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ sent: 1, skipped: 1 });
+
+      const loggedText = JSON.stringify([...errSpy.mock.calls, ...warnSpy.mock.calls]);
+      expect(loggedText).not.toContain("@");
+      expect(loggedText).not.toContain("fails@example.com");
+      expect(loggedText).toContain("s2");
+    });
+
+    it("never logs a recipient address even when Resend's own error body echoes it back", async () => {
+      // Resend-shaped validation errors can embed the submitted `to`
+      // address in the response body (`result.error` in the route is
+      // built straight from that raw text — see src/lib/email/resend.ts).
+      // A synthetic PII-free string like "Resend 500" would pass this test
+      // even if the route logged `result.error` verbatim, so this fixture
+      // mimics a real Resend error payload that contains the address.
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+        { id: "s2", email: "fails@example.com", unsubscribe_token: "t2", last_sent_at: null },
+      ];
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map((m) =>
+          m.to === "fails@example.com"
+            ? {
+                ok: false,
+                error: 'Resend 422: {"message":"Invalid to: fails@example.com"}',
+              }
+            : { ok: true, id: "resend-id" },
+        ),
+      );
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ sent: 1, skipped: 1 });
+
+      const loggedText = JSON.stringify(errSpy.mock.calls);
+      expect(loggedText).not.toContain("fails@example.com");
+      expect(loggedText).not.toContain("@");
+      expect(loggedText).toContain("s2");
+      expect(loggedText).toContain("Resend 422");
+    });
+
+    it("logs an aggregate send-failures warning with counts only", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+        { id: "s2", email: "fails@example.com", unsubscribe_token: "t2", last_sent_at: null },
+      ];
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map((m) =>
+          m.to === "fails@example.com"
+            ? { ok: false, error: "Resend 500" }
+            : { ok: true, id: "resend-id" },
+        ),
+      );
+
+      const mod = await importRoute();
+      await mod.GET(req("shhh"));
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[digest-cron] send failures",
+        expect.objectContaining({ sent: 1, skipped: 1 }),
+      );
+    });
+
+    it("logs no console.warn at all on the all-success path", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = [
+        { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+      ];
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+      expect(await res.json()).toEqual({ sent: 1, skipped: 0 });
+
+      expect(warnSpy).not.toHaveBeenCalled();
+    });
+  });
 });

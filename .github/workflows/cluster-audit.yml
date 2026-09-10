@@ -28,12 +28,22 @@ jobs:
 
       - run: npm ci
 
+      # A non-zero exit now fails the job on purpose (see the --persist
+      # exit-code contract documented at the top of audit-clusters.mjs) —
+      # that failure notification is the pager for the zero-output alarm.
+      # The `if: always()` upload below still preserves audit-report.json
+      # for triage even when this step fails.
       - name: Run cluster quality audit
         env:
           # scripts/audit-clusters.mjs reads SUPABASE_URL directly (falls
           # back to NEXT_PUBLIC_SUPABASE_URL for local dev).
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Gates the zero-output alarm's neutral-title check (see
+          # scripts/lib/audit/zero-output.mjs). Until this secret is added
+          # to the repo, the check stays a no-op (prints "skipped", job
+          # still green) — it activates the day ANTHROPIC_API_KEY is set.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: node scripts/audit-clusters.mjs --json --persist > audit-report.json
 
       # always() so a --persist failure (report already computed/printed)
