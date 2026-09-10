@@ -109,13 +109,18 @@ function parseToken(token: string | undefined): SessionPayload | null {
 }
 
 /**
- * Constant-time password check. Hashes both sides first so we don't leak
- * the password length through the comparison timing.
+ * Constant-time password check. Both sides are run through scrypt so the
+ * comparison is over equal-length digests (no length leak through timing)
+ * and so the derived value is not a cheap hash of the password. Nothing is
+ * stored; the fixed salt only normalises the two sides. Cost is ~50 ms per
+ * attempt, which the login limiter in actions.ts already bounds.
  */
+const PASSWORD_CHECK_SALT = "tayf-admin-login-v1";
+
 export function checkAdminPassword(input: string): boolean {
   const expected = getAdminPassword();
-  const a = crypto.createHash("sha256").update(input).digest();
-  const b = crypto.createHash("sha256").update(expected).digest();
+  const a = crypto.scryptSync(input, PASSWORD_CHECK_SALT, 32);
+  const b = crypto.scryptSync(expected, PASSWORD_CHECK_SALT, 32);
   return crypto.timingSafeEqual(a, b);
 }
 
