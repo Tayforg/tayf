@@ -491,10 +491,163 @@ export class SafeFetchError extends Error {
   }
 }
 
+// ---------------------------------------------------------------------------
+// safeResponse — the shared SSRF-guarded redirect loop, body unread
+// ---------------------------------------------------------------------------
+//
+// `safeFetch` below (og-image extraction) and `fetchFeed` in
+// `rss/fetcher.ts` (RSS ingest) both need the SAME allow-check + manual-
+// redirect + literal-IP-pin behaviour, but they disagree on everything
+// about the body: safeFetch wants a UTF-8 string capped at ~50 KB with an
+// 8 s budget; fetchFeed wants raw bytes (for its charset-aware decoder and
+// the migration-041 body-hash short-circuit), a multi-MB cap, and a 10 s
+// budget. Rather than duplicate the guard, `safeResponse` does everything
+// UP TO the body — DNS/pin/redirect validation — and hands back the live
+// Response for the caller to read under its own rules.
+
+export interface SafeResponseOptions {
+  /** Request headers; same shape as RequestInit.headers. */
+  readonly headers?: HeadersInit;
+  /** Per-request timeout, used only when `signal` is not supplied. Defaults to 8000ms. */
+  readonly timeoutMs?: number;
+  /**
+   * Caller-owned abort signal. When supplied, takes precedence over
+   * `timeoutMs` — this lets `safeFetch` share ONE abort budget across both
+   * the redirect loop here and its own subsequent body read.
+   */
+  readonly signal?: AbortSignal;
+  /** Maximum redirect hops. Defaults to 3. */
+  readonly maxRedirects?: number;
+}
+
+export interface SafeResponseResult {
+  /** The unread Response for the final (non-redirect) hop. */
+  readonly response: Response;
+  /** Final URL after redirect handling. */
+  readonly finalUrl: string;
+}
+
 /**
- * SSRF-safe outbound fetch. Validates the URL (DNS + private-block check),
- * disables automatic redirects, re-validates every Location header through
- * the same allowlist, and caps the body read at `maxBytes`.
+ * SSRF-safe outbound fetch that stops short of reading the body. Validates
+ * the URL (DNS + private-block check) on every hop, disables automatic
+ * redirects, re-validates every Location header through the same
+ * allowlist, and pins the dial to the validated literal IP for plain HTTP
+ * (HTTPS keeps the hostname for SNI/TLS — see the module doc comment; this
+ * does NOT close HTTPS rebinding, only HTTP).
+ *
+ * Callers own the body: `response.body` is still open (except for a 3xx
+ * hop, which this function drains itself before looping/returning) and
+ * MUST be read or cancelled by the caller. Throws SafeFetchError on any
+ * policy violation (bad protocol, blocked DNS/literal, blocked redirect
+ * target, redirect chain too long).
+ */
+export async function safeResponse(
+  rawUrl: string,
+  opts: SafeResponseOptions = {},
+): Promise<SafeResponseResult> {
+  const maxRedirects = opts.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+  // The caller reads the body AFTER this function returns, so we must NOT
+  // start a bare `setTimeout` here — there would be no way for the caller to
+  // clear it once control leaves this function, and an uncleared timer would
+  // leak. When the caller supplies its own `signal` (safeFetch does, so one
+  // budget covers the redirect loop AND its body read) we use that;
+  // otherwise `AbortSignal.timeout` self-expires and needs no clearing.
+  const signal = opts.signal ?? AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+  let currentUrl = rawUrl;
+  let hops = 0;
+
+  while (true) {
+    const validated = await validateOutboundUrl(currentUrl);
+    if (typeof validated === "string") {
+      throw new SafeFetchError(`URL rejected: ${validated} (url=${currentUrl})`);
+    }
+
+    // Round-6 P1 fix (DNS rebinding TOCTOU): rewrite the URL to use the
+    // pinned IP literal we already validated. The platform `fetch` would
+    // otherwise re-resolve the hostname through its own resolver, opening
+    // a window where an attacker who controls the authoritative DNS can
+    // serve a public IP to our check and a private IP to fetch. We
+    // preserve the original Host via header so virtual-hosted servers
+    // still route correctly, and SNI/TLS still validates because the
+    // platform Deno client uses the URL's hostname for the SNI handshake
+    // — for HTTPS we therefore keep the hostname unrewritten and rely on
+    // the same-resolver lookup, accepting that residual risk in exchange
+    // for not breaking TLS. For plain HTTP we pin to the literal.
+    let dialUrl = validated.toString();
+    const dialHeaders = new Headers(opts.headers ?? undefined);
+    if (validated.protocol === "http:") {
+      const pinned = await resolveAndPin(validated.hostname);
+      if (typeof pinned === "string") {
+        throw new SafeFetchError(`pin rejected: ${pinned} (url=${currentUrl})`);
+      }
+      if (!dialHeaders.has("host")) {
+        dialHeaders.set("host", validated.host);
+      }
+      const literalHost =
+        pinned.ipFamily === "v6" ? `[${pinned.pinIp}]` : pinned.pinIp;
+      const portSuffix = validated.port ? `:${validated.port}` : "";
+      dialUrl =
+        `${validated.protocol}//${literalHost}${portSuffix}${validated.pathname}${validated.search}`;
+    }
+
+    const response = await fetch(dialUrl, {
+      method: "GET",
+      signal,
+      headers: dialHeaders,
+      redirect: "manual",
+    });
+
+    // 3xx with a Location header → cancel the current body, validate the
+    // next hop, and loop. We do NOT follow without re-validating; we do NOT
+    // follow more than `maxRedirects` hops.
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      // Discard the body of the redirect response. Some servers send a
+      // small "Redirecting to ..." HTML even on 3xx; we don't need it, and
+      // this runs whether or not we end up following (no-Location also
+      // drains below via the same cancel call).
+      try {
+        await response.body?.cancel();
+      } catch {
+        // ignore
+      }
+      if (!location) {
+        // 3xx without Location: nothing more we can do, return as-is.
+        // (Most clients treat this as an error; we surface it via status.)
+        // The body is already cancelled above, matching safeFetch's
+        // pre-refactor `body: ""` contract for this case.
+        return { response, finalUrl: validated.toString() };
+      }
+      if (hops >= maxRedirects) {
+        throw new SafeFetchError(
+          `redirect chain exceeded ${maxRedirects} hops (last=${currentUrl} → ${location})`,
+        );
+      }
+      // Resolve Location relative to the validated URL — Location may be
+      // absolute or relative per RFC 7231 §7.1.2.
+      let nextUrl: string;
+      try {
+        nextUrl = new URL(location, validated).toString();
+      } catch {
+        throw new SafeFetchError(`unparseable Location header: ${location}`);
+      }
+      currentUrl = nextUrl;
+      hops += 1;
+      continue;
+    }
+
+    // Non-redirect (including 304): return the response as-is, unread, for
+    // the caller to consume under its own body-reading rules.
+    const finalUrl = response.url || currentUrl;
+    return { response, finalUrl };
+  }
+}
+
+/**
+ * SSRF-safe outbound fetch. Thin decode-and-cap wrapper over `safeResponse`:
+ * it owns the timeout/AbortController lifecycle and the bounded UTF-8 body
+ * read; all DNS/redirect/pin validation lives in `safeResponse`.
  *
  * Throws SafeFetchError on any policy violation. Callers should catch and
  * return null — see og-image.ts for the canonical pattern.
@@ -511,103 +664,16 @@ export async function safeFetch(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    let currentUrl = rawUrl;
-    let hops = 0;
-    let response: Response | null = null;
-
-    while (true) {
-      const validated = await validateOutboundUrl(currentUrl);
-      if (typeof validated === "string") {
-        throw new SafeFetchError(`URL rejected: ${validated} (url=${currentUrl})`);
-      }
-
-      // Round-6 P1 fix (DNS rebinding TOCTOU): rewrite the URL to use the
-      // pinned IP literal we already validated. The platform `fetch` would
-      // otherwise re-resolve the hostname through its own resolver, opening
-      // a window where an attacker who controls the authoritative DNS can
-      // serve a public IP to our check and a private IP to fetch. We
-      // preserve the original Host via header so virtual-hosted servers
-      // still route correctly, and SNI/TLS still validates because the
-      // platform Deno client uses the URL's hostname for the SNI handshake
-      // — for HTTPS we therefore keep the hostname unrewritten and rely on
-      // the same-resolver lookup, accepting that residual risk in exchange
-      // for not breaking TLS. For plain HTTP we pin to the literal.
-      let dialUrl = validated.toString();
-      const dialHeaders = new Headers(opts.headers ?? undefined);
-      if (validated.protocol === "http:") {
-        const pinned = await resolveAndPin(validated.hostname);
-        if (typeof pinned === "string") {
-          throw new SafeFetchError(`pin rejected: ${pinned} (url=${currentUrl})`);
-        }
-        if (!dialHeaders.has("host")) {
-          dialHeaders.set("host", validated.host);
-        }
-        const literalHost =
-          pinned.ipFamily === "v6" ? `[${pinned.pinIp}]` : pinned.pinIp;
-        const portSuffix = validated.port ? `:${validated.port}` : "";
-        dialUrl =
-          `${validated.protocol}//${literalHost}${portSuffix}${validated.pathname}${validated.search}`;
-      }
-
-      response = await fetch(dialUrl, {
-        method: "GET",
-        signal: controller.signal,
-        headers: dialHeaders,
-        redirect: "manual",
-      });
-
-      // 3xx with a Location header → cancel the current body, validate the
-      // next hop, and loop. We do NOT follow without re-validating; we do NOT
-      // follow more than `maxRedirects` hops.
-      if (response.status >= 300 && response.status < 400) {
-        const location = response.headers.get("location");
-        // Discard the body of the redirect response. Some servers send a
-        // small "Redirecting to ..." HTML even on 3xx; we don't need it.
-        try {
-          await response.body?.cancel();
-        } catch {
-          // ignore
-        }
-        if (!location) {
-          // 3xx without Location: nothing more we can do, return as-is.
-          // (Most clients treat this as an error; we surface it via status.)
-          return {
-            status: response.status,
-            headers: response.headers,
-            body: "",
-            finalUrl: validated.toString(),
-          };
-        }
-        if (hops >= maxRedirects) {
-          throw new SafeFetchError(
-            `redirect chain exceeded ${maxRedirects} hops (last=${currentUrl} → ${location})`,
-          );
-        }
-        // Resolve Location relative to the validated URL — Location may be
-        // absolute or relative per RFC 7231 §7.1.2.
-        let nextUrl: string;
-        try {
-          nextUrl = new URL(location, validated).toString();
-        } catch {
-          throw new SafeFetchError(`unparseable Location header: ${location}`);
-        }
-        currentUrl = nextUrl;
-        hops += 1;
-        continue;
-      }
-
-      // Non-redirect: drop out and stream the body.
-      break;
-    }
-
-    if (response === null) {
-      // Unreachable — the loop always assigns response — but TypeScript
-      // narrowing wants the explicit check.
-      throw new SafeFetchError("internal: no response after redirect loop");
-    }
+    // Pass our own controller signal through so the redirect loop AND the
+    // body read below share one timeout budget — safeResponse never starts
+    // its own timer when a signal is supplied.
+    const { response, finalUrl } = await safeResponse(rawUrl, {
+      headers: opts.headers,
+      signal: controller.signal,
+      maxRedirects,
+    });
 
     // ---- Bounded body read ------------------------------------------------
-    const finalUrl = response.url || currentUrl;
     const reader = response.body?.getReader();
     if (!reader) {
       return {

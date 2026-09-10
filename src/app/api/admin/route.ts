@@ -9,6 +9,13 @@ import {
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
+import {
+  isBiasCategory,
+  isSourceKindValue,
+  isValidSourceName,
+  isValidSourceSlug,
+  isValidSourceUrl,
+} from "@/lib/validation/source-input";
 
 // Mutating admin actions: 20-token bucket, refilling at 0.2 tokens/sec
 // (1 token every 5s). Bursts of ~20 are fine, sustained spam gets 429'd.
@@ -90,6 +97,9 @@ export const POST = withApiErrors(async (request: Request) => {
 
     case "toggle_source": {
       const { slug, active } = body;
+      if (!isValidSourceSlug(slug) || typeof active !== "boolean") {
+        return apiBadRequest("Invalid source or state");
+      }
       const { error } = await supabase
         .from("sources")
         .update({ active })
@@ -99,32 +109,67 @@ export const POST = withApiErrors(async (request: Request) => {
     }
 
     case "add_source": {
-      const { name, slug, url, rss_url, bias } = body;
+      const { name, slug, url, rss_url, bias, kind } = body;
       if (!name || !slug || !url || !rss_url || !bias) {
         return apiBadRequest("All fields are required");
       }
-      const { error } = await supabase.from("sources").insert({
+      if (!isValidSourceName(name)) return apiBadRequest("Invalid name");
+      if (!isValidSourceSlug(slug)) return apiBadRequest("Invalid slug");
+      if (!isValidSourceUrl(url)) return apiBadRequest("Invalid url");
+      if (!isValidSourceUrl(rss_url)) return apiBadRequest("Invalid rss_url");
+      if (!isBiasCategory(bias)) return apiBadRequest("Invalid bias");
+      if (kind !== undefined && !isSourceKindValue(kind)) {
+        return apiBadRequest("Invalid kind");
+      }
+
+      const insertPayload: Record<string, unknown> = {
         name,
         slug,
         url,
         rss_url,
         bias,
         active: true,
-      });
+      };
+      // The `kind` column is `not null default 'outlet'` (migration 034),
+      // so omitting the key when the caller didn't provide one is correct
+      // — the DB default applies rather than us writing an explicit value.
+      if (kind !== undefined) insertPayload.kind = kind;
+
+      const { error } = await supabase.from("sources").insert(insertPayload);
       if (error) return apiServerError(error);
       return NextResponse.json({ success: true, message: `${name} added` });
     }
 
     case "update_source": {
-      const { id, name, slug, url, rss_url, bias, active } = body;
+      const { id, name, slug, url, rss_url, bias, kind, active } = body;
       if (!id) return apiBadRequest("Source id is required");
       const updates: Record<string, unknown> = {};
-      if (name !== undefined) updates.name = name;
-      if (slug !== undefined) updates.slug = slug;
-      if (url !== undefined) updates.url = url;
-      if (rss_url !== undefined) updates.rss_url = rss_url;
-      if (bias !== undefined) updates.bias = bias;
+      if (name !== undefined) {
+        if (!isValidSourceName(name)) return apiBadRequest("Invalid name");
+        updates.name = name;
+      }
+      if (slug !== undefined) {
+        if (!isValidSourceSlug(slug)) return apiBadRequest("Invalid slug");
+        updates.slug = slug;
+      }
+      if (url !== undefined) {
+        if (!isValidSourceUrl(url)) return apiBadRequest("Invalid url");
+        updates.url = url;
+      }
+      if (rss_url !== undefined) {
+        if (!isValidSourceUrl(rss_url)) return apiBadRequest("Invalid rss_url");
+        updates.rss_url = rss_url;
+      }
+      if (bias !== undefined) {
+        if (!isBiasCategory(bias)) return apiBadRequest("Invalid bias");
+        updates.bias = bias;
+      }
+      if (kind !== undefined) {
+        if (!isSourceKindValue(kind)) return apiBadRequest("Invalid kind");
+        updates.kind = kind;
+      }
       if (active !== undefined) updates.active = active;
+      if (Object.keys(updates).length === 0) return apiBadRequest("No fields to update");
       const { error } = await supabase.from("sources").update(updates).eq("id", id);
       if (error) return apiServerError(error);
       return NextResponse.json({ success: true, message: `${name || "Source"} updated` });

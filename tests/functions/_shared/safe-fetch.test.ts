@@ -24,6 +24,7 @@ import {
   isPrivateAddress,
   safeFetch,
   SafeFetchError,
+  safeResponse,
   validateOutboundUrl,
 } from "../../../supabase/functions/_shared/safe-fetch.ts";
 
@@ -456,5 +457,103 @@ describe("safeFetch", () => {
     expect(dialUrl).toContain("example.com");
     expect(dialUrl).not.toContain("93.184.216.34");
     expect(dialUrl).toBe("https://example.com/path");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// safeResponse — the shared primitive fetchFeed (RSS ingest, SEC-01) also
+// builds on. Proves the redirect/DNS/pin guard behaves the same as it did
+// inside safeFetch pre-refactor, and that the body is left unread for the
+// caller to consume under its own rules (no 50 KB cap, no UTF-8 decode).
+// ---------------------------------------------------------------------------
+
+describe("safeResponse", () => {
+  it("returns an unread 200 Response with no cap and no decode applied", async () => {
+    stubResolveDns(["93.184.216.34"]);
+    // Larger than safeFetch's DEFAULT_MAX_BYTES (50 000) — proves
+    // safeResponse itself enforces no cap; that ceiling only exists in
+    // safeFetch's own bounded read layered on top.
+    const bigBody = "a".repeat(60_000);
+    queueFetchResponses([
+      new Response(bigBody, {
+        status: 200,
+        headers: { "Content-Type": "text/plain" },
+      }),
+    ]);
+
+    const { response, finalUrl } = await safeResponse("https://example.com/big");
+    const buf = await response.arrayBuffer();
+    expect(buf.byteLength).toBe(60_000);
+    expect(response.status).toBe(200);
+    expect(finalUrl).toBe("https://example.com/big");
+  });
+
+  it("returns a 304 untouched without following anything", async () => {
+    stubResolveDns(["93.184.216.34"]);
+    const fetchStub = queueFetchResponses([
+      new Response(null, { status: 304 }),
+    ]);
+
+    const { response } = await safeResponse("https://example.com/feed.xml");
+    expect(response.status).toBe(304);
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws SafeFetchError for the literal 169.254.169.254 URL", async () => {
+    await expect(
+      safeResponse("http://169.254.169.254/latest/meta-data"),
+    ).rejects.toBeInstanceOf(SafeFetchError);
+  });
+
+  it("rejects a 302 hop into 169.254.169.254", async () => {
+    stubResolveDns(["8.8.8.8"]);
+    queueFetchResponses([
+      new Response(null, {
+        status: 302,
+        headers: { Location: "http://169.254.169.254/latest/meta-data" },
+      }),
+      // Would only be reached if the Location re-validation failed to fire.
+      new Response("nope", { status: 200 }),
+    ]);
+
+    await expect(
+      safeResponse("http://public.example/start"),
+    ).rejects.toBeInstanceOf(SafeFetchError);
+  });
+
+  it("throws when the redirect chain exceeds maxRedirects", async () => {
+    stubResolveDns(["8.8.8.8"]);
+    queueFetchResponses([
+      new Response(null, {
+        status: 302,
+        headers: { Location: "http://public-2.example/next" },
+      }),
+      new Response(null, {
+        status: 302,
+        headers: { Location: "http://public-3.example/next" },
+      }),
+      // Never reached — the chain is rejected on the second hop.
+      new Response("nope", { status: 200 }),
+    ]);
+
+    await expect(
+      safeResponse("http://public.example/start", { maxRedirects: 1 }),
+    ).rejects.toBeInstanceOf(SafeFetchError);
+  });
+
+  it("forwards caller headers onto the dialed request", async () => {
+    stubResolveDns(["93.184.216.34"]);
+    const fetchStub = queueFetchResponses([
+      new Response("ok", { status: 200 }),
+    ]);
+
+    await safeResponse("https://example.com/feed.xml", {
+      headers: { "If-None-Match": '"abc"' },
+    });
+
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+    const [, init] = fetchStub.mock.calls[0];
+    const headers = new Headers((init as RequestInit).headers);
+    expect(headers.get("if-none-match")).toBe('"abc"');
   });
 });

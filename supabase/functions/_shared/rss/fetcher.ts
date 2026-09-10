@@ -13,6 +13,7 @@
 
 import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.0";
 import { decodeRssBody } from "./charset.ts";
+import { safeResponse, SafeFetchError } from "../safe-fetch.ts";
 
 export interface RssSource {
   id: string;
@@ -66,9 +67,30 @@ export interface FetchOptions {
   /** Last body hash we stored for this source (migration 041). A 2xx whose
    * body hashes the same is treated as not-modified BEFORE decode/parse. */
   knownBodyHash?: string;
+  /** Maximum bytes read from the feed body. Default DEFAULT_MAX_BYTES — lets
+   * tests drive the cap with a tiny body without touching the module const. */
+  maxBytes?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+// SEC-01: outbound RSS fetches now go through the same SSRF guard
+// (safeResponse) as the og-image path, rather than a bare `fetch`. Plain
+// `redirect: "follow"` lets a platform client chase ~20 hops; 5 is enough
+// to cover a real http→https→cdn feed migration chain while keeping the
+// re-validated-per-hop guard loop bounded.
+const FEED_MAX_REDIRECTS = 5;
+
+// A feed body is now attacker-configured (the guard only validates the
+// HOST, not the response size), so an unbounded `arrayBuffer()` read is a
+// memory-exhaustion DoS. 8 MB comfortably covers the largest legitimate
+// outlets in the roster with headroom; readBoundedBytes below enforces it
+// via a streamed read rather than buffering first and checking after.
+const DEFAULT_MAX_BYTES = 8_000_000;
+
+// Deliberately out of scope for this PR: no DNS cache / TTL-aware re-pin
+// here. safeResponse re-resolves per call; a shared cache is a separate
+// perf change with its own staleness tradeoffs.
 
 // Hashing the raw bytes (not the decoded text) is both cheaper and much
 // smaller to carry on `FetchResult` than the body itself (migration 041) --
@@ -79,11 +101,60 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   // ArrayBufferView<ArrayBuffer> specifically, but `bytes` here is typed as
   // Uint8Array<ArrayBufferLike> (it may be backed by a SharedArrayBuffer in
   // principle) even though in practice it never is — it's always the sole
-  // Uint8Array wrapping a fresh `response.arrayBuffer()` result.
+  // Uint8Array wrapping a bounded, reassembled read.
   const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+}
+
+// SEC-01: `source.rss_url` now reaches this function after passing the SSRF
+// host guard, but the guard validates only the HOST, not what that host
+// sends back -- a malicious or misconfigured outlet can still stream an
+// unbounded body. The old `new Uint8Array(await response.arrayBuffer())`
+// buffered the whole thing before we ever got to check its size, which is a
+// memory-exhaustion DoS on an attacker-configured URL. This reads via the
+// stream reader instead, bailing (and cancelling the reader) the moment the
+// running total would exceed `maxBytes`, so we never hold more than one cap
+// worth of bytes in memory even for a hostile multi-GB reply.
+//
+// Returns `null` to mean "the cap was exceeded" (the caller decides how to
+// report that, rather than this function silently truncating and letting a
+// partial-body parse produce corrupt items). A `null` `response.body` (some
+// empty 2xx replies have no stream at all) is treated as zero bytes so the
+// existing hash/decode path downstream still runs unchanged.
+async function readBoundedBytes(
+  response: Response,
+  maxBytes: number,
+): Promise<Uint8Array | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return new Uint8Array(0);
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) return null;
+      chunks.push(value);
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore
+    }
+  }
+
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
 }
 
 const DEFAULT_UA =
@@ -133,6 +204,7 @@ export async function fetchFeed(
   opts: FetchOptions = {},
 ): Promise<FetchResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
   const cache = opts.conditionalCache;
 
   const headers: Record<string, string> = { ...DEFAULT_HEADERS };
@@ -145,20 +217,27 @@ export async function fetchFeed(
 
   let response: Response;
   try {
-    response = await fetch(source.rss_url, {
-      method: "GET",
+    // SEC-01: route through the same SSRF guard (safeResponse) the
+    // og-image path uses, instead of a bare `fetch` with
+    // `redirect: "follow"`. `source.rss_url` is admin-configured, not
+    // reader-supplied, but it still needs DNS/redirect pinning and
+    // private-range blocking -- a compromised admin session or a
+    // misconfigured source row is exactly the threat model SEC-01 covers.
+    ({ response } = await safeResponse(source.rss_url, {
       headers,
-      redirect: "follow",
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+      timeoutMs,
+      maxRedirects: FEED_MAX_REDIRECTS,
+    }));
   } catch (err) {
     const name = (err as { name?: string })?.name ?? "";
     const message =
       name === "TimeoutError" || name === "AbortError"
         ? `Request timed out after ${timeoutMs}ms`
-        : err instanceof Error
+        : err instanceof SafeFetchError
           ? err.message
-          : String(err);
+          : err instanceof Error
+            ? err.message
+            : String(err);
     return {
       source,
       items: [],
@@ -191,7 +270,15 @@ export async function fetchFeed(
     };
   }
 
-  const buf = new Uint8Array(await response.arrayBuffer());
+  const buf = await readBoundedBytes(response, maxBytes);
+  if (buf === null) {
+    return {
+      source,
+      items: [],
+      status: response.status,
+      error: `feed body exceeded ${maxBytes} bytes`,
+    };
+  }
   const bodyHash = await sha256Hex(buf);
 
   // Refresh conditional-GET cache only on 2xx with a body.
