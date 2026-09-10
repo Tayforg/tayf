@@ -83,6 +83,7 @@ function mkDetail(
       memberCount: article_count,
       ...wireOverrides,
     },
+    blindspotSuppressed: false,
   };
 }
 

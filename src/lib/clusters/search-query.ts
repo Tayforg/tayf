@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { createServerClient } from "@/lib/supabase/server";
+import { getZoneFeedHealth } from "./feed-health";
 import {
   buildClusterBundle,
   CLUSTER_EMBED_SELECT,
@@ -43,6 +44,12 @@ async function cachedSearchClusters(q: string): Promise<ClusterBundle[]> {
 
   const supabase = createServerClient();
 
+  // Same feed-health gate as politics-query.ts's fetchPoliticsClusters,
+  // fetched once per search — so search-result cards (which render the
+  // identical ClusterCard blindspot badge) never disagree with the home
+  // feed about a suppressed cluster.
+  const health = await getZoneFeedHealth();
+
   const { data, error } = await supabase
     .from("clusters")
     .select(CLUSTER_EMBED_SELECT)
@@ -67,7 +74,7 @@ async function cachedSearchClusters(q: string): Promise<ClusterBundle[]> {
   for (const row of data ?? []) {
     const members = flattenClusterMembers(row);
     if (members.length === 0) continue;
-    bundles.push(buildClusterBundle(row, members).bundle);
+    bundles.push(buildClusterBundle(row, members, health).bundle);
   }
   return bundles;
 }

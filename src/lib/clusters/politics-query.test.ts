@@ -48,7 +48,30 @@ vi.mock("@/lib/supabase/server", () => ({
   createServerClient: vi.fn(() => makeFakeClient()),
 }));
 
+// Pack C (feed-health-gated blindspots): fetchPoliticsClusters() now calls
+// getZoneFeedHealth() once per build. That function does its own Supabase
+// round-trip against the `sources` table — mocking it here (instead of
+// wiring a second table into the hand-rolled `makeFakeClient` above) keeps
+// every pre-existing test's "exactly one clusters query" assertion true,
+// and keeps this file's health-suppression tests independent of
+// feed-health.ts's own query shape (covered by feed-health.test.ts).
+// `shouldSuppressBlindspot` is kept REAL (imported via importOriginal) so
+// these are still integration tests of the suppression wiring, not just of
+// the mock.
+const feedHealth = vi.hoisted(() => ({
+  getZoneFeedHealth: vi.fn(async () => null as unknown),
+}));
+
+vi.mock("./feed-health", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./feed-health")>();
+  return {
+    ...actual,
+    getZoneFeedHealth: feedHealth.getZoneFeedHealth,
+  };
+});
+
 import { getPoliticsClusters } from "./politics-query";
+import type { ZoneFeedHealth } from "./feed-health";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -123,6 +146,8 @@ function mkCluster(opts: MkClusterOpts) {
 beforeEach(() => {
   callLog = [];
   response = { data: [], error: null };
+  feedHealth.getZoneFeedHealth.mockReset();
+  feedHealth.getZoneFeedHealth.mockResolvedValue(null);
   vi.useFakeTimers();
   vi.setSystemTime(new Date(NOW_MS));
 });
@@ -633,6 +658,121 @@ describe("zone-diversity ranking (source-kind aware)", () => {
     // sort instead.
     expect(bundles[0].cluster.id).toBe("cluster-b");
     expect(bundles[1].cluster.id).toBe("cluster-a");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pack C — feed-health-gated blindspot suppression (read-path only)
+// ---------------------------------------------------------------------------
+
+describe("feed-health gated blindspot suppression", () => {
+  function mkHealth(overrides: {
+    iktidar?: boolean;
+    bagimsiz?: boolean;
+    muhalefet?: boolean;
+  }): ZoneFeedHealth {
+    const healthy = { total: 10, healthy: 10, healthyShare: 1, degraded: false };
+    const degraded = { total: 10, healthy: 2, healthyShare: 0.2, degraded: true };
+    return {
+      iktidar: overrides.iktidar ? degraded : healthy,
+      bagimsiz: overrides.bagimsiz ? degraded : healthy,
+      muhalefet: overrides.muhalefet ? degraded : healthy,
+    };
+  }
+
+  it("withdraws is_blindspot/blindspot_side and logs once when the silent pole zone is degraded", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: true }));
+    response = {
+      data: [
+        mkCluster({
+          id: "suppressed",
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: { pro_government: 9, opposition: 1 },
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "politika" },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0].cluster.is_blindspot).toBe(false);
+    expect(bundles[0].cluster.blindspot_side).toBeNull();
+    expect(infoSpy).toHaveBeenCalledTimes(1);
+    expect(infoSpy.mock.calls[0]?.[0]).toBe(
+      "[feed-health] suppressed blindspot for cluster suppressed (silent zone muhalefet: 2/10 feeds healthy)",
+    );
+    infoSpy.mockRestore();
+  });
+
+  it("leaves is_blindspot/blindspot_side untouched when feed health is unknown (null passthrough)", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(null);
+    response = {
+      data: [
+        mkCluster({
+          id: "unaffected-unknown-health",
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: { pro_government: 9, opposition: 1 },
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "politika" },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].cluster.is_blindspot).toBe(true);
+    expect(bundles[0].cluster.blindspot_side).toBe("pro_government");
+  });
+
+  it("leaves is_blindspot/blindspot_side untouched when the silent pole zone is healthy (regression)", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(mkHealth({}));
+    response = {
+      data: [
+        mkCluster({
+          id: "unaffected-healthy-silent-side",
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: { pro_government: 9, opposition: 1 },
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "politika" },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].cluster.is_blindspot).toBe(true);
+    expect(bundles[0].cluster.blindspot_side).toBe("pro_government");
+  });
+
+  it("never suppresses a cluster that isn't already a blindspot", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: true }));
+    response = {
+      data: [
+        mkCluster({
+          id: "not-a-blindspot",
+          is_blindspot: false,
+          blindspot_side: null,
+          bias_distribution: { pro_government: 9, opposition: 1 },
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "politika" },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].cluster.is_blindspot).toBe(false);
+    expect(bundles[0].cluster.blindspot_side).toBeNull();
   });
 });
 
