@@ -13,13 +13,23 @@
 //      block list (RFC 1918, CGNAT, loopback, link-local, ULA, IPv4-mapped
 //      IPv6, multicast, reserved, etc.) causes the request to be rejected
 //      before a connection is opened.
-//   2. For plain HTTP, after the allow-check we PIN the dial to the
-//      resolved literal IP (preserving the original Host via header) so
-//      the platform `fetch` does not re-resolve and a DNS-rebinding
-//      attacker cannot serve a public IP to our check and a private IP
-//      to the dial. For HTTPS we keep the hostname in the URL so SNI/TLS
-//      verifies — that residual rebinding risk is the price of correct
-//      TLS handshakes.
+//   2. For plain HTTP, after the allow-check we run a second DNS
+//      validation via resolveAndPin() and reject the request if the
+//      resolution is blocked — but then dial the HOSTNAME URL, not the
+//      resolved IP literal. An earlier revision rewrote the dial to the
+//      literal IP and set a "host" header to preserve virtual hosting;
+//      Deno's fetch treats `Host` as a forbidden header and silently
+//      drops it, so the origin received `Host: <ip>` and any
+//      Cloudflare-fronted or vhosted target answered 403 (this was a
+//      production defect: PR #43 routed the RSS fetcher through
+//      safeResponse and 14 of 118 http: feeds started failing). We
+//      therefore accept, for HTTP, the same residual same-resolver
+//      DNS-rebinding TOCTOU that HTTPS already accepts below — the dial
+//      re-resolves the hostname itself, so a rebinding attacker who
+//      flips DNS between our check and the platform fetch's own lookup
+//      is not caught. For HTTPS we keep the hostname in the URL so
+//      SNI/TLS verifies — that residual rebinding risk is the price of
+//      correct TLS handshakes.
 //   3. Redirects are manual (`redirect: "manual"`). Each Location header is
 //      re-validated through the same allowlist on every hop, with a maximum
 //      of MAX_REDIRECTS hops. This blocks the "first-fetch is public, then
@@ -319,13 +329,19 @@ export function isPrivateAddress(ip: string): string | null {
  * should be blocked.
  */
 /**
- * Resolve a hostname and return the public address to pin the fetch against,
- * or a reason string if the host should be blocked.
+ * Resolve a hostname and return the public address the DNS lookup resolved
+ * to, or a reason string if the host should be blocked.
  *
- * Returns `{ pinIp, ipFamily }` on success. Callers should rewrite the URL's
- * hostname to the pinned literal (bracketed for v6) and re-check the literal
- * before opening the socket — that closes the DNS-rebinding TOCTOU window
- * that exists when the platform `fetch` re-resolves after our check.
+ * Returns `{ pinIp, ipFamily }` on success. NOTE: `safeResponse` currently
+ * calls this only to reject blocked resolutions for plain HTTP — it does
+ * NOT rewrite the dial URL to `pinIp`. Rewriting the dial to the literal
+ * (an earlier revision did this to close the DNS-rebinding TOCTOU window)
+ * requires setting a `Host` header to keep virtual hosting working, but
+ * Deno's fetch treats `Host` as a forbidden header and silently drops it,
+ * so the origin receives `Host: <ip>` and Cloudflare-fronted / vhosted
+ * targets answer 403. The dial therefore uses the hostname URL and accepts
+ * the same residual same-resolver rebinding risk HTTPS already accepts —
+ * see the module doc comment.
  */
 export async function resolveAndPin(
   hostname: string,
@@ -531,9 +547,10 @@ export interface SafeResponseResult {
  * SSRF-safe outbound fetch that stops short of reading the body. Validates
  * the URL (DNS + private-block check) on every hop, disables automatic
  * redirects, re-validates every Location header through the same
- * allowlist, and pins the dial to the validated literal IP for plain HTTP
- * (HTTPS keeps the hostname for SNI/TLS — see the module doc comment; this
- * does NOT close HTTPS rebinding, only HTTP).
+ * allowlist, and — for plain HTTP — runs a second DNS validation via
+ * resolveAndPin() to reject blocked resolutions. The dial itself always
+ * uses the hostname URL (for both HTTP and HTTPS) — see the module doc
+ * comment for why HTTP is no longer pinned to the resolved literal.
  *
  * Callers own the body: `response.body` is still open (except for a 3xx
  * hop, which this function drains itself before looping/returning) and
@@ -563,32 +580,25 @@ export async function safeResponse(
       throw new SafeFetchError(`URL rejected: ${validated} (url=${currentUrl})`);
     }
 
-    // Round-6 P1 fix (DNS rebinding TOCTOU): rewrite the URL to use the
-    // pinned IP literal we already validated. The platform `fetch` would
-    // otherwise re-resolve the hostname through its own resolver, opening
-    // a window where an attacker who controls the authoritative DNS can
-    // serve a public IP to our check and a private IP to fetch. We
-    // preserve the original Host via header so virtual-hosted servers
-    // still route correctly, and SNI/TLS still validates because the
-    // platform Deno client uses the URL's hostname for the SNI handshake
-    // — for HTTPS we therefore keep the hostname unrewritten and rely on
-    // the same-resolver lookup, accepting that residual risk in exchange
-    // for not breaking TLS. For plain HTTP we pin to the literal.
-    let dialUrl = validated.toString();
+    // For plain HTTP, run a second DNS validation via resolveAndPin() so a
+    // resolution that flips into a blocked range is still rejected. We do
+    // NOT use the pinned literal for the dial, and we do NOT set a `host`
+    // header: an earlier revision rewrote the dial URL to the resolved IP
+    // literal and set `host` to the original hostname to keep virtual
+    // hosting working, but Deno's fetch treats `Host` as a forbidden
+    // header and silently drops it — the origin then received
+    // `Host: <ip>` and any Cloudflare-fronted or vhosted target answered
+    // 403 (production defect, see module doc comment point 2). We instead
+    // dial the hostname URL for HTTP exactly as we already do for HTTPS,
+    // accepting the same residual same-resolver DNS-rebinding TOCTOU that
+    // HTTPS accepts.
+    const dialUrl = validated.toString();
     const dialHeaders = new Headers(opts.headers ?? undefined);
     if (validated.protocol === "http:") {
       const pinned = await resolveAndPin(validated.hostname);
       if (typeof pinned === "string") {
         throw new SafeFetchError(`pin rejected: ${pinned} (url=${currentUrl})`);
       }
-      if (!dialHeaders.has("host")) {
-        dialHeaders.set("host", validated.host);
-      }
-      const literalHost =
-        pinned.ipFamily === "v6" ? `[${pinned.pinIp}]` : pinned.pinIp;
-      const portSuffix = validated.port ? `:${validated.port}` : "";
-      dialUrl =
-        `${validated.protocol}//${literalHost}${portSuffix}${validated.pathname}${validated.search}`;
     }
 
     const response = await fetch(dialUrl, {
