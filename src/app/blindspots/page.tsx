@@ -14,6 +14,7 @@ export const metadata: Metadata = {
 import { ClusterCard } from "@/components/story/cluster-card";
 import { NewsletterForm } from "@/components/newsletter/newsletter-form";
 import { PageHero } from "@/components/ui/page-hero";
+import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
 import {
   getBlindspots,
@@ -75,9 +76,11 @@ export default async function BlindspotsPage() {
         </div>
       )}
 
-      <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 max-w-sm">
-        <NewsletterForm />
-      </div>
+      {isMailConfigured() && (
+        <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 max-w-sm">
+          <NewsletterForm />
+        </div>
+      )}
     </div>
   );
 }

@@ -711,9 +711,15 @@ select confirm_token, unsubscribe_token, confirmed, confirmed_at
 **2. Set the new Vercel env vars:**
 
 ```bash
-# Required for outbound mail (confirm links + the weekly digest). Without
-# it, sendEmail() no-ops with { skipped: true } and warns once — signups
-# and digests still "succeed" but nothing is actually mailed.
+# Required for outbound mail (confirm links + the weekly digest). This key
+# gates the whole feature fail-closed, not just outbound mail: while it is
+# unset, isMailConfigured() (src/lib/email/resend.ts) makes the footer hide
+# the newsletter form entirely (src/components/layout/footer.tsx), POST
+# /api/newsletter returns 503 "Newsletter is not configured" before any row
+# is inserted, and GET /api/cron/digest returns
+# {"skipped":true,"reason":"RESEND_API_KEY not set","sent":0} without
+# running a single Supabase query. Nothing is ever shown, accepted, or
+# billed for a promise this deployment can't keep.
 vercel env add RESEND_API_KEY production
 
 # Optional — defaults to "Tayf <bulten@tayfhaber.com>" if unset.
@@ -727,11 +733,11 @@ vercel env add NEXT_PUBLIC_SITE_URL production
 
 | Env var               | Default (if unset)                    | Notes                                                                                  |
 | ---------------------- | -------------------------------------- | --------------------------------------------------------------------------------------- |
-| `RESEND_API_KEY`       | *(none — sending is skipped)*          | `src/lib/email/resend.ts` calls `https://api.resend.com/emails`. Missing key = soft no-op, never a thrown error. |
+| `RESEND_API_KEY`       | *(none — feature fail-closed)*         | `isMailConfigured()` in `src/lib/email/resend.ts` is the single source of truth. Unset = the footer form is not rendered, `POST /api/newsletter` returns 503 with no row inserted, and `GET /api/cron/digest` returns `{skipped:true, reason:"RESEND_API_KEY not set", sent:0}` with no Supabase query. `sendEmail`/`sendBatch` keep their own `{skipped:true}` soft no-op as a second line of defense for any caller that still reaches them. |
 | `NEWSLETTER_FROM`      | `Tayf <bulten@tayfhaber.com>`          | Must be a domain verified in the Resend dashboard, or sends will bounce even with a valid key. |
 | `NEXT_PUBLIC_SITE_URL` | `https://<VERCEL_PROJECT_PRODUCTION_URL>` or `http://localhost:3000` | Shared with `metadataBase` (see `src/lib/site-url.ts`); confirm/unsubscribe/digest links are built from it. |
 
-**3. Redeploy** so the env vars and the new `/api/cron/digest` cron entry attach:
+**3. Redeploy — this step is not optional.** `RESEND_API_KEY` gates the footer at prerender time (`isMailConfigured()` runs when the server component renders), so **setting the key in Vercel does nothing to production until the app is redeployed.** Pasting the value into the dashboard alone leaves the footer form hidden, `POST /api/newsletter` still returning 503, and the digest cron still short-circuiting — indefinitely, with no error to signal why.
 
 ```bash
 vercel --prod
@@ -739,28 +745,25 @@ vercel --prod
 
 After this deploy, Vercel's Cron Jobs page should list `/api/cron/headline` (every 5 minutes) **and** `/api/cron/digest` (`0 6 * * 6` — Saturday 06:00 UTC / 09:00 TRT).
 
-**Verification** — same `$CRON_SECRET` from the headline-cron section above gates this route too:
+**GO-LIVE checklist.** Work through this in order, every time `RESEND_API_KEY` changes state (added, rotated, or removed) in production. `$CRON_SECRET` is the same one gating `/api/cron/headline` above.
 
-```bash
-# Should return 401 (no auth header).
-curl -sS -o /dev/null -w "%{http_code}\n" "https://<your-tayf-domain>/api/cron/digest"
-
-# Should return 200 with { sent, skipped }.
-curl -sS -H "Authorization: Bearer $CRON_SECRET" "https://<your-tayf-domain>/api/cron/digest"
-```
-
-Manually exercise the signup flow once against production before calling this done:
-
-```bash
-curl -sS -X POST -H "Content-Type: application/json" \
-  -d '{"email":"you@example.com"}' \
-  "https://<your-tayf-domain>/api/newsletter"
-# Expect: {"success":true} and a "Tayf bültenine kaydını onayla" email in
-# your inbox within a few seconds (skip this check if RESEND_API_KEY is
-# intentionally unset in this environment).
-```
-
-Click the confirm link in that email and confirm it redirects to `/?bulten=onaylandi` (not `/?bulten=gecersiz` — a mismatch there usually means `NEXT_PUBLIC_SITE_URL` doesn't match the domain you're testing against, so the link points at the wrong host).
+1. **Redeploy after the env var change.** `vercel --prod` — see the note above; skipping this step is the most common way this checklist silently fails.
+2. **Form visible.** `curl -sS "https://<your-tayf-domain>/" | grep -c 'Haftalık bülten'` returns `1` (with the key unset, it must return `0` — no empty bordered block, the whole wrapper is gone).
+3. **POST returns 200.**
+   ```bash
+   curl -sS -i -X POST -H "Content-Type: application/json" \
+     -d '{"email":"you@example.com"}' \
+     "https://<your-tayf-domain>/api/newsletter"
+   ```
+   Expect `HTTP/2 200` and `{"success":true}` (with the key unset, expect `503` and a body containing `"Newsletter is not configured"`, and no row inserted).
+4. **Exactly one row.** In Supabase SQL: `select count(*) from newsletter_subscribers where email = 'you@example.com';` — expect `1`.
+5. **Confirmation mail received.** A "Tayf bültenine kaydını onayla" email arrives in the inbox used above within a few seconds.
+6. **Confirm link sets `confirmed_at`.** Click the link; it must redirect to `/?bulten=onaylandi` (not `/?bulten=gecersiz` — a mismatch there usually means `NEXT_PUBLIC_SITE_URL` doesn't match the domain you're testing against, so the link points at the wrong host). Then: `select confirmed_at from newsletter_subscribers where email = 'you@example.com';` — expect a non-null timestamp. (Before clicking, the same query must return exactly one row with `confirmed_at` null — that is the double opt-in precondition.)
+7. **Authenticated digest call succeeds, not a skip.**
+   ```bash
+   curl -sS -H "Authorization: Bearer $CRON_SECRET" "https://<your-tayf-domain>/api/cron/digest"
+   ```
+   Expect `200` with `sent >= 1` (at least your confirmed test address) and **no** `"skipped":true` / `"reason"` fail-closed body — that shape only appears while the key is missing. A normal response looks like `{"sent":<n>,"skipped":<n>}`, where `skipped` here counts individual send failures, not a feature-disabled flag.
 
 ## Ingest fetch state (041): apply migration, then redeploy `ingest`
 

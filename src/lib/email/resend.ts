@@ -33,6 +33,16 @@ export type SendEmailResult =
  * - Resend rejects the request (non-2xx) → `{ ok: false, error }`.
  * - Network/parse failure → `{ ok: false, error }`. Never throws.
  */
+/**
+ * Single source of truth for "can this deployment send mail?". Every
+ * surface that offers or promises e-mail (footer form, POST /api/newsletter,
+ * the digest cron) must gate on this so nothing is shown or accepted that
+ * cannot actually be delivered.
+ */
+export function isMailConfigured(): boolean {
+  return Boolean(process.env.RESEND_API_KEY);
+}
+
 export async function sendEmail(
   input: SendEmailInput,
 ): Promise<SendEmailResult> {

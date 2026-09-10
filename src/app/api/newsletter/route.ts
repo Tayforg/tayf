@@ -1,6 +1,6 @@
 import { after, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { sendEmail } from "@/lib/email/resend";
+import { isMailConfigured, sendEmail } from "@/lib/email/resend";
 import { siteUrl } from "@/lib/site-url";
 import {
   apiBadRequest,
@@ -40,7 +40,17 @@ interface ExistingSubscriberRow {
   confirmed_at: string | null;
 }
 
+// GET /api/newsletter/confirm and GET /api/newsletter/unsubscribe are
+// deliberately NOT gated on isMailConfigured(): an already-mailed token must
+// keep working even if the key is later removed.
 export const POST = withApiErrors(async (request: Request) => {
+  // Gate BEFORE the rate limiter's side effects and before any Supabase
+  // call: a probe against a misconfigured deployment must not burn rate
+  // limit tokens or promise a signup we cannot fulfill.
+  if (!isMailConfigured()) {
+    return apiError(503, "Newsletter is not configured");
+  }
+
   const rl = newsletterPostLimit(clientKey(request));
   if (!rl.allowed) {
     return apiError(429, "Too many requests", {

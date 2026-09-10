@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { sendEmail, sendBatch } from "./resend";
+import { sendEmail, sendBatch, isMailConfigured } from "./resend";
 
 const ORIGINAL_ENV = { ...process.env };
 const originalFetch = globalThis.fetch;
@@ -17,6 +17,23 @@ afterEach(() => {
 });
 
 const INPUT = { to: "reader@example.com", subject: "Merhaba", html: "<p>hi</p>" };
+
+describe("isMailConfigured", () => {
+  it("is false when RESEND_API_KEY is unset", () => {
+    delete process.env.RESEND_API_KEY;
+    expect(isMailConfigured()).toBe(false);
+  });
+
+  it("is false when RESEND_API_KEY is an empty string", () => {
+    process.env.RESEND_API_KEY = "";
+    expect(isMailConfigured()).toBe(false);
+  });
+
+  it("is true when RESEND_API_KEY is set", () => {
+    process.env.RESEND_API_KEY = "re_test_key";
+    expect(isMailConfigured()).toBe(true);
+  });
+});
 
 describe("sendEmail", () => {
   it("is skipped without RESEND_API_KEY, and warns exactly once", async () => {

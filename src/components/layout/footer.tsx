@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Suspense } from "react";
 
 import { NewsletterForm } from "@/components/newsletter/newsletter-form";
+import { isMailConfigured } from "@/lib/email/resend";
 import { getDeliveringSourceCount } from "@/lib/sources/active-count";
 
 const NAV_LINKS = [
@@ -87,9 +88,11 @@ export function Footer() {
           </Suspense>
         </div>
 
-        <div className="mt-8 pt-6 border-t border-border/20 max-w-sm">
-          <NewsletterForm />
-        </div>
+        {isMailConfigured() && (
+          <div className="mt-8 pt-6 border-t border-border/20 max-w-sm">
+            <NewsletterForm />
+          </div>
+        )}
 
         <p className="mt-3 text-[10px] text-muted-foreground/40 leading-relaxed">
           Çerez kullanmıyoruz; ziyaret sayıları anonim olarak ölçülür (Vercel Web Analytics).
