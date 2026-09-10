@@ -1,8 +1,20 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactNode } from "react";
 
 vi.mock("@/components/story/correction-form", () => ({
   CorrectionForm: () => null,
+}));
+
+// Mutable per-test status, mirrored via a `let` (like the rss.xml test
+// suite) so each test can pick its own neutralized/eligible/null shape.
+// Default mirrors production reality today: zero clusters neutralized.
+let mockNeutralStatus: { neutralized: number; eligible: number } | null = {
+  neutralized: 0,
+  eligible: 12,
+};
+
+vi.mock("@/lib/headline/status", () => ({
+  getNeutralizedStatus: vi.fn(async () => mockNeutralStatus),
 }));
 
 import { BIAS_LABELS, BLINDSPOT, SURPRISE, ZONE_META } from "@/lib/bias/config";
@@ -89,9 +101,13 @@ function collectStringProps(node: unknown, out: string[] = []): string[] {
 }
 
 describe("/metodoloji page", () => {
+  beforeEach(() => {
+    mockNeutralStatus = { neutralized: 0, eligible: 12 };
+  });
+
   it("renders every bias-zone contract number and label from the shared config", async () => {
     const { default: MethodologyPage } = await import("./page");
-    const tree = MethodologyPage();
+    const tree = await MethodologyPage();
     const text = collectText(tree).join("");
 
     // Assert the interpolated phrasing, not bare digits — a bare-digit
@@ -137,12 +153,12 @@ describe("/metodoloji page", () => {
     delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
     vi.resetModules();
     const { default: WithoutEmail } = await import("./page");
-    expect(collectText(WithoutEmail()).join("")).not.toContain("@");
+    expect(collectText(await WithoutEmail()).join("")).not.toContain("@");
 
     process.env.NEXT_PUBLIC_CONTACT_EMAIL = "duzeltme@tayfhaber.com";
     vi.resetModules();
     const { default: WithEmail } = await import("./page");
-    expect(collectText(WithEmail()).join("")).toContain(
+    expect(collectText(await WithEmail()).join("")).toContain(
       "duzeltme@tayfhaber.com",
     );
 
@@ -157,7 +173,7 @@ describe("/metodoloji page", () => {
   // removed section id would silently break in-page navigation.
   it("links every table-of-contents pill to a section id that exists on the page", async () => {
     const { default: MethodologyPage } = await import("./page");
-    const tree = MethodologyPage();
+    const tree = await MethodologyPage();
     const ids = collectIds(tree);
     const anchors = collectHrefs(tree).filter((href) => href.startsWith("#"));
     expect(anchors.length).toBeGreaterThanOrEqual(7);
@@ -169,8 +185,43 @@ describe("/metodoloji page", () => {
   // column rendered as bare text without its contract dot colour.
   it("never hard-codes a source count and marks each Medya DNA zone with its contract dot colour", async () => {
     const { default: MethodologyPage } = await import("./page");
-    const strings = collectStringProps(MethodologyPage()).join(" ");
+    const strings = collectStringProps(await MethodologyPage()).join(" ");
     expect(strings).not.toMatch(/\d+\s*Türk haber kaynağ/);
     for (const zone of Object.values(ZONE_META)) expect(strings).toContain(zone.dot);
+  });
+
+  // Pack B — neutralizer honesty: the "Başlıklar nasıl tarafsızlaştırılıyor"
+  // section must never claim AI-neutralization without live evidence.
+  describe("neutralization status line", () => {
+    it("renders the closed-loop sentence when neutralized === 0", async () => {
+      mockNeutralStatus = { neutralized: 0, eligible: 12 };
+
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain(
+        "Bu adım şu anda kapalı: üretimde hiçbir başlık tarafsızlaştırılmadı.",
+      );
+    });
+
+    it("renders the live count when neutralized > 0, and drops the closed-loop sentence", async () => {
+      mockNeutralStatus = { neutralized: 7, eligible: 12 };
+
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain("Şu ana kadar 7 kümenin başlığı tarafsızlaştırıldı.");
+      expect(text).not.toContain("Bu adım şu anda kapalı");
+    });
+
+    it("renders neither sentence when getNeutralizedStatus() returns null", async () => {
+      mockNeutralStatus = null;
+
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).not.toContain("Bu adım şu anda kapalı");
+      expect(text).not.toContain("kümenin başlığı tarafsızlaştırıldı");
+    });
   });
 });

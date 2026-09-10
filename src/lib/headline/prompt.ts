@@ -11,6 +11,19 @@
 // route's actual gate.
 export const HEADLINE_MIN_ARTICLE_COUNT = 3;
 
+// Provenance stamp written into `clusters.title_neutral_prompt_version`
+// (migration 046) alongside `title_tr_neutral` / `title_neutral_at`, so a
+// rewritten title can always be traced back to the exact prompt that
+// produced it.
+//
+// BUMP RULE: bump this string every time `HEADLINE_PROMPT_TEMPLATE` below
+// changes (wording, rules, formatting) — including whitespace-only edits
+// that change model output. Format: `YYYY-MM-DD.N`, where `N` increments
+// for a same-day revision. Do NOT bump for changes outside this file (e.g.
+// `buildHeadlinePrompt`'s title-count cap) unless they change what text is
+// actually sent to the LLM.
+export const HEADLINE_PROMPT_VERSION = "2026-09-10.1";
+
 export const HEADLINE_PROMPT_TEMPLATE = `Aşağıda 8 farklı Türk haber kaynağının aynı haber için yazdığı başlıklar var. Bu haberleri toplu bir tarafsız başlığa indirgemen gerekiyor.
 
 KURALLAR:
