@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { requireAdminSession } from "@/lib/admin/session";
 import { AdminPanel } from "@/components/admin/admin-panel";
 import { CorrectionsList } from "@/components/admin/corrections-list";
@@ -19,7 +20,13 @@ export default async function AdminPage() {
   return (
     <>
       <AdminPanel />
-      <div className="mx-auto w-full max-w-5xl px-4 pb-10">
+      <div className="mx-auto w-full max-w-5xl px-4 pb-10 space-y-6">
+        <Link
+          href="/admin/ekonomi"
+          className="inline-flex items-center gap-1.5 font-mono text-[12px] text-brand hover:underline"
+        >
+          Ekonomi paneli: KAP akışı, eşleştirme ve tahmin sinyalleri
+        </Link>
         <CorrectionsList />
       </div>
     </>

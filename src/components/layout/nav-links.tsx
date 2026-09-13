@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Telescope, Eye, Bookmark, Settings } from "lucide-react";
+import { Telescope, Eye, Bookmark, Settings, TrendingUp } from "lucide-react";
 import { Separator } from "@/components/ui/separator";
 
 const baseLink =
@@ -27,6 +27,7 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
 
   const isHome = pathname === "/";
   const isBlindspots = pathname?.startsWith("/blindspots") ?? false;
+  const isEkonomi = pathname?.startsWith("/ekonomi") ?? false;
   const isSaved = pathname?.startsWith("/saved") ?? false;
   const isAdmin = pathname?.startsWith("/admin") ?? false;
 
@@ -50,6 +51,16 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
         <Eye className="h-3.5 w-3.5" />
         <span className="sr-only sm:hidden">Kör Noktalar</span>
         <span className="hidden sm:inline">Kör Noktalar</span>
+      </Link>
+      <Separator orientation="vertical" className="h-3 mx-0.5" />
+      <Link
+        href="/ekonomi"
+        aria-current={isEkonomi ? "page" : undefined}
+        className={`${baseLink} ${isEkonomi ? active : inactive}`}
+      >
+        <TrendingUp className="h-3.5 w-3.5" />
+        <span className="sr-only sm:hidden">Ekonomi</span>
+        <span className="hidden sm:inline">Ekonomi</span>
       </Link>
       <Separator orientation="vertical" className="h-3 mx-0.5" />
       <Link
