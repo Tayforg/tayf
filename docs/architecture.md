@@ -81,6 +81,8 @@ graph TB
 | Cluster drain | Edge Function `cluster-consumer`, scheduled by `pg_cron` | `* * * * *` | `pgmq.read(vt=60, qty=50)` → run 3-method ensemble → upsert into `clusters` + `cluster_articles` → `pgmq.archive` on success, `pgmq.delete` on permanent failure (>3 reads) |
 | Image drain | Edge Function `image-consumer`, scheduled by `pg_cron` | `*/5 * * * *` | Fetch first 50 KB of article URL, extract `og:image` / `twitter:image`, SSRF guard (RFC1918/169.254/loopback/IPv6 link-local), update `articles.image_url` |
 | Headline | Vercel cron `/api/cron/headline` | `*/5 * * * *` | LLM-generated neutral Turkish title for new clusters lacking `title_tr_neutral` |
+| KAP drain | Edge Function `kap-ingest`, scheduled by `pg_cron` `kap-drain` | `*/10 * * * *` | Pulls the last two Istanbul days of KAP disclosures (`POST /tr/api/disclosure/members/byCriteria`, 2000-row cap, walked one day at a time) into `kap_disclosures`; `{"companies":true}` refreshes `bist_companies` + auto `bist_aliases` from the KAP company list. `scripts/kap-backfill.mjs` walks history. Migration 049. |
+| Ticker resolve | SQL `resolve_article_tickers()`, scheduled by `pg_cron` `resolve-tickers` | `*/10 * * * *` | Joins articles created in the last 30 min to `bist_aliases` (folded whole-word substring) and to uppercase ticker codes, writing `article_tickers`. Views `ticker_attention_daily` and `disclosure_coverage` are the backtester's read surface. |
 
 The pgmq queues give at-least-once delivery with visibility timeouts; the `worker_metrics` view feeds `/api/health` and `/api/metrics`. Cold-start risk on the Edge Functions is mitigated by the regular pg_cron cadence keeping the instances warm.
 
