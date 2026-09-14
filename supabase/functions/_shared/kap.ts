@@ -200,7 +200,7 @@ const GENERIC = new Set([
  */
 export function autoAlias(title: string): string | null {
   const first = foldTr(title).split(" ").find((t) => !LEGAL.has(t));
-  if (!first || first.length < 4 || GENERIC.has(first)) return null;
+  if (!first || first.length < 4 || GENERIC.has(first) || /^\d+$/.test(first)) return null;
   return first;
 }
 

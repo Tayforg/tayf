@@ -115,6 +115,32 @@ on conflict do nothing;
 -- Apply to the current state: prune, then drop sports-desk matches.
 select public.prune_generic_aliases();
 
+-- Below the threshold the counts no longer separate names from words, so
+-- the residue seen in prod is listed by hand: cities, districts, first
+-- names, surnames, plain nouns and all-digit tokens.
+update public.bist_aliases set enabled = false
+where origin = 'auto' and enabled and (
+  alias ~ '^[0-9]+$' or alias in (
+    'marmaris', 'kule', 'bogazici', 'usak', 'emir', 'levent', 'iskenderun', 'atlas',
+    'analiz', 'avrasya', 'taraf', 'sonmez', 'bahadir', 'oncu', 'servet', 'turker',
+    'mega', 'kutahya', 'osmanli', 'asil', 'metal', 'guven', 'luks', 'selcuk',
+    'denizli', 'kalkinma', 'trabzon', 'dagi', 'bizim', 'aslan', 'mavi', 'edip',
+    'duran', 'pusula', 'huzur', 'emlak', 'beykoz', 'soke', 'cagdas', 'ziraat',
+    'marka', 'denge', 'isik', 'korfez', 'lider', 'onur', 'metro', 'federal',
+    'emek', 'kepez', 'adil', 'detay', 'mutlu', 'menderes', 'uyum', 'unal',
+    'ankara', 'izmir', 'bursa', 'adana', 'konya', 'kayseri', 'samsun', 'bolu',
+    'akdeniz', 'karadeniz', 'ege', 'marmara', 'anadolu', 'sabah', 'ekim',
+    'hedef', 'destek', 'halk', 'unlu', 'teknik', 'euro', 'saat', 'medya',
+    'gelecek', 'akin', 'yesil', 'zorlu', 'yonetim', 'finansman', 'alternatif',
+    'aksu', 'guler', 'dogru', 'saray', 'aktif', 'tera', 'hareket', 'asya',
+    'pinar', 'kredi', 'pasifik', 'fiba', 'deger', 'park', 'beyaz', 'turkish',
+    'baskent', 'volkswagen', 'dogus'
+  )
+);
+delete from public.article_tickers t
+using public.bist_aliases al
+where t.matched_on = 'alias:' || al.alias and not al.enabled;
+
 delete from public.article_tickers t
 using public.articles a
 where a.id = t.article_id and a.category = 'spor';
