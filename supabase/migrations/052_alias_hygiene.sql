@@ -72,7 +72,11 @@ $$;
 -- Disable auto aliases that hit more than p_max_hits articles in the last
 -- p_days (counted from article_tickers, so it is cheap), and drop the
 -- matches they produced. Returns the number of aliases disabled.
-create or replace function public.prune_generic_aliases(p_days int default 14, p_max_hits int default 300)
+--
+-- Threshold calibration (prod, 14 days, 2026-09-14): the busiest real
+-- names run ~60-100 hits (bim 98, vestel 88, turkcell 82, aselsan 81),
+-- while everything above 100 was a dictionary word, a city or a surname.
+create or replace function public.prune_generic_aliases(p_days int default 14, p_max_hits int default 100)
 returns integer
 language plpgsql
 as $$
