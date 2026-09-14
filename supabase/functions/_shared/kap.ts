@@ -109,12 +109,21 @@ export function splitCodes(s: string | null | undefined): string[] {
   return s.split(",").map((c) => c.trim().toUpperCase()).filter(Boolean);
 }
 
+// Exchange-filed notices (circuit breakers, market announcements) carry no
+// stockCodes; the paper is named at the start of the summary as "CODE.E".
+const SUMMARY_CODE = /^([A-Z0-9]{3,6})\.E\b/;
+
 export function mapDisclosure(r: KapListItem): KapDisclosureRow {
+  let stockCodes = splitCodes(r.stockCodes);
+  if (stockCodes.length === 0) {
+    const m = SUMMARY_CODE.exec((r.summary ?? "").trim());
+    if (m) stockCodes = [m[1]!];
+  }
   return {
     disclosure_index: r.disclosureIndex,
     published_at: parseKapDate(r.publishDate),
     kap_title: r.kapTitle ?? null,
-    stock_codes: splitCodes(r.stockCodes),
+    stock_codes: stockCodes,
     related_stocks: splitCodes(r.relatedStocks),
     disclosure_class: r.disclosureClass ?? null,
     disclosure_type: r.disclosureType ?? null,

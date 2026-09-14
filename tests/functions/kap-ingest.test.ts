@@ -46,6 +46,28 @@ describe("kap helpers", () => {
     expect(row.raw.disclosureIndex).toBe(1662124);
   });
 
+  it("lifts the paper code out of an exchange-filed summary", () => {
+    const row = mapDisclosure({
+      publishDate: "14.09.2026 15:57:00",
+      kapTitle: "BORSA İSTANBUL BISTECH DEVRE KESİCİ UYGULAMASI",
+      disclosureClass: "DKB",
+      disclosureType: "DUY",
+      disclosureCategory: null,
+      summary: "BETAE.E işlem sırasında Pay Bazında Devre Kesici Uygulaması devreye girmiştir",
+      subject: "Pay Bazında Devre Kesici Bildirimi",
+      relatedStocks: null,
+      year: null,
+      ruleType: "-",
+      period: null,
+      disclosureIndex: 1662400,
+      isLate: false,
+      stockCodes: null,
+      attachmentCount: 0,
+      modifyStatus: null,
+    });
+    expect(row.stock_codes).toEqual(["BETAE"]);
+  });
+
   it("folds Turkish like public.fold_tr", () => {
     expect(foldTr("Türk Hava Yolları'nın")).toBe("turk hava yollari nin");
     expect(foldTr("ŞİŞECAM, Iğdır & İstanbul")).toBe("sisecam igdir istanbul");
