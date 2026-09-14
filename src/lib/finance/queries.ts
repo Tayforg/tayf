@@ -149,6 +149,17 @@ export function toFeedItem(row: ArticleRow): FeedItem {
 
 const ARTICLE_SELECT = "id,title,url,published_at,category,source:sources(name,slug),article_tickers!inner(ticker)";
 
+interface TickerArticleRow {
+  id: string;
+  title: string;
+  url: string;
+  published_at: string;
+  category: string;
+  source_name: string | null;
+  source_slug: string | null;
+  matched_on: string;
+}
+
 export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
   "use cache";
   cacheLife(FEED_CACHE);
@@ -418,7 +429,9 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
   const [companyRes, attentionRes, articlesRes, disclosuresRes, coverageRes] = await Promise.all([
     supabase.from("bist_companies").select("kap_member_oid,tickers,title,city,shares_traded").contains("tickers", [ticker]).limit(1),
     supabase.from("ticker_attention_daily").select("day,articles,sources").eq("ticker", ticker).gte("day", istDate(-29)).order("day"),
-    supabase.from("articles").select(ARTICLE_SELECT).eq("article_tickers.ticker", ticker).order("published_at", { ascending: false }).limit(60),
+    // Starts from the indexed article_tickers side (migration 054); the
+    // embedded-filter form timed out in production.
+    supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: 60 }),
     supabase.from("kap_disclosures").select(DISCLOSURE_SELECT).contains("stock_codes", [ticker]).gte("published_at", since30).order("published_at", { ascending: false }).limit(60),
     supabase.from("disclosure_coverage").select("disclosure_index,lag_minutes").eq("ticker", ticker).gte("disclosed_at", since30).limit(2000),
   ]);
@@ -431,7 +444,15 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
   return {
     company: c ? { kapMemberOid: c.kap_member_oid, tickers: c.tickers, title: c.title, city: c.city, sharesTraded: c.shares_traded } : null,
     attention: ((attentionRes.data ?? []) as AttentionDay[]).map((d) => ({ day: String(d.day), articles: Number(d.articles), sources: Number(d.sources) })),
-    articles: ((articlesRes.data ?? []) as unknown as ArticleRow[]).map(toFeedItem),
+    articles: ((articlesRes.data ?? []) as TickerArticleRow[]).map((r) => ({
+      id: r.id,
+      title: r.title,
+      url: r.url,
+      publishedAt: r.published_at,
+      category: r.category,
+      source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
+      tickers: [ticker],
+    })),
     disclosures,
     coverage: coverageStats((coverageRes.data ?? []) as Array<{ disclosure_index: number; lag_minutes: number }>, disclosures.length),
   };

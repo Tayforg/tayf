@@ -285,6 +285,22 @@ export function createFinanceFakeClient(): unknown {
       finance_signals: SIGNALS,
     },
     rpc: {
+      ticker_articles: (args) => {
+        const { p_ticker, p_limit } = (args ?? {}) as { p_ticker?: string; p_limit?: number };
+        const data = ARTICLES.filter((a) => a.article_tickers.some((t) => t.ticker === p_ticker))
+          .slice(0, p_limit ?? 60)
+          .map((a) => ({
+            id: a.id,
+            title: a.title,
+            url: a.url,
+            published_at: a.published_at,
+            category: a.category,
+            source_name: a.source.name,
+            source_slug: a.source.slug,
+            matched_on: "alias",
+          }));
+        return { data, error: null };
+      },
       feed_reference_prices: (args) => {
         const ids = ((args as { p_article_ids?: string[] })?.p_article_ids ?? []) as string[];
         const data = ARTICLES.filter((a) => ids.includes(a.id)).flatMap((a) =>
