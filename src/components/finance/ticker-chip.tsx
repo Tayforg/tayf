@@ -1,13 +1,28 @@
 import Link from "next/link";
 
-import { fmtPct, fmtPrice, moveClass } from "@/lib/finance/format";
-import type { TickerAttention } from "@/lib/finance/queries";
+import { fmtPct, fmtPrice, fmtX, limitFlag, moveClass } from "@/lib/finance/format";
+import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
 import type { Quote } from "@/lib/finance/quotes";
 import { cn } from "@/lib/utils";
 
-// Inline ticker with its last price and day move. Colour is spent only on
-// the move; the code itself is brand amber because it is the link.
-export function TickerChip({ ticker, quote, className }: { ticker: string; quote?: Quote; className?: string }) {
+// Inline ticker with its last price, the day move and, when known, the
+// move since the headline it sits under. Colour is spent only on moves;
+// the code itself is brand amber because it is the link. A price at the
+// BIST limit gets a "tavan"/"taban" tag: for a retail reader that single
+// word matters more than the number.
+export function TickerChip({
+  ticker,
+  quote,
+  sinceNews,
+  className,
+}: {
+  ticker: string;
+  quote?: Quote;
+  /** Percent move from the price at headline time to now; null when unknown. */
+  sinceNews?: number | null;
+  className?: string;
+}) {
+  const limit = quote ? limitFlag(quote.changePct) : null;
   return (
     <Link
       href={`/ekonomi/${ticker}`}
@@ -21,20 +36,37 @@ export function TickerChip({ ticker, quote, className }: { ticker: string; quote
         <>
           <span className="tabular-nums text-foreground/90">{fmtPrice(quote.price)}</span>
           <span className={cn("tabular-nums", moveClass(quote.changePct))}>{fmtPct(quote.changePct)}</span>
+          {limit ? <span className="bg-brand/20 px-1 text-[10px] text-brand">{limit}</span> : null}
+          {sinceNews != null ? (
+            <span className={cn("border-l border-border/80 pl-1.5 tabular-nums", moveClass(sinceNews))}>
+              {fmtPct(sinceNews)} <span className="text-muted-foreground">haberden</span>
+            </span>
+          ) : null}
         </>
       ) : null}
     </Link>
   );
 }
 
-// The masthead strip: the most-mentioned tickers with their moves. One
-// horizontal band, scrolls sideways on narrow screens instead of wrapping.
-export function TickerTape({ items, quotes }: { items: TickerAttention[]; quotes: Record<string, Quote> }) {
+// The masthead strip: the most-mentioned tickers with move, relative
+// volume and how unusual today's attention is. One horizontal band that
+// scrolls sideways on narrow screens instead of wrapping.
+export function TickerTape({
+  items,
+  quotes,
+  stats,
+}: {
+  items: TickerAttention[];
+  quotes: Record<string, Quote>;
+  stats: Record<string, QuoteStat>;
+}) {
   if (items.length === 0) return null;
   return (
     <div className="flex overflow-x-auto border border-border bg-foreground/[0.03] font-mono text-[11px] leading-none [scrollbar-width:thin]">
       {items.map((t) => {
         const q = quotes[t.ticker];
+        const s = stats[t.ticker];
+        const limit = q ? limitFlag(q.changePct) : null;
         return (
           <Link
             key={t.ticker}
@@ -44,10 +76,15 @@ export function TickerTape({ items, quotes }: { items: TickerAttention[]; quotes
             <span className="flex items-baseline gap-2">
               <span className="text-brand">{t.ticker}</span>
               {q ? <span className="tabular-nums">{fmtPrice(q.price)}</span> : <span className="text-muted-foreground">fiyat yok</span>}
+              {limit ? <span className="bg-brand/20 px-1 text-[10px] text-brand">{limit}</span> : null}
             </span>
             <span className="flex items-baseline gap-2 text-muted-foreground">
               {q ? <span className={cn("tabular-nums", moveClass(q.changePct))}>{fmtPct(q.changePct)}</span> : null}
               <span className="tabular-nums">{t.articles} haber</span>
+              {t.ratio != null && t.ratio >= 2 ? <span className="tabular-nums text-amber-400">ilgi {fmtX(t.ratio)}</span> : null}
+              {s?.rvol != null ? (
+                <span className={cn("tabular-nums", s.rvol >= 2 ? "text-amber-400" : "")}>hacim {fmtX(s.rvol)}</span>
+              ) : null}
             </span>
           </Link>
         );

@@ -1,4 +1,4 @@
-// Dev-only stand-in for the finance tables (migrations 049/050) so the
+// Dev-only stand-in for the finance tables (migrations 049-051) so the
 // /ekonomi pages can be looked at on a machine whose database has not had
 // the migrations applied. Enabled by TAYF_FAKE_FINANCE=1 in
 // lib/supabase/server.ts, never in production. Quotes still come from
@@ -74,6 +74,7 @@ const DISCLOSURES = [
   { i: 1662298, ago: 1.1 * H, codes: ["ASELS"], subject: "Yeni İş İlişkisi", summary: "Yurt dışı müşteri ile sözleşme imzalanması hk.", cls: "ODA" },
   { i: 1662290, ago: 1.6 * H, codes: ["EREGL"], subject: "Sermaye Artırımı - Azaltımı İşlemlerine İlişkin Bildirim", summary: "Bedelsiz sermaye artırımı başvurusu", cls: "DG" },
   { i: 1662284, ago: 2.2 * H, codes: ["SASA"], subject: "Pay Bazında Devre Kesici Bildirimi", summary: "SASA payında devre kesici uygulanmıştır.", cls: "DKB" },
+  { i: 1662281, ago: 2.9 * H, codes: ["KONTR"], subject: "Pay Bazında Devre Kesici Bildirimi", summary: "KONTR payında devre kesici uygulanmıştır.", cls: "DKB" },
   { i: 1662270, ago: 3.4 * H, codes: ["KONTR"], subject: "Yeni İş İlişkisi", summary: "Kazakistan enerji depolama projesi", cls: "ODA" },
   { i: 1662255, ago: 5.5 * H, codes: ["SISE"], subject: "Özel Durum Açıklaması (Genel)", summary: "Bulgaristan yatırımı hk.", cls: "ODA" },
   { i: 1662240, ago: 7.2 * H, codes: ["HEKTS"], subject: "Finansal Rapor", summary: "2026 Yılı 2. Çeyrek Finansal Rapor", cls: "FR" },
@@ -131,6 +132,52 @@ const COVERAGE = [
   { disclosure_index: 1662101, ticker: "ASELS", disclosed_at: iso(40 * H), lag_minutes: -1900 },
 ];
 
+// Reference closes per ticker (previous session) so the intraday series,
+// quote stats and headline-time prices agree with each other.
+const BASE: Record<string, { prev: number; rvol: number }> = {
+  THYAO: { prev: 300.25, rvol: 1.4 },
+  ASELS: { prev: 393.5, rvol: 2.6 },
+  VESTL: { prev: 25.86, rvol: 3.1 },
+  EREGL: { prev: 39.4, rvol: 0.9 },
+  BIMAS: { prev: 434.75, rvol: 0.8 },
+  SASA: { prev: 2.82, rvol: 4.2 },
+  KONTR: { prev: 3.5, rvol: 1.1 },
+  TUPRS: { prev: 413.5, rvol: 1.0 },
+  SISE: { prev: 45.0, rvol: 0.7 },
+  HEKTS: { prev: 2.84, rvol: 1.9 },
+  ISCTR: { prev: 13.93, rvol: 1.2 },
+};
+
+const QUOTE_STATS = Object.entries(BASE).map(([ticker, b]) => ({
+  ticker,
+  last_day: day(1),
+  last_close: b.prev,
+  prev_close: b.prev * 0.995,
+  last_volume: 1_000_000,
+  avg_volume_20: Math.round(1_000_000 / b.rvol),
+  rvol: b.rvol,
+}));
+
+// Today's session as 5-minute bars, 10:00 Istanbul up to now (or the
+// close), a deterministic wobble around the previous close.
+function sessionBars(ticker: string): Array<{ ticker: string; ts: string; close: number; volume: number }> {
+  const b = BASE[ticker]!;
+  const todayIst = day(0);
+  const start = Date.parse(`${todayIst}T10:00:00+03:00`);
+  const end = Math.min(now, Date.parse(`${todayIst}T18:10:00+03:00`));
+  const out = [];
+  let seed = ticker.charCodeAt(0) + ticker.charCodeAt(1);
+  let price = b.prev;
+  for (let t = start; t <= end; t += 5 * 60 * 1000) {
+    seed = (seed * 9301 + 49297) % 233280;
+    price *= 1 + ((seed / 233280 - 0.5) * 0.006);
+    out.push({ ticker, ts: new Date(t).toISOString(), close: Math.round(price * 100) / 100, volume: 20_000 + (seed % 90_000) });
+  }
+  return out;
+}
+
+const BARS_5M = Object.keys(BASE).flatMap(sessionBars);
+
 const HEALTH = [
   {
     last_disclosure_at: iso(0.5 * H),
@@ -140,6 +187,10 @@ const HEALTH = [
     last_resolved_at: iso(0.2 * H),
     companies_traded: 626,
     aliases: 1104,
+    daily_bar_tickers: 626,
+    last_daily_bar_day: day(1),
+    intraday_tickers_24h: 11,
+    last_5m_bar_at: BARS_5M[BARS_5M.length - 1]?.ts ?? null,
   },
 ];
 
@@ -163,8 +214,19 @@ function gteVal(state: BuilderState, col: string): string | undefined {
 function containsVal(state: BuilderState, col: string): string[] | undefined {
   return state.contains.find((e) => e.col === col)?.val as string[] | undefined;
 }
+function inVals(state: BuilderState, col: string): unknown[] | undefined {
+  return state.in.find((e) => e.col === col)?.vals;
+}
 function finish<T>(rows: T[], state: BuilderState): { data: T[]; error: null } {
   return { data: state.limit ? rows.slice(0, state.limit) : rows, error: null };
+}
+
+// price_at() equivalent over the fixture bars.
+function priceAt(ticker: string, isoTs: string): number | null {
+  const ts = Date.parse(isoTs);
+  const bars = BARS_5M.filter((b) => b.ticker === ticker && Date.parse(b.ts) <= ts);
+  if (bars.length) return bars[bars.length - 1]!.close;
+  return BASE[ticker]?.prev ?? null;
 }
 
 export function createFinanceFakeClient(): unknown {
@@ -190,8 +252,17 @@ export function createFinanceFakeClient(): unknown {
       kap_disclosures: (state) => {
         const c = containsVal(state, "stock_codes");
         const since = gteVal(state, "published_at") ?? "0000";
+        // The fake records neither ilike nor not(); approximate the two
+        // callers by their select target: circuit breakers use a today
+        // cut-off, the main stream uses none.
+        const wantsBreakers = since > "2000" && !c;
         return finish(
-          DISCLOSURES.filter((r) => (!c || c.some((x) => r.stock_codes.includes(x))) && r.published_at >= since),
+          DISCLOSURES.filter((r) => {
+            const isBreaker = /devre kesici/i.test(r.subject);
+            if (c && !c.some((x) => r.stock_codes.includes(x))) return false;
+            if (r.published_at < since) return false;
+            return wantsBreakers ? isBreaker : !isBreaker || Boolean(c);
+          }),
           state,
         );
       },
@@ -199,8 +270,28 @@ export function createFinanceFakeClient(): unknown {
         const t = eqVal(state, "ticker");
         return finish(COVERAGE.filter((r) => !t || r.ticker === t), state);
       },
+      bist_quote_stats: (state) => {
+        const list = inVals(state, "ticker") as string[] | undefined;
+        return finish(QUOTE_STATS.filter((r) => !list || list.includes(r.ticker)), state);
+      },
+      bist_bars_5m: (state) => {
+        const t = eqVal(state, "ticker");
+        const since = gteVal(state, "ts") ?? "0000";
+        const desc = state.order.some((o) => (o.opts as { ascending?: boolean } | undefined)?.ascending === false);
+        const rows = BARS_5M.filter((b) => (!t || b.ticker === t) && b.ts >= since);
+        return finish(desc ? [...rows].reverse() : rows, state);
+      },
       finance_health: HEALTH,
       finance_signals: SIGNALS,
+    },
+    rpc: {
+      feed_reference_prices: (args) => {
+        const ids = ((args as { p_article_ids?: string[] })?.p_article_ids ?? []) as string[];
+        const data = ARTICLES.filter((a) => ids.includes(a.id)).flatMap((a) =>
+          a.article_tickers.map((t) => ({ article_id: a.id, ticker: t.ticker, ref_price: priceAt(t.ticker, a.published_at) })),
+        );
+        return { data, error: null };
+      },
     },
   }).client;
 }

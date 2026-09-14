@@ -19,19 +19,26 @@ describe("finance query transforms", () => {
     expect(item.tickers).toEqual(["ASELS", "VESTL"]);
   });
 
-  it("ranks attention by article count across days", () => {
+  it("ranks attention on the recent window and rates it against the baseline", () => {
     const ranked = rankAttention(
       [
+        { ticker: "THYAO", day: "2026-09-06", articles: 1, sources: 1 },
+        { ticker: "THYAO", day: "2026-09-09", articles: 2, sources: 1 },
         { ticker: "THYAO", day: "2026-09-12", articles: 2, sources: 2 },
         { ticker: "THYAO", day: "2026-09-13", articles: 5, sources: 4 },
         { ticker: "VESTL", day: "2026-09-13", articles: 6, sources: 1 },
+        { ticker: "OLD", day: "2026-09-08", articles: 9, sources: 3 },
       ],
       new Map([["THYAO", "TÜRK HAVA YOLLARI A.O."]]),
       10,
+      "2026-09-12",
+      2,
+      6,
     );
     expect(ranked.map((r) => r.ticker)).toEqual(["THYAO", "VESTL"]);
-    expect(ranked[0]).toMatchObject({ articles: 7, sources: 4, title: "TÜRK HAVA YOLLARI A.O." });
-    expect(ranked[1]!.title).toBeNull();
+    // 7 articles over 2 days vs 3 over the 6 baseline days: 3.5 / 0.5 = 7x
+    expect(ranked[0]).toMatchObject({ articles: 7, sources: 4, title: "TÜRK HAVA YOLLARI A.O.", ratio: 7 });
+    expect(ranked[1]).toMatchObject({ title: null, ratio: null });
   });
 
   it("computes first-coverage lag per disclosure", () => {

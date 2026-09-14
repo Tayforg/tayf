@@ -2,7 +2,7 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { createServerClient } from "@/lib/supabase/server";
 
-// Read side of the finance substrate (migrations 049 + 050) for the
+// Read side of the finance substrate (migrations 049-051) for the
 // /ekonomi pages and /admin/ekonomi. Every fetcher throws on a Supabase
 // error so the route's error.tsx renders instead of a cached empty page
 // (same rule as trends-query).
@@ -27,6 +27,8 @@ export interface TickerAttention {
   title: string | null;
   articles: number;
   sources: number;
+  /** Recent daily rate over the prior baseline rate; null without a baseline. */
+  ratio: number | null;
 }
 
 export interface Disclosure {
@@ -68,6 +70,22 @@ export interface TickerPage {
   coverage: CoverageStats;
 }
 
+export interface QuoteStat {
+  ticker: string;
+  lastDay: string;
+  lastClose: number;
+  prevClose: number | null;
+  lastVolume: number | null;
+  avgVolume20: number | null;
+  rvol: number | null;
+}
+
+export interface Bar5m {
+  ts: string;
+  close: number;
+  volume: number | null;
+}
+
 export interface FinanceHealth {
   lastDisclosureAt: string | null;
   disclosures24h: number;
@@ -76,6 +94,10 @@ export interface FinanceHealth {
   lastResolvedAt: string | null;
   companiesTraded: number;
   aliases: number;
+  dailyBarTickers: number;
+  lastDailyBarDay: string | null;
+  intradayTickers24h: number;
+  last5mBarAt: string | null;
 }
 
 export interface Signal {
@@ -91,7 +113,10 @@ export interface LagBucket {
   count: number;
 }
 
-const FEED_CACHE = { stale: 60, revalidate: 300, expire: 3600 } as const;
+// News and KAP change by the minute; a 60 s window is the freshness the
+// tape promises. Quote-derived tables move with the 5-minute bar job.
+const FEED_CACHE = { stale: 30, revalidate: 60, expire: 600 } as const;
+const ADMIN_CACHE = { stale: 30, revalidate: 60, expire: 300 } as const;
 
 // PostgREST embeds come back as an object for a to-one FK and an array for
 // the reverse side; the fake client in tests may hand either. Normalise.
@@ -149,27 +174,52 @@ interface AttentionRow {
   sources: number;
 }
 
-export function rankAttention(rows: AttentionRow[], titles: Map<string, string>, limit: number): TickerAttention[] {
-  const acc = new Map<string, TickerAttention>();
+/**
+ * Rank tickers by mentions on/after `splitDay`; the days before it form
+ * the baseline for `ratio` (recent daily rate / baseline daily rate).
+ */
+export function rankAttention(
+  rows: AttentionRow[],
+  titles: Map<string, string>,
+  limit: number,
+  splitDay: string,
+  recentDays: number,
+  baselineDays: number,
+): TickerAttention[] {
+  const acc = new Map<string, TickerAttention & { baseline: number }>();
   for (const r of rows) {
-    const cur = acc.get(r.ticker) ?? { ticker: r.ticker, title: titles.get(r.ticker) ?? null, articles: 0, sources: 0 };
-    cur.articles += Number(r.articles);
-    cur.sources = Math.max(cur.sources, Number(r.sources));
+    const cur = acc.get(r.ticker) ?? { ticker: r.ticker, title: titles.get(r.ticker) ?? null, articles: 0, sources: 0, ratio: null, baseline: 0 };
+    if (r.day >= splitDay) {
+      cur.articles += Number(r.articles);
+      cur.sources = Math.max(cur.sources, Number(r.sources));
+    } else {
+      cur.baseline += Number(r.articles);
+    }
     acc.set(r.ticker, cur);
   }
-  return [...acc.values()].sort((a, b) => b.articles - a.articles || a.ticker.localeCompare(b.ticker)).slice(0, limit);
+  return [...acc.values()]
+    .filter((t) => t.articles > 0)
+    .map(({ baseline, ...t }) => ({
+      ...t,
+      ratio: baseline > 0 ? (t.articles / recentDays) / (baseline / baselineDays) : null,
+    }))
+    .sort((a, b) => b.articles - a.articles || a.ticker.localeCompare(b.ticker))
+    .slice(0, limit);
 }
 
-/** Most-mentioned tickers over the last `days` Istanbul days. */
+const BASELINE_DAYS = 6;
+
+/** Most-mentioned tickers over the last `days` Istanbul days, with a ratio to the prior 6 days. */
 export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAttention[]> {
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
   const supabase = createServerClient();
+  const splitDay = istDate(-(days - 1));
   const { data, error } = await supabase
     .from("ticker_attention_daily")
     .select("ticker,day,articles,sources")
-    .gte("day", istDate(-(days - 1)));
+    .gte("day", istDate(-(days - 1 + BASELINE_DAYS)));
   if (error) throw new Error(`[finance] fetchTopTickers: ${error.message}`);
   const rows = (data ?? []) as AttentionRow[];
   const tickers = [...new Set(rows.map((r) => r.ticker))];
@@ -184,7 +234,7 @@ export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAtten
       for (const t of c.tickers) titles.set(t, c.title);
     }
   }
-  return rankAttention(rows, titles, limit);
+  return rankAttention(rows, titles, limit, splitDay, days, BASELINE_DAYS);
 }
 
 interface DisclosureRow {
@@ -210,7 +260,9 @@ function toDisclosure(r: DisclosureRow): Disclosure {
 }
 
 const DISCLOSURE_SELECT = "disclosure_index,published_at,kap_title,stock_codes,subject,summary,disclosure_class";
+const CIRCUIT_BREAKER = "%Devre Kesici%";
 
+/** Latest disclosures, circuit-breaker notices excluded (they get their own strip). */
 export async function fetchRecentDisclosures(limit = 40, ticker?: string): Promise<Disclosure[]> {
   "use cache";
   cacheLife(FEED_CACHE);
@@ -219,12 +271,118 @@ export async function fetchRecentDisclosures(limit = 40, ticker?: string): Promi
   let q = supabase
     .from("kap_disclosures")
     .select(DISCLOSURE_SELECT)
+    .not("subject", "ilike", CIRCUIT_BREAKER)
     .order("published_at", { ascending: false })
     .limit(limit);
   if (ticker) q = q.contains("stock_codes", [ticker]);
   const { data, error } = await q;
   if (error) throw new Error(`[finance] fetchRecentDisclosures: ${error.message}`);
   return ((data ?? []) as DisclosureRow[]).map(toDisclosure);
+}
+
+/** Today's circuit-breaker notices (Istanbul day), newest first. */
+export async function fetchCircuitBreakers(limit = 60): Promise<Disclosure[]> {
+  "use cache";
+  cacheLife(FEED_CACHE);
+  cacheTag("finance-feed");
+  const supabase = createServerClient();
+  const { data, error } = await supabase
+    .from("kap_disclosures")
+    .select(DISCLOSURE_SELECT)
+    .ilike("subject", CIRCUIT_BREAKER)
+    .gte("published_at", `${istDate()}T00:00:00+03:00`)
+    .order("published_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`[finance] fetchCircuitBreakers: ${error.message}`);
+  return ((data ?? []) as DisclosureRow[]).map(toDisclosure);
+}
+
+interface QuoteStatRow {
+  ticker: string;
+  last_day: string;
+  last_close: number;
+  prev_close: number | null;
+  last_volume: number | null;
+  avg_volume_20: number | null;
+  rvol: number | null;
+}
+
+/** Relative volume and last settled close per ticker, from bist_quote_stats. */
+export async function fetchQuoteStats(tickers: readonly string[]): Promise<Record<string, QuoteStat>> {
+  "use cache";
+  cacheLife(FEED_CACHE);
+  cacheTag("finance-bars");
+  const unique = [...new Set(tickers)].sort();
+  if (unique.length === 0) return {};
+  const supabase = createServerClient();
+  const { data, error } = await supabase.from("bist_quote_stats").select("*").in("ticker", unique);
+  if (error) throw new Error(`[finance] fetchQuoteStats: ${error.message}`);
+  const out: Record<string, QuoteStat> = {};
+  for (const r of (data ?? []) as QuoteStatRow[]) {
+    out[r.ticker] = {
+      ticker: r.ticker,
+      lastDay: String(r.last_day),
+      lastClose: Number(r.last_close),
+      prevClose: r.prev_close == null ? null : Number(r.prev_close),
+      lastVolume: r.last_volume == null ? null : Number(r.last_volume),
+      avgVolume20: r.avg_volume_20 == null ? null : Number(r.avg_volume_20),
+      rvol: r.rvol == null ? null : Number(r.rvol),
+    };
+  }
+  return out;
+}
+
+export const refKey = (articleId: string, ticker: string) => `${articleId}:${ticker}`;
+
+/** Price at each article's publish time, keyed by refKey(articleId, ticker). */
+export async function fetchReferencePrices(articleIds: readonly string[]): Promise<Record<string, number>> {
+  "use cache";
+  cacheLife(FEED_CACHE);
+  cacheTag("finance-bars");
+  const ids = [...new Set(articleIds)].sort();
+  if (ids.length === 0) return {};
+  const supabase = createServerClient();
+  const { data, error } = await supabase.rpc("feed_reference_prices", { p_article_ids: ids });
+  if (error) throw new Error(`[finance] fetchReferencePrices: ${error.message}`);
+  const out: Record<string, number> = {};
+  for (const r of (data ?? []) as Array<{ article_id: string; ticker: string; ref_price: number | null }>) {
+    if (r.ref_price != null) out[refKey(r.article_id, r.ticker)] = Number(r.ref_price);
+  }
+  return out;
+}
+
+/** 5-minute bars for the ticker's most recent session that has any. */
+export async function fetchIntraday(ticker: string): Promise<{ day: string | null; bars: Bar5m[] }> {
+  "use cache";
+  cacheLife(FEED_CACHE);
+  cacheTag("finance-bars", `finance-ticker:${ticker}`);
+  const supabase = createServerClient();
+  const { data: last, error: lErr } = await supabase
+    .from("bist_bars_5m")
+    .select("ts")
+    .eq("ticker", ticker)
+    .order("ts", { ascending: false })
+    .limit(1);
+  if (lErr) throw new Error(`[finance] fetchIntraday last: ${lErr.message}`);
+  const lastTs = (last ?? [])[0]?.ts as string | undefined;
+  if (!lastTs) return { day: null, bars: [] };
+  const day = new Date(new Date(lastTs).getTime() + 3 * 3600 * 1000).toISOString().slice(0, 10);
+  const { data, error } = await supabase
+    .from("bist_bars_5m")
+    .select("ts,close,volume")
+    .eq("ticker", ticker)
+    .gte("ts", `${day}T00:00:00+03:00`)
+    .order("ts")
+    .limit(200);
+  if (error) throw new Error(`[finance] fetchIntraday: ${error.message}`);
+  return {
+    day,
+    bars: ((data ?? []) as Array<{ ts: string; close: number; volume: number | null }>).map((b) => ({
+      ts: b.ts,
+      close: Number(b.close),
+      volume: b.volume == null ? null : Number(b.volume),
+    })),
+  };
 }
 
 function median(nums: number[]): number | null {
@@ -283,25 +441,30 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
 
 export async function fetchFinanceHealth(): Promise<FinanceHealth> {
   "use cache";
-  cacheLife({ stale: 30, revalidate: 60, expire: 300 });
+  cacheLife(ADMIN_CACHE);
   const supabase = createServerClient();
   const { data, error } = await supabase.from("finance_health").select("*").limit(1);
   if (error) throw new Error(`[finance] fetchFinanceHealth: ${error.message}`);
   const r = ((data ?? [])[0] ?? {}) as Record<string, unknown>;
+  const str = (k: string) => (r[k] == null ? null : String(r[k]));
   return {
-    lastDisclosureAt: (r.last_disclosure_at as string | null) ?? null,
+    lastDisclosureAt: str("last_disclosure_at"),
     disclosures24h: Number(r.disclosures_24h ?? 0),
     articleTickers24h: Number(r.article_tickers_24h ?? 0),
     tickers24h: Number(r.tickers_24h ?? 0),
-    lastResolvedAt: (r.last_resolved_at as string | null) ?? null,
+    lastResolvedAt: str("last_resolved_at"),
     companiesTraded: Number(r.companies_traded ?? 0),
     aliases: Number(r.aliases ?? 0),
+    dailyBarTickers: Number(r.daily_bar_tickers ?? 0),
+    lastDailyBarDay: str("last_daily_bar_day"),
+    intradayTickers24h: Number(r.intraday_tickers_24h ?? 0),
+    last5mBarAt: str("last_5m_bar_at"),
   };
 }
 
 export async function fetchSignals(limit = 120): Promise<Signal[]> {
   "use cache";
-  cacheLife({ stale: 30, revalidate: 60, expire: 300 });
+  cacheLife(ADMIN_CACHE);
   const supabase = createServerClient();
   const { data, error } = await supabase
     .from("finance_signals")
@@ -337,7 +500,7 @@ export function bucketLags(lags: number[]): LagBucket[] {
 
 export async function fetchLagHistogram(days = 7): Promise<LagBucket[]> {
   "use cache";
-  cacheLife({ stale: 30, revalidate: 60, expire: 300 });
+  cacheLife(ADMIN_CACHE);
   const supabase = createServerClient();
   const { data, error } = await supabase
     .from("disclosure_coverage")

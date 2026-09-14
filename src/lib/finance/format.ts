@@ -5,6 +5,7 @@
 
 const PRICE = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const PCT = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: "always" });
+const X = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 const IST_OFFSET_MS = 3 * 3600 * 1000;
 
@@ -20,6 +21,11 @@ export function fmtPrice(n: number): string {
 
 export function fmtPct(n: number): string {
   return `${PCT.format(n)}%`;
+}
+
+/** Ratio like relative volume: 2.4 -> "2,4x". */
+export function fmtX(n: number): string {
+  return `${X.format(n)}x`;
 }
 
 /** Istanbul calendar day as YYYY-MM-DD. */
@@ -47,4 +53,18 @@ export function moveClass(pct: number): string {
   if (pct > 0.005) return "text-emerald-400";
   if (pct < -0.005) return "text-red-400";
   return "text-muted-foreground";
+}
+
+/** Percent change from `from` to `to`, or null when either side is missing. */
+export function pctChange(from: number | null | undefined, to: number | null | undefined): number | null {
+  if (from == null || to == null || !(from > 0)) return null;
+  return ((to - from) / from) * 100;
+}
+
+// BIST equity price limits are +-10% of the reference price; anything past
+// 9.5% is, for a reader, at the limit.
+export function limitFlag(pct: number): "tavan" | "taban" | null {
+  if (pct >= 9.5) return "tavan";
+  if (pct <= -9.5) return "taban";
+  return null;
 }

@@ -89,6 +89,21 @@ export default async function AdminEkonomiPage() {
           <dt className="text-muted-foreground">alias sayısı</dt>
           <dd className="tabular-nums">{health.aliases}</dd>
         </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">günlük bar, hisse</dt>
+          <dd className="tabular-nums">
+            {health.dailyBarTickers}
+            {health.lastDailyBarDay ? <span className="text-muted-foreground"> son {health.lastDailyBarDay.split("-").reverse().join(".")}</span> : null}
+          </dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">5 dk bar, hisse / 24s</dt>
+          <dd className="tabular-nums">{health.intradayTickers24h}</dd>
+        </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">son 5 dk bar</dt>
+          <dd className="tabular-nums">{health.last5mBarAt ? fmtWhen(health.last5mBarAt) : "yok"}</dd>
+        </div>
       </dl>
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
@@ -148,7 +163,10 @@ export default async function AdminEkonomiPage() {
               <p>
                 Eğitim verisi hazır: <span className="text-foreground">disclosure_coverage</span> (bildirim, haber, gecikme), <span className="text-foreground">ticker_attention_daily</span> (günlük ilgi) ve backtest tarafındaki fiyat serisi.
               </p>
-              <p>Hedef değişken backtest ekibinden gelir: bildirim sonrası 5 ve 20 seanslık anormal getiri.</p>
+              <p>
+                Etiketli satırlar hazır: <span className="text-foreground">ml_news_events</span> (haber × hisse) ve{" "}
+                <span className="text-foreground">ml_disclosure_events</span> (KAP × hisse), her satırda r0, r1, r5, r20 ileri getiri, pre5 ön koşu ve önceki 7 günün ilgisi.
+              </p>
             </div>
           </Panel>
         </div>

@@ -3,16 +3,18 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
 
+import { IntradayChart } from "@/components/finance/intraday-chart";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
-import { fmtPct, fmtPrice, fmtWhen, istToday, moveClass } from "@/lib/finance/format";
-import { fetchTickerPage } from "@/lib/finance/queries";
+import { fmtPct, fmtPrice, fmtWhen, fmtX, istToday, limitFlag, moveClass } from "@/lib/finance/format";
+import { fetchIntraday, fetchQuoteStats, fetchTickerPage } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
 import { cn } from "@/lib/utils";
 
-// /ekonomi/[ticker] — one company: last price and five-session line,
-// 30 days of press attention, the articles that named it, and its KAP
-// disclosures with how fast (or how early) the press reacted.
+// /ekonomi/[ticker] — one company: last price and five-session line, the
+// session's 5-minute chart with headlines marked on it, 30 days of press
+// attention, the articles that named it, and its KAP disclosures with how
+// fast (or how early) the press reacted.
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/;
 
@@ -38,9 +40,23 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   if (!TICKER_RE.test(ticker)) notFound();
   await connection();
 
-  const [page, quotes] = await Promise.all([fetchTickerPage(ticker), getQuotes([ticker])]);
+  const [page, quotes, stats, intraday] = await Promise.all([
+    fetchTickerPage(ticker),
+    getQuotes([ticker]),
+    fetchQuoteStats([ticker]),
+    fetchIntraday(ticker),
+  ]);
   if (!page.company && page.articles.length === 0 && page.disclosures.length === 0) notFound();
   const quote = quotes[ticker];
+  const stat = stats[ticker];
+  const limit = quote ? limitFlag(quote.changePct) : null;
+  const sessionDay = intraday.day;
+  const markers = sessionDay
+    ? [
+        ...page.articles.filter((a) => istToday(new Date(a.publishedAt).getTime()) === sessionDay).map((a) => ({ ts: a.publishedAt, label: a.title })),
+        ...page.disclosures.filter((d) => istToday(new Date(d.publishedAt).getTime()) === sessionDay).map((d) => ({ ts: d.publishedAt, label: `KAP: ${d.subject ?? "bildirim"}` })),
+      ].sort((a, b) => a.ts.localeCompare(b.ts))
+    : [];
 
   return (
     <div className="mx-auto w-full max-w-[1600px] px-4 py-6 space-y-3">
@@ -66,10 +82,18 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           {quote ? (
             <>
               <div className="text-right">
-                <div className="text-3xl leading-none tabular-nums">{fmtPrice(quote.price)}</div>
+                <div className="flex items-baseline justify-end gap-2">
+                  {limit ? <span className="bg-brand/20 px-1.5 py-0.5 text-[11px] text-brand">{limit}</span> : null}
+                  <span className="text-3xl leading-none tabular-nums">{fmtPrice(quote.price)}</span>
+                </div>
                 <div className={cn("mt-1 text-[12px] tabular-nums", moveClass(quote.changePct))}>
                   {fmtPct(quote.changePct)} <span className="text-muted-foreground">bugün</span>
                 </div>
+                {stat?.rvol != null ? (
+                  <div className={cn("mt-0.5 text-[11px] tabular-nums", stat.rvol >= 2 ? "text-amber-400" : "text-muted-foreground")}>
+                    hacim {fmtX(stat.rvol)} <span className="text-muted-foreground">20 günlük ortalamanın</span>
+                  </div>
+                ) : null}
               </div>
               <Sparkline values={quote.closes} className={moveClass(quote.changePct)} width={140} height={40} />
             </>
@@ -78,6 +102,17 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           )}
         </div>
       </header>
+
+      <Panel
+        title="Seans içi"
+        meta={sessionDay ? `${sessionDay.split("-").reverse().join(".")}, 5 dakikalık kapanışlar, haberler işaretli` : "5 dakikalık veri henüz yok"}
+      >
+        {intraday.bars.length < 2 ? (
+          <PanelEmpty>Bu hisse için seans içi veri henüz toplanmadı. Haberde geçen hisseler seans boyunca 5 dakikada bir kaydedilir.</PanelEmpty>
+        ) : (
+          <IntradayChart bars={intraday.bars} markers={markers} prevClose={stat?.prevClose ?? quote?.prevClose ?? null} />
+        )}
+      </Panel>
 
       <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <Panel title="Basın ilgisi" meta="son 30 gün, günlük haber sayısı">

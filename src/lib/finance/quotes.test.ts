@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { fmtPct, fmtWhen, moveClass } from "./format";
+import { fmtPct, fmtWhen, fmtX, limitFlag, moveClass, pctChange } from "./format";
 import { parseYahooChart, YahooQuoteSource } from "./quotes";
 
 // Shape captured from query1.finance.yahoo.com on 2026-09-13 for THYAO.IS.
@@ -68,6 +68,16 @@ describe("format", () => {
     expect(moveClass(0.3)).toContain("emerald");
     expect(moveClass(-0.3)).toContain("red");
     expect(moveClass(0.001)).toContain("muted");
+  });
+
+  it("computes the move since a reference price and flags the BIST limit", () => {
+    expect(pctChange(100, 101.5)).toBeCloseTo(1.5, 9);
+    expect(pctChange(null, 101.5)).toBeNull();
+    expect(pctChange(0, 5)).toBeNull();
+    expect(limitFlag(9.6)).toBe("tavan");
+    expect(limitFlag(-9.8)).toBe("taban");
+    expect(limitFlag(4)).toBeNull();
+    expect(fmtX(2.44)).toBe("2,4x");
   });
 
   it("shows only the clock for today in Istanbul", () => {
