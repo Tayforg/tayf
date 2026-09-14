@@ -143,6 +143,12 @@ async function syncCompanies(
     .upsert(aliases, { onConflict: "alias,ticker", ignoreDuplicates: true });
   if (aErr) throw new Error(`[kap-ingest] bist_aliases upsert: ${aErr.message}`);
   stats.aliases = aliases.length;
+
+  // New auto aliases that behave like common words get switched off by the
+  // empirical rule in migration 052; run it right away rather than waiting
+  // for the nightly job.
+  const { error: pErr } = await supabase.rpc("prune_generic_aliases");
+  if (pErr) console.warn(`[kap-ingest] prune_generic_aliases: ${pErr.message}`);
 }
 
 interface Body {
