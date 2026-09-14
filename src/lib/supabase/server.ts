@@ -1,6 +1,15 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
-export function createServerClient() {
+import { createFinanceFakeClient } from "@/lib/finance/dev-fixtures";
+
+export function createServerClient(): SupabaseClient {
+  // TAYF_FAKE_FINANCE=1 (dev only) serves the /ekonomi pages from fixture
+  // rows so the layout can be reviewed before migrations 049/050 exist in
+  // the database. Every other table answers empty.
+  if (process.env.NODE_ENV !== "production" && process.env.TAYF_FAKE_FINANCE === "1") {
+    return createFinanceFakeClient() as SupabaseClient;
+  }
+
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 

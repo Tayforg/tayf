@@ -56,7 +56,7 @@ export default async function AdminEkonomiPage() {
   return (
     <div className="mx-auto w-full max-w-[1400px] px-4 py-6 space-y-4">
       <div className="flex flex-wrap items-baseline justify-between gap-3 font-mono text-[12px]">
-        <h1>
+        <h1 className="font-mono text-[12px] font-normal">
           Admin <span className="text-brand">Ekonomi</span>
         </h1>
         <div className="flex gap-4 text-muted-foreground">

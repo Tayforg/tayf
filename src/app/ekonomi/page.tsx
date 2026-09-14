@@ -37,7 +37,7 @@ export default async function EkonomiPage() {
   return (
     <div className="mx-auto w-full max-w-[1600px] px-4 py-6 space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 font-mono text-[12px]">
-        <h1 className="text-foreground">
+        <h1 className="font-mono text-[12px] font-normal text-foreground">
           Tayf <span className="text-brand">Ekonomi</span>
         </h1>
         <p className="text-muted-foreground">

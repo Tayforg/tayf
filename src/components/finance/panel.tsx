@@ -19,7 +19,7 @@ export function Panel({
   return (
     <section className={cn("flex min-w-0 flex-col border border-border bg-black/25", className)}>
       <header className="flex items-baseline justify-between gap-3 border-b border-border bg-foreground/[0.04] px-3 py-1.5 font-mono text-[11px] leading-none">
-        <h2 className="text-brand">{title}</h2>
+        <h2 className="font-mono text-[11px] font-normal text-brand">{title}</h2>
         {meta ? <span className="truncate text-muted-foreground">{meta}</span> : null}
       </header>
       <div className="min-w-0 flex-1">{children}</div>
