@@ -143,6 +143,12 @@ interface CycleStats {
   // migration 041 F2). Not a column on `ingest_cycles` (039 shipped before
   // this existed) -- logged in the per-cycle summary line instead.
   dedupedInBatch: number;
+  // Headline changes detected on re-polled items this cycle
+  // (`recordTitleVersions`, migration 056 / U-07 collection half). Same
+  // "not a column on `ingest_cycles`, logged in the summary line instead"
+  // discipline as `dedupedInBatch` above -- this is collection-only
+  // telemetry, nothing here is published anywhere.
+  titleVersions: number;
   durationMs: number;
 }
 
@@ -235,6 +241,132 @@ async function dropExistingSourceContentHashRows(
     out.push(row);
   }
   return { rows: out, dropped };
+}
+
+// ---------------------------------------------------------------------------
+// Headline-version collection (migration 056, U-07 collection half)
+// ---------------------------------------------------------------------------
+//
+// `content_hash = strictFingerprint(title, description)` (normalize.ts
+// ~337), so a re-polled item whose TITLE changed produces a DIFFERENT
+// content_hash. It therefore survives both `dedupeBySourceContentHash` and
+// `dropExistingSourceContentHashRows` above, reaches the batched upsert
+// below, and is dropped silently by
+// `.upsert(chunk, { onConflict: "url", ignoreDuplicates: true })` -- the old
+// title is lost with no trace. That drop stays (we are not changing upsert
+// semantics) -- this helper only records the delta BEFORE the upsert runs,
+// so the row it reads back still carries the pre-cycle title.
+//
+// Collection only: `article_title_versions` (migration 056) has RLS
+// enabled with NO select policy -- nothing recorded here is published
+// anywhere in this PR (U-07's own risk note: republishing a headline an
+// outlet removed under a court order or a KVKK request invites the same
+// order against Tayf's URL -- Law 5651 Art. 9).
+//
+// Bounded to the chunk: one `select` restricted to this chunk's urls, one
+// `insert` of whatever changed -- never a full-table scan, never a
+// per-row query. Mirrors `dropExistingSourceContentHashRows`'s
+// degrade-to-no-op discipline: any error here is logged and swallowed, and
+// this function NEVER throws, so a lookup failure, an insert failure or
+// any other exception costs zero articles -- it must never block, delay or
+// reduce the upsert that follows it.
+// Bounded to LOOKUP_BATCH urls per `.in(...)` select -- 500 full news URLs
+// in one PostgREST GET query string (heavily percent-escaped) can push the
+// request URI past typical proxy request-line limits, which fails the
+// lookup silently (degrades to 0, per the discipline below). 100/select
+// keeps every request well under that ceiling; the single insert/upsert at
+// the end stays bounded to this chunk's urls either way.
+const TITLE_LOOKUP_BATCH = 100;
+
+export async function recordTitleVersions(
+  supabase: ReturnType<typeof createServiceClient>,
+  chunk: readonly IngestArticleRow[],
+): Promise<number> {
+  try {
+    if (chunk.length === 0) return 0;
+
+    const urls = chunk.map((row) => row.url);
+    const stored = new Map<
+      string,
+      { id: string; title: string; source_id: string }
+    >();
+    for (let j = 0; j < urls.length; j += TITLE_LOOKUP_BATCH) {
+      const { data, error } = await supabase
+        .from("articles")
+        .select("id, url, title, source_id")
+        .in("url", urls.slice(j, j + TITLE_LOOKUP_BATCH));
+      if (error) {
+        console.error(`[ingest] title-version lookup failed: ${error.message}`);
+        return 0;
+      }
+      for (const row of (data ?? []) as Array<{
+        id: string;
+        url: string;
+        title: string;
+        source_id: string;
+      }>) {
+        stored.set(row.url, {
+          id: row.id,
+          title: row.title,
+          source_id: row.source_id,
+        });
+      }
+    }
+
+    // Exact string compare after `.trim()` only -- no case/punctuation
+    // normalization. A case change IS a headline change. Comparison runs
+    // on the full untruncated titles; only the stored row is clamped below.
+    let crossSourceCollisions = 0;
+    const versions: Array<{
+      article_id: string;
+      source_id: string;
+      old_title: string;
+      new_title: string;
+    }> = [];
+    for (const row of chunk) {
+      const existing = stored.get(row.url);
+      if (!existing) continue;
+      // A feed that syndicates/links another outlet's url must never have
+      // its title change attributed to that other outlet's article.
+      if (existing.source_id !== row.source_id) {
+        crossSourceCollisions += 1;
+        continue;
+      }
+      if (row.title.trim() === existing.title.trim()) continue;
+      versions.push({
+        article_id: existing.id,
+        source_id: existing.source_id,
+        old_title: existing.title.slice(0, 500),
+        new_title: row.title.slice(0, 500),
+      });
+    }
+    if (crossSourceCollisions > 0) {
+      console.warn(
+        `[ingest] skipped ${crossSourceCollisions} title-version row(s) whose url matched a different source_id`,
+      );
+    }
+
+    if (versions.length === 0) return 0;
+
+    // `ignoreDuplicates: true` against the (article_id, new_title_hash)
+    // unique index (migration 056) means a headline that stays changed
+    // across multiple 3-minute cycles is recorded once, not every cycle.
+    const { data: insertedRows, error: insertError } = await supabase
+      .from("article_title_versions")
+      .upsert(versions, {
+        onConflict: "article_id,new_title_hash",
+        ignoreDuplicates: true,
+      })
+      .select("id");
+    if (insertError) {
+      console.error(`[ingest] title-version insert failed: ${insertError.message}`);
+      return 0;
+    }
+    return insertedRows?.length ?? 0;
+  } catch (err) {
+    console.error("[ingest] title-version recording threw", err);
+    return 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +508,7 @@ async function runCycle(): Promise<CycleStats> {
     inserted: 0,
     rowErrors: 0,
     dedupedInBatch: 0,
+    titleVersions: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -580,10 +713,28 @@ async function runCycleBody(
       // Both dedupe passes together removed everything in this chunk —
       // skip the upsert call entirely rather than sending an empty batch.
       if (chunk.length === 0) continue;
-      const { data: upserted, error: upsertError } = await supabase
-        .from("articles")
-        .upsert(chunk, { onConflict: "url", ignoreDuplicates: true })
-        .select("id");
+      // Record any headline change (migration 056 / U-07) IN PARALLEL with
+      // the article upsert below, not before it: `recordTitleVersions`
+      // never rejects (its own try/catch returns 0) and the upsert never
+      // mutates `title` (`ignoreDuplicates: true` on the `url` conflict
+      // leaves the old title in place -- migration 056's own header), so
+      // the two are independent and running them serially only cost wall
+      // clock against the cycle deadline. Articles always win the deadline
+      // race: a miss on the title-version side just means this chunk's
+      // changes go uncollected.
+      const [titleVersions, { data: upserted, error: upsertError }] = await Promise.all([
+        Date.now() <= deadline ? recordTitleVersions(supabase, chunk) : Promise.resolve(0),
+        supabase
+          .from("articles")
+          .upsert(chunk, { onConflict: "url", ignoreDuplicates: true })
+          .select("id"),
+      ]);
+      if (titleVersions > 0) {
+        stats.titleVersions += titleVersions;
+        console.log(
+          `[ingest] recorded ${titleVersions} headline version(s) in chunk ${i}-${i + chunk.length}`,
+        );
+      }
       if (upsertError) {
         console.error(
           `[ingest] batched upsert (chunk ${i}-${i + chunk.length}) failed: ${upsertError.message}`,

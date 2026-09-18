@@ -422,6 +422,10 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "031_zone_based_blindspot_backfill.sql",
       "032_blindspot_contract_recompute.sql",
       "034_source_kind.sql",
+      // 057 only lists the zone LABELS in a CHECK constraint (guessed_zone
+      // in (...)); it copies no bias->zone MAP, so it isn't a fifth
+      // zone-map copy. Its label list is asserted against ZONE_KEYS below.
+      "057_zone_guesses.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
@@ -437,6 +441,20 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
     for (const f of KNOWN_FILES) {
       expect(read(f)).toMatch(/iktidar/);
     }
+  });
+
+  it("057's guessed_zone CHECK literals deep-equal ZONE_KEYS", () => {
+    const code = stripSqlComments(read("057_zone_guesses.sql"));
+    const m = /guessed_zone\s+text\s+not\s+null\s+check\s*\(\s*guessed_zone\s+in\s*\(([^)]+)\)\s*\)/i.exec(
+      code,
+    );
+    expect(m).not.toBeNull();
+    const body = (m as RegExpExecArray)[1] as string;
+    const itemRe = /'([a-z_]+)'/g;
+    const parsed: string[] = [];
+    let im: RegExpExecArray | null;
+    while ((im = itemRe.exec(body)) !== null) parsed.push(im[1] as string);
+    expect(new Set(parsed)).toEqual(new Set(ZONE_KEYS));
   });
 });
 
