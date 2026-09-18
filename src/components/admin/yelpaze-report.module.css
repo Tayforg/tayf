@@ -1,0 +1,116 @@
+/*
+ * Yelpaze Raporu — structural + print CSS module.
+ *
+ * Screen typography/spacing lives as Tailwind utility classes directly in
+ * yelpaze-report.tsx (same convention as the rest of /admin — see
+ * admin/ekonomi/page.tsx). This module owns exactly what Tailwind utility
+ * classes can't express well for a *printed* report: avoiding page breaks
+ * inside a section, hiding the surrounding app chrome (header/footer/nav)
+ * and the copy button, forcing paper-safe black-on-white regardless of the
+ * site's dark theme, printing link URLs after their anchor text, and
+ * swapping the interactive commentary textarea for a static bordered box.
+ *
+ * NOT yet verified in a browser print preview. pack.md live check, still
+ * pending: open /admin/rapor/<id>, Cmd-P, confirm white background, no
+ * nav, no copy button, report title and cluster id present, no section
+ * split across a page break, commentary box visible with its typed
+ * content. Do not mark pack D print-complete until the founder runs it.
+ */
+
+.report {
+  /* Scoping anchor for the print overrides below — no screen styling of
+     its own beyond what the component already sets via Tailwind. */
+}
+
+.section {
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.noPrint {
+}
+
+.commentaryBox {
+  font: inherit;
+}
+
+.commentaryScreenOnly {
+}
+
+/* Static print stand-in for the <textarea>. Most browsers *do* print a
+   textarea's current value, but a scrollable box taller than its content
+   area gets clipped on paper — this always-rendered, non-scrolling box is
+   the reliable path, shown only in print via the media query below. */
+.commentaryPrintBox {
+  display: none;
+  white-space: pre-wrap;
+}
+
+@media print {
+  /* Scoped to a document that actually contains a .report — bare
+     :global(header)/:global(footer)/:global(nav) selectors are NOT scoped
+     to this component at all (CSS Modules only scopes class/id tokens),
+     so App Router keeping a route's stylesheet attached after a
+     client-side navigation could hide site chrome on an unrelated page
+     printed later in the same session. `:has(.report)` ties the rule to
+     pages that render this component. */
+  :global(body):has(.report) :global(header),
+  :global(body):has(.report) :global(footer),
+  :global(body):has(.report) :global(nav) {
+    display: none !important;
+  }
+
+  :global(body) {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  .report {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    color: #000 !important;
+    background: #fff !important;
+  }
+
+  /* Force every descendant to paper-safe black-on-white/transparent,
+     regardless of the app's dark-mode Tailwind classes (bg-*, text-*,
+     border-* utilities carry real specificity, so this needs !important
+     to win reliably across browsers). */
+  .report * {
+    color: #000 !important;
+    background: transparent !important;
+    border-color: #000 !important;
+  }
+
+  .noPrint {
+    display: none !important;
+  }
+
+  .section {
+    margin-bottom: 0.85rem;
+  }
+
+  .commentaryScreenOnly {
+    display: none !important;
+  }
+
+  .commentaryPrintBox {
+    display: block !important;
+    border: 1px solid #000;
+    border-radius: 0;
+    padding: 0.5rem;
+    min-height: 4rem;
+  }
+
+  /* Paper copies can't be clicked — print the URL after every anchor so a
+     printed report stays traceable without a browser. */
+  .report a[href]::after {
+    content: " (" attr(href) ")";
+    font-size: 0.75em;
+  }
+
+  @page {
+    margin: 1.5cm;
+  }
+}

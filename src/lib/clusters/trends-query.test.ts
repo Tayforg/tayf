@@ -4,6 +4,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // New coverage — fetchTimeline / bucketFromAggregates / WINDOW_DAYS were
 // extracted out of src/app/trends/page.tsx into this module. Harness mirrors
 // blindspots-query.test.ts / timeline-query.test.ts's shared-fake wiring.
+//
+// fetchTimeline never throws (see src/lib/clusters/trends-query.ts's file
+// header): a throw inside a "use cache" function aborts the whole `next
+// build` prerender, which happened twice in production when the aggregate
+// query hit `canceling statement due to statement timeout`. On any failure
+// it logs via console.error and resolves `null` instead — mirrors
+// src/lib/headline/status.ts / src/lib/sources/active-count.ts's
+// never-throw discipline.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -93,17 +101,29 @@ describe("fetchTimeline", () => {
 
     const buckets = await fetchTimeline();
 
+    expect(buckets).not.toBeNull();
     expect(buckets).toHaveLength(WINDOW_DAYS);
-    const totalArticles = buckets.reduce((acc, b) => acc + b.total, 0);
+    const totalArticles = buckets!.reduce((acc, b) => acc + b.total, 0);
     expect(totalArticles).toBe(5);
   });
 
-  it("rejects (never returns an all-zero series) on a Supabase error", async () => {
+  it("returns null (never throws) on a Supabase error, so a build-time prerender can't fail on a transient failure", async () => {
     fixture.error = { message: "canceling statement due to statement timeout" };
 
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    await expect(fetchTimeline()).rejects.toThrow(/\[trends\] fetchTimeline error/);
+    await expect(fetchTimeline()).resolves.toBeNull();
     expect(errSpy).toHaveBeenCalled();
+    const [message] = errSpy.mock.calls[0] as [string];
+    expect(message).toMatch(/\[trends\] fetchTimeline error/);
+    errSpy.mockRestore();
+  });
+
+  it("returns null (never throws) when Supabase env vars are missing", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(fetchTimeline()).resolves.toBeNull();
     errSpy.mockRestore();
   });
 });

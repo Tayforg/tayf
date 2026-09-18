@@ -27,6 +27,10 @@ export default async function AdminPage() {
         >
           Ekonomi paneli: KAP akışı, eşleştirme ve tahmin sinyalleri
         </Link>
+        <p className="font-mono text-[12px] text-muted-foreground">
+          Yelpaze Raporu: <code className="text-foreground">/admin/rapor/&lt;clusterId&gt;</code> — küme kimliği
+          herhangi bir <code className="text-foreground">/cluster/&lt;id&gt;</code> bağlantısından alınır.
+        </p>
         <CorrectionsList />
       </div>
     </>
