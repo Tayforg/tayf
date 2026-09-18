@@ -1,6 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
-import { createServerClient } from "@/lib/supabase/server";
+import { createFinanceServerClient } from "@/lib/supabase/server";
 
 // Read side of the finance substrate (migrations 049-051) for the
 // /ekonomi pages and /admin/ekonomi. Every fetcher throws on a Supabase
@@ -147,8 +147,6 @@ export function toFeedItem(row: ArticleRow): FeedItem {
   };
 }
 
-const ARTICLE_SELECT = "id,title,url,published_at,category,source:sources(name,slug),article_tickers!inner(ticker)";
-
 interface TickerArticleRow {
   id: string;
   title: string;
@@ -160,18 +158,38 @@ interface TickerArticleRow {
   matched_on: string;
 }
 
+interface EconFeedRow {
+  id: string;
+  title: string;
+  url: string;
+  published_at: string;
+  category: string;
+  source_name: string | null;
+  source_slug: string | null;
+  tickers: string[] | null;
+}
+
+// DB-02: the previous `.from('articles').select(ARTICLE_SELECT)` embed
+// drove the query newest-first over `articles` via `article_tickers!inner`
+// — "the wrong direction" (see 054's header). `econ_feed` (migration 058)
+// starts from the indexed article_tickers side instead, the same fix
+// `ticker_articles` (migration 054) applied to the per-ticker page below.
 export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = createServerClient();
-  const { data, error } = await supabase
-    .from("articles")
-    .select(ARTICLE_SELECT)
-    .order("published_at", { ascending: false })
-    .limit(limit);
+  const supabase = await createFinanceServerClient();
+  const { data, error } = await supabase.rpc("econ_feed", { p_limit: limit });
   if (error) throw new Error(`[finance] fetchEconFeed: ${error.message}`);
-  return ((data ?? []) as unknown as ArticleRow[]).map(toFeedItem);
+  return ((data ?? []) as EconFeedRow[]).map((r) => ({
+    id: r.id,
+    title: r.title,
+    url: r.url,
+    publishedAt: r.published_at,
+    category: r.category,
+    source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
+    tickers: [...new Set(r.tickers ?? [])].sort(),
+  }));
 }
 
 function istDate(offsetDays = 0): string {
@@ -225,7 +243,7 @@ export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAtten
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const splitDay = istDate(-(days - 1));
   const { data, error } = await supabase
     .from("ticker_attention_daily")
@@ -278,11 +296,17 @@ export async function fetchRecentDisclosures(limit = 40, ticker?: string): Promi
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
+  // TS-06: `.not('subject','ilike',CIRCUIT_BREAKER)` compiles to
+  // `subject NOT ILIKE ...`, which is NULL (not TRUE) for a NULL subject —
+  // PostgREST drops those rows even though they plainly aren't circuit
+  // breaker notices. subject is nullable; explicitly keep NULLs. Note the
+  // `.or()` filter DSL uses `*` for a wildcard, not the `%` the `.ilike()`
+  // builder method takes.
   let q = supabase
     .from("kap_disclosures")
     .select(DISCLOSURE_SELECT)
-    .not("subject", "ilike", CIRCUIT_BREAKER)
+    .or("subject.is.null,subject.not.ilike.*Devre Kesici*")
     .order("published_at", { ascending: false })
     .limit(limit);
   if (ticker) q = q.contains("stock_codes", [ticker]);
@@ -296,7 +320,7 @@ export async function fetchCircuitBreakers(limit = 60): Promise<Disclosure[]> {
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const { data, error } = await supabase
     .from("kap_disclosures")
     .select(DISCLOSURE_SELECT)
@@ -325,7 +349,7 @@ export async function fetchQuoteStats(tickers: readonly string[]): Promise<Recor
   cacheTag("finance-bars");
   const unique = [...new Set(tickers)].sort();
   if (unique.length === 0) return {};
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const { data, error } = await supabase.from("bist_quote_stats").select("*").in("ticker", unique);
   if (error) throw new Error(`[finance] fetchQuoteStats: ${error.message}`);
   const out: Record<string, QuoteStat> = {};
@@ -352,7 +376,7 @@ export async function fetchReferencePrices(articleIds: readonly string[]): Promi
   cacheTag("finance-bars");
   const ids = [...new Set(articleIds)].sort();
   if (ids.length === 0) return {};
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const { data, error } = await supabase.rpc("feed_reference_prices", { p_article_ids: ids });
   if (error) throw new Error(`[finance] fetchReferencePrices: ${error.message}`);
   const out: Record<string, number> = {};
@@ -367,7 +391,7 @@ export async function fetchIntraday(ticker: string): Promise<{ day: string | nul
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-bars", `finance-ticker:${ticker}`);
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const { data: last, error: lErr } = await supabase
     .from("bist_bars_5m")
     .select("ts")
@@ -423,7 +447,7 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed", `finance-ticker:${ticker}`);
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const since30 = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
 
   const [companyRes, attentionRes, articlesRes, disclosuresRes, coverageRes] = await Promise.all([
@@ -463,7 +487,7 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
 export async function fetchFinanceHealth(): Promise<FinanceHealth> {
   "use cache";
   cacheLife(ADMIN_CACHE);
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const { data, error } = await supabase.from("finance_health").select("*").limit(1);
   if (error) throw new Error(`[finance] fetchFinanceHealth: ${error.message}`);
   const r = ((data ?? [])[0] ?? {}) as Record<string, unknown>;
@@ -486,7 +510,7 @@ export async function fetchFinanceHealth(): Promise<FinanceHealth> {
 export async function fetchSignals(limit = 120): Promise<Signal[]> {
   "use cache";
   cacheLife(ADMIN_CACHE);
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const { data, error } = await supabase
     .from("finance_signals")
     .select("kind,ticker,score,evidence,observed_at")
@@ -522,7 +546,7 @@ export function bucketLags(lags: number[]): LagBucket[] {
 export async function fetchLagHistogram(days = 7): Promise<LagBucket[]> {
   "use cache";
   cacheLife(ADMIN_CACHE);
-  const supabase = createServerClient();
+  const supabase = await createFinanceServerClient();
   const { data, error } = await supabase
     .from("disclosure_coverage")
     .select("lag_minutes")

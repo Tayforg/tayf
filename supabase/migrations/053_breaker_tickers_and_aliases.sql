@@ -34,9 +34,15 @@ where origin = 'auto' and enabled and alias in (
   'kervan', 'batman', 'kartal', 'sinpas', 'orge', 'europower', 'global'
 );
 
+-- DBF-04 / same hazard 052:140-148 (DBF-07) and 058's prune_generic_aliases
+-- (DB-04) fix: bist_aliases' PK is (alias, ticker), so an alias-only
+-- predicate deletes every ticker sharing a disabled alias string, including
+-- a different, still-enabled, manual alias row for another ticker --
+-- irreversible cross-ticker history loss. Replay-safety fix only; this
+-- statement has already applied in production.
 delete from public.article_tickers t
 using public.bist_aliases al
-where t.matched_on = 'alias:' || al.alias and not al.enabled;
+where t.matched_on = 'alias:' || al.alias and t.ticker = al.ticker and not al.enabled;
 
 delete from public.article_tickers where matched_on = 'alias:garanti';
 

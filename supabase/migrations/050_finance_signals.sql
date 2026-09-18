@@ -21,18 +21,14 @@
 
 begin;
 
-create or replace view public.finance_health as
-select
-  (select max(published_at) from public.kap_disclosures)                                   as last_disclosure_at,
-  (select count(*) from public.kap_disclosures where published_at >= now() - interval '24 hours') as disclosures_24h,
-  (select count(*) from public.article_tickers where created_at >= now() - interval '24 hours')   as article_tickers_24h,
-  (select count(distinct ticker) from public.article_tickers where created_at >= now() - interval '24 hours') as tickers_24h,
-  (select max(created_at) from public.article_tickers)                                     as last_resolved_at,
-  (select count(*) from public.bist_companies where shares_traded)                          as companies_traded,
-  (select count(*) from public.bist_aliases)                                                as aliases;
-
-comment on view public.finance_health is
-  'One row: freshness and volume of the finance substrate (049) for the admin page.';
+-- finance_health is now owned entirely by 051_finance_bars_and_speed.sql,
+-- which replaces this view with an 11-column version (bar freshness
+-- columns appended to these original 7). It is deliberately NOT
+-- (re)defined here (DB-10 replay safety): `create or replace view` cannot
+-- drop columns, so if this file were ever replayed after 051 -- a partial
+-- re-apply, a manual hotfix -- redefining the narrower 7-column shape here
+-- would error instead of silently regressing. 051 owns the view for the
+-- lifetime of the schema; nothing below in this file depends on it.
 
 create or replace view public.finance_signals as
 with ist_today as (
