@@ -43,6 +43,20 @@ function fmtLag(lagMs: number | null): string {
   return minutes <= 0 ? "ilk yayın" : `+${minutes} dk`;
 }
 
+/** `tr-TR` date-only, e.g. "11.09.2025" (mirrors markdown.ts's own
+ *  `formatDdMmYyyy` / label-card.tsx's — kept local, no shared home for
+ *  this dd.mm.yyyy shape). "" for an unparseable `trustee_since`. */
+function fmtTrusteeDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "Europe/Istanbul",
+  });
+}
+
 function fmtPct(share: number | null): string {
   return share === null ? "—" : `%${Math.round(share * 100)}`;
 }
@@ -331,13 +345,6 @@ export function YelpazeReportView({ report }: { report: YelpazeReportData }) {
             {report.ownership.groups.map((g) => (
               <li key={g.ownerGroup}>
                 <span className="font-semibold">{g.label}</span>: {g.sourceNames.join(", ")}
-                {/* TODO(pack B merge): sources.trustee_since / trustee_note
-                    aren't on this branch yet (D1.md section 05) — D1's
-                    OwnershipGroupRow carries no trustee field, so there is
-                    nothing to render here. Once pack B's columns land and
-                    yelpaze.ts's own TODO is resolved, thread a per-source
-                    trustee badge into this line instead of the bare
-                    sourceNames join above. */}
               </li>
             ))}
           </ul>
@@ -347,6 +354,16 @@ export function YelpazeReportView({ report }: { report: YelpazeReportData }) {
             ? `Baskın grup: ${report.ownership.dominant.label} (${report.ownership.dominant.sourceCount} kaynak).`
             : "Baskın sahip grubu yok (etiketli kaynakların yarısından fazlasını oluşturan tek grup bulunamadı)."}
         </p>
+        {(report.ownership.trusteedSources ?? []).length > 0 && (
+          <ul className="mt-1.5 space-y-1 text-[10px] text-muted-foreground/80">
+            {(report.ownership.trusteedSources ?? []).map((t) => {
+              const date = fmtTrusteeDate(t.since);
+              return date ? (
+                <li key={t.slug}>{`Kayyum yönetiminde: ${t.name} (${date})`}</li>
+              ) : null;
+            })}
+          </ul>
+        )}
       </section>
 
       {/* 06 — Yorum */}

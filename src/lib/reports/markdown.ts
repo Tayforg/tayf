@@ -36,6 +36,22 @@ function cell(text: string): string {
   return text.replace(/\|/g, "\\|").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
 }
 
+/** `tr-TR` numeric date, e.g. "11.09.2025", pinned to Europe/Istanbul so
+ *  server and client renders agree (mirrors label-card.tsx's own
+ *  `formatDdMmYyyy`; kept local here — neither file exports it and this
+ *  dd.mm.yyyy shape has no shared home). Returns "" for an unparseable
+ *  `trustee_since` so a bad date never prints "Invalid Date". */
+function formatDdMmYyyy(dateISO: string): string {
+  const date = new Date(dateISO);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "Europe/Istanbul",
+  }).format(date);
+}
+
 // ---------------------------------------------------------------------------
 // 01 — Kapsam (coverage)
 // ---------------------------------------------------------------------------
@@ -208,6 +224,17 @@ function renderOwnership(report: YelpazeReport): string {
     ? `Baskın grup: ${o.dominant.label} (${o.dominant.sourceCount} kaynak).`
     : "Baskın sahip grubu yok (etiketli kaynakların yarısından fazlasını oluşturan tek grup bulunamadı).";
 
+  // Kayyum (trustee) flags — never printed without a parseable date (a
+  // malformed trustee_since is dropped, not shown as "Invalid Date").
+  // `trusteedSources` is optional (see yelpaze.ts's doc comment) —
+  // absent reads the same as empty.
+  const trusteeLines = (o.trusteedSources ?? [])
+    .map((t) => {
+      const date = formatDdMmYyyy(t.since);
+      return date ? `- Kayyum yönetiminde: ${cell(t.name)} (${date})` : null;
+    })
+    .filter((line): line is string => line !== null);
+
   return [
     "## 05 — Sahiplik",
     "",
@@ -215,6 +242,7 @@ function renderOwnership(report: YelpazeReport): string {
     ...groupLines,
     "",
     dominantLine,
+    ...(trusteeLines.length > 0 ? ["", ...trusteeLines] : []),
   ].join("\n");
 }
 

@@ -25,9 +25,10 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 import { createSupabaseFake, type SupabaseFakeOptions } from "../../../tests/_helpers/supabase-fake";
+import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 
 // Import AFTER mocks are declared.
-import { buildYelpazeReport } from "./yelpaze";
+import { buildOwnershipSection, buildYelpazeReport } from "./yelpaze";
 
 // ---------------------------------------------------------------------------
 // Fixture helpers
@@ -97,9 +98,16 @@ function mkEmbeddedMember(
   };
 }
 
-// Feed-health rows (src/lib/clusters/feed-health.ts): healthy = status
-// 200/304 fetched within the last 2h. Recomputed relative to "now" at call
-// time so the fixture never goes stale.
+// Feed-health rows (src/lib/clusters/feed-health.ts): the two-axis
+// ZoneHealth shape (pack A merge) — `fetchOk` (status 200/304 within the
+// last 2h) and `delivering` (>=1 article in the trailing yield window, via
+// the `recent:articles(id)` existence-probe embed) are independent axes;
+// `healthy` is their AND. This fixture drives both axes off the same
+// `healthy` boolean by default (so every pinned count that predates the
+// two-axis split keeps reading the same number post-merge); pass explicit
+// `fetch_last_status` / `fetch_last_at` / `recent` overrides to make the
+// two axes disagree. Recomputed relative to "now" at call time so the
+// fixture never goes stale.
 function healthyAt(minutesAgo = 5) {
   return new Date(Date.now() - minutesAgo * 60_000).toISOString();
 }
@@ -117,6 +125,7 @@ function mkFeedHealthRow(
     rss_url: `https://${slug}.example/rss`,
     fetch_last_status: healthy ? 200 : 500,
     fetch_last_at: healthy ? healthyAt() : new Date(0).toISOString(),
+    recent: healthy ? [{ id: `${slug}-recent` }] : [],
     ...overrides,
   };
 }
@@ -209,7 +218,7 @@ describe("buildYelpazeReport — coverage, framing, timeline, ownership (known f
     expect(muhalefet.denominator).toBe(2);
     expect(muhalefet.share).toBeCloseTo(1 / 2);
 
-    expect(report!.coverage.denominatorBasis).toBe("status");
+    expect(report!.coverage.denominatorBasis).toBe("yield");
   });
 
   it("gives the single-article bagimsiz zone a null `last` framing half, not a fabricated pair", async () => {
@@ -253,6 +262,83 @@ describe("buildYelpazeReport — coverage, framing, timeline, ownership (known f
     expect(report!.ownership.totalSourceCount).toBe(4);
     expect(report!.ownership.taggedSourceCount).toBe(3);
     expect(report!.ownership.taggedShare).toBe(3 / 4);
+  });
+});
+
+describe("buildYelpazeReport — coverage denominator is the yield axis, not fetchOk (pack A merge)", () => {
+  it("the denominator equals the zone's `delivering` count even when fetchOk disagrees", async () => {
+    setSupabaseFixtures({
+      tables: {
+        clusters: [mkClusterRow()],
+        cluster_articles: [
+          mkEmbeddedMember(
+            "a1",
+            mkEmbeddedSource("s1", "stale-but-delivering", "opposition"),
+            "2026-04-17T07:00:00Z",
+          ),
+        ],
+        sources: [
+          // fetchOk=false (stale status) but delivering=true — must still
+          // count toward the yield denominator: zoneYieldDenominator()
+          // reads `delivering` only, never `fetchOk` / the AND'd `healthy`.
+          mkFeedHealthRow("stale-but-delivering", "opposition", true, {
+            fetch_last_status: 500,
+            fetch_last_at: new Date(0).toISOString(),
+          }),
+          // fetchOk=true (fresh 200) but delivering=false — must NOT count
+          // toward the yield denominator despite answering fine.
+          mkFeedHealthRow("fresh-but-silent", "opposition", false, {
+            fetch_last_status: 200,
+            fetch_last_at: healthyAt(),
+          }),
+        ],
+      },
+    });
+
+    const report = await buildYelpazeReport("cluster-1");
+    expect(report).not.toBeNull();
+
+    const muhalefet = report!.coverage.rows.find((r) => r.zone === "muhalefet")!;
+    // Only "stale-but-delivering" delivered — a fetchOk-based denominator
+    // would read 0 here (both rows disagree with fetchOk), and a
+    // count-every-source denominator would read 2; the yield-only
+    // denominator must read exactly 1.
+    expect(muhalefet.denominator).toBe(1);
+    expect(report!.coverage.denominatorBasis).toBe("yield");
+  });
+});
+
+describe("buildYelpazeReport — ownership trustee flags (pack B merge)", () => {
+  it("lists a trusteed source (slug + date) via buildOwnershipSection", () => {
+    // cluster-detail-query.ts rebuilds ClusterDetailMember.source
+    // field-by-field and doesn't select/copy trustee_since / trustee_note
+    // yet (out of this pack's scope — must-fix-merge.md item 4), so a
+    // trusteed source can't reach this function through the full
+    // buildYelpazeReport() pipeline in this test suite. Exercise
+    // buildOwnershipSection directly instead (exported for exactly this).
+    const members = [
+      {
+        source: {
+          ...mkEmbeddedSource("s-trustee", "kayyumlu-gazete", "pro_government"),
+          trustee_since: "2025-09-11",
+          trustee_note: "TMSF kayyum atandı (Can Holding), 11.09.2025",
+        },
+        article: {
+          id: "a1",
+          title: "Haber a1",
+          url: "https://example.com/a1",
+          published_at: "2026-04-17T07:00:00Z",
+          image_url: null,
+          content_hash: "hash-a1",
+        },
+      },
+    ] as unknown as ClusterDetailMember[];
+
+    const ownership = buildOwnershipSection(members);
+
+    expect(ownership.trusteedSources).toEqual([
+      { slug: "kayyumlu-gazete", name: "Kaynak kayyumlu-gazete", since: "2025-09-11" },
+    ]);
   });
 });
 

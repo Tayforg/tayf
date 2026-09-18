@@ -77,6 +77,7 @@ function baseReport(overrides: Partial<YelpazeReport> = {}): YelpazeReport {
       totalSourceCount: 3,
       taggedShare: 2 / 3,
       dominant: null,
+      trusteedSources: [],
     },
     generatedAt: "2026-04-17T13:00:00Z",
   };
@@ -279,6 +280,34 @@ describe("reportToMarkdown — KVKK guard (no excerpts, no image URLs)", () => {
     const md = reportToMarkdown(report);
     expect(md).not.toContain("Bu gizli bir alıntı");
     expect(md).not.toContain("cdn.example/photo-of-someone.jpg");
+  });
+});
+
+describe("reportToMarkdown — ownership trustee flags (D pack B merge)", () => {
+  it("prints a trusteed source under 05 — Sahiplik as 'Kayyum yönetiminde: <name> (dd.mm.yyyy)'", () => {
+    const report = baseReport({
+      ownership: {
+        groups: [
+          { ownerGroup: "turkuvaz", label: "Turkuvaz Medya", sourceNames: ["Sabah"] },
+        ],
+        taggedSourceCount: 1,
+        totalSourceCount: 1,
+        taggedShare: 1,
+        dominant: null,
+        trusteedSources: [
+          { slug: "kayyumlu-gazete", name: "Kayyumlu Gazete", since: "2025-09-11" },
+        ],
+      },
+    });
+
+    const md = reportToMarkdown(report);
+    const section05 = md.split("## 05")[1]!.split("## 06")[0]!;
+    expect(section05).toContain("Kayyum yönetiminde: Kayyumlu Gazete (11.09.2025)");
+  });
+
+  it("never prints a trustee line when trusteedSources is empty", () => {
+    const md = reportToMarkdown(baseReport());
+    expect(md).not.toContain("Kayyum yönetiminde");
   });
 });
 

@@ -26,6 +26,7 @@ import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import {
   degradedSilentZone,
   getZoneFeedHealth,
+  zoneYieldDenominator,
   type ZoneFeedHealth,
   type ZoneHealth,
 } from "@/lib/clusters/feed-health";
@@ -34,7 +35,7 @@ import { groupMembersByZone } from "@/lib/clusters/framing";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { partitionByVote } from "@/lib/sources/kind";
 import { groupByOwner } from "@/lib/sources/ownership";
-import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
+import type { BiasCategory, BiasDistribution, MediaDnaZone, Source } from "@/types";
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -75,16 +76,15 @@ export interface CoverageZoneRow {
 
 export interface CoverageSection {
   rows: CoverageZoneRow[];
-  // TODO(pack A merge): once this branch rebases past pack A,
-  // src/lib/clusters/feed-health.ts also exports `zoneYieldDenominator()`
-  // (outlets that actually DELIVERED into this cluster's window — the
-  // honest denominator per D's pack.md). Prefer that here and flip this to
-  // "yield". The status-based `healthy` count below (this branch's only
-  // option — see D1.md section 01) is a deliberate, clearly-labelled
-  // fallback, not the final design. Also: pack A's /kaynaklar/durum page
-  // (linked from the coverage section's basis footnote in
-  // yelpaze-report.tsx) doesn't exist on this branch yet — that link
-  // currently points at /sources instead; restore it once pack A merges.
+  // Resolved (pack A merge): the denominator is `zoneYieldDenominator()`
+  // (src/lib/clusters/feed-health.ts) — active, RSS-backed sources that
+  // actually DELIVERED into the trailing yield window, the honest
+  // denominator per D's pack.md — rather than the status-only `healthy`
+  // count this branch used before pack A landed. Note: pack A's
+  // /kaynaklar/durum page (linked from the coverage section's basis
+  // footnote in yelpaze-report.tsx) doesn't exist on this branch yet —
+  // that link currently points at /sources instead; out of this pack's
+  // scope to restore (see must-fix-merge.md item 4).
   denominatorBasis: "status" | "yield" | null;
 }
 
@@ -94,14 +94,14 @@ function buildCoverageSection(
 ): CoverageSection {
   const rows: CoverageZoneRow[] = ZONE_ORDER.map((zone) => {
     const outlets = byZone[zone].length;
-    const zoneHealth = health ? health[zone] : null;
-    const denominatorKnown = zoneHealth != null;
-    const denominator = denominatorKnown ? zoneHealth!.healthy : null;
+    const denominator = zoneYieldDenominator(health, zone);
+    const denominatorKnown = denominator !== null;
     // The numerator (covering outlets over the cluster's lifetime) and the
-    // denominator (currently-healthy feeds) are different populations — an
-    // outlet that covered the story yesterday and broke an hour ago counts
-    // in the numerator but not the denominator. Never print a share when
-    // that leaves outlets > denominator (it would read as >100%).
+    // denominator (currently-delivering feeds) are different populations —
+    // an outlet that covered the story yesterday and stopped delivering an
+    // hour ago counts in the numerator but not the denominator. Never
+    // print a share when that leaves outlets > denominator (it would read
+    // as >100%).
     const denominatorBelowOutlets =
       denominatorKnown && denominator !== null && outlets > denominator;
     // A zero denominator can be NAMED but not divided by — treat it the
@@ -114,7 +114,7 @@ function buildCoverageSection(
         : null;
     return { zone, outlets, denominator, share, denominatorKnown, denominatorBelowOutlets };
   });
-  return { rows, denominatorBasis: health ? "status" : null };
+  return { rows, denominatorBasis: health ? "yield" : null };
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +408,15 @@ export interface OwnershipGroupRow {
   sourceNames: string[];
 }
 
+/** One trusteed (kayyum) source — slug + display name + the DB's
+ *  `trustee_since` date (ISO yyyy-mm-dd), verbatim, no note text (the
+ *  note is a citation for the operator, not something to print here). */
+export interface TrusteedSourceRow {
+  slug: string;
+  name: string;
+  since: string;
+}
+
 export interface OwnershipSection {
   groups: OwnershipGroupRow[];
   taggedSourceCount: number;
@@ -416,18 +425,51 @@ export interface OwnershipSection {
    *  coverage claim (pack.md acceptance criteria). */
   taggedShare: number;
   dominant: { label: string; sourceCount: number } | null;
-  // TODO(pack B merge): once `sources.trustee_since` / `trustee_note` land
-  // (and the `Source` type grows those columns — see cluster-detail-query.ts's
-  // `sources` embed, which will need to select them too), thread a
-  // per-source `trustee: { since: string; note: string | null } | null`
-  // onto each OwnershipGroupRow instead of the bare `sourceNames` below.
-  // Deliberately omitted on this branch (D1.md section 05): selecting a
-  // column that doesn't exist yet would 500 the page.
+  // Resolved (pack B merge): `sources.trustee_since` / `trustee_note`
+  // (migration 055) are live DB columns, listed here as `trusteedSources`
+  // (deduped by slug, only sources with a set `trustee_since`). Note:
+  // cluster-detail-query.ts's member-embed select and the shared `Source`
+  // type (src/types/index.ts) don't carry these two columns yet — both
+  // are outside this pack's scope (must-fix-merge.md item 4) — so
+  // `buildOwnershipSection` below reads them defensively as optional and
+  // this list degrades to empty (never throws) until that select lands.
+  // The field itself is optional (rather than required) on this interface
+  // so pre-existing `OwnershipSection` literals elsewhere in the repo
+  // (fixtures that predate this pack) keep compiling; every reader treats
+  // an absent field the same as an empty list.
+  trusteedSources?: TrusteedSourceRow[];
 }
 
-function buildOwnershipSection(members: ClusterDetailMember[]): OwnershipSection {
+/** Local, optional-field widening of the shared `Source` type — see the
+ *  `trusteedSources` doc comment above for why these two columns aren't
+ *  on `Source` itself yet. */
+type SourceWithTrustee = Source & {
+  trustee_since?: string | null;
+  trustee_note?: string | null;
+};
+
+// Exported (only for yelpaze.test.ts): cluster-detail-query.ts rebuilds
+// `ClusterDetailMember.source` field-by-field and doesn't copy through
+// `trustee_since` / `trustee_note` (out of this pack's scope — see the
+// `trusteedSources` doc comment above), so a trusteed source can never
+// reach this function via the full `buildYelpazeReport` pipeline in a
+// test built on the supabase fake. Exporting lets the trustee-flag test
+// exercise this function directly with a hand-built member array instead.
+export function buildOwnershipSection(members: ClusterDetailMember[]): OwnershipSection {
   const sources = members.map((m) => m.source);
   const summary = groupByOwner(sources);
+
+  const bySlug = new Map<string, SourceWithTrustee>();
+  for (const source of sources as SourceWithTrustee[]) {
+    if (!bySlug.has(source.slug)) bySlug.set(source.slug, source);
+  }
+  const trusteedSources: TrusteedSourceRow[] = [...bySlug.values()]
+    .filter((s): s is SourceWithTrustee & { trustee_since: string } =>
+      typeof s.trustee_since === "string" && s.trustee_since.length > 0,
+    )
+    .map((s) => ({ slug: s.slug, name: s.name, since: s.trustee_since }))
+    .sort((a, b) => a.name.localeCompare(b.name, "tr"));
+
   return {
     groups: summary.groups.map((g) => ({
       ownerGroup: g.ownerGroup,
@@ -440,6 +482,7 @@ function buildOwnershipSection(members: ClusterDetailMember[]): OwnershipSection
     dominant: summary.dominant
       ? { label: summary.dominant.label, sourceCount: summary.dominant.sources.length }
       : null,
+    trusteedSources,
   };
 }
 
