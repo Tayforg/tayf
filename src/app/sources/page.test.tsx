@@ -80,6 +80,7 @@ vi.mock("@/lib/supabase/server", () => ({
 
 // Import AFTER mocks are declared.
 import SourcesPage from "./page";
+import { DenominatorNote } from "@/components/source/denominator-note";
 
 /** Collects every string/number leaf under a React element tree. */
 function collectText(node: unknown, out: string[] = []): string[] {
@@ -98,14 +99,27 @@ function collectText(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
-/** Collects every `href` prop found anywhere in a React element tree. */
+/**
+ * Collects every `href` prop found anywhere in a React element tree.
+ * Expands `<DenominatorNote>` (a one-level-deep function component whose
+ * own href lives in its rendered output, not its props) so its
+ * /kaynaklar/durum link is reachable without a full renderer.
+ */
 function collectHrefs(node: unknown, out: string[] = []): string[] {
   if (Array.isArray(node)) {
     for (const child of node) collectHrefs(child, out);
     return out;
   }
   if (node && typeof node === "object") {
-    const el = node as { props?: { href?: unknown; children?: ReactNode } };
+    const el = node as {
+      type?: unknown;
+      props?: { href?: unknown; children?: ReactNode; [k: string]: unknown };
+    };
+    if (el.type === DenominatorNote && el.props) {
+      const props = el.props as unknown as Parameters<typeof DenominatorNote>[0];
+      collectHrefs(DenominatorNote(props), out);
+      return out;
+    }
     if (typeof el.props?.href === "string") out.push(el.props.href);
     if (el.props?.children !== undefined) collectHrefs(el.props.children, out);
   }
@@ -124,5 +138,17 @@ describe("/sources page — source-kind UI", () => {
     expect(text).toContain("Toplayıcı");
     expect(text).toContain("Ajans");
     expect(hrefs).toContain("/metodoloji#kaynaklar");
+  });
+
+  it("A-M4 / PERF-01: links to /kaynaklar/durum via the DenominatorNote, derived from the already-fetched rows with no second query", async () => {
+    const tree = await SourcesPage();
+    const hrefs = collectHrefs(tree);
+    const text = collectText(tree).join("");
+
+    expect(hrefs).toContain("/kaynaklar/durum");
+    // Fixture: 2 voting sources (outlet + wire), neither with a
+    // `latest` row, so the derived voting-delivering pair is 0/2.
+    expect(text).toContain("0");
+    expect(text).toContain("2");
   });
 });

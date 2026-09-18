@@ -104,6 +104,7 @@ export function SourceDialog({
             <Label htmlFor={biasId} className="text-xs">Yanlılık Etiketi</Label>
             <Select
               value={source.bias}
+              disabled={mode === "edit"}
               onValueChange={(value) =>
                 value && onChange({ ...source, bias: value })
               }
@@ -122,6 +123,9 @@ export function SourceDialog({
                 ))}
               </SelectContent>
             </Select>
+            <p className="text-[11px] text-muted-foreground">
+              Bölge değişikliği gerekçe ister; kayıt üzerinden yapılır.
+            </p>
           </div>
         </div>
 

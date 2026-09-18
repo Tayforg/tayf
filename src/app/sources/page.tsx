@@ -15,9 +15,11 @@ export const metadata: Metadata = {
 import { PageHero } from "@/components/ui/page-hero";
 import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceChips } from "@/components/source/source-chips";
+import { DenominatorNote } from "@/components/source/denominator-note";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { countClassifiedSources } from "@/lib/sources/classification";
+import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, Source } from "@/types";
@@ -146,6 +148,34 @@ export default async function SourcesPage() {
     (acc, bias) => acc + (grouped[bias] ?? []).filter(isVotingSource).length,
     0,
   );
+
+  // PERF-01 / A-H1: the DenominatorNote footnote's pair, derived for free
+  // from the `grouped` rows getSources() already fetched — NOT a second
+  // full-directory query (do not touch getSources() itself; it doesn't
+  // need to change). `lastPublishedAt` on each row already carries the
+  // real timestamp within getSources()'s 7-day window, so "delivering"
+  // (within the shorter 72h yield window) is derivable locally. Must be
+  // the VOTING-kind intersection (A-H1) — not every active source — since
+  // that's the real denominator every share on this page divides by.
+  // `nowMs` guards against a future-dated `lastPublishedAt` (SEC-01 — a
+  // source-controlled pubDate must never count as "just delivered").
+  // eslint-disable-next-line react-hooks/purity
+  const nowMs = Date.now();
+  let votingDelivering = 0;
+  for (const bias of BIAS_ORDER) {
+    for (const source of grouped[bias] ?? []) {
+      if (!isVotingSource(source)) continue;
+      const lastMs = source.lastPublishedAt
+        ? new Date(source.lastPublishedAt).getTime()
+        : null;
+      const delivering =
+        lastMs !== null &&
+        lastMs <= nowMs &&
+        nowMs - lastMs <= FEED_YIELD_WINDOW_MS;
+      if (delivering) votingDelivering += 1;
+    }
+  }
+
   const allSlugs = BIAS_ORDER.flatMap(
     (bias) => (grouped[bias] ?? []).map((source) => source.slug),
   );
@@ -172,6 +202,7 @@ export default async function SourcesPage() {
           Neden?
         </Link>
       </p>
+      <DenominatorNote delivering={votingDelivering} total={votingSources} />
       <p className="text-xs text-muted-foreground">
         Doğruluk ve sahiplik etiketi girilen kaynak:{" "}
         <span className="font-mono">
