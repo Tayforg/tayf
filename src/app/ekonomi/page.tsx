@@ -44,11 +44,16 @@ export default async function EkonomiPage() {
     fetchRecentDisclosures(40),
     fetchCircuitBreakers(),
   ]);
-  const tickers = [...new Set([...top.map((t) => t.ticker), ...feed.flatMap((f) => f.tickers)])];
+  // TS-11: normalise the ticker set ONCE, outside the cache boundary, and
+  // hand every cached fetcher the same sorted array. getQuotes/fetchQuoteStats
+  // each independently sort+dedupe internally too, but doing it here as well
+  // means the three run against the exact same Next cache key shape instead
+  // of three independently-expiring 60 s entries that can briefly disagree.
+  const tickerKey = [...new Set([...top.map((t) => t.ticker), ...feed.flatMap((f) => f.tickers)])].sort();
   const [quotes, stats, refs] = await Promise.all([
-    getQuotes(tickers),
-    fetchQuoteStats(tickers),
-    fetchReferencePrices(feed.map((f) => f.id)),
+    getQuotes(tickerKey),
+    fetchQuoteStats(tickerKey),
+    fetchReferencePrices(feed.map((f) => f.id).sort()),
   ]);
 
   return (
