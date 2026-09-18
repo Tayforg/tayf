@@ -3,9 +3,13 @@
 import { useEffect } from "react";
 import { AlertTriangle } from "lucide-react";
 
-// Catches fetchTimeline()'s throw (src/lib/clusters/trends-query.ts) so a
-// Supabase hiccup renders a retry prompt instead of the framework's default
-// 500 page — mirrors src/app/cluster/[id]/error.tsx.
+// Catches genuine render-time exceptions in the /trends route tree (React
+// error boundary — mirrors src/app/cluster/[id]/error.tsx), NOT Supabase
+// failures: fetchTimeline() (src/lib/clusters/trends-query.ts) never
+// throws to its caller — it catches internally and resolves `null` — so a
+// Supabase hiccup renders the in-page "Trend verileri şu anda
+// yüklenemiyor." unavailable state in page.tsx instead of reaching this
+// boundary at all.
 export default function TrendsError({
   error,
   reset,
