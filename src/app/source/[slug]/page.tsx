@@ -9,7 +9,8 @@ import { BIAS_LABELS } from "@/lib/bias/config";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
-import type { Source } from "@/types";
+import { LabelCard, type ZoneHistoryEntry } from "@/components/source/label-card";
+import type { BiasCategory, Source } from "@/types";
 
 // /source/[slug] — single-source profile page.
 //
@@ -40,10 +41,31 @@ interface ArticleRow {
   published_at: string;
 }
 
+// S-20/M-04 registry columns (migration 055) — not yet on the shared
+// `Source` type, so extended locally here rather than editing
+// `@/types` (out of this file's ownership scope).
+interface SourceRegistryFields {
+  zone_rationale: string | null;
+  zone_rationale_at: string | null;
+  trustee_since: string | null;
+  trustee_note: string | null;
+}
+
+type SourceWithRegistry = Source & SourceRegistryFields;
+
+interface ZoneHistoryRow {
+  old_bias: string | null;
+  new_bias: string;
+  reason: string | null;
+  rater: string | null;
+  changed_at: string;
+}
+
 interface SourceProfile {
-  source: Source;
+  source: SourceWithRegistry;
   articleCount7d: number;
   articles: ArticleRow[];
+  zoneHistory: ZoneHistoryEntry[];
 }
 
 async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
@@ -55,7 +77,9 @@ async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
 
     const { data: sourceRow, error: sourceError } = await supabase
       .from("sources")
-      .select("id, name, slug, url, rss_url, bias, logo_url, active, image_allowed, excerpt_allowed")
+      .select(
+        "id, name, slug, url, rss_url, bias, logo_url, active, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note",
+      )
       .eq("slug", slug)
       .maybeSingle();
 
@@ -66,16 +90,18 @@ async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
     }
     if (!sourceRow) return null;
 
-    const source = sourceRow as Source;
+    const source = sourceRow as SourceWithRegistry;
 
-    // Two read-only fetches that depend only on source.id — fire in parallel.
-    // The 7-day count uses head/exact to avoid pulling row bodies; the
-    // recent-articles list is capped at 20 to keep the payload small.
+    // Three read-only fetches that depend only on source.id — fire in
+    // parallel (one round-trip). The 7-day count uses head/exact to avoid
+    // pulling row bodies; the recent-articles list is capped at 20 to keep
+    // the payload small; the zone-history list is capped at 20, newest
+    // first.
     const sevenDaysAgo = new Date(
       Date.now() - 7 * 24 * 60 * 60 * 1000,
     ).toISOString();
 
-    const [countResult, articlesResult] = await Promise.all([
+    const [countResult, articlesResult, historyResult] = await Promise.all([
       supabase
         .from("articles")
         .select("id", { count: "exact", head: true })
@@ -87,6 +113,12 @@ async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
         .eq("source_id", source.id)
         .order("published_at", { ascending: false })
         .limit(20),
+      supabase
+        .from("source_zone_history")
+        .select("old_bias, new_bias, reason, rater, changed_at")
+        .eq("source_id", source.id)
+        .order("changed_at", { ascending: false })
+        .limit(20),
     ]);
 
     if (countResult.error) {
@@ -97,11 +129,33 @@ async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
         `articles query failed: ${articlesResult.error.message}`,
       );
     }
+    // Deliberately non-fatal, unlike the two checks above: a
+    // source_zone_history read failure renders the card without a history
+    // list (LabelCard's own empty state) rather than 404-ing the whole
+    // profile over a secondary, non-essential fetch. Still logged (not
+    // swallowed) so a permanently-broken query doesn't silently masquerade
+    // as the honest "Bu etiket hiç değişmedi." empty state forever.
+    if (historyResult.error) {
+      console.error(
+        "[source-profile] zone history query failed",
+        historyResult.error,
+      );
+    }
+    const zoneHistory: ZoneHistoryEntry[] = historyResult.error
+      ? []
+      : ((historyResult.data ?? []) as ZoneHistoryRow[]).map((row) => ({
+          oldBias: row.old_bias as BiasCategory | null,
+          newBias: row.new_bias as BiasCategory,
+          reason: row.reason,
+          rater: row.rater,
+          changedAt: row.changed_at,
+        }));
 
   return {
     source,
     articleCount7d: countResult.count ?? 0,
     articles: (articlesResult.data ?? []) as ArticleRow[],
+    zoneHistory,
   };
 }
 
@@ -156,7 +210,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
   const profile = await getSourceProfile(slug);
   if (!profile) notFound();
 
-  const { source, articleCount7d, articles } = profile;
+  const { source, articleCount7d, articles, zoneHistory } = profile;
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
@@ -211,6 +265,20 @@ export default async function SourceProfilePage({ params }: PageProps) {
           </div>
         </div>
       </header>
+
+      {/* Etiket kartı (S-20/M-04) — zone/bias reconciliation, rationale,
+          ownership, trustee status, zone-change history and dispute link.
+          Sits between the header and the recent-articles list so it reads
+          as the source's evidence dossier before its output. */}
+      <LabelCard
+        slug={source.slug}
+        bias={source.bias}
+        zoneRationale={source.zone_rationale}
+        zoneRationaleAt={source.zone_rationale_at}
+        trusteeSince={source.trustee_since}
+        trusteeNote={source.trustee_note}
+        history={zoneHistory}
+      />
 
       {/* Recent articles list. Capped at 20 by the data layer; the empty
           state covers brand-new sources or temporarily inactive feeds. */}

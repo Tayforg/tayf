@@ -315,6 +315,20 @@ begin
     return;
   end if;
 
+  -- Replay safety (DB-10): 051_finance_bars_and_speed.sql reschedules
+  -- kap-drain to */2 and adds resolve-tickers as an hourly sweep. If this
+  -- migration is ever replayed on top of that (partial re-apply, manual
+  -- hotfix), do not silently reset kap-drain back to this file's original
+  -- */10 cadence.
+  if exists (
+    select 1 from cron.job
+    where jobname = 'kap-drain' and schedule <> '*/10 * * * *'
+  ) then
+    raise notice
+      'kap-drain already owned by a later schedule (051_finance_bars_and_speed.sql or newer) — skipping the 049 */10 schedule on replay.';
+    return;
+  end if;
+
   if exists (select 1 from cron.job where jobname = 'kap-drain') then
     perform cron.unschedule('kap-drain');
   end if;

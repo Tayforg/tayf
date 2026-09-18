@@ -14,12 +14,14 @@ export const metadata: Metadata = {
 import { ClusterCard } from "@/components/story/cluster-card";
 import { NewsletterForm } from "@/components/newsletter/newsletter-form";
 import { PageHero } from "@/components/ui/page-hero";
+import { DenominatorNote } from "@/components/source/denominator-note";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
 import {
   getBlindspots,
   type BlindspotBundle,
 } from "@/lib/clusters/blindspots-query";
+import { getFeedStatusSummary } from "@/lib/sources/feed-status";
 
 // /blindspots — Tayf's "Kör Noktalar" feed. The fetch/filter/tally logic
 // lives in blindspots-query.ts (see that file for the BLINDSPOT contract,
@@ -31,7 +33,19 @@ export default async function BlindspotsPage() {
   // boundary provides the static shell while this streams in.
   await connection();
 
-  const { bundles } = await getBlindspots();
+  // PERF-01: fetched in parallel, not two serial awaits — neither depends
+  // on the other. DenominatorNote wants one directory-wide, voting-kind
+  // N/M pair, not a per-zone breakdown (a blindspot bundle can span either
+  // pole), so this reads the cheap `getFeedStatusSummary()` existence-probe
+  // from src/lib/sources/feed-status.ts rather than A1's
+  // `getZoneFeedHealth()`/`zoneYieldDenominator` (those are per-zone and
+  // drive `shouldSuppressBlindspot`, not this footnote) or the full
+  // `getSourceFeedStatuses()` row set (which /kaynaklar/durum needs but
+  // this footnote doesn't).
+  const [{ bundles }, feedSummary] = await Promise.all([
+    getBlindspots(),
+    getFeedStatusSummary(),
+  ]);
 
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
@@ -42,6 +56,11 @@ export default async function BlindspotsPage() {
         kicker="Sadece bir tarafın gördüğü"
         title="Kör Noktalar"
         subtitle="Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Diğer kaynaklar neden susuyor?"
+      />
+
+      <DenominatorNote
+        delivering={feedSummary?.delivering ?? null}
+        total={feedSummary?.total ?? null}
       />
 
       {bundles.length === 0 ? (

@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// `getQuote`/`getQuotes` are wrapped in "use cache"; next/cache's real
+// cacheLife() throws outside a Next.js cacheComponents build ("`cacheLife()`
+// is only available with the `cacheComponents` config"), so it's stubbed
+// here the same way src/lib/finance/queries.test.ts stubs it.
+vi.mock("next/cache", () => ({ cacheLife: vi.fn() }));
 
 import { fmtPct, fmtWhen, fmtX, limitFlag, moveClass, pctChange } from "./format";
-import { parseYahooChart, YahooQuoteSource } from "./quotes";
+import { getQuotes, parseYahooChart, YahooQuoteSource } from "./quotes";
 
 // Shape captured from query1.finance.yahoo.com on 2026-09-13 for THYAO.IS.
 const SAMPLE = {
@@ -24,21 +30,50 @@ const SAMPLE = {
 };
 
 describe("parseYahooChart", () => {
-  it("reads price, percent change and closes", () => {
+  it("reads price and closes, and prefers chartPreviousClose for the percent change (TS-09)", () => {
     const q = parseYahooChart("THYAO", SAMPLE)!;
     expect(q.ticker).toBe("THYAO");
     expect(q.price).toBe(300.25);
-    expect(q.changePct).toBeCloseTo(0.334, 3);
-    expect(q.prevClose).toBeCloseTo(299.25, 1);
+    expect(q.prevClose).toBe(305);
+    expect(q.changePct).toBeCloseTo(((300.25 - 305) / 305) * 100, 6);
     expect(q.closes).toEqual([305, 301.5, 299.25, 300.25]);
     expect(q.currency).toBe("TRY");
   });
 
-  it("falls back to the last two closes when the percent is missing", () => {
+  it("uses chartPreviousClose for the change when regularMarketChangePercent is missing", () => {
     const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
     delete json.chart.result[0]!.meta.regularMarketChangePercent;
     const q = parseYahooChart("THYAO", json)!;
+    expect(q.prevClose).toBe(305);
+    expect(q.changePct).toBeCloseTo(((300.25 - 305) / 305) * 100, 6);
+  });
+
+  it("falls back to regularMarketChangePercent when chartPreviousClose is not a usable positive number", () => {
+    const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
+    json.chart.result[0]!.meta.chartPreviousClose = 0;
+    const q = parseYahooChart("THYAO", json)!;
+    expect(q.changePct).toBeCloseTo(0.334, 3);
+    expect(q.prevClose).toBeCloseTo(299.25, 1);
+  });
+
+  it("falls back to the last two closes when both chartPreviousClose and regularMarketChangePercent are missing", () => {
+    const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
+    delete json.chart.result[0]!.meta.regularMarketChangePercent;
+    delete json.chart.result[0]!.meta.chartPreviousClose;
+    const q = parseYahooChart("THYAO", json)!;
+    expect(q.prevClose).toBeCloseTo(299.25, 1);
     expect(q.changePct).toBeCloseTo(((300.25 - 299.25) / 299.25) * 100, 6);
+  });
+
+  it("guards against changePct === -100 producing an infinite or NaN prevClose (TS-13)", () => {
+    const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
+    delete json.chart.result[0]!.meta.chartPreviousClose;
+    json.chart.result[0]!.meta.regularMarketChangePercent = -100;
+    const q = parseYahooChart("THYAO", json)!;
+    expect(Number.isFinite(q.prevClose)).toBe(true);
+    expect(Number.isFinite(q.changePct)).toBe(true);
+    expect(q.prevClose).toBe(300.25);
+    expect(q.changePct).toBe(0);
   });
 
   it("returns null for an unknown symbol payload", () => {
@@ -55,6 +90,29 @@ describe("YahooQuoteSource", () => {
     }) as typeof fetch;
     const quotes = await new YahooQuoteSource(fetchImpl).getQuotes(["THYAO", "DEAD", "ASELS"]);
     expect(quotes.map((q) => q.ticker).sort()).toEqual(["ASELS", "THYAO"]);
+  });
+});
+
+describe("getQuotes", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns quotes for all 60 requested tickers, not just the alphabetical first 40 (TS-01 regression)", async () => {
+    const tickers = Array.from({ length: 60 }, (_, i) => `TICK${String(i).padStart(2, "0")}`);
+    vi.stubGlobal(
+      "fetch",
+      (async () => new Response(JSON.stringify(SAMPLE), { status: 200 })) as typeof fetch,
+    );
+    const quotes = await getQuotes(tickers);
+    expect(Object.keys(quotes).sort()).toEqual([...tickers].sort());
+  });
+
+  it("returns an empty object without fetching for an empty ticker list", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy as unknown as typeof fetch);
+    expect(await getQuotes([])).toEqual({});
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

@@ -19,7 +19,15 @@ import { cn } from "@/lib/utils";
 const TICKER_RE = /^[A-Z0-9]{2,6}$/;
 
 export async function generateMetadata({ params }: { params: Promise<{ ticker: string }> }): Promise<Metadata> {
-  const { ticker } = await params;
+  const { ticker: raw } = await params;
+  const ticker = raw.toUpperCase();
+  // SEC-04/SEC-11: generateMetadata runs independently of (and before) the
+  // page body, so the TICKER_RE gate that guards the page's outbound
+  // lookups has to be applied here too — otherwise a junk segment gets
+  // echoed straight into <title>/<meta description>/canonical.
+  if (!TICKER_RE.test(ticker)) {
+    return { title: "Hisse bulunamadı", robots: { index: false, follow: false } };
+  }
   return {
     title: `${ticker} — hisse haberleri ve KAP bildirimleri`,
     description: `${ticker} hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.`,
@@ -40,13 +48,18 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   if (!TICKER_RE.test(ticker)) notFound();
   await connection();
 
-  const [page, quotes, stats, intraday] = await Promise.all([
-    fetchTickerPage(ticker),
+  // SEC-04: fetch the KAP/article side ALONE first and resolve notFound()
+  // before touching quotes at all. Splitting the Promise.all removes the
+  // outbound Yahoo request entirely for junk tickers, instead of firing it
+  // in parallel with a lookup whose result we're about to discard.
+  const page = await fetchTickerPage(ticker);
+  if (!page.company && page.articles.length === 0 && page.disclosures.length === 0) notFound();
+
+  const [quotes, stats, intraday] = await Promise.all([
     getQuotes([ticker]),
     fetchQuoteStats([ticker]),
     fetchIntraday(ticker),
   ]);
-  if (!page.company && page.articles.length === 0 && page.disclosures.length === 0) notFound();
   const quote = quotes[ticker];
   const stat = stats[ticker];
   const limit = quote ? limitFlag(quote.changePct) : null;

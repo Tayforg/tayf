@@ -137,9 +137,15 @@ where origin = 'auto' and enabled and (
     'baskent', 'volkswagen', 'dogus'
   )
 );
+-- DBF-07 / 058:225-228's later precedent: bist_aliases' PK is
+-- (alias, ticker), so an alias-only predicate deletes every ticker sharing
+-- a disabled alias string, including a different, still-enabled, manual
+-- alias row for another ticker (e.g. 'kardemir' disabled for KRDMA but
+-- manual+enabled for KRDMD) -- irreversible cross-ticker history loss.
+-- Replay-safety fix only; this statement has already applied in production.
 delete from public.article_tickers t
 using public.bist_aliases al
-where t.matched_on = 'alias:' || al.alias and not al.enabled;
+where t.matched_on = 'alias:' || al.alias and t.ticker = al.ticker and not al.enabled;
 
 delete from public.article_tickers t
 using public.articles a
