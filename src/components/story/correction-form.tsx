@@ -16,23 +16,44 @@ type Status = "idle" | "submitting" | "success" | "error";
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Same slug shape src/lib/validation/source-input.ts's isValidSourceSlug
+// (and, via that, the /api/sources[/[slug]] routes) accepts — kept in sync
+// so a malformed ?source= query param is dropped client-side. Duplicated
+// locally rather than imported, same pattern as UUID_RE above.
+const SOURCE_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
 export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUrlProp }: CorrectionFormProps) {
   const [status, setStatus] = useState<Status>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const successRef = useRef<HTMLParagraphElement>(null);
   // /metodoloji is a static page (Cache Components), so it can't read
   // searchParams server-side without opting the whole page into dynamic
-  // rendering. Read `?cluster=` client-side instead — the cluster page
-  // links here as `/metodoloji?cluster=<id>#duzeltme`.
+  // rendering. Read `?cluster=` / `?source=` client-side instead — the
+  // cluster page links here as `/metodoloji?cluster=<id>#duzeltme` and a
+  // source's label card links here as `/metodoloji?source=<slug>#duzeltme`.
   const searchParams = useSearchParams();
   const clusterParam = searchParams.get("cluster") ?? undefined;
   const clusterId =
     clusterIdProp ?? (clusterParam && UUID_RE.test(clusterParam) ? clusterParam : undefined);
+  const sourceParam = searchParams.get("source") ?? undefined;
+  const sourceSlug =
+    sourceParam && SOURCE_SLUG_RE.test(sourceParam) ? sourceParam : undefined;
+  // ?cluster= wins if both are set — the two params are otherwise
+  // independent (checking clusterId first gives it priority in both
+  // branches below).
   const defaultUrl =
     defaultUrlProp ??
     (clusterId && typeof window !== "undefined"
       ? `${window.location.origin}/cluster/${clusterId}`
-      : undefined);
+      : sourceSlug && typeof window !== "undefined"
+        ? `${window.location.origin}/source/${sourceSlug}`
+        : undefined);
+  // Only the placeholder is seeded — never the message body itself. The
+  // reader always writes their own objection.
+  const messagePlaceholder =
+    !clusterId && sourceSlug
+      ? "Bu kaynağın yanlılık etiketine neden itiraz ettiğinizi açıklayın..."
+      : "Neyin yanlış veya eksik olduğunu açıklayın...";
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -131,7 +152,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
           minLength={10}
           maxLength={2000}
           rows={5}
-          placeholder="Neyin yanlış veya eksik olduğunu açıklayın..."
+          placeholder={messagePlaceholder}
           className="min-h-[110px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
         />
       </div>

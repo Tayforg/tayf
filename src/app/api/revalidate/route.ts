@@ -17,7 +17,7 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 // Only tags this deployment actually tags cached data with — anything else
 // is a 400, so a leaked bearer token still can't revalidate arbitrary tags.
-const STATIC_TAG_ALLOWLIST = new Set(["clusters", "clusters-politics"]);
+const STATIC_TAG_ALLOWLIST = new Set(["clusters", "clusters-politics", "sources"]);
 const CLUSTER_DETAIL_TAG_RE = /^cluster-detail:[0-9a-f-]{36}$/;
 
 function isAllowedTag(tag: string): boolean {
