@@ -67,6 +67,34 @@ describe("migration 058_finance_hardening.sql (static)", () => {
     expect(sql).toMatch(/commit;/);
   });
 
+  // DBF-02: an unbounded lock wait must not be able to queue article
+  // ingest behind this migration's ACCESS EXCLUSIVE lock.
+  it("bounds the lock wait with lock_timeout and statement_timeout immediately after begin", () => {
+    const beginIdx = sql.indexOf("begin;");
+    const lockIdx = sql.indexOf("set local lock_timeout = '5s';");
+    const stmtIdx = sql.indexOf("set local statement_timeout = '60s';");
+    const firstRevokeIdx = sql.indexOf("revoke all on public.finance_signals");
+    expect(beginIdx).toBeGreaterThanOrEqual(0);
+    expect(lockIdx).toBeGreaterThan(beginIdx);
+    expect(stmtIdx).toBeGreaterThan(beginIdx);
+    expect(lockIdx).toBeLessThan(firstRevokeIdx);
+    expect(stmtIdx).toBeLessThan(firstRevokeIdx);
+  });
+
+  // SEC-F-08: the migration must self-record in the ledger, same precedent
+  // as 055, so a `psql -f` replay outside `supabase db push` is still safe.
+  it("self-records into supabase_migrations.schema_migrations immediately before commit", () => {
+    const insertIdx = sql.indexOf(
+      "insert into supabase_migrations.schema_migrations (version, name)",
+    );
+    expect(insertIdx).toBeGreaterThanOrEqual(0);
+    const nearby = sql.slice(insertIdx, insertIdx + 200);
+    expect(nearby).toMatch(/values\s*\(\s*'058',\s*'058_finance_hardening'\s*\)/i);
+    expect(nearby).toMatch(/on\s+conflict\s+do\s+nothing/i);
+    const commitIdx = sql.lastIndexOf("commit;");
+    expect(commitIdx).toBeGreaterThan(insertIdx);
+  });
+
   it("does not touch 055, 056 or 057 (reserved for other packs)", () => {
     expect(sql).not.toMatch(/05[567]_/);
   });
@@ -258,6 +286,40 @@ describe("migration 058_finance_hardening.sql (static)", () => {
     expect(sql).not.toMatch(/alter\s+column\s+source_id\s+set\s+not\s+null/i);
   });
 
+  // DBF-01: a row inserted concurrently by the pre-058 resolver (no
+  // published_at/source_id supplied) must be backfilled by a BEFORE INSERT
+  // trigger rather than rejected by the NOT NULL that follows it.
+  it("adds a BEFORE INSERT backfill trigger for published_at/source_id before the NOT NULL is enforced", () => {
+    const fillFnIdx = sql.indexOf("create or replace function public.article_tickers_fill_ts()");
+    expect(fillFnIdx).toBeGreaterThanOrEqual(0);
+    expect(sql).toMatch(
+      /drop\s+trigger\s+if\s+exists\s+article_tickers_fill_ts_trg\s+on\s+public\.article_tickers/i,
+    );
+    const triggerIdx = sql.indexOf(
+      "create trigger article_tickers_fill_ts_trg before insert on public.article_tickers",
+    );
+    expect(triggerIdx).toBeGreaterThan(fillFnIdx);
+    const notNullIdx = sql.indexOf(
+      "alter table public.article_tickers alter column published_at set not null;",
+    );
+    expect(notNullIdx).toBeGreaterThan(triggerIdx);
+  });
+
+  it("owns article_tickers_fill_ts() by postgres and revokes/grants it like the other finance functions", () => {
+    expect(sql).toMatch(
+      /alter\s+function\s+public\.article_tickers_fill_ts\(\)\s+owner\s+to\s+postgres/i,
+    );
+    const revokeStart = sql.indexOf("revoke execute on function");
+    const revokeEnd = sql.indexOf("from anon, authenticated, public;", revokeStart);
+    const revokeBlock = sql.slice(revokeStart, revokeEnd);
+    expect(revokeBlock).toContain("public.article_tickers_fill_ts()");
+
+    const grantStart = sql.indexOf("grant execute on function", revokeEnd);
+    const grantEnd = sql.indexOf("to service_role;", grantStart);
+    const grantBlock = sql.slice(grantStart, grantEnd);
+    expect(grantBlock).toContain("public.article_tickers_fill_ts()");
+  });
+
   it("indexes article_tickers on (published_at desc, ticker)", () => {
     expect(sql).toMatch(
       /create\s+index\s+if\s+not\s+exists\s+article_tickers_published_ticker_idx\s+on\s+public\.article_tickers\s*\(\s*published_at\s+desc,\s*ticker\s*\)/i,
@@ -273,6 +335,16 @@ describe("migration 058_finance_hardening.sql (static)", () => {
     expect(body).toMatch(
       /insert\s+into\s+public\.article_tickers\s*\(\s*article_id,\s*ticker,\s*matched_on,\s*published_at,\s*source_id\s*\)/i,
     );
+  });
+
+  // SEC-F-11: the callee must be pinned too, independent of whichever
+  // caller's search_path it happens to inherit.
+  it("pins search_path on resolve_article_tickers_for and schema-qualifies its pg_catalog calls", () => {
+    const body = objectBody(sql, "create or replace function public.resolve_article_tickers_for(p_ids uuid[])");
+    expect(body).toMatch(/set\s+search_path\s*=\s*''/);
+    expect(body).toMatch(/pg_catalog\.strpos\(/i);
+    expect(body).toMatch(/pg_catalog\.regexp_matches\(/i);
+    expect(body).toMatch(/pg_catalog\.unnest\(tickers\)/i);
   });
 
   it("redefines ticker_attention_daily to aggregate article_tickers alone, with no join back to articles", () => {
@@ -476,6 +548,27 @@ describe("migration 052_alias_hygiene.sql replay guard (static, DBF-07)", () => 
   let sql = "";
   beforeAll(() => {
     sql = read("052_alias_hygiene.sql");
+    expect(sql.length).toBeGreaterThan(0);
+  });
+
+  it("deletes article_tickers by (alias, ticker), not alias text alone", () => {
+    expect(sql).toMatch(
+      /delete\s+from\s+public\.article_tickers\s+t\s*\n?\s*using\s+public\.bist_aliases\s+al\s*\n?\s*where\s+t\.matched_on\s*=\s*'alias:'\s*\|\|\s*al\.alias\s+and\s+t\.ticker\s*=\s*al\.ticker\s+and\s+not\s+al\.enabled/i,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DBF-04: the same ticker-blind DELETE hazard DBF-07 (052) and DB-04 (058's
+// prune_generic_aliases) fixed also existed, unfixed, in 053's alias-cleanup
+// statement. Replay-safety-only fix (the statement has already applied in
+// production).
+// ---------------------------------------------------------------------------
+
+describe("migration 053_breaker_tickers_and_aliases.sql replay guard (static, DBF-04)", () => {
+  let sql = "";
+  beforeAll(() => {
+    sql = read("053_breaker_tickers_and_aliases.sql");
     expect(sql.length).toBeGreaterThan(0);
   });
 

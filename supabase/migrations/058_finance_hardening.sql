@@ -32,6 +32,12 @@
 
 begin;
 
+-- DBF-02: ACCESS EXCLUSIVE on article_tickers (from the NOT NULL below)
+-- must never queue article ingest behind an unbounded wait; a timeout
+-- rolls back cleanly and the orchestrator retries.
+set local lock_timeout = '5s';
+set local statement_timeout = '60s';
+
 -- 1. View grants ---------------------------------------------------------------
 -- Operator + research surfaces are service_role only, mirroring 048.
 revoke all on public.finance_signals      from anon, authenticated;
@@ -47,10 +53,11 @@ grant select on public.finance_signals, public.finance_health,
 -- (Verified none of the three anon-readable views calls a function, so
 -- invoker rights need no extra EXECUTE grants.)
 -- NOTE: the actual `alter view ... set (security_invoker = on)` statements
--- are issued further down, immediately before COMMIT -- every one of these
--- seven views is recreated with `create or replace view` later in this
--- migration, and a bare CREATE OR REPLACE VIEW resets reloptions to NULL,
--- so setting the option here would be silently undone.
+-- are issued further down, immediately before COMMIT -- four of these
+-- seven views are recreated below (ticker_attention_daily, finance_signals,
+-- ml_disclosure_events, disclosure_coverage); the ALTER VIEW ...
+-- security_invoker statements are deferred to the end so a recreation
+-- cannot wipe the option.
 
 -- 2. Function EXECUTE ----------------------------------------------------------
 -- The zero-arg form must go before this section's end recreates it with
@@ -110,6 +117,35 @@ where a.id = t.article_id and t.published_at is null;
 
 -- Safe only because the resolver below now always supplies it; the NOT NULL
 -- is what keeps the rewritten views from silently dropping rows.
+--
+-- DBF-01: a row inserted by the pre-058 resolver while this migration is
+-- mid-run (concurrent with the ALTER below) does not supply
+-- published_at/source_id, so a bare NOT NULL would reject it. This BEFORE
+-- INSERT trigger backfills both columns from the parent article whenever
+-- the caller omits them, so the constraint below never loses a
+-- concurrently inserted row.
+create or replace function public.article_tickers_fill_ts()
+returns trigger language plpgsql security definer set search_path = '' as $fx$
+begin
+  if NEW.published_at is null or NEW.source_id is null then
+    select a.published_at, a.source_id into NEW.published_at, NEW.source_id
+    from public.articles a where a.id = NEW.article_id;
+  end if;
+  return NEW;
+end $fx$;
+
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'postgres') then
+    alter function public.article_tickers_fill_ts() owner to postgres;
+  end if;
+end
+$$;
+
+drop trigger if exists article_tickers_fill_ts_trg on public.article_tickers;
+create trigger article_tickers_fill_ts_trg before insert on public.article_tickers
+  for each row execute function public.article_tickers_fill_ts();
+
 alter table public.article_tickers alter column published_at set not null;
 
 create index if not exists article_tickers_published_ticker_idx
@@ -121,6 +157,7 @@ create index if not exists article_tickers_published_ticker_idx
 create or replace function public.resolve_article_tickers_for(p_ids uuid[])
 returns integer
 language plpgsql
+set search_path = ''
 as $$
 declare
   v_n integer;
@@ -139,15 +176,15 @@ begin
     select r.id as article_id, al.ticker, 'alias:' || al.alias as matched_on,
            r.published_at, r.source_id
     from recent r
-    join public.bist_aliases al on al.enabled and strpos(r.folded, ' ' || al.alias || ' ') > 0
+    join public.bist_aliases al on al.enabled and pg_catalog.strpos(r.folded, ' ' || al.alias || ' ') > 0
   ),
   code_hits as (
     select distinct r.id as article_id, c.ticker, 'code' as matched_on,
            r.published_at, r.source_id
     from recent r
-    cross join lateral regexp_matches(r.raw, '\m([A-Z]{4,6})\M', 'g') m
+    cross join lateral pg_catalog.regexp_matches(r.raw, '\m([A-Z]{4,6})\M', 'g') m
     join (
-      select unnest(tickers) as ticker from public.bist_companies where shares_traded
+      select pg_catalog.unnest(tickers) as ticker from public.bist_companies where shares_traded
     ) c on c.ticker = m[1]
   ),
   hits as (
@@ -354,8 +391,12 @@ left join lateral public.bar_returns(c.ticker, d.published_at) r on true;
 
 -- disclosure_coverage: keep 054's indexable stock_codes containment, and add
 -- the (now indexed) t.published_at window alongside the original
--- a.published_at window rather than replacing it -- the two are equal, so
--- keeping both makes the semantics provably unchanged.
+-- a.published_at window. The two predicates are logically equal, so
+-- semantics are unchanged -- but not the plan: this is fast for
+-- disclosure-driven windows (a lookup by d.published_at can now use
+-- article_tickers_published_ticker_idx), while in the ticker-driven
+-- direction it defeats Memoize on the correlated a.published_at bound.
+-- Watch finance_signals in pg_stat_statements.
 create or replace view public.disclosure_coverage as
 select
   d.disclosure_index,
@@ -434,6 +475,7 @@ revoke execute on function
     public.resolve_article_tickers(interval),
     public.resolve_article_tickers_for(uuid[]),
     public.resolve_article_tickers_trigger(),
+    public.article_tickers_fill_ts(),
     public.prune_generic_aliases(int, int),
     public.prune_bist_bars_5m(int),
     public.bist_daily_targets(int),
@@ -450,6 +492,7 @@ grant execute on function
     public.resolve_article_tickers(interval),
     public.resolve_article_tickers_for(uuid[]),
     public.resolve_article_tickers_trigger(),
+    public.article_tickers_fill_ts(),
     public.prune_generic_aliases(int, int),
     public.prune_bist_bars_5m(int),
     public.bist_daily_targets(int),
@@ -484,6 +527,12 @@ alter view public.finance_signals        set (security_invoker = on);
 alter view public.finance_health         set (security_invoker = on);
 alter view public.ml_news_events         set (security_invoker = on);
 alter view public.ml_disclosure_events   set (security_invoker = on);
+
+-- SEC-F-08: record this migration in the ledger from inside the file
+-- itself, same precedent as 055.
+insert into supabase_migrations.schema_migrations (version, name)
+  values ('058', '058_finance_hardening')
+  on conflict do nothing;
 
 commit;
 
