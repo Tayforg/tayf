@@ -122,6 +122,13 @@ describe("sitemap output", () => {
     expect(urls).not.toContain("https://tayf.test/cluster/archived-1");
     expect(urls).toContain("https://tayf.test/");
   });
+
+  it("A-M4: includes /kaynaklar/durum among the static routes", async () => {
+    const entries = await sitemap();
+    const urls = entries.map((e) => e.url);
+
+    expect(urls).toContain("https://tayf.test/kaynaklar/durum");
+  });
 });
 
 describe("sitemap image entries", () => {
