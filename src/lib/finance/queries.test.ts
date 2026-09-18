@@ -1,8 +1,83 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// ---------------------------------------------------------------------------
+// Harness mirrors src/lib/sources/active-count.test.ts's shared-fake wiring:
+// `createSupabaseFake`'s client is returned from a mocked
+// `@supabase/supabase-js` `createClient`, so `createFinanceServerClient()`'s
+// real (non-fixture) branch resolves to the fake client end to end — no
+// need to mock `@/lib/supabase/server` itself. next/cache's cacheLife /
+// cacheTag are stubbed since the "use cache" directive is a no-op outside
+// a Next.js cacheComponents build.
+// ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
-import { bucketLags, coverageStats, rankAttention, toFeedItem } from "./queries";
+const fixture = vi.hoisted(() => ({
+  kapDisclosures: [] as unknown[],
+  bars5m: [] as Array<{ ts: string; close: number; volume: number }>,
+  econFeedRows: [] as unknown[],
+  lastKapState: null as unknown,
+}));
+
+const supabaseFake = await vi.hoisted(async () => {
+  const helper = await import("../../../tests/_helpers/supabase-fake");
+  return helper.createSupabaseFake({
+    tables: {
+      kap_disclosures: (state: unknown) => {
+        fixture.lastKapState = state;
+        return { data: fixture.kapDisclosures, error: null };
+      },
+      bist_bars_5m: (state: unknown) => {
+        const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
+        const desc = s.order.some((o) => (o.opts as { ascending?: boolean } | undefined)?.ascending === false);
+        const since = s.gte.find((g) => g.col === "ts")?.val as string | undefined;
+        const rows = fixture.bars5m.filter((r) => !since || Date.parse(r.ts) >= Date.parse(since));
+        const sorted = [...rows].sort((a, b) => (desc ? Date.parse(b.ts) - Date.parse(a.ts) : Date.parse(a.ts) - Date.parse(b.ts)));
+        return { data: s.limit ? sorted.slice(0, s.limit) : sorted, error: null };
+      },
+    },
+    rpc: {
+      econ_feed: () => ({ data: fixture.econFeedRows, error: null }),
+    },
+  });
+});
+
+vi.mock("@supabase/supabase-js", () => ({
+  createClient: () => supabaseFake.client,
+}));
+
+import { istToday } from "./format";
+import {
+  bucketLags,
+  coverageStats,
+  fetchCircuitBreakers,
+  fetchEconFeed,
+  fetchIntraday,
+  fetchRecentDisclosures,
+  rankAttention,
+  toFeedItem,
+} from "./queries";
+import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
+
+const ORIGINAL_ENV = { ...process.env };
+
+beforeEach(() => {
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
+  process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  fixture.kapDisclosures = [];
+  fixture.bars5m = [];
+  fixture.econFeedRows = [];
+  fixture.lastKapState = null;
+  supabaseFake.calls.rpc.length = 0;
+});
+
+afterEach(() => {
+  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
+    if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
+    else delete process.env[k];
+  }
+  vi.useRealTimers();
+});
 
 describe("finance query transforms", () => {
   it("flattens an article row with embedded source and tickers", () => {
@@ -56,5 +131,108 @@ describe("finance query transforms", () => {
   it("buckets lags into the fixed histogram", () => {
     const b = bucketLags([-3000, -100, -5, 10, 200, 900, 5000]);
     expect(b.map((x) => x.count)).toEqual([1, 1, 1, 1, 1, 1, 1]);
+  });
+});
+
+describe("finance query fetchers (live Supabase shape)", () => {
+  it("fetchRecentDisclosures keeps a row whose subject is null, not just non-breaker rows (TS-06)", async () => {
+    fixture.kapDisclosures = [
+      {
+        disclosure_index: 1662301,
+        published_at: "2026-09-13T08:00:00Z",
+        kap_title: "ÖRNEK A.Ş.",
+        stock_codes: ["ASELS"],
+        subject: null,
+        summary: null,
+        disclosure_class: null,
+      },
+    ];
+    const rows = await fetchRecentDisclosures(10);
+    expect(rows).toEqual([
+      {
+        disclosureIndex: 1662301,
+        publishedAt: "2026-09-13T08:00:00Z",
+        kapTitle: "ÖRNEK A.Ş.",
+        stockCodes: ["ASELS"],
+        subject: null,
+        summary: null,
+        disclosureClass: null,
+      },
+    ]);
+  });
+
+  it("fetchCircuitBreakers' gte cut-off tracks istToday() for a fixed clock", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T20:00:00Z"));
+    await fetchCircuitBreakers();
+    const state = fixture.lastKapState as BuilderState;
+    const gte = state.gte.find((g) => g.col === "published_at");
+    expect(gte?.val).toBe(`${istToday()}T00:00:00+03:00`);
+  });
+
+  it("fetchIntraday picks the Istanbul day of the newest bar across a 21:00 UTC boundary", async () => {
+    // 21:05 UTC is 00:05 Istanbul the NEXT calendar day.
+    fixture.bars5m = [
+      { ts: "2026-09-13T18:00:00Z", close: 10, volume: 100 },
+      { ts: "2026-09-13T21:05:00Z", close: 11, volume: 120 },
+    ];
+    const { day, bars } = await fetchIntraday("THYAO");
+    expect(day).toBe("2026-09-14");
+    expect(bars.map((b) => b.ts)).toEqual(["2026-09-13T21:05:00Z"]);
+  });
+
+  it("fetchEconFeed maps econ_feed RPC rows into FeedItem with tickers deduped and sorted", async () => {
+    fixture.econFeedRows = [
+      {
+        id: "a1",
+        title: "Vestel'in kârı arttı",
+        url: "https://x/1",
+        published_at: "2026-09-13T08:00:00Z",
+        category: "ekonomi",
+        source_name: "Bloomberg HT",
+        source_slug: "bloomberght",
+        tickers: ["VESTL", "VESTL", "ASELS"],
+      },
+    ];
+    const items = await fetchEconFeed(10);
+    expect(items).toEqual([
+      {
+        id: "a1",
+        title: "Vestel'in kârı arttı",
+        url: "https://x/1",
+        publishedAt: "2026-09-13T08:00:00Z",
+        category: "ekonomi",
+        source: { name: "Bloomberg HT", slug: "bloomberght" },
+        tickers: ["ASELS", "VESTL"],
+      },
+    ]);
+    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 10 } });
+  });
+
+  it("fetchEconFeed maps a row with no source (source_slug null) to source: null", async () => {
+    fixture.econFeedRows = [
+      {
+        id: "a2",
+        title: "Kaynaksız haber",
+        url: "https://x/2",
+        published_at: "2026-09-13T09:00:00Z",
+        category: "ekonomi",
+        source_name: null,
+        source_slug: null,
+        tickers: null,
+      },
+    ];
+    const items = await fetchEconFeed(10);
+    expect(items).toEqual([
+      {
+        id: "a2",
+        title: "Kaynaksız haber",
+        url: "https://x/2",
+        publishedAt: "2026-09-13T09:00:00Z",
+        category: "ekonomi",
+        source: null,
+        tickers: [],
+      },
+    ]);
   });
 });

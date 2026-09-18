@@ -18,6 +18,105 @@ export const KAP_COMPANIES_PATH = "/tr/bildirim-sorgu";
 export const KAP_PAGE_CAP = 2000;
 export const KAP_CLASSES = ["ODA", "DKB", "DG", "FR"] as const;
 
+// Honest, contactable bot identity (SEC-06/TS-03) — replaces the fabricated
+// desktop-Chrome UA kap-ingest and quotes-ingest used to send. Reuses the
+// identity the repo already publishes and that already resolves
+// (_shared/og-image.ts:62, _shared/rss/fetcher.ts:161,174 — tayf.app is a
+// live site) rather than a new `+https://www.tayfhaber.com/bot` URL that
+// 404s (src/app/ has no `bot` route). Shared by both Edge Functions so the
+// string only needs to be right in one place.
+export const TAYF_BOT_UA =
+  "Mozilla/5.0 (compatible; Tayf/1.0; +https://tayf.app) finance-edge";
+
+// ---------------------------------------------------------------------------
+// Retry/backoff wrapper (SEC-07) — used by kap-ingest's fetchDay and
+// quotes-ingest's fetchChart so both polite-scraping surfaces (kap.org.tr,
+// Yahoo) back off on 429/503 instead of replaying the same block every
+// 2-5 min forever, and give up immediately — no retry — on 403 so a real
+// block doesn't get hammered 720x/day by kap-drain. Deliberately NOT the
+// persisted `kap_blocked_until` breaker the review also floated: that needs
+// a table and is explicitly deferred for this pack.
+// ---------------------------------------------------------------------------
+
+export interface FetchRetryOptions {
+  /** Extra attempts after the first, only for 429/503. Default 2. */
+  retries?: number;
+  /** Ceiling for both the Retry-After header and the backoff fallback. */
+  maxBackoffMs?: number;
+  /** Injectable for tests; defaults to a real setTimeout-based sleep. */
+  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Per-attempt fetch timeout. `AbortSignal.timeout()` starts counting at
+   * construction, so a caller-supplied `init.signal` built once outside the
+   * retry loop has its budget burned by the backoff sleep itself — a
+   * `Retry-After` longer than what's left aborts the retried fetch instantly
+   * and turns a legible 429 into an opaque AbortError. When set, a fresh
+   * timeout signal is built for every attempt instead (merged with
+   * `init.signal` if the caller also passed one).
+   */
+  timeoutMs?: number;
+}
+
+const DEFAULT_MAX_BACKOFF_MS = 30_000;
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Parse a `Retry-After` header — delta-seconds ("2") or an HTTP-date — into
+ * milliseconds. Returns null when absent or unparseable so the caller can
+ * fall back to its own backoff schedule.
+ */
+export function parseRetryAfterMs(value: string | null, now = Date.now()): number | null {
+  if (!value) return null;
+  const secs = Number(value);
+  if (Number.isFinite(secs)) return Math.max(0, secs * 1000);
+  const at = Date.parse(value);
+  if (Number.isFinite(at)) return Math.max(0, at - now);
+  return null;
+}
+
+/**
+ * `fetch()` with bounded retry for 429/503 and an immediate, non-retried
+ * stop on 403. Every other outcome (2xx, or any 4xx/5xx other than
+ * 429/403/503) is returned on the first attempt. Callers keep their
+ * existing `if (!res.ok) throw ...` handling — a 403 or an exhausted
+ * 429/503 still surfaces as a failure the caller records, it just isn't
+ * replayed against a host that already told us to stop.
+ */
+export async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  opts: FetchRetryOptions = {},
+): Promise<Response> {
+  const retries = opts.retries ?? 2;
+  const maxBackoffMs = opts.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
+  const sleep = opts.sleep ?? defaultSleep;
+  const timeoutMs = opts.timeoutMs;
+
+  for (let attempt = 0; ; attempt++) {
+    // Fresh per-attempt signal (SEC-07): reusing a single AbortSignal.timeout()
+    // built once outside this loop means the backoff sleep eats into that
+    // signal's own budget, so a retried attempt can abort before it even
+    // starts.
+    const signal = timeoutMs === undefined
+      ? init.signal
+      : init.signal
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs);
+    const res = await fetch(url, { ...init, signal });
+    if (res.ok || res.status === 403) return res;
+    if ((res.status === 429 || res.status === 503) && attempt < retries) {
+      const headerMs = parseRetryAfterMs(res.headers.get("retry-after"));
+      const backoffMs = Math.min(headerMs ?? 1000 * 2 ** attempt, maxBackoffMs);
+      await sleep(backoffMs);
+      continue;
+    }
+    return res;
+  }
+}
+
 export interface KapListItem {
   publishDate: string;
   kapTitle: string | null;

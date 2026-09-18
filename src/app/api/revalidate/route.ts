@@ -17,11 +17,16 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 // Only tags this deployment actually tags cached data with — anything else
 // is a 400, so a leaked bearer token still can't revalidate arbitrary tags.
-const STATIC_TAG_ALLOWLIST = new Set(["clusters", "clusters-politics", "sources"]);
+// finance-feed/finance-bars/finance-ticker:<TICKER> (TS-08) are the tags
+// lib/finance/queries.ts's cacheTag() calls use; the caller that fires them
+// (currently kap-drain/quotes-ingest) lives in supabase/functions. "sources"
+// is fired by the registry admin actions (pack B).
+const STATIC_TAG_ALLOWLIST = new Set(["clusters", "clusters-politics", "sources", "finance-feed", "finance-bars"]);
 const CLUSTER_DETAIL_TAG_RE = /^cluster-detail:[0-9a-f-]{36}$/;
+const FINANCE_TICKER_TAG_RE = /^finance-ticker:[A-Z0-9]{2,6}$/;
 
 function isAllowedTag(tag: string): boolean {
-  return STATIC_TAG_ALLOWLIST.has(tag) || CLUSTER_DETAIL_TAG_RE.test(tag);
+  return STATIC_TAG_ALLOWLIST.has(tag) || CLUSTER_DETAIL_TAG_RE.test(tag) || FINANCE_TICKER_TAG_RE.test(tag);
 }
 
 const MAX_TAGS = 100;

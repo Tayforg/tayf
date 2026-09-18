@@ -169,6 +169,39 @@ describe("POST /api/revalidate", () => {
     expect(revalidateTagMock).toHaveBeenCalledTimes(2);
   });
 
+  it("allows the finance cache tags (TS-08): finance-feed, finance-bars, finance-ticker:<TICKER>", async () => {
+    process.env.CRON_SECRET = "shhh";
+    const mod = await import("@/app/api/revalidate/route");
+    const res = await mod.POST(
+      makeRequest(
+        { tags: ["finance-feed", "finance-bars", "finance-ticker:THYAO"] },
+        { auth: "Bearer shhh" },
+      ),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual({ revalidated: 3 });
+    expect(revalidateTagMock).toHaveBeenCalledWith("finance-feed", "max");
+    expect(revalidateTagMock).toHaveBeenCalledWith("finance-bars", "max");
+    expect(revalidateTagMock).toHaveBeenCalledWith("finance-ticker:THYAO", "max");
+  });
+
+  it("rejects a finance-ticker tag whose symbol fails the ticker shape, and an unrelated unlisted tag", async () => {
+    process.env.CRON_SECRET = "shhh";
+    const mod = await import("@/app/api/revalidate/route");
+
+    const badTicker = await mod.POST(
+      makeRequest({ tags: ["finance-ticker:toolong"] }, { auth: "Bearer shhh" }),
+    );
+    expect(badTicker.status).toBe(400);
+
+    const unlisted = await mod.POST(
+      makeRequest({ tags: ["finance-feed", "not-a-real-tag"] }, { auth: "Bearer shhh" }),
+    );
+    expect(unlisted.status).toBe(400);
+    expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
   it("returns 429 after 30 requests from the same client within the window", async () => {
     process.env.CRON_SECRET = "shhh";
     const mod = await import("@/app/api/revalidate/route");
