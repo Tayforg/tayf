@@ -29,11 +29,15 @@ function zoneLabel(zone: MediaDnaZone): string {
   return ZONE_META[zone].label;
 }
 
-/** Escapes pipe/bracket characters so a headline/outlet name can never break
+/** Escapes backslash, pipe and bracket characters so a headline/outlet name can never break
  *  a Markdown table row or terminate a link early (e.g. a wire headline
  *  like "[VİDEO] …"). */
 function cell(text: string): string {
-  return text.replace(/\|/g, "\\|").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+  return text
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
 }
 
 /** `tr-TR` numeric date, e.g. "11.09.2025", pinned to Europe/Istanbul so
