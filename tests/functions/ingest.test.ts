@@ -142,6 +142,53 @@ let existingArticleHashPairs: Array<{ source_id: string; content_hash: string }>
 // absent from `upserted`.
 const articlesUpsertCalls: Array<Array<Record<string, unknown>>> = [];
 
+// Simulates rows currently stored in `articles`, keyed by url — read by
+// `recordTitleVersions`'s `select(...).in("url", urls)` lookup (migration
+// 056). Distinct from `existingArticleHashPairs` above: that map backs the
+// (source_id, content_hash) lookup `dropExistingSourceContentHashRows`
+// makes against the SAME `articles` table; this one backs the
+// (url -> {id, title, source_id}) lookup `recordTitleVersions` makes. The
+// mock tells the two apart by which column the SUT's `.in(...)` call used
+// ("url" vs "source_id"/"content_hash"), not by call order, so both
+// helpers can run against the same chunk without one starving the other's
+// fixture.
+let storedArticlesByUrl: Record<
+  string,
+  { id: string; title: string; source_id: string }
+> = {};
+
+// When set, the url-keyed `articles` lookup above returns this as a
+// Supabase `error` instead of reading `storedArticlesByUrl` — proves
+// `recordTitleVersions` degrades to a no-op (returns 0, never throws) on a
+// lookup failure, same discipline as `dropExistingSourceContentHashRows`.
+let forcedTitleLookupError: string | null = null;
+
+// When set, `.from("article_title_versions").insert(...)` returns this as
+// an error instead of recording the rows — proves `recordTitleVersions`
+// degrades to a no-op on an insert failure too.
+let forcedTitleVersionInsertError: string | null = null;
+
+// One entry per `.from("articles").select(...).in("url", urls)` call this
+// test made — lets the tests assert the lookup is bounded to exactly the
+// chunk's urls (length equality) and happens exactly once per chunk.
+const articlesUrlLookupCalls: Array<{ urls: string[] }> = [];
+
+// One entry per `.from("article_title_versions").upsert(rows, opts)` call
+// this test made — lets the tests assert exactly one upsert call carrying
+// every changed row in a chunk, not one call per changed row. (Named
+// "InsertCalls" for history: the SUT used a plain `.insert(...)` here
+// before MF-02 switched it to an `.upsert(..., { ignoreDuplicates: true })`
+// keyed on (article_id, new_title_hash) so a headline that stays changed
+// across cycles is recorded once, not every cycle.)
+const titleVersionInsertCalls: Array<Array<Record<string, unknown>>> = [];
+
+// Simulates the migration-056 unique index on (article_id, new_title_hash)
+// combined with the SUT's `ignoreDuplicates: true`: a pair already
+// "recorded" (in this test, keyed on article_id + new_title, standing in
+// for the real md5(new_title) hash) returns no row on a repeat call,
+// exactly like the DB silently no-opping a duplicate upsert.
+const recordedTitleVersionKeys = new Set<string>();
+
 // When set, the "ingest_cycles" `insert()` mock below returns this as an
 // error instead of recording the row — used to prove `recordIngestCycle`'s
 // try/catch absorbs a telemetry-write failure instead of failing the cycle.
@@ -158,6 +205,11 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
   createServiceClient: () => ({
     from: (table: string) => {
       const chain: Record<string, unknown> = {};
+      // Captured per `.from(table)` call so two concurrent query shapes
+      // against the same table (the (source_id, content_hash) lookup vs
+      // the url-keyed title-version lookup, both against `articles`) never
+      // bleed into each other.
+      const inCalls: Array<{ column: string; values: unknown[] }> = [];
       const settle = () => {
         if (table === "sources") {
           if (forcedSourcesError) {
@@ -166,6 +218,27 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
           return { data: [...fakeSources], error: null };
         }
         if (table === "articles") {
+          const urlIn = inCalls.find((c) => c.column === "url");
+          if (urlIn) {
+            // `recordTitleVersions`'s bounded lookup (migration 056):
+            // `select("id, url, title, source_id").in("url", urls)`.
+            const urls = urlIn.values as string[];
+            articlesUrlLookupCalls.push({ urls: [...urls] });
+            if (forcedTitleLookupError) {
+              return { data: null, error: { message: forcedTitleLookupError } };
+            }
+            const rows = urls
+              .map((url) => {
+                const stored = storedArticlesByUrl[url];
+                return stored
+                  ? { id: stored.id, url, title: stored.title, source_id: stored.source_id }
+                  : null;
+              })
+              .filter((r): r is { id: string; url: string; title: string; source_id: string } =>
+                r !== null,
+              );
+            return { data: rows, error: null };
+          }
           // Only reached by a plain `.select(...)` read (the batched/
           // per-row `.upsert(...)` calls below return their own thenable
           // and never hit this `settle()`) — i.e.
@@ -179,7 +252,13 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
         eq: () => chain,
         order: () => chain,
         limit: () => chain,
-        in: () => chain,
+        in: (column: string, values: unknown) => {
+          inCalls.push({
+            column,
+            values: Array.isArray(values) ? values : [values],
+          });
+          return chain;
+        },
         maybeSingle: async () => ({ data: null, error: null }),
         single: async () => ({ data: null, error: null }),
         // Make the chain awaitable: `await supabase.from("sources").select(...)`.
@@ -229,6 +308,36 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
               fn: "sources.upsert",
               rows: arr as Array<Record<string, unknown>>,
             });
+          } else if (table === "article_title_versions") {
+            titleVersionInsertCalls.push(arr as Array<Record<string, unknown>>);
+            if (forcedTitleVersionInsertError) {
+              const result = {
+                data: null,
+                error: { message: forcedTitleVersionInsertError },
+              };
+              return {
+                select: () => Promise.resolve(result),
+                then: (
+                  onFul?: (v: typeof result) => unknown,
+                  onRej?: (e: unknown) => unknown,
+                ) => Promise.resolve(result).then(onFul, onRej),
+              };
+            }
+            const insertedRows: Array<{ id: string }> = [];
+            for (const r of arr as Array<Record<string, unknown>>) {
+              const key = `${r.article_id as string}::${r.new_title as string}`;
+              if (recordedTitleVersionKeys.has(key)) continue;
+              recordedTitleVersionKeys.add(key);
+              insertedRows.push({ id: `fake-title-version-${recordedTitleVersionKeys.size}` });
+            }
+            const result = { data: insertedRows, error: null };
+            return {
+              select: () => Promise.resolve(result),
+              then: (
+                onFul?: (v: typeof result) => unknown,
+                onRej?: (e: unknown) => unknown,
+              ) => Promise.resolve(result).then(onFul, onRej),
+            };
           }
           // The SUT chains `.upsert(...).select("id")` (production code at
           // supabase/functions/ingest/index.ts:185-188). Returning a bare
@@ -249,6 +358,7 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
           return builder;
         },
         insert: (rows: unknown) => {
+          const arr = Array.isArray(rows) ? rows : [rows];
           if (table === "ingest_cycles") {
             if (forcedIngestCyclesInsertError) {
               return Promise.resolve({
@@ -256,9 +366,10 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
                 error: { message: forcedIngestCyclesInsertError },
               });
             }
-            const arr = Array.isArray(rows) ? rows : [rows];
             for (const r of arr) ingestCycleInserts.push(r as Record<string, unknown>);
           }
+          // `article_title_versions` is written via `.upsert(...)` now (see
+          // above), not `.insert(...)` — MF-02.
           return Promise.resolve({ data: null, error: null });
         },
         update: () => chain,
@@ -398,6 +509,12 @@ beforeEach(() => {
   fetchFeedCalls.length = 0;
   articlesUpsertCalls.length = 0;
   existingArticleHashPairs = [];
+  storedArticlesByUrl = {};
+  forcedTitleLookupError = null;
+  forcedTitleVersionInsertError = null;
+  articlesUrlLookupCalls.length = 0;
+  titleVersionInsertCalls.length = 0;
+  recordedTitleVersionKeys.clear();
   forcedSourcesError = null;
   forcedIngestCyclesInsertError = null;
   fakeSources.length = 0;
@@ -1154,5 +1271,502 @@ describe("dedupeBySourceContentHash [migration 041]", () => {
 
     expect(deduped).toBe(1);
     expect(out.map((r) => r.url)).toEqual(["https://a", "https://c", "https://d"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Headline-version collection (migration 056, U-07 collection half) — a
+// pure-function unit test against the exported `recordTitleVersions`
+// helper, the same technique `dedupeBySourceContentHash` above uses:
+// direct import + a hand-built `chunk`, asserting against the mocked
+// Supabase client's `titleVersionInsertCalls` / `articlesUrlLookupCalls`
+// sinks declared at the top of this file. `storedArticlesByUrl` stands in
+// for the row `recordTitleVersions`'s bounded `select(...).in("url", ...)`
+// would read back from `articles`.
+// ---------------------------------------------------------------------------
+
+type RecordTitleVersionsChunkRow = { url: string; title: string; source_id: string };
+type RecordTitleVersionsFn = (
+  supabase: unknown,
+  chunk: ReadonlyArray<RecordTitleVersionsChunkRow>,
+) => Promise<number>;
+
+async function importRecordTitleVersions(): Promise<{
+  recordTitleVersions: RecordTitleVersionsFn;
+  supabase: unknown;
+}> {
+  const mod = (await import("../../supabase/functions/ingest/index.ts")) as {
+    recordTitleVersions: RecordTitleVersionsFn;
+  };
+  const { createServiceClient } = (await import(
+    "../../supabase/functions/_shared/supabase.ts"
+  )) as { createServiceClient: () => unknown };
+  return { recordTitleVersions: mod.recordTitleVersions, supabase: createServiceClient() };
+}
+
+describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
+  it("records exactly one row with the right article_id/source_id/old_title/new_title when the stored title differs", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/changed"] = {
+      id: "article-changed",
+      title: "Eski başlık",
+      source_id: "source-1",
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/changed", title: "Yeni başlık", source_id: "source-1" },
+    ];
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(1);
+    expect(titleVersionInsertCalls).toHaveLength(1);
+    expect(titleVersionInsertCalls[0]).toEqual([
+      {
+        article_id: "article-changed",
+        source_id: "source-1",
+        old_title: "Eski başlık",
+        new_title: "Yeni başlık",
+      },
+    ]);
+  });
+
+  it("does not insert when the title is unchanged", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/unchanged"] = {
+      id: "article-unchanged",
+      title: "Aynı başlık",
+      source_id: "source-1",
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/unchanged", title: "Aynı başlık", source_id: "source-1" },
+    ];
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(0);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+  });
+
+  it("treats a trim-only whitespace difference as unchanged but a bare case change as changed", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/whitespace"] = {
+      id: "article-whitespace",
+      title: "Aynı başlık",
+      source_id: "source-1",
+    };
+    storedArticlesByUrl["https://example.com/case"] = {
+      id: "article-case",
+      title: "degisen baslik",
+      source_id: "source-1",
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      // Only leading/trailing whitespace differs from the stored title —
+      // NOT a change once both sides are `.trim()`-ed.
+      { url: "https://example.com/whitespace", title: "  Aynı başlık  ", source_id: "source-1" },
+      // Only casing differs — the brief's contract says this IS a change:
+      // no case/punctuation normalization, exact string compare only.
+      { url: "https://example.com/case", title: "DEGISEN BASLIK", source_id: "source-1" },
+    ];
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(1);
+    expect(titleVersionInsertCalls).toHaveLength(1);
+    expect(titleVersionInsertCalls[0]).toEqual([
+      {
+        article_id: "article-case",
+        source_id: "source-1",
+        old_title: "degisen baslik",
+        new_title: "DEGISEN BASLIK",
+      },
+    ]);
+  });
+
+  it("does not insert when the chunk's url has no matching stored row", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    // Deliberately nothing seeded into storedArticlesByUrl for this url.
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/never-stored", title: "Herhangi bir şey", source_id: "source-1" },
+    ];
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(0);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+  });
+
+  it("batches two changed titles in one chunk into a single insert call carrying two rows", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/multi-1"] = {
+      id: "article-multi-1",
+      title: "Eski C",
+      source_id: "source-1",
+    };
+    storedArticlesByUrl["https://example.com/multi-2"] = {
+      id: "article-multi-2",
+      title: "Eski D",
+      source_id: "source-2",
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/multi-1", title: "Yeni C", source_id: "source-1" },
+      { url: "https://example.com/multi-2", title: "Yeni D", source_id: "source-2" },
+    ];
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(2);
+    // Exactly ONE insert call carrying both rows, not two separate calls.
+    expect(titleVersionInsertCalls).toHaveLength(1);
+    expect(titleVersionInsertCalls[0]).toHaveLength(2);
+    expect(titleVersionInsertCalls[0]).toEqual([
+      {
+        article_id: "article-multi-1",
+        source_id: "source-1",
+        old_title: "Eski C",
+        new_title: "Yeni C",
+      },
+      {
+        article_id: "article-multi-2",
+        source_id: "source-2",
+        old_title: "Eski D",
+        new_title: "Yeni D",
+      },
+    ]);
+  });
+
+  it("looks the chunk up with exactly one select bounded to the chunk's urls", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/bound-1"] = {
+      id: "article-bound-1",
+      title: "X",
+      source_id: "source-1",
+    };
+    // The other two urls are deliberately never stored -- they still count
+    // toward the bound, proving the lookup covers the whole chunk, not just
+    // the rows that happen to already exist.
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/bound-1", title: "Y", source_id: "source-1" },
+      { url: "https://example.com/bound-2", title: "Z", source_id: "source-1" },
+      { url: "https://example.com/bound-3", title: "W", source_id: "source-1" },
+    ];
+
+    await recordTitleVersions(supabase, chunk);
+
+    expect(articlesUrlLookupCalls).toHaveLength(1);
+    expect(articlesUrlLookupCalls[0].urls).toHaveLength(chunk.length);
+    expect(articlesUrlLookupCalls[0].urls).toEqual(chunk.map((r) => r.url));
+  });
+
+  it("skips the insert call entirely (not an empty-array call) when nothing changed", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/no-change"] = {
+      id: "article-no-change",
+      title: "Sabit başlık",
+      source_id: "source-1",
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/no-change", title: "Sabit başlık", source_id: "source-1" },
+    ];
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(0);
+    // Not just "no rows recorded" -- the insert() call must never happen.
+    expect(titleVersionInsertCalls).toHaveLength(0);
+  });
+
+  it("returns 0 on an empty chunk without making any calls", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    const count = await recordTitleVersions(supabase, []);
+
+    expect(count).toBe(0);
+    expect(articlesUrlLookupCalls).toHaveLength(0);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+  });
+
+  it("never throws: a synchronous throw from the Supabase client degrades to 0", async () => {
+    const { recordTitleVersions } = await importRecordTitleVersions();
+
+    const throwingSupabase = {
+      from: () => {
+        throw new Error("simulated client failure");
+      },
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/throws", title: "Bir şey", source_id: "source-1" },
+    ];
+
+    await expect(recordTitleVersions(throwingSupabase, chunk)).resolves.toBe(0);
+  });
+
+  it("degrades to 0 (never throws) when the lookup select itself returns an error", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    forcedTitleLookupError = "simulated select failure";
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/select-fails", title: "Bir şey", source_id: "source-1" },
+    ];
+
+    await expect(recordTitleVersions(supabase, chunk)).resolves.toBe(0);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+  });
+
+  it("degrades to 0 (never throws) when the insert itself returns an error", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/insert-fails"] = {
+      id: "article-insert-fails",
+      title: "Eski başlık",
+      source_id: "source-1",
+    };
+    forcedTitleVersionInsertError = "simulated insert failure";
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/insert-fails", title: "Yeni başlık", source_id: "source-1" },
+    ];
+
+    await expect(recordTitleVersions(supabase, chunk)).resolves.toBe(0);
+    // The insert was attempted (and failed) -- distinguishes this from the
+    // "nothing changed, insert never called" case above.
+    expect(titleVersionInsertCalls).toHaveLength(1);
+  });
+
+  // MF-02: the ingest cycle runs every 3 minutes and `articles.title` is
+  // never updated by the upsert (`ignoreDuplicates: true` on `url`), so a
+  // headline that stays changed presents the SAME chunk again next cycle.
+  // Without a dedupe key the row would be re-recorded every cycle it stays
+  // changed; migration 056's (article_id, new_title_hash) unique index +
+  // `ignoreDuplicates: true` on the upsert must collapse that to one row.
+  it("re-recording the same (article_id, new_title) pair on a later cycle inserts nothing new [MF-02]", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/dup-cycle"] = {
+      id: "article-dup-cycle",
+      title: "Eski başlık",
+      source_id: "source-1",
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      { url: "https://example.com/dup-cycle", title: "Yeni başlık", source_id: "source-1" },
+    ];
+
+    const first = await recordTitleVersions(supabase, chunk);
+    expect(first).toBe(1);
+
+    // Same chunk presented again, as it would be on the next 3-minute
+    // cycle while the item stays in the feed with the same new title.
+    const second = await recordTitleVersions(supabase, chunk);
+    expect(second).toBe(0);
+    // Both cycles attempt the upsert -- the dedupe happens at the DB layer
+    // (unique index + ignoreDuplicates), not by skipping the call.
+    expect(titleVersionInsertCalls).toHaveLength(2);
+  });
+
+  // MF-03: `articles.url` is globally unique across all outlets, but a
+  // syndicating/linking feed can still present another outlet's url under
+  // its OWN source_id. The stored row's source_id must be checked, not
+  // just its url, or the change gets attributed to the wrong outlet.
+  it("never attributes a title change to a stored row belonging to a different source_id [MF-03]", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    storedArticlesByUrl["https://example.com/cross-source"] = {
+      id: "article-cross-source",
+      title: "Eski başlık",
+      source_id: "source-original",
+    };
+    const chunk: RecordTitleVersionsChunkRow[] = [
+      {
+        url: "https://example.com/cross-source",
+        title: "Yeni başlık",
+        source_id: "source-syndicator",
+      },
+    ];
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(0);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+  });
+
+  // MF-05: a full 500-url `.in(...)` lookup can push the PostgREST request
+  // URI past proxy request-line limits and fail (silently, per the
+  // degrade-to-0 discipline above). Sub-batching the lookup keeps every
+  // select request small while the write stays a single call.
+  it("sub-batches a 500-row chunk's lookup into selects of at most 100 urls, and still makes one upsert call [MF-05]", async () => {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+
+    const chunk: RecordTitleVersionsChunkRow[] = [];
+    for (let n = 0; n < 500; n++) {
+      const url = `https://example.com/batch-${n}`;
+      storedArticlesByUrl[url] = {
+        id: `article-batch-${n}`,
+        // Only the first url's title actually changes -- enough to prove
+        // the single upsert call still carries the right row while the
+        // lookup itself is sub-batched.
+        title: n === 0 ? "Eski başlık" : `Sabit başlık ${n}`,
+        source_id: "source-1",
+      };
+      chunk.push({ url, title: n === 0 ? "Yeni başlık" : `Sabit başlık ${n}`, source_id: "source-1" });
+    }
+
+    const count = await recordTitleVersions(supabase, chunk);
+
+    expect(count).toBe(1);
+    expect(articlesUrlLookupCalls).toHaveLength(5);
+    for (const call of articlesUrlLookupCalls) {
+      expect(call.urls.length).toBeLessThanOrEqual(100);
+    }
+    expect(
+      articlesUrlLookupCalls.reduce((sum, call) => sum + call.urls.length, 0),
+    ).toBe(500);
+    expect(titleVersionInsertCalls).toHaveLength(1);
+    expect(titleVersionInsertCalls[0]).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end: recordTitleVersions must never block, delay or reduce the
+// article upsert, and the cycle's one-line JSON summary must report the
+// count -- exercised through the full ingest handler so the call-site
+// wiring (not just the helper in isolation) is covered.
+// ---------------------------------------------------------------------------
+
+describe("ingest cycle + recordTitleVersions integration [migration 056]", () => {
+  it("reports the titleVersions count in the cycle's one-line JSON summary", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-title-stats",
+      name: "Title Stats Fixture",
+      slug: "title-stats-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/title-stats.rss",
+      active: true,
+    });
+    fetchResponses["https://example.com/title-stats.rss"] = {
+      status: 200,
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+      body:
+        '<?xml version="1.0" encoding="utf-8"?>' +
+        "<rss><channel><item>" +
+        "<title>Yeni başlık</title><link>https://example.com/title-stats/1</link>" +
+        "</item></channel></rss>",
+    };
+    fetcherItems["https://example.com/title-stats.rss"] = [
+      { title: "Yeni başlık", link: "https://example.com/title-stats/1" },
+    ];
+    storedArticlesByUrl["https://example.com/title-stats/1"] = {
+      id: "article-title-stats",
+      title: "Eski başlık",
+      source_id: "src-title-stats",
+    };
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await handler(
+        authedRequest("http://localhost/ingest", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+
+      const cycleCall = logSpy.mock.calls.find(
+        (args) => args[0] === "[ingest] cycle",
+      ) as [string, string] | undefined;
+      expect(cycleCall).toBeDefined();
+      const summary = JSON.parse(cycleCall?.[1] ?? "{}") as { titleVersions?: number };
+      expect(summary.titleVersions).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it("a select error in the title-version lookup never touches the article upsert or the cycle's inserted count", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-title-select-err",
+      name: "Title Select Error Fixture",
+      slug: "title-select-err-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/title-select-err.rss",
+      active: true,
+    });
+    fetchResponses["https://example.com/title-select-err.rss"] = {
+      status: 200,
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+      body:
+        '<?xml version="1.0" encoding="utf-8"?>' +
+        "<rss><channel><item>" +
+        "<title>Bir haber</title><link>https://example.com/title-select-err/1</link>" +
+        "</item></channel></rss>",
+    };
+    fetcherItems["https://example.com/title-select-err.rss"] = [
+      { title: "Bir haber", link: "https://example.com/title-select-err/1" },
+    ];
+    forcedTitleLookupError = "simulated select failure";
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(upserted.length).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(1);
+    expect((ingestCycleInserts[0] as { inserted?: number }).inserted).toBe(1);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+  });
+
+  it("an insert error while writing article_title_versions never touches the article upsert or the cycle's inserted count", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-title-insert-err",
+      name: "Title Insert Error Fixture",
+      slug: "title-insert-err-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/title-insert-err.rss",
+      active: true,
+    });
+    fetchResponses["https://example.com/title-insert-err.rss"] = {
+      status: 200,
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8" },
+      body:
+        '<?xml version="1.0" encoding="utf-8"?>' +
+        "<rss><channel><item>" +
+        "<title>Yeni haber</title><link>https://example.com/title-insert-err/1</link>" +
+        "</item></channel></rss>",
+    };
+    fetcherItems["https://example.com/title-insert-err.rss"] = [
+      { title: "Yeni haber", link: "https://example.com/title-insert-err/1" },
+    ];
+    // Seeded with a DIFFERENT title so recordTitleVersions actually attempts
+    // the insert (and not just short-circuits on "nothing changed").
+    storedArticlesByUrl["https://example.com/title-insert-err/1"] = {
+      id: "article-title-insert-err",
+      title: "Eski haber",
+      source_id: "src-title-insert-err",
+    };
+    forcedTitleVersionInsertError = "simulated insert failure";
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(upserted.length).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(1);
+    expect((ingestCycleInserts[0] as { inserted?: number }).inserted).toBe(1);
+    expect(titleVersionInsertCalls).toHaveLength(1);
   });
 });
