@@ -37,6 +37,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${baseUrl}/kaynaklar/durum`, lastModified: new Date(), changeFrequency: "hourly", priority: 0.6 },
     { url: `${baseUrl}/metodoloji`, lastModified: new Date(), changeFrequency: "monthly", priority: 0.5 },
     { url: `${baseUrl}/kalite`, lastModified: new Date(), changeFrequency: "daily", priority: 0.5 },
+    { url: `${baseUrl}/duzeltmeler`, lastModified: new Date(), changeFrequency: "daily", priority: 0.4 },
   ];
 
   // Dynamic cluster routes — top 1000 by updated_at.

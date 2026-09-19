@@ -13,13 +13,15 @@ import {
   toRegistryRecord,
   type RegistrySourceRow,
 } from "@/lib/sources/registry";
+import { summariseCounts } from "@/lib/game/agreement";
 
 /**
  * GET /api/sources/[slug] — one source's registry record plus its
  * `source_zone_history` (the versioned part of "versioned registry": every
  * bias change, including the ones the `sources_zone_history_trg` trigger
  * records with a null reason for a change made outside the
- * `set_source_bias` RPC — see migration 055). No auth, but rate limited
+ * `set_source_bias` RPC — see migration 055) and the aggregate reader
+ * agreement from /oyun (`reader_agreement: {n, share} | null`, U-03). No auth, but rate limited
  * (B-SEC-05), same 60/1-per-second bucket and limiter name as the list
  * route in ../route.ts.
  *
@@ -107,10 +109,39 @@ export const GET = withApiErrors(
 
     if (historyError) return apiServerError(historyError);
 
+    // U-03 follow-through — aggregate reader agreement from /oyun. Two
+    // `count: "exact", head: true` queries (all guesses, then the correct
+    // ones): head requests return no rows at all, so the wire can carry the
+    // share and the n — the true total, not a capped window — but never an
+    // individual guess. `summariseCounts` suppresses anything below the
+    // publication threshold.
+    //
+    // A failure here is NOT a 500: the registry record and its zone history
+    // are the contract; the agreement is a bonus field that degrades to
+    // null rather than taking the endpoint down.
+    const { count: guessTotal, error: guessError } = await supabase
+      .from("zone_guesses")
+      .select("correct", { count: "exact", head: true })
+      .eq("source_id", row.id);
+
+    let readerAgreement = null as ReturnType<typeof summariseCounts>;
+    if (!guessError && typeof guessTotal === "number") {
+      const { count: guessCorrect, error: correctError } = await supabase
+        .from("zone_guesses")
+        .select("correct", { count: "exact", head: true })
+        .eq("source_id", row.id)
+        .eq("correct", true);
+
+      if (!correctError) {
+        readerAgreement = summariseCounts(guessTotal, guessCorrect ?? 0);
+      }
+    }
+
     return NextResponse.json(
       registryEnvelope({
         source: toRegistryRecord(row),
         zone_history: historyRows ?? [],
+        reader_agreement: readerAgreement,
       }),
       { headers: REGISTRY_HEADERS },
     );

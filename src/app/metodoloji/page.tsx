@@ -455,7 +455,11 @@ export default async function MethodologyPage() {
           <p className={proseClass}>
             Yanlış bir yanlılık etiketi, hatalı bir tarafsızlaştırılmış
             başlık ya da başka bir hata mı gördünüz? Aşağıdaki formla
-            bildirin.
+            bildirin.{" "}
+            <Link href="/duzeltmeler" className="brand-underline">
+              İncelenen düzeltmelerin kaydı
+            </Link>{" "}
+            herkese açıktır.
           </p>
           <div className="max-w-xl">
             <Suspense fallback={null}>

@@ -10,6 +10,7 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { LabelCard, type ZoneHistoryEntry } from "@/components/source/label-card";
+import { getSourceAgreement } from "@/lib/game/agreement";
 import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
 import type { BiasCategory, Source } from "@/types";
 
@@ -213,6 +214,12 @@ export default async function SourceProfilePage({ params }: PageProps) {
 
   const { source, articleCount7d, articles, zoneHistory } = profile;
 
+  // U-03 follow-through — cached separately from the profile (its own
+  // "use cache" entry keyed by source id) so a busy /oyun ledger never
+  // slows the profile down, and never throws: `null` renders the label
+  // card's "Henüz yeterli tahmin yok".
+  const readerAgreement = await getSourceAgreement(source.id);
+
   // S-17: BreadcrumbList JSON-LD (Anasayfa → Kaynaklar → this source).
   const breadcrumbs = buildBreadcrumbs([
     { name: "Anasayfa", path: "/" },
@@ -295,6 +302,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
         trusteeSince={source.trustee_since}
         trusteeNote={source.trustee_note}
         history={zoneHistory}
+        readerAgreement={readerAgreement}
       />
 
       {/* Recent articles list. Capped at 20 by the data layer; the empty

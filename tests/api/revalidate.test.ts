@@ -169,6 +169,17 @@ describe("POST /api/revalidate", () => {
     expect(revalidateTagMock).toHaveBeenCalledTimes(2);
   });
 
+  it('allows the "corrections" tag the admin PATCH fires for /duzeltmeler (S-18)', async () => {
+    process.env.CRON_SECRET = "shhh";
+    const mod = await import("@/app/api/revalidate/route");
+    const res = await mod.POST(
+      makeRequest({ tags: ["corrections"] }, { auth: "Bearer shhh" }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revalidated: 1 });
+    expect(revalidateTagMock).toHaveBeenCalledWith("corrections", "max");
+  });
+
   it("allows the finance cache tags (TS-08): finance-feed, finance-bars, finance-ticker:<TICKER>", async () => {
     process.env.CRON_SECRET = "shhh";
     const mod = await import("@/app/api/revalidate/route");

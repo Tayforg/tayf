@@ -20,8 +20,17 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 // finance-feed/finance-bars/finance-ticker:<TICKER> (TS-08) are the tags
 // lib/finance/queries.ts's cacheTag() calls use; the caller that fires them
 // (currently kap-drain/quotes-ingest) lives in supabase/functions. "sources"
-// is fired by the registry admin actions (pack B).
-const STATIC_TAG_ALLOWLIST = new Set(["clusters", "clusters-politics", "sources", "finance-feed", "finance-bars"]);
+// is fired by the registry admin actions (pack B); "corrections" is the tag
+// src/lib/corrections/public-log.ts caches /duzeltmeler under, fired by the
+// admin corrections PATCH (S-18).
+const STATIC_TAG_ALLOWLIST = new Set([
+  "clusters",
+  "clusters-politics",
+  "sources",
+  "corrections",
+  "finance-feed",
+  "finance-bars",
+]);
 const CLUSTER_DETAIL_TAG_RE = /^cluster-detail:[0-9a-f-]{36}$/;
 const FINANCE_TICKER_TAG_RE = /^finance-ticker:[A-Z0-9]{2,6}$/;
 
