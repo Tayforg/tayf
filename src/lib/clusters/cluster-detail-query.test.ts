@@ -248,6 +248,9 @@ describe("getClusterDetail query shape", () => {
     // BL-13: the member embed must carry both rights flags.
     expect(embedded).toMatch(/source:sources\s*\([^)]*\bimage_allowed\b/);
     expect(embedded).toMatch(/source:sources\s*\([^)]*\bexcerpt_allowed\b/);
+    // pack G3: the member embed must carry both trustee columns.
+    expect(embedded).toMatch(/source:sources\s*\([^)]*\btrustee_since\b/);
+    expect(embedded).toMatch(/source:sources\s*\([^)]*\btrustee_note\b/);
     const membersEq = membersCall!.steps.find((s) => s.method === "eq");
     expect(membersEq!.args).toEqual(["cluster_id", "cluster-1"]);
 
@@ -549,6 +552,41 @@ describe("BL-13 per-source rights flags", () => {
   });
 });
 
+describe("pack G3 trustee plumbing", () => {
+  it("threads trustee_since/trustee_note through to each member's source, defaulting missing fields to null", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a-trustee", "s-trustee", "2026-04-17T10:00:00Z", {
+            source: {
+              trustee_since: "2025-09-11",
+              trustee_note: "TMSF kayyum atandı, 11.09.2025",
+            },
+          }),
+          // Legacy row: no trustee columns in the select response at all —
+          // must default to null, not undefined (same rule as the BL-13
+          // rights flags above, mirrored for the two trustee fields).
+          mkEmbeddedMember("a-legacy", "s-legacy", "2026-04-17T09:00:00Z"),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    const bySource = Object.fromEntries(
+      result!.members.map((m) => [m.source.id, m.source]),
+    );
+    expect(bySource["s-trustee"].trustee_since).toBe("2025-09-11");
+    expect(bySource["s-trustee"].trustee_note).toBe(
+      "TMSF kayyum atandı, 11.09.2025",
+    );
+    expect(bySource["s-legacy"].trustee_since).toBeNull();
+    expect(bySource["s-legacy"].trustee_note).toBeNull();
+  });
+});
+
 describe("BL-13 imageEligibleMembers", () => {
   function member(id: string, imageAllowed: boolean | undefined): ClusterDetailMember {
     return {
@@ -562,6 +600,8 @@ describe("BL-13 imageEligibleMembers", () => {
         logo_url: null,
         active: true,
         image_allowed: imageAllowed,
+        trustee_since: null,
+        trustee_note: null,
       },
       article: {
         id,

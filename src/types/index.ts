@@ -73,6 +73,19 @@ export interface Source {
    */
   image_allowed?: boolean;
   excerpt_allowed?: boolean;
+  /**
+   * Trusteeship (kayyum) plumbing (migration 055): `trustee_since` is the
+   * ISO yyyy-mm-dd date a court-appointed trustee took over the outlet,
+   * `trustee_note` is the dated public-source citation backing that claim.
+   * Both are `NOT NULL DEFAULT NULL` on the DB column (any non-trusteed
+   * source is simply `null`/`null`). Unlike `kind` / `image_allowed` above
+   * these are NOT optional here — every reader (cluster-detail-query.ts,
+   * yelpaze.ts, source-badge.tsx) must handle the untrusteed case via an
+   * explicit `null`, not an `undefined` a fixture forgot to set. Fixtures
+   * that predate this field should add both as `null`.
+   */
+  trustee_since: string | null;
+  trustee_note: string | null;
 }
 
 export interface Article {

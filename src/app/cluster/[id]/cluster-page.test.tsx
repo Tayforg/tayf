@@ -250,6 +250,8 @@ function makeSource(overrides: Partial<Source> & { id: string }): Source {
     active: overrides.active ?? true,
     kind: overrides.kind,
     image_allowed: overrides.image_allowed,
+    trustee_since: overrides.trustee_since ?? null,
+    trustee_note: overrides.trustee_note ?? null,
   };
 }
 

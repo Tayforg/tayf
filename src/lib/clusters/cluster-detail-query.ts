@@ -208,6 +208,14 @@ type EmbeddedSourceRow = {
    */
   image_allowed?: boolean;
   excerpt_allowed?: boolean;
+  /**
+   * Trusteeship plumbing (pack G3, migration 055). Optional for the same
+   * reason as the rights flags above — a fixture/legacy select shape that
+   * predates the column must still compile and default to "not trusteed"
+   * (`null`), never `undefined`, on `ClusterDetailMember.source` below.
+   */
+  trustee_since?: string | null;
+  trustee_note?: string | null;
 };
 
 type EmbeddedArticleRow = {
@@ -254,7 +262,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         .select(
           `article:articles (
              id, title, url, published_at, image_url, content_hash, description,
-             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed )
+             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, trustee_since, trustee_note )
            )`
         )
         .eq("cluster_id", id)
@@ -353,6 +361,11 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           // "undefined means allowed" rule itself.
           image_allowed: source.image_allowed ?? true,
           excerpt_allowed: source.excerpt_allowed ?? true,
+          // Trusteeship plumbing (pack G3): default missing/legacy rows to
+          // "not trusteed" rather than leaving `undefined` on the Source
+          // shape every other reader now expects `string | null` from.
+          trustee_since: source.trustee_since ?? null,
+          trustee_note: source.trustee_note ?? null,
         },
         article: {
           id: article.id,

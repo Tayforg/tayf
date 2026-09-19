@@ -3,6 +3,7 @@ import type { BiasCategory } from "@/types";
 import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
+import { formatDdMmYyyy } from "@/lib/format/date-tr";
 
 // The 'Etiket kartı' (S-20/M-04) evidence section on /source/[slug].
 //
@@ -34,23 +35,6 @@ export interface LabelCardProps {
 
 const EMPTY_RATIONALE = "Gerekçe henüz girilmedi";
 const EMPTY_HISTORY = "Bu etiket hiç değişmedi.";
-
-/**
- * `tr-TR` numeric date, e.g. "11.09.2025". Pinned to Europe/Istanbul so
- * server and client renders agree (same rationale as `formatTurkishDate`
- * in `@/lib/time`; kept local here since this dd.mm.yyyy shape has no
- * other consumer in the app). Returns "" for an unparseable input.
- */
-function formatDdMmYyyy(dateISO: string): string {
-  const date = new Date(dateISO);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("tr-TR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    timeZone: "Europe/Istanbul",
-  }).format(date);
-}
 
 function biasLabelOf(bias: BiasCategory | null): string {
   return bias ? (BIAS_LABELS[bias] ?? bias) : "—";
