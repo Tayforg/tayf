@@ -122,6 +122,13 @@ const RAW_HISTORY: RawHistoryRow[] = Array.from({ length: 60 }, (_, i) => ({
 const dbState = vi.hoisted(() => ({
   forceListError: false,
   lastSourcesSelectArgs: [] as unknown[],
+  // U-03 reader agreement: the `zone_guesses` rows the detail route counts
+  // (it issues `count: "exact", head: true` queries, so the fake answers
+  // with a count and no rows). Default is below the publication threshold so
+  // every pre-existing assertion sees `reader_agreement: null`.
+  guessRows: [] as { correct: boolean }[],
+  forceGuessError: false,
+  guessStates: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -182,6 +189,28 @@ const supabaseFake = await vi.hoisted(async () => {
 
         return { data: projected, error: null };
       },
+      zone_guesses: (state) => {
+        dbState.guessStates.push(state);
+        if (dbState.forceGuessError) {
+          return { data: null, error: { message: "zone_guesses boom" } };
+        }
+        const sourceIdEq = state.eq.find((e) => e.col === "source_id");
+        const rows =
+          sourceIdEq && sourceIdEq.val !== "src-1" ? [] : dbState.guessRows;
+        const correctEq = state.eq.find((e) => e.col === "correct");
+        const matched = correctEq
+          ? rows.filter((r) => r.correct === correctEq.val)
+          : rows;
+        const opts = state.selectArgs[1] as
+          | { count?: string; head?: boolean }
+          | undefined;
+        // head: true — PostgREST sends the count back in Content-Range and
+        // no rows at all; anything else keeps the row-returning shape.
+        if (opts?.head) {
+          return { data: null, error: null, count: matched.length };
+        }
+        return { data: matched, error: null, count: matched.length };
+      },
     },
   });
 });
@@ -204,6 +233,9 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   dbState.forceListError = false;
+  dbState.guessRows = [];
+  dbState.forceGuessError = false;
+  dbState.guessStates = [];
 });
 
 afterEach(() => {
@@ -523,5 +555,95 @@ describe("GET /api/sources/[slug]", () => {
     expect(res.status).toBe(429);
     const body = await res.json();
     expect(typeof body.error).toBe("string");
+  });
+
+  // U-03 follow-through — aggregate reader agreement rides on the detail
+  // envelope next to zone_history. Aggregate only: the route must never be
+  // able to surface an individual guess.
+  it("carries reader_agreement: null when the outlet is below the 30-guess threshold", async () => {
+    dbState.guessRows = Array.from({ length: 29 }, () => ({ correct: true }));
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    expect("reader_agreement" in body).toBe(true);
+    expect(body.reader_agreement).toBeNull();
+  });
+
+  it("carries reader_agreement {n, share} once there are 30+ guesses", async () => {
+    dbState.guessRows = Array.from({ length: 30 }, (_, i) => ({
+      correct: i < 19,
+    }));
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
+    const body = await res.json();
+
+    expect(body.reader_agreement).toEqual({ n: 30, share: 0.633 });
+    expect(Object.keys(body.reader_agreement).sort()).toEqual(["n", "share"]);
+    expect(Array.isArray(body.zone_history)).toBe(true);
+  });
+
+  it("counts zone_guesses with head-only queries — never selects article_id, id or a row window", async () => {
+    dbState.guessRows = Array.from({ length: 30 }, () => ({ correct: true }));
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    await GET(detailRequest("haberturk"), paramsFor("haberturk"));
+
+    type GuessState = {
+      table: string;
+      selectArgs: unknown[];
+      eq: Array<{ col: string; val: unknown }>;
+      order: Array<{ col: string; opts: unknown }>;
+      limit: number | null;
+    };
+    const guessStates = dbState.guessStates as GuessState[];
+    expect(guessStates).toHaveLength(2);
+
+    for (const state of guessStates) {
+      expect(state.table).toBe("zone_guesses");
+      expect(String(state.selectArgs[0] ?? "")).toBe("correct");
+      expect(state.selectArgs[1]).toEqual({ count: "exact", head: true });
+      // No row window: n is the true total, not `limit`ed to 5000.
+      expect(state.limit).toBeNull();
+      expect(state.order).toEqual([]);
+    }
+
+    expect(guessStates[0]!.eq).toEqual([{ col: "source_id", val: "src-1" }]);
+    expect(guessStates[1]!.eq).toEqual([
+      { col: "source_id", val: "src-1" },
+      { col: "correct", val: true },
+    ]);
+  });
+
+  it("reports the true total in reader_agreement.n, not a 5000-row cap", async () => {
+    dbState.guessRows = Array.from({ length: 12_345 }, (_, i) => ({
+      correct: i < 6_000,
+    }));
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
+    const body = await res.json();
+
+    expect(body.reader_agreement).toEqual({ n: 12_345, share: 0.486 });
+  });
+
+  it("degrades to reader_agreement: null (200, not 500) when the guess query errors", async () => {
+    dbState.forceGuessError = true;
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.reader_agreement).toBeNull();
+    expect(body.source.slug).toBe("haberturk");
+  });
+
+  it("does not add reader_agreement to the registry record itself", async () => {
+    dbState.guessRows = Array.from({ length: 30 }, () => ({ correct: true }));
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
+    const body = await res.json();
+
+    expect(Object.keys(body.source).sort()).toEqual(REGISTRY_RECORD_KEYS);
+    expect(JSON.stringify(body)).not.toContain("guessed_zone");
   });
 });
