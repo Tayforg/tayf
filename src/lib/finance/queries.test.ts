@@ -17,6 +17,13 @@ const fixture = vi.hoisted(() => ({
   bars5m: [] as Array<{ ts: string; close: number; volume: number }>,
   econFeedRows: [] as unknown[],
   lastKapState: null as unknown,
+  // SEC-07 follow-up: fetchKapBreakerState reads kap_fetch_state (migration
+  // 059). `undefined` = table errors (simulates a Supabase error envelope);
+  // an object = the row; `null` = no row (maybeSingle's zero-row case).
+  kapFetchStateRow: undefined as
+    | { blocked_until: string | null; last_status: number | null; last_error: string | null; updated_at: string }
+    | null
+    | undefined,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -34,6 +41,12 @@ const supabaseFake = await vi.hoisted(async () => {
         const rows = fixture.bars5m.filter((r) => !since || Date.parse(r.ts) >= Date.parse(since));
         const sorted = [...rows].sort((a, b) => (desc ? Date.parse(b.ts) - Date.parse(a.ts) : Date.parse(a.ts) - Date.parse(b.ts)));
         return { data: s.limit ? sorted.slice(0, s.limit) : sorted, error: null };
+      },
+      kap_fetch_state: () => {
+        if (fixture.kapFetchStateRow === undefined) {
+          return { data: null, error: { message: "kap_fetch_state read failed" } };
+        }
+        return { data: fixture.kapFetchStateRow, error: null };
       },
     },
     rpc: {
@@ -53,6 +66,7 @@ import {
   fetchCircuitBreakers,
   fetchEconFeed,
   fetchIntraday,
+  fetchKapBreakerState,
   fetchRecentDisclosures,
   rankAttention,
   toFeedItem,
@@ -68,6 +82,7 @@ beforeEach(() => {
   fixture.bars5m = [];
   fixture.econFeedRows = [];
   fixture.lastKapState = null;
+  fixture.kapFetchStateRow = undefined;
   supabaseFake.calls.rpc.length = 0;
 });
 
@@ -207,6 +222,39 @@ describe("finance query fetchers (live Supabase shape)", () => {
       },
     ]);
     expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 10 } });
+  });
+
+  // SEC-07 follow-up: fetchKapBreakerState is a deliberate exception to
+  // this file's "every fetcher throws" rule (see header comment) — no
+  // "use cache" (the admin badge wants the live row) and it returns null
+  // instead of throwing, so a broken breaker read degrades the badge, not
+  // the whole /admin/ekonomi page.
+  it("fetchKapBreakerState returns the row, camelCased", async () => {
+    fixture.kapFetchStateRow = {
+      blocked_until: "2026-09-15T12:00:00.000Z",
+      last_status: 403,
+      last_error: "[kap-ingest] KAP 403 for 2026-09-15/*",
+      updated_at: "2026-09-15T06:00:00.000Z",
+    };
+    const state = await fetchKapBreakerState();
+    expect(state).toEqual({
+      blockedUntil: "2026-09-15T12:00:00.000Z",
+      lastStatus: 403,
+      lastError: "[kap-ingest] KAP 403 for 2026-09-15/*",
+      updatedAt: "2026-09-15T06:00:00.000Z",
+    });
+  });
+
+  it("fetchKapBreakerState returns null on a Supabase error", async () => {
+    fixture.kapFetchStateRow = undefined;
+    const state = await fetchKapBreakerState();
+    expect(state).toBeNull();
+  });
+
+  it("fetchKapBreakerState returns null when the row is missing", async () => {
+    fixture.kapFetchStateRow = null;
+    const state = await fetchKapBreakerState();
+    expect(state).toBeNull();
   });
 
   it("fetchEconFeed maps a row with no source (source_slug null) to source: null", async () => {

@@ -3,10 +3,12 @@ import Link from "next/link";
 import { Activity, Building2, FileText, Tags } from "lucide-react";
 
 import { StatCard } from "@/components/admin/stat-card";
+import { KapBreakerBadge } from "@/components/finance/kap-breaker-badge";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { requireAdminSession } from "@/lib/admin/session";
 import { fmtWhen } from "@/lib/finance/format";
-import { fetchFinanceHealth, fetchLagHistogram, fetchSignals, type Signal } from "@/lib/finance/queries";
+import { fetchFinanceHealth, fetchKapBreakerState, fetchLagHistogram, fetchSignals, type Signal } from "@/lib/finance/queries";
+import { currentTimeMs } from "@/lib/time";
 
 export const metadata: Metadata = {
   title: "Ekonomi paneli",
@@ -49,7 +51,7 @@ function evidenceText(s: Signal): string {
 
 export default async function AdminEkonomiPage() {
   await requireAdminSession();
-  const [health, signals, lags] = await Promise.all([fetchFinanceHealth(), fetchSignals(), fetchLagHistogram(7)]);
+  const [health, signals, lags, kapBreaker] = await Promise.all([fetchFinanceHealth(), fetchSignals(), fetchLagHistogram(7), fetchKapBreakerState()]);
   const lagMax = Math.max(1, ...lags.map((l) => l.count));
   const groups = Object.keys(KIND_META).map((kind) => ({ kind, items: signals.filter((s) => s.kind === kind) }));
 
@@ -154,6 +156,11 @@ export default async function AdminEkonomiPage() {
               </ol>
             )}
           </Panel>
+
+          <KapBreakerBadge
+            state={kapBreaker}
+            open={Boolean(kapBreaker?.blockedUntil && Date.parse(kapBreaker.blockedUntil) > currentTimeMs())}
+          />
 
           <Panel title="Model yuvası">
             <div className="space-y-2 px-3 py-3 font-mono text-[11px] leading-relaxed text-muted-foreground">

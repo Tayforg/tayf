@@ -12,6 +12,7 @@ export const OWNER_GROUPS: Record<string, string> = {
   ihlas: "İhlas Holding",
   albayrak: "Albayrak Grubu",
   ciner: "Ciner Medya",
+  "can-holding": "Can Holding (TMSF kayyum, 11.09.2025)",
   dogus: "Doğuş Grubu",
   "state-tr": "Devlet medyası (TRT/AA)",
   "foreign-public": "Yabancı kamu yayıncısı",

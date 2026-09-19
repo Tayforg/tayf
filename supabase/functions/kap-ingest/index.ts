@@ -16,11 +16,14 @@
 import {
   type BistCompanyRow,
   fetchWithRetry,
+  isBreakerTripStatus,
   KAP_BASE,
+  KAP_BREAKER_BLOCK_MS,
   KAP_CLASSES,
   KAP_COMPANIES_PATH,
   KAP_LIST_PATH,
   KAP_PAGE_CAP,
+  KapFetchError,
   type KapDisclosureRow,
   type KapListItem,
   autoAlias,
@@ -73,7 +76,14 @@ async function fetchDay(day: string, disclosureClass = ""): Promise<KapListItem[
     // that starts counting before the retry loop's backoff sleeps even run.
     { timeoutMs: FETCH_TIMEOUT_MS },
   );
-  if (!res.ok) throw new Error(`[kap-ingest] KAP ${res.status} for ${day}/${disclosureClass || "*"}`);
+  if (!res.ok) {
+    // SEC-07 follow-up: carries the final status so the caller (ingestRange)
+    // can decide isBreakerTripStatus(status) without re-parsing this text.
+    throw new KapFetchError(
+      res.status,
+      `[kap-ingest] KAP ${res.status} for ${day}/${disclosureClass || "*"}`,
+    );
+  }
   return (await res.json()) as KapListItem[];
 }
 
@@ -105,6 +115,10 @@ async function ingestRange(
   stats: Stats,
   isBackfill: boolean,
 ): Promise<void> {
+  // SEC-07 follow-up: clear the breaker's last_error at most once per
+  // cycle, on the first day that actually succeeds — not once per day,
+  // which would write kap_fetch_state on every successful fetchDay call.
+  let breakerCleared = false;
   for (const day of dayRange(from, to)) {
     if (Date.now() > deadline) {
       stats.errors.push(`deadline before ${day}`);
@@ -116,6 +130,10 @@ async function ingestRange(
     // bad day blocks today for ~24h behind it.
     try {
       const items = await fetchDayComplete(day, stats);
+      if (!breakerCleared) {
+        await clearBreakerError(supabase);
+        breakerCleared = true;
+      }
       stats.days++;
       stats.fetched += items.length;
       const rows: KapDisclosureRow[] = [];
@@ -151,8 +169,82 @@ async function ingestRange(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       stats.errors.push(`${day}: ${message}`);
+      // SEC-07 follow-up: only a KapFetchError whose retry ladder exhausted
+      // on a final 403/429 trips the breaker — a 5xx or a thrown
+      // network/timeout error (TypeError, AbortError, ...) is transient
+      // and must keep being retried on the function's normal schedule.
+      // Once tripped, stop attempting further days this cycle: KAP already
+      // told us to stop, so there's nothing to gain from hammering the
+      // remaining days too.
+      if (err instanceof KapFetchError && isBreakerTripStatus(err.status)) {
+        await tripBreaker(supabase, err.status, message);
+        break;
+      }
     }
   }
+}
+
+/** Read-only breaker check: null when open (no row, DB error, or never tripped). */
+async function readBreaker(
+  supabase: ReturnType<typeof createServiceClient>,
+): Promise<string | null> {
+  const { data, error } = await supabase
+    .from("kap_fetch_state")
+    .select("blocked_until")
+    .eq("id", 1)
+    .maybeSingle();
+  // Fail OPEN: a broken read must never stop ingestion — that would turn a
+  // transient kap_fetch_state read hiccup into a silent drain outage.
+  if (error || !data) return null;
+  return (data as { blocked_until: string | null }).blocked_until ?? null;
+}
+
+/**
+ * SEC-07 follow-up: record a breaker trip. Only called after the retry
+ * ladder exhausts on a final 403/429.
+ *
+ * `.eq("id", 1)` matching zero rows is a silent no-op in PostgREST (`error:
+ * null`, nothing written) -- if the seeded row (migration 059) is ever
+ * missing, the old fire-and-forget `if (error) ...` guard never fired, so
+ * the breaker reported success while persisting nothing. Requesting an
+ * exact row count and warning on zero closes that hole without changing
+ * the grants.
+ */
+async function tripBreaker(
+  supabase: ReturnType<typeof createServiceClient>,
+  status: number,
+  message: string,
+): Promise<void> {
+  const blockedUntil = new Date(Date.now() + KAP_BREAKER_BLOCK_MS).toISOString();
+  const { error, count } = await supabase
+    .from("kap_fetch_state")
+    .update(
+      {
+        blocked_until: blockedUntil,
+        last_status: status,
+        last_error: message,
+        updated_at: new Date().toISOString(),
+      },
+      { count: "exact" },
+    )
+    .eq("id", 1);
+  if (error) console.warn(`[kap-ingest] tripBreaker write failed: ${error.message}`);
+  else if (count === 0) console.warn("[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist");
+}
+
+/**
+ * Clears the breaker's last_error/last_status after a successful fetch.
+ * Never touches blocked_until. Same zero-row-match warn as tripBreaker.
+ */
+async function clearBreakerError(
+  supabase: ReturnType<typeof createServiceClient>,
+): Promise<void> {
+  const { error, count } = await supabase
+    .from("kap_fetch_state")
+    .update({ last_error: null, last_status: 200, updated_at: new Date().toISOString() }, { count: "exact" })
+    .eq("id", 1);
+  if (error) console.warn(`[kap-ingest] clearBreakerError write failed: ${error.message}`);
+  else if (count === 0) console.warn("[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist");
 }
 
 // TS-08 (caller half): best-effort Next.js cache revalidation so the
@@ -229,7 +321,24 @@ interface Body {
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-export async function runCycle(body: Body): Promise<Stats> {
+/** SEC-07 follow-up: the early-return payload readBreaker's gate produces. */
+export interface KapBreakerSkip {
+  skipped: true;
+  reason: "kap_blocked";
+}
+
+export async function runCycle(body: Body): Promise<Stats | KapBreakerSkip> {
+  const supabase = createServiceClient();
+
+  // SEC-07 follow-up: gate the ENTIRE cycle before any KAP request — a
+  // definitive 403/429 is a WAF-level block on kap.org.tr, not scoped to
+  // one endpoint, so a company-list sync must not sneak through either.
+  const blockedUntil = await readBreaker(supabase);
+  if (blockedUntil && Date.parse(blockedUntil) > Date.now()) {
+    console.log(`[kap-ingest] breaker open until ${blockedUntil}`);
+    return { skipped: true, reason: "kap_blocked" };
+  }
+
   const startedAt = Date.now();
   const deadline = startedAt + CYCLE_DEADLINE_MS;
   const stats: Stats = {
@@ -244,7 +353,6 @@ export async function runCycle(body: Body): Promise<Stats> {
     durationMs: 0,
     ok: true,
   };
-  const supabase = createServiceClient();
 
   if (body.companies) await syncCompanies(supabase, stats);
 
@@ -308,12 +416,22 @@ Deno.serve(withSentry("kap-ingest", async (req: Request) => {
   }
 
   try {
-    const stats = await runCycle(body);
+    const result = await runCycle(body);
+    // SEC-07 follow-up: a breaker-open skip is a healthy, expected outcome
+    // (polite backoff), not a drain failure — always 200. `Stats.skipped`
+    // is a `number` (row-skip counter), never the literal `true` this
+    // payload carries, so the two shapes never collide.
+    if (result.skipped === true) {
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     // TSF-01: a total-drain-failure cycle reports ok:false with a non-2xx
     // status so the cron run shows red instead of a green 200 — `stats`
     // already carries `ok`, so no separate wrapper field is needed here.
-    return new Response(JSON.stringify(stats), {
-      status: stats.ok ? 200 : 502,
+    return new Response(JSON.stringify(result), {
+      status: result.ok ? 200 : 502,
       headers: { "content-type": "application/json" },
     });
   } catch (err) {

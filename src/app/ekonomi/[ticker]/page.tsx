@@ -2,13 +2,16 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
+import { cache } from "react";
 
+import { DataNote } from "@/components/finance/data-note";
 import { IntradayChart } from "@/components/finance/intraday-chart";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
 import { fmtPct, fmtPrice, fmtWhen, fmtX, istToday, limitFlag, moveClass } from "@/lib/finance/format";
 import { fetchIntraday, fetchQuoteStats, fetchTickerPage } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
+import { createServerClient } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
 
 // /ekonomi/[ticker] — one company: last price and five-session line, the
@@ -18,15 +21,88 @@ import { cn } from "@/lib/utils";
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/;
 
+const NOT_FOUND_METADATA: Metadata = {
+  title: "Hisse bulunamadı",
+  robots: { index: false, follow: false },
+};
+
+/**
+ * SEC-04/SEC-11: a cheap existence probe run BEFORE `connection()` in both
+ * the page body and generateMetadata, wrapped in React's per-request
+ * `cache()` so the two callers share one set of round trips instead of
+ * issuing them twice. `connection()` is what opts this segment into the
+ * loading.tsx-backed dynamic Suspense boundary (see that file's header
+ * comment); a notFound() thrown after that point only swaps streamed
+ * content, not the HTTP status.
+ *
+ * Measured behaviour against the production build (`next build` + `next
+ * start`, cacheComponents/PPR on): calling notFound() synchronously in the
+ * page body before connection() DOES keep a real 404 on the wire for a
+ * MALFORMED ticker (fails TICKER_RE below, never reaches this function —
+ * see TickerPage). A well-formed but genuinely UNKNOWN ticker still streams
+ * a 200 shell with 404 content, because the segment's own loading.tsx
+ * Suspense boundary flushes before this async check resolves; that half of
+ * the requirement is instead enforced by src/middleware.ts's ticker-shape
+ * check ahead of any render (middleware cannot cheaply probe the database,
+ * so it only rejects malformed segments — an unknown-but-well-formed ticker
+ * is a documented, explicit deviation: it streams 200/404-content, not a
+ * wire 404).
+ *
+ * lib/finance/queries.ts has no existence helper cheaper than the full
+ * fetchTickerPage() company query, so this is added here per the worker
+ * brief. The primary probe mirrors fetchTickerPage's real company-lookup
+ * shape: BIST companies key on the plural `tickers` array column (a
+ * company can list more than one share class), not a singular `ticker`
+ * column, so it uses `.contains(...)` rather than `.eq(...)`, and reads
+ * `.limit(1)` array results the same way fetchTickerPage does rather than
+ * `.maybeSingle()` (which 500s on >1 match instead of just taking the
+ * first row).
+ *
+ * A miss on bist_companies is not final: a freshly listed or aliased
+ * ticker — or one still behind the company-sync breaker's up-to-6h window
+ * — can have real article/disclosure coverage before its company row
+ * exists (see TickerPage's own tolerance of a null `page.company`), so
+ * this only 404s when bist_companies AND article_tickers AND
+ * kap_disclosures all miss. Any query error fails OPEN (treated as
+ * "exists") rather than 500ing the page or generateMetadata over a
+ * transient read.
+ */
+const tickerExists = cache(async (ticker: string): Promise<boolean> => {
+  const supabase = createServerClient();
+  const { data: companyRows, error: companyError } = await supabase
+    .from("bist_companies")
+    .select("kap_member_oid")
+    .contains("tickers", [ticker])
+    .limit(1);
+  if (companyError) {
+    console.error(`[ekonomi] tickerExists: bist_companies probe failed: ${companyError.message}`);
+    return true;
+  }
+  if ((companyRows ?? []).length > 0) return true;
+
+  const [articlesRes, disclosuresRes] = await Promise.all([
+    supabase.from("article_tickers").select("ticker").eq("ticker", ticker).limit(1),
+    supabase.from("kap_disclosures").select("disclosure_index").contains("stock_codes", [ticker]).limit(1),
+  ]);
+  if (articlesRes.error) {
+    console.error(`[ekonomi] tickerExists: article_tickers probe failed: ${articlesRes.error.message}`);
+  }
+  if (disclosuresRes.error) {
+    console.error(`[ekonomi] tickerExists: kap_disclosures probe failed: ${disclosuresRes.error.message}`);
+  }
+  return (articlesRes.data ?? []).length > 0 || (disclosuresRes.data ?? []).length > 0;
+});
+
 export async function generateMetadata({ params }: { params: Promise<{ ticker: string }> }): Promise<Metadata> {
   const { ticker: raw } = await params;
   const ticker = raw.toUpperCase();
   // SEC-04/SEC-11: generateMetadata runs independently of (and before) the
-  // page body, so the TICKER_RE gate that guards the page's outbound
-  // lookups has to be applied here too — otherwise a junk segment gets
-  // echoed straight into <title>/<meta description>/canonical.
-  if (!TICKER_RE.test(ticker)) {
-    return { title: "Hisse bulunamadı", robots: { index: false, follow: false } };
+  // page body, so both the shape gate AND the existence probe that guard
+  // the page's outbound lookups have to be applied here too — otherwise a
+  // junk or unknown segment gets echoed straight into
+  // <title>/<meta description>/canonical.
+  if (!TICKER_RE.test(ticker) || !(await tickerExists(ticker))) {
+    return NOT_FOUND_METADATA;
   }
   return {
     title: `${ticker} — hisse haberleri ve KAP bildirimleri`,
@@ -45,15 +121,23 @@ function lagLabel(minutes: number | null): string {
 export default async function TickerPage({ params }: { params: Promise<{ ticker: string }> }) {
   const { ticker: raw } = await params;
   const ticker = raw.toUpperCase();
+  // SEC-04/SEC-11: both checks run — and can notFound() — synchronously in
+  // the page body BEFORE connection(). The shape check commits a real HTTP
+  // 404 for a malformed segment (see src/middleware.ts, which enforces the
+  // same shape at the edge). The existence probe additionally protects
+  // against rendering the full data fetch for a ticker with zero coverage
+  // anywhere, but for a well-formed unknown ticker it only swaps streamed
+  // content — see tickerExists()'s header comment for the measured detail.
   if (!TICKER_RE.test(ticker)) notFound();
+  if (!(await tickerExists(ticker))) notFound();
   await connection();
 
-  // SEC-04: fetch the KAP/article side ALONE first and resolve notFound()
-  // before touching quotes at all. Splitting the Promise.all removes the
-  // outbound Yahoo request entirely for junk tickers, instead of firing it
-  // in parallel with a lookup whose result we're about to discard.
+  // tickerExists() confirms the ticker has SOME coverage (a bist_companies
+  // row, or at least one article/disclosure), not specifically a company
+  // row — see its header comment (E-06) — so `page.company` can still
+  // legitimately be null here for a real, freshly-listed or alias-only
+  // ticker. Every render below already treats `page.company` as nullable.
   const page = await fetchTickerPage(ticker);
-  if (!page.company && page.articles.length === 0 && page.disclosures.length === 0) notFound();
 
   const [quotes, stats, intraday] = await Promise.all([
     getQuotes([ticker]),
@@ -203,6 +287,8 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           )}
         </Panel>
       </div>
+
+      <DataNote />
     </div>
   );
 }

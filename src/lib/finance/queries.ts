@@ -543,6 +543,48 @@ export function bucketLags(lags: number[]): LagBucket[] {
   }));
 }
 
+export interface KapBreakerState {
+  blockedUntil: string | null;
+  lastStatus: number | null;
+  lastError: string | null;
+  updatedAt: string;
+}
+
+interface KapFetchStateRow {
+  blocked_until: string | null;
+  last_status: number | null;
+  last_error: string | null;
+  updated_at: string;
+}
+
+/**
+ * SEC-07 follow-up: the kap-ingest circuit breaker's single row (migration
+ * 059), read for the /admin/ekonomi badge (kap-breaker-badge.tsx).
+ *
+ * Deliberately NOT "use cache" -- the admin operator wants the live row,
+ * not a stale cached one -- and deliberately returns null instead of
+ * throwing on any Supabase error or a missing row, unlike every other
+ * fetcher in this file (see the header comment): a badge that can't read
+ * its own state is a much smaller problem than an admin page that 500s
+ * because of it.
+ */
+export async function fetchKapBreakerState(): Promise<KapBreakerState | null> {
+  const supabase = await createFinanceServerClient();
+  const { data, error } = await supabase
+    .from("kap_fetch_state")
+    .select("blocked_until,last_status,last_error,updated_at")
+    .eq("id", 1)
+    .maybeSingle();
+  if (error || !data) return null;
+  const r = data as KapFetchStateRow;
+  return {
+    blockedUntil: r.blocked_until,
+    lastStatus: r.last_status,
+    lastError: r.last_error,
+    updatedAt: r.updated_at,
+  };
+}
+
 export async function fetchLagHistogram(days = 7): Promise<LagBucket[]> {
   "use cache";
   cacheLife(ADMIN_CACHE);

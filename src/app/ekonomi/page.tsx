@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
 
+import { DataNote } from "@/components/finance/data-note";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
 import { fmtClock, fmtWhen, pctChange } from "@/lib/finance/format";
@@ -193,6 +194,8 @@ export default async function EkonomiPage() {
           )}
         </Panel>
       </div>
+
+      <DataNote />
     </div>
   );
 }

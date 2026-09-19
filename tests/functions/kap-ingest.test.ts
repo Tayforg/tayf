@@ -4,7 +4,9 @@ import {
   dayRange,
   fetchWithRetry,
   foldTr,
+  isBreakerTripStatus,
   istanbulDate,
+  KAP_BREAKER_BLOCK_MS,
   KAP_CLASSES,
   KAP_PAGE_CAP,
   mapDisclosure,
@@ -96,6 +98,23 @@ describe("kap helpers", () => {
     // 22:30 UTC is already the next day in Istanbul.
     expect(istanbulDate(0, Date.parse("2026-09-12T22:30:00Z"))).toBe("2026-09-13");
     expect(istanbulDate(-1, Date.parse("2026-09-12T22:30:00Z"))).toBe("2026-09-12");
+  });
+
+  // SEC-07 follow-up: the single definition of "which statuses trip the
+  // persisted breaker" (migration 059) -- only a definitive 403 or 429,
+  // never a 5xx or anything else fetchWithRetry might return.
+  it("trips the breaker only on 403 or 429, never on 5xx or 2xx", () => {
+    expect(isBreakerTripStatus(403)).toBe(true);
+    expect(isBreakerTripStatus(429)).toBe(true);
+    expect(isBreakerTripStatus(500)).toBe(false);
+    expect(isBreakerTripStatus(502)).toBe(false);
+    expect(isBreakerTripStatus(503)).toBe(false);
+    expect(isBreakerTripStatus(200)).toBe(false);
+    expect(isBreakerTripStatus(404)).toBe(false);
+  });
+
+  it("blocks for 6 hours", () => {
+    expect(KAP_BREAKER_BLOCK_MS).toBe(6 * 60 * 60 * 1000);
   });
 });
 
@@ -208,9 +227,34 @@ describe("fetchWithRetry", () => {
   },
 };
 
+// SEC-07 follow-up: kap_fetch_state (migration 059) is a live, mutable
+// single-row fixture -- not a fixed array -- so tests can set
+// `kapSupabaseFake.kapFetchState.blocked_until` etc. before calling
+// runCycle and read back the `.update()` calls index.ts's readBreaker /
+// tripBreaker / clearBreakerError issue against it.
+//
+// `kapFetchStateMissing` simulates the seeded row (migration 059) being
+// absent: the fixture then reports zero matched rows (`data: [], count:
+// 0`), the same shape a `.eq("id", 1)`-matching-nothing PostgREST update
+// returns, so tripBreaker/clearBreakerError's zero-row-match warn path
+// (E-08) is exercised for real instead of assumed.
 const kapSupabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
-  return helper.createSupabaseFake({ tables: {} });
+  const kapFetchState: {
+    blocked_until: string | null;
+    last_status: number | null;
+    last_error: string | null;
+  } = { blocked_until: null, last_status: null, last_error: null };
+  const missing = { value: false };
+  const fake = helper.createSupabaseFake({
+    tables: {
+      kap_fetch_state: () =>
+        missing.value
+          ? { data: [], error: null, count: 0 }
+          : { data: [{ id: 1, ...kapFetchState }], error: null, count: 1 },
+    },
+  });
+  return { ...fake, kapFetchState, kapFetchStateMissing: missing };
 });
 
 const kapSentryCalls = vi.hoisted(() => ({
@@ -276,6 +320,10 @@ describe("kap-ingest runCycle", () => {
     fetchImpl = async () => new Response("[]", { status: 200 });
     kapSupabaseFake.calls.mutations.length = 0;
     kapSupabaseFake.calls.rpc.length = 0;
+    kapSupabaseFake.kapFetchState.blocked_until = null;
+    kapSupabaseFake.kapFetchState.last_status = null;
+    kapSupabaseFake.kapFetchState.last_error = null;
+    kapSupabaseFake.kapFetchStateMissing.value = false;
     kapSentryCalls.captured.length = 0;
     process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
     vi.stubGlobal(
@@ -408,5 +456,189 @@ describe("kap-ingest runCycle", () => {
     expect(body.days).toBe(0);
     expect(kapSentryCalls.captured).toHaveLength(1);
     expect(kapSentryCalls.captured[0]?.fn).toBe("kap-ingest");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SEC-07 follow-up: the persisted kap_fetch_state circuit breaker (migration
+// 059). readBreaker gates the whole cycle before any KAP request; tripBreaker
+// only fires when fetchWithRetry's ladder exhausts on a final 403/429;
+// clearBreakerError fires once per cycle after the first successful fetch.
+// ---------------------------------------------------------------------------
+
+describe("kap-ingest circuit breaker (SEC-07 follow-up)", () => {
+  beforeEach(() => {
+    fetchCalls.length = 0;
+    fetchImpl = async () => new Response("[]", { status: 200 });
+    kapSupabaseFake.calls.mutations.length = 0;
+    kapSupabaseFake.calls.rpc.length = 0;
+    kapSupabaseFake.kapFetchState.blocked_until = null;
+    kapSupabaseFake.kapFetchState.last_status = null;
+    kapSupabaseFake.kapFetchState.last_error = null;
+    kapSupabaseFake.kapFetchStateMissing.value = false;
+    kapSentryCalls.captured.length = 0;
+    process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        fetchCalls.push({ url, init });
+        return fetchImpl(url, init);
+      }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns {skipped:true, reason:'kap_blocked'} without fetching while blocked_until is in the future", async () => {
+    kapSupabaseFake.kapFetchState.blocked_until = new Date(Date.now() + 3_600_000).toISOString();
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    const result = await runCycle({ from: "2026-09-15", to: "2026-09-15" });
+
+    expect(result).toEqual({ skipped: true, reason: "kap_blocked" });
+    expect(fetchCalls.length).toBe(0);
+  });
+
+  it("does not block when blocked_until is in the past", async () => {
+    kapSupabaseFake.kapFetchState.blocked_until = new Date(Date.now() - 3_600_000).toISOString();
+    const day = "2026-09-15";
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    const result = await runCycle({ from: day, to: day });
+
+    expect(result).not.toEqual({ skipped: true, reason: "kap_blocked" });
+    expect(fetchCalls.length).toBeGreaterThan(0);
+  });
+
+  it("the Deno.serve handler returns HTTP 200 with the skip payload while blocked", async () => {
+    kapSupabaseFake.kapFetchState.blocked_until = new Date(Date.now() + 3_600_000).toISOString();
+    await import("../../supabase/functions/kap-ingest/index.ts");
+    const handler = (globalThis as unknown as {
+      __kapIngestHandler?: (req: Request) => Promise<Response>;
+    }).__kapIngestHandler;
+
+    const res = await handler!(authedRequest("http://localhost/kap-ingest", {}));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ skipped: true, reason: "kap_blocked" });
+    expect(fetchCalls.length).toBe(0);
+  });
+
+  it("trips the breaker (blocked_until ~6h out, last_status 403) when the retry ladder exhausts on a final 403", async () => {
+    const day = "2026-09-16";
+    fetchImpl = async () => new Response("forbidden", { status: 403 });
+    const before = Date.now();
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    const update = kapSupabaseFake.calls.update("kap_fetch_state").at(-1);
+    expect(update).toBeDefined();
+    const patch = update!.patch as { blocked_until: string; last_status: number; last_error: string };
+    expect(patch.last_status).toBe(403);
+    expect(typeof patch.last_error).toBe("string");
+    const blockedAt = Date.parse(patch.blocked_until);
+    expect(blockedAt).toBeGreaterThanOrEqual(before + KAP_BREAKER_BLOCK_MS - 2000);
+    expect(blockedAt).toBeLessThanOrEqual(Date.now() + KAP_BREAKER_BLOCK_MS + 2000);
+  });
+
+  it("trips the breaker (last_status 429) when the retry ladder exhausts on a final 429", async () => {
+    const day = "2026-09-17";
+    fetchImpl = async () => new Response("rate limited", { status: 429, headers: { "Retry-After": "0" } });
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    const update = kapSupabaseFake.calls.update("kap_fetch_state").at(-1);
+    expect(update?.patch).toMatchObject({ last_status: 429 });
+  });
+
+  it("does not trip the breaker on a 5xx (single attempt, e.g. 502)", async () => {
+    const day = "2026-09-18";
+    fetchImpl = async () => new Response("bad gateway", { status: 502 });
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    expect(kapSupabaseFake.calls.update("kap_fetch_state").length).toBe(0);
+  });
+
+  it("does not trip the breaker when the retry ladder exhausts on 503 (5xx, not 403/429)", async () => {
+    const day = "2026-09-19";
+    fetchImpl = async () => new Response("unavailable", { status: 503, headers: { "Retry-After": "0" } });
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    expect(kapSupabaseFake.calls.update("kap_fetch_state").length).toBe(0);
+  });
+
+  it("does not trip the breaker on a thrown network error", async () => {
+    const day = "2026-09-20";
+    fetchImpl = async () => {
+      throw new TypeError("network down");
+    };
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    expect(kapSupabaseFake.calls.update("kap_fetch_state").length).toBe(0);
+  });
+
+  it("clears last_error and sets last_status 200 after a successful fetch", async () => {
+    kapSupabaseFake.kapFetchState.last_error = "[kap-ingest] KAP 403 for 2026-09-15/*";
+    kapSupabaseFake.kapFetchState.last_status = 403;
+    const day = "2026-09-21";
+    fetchImpl = async () => new Response(JSON.stringify([kapItem(500)]), { status: 200 });
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    const update = kapSupabaseFake.calls.update("kap_fetch_state").at(-1);
+    expect(update?.patch).toMatchObject({ last_error: null, last_status: 200 });
+  });
+
+  it("clears the breaker error at most once per cycle even across multiple successful days", async () => {
+    fetchImpl = async () => new Response(JSON.stringify([kapItem(600)]), { status: 200 });
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: "2026-09-10", to: "2026-09-12" });
+
+    expect(kapSupabaseFake.calls.update("kap_fetch_state").length).toBe(1);
+  });
+
+  // E-08: a `.eq("id", 1)` update matching zero rows is a silent
+  // `{ error: null }` no-op in PostgREST — if the seeded row (migration
+  // 059) is ever missing, the old code reported success while persisting
+  // nothing. tripBreaker/clearBreakerError now request an exact row count
+  // and warn once the write matches zero rows.
+  it("warns once when tripBreaker's write matches zero rows (kap_fetch_state row missing)", async () => {
+    kapSupabaseFake.kapFetchStateMissing.value = true;
+    const day = "2026-09-22";
+    fetchImpl = async () => new Response("forbidden", { status: 403 });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist",
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("warns once when clearBreakerError's write matches zero rows (kap_fetch_state row missing)", async () => {
+    kapSupabaseFake.kapFetchStateMissing.value = true;
+    const day = "2026-09-23";
+    fetchImpl = async () => new Response(JSON.stringify([kapItem(700)]), { status: 200 });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { runCycle } = await import("../../supabase/functions/kap-ingest/index.ts");
+    await runCycle({ from: day, to: day });
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[kap-ingest] kap_fetch_state row 1 missing — breaker write did not persist",
+    );
+    warnSpy.mockRestore();
   });
 });

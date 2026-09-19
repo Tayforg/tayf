@@ -117,6 +117,42 @@ export async function fetchWithRetry(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Circuit breaker (SEC-07 follow-up, migration 059) -- pure predicate and
+// error type only. The persisted state (kap_fetch_state) is read/written
+// by kap-ingest/index.ts's runCycle, which owns the Supabase client; this
+// file stays Deno-free so vitest can exercise the trip decision directly.
+// ---------------------------------------------------------------------------
+
+/** How long a tripped breaker stays open before the next tick tries again. */
+export const KAP_BREAKER_BLOCK_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * True only for the two statuses fetchWithRetry's retry ladder can exhaust
+ * on and call "the origin told us to stop": 403 (immediate, no retry) and
+ * 429 (retried up to `retries` times, then still 429). Any other outcome
+ * -- a 5xx, or a thrown network/timeout error that never reaches this
+ * predicate at all -- is transient and must NOT trip the breaker.
+ */
+export function isBreakerTripStatus(status: number): boolean {
+  return status === 403 || status === 429;
+}
+
+/**
+ * Thrown by index.ts's fetchDay when KAP returns a non-ok status after
+ * fetchWithRetry's ladder finishes. Carries the final HTTP status so the
+ * caller can decide `isBreakerTripStatus(status)` without re-parsing the
+ * error message.
+ */
+export class KapFetchError extends Error {
+  readonly status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "KapFetchError";
+    this.status = status;
+  }
+}
+
 export interface KapListItem {
   publishDate: string;
   kapTitle: string | null;

@@ -174,17 +174,19 @@ export const SOURCE_METADATA: Record<string, SourceFactualityMetadata> = {
     ownership: "Doğuş Yayın Grubu",
     ownerGroup: "dogus",
   },
-  // Ciner Medya — Habertürk, Show TV, Bloomberg HT (Bloomberg is a
-  // licensed operation but the local edit is Ciner-run).
+  // Habertürk, Show TV, Bloomberg HT — formerly Ciner Medya; TMSF placed
+  // Ciner Holding's media assets under trusteeship (kayyum) via Can
+  // Holding on 2025-09-11. `ciner` stays in OWNER_GROUPS in case any
+  // remaining Ciner-run title needs it later; it is harmless to keep.
   haberturk: {
     factuality: "mixed",
-    ownership: "Ciner Medya",
-    ownerGroup: "ciner",
+    ownership: "Can Holding (TMSF kayyum yönetiminde, 11.09.2025; önceki sahip Ciner Medya)",
+    ownerGroup: "can-holding",
   },
   "bloomberg-ht": {
     factuality: "high",
-    ownership: "Ciner Medya (Bloomberg lisansı)",
-    ownerGroup: "ciner",
+    ownership: "Can Holding (TMSF kayyum yönetiminde, 11.09.2025; önceki sahip Ciner Medya)",
+    ownerGroup: "can-holding",
   },
 
   // ── Opposition press (independent) ─────────────────────────────────────

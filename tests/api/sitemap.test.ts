@@ -129,6 +129,16 @@ describe("sitemap output", () => {
 
     expect(urls).toContain("https://tayf.test/kaynaklar/durum");
   });
+
+  it("E1: includes /kalite among the static routes, with changeFrequency daily and priority 0.5", async () => {
+    const entries = await sitemap();
+
+    const kalite = entries.find((e) => e.url === "https://tayf.test/kalite");
+
+    expect(kalite).toBeDefined();
+    expect(kalite?.changeFrequency).toBe("daily");
+    expect(kalite?.priority).toBe(0.5);
+  });
 });
 
 describe("sitemap image entries", () => {

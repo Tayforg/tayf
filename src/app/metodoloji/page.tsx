@@ -314,7 +314,7 @@ export default async function MethodologyPage() {
           title="Tek kaynaktan dağıtım"
           meta="Dispeç tespiti"
         />
-        <div className={cardClass}>
+        <div className={cardClass + " space-y-3"}>
           <p className={proseClass}>
             Bazı &quot;kümeler&quot; aslında birden fazla gazetecilik çabası
             değil, tek bir ajans (AA, DHA, İHA gibi) dispeçinin farklı
@@ -326,6 +326,12 @@ export default async function MethodologyPage() {
             gösterilen kaynak sayısı, kopya sayısı yerine benzersiz dispeç
             sayısına indirilir — böylece &quot;7 kaynak&quot; aslında tek bir
             ajans haberinin 7 kopyası olduğunda bu dürüstçe belirtilir.
+          </p>
+          <p className={noteClass}>
+            Güncel kalite sayıları:{" "}
+            <Link href="/kalite" className={quietLink}>
+              /kalite
+            </Link>
           </p>
         </div>
       </section>
