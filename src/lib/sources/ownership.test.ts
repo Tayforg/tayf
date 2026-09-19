@@ -97,4 +97,19 @@ describe("groupByOwner", () => {
       expect(label.length).toBeGreaterThan(0);
     }
   });
+
+  // 2026-09-11 TMSF trusteeship: Habertürk and Bloomberg HT moved out of
+  // Ciner Medya to Can Holding trusteeship. groupByOwner must bucket both
+  // under the new `can-holding` group, not the stale `ciner` one.
+  it("buckets haberturk and bloomberg-ht together under can-holding, not ciner", () => {
+    const result = groupByOwner([source("haberturk"), source("bloomberg-ht")]);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]?.ownerGroup).toBe("can-holding");
+    expect(result.groups[0]?.sources).toHaveLength(2);
+    expect(result.groups.some((g) => g.ownerGroup === "ciner")).toBe(false);
+  });
+
+  it("OWNER_GROUPS['can-holding'] carries the TMSF trustee label with the date", () => {
+    expect(OWNER_GROUPS["can-holding"]).toBe("Can Holding (TMSF kayyum, 11.09.2025)");
+  });
 });

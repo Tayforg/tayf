@@ -387,6 +387,20 @@ export const POST = withApiErrors(async (request: Request) => {
       return NextResponse.json(data);
     }
 
+    // SEC-07 follow-up: reset the kap-ingest circuit breaker (migration
+    // 059's kap_fetch_state, single row id=1) — no body fields to
+    // validate; a full reset (blocked_until, last_status, last_error all
+    // null) so the badge goes back to a clean "closed" state, not just
+    // unblocked with a stale last_error still showing.
+    case "clear_kap_breaker": {
+      const { error } = await supabase
+        .from("kap_fetch_state")
+        .update({ blocked_until: null, last_status: null, last_error: null, updated_at: new Date().toISOString() })
+        .eq("id", 1);
+      if (error) return apiServerError(error);
+      return NextResponse.json({ success: true, message: "KAP devre kesici temizlendi" });
+    }
+
     case "delete_source": {
       const { id } = body;
       if (!id) return apiBadRequest("Source id is required");

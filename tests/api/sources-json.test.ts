@@ -32,7 +32,11 @@ interface RawSourceRow {
 // (ownerGroup + factuality both non-null) so they exercise the "tagged"
 // branch of toRegistryRecord; 'niche-blog' is deliberately NOT a key in
 // SOURCE_METADATA so it exercises the "explicit null, never omitted"
-// branch the brief calls out.
+// branch the brief calls out. haberturk's ownerGroup is 'can-holding'
+// (TMSF trustee handover, 2025-09-11) — its `zone_rationale` fixture text
+// still reads "Ciner Medya çatısı altında..." because `rationale` is a
+// stored DB string the test supplies directly, not a value derived from
+// ownerGroup.
 const RAW_SOURCES: RawSourceRow[] = [
   {
     id: "src-1",
@@ -330,7 +334,7 @@ describe("GET /api/sources", () => {
     const haberturk = body.sources.find(
       (s: { slug: string }) => s.slug === "haberturk",
     );
-    expect(haberturk.owner_group).toBe("ciner");
+    expect(haberturk.owner_group).toBe("can-holding");
     expect(typeof haberturk.owner_group_label).toBe("string");
     expect(haberturk.factuality).not.toBeNull();
     expect(haberturk.rationale).toBe(

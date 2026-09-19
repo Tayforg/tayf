@@ -867,6 +867,43 @@ describe("POST /api/admin", () => {
     });
   });
 
+  // SEC-07 follow-up: the kap-ingest circuit breaker's admin reset
+  // (migration 059's kap_fetch_state). No request-body fields to validate
+  // -- the action always resets the single row (id=1).
+  describe("clear_kap_breaker", () => {
+    it("401s without a session, with no write", async () => {
+      __adminAuthed = false;
+      const res = await postAdmin({ action: "clear_kap_breaker" });
+      expect(res.status).toBe(401);
+      expect(writes.length).toBe(0);
+    });
+
+    it("sets blocked_until (and last_status/last_error) null and returns 200 on success", async () => {
+      const res = await postAdmin({ action: "clear_kap_breaker" });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.success).toBe(true);
+
+      expect(writes.length).toBe(1);
+      const write = writes[0];
+      expect(write?.table).toBe("kap_fetch_state");
+      expect(write?.op).toBe("update");
+      const patch = write?.payload as Record<string, unknown>;
+      expect(patch.blocked_until).toBeNull();
+      expect(patch.last_status).toBeNull();
+      expect(patch.last_error).toBeNull();
+    });
+
+    it("returns 500 (not 200) when the update fails", async () => {
+      setTableResponse("kap_fetch_state", {
+        data: null,
+        error: { message: "update failed" },
+      });
+      const res = await postAdmin({ action: "clear_kap_breaker" });
+      expect(res.status).toBe(500);
+    });
+  });
+
   describe("nuke actions", () => {
     it("nuke_articles deletes cluster_articles, then clusters, then articles, in order", async () => {
       const res = await postAdmin({ action: "nuke_articles" });
