@@ -146,6 +146,16 @@ describe("sitemap output", () => {
     expect(kalite?.changeFrequency).toBe("daily");
     expect(kalite?.priority).toBe(0.5);
   });
+
+  it("G2: includes /hafta among the static routes, with changeFrequency daily and priority 0.6", async () => {
+    const entries = await sitemap();
+
+    const hafta = entries.find((e) => e.url === "https://tayf.test/hafta");
+
+    expect(hafta).toBeDefined();
+    expect(hafta?.changeFrequency).toBe("daily");
+    expect(hafta?.priority).toBe(0.6);
+  });
 });
 
 describe("sitemap image entries", () => {

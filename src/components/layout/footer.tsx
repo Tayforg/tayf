@@ -11,6 +11,7 @@ const NAV_LINKS = [
   { href: "/sources", label: "Kaynaklar" },
   { href: "/timeline", label: "Zaman Akışı" },
   { href: "/trends", label: "Trendler" },
+  { href: "/hafta", label: "Haftanın yelpazesi" },
   { href: "/metodoloji", label: "Metodoloji" },
   { href: "/metodoloji#duzeltme", label: "İletişim" },
 ] as const;
