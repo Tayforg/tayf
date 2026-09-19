@@ -1,4 +1,4 @@
-import { cacheLife } from "next/cache";
+import { cacheLife, cacheTag } from "next/cache";
 
 import { createServerClient } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
@@ -69,37 +69,63 @@ export function bucketFromAggregates(rows: AggregateRow[]): DayBucket[] {
   return Array.from(buckets.values());
 }
 
-export async function fetchTimeline(): Promise<DayBucket[]> {
+// Split into a cached inner fetcher that THROWS on failure, and an
+// uncached exported wrapper that catches. A `"use cache"` function's
+// *return value* is what gets cached — including `null` — so returning
+// null from inside the cached function would itself be cached as the
+// answer for the whole `revalidate: 3600` window (and, since
+// next.config.ts has `cacheComponents: true`, `next build` prefills this
+// entry, so one transient statement timeout at build time would ship a
+// deployed /trends pinned on "unavailable" for up to an hour, with no
+// `cacheTag` to purge it by). Throwing here still aborts this function's
+// own cache write (so nothing bad gets cached) without aborting the
+// `next build` prerender, because the exported wrapper's try/catch below
+// swallows the throw before it can escape to the framework.
+async function fetchTimelineCached(): Promise<DayBucket[]> {
   "use cache";
   cacheLife({ revalidate: 3600 });
+  cacheTag("trends");
 
+  const supabase = createServerClient();
+
+  // `day` in the view is a DATE, so we filter on a bare `YYYY-MM-DD`
+  // cutoff rather than a full timestamp. This bounds the payload at
+  // `WINDOW_DAYS * (# zones)` rows regardless of article volume, and the
+  // view (trends_daily_bias_counts, migration 023) is the pre-aggregated
+  // one PostgREST reads from — not a raw `articles` scan — so this cutoff
+  // is a belt-and-suspenders bound on top of an already-bounded query.
+  const cutoffDay = new Date(Date.now() - WINDOW_DAYS * DAY_MS)
+    .toISOString()
+    .slice(0, 10);
+
+  const { data, error } = await supabase
+    .from("trends_daily_bias_counts")
+    .select("day, zone, count")
+    .gte("day", cutoffDay)
+    .returns<AggregateRow[]>();
+
+  if (error) {
+    // That happened twice in production when this query hit `canceling
+    // statement due to statement timeout` — throw so this cache entry is
+    // never written with a bad/empty result; the outer wrapper turns this
+    // into an honest "unavailable" `null` without caching it.
+    throw new Error(`[trends] fetchTimeline error: ${error.message}`);
+  }
+
+  return bucketFromAggregates(data ?? []);
+}
+
+export async function fetchTimeline(): Promise<DayBucket[] | null> {
   try {
-    const supabase = createServerClient();
-
-    // `day` in the view is a DATE, so we filter on a bare `YYYY-MM-DD`
-    // cutoff rather than a full timestamp. This bounds the payload at
-    // `WINDOW_DAYS * (# zones)` rows regardless of article volume.
-    const cutoffDay = new Date(Date.now() - WINDOW_DAYS * DAY_MS)
-      .toISOString()
-      .slice(0, 10);
-
-    const { data, error } = await supabase
-      .from("trends_daily_bias_counts")
-      .select("day, zone, count")
-      .gte("day", cutoffDay)
-      .returns<AggregateRow[]>();
-
-    if (error) {
-      // Throw — this fetcher is wrapped in `"use cache"`; returning an
-      // all-zero series on a transient failure would cache a fake "no
-      // activity" month for the whole revalidate window. Same rule as
-      // blindspots-query / search-query.
-      throw new Error(`[trends] fetchTimeline error: ${error.message}`);
-    }
-
-    return bucketFromAggregates(data ?? []);
+    return await fetchTimelineCached();
   } catch (err) {
-    console.error("[trends] fetchTimeline failed", err);
-    throw err;
+    // createServerClient() throws when Supabase env vars are missing, and
+    // fetchTimelineCached() throws on a Supabase query error — both land
+    // here. Log and return null (uncached — this wrapper has no `"use
+    // cache"` of its own) so the page can render an honest "unavailable"
+    // state instead of crashing the render or the `next build` prerender.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[trends] fetchTimeline error: ${message}`);
+    return null;
   }
 }

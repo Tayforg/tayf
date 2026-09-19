@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
 
@@ -31,8 +32,13 @@ import type { MediaDnaZone } from "@/types";
 // DB is hit at most once an hour per region.
 //
 // Fetch + bucketing logic lives in `@/lib/clusters/trends-query` (unit
-// tested there) so a Supabase failure throws instead of silently
-// rendering an all-zero month — `src/app/trends/error.tsx` catches it.
+// tested there). `fetchTimeline` never throws — a throw inside a "use
+// cache" function aborts the whole `next build` prerender, which happened
+// twice in production when the aggregate query hit a statement timeout. On
+// a Supabase failure it logs and resolves `null`; this page renders an
+// honest "unavailable" state for that case rather than silently rendering
+// an all-zero month or crashing the build. `src/app/trends/error.tsx`
+// still catches genuine render errors (it's untouched by this).
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -61,6 +67,35 @@ const ZONE_FILL: Record<MediaDnaZone, string> = {
 
 export default async function TrendsPage() {
   const buckets = await fetchTimeline();
+
+  // `null` means the fetch itself failed (Supabase error, or — at build
+  // time — env vars not yet wired) — a distinct, honest state from "zero
+  // articles this month". Render inside the normal layout (no throw) so a
+  // `next build` prerender always succeeds; the cache entry stays empty
+  // until the next request revalidates it.
+  if (buckets === null) {
+    return (
+      <div className="container mx-auto px-4 py-8 max-w-5xl space-y-6">
+        <PageHero
+          kicker="Son 30 gün"
+          title="Medya DNA Trendi"
+          subtitle="Her gün hangi taraf ne kadar haber üretti? Kırmızı iktidara yakın, gri bağımsız, yeşil muhalefete yakın kaynaklardır."
+        />
+        <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6">
+          <p className="text-sm text-muted-foreground text-center py-12">
+            Trend verileri şu anda yüklenemiyor.{" "}
+            <Link
+              href="/trends"
+              className="underline underline-offset-2 hover:text-foreground"
+            >
+              Tekrar dene
+            </Link>
+            .
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // Y-axis scale derives from the busiest day in the window, so a quiet
   // month and a heavy month both fill the plot area. Floor at 1 to avoid
