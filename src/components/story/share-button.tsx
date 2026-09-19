@@ -54,6 +54,17 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
         )}
         <span>{copied ? "Kopyalandı" : "Paylaş"}</span>
       </button>
+      <a
+        href={`/cluster/${clusterId}/kart`}
+        // Explicit filename: the route answers `Content-Disposition:
+        // inline` (the card stays viewable at its own URL), and the URL's
+        // last segment is "kart" with no extension, so a valueless
+        // `download` would save an extensionless file. KART-06.
+        download="tayf-kart.png"
+        className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+      >
+        Kartı indir
+      </a>
       <span className="sr-only" role="status" aria-live="polite">
         {copied ? "Kopyalandı" : ""}
       </span>
