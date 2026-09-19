@@ -308,20 +308,52 @@ describe("buildYelpazeReport — coverage denominator is the yield axis, not fet
   });
 });
 
-describe("buildYelpazeReport — ownership trustee flags (pack B merge)", () => {
-  it("lists a trusteed source (slug + date) via buildOwnershipSection", () => {
-    // cluster-detail-query.ts rebuilds ClusterDetailMember.source
-    // field-by-field and doesn't select/copy trustee_since / trustee_note
-    // yet (out of this pack's scope — must-fix-merge.md item 4), so a
-    // trusteed source can't reach this function through the full
-    // buildYelpazeReport() pipeline in this test suite. Exercise
-    // buildOwnershipSection directly instead (exported for exactly this).
+describe("buildYelpazeReport — ownership trustee flags (pack G3)", () => {
+  it("lists a trusteed source (slug + date) through the full buildYelpazeReport pipeline", async () => {
+    // pack G3: cluster-detail-query.ts now selects and threads
+    // trustee_since / trustee_note through to ClusterDetailMember.source,
+    // so a trusteed source reaches buildOwnershipSection via the real
+    // getClusterDetail() → buildYelpazeReport() pipeline — no more
+    // hand-built member array / direct buildOwnershipSection workaround.
+    setSupabaseFixtures({
+      tables: {
+        clusters: [mkClusterRow()],
+        cluster_articles: [
+          mkEmbeddedMember(
+            "a1",
+            mkEmbeddedSource("s-trustee", "kayyumlu-gazete", "pro_government", {
+              trustee_since: "2025-09-11",
+              trustee_note: "TMSF kayyum atandı (Can Holding), 11.09.2025",
+            }),
+            "2026-04-17T07:00:00Z",
+          ),
+          // A non-trusteed member in the same cluster must not leak a
+          // null/blank entry into the trusteed list.
+          mkEmbeddedMember(
+            "a2",
+            mkEmbeddedSource("s-plain", "sade-gazete", "center"),
+            "2026-04-17T07:30:00Z",
+          ),
+        ],
+        sources: [],
+      },
+    });
+
+    const report = await buildYelpazeReport("cluster-1");
+    expect(report).not.toBeNull();
+
+    expect(report!.ownership.trusteedSources).toEqual([
+      { slug: "kayyumlu-gazete", name: "Kaynak kayyumlu-gazete", since: "2025-09-11" },
+    ]);
+  });
+
+  it("returns an empty trusteedSources list when no member is trusteed", () => {
     const members = [
       {
         source: {
-          ...mkEmbeddedSource("s-trustee", "kayyumlu-gazete", "pro_government"),
-          trustee_since: "2025-09-11",
-          trustee_note: "TMSF kayyum atandı (Can Holding), 11.09.2025",
+          ...mkEmbeddedSource("s-plain", "sade-gazete", "center"),
+          trustee_since: null,
+          trustee_note: null,
         },
         article: {
           id: "a1",
@@ -336,9 +368,7 @@ describe("buildYelpazeReport — ownership trustee flags (pack B merge)", () => 
 
     const ownership = buildOwnershipSection(members);
 
-    expect(ownership.trusteedSources).toEqual([
-      { slug: "kayyumlu-gazete", name: "Kaynak kayyumlu-gazete", since: "2025-09-11" },
-    ]);
+    expect(ownership.trusteedSources).toEqual([]);
   });
 });
 

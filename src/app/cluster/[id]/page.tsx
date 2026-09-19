@@ -12,6 +12,7 @@ import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption"
 import { ShareButton } from "@/components/story/share-button";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { SourceChips } from "@/components/source/source-chips";
+import { SourceBadge } from "@/components/story/source-badge";
 import { OwnershipLine } from "@/components/story/ownership-line";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import {
@@ -494,6 +495,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                         {source.name}
                       </span>
                       <SourceChips slug={source.slug} />
+                      <SourceBadge trusteeSince={source.trustee_since} />
                     </li>
                   ))}
                 </ul>

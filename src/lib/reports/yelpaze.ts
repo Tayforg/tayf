@@ -425,46 +425,31 @@ export interface OwnershipSection {
    *  coverage claim (pack.md acceptance criteria). */
   taggedShare: number;
   dominant: { label: string; sourceCount: number } | null;
-  // Resolved (pack B merge): `sources.trustee_since` / `trustee_note`
-  // (migration 055) are live DB columns, listed here as `trusteedSources`
-  // (deduped by slug, only sources with a set `trustee_since`). Note:
-  // cluster-detail-query.ts's member-embed select and the shared `Source`
-  // type (src/types/index.ts) don't carry these two columns yet — both
-  // are outside this pack's scope (must-fix-merge.md item 4) — so
-  // `buildOwnershipSection` below reads them defensively as optional and
-  // this list degrades to empty (never throws) until that select lands.
-  // The field itself is optional (rather than required) on this interface
-  // so pre-existing `OwnershipSection` literals elsewhere in the repo
-  // (fixtures that predate this pack) keep compiling; every reader treats
-  // an absent field the same as an empty list.
+  // `sources.trustee_since` / `trustee_note` (migration 055) are live DB
+  // columns and, as of pack G3, live fields on the shared `Source` type
+  // (src/types/index.ts) that cluster-detail-query.ts's member-embed
+  // select threads through — so `buildOwnershipSection` below reads them
+  // directly, typed, off `member.source`. Deduped by slug, only sources
+  // with a set `trustee_since` are listed. Kept optional (not required) on
+  // this interface — same reasoning as before pack G3 — so pre-existing
+  // `OwnershipSection` literals elsewhere in the repo (fixtures outside
+  // this pack's file ownership) keep compiling; every reader already
+  // treats an absent field the same as an empty list.
   trusteedSources?: TrusteedSourceRow[];
 }
 
-/** Local, optional-field widening of the shared `Source` type — see the
- *  `trusteedSources` doc comment above for why these two columns aren't
- *  on `Source` itself yet. */
-type SourceWithTrustee = Source & {
-  trustee_since?: string | null;
-  trustee_note?: string | null;
-};
-
-// Exported (only for yelpaze.test.ts): cluster-detail-query.ts rebuilds
-// `ClusterDetailMember.source` field-by-field and doesn't copy through
-// `trustee_since` / `trustee_note` (out of this pack's scope — see the
-// `trusteedSources` doc comment above), so a trusteed source can never
-// reach this function via the full `buildYelpazeReport` pipeline in a
-// test built on the supabase fake. Exporting lets the trustee-flag test
-// exercise this function directly with a hand-built member array instead.
+// Exported for yelpaze.test.ts, which exercises it both directly and via
+// the full `buildYelpazeReport` pipeline.
 export function buildOwnershipSection(members: ClusterDetailMember[]): OwnershipSection {
   const sources = members.map((m) => m.source);
   const summary = groupByOwner(sources);
 
-  const bySlug = new Map<string, SourceWithTrustee>();
-  for (const source of sources as SourceWithTrustee[]) {
+  const bySlug = new Map<string, Source>();
+  for (const source of sources) {
     if (!bySlug.has(source.slug)) bySlug.set(source.slug, source);
   }
   const trusteedSources: TrusteedSourceRow[] = [...bySlug.values()]
-    .filter((s): s is SourceWithTrustee & { trustee_since: string } =>
+    .filter((s): s is Source & { trustee_since: string } =>
       typeof s.trustee_since === "string" && s.trustee_since.length > 0,
     )
     .map((s) => ({ slug: s.slug, name: s.name, since: s.trustee_since }))

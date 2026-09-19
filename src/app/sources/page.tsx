@@ -22,6 +22,7 @@ import { countClassifiedSources } from "@/lib/sources/classification";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
+import { buildRegistryDataset, serializeJsonLd } from "@/lib/seo/json-ld";
 import type { BiasCategory, Source } from "@/types";
 
 // /sources — public directory of every active Türk news source Tayf monitors,
@@ -181,8 +182,24 @@ export default async function SourcesPage() {
   );
   const classifiedSources = countClassifiedSources(allSlugs);
 
+  // S-17: Dataset JSON-LD describing the source registry this page
+  // renders. `dateModified` reuses `nowMs` (already computed above for the
+  // yield-denominator footnote) rather than a second clock read.
+  const registryDataset = buildRegistryDataset({
+    dateModified: new Date(nowMs).toISOString(),
+  });
+
   return (
-    <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
+    <>
+      {/* Same script-injection-safety rationale as cluster/[id]/page.tsx's
+          NewsArticle block: `serializeJsonLd` escapes every "<" so a
+          hostile source name can never terminate the script element
+          early. */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(registryDataset) }}
+      />
+      <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
       <PageHero
         kicker="Türkiye medya haritası"
         title="Kaynaklar"
@@ -296,6 +313,7 @@ export default async function SourcesPage() {
           </section>
         );
       })}
-    </div>
+      </div>
+    </>
   );
 }

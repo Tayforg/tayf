@@ -10,6 +10,7 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { LabelCard, type ZoneHistoryEntry } from "@/components/source/label-card";
+import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
 import type { BiasCategory, Source } from "@/types";
 
 // /source/[slug] — single-source profile page.
@@ -212,8 +213,24 @@ export default async function SourceProfilePage({ params }: PageProps) {
 
   const { source, articleCount7d, articles, zoneHistory } = profile;
 
+  // S-17: BreadcrumbList JSON-LD (Anasayfa → Kaynaklar → this source).
+  const breadcrumbs = buildBreadcrumbs([
+    { name: "Anasayfa", path: "/" },
+    { name: "Kaynaklar", path: "/sources" },
+    { name: source.name, path: `/source/${source.slug}` },
+  ]);
+
   return (
-    <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
+    <>
+      {/* Same script-injection-safety rationale as cluster/[id]/page.tsx's
+          NewsArticle block: `serializeJsonLd` escapes every "<" so a
+          hostile source name can never terminate the script element
+          early. */}
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: serializeJsonLd(breadcrumbs) }}
+      />
+      <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
       {/* Back nav — keeps the user grounded inside Tayf when they arrived
           via a source chip on a cluster or via /sources. */}
       <nav>
@@ -339,6 +356,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
           </ul>
         )}
       </section>
-    </div>
+      </div>
+    </>
   );
 }

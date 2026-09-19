@@ -17,6 +17,8 @@ function mkMember(slug: string, id = slug): ClusterDetailMember {
     bias: "center",
     logo_url: null,
     active: true,
+    trustee_since: null,
+    trustee_note: null,
   };
   return {
     source,
