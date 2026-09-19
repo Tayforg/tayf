@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { LabelCard, type ZoneHistoryEntry } from "./label-card";
+import type { ReaderAgreement } from "@/lib/game/agreement";
 
 // LabelCard is a synchronous Server Component (plain-data props, no
 // Supabase, no hooks) so — same approach as source-chips.test.ts — it can
@@ -63,6 +64,7 @@ const BASE_PROPS = {
   trusteeSince: null,
   trusteeNote: null,
   history: [] as ZoneHistoryEntry[],
+  readerAgreement: null as ReaderAgreement | null,
 };
 
 describe("LabelCard — rationale", () => {
@@ -259,5 +261,73 @@ describe("LabelCard — dispute link", () => {
       (n) => typeof n.props?.href === "string" && n.props.href.includes("#duzeltme"),
     );
     expect(disputeLink?.props?.href).toBe("/metodoloji?source=t24#duzeltme");
+  });
+});
+
+// U-03 follow-through — the reader-agreement line. Wording is load-bearing:
+// it is a *guess share* ("okur tahmini"), never an accuracy claim, and the
+// n is always shown next to it.
+describe("LabelCard — reader agreement", () => {
+  it("renders the honest empty state when there are too few guesses", () => {
+    const el = LabelCard({ ...BASE_PROPS, readerAgreement: null });
+    const text = collectText(el).join(" ");
+    expect(text).toContain("Henüz yeterli tahmin yok");
+    expect(text).not.toContain("Okur tahmini");
+  });
+
+  it("renders the exact sentence for 30 guesses at a 0.633 share", () => {
+    const el = LabelCard({
+      ...BASE_PROPS,
+      readerAgreement: { n: 30, share: 0.633 },
+    });
+    const texts = collectText(el);
+    expect(texts).toContain("Okur tahmini: %63,3 (30 tahmin)");
+    expect(texts.join(" ")).not.toContain("Henüz yeterli tahmin yok");
+  });
+
+  it("formats the boundary shares 0 and 1 with a Turkish decimal comma", () => {
+    expect(
+      collectText(LabelCard({ ...BASE_PROPS, readerAgreement: { n: 30, share: 0 } })),
+    ).toContain("Okur tahmini: %0,0 (30 tahmin)");
+    expect(
+      collectText(LabelCard({ ...BASE_PROPS, readerAgreement: { n: 412, share: 1 } })),
+    ).toContain("Okur tahmini: %100,0 (412 tahmin)");
+  });
+
+  it("never uses the word 'doğruluk' in either state", () => {
+    const withData = collectText(
+      LabelCard({ ...BASE_PROPS, readerAgreement: { n: 120, share: 0.51 } }),
+    ).join(" ");
+    const without = collectText(
+      LabelCard({ ...BASE_PROPS, readerAgreement: null }),
+    ).join(" ");
+    expect(withData.toLocaleLowerCase("tr-TR")).not.toContain("doğruluk");
+    expect(without.toLocaleLowerCase("tr-TR")).not.toContain("doğruluk");
+  });
+
+  it("sits after the trustee block and before the label history", () => {
+    const texts = collectText(
+      LabelCard({
+        ...BASE_PROPS,
+        trusteeSince: "2016-10-29",
+        readerAgreement: { n: 30, share: 0.633 },
+      }),
+    );
+    const trustee = texts.findIndex((t) => t.includes("Kayyum yönetiminde"));
+    const agreement = texts.findIndex((t) => t.includes("Okur tahmini"));
+    const history = texts.findIndex((t) => t.includes("Etiket geçmişi"));
+    expect(trustee).toBeGreaterThanOrEqual(0);
+    expect(agreement).toBeGreaterThan(trustee);
+    expect(history).toBeGreaterThan(agreement);
+  });
+
+  it("never leaks an individual guess — only the share and the n", () => {
+    const el = LabelCard({
+      ...BASE_PROPS,
+      readerAgreement: { n: 30, share: 0.633 },
+    });
+    const text = collectText(el).join(" ");
+    expect(text).not.toContain("iktidar tahmini");
+    expect(text).not.toContain("0.633");
   });
 });

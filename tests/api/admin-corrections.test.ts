@@ -16,6 +16,14 @@ const dbState = vi.hoisted(() => ({
   }>,
 }));
 
+const { revalidateTagMock } = vi.hoisted(() => ({
+  revalidateTagMock: vi.fn(),
+}));
+
+vi.mock("next/cache", () => ({
+  revalidateTag: revalidateTagMock,
+}));
+
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
   return helper.createSupabaseFake({
@@ -64,6 +72,7 @@ beforeEach(() => {
   dbState.rows = [{ id: ID }];
   __adminAuthed = true;
   supabaseFake.calls.mutations.length = 0;
+  revalidateTagMock.mockClear();
 });
 
 afterEach(() => {
@@ -168,6 +177,27 @@ describe("PATCH/DELETE /api/admin/corrections/[id]", () => {
     const updates = supabaseFake.calls.update("corrections");
     const patch = updates[0]?.patch as { reviewed_at: unknown };
     expect(patch.reviewed_at).toBeNull();
+  });
+
+  it('revalidates the "corrections" tag so /duzeltmeler publishes the decision on demand', async () => {
+    const mod = await import("@/app/api/admin/corrections/[id]/route");
+    const res = await mod.PATCH(
+      patchRequest({ status: "reviewed" }),
+      paramsFor(ID),
+    );
+    expect(res.status).toBe(200);
+    expect(revalidateTagMock).toHaveBeenCalledWith("corrections", "max");
+  });
+
+  it("does not revalidate when the row is not found", async () => {
+    dbState.rows = [];
+    const mod = await import("@/app/api/admin/corrections/[id]/route");
+    const res = await mod.PATCH(
+      patchRequest({ status: "reviewed" }),
+      paramsFor(ID),
+    );
+    expect(res.status).toBe(404);
+    expect(revalidateTagMock).not.toHaveBeenCalled();
   });
 
   it("returns 404 for PATCH and DELETE when the row is not found", async () => {

@@ -19,6 +19,7 @@
  * this route already validated against a fixed allow-list.
  */
 import { NextResponse } from "next/server";
+import { revalidateTag } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
@@ -98,6 +99,12 @@ export const PATCH = withApiErrors(
     if (data === null) {
       return apiNotFound("Correction not found");
     }
+
+    // /duzeltmeler is cached under the "corrections" tag
+    // (src/lib/corrections/public-log.ts). Without this, an editor's
+    // decision only surfaces when the 300s cacheLife expires — and a row
+    // moved back to 'open' or 'dismissed' would stay published until then.
+    revalidateTag("corrections", "max");
 
     return NextResponse.json({ ok: true, status }, { status: 200 });
   },

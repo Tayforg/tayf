@@ -130,6 +130,13 @@ describe("sitemap output", () => {
     expect(urls).toContain("https://tayf.test/kaynaklar/durum");
   });
 
+  it("S-18: includes /duzeltmeler among the static routes", async () => {
+    const entries = await sitemap();
+    const urls = entries.map((e) => e.url);
+
+    expect(urls).toContain("https://tayf.test/duzeltmeler");
+  });
+
   it("E1: includes /kalite among the static routes, with changeFrequency daily and priority 0.5", async () => {
     const entries = await sitemap();
 

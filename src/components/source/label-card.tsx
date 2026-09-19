@@ -4,6 +4,7 @@ import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
+import type { ReaderAgreement } from "@/lib/game/agreement";
 
 // The 'Etiket kartı' (S-20/M-04) evidence section on /source/[slug].
 //
@@ -31,10 +32,26 @@ export interface LabelCardProps {
   trusteeSince: string | null;
   trusteeNote: string | null;
   history: ZoneHistoryEntry[];
+  /** Aggregate /oyun guess share for this outlet, or null below the
+   *  publication threshold (see @/lib/game/agreement). */
+  readerAgreement: ReaderAgreement | null;
 }
 
 const EMPTY_RATIONALE = "Gerekçe henüz girilmedi";
 const EMPTY_HISTORY = "Bu etiket hiç değişmedi.";
+const EMPTY_AGREEMENT = "Henüz yeterli tahmin yok";
+
+// "Okur tahmini", never "doğruluk": the share says how often readers
+// guessed the zone Tayf assigned — agreement with our label, not proof that
+// either side is right. The n rides along so the reader can weigh it.
+function agreementSentence(agreement: ReaderAgreement | null): string {
+  if (!agreement) return EMPTY_AGREEMENT;
+  const percent = (Math.round(agreement.share * 1000) / 10).toLocaleString(
+    "tr-TR",
+    { minimumFractionDigits: 1, maximumFractionDigits: 1 },
+  );
+  return `Okur tahmini: %${percent} (${agreement.n} tahmin)`;
+}
 
 function biasLabelOf(bias: BiasCategory | null): string {
   return bias ? (BIAS_LABELS[bias] ?? bias) : "—";
@@ -48,6 +65,7 @@ export function LabelCard({
   trusteeSince,
   trusteeNote,
   history,
+  readerAgreement,
 }: LabelCardProps) {
   const zone = zoneOf(bias);
   const zoneMeta = ZONE_META[zone];
@@ -138,6 +156,13 @@ export function LabelCard({
           ) : null}
         </div>
       ) : null}
+
+      {/* 4b. Reader agreement (U-03) — the aggregate /oyun guess share for
+          this outlet, or the honest empty state below the threshold. Never
+          an individual guess, never an accuracy claim. */}
+      <p className="text-xs text-muted-foreground">
+        {agreementSentence(readerAgreement)}
+      </p>
 
       {/* 5. Zone history — append-only; reason/rater rendered only when
           present, never invented for an unexplained change. */}

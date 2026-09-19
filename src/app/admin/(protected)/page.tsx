@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { requireAdminSession } from "@/lib/admin/session";
+import { getRecentArchiveExports } from "@/lib/admin/archive-status";
 import { AdminPanel } from "@/components/admin/admin-panel";
 import { CorrectionsList } from "@/components/admin/corrections-list";
 
@@ -17,6 +18,10 @@ export default async function AdminPage() {
   // the API route.
   await requireAdminSession();
 
+  // M-10: the nightly archive ledger (migration 060). Plain await, no
+  // "use cache" — this page is cookie-gated and dynamic.
+  const exports = await getRecentArchiveExports();
+
   return (
     <>
       <AdminPanel />
@@ -31,6 +36,35 @@ export default async function AdminPage() {
           Yelpaze Raporu: <code className="text-foreground">/admin/rapor/&lt;clusterId&gt;</code> — küme kimliği
           herhangi bir <code className="text-foreground">/cluster/&lt;id&gt;</code> bağlantısından alınır.
         </p>
+        <section className="space-y-2">
+          <h2 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">Arşiv (tayf-archive)</h2>
+          {exports === null ? (
+            <p className="font-mono text-[12px] text-muted-foreground">Arşiv durumu okunamadı.</p>
+          ) : exports.length === 0 ? (
+            <p className="font-mono text-[12px] text-muted-foreground">Henüz dışa aktarma yok</p>
+          ) : (
+            <table className="w-full font-mono text-[12px]">
+              <thead>
+                <tr className="text-left text-muted-foreground">
+                  <th className="py-1 pr-3 font-normal">Gün</th>
+                  <th className="py-1 pr-3 font-normal">Satır</th>
+                  <th className="py-1 pr-3 font-normal">Bayt</th>
+                  <th className="py-1 font-normal">SHA-256</th>
+                </tr>
+              </thead>
+              <tbody>
+                {exports.map((row) => (
+                  <tr key={row.day} className="border-t border-border">
+                    <td className="py-1 pr-3 text-foreground">{row.day}</td>
+                    <td className="py-1 pr-3 text-foreground">{row.rows.toLocaleString("tr-TR")}</td>
+                    <td className="py-1 pr-3 text-foreground">{row.bytes.toLocaleString("tr-TR")}</td>
+                    <td className="py-1 text-muted-foreground">{row.sha256.slice(0, 12)}…</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </section>
         <CorrectionsList />
       </div>
     </>
