@@ -242,12 +242,15 @@ function renderCard({
             display: "flex",
             flexDirection: "row",
             justifyContent: "space-between",
+            // The 36-char uuid URL at 26px fills the row on its own, so
+            // without a gap the date and URL run together ("17.09.2026tayf…").
+            gap: 32,
             fontSize: 26,
             color: MUTED,
           }}
         >
-          <div>{dateLabel}</div>
-          <div>{`tayfhaber.com/cluster/${id}`}</div>
+          <div style={{ flexShrink: 0 }}>{dateLabel}</div>
+          <div style={{ fontSize: 22 }}>{`tayfhaber.com/cluster/${id}`}</div>
         </div>
       </div>
     </div>
