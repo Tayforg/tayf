@@ -1036,7 +1036,7 @@ describe("runJevShadow", () => {
     }
   });
 
-  it("(h) finishRun always runs (try/finally), even when a stage's fetch throws -- status error, note clamped to 500 chars", async () => {
+  it("(h) finishRun always runs (try/finally), even when a stage's fetch throws -- the stage is isolated (JEV-B1), the run closes as partial, note stays short", async () => {
     const longMessage = "boom ".repeat(200);
     expect(longMessage.length).toBeGreaterThan(500);
     const rec = makePorts({
@@ -1047,12 +1047,24 @@ describe("runJevShadow", () => {
 
     const result = await runJevShadow(rec.ports);
 
-    expect(result.status).toBe("error");
+    expect(result.status).toBe("partial");
+    expect(result.stages.articles.errors).toBe(1);
     expect(rec.finishRunCalls).toHaveLength(1);
     const patch = rec.finishRunCalls[0]?.patch;
-    expect(patch?.status).toBe("error");
-    expect(patch?.note).not.toBeNull();
+    expect(patch?.status).toBe("partial");
+    expect(patch?.note).toBe("stage failed: articles");
     expect(patch?.note?.length).toBeLessThanOrEqual(500);
+    // The other stages still ran.
+    expect(rec.order.filter((name) => name.startsWith("fetch"))).toContain("fetchPendingTitleVersions");
+  });
+
+  it("(h3) an error thrown OUTSIDE a stage (monthTokens/startRun happen before; here finishRun itself) still surfaces -- the isolation is per stage, not a blanket swallow", async () => {
+    const rec = makePorts({
+      finishRun: async () => {
+        throw new Error("finishRun failed");
+      },
+    });
+    await expect(runJevShadow(rec.ports)).rejects.toThrow("finishRun failed");
   });
 
   it("(g2) checkpoints spend via recordTokens after every successful evaluate(), not only at finishRun (JEV-A12)", async () => {
@@ -1090,6 +1102,31 @@ describe("runJevShadow", () => {
     const patch = rec.finishRunCalls[0]?.patch;
     expect(patch?.status).toBe("error");
     expect(patch?.note).toContain("insert failed");
+  });
+
+  it("(i2) a stage whose fetch throws is isolated (JEV-B1): later stages still run, the run closes as partial naming the stage", async () => {
+    const onErrorCalls: Array<{ stage: string; err: unknown }> = [];
+    const rec = makePorts({
+      fetchPairCandidates: async () => {
+        throw new Error("jev-shadow: fetchPairCandidates failed: canceling statement due to statement timeout");
+      },
+      onError: (stage, err) => {
+        onErrorCalls.push({ stage, err });
+      },
+    });
+
+    const result = await runJevShadow(rec.ports);
+
+    const fetchOrder = rec.order.filter((name) => name.startsWith("fetch"));
+    expect(fetchOrder).toContain("fetchPendingKap");
+    expect(fetchOrder).toContain("fetchPendingTitleVersions");
+    expect(result.status).toBe("partial");
+    expect(result.stages.pairs.errors).toBe(1);
+    expect(result.errors).toBe(1);
+    expect(onErrorCalls.map((c) => c.stage)).toEqual(["pairs"]);
+    const patch = rec.finishRunCalls[0]?.patch;
+    expect(patch?.status).toBe("partial");
+    expect(patch?.note).toContain("pairs");
   });
 
   it("(i) runs stages in order: articles -> clusters -> pairs -> kap -> title_versions", async () => {
@@ -1316,8 +1353,13 @@ describe("jev-shadow/index.ts fetchPairCandidates query shape (JEV-A3)", () => {
     expect(fnMatch, "could not find fetchPairCandidates in jev-shadow/index.ts").not.toBeNull();
     const fnBody = fnMatch![0];
 
-    expect(fnBody).toMatch(/articles!inner/);
-    expect(fnBody).toMatch(/\.gte\(\s*"article\.published_at"\s*,\s*sinceIso\s*\)/);
+    // Articles-side query (indexed published_at) with the cluster join as an
+    // inner embed -- the cluster_articles-side mirror image timed out at 8s
+    // on the first production run (JEV-B2).
+    expect(fnBody).toMatch(/\.from\(\s*"articles"\s*\)/);
+    expect(fnBody).toMatch(/cluster_articles!inner/);
+    expect(fnBody).toMatch(/\.gte\(\s*"published_at"\s*,\s*sinceIso\s*\)/);
+    expect(fnBody).not.toMatch(/\.from\(\s*"cluster_articles"\s*\)/);
     // The dead in-memory skip this test guards against.
     expect(fnBody).not.toMatch(/a\.published_at\s*<\s*sinceIso/);
   });

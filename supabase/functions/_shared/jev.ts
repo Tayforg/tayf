@@ -789,6 +789,10 @@ interface RunCtx {
   stopReason: JevRunStatus | null;
   callSeq: number;
   stages: Record<StageName, StageStats>;
+  /** Stages whose own fetch/build threw (JEV-B1 stage isolation). The run
+   * still closes -- as 'partial', naming them -- instead of one stage's
+   * PostgREST error taking every later stage down with it. */
+  failedStages: StageName[];
 }
 
 function emptyStageStats(): StageStats {
@@ -810,6 +814,7 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     rowsInserted: 0,
     stopReason: null,
     callSeq: 0,
+    failedStages: [],
     stages: {
       articles: emptyStageStats(),
       clusters: emptyStageStats(),
@@ -1345,16 +1350,30 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
 
   for (const { name, run } of stageDefs) {
     if (ctx.stopReason) break;
+    if (isPastDeadline(ctx)) {
+      ctx.stopReason = "partial";
+      break;
+    }
     try {
-      if (isPastDeadline(ctx)) throw new JevDeadlineError(name);
+      await run();
     } catch (err) {
       if (err instanceof JevDeadlineError) {
         ctx.stopReason = "partial";
         break;
       }
-      throw err;
+      // Stage isolation (JEV-B1): a stage's own fetch/build failing -- the
+      // first production run lost kap and title_versions to a PostgREST
+      // statement timeout in the pairs fetch -- must not take the remaining
+      // stages down with it. Count it, report it through onError (which
+      // never receives a raw gateway body: fetch errors are Supabase
+      // messages, gateway errors were already sanitised by the binding),
+      // and carry on; runJevShadow closes the run as 'partial' naming the
+      // stage. Rate limits never reach here (callOnce sets stopReason).
+      ctx.errors += 1;
+      ctx.stages[name].errors += 1;
+      ctx.failedStages.push(name);
+      ctx.ports.onError?.(name, err);
     }
-    await run();
   }
 }
 
@@ -1399,6 +1418,10 @@ export async function runJevShadow(
     } else {
       await runStages(ctx, opts.nowIso);
       if (ctx.stopReason) status = ctx.stopReason;
+      if (ctx.failedStages.length > 0) {
+        if (status === "ok") status = "partial";
+        note = `stage failed: ${ctx.failedStages.join(",")}`;
+      }
     }
   } catch (err) {
     status = "error";

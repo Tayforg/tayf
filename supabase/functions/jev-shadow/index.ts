@@ -106,9 +106,10 @@ interface RawMemberFetchRow {
 }
 
 interface RawPairFetchRow {
-  cluster_id: string;
-  article_id: string;
-  article: { id: string; title: string; published_at: string } | { id: string; title: string; published_at: string }[] | null;
+  id: string;
+  title: string;
+  published_at: string;
+  cluster_articles: { cluster_id: string } | { cluster_id: string }[] | null;
 }
 
 interface RawTitleVersionFetchRow {
@@ -302,23 +303,27 @@ function makePorts(apiKey: string): JevPorts {
     },
 
     async fetchPairCandidates(sinceIso, limit): Promise<JevPairCandidate[]> {
-      // `!inner` filters the embedded article server-side (same pattern as
-      // src/lib/weekly/weekly-query.ts and src/lib/finance/queries.ts) so
-      // the 24h window is applied by PostgREST, not by an in-memory skip
-      // over an unfiltered oldest-cluster_id-first slice of the whole
-      // historical table.
+      // Query from the ARTICLES side: `articles.published_at` is indexed
+      // (idx_articles_published_at) and the 24h window is a few thousand
+      // rows, so the planner walks that index and joins cluster_articles
+      // through idx_cluster_articles_article_id. The `!inner` embed drops
+      // unclustered articles server-side. The first production run proved
+      // the mirror-image query (from cluster_articles, `articles!inner`,
+      // ordered by the embedded column) joins all ~250k cluster_articles
+      // rows before sorting and trips the authenticator role's 8s
+      // statement_timeout.
       const { data, error } = await supabase
-        .from("cluster_articles")
-        .select("cluster_id, article_id, article:articles!inner(id, title, published_at)")
-        .gte("article.published_at", sinceIso)
-        .order("published_at", { referencedTable: "article", ascending: false })
+        .from("articles")
+        .select("id, title, published_at, cluster_articles!inner(cluster_id)")
+        .gte("published_at", sinceIso)
+        .order("published_at", { ascending: false })
         .limit(limit);
       if (error) throw new Error(`jev-shadow: fetchPairCandidates failed: ${error.message}`);
       const out: JevPairCandidate[] = [];
-      for (const m of (data ?? []) as unknown as RawPairFetchRow[]) {
-        const a = flattenEmbed(m.article);
-        if (!a) continue;
-        out.push({ id: a.id, cluster_id: m.cluster_id, title: a.title, published_at: a.published_at });
+      for (const a of (data ?? []) as unknown as RawPairFetchRow[]) {
+        const ca = flattenEmbed(a.cluster_articles);
+        if (!ca) continue;
+        out.push({ id: a.id, cluster_id: ca.cluster_id, title: a.title, published_at: a.published_at });
       }
       return out;
     },
