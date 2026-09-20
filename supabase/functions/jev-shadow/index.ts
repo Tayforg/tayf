@@ -42,7 +42,9 @@ import {
   JevRateLimitError,
   type JevRequest,
   type JevResponse,
+  type JevRunMode,
   type JevRunStatus,
+  type JevTickerRow,
   type JevTitleRow,
   isRateLimitStatus,
   offendingQuestionIds,
@@ -62,6 +64,14 @@ const JEV_ARTICLE_FETCH_MAX_PAGES = 10;
  * TITLE_LOOKUP_BATCH -- keeps a PostgREST `.in(...)` GET URL well under
  * typical gateway URL-length limits (JEV-A5). */
 const JEV_ID_CHUNK = 100;
+
+/** Explicit cap on the bist_companies select in fetchPendingTickerMatches
+ * (~1047 rows in production, comfortably under this). Without it, an
+ * unbounded select silently truncates under a PostgREST db-max-rows
+ * setting and every ticker past the cut becomes company `undefined` at
+ * once (M5); fetchPendingTickerMatches throws instead if the row count
+ * ever comes back exactly at this limit. */
+const JEV_BIST_COMPANIES_LIMIT = 5000;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -96,6 +106,7 @@ interface RawClusterFetchRow {
   id: string;
   title_tr: string;
   title_tr_neutral: string | null;
+  title_neutral_model: string | null;
   updated_at: string;
 }
 
@@ -110,6 +121,22 @@ interface RawPairFetchRow {
   title: string;
   published_at: string;
   cluster_articles: { cluster_id: string } | { cluster_id: string }[] | null;
+}
+
+interface RawAuditClusterRow {
+  id: string;
+}
+
+interface RawTickerFetchRow {
+  article_id: string;
+  ticker: string;
+  matched_on: string;
+  article: { title: string; description: string | null } | { title: string; description: string | null }[] | null;
+}
+
+interface RawBistCompanyRow {
+  tickers: string[];
+  title: string;
 }
 
 interface RawTitleVersionFetchRow {
@@ -271,7 +298,7 @@ function makePorts(apiKey: string): JevPorts {
     async fetchRecentClusters(sinceIso, limit): Promise<JevClusterRow[]> {
       const { data, error } = await supabase
         .from("clusters")
-        .select("id, title_tr, title_tr_neutral, updated_at")
+        .select("id, title_tr, title_tr_neutral, title_neutral_model, updated_at")
         .gte("updated_at", sinceIso)
         .gte("article_count", 2)
         .order("updated_at", { ascending: false })
@@ -281,6 +308,8 @@ function makePorts(apiKey: string): JevPorts {
         id: c.id,
         title: c.title_tr_neutral ?? c.title_tr,
         updated_at: c.updated_at,
+        title_tr_neutral: c.title_tr_neutral,
+        title_neutral_model: c.title_neutral_model,
       }));
     },
 
@@ -324,6 +353,122 @@ function makePorts(apiKey: string): JevPorts {
         const ca = flattenEmbed(a.cluster_articles);
         if (!ca) continue;
         out.push({ id: a.id, cluster_id: ca.cluster_id, title: a.title, published_at: a.published_at });
+      }
+      return out;
+    },
+
+    async fetchAuditPairs(sinceIso, clusterLimit): Promise<JevPairCandidate[]> {
+      // Same shape as fetchPairCandidates, but pair construction for audit
+      // mode is pure and lives in sampleClusterPairs (_shared/jev.ts) -- this
+      // port only fetches cluster MEMBERS updated since sinceIso.
+      const { data: clusterRows, error: clusterError } = await supabase
+        .from("clusters")
+        .select("id")
+        .gte("updated_at", sinceIso)
+        .gte("article_count", 2)
+        .order("updated_at", { ascending: false })
+        .limit(clusterLimit);
+      if (clusterError) throw new Error(`jev-shadow: fetchAuditPairs failed: ${clusterError.message}`);
+      const clusterIds = ((clusterRows ?? []) as unknown as RawAuditClusterRow[]).map((c) => c.id);
+      if (clusterIds.length === 0) return [];
+
+      // clusterLimit (200) is above every existing fetchClusterMembers call
+      // site's <= 40 ids, so this port chunks its `.in("cluster_id", ...)`
+      // by the shared JEV_ID_CHUNK (100) the same way anti_join does --
+      // never queries from the articles side ordered by an embedded column
+      // (the fetchPairCandidates comment above explains why that direction
+      // trips the authenticator role's 8s statement_timeout).
+      const out: JevPairCandidate[] = [];
+      for (let i = 0; i < clusterIds.length; i += JEV_ID_CHUNK) {
+        const chunk = clusterIds.slice(i, i + JEV_ID_CHUNK);
+        const { data, error } = await supabase
+          .from("cluster_articles")
+          .select("cluster_id, article_id, article:articles(title, published_at)")
+          .in("cluster_id", chunk)
+          .order("cluster_id", { ascending: true })
+          .order("article_id", { ascending: true });
+        if (error) throw new Error(`jev-shadow: fetchAuditPairs failed: ${error.message}`);
+        for (const m of (data ?? []) as unknown as RawMemberFetchRow[]) {
+          const a = flattenEmbed(m.article);
+          if (!a) continue;
+          out.push({ id: m.article_id, cluster_id: m.cluster_id, title: a.title, published_at: a.published_at });
+        }
+      }
+      return out;
+    },
+
+    async fetchPendingTickerMatches(sinceIso, limit): Promise<JevTickerRow[]> {
+      // Query from the SMALL indexed side -- article_tickers carries its own
+      // published_at and takes ~70 rows/day. The mirror-image
+      // `.from("articles")` with an `article_tickers!inner` embed ordered by
+      // the embedded column is the exact shape that tripped the
+      // authenticator role's 8s statement_timeout in fetchPairCandidates
+      // above and in src/lib/finance/queries.ts (DB-02). JEV-A17 in
+      // tests/migrations/jev-shadow-parity.test.ts pins this direction
+      // statically.
+      const { data, error } = await supabase
+        .from("article_tickers")
+        .select("article_id, ticker, matched_on, article:articles(title, description)")
+        .gte("published_at", sinceIso)
+        .order("published_at", { ascending: false })
+        .range(0, limit * 2 - 1);
+      if (error) throw new Error(`jev-shadow: fetchPendingTickerMatches failed: ${error.message}`);
+      const rows = (data ?? []) as unknown as RawTickerFetchRow[];
+      if (rows.length === 0) return [];
+
+      // Anti-join BEFORE anything else -- skipping this makes every run
+      // re-pay the gateway for rows the upsert then silently discards (the
+      // JEV-A10 lesson).
+      const seen = await anti_join(
+        "ticker_relevance",
+        rows.map((r) => `${r.article_id}:${r.ticker}`),
+      );
+      const unseen = rows.filter((r) => !seen.has(`${r.article_id}:${r.ticker}`));
+      if (unseen.length === 0) return [];
+
+      // Exactly ONE bist_companies query per run, never one per ticker --
+      // built into an in-memory Map by iterating each row's tickers array.
+      // Bounded to JEV_BIST_COMPANIES_LIMIT: without an explicit limit, a
+      // PostgREST db-max-rows setting could silently truncate this select
+      // and every ticker past the cut becomes company `undefined` at once
+      // (M5) -- fail loudly instead of degrading silently.
+      const { data: companyRows, error: companyError } = await supabase
+        .from("bist_companies")
+        .select("tickers, title")
+        .limit(JEV_BIST_COMPANIES_LIMIT);
+      if (companyError) throw new Error(`jev-shadow: fetchPendingTickerMatches failed: ${companyError.message}`);
+      const companyRowsTyped = (companyRows ?? []) as unknown as RawBistCompanyRow[];
+      if (companyRowsTyped.length === JEV_BIST_COMPANIES_LIMIT) {
+        throw new Error(
+          `jev-shadow: fetchPendingTickerMatches: bist_companies returned JEV_BIST_COMPANIES_LIMIT (${JEV_BIST_COMPANIES_LIMIT}) rows -- likely truncated by a PostgREST db-max-rows setting`,
+        );
+      }
+      const companyByTicker = new Map<string, string>();
+      for (const c of companyRowsTyped) {
+        for (const t of c.tickers ?? []) companyByTicker.set(t, c.title);
+      }
+
+      const out: JevTickerRow[] = [];
+      for (const r of unseen) {
+        // Skip unmapped tickers rather than writing a null company (M5):
+        // the registry question asks about "the company named in
+        // `company`", and jev_shadow_predictions' unique (task, subject_id)
+        // with ignoreDuplicates means a poisoned null-company row could
+        // never be re-asked once bist_companies gains the alias -- the
+        // anti-join makes skipping self-healing on a later run instead.
+        const company = companyByTicker.get(r.ticker);
+        if (company === undefined) continue;
+        const a = flattenEmbed(r.article);
+        if (!a) continue;
+        out.push({
+          article_id: r.article_id,
+          ticker: r.ticker,
+          title: a.title,
+          description: a.description,
+          company,
+          matched_on: r.matched_on,
+        });
+        if (out.length >= limit) break;
       }
       return out;
     },
@@ -521,17 +666,18 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
   }
   if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
 
-  // No overrides are supported (no `{"limit_articles": n}` style knobs) --
-  // the only accepted bodies are empty, or a JSON object whose fields are
-  // ignored. Anything that isn't valid JSON, or isn't an object, is a 400.
+  // No overrides are supported beyond `mode` (no `{"limit_articles": n}`
+  // style knobs) -- the only accepted bodies are empty, or a JSON object
+  // whose fields are ignored except `mode`. Anything that isn't valid JSON,
+  // or isn't an object, is a 400.
   let text: string;
   try {
     text = await req.text();
   } catch {
     return jsonResponse({ ok: false, error: "bad-json" }, 400);
   }
+  let parsed: unknown;
   if (text.trim()) {
-    let parsed: unknown;
     try {
       parsed = JSON.parse(text);
     } catch {
@@ -541,6 +687,22 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
       return jsonResponse({ ok: false, error: "bad-json" }, 400);
     }
   }
+
+  // Kill switch -- checked BEFORE any database read, run row, or gateway
+  // call. Placed after the bearer check above (so an unauthenticated poke
+  // still 401s) but before AI_GATEWAY_API_KEY and makePorts() (so it costs
+  // zero Supabase client construction and zero DB round trips).
+  const disabled = Deno.env.get("JEV_DISABLED") ?? "";
+  if (disabled === "1" || disabled.toLowerCase() === "true") {
+    console.log("[jev-shadow] skipped: JEV_DISABLED");
+    return jsonResponse({ ok: true, skipped: true, reason: "disabled" });
+  }
+
+  // The one and only accepted body field: `{"mode":"audit"}` selects the
+  // nightly accuracy audit; a missing mode, `{}`, `{"mode":"shadow"}`, or
+  // any other string all select the normal shadow run. `{"limit_articles":
+  // n}`-style knobs are still refused, simply by being ignored.
+  const mode: JevRunMode = (parsed as { mode?: unknown } | undefined)?.mode === "audit" ? "audit" : "shadow";
 
   // Fail-safe: no key configured -> no run row, no gateway call (the
   // RESEND_API_KEY precedent in src/lib/email/resend.ts). This is the
@@ -555,12 +717,12 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
     // `|| JEV_MONTHLY_TOKEN_CAP_DEFAULT` would treat 0 as falsy -- an
     // operator setting JEV_MONTHLY_TOKEN_CAP=0 as an emergency "spend
     // nothing" lever (pack.md's documented cost lever) would silently get
-    // the 3e8-token default instead. Parse explicitly so 0 is honoured and
-    // junk still falls back.
+    // the default instead. Parse explicitly so 0 is honoured and junk
+    // still falls back.
     const rawCap = Deno.env.get("JEV_MONTHLY_TOKEN_CAP");
     const parsedCap = rawCap === undefined || rawCap.trim() === "" ? NaN : Number(rawCap);
     const cap = Number.isFinite(parsedCap) && parsedCap >= 0 ? parsedCap : JEV_MONTHLY_TOKEN_CAP_DEFAULT;
-    const result = await runJevShadow(makePorts(apiKey), { deadlineMs: JEV_DEADLINE_MS, cap });
+    const result = await runJevShadow(makePorts(apiKey), { deadlineMs: JEV_DEADLINE_MS, cap, mode });
     console.log("[jev-shadow]", JSON.stringify(result));
     return jsonResponse(result);
   } catch (err) {

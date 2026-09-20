@@ -913,6 +913,104 @@ supabase secrets unset AI_GATEWAY_API_KEY --project-ref "$PROJECT_REF"
 
 ---
 
+## Jev şimdi paketi (063): altın küme, gece denetimi, kapasite
+
+There is deliberately no 062 in this repo — the production ledger already carries a foreign `062_coverage_semantics_and_context` row applied outside this repository, so this pack was renumbered to 063. Do not create a 062_*.sql.
+
+`063_jev_now_package.sql` turns the 061 shadow suite from an agreement meter into an accuracy meter: three new shadow tasks (`pair_positive`, `ticker_relevance`, `neutral_pick`), a nightly **audit** run mode that samples pairs against cluster membership instead of the live stream, a hashed question registry, and a new `/admin/jev-altin` "altın küme" (gold set) double-labeling surface with its own tables (`jev_gold_set`, `jev_gold_labels`) and `SECURITY DEFINER` RPCs (`jev_gold_seed`, `jev_gold_next`, `jev_gold_scorecard`). The monthly token cap default also rises from 3e8 to 5e8 (~$21 at the gateway market rate observed 2026-09-20); measured production burn at the `*/10` cadence puts that cap around day 23 of a 30-day month, so 5e8 is a deliberate ~3-week ceiling, not a month of headroom. `jev-shadow/index.ts` gains a `JEV_DISABLED` kill switch and routes `{"mode":"audit"}` to the new nightly path; everything else about the shadow observer — pure, `service_role`-only, nothing it writes reaches a reader except the cookie-gated `/admin` sections — is unchanged from 061.
+
+**ORDER IS LOAD-BEARING** (same discipline as every migration above): apply the migration **before** deploying the function or redeploying Vercel — both the Edge Function and the new `/admin/jev-altin` page read objects that only exist after step 2.
+
+1. **Vault precondition (038), unchanged.** Same check as 061 step 1 — if either secret is missing, 063's do-block silently schedules no audit cron (the tables and functions still land):
+
+   ```sql
+   select name from vault.decrypted_secrets where name in ('service_role_key', 'functions_base_url');
+   ```
+
+2. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/063_jev_now_package.sql
+   # ...or: supabase db push
+   ```
+
+   The file inserts its own ledger row (`('063', '063_jev_now_package')`) and is safe to re-apply.
+
+3. **The cap change — and the override trap.** The SQL default rises to `5e8` (~$21), but if a `JEV_MONTHLY_TOKEN_CAP` Edge secret was set during 061 step 4 (the recommended opening ~$4.20 ceiling), **that env var still wins over the new SQL default for the Edge Function**, while `/admin`'s budget percentage always reads the SQL default — so the two disagree until the override is removed: the function silently caps out around $4.20 while the page shows 20% of a $21 budget used. Unless you deliberately mean to keep the lower ceiling:
+
+   ```bash
+   supabase secrets unset JEV_MONTHLY_TOKEN_CAP --project-ref "$PROJECT_REF"
+   supabase secrets list --project-ref "$PROJECT_REF" | grep JEV_MONTHLY_TOKEN_CAP   # expect no output
+   ```
+
+4. **Deploy the function.** `--no-verify-jwt` is not optional here, same as 061:
+
+   ```bash
+   supabase functions deploy jev-shadow --project-ref "$PROJECT_REF" --no-verify-jwt
+   ```
+
+5. **Verify, in order:**
+
+   ```sql
+   select jobname, schedule, active from cron.job where jobname in ('jev-shadow', 'jev-cluster-audit');
+   -- expect */10 * * * * and 55 3 * * *, both active = true
+   ```
+
+   ```sql
+   select * from public.jev_shadow_month_usage();
+   -- expect cap = 500000000
+   ```
+
+6. **Smoke the audit path once, by hand, before the cron's first 03:55 UTC run:**
+
+   ```bash
+   curl -sS -X POST -H "Authorization: Bearer $SR" -H 'Content-Type: application/json' \
+     -d '{"mode":"audit"}' "https://$PROJECT_REF.functions.supabase.co/jev-shadow"
+   # expect non-zero audit_pairs and pairs stage counts, zero everywhere else
+   ```
+
+7. **Redeploy Vercel.** No new environment variable is needed — `/admin/jev-altin` reads the new RPCs with the existing `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` — but `vercel --prod` **is** required for the page to exist:
+
+   ```bash
+   vercel --prod
+   ```
+
+8. **Seed the gold set** from `/admin/jev-altin` ("Altın kümeyi oluştur") only **after** at least 24h of shadow predictions exist — `jev_gold_seed` draws exclusively from articles that already carry a `task='politics'` prediction, so an early seed returns a small or empty set. The button is idempotent; re-running it later tops each category back up to the SQL default (38).
+
+**KILL SWITCH.** Four independent levers, in escalating order, none requiring a migration or a deploy:
+
+```sql
+-- 1. Stop the nightly audit only -- the 10-minute shadow run keeps going.
+update cron.job set active = false where jobname = 'jev-cluster-audit';
+```
+
+```bash
+# 2. Stop BOTH modes instantly, without touching cron.job -- checked before
+# any database read, run row, or gateway call.
+supabase secrets set JEV_DISABLED=1 --project-ref "$PROJECT_REF"
+# every poke now returns 200 {"ok":true,"skipped":true,"reason":"disabled"}
+```
+
+```sql
+-- 3. Stop the 10-minute shadow poke entirely.
+update cron.job set active = false where jobname = 'jev-shadow';
+```
+
+```bash
+# 4. Unset the gateway key -- the function then no-ops on every poke,
+# regardless of JEV_DISABLED or cron.job.
+supabase secrets unset AI_GATEWAY_API_KEY --project-ref "$PROJECT_REF"
+```
+
+**WARNING — gold labels cascade-delete with their articles.** `jev_gold_labels.article_id` references `jev_gold_set(article_id)` which references `articles(id)`, both `on delete cascade`. The admin `nuke_articles` action (`src/app/api/admin/route.ts`) deletes every row of `public.articles` in one press, which silently and irrecoverably destroys the entire hand-labeled gold set with it. Before running `nuke_articles`, or any other bulk article delete, snapshot both tables:
+
+```sql
+copy (select * from public.jev_gold_set) to '/tmp/jev_gold_set_backup.csv' with csv header;
+copy (select * from public.jev_gold_labels) to '/tmp/jev_gold_labels_backup.csv' with csv header;
+```
+
+---
+
 ## Owner sign-off checklist
 
 Before declaring the migration complete:
@@ -940,6 +1038,10 @@ Before declaring the migration complete:
 
 - [ ] Migration 061 applied (Vault precondition from 038 verified first) and `jev-shadow` deployed with `--no-verify-jwt`; `select jobname, schedule, active from cron.job where jobname='jev-shadow';` shows `*/10 * * * *`, active
 - [ ] `AI_GATEWAY_API_KEY` set (`supabase secrets set ... --project-ref "$PROJECT_REF"` or the gitignored `.env.production` route) and `vercel --prod` redeployed so the `/admin` "Jev gölge" section renders
+
+- [ ] Migration 063 applied (Vault precondition from 038 verified first); `select jobname, schedule, active from cron.job where jobname in ('jev-shadow','jev-cluster-audit');` shows `*/10 * * * *` and `55 3 * * *`, both active; `select * from public.jev_shadow_month_usage();` reports `cap = 500000000`
+- [ ] `JEV_DISABLED` documented as the instant, no-deploy kill switch for both shadow and audit modes, and `vercel --prod` redeployed so `/admin/jev-altin` renders
+- [ ] Operator knows `jev_gold_labels` (and `jev_gold_set`) cascade-delete with their `articles` rows, and that the admin `nuke_articles` action deletes every article -- a snapshot/export procedure is agreed before that action is ever used
 
 ---
 

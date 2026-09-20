@@ -2,12 +2,20 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  JEV_AUDIT_CANDIDATE_LIMIT,
+  JEV_AUDIT_CLUSTER_LIMIT,
+  JEV_AUDIT_PAIR_COUNT,
+  JEV_AUDIT_PAIRS_PER_CLUSTER,
   JEV_CLUSTER_MEMBER_MAX,
   JEV_CONCURRENCY,
   JEV_DESC_CLAMP,
   JEV_MODEL,
+  JEV_NEUTRAL_MODEL_ID,
   JEV_PAIRS_PER_CALL,
   JEV_PREVIEW_CLAMP,
+  JEV_QUESTION_REGISTRY,
+  JEV_TASKS,
+  JEV_TICKER_LIMIT,
   JEV_TITLE_CLAMP,
   JevDeadlineError,
   JevRateLimitError,
@@ -18,6 +26,7 @@ import {
   buildClusterCall,
   buildKapCall,
   buildPairCall,
+  buildTickerCall,
   buildTitleCall,
   canonicalJson,
   choiceAgrees,
@@ -26,10 +35,13 @@ import {
   offendingQuestionIds,
   pairKey,
   parseJevResponse,
+  pickNeutralArticleId,
   politicsBaseline,
   predictionRow,
+  questionRegistryHash,
   retryDelayMs,
   runJevShadow,
+  sampleClusterPairs,
   samplePairs,
   stateHash,
   statePreview,
@@ -46,6 +58,7 @@ import {
   type JevRequest,
   type JevResponse,
   type JevAnswer,
+  type JevTickerRow,
   type JevTitleRow,
 } from "../../supabase/functions/_shared/jev.ts";
 import { sha256Hex } from "../../supabase/functions/_shared/archive.ts";
@@ -137,7 +150,26 @@ function articleRow(overrides: Partial<JevArticleRow> = {}): JevArticleRow {
 }
 
 function clusterRow(overrides: Partial<JevClusterRow> = {}): JevClusterRow {
-  return { id: "c1", title: "Olay", updated_at: "2026-09-19T09:00:00.000Z", ...overrides };
+  return {
+    id: "c1",
+    title: "Olay",
+    updated_at: "2026-09-19T09:00:00.000Z",
+    title_tr_neutral: null,
+    title_neutral_model: null,
+    ...overrides,
+  };
+}
+
+function tickerRow(overrides: Partial<JevTickerRow> = {}): JevTickerRow {
+  return {
+    article_id: "art-1",
+    ticker: "THYAO",
+    title: "Başlık",
+    description: "Açıklama",
+    company: "Türk Hava Yolları",
+    matched_on: "code",
+    ...overrides,
+  };
 }
 
 function memberRow(overrides: Partial<JevMemberRow> = {}): JevMemberRow {
@@ -211,6 +243,8 @@ interface Recorder {
   fetchPairCandidatesCalls: Array<{ sinceIso: string; limit: number }>;
   fetchPendingKapCalls: Array<{ sinceIso: string; limit: number }>;
   fetchPendingTitleVersionsCalls: Array<{ sinceIso: string; limit: number }>;
+  fetchAuditPairsCalls: Array<{ sinceIso: string; clusterLimit: number }>;
+  fetchPendingTickerMatchesCalls: Array<{ sinceIso: string; limit: number }>;
 }
 
 function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
@@ -230,6 +264,8 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
     fetchPairCandidatesCalls: [],
     fetchPendingKapCalls: [],
     fetchPendingTitleVersionsCalls: [],
+    fetchAuditPairsCalls: [],
+    fetchPendingTickerMatchesCalls: [],
   };
 
   const tick = 0;
@@ -297,6 +333,16 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
     fetchPendingTitleVersions: async (sinceIso, limit) => {
       rec.order.push("fetchPendingTitleVersions");
       rec.fetchPendingTitleVersionsCalls.push({ sinceIso, limit });
+      return [];
+    },
+    fetchAuditPairs: async (sinceIso, clusterLimit) => {
+      rec.order.push("fetchAuditPairs");
+      rec.fetchAuditPairsCalls.push({ sinceIso, clusterLimit });
+      return [];
+    },
+    fetchPendingTickerMatches: async (sinceIso, limit) => {
+      rec.order.push("fetchPendingTickerMatches");
+      rec.fetchPendingTickerMatchesCalls.push({ sinceIso, limit });
       return [];
     },
   };
@@ -1129,7 +1175,7 @@ describe("runJevShadow", () => {
     expect(patch?.note).toContain("pairs");
   });
 
-  it("(i) runs stages in order: articles -> clusters -> pairs -> kap -> title_versions", async () => {
+  it("(i) runs stages in order: articles -> clusters -> pairs -> kap -> title_versions -> tickers", async () => {
     const rec = makePorts();
 
     await runJevShadow(rec.ports);
@@ -1141,6 +1187,7 @@ describe("runJevShadow", () => {
       "fetchPairCandidates",
       "fetchPendingKap",
       "fetchPendingTitleVersions",
+      "fetchPendingTickerMatches",
     ]);
   });
 
@@ -1229,10 +1276,19 @@ describe("runJevShadow", () => {
     const rec = makePorts({
       fetchRecentClusters: async () => [cluster1],
       fetchClusterMembers: async () => members,
+      // The clusters stage now also anti-joins "neutral_pick" in the same
+      // batched fashion (063). cluster1's title_neutral_model is null (not
+      // "extractive-v1"), so it never enters the neutral_pick anti-join's
+      // subjectIds -- pin that explicitly rather than letting the second
+      // branch go unasserted (JEV-N3).
       fetchSeenSubjects: async (task, subjectIds) => {
-        expect(task).toBe("cluster_member");
-        expect(subjectIds).toEqual(["c1:m1", "c1:m2"]);
-        return new Set(["c1:m1", "c1:m2"]);
+        if (task === "cluster_member") {
+          expect(subjectIds).toEqual(["c1:m1", "c1:m2"]);
+          return new Set(["c1:m1", "c1:m2"]);
+        }
+        expect(task).toBe("neutral_pick");
+        expect(subjectIds).toEqual([]);
+        return new Set();
       },
     });
 
@@ -1330,6 +1386,653 @@ describe("runJevShadow", () => {
     expect(result.stages.pairs.calls).toBe(0);
     // No pair-stage row should have been written.
     expect(rec.insertPredictionsCalls.flat().some((r) => r.task === "pair_negative")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. JEV_QUESTION_REGISTRY -- migration 063. The single source of every
+// instructions/criteria string; byte-identical for the 12 pre-063 tasks.
+//
+// DEVIATION FROM W1.md, per pack.md's orchestrator override #1 (overrides
+// win over the brief): questionRegistryHash() is ASYNC, computed as
+// `sha256Hex(canonicalJson(JEV_QUESTION_REGISTRY))` using the existing
+// async sha256Hex from ./archive.ts -- NOT a hand-rolled synchronous
+// sha256Sync. There is therefore no sha256Sync export and no NIST-vector
+// test for it; the brief's verbatim "sha256Sync matches the NIST vector for
+// 'abc'" test is replaced below with a stability/shape check on the async
+// questionRegistryHash() the override mandates instead.
+// ---------------------------------------------------------------------------
+
+describe("JEV_QUESTION_REGISTRY", () => {
+  it("has an entry for every JevTask", () => {
+    for (const task of JEV_TASKS) {
+      expect(JEV_QUESTION_REGISTRY[task], `missing registry entry for "${task}"`).toBeDefined();
+      expect(typeof JEV_QUESTION_REGISTRY[task]?.instructions).toBe("string");
+    }
+  });
+
+  it("keeps every pre-063 question string byte-identical", () => {
+    const article = buildArticleCall(articleRow());
+    expect(article.questions.politics).toEqual({
+      type: "boolean",
+      instructions:
+        "Is this Turkish news item about domestic politics, government, parties, elections, parliament, courts/justice with political actors, or foreign policy? Judge the news item in `title` and `description`, not the outlet. Not politics: sports, markets/economy with no political actor, celebrity, weather, crime with no political actor.",
+      criteria: {
+        true: "Political actors, institutions or processes are the subject of the item",
+        false: "No political actor, institution or process is the subject",
+      },
+    });
+    expect(article.questions.topic).toEqual({
+      type: "choice",
+      instructions: "Which single topic best matches this Turkish news item?",
+      criteria: {
+        politics: "Government, parliament, parties, elections, courts, law-making, foreign policy",
+        economy:
+          "Markets, companies, finance, trade, inflation, the budget as an economic (not political-process) matter",
+        other: "Anything else: sports, culture, weather, crime, celebrity, technology, health",
+      },
+    });
+    expect(article.questions.opinion).toEqual({
+      type: "boolean",
+      instructions:
+        "Is this an opinion piece, column or analysis expressing the writer's own judgement, rather than a straight news report of events?",
+      criteria: { true: "Column/opinion/analysis voice", false: "Straight news report" },
+    });
+    expect(article.questions.clickbait).toEqual({
+      type: "boolean",
+      instructions:
+        "Does this headline deliberately withhold the key fact to force a click (curiosity gap, unnamed subject, 'işte o isim', 'ne oldu şaşıracaksınız'), rather than stating what happened?",
+      criteria: { true: "The headline hides the payload", false: "The headline states what happened" },
+    });
+    expect(article.questions.framing).toEqual({
+      type: "choice",
+      instructions:
+        "Whose side does the WORDING of this Turkish headline favour? Judge word choice and framing, not which actors appear.",
+      criteria: {
+        pro_government: "Wording favours government/state actors, or casts their critics unfavourably",
+        pro_opposition: "Wording favours opposition actors, or casts the government unfavourably",
+        neutral: "Reports the event without favouring either side",
+      },
+    });
+    expect(article.questions.sensational).toEqual({
+      type: "score",
+      instructions: "How sensational is the wording of this headline?",
+      criteria: [
+        "Plain, factual wording",
+        "Slightly heightened wording",
+        "Clearly dramatic wording (şok, skandal, kan donduran)",
+        "Extreme tabloid wording",
+      ],
+    });
+
+    const { request: clusterReq } = buildClusterCall(clusterRow(), [
+      memberRow({ article_id: "m1", published_at: "2026-09-19T08:00:00.000Z" }),
+      memberRow({ article_id: "m2", published_at: "2026-09-19T08:10:00.000Z" }),
+    ]);
+    expect(clusterReq.questions.m1).toEqual({
+      type: "boolean",
+      instructions:
+        "Does headline `m1` report the SAME news event as the event named in `event`? Same event means the same incident, announcement or decision — not merely the same topic, the same people, or a follow-up story on a different day.",
+      criteria: { true: "Same concrete event", false: "Different event, even if related" },
+    });
+
+    const { request: pairReq } = buildPairCall([
+      { a: pairCandidateRow({ id: "a1" }), b: pairCandidateRow({ id: "b1", cluster_id: "other" }) },
+    ]);
+    expect(pairReq.questions.p1).toEqual({
+      type: "boolean",
+      instructions:
+        "Do the two headlines in `pairs.p1` report the SAME news event (same incident, announcement or decision), or merely the same topic / different events?",
+      criteria: { true: "Same concrete event", false: "Different events" },
+    });
+
+    const kapReq = buildKapCall(kapRow());
+    expect(kapReq.questions.kap_class).toEqual({
+      type: "choice",
+      instructions: "Which KAP disclosure class does this Turkish filing belong to?",
+      criteria: {
+        ODA: "Özel Durum Açıklaması — a material-event disclosure: contract, investment, litigation, management change, capital action",
+        DKB: "Düzenli Kamuyu Bilgilendirme — routine periodic information: buy-back reports, investor presentations, general assembly notices",
+        DG: "Diğer — other filings that fit none of the other classes",
+        FR: "Finansal Rapor — a financial statement or interim/annual financial report",
+      },
+    });
+    expect(kapReq.questions.kap_materiality).toEqual({
+      type: "score",
+      instructions: "How likely is this filing to move the company's share price?",
+      criteria: [
+        "Administrative or routine; no price impact expected",
+        "Minor; marginal impact at most",
+        "Notable; a plausible single-digit move",
+        "Highly material; a large move is likely",
+      ],
+    });
+
+    const titleReq = buildTitleCall(titleVersionRow());
+    expect(titleReq.questions.title_meaning).toEqual({
+      type: "boolean",
+      instructions:
+        "Did the edit from `before` to `after` change the FACTUAL meaning of the headline — a different claim, number, actor, or an added/removed allegation — as opposed to a purely cosmetic edit such as a typo fix, punctuation, shortening or style change?",
+      criteria: { true: "The factual claim changed", false: "Cosmetic edit only; the claim is the same" },
+    });
+    expect(titleReq.questions.title_edit_kind).toEqual({
+      type: "choice",
+      instructions: "What kind of edit turned `before` into `after`?",
+      criteria: {
+        correction: "Fixes a factual error in the earlier headline",
+        softening: "Makes the claim weaker, vaguer, or less damaging to someone",
+        hardening: "Makes the claim stronger, sharper, or more damaging to someone",
+        cosmetic: "Typo, punctuation, length or style only — the claim is unchanged",
+      },
+    });
+  });
+
+  it("questionRegistryHash matches sha256Hex(canonicalJson(registry))", async () => {
+    const hash = await questionRegistryHash();
+    expect(hash).toBe(await sha256Hex(canonicalJson(JEV_QUESTION_REGISTRY)));
+  });
+
+  it("questionRegistryHash is a stable sha256 hex digest across calls (override #1: async, no hand-rolled SHA-256)", async () => {
+    const h1 = await questionRegistryHash();
+    const h2 = await questionRegistryHash();
+    expect(h1).toBe(h2);
+    expect(h1).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("pair_positive is a byte-identical copy of pair_negative", () => {
+    const pairs = [{ a: pairCandidateRow({ id: "a1" }), b: pairCandidateRow({ id: "b1", cluster_id: "other" }) }];
+    const neg = buildPairCall(pairs, "pair_negative").request.questions.p1;
+    const pos = buildPairCall(pairs, "pair_positive").request.questions.p1;
+    expect(pos).toEqual(neg);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 16. buildClusterCall with neutral_pick (063)
+// ---------------------------------------------------------------------------
+
+describe("buildClusterCall with neutral_pick", () => {
+  const threeMembers = [
+    memberRow({ article_id: "m-a", published_at: "2026-09-19T08:00:00.000Z", title: "Olay oldu" }),
+    memberRow({ article_id: "m-b", published_at: "2026-09-19T08:10:00.000Z", title: "Olay yine oldu" }),
+    memberRow({ article_id: "m-c", published_at: "2026-09-19T08:20:00.000Z", title: "Olay üçüncü kez oldu" }),
+  ];
+
+  it("adds s<k>/f<k> only when neutralPick is set", () => {
+    const withoutNeutral = buildClusterCall(clusterRow(), threeMembers);
+    expect(
+      Object.keys(withoutNeutral.request.questions).some((k) => k.startsWith("f") || k.startsWith("s")),
+    ).toBe(false);
+    expect(withoutNeutral.neutralKeys).toEqual({});
+
+    const withNeutral = buildClusterCall(clusterRow(), threeMembers, { neutralPick: true });
+    expect(withNeutral.request.questions.f1?.type).toBe("boolean");
+    expect(withNeutral.request.questions.s1?.type).toBe("score");
+    expect(withNeutral.request.questions.f3?.type).toBe("boolean");
+    expect(withNeutral.request.questions.s3?.type).toBe("score");
+  });
+
+  it("keeps every member in state.headlines while asking m<k> only for unseen members", () => {
+    const skip = new Set(["m-a"]);
+    const { request, keys } = buildClusterCall(clusterRow(), threeMembers, { skipMemberIds: skip });
+    const state = request.state as { headlines: Record<string, string> };
+    expect(Object.keys(state.headlines)).toHaveLength(3);
+    expect(keys).not.toHaveProperty("m1");
+    expect(keys.m2).toBe("m-b");
+    expect(keys.m3).toBe("m-c");
+  });
+
+  it("returns neutralKeys covering every member in the call", () => {
+    const skip = new Set(["m-a"]);
+    const { neutralKeys } = buildClusterCall(clusterRow(), threeMembers, { neutralPick: true, skipMemberIds: skip });
+    expect(neutralKeys).toEqual({ m1: "m-a", m2: "m-b", m3: "m-c" });
+  });
+
+  it("skips only when both keys and neutralKeys are empty", () => {
+    const allSkipped = new Set(threeMembers.map((m) => m.article_id));
+    const { keys, neutralKeys } = buildClusterCall(clusterRow(), threeMembers, { skipMemberIds: allSkipped });
+    expect(keys).toEqual({});
+    expect(neutralKeys).toEqual({});
+
+    const { keys: keys2, neutralKeys: neutralKeys2 } = buildClusterCall(clusterRow(), threeMembers, {
+      neutralPick: true,
+      skipMemberIds: allSkipped,
+    });
+    expect(keys2).toEqual({});
+    expect(Object.keys(neutralKeys2)).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 17. pickNeutralArticleId (063)
+// ---------------------------------------------------------------------------
+
+describe("pickNeutralArticleId", () => {
+  const neutralKeys = { m1: "art-1", m2: "art-2", m3: "art-3" };
+  const order = [
+    { key: "m1", published_at: "2026-09-19T08:00:00.000Z" },
+    { key: "m2", published_at: "2026-09-19T08:10:00.000Z" },
+    { key: "m3", published_at: "2026-09-19T08:20:00.000Z" },
+  ];
+
+  it("picks the lowest-score plain headline", () => {
+    const answers: Record<string, JevAnswer> = {
+      f1: { type: "boolean", probability: 0.9 },
+      s1: { type: "score", score: 1 },
+      f2: { type: "boolean", probability: 0.95 },
+      s2: { type: "score", score: 0.2 },
+      f3: { type: "boolean", probability: 0.1 },
+      s3: { type: "score", score: 0.05 },
+    };
+    const { articleId } = pickNeutralArticleId(neutralKeys, order, answers);
+    // m3 has the lowest score overall but f3 < threshold (not plain); among
+    // the plain headlines (m1, m2) m2 has the lower score.
+    expect(articleId).toBe("art-2");
+  });
+
+  it("falls back to the lowest score when no headline is plain", () => {
+    const answers: Record<string, JevAnswer> = {
+      f1: { type: "boolean", probability: 0.1 },
+      s1: { type: "score", score: 1 },
+      f2: { type: "boolean", probability: 0.2 },
+      s2: { type: "score", score: 0.4 },
+      f3: { type: "boolean", probability: 0.3 },
+      s3: { type: "score", score: 2 },
+    };
+    const { articleId } = pickNeutralArticleId(neutralKeys, order, answers);
+    expect(articleId).toBe("art-2");
+  });
+
+  it("breaks a tie by earliest published_at", () => {
+    const answers: Record<string, JevAnswer> = {
+      f1: { type: "boolean", probability: 0.9 },
+      s1: { type: "score", score: 0.5 },
+      f2: { type: "boolean", probability: 0.9 },
+      s2: { type: "score", score: 0.5 },
+      f3: { type: "boolean", probability: 0.1 },
+      s3: { type: "score", score: 9 },
+    };
+    const { articleId } = pickNeutralArticleId(neutralKeys, order, answers);
+    expect(articleId).toBe("art-1");
+  });
+
+  it("returns null when no score answer came back", () => {
+    const { articleId, picks } = pickNeutralArticleId(neutralKeys, order, {});
+    expect(articleId).toBeNull();
+    expect(picks.m1).toEqual({ s: null, f: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 18. neutral_pick rows -- full runJevShadow integration (063)
+// ---------------------------------------------------------------------------
+
+describe("neutral_pick rows", () => {
+  function neutralClusterRow(overrides: Partial<JevClusterRow> = {}): JevClusterRow {
+    return clusterRow({ title_neutral_model: JEV_NEUTRAL_MODEL_ID, title_tr_neutral: "Olay oldu", ...overrides });
+  }
+
+  const twoMembers = [
+    memberRow({ article_id: "m-a", published_at: "2026-09-19T08:00:00.000Z", title: "Olay oldu" }),
+    memberRow({ article_id: "m-b", published_at: "2026-09-19T08:10:00.000Z", title: "Farklı başlık" }),
+  ];
+
+  function neutralEvaluate(): JevPorts["evaluate"] {
+    return async (req) => {
+      const answers: Record<string, JevAnswer> = {};
+      for (const [key, q] of Object.entries(req.questions)) {
+        if (key.startsWith("f")) answers[key] = { type: "boolean", probability: 0.9 };
+        else if (key.startsWith("s")) answers[key] = { type: "score", score: key === "s1" ? 0.1 : 2 };
+        else answers[key] = defaultAnswerFor(q);
+      }
+      return { response: { answers, usage: { inputTokens: 40, outputTokens: 4 } }, latencyMs: 2 };
+    };
+  }
+
+  it("baseline is the member whose trimmed title equals title_tr_neutral", async () => {
+    const rec = makePorts({
+      fetchRecentClusters: async () => [neutralClusterRow()],
+      fetchClusterMembers: async () => twoMembers,
+      evaluate: neutralEvaluate(),
+    });
+    await runJevShadow(rec.ports);
+    const row = rec.insertPredictionsCalls.flat().find((r) => r.task === "neutral_pick");
+    expect(row).toBeDefined();
+    expect(row?.baseline_answer).toBe("m-a");
+  });
+
+  it("baseline is 'unknown' and agree null when no member title matches", async () => {
+    const rec = makePorts({
+      fetchRecentClusters: async () => [neutralClusterRow({ title_tr_neutral: "Hiç eşleşmeyen başlık" })],
+      fetchClusterMembers: async () => twoMembers,
+      evaluate: neutralEvaluate(),
+    });
+    await runJevShadow(rec.ports);
+    const row = rec.insertPredictionsCalls.flat().find((r) => r.task === "neutral_pick");
+    expect(row?.baseline_answer).toBe("unknown");
+    expect(row?.agree).toBeNull();
+  });
+
+  it("baseline is 'unknown' (not a false agree) when the matching title belongs to a member outside the first JEV_CLUSTER_MEMBER_MAX by published_at (regression, 063)", async () => {
+    // JEV_CLUSTER_MEMBER_MAX + 2 members, published_at ascending m0..mN. The
+    // title matching title_tr_neutral belongs to the member at index
+    // JEV_CLUSTER_MEMBER_MAX -- one past the cap orderMembers() applies --
+    // so Jev was never shown that headline. The baseline must resolve
+    // against the SAME capped/ordered list the call itself used, not the
+    // raw uncapped member list, or this silently becomes a hard `false`
+    // disagreement instead of an excluded 'unknown'.
+    const manyMembers = Array.from({ length: JEV_CLUSTER_MEMBER_MAX + 2 }, (_, i) =>
+      memberRow({
+        article_id: `m${i}`,
+        published_at: `2026-09-19T08:${String(i).padStart(2, "0")}:00.000Z`,
+        title: i === JEV_CLUSTER_MEMBER_MAX ? "Olay oldu" : `Diğer başlık ${i}`,
+      }),
+    );
+    const rec = makePorts({
+      fetchRecentClusters: async () => [neutralClusterRow()],
+      fetchClusterMembers: async () => manyMembers,
+      evaluate: neutralEvaluate(),
+    });
+    await runJevShadow(rec.ports);
+    const row = rec.insertPredictionsCalls.flat().find((r) => r.task === "neutral_pick");
+    expect(row?.baseline_answer).toBe("unknown");
+    expect(row?.agree).toBeNull();
+  });
+
+  it("stores the per-member picks in jev_answer.answer.picks", async () => {
+    const rec = makePorts({
+      fetchRecentClusters: async () => [neutralClusterRow()],
+      fetchClusterMembers: async () => twoMembers,
+      evaluate: neutralEvaluate(),
+    });
+    await runJevShadow(rec.ports);
+    const row = rec.insertPredictionsCalls.flat().find((r) => r.task === "neutral_pick");
+    const answer = row?.jev_answer.answer as {
+      type: string;
+      choice: string;
+      picks: Record<string, { s: number | null; f: number | null }>;
+    };
+    expect(answer.type).toBe("choice");
+    expect(answer.picks.m1).toEqual({ s: 0.1, f: 0.9 });
+    expect(answer.picks.m2).toEqual({ s: 2, f: 0.9 });
+  });
+
+  it("writes one row per cluster with subject_id = cluster_id", async () => {
+    const rec = makePorts({
+      fetchRecentClusters: async () => [neutralClusterRow({ id: "cluster-xyz" })],
+      fetchClusterMembers: async () => twoMembers.map((m) => ({ ...m, cluster_id: "cluster-xyz" })),
+      evaluate: neutralEvaluate(),
+    });
+    await runJevShadow(rec.ports);
+    const rows = rec.insertPredictionsCalls.flat().filter((r) => r.task === "neutral_pick");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.subject_id).toBe("cluster-xyz");
+    expect(rows[0]?.subject_type).toBe("cluster");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 19. ticker_relevance stage (063)
+// ---------------------------------------------------------------------------
+
+describe("buildTickerCall", () => {
+  it("builds state {title, description, ticker, company, matched_on} and one boolean question keyed ticker_relevance", () => {
+    const req = buildTickerCall(tickerRow());
+    expect(req.state).toEqual({
+      title: "Başlık",
+      description: "Açıklama",
+      ticker: "THYAO",
+      company: "Türk Hava Yolları",
+      matched_on: "code",
+    });
+    expect(req.questions.ticker_relevance?.type).toBe("boolean");
+  });
+});
+
+describe("ticker_relevance stage", () => {
+  it("runs after kap in shadow mode, fetching JEV_TICKER_LIMIT rows", async () => {
+    const rec = makePorts();
+    await runJevShadow(rec.ports);
+    const fetchOrder = rec.order.filter((name) => name.startsWith("fetch"));
+    const kapIdx = fetchOrder.indexOf("fetchPendingKap");
+    const tickerIdx = fetchOrder.indexOf("fetchPendingTickerMatches");
+    expect(kapIdx).toBeGreaterThanOrEqual(0);
+    expect(tickerIdx).toBeGreaterThan(kapIdx);
+    expect(rec.fetchPendingTickerMatchesCalls[0]?.limit).toBe(JEV_TICKER_LIMIT);
+  });
+
+  it("builds subject_id as `${article_id}:${ticker}` and sets article_id", async () => {
+    const rec = makePorts({
+      fetchPendingTickerMatches: async () => [tickerRow({ article_id: "art-9", ticker: "GARAN" })],
+      evaluate: async (_req) => ({
+        response: {
+          answers: { ticker_relevance: { type: "boolean", probability: 0.8 } },
+          usage: { inputTokens: 10, outputTokens: 1 },
+        },
+        latencyMs: 1,
+      }),
+    });
+    await runJevShadow(rec.ports);
+    const row = rec.insertPredictionsCalls.flat().find((r) => r.task === "ticker_relevance");
+    expect(row?.subject_id).toBe("art-9:GARAN");
+    expect(row?.article_id).toBe("art-9");
+    expect(row?.subject_type).toBe("article");
+  });
+
+  it("baseline is 'true' and agree follows the 0.5 threshold", async () => {
+    const rec = makePorts({
+      fetchPendingTickerMatches: async () => [
+        tickerRow({ article_id: "a1", ticker: "T1" }),
+        tickerRow({ article_id: "a2", ticker: "T2" }),
+      ],
+      evaluate: async (req) => {
+        const state = req.state as { ticker: string };
+        const probability = state.ticker === "T1" ? 0.7 : 0.3;
+        return {
+          response: {
+            answers: { ticker_relevance: { type: "boolean", probability } },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+          latencyMs: 1,
+        };
+      },
+    });
+    await runJevShadow(rec.ports);
+    const rows = rec.insertPredictionsCalls.flat().filter((r) => r.task === "ticker_relevance");
+    const r1 = rows.find((r) => r.subject_id === "a1:T1");
+    const r2 = rows.find((r) => r.subject_id === "a2:T2");
+    expect(r1).toMatchObject({ baseline_answer: "true", agree: true });
+    expect(r2).toMatchObject({ baseline_answer: "true", agree: false });
+  });
+
+  it("clamps description and sends ticker/company/matched_on in state", async () => {
+    let capturedState: unknown;
+    const longDesc = "x".repeat(1000);
+    const rec = makePorts({
+      fetchPendingTickerMatches: async () => [
+        tickerRow({ description: longDesc, company: "ACME", matched_on: "alias:acme" }),
+      ],
+      evaluate: async (req) => {
+        capturedState = req.state;
+        return {
+          response: {
+            answers: { ticker_relevance: { type: "boolean", probability: 0.5 } },
+            usage: { inputTokens: 10, outputTokens: 1 },
+          },
+          latencyMs: 1,
+        };
+      },
+    });
+    await runJevShadow(rec.ports);
+    const state = capturedState as { description: string; ticker: string; company: string | null; matched_on: string };
+    expect(state.description.length).toBeLessThanOrEqual(JEV_DESC_CLAMP);
+    expect(state.ticker).toBe("THYAO");
+    expect(state.company).toBe("ACME");
+    expect(state.matched_on).toBe("alias:acme");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 20. sampleClusterPairs (063) -- audit mode's recall-side sampler
+// ---------------------------------------------------------------------------
+
+describe("sampleClusterPairs", () => {
+  function auditCandidate(overrides: Partial<JevPairCandidate> = {}): JevPairCandidate {
+    return { id: "x1", cluster_id: "c1", title: "Başlık", published_at: "2026-09-19T08:00:00.000Z", ...overrides };
+  }
+
+  it("never pairs two articles from different clusters", () => {
+    const rows = [
+      auditCandidate({ id: "1", cluster_id: "c1" }),
+      auditCandidate({ id: "2", cluster_id: "c1" }),
+      auditCandidate({ id: "3", cluster_id: "c1" }),
+      auditCandidate({ id: "4", cluster_id: "c2" }),
+      auditCandidate({ id: "5", cluster_id: "c2" }),
+    ];
+    const pairs = sampleClusterPairs(rows, 3, 20, mulberry32(11));
+    expect(pairs.length).toBeGreaterThan(0);
+    for (const p of pairs) expect(p.a.cluster_id).toBe(p.b.cluster_id);
+  });
+
+  it("draws at most JEV_AUDIT_PAIRS_PER_CLUSTER pairs per cluster", () => {
+    const rows = Array.from({ length: 10 }, (_, i) => auditCandidate({ id: `m${i}`, cluster_id: "c1" }));
+    const pairs = sampleClusterPairs(rows, JEV_AUDIT_PAIRS_PER_CLUSTER, 500, mulberry32(2));
+    expect(pairs.length).toBeLessThanOrEqual(JEV_AUDIT_PAIRS_PER_CLUSTER);
+  });
+
+  it("stops at the requested count", () => {
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => auditCandidate({ id: `a${i}`, cluster_id: "c1" })),
+      ...Array.from({ length: 5 }, (_, i) => auditCandidate({ id: `b${i}`, cluster_id: "c2" })),
+    ];
+    const pairs = sampleClusterPairs(rows, 10, 2, mulberry32(4));
+    expect(pairs.length).toBeLessThanOrEqual(2);
+  });
+
+  it("returns [] when every cluster has fewer than two members", () => {
+    const rows = [auditCandidate({ id: "1", cluster_id: "c1" }), auditCandidate({ id: "2", cluster_id: "c2" })];
+    expect(sampleClusterPairs(rows, 3, 10, mulberry32(1))).toEqual([]);
+  });
+
+  it("is deterministic under a seeded PRNG", () => {
+    const rows = Array.from({ length: 8 }, (_, i) => auditCandidate({ id: `r${i}`, cluster_id: `c${i % 3}` }));
+    const p1 = sampleClusterPairs(rows, 3, 20, mulberry32(77));
+    const p2 = sampleClusterPairs(rows, 3, 20, mulberry32(77));
+    expect(p1.map((p) => pairKey(p.a.id, p.b.id))).toEqual(p2.map((p) => pairKey(p.a.id, p.b.id)));
+  });
+
+  it("never emits a self-pair when a cluster has duplicate-id members (M6)", () => {
+    const rows = [auditCandidate({ id: "A", cluster_id: "c1" }), auditCandidate({ id: "A", cluster_id: "c1" })];
+    expect(sampleClusterPairs(rows, 3, 10, () => 0)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 21. audit mode (063) -- runJevShadow(ports, { mode: "audit" })
+// ---------------------------------------------------------------------------
+
+describe("audit mode", () => {
+  it("runs only audit_pairs then pairs, using the audit-sized limits", async () => {
+    const rec = makePorts();
+    await runJevShadow(rec.ports, { mode: "audit" });
+    const fetchOrder = rec.order.filter((name) => name.startsWith("fetch"));
+    expect(fetchOrder).toEqual(["fetchAuditPairs", "fetchPairCandidates"]);
+    expect(rec.fetchAuditPairsCalls[0]?.clusterLimit).toBe(JEV_AUDIT_CLUSTER_LIMIT);
+    expect(rec.fetchPairCandidatesCalls[0]?.limit).toBe(JEV_AUDIT_CANDIDATE_LIMIT);
+  });
+
+  it("never fetches articles, kap, title versions or tickers", async () => {
+    const rec = makePorts();
+    await runJevShadow(rec.ports, { mode: "audit" });
+    expect(rec.fetchPendingArticlesCalls).toHaveLength(0);
+    expect(rec.fetchRecentClustersCalls).toHaveLength(0);
+    expect(rec.fetchClusterMembersCalls).toHaveLength(0);
+    expect(rec.fetchPendingKapCalls).toHaveLength(0);
+    expect(rec.fetchPendingTitleVersionsCalls).toHaveLength(0);
+    expect(rec.fetchPendingTickerMatchesCalls).toHaveLength(0);
+  });
+
+  it("writes pair_positive rows with baseline 'true' and subject_id pairKey(a,b)", async () => {
+    const rec = makePorts({
+      fetchAuditPairs: async () => [
+        { id: "a1", cluster_id: "cA", title: "X", published_at: "2026-09-19T08:00:00.000Z" },
+        { id: "a2", cluster_id: "cA", title: "Y", published_at: "2026-09-19T08:10:00.000Z" },
+      ],
+    });
+    await runJevShadow(rec.ports, { mode: "audit" });
+    const rows = rec.insertPredictionsCalls.flat().filter((r) => r.task === "pair_positive");
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows[0]).toMatchObject({
+      baseline_answer: "true",
+      subject_type: "pair",
+      subject_id: pairKey("a1", "a2"),
+    });
+  });
+
+  it("writes pair_negative rows with baseline 'false' in the same run", async () => {
+    const rec = makePorts({
+      fetchAuditPairs: async () => [
+        { id: "a1", cluster_id: "cA", title: "X", published_at: "2026-09-19T08:00:00.000Z" },
+        { id: "a2", cluster_id: "cA", title: "Y", published_at: "2026-09-19T08:10:00.000Z" },
+      ],
+      fetchPairCandidates: async () => [
+        pairCandidateRow({ id: "n1", cluster_id: "cB", published_at: "2026-09-19T08:00:00.000Z" }),
+        pairCandidateRow({ id: "n2", cluster_id: "cC", published_at: "2026-09-19T08:00:00.000Z" }),
+      ],
+    });
+    const result = await runJevShadow(rec.ports, { mode: "audit" });
+    const posRows = rec.insertPredictionsCalls.flat().filter((r) => r.task === "pair_positive");
+    const negRows = rec.insertPredictionsCalls.flat().filter((r) => r.task === "pair_negative");
+    expect(posRows.length).toBeGreaterThan(0);
+    expect(negRows.length).toBeGreaterThan(0);
+    expect(negRows[0]).toMatchObject({ baseline_answer: "false" });
+    expect(result.stages.audit_pairs.rows).toBeGreaterThan(0);
+    expect(result.stages.pairs.rows).toBeGreaterThan(0);
+  });
+
+  it("packs JEV_PAIRS_PER_CALL pairs per gateway call", async () => {
+    const clusterMembers = Array.from({ length: 25 }, (_, i) => [
+      { id: `p${i}-a`, cluster_id: `g${i}`, title: "T", published_at: "2026-09-19T08:00:00.000Z" },
+      { id: `p${i}-b`, cluster_id: `g${i}`, title: "T", published_at: "2026-09-19T08:05:00.000Z" },
+    ]).flat();
+    const rec = makePorts({ fetchAuditPairs: async () => clusterMembers });
+    await runJevShadow(rec.ports, { mode: "audit" });
+    for (const req of rec.evaluateCalls) {
+      const state = req.state as { pairs?: Record<string, unknown> };
+      if (state.pairs) {
+        expect(Object.keys(state.pairs).length).toBeLessThanOrEqual(JEV_PAIRS_PER_CALL);
+      }
+    }
+  });
+
+  it("never samples more than JEV_AUDIT_PAIR_COUNT pairs in one audit run", async () => {
+    const manyClusters = Array.from({ length: JEV_AUDIT_PAIR_COUNT + 50 }, (_, i) => [
+      { id: `q${i}-a`, cluster_id: `h${i}`, title: "T", published_at: "2026-09-19T08:00:00.000Z" },
+      { id: `q${i}-b`, cluster_id: `h${i}`, title: "T", published_at: "2026-09-19T08:05:00.000Z" },
+    ]).flat();
+    const rec = makePorts({ fetchAuditPairs: async () => manyClusters });
+    await runJevShadow(rec.ports, { mode: "audit" });
+    const posRows = rec.insertPredictionsCalls.flat().filter((r) => r.task === "pair_positive");
+    expect(posRows.length).toBeLessThanOrEqual(JEV_AUDIT_PAIR_COUNT);
+  });
+
+  it("still honours the budget cap and closes the run row", async () => {
+    const clusterMembers = [
+      { id: "p0-a", cluster_id: "g0", title: "T", published_at: "2026-09-19T08:00:00.000Z" },
+      { id: "p0-b", cluster_id: "g0", title: "T", published_at: "2026-09-19T08:05:00.000Z" },
+      { id: "p1-a", cluster_id: "g1", title: "T", published_at: "2026-09-19T08:00:00.000Z" },
+      { id: "p1-b", cluster_id: "g1", title: "T", published_at: "2026-09-19T08:05:00.000Z" },
+    ];
+    const rec = makePorts({
+      fetchAuditPairs: async () => clusterMembers,
+      evaluate: async (req) => ({
+        response: { answers: validResponseFor(req).answers, usage: { inputTokens: 60, outputTokens: 5 } },
+        latencyMs: 1,
+      }),
+    });
+    const result = await runJevShadow(rec.ports, { mode: "audit", cap: 50 });
+    expect(result.status).toBe("budget_exceeded");
+    expect(rec.finishRunCalls).toHaveLength(1);
   });
 });
 

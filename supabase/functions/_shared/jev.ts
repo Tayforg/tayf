@@ -1,21 +1,28 @@
 // supabase/functions/_shared/jev.ts
 //
-// TypeSafe Jev SHADOW MODE (migration 061): the pure, runtime-agnostic half
-// of the jev-shadow Edge Function, exactly the role _shared/archive.ts plays
-// for archive-export. Everything here runs unchanged under the Deno runtime
-// (jev-shadow/index.ts) and under vitest on Node 24
-// (tests/functions/jev-shadow.test.ts) -- no Deno global APIs, no
-// supabase-js import, no `fetch` call. jev-shadow/index.ts wires a raw-fetch gateway
-// client and a Supabase service-role client into the `JevPorts` interface at
-// the bottom, so the shadow algorithm (stage order, concurrency, budget
-// guard, baseline/agree rules, row shape) is testable with plain in-memory
-// fakes -- the ArchivePorts seam, verbatim discipline.
+// TypeSafe Jev SHADOW MODE (migration 061) + "Jev şimdi" (migration 063):
+// the pure, runtime-agnostic half of the jev-shadow Edge Function, exactly
+// the role _shared/archive.ts plays for archive-export. Everything here
+// runs unchanged under the Deno runtime (jev-shadow/index.ts) and under
+// vitest on Node 24 (tests/functions/jev-shadow.test.ts) -- no Deno global
+// APIs, no supabase-js import, no `fetch` call. jev-shadow/index.ts wires a
+// raw-fetch gateway client and a Supabase service-role client into the
+// `JevPorts` interface at the bottom, so the shadow algorithm (stage order,
+// concurrency, budget guard, baseline/agree rules, row shape) is testable
+// with plain in-memory fakes -- the ArchivePorts seam, verbatim discipline.
 //
-// What this asks, per run: 12 typed questions across five subject types
-// (article, cluster, pair, KAP disclosure, title version), one gateway call
-// per subject (except pairs, which pack up to 10 per call). Every prediction
-// is stored alongside the CURRENT system's answer (the "baseline") so
-// agreement can be measured without ever feeding a reader-facing byte.
+// What this asks, per run: 15 typed questions across six subject types
+// (article, cluster, pair, KAP disclosure, title version, ticker match),
+// one gateway call per subject (except pairs, which pack up to 10 per
+// call). Every prediction is stored alongside the CURRENT system's answer
+// (the "baseline") so agreement can be measured without ever feeding a
+// reader-facing byte.
+//
+// 063 adds an "audit" run mode (asks only the two pair questions, at
+// volume, against a nightly cron so cluster precision/recall get a
+// statistically useful sample the 10-minute shadow run should not pay for)
+// and a neutral_pick stage that scores the extractive neutral-title picker
+// against Jev's own choice among a cluster's member headlines.
 
 import { sha256Hex } from "./archive.ts";
 
@@ -36,18 +43,41 @@ export const JEV_PAIR_COUNT = 20;
 export const JEV_PAIRS_PER_CALL = 10;
 export const JEV_KAP_LIMIT = 30;
 export const JEV_TITLE_LIMIT = 30;
-export const JEV_MONTHLY_TOKEN_CAP_DEFAULT = 300_000_000;
+/** Raised 3e8 -> 5e8 by migration 063 (~$21/month at the gateway market rate
+ * observed 2026-09-20) to cover the nightly audit run and the new
+ * ticker_relevance / neutral_pick shadow stages. Hand-duplicated against
+ * 063_jev_now_package.sql's jev_shadow_month_usage default -- JEV-A16 in
+ * tests/migrations/jev-shadow-parity.test.ts is the only thing keeping them
+ * equal. NOTE for operators: an explicit JEV_MONTHLY_TOKEN_CAP Edge secret
+ * overrides this default for the function but NOT for /admin's budget line,
+ * which always reads the SQL default -- unset the secret after applying 063. */
+export const JEV_MONTHLY_TOKEN_CAP_DEFAULT = 500_000_000;
 export const JEV_USD_PER_TOKEN = 42 / 1_000_000_000;
 export const JEV_BOOLEAN_THRESHOLD = 0.5;
 export const JEV_TITLE_CLAMP = 300; // chars of title sent
 export const JEV_DESC_CLAMP = 600; // chars of description sent
 export const JEV_PREVIEW_CLAMP = 240; // chars stored in state_preview
+/** ticker_relevance rows per shadow run. */
+export const JEV_TICKER_LIMIT = 60;
+/** Pairs sampled per audit task (pair_negative, pair_positive), per audit run. */
+export const JEV_AUDIT_PAIR_COUNT = 500;
+/** Cap on positive (same-cluster) pairs drawn from one cluster per audit run. */
+export const JEV_AUDIT_PAIRS_PER_CLUSTER = 3;
+/** Clusters fetchAuditPairs walks per audit run. */
+export const JEV_AUDIT_CLUSTER_LIMIT = 200;
+/** Negative-pair candidate pool size in audit mode. */
+export const JEV_AUDIT_CANDIDATE_LIMIT = 600;
+/** Must equal EXTRACTIVE_MODEL_ID in src/lib/clusters/neutral-title.ts. */
+export const JEV_NEUTRAL_MODEL_ID = "extractive-v1";
 /** Stamped into every jev_answer as `question_set`. The 2026-09-20 limits
  * test showed instruction paraphrases flip ~30% of borderline titles, so a
  * prediction is only comparable to others made with the SAME question text.
- * Bump this whenever any instructions/criteria string in the builders below
- * changes, so analyses can group by question set. */
-export const JEV_QUESTION_SET_VERSION = "2026-09-20.1";
+ * Bump this whenever any instructions/criteria string in JEV_QUESTION_REGISTRY
+ * changes, so analyses can group by question set. Migration 063 bumps this
+ * alongside the three new tasks (JEV-A20 pins this against
+ * questionRegistryHash() so a future wording change can't bump one without
+ * the other). */
+export const JEV_QUESTION_SET_VERSION = "2026-09-21.1";
 // JEV-A11 stopgap: evaluateWithRetries (index.ts) is not deadline-aware --
 // each attempt is a fresh AbortSignal.timeout(20_000) plus a retryDelayMs
 // ladder, so 5 attempts at JEV_MAX_RETRIES=4 had a ~107s worst case for a
@@ -73,6 +103,9 @@ export const JEV_TASKS = [
   "sensational",
   "cluster_member",
   "pair_negative",
+  "pair_positive",
+  "ticker_relevance",
+  "neutral_pick",
   "kap_class",
   "kap_materiality",
   "title_meaning",
@@ -81,6 +114,9 @@ export const JEV_TASKS = [
 export type JevTask = (typeof JEV_TASKS)[number];
 export type JevSubjectType = "article" | "pair" | "cluster" | "kap" | "title_version";
 export type JevRunStatus = "running" | "ok" | "partial" | "rate_limited" | "budget_exceeded" | "error";
+/** shadow: the 10-minute cron, every subject type. audit: the nightly
+ * cluster-precision/recall cron, pair questions only, at volume. */
+export type JevRunMode = "shadow" | "audit";
 
 /** Rows accumulate before insertPredictions is called; matches migration 061's design note. */
 const PREDICTION_INSERT_CHUNK = 200;
@@ -380,10 +416,66 @@ export function samplePairs(
   return out;
 }
 
+/**
+ * Groups candidates (cluster members) by cluster_id, drops clusters with
+ * fewer than 2 members, and draws at most `maxPerCluster` distinct
+ * SAME-cluster pairs per cluster (deduped on pairKey, bounded to
+ * maxPerCluster*10 attempts per cluster so it can never spin), stopping
+ * overall at `count`. Never pairs two different cluster_ids -- the mirror
+ * image of samplePairs, which never pairs the SAME cluster_id. Used by
+ * audit mode's recall check: pairs the clusterer DID put together.
+ */
+export function sampleClusterPairs(
+  rows: readonly JevPairCandidate[],
+  maxPerCluster: number,
+  count: number,
+  random: () => number,
+): JevPair[] {
+  const byCluster = new Map<string, JevPairCandidate[]>();
+  for (const row of rows) {
+    const list = byCluster.get(row.cluster_id);
+    if (list) list.push(row);
+    else byCluster.set(row.cluster_id, [row]);
+  }
+
+  const seen = new Set<string>();
+  const out: JevPair[] = [];
+
+  for (const members of byCluster.values()) {
+    if (out.length >= count) break;
+    if (members.length < 2) continue;
+
+    const maxAttempts = maxPerCluster * 10;
+    let drawn = 0;
+    for (let attempt = 0; attempt < maxAttempts && drawn < maxPerCluster && out.length < count; attempt++) {
+      const i = Math.floor(random() * members.length);
+      let j = Math.floor(random() * members.length);
+      if (j === i) j = (j + 1) % members.length;
+
+      const a = members[i];
+      const b = members[j];
+      if (!a || !b) continue;
+      if (a.id === b.id) continue;
+
+      const key = pairKey(a.id, b.id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ a, b });
+      drawn++;
+    }
+  }
+
+  return out;
+}
+
 // ---------------------------------------------------------------------------
-// Question builders -- instruction strings copied verbatim from the
-// planner's shadow_tasks list (pack.md), English instructions over Turkish
-// content, matching the verified gateway contract example.
+// Question builders -- instruction strings sourced from JEV_QUESTION_REGISTRY,
+// the single source of truth for every instructions/criteria string. Per-key
+// tasks (cluster_member, pair_negative, pair_positive, neutral_pick) store a
+// template with the literal placeholder "{key}"; the builders below do a
+// plain .replace("{key}", key). The 12 pre-063 emitted strings are
+// byte-identical to PR #69's (tests/functions/jev-shadow.test.ts,
+// "keeps every pre-063 question string byte-identical").
 // ---------------------------------------------------------------------------
 
 export interface JevArticleRow {
@@ -397,8 +489,10 @@ export interface JevArticleRow {
 
 export interface JevClusterRow {
   id: string;
-  title: string;
+  title: string; // title_tr_neutral ?? title_tr (unchanged)
   updated_at: string;
+  title_tr_neutral: string | null; // raw column, for the neutral_pick baseline
+  title_neutral_model: string | null; // "extractive-v1" | "<llm prompt id>" | null
 }
 
 export interface JevMemberRow {
@@ -424,6 +518,200 @@ export interface JevTitleRow {
   new_title: string;
 }
 
+export interface JevTickerRow {
+  article_id: string;
+  ticker: string;
+  title: string;
+  description: string | null;
+  company: string | null; // bist_companies.title, or null when unmapped
+  matched_on: string; // "alias:<alias>" | "code"
+}
+
+/**
+ * Single source of every instructions/criteria string this module sends.
+ * Per-key entries (cluster_member, pair_negative, pair_positive,
+ * neutral_pick) hold the literal "{key}" placeholder, substituted at build
+ * time. neutral_pick nests its score sub-question under criteria.score.
+ * pair_positive is a byte-identical copy of pair_negative -- only the
+ * sampling and baseline differ downstream.
+ */
+export const JEV_QUESTION_REGISTRY: Record<JevTask, { instructions: string; criteria?: unknown }> = {
+  politics: {
+    instructions:
+      "Is this Turkish news item about domestic politics, government, parties, elections, parliament, courts/justice with political actors, or foreign policy? Judge the news item in `title` and `description`, not the outlet. Not politics: sports, markets/economy with no political actor, celebrity, weather, crime with no political actor.",
+    criteria: {
+      true: "Political actors, institutions or processes are the subject of the item",
+      false: "No political actor, institution or process is the subject",
+    },
+  },
+  topic: {
+    instructions: "Which single topic best matches this Turkish news item?",
+    criteria: {
+      politics: "Government, parliament, parties, elections, courts, law-making, foreign policy",
+      economy: "Markets, companies, finance, trade, inflation, the budget as an economic (not political-process) matter",
+      other: "Anything else: sports, culture, weather, crime, celebrity, technology, health",
+    },
+  },
+  opinion: {
+    instructions:
+      "Is this an opinion piece, column or analysis expressing the writer's own judgement, rather than a straight news report of events?",
+    criteria: { true: "Column/opinion/analysis voice", false: "Straight news report" },
+  },
+  clickbait: {
+    instructions:
+      "Does this headline deliberately withhold the key fact to force a click (curiosity gap, unnamed subject, 'işte o isim', 'ne oldu şaşıracaksınız'), rather than stating what happened?",
+    criteria: { true: "The headline hides the payload", false: "The headline states what happened" },
+  },
+  framing: {
+    instructions:
+      "Whose side does the WORDING of this Turkish headline favour? Judge word choice and framing, not which actors appear.",
+    criteria: {
+      pro_government: "Wording favours government/state actors, or casts their critics unfavourably",
+      pro_opposition: "Wording favours opposition actors, or casts the government unfavourably",
+      neutral: "Reports the event without favouring either side",
+    },
+  },
+  sensational: {
+    instructions: "How sensational is the wording of this headline?",
+    criteria: [
+      "Plain, factual wording",
+      "Slightly heightened wording",
+      "Clearly dramatic wording (şok, skandal, kan donduran)",
+      "Extreme tabloid wording",
+    ],
+  },
+  cluster_member: {
+    instructions:
+      "Does headline `{key}` report the SAME news event as the event named in `event`? Same event means the same incident, announcement or decision — not merely the same topic, the same people, or a follow-up story on a different day.",
+    criteria: { true: "Same concrete event", false: "Different event, even if related" },
+  },
+  pair_negative: {
+    instructions:
+      "Do the two headlines in `pairs.{key}` report the SAME news event (same incident, announcement or decision), or merely the same topic / different events?",
+    criteria: { true: "Same concrete event", false: "Different events" },
+  },
+  pair_positive: {
+    instructions:
+      "Do the two headlines in `pairs.{key}` report the SAME news event (same incident, announcement or decision), or merely the same topic / different events?",
+    criteria: { true: "Same concrete event", false: "Different events" },
+  },
+  ticker_relevance: {
+    instructions:
+      "Is this news item substantively about the company named in `company` (ticker `ticker`) — its business, shares, filings or people — rather than merely containing a word that happens to match its name or alias?",
+    criteria: {
+      true: "The item is about that company's business, shares, filings or people",
+      false: "The name merely appears, or matches a different subject entirely",
+    },
+  },
+  neutral_pick: {
+    instructions: "Does headline `{key}` state the concrete event plainly, without opinion, teaser or rhetorical question?",
+    criteria: {
+      true: "Plain statement of the concrete event",
+      false: "Opinion, teaser, rhetorical question or withheld payload",
+      score: {
+        instructions: "How sensational is the wording of headline `{key}`?",
+        criteria: [
+          "Plain, factual wording",
+          "Slightly heightened wording",
+          "Clearly dramatic wording (şok, skandal, kan donduran)",
+          "Extreme tabloid wording",
+        ],
+      },
+    },
+  },
+  kap_class: {
+    instructions: "Which KAP disclosure class does this Turkish filing belong to?",
+    criteria: {
+      ODA: "Özel Durum Açıklaması — a material-event disclosure: contract, investment, litigation, management change, capital action",
+      DKB: "Düzenli Kamuyu Bilgilendirme — routine periodic information: buy-back reports, investor presentations, general assembly notices",
+      DG: "Diğer — other filings that fit none of the other classes",
+      FR: "Finansal Rapor — a financial statement or interim/annual financial report",
+    },
+  },
+  kap_materiality: {
+    instructions: "How likely is this filing to move the company's share price?",
+    criteria: [
+      "Administrative or routine; no price impact expected",
+      "Minor; marginal impact at most",
+      "Notable; a plausible single-digit move",
+      "Highly material; a large move is likely",
+    ],
+  },
+  title_meaning: {
+    instructions:
+      "Did the edit from `before` to `after` change the FACTUAL meaning of the headline — a different claim, number, actor, or an added/removed allegation — as opposed to a purely cosmetic edit such as a typo fix, punctuation, shortening or style change?",
+    criteria: { true: "The factual claim changed", false: "Cosmetic edit only; the claim is the same" },
+  },
+  title_edit_kind: {
+    instructions: "What kind of edit turned `before` into `after`?",
+    criteria: {
+      correction: "Fixes a factual error in the earlier headline",
+      softening: "Makes the claim weaker, vaguer, or less damaging to someone",
+      hardening: "Makes the claim stronger, sharper, or more damaging to someone",
+      cosmetic: "Typo, punctuation, length or style only — the claim is unchanged",
+    },
+  },
+};
+
+/**
+ * SYNCHRONOUS in the original plan, but sha256Hex (archive.ts) is async and
+ * this module must never touch a runtime crypto global directly (Deno vs.
+ * Node parity) -- so, per pack.md's orchestrator override #1 (overrides win
+ * over the brief/contract), this is ASYNC and delegates to the existing
+ * sha256Hex rather than hand-rolling SHA-256. The parity test
+ * (tests/migrations/jev-shadow-parity.test.ts, JEV-A20) awaits it and pins
+ * the literal hash next to JEV_QUESTION_SET_VERSION.
+ */
+export async function questionRegistryHash(): Promise<string> {
+  return sha256Hex(canonicalJson(JEV_QUESTION_REGISTRY));
+}
+
+function boolQuestion(task: JevTask): JevQuestion {
+  const entry = JEV_QUESTION_REGISTRY[task];
+  const c = (entry.criteria ?? {}) as { true?: string; false?: string };
+  return { type: "boolean", instructions: entry.instructions, criteria: { true: c.true, false: c.false } };
+}
+
+function choiceQuestion(task: JevTask): JevQuestion {
+  const entry = JEV_QUESTION_REGISTRY[task];
+  return { type: "choice", instructions: entry.instructions, criteria: entry.criteria as Record<string, string | null> };
+}
+
+function scoreQuestion(task: JevTask): JevQuestion {
+  const entry = JEV_QUESTION_REGISTRY[task];
+  return { type: "score", instructions: entry.instructions, criteria: entry.criteria as Array<string | null> };
+}
+
+function keyedBoolQuestion(task: "cluster_member" | "pair_negative" | "pair_positive", key: string): JevQuestion {
+  const entry = JEV_QUESTION_REGISTRY[task];
+  const c = (entry.criteria ?? {}) as { true?: string; false?: string };
+  return {
+    type: "boolean",
+    instructions: entry.instructions.replace("{key}", key),
+    criteria: { true: c.true, false: c.false },
+  };
+}
+
+function neutralPickBoolQuestion(key: string): JevQuestion {
+  const entry = JEV_QUESTION_REGISTRY.neutral_pick;
+  const c = entry.criteria as { true: string; false: string };
+  return {
+    type: "boolean",
+    instructions: entry.instructions.replace("{key}", key),
+    criteria: { true: c.true, false: c.false },
+  };
+}
+
+function neutralPickScoreQuestion(key: string): JevQuestion {
+  const entry = JEV_QUESTION_REGISTRY.neutral_pick;
+  const c = entry.criteria as { score: { instructions: string; criteria: Array<string | null> } };
+  return {
+    type: "score",
+    instructions: c.score.instructions.replace("{key}", key),
+    criteria: c.score.criteria,
+  };
+}
+
 /** state {title, description}; six questions keyed politics|topic|opinion|clickbait|framing|sensational.
  * Deliberately NO outlet slug and NO timestamp in the state: the 2026-09-20
  * limits test showed the framing answer tracks the named entity rather than
@@ -437,98 +725,81 @@ export function buildArticleCall(a: JevArticleRow): JevRequest {
   };
 
   const questions: Record<string, JevQuestion> = {
-    politics: {
-      type: "boolean",
-      instructions:
-        "Is this Turkish news item about domestic politics, government, parties, elections, parliament, courts/justice with political actors, or foreign policy? Judge the news item in `title` and `description`, not the outlet. Not politics: sports, markets/economy with no political actor, celebrity, weather, crime with no political actor.",
-      criteria: {
-        true: "Political actors, institutions or processes are the subject of the item",
-        false: "No political actor, institution or process is the subject",
-      },
-    },
-    topic: {
-      type: "choice",
-      instructions: "Which single topic best matches this Turkish news item?",
-      criteria: {
-        politics: "Government, parliament, parties, elections, courts, law-making, foreign policy",
-        economy: "Markets, companies, finance, trade, inflation, the budget as an economic (not political-process) matter",
-        other: "Anything else: sports, culture, weather, crime, celebrity, technology, health",
-      },
-    },
-    opinion: {
-      type: "boolean",
-      instructions:
-        "Is this an opinion piece, column or analysis expressing the writer's own judgement, rather than a straight news report of events?",
-      criteria: { true: "Column/opinion/analysis voice", false: "Straight news report" },
-    },
-    clickbait: {
-      type: "boolean",
-      instructions:
-        "Does this headline deliberately withhold the key fact to force a click (curiosity gap, unnamed subject, 'işte o isim', 'ne oldu şaşıracaksınız'), rather than stating what happened?",
-      criteria: { true: "The headline hides the payload", false: "The headline states what happened" },
-    },
-    framing: {
-      type: "choice",
-      instructions:
-        "Whose side does the WORDING of this Turkish headline favour? Judge word choice and framing, not which actors appear.",
-      criteria: {
-        pro_government: "Wording favours government/state actors, or casts their critics unfavourably",
-        pro_opposition: "Wording favours opposition actors, or casts the government unfavourably",
-        neutral: "Reports the event without favouring either side",
-      },
-    },
-    sensational: {
-      type: "score",
-      instructions: "How sensational is the wording of this headline?",
-      criteria: [
-        "Plain, factual wording",
-        "Slightly heightened wording",
-        "Clearly dramatic wording (şok, skandal, kan donduran)",
-        "Extreme tabloid wording",
-      ],
-    },
+    politics: boolQuestion("politics"),
+    topic: choiceQuestion("topic"),
+    opinion: boolQuestion("opinion"),
+    clickbait: boolQuestion("clickbait"),
+    framing: choiceQuestion("framing"),
+    sensational: scoreQuestion("sensational"),
   };
 
   return { state, questions };
 }
 
+function orderMembers(members: readonly JevMemberRow[]): JevMemberRow[] {
+  return [...members]
+    .sort((x, y) => x.published_at.localeCompare(y.published_at))
+    .slice(0, JEV_CLUSTER_MEMBER_MAX);
+}
+
 /**
- * keys maps m1..m12 -> article_id; members capped at JEV_CLUSTER_MEMBER_MAX
- * ordered by published_at asc so the seed is always included; returns
- * keys = {} when members.length < 2 (caller skips).
+ * state.headlines always covers EVERY member in the call (m1..mN,
+ * published_at asc, capped at JEV_CLUSTER_MEMBER_MAX). `keys` = m<k>
+ * questions actually asked (members not in opts.skipMemberIds). `neutralKeys`
+ * = every m<k> -> article_id when opts.neutralPick, else {}. Caller skips
+ * the cluster only when BOTH keys and neutralKeys come back empty.
  */
 export function buildClusterCall(
   c: JevClusterRow,
   members: readonly JevMemberRow[],
-): { request: JevRequest; keys: Record<string, string> } {
-  const ordered = [...members].sort((x, y) => x.published_at.localeCompare(y.published_at)).slice(0, JEV_CLUSTER_MEMBER_MAX);
+  opts: { neutralPick?: boolean; skipMemberIds?: ReadonlySet<string> } = {},
+): { request: JevRequest; keys: Record<string, string>; neutralKeys: Record<string, string> } {
+  const ordered = orderMembers(members);
 
   if (ordered.length < 2) {
-    return { request: { state: {}, questions: {} }, keys: {} };
+    return { request: { state: {}, questions: {} }, keys: {}, neutralKeys: {} };
   }
+
+  const skip = opts.skipMemberIds ?? new Set<string>();
+  const neutralPick = opts.neutralPick ?? false;
 
   const headlines: Record<string, string> = {};
   const keys: Record<string, string> = {};
+  const neutralKeys: Record<string, string> = {};
   const questions: Record<string, JevQuestion> = {};
 
   ordered.forEach((m, i) => {
     const key = `m${i + 1}`;
     headlines[key] = clamp(m.title, JEV_TITLE_CLAMP);
-    keys[key] = m.article_id;
-    questions[key] = {
-      type: "boolean",
-      instructions:
-        `Does headline \`${key}\` report the SAME news event as the event named in \`event\`? Same event means the same incident, announcement or decision — not merely the same topic, the same people, or a follow-up story on a different day.`,
-      criteria: { true: "Same concrete event", false: "Different event, even if related" },
-    };
+
+    if (!skip.has(m.article_id)) {
+      keys[key] = m.article_id;
+      questions[key] = keyedBoolQuestion("cluster_member", key);
+    }
+
+    if (neutralPick) {
+      neutralKeys[key] = m.article_id;
+      questions[`f${i + 1}`] = neutralPickBoolQuestion(key);
+      questions[`s${i + 1}`] = neutralPickScoreQuestion(key);
+    }
   });
 
+  if (Object.keys(keys).length === 0 && Object.keys(neutralKeys).length === 0) {
+    return { request: { state: {}, questions: {} }, keys: {}, neutralKeys: {} };
+  }
+
   const state = { event: clamp(c.title, JEV_TITLE_CLAMP), headlines };
-  return { request: { state, questions }, keys };
+  return { request: { state, questions }, keys, neutralKeys };
 }
 
-/** <= JEV_PAIRS_PER_CALL pairs keyed p1..p10. */
-export function buildPairCall(pairs: readonly JevPair[]): { request: JevRequest; keys: Record<string, JevPair> } {
+/** <= JEV_PAIRS_PER_CALL pairs keyed p1..p10. `task` selects which registry
+ * entry supplies the question text -- pair_positive is byte-identical to
+ * pair_negative, so the emitted request is the same either way. Defaults to
+ * "pair_negative", which keeps every PR #69 call site compiling. */
+export function buildPairCall(
+  pairs: readonly JevPair[],
+  task: "pair_negative" | "pair_positive" = "pair_negative",
+): { request: JevRequest; keys: Record<string, JevPair> } {
   const limited = pairs.slice(0, JEV_PAIRS_PER_CALL);
   const pairsState: Record<string, { a: string; b: string }> = {};
   const keys: Record<string, JevPair> = {};
@@ -538,12 +809,7 @@ export function buildPairCall(pairs: readonly JevPair[]): { request: JevRequest;
     const key = `p${i + 1}`;
     pairsState[key] = { a: clamp(pair.a.title, JEV_TITLE_CLAMP), b: clamp(pair.b.title, JEV_TITLE_CLAMP) };
     keys[key] = pair;
-    questions[key] = {
-      type: "boolean",
-      instructions:
-        `Do the two headlines in \`pairs.${key}\` report the SAME news event (same incident, announcement or decision), or merely the same topic / different events?`,
-      criteria: { true: "Same concrete event", false: "Different events" },
-    };
+    questions[key] = keyedBoolQuestion(task, key);
   });
 
   return { request: { state: { pairs: pairsState }, questions }, keys };
@@ -559,26 +825,8 @@ export function buildKapCall(d: JevKapRow): JevRequest {
   };
 
   const questions: Record<string, JevQuestion> = {
-    kap_class: {
-      type: "choice",
-      instructions: "Which KAP disclosure class does this Turkish filing belong to?",
-      criteria: {
-        ODA: "Özel Durum Açıklaması — a material-event disclosure: contract, investment, litigation, management change, capital action",
-        DKB: "Düzenli Kamuyu Bilgilendirme — routine periodic information: buy-back reports, investor presentations, general assembly notices",
-        DG: "Diğer — other filings that fit none of the other classes",
-        FR: "Finansal Rapor — a financial statement or interim/annual financial report",
-      },
-    },
-    kap_materiality: {
-      type: "score",
-      instructions: "How likely is this filing to move the company's share price?",
-      criteria: [
-        "Administrative or routine; no price impact expected",
-        "Minor; marginal impact at most",
-        "Notable; a plausible single-digit move",
-        "Highly material; a large move is likely",
-      ],
-    },
+    kap_class: choiceQuestion("kap_class"),
+    kap_materiality: scoreQuestion("kap_materiality"),
   };
 
   return { state, questions };
@@ -589,25 +837,87 @@ export function buildTitleCall(v: JevTitleRow): JevRequest {
   const state = { before: clamp(v.old_title, JEV_TITLE_CLAMP), after: clamp(v.new_title, JEV_TITLE_CLAMP) };
 
   const questions: Record<string, JevQuestion> = {
-    title_meaning: {
-      type: "boolean",
-      instructions:
-        "Did the edit from `before` to `after` change the FACTUAL meaning of the headline — a different claim, number, actor, or an added/removed allegation — as opposed to a purely cosmetic edit such as a typo fix, punctuation, shortening or style change?",
-      criteria: { true: "The factual claim changed", false: "Cosmetic edit only; the claim is the same" },
-    },
-    title_edit_kind: {
-      type: "choice",
-      instructions: "What kind of edit turned `before` into `after`?",
-      criteria: {
-        correction: "Fixes a factual error in the earlier headline",
-        softening: "Makes the claim weaker, vaguer, or less damaging to someone",
-        hardening: "Makes the claim stronger, sharper, or more damaging to someone",
-        cosmetic: "Typo, punctuation, length or style only — the claim is unchanged",
-      },
-    },
+    title_meaning: boolQuestion("title_meaning"),
+    title_edit_kind: choiceQuestion("title_edit_kind"),
   };
 
   return { state, questions };
+}
+
+/** state {title, description, ticker, company, matched_on}; one boolean question keyed ticker_relevance. */
+export function buildTickerCall(t: JevTickerRow): JevRequest {
+  const state = {
+    title: clamp(t.title, JEV_TITLE_CLAMP),
+    description: clamp(t.description, JEV_DESC_CLAMP),
+    ticker: t.ticker,
+    company: t.company,
+    matched_on: t.matched_on,
+  };
+
+  const questions: Record<string, JevQuestion> = {
+    ticker_relevance: boolQuestion("ticker_relevance"),
+  };
+
+  return { state, questions };
+}
+
+/**
+ * Among keys whose f<k> probability >= JEV_BOOLEAN_THRESHOLD, picks the
+ * lowest s<k> score; a tie is broken by earliest published_at. When no key
+ * qualifies (no f<k> reached the threshold), falls back to the lowest s<k>
+ * overall (same tiebreak). When no s<k> answer came back at all, returns
+ * articleId: null (caller must write no neutral_pick row).
+ */
+export function pickNeutralArticleId(
+  neutralKeys: Record<string, string>,
+  order: readonly { key: string; published_at: string }[],
+  answers: Record<string, JevAnswer>,
+): { articleId: string | null; picks: Record<string, { s: number | null; f: number | null }> } {
+  const publishedAtByKey = new Map(order.map((o) => [o.key, o.published_at]));
+  const picks: Record<string, { s: number | null; f: number | null }> = {};
+
+  interface Entry {
+    key: string;
+    articleId: string;
+    s: number;
+    f: number | null;
+    publishedAt: string;
+  }
+  const withScore: Entry[] = [];
+
+  for (const key of Object.keys(neutralKeys)) {
+    const suffix = key.slice(1);
+    const fAnswer = answers[`f${suffix}`];
+    const sAnswer = answers[`s${suffix}`];
+    const f = fAnswer && fAnswer.type === "boolean" ? fAnswer.probability : null;
+    const s = sAnswer && sAnswer.type === "score" ? sAnswer.score : null;
+    picks[key] = { s, f };
+    if (s !== null) {
+      withScore.push({
+        key,
+        articleId: neutralKeys[key]!,
+        s,
+        f,
+        publishedAt: publishedAtByKey.get(key) ?? "",
+      });
+    }
+  }
+
+  if (withScore.length === 0) {
+    return { articleId: null, picks };
+  }
+
+  function lowest(candidates: Entry[]): Entry {
+    return candidates.reduce((best, cur) => {
+      if (cur.s < best.s) return cur;
+      if (cur.s === best.s && cur.publishedAt < best.publishedAt) return cur;
+      return best;
+    });
+  }
+
+  const qualifying = withScore.filter((e) => e.f !== null && e.f >= JEV_BOOLEAN_THRESHOLD);
+  const winner = lowest(qualifying.length > 0 ? qualifying : withScore);
+  return { articleId: winner.articleId, picks };
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +971,8 @@ export function predictionRow(args: {
   agree: boolean | null;
   latencyMs: number;
   runId: number;
+  /** Shallow-merged into jev_answer.answer -- e.g. neutral_pick's { picks }. */
+  answerExtra?: Record<string, unknown>;
 }): JevPredictionRow {
   const jevProb =
     args.answer.type === "boolean"
@@ -681,7 +993,7 @@ export function predictionRow(args: {
     cluster_id: args.clusterId ?? null,
     state_hash: args.stateHash,
     jev_answer: {
-      answer: args.answer,
+      answer: args.answerExtra ? { ...args.answer, ...args.answerExtra } : args.answer,
       question_id: args.questionId,
       question_set: JEV_QUESTION_SET_VERSION,
       call_id: args.callId,
@@ -727,7 +1039,8 @@ export interface JevPorts {
   /** Anti-join: which of these `${task}` subject_ids already have a row in
    * jev_shadow_predictions. Backed by index.ts's chunked anti_join()
    * helper (JEV-A5). Used by the cluster stage (JEV-A10) since
-   * fetchClusterMembers has no per-task notion of "already asked". */
+   * fetchClusterMembers has no per-task notion of "already asked", and
+   * (063) by the neutral_pick anti-join over extractive-v1 clusters. */
   fetchSeenSubjects(task: string, subjectIds: readonly string[]): Promise<Set<string>>;
   fetchPendingArticles(sinceIso: string, limit: number): Promise<JevArticleRow[]>;
   fetchRecentClusters(sinceIso: string, limit: number): Promise<JevClusterRow[]>;
@@ -735,6 +1048,16 @@ export interface JevPorts {
   fetchPairCandidates(sinceIso: string, limit: number): Promise<JevPairCandidate[]>;
   fetchPendingKap(sinceIso: string, limit: number): Promise<JevKapRow[]>;
   fetchPendingTitleVersions(sinceIso: string, limit: number): Promise<JevTitleRow[]>;
+  /** (063) Members of clusters updated since sinceIso with >= 2 members, as
+   * JevPairCandidate { id: article_id, cluster_id, title, published_at }.
+   * Pair construction is pure and lives in sampleClusterPairs -- the port
+   * only fetches. */
+  fetchAuditPairs(sinceIso: string, clusterLimit: number): Promise<JevPairCandidate[]>;
+  /** (063) Pending article_tickers matches, ANTI-JOINED on task
+   * "ticker_relevance" over `${article_id}:${ticker}` BEFORE returning, or
+   * every run re-pays the gateway for rows the upsert then silently
+   * discards (the JEV-A10 lesson). */
+  fetchPendingTickerMatches(sinceIso: string, limit: number): Promise<JevTickerRow[]>;
   /**
    * Optional per-failure hook (JEV-A13): called for every callOnce failure
    * that is NOT a rate limit (a rate limit is already visible via the run's
@@ -744,10 +1067,11 @@ export interface JevPorts {
    * UNVERIFIED risk specifically calls for watching this.
    *
    * SECURITY, non-negotiable, runtime-agnostic (this file must stay free of
-   * Deno./fetch(/npm: -- the "[W1] zero occurrences" acceptance bullet):
-   * an implementation must log only the error's name/class, HTTP status and
-   * attempt count -- NEVER the gateway's raw response text/JSON (a 401 body
-   * embeds an API-key-creation URL, a 400 echoes request paths).
+   * any Deno-global, raw-fetch or npm-specifier reference -- the "[W1] zero
+   * occurrences" acceptance bullet): an implementation must log only the
+   * error's name/class, HTTP status and attempt count -- NEVER the
+   * gateway's raw response text/JSON (a 401 body embeds an
+   * API-key-creation URL, a 400 echoes request paths).
    */
   onError?(stage: string, err: unknown): void;
 }
@@ -765,7 +1089,7 @@ export interface JevShadowResult {
   duration_ms: number;
 }
 
-type StageName = "articles" | "clusters" | "pairs" | "kap" | "title_versions";
+type StageName = "articles" | "clusters" | "pairs" | "kap" | "title_versions" | "tickers" | "audit_pairs";
 
 interface StageStats {
   calls: number;
@@ -780,6 +1104,7 @@ interface RunCtx {
   t0: number;
   deadlineMs: number;
   cap: number;
+  mode: JevRunMode;
   monthTokens: number;
   calls: number;
   errors: number;
@@ -799,13 +1124,14 @@ function emptyStageStats(): StageStats {
   return { calls: 0, rows: 0, errors: 0, skipped: 0 };
 }
 
-function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number, cap: number): RunCtx {
+function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number, cap: number, mode: JevRunMode): RunCtx {
   return {
     ports,
     runId,
     t0,
     deadlineMs,
     cap,
+    mode,
     monthTokens: 0,
     calls: 0,
     errors: 0,
@@ -821,6 +1147,8 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
       pairs: emptyStageStats(),
       kap: emptyStageStats(),
       title_versions: emptyStageStats(),
+      tickers: emptyStageStats(),
+      audit_pairs: emptyStageStats(),
     },
   };
 }
@@ -1051,6 +1379,49 @@ function buildClusterRows(
   return rows;
 }
 
+function computeNeutralBaseline(members: readonly JevMemberRow[], titleTrNeutral: string | null): string {
+  const target = (titleTrNeutral ?? "").trim();
+  const match = members.find((m) => m.title.trim() === target);
+  return match ? match.article_id : "unknown";
+}
+
+function buildNeutralPickRow(
+  runId: number,
+  cluster: JevClusterRow,
+  pickedArticleId: string | null,
+  picks: Record<string, { s: number | null; f: number | null }>,
+  members: readonly JevMemberRow[],
+  response: JevResponse,
+  callId: string,
+  hash: string,
+  preview: string,
+  latencyMs: number,
+): JevPredictionRow | null {
+  if (pickedArticleId === null) return null;
+
+  const baselineArticleId = computeNeutralBaseline(members, cluster.title_tr_neutral);
+  const agree = baselineArticleId === "unknown" ? null : baselineArticleId === pickedArticleId;
+
+  return predictionRow({
+    task: "neutral_pick",
+    subjectType: "cluster",
+    subjectId: cluster.id,
+    articleId: null,
+    clusterId: cluster.id,
+    stateHash: hash,
+    preview,
+    questionId: "neutral_pick",
+    callId,
+    answer: { type: "choice", choice: pickedArticleId },
+    answerExtra: { picks },
+    response,
+    baseline: baselineArticleId,
+    agree,
+    latencyMs,
+    runId,
+  });
+}
+
 function buildPairRows(
   runId: number,
   keys: Record<string, JevPair>,
@@ -1059,14 +1430,17 @@ function buildPairRows(
   hash: string,
   preview: string,
   latencyMs: number,
+  task: "pair_negative" | "pair_positive" = "pair_negative",
 ): JevPredictionRow[] {
+  const baselineBool = task === "pair_positive";
+  const baseline = baselineBool ? "true" : "false";
   const rows: JevPredictionRow[] = [];
   for (const [key, pair] of Object.entries(keys)) {
     const answer = response.answers[key];
     if (!answer || answer.type !== "boolean") continue;
     rows.push(
       predictionRow({
-        task: "pair_negative",
+        task,
         subjectType: "pair",
         subjectId: pairKey(pair.a.id, pair.b.id),
         articleId: null,
@@ -1077,8 +1451,8 @@ function buildPairRows(
         callId,
         answer,
         response,
-        baseline: "false",
-        agree: booleanAgrees(answer.probability, false),
+        baseline,
+        agree: booleanAgrees(answer.probability, baselineBool),
         latencyMs,
         runId,
       }),
@@ -1195,6 +1569,41 @@ function buildTitleRows(
   return rows;
 }
 
+function buildTickerRows(
+  runId: number,
+  t: JevTickerRow,
+  response: JevResponse,
+  callId: string,
+  hash: string,
+  preview: string,
+  latencyMs: number,
+): JevPredictionRow[] {
+  const rows: JevPredictionRow[] = [];
+  const answer = response.answers.ticker_relevance;
+  if (answer && answer.type === "boolean") {
+    rows.push(
+      predictionRow({
+        task: "ticker_relevance",
+        subjectType: "article",
+        subjectId: `${t.article_id}:${t.ticker}`,
+        articleId: t.article_id,
+        clusterId: null,
+        stateHash: hash,
+        preview,
+        questionId: "ticker_relevance",
+        callId,
+        answer,
+        response,
+        baseline: "true",
+        agree: booleanAgrees(answer.probability, true),
+        latencyMs,
+        runId,
+      }),
+    );
+  }
+  return rows;
+}
+
 // --- per-stage runners --------------------------------------------------------
 
 async function runArticlesStage(ctx: RunCtx, sinceIso: string): Promise<void> {
@@ -1237,12 +1646,23 @@ async function runClustersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
   const candidateSubjectIds = members.map((m) => `${m.cluster_id}:${m.article_id}`);
   const seen = await ctx.ports.fetchSeenSubjects("cluster_member", candidateSubjectIds);
 
+  // (063) neutral_pick anti-join: one pick per cluster, ever -- batched over
+  // every extractive-v1 cluster in this window, alongside the cluster_member
+  // anti-join above.
+  const extractiveClusterIds = clusters
+    .filter((c) => c.title_neutral_model === JEV_NEUTRAL_MODEL_ID)
+    .map((c) => c.id);
+  const seenNeutral = await ctx.ports.fetchSeenSubjects("neutral_pick", extractiveClusterIds);
+
   await processStage(ctx, "clusters", clusters, async (cluster) => {
-    const unseenMembers = (byCluster.get(cluster.id) ?? []).filter(
-      (m) => !seen.has(`${cluster.id}:${m.article_id}`),
+    const allMembers = byCluster.get(cluster.id) ?? [];
+    const skipMemberIds = new Set(
+      allMembers.filter((m) => seen.has(`${cluster.id}:${m.article_id}`)).map((m) => m.article_id),
     );
-    const { request, keys } = buildClusterCall(cluster, unseenMembers);
-    if (Object.keys(keys).length === 0) {
+    const neutralPick = cluster.title_neutral_model === JEV_NEUTRAL_MODEL_ID && !seenNeutral.has(cluster.id);
+
+    const { request, keys, neutralKeys } = buildClusterCall(cluster, allMembers, { neutralPick, skipMemberIds });
+    if (Object.keys(keys).length === 0 && Object.keys(neutralKeys).length === 0) {
       ctx.stages.clusters.skipped += 1;
       return;
     }
@@ -1256,14 +1676,34 @@ async function runClustersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
     const preview = statePreview(request.state);
     const callId = nextCallId(ctx);
     const rows = buildClusterRows(ctx.runId, cluster, keys, result.response, callId, hash, preview, result.latencyMs);
+
+    if (Object.keys(neutralKeys).length > 0) {
+      const ordered = orderMembers(allMembers);
+      const order = ordered.map((m, i) => ({ key: `m${i + 1}`, published_at: m.published_at }));
+      const { articleId, picks } = pickNeutralArticleId(neutralKeys, order, result.response.answers);
+      const neutralRow = buildNeutralPickRow(
+        ctx.runId,
+        cluster,
+        articleId,
+        picks,
+        ordered,
+        result.response,
+        callId,
+        hash,
+        preview,
+        result.latencyMs,
+      );
+      if (neutralRow) rows.push(neutralRow);
+    }
+
     ctx.stages.clusters.rows += rows.length;
     await pushRows(ctx, rows);
   });
 }
 
-async function runPairsStage(ctx: RunCtx, sinceIso: string): Promise<void> {
-  const candidates = await ctx.ports.fetchPairCandidates(sinceIso, PAIR_CANDIDATE_FETCH_LIMIT);
-  const pairs = samplePairs(candidates, JEV_PAIR_COUNT, ctx.ports.random);
+async function runPairsStage(ctx: RunCtx, sinceIso: string, sampleCount: number, candidateLimit: number): Promise<void> {
+  const candidates = await ctx.ports.fetchPairCandidates(sinceIso, candidateLimit);
+  const pairs = samplePairs(candidates, sampleCount, ctx.ports.random);
   if (pairs.length === 0) {
     // Too few candidates (or too few distinct same-day cluster pairs) to
     // sample anything this run -- mark it explicitly rather than returning
@@ -1291,6 +1731,37 @@ async function runPairsStage(ctx: RunCtx, sinceIso: string): Promise<void> {
     const callId = nextCallId(ctx);
     const rows = buildPairRows(ctx.runId, keys, result.response, callId, hash, preview, result.latencyMs);
     ctx.stages.pairs.rows += rows.length;
+    await pushRows(ctx, rows);
+  });
+}
+
+/** (063) audit mode's recall stage: pairs the clusterer DID put together, asked as task "pair_positive". */
+async function runAuditPairsStage(ctx: RunCtx, sinceIso: string): Promise<void> {
+  const rows = await ctx.ports.fetchAuditPairs(sinceIso, JEV_AUDIT_CLUSTER_LIMIT);
+  const pairs = sampleClusterPairs(rows, JEV_AUDIT_PAIRS_PER_CLUSTER, JEV_AUDIT_PAIR_COUNT, ctx.ports.random);
+  if (pairs.length === 0) {
+    ctx.stages.audit_pairs.skipped += 1;
+    return;
+  }
+
+  const chunks: JevPair[][] = [];
+  for (let i = 0; i < pairs.length; i += JEV_PAIRS_PER_CALL) {
+    chunks.push(pairs.slice(i, i + JEV_PAIRS_PER_CALL));
+  }
+
+  await processStage(ctx, "audit_pairs", chunks, async (chunk) => {
+    const { request, keys } = buildPairCall(chunk, "pair_positive");
+    const result = await callOnce(ctx, "audit_pairs", request);
+    if (!result) {
+      ctx.stages.audit_pairs.errors += 1;
+      return;
+    }
+    ctx.stages.audit_pairs.calls += 1;
+    const hash = await stateHash(request.state);
+    const preview = statePreview(request.state);
+    const callId = nextCallId(ctx);
+    const rows = buildPairRows(ctx.runId, keys, result.response, callId, hash, preview, result.latencyMs, "pair_positive");
+    ctx.stages.audit_pairs.rows += rows.length;
     await pushRows(ctx, rows);
   });
 }
@@ -1333,6 +1804,25 @@ async function runTitleStage(ctx: RunCtx, sinceIso: string): Promise<void> {
   });
 }
 
+async function runTickersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
+  const items = await ctx.ports.fetchPendingTickerMatches(sinceIso, JEV_TICKER_LIMIT);
+  await processStage(ctx, "tickers", items, async (t) => {
+    const request = buildTickerCall(t);
+    const result = await callOnce(ctx, "tickers", request);
+    if (!result) {
+      ctx.stages.tickers.errors += 1;
+      return;
+    }
+    ctx.stages.tickers.calls += 1;
+    const hash = await stateHash(request.state);
+    const preview = statePreview(request.state);
+    const callId = nextCallId(ctx);
+    const rows = buildTickerRows(ctx.runId, t, result.response, callId, hash, preview, result.latencyMs);
+    ctx.stages.tickers.rows += rows.length;
+    await pushRows(ctx, rows);
+  });
+}
+
 const HOUR_MS = 60 * 60 * 1000;
 
 async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void> {
@@ -1340,13 +1830,20 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
   const sinceIso = new Date(nowMs - 24 * HOUR_MS).toISOString();
   const clusterSinceIso = new Date(nowMs - HOUR_MS).toISOString();
 
-  const stageDefs: Array<{ name: StageName; run: () => Promise<void> }> = [
-    { name: "articles", run: () => runArticlesStage(ctx, sinceIso) },
-    { name: "clusters", run: () => runClustersStage(ctx, clusterSinceIso) },
-    { name: "pairs", run: () => runPairsStage(ctx, sinceIso) },
-    { name: "kap", run: () => runKapStage(ctx, sinceIso) },
-    { name: "title_versions", run: () => runTitleStage(ctx, sinceIso) },
-  ];
+  const stageDefs: Array<{ name: StageName; run: () => Promise<void> }> =
+    ctx.mode === "audit"
+      ? [
+          { name: "audit_pairs", run: () => runAuditPairsStage(ctx, sinceIso) },
+          { name: "pairs", run: () => runPairsStage(ctx, sinceIso, JEV_AUDIT_PAIR_COUNT, JEV_AUDIT_CANDIDATE_LIMIT) },
+        ]
+      : [
+          { name: "articles", run: () => runArticlesStage(ctx, sinceIso) },
+          { name: "clusters", run: () => runClustersStage(ctx, clusterSinceIso) },
+          { name: "pairs", run: () => runPairsStage(ctx, sinceIso, JEV_PAIR_COUNT, PAIR_CANDIDATE_FETCH_LIMIT) },
+          { name: "kap", run: () => runKapStage(ctx, sinceIso) },
+          { name: "title_versions", run: () => runTitleStage(ctx, sinceIso) },
+          { name: "tickers", run: () => runTickersStage(ctx, sinceIso) },
+        ];
 
   for (const { name, run } of stageDefs) {
     if (ctx.stopReason) break;
@@ -1382,10 +1879,12 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
  *  - monthTokens(cap) FIRST (before startRun). If exceeded: open a run row,
  *    close it immediately with status 'budget_exceeded', calls 0, note
  *    'monthly cap reached', make ZERO evaluate() calls.
- *  - Stages run articles -> clusters -> pairs -> kap -> title_versions, each
- *    with its own deadline check before it starts and between batches.
- *    Hitting the deadline stops cleanly with status 'partial' (never throws
- *    out of this function).
+ *  - Shadow mode stages run articles -> clusters -> pairs -> kap ->
+ *    title_versions -> tickers; audit mode runs audit_pairs -> pairs only,
+ *    never touching the other five ports. Each stage checks its own
+ *    deadline before it starts and between batches. Hitting the deadline
+ *    stops cleanly with status 'partial' (never throws out of this
+ *    function).
  *  - At most JEV_CONCURRENCY evaluate() calls in flight per stage.
  *  - A single call's failure is a per-subject skip (errors++, keep going).
  *    A JevRateLimitError aborts the remaining run with status 'rate_limited'.
@@ -1397,15 +1896,16 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
  */
 export async function runJevShadow(
   ports: JevPorts,
-  opts: { deadlineMs?: number; cap?: number; nowIso?: string } = {},
+  opts: { deadlineMs?: number; cap?: number; nowIso?: string; mode?: JevRunMode } = {},
 ): Promise<JevShadowResult> {
   const t0 = ports.now();
   const deadlineMs = opts.deadlineMs ?? JEV_DEADLINE_MS;
   const cap = opts.cap ?? JEV_MONTHLY_TOKEN_CAP_DEFAULT;
+  const mode: JevRunMode = opts.mode ?? "shadow";
 
   const month = await ports.monthTokens(cap);
   const runId = await ports.startRun();
-  const ctx = makeCtx(ports, runId, t0, deadlineMs, cap);
+  const ctx = makeCtx(ports, runId, t0, deadlineMs, cap, mode);
   ctx.monthTokens = month.input_tokens;
 
   let status: JevRunStatus = "ok";

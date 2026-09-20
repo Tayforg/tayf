@@ -1,3 +1,4 @@
+import Link from "next/link";
 import {
   getJevShadowStatus,
   type JevAgreementRow,
@@ -144,6 +145,12 @@ export async function JevShadowSection() {
       <p className="font-mono text-[12px] text-muted-foreground">
         Gölge mod: hiçbir Jev çıktısı okuyucuya gösterilmez, yalnızca ölçüm için saklanır.
       </p>
+      <Link
+        href="/admin/jev-altin"
+        className="inline-flex items-center gap-1.5 font-mono text-[12px] text-brand hover:underline"
+      >
+        Altın küme: etiketleme ve karne
+      </Link>
       {status === null ? (
         <p className="font-mono text-[12px] text-muted-foreground">Jev gölge durumu okunamadı.</p>
       ) : (
