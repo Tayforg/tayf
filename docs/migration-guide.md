@@ -828,6 +828,91 @@ Both return an integer count (rows flagged / rows deleted); `0` is a valid, unre
 
 ---
 
+## Jev gölge modu (061): apply migration, set the gateway key, deploy the function
+
+`061_jev_shadow.sql` ships TypeSafe Jev as a pure shadow observer: a `pg_cron`-poked Edge Function (`jev-shadow`, `*/10 * * * *`, bearer-gated like `archive-export`) asks Jev 12 typed questions per run across five subject types and records one row per (task, subject) in `jev_shadow_predictions`, alongside the current system's answer where a baseline exists. The three new tables (`jev_shadow_runs`, `jev_shadow_predictions`, `jev_shadow_reviews`) are `service_role`-only (RLS on, no policies, explicit revoke — the 059/060 shell); nothing this writes reaches a reader except the cookie-gated `/admin` "Jev gölge" section.
+
+**ORDER IS LOAD-BEARING** (the 034/039/041 precedent): apply the migration **before** deploying the function or redeploying Vercel — both the Edge Function and the `/admin` page read tables that only exist after step 1, and a pg_cron poke before step 3 is a harmless 404 in `cron.job_run_details`.
+
+1. **Vault precondition (038).** Verify the Vault secrets `service_role_key` and `functions_base_url` already exist — if either is missing, 061's do-block raises a NOTICE and schedules nothing (the tables and functions still land, but the cron job silently never runs):
+
+   ```sql
+   select name from vault.decrypted_secrets where name in ('service_role_key', 'functions_base_url');
+   ```
+
+2. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/061_jev_shadow.sql
+   # ...or: supabase db push
+   ```
+
+   The file inserts its own ledger row (`('061', '061_jev_shadow')`), so a subsequent `supabase db push` will not try to re-apply it.
+
+3. **Set the gateway key.** Until this is set, `jev-shadow` returns `{ok:true, skipped:true, reason:"no-api-key"}` and makes zero gateway calls or DB writes — so it is safe to deploy the function before the key exists.
+
+   ```bash
+   supabase secrets set AI_GATEWAY_API_KEY=<key> --project-ref "$PROJECT_REF"
+   ```
+
+   Or the `.env.production` route (that file is gitignored via `supabase/functions/.env*`; confirm with `git check-ignore -v -- supabase/functions/.env.production`):
+
+   ```bash
+   # add AI_GATEWAY_API_KEY=... to supabase/functions/.env.production, then:
+   supabase secrets set --env-file supabase/functions/.env.production --project-ref "$PROJECT_REF"
+   ```
+
+   The key is never written to the database, never logged, never returned in any HTTP response.
+
+4. **Optional — `JEV_MONTHLY_TOKEN_CAP`** (integer, input tokens). Unset = the SQL default of 3e8 (~$12.6). Set it lower for the first week — the recommended opening position is a ~$4.20 ceiling:
+
+   ```bash
+   supabase secrets set JEV_MONTHLY_TOKEN_CAP=100000000 --project-ref "$PROJECT_REF"
+   ```
+
+   Note the `/admin` budget line always reads against the SQL default's cap, so if you override the env var, change the SQL default in a follow-up migration too or the admin percentage will read against the wrong denominator.
+
+5. **Deploy the function.** `--no-verify-jwt` is not optional here: omitting it re-enables gateway JWT verification and 401s every pg_cron poke (AGENTS.md:19).
+
+   ```bash
+   supabase functions deploy jev-shadow --project-ref "$PROJECT_REF" --no-verify-jwt
+   ```
+
+6. **Verify, in order:**
+
+   ```sql
+   select jobname, schedule, active from cron.job where jobname = 'jev-shadow';
+   -- expect */10 * * * *, active = true
+   ```
+
+   ```bash
+   curl -sS -X POST -H "Authorization: Bearer $SR" "https://$PROJECT_REF.functions.supabase.co/jev-shadow"
+   # expect 200 with a counters JSON
+   ```
+
+   ```sql
+   select * from public.jev_shadow_month_usage();
+   select status, calls, errors, input_tokens from public.jev_shadow_runs order by id desc limit 5;
+   ```
+
+7. **Redeploy Vercel.** No new env var is needed — the `/admin` page reads the new tables with the existing `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` — but `vercel --prod` **is** required for the new "Jev gölge" `/admin` section to appear.
+
+**KILL SWITCH.** Three independent levers, none requiring a migration or a deploy:
+
+```sql
+-- 1. Stop the cron poke entirely.
+update cron.job set active = false where jobname = 'jev-shadow';
+```
+
+```bash
+# 2. Unset the gateway key -- the function then no-ops on every poke.
+supabase secrets unset AI_GATEWAY_API_KEY --project-ref "$PROJECT_REF"
+```
+
+3. The run stops itself once the monthly token cap is hit (`jev_shadow_month_usage`, checked before the first call and re-checked mid-run).
+
+---
+
 ## Owner sign-off checklist
 
 Before declaring the migration complete:
@@ -852,6 +937,9 @@ Before declaring the migration complete:
 - [ ] `vercel --prod` deploy landed with `/api/cron/digest` (`0 6 * * 6`) alongside `/api/cron/headline` in the Cron Jobs dashboard
 - [ ] A manual `POST /api/newsletter` test delivered a confirm email whose link redirects to `/?bulten=onaylandi` on click
 - [ ] Migration 041 applied and `ingest` redeployed — `select slug, fetch_last_status, fetch_last_at from sources order by fetch_last_at desc nulls last limit 10;` shows recent timestamps; the `200`-vs-`546` ratio in `net._http_response` for the `ingest` cron job has shifted toward `200`
+
+- [ ] Migration 061 applied (Vault precondition from 038 verified first) and `jev-shadow` deployed with `--no-verify-jwt`; `select jobname, schedule, active from cron.job where jobname='jev-shadow';` shows `*/10 * * * *`, active
+- [ ] `AI_GATEWAY_API_KEY` set (`supabase secrets set ... --project-ref "$PROJECT_REF"` or the gitignored `.env.production` route) and `vercel --prod` redeployed so the `/admin` "Jev gölge" section renders
 
 ---
 

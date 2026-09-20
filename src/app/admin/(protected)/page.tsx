@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { requireAdminSession } from "@/lib/admin/session";
 import { getRecentArchiveExports } from "@/lib/admin/archive-status";
+import { JevShadowSection } from "@/components/admin/jev-shadow-section";
 import { AdminPanel } from "@/components/admin/admin-panel";
 import { CorrectionsList } from "@/components/admin/corrections-list";
 
@@ -65,6 +66,7 @@ export default async function AdminPage() {
             </table>
           )}
         </section>
+        <JevShadowSection />
         <CorrectionsList />
       </div>
     </>
