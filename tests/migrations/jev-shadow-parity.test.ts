@@ -132,7 +132,8 @@ describe("migration 061_jev_shadow.sql (static parity)", () => {
 
 describe("jev-shadow/index.ts <-> article_title_versions column parity (JEV-A1)", () => {
   it("every .gte()/.order() column used against article_title_versions exists in migration 056's DDL", () => {
-    const indexTs = readFileSync(resolve(FUNCTIONS_DIR, "jev-shadow", "index.ts"), "utf8");
+    // CRLF-normalised: the body regexes below anchor on "\n" (Windows autocrlf).
+    const indexTs = readFileSync(resolve(FUNCTIONS_DIR, "jev-shadow", "index.ts"), "utf8").replace(/\r\n/g, "\n");
     const migration056 = read("056_article_title_versions.sql");
     const columns = ddlColumns(migration056, "article_title_versions");
     expect(columns.length).toBeGreaterThan(0);

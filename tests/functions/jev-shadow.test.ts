@@ -1348,7 +1348,9 @@ describe("jev-shadow/index.ts fetchPairCandidates query shape (JEV-A3)", () => {
     const indexTs = readFileSync(
       resolve(__dirname, "..", "..", "supabase", "functions", "jev-shadow", "index.ts"),
       "utf8",
-    );
+      // Windows checkouts (core.autocrlf) hand this file back with CRLF; the
+      // body regex below anchors on "\n".
+    ).replace(/\r\n/g, "\n");
     const fnMatch = indexTs.match(/async fetchPairCandidates[\s\S]*?\n    \},\n/);
     expect(fnMatch, "could not find fetchPairCandidates in jev-shadow/index.ts").not.toBeNull();
     const fnBody = fnMatch![0];
