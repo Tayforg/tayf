@@ -1,4 +1,4 @@
--- 061_coverage_semantics_and_context.sql
+-- 062_coverage_semantics_and_context.sql
 --
 -- Three semantic corrections to the Ekonomi feature after a week of live
 -- data (and an outside relevance test that scored 15 of 25 article_tickers
@@ -282,7 +282,7 @@ alter view public.finance_signals      set (security_invoker = on);
 alter view public.ml_disclosure_events set (security_invoker = on);
 
 insert into supabase_migrations.schema_migrations (version, name)
-  values ('061', '061_coverage_semantics_and_context')
+  values ('062', '062_coverage_semantics_and_context')
   on conflict do nothing;
 
 commit;

@@ -2,13 +2,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// Static guard for 061. An earlier draft of this migration was applied from
+// Static guard for 062. An earlier draft of this migration was applied from
 // a stale checkout and replaced 058's hardened resolver and two views with
 // plain bodies. These assertions are the properties that were lost: they
 // fail if a later edit rebuilds the objects without 058's hardening.
 
 const sql = readFileSync(
-  resolve(__dirname, "..", "..", "supabase", "migrations", "061_coverage_semantics_and_context.sql"),
+  resolve(__dirname, "..", "..", "supabase", "migrations", "062_coverage_semantics_and_context.sql"),
   "utf8",
 );
 
@@ -19,7 +19,7 @@ function body(startMarker: string): string {
   return sql.slice(start, end);
 }
 
-describe("migration 061_coverage_semantics_and_context.sql (static)", () => {
+describe("migration 062_coverage_semantics_and_context.sql (static)", () => {
   it("keeps 058's resolver hardening", () => {
     const fn = body("create or replace function public.resolve_article_tickers_for");
     expect(fn).toMatch(/set search_path = ''/);
@@ -52,7 +52,7 @@ describe("migration 061_coverage_semantics_and_context.sql (static)", () => {
   it("locks down the one new function and records itself in the ledger", () => {
     expect(sql).toMatch(/revoke all on function public\.finance_context_regex\(\) from public, anon, authenticated/);
     expect(sql).toMatch(/grant execute on function public\.finance_context_regex\(\) to service_role/);
-    expect(sql).toMatch(/values \('061', '061_coverage_semantics_and_context'\)/);
+    expect(sql).toMatch(/values \('062', '062_coverage_semantics_and_context'\)/);
   });
 
   it("deletes stored matches by (alias, ticker), never by alias text alone", () => {
