@@ -427,19 +427,39 @@ function median(nums: number[]): number | null {
   return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
-export function coverageStats(rows: Array<{ disclosure_index: number; lag_minutes: number }>, disclosures: number): CoverageStats {
+/**
+ * Coverage of a ticker's disclosures.
+ *   covered          disclosures with at least one article AT OR AFTER the filing
+ *   medianLagMinutes median of the first such article's lag
+ *   pressAhead       disclosures with abnormal attention in the 24 h before:
+ *                    >= 2 articles and >= 3x the ticker's usual daily rate.
+ * A mention before the filing is not leakage by itself; a ticker that is in
+ * the news every day always has one.
+ */
+export function coverageStats(
+  rows: Array<{ disclosure_index: number; lag_minutes: number }>,
+  disclosures: number,
+  baselineDaily: number,
+): CoverageStats {
   const byDisclosure = new Map<number, number[]>();
   for (const r of rows) {
     const arr = byDisclosure.get(r.disclosure_index) ?? [];
     arr.push(Number(r.lag_minutes));
     byDisclosure.set(r.disclosure_index, arr);
   }
-  const firstLags = [...byDisclosure.values()].map((lags) => Math.min(...lags));
+  const firstAfter: number[] = [];
+  let pressAhead = 0;
+  for (const lags of byDisclosure.values()) {
+    const after = lags.filter((l) => l >= 0);
+    if (after.length) firstAfter.push(Math.min(...after));
+    const pre24 = lags.filter((l) => l >= -1440 && l < 0).length;
+    if (pre24 >= 2 && pre24 >= 3 * Math.max(baselineDaily, 0.5)) pressAhead++;
+  }
   return {
     disclosures,
-    covered: byDisclosure.size,
-    medianLagMinutes: median(firstLags),
-    pressAhead: firstLags.filter((l) => l < -60).length,
+    covered: firstAfter.length,
+    medianLagMinutes: median(firstAfter),
+    pressAhead,
   };
 }
 
@@ -465,9 +485,11 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
 
   const c = (companyRes.data ?? [])[0] as { kap_member_oid: string; tickers: string[]; title: string; city: string | null; shares_traded: boolean } | undefined;
   const disclosures = ((disclosuresRes.data ?? []) as DisclosureRow[]).map(toDisclosure);
+  const attention = ((attentionRes.data ?? []) as AttentionDay[]).map((d) => ({ day: String(d.day), articles: Number(d.articles), sources: Number(d.sources) }));
+  const baselineDaily = attention.reduce((s, d) => s + d.articles, 0) / 30;
   return {
     company: c ? { kapMemberOid: c.kap_member_oid, tickers: c.tickers, title: c.title, city: c.city, sharesTraded: c.shares_traded } : null,
-    attention: ((attentionRes.data ?? []) as AttentionDay[]).map((d) => ({ day: String(d.day), articles: Number(d.articles), sources: Number(d.sources) })),
+    attention,
     articles: ((articlesRes.data ?? []) as TickerArticleRow[]).map((r) => ({
       id: r.id,
       title: r.title,
@@ -478,7 +500,7 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
       tickers: [ticker],
     })),
     disclosures,
-    coverage: coverageStats((coverageRes.data ?? []) as Array<{ disclosure_index: number; lag_minutes: number }>, disclosures.length),
+    coverage: coverageStats((coverageRes.data ?? []) as Array<{ disclosure_index: number; lag_minutes: number }>, disclosures.length, baselineDaily),
   };
 }
 

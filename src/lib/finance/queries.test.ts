@@ -131,16 +131,25 @@ describe("finance query transforms", () => {
     expect(ranked[1]).toMatchObject({ title: null, ratio: null });
   });
 
-  it("computes first-coverage lag per disclosure", () => {
-    const stats = coverageStats(
-      [
-        { disclosure_index: 1, lag_minutes: 30 },
-        { disclosure_index: 1, lag_minutes: 400 },
-        { disclosure_index: 2, lag_minutes: -180 },
-      ],
-      5,
-    );
-    expect(stats).toEqual({ disclosures: 5, covered: 2, medianLagMinutes: -75, pressAhead: 1 });
+  it("measures first coverage after the filing and flags only abnormal pre-filing attention", () => {
+    const rows = [
+      // 1: one routine mention before, first real coverage 30 min after
+      { disclosure_index: 1, lag_minutes: -600 },
+      { disclosure_index: 1, lag_minutes: 30 },
+      { disclosure_index: 1, lag_minutes: 400 },
+      // 2: only a mention two days before, never covered afterwards
+      { disclosure_index: 2, lag_minutes: -2000 },
+      // 3: four articles in the 24 h before, coverage 90 min after
+      { disclosure_index: 3, lag_minutes: -1200 },
+      { disclosure_index: 3, lag_minutes: -300 },
+      { disclosure_index: 3, lag_minutes: -200 },
+      { disclosure_index: 3, lag_minutes: -20 },
+      { disclosure_index: 3, lag_minutes: 90 },
+    ];
+    // quiet ticker: 4 articles in a day is abnormal
+    expect(coverageStats(rows, 5, 0.2)).toEqual({ disclosures: 5, covered: 2, medianLagMinutes: 60, pressAhead: 1 });
+    // busy ticker (3 a day): the same 4 articles are just Tuesday
+    expect(coverageStats(rows, 5, 3).pressAhead).toBe(0);
   });
 
   it("buckets lags into the fixed histogram", () => {

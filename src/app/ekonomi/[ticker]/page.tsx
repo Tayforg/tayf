@@ -230,12 +230,12 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
               <dd className="text-lg tabular-nums">{lagLabel(page.coverage.medianLagMinutes)}</dd>
             </div>
             <div>
-              <dt className="text-muted-foreground">basın KAP&apos;tan önce</dt>
+              <dt className="text-muted-foreground">olağandışı ön ilgi</dt>
               <dd className={cn("text-lg tabular-nums", page.coverage.pressAhead > 0 ? "text-amber-400" : "")}>{page.coverage.pressAhead}</dd>
             </div>
           </dl>
           <p className="border-t border-border/70 px-3 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
-            Bildirimden 2 gün önce ile 5 gün sonra arasında hisseyi anan haberler sayılır. Negatif gecikme, basının KAP&apos;tan önce yazdığını gösterir.
+            İlk haber, bildirimden sonra çıkan ilk habere göre ölçülür. Ön ilgi: bildirimden önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı.
           </p>
         </Panel>
       </div>

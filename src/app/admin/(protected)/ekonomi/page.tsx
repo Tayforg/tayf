@@ -30,8 +30,8 @@ const KIND_META: Record<string, { title: string; hint: string }> = {
     hint: "Son 48 saatte finansal rapor veya özel durum açıklaması var, basın hâlâ yazmadı. PEAD adayı.",
   },
   press_ahead: {
-    title: "Basın önden gitti",
-    hint: "Bildirimden bir saatten fazla önce en az iki haber çıkmış. Hareketin çoğu muhtemelen fiyatlanmış.",
+    title: "Olağandışı ön ilgi",
+    hint: "Bildirimden önceki 24 saatte en az 2 haber ve hissenin olağan günlük hızının en az 3 katı. Hareketin bir kısmı muhtemelen fiyatlanmış.",
   },
 };
 
@@ -43,7 +43,7 @@ function evidenceText(s: Signal): string {
     case "silent_disclosure":
       return `${e.subject ?? "bildirim"} (${e.class}), ${typeof e.disclosed_at === "string" ? fmtWhen(e.disclosed_at) : ""}`;
     case "press_ahead":
-      return `${e.articles_before} haber, medyan ${Math.abs(Number(e.median_lag_min ?? 0)).toFixed(0)} dk önce`;
+      return `${e.subject ?? "bildirim"}: önceki 24 saatte ${e.articles_before} haber, olağan günlük ${e.baseline_daily}`;
     default:
       return JSON.stringify(e);
   }

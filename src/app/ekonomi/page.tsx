@@ -116,14 +116,14 @@ export default async function EkonomiPage() {
                       {item.title}
                     </a>
                     <div className="flex flex-wrap gap-1">
-                      {item.tickers.map((t) => (
-                        <TickerChip
-                          key={t}
-                          ticker={t}
-                          quote={quotes[t]}
-                          sinceNews={pctChange(refs[refKey(item.id, t)], quotes[t]?.price)}
-                        />
-                      ))}
+                      {item.tickers.map((t) => {
+                        const q = quotes[t];
+                        const since = pctChange(refs[refKey(item.id, t)], q?.price);
+                        // A headline from before the open references the previous
+                        // close, which makes "since" the day move again. Say it once.
+                        const redundant = since != null && q != null && Math.abs(since - q.changePct) < 0.02;
+                        return <TickerChip key={t} ticker={t} quote={q} sinceNews={redundant ? null : since} />;
+                      })}
                       {item.source ? <span className="font-mono text-[11px] text-muted-foreground sm:hidden">{item.source.name}</span> : null}
                     </div>
                   </div>
