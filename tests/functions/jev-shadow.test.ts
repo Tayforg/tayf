@@ -15,14 +15,17 @@ import {
   JEV_NEUTRAL_MODEL_ID,
   JEV_PAIRS_PER_CALL,
   JEV_PREVIEW_CLAMP,
+  JEV_PROB_MAX_NUMERIC,
   JEV_QUESTION_REGISTRY,
   JEV_QUESTION_SET_VERSION,
+  JEV_REGRESSION_ITEM_LIMIT,
   JEV_TASKS,
   JEV_TICKER_LIMIT,
   JEV_TITLE_CLAMP,
   JevDeadlineError,
   JevRateLimitError,
   JevResponseError,
+  agreedGoldLabels,
   biasKeysForZones,
   blindspotSilentZones,
   booleanAgrees,
@@ -39,6 +42,9 @@ import {
   canonicalJson,
   choiceAgrees,
   clamp,
+  computeRegressionDeltas,
+  computeRegressionGold,
+  goldTopicToJevChoice,
   isRateLimitStatus,
   offendingQuestionIds,
   pairKey,
@@ -48,6 +54,9 @@ import {
   predictionRow,
   questionRegistryHash,
   rankBlindspotCandidates,
+  regressionAnswerRows,
+  regressionArticleRow,
+  regressionPair,
   retryDelayMs,
   runJevShadow,
   sampleClusterPairs,
@@ -65,12 +74,15 @@ import {
   type JevBlindspotCandidateQuery,
   type JevBlindspotClusterRow,
   type JevClusterRow,
+  type JevGoldLabelRow,
   type JevKapRow,
   type JevMemberRow,
   type JevPairCandidate,
   type JevPorts,
   type JevPredictionRow,
   type JevQuestion,
+  type JevRegressionAnswerRow,
+  type JevRegressionItem,
   type JevRequest,
   type JevResponse,
   type JevAnswer,
@@ -246,6 +258,28 @@ function blindspotCandidateRow(overrides: Partial<JevBlindspotCandidate> = {}): 
   };
 }
 
+function regressionArticleItem(overrides: Partial<JevRegressionItem> = {}): JevRegressionItem {
+  return {
+    id: 1,
+    kind: "article",
+    subject_id: "ra-1",
+    state: { title: "Başlık", description: "Açıklama" },
+    in_gold: false,
+    ...overrides,
+  };
+}
+
+function regressionPairItem(overrides: Partial<JevRegressionItem> = {}): JevRegressionItem {
+  return {
+    id: 100,
+    kind: "pair",
+    subject_id: "pa-1:pa-2",
+    state: { pairs: { p1: { a: "Başlık A", b: "Başlık B" } } },
+    in_gold: false,
+    ...overrides,
+  };
+}
+
 function clusterMemberPredictionRow(overrides: Partial<JevPredictionRow> = {}): JevPredictionRow {
   return {
     task: "cluster_member",
@@ -308,6 +342,12 @@ interface Recorder {
   fetchBlindspotClustersCalls: Array<{ sinceIso: string; limit: number }>;
   fetchBlindspotCandidatesCalls: JevBlindspotCandidateQuery[];
   markBlindspotCheckedCalls: Array<{ clusterId: string; suspect: boolean }>;
+  fetchRegressionItemsCalls: Array<{ kind: string; limit: number }>;
+  insertRegressionAnswersCalls: JevRegressionAnswerRow[][];
+  startRegressionRunCalls: string[];
+  finishRegressionRunCalls: Array<{ id: number; patch: Parameters<JevPorts["finishRegressionRun"]>[1] }>;
+  fetchPreviousRegressionAnswersCalls: number[];
+  fetchGoldLabelsCalls: string[][];
 }
 
 function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
@@ -333,6 +373,12 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
     fetchBlindspotClustersCalls: [],
     fetchBlindspotCandidatesCalls: [],
     markBlindspotCheckedCalls: [],
+    fetchRegressionItemsCalls: [],
+    insertRegressionAnswersCalls: [],
+    startRegressionRunCalls: [],
+    finishRegressionRunCalls: [],
+    fetchPreviousRegressionAnswersCalls: [],
+    fetchGoldLabelsCalls: [],
   };
 
   const tick = 0;
@@ -430,6 +476,35 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
     markBlindspotChecked: async (clusterId, suspect) => {
       rec.order.push("markBlindspotChecked");
       rec.markBlindspotCheckedCalls.push({ clusterId, suspect });
+    },
+    fetchRegressionItems: async (kind, limit) => {
+      rec.order.push("fetchRegressionItems");
+      rec.fetchRegressionItemsCalls.push({ kind, limit });
+      return [];
+    },
+    insertRegressionAnswers: async (rows) => {
+      rec.order.push("insertRegressionAnswers");
+      rec.insertRegressionAnswersCalls.push([...rows]);
+      return rows.length;
+    },
+    startRegressionRun: async (questionSet) => {
+      rec.order.push("startRegressionRun");
+      rec.startRegressionRunCalls.push(questionSet);
+      return 900;
+    },
+    finishRegressionRun: async (id, patch) => {
+      rec.order.push("finishRegressionRun");
+      rec.finishRegressionRunCalls.push({ id, patch });
+    },
+    fetchPreviousRegressionAnswers: async (currentRunId) => {
+      rec.order.push("fetchPreviousRegressionAnswers");
+      rec.fetchPreviousRegressionAnswersCalls.push(currentRunId);
+      return [];
+    },
+    fetchGoldLabels: async (articleIds) => {
+      rec.order.push("fetchGoldLabels");
+      rec.fetchGoldLabelsCalls.push([...articleIds]);
+      return [];
     },
   };
 
@@ -2187,6 +2262,484 @@ describe("audit mode", () => {
     const result = await runJevShadow(rec.ports, { mode: "audit", cap: 50 });
     expect(result.status).toBe("budget_exceeded");
     expect(rec.finishRunCalls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 066 -- "Metodoloji regresyonu": a frozen regression set replayed
+// on a fixed cadence against the CURRENT question set. Pure helpers
+// (regressionArticleRow/regressionPair/regressionAnswerRows/
+// computeRegressionDeltas/goldTopicToJevChoice/agreedGoldLabels/
+// computeRegressionGold) are unit-tested directly; runJevShadow's regression
+// branch is tested through the same in-memory ports recorder as shadow/audit
+// mode above.
+// ---------------------------------------------------------------------------
+
+describe("regression mode (migration 066)", () => {
+  it("regression mode runs exactly two stages, regression_articles then regression_pairs", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind, limit) => {
+        rec.order.push("fetchRegressionItems");
+        rec.fetchRegressionItemsCalls.push({ kind, limit });
+        return kind === "article" ? [regressionArticleItem()] : [regressionPairItem()];
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(rec.fetchRegressionItemsCalls.map((c) => c.kind)).toEqual(["article", "pair"]);
+    expect(rec.fetchRegressionItemsCalls.every((c) => c.limit === JEV_REGRESSION_ITEM_LIMIT)).toBe(true);
+    expect(result.stages.regression_articles.calls).toBe(1);
+    expect(result.stages.regression_pairs.calls).toBe(1);
+  });
+
+  it("regression mode never touches a shadow or audit fetch port", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : [regressionPairItem()]),
+    });
+
+    await runJevShadow(rec.ports, { mode: "regression" });
+
+    const neverTouched = [
+      "fetchPendingArticles",
+      "fetchRecentClusters",
+      "fetchClusterMembers",
+      "fetchPairCandidates",
+      "fetchPendingKap",
+      "fetchPendingTitleVersions",
+      "fetchAuditPairs",
+      "fetchPendingTickerMatches",
+      "fetchBlindspotClusters",
+      "fetchBlindspotCandidates",
+      "markBlindspotChecked",
+      "insertUnlinkCandidates",
+      "insertPredictions",
+      "fetchSeenSubjects",
+    ] as const;
+    for (const port of neverTouched) {
+      expect(rec.order.filter((n) => n === port)).toHaveLength(0);
+    }
+  });
+
+  it("regression article calls send only the frozen title and description", () => {
+    const item = regressionArticleItem({
+      subject_id: "leaked-source-slug-id",
+      state: {
+        title: "Başlık",
+        description: "Açıklama",
+        category: "politika",
+        published_at: "2026-01-01T00:00:00.000Z",
+        source_slug: "sensitive-outlet",
+      },
+    });
+    const row = regressionArticleRow(item);
+    const request = buildArticleCall(row);
+
+    expect(Object.keys(request.state).sort()).toEqual(["description", "title"]);
+    // Only the STATE may not leak the frozen row's extra fields; the
+    // question set legitimately contains "politika" (topic7 criteria key).
+    const json = JSON.stringify(request.state);
+    expect(json).not.toContain("sensitive-outlet");
+    expect(json).not.toContain("2026-01-01T00:00:00.000Z");
+    expect(json).not.toContain("politika");
+  });
+
+  it("regression pair calls send the frozen a/b titles, JEV_PAIRS_PER_CALL per call", async () => {
+    const pairItems = Array.from({ length: 25 }, (_, i) =>
+      regressionPairItem({
+        id: 200 + i,
+        subject_id: `x${i}:y${i}`,
+        state: { pairs: { p1: { a: `A${i}`, b: `B${i}` } } },
+      }),
+    );
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "pair" ? pairItems : []),
+    });
+
+    await runJevShadow(rec.ports, { mode: "regression" });
+
+    const pairRequests = rec.evaluateCalls.filter((req) => (req.state as { pairs?: unknown }).pairs);
+    expect(pairRequests.length).toBeGreaterThan(1);
+    for (const req of pairRequests) {
+      const pairs = (req.state as { pairs: Record<string, { a: string; b: string }> }).pairs;
+      expect(Object.keys(pairs).length).toBeLessThanOrEqual(JEV_PAIRS_PER_CALL);
+    }
+    expect(pairRequests[0]?.state).toMatchObject({ pairs: { p1: { a: "A0", b: "B0" } } });
+  });
+
+  it("regression answers go through insertRegressionAnswers, never insertPredictions", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) =>
+        kind === "article" ? [regressionArticleItem({ id: 1 })] : [regressionPairItem({ id: 100 })],
+    });
+
+    await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(rec.insertPredictionsCalls).toHaveLength(0);
+    expect(rec.insertRegressionAnswersCalls.length).toBeGreaterThan(0);
+    const rows = rec.insertRegressionAnswersCalls.flat();
+    expect(rows.some((r) => r.task === "politics")).toBe(true);
+    expect(rows.some((r) => r.task === "pair_negative")).toBe(true);
+  });
+
+  it("a regression article call writes exactly the task set buildArticleCall asks -- keyToTask cannot silently drop a question again", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : []),
+    });
+
+    await runJevShadow(rec.ports, { mode: "regression" });
+
+    const rows = rec.insertRegressionAnswersCalls.flat();
+    const writtenTasks = [...new Set(rows.map((r) => r.task))].sort();
+    const expectedTasks = Object.keys(buildArticleCall(regressionArticleRow(regressionArticleItem())).questions).sort();
+
+    expect(writtenTasks).toEqual(expectedTasks);
+    expect(writtenTasks).toEqual(["clickbait", "framing", "opinion", "politics", "sensational", "topic", "topic7"]);
+  });
+
+  it("regression opens and closes both the regression run row and the jev_shadow_runs row", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : []),
+    });
+
+    await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(rec.startRunCalls).toBe(1);
+    expect(rec.finishRunCalls).toHaveLength(1);
+    expect(rec.startRegressionRunCalls).toEqual([JEV_QUESTION_SET_VERSION]);
+    expect(rec.finishRegressionRunCalls).toHaveLength(1);
+  });
+
+  it("a finishRegressionRun rejection is swallowed -- finishRun still closes jev_shadow_runs with the pre-existing status", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : []),
+      finishRegressionRun: async (id, patch) => {
+        rec.order.push("finishRegressionRun");
+        rec.finishRegressionRunCalls.push({ id, patch });
+        throw new Error("jev-shadow: finishRegressionRun failed: PostgREST error");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(result.status).toBe("ok");
+    expect(rec.order.filter((n) => n === "finishRun")).toHaveLength(1);
+    expect(rec.finishRunCalls).toHaveLength(1);
+    expect(rec.finishRunCalls[0]?.patch.status).toBe("ok");
+    expect(rec.finishRunCalls[0]?.patch.note).toBe("regression");
+  });
+
+  it("insertRegressionAnswers failing on every chunk closes jev_regression_runs as 'partial' without breaking jev_shadow_runs", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : [regressionPairItem()]),
+      insertRegressionAnswers: async (rows) => {
+        rec.order.push("insertRegressionAnswers");
+        rec.insertRegressionAnswersCalls.push([...rows]);
+        throw new Error("jev-shadow: insertRegressionAnswers failed: PostgREST error");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(result.status).toBe("ok");
+    expect(rec.finishRegressionRunCalls).toHaveLength(1);
+    expect(rec.finishRegressionRunCalls[0]?.patch.status).toBe("partial");
+    expect(rec.finishRunCalls).toHaveLength(1);
+    expect(rec.finishRunCalls[0]?.patch.status).toBe("ok");
+  });
+
+  it("regression stamps note 'regression' on the jev_shadow_runs row", async () => {
+    const rec = makePorts(); // no frozen items at all -- both stages skip cleanly
+
+    await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(rec.finishRunCalls[0]?.patch.note).toBe("regression");
+  });
+
+  it("regression tokens are checkpointed through recordTokens and closed through finishRun", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) =>
+        kind === "article" ? [regressionArticleItem({ id: 1 }), regressionArticleItem({ id: 2, subject_id: "ra-2" })] : [],
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(rec.recordTokensCalls.length).toBeGreaterThanOrEqual(2);
+    expect(rec.finishRunCalls).toHaveLength(1);
+    expect(rec.finishRunCalls[0]?.patch.input_tokens).toBe(result.input_tokens);
+    expect(rec.finishRunCalls[0]?.patch.calls).toBe(result.calls);
+  });
+
+  it("budget_exceeded in regression mode opens no regression run row and makes zero evaluate calls", async () => {
+    const rec = makePorts({
+      monthTokens: async (cap) => {
+        rec.order.push("monthTokens");
+        rec.monthTokensCalls.push(cap);
+        return { input_tokens: cap, cap, exceeded: true };
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression", cap: 1000 });
+
+    expect(result.status).toBe("budget_exceeded");
+    expect(rec.startRegressionRunCalls).toHaveLength(0);
+    expect(rec.evaluateCalls).toHaveLength(0);
+    expect(result.regression).toBeUndefined();
+    expect(rec.finishRunCalls[0]?.patch.note).toBe("regression; monthly cap reached");
+  });
+
+  it("a regression stage failure closes the regression run as partial without taking the other stage down", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => {
+        if (kind === "pair") throw new Error("jev-shadow: fetchRegressionItems failed: statement timeout");
+        return [regressionArticleItem({ id: 1 })];
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(result.status).toBe("partial");
+    expect(rec.finishRegressionRunCalls).toHaveLength(1);
+    expect(rec.finishRegressionRunCalls[0]?.patch.status).toBe("partial");
+    // The regression run's own note names the failed stage, so an operator
+    // reading jev_regression_runs doesn't have to cross-check jev_shadow_runs.
+    expect(rec.finishRegressionRunCalls[0]?.patch.note).toBe("stage failed: regression_pairs");
+    const rows = rec.insertRegressionAnswersCalls.flat();
+    expect(rows.some((r) => r.task === "politics")).toBe(true);
+  });
+
+  it("a deadline mid-regression closes both run rows and still writes deltas", async () => {
+    const ticks = [0, 999_999];
+    let i = 0;
+    const rec = makePorts({
+      now: () => ticks[Math.min(i++, ticks.length - 1)] ?? 0,
+      fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : [regressionPairItem()]),
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression", deadlineMs: 50_000 });
+
+    expect(result.status).toBe("partial");
+    expect(rec.startRegressionRunCalls).toHaveLength(1);
+    expect(rec.finishRegressionRunCalls).toHaveLength(1);
+    expect(rec.finishRegressionRunCalls[0]?.patch.deltas).toBeDefined();
+    expect(rec.evaluateCalls).toHaveLength(0);
+  });
+
+  it("regressionArticleRow keeps category, published_at and source_slug out of the request", () => {
+    const item = regressionArticleItem({ subject_id: "art-9", state: { title: "T", description: "D" } });
+    const row = regressionArticleRow(item);
+    expect(row.id).toBe("art-9");
+    expect(row.category).toBeNull();
+    expect(row.published_at).toBe("");
+    expect(row.source_slug).toBeNull();
+  });
+
+  it("regressionPair returns null for a malformed frozen pair state", () => {
+    expect(regressionPair(regressionPairItem({ state: {} }))).toBeNull();
+    expect(regressionPair(regressionPairItem({ state: { pairs: {} } }))).toBeNull();
+    expect(regressionPair(regressionPairItem({ state: { pairs: { p1: { a: "only-a" } } } }))).toBeNull();
+    expect(regressionPair(regressionPairItem({ state: { pairs: { p1: { a: 1, b: "B" } } } }))).toBeNull();
+
+    const ok = regressionPair(regressionPairItem({ subject_id: "x:y", state: { pairs: { p1: { a: "A", b: "B" } } } }));
+    expect(ok).not.toBeNull();
+    expect(ok?.a).toMatchObject({ id: "x", title: "A", cluster_id: "", published_at: "" });
+    expect(ok?.b).toMatchObject({ id: "y", title: "B", cluster_id: "", published_at: "" });
+
+    // subject_id without exactly two colon-separated halves -- ["", ""] fallback.
+    const malformedId = regressionPair(regressionPairItem({ subject_id: "not-a-pair-key", state: { pairs: { p1: { a: "A", b: "B" } } } }));
+    expect(malformedId?.a.id).toBe("");
+    expect(malformedId?.b.id).toBe("");
+  });
+
+  it("regressionAnswerRows clamps a rounded 9.9999 score to 9.999 so numeric(4,3) cannot overflow", () => {
+    const response: JevResponse = {
+      answers: { sensational: { type: "score", score: 9.9999 } },
+      usage: { inputTokens: 10, outputTokens: 1 },
+    };
+    const rows = regressionAnswerRows(1, 1, response, { sensational: "sensational" });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.jev_prob).toBe(JEV_PROB_MAX_NUMERIC);
+    expect(rows[0]?.jev_prob).toBeLessThanOrEqual(9.999);
+    expect(rows[0]?.jev_choice).toBeNull();
+  });
+
+  it("regressionAnswerRows: missing answers are skipped, choice answers carry jev_choice not jev_prob", () => {
+    const response: JevResponse = {
+      answers: { topic: { type: "choice", choice: "politics" } },
+      usage: { inputTokens: 10, outputTokens: 1 },
+    };
+    const rows = regressionAnswerRows(1, 1, response, { topic: "topic", opinion: "opinion" });
+    expect(rows).toEqual([{ run_id: 1, item_id: 1, task: "topic", jev_prob: null, jev_choice: "politics" }]);
+  });
+
+  it("computeRegressionDeltas returns { first_run: true } when there is no previous run", () => {
+    const cur: JevRegressionAnswerRow[] = [{ run_id: 2, item_id: 1, task: "politics", jev_prob: 0.9, jev_choice: null }];
+    expect(computeRegressionDeltas([], cur)).toEqual({ first_run: true });
+  });
+
+  it("computeRegressionDeltas counts a 0.49 to 0.51 crossing as a flip and 0.10 to 0.20 as not", () => {
+    const prev: JevRegressionAnswerRow[] = [
+      { run_id: 1, item_id: 1, task: "politics", jev_prob: 0.49, jev_choice: null },
+      { run_id: 1, item_id: 2, task: "politics", jev_prob: 0.1, jev_choice: null },
+    ];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 2, item_id: 1, task: "politics", jev_prob: 0.51, jev_choice: null },
+      { run_id: 2, item_id: 2, task: "politics", jev_prob: 0.2, jev_choice: null },
+    ];
+
+    const deltas = computeRegressionDeltas(prev, cur);
+
+    expect(deltas.tasks?.politics?.n).toBe(2);
+    expect(deltas.tasks?.politics?.flips).toBe(1);
+    expect(deltas.overall).toEqual({ items: 2, tasks: 1, flip_rate: 0.5 });
+  });
+
+  it("computeRegressionDeltas counts a changed choice as a flip and reports mean and max abs delta per task", () => {
+    const prev: JevRegressionAnswerRow[] = [
+      { run_id: 1, item_id: 1, task: "topic", jev_prob: null, jev_choice: "politics" },
+      { run_id: 1, item_id: 1, task: "sensational", jev_prob: 1.0, jev_choice: null },
+      { run_id: 1, item_id: 2, task: "sensational", jev_prob: 2.0, jev_choice: null },
+    ];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 2, item_id: 1, task: "topic", jev_prob: null, jev_choice: "economy" },
+      { run_id: 2, item_id: 1, task: "sensational", jev_prob: 1.2, jev_choice: null },
+      { run_id: 2, item_id: 2, task: "sensational", jev_prob: 2.5, jev_choice: null },
+    ];
+
+    const deltas = computeRegressionDeltas(prev, cur);
+
+    expect(deltas.tasks?.topic).toEqual({ n: 1, flips: 1, mean_abs_delta: null, max_abs_delta: null });
+    expect(deltas.tasks?.sensational?.n).toBe(2);
+    expect(deltas.tasks?.sensational?.mean_abs_delta).toBe(0.35);
+    expect(deltas.tasks?.sensational?.max_abs_delta).toBe(0.5);
+  });
+
+  it("computeRegressionDeltas never flips a score task (0-10 scale) on the [0,1] boolean threshold, but a politics 0.5 crossing still flips", () => {
+    const prev: JevRegressionAnswerRow[] = [
+      { run_id: 1, item_id: 1, task: "sensational", jev_prob: 1.0, jev_choice: null },
+      { run_id: 1, item_id: 2, task: "politics", jev_prob: 0.49, jev_choice: null },
+    ];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 2, item_id: 1, task: "sensational", jev_prob: 9.0, jev_choice: null },
+      { run_id: 2, item_id: 2, task: "politics", jev_prob: 0.51, jev_choice: null },
+    ];
+
+    const deltas = computeRegressionDeltas(prev, cur);
+
+    expect(deltas.tasks?.sensational?.flips).toBe(0);
+    expect(deltas.tasks?.sensational?.max_abs_delta).toBe(8);
+    expect(deltas.tasks?.politics?.flips).toBe(1);
+    // sensational is excluded from both the flip_rate numerator and
+    // denominator -- only the politics comparison counts.
+    expect(deltas.overall).toEqual({ items: 2, tasks: 2, flip_rate: 1 });
+  });
+
+  it("computeRegressionDeltas.overall.flip_rate is null when every compared row is a score task", () => {
+    const prev: JevRegressionAnswerRow[] = [{ run_id: 1, item_id: 1, task: "sensational", jev_prob: 1.0, jev_choice: null }];
+    const cur: JevRegressionAnswerRow[] = [{ run_id: 2, item_id: 1, task: "sensational", jev_prob: 9.0, jev_choice: null }];
+
+    const deltas = computeRegressionDeltas(prev, cur);
+
+    expect(deltas.tasks?.sensational?.flips).toBe(0);
+    expect(deltas.overall?.flip_rate).toBeNull();
+  });
+
+  it("computeRegressionDeltas ignores answers missing from either run", () => {
+    const prev: JevRegressionAnswerRow[] = [{ run_id: 1, item_id: 1, task: "politics", jev_prob: 0.9, jev_choice: null }];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 2, item_id: 1, task: "politics", jev_prob: 0.8, jev_choice: null },
+      { run_id: 2, item_id: 2, task: "politics", jev_prob: 0.7, jev_choice: null }, // no prev counterpart
+    ];
+
+    const deltas = computeRegressionDeltas(prev, cur);
+
+    expect(deltas.tasks?.politics?.n).toBe(1);
+    expect(deltas.overall?.items).toBe(1);
+
+    // A pair where one side is a probability and the other a choice is
+    // skipped entirely -- never counted as a flip, never counted toward n.
+    const prevMixed: JevRegressionAnswerRow[] = [{ run_id: 1, item_id: 3, task: "topic", jev_prob: 0.9, jev_choice: null }];
+    const curMixed: JevRegressionAnswerRow[] = [{ run_id: 2, item_id: 3, task: "topic", jev_prob: null, jev_choice: "politics" }];
+    const deltasMixed = computeRegressionDeltas(prevMixed, curMixed);
+    expect(deltasMixed.overall?.items).toBe(0);
+  });
+
+  it("goldTopicToJevChoice maps politika/ekonomi/dunya exactly like jev_gold_scorecard", () => {
+    expect(goldTopicToJevChoice("politika")).toBe("politics");
+    expect(goldTopicToJevChoice("ekonomi")).toBe("economy");
+    expect(goldTopicToJevChoice("dunya")).toBeNull();
+    expect(goldTopicToJevChoice("spor")).toBe("other");
+    expect(goldTopicToJevChoice("yasam")).toBe("other");
+    expect(goldTopicToJevChoice("teknoloji")).toBe("other");
+    expect(goldTopicToJevChoice("genel")).toBe("other");
+  });
+
+  it("agreedGoldLabels keeps only rows where both labelers agree on both fields", () => {
+    const rows = [
+      { article_id: "a1", labeler: 1, is_politics: true, topic: "politika" },
+      { article_id: "a1", labeler: 2, is_politics: true, topic: "politika" },
+      { article_id: "a2", labeler: 1, is_politics: true, topic: "politika" },
+      { article_id: "a2", labeler: 2, is_politics: false, topic: "politika" }, // disagree is_politics
+      { article_id: "a3", labeler: 1, is_politics: false, topic: "spor" },
+      { article_id: "a3", labeler: 2, is_politics: false, topic: "ekonomi" }, // disagree topic
+      { article_id: "a4", labeler: 1, is_politics: true, topic: "politika" }, // only one labeler
+    ];
+
+    const out = agreedGoldLabels(rows);
+
+    expect(out).toEqual([{ article_id: "a1", is_politics: true, topic: "politika" }]);
+  });
+
+  it("computeRegressionGold scores politics at 0.5 and 0.7 and excludes dunya from topic", () => {
+    const items: JevRegressionItem[] = [
+      regressionArticleItem({ id: 1, subject_id: "g1", in_gold: true }),
+      regressionArticleItem({ id: 2, subject_id: "g2", in_gold: true }),
+      regressionArticleItem({ id: 3, subject_id: "g3", in_gold: true }),
+    ];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 1, item_id: 1, task: "politics", jev_prob: 0.6, jev_choice: null }, // >=0.5 true, >=0.7 false
+      { run_id: 1, item_id: 1, task: "topic", jev_prob: null, jev_choice: "politics" },
+      { run_id: 1, item_id: 2, task: "politics", jev_prob: 0.2, jev_choice: null }, // both false -> correct
+      { run_id: 1, item_id: 3, task: "topic", jev_prob: null, jev_choice: "other" },
+    ];
+    const labels: JevGoldLabelRow[] = [
+      { article_id: "g1", is_politics: true, topic: "politika" },
+      { article_id: "g2", is_politics: false, topic: "spor" },
+      { article_id: "g3", is_politics: true, topic: "dunya" }, // excluded from topic (dunya -> null)
+    ];
+
+    const gold = computeRegressionGold(items, cur, labels);
+
+    expect(gold.politics).toEqual({ n: 2, correct_050: 2, correct_070: 1 });
+    expect(gold.topic).toEqual({ n: 1, correct: 1 });
+  });
+
+  it("computeRegressionGold runs on the first run too, alongside first_run: true", async () => {
+    const goldItem = regressionArticleItem({ id: 5, subject_id: "gold-1", in_gold: true, state: { title: "T", description: "D" } });
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [goldItem] : []),
+      evaluate: async (_req) => ({
+        response: {
+          answers: {
+            politics: { type: "boolean", probability: 0.9 },
+            topic: { type: "choice", choice: "politics" },
+            opinion: { type: "boolean", probability: 0.1 },
+            clickbait: { type: "boolean", probability: 0.1 },
+            framing: { type: "choice", choice: "neutral" },
+            sensational: { type: "score", score: 0.5 },
+          },
+          usage: { inputTokens: 50, outputTokens: 5 },
+        },
+        latencyMs: 1,
+      }),
+      fetchGoldLabels: async () => [{ article_id: "gold-1", is_politics: true, topic: "politika" }],
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(result.regression?.deltas?.first_run).toBe(true);
+    expect(result.regression?.deltas?.gold?.politics).toEqual({ n: 1, correct_050: 1, correct_070: 1 });
+    expect(result.regression?.deltas?.gold?.topic).toEqual({ n: 1, correct: 1 });
   });
 });
 

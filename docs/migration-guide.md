@@ -1089,6 +1089,111 @@ Treat the first weeks of this count as threshold-calibration data, not ground tr
 
 **RETRACTION IS NOT AUTOMATIC.** `jev_source_drift_compute` can only ever rewrite or add a row for a day that still qualifies (`politics_n >= 20` and `base_n >= 60`); it never deletes a row for a day that stopped qualifying -- the `upserted` CTE only inserts/updates. `source_drift_daily` also has no delete grant (`select`/`insert`/`update` only), so a stale `flagged = true` row keeps rendering in /admin's "Kaynak sapması" table for the rest of its 7-day window even after an operator confirms it was a false positive, and simply re-running `jev_source_drift_compute()` for that day returns `(0, 0)` with no change. There is no service_role delete path today -- retracting a known-bad row requires a follow-up migration; until one lands, treat it as "acknowledge and wait for it to age out of the 7-day window", not as something an operator can clear by hand.
 
+### Migration 066 — Metodoloji regresyonu (frozen regression set)
+
+`066_jev_regression.sql` adds a frozen regression set that is replayed on a fixed cadence against the CURRENT question set: three new `service_role`-only tables (`jev_regression_items`, `jev_regression_runs`, `jev_regression_answers`), an idempotent `SECURITY DEFINER` top-up function `jev_regression_freeze(p_articles=400, p_pairs=100)`, an on-demand `jev_regression_trigger()` that pokes `jev-shadow` the same way the 061/063 cron do-blocks do, and the `jev-regression-weekly` cron (`20 4 * * 0`, body `{"mode":"regression"}`). `jev-shadow/index.ts` gains a third mode, `"regression"`, that asks the SAME existing questions (no new question string, no `JEV_QUESTION_SET_VERSION` bump) and writes answers to `jev_regression_answers`, never `jev_shadow_predictions`. Regression tokens still land in `jev_shadow_runs` (note `'regression'`), so `jev_shadow_month_usage()` counts them against the same monthly cap every other run spends from.
+
+**ORDER IS LOAD-BEARING**: apply the migration **before** deploying the function or redeploying Vercel, and freeze the set **before** the first cron Sunday.
+
+1. **Vault precondition (038), unchanged.** Same check as 061/063/065 step 1 — if either secret is missing, 066's do-block silently skips the weekly cron (the tables and functions still land) and `jev_regression_trigger()` returns `null` forever:
+
+   ```sql
+   select name from vault.decrypted_secrets where name in ('service_role_key', 'functions_base_url');
+   ```
+
+2. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/066_jev_regression.sql
+   # ...or: supabase db push
+   ```
+
+   The file inserts its own ledger row (`('066', '066_jev_regression')`) and is safe to re-apply.
+
+3. **Deploy the function.** `--no-verify-jwt` is not optional here, same as every other Edge Function in this repo:
+
+   ```bash
+   supabase functions deploy jev-shadow --project-ref "$PROJECT_REF" --no-verify-jwt
+   ```
+
+4. **Redeploy Vercel** so the `/admin` "Metodoloji regresyonu" section renders. No new environment variable is needed — it reads the new tables with the existing `NEXT_PUBLIC_SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY`:
+
+   ```bash
+   vercel --prod
+   ```
+
+5. **FREEZE DELIBERATELY, by hand, BEFORE pressing "Seti dondur".** The set size IS the run cost — one gateway call per article item (`buildArticleCall` asks all seven article questions in a single call, but there is no batching across articles). Three production regression runs (126 calls each — `jev_shadow_runs` ids 196/197/200, all `status='ok'`) completed in ~5.6s wall at `JEV_CONCURRENCY=8`, about 0.36s/call (~22 calls/s). Extrapolating, the SQL defaults (400 articles + 100 pairs, ~410 calls) take roughly 18-20s against `JEV_DEADLINE_MS=50_000` and the cron's 60s `timeout_milliseconds` — comfortably inside both, though this is an extrapolation from a 126-call sample and per-call latency would have to roughly triple before a full-size set started truncating. Because the baseline query only accepts `status='ok'`, a run that does close `'partial'` never produces a baseline and `deltas` stays `{first_run:true}` forever. Freeze a deliberately smaller set first if you want a faster initial baseline:
+
+   ```sql
+   select * from public.jev_regression_freeze(120, 60);
+   -- ~126 calls, comfortably inside the 50s deadline; closes 'ok'
+   ```
+
+   The `/admin` button's RPC call carries no arguments, so it always tops up to the SQL defaults (400/100), which are now believed to fit comfortably inside the deadline (see step 5's timing above). The top-up is additive — there is no shrink path from `/admin` (no delete route, and the table has no service_role DELETE path in code) — so an operator who wants a small set should freeze by hand first, before ever pressing "Seti dondur".
+
+   Re-running the freeze is also how a previously-random article gets upgraded: if an article was frozen by step 5b (`in_gold=false`) and has since entered `jev_gold_set` via the 063 labelling flow, the next `jev_regression_freeze()` call flips it to `in_gold=true` in place (no new row, no quota spent) so it becomes visible to the gold comparison.
+
+6. **Verify, in order:**
+
+   ```sql
+   select jobname, schedule, active from cron.job where jobname = 'jev-regression-weekly';
+   -- expect 20 4 * * 0, active = true
+   ```
+
+   ```sql
+   select kind, count(*), count(*) filter (where in_gold) as gold from public.jev_regression_items group by kind;
+   ```
+
+7. **Smoke the path once, by hand, before the cron's first Sunday:**
+
+   ```bash
+   curl -sS -X POST -H "Authorization: Bearer $SR" -H 'Content-Type: application/json' \
+     -d '{"mode":"regression"}' "https://$PROJECT_REF.functions.supabase.co/jev-shadow"
+   # expect non-zero regression_articles/regression_pairs stage counts, zero everywhere else, and a `regression` key in the response
+   ```
+
+   Read the first run:
+
+   ```sql
+   select id, question_set, status, items, calls, input_tokens, deltas->'overall', deltas->'gold'
+   from public.jev_regression_runs order by id desc limit 3;
+   -- the first run's deltas is {"first_run": true, "gold": {...}} -- there is nothing to compare against yet.
+   -- the SECOND run is the first one that can show a flip.
+   ```
+
+   Confirm the spend landed in the shared ledger:
+
+   ```sql
+   select id, status, note, calls, input_tokens from public.jev_shadow_runs order by id desc limit 3;
+   -- the regression run's row must be here, note starting 'regression'
+   select * from public.jev_shadow_month_usage();
+   ```
+
+   Note on `deltas.overall.flip_rate`: only boolean/choice tasks (`politics`, `topic`, `topic7`, `opinion`, `clickbait`, `framing`, `pair_negative`) contribute a flip and count toward `flip_rate`. `sensational` is a 0-10 SCORE answer, not a `[0,1]` probability, so a 0.5 crossing is meaningless for it; `computeRegressionDeltas` excludes it from `flips`/`flip_rate` and tracks its drift only via `mean_abs_delta`/`max_abs_delta`.
+
+8. **CRON COLLISION — known, accepted.** `'20 4 * * 0'` lands on the `jev-shadow` `*/10` grid (minutes `00/10/20/30/40/50`), unlike 063's deliberately off-grid `'55 3 * * *'`. One Sunday morning per week, two `jev-shadow` instances run concurrently. They write to disjoint tables and each opens its own `jev_shadow_runs` row, so there is no corruption and no double-counting — the exposure is gateway rate limiting (which `callOnce` downgrades to `status='rate_limited'`, not a crash) and two simultaneous `monthTokens` reads racing the cap check. Shipped as specified; move the job to `'25 4 * * 0'` if the gateway starts rate-limiting on Sunday mornings:
+
+   ```sql
+   select cron.unschedule('jev-regression-weekly');
+   select cron.schedule('jev-regression-weekly', '25 4 * * 0', $sql$ ... $sql$); -- copy the do-block body from 066
+   ```
+
+9. **KILL SWITCH.** Two independent levers, in escalating order, none requiring a migration or a deploy:
+
+   ```sql
+   -- 1. Stop the weekly regression replay only -- the 10-minute shadow run
+   -- and the nightly audit (if 063 is applied) keep going.
+   update cron.job set active = false where jobname = 'jev-regression-weekly';
+   ```
+
+   ```bash
+   # 2. Stop all three modes instantly -- checked before any database read,
+   # run row, or gateway call.
+   supabase secrets set JEV_DISABLED=1 --project-ref "$PROJECT_REF"
+   ```
+
+**WARNING — `jev_regression_items` deliberately has NO foreign key to `articles`, so it SURVIVES `nuke_articles`** (unlike `jev_gold_set`/`jev_gold_labels`, which cascade-delete with their articles — see the 063 section's warning above). The regression ITEMS keep existing after a bulk article delete, but `computeRegressionGold`'s `in_gold` half depends on `jev_gold_labels`, so the gold comparison inside `deltas` silently becomes `{n:0}` once the underlying gold labels are gone. The 063 snapshot procedure (`jev_gold_set`/`jev_gold_labels` CSV export) is still the only protection for the gold half of this pack too.
+
 ---
 
 ## Çerçeve oyları paketi (068): oy tablosu + dört SECURITY DEFINER fonksiyon, cron yok
@@ -1206,6 +1311,9 @@ Before declaring the migration complete:
 - [ ] `archive-export` redeployed and the next manifest carries `labels.declared = true` with a plausible `coverage`
 - [ ] Operator knows the SQL-only `jev-signals-nightly` cron has no Sentry alerting and must be checked in `cron.job_run_details`
 
+- [ ] Migration 066 applied (Vault precondition from 038 verified first); `select jobname, schedule, active from cron.job where jobname = 'jev-regression-weekly';` shows `20 4 * * 0`, active
+- [ ] The operator has read the first run's `status` and `calls` from `jev_regression_runs` and confirmed the run closed `'ok'` before trusting any later delta
+- [ ] Operator knows `jev_regression_items` deliberately has NO foreign key to `articles` and therefore SURVIVES `nuke_articles` (unlike `jev_gold_set`/`jev_gold_labels`), but the gold half of `deltas` still depends on `jev_gold_labels` and goes to `{n:0}` if those rows are gone
 - [ ] Migration 068 applied; `select proname, prosecdef from pg_proc where proname in ('framing_vote_totals','framing_next_headline','framing_gold_candidates','cluster_framing_receipt');` returns 4 rows, all `prosecdef = true`
 - [ ] `select * from public.framing_vote_totals('00000000-0000-0000-0000-000000000000');` returns one row of zeros, not an error
 - [ ] Operator has read the 48h Çerçeve pool size and the `task = 'framing'` scored-probability count (Verification queries (c) and (d) above) before announcing the mode

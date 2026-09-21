@@ -38,12 +38,15 @@ import {
   JEV_POLITICS_CATEGORIES,
   JEV_PROTOCOL_VERSION,
   JEV_SPEC_VERSION,
+  type JevGoldLabelRow,
   type JevKapRow,
   JevDeadlineError,
   type JevMemberRow,
   type JevPairCandidate,
   type JevPorts,
   JevRateLimitError,
+  type JevRegressionAnswerRow,
+  type JevRegressionItem,
   type JevRequest,
   type JevResponse,
   type JevRunMode,
@@ -51,6 +54,7 @@ import {
   type JevTickerRow,
   type JevTitleRow,
   type JevUnlinkCandidateRow,
+  agreedGoldLabels,
   isRateLimitStatus,
   offendingQuestionIds,
   parseJevResponse,
@@ -64,6 +68,14 @@ const JSON_HEADERS = { "content-type": "application/json" } as const;
 /** Hard cap on fetchPendingArticles' forward paging (JEV-A4) -- bounds a
  * pathological 24h backlog to a fixed number of round trips per run. */
 const JEV_ARTICLE_FETCH_MAX_PAGES = 10;
+
+/** PostgREST page size for fetchPreviousRegressionAnswers (066). */
+const JEV_REGRESSION_ANSWER_PAGE = 1000;
+/** Hard cap on fetchPreviousRegressionAnswers' paging (066): 400 articles x
+ * 7 tasks + 100 pairs is 2900 rows, well over PostgREST's default 1000-row
+ * ceiling -- an unpaged read would silently truncate the baseline and
+ * manufacture flips over a fraction of the set rather than erroring. */
+const JEV_REGRESSION_ANSWER_MAX_PAGES = 10;
 
 /** Same 100-id cap as _shared/archive.ts's ARCHIVE_ID_CHUNK,
  * cluster-consumer/index.ts's inChunked default, and ingest/index.ts's
@@ -655,6 +667,106 @@ function makePorts(apiKey: string): JevPorts {
       const { error } = await supabase.from("clusters").update(patch).eq("id", clusterId);
       if (error) throw new Error(`jev-shadow: markBlindspotChecked failed: ${error.message}`);
     },
+
+    // --- Migration 066: frozen regression set --------------------------------
+
+    async fetchRegressionItems(kind, limit): Promise<JevRegressionItem[]> {
+      const { data, error } = await supabase
+        .from("jev_regression_items")
+        .select("id, kind, subject_id, state, in_gold")
+        .eq("kind", kind)
+        .order("id", { ascending: true })
+        .limit(limit);
+      if (error) throw new Error(`jev-shadow: fetchRegressionItems failed: ${error.message}`);
+      return (data ?? []) as unknown as JevRegressionItem[];
+    },
+
+    async insertRegressionAnswers(rows): Promise<number> {
+      if (rows.length === 0) return 0;
+      // The primary key IS the idempotency key -- upsert on conflict
+      // (run_id, item_id, task) DO UPDATE, so a retried write corrects
+      // instead of 23505-ing.
+      const { data, error } = await supabase
+        .from("jev_regression_answers")
+        .upsert(rows, { onConflict: "run_id,item_id,task" })
+        .select("task");
+      if (error) throw new Error(`jev-shadow: insertRegressionAnswers failed: ${error.message}`);
+      return (data ?? []).length;
+    },
+
+    async startRegressionRun(questionSet): Promise<number> {
+      const { data, error } = await supabase
+        .from("jev_regression_runs")
+        .insert({ question_set: questionSet })
+        .select("id")
+        .single();
+      if (error) throw new Error(`jev-shadow: startRegressionRun failed: ${error.message}`);
+      return (data as { id: number }).id;
+    },
+
+    async finishRegressionRun(id, patch): Promise<void> {
+      const { error } = await supabase.from("jev_regression_runs").update(patch).eq("id", id);
+      if (error) throw new Error(`jev-shadow: finishRegressionRun failed: ${error.message}`);
+    },
+
+    async fetchPreviousRegressionAnswers(currentRunId): Promise<JevRegressionAnswerRow[]> {
+      // The baseline is the most recent status='ok' run BELOW this run's id
+      // -- a deadline-truncated 'partial' run answered only a prefix of the
+      // set, so promoting it would make the next run's flip counts depend
+      // on where the deadline landed.
+      const { data: baseline, error: baselineError } = await supabase
+        .from("jev_regression_runs")
+        .select("id")
+        .eq("status", "ok")
+        .lt("id", currentRunId)
+        .order("id", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (baselineError) {
+        throw new Error(`jev-shadow: fetchPreviousRegressionAnswers failed: ${baselineError.message}`);
+      }
+      if (!baseline) return [];
+      const baselineRunId = (baseline as { id: number }).id;
+
+      // 400 articles x 7 tasks + 100 pairs is 2900 rows, well over
+      // PostgREST's default 1000-row ceiling -- page with .range(), capped
+      // at JEV_REGRESSION_ANSWER_MAX_PAGES, or an unpaged read would
+      // silently truncate the baseline and manufacture flips.
+      const out: JevRegressionAnswerRow[] = [];
+      for (let page = 0; page < JEV_REGRESSION_ANSWER_MAX_PAGES; page++) {
+        const from = page * JEV_REGRESSION_ANSWER_PAGE;
+        const to = from + JEV_REGRESSION_ANSWER_PAGE - 1;
+        const { data, error } = await supabase
+          .from("jev_regression_answers")
+          .select("run_id, item_id, task, jev_prob, jev_choice")
+          .eq("run_id", baselineRunId)
+          .order("item_id", { ascending: true })
+          .order("task", { ascending: true })
+          .range(from, to);
+        if (error) throw new Error(`jev-shadow: fetchPreviousRegressionAnswers failed: ${error.message}`);
+        const rows = (data ?? []) as unknown as JevRegressionAnswerRow[];
+        out.push(...rows);
+        if (rows.length < JEV_REGRESSION_ANSWER_PAGE) break;
+      }
+      return out;
+    },
+
+    async fetchGoldLabels(articleIds): Promise<JevGoldLabelRow[]> {
+      if (articleIds.length === 0) return [];
+      const rows: Array<{ article_id: string; labeler: number; is_politics: boolean; topic: string }> = [];
+      for (let i = 0; i < articleIds.length; i += JEV_ID_CHUNK) {
+        const chunk = articleIds.slice(i, i + JEV_ID_CHUNK) as string[];
+        const { data, error } = await supabase
+          .from("jev_gold_labels")
+          .select("article_id, labeler, is_politics, topic")
+          .in("article_id", chunk);
+        if (error) throw new Error(`jev-shadow: fetchGoldLabels failed: ${error.message}`);
+        rows.push(...((data ?? []) as unknown as Array<{ article_id: string; labeler: number; is_politics: boolean; topic: string }>));
+      }
+      // Already agreement-filtered -- agreedGoldLabels keeps only rows where
+      // labeler 1 and labeler 2 both exist and agree on both fields.
+      return agreedGoldLabels(rows);
+    },
   };
 }
 
@@ -826,11 +938,13 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
     return jsonResponse({ ok: true, skipped: true, reason: "disabled" });
   }
 
-  // The one and only accepted body field: `{"mode":"audit"}` selects the
-  // nightly accuracy audit; a missing mode, `{}`, `{"mode":"shadow"}`, or
-  // any other string all select the normal shadow run. `{"limit_articles":
+  // The accepted body fields: `{"mode":"audit"}` selects the nightly
+  // accuracy audit; `{"mode":"regression"}` (066) selects the frozen
+  // regression-set replay; a missing mode, `{}`, `{"mode":"shadow"}`, or any
+  // other string all select the normal shadow run. `{"limit_articles":
   // n}`-style knobs are still refused, simply by being ignored.
-  const mode: JevRunMode = (parsed as { mode?: unknown } | undefined)?.mode === "audit" ? "audit" : "shadow";
+  const rawMode = (parsed as { mode?: unknown } | undefined)?.mode;
+  const mode: JevRunMode = rawMode === "regression" ? "regression" : rawMode === "audit" ? "audit" : "shadow";
 
   // Fail-safe: no key configured -> no run row, no gateway call (the
   // RESEND_API_KEY precedent in src/lib/email/resend.ts). This is the

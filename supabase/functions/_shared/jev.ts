@@ -111,6 +111,25 @@ export const JEV_BLINDSPOT_WINDOW_HOURS = 24;
 /** Any blindspot_recall answer at or above this probability marks the
  * cluster blindspot_recall_suspect. */
 export const JEV_BLINDSPOT_SUSPECT_PROB = 0.7;
+
+// --- Migration 066: frozen regression set ---
+/** Items fetched per kind, per regression run. */
+export const JEV_REGRESSION_ITEM_LIMIT = 500;
+/** Answer rows buffered before an insertRegressionAnswers write. */
+export const JEV_REGRESSION_ANSWER_CHUNK = 200;
+/** Hand-duplicated twin of 066's jev_regression_freeze(p_articles int default 400). */
+export const JEV_REGRESSION_ARTICLE_DEFAULT = 400;
+/** Hand-duplicated twin of 066's jev_regression_freeze(p_pairs int default 100). */
+export const JEV_REGRESSION_PAIR_DEFAULT = 100;
+/** Second gold threshold, mirroring jev_gold_scorecard()'s jev_politics_070. */
+export const JEV_GOLD_STRICT_THRESHOLD = 0.7;
+/** numeric(4,3) ceiling in 066's jev_regression_answers.jev_prob. */
+export const JEV_PROB_MAX_NUMERIC = 9.999;
+/** Tasks whose jev_prob is a 0-10 score, not a [0,1] probability. A 0.5
+ * crossing is meaningless for these, so they contribute mean/max_abs_delta
+ * but never a flip or a flip_rate denominator. */
+export const JEV_SCORE_TASKS: ReadonlySet<string> = new Set(["sensational", "kap_materiality"]);
+
 // JEV-A11 stopgap: evaluateWithRetries (index.ts) is not deadline-aware --
 // each attempt is a fresh AbortSignal.timeout(20_000) plus a retryDelayMs
 // ladder, so 5 attempts at JEV_MAX_RETRIES=4 had a ~107s worst case for a
@@ -158,8 +177,12 @@ export type JevTask = (typeof JEV_TASKS)[number];
 export type JevSubjectType = "article" | "pair" | "cluster" | "kap" | "title_version";
 export type JevRunStatus = "running" | "ok" | "partial" | "rate_limited" | "budget_exceeded" | "error";
 /** shadow: the 10-minute cron, every subject type. audit: the nightly
- * cluster-precision/recall cron, pair questions only, at volume. */
-export type JevRunMode = "shadow" | "audit";
+ * cluster-precision/recall cron, pair questions only, at volume. regression
+ * (066): the weekly frozen-regression-set replay, comparing this run's
+ * answers against the previous 'ok' regression run (and against human gold
+ * labels) so a wording or model change surfaces as a flip, separate from
+ * every other pipeline change 061-065 already measure. */
+export type JevRunMode = "shadow" | "audit" | "regression";
 
 /** Rows accumulate before insertPredictions is called; matches migration 061's design note. */
 const PREDICTION_INSERT_CHUNK = 200;
@@ -615,6 +638,54 @@ export interface JevTickerRow {
   description: string | null;
   company: string | null; // bist_companies.title, or null when unmapped
   matched_on: string; // "alias:<alias>" | "code"
+}
+
+// --- Migration 066: frozen regression set ---
+
+export type JevRegressionItemKind = "article" | "pair";
+export type JevRegressionRunStatus = "running" | "ok" | "partial" | "error";
+
+export interface JevRegressionItem {
+  id: number;
+  kind: JevRegressionItemKind;
+  subject_id: string;
+  /** Frozen snapshot. article: {title, description}. pair: {pairs:{p1:{a,b}}}. */
+  state: Record<string, unknown>;
+  in_gold: boolean;
+}
+
+export interface JevRegressionAnswerRow {
+  run_id: number;
+  item_id: number;
+  task: string;
+  jev_prob: number | null;
+  jev_choice: string | null;
+}
+
+export interface JevGoldLabelRow {
+  article_id: string;
+  is_politics: boolean;
+  /** Feed taxonomy: politika|dunya|ekonomi|spor|yasam|teknoloji|genel. */
+  topic: string;
+}
+
+export interface JevRegressionTaskDelta {
+  n: number;
+  flips: number;
+  mean_abs_delta: number | null;
+  max_abs_delta: number | null;
+}
+
+export interface JevRegressionGold {
+  politics: { n: number; correct_050: number; correct_070: number };
+  topic: { n: number; correct: number };
+}
+
+export interface JevRegressionDeltas {
+  first_run?: boolean;
+  tasks?: Record<string, JevRegressionTaskDelta>;
+  overall?: { items: number; tasks: number; flip_rate: number | null };
+  gold?: JevRegressionGold;
 }
 
 /**
@@ -1137,6 +1208,289 @@ export function pickNeutralArticleId(
 }
 
 // ---------------------------------------------------------------------------
+// Migration 066: frozen regression set -- pure functions only (no ports, no
+// Date.now(), no I/O). Unit-tested directly in tests/functions/jev-shadow.test.ts.
+// ---------------------------------------------------------------------------
+
+/**
+ * Rebuilds the JevArticleRow buildArticleCall reads its request from, using
+ * ONLY the frozen item's title+description -- category/published_at/
+ * source_slug are deliberately absent (null/"") so nothing but the frozen
+ * bytes can reach the gateway.
+ */
+export function regressionArticleRow(item: JevRegressionItem): JevArticleRow {
+  const state = item.state as { title?: unknown; description?: unknown };
+  return {
+    id: item.subject_id,
+    title: String(state.title ?? ""),
+    description: typeof state.description === "string" ? state.description : null,
+    category: null,
+    published_at: "",
+    source_slug: null,
+  };
+}
+
+/**
+ * Reads state.pairs.p1.{a,b}. A malformed frozen row (missing or non-string
+ * title on either side) is a skip, never a throw -- one bad frozen row must
+ * never abort the whole regression_pairs stage. ids come from
+ * subject_id.split(":") (["", ""] fallback when the format is unexpected);
+ * cluster_id "" and published_at "" on both sides (the pair sampler/grouping
+ * functions are never used in regression mode).
+ */
+export function regressionPair(item: JevRegressionItem): JevPair | null {
+  const pairsField = (item.state as { pairs?: unknown }).pairs;
+  const p1 = pairsField && typeof pairsField === "object" ? (pairsField as Record<string, unknown>).p1 : undefined;
+  if (!p1 || typeof p1 !== "object") return null;
+  const a = (p1 as Record<string, unknown>).a;
+  const b = (p1 as Record<string, unknown>).b;
+  if (typeof a !== "string" || typeof b !== "string") return null;
+
+  const parts = item.subject_id.split(":");
+  const [idA, idB] = parts.length === 2 ? parts : ["", ""];
+
+  return {
+    a: { id: idA ?? "", cluster_id: "", title: a, published_at: "" },
+    b: { id: idB ?? "", cluster_id: "", title: b, published_at: "" },
+  };
+}
+
+/**
+ * Builds JevRegressionAnswerRow[] from a JevResponse, one row per key in
+ * keyToTask present in response.answers -- a missing answer is skipped
+ * silently (the 400-retry path can drop a question). boolean/score answers
+ * are clamped with Math.min(round3(x), JEV_PROB_MAX_NUMERIC): an un-clamped
+ * round3(9.9996) rounds to 10 and 22003s the numeric(4,3) column, killing
+ * the whole insert chunk.
+ */
+export function regressionAnswerRows(
+  runId: number,
+  itemId: number,
+  response: JevResponse,
+  keyToTask: Readonly<Record<string, string>>,
+): JevRegressionAnswerRow[] {
+  const rows: JevRegressionAnswerRow[] = [];
+  for (const [key, task] of Object.entries(keyToTask)) {
+    const answer = response.answers[key];
+    if (!answer) continue;
+    if (answer.type === "boolean") {
+      rows.push({
+        run_id: runId,
+        item_id: itemId,
+        task,
+        jev_prob: Math.min(round3(answer.probability), JEV_PROB_MAX_NUMERIC),
+        jev_choice: null,
+      });
+    } else if (answer.type === "score") {
+      rows.push({
+        run_id: runId,
+        item_id: itemId,
+        task,
+        jev_prob: Math.min(round3(answer.score), JEV_PROB_MAX_NUMERIC),
+        jev_choice: null,
+      });
+    } else {
+      rows.push({ run_id: runId, item_id: itemId, task, jev_prob: null, jev_choice: answer.choice });
+    }
+  }
+  return rows;
+}
+
+/**
+ * prev empty -> { first_run: true } and nothing else. Otherwise compares
+ * ONLY (item_id, task) keys present in BOTH sides; a pair where one side is
+ * a probability/score and the other a choice is skipped entirely (never
+ * counted as a flip, never counted toward n). flip = threshold-crossing for
+ * a prob pair, choice inequality for a choice pair. mean_abs_delta /
+ * max_abs_delta are computed only over pairs where BOTH sides carry a
+ * non-null jev_prob (null when there are none), both rounded to 3 decimals.
+ * Score-typed tasks (JEV_SCORE_TASKS: jev_prob on a 0-10 scale, not [0,1])
+ * still report n/mean_abs_delta/max_abs_delta but are EXCLUDED from `flips`
+ * and from `overall.flip_rate`'s numerator/denominator -- a 0.5 threshold
+ * crossing is meaningless on a 0-10 scale. A score task's emitted `flips: 0`
+ * therefore means NOT SCORED, not zero drift; read mean/max_abs_delta for
+ * its actual drift signal.
+ */
+export function computeRegressionDeltas(
+  prev: readonly JevRegressionAnswerRow[],
+  cur: readonly JevRegressionAnswerRow[],
+): JevRegressionDeltas {
+  if (prev.length === 0) return { first_run: true };
+
+  const prevByKey = new Map<string, JevRegressionAnswerRow>();
+  for (const row of prev) prevByKey.set(`${row.item_id}:${row.task}`, row);
+
+  interface TaskAcc {
+    n: number;
+    flips: number;
+    sum: number;
+    max: number;
+    deltaCount: number;
+  }
+  const tasks = new Map<string, TaskAcc>();
+  const itemIds = new Set<number>();
+  let totalCompared = 0;
+  let totalFlips = 0;
+
+  for (const c of cur) {
+    const p = prevByKey.get(`${c.item_id}:${c.task}`);
+    if (!p) continue;
+
+    const pIsProb = p.jev_prob !== null;
+    const cIsProb = c.jev_prob !== null;
+    const pIsChoice = p.jev_choice !== null;
+    const cIsChoice = c.jev_choice !== null;
+    if (pIsProb !== cIsProb) continue; // one side prob, other choice -- skip entirely
+    if (!pIsProb && !pIsChoice) continue; // neither side has an answer
+    if (!cIsProb && !cIsChoice) continue;
+
+    // Score-typed tasks (0-10 scale) never cross the [0,1] boolean threshold
+    // meaningfully -- skip the flip comparison entirely rather than run it
+    // against a 0-10 value.
+    const isScore = JEV_SCORE_TASKS.has(c.task);
+    const flip = isScore
+      ? false
+      : pIsProb
+        ? (p.jev_prob! >= JEV_BOOLEAN_THRESHOLD) !== (c.jev_prob! >= JEV_BOOLEAN_THRESHOLD)
+        : p.jev_choice !== c.jev_choice;
+
+    let acc = tasks.get(c.task);
+    if (!acc) {
+      acc = { n: 0, flips: 0, sum: 0, max: 0, deltaCount: 0 };
+      tasks.set(c.task, acc);
+    }
+    acc.n += 1;
+    if (flip) acc.flips += 1;
+    if (p.jev_prob !== null && c.jev_prob !== null) {
+      const d = Math.abs(p.jev_prob - c.jev_prob);
+      acc.sum += d;
+      acc.max = Math.max(acc.max, d);
+      acc.deltaCount += 1;
+    }
+
+    itemIds.add(c.item_id);
+    if (!isScore) {
+      totalCompared += 1;
+      if (flip) totalFlips += 1;
+    }
+  }
+
+  const outTasks: Record<string, JevRegressionTaskDelta> = {};
+  for (const [task, acc] of tasks) {
+    outTasks[task] = {
+      n: acc.n,
+      flips: acc.flips,
+      mean_abs_delta: acc.deltaCount > 0 ? round3(acc.sum / acc.deltaCount) : null,
+      max_abs_delta: acc.deltaCount > 0 ? round3(acc.max) : null,
+    };
+  }
+
+  return {
+    tasks: outTasks,
+    overall: {
+      items: itemIds.size,
+      tasks: Object.keys(outTasks).length,
+      flip_rate: totalCompared > 0 ? round3(totalFlips / totalCompared) : null,
+    },
+  };
+}
+
+/**
+ * 'politika' -> "politics" | 'ekonomi' -> "economy" | 'dunya' -> null
+ * (ambiguous, NOT scored wrong) | everything else -> "other". MUST stay
+ * identical to jev_gold_scorecard()'s topic3 CTE (063) and topicBaseline()'s
+ * dunya handling -- DB-1 parity.
+ */
+export function goldTopicToJevChoice(topic: string): string | null {
+  if (topic === "politika") return "politics";
+  if (topic === "ekonomi") return "economy";
+  if (topic === "dunya") return null;
+  return "other";
+}
+
+/**
+ * Keeps one row per article_id where labeler 1 and labeler 2 both exist AND
+ * agree on is_politics AND on topic. Disagreement is excluded, never
+ * adjudicated.
+ */
+export function agreedGoldLabels(
+  rows: readonly { article_id: string; labeler: number; is_politics: boolean; topic: string }[],
+): JevGoldLabelRow[] {
+  type LabelRow = { article_id: string; labeler: number; is_politics: boolean; topic: string };
+  const byArticle = new Map<string, LabelRow[]>();
+  for (const r of rows) {
+    const list = byArticle.get(r.article_id);
+    if (list) list.push(r);
+    else byArticle.set(r.article_id, [r]);
+  }
+
+  const out: JevGoldLabelRow[] = [];
+  for (const [articleId, list] of byArticle) {
+    const l1 = list.find((r) => r.labeler === 1);
+    const l2 = list.find((r) => r.labeler === 2);
+    if (!l1 || !l2) continue;
+    if (l1.is_politics !== l2.is_politics) continue;
+    if (l1.topic !== l2.topic) continue;
+    out.push({ article_id: articleId, is_politics: l1.is_politics, topic: l1.topic });
+  }
+  return out;
+}
+
+/**
+ * Only items with in_gold === true && kind === "article", matched to a
+ * label by subject_id === article_id. politics: n counts items with a label
+ * and a non-null task='politics' jev_prob; correct_050/correct_070 compare
+ * against JEV_BOOLEAN_THRESHOLD / JEV_GOLD_STRICT_THRESHOLD. topic: excludes
+ * labels whose goldTopicToJevChoice is null; n counts the rest with a
+ * non-null task='topic' jev_choice; correct = jev_choice === mapped topic.
+ */
+export function computeRegressionGold(
+  items: readonly JevRegressionItem[],
+  cur: readonly JevRegressionAnswerRow[],
+  labels: readonly JevGoldLabelRow[],
+): JevRegressionGold {
+  const labelByArticle = new Map(labels.map((l) => [l.article_id, l]));
+  const politicsByItem = new Map<number, number>();
+  const topicByItem = new Map<number, string>();
+  for (const row of cur) {
+    if (row.task === "politics" && row.jev_prob !== null) politicsByItem.set(row.item_id, row.jev_prob);
+    if (row.task === "topic" && row.jev_choice !== null) topicByItem.set(row.item_id, row.jev_choice);
+  }
+
+  let politicsN = 0;
+  let correct050 = 0;
+  let correct070 = 0;
+  let topicN = 0;
+  let topicCorrect = 0;
+
+  for (const item of items) {
+    if (!item.in_gold || item.kind !== "article") continue;
+    const label = labelByArticle.get(item.subject_id);
+    if (!label) continue;
+
+    const prob = politicsByItem.get(item.id);
+    if (prob !== undefined) {
+      politicsN += 1;
+      if ((prob >= JEV_BOOLEAN_THRESHOLD) === label.is_politics) correct050 += 1;
+      if ((prob >= JEV_GOLD_STRICT_THRESHOLD) === label.is_politics) correct070 += 1;
+    }
+
+    const mappedTopic = goldTopicToJevChoice(label.topic);
+    if (mappedTopic === null) continue;
+    const choice = topicByItem.get(item.id);
+    if (choice !== undefined) {
+      topicN += 1;
+      if (choice === mappedTopic) topicCorrect += 1;
+    }
+  }
+
+  return {
+    politics: { n: politicsN, correct_050: correct050, correct_070: correct070 },
+    topic: { n: topicN, correct: topicCorrect },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Row builder -- the single place the insert payload shape is decided.
 // ---------------------------------------------------------------------------
 
@@ -1303,6 +1657,38 @@ export interface JevPorts {
    * API-key-creation URL, a 400 echoes request paths).
    */
   onError?(stage: string, err: unknown): void;
+
+  // --- Migration 066: frozen regression set ---
+
+  /** Frozen regression items of one kind, ordered by id ASC -- a
+   * deadline-truncated run must always cover the SAME prefix as the last
+   * one, so flip counts stay comparable run over run. */
+  fetchRegressionItems(kind: JevRegressionItemKind, limit: number): Promise<JevRegressionItem[]>;
+  /** Upsert on conflict (run_id, item_id, task) DO UPDATE -- a retried write
+   * corrects instead of 23505-ing. Returns rows written. */
+  insertRegressionAnswers(rows: readonly JevRegressionAnswerRow[]): Promise<number>;
+  startRegressionRun(questionSet: string): Promise<number>;
+  finishRegressionRun(
+    id: number,
+    patch: {
+      finished_at: string;
+      items: number;
+      calls: number;
+      input_tokens: number;
+      status: JevRegressionRunStatus;
+      deltas: JevRegressionDeltas | null;
+      note: string | null;
+    },
+  ): Promise<void>;
+  /** Answers of the most recent jev_regression_runs row with status='ok'
+   * AND id < currentRunId; [] when there is none. MUST page: 400 articles x
+   * 6 tasks + 100 pairs is 2500 rows, over PostgREST's 1000-row default --
+   * an unpaged read would silently truncate the baseline and manufacture
+   * flips. */
+  fetchPreviousRegressionAnswers(currentRunId: number): Promise<JevRegressionAnswerRow[]>;
+  /** Already agreement-filtered via agreedGoldLabels(). Chunk .in() by
+   * JEV_ID_CHUNK (100). */
+  fetchGoldLabels(articleIds: readonly string[]): Promise<JevGoldLabelRow[]>;
 }
 
 export interface JevShadowResult {
@@ -1316,6 +1702,10 @@ export interface JevShadowResult {
   usd: number;
   stages: Record<StageName, StageStats>;
   duration_ms: number;
+  /** Present only when this run opened a regression run row (mode
+   * 'regression' and the monthly cap was not already exceeded). shadow/audit
+   * responses are byte-unchanged -- this field is purely additive. */
+  regression?: { run_id: number; items: number; deltas: JevRegressionDeltas | null };
 }
 
 type StageName =
@@ -1326,7 +1716,9 @@ type StageName =
   | "kap"
   | "title_versions"
   | "tickers"
-  | "audit_pairs";
+  | "audit_pairs"
+  | "regression_articles"
+  | "regression_pairs";
 
 interface StageStats {
   calls: number;
@@ -1355,6 +1747,19 @@ interface RunCtx {
    * still closes -- as 'partial', naming them -- instead of one stage's
    * PostgREST error taking every later stage down with it. */
   failedStages: StageName[];
+  /** Migration 066: non-null only when mode === 'regression' and a
+   * regression run row was actually opened (never when the monthly cap was
+   * already exceeded). */
+  regression: {
+    runId: number;
+    items: JevRegressionItem[];
+    answers: JevRegressionAnswerRow[];
+    pending: JevRegressionAnswerRow[];
+    /** Count of insertRegressionAnswers chunk failures (pushRegressionRows
+     * + flushRegressionRows). Never fed by ctx.errors alone: a write-failed
+     * run must not close 'ok' and become the next run's baseline. */
+    writeErrors: number;
+  } | null;
 }
 
 function emptyStageStats(): StageStats {
@@ -1378,6 +1783,7 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     stopReason: null,
     callSeq: 0,
     failedStages: [],
+    regression: null,
     stages: {
       articles: emptyStageStats(),
       clusters: emptyStageStats(),
@@ -1387,6 +1793,8 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
       title_versions: emptyStageStats(),
       tickers: emptyStageStats(),
       audit_pairs: emptyStageStats(),
+      regression_articles: emptyStageStats(),
+      regression_pairs: emptyStageStats(),
     },
   };
 }
@@ -1417,6 +1825,60 @@ async function flushRemaining(ctx: RunCtx): Promise<void> {
   if (ctx.rows.length === 0) return;
   const chunk = ctx.rows.splice(0, ctx.rows.length);
   ctx.rowsInserted += await ctx.ports.insertPredictions(chunk);
+}
+
+/**
+ * Mirrors pushRows, writing through ctx.ports.insertRegressionAnswers in
+ * chunks of JEV_REGRESSION_ANSWER_CHUNK -- but, unlike pushRows, every write
+ * is BEST-EFFORT: a failed answer write must never turn a paid gateway call
+ * into a thrown run. `stage` is always known at the call site (both
+ * regression stage runners call this from inside their own processStage
+ * worker), so a failure bumps that stage's error counter too.
+ */
+async function pushRegressionRows(
+  ctx: RunCtx,
+  stage: "regression_articles" | "regression_pairs",
+  rows: readonly JevRegressionAnswerRow[],
+): Promise<void> {
+  if (!ctx.regression) return;
+  ctx.regression.pending.push(...rows);
+  while (ctx.regression.pending.length >= JEV_REGRESSION_ANSWER_CHUNK) {
+    const chunk = ctx.regression.pending.splice(0, JEV_REGRESSION_ANSWER_CHUNK);
+    try {
+      await ctx.ports.insertRegressionAnswers(chunk);
+    } catch (err) {
+      ctx.errors += 1;
+      ctx.stages[stage].errors += 1;
+      ctx.regression.writeErrors += 1;
+      try {
+        ctx.ports.onError?.(stage, err);
+      } catch {
+        // A logging hook must never destabilize the run.
+      }
+    }
+  }
+}
+
+/**
+ * Mirrors flushRemaining, called once in runJevShadow's finally block after
+ * both regression stages have run (or been cut short by the deadline) -- no
+ * single stage is "in scope" here, so a failure bumps only ctx.errors and
+ * reports through onError under the literal stage name "regression".
+ */
+async function flushRegressionRows(ctx: RunCtx): Promise<void> {
+  if (!ctx.regression || ctx.regression.pending.length === 0) return;
+  const chunk = ctx.regression.pending.splice(0, ctx.regression.pending.length);
+  try {
+    await ctx.ports.insertRegressionAnswers(chunk);
+  } catch (err) {
+    ctx.errors += 1;
+    if (ctx.regression) ctx.regression.writeErrors += 1;
+    try {
+      ctx.ports.onError?.("regression", err);
+    } catch {
+      // A logging hook must never destabilize the run.
+    }
+  }
 }
 
 /**
@@ -2282,6 +2744,184 @@ async function runTickersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
   });
 }
 
+// --- Migration 066: frozen regression set -- stage runners ------------------
+
+/**
+ * Replays every frozen article item's seven article-shaped questions through
+ * the SAME callOnce/processStage machinery shadow/audit mode use. Never
+ * calls insertPredictions -- every answer goes through pushRegressionRows
+ * (insertRegressionAnswers).
+ */
+async function runRegressionArticlesStage(ctx: RunCtx): Promise<void> {
+  const items = await ctx.ports.fetchRegressionItems("article", JEV_REGRESSION_ITEM_LIMIT);
+  if (items.length === 0) {
+    ctx.stages.regression_articles.skipped += 1;
+    return;
+  }
+  if (ctx.regression) ctx.regression.items.push(...items);
+
+  const keyToTask: Readonly<Record<string, string>> = {
+    politics: "politics",
+    topic: "topic",
+    topic7: "topic7",
+    opinion: "opinion",
+    clickbait: "clickbait",
+    framing: "framing",
+    sensational: "sensational",
+  };
+
+  await processStage(ctx, "regression_articles", items, async (item) => {
+    const request = buildArticleCall(regressionArticleRow(item));
+    const result = await callOnce(ctx, "regression_articles", request);
+    if (!result) {
+      ctx.stages.regression_articles.errors += 1;
+      return;
+    }
+    ctx.stages.regression_articles.calls += 1;
+    const runId = ctx.regression?.runId ?? ctx.runId;
+    const rows = regressionAnswerRows(runId, item.id, result.response, keyToTask);
+    ctx.stages.regression_articles.rows += rows.length;
+    if (ctx.regression) ctx.regression.answers.push(...rows);
+    await pushRegressionRows(ctx, "regression_articles", rows);
+  });
+}
+
+/**
+ * Replays frozen pair items JEV_PAIRS_PER_CALL at a time, task
+ * "pair_negative" (the wording actually sent -- pair_positive is a
+ * byte-identical copy). A malformed frozen pair (regressionPair returns
+ * null) is dropped and counted as a skip, never a throw.
+ */
+async function runRegressionPairsStage(ctx: RunCtx): Promise<void> {
+  const items = await ctx.ports.fetchRegressionItems("pair", JEV_REGRESSION_ITEM_LIMIT);
+
+  const survivors: Array<{ item: JevRegressionItem; pair: JevPair }> = [];
+  for (const item of items) {
+    const pair = regressionPair(item);
+    if (!pair) {
+      ctx.stages.regression_pairs.skipped += 1;
+      continue;
+    }
+    survivors.push({ item, pair });
+  }
+  if (survivors.length === 0) return;
+  if (ctx.regression) ctx.regression.items.push(...survivors.map((s) => s.item));
+
+  const chunks: Array<Array<{ item: JevRegressionItem; pair: JevPair }>> = [];
+  for (let i = 0; i < survivors.length; i += JEV_PAIRS_PER_CALL) {
+    chunks.push(survivors.slice(i, i + JEV_PAIRS_PER_CALL));
+  }
+
+  await processStage(ctx, "regression_pairs", chunks, async (chunk) => {
+    const { request } = buildPairCall(chunk.map((entry) => entry.pair));
+    const result = await callOnce(ctx, "regression_pairs", request);
+    if (!result) {
+      ctx.stages.regression_pairs.errors += 1;
+      return;
+    }
+    ctx.stages.regression_pairs.calls += 1;
+    const runId = ctx.regression?.runId ?? ctx.runId;
+    const rows: JevRegressionAnswerRow[] = [];
+    chunk.forEach((entry, i) => {
+      const key = `p${i + 1}`;
+      rows.push(...regressionAnswerRows(runId, entry.item.id, result.response, { [key]: "pair_negative" }));
+    });
+    ctx.stages.regression_pairs.rows += rows.length;
+    if (ctx.regression) ctx.regression.answers.push(...rows);
+    await pushRegressionRows(ctx, "regression_pairs", rows);
+  });
+}
+
+/** JevRunStatus -> JevRegressionRunStatus per contract B4. */
+function regressionRunStatus(status: JevRunStatus): JevRegressionRunStatus {
+  if (status === "ok") return "ok";
+  if (status === "error") return "error";
+  return "partial"; // partial | rate_limited | budget_exceeded | running
+}
+
+/** Prefixes a jev_shadow_runs note with 'regression' in regression mode
+ * only -- applied once, at the finishRun call site, so it also prefixes
+ * 'monthly cap reached' and a caught error message. */
+function withModeNote(mode: JevRunMode, note: string | null): string | null {
+  if (mode !== "regression") return note;
+  return note ? `regression; ${note}` : "regression";
+}
+
+/**
+ * Computes deltas (against the previous 'ok' regression run) and, when at
+ * least one in_gold article item exists, the gold comparison -- even on a
+ * first run, which compares against humans, not a previous run. The whole
+ * computation lives in its own try/catch that degrades to deltas = null on
+ * any failure (JEV-B5): it must never prevent finishRegressionRun from
+ * closing the row.
+ */
+async function closeRegressionRun(
+  ctx: RunCtx,
+  status: JevRunStatus,
+): Promise<{ run_id: number; items: number; deltas: JevRegressionDeltas | null } | null> {
+  if (!ctx.regression) return null;
+  const { runId, items, answers } = ctx.regression;
+
+  let deltas: JevRegressionDeltas | null = null;
+  try {
+    const prev = await ctx.ports.fetchPreviousRegressionAnswers(runId);
+    deltas = computeRegressionDeltas(prev, answers);
+
+    const goldArticleIds = items.filter((i) => i.in_gold && i.kind === "article").map((i) => i.subject_id);
+    if (goldArticleIds.length > 0) {
+      const labels = await ctx.ports.fetchGoldLabels(goldArticleIds);
+      const gold = computeRegressionGold(items, answers, labels);
+      deltas = { ...deltas, gold };
+    }
+  } catch (err) {
+    deltas = null;
+    ctx.errors += 1;
+    try {
+      ctx.ports.onError?.("regression_deltas", err);
+    } catch {
+      // A logging hook must never destabilize the run.
+    }
+  }
+
+  const closeStatus =
+    ctx.regression.writeErrors > 0 && regressionRunStatus(status) === "ok"
+      ? "partial"
+      : regressionRunStatus(status);
+
+  // Short, plain-text reason the run closed non-'ok' (deadline, rate limit,
+  // budget, a failed stage, or a failed insertRegressionAnswers chunk), so
+  // an operator reading jev_regression_runs.note doesn't have to cross-check
+  // the sibling jev_shadow_runs row. Never an error message, URL or gateway
+  // text -- just the state already tracked on ctx/ctx.regression.
+  const regressionNote =
+    ctx.failedStages.length > 0
+      ? `stage failed: ${ctx.failedStages.join(",")}`
+      : ctx.regression.writeErrors > 0
+        ? "answer writes failed"
+        : null;
+
+  try {
+    await ctx.ports.finishRegressionRun(runId, {
+      finished_at: new Date(ctx.ports.now()).toISOString(),
+      items: items.length,
+      calls: ctx.stages.regression_articles.calls + ctx.stages.regression_pairs.calls,
+      input_tokens: ctx.runTokens,
+      status: closeStatus,
+      deltas,
+      note: regressionNote,
+    });
+  } catch (err) {
+    ctx.errors += 1;
+    try {
+      ctx.ports.onError?.("regression_close", err);
+    } catch {
+      // A logging hook must never destabilize the run.
+    }
+  }
+
+  return { run_id: runId, items: items.length, deltas };
+}
+
 const HOUR_MS = 60 * 60 * 1000;
 
 async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void> {
@@ -2295,15 +2935,20 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
           { name: "audit_pairs", run: () => runAuditPairsStage(ctx, sinceIso) },
           { name: "pairs", run: () => runPairsStage(ctx, sinceIso, JEV_AUDIT_PAIR_COUNT, JEV_AUDIT_CANDIDATE_LIMIT) },
         ]
-      : [
-          { name: "articles", run: () => runArticlesStage(ctx, sinceIso) },
-          { name: "clusters", run: () => runClustersStage(ctx, clusterSinceIso) },
-          { name: "blindspot_recall", run: () => runBlindspotRecallStage(ctx, nowMs) },
-          { name: "pairs", run: () => runPairsStage(ctx, sinceIso, JEV_PAIR_COUNT, PAIR_CANDIDATE_FETCH_LIMIT) },
-          { name: "kap", run: () => runKapStage(ctx, sinceIso) },
-          { name: "title_versions", run: () => runTitleStage(ctx, sinceIso) },
-          { name: "tickers", run: () => runTickersStage(ctx, sinceIso) },
-        ];
+      : ctx.mode === "regression"
+        ? [
+            { name: "regression_articles", run: () => runRegressionArticlesStage(ctx) },
+            { name: "regression_pairs", run: () => runRegressionPairsStage(ctx) },
+          ]
+        : [
+            { name: "articles", run: () => runArticlesStage(ctx, sinceIso) },
+            { name: "clusters", run: () => runClustersStage(ctx, clusterSinceIso) },
+            { name: "blindspot_recall", run: () => runBlindspotRecallStage(ctx, nowMs) },
+            { name: "pairs", run: () => runPairsStage(ctx, sinceIso, JEV_PAIR_COUNT, PAIR_CANDIDATE_FETCH_LIMIT) },
+            { name: "kap", run: () => runKapStage(ctx, sinceIso) },
+            { name: "title_versions", run: () => runTitleStage(ctx, sinceIso) },
+            { name: "tickers", run: () => runTickersStage(ctx, sinceIso) },
+          ];
 
   for (const { name, run } of stageDefs) {
     if (ctx.stopReason) break;
@@ -2341,10 +2986,13 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
  *    'monthly cap reached', make ZERO evaluate() calls.
  *  - Shadow mode stages run articles -> clusters -> pairs -> kap ->
  *    title_versions -> tickers; audit mode runs audit_pairs -> pairs only,
- *    never touching the other five ports. Each stage checks its own
- *    deadline before it starts and between batches. Hitting the deadline
- *    stops cleanly with status 'partial' (never throws out of this
- *    function).
+ *    never touching the other five ports; regression mode (066) runs
+ *    regression_articles -> regression_pairs only, replaying the frozen set
+ *    through the SAME question text as shadow mode and writing answers to
+ *    jev_regression_answers (never jev_shadow_predictions). Each stage
+ *    checks its own deadline before it starts and between batches. Hitting
+ *    the deadline stops cleanly with status 'partial' (never throws out of
+ *    this function).
  *  - At most JEV_CONCURRENCY evaluate() calls in flight per stage.
  *  - A single call's failure is a per-subject skip (errors++, keep going).
  *    A JevRateLimitError aborts the remaining run with status 'rate_limited'.
@@ -2370,12 +3018,21 @@ export async function runJevShadow(
 
   let status: JevRunStatus = "ok";
   let note: string | null = null;
+  let regressionResult: { run_id: number; items: number; deltas: JevRegressionDeltas | null } | null = null;
 
   try {
     if (month.exceeded) {
       status = "budget_exceeded";
       note = "monthly cap reached";
     } else {
+      // Migration 066: open the regression run row BEFORE runStages, only
+      // in regression mode and only once the month cap is known clear --
+      // month.exceeded above must open NO regression run row and make ZERO
+      // evaluate() calls.
+      if (mode === "regression") {
+        const regressionRunId = await ports.startRegressionRun(JEV_QUESTION_SET_VERSION);
+        ctx.regression = { runId: regressionRunId, items: [], answers: [], pending: [], writeErrors: 0 };
+      }
       await runStages(ctx, opts.nowIso);
       if (ctx.stopReason) status = ctx.stopReason;
       if (ctx.failedStages.length > 0) {
@@ -2387,6 +3044,19 @@ export async function runJevShadow(
     status = "error";
     note = clampErrorMessage(err);
   } finally {
+    // Order is load-bearing (contract B2): flushRegressionRows ->
+    // closeRegressionRun -> flushRemaining -> finishRun. flushRegressionRows
+    // is best-effort internally and never throws. closeRegressionRun is
+    // also guaranteed not to throw: both its deltas computation AND its
+    // finishRegressionRun call are individually try/caught (counting
+    // ctx.errors and reporting via onError) so a PostgREST failure on
+    // either can never prevent flushRemaining/finishRun below from
+    // running.
+    await flushRegressionRows(ctx);
+    if (ctx.regression) {
+      regressionResult = await closeRegressionRun(ctx, status);
+    }
+
     // flushRemaining can itself throw (e.g. insertPredictions rejects on
     // the final chunk) -- never let that prevent finishRun from closing the
     // run row (docblock above: "finishRun always runs"). Downgrade to
@@ -2406,7 +3076,7 @@ export async function runJevShadow(
       input_tokens: ctx.runTokens,
       errors: ctx.errors,
       status,
-      note,
+      note: withModeNote(mode, note),
     });
   }
 
@@ -2421,5 +3091,6 @@ export async function runJevShadow(
     usd: tokensToUsd(ctx.runTokens),
     stages: ctx.stages,
     duration_ms: ports.now() - t0,
+    ...(regressionResult ? { regression: regressionResult } : {}),
   };
 }
