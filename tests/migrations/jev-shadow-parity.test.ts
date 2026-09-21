@@ -6,10 +6,14 @@ import {
   JEV_NEUTRAL_MODEL_ID,
   JEV_POLITICS_CATEGORIES,
   JEV_QUESTION_SET_VERSION,
+  JEV_REGRESSION_ARTICLE_DEFAULT,
+  JEV_REGRESSION_PAIR_DEFAULT,
   JEV_TASKS,
   JEV_TOPIC7_CHOICES,
   JEV_USD_PER_TOKEN,
   questionRegistryHash,
+  type JevRegressionItemKind,
+  type JevRegressionRunStatus,
   type JevRunStatus,
   type JevSubjectType,
 } from "../../supabase/functions/_shared/jev.ts";
@@ -411,6 +415,144 @@ describe("migration 064_jev_cluster_live.sql (static parity)", () => {
     const impostor = `pg_catalog.coalesce(v_total, 0) >= ${BLINDSPOT.minSources} and pg_catalog.nullif(v_total, 0) >= ${BLINDSPOT.dominantShare}`;
     expect(impostor).not.toMatch(minSourcesRe);
     expect(impostor).not.toMatch(shareRe);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// migration 066_jev_regression.sql (static parity) -- "Metodoloji
+// regresyonu": the frozen regression set (jev_regression_items/_runs/
+// _answers), jev_regression_freeze / jev_regression_trigger, and the
+// jev-regression-weekly cron. Byte-identical to the planner's SQL (W1.md's
+// Migration section); this file pins the vocabularies/contracts the same
+// way the 061/063/064 blocks above do.
+// ---------------------------------------------------------------------------
+
+describe("migration 066_jev_regression.sql (static parity)", () => {
+  let sql066 = "";
+  let code066 = "";
+  beforeAll(() => {
+    sql066 = read("066_jev_regression.sql");
+    expect(sql066.length).toBeGreaterThan(0);
+    code066 = sql066.replace(/--[^\n]*/g, "");
+  });
+
+  it("contains the ledger insert for '066'", () => {
+    expect(sql066).toMatch(
+      /insert\s+into\s+supabase_migrations\.schema_migrations[\s\S]*?values\s*\(\s*'066'\s*,\s*'066_jev_regression'\s*\)/i,
+    );
+  });
+
+  it("066 is additive-only: no DROP TABLE/COLUMN and no ALTER of an existing table", () => {
+    expect(sql066).not.toMatch(/\bdrop\s+table\b/i);
+    expect(sql066).not.toMatch(/\bdrop\s+column\b/i);
+    expect(sql066).not.toMatch(
+      /\balter\s+table\s+public\.(articles|clusters|jev_shadow_predictions|jev_shadow_runs|jev_gold_set|jev_gold_labels)\b/i,
+    );
+  });
+
+  it("the three jev_regression_* tables are service_role-only: RLS on, anon/authenticated/public revoked, sequences revoked", () => {
+    for (const table of ["jev_regression_items", "jev_regression_runs", "jev_regression_answers"]) {
+      expect(sql066).toMatch(new RegExp(`alter\\s+table\\s+public\\.${table}\\s+enable\\s+row\\s+level\\s+security`, "i"));
+      expect(sql066).toMatch(
+        new RegExp(`revoke\\s+all\\s+on\\s+public\\.${table}\\s+from\\s+anon,\\s*authenticated,\\s*public`, "i"),
+      );
+    }
+    for (const seq of ["jev_regression_items_id_seq", "jev_regression_runs_id_seq"]) {
+      expect(sql066).toMatch(
+        new RegExp(`revoke\\s+all\\s+on\\s+sequence\\s+public\\.${seq}\\s+from\\s+anon,\\s*authenticated,\\s*public`, "i"),
+      );
+    }
+  });
+
+  it("the jev_regression_items.kind CHECK list equals the JevRegressionItemKind union", () => {
+    const match = sql066.match(/kind\s+text\s+not\s+null\s+check\s*\(\s*kind\s+in\s*\(([^)]+)\)\s*\)/i);
+    expect(match, "could not find the jev_regression_items.kind CHECK list").not.toBeNull();
+    const values = (match![1] ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/^'|'$/g, ""))
+      .filter(Boolean);
+    const expected: JevRegressionItemKind[] = ["article", "pair"];
+    expect(values.sort()).toEqual([...expected].sort());
+  });
+
+  it("the jev_regression_runs.status CHECK list equals the JevRegressionRunStatus union", () => {
+    const match = sql066.match(
+      /status\s+text\s+not\s+null\s+default\s+'running'\s+check\s*\(\s*status\s+in\s*\(([^)]+)\)\s*\)/i,
+    );
+    expect(match, "could not find the jev_regression_runs.status CHECK list").not.toBeNull();
+    const values = (match![1] ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/^'|'$/g, ""))
+      .filter(Boolean);
+    const expected: JevRegressionRunStatus[] = ["running", "ok", "partial", "error"];
+    expect(values.sort()).toEqual([...expected].sort());
+  });
+
+  it("jev_regression_freeze and jev_regression_trigger are SECURITY DEFINER with search_path = '' and revoked from anon/authenticated/public", () => {
+    const freezeMatch = sql066.match(
+      /create\s+or\s+replace\s+function\s+public\.jev_regression_freeze\([^)]*\)[\s\S]*?\$fn\$;/i,
+    );
+    const triggerMatch = sql066.match(
+      /create\s+or\s+replace\s+function\s+public\.jev_regression_trigger\(\)[\s\S]*?\$fn\$;/i,
+    );
+    for (const fnMatch of [freezeMatch, triggerMatch]) {
+      expect(fnMatch, "could not find one of jev_regression_freeze/jev_regression_trigger").not.toBeNull();
+      const body = fnMatch![0];
+      expect(body).toMatch(/security\s+definer/i);
+      expect(body).toMatch(/set\s+search_path\s*=\s*''/i);
+    }
+    expect(sql066).toMatch(
+      /revoke\s+all\s+on\s+function\s+public\.jev_regression_freeze\(int,\s*int\)\s+from\s+anon,\s*authenticated,\s*public/i,
+    );
+    expect(sql066).toMatch(
+      /revoke\s+all\s+on\s+function\s+public\.jev_regression_trigger\(\)\s+from\s+anon,\s*authenticated,\s*public/i,
+    );
+  });
+
+  it("jev_regression_freeze's SQL defaults equal JEV_REGRESSION_ARTICLE_DEFAULT and JEV_REGRESSION_PAIR_DEFAULT", () => {
+    expect(sql066).toContain(`p_articles int default ${JEV_REGRESSION_ARTICLE_DEFAULT}`);
+    expect(sql066).toContain(`p_pairs int default ${JEV_REGRESSION_PAIR_DEFAULT}`);
+  });
+
+  it('the jev-regression-weekly cron is scheduled \'20 4 * * 0\' with body {"mode":"regression"}', () => {
+    expect(sql066).toMatch(/cron\.schedule\(\s*'jev-regression-weekly'\s*,\s*'20 4 \* \* 0'/);
+    expect(sql066).toContain('{"mode":"regression"}');
+  });
+
+  it("jev_regression_trigger posts to /jev-shadow with the Vault bearer and returns the pg_net request id", () => {
+    const fnMatch = sql066.match(
+      /create\s+or\s+replace\s+function\s+public\.jev_regression_trigger\(\)[\s\S]*?\$fn\$;/i,
+    );
+    expect(fnMatch, "could not find function public.jev_regression_trigger").not.toBeNull();
+    const body = fnMatch![0];
+    expect(body).toMatch(/returns\s+bigint/i);
+    expect(body).toMatch(/net\.http_post\(/);
+    expect(body).toContain("'/jev-shadow'");
+    expect(body).toMatch(/'Authorization',\s*'Bearer '\s*\|\|\s*v_key/);
+  });
+
+  it("066 never schema-qualifies coalesce/nullif/left/greatest/least (the DB-01 impostor class)", () => {
+    expect(code066).not.toMatch(/pg_catalog\.(coalesce|nullif|left|greatest|least)\s*\(/i);
+  });
+
+  it("jev-shadow/index.ts parses mode 'regression' while keeping the JEV-A21 audit substring intact", () => {
+    const indexTs = readFileSync(resolve(FUNCTIONS_DIR, "jev-shadow", "index.ts"), "utf8");
+    expect(indexTs).toContain('=== "regression" ? "regression"');
+    expect(indexTs).toContain('=== "audit" ? "audit" : "shadow"');
+  });
+
+  it("fetchPreviousRegressionAnswers orders by item_id/task before .range() -- OFFSET/LIMIT paging over an unordered baseline can repeat or skip rows", () => {
+    const indexTs = readFileSync(resolve(FUNCTIONS_DIR, "jev-shadow", "index.ts"), "utf8");
+    const fnMatch = indexTs.match(/async fetchPreviousRegressionAnswers[\s\S]*?\n    \},\n/);
+    expect(fnMatch, "could not find fetchPreviousRegressionAnswers in jev-shadow/index.ts").not.toBeNull();
+    const fnBody = fnMatch![0];
+    expect(fnBody).toMatch(/\.order\(\s*"item_id"/);
+    const orderIdx = fnBody.search(/\.order\(\s*"item_id"/);
+    // The actual paging call, not the prose above it that also says
+    // ".range()" while explaining why the paging exists.
+    const rangeIdx = fnBody.search(/\.range\(\s*from\s*,\s*to\s*\)/);
+    expect(rangeIdx).toBeGreaterThan(-1);
+    expect(orderIdx).toBeLessThan(rangeIdx);
   });
 });
 
