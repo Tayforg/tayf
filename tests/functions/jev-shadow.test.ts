@@ -6,6 +6,8 @@ import {
   JEV_AUDIT_CLUSTER_LIMIT,
   JEV_AUDIT_PAIR_COUNT,
   JEV_AUDIT_PAIRS_PER_CLUSTER,
+  JEV_BLINDSPOT_CANDIDATES_PER_CALL,
+  JEV_BLINDSPOT_FORWARD_HOURS,
   JEV_CLUSTER_MEMBER_MAX,
   JEV_CONCURRENCY,
   JEV_DESC_CLAMP,
@@ -14,15 +16,21 @@ import {
   JEV_PAIRS_PER_CALL,
   JEV_PREVIEW_CLAMP,
   JEV_QUESTION_REGISTRY,
+  JEV_QUESTION_SET_VERSION,
   JEV_TASKS,
   JEV_TICKER_LIMIT,
   JEV_TITLE_CLAMP,
   JevDeadlineError,
   JevRateLimitError,
   JevResponseError,
+  biasKeysForZones,
+  blindspotSilentZones,
   booleanAgrees,
   budgetExceeded,
   buildArticleCall,
+  buildBlindspotRecallCall,
+  buildBlindspotRecallRows,
+  buildBlindspotDayRow,
   buildClusterCall,
   buildKapCall,
   buildPairCall,
@@ -39,15 +47,21 @@ import {
   politicsBaseline,
   predictionRow,
   questionRegistryHash,
+  rankBlindspotCandidates,
   retryDelayMs,
   runJevShadow,
   sampleClusterPairs,
   samplePairs,
+  sharedTokenCount,
   stateHash,
   statePreview,
   tokensToUsd,
   topicBaseline,
+  unlinkCandidatesFromRows,
   type JevArticleRow,
+  type JevBlindspotCandidate,
+  type JevBlindspotCandidateQuery,
+  type JevBlindspotClusterRow,
   type JevClusterRow,
   type JevKapRow,
   type JevMemberRow,
@@ -60,6 +74,7 @@ import {
   type JevAnswer,
   type JevTickerRow,
   type JevTitleRow,
+  type JevUnlinkCandidateRow,
 } from "../../supabase/functions/_shared/jev.ts";
 import { sha256Hex } from "../../supabase/functions/_shared/archive.ts";
 
@@ -208,6 +223,48 @@ function titleVersionRow(overrides: Partial<JevTitleRow> = {}): JevTitleRow {
   return { id: "v1", article_id: "a1", old_title: "Eski", new_title: "Yeni", ...overrides };
 }
 
+function blindspotClusterRow(overrides: Partial<JevBlindspotClusterRow> = {}): JevBlindspotClusterRow {
+  return {
+    id: "bc1",
+    title: "Kör nokta olayı",
+    blindspot_side: "pro_government",
+    first_published: "2026-09-19T08:00:00.000Z",
+    updated_at: "2026-09-19T09:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function blindspotCandidateRow(overrides: Partial<JevBlindspotCandidate> = {}): JevBlindspotCandidate {
+  return {
+    article_id: "bca-1",
+    title: "Aday başlık",
+    published_at: "2026-09-19T08:30:00.000Z",
+    source_slug: "kaynak",
+    ...overrides,
+  };
+}
+
+function clusterMemberPredictionRow(overrides: Partial<JevPredictionRow> = {}): JevPredictionRow {
+  return {
+    task: "cluster_member",
+    subject_type: "cluster",
+    subject_id: "c1:a1",
+    article_id: "a1",
+    cluster_id: "c1",
+    state_hash: "h",
+    jev_answer: {},
+    jev_prob: 0.1,
+    jev_choice: null,
+    baseline_answer: "true",
+    agree: true,
+    latency_ms: 1,
+    input_tokens: 1,
+    model: JEV_MODEL,
+    run_id: 1,
+    ...overrides,
+  };
+}
+
 function defaultAnswerFor(question: JevQuestion): JevAnswer {
   if (question.type === "boolean") return { type: "boolean", probability: 0.9 };
   if (question.type === "choice") {
@@ -245,6 +302,10 @@ interface Recorder {
   fetchPendingTitleVersionsCalls: Array<{ sinceIso: string; limit: number }>;
   fetchAuditPairsCalls: Array<{ sinceIso: string; clusterLimit: number }>;
   fetchPendingTickerMatchesCalls: Array<{ sinceIso: string; limit: number }>;
+  insertUnlinkCandidatesCalls: JevUnlinkCandidateRow[][];
+  fetchBlindspotClustersCalls: Array<{ sinceIso: string; limit: number }>;
+  fetchBlindspotCandidatesCalls: JevBlindspotCandidateQuery[];
+  markBlindspotCheckedCalls: Array<{ clusterId: string; suspect: boolean }>;
 }
 
 function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
@@ -266,6 +327,10 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
     fetchPendingTitleVersionsCalls: [],
     fetchAuditPairsCalls: [],
     fetchPendingTickerMatchesCalls: [],
+    insertUnlinkCandidatesCalls: [],
+    fetchBlindspotClustersCalls: [],
+    fetchBlindspotCandidatesCalls: [],
+    markBlindspotCheckedCalls: [],
   };
 
   const tick = 0;
@@ -344,6 +409,25 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
       rec.order.push("fetchPendingTickerMatches");
       rec.fetchPendingTickerMatchesCalls.push({ sinceIso, limit });
       return [];
+    },
+    insertUnlinkCandidates: async (rows) => {
+      rec.order.push("insertUnlinkCandidates");
+      rec.insertUnlinkCandidatesCalls.push([...rows]);
+      return rows.length;
+    },
+    fetchBlindspotClusters: async (sinceIso, limit) => {
+      rec.order.push("fetchBlindspotClusters");
+      rec.fetchBlindspotClustersCalls.push({ sinceIso, limit });
+      return [];
+    },
+    fetchBlindspotCandidates: async (query) => {
+      rec.order.push("fetchBlindspotCandidates");
+      rec.fetchBlindspotCandidatesCalls.push({ ...query, biasKeys: [...query.biasKeys] });
+      return [];
+    },
+    markBlindspotChecked: async (clusterId, suspect) => {
+      rec.order.push("markBlindspotChecked");
+      rec.markBlindspotCheckedCalls.push({ clusterId, suspect });
     },
   };
 
@@ -1175,7 +1259,7 @@ describe("runJevShadow", () => {
     expect(patch?.note).toContain("pairs");
   });
 
-  it("(i) runs stages in order: articles -> clusters -> pairs -> kap -> title_versions -> tickers", async () => {
+  it("(i) runs stages in order: articles -> clusters -> blindspot_recall -> pairs -> kap -> title_versions -> tickers (064)", async () => {
     const rec = makePorts();
 
     await runJevShadow(rec.ports);
@@ -1184,6 +1268,7 @@ describe("runJevShadow", () => {
     expect(fetchOrder).toEqual([
       "fetchPendingArticles",
       "fetchRecentClusters",
+      "fetchBlindspotClusters",
       "fetchPairCandidates",
       "fetchPendingKap",
       "fetchPendingTitleVersions",
@@ -2037,6 +2122,533 @@ describe("audit mode", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Migration 064 -- "Jev canlı küme": outlier-ejection queue (P5) and the
+// blindspot recall check (P4). Both are additive shadow-side mechanisms;
+// P4/P5 write nothing a reader ever sees. P3 (live marginal verification)
+// lives entirely in W2's supabase/functions/_shared/cluster/jev-verify.ts
+// and supabase/functions/cluster-consumer/index.ts -- out of scope here.
+// ---------------------------------------------------------------------------
+
+describe("JEV_QUESTION_REGISTRY (064)", () => {
+  it("keeps every pre-064 question string byte-identical", () => {
+    expect(JEV_TASKS).toEqual([
+      "politics",
+      "topic",
+      "opinion",
+      "clickbait",
+      "framing",
+      "sensational",
+      "cluster_member",
+      "pair_negative",
+      "pair_positive",
+      "ticker_relevance",
+      "neutral_pick",
+      "kap_class",
+      "kap_materiality",
+      "title_meaning",
+      "title_edit_kind",
+      "pair_marginal",
+      "blindspot_recall",
+    ]);
+
+    expect(JEV_QUESTION_REGISTRY.pair_marginal).toEqual({
+      instructions:
+        "Do the two headlines in `pairs.{key}` report the SAME news event (same incident, announcement or decision), or merely the same topic / different events?",
+      criteria: { true: "Same concrete event", false: "Different events" },
+    });
+    expect(JEV_QUESTION_REGISTRY.pair_marginal).toEqual(JEV_QUESTION_REGISTRY.pair_negative);
+
+    expect(JEV_QUESTION_REGISTRY.blindspot_recall).toEqual({
+      instructions:
+        "Does headline `{key}` report the SAME news event as the event named in `event`? Same event means the same incident, announcement or decision — not merely the same topic, the same people, or a follow-up story on a different day.",
+      criteria: { true: "Same concrete event", false: "Different event, even if related" },
+    });
+    expect(JEV_QUESTION_REGISTRY.blindspot_recall).toEqual(JEV_QUESTION_REGISTRY.cluster_member);
+  });
+});
+
+describe("blindspotSilentZones / biasKeysForZones", () => {
+  it("blindspotSilentZones returns the two zones that are NOT the dominant side's zone", () => {
+    expect(blindspotSilentZones("pro_government")).toEqual(["bagimsiz", "muhalefet"]);
+    expect(blindspotSilentZones("gov_leaning")).toEqual(["bagimsiz", "muhalefet"]);
+    expect(blindspotSilentZones("opposition")).toEqual(["iktidar", "bagimsiz"]);
+    expect(blindspotSilentZones("center")).toEqual(["iktidar", "muhalefet"]);
+    expect(blindspotSilentZones("pro_kurdish")).toEqual(["iktidar", "muhalefet"]);
+  });
+
+  it("[A6 / SEC-064-04] fails closed (returns []) for null or any side outside BIAS_KEYS, instead of every zone", () => {
+    expect(blindspotSilentZones(null)).toEqual([]);
+    expect(blindspotSilentZones("")).toEqual([]);
+    expect(blindspotSilentZones("not_a_bias_key")).toEqual([]);
+    expect(blindspotSilentZones("pg_catalog")).toEqual([]);
+  });
+
+  it("biasKeysForZones returns BIAS_KEYS-ordered keys for the given zones", () => {
+    expect(biasKeysForZones(["bagimsiz"])).toEqual(["center", "pro_kurdish", "international"]);
+    expect(biasKeysForZones(["iktidar", "muhalefet"])).toEqual([
+      "pro_government",
+      "gov_leaning",
+      "state_media",
+      "opposition_leaning",
+      "opposition",
+      "nationalist",
+      "islamist_conservative",
+    ]);
+  });
+});
+
+describe("sharedTokenCount", () => {
+  it("counts shared 4+ char Turkish-folded/stemmed tokens between two titles", () => {
+    expect(sharedTokenCount("ankara meclis kanun teklifi", "ankara meclis kanun teklifi onaylandi")).toBe(4);
+    expect(sharedTokenCount("ankara meclis kanun teklifi", "ankara meclis toplantisi yapildi")).toBe(2);
+    expect(sharedTokenCount("ankara meclis kanun teklifi", "istanbul spor kulubu maci")).toBe(0);
+  });
+});
+
+describe("blindspot_recall: rankBlindspotCandidates", () => {
+  it("keeps only >=2 shared 4+ char Turkish-folded tokens, top 15, published_at desc tiebreak", () => {
+    const eventTitle = "ankara meclis kanun teklifi";
+    const high = blindspotCandidateRow({
+      article_id: "high",
+      title: "ankara meclis kanun teklifi onaylandi",
+      published_at: "2026-09-19T08:00:00.000Z",
+    });
+    const midLate = blindspotCandidateRow({
+      article_id: "mid-late",
+      title: "ankara meclis komisyonu toplandi",
+      published_at: "2026-09-19T09:00:00.000Z",
+    });
+    const midEarly = blindspotCandidateRow({
+      article_id: "mid-early",
+      title: "ankara meclis toplantisi yapildi",
+      published_at: "2026-09-19T07:00:00.000Z",
+    });
+    const low = blindspotCandidateRow({
+      article_id: "low",
+      title: "ankara valiligi aciklama yapti",
+      published_at: "2026-09-19T10:00:00.000Z",
+    });
+    const zero = blindspotCandidateRow({
+      article_id: "zero",
+      title: "istanbul spor kulubu maci",
+      published_at: "2026-09-19T11:00:00.000Z",
+    });
+
+    const ranked = rankBlindspotCandidates(eventTitle, [low, zero, midEarly, high, midLate]);
+    // low (shared=1) and zero (shared=0) are dropped -- only >=2-shared survive.
+    // high (shared=4) beats the two shared=2 candidates; midLate beats
+    // midEarly on the published_at-desc tiebreak.
+    expect(ranked.map((c) => c.article_id)).toEqual(["high", "mid-late", "mid-early"]);
+
+    const many = Array.from({ length: 20 }, (_, i) =>
+      blindspotCandidateRow({
+        article_id: `many-${String(i).padStart(2, "0")}`,
+        title: eventTitle,
+        published_at: `2026-09-19T08:${String(i).padStart(2, "0")}:00.000Z`,
+      }),
+    );
+    const rankedMany = rankBlindspotCandidates(eventTitle, many);
+    expect(rankedMany).toHaveLength(JEV_BLINDSPOT_CANDIDATES_PER_CALL);
+    expect(rankedMany[0]?.article_id).toBe("many-19");
+    expect(rankedMany[14]?.article_id).toBe("many-05");
+    for (let i = 1; i < rankedMany.length; i++) {
+      expect(rankedMany[i]!.published_at <= rankedMany[i - 1]!.published_at).toBe(true);
+    }
+  });
+});
+
+describe("blindspot_recall: buildBlindspotRecallCall", () => {
+  it("keys c1..cN and copies the cluster_member wording byte-for-byte", () => {
+    const cluster = blindspotClusterRow({ title: "Ana olay" });
+    const candidates = [
+      blindspotCandidateRow({ article_id: "art-1", title: "Aday 1" }),
+      blindspotCandidateRow({ article_id: "art-2", title: "Aday 2" }),
+    ];
+    const { request, keys } = buildBlindspotRecallCall(cluster, candidates);
+
+    expect(keys).toEqual({ c1: "art-1", c2: "art-2" });
+    expect(request.state).toEqual({
+      event: "Ana olay",
+      headlines: { c1: "Aday 1", c2: "Aday 2" },
+    });
+    expect(request.questions.c1).toEqual({
+      type: "boolean",
+      instructions:
+        "Does headline `c1` report the SAME news event as the event named in `event`? Same event means the same incident, announcement or decision — not merely the same topic, the same people, or a follow-up story on a different day.",
+      criteria: { true: "Same concrete event", false: "Different event, even if related" },
+    });
+    expect(request.questions.c2?.instructions).toContain("headline `c2`");
+  });
+
+  it("returns the empty request/keys shape when there are no candidates", () => {
+    const { request, keys } = buildBlindspotRecallCall(blindspotClusterRow(), []);
+    expect(request).toEqual({ state: {}, questions: {} });
+    expect(keys).toEqual({});
+  });
+});
+
+describe("blindspot_recall: buildBlindspotRecallRows", () => {
+  it("rows use baseline 'false' so agree is true exactly when p < 0.5", () => {
+    const cluster = blindspotClusterRow({ id: "clx" });
+    const keys = { c1: "art-low", c2: "art-high" };
+    const response: JevResponse = {
+      answers: {
+        c1: { type: "boolean", probability: 0.2 },
+        c2: { type: "boolean", probability: 0.8 },
+      },
+      usage: { inputTokens: 10, outputTokens: 1 },
+    };
+
+    const rows = buildBlindspotRecallRows(1, cluster, keys, response, "call-1", "hash-1", "preview-1", 5);
+
+    expect(rows).toHaveLength(2);
+    const low = rows.find((r) => r.subject_id === "clx:art-low");
+    const high = rows.find((r) => r.subject_id === "clx:art-high");
+    expect(low).toMatchObject({
+      task: "blindspot_recall",
+      subject_type: "cluster",
+      article_id: "art-low",
+      cluster_id: "clx",
+      baseline_answer: "false",
+      agree: true,
+      jev_prob: 0.2,
+    });
+    expect(high).toMatchObject({
+      task: "blindspot_recall",
+      subject_type: "cluster",
+      article_id: "art-high",
+      cluster_id: "clx",
+      baseline_answer: "false",
+      agree: false,
+      jev_prob: 0.8,
+    });
+  });
+});
+
+describe("blindspot_recall: buildBlindspotDayRow", () => {
+  it("builds a marker row with no real Jev answer", () => {
+    const row = buildBlindspotDayRow({
+      runId: 7,
+      clusterId: "clx",
+      day: "2026-09-19",
+      candidates: 3,
+      stateHash: "hash-1",
+      preview: "preview-1",
+    });
+    expect(row).toMatchObject({
+      task: "blindspot_recall",
+      subject_type: "cluster",
+      subject_id: "clx:2026-09-19",
+      article_id: null,
+      cluster_id: "clx",
+      jev_prob: null,
+      jev_choice: null,
+      baseline_answer: "false",
+      agree: null,
+      latency_ms: 0,
+      input_tokens: 0,
+      run_id: 7,
+    });
+    expect(row.jev_answer).toEqual({ candidates: 3, question_set: JEV_QUESTION_SET_VERSION, day: "2026-09-19" });
+  });
+});
+
+describe("blindspot_recall stage", () => {
+  it("blindspot_recall: writes the <cluster>:<day> marker row even when a cluster has zero candidates", async () => {
+    const cluster = blindspotClusterRow({
+      id: "bc-zero",
+      blindspot_side: "pro_government",
+      first_published: "2026-09-19T08:00:00.000Z",
+    });
+    const rec = makePorts({
+      fetchBlindspotClusters: async () => [cluster],
+      fetchBlindspotCandidates: async () => [],
+    });
+
+    await runJevShadow(rec.ports, { nowIso: "2026-09-19T10:00:00.000Z" });
+
+    const allRows = rec.insertPredictionsCalls.flat();
+    const dayRow = allRows.find((r) => r.task === "blindspot_recall" && r.subject_id === "bc-zero:2026-09-19");
+    expect(dayRow).toBeDefined();
+    expect(dayRow).toMatchObject({
+      subject_type: "cluster",
+      article_id: null,
+      cluster_id: "bc-zero",
+      jev_prob: null,
+      jev_choice: null,
+      baseline_answer: "false",
+      agree: null,
+      latency_ms: 0,
+      input_tokens: 0,
+    });
+    expect(dayRow?.jev_answer).toMatchObject({ candidates: 0, day: "2026-09-19" });
+    expect(rec.markBlindspotCheckedCalls).toEqual([{ clusterId: "bc-zero", suspect: false }]);
+    expect(rec.evaluateCalls).toHaveLength(0);
+  });
+
+  it("blindspot_recall: marks the cluster suspect only when some candidate reaches 0.7", async () => {
+    const highCluster = blindspotClusterRow({
+      id: "bc-high",
+      title: "ankara meclis kanun teklifi",
+      blindspot_side: "pro_government",
+      first_published: "2026-09-19T08:00:00.000Z",
+    });
+    const lowCluster = blindspotClusterRow({
+      id: "bc-low",
+      title: "ankara meclis butce teklifi",
+      blindspot_side: "pro_government",
+      first_published: "2026-09-19T08:00:00.000Z",
+    });
+    const candidate = blindspotCandidateRow({
+      article_id: "cand-1",
+      title: "ankara meclis kanun butce teklifi onaylandi",
+    });
+
+    const rec = makePorts({
+      fetchBlindspotClusters: async () => [highCluster, lowCluster],
+      fetchBlindspotCandidates: async () => [candidate],
+      evaluate: async (req) => {
+        const state = req.state as { event?: string };
+        const probability = state.event === highCluster.title ? 0.75 : 0.5;
+        const key = Object.keys(req.questions)[0]!;
+        return {
+          response: { answers: { [key]: { type: "boolean", probability } }, usage: { inputTokens: 5, outputTokens: 1 } },
+          latencyMs: 1,
+        };
+      },
+    });
+
+    await runJevShadow(rec.ports, { nowIso: "2026-09-19T10:00:00.000Z" });
+
+    expect(rec.markBlindspotCheckedCalls).toContainEqual({ clusterId: "bc-high", suspect: true });
+    expect(rec.markBlindspotCheckedCalls).toContainEqual({ clusterId: "bc-low", suspect: false });
+  });
+
+  it("blindspot_recall: skips clusters whose <cluster>:<day> marker already exists (anti-join)", async () => {
+    const cluster = blindspotClusterRow({ id: "bc-seen" });
+    const rec = makePorts({
+      fetchBlindspotClusters: async () => [cluster],
+      fetchSeenSubjects: async (task, subjectIds) => {
+        expect(task).toBe("blindspot_recall");
+        expect(subjectIds).toEqual(["bc-seen:2026-09-19"]);
+        return new Set(["bc-seen:2026-09-19"]);
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { nowIso: "2026-09-19T10:00:00.000Z" });
+
+    expect(rec.fetchBlindspotCandidatesCalls).toHaveLength(0);
+    expect(rec.evaluateCalls).toHaveLength(0);
+    expect(result.stages.blindspot_recall.skipped).toBe(1);
+  });
+
+  it("blindspot_recall: a gateway failure writes no marker row, so the next run retries the cluster", async () => {
+    const cluster = blindspotClusterRow({
+      id: "bc-fail",
+      title: "ankara meclis kanun teklifi",
+      blindspot_side: "pro_government",
+      first_published: "2026-09-19T08:00:00.000Z",
+    });
+    const candidate = blindspotCandidateRow({
+      article_id: "cand-1",
+      title: "ankara meclis kanun teklifi onaylandi",
+    });
+    const rec = makePorts({
+      fetchBlindspotClusters: async () => [cluster],
+      fetchBlindspotCandidates: async () => [candidate],
+      evaluate: async () => {
+        throw new Error("gateway-error");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { nowIso: "2026-09-19T10:00:00.000Z" });
+
+    const allRows = rec.insertPredictionsCalls.flat();
+    expect(allRows.filter((r) => r.task === "blindspot_recall")).toHaveLength(0);
+    expect(rec.markBlindspotCheckedCalls).toHaveLength(0);
+    expect(result.stages.blindspot_recall.errors).toBe(1);
+  });
+
+  it("blindspot_recall: bounds the candidate fetch window to first_published + JEV_BLINDSPOT_FORWARD_HOURS, not nowMs (A-ADV-01)", async () => {
+    const cluster = blindspotClusterRow({
+      id: "bc-window",
+      first_published: "2026-09-19T08:00:00.000Z",
+    });
+    // No fetchBlindspotCandidates override here on purpose: overriding it
+    // would replace makePorts' own recording wrapper (which pushes into
+    // rec.fetchBlindspotCandidatesCalls) and this test's only interest is
+    // the query bounds that wrapper records; the base mock already returns
+    // an empty candidate list.
+    const rec = makePorts({
+      fetchBlindspotClusters: async () => [cluster],
+    });
+
+    // nowMs is far past the event -- under the old code this leaked
+    // straight into toIso, so the candidate window trailed `now`
+    // unboundedly instead of staying anchored to the event.
+    await runJevShadow(rec.ports, { nowIso: "2026-09-21T13:15:32.000Z" });
+
+    expect(rec.fetchBlindspotCandidatesCalls).toHaveLength(1);
+    const expectedToIso = new Date(
+      Date.parse(cluster.first_published) + JEV_BLINDSPOT_FORWARD_HOURS * 3600e3,
+    ).toISOString();
+    expect(rec.fetchBlindspotCandidatesCalls[0]!.toIso).toBe(expectedToIso);
+    expect(rec.fetchBlindspotCandidatesCalls[0]!.toIso).not.toBe(new Date("2026-09-21T13:15:32.000Z").toISOString());
+  });
+
+  it("blindspot_recall: a candidate published near first_published (the old end of the window) survives ranking into the Jev call (A-ADV-01)", async () => {
+    const cluster = blindspotClusterRow({
+      id: "bc-survive",
+      title: "ankara meclis kanun teklifi onaylandi",
+      blindspot_side: "pro_government",
+      first_published: "2026-09-19T08:00:00.000Z",
+    });
+    // Candidates spanning the full [fromIso, toIso] window: the oldest one
+    // (right at first_published) is the one a naive "keep only the newest
+    // N" truncation would have dropped first. All share >=2 tokens with the
+    // cluster title so every one clears rankBlindspotCandidates' relevance
+    // filter, and there are fewer than JEV_BLINDSPOT_CANDIDATES_PER_CALL of
+    // them so none are cut by the per-call cap either -- the only thing
+    // under test is whether the stage forwards the old candidate at all.
+    const oldCandidate = blindspotCandidateRow({
+      article_id: "old-near-event",
+      title: "ankara meclis kanun teklifi",
+      published_at: "2026-09-19T08:05:00.000Z",
+    });
+    const newCandidate = blindspotCandidateRow({
+      article_id: "new-recent",
+      title: "ankara meclis kanun teklifi yorumlandi",
+      published_at: "2026-09-19T19:00:00.000Z",
+    });
+    const rec = makePorts({
+      fetchBlindspotClusters: async () => [cluster],
+      fetchBlindspotCandidates: async () => [newCandidate, oldCandidate],
+    });
+
+    await runJevShadow(rec.ports, { nowIso: "2026-09-21T13:15:32.000Z" });
+
+    const allRows = rec.insertPredictionsCalls.flat();
+    const oldRow = allRows.find(
+      (r) => r.task === "blindspot_recall" && r.subject_id === "bc-survive:old-near-event",
+    );
+    expect(oldRow).toBeDefined();
+  });
+
+  it("blindspot_recall: audit mode never touches the four new ports", async () => {
+    const rec = makePorts();
+
+    await runJevShadow(rec.ports, { mode: "audit" });
+
+    expect(rec.fetchBlindspotClustersCalls).toHaveLength(0);
+    expect(rec.fetchBlindspotCandidatesCalls).toHaveLength(0);
+    expect(rec.markBlindspotCheckedCalls).toHaveLength(0);
+    expect(rec.insertUnlinkCandidatesCalls).toHaveLength(0);
+  });
+});
+
+describe("unlinkCandidatesFromRows", () => {
+  it("emits one candidate per cluster_member row under 0.35 and nothing at 0.35", () => {
+    const rows: JevPredictionRow[] = [
+      clusterMemberPredictionRow({ jev_prob: 0.1, cluster_id: "c1", article_id: "a1", subject_id: "c1:a1" }),
+      clusterMemberPredictionRow({ jev_prob: 0.35, cluster_id: "c1", article_id: "a2", subject_id: "c1:a2" }),
+      clusterMemberPredictionRow({ jev_prob: 0.34999, cluster_id: "c1", article_id: "a3", subject_id: "c1:a3" }),
+      clusterMemberPredictionRow({
+        task: "pair_negative",
+        jev_prob: 0.1,
+        cluster_id: null,
+        article_id: null,
+        subject_id: "a4:a5",
+      }),
+      clusterMemberPredictionRow({ jev_prob: null, cluster_id: "c1", article_id: "a6", subject_id: "c1:a6" }),
+    ];
+
+    expect(unlinkCandidatesFromRows(rows)).toEqual([
+      { cluster_id: "c1", article_id: "a1", jev_prob: 0.1, source_task: "cluster_member" },
+      { cluster_id: "c1", article_id: "a3", jev_prob: 0.34999, source_task: "cluster_member" },
+    ]);
+  });
+});
+
+describe("clusters stage: outlier-ejection queue emission (064)", () => {
+  it("insertUnlinkCandidates failure is swallowed: the clusters stage still inserts its prediction rows", async () => {
+    const cluster = clusterRow({ id: "c1", title: "Olay" });
+    const members = [
+      memberRow({ cluster_id: "c1", article_id: "m1", published_at: "2026-09-19T08:00:00.000Z" }),
+      memberRow({ cluster_id: "c1", article_id: "m2", published_at: "2026-09-19T08:10:00.000Z" }),
+    ];
+    const rec = makePorts({
+      fetchRecentClusters: async () => [cluster],
+      fetchClusterMembers: async () => members,
+      evaluate: async () => ({
+        response: {
+          answers: { m1: { type: "boolean", probability: 0.1 }, m2: { type: "boolean", probability: 0.9 } },
+          usage: { inputTokens: 10, outputTokens: 1 },
+        },
+        latencyMs: 1,
+      }),
+      insertUnlinkCandidates: async () => {
+        throw new Error("db down");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports);
+
+    const allRows = rec.insertPredictionsCalls.flat();
+    const clusterRows = allRows.filter((r) => r.task === "cluster_member");
+    expect(clusterRows).toHaveLength(2);
+    expect(result.errors).toBeGreaterThan(0);
+  });
+
+  it("queues exactly the sub-0.35 cluster_member rows via insertUnlinkCandidates, and nothing when every row clears the bar", async () => {
+    const cluster = clusterRow({ id: "c1", title: "Olay" });
+    const members = [
+      memberRow({ cluster_id: "c1", article_id: "m1", published_at: "2026-09-19T08:00:00.000Z" }),
+      memberRow({ cluster_id: "c1", article_id: "m2", published_at: "2026-09-19T08:10:00.000Z" }),
+    ];
+    const rec = makePorts({
+      fetchRecentClusters: async () => [cluster],
+      fetchClusterMembers: async () => members,
+      evaluate: async () => ({
+        response: {
+          answers: { m1: { type: "boolean", probability: 0.1 }, m2: { type: "boolean", probability: 0.95 } },
+          usage: { inputTokens: 10, outputTokens: 1 },
+        },
+        latencyMs: 1,
+      }),
+    });
+
+    await runJevShadow(rec.ports);
+
+    expect(rec.insertUnlinkCandidatesCalls).toEqual([
+      [{ cluster_id: "c1", article_id: "m1", jev_prob: 0.1, source_task: "cluster_member" }],
+    ]);
+  });
+
+  it("never calls insertUnlinkCandidates when no cluster_member row falls below the threshold", async () => {
+    const cluster = clusterRow({ id: "c1", title: "Olay" });
+    const members = [
+      memberRow({ cluster_id: "c1", article_id: "m1", published_at: "2026-09-19T08:00:00.000Z" }),
+      memberRow({ cluster_id: "c1", article_id: "m2", published_at: "2026-09-19T08:10:00.000Z" }),
+    ];
+    const rec = makePorts({
+      fetchRecentClusters: async () => [cluster],
+      fetchClusterMembers: async () => members,
+      evaluate: async () => ({
+        response: {
+          answers: { m1: { type: "boolean", probability: 0.9 }, m2: { type: "boolean", probability: 0.95 } },
+          usage: { inputTokens: 10, outputTokens: 1 },
+        },
+        latencyMs: 1,
+      }),
+    });
+
+    await runJevShadow(rec.ports);
+
+    expect(rec.insertUnlinkCandidatesCalls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // JEV-A3 static guard: fetchPairCandidates in jev-shadow/index.ts must
 // filter the 24h window server-side through the embedded article (a
 // `!inner` embed + `.gte("article.published_at", ...)`), not by fetching an
@@ -2065,5 +2677,55 @@ describe("jev-shadow/index.ts fetchPairCandidates query shape (JEV-A3)", () => {
     expect(fnBody).not.toMatch(/\.from\(\s*"cluster_articles"\s*\)/);
     // The dead in-memory skip this test guards against.
     expect(fnBody).not.toMatch(/a\.published_at\s*<\s*sinceIso/);
+  });
+});
+
+describe("jev-shadow/index.ts markBlindspotChecked patch shape (DB-06 / SEC-064-03)", () => {
+  it("writes blindspot_recall_suspect unconditionally, including false on a negative re-check", () => {
+    const indexTs = readFileSync(
+      resolve(__dirname, "..", "..", "supabase", "functions", "jev-shadow", "index.ts"),
+      "utf8",
+    );
+    const fnMatch = indexTs.match(/async markBlindspotChecked[\s\S]*?\n    \},\n/);
+    expect(fnMatch, "could not find markBlindspotChecked in jev-shadow/index.ts").not.toBeNull();
+    const fnBody = fnMatch![0];
+
+    // The fix: one unconditional patch object, suspect written every time.
+    expect(fnBody).toMatch(/blindspot_recall_suspect:\s*suspect\s*,/);
+    expect(fnBody).toMatch(/blindspot_recall_checked_at:\s*new Date\(\)\.toISOString\(\)/);
+    // Guard against reintroducing the DB-06 latch: no ternary that only
+    // sets blindspot_recall_suspect on the truthy branch.
+    expect(fnBody).not.toMatch(/suspect\s*\?\s*\{\s*blindspot_recall_suspect:\s*true/);
+  });
+});
+
+// A-ADV-03 static guard: fetchBlindspotCandidates' silent-zone source lookup
+// must be restricted to VOTING_SOURCE_KINDS (outlet, wire) -- is_blindspot
+// and the 064 RPC's own recompute only ever count voting-kind sources, so an
+// unfiltered `.in("bias", ...)` lets a non-voting source (aggregator/niche)
+// raise a blindspot_recall_suspect flag for a verdict it never contributed
+// to. The filter must come from _shared/cluster/source-kind.ts, not a
+// hand-copied literal list (a fourth copy of the kind list this repo has
+// already had to keep in sync three times over).
+describe("jev-shadow/index.ts fetchBlindspotCandidates sources query shape (A-ADV-03)", () => {
+  it("restricts the silent-zone sources lookup to VOTING_SOURCE_KINDS", () => {
+    const indexTs = readFileSync(
+      resolve(__dirname, "..", "..", "supabase", "functions", "jev-shadow", "index.ts"),
+      "utf8",
+    );
+
+    expect(indexTs).toMatch(
+      /import \{ VOTING_SOURCE_KINDS \} from "\.\.\/_shared\/cluster\/source-kind\.ts";/,
+    );
+
+    const fnMatch = indexTs.match(/async fetchBlindspotCandidates[\s\S]*?\n    \},\n/);
+    expect(fnMatch, "could not find fetchBlindspotCandidates in jev-shadow/index.ts").not.toBeNull();
+    const fnBody = fnMatch![0];
+
+    expect(fnBody).toMatch(/\.from\(\s*"sources"\s*\)/);
+    expect(fnBody).toMatch(/\.in\(\s*"bias"\s*,\s*query\.biasKeys as string\[\]\s*\)/);
+    expect(fnBody).toMatch(
+      /\.in\(\s*"kind"\s*,\s*VOTING_SOURCE_KINDS as unknown as string\[\]\s*\)/,
+    );
   });
 });

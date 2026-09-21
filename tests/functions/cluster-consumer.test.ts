@@ -1,6 +1,12 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+// Static import of the mocked `score` export (see the vi.mock factory
+// below) so the A3 live-path tests can override its return value per test
+// via `vi.mocked(scoreMock).mockImplementation(...)` -- band-low/band-high
+// classification depends on the ensemble score, and the real ensemble
+// scorer is not exercised at all under this file's mocks.
+import { score as scoreMock } from "../../supabase/functions/_shared/cluster/ensemble.ts";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the cluster-consumer Edge Function.
@@ -133,13 +139,33 @@ vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
 // pre-import phase the `vi.mock` factory runs in. Without it the mock factory
 // would reference an uninitialised `supabaseFakeClient` because vitest hoists
 // `vi.mock` above the regular `import` statement that pulls in the helper.
-const { fakeArticles, supabaseFakeClient, supabaseFakeCalls } = await vi.hoisted(
+const {
+  fakeArticles,
+  clusterRows,
+  clusterArticleRows,
+  rpcFixtures,
+  supabaseFakeClient,
+  supabaseFakeCalls,
+} = await vi.hoisted(
   async () => {
     // Dynamic `await import` works here because vitest 1.x+ supports async
     // `vi.hoisted` factories. `require()` doesn't resolve `.ts` under
     // vitest's ESM loader; `import()` does.
     const helper = await import("../_helpers/supabase-fake");
     const articles: Record<string, unknown> = {};
+    // `clusters` / `cluster_articles` default to `[]` for every EXISTING
+    // test in this file (nothing pushes into these two arrays until the
+    // A3 live-path describe block below), so this is behaviourally
+    // identical to the old static `[]` fixtures for the whole suite except
+    // that block. `.eq("id"/"cluster_id", ...)` / `.in("cluster_id", ...)`
+    // narrow the result the same way the `articles` fixture above already
+    // does; an unfiltered select (loadClusterContext's `.gte().order()`)
+    // returns the full current array.
+    const clusters: Array<Record<string, unknown>> = [];
+    const clusterArticles: Array<{ cluster_id: string; article_id: string }> = [];
+    const rpcFixturesState: {
+      cluster_link_atomic: { data: unknown; error: { message: string } | null } | null;
+    } = { cluster_link_atomic: null };
     const fake = helper.createSupabaseFake({
       tables: {
         articles: (state) => {
@@ -169,17 +195,51 @@ const { fakeArticles, supabaseFakeClient, supabaseFakeCalls } = await vi.hoisted
             count: Object.keys(articles).length,
           };
         },
-        clusters: [],
-        cluster_articles: [],
+        clusters: (state) => {
+          const eqId = state.eq.find((p) => p.col === "id")?.val as string | undefined;
+          if (eqId !== undefined) {
+            const row = clusters.find((c) => c.id === eqId) ?? null;
+            return { data: row, error: null, count: row ? 1 : 0 };
+          }
+          return { data: clusters, error: null, count: clusters.length };
+        },
+        cluster_articles: (state) => {
+          const eqClusterId = state.eq.find((p) => p.col === "cluster_id")?.val as
+            | string
+            | undefined;
+          if (eqClusterId !== undefined) {
+            const rows = clusterArticles.filter((r) => r.cluster_id === eqClusterId);
+            return { data: rows, error: null, count: rows.length };
+          }
+          const inClusterIds = state.in.find((p) => p.col === "cluster_id")?.vals as
+            | string[]
+            | undefined;
+          if (inClusterIds) {
+            const rows = clusterArticles.filter((r) => inClusterIds.includes(r.cluster_id));
+            return { data: rows, error: null, count: rows.length };
+          }
+          return { data: clusterArticles, error: null, count: clusterArticles.length };
+        },
         sources: [
           { id: "src-outlet", bias: "pro_government", name: "Outlet", slug: "outlet", kind: "outlet" },
           { id: "src-agg", bias: "center", name: "Aggregator", slug: "agg", kind: "aggregator" },
           { id: "src-wire", bias: "state_media", name: "Wire", slug: "wire", kind: "wire" },
         ],
       },
+      rpc: {
+        // Default (null override) mirrors the pre-A3 behaviour: unknown
+        // rpcs already resolve `{ data: null, error: null }` in the shared
+        // fake, so addArticleToCluster's `cluster_link_atomic` call always
+        // succeeded silently before this fixture existed too.
+        cluster_link_atomic: () =>
+          rpcFixturesState.cluster_link_atomic ?? { data: { ok: true }, error: null },
+      },
     });
     return {
       fakeArticles: articles,
+      clusterRows: clusters,
+      clusterArticleRows: clusterArticles,
+      rpcFixtures: rpcFixturesState,
       supabaseFakeClient: fake.client,
       supabaseFakeCalls: fake.calls,
     };
@@ -212,6 +272,10 @@ beforeEach(() => {
   // observes only its own writes.
   supabaseFakeCalls.mutations.length = 0;
   supabaseFakeCalls.rpc.length = 0;
+  // Only the A3 live-path describe block below ever sets this override;
+  // reset it every test so a DB-error scenario there never bleeds into an
+  // unrelated test.
+  rpcFixtures.cluster_link_atomic = null;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
   // Unset by default so tests that don't opt in never trigger a real fetch.
@@ -605,6 +669,560 @@ describe("cluster-consumer Edge Function", () => {
     expect(tags.slice(2)).toEqual(
       ids.slice(0, 98).map((id) => `cluster-detail:${id}`),
     );
+  });
+
+  // -------------------------------------------------------------------
+  // P3 live marginal verification (migration 064) -- flag-off invariants.
+  // The `clusters` fixture above is always empty, so `scored` never gets a
+  // `primary` candidate and the live-verification block is always a no-op
+  // regardless of the flag; these two tests instead guard the response
+  // shape and the "never touches the gateway" contract that must hold no
+  // matter what candidates exist.
+  // -------------------------------------------------------------------
+
+  it("drain response carries jev_live with enabled false when JEV_LIVE_PAIRS is unset", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    delete process.env.JEV_LIVE_PAIRS;
+    delete process.env.AI_GATEWAY_API_KEY;
+    pgmqState.pending = [];
+
+    const res = await handler(
+      authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { jev_live?: Record<string, unknown> };
+    expect(body.jev_live).toEqual({
+      enabled: false,
+      calls: 0,
+      joined_by_jev: 0,
+      rejected_by_jev: 0,
+      errors: 0,
+      timeouts: 0,
+      budget_skipped: 0,
+    });
+  });
+
+  it("with JEV_LIVE_PAIRS unset the drain makes zero fetches to the Jev gateway", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    delete process.env.JEV_LIVE_PAIRS;
+    delete process.env.AI_GATEWAY_API_KEY;
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    pgmqState.pending = [
+      { msg_id: 401, read_ct: 1, message: { article_id: "art-jevflagoff" } },
+    ];
+    fakeArticles["art-jevflagoff"] = {
+      id: "art-jevflagoff",
+      title: "Bayrak kapalıyken canlı doğrulama yok",
+      description: "Body",
+      url: "https://example.com/jevflagoff",
+      category: "politika",
+      published_at: new Date().toISOString(),
+    };
+
+    await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+    // No REVALIDATE_URL/CRON_SECRET is set in beforeEach either, so this
+    // also holds fetch to zero calls overall -- the point being asserted
+    // is that the flag-off live-verification path never reaches for
+    // `fetch` at all, not merely that it targets a different URL.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------
+  // P3 live marginal verification -- LIVE path (A2 budget-on-attempts fix
+  // + A3 join/reject/timeout/db-error coverage). Every test above this
+  // point runs with the `clusters` fixture empty, so `scored` never gets a
+  // `primary` candidate and this whole block was previously a structural
+  // no-op no matter what JEV_LIVE_PAIRS/AI_GATEWAY_API_KEY were set to --
+  // exactly how A1's try/catch-swallows-the-DB-throw bug survived review
+  // with a fully green suite. The tests below give clusterArticle a real
+  // candidate cluster to score against so the jev-live block actually runs.
+  //
+  // clusterContextCache (module-level in the SUT) has a 60s TTL keyed off
+  // Date.now(), and persists across every `it` in this file since the SUT
+  // module is only evaluated once. `vi.useFakeTimers({ toFake: ["Date"] })`
+  // + a one-time forward jump in `beforeAll` invalidates whatever
+  // (empty) snapshot the tests above already warmed, so the FIRST test
+  // below reloads the cache and picks up the shared cluster seeded here --
+  // it then stays warm (frozen clock, never advanced again) for the rest
+  // of this block. `toFake: ["Date"]` leaves real timers (setTimeout,
+  // AbortSignal) untouched.
+  describe("P3 live marginal verification -- live path (A2 budget + A3 join/reject/timeout/db-error)", () => {
+    const SHARED_CLUSTER_ID = "cluster-live-shared";
+    const SHARED_MEMBER_ID = "member-live-shared";
+    // Every incoming test article below is titled "Ankara depremi ..." so
+    // it shares >= TOKEN_CANDIDATE_MIN_SHARED (2) tokens ("ankara",
+    // "depremi") with this seed via the title-token candidate route --
+    // each test's own tail text differs (and differs from this seed's)
+    // so the strict-fingerprint fast path (an exact shingle-set match)
+    // never fires and short-circuits past the ensemble/jev-live code the
+    // fast path predates.
+    const SEED_TITLE = "Ankara depremi sonrasi kurtarma ekipleri bolgeye ulasti";
+    const SEED_DESCRIPTION = "Bolgede arama calismalari suruyor";
+
+    // The mock factory's own default (0.82, always). Every "created" outcome
+    // in this block (band-low with no Jev override, or a Jev reject) grows
+    // the candidate pool with a new auto-created cluster that ALSO shares
+    // the "ankara"+"depremi" tokens with every later test's title -- so by
+    // the second test in this block, `score()` is called more than once per
+    // article (once per candidate cluster). A `mockReturnValueOnce` only
+    // covers the first of those calls, and any later call silently falls
+    // back to this same default, which then wins `primary` on ensemble
+    // score alone (0.82 sorts above the band the test intended to control).
+    // `mockImplementation` below controls EVERY call for the duration of a
+    // test instead, and `afterEach` restores this default so the next test
+    // (in or outside this block) is unaffected.
+    const defaultScoreImpl = () => ({
+      score: 0.82,
+      components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
+      isMatch: true,
+    });
+
+    function mockBandScore(score: number): void {
+      vi.mocked(scoreMock).mockImplementation(() => ({
+        score,
+        components: { cosine: 0.3, entityJaccard: 0, fingerprintMatch: false },
+        isMatch: false,
+      }));
+    }
+
+    beforeAll(() => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(Date.now() + 61_000));
+
+      const now = new Date().toISOString();
+      clusterRows.push({
+        id: SHARED_CLUSTER_ID,
+        title_tr: SEED_TITLE,
+        title_tr_neutral: SEED_TITLE,
+        first_published: now,
+        updated_at: now,
+        article_count: 1,
+      });
+      clusterArticleRows.push({ cluster_id: SHARED_CLUSTER_ID, article_id: SHARED_MEMBER_ID });
+    });
+
+    afterAll(() => {
+      vi.useRealTimers();
+    });
+
+    beforeEach(() => {
+      process.env.JEV_LIVE_PAIRS = "1";
+      process.env.AI_GATEWAY_API_KEY = "test-gateway-key";
+      // addArticleToCluster reads `cluster_articles`/`articles` fresh on
+      // every call (never cached) and the outer beforeEach above wipes
+      // `fakeArticles` before each test -- restore the shared seed member
+      // here (inner beforeEach hooks run after outer ones) so the live
+      // join queries keep resolving for every test in this block, not just
+      // the first one that happened to warm the cache.
+      fakeArticles[SHARED_MEMBER_ID] = {
+        id: SHARED_MEMBER_ID,
+        source_id: null,
+        title: SEED_TITLE,
+        description: SEED_DESCRIPTION,
+        published_at: new Date().toISOString(),
+        fingerprint: null,
+        entities: [],
+        category: "politika",
+        minhash_sig: null,
+        minhash_version: null,
+      };
+    });
+
+    afterEach(() => {
+      vi.mocked(scoreMock).mockImplementation(defaultScoreImpl);
+    });
+
+    function jevResponse(probability: number, inputTokens = 12): Response {
+      return new Response(
+        JSON.stringify({
+          answers: { p1: { type: "boolean", probability } },
+          usage: { inputTokens, outputTokens: 3 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+
+    function abortErrorFetch(): ReturnType<typeof vi.fn> {
+      return vi.fn(async () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        throw err;
+      });
+    }
+
+    it("(a) band-low join (p>=0.7): exactly one fetch, matches the primary cluster, upserts one 'joined' pair_marginal row", async () => {
+      const title = "Ankara depremi sonrasi kurtarma calismalari hiz kazandi";
+      pgmqState.pending = [
+        { msg_id: 501, read_ct: 1, message: { article_id: "art-live-a" } },
+      ];
+      fakeArticles["art-live-a"] = {
+        id: "art-live-a",
+        source_id: null,
+        title,
+        description: "Detay A",
+        url: "https://example.com/live-a",
+        category: "politika",
+        published_at: new Date().toISOString(),
+      };
+      mockBandScore(0.38);
+      const fetchMock = vi.fn(async () => jevResponse(0.9));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const handler = await importHandler();
+      expect(handler).toBeDefined();
+      if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        matched: number;
+        created: number;
+        failedTransient: number;
+        jev_live: { calls: number; joined_by_jev: number; errors: number };
+      };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(body.matched).toBe(1);
+      expect(body.created).toBe(0);
+      expect(body.failedTransient).toBe(0);
+      expect(body.jev_live.calls).toBe(1);
+      expect(body.jev_live.joined_by_jev).toBe(1);
+      expect(body.jev_live.errors).toBe(0);
+
+      const linkCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
+      expect(linkCalls.length).toBe(1);
+      expect((linkCalls[0]?.args as { p_cluster_id: string }).p_cluster_id).toBe(SHARED_CLUSTER_ID);
+
+      const marginalUpserts = supabaseFakeCalls.upsert("jev_shadow_predictions");
+      expect(marginalUpserts.length).toBe(1);
+      const rows = marginalUpserts[0]?.patch as Array<{ jev_answer: { decision: string } }>;
+      expect(rows[0]?.jev_answer.decision).toBe("joined");
+
+      expect([...pgmqState.archived, ...pgmqState.deleted]).toContain(501);
+    });
+
+    it("(b) band-high reject (p<0.3): primary is blocked, the article falls through to createCluster (not matched)", async () => {
+      const title = "Ankara depremi nedeniyle okullar tatil edildi";
+      pgmqState.pending = [
+        { msg_id: 502, read_ct: 1, message: { article_id: "art-live-b" } },
+      ];
+      fakeArticles["art-live-b"] = {
+        id: "art-live-b",
+        source_id: null,
+        title,
+        description: "Detay B",
+        url: "https://example.com/live-b",
+        category: "politika",
+        published_at: new Date().toISOString(),
+      };
+      mockBandScore(0.41);
+      const fetchMock = vi.fn(async () => jevResponse(0.1));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const handler = await importHandler();
+      expect(handler).toBeDefined();
+      if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        matched: number;
+        created: number;
+        jev_live: { calls: number; rejected_by_jev: number };
+      };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(1);
+      expect(body.jev_live.calls).toBe(1);
+      expect(body.jev_live.rejected_by_jev).toBe(1);
+
+      const linkCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
+      expect(linkCalls.length).toBe(0);
+
+      const marginalUpserts = supabaseFakeCalls.upsert("jev_shadow_predictions");
+      expect(marginalUpserts.length).toBe(1);
+      const rows = marginalUpserts[0]?.patch as Array<{ jev_answer: { decision: string } }>;
+      expect(rows[0]?.jev_answer.decision).toBe("rejected");
+    });
+
+    it("(c) AbortError from fetch: jev_live.timeouts===1, errors===0, and the ensemble's own decision (band-low -> create) is untouched", async () => {
+      const title = "Ankara depremi sonrasi enkaz altinda arama suruyor";
+      pgmqState.pending = [
+        { msg_id: 503, read_ct: 1, message: { article_id: "art-live-c" } },
+      ];
+      fakeArticles["art-live-c"] = {
+        id: "art-live-c",
+        source_id: null,
+        title,
+        description: "Detay C",
+        url: "https://example.com/live-c",
+        category: "politika",
+        published_at: new Date().toISOString(),
+      };
+      mockBandScore(0.38);
+      const fetchMock = abortErrorFetch();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const handler = await importHandler();
+      expect(handler).toBeDefined();
+      if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        matched: number;
+        created: number;
+        jev_live: { calls: number; timeouts: number; errors: number };
+      };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(body.jev_live.timeouts).toBe(1);
+      expect(body.jev_live.errors).toBe(0);
+      expect(body.jev_live.calls).toBe(0);
+      // Band-low: absent a Jev override the ensemble alone never joins an
+      // existing cluster (score < MATCH_THRESHOLD) -- "untouched" means
+      // the article still falls through to createCluster, exactly as it
+      // would with the flag off.
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(1);
+    });
+
+    it("(d) [A1] addArticleToCluster's RPC erroring on a Jev-directed join reports failedTransient (not created), and jev_live.errors is NOT incremented", async () => {
+      const title = "Ankara depremi sonrasi yardim kampanyasi baslatildi";
+      pgmqState.pending = [
+        { msg_id: 504, read_ct: 1, message: { article_id: "art-live-d" } },
+      ];
+      fakeArticles["art-live-d"] = {
+        id: "art-live-d",
+        source_id: null,
+        title,
+        description: "Detay D",
+        url: "https://example.com/live-d",
+        category: "politika",
+        published_at: new Date().toISOString(),
+      };
+      mockBandScore(0.38);
+      const fetchMock = vi.fn(async () => jevResponse(0.9));
+      vi.stubGlobal("fetch", fetchMock);
+      rpcFixtures.cluster_link_atomic = { data: null, error: { message: "boom" } };
+
+      const handler = await importHandler();
+      expect(handler).toBeDefined();
+      if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        matched: number;
+        created: number;
+        failedTransient: number;
+        jev_live: { calls: number; joined_by_jev: number; errors: number };
+      };
+
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(0);
+      expect(body.failedTransient).toBe(1);
+      expect(body.jev_live.calls).toBe(1);
+      expect(body.jev_live.joined_by_jev).toBe(0);
+      // The RPC throw happens OUTSIDE the try/catch that increments
+      // jev_live.errors (A1 fix) -- it must propagate to drainQueue's own
+      // failedTransient accounting instead of being swallowed here.
+      expect(body.jev_live.errors).toBe(0);
+
+      expect(pgmqState.archived).not.toContain(504);
+      expect(pgmqState.deleted).not.toContain(504);
+    });
+
+    it("[A2] 40 consecutive failing/timing-out attempts stop the 41st: fetch is called exactly 40 times, and budget_skipped is 1", async () => {
+      const N = 41;
+      pgmqState.pending = Array.from({ length: N }, (_, i) => ({
+        msg_id: 600 + i,
+        read_ct: 1,
+        message: { article_id: `art-live-budget-${i}` },
+      }));
+      const now = new Date().toISOString();
+      for (let i = 0; i < N; i++) {
+        fakeArticles[`art-live-budget-${i}`] = {
+          id: `art-live-budget-${i}`,
+          source_id: null,
+          title: `Ankara depremi haberi guncelleme ${i}`,
+          description: `Detay budget ${i}`,
+          url: `https://example.com/live-budget-${i}`,
+          category: "politika",
+          published_at: now,
+        };
+      }
+      // Every candidate scores band-low regardless of which cluster it is
+      // scored against -- the budget test only needs `primary` to exist on
+      // every one of the 41 messages, not a specific winning cluster.
+      // `afterEach` above restores the default implementation.
+      mockBandScore(0.38);
+      const fetchMock = abortErrorFetch();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const handler = await importHandler();
+      expect(handler).toBeDefined();
+      if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        created: number;
+        jev_live: {
+          calls: number;
+          timeouts: number;
+          errors: number;
+          budget_skipped: number;
+        };
+      };
+
+      expect(fetchMock).toHaveBeenCalledTimes(40);
+      expect(body.jev_live.timeouts).toBe(40);
+      expect(body.jev_live.calls).toBe(0);
+      expect(body.jev_live.errors).toBe(0);
+      expect(body.jev_live.budget_skipped).toBe(1);
+      expect(body.created).toBe(N);
+    });
+
+    it("[A-ADV-02] a band-high reject may only fall back to a candidate the ensemble would have joined on its own (>= MATCH_THRESHOLD), never a sub-threshold one", async () => {
+      // Dedicated two-candidate scenario (test (b) above only ever exercises
+      // a single candidate cluster, so it can never reach the fallback
+      // loop's bar at all). Force a fresh loadClusterContext fetch so these
+      // two clusters -- and *only* these two, via non-overlapping title
+      // tokens -- are the candidates scored for the incoming article.
+      vi.setSystemTime(new Date(Date.now() + 61_000));
+
+      const now = new Date().toISOString();
+      const CLUSTER_A_ID = "cluster-live-b41-primary";
+      const CLUSTER_B_ID = "cluster-live-b41-second";
+      const MEMBER_A_ID = "member-live-b41-primary";
+      const MEMBER_B_ID = "member-live-b41-second";
+      const FP_A = "fp-b41-primary";
+      const FP_B = "fp-b41-second";
+      const TITLE_A = "Izmir liman genisletme projesi onaylandi";
+      const TITLE_B = "Izmir liman genisletme ihalesi iptal edildi";
+
+      clusterRows.push(
+        {
+          id: CLUSTER_A_ID,
+          title_tr: TITLE_A,
+          title_tr_neutral: TITLE_A,
+          first_published: now,
+          updated_at: now,
+          article_count: 1,
+        },
+        {
+          id: CLUSTER_B_ID,
+          title_tr: TITLE_B,
+          title_tr_neutral: TITLE_B,
+          first_published: now,
+          updated_at: now,
+          article_count: 1,
+        },
+      );
+      clusterArticleRows.push(
+        { cluster_id: CLUSTER_A_ID, article_id: MEMBER_A_ID },
+        { cluster_id: CLUSTER_B_ID, article_id: MEMBER_B_ID },
+      );
+      fakeArticles[MEMBER_A_ID] = {
+        id: MEMBER_A_ID,
+        source_id: null,
+        title: TITLE_A,
+        description: "Detay A",
+        published_at: now,
+        fingerprint: FP_A,
+        entities: [],
+        category: "politika",
+        minhash_sig: null,
+        minhash_version: null,
+      };
+      fakeArticles[MEMBER_B_ID] = {
+        id: MEMBER_B_ID,
+        source_id: null,
+        title: TITLE_B,
+        description: "Detay B",
+        published_at: now,
+        fingerprint: FP_B,
+        entities: [],
+        category: "politika",
+        minhash_sig: null,
+        minhash_version: null,
+      };
+
+      const title = "Izmir liman genisletme calismasi durduruldu";
+      pgmqState.pending = [
+        { msg_id: 700, read_ct: 1, message: { article_id: "art-live-b41" } },
+      ];
+      fakeArticles["art-live-b41"] = {
+        id: "art-live-b41",
+        source_id: null,
+        title,
+        description: "Detay çalışma",
+        url: "https://example.com/live-b41",
+        category: "politika",
+        published_at: now,
+      };
+
+      // Primary (cluster A) scores 0.41 -- band-high. Second candidate
+      // (cluster B) scores 0.37: below MATCH_THRESHOLD (0.40) but above the
+      // old bar, FALLBACK_FLOOR (0.36) -- exactly the gap this fix closes.
+      vi.mocked(scoreMock).mockImplementation((_a: unknown, b: unknown) => {
+        const strict = (b as { strict?: string | null } | null | undefined)?.strict ?? null;
+        const s = strict === FP_A ? 0.41 : strict === FP_B ? 0.37 : 0;
+        return {
+          score: s,
+          components: { cosine: 0.3, entityJaccard: 0, fingerprintMatch: false },
+          isMatch: false,
+        };
+      });
+      const fetchMock = vi.fn(async () => jevResponse(0.1)); // p<0.3 -> reject
+      vi.stubGlobal("fetch", fetchMock);
+
+      const handler = await importHandler();
+      expect(handler).toBeDefined();
+      if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        matched: number;
+        created: number;
+        jev_live: { calls: number; rejected_by_jev: number };
+      };
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(body.jev_live.rejected_by_jev).toBe(1);
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(1);
+
+      // Neither candidate was ever joined: A is blocked by the reject, and B
+      // (0.37) never clears the MATCH_THRESHOLD bar the reject imposes --
+      // addArticleToCluster (cluster_link_atomic) must not have been called.
+      const linkCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
+      expect(linkCalls.length).toBe(0);
+    });
   });
 });
 

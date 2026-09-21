@@ -12,6 +12,7 @@ import {
   type JevRunStatus,
   type JevSubjectType,
 } from "../../supabase/functions/_shared/jev.ts";
+import { BLINDSPOT } from "../../supabase/functions/_shared/cluster/blindspot";
 import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 
 // ---------------------------------------------------------------------------
@@ -69,8 +70,8 @@ describe("migration 061_jev_shadow.sql (static parity)", () => {
     expect(sql.length).toBeGreaterThan(0);
   });
 
-  it("mentions every JEV_TASKS name in the task-column comments (061 + 063 concatenated)", () => {
-    const combined = sql + read("063_jev_now_package.sql");
+  it("mentions every JEV_TASKS name in the task-column comments (061 + 063 + 064 concatenated)", () => {
+    const combined = sql + read("063_jev_now_package.sql") + read("064_jev_cluster_live.sql");
     for (const task of JEV_TASKS) {
       expect(combined).toContain(task);
     }
@@ -290,6 +291,128 @@ describe("migration 063_jev_now_package.sql (static parity)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// migration 064_jev_cluster_live.sql (static parity) -- "Jev canlı küme":
+// the outlier-ejection queue (jev_unlink_candidates + cluster_unlink_article)
+// and the two blindspot_recall columns on clusters. Byte-identical to the
+// planner's SQL (see pack.md's Migration section); this file pins the
+// vocabularies/contracts the same way the 061/063 blocks above do.
+// ---------------------------------------------------------------------------
+
+describe("migration 064_jev_cluster_live.sql (static parity)", () => {
+  let sql064 = "";
+  let code064 = "";
+  beforeAll(() => {
+    sql064 = read("064_jev_cluster_live.sql");
+    expect(sql064.length).toBeGreaterThan(0);
+    code064 = sql064.replace(/--[^\n]*/g, "");
+  });
+
+  it("contains the ledger insert for '064'", () => {
+    expect(sql064).toMatch(
+      /insert\s+into\s+supabase_migrations\.schema_migrations[\s\S]*?values\s*\(\s*'064'\s*,\s*'064_jev_cluster_live'\s*\)/i,
+    );
+  });
+
+  it("064 is additive-only: no DROP TABLE/COLUMN, and the only ALTER TABLE on public.clusters is ADD COLUMN IF NOT EXISTS", () => {
+    expect(sql064).not.toMatch(/\bdrop\s+table\b/i);
+    expect(sql064).not.toMatch(/\bdrop\s+column\b/i);
+    const alterMatches = [...sql064.matchAll(/alter\s+table\s+public\.clusters\b[\s\S]*?;/gi)];
+    expect(alterMatches.length).toBeGreaterThan(0);
+    for (const m of alterMatches) {
+      expect(m[0]).toMatch(/add\s+column\s+if\s+not\s+exists/i);
+    }
+  });
+
+  it("jev_unlink_candidates is service_role-only: RLS on, anon/authenticated/public revoked, sequence revoked", () => {
+    expect(sql064).toMatch(/alter\s+table\s+public\.jev_unlink_candidates\s+enable\s+row\s+level\s+security/i);
+    expect(sql064).toMatch(
+      /revoke\s+all\s+on\s+public\.jev_unlink_candidates\s+from\s+anon,\s*authenticated,\s*public/i,
+    );
+    expect(sql064).toMatch(
+      /revoke\s+all\s+on\s+sequence\s+public\.jev_unlink_candidates_id_seq\s+from\s+anon,\s*authenticated,\s*public/i,
+    );
+  });
+
+  it("cluster_unlink_article is SECURITY DEFINER with search_path = '' and revoked from anon/authenticated/public", () => {
+    const fnMatch = sql064.match(
+      /create\s+or\s+replace\s+function\s+public\.cluster_unlink_article\([^)]*\)[\s\S]*?\$fn\$;/i,
+    );
+    expect(fnMatch, "could not find function public.cluster_unlink_article").not.toBeNull();
+    const body = fnMatch![0];
+    expect(body).toMatch(/security\s+definer/i);
+    expect(body).toMatch(/set\s+search_path\s*=\s*''/i);
+    expect(sql064).toMatch(
+      /revoke\s+all\s+on\s+function\s+public\.cluster_unlink_article\(uuid,\s*uuid\)\s+from\s+anon,\s*authenticated,\s*public/i,
+    );
+  });
+
+  it("cluster_unlink_article takes the same per-cluster advisory lock as cluster_link_atomic and never deletes a cluster", () => {
+    const fnMatch = sql064.match(
+      /create\s+or\s+replace\s+function\s+public\.cluster_unlink_article\([^)]*\)[\s\S]*?\$fn\$;/i,
+    );
+    expect(fnMatch).not.toBeNull();
+    const body = fnMatch![0];
+    // Same key as cluster_link_atomic (027): pg_advisory_xact_lock(hashtext(cluster_id::text)).
+    expect(body).toMatch(/pg_advisory_xact_lock\(\s*pg_catalog\.hashtext\(\s*p_cluster_id::text\s*\)\s*\)/i);
+    expect(body).not.toMatch(/delete\s+from\s+public\.clusters\b/i);
+  });
+
+  it("the jev_unlink_candidates status and source_task CHECK lists match the contract vocabularies", () => {
+    const statusMatch = code064.match(
+      /status\s+text\s+not\s+null\s+default\s+'pending'\s+check\s*\(\s*status\s+in\s*\(([^)]+)\)\s*\)/i,
+    );
+    expect(statusMatch, "could not find the jev_unlink_candidates.status CHECK list").not.toBeNull();
+    const statusValues = (statusMatch![1] ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/^'|'$/g, ""))
+      .filter(Boolean);
+    expect(statusValues.sort()).toEqual(["kept", "pending", "unlinked"].sort());
+
+    const sourceTaskMatch = code064.match(
+      /source_task\s+text\s+not\s+null\s+check\s*\(\s*source_task\s+in\s*\(([^)]+)\)\s*\)/i,
+    );
+    expect(sourceTaskMatch, "could not find the jev_unlink_candidates.source_task CHECK list").not.toBeNull();
+    const sourceTaskValues = (sourceTaskMatch![1] ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/^'|'$/g, ""))
+      .filter(Boolean);
+    expect(sourceTaskValues.sort()).toEqual(["audit", "cluster_member"].sort());
+  });
+
+  // BLINDSPOT.minSources / dominantShare (supabase/functions/_shared/cluster/blindspot.ts)
+  // re-derived here rather than hardcoded twice -- a threshold change in the
+  // contract module must fail this test until 064's hand-duplicated SQL copy
+  // (the zone-parity suite pins the zone CASE + BIAS_KEYS/ZONE_KEYS arrays
+  // separately) is updated to match.
+  it("the is_blindspot recompute uses BLINDSPOT.minSources / dominantShare, anchored to the real expressions (not hardcoded twice)", () => {
+    // DB-02 fix: anchor `coalesce(`/`nullif(` so a schema-qualified
+    // impostor (e.g. `pg_catalog.coalesce(...)`, the exact shape DB-01
+    // found breaking cluster_unlink_article at call time) cannot satisfy
+    // this guard as an unanchored substring match.
+    const minSourcesRe = new RegExp(
+      `(^|[^.\\w])coalesce\\(v_total,\\s*0\\)\\s*>=\\s*${BLINDSPOT.minSources}\\b`,
+      "i",
+    );
+    const shareRe = new RegExp(
+      `(^|[^.\\w])nullif\\(v_total,\\s*0\\)\\s*>=\\s*${BLINDSPOT.dominantShare.toString().replace(".", "\\.")}\\b`,
+      "i",
+    );
+    expect(code064).toMatch(minSourcesRe);
+    expect(code064).toMatch(shareRe);
+
+    // The regexes must reject a schema-qualified impostor of either call --
+    // this is what would have caught DB-01 (a `pg_catalog.coalesce`/
+    // `pg_catalog.nullif` substitution elsewhere in this file that made
+    // `cluster_unlink_article` raise `function pg_catalog.coalesce(bigint,
+    // integer) does not exist` on every call, while the old unanchored
+    // regex still matched it as a substring and passed green).
+    const impostor = `pg_catalog.coalesce(v_total, 0) >= ${BLINDSPOT.minSources} and pg_catalog.nullif(v_total, 0) >= ${BLINDSPOT.dominantShare}`;
+    expect(impostor).not.toMatch(minSourcesRe);
+    expect(impostor).not.toMatch(shareRe);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // JEV-A20: JEV_QUESTION_SET_VERSION and questionRegistryHash() are bumped
 // together, or not at all -- a wording change that forgets to bump either
 // fails here rather than silently mixing pre/post-change predictions under
@@ -298,8 +421,8 @@ describe("migration 063_jev_now_package.sql (static parity)", () => {
 
 describe("question set version + registry hash (JEV-A20)", () => {
   it("pins JEV_QUESTION_SET_VERSION and questionRegistryHash together — bump BOTH or neither", async () => {
-    expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-21.1");
-    expect(await questionRegistryHash()).toBe("e554d7cbee345a0ad2be2e9a59f659694718044af53b04a9e1cb460898a20d00");
+    expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-21.2");
+    expect(await questionRegistryHash()).toBe("960683464c3044fcca5eeb0649cebd0a5250a2bdc5a380da2f8a4a161b0107ba");
   });
 });
 

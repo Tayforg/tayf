@@ -1049,3 +1049,98 @@ Before declaring the migration complete:
 
 - [`key-rotation.md`](key-rotation.md) — rotation runbook for every secret this system uses (Vercel env, GitHub Actions secrets, Supabase Vault, Edge Function secrets).
 - [`backup-posture.md`](backup-posture.md) — what Supabase backs up automatically, what isn't backed up at all, the nightly jobs a restore has to be reconciled with, and the quarterly restore-drill procedure.
+
+## 064 — Jev canlı küme paketi (pair_marginal, kör nokta geri çağırma, ayırma kuyruğu)
+
+`064_jev_cluster_live.sql` is the first Jev migration that lets a Jev answer CHANGE what a reader sees, and it does so on the narrowest possible surface: two bounded production mechanisms behind kill switches, plus one fully shadow-only check. `pair_marginal` (cluster-consumer, flag `JEV_LIVE_PAIRS`) asks a second opinion only in the two score bands the ensemble clusterer is already unsure about — band-low `[0.36, 0.40)` and band-high `[0.40, 0.44)` — one call per article, 1500ms timeout, 40 calls per drain, any failure leaves the ensemble decision untouched. `blindspot_recall` (jev-shadow, shadow only, no reader change) asks whether the SILENT media zone of a blindspot cluster actually published the same event, and flags `clusters.blindspot_recall_suspect` for a human to review on `/admin`. The outlier-ejection queue (`jev_unlink_candidates` + the `cluster_unlink_article` RPC) turns low-probability `cluster_member` predictions into an `/admin` "Küme dışı adaylar" review list — nothing is ever unlinked automatically.
+
+**ORDER IS LOAD-BEARING**, same discipline as every migration above: apply the migration **before** deploying either Edge Function or redeploying Vercel.
+
+1. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/064_jev_cluster_live.sql
+   # ...or: supabase db push
+   ```
+
+   Verify it landed and the two additive `clusters` columns and the new RPC exist:
+
+   ```sql
+   select * from supabase_migrations.schema_migrations where version = '064';
+   select count(*) from public.jev_unlink_candidates;
+   -- expect 0 immediately after apply
+   select blindspot_recall_suspect, blindspot_recall_checked_at from public.clusters limit 1;
+   select pg_catalog.pg_get_functiondef('public.cluster_unlink_article(uuid,uuid)'::regprocedure) is not null;
+   -- expect true
+   ```
+
+2. **Deploy order: jev-shadow first, then cluster-consumer, both `--no-verify-jwt`, then Vercel.**
+
+   ```bash
+   supabase functions deploy jev-shadow --project-ref "$PROJECT_REF" --no-verify-jwt
+   supabase functions deploy cluster-consumer --project-ref "$PROJECT_REF" --no-verify-jwt
+   vercel --prod
+   ```
+
+   jev-shadow first because `blindspot_recall` and the `jev_unlink_candidates` writer both live there and have no reader-facing effect — safe to land before anything else touches this pack. cluster-consumer second because the live marginal-verification code path ships inert until the flag below is set. Vercel last so `/admin`'s two new sections (and the `POST /api/admin/jev-unlink` route) exist only once the RPC and the tables they read are already live.
+
+3. **Secrets.** `AI_GATEWAY_API_KEY` is already present (shared by every Jev-calling function since migration 061) — no new secret is needed for `blindspot_recall` or the unlink queue. The live marginal-verification switch is separate and OFF by default:
+
+   ```bash
+   supabase secrets list --project-ref "$PROJECT_REF" | grep JEV_LIVE_PAIRS
+   # expect no output -- leaving it unset is the safe default: cluster-consumer's
+   # clustering behaviour is byte-identical to today, the drain body only gains
+   # a jev_live block with enabled: false.
+   ```
+
+   Flip it only after confirming the byte-identical drain (step 4 below):
+
+   ```bash
+   supabase secrets set JEV_LIVE_PAIRS=1 --project-ref "$PROJECT_REF"
+   # the next cluster-consumer invocation picks it up -- no redeploy needed.
+   ```
+
+4. **How to watch it.** Confirm a drain body carries `"jev_live":{"enabled":false,...}` before setting the flag, and once it is set, watch `calls` stay well under 40 with `errors`/`timeouts` near zero:
+
+   ```bash
+   curl -sS -X POST -H "Authorization: Bearer $SR" \
+     "https://$PROJECT_REF.functions.supabase.co/cluster-consumer"
+   # inspect the jev_live block in the JSON body
+   ```
+
+   Track `pair_marginal` and `blindspot_recall` volume and agreement in SQL. `recordMarginal`'s upsert (`onConflict: 'task,subject_id', ignoreDuplicates: true`, `subject_id = '<articleId>:<clusterId>'`) means a same-primary retry keeps the FIRST row (which can go stale relative to a retry that actually skipped on duplicate-source) and a different-primary retry writes a SECOND row for the same article — so `count(*)` can double-count and skew `avg(jev_prob)`; cross-check it against the distinct-subject count below before trusting the aggregate:
+
+   ```sql
+   select task, count(*), count(distinct split_part(subject_id, ':', 1)) as distinct_subjects, avg(jev_prob)
+     from public.jev_shadow_predictions
+    where task in ('pair_marginal', 'blindspot_recall')
+      and created_at >= now() - interval '1 day'
+    group by task;
+   ```
+
+   Confirm `jev_unlink_candidates` is receiving rows a few `jev-shadow` runs after deploy (`select count(*) from public.jev_unlink_candidates;`), and review `/admin`'s "Küme dışı adaylar" and "Şüpheli kör noktalar" sections by hand before trusting either signal.
+
+   **What pressing "Ayır" actually does (read before using it).** `cluster_unlink_article` only deletes the `cluster_articles` row — it does not re-home the article anywhere. Every reader surface (cluster detail, the home feed, `/blindspots`) reaches articles through `cluster_articles`, and nothing on the ingest or admin side re-enqueues an unlinked article back onto the cluster queue. So unlinking removes the article from every reader surface entirely; it is effectively a **hide**, not a **move**, of that article — the operator is not correcting its cluster, they are pulling it off the site. If the article should end up in a different (correct) cluster: a plain re-enqueue onto `cluster_work` (the same queue `cluster-consumer` drains) replays the identical ensemble scoring against the identical cluster context, and `addArticleToCluster`'s duplicate-source guard no longer blocks it because the unlink just removed that source's only member row — so the article is very likely re-linked to the exact cluster it was just removed from. Today, treat "Ayır" as a **removal from the site, not a correction**; a safe re-home needs an exclude-cluster hint and is tracked as a follow-up, not a manual re-enqueue. Keep this in mind alongside the round-trip check above: confirming `jev_unlink_candidates` count and reviewing "Küme dışı adaylar" by hand tells you the queue is being populated, not that an unlinked article has landed anywhere else.
+
+**KILL SWITCHES**, in order of bluntness — none of them requires a migration or a rollback, and 064 can stay applied with every switch off:
+
+```bash
+# 1. Live marginal verification off within one cluster-consumer invocation;
+#    the shadow suite (blindspot_recall, the unlink queue) keeps running.
+#    This is the ONLY switch that stops the live pair_marginal path.
+supabase secrets unset JEV_LIVE_PAIRS --project-ref "$PROJECT_REF"
+```
+
+```bash
+# 2. The whole jev-shadow suite off (blindspot_recall included).
+#    Does NOT stop live marginal verification -- unset JEV_LIVE_PAIRS
+#    (switch 1) first. The live path is also independent of
+#    JEV_MONTHLY_TOKEN_CAP (it never reads jev_shadow_runs).
+supabase secrets set JEV_DISABLED=1 --project-ref "$PROJECT_REF"
+```
+
+```sql
+-- 3. Stop the 10-minute shadow poke entirely.
+update cron.job set active = false where jobname = 'jev-shadow';
+```
+
