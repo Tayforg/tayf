@@ -164,6 +164,8 @@ erDiagram
 | Module | Responsibility |
 |---|---|
 | `clusters/politics-query.ts` | Fetches, filters (≥60% politics), dedupes, wire-collapses, caps source fairness, and importance-ranks clusters for the home feed. Single PostgREST embedded select. |
+| `clusters/topic-query.ts` | Topic-hub read for /konu and /konu/[slug]: 7-day window over clusters.topic7 (migration 067), reuses politics-query's embedded select and bundle builder, `use cache` + cluster-feed + clusters-politics tag, returns null on error so a prerender never fails. |
+| `cluster_topics_refresh` | SECURITY DEFINER SQL aggregation that turns task='topic7' shadow predictions into clusters.topic7 at a 0.8 confidence / 0.6 majority gate; pg_cron 'cluster-topics-refresh' every 10 min at :03. Migration 067. |
 | `clusters/cluster-detail-query.ts` | Fetches a single cluster with all members + full source directory. Two parallel round-trips. |
 | `bias/config.ts` | Single source of truth for bias labels, colors, spectrum order, and the 10→3 zone mapping. |
 | `bias/cross-spectrum.ts` | Detects "surprise" outlets covering a story dominated by the opposing zone. Guards: ≥5 sources, ≥0.65 threshold, ≥3 absolute margin. |

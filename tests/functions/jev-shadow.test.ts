@@ -57,7 +57,9 @@ import {
   statePreview,
   tokensToUsd,
   topicBaseline,
+  topic7Baseline,
   unlinkCandidatesFromRows,
+  JEV_TOPIC7_CHOICES,
   type JevArticleRow,
   type JevBlindspotCandidate,
   type JevBlindspotCandidateQuery,
@@ -703,6 +705,20 @@ describe("politicsBaseline / topicBaseline", () => {
   });
 });
 
+describe("topic7Baseline", () => {
+  it("returns the article category verbatim for the seven feed topics", () => {
+    for (const category of JEV_TOPIC7_CHOICES) {
+      expect(topic7Baseline(category)).toBe(category);
+    }
+  });
+
+  it("returns null for son_dakika, null, and any unmapped category — the caller stores 'unknown' and agree null", () => {
+    expect(topic7Baseline("son_dakika")).toBeNull();
+    expect(topic7Baseline(null)).toBeNull();
+    expect(topic7Baseline("something_else")).toBeNull();
+  });
+});
+
 // --- 9. booleanAgrees / choiceAgrees -----------------------------------------------
 
 describe("booleanAgrees / choiceAgrees", () => {
@@ -928,7 +944,7 @@ describe("predictionRow", () => {
 // --- 12. question builders -----------------------------------------------------------
 
 describe("buildArticleCall", () => {
-  it("builds state {title, description} only (no outlet slug, no timestamp) and all six article questions", () => {
+  it("builds state {title, description} only (no outlet slug, no timestamp) and all seven article questions", () => {
     const a = articleRow();
     const req = buildArticleCall(a);
     expect(req.state).toEqual({
@@ -937,10 +953,11 @@ describe("buildArticleCall", () => {
     });
     expect(JSON.stringify(req.state)).not.toContain(a.source_slug ?? " ");
     expect(Object.keys(req.questions).sort()).toEqual(
-      ["clickbait", "framing", "opinion", "politics", "sensational", "topic"].sort(),
+      ["clickbait", "framing", "opinion", "politics", "sensational", "topic", "topic7"].sort(),
     );
     expect(req.questions.sensational?.type).toBe("score");
     expect(req.questions.topic?.type).toBe("choice");
+    expect(req.questions.topic7?.type).toBe("choice");
     expect(req.questions.politics?.type).toBe("boolean");
   });
 
@@ -949,6 +966,13 @@ describe("buildArticleCall", () => {
     const state = req.state as { description: string; source?: unknown };
     expect(state.description).toBe("");
     expect("source" in state).toBe(false);
+  });
+
+  it("sends the topic7 criteria keys in the 7-label feed taxonomy, byte-identical to JEV_TOPIC7_CHOICES", () => {
+    const req = buildArticleCall(articleRow());
+    const topic7 = req.questions.topic7 as { type: "choice"; criteria: Record<string, string | null> };
+    expect(topic7.type).toBe("choice");
+    expect(Object.keys(topic7.criteria).sort()).toEqual([...JEV_TOPIC7_CHOICES].sort());
   });
 });
 
@@ -1159,7 +1183,7 @@ describe("runJevShadow", () => {
     expect(result.calls).toBe(40);
     const totalRows = rec.insertPredictionsCalls.reduce((n, rows) => n + rows.length, 0);
     expect(totalRows).toBe(result.rows);
-    expect(totalRows).toBe(240);
+    expect(totalRows).toBe(280);
     expect(rec.insertPredictionsCalls.length).toBeGreaterThanOrEqual(2);
     for (const rows of rec.insertPredictionsCalls) {
       expect(rows.length).toBeLessThanOrEqual(200);
@@ -1285,6 +1309,7 @@ describe("runJevShadow", () => {
           answers: {
             politics: { type: "boolean", probability: 0.9 },
             topic: { type: "choice", choice: "other" },
+            topic7: { type: "choice", choice: "ekonomi" },
             opinion: { type: "boolean", probability: 0.2 },
             clickbait: { type: "boolean", probability: 0.8 },
             framing: { type: "choice", choice: "neutral" },
@@ -1309,6 +1334,12 @@ describe("runJevShadow", () => {
     const topicNull = allRows.find((r) => r.task === "topic" && r.subject_id === "a-null-cat");
     expect(topicNull).toMatchObject({ baseline_answer: "unknown", agree: null });
 
+    const topic7Politics = allRows.find((r) => r.task === "topic7" && r.subject_id === "a-politics");
+    expect(topic7Politics).toMatchObject({ baseline_answer: "politika", agree: false, jev_choice: "ekonomi", jev_prob: null });
+
+    const topic7Null = allRows.find((r) => r.task === "topic7" && r.subject_id === "a-null-cat");
+    expect(topic7Null).toMatchObject({ baseline_answer: "unknown", agree: null, jev_choice: "ekonomi", jev_prob: null });
+
     for (const task of ["opinion", "clickbait", "framing", "sensational"] as const) {
       for (const subjectId of ["a-politics", "a-null-cat"]) {
         const row = allRows.find((r) => r.task === task && r.subject_id === subjectId);
@@ -1316,8 +1347,46 @@ describe("runJevShadow", () => {
       }
     }
 
-    expect(allRows.filter((r) => r.subject_id === "a-null-cat")).toHaveLength(5);
-    expect(allRows.filter((r) => r.subject_id === "a-politics")).toHaveLength(6);
+    expect(allRows.filter((r) => r.subject_id === "a-null-cat")).toHaveLength(6);
+    expect(allRows.filter((r) => r.subject_id === "a-politics")).toHaveLength(7);
+  });
+
+  it("(j1b) article stage: a topic7 choice with its probabilities map survives verbatim at jev_answer.answer.probabilities, and jev_prob stays null", async () => {
+    const articles = [articleRow({ id: "a1", category: "spor" })];
+    const probabilities = {
+      politika: 0.02,
+      dunya: 0.01,
+      ekonomi: 0.02,
+      spor: 0.9,
+      yasam: 0.02,
+      teknoloji: 0.02,
+      genel: 0.01,
+    };
+    const rec = makePorts({
+      fetchPendingArticles: async () => articles,
+      evaluate: async (req) => ({
+        response: {
+          answers: {
+            ...validResponseFor(req).answers,
+            topic7: { type: "choice", choice: "spor", probabilities },
+          },
+          usage: { inputTokens: 55, outputTokens: 6 },
+        },
+        latencyMs: 4,
+      }),
+    });
+
+    await runJevShadow(rec.ports);
+    const allRows = rec.insertPredictionsCalls.flat();
+    const topic7Row = allRows.find((r) => r.task === "topic7" && r.subject_id === "a1");
+
+    expect(topic7Row).toBeDefined();
+    expect(topic7Row?.jev_choice).toBe("spor");
+    expect(topic7Row?.jev_prob).toBeNull();
+    expect(topic7Row?.baseline_answer).toBe("spor");
+    expect(topic7Row?.agree).toBe(true);
+    const answer = (topic7Row?.jev_answer as { answer: { probabilities?: Record<string, number> } }).answer;
+    expect(answer.probabilities).toEqual(probabilities);
   });
 
   it("(j2) cluster stage: cluster_member baseline is always true, subject_id is clusterId:articleId, and <2 members is a skip", async () => {
@@ -2134,6 +2203,7 @@ describe("JEV_QUESTION_REGISTRY (064)", () => {
     expect(JEV_TASKS).toEqual([
       "politics",
       "topic",
+      "topic7",
       "opinion",
       "clickbait",
       "framing",

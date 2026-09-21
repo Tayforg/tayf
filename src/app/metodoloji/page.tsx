@@ -88,6 +88,7 @@ const SECTIONS = [
   { id: "tek-kaynak", short: "Tek kaynak" },
   { id: "guvenilirlik", short: "Güvenilirlik" },
   { id: "basliklar", short: "Başlıklar" },
+  { id: "konu", short: "Konu" },
   { id: "duzeltme", short: "Düzeltme" },
 ] as const;
 
@@ -446,6 +447,29 @@ export default async function MethodologyPage() {
               </pre>
             </div>
           </details>
+        </div>
+      </section>
+
+      <section aria-labelledby="konu" className="scroll-mt-24 space-y-3">
+        <SectionHeading id="konu" title="Konu etiketleri nasıl atanıyor" meta="Eşikler" />
+        <div className={cardClass + " space-y-3"}>
+          <p className={proseClass}>
+            Her küme, üyelerinin başlıklarına bakılarak yedi konu
+            etiketinden birine (&quot;politika&quot;, &quot;dünya&quot;,
+            &quot;ekonomi&quot;, &quot;spor&quot;, &quot;yaşam&quot;,
+            &quot;teknoloji&quot;, &quot;genel&quot;) otomatik olarak
+            atanabilir. Bu atama bir editör kararı değildir; Jev adlı
+            otomatik sınıflandırma sistemi her makale başlığını ayrı ayrı
+            değerlendirir. Bir üyenin oyu yalnızca kendi seçtiği etiket için
+            olasılığı ≥ 0,8 olduğunda sayılır ve bir kümenin etiket
+            alabilmesi için ya en az 2 güvenli üyenin ≥ %60&apos;ı aynı
+            etikette anlaşmalı ya da tek üyeli bir kümede o tek üye ≥ 0,9
+            olasılıkla oy vermelidir — bu 0,8 eşiği bir güven eşiğidir, bir
+            doğruluk iddiası değildir. Eşikleri geçemeyen bir küme hiçbir
+            konu sayfasında görünmez ve &quot;politika&quot; etiketi
+            veritabanında tutulsa da kendi sayfası yoktur, çünkü ana sayfa
+            zaten siyaset akışıdır.
+          </p>
         </div>
       </section>
 

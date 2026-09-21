@@ -5,7 +5,7 @@ import { NextResponse, type NextRequest } from "next/server";
 // layout body, which can only swap already-streamed content) the statuses
 // below are real on the wire.
 //
-// Two independent gates share this one file because Next only loads a
+// Three independent gates share this one file because Next only loads a
 // single src/middleware.ts:
 //
 //  1. /ekonomi/:ticker — a malformed ticker segment (fails the same shape
@@ -17,7 +17,19 @@ import { NextResponse, type NextRequest } from "next/server";
 //     src/app/ekonomi/[ticker]/page.tsx's tickerExists() header comment
 //     for the measured detail and the documented deviation.
 //
-//  2. /admin/:path* (except /admin/login) — unauthenticated requests get a
+//  2. /konu/:slug — same hazard as /ekonomi/:ticker: permanentRedirect()/
+//     notFound() inside src/app/konu/[slug]/page.tsx run after `await
+//     params` inside the src/app/loading.tsx Suspense boundary, so PPR has
+//     already flushed a 200 shell by the time they run. /konu is a closed
+//     six-value vocabulary, so the gate here is a plain Set membership
+//     check (KONU_SLUGS, mirrored from topic-query.ts's TOPIC_SLUGS — see
+//     the parity guard in tests/app/konu-routes.test.ts) plus one literal
+//     redirect for "politika". Not imported from
+//     @/lib/clusters/topic-query: that module pulls in next/cache and
+//     @supabase/supabase-js transitively, neither of which belong in the
+//     Edge middleware bundle.
+//
+//  3. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
 //     requireAdminSession() call, and each page's own call, stay as
 //     defence in depth; this middleware is not the only check.
@@ -29,10 +41,14 @@ import { NextResponse, type NextRequest } from "next/server";
 // shape and `expiresAt` check — not a weaker cookie-presence check.
 
 export const config = {
-  matcher: ["/admin", "/admin/:path*", "/ekonomi/:ticker"],
+  matcher: ["/admin", "/admin/:path*", "/ekonomi/:ticker", "/konu/:slug"],
 };
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/i;
+// Mirrors topic-query.ts's TOPIC_SLUGS as inline literals (not imported —
+// see the header comment above). Pinned against the real export by
+// tests/app/konu-routes.test.ts.
+const KONU_SLUGS = new Set(["dunya", "ekonomi", "spor", "yasam", "teknoloji", "genel"]);
 const ADMIN_COOKIE_NAME = "admin_session";
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -88,6 +104,13 @@ async function verifyAdminToken(token: string | undefined, secret: string): Prom
 
 export async function middleware(req: NextRequest): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
+
+  if (pathname.startsWith("/konu/")) {
+    const slug = pathname.slice("/konu/".length);
+    if (slug === "politika") return NextResponse.redirect(new URL("/", req.url), 308);
+    if (!KONU_SLUGS.has(slug)) return new NextResponse(null, { status: 404 });
+    return NextResponse.next();
+  }
 
   if (pathname.startsWith("/ekonomi/")) {
     const ticker = pathname.slice("/ekonomi/".length);

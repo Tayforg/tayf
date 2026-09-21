@@ -7,6 +7,7 @@ import {
   JEV_POLITICS_CATEGORIES,
   JEV_QUESTION_SET_VERSION,
   JEV_TASKS,
+  JEV_TOPIC7_CHOICES,
   JEV_USD_PER_TOKEN,
   questionRegistryHash,
   type JevRunStatus,
@@ -70,8 +71,9 @@ describe("migration 061_jev_shadow.sql (static parity)", () => {
     expect(sql.length).toBeGreaterThan(0);
   });
 
-  it("mentions every JEV_TASKS name in the task-column comments (061 + 063 + 064 concatenated)", () => {
-    const combined = sql + read("063_jev_now_package.sql") + read("064_jev_cluster_live.sql");
+  it("mentions every JEV_TASKS name in the task-column comments (061 + 063 + 064 + 067 concatenated)", () => {
+    const combined =
+      sql + read("063_jev_now_package.sql") + read("064_jev_cluster_live.sql") + read("067_cluster_topics.sql");
     for (const task of JEV_TASKS) {
       expect(combined).toContain(task);
     }
@@ -413,6 +415,118 @@ describe("migration 064_jev_cluster_live.sql (static parity)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// migration 067_cluster_topics.sql (static parity) -- "Konu" (B4): a real
+// topic axis on clusters, and the FIRST reader-facing use of TypeSafe Jev
+// output anywhere in Tayf. Byte-identical to the planner's SQL (see
+// pack.md's Migration section); pins the same vocabularies/contracts the
+// 061/063/064 blocks above do, plus the three reader-facing gates (CT-1)
+// and the never-touch-updated_at guard (CT-2).
+// ---------------------------------------------------------------------------
+
+describe("migration 067_cluster_topics.sql (static parity)", () => {
+  let sql067 = "";
+  beforeAll(() => {
+    sql067 = read("067_cluster_topics.sql");
+    expect(sql067.length).toBeGreaterThan(0);
+  });
+
+  it("contains the ledger insert for '067'", () => {
+    expect(sql067).toMatch(
+      /insert\s+into\s+supabase_migrations\.schema_migrations[\s\S]*?values\s*\(\s*'067'\s*,\s*'067_cluster_topics'\s*\)/i,
+    );
+  });
+
+  it("is additive-only: no DROP TABLE/COLUMN, and the only ALTER TABLE on public.clusters are ADD COLUMN IF NOT EXISTS / ADD CONSTRAINT / VALIDATE CONSTRAINT", () => {
+    expect(sql067).not.toMatch(/\bdrop\s+table\b/i);
+    expect(sql067).not.toMatch(/\bdrop\s+column\b/i);
+    const alterMatches = [...sql067.matchAll(/alter\s+table\s+public\.clusters\b[\s\S]*?;/gi)];
+    expect(alterMatches.length).toBeGreaterThan(0);
+    for (const m of alterMatches) {
+      // VALIDATE CONSTRAINT only scans existing rows (a NOT VALID check
+      // constraint added just above); it changes no schema and is safe.
+      expect(m[0]).toMatch(/add\s+column\s+if\s+not\s+exists|add\s+constraint|validate\s+constraint/i);
+    }
+  });
+
+  it("adds topic7 text, topic7_p numeric(4,3) and topic7_n integer not null default 0 to public.clusters", () => {
+    expect(sql067).toMatch(/alter\s+table\s+public\.clusters\s+add\s+column\s+if\s+not\s+exists\s+topic7\s+text\s*;/i);
+    expect(sql067).toMatch(
+      /alter\s+table\s+public\.clusters\s+add\s+column\s+if\s+not\s+exists\s+topic7_p\s+numeric\(4,\s*3\)\s*;/i,
+    );
+    expect(sql067).toMatch(
+      /alter\s+table\s+public\.clusters\s+add\s+column\s+if\s+not\s+exists\s+topic7_n\s+integer\s+not\s+null\s+default\s+0\s*;/i,
+    );
+  });
+
+  it("the clusters_topic7_check vocabulary equals JEV_TOPIC7_CHOICES and the partial index is on (topic7, updated_at desc)", () => {
+    const match = sql067.match(/topic7\s+in\s*\(([^)]+)\)/i);
+    expect(match, "could not find the clusters_topic7_check vocabulary").not.toBeNull();
+    const values = (match![1] ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/^'|'$/g, ""))
+      .filter(Boolean);
+    expect(values).toEqual([...JEV_TOPIC7_CHOICES]);
+
+    expect(sql067).toMatch(
+      /create\s+index\s+if\s+not\s+exists\s+clusters_topic7_updated_idx\s+on\s+public\.clusters\s*\(\s*topic7\s*,\s*updated_at\s+desc\s*\)/i,
+    );
+  });
+
+  it("cluster_topics_refresh is SECURITY DEFINER with search_path = '' and is revoked from anon/authenticated/public, granted to service_role", () => {
+    const fnMatch = sql067.match(
+      /create\s+or\s+replace\s+function\s+public\.cluster_topics_refresh\([^)]*\)[\s\S]*?\$fn\$;/i,
+    );
+    expect(fnMatch, "could not find function public.cluster_topics_refresh").not.toBeNull();
+    const body = fnMatch![0];
+    expect(body).toMatch(/security\s+definer/i);
+    expect(body).toMatch(/set\s+search_path\s*=\s*''/i);
+    expect(sql067).toMatch(
+      /revoke\s+all\s+on\s+function\s+public\.cluster_topics_refresh\(interval\)\s+from\s+anon,\s*authenticated,\s*public/i,
+    );
+    expect(sql067).toMatch(
+      /grant\s+execute\s+on\s+function\s+public\.cluster_topics_refresh\(interval\)\s+to\s+service_role/i,
+    );
+  });
+
+  it("pins the three reader-facing gates: 0.800 confidence, 0.600 majority over >= 2 members, 0.900 singleton (CT-1)", () => {
+    expect(sql067).toMatch(/>=\s*0\.800/);
+    expect(sql067).toMatch(/confident_n\s*>=\s*2[\s\S]{0,80}?>=\s*0\.600/);
+    expect(sql067).toMatch(/confident_n\s*=\s*1[\s\S]{0,120}?>=\s*0\.900/);
+  });
+
+  it("never writes clusters.updated_at — the /api/health liveness signal (CT-2)", () => {
+    const fnMatch = sql067.match(
+      /create\s+or\s+replace\s+function\s+public\.cluster_topics_refresh\([^)]*\)[\s\S]*?\$fn\$;/i,
+    );
+    expect(fnMatch).not.toBeNull();
+    const body = fnMatch![0];
+    expect(body).not.toMatch(/updated_at\s*=/i);
+    expect(body).toMatch(/is\s+distinct\s+from/i);
+  });
+
+  it("schedules cluster-topics-refresh at '3-59/10 * * * *' with a SQL-only body and no pg_net/Vault dependency", () => {
+    expect(sql067).toMatch(/cron\.schedule\(\s*'cluster-topics-refresh'\s*,\s*'3-59\/10 \* \* \* \*'/);
+    expect(sql067).toContain("select public.cluster_topics_refresh();");
+    // Real usage only -- the migration's own header prose documents the
+    // ABSENCE of both ("no pg_net, no Vault"), which would false-positive a
+    // bare substring match.
+    expect(sql067).not.toMatch(/\bnet\.http_(post|get)\b/i);
+    expect(sql067).not.toMatch(/\bvault\.\w+\(/i);
+  });
+
+  // C1-SQL-QUAL-ORDER: the confidence guard (jsonb_typeof) and the
+  // ::numeric cast it protects must be one indivisible CASE expression, not
+  // two sibling AND conjuncts -- SQL does not define AND-conjunct
+  // evaluation order, so a plan change (ANALYZE, a new index, a PostgreSQL
+  // major upgrade) can put the cast first and raise 22P02 on a non-numeric
+  // probabilities value. Regression guard for the fix, not the bug.
+  it("guards the ::numeric cast with a CASE expression, not a sibling AND conjunct (C1-SQL-QUAL-ORDER)", () => {
+    expect(sql067).toMatch(/case\s+when\s+pg_catalog\.jsonb_typeof/i);
+    expect(sql067).not.toMatch(/\)::numeric\s*>=\s*/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // JEV-A20: JEV_QUESTION_SET_VERSION and questionRegistryHash() are bumped
 // together, or not at all -- a wording change that forgets to bump either
 // fails here rather than silently mixing pre/post-change predictions under
@@ -420,9 +534,13 @@ describe("migration 064_jev_cluster_live.sql (static parity)", () => {
 // ---------------------------------------------------------------------------
 
 describe("question set version + registry hash (JEV-A20)", () => {
+  // Pack C (067) bumps the version for the new topic7 question; the fixer
+  // re-pins this once more after this pack merges with any earlier pack in
+  // the same run that also touched JEV_QUESTION_REGISTRY (pack.md "Risks to
+  // design against" -- "Two workers, one question-set version").
   it("pins JEV_QUESTION_SET_VERSION and questionRegistryHash together — bump BOTH or neither", async () => {
-    expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-21.2");
-    expect(await questionRegistryHash()).toBe("960683464c3044fcca5eeb0649cebd0a5250a2bdc5a380da2f8a4a161b0107ba");
+    expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-21.3");
+    expect(await questionRegistryHash()).toBe("95279b8f8e856de42b9f281eeeea02e861abc638409b714f142b8bc4b4795477");
   });
 });
 
@@ -471,6 +589,39 @@ describe("gold topic vocabulary (JEV-A19)", () => {
       .map((s) => s.trim().replace(/^["']|["']$/g, ""))
       .filter(Boolean);
     expect(values).toEqual(["politika", "dunya", "ekonomi", "spor", "yasam", "teknoloji", "genel"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CT-3 static guard (EXPECTED RED until W2 lands
+// src/app/konu/[slug]/page.tsx -- see pack.md "Risks to design against" and
+// W1.md's instructions. Do not weaken, do not stub the file it reads. This
+// is the cross-worker signal that the reader page actually states the
+// confidence-gate mechanism next to the topic7 label it renders -- the pack
+// never lets a hub claim an accuracy figure, only the mechanism.
+// ---------------------------------------------------------------------------
+
+describe("konu page states the confidence gate (CT-3)", () => {
+  it("src/app/konu/[slug]/page.tsx renders the 0,8 threshold note (TOPIC_NOTE_PREFIX) and links it to /metodoloji#konu", () => {
+    const pagePath = resolve(__dirname, "..", "..", "src", "app", "konu", "[slug]", "page.tsx");
+    const pageSrc = readFileSync(pagePath, "utf8");
+    // The literal Turkish prose ("Konu etiketleri otomatik atanır (Jev, eşik
+    // 0,8) — ") lives in topic-query.ts's TOPIC_NOTE_PREFIX, the single
+    // source of truth per the shared contract -- page.tsx renders the
+    // imported constant, so this guard checks the symbol + the /metodoloji
+    // link, not a duplicated literal.
+    expect(pageSrc).toMatch(/\bTOPIC_NOTE_PREFIX\b/);
+    // C1-METODOLOJI-DEAD-LINK: the link must land on an actual section, not
+    // the bare page -- /metodoloji had zero mentions of "konu"/"jev"/
+    // "topic7" before this fix, so a bare /metodoloji link was a dead end.
+    expect(pageSrc).toMatch(/href=["']\/metodoloji#konu["']/);
+
+    // The destination section must actually exist: this is the guard that
+    // "the link destination is empty" (the bug CT-3 could not see before)
+    // now fails loudly if the #konu section is ever removed.
+    const metodolojiPath = resolve(__dirname, "..", "..", "src", "app", "metodoloji", "page.tsx");
+    const metodolojiSrc = readFileSync(metodolojiPath, "utf8");
+    expect(metodolojiSrc).toMatch(/id=["']konu["']/);
   });
 });
 
