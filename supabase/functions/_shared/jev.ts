@@ -11,7 +11,7 @@
 // concurrency, budget guard, baseline/agree rules, row shape) is testable
 // with plain in-memory fakes -- the ArchivePorts seam, verbatim discipline.
 //
-// What this asks, per run: 15 typed questions across six subject types
+// What this asks, per run: 16 typed questions across six subject types
 // (article, cluster, pair, KAP disclosure, title version, ticker match),
 // one gateway call per subject (except pairs, which pack up to 10 per
 // call). Every prediction is stored alongside the CURRENT system's answer
@@ -78,8 +78,9 @@ export const JEV_NEUTRAL_MODEL_ID = "extractive-v1";
  * changes, so analyses can group by question set. Migration 063 bumps this
  * alongside the three new tasks (JEV-A20 pins this against
  * questionRegistryHash() so a future wording change can't bump one without
- * the other). */
-export const JEV_QUESTION_SET_VERSION = "2026-09-21.2";
+ * the other). Migration 067 bumps this again, to 2026-09-21.3, for the new
+ * topic7 question. */
+export const JEV_QUESTION_SET_VERSION = "2026-09-21.3";
 /** Migration 064: a cluster_member prediction below this probability queues
  * the (cluster, article) pair into jev_unlink_candidates for a human to
  * review on /admin. */
@@ -126,9 +127,17 @@ export const JEV_MAX_RETRIES = 2;
  * Function's own serve entrypoint into vitest) -- the parity test cannot
  * detect that cluster-consumer changed its own list independently. */
 export const JEV_POLITICS_CATEGORIES = ["politika", "son_dakika"] as const;
+/** The feed's 7-label topic taxonomy. Byte-identical to migration 063's
+ *  jev_gold_labels.topic CHECK list and to JEV_GOLD_TOPICS in
+ *  src/lib/admin/jev-gold.ts. Also the vocabulary of clusters.topic7. */
+export const JEV_TOPIC7_CHOICES = [
+  "politika", "dunya", "ekonomi", "spor", "yasam", "teknoloji", "genel",
+] as const;
+export type JevTopic7Choice = (typeof JEV_TOPIC7_CHOICES)[number];
 export const JEV_TASKS = [
   "politics",
   "topic",
+  "topic7",
   "opinion",
   "clickbait",
   "framing",
@@ -368,6 +377,21 @@ export function topicBaseline(category: string | null): "politics" | "economy" |
   if (category === "ekonomi") return "economy";
   if (category === "spor" || category === "teknoloji" || category === "yasam" || category === "genel") {
     return "other";
+  }
+  return null;
+}
+
+/**
+ * articles.category verbatim when it is one of the seven feed topics; null
+ * for son_dakika (the breaking-news bucket is a publishing state, not a
+ * topic), for null, and for anything unmapped. Unlike the 3-way
+ * topicBaseline() above, dunya IS a real label here -- it is not folded into
+ * "unknown". Caller maps null -> baseline_answer 'unknown' and agree -> null,
+ * exactly like topicBaseline()'s callers do.
+ */
+export function topic7Baseline(category: string | null): JevTopic7Choice | null {
+  if (category !== null && (JEV_TOPIC7_CHOICES as readonly string[]).includes(category)) {
+    return category as JevTopic7Choice;
   }
   return null;
 }
@@ -618,6 +642,18 @@ export const JEV_QUESTION_REGISTRY: Record<JevTask, { instructions: string; crit
       other: "Anything else: sports, culture, weather, crime, celebrity, technology, health",
     },
   },
+  topic7: {
+    instructions: "Which single topic category best matches this Turkish news headline?",
+    criteria: {
+      politika: "The headline is primarily about domestic politics, government, political parties, elections, parliament, or policy-making.",
+      dunya: "The headline is primarily about international news, foreign countries, foreign policy, or world events outside Turkey.",
+      ekonomi: "The headline is primarily about the economy, markets, companies, finance, trade, currency, or the cost of living.",
+      spor: "The headline is primarily about sports, athletes, matches, or sports competitions.",
+      yasam: "The headline is primarily about everyday life, lifestyle, celebrity/entertainment, culture, religion, health, or human-interest topics.",
+      teknoloji: "The headline is primarily about technology, science, gadgets, software, AI, or the internet.",
+      genel: "The headline does not clearly fit any of the other categories, such as general crime, weather, accidents, or miscellaneous news without a dominant political, economic, sports, lifestyle, or technology angle.",
+    },
+  },
   opinion: {
     instructions:
       "Is this an opinion piece, column or analysis expressing the writer's own judgement, rather than a straight news report of events?",
@@ -791,7 +827,7 @@ function neutralPickScoreQuestion(key: string): JevQuestion {
   };
 }
 
-/** state {title, description}; six questions keyed politics|topic|opinion|clickbait|framing|sensational.
+/** state {title, description}; seven questions keyed politics|topic|topic7|opinion|clickbait|framing|sensational.
  * Deliberately NO outlet slug and NO timestamp in the state: the 2026-09-20
  * limits test showed the framing answer tracks the named entity rather than
  * the wording, so handing the model the outlet name would let it key on the
@@ -806,6 +842,7 @@ export function buildArticleCall(a: JevArticleRow): JevRequest {
   const questions: Record<string, JevQuestion> = {
     politics: boolQuestion("politics"),
     topic: choiceQuestion("topic"),
+    topic7: choiceQuestion("topic7"),
     opinion: boolQuestion("opinion"),
     clickbait: boolQuestion("clickbait"),
     framing: choiceQuestion("framing"),
@@ -1519,6 +1556,23 @@ function buildArticleRows(
         answer: topicAnswer,
         baseline: baseline ?? "unknown",
         agree: choiceAgrees(topicAnswer.choice, baseline),
+      }),
+    );
+  }
+
+  const topic7Answer = response.answers.topic7;
+  if (topic7Answer && topic7Answer.type === "choice") {
+    const baseline7 = topic7Baseline(article.category);
+    rows.push(
+      predictionRow({
+        ...common,
+        task: "topic7",
+        subjectType: "article",
+        subjectId: article.id,
+        questionId: "topic7",
+        answer: topic7Answer,
+        baseline: baseline7 ?? "unknown",
+        agree: choiceAgrees(topic7Answer.choice, baseline7),
       }),
     );
   }

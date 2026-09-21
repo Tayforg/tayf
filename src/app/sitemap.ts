@@ -1,6 +1,7 @@
 import { cacheLife } from "next/cache";
 import type { MetadataRoute } from "next";
 import { createServerClient } from "@/lib/supabase/server";
+import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 
 // No Google "image:image" extension here (removed — deck TOP-3 / finding
 // LEG-04). This sitemap used to embed each cluster's hero photo — one of
@@ -39,6 +40,15 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     { url: `${baseUrl}/kalite`, lastModified: new Date(), changeFrequency: "daily", priority: 0.5 },
     { url: `${baseUrl}/duzeltmeler`, lastModified: new Date(), changeFrequency: "daily", priority: 0.4 },
     { url: `${baseUrl}/hafta`, lastModified: new Date(), changeFrequency: "daily", priority: 0.6 },
+    // Pack C ("Konu"): /konu index + the six hub slugs. politika is
+    // deliberately absent — it 308s to "/" and is not a hub of its own.
+    { url: `${baseUrl}/konu`, lastModified: new Date(), changeFrequency: "daily", priority: 0.6 },
+    ...TOPIC_SLUGS.map((slug) => ({
+      url: `${baseUrl}/konu/${slug}`,
+      lastModified: new Date(),
+      changeFrequency: "hourly" as const,
+      priority: 0.6,
+    })),
   ];
 
   // Dynamic cluster routes — top 1000 by updated_at.

@@ -22,6 +22,7 @@ import { JevReviewActions } from "@/components/admin/jev-shadow-review-actions";
 const JEV_TASK_ORDER = [
   "politics",
   "topic",
+  "topic7",
   "opinion",
   "clickbait",
   "framing",
@@ -37,6 +38,7 @@ const JEV_TASK_ORDER = [
 const JEV_TASK_LABELS_TR: Record<string, string> = {
   politics: "Siyaset mi?",
   topic: "Konu",
+  topic7: "Konu (7)",
   opinion: "Köşe yazısı mı?",
   clickbait: "Tık tuzağı",
   framing: "Çerçeveleme",

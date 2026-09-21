@@ -1312,3 +1312,87 @@ supabase secrets set JEV_DISABLED=1 --project-ref "$PROJECT_REF"
 update cron.job set active = false where jobname = 'jev-shadow';
 ```
 
+## Konu — küme konu ekseni (067): apply the migration, then redeploy jev-shadow
+
+`067_cluster_topics.sql` is Pack C ("Konu", B4) and the FIRST migration that lets a Jev answer become something a reader sees directly: a topic label (`clusters.topic7`) that drives six new hub pages (`/konu/dunya`, `/konu/ekonomi`, `/konu/spor`, `/konu/yasam`, `/konu/teknoloji`, `/konu/genel` -- `/konu/politika` 308s to `/`, which already is the politics feed). It adds one new question to the existing per-article `jev-shadow` call (`topic7`, the 7-label feed taxonomy) and one pure-SQL, zero-gateway-call aggregation function, `public.cluster_topics_refresh(interval)`, scheduled on its own `pg_cron` job. Reader-facing gates are deliberately stricter than the shadow suite applies to itself: a member only counts as evidence at `>= 0.800` choice probability; a multi-member cluster needs `>= 2` confident members with `>= 60%` agreeing; a single-member cluster needs its one member at `>= 0.900`; anything else writes `topic7 = null`, rewritten on every pass -- a label never outlives its evidence. **Provenance of the 0.800 gate:** the 2026-09-20 limits test scored 90.3% at this gate for this exact question text asked TITLE-ONLY as one of SIX packed questions; this pack sends title+description as one of SEVEN questions alongside the existing 3-way `topic` question, and T8 measured a 10.0% answer-flip rate for title+description on topic while T7 caps the safe pack at six questions -- so the drift of the shipped configuration has NOT been measured. 0.800 is a confidence gate, not an accuracy claim.
+
+**ORDER IS LOAD-BEARING**, same discipline as every migration above: apply the migration **before** redeploying `jev-shadow` — the redeployed function starts writing `task = 'topic7'` rows, which are harmless with or without the migration, but the cron job has nothing to aggregate if the migration lands second.
+
+1. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/067_cluster_topics.sql
+   # ...or: supabase db push
+   ```
+
+   `067`'s `create index if not exists clusters_topic7_updated_idx` runs inside this file's `begin;`/`commit;` wrapper, so it cannot be `CONCURRENTLY` and holds a `SHARE` lock on `public.clusters` for the whole build -- blocking `INSERT`/`UPDATE` from `cluster-consumer` and `cluster_link_atomic` for that duration. The index is partial and starts empty, but the build still scans the full table. Apply this migration during a quiet ingestion window.
+
+   **Pre-flight, before the cron is enabled on production**: confirm nothing else already stamps `clusters.updated_at` on UPDATE. `cluster_topics_refresh()` deliberately never writes `updated_at` (that column is the `/api/health` liveness signal and the home feed's freshness input, per migration 027's `cluster_link_atomic`), but if a trigger already exists that stamps it independently, every labelled cluster would look permanently fresh -- `/api/health` would report a healthy pipeline while ingestion was actually dead. Check this **before** trusting the schedule:
+
+   ```sql
+   select tgname from pg_trigger where tgrelid = 'public.clusters'::regclass and not tgisinternal;
+   ```
+
+   If this returns any `BEFORE UPDATE` trigger that touches `updated_at`, **stop** -- do not let `cluster-topics-refresh` run until that trigger is accounted for (either it explicitly excludes this function's UPDATE, or it is removed). Migration 027 stamping `updated_at` explicitly inside `cluster_link_atomic` is strong evidence no such trigger exists, but this has not been verified against the live database.
+
+2. **Deploy order: jev-shadow, then Vercel.**
+
+   ```bash
+   supabase functions deploy jev-shadow --project-ref "$PROJECT_REF" --no-verify-jwt
+   vercel --prod
+   ```
+
+   `jev-shadow` first because the new `topic7` question is additive to an existing call -- nothing reads those rows until `cluster_topics_refresh()` (already scheduled by step 1) picks them up on its next tick. Vercel last so `/konu` and `/konu/<slug>` exist only once `clusters.topic7` is a real, populated column.
+
+3. **Verification SQL**, run after one `jev-shadow` tick (<= 10 minutes) and then after the first `cluster-topics-refresh` tick (<= 13 minutes, since it runs 3 minutes behind the shadow poke):
+
+   ```sql
+   select count(*) from public.jev_shadow_predictions where task = 'topic7';
+   -- expect non-zero once jev-shadow has run at least once post-deploy
+
+   select public.cluster_topics_refresh();
+   -- returns the number of cluster rows changed by a manual pass
+
+   select topic7, count(*), round(avg(topic7_p), 3)
+     from public.clusters where topic7 is not null
+    group by topic7 order by 2 desc;
+   -- sanity-check: politika should dominate (Tayf's feed is politics-heavy),
+   -- dunya/ekonomi/spor should be non-trivial
+
+   select jobname, schedule, active from cron.job where jobname = 'cluster-topics-refresh';
+   -- expect '3-59/10 * * * *', active = true
+   ```
+
+   If `jev_shadow_predictions` shows rows for `task = 'topic7'` but the `probabilities` map is absent from `jev_answer->'answer'->'probabilities'`, the `>= 0.800` confidence gate can never pass and every hub will stay empty -- stop and investigate the gateway response shape before assuming the aggregation is broken.
+
+4. **Backfill, off-peak, once the cron is confirmed healthy** (step 3's last query returns a healthy schedule):
+
+   ```sql
+   select public.cluster_topics_refresh(interval '7 days');
+   ```
+
+   This is the single heaviest pass the function will ever make. **It does NOT populate the hubs with the week already in the database on day one** -- it only labels clusters whose members were scored by `jev-shadow` AFTER this redeploy. The article-fetch stage's anti-join is keyed on a single task (`await anti_join("politics", ...)`, `supabase/functions/jev-shadow/index.ts`), and `jev_shadow_predictions` carries `unique (task, subject_id)` with `ON CONFLICT DO NOTHING` (migration 061), so every article scored before this deploy is permanently "seen" for that anti-join and is never re-fetched -- it will never receive a `task = 'topic7'` row. The hubs instead fill in gradually over the following ~24-48h as new articles are ingested and scored post-deploy. Time this pass anyway (if it exceeds ~30s, run it in two narrower windows instead of one 7-day sweep), but do not expect it to backfill history.
+
+   **`topic7_n = 0` across the board on day one is therefore EXPECTED and is NOT the missing-probabilities signature** described elsewhere in this pack's risk notes -- cross-reference step 3's probabilities check (the `jev_answer->'answer'->'probabilities'` shape check) to tell the two apart: if `topic7_n` stays at 0 after 48h *and* step 3's probabilities check is failing, that is the missing-probabilities-map problem; if `topic7_n` stays at 0 right after the backfill but step 3's check passes, that is this expected day-one gap, not a bug.
+
+   A true historical backfill would need a one-off re-ask path (delete-and-rescore the affected `jev_shadow_predictions` rows, or a `topic7`-keyed anti-join instead of the shared `politics`-keyed one) -- out of scope for this pack.
+
+5. **Kill switch and label wipe**, in increasing severity, neither requires a migration or a rollback:
+
+   ```sql
+   -- 1. Stop new labels; existing labels keep rendering until they age out
+   --    of the window or a member's evidence expires naturally.
+   update cron.job set active = false where jobname = 'cluster-topics-refresh';
+   ```
+
+   ```sql
+   -- 2. Empty every hub within one cacheLife window without touching a
+   --    single URL -- /konu/<slug> renders its honest empty-state copy.
+   update public.clusters set topic7 = null, topic7_p = null, topic7_n = 0
+    where topic7 is not null;
+   ```
+
+   The `topic7`/`topic7_p`/`topic7_n` columns and `cluster_topics_refresh` itself are additive and can stay in place indefinitely with the cron off -- no follow-up migration is needed to "undo" 067.
+
+6. **Cost.** One extra question on the existing per-article `jev-shadow` call, roughly +325 input tokens per article (measured post-deploy: 1265 avg input tokens/prediction vs 941 pre-deploy), about 58M tokens/month at ~6,000 articles/day against the `JEV_MONTHLY_TOKEN_CAP_DEFAULT` of `5e8` (migration 063) -- ~12% of the cap, still comfortable headroom, and worth re-measuring once several days of ticks have accumulated. No new secret, no new environment variable: `AI_GATEWAY_API_KEY` is already present (shared by every Jev-calling function since migration 061), and `cluster_topics_refresh()` makes zero gateway calls of its own.
+
