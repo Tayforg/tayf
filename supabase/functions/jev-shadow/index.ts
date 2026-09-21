@@ -26,12 +26,16 @@ import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
 import {
   type JevArticleRow,
+  type JevBlindspotCandidate,
+  type JevBlindspotCandidateQuery,
+  type JevBlindspotClusterRow,
   type JevClusterRow,
   JEV_DEADLINE_MS,
   JEV_ENDPOINT,
   JEV_MAX_RETRIES,
   JEV_MODEL,
   JEV_MONTHLY_TOKEN_CAP_DEFAULT,
+  JEV_POLITICS_CATEGORIES,
   JEV_PROTOCOL_VERSION,
   JEV_SPEC_VERSION,
   type JevKapRow,
@@ -46,12 +50,14 @@ import {
   type JevRunStatus,
   type JevTickerRow,
   type JevTitleRow,
+  type JevUnlinkCandidateRow,
   isRateLimitStatus,
   offendingQuestionIds,
   parseJevResponse,
   retryDelayMs,
   runJevShadow,
 } from "../_shared/jev.ts";
+import { VOTING_SOURCE_KINDS } from "../_shared/cluster/source-kind.ts";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
@@ -144,6 +150,30 @@ interface RawTitleVersionFetchRow {
   article_id: string | null;
   old_title: string;
   new_title: string;
+}
+
+interface RawBlindspotClusterFetchRow {
+  id: string;
+  title_tr: string;
+  title_tr_neutral: string | null;
+  blindspot_side: string | null;
+  first_published: string;
+  updated_at: string;
+}
+
+interface RawBlindspotMemberIdRow {
+  article_id: string;
+}
+
+interface RawBlindspotSourceIdRow {
+  id: string;
+}
+
+interface RawBlindspotCandidateFetchRow {
+  id: string;
+  title: string;
+  published_at: string;
+  source: { slug: string | null } | { slug: string | null }[] | null;
 }
 
 interface ShadowPredictionKey {
@@ -526,6 +556,104 @@ function makePorts(apiKey: string): JevPorts {
         if (out.length >= limit) break;
       }
       return out;
+    },
+
+    async insertUnlinkCandidates(rows: readonly JevUnlinkCandidateRow[]): Promise<number> {
+      if (rows.length === 0) return 0;
+      // A re-ask of an already-queued (cluster, article) pair must never
+      // 23505 the batch, and must never resurrect a row a human already
+      // decided (status moves to 'unlinked'/'kept' and stays there) --
+      // ignoreDuplicates against the unique (cluster_id, article_id) key.
+      const { data, error } = await supabase
+        .from("jev_unlink_candidates")
+        .upsert(rows, { onConflict: "cluster_id,article_id", ignoreDuplicates: true })
+        .select("id");
+      if (error) throw new Error(`jev-shadow: insertUnlinkCandidates failed: ${error.message}`);
+      return (data ?? []).length;
+    },
+
+    async fetchBlindspotClusters(sinceIso, limit): Promise<JevBlindspotClusterRow[]> {
+      const { data, error } = await supabase
+        .from("clusters")
+        .select("id, title_tr, title_tr_neutral, blindspot_side, first_published, updated_at")
+        .eq("is_blindspot", true)
+        .gte("updated_at", sinceIso)
+        .order("updated_at", { ascending: false })
+        .limit(limit);
+      if (error) throw new Error(`jev-shadow: fetchBlindspotClusters failed: ${error.message}`);
+      return ((data ?? []) as unknown as RawBlindspotClusterFetchRow[]).map((c) => ({
+        id: c.id,
+        title: c.title_tr_neutral ?? c.title_tr,
+        blindspot_side: c.blindspot_side,
+        first_published: c.first_published,
+        updated_at: c.updated_at,
+      }));
+    },
+
+    async fetchBlindspotCandidates(query: JevBlindspotCandidateQuery): Promise<JevBlindspotCandidate[]> {
+      // (a) existing members -- never re-suggest an article already in the cluster.
+      const { data: memberRows, error: memberError } = await supabase
+        .from("cluster_articles")
+        .select("article_id")
+        .eq("cluster_id", query.clusterId);
+      if (memberError) throw new Error(`jev-shadow: fetchBlindspotCandidates failed: ${memberError.message}`);
+      const memberIds = new Set(
+        ((memberRows ?? []) as unknown as RawBlindspotMemberIdRow[]).map((m) => m.article_id),
+      );
+
+      // (b) source ids for the silent zone's bias categories. Only VOTING
+      // kinds count -- mirrors is_blindspot's own voting-kind restriction
+      // (_shared/cluster/source-kind.ts, and the 064 RPC's own
+      // `s.kind in ('outlet', 'wire')` recompute) so a non-voting source
+      // (aggregator/niche) can never raise a blindspot_recall_suspect flag
+      // for a verdict it never contributed to.
+      const { data: sourceRows, error: sourceError } = await supabase
+        .from("sources")
+        .select("id")
+        .in("bias", query.biasKeys as string[])
+        .in("kind", VOTING_SOURCE_KINDS as unknown as string[]);
+      if (sourceError) throw new Error(`jev-shadow: fetchBlindspotCandidates failed: ${sourceError.message}`);
+      const sourceIds = ((sourceRows ?? []) as unknown as RawBlindspotSourceIdRow[]).map((s) => s.id);
+      if (sourceIds.length === 0) return [];
+
+      // (c) query FROM THE ARTICLES SIDE ONLY (indexed published_at),
+      // chunked by JEV_ID_CHUNK -- never from cluster_articles with an
+      // articles!inner embed ordered by the embedded column, the shape
+      // that has already tripped the authenticator role's 8s
+      // statement_timeout twice in this repo (fetchPairCandidates above).
+      const out: JevBlindspotCandidate[] = [];
+      for (let i = 0; i < sourceIds.length; i += JEV_ID_CHUNK) {
+        const chunk = sourceIds.slice(i, i + JEV_ID_CHUNK);
+        const { data, error } = await supabase
+          .from("articles")
+          .select("id, title, published_at, source:sources(slug)")
+          .in("source_id", chunk)
+          .in("category", JEV_POLITICS_CATEGORIES as unknown as string[])
+          .gte("published_at", query.fromIso)
+          .lte("published_at", query.toIso)
+          .order("published_at", { ascending: false })
+          .limit(query.limit);
+        if (error) throw new Error(`jev-shadow: fetchBlindspotCandidates failed: ${error.message}`);
+        for (const a of (data ?? []) as unknown as RawBlindspotCandidateFetchRow[]) {
+          if (memberIds.has(a.id)) continue;
+          const source = flattenEmbed(a.source);
+          out.push({ article_id: a.id, title: a.title, published_at: a.published_at, source_slug: source?.slug ?? null });
+        }
+      }
+      out.sort((a, b) => b.published_at.localeCompare(a.published_at));
+      return out.slice(0, query.limit);
+    },
+
+    async markBlindspotChecked(clusterId: string, suspect: boolean): Promise<void> {
+      // DB-06 / SEC-064-03 fix: write the flag unconditionally. suspect is
+      // the CURRENT verdict, not a latch -- a negative re-check must clear
+      // a stale `true` (and stop pushing checked_at forward to keep a
+      // one-time suspicion inside getJevBlindspotSuspects' 7-day window),
+      // matching the 064 column comment ("Written on every check, suspect
+      // or not").
+      const patch = { blindspot_recall_suspect: suspect, blindspot_recall_checked_at: new Date().toISOString() };
+      const { error } = await supabase.from("clusters").update(patch).eq("id", clusterId);
+      if (error) throw new Error(`jev-shadow: markBlindspotChecked failed: ${error.message}`);
     },
   };
 }

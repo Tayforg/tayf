@@ -25,6 +25,8 @@
 // against Jev's own choice among a cluster's member headlines.
 
 import { sha256Hex } from "./archive.ts";
+import { BIAS_TO_ZONE, BIAS_KEYS, ZONE_KEYS, type BiasKey, type MediaDnaZone } from "./cluster/blindspot.ts";
+import { titleTokens } from "./cluster/fingerprint.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -77,7 +79,37 @@ export const JEV_NEUTRAL_MODEL_ID = "extractive-v1";
  * alongside the three new tasks (JEV-A20 pins this against
  * questionRegistryHash() so a future wording change can't bump one without
  * the other). */
-export const JEV_QUESTION_SET_VERSION = "2026-09-21.1";
+export const JEV_QUESTION_SET_VERSION = "2026-09-21.2";
+/** Migration 064: a cluster_member prediction below this probability queues
+ * the (cluster, article) pair into jev_unlink_candidates for a human to
+ * review on /admin. */
+export const JEV_UNLINK_PROB_MAX = 0.35;
+/** Migration 064: recently-updated blindspot clusters examined per
+ * jev-shadow run by the 'blindspot_recall' stage. */
+export const JEV_BLINDSPOT_CLUSTER_LIMIT = 20;
+/** Candidate headlines fetched from the silent zone before ranking. This is
+ * a WINDOW cap, not a relevance cap -- rankBlindspotCandidates (shared-token
+ * >= JEV_BLINDSPOT_MIN_SHARED_TOKENS, top JEV_BLINDSPOT_CANDIDATES_PER_CALL)
+ * is the relevance filter, so this value must exceed the number of
+ * silent-zone politics articles that can appear in the candidate window
+ * (measured 663 across a +/-12h window on 2026-09-21). */
+export const JEV_BLINDSPOT_CANDIDATE_FETCH = 600;
+/** Top-ranked candidates actually sent to Jev per cluster, per run. */
+export const JEV_BLINDSPOT_CANDIDATES_PER_CALL = 15;
+/** rankBlindspotCandidates' default minimum shared-token count. */
+export const JEV_BLINDSPOT_MIN_SHARED_TOKENS = 2;
+/** titleTokens' minLen for the blindspot recall candidate ranking. */
+export const JEV_BLINDSPOT_TOKEN_MIN_LEN = 4;
+/** Candidate window: cluster.first_published minus this many hours. */
+export const JEV_BLINDSPOT_LOOKBACK_HOURS = 12;
+/** Candidate window upper bound: cluster.first_published plus this many
+ * hours, capped at now. */
+export const JEV_BLINDSPOT_FORWARD_HOURS = 12;
+/** Driver query window: clusters.updated_at >= now - this many hours. */
+export const JEV_BLINDSPOT_WINDOW_HOURS = 24;
+/** Any blindspot_recall answer at or above this probability marks the
+ * cluster blindspot_recall_suspect. */
+export const JEV_BLINDSPOT_SUSPECT_PROB = 0.7;
 // JEV-A11 stopgap: evaluateWithRetries (index.ts) is not deadline-aware --
 // each attempt is a fresh AbortSignal.timeout(20_000) plus a retryDelayMs
 // ladder, so 5 attempts at JEV_MAX_RETRIES=4 had a ~107s worst case for a
@@ -110,6 +142,8 @@ export const JEV_TASKS = [
   "kap_materiality",
   "title_meaning",
   "title_edit_kind",
+  "pair_marginal",
+  "blindspot_recall",
 ] as const;
 export type JevTask = (typeof JEV_TASKS)[number];
 export type JevSubjectType = "article" | "pair" | "cluster" | "kap" | "title_version";
@@ -502,6 +536,38 @@ export interface JevMemberRow {
   published_at: string;
 }
 
+// --- Migration 064: outlier-ejection queue + blindspot recall check -------
+
+export interface JevUnlinkCandidateRow {
+  cluster_id: string;
+  article_id: string;
+  jev_prob: number;
+  source_task: "cluster_member" | "audit";
+}
+
+export interface JevBlindspotClusterRow {
+  id: string;
+  title: string;
+  blindspot_side: string | null;
+  first_published: string;
+  updated_at: string;
+}
+
+export interface JevBlindspotCandidateQuery {
+  clusterId: string;
+  biasKeys: readonly string[];
+  fromIso: string;
+  toIso: string;
+  limit: number;
+}
+
+export interface JevBlindspotCandidate {
+  article_id: string;
+  title: string;
+  published_at: string;
+  source_slug: string | null;
+}
+
 export interface JevKapRow {
   disclosure_index: string;
   kap_title: string;
@@ -651,6 +717,16 @@ export const JEV_QUESTION_REGISTRY: Record<JevTask, { instructions: string; crit
       cosmetic: "Typo, punctuation, length or style only — the claim is unchanged",
     },
   },
+  pair_marginal: {
+    instructions:
+      "Do the two headlines in `pairs.{key}` report the SAME news event (same incident, announcement or decision), or merely the same topic / different events?",
+    criteria: { true: "Same concrete event", false: "Different events" },
+  },            // byte-identical to pair_negative
+  blindspot_recall: {
+    instructions:
+      "Does headline `{key}` report the SAME news event as the event named in `event`? Same event means the same incident, announcement or decision — not merely the same topic, the same people, or a follow-up story on a different day.",
+    criteria: { true: "Same concrete event", false: "Different event, even if related" },
+  },            // byte-identical to cluster_member (em dash preserved via copy/paste)
 };
 
 /**
@@ -682,7 +758,10 @@ function scoreQuestion(task: JevTask): JevQuestion {
   return { type: "score", instructions: entry.instructions, criteria: entry.criteria as Array<string | null> };
 }
 
-function keyedBoolQuestion(task: "cluster_member" | "pair_negative" | "pair_positive", key: string): JevQuestion {
+function keyedBoolQuestion(
+  task: "cluster_member" | "pair_negative" | "pair_positive" | "pair_marginal" | "blindspot_recall",
+  key: string,
+): JevQuestion {
   const entry = JEV_QUESTION_REGISTRY[task];
   const c = (entry.criteria ?? {}) as { true?: string; false?: string };
   return {
@@ -859,6 +938,106 @@ export function buildTickerCall(t: JevTickerRow): JevRequest {
   };
 
   return { state, questions };
+}
+
+// ---------------------------------------------------------------------------
+// Migration 064: blindspot recall check + outlier-ejection pure helpers.
+// ---------------------------------------------------------------------------
+
+/** UTC "YYYY-MM-DD" -- the per-day anti-join key for the blindspot_recall marker row. */
+export function runDayKey(nowMs: number): string {
+  return new Date(nowMs).toISOString().slice(0, 10);
+}
+
+/**
+ * Planner decision D1 (pack.md §L): blindspot_side is a bias CATEGORY inside
+ * the DOMINANT zone (the side that DID write -- /blindspots renders "Sadece
+ * X yazdı"), so the zones this function returns are the ones that did NOT
+ * write -- the silent zones the recall check should examine.
+ *
+ * A6 / SEC-064-04 fix: `side` is an arbitrary DB `text` value, not a typed
+ * BiasKey -- validate it against BIAS_KEYS instead of casting. `side ===
+ * null` or any value outside BIAS_KEYS (should not happen for a real
+ * blindspot cluster; defensive only) now fails CLOSED, returning `[]`
+ * (no zones to check), instead of failing open and returning every zone
+ * including the dominant one that demonstrably did publish -- the caller
+ * (runBlindspotRecallStage) already skips when `zones.length === 0`.
+ */
+export function blindspotSilentZones(side: string | null): MediaDnaZone[] {
+  if (side === null || !(BIAS_KEYS as readonly string[]).includes(side)) return [];
+  const zone = BIAS_TO_ZONE[side as BiasKey];
+  return ZONE_KEYS.filter((z) => z !== zone);
+}
+
+/** BIAS_KEYS whose zone is one of `zones`, in BIAS_KEYS order. */
+export function biasKeysForZones(zones: readonly MediaDnaZone[]): BiasKey[] {
+  return BIAS_KEYS.filter((k) => zones.includes(BIAS_TO_ZONE[k]));
+}
+
+/** |titleTokens(a) ∩ titleTokens(b)| -- shared 4+ char Turkish-folded/stemmed tokens. */
+export function sharedTokenCount(a: string, b: string, minLen = JEV_BLINDSPOT_TOKEN_MIN_LEN): number {
+  const ta = titleTokens(a, minLen);
+  const tb = titleTokens(b, minLen);
+  let count = 0;
+  for (const t of ta) {
+    if (tb.has(t)) count += 1;
+  }
+  return count;
+}
+
+/**
+ * Keeps only candidates sharing >= opts.minShared (default
+ * JEV_BLINDSPOT_MIN_SHARED_TOKENS) tokens of >= JEV_BLINDSPOT_TOKEN_MIN_LEN
+ * chars with `eventTitle`, sorts shared desc / published_at desc / article_id
+ * asc, and slices to opts.limit (default JEV_BLINDSPOT_CANDIDATES_PER_CALL).
+ */
+export function rankBlindspotCandidates(
+  eventTitle: string,
+  candidates: readonly JevBlindspotCandidate[],
+  opts: { minShared?: number; limit?: number } = {},
+): JevBlindspotCandidate[] {
+  const minShared = opts.minShared ?? JEV_BLINDSPOT_MIN_SHARED_TOKENS;
+  const limit = opts.limit ?? JEV_BLINDSPOT_CANDIDATES_PER_CALL;
+
+  return candidates
+    .map((c) => ({ c, shared: sharedTokenCount(eventTitle, c.title, JEV_BLINDSPOT_TOKEN_MIN_LEN) }))
+    .filter((x) => x.shared >= minShared)
+    .sort((x, y) => {
+      if (y.shared !== x.shared) return y.shared - x.shared;
+      if (x.c.published_at !== y.c.published_at) return y.c.published_at.localeCompare(x.c.published_at);
+      return x.c.article_id.localeCompare(y.c.article_id);
+    })
+    .slice(0, limit)
+    .map((x) => x.c);
+}
+
+/**
+ * state = { event, headlines: { c1..cN } }; questions[`c${i+1}`] copies the
+ * blindspot_recall registry entry (byte-identical to cluster_member).
+ * candidates.length === 0 => the empty-request shape (caller skips the
+ * gateway call and writes only the day marker row).
+ */
+export function buildBlindspotRecallCall(
+  cluster: JevBlindspotClusterRow,
+  candidates: readonly JevBlindspotCandidate[],
+): { request: JevRequest; keys: Record<string, string> } {
+  if (candidates.length === 0) {
+    return { request: { state: {}, questions: {} }, keys: {} };
+  }
+
+  const headlines: Record<string, string> = {};
+  const keys: Record<string, string> = {};
+  const questions: Record<string, JevQuestion> = {};
+
+  candidates.forEach((candidate, i) => {
+    const key = `c${i + 1}`;
+    headlines[key] = clamp(candidate.title, JEV_TITLE_CLAMP);
+    keys[key] = candidate.article_id;
+    questions[key] = keyedBoolQuestion("blindspot_recall", key);
+  });
+
+  const state = { event: clamp(cluster.title, JEV_TITLE_CLAMP), headlines };
+  return { request: { state, questions }, keys };
 }
 
 /**
@@ -1058,6 +1237,19 @@ export interface JevPorts {
    * every run re-pays the gateway for rows the upsert then silently
    * discards (the JEV-A10 lesson). */
   fetchPendingTickerMatches(sinceIso: string, limit: number): Promise<JevTickerRow[]>;
+  /** Migration 064: queues (cluster, article) pairs a cluster_member
+   * prediction scored below JEV_UNLINK_PROB_MAX for human review on /admin.
+   * Returns the number of rows actually inserted (upsert, ignoreDuplicates
+   * -- a re-ask of an already-queued pair is a no-op). */
+  insertUnlinkCandidates(rows: readonly JevUnlinkCandidateRow[]): Promise<number>;
+  /** Migration 064: blindspot clusters updated since sinceIso, most recent first. */
+  fetchBlindspotClusters(sinceIso: string, limit: number): Promise<JevBlindspotClusterRow[]>;
+  /** Migration 064: candidate headlines from the given (silent-zone) source
+   * set, published inside [fromIso, toIso], excluding existing members. */
+  fetchBlindspotCandidates(query: JevBlindspotCandidateQuery): Promise<JevBlindspotCandidate[]>;
+  /** Migration 064: stamps clusters.blindspot_recall_checked_at (and, when
+   * suspect, blindspot_recall_suspect = true) after every check. */
+  markBlindspotChecked(clusterId: string, suspect: boolean): Promise<void>;
   /**
    * Optional per-failure hook (JEV-A13): called for every callOnce failure
    * that is NOT a rate limit (a rate limit is already visible via the run's
@@ -1089,7 +1281,15 @@ export interface JevShadowResult {
   duration_ms: number;
 }
 
-type StageName = "articles" | "clusters" | "pairs" | "kap" | "title_versions" | "tickers" | "audit_pairs";
+type StageName =
+  | "articles"
+  | "clusters"
+  | "blindspot_recall"
+  | "pairs"
+  | "kap"
+  | "title_versions"
+  | "tickers"
+  | "audit_pairs";
 
 interface StageStats {
   calls: number;
@@ -1144,6 +1344,7 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     stages: {
       articles: emptyStageStats(),
       clusters: emptyStageStats(),
+      blindspot_recall: emptyStageStats(),
       pairs: emptyStageStats(),
       kap: emptyStageStats(),
       title_versions: emptyStageStats(),
@@ -1377,6 +1578,98 @@ function buildClusterRows(
     );
   }
   return rows;
+}
+
+/**
+ * Migration 064: cluster_member predictions the ensemble should NOT trust --
+ * jev_prob strictly below JEV_UNLINK_PROB_MAX (0.35). Feeds
+ * jev_unlink_candidates so a human can review on /admin; nothing is unlinked
+ * automatically.
+ */
+export function unlinkCandidatesFromRows(rows: readonly JevPredictionRow[]): JevUnlinkCandidateRow[] {
+  const out: JevUnlinkCandidateRow[] = [];
+  for (const row of rows) {
+    if (row.task === "cluster_member" && row.jev_prob !== null && row.jev_prob < JEV_UNLINK_PROB_MAX) {
+      out.push({
+        cluster_id: row.cluster_id!,
+        article_id: row.article_id!,
+        jev_prob: row.jev_prob!,
+        source_task: "cluster_member",
+      });
+    }
+  }
+  return out;
+}
+
+/** One row per candidate answer: subject_id `${clusterId}:${articleId}`,
+ * baseline "false" (the system says the silent zone did NOT cover it), so
+ * agree is true exactly when the answer also lands below the 0.5 threshold. */
+export function buildBlindspotRecallRows(
+  runId: number,
+  cluster: JevBlindspotClusterRow,
+  keys: Record<string, string>,
+  response: JevResponse,
+  callId: string,
+  hash: string,
+  preview: string,
+  latencyMs: number,
+): JevPredictionRow[] {
+  const rows: JevPredictionRow[] = [];
+  for (const [key, articleId] of Object.entries(keys)) {
+    const answer = response.answers[key];
+    if (!answer || answer.type !== "boolean") continue;
+    rows.push(
+      predictionRow({
+        task: "blindspot_recall",
+        subjectType: "cluster",
+        subjectId: `${cluster.id}:${articleId}`,
+        articleId,
+        clusterId: cluster.id,
+        stateHash: hash,
+        preview,
+        questionId: key,
+        callId,
+        answer,
+        response,
+        baseline: "false",
+        agree: booleanAgrees(answer.probability, false),
+        latencyMs,
+        runId,
+      }),
+    );
+  }
+  return rows;
+}
+
+/** The per-(cluster, day) marker row: makes the anti-join hold even when a
+ * cluster had zero ranked candidates that day, so the stage never re-asks it
+ * within the same UTC day. Carries no real Jev answer -- jev_prob/jev_choice
+ * null, agree null, zero latency/tokens. */
+export function buildBlindspotDayRow(args: {
+  runId: number;
+  clusterId: string;
+  day: string;
+  candidates: number;
+  stateHash: string;
+  preview: string;
+}): JevPredictionRow {
+  return {
+    task: "blindspot_recall",
+    subject_type: "cluster",
+    subject_id: `${args.clusterId}:${args.day}`,
+    article_id: null,
+    cluster_id: args.clusterId,
+    state_hash: args.stateHash,
+    jev_answer: { candidates: args.candidates, question_set: JEV_QUESTION_SET_VERSION, day: args.day },
+    jev_prob: null,
+    jev_choice: null,
+    baseline_answer: "false",
+    agree: null,
+    latency_ms: 0,
+    input_tokens: 0,
+    model: JEV_MODEL,
+    run_id: args.runId,
+  };
 }
 
 function computeNeutralBaseline(members: readonly JevMemberRow[], titleTrNeutral: string | null): string {
@@ -1677,6 +1970,20 @@ async function runClustersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
     const callId = nextCallId(ctx);
     const rows = buildClusterRows(ctx.runId, cluster, keys, result.response, callId, hash, preview, result.latencyMs);
 
+    // Migration 064: queue any cluster_member prediction Jev scored below
+    // JEV_UNLINK_PROB_MAX for human review on /admin. Best-effort, exactly
+    // like recordTokens above -- a failed queue write must never turn a
+    // successful gateway call into a lost prediction row.
+    const unlinkRows = unlinkCandidatesFromRows(rows);
+    if (unlinkRows.length > 0) {
+      try {
+        await ctx.ports.insertUnlinkCandidates(unlinkRows);
+      } catch (err) {
+        ctx.errors += 1;
+        ctx.ports.onError?.("clusters", err);
+      }
+    }
+
     if (Object.keys(neutralKeys).length > 0) {
       const ordered = orderMembers(allMembers);
       const order = ordered.map((m, i) => ({ key: `m${i + 1}`, published_at: m.published_at }));
@@ -1698,6 +2005,104 @@ async function runClustersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
 
     ctx.stages.clusters.rows += rows.length;
     await pushRows(ctx, rows);
+  });
+}
+
+/**
+ * Migration 064, shadow mode only (audit mode never touches the four new
+ * ports). For up to JEV_BLINDSPOT_CLUSTER_LIMIT recently-updated blindspot
+ * clusters per run, asks whether the SILENT media zone actually published
+ * the same event. One `<clusterId>:<day>` marker row per cluster per UTC
+ * day makes the anti-join hold even when a cluster had zero ranked
+ * candidates that day; a gateway failure writes NO marker row, so the next
+ * run retries the cluster.
+ */
+async function runBlindspotRecallStage(ctx: RunCtx, nowMs: number): Promise<void> {
+  const sinceIso = new Date(nowMs - JEV_BLINDSPOT_WINDOW_HOURS * 3600e3).toISOString();
+  const clusters = await ctx.ports.fetchBlindspotClusters(sinceIso, JEV_BLINDSPOT_CLUSTER_LIMIT * 4);
+  if (clusters.length === 0) return;
+
+  const day = runDayKey(nowMs);
+  const candidateSubjectIds = clusters.map((c) => `${c.id}:${day}`);
+  const seen = await ctx.ports.fetchSeenSubjects("blindspot_recall", candidateSubjectIds);
+  const eligible = clusters.filter((c) => !seen.has(`${c.id}:${day}`));
+  ctx.stages.blindspot_recall.skipped += clusters.length - eligible.length;
+  const survivors = eligible.slice(0, JEV_BLINDSPOT_CLUSTER_LIMIT);
+
+  await processStage(ctx, "blindspot_recall", survivors, async (cluster) => {
+    const zones = blindspotSilentZones(cluster.blindspot_side);
+    if (zones.length === 0) {
+      ctx.stages.blindspot_recall.skipped += 1;
+      return;
+    }
+    const biasKeys = biasKeysForZones(zones);
+    const fromIso = new Date(Date.parse(cluster.first_published) - JEV_BLINDSPOT_LOOKBACK_HOURS * 3600e3).toISOString();
+    const toIso = new Date(
+      Math.min(nowMs, Date.parse(cluster.first_published) + JEV_BLINDSPOT_FORWARD_HOURS * 3600e3),
+    ).toISOString();
+    const fetched = await ctx.ports.fetchBlindspotCandidates({
+      clusterId: cluster.id,
+      biasKeys,
+      fromIso,
+      toIso,
+      limit: JEV_BLINDSPOT_CANDIDATE_FETCH,
+    });
+    const ranked = rankBlindspotCandidates(cluster.title, fetched);
+
+    if (ranked.length === 0) {
+      const emptyState = { event: clamp(cluster.title, JEV_TITLE_CLAMP), headlines: {} };
+      const hash = await stateHash(emptyState);
+      const preview = statePreview(emptyState);
+      const dayRow = buildBlindspotDayRow({
+        runId: ctx.runId,
+        clusterId: cluster.id,
+        day,
+        candidates: 0,
+        stateHash: hash,
+        preview,
+      });
+      ctx.stages.blindspot_recall.rows += 1;
+      await pushRows(ctx, [dayRow]);
+      try {
+        await ctx.ports.markBlindspotChecked(cluster.id, false);
+      } catch (err) {
+        ctx.stages.blindspot_recall.errors += 1;
+        ctx.ports.onError?.("blindspot_recall", err);
+      }
+      return;
+    }
+
+    const { request, keys } = buildBlindspotRecallCall(cluster, ranked);
+    const result = await callOnce(ctx, "blindspot_recall", request);
+    if (!result) {
+      // No marker row written -- the next run retries this cluster.
+      ctx.stages.blindspot_recall.errors += 1;
+      return;
+    }
+    ctx.stages.blindspot_recall.calls += 1;
+    const hash = await stateHash(request.state);
+    const preview = statePreview(request.state);
+    const callId = nextCallId(ctx);
+    const answerRows = buildBlindspotRecallRows(ctx.runId, cluster, keys, result.response, callId, hash, preview, result.latencyMs);
+    const dayRow = buildBlindspotDayRow({
+      runId: ctx.runId,
+      clusterId: cluster.id,
+      day,
+      candidates: ranked.length,
+      stateHash: hash,
+      preview,
+    });
+    const rows = [...answerRows, dayRow];
+    const suspect = rows.some((r) => (r.jev_prob ?? 0) >= JEV_BLINDSPOT_SUSPECT_PROB);
+
+    ctx.stages.blindspot_recall.rows += rows.length;
+    await pushRows(ctx, rows);
+    try {
+      await ctx.ports.markBlindspotChecked(cluster.id, suspect);
+    } catch (err) {
+      ctx.stages.blindspot_recall.errors += 1;
+      ctx.ports.onError?.("blindspot_recall", err);
+    }
   });
 }
 
@@ -1839,6 +2244,7 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
       : [
           { name: "articles", run: () => runArticlesStage(ctx, sinceIso) },
           { name: "clusters", run: () => runClustersStage(ctx, clusterSinceIso) },
+          { name: "blindspot_recall", run: () => runBlindspotRecallStage(ctx, nowMs) },
           { name: "pairs", run: () => runPairsStage(ctx, sinceIso, JEV_PAIR_COUNT, PAIR_CANDIDATE_FETCH_LIMIT) },
           { name: "kap", run: () => runKapStage(ctx, sinceIso) },
           { name: "title_versions", run: () => runTitleStage(ctx, sinceIso) },

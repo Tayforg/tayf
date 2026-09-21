@@ -426,6 +426,10 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // in (...)); it copies no bias->zone MAP, so it isn't a fifth
       // zone-map copy. Its label list is asserted against ZONE_KEYS below.
       "057_zone_guesses.sql",
+      // 064's cluster_unlink_article RPC re-derives is_blindspot /
+      // blindspot_side under the lock, mirroring 032's recompute -- a sixth
+      // declared zone-map copy, asserted below.
+      "064_jev_cluster_live.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
@@ -455,6 +459,36 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
     let im: RegExpExecArray | null;
     while ((im = itemRe.exec(body)) !== null) parsed.push(im[1] as string);
     expect(new Set(parsed)).toEqual(new Set(ZONE_KEYS));
+  });
+});
+
+describe("zone-parity: migration 064 (cluster_unlink_article) matches the contract", () => {
+  let code = "";
+  beforeAll(() => {
+    const sql = read("064_jev_cluster_live.sql");
+    expect(sql.length).toBeGreaterThan(0);
+    code = stripSqlComments(sql);
+  });
+
+  it("its zone CASE deep-equals BIAS_TO_ZONE", () => {
+    const parsed = parseZoneCase(code);
+    expect(parsed).toEqual(contractZoneMap);
+  });
+
+  it("its BIAS_KEYS-order array literal equals BIAS_KEYS", () => {
+    const candidates = extractArrayLiterals(code, BIAS_KEYS.length);
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const candidate of candidates) {
+      expect(candidate).toEqual([...BIAS_KEYS]);
+    }
+  });
+
+  it("its ZONE_KEYS-order array literal equals ZONE_KEYS", () => {
+    const candidates = extractArrayLiterals(code, ZONE_KEYS.length);
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const candidate of candidates) {
+      expect(candidate).toEqual([...ZONE_KEYS]);
+    }
   });
 });
 

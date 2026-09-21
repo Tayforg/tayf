@@ -57,6 +57,20 @@ import {
   detectBlindspot,
 } from "../_shared/cluster/blindspot.ts";
 import { type SourceKind, votingBiasKeys } from "../_shared/cluster/source-kind.ts";
+import { statePreview, stateHash } from "../_shared/jev.ts";
+import { evaluateJev } from "../_shared/jev-client.ts";
+import {
+  budgetAllows,
+  buildMarginalRequest,
+  buildMarginalRow,
+  classifyBand,
+  decideMarginal,
+  JEV_LIVE_POLICY,
+  liveEnabled,
+  newJevLiveState,
+  type JevLiveRow,
+  type JevLiveState,
+} from "../_shared/cluster/jev-verify.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -137,6 +151,7 @@ interface SourceRow {
 interface ClusterRow {
   id: string;
   title_tr: string | null;
+  title_tr_neutral: string | null;
   first_published: string;
   updated_at: string;
   article_count: number;
@@ -193,9 +208,39 @@ let clusterContextCache: ClusterContext | null = null;
 let sourceLookupCache: { fetchedAt: number; lookup: Map<string, SourceRow> } | null = null;
 const SOURCE_LOOKUP_TTL_MS = 5 * 60_000; // 5 minutes
 
+// Live marginal-verification counters (P3, migration 064) -- RESET at the
+// top of every drainQueue() invocation (see below). Read here as a plain
+// module-scoped `let`, not inside a class, so the Deno-polyfill test harness
+// (tests/functions/cluster-consumer.test.ts) can import the module fresh
+// per test without any extra wiring.
+let jevLive: JevLiveState = newJevLiveState(false);
+// Attempts (not successes) gate the per-drain budget -- see A2 fix at the
+// live-verification call site. Reset alongside `jevLive` at the top of
+// drainQueue() so a timeout/5xx-only gateway outage still hard-stops at
+// JEV_LIVE_POLICY.maxCallsPerDrain instead of never budgeting out.
+let jevLiveAttempts = 0;
+// Guards against two overlapping POST /drainQueue invocations in the same
+// warm isolate: drainQueue() resets jevLive/jevLiveAttempts as its first
+// statements, so a second concurrent drain would zero the first drain's
+// in-flight counters (the 40-call live-verification budget would silently
+// become 80+) and both HTTP responses / log lines would end up reporting
+// the second drain's numbers. pgmq's own visibility timeout already
+// prevents double-processing of the same queue message -- this guard is
+// only about the live-verification budget and its counters. A concurrent
+// POST is answered `{ ok: true, busy: true }` instead of draining.
+let drainInFlight = false;
+
 // ---------------------------------------------------------------------------
 // Helpers (pure)
 // ---------------------------------------------------------------------------
+
+// title_tr_neutral (set once the neutral-title picker has run) wins over
+// the raw title_tr when present; loadClusterContext/registerNewClusterInCache
+// keep both columns populated on every ClusterRow.
+function clusterTitleFromContext(ctx: ClusterContext, clusterId: string): string {
+  const cluster = ctx.clusters.find((c) => c.id === clusterId);
+  return cluster?.title_tr_neutral ?? cluster?.title_tr ?? "";
+}
 
 function hoursBetween(aIso: string, bIso: string): number {
   return (
@@ -322,7 +367,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
   {
     const res = await supabase
       .from("clusters")
-      .select("id, title_tr, first_published, updated_at, article_count")
+      .select("id, title_tr, title_tr_neutral, first_published, updated_at, article_count")
       .gte("updated_at", cutoffIso)
       .order("updated_at", { ascending: false })
       .limit(CONTEXT_CLUSTER_CAP);
@@ -571,6 +616,7 @@ function registerNewClusterInCache(clusterId: string, seed: ClusterMemberArticle
   clusterContextCache.clusters.push({
     id: clusterId,
     title_tr: seed.title,
+    title_tr_neutral: null,
     first_published: seed.published_at,
     updated_at: seed.published_at,
     article_count: 1,
@@ -851,6 +897,27 @@ async function addArticleToCluster(
 }
 
 // ---------------------------------------------------------------------------
+// Live marginal-verification prediction write (P3, migration 064). Every
+// jev_shadow_predictions row this module writes goes through here so the
+// insert failure path is centralised: never rethrows, always accounted for
+// in jevLive.errors, called AFTER the join/reject/unchanged decision has
+// already been executed so `decision` reflects the truth.
+// ---------------------------------------------------------------------------
+
+async function recordMarginal(row: JevLiveRow): Promise<void> {
+  try {
+    const res = await supabase
+      .from("jev_shadow_predictions")
+      .upsert([row], { onConflict: "task,subject_id", ignoreDuplicates: true });
+    if (res.error) {
+      jevLive.errors += 1;
+    }
+  } catch {
+    jevLive.errors += 1;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Per-message processing
 // ---------------------------------------------------------------------------
 
@@ -1003,12 +1070,202 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
   }
   scored.sort((a, b) => b.score - a.score);
 
-  const blocked = new Set<string>();
   const primary = scored[0];
+
+  // ---------------------------------------------------------------------
+  // P3 live marginal verification (migration 064, JEV_LIVE_PAIRS flag).
+  // Exactly one gateway call per article, always about `primary` only, and
+  // only in the two narrow bands where the ensemble's own decision is a
+  // single hair's-width call. `jevLive.enabled` is false (and this whole
+  // block a no-op) whenever the flag is unset/off or AI_GATEWAY_API_KEY is
+  // missing -- see drainQueue's reset of `jevLive` -- so with the flag off
+  // this function's behaviour, DB writes and JSON output are byte-for-byte
+  // identical to before this pack, apart from the `jev_live` summary block
+  // added far below.
+  //
+  // Every failure path here (budget exhausted, gateway timeout/error,
+  // malformed response, failed prediction insert) falls through leaving
+  // the ensemble's decision untouched -- this block only ever RETURNS
+  // early on an executed "join", and only ever narrows the fallback loop
+  // below via `marginalRejectedClusterId` on an executed "reject".
+  // ---------------------------------------------------------------------
+  const band = primary
+    ? classifyBand({
+        score: primary.score,
+        floor: FALLBACK_FLOOR,
+        threshold: MATCH_THRESHOLD,
+        highBand: JEV_LIVE_POLICY.highBandWidth,
+      })
+    : "none";
+  let marginalRejectedClusterId: string | null = null;
+  // Set only when the gateway's own answer says "join" -- the actual DB
+  // write (addArticleToCluster) happens AFTER the try/catch below, outside
+  // any try, so a thrown DB error propagates unchanged instead of being
+  // mis-counted as a gateway failure (contract §G).
+  let pendingJoin: {
+    probability: number;
+    hash: string;
+    preview: string;
+    latencyMs: number;
+    inputTokens: number;
+  } | null = null;
+
+  if (jevLive.enabled && primary && band !== "none") {
+    // Budget is gated on ATTEMPTS, not successes -- jevLiveAttempts is
+    // bumped immediately before the gateway call below regardless of
+    // outcome, so a gateway outage (timeouts/5xx on every call) still
+    // hard-stops at JEV_LIVE_POLICY.maxCallsPerDrain instead of burning up
+    // to timeoutMs per article for the rest of the drain.
+    if (!budgetAllows(jevLiveAttempts)) {
+      jevLive.budget_skipped += 1;
+    } else {
+      const apiKey = Deno.env.get("AI_GATEWAY_API_KEY") ?? "";
+      const request = buildMarginalRequest({
+        headlineA: article.title,
+        headlineB: clusterTitleFromContext(ctx, primary.clusterId),
+        headlineC: latestByCluster.get(primary.clusterId)?.title ?? null,
+      });
+      try {
+        jevLiveAttempts += 1;
+        const { response, latencyMs } = await evaluateJev(apiKey, request, {
+          timeoutMs: JEV_LIVE_POLICY.timeoutMs,
+          maxRetries: JEV_LIVE_POLICY.maxRetries,
+        });
+        jevLive.calls += 1;
+
+        const answer = response.answers.p1;
+        if (!answer || answer.type !== "boolean") {
+          // Malformed/incomplete gateway response for our one question --
+          // never fabricate a probability; leave the ensemble untouched.
+          jevLive.errors += 1;
+        } else {
+          const probability = answer.probability;
+          const decision = decideMarginal({
+            score: primary.score,
+            floor: FALLBACK_FLOOR,
+            threshold: MATCH_THRESHOLD,
+            highBand: JEV_LIVE_POLICY.highBandWidth,
+            probability,
+          });
+          const hash = await stateHash(request.state);
+          const preview = statePreview(request.state);
+
+          if (decision === "join") {
+            // The DB write itself happens after this try/catch closes --
+            // see pendingJoin above.
+            pendingJoin = { probability, hash, preview, latencyMs, inputTokens: response.usage.inputTokens };
+          } else if (decision === "reject") {
+            marginalRejectedClusterId = primary.clusterId;
+            jevLive.rejected_by_jev += 1;
+            await recordMarginal(
+              buildMarginalRow({
+                articleId: article.id,
+                clusterId: primary.clusterId,
+                band,
+                ensembleScore: primary.score,
+                probability,
+                decision: "rejected",
+                stateHash: hash,
+                preview,
+                latencyMs,
+                inputTokens: response.usage.inputTokens,
+              }),
+            );
+          } else {
+            await recordMarginal(
+              buildMarginalRow({
+                articleId: article.id,
+                clusterId: primary.clusterId,
+                band,
+                ensembleScore: primary.score,
+                probability,
+                decision: "unchanged",
+                stateHash: hash,
+                preview,
+                latencyMs,
+                inputTokens: response.usage.inputTokens,
+              }),
+            );
+          }
+        }
+      } catch (err) {
+        // Timeout/abort vs. any other gateway failure -- see JevLiveState.
+        // Log only { name }: never the key, the request body, or a gateway
+        // response body (inherited discipline from jev-shadow/index.ts).
+        const name = err instanceof Error ? err.name : "unknown";
+        if (name === "TimeoutError" || name === "AbortError") {
+          jevLive.timeouts += 1;
+        } else {
+          jevLive.errors += 1;
+        }
+        console.warn(`[cluster-consumer] jev live verification failed for ${article.id}`, { name });
+      }
+    }
+  }
+
+  // Executed OUTSIDE the try/catch above on purpose (A1 fix): addArticleToCluster
+  // throws on every DB failure, and that throw must propagate exactly as it
+  // does for the non-Jev join path below (contract §G) -- never swallowed
+  // into jevLive.errors, never mis-counted as a gateway failure.
+  if (pendingJoin && primary) {
+    const r = await addArticleToCluster(sourceLookup, primary.clusterId, article);
+    if (!r.skipped) {
+      addMemberToIndices(primary.clusterId, article);
+      jevLive.joined_by_jev += 1;
+      await recordMarginal(
+        buildMarginalRow({
+          articleId: article.id,
+          clusterId: primary.clusterId,
+          band: band as "low" | "high",
+          ensembleScore: primary.score,
+          probability: pendingJoin.probability,
+          decision: "joined",
+          stateHash: pendingJoin.hash,
+          preview: pendingJoin.preview,
+          latencyMs: pendingJoin.latencyMs,
+          inputTokens: pendingJoin.inputTokens,
+        }),
+      );
+      return { result: "matched", clusterId: primary.clusterId };
+    }
+    // Duplicate-source skip -- record "unchanged" and continue into
+    // the existing flow below (which will re-attempt, and re-skip,
+    // the same cluster on its own).
+    await recordMarginal(
+      buildMarginalRow({
+        articleId: article.id,
+        clusterId: primary.clusterId,
+        band: band as "low" | "high",
+        ensembleScore: primary.score,
+        probability: pendingJoin.probability,
+        decision: "unchanged",
+        stateHash: pendingJoin.hash,
+        preview: pendingJoin.preview,
+        latencyMs: pendingJoin.latencyMs,
+        inputTokens: pendingJoin.inputTokens,
+      }),
+    );
+  }
+
+  const blocked = new Set<string>();
+  if (marginalRejectedClusterId) {
+    // Block the primary candidate BEFORE the fallback loop below -- the
+    // loop's own `primary.score >= MATCH_THRESHOLD` entry condition and
+    // per-candidate logic are otherwise untouched, so the next candidate
+    // (or createCluster) wins exactly as it already does for any other
+    // blocked cluster.
+    blocked.add(marginalRejectedClusterId);
+  }
   if (primary && primary.score >= MATCH_THRESHOLD) {
     for (const cand of scored) {
       if (blocked.has(cand.clusterId)) continue;
-      if (cand.score < FALLBACK_FLOOR) break;
+      // A Jev reject withdraws the "primary is a match" premise, so the
+      // fallback may only reach a candidate the ensemble would have joined
+      // on its own (score >= MATCH_THRESHOLD); otherwise createCluster.
+      // Without this, a band-high reject (primary in [0.40, 0.44)) could
+      // fall through into a genuinely sub-threshold join in [FALLBACK_FLOOR,
+      // MATCH_THRESHOLD) -- a join the ensemble alone would never make.
+      if (cand.score < (marginalRejectedClusterId ? MATCH_THRESHOLD : FALLBACK_FLOOR)) break;
       const result = await addArticleToCluster(sourceLookup, cand.clusterId, article);
       if (result.skipped) {
         blocked.add(cand.clusterId);
@@ -1051,6 +1308,7 @@ interface InvocationSummary {
   failedPermanent: number;
   duration_ms: number;
   budgeted_out: boolean;
+  jev_live: JevLiveState;
 }
 
 // /api/revalidate rejects payloads over MAX_TAGS; reserve room for the two
@@ -1105,6 +1363,17 @@ async function triggerRevalidation(clusterIds: string[]): Promise<void> {
 }
 
 async function drainQueue(): Promise<InvocationSummary> {
+  // FIRST statement: reset the live-verification counters for this
+  // invocation. Read the env here (not at module load) so the Deno-env
+  // polyfill in tests/functions/cluster-consumer.test.ts keeps working.
+  jevLive = newJevLiveState(
+    liveEnabled(
+      Deno.env.get("JEV_LIVE_PAIRS") ?? undefined,
+      Deno.env.get("AI_GATEWAY_API_KEY") ?? undefined,
+    ),
+  );
+  jevLiveAttempts = 0;
+
   const startedAt = Date.now();
   const summary: InvocationSummary = {
     drained: 0,
@@ -1117,6 +1386,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     failedPermanent: 0,
     duration_ms: 0,
     budgeted_out: false,
+    jev_live: jevLive,
   };
 
   // Best-effort depth sample for the drain summary log (audit O13).
@@ -1251,6 +1521,14 @@ async function drainQueue(): Promise<InvocationSummary> {
     await triggerRevalidation([...touchedClusterIds]);
   }
 
+  // jevLive may have been re-assigned counters throughout the drain; take
+  // the final snapshot right before duration_ms so both the log line and
+  // the HTTP body reflect the same invocation.
+  // Copy, not a reference -- a later concurrent drain reassigns the module
+  // binding `jevLive`, and if this summary object held that reference, the
+  // HTTP body/log line built here would silently pick up the later drain's
+  // numbers instead of this invocation's own.
+  summary.jev_live = { ...jevLive };
   summary.duration_ms = Date.now() - startedAt;
   const after = await queueDepth(supabase, QUEUE_NAME);
   // One JSON-shaped summary line per drain (audit O13) — depth + oldest-age
@@ -1291,6 +1569,19 @@ Deno.serve(withSentry("cluster-consumer", async (req: Request) => {
   if (req.method !== "POST") {
     return new Response("method not allowed", { status: 405 });
   }
+  // A concurrent POST is answered `{ ok: true, busy: true }` rather than
+  // draining -- drainQueue() resets the module-scoped live-verification
+  // counters as its first statements, so two overlapping drains in the same
+  // warm isolate would corrupt each other's budget/counters (see
+  // `drainInFlight` above). pgmq's own visibility timeout already guards
+  // message-level double-processing; this guard is only about that budget.
+  if (drainInFlight) {
+    return new Response(JSON.stringify({ ok: true, busy: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  drainInFlight = true;
   try {
     const summary = await drainQueue();
     return new Response(JSON.stringify({ ok: true, ...summary }), {
@@ -1315,5 +1606,7 @@ Deno.serve(withSentry("cluster-consumer", async (req: Request) => {
         headers: { "content-type": "application/json" },
       },
     );
+  } finally {
+    drainInFlight = false;
   }
 }));
