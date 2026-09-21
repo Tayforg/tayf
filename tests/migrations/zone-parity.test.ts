@@ -430,6 +430,10 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // blindspot_side under the lock, mirroring 032's recompute -- a sixth
       // declared zone-map copy, asserted below.
       "064_jev_cluster_live.sql",
+      // 068 only lists the three framing VOTE labels in a CHECK constraint
+      // (vote in ('iktidar', 'muhalefet', 'none')); it copies no bias->zone
+      // MAP, so it isn't another zone-map copy.
+      "068_framing_votes.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

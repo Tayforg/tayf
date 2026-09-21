@@ -8,6 +8,7 @@ import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { MediaDna } from "@/components/story/media-dna";
 import { FramingComparison } from "@/components/story/framing-comparison";
+import { FramingReceiptCard } from "@/components/story/framing-receipt";
 import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption";
 import { ShareButton } from "@/components/story/share-button";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
@@ -23,6 +24,11 @@ import {
   getClusterDetail,
   imageEligibleMembers,
 } from "@/lib/clusters/cluster-detail-query";
+import {
+  getCachedClusterFramingReceipt,
+  isFramingReceiptPublic,
+  shouldShowPublicFramingReceipt,
+} from "@/lib/clusters/framing-receipt";
 import { buildShareText } from "@/lib/clusters/share";
 import {
   describeForMeta,
@@ -257,6 +263,15 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     members,
     wire,
   });
+
+  // T11 (migration 068) — Çerçeveleme makbuzu. The flag is checked FIRST,
+  // synchronously, so a flag-off deploy (the default — see pack.md's ops
+  // step 11) adds exactly zero Supabase queries to this, the hottest public
+  // page. The receipt itself is counts-only and never names an outlet —
+  // see FramingReceiptCard's own doc comment.
+  const receipt = isFramingReceiptPublic()
+    ? await getCachedClusterFramingReceipt(id)
+    : null;
 
   // Schema.org NewsArticle structured data. Lets Google surface the
   // cluster in news-rich results and gives social previews a clean
@@ -530,6 +545,14 @@ export default async function ClusterDetailPage({ params }: PageProps) {
         <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 hover-lift animate-fade-up stagger-1">
           <FramingComparison members={votingMembers} />
         </div>
+      )}
+
+      {/* T11 (migration 068) — Çerçeveleme makbuzu. shouldShowPublicFramingReceipt
+          re-checks the flag AND the scored>=3 floor here too (belt and
+          suspenders with the fetch guard above); the card itself renders
+          counts only, never an outlet name. */}
+      {shouldShowPublicFramingReceipt(receipt) && receipt && (
+        <FramingReceiptCard receipt={receipt} />
       )}
 
       {/* Toplayıcı / niş kaynaklar — cluster members whose kind never votes

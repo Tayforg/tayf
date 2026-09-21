@@ -179,6 +179,11 @@ erDiagram
 | `finance/queries.ts` | Read side of the finance substrate (migrations 049/050) for `/ekonomi`, `/ekonomi/[ticker]` and `/admin/ekonomi`: ticker-matched article feed, attention ranking, KAP stream, per-ticker page, health, rule-based `finance_signals`, coverage-lag histogram. All `"use cache"`, throw on error. |
 | `finance/quotes.ts` | `QuoteSource` boundary with the Yahoo chart implementation (`<CODE>.IS`, 5d/1d). `getQuotes()` is the cached edge (5 min); swap `defaultQuoteSource()` for a paid feed. |
 | `rate-limit.ts` | In-memory token-bucket rate limiter with periodic idle-bucket cleanup. |
+| `clusters/framing-receipt.ts` | Reads `cluster_framing_receipt()` and turns it into the Çerçeveleme makbuzu: a counts-only summary of how many member headlines cleared the 0,75 shadow-probability threshold on `iktidar`/`muhalefet`/`none`, plus the Turkish possessive-suffix sentence builder. Migration 068. |
+| `game/framing.ts` | Çerçeve mode's pure lib: vote enum, tally normalization/formatting, the session-cookie helpers (mint, parse, sha256 hash) shared by `GET/POST /api/oyun/cerceve`. Migration 068. |
+| `admin/framing-votes.ts` | `/admin`'s "Çerçeve oyları" reader: `framing_gold_candidates()` (capped at 20 rows) plus a `framing_votes` head count. Migration 068. |
+| `framing_votes` | service_role-only crowd-vote ledger for the Çerçeve mode — one hashed session per article, never an IP or raw cookie value. Migration 068. |
+| `framing_vote_totals` / `framing_next_headline` / `framing_gold_candidates` / `cluster_framing_receipt` | `SECURITY DEFINER` RPCs backing the Çerçeve game, its crowd tally, the future gold-label flywheel, and the cluster-level framing receipt. Migration 068. |
 
 ### Ranking Pipeline (`politics-query.ts`)
 
@@ -216,6 +221,8 @@ Tayf uses Next.js 16 Cache Components (`"use cache"` directive) with named cache
 
 Cache tags (`cacheTag`) enable targeted invalidation: `clusters`, `clusters-politics`, `cluster-detail:{id}`, `sources`, `articles`.
 
+The public Çerçeveleme makbuzu (migration 068) reuses the `cluster-feed` profile and the `cluster-detail:{id}` tag, and only ever runs when `FRAMING_RECEIPT_PUBLIC` is set; /oyun's Çerçeve endpoints (`GET`/`POST /api/oyun/cerceve*`) are always `Cache-Control: no-store`.
+
 ## Security
 
 - **CSP headers** on all routes (script/style/img/connect directives)
@@ -224,6 +231,8 @@ Cache tags (`cacheTag`) enable targeted invalidation: `clusters`, `clusters-poli
 - **CRON_SECRET** bearer token for cron endpoints
 - **robots.txt** disallows `/admin` and `/api/`
 - Wildcard `images.remotePatterns` — acceptable because image URLs enter only through the Deno-side `_shared/rss/normalize.ts` + `_shared/og-image.ts` pipeline, both gated by the `_shared/safe-fetch.ts` SSRF allowlist (DNS-resolves the host and rejects RFC1918, loopback, link-local, ULA, CGNAT, IPv6 documentation prefixes); never from user input
+- `FRAMING_RECEIPT_PUBLIC` defaults off (unset); the public cluster-page receipt it gates publishes counts only, never an outlet name
+- `framing_votes` (migration 068) stores a hashed, random per-session cookie id, never an IP or a user agent
 
 ## External Dependencies
 

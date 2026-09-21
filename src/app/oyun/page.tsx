@@ -3,7 +3,7 @@ import { connection } from "next/server";
 import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
-import { ZoneGuessGame } from "@/components/game/zone-guess-game";
+import { OyunModes } from "@/components/game/oyun-modes";
 import { getGameHeadlines, sampleHeadlines } from "@/lib/game/headline-pool";
 
 // Own metadata so the page doesn't inherit the root layout's title and
@@ -15,14 +15,25 @@ export const metadata: Metadata = {
   alternates: { canonical: "/oyun" },
 };
 
-// /oyun — "Tarafı Tahmin Et", a 60-second zone-guessing game. Server
-// Component picks the headline pool (getGameHeadlines, cached + rotating);
-// the game itself (ZoneGuessGame) is a client component. No cookies, no
-// session id, no identifier of any kind is collected on this page or sent
-// by the client — see zone-guess-game.tsx's doc comment.
+// /oyun — two games behind one mode switch (OyunModes, "use client"),
+// picked from a Server Component that fetches the Bölge headline pool
+// (getGameHeadlines, cached + rotating) and hands it down as a prop.
 //
-// The server sends each headline's source name/bias/zone down WITH the
-// headline (ZoneGuessGame needs it for the reveal step) — hiding it
+// THE COOKIE SPLIT (read this before assuming "no cookies" covers the
+// whole page — it no longer does):
+//   - Bölge (zone-guess, unchanged): still sets NO cookie and collects NO
+//     identifier of any kind, on this page or from the client. Its POST
+//     /api/oyun response is never even read by the client — see
+//     zone-guess-game.tsx's doc comment.
+//   - Çerçeve (framing-vote, R10): its two API routes
+//     (api/oyun/cerceve/{next,route}.ts) DO set one first-party, HttpOnly,
+//     opaque-random cookie (`tayf_cerceve_sid`) so a reader's crowd vote
+//     can be deduplicated per headline. Only that cookie's sha256 ever
+//     reaches the database — never an IP, never a user agent, never a
+//     login. The raw cookie value never leaves the browser.
+//
+// The server sends each Bölge headline's source name/bias/zone down WITH
+// the headline (ZoneGuessGame needs it for the reveal step) — hiding it
 // client-side would be theatre, not security. The client-side score is
 // NOT authoritative: POST /api/oyun recomputes `correct` server-side from
 // `sources.bias` and its response is never even read by the client, so a
@@ -64,17 +75,13 @@ export default async function OyunPage() {
           </Link>{" "}
           okuyabilirsin.
         </p>
+        <p>
+          Çerçeve modunda ise kaynağı değil, başlığın kendisini
+          değerlendiriyorsun: bu başlık kimin lehine yazılmış?
+        </p>
       </div>
 
-      {headlines.length === 0 ? (
-        <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-          <p className="text-sm text-muted-foreground">
-            Şu an oynanacak başlık yok. Birazdan tekrar dene.
-          </p>
-        </div>
-      ) : (
-        <ZoneGuessGame headlines={headlines} />
-      )}
+      <OyunModes headlines={headlines} />
     </div>
   );
 }

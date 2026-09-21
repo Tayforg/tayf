@@ -4,7 +4,9 @@ import { connection } from "next/server";
 
 import { requireAdminSession } from "@/lib/admin/session";
 import { buildYelpazeReport } from "@/lib/reports/yelpaze";
+import { getClusterFramingReceipt } from "@/lib/clusters/framing-receipt";
 import { YelpazeReportView } from "@/components/admin/yelpaze-report";
+import { FramingReceiptCard } from "@/components/story/framing-receipt";
 
 // Admin-only, client-specific report (R-01 pilot tool — pack D). Never
 // indexed, never followed, never in sitemap.ts. Belt-and-suspenders with
@@ -48,5 +50,20 @@ export default async function YelpazeRaporPage({ params }: PageProps) {
   const report = await buildYelpazeReport(clusterId);
   if (!report) notFound();
 
-  return <YelpazeReportView report={report} />;
+  // T11 (migration 068) — Çerçeveleme makbuzu. Uncached (admin pages never
+  // use "use cache") and renders regardless of FRAMING_RECEIPT_PUBLIC and
+  // regardless of `scored` — framingReceiptSentence has an honest
+  // scored = 0 branch, so an operator always sees a real read here.
+  const receipt = await getClusterFramingReceipt(clusterId);
+
+  return (
+    <>
+      {receipt && (
+        <div className="mx-auto w-full max-w-5xl px-4 pt-6">
+          <FramingReceiptCard receipt={receipt} />
+        </div>
+      )}
+      <YelpazeReportView report={report} />
+    </>
+  );
 }
