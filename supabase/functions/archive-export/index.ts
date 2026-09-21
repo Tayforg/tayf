@@ -14,13 +14,16 @@ import { createServiceClient } from "../_shared/supabase.ts";
 import {
   ARCHIVE_BUCKET,
   ARCHIVE_DEADLINE_MS,
+  ARCHIVE_LABEL_TASKS,
   ARCHIVE_PAGE_SIZE,
   type ArchiveCluster,
   ArchiveDeadlineError,
   type ArchivePorts,
   isValidDay,
+  labelsFromRows,
   previousUtcDay,
   type RawArticleRow,
+  type RawLabelRow,
   runArchiveExport,
 } from "../_shared/archive.ts";
 
@@ -32,6 +35,15 @@ const CLUSTER_COLUMNS =
 // cluster_id column); the embed flattens to RawArticleRow in fetchArticles.
 const MEMBER_COLUMNS =
   "cluster_id, article_id, article:articles ( id, title, url, published_at, source:sources ( slug, bias ) )";
+// (i) `question_set:jev_answer->>question_set` is deliberate: selecting the
+// whole `jev_answer` jsonb would drag `state_preview` (headline text,
+// including pre-edit headlines an outlet has removed -- see migration
+// 056/061) through the export process for no reason. (ii) 100 article ids x
+// 5 tasks caps a chunk's result at 500 rows, comfortably under PostgREST's
+// 1000 max-rows default, so no paging is needed here. (iii) the
+// `.order("task").order("article_id")` pair makes the question_set
+// tie-break in labelsFromRows deterministic run over run.
+const LABEL_COLUMNS = "task, article_id, jev_prob, jev_choice, question_set:jev_answer->>question_set";
 
 interface MemberRow {
   cluster_id: string;
@@ -93,6 +105,26 @@ function makePorts(): ArchivePorts {
       // `fetched` is the raw page length: paging must not stop because a
       // member row was dropped above (see ArchivePorts.fetchArticles).
       return { rows, fetched };
+    },
+    async fetchLabels(articleIds) {
+      // Explicit bound rather than relying on PostgREST's default max-rows:
+      // articleIds.length x ARCHIVE_LABEL_TASKS.length is the true row cap
+      // for this query (one row per article per task).
+      const labelCap = articleIds.length * ARCHIVE_LABEL_TASKS.length;
+      const { data, error } = await supabase
+        .from("jev_shadow_predictions")
+        .select(LABEL_COLUMNS)
+        .in("task", [...ARCHIVE_LABEL_TASKS])
+        .in("article_id", articleIds as string[])
+        .order("task", { ascending: true })
+        .order("article_id", { ascending: true })
+        .limit(labelCap + 1);
+      if (error) throw new Error(`labels chunk failed: ${error.message}`);
+      const rows = data ?? [];
+      if (rows.length > labelCap) {
+        console.error(`[archive-export] labels chunk hit its cap (${labelCap} rows) -- possible truncation`);
+      }
+      return labelsFromRows(rows as unknown as RawLabelRow[]);
     },
     async upload(path, body, contentType) {
       const { error } = await supabase.storage

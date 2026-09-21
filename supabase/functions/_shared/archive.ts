@@ -23,6 +23,13 @@ export const ARCHIVE_ID_CHUNK = 100;
 /** Same wall-clock budget as ingest's CYCLE_DEADLINE_MS. */
 export const ARCHIVE_DEADLINE_MS = 50_000;
 
+// P12 (migration 065): each exported article is enriched with a `labels`
+// object read from jev_shadow_predictions -- one model's shadow answers
+// under a pinned question set, declared as such in the manifest. Zero
+// gateway calls: this only reads rows jev-shadow already wrote.
+export const ARCHIVE_LABEL_TASKS = ["politics", "topic", "clickbait", "framing", "sensational"] as const;
+export const ARCHIVE_LABEL_SOURCE = "typesafe-ai/jev via jev-shadow";
+
 export interface ArchiveCluster {
   id: string;
   title_tr: string;
@@ -36,6 +43,34 @@ export interface ArchiveCluster {
   first_published: string;
 }
 
+/**
+ * One article's shadow-model labels. All six fields are null when jev-shadow
+ * has not produced a prediction for the article yet -- a miss is never an
+ * error and never drops the article from the export.
+ */
+export interface ArchiveLabels {
+  question_set: string | null;
+  politics_p: number | null; // task 'politics'  -> jev_prob
+  topic: string | null; // task 'topic'     -> jev_choice
+  clickbait_p: number | null; // task 'clickbait' -> jev_prob
+  framing: string | null; // task 'framing'   -> jev_choice
+  sensational: number | null; // task 'sensational' -> jev_prob (RAW 0..3, NOT normalised)
+}
+
+/** A fresh, all-null ArchiveLabels object. Never share/freeze one instance --
+ * every article gets its own so a future mutation bug can't silently alias
+ * across the export. */
+export function emptyLabels(): ArchiveLabels {
+  return {
+    question_set: null,
+    politics_p: null,
+    topic: null,
+    clickbait_p: null,
+    framing: null,
+    sensational: null,
+  };
+}
+
 export interface ArchiveArticle {
   article_id: string;
   cluster_id: string;
@@ -44,6 +79,7 @@ export interface ArchiveArticle {
   title: string;
   url: string;
   published_at: string;
+  labels: ArchiveLabels;
 }
 
 export interface ArchiveFile {
@@ -53,6 +89,13 @@ export interface ArchiveFile {
   bytes: number;
 }
 
+export interface ArchiveManifestLabels {
+  source: typeof ARCHIVE_LABEL_SOURCE;
+  question_set: string | null; // most common non-null question_set; ties broken lexicographically ascending
+  coverage: number; // (# articles with labels.politics_p !== null) / articles.length, 3dp, 0 when empty
+  declared: true;
+}
+
 export interface ArchiveManifest {
   schema: typeof ARCHIVE_SCHEMA;
   day: string;
@@ -60,6 +103,7 @@ export interface ArchiveManifest {
   files: ArchiveFile[];
   rows: number;
   bytes: number;
+  labels: ArchiveManifestLabels;
 }
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -122,7 +166,15 @@ export function byteLength(text: string): number {
   return new TextEncoder().encode(text).byteLength;
 }
 
-export function buildManifest(day: string, generatedAt: string, files: ArchiveFile[]): ArchiveManifest {
+export function buildManifest(
+  day: string,
+  generatedAt: string,
+  files: ArchiveFile[],
+  labels: ArchiveManifestLabels,
+): ArchiveManifest {
+  // Key order here IS manifest.json's key order (JSON.stringify(manifest,
+  // null, 2) is not key-sorted): schema, day, generated_at, files, rows,
+  // bytes, labels. Do not reorder without checking (h) in the test suite.
   return {
     schema: ARCHIVE_SCHEMA,
     day,
@@ -130,6 +182,37 @@ export function buildManifest(day: string, generatedAt: string, files: ArchiveFi
     files,
     rows: files.reduce((n, f) => n + f.rows, 0),
     bytes: files.reduce((n, f) => n + f.bytes, 0),
+    labels,
+  };
+}
+
+/**
+ * Coverage/question_set summary for the manifest's `labels` block. Coverage
+ * is measured by `politics_p` (every article gets a politics prediction in
+ * the normal run) not by "has any label at all", so a partially-labelled day
+ * reports a meaningful fraction rather than always 1.0.
+ */
+export function summariseLabels(articles: readonly ArchiveArticle[]): ArchiveManifestLabels {
+  if (articles.length === 0) {
+    return { source: ARCHIVE_LABEL_SOURCE, question_set: null, coverage: 0, declared: true };
+  }
+  let withPolitics = 0;
+  const counts = new Map<string, number>();
+  for (const a of articles) {
+    if (a.labels.politics_p !== null) withPolitics++;
+    if (a.labels.question_set !== null) {
+      counts.set(a.labels.question_set, (counts.get(a.labels.question_set) ?? 0) + 1);
+    }
+  }
+  // Determinism is the point: two runs over the same day must produce the
+  // same manifest hash, so ties break on the question_set string itself,
+  // not on Map/array iteration order.
+  const ranked = [...counts.entries()].sort(([qsA, nA], [qsB, nB]) => nB - nA || (qsA < qsB ? -1 : qsA > qsB ? 1 : 0));
+  return {
+    source: ARCHIVE_LABEL_SOURCE,
+    question_set: ranked.length > 0 ? ranked[0]![0] : null,
+    coverage: Number((withPolitics / articles.length).toFixed(3)),
+    declared: true,
   };
 }
 
@@ -149,7 +232,7 @@ export interface RawArticleRow {
   source: { slug: string; bias: string | null } | { slug: string; bias: string | null }[] | null;
 }
 
-export function mapArticle(row: RawArticleRow): ArchiveArticle {
+export function mapArticle(row: RawArticleRow, labels: ArchiveLabels = emptyLabels()): ArchiveArticle {
   const src = Array.isArray(row.source) ? (row.source[0] ?? null) : row.source;
   return {
     article_id: row.id,
@@ -159,7 +242,66 @@ export function mapArticle(row: RawArticleRow): ArchiveArticle {
     title: row.title,
     url: row.url,
     published_at: row.published_at,
+    labels,
   };
+}
+
+/** Raw row from `jev_shadow_predictions`, one per (article, task). */
+export interface RawLabelRow {
+  task: string;
+  article_id: string | null;
+  jev_prob: number | string | null;
+  jev_choice: string | null;
+  question_set: string | null; // projected from jev_answer->>question_set
+}
+
+function coerceLabelNumber(v: number | string | null): number | null {
+  if (v === null) return null;
+  // PostgREST sends numeric columns as strings.
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Folds raw jev_shadow_predictions rows (task-per-row) into one ArchiveLabels
+ * object per article. A row with a null/empty article_id or a task outside
+ * ARCHIVE_LABEL_TASKS is skipped entirely. question_set is taken from the
+ * first non-null value seen for that article and never overwritten after.
+ */
+export function labelsFromRows(rows: readonly RawLabelRow[]): Map<string, ArchiveLabels> {
+  const out = new Map<string, ArchiveLabels>();
+  const tasks: readonly string[] = ARCHIVE_LABEL_TASKS;
+  for (const row of rows) {
+    if (!row.article_id) continue;
+    if (!tasks.includes(row.task)) continue;
+
+    let labels = out.get(row.article_id);
+    if (!labels) {
+      labels = emptyLabels();
+      out.set(row.article_id, labels);
+    }
+    if (labels.question_set === null && row.question_set !== null) {
+      labels.question_set = row.question_set;
+    }
+    switch (row.task) {
+      case "politics":
+        labels.politics_p = coerceLabelNumber(row.jev_prob);
+        break;
+      case "clickbait":
+        labels.clickbait_p = coerceLabelNumber(row.jev_prob);
+        break;
+      case "sensational":
+        labels.sensational = coerceLabelNumber(row.jev_prob);
+        break;
+      case "topic":
+        labels.topic = row.jev_choice;
+        break;
+      case "framing":
+        labels.framing = row.jev_choice;
+        break;
+    }
+  }
+  return out;
 }
 
 /** The I/O the export needs; archive-export/index.ts binds it to Supabase. */
@@ -179,6 +321,13 @@ export interface ArchivePorts {
     clusterIds: readonly string[],
     page: number,
   ): Promise<{ rows: RawArticleRow[]; fetched: number }>;
+  /**
+   * Shadow-model labels for up to ARCHIVE_ID_CHUNK article ids in ONE query
+   * -- never one per article, same anti-timeout discipline as fetchArticles.
+   * An id absent from the returned Map is not an error: the caller falls
+   * back to emptyLabels() and still exports the article.
+   */
+  fetchLabels(articleIds: readonly string[]): Promise<Map<string, ArchiveLabels>>;
   upload(path: string, body: string, contentType: string): Promise<void>;
   recordExport(row: { day: string; object_path: string; sha256: string; rows: number; bytes: number }): Promise<void>;
   now(): number;
@@ -222,8 +371,12 @@ async function pageAll<T>(
 
 /**
  * Exports one UTC day. Idempotent per day: returns `skipped` when a ledger
- * row already exists. Throws (no ledger row written) on an upload failure
- * or when the deadline is hit, so the next run redoes the whole day.
+ * row already exists. Throws (no ledger row written) only on an upload
+ * failure or when the overall deadline is blown -- a day that fails that
+ * way is NOT automatically retried; it stays failed until an operator
+ * deletes its `archive_exports` row and re-POSTs the day. A deadline hit
+ * during the optional labels phase does not throw: it degrades to
+ * all-null labels for the remaining articles and the day still exports.
  */
 export async function runArchiveExport(
   ports: ArchivePorts,
@@ -232,6 +385,7 @@ export async function runArchiveExport(
 ): Promise<ArchiveResult> {
   const t0 = ports.now();
   const deadlineMs = opts.deadlineMs ?? ARCHIVE_DEADLINE_MS;
+  const labelsCutoff = t0 + deadlineMs * 0.7;
   const checkDeadline = (stage: string) => {
     if (ports.now() - t0 > deadlineMs) throw new ArchiveDeadlineError(stage);
   };
@@ -241,7 +395,7 @@ export async function runArchiveExport(
   const { start, end } = dayBounds(day);
   const clusters = await pageAll((p) => ports.fetchClusters(start, end, p), checkDeadline, "clusters");
 
-  const articles: ArchiveArticle[] = [];
+  const rawRows: RawArticleRow[] = [];
   const ids = clusters.map((c) => c.id);
   for (let i = 0; i < ids.length; i += ARCHIVE_ID_CHUNK) {
     const chunk = ids.slice(i, i + ARCHIVE_ID_CHUNK);
@@ -251,10 +405,45 @@ export async function runArchiveExport(
     for (let page = 0; ; page++) {
       checkDeadline("articles");
       const { rows, fetched } = await ports.fetchArticles(chunk, page);
-      for (const row of rows) articles.push(mapArticle(row));
+      rawRows.push(...rows);
       if (fetched < ARCHIVE_PAGE_SIZE) break;
     }
   }
+
+  // Deduped, insertion-ordered article ids: the same article can be a
+  // member of two clusters published the same day, so it must be requested
+  // from fetchLabels once even though it is mapped into `articles` twice.
+  const seenIds = new Set<string>();
+  const dedupedIds: string[] = [];
+  for (const row of rawRows) {
+    if (seenIds.has(row.id)) continue;
+    seenIds.add(row.id);
+    dedupedIds.push(row.id);
+  }
+
+  const labelMap = new Map<string, ArchiveLabels>();
+  for (let i = 0; i < dedupedIds.length; i += ARCHIVE_ID_CHUNK) {
+    const chunk = dedupedIds.slice(i, i + ARCHIVE_ID_CHUNK);
+    // Labels are an optional enrichment with its own sub-budget so it can
+    // never cost the day: once labelsCutoff passes, stop labelling and let
+    // every remaining article fall back to emptyLabels() below -- the day
+    // still exports, with manifest.labels.coverage as the machine-readable
+    // signal that this happened.
+    if (ports.now() > labelsCutoff) break;
+    // A PostgREST error on this chunk (including a deadline-port error)
+    // must not abort the whole day's export either -- same degrade path.
+    try {
+      const chunkLabels = await ports.fetchLabels(chunk);
+      for (const [id, labels] of chunkLabels) labelMap.set(id, labels);
+    } catch (err) {
+      console.error("[archive-export] labels chunk failed", err);
+      break;
+    }
+  }
+
+  const articles: ArchiveArticle[] = rawRows.map((row) =>
+    mapArticle(row, { ...(labelMap.get(row.id) ?? emptyLabels()) }),
+  );
 
   const prefix = objectPrefix(day);
   const clustersText = toJsonl(clusters as unknown as Record<string, unknown>[]);
@@ -264,7 +453,8 @@ export async function runArchiveExport(
     { name: "articles.jsonl", sha256: await sha256Hex(articlesText), rows: articles.length, bytes: byteLength(articlesText) },
   ];
   const generatedAt = opts.generatedAt ?? new Date(ports.now()).toISOString();
-  const manifest = buildManifest(day, generatedAt, files);
+  const manifestLabels = summariseLabels(articles);
+  const manifest = buildManifest(day, generatedAt, files, manifestLabels);
   const manifestText = JSON.stringify(manifest, null, 2) + "\n";
   const manifestSha = await sha256Hex(manifestText);
 
