@@ -1009,6 +1009,86 @@ copy (select * from public.jev_gold_set) to '/tmp/jev_gold_set_backup.csv' with 
 copy (select * from public.jev_gold_labels) to '/tmp/jev_gold_labels_backup.csv' with csv header;
 ```
 
+## Sinyaller paketi (065): kaynak sapması, KAP kanaryası, arşiv etiketleri
+
+`065_jev_signals.sql` adds four zero-gateway-cost measurements built entirely on the predictions the 061/063 shadow suite already writes: two `service_role`-only tables (`source_drift_daily`, `jev_alerts`), four `SECURITY DEFINER` functions (`jev_source_drift_compute`, `jev_kap_canary_compute`, `jev_kap_canary_status`, `kap_disclosure_signals_for`), and one SQL-only nightly `pg_cron` job (`jev-signals-nightly`, `05 4 * * *`) that calls the two writer functions. The nightly archive export also gains a per-article `labels` object and a declared `labels` block in `manifest.json`. Standing note: this pack adds zero new gateway calls (every number is computed in SQL from rows that already exist) and makes no reader-facing byte changes -- `/ekonomi`, `/`, `/kaynaklar/durum` and `/blindspots` are untouched.
+
+**ORDER IS LOAD-BEARING**: apply the migration **before** deploying `archive-export` and **before** `vercel --prod` -- both read objects that only exist after the migration.
+
+1. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/065_jev_signals.sql
+   # ...or: supabase db push
+   ```
+
+   The file inserts its own ledger row (`('065', '065_jev_signals')`) and is safe to re-apply. Unlike 060/061/063, this migration needs **no Vault precondition** -- the cron job is SQL-only and never leaves Postgres.
+
+2. **Verify the cron:**
+
+   ```sql
+   select jobname, schedule, active from cron.job where jobname = 'jev-signals-nightly';
+   -- expect 05 4 * * *, active = true
+   ```
+
+3. **Smoke both writers by hand for yesterday, before the first 04:05 UTC run:**
+
+   ```sql
+   select * from public.jev_source_drift_compute();
+   select * from public.jev_kap_canary_compute();
+   ```
+
+   On a fresh install both legitimately return zeros until 14 days of shadow predictions exist -- the baseline gate is `n >= 60` politics predictions over the trailing 14 days per source.
+
+4. **Deploy the archive function:**
+
+   ```bash
+   supabase functions deploy archive-export --project-ref "$PROJECT_REF" --no-verify-jwt
+   ```
+
+   `--no-verify-jwt` is not optional here, same as every other Edge Function in this repo.
+
+5. **ARCHIVE LABELS ARE DECLARED, MODEL-DERIVED DATA.** Every `articles.jsonl` row now carries a `labels` object and `manifest.json` carries `labels: {source: "typesafe-ai/jev via jev-shadow", question_set, coverage, declared: true}`. These are a model's answers, not editorial judgements and not ground truth; anyone consuming the archive must read them as such. Older day prefixes keep the pre-065 shape -- the export is idempotent per day and will **not** rewrite a day that already has an `archive_exports` ledger row. To backfill labels into an already-exported day, delete that day's ledger row first, then re-POST the day:
+
+   ```sql
+   delete from public.archive_exports where day = 'YYYY-MM-DD';
+   ```
+
+   ```bash
+   curl -sS -X POST -H "Authorization: Bearer $SR" -H 'Content-Type: application/json' \
+     -d '{"day":"YYYY-MM-DD"}' "https://$PROJECT_REF.functions.supabase.co/archive-export"
+   ```
+
+6. **Redeploy Vercel** -- required for the new `/admin` "Kaynak sapması" / "Uyarılar" sections and the `/admin/ekonomi` "KAP önemlilik" panel. No new environment variable is needed:
+
+   ```bash
+   vercel --prod
+   ```
+
+**KILL SWITCH** (no migration, no deploy):
+
+```sql
+update cron.job set active = false where jobname = 'jev-signals-nightly';
+```
+
+This stops both signal writers and changes nothing else -- the archive labels and the admin sections keep working off whatever rows already exist.
+
+A SQL-only cron failure surfaces **only** in `cron.job_run_details`, never in Sentry (which is wired into the Deno Edge Functions, not into Postgres):
+
+```sql
+select jobname, status, return_message, start_time from cron.job_run_details where jobname = 'jev-signals-nightly' order by start_time desc limit 5;
+```
+
+**POST-DEPLOY WATCH.** Also check that the alert count does not explode on day one:
+
+```sql
+select count(*) from public.jev_alerts where acknowledged_at is null;
+```
+
+Treat the first weeks of this count as threshold-calibration data, not ground truth: the `drift_score >= 3` / `>= 0.250` cut points and the KAP canary's 10% / `n >= 10` gate are unvalidated first guesses. A synthetic 118-source / 283k-prediction uniform-random run flagged roughly 3-6% of sources per night on pure noise alone (an upper bound -- real sources are autocorrelated, so expect less in practice). A steady nightly floor at that rate means the thresholds need tuning, not that the feeds broke.
+
+**RETRACTION IS NOT AUTOMATIC.** `jev_source_drift_compute` can only ever rewrite or add a row for a day that still qualifies (`politics_n >= 20` and `base_n >= 60`); it never deletes a row for a day that stopped qualifying -- the `upserted` CTE only inserts/updates. `source_drift_daily` also has no delete grant (`select`/`insert`/`update` only), so a stale `flagged = true` row keeps rendering in /admin's "Kaynak sapması" table for the rest of its 7-day window even after an operator confirms it was a false positive, and simply re-running `jev_source_drift_compute()` for that day returns `(0, 0)` with no change. There is no service_role delete path today -- retracting a known-bad row requires a follow-up migration; until one lands, treat it as "acknowledge and wait for it to age out of the 7-day window", not as something an operator can clear by hand.
+
 ---
 
 ## Owner sign-off checklist
@@ -1042,6 +1122,10 @@ Before declaring the migration complete:
 - [ ] Migration 063 applied (Vault precondition from 038 verified first); `select jobname, schedule, active from cron.job where jobname in ('jev-shadow','jev-cluster-audit');` shows `*/10 * * * *` and `55 3 * * *`, both active; `select * from public.jev_shadow_month_usage();` reports `cap = 500000000`
 - [ ] `JEV_DISABLED` documented as the instant, no-deploy kill switch for both shadow and audit modes, and `vercel --prod` redeployed so `/admin/jev-altin` renders
 - [ ] Operator knows `jev_gold_labels` (and `jev_gold_set`) cascade-delete with their `articles` rows, and that the admin `nuke_articles` action deletes every article -- a snapshot/export procedure is agreed before that action is ever used
+
+- [ ] Migration 065 applied; `select jobname, schedule, active from cron.job where jobname = 'jev-signals-nightly';` shows `05 4 * * *`, active
+- [ ] `archive-export` redeployed and the next manifest carries `labels.declared = true` with a plausible `coverage`
+- [ ] Operator knows the SQL-only `jev-signals-nightly` cron has no Sentry alerting and must be checked in `cron.job_run_details`
 
 ---
 

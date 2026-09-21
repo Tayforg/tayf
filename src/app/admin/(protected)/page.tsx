@@ -3,6 +3,7 @@ import Link from "next/link";
 import { requireAdminSession } from "@/lib/admin/session";
 import { getRecentArchiveExports } from "@/lib/admin/archive-status";
 import { JevShadowSection } from "@/components/admin/jev-shadow-section";
+import { JevSignalsSection } from "@/components/admin/jev-signals-section";
 import { JevUnlinkSection } from "@/components/admin/jev-unlink-section";
 import { JevBlindspotSection } from "@/components/admin/jev-blindspot-section";
 import { AdminPanel } from "@/components/admin/admin-panel";
@@ -69,6 +70,7 @@ export default async function AdminPage() {
           )}
         </section>
         <JevShadowSection />
+        <JevSignalsSection />
         <JevUnlinkSection />
         <JevBlindspotSection />
         <CorrectionsList />

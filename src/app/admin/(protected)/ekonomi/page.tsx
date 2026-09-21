@@ -8,6 +8,7 @@ import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { requireAdminSession } from "@/lib/admin/session";
 import { fmtWhen } from "@/lib/finance/format";
 import { fetchFinanceHealth, fetchKapBreakerState, fetchLagHistogram, fetchSignals, type Signal } from "@/lib/finance/queries";
+import { getKapSignals, type KapCanaryStatus, type KapMaterialityLevel } from "@/lib/admin/kap-signals";
 import { currentTimeMs } from "@/lib/time";
 
 export const metadata: Metadata = {
@@ -35,6 +36,25 @@ const KIND_META: Record<string, { title: string; hint: string }> = {
   },
 };
 
+// "KAP önemlilik" panel (pack "Sinyaller", migration 065) — materiality and
+// class-agreement are Jev gölge predictions, never KAP's own declaration;
+// see pack.md's "AGREEMENT IS NOT ACCURACY" and the footnote below.
+function materialityLevelText(level: KapMaterialityLevel | null): string {
+  return level ?? "—";
+}
+
+function classAgreeText(v: boolean | null): string {
+  if (v === true) return "uyumlu";
+  if (v === false) return "ayrışıyor";
+  return "—";
+}
+
+function canaryLine(canary: KapCanaryStatus | null): string {
+  if (canary === null || canary.n < 10) return "Kanarya: yeterli veri yok.";
+  const rateText = canary.rate === null ? "—" : `%${Math.round(canary.rate * 100)}`;
+  return `Kanarya ${canary.day}: ${canary.n} sınıf tahmini · ${rateText} anlaşmazlık`;
+}
+
 function evidenceText(s: Signal): string {
   const e = s.evidence;
   switch (s.kind) {
@@ -51,7 +71,13 @@ function evidenceText(s: Signal): string {
 
 export default async function AdminEkonomiPage() {
   await requireAdminSession();
-  const [health, signals, lags, kapBreaker] = await Promise.all([fetchFinanceHealth(), fetchSignals(), fetchLagHistogram(7), fetchKapBreakerState()]);
+  const [health, signals, lags, kapBreaker, kapSignals] = await Promise.all([
+    fetchFinanceHealth(),
+    fetchSignals(),
+    fetchLagHistogram(7),
+    fetchKapBreakerState(),
+    getKapSignals(),
+  ]);
   const lagMax = Math.max(1, ...lags.map((l) => l.count));
   const groups = Object.keys(KIND_META).map((kind) => ({ kind, items: signals.filter((s) => s.kind === kind) }));
 
@@ -161,6 +187,39 @@ export default async function AdminEkonomiPage() {
             state={kapBreaker}
             open={Boolean(kapBreaker?.blockedUntil && Date.parse(kapBreaker.blockedUntil) > currentTimeMs())}
           />
+
+          <Panel title="KAP önemlilik" meta="son 30 bildirim, Jev gölge">
+            {kapSignals === null ? (
+              <PanelEmpty>KAP önemlilik okunamadı.</PanelEmpty>
+            ) : (
+              <>
+                <p className="px-3 pt-3 font-mono text-[11px] tabular-nums text-foreground">
+                  {canaryLine(kapSignals.canary)}
+                </p>
+                {kapSignals.disclosures.length === 0 ? (
+                  <PanelEmpty>Henüz önemlilik etiketi yok.</PanelEmpty>
+                ) : (
+                  <ol className="divide-y divide-border/60 px-3 py-2 font-mono text-[11px] tabular-nums">
+                    {kapSignals.disclosures.map((row) => (
+                      <li
+                        key={row.disclosure_index}
+                        className="grid grid-cols-[3.5rem_minmax(0,1fr)_4rem_5rem] items-center gap-2 py-1.5"
+                      >
+                        <span className="text-muted-foreground">{row.disclosure_index}</span>
+                        <span className="truncate text-foreground">{row.kap_title}</span>
+                        <span className="text-foreground">{materialityLevelText(row.materiality_level)}</span>
+                        <span className="text-foreground">{classAgreeText(row.class_agree)}</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+                <p className="px-3 pb-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                  Önemlilik ve sınıf uyumu Jev gölge tahminlerinden gelir, KAP&apos;ın beyanı değildir. /ekonomi
+                  sayfasında gösterilmez.
+                </p>
+              </>
+            )}
+          </Panel>
 
           <Panel title="Model yuvası">
             <div className="space-y-2 px-3 py-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
