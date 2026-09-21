@@ -150,6 +150,25 @@ const supabaseFake = await vi.hoisted(async () => {
         };
       },
     },
+    // B7 (migration 069): this suite predates the LLM eligibility pre-gate
+    // and asserts on the unconditional "candidate -> LLM call" path it
+    // exercised before 069 landed. Every candidate in this file is
+    // therefore stubbed as eligible (politically relevant, not
+    // clickbait-heavy) so those pre-existing assertions keep testing what
+    // they were written to test; the gate's own ineligible / budgeted_out /
+    // rpc-failure behaviour is covered by tests/api/cron-headline-llm.test.ts.
+    rpc: {
+      headline_llm_eligible: (args: unknown) => {
+        const { p_cluster_ids } = (args ?? {}) as { p_cluster_ids?: string[] };
+        const rows = (p_cluster_ids ?? []).map((id) => ({
+          cluster_id: id,
+          eligible: true,
+          politics_n: 2,
+          clickbait_share: 0,
+        }));
+        return { data: rows, error: null };
+      },
+    },
   });
   return { fake, tableData, dbAccessLog };
 });

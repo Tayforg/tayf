@@ -11,6 +11,15 @@ import {
 } from "@/lib/headline/prompt";
 import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
 import { captureServerException } from "@/lib/sentry/server";
+import { fetchHeadlineEligibility } from "@/lib/headline/eligibility";
+import {
+  addHeadlineBudget,
+  addHeadlineGateCounts,
+  estimateCallUsd,
+  headlineLlmDailyCapUsd,
+  readHeadlineBudget,
+  utcDay,
+} from "@/lib/headline/budget";
 
 // Boot-time guard. The route is FAIL-CLOSED on a missing `CRON_SECRET` (503
 // on every invocation), but in production that failure is otherwise only
@@ -118,6 +127,7 @@ const LLM_MODEL =
 interface ClusterCandidate {
   id: string;
   title_tr: string | null;
+  title_tr_neutral: string | null;
   summary_tr: string | null;
   article_count: number;
 }
@@ -137,7 +147,7 @@ interface ClusterArticleRow {
  */
 async function rewriteClusterHeadline(input: {
   member_titles: string[];
-}): Promise<string> {
+}): Promise<{ text: string; inputTokens: number; outputTokens: number }> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error("LLM API key not set");
@@ -166,14 +176,20 @@ async function rewriteClusterHeadline(input: {
 
   const data = (await res.json()) as {
     content?: Array<{ text?: string }>;
+    usage?: { input_tokens?: number; output_tokens?: number };
   };
-  const text = data.content?.[0]?.text?.trim();
-  if (!text) {
-    throw new Error("Empty response from LLM");
-  }
-
-  // Strip stray wrapping quotes (curly + straight) the model sometimes adds.
-  return text.replace(/^["'“‘]|["'”’]$/g, "").trim();
+  // Do NOT throw on empty content: the vendor has already billed this 200.
+  // Return the usage counts so the caller can meter the spend, then let its
+  // existing `if (!result.text)` branch record status "errored".
+  const text = data.content?.[0]?.text?.trim() ?? "";
+  const cleaned = text.replace(/^["'“‘]|["'”’]$/g, "").trim();
+  return {
+    text: cleaned,
+    // A 200 with no usage object must not meter as free; fall back to a
+    // conservative non-zero estimate (prompt chars/4 in, max_tokens out).
+    inputTokens: data.usage?.input_tokens ?? Math.ceil(prompt.length / 4),
+    outputTokens: data.usage?.output_tokens ?? 100,
+  };
 }
 
 export const GET = withApiErrors(async (request: Request) => {
@@ -234,7 +250,7 @@ export const GET = withApiErrors(async (request: Request) => {
   // unchanged so migration 019's partial index still applies.
   const { data: clustersData, error: pickError } = await supabase
     .from("clusters")
-    .select("id, title_tr, summary_tr, article_count")
+    .select("id, title_tr, title_tr_neutral, summary_tr, article_count")
     .is(mode === "llm" ? "title_neutral_at" : "title_tr_neutral", null)
     .eq("is_archived", false)
     .gte(
@@ -251,12 +267,20 @@ export const GET = withApiErrors(async (request: Request) => {
   const clusters = (clustersData ?? []) as ClusterCandidate[];
 
   if (clusters.length === 0) {
+    if (mode === "llm") {
+      // Gate counters are per CYCLE, not per candidate — a zero-candidate
+      // cycle still records that the gate ran (both counts 0).
+      await addHeadlineGateCounts(supabase, { day: utcDay(), eligible: 0, ineligible: 0 });
+    }
     return NextResponse.json({
       success: true,
       mode,
       rewrote: 0,
       skipped: 0,
       errored: 0,
+      eligible: 0,
+      ineligible: 0,
+      budgetedOut: 0,
       reason: "no candidates",
       timestamp: new Date().toISOString(),
     });
@@ -265,9 +289,34 @@ export const GET = withApiErrors(async (request: Request) => {
   let rewrote = 0;
   let skipped = 0;
   let errored = 0;
+  let eligibleCount = 0;
+  let ineligibleCount = 0;
+  let budgetedOut = 0;
   const perCluster: Record<string, { status: string; error?: string }> = {};
   // Ids actually rewrote this cycle — drives the revalidateTag calls below.
   const rewroteIds: string[] = [];
+
+  // B7 (migration 069): the LLM eligibility pre-gate + daily USD budget.
+  // Computed once before the loop, only in LLM mode — extractive mode
+  // never calls headline_llm_eligible / llm_budget_add / llm_budget_gate
+  // (it is free, so there is nothing to gate or meter). `spentUsd` is
+  // re-read from each successful llm_budget_add() return value inside the
+  // loop, never accumulated locally, so the cap check always reflects the
+  // database's authoritative total.
+  const day = utcDay();
+  const capUsd = headlineLlmDailyCapUsd();
+  let spentUsd = 0;
+  let eligibility = new Map<
+    string,
+    { eligible: boolean; politics_n: number; clickbait_share: number }
+  >();
+  if (mode === "llm") {
+    spentUsd = (await readHeadlineBudget(supabase, day))?.usd ?? 0;
+    eligibility = await fetchHeadlineEligibility(
+      supabase,
+      clusters.map((c) => c.id),
+    );
+  }
 
   // Sequential. The LLM API is fine with bursts but cost-conscious mode
   // wants serialised retries; one bad cluster shouldn't blow the whole
@@ -311,28 +360,160 @@ export const GET = withApiErrors(async (request: Request) => {
       continue;
     }
 
+    if (mode === "llm") {
+      // B7 gate: only an eligible row (from headline_llm_eligible) may
+      // spend LLM budget. A cluster absent from the map (rpc failure, or
+      // no scored members) is fail-safe ineligible — see
+      // src/lib/headline/eligibility.ts's header doc.
+      const isEligible = eligibility.get(c.id)?.eligible === true;
+
+      if (!isEligible) {
+        ineligibleCount++;
+
+        if (c.title_tr_neutral === null) {
+          // STARVATION GUARD: only write the free extractive fallback when
+          // this cluster has never had ANY neutral title — otherwise a
+          // cluster that already holds an extractive title would be
+          // rewritten every single cycle (it always matches
+          // `title_neutral_at IS NULL`), looping the same rows forever.
+          let neutral: string | null;
+          try {
+            neutral = pickNeutralTitle(items);
+          } catch (err) {
+            console.error("[headline-cron] extractive pick failed", c.id, err);
+            captureServerException(err, { clusterId: c.id, mode });
+            perCluster[c.id] = { status: "errored", error: "empty rewrite" };
+            errored++;
+            continue;
+          }
+          if (!neutral) {
+            perCluster[c.id] = { status: "errored", error: "empty rewrite" };
+            errored++;
+            continue;
+          }
+
+          const { error: writeErr } = await supabase
+            .from("clusters")
+            .update({
+              // No title_neutral_at: an extractive pick is not an AI
+              // neutralization and must not be counted as one.
+              title_tr_neutral: neutral,
+              title_neutral_model: EXTRACTIVE_MODEL_ID,
+            })
+            .eq("id", c.id);
+
+          if (writeErr) {
+            console.error("[headline-cron] write", c.id, writeErr);
+            captureServerException(writeErr, { clusterId: c.id, mode });
+            perCluster[c.id] = { status: "errored", error: "write-failed" };
+            errored++;
+            continue;
+          }
+
+          perCluster[c.id] = { status: "extractive" };
+          // Counts as a rewrite for cache-invalidation purposes, but NOT
+          // in the `rewrote` counter — it isn't an AI neutralization.
+          rewroteIds.push(c.id);
+        } else {
+          // Already has a title (extractive or otherwise): leave it
+          // untouched, no write, no LLM call. Prevents the batch from
+          // starving on the same rows every cycle (see pack.md's
+          // "STARVATION BUG THE DESIGN AVOIDS").
+          perCluster[c.id] = { status: "ineligible" };
+        }
+        continue;
+      }
+
+      eligibleCount++;
+
+      if (spentUsd >= capUsd) {
+        console.warn("[headline-cron] budgeted_out", c.id, spentUsd, capUsd);
+        perCluster[c.id] = { status: "budgeted_out" };
+        budgetedOut++;
+        continue;
+      }
+
+      let result: { text: string; inputTokens: number; outputTokens: number };
+      try {
+        result = await rewriteClusterHeadline({ member_titles: memberTitles });
+      } catch (err) {
+        // Keep the raw `err` out of the response body — it can carry
+        // vendor identifiers, prompt fragments, or upstream rate-limit
+        // details that we do not want to leak to the caller. The full
+        // message is captured explicitly via captureServerException below
+        // and also logged to Edge/Vercel logs via console.error.
+        console.error(
+          "[headline-cron] LLM call failed for cluster",
+          c.id,
+          err,
+        );
+        captureServerException(err, { clusterId: c.id, mode });
+        perCluster[c.id] = {
+          status: "errored",
+          error: "rewriteClusterHeadline failed",
+        };
+        errored++;
+        continue;
+      }
+
+      // Record the real spend and use the database's returned cumulative
+      // total for the NEXT iteration's cap check (migration 069, B7) —
+      // never a locally-accumulated number. This MUST run immediately
+      // after the vendor call resolves, before any later branch below can
+      // `continue` — the money is spent when the vendor responds, not when
+      // the clusters row is written (E1-BUDGET-LEAK).
+      const usd = estimateCallUsd(result.inputTokens, result.outputTokens);
+      const newTotal = await addHeadlineBudget(supabase, {
+        day,
+        calls: 1,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        usd,
+      });
+      spentUsd = newTotal ?? spentUsd + usd;
+
+      if (!result.text) {
+        perCluster[c.id] = { status: "errored", error: "empty rewrite" };
+        errored++;
+        continue;
+      }
+
+      const { error: writeErr } = await supabase
+        .from("clusters")
+        .update({
+          title_tr_neutral: result.text,
+          title_neutral_at: new Date().toISOString(),
+          // Provenance (migration 046): the model id actually used for
+          // this rewrite and the prompt-template version that produced
+          // it, so a rewrite can never land without an audit trail.
+          title_neutral_model: LLM_MODEL,
+          title_neutral_prompt_version: HEADLINE_PROMPT_VERSION,
+        })
+        .eq("id", c.id);
+
+      if (writeErr) {
+        console.error("[headline-cron] write", c.id, writeErr);
+        captureServerException(writeErr, { clusterId: c.id, mode });
+        perCluster[c.id] = { status: "errored", error: "write-failed" };
+        errored++;
+        continue;
+      }
+
+      perCluster[c.id] = { status: "rewrote" };
+      rewrote++;
+      rewroteIds.push(c.id);
+      continue;
+    }
+
+    // Extractive mode (no ANTHROPIC_API_KEY): unchanged from before B7 —
+    // picks and cleans a member headline, zero cost, no eligibility gate.
     let neutral: string | null;
     try {
-      neutral =
-        mode === "llm"
-          ? await rewriteClusterHeadline({ member_titles: memberTitles })
-          : pickNeutralTitle(items);
+      neutral = pickNeutralTitle(items);
     } catch (err) {
-      // Keep the raw `err` out of the response body — it can carry vendor
-      // identifiers, prompt fragments, or upstream rate-limit details that
-      // we do not want to leak to the caller. The full message is captured
-      // explicitly via captureServerException below and also logged to
-      // Edge/Vercel logs via console.error.
-      console.error(
-        "[headline-cron] LLM call failed for cluster",
-        c.id,
-        err,
-      );
+      console.error("[headline-cron] extractive pick failed", c.id, err);
       captureServerException(err, { clusterId: c.id, mode });
-      perCluster[c.id] = {
-        status: "errored",
-        error: "rewriteClusterHeadline failed",
-      };
+      perCluster[c.id] = { status: "errored", error: "empty rewrite" };
       errored++;
       continue;
     }
@@ -345,24 +526,12 @@ export const GET = withApiErrors(async (request: Request) => {
 
     const { error: writeErr } = await supabase
       .from("clusters")
-      .update(
-        mode === "llm"
-          ? {
-              title_tr_neutral: neutral,
-              title_neutral_at: new Date().toISOString(),
-              // Provenance (migration 046): the model id actually used for
-              // this rewrite and the prompt-template version that produced
-              // it, so a rewrite can never land without an audit trail.
-              title_neutral_model: LLM_MODEL,
-              title_neutral_prompt_version: HEADLINE_PROMPT_VERSION,
-            }
-          : {
-              // No title_neutral_at: an extractive pick is not an AI
-              // neutralization and must not be counted as one.
-              title_tr_neutral: neutral,
-              title_neutral_model: EXTRACTIVE_MODEL_ID,
-            },
-      )
+      .update({
+        // No title_neutral_at: an extractive pick is not an AI
+        // neutralization and must not be counted as one.
+        title_tr_neutral: neutral,
+        title_neutral_model: EXTRACTIVE_MODEL_ID,
+      })
       .eq("id", c.id);
 
     if (writeErr) {
@@ -376,6 +545,21 @@ export const GET = withApiErrors(async (request: Request) => {
     perCluster[c.id] = { status: "rewrote" };
     rewrote++;
     rewroteIds.push(c.id);
+  }
+
+  // B7: best-effort gate-outcome write, once per cycle, including cycles
+  // that made zero LLM calls (every candidate ineligible, or budget
+  // exhausted before the first eligible cluster). Never in extractive mode.
+  if (mode === "llm") {
+    try {
+      await addHeadlineGateCounts(supabase, {
+        day,
+        eligible: eligibleCount,
+        ineligible: ineligibleCount,
+      });
+    } catch (err) {
+      console.error("[headline-cron] llm_budget_gate failed", err);
+    }
   }
 
   // Push fresh titles out now instead of waiting on the cluster-feed
@@ -398,6 +582,10 @@ export const GET = withApiErrors(async (request: Request) => {
     rewrote,
     skipped,
     errored,
+    eligible: eligibleCount,
+    ineligible: ineligibleCount,
+    budgetedOut,
+    ...(mode === "llm" ? { budget: { day, usd: spentUsd, cap: capUsd } } : {}),
     clusters: perCluster,
     timestamp: new Date().toISOString(),
   });

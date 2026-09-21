@@ -1504,3 +1504,83 @@ update cron.job set active = false where jobname = 'jev-shadow';
 
 6. **Cost.** One extra question on the existing per-article `jev-shadow` call, roughly +325 input tokens per article (measured post-deploy: 1265 avg input tokens/prediction vs 941 pre-deploy), about 58M tokens/month at ~6,000 articles/day against the `JEV_MONTHLY_TOKEN_CAP_DEFAULT` of `5e8` (migration 063) -- ~12% of the cap, still comfortable headroom, and worth re-measuring once several days of ticks have accumulated. No new secret, no new environment variable: `AI_GATEWAY_API_KEY` is already present (shared by every Jev-calling function since migration 061), and `cluster_topics_refresh()` makes zero gateway calls of its own.
 
+
+
+## 069 — API anahtarları, rapor paylaşım bağlantıları, LLM bütçesi
+
+`069_api_keys_reports_llm_budget.sql` ships three independent, additive-only business-plumbing features in one migration because they landed in the same wave (Pack E: "İş altyapısı"): B7 puts a cost gate + daily USD ledger in front of the dormant LLM branch of `/api/cron/headline`; B9 adds tokened self-serve share links for the per-cluster Yelpaze Raporu; B11 adds a keyed, tiered `/api/v1` public read API. It creates four new tables (`llm_budget_daily`, `report_share_links`, `api_keys`, `api_key_usage_daily`) and five new functions (`llm_budget_add`, `llm_budget_gate`, `headline_llm_eligible`, `report_share_view`, `api_key_touch`), all in the same service_role-only shell as 041/057/059/060/061 — RLS enabled with zero policies, `revoke all ... from anon, authenticated, public`, and every function `SECURITY DEFINER` with `set search_path = ''`.
+
+**NO CRON IS SCHEDULED BY THIS MIGRATION, AND NO VAULT SECRET IS NEEDED.** Nothing in this pack needs a timer: the LLM budget is written by the existing Vercel cron `/api/cron/headline` on its own `*/5 * * * *` schedule, share links expire by `expires_at` comparison at read time (no sweeper job — an expired row is already dead to `report_share_view`), and API usage rows are written by the request path itself. There is no `do-block`, no `cron.schedule` call, and no `vault.decrypted_secrets` read anywhere in this file — apply it exactly like any other additive migration, no Supabase secret dance beforehand.
+
+1. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/069_api_keys_reports_llm_budget.sql
+   # ...or: supabase db push
+   ```
+
+   Verify it landed and every new object exists:
+
+   ```sql
+   select * from supabase_migrations.schema_migrations where version = '069';
+   select count(*) from public.llm_budget_daily;   -- expect 0 immediately after apply
+   select public.headline_llm_eligible(array[]::uuid[]);  -- expect zero rows, no error
+   ```
+
+   Prove the two budget RPCs' INSERT paths actually plan on the live server
+   (plpgsql bodies are only checked at call time, and the null-day guard
+   returns before the INSERT, so a read-only call proves nothing). Run this
+   BEFORE `ANTHROPIC_API_KEY` is ever set; the rollback leaves no row behind:
+
+   ```sql
+   begin;
+   select public.llm_budget_add('1970-01-01'::date, 1, 10, 5, 0.0001);
+   select public.llm_budget_gate('1970-01-01'::date, 1, 1);
+   select * from public.llm_budget_daily where day = '1970-01-01';
+   -- expect one row: calls 1, input_tokens 10, output_tokens 5,
+   -- usd 0.0001, eligible_n 1, ineligible_n 1
+   rollback;
+   ```
+
+2. **No Edge Function redeploy needed.** All five functions and four tables are read/written entirely from the Next.js app (`/api/cron/headline`, the new `/api/admin/rapor/*` and `/api/admin/api-keys*` routes, `/api/v1/*`, `/rapor/[token]`). Deploy the migration, then `vercel --prod` as usual — order matters only in that direction (DB before app), the same discipline as every migration above.
+
+3. **New env var: `HEADLINE_LLM_DAILY_USD_CAP`.** Decimal string, default `"2.00"` (USD per UTC day). Parsed with `Number()`; a NaN, zero, negative, or unset value falls back to the 2.00 default and logs the fallback once. Set it explicitly on Vercel (Production + Preview) so the ceiling is visible in the dashboard next to `ANTHROPIC_API_KEY`, even though omitting it is safe.
+
+   ```bash
+   vercel env add HEADLINE_LLM_DAILY_USD_CAP production
+   # value: 2.00 (or the founder's chosen ceiling)
+   ```
+
+   **There is deliberately no bypass switch for the eligibility gate.** An env var that disables a cost gate is a footgun; if the gate is wrongly refusing spend, the fix is jev-shadow coverage (see the warning below), never loosening or disabling the check.
+
+4. **THE ELIGIBILITY GATE IS FAIL-SAFE AND CAN SILENTLY KEEP THE LLM BRANCH DORMANT — this is by design, read it before setting `ANTHROPIC_API_KEY`.** `headline_llm_eligible()` reads `jev_shadow_predictions` for a candidate cluster's members. That table's politics/clickbait coverage is sparse and opportunistic (`jev-shadow` samples, it does not sweep every article), so a cluster with no scored members comes back ineligible every time. If coverage is thin, EVERY candidate is ineligible and the LLM branch spends nothing even after `ANTHROPIC_API_KEY` is set — the gate can only ever underspend, never overspend, but it will look like "nothing is happening" if you don't check the right number. **/admin's "Başlık LLM bütçesi" section's "Uygun küme: N/M" line is that number.** If it reads `0/N` (or "henüz ölçülmedi"), the gate is correctly refusing to spend on clusters Jev hasn't scored yet — do not "fix" this by loosening the gate or adding a bypass; the fix is more `jev-shadow` coverage.
+
+5. **B7 stays dormant in production on purpose.** `ANTHROPIC_API_KEY` remains unset today, so the whole LLM branch — eligibility check, budget ledger, the vendor call itself — is inert; `/api/cron/headline` keeps running in extractive mode exactly as before, with the two new response counters (`eligible`, `ineligible`, `budgetedOut`) present and zero. Do not set `ANTHROPIC_API_KEY` as part of this deploy. When the founder later wants LLM headlines, set it and watch the "Uygun küme" line for at least an hour before trusting the spend numbers.
+
+**KILL SWITCHES**, one per feature in this pack, none requiring a migration or rollback:
+
+```bash
+# 1. Pause the whole /api/cron/headline cron (both LLM and extractive mode).
+#    Already documented for migration 046 — repeated here because B7's gate
+#    lives inside the same route.
+vercel env add HEADLINE_PAUSED production   # value: 1
+```
+
+```sql
+-- 2. Kill one API consumer (B11) — 403s every subsequent request from that key.
+update public.api_keys set revoked_at = now() where id = <n>;
+```
+
+```sql
+-- 3. Kill one share link (B9) — the token 404s identically to unknown/expired.
+update public.report_share_links set revoked_at = now() where token = '<t>';
+
+-- 3b. Kill EVERY share link at once (e.g. a suspected leak).
+update public.report_share_links set revoked_at = now() where revoked_at is null;
+```
+
+```bash
+# 4. Drop the LLM branch back to extractive mode entirely (B7) — no
+#    migration change, no redeploy: the very next cron tick picks it up.
+vercel env rm ANTHROPIC_API_KEY production
+```
