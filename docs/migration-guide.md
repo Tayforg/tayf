@@ -1091,6 +1091,85 @@ Treat the first weeks of this count as threshold-calibration data, not ground tr
 
 ---
 
+## Çerçeve oyları paketi (068): oy tablosu + dört SECURITY DEFINER fonksiyon, cron yok
+
+`068_framing_votes.sql` is PACK D's only migration (R10 + T11): the `public.framing_votes` table (one row per anonymous crowd vote from `/oyun`'s new "Çerçeve" mode) and four `SECURITY DEFINER` functions -- `framing_vote_totals`, `framing_next_headline`, `framing_gold_candidates`, `cluster_framing_receipt`. Same shell as every migration since 057/061: RLS enabled, zero policies, revoked from `anon`/`authenticated`/`public`, granted to `service_role` only, `search_path = ''` on every function. It adds **no cron job** -- every write is reader-driven (`POST /api/oyun/cerceve`) and every read is request-driven -- and **no new secret**: nothing here calls the AI gateway, so 068 costs $0 of model spend.
+
+**ORDER IS LOAD-BEARING**, same discipline as every migration above: apply 068 **before** deploying to Vercel. The deployed `/oyun` Çerçeve mode and the two new `/admin` surfaces (`FramingVotesSection`, and `/admin/rapor/<clusterId>`'s receipt) call `framing_next_headline` / `framing_vote_totals` / `framing_gold_candidates` / `cluster_framing_receipt` the moment they render -- a route that selects a function that does not exist yet must go second, so the migration goes first.
+
+1. **Apply the migration:**
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/068_framing_votes.sql
+   # ...or: supabase db push
+   ```
+
+   The file inserts its own ledger row (`('068', '068_framing_votes')`) and is safe to re-apply.
+
+2. No Edge Function deploy is needed -- `supabase/functions/**` is untouched by this pack. Redeploy Vercel once the migration has landed:
+
+   ```bash
+   vercel --prod
+   ```
+
+**Verification:**
+
+```sql
+-- (a) all four functions exist and are SECURITY DEFINER.
+select proname, prosecdef from pg_proc
+  where proname in ('framing_vote_totals', 'framing_next_headline', 'framing_gold_candidates', 'cluster_framing_receipt');
+-- expect 4 rows, prosecdef = true
+```
+
+```sql
+-- (b) a headline with no votes yet answers zeros, not an error.
+select * from public.framing_vote_totals('00000000-0000-0000-0000-000000000000');
+-- expect one row of zeros
+```
+
+```sql
+-- (c) the 48h Çerçeve pool size -- single digits means the mode will run dry
+-- and the launch should wait. Mirrors framing_next_headline's eligibility
+-- predicate exactly (48h window + active + non-wire source + politics
+-- prediction >= 0.7) so this count and the function's real pool can never
+-- drift apart.
+select count(*) from public.articles a
+  join public.sources s on s.id = a.source_id
+  where a.published_at >= now() - interval '48 hours'
+    and s.active
+    and coalesce(s.kind, 'outlet') <> 'wire'
+    and exists (select 1 from public.jev_shadow_predictions p
+                where p.article_id = a.id and p.task = 'politics' and p.jev_prob >= 0.7);
+```
+
+```sql
+-- (d) whether cluster_framing_receipt has anything to score at all. If this
+-- is 0, the receipt reports scored = 0 forever (fail-closed by design) and
+-- FRAMING_RECEIPT_PUBLIC must stay off until a follow-up pack persists
+-- per-choice probabilities.
+select count(*) from public.jev_shadow_predictions
+  where task = 'framing' and jsonb_typeof(jev_answer -> 'answer' -> 'probabilities') = 'object';
+```
+
+**WARNING -- the crowd vote ledger cascade-deletes with its articles.** `framing_votes.article_id` references `articles(id) on delete cascade`, the same hazard 063 documents for `jev_gold_labels`. The admin `nuke_articles` action deletes every row of `public.articles` in one press, which silently and irrecoverably destroys every crowd vote with it. Before running `nuke_articles`, or any other bulk article delete, snapshot the ledger:
+
+```sql
+copy (select * from public.framing_votes) to '/tmp/framing_votes_backup.csv' with csv header;
+```
+
+**KILL SWITCH.** There is no cron to disable. To stop the Çerçeve mode with no deploy:
+
+```sql
+revoke execute on function public.framing_next_headline(text) from service_role;
+-- GET /api/oyun/cerceve/next now 500s and the client falls back to its
+-- empty-pool state. Re-grant to restore:
+grant execute on function public.framing_next_headline(text) to service_role;
+```
+
+**`FRAMING_RECEIPT_PUBLIC` stays unset.** It is a Vercel env var, server-only, read only through `isFramingReceiptPublic()`. Only the literal string `"1"` turns on the public cluster-page receipt; every other value (including unset) keeps it admin-only. Do not set it as part of this deploy -- flip it only after the operator has reviewed receipts by hand on `/admin/rapor/<clusterId>` and confirmed query (d) above is non-zero.
+
+---
+
 ## Owner sign-off checklist
 
 Before declaring the migration complete:
@@ -1126,6 +1205,11 @@ Before declaring the migration complete:
 - [ ] Migration 065 applied; `select jobname, schedule, active from cron.job where jobname = 'jev-signals-nightly';` shows `05 4 * * *`, active
 - [ ] `archive-export` redeployed and the next manifest carries `labels.declared = true` with a plausible `coverage`
 - [ ] Operator knows the SQL-only `jev-signals-nightly` cron has no Sentry alerting and must be checked in `cron.job_run_details`
+
+- [ ] Migration 068 applied; `select proname, prosecdef from pg_proc where proname in ('framing_vote_totals','framing_next_headline','framing_gold_candidates','cluster_framing_receipt');` returns 4 rows, all `prosecdef = true`
+- [ ] `select * from public.framing_vote_totals('00000000-0000-0000-0000-000000000000');` returns one row of zeros, not an error
+- [ ] Operator has read the 48h Çerçeve pool size and the `task = 'framing'` scored-probability count (Verification queries (c) and (d) above) before announcing the mode
+- [ ] `FRAMING_RECEIPT_PUBLIC` is documented as UNSET by default and is only ever set after the operator has reviewed receipts on `/admin/rapor/<clusterId>` by hand
 
 ---
 

@@ -28,7 +28,7 @@ import type { GameHeadline } from "@/lib/game/headline-pool";
 // ---------------------------------------------------------------------------
 
 const SOURCE_PATH = resolve(__dirname, "zone-guess-game.tsx");
-const PAGE_PATH = resolve(__dirname, "..", "..", "app", "oyun", "page.tsx");
+const MODES_PATH = resolve(__dirname, "oyun-modes.tsx");
 
 const source = readFileSync(SOURCE_PATH, "utf8");
 
@@ -114,9 +114,9 @@ describe("ZoneGuessGame — source guard: no cookies", () => {
   });
 });
 
-describe("/oyun page — empty pool branch [source guard]", () => {
+describe("OyunModes empty pool branch [source guard]", () => {
   it("renders the 'no headlines' message when the pool is empty", () => {
-    const pageSource = readFileSync(PAGE_PATH, "utf8");
+    const pageSource = readFileSync(MODES_PATH, "utf8");
     expect(pageSource).toMatch(/headlines\.length === 0/);
     expect(pageSource).toContain("Şu an oynanacak başlık yok");
   });

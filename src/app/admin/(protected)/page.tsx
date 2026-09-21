@@ -6,6 +6,7 @@ import { JevShadowSection } from "@/components/admin/jev-shadow-section";
 import { JevSignalsSection } from "@/components/admin/jev-signals-section";
 import { JevUnlinkSection } from "@/components/admin/jev-unlink-section";
 import { JevBlindspotSection } from "@/components/admin/jev-blindspot-section";
+import { FramingVotesSection } from "@/components/admin/framing-votes-section";
 import { AdminPanel } from "@/components/admin/admin-panel";
 import { CorrectionsList } from "@/components/admin/corrections-list";
 
@@ -73,6 +74,7 @@ export default async function AdminPage() {
         <JevSignalsSection />
         <JevUnlinkSection />
         <JevBlindspotSection />
+        <FramingVotesSection />
         <CorrectionsList />
       </div>
     </>
