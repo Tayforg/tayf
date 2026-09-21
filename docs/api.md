@@ -191,6 +191,174 @@ RSS 2.0 feed of the top 30 politics clusters. Cached 5 minutes.
 
 ---
 
+## /api/v1 (keyed)
+
+Pack E / B11 — a keyed, rate-limited public API for third-party consumers
+who want cluster/source data without scraping the site. `GET /api/sources`
+stays free and unkeyed (see above); everything under `/api/v1/*` requires
+a Bearer API key.
+
+**API keys**: format `tayf_<40 hex chars>` (45 chars total, e.g.
+`tayf_1a2b3c...`). Issued from `/admin` (POST /api/admin/api-keys below);
+the plaintext key is shown **exactly once**, at creation. Tayf's database
+stores only the key's sha256 hash — there is no way to recover a lost key;
+revoke it and issue a new one.
+
+**Auth header**: `Authorization: Bearer tayf_<40 hex>` on every `/api/v1/*`
+request (case-insensitive `Bearer` scheme).
+
+**Tiers and limits**:
+
+| Tier | Per-minute | Per-day |
+|---|---|---|
+| `free` | 60 | 2,000 |
+| `partner` | 600 | 50,000 |
+
+The per-minute limiter is **process-local** (an in-memory token bucket per
+serverless instance — see `src/lib/rate-limit.ts`), so the advertised
+per-minute ceiling is a per-replica figure, not a hard global cap. The
+**per-day** limit is durable (`api_key_usage_daily`, incremented server-side
+on every accepted call) and holds across replicas — it is the only number
+callers should treat as a hard global ceiling. An additional, unconditional
+per-source-IP floor of roughly 60 req/min (30 burst, 1 token/s) applies to
+every `/api/v1` request regardless of tier or key — so the advertised
+per-minute ceilings above are only reachable by a caller fanning out across
+multiple source IPs; a single-host `partner` consumer is capped at this
+floor, not at 600/min.
+
+**Response codes** (canonical `{error, code?, details?}` envelope on every
+non-2xx):
+- `401`: missing/malformed `Authorization` header, or a well-formed key
+  whose hash is not on file.
+- `403`: a well-formed, previously-valid key that has been revoked.
+- `429`: per-minute or per-day cap exceeded; `details.retryAfterMs` is
+  included on both (per-day: milliseconds until the next UTC midnight).
+- `500`: unexpected server error (never echoes a raw Supabase error).
+
+**Headers on every response (2xx and non-2xx alike)**:
+```
+X-Tayf-Tier: free | partner
+Cache-Control: private, no-store
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, OPTIONS
+Access-Control-Allow-Headers: Authorization, Content-Type
+Access-Control-Max-Age: 86400
+Vary: Origin, Authorization
+```
+CORS is GET-from-anywhere (this is a read-only public API — any origin may
+call it from the browser as long as it presents a valid key). Every
+`/api/v1/*` route also answers `OPTIONS` with a bare `204` carrying the
+same CORS headers.
+
+**Envelope**: every response body is wrapped by the same
+`registryEnvelope()` `/api/sources` uses — `licence` (`CC BY-SA 4.0 —
+Tayf'a göre`), `attribution`, `methodology`, `generated_at` — plus the
+endpoint's own payload keys.
+
+---
+
+### `GET /api/v1/clusters`
+
+**Query params**: `since` (ISO 8601 timestamp, default 24h ago, clamped to
+at most 7 days ago), `limit` (integer 1–100, default 50).
+
+**Response** `200`:
+```json
+{
+  "licence": "CC BY-SA 4.0 — Tayf'a göre",
+  "attribution": "...",
+  "methodology": "...",
+  "generated_at": "2026-09-21T12:00:00.000Z",
+  "since": "2026-09-20T12:00:00.000Z",
+  "count": 12,
+  "clusters": [
+    {
+      "id": "...",
+      "title": "...",
+      "url": "https://tayfhaber.com/cluster/...",
+      "first_published": "...",
+      "updated_at": "...",
+      "article_count": 6,
+      "bias_distribution": { "pro_government": 2, "opposition": 4 },
+      "is_blindspot": false,
+      "blindspot_side": null,
+      "topic7": null,
+      "sources": [{ "slug": "sabah", "zone": "iktidar" }, { "slug": "birgun", "zone": "muhalefet" }]
+    }
+  ]
+}
+```
+
+Only clusters whose members are ≥60% `politika`/`son_dakika` are returned
+(same majority rule the home feed uses). Per member, only `{slug, zone}` is
+ever surfaced — no article title, URL, image or description is present
+anywhere in the payload; the only URL in a cluster record is Tayf's own
+`/cluster/<id>` link. `topic7` is nullable: the `clusters.topic7` column
+exists in production, so a `null` means no topic has been assigned to that
+cluster. The column is probed once per server process; if the probe ever
+fails (e.g. the column is absent on a preview deploy) the field degrades to
+`null` for the remaining lifetime of that process rather than erroring.
+
+**Response** `400`: invalid `since` (not ISO 8601) or `limit` (outside
+1–100).
+
+---
+
+### `GET /api/v1/clusters/[id]`
+
+**Response** `200`: `{ ...envelope, "cluster": <same shape as above> }`.
+**Response** `400`: `id` is not a UUID.
+**Response** `404`: unknown id, or the cluster is archived.
+
+---
+
+### `GET /api/v1/sources`
+
+Identical record shape to `GET /api/sources` above (reuses the same
+`toRegistryRecord` mapper and the same explicit column list — never
+`rss_url`, never `*`). Only active sources are returned.
+
+**Response** `200`: `{ ...envelope, "count": 118, "sources": [RegistryRecord, ...] }`.
+
+---
+
+### `POST /api/admin/api-keys`
+
+Admin-gated (`hasAdminSession()`, checked before the rate limiter and
+before the body is read). Rate limited: 20-token bucket, 0.2 tokens/sec
+refill (shared with the revoke route below — both are the same named
+bucket).
+
+**Body**: `{ "label": "partner-x", "tier": "free" | "partner" }`
+- `label`: 1–64 chars after trim, no control characters.
+- `tier`: `"free"` or `"partner"`.
+
+**Response** `201`:
+```json
+{ "ok": true, "id": 3, "api_key": "tayf_1a2b3c...", "label": "partner-x", "tier": "free", "created_at": "2026-09-21T12:00:00.000Z" }
+```
+`api_key` is the plaintext key — it appears in **this response and
+nowhere else, ever**. Only its sha256 hash is written to `api_keys`.
+
+**Response** `400`: invalid `label` or `tier`.
+**Response** `401`: no admin session.
+**Response** `429`: rate limit exhausted.
+
+---
+
+### `POST /api/admin/api-keys/revoke`
+
+Same admin gate + same rate-limit bucket as the create route above.
+
+**Body**: `{ "id": 3 }`
+
+**Response** `200`: `{ "ok": true, "id": 3, "revoked_at": "2026-09-21T12:05:00.000Z" }`
+**Response** `400`: `id` is not a number.
+**Response** `401`: no admin session.
+**Response** `404`: no key with that id, or it was already revoked.
+
+---
+
 ## Core Library Functions
 
 ### `getPoliticsClusters()`

@@ -33,9 +33,25 @@ Sentry.init({
 
   // The SDK attaches every incoming request header to route-handler
   // events; drop the cron bearer and cookies before they leave the process.
+  // Also redact the /rapor/<token> share capability secret — it travels in
+  // the URL PATH, not a header, so a throw inside src/app/rapor/[token]/
+  // would otherwise ship a working, unexpired share link to Sentry.
   beforeSend(event) {
+    const redact = (s?: string) => s?.replace(/\/rapor\/[0-9a-f]{32}/gi, "/rapor/[token]");
     const h = event.request?.headers;
-    if (h) { delete h.authorization; delete h.cookie; }
+    if (h) {
+      delete h.authorization;
+      delete h.cookie;
+      // Referrer-Policy strict-origin-when-cross-origin sends the FULL url
+      // same-origin, so the page's own "Markdown indir" click puts a live
+      // /rapor/<token> capability URL in Referer. Redact every header value,
+      // not just referer, so a future header can't reintroduce the leak.
+      for (const k of Object.keys(h)) {
+        if (typeof h[k] === "string") h[k] = redact(h[k])!;
+      }
+    }
+    if (event.request?.url) event.request.url = redact(event.request.url)!;
+    if (event.transaction) event.transaction = redact(event.transaction)!;
     return event;
   },
 });

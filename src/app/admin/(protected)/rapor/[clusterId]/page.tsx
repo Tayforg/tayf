@@ -3,9 +3,12 @@ import { notFound } from "next/navigation";
 import { connection } from "next/server";
 
 import { requireAdminSession } from "@/lib/admin/session";
+import { createServerClient } from "@/lib/supabase/server";
 import { buildYelpazeReport } from "@/lib/reports/yelpaze";
+import { listShareLinks } from "@/lib/reports/share";
 import { getClusterFramingReceipt } from "@/lib/clusters/framing-receipt";
 import { YelpazeReportView } from "@/components/admin/yelpaze-report";
+import { ReportSharePanel } from "@/components/admin/report-share-panel";
 import { FramingReceiptCard } from "@/components/story/framing-receipt";
 
 // Admin-only, client-specific report (R-01 pilot tool — pack D). Never
@@ -56,6 +59,10 @@ export default async function YelpazeRaporPage({ params }: PageProps) {
   // scored = 0 branch, so an operator always sees a real read here.
   const receipt = await getClusterFramingReceipt(clusterId);
 
+  // Plain await, NO "use cache" — this page is cookie-gated and dynamic
+  // (pack E / B9), same rationale as every other /admin reader.
+  const links = await listShareLinks(createServerClient(), clusterId);
+
   return (
     <>
       {receipt && (
@@ -63,6 +70,13 @@ export default async function YelpazeRaporPage({ params }: PageProps) {
           <FramingReceiptCard receipt={receipt} />
         </div>
       )}
+      {/* YelpazeReportView below owns its own mx-auto/max-w-4xl container
+          (src/components/admin/yelpaze-report.tsx) — this wrapper only
+          matches that width for the share panel so the two align, without
+          nesting a second centering container around the report itself. */}
+      <div className="mx-auto w-full max-w-4xl px-4 pt-6 font-mono text-[12px]">
+        <ReportSharePanel clusterId={clusterId} links={links} />
+      </div>
       <YelpazeReportView report={report} />
     </>
   );

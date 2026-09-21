@@ -8,6 +8,8 @@ import { JevUnlinkSection } from "@/components/admin/jev-unlink-section";
 import { JevBlindspotSection } from "@/components/admin/jev-blindspot-section";
 import { JevRegressionSection } from "@/components/admin/jev-regression-section";
 import { FramingVotesSection } from "@/components/admin/framing-votes-section";
+import { LlmBudgetSection } from "@/components/admin/llm-budget-section";
+import { ApiKeysSection } from "@/components/admin/api-keys-section";
 import { AdminPanel } from "@/components/admin/admin-panel";
 import { CorrectionsList } from "@/components/admin/corrections-list";
 
@@ -77,6 +79,8 @@ export default async function AdminPage() {
         <JevUnlinkSection />
         <JevBlindspotSection />
         <FramingVotesSection />
+        <LlmBudgetSection />
+        <ApiKeysSection />
         <CorrectionsList />
       </div>
     </>

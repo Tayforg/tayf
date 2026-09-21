@@ -104,7 +104,20 @@ function renderBlindspotBody(report: YelpazeReportData) {
 
 type CopyState = "idle" | "copied" | "error";
 
-export function YelpazeReportView({ report }: { report: YelpazeReportData }) {
+export function YelpazeReportView({
+  report,
+  variant = "admin",
+}: {
+  report: YelpazeReportData;
+  /** "admin" (default) is today's rendering, byte-identical: header block,
+   *  copy button, section 06 "Yorum". "public" is for the tokened
+   *  self-serve share surface (src/app/rapor/[token]/page.tsx, pack E /
+   *  B9) — it drops the header block (no h1, no cluster id, no copy
+   *  button, no sr-only copy status) and section 06 entirely; the public
+   *  page renders its own h1/licence/download-link chrome around this
+   *  component instead. Sections 01–05 and 07 are unchanged either way. */
+  variant?: "admin" | "public";
+}) {
   const [commentary, setCommentary] = useState("");
   const [copyState, setCopyState] = useState<CopyState>("idle");
   // Keeps the pending "reset to idle" timer so a second copy within the
@@ -146,38 +159,42 @@ export function YelpazeReportView({ report }: { report: YelpazeReportData }) {
 
   return (
     <div className={`${styles.report} mx-auto w-full max-w-4xl space-y-6 px-4 py-6 font-mono text-[12px]`}>
-      <div className="flex flex-wrap items-baseline justify-between gap-3">
-        <div>
-          <h1 className="text-[13px] font-semibold">
-            Yelpaze <span className="text-brand">Raporu</span>
-          </h1>
-          <p className="text-muted-foreground">{report.header.title}</p>
-          <p className="text-[10px] text-muted-foreground/80">
-            Küme: {report.header.clusterId} · Oluşturma: {fmtDate(report.generatedAt)}
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={handleCopy}
-          className={`${styles.noPrint} inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-3 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground`}
-        >
-          {copyState === "copied" ? (
-            <Check className="h-3.5 w-3.5 text-emerald-500" />
-          ) : (
-            <CopyIcon className="h-3.5 w-3.5" />
-          )}
-          <span>
-            {copyState === "copied"
-              ? "Kopyalandı"
-              : copyState === "error"
-                ? "Kopyalanamadı"
-                : "Kopyala (Markdown)"}
+      {variant === "admin" && (
+        <>
+          <div className="flex flex-wrap items-baseline justify-between gap-3">
+            <div>
+              <h1 className="text-[13px] font-semibold">
+                Yelpaze <span className="text-brand">Raporu</span>
+              </h1>
+              <p className="text-muted-foreground">{report.header.title}</p>
+              <p className="text-[10px] text-muted-foreground/80">
+                Küme: {report.header.clusterId} · Oluşturma: {fmtDate(report.generatedAt)}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleCopy}
+              className={`${styles.noPrint} inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 px-3 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground`}
+            >
+              {copyState === "copied" ? (
+                <Check className="h-3.5 w-3.5 text-emerald-500" />
+              ) : (
+                <CopyIcon className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {copyState === "copied"
+                  ? "Kopyalandı"
+                  : copyState === "error"
+                    ? "Kopyalanamadı"
+                    : "Kopyala (Markdown)"}
+              </span>
+            </button>
+          </div>
+          <span className="sr-only" role="status" aria-live="polite">
+            {copyState === "copied" ? "Kopyalandı" : copyState === "error" ? "Kopyalanamadı" : ""}
           </span>
-        </button>
-      </div>
-      <span className="sr-only" role="status" aria-live="polite">
-        {copyState === "copied" ? "Kopyalandı" : copyState === "error" ? "Kopyalanamadı" : ""}
-      </span>
+        </>
+      )}
 
       {/* 01 — Kapsam (bölgeye göre) */}
       <section className={styles.section}>
@@ -366,24 +383,27 @@ export function YelpazeReportView({ report }: { report: YelpazeReportData }) {
         )}
       </section>
 
-      {/* 06 — Yorum */}
-      <section className={styles.section}>
-        <h2 className="mb-2 border-b border-border/60 pb-1 text-[12px] font-semibold uppercase tracking-wide">
-          06 — Yorum
-        </h2>
-        <label htmlFor="yelpaze-commentary" className="sr-only">
-          Kurucunun yorumu
-        </label>
-        <textarea
-          id="yelpaze-commentary"
-          className={`${styles.commentaryBox} ${styles.commentaryScreenOnly} w-full rounded-md border border-border/60 bg-transparent p-2 text-[12px]`}
-          value={commentary}
-          onChange={(e) => setCommentary(e.target.value)}
-          placeholder="İki satır insan yorumu — raporu satılabilir kılan kısım burası."
-          rows={4}
-        />
-        <div className={styles.commentaryPrintBox}>{commentary}</div>
-      </section>
+      {/* 06 — Yorum (admin-only: the public share surface never exposes
+          the founder's draft commentary box). */}
+      {variant === "admin" && (
+        <section className={styles.section}>
+          <h2 className="mb-2 border-b border-border/60 pb-1 text-[12px] font-semibold uppercase tracking-wide">
+            06 — Yorum
+          </h2>
+          <label htmlFor="yelpaze-commentary" className="sr-only">
+            Kurucunun yorumu
+          </label>
+          <textarea
+            id="yelpaze-commentary"
+            className={`${styles.commentaryBox} ${styles.commentaryScreenOnly} w-full rounded-md border border-border/60 bg-transparent p-2 text-[12px]`}
+            value={commentary}
+            onChange={(e) => setCommentary(e.target.value)}
+            placeholder="İki satır insan yorumu — raporu satılabilir kılan kısım burası."
+            rows={4}
+          />
+          <div className={styles.commentaryPrintBox}>{commentary}</div>
+        </section>
+      )}
 
       {/* 07 — Özel bağlantı notu */}
       <section className={styles.section}>
