@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { cookies } from "next/headers";
 
+import { AdminSection, EmptyState, FieldLabel, Meter } from "@/components/admin/admin-ui";
 import { requireAdminSession } from "@/lib/admin/session";
 import {
   JEV_GOLD_MIN_N,
@@ -22,7 +24,9 @@ import { JevGoldSeedButton } from "@/components/admin/jev-gold-seed-button";
 // Async server component, NO "use cache" — same rationale as every other
 // /admin page: this is cookie-gated and dynamic (requireAdminSession() +
 // the jev_labeler UI-convenience cookie), so it must never be statically
-// cached.
+// cached. All reads, the cookie parse, and the labeling components' props
+// are unchanged from before this readability pass — only the presentation
+// around them changed.
 
 export const metadata: Metadata = {
   title: "Jev altın küme",
@@ -41,6 +45,16 @@ interface ScorecardLine {
   label: string;
   text: string;
 }
+
+// Short "what does this mean" subline shown under a handful of karne
+// labels whose names alone don't explain what's being compared.
+const SCORECARD_LABEL_HELP: Record<string, string> = {
+  "Çift etiketli": "İki kişinin de etiketlediği haber",
+  "Altın satır": "İki etiketin aynı olduğu, doğru kabul edilen satır",
+  "Jev siyaset (≥0,50)": "Jev'in bu eşikte altınla aynı cevabı verme oranı",
+  "Jev siyaset (≥0,70)": "Jev'in bu eşikte altınla aynı cevabı verme oranı",
+  "Akış etiketi siyaset": "Mevcut sistemin kategori etiketinin altınla uyumu",
+};
 
 function buildScorecardLines(card: JevGoldScorecard): ScorecardLine[] {
   const labeledText = Object.entries(card.labeled)
@@ -86,67 +100,94 @@ export default async function JevAltinPage() {
   const labeler = parseLabelerCookie(store.get(JEV_LABELER_COOKIE)?.value);
 
   const [next, scorecard] = await Promise.all([getJevGoldNext(labeler), getJevGoldScorecard()]);
+  const pct = next !== null && next.total > 0 ? (next.done / next.total) * 100 : 0;
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-6 space-y-6">
-      <h1 className="font-mono text-[12px] font-normal">Jev altın küme</h1>
-      <p className="font-mono text-[12px] text-muted-foreground">
-        İki kişi bağımsız etiketler; iki etiket de aynıysa o satır altın kabul edilir. Jev ve akış etiketi bu altına karşı ölçülür.
-      </p>
+    <div className="mx-auto w-full max-w-3xl min-w-0 space-y-6 px-4 py-6 sm:py-8">
+      <div className="space-y-2">
+        <Link href="/admin" className="text-sm text-muted-foreground hover:text-foreground">
+          ← Yönetim paneli
+        </Link>
+        <h1 className="font-serif text-2xl">Jev altın küme</h1>
+        <p className="text-sm text-muted-foreground">
+          İki kişi bağımsız etiketler; iki etiket de aynıysa o satır altın kabul edilir. Jev ve akış etiketi bu altına karşı ölçülür.
+        </p>
+      </div>
 
       <JevGoldSeedButton />
 
-      <section className="space-y-3">
-        <JevGoldLabelerSwitch labeler={labeler} />
-        {next === null ? (
-          <p className="font-mono text-[12px] text-muted-foreground">Altın küme durumu okunamadı.</p>
-        ) : (
-          <>
-            <p className="font-mono text-[12px] text-foreground">
-              Etiketleyici {labeler}: {next.done.toLocaleString("tr-TR")} / {next.total.toLocaleString("tr-TR")}
-            </p>
-            {next.article === null ? (
-              next.total === 0 ? (
-                <p className="font-mono text-[12px] text-muted-foreground">
-                  Altın küme henüz oluşturulmadı. Önce &quot;Altın kümeyi oluştur&quot; düğmesine basın.
-                </p>
+      <AdminSection id="etiketleme" title="Etiketleme" help="Sıradaki haberi etiketleyin.">
+        <div className="space-y-3">
+          <JevGoldLabelerSwitch labeler={labeler} />
+          {next === null ? (
+            <EmptyState kind="error">Altın küme durumu okunamadı.</EmptyState>
+          ) : (
+            <>
+              <Meter pct={pct} label="Etiketleme ilerlemesi" />
+              <p className="text-sm text-foreground">
+                Etiketleyici {labeler}: {next.done.toLocaleString("tr-TR")} / {next.total.toLocaleString("tr-TR")}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {`${(next.total - next.done).toLocaleString("tr-TR")} haber kaldı`}
+              </p>
+              {next.article === null ? (
+                next.total === 0 ? (
+                  <EmptyState>
+                    Altın küme henüz oluşturulmadı. Önce &quot;Altın kümeyi oluştur&quot; düğmesine basın.
+                  </EmptyState>
+                ) : (
+                  <EmptyState>Bu etiketleyici için sıra bitti.</EmptyState>
+                )
               ) : (
-                <p className="font-mono text-[12px] text-muted-foreground">Bu etiketleyici için sıra bitti.</p>
-              )
-            ) : (
-              <div className="space-y-3 border border-border p-3">
-                <div className="space-y-1">
-                  <p className="font-mono text-[12px] text-foreground">{next.article.title}</p>
-                  {next.article.description && (
-                    <p className="font-mono text-[12px] text-muted-foreground">{next.article.description}</p>
-                  )}
-                  <p className="font-mono text-[12px] text-muted-foreground">
-                    Kaynak: {next.article.source_slug} · Akış kategorisi: {next.article.category} · Sıra:{" "}
-                    {next.article.position}
-                  </p>
+                <div className="space-y-3 rounded-xl border border-border p-4">
+                  <div className="space-y-1">
+                    <p className="text-lg font-medium text-foreground">{next.article.title}</p>
+                    {next.article.description && (
+                      <p className="text-sm text-muted-foreground">{next.article.description}</p>
+                    )}
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span>
+                        <FieldLabel>Kaynak</FieldLabel> {next.article.source_slug}
+                      </span>
+                      <span>
+                        <FieldLabel>Akış kategorisi</FieldLabel> {next.article.category}
+                      </span>
+                      <span>
+                        <FieldLabel>Sıra</FieldLabel> {next.article.position}
+                      </span>
+                    </div>
+                  </div>
+                  <JevGoldLabeler articleId={next.article.article_id} labeler={labeler} />
                 </div>
-                <JevGoldLabeler articleId={next.article.article_id} labeler={labeler} />
-              </div>
-            )}
-          </>
-        )}
-      </section>
+              )}
+            </>
+          )}
+        </div>
+      </AdminSection>
 
-      <section className="space-y-2">
-        <h2 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">Karne</h2>
+      <AdminSection
+        id="karne"
+        title="Karne"
+        help={`Oranlar en az ${JEV_GOLD_MIN_N} satırdan sonra gösterilir; daha az veriyle yüzde yanıltıcı olur.`}
+      >
         {scorecard === null ? (
-          <p className="font-mono text-[12px] text-muted-foreground">Karne okunamadı.</p>
+          <EmptyState kind="error">Karne okunamadı.</EmptyState>
         ) : (
-          <ul className="space-y-1 font-mono text-[12px]">
+          <dl className="space-y-2 text-sm">
             {buildScorecardLines(scorecard).map((line) => (
-              <li key={line.label} className="flex justify-between gap-3 text-foreground">
-                <span className="text-muted-foreground">{line.label}</span>
-                <span>{line.text}</span>
-              </li>
+              <div key={line.label} className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <dt className="text-foreground">{line.label}</dt>
+                  {SCORECARD_LABEL_HELP[line.label] && (
+                    <p className="text-xs text-muted-foreground">{SCORECARD_LABEL_HELP[line.label]}</p>
+                  )}
+                </div>
+                <dd className="shrink-0 tabular-nums text-right text-foreground">{line.text}</dd>
+              </div>
             ))}
-          </ul>
+          </dl>
         )}
-      </section>
+      </AdminSection>
     </div>
   );
 }

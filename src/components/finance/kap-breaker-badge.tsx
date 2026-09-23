@@ -58,13 +58,13 @@ export function KapBreakerBadge({ state, open }: { state: KapBreakerState | null
 
   return (
     <section className="flex min-w-0 flex-col border border-border bg-black/25">
-      <header className="flex items-baseline justify-between gap-3 border-b border-border bg-foreground/[0.04] px-3 py-1.5 font-mono text-[11px] leading-none">
-        <h2 className="font-mono text-[11px] font-normal text-brand">KAP devre kesici</h2>
+      <header className="flex items-baseline justify-between gap-3 border-b border-border bg-foreground/[0.04] px-3 py-1.5 font-mono text-xs leading-none">
+        <h2 className="font-mono text-xs font-normal text-brand">KAP devre kesici</h2>
         <span className={open ? "text-amber-500" : "text-muted-foreground"}>
-          {open ? "açık (bloklu)" : "kapalı"}
+          {open ? "açık (KAP istekleri durduruldu)" : "kapalı (normal)"}
         </span>
       </header>
-      <div className="min-w-0 flex-1 space-y-1.5 px-3 py-2 font-mono text-[11px]">
+      <div className="min-w-0 flex-1 space-y-1.5 px-3 py-2 font-mono text-xs">
         {state ? (
           <dl className="space-y-1">
             {open && state.blockedUntil ? (
@@ -75,8 +75,11 @@ export function KapBreakerBadge({ state, open }: { state: KapBreakerState | null
             ) : null}
             {state.lastStatus != null ? (
               <div className="flex justify-between gap-3">
-                <dt className="text-muted-foreground">son durum</dt>
-                <dd className="tabular-nums">{state.lastStatus}</dd>
+                <dt className="text-muted-foreground">son KAP yanıt kodu</dt>
+                <dd className="tabular-nums">
+                  {state.lastStatus}
+                  {state.lastStatus >= 200 && state.lastStatus < 300 ? " (normal)" : ""}
+                </dd>
               </div>
             ) : null}
             {state.lastError ? (
@@ -91,12 +94,15 @@ export function KapBreakerBadge({ state, open }: { state: KapBreakerState | null
         ) : (
           <p className="text-muted-foreground">durum okunamadı</p>
         )}
+        <p className="text-xs text-muted-foreground">
+          Devre kesici, KAP art arda hata verdiğinde istekleri geçici olarak durdurur. Açıkken &apos;devre kesiciyi temizle&apos; ile yeniden deneyebilirsiniz.
+        </p>
         {open ? (
           <form onSubmit={handleClear}>
             <button
               type="submit"
               disabled={clearing}
-              className="w-full border border-border px-2 py-1 text-[11px] text-foreground hover:border-brand/40 disabled:opacity-50"
+              className="flex h-9 w-full items-center justify-center border border-border px-2 text-xs text-foreground hover:border-brand/40 disabled:opacity-50 sm:h-7"
             >
               {clearing ? "temizleniyor…" : "devre kesiciyi temizle"}
             </button>

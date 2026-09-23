@@ -1,11 +1,27 @@
 import {
+  AdminSection,
+  DataTable,
+  EmptyState,
+  KpiTile,
+  StatusBadge,
+  Td,
+  Th,
+  Tr,
+  type Tone,
+} from "@/components/admin/admin-ui";
+import {
+  FRAMING_GOLD_MIN_SHARE,
+  FRAMING_GOLD_MIN_VOTES,
   formatGoldShare,
-  getFramingVoteStatus,
+  type FramingVoteAdminStatus,
 } from "@/lib/admin/framing-votes";
 
-// T11 (migration 068) — the /admin "Çerçeve oyları" section: plain async
-// SERVER component, no "use cache" (same rationale as the Arşiv / Jev gölge
-// sections on this page — /admin is cookie-gated and dynamic).
+// T11 (migration 068) — the /admin "Çerçeve oyları" section
+// (group #sinyaller). Non-async SERVER component: /admin's page.tsx now
+// reads getFramingVoteStatus() once (the shared Promise.all) and passes
+// the result down as a prop, so this file no longer fetches on its own.
+// No "use cache" here — there is nothing left to cache, the data arrives
+// as a prop.
 
 // Deliberate local duplicate of FRAMING_VOTE_LABELS_TR (src/lib/game/framing.ts,
 // owned by a different worker) — same precedent as JEV_TASK_ORDER in
@@ -21,61 +37,78 @@ function voteLabel(vote: string): string {
   return FRAMING_VOTE_LABELS_TR[vote] ?? vote;
 }
 
-export async function FramingVotesSection() {
-  const status = await getFramingVoteStatus();
+// The majority tone only tells iktidar/muhalefet/none apart — it is not
+// an ok/bad judgement of the vote itself, hence the explicit title on the
+// badge below. Exported so this mapping has a pure unit test instead of a
+// render test (AGENTS.md: no render tests of server components — this
+// file has no "use client").
+export function majorityTone(vote: string): Tone {
+  if (vote === "iktidar") return "bad";
+  if (vote === "muhalefet") return "ok";
+  return "muted";
+}
 
+const HELP = `Okuyucular çerçeve oyununda bir başlığın kimin lehine yazıldığını oyluyor. En az ${FRAMING_GOLD_MIN_VOTES} oy alan ve oyların en az %${Math.round(FRAMING_GOLD_MIN_SHARE * 100)}'i aynı cevapta birleşen başlıklar altın etiket adayıdır.`;
+
+export function FramingVotesSection({
+  status,
+}: {
+  status: FramingVoteAdminStatus | null;
+}) {
   return (
-    <section className="space-y-2">
-      <h2 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">
-        Çerçeve oyları
-      </h2>
+    <AdminSection id="cerceve" title="Çerçeve oyları" help={HELP} collapsible>
       {status === null ? (
-        <p className="font-mono text-[12px] text-muted-foreground">
-          Çerçeve oyu durumu okunamadı.
-        </p>
+        <EmptyState kind="error">Çerçeve oyu durumu okunamadı.</EmptyState>
       ) : (
-        <>
-          <p className="font-mono text-[12px] text-foreground">
-            {status.totalVotes === null
-              ? "Oy sayısı okunamadı."
-              : `Toplam oy: ${status.totalVotes.toLocaleString("tr-TR")}`}
-          </p>
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <KpiTile
+              label="Toplam oy"
+              value={
+                status.totalVotes === null
+                  ? "—"
+                  : status.totalVotes.toLocaleString("tr-TR")
+              }
+              hint={status.totalVotes === null ? "Oy sayısı okunamadı." : undefined}
+              tone={status.totalVotes === null ? "muted" : "neutral"}
+            />
+          </div>
+
           {status.candidates.length === 0 ? (
-            <p className="font-mono text-[12px] text-muted-foreground">
-              Henüz altın etiket adayı yok.
-            </p>
+            <EmptyState>Henüz altın etiket adayı yok.</EmptyState>
           ) : (
-            <table className="w-full font-mono text-[12px]">
+            <DataTable minWidth="md">
               <thead>
-                <tr className="text-left text-muted-foreground">
-                  <th className="py-1 pr-3 font-normal">Başlık</th>
-                  <th className="py-1 pr-3 font-normal">Çoğunluk</th>
-                  <th className="py-1 pr-3 font-normal">Oy</th>
-                  <th className="py-1 font-normal">Pay</th>
-                </tr>
+                <Tr>
+                  <Th>Başlık</Th>
+                  <Th>Çoğunluk</Th>
+                  <Th numeric>Oy</Th>
+                  <Th numeric>Pay</Th>
+                </Tr>
               </thead>
               <tbody>
                 {status.candidates.map((row) => (
-                  <tr key={row.article_id} className="border-t border-border">
-                    <td className="py-1 pr-3 max-w-[28rem] truncate text-foreground">
-                      {row.title}
-                    </td>
-                    <td className="py-1 pr-3 text-foreground">
-                      {voteLabel(row.vote)}
-                    </td>
-                    <td className="py-1 pr-3 text-foreground">
-                      {row.n.toLocaleString("tr-TR")}
-                    </td>
-                    <td className="py-1 text-foreground">
-                      {formatGoldShare(row.share)}
-                    </td>
-                  </tr>
+                  <Tr key={row.article_id}>
+                    <Td className="max-w-[28rem] truncate">
+                      <span title={row.title}>{row.title}</span>
+                    </Td>
+                    <Td>
+                      <StatusBadge
+                        tone={majorityTone(row.vote)}
+                        title="Renk yalnızca tarafı ayırt eder, iyi/kötü anlamı taşımaz"
+                      >
+                        {voteLabel(row.vote)}
+                      </StatusBadge>
+                    </Td>
+                    <Td numeric>{row.n.toLocaleString("tr-TR")}</Td>
+                    <Td numeric>{formatGoldShare(row.share)}</Td>
+                  </Tr>
                 ))}
               </tbody>
-            </table>
+            </DataTable>
           )}
-        </>
+        </div>
       )}
-    </section>
+    </AdminSection>
   );
 }

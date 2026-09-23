@@ -40,21 +40,21 @@ export function JevUnlinkActions({ id }: { id: number }) {
   }
 
   return (
-    <div className="flex flex-col items-end gap-1">
-      <div className="flex items-center gap-1.5">
+    <div className="flex flex-col gap-1.5">
+      <div className="grid grid-cols-2 gap-2 sm:flex">
         <Button
-          variant="ghost"
+          variant="outline"
           size="sm"
-          className="h-7 px-2 text-[11px]"
+          className="h-9 px-3 text-xs text-destructive border-destructive/40 sm:h-7"
           disabled={isPending}
           onClick={() => handleDecision("unlink")}
         >
           Ayır
         </Button>
         <Button
-          variant="ghost"
+          variant="outline"
           size="sm"
-          className="h-7 px-2 text-[11px]"
+          className="h-9 px-3 text-xs sm:h-7"
           disabled={isPending}
           onClick={() => handleDecision("keep")}
         >
@@ -62,7 +62,7 @@ export function JevUnlinkActions({ id }: { id: number }) {
         </Button>
       </div>
       {error && (
-        <p className="text-[11px] text-destructive">
+        <p className="text-xs text-destructive">
           İşlem başarısız, tekrar deneyin.
         </p>
       )}

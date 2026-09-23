@@ -70,9 +70,9 @@ export function WorkerStats() {
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold flex items-center gap-1.5">
           <Activity className="h-3.5 w-3.5 text-emerald-500" />
-          Canlı metrikler
+          Canlı metrikler (60 sn&apos;de bir yenilenir)
         </h3>
-        <span className="text-[10px] text-muted-foreground">
+        <span className="text-xs text-muted-foreground">
           {new Date(metrics.timestamp).toLocaleTimeString("tr-TR")}
         </span>
       </div>
@@ -106,7 +106,7 @@ function StatBox({
       : "text-foreground";
   return (
     <div className="rounded-lg bg-muted/40 border border-border/40 p-3">
-      <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <Icon className="h-3 w-3" />
         {label}
       </div>

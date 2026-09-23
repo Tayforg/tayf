@@ -83,7 +83,7 @@ export function CorrectionActions({
           defaultValue={status}
           disabled={isPending}
           onChange={(e) => handleStatusChange(e.target.value)}
-          className="h-7 rounded-lg border border-border/60 bg-background px-2 text-[11px] disabled:opacity-50"
+          className="h-9 sm:h-7 rounded-lg border border-border/60 bg-background px-2 text-xs disabled:opacity-50"
         >
           {CORRECTION_STATUSES.map((s) => (
             <option key={s} value={s}>
@@ -94,15 +94,17 @@ export function CorrectionActions({
         <Button
           variant="ghost"
           size="sm"
-          className="h-7 w-7 p-0 text-destructive/60 hover:text-destructive"
+          className="h-9 w-9 sm:h-7 sm:w-7 p-0 text-destructive/60 hover:text-destructive"
           disabled={isPending}
           onClick={handleDelete}
+          aria-label="Bildirimi sil"
+          title="Bildirimi sil"
         >
           <Trash2 className="h-3 w-3" />
         </Button>
       </div>
       {error && (
-        <p className="text-[11px] text-destructive">
+        <p className="text-xs text-destructive">
           İşlem başarısız, tekrar deneyin.
         </p>
       )}

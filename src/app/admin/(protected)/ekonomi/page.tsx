@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Activity, Building2, FileText, Tags } from "lucide-react";
 
+import { toneTextClass, type Tone } from "@/components/admin/admin-ui";
 import { StatCard } from "@/components/admin/stat-card";
 import { KapBreakerBadge } from "@/components/finance/kap-breaker-badge";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
@@ -19,7 +20,9 @@ export const metadata: Metadata = {
 // /admin/ekonomi — the prediction system's operator view. v0 is the three
 // SQL rules in finance_signals (migration 050). The page is laid out so a
 // learned scorer slots in without a redesign: same signal rows, the score
-// column just stops being a rule count.
+// column just stops being a rule count. Every read is unchanged from
+// before this readability pass — only the layout and copy around them
+// changed (see "Model yuvası" and the KAP önemlilik header row below).
 
 const KIND_META: Record<string, { title: string; hint: string }> = {
   attention_spike: {
@@ -43,10 +46,25 @@ function materialityLevelText(level: KapMaterialityLevel | null): string {
   return level ?? "—";
 }
 
+function materialityTone(level: KapMaterialityLevel | null): Tone {
+  if (level === "yüksek") return "bad";
+  if (level === "orta") return "warn";
+  if (level === "düşük") return "muted";
+  return "muted";
+}
+
 function classAgreeText(v: boolean | null): string {
   if (v === true) return "uyumlu";
   if (v === false) return "ayrışıyor";
   return "—";
+}
+
+// Disagreement ("ayrışıyor") is flagged, not judged bad — it just means the
+// existing classification and Jev's read of the same disclosure differ.
+function classAgreeTone(v: boolean | null): Tone {
+  if (v === false) return "warn";
+  if (v === true) return "ok";
+  return "muted";
 }
 
 function canaryLine(canary: KapCanaryStatus | null): string {
@@ -79,22 +97,30 @@ export default async function AdminEkonomiPage() {
     getKapSignals(),
   ]);
   const lagMax = Math.max(1, ...lags.map((l) => l.count));
+  const lagTotal = lags.reduce((sum, l) => sum + l.count, 0);
+  // Last bucket whose label mentions "önce" ("before") — the divider marks
+  // where "before the disclosure" flips to "after the disclosure". If no
+  // label contains "önce" the index stays -1 and no divider is inserted.
+  const lastBeforeIdx = lags.reduce((acc, l, i) => (l.label.includes("önce") ? i : acc), -1);
   const groups = Object.keys(KIND_META).map((kind) => ({ kind, items: signals.filter((s) => s.kind === kind) }));
 
   return (
     <div className="mx-auto w-full max-w-[1400px] px-4 py-6 space-y-4">
-      <div className="flex flex-wrap items-baseline justify-between gap-3 font-mono text-[12px]">
-        <h1 className="font-mono text-[12px] font-normal">
-          Admin <span className="text-brand">Ekonomi</span>
-        </h1>
-        <div className="flex gap-4 text-muted-foreground">
-          <Link href="/admin" className="hover:text-foreground">
-            Ana panel
-          </Link>
-          <Link href="/ekonomi" className="hover:text-foreground">
-            Sayfayı gör
-          </Link>
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-baseline justify-between gap-3">
+          <h1 className="font-serif text-2xl">Ekonomi paneli</h1>
+          <div className="flex gap-4 text-sm text-muted-foreground">
+            <Link href="/admin" className="hover:text-foreground">
+              Ana panel
+            </Link>
+            <Link href="/ekonomi" className="hover:text-foreground">
+              Sayfayı gör
+            </Link>
+          </div>
         </div>
+        <p className="text-sm text-muted-foreground">
+          KAP bildirim akışı, haber-hisse eşleştirmesi ve kural tabanlı tahmin sinyalleri.
+        </p>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -104,7 +130,7 @@ export default async function AdminEkonomiPage() {
         <StatCard icon={Building2} label="İşlem gören şirket" value={health.companiesTraded} variant={health.companiesTraded === 0 ? "warning" : "default"} />
       </div>
 
-      <dl className="grid gap-x-6 gap-y-1 border border-border bg-black/25 px-3 py-2 font-mono text-[11px] sm:grid-cols-3">
+      <dl className="grid gap-x-6 gap-y-1 border border-border bg-black/25 px-3 py-2 font-mono text-xs sm:grid-cols-3">
         <div className="flex justify-between gap-3">
           <dt className="text-muted-foreground">son KAP bildirimi</dt>
           <dd className="tabular-nums">{health.lastDisclosureAt ? fmtWhen(health.lastDisclosureAt) : "yok"}</dd>
@@ -134,51 +160,73 @@ export default async function AdminEkonomiPage() {
         </div>
       </dl>
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <Panel title="Tahmin sistemi, kural tabanlı v0" meta={`${signals.length} sinyal`}>
           {signals.length === 0 ? (
             <PanelEmpty>Şu an kural üreten durum yok. KAP akışı ve eşleştirici çalıştıkça sinyaller burada birikir.</PanelEmpty>
           ) : null}
           {groups.map(({ kind, items }) => (
             <section key={kind} className="border-b border-border/70 last:border-b-0">
-              <div className="flex items-baseline justify-between gap-3 bg-foreground/[0.03] px-3 py-1.5 font-mono text-[11px]">
-                <span className="text-foreground">{KIND_META[kind]!.title}</span>
-                <span className="truncate text-muted-foreground">{KIND_META[kind]!.hint}</span>
+              <div className="space-y-0.5 bg-foreground/[0.03] px-3 py-1.5 font-mono text-xs">
+                <div className="flex items-baseline justify-between gap-3">
+                  <span className="text-foreground">{KIND_META[kind]!.title}</span>
+                  <span className="tabular-nums text-muted-foreground">{items.length} sinyal</span>
+                </div>
+                <p className="text-muted-foreground">{KIND_META[kind]!.hint}</p>
               </div>
               {items.length === 0 ? (
-                <p className="px-3 py-2 font-mono text-[11px] text-muted-foreground">yok</p>
+                <p className="px-3 py-2 font-mono text-xs text-muted-foreground">yok</p>
               ) : (
-                <ol className="divide-y divide-border/60">
-                  {items.map((s, i) => (
-                    <li key={`${s.kind}-${s.ticker}-${i}`} className="grid grid-cols-[4.5rem_3rem_minmax(0,1fr)] items-baseline gap-x-3 px-3 py-1.5 font-mono text-[11px]">
-                      <Link href={`/ekonomi/${s.ticker}`} className="text-brand hover:underline">
-                        {s.ticker}
-                      </Link>
-                      <span className="tabular-nums text-foreground/90">{s.score.toFixed(1)}</span>
-                      <span className="truncate text-muted-foreground">{evidenceText(s)}</span>
-                    </li>
-                  ))}
-                </ol>
+                <>
+                  <div className="grid grid-cols-[4.5rem_3rem_minmax(0,1fr)] gap-x-3 px-3 py-1 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                    <span>Hisse</span>
+                    <span title="Sıralama puanı: üst sınırı yok, yalnızca aynı grup içinde karşılaştırın.">Puan</span>
+                    <span>Kanıt</span>
+                  </div>
+                  <ol className="divide-y divide-border/60">
+                    {items.map((s, i) => (
+                      <li key={`${s.kind}-${s.ticker}-${i}`} className="grid grid-cols-[4.5rem_3rem_minmax(0,1fr)] items-baseline gap-x-3 px-3 py-1.5 font-mono text-xs">
+                        <Link href={`/ekonomi/${s.ticker}`} className="text-brand hover:underline">
+                          {s.ticker}
+                        </Link>
+                        <span className="tabular-nums text-foreground/90">{s.score.toFixed(1)}</span>
+                        <span className="truncate text-muted-foreground">{evidenceText(s)}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </>
               )}
             </section>
           ))}
         </Panel>
 
         <div className="space-y-3">
-          <Panel title="Basın, KAP'a göre ne zaman yazdı" meta="son 7 gün, haber başına">
+          <Panel title="Basın, KAP'a göre ne zaman yazdı" meta="son 7 gün · haber başına · bildirimden önce/sonra">
             {lags.every((l) => l.count === 0) ? (
               <PanelEmpty>Henüz bildirim-haber eşleşmesi yok.</PanelEmpty>
             ) : (
-              <ol className="space-y-1.5 px-3 py-3 font-mono text-[11px]">
-                {lags.map((l) => (
-                  <li key={l.label} className="grid grid-cols-[9.5rem_minmax(0,1fr)_3rem] items-center gap-2">
-                    <span className="text-muted-foreground">{l.label}</span>
-                    <span className="h-3 bg-foreground/10">
-                      <span className="block h-full bg-brand" style={{ width: `${(l.count / lagMax) * 100}%` }} />
-                    </span>
-                    <span className="text-right tabular-nums">{l.count}</span>
-                  </li>
-                ))}
+              <ol className="space-y-1.5 px-3 py-3 font-mono text-xs">
+                {lags.flatMap((l, i) => {
+                  const pct = lagTotal > 0 ? Math.round((l.count / lagTotal) * 100) : 0;
+                  const row = (
+                    <li key={l.label} className="grid grid-cols-[9.5rem_minmax(0,1fr)_5rem] items-center gap-2">
+                      <span className="text-muted-foreground">{l.label}</span>
+                      <span className="h-3 bg-foreground/10">
+                        <span className="block h-full bg-brand" style={{ width: `${(l.count / lagMax) * 100}%` }} />
+                      </span>
+                      <span className="text-right tabular-nums">{`${l.count} (%${pct})`}</span>
+                    </li>
+                  );
+                  if (lastBeforeIdx >= 0 && i === lastBeforeIdx + 1) {
+                    return [
+                      <li key="divider" className="py-0.5 text-center text-muted-foreground">
+                        ▼ KAP bildirimi
+                      </li>,
+                      row,
+                    ];
+                  }
+                  return [row];
+                })}
               </ol>
             )}
           </Panel>
@@ -193,27 +241,41 @@ export default async function AdminEkonomiPage() {
               <PanelEmpty>KAP önemlilik okunamadı.</PanelEmpty>
             ) : (
               <>
-                <p className="px-3 pt-3 font-mono text-[11px] tabular-nums text-foreground">
+                <p className="px-3 pt-3 font-mono text-xs tabular-nums text-foreground">
                   {canaryLine(kapSignals.canary)}
                 </p>
                 {kapSignals.disclosures.length === 0 ? (
                   <PanelEmpty>Henüz önemlilik etiketi yok.</PanelEmpty>
                 ) : (
-                  <ol className="divide-y divide-border/60 px-3 py-2 font-mono text-[11px] tabular-nums">
-                    {kapSignals.disclosures.map((row) => (
-                      <li
-                        key={row.disclosure_index}
-                        className="grid grid-cols-[3.5rem_minmax(0,1fr)_4rem_5rem] items-center gap-2 py-1.5"
-                      >
-                        <span className="text-muted-foreground">{row.disclosure_index}</span>
-                        <span className="truncate text-foreground">{row.kap_title}</span>
-                        <span className="text-foreground">{materialityLevelText(row.materiality_level)}</span>
-                        <span className="text-foreground">{classAgreeText(row.class_agree)}</span>
-                      </li>
-                    ))}
-                  </ol>
+                  <>
+                    <div className="grid grid-cols-[3.5rem_minmax(0,1fr)_4rem_5rem] gap-2 px-3 pt-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                      <span>No</span>
+                      <span>Başlık</span>
+                      <span>Önemlilik</span>
+                      <span>Sınıf uyumu</span>
+                    </div>
+                    <ol className="divide-y divide-border/60 px-3 py-2 font-mono text-xs tabular-nums">
+                      {kapSignals.disclosures.map((row) => (
+                        <li
+                          key={row.disclosure_index}
+                          className="grid grid-cols-[3.5rem_minmax(0,1fr)_4rem_5rem] items-center gap-2 py-1.5"
+                        >
+                          <span className="text-muted-foreground" title="KAP bildirim numarası">
+                            {row.disclosure_index}
+                          </span>
+                          <span className="truncate text-foreground">{row.kap_title}</span>
+                          <span className={toneTextClass(materialityTone(row.materiality_level))}>
+                            {materialityLevelText(row.materiality_level)}
+                          </span>
+                          <span className={toneTextClass(classAgreeTone(row.class_agree))}>
+                            {classAgreeText(row.class_agree)}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  </>
                 )}
-                <p className="px-3 pb-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+                <p className="px-3 pb-3 font-mono text-xs leading-relaxed text-muted-foreground">
                   Önemlilik ve sınıf uyumu Jev gölge tahminlerinden gelir, KAP&apos;ın beyanı değildir. /ekonomi
                   sayfasında gösterilmez.
                 </p>
@@ -222,17 +284,25 @@ export default async function AdminEkonomiPage() {
           </Panel>
 
           <Panel title="Model yuvası">
-            <div className="space-y-2 px-3 py-3 font-mono text-[11px] leading-relaxed text-muted-foreground">
+            <div className="space-y-3 px-3 py-3 font-mono text-xs leading-relaxed text-muted-foreground">
               <p>
-                Bugün <span className="text-foreground">finance_signals.score</span> kural sayacı. Öğrenilmiş bir model geldiğinde aynı görünüm sütununu doldurur; sayfa değişmez.
+                Bugünkü sinyaller basit kurallardan geliyor. Öğrenen bir model hazır olduğunda aynı sütunu dolduracak; sayfa değişmeyecek. Eğitim ve etiketli veri hazır.
               </p>
-              <p>
-                Eğitim verisi hazır: <span className="text-foreground">disclosure_coverage</span> (bildirim, haber, gecikme), <span className="text-foreground">ticker_attention_daily</span> (günlük ilgi) ve backtest tarafındaki fiyat serisi.
-              </p>
-              <p>
-                Etiketli satırlar hazır: <span className="text-foreground">ml_news_events</span> (haber × hisse) ve{" "}
-                <span className="text-foreground">ml_disclosure_events</span> (KAP × hisse), her satırda r0, r1, r5, r20 ileri getiri, pre5 ön koşu ve önceki 7 günün ilgisi.
-              </p>
+              <details>
+                <summary className="cursor-pointer text-foreground">Teknik ayrıntı</summary>
+                <div className="mt-2 space-y-2">
+                  <p>
+                    Bugün <span className="text-foreground">finance_signals.score</span> kural sayacı. Öğrenilmiş bir model geldiğinde aynı görünüm sütunu doldurur; sayfa değişmez.
+                  </p>
+                  <p>
+                    Eğitim verisi hazır: <span className="text-foreground">disclosure_coverage</span> (bildirim, haber, gecikme), <span className="text-foreground">ticker_attention_daily</span> (günlük ilgi) ve backtest tarafındaki fiyat serisi.
+                  </p>
+                  <p>
+                    Etiketli satırlar hazır: <span className="text-foreground">ml_news_events</span> (haber × hisse) ve{" "}
+                    <span className="text-foreground">ml_disclosure_events</span> (KAP × hisse), her satırda r0, r1, r5, r20 ileri getiri, pre5 ön koşu ve önceki 7 günün ilgisi.
+                  </p>
+                </div>
+              </details>
             </div>
           </Panel>
         </div>

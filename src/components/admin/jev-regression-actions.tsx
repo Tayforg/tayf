@@ -16,6 +16,10 @@ import { Button } from "@/components/ui/button";
  * single-button original — pressing either while the other's request is
  * in flight is disabled rather than queued.
  */
+
+const FREEZE_HINT = "Karşılaştırma setini güncel haberlerle yeniden oluşturur.";
+const RUN_HINT = "Haftalık çalışmayı beklemeden şimdi başlatır.";
+
 export function JevRegressionActions() {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -64,26 +68,34 @@ export function JevRegressionActions() {
   }
 
   return (
-    <div className="flex items-center gap-2">
-      <Button
-        variant="outline"
-        size="sm"
-        className="h-7 px-2 text-[11px]"
-        disabled={isPending}
-        onClick={handleFreeze}
-      >
-        Seti dondur
-      </Button>
-      <Button
-        variant="outline"
-        size="sm"
-        className="h-7 px-2 text-[11px]"
-        disabled={isPending}
-        onClick={handleRun}
-      >
-        Regresyonu çalıştır
-      </Button>
-      {message && <p className="font-mono text-[11px] text-muted-foreground">{message}</p>}
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-9 px-3 text-xs sm:h-7"
+          disabled={isPending}
+          onClick={handleFreeze}
+          title={FREEZE_HINT}
+        >
+          Seti dondur
+        </Button>
+        <span className="text-xs text-muted-foreground">{FREEZE_HINT}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-9 px-3 text-xs sm:h-7"
+          disabled={isPending}
+          onClick={handleRun}
+          title={RUN_HINT}
+        >
+          Regresyonu çalıştır
+        </Button>
+        <span className="text-xs text-muted-foreground">{RUN_HINT}</span>
+      </div>
+      {message && <p className="text-xs text-muted-foreground">{message}</p>}
     </div>
   );
 }

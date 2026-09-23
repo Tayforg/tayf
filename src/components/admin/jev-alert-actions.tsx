@@ -42,15 +42,15 @@ export function JevAlertActions({ id }: { id: number }) {
   return (
     <div className="mt-1 flex flex-col gap-1">
       <Button
-        variant="ghost"
+        variant="outline"
         size="sm"
-        className="h-7 px-2 text-[11px]"
+        className="h-9 px-3 text-xs sm:h-7"
         disabled={isPending}
         onClick={handleAck}
       >
         Onayla
       </Button>
-      {error && <p className="text-[11px] text-destructive">İşlem başarısız, tekrar deneyin.</p>}
+      {error && <p className="text-xs text-destructive">İşlem başarısız, tekrar deneyin.</p>}
     </div>
   );
 }

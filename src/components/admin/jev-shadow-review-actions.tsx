@@ -49,14 +49,19 @@ export function JevReviewActions({ id }: { id: number }) {
   }
 
   return (
-    <div className="mt-1 flex flex-col gap-1">
-      <div className="flex flex-wrap gap-1.5">
+    <div className="mt-1 flex flex-col gap-1.5">
+      <p className="text-xs text-muted-foreground">Hangisi doğru?</p>
+      <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap">
         {JEV_VERDICT_BUTTONS.map(({ verdict, label }) => (
           <Button
             key={verdict}
-            variant="ghost"
+            variant={verdict === "jev" || verdict === "baseline" ? "outline" : "ghost"}
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className={
+              verdict === "unsure"
+                ? "h-9 col-span-2 px-3 text-xs sm:h-7"
+                : "h-9 px-3 text-xs sm:h-7"
+            }
             disabled={isPending}
             onClick={() => handleVerdict(verdict)}
           >
@@ -64,8 +69,9 @@ export function JevReviewActions({ id }: { id: number }) {
           </Button>
         ))}
       </div>
+      {isPending && <p className="text-xs text-muted-foreground">Kaydediliyor…</p>}
       {error && (
-        <p className="text-[11px] text-destructive">
+        <p className="text-xs text-destructive">
           İşlem başarısız, tekrar deneyin.
         </p>
       )}

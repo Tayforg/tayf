@@ -1,4 +1,17 @@
-import { getJevRegressionStatus } from "@/lib/admin/jev-regression";
+import type { JevRegressionStatus } from "@/lib/admin/jev-regression";
+import {
+  AdminSection,
+  DataTable,
+  EmptyState,
+  KpiTile,
+  StatusBadge,
+  Td,
+  Th,
+  Tr,
+  toneTextClass,
+  type Tone,
+} from "@/components/admin/admin-ui";
+import { fmtDateTime, fmtInt, fmtPct, fmtRelative } from "@/lib/admin/format";
 import { JevRegressionActions } from "@/components/admin/jev-regression-actions";
 
 // Pack B2 "Metodoloji regresyonu" (migration 066) — the /admin section for
@@ -10,12 +23,10 @@ import { JevRegressionActions } from "@/components/admin/jev-regression-actions"
 // set replayed against a frozen input means a moved answer is the model
 // or the question moving, never the news.
 //
-// Plain async SERVER component, no cache directive — /admin is
-// cookie-gated and dynamic, same rationale as every other section on
-// this page.
-// getJevRegressionStatus never throws, so this section can never 500 the
-// page: null degrades to the Turkish read-failure sentence, an empty
-// runs array to the empty-runs sentence.
+// Plain SYNCHRONOUS server component (no "use cache", no fetch): `status`
+// and `now` are read once in page.tsx and passed in as props. null
+// degrades to the Turkish read-failure sentence, an empty runs array to
+// the empty-runs sentence — this component itself can never throw.
 
 const STATUS_LABELS: Record<string, string> = {
   running: "çalışıyor",
@@ -24,79 +35,129 @@ const STATUS_LABELS: Record<string, string> = {
   error: "hata",
 };
 
+const STATUS_TONE: Record<string, Tone> = {
+  running: "neutral",
+  ok: "ok",
+  partial: "warn",
+  error: "bad",
+};
+
 function statusLabel(status: string): string {
   return STATUS_LABELS[status] ?? status;
 }
 
-function formatRate(rate: number | null): string {
-  return rate === null ? "—" : `%${Math.round(rate * 100)}`;
+function statusTone(status: string): Tone {
+  return STATUS_TONE[status] ?? "neutral";
 }
 
-function formatInt(value: number | null): string {
-  return value === null ? "—" : value.toLocaleString("tr-TR");
+/**
+ * Flip-rate colouring is intentionally stricter than the shared
+ * rateTone() thresholds (which assume "higher is better"): here a HIGHER
+ * flip rate is worse, so this local helper flips the comparison and uses
+ * its own thresholds (>=0.05 warn, >=0.15 bad).
+ */
+function flipRateTone(rate: number | null): Tone {
+  if (rate === null) return "muted";
+  if (rate >= 0.15) return "bad";
+  if (rate >= 0.05) return "warn";
+  return "ok";
 }
 
-export async function JevRegressionSection() {
-  const status = await getJevRegressionStatus();
-
+export function JevRegressionSection({
+  status,
+  now,
+}: {
+  status: JevRegressionStatus | null;
+  now: number;
+}) {
   return (
-    <section className="space-y-2">
-      <h2 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">
-        Metodoloji regresyonu
-      </h2>
-      <p className="font-mono text-[12px] text-muted-foreground">
-        Aynı soru seti ile tekrar: kayma = model veya soru değişti
-      </p>
+    <AdminSection
+      id="regresyon"
+      title="Metodoloji regresyonu"
+      help="Haftada bir, dondurulmuş aynı haber setine aynı sorular yeniden sorulur. Haberler değişmediği için bir cevabın değişmesi (kayma) model ya da soru değişikliği demektir."
+      action="Kayma belirgin yükseldiyse son model veya soru değişikliğini gözden geçirin."
+      headerRight={<JevRegressionActions />}
+    >
       {status === null ? (
-        <p className="font-mono text-[12px] text-muted-foreground">Metodoloji regresyonu okunamadı.</p>
+        <EmptyState kind="error">Metodoloji regresyonu okunamadı.</EmptyState>
       ) : (
         <>
-          <p className="font-mono text-[12px] text-muted-foreground">
-            {`Donmuş set: ${status.counts.articles.toLocaleString("tr-TR")} haber · ${status.counts.pairs.toLocaleString("tr-TR")} eşleşme · ${status.counts.inGold.toLocaleString("tr-TR")} altın`}
-          </p>
-          <JevRegressionActions />
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <KpiTile label="Donmuş haber" value={fmtInt(status.counts.articles)} />
+            <KpiTile label="Donmuş eşleşme" value={fmtInt(status.counts.pairs)} />
+            <KpiTile label="Altın kümede" value={fmtInt(status.counts.inGold)} />
+          </div>
           {status.runs.length === 0 ? (
-            <p className="font-mono text-[12px] text-muted-foreground">Henüz regresyon çalışması yok.</p>
+            <EmptyState>Henüz regresyon çalışması yok.</EmptyState>
           ) : (
-            <table className="w-full font-mono text-[12px]">
-              <thead>
-                <tr className="text-left text-muted-foreground">
-                  <th className="py-1 pr-3 font-normal">Soru seti</th>
-                  <th className="py-1 pr-3 font-normal">Başlangıç</th>
-                  <th className="py-1 pr-3 font-normal">Durum</th>
-                  <th className="py-1 pr-3 font-normal">Öğe</th>
-                  <th className="py-1 pr-3 font-normal">Çağrı</th>
-                  <th className="py-1 pr-3 font-normal">Kayma</th>
-                  <th className="py-1 pr-3 font-normal">Siyaset</th>
-                  <th className="py-1 pr-3 font-normal">Konu</th>
-                  <th className="py-1 pr-3 font-normal">Eşleşme</th>
-                  <th className="py-1 font-normal">Altın (0.7)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {status.runs.map((run) => (
-                  <tr key={run.id} className="border-t border-border">
-                    <td className="py-1 pr-3 text-foreground">{run.questionSet}</td>
-                    <td className="py-1 pr-3 text-foreground">
-                      {new Date(run.startedAt).toLocaleString("tr-TR")}
-                    </td>
-                    <td className="py-1 pr-3 text-foreground">{statusLabel(run.status)}</td>
-                    <td className="py-1 pr-3 text-foreground">{run.items.toLocaleString("tr-TR")}</td>
-                    <td className="py-1 pr-3 text-foreground">{run.calls.toLocaleString("tr-TR")}</td>
-                    <td className="py-1 pr-3 text-foreground">
-                      {run.firstRun ? "ilk çalışma" : formatRate(run.flipRate)}
-                    </td>
-                    <td className="py-1 pr-3 text-foreground">{formatInt(run.flips.politics)}</td>
-                    <td className="py-1 pr-3 text-foreground">{formatInt(run.flips.topic)}</td>
-                    <td className="py-1 pr-3 text-foreground">{formatInt(run.flips.pair)}</td>
-                    <td className="py-1 text-foreground">{formatRate(run.goldPolitics070)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <details open className="scroll-mt-28">
+              <summary className="cursor-pointer text-sm text-brand">
+                Çalışma geçmişi ({fmtInt(status.runs.length)})
+              </summary>
+              <div className="mt-2">
+                <DataTable minWidth="lg">
+                  <thead>
+                    <Tr>
+                      <Th>Soru seti</Th>
+                      <Th>Başladı</Th>
+                      <Th>Durum</Th>
+                      <Th numeric>Öğe</Th>
+                      <Th numeric>Çağrı</Th>
+                      <Th
+                        numeric
+                        title="Önceki çalışmaya göre cevabı değişen öğelerin payı"
+                      >
+                        Kayma
+                      </Th>
+                      <Th numeric>Değişen: Siyaset</Th>
+                      <Th numeric>Değişen: Konu</Th>
+                      <Th numeric>Değişen: Eşleşme</Th>
+                      <Th
+                        numeric
+                        title="Jev siyaset cevabının 0,70 eşiğinde altın etiketlerle aynı olma oranı"
+                      >
+                        Altına uyum (≥0,70)
+                      </Th>
+                    </Tr>
+                  </thead>
+                  <tbody>
+                    {status.runs.map((run) => (
+                      <Tr key={run.id}>
+                        <Td>{run.questionSet}</Td>
+                        <Td>
+                          <span title={fmtDateTime(run.startedAt)}>
+                            {fmtRelative(run.startedAt, now)}
+                          </span>
+                        </Td>
+                        <Td>
+                          <StatusBadge tone={statusTone(run.status)}>
+                            {statusLabel(run.status)}
+                          </StatusBadge>
+                        </Td>
+                        <Td numeric>{fmtInt(run.items)}</Td>
+                        <Td numeric>{fmtInt(run.calls)}</Td>
+                        <Td numeric>
+                          {run.firstRun ? (
+                            "ilk çalışma"
+                          ) : (
+                            <span className={toneTextClass(flipRateTone(run.flipRate))}>
+                              {fmtPct(run.flipRate)}
+                            </span>
+                          )}
+                        </Td>
+                        <Td numeric>{fmtInt(run.flips.politics)}</Td>
+                        <Td numeric>{fmtInt(run.flips.topic)}</Td>
+                        <Td numeric>{fmtInt(run.flips.pair)}</Td>
+                        <Td numeric>{fmtPct(run.goldPolitics070)}</Td>
+                      </Tr>
+                    ))}
+                  </tbody>
+                </DataTable>
+              </div>
+            </details>
           )}
         </>
       )}
-    </section>
+    </AdminSection>
   );
 }
