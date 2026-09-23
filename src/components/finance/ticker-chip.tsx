@@ -62,7 +62,7 @@ export function TickerTape({
 }) {
   if (items.length === 0) return null;
   return (
-    <div className="flex overflow-x-auto border border-border bg-foreground/[0.03] font-mono text-[11px] leading-none [scrollbar-width:thin]">
+    <div className="tayf-scroll-x flex overflow-x-auto border border-border bg-foreground/[0.03] font-mono text-[11px] leading-none">
       {items.map((t) => {
         const q = quotes[t.ticker];
         const s = stats[t.ticker];

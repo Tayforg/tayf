@@ -286,4 +286,34 @@
     opacity: 0.15;
     z-index: -1;
   }
+
+  /* Themed horizontal scrollbar for the ticker/chip strips (ticker tape,
+     breaker rows, etc). Replaces the browser's default light-grey
+     non-overlay track+thumb — which sits on top of chip content on
+     platforms without overlay scrollbars (e.g. macOS "always show
+     scrollbars") — with a thin, low-contrast bar in the site's own
+     tokens. `padding-bottom` reserves room below the content so the bar
+     renders under the last line of text instead of over it, in both
+     Firefox (`scrollbar-width: thin`, no custom size) and WebKit's
+     explicit 6px thumb. `--muted-foreground` already flips between the
+     light and dark palettes above, so no separate dark-mode override is
+     needed here. */
+  .tayf-scroll-x {
+    padding-bottom: 10px;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent) transparent;
+  }
+  .tayf-scroll-x::-webkit-scrollbar {
+    height: 6px;
+  }
+  .tayf-scroll-x::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .tayf-scroll-x::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklch, var(--muted-foreground) 45%, transparent);
+    border-radius: 9999px;
+  }
+  .tayf-scroll-x::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
+  }
 }
