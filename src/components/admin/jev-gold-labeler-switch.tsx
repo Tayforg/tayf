@@ -20,6 +20,9 @@ import { Button } from "@/components/ui/button";
  * jev_labeler cookie server-side), never a client-side cookie write — see
  * the shared contract's cookie section: this switch is a UI convenience,
  * not an authorization signal.
+ *
+ * Same POST, same body — only the labels and tap targets changed in the
+ * admin readability pass.
  */
 export function JevGoldLabelerSwitch({ labeler }: { labeler: 1 | 2 }) {
   const router = useRouter();
@@ -48,22 +51,25 @@ export function JevGoldLabelerSwitch({ labeler }: { labeler: 1 | 2 }) {
 
   return (
     <div className="space-y-1">
-      <div className="flex items-center gap-1.5 font-mono text-[12px]">
+      <div className="flex items-center gap-1.5 text-sm">
         <span className="text-muted-foreground">Etiketleyici:</span>
         {([1, 2] as const).map((n) => (
           <Button
             key={n}
             variant={labeler === n ? "secondary" : "ghost"}
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className="h-9 sm:h-7 px-2 text-xs"
             disabled={isPending}
             onClick={() => handleLabelerSwitch(n)}
           >
-            {n}
+            {n === 1 ? "Etiketleyici 1" : "Etiketleyici 2"}
           </Button>
         ))}
       </div>
-      {error && <p className="font-mono text-[11px] text-destructive">{error}</p>}
+      <p className="text-xs text-muted-foreground">
+        Etiketleyici 1 ve 2 iki ayrı kişidir. Kendi numaranızı seçin; seçim bu tarayıcıda hatırlanır. İki kişi aynı haberleri birbirinden bağımsız etiketler.
+      </p>
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }

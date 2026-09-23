@@ -1,9 +1,32 @@
 import Link from "next/link";
-import {
-  getJevShadowStatus,
-  type JevAgreementRow,
-  type JevRunRow,
+import type {
+  JevAgreementRow,
+  JevRunRow,
+  JevShadowStatus,
 } from "@/lib/admin/jev-shadow-status";
+import {
+  AdminSection,
+  DataTable,
+  EmptyState,
+  FieldLabel,
+  KpiTile,
+  Meter,
+  StatusBadge,
+  Td,
+  Th,
+  Tr,
+  toneTextClass,
+  type Tone,
+} from "@/components/admin/admin-ui";
+import {
+  fmtDateTime,
+  fmtInt,
+  fmtPct,
+  fmtRelative,
+  fmtUsd,
+  parseStatePreview,
+  rateTone,
+} from "@/lib/admin/format";
 import { JevReviewActions } from "@/components/admin/jev-shadow-review-actions";
 
 // Pack JEV (migration 061) — the /admin "Jev gölge" section. Gölge mod:
@@ -12,8 +35,10 @@ import { JevReviewActions } from "@/components/admin/jev-shadow-review-actions";
 // an unvalidated baseline — never call an agreement rate an accuracy
 // figure (see pack.md's "AGREEMENT IS NOT ACCURACY").
 //
-// Plain async SERVER component, no "use cache" — /admin is cookie-gated
-// and dynamic, same rationale as the Arşiv section on this page.
+// Plain SYNCHRONOUS server components (no "use cache", no fetch): data is
+// read once in page.tsx and passed in as `status`/`now` props. Rendering a
+// null/empty status is the caller's read-failure/empty-state path, not
+// this component's — see the AdminSection null branches below.
 
 // Duplicates the order of JEV_TASKS in supabase/functions/_shared/jev.ts.
 // That module is Deno-adjacent (imported by the jev-shadow Edge Function)
@@ -60,12 +85,25 @@ const JEV_RUN_STATUS_LABELS_TR: Record<string, string> = {
   error: "hata",
 };
 
+const JEV_RUN_STATUS_TONE: Record<string, Tone> = {
+  ok: "ok",
+  partial: "warn",
+  rate_limited: "warn",
+  budget_exceeded: "bad",
+  error: "bad",
+  running: "neutral",
+};
+
 function taskLabel(task: string): string {
   return JEV_TASK_LABELS_TR[task] ?? task;
 }
 
-function formatRate(rate: number | null): string {
-  return rate === null ? "—" : `%${Math.round(rate * 100)}`;
+function runStatusLabel(status: string): string {
+  return JEV_RUN_STATUS_LABELS_TR[status] ?? status;
+}
+
+function runStatusTone(status: string): Tone {
+  return JEV_RUN_STATUS_TONE[status] ?? "neutral";
 }
 
 interface AgreementByTask {
@@ -109,120 +147,223 @@ function buildAgreementRows(
   });
 }
 
-function monthLine(status: {
-  runs: number;
-  calls: number;
-  inputTokens: number;
-  usd: number;
-  cap: number;
-  pct: number;
-}): string {
-  return (
-    `Bu ay: ${status.runs.toLocaleString("tr-TR")} çalışma · ` +
-    `${status.calls.toLocaleString("tr-TR")} çağrı · ` +
-    `${status.inputTokens.toLocaleString("tr-TR")} jeton · ` +
-    `≈${status.usd.toFixed(2)} $ · ` +
-    `sınır ${status.cap.toLocaleString("tr-TR")} jeton (%${status.pct})`
-  );
+function monthTone(month: JevShadowStatus["month"]): Tone {
+  if (month.exceeded || month.pct >= 100) return "bad";
+  if (month.pct >= 80) return "warn";
+  return "neutral";
 }
 
-function lastRunLine(lastRun: JevRunRow | null): string {
-  if (lastRun === null) return "Henüz çalışma yok";
-  const statusLabel = JEV_RUN_STATUS_LABELS_TR[lastRun.status] ?? lastRun.status;
-  return (
-    `Son çalışma: ${new Date(lastRun.started_at).toLocaleString("tr-TR")} · ` +
-    `${statusLabel} · ${lastRun.calls.toLocaleString("tr-TR")} çağrı · ` +
-    `${lastRun.errors.toLocaleString("tr-TR")} hata`
-  );
+function lastRunHint(lastRun: JevRunRow): string {
+  return `${fmtInt(lastRun.calls)} çağrı · ${fmtInt(lastRun.errors)} hata`;
 }
 
-export async function JevShadowSection() {
-  const status = await getJevShadowStatus();
-
+/**
+ * "Jev gölge ölçümü": monthly budget KPIs, the last run, and the
+ * per-task agreement table. `status`/`now` are read once in page.tsx and
+ * passed in — this component itself does no I/O and no Date.now().
+ */
+export function JevShadowSection({
+  status,
+  now,
+}: {
+  status: JevShadowStatus | null;
+  now: number;
+}) {
   return (
-    <section className="space-y-2">
-      <h2 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">
-        Jev gölge
-      </h2>
-      <p className="font-mono text-[12px] text-muted-foreground">
-        Gölge mod: hiçbir Jev çıktısı okuyucuya gösterilmez, yalnızca ölçüm için saklanır.
-      </p>
-      <Link
-        href="/admin/jev-altin"
-        className="inline-flex items-center gap-1.5 font-mono text-[12px] text-brand hover:underline"
-      >
-        Altın küme: etiketleme ve karne
-      </Link>
+    <AdminSection
+      id="jev-golge"
+      title="Jev gölge ölçümü"
+      help="Jev, haberleri arka planda ikinci bir gözle etiketleyen dil modeli. Gölge modda çalışır: sonuçları okuyucuya gösterilmez, yalnızca mevcut sistemle karşılaştırılır."
+      action="Uyum oranı birden düşerse ya da son çalışma hata verdiyse Jev ayarlarını kontrol edin."
+      headerRight={
+        <Link
+          href="/admin/jev-altin"
+          className="inline-flex items-center gap-1.5 text-sm text-brand hover:underline"
+        >
+          Altın küme: etiketleme ve karne
+        </Link>
+      }
+    >
       {status === null ? (
-        <p className="font-mono text-[12px] text-muted-foreground">Jev gölge durumu okunamadı.</p>
+        <EmptyState kind="error">Jev gölge durumu okunamadı.</EmptyState>
       ) : (
         <>
-          <p className="font-mono text-[12px] text-foreground">
-            {monthLine(status.month)}
-            {status.month.exceeded && (
-              <span className="text-destructive"> — bütçe doldu, çağrılar durduruldu.</span>
-            )}
-          </p>
-          <p className="font-mono text-[12px] text-muted-foreground">
-            {lastRunLine(status.lastRun)}
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <div className="space-y-2">
+              <KpiTile
+                label="Bu ay jeton"
+                value={fmtInt(status.month.inputTokens)}
+                hint={`sınır ${fmtInt(status.month.cap)} (%${status.month.pct})`}
+                tone={monthTone(status.month)}
+              />
+              <Meter
+                pct={status.month.pct}
+                tone={monthTone(status.month)}
+                label="Aylık jeton kullanımı"
+              />
+            </div>
+            <KpiTile label="Tahmini maliyet" value={fmtUsd(status.month.usd)} />
+            <KpiTile
+              label="Çağrı / çalışma"
+              value={`${fmtInt(status.month.calls)} / ${fmtInt(status.month.runs)}`}
+            />
+            <KpiTile
+              label="Son çalışma"
+              value={
+                status.lastRun === null ? (
+                  "Henüz çalışma yok"
+                ) : (
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
+                    <span title={fmtDateTime(status.lastRun.started_at)}>
+                      {fmtRelative(status.lastRun.started_at, now)}
+                    </span>
+                    <StatusBadge tone={runStatusTone(status.lastRun.status)}>
+                      {runStatusLabel(status.lastRun.status)}
+                    </StatusBadge>
+                  </span>
+                )
+              }
+              hint={status.lastRun === null ? undefined : lastRunHint(status.lastRun)}
+              tone={status.lastRun === null ? "muted" : runStatusTone(status.lastRun.status)}
+            />
+          </div>
+          {status.month.exceeded && (
+            <p className="text-sm text-destructive">
+              — bütçe doldu, çağrılar durduruldu.
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Uyum doğruluk değildir: yalnızca Jev ile mevcut sistemin aynı cevabı verme oranıdır.
           </p>
           {(() => {
             const agreementRows = buildAgreementRows(status.agreement24h, status.agreement7d);
             return agreementRows.length === 0 ? (
-              <p className="font-mono text-[12px] text-muted-foreground">Henüz gölge tahmin yok.</p>
+              <EmptyState>Henüz gölge tahmin yok.</EmptyState>
             ) : (
-              <table className="w-full font-mono text-[12px]">
+              <DataTable minWidth="md">
                 <thead>
-                  <tr className="text-left text-muted-foreground">
-                    <th className="py-1 pr-3 font-normal">Görev</th>
-                    <th className="py-1 pr-3 font-normal">Uyum 24s</th>
-                    <th className="py-1 pr-3 font-normal">Uyum 7g</th>
-                    <th className="py-1 pr-3 font-normal">Karşılaştırılan</th>
-                    <th className="py-1 font-normal">Ölçülemeyen</th>
-                  </tr>
+                  <Tr>
+                    <Th>Görev</Th>
+                    <Th numeric>Uyum 24 saat</Th>
+                    <Th numeric>Uyum 7 gün</Th>
+                    <Th numeric title="Jev'in ve sistemin cevap verdiği tahmin sayısı">
+                      Karşılaştırılan (7 gün)
+                    </Th>
+                    <Th numeric title="Jev'in net cevap vermediği, karşılaştırılamayan tahminler">
+                      Kararsız
+                    </Th>
+                  </Tr>
                 </thead>
                 <tbody>
                   {agreementRows.map((row) => (
-                    <tr key={row.task} className="border-t border-border">
-                      <td className="py-1 pr-3 text-foreground">{taskLabel(row.task)}</td>
-                      <td className="py-1 pr-3 text-foreground">{formatRate(row.rate24h)}</td>
-                      <td className="py-1 pr-3 text-foreground">{formatRate(row.rate7d)}</td>
-                      <td className="py-1 pr-3 text-foreground">
-                        {row.total.toLocaleString("tr-TR")}
-                      </td>
-                      <td className="py-1 text-foreground">
-                        {row.undecided.toLocaleString("tr-TR")}
-                      </td>
-                    </tr>
+                    <Tr key={row.task}>
+                      <Td>{taskLabel(row.task)}</Td>
+                      <Td numeric>
+                        <span
+                          className={toneTextClass(rateTone(row.rate24h))}
+                          title={row.rate24h === null ? "Bu pencerede karşılaştırma yok" : undefined}
+                        >
+                          {fmtPct(row.rate24h)}
+                        </span>
+                      </Td>
+                      <Td numeric>
+                        <span
+                          className={toneTextClass(rateTone(row.rate7d))}
+                          title={row.rate7d === null ? "Bu pencerede karşılaştırma yok" : undefined}
+                        >
+                          {fmtPct(row.rate7d)}
+                        </span>
+                      </Td>
+                      <Td numeric>{fmtInt(row.total)}</Td>
+                      <Td numeric>{fmtInt(row.undecided)}</Td>
+                    </Tr>
                   ))}
                 </tbody>
-              </table>
+              </DataTable>
             );
           })()}
-          <h3 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">
-            Anlaşmazlık kuyruğu ({status.queue.length})
-          </h3>
-          {status.queue.length === 0 ? (
-            <p className="font-mono text-[12px] text-muted-foreground">İncelenecek anlaşmazlık yok.</p>
-          ) : (
-            <ul className="space-y-3">
-              {status.queue.map((row) => (
-                <li key={row.id} className="border-t border-border pt-2">
-                  <p className="font-mono text-[12px] text-muted-foreground">
-                    {taskLabel(row.task)} · {new Date(row.created_at).toLocaleString("tr-TR")}
-                  </p>
-                  <p className="mt-1 whitespace-pre-wrap text-foreground">{row.state_preview}</p>
-                  <p className="font-mono text-[12px] text-muted-foreground">
-                    Sistem: {row.baseline_answer} · Jev:{" "}
-                    {row.jev_choice ?? (row.jev_prob != null ? row.jev_prob.toFixed(2) : "—")}
-                  </p>
-                  <JevReviewActions id={row.id} />
-                </li>
-              ))}
-            </ul>
-          )}
         </>
       )}
-    </section>
+    </AdminSection>
+  );
+}
+
+/**
+ * "Anlaşmazlık kuyruğu": the newest disagreements between Jev and the
+ * baseline (capped upstream at JEV_QUEUE_LIMIT). Each row's free-text
+ * `state_preview` is rendered as text nodes only — never HTML — either as
+ * labelled fields via parseStatePreview, or as a plain whitespace-pre-wrap
+ * fallback when it doesn't parse.
+ */
+export function JevDisagreementQueue({
+  status,
+  now,
+}: {
+  status: JevShadowStatus | null;
+  now: number;
+}) {
+  const queue = status?.queue ?? [];
+  return (
+    <AdminSection
+      id="anlasmazlik"
+      title="Anlaşmazlık kuyruğu"
+      help="Jev ile mevcut sistemin aynı haber için farklı cevap verdiği örnekler (en yeni 30)."
+      action="Metni okuyun ve hangisinin doğru olduğunu seçin. Kararınız okuyucu sayfalarını değiştirmez; yalnızca Jev'i değerlendirmek için saklanır."
+      count={queue.length}
+      tone={queue.length > 0 ? "warn" : "neutral"}
+    >
+      {status === null ? (
+        <EmptyState kind="error">Jev gölge durumu okunamadı.</EmptyState>
+      ) : queue.length === 0 ? (
+        <EmptyState>İncelenecek anlaşmazlık yok.</EmptyState>
+      ) : (
+        <ul className="divide-y divide-border/60">
+          {queue.map((row) => {
+            const fields = parseStatePreview(row.state_preview);
+            return (
+              <li key={row.id} className="min-w-0 space-y-2 py-3 break-words">
+                <p className="flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+                  <StatusBadge tone="neutral">{taskLabel(row.task)}</StatusBadge>
+                  <span title={fmtDateTime(row.created_at)}>{fmtRelative(row.created_at, now)}</span>
+                </p>
+                {fields ? (
+                  <dl className="space-y-1">
+                    {fields.map((field, index) => (
+                      <div key={field.label}>
+                        <FieldLabel>{field.label}</FieldLabel>
+                        <dd
+                          className={
+                            index === 0
+                              ? "text-base font-medium text-foreground"
+                              : "text-sm text-foreground"
+                          }
+                        >
+                          {field.value}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <p className="text-sm whitespace-pre-wrap text-foreground">{row.state_preview}</p>
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="rounded-lg border border-border p-2">
+                    <FieldLabel>Sistem</FieldLabel>
+                    <p className="text-sm text-foreground">{row.baseline_answer}</p>
+                  </div>
+                  <div className="rounded-lg border border-border p-2">
+                    <FieldLabel>Jev</FieldLabel>
+                    <p className="text-sm text-foreground">
+                      {row.jev_choice ?? (row.jev_prob != null ? fmtPct(row.jev_prob) : "—")}
+                    </p>
+                  </div>
+                </div>
+                <JevReviewActions id={row.id} />
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </AdminSection>
   );
 }

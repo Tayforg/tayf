@@ -12,8 +12,7 @@ import {
   ActionResultBanner,
   type ActionResult,
 } from "@/components/admin/action-result-banner";
-import { RefreshCw, Loader2, Plus, LogOut } from "lucide-react";
-import { logoutAction } from "@/app/admin/login/actions";
+import { RefreshCw, Plus } from "lucide-react";
 
 interface Stats {
   articles: number;
@@ -166,48 +165,27 @@ export function AdminPanel() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-24">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      <div className="space-y-4">
+        <div className="h-40 animate-pulse rounded-xl border border-border bg-card/40" />
       </div>
     );
   }
 
   return (
-    <div className="container mx-auto px-4 sm:px-6 py-8 max-w-6xl">
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="text-xl font-bold font-serif">Admin Panel</h1>
-          <p className="text-xs text-muted-foreground mt-0.5">
-            Dev tools for testing and managing Tayf
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={fetchStats}
-            className="text-xs"
-          >
-            <RefreshCw className="h-3 w-3 mr-1.5" />
-            Yenile
-          </Button>
-          <form action={logoutAction}>
-            <Button
-              type="submit"
-              variant="ghost"
-              size="sm"
-              className="text-xs text-muted-foreground"
-            >
-              <LogOut className="h-3 w-3 mr-1.5" />
-              Çıkış
-            </Button>
-          </form>
-        </div>
+    <div className="space-y-4">
+      <div className="flex items-center justify-end">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={fetchStats}
+          className="h-9 text-xs sm:h-7"
+        >
+          <RefreshCw className="h-3 w-3 mr-1.5" />
+          Yenile
+        </Button>
       </div>
 
-      <div className="mb-4">
-        <WorkerStats />
-      </div>
+      <WorkerStats />
 
       <StatsGrid
         articles={stats?.articles ?? 0}
@@ -218,22 +196,18 @@ export function AdminPanel() {
 
       {lastResult && <ActionResultBanner result={lastResult} />}
 
-      <QuickActionsCard
-        missingImages={stats?.missingImages ?? 0}
-        actionLoading={actionLoading}
-        onRun={runAction}
-        onConfirmAndRun={confirmAndRun}
-      />
-
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-serif">Kaynaklar</CardTitle>
-            <Button size="sm" className="text-xs h-7" onClick={openAddDialog}>
+            <Button size="sm" className="h-9 text-xs sm:h-7" onClick={openAddDialog}>
               <Plus className="h-3 w-3 mr-1" />
               Kaynak Ekle
             </Button>
           </div>
+          <p className="text-sm text-muted-foreground">
+            Haber çekilen RSS kaynakları. Devre dışı bırakılan kaynaktan yeni haber alınmaz.
+          </p>
         </CardHeader>
         <CardContent>
           <div className="space-y-1">
@@ -250,6 +224,13 @@ export function AdminPanel() {
           </div>
         </CardContent>
       </Card>
+
+      <QuickActionsCard
+        missingImages={stats?.missingImages ?? 0}
+        actionLoading={actionLoading}
+        onRun={runAction}
+        onConfirmAndRun={confirmAndRun}
+      />
 
       <SourceDialog
         open={dialogOpen}

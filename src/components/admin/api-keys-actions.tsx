@@ -4,6 +4,15 @@ import { useState, useTransition, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import {
+  DataTable,
+  EmptyState,
+  StatusBadge,
+  Td,
+  Th,
+  Tr,
+} from "@/components/admin/admin-ui";
+import { fmtDateTime, fmtRelative } from "@/lib/admin/format";
 import type { ApiKeyRow } from "@/lib/admin/api-keys-status";
 
 /**
@@ -18,16 +27,21 @@ import type { ApiKeyRow } from "@/lib/admin/api-keys-status";
  * The freshly-created plaintext key is held ONLY in this component's local
  * state (never round-tripped through the server component / router
  * refresh) and is shown exactly once behind the contract's notice string.
+ *
+ * `now` is threaded down from the server component (currentTimeMs(), not
+ * Date.now() in render) so the relative "Oluşturuldu" / "Son kullanım"
+ * columns stay stable between server render and hydration.
  */
 
 const GENERIC_ERROR = "İşlem başarısız, tekrar deneyin.";
 
-function formatDate(iso: string): string {
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString("tr-TR");
-}
-
-export function ApiKeysActions({ keys }: { keys: ApiKeyRow[] }) {
+export function ApiKeysActions({
+  keys,
+  now,
+}: {
+  keys: ApiKeyRow[];
+  now: number;
+}) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [label, setLabel] = useState("");
@@ -83,89 +97,96 @@ export function ApiKeysActions({ keys }: { keys: ApiKeyRow[] }) {
   }
 
   return (
-    <div className="space-y-3">
-      <form onSubmit={handleCreate} className="flex flex-wrap items-end gap-2">
-        <label className="flex flex-col gap-1 font-mono text-[11px] text-muted-foreground">
-          Etiket
-          <input
-            type="text"
-            required
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
+    <div className="space-y-4">
+      <div className="space-y-2 rounded-lg border border-border/60 p-3">
+        <p className="text-sm font-medium text-foreground">Yeni anahtar oluştur</p>
+        <form onSubmit={handleCreate} className="flex flex-wrap items-end gap-2">
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            Etiket
+            <input
+              type="text"
+              required
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
+              disabled={isPending}
+              placeholder="örn. Kurum adı"
+              className="h-9 rounded-lg border border-border/60 bg-background px-2 text-sm disabled:opacity-50"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+            Katman
+            <select
+              value={tier}
+              onChange={(e) => setTier(e.target.value === "partner" ? "partner" : "free")}
+              disabled={isPending}
+              className="h-9 rounded-lg border border-border/60 bg-background px-2 text-sm disabled:opacity-50"
+            >
+              <option value="free">Ücretsiz</option>
+              <option value="partner">Partner</option>
+            </select>
+          </label>
+          <Button
+            type="submit"
+            size="sm"
+            className="h-9 sm:h-7 px-3 text-xs"
             disabled={isPending}
-            className="h-7 rounded-lg border border-border/60 bg-background px-2 text-[11px] disabled:opacity-50"
-          />
-        </label>
-        <label className="flex flex-col gap-1 font-mono text-[11px] text-muted-foreground">
-          Katman
-          <select
-            value={tier}
-            onChange={(e) => setTier(e.target.value === "partner" ? "partner" : "free")}
-            disabled={isPending}
-            className="h-7 rounded-lg border border-border/60 bg-background px-2 text-[11px] disabled:opacity-50"
           >
-            <option value="free">Ücretsiz</option>
-            <option value="partner">Partner</option>
-          </select>
-        </label>
-        <Button type="submit" size="sm" disabled={isPending}>
-          Anahtar oluştur
-        </Button>
-      </form>
+            Anahtar oluştur
+          </Button>
+        </form>
+      </div>
 
       {newKey && (
-        <div className="rounded-lg border border-border/60 p-2 font-mono text-[11px]">
-          <p className="text-muted-foreground">
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
+          <p className="text-amber-600 dark:text-amber-400">
             Bu anahtar yalnızca bir kez gösterilir. Şimdi kopyalayın.
           </p>
-          <p className="mt-1 break-all text-foreground">{newKey}</p>
+          <p className="mt-1 break-all font-mono text-xs text-foreground">{newKey}</p>
         </div>
       )}
 
-      {error && (
-        <p className="font-mono text-[11px] text-destructive">{GENERIC_ERROR}</p>
-      )}
+      {error && <p className="text-xs text-destructive">{GENERIC_ERROR}</p>}
 
       {keys.length === 0 ? (
-        <p className="font-mono text-[12px] text-muted-foreground">
-          Henüz API anahtarı yok.
-        </p>
+        <EmptyState>Henüz API anahtarı yok.</EmptyState>
       ) : (
-        <table className="w-full font-mono text-[12px]">
+        <DataTable minWidth="md">
           <thead>
-            <tr className="text-left text-muted-foreground">
-              <th className="py-1 pr-3 font-normal">Etiket</th>
-              <th className="py-1 pr-3 font-normal">Katman</th>
-              <th className="py-1 pr-3 font-normal">Oluşturma</th>
-              <th className="py-1 pr-3 font-normal">Son kullanım</th>
-              <th className="py-1 pr-3 font-normal">7 günlük çağrı</th>
-              <th className="py-1 font-normal">Durum</th>
-            </tr>
+            <Tr>
+              <Th>Etiket</Th>
+              <Th>Katman</Th>
+              <Th>Oluşturuldu</Th>
+              <Th>Son kullanım</Th>
+              <Th numeric>7 günlük çağrı</Th>
+              <Th>Durum</Th>
+            </Tr>
           </thead>
           <tbody>
             {keys.map((k) => (
-              <tr key={k.id} className="border-t border-border">
-                <td className="py-1 pr-3 text-foreground">{k.label}</td>
-                <td className="py-1 pr-3 text-foreground">
-                  {k.tier === "partner" ? "Partner" : "Ücretsiz"}
-                </td>
-                <td className="py-1 pr-3 text-foreground">{formatDate(k.created_at)}</td>
-                <td className="py-1 pr-3 text-foreground">
-                  {k.last_used_at ? formatDate(k.last_used_at) : "—"}
-                </td>
-                <td className="py-1 pr-3 text-foreground">
-                  {k.calls7d.toLocaleString("tr-TR")}
-                </td>
-                <td className="py-1 text-foreground">
+              <Tr key={k.id}>
+                <Td>{k.label}</Td>
+                <Td>{k.tier === "partner" ? "Partner" : "Ücretsiz"}</Td>
+                <Td>
+                  <span title={fmtDateTime(k.created_at)}>
+                    {fmtRelative(k.created_at, now)}
+                  </span>
+                </Td>
+                <Td>
+                  <span title={fmtDateTime(k.last_used_at)}>
+                    {fmtRelative(k.last_used_at, now)}
+                  </span>
+                </Td>
+                <Td numeric>{k.calls7d.toLocaleString("tr-TR")}</Td>
+                <Td>
                   {k.revoked_at ? (
-                    "iptal"
+                    <StatusBadge tone="muted">iptal</StatusBadge>
                   ) : (
                     <div className="flex items-center gap-1.5">
-                      etkin
+                      <StatusBadge tone="ok">etkin</StatusBadge>
                       <Button
                         variant="ghost"
                         size="sm"
-                        className="h-6 px-1.5 text-[10px] text-destructive/60 hover:text-destructive"
+                        className="h-9 sm:h-7 px-2 text-xs text-destructive/60 hover:text-destructive"
                         disabled={isPending}
                         onClick={() => handleRevoke(k.id)}
                       >
@@ -173,11 +194,11 @@ export function ApiKeysActions({ keys }: { keys: ApiKeyRow[] }) {
                       </Button>
                     </div>
                   )}
-                </td>
-              </tr>
+                </Td>
+              </Tr>
             ))}
           </tbody>
-        </table>
+        </DataTable>
       )}
     </div>
   );

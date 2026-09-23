@@ -13,9 +13,12 @@ export function QuickActionsCard({
   onConfirmAndRun: (action: string, label: string) => void;
 }) {
   return (
-    <Card className="mb-6">
+    <Card className="mb-6 border-destructive/40 ring-destructive/20">
       <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-serif">Hızlı İşlemler</CardTitle>
+        <CardTitle className="text-sm font-serif">Tehlikeli işlemler</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          Geri alınamaz. Yalnızca test ortamında ya da bilerek kullanın.
+        </p>
       </CardHeader>
       <CardContent className="space-y-3">
         <ActionRow

@@ -5,11 +5,13 @@ export function StatCard({
   label,
   value,
   variant = "default",
+  hint,
 }: {
   icon: React.ElementType;
   label: string;
   value: number;
   variant?: "default" | "warning";
+  hint?: string;
 }) {
   return (
     <Card className="animate-fade-up hover-lift">
@@ -26,7 +28,8 @@ export function StatCard({
           </div>
           <div>
             <p className="font-mono text-2xl font-semibold text-brand tabular-nums">{value}</p>
-            <p className="font-sans text-[11px] uppercase tracking-wider text-muted-foreground">{label}</p>
+            <p className="font-sans text-xs uppercase tracking-wider text-muted-foreground">{label}</p>
+            {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
           </div>
         </div>
       </CardContent>

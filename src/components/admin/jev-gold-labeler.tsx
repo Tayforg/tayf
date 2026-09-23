@@ -57,15 +57,17 @@ export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labe
     });
   }
 
+  const incomplete = isPolitics === null || topic === null;
+
   return (
     <div className="space-y-3">
-      <div className="space-y-1.5 font-mono text-[12px]">
-        <p className="text-muted-foreground">Siyaset mi?</p>
+      <div className="space-y-1.5 text-sm">
+        <p className="text-muted-foreground">Siyaset mi? (zorunlu)</p>
         <div className="flex gap-1.5">
           <Button
             variant={isPolitics === true ? "secondary" : "ghost"}
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className="h-9 sm:h-7 px-2 text-xs"
             disabled={isPending}
             onClick={() => setIsPolitics(true)}
           >
@@ -74,7 +76,7 @@ export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labe
           <Button
             variant={isPolitics === false ? "secondary" : "ghost"}
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className="h-9 sm:h-7 px-2 text-xs"
             disabled={isPending}
             onClick={() => setIsPolitics(false)}
           >
@@ -83,15 +85,15 @@ export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labe
         </div>
       </div>
 
-      <div className="space-y-1.5 font-mono text-[12px]">
-        <p className="text-muted-foreground">Konu</p>
+      <div className="space-y-1.5 text-sm">
+        <p className="text-muted-foreground">Konu (zorunlu)</p>
         <div className="flex flex-wrap gap-1.5">
           {JEV_GOLD_TOPICS.map((t) => (
             <Button
               key={t}
               variant={topic === t ? "secondary" : "ghost"}
               size="sm"
-              className="h-7 px-2 text-[11px]"
+              className="h-9 sm:h-7 px-2 text-xs"
               disabled={isPending}
               onClick={() => setTopic(t)}
             >
@@ -108,18 +110,25 @@ export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labe
         maxLength={JEV_GOLD_NOTE_MAX_LENGTH}
         disabled={isPending}
         rows={2}
-        className="w-full rounded-lg border border-border/60 bg-background p-2 font-mono text-[12px] disabled:opacity-50"
+        className="w-full rounded-lg border border-border/60 bg-background p-2 text-sm disabled:opacity-50"
       />
 
-      <Button
-        size="sm"
-        className="h-7 px-3 text-[11px]"
-        disabled={isPending || isPolitics === null || topic === null}
-        onClick={handleSave}
-      >
-        Kaydet
-      </Button>
-      {error && <p className="font-mono text-[11px] text-destructive">{error}</p>}
+      <div className="space-y-1">
+        <Button
+          size="sm"
+          className="h-9 sm:h-7 px-3 text-xs"
+          disabled={isPending || incomplete}
+          onClick={handleSave}
+        >
+          Kaydet
+        </Button>
+        {incomplete && (
+          <p className="text-xs text-muted-foreground">
+            Kaydetmek için &apos;Siyaset mi?&apos; ve &apos;Konu&apos; seçin.
+          </p>
+        )}
+      </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
     </div>
   );
 }

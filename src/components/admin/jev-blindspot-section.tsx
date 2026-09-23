@@ -1,4 +1,6 @@
-import { getJevBlindspotSuspects } from "@/lib/admin/jev-cluster";
+import type { JevBlindspotSuspectView } from "@/lib/admin/jev-cluster";
+import { AdminSection, EmptyState, FieldLabel, StatusBadge } from "@/components/admin/admin-ui";
+import { fmtDateTime, fmtPct, fmtRelative } from "@/lib/admin/format";
 
 // Pack A ("Jev canlı küme", migration 064) — the /admin "Şüpheli kör
 // noktalar" section: clusters the 'blindspot_recall' shadow stage thinks
@@ -7,55 +9,62 @@ import { getJevBlindspotSuspects } from "@/lib/admin/jev-cluster";
 // Read-only — no actions, no writer lives here; /blindspots itself is
 // untouched by this pack, see shared_contract.
 //
-// Plain async SERVER component, no "use cache" — /admin is cookie-gated
-// and dynamic, same rationale as every other section on this page.
-// getJevBlindspotSuspects never throws, so this section can never 500 the
-// page: null degrades to the Turkish read-failure sentence, [] to the
-// empty sentence.
+// Plain SYNCHRONOUS server component (no "use cache", no fetch):
+// `suspects`/`now` are read once in page.tsx and passed in as props.
+// null degrades to the Turkish read-failure sentence, [] to the empty
+// sentence — this component itself can never throw.
 
-export async function JevBlindspotSection() {
-  const suspects = await getJevBlindspotSuspects();
-
+export function JevBlindspotSection({
+  suspects,
+  now,
+}: {
+  suspects: JevBlindspotSuspectView[] | null;
+  now: number;
+}) {
   return (
-    <section className="space-y-2">
-      <h2 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">
-        Şüpheli kör noktalar
-      </h2>
-      <p className="font-mono text-[12px] text-muted-foreground">
-        Son 7 gün: Jev, kör nokta sayılan kümede susan tarafın aynı olayı yazdığını söylüyor.
-      </p>
+    <AdminSection
+      id="kor-nokta"
+      title="Şüpheli kör noktalar"
+      help="Kör nokta: bir olayı yalnızca bir tarafın medyasının yazdığı küme. Jev burada susan tarafın da aynı olayı yazdığını buldu; yani bu kör nokta aslında bir eşleştirme hatası olabilir. Son 7 gün."
+      action="Bulunan haberin gerçekten aynı olay olup olmadığına bakın."
+      collapsible
+    >
       {suspects === null ? (
-        <p className="font-mono text-[12px] text-muted-foreground">Şüpheli kör noktalar okunamadı.</p>
+        <EmptyState kind="error">Şüpheli kör noktalar okunamadı.</EmptyState>
       ) : suspects.length === 0 ? (
-        <p className="font-mono text-[12px] text-muted-foreground">Şüpheli kör nokta yok.</p>
+        <EmptyState>Şüpheli kör nokta yok.</EmptyState>
       ) : (
-        <table className="w-full font-mono text-[12px]">
-          <thead>
-            <tr className="text-left text-muted-foreground">
-              <th className="py-1 pr-3 font-normal">Küme</th>
-              <th className="py-1 pr-3 font-normal">Bulunan haber</th>
-              <th className="py-1 pr-3 font-normal">Kaynak</th>
-              <th className="py-1 pr-3 font-normal">Jev olasılığı</th>
-              <th className="py-1 font-normal">Kontrol</th>
-            </tr>
-          </thead>
-          <tbody>
-            {suspects.map((row) => (
-              <tr key={row.clusterId} className="border-t border-border">
-                <td className="py-1 pr-3 text-foreground">{row.clusterTitle}</td>
-                <td className="py-1 pr-3 text-foreground">{row.topArticleTitle ?? "—"}</td>
-                <td className="py-1 pr-3 text-muted-foreground">{row.topSourceSlug ?? "—"}</td>
-                <td className="py-1 pr-3 text-foreground">
-                  {row.topProb !== null ? row.topProb.toFixed(2) : "—"}
-                </td>
-                <td className="py-1 text-muted-foreground">
-                  {row.checkedAt ? new Date(row.checkedAt).toLocaleString("tr-TR") : "—"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <ul className="divide-y divide-border/60">
+          {suspects.map((row) => (
+            <li key={row.clusterId} className="min-w-0 space-y-2 py-3 break-words">
+              <div>
+                <FieldLabel>Kör nokta kümesi</FieldLabel>
+                <p className="text-sm text-muted-foreground">{row.clusterTitle}</p>
+              </div>
+              <div>
+                <FieldLabel>Susan taraftan bulunan haber</FieldLabel>
+                <p className="text-base font-medium text-foreground">
+                  {row.topArticleTitle ?? "—"}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <StatusBadge tone="muted">{row.topSourceSlug ?? "—"}</StatusBadge>
+                <span className="text-foreground">
+                  Aynı olay olasılığı: {row.topProb !== null ? fmtPct(row.topProb) : "—"}
+                </span>
+                <span className="text-muted-foreground">
+                  Kontrol:{" "}
+                  {row.checkedAt ? (
+                    <span title={fmtDateTime(row.checkedAt)}>{fmtRelative(row.checkedAt, now)}</span>
+                  ) : (
+                    "—"
+                  )}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
-    </section>
+    </AdminSection>
   );
 }

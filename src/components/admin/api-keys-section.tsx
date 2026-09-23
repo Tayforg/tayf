@@ -1,26 +1,40 @@
-import { getApiKeysStatus } from "@/lib/admin/api-keys-status";
+import { AdminSection, EmptyState } from "@/components/admin/admin-ui";
 import { ApiKeysActions } from "@/components/admin/api-keys-actions";
+import type { ApiKeyRow } from "@/lib/admin/api-keys-status";
 
-// Pack E / B11 — /admin "API anahtarları" section. Plain async SERVER
-// component, no props (src/app/admin/(protected)/page.tsx mounts this
-// with no arguments — see the shared contract's "ADMIN DASHBOARD MOUNT").
-// Degrades to a status sentence instead of throwing, same discipline as
-// JevShadowSection / LlmBudgetSection on this page.
-export async function ApiKeysSection() {
-  const keys = await getApiKeysStatus();
+// Pack E / B11 — /admin "API anahtarları" section (group #is). Non-async
+// SERVER component: /admin's page.tsx reads getApiKeysStatus() once (the
+// shared Promise.all) and passes the result, plus the shared `now`, down
+// as props. Degrades to a status sentence instead of throwing, same
+// discipline as every other /admin section.
+
+const HELP =
+  "Dış geliştiricilere verilen erişim anahtarları. Katman, anahtarın kullanım sınırını belirler.";
+const ACTION =
+  "Yeni anahtar yalnızca bir kez gösterilir; oluşturduktan hemen sonra kopyalayıp güvenli biçimde iletin.";
+
+export function ApiKeysSection({
+  keys,
+  now,
+}: {
+  keys: ApiKeyRow[] | null;
+  now: number;
+}) {
+  const activeCount = keys === null ? 0 : keys.filter((k) => !k.revoked_at).length;
 
   return (
-    <section className="space-y-2">
-      <h2 className="font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground">
-        API anahtarları
-      </h2>
+    <AdminSection
+      id="api-anahtarlari"
+      title="API anahtarları"
+      help={HELP}
+      action={ACTION}
+      count={activeCount}
+    >
       {keys === null ? (
-        <p className="font-mono text-[12px] text-muted-foreground">
-          API anahtarları okunamadı.
-        </p>
+        <EmptyState kind="error">API anahtarları okunamadı.</EmptyState>
       ) : (
-        <ApiKeysActions keys={keys} />
+        <ApiKeysActions keys={keys} now={now} />
       )}
-    </section>
+    </AdminSection>
   );
 }
