@@ -464,18 +464,20 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
 
 Deno.serve(withSentry("image-consumer", async (req: Request) => {
   // Bearer gate before any branch — the GET probe also returns infra detail
-  // ("configured", init errors) we do not want to leak anonymously.
+  // ("configured") we do not want to leak anonymously.
   const denied = requireServiceRoleBearer(req);
   if (denied) return denied;
 
-  // GET → cheap health probe (no DB hits).
+  // GET → cheap health probe (no DB hits). The raw init error is logged
+  // once at module init (see the `supabaseInitError` assignment above) and
+  // is never echoed in the response body — only the non-sensitive
+  // ok/configured booleans are (CodeQL js/stack-trace-exposure).
   if (req.method === "GET") {
     return new Response(
       JSON.stringify({
         ok: supabase !== null,
         queue: QUEUE_NAME,
         configured: supabase !== null,
-        ...(supabaseInitError ? { error: supabaseInitError } : {}),
       }),
       { headers: { "content-type": "application/json" } },
     );
@@ -484,8 +486,10 @@ Deno.serve(withSentry("image-consumer", async (req: Request) => {
     return new Response("method not allowed", { status: 405 });
   }
   if (!supabase) {
+    // Same rationale as the GET probe: the detailed init error was already
+    // logged server-side at module init; only a generic message goes out.
     return new Response(
-      JSON.stringify({ error: supabaseInitError ?? "supabase client unavailable" }),
+      JSON.stringify({ error: "supabase client unavailable" }),
       { status: 503, headers: { "content-type": "application/json" } },
     );
   }
