@@ -1,0 +1,722 @@
+[
+  {
+    "subject": "Özel Durum Açıklaması (Genel)",
+    "top": "ODA",
+    "tot": 24518,
+    "purity": 0.994
+  },
+  {
+    "subject": "Pay Dışında Sermaye Piyasası Aracı İşlemlerine İlişkin Bildirim (Faiz İçeren)",
+    "top": "ODA",
+    "tot": 15951,
+    "purity": 1.0
+  },
+  {
+    "subject": "Genel Kurul İşlemlerine İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 6653,
+    "purity": 1.0
+  },
+  {
+    "subject": "Payların Geri Alınmasına İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 5392,
+    "purity": 1.0
+  },
+  {
+    "subject": "Bağımsız Denetim Kuruluşunun Belirlenmesi",
+    "top": "ODA",
+    "tot": 4307,
+    "purity": 1.0
+  },
+  {
+    "subject": "Pay Dışında Sermaye Piyasası Aracı İşlemlerine İlişkin Bildirim (Faizsiz)",
+    "top": "ODA",
+    "tot": 3925,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kar Payı Dağıtım İşlemlerine İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 3795,
+    "purity": 1.0
+  },
+  {
+    "subject": "Yatırım Kuruluşu Varant - Sertifika - Senetlerine İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 3493,
+    "purity": 1.0
+  },
+  {
+    "subject": "İhraç Tavanına İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 2831,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sermaye Artırımı - Azaltımı İşlemlerine İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 2698,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kredi Derecelendirmesi",
+    "top": "ODA",
+    "tot": 2388,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kayıtlı Sermaye Tavanı İşlemlerine İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 1920,
+    "purity": 1.0
+  },
+  {
+    "subject": "Yeni İş İlişkisi",
+    "top": "ODA",
+    "tot": 1819,
+    "purity": 1.0
+  },
+  {
+    "subject": "Yönetim Kurulu Komiteleri",
+    "top": "ODA",
+    "tot": 1176,
+    "purity": 1.0
+  },
+  {
+    "subject": "Esas Sözleşme Tadili",
+    "top": "ODA",
+    "tot": 1162,
+    "purity": 1.0
+  },
+  {
+    "subject": "İhale Süreci / Sonucu",
+    "top": "ODA",
+    "tot": 698,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kurumsal Yönetim İlkelerine Uyum Derecelendirmesi",
+    "top": "ODA",
+    "tot": 629,
+    "purity": 1.0
+  },
+  {
+    "subject": "Finansal Duran Varlık Edinimi",
+    "top": "ODA",
+    "tot": 619,
+    "purity": 1.0
+  },
+  {
+    "subject": "İlişkili Taraf İşlemleri",
+    "top": "ODA",
+    "tot": 559,
+    "purity": 1.0
+  },
+  {
+    "subject": "Genel Kurul Bildirimi",
+    "top": "ODA",
+    "tot": 531,
+    "purity": 1.0
+  },
+  {
+    "subject": "Olağan Dışı Fiyat ve Miktar Hareketleri",
+    "top": "ODA",
+    "tot": 497,
+    "purity": 1.0
+  },
+  {
+    "subject": "Birleşme İşlemlerine İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 386,
+    "purity": 1.0
+  },
+  {
+    "subject": "Geleceğe Dönük Değerlendirmeler",
+    "top": "ODA",
+    "tot": 323,
+    "purity": 1.0
+  },
+  {
+    "subject": "Finansal Tablo ve-veya Dipnot Değişikliği",
+    "top": "ODA",
+    "tot": 286,
+    "purity": 1.0
+  },
+  {
+    "subject": "Pay Alım Teklifi Yoluyla Pay Toplanmasına İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 228,
+    "purity": 1.0
+  },
+  {
+    "subject": "Ortaklık Aleyhine Dava Açılması veya Davaya İlişkin Gelişmeler",
+    "top": "ODA",
+    "tot": 220,
+    "purity": 1.0
+  },
+  {
+    "subject": "Finansal Duran Varlık Satışı",
+    "top": "ODA",
+    "tot": 202,
+    "purity": 1.0
+  },
+  {
+    "subject": "Maddi Duran Varlık Alımı",
+    "top": "ODA",
+    "tot": 194,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kar Dağıtım Politikası",
+    "top": "ODA",
+    "tot": 189,
+    "purity": 1.0
+  },
+  {
+    "subject": "Toptan Alış Satış İşlemi Bildirimi",
+    "top": "ODA",
+    "tot": 186,
+    "purity": 1.0
+  },
+  {
+    "subject": "Hak Kullanım Süreç İptal Bildirimi",
+    "top": "ODA",
+    "tot": 179,
+    "purity": 1.0
+  },
+  {
+    "subject": "Haber ve Söylentilere İlişkin Açıklama",
+    "top": "ODA",
+    "tot": 165,
+    "purity": 1.0
+  },
+  {
+    "subject": "Halka Arz İşlemlerinde Sermaye Piyasası Aracının % 5 inden Fazlasını Satın Alanlara İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 165,
+    "purity": 1.0
+  },
+  {
+    "subject": "Transfer Görüşmelerinin Sonuçlanması veya Sona Ermesi",
+    "top": "ODA",
+    "tot": 165,
+    "purity": 1.0
+  },
+  {
+    "subject": "Maddi Duran Varlık Satımı",
+    "top": "ODA",
+    "tot": 144,
+    "purity": 1.0
+  },
+  {
+    "subject": "Şirket Merkezi Değişikliği",
+    "top": "ODA",
+    "tot": 139,
+    "purity": 1.0
+  },
+  {
+    "subject": "Geri Alınan Payların Elden Çıkarılması",
+    "top": "ODA",
+    "tot": 131,
+    "purity": 1.0
+  },
+  {
+    "subject": "Faaliyetlerin Kısmen veya Tamamen Durdurulması ya da İmkansız Hale Gelmesi",
+    "top": "ODA",
+    "tot": 122,
+    "purity": 1.0
+  },
+  {
+    "subject": "Ayrılma Hakkı Kullanımına İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 105,
+    "purity": 1.0
+  },
+  {
+    "subject": "Maddi Duran Varlık Kiraya Verilmesi veya Ayni Hak Tesisi",
+    "top": "ODA",
+    "tot": 101,
+    "purity": 1.0
+  },
+  {
+    "subject": "Bilgilendirme Politikası",
+    "top": "ODA",
+    "tot": 91,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sermaye Artırımı veya Azaltımı Bildirimi",
+    "top": "ODA",
+    "tot": 89,
+    "purity": 1.0
+  },
+  {
+    "subject": "Bölünme İşlemlerine İlişkin Bildirim",
+    "top": "ODA",
+    "tot": 68,
+    "purity": 1.0
+  },
+  {
+    "subject": "Transfer Görüşmeleri",
+    "top": "ODA",
+    "tot": 61,
+    "purity": 1.0
+  },
+  {
+    "subject": "Ünvan Değişikliği",
+    "top": "ODA",
+    "tot": 52,
+    "purity": 1.0
+  },
+  {
+    "subject": "Pay Bazında Devre Kesici Bildirimi",
+    "top": "DKB",
+    "tot": 33085,
+    "purity": 1.0
+  },
+  {
+    "subject": "Pay Alım Satım Bildirimi",
+    "top": "DKB",
+    "tot": 5386,
+    "purity": 0.72
+  },
+  {
+    "subject": "BISTECH Pay Piyasası Alım Satım Sistemi Duyurusu",
+    "top": "DKB",
+    "tot": 2137,
+    "purity": 1.0
+  },
+  {
+    "subject": "Borçlanma Araçları, Yatırım Fonları ve Varant İtfa/Kupon/Getiri/ Nakdi Uzlaşı Ödeme İşlemleri",
+    "top": "DKB",
+    "tot": 681,
+    "purity": 1.0
+  },
+  {
+    "subject": "Borçlanma Araçlarının / Kira Sertifikalarının İşlem Görmeye Başlaması",
+    "top": "DKB",
+    "tot": 670,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kamuyu Aydınlatma Platformu Duyurusu",
+    "top": "DKB",
+    "tot": 666,
+    "purity": 1.0
+  },
+  {
+    "subject": "Borsada İşlem Gören Tipe Dönüşüm Duyurusu",
+    "top": "DKB",
+    "tot": 662,
+    "purity": 1.0
+  },
+  {
+    "subject": "Hak Kullanımı",
+    "top": "DKB",
+    "tot": 448,
+    "purity": 1.0
+  },
+  {
+    "subject": "Merkezi Kayıt Kuruluşu A.Ş. Duyurusu",
+    "top": "DKB",
+    "tot": 346,
+    "purity": 1.0
+  },
+  {
+    "subject": "Pay Mali Hak Kullanım İşlemi - Nakit Ödeme",
+    "top": "DKB",
+    "tot": 330,
+    "purity": 1.0
+  },
+  {
+    "subject": "Test Bildirimi",
+    "top": "DKB",
+    "tot": 252,
+    "purity": 1.0
+  },
+  {
+    "subject": "Varantların veya Sertifikaların İşlem Görmeye Başlaması",
+    "top": "DKB",
+    "tot": 197,
+    "purity": 1.0
+  },
+  {
+    "subject": "Endeks Şirketlerinde Değişiklik",
+    "top": "DKB",
+    "tot": 179,
+    "purity": 1.0
+  },
+  {
+    "subject": "Endekslerde Kullanılan Fiili Dolaşımdaki Pay Oranı Değişiklikleri",
+    "top": "DKB",
+    "tot": 126,
+    "purity": 1.0
+  },
+  {
+    "subject": "Toptan Alış Satış İşlemi",
+    "top": "DKB",
+    "tot": 117,
+    "purity": 1.0
+  },
+  {
+    "subject": "Pay İşlem Sırası Kapatma / Açma",
+    "top": "DKB",
+    "tot": 110,
+    "purity": 1.0
+  },
+  {
+    "subject": "İşlem İptali",
+    "top": "DKB",
+    "tot": 105,
+    "purity": 1.0
+  },
+  {
+    "subject": "Payların İşlem Görmeye Başlaması",
+    "top": "DKB",
+    "tot": 87,
+    "purity": 1.0
+  },
+  {
+    "subject": "Birincil Piyasa Duyurusu - Kalan Paylar",
+    "top": "DKB",
+    "tot": 78,
+    "purity": 1.0
+  },
+  {
+    "subject": "Borsa İstanbul A.Ş. Duyurusu",
+    "top": "DKB",
+    "tot": 75,
+    "purity": 1.0
+  },
+  {
+    "subject": "Rüçhan Hakkı Referans Fiyatı",
+    "top": "DKB",
+    "tot": 74,
+    "purity": 1.0
+  },
+  {
+    "subject": "Temerrüt İşlemi",
+    "top": "DKB",
+    "tot": 67,
+    "purity": 1.0
+  },
+  {
+    "subject": "Finansal Rapor Ek Süre Taleplerine İlişkin SPK Değerlendirmesi",
+    "top": "DKB",
+    "tot": 66,
+    "purity": 1.0
+  },
+  {
+    "subject": "Özsermaye Hallerine İlişkin Borsa Duyurusu",
+    "top": "DKB",
+    "tot": 64,
+    "purity": 1.0
+  },
+  {
+    "subject": "BIST Pay Endeksleri",
+    "top": "DKB",
+    "tot": 64,
+    "purity": 1.0
+  },
+  {
+    "subject": "SPK İşlem Yasağı Nedeniyle Pay Duyurusu",
+    "top": "DKB",
+    "tot": 63,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sermaye Piyasası Kurulu Tedbir Kararı",
+    "top": "DKB",
+    "tot": 63,
+    "purity": 1.0
+  },
+  {
+    "subject": "Şirket Genel Bilgi Formu",
+    "top": "DG",
+    "tot": 8784,
+    "purity": 1.0
+  },
+  {
+    "subject": "Katılım Finansı İlkeleri Bilgi Formu",
+    "top": "DG",
+    "tot": 3710,
+    "purity": 1.0
+  },
+  {
+    "subject": "Değerleme Raporu",
+    "top": "DG",
+    "tot": 2805,
+    "purity": 1.0
+  },
+  {
+    "subject": "İzahname (SPK Tarafından Onaylanan)",
+    "top": "DG",
+    "tot": 1813,
+    "purity": 1.0
+  },
+  {
+    "subject": "Herhangi Bir Otoriteye Mali Tablo Verilmesi",
+    "top": "DG",
+    "tot": 1679,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kurumsal Yönetim Bilgi Formu",
+    "top": "DG",
+    "tot": 1634,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kurumsal Yönetim Uyum Raporu",
+    "top": "DG",
+    "tot": 1627,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sürdürülebilirlik Uyum Raporu",
+    "top": "DG",
+    "tot": 1551,
+    "purity": 1.0
+  },
+  {
+    "subject": "Piyasa Yapıcılığı Kapsamında Gerçekleştirilen İşlemler Bildirimi",
+    "top": "DG",
+    "tot": 1442,
+    "purity": 1.0
+  },
+  {
+    "subject": "Haftalık Rapor",
+    "top": "DG",
+    "tot": 1281,
+    "purity": 1.0
+  },
+  {
+    "subject": "Tertip İhraç Belgesi",
+    "top": "DG",
+    "tot": 1237,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kurumsal Yönetim Bilgi Formu (Güncelleme) - Yönetim Kurulu-2",
+    "top": "DG",
+    "tot": 1218,
+    "purity": 1.0
+  },
+  {
+    "subject": "İhraç Belgesi",
+    "top": "DG",
+    "tot": 1102,
+    "purity": 1.0
+  },
+  {
+    "subject": "Esas Sözleşme",
+    "top": "DG",
+    "tot": 1098,
+    "purity": 1.0
+  },
+  {
+    "subject": "Likidite Sağlayıcılık Kapsamındaki İşlemler",
+    "top": "DG",
+    "tot": 1004,
+    "purity": 1.0
+  },
+  {
+    "subject": "Halka Arz Fiyatının Belirlenmesinde Esas Alınan Varsayımlara İlişkin Değerlendirme Raporu",
+    "top": "DG",
+    "tot": 886,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sermaye Artırımından Elde Edilecek - Edilen Fonun Kullanımına İlişkin Rapor",
+    "top": "DG",
+    "tot": 800,
+    "purity": 1.0
+  },
+  {
+    "subject": "Fiyat Tespit Raporuna İlişkin Analist Raporu (Halka Arza Aracılık Eden Kuruluş Dışında Farklı bir Kuruluş Tarafından Hazırlanan)",
+    "top": "DG",
+    "tot": 728,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sürdürülebilirlik Raporu",
+    "top": "DG",
+    "tot": 563,
+    "purity": 1.0
+  },
+  {
+    "subject": "Finansal Takvim",
+    "top": "DG",
+    "tot": 495,
+    "purity": 1.0
+  },
+  {
+    "subject": "İzahname-Sermaye Piyasası Aracı Notu (SPK Tarafından Onaylanan)",
+    "top": "DG",
+    "tot": 458,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kurumsal Yönetim Bilgi Formu (Güncelleme) - Yönetim Kurulu-1",
+    "top": "DG",
+    "tot": 346,
+    "purity": 1.0
+  },
+  {
+    "subject": "Yatırımcı Raporu",
+    "top": "DG",
+    "tot": 326,
+    "purity": 1.0
+  },
+  {
+    "subject": "İzahname-Özet (SPK Tarafından Onaylanan)",
+    "top": "DG",
+    "tot": 320,
+    "purity": 1.0
+  },
+  {
+    "subject": "Fiyat Tespit Raporuna İlişkin Analist Raporu (Halka Arza Aracılık Eden Kuruluş Tarafından Hazırlanan)",
+    "top": "DG",
+    "tot": 204,
+    "purity": 1.0
+  },
+  {
+    "subject": "Pay  Satış Bilgi Formu",
+    "top": "DG",
+    "tot": 203,
+    "purity": 0.882
+  },
+  {
+    "subject": "İzahname (SPK Onayına Sunulan)",
+    "top": "DG",
+    "tot": 188,
+    "purity": 1.0
+  },
+  {
+    "subject": "İzahname-İhraççı Bİlgi Dokümanı (SPK Tarafından Onaylanan)",
+    "top": "DG",
+    "tot": 173,
+    "purity": 1.0
+  },
+  {
+    "subject": "Tasarruf Sahiplerine Satış Duyurusu",
+    "top": "DG",
+    "tot": 172,
+    "purity": 1.0
+  },
+  {
+    "subject": "Portföy Sınırlamalarına Uyumun Kontrolü",
+    "top": "DG",
+    "tot": 156,
+    "purity": 1.0
+  },
+  {
+    "subject": "Fiyat Tespit Raporu",
+    "top": "DG",
+    "tot": 115,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kurumsal Yönetim Bilgi Formu (Güncelleme) - Pay Sahipleri",
+    "top": "DG",
+    "tot": 114,
+    "purity": 1.0
+  },
+  {
+    "subject": "Aracılık Hizmetleri İçin Ödenen Komisyonlar",
+    "top": "DG",
+    "tot": 100,
+    "purity": 1.0
+  },
+  {
+    "subject": "Dışarıdan Sağlanan Hizmetler ve Personel İçin Ödenen Komisyon ve Ücretler",
+    "top": "DG",
+    "tot": 99,
+    "purity": 1.0
+  },
+  {
+    "subject": "Kurumsal Yönetim Bilgi Formu (Güncelleme) - Yönetim Kurulu-3",
+    "top": "DG",
+    "tot": 99,
+    "purity": 1.0
+  },
+  {
+    "subject": "İç Yönerge",
+    "top": "DG",
+    "tot": 66,
+    "purity": 1.0
+  },
+  {
+    "subject": "İzahname (İhraççı Bilgi Dokümanı-SPK Onayına Sunulan)",
+    "top": "DG",
+    "tot": 65,
+    "purity": 1.0
+  },
+  {
+    "subject": "İzahname (Sermaye Piyasası Aracı Notu-SPK Onayına Sunulan)",
+    "top": "DG",
+    "tot": 59,
+    "purity": 1.0
+  },
+  {
+    "subject": "Performans Sunuş Raporu",
+    "top": "DG",
+    "tot": 59,
+    "purity": 1.0
+  },
+  {
+    "subject": "İzahname veya İzahnameyi Oluşturan Belgelerde Değişiklik - Ekleme",
+    "top": "DG",
+    "tot": 56,
+    "purity": 1.0
+  },
+  {
+    "subject": "Finansal Rapor",
+    "top": "FR",
+    "tot": 7956,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sorumluluk Beyanı (Konsolide)",
+    "top": "FR",
+    "tot": 4560,
+    "purity": 1.0
+  },
+  {
+    "subject": "Faaliyet Raporu (Konsolide)",
+    "top": "FR",
+    "tot": 4396,
+    "purity": 1.0
+  },
+  {
+    "subject": "Sorumluluk Beyanı (Konsolide Olmayan)",
+    "top": "FR",
+    "tot": 2875,
+    "purity": 1.0
+  },
+  {
+    "subject": "Faaliyet Raporu (Konsolide Olmayan)",
+    "top": "FR",
+    "tot": 2581,
+    "purity": 1.0
+  },
+  {
+    "subject": "TSRS Uyumlu Sürdürülebilirlik Raporu",
+    "top": "FR",
+    "tot": 370,
+    "purity": 1.0
+  },
+  {
+    "subject": "Faaliyet Raporu Sorumluluk Beyanı",
+    "top": "FR",
+    "tot": 278,
+    "purity": 1.0
+  },
+  {
+    "subject": "Entegre Rapor",
+    "top": "FR",
+    "tot": 73,
+    "purity": 1.0
+  }
+]

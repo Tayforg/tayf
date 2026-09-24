@@ -682,8 +682,8 @@ describe("question set version + registry hash (JEV-A20)", () => {
   // the same run that also touched JEV_QUESTION_REGISTRY (pack.md "Risks to
   // design against" -- "Two workers, one question-set version").
   it("pins JEV_QUESTION_SET_VERSION and questionRegistryHash together — bump BOTH or neither", async () => {
-    expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-21.3");
-    expect(await questionRegistryHash()).toBe("95279b8f8e856de42b9f281eeeea02e861abc638409b714f142b8bc4b4795477");
+    expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-24.1");
+    expect(await questionRegistryHash()).toBe("4259abdc8db9062f8eea76650689c5e85f6c052dd22b640c0f4000d48a62fb39");
   });
 });
 
