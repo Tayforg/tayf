@@ -11,7 +11,9 @@ import {
   JEV_CLUSTER_MEMBER_MAX,
   JEV_CONCURRENCY,
   JEV_DESC_CLAMP,
+  JEV_KAP_LIMIT,
   JEV_MODEL,
+  JEV_MONTHLY_TOKEN_CAP_DEFAULT,
   JEV_NEUTRAL_MODEL_ID,
   JEV_PAIRS_PER_CALL,
   JEV_PREVIEW_CLAMP,
@@ -1100,6 +1102,149 @@ describe("buildKapCall / buildTitleCall", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// kap_class criteria — KAP subject taxonomy (2026-09-24.1). KAP's own
+// disclosure_class is fixed by the form `subject`, not by news importance;
+// the pre-2026-09-24 wording confused DKB ("Düzenleyici Kurum Bildirimi" --
+// a notice from the exchange/regulator/KAP itself, NOT "Düzenli Kamuyu
+// Bilgilendirme"/routine periodic info) with ODA, which sent buy-backs and
+// general assemblies to the wrong class. kap-subject-class.json is the
+// production subject -> majority-class aggregate (197,674 rows, 120
+// subjects) used to build the Subjects lists below.
+// ---------------------------------------------------------------------------
+
+type KapSubjectRow = { subject: string; top: "ODA" | "DKB" | "DG" | "FR"; tot: number; purity: number };
+
+const kapSubjectFixture: KapSubjectRow[] = JSON.parse(
+  readFileSync(resolve(__dirname, "..", "fixtures", "kap-subject-class.json"), "utf-8"),
+);
+
+function subjectsOf(cls: "ODA" | "DKB" | "DG" | "FR"): string[] {
+  const criteria = JEV_QUESTION_REGISTRY.kap_class.criteria as Record<string, string>;
+  const value = criteria[cls];
+  if (!value) throw new Error(`no kap_class criterion for "${cls}"`);
+  return value.split("Subjects: ")[1]!.replace(/\.$/, "").split("; ");
+}
+
+describe("kap_class criteria — KAP subject taxonomy (2026-09-24.1)", () => {
+  it("fixture sums to the full production count across the 4 classes", () => {
+    expect(kapSubjectFixture.length).toBe(120);
+    const total = kapSubjectFixture.reduce((sum, r) => sum + r.tot, 0);
+    expect(total).toBe(197674);
+  });
+
+  it("has exactly the 4 KAP disclosure classes, each with a Subjects list", () => {
+    const criteria = JEV_QUESTION_REGISTRY.kap_class.criteria as Record<string, string>;
+    expect(Object.keys(criteria).sort()).toEqual(["DG", "DKB", "FR", "ODA"]);
+    for (const cls of ["ODA", "DKB", "DG", "FR"] as const) {
+      expect(criteria[cls]).toContain("Subjects: ");
+    }
+  });
+
+  it("classifies buy-backs as ODA, not DKB", () => {
+    const oda = subjectsOf("ODA");
+    expect(oda).toContain("Payların Geri Alınmasına İlişkin Bildirim");
+    expect(oda).toContain("Geri Alınan Payların Elden Çıkarılması");
+    const dkbCriterion = (JEV_QUESTION_REGISTRY.kap_class.criteria as Record<string, string>).DKB;
+    expect(dkbCriterion).not.toContain("Geri Alın");
+    expect(dkbCriterion.toLowerCase()).not.toContain("buy-back");
+  });
+
+  it("classifies exchange/market-operator notices as DKB", () => {
+    const dkb = subjectsOf("DKB");
+    expect(dkb).toContain("Pay Bazında Devre Kesici Bildirimi");
+    expect(dkb).toContain("Temerrüt İşlemi");
+    expect(dkb).toContain("Pay Alım Satım Bildirimi");
+    expect(dkb).toContain("BISTECH Pay Piyasası Alım Satım Sistemi Duyurusu");
+  });
+
+  it("classifies standing forms as DG, not DKB", () => {
+    const dg = subjectsOf("DG");
+    const dkb = subjectsOf("DKB");
+    expect(dg).toContain("Şirket Genel Bilgi Formu");
+    expect(dg).toContain("Katılım Finansı İlkeleri Bilgi Formu");
+    expect(dkb).not.toContain("Şirket Genel Bilgi Formu");
+    expect(dkb).not.toContain("Katılım Finansı İlkeleri Bilgi Formu");
+  });
+
+  it("classifies general assemblies and credit ratings as ODA", () => {
+    const oda = subjectsOf("ODA");
+    expect(oda).toContain("Genel Kurul İşlemlerine İlişkin Bildirim");
+    expect(oda).toContain("Genel Kurul Bildirimi");
+    expect(oda).toContain("Kredi Derecelendirmesi");
+  });
+
+  it("every fixture subject is listed under its majority class in the matching criterion", () => {
+    const byClass: Record<string, string[]> = {
+      ODA: subjectsOf("ODA"),
+      DKB: subjectsOf("DKB"),
+      DG: subjectsOf("DG"),
+      FR: subjectsOf("FR"),
+    };
+    for (const row of kapSubjectFixture) {
+      expect(byClass[row.top], `"${row.subject}" missing from ${row.top}'s Subjects list`).toContain(row.subject);
+    }
+  });
+
+  it("no Subjects list item contains a literal `;` (the format is `a; b; …; z.`, used to parse the lists)", () => {
+    for (const cls of ["ODA", "DKB", "DG", "FR"] as const) {
+      for (const item of subjectsOf(cls)) {
+        expect(item.includes(";")).toBe(false);
+      }
+    }
+  });
+
+  it("preserves KAP's own data quirks verbatim: the double space in 'Pay  Satış Bilgi Formu' and the capital İ in 'Bİlgi'", () => {
+    const dg = subjectsOf("DG");
+    expect(dg).toContain("Pay  Satış Bilgi Formu");
+    expect(dg.some((s) => s.includes("Bİlgi"))).toBe(true);
+  });
+
+  it("instructions cover the near-duplicate and mixed-subject disambiguation rules", () => {
+    const instructions = JEV_QUESTION_REGISTRY.kap_class.instructions;
+    expect(instructions).toContain("Toptan Alış Satış İşlemi");
+    expect(instructions).toContain("Esas Sözleşme");
+    expect(instructions).toContain("Pay Alım Satım Bildirimi");
+    expect(instructions).toContain("Pay  Satış Bilgi Formu");
+  });
+
+  // JEV-review 2026-09-24: the 120-subject Subjects lists are resent
+  // verbatim on every single kap_class call (buildKapCall -> choiceQuestion),
+  // with no server-side caching keyed by JEV_QUESTION_SET_VERSION. This
+  // guards that the measured cost stays documented and bounded rather than
+  // silently ballooning on a future edit -- see the JEV_QUESTION_SET_VERSION
+  // comment in jev.ts for the reasoning.
+  it("kap_class prompt cost stays within the documented worst-case budget share", () => {
+    const entry = JEV_QUESTION_REGISTRY.kap_class;
+    const promptChars = entry.instructions.length + JSON.stringify(entry.criteria).length;
+    // ~7,097 chars measured 2026-09-24 (instructions + Subjects criteria).
+    // Ceiling gives ~10% headroom before this test forces a re-measurement.
+    expect(promptChars).toBeLessThan(7_800);
+
+    // ~4 chars/token is a rough but standard estimate for this kind of
+    // mixed Turkish/English prose; good enough for an order-of-magnitude
+    // budget check, not a billing figure (actual usage.inputTokens comes
+    // back from the gateway per call).
+    const approxTokensPerCall = Math.ceil(promptChars / 4);
+
+    // Theoretical worst case: JEV_KAP_LIMIT calls on every 10-minute cron
+    // tick (migration 061, cron.schedule('jev-shadow', '*/10 * * * *')) for
+    // a 30-day month. Real KAP disclosure volume is far below this ceiling;
+    // this is a hard upper bound from enforced constants, not an observed
+    // rate.
+    const cronTicksPerMonth = ((24 * 60) / 10) * 30;
+    const worstCaseMonthlyCalls = JEV_KAP_LIMIT * cronTicksPerMonth;
+    const worstCaseMonthlyTokens = worstCaseMonthlyCalls * approxTokensPerCall;
+    const worstCaseShareOfCap = worstCaseMonthlyTokens / JEV_MONTHLY_TOKEN_CAP_DEFAULT;
+
+    // budgetExceeded() already stops a run mid-flight regardless of this
+    // share, so this is a visibility bound, not a safety mechanism: it
+    // fails loudly if a future kap_class edit would let the theoretical
+    // worst case alone consume more than half the monthly cap.
+    expect(worstCaseShareOfCap).toBeLessThan(0.5);
+  });
+});
+
 // --- 13. error classes ---------------------------------------------------------------
 
 describe("JevDeadlineError / JevRateLimitError / JevResponseError", () => {
@@ -1715,17 +1860,10 @@ describe("JEV_QUESTION_REGISTRY", () => {
       criteria: { true: "Same concrete event", false: "Different events" },
     });
 
+    // kap_class's instructions/criteria were rewritten in 2026-09-24.1 (see
+    // the "kap_class criteria — KAP subject taxonomy" describe block below),
+    // so it is deliberately excluded from this byte-identical pin.
     const kapReq = buildKapCall(kapRow());
-    expect(kapReq.questions.kap_class).toEqual({
-      type: "choice",
-      instructions: "Which KAP disclosure class does this Turkish filing belong to?",
-      criteria: {
-        ODA: "Özel Durum Açıklaması — a material-event disclosure: contract, investment, litigation, management change, capital action",
-        DKB: "Düzenli Kamuyu Bilgilendirme — routine periodic information: buy-back reports, investor presentations, general assembly notices",
-        DG: "Diğer — other filings that fit none of the other classes",
-        FR: "Finansal Rapor — a financial statement or interim/annual financial report",
-      },
-    });
     expect(kapReq.questions.kap_materiality).toEqual({
       type: "score",
       instructions: "How likely is this filing to move the company's share price?",

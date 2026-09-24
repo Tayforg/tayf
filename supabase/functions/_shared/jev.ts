@@ -79,8 +79,22 @@ export const JEV_NEUTRAL_MODEL_ID = "extractive-v1";
  * alongside the three new tasks (JEV-A20 pins this against
  * questionRegistryHash() so a future wording change can't bump one without
  * the other). Migration 067 bumps this again, to 2026-09-21.3, for the new
- * topic7 question. */
-export const JEV_QUESTION_SET_VERSION = "2026-09-21.3";
+ * topic7 question.
+ * 2026-09-24.1: kap_class rewritten to KAP's subject→class taxonomy (DKB =
+ * Düzenleyici Kurum Bildirimi). Cost measured before merging (test:
+ * "kap_class prompt cost stays within the documented worst-case budget
+ * share" in jev-shadow.test.ts): the instructions+criteria block grew from
+ * ~559 to ~7,097 chars (~140 -> ~1,775 input tokens at ~4 chars/token,
+ * resent verbatim on every kap_class call -- there is no server-side
+ * caching keyed by this version string). Even the theoretical worst case
+ * (JEV_KAP_LIMIT=30 kap calls on every one of the ~4,320 monthly 10-minute
+ * cron ticks, migration 061) adds well under half of
+ * JEV_MONTHLY_TOKEN_CAP_DEFAULT, and budgetExceeded() already stops a run
+ * mid-flight regardless, so this can't blow the cap unnoticed -- but it IS
+ * a real, measured recurring cost, not a free rewrite. If kap_class grows
+ * again, re-run that test and re-measure rather than assuming it's still
+ * cheap. */
+export const JEV_QUESTION_SET_VERSION = "2026-09-24.1";
 /** Migration 064: a cluster_member prediction below this probability queues
  * the (cluster, article) pair into jev_unlink_candidates for a human to
  * review on /admin. */
@@ -792,13 +806,26 @@ export const JEV_QUESTION_REGISTRY: Record<JevTask, { instructions: string; crit
       },
     },
   },
+  // 2026-09-24.1 rewrite: the pre-2026-09-24 criteria misdefined DKB as
+  // "Düzenli Kamuyu Bilgilendirme" (routine periodic info), which sent
+  // buy-backs and general assemblies to DKB instead of ODA and real
+  // exchange/regulator notices to DG or ODA -- most of a 32% agreement
+  // rate. DKB is actually "Düzenleyici Kurum Bildirimi": a notice from the
+  // exchange, a market institution, the regulator or KAP itself. The
+  // Subjects lists are copied verbatim from KAP's own subject taxonomy
+  // (kap_map.json, 197,674-row production aggregate); two entries carry
+  // KAP's own data quirks and must NOT be "fixed": `Pay  Satış Bilgi Formu`
+  // has a double space, and `İzahname-İhraççı Bİlgi Dokümanı` has a capital
+  // İ in "Bİlgi". Each criterion follows a fixed `Subjects: a; b; …; z.`
+  // format with no `;` inside any item, so tests can parse the lists.
   kap_class: {
-    instructions: "Which KAP disclosure class does this Turkish filing belong to?",
+    instructions:
+      "Which disclosure class did KAP itself assign to this filing? KAP fixes the class by the form type in `subject`, not by how important the news is. 1) Look up `subject` in the Subjects lists below; a listed `subject` decides the class. Match exact names, since near-duplicates differ: 'Toptan Alış Satış İşlemi' is DKB but 'Toptan Alış Satış İşlemi Bildirimi' is ODA; 'Hak Kullanımı' is DKB but 'Hak Kullanım Süreç İptal Bildirimi' is ODA; 'Esas Sözleşme' is DG but 'Esas Sözleşme Tadili' is ODA; 'Sürdürülebilirlik Raporu' is DG but 'TSRS Uyumlu Sürdürülebilirlik Raporu' is FR; 'Finansal Rapor' is FR but 'Finansal Rapor Ek Süre Taleplerine İlişkin SPK Değerlendirmesi' is DKB. Two subjects are mixed in KAP's own labels; use their listed class: 'Pay Alım Satım Bildirimi' (about 72% DKB) and 'Pay  Satış Bilgi Formu' (about 88% DG). 2) Only if `subject` is missing or not listed, use `title` (the filer): Borsa İstanbul, BISTECH, Takasbank, Merkezi Kayıt Kuruluşu (MKK) or Kamuyu Aydınlatma Platformu (KAP) as filer means DKB. 3) Otherwise judge `summary`: exchange, clearing or regulator notice = DKB; the company's own event or corporate action = ODA; standing form, prospectus or report = DG; financial statements = FR.",
     criteria: {
-      ODA: "Özel Durum Açıklaması — a material-event disclosure: contract, investment, litigation, management change, capital action",
-      DKB: "Düzenli Kamuyu Bilgilendirme — routine periodic information: buy-back reports, investor presentations, general assembly notices",
-      DG: "Diğer — other filings that fit none of the other classes",
-      FR: "Finansal Rapor — a financial statement or interim/annual financial report",
+      ODA: "Özel Durum Açıklaması — the listed company's own event or corporate-action notification, including share buy-backs, general assemblies, dividends, capital changes, debt issuance and credit ratings. Subjects: Özel Durum Açıklaması (Genel); Pay Dışında Sermaye Piyasası Aracı İşlemlerine İlişkin Bildirim (Faiz İçeren); Genel Kurul İşlemlerine İlişkin Bildirim; Payların Geri Alınmasına İlişkin Bildirim; Bağımsız Denetim Kuruluşunun Belirlenmesi; Pay Dışında Sermaye Piyasası Aracı İşlemlerine İlişkin Bildirim (Faizsiz); Kar Payı Dağıtım İşlemlerine İlişkin Bildirim; Yatırım Kuruluşu Varant - Sertifika - Senetlerine İlişkin Bildirim; İhraç Tavanına İlişkin Bildirim; Sermaye Artırımı - Azaltımı İşlemlerine İlişkin Bildirim; Kredi Derecelendirmesi; Kayıtlı Sermaye Tavanı İşlemlerine İlişkin Bildirim; Yeni İş İlişkisi; Yönetim Kurulu Komiteleri; Esas Sözleşme Tadili; İhale Süreci / Sonucu; Kurumsal Yönetim İlkelerine Uyum Derecelendirmesi; Finansal Duran Varlık Edinimi; İlişkili Taraf İşlemleri; Genel Kurul Bildirimi; Olağan Dışı Fiyat ve Miktar Hareketleri; Birleşme İşlemlerine İlişkin Bildirim; Geleceğe Dönük Değerlendirmeler; Finansal Tablo ve-veya Dipnot Değişikliği; Pay Alım Teklifi Yoluyla Pay Toplanmasına İlişkin Bildirim; Ortaklık Aleyhine Dava Açılması veya Davaya İlişkin Gelişmeler; Finansal Duran Varlık Satışı; Maddi Duran Varlık Alımı; Kar Dağıtım Politikası; Toptan Alış Satış İşlemi Bildirimi; Hak Kullanım Süreç İptal Bildirimi; Haber ve Söylentilere İlişkin Açıklama; Halka Arz İşlemlerinde Sermaye Piyasası Aracının % 5 inden Fazlasını Satın Alanlara İlişkin Bildirim; Transfer Görüşmelerinin Sonuçlanması veya Sona Ermesi; Maddi Duran Varlık Satımı; Şirket Merkezi Değişikliği; Geri Alınan Payların Elden Çıkarılması; Faaliyetlerin Kısmen veya Tamamen Durdurulması ya da İmkansız Hale Gelmesi; Ayrılma Hakkı Kullanımına İlişkin Bildirim; Maddi Duran Varlık Kiraya Verilmesi veya Ayni Hak Tesisi; Bilgilendirme Politikası; Sermaye Artırımı veya Azaltımı Bildirimi; Bölünme İşlemlerine İlişkin Bildirim; Transfer Görüşmeleri; Ünvan Değişikliği.",
+      DKB: "Düzenleyici Kurum Bildirimi — a notice published by the exchange, a market institution, the regulator or KAP itself about a security (circuit breakers, trading halts, index changes, listing start, settlement and default), not the company's own disclosure. Subjects: Pay Bazında Devre Kesici Bildirimi; Pay Alım Satım Bildirimi; BISTECH Pay Piyasası Alım Satım Sistemi Duyurusu; Borçlanma Araçları, Yatırım Fonları ve Varant İtfa/Kupon/Getiri/ Nakdi Uzlaşı Ödeme İşlemleri; Borçlanma Araçlarının / Kira Sertifikalarının İşlem Görmeye Başlaması; Kamuyu Aydınlatma Platformu Duyurusu; Borsada İşlem Gören Tipe Dönüşüm Duyurusu; Hak Kullanımı; Merkezi Kayıt Kuruluşu A.Ş. Duyurusu; Pay Mali Hak Kullanım İşlemi - Nakit Ödeme; Test Bildirimi; Varantların veya Sertifikaların İşlem Görmeye Başlaması; Endeks Şirketlerinde Değişiklik; Endekslerde Kullanılan Fiili Dolaşımdaki Pay Oranı Değişiklikleri; Toptan Alış Satış İşlemi; Pay İşlem Sırası Kapatma / Açma; İşlem İptali; Payların İşlem Görmeye Başlaması; Birincil Piyasa Duyurusu - Kalan Paylar; Borsa İstanbul A.Ş. Duyurusu; Rüçhan Hakkı Referans Fiyatı; Temerrüt İşlemi; Finansal Rapor Ek Süre Taleplerine İlişkin SPK Değerlendirmesi; Özsermaye Hallerine İlişkin Borsa Duyurusu; BIST Pay Endeksleri; SPK İşlem Yasağı Nedeniyle Pay Duyurusu; Sermaye Piyasası Kurulu Tedbir Kararı.",
+      DG: "Diğer — standing company forms, prospectuses and issue documents, governance and sustainability reports, valuation reports, and fund or market-making reports. Subjects: Şirket Genel Bilgi Formu; Katılım Finansı İlkeleri Bilgi Formu; Değerleme Raporu; İzahname (SPK Tarafından Onaylanan); Herhangi Bir Otoriteye Mali Tablo Verilmesi; Kurumsal Yönetim Bilgi Formu; Kurumsal Yönetim Uyum Raporu; Sürdürülebilirlik Uyum Raporu; Piyasa Yapıcılığı Kapsamında Gerçekleştirilen İşlemler Bildirimi; Haftalık Rapor; Tertip İhraç Belgesi; Kurumsal Yönetim Bilgi Formu (Güncelleme) - Yönetim Kurulu-2; İhraç Belgesi; Esas Sözleşme; Likidite Sağlayıcılık Kapsamındaki İşlemler; Halka Arz Fiyatının Belirlenmesinde Esas Alınan Varsayımlara İlişkin Değerlendirme Raporu; Sermaye Artırımından Elde Edilecek - Edilen Fonun Kullanımına İlişkin Rapor; Fiyat Tespit Raporuna İlişkin Analist Raporu (Halka Arza Aracılık Eden Kuruluş Dışında Farklı bir Kuruluş Tarafından Hazırlanan); Sürdürülebilirlik Raporu; Finansal Takvim; İzahname-Sermaye Piyasası Aracı Notu (SPK Tarafından Onaylanan); Kurumsal Yönetim Bilgi Formu (Güncelleme) - Yönetim Kurulu-1; Yatırımcı Raporu; İzahname-Özet (SPK Tarafından Onaylanan); Fiyat Tespit Raporuna İlişkin Analist Raporu (Halka Arza Aracılık Eden Kuruluş Tarafından Hazırlanan); Pay  Satış Bilgi Formu; İzahname (SPK Onayına Sunulan); İzahname-İhraççı Bİlgi Dokümanı (SPK Tarafından Onaylanan); Tasarruf Sahiplerine Satış Duyurusu; Portföy Sınırlamalarına Uyumun Kontrolü; Fiyat Tespit Raporu; Kurumsal Yönetim Bilgi Formu (Güncelleme) - Pay Sahipleri; Aracılık Hizmetleri İçin Ödenen Komisyonlar; Dışarıdan Sağlanan Hizmetler ve Personel İçin Ödenen Komisyon ve Ücretler; Kurumsal Yönetim Bilgi Formu (Güncelleme) - Yönetim Kurulu-3; İç Yönerge; İzahname (İhraççı Bilgi Dokümanı-SPK Onayına Sunulan); İzahname (Sermaye Piyasası Aracı Notu-SPK Onayına Sunulan); Performans Sunuş Raporu; İzahname veya İzahnameyi Oluşturan Belgelerde Değişiklik - Ekleme.",
+      FR: "Finansal Rapor — periodic financial statements and the annual-report and responsibility-statement filings that accompany them. Subjects: Finansal Rapor; Sorumluluk Beyanı (Konsolide); Faaliyet Raporu (Konsolide); Sorumluluk Beyanı (Konsolide Olmayan); Faaliyet Raporu (Konsolide Olmayan); TSRS Uyumlu Sürdürülebilirlik Raporu; Faaliyet Raporu Sorumluluk Beyanı; Entegre Rapor.",
     },
   },
   kap_materiality: {
