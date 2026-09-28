@@ -237,3 +237,39 @@ describe("upsertWithBisect", () => {
   });
 });
 
+
+describe("upsertWithBisect onSkipped [silent-feeds]", () => {
+  const mk = (n: number): FakeRow[] =>
+    Array.from({ length: n }, (_, i) => ({ id: i }) as unknown as FakeRow);
+
+  it("receives exactly the batches popped after the deadline; total equals skipped", async () => {
+    const rows = mk(8);
+    let callCount = 0;
+    let deadlinePassed = false;
+    const upsert = vi.fn(async (_batch: FakeRow[]) => {
+      callCount++;
+      if (callCount === 2) deadlinePassed = true;
+      return { inserted: 0, error: "always fails" };
+    });
+    const skippedBatches: FakeRow[][] = [];
+    const result = await upsertWithBisect(rows, upsert, {
+      isPastDeadline: () => deadlinePassed,
+      onSkipped: (batch) => skippedBatches.push([...batch]),
+    });
+    expect(result.skipped).toBe(8);
+    expect(skippedBatches.reduce((n, b) => n + b.length, 0)).toBe(result.skipped);
+    // Every row is reported skipped exactly once.
+    expect(new Set(skippedBatches.flat()).size).toBe(8);
+  });
+
+  it("is never called on an on-time run", async () => {
+    const onSkipped = vi.fn();
+    const upsert = vi.fn(async (_batch: FakeRow[]) => ({ inserted: 1, error: null as string | null }));
+    const result = await upsertWithBisect(mk(5), upsert, {
+      isPastDeadline: () => false,
+      onSkipped,
+    });
+    expect(result.skipped).toBe(0);
+    expect(onSkipped).not.toHaveBeenCalled();
+  });
+});

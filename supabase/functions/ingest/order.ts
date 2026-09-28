@@ -125,6 +125,12 @@ export interface BisectUpsertOptions<T> {
   isPastDeadline: () => boolean;
   /** Called once per row that fails in isolation (a length-1 batch). */
   onRowError?: (row: T, error: string) => void;
+  /**
+   * Called once per batch popped after the deadline and therefore never
+   * attempted (silent-feeds: lets the caller mark those rows' sources as not
+   * fully settled). The summed lengths equal `result.skipped`.
+   */
+  onSkipped?: (batch: readonly T[]) => void;
 }
 
 /**
@@ -162,6 +168,7 @@ export async function upsertWithBisect<T>(
 
     if (opts.isPastDeadline()) {
       result.skipped += batch.length;
+      opts.onSkipped?.(batch);
       continue;
     }
 

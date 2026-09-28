@@ -2013,3 +2013,35 @@ update public.sources s set rss_url = b.old_rss_url
   from public.sources_rss_backup_093 b
  where b.id = s.id and s.rss_url = b.new_rss_url;
 ```
+
+## 094 — Silent feeds: redeploy ingest FIRST, then apply 094
+
+**What it does:** resets `fetch_etag`, `fetch_last_modified` and `fetch_body_hash` for six sources whose feeds were answered with a 304 or a body-hash hit while their current items were never stored (`iklim-haber`, `investing-com-tr`, `newslab-turkey`, `platform-24`, `turkiye-haber-ajansi`, `journo`). Old values go to `public.sources_fetch_state_backup_094` in the same statement. It never touches `rss_url`, `active`, `bias`, `kind`, the fail streak or quarantine. Root cause and evidence: `docs/feed-registry-2026-09.md` section 3 ("Root cause (2026-09-29)").
+
+**Deploy order matters:**
+
+1. Deploy the fixed ingest: `supabase functions deploy ingest --no-verify-jwt`. It commits a feed's validators only after all of its rows are durable, and reports `validatorsWithheld` in the cycle JSON and summary line.
+2. Apply `094_reset_poisoned_feed_validators.sql`. If applied before step 1, the old code can poison the validators again on the next starved cycle.
+3. Redeploy ingest once more (or wait for the warm instances to recycle). A warm instance keeps sending the old ETag from its in-memory cache after the columns were nulled, and would keep getting 304.
+
+**Verify** (expect each source to show `new_articles >= 1` and `validators_back` true within about 15-30 min):
+
+```sql
+select s.slug, s.fetch_last_status, s.fetch_etag is not null or s.fetch_body_hash is not null as validators_back,
+       count(a.id) filter (where a.created_at > b.backed_up_at) new_articles
+  from public.sources s
+  join public.sources_fetch_state_backup_094 b on b.id = s.id
+  left join public.articles a on a.source_id = s.id
+ group by 1, 2, 3;
+```
+
+After deploy, watch `validatorsWithheld` in the ingest logs and the 546 share in `net._http_response`: under sustained upsert starvation, withheld feeds are re-parsed every cycle (the price of at-least-once delivery). Rollback of the code is redeploying the previous ingest.
+
+**Rollback** (data):
+
+```sql
+update public.sources s
+   set fetch_etag = b.old_fetch_etag, fetch_last_modified = b.old_fetch_last_modified, fetch_body_hash = b.old_fetch_body_hash
+  from public.sources_fetch_state_backup_094 b
+ where b.id = s.id;
+```
