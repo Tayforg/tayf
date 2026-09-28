@@ -138,22 +138,62 @@ function getImageEnclosure(item: RawFeedItem): string | null {
   return item.enclosure.url;
 }
 
+// audit fix A (db-platform): fetcher.ts only ever captures a bare URL for
+// media:content / media:thumbnail (no medium/type attribute survives the
+// XML->RawFeedItem mapping), so a video posted via media:content (a common
+// shape for video-first outlets) looked identical to an image one -- the
+// old extractImage happily returned an .mp4/.m3u8 URL as `image_url`,
+// which every consumer downstream (OG image, thumbnails, the reader UI)
+// then rendered (or tried to) as a static image. Detect by URL extension
+// since that's the only signal fetcher.ts preserves.
+export function isVideoUrl(u: string): boolean {
+  return /\.(mp4|m3u8|webm|mov)(\?|#|$)/i.test(u);
+}
+
+// audit fix A (db-platform), R3: rcman-hosted outlets (aydinlik, ekonomim,
+// f5haber, artigercek) serve a 150x84 crop by default. A 25-URL sample of
+// live rows rewritten to the 1280x720 variant all returned 200 image/* (see
+// the 084 migration header for the exact sample), so the larger crop is a
+// safe drop-in upgrade for any URL still carrying the small preset.
+//
+// TODO(db-platform): haberet's '/150/84/' thumbnail shape is NOT upgraded
+// here -- unlike rcman it carries no discoverable larger-variant path
+// convention, and the audit found no verified bigger crop to swap in. Leave
+// as-is until a haberet-specific larger variant is confirmed.
+const RCMAN_SMALL = "/rcman/Cw150h84q95gc/";
+const RCMAN_LARGE = "/rcman/Cw1280h720q95gc/";
+
+export function upgradeThumbnailUrl(u: string): string {
+  return u.includes(RCMAN_SMALL) ? u.split(RCMAN_SMALL).join(RCMAN_LARGE) : u;
+}
+
+function firstNonVideoCandidate(candidates: ReadonlyArray<string | null | undefined>): string | null {
+  for (const c of candidates) {
+    if (c && !isVideoUrl(c)) return upgradeThumbnailUrl(c);
+  }
+  return null;
+}
+
 function extractImage(item: RawFeedItem): string | null {
-  const fromFields =
-    getImageEnclosure(item) ??
-    item.mediaContent?.$?.url ??
-    item.mediaThumbnail?.$?.url ??
-    item.mediaGroup?.["media:content"]?.$?.url ??
-    item.mediaGroup?.["media:thumbnail"]?.$?.url ??
-    null;
+  const fromFields = firstNonVideoCandidate([
+    getImageEnclosure(item),
+    item.mediaContent?.$?.url,
+    item.mediaThumbnail?.$?.url,
+    item.mediaGroup?.["media:content"]?.$?.url,
+    item.mediaGroup?.["media:thumbnail"]?.$?.url,
+  ]);
   if (fromFields) return fromFields;
 
-  if (item.itemImage && isValidImageUrl(item.itemImage)) return item.itemImage;
+  if (item.itemImage && isValidImageUrl(item.itemImage) && !isVideoUrl(item.itemImage)) {
+    return upgradeThumbnailUrl(item.itemImage);
+  }
 
   const htmlContent = item.contentEncoded ?? item.content ?? "";
   if (htmlContent) {
     const m = htmlContent.match(/<img[^>]+src=["']([^"']+)["']/i);
-    if (m?.[1] && isValidImageUrl(m[1])) return m[1];
+    if (m?.[1] && isValidImageUrl(m[1]) && !isVideoUrl(m[1])) {
+      return upgradeThumbnailUrl(m[1]);
+    }
   }
   return null;
 }

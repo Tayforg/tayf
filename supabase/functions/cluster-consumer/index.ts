@@ -1454,15 +1454,29 @@ interface InvocationSummary {
 }
 
 // /api/revalidate rejects payloads over MAX_TAGS; reserve room for the two
-// static tags so a large drain never overflows the cap into a 400.
+// feed tags so a large drain never overflows the cap into a 400.
 const MAX_REVALIDATION_TAGS = 100;
-const STATIC_REVALIDATION_TAGS = ["clusters-politics", "clusters"];
+// reader-queries E4: these two tags mark the ENTIRE home feed, /blindspots,
+// every topic page and RSS stale — cluster-consumer used to send them on
+// EVERY drain that changed clusters, and pg_cron's 'cluster-drain' job
+// (038_cron_schedules.sql) runs every minute, so the 300s cluster-feed
+// cache window (E1) never actually held: revalidateTag(tag, 'max') at
+// api/revalidate/route.ts:92 re-marked those surfaces stale about once a
+// minute regardless of the window. Feed tags are now opt-in
+// (REVALIDATE_FEED_TAGS=1) — detail tags (cluster-detail:<id>) still flip
+// on every drain, since a single cluster's own page should update
+// immediately when ITS content changes.
+const FEED_REVALIDATION_TAGS = ["clusters-politics", "clusters"];
 
-export function buildRevalidationTags(clusterIds: string[]): string[] {
+export function buildRevalidationTags(
+  clusterIds: string[],
+  includeFeedTags = false,
+): string[] {
+  const statics = includeFeedTags ? FEED_REVALIDATION_TAGS : [];
   return [
-    ...STATIC_REVALIDATION_TAGS,
+    ...statics,
     ...clusterIds
-      .slice(0, MAX_REVALIDATION_TAGS - STATIC_REVALIDATION_TAGS.length)
+      .slice(0, MAX_REVALIDATION_TAGS - statics.length)
       .map((id) => `cluster-detail:${id}`),
   ];
 }
@@ -1481,7 +1495,12 @@ async function triggerRevalidation(clusterIds: string[]): Promise<void> {
     return;
   }
 
-  const tags = buildRevalidationTags(clusterIds);
+  // Opt-in escape hatch: set REVALIDATE_FEED_TAGS=1 to restore the old
+  // per-drain feed invalidation (e.g. while diagnosing a staleness report)
+  // — the cluster-feed window (300s, E1) is the default freshness contract
+  // otherwise.
+  const includeFeedTags = Deno.env.get("REVALIDATE_FEED_TAGS") === "1";
+  const tags = buildRevalidationTags(clusterIds, includeFeedTags);
   try {
     const res = await fetch(revalidateUrl, {
       method: "POST",

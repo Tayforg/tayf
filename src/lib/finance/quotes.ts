@@ -51,23 +51,27 @@ export function parseYahooChart(ticker: string, json: unknown): Quote | null {
   const price = meta.regularMarketPrice;
 
   // Ordered fallback chain for the previous-session baseline (TS-09):
-  //   1. chartPreviousClose — the actual prior close the chart itself is
-  //      plotted against. Preferred: regularMarketChangePercent is
-  //      computed by Yahoo against a live pre/post-market reference that
-  //      can diverge from the chart's own baseline.
-  //   2. regularMarketChangePercent (already in percent units, e.g.
-  //      0.334 = +0.33%), back-solved for prevClose.
-  //   3. The last two daily closes.
+  //   1. regularMarketChangePercent (already in percent units, e.g.
+  //      0.334 = +0.33%), back-solved for prevClose. Preferred: this is
+  //      Yahoo's own live reference against the actual previous session.
+  //   2. The last two daily closes. NOTE: chartPreviousClose on a
+  //      range=5d request is the close from *before the whole 5-day
+  //      window*, not yesterday's close — using it here would badly
+  //      misstate "bugün" for names that have moved over the window. This
+  //      fallback can also show yesterday's move (close[-2] to close[-1])
+  //      before today's bar exists, e.g. pre-market with no trades yet.
+  //   3. chartPreviousClose, but only for a genuine 1-day chart (at most
+  //      one close), where it *is* the prior session's close.
   let changePct = NaN;
   let prevClose = NaN;
-  if (typeof meta.chartPreviousClose === "number" && Number.isFinite(meta.chartPreviousClose) && meta.chartPreviousClose > 0) {
-    prevClose = meta.chartPreviousClose;
-    changePct = ((price - prevClose) / prevClose) * 100;
-  } else if (typeof meta.regularMarketChangePercent === "number" && Number.isFinite(meta.regularMarketChangePercent)) {
+  if (typeof meta.regularMarketChangePercent === "number" && Number.isFinite(meta.regularMarketChangePercent)) {
     changePct = meta.regularMarketChangePercent;
     prevClose = price / (1 + changePct / 100);
   } else if (closes.length >= 2) {
     prevClose = closes[closes.length - 2]!;
+    changePct = ((price - prevClose) / prevClose) * 100;
+  } else if (typeof meta.chartPreviousClose === "number" && Number.isFinite(meta.chartPreviousClose) && meta.chartPreviousClose > 0 && closes.length <= 1) {
+    prevClose = meta.chartPreviousClose;
     changePct = ((price - prevClose) / prevClose) * 100;
   }
   // TS-13: changePct === -100 sends the regularMarketChangePercent branch's

@@ -3,6 +3,7 @@ import type { BiasCategory } from "@/types";
 import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
+import { ownerLineParts } from "@/lib/sources/owner-line";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import type { ReaderAgreement } from "@/lib/game/agreement";
 
@@ -134,14 +135,21 @@ export function LabelCard({
       {/* 3. Owner group — only for tagged slugs (~21/144 today). Render
           nothing (not 'bilinmiyor'/'sınıflandırılmamış') for the rest, same
           rule /sources and <SourceChips> already apply. */}
-      {ownerGroup ? (
-        <div className="text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">
-            {OWNER_GROUPS[ownerGroup] ?? ownerGroup}
-          </span>
-          {meta?.ownership ? <span> · {meta.ownership}</span> : null}
-        </div>
-      ) : null}
+      {ownerGroup
+        ? (() => {
+            const parts = ownerLineParts({
+              groupLabel: OWNER_GROUPS[ownerGroup] ?? ownerGroup,
+              ownership: meta?.ownership,
+              hasTrusteeBadge: trusteeDate !== "",
+            });
+            return (
+              <div className="text-xs text-muted-foreground">
+                <span className="font-medium text-foreground">{parts.primary}</span>
+                {parts.secondary ? <span> · {parts.secondary}</span> : null}
+              </div>
+            );
+          })()
+        : null}
 
       {/* 4. Trustee badge — factual and dated, no motive or adjective.
           Gated on trusteeDate (not just trusteeSince) so an unparseable

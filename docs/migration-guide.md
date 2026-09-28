@@ -1788,3 +1788,186 @@ update cron.job set active = false where jobname = 'jev-budget-nightly';
 Redeploy the previous `jev-shadow` Edge Function version (pre-`stage_tokens`/pre-sampling). The `jev_alerts_auto_resolve()` redefinition from 088 may stay in place — its step (a) only changes behavior for `kap_class_canary` alerts, which is backward-compatible with the pre-088 reader.
 
 See also `docs/jev-politics-admission.md` (migration 089, the ADMIT item) and `docs/topic7-v2.md` (migration 090, the T7a item) for the two migrations that build on top of 088 in this same wave.
+
+## Audit fix A (083-086): deploy order
+
+Seven-part rollout: three DB migrations (083, 084, 085 — 086 lands
+separately), two Edge Function redeploys, a mandatory edge rate-limit rule,
+and one Vercel deploy. Follow this order; 083 and 086 gate the Vercel
+deploy, 084/085 do not.
+
+1. **Apply 083 (reader query RPCs) before the Vercel deploy.** It has an
+   optional/required pre-step of
+   `create index concurrently if not exists clusters_search_tsv_live_idx ...`
+   and `clusters_neutral_eligible_idx ...` (see the 083 migration header for
+   the exact statements). Verify with:
+   ```sql
+   select * from public.headline_neutral_counts();
+   ```
+2. **Apply 084 off-peak** (see "084: DB housekeeping" below) — it briefly
+   takes an ACCESS EXCLUSIVE lock on `public.articles` and does a bounded
+   30-day `UPDATE` over it.
+3. **Apply 085** (see "085: ticker code gate" below).
+4. **Apply 086 (admin login throttle) before the Vercel deploy.** Otherwise
+   admin login fails closed with "Çok fazla deneme. Lütfen biraz sonra
+   tekrar deneyin." (the same generic message a rate-limited attempt gets —
+   the two "not allowed" outcomes are deliberately indistinguishable to the
+   caller). The escape hatch is:
+   ```sql
+   delete from public.admin_login_attempts;
+   ```
+5. **Redeploy the `ingest` and `cluster-consumer` Edge Functions** with
+   `--no-verify-jwt` (per this doc's existing Edge Function convention).
+6. **Before or immediately after the Vercel deploy, add a Vercel
+   Firewall/Edge Config rate-limit rule on `POST /admin/login`.** This is
+   mandatory, not optional: `admin_login_throttle()` (086) does a
+   `pg_advisory_xact_lock` + delete-sweep + two `count(*)` selects on every
+   call — allowed or blocked — so a request flood distributed across many
+   IPs/serverless instances still drives full DB round-trips at whatever
+   rate the client can sustain; the in-memory limiter in
+   `src/lib/rate-limit.ts` only shields a single instance. An edge-level
+   rule (e.g. 20 req/min per IP, or per-ASN if abuse is distributed) keeps
+   that flood from ever reaching Postgres, which also serves all public
+   reader traffic.
+7. **Deploy Vercel.** It now runs in `lhr1` (London) — confirm with:
+   ```bash
+   curl -sI https://www.tayfhaber.com/api/health
+   ```
+   and check the response's `x-vercel-id` header shows `::lhr1::`.
+
+## 084: DB housekeeping
+
+**What it changes:** tunes `public.clusters`'s autovacuum thresholds
+(scale factors 0.2 -> 0.05/0.02, so autovacuum fires at ~10k dead tuples
+instead of ~41k at the table's current ~206k-row size); adds three FK
+support indexes (`corrections.cluster_id`, `zone_guesses.article_id`,
+`story_stances.source_id`, all currently-empty tables); drops the two
+articles indexes confirmed dead by a 30+ day idx_scan=0 window
+(`idx_articles_fingerprint`, `idx_articles_body_excerpt_backfill`); nulls
+out `image_url` for the last 30 days of video URLs (mp4/m3u8/webm/mov) and
+explicitly re-enqueues `image_backfill` for those rows (migration 025's
+`articles_image_enqueue` trigger only fires on INSERT, not UPDATE); and
+upgrades the rcman 150x84 default thumbnail crop to 1280x720 for the last
+30 days (verified 25/25 sampled URLs return `200 image/*` after rewrite —
+see the migration's own header for the full Step 0 evidence).
+
+**Lock note:** the two `drop index` statements in 084 (on `public.articles`)
+each take a brief ACCESS EXCLUSIVE lock on that table — briefly excluding
+both readers and writers. The three `create index` statements (on the
+currently-empty `corrections` / `zone_guesses` / `story_stances`) each take
+only a SHARE lock — Postgres's documented level for a non-`CONCURRENTLY`
+`CREATE INDEX` — which blocks writers but not readers. None of these run
+`CONCURRENTLY` (084 runs inside one transaction, and `CREATE INDEX
+CONCURRENTLY` cannot run inside a transaction block). `set local
+lock_timeout = '5s'` means the whole migration fails fast and can simply be
+re-run rather than queuing behind a long-running reader. To avoid any lock
+risk on the DROPs (the half that genuinely excludes readers), an operator
+can pre-run them outside a transaction before applying 084:
+```sql
+drop index concurrently if exists public.idx_articles_fingerprint;
+drop index concurrently if exists public.idx_articles_body_excerpt_backfill;
+```
+084's own `drop index if exists` then becomes a no-op.
+
+**Right after applying**, run the manual vacuum by hand once (084 also
+schedules this nightly at 06:35 UTC via pg_cron, guarded — it no-ops with a
+`raise notice` if pg_cron isn't installed):
+```sql
+vacuum (analyze) public.clusters;
+```
+
+**Rollback:**
+```sql
+alter table public.clusters reset (
+  autovacuum_vacuum_scale_factor,
+  autovacuum_analyze_scale_factor,
+  autovacuum_vacuum_insert_scale_factor
+);
+select cron.unschedule('clusters-vacuum');
+-- re-create the dropped indexes from 007/020 if ever needed:
+create index if not exists idx_articles_fingerprint on public.articles (fingerprint);
+create index if not exists idx_articles_body_excerpt_backfill on public.articles (body_excerpt) where body_excerpt is null;
+```
+
+## 085: ticker code gate
+
+**The rule:** a bare ticker CODE match (e.g. "DEVA" appearing as a
+stand-alone 4-6 letter uppercase token) is only kept for a stoplisted
+ticker (`public.ticker_code_stoplist()`: `DEVA`, `BEYAZ`, `ATLAS`, `KONYA`)
+when the article is genuinely finance-context (`category = 'ekonomi'`) or
+the ticker already appears parenthesised in the text (e.g. "... Deva
+Holding (DEVA) ..."). Non-stoplisted tickers are completely unaffected —
+same unconditional code-hit behaviour as migration 062. See the migration's
+own header for the full per-ticker evidence (S9/S10) behind the stoplist
+and the two disabled aliases (`dinamik`, `goldman`).
+
+**How to extend the stoplist:** ship a new migration (086+) that does
+`create or replace function public.ticker_code_stoplist() returns text[] ...`
+with the extra ticker(s) appended to the array, plus a `delete from
+public.article_tickers` cleanup scoped the same way 085's is (matched_on =
+'code', ticker = the new stoplist, category <> 'ekonomi', no "(TICKER)" in
+the text). Do not edit 085 in place — migrations are immutable once
+applied.
+
+**Verification query** — code rows for the stoplist over 14 days should
+all be genuine company news (either ekonomi-category or explicitly
+parenthesised):
+```sql
+select t.ticker, a.category, left(a.title, 120)
+  from public.article_tickers t
+  join public.articles a on a.id = t.article_id
+ where t.matched_on = 'code'
+   and t.ticker = any (public.ticker_code_stoplist())
+   and t.published_at > now() - interval '14 days'
+ order by t.published_at desc;
+-- every remaining row should be category = 'ekonomi' or carry "(TICKER)" in
+-- the title/description -- anything else means the gate has a gap.
+```
+
+### net._http_response bloat: the operator step (corrects the 081 section)
+
+The "Manual full-table compaction" section above (and the analogous advice
+elsewhere in this doc) is **wrong for `net._http_response`** specifically:
+`VACUUM` (plain or `FULL`) run as `postgres` is silently skipped —
+`net._http_response` is owned by `supabase_admin`, not `postgres`, and
+Postgres prints `skipping "..." --- only table or database owner can vacuum
+it` rather than erroring. The fix is a `TRUNCATE`, not a `VACUUM`:
+
+1. **Check the size and the privilege:**
+   ```sql
+   select pg_size_pretty(pg_total_relation_size('net._http_response'));
+   select has_table_privilege('net._http_response', 'TRUNCATE');
+   ```
+2. **If `has_table_privilege(...) = true`**, run this in the 04:30 UTC lull
+   (ten minutes before `ops-exhaust-prune` fires, per the 081 section
+   above):
+   ```sql
+   truncate table net._http_response;
+   ```
+   This drops at most ~6 hours of `pg_net` response log (its own TTL keeps
+   the table's live row count small — 178 MB of bloat sat behind only ~820
+   live rows in the 2026-09-28 measurement). The only reader is
+   `ops_health_report`'s 30-minute `edge_http_errors_30m` check, which
+   cannot fail on an empty window.
+3. **If `has_table_privilege(...) = false`** in some environment, open a
+   Supabase support ticket asking for a `VACUUM FULL` on the table, and ask
+   why autovacuum skips it — include its `reloptions` (null as of
+   2026-09-28) and its `last_autovacuum` (2026-08-05 10:11 UTC as of that
+   measurement, ~7 weeks stale).
+
+**Expected effect:** about 170 MB reclaimed at once, and `pg_net`'s TTL
+`DELETE` (per the 081 Step 0 numbers, the costliest statement measured:
+233k calls, ~42k s total) becomes cheap again against a small table.
+
+**Regrowth:** bloat regrows at roughly 3 MB/day (178 MB accumulated since
+the `last_autovacuum` on 2026-08-05); re-check monthly via the size query
+above and repeat this step once the table passes ~50 MB again.
+
+**Correction to the `cron.job_run_details` advice** in the "Manual
+full-table compaction" section above: the same ownership caveat applies
+there in principle (`cron.job_run_details` is also owned by
+`supabase_admin`), but 081's `ops_exhaust_prune()` already `DELETE`s the
+old rows on a schedule, which makes that space reusable in place without
+needing `VACUUM FULL` at all — a `TRUNCATE` is not appropriate there since
+recent run history must be kept, unlike `net._http_response`'s pure
+response-log rows.

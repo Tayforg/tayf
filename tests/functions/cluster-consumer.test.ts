@@ -651,13 +651,14 @@ describe("cluster-consumer Edge Function", () => {
     expect(src).toMatch(/from\("sources"\)\.select\("id, bias, name, slug, kind"\)/);
   });
 
-  it("POSTs once to REVALIDATE_URL with cluster tags after a drain that changes clusters, and not when nothing changed", async () => {
+  it("POSTs once to REVALIDATE_URL with ONLY cluster-detail tags by default (reader-queries E4), and not when nothing changed", async () => {
     const handler = await importHandler();
     expect(handler).toBeDefined();
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
     process.env.REVALIDATE_URL = "https://example.test/api/revalidate";
     process.env.CRON_SECRET = "test-cron-secret";
+    delete process.env.REVALIDATE_FEED_TAGS;
     const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -684,9 +685,15 @@ describe("cluster-consumer Edge Function", () => {
       "Bearer test-cron-secret",
     );
     const body = JSON.parse(init.body as string) as { tags: string[] };
-    expect(body.tags).toContain("clusters-politics");
-    expect(body.tags).toContain("clusters");
-    expect(body.tags.some((t) => /^cluster-detail:/.test(t))).toBe(true);
+    // reader-queries E4: feed tags are opt-in now — the 300s cluster-feed
+    // cache window (E1) never held while every drain re-marked the whole
+    // feed stale. Only cluster-detail:<id> tags fire by default.
+    expect(body.tags).not.toContain("clusters-politics");
+    expect(body.tags).not.toContain("clusters");
+    for (const tag of body.tags) {
+      expect(tag).toMatch(/^cluster-detail:/);
+    }
+    expect(body.tags.length).toBeGreaterThan(0);
 
     // A second drain with nothing pending must not fire another POST.
     fetchMock.mockClear();
@@ -695,16 +702,58 @@ describe("cluster-consumer Edge Function", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("caps the revalidation tag payload at 100, reserving room for the 2 static tags", async () => {
+  it("POSTs both feed tags when REVALIDATE_FEED_TAGS=1 (opt-in escape hatch)", async () => {
+    const handler = await importHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    process.env.REVALIDATE_URL = "https://example.test/api/revalidate";
+    process.env.CRON_SECRET = "test-cron-secret";
+    process.env.REVALIDATE_FEED_TAGS = "1";
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      pgmqState.pending = [
+        { msg_id: 302, read_ct: 1, message: { article_id: "art-revalidate-2" } },
+      ];
+      fakeArticles["art-revalidate-2"] = {
+        id: "art-revalidate-2",
+        title: "Yeni haber 2",
+        description: "Body",
+        url: "https://example.com/revalidate-2",
+        category: "politika",
+        published_at: new Date().toISOString(),
+      };
+
+      await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const body = JSON.parse(init.body as string) as { tags: string[] };
+      expect(body.tags).toContain("clusters-politics");
+      expect(body.tags).toContain("clusters");
+      expect(body.tags.some((t) => /^cluster-detail:/.test(t))).toBe(true);
+    } finally {
+      delete process.env.REVALIDATE_FEED_TAGS;
+    }
+  });
+
+  it("caps the revalidation tag payload at 100: default gives 100 detail tags; includeFeedTags gives 2 feed tags + 98 detail tags", async () => {
     // /api/revalidate's MAX_TAGS is 100; a big drain must never overflow it.
     await importHandler();
     const mod = await import("../../supabase/functions/cluster-consumer/index.ts");
     const ids = Array.from({ length: 150 }, (_, i) => `id-${i}`);
-    const tags = mod.buildRevalidationTags(ids);
-    expect(tags.length).toBe(100);
-    expect(tags[0]).toBe("clusters-politics");
-    expect(tags[1]).toBe("clusters");
-    expect(tags.slice(2)).toEqual(
+
+    const defaultTags = mod.buildRevalidationTags(ids);
+    expect(defaultTags.length).toBe(100);
+    expect(defaultTags).toEqual(ids.slice(0, 100).map((id) => `cluster-detail:${id}`));
+
+    const withFeedTags = mod.buildRevalidationTags(ids, true);
+    expect(withFeedTags.length).toBe(100);
+    expect(withFeedTags[0]).toBe("clusters-politics");
+    expect(withFeedTags[1]).toBe("clusters");
+    expect(withFeedTags.slice(2)).toEqual(
       ids.slice(0, 98).map((id) => `cluster-detail:${id}`),
     );
   });

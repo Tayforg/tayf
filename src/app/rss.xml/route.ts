@@ -22,7 +22,6 @@ function escapeXml(str: string): string {
 }
 
 export async function GET(): Promise<Response> {
-  const { bundles } = await getPoliticsClusters();
   const baseUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
   const now = new Date().toUTCString();
 
@@ -32,7 +31,13 @@ export async function GET(): Promise<Response> {
   // src/components/layout/footer.tsx's ActiveSourceCount for the same rule
   // applied to the source count. getNeutralizedStatus() never throws; a
   // null (unknown) status is treated the same as "no evidence yet".
-  const neutralStatus = await getNeutralizedStatus();
+  //
+  // reader-queries F2: the two fetches are independent — run them in
+  // parallel rather than two serial awaits.
+  const [{ bundles }, neutralStatus] = await Promise.all([
+    getPoliticsClusters(),
+    getNeutralizedStatus(),
+  ]);
   const neutralSentence =
     neutralStatus && neutralStatus.neutralized > 0
       ? " Başlıklar yapay zekâ ile tarafsızlaştırılmıştır (tayfhaber.com/metodoloji)."
@@ -107,7 +112,8 @@ ${items}
   return new Response(xml, {
     headers: {
       "Content-Type": "application/rss+xml; charset=utf-8",
-      "Cache-Control": "public, max-age=300, s-maxage=300",
+      "Cache-Control":
+        "public, max-age=300, s-maxage=300, stale-while-revalidate=3600",
     },
   });
 }

@@ -30,6 +30,9 @@ interface NormalizeModule {
   normalizeItem: typeof import(
     "../../../supabase/functions/_shared/rss/normalize.ts"
   )["normalizeItem"];
+  isVideoUrl: typeof import(
+    "../../../supabase/functions/_shared/rss/normalize.ts"
+  )["isVideoUrl"];
 }
 
 let mod: NormalizeModule | null = null;
@@ -40,7 +43,7 @@ beforeAll(async () => {
     const m = await import(
       "../../../supabase/functions/_shared/rss/normalize.ts"
     );
-    mod = { normalizeItem: m.normalizeItem };
+    mod = { normalizeItem: m.normalizeItem, isVideoUrl: m.isVideoUrl };
   } catch (err) {
     loadError = err;
   }
@@ -113,5 +116,72 @@ describe("normalize.ts sanitisation (CodeQL js/double-escaping + js/incomplete-m
     expect(row!.title).not.toContain("<b>");
     expect(row!.title).toContain("Kalın");
     expect(row!.title).toContain("başlık");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// audit fix A (db-platform): image/video image_url extraction.
+//
+// fetcher.ts only ever captures a bare URL for media:content /
+// media:thumbnail (no medium/type attribute survives the XML mapping), so a
+// video posted via media:content was indistinguishable from an image one --
+// extractImage returned the .mp4/.m3u8 URL verbatim as `image_url`. Detect
+// video candidates by extension and skip them; also upgrade the rcman
+// 150x84 default crop to 1280x720 (R3: a 25-URL live sample all returned
+// 200 image/* -- see the 084 migration header).
+// ---------------------------------------------------------------------------
+describe("normalize.ts image extraction: video skip + rcman thumbnail upgrade", () => {
+  it("isVideoUrl matches .mp4/.m3u8/.webm/.mov even with a query string or fragment", () => {
+    expect(mod!.isVideoUrl("https://cdn.test/clip.mp4")).toBe(true);
+    expect(mod!.isVideoUrl("https://cdn.test/clip.mp4?w=100")).toBe(true);
+    expect(mod!.isVideoUrl("https://cdn.test/clip.m3u8#t=10")).toBe(true);
+    expect(mod!.isVideoUrl("https://cdn.test/photo.jpg")).toBe(false);
+  });
+
+  it("prefers a jpg media:thumbnail over an .mp4 media:content", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Video haberi",
+      link: "/v",
+      mediaContent: { $: { url: "https://cdn.test/clip.mp4" } },
+      mediaThumbnail: { $: { url: "https://cdn.test/poster.jpg" } },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBe("https://cdn.test/poster.jpg");
+  });
+
+  it("returns null image_url for an .m3u8 enclosure with nothing else to fall back on", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Canlı yayın",
+      link: "/live",
+      enclosure: { url: "https://cdn.test/stream.m3u8" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("upgrades an rcman 150x84 URL to the 1280x720 variant", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Ekonomi haberi",
+      link: "/e",
+      mediaContent: {
+        $: {
+          url: "https://img.aydinlik.com.tr/rcman/Cw150h84q95gc/storage/files/images/x.jpg",
+        },
+      },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBe(
+      "https://img.aydinlik.com.tr/rcman/Cw1280h720q95gc/storage/files/images/x.jpg",
+    );
+  });
+
+  it("leaves a normal jpg URL unchanged", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Genel haber",
+      link: "/g",
+      mediaContent: { $: { url: "https://cdn.test/normal.jpg" } },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBe("https://cdn.test/normal.jpg");
   });
 });

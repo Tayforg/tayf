@@ -61,9 +61,50 @@ describe("FramingGame — source guard: a late vote response cannot overwrite a 
 
   it("keeps headlineIdRef in lockstep with setHeadline (new draw) and finishRound (round end)", () => {
     expect(source).toContain(
-      'setHeadline({ articleId: body.article_id, title: body.title });\n      headlineIdRef.current = body.article_id;',
+      'setHeadline({ articleId: outcome.articleId, title: outcome.title });\n      headlineIdRef.current = outcome.articleId;',
     );
     expect(source).toContain("setHeadline(null);\n    headlineIdRef.current = null;");
+  });
+});
+
+describe("FramingGame — source guard: the round clock only starts once a headline lands [round clock]", () => {
+  it("handleStart resets the deadline sentinel instead of computing one", () => {
+    const handleStartStart = source.indexOf("const handleStart = useCallback(");
+    const handleStartEnd = source.indexOf("// Single round-long countdown");
+    expect(handleStartStart).toBeGreaterThan(-1);
+    const body = source.slice(handleStartStart, handleStartEnd);
+    expect(body).toContain("endsAtRef.current = 0;");
+    expect(body).not.toContain("Date.now() + FRAMING_ROUND_SECONDS");
+  });
+
+  it("drawHeadline classifies the response and starts the clock via startRoundClock", () => {
+    const drawStart = source.indexOf("const drawHeadline = useCallback(");
+    const drawEnd = source.indexOf("const handleStart = useCallback(");
+    expect(drawStart).toBeGreaterThan(-1);
+    const body = source.slice(drawStart, drawEnd);
+    expect(body).toContain("classifyDrawResponse(res)");
+    expect(body).toContain("startRoundClock(");
+  });
+
+  it("renders 'Tekrar dene' only in the error branch", () => {
+    const occurrences = source.split("Tekrar dene").length - 1;
+    expect(occurrences).toBe(1);
+    const errorStart = source.indexOf('phase === "error") {');
+    const errorEnd = source.indexOf('phase === "finished") {', errorStart);
+    expect(errorStart).toBeGreaterThan(-1);
+    expect(errorEnd).toBeGreaterThan(errorStart);
+    expect(source.slice(errorStart, errorEnd)).toContain("Tekrar dene");
+  });
+
+  it("setPoolEmpty(true) appears only in the pool-empty branch", () => {
+    const occurrences = source.split("setPoolEmpty(true)").length - 1;
+    expect(occurrences).toBe(1);
+    const poolEmptyIndex = source.indexOf('outcome.kind === "pool-empty"');
+    const errorCommentIndex = source.indexOf('// outcome.kind === "error"');
+    expect(poolEmptyIndex).toBeGreaterThan(-1);
+    expect(errorCommentIndex).toBeGreaterThan(poolEmptyIndex);
+    const poolEmptyBody = source.slice(poolEmptyIndex, errorCommentIndex);
+    expect(poolEmptyBody).toContain("setPoolEmpty(true)");
   });
 });
 

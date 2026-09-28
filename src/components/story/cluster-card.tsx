@@ -310,7 +310,7 @@ export function ClusterCard({
                 alt={heroAlt}
                 width={320}
                 height={224}
-                sizes="(min-width: 640px) 160px, 100vw"
+                sizes="160px"
                 priority={isPriority}
                 className="h-full w-full object-cover"
               />

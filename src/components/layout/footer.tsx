@@ -98,7 +98,9 @@ export function Footer() {
         )}
 
         <p className="mt-3 text-[10px] text-muted-foreground/40 leading-relaxed">
-          Çerez kullanmıyoruz; ziyaret sayıları anonim olarak ölçülür (Vercel Web Analytics).
+          Reklam ya da izleme çerezi kullanmıyoruz. Okuyucu tarafındaki tek çerez, Çerçeve oyununun aynı başlığı
+          tekrar göstermemek için 30 gün sakladığı anonim oturum çerezidir. Yer imleri yalnızca tarayıcınızda
+          saklanır. Ziyaret sayıları anonim olarak ölçülür (Vercel Web Analytics).
         </p>
       </div>
     </footer>

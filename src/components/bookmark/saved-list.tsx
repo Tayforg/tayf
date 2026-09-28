@@ -5,7 +5,6 @@ import Link from "next/link";
 import { Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
-import { createBrowserClient } from "@/lib/supabase/browser";
 import { formatTurkishTimeAgo } from "@/lib/time";
 
 interface SavedRow {
@@ -30,21 +29,29 @@ export function SavedList() {
     if (idList.length === 0) return;
     let cancelled = false;
     (async () => {
-      const { data, error } = await createBrowserClient()
-        .from("clusters")
-        .select("id, title_tr, title_tr_neutral, article_count, updated_at")
-        .in("id", idList)
-        .order("updated_at", { ascending: false })
-        .returns<SavedRow[]>();
-      if (cancelled) return;
-      if (error) {
-        console.warn("[saved] title lookup error:", error.message);
+      try {
+        const { createBrowserClient } = await import("@/lib/supabase/browser");
+        const { data, error } = await createBrowserClient()
+          .from("clusters")
+          .select("id, title_tr, title_tr_neutral, article_count, updated_at")
+          .in("id", idList)
+          .order("updated_at", { ascending: false })
+          .returns<SavedRow[]>();
+        if (cancelled) return;
+        if (error) {
+          console.warn("[saved] title lookup error:", error.message);
+          setFailed(true);
+          setRows([]);
+          return;
+        }
+        setFailed(false);
+        setRows(data ?? []);
+      } catch (err) {
+        if (cancelled) return;
+        console.warn("[saved] title lookup error:", err instanceof Error ? err.message : String(err));
         setFailed(true);
         setRows([]);
-        return;
       }
-      setFailed(false);
-      setRows(data ?? []);
     })();
     return () => {
       cancelled = true;

@@ -30,39 +30,85 @@ const SAMPLE = {
 };
 
 describe("parseYahooChart", () => {
-  it("reads price and closes, and prefers chartPreviousClose for the percent change (TS-09)", () => {
+  it("reads price and closes, and prefers regularMarketChangePercent over the pre-window chartPreviousClose (TS-09)", () => {
     const q = parseYahooChart("THYAO", SAMPLE)!;
     expect(q.ticker).toBe("THYAO");
     expect(q.price).toBe(300.25);
-    expect(q.prevClose).toBe(305);
-    expect(q.changePct).toBeCloseTo(((300.25 - 305) / 305) * 100, 6);
+    expect(q.changePct).toBeCloseTo(0.334, 6);
+    expect(q.prevClose).toBeCloseTo(300.25 / (1 + 0.334 / 100), 6);
     expect(q.closes).toEqual([305, 301.5, 299.25, 300.25]);
     expect(q.currency).toBe("TRY");
   });
 
-  it("uses chartPreviousClose for the change when regularMarketChangePercent is missing", () => {
+  it("falls back to the last two closes when regularMarketChangePercent is missing, ignoring the 5-day chartPreviousClose", () => {
     const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
     delete json.chart.result[0]!.meta.regularMarketChangePercent;
+    const q = parseYahooChart("THYAO", json)!;
+    expect(q.prevClose).toBeCloseTo(299.25, 1);
+    expect(q.changePct).toBeCloseTo(((300.25 - 299.25) / 299.25) * 100, 6);
+  });
+
+  it("falls back to the last two closes when chartPreviousClose is not a usable positive number and pct is missing", () => {
+    const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
+    json.chart.result[0]!.meta.chartPreviousClose = 0;
+    delete json.chart.result[0]!.meta.regularMarketChangePercent;
+    const q = parseYahooChart("THYAO", json)!;
+    expect(q.changePct).toBeCloseTo(((300.25 - 299.25) / 299.25) * 100, 6);
+    expect(q.prevClose).toBeCloseTo(299.25, 1);
+  });
+
+  it("uses chartPreviousClose only for a 1-day chart (single close)", () => {
+    const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
+    delete json.chart.result[0]!.meta.regularMarketChangePercent;
+    (json.chart.result[0] as { indicators: { quote: Array<{ close: unknown[] }> } }).indicators.quote[0]!.close = [300.25];
     const q = parseYahooChart("THYAO", json)!;
     expect(q.prevClose).toBe(305);
     expect(q.changePct).toBeCloseTo(((300.25 - 305) / 305) * 100, 6);
   });
 
-  it("falls back to regularMarketChangePercent when chartPreviousClose is not a usable positive number", () => {
-    const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
-    json.chart.result[0]!.meta.chartPreviousClose = 0;
-    const q = parseYahooChart("THYAO", json)!;
-    expect(q.changePct).toBeCloseTo(0.334, 3);
-    expect(q.prevClose).toBeCloseTo(299.25, 1);
+  it("OZATD regression: a 10% taban move on a 5-day chart uses regularMarketChangePercent, not the pre-window close", () => {
+    const json = {
+      chart: {
+        result: [
+          {
+            meta: {
+              currency: "TRY",
+              regularMarketPrice: 1935,
+              regularMarketChangePercent: -10,
+              chartPreviousClose: 2945,
+            },
+            indicators: { quote: [{ close: [2945, 2652.5, 2388, 2150, 1935] }] },
+          },
+        ],
+        error: null,
+      },
+    };
+    const q = parseYahooChart("OZATD", json)!;
+    expect(q.changePct).toBeCloseTo(-10, 6);
+    expect(q.prevClose).toBeCloseTo(2150, 6);
+    expect(limitFlag(q.changePct)).toBe("taban");
   });
 
-  it("falls back to the last two closes when both chartPreviousClose and regularMarketChangePercent are missing", () => {
-    const json = structuredClone(SAMPLE) as { chart: { result: Array<{ meta: Record<string, unknown> }> } };
-    delete json.chart.result[0]!.meta.regularMarketChangePercent;
-    delete json.chart.result[0]!.meta.chartPreviousClose;
+  it("THYAO regression: a -1.29% move on a 5-day chart uses regularMarketChangePercent", () => {
+    const json = {
+      chart: {
+        result: [
+          {
+            meta: {
+              currency: "TRY",
+              regularMarketPrice: 287,
+              regularMarketChangePercent: -1.29,
+              chartPreviousClose: 298,
+            },
+            indicators: { quote: [{ close: [298, 298.5, 288.5, 290.75, 287] }] },
+          },
+        ],
+        error: null,
+      },
+    };
     const q = parseYahooChart("THYAO", json)!;
-    expect(q.prevClose).toBeCloseTo(299.25, 1);
-    expect(q.changePct).toBeCloseTo(((300.25 - 299.25) / 299.25) * 100, 6);
+    expect(q.changePct).toBeCloseTo(-1.29, 6);
+    expect(q.prevClose).toBeCloseTo(290.75, 2);
   });
 
   it("guards against changePct === -100 producing an infinite or NaN prevClose (TS-13)", () => {

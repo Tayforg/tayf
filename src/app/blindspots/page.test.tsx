@@ -2,22 +2,32 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
-// A-M4: no test file existed for /blindspots before. Keeps `getBlindspots`
+// A-M4: no test file existed for /blindspots before. Keeps `getBlindspotsSafe`
 // resolving zero bundles (the page's own empty-state branch) so this test
 // doesn't need to mock ClusterCard's full dependency chain — the point here
 // is PERF-01 (parallel fetch) and the DenominatorNote wiring, not the
 // bundle-rendering path (already covered by blindspots-query.test.ts).
+//
+// reader-queries D2: the page's data-dependent body now lives in the inner
+// async `BlindspotsFeed` component, streamed behind a <Suspense> boundary —
+// `BlindspotsPage()` itself returns synchronously and never touches the
+// data layer. Every assertion below therefore renders `BlindspotsFeed()`
+// directly (it's the exported implementation detail these tests exist to
+// cover) rather than `BlindspotsPage()`.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/server", () => ({
   connection: vi.fn(async () => undefined),
 }));
 
-const getBlindspots = vi.fn(async (): Promise<{ bundles: unknown[] }> => ({
-  bundles: [],
-}));
+const getBlindspots = vi.fn(
+  async (): Promise<{ ok: true; bundles: unknown[] }> => ({
+    ok: true,
+    bundles: [],
+  }),
+);
 vi.mock("@/lib/clusters/blindspots-query", () => ({
-  getBlindspots: () => getBlindspots(),
+  getBlindspotsSafe: () => getBlindspots(),
 }));
 
 const getFeedStatusSummary = vi.fn(
@@ -30,7 +40,7 @@ vi.mock("@/lib/sources/feed-status", () => ({
   getFeedStatusSummary: () => getFeedStatusSummary(),
 }));
 
-import BlindspotsPage from "./page";
+import { BlindspotsFeed } from "./page";
 import { DenominatorNote } from "@/components/source/denominator-note";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -102,7 +112,7 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
 
 describe("/blindspots page", () => {
   it("A-M4: links to /kaynaklar/durum via the DenominatorNote, with the voting-kind pair from getFeedStatusSummary", async () => {
-    const tree = await BlindspotsPage();
+    const tree = await BlindspotsFeed();
     const hrefs = collectHrefs(tree);
     const text = collectText(tree).join(" ");
 
@@ -117,7 +127,7 @@ describe("/blindspots page", () => {
       order.push("blindspots:start");
       await new Promise((r) => setTimeout(r, 0));
       order.push("blindspots:end");
-      return { bundles: [] };
+      return { ok: true, bundles: [] };
     });
     getFeedStatusSummary.mockImplementation(async () => {
       order.push("summary:start");
@@ -126,7 +136,7 @@ describe("/blindspots page", () => {
       return { delivering: 1, total: 2 };
     });
 
-    await BlindspotsPage();
+    await BlindspotsFeed();
 
     // Both "start" markers must precede both "end" markers — impossible
     // under two serial `await`s, which would fully finish one call before
@@ -138,7 +148,7 @@ describe("/blindspots page", () => {
   it("degrades DenominatorNote to wording-without-numbers when the summary is unknown", async () => {
     getFeedStatusSummary.mockResolvedValueOnce(null);
 
-    const tree = await BlindspotsPage();
+    const tree = await BlindspotsFeed();
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("yanlılık dağılımına sayılan");

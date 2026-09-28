@@ -132,6 +132,18 @@ describe("GET /rss.xml", () => {
     mockMembers = {};
   }
 
+  it("sets Cache-Control with stale-while-revalidate (F2)", async () => {
+    singleClusterBundle();
+    mockNeutralStatus = { neutralized: 0, eligible: 10 };
+
+    const { GET } = await import("@/app/rss.xml/route");
+    const res = await GET();
+
+    expect(res.headers.get("Cache-Control")).toBe(
+      "public, max-age=300, s-maxage=300, stale-while-revalidate=3600",
+    );
+  });
+
   it("omits the AI-disclosure sentence and any hardcoded source count while neutralized is 0", async () => {
     singleClusterBundle();
     mockNeutralStatus = { neutralized: 0, eligible: 10 };

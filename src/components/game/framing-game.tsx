@@ -14,17 +14,13 @@ import {
   type FramingTally,
   type FramingVote,
 } from "@/lib/game/framing";
+import { classifyDrawResponse, startRoundClock } from "@/lib/game/framing-draw";
 
-type Phase = "idle" | "loading" | "playing" | "revealed" | "finished";
+type Phase = "idle" | "loading" | "playing" | "revealed" | "finished" | "error";
 
 interface CerceveHeadline {
   articleId: string;
   title: string;
-}
-
-interface NextPayload {
-  article_id: string | null;
-  title: string | null;
 }
 
 interface VotePayload {
@@ -82,6 +78,7 @@ export function FramingGame() {
   const firstVoteRef = useRef<HTMLButtonElement | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
   const replayRef = useRef<HTMLButtonElement | null>(null);
+  const retryRef = useRef<HTMLButtonElement | null>(null);
 
   const recordEntry = useCallback((entry: FramingRoundEntry) => {
     entriesRef.current = [...entriesRef.current, entry];
@@ -97,31 +94,51 @@ export function FramingGame() {
 
   const drawHeadline = useCallback(async () => {
     setPhase("loading");
+    let res: { ok: boolean; body: unknown } | null = null;
     try {
-      const res = await fetch("/api/oyun/cerceve/next", {
+      const fetchRes = await fetch("/api/oyun/cerceve/next", {
         method: "GET",
         signal: AbortSignal.timeout(8000),
       });
-      if (!res.ok) {
-        if (entriesRef.current.length === 0) setPoolEmpty(true);
-        finishRound();
-        return;
-      }
-      const body = (await res.json()) as NextPayload;
-      if (!body.article_id || !body.title) {
-        if (entriesRef.current.length === 0) setPoolEmpty(true);
-        finishRound();
-        return;
-      }
-      setHeadline({ articleId: body.article_id, title: body.title });
-      headlineIdRef.current = body.article_id;
+      const body = fetchRes.ok ? await fetchRes.json().catch(() => null) : null;
+      res = { ok: fetchRes.ok, body };
+    } catch {
+      res = null;
+    }
+    const outcome = classifyDrawResponse(res);
+
+    if (outcome.kind === "headline") {
+      endsAtRef.current = startRoundClock(
+        endsAtRef.current,
+        Date.now(),
+        FRAMING_ROUND_SECONDS,
+      );
+      setSecondsLeft(Math.max(0, Math.ceil((endsAtRef.current - Date.now()) / 1000)));
+      setHeadline({ articleId: outcome.articleId, title: outcome.title });
+      headlineIdRef.current = outcome.articleId;
       setLastVote(null);
       setLastTally(null);
       setPhase("playing");
-    } catch {
+      return;
+    }
+
+    if (outcome.kind === "pool-empty") {
       if (entriesRef.current.length === 0) setPoolEmpty(true);
       finishRound();
+      return;
     }
+
+    // outcome.kind === "error"
+    if (entriesRef.current.length === 0) {
+      // No headline has ever been shown this round -- the clock never
+      // started (endsAtRef stays 0), so there's nothing to lose by
+      // retrying: show a retry affordance instead of silently ending the
+      // round on a transient network blip.
+      setPhase("error");
+      setAnnouncement("Başlık yüklenemedi.");
+      return;
+    }
+    finishRound();
   }, [finishRound]);
 
   const handleStart = useCallback(() => {
@@ -129,7 +146,7 @@ export function FramingGame() {
     setEntries([]);
     setPoolEmpty(false);
     setVoted(0);
-    endsAtRef.current = Date.now() + FRAMING_ROUND_SECONDS * 1000;
+    endsAtRef.current = 0;
     announcedThresholdsRef.current = new Set();
     setSecondsLeft(FRAMING_ROUND_SECONDS);
     setAnnouncement("");
@@ -163,6 +180,8 @@ export function FramingGame() {
       firstVoteRef.current?.focus();
     } else if (phase === "finished") {
       replayRef.current?.focus();
+    } else if (phase === "error") {
+      retryRef.current?.focus();
     }
   }, [phase]);
 
@@ -253,6 +272,23 @@ export function FramingGame() {
     content = (
       <div className="rounded-xl border border-border/60 bg-card/40 p-6 text-center space-y-4 min-h-[160px] flex flex-col items-center justify-center">
         <p className="text-sm text-muted-foreground">Başlık yükleniyor...</p>
+      </div>
+    );
+  } else if (phase === "error") {
+    content = (
+      <div className="rounded-xl border border-border/60 bg-card/40 p-6 text-center space-y-4">
+        <p className="text-sm text-muted-foreground">Başlık yüklenemedi.</p>
+        <p className="text-[11px] text-muted-foreground">
+          Bağlantı yavaş olabilir; süre henüz başlamadı.
+        </p>
+        <button
+          ref={retryRef}
+          type="button"
+          onClick={() => void drawHeadline()}
+          className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+        >
+          Tekrar dene
+        </button>
       </div>
     );
   } else if (phase === "finished") {

@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { Newspaper, SearchX } from "lucide-react";
 
@@ -6,32 +7,25 @@ import { currentTimeMs } from "@/lib/time";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { PageHero } from "@/components/ui/page-hero";
+import { RetryButton } from "@/components/ui/retry-button";
 import {
   getPoliticsClusters,
   type ClusterBundle,
+  type PoliticsClustersResult,
 } from "@/lib/clusters/politics-query";
 import { searchClusters } from "@/lib/clusters/search-query";
+import { composeSearchView } from "@/lib/clusters/search-view";
 
 // Home route — this IS the news view.
-// Previously a separate "Haberler" article feed lived here, but the user
-// consolidated it: the canonical "news" experience is the story-cluster
-// view (aynı haber, farklı kaynaklar), so the home route now renders the
-// cluster bundles directly.
 //
-// Caching: the cluster worker runs on a 30s cycle, so serving a cached
-// render for up to 30s is the natural freshness window. Route-segment ISR
-// (`revalidate = 30`) layers on top of the in-process cache inside
-// `getPoliticsClusters`.
-//
-// b4 update: the page now reads two query params and re-shapes the
-// cluster list in JS:
-//   ?q=...      free-text title filter (Turkish lowercase substring)
-//   ?page=N     1-indexed pagination slice (PAGE_SIZE clusters per page)
-// Filtering happens BEFORE pagination, then the paged set is grouped
-// into three time buckets (Bugün / Bu hafta / Daha eski) based on each
-// cluster's `updated_at`. The data fetch itself is unchanged — the
-// politics-query helper caches its result for 30s, so re-filtering on
-// every request is essentially free.
+// perf-8 / reader-queries C3: `HomePage` itself is a plain (non-async)
+// Server Component so Next can serve the static shell (PageHero, the
+// search bar placeholder, the feed skeleton) immediately, while the actual
+// data — the politics feed AND, when present, the archive search — stream
+// in behind their own <Suspense> boundaries inside `HomeFeed`. Neither the
+// feed nor the archive search can fail the page any more: `loadFeed()` and
+// `searchClusters()` both degrade to a retry affordance instead of
+// throwing (see FeedUnavailable / SearchUnavailable below).
 const PAGE_SIZE = 15;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -73,8 +67,7 @@ interface BucketWithClusters {
 }
 
 // Shared card renderer used by both the "Son Dakika" strip and the
-// time-bucketed sections below it. Extracted because we now render the
-// same card JSX in two places. `idx` is passed in (not computed here)
+// time-bucketed sections below it. `idx` is passed in (not computed here)
 // so the caller can maintain a single cross-section counter for the
 // priority-image hint (first ~3 cards above the fold preload eagerly).
 // `nowMs` is passed in because Next.js 16's `react-hooks/purity` rule
@@ -105,7 +98,80 @@ function renderClusterCard(
   );
 }
 
-export default async function HomePage({
+export default function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string; page?: string }>;
+}) {
+  return (
+    <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
+      <PageHero
+        kicker="Türkiye haber takibi"
+        title="Haberler"
+        subtitle="Aynı olayı kaç farklı kaynak, hangi bakış açısıyla ele alıyor? Ensemble kümeleme ile birleştirilmiş güncel politika haberleri."
+      />
+
+      <Suspense fallback={<SearchBarPlaceholder />}>
+        <SearchBar />
+      </Suspense>
+
+      <Suspense fallback={<FeedSkeleton />}>
+        <HomeFeed searchParams={searchParams} />
+      </Suspense>
+    </div>
+  );
+}
+
+// Static placeholder matching SearchBar's own shape (see loading.tsx's
+// former "Search bar skeleton" comment) — rendered synchronously in the
+// static shell while the real <SearchBar/> streams in.
+function SearchBarPlaceholder() {
+  return (
+    <div
+      aria-hidden="true"
+      className="h-10 w-full rounded-full bg-muted/40 animate-pulse"
+    />
+  );
+}
+
+// Static placeholder matching loading.tsx's former "Cluster card
+// skeletons" — rendered synchronously in the static shell while
+// `HomeFeed`'s data streams in.
+function FeedSkeleton() {
+  return (
+    <div className="space-y-4" aria-hidden="true">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div
+          key={i}
+          className="rounded-xl ring-1 ring-border/60 bg-card/60 p-5 flex gap-4 animate-pulse"
+        >
+          <div className="h-28 w-40 rounded-lg bg-muted/50 shrink-0" />
+          <div className="flex-1 space-y-3">
+            <div className="h-5 w-3/4 rounded bg-muted/70" />
+            <div className="h-3 w-1/2 rounded bg-muted/40" />
+            <div className="h-2 w-full rounded-full bg-muted/40" />
+            <div className="space-y-1.5 mt-2">
+              <div className="h-2.5 w-11/12 rounded bg-muted/30" />
+              <div className="h-2.5 w-10/12 rounded bg-muted/30" />
+              <div className="h-2.5 w-9/12 rounded bg-muted/30" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+async function loadFeed(): Promise<PoliticsClustersResult | null> {
+  try {
+    return await getPoliticsClusters();
+  } catch (err) {
+    console.warn("[home] feed unavailable:", err);
+    return null;
+  }
+}
+
+async function HomeFeed({
   searchParams,
 }: {
   searchParams: Promise<{ q?: string; page?: string }>;
@@ -114,7 +180,25 @@ export default async function HomePage({
   const q = qRaw?.trim() || undefined;
   const page = Math.max(1, parseInt(pageRaw ?? "1", 10) || 1);
 
-  const { bundles, breakingBundles } = await getPoliticsClusters();
+  // Neither fetch depends on the other — run them in parallel. `search` is
+  // only attempted once `q` reaches the 2-character floor (searchClusters
+  // itself also enforces this, but skipping the call entirely here avoids
+  // an unnecessary await on a query too short to ever match).
+  const [feed, search] = await Promise.all([
+    loadFeed(),
+    q && q.length >= 2 ? searchClusters(q) : Promise.resolve(null),
+  ]);
+
+  if (feed === null) {
+    return (
+      <>
+        <NewSinceLastVisit timestamps={[]} />
+        <FeedUnavailable />
+      </>
+    );
+  }
+
+  const { bundles, breakingBundles } = feed;
 
   // Filter by Turkish-lowercased substring of the cluster title. We use
   // toLocaleLowerCase("tr") so dotted/dotless I are folded the way a
@@ -125,17 +209,6 @@ export default async function HomePage({
 
   const filteredBreaking = breakingBundles.filter(matchesNeedle);
   const filtered = bundles.filter(matchesNeedle);
-
-  // Full-text fallback: the in-memory title filter above only sees the
-  // already-fetched top clusters (CANDIDATE_LIMIT in politics-query), so
-  // a query matching an older/lower-ranked story finds nothing there.
-  // When that happens, fall back to a full-text search across ALL
-  // clusters (search-query.ts, backed by migration 035's tsvector
-  // index) before giving up and showing the empty state.
-  const archiveBundles =
-    q && filtered.length === 0 && filteredBreaking.length === 0
-      ? await searchClusters(q)
-      : [];
 
   // Dedupe: a cluster that's both "breaking" (< 2h) AND in the top-30
   // ranked set would otherwise render twice. The Son Dakika strip wins
@@ -201,96 +274,119 @@ export default async function HomePage({
     ];
   });
 
+  // All in-feed matches (breaking + ranked, across the whole filtered set —
+  // not just this page's slice) so the archive section never duplicates a
+  // cluster the reader can already see somewhere in the feed.
+  const inFeedIds = new Set<string>([
+    ...filteredBreaking.map((b) => b.cluster.id),
+    ...filtered.map((b) => b.cluster.id),
+  ]);
+  const view = composeSearchView({ q, page: safePage, inFeedIds, search });
+
+  const hasInFeedMatches = filtered.length > 0 || filteredBreaking.length > 0;
+
   // We track a global render index across buckets so the first ~3
   // ClusterCards (above the fold) still get the priority hint, even
   // though they're now nested inside <section> wrappers.
   let renderIndex = 0;
 
   return (
-    <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
-      <PageHero
-        kicker="Türkiye haber takibi"
-        title="Haberler"
-        subtitle="Aynı olayı kaç farklı kaynak, hangi bakış açısıyla ele alıyor? Ensemble kümeleme ile birleştirilmiş güncel politika haberleri."
-      />
-
+    <>
       <NewSinceLastVisit timestamps={renderedTimestamps} />
 
-      <SearchBar />
-
-      {archiveBundles.length > 0 ? (
-        <section className="space-y-3">
-          <div className="flex items-center gap-3">
-            <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-              Arşivden: {archiveBundles.length} sonuç
-            </h2>
-            <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
-          </div>
-          <div className="space-y-4">
-            {archiveBundles.map((b, idx) => renderClusterCard(b, idx, nowMs))}
-          </div>
-        </section>
-      ) : bundles.length === 0 && breakingBundles.length === 0 ? (
+      {!q && bundles.length === 0 && breakingBundles.length === 0 ? (
         <EmptyClusters />
-      ) : filtered.length === 0 && filteredBreaking.length === 0 ? (
-        <EmptySearch query={q} />
       ) : (
         <>
-          {breaking.length > 0 && (
-            <section className="space-y-3">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <span
-                    className="h-2 w-2 animate-pulse rounded-full bg-red-600 dark:bg-red-500"
-                    aria-hidden="true"
-                  />
-                  <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-red-600 dark:text-red-500">
-                    Son Dakika
-                  </h2>
-                </div>
-                <div className="h-px flex-1 bg-gradient-to-r from-red-500/40 to-transparent" />
-                <span className="text-[11px] text-muted-foreground">
-                  {breaking.length}
-                </span>
-              </div>
-              <div className="space-y-4">
-                {breaking.map((b) => renderClusterCard(b, renderIndex++, nowMs))}
-              </div>
-            </section>
+          {hasInFeedMatches && (
+            <>
+              {breaking.length > 0 && (
+                <section className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="h-2 w-2 animate-pulse rounded-full bg-red-600 dark:bg-red-500"
+                        aria-hidden="true"
+                      />
+                      <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-red-600 dark:text-red-500">
+                        Son Dakika
+                      </h2>
+                    </div>
+                    <div className="h-px flex-1 bg-gradient-to-r from-red-500/40 to-transparent" />
+                    <span className="text-[11px] text-muted-foreground">
+                      {breaking.length}
+                    </span>
+                  </div>
+                  <div className="space-y-4">
+                    {breaking.map((b) =>
+                      renderClusterCard(b, renderIndex++, nowMs)
+                    )}
+                  </div>
+                </section>
+              )}
+
+              {bucketsWithClusters.map((bucket) => (
+                <section key={bucket.key} className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
+                      {bucket.label}
+                    </h2>
+                    <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
+                    <span className="text-[11px] text-muted-foreground">
+                      {bucket.count}
+                    </span>
+                  </div>
+                  <div className="space-y-4">
+                    {bucket.clusters.map((b) =>
+                      renderClusterCard(b, renderIndex++, nowMs)
+                    )}
+                  </div>
+                </section>
+              ))}
+
+              <Pagination
+                currentPage={safePage}
+                totalPages={totalPages}
+                query={q}
+              />
+            </>
           )}
 
-          {bucketsWithClusters.map((bucket) => (
-            <section key={bucket.key} className="space-y-3">
+          {view.archive.length > 0 && (
+            <section className="space-y-3">
               <div className="flex items-center gap-3">
                 <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                  {bucket.label}
+                  Arşivden: {view.archive.length} sonuç
                 </h2>
                 <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
-                <span className="text-[11px] text-muted-foreground">
-                  {bucket.count}
-                </span>
               </div>
               <div className="space-y-4">
-                {bucket.clusters.map((b) =>
+                {view.archive.map((b) =>
                   renderClusterCard(b, renderIndex++, nowMs)
                 )}
               </div>
             </section>
-          ))}
+          )}
 
-          <Pagination
-            currentPage={safePage}
-            totalPages={totalPages}
-            query={q}
-          />
+          {view.archiveUnavailable &&
+            (hasInFeedMatches ? (
+              <p className="text-xs text-muted-foreground">
+                Arşiv araması şu an yanıt vermiyor.{" "}
+                <RetryButton />
+              </p>
+            ) : (
+              <SearchUnavailable />
+            ))}
+
+          {view.emptySearch && <EmptySearch query={q} />}
         </>
       )}
-    </div>
+    </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Empty states
+// Empty / unavailable states
 // ---------------------------------------------------------------------------
 
 function EmptyClusters() {
@@ -306,6 +402,20 @@ function EmptyClusters() {
         Worker iki veya daha fazla kaynaktan gelen politika haberlerini
         birleştirmeye devam ediyor. Birkaç dakika sonra tekrar uğrayın.
       </p>
+    </div>
+  );
+}
+
+function FeedUnavailable() {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-16 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
+        <Newspaper className="h-7 w-7" aria-hidden="true" />
+      </div>
+      <p className="font-serif text-sm font-medium text-foreground">
+        Haberler şu an yüklenemedi, birkaç dakika içinde tekrar deneyin.
+      </p>
+      <RetryButton />
     </div>
   );
 }
@@ -335,6 +445,31 @@ function EmptySearch({ query }: { query?: string }) {
       >
         Aramayı temizle
       </Link>
+    </div>
+  );
+}
+
+function SearchUnavailable() {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-16 text-center">
+      <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
+        <SearchX className="h-7 w-7" aria-hidden="true" />
+      </div>
+      <p className="font-serif text-sm font-medium text-foreground">
+        Arama şu an yanıt vermiyor
+      </p>
+      <p className="max-w-md text-xs text-muted-foreground leading-relaxed">
+        Arşiv araması zaman aşımına uğradı. Lütfen tekrar deneyin.
+      </p>
+      <div className="flex items-center gap-3">
+        <RetryButton />
+        <Link
+          href="/"
+          className="mt-1 inline-flex min-h-[44px] touch-manipulation items-center rounded-full border border-border/60 bg-background px-4 text-[12px] font-medium text-foreground transition-colors hover:bg-muted"
+        >
+          Aramayı temizle
+        </Link>
+      </div>
     </div>
   );
 }

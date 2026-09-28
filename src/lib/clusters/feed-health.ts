@@ -180,7 +180,7 @@ export function isZoneDegraded(
  * null, i.e. behave exactly as if this function did not exist.
  */
 export async function getZoneFeedHealth(): Promise<ZoneFeedHealth | null> {
-  "use cache";
+  "use cache: remote";
   cacheLife("source-directory");
   cacheTag("sources");
 
