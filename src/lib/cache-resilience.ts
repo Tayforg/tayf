@@ -28,11 +28,15 @@
 //      the cache attempt; on a hit, returns the cached value untouched
 //      (including a legitimately empty/null value — this is not itself
 //      a failure). On a miss, it retries the same fetch live (uncached)
-//      once, so a transient Supabase blip is not pinned as "the answer"
-//      for the whole `cacheLife` window the way returning the sentinel
-//      directly would be — only a genuinely sustained outage (the cached
-//      attempt AND the live retry both fail) falls through to `fallback`.
-//      This half also never throws.
+//      once. NOTE the `{ ok: false }` sentinel returned from the `use
+//      cache` body is itself memoised for the whole `cacheLife` window, so
+//      while it is cached every request skips the cache and runs the
+//      fetch live (uncached); the retry is what heals a transient blip
+//      per request, not cache expiry. Only a genuinely sustained outage
+//      (cached attempt AND live retry both fail) falls through to
+//      `fallback`. This half also never throws. Callers that must not
+//      degrade silently (crons, RSS) should follow the getBlindspots
+//      shape instead: attempt, live retry, then let the throw propagate.
 export type CacheAttempt<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };

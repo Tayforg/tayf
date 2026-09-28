@@ -117,7 +117,7 @@ describe("migration 092_trends_rollup.sql (SQL contract)", () => {
     expect(m).not.toBeNull();
     expect(Number(m?.[1])).toBeLessThanOrEqual(40);
     // Batched: a loop construct, not one bare 32/40-day group-by.
-    expect(code).toMatch(/\bwhile\b|\bfor\b.*\bloop\b/i);
+    expect(code).toMatch(/\bwhile\b|\bfor\b[\s\S]*?\bloop\b/i);
   });
 
   it("revokes execute from public/anon/authenticated and grants only service_role", () => {
@@ -183,12 +183,26 @@ describe("migration 092_trends_rollup.sql (SQL contract)", () => {
     // the window 3 hours later than the Istanbul day it's meant to cover.
     expect(code).not.toMatch(/v_day\s*::\s*timestamptz/i);
     expect(code).not.toMatch(/v_day\s*\+\s*\d+\s*\)?\s*::\s*timestamptz/i);
-    // Both the lower and upper bound must derive from an explicit
-    // Europe/Istanbul-zoned cast of v_day.
-    const windowClause = /a\.created_at\s*>=[\s\S]*?a\.created_at\s*<[\s\S]{0,200}/i.exec(code);
+    // The lower bound must derive from an explicit Europe/Istanbul-zoned
+    // cast of v_day.
+    const windowClause = /a\.created_at\s*>=\s*\(v_day[^\n]*/i.exec(code);
     expect(windowClause).not.toBeNull();
-    const clause = (windowClause as RegExpExecArray)[0];
-    expect(clause).toMatch(/v_day[\s\S]{0,60}at\s+time\s+zone\s+'Europe\/Istanbul'/i);
+    expect(windowClause![0]).toMatch(/v_day[\s\S]{0,60}at\s+time\s+zone\s+'Europe\/Istanbul'/i);
+  });
+
+  it("has NO upper created_at bound in the per-day aggregation (late-ingested rows bucket to old days)", () => {
+    // least(published_at, created_at) can be many days older than
+    // created_at, so `a.created_at < v_day + N` silently drops late rows.
+    expect(code).not.toMatch(/a\.created_at\s*<\s*\(?\s*v_day/i);
+  });
+
+  it("also recomputes bucket days that received recently-ingested rows (repairs old days)", () => {
+    expect(code).toMatch(/a\.created_at\s*>=\s*pg_catalog\.now\(\)\s*-\s*interval\s*'2 days'/i);
+  });
+
+  it("guards a MAINTAIN revoke behind server_version_num >= 170000", () => {
+    expect(code).toMatch(/server_version_num[\s\S]{0,40}>=\s*170000/i);
+    expect(code).toMatch(/revoke\s+maintain\s+on\s+public\.trends_daily_zone_counts_ist_rollup/i);
   });
 
   it("revokes anon/authenticated write privileges on the new rollup table (mirrors 091's unconditional TRUNCATE/TRIGGER/REFERENCES revoke, plus INSERT/UPDATE/DELETE since it has no write policy)", () => {

@@ -7,7 +7,7 @@ import type {
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
-import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import type {
   BiasCategory,
@@ -801,12 +801,6 @@ function scoreCluster(
   );
 }
 
-const POLITICS_FALLBACK: PoliticsClustersResult = {
-  bundles: [],
-  breakingBundles: [],
-  prefilterCount: 0,
-};
-
 // Cached entry point. Cache Components migration (Next.js 16): replaces
 // the previous `unstable_cache` wrapper with the `use cache` directive.
 // The function's arguments (none here) automatically become part of the
@@ -818,7 +812,9 @@ const POLITICS_FALLBACK: PoliticsClustersResult = {
 // data immediately without waiting for the 30s TTL.
 //
 // Build-safety: this never throws — `attemptCached` swallows whatever
-// `fetchPoliticsClusters` throws and reports `{ ok: false }` instead. A
+// `fetchPoliticsClusters` throws and reports `{ ok: false }` instead
+// (that sentinel IS cached for the cacheLife window; the public entry's
+// live retry heals it). A
 // throw that crosses this `"use cache: remote"` boundary fails `next
 // build`'s prerender even though `getPoliticsClusters` below wraps every
 // call (see src/lib/cache-resilience.ts's file header for the incident
@@ -832,15 +828,15 @@ async function getPoliticsClustersCached() {
 
 // Public entry point. The page component (and the RSS/cron consumers)
 // call this identical signature — the cache layer is invisible from the
-// call site. On a cache-attempt failure this retries the query live once
-// (so a transient Supabase blip is not pinned as "the feed" for the whole
-// `cluster-feed` cacheLife window) before falling back to an empty,
-// never-throwing result.
+// call site. Still THROWS on a sustained failure (same contract as
+// getBlindspots): the digest and social crons must not send from empty
+// data, rss.xml must not publish an empty 200 feed, and the home page's
+// loadFeed catch renders <FeedUnavailable/>. On a cache-attempt failure
+// this retries the query live once (the cached `{ ok: false }` sentinel
+// is memoised for the cacheLife window, and this retry is what heals it)
+// before letting a genuine, still-failing outage propagate.
 export async function getPoliticsClusters(): Promise<PoliticsClustersResult> {
-  return resolveCachedOrRetry(
-    "politics-query",
-    getPoliticsClustersCached,
-    fetchPoliticsClusters,
-    POLITICS_FALLBACK,
-  );
+  const attempt = await getPoliticsClustersCached();
+  if (attempt.ok) return attempt.data;
+  return fetchPoliticsClusters();
 }

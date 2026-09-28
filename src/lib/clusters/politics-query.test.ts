@@ -996,18 +996,14 @@ describe("blindspot recall veto", () => {
 // ---------------------------------------------------------------------------
 
 describe("getPoliticsClusters error handling", () => {
-  it("never throws when the query errors — retries live and falls back to an empty feed", async () => {
-    // A thrown error inside the "use cache" boundary fails `next build`'s
-    // prerender even though this function wraps every call (see
-    // src/lib/cache-resilience.ts). Every query attempt below errors
-    // identically, so the cache attempt fails AND the live retry fails —
-    // getPoliticsClusters must still resolve, never reject.
+  it("rejects when the cache attempt AND the live retry both fail (cron/RSS/home callers rely on the throw)", async () => {
+    // The `"use cache"` layer never throws (attemptCached), but the public
+    // entry must: the digest/social crons must not send from empty data,
+    // rss.xml must 500 rather than serve an empty 200 feed, and the home
+    // page's try/catch must reach <FeedUnavailable/>.
+    vi.spyOn(console, "error").mockImplementation(() => {});
     response = { data: null, error: { message: "db down" } };
-    await expect(getPoliticsClusters()).resolves.toEqual({
-      bundles: [],
-      breakingBundles: [],
-      prefilterCount: 0,
-    });
+    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
   });
 
   it("returns an empty result when the query returns no rows", async () => {

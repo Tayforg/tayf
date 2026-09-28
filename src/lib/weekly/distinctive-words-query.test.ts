@@ -134,7 +134,6 @@ describe("getWeeklyDistinctiveWords (never-throws, retry-once wrapper)", () => {
   it("never throws even when the underlying fetch throws synchronously via a bad Supabase response", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     fixture.sourcesError = { message: "connection reset" };
-    await expect(getWeeklyDistinctiveWords()).resolves.not.toThrow;
     await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
   });
 });

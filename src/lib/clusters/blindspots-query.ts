@@ -320,7 +320,7 @@ async function getBlindspotsCached() {
 // from the call site. Still THROWS on failure (unchanged contract): the
 // digest cron, the social cron and rss/[topic] depend on that — they each
 // catch it themselves. On a cache-attempt failure this retries the query
-// live once (bypassing the cache boundary, never memoising a failure)
+// live once (bypassing the cache boundary, the live result is not memoised; the cached ok:false sentinel is)
 // before letting a genuine, still-failing outage propagate as a throw.
 export async function getBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
   const attempt = await getBlindspotsCached();

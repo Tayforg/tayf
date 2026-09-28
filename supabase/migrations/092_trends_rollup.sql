@@ -46,11 +46,13 @@
 --
 --   3. pg_cron job 'trends-rollup-refresh', hourly at :00, calling the
 --      function with its default `p_days = 2` — the rolling window that
---      can still change (today + yesterday's Istanbul day, since a story
---      can be re-dated or newly ingested near the day boundary). Older
---      days are immutable once ingested (BLINDSPOT.feedDelayHours-style
---      reasoning: nothing backdates `created_at`), so they are never
---      re-touched by the hourly tick.
+--      can still change (today + yesterday's Istanbul day). Older days are
+--      NOT immutable: least(published_at, created_at) can be many days
+--      older than created_at (late-ingested rows; prod has lags of up to
+--      ~1350 days), so a row ingested now can belong to an old bucket day.
+--      The function therefore ALSO recomputes every bucket day (within the
+--      40-day cap) that received a row with created_at in the last 2 days,
+--      so late rows are never dropped permanently.
 --
 --   4. A one-off backfill: `select
 --      public.trends_daily_zone_counts_ist_refresh(32);` — the full
@@ -128,6 +130,17 @@ grant select on public.trends_daily_zone_counts_ist_rollup to anon, authenticate
 revoke insert, update, delete, truncate, trigger, references
   on public.trends_daily_zone_counts_ist_rollup from anon, authenticated;
 
+-- PG17 added the MAINTAIN privilege (VACUUM/ANALYZE/REINDEX/LOCK TABLE),
+-- which Supabase's default ACL also grants to anon/authenticated. It does
+-- not exist before PG17 (revoking it would be a syntax error), so guard.
+do $maint$
+begin
+  if current_setting('server_version_num')::int >= 170000 then
+    execute 'revoke maintain on public.trends_daily_zone_counts_ist_rollup from anon, authenticated';
+  end if;
+end
+$maint$;
+
 -- 2. Refresh function -----------------------------------------------------------
 
 create or replace function public.trends_daily_zone_counts_ist_refresh(
@@ -139,7 +152,6 @@ declare
   v_days    integer := least(greatest(coalesce(p_days, 2), 1), 40);
   v_today   date;
   v_day     date;
-  v_offset  integer := 0;
   v_touched integer := 0;
   v_rows    integer;
 begin
@@ -151,9 +163,21 @@ begin
 
   v_today := (pg_catalog.now() at time zone 'Europe/Istanbul')::date;
 
-  while v_offset < v_days loop
-    v_day := v_today - v_offset;
-
+  -- Days to recompute: the rolling p_days window UNION every bucket day
+  -- (within the 40-day cap) that received a row ingested in the last 2
+  -- days. The second set repairs old days hit by late-ingested rows
+  -- (least(published_at, created_at) far older than created_at).
+  for v_day in
+    select d from (
+      select (v_today - g)::date as d from pg_catalog.generate_series(0, v_days - 1) g
+      union
+      select (least(a.published_at, a.created_at) at time zone 'Europe/Istanbul')::date
+        from public.articles a
+       where a.created_at >= pg_catalog.now() - interval '2 days'
+    ) x
+    where d <= v_today and d >= v_today - 40
+    order by d desc
+  loop
     with zmap(bias_key, zone) as (values   -- verbatim BIAS_TO_ZONE (023/087); parity-tested
         ('pro_government','iktidar'),('gov_leaning','iktidar'),('state_media','iktidar'),
         ('islamist_conservative','iktidar'),('nationalist','iktidar'),
@@ -165,21 +189,19 @@ begin
         join public.sources s on s.id = a.source_id
         join zmap z on z.bias_key = s.bias
        where (least(a.published_at, a.created_at) at time zone 'Europe/Istanbul')::date = v_day
-         -- Same covering index as 087 (idx_articles_created_published_source
-         -- on created_at, include published_at/source_id): a tight
-         -- created_at range keeps each day's scan index-bound instead of
-         -- degrading into a full-table scan.  least(published_at,
-         -- created_at) <= created_at always, so created_at in
-         -- [v_day, v_day + 3 days) cannot miss a row whose bucketed day is
-         -- v_day.
+         -- Lower bound only, via the covering index as 087
+         -- (idx_articles_created_published_source on created_at, include
+         -- published_at/source_id). There is deliberately NO upper
+         -- created_at bound: least(published_at, created_at) <= created_at,
+         -- so a row bucketed to v_day can have been ingested arbitrarily
+         -- LATER (prod: lags up to ~1350 days); an upper bound silently
+         -- drops those rows. The lower bound is safe: bucket day v_day
+         -- implies created_at >= start of v_day.
          -- Explicit Europe/Istanbul-zoned cast, matching the bucketing
          -- key's `at time zone 'Europe/Istanbul'` above: a bare
-         -- `v_day::timestamptz` uses the SESSION's TimeZone setting (UTC
-         -- on prod), anchoring the window 3 hours later than the
-         -- Istanbul day it's supposed to cover and silently dropping
-         -- every row whose created_at falls in that 3-hour gap.
+         -- `v_day::timestamptz` uses the SESSION's TimeZone (UTC on
+         -- prod), anchoring the bound 3 hours late.
          and a.created_at >= (v_day::timestamp at time zone 'Europe/Istanbul')
-         and a.created_at <  (v_day::timestamp at time zone 'Europe/Istanbul') + interval '3 days'
          and s.kind in ('outlet', 'wire')
        group by 1
     )
@@ -191,7 +213,6 @@ begin
 
     get diagnostics v_rows = row_count;
     v_touched := v_touched + v_rows;
-    v_offset := v_offset + 1;
   end loop;
 
   return v_touched;
