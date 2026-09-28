@@ -967,3 +967,81 @@ describe("getClusterDetail feed-health suppression", () => {
     expect(feedHealthMock.shouldSuppressBlindspot).not.toHaveBeenCalled();
   });
 });
+
+describe("getClusterDetail blindspot recall veto (migration 071)", () => {
+  function setVetoRow(veto: boolean | null | undefined) {
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          is_blindspot: true,
+          blindspot_side: "pro_government",
+          bias_distribution: { pro_government: 5 },
+          ...(veto !== undefined ? { blindspot_recall_veto: veto } : {}),
+        }),
+        error: null,
+      },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+  }
+
+  it("selects blindspot_recall_veto on the cluster row", async () => {
+    setVetoRow(false);
+    await getClusterDetail("cluster-1");
+    const clusterCall = callLog.find((c) => c.table === "clusters");
+    const select = clusterCall!.steps.find((s) => s.method === "select");
+    expect(String(select!.args[0])).toMatch(/\bblindspot_recall_veto\b/);
+  });
+
+  it("withdraws the claim, flags blindspotRecallVetoed, and never asks feed health", async () => {
+    setVetoRow(true);
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      const result = await getClusterDetail("cluster-1");
+      expect(result!.cluster.is_blindspot).toBe(false);
+      expect(result!.cluster.blindspot_side).toBeNull();
+      expect(result!.blindspotRecallVetoed).toBe(true);
+      // A matching fact, not a feed outage.
+      expect(result!.blindspotSuppressed).toBe(false);
+      expect(feedHealthMock.getZoneFeedHealth).not.toHaveBeenCalled();
+      expect(feedHealthMock.shouldSuppressBlindspot).not.toHaveBeenCalled();
+      expect(infoSpy).toHaveBeenCalledWith(
+        "[recall-veto] withdrew blindspot for cluster cluster-1",
+      );
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    ["false", false],
+    ["null", null],
+    ["absent (pre-071 row)", undefined],
+  ])("keeps the blindspot and runs the feed-health gate when the veto is %s", async (_l, veto) => {
+    setVetoRow(veto);
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.cluster.is_blindspot).toBe(true);
+    expect(result!.cluster.blindspot_side).toBe("pro_government");
+    expect(result!.blindspotRecallVetoed).toBe(false);
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+  });
+
+  it("feed-health suppression still works for a non-vetoed blindspot (regression)", async () => {
+    setVetoRow(false);
+    feedHealthMock.getZoneFeedHealth.mockResolvedValue({
+      iktidar: { total: 10, healthy: 9, healthyShare: 0.9, degraded: false },
+      muhalefet: { total: 10, healthy: 2, healthyShare: 0.2, degraded: true },
+      bagimsiz: { total: 5, healthy: 5, healthyShare: 1, degraded: false },
+    });
+    feedHealthMock.shouldSuppressBlindspot.mockReturnValue(true);
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const result = await getClusterDetail("cluster-1");
+      expect(result!.cluster.is_blindspot).toBe(false);
+      expect(result!.blindspotSuppressed).toBe(true);
+      expect(result!.blindspotRecallVetoed).toBe(false);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});

@@ -93,6 +93,8 @@ interface MkClusterOpts {
   bias_distribution?: unknown;
   is_blindspot?: boolean;
   blindspot_side?: unknown;
+  /** Migration 071 — omit for "column absent" (pre-071 row, pass-through). */
+  blindspot_recall_veto?: boolean | null;
   first_published?: string;
   updated_at?: string;
   members: Array<{
@@ -120,6 +122,9 @@ function mkCluster(opts: MkClusterOpts) {
     bias_distribution: opts.bias_distribution ?? {},
     is_blindspot: opts.is_blindspot ?? false,
     blindspot_side: opts.blindspot_side ?? null,
+    ...(opts.blindspot_recall_veto !== undefined
+      ? { blindspot_recall_veto: opts.blindspot_recall_veto }
+      : {}),
     article_count: opts.article_count ?? opts.members.length,
     first_published: opts.first_published ?? iso(10 * 60 * 1000),
     updated_at: opts.updated_at ?? iso(5 * 60 * 1000),
@@ -843,6 +848,78 @@ describe("feed-health gated blindspot suppression", () => {
     const { bundles } = await getPoliticsClusters();
     expect(bundles[0].cluster.is_blindspot).toBe(false);
     expect(bundles[0].cluster.blindspot_side).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 071 — blindspot recall veto (read-path only)
+// ---------------------------------------------------------------------------
+
+describe("blindspot recall veto", () => {
+  const healthyAll: ZoneFeedHealth = {
+    iktidar: { total: 10, healthy: 10, healthyShare: 1, degraded: false },
+    bagimsiz: { total: 10, healthy: 10, healthyShare: 1, degraded: false },
+    muhalefet: { total: 10, healthy: 10, healthyShare: 1, degraded: false },
+  };
+
+  function vetoRow(id: string, veto: boolean | null | undefined) {
+    return mkCluster({
+      id,
+      is_blindspot: true,
+      blindspot_side: "pro_government",
+      bias_distribution: { pro_government: 9, opposition: 1 },
+      ...(veto !== undefined ? { blindspot_recall_veto: veto } : {}),
+      members: [
+        { id: `${id}-a1`, sourceId: `${id}-s1`, category: "politika" },
+        { id: `${id}-a2`, sourceId: `${id}-s2`, category: "politika" },
+      ],
+    });
+  }
+
+  it("selects blindspot_recall_veto on the cluster (CLUSTER_EMBED_SELECT)", async () => {
+    await getPoliticsClusters();
+    const select = callLog[0]!.steps.find((s) => s.method === "select");
+    expect(String(select!.args[0])).toMatch(/\bblindspot_recall_veto\b/);
+  });
+
+  it("withdraws the claim on its own — health would NOT suppress — and logs the veto", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(healthyAll);
+    response = { data: [vetoRow("vetoed", true)], error: null };
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0].cluster.is_blindspot).toBe(false);
+    expect(bundles[0].cluster.blindspot_side).toBeNull();
+    const lines = infoSpy.mock.calls.map((c) => String(c[0]));
+    expect(lines).toContain("[recall-veto] withdrew blindspot for cluster vetoed");
+    expect(lines.some((l) => l.startsWith("[feed-health]"))).toBe(false);
+    infoSpy.mockRestore();
+  });
+
+  it("vetoes before the feed-health gate (no feed-health log even when the silent zone is degraded)", async () => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue({
+      ...healthyAll,
+      muhalefet: { total: 10, healthy: 2, healthyShare: 0.2, degraded: true },
+    });
+    response = { data: [vetoRow("vetoed-first", true)], error: null };
+    const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].cluster.is_blindspot).toBe(false);
+    const lines = infoSpy.mock.calls.map((c) => String(c[0]));
+    expect(lines).toEqual(["[recall-veto] withdrew blindspot for cluster vetoed-first"]);
+    infoSpy.mockRestore();
+  });
+
+  it.each([
+    ["false", false],
+    ["null", null],
+    ["absent (pre-071 row)", undefined],
+  ])("keeps the blindspot when the veto is %s", async (_label, veto) => {
+    feedHealth.getZoneFeedHealth.mockResolvedValue(healthyAll);
+    response = { data: [vetoRow("kept", veto)], error: null };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].cluster.is_blindspot).toBe(true);
+    expect(bundles[0].cluster.blindspot_side).toBe("pro_government");
   });
 });
 

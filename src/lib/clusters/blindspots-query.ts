@@ -79,6 +79,8 @@ type EmbeddedClusterRow = {
   bias_distribution: unknown;
   is_blindspot: boolean;
   blindspot_side: BiasCategory | null;
+  /** Migration 071; filtered DB-side (always false on returned rows). */
+  blindspot_recall_veto?: boolean | null;
   article_count: number;
   first_published: string;
   updated_at: string;
@@ -112,7 +114,7 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
     const { data, error } = await supabase
       .from("clusters")
       .select(
-        `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, article_count, first_published, updated_at,
+        `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash,
@@ -126,6 +128,10 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
       // The DB flag implements the same core rule as a pre-filter — the
       // live tally below still re-checks it after dedupe.
       .eq("is_blindspot", true)
+      // Migration 071 recall veto: Jev matched same-event coverage from the
+      // silent side, so the claim is withdrawn. DB-side so a vetoed row
+      // never costs a candidate slot. The column is NOT NULL default false.
+      .eq("blindspot_recall_veto", false)
       // Archived (migration 037) clusters are excluded from every reader-facing
       // surface; the detail page still resolves them so shared links never 404.
       .eq("is_archived", false)

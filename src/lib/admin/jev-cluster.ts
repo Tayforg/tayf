@@ -48,6 +48,10 @@ export interface JevBlindspotSuspectView {
   topArticleTitle: string | null;
   topSourceSlug: string | null;
   topProb: number | null;
+  /** Migration 071: true when the recall veto hides this blindspot from readers. */
+  vetoed: boolean;
+  /** When the veto was first set (clusters.blindspot_recall_veto_at). */
+  vetoedAt: string | null;
 }
 
 const JEV_UNLINK_SELECT =
@@ -160,6 +164,8 @@ interface RawSuspectClusterRow {
   title_tr?: unknown;
   title_tr_neutral?: unknown;
   blindspot_recall_checked_at?: unknown;
+  blindspot_recall_veto?: unknown;
+  blindspot_recall_veto_at?: unknown;
 }
 
 interface RawSuspectPredictionRow {
@@ -170,7 +176,8 @@ interface RawSuspectPredictionRow {
 
 /**
  * Clusters `blindspot_recall` flagged as a likely clustering miss in the
- * last JEV_BLINDSPOT_SUSPECT_DAYS days, each paired with the
+ * last JEV_BLINDSPOT_SUSPECT_DAYS days, plus every cluster migration 071
+ * currently recall-vetoes (hidden from readers), each paired with the
  * highest-probability recall candidate found for it.
  *
  * Two queries, joined in application code rather than one PostgREST embed:
@@ -190,9 +197,18 @@ export async function getJevBlindspotSuspects(): Promise<JevBlindspotSuspectView
 
     const clustersRes = await supabase
       .from("clusters")
-      .select("id, title_tr, title_tr_neutral, blindspot_recall_checked_at")
-      .eq("blindspot_recall_suspect", true)
-      .gte("blindspot_recall_checked_at", sinceIso)
+      .select(
+        "id, title_tr, title_tr_neutral, blindspot_recall_checked_at, blindspot_recall_veto, blindspot_recall_veto_at",
+      )
+      // Migration 071: a recall-vetoed cluster (hidden from readers) must
+      // always be reviewable here. 064's suspect flag and 071's veto are
+      // computed independently and can disagree (veto-eligible p>=0.85
+      // match with suspect=false), and 071 can refresh a veto from
+      // updated_at alone, so vetoed rows bypass both the suspect flag and
+      // the checked_at window; suspects stay bounded by the window.
+      .or(
+        `blindspot_recall_veto.eq.true,and(blindspot_recall_suspect.eq.true,blindspot_recall_checked_at.gte."${sinceIso}")`,
+      )
       .order("blindspot_recall_checked_at", { ascending: false })
       .limit(JEV_BLINDSPOT_SUSPECT_LIMIT);
 
@@ -258,6 +274,11 @@ export async function getJevBlindspotSuspects(): Promise<JevBlindspotSuspectView
         topArticleTitle: article ? asString(article.title, "") || null : null,
         topSourceSlug: sourceSlugOf(article),
         topProb: Number.isFinite(prob) ? prob : null,
+        vetoed: row.blindspot_recall_veto === true,
+        vetoedAt:
+          row.blindspot_recall_veto === true && typeof row.blindspot_recall_veto_at === "string"
+            ? row.blindspot_recall_veto_at
+            : null,
       };
     });
   } catch (err) {

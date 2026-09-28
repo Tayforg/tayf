@@ -13,6 +13,7 @@ import {
   SURPRISE,
   ZONE_META,
 } from "@/lib/bias/config";
+import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { SOURCE_METADATA } from "@/lib/sources/factuality";
@@ -37,6 +38,10 @@ export const metadata: Metadata = {
 // Per-entry dates recovered from git history (git log -S on the distinctive
 // substring of each line, src/app/metodoloji/page.tsx), newest first.
 const CHANGELOG = [
+  {
+    date: "2026-09-28",
+    text: "Kör nokta doğrulaması: karşı taraftan aynı olayı anlatan haber bulunan kümelerde kör nokta işareti artık gösterilmiyor.",
+  },
   {
     date: "2026-09-07",
     text: "Kaynak türleri eklendi: toplayıcı ve niş kaynaklar artık yanlılık dağılımına, kör nokta ve sürpriz hesaplarına sayılmıyor; yanlılık kategorisi \"Bağımsız\" yerine \"Merkez\" olarak adlandırıldı.",
@@ -268,6 +273,14 @@ export default async function MethodologyPage() {
             listesine {BLINDSPOT.feedDelayHours} saat sonra girer —
             veritabanındaki işaretleme kendisi anlıktır, gecikme sadece
             herkese açık listeleme içindir.
+          </p>
+          <p className={proseClass}>
+            Tayf&apos;ın kümeleyicisi aynı olayı bazen iki ayrı kümeye böler.
+            Bu yüzden her kör nokta için, sessiz görünen taraftaki kaynaklarda
+            aynı olayı anlatan haber aranır (Jev ile, olasılık ≥ %
+            {Math.round(RECALL_VETO_MIN_PROB * 100)}). Bulunan kaynaklar
+            sayıma eklendiğinde baskınlık eşiği artık tutmuyorsa, o kümede kör
+            nokta işareti gösterilmez.
           </p>
         </div>
       </section>

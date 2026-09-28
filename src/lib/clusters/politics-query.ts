@@ -21,6 +21,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "./feed-health";
+import { applyRecallVeto, logRecallVeto } from "./recall-veto";
 import { detectWireRedistribution } from "./wire";
 
 // Politics-filtered cluster fetcher used by the /clusters page.
@@ -224,6 +225,12 @@ export type EmbeddedClusterRow = {
   bias_distribution: unknown;
   is_blindspot: boolean;
   blindspot_side: BiasCategory | null;
+  /**
+   * Migration 071 blindspot recall veto. `true` withdraws the blindspot
+   * claim for every reader (see recall-veto.ts). Optional so fixtures and
+   * rows fetched before 071 pass through unchanged.
+   */
+  blindspot_recall_veto?: boolean | null;
   article_count: number;
   first_published: string;
   updated_at: string;
@@ -234,7 +241,7 @@ export type EmbeddedClusterRow = {
 // → sources. Exported so search-query.ts's full-text query walks the exact
 // same join shape (and therefore can feed its rows through
 // `buildClusterBundle` below unchanged).
-export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, article_count, first_published, updated_at,
+export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash,
@@ -529,8 +536,14 @@ export function buildClusterBundle(
   // for THIS render if the silent pole zone's feeds are too broken for its
   // silence to mean anything. `health` undefined/null (no caller passed
   // it, or getZoneFeedHealth() itself failed open) => never suppress.
-  let isBlindspot = c.is_blindspot;
-  let blindspotSide = c.blindspot_side;
+  //
+  // Migration 071 recall veto runs FIRST: Jev found same-event coverage from
+  // the silent side, so the claim is withdrawn as a matching fact, not a
+  // feed outage — a vetoed cluster never reaches the feed-health check.
+  const veto = applyRecallVeto(c);
+  if (veto.vetoed) logRecallVeto(c.id);
+  let isBlindspot = veto.isBlindspot;
+  let blindspotSide = veto.blindspotSide;
   if (isBlindspot && health) {
     // Dominant zone derived from the already-normalized bias_distribution
     // via the existing zone-summary helper (tallyZones, re-exported from

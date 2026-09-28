@@ -19,6 +19,7 @@ vi.mock("@/lib/headline/status", () => ({
 
 import { BIAS_LABELS, BLINDSPOT, SURPRISE, ZONE_META } from "@/lib/bias/config";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
+import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import {
   HEADLINE_MIN_ARTICLE_COUNT,
@@ -146,6 +147,19 @@ describe("/metodoloji page", () => {
       "yanlılık dağılımına, kör nokta ve sürpriz hesaplarına sayılmaz",
     );
     expect(collectHrefs(tree)).toContain("/sources");
+  });
+
+  it("explains the blindspot recall veto (migration 071) with the threshold from the shared module", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = await MethodologyPage();
+    const text = collectText(tree).join("");
+
+    expect(text).toContain("aynı olayı bazen iki ayrı kümeye böler");
+    expect(text).toContain(`(Jev ile, olasılık ≥ %${Math.round(RECALL_VETO_MIN_PROB * 100)})`);
+    expect(text).toContain("o kümede kör nokta işareti gösterilmez");
+    expect(text).toContain(
+      "Kör nokta doğrulaması: karşı taraftan aynı olayı anlatan haber bulunan kümelerde kör nokta işareti artık gösterilmiyor.",
+    );
   });
 
   it("shows the mailto link only when NEXT_PUBLIC_CONTACT_EMAIL is set", async () => {

@@ -125,6 +125,7 @@ function detailWithLongHeadlines(): ClusterDetail {
       memberCount: members.length,
     },
     blindspotSuppressed: false,
+    blindspotRecallVetoed: false,
   };
 }
 
