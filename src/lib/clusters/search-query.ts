@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import { turkishQueryVariants } from "./turkish-query";
 import { getZoneFeedHealth } from "./feed-health";
@@ -40,24 +41,13 @@ interface SearchIdRow {
   id: string;
 }
 
-// Internal, cached implementation. THROWS on a Supabase error/exception —
-// mirroring politics-query.ts's fetch/cache split — because this function
-// carries the "use cache" boundary. A caught-and-swallowed error here
-// would cache an empty result as truth for the whole cluster-feed window
-// (empty archive search for minutes after one Supabase blip). The public
-// `searchClusters` below sits outside the cache and converts the throw
-// into the documented never-throw contract.
-//
-// Kept on plain `"use cache"` (NOT `"use cache: remote"`): per-query keys
-// plus search-as-you-type prefixes give a near-zero hit rate for a shared
-// remote cache handler (see next/dist/docs' use-cache-remote.md, "When to
-// avoid remote caching") — an in-memory per-instance cache is the right
-// fit here, unlike the hot fetchers in E1.
-async function cachedSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag("clusters-search");
-
+// Internal, UNCACHED implementation. THROWS on a Supabase error/exception
+// — mirroring politics-query.ts's fetch/cache split. Kept free of the
+// "use cache" directive so it can be called twice: once (wrapped by
+// `attemptCached`) inside the cache boundary below, and once more, live,
+// as `searchClusters`' retry on a cache-attempt failure. `trimmed` is
+// already length-checked by `searchClusters` before this is ever called.
+async function fetchSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
   const variants = turkishQueryVariants(trimmed);
   if (variants.length === 0) return [];
 
@@ -111,20 +101,44 @@ async function cachedSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
   return bundles;
 }
 
+// Build-safety: `attemptCached` swallows whatever `fetchSearchClusters`
+// throws instead of letting it cross the `"use cache"` boundary — a throw
+// here fails `next build`'s prerender even when every caller catches (see
+// src/lib/cache-resilience.ts; catching OUTSIDE the boundary, which is
+// what this file used to do, does not by itself prevent that).
+//
+// Kept on plain `"use cache"` (NOT `"use cache: remote"`): per-query keys
+// plus search-as-you-type prefixes give a near-zero hit rate for a shared
+// remote cache handler (see next/dist/docs' use-cache-remote.md, "When to
+// avoid remote caching") — an in-memory per-instance cache is the right
+// fit here, unlike the hot fetchers in E1.
+async function cachedSearchClusters(trimmed: string) {
+  "use cache";
+  cacheLife("cluster-feed");
+  cacheTag("clusters-search");
+  return attemptCached("clusters-search", () => fetchSearchClusters(trimmed));
+}
+
 // Public entry point. `q` becomes part of the cached function's key
 // automatically, so each distinct search term gets its own cache entry
-// under the same `cluster-feed` TTL as the main feed. This wrapper lives
-// OUTSIDE the cache boundary so a failure is never memoised: it catches
-// whatever `cachedSearchClusters` throws, logs it (never logging `q`
-// itself — it's reader-typed input), and returns `{ ok: false }` so
-// HomeFeed can render a retry affordance instead of a silent "no results".
+// under the same `cluster-feed` TTL as the main feed. On a cache-attempt
+// failure this retries the query live once (bypassing the cache boundary
+// entirely, never memoising a failure) before giving up — distinguishing
+// "no results" (`{ ok: true, bundles: [] }`) from "still failing"
+// (`{ ok: false }`, never logging `q` itself — it's reader-typed input) so
+// HomeFeed only shows a retry affordance on a genuine, still-failing
+// outage. Never throws.
 export async function searchClusters(q: string): Promise<SearchResult> {
   const trimmed = q.trim().slice(0, MAX_QUERY_LENGTH);
   if (trimmed.length < MIN_QUERY_LENGTH) {
     return { ok: true, bundles: [] };
   }
+
+  const attempt = await cachedSearchClusters(trimmed);
+  if (attempt.ok) return { ok: true, bundles: attempt.data };
+
   try {
-    const bundles = await cachedSearchClusters(trimmed);
+    const bundles = await fetchSearchClusters(trimmed);
     return { ok: true, bundles };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

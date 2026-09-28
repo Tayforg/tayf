@@ -4,10 +4,9 @@ import { DIET_ZONES } from "./diet";
 
 /**
  * Loads the per-zone "least-read nudge" suggestion lists from the same
- * cached politics feed the homepage uses. `getPoliticsClusters` is
- * `"use cache"` and throws on failure rather than caching an empty result,
- * so this function is deliberately NOT itself `"use cache"` — it just
- * shields the nudge from ever surfacing a fetch error.
+ * cached politics feed the homepage uses. `getPoliticsClusters` retries
+ * once live and then throws on a sustained outage; this catch degrades
+ * that to `null` (no suggestions).
  */
 export async function loadZoneSuggestions(): Promise<ZoneSuggestions | null> {
   try {

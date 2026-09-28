@@ -2,6 +2,7 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { zoneOf } from "@/lib/bias/config";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
+import { resolveCachedOrRetry } from "@/lib/cache-resilience";
 import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
@@ -228,11 +229,7 @@ export function summariseWeek(
  * (the page renders that as unavailable); `[]` = "the week is genuinely
  * empty".
  */
-export async function getWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag("clusters-politics");
-
+async function fetchWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
   try {
     const supabase = createServerClient();
     // One clock read: two `Date.now()` calls could straddle a tick and
@@ -266,6 +263,31 @@ export async function getWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
     console.error(`[weekly] clusters unavailable: ${message}`);
     return null;
   }
+}
+
+// This was already build-safe (never throws — see the file header), but a
+// `null` "could not read" result still got cached as the answer for the
+// whole `cluster-feed` window. `getWeeklyClusters` below retries live once
+// on a `null` before falling back, so a transient Supabase blip is not
+// pinned for the rest of the window.
+async function getWeeklyClustersCached() {
+  "use cache";
+  cacheLife("cluster-feed");
+  cacheTag("clusters-politics");
+
+  const data = await fetchWeeklyClusters();
+  return data === null
+    ? ({ ok: false, error: "weekly clusters unavailable" } as const)
+    : ({ ok: true, data } as const);
+}
+
+export async function getWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
+  return resolveCachedOrRetry(
+    "weekly-clusters",
+    getWeeklyClustersCached,
+    fetchWeeklyClusters,
+    null,
+  );
 }
 
 type EmbeddedSource = { name?: string | null; active?: boolean | null };
@@ -327,17 +349,9 @@ function shapeLabelChanges(
   return out;
 }
 
-/**
- * Public label changes inside the same 7-day window. `null` = the history
- * could not be read; `[]` = nothing moved this week.
- */
-export async function getWeeklyLabelChanges(): Promise<
+async function fetchWeeklyLabelChanges(): Promise<
   WeeklyLabelChange[] | null
 > {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("sources");
-
   try {
     const supabase = createServerClient();
     // One clock read, same as getWeeklyClusters: two `Date.now()` calls
@@ -371,4 +385,32 @@ export async function getWeeklyLabelChanges(): Promise<
     console.error(`[weekly] label changes unavailable: ${message}`);
     return null;
   }
+}
+
+async function getWeeklyLabelChangesCached() {
+  "use cache";
+  cacheLife("source-directory");
+  cacheTag("sources");
+
+  const data = await fetchWeeklyLabelChanges();
+  return data === null
+    ? ({ ok: false, error: "weekly label changes unavailable" } as const)
+    : ({ ok: true, data } as const);
+}
+
+/**
+ * Public label changes inside the same 7-day window. `null` = the history
+ * could not be read; `[]` = nothing moved this week. Retries live once on
+ * a cache-attempt `null` before falling back, so a transient Supabase blip
+ * is not pinned for the rest of the `source-directory` cacheLife window.
+ */
+export async function getWeeklyLabelChanges(): Promise<
+  WeeklyLabelChange[] | null
+> {
+  return resolveCachedOrRetry(
+    "weekly-label-changes",
+    getWeeklyLabelChangesCached,
+    fetchWeeklyLabelChanges,
+    null,
+  );
 }

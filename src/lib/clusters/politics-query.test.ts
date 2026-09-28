@@ -996,11 +996,12 @@ describe("blindspot recall veto", () => {
 // ---------------------------------------------------------------------------
 
 describe("getPoliticsClusters error handling", () => {
-  it("throws when the query errors — an empty feed must never be cached as truth", async () => {
-    // The caller is wrapped in `"use cache"`: a thrown error prevents the
-    // bad value from entering the cache (Next serves the last good entry),
-    // whereas returning {bundles: []} would pin an empty homepage for the
-    // full revalidate window after a single Supabase blip.
+  it("rejects when the cache attempt AND the live retry both fail (cron/RSS/home callers rely on the throw)", async () => {
+    // The `"use cache"` layer never throws (attemptCached), but the public
+    // entry must: the digest/social crons must not send from empty data,
+    // rss.xml must 500 rather than serve an empty 200 feed, and the home
+    // page's try/catch must reach <FeedUnavailable/>.
+    vi.spyOn(console, "error").mockImplementation(() => {});
     response = { data: null, error: { message: "db down" } };
     await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
   });

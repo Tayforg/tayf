@@ -627,9 +627,14 @@ describe("BL-13 imageEligibleMembers", () => {
 });
 
 describe("getClusterDetail error handling", () => {
-  // NOTE: "cluster row errors → null" was the old contract; errors now
-  // throw (see the cache-poisoning tests below). Only a genuine
-  // maybeSingle miss maps to null/notFound.
+  // NOTE: a throw that crosses the "use cache" boundary fails `next
+  // build`'s prerender even when every caller catches (see
+  // src/lib/cache-resilience.ts) — so `getClusterDetail` never throws.
+  // Internally `fetchClusterDetail` still throws on a real query error
+  // (kept out of the cache write); `getClusterDetail` catches that via
+  // `attemptCached`, retries live once, and only then falls back to
+  // `null`. A genuine maybeSingle miss (no error) still maps to
+  // null/notFound directly, on the first attempt.
 
   it("returns null when the cluster is not found (maybeSingle → null)", async () => {
     responses.clusters = { maybeSingle: { data: null, error: null } };
@@ -639,32 +644,40 @@ describe("getClusterDetail error handling", () => {
     expect(result).toBeNull();
   });
 
-  it("throws when the cluster query errors — a transient failure must not cache as a 404", async () => {
-    // Returning null here makes the page call notFound(), and `"use cache"`
-    // would pin that null for the detail TTL — i.e. a real cluster serves
-    // a cached 404 for minutes after a single Supabase blip. Throwing keeps
-    // the bad result out of the cache.
+  it("never throws when the cluster query errors — retries live and falls back to null", async () => {
+    // Every attempt (cache + live retry) sees the same erroring fixture,
+    // so getClusterDetail must still resolve to null rather than reject.
     responses.clusters = {
       maybeSingle: { data: null, error: { message: "cluster boom" } },
     };
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    await expect(getClusterDetail("11111111-1111-4111-8111-111111111111")).rejects.toThrow(
-      /cluster boom/,
-    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        getClusterDetail("11111111-1111-4111-8111-111111111111"),
+      ).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
-  it("throws when the members query errors — a memberless detail must not be cached", async () => {
+  it("never throws when the members query errors — retries live and falls back to null", async () => {
     responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
     responses.cluster_articles = {
       returns: { data: null, error: { message: "members boom" } },
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    await expect(getClusterDetail("11111111-1111-4111-8111-111111111111")).rejects.toThrow(
-      /members boom/,
-    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(
+        getClusterDetail("11111111-1111-4111-8111-111111111111"),
+      ).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("still renders when only the supplemental sources query errored", async () => {

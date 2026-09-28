@@ -7,6 +7,7 @@ import type {
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import type {
   BiasCategory,
@@ -800,20 +801,42 @@ function scoreCluster(
   );
 }
 
-// Public cached entry point. The page component calls this identical
-// signature — the cache layer is invisible from the call site.
-//
-// Cache Components migration (Next.js 16): replaces the previous
-// `unstable_cache` wrapper with the `use cache` directive. The function's
-// arguments (none here) automatically become part of the cache key, and
-// `cacheLife` / `cacheTag` control TTL and on-demand invalidation.
+// Cached entry point. Cache Components migration (Next.js 16): replaces
+// the previous `unstable_cache` wrapper with the `use cache` directive.
+// The function's arguments (none here) automatically become part of the
+// cache key, and `cacheLife` / `cacheTag` control TTL and on-demand
+// invalidation.
 //
 // Tag: `clusters-politics` — cluster-worker can call
 // `revalidateTag("clusters-politics")` after a write cycle to push fresh
 // data immediately without waiting for the 30s TTL.
-export async function getPoliticsClusters(): Promise<PoliticsClustersResult> {
+//
+// Build-safety: this never throws — `attemptCached` swallows whatever
+// `fetchPoliticsClusters` throws and reports `{ ok: false }` instead
+// (that sentinel IS cached for the cacheLife window; the public entry's
+// live retry heals it). A
+// throw that crosses this `"use cache: remote"` boundary fails `next
+// build`'s prerender even though `getPoliticsClusters` below wraps every
+// call (see src/lib/cache-resilience.ts's file header for the incident
+// this fixes: /trends and /rss.xml, 2026-09-28).
+async function getPoliticsClustersCached() {
   "use cache: remote";
   cacheLife("cluster-feed");
   cacheTag("clusters-politics");
+  return attemptCached("politics-query", fetchPoliticsClusters);
+}
+
+// Public entry point. The page component (and the RSS/cron consumers)
+// call this identical signature — the cache layer is invisible from the
+// call site. Still THROWS on a sustained failure (same contract as
+// getBlindspots): the digest and social crons must not send from empty
+// data, rss.xml must not publish an empty 200 feed, and the home page's
+// loadFeed catch renders <FeedUnavailable/>. On a cache-attempt failure
+// this retries the query live once (the cached `{ ok: false }` sentinel
+// is memoised for the cacheLife window, and this retry is what heals it)
+// before letting a genuine, still-failing outage propagate.
+export async function getPoliticsClusters(): Promise<PoliticsClustersResult> {
+  const attempt = await getPoliticsClustersCached();
+  if (attempt.ok) return attempt.data;
   return fetchPoliticsClusters();
 }
