@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { connection } from "next/server";
 import { Eye } from "lucide-react";
 
@@ -8,7 +9,10 @@ export const metadata: Metadata = {
   title: "Kör Noktalar",
   description:
     "Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Türk medyasındaki kör noktaları tek ekranda görün.",
-  alternates: { canonical: "/blindspots" },
+  alternates: {
+    canonical: "/blindspots",
+    types: { "application/rss+xml": "/rss/kor-noktalar.xml" },
+  },
 };
 
 import { ClusterCard } from "@/components/story/cluster-card";
@@ -62,6 +66,15 @@ export default async function BlindspotsPage() {
         delivering={feedSummary?.delivering ?? null}
         total={feedSummary?.total ?? null}
       />
+
+      <p className="text-xs text-muted-foreground">
+        <Link
+          href="/rss/kor-noktalar.xml"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          RSS
+        </Link>
+      </p>
 
       {bundles.length === 0 ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">

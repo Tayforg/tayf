@@ -49,6 +49,8 @@ for the full methodology and licence terms.
   source (last item time, last HTTP status, 7-day items/day, silent flag)
 - ${baseUrl}/api/sources — machine-readable source registry (JSON)
 - ${baseUrl}/api/sources/{slug} — single-source registry record (JSON)
+- ${baseUrl}/gelistirici — developer docs for the keyed /api/v1 (TR, English code samples)
+- ${baseUrl}/api/v1/openapi.json — OpenAPI 3.1 description of /api/v1
 - ${baseUrl}/blindspots — stories one political pole is not covering
 - ${baseUrl}/rss.xml — RSS feed
 - ${baseUrl}/sitemap.xml — sitemap

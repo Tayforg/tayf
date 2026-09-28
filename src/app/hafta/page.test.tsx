@@ -67,6 +67,10 @@ const mocks = vi.hoisted(() => ({
   > | null,
   feedStatus: null as { delivering: number; total: number } | null,
   words: null as WordsResult,
+  recentWeeks: { current: "2026-W40", previous: ["2026-W39", "2026-W38"] } as {
+    current: string;
+    previous: string[];
+  },
 }));
 
 vi.mock("@/lib/weekly/weekly-query", () => ({
@@ -92,6 +96,9 @@ vi.mock("@/lib/sources/feed-status", () => ({
 
 vi.mock("@/lib/weekly/distinctive-words-query", () => ({
   getWeeklyDistinctiveWords: () => Promise.resolve(mocks.words),
+}));
+vi.mock("@/lib/weekly/week-archive", () => ({
+  getRecentWeekKeys: () => Promise.resolve(mocks.recentWeeks),
 }));
 
 import WeeklyPage, { metadata } from "./page";
@@ -253,6 +260,7 @@ beforeEach(() => {
       ],
     },
   };
+  mocks.recentWeeks = { current: "2026-W40", previous: ["2026-W39", "2026-W38"] };
 });
 
 describe("metadata", () => {
@@ -404,6 +412,31 @@ describe("WeeklyPage — data present", () => {
 
     expect(text).toContain("Sessiz kaynak sayısı bilinmiyor");
     expect(text).not.toMatch(/NaN|undefined/);
+  });
+});
+
+describe("WeeklyPage — week archive nav", () => {
+  it("links recent weeks with '{n}. hafta' labels", async () => {
+    const tree = await WeeklyPage();
+    const text = collectText(tree).join(" ");
+    const hrefs = collectHrefs(tree);
+
+    expect(text).toContain("Geçmiş haftalar:");
+    expect(text).toContain("39. hafta");
+    expect(text).toContain("38. hafta");
+    expect(hrefs).toContain("/hafta/2026-W39");
+    expect(hrefs).toContain("/hafta/2026-W38");
+  });
+
+  it("renders nothing when there are no previous weeks", async () => {
+    mocks.recentWeeks = { current: "2026-W38", previous: [] };
+    const text = collectText(await WeeklyPage()).join(" ");
+    expect(text).not.toContain("Geçmiş haftalar:");
+  });
+
+  it("does not add a sixth h2 heading for the archive nav", async () => {
+    const headings = collectTag(await WeeklyPage(), "h2");
+    expect(headings).toHaveLength(5);
   });
 });
 

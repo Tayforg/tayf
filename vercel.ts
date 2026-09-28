@@ -36,6 +36,18 @@ import type { VercelConfig } from "@vercel/config/v1";
  *     link only, never a verdict or description. Fail-closed against a
  *     missing `CRON_SECRET`. See `src/app/api/cron/fact-checks/route.ts`.
  *
+ *   - `/api/cron/social` — Owned-channels auto-poster (Telegram +
+ *     Bluesky): posts at most 2 blindspots and 1 top story per channel
+ *     per tick, gated by migration 079's `social_posts` ledger
+ *     (claim-before-post, unique (channel, cluster_id), 8/day cap per
+ *     channel). Every ten-minute-scale window between 08:00 and 23:40
+ *     TRT (05:00-20:40 UTC), every 20 minutes — proven safe on this plan
+ *     by the existing 5-minute headline cron (Hobby would reject a
+ *     sub-daily cron at deploy). No-op (disabled or unconfigured) when
+ *     `SOCIAL_POST_DISABLED=1` or no channel env vars are set.
+ *     Fail-closed against a missing `CRON_SECRET`. See
+ *     `src/app/api/cron/social/route.ts` and `docs/owned-channels.md`.
+ *
  * Full architecture in `docs/adr/001-worker-stream-system.md`; operator
  * cutover steps in `docs/migration-guide.md`.
  */
@@ -44,6 +56,7 @@ const config: VercelConfig = {
     { path: "/api/cron/headline", schedule: "*/5 * * * *" },
     { path: "/api/cron/digest", schedule: "0 6 * * 6" },
     { path: "/api/cron/fact-checks", schedule: "23 * * * *" },
+    { path: "/api/cron/social", schedule: "*/20 5-20 * * *" },
   ],
 };
 

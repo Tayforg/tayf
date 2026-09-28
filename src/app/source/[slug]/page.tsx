@@ -10,8 +10,14 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { LabelCard, type ZoneHistoryEntry } from "@/components/source/label-card";
+import { ClickbaitKarneLine } from "@/components/source/clickbait-karne";
 import { getSourceAgreement } from "@/lib/game/agreement";
 import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
+import {
+  CLICKBAIT_PRECISION_CHECK,
+  getClickbaitKarne,
+  isClickbaitPublic,
+} from "@/lib/sources/clickbait";
 import type { BiasCategory, Source } from "@/types";
 
 // /source/[slug] — single-source profile page.
@@ -220,6 +226,9 @@ export default async function SourceProfilePage({ params }: PageProps) {
   // card's "Henüz yeterli tahmin yok".
   const readerAgreement = await getSourceAgreement(source.id);
 
+  // "tık tuzağı karnesi" (migration 078) — same gate as /sources.
+  const karne = isClickbaitPublic() ? await getClickbaitKarne() : null;
+
   // S-17: BreadcrumbList JSON-LD (Anasayfa → Kaynaklar → this source).
   const breadcrumbs = buildBreadcrumbs([
     { name: "Anasayfa", path: "/" },
@@ -304,6 +313,10 @@ export default async function SourceProfilePage({ params }: PageProps) {
         history={zoneHistory}
         readerAgreement={readerAgreement}
       />
+
+      {karne ? (
+        <ClickbaitKarneLine karne={karne} slug={source.slug} check={CLICKBAIT_PRECISION_CHECK} />
+      ) : null}
 
       {/* Recent articles list. Capped at 20 by the data layer; the empty
           state covers brand-new sources or temporarily inactive feeds. */}

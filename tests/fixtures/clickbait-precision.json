@@ -1,0 +1,329 @@
+{
+  "status": "PLACEHOLDER: synthetic fixture for unit-testing the recomputation contract only. The real Step 0 blind 200-row precision label pass (SPEC decision 6 / Step 0d) has NOT been run -- it is judgement work delegated to a Fable/Opus-tier agent per the spec, not this Sonnet implementation pass. CLICKBAIT_PRECISION_CHECK stays null (gate closed) regardless of this file.",
+  "checkedOn": null,
+  "questionSet": "2026-09-24.1",
+  "threshold": 0.7,
+  "salt": "tik-tuzagi-v1",
+  "rows": [
+    {
+      "article_id": "placeholder-000",
+      "source_slug": "placeholder-source-0",
+      "zone": "iktidar",
+      "jev_prob": 0.7,
+      "label": false,
+      "rule": "N1"
+    },
+    {
+      "article_id": "placeholder-001",
+      "source_slug": "placeholder-source-1",
+      "zone": "bagimsiz",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "placeholder-002",
+      "source_slug": "placeholder-source-2",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "placeholder-003",
+      "source_slug": "placeholder-source-3",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "placeholder-004",
+      "source_slug": "placeholder-source-4",
+      "zone": "bagimsiz",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "placeholder-005",
+      "source_slug": "placeholder-source-5",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "placeholder-006",
+      "source_slug": "placeholder-source-0",
+      "zone": "iktidar",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "placeholder-007",
+      "source_slug": "placeholder-source-1",
+      "zone": "bagimsiz",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "placeholder-008",
+      "source_slug": "placeholder-source-2",
+      "zone": "muhalefet",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "placeholder-009",
+      "source_slug": "placeholder-source-3",
+      "zone": "iktidar",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "placeholder-010",
+      "source_slug": "placeholder-source-4",
+      "zone": "bagimsiz",
+      "jev_prob": 0.8,
+      "label": false,
+      "rule": "N5"
+    },
+    {
+      "article_id": "placeholder-011",
+      "source_slug": "placeholder-source-5",
+      "zone": "muhalefet",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y6"
+    },
+    {
+      "article_id": "placeholder-012",
+      "source_slug": "placeholder-source-0",
+      "zone": "iktidar",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "placeholder-013",
+      "source_slug": "placeholder-source-1",
+      "zone": "bagimsiz",
+      "jev_prob": 0.83,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "placeholder-014",
+      "source_slug": "placeholder-source-2",
+      "zone": "muhalefet",
+      "jev_prob": 0.84,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "placeholder-015",
+      "source_slug": "placeholder-source-3",
+      "zone": "iktidar",
+      "jev_prob": 0.85,
+      "label": false,
+      "rule": "N4"
+    },
+    {
+      "article_id": "placeholder-016",
+      "source_slug": "placeholder-source-4",
+      "zone": "bagimsiz",
+      "jev_prob": 0.86,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "placeholder-017",
+      "source_slug": "placeholder-source-5",
+      "zone": "muhalefet",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y6"
+    },
+    {
+      "article_id": "placeholder-018",
+      "source_slug": "placeholder-source-0",
+      "zone": "iktidar",
+      "jev_prob": 0.88,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "placeholder-019",
+      "source_slug": "placeholder-source-1",
+      "zone": "bagimsiz",
+      "jev_prob": 0.89,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "placeholder-020",
+      "source_slug": "placeholder-source-2",
+      "zone": "muhalefet",
+      "jev_prob": 0.9,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "placeholder-021",
+      "source_slug": "placeholder-source-3",
+      "zone": "iktidar",
+      "jev_prob": 0.91,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "placeholder-022",
+      "source_slug": "placeholder-source-4",
+      "zone": "bagimsiz",
+      "jev_prob": 0.92,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "placeholder-023",
+      "source_slug": "placeholder-source-5",
+      "zone": "muhalefet",
+      "jev_prob": 0.93,
+      "label": true,
+      "rule": "Y6"
+    },
+    {
+      "article_id": "placeholder-024",
+      "source_slug": "placeholder-source-0",
+      "zone": "iktidar",
+      "jev_prob": 0.94,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "placeholder-025",
+      "source_slug": "placeholder-source-1",
+      "zone": "bagimsiz",
+      "jev_prob": 0.95,
+      "label": false,
+      "rule": "N2"
+    },
+    {
+      "article_id": "placeholder-026",
+      "source_slug": "placeholder-source-2",
+      "zone": "muhalefet",
+      "jev_prob": 0.96,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "placeholder-027",
+      "source_slug": "placeholder-source-3",
+      "zone": "iktidar",
+      "jev_prob": 0.97,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "placeholder-028",
+      "source_slug": "placeholder-source-4",
+      "zone": "bagimsiz",
+      "jev_prob": 0.98,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "placeholder-029",
+      "source_slug": "placeholder-source-5",
+      "zone": "muhalefet",
+      "jev_prob": 0.99,
+      "label": true,
+      "rule": "Y6"
+    },
+    {
+      "article_id": "placeholder-030",
+      "source_slug": "placeholder-source-0",
+      "zone": "iktidar",
+      "jev_prob": 0.7,
+      "label": false,
+      "rule": "N1"
+    },
+    {
+      "article_id": "placeholder-031",
+      "source_slug": "placeholder-source-1",
+      "zone": "bagimsiz",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "placeholder-032",
+      "source_slug": "placeholder-source-2",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "placeholder-033",
+      "source_slug": "placeholder-source-3",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "placeholder-034",
+      "source_slug": "placeholder-source-4",
+      "zone": "bagimsiz",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "placeholder-035",
+      "source_slug": "placeholder-source-5",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "placeholder-036",
+      "source_slug": "placeholder-source-0",
+      "zone": "iktidar",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "placeholder-037",
+      "source_slug": "placeholder-source-1",
+      "zone": "bagimsiz",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "placeholder-038",
+      "source_slug": "placeholder-source-2",
+      "zone": "muhalefet",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "placeholder-039",
+      "source_slug": "placeholder-source-3",
+      "zone": "iktidar",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y4"
+    }
+  ]
+}

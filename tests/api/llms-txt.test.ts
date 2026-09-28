@@ -62,6 +62,13 @@ describe("GET /llms.txt", () => {
     }
   });
 
+  it("points to /gelistirici and /api/v1/openapi.json", async () => {
+    const body = await (await GET()).text();
+    for (const path of ["/gelistirici", "/api/v1/openapi.json"]) {
+      expect(body).toContain(path);
+    }
+  });
+
   it("states that Tayf does not relicense outlet text or photographs", async () => {
     const body = await (await GET()).text();
     expect(body.toLowerCase()).toMatch(
