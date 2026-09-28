@@ -47,7 +47,16 @@ export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
   const { slug } = await params;
-  if (isTopicSlug(slug)) return topicMetadata(slug);
+  if (isTopicSlug(slug)) {
+    const base = topicMetadata(slug);
+    return {
+      ...base,
+      alternates: {
+        ...base.alternates,
+        types: { "application/rss+xml": `/rss/${slug}.xml` },
+      },
+    };
+  }
   return {};
 }
 
@@ -128,6 +137,13 @@ export default async function TopicHubPage({
           className="underline decoration-dotted underline-offset-2 hover:text-foreground"
         >
           {TOPIC_NOTE_LINK_LABEL}
+        </Link>
+        {" · "}
+        <Link
+          href={`/rss/${slug}.xml`}
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          RSS
         </Link>
       </p>
 

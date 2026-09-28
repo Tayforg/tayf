@@ -147,6 +147,7 @@ describe("/metodoloji page", () => {
       "yanlılık dağılımına, kör nokta ve sürpriz hesaplarına sayılmaz",
     );
     expect(collectHrefs(tree)).toContain("/sources");
+    expect(collectHrefs(tree)).toContain("/gelistirici");
   });
 
   it("explains the blindspot recall veto (migration 071) with the threshold from the shared module", async () => {

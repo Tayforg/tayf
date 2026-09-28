@@ -118,10 +118,13 @@ export function withApiV1Headers(res: Response, tier?: ApiTier): Response {
 // reaches Supabase to look up a hash. Deliberately generous (30/1s) — this
 // is a floor under every caller, authenticated or not, not the per-key
 // limit itself.
-const anonLimiter = createRateLimiter("api-v1-anon", {
-  capacity: 30,
-  refillPerSecond: 1,
-});
+//
+// Exported so /gelistirici (src/app/gelistirici/page.tsx) can derive its
+// "a single IP is capped at ~60/min regardless of tier" copy from the same
+// numbers this limiter actually runs on, instead of a hand-typed "30" and
+// "1" the two could silently drift apart on.
+export const API_V1_ANON_LIMIT = { capacity: 30, refillPerSecond: 1 } as const;
+const anonLimiter = createRateLimiter("api-v1-anon", API_V1_ANON_LIMIT);
 
 // Per-minute buckets, one per tier, keyed by `k${keyId}` (never by IP —
 // a partner key legitimately fans out across many client IPs). Capacity

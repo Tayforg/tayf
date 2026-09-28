@@ -16,6 +16,7 @@ import { PageHero } from "@/components/ui/page-hero";
 import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceChips } from "@/components/source/source-chips";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { countClassifiedSources } from "@/lib/sources/classification";
@@ -23,6 +24,11 @@ import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import { buildRegistryDataset, serializeJsonLd } from "@/lib/seo/json-ld";
+import {
+  CLICKBAIT_PRECISION_CHECK,
+  getClickbaitKarne,
+  isClickbaitPublic,
+} from "@/lib/sources/clickbait";
 import type { BiasCategory, Source } from "@/types";
 
 // /sources — public directory of every active Türk news source Tayf monitors,
@@ -182,6 +188,11 @@ export default async function SourcesPage() {
   );
   const classifiedSources = countClassifiedSources(allSlugs);
 
+  // "tık tuzağı karnesi" (migration 078) — gated on CLICKBAIT_PRECISION_CHECK
+  // (src/lib/sources/clickbait.ts). getClickbaitKarne() is only called when
+  // the gate is already open, so a closed gate costs nothing extra here.
+  const karne = isClickbaitPublic() ? await getClickbaitKarne() : null;
+
   // S-17: Dataset JSON-LD describing the source registry this page
   // renders. `dateModified` reuses `nowMs` (already computed above for the
   // yield-denominator footnote) rather than a second clock read.
@@ -313,6 +324,9 @@ export default async function SourcesPage() {
           </section>
         );
       })}
+      {karne ? (
+        <ClickbaitKarneSection karne={karne} check={CLICKBAIT_PRECISION_CHECK} />
+      ) : null}
       </div>
     </>
   );

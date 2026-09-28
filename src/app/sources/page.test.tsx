@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactNode } from "react";
 
 import { createSupabaseFake } from "../../../tests/_helpers/supabase-fake";
@@ -28,6 +28,24 @@ vi.mock("next/cache", () => ({
 vi.mock("next/server", () => ({
   connection: vi.fn(async () => undefined),
 }));
+
+// clickbait-karne (migration 078) — mocked independently of the real rpc
+// path so this file stays focused on the source-kind UI it already covers.
+// `clickbaitFixture.public` toggles the gate the same way
+// isClickbaitPublic() would.
+const clickbaitFixture = vi.hoisted(() => ({
+  public: false,
+  karne: null as unknown,
+}));
+
+vi.mock("@/lib/sources/clickbait", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/sources/clickbait")>();
+  return {
+    ...actual,
+    isClickbaitPublic: vi.fn(() => clickbaitFixture.public),
+    getClickbaitKarne: vi.fn(async () => clickbaitFixture.karne),
+  };
+});
 
 function makeFakeClient() {
   const sourceRows = [
@@ -81,8 +99,15 @@ vi.mock("@/lib/supabase/server", () => ({
 // Import AFTER mocks are declared.
 import SourcesPage from "./page";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
+import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
 
-/** Collects every string/number leaf under a React element tree. */
+/**
+ * Collects every string/number leaf under a React element tree. Expands
+ * `<ClickbaitKarneSection>` the same way collectHrefs below expands
+ * `<DenominatorNote>` — a one-level-deep function component whose own text
+ * lives in its rendered output, not its props.
+ */
 function collectText(node: unknown, out: string[] = []): string[] {
   if (typeof node === "string" || typeof node === "number") {
     out.push(String(node));
@@ -93,7 +118,12 @@ function collectText(node: unknown, out: string[] = []): string[] {
     return out;
   }
   if (node && typeof node === "object") {
-    const el = node as { props?: { children?: ReactNode } };
+    const el = node as { type?: unknown; props?: { children?: ReactNode; [k: string]: unknown } };
+    if (el.type === ClickbaitKarneSection && el.props) {
+      const props = el.props as unknown as Parameters<typeof ClickbaitKarneSection>[0];
+      collectText(ClickbaitKarneSection(props), out);
+      return out;
+    }
     if (el.props?.children !== undefined) collectText(el.props.children, out);
   }
   return out;
@@ -150,5 +180,54 @@ describe("/sources page — source-kind UI", () => {
     // `latest` row, so the derived voting-delivering pair is 0/2.
     expect(text).toContain("0");
     expect(text).toContain("2");
+  });
+});
+
+describe("/sources page — clickbait-karne gate", () => {
+  beforeEach(() => {
+    clickbaitFixture.public = false;
+    clickbaitFixture.karne = null;
+    vi.mocked(isClickbaitPublic).mockClear();
+    vi.mocked(getClickbaitKarne).mockClear();
+  });
+
+  it("with the gate closed, getClickbaitKarne is never called and there is no 'tık tuzağı' text", async () => {
+    clickbaitFixture.public = false;
+
+    const tree = await SourcesPage();
+    const text = collectText(tree).join(" ");
+
+    expect(getClickbaitKarne).not.toHaveBeenCalled();
+    expect(text).not.toMatch(/tık tuzağı/i);
+  });
+
+  it("with the gate open and karne present, the section renders", async () => {
+    clickbaitFixture.public = true;
+    clickbaitFixture.karne = {
+      outlets: [
+        {
+          slug: "s-outlet",
+          name: "Outlet Gazete",
+          bias: "pro_government",
+          zone: "iktidar",
+          n: 300,
+          nFlagged: 30,
+          share: 0.1,
+          meanProb: 0.4,
+          tier: "low",
+        },
+      ],
+      firstDay: "2026-09-24",
+      lastDay: "2026-09-28",
+      outletCount: 1,
+      questionSets: ["2026-09-24.1"],
+      minN: 300,
+    };
+
+    const tree = await SourcesPage();
+    const text = collectText(tree).join(" ");
+
+    expect(getClickbaitKarne).toHaveBeenCalled();
+    expect(text).toMatch(/tık tuzağı karnesi/i);
   });
 });

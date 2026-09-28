@@ -1,0 +1,1610 @@
+{
+  "status": "REAL 200-row blind sample, labelled 2026-09-28 by two independent model-proxy labellers (Opus) with a third adjudicating 2 disagreements (99% raw agreement). Precision 0.765 < 0.80, so CLICKBAIT_PRECISION_CHECK stays null (gate closed). No titles stored; the full sheet stays in the session scratchpad.",
+  "checkedOn": "2026-09-28",
+  "questionSet": "2026-09-24.1",
+  "threshold": 0.7,
+  "salt": "tik-tuzagi-v1",
+  "labeler": "model-proxy (2 independent labellers + adjudicator)",
+  "rows": [
+    {
+      "article_id": "a322a5cf-2c51-45ab-9bec-d7389a71cdd1",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.85,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "99cb3f06-aae1-42a4-af39-0c8cbf1c8036",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "b9dfe80c-f57e-401a-b987-fe39ed4b782e",
+      "source_slug": "gazete-pencere",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "7e050878-dba4-42dd-ae6e-81a66561d168",
+      "source_slug": "habervakti",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "dd94c58b-41f5-45aa-9959-e96519ac257c",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.77,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "31e1ff34-31b1-45a8-9201-4170bdbeeb4d",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "7c7e264e-b2de-4602-952e-642629f8ca97",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "503c8a0e-e17e-4dba-b434-6e1691deefe6",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.8,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "7b3f87e1-5837-47b5-87a0-3fdacef71884",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.91,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "cc87fb89-2446-4e4e-bd9b-2cd716acb810",
+      "source_slug": "arti-gercek",
+      "zone": "muhalefet",
+      "jev_prob": 0.8,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "9be1034e-3bd7-4375-bd8c-479f20e6e359",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "6a8fba92-abc0-4b3b-b672-b34bb4ef7065",
+      "source_slug": "elips-haber",
+      "zone": "muhalefet",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "56a147ca-39ae-4a4f-87c6-8d42449c123c",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "d7b1ddc7-2007-4c48-952a-840c67925f15",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "6c497a08-d8dd-42a2-bf91-8e68ff04ca32",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.7,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "4c1bf3bc-8eaf-465b-9737-ee9fb925003b",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "a6c334c6-08b1-49fa-8794-8d049c8c956b",
+      "source_slug": "abc-haber",
+      "zone": "bagimsiz",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "f818eaaa-9d53-40eb-9d6d-179a9c564257",
+      "source_slug": "dirilis-postasi",
+      "zone": "iktidar",
+      "jev_prob": 0.83,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "669c00b2-f35e-4fa1-8b55-05301504cd83",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "ae4bbc0a-8bb2-401a-a84d-dbb922f7d5cc",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.88,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "840f17b0-7133-4f1f-9ccb-0d8a9d0f94bb",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "b702408a-a34a-42be-ab57-ea215d053ecf",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "98901d4e-47fe-4bea-9518-e8596115a5ec",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.93,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "7f57ead1-27f3-4566-a47f-93259f0341aa",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "7d2a13b3-98aa-4190-bc8a-c0cf6839894b",
+      "source_slug": "gazete-pencere",
+      "zone": "bagimsiz",
+      "jev_prob": 0.75,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "901c16b3-026d-441c-8679-6e11f25c2872",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "48620caa-4ca7-4437-9608-931c57f34d31",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "80fd4984-3c56-4f91-80d0-24f8a6d63ff4",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.9,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "65e8ed15-1d9a-4d89-854f-5e8ed41b3be2",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "562d43a3-7483-446b-8556-245f24b82d0e",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.87,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "5660da84-c279-4eb0-825a-b574471271fe",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.77,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "9f7b309f-5131-47f3-972b-afdb8af25e8f",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "fd6707d2-e78d-4049-bebe-82a37a68a43d",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.75,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "950171ec-9d98-4765-a219-0c2160b56b7f",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.89,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "cf5a2117-a90e-4f51-b716-40763cbf87eb",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "eb9e80ba-056d-49dd-8a69-0a8c0f6ac3be",
+      "source_slug": "haber-global",
+      "zone": "iktidar",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "5ef02fc4-c274-41f1-b6f4-72657e77895d",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "5c1c0b28-da14-43cd-bc57-8c1eb6dd6fa0",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "26940dd6-1596-40b7-8dd4-05ce7af40ace",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "2e2dc52a-5a9f-40b3-b39f-7bdf5a8491f4",
+      "source_slug": "gazete-oksijen",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "2046bf87-8344-4a27-8904-cd4dbea6c6fa",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "c25c8ece-5452-45af-adef-5cb7d47da9c3",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "459461f3-3e95-4145-8271-7671b97c0a16",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.78,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "bec2f82a-8dc9-4dc5-b393-3077f585e8d7",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "5d7931e6-60e1-4f2f-98e2-f80b2da93a52",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "47a77b81-2059-41c3-9d80-b126abd481d6",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.86,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "6f2972cd-3f3e-4098-bd60-eaa8bc5f0253",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.82,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "4fbdc7a6-7241-40fe-abe9-f30ba6c4c56f",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "40e160a6-f6c1-4412-a736-103ad28224d3",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "d7d98bd1-be02-457a-bb47-1ebc416bd579",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "9b4bfac8-c34c-47f4-ac50-576e21aa9743",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.93,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "b3c74cda-76f3-46f9-8dfa-063fc5c19bc6",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "1c809da8-e32e-4d5f-a777-33039dd382d7",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.81,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "29761545-6917-4bb4-b9fb-547815cffc91",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.86,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "a9d32431-e402-4268-a3d2-68d9705d107f",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "810aaaf0-ddbd-4fc6-820f-2a1f8b4255b7",
+      "source_slug": "bbc-turkce",
+      "zone": "bagimsiz",
+      "jev_prob": 0.85,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "6989dd37-e561-4ef9-9fcc-8209397671fd",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.8,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "add891bb-7dcd-4f3b-8672-789d804c2b59",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "55cecee4-8aa5-47d5-a8f2-830dea355426",
+      "source_slug": "arti-gercek",
+      "zone": "muhalefet",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "0b507683-df5f-4ee8-9265-91379a516b0c",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.84,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "820038c8-1a90-4fec-9ae7-c6cd091c7f4f",
+      "source_slug": "gazete-oksijen",
+      "zone": "bagimsiz",
+      "jev_prob": 0.78,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "39388b5c-9ee6-42d2-93b8-8ca051c371e6",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.92,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "0a98100b-bc33-4c45-8129-0fb6931b1780",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "9031bbb3-9017-4d4b-81fd-9d025edcf0dd",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "6f57b9b4-621b-4bda-88ca-a07f74377c89",
+      "source_slug": "habervakti",
+      "zone": "bagimsiz",
+      "jev_prob": 0.84,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "d85f957a-2d8a-4d62-ae31-8eca8f2c2716",
+      "source_slug": "gazete-oksijen",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "41bf6ee7-e113-459c-98b7-c0d5449a8660",
+      "source_slug": "elips-haber",
+      "zone": "muhalefet",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "de1761e3-8d94-4692-9925-e8e9aaa62b8d",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "2847d94d-abe1-4865-85f5-f892dbd3ffc4",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "ca3967cd-f65f-41a8-8b9b-b84f241db452",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.9,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "a6cf8f1b-d202-436b-8ae6-303242fad433",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.88,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "05b83b61-3b30-405d-a903-a7f918b636f8",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.86,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "7220d3dc-2b9a-4c08-9d08-190ce0c3c8f3",
+      "source_slug": "elips-haber",
+      "zone": "muhalefet",
+      "jev_prob": 0.86,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "bed3e1dd-729c-46e8-ad55-1f4279ec5d07",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.86,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "6de73370-363d-4225-b8f6-8da00a1954df",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.82,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "7d98d77b-9004-497b-bdab-b605f136f3a8",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.8,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "8fe6f494-5793-4a38-816a-ceb65034df9e",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.8,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "4ccae03d-6d0a-43dc-8f80-adc5dc3da0d9",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "6dea8422-8b4f-460b-bd89-9ffb2e349425",
+      "source_slug": "elips-haber",
+      "zone": "muhalefet",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "1df3a813-c1d0-4637-b0f5-51403266571b",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "178881bc-1f94-4407-bac6-df6be1de4abd",
+      "source_slug": "elips-haber",
+      "zone": "muhalefet",
+      "jev_prob": 0.74,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "223600a2-b415-4960-861d-15d72552f6a5",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "54e732b9-99e1-45d5-94d0-fc830b5d1560",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "06252730-62ef-47c0-bcd7-b6f5875002dc",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "e5c26a33-0cf4-4df0-a032-f40e84e47b38",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.7,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "28642fd3-0a73-473a-89ce-fa324e51778e",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "53d9be5a-d879-4106-b356-42c004ba14bf",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.85,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "f9453be7-75de-4653-b726-9e76e72c3845",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "5d7aceeb-dbb0-4d73-95d7-0ae2c015523c",
+      "source_slug": "gazete-oksijen",
+      "zone": "bagimsiz",
+      "jev_prob": 0.72,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "c72be415-257b-4c57-b132-96d556c5e1af",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.8,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "8d700347-ddd5-4d1a-8c4c-2f45b25334ad",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "fc071fe2-a5e8-491f-9700-04951a5e7ca0",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "1a651ac0-cd3d-4d7a-8458-6ab01beed0b9",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.86,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "d0102d79-13ce-42c5-b49c-ac711ca98552",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "3d5c5212-e4e0-4f63-a269-1609e5547f8a",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "5429d796-2974-4ab5-8139-02c3cef0a7cd",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "06f14e58-064b-4078-9a8d-1e346e35e634",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.79,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "1500eb92-ac4b-4a03-8d5f-d4cea1250319",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "ea7483dc-3388-4e0f-ad6b-56e6055403ae",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "7f94023c-142c-477e-9168-fc30568e1026",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.85,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "b6056bcc-5c18-4786-8ecb-d7adac8a9bab",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "dcfa76e9-3496-4513-873f-af52d48c661d",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "bb395224-5911-4af2-8535-56b3cbf20301",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "65682da4-7ba5-44c4-9400-68a235e72952",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "ff08063a-f0a0-4bf5-80b5-d8993ad71c3d",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "02194ea0-5b8b-49e7-b2ca-fd2bf84b3f31",
+      "source_slug": "dirilis-postasi",
+      "zone": "iktidar",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "0b7a2a9c-1e77-45ad-8229-4d782fa95737",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "1703a2ed-9a9f-4699-a6d9-ea943813fb67",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.89,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "c941a5f9-711a-4233-bd8a-bc5a40c40c2d",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.79,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "f0aec041-421e-4f01-9313-aeb1ea936f6c",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "c7050f3f-6b30-4ec2-96f4-a8ee39639465",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "6202253f-0efa-4cef-aa49-2b6a3e7aac44",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "d600c78c-7928-48b8-a002-8c8a66b4f397",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.84,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "37b09aa5-1162-45b1-8a29-c6f14ce52303",
+      "source_slug": "haber-global",
+      "zone": "iktidar",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "25c25cce-15c0-4659-a71d-f7017b25621e",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "6b1bc44c-3d70-4c43-bb67-e74b673002af",
+      "source_slug": "elips-haber",
+      "zone": "muhalefet",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "243e3c19-05c6-467a-ab19-ecfc0a4945e4",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "da818147-8ac6-48ba-b606-779691a1996d",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.71,
+      "label": false,
+      "rule": "N1"
+    },
+    {
+      "article_id": "1bdf48f6-cef8-41e5-b778-2a84258c223e",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.85,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "0f909082-ec4e-4855-8b73-91bf27fef74b",
+      "source_slug": "gazete-oksijen",
+      "zone": "bagimsiz",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "7df3a4c5-2677-43ae-8eb6-349c0afd1b9b",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.8,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "704eb35d-3542-4ce5-96c0-a1aaa556429a",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.83,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "c6b5594e-b16f-439f-a818-c753c5441f24",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.7,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "d1084bc5-f825-4a07-9c68-f02744da1c55",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.94,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "6df104ec-2015-48d9-ab75-4200c54ca709",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "f307a818-bd40-48de-a231-1e02b0bfd31b",
+      "source_slug": "dw-turkce",
+      "zone": "bagimsiz",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "eb7d6a78-c81d-4abf-9939-3b11dbcd23e6",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.7,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "1a50c736-1699-488f-ad49-ce261c93e069",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.84,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "51bd13e5-2325-4b6a-a250-c990a87f7ef4",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "00eed6d3-732d-4ce1-9e24-b0b69e01e96c",
+      "source_slug": "gazete-oksijen",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "5993627e-8afd-4da1-a67e-74cb493144c0",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.92,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "4b9d9319-d859-4697-9e53-06d657af0795",
+      "source_slug": "aydinlik",
+      "zone": "iktidar",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "81ea963c-99c9-4eff-bfb5-fb3f7982d16b",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "289603ea-50da-410c-bbf0-95b5766f59e4",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "c69ad940-61b4-4882-a514-4360c40c1756",
+      "source_slug": "karar",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "9422951d-1aa5-4363-ace8-a1030a5a77bd",
+      "source_slug": "abc-haber",
+      "zone": "bagimsiz",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "1d75da4e-3f49-4343-a738-147f4bf14348",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "215f2ebe-afc2-4cd3-889b-d2e0fe23f957",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "a6f76a31-4589-469a-b30e-1e3ddb457a38",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "f5b9cefb-33d6-4302-a776-8b8e19c18a6e",
+      "source_slug": "elips-haber",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "68c78512-f6ea-4d7c-bbc8-b8e2dbc6281f",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "235ed8c1-c3d8-4332-9bd1-ea0c07436bac",
+      "source_slug": "mynet",
+      "zone": "iktidar",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "a2b3ee01-45d1-489f-a365-447f43957241",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.72,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "74d21f30-9c5c-415b-8570-b54914b7b77e",
+      "source_slug": "bianet",
+      "zone": "bagimsiz",
+      "jev_prob": 0.75,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "f62f80ae-60e4-412c-b972-9835bfa5de6c",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "34420b4f-5045-4d02-aa8d-266736fa2f21",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "cb437faa-54ef-4839-82d5-091f75ab722a",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "7a05449c-c3e1-49b4-bec7-fa040022fd62",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.85,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "980d519d-fdf2-48d8-b91e-fc015378daed",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.75,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "6e1a9aaf-022a-45a8-af9e-ffc3031a5937",
+      "source_slug": "a-haber",
+      "zone": "iktidar",
+      "jev_prob": 0.77,
+      "label": false,
+      "rule": "N5"
+    },
+    {
+      "article_id": "d8034088-a53e-45e9-87b3-6e7f4478a3cd",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.75,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "844bcae9-416f-4b47-9c74-2333e324c1f2",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "2bf59199-7b20-435c-9708-3f5c79c16022",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "2d850e0b-f032-4042-9956-4225073c59c9",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.77,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "6a7ef464-68f3-4494-836e-afe7ff750e54",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.77,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "a015ad9d-0e32-4327-bf12-36d5715a97e3",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.83,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "04e4fb5d-7684-4e92-997e-92861561e383",
+      "source_slug": "a-haber",
+      "zone": "iktidar",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "f794da12-15d6-4ae7-a8eb-17ae309e4e70",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.81,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "2774854d-6b9f-417b-8a99-9e1284fab9f1",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "f37ff24e-610d-45e3-810e-46ce01f82977",
+      "source_slug": "abc-haber",
+      "zone": "bagimsiz",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "b95b4dec-59c7-4694-9ca2-b7bedad856d8",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "7603a77c-67a8-4fb0-bb54-f43ab44306ae",
+      "source_slug": "hurriyet",
+      "zone": "iktidar",
+      "jev_prob": 0.89,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "07711343-fff6-4211-bb1f-22acb3c3deda",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.89,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "8e8ae7b9-9fbe-41cf-a291-fea79714249b",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "eeac174a-0785-4fef-b45f-6ac145358a3e",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.92,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "a449002b-05da-48ab-976a-c6ef32224d02",
+      "source_slug": "haber-com",
+      "zone": "bagimsiz",
+      "jev_prob": 0.8,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "faf2dc03-0b90-42d4-a2a6-0a472e7acfe2",
+      "source_slug": "haberturk",
+      "zone": "iktidar",
+      "jev_prob": 0.7,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "fba6a1af-ded2-4c2d-aaf7-b310c9410edf",
+      "source_slug": "a-haber",
+      "zone": "iktidar",
+      "jev_prob": 0.7,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "0fa891e1-c122-4bcd-b7bb-2e29df632273",
+      "source_slug": "benguturk",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "b9f7900d-37f3-4c71-9653-a9f1326b87ca",
+      "source_slug": "gazete-oksijen",
+      "zone": "bagimsiz",
+      "jev_prob": 0.73,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "1e492b4a-cecf-4d0a-baf0-95c39552134b",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "85617ef4-a5eb-4773-8e20-87efccd8636f",
+      "source_slug": "gazete-pencere",
+      "zone": "bagimsiz",
+      "jev_prob": 0.7,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "7385bfee-7cd9-4b0f-b563-3e8d8496fcaf",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.86,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "97415c09-e668-4989-818e-12476a62e3b7",
+      "source_slug": "benguturk",
+      "zone": "bagimsiz",
+      "jev_prob": 0.71,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "aa72ca52-9fe2-4943-9b68-8017f888740f",
+      "source_slug": "halk-tv",
+      "zone": "muhalefet",
+      "jev_prob": 0.89,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "3e363791-4ec4-4389-a68e-aa305f3b09f3",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.93,
+      "label": true,
+      "rule": "Y3"
+    },
+    {
+      "article_id": "f17e6612-1326-4e87-be9c-d259f350327e",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "b6d80686-2480-402e-987b-e63557fba5ab",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.79,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "dbf4ecb6-e2f8-477c-a445-5a9661890bd6",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.78,
+      "label": false,
+      "rule": "N3"
+    },
+    {
+      "article_id": "6979ac34-fa5b-413c-8031-e6365bdc24a6",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.87,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "c8ec23f1-cb1e-41bb-9b30-d82704720625",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.86,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "d0828bca-bd94-47b9-b7ac-09ba04a6e3da",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.92,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "ed89e53c-0676-4b34-8470-4079703552f3",
+      "source_slug": "cnn-turk",
+      "zone": "iktidar",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "35ed4b0d-45fc-4c5c-9b54-24ef426cb2f9",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.85,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "c4f94f34-779b-4028-b51d-f20a4e9e9cdf",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.84,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "0d9ca689-f0b6-4d6c-9019-46126e1bab66",
+      "source_slug": "haber-com",
+      "zone": "bagimsiz",
+      "jev_prob": 0.76,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "d5c38282-b017-4d2f-8d93-db51a929061f",
+      "source_slug": "yenicag",
+      "zone": "muhalefet",
+      "jev_prob": 0.8,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "eda40cf0-6c16-490f-9b1c-2ce8db027e1f",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.95,
+      "label": true,
+      "rule": "Y1"
+    },
+    {
+      "article_id": "85fe5f0b-616f-42ae-9f54-d73f01428744",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y5"
+    },
+    {
+      "article_id": "7e63111b-7197-46f0-b855-61062dfb1db2",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.82,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "3ae2a65a-3f6d-46df-9bd4-37b69bdf35f0",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.84,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "7cd6e6c8-fe5e-490a-84d6-6976f8c99d12",
+      "source_slug": "korkusuz",
+      "zone": "muhalefet",
+      "jev_prob": 0.74,
+      "label": false,
+      "rule": "N1"
+    },
+    {
+      "article_id": "2d0aba41-4f0f-4f05-a7f2-ebe21229a2c1",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.73,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "29ef97a1-7d1a-41f6-9d88-7fb4f8c835b0",
+      "source_slug": "gzt",
+      "zone": "iktidar",
+      "jev_prob": 0.85,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "8a776be3-766d-40f6-8190-6cc97cc54d2a",
+      "source_slug": "sozcu",
+      "zone": "muhalefet",
+      "jev_prob": 0.88,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "6c2b10eb-46e2-4dfa-bf47-c509a40d6744",
+      "source_slug": "aksam",
+      "zone": "iktidar",
+      "jev_prob": 0.78,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "4449e840-e8b8-43fd-8633-e15e3dfc460a",
+      "source_slug": "haber7",
+      "zone": "iktidar",
+      "jev_prob": 0.75,
+      "label": true,
+      "rule": "Y2"
+    },
+    {
+      "article_id": "0d6a470e-175f-4ad8-8037-3dd49891a606",
+      "source_slug": "cumhuriyet",
+      "zone": "muhalefet",
+      "jev_prob": 0.93,
+      "label": true,
+      "rule": "Y4"
+    },
+    {
+      "article_id": "d746bcb1-f520-46a7-b538-9225930fe8f8",
+      "source_slug": "gazete-pencere",
+      "zone": "bagimsiz",
+      "jev_prob": 0.8,
+      "label": false,
+      "rule": "N6"
+    },
+    {
+      "article_id": "82ad33c9-5b1b-4c8a-83a0-b583e2b1f8c8",
+      "source_slug": "birgun",
+      "zone": "muhalefet",
+      "jev_prob": 0.74,
+      "label": true,
+      "rule": "Y4"
+    }
+  ]
+}

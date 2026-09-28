@@ -393,6 +393,52 @@ Notes:
 **Response** `400`: invalid/missing `ticker`, invalid `since` (not ISO 8601
 or in the future), or `limit` outside 1–100.
 
+### `GET /api/v1/openapi.json`
+
+Static OpenAPI 3.1 description of the whole `/api/v1` surface, generated
+from `src/lib/api/v1-docs.ts`'s `V1_ENDPOINTS` by
+`src/lib/api/openapi.ts`'s `buildOpenApiDocument()`. No auth required, no
+request state read (no headers/cookies/`Date`), so it prerenders as static
+output. `tests/api/v1-openapi-contract.test.ts` fails the build's test
+suite if a v1 route handler is added/changed without a matching entry
+here, or if this document describes an operation with no real handler.
+
+**Response** `200`:
+```json
+{
+  "openapi": "3.1.0",
+  "info": { "title": "Tayf API", "version": "1", "license": { "name": "CC BY-SA 4.0 — Tayf'a göre" } },
+  "servers": [{ "url": "https://tayfhaber.com" }],
+  "paths": { "/api/v1/clusters": { "get": { "...": "..." } } }
+}
+```
+**Headers**: `Content-Type: application/json; charset=utf-8`,
+`Cache-Control: public, max-age=3600, s-maxage=86400`,
+`Access-Control-Allow-Origin: *`.
+
+Human-readable developer docs (quick-start code samples, the plan table,
+error reference) live at [`/gelistirici`](/gelistirici) — both are driven
+off the same `V1_ENDPOINTS`/`API_PLANS` module so they cannot silently
+drift from each other or from the route handlers.
+
+#### Talep ölçümü (b2b-1 eşiği)
+
+Post-launch go/no-go: the b2b-1 kill threshold is real demand, defined as
+**>= 10 keys issued in the trailing 30 days AND >= 3 of those keys active
+on 7+ distinct days within that window**. Below that, kill the surface
+rather than keep maintaining it.
+
+```sql
+select count(*) from api_keys where created_at > now() - interval '30 days';
+
+select count(*) from (
+  select key_id from api_key_usage_daily
+  where day > current_date - 30
+  group by key_id
+  having count(*) >= 7
+) t;
+```
+
 ---
 
 ### `POST /api/admin/api-keys`

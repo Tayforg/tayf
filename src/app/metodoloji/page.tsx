@@ -169,7 +169,11 @@ export default async function MethodologyPage() {
           <Link href="/sources" className={quietLink}>
             Kaynaklar
           </Link>{" "}
-          sayfasındadır.
+          sayfasındadır. Verilere programla erişmek için{" "}
+          <Link href="/gelistirici" className={quietLink}>
+            Geliştirici API
+          </Link>{" "}
+          sayfasına bakın.
         </p>
       </div>
 
