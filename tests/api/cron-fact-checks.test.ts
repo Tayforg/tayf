@@ -91,6 +91,17 @@ vi.mock("@supabase/supabase-js", () => ({
 const ORIGINAL_ENV = { ...process.env };
 let fetchMock: ReturnType<typeof vi.fn>;
 
+// Exact host match (not a substring check) so the mock routes only real
+// teyit.org feed URLs.
+function isTeyitUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === "teyit.org" || host === "www.teyit.org";
+  } catch {
+    return false;
+  }
+}
+
 function xmlResponse(body: string, opts: { status?: number; url?: string } = {}) {
   const res = new Response(body, {
     status: opts.status ?? 200,
@@ -120,7 +131,7 @@ beforeEach(() => {
 
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    if (url.includes("teyit.org")) {
+    if (isTeyitUrl(url)) {
       return xmlResponse(EMPTY_TEYIT_XML, { url });
     }
     return xmlResponse(EMPTY_TEYIT_XML, { url });
@@ -162,7 +173,7 @@ describe("GET /api/cron/fact-checks", () => {
   it("upserts exactly 1 valid row from a 3-item feed (js/off-host dropped), onConflict url", async () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("teyit.org")) return xmlResponse(THREE_ITEM_TEYIT_XML, { url });
+      if (isTeyitUrl(url)) return xmlResponse(THREE_ITEM_TEYIT_XML, { url });
       return xmlResponse(EMPTY_TEYIT_XML, { url });
     });
 
@@ -190,7 +201,7 @@ describe("GET /api/cron/fact-checks", () => {
   it("one feed returning 500 still yields a 200 with that feed's status recorded", async () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("teyit.org")) {
+      if (isTeyitUrl(url)) {
         return xmlResponse("server error", { status: 500, url });
       }
       return xmlResponse(EMPTY_TEYIT_XML, { url });
@@ -210,7 +221,7 @@ describe("GET /api/cron/fact-checks", () => {
   it("a constructed Response with empty res.url falls back to the requested URL for the host check", async () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("teyit.org")) {
+      if (isTeyitUrl(url)) {
         // Empty res.url (as a hand-constructed Response would have) --
         // the route must fall back to the request url for the host check
         // rather than treating an empty host as a mismatch.
