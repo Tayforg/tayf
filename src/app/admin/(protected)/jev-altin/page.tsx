@@ -11,16 +11,22 @@ import {
   getJevGoldNextPrioritized,
   getJevGoldScorecard,
   getJevGoldProvisionalScorecard,
+  getJevGoldTopic7Scorecard,
   parseLabelerCookie,
   priorityBadge,
   buildProvisionalScorecardLines,
+  preLabelFields,
   type JevGoldScorecard,
   type JevGoldNext,
   type JevGoldNextPrioritized,
+  type JevGoldArticle,
+  type JevGoldPriority,
 } from "@/lib/admin/jev-gold";
+import { getJevTopic7Yardsticks } from "@/lib/admin/jev-topic7";
 import { JevGoldLabeler } from "@/components/admin/jev-gold-labeler";
 import { JevGoldLabelerSwitch } from "@/components/admin/jev-gold-labeler-switch";
 import { JevGoldSeedButton } from "@/components/admin/jev-gold-seed-button";
+import { Topic7ScorecardSection, Topic7YardstickSection } from "@/components/admin/jev-topic7-section";
 
 // Pack JEV şimdi (migration 063) — the /admin/jev-altin double-labeling
 // surface. No middleware matcher edit needed: the existing matcher already
@@ -33,6 +39,11 @@ import { JevGoldSeedButton } from "@/components/admin/jev-gold-seed-button";
 // cached. All reads, the cookie parse, and the labeling components' props
 // are unchanged from before this readability pass — only the presentation
 // around them changed.
+//
+// 090 (T7a): the pre-label view no longer shows source / feed category
+// (ArticleCard reads them only to build the post-save `reveal` line, via a
+// destructure rather than a `.article.source_slug` property chain, so a
+// static grep can tell the two uses apart).
 
 export const metadata: Metadata = {
   title: "Jev altın küme",
@@ -99,16 +110,61 @@ function buildScorecardLines(card: JevGoldScorecard): ScorecardLine[] {
   ];
 }
 
+function ArticleCard({
+  article,
+  labeler,
+  badge,
+  priority,
+}: {
+  article: JevGoldArticle;
+  labeler: 1 | 2;
+  badge: { label: string; tone: "warn" | "neutral" | "muted" } | null;
+  priority: JevGoldPriority | null;
+}) {
+  // Destructured (not a `.article.source_slug` / `.article.category` chain)
+  // on purpose: these values feed only the post-save reveal line, never the
+  // pre-label view below.
+  const { source_slug: sourceSlug, category } = article;
+  const reveal = { sourceSlug, category };
+
+  return (
+    <div className="space-y-3 rounded-xl border border-border p-4">
+      <div className="space-y-1">
+        {badge && (
+          <div className="space-y-1">
+            <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
+            {priority === "disagreement" && (
+              <p className="text-xs text-muted-foreground">Geçici etiket ile Jev bu haberde farklı cevap verdi.</p>
+            )}
+          </div>
+        )}
+        <p className="text-lg font-medium text-foreground">{article.title}</p>
+        {article.description && <p className="text-sm text-muted-foreground">{article.description}</p>}
+        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+          {preLabelFields(article).map((field) => (
+            <span key={field.label}>
+              <FieldLabel>{field.label}</FieldLabel> {field.value}
+            </span>
+          ))}
+        </div>
+      </div>
+      <JevGoldLabeler articleId={article.article_id} labeler={labeler} reveal={reveal} />
+    </div>
+  );
+}
+
 export default async function JevAltinPage() {
   await requireAdminSession();
 
   const store = await cookies();
   const labeler = parseLabelerCookie(store.get(JEV_LABELER_COOKIE)?.value);
 
-  const [prioritized, scorecard, provisionalScorecard] = await Promise.all([
+  const [prioritized, scorecard, provisionalScorecard, topic7Scorecard, topic7Yardsticks] = await Promise.all([
     getJevGoldNextPrioritized(labeler),
     getJevGoldScorecard(),
     getJevGoldProvisionalScorecard(),
+    getJevGoldTopic7Scorecard(),
+    getJevTopic7Yardsticks(7),
   ]);
 
   // 076 may not be applied yet -- labeling must keep working either way, so
@@ -179,36 +235,7 @@ export default async function JevAltinPage() {
                   <EmptyState>Bu etiketleyici için sıra bitti.</EmptyState>
                 )
               ) : (
-                <div className="space-y-3 rounded-xl border border-border p-4">
-                  <div className="space-y-1">
-                    {badge && (
-                      <div className="space-y-1">
-                        <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
-                        {priority === "disagreement" && (
-                          <p className="text-xs text-muted-foreground">
-                            Geçici etiket ile Jev bu haberde farklı cevap verdi.
-                          </p>
-                        )}
-                      </div>
-                    )}
-                    <p className="text-lg font-medium text-foreground">{next.article.title}</p>
-                    {next.article.description && (
-                      <p className="text-sm text-muted-foreground">{next.article.description}</p>
-                    )}
-                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                      <span>
-                        <FieldLabel>Kaynak</FieldLabel> {next.article.source_slug}
-                      </span>
-                      <span>
-                        <FieldLabel>Akış kategorisi</FieldLabel> {next.article.category}
-                      </span>
-                      <span>
-                        <FieldLabel>Sıra</FieldLabel> {next.article.position}
-                      </span>
-                    </div>
-                  </div>
-                  <JevGoldLabeler articleId={next.article.article_id} labeler={labeler} />
-                </div>
+                <ArticleCard article={next.article} labeler={labeler} badge={badge} priority={priority} />
               )}
             </>
           )}
@@ -257,6 +284,9 @@ export default async function JevAltinPage() {
           </dl>
         )}
       </AdminSection>
+
+      <Topic7ScorecardSection scorecard={topic7Scorecard} />
+      <Topic7YardstickSection rows={topic7Yardsticks} />
     </div>
   );
 }

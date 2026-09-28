@@ -21,6 +21,9 @@ import {
   JEV_QUESTION_REGISTRY,
   JEV_QUESTION_SET_VERSION,
   JEV_REGRESSION_ITEM_LIMIT,
+  JEV_REGRESSION_CONCURRENCY,
+  JEV_KAP_CLASS_SAMPLE_MOD,
+  JEV_LEDGER_STAGE_KEYS,
   JEV_TASKS,
   JEV_TICKER_LIMIT,
   JEV_TITLE_CLAMP,
@@ -46,8 +49,10 @@ import {
   clamp,
   computeRegressionDeltas,
   computeRegressionGold,
+  fnv1a64Hex,
   goldTopicToJevChoice,
   isRateLimitStatus,
+  kapClassSampled,
   offendingQuestionIds,
   pairKey,
   parseJevResponse,
@@ -55,6 +60,8 @@ import {
   politicsBaseline,
   predictionRow,
   questionRegistryHash,
+  stageLedger,
+  taskQuestionFingerprint,
   rankBlindspotCandidates,
   regressionAnswerRows,
   regressionArticleRow,
@@ -88,9 +95,11 @@ import {
   type JevRequest,
   type JevResponse,
   type JevAnswer,
+  type JevStageLedger,
   type JevTickerRow,
   type JevTitleRow,
   type JevUnlinkCandidateRow,
+  type JevProvisionalLabelRow,
 } from "../../supabase/functions/_shared/jev.ts";
 import { sha256Hex } from "../../supabase/functions/_shared/archive.ts";
 
@@ -330,7 +339,7 @@ interface Recorder {
   startRunCalls: number;
   finishRunCalls: Array<{ id: number; patch: Parameters<JevPorts["finishRun"]>[1] }>;
   insertPredictionsCalls: JevPredictionRow[][];
-  recordTokensCalls: Array<{ runId: number; calls: number; inputTokens: number }>;
+  recordTokensCalls: Array<{ runId: number; calls: number; inputTokens: number; stageTokens: JevStageLedger }>;
   fetchSeenSubjectsCalls: Array<{ task: string; subjectIds: string[] }>;
   fetchPendingArticlesCalls: Array<{ sinceIso: string; limit: number }>;
   fetchRecentClustersCalls: Array<{ sinceIso: string; limit: number }>;
@@ -416,9 +425,9 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
       rec.fetchSeenSubjectsCalls.push({ task, subjectIds: [...subjectIds] });
       return new Set<string>();
     },
-    recordTokens: async (runId, calls, inputTokens) => {
+    recordTokens: async (runId, calls, inputTokens, stageTokens) => {
       rec.order.push("recordTokens");
-      rec.recordTokensCalls.push({ runId, calls, inputTokens });
+      rec.recordTokensCalls.push({ runId, calls, inputTokens, stageTokens });
     },
     fetchPendingArticles: async (sinceIso, limit) => {
       rec.order.push("fetchPendingArticles");
@@ -875,6 +884,109 @@ describe("samplePairs", () => {
 
 // --- 11. predictionRow -----------------------------------------------------------------
 
+// --- 088: taskQuestionFingerprint / kapClassSampled / stageLedger ----------
+
+describe("fnv1a64Hex / taskQuestionFingerprint (088)", () => {
+  it("fnv1a64Hex is deterministic and changes when one character changes", () => {
+    const a = fnv1a64Hex("hello world");
+    const b = fnv1a64Hex("hello world");
+    const c = fnv1a64Hex("hello worle");
+    expect(a).toBe(b);
+    expect(a).not.toBe(c);
+    expect(a).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("taskQuestionFingerprint returns fnv1a64:<16 hex>, is deterministic and memoised", () => {
+    const first = taskQuestionFingerprint("politics");
+    const second = taskQuestionFingerprint("politics");
+    expect(first).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+    expect(first).toBe(second);
+  });
+
+  it("returns null for an unknown task", () => {
+    expect(taskQuestionFingerprint("not_a_real_task")).toBeNull();
+  });
+
+  it("stamps a fingerprint for every JEV_TASKS entry", () => {
+    for (const task of JEV_TASKS) {
+      expect(taskQuestionFingerprint(task)).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+    }
+  });
+
+  it("changes when the registry entry's text changes by one character", () => {
+    const original = JEV_QUESTION_REGISTRY.topic7.instructions;
+    const withOneCharChanged = `${original}!`;
+    const a = fnv1a64Hex(canonicalJson({ ...JEV_QUESTION_REGISTRY.topic7, instructions: original }));
+    const b = fnv1a64Hex(canonicalJson({ ...JEV_QUESTION_REGISTRY.topic7, instructions: withOneCharChanged }));
+    expect(a).not.toBe(b);
+  });
+
+  // JEV-A20 registry-hash pin values, next to the fingerprint pins (088).
+  it("pins the fingerprints of politics, topic7, kap_class and kap_materiality", () => {
+    expect(taskQuestionFingerprint("politics")).toBe("fnv1a64:b28f24b28b0aa1e2");
+    expect(taskQuestionFingerprint("topic7")).toBe("fnv1a64:a5be77748d03273a");
+    expect(taskQuestionFingerprint("kap_class")).toBe("fnv1a64:4b45cd2a1c4f9cf3");
+    expect(taskQuestionFingerprint("kap_materiality")).toBe("fnv1a64:18fd8c4cc9909d75");
+  });
+});
+
+describe("kapClassSampled (088)", () => {
+  it("samples disclosure_index mod 5 === 0 (ends in 0 or 5)", () => {
+    expect(kapClassSampled("10")).toBe(true);
+    expect(kapClassSampled("15")).toBe(true);
+    expect(kapClassSampled("11")).toBe(false);
+    expect(kapClassSampled("12345678901234567890")).toBe(true);
+  });
+
+  it("fails closed on non-numeric or empty input", () => {
+    expect(kapClassSampled("")).toBe(false);
+    expect(kapClassSampled("abc")).toBe(false);
+    expect(kapClassSampled("1.5")).toBe(false);
+  });
+});
+
+describe("KAP cost with measured constants (088)", () => {
+  // Measured 2026-09-25 in place of the 4-chars/token estimate.
+  const KAP_FULL_CALL_TOKENS = 3115;
+  const TOKENS_PER_CHAR = 0.389;
+
+  it("sampling brings the average KAP tokens/call to <= 1,100", () => {
+    const entry = JEV_QUESTION_REGISTRY.kap_class;
+    const kapClassChars = entry.instructions.length + JSON.stringify(entry.criteria).length;
+    const matOnly = KAP_FULL_CALL_TOKENS - kapClassChars * TOKENS_PER_CHAR;
+    const sampled =
+      (1 - 1 / JEV_KAP_CLASS_SAMPLE_MOD) * matOnly + (1 / JEV_KAP_CLASS_SAMPLE_MOD) * KAP_FULL_CALL_TOKENS;
+    expect(sampled).toBeLessThanOrEqual(1100);
+  });
+});
+
+describe("stageLedger (088)", () => {
+  it("uses the bare stage name in shadow mode", () => {
+    expect(stageLedger("shadow", { articles: { calls: 2, tokens: 200 }, kap: { calls: 0, tokens: 0 } })).toEqual({
+      articles: { calls: 2, tokens: 200 },
+    });
+  });
+
+  it("prefixes with mode: in audit/regression mode", () => {
+    expect(stageLedger("audit", { audit_pairs: { calls: 1, tokens: 10 } })).toEqual({
+      "audit:audit_pairs": { calls: 1, tokens: 10 },
+    });
+    expect(stageLedger("regression", { regression_articles: { calls: 1, tokens: 10 } })).toEqual({
+      "regression:regression_articles": { calls: 1, tokens: 10 },
+    });
+  });
+
+  it("omits stages with zero calls", () => {
+    expect(stageLedger("shadow", { articles: { calls: 0, tokens: 0 } })).toEqual({});
+  });
+
+  it("every JEV_LEDGER_STAGE_KEYS entry is a plausible stage key shape", () => {
+    for (const key of JEV_LEDGER_STAGE_KEYS) {
+      expect(typeof key).toBe("string");
+    }
+  });
+});
+
 describe("predictionRow", () => {
   const baseResponse: JevResponse = { answers: {}, usage: { inputTokens: 100, outputTokens: 20 } };
 
@@ -1088,10 +1200,27 @@ describe("buildPairCall", () => {
 });
 
 describe("buildKapCall / buildTitleCall", () => {
-  it("buildKapCall asks kap_class (choice) and kap_materiality (score)", () => {
-    const req = buildKapCall(kapRow());
+  it("buildKapCall asks kap_class (choice) and kap_materiality (score) when withClass is true", () => {
+    const req = buildKapCall(kapRow(), { withClass: true });
     expect(req.questions.kap_class?.type).toBe("choice");
     expect(req.questions.kap_materiality?.type).toBe("score");
+  });
+
+  it("buildKapCall asks only kap_materiality when the disclosure is not sampled for kap_class (088)", () => {
+    // kapRow()'s default disclosure_index "KAP-1" is non-numeric, so
+    // kapClassSampled defaults to false -- fails closed, never asked.
+    const req = buildKapCall(kapRow());
+    expect(req.questions.kap_class).toBeUndefined();
+    expect(req.questions.kap_materiality?.type).toBe("score");
+    expect(Object.keys(req.questions)).toEqual(["kap_materiality"]);
+  });
+
+  it("buildKapCall samples kap_class for disclosure_index mod 5 === 0 by default (088)", () => {
+    const sampled = buildKapCall(kapRow({ disclosure_index: "10" }));
+    expect(Object.keys(sampled.questions)).toEqual(["kap_class", "kap_materiality"]);
+
+    const unsampled = buildKapCall(kapRow({ disclosure_index: "11" }));
+    expect(Object.keys(unsampled.questions)).toEqual(["kap_materiality"]);
   });
 
   it("buildTitleCall asks title_meaning (boolean) and title_edit_kind (choice)", () => {
@@ -2852,6 +2981,73 @@ describe("regression mode (migration 066)", () => {
     expect(gold.topic).toEqual({ n: 1, correct: 1 });
   });
 
+  it("computeRegressionGold's topic7 block is an exact 7-way match, dunya scored (088)", () => {
+    const items: JevRegressionItem[] = [
+      regressionArticleItem({ id: 1, subject_id: "g1", in_gold: true }),
+      regressionArticleItem({ id: 2, subject_id: "g2", in_gold: true }),
+    ];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 1, item_id: 1, task: "topic7", jev_prob: null, jev_choice: "dunya" },
+      { run_id: 1, item_id: 2, task: "topic7", jev_prob: null, jev_choice: "spor" },
+    ];
+    const labels: JevGoldLabelRow[] = [
+      { article_id: "g1", is_politics: false, topic: "dunya" }, // exact match, dunya scored
+      { article_id: "g2", is_politics: false, topic: "ekonomi" }, // mismatch
+    ];
+
+    const gold = computeRegressionGold(items, cur, labels);
+    expect(gold.topic7).toEqual({ n: 2, correct: 1 });
+  });
+
+  it("computeRegressionGold's politics/topic blocks stay byte-identical when a 4th arg is passed", () => {
+    const items: JevRegressionItem[] = [regressionArticleItem({ id: 1, subject_id: "g1", in_gold: true })];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 1, item_id: 1, task: "politics", jev_prob: 0.9, jev_choice: null },
+      { run_id: 1, item_id: 1, task: "topic", jev_prob: null, jev_choice: "politics" },
+    ];
+    const labels: JevGoldLabelRow[] = [{ article_id: "g1", is_politics: true, topic: "politika" }];
+
+    const withoutProvisional = computeRegressionGold(items, cur, labels);
+    const withProvisional = computeRegressionGold(items, cur, labels, []);
+    expect(withProvisional.politics).toEqual(withoutProvisional.politics);
+    expect(withProvisional.topic).toEqual(withoutProvisional.topic);
+  });
+
+  it("computeRegressionGold's provisional block is absent when the 4th arg is undefined, and n=0 when []", () => {
+    const items: JevRegressionItem[] = [regressionArticleItem({ id: 1, subject_id: "g1", in_gold: true })];
+    const cur: JevRegressionAnswerRow[] = [];
+    const labels: JevGoldLabelRow[] = [];
+
+    expect(computeRegressionGold(items, cur, labels).provisional).toBeUndefined();
+    expect(computeRegressionGold(items, cur, labels, []).provisional).toEqual({
+      dev: { politics: { n: 0, correct_050: 0, correct_070: 0 }, topic7: { n: 0, correct: 0 } },
+      heldout: { politics: { n: 0, correct_050: 0, correct_070: 0 }, topic7: { n: 0, correct: 0 } },
+    });
+  });
+
+  it("computeRegressionGold splits provisional labels dev (opus_seed) vs heldout (every other stratum)", () => {
+    const items: JevRegressionItem[] = [
+      regressionArticleItem({ id: 1, subject_id: "dev-1", in_gold: false }),
+      regressionArticleItem({ id: 2, subject_id: "held-1", in_gold: false }),
+    ];
+    const cur: JevRegressionAnswerRow[] = [
+      { run_id: 1, item_id: 1, task: "politics", jev_prob: 0.9, jev_choice: null },
+      { run_id: 1, item_id: 1, task: "topic7", jev_prob: null, jev_choice: "politika" },
+      { run_id: 1, item_id: 2, task: "politics", jev_prob: 0.1, jev_choice: null },
+      { run_id: 1, item_id: 2, task: "topic7", jev_prob: null, jev_choice: "spor" },
+    ];
+    const provisional: JevProvisionalLabelRow[] = [
+      { article_id: "dev-1", is_politics: true, topic: "politika", split: "dev" },
+      { article_id: "held-1", is_politics: true, topic: "spor", split: "heldout" }, // politics mismatch, topic7 match
+    ];
+
+    const gold = computeRegressionGold(items, cur, [], provisional);
+    expect(gold.provisional?.dev.politics).toEqual({ n: 1, correct_050: 1, correct_070: 1 });
+    expect(gold.provisional?.dev.topic7).toEqual({ n: 1, correct: 1 });
+    expect(gold.provisional?.heldout.politics).toEqual({ n: 1, correct_050: 0, correct_070: 0 });
+    expect(gold.provisional?.heldout.topic7).toEqual({ n: 1, correct: 1 });
+  });
+
   it("computeRegressionGold runs on the first run too, alongside first_run: true", async () => {
     const goldItem = regressionArticleItem({ id: 5, subject_id: "gold-1", in_gold: true, state: { title: "T", description: "D" } });
     const rec = makePorts({
@@ -2878,6 +3074,191 @@ describe("regression mode (migration 066)", () => {
     expect(result.regression?.deltas?.first_run).toBe(true);
     expect(result.regression?.deltas?.gold?.politics).toEqual({ n: 1, correct_050: 1, correct_070: 1 });
     expect(result.regression?.deltas?.gold?.topic).toEqual({ n: 1, correct: 1 });
+  });
+
+  it("a closeRegressionRun provisional fetch failure omits provisional but keeps gold (088)", async () => {
+    const goldItem = regressionArticleItem({ id: 5, subject_id: "gold-1", in_gold: true });
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [goldItem] : []),
+      fetchGoldLabels: async () => [{ article_id: "gold-1", is_politics: true, topic: "politika" }],
+      fetchProvisionalGoldLabels: async () => {
+        throw new Error("boom");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression" });
+
+    expect(result.regression?.deltas?.gold?.politics).toEqual({ n: 1, correct_050: 1, correct_070: 1 });
+    expect(result.regression?.deltas?.gold?.provisional).toBeUndefined();
+  });
+
+  it("fetchRegressionItems is called with the raised JEV_REGRESSION_ITEM_LIMIT (700)", async () => {
+    const rec = makePorts({
+      fetchRegressionItems: async () => [],
+    });
+    await runJevShadow(rec.ports, { mode: "regression" });
+    expect(JEV_REGRESSION_ITEM_LIMIT).toBe(700);
+    expect(rec.fetchRegressionItemsCalls.every((c) => c.limit === 700)).toBe(true);
+  });
+
+  it("regression stages run above JEV_CONCURRENCY, up to JEV_REGRESSION_CONCURRENCY, while shadow stays at JEV_CONCURRENCY (088)", async () => {
+    let inFlight = 0;
+    let maxInFlightRegression = 0;
+    const resolvers: Array<() => void> = [];
+    const items = Array.from({ length: 40 }, (_, i) => regressionArticleItem({ id: i + 1, subject_id: `ri-${i}` }));
+
+    const rec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? items : []),
+      evaluate: async (req) => {
+        inFlight += 1;
+        maxInFlightRegression = Math.max(maxInFlightRegression, inFlight);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+        inFlight -= 1;
+        return { response: validResponseFor(req), latencyMs: 1 };
+      },
+    });
+
+    const runPromise = runJevShadow(rec.ports, { mode: "regression" });
+    let done = false;
+    void runPromise.then(() => {
+      done = true;
+    });
+    // Drain in waves: each wave releases whatever is pending, then yields
+    // so newly-dispatched workers can queue their own resolver.
+    while (!done) {
+      while (resolvers.length > 0) resolvers.shift()!();
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    await runPromise;
+
+    expect(maxInFlightRegression).toBeGreaterThan(JEV_CONCURRENCY);
+    expect(maxInFlightRegression).toBeLessThanOrEqual(JEV_REGRESSION_CONCURRENCY);
+  });
+
+  it("the shadow articles stage never exceeds JEV_CONCURRENCY in flight", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const resolvers: Array<() => void> = [];
+    const items = Array.from({ length: 20 }, (_, i) => articleRow({ id: `sa-${i}` }));
+
+    const rec = makePorts({
+      fetchPendingArticles: async () => items,
+      evaluate: async (req) => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+        inFlight -= 1;
+        return { response: validResponseFor(req), latencyMs: 1 };
+      },
+    });
+
+    const runPromise = runJevShadow(rec.ports, { mode: "shadow" });
+    let done = false;
+    void runPromise.then(() => {
+      done = true;
+    });
+    while (!done) {
+      while (resolvers.length > 0) resolvers.shift()!();
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    await runPromise;
+
+    expect(maxInFlight).toBeLessThanOrEqual(JEV_CONCURRENCY);
+  });
+});
+
+describe("stage_tokens ledger invariant (088)", () => {
+  it("after a shadow run, the sum of finishRun.patch.stage_tokens tokens equals result.input_tokens", async () => {
+    const rec = makePorts({
+      fetchPendingArticles: async () => [articleRow()],
+      fetchPendingKap: async () => [kapRow({ disclosure_index: "10" })],
+    });
+
+    const result = await runJevShadow(rec.ports, { mode: "shadow" });
+    const patch = rec.finishRunCalls.at(-1)!.patch;
+    const sum = Object.values(patch.stage_tokens).reduce((acc, s) => acc + s.tokens, 0);
+    expect(sum).toBe(result.input_tokens);
+
+    for (const key of Object.keys(patch.stage_tokens)) {
+      expect(JEV_LEDGER_STAGE_KEYS as readonly string[]).toContain(key);
+    }
+  });
+
+  it("every recordTokens checkpoint's stageTokens satisfies the invariant against its own inputTokens", async () => {
+    const rec = makePorts({
+      fetchPendingArticles: async () => [articleRow({ id: "a1" }), articleRow({ id: "a2" })],
+    });
+
+    await runJevShadow(rec.ports, { mode: "shadow" });
+    for (const call of rec.recordTokensCalls) {
+      const sum = Object.values(call.stageTokens).reduce((acc, s) => acc + s.tokens, 0);
+      expect(sum).toBe(call.inputTokens);
+    }
+  });
+
+  it("audit keys are audit:audit_pairs / audit:pairs; regression keys are regression:regression_articles / regression:regression_pairs", async () => {
+    const auditRec = makePorts({
+      fetchAuditPairs: async () => [pairCandidateRow({ id: "aa" }), pairCandidateRow({ id: "ab", cluster_id: "other" })],
+      fetchPairCandidates: async () => [pairCandidateRow({ id: "pa" }), pairCandidateRow({ id: "pb", cluster_id: "other" })],
+    });
+    await runJevShadow(auditRec.ports, { mode: "audit" });
+    const auditPatch = auditRec.finishRunCalls.at(-1)!.patch;
+    for (const key of Object.keys(auditPatch.stage_tokens)) {
+      expect(["audit:audit_pairs", "audit:pairs"]).toContain(key);
+    }
+
+    const regRec = makePorts({
+      fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : [regressionPairItem()]),
+    });
+    await runJevShadow(regRec.ports, { mode: "regression" });
+    const regPatch = regRec.finishRunCalls.at(-1)!.patch;
+    for (const key of Object.keys(regPatch.stage_tokens)) {
+      expect(["regression:regression_articles", "regression:regression_pairs"]).toContain(key);
+    }
+  });
+
+  it("the budget-exceeded early close sends stage_tokens: {}", async () => {
+    const rec = makePorts({
+      monthTokens: async (cap) => ({ input_tokens: cap, cap, exceeded: true }),
+    });
+    await runJevShadow(rec.ports, { mode: "shadow" });
+    const patch = rec.finishRunCalls.at(-1)!.patch;
+    expect(patch.stage_tokens).toEqual({});
+  });
+});
+
+describe("pack (088)", () => {
+  it("article-stage rows carry pack = the sorted 7 article keys", async () => {
+    const rec = makePorts({ fetchPendingArticles: async () => [articleRow()] });
+    await runJevShadow(rec.ports, { mode: "shadow" });
+    const rows = rec.insertPredictionsCalls.flat();
+    const articleTaskRow = rows.find((r) => r.task === "politics");
+    expect(articleTaskRow?.jev_answer.pack).toEqual(
+      ["clickbait", "framing", "opinion", "politics", "sensational", "topic", "topic7"].sort(),
+    );
+  });
+
+  it("KAP rows carry pack of [kap_class, kap_materiality] when sampled, [kap_materiality] otherwise", async () => {
+    const rec = makePorts({
+      fetchPendingKap: async () => [kapRow({ disclosure_index: "10" }), kapRow({ disclosure_index: "11", disclosure_class: null })],
+    });
+    await runJevShadow(rec.ports, { mode: "shadow" });
+    const rows = rec.insertPredictionsCalls.flat();
+    const matRows = rows.filter((r) => r.task === "kap_materiality");
+    const packs = matRows.map((r) => r.jev_answer.pack);
+    expect(packs).toContainEqual(["kap_class", "kap_materiality"]);
+    expect(packs).toContainEqual(["kap_materiality"]);
+  });
+
+  it("a sampled disclosure yields 2 rows; an unsampled one yields only kap_materiality with no kap_class key sent", async () => {
+    const rec = makePorts({
+      fetchPendingKap: async () => [kapRow({ disclosure_index: "11" })],
+    });
+    await runJevShadow(rec.ports, { mode: "shadow" });
+    expect(rec.evaluateCalls[0]?.questions.kap_class).toBeUndefined();
+    const rows = rec.insertPredictionsCalls.flat().filter((r) => r.subject_type === "kap");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.task).toBe("kap_materiality");
   });
 });
 
@@ -3110,7 +3491,24 @@ describe("blindspot_recall: buildBlindspotDayRow", () => {
       input_tokens: 0,
       run_id: 7,
     });
-    expect(row.jev_answer).toEqual({ candidates: 3, question_set: JEV_QUESTION_SET_VERSION, day: "2026-09-19" });
+    expect(row.jev_answer).toEqual({
+      candidates: 3,
+      question_set: JEV_QUESTION_SET_VERSION,
+      question_hash: taskQuestionFingerprint("blindspot_recall"),
+      day: "2026-09-19",
+    });
+  });
+
+  it("marker rows carry question_hash (088; counts toward the >= 99.9% acceptance)", () => {
+    const row = buildBlindspotDayRow({
+      runId: 7,
+      clusterId: "clx",
+      day: "2026-09-19",
+      candidates: 0,
+      stateHash: "hash-1",
+      preview: "preview-1",
+    });
+    expect(row.jev_answer.question_hash).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
   });
 });
 

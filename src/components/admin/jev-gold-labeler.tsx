@@ -4,7 +4,13 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
-import { JEV_GOLD_NOTE_MAX_LENGTH, JEV_GOLD_TOPICS, JEV_GOLD_TOPIC_LABELS_TR } from "@/lib/admin/jev-gold";
+import {
+  JEV_GOLD_NOTE_MAX_LENGTH,
+  JEV_GOLD_TOPICS,
+  JEV_GOLD_TOPIC_LABELS_TR,
+  JEV_TOPIC7_GUIDE_TR,
+  revealLine,
+} from "@/lib/admin/jev-gold";
 
 /**
  * The /admin/jev-altin labeling form for one article. Modelled on
@@ -19,13 +25,22 @@ import { JEV_GOLD_NOTE_MAX_LENGTH, JEV_GOLD_TOPICS, JEV_GOLD_TOPIC_LABELS_TR } f
  * not here (063, JEV-N2) — it must render even when this component isn't
  * mounted (no article left in the queue, or the gold set is still empty).
  */
-export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labeler: 1 | 2 }) {
+export function JevGoldLabeler({
+  articleId,
+  labeler,
+  reveal = { sourceSlug: null, category: null },
+}: {
+  articleId: string;
+  labeler: 1 | 2;
+  reveal?: { sourceSlug: string | null; category: string | null };
+}) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [isPolitics, setIsPolitics] = useState<boolean | null>(null);
   const [topic, setTopic] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [lastSaved, setLastSaved] = useState<{ sourceSlug: string | null; category: string | null } | null>(null);
 
   function handleSave() {
     if (isPolitics === null || topic === null) return;
@@ -50,6 +65,7 @@ export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labe
         setIsPolitics(null);
         setTopic(null);
         setNote("");
+        setLastSaved(reveal);
         router.refresh();
       } catch {
         setError("Kaydedilemedi.");
@@ -61,6 +77,10 @@ export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labe
 
   return (
     <div className="space-y-3">
+      {lastSaved && (
+        <p className="text-xs text-muted-foreground">{revealLine(lastSaved)}</p>
+      )}
+
       <div className="space-y-1.5 text-sm">
         <p className="text-muted-foreground">Siyaset mi? (zorunlu)</p>
         <div className="flex gap-1.5">
@@ -83,6 +103,26 @@ export function JevGoldLabeler({ articleId, labeler }: { articleId: string; labe
             Hayır
           </Button>
         </div>
+      </div>
+
+      <div className="space-y-1.5 rounded-lg border border-border/60 p-3 text-sm">
+        <p className="font-medium text-foreground">Konu kuralları (sırayla uygula, ilk uyan kuralda dur)</p>
+        <p className="text-xs text-muted-foreground">{JEV_TOPIC7_GUIDE_TR.intro}</p>
+        {JEV_TOPIC7_GUIDE_TR.rules.map((rule) => (
+          <p key={rule} className="text-xs text-muted-foreground">
+            {rule}
+          </p>
+        ))}
+        <details>
+          <summary className="cursor-pointer text-xs text-muted-foreground">Konu tanımları</summary>
+          <div className="space-y-1 pt-1">
+            {JEV_TOPIC7_GUIDE_TR.classes.map((c) => (
+              <p key={c.topic} className="text-xs text-muted-foreground">
+                {c.text}
+              </p>
+            ))}
+          </div>
+        </details>
       </div>
 
       <div className="space-y-1.5 text-sm">

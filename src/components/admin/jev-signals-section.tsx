@@ -10,6 +10,7 @@ import {
   Tr,
 } from "@/components/admin/admin-ui";
 import { fmtDateTime, fmtInt, fmtRelative } from "@/lib/admin/format";
+import { JEV_STAGE_LABELS_TR } from "@/lib/admin/jev-shadow-status";
 
 function resolvedRecentLine(status: JevSignalsStatus) {
   const n = status.resolvedRecent;
@@ -35,6 +36,7 @@ import { JevAlertActions } from "@/components/admin/jev-alert-actions";
 const JEV_ALERT_KIND_LABELS_TR: Record<string, string> = {
   source_drift: "Kaynak sapması",
   kap_class_canary: "KAP sınıfı kanaryası",
+  stage_budget: "Aşama bütçesi",
 };
 
 function kindLabel(kind: string): string {
@@ -49,6 +51,15 @@ function fmtScore(value: number | null): string {
   return value === null ? "—" : value.toFixed(2);
 }
 
+/** tr-TR decimal comma, e.g. "1,17×". Reads payload.ratio as a number or a
+ * numeric string (PostgREST jsonb numerics may arrive either way) -- plain
+ * text only, never rendered as JSON. */
+function fmtAlertRatio(value: unknown): string | null {
+  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(n)) return null;
+  return `${n.toFixed(2).replace(".", ",")}×`;
+}
+
 // Plain-text summary only -- payload is never rendered as HTML/markup and
 // never JSON.stringify'd into the page.
 function alertSummary(row: JevAlertRow): string {
@@ -57,6 +68,13 @@ function alertSummary(row: JevAlertRow): string {
     const slug = row.payload.source_slug;
     const value = (typeof name === "string" && name) || (typeof slug === "string" && slug) || row.subject;
     return String(value);
+  }
+  if (row.kind === "stage_budget") {
+    const stageName = JEV_STAGE_LABELS_TR[row.subject] ?? row.subject;
+    const ratio = fmtAlertRatio(row.payload.ratio);
+    return ratio === null
+      ? `Aşama bütçesi aşıldı: ${stageName}`
+      : `Aşama bütçesi aşıldı: ${stageName} (${ratio})`;
   }
   return row.subject;
 }
@@ -139,6 +157,15 @@ export function JevAlertsSection({
                     <Link href="/admin/ekonomi" className="text-brand hover:underline">
                       Ekonomi paneli
                     </Link>
+                    .
+                  </p>
+                ) : row.kind === "stage_budget" ? (
+                  <p className="text-sm text-muted-foreground">
+                    Bu aşamanın dünkü Jev harcaması günlük payını aştı. Tek sert sınır aylık
+                    tavandır; bu yalnızca bir uyarıdır. Ayrıntı:{" "}
+                    <a href="#jev-golge" className="text-brand hover:underline">
+                      Jev gölge bölümündeki Aşama bütçesi tablosu
+                    </a>
                     .
                   </p>
                 ) : null}

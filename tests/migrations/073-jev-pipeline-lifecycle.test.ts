@@ -183,14 +183,22 @@ describe("migration 073_jev_pipeline_lifecycle.sql (SQL contract)", () => {
     expect(b).not.toMatch(/a\.subject::uuid/i);
   });
 
-  it("the CHECK reason list matches JEV_ALERT_RESOLVED_REASONS", () => {
-    expect(JEV_ALERT_RESOLVED_REASONS).toEqual(["question_set_changed", "agreement_recovered", "drift_quiet"]);
+  it("the CHECK reason list matches JEV_ALERT_RESOLVED_REASONS minus 088's under_allowance", () => {
+    // 088 (JEV-A) widens JEV_ALERT_RESOLVED_REASONS to add 'under_allowance',
+    // written by jev_stage_budget_compute() -- 073 itself never writes that
+    // reason, so its own CHECK list is still the original 4-item... 3-item
+    // set (under_allowance excluded).
+    expect(JEV_ALERT_RESOLVED_REASONS.filter((r) => r !== "under_allowance")).toEqual([
+      "question_set_changed",
+      "agreement_recovered",
+      "drift_quiet",
+    ]);
     const m = code.match(/resolved_reason\s+in\s*\(([^)]+)\)/i);
     expect(m).not.toBeNull();
     const reasons = (m?.[1] ?? "")
       .split(",")
       .map((s) => s.trim().replace(/^'|'$/g, ""));
-    expect(reasons).toEqual([...JEV_ALERT_RESOLVED_REASONS]);
+    expect(reasons).toEqual(JEV_ALERT_RESOLVED_REASONS.filter((r) => r !== "under_allowance"));
   });
 
   it("adds resolved_at/resolved_reason columns additively and a partial open-alerts index", () => {

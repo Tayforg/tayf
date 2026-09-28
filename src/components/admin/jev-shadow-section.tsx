@@ -1,9 +1,11 @@
 import Link from "next/link";
 import type {
   JevAgreementRow,
+  JevBudgetRow,
   JevRunRow,
   JevShadowStatus,
 } from "@/lib/admin/jev-shadow-status";
+import { JEV_STAGE_LABELS_TR } from "@/lib/admin/jev-shadow-status";
 import {
   AdminSection,
   DataTable,
@@ -63,7 +65,7 @@ const JEV_TASK_ORDER = [
 const JEV_TASK_LABELS_TR: Record<string, string> = {
   politics: "Siyaset mi?",
   topic: "Konu",
-  topic7: "Konu (7)",
+  topic7: "Konu (7), regex etiketine karşı (zayıf ölçüt)",
   opinion: "Köşe yazısı mı?",
   clickbait: "Tık tuzağı",
   framing: "Çerçeveleme",
@@ -145,6 +147,25 @@ function buildAgreementRows(
       undecided: row7?.undecided ?? row24?.undecided ?? 0,
     };
   });
+}
+
+function stageLabel(stage: string): string {
+  return JEV_STAGE_LABELS_TR[stage] ?? stage;
+}
+
+/** tr-TR decimal comma, e.g. "1,17×". Null when no allowance or no spend to ratio against. */
+function fmtRatio(spend: number | null, allowance: number | null): string | null {
+  if (spend === null || allowance === null || allowance <= 0) return null;
+  const ratio = spend / allowance;
+  return `${ratio.toFixed(2).replace(".", ",")}×`;
+}
+
+function budgetRatioTone(spend: number | null, allowance: number | null): Tone {
+  if (spend === null || allowance === null || allowance <= 0) return "neutral";
+  const ratio = spend / allowance;
+  if (ratio >= 1) return "bad";
+  if (ratio >= 0.8) return "warn";
+  return "neutral";
 }
 
 function monthTone(month: JevShadowStatus["month"]): Tone {
@@ -282,9 +303,62 @@ export function JevShadowSection({
               </DataTable>
             );
           })()}
+          <JevStageBudgetTable budget={status.budget} />
         </>
       )}
     </AdminSection>
+  );
+}
+
+/**
+ * "Aşama bütçesi" (088): per-stage daily allowance table inside the "Jev
+ * gölge" section. `budget === null` means jev_budget_daily could not be
+ * read (088 not yet applied, or a PostgREST hiccup) -- renders a status
+ * sentence, never throws, and never blocks the rest of the section.
+ */
+function JevStageBudgetTable({ budget }: { budget: JevBudgetRow[] | null }) {
+  if (budget === null) {
+    return <p className="text-sm text-destructive">Aşama bütçesi okunamadı.</p>;
+  }
+  if (budget.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Henüz aşama kaydı yok (088 sonrası çalışmalarla dolacak).
+      </p>
+    );
+  }
+  return (
+    <DataTable minWidth="md">
+      <thead>
+        <Tr>
+          <Th>Aşama</Th>
+          <Th numeric>Dün</Th>
+          <Th numeric>Bugün (şimdiye kadar)</Th>
+          <Th numeric>Günlük pay</Th>
+          <Th numeric>Dün / pay</Th>
+        </Tr>
+      </thead>
+      <tbody>
+        {budget.map((row) => {
+          const ratio = fmtRatio(row.yesterday, row.allowance);
+          return (
+            <Tr key={row.stage}>
+              <Td>{stageLabel(row.stage)}</Td>
+              <Td numeric>{row.yesterday === null ? "—" : fmtInt(row.yesterday)}</Td>
+              <Td numeric>{row.today === null ? "—" : fmtInt(row.today)}</Td>
+              <Td numeric>{row.allowance === null ? "—" : fmtInt(row.allowance)}</Td>
+              <Td numeric>
+                {ratio === null ? (
+                  "—"
+                ) : (
+                  <span className={toneTextClass(budgetRatioTone(row.yesterday, row.allowance))}>{ratio}</span>
+                )}
+              </Td>
+            </Tr>
+          );
+        })}
+      </tbody>
+    </DataTable>
   );
 }
 

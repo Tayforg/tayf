@@ -62,6 +62,15 @@ const fixture = vi.hoisted(() => ({
   } as unknown,
   nextPrioritizedError: null as { message: string } | null,
   provisionalScorecardError: null as { message: string } | null,
+  topic7Scorecard: {
+    by_split: {
+      dev: { n: 356, final_by_source: { human_agreed: 300, human_single: 40, provisional: 16 }, prov_vs_human_n: 340, prov_vs_human_agree: 300 },
+      heldout: { n: 300, final_by_source: { none: 300 }, prov_vs_human_n: 0, prov_vs_human_agree: 0 },
+    },
+    stored_vs_final: [{ split: "dev", stored_key: "qs:2026-09-21.3", n: 340, correct: 300 }],
+    note: "…",
+  } as unknown,
+  topic7ScorecardError: null as { message: string } | null,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -84,6 +93,10 @@ const supabaseFake = await vi.hoisted(async () => {
         if (fixture.provisionalScorecardError) return { data: null, error: fixture.provisionalScorecardError };
         return { data: fixture.provisionalScorecard, error: null };
       },
+      jev_gold_topic7_scorecard: () => {
+        if (fixture.topic7ScorecardError) return { data: null, error: fixture.topic7ScorecardError };
+        return { data: fixture.topic7Scorecard, error: null };
+      },
     },
   });
 });
@@ -104,8 +117,17 @@ import {
   buildProvisionalScorecardLines,
   JEV_GOLD_TOPICS,
   JEV_GOLD_MIN_N,
+  JEV_GOLD_TOPIC_LABELS_TR,
+  JEV_TOPIC7_GUIDE_TR,
+  preLabelFields,
+  revealLine,
+  parseTopic7Scorecard,
+  getJevGoldTopic7Scorecard,
   type JevGoldProvisionalScorecard,
+  type JevGoldArticle,
 } from "./jev-gold";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -166,6 +188,7 @@ beforeEach(() => {
   };
   fixture.nextPrioritizedError = null;
   fixture.provisionalScorecardError = null;
+  fixture.topic7ScorecardError = null;
   supabaseFake.calls.rpc.length = 0;
 });
 
@@ -645,5 +668,127 @@ describe("buildProvisionalScorecardLines", () => {
     const lines = buildProvisionalScorecardLines(bigCard);
     const byLabel = Object.fromEntries(lines.map((l) => [l.label, l.text]));
     expect(byLabel["Geçici etiketin insanla uyumu"]).not.toContain("henüz yok");
+  });
+});
+
+describe("JEV_TOPIC7_GUIDE_TR (090)", () => {
+  it("class order matches JEV_GOLD_TOPICS, and each label matches JEV_GOLD_TOPIC_LABELS_TR", () => {
+    expect(JEV_TOPIC7_GUIDE_TR.classes.map((c) => c.topic)).toEqual([...JEV_GOLD_TOPICS]);
+    for (const c of JEV_TOPIC7_GUIDE_TR.classes) {
+      expect(c.label).toBe(JEV_GOLD_TOPIC_LABELS_TR[c.topic]);
+    }
+  });
+
+  it("each rule starts with its 1-based ordinal marker", () => {
+    JEV_TOPIC7_GUIDE_TR.rules.forEach((rule, i) => {
+      expect(rule.startsWith(`${i + 1}) `)).toBe(true);
+    });
+  });
+
+  it("genel is 'Olaylar (genel)'", () => {
+    expect(JEV_GOLD_TOPIC_LABELS_TR.genel).toBe("Olaylar (genel)");
+  });
+});
+
+describe("preLabelFields (090)", () => {
+  const article: JevGoldArticle = {
+    article_id: "11111111-2222-3333-4444-555555555555",
+    title: "Başlık",
+    description: "Açıklama",
+    category: "politika",
+    source_slug: "kaynak",
+    position: 7,
+  };
+
+  it("returns only Sıra, excluding Kaynak and Akış kategorisi", () => {
+    const fields = preLabelFields(article);
+    expect(fields).toEqual([{ label: "Sıra", value: "7" }]);
+    const labels = fields.map((f) => f.label);
+    expect(labels).not.toContain("Kaynak");
+    expect(labels).not.toContain("Akış kategorisi");
+  });
+});
+
+describe("revealLine (090)", () => {
+  it("renders both fields", () => {
+    expect(revealLine({ sourceSlug: "kaynak", category: "politika" })).toBe(
+      "Az önce etiketlenen haber: kaynak kaynak · akış kategorisi politika",
+    );
+  });
+
+  it("handles nulls as em dash", () => {
+    expect(revealLine({ sourceSlug: null, category: null })).toBe(
+      "Az önce etiketlenen haber: kaynak — · akış kategorisi —",
+    );
+  });
+});
+
+describe("static read of jev-altin/page.tsx (090)", () => {
+  it("never renders next.article.source_slug or next.article.category directly", () => {
+    const path = resolve(__dirname, "..", "..", "app", "admin", "(protected)", "jev-altin", "page.tsx");
+    const src = readFileSync(path, "utf8");
+    expect(src).not.toMatch(/next\.article\.source_slug/);
+    expect(src).not.toMatch(/next\.article\.category/);
+  });
+});
+
+describe("parseTopic7Scorecard (090)", () => {
+  it("returns null for null", () => {
+    expect(parseTopic7Scorecard(null)).toBeNull();
+  });
+
+  it("returns empty-shaped object for {}", () => {
+    expect(parseTopic7Scorecard({})).toEqual({ bySplit: {}, storedVsFinal: [] });
+  });
+
+  it("handles a missing split", () => {
+    const parsed = parseTopic7Scorecard({
+      by_split: { dev: { n: 5, final_by_source: {}, prov_vs_human_n: 0, prov_vs_human_agree: 0 } },
+      stored_vs_final: [],
+    });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.bySplit.dev).toBeDefined();
+    expect(parsed!.bySplit.heldout).toBeUndefined();
+  });
+
+  it("drops stored_vs_final rows with non-numeric fields", () => {
+    const parsed = parseTopic7Scorecard({
+      by_split: {},
+      stored_vs_final: [
+        { split: "dev", stored_key: "qs:x", n: "not-a-number", correct: 3 },
+        { split: "dev", stored_key: "qs:y", n: 10, correct: 8 },
+      ],
+    });
+    expect(parsed!.storedVsFinal).toEqual([{ split: "dev", storedKey: "qs:y", n: 10, correct: 8 }]);
+  });
+
+  it("coerces numeric-looking strings in split figures", () => {
+    const parsed = parseTopic7Scorecard({
+      by_split: {
+        dev: { n: "356", final_by_source: { human_agreed: "300" }, prov_vs_human_n: "340", prov_vs_human_agree: "300" },
+      },
+      stored_vs_final: [],
+    });
+    expect(parsed!.bySplit.dev).toEqual({
+      n: 356,
+      finalBySource: { human_agreed: 300 },
+      provVsHumanN: 340,
+      provVsHumanAgree: 300,
+    });
+  });
+});
+
+describe("getJevGoldTopic7Scorecard (090)", () => {
+  it("parses a well-formed RPC result", async () => {
+    const card = await getJevGoldTopic7Scorecard();
+    expect(card).not.toBeNull();
+    expect(card!.bySplit.dev?.n).toBe(356);
+    expect(card!.storedVsFinal[0]?.storedKey).toBe("qs:2026-09-21.3");
+  });
+
+  it("returns null on an RPC error", async () => {
+    fixture.topic7ScorecardError = { message: "boom" };
+    const card = await getJevGoldTopic7Scorecard();
+    expect(card).toBeNull();
   });
 });

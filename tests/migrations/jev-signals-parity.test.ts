@@ -187,7 +187,7 @@ describe("065 numeric thresholds (day gate, baseline gate, per-term floors, drif
 // ---------------------------------------------------------------------------
 
 describe("jev_alerts kind vocabulary (SIG-A1)", () => {
-  it("src/lib/admin/jev-signals.ts's JEV_ALERT_KINDS equals migration 065's CHECK list", () => {
+  it("src/lib/admin/jev-signals.ts's JEV_ALERT_KINDS equals migration 088's kind CHECK list", () => {
     const jevSignalsPath = resolve(REPO_ROOT, "src", "lib", "admin", "jev-signals.ts");
     const jevSignalsSrc = readFileSync(jevSignalsPath, "utf8");
     const match = jevSignalsSrc.match(/JEV_ALERT_KINDS\s*=\s*\[([^\]]*)\]/);
@@ -196,7 +196,19 @@ describe("jev_alerts kind vocabulary (SIG-A1)", () => {
       .split(",")
       .map((s) => s.trim().replace(/^["']|["']$/g, ""))
       .filter(Boolean);
-    expect(values).toEqual(["source_drift", "kap_class_canary"]);
+    expect(values).toEqual(["source_drift", "kap_class_canary", "stage_budget"]);
+
+    // 088 (JEV-A) widens 065's original two-kind CHECK to add 'stage_budget'
+    // (jev_stage_budget_compute()). Parse the CHECK straight out of 088's
+    // SQL rather than 065's so a future widening can't silently drift.
+    const migration088 = read("088_jev_spend_ledger.sql");
+    const kindMatch = migration088.match(/jev_alerts_kind_check\s*\n?\s*check\s*\(\s*kind\s+in\s*\(([^)]+)\)/i);
+    expect(kindMatch, "could not find jev_alerts_kind_check in 088_jev_spend_ledger.sql").not.toBeNull();
+    const kindValues = (kindMatch?.[1] ?? "")
+      .split(",")
+      .map((s) => s.trim().replace(/^'|'$/g, ""))
+      .filter(Boolean);
+    expect(kindValues).toEqual(values);
   });
 });
 

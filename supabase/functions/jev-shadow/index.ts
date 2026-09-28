@@ -45,6 +45,7 @@ import {
   type JevMemberRow,
   type JevPairCandidate,
   type JevPorts,
+  type JevProvisionalLabelRow,
   JevRateLimitError,
   type JevRegressionAnswerRow,
   type JevRegressionItem,
@@ -52,6 +53,7 @@ import {
   type JevResponse,
   type JevRunMode,
   type JevRunStatus,
+  type JevStageLedger,
   type JevTickerRow,
   type JevTitleRow,
   type JevUnlinkCandidateRow,
@@ -261,13 +263,14 @@ function makePorts(apiKey: string): JevPorts {
       captureException("jev-shadow", err);
     },
 
-    async recordTokens(id, calls, inputTokens) {
+    async recordTokens(id, calls, inputTokens, stageTokens) {
       // service_role already has update on jev_shadow_runs (061:219) -- no
       // grant change needed. Deliberately not startedAt/finished_at: this
-      // is a mid-run checkpoint, not a close.
+      // is a mid-run checkpoint, not a close. 088: stage_tokens requires 088
+      // to be applied first -- see docs/migration-guide.md's deploy order.
       const { error } = await supabase
         .from("jev_shadow_runs")
-        .update({ calls, input_tokens: inputTokens })
+        .update({ calls, input_tokens: inputTokens, stage_tokens: stageTokens })
         .eq("id", id);
       if (error) throw new Error(`jev-shadow: recordTokens failed: ${error.message}`);
     },
@@ -288,7 +291,18 @@ function makePorts(apiKey: string): JevPorts {
       return (data as { id: number }).id;
     },
 
-    async finishRun(id: number, patch: { finished_at: string; calls: number; input_tokens: number; errors: number; status: JevRunStatus; note: string | null }) {
+    async finishRun(
+      id: number,
+      patch: {
+        finished_at: string;
+        calls: number;
+        input_tokens: number;
+        errors: number;
+        status: JevRunStatus;
+        note: string | null;
+        stage_tokens: JevStageLedger;
+      },
+    ) {
       const { error } = await supabase.from("jev_shadow_runs").update(patch).eq("id", id);
       if (error) throw new Error(`jev-shadow: finishRun failed: ${error.message}`);
     },
@@ -552,8 +566,12 @@ function makePorts(apiKey: string): JevPorts {
         (r) => ({ ...r, disclosure_index: String(r.disclosure_index) }),
       );
       if (rows.length === 0) return [];
+      // 088: kap_class is now sampled (1 in 5 disclosures), so kap_materiality
+      // -- asked on every disclosure -- is the anti-join that actually covers
+      // "have we already asked this disclosure". Anti-joining on kap_class
+      // would re-ask every unsampled disclosure every 10-minute tick.
       const seen = await anti_join(
-        "kap_class",
+        "kap_materiality",
         rows.map((r) => r.disclosure_index),
       );
       const out: JevKapRow[] = [];
@@ -785,6 +803,35 @@ function makePorts(apiKey: string): JevPorts {
       // Already agreement-filtered -- agreedGoldLabels keeps only rows where
       // labeler 1 and labeler 2 both exist and agree on both fields.
       return agreedGoldLabels(rows);
+    },
+
+    async fetchProvisionalGoldLabels(articleIds): Promise<JevProvisionalLabelRow[]> {
+      if (articleIds.length === 0) return [];
+      const out: JevProvisionalLabelRow[] = [];
+      for (let i = 0; i < articleIds.length; i += JEV_ID_CHUNK) {
+        const chunk = articleIds.slice(i, i + JEV_ID_CHUNK) as string[];
+        const { data, error } = await supabase
+          .from("jev_gold_provisional_labels")
+          .select("article_id, is_politics, topic, gold:jev_gold_set!inner(stratum)")
+          .in("article_id", chunk);
+        if (error) throw new Error(`jev-shadow: fetchProvisionalGoldLabels failed: ${error.message}`);
+        for (const r of (data ?? []) as unknown as Array<{
+          article_id: string;
+          is_politics: boolean;
+          topic: string;
+          gold: { stratum: string } | { stratum: string }[] | null;
+        }>) {
+          const embed = Array.isArray(r.gold) ? r.gold[0] : r.gold;
+          const stratum = embed?.stratum ?? null;
+          out.push({
+            article_id: r.article_id,
+            is_politics: r.is_politics,
+            topic: r.topic,
+            split: stratum === "opus_seed" ? "dev" : "heldout",
+          });
+        }
+      }
+      return out;
     },
   };
 }

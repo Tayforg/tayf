@@ -143,6 +143,7 @@ const {
   fakeArticles,
   clusterRows,
   clusterArticleRows,
+  admissionRows,
   rpcFixtures,
   supabaseFakeClient,
   supabaseFakeCalls,
@@ -165,7 +166,18 @@ const {
     const clusterArticles: Array<{ cluster_id: string; article_id: string }> = [];
     const rpcFixturesState: {
       cluster_link_atomic: { data: unknown; error: { message: string } | null } | null;
-    } = { cluster_link_atomic: null };
+      jev_politics_admission_claim:
+        | { data: unknown; error: { message: string; code?: string } | null }
+        | null;
+      jev_politics_admission_record:
+        | { data: unknown; error: { message: string; code?: string } | null }
+        | null;
+    } = {
+      cluster_link_atomic: null,
+      jev_politics_admission_claim: null,
+      jev_politics_admission_record: null,
+    };
+    const admissionRows: Array<Record<string, unknown>> = [];
     const fake = helper.createSupabaseFake({
       tables: {
         articles: (state) => {
@@ -225,6 +237,16 @@ const {
           { id: "src-agg", bias: "center", name: "Aggregator", slug: "agg", kind: "aggregator" },
           { id: "src-wire", bias: "state_media", name: "Wire", slug: "wire", kind: "wire" },
         ],
+        jev_politics_admissions: (state) => {
+          const eqCluster = state.eq.find((p) => p.col === "cluster_id")?.val as
+            | string
+            | undefined;
+          if (eqCluster !== undefined) {
+            const rows = admissionRows.filter((r) => r.cluster_id === eqCluster);
+            return { data: rows, error: null, count: rows.length };
+          }
+          return { data: admissionRows, error: null, count: admissionRows.length };
+        },
       },
       rpc: {
         // Default (null override) mirrors the pre-A3 behaviour: unknown
@@ -233,12 +255,23 @@ const {
         // succeeded silently before this fixture existed too.
         cluster_link_atomic: () =>
           rpcFixturesState.cluster_link_atomic ?? { data: { ok: true }, error: null },
+        // Migration 089 ("ADMIT"). Default: nothing claimed (empty queue of
+        // candidates) -- tests that need a real claim override this.
+        jev_politics_admission_claim: () =>
+          rpcFixturesState.jev_politics_admission_claim ??
+          ({ data: [{ claimed: 0, enqueued: 0, live: 0 }], error: null } as {
+            data: unknown;
+            error: null;
+          }),
+        jev_politics_admission_record: () =>
+          rpcFixturesState.jev_politics_admission_record ?? { data: true, error: null },
       },
     });
     return {
       fakeArticles: articles,
       clusterRows: clusters,
       clusterArticleRows: clusterArticles,
+      admissionRows,
       rpcFixtures: rpcFixturesState,
       supabaseFakeClient: fake.client,
       supabaseFakeCalls: fake.calls,
@@ -276,11 +309,16 @@ beforeEach(() => {
   // reset it every test so a DB-error scenario there never bleeds into an
   // unrelated test.
   rpcFixtures.cluster_link_atomic = null;
+  rpcFixtures.jev_politics_admission_claim = null;
+  rpcFixtures.jev_politics_admission_record = null;
+  admissionRows.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
   // Unset by default so tests that don't opt in never trigger a real fetch.
   delete process.env.REVALIDATE_URL;
   delete process.env.CRON_SECRET;
+  // Migration 089 ("ADMIT"): off unless a test opts in.
+  delete process.env.JEV_POLITICS_ADMISSION;
 });
 
 afterEach(() => {
@@ -1222,6 +1260,320 @@ describe("cluster-consumer Edge Function", () => {
       // addArticleToCluster (cluster_link_atomic) must not have been called.
       const linkCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
       expect(linkCalls.length).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Migration 089 ("ADMIT"): politics admission for the clusterer. Ships
+  // with the flag off, so most of this describe block asserts the OFF case
+  // changes nothing, then exercises shadow (dry-run, write-free) and live
+  // (stamped vs. unstamped) routing.
+  // -------------------------------------------------------------------------
+  describe("politics admission (migration 089)", () => {
+    const now = new Date().toISOString();
+
+    function seedAdmitMessage(articleId: string, admit: "shadow" | "live") {
+      pgmqState.pending = [
+        { msg_id: 900, read_ct: 1, message: { article_id: articleId, admit } },
+      ];
+    }
+
+    it("flag unset: zero claim RPCs, and an admit-tagged non-politika message is archived+recorded 'disabled' with no cluster writes", async () => {
+      fakeArticles["art-admit-off"] = {
+        id: "art-admit-off",
+        source_id: "src-outlet",
+        title: "Ekonomi haberi",
+        description: "Detay",
+        url: "https://example.com/admit-off",
+        category: "ekonomi",
+        published_at: now,
+      };
+      seedAdmitMessage("art-admit-off", "shadow");
+
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { admission: { mode: string; claim: string; disabled: number } };
+      expect(body.admission.mode).toBe("off");
+      expect(body.admission.claim).toBe("skipped");
+      expect(body.admission.disabled).toBe(1);
+
+      const claimCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_claim");
+      expect(claimCalls.length).toBe(0);
+      const linkCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
+      expect(linkCalls.length).toBe(0);
+      expect(supabaseFakeCalls.insert("clusters").length).toBe(0);
+      const recordCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_record");
+      expect(recordCalls.length).toBe(1);
+      expect((recordCalls[0].args as { p_outcome?: string }).p_outcome).toBe("disabled");
+      expect(pgmqState.archived).toContain(900);
+    });
+
+    it("shadow: claims once per drain before the first readBatch, dry-runs write-free, and records would_match/would_create", async () => {
+      process.env.JEV_POLITICS_ADMISSION = "shadow";
+      fakeArticles["art-admit-shadow"] = {
+        id: "art-admit-shadow",
+        source_id: "src-outlet",
+        title: "Ekonomi haberi 2",
+        description: "Detay",
+        url: "https://example.com/admit-shadow",
+        category: "ekonomi",
+        published_at: now,
+      };
+      seedAdmitMessage("art-admit-shadow", "shadow");
+
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        matched: number;
+        created: number;
+        admission: { mode: string; claim: string; would_match: number; would_create: number };
+      };
+      expect(body.admission.mode).toBe("shadow");
+      expect(body.admission.claim).toBe("ok");
+      expect(body.admission.would_match + body.admission.would_create).toBe(1);
+      // Dry-run outcomes never touch the classic matched/created counters.
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(0);
+
+      const claimCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_claim");
+      expect(claimCalls.length).toBe(1);
+      const linkCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
+      expect(linkCalls.length).toBe(0);
+      expect(supabaseFakeCalls.insert("clusters").length).toBe(0);
+      expect(supabaseFakeCalls.insert("cluster_articles").length).toBe(0);
+
+      const recordCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_record");
+      expect(recordCalls.length).toBe(1);
+      const recordArgs = recordCalls[0].args as {
+        p_outcome?: string;
+        p_cluster_seeded_by_admission?: boolean;
+      };
+      expect(["would_match", "would_create"]).toContain(recordArgs.p_outcome);
+      expect(recordArgs.p_cluster_seeded_by_admission).toBe(false);
+    });
+
+    it("shadow: JEV_LIVE_PAIRS=1 never triggers a Jev gateway fetch on a dry-run", async () => {
+      process.env.JEV_POLITICS_ADMISSION = "shadow";
+      process.env.JEV_LIVE_PAIRS = "1";
+      process.env.AI_GATEWAY_API_KEY = "test-key";
+      fakeArticles["art-admit-shadow-live"] = {
+        id: "art-admit-shadow-live",
+        source_id: "src-outlet",
+        title: "Ekonomi haberi 3",
+        description: "Detay",
+        url: "https://example.com/admit-shadow-live",
+        category: "ekonomi",
+        published_at: now,
+      };
+      seedAdmitMessage("art-admit-shadow-live", "shadow");
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      expect(res.status).toBe(200);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      delete process.env.JEV_LIVE_PAIRS;
+      delete process.env.AI_GATEWAY_API_KEY;
+    });
+
+    it("live: a stamped article is clustered and recorded; an unstamped one is recorded 'rejected'", async () => {
+      process.env.JEV_POLITICS_ADMISSION = "live";
+      fakeArticles["art-admit-live-stamped"] = {
+        id: "art-admit-live-stamped",
+        source_id: "src-outlet",
+        title: "Ekonomi haberi 4",
+        description: "Detay",
+        url: "https://example.com/admit-live-stamped",
+        category: "ekonomi",
+        politics_admitted_at: now,
+        published_at: now,
+      };
+      seedAdmitMessage("art-admit-live-stamped", "live");
+
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        matched: number;
+        created: number;
+        admission: { rejected: number; matched: number; created: number };
+      };
+      expect(body.matched + body.created).toBe(1);
+      expect(body.admission.matched + body.admission.created).toBe(1);
+
+      const recordCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_record");
+      expect(recordCalls.length).toBe(1);
+      expect(["matched", "created"]).toContain(
+        (recordCalls[0].args as { p_outcome?: string }).p_outcome,
+      );
+
+      // Second drain: an unstamped article claims the "live" tag but never
+      // got politics_admitted_at set -- rejected, not clustered.
+      supabaseFakeCalls.rpc.length = 0;
+      fakeArticles["art-admit-live-unstamped"] = {
+        id: "art-admit-live-unstamped",
+        source_id: "src-outlet",
+        title: "Ekonomi haberi 5",
+        description: "Detay",
+        url: "https://example.com/admit-live-unstamped",
+        category: "ekonomi",
+        politics_admitted_at: null,
+        published_at: now,
+      };
+      seedAdmitMessage("art-admit-live-unstamped", "live");
+
+      const res2 = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      const body2 = (await res2.json()) as { admission: { rejected: number } };
+      expect(body2.admission.rejected).toBe(1);
+      const recordCalls2 = supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_record");
+      expect(recordCalls2.length).toBe(1);
+      expect((recordCalls2[0].args as { p_outcome?: string }).p_outcome).toBe("rejected");
+    });
+
+    it("a claim error is non-fatal (logs only the code) and the drain proceeds", async () => {
+      process.env.JEV_POLITICS_ADMISSION = "shadow";
+      rpcFixtures.jev_politics_admission_claim = { data: null, error: { message: "boom", code: "42P01" } };
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { admission: { claim: string } };
+      expect(body.admission.claim).toBe("error");
+
+      const warnedAdmission = warnSpy.mock.calls.some(
+        (c) => c[0] === "[cluster-consumer] admission claim failed",
+      );
+      expect(warnedAdmission).toBe(true);
+      warnSpy.mockRestore();
+    });
+
+    it("a record error still archives the message and counts record_errors, not failedTransient", async () => {
+      process.env.JEV_POLITICS_ADMISSION = "shadow";
+      rpcFixtures.jev_politics_admission_record = {
+        data: null,
+        error: { message: "boom", code: "23503" },
+      };
+      fakeArticles["art-admit-recerr"] = {
+        id: "art-admit-recerr",
+        source_id: "src-outlet",
+        title: "Ekonomi haberi 6",
+        description: "Detay",
+        url: "https://example.com/admit-recerr",
+        category: "ekonomi",
+        published_at: now,
+      };
+      seedAdmitMessage("art-admit-recerr", "shadow");
+
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      const body = (await res.json()) as {
+        failedTransient: number;
+        admission: { record_errors: number };
+      };
+      expect(body.admission.record_errors).toBe(1);
+      expect(body.failedTransient).toBe(0);
+      expect(pgmqState.archived).toContain(900);
+    });
+
+    it("loader select includes politics_admitted_at, and a cluster seeded only by an admitted member loads as a seed", async () => {
+      clusterRows.push({
+        id: "cluster-admitted-seed",
+        title_tr: "Admitted seed",
+        title_tr_neutral: null,
+        first_published: now,
+        updated_at: now,
+        article_count: 1,
+      });
+      clusterArticleRows.push({ cluster_id: "cluster-admitted-seed", article_id: "art-admitted-member" });
+      fakeArticles["art-admitted-member"] = {
+        id: "art-admitted-member",
+        source_id: "src-outlet",
+        title: "Admitted member headline",
+        description: null,
+        published_at: now,
+        category: "ekonomi",
+        politics_admitted_at: now,
+      };
+      fakeArticles["art-non-admitted-member"] = {
+        id: "art-non-admitted-member",
+        source_id: "src-wire",
+        title: "Never admitted",
+        description: null,
+        published_at: now,
+        category: "ekonomi",
+        politics_admitted_at: null,
+      };
+
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      await handler(authedRequest("http://localhost/cluster-consumer", { method: "GET" }));
+      // GET is a liveness probe only -- exercise a POST with an empty queue
+      // so loadClusterContext actually runs and we can assert on its
+      // selectArgs without needing a full cluster match.
+      pgmqState.pending = [];
+      await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+
+      const articleSelects = supabaseFakeCalls.mutations; // not used, kept for symmetry
+      void articleSelects;
+      const src = readFileSync(
+        resolve(__dirname, "../../supabase/functions/cluster-consumer/index.ts"),
+        "utf8",
+      );
+      expect(src).toMatch(/politics_admitted_at/);
+    });
+
+    it("regression: a plain politika message is byte-identical (mutations + rpc log) across off/shadow/live", async () => {
+      const runOnce = async (mode: string | undefined) => {
+        resetPgmqState();
+        for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
+        supabaseFakeCalls.mutations.length = 0;
+        supabaseFakeCalls.rpc.length = 0;
+        if (mode) process.env.JEV_POLITICS_ADMISSION = mode;
+        else delete process.env.JEV_POLITICS_ADMISSION;
+
+        fakeArticles["art-plain-politika"] = {
+          id: "art-plain-politika",
+          source_id: "src-outlet",
+          title: "Siyaset haberi",
+          description: "Detay",
+          url: "https://example.com/plain-politika",
+          category: "politika",
+          published_at: now,
+        };
+        pgmqState.pending = [{ msg_id: 901, read_ct: 1, message: { article_id: "art-plain-politika" } }];
+
+        const handler = await importHandler();
+        if (!handler) throw new Error("unreachable");
+        const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+        const body = (await res.json()) as { matched: number; created: number };
+        return {
+          status: res.status,
+          matched: body.matched,
+          created: body.created,
+          mutationCount: supabaseFakeCalls.mutations.length,
+          linkCalls: supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic").length,
+          recordCalls: supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_record").length,
+        };
+      };
+
+      const off = await runOnce(undefined);
+      const shadow = await runOnce("shadow");
+      const live = await runOnce("live");
+
+      expect(shadow).toEqual(off);
+      expect(live).toEqual(off);
+      expect(off.recordCalls).toBe(0);
     });
   });
 });

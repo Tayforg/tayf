@@ -141,8 +141,10 @@ describe("getJevRegressionStatus", () => {
       calls: 410,
       flipRate: 0.008,
       firstRun: false,
-      flips: { politics: 3, topic: 5, pair: 1 },
+      flips: { politics: 3, topic: 5, pair: 1, topic7: null },
       goldPolitics070: 241 / 280,
+      goldTopic7: null,
+      provisional: null,
     });
   });
 
@@ -212,8 +214,10 @@ describe("toRegressionRunView", () => {
       calls: 410,
       flipRate: 0.008,
       firstRun: false,
-      flips: { politics: 3, topic: 5, pair: 1 },
+      flips: { politics: 3, topic: 5, pair: 1, topic7: null },
       goldPolitics070: 241 / 280,
+      goldTopic7: null,
+      provisional: null,
     });
   });
 
@@ -231,8 +235,10 @@ describe("toRegressionRunView", () => {
 
     expect(view.firstRun).toBe(true);
     expect(view.flipRate).toBeNull();
-    expect(view.flips).toEqual({ politics: null, topic: null, pair: null });
+    expect(view.flips).toEqual({ politics: null, topic: null, pair: null, topic7: null });
     expect(view.goldPolitics070).toBeNull();
+    expect(view.goldTopic7).toBeNull();
+    expect(view.provisional).toBeNull();
     expect(view.finishedAt).toBeNull();
   });
 
@@ -251,8 +257,10 @@ describe("toRegressionRunView", () => {
       expect(() => toRegressionRunView({ ...base, deltas })).not.toThrow();
       const view = toRegressionRunView({ ...base, deltas });
       expect(view.flipRate).toBeNull();
-      expect(view.flips).toEqual({ politics: null, topic: null, pair: null });
+      expect(view.flips).toEqual({ politics: null, topic: null, pair: null, topic7: null });
       expect(view.goldPolitics070).toBeNull();
+      expect(view.goldTopic7).toBeNull();
+      expect(view.provisional).toBeNull();
       expect(Number.isNaN(view.id)).toBe(false);
       expect(Number.isNaN(view.items)).toBe(false);
       expect(Number.isNaN(view.calls)).toBe(false);
@@ -282,5 +290,70 @@ describe("toRegressionRunView", () => {
 
     expect(view.goldPolitics070).toBeNull();
     expect(Number.isNaN(view.goldPolitics070 as unknown as number)).toBe(false);
+  });
+
+  it("088: parses goldTopic7, flips.topic7 and the provisional dev/heldout split", () => {
+    const view = toRegressionRunView({
+      id: 20,
+      question_set: "2026-09-24.1",
+      started_at: "2026-09-28T04:20:00.000Z",
+      finished_at: "2026-09-28T04:30:00.000Z",
+      status: "ok",
+      items: 660,
+      calls: 600,
+      deltas: {
+        tasks: { topic7: { n: 400, flips: 12, mean_abs_delta: null, max_abs_delta: null } },
+        overall: { flip_rate: 0.02 },
+        gold: {
+          politics: { n: 280, correct_050: 260, correct_070: 241 },
+          topic7: { n: 280, correct: 250 },
+          provisional: {
+            dev: { politics: { n: 356, correct_050: 300 }, topic7: { n: 356, correct: 310 } },
+            heldout: { politics: { n: 304, correct_050: 280 }, topic7: { n: 304, correct: 290 } },
+          },
+        },
+      },
+    });
+
+    expect(view.flips.topic7).toBe(12);
+    expect(view.goldTopic7).toBe(250 / 280);
+    expect(view.provisional).toEqual({
+      dev: { n: 356, politics050: 300 / 356, topic7: 310 / 356 },
+      heldout: { n: 304, politics050: 280 / 304, topic7: 290 / 304 },
+    });
+  });
+
+  it("088: goldTopic7 is null when n is 0, and provisional is null when the block is absent -- never NaN, never throws", () => {
+    const view = toRegressionRunView({
+      id: 21,
+      question_set: "2026-09-24.1",
+      started_at: "2026-09-28T04:20:00.000Z",
+      finished_at: "2026-09-28T04:30:00.000Z",
+      status: "ok",
+      items: 0,
+      calls: 0,
+      deltas: { gold: { topic7: { n: 0, correct: 0 } } },
+    });
+
+    expect(view.goldTopic7).toBeNull();
+    expect(Number.isNaN(view.goldTopic7 as unknown as number)).toBe(false);
+    expect(view.provisional).toBeNull();
+  });
+
+  it("088: a malformed provisional block degrades to null fields without throwing", () => {
+    expect(() =>
+      toRegressionRunView({
+        id: 22,
+        deltas: { gold: { provisional: "not-an-object" } },
+      }),
+    ).not.toThrow();
+    const view = toRegressionRunView({ id: 22, deltas: { gold: { provisional: "not-an-object" } } });
+    expect(view.provisional).toBeNull();
+
+    const view2 = toRegressionRunView({ id: 23, deltas: { gold: { provisional: {} } } });
+    expect(view2.provisional).toEqual({
+      dev: { n: 0, politics050: null, topic7: null },
+      heldout: { n: 0, politics050: null, topic7: null },
+    });
   });
 });

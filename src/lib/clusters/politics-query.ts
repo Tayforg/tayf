@@ -6,7 +6,7 @@ import type {
   ClusterCardSource,
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
-import { isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
+import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
 import { createServerClient } from "@/lib/supabase/server";
 import type {
   BiasCategory,
@@ -46,7 +46,10 @@ import { detectWireRedistribution } from "./wire";
 //   TTFB to essentially "React render time only".
 
 const POLITICS_THRESHOLD = 0.6;
-const POLITICS_CATEGORIES: readonly NewsCategory[] = ["politika", "son_dakika"];
+// isPoliticsMember (migration 089, "ADMIT") replaces the local
+// POLITICS_CATEGORIES literal: a member counts as politics either by its
+// own category (politika/son_dakika) or by a live politics_admitted_at
+// stamp. Inert today (nothing is ever stamped while the flag is off).
 // R1 ranker (post-A7): widen the recency-ordered candidate pool from 60 to
 // 200 so the importance-weighted scorer below has enough material to
 // reorder. With CANDIDATE_LIMIT=60 the top of the list was being eaten by
@@ -203,6 +206,10 @@ export type EmbeddedArticle = {
    * misclassified as wire (see `detectWireRedistribution`).
    */
   content_hash: string | null;
+  /** Migration 089 ("ADMIT"): non-null once Jev has admitted this article
+   * into political clustering under a live claim. NULL on every row until
+   * a later promotion PR; see isPoliticsMember in src/lib/bias/config.ts. */
+  politics_admitted_at?: string | null;
   sources: EmbeddedSource | null;
 };
 
@@ -244,7 +251,7 @@ export type EmbeddedClusterRow = {
 export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
          cluster_articles (
            articles (
-             id, title, url, image_url, published_at, source_id, category, content_hash,
+             id, title, url, image_url, published_at, source_id, category, content_hash, politics_admitted_at,
              sources ( id, name, bias, logo_url, kind, image_allowed, excerpt_allowed )
            )
          )`;
@@ -304,9 +311,7 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
       // (≥60% politika/son_dakika members). Runs on the RAW (pre-dedupe)
       // member list, same as before extracting buildClusterBundle below —
       // search-query.ts has no equivalent gate, it searches all clusters.
-      const hits = members.filter((m) =>
-        POLITICS_CATEGORIES.includes(m.category)
-      ).length;
+      const hits = members.filter((m) => isPoliticsMember(m)).length;
       if (hits / members.length < POLITICS_THRESHOLD) continue;
 
       const { bundle, dedupedMembers } = buildClusterBundle(c, members, health);

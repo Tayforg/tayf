@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { zoneOf } from "@/lib/bias/config";
+import { isPoliticsMember, zoneOf } from "@/lib/bias/config";
 import { applyRecallVeto } from "@/lib/clusters/recall-veto";
 import { siteUrl } from "@/lib/site-url";
 import type { BiasCategory, MediaDnaZone } from "@/types";
@@ -24,7 +24,7 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
 export const V1_CLUSTER_SELECT = `id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
          cluster_articles (
            articles (
-             category,
+             category, politics_admitted_at,
              sources ( slug, bias )
            )
          )`;
@@ -63,6 +63,10 @@ export interface V1EmbeddedSource {
 
 export interface V1EmbeddedArticle {
   category: string;
+  /** Migration 089 ("ADMIT") -- read ONLY by isPoliticsMajority below, via
+   * isPoliticsMember. toV1ClusterRecord must never read it: the public API
+   * never serialises this stamp. */
+  politics_admitted_at?: string | null;
   sources: V1EmbeddedSource | null;
 }
 
@@ -128,9 +132,8 @@ export function isPoliticsMajority(row: V1ClusterRow): boolean {
     .map((ca) => ca.articles)
     .filter((a): a is V1EmbeddedArticle => a !== null);
   if (members.length === 0) return false;
-  const hits = members.filter((m) =>
-    (V1_POLITICS_CATEGORIES as readonly string[]).includes(m.category),
-  ).length;
+  // Migration 089 ("ADMIT"): a live-admitted member counts too.
+  const hits = members.filter((m) => isPoliticsMember(m)).length;
   return hits / members.length >= V1_POLITICS_THRESHOLD;
 }
 

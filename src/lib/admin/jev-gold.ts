@@ -1,4 +1,7 @@
 import { createServerClient } from "@/lib/supabase/server";
+import { JEV_TOPIC7_GUIDE_TR, renderTopic7GuideText } from "@/lib/admin/jev-topic7-guide";
+
+export { JEV_TOPIC7_GUIDE_TR, renderTopic7GuideText };
 
 // Pack JEV şimdi (migration 063) — the /admin/jev-altin double-labeling
 // surface's reader and vocabulary. Mirrors src/lib/admin/jev-shadow-status.ts's
@@ -25,7 +28,7 @@ export const JEV_GOLD_TOPIC_LABELS_TR: Record<(typeof JEV_GOLD_TOPICS)[number], 
   spor: "Spor",
   yasam: "Yaşam",
   teknoloji: "Teknoloji",
-  genel: "Genel",
+  genel: "Olaylar (genel)",
 };
 
 export type JevLabeler = 1 | 2;
@@ -55,6 +58,27 @@ export interface JevGoldArticle {
   category: string;
   source_slug: string;
   position: number;
+}
+
+/**
+ * The pre-label view of an article (090, pre-existing issue #4): only
+ * "Sıra" — never source or feed category, which anchored labellers on the
+ * regex category (~53% accurate against Opus gold). See revealLine() for
+ * what's shown AFTER a label is saved.
+ */
+export function preLabelFields(article: JevGoldArticle): Array<{ label: string; value: string }> {
+  return [{ label: "Sıra", value: String(article.position) }];
+}
+
+/**
+ * The one-line reveal shown after a label is saved for the article just
+ * labelled (090): "Az önce etiketlenen haber: kaynak {source_slug} · akış
+ * kategorisi {category}". Nulls render as "—".
+ */
+export function revealLine(saved: { sourceSlug: string | null; category: string | null }): string {
+  const sourceSlug = saved.sourceSlug ?? "—";
+  const category = saved.category ?? "—";
+  return `Az önce etiketlenen haber: kaynak ${sourceSlug} · akış kategorisi ${category}`;
 }
 
 export interface JevGoldNext {
@@ -412,6 +436,115 @@ export async function getJevGoldScorecard(): Promise<JevGoldScorecard | null> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[admin] jev gold scorecard unavailable: ${message}`);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Topic (7) altın karnesi (migration 090, T7a): dev (opus_seed) vs held-out
+// composition and final-label provenance, from jev_gold_topic7_scorecard().
+// Defensive parse -- an RPC error, a missing split or a non-numeric field
+// never throws; getJevGoldTopic7Scorecard() returns null instead. No
+// "use cache": this reads live labeling state, same rationale as every
+// other getter in this file.
+// ---------------------------------------------------------------------------
+
+export type JevGoldTopic7FinalSource = "human_agreed" | "human_single" | "provisional" | "none";
+
+export interface JevGoldTopic7SplitFigure {
+  n: number;
+  finalBySource: Partial<Record<JevGoldTopic7FinalSource, number>>;
+  provVsHumanN: number;
+  provVsHumanAgree: number;
+}
+
+export interface JevGoldTopic7StoredVsFinalRow {
+  split: string;
+  storedKey: string;
+  n: number;
+  correct: number;
+}
+
+export interface JevGoldTopic7Scorecard {
+  bySplit: Partial<Record<"dev" | "heldout", JevGoldTopic7SplitFigure>>;
+  storedVsFinal: JevGoldTopic7StoredVsFinalRow[];
+}
+
+function isFinalSource(v: unknown): v is JevGoldTopic7FinalSource {
+  return v === "human_agreed" || v === "human_single" || v === "provisional" || v === "none";
+}
+
+function parseTopic7SplitFigure(raw: unknown): JevGoldTopic7SplitFigure | null {
+  if (raw === null || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const finalBySourceRaw = r.final_by_source;
+  const finalBySource: Partial<Record<JevGoldTopic7FinalSource, number>> = {};
+  if (finalBySourceRaw !== null && typeof finalBySourceRaw === "object") {
+    for (const [key, value] of Object.entries(finalBySourceRaw as Record<string, unknown>)) {
+      if (isFinalSource(key)) {
+        finalBySource[key] = toNum(value);
+      }
+    }
+  }
+  return {
+    n: toNum(r.n),
+    finalBySource,
+    provVsHumanN: toNum(r.prov_vs_human_n),
+    provVsHumanAgree: toNum(r.prov_vs_human_agree),
+  };
+}
+
+/**
+ * Defensive parser for jev_gold_topic7_scorecard()'s jsonb shape. Handles
+ * null, {}, a missing split, and non-numeric fields (coerced via toNum /
+ * dropped when the row itself is non-numeric junk). Never throws.
+ */
+export function parseTopic7Scorecard(raw: unknown): JevGoldTopic7Scorecard | null {
+  if (raw === null || raw === undefined || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+
+  const bySplitRaw = r.by_split;
+  const bySplit: Partial<Record<"dev" | "heldout", JevGoldTopic7SplitFigure>> = {};
+  if (bySplitRaw !== null && typeof bySplitRaw === "object") {
+    for (const key of ["dev", "heldout"] as const) {
+      const figure = parseTopic7SplitFigure((bySplitRaw as Record<string, unknown>)[key]);
+      if (figure !== null) bySplit[key] = figure;
+    }
+  }
+
+  const storedVsFinalRaw = r.stored_vs_final;
+  const storedVsFinal: JevGoldTopic7StoredVsFinalRow[] = [];
+  if (Array.isArray(storedVsFinalRaw)) {
+    for (const row of storedVsFinalRaw) {
+      if (row === null || typeof row !== "object") continue;
+      const rr = row as Record<string, unknown>;
+      const split = rr.split;
+      const storedKey = rr.stored_key;
+      if (typeof split !== "string" || typeof storedKey !== "string") continue;
+      const n = Number(rr.n);
+      const correct = Number(rr.correct);
+      if (!Number.isFinite(n) || !Number.isFinite(correct)) continue;
+      storedVsFinal.push({ split, storedKey, n, correct });
+    }
+  }
+
+  return { bySplit, storedVsFinal };
+}
+
+export async function getJevGoldTopic7Scorecard(): Promise<JevGoldTopic7Scorecard | null> {
+  try {
+    const supabase = createServerClient();
+    const { data, error } = await supabase.rpc("jev_gold_topic7_scorecard");
+
+    if (error) {
+      console.error(`[admin] jev gold topic7 scorecard unavailable: ${error.message}`);
+      return null;
+    }
+
+    return parseTopic7Scorecard(data ?? null);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[admin] jev gold topic7 scorecard unavailable: ${message}`);
     return null;
   }
 }

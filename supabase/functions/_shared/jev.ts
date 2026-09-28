@@ -127,8 +127,16 @@ export const JEV_BLINDSPOT_WINDOW_HOURS = 24;
 export const JEV_BLINDSPOT_SUSPECT_PROB = 0.7;
 
 // --- Migration 066: frozen regression set ---
-/** Items fetched per kind, per regression run. */
-export const JEV_REGRESSION_ITEM_LIMIT = 500;
+/** Items fetched per kind, per regression run. Raised 500 -> 700 by 088 so a
+ * full 660-item frozen replay is not truncated (see JEV_REGRESSION_CONCURRENCY). */
+export const JEV_REGRESSION_ITEM_LIMIT = 700;
+/** 088: regression stage concurrency, well above JEV_CONCURRENCY. At 8-wide,
+ * ~660 regression calls cannot finish inside JEV_DEADLINE_MS=50_000 (066's
+ * own comment: ~400 calls do not fit), so every replay closed 'partial' and
+ * never became a baseline. Only runRegressionArticlesStage and
+ * runRegressionPairsStage pass this to processStage; shadow and audit stay
+ * at JEV_CONCURRENCY. */
+export const JEV_REGRESSION_CONCURRENCY = 32;
 /** Answer rows buffered before an insertRegressionAnswers write. */
 export const JEV_REGRESSION_ANSWER_CHUNK = 200;
 /** Hand-duplicated twin of 066's jev_regression_freeze(p_articles int default 400). */
@@ -154,11 +162,12 @@ export const JEV_SCORE_TASKS: ReadonlySet<string> = new Set(["sensational", "kap
 // so a single call's AbortSignal.timeout is bounded by the run's remaining
 // budget, not a fixed 20s.
 export const JEV_MAX_RETRIES = 2;
-/** MUST match POLITICS_CATEGORIES at cluster-consumer/index.ts:93. Parity-tested
- * in tests/migrations/jev-shadow-parity.test.ts. CONSTANT DRIFT: this is a
- * deliberate duplicate (importing the real one would drag that Edge
- * Function's own serve entrypoint into vitest) -- the parity test cannot
- * detect that cluster-consumer changed its own list independently. */
+/** MUST match POLITICS_CATEGORIES at _shared/cluster/politics-admission.ts
+ * (added by the ADMIT item). Parity-tested in
+ * tests/migrations/jev-shadow-parity.test.ts and cross-pinned by
+ * tests/functions/politics-admission.test.ts. CONSTANT DRIFT: this is a
+ * deliberate duplicate -- the parity test cannot detect that
+ * politics-admission.ts changed its own list independently. */
 export const JEV_POLITICS_CATEGORIES = ["politika", "son_dakika"] as const;
 /** The feed's 7-label topic taxonomy. Byte-identical to migration 063's
  *  jev_gold_labels.topic CHECK list and to JEV_GOLD_TOPICS in
@@ -683,6 +692,15 @@ export interface JevGoldLabelRow {
   topic: string;
 }
 
+/** 088: a provisional (not-yet-agreed) human label, split dev/heldout by
+ * jev_gold_set.stratum (opus_seed -> dev, every other stratum -> heldout). */
+export interface JevProvisionalLabelRow {
+  article_id: string;
+  is_politics: boolean;
+  topic: string;
+  split: "dev" | "heldout";
+}
+
 export interface JevRegressionTaskDelta {
   n: number;
   flips: number;
@@ -690,9 +708,23 @@ export interface JevRegressionTaskDelta {
   max_abs_delta: number | null;
 }
 
+export interface JevProvisionalSplitGold {
+  politics: { n: number; correct_050: number; correct_070: number };
+  topic7: { n: number; correct: number };
+}
+
 export interface JevRegressionGold {
   politics: { n: number; correct_050: number; correct_070: number };
   topic: { n: number; correct: number };
+  /** 088: 7-way topic match (JEV_TOPIC7_CHOICES), dunya scored, against
+   * agreed human labels -- byte-additive to the existing politics/topic
+   * blocks above. */
+  topic7: { n: number; correct: number };
+  /** 088: present iff computeRegressionGold's 4th arg was passed (n = 0 when
+   * the caller passed an empty array). dev = stratum 'opus_seed', heldout =
+   * every other stratum. Scored against JevProvisionalLabelRow, which has
+   * not been through agreedGoldLabels' two-labeler agreement filter. */
+  provisional?: { dev: JevProvisionalSplitGold; heldout: JevProvisionalSplitGold };
 }
 
 export interface JevRegressionDeltas {
@@ -876,6 +908,60 @@ export async function questionRegistryHash(): Promise<string> {
   return sha256Hex(canonicalJson(JEV_QUESTION_REGISTRY));
 }
 
+const FNV1A64_TEXT_ENCODER = new TextEncoder();
+const FNV1A64_OFFSET_BASIS = BigInt("0xcbf29ce484222325");
+const FNV1A64_PRIME = BigInt("0x100000001b3");
+const FNV1A64_MASK = BigInt("0xffffffffffffffff");
+
+/** FNV-1a-64 over the UTF-8 bytes of `str`, as 16 lowercase hex chars. No
+ * BigInt literals (tsconfig target ES2017) -- every constant is built via
+ * BigInt(...). Exported so tests can pin it directly without going through
+ * taskQuestionFingerprint's registry lookup. */
+export function fnv1a64Hex(str: string): string {
+  let hash = FNV1A64_OFFSET_BASIS;
+  const bytes = FNV1A64_TEXT_ENCODER.encode(str);
+  for (const b of bytes) {
+    hash ^= BigInt(b);
+    hash = (hash * FNV1A64_PRIME) & FNV1A64_MASK;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+const taskQuestionFingerprintCache = new Map<string, string | null>();
+
+/** Per-task fingerprint of the CURRENT question text (088): "fnv1a64:" + 16
+ * lowercase hex of FNV-1a-64 over canonicalJson(JEV_QUESTION_REGISTRY[task]).
+ * Synchronous and pure (unlike questionRegistryHash, which is async only
+ * because it delegates to sha256Hex); memoised per task since the registry
+ * never changes within a process. Returns null for an unknown task -- this
+ * lets a caller stamp jev_answer.question_hash for every JEV_TASKS entry
+ * without a lookup failure. */
+export function taskQuestionFingerprint(task: string): string | null {
+  if (taskQuestionFingerprintCache.has(task)) {
+    return taskQuestionFingerprintCache.get(task) ?? null;
+  }
+  const entry = (JEV_QUESTION_REGISTRY as Record<string, { instructions: string; criteria?: unknown } | undefined>)[
+    task
+  ];
+  if (!entry) {
+    taskQuestionFingerprintCache.set(task, null);
+    return null;
+  }
+  const fp = `fnv1a64:${fnv1a64Hex(canonicalJson(entry))}`;
+  taskQuestionFingerprintCache.set(task, fp);
+  return fp;
+}
+
+/** 088: kap_class is asked for 1 in 5 disclosures. */
+export const JEV_KAP_CLASS_SAMPLE_MOD = 5;
+
+/** True when disclosure_index mod JEV_KAP_CLASS_SAMPLE_MOD === 0, i.e. the
+ * decimal string ends in "0" or "5". Non-numeric or empty input -> false
+ * (never sampled -- fails closed, matching kap_materiality-only asks). */
+export function kapClassSampled(idx: string): boolean {
+  return /^\d+$/.test(idx) && (idx.endsWith("0") || idx.endsWith("5"));
+}
+
 function boolQuestion(task: JevTask): JevQuestion {
   const entry = JEV_QUESTION_REGISTRY[task];
   const c = (entry.criteria ?? {}) as { true?: string; false?: string };
@@ -1029,8 +1115,12 @@ export function buildPairCall(
   return { request: { state: { pairs: pairsState }, questions }, keys };
 }
 
-/** questions kap_class (choice ODA|DKB|DG|FR) + kap_materiality (score, 4 levels). */
-export function buildKapCall(d: JevKapRow): JevRequest {
+/** questions kap_class (choice ODA|DKB|DG|FR) + kap_materiality (score, 4
+ * levels). 088: kap_class is sampled -- opts.withClass defaults to
+ * kapClassSampled(d.disclosure_index); when false the request carries only
+ * kap_materiality (an ~-730k tokens/weekday saving, per measurement). */
+export function buildKapCall(d: JevKapRow, opts: { withClass?: boolean } = {}): JevRequest {
+  const withClass = opts.withClass ?? kapClassSampled(d.disclosure_index);
   const state = {
     title: clamp(d.kap_title, JEV_TITLE_CLAMP),
     subject: d.subject ?? null,
@@ -1038,10 +1128,9 @@ export function buildKapCall(d: JevKapRow): JevRequest {
     stock_codes: d.stock_codes ?? [],
   };
 
-  const questions: Record<string, JevQuestion> = {
-    kap_class: choiceQuestion("kap_class"),
-    kap_materiality: scoreQuestion("kap_materiality"),
-  };
+  const questions: Record<string, JevQuestion> = withClass
+    ? { kap_class: choiceQuestion("kap_class"), kap_materiality: scoreQuestion("kap_materiality") }
+    : { kap_materiality: scoreQuestion("kap_materiality") };
 
   return { state, questions };
 }
@@ -1471,17 +1560,24 @@ export function agreedGoldLabels(
  * labels whose goldTopicToJevChoice is null; n counts the rest with a
  * non-null task='topic' jev_choice; correct = jev_choice === mapped topic.
  */
+function emptyProvisionalSplitGold(): JevProvisionalSplitGold {
+  return { politics: { n: 0, correct_050: 0, correct_070: 0 }, topic7: { n: 0, correct: 0 } };
+}
+
 export function computeRegressionGold(
   items: readonly JevRegressionItem[],
   cur: readonly JevRegressionAnswerRow[],
   labels: readonly JevGoldLabelRow[],
+  provisional?: readonly JevProvisionalLabelRow[],
 ): JevRegressionGold {
   const labelByArticle = new Map(labels.map((l) => [l.article_id, l]));
   const politicsByItem = new Map<number, number>();
   const topicByItem = new Map<number, string>();
+  const topic7ByItem = new Map<number, string>();
   for (const row of cur) {
     if (row.task === "politics" && row.jev_prob !== null) politicsByItem.set(row.item_id, row.jev_prob);
     if (row.task === "topic" && row.jev_choice !== null) topicByItem.set(row.item_id, row.jev_choice);
+    if (row.task === "topic7" && row.jev_choice !== null) topic7ByItem.set(row.item_id, row.jev_choice);
   }
 
   let politicsN = 0;
@@ -1489,8 +1585,13 @@ export function computeRegressionGold(
   let correct070 = 0;
   let topicN = 0;
   let topicCorrect = 0;
+  let topic7N = 0;
+  let topic7Correct = 0;
 
+  const itemByArticle = new Map<string, JevRegressionItem>();
   for (const item of items) {
+    if (item.kind === "article") itemByArticle.set(item.subject_id, item);
+
     if (!item.in_gold || item.kind !== "article") continue;
     const label = labelByArticle.get(item.subject_id);
     if (!label) continue;
@@ -1503,18 +1604,53 @@ export function computeRegressionGold(
     }
 
     const mappedTopic = goldTopicToJevChoice(label.topic);
-    if (mappedTopic === null) continue;
-    const choice = topicByItem.get(item.id);
-    if (choice !== undefined) {
-      topicN += 1;
-      if (choice === mappedTopic) topicCorrect += 1;
+    if (mappedTopic !== null) {
+      const choice = topicByItem.get(item.id);
+      if (choice !== undefined) {
+        topicN += 1;
+        if (choice === mappedTopic) topicCorrect += 1;
+      }
+    }
+
+    // topic7: exact 7-way match against the agreed human label, dunya scored
+    // like every other choice (no goldTopicToJevChoice mapping/exclusion).
+    const topic7Choice = topic7ByItem.get(item.id);
+    if (topic7Choice !== undefined) {
+      topic7N += 1;
+      if (topic7Choice === label.topic) topic7Correct += 1;
     }
   }
 
-  return {
+  const gold: JevRegressionGold = {
     politics: { n: politicsN, correct_050: correct050, correct_070: correct070 },
     topic: { n: topicN, correct: topicCorrect },
+    topic7: { n: topic7N, correct: topic7Correct },
   };
+
+  if (provisional === undefined) return gold;
+
+  const dev = emptyProvisionalSplitGold();
+  const heldout = emptyProvisionalSplitGold();
+  for (const label of provisional) {
+    const item = itemByArticle.get(label.article_id);
+    if (!item) continue;
+    const split = label.split === "dev" ? dev : heldout;
+
+    const prob = politicsByItem.get(item.id);
+    if (prob !== undefined) {
+      split.politics.n += 1;
+      if ((prob >= JEV_BOOLEAN_THRESHOLD) === label.is_politics) split.politics.correct_050 += 1;
+      if ((prob >= JEV_GOLD_STRICT_THRESHOLD) === label.is_politics) split.politics.correct_070 += 1;
+    }
+
+    const choice7 = topic7ByItem.get(item.id);
+    if (choice7 !== undefined) {
+      split.topic7.n += 1;
+      if (choice7 === label.topic) split.topic7.correct += 1;
+    }
+  }
+
+  return { ...gold, provisional: { dev, heldout } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1570,6 +1706,9 @@ export function predictionRow(args: {
   runId: number;
   /** Shallow-merged into jev_answer.answer -- e.g. neutral_pick's { picks }. */
   answerExtra?: Record<string, unknown>;
+  /** 088: the sorted list of tasks asked in this call (article and KAP rows
+   * only). Absent from jev_answer entirely when not given, never `[]`. */
+  pack?: readonly string[];
 }): JevPredictionRow {
   const jevProb =
     args.answer.type === "boolean"
@@ -1593,6 +1732,8 @@ export function predictionRow(args: {
       answer: args.answerExtra ? { ...args.answer, ...args.answerExtra } : args.answer,
       question_id: args.questionId,
       question_set: JEV_QUESTION_SET_VERSION,
+      question_hash: taskQuestionFingerprint(args.task),
+      ...(args.pack ? { pack: [...args.pack].sort() } : {}),
       call_id: args.callId,
       state_preview: args.preview,
       output_tokens: args.response.usage.outputTokens,
@@ -1623,7 +1764,17 @@ export interface JevPorts {
   startRun(): Promise<number>;
   finishRun(
     id: number,
-    patch: { finished_at: string; calls: number; input_tokens: number; errors: number; status: JevRunStatus; note: string | null },
+    patch: {
+      finished_at: string;
+      calls: number;
+      input_tokens: number;
+      errors: number;
+      status: JevRunStatus;
+      note: string | null;
+      /** 088: {} on the budget-exceeded early close (zero evaluate() calls
+       * were made); otherwise stageLedger(mode, ctx.ledger). */
+      stage_tokens: JevStageLedger;
+    },
   ): Promise<void>;
   insertPredictions(rows: readonly JevPredictionRow[]): Promise<number>;
   /** Checkpoints spend on the still-open run row (UPDATE, not the closing
@@ -1632,7 +1783,7 @@ export interface JevPorts {
    * cron's 60s timeout -- still leaves its spend counted toward the monthly
    * cap, instead of the whole run's tokens vanishing because `finally`
    * never ran. */
-  recordTokens(runId: number, calls: number, inputTokens: number): Promise<void>;
+  recordTokens(runId: number, calls: number, inputTokens: number, stageTokens: JevStageLedger): Promise<void>;
   /** Anti-join: which of these `${task}` subject_ids already have a row in
    * jev_shadow_predictions. Backed by index.ts's chunked anti_join()
    * helper (JEV-A5). Used by the cluster stage (JEV-A10) since
@@ -1716,6 +1867,12 @@ export interface JevPorts {
   /** Already agreement-filtered via agreedGoldLabels(). Chunk .in() by
    * JEV_ID_CHUNK (100). */
   fetchGoldLabels(articleIds: readonly string[]): Promise<JevGoldLabelRow[]>;
+  /** 088: optional so existing JevPorts fakes keep compiling. Not-yet-agreed
+   * human labels for the given article ids, split dev/heldout by
+   * jev_gold_set.stratum. Called from closeRegressionRun in its own nested
+   * try/catch -- a failure omits deltas.gold.provisional but never nulls the
+   * rest of deltas.gold. */
+  fetchProvisionalGoldLabels?(articleIds: readonly string[]): Promise<JevProvisionalLabelRow[]>;
 }
 
 export interface JevShadowResult {
@@ -1752,6 +1909,9 @@ interface StageStats {
   rows: number;
   errors: number;
   skipped: number;
+  /** 088: input tokens spent by this stage, mirrored into ctx.ledger and
+   * written out via stageLedger()/JevPorts.recordTokens/finishRun. */
+  tokens: number;
 }
 
 interface RunCtx {
@@ -1774,6 +1934,10 @@ interface RunCtx {
    * still closes -- as 'partial', naming them -- instead of one stage's
    * PostgREST error taking every later stage down with it. */
   failedStages: StageName[];
+  /** 088: private per-stage ledger, mirrored into ctx.stages[stage].tokens
+   * and written out via stageLedger() at every checkpoint and at close.
+   * Invariant: sum of ledger tokens === ctx.runTokens at all times. */
+  ledger: Record<StageName, { calls: number; tokens: number }>;
   /** Migration 066: non-null only when mode === 'regression' and a
    * regression run row was actually opened (never when the monthly cap was
    * already exceeded). */
@@ -1790,7 +1954,42 @@ interface RunCtx {
 }
 
 function emptyStageStats(): StageStats {
-  return { calls: 0, rows: 0, errors: 0, skipped: 0 };
+  return { calls: 0, rows: 0, errors: 0, skipped: 0, tokens: 0 };
+}
+
+/** 088: per-stage ledger key -- StageName in shadow mode, `${mode}:${stage}`
+ * in audit/regression mode. */
+export type JevStageLedger = Record<string, { calls: number; tokens: number }>;
+
+/** Every key stageLedger()/the ledger can emit. Used by the 088 SQL and its
+ * static contract test (JEV-A16-style) to size jev_stage_budgets' seed set;
+ * live_pair_marginal is SQL-only (no jev-shadow stage emits it). */
+export const JEV_LEDGER_STAGE_KEYS = [
+  "articles",
+  "clusters",
+  "blindspot_recall",
+  "pairs",
+  "kap",
+  "title_versions",
+  "tickers",
+  "audit:audit_pairs",
+  "audit:pairs",
+  "regression:regression_articles",
+  "regression:regression_pairs",
+] as const;
+
+/** Builds the JevStageLedger written to jev_shadow_runs.stage_tokens: the key
+ * is the bare stage name in shadow mode, `${mode}:${stage}` in audit/
+ * regression mode (088). Only entries with calls > 0 are included, so an
+ * empty run writes '{}' rather than a wall of zeros. */
+export function stageLedger(mode: JevRunMode, ledger: Record<string, { calls: number; tokens: number }>): JevStageLedger {
+  const out: JevStageLedger = {};
+  for (const [stage, stats] of Object.entries(ledger)) {
+    if (stats.calls <= 0) continue;
+    const key = mode === "shadow" ? stage : `${mode}:${stage}`;
+    out[key] = { calls: stats.calls, tokens: stats.tokens };
+  }
+  return out;
 }
 
 function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number, cap: number, mode: JevRunMode): RunCtx {
@@ -1822,6 +2021,18 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
       audit_pairs: emptyStageStats(),
       regression_articles: emptyStageStats(),
       regression_pairs: emptyStageStats(),
+    },
+    ledger: {
+      articles: { calls: 0, tokens: 0 },
+      clusters: { calls: 0, tokens: 0 },
+      blindspot_recall: { calls: 0, tokens: 0 },
+      pairs: { calls: 0, tokens: 0 },
+      kap: { calls: 0, tokens: 0 },
+      title_versions: { calls: 0, tokens: 0 },
+      tickers: { calls: 0, tokens: 0 },
+      audit_pairs: { calls: 0, tokens: 0 },
+      regression_articles: { calls: 0, tokens: 0 },
+      regression_pairs: { calls: 0, tokens: 0 },
     },
   };
 }
@@ -1922,8 +2133,12 @@ async function callOnce(
 ): Promise<{ response: JevResponse; latencyMs: number } | null> {
   try {
     const result = await ctx.ports.evaluate(request);
+    const inputTokens = result.response.usage.inputTokens;
     ctx.calls += 1;
-    ctx.runTokens += result.response.usage.inputTokens;
+    ctx.runTokens += inputTokens;
+    ctx.ledger[stage].calls += 1;
+    ctx.ledger[stage].tokens += inputTokens;
+    ctx.stages[stage].tokens += inputTokens;
     if (!ctx.stopReason && budgetExceeded(ctx.monthTokens, ctx.runTokens, ctx.cap)) {
       ctx.stopReason = "budget_exceeded";
     }
@@ -1931,7 +2146,7 @@ async function callOnce(
     // ordering) but best-effort: a failed checkpoint write must not turn a
     // successful gateway call into a per-subject error.
     try {
-      await ctx.ports.recordTokens(ctx.runId, ctx.calls, ctx.runTokens);
+      await ctx.ports.recordTokens(ctx.runId, ctx.calls, ctx.runTokens, stageLedger(ctx.mode, ctx.ledger));
     } catch {
       // swallow -- finishRun's close-of-run write is still authoritative.
     }
@@ -1963,6 +2178,7 @@ async function processStage<T>(
   stageName: StageName,
   items: readonly T[],
   worker: (item: T) => Promise<void>,
+  concurrency: number = JEV_CONCURRENCY,
 ): Promise<void> {
   if (items.length === 0) return;
   let idx = 0;
@@ -1986,7 +2202,7 @@ async function processStage<T>(
     }
   };
 
-  const n = Math.max(1, Math.min(JEV_CONCURRENCY, items.length));
+  const n = Math.max(1, Math.min(concurrency, items.length));
   await Promise.all(Array.from({ length: n }, () => runOne()));
 }
 
@@ -2000,6 +2216,7 @@ function buildArticleRows(
   hash: string,
   preview: string,
   latencyMs: number,
+  pack: readonly string[],
 ): JevPredictionRow[] {
   const rows: JevPredictionRow[] = [];
   const common = {
@@ -2011,6 +2228,7 @@ function buildArticleRows(
     response,
     latencyMs,
     runId,
+    pack,
   };
 
   if (article.category !== null) {
@@ -2203,7 +2421,12 @@ export function buildBlindspotDayRow(args: {
     article_id: null,
     cluster_id: args.clusterId,
     state_hash: args.stateHash,
-    jev_answer: { candidates: args.candidates, question_set: JEV_QUESTION_SET_VERSION, day: args.day },
+    jev_answer: {
+      candidates: args.candidates,
+      question_set: JEV_QUESTION_SET_VERSION,
+      question_hash: taskQuestionFingerprint("blindspot_recall"),
+      day: args.day,
+    },
     jev_prob: null,
     jev_choice: null,
     baseline_answer: "false",
@@ -2305,6 +2528,7 @@ function buildKapRows(
   hash: string,
   preview: string,
   latencyMs: number,
+  pack: readonly string[],
 ): JevPredictionRow[] {
   const rows: JevPredictionRow[] = [];
   const common = {
@@ -2318,6 +2542,7 @@ function buildKapRows(
     runId,
     subjectType: "kap" as const,
     subjectId: d.disclosure_index,
+    pack,
   };
 
   const classAnswer = response.answers.kap_class;
@@ -2455,7 +2680,16 @@ async function runArticlesStage(ctx: RunCtx, sinceIso: string): Promise<void> {
     const hash = await stateHash(request.state);
     const preview = statePreview(request.state);
     const callId = nextCallId(ctx);
-    const rows = buildArticleRows(ctx.runId, article, result.response, callId, hash, preview, result.latencyMs);
+    const rows = buildArticleRows(
+      ctx.runId,
+      article,
+      result.response,
+      callId,
+      hash,
+      preview,
+      result.latencyMs,
+      Object.keys(request.questions),
+    );
     ctx.stages.articles.rows += rows.length;
     await pushRows(ctx, rows);
   });
@@ -2727,7 +2961,16 @@ async function runKapStage(ctx: RunCtx, sinceIso: string): Promise<void> {
     const hash = await stateHash(request.state);
     const preview = statePreview(request.state);
     const callId = nextCallId(ctx);
-    const rows = buildKapRows(ctx.runId, d, result.response, callId, hash, preview, result.latencyMs);
+    const rows = buildKapRows(
+      ctx.runId,
+      d,
+      result.response,
+      callId,
+      hash,
+      preview,
+      result.latencyMs,
+      Object.keys(request.questions),
+    );
     ctx.stages.kap.rows += rows.length;
     await pushRows(ctx, rows);
   });
@@ -2810,7 +3053,7 @@ async function runRegressionArticlesStage(ctx: RunCtx): Promise<void> {
     ctx.stages.regression_articles.rows += rows.length;
     if (ctx.regression) ctx.regression.answers.push(...rows);
     await pushRegressionRows(ctx, "regression_articles", rows);
-  });
+  }, JEV_REGRESSION_CONCURRENCY);
 }
 
 /**
@@ -2856,7 +3099,7 @@ async function runRegressionPairsStage(ctx: RunCtx): Promise<void> {
     ctx.stages.regression_pairs.rows += rows.length;
     if (ctx.regression) ctx.regression.answers.push(...rows);
     await pushRegressionRows(ctx, "regression_pairs", rows);
-  });
+  }, JEV_REGRESSION_CONCURRENCY);
 }
 
 /** JevRunStatus -> JevRegressionRunStatus per contract B4. */
@@ -2897,7 +3140,25 @@ async function closeRegressionRun(
     const goldArticleIds = items.filter((i) => i.in_gold && i.kind === "article").map((i) => i.subject_id);
     if (goldArticleIds.length > 0) {
       const labels = await ctx.ports.fetchGoldLabels(goldArticleIds);
-      const gold = computeRegressionGold(items, answers, labels);
+
+      // Provisional labels are best-effort: a failure here must never null
+      // the whole deltas.gold block, only omit its `provisional` sub-block.
+      let provisional: readonly JevProvisionalLabelRow[] | undefined;
+      try {
+        provisional = await ctx.ports.fetchProvisionalGoldLabels?.(
+          items.filter((i) => i.kind === "article").map((i) => i.subject_id),
+        );
+      } catch (provErr) {
+        ctx.errors += 1;
+        try {
+          ctx.ports.onError?.("regression_provisional", provErr);
+        } catch {
+          // A logging hook must never destabilize the run.
+        }
+        provisional = undefined;
+      }
+
+      const gold = computeRegressionGold(items, answers, labels, provisional);
       deltas = { ...deltas, gold };
     }
   } catch (err) {
@@ -3104,6 +3365,10 @@ export async function runJevShadow(
       errors: ctx.errors,
       status,
       note: withModeNote(mode, note),
+      // {} on the budget-exceeded early close (zero evaluate() calls were
+      // made, so the ledger is legitimately empty); otherwise reflects
+      // every stage that made at least one call.
+      stage_tokens: stageLedger(mode, ctx.ledger),
     });
   }
 
