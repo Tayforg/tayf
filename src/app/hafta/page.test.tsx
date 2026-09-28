@@ -531,7 +531,13 @@ describe("WeeklyPage — Aynı hafta, farklı kelimeler", () => {
 
   it("renders every example href as http(s)", async () => {
     const hrefs = collectHrefs(await WeeklyPage());
-    const exampleHrefs = hrefs.filter((h) => h.includes("example.com"));
+    const exampleHrefs = hrefs.filter((h) => {
+      try {
+        return new URL(h).hostname === "example.com";
+      } catch {
+        return false;
+      }
+    });
 
     expect(exampleHrefs.length).toBeGreaterThan(0);
     for (const href of exampleHrefs) {

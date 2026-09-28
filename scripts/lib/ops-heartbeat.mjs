@@ -110,12 +110,13 @@ export function formatTable(rows) {
 export function formatMarkdown(rows, verdict) {
   const header = "| check | status | observed | threshold | detail |";
   const sep = "| --- | --- | --- | --- | --- |";
+  // Escape backslashes first, then pipes, so a cell can neither break out of
+  // its column nor smuggle an escape sequence into the table.
+  const md = (v) => cell(v).replace(/\\/g, "\\\\").replace(/\|/g, "\\|");
   const body = rows
     .map(
       (r) =>
-        `| ${cell(r.check_name)} | ${cell(r.status)} | ${cell(r.observed)} | ${cell(r.threshold)} | ${cell(
-          r.detail,
-        ).replace(/\|/g, "\\|")} |`,
+        `| ${md(r.check_name)} | ${md(r.status)} | ${md(r.observed)} | ${md(r.threshold)} | ${md(r.detail)} |`,
     )
     .join("\n");
   return `## Ops heartbeat: ${verdict}\n\n${header}\n${sep}\n${body}\n`;
