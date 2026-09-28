@@ -443,6 +443,11 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // either; it is pinned by tests/migrations/077-ops-health-report.test.ts.
       "077_ops_health_report.sql",
       "087_trends_istanbul_day.sql",
+      // 092's trends_daily_zone_counts_ist_refresh() carries a ninth
+      // VALUES-list copy of BIAS_TO_ZONE (same shape as 071's/077's), so
+      // parseZoneCase can't read it either; it is pinned by
+      // tests/migrations/092-trends-rollup.test.ts.
+      "092_trends_rollup.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

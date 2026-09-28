@@ -996,13 +996,18 @@ describe("blindspot recall veto", () => {
 // ---------------------------------------------------------------------------
 
 describe("getPoliticsClusters error handling", () => {
-  it("throws when the query errors — an empty feed must never be cached as truth", async () => {
-    // The caller is wrapped in `"use cache"`: a thrown error prevents the
-    // bad value from entering the cache (Next serves the last good entry),
-    // whereas returning {bundles: []} would pin an empty homepage for the
-    // full revalidate window after a single Supabase blip.
+  it("never throws when the query errors — retries live and falls back to an empty feed", async () => {
+    // A thrown error inside the "use cache" boundary fails `next build`'s
+    // prerender even though this function wraps every call (see
+    // src/lib/cache-resilience.ts). Every query attempt below errors
+    // identically, so the cache attempt fails AND the live retry fails —
+    // getPoliticsClusters must still resolve, never reject.
     response = { data: null, error: { message: "db down" } };
-    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
+    await expect(getPoliticsClusters()).resolves.toEqual({
+      bundles: [],
+      breakingBundles: [],
+      prefilterCount: 0,
+    });
   });
 
   it("returns an empty result when the query returns no rows", async () => {

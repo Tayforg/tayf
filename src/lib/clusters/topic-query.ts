@@ -9,6 +9,7 @@ import {
   type EmbeddedClusterRow,
 } from "@/lib/clusters/politics-query";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { resolveCachedOrRetry } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import { siteUrl } from "@/lib/site-url";
 
@@ -88,16 +89,10 @@ export function clampTopicPage(page: number): number {
   return Math.min(TOPIC_MAX_PAGE, Math.max(1, truncated || 1));
 }
 
-/** null = could not read (render the unavailable state).
- *  { bundles: [] } = read fine, nothing matched (render the empty state). */
-export async function getTopicClusters(
+async function fetchTopicClusters(
   slug: TopicSlug,
   page: number,
 ): Promise<TopicClustersPage | null> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag("clusters-politics");
-
   const clampedPage = clampTopicPage(page);
 
   try {
@@ -158,16 +153,35 @@ export async function getTopicClusters(
   }
 }
 
-/** 7-day cluster count per hub slug. null = could not read; the index page
- *  then renders the six links with no numbers rather than zeros. */
-export async function getTopicCounts(): Promise<Record<
-  TopicSlug,
-  number
-> | null> {
+async function getTopicClustersCached(slug: TopicSlug, page: number) {
   "use cache";
   cacheLife("cluster-feed");
   cacheTag("clusters-politics");
 
+  const data = await fetchTopicClusters(slug, page);
+  return data === null
+    ? ({ ok: false, error: "konu clusters unavailable" } as const)
+    : ({ ok: true, data } as const);
+}
+
+/** null = could not read (render the unavailable state).
+ *  { bundles: [] } = read fine, nothing matched (render the empty state).
+ *  Retries live once on a cache-attempt `null` before falling back, so a
+ *  transient Supabase blip is not pinned for the rest of the
+ *  `cluster-feed` cacheLife window. */
+export async function getTopicClusters(
+  slug: TopicSlug,
+  page: number,
+): Promise<TopicClustersPage | null> {
+  return resolveCachedOrRetry(
+    "konu-clusters",
+    () => getTopicClustersCached(slug, page),
+    () => fetchTopicClusters(slug, page),
+    null,
+  );
+}
+
+async function fetchTopicCounts(): Promise<Record<TopicSlug, number> | null> {
   try {
     const supabase = createServerClient();
     const nowMs = Date.now();
@@ -214,6 +228,32 @@ export async function getTopicCounts(): Promise<Record<
     console.error(`[konu] counts unavailable: ${message}`);
     return null;
   }
+}
+
+async function getTopicCountsCached() {
+  "use cache";
+  cacheLife("cluster-feed");
+  cacheTag("clusters-politics");
+
+  const data = await fetchTopicCounts();
+  return data === null
+    ? ({ ok: false, error: "konu counts unavailable" } as const)
+    : ({ ok: true, data } as const);
+}
+
+/** 7-day cluster count per hub slug. null = could not read; the index page
+ *  then renders the six links with no numbers rather than zeros. Retries
+ *  live once on a cache-attempt `null` before falling back. */
+export async function getTopicCounts(): Promise<Record<
+  TopicSlug,
+  number
+> | null> {
+  return resolveCachedOrRetry(
+    "konu-counts",
+    getTopicCountsCached,
+    fetchTopicCounts,
+    null,
+  );
 }
 
 /** Pure. schema.org CollectionPage + ItemList of absolute /cluster/<id> URLs. */

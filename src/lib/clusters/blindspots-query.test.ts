@@ -458,3 +458,19 @@ describe("getBlindspotsSafe", () => {
     }
   });
 });
+
+describe("getBlindspots build-safety", () => {
+  it("never throws on a Step-A error — retries live and falls back to an empty list", async () => {
+    // A throw crossing the "use cache: remote" boundary fails `next
+    // build`'s prerender even though this function wraps every call (see
+    // src/lib/cache-resilience.ts). The fixture errors on every call, so
+    // both the cache attempt and the live retry fail.
+    fixture.candidateError = { message: "db down" };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(getBlindspots()).resolves.toEqual({ bundles: [] });
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});

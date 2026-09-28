@@ -7,6 +7,7 @@ import type {
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { BLINDSPOT } from "@/lib/bias/config";
+import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 import {
   dedupeBySource,
   passesFeedFilters,
@@ -303,15 +304,30 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
   return { bundles: bundles.slice(0, DISPLAY_LIMIT) };
 }
 
-// Public cached entry point. The /blindspots page and the weekly digest
-// cron both call this identical signature — the cache layer is invisible
-// from the call site. Still THROWS on failure (unchanged contract): the
-// digest cron, the social cron and rss/[topic] depend on that.
-export async function getBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
+const BLINDSPOTS_FALLBACK: { bundles: BlindspotBundle[] } = { bundles: [] };
+
+// Build-safety: `attemptCached` swallows whatever `fetchBlindspots` throws
+// instead of letting it cross the `"use cache: remote"` boundary — a throw
+// here fails `next build`'s prerender even when every caller catches (see
+// src/lib/cache-resilience.ts).
+async function getBlindspotsCached() {
   "use cache: remote";
   cacheLife("cluster-feed");
   cacheTag("clusters", "clusters-politics");
-  return fetchBlindspots();
+  return attemptCached("blindspots-query", fetchBlindspots);
+}
+
+// Public cached entry point. The /blindspots page and the weekly digest
+// cron both call this identical signature — the cache layer is invisible
+// from the call site. On a cache-attempt failure this retries the query
+// live once before falling back to `{ bundles: [] }`; never throws.
+export async function getBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
+  return resolveCachedOrRetry(
+    "blindspots-query",
+    getBlindspotsCached,
+    fetchBlindspots,
+    BLINDSPOTS_FALLBACK,
+  );
 }
 
 export type BlindspotsResult =

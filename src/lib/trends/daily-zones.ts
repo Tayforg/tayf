@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
 
@@ -111,30 +112,49 @@ export function bucketIstanbulDays(
 }
 
 // Split into a cached inner fetcher that THROWS on failure OR on an empty
-// result, and an uncached exported wrapper that catches. A `"use cache"`
-// function's *return value* is what gets cached — including an empty
-// array — so returning `[]` from inside the cached function would itself
-// be cached as the answer for the whole `revalidate: 3600` window. Since
-// `next.config.ts` has `cacheComponents: true`, `next build` prefills this
-// entry, so a transient failure OR a genuinely-empty prod dataset at build
-// time would ship a deployed /trends pinned on "unavailable"/"empty" for
-// up to an hour with no `cacheTag` recourse until the next real request.
-// Throwing here aborts this function's own cache write without aborting
-// the `next build` prerender — the wrapper's try/catch swallows the throw.
+// result, and an uncached exported wrapper that catches.
+//
+// Build-safety (2026-09-28 incident: `next build` failed with "Error
+// occurred prerendering page /trends" after a Supabase statement timeout
+// thrown here — the throw/outer-catch pattern below, on its own, does NOT
+// protect `next build`'s prerender: a throw crossing the `"use cache"`
+// boundary fails the build even though `fetchIstanbulTimeline` wraps every
+// call. See src/lib/cache-resilience.ts's file header and
+// src/lib/clusters/feed-health.ts's file header for the confirmed root
+// cause). `attemptCached` below swallows the throw INSIDE the cache
+// boundary so it can never escape into the prerender.
+//
+// No live-retry-on-failure here (unlike politics-query.ts, blindspots-
+// query.ts, etc.): the raw fetch reads `Date.now()`, and Next 16 prerender
+// (cacheComponents) rejects a clock read in the uncached render path of a
+// static route. A bypass-retry would call that clock read outside any
+// cache scope, which is exactly the dynamic-API-during-prerender case this
+// file was already written to avoid. A cache-attempt failure therefore
+// falls straight back to `null` — the existing hourly `revalidate: 3600`
+// cacheLife already re-tries automatically at the next real request.
+//
+// A `"use cache"` function's *return value* is what gets cached —
+// including an empty array — so returning `[]` from inside the cached
+// function would itself be cached as the answer for the whole
+// `revalidate: 3600` window. Since `next.config.ts` has `cacheComponents:
+// true`, `next build` prefills this entry, so a transient failure OR a
+// genuinely-empty prod dataset at build time would ship a deployed
+// /trends pinned on "unavailable"/"empty" for up to an hour with no
+// `cacheTag` recourse until the next real request. Throwing inside
+// `fetchIstanbulTimelineCached` (caught immediately by `attemptCached`)
+// keeps a transient failure out of that cached *value* without ever
+// letting the throw itself reach the prerender.
 //
 // The clock is read once INSIDE the cache scope and quantized to the hour
 // (`hourBucketStart`), so the Istanbul "today" boundary moves with the
 // hourly revalidate window. It cannot be read in the uncached wrapper:
 // Next 16 prerender (cacheComponents) rejects Date.now() in the uncached
 // render path of a static route.
-async function fetchIstanbulTimelineCached(): Promise<DayBucket[]> {
-  "use cache";
-  cacheLife({ revalidate: 3600 });
+async function fetchIstanbulTimelineRaw(): Promise<DayBucket[]> {
   // Read the clock INSIDE the cache scope (same pattern as the pre-087
   // trends-query.ts): Next 16 prerender forbids Date.now() in the uncached
   // render path, and the cached entry is refreshed hourly anyway.
   const nowMs = hourBucketStart(Date.now());
-  cacheTag("trends");
 
   const supabase = createServerClient();
 
@@ -160,12 +180,14 @@ async function fetchIstanbulTimelineCached(): Promise<DayBucket[]> {
   return bucketIstanbulDays(data, nowMs);
 }
 
+async function fetchIstanbulTimelineCached() {
+  "use cache";
+  cacheLife({ revalidate: 3600 });
+  cacheTag("trends");
+  return attemptCached("trends", fetchIstanbulTimelineRaw);
+}
+
 export async function fetchIstanbulTimeline(): Promise<DayBucket[] | null> {
-  try {
-    return await fetchIstanbulTimelineCached();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[trends] fetchIstanbulTimeline error: ${message}`);
-    return null;
-  }
+  const result = await fetchIstanbulTimelineCached();
+  return result.ok ? result.data : null;
 }

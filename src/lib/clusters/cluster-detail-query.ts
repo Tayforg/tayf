@@ -4,6 +4,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
+import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 import {
   degradedSilentZone,
   getZoneFeedHealth,
@@ -488,19 +489,19 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
   }
 }
 
-// Cached implementation. With Cache Components the `id` argument is
-// automatically part of the cache key — no per-id wrapper Map needed.
-// Callers / workers can invalidate a single cluster with
-// `revalidateTag(\`cluster-detail:\${id}\`)`. Not exported: every caller
-// must go through `getClusterDetail`'s UUID guard below so a malformed id
-// (e.g. `/cluster/not-a-uuid`) never reaches Supabase or this cache layer.
-async function getClusterDetailCached(
-  id: string
-): Promise<ClusterDetail | null> {
+// Build-safety: `attemptCached` swallows whatever `fetchClusterDetail`
+// throws instead of letting it cross the `"use cache: remote"` boundary —
+// a throw here fails `next build`'s prerender even when every caller
+// catches (see src/lib/cache-resilience.ts). A genuine "not found"
+// (`null`, no error) is NOT a failure — it flows through as
+// `{ ok: true, data: null }`. Not exported: every caller must go through
+// `getClusterDetail`'s UUID guard below so a malformed id (e.g.
+// `/cluster/not-a-uuid`) never reaches Supabase or this cache layer.
+async function getClusterDetailCached(id: string) {
   "use cache: remote";
   cacheLife("cluster-feed");
   cacheTag(`cluster-detail:${id}`, "clusters");
-  return fetchClusterDetail(id);
+  return attemptCached("cluster-detail", () => fetchClusterDetail(id));
 }
 
 // UUID guard (reader-queries E3): `clusters.id` is a Postgres `uuid`
@@ -513,9 +514,23 @@ async function getClusterDetailCached(
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Public entry point. With Cache Components the `id` argument is
+// automatically part of the cache key — no per-id wrapper Map needed.
+// Callers / workers can invalidate a single cluster with
+// `revalidateTag(\`cluster-detail:\${id}\`)`.
+//
+// On a cache-attempt failure this retries the query live once (so a
+// transient Supabase blip does not pin a false 404 for the whole
+// `cluster-feed` cacheLife window) before falling back to `null`; never
+// throws.
 export async function getClusterDetail(
   id: string
 ): Promise<ClusterDetail | null> {
   if (!UUID_RE.test(id)) return null;
-  return getClusterDetailCached(id);
+  return resolveCachedOrRetry(
+    "cluster-detail",
+    () => getClusterDetailCached(id),
+    () => fetchClusterDetail(id),
+    null,
+  );
 }
