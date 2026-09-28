@@ -29,6 +29,13 @@ import type { VercelConfig } from "@vercel/config/v1";
  *     Saturday 09:00 TRT (06:00 UTC). Fail-closed against a missing
  *     `CRON_SECRET`. See `src/app/api/cron/digest/route.ts`.
  *
+ *   - `/api/cron/fact-checks` — "Bu konuda doğrulama": fetches Teyit,
+ *     Doğruluk Payı and Malumatfuruş's RSS feeds, upserts new fact-check
+ *     articles (migration 080), and links them to recent clusters via a
+ *     pure keyword matcher (`src/lib/fact-checks/match.ts`). Headline +
+ *     link only, never a verdict or description. Fail-closed against a
+ *     missing `CRON_SECRET`. See `src/app/api/cron/fact-checks/route.ts`.
+ *
  * Full architecture in `docs/adr/001-worker-stream-system.md`; operator
  * cutover steps in `docs/migration-guide.md`.
  */
@@ -36,6 +43,7 @@ const config: VercelConfig = {
   crons: [
     { path: "/api/cron/headline", schedule: "*/5 * * * *" },
     { path: "/api/cron/digest", schedule: "0 6 * * 6" },
+    { path: "/api/cron/fact-checks", schedule: "23 * * * *" },
   ],
 };
 

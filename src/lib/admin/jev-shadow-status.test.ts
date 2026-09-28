@@ -2,21 +2,29 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Pack JEV, W3. Mirrors src/lib/admin/archive-status.test.ts: the shared
 // chainable Supabase fake (tests/_helpers/supabase-fake.ts) plus its `rpc`
-// fixture map, since getJevShadowStatus is built on four RPCs
-// (jev_shadow_agreement x2, jev_shadow_month_usage, jev_shadow_queue) and
-// one `jev_shadow_runs` table read. No next/cache mock here —
-// getJevShadowStatus is a plain async fetcher on purpose (the /admin page
-// is cookie-gated and dynamic, so it must never be "use cache").
+// fixture map, since getJevShadowStatus is built on five RPCs
+// (jev_shadow_agreement x1 raw 24h, jev_shadow_agreement_rollup for the 7-day
+// window with a raw jev_shadow_agreement(168) fallback, jev_shadow_month_usage,
+// jev_shadow_queue) and one `jev_shadow_runs` table read. No next/cache mock
+// here — getJevShadowStatus is a plain async fetcher on purpose (the /admin
+// page is cookie-gated and dynamic, so it must never be "use cache").
+//
+// Migration 081 swaps the 168h raw scan for the jev_shadow_daily rollup
+// (jev_shadow_agreement_rollup({p_days: 7})) and falls back to the original
+// raw jev_shadow_agreement({p_hours: 168}) call only if the rollup RPC
+// errors (e.g. 081 not yet applied). The 24h call stays raw, unconditionally.
 
 const fixture = vi.hoisted(() => ({
   agreement24h: [] as unknown[],
   agreement7d: [] as unknown[],
+  rollup7d: [] as unknown[],
   monthUsage: [
     { runs: 12, calls: 340, input_tokens: 1_500_000, cap: 300_000_000, exceeded: false },
   ] as unknown[],
   queue: [] as unknown[],
   lastRun: [] as unknown[],
   agreementError: null as { message: string } | null,
+  rollupError: null as { message: string } | null,
   monthError: null as { message: string } | null,
   queueError: null as { message: string } | null,
   runsError: null as { message: string } | null,
@@ -36,6 +44,10 @@ const supabaseFake = await vi.hoisted(async () => {
         if (fixture.agreementError) return { data: null, error: fixture.agreementError };
         const hours = (args as { p_hours: number } | undefined)?.p_hours;
         return { data: hours === 24 ? fixture.agreement24h : fixture.agreement7d, error: null };
+      },
+      jev_shadow_agreement_rollup: () => {
+        if (fixture.rollupError) return { data: null, error: fixture.rollupError };
+        return { data: fixture.rollup7d, error: null };
       },
       jev_shadow_month_usage: () => {
         if (fixture.monthError) return { data: null, error: fixture.monthError };
@@ -62,12 +74,14 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.agreement24h = [];
   fixture.agreement7d = [];
+  fixture.rollup7d = [];
   fixture.monthUsage = [
     { runs: 12, calls: 340, input_tokens: 1_500_000, cap: 300_000_000, exceeded: false },
   ];
   fixture.queue = [];
   fixture.lastRun = [];
   fixture.agreementError = null;
+  fixture.rollupError = null;
   fixture.monthError = null;
   fixture.queueError = null;
   fixture.runsError = null;
@@ -86,7 +100,7 @@ describe("getJevShadowStatus", () => {
     fixture.agreement24h = [
       { task: "politics", total: 80, agreed: 60, undecided: 5 },
     ];
-    fixture.agreement7d = [
+    fixture.rollup7d = [
       { task: "politics", total: 500, agreed: 400, undecided: 20 },
     ];
     fixture.monthUsage = [
@@ -166,7 +180,7 @@ describe("getJevShadowStatus", () => {
     errorSpy.mockRestore();
   });
 
-  it("pins the query shape: jev_shadow_agreement called with p_hours 24 and 168, jev_shadow_queue with p_limit 30", async () => {
+  it("pins the query shape: jev_shadow_agreement(24), jev_shadow_agreement_rollup(7), jev_shadow_queue(30)", async () => {
     await getJevShadowStatus();
 
     const rpcCalls = supabaseFake.calls.rpc;
@@ -178,7 +192,9 @@ describe("getJevShadowStatus", () => {
     ).toBe(true);
     expect(
       rpcCalls.some(
-        (c) => c.name === "jev_shadow_agreement" && (c.args as { p_hours: number }).p_hours === 168,
+        (c) =>
+          c.name === "jev_shadow_agreement_rollup" &&
+          (c.args as { p_days: number }).p_days === 7,
       ),
     ).toBe(true);
     expect(
@@ -190,5 +206,70 @@ describe("getJevShadowStatus", () => {
     ).toBe(true);
     expect(rpcCalls.some((c) => c.name === "jev_shadow_month_usage")).toBe(true);
     expect(JEV_QUEUE_LIMIT).toBe(30);
+  });
+
+  it("rollup success: jev_shadow_agreement_rollup({p_days:7}) called and raw jev_shadow_agreement(168) NOT called", async () => {
+    fixture.rollup7d = [{ task: "politics", total: 500, agreed: 400, undecided: 20 }];
+
+    const result = await getJevShadowStatus();
+
+    expect(result).not.toBeNull();
+    expect(result!.agreement7d).toEqual([
+      { task: "politics", total: 500, agreed: 400, undecided: 20, rate: 400 / 500 },
+    ]);
+
+    const rpcCalls = supabaseFake.calls.rpc;
+    expect(
+      rpcCalls.some(
+        (c) =>
+          c.name === "jev_shadow_agreement_rollup" &&
+          (c.args as { p_days: number }).p_days === 7,
+      ),
+    ).toBe(true);
+    expect(
+      rpcCalls.some(
+        (c) => c.name === "jev_shadow_agreement" && (c.args as { p_hours: number }).p_hours === 168,
+      ),
+    ).toBe(false);
+  });
+
+  it("rollup error: falls back to raw jev_shadow_agreement({p_hours:168}), and the status is still non-null", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fixture.rollupError = { message: "function jev_shadow_agreement_rollup does not exist" };
+    fixture.agreement7d = [{ task: "politics", total: 500, agreed: 400, undecided: 20 }];
+
+    const result = await getJevShadowStatus();
+
+    expect(result).not.toBeNull();
+    expect(result!.agreement7d).toEqual([
+      { task: "politics", total: 500, agreed: 400, undecided: 20, rate: 400 / 500 },
+    ]);
+
+    const rpcCalls = supabaseFake.calls.rpc;
+    expect(
+      rpcCalls.some(
+        (c) => c.name === "jev_shadow_agreement" && (c.args as { p_hours: number }).p_hours === 168,
+      ),
+    ).toBe(true);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "[admin] jev_shadow_agreement_rollup unavailable, using raw 168h: ",
+      ),
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it("the 24h call is unchanged: always raw jev_shadow_agreement({p_hours:24}), independent of the rollup outcome", async () => {
+    fixture.agreement24h = [{ task: "politics", total: 80, agreed: 60, undecided: 5 }];
+    fixture.rollupError = { message: "boom" };
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const result = await getJevShadowStatus();
+
+    expect(result).not.toBeNull();
+    expect(result!.agreement24h).toEqual([
+      { task: "politics", total: 80, agreed: 60, undecided: 5, rate: 60 / 80 },
+    ]);
   });
 });

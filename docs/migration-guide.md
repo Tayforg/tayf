@@ -1624,3 +1624,94 @@ update public.clusters set blindspot_recall_veto = false, blindspot_recall_veto_
 ```
 
 **Rollback:** do **not** drop the columns while this branch is deployed (the 400 above). Unschedule and clear as in the kill switch; drop the columns only after reverting the app.
+
+## 081 — Jev günlük özet + ops artığı temizliği (jev-shadow-daily, ops-exhaust-prune)
+
+`081_ops_retention.sql` does two independent things, both non-destructive to product data:
+
+1. **A daily rollup** (`public.jev_shadow_daily`, refreshed by `public.jev_shadow_daily_refresh(p_days)`) of `public.jev_shadow_predictions` — one row per (UTC day, task, question_set). `public.jev_shadow_agreement_rollup(p_days)` reads complete days from the rollup plus a raw tail (today, or since the rollup last ran) and returns the same `(task, total, agreed, undecided)` shape as the existing `jev_shadow_agreement(p_hours)`. `src/lib/admin/jev-shadow-status.ts`'s 7-day call now uses the rollup, with an automatic fallback to the original raw `jev_shadow_agreement({p_hours: 168})` if the rollup RPC errors (e.g. this migration hasn't landed yet). The 24h call is untouched.
+2. **Retention of SYSTEM exhaust only** — `public.ops_exhaust_prune(p_cron_keep, p_net_keep, p_batch, p_max_batches)` deletes old rows from `cron.job_run_details` and `net._http_response`. It **never** touches `public.jev_shadow_predictions` or any other product table — enforced by a static SQL-contract test (`tests/migrations/081-ops-retention.test.ts`) that scans the migration file for every `delete from` target and fails the build if anything outside those two system tables appears.
+
+`jev_shadow_predictions` itself is **deliberately left alone** — still ~413 MB and growing ~50 MB/day. This migration is the prerequisite for a later, separate decision about pruning the raw table; it does not make that decision.
+
+### Step 0 numbers (measured 2026-09-28, read-only — see the migration file's own header for the full detail and the savings math)
+
+| Object | Size | Rows | Notes |
+|---|---|---|---|
+| `public.jev_shadow_predictions` | 413 MB | 401,277 | 2026-09-20 → today, ~53 MB/day growth, untouched by this migration |
+| `cron.job_run_details` | 211 MB | 258,310 | back to 2026-06-10; 212,628 rows (82%) already older than the 14-day keep window |
+| `net._http_response` | 178 MB | 838 live | all rows <6h old (pg_net TTL already works) — the 178 MB is dead-tuple bloat, `last_autovacuum` 2026-08-05 |
+| whole DB | 3,021 MB | — | — |
+
+Expected effect: the first `ops_exhaust_prune()` run makes ~174 MB reusable inside `cron.job_run_details` (file shrinks only after a manual compaction pass); the `net._http_response` 3-day guard removes ~0 rows on this measurement (it's a guard against pg_net TTL regressing, not a fix for today's bloat) — that bloat needs a one-off manual compaction pass instead. `/admin`'s 7-day agreement read moves off a raw scan of the ever-growing predictions table onto the bounded rollup.
+
+### Deploy order
+
+1. **Apply the migration.** It is safe to apply at any time relative to the app deploy — `jev_shadow_agreement_rollup` is additive, and `jev-shadow-status.ts`'s fallback means the admin page works whether or not 081 has landed yet:
+
+   ```bash
+   psql "$DATABASE_URL" -f supabase/migrations/081_ops_retention.sql
+   # ...or: supabase db push
+   ```
+
+   The migration itself runs a one-off backfill (`select public.jev_shadow_daily_refresh(400);`) inside the same transaction, rolling up every complete day since the table's 2026-09-20 start.
+
+2. **If the SQL editor times out on the backfill:** this migration is one transaction, so a timeout rolls the *entire* file back, including the table/function creation. Apply the file with the backfill line removed, then run the backfill separately (it can take a lot longer safely outside a single-timeout window):
+
+   ```sql
+   -- with "select public.jev_shadow_daily_refresh(400);" deleted from the file:
+   \i supabase/migrations/081_ops_retention.sql
+   -- then, separately, possibly in smaller chunks if needed:
+   select public.jev_shadow_daily_refresh(400);
+   ```
+
+3. **Deploy the Vercel branch** whenever convenient — no ordering constraint with this one (unlike 071/064 above): the admin page degrades to the raw 168h RPC automatically if it runs against a database without 081 yet.
+
+### First manual prune
+
+Run this once by hand after applying, to confirm the numbers before trusting the nightly `ops-exhaust-prune` schedule (04:40 UTC):
+
+```sql
+select * from public.ops_exhaust_prune();
+-- expect cron_deleted close to Step 0's "prunable" count on a fresh DB, net_deleted
+-- close to 0 unless net._http_response has accumulated rows older than 3 days.
+```
+
+### Manual full-table compaction (optional, one-off)
+
+DELETE makes space reusable inside a table but does not shrink the file on disk — that needs a manual full-table compaction pass (`VACUUM FULL`), which is **not** run automatically because it cannot execute inside a transaction block and takes an ACCESS EXCLUSIVE lock. Run it in the 04:30 UTC lull, ten minutes before `ops-exhaust-prune` fires:
+
+```sql
+-- needs table-owner privileges (supabase_admin on this project, per Step 0);
+-- if denied, fall back to a plain (non-FULL) VACUUM, or ask Supabase support.
+vacuum full net._http_response;
+vacuum full cron.job_run_details;
+```
+
+### Kill switches
+
+```sql
+update cron.job set active = false where jobname in ('jev-shadow-daily', 'ops-exhaust-prune');
+```
+
+### Verification
+
+```sql
+select min(day), max(day), count(*) from public.jev_shadow_daily;
+-- expect min = 2026-09-20, max = yesterday (UTC), no row for today
+
+select public.jev_shadow_daily_refresh(2);
+-- idempotent: re-running with the same window changes nothing further
+
+select jobname, schedule from cron.job where jobname in ('jev-shadow-daily', 'ops-exhaust-prune');
+
+select count(*) from cron.job_run_details where start_time < now() - interval '14 days';
+-- expect 0 after the first ops-exhaust-prune run
+
+select count(*) from public.jev_shadow_predictions;
+-- must never decrease across an ops_exhaust_prune() run
+
+-- /admin 7-day rates should be within ~2 points of the pre-081 raw values for
+-- tasks with at least 500 comparable rows, and the section should load well
+-- under PostgREST's 8s statement_timeout.
+```

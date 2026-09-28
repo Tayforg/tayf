@@ -10,6 +10,7 @@ import type { BiasDistribution, Source } from "@/types";
 import { FramingComparison } from "@/components/story/framing-comparison";
 import { MediaDna } from "@/components/story/media-dna";
 import { StoryTimeline } from "@/components/story/story-timeline";
+import { FactCheckBox } from "@/components/story/fact-check-box";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -58,6 +59,12 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
     getZoneFeedHealth: (...args: unknown[]) => getZoneFeedHealth(...args),
   };
 });
+// "Bu konuda doğrulama" fact-check box: Supabase-backed lookup, mocked so
+// the page never reaches a real client. Defaults to [] (no box) below.
+const getClusterFactChecks = vi.fn();
+vi.mock("@/lib/fact-checks/cluster-fact-checks-query", () => ({
+  getClusterFactChecks: (...args: unknown[]) => getClusterFactChecks(...args),
+}));
 
 import ClusterDetailPage, { generateMetadata } from "./page";
 
@@ -324,6 +331,8 @@ beforeEach(() => {
   getMemberSeenAt.mockResolvedValue(null);
   getZoneFeedHealth.mockReset();
   getZoneFeedHealth.mockResolvedValue(null);
+  getClusterFactChecks.mockReset();
+  getClusterFactChecks.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -953,5 +962,63 @@ describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
     expect(timeline?.summary).toBe(
       "İlk: Sabah · 09:12 — Bağımsız 28 dk sonra katıldı — Muhalefet 2 sa 10 dk sonra katıldı",
     );
+  });
+});
+
+describe("ClusterDetailPage — Bu konuda doğrulama (fact-check box)", () => {
+  function simpleDetail(): ClusterDetail {
+    const sabah = makeSource({ id: "s-sabah", name: "Sabah", bias: "pro_government" });
+    const sozcu = makeSource({ id: "s-sozcu", name: "Sözcü", bias: "opposition_leaning" });
+    const members = [makeMember("a-sabah", sabah), makeMember("a-sozcu", sozcu)];
+    const distribution = emptyDistribution();
+    for (const m of members) distribution[m.source.bias] += 1;
+    return {
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members,
+      allSources: members.map((m) => m.source),
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: members.length,
+        memberCount: members.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  it("renders the box with the heading, href and rel when getClusterFactChecks returns one item", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+    getClusterFactChecks.mockResolvedValue([
+      {
+        id: "fc-1",
+        publisher: "teyit",
+        publisherLabel: "Teyit",
+        url: "https://teyit.org/analiz/x",
+        title: "Bir iddianın analizi",
+        dateLabel: "28 Eyl 2026",
+        score: 0.7,
+      },
+    ]);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(getClusterFactChecks).toHaveBeenCalledWith("c1");
+
+    const el = findElementOfType(tree, FactCheckBox);
+    expect(el).not.toBeNull();
+    const html = renderToStaticMarkup(
+      el as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(html).toContain("Bu konuda doğrulama");
+    expect(html).toContain('href="https://teyit.org/analiz/x"');
+    expect(html).toContain('rel="noopener noreferrer"');
+  });
+
+  it("omits the box entirely when getClusterFactChecks returns []", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+    getClusterFactChecks.mockResolvedValue([]);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(hasElementOfType(tree, FactCheckBox)).toBe(false);
+    expect(collectText(tree).join("")).not.toContain("Bu konuda doğrulama");
   });
 });

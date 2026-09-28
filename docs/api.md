@@ -322,6 +322,79 @@ Identical record shape to `GET /api/sources` above (reuses the same
 
 ---
 
+### `GET /api/v1/kap/pickup`
+
+Keyed mirror of the "Medyada yankı" panel on `/ekonomi/[ticker]`: for each
+KAP disclosure of a ticker, how much (and which zone of) press coverage
+appeared in the **48 hours after filing**. Never queries
+`disclosure_coverage` (an unbounded count against it timed out at 60s in
+production) — this endpoint is always ticker- and time-bounded on
+`kap_disclosures` / `article_tickers` directly.
+
+**Query params**:
+- `ticker` (required): 2–6 uppercase alphanumeric characters (case-insensitive
+  on input, normalized to upper). Invalid/missing -> `400`.
+- `since` (optional ISO 8601 timestamp): default 30 days ago. A future
+  timestamp is rejected (`400`); a timestamp older than 90 days ago is
+  silently clamped to 90 days ago.
+- `limit` (optional integer, 1–100, default 50): caps the number of
+  disclosures returned (most recent first).
+
+**Response** `200`:
+```json
+{
+  "licence": "CC BY-SA 4.0 — Tayf'a göre",
+  "attribution": "...", "methodology": "...", "generated_at": "...",
+  "ticker": "THYAO", "window_hours": 48,
+  "since": "…", "until": "…",
+  "relevance_filter": { "task": "ticker_relevance", "min_prob": 0.2, "applied": true },
+  "truncated": false,
+  "totals": {
+    "disclosures": 12, "picked_up": 9, "pickup_rate": 0.75,
+    "median_first_lag_minutes": 184, "outlets": 14,
+    "zones": { "iktidar": 5, "bagimsiz": 6, "muhalefet": 3 }
+  },
+  "count": 12,
+  "disclosures": [
+    {
+      "disclosure_index": 1234567, "disclosed_at": "…", "subject": "…",
+      "disclosure_class": "ODA",
+      "kap_url": "https://www.kap.org.tr/tr/Bildirim/1234567",
+      "articles": 4, "outlets": 3, "first_lag_minutes": 95,
+      "zones": { "iktidar": 1, "bagimsiz": 2, "muhalefet": 0 },
+      "sources": [{ "slug": "sabah", "zone": "iktidar" }],
+      "window_complete": true, "overlapping_disclosures": 0
+    }
+  ]
+}
+```
+
+Notes:
+- **Window rule**: each disclosure counts every mention published in its
+  own `[filed_at, filed_at + 48h)` window. A mention strictly before its
+  disclosure is never pickup. When two disclosures of the same ticker fall
+  within 48h of each other, the same article counts toward both —
+  `overlapping_disclosures` on each record makes that visible instead of
+  silently deduping it away.
+- **Relevance filter**: mentions Jev's `ticker_relevance` shadow model
+  scored below 0.2 are excluded (a documented false-positive band — e.g. a
+  political-party story matching a same-named ticker). Unscored mentions
+  are always kept. If the relevance lookup itself fails, the endpoint fails
+  open (`relevance_filter.applied: false`) rather than 500ing.
+- **`outlets` vs `articles`**: `articles` counts every matching mention,
+  including aggregator/KAP-bot republication; `outlets` and `zones` count
+  only distinct, classified, voting-eligible news sources — that is the
+  headline number, not `articles`.
+- No article title, URL, or id is ever present in the response — only
+  disclosure metadata and per-source `{slug, zone}` pairs.
+- Both `free` and `partner` tiers may call this endpoint; responses are
+  uncached (`private, no-store`).
+
+**Response** `400`: invalid/missing `ticker`, invalid `since` (not ISO 8601
+or in the future), or `limit` outside 1–100.
+
+---
+
 ### `POST /api/admin/api-keys`
 
 Admin-gated (`hasAdminSession()`, checked before the rate limiter and
