@@ -1971,3 +1971,45 @@ old rows on a schedule, which makes that space reusable in place without
 needing `VACUUM FULL` at all — a `TRUNCATE` is not appropriate there since
 recent run history must be kept, unlike `net._http_response`'s pure
 response-log rows.
+
+## 093 — Feed registry repoint (dead/moved RSS feeds)
+
+**What it does:** repoints `sources.rss_url` for 9 sources whose old feed was
+404, a Cloudflare 403, an HTML page or an empty feed, to replacements verified
+on 2026-09-28 (`ajans-haber`, `hurriyet-daily-news`, `mfa-turkey`, `milat`,
+`muhalif`, `posta`, `trt-world`, `turkiye-gazetesi`, `yeni-mesaj`). It resets
+`fetch_fail_streak`, `fetch_quarantined_until`, `fetch_etag`,
+`fetch_last_modified` and `fetch_body_hash` on those rows only, so the new URL
+is never sent the old feed's validators. Every changed row is first written to
+`public.sources_rss_backup_093` in the same statement. It never touches
+`active`, `bias`, `kind`, `url`, `name` or `slug`, and never deactivates,
+deletes or relabels a source. Evidence, and the 25 outlets with no working
+feed (founder decision), are in `docs/feed-registry-2026-09.md`.
+
+**Data-only, apply any time:** no app or edge-function dependency and no
+deploy ordering. Re-running is a no-op (the match requires the old URL).
+
+**Verify** (expect 9 backup rows; within about 15 min each repointed source
+should show status 200/304, streak 0 and new articles):
+
+```sql
+select count(*) from public.sources_rss_backup_093;
+
+select s.slug, s.fetch_last_status, s.fetch_fail_streak, max(a.created_at)
+  from public.sources s
+  join public.sources_rss_backup_093 b on b.id = s.id
+  left join public.articles a on a.source_id = s.id and a.created_at > b.backed_up_at
+ group by 1, 2, 3;
+```
+
+The URLs were verified from a residential network. If a source still fails
+from the Supabase datacenter IP, roll that row back (below) and treat it as a
+`SOURCE_HEADERS` follow-up.
+
+**Rollback:**
+
+```sql
+update public.sources s set rss_url = b.old_rss_url
+  from public.sources_rss_backup_093 b
+ where b.id = s.id and s.rss_url = b.new_rss_url;
+```

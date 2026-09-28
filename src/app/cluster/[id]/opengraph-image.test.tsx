@@ -6,6 +6,9 @@ import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 // Mocked BEFORE importing the module under test so the dynamic
 // `getClusterDetail` import inside opengraph-image.tsx resolves to this
 // mock instead of hitting Supabase.
+const VALID_ID = "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187b";
+const MISSING_ID = "11111111-2222-4333-8444-555555555555";
+
 const getClusterDetail = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
   getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
@@ -54,7 +57,7 @@ function mkDetail(
   const article_count = overrides.article_count ?? 4;
   return {
     cluster: {
-      id: "x",
+      id: VALID_ID,
       title_tr: "Test kümesi başlığı",
       title_original: null,
       title_method: null,
@@ -102,7 +105,7 @@ describe("cluster opengraph-image", () => {
     getClusterDetail.mockResolvedValueOnce(mkDetail({}));
     const { default: Image } = await import("./opengraph-image");
 
-    const res = await Image({ params: Promise.resolve({ id: "x" }) });
+    const res = await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     expect(res).toBeInstanceOf(Response);
     expect(res.status).toBe(200);
@@ -120,7 +123,7 @@ describe("cluster opengraph-image", () => {
     );
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).not.toContain("KÖR NOKTA");
@@ -146,7 +149,7 @@ describe("cluster opengraph-image", () => {
     );
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).toContain("KÖR NOKTA — sadece Muhalefet yazdı");
@@ -166,7 +169,7 @@ describe("cluster opengraph-image", () => {
     );
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
@@ -197,7 +200,7 @@ describe("cluster opengraph-image", () => {
     );
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).toContain("KÖR NOKTA — %80 İktidar");
@@ -213,7 +216,7 @@ describe("cluster opengraph-image", () => {
     );
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).toContain("1 kaynak");
@@ -229,7 +232,7 @@ describe("cluster opengraph-image", () => {
     );
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).toContain("5 kaynak");
@@ -245,7 +248,7 @@ describe("cluster opengraph-image", () => {
     );
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
@@ -256,7 +259,7 @@ describe("cluster opengraph-image", () => {
     getClusterDetail.mockResolvedValueOnce(mkDetail({}));
     const { default: Image } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     const text = collectText(captured).join("");
     expect(text).toContain("tayfhaber.com/metodoloji");
@@ -266,7 +269,7 @@ describe("cluster opengraph-image", () => {
     getClusterDetail.mockResolvedValueOnce(mkDetail({}));
     const { default: Image, OG_CACHE_HEADERS } = await import("./opengraph-image");
 
-    await Image({ params: Promise.resolve({ id: "x" }) });
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     expect(OG_CACHE_HEADERS).toEqual({
       "cache-control": "public, s-maxage=600, stale-while-revalidate=86400",
@@ -280,7 +283,7 @@ describe("cluster opengraph-image", () => {
     getClusterDetail.mockResolvedValueOnce(null);
     const { default: Image, OG_FALLBACK_CACHE_HEADERS } = await import("./opengraph-image");
 
-    const res = await Image({ params: Promise.resolve({ id: "gone" }) });
+    const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
 
     expect(res).toBeInstanceOf(Response);
     expect(res.status).toBe(200);
@@ -293,5 +296,34 @@ describe("cluster opengraph-image", () => {
 
     const body = await res.arrayBuffer();
     expect(body.byteLength).toBeGreaterThan(0);
+  });
+
+  it("404s an empty body for a non-UUID id without touching the database", async () => {
+    getClusterDetail.mockClear();
+    const { default: Image, OG_NOT_FOUND_HEADERS } = await import("./opengraph-image");
+    expect(OG_NOT_FOUND_HEADERS).toEqual({ "cache-control": "public, s-maxage=300" });
+
+    for (const id of ["not-a-uuid", "x", "", "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187bZ"]) {
+      const res = await Image({ params: Promise.resolve({ id }) });
+      expect(res.status, id).toBe(404);
+      expect(res.headers.get("cache-control")).toBe(OG_NOT_FOUND_HEADERS["cache-control"]);
+      expect((await res.arrayBuffer()).byteLength).toBe(0);
+    }
+    expect(getClusterDetail).not.toHaveBeenCalled();
+  });
+
+  it("twitter-image re-export 404s a non-UUID id too", async () => {
+    getClusterDetail.mockClear();
+    const tw = await import("./twitter-image");
+    const res = await tw.default({ params: Promise.resolve({ id: "not-a-uuid" }) });
+    expect(res.status).toBe(404);
+    expect((await res.arrayBuffer()).byteLength).toBe(0);
+    expect(getClusterDetail).not.toHaveBeenCalled();
+  });
+
+  it("lets a genuine fetch error throw so crawlers retry", async () => {
+    getClusterDetail.mockRejectedValueOnce(new Error("db down"));
+    const { default: Image } = await import("./opengraph-image");
+    await expect(Image({ params: Promise.resolve({ id: VALID_ID }) })).rejects.toThrow("db down");
   });
 });

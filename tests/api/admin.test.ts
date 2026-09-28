@@ -38,6 +38,9 @@ interface RecordedWrite {
 
 let writes: RecordedWrite[] = [];
 
+// select() options per table, in call order (count-mode assertions).
+let selectCalls: { table: string; opts: unknown }[] = [];
+
 // `.rpc()` plumbing for the set_source_bias RPC (migration 055) — a
 // separate call log from `writes` above so tests can assert the route
 // NEVER falls back to a direct `.update({ bias })` on `sources`.
@@ -82,7 +85,10 @@ vi.mock("@supabase/supabase-js", () => ({
       const terminal = (onFul?: (v: TableResponse) => unknown, onRej?: (e: unknown) => unknown) =>
         Promise.resolve(resp()).then(onFul, onRej);
       Object.assign(chain, {
-        select: () => chain,
+        select: (_c?: string, opts?: unknown) => {
+          selectCalls.push({ table, opts });
+          return chain;
+        },
         insert: (payload: unknown) => {
           writes.push({ table, op: "insert", payload });
           return chain;
@@ -156,6 +162,7 @@ beforeEach(() => {
   delete process.env.CRON_SECRET;
   resetTableResponses();
   writes = [];
+  selectCalls = [];
   resetRpc();
   revalidateTagMock.mockClear();
   __adminAuthed = true;
@@ -206,6 +213,26 @@ describe("GET /api/admin", () => {
     expect(body).toHaveProperty("sourcesList");
     expect(typeof body.articles).toBe("number");
     expect(Array.isArray(body.sourcesList)).toBe(true);
+    expect(body).toHaveProperty("missingImages");
+    expect(body.articles).toBe(42);
+    expect(body.sources).toBe(8);
+    expect(body.clusters).toBe(3);
+  });
+
+  it("uses planned counts for articles/missing images and exact for sources/clusters", async () => {
+    const mod = await import("@/app/api/admin/route");
+    const res = await mod.GET(new Request("http://example.com/api/admin"));
+    expect(res.status).toBe(200);
+    const planned = { count: "planned", head: true };
+    const exact = { count: "exact", head: true };
+    const articleOpts = selectCalls.filter((c) => c.table === "articles").map((c) => c.opts);
+    // total + image_url is null, both planned
+    expect(articleOpts).toEqual([planned, planned]);
+    expect(selectCalls.filter((c) => c.table === "clusters").map((c) => c.opts)).toEqual([exact]);
+    // sources: one exact head-count (~150 rows) + the non-count list select
+    const sourceOpts = selectCalls.filter((c) => c.table === "sources").map((c) => c.opts);
+    expect(sourceOpts).toContainEqual(exact);
+    expect(sourceOpts).not.toContainEqual(planned);
   });
 });
 

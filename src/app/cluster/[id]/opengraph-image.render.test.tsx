@@ -7,6 +7,9 @@ import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 // a style Satori doesn't support (grid, a pseudo-element, an unsupported
 // property) fails here instead of at the first social crawl.
 
+const VALID_ID = "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187b";
+const MISSING_ID = "11111111-2222-4333-8444-555555555555";
+
 const getClusterDetail = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
   getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
@@ -17,7 +20,7 @@ const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 function blindspotDetail(): ClusterDetail {
   return {
     cluster: {
-      id: "x",
+      id: VALID_ID,
       title_tr:
         "Cumhurbaşkanı Erdoğan, Şanlıurfa'daki güneş enerjisi santrali açılışında muhalefete yüklendi; İstanbul'da öğretmenler grev kararı aldı",
       title_original: null,
@@ -62,7 +65,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
     const { default: Image } = await import("./opengraph-image");
 
     const bytes = await pngBytes(
-      await Image({ params: Promise.resolve({ id: "x" }) }),
+      await Image({ params: Promise.resolve({ id: VALID_ID }) }),
     );
 
     expect(Array.from(bytes.slice(0, 8))).toEqual(PNG_SIGNATURE);
@@ -77,7 +80,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
     const { default: Image } = await import("./opengraph-image");
 
     const bytes = await pngBytes(
-      await Image({ params: Promise.resolve({ id: "x" }) }),
+      await Image({ params: Promise.resolve({ id: VALID_ID }) }),
     );
 
     expect(Array.from(bytes.slice(0, 8))).toEqual(PNG_SIGNATURE);
@@ -88,7 +91,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
     getClusterDetail.mockResolvedValueOnce(blindspotDetail());
     const { default: Image } = await import("./opengraph-image");
 
-    const res = await Image({ params: Promise.resolve({ id: "x" }) });
+    const res = await Image({ params: Promise.resolve({ id: VALID_ID }) });
 
     expect(res.headers.get("cache-control")).toBe(
       "public, s-maxage=600, stale-while-revalidate=86400",
@@ -99,7 +102,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
     getClusterDetail.mockResolvedValueOnce(null);
     const { default: Image } = await import("./opengraph-image");
 
-    const res = await Image({ params: Promise.resolve({ id: "gone" }) });
+    const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
 
     expect(res.headers.get("cache-control")).toBe("public, s-maxage=60");
   });
@@ -114,7 +117,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
     expect(tw.contentType).toBe("image/png");
 
     const bytes = await pngBytes(
-      await tw.default({ params: Promise.resolve({ id: "gone" }) }),
+      await tw.default({ params: Promise.resolve({ id: MISSING_ID }) }),
     );
     expect(Array.from(bytes.slice(0, 8))).toEqual(PNG_SIGNATURE);
   });

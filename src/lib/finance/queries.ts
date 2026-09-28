@@ -14,7 +14,7 @@ import {
 // Read side of the finance substrate (migrations 049-051) for the
 // /ekonomi pages and /admin/ekonomi. Every fetcher throws on a Supabase
 // error so the route's error.tsx renders instead of a cached empty page
-// (same rule as trends-query).
+// (same throw-inside-the-cache rule as src/lib/trends/daily-zones.ts).
 //
 // reader-data (§4(b)): the relevance LOOKUPS in this file
 // (fetchRelevanceScores / fetchLowRelevanceSince, both in

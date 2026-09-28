@@ -2,10 +2,10 @@ import { StatCard } from "./stat-card";
 import { Newspaper, Building2, Layers, ImageOff } from "lucide-react";
 
 const items = [
-  { icon: Newspaper, label: "Haberler", key: "articles" as const },
-  { icon: Building2, label: "Kaynaklar", key: "sources" as const },
-  { icon: Layers, label: "Kümeler", key: "clusters" as const },
-  { icon: ImageOff, label: "Görselsiz", key: "missingImages" as const },
+  { icon: Newspaper, label: "Haberler", key: "articles" as const, approx: true },
+  { icon: Building2, label: "Kaynaklar", key: "sources" as const, approx: false },
+  { icon: Layers, label: "Kümeler", key: "clusters" as const, approx: true },
+  { icon: ImageOff, label: "Görselsiz", key: "missingImages" as const, approx: true },
 ] as const;
 
 export function StatsGrid({

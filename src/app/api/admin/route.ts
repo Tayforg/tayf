@@ -49,12 +49,17 @@ export const GET = withApiErrors(async () => {
     { count: clusterCount },
     { count: noImageCount },
   ] = await Promise.all([
-    supabase.from("articles").select("*", { count: "exact", head: true }),
+    // Operator-facing tiles: planner estimates (`Prefer: count=planned`) for
+    // the big article counts avoid full-table scans (image_url is null ~6 s
+    // exact). sources (~150 rows) and clusters (~45 ms exact) stay exact.
+    // stats-grid.tsx marks estimates with a title attribute and an
+    // "≈ yaklaşık" hint, not a "≈" prefix on the value.
+    supabase.from("articles").select("*", { count: "planned", head: true }),
     supabase.from("sources").select("*", { count: "exact", head: true }),
     supabase.from("clusters").select("*", { count: "exact", head: true }),
     supabase
       .from("articles")
-      .select("*", { count: "exact", head: true })
+      .select("*", { count: "planned", head: true })
       .is("image_url", null),
   ]);
 

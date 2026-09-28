@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import { Suspense } from "react";
 import Link from "next/link";
 import { Newspaper, SearchX } from "lucide-react";
@@ -15,6 +16,13 @@ import {
 } from "@/lib/clusters/politics-query";
 import { searchClusters } from "@/lib/clusters/search-query";
 import { composeSearchView } from "@/lib/clusters/search-view";
+import {
+  HOME_PAGE_SIZE,
+  homeCanonicalPath,
+  homeTotalPages,
+  parseHomePage,
+  rankedCountOf,
+} from "@/lib/seo/home-canonical";
 
 // Home route — this IS the news view.
 //
@@ -26,7 +34,37 @@ import { composeSearchView } from "@/lib/clusters/search-view";
 // feed nor the archive search can fail the page any more: `loadFeed()` and
 // `searchClusters()` both degrade to a retry affordance instead of
 // throwing (see FeedUnavailable / SearchUnavailable below).
-const PAGE_SIZE = 15;
+
+// Self-canonical for /?page=N (N > 1, clamped to the last page). Without
+// this, the layout's canonical "/" told crawlers page 2 duplicates page 1.
+// Metadata merges shallowly, so `types` (the layout's RSS alternate) is
+// repeated or it would be dropped. Any failure returns {} (inherit "/") —
+// metadata must never throw into the error boundary.
+export async function generateMetadata({
+  searchParams,
+}: {
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
+}): Promise<Metadata> {
+  const { q, page: pageRaw } = await searchParams;
+  const page = parseHomePage(pageRaw);
+  if (page <= 1 || (Array.isArray(q) ? q[0] : q)?.trim()) return {};
+  let rankedCount: number | null = null;
+  try {
+    rankedCount = rankedCountOf(await getPoliticsClusters());
+  } catch {
+    rankedCount = null;
+  }
+  const canonical = homeCanonicalPath({ q, page, rankedCount });
+  if (!canonical) return {};
+  return {
+    alternates: {
+      canonical,
+      types: {
+        "application/rss+xml": [{ url: "/rss.xml", title: "Tayf — Haberler RSS" }],
+      },
+    },
+  };
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WEEK_MS = 7 * DAY_MS;
@@ -178,7 +216,7 @@ async function HomeFeed({
 }) {
   const { q: qRaw, page: pageRaw } = await searchParams;
   const q = qRaw?.trim() || undefined;
-  const page = Math.max(1, parseInt(pageRaw ?? "1", 10) || 1);
+  const page = parseHomePage(pageRaw);
 
   // Neither fetch depends on the other — run them in parallel. `search` is
   // only attempted once `q` reaches the 2-character floor (searchClusters
@@ -217,13 +255,13 @@ async function HomeFeed({
   const breakingIds = new Set(filteredBreaking.map((b) => b.cluster.id));
   const ranked = filtered.filter((b) => !breakingIds.has(b.cluster.id));
 
-  const totalPages = Math.max(1, Math.ceil(ranked.length / PAGE_SIZE));
+  const totalPages = homeTotalPages(ranked.length);
   // Clamp the requested page so /?page=999 still renders the last page
   // instead of an empty list.
   const safePage = Math.min(page, totalPages);
   const paged = ranked.slice(
-    (safePage - 1) * PAGE_SIZE,
-    safePage * PAGE_SIZE
+    (safePage - 1) * HOME_PAGE_SIZE,
+    safePage * HOME_PAGE_SIZE
   );
 
   // Son Dakika is a page-1-only strip. On page 2+ the user is browsing

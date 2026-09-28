@@ -5,7 +5,7 @@ import { AlertTriangle } from "lucide-react";
 
 // Catches genuine render-time exceptions in the /trends route tree (React
 // error boundary — mirrors src/app/cluster/[id]/error.tsx), NOT Supabase
-// failures: fetchTimeline() (src/lib/clusters/trends-query.ts) never
+// failures: fetchIstanbulTimeline() (src/lib/trends/daily-zones.ts) never
 // throws to its caller — it catches internally and resolves `null` — so a
 // Supabase hiccup renders the in-page "Trend verileri şu anda
 // yüklenemiyor." unavailable state in page.tsx instead of reaching this
