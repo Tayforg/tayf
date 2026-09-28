@@ -41,10 +41,12 @@ const OPERATION_IDS: Record<string, string> = {
   "GET /api/v1/clusters": "listClusters",
   "GET /api/v1/clusters/{id}": "getCluster",
   "GET /api/v1/sources": "listSources",
+  "GET /api/v1/kap/pickup": "getKapPickup",
   "GET /api/v1/openapi.json": "getOpenApi",
   "OPTIONS /api/v1/clusters": "optionsClusters",
   "OPTIONS /api/v1/clusters/{id}": "optionsCluster",
   "OPTIONS /api/v1/sources": "optionsSources",
+  "OPTIONS /api/v1/kap/pickup": "optionsKapPickup",
 };
 
 const ZONE_ENUM = ["iktidar", "bagimsiz", "muhalefet"];
@@ -212,6 +214,110 @@ function buildSchemas(): Record<string, unknown> {
     ],
   };
 
+  const v1PickupSource = {
+    type: "object",
+    required: ["slug", "zone"],
+    properties: {
+      slug: { type: "string" },
+      zone: { type: "string", enum: ZONE_ENUM },
+    },
+  };
+
+  const v1PickupDisclosure = {
+    type: "object",
+    required: [
+      "disclosure_index",
+      "disclosed_at",
+      "subject",
+      "disclosure_class",
+      "kap_url",
+      "articles",
+      "outlets",
+      "first_lag_minutes",
+      "zones",
+      "sources",
+      "window_complete",
+      "overlapping_disclosures",
+    ],
+    properties: {
+      disclosure_index: { type: "integer" },
+      disclosed_at: { type: "string", format: "date-time" },
+      subject: { type: ["string", "null"] },
+      disclosure_class: { type: ["string", "null"] },
+      kap_url: { type: "string" },
+      articles: { type: "integer" },
+      outlets: { type: "integer" },
+      first_lag_minutes: { type: ["integer", "null"] },
+      zones: { type: "object", additionalProperties: { type: "number" } },
+      sources: {
+        type: "array",
+        items: { $ref: "#/components/schemas/V1PickupSource" },
+      },
+      window_complete: { type: "boolean" },
+      overlapping_disclosures: { type: "integer" },
+    },
+  };
+
+  const kapPickupResponse = {
+    allOf: [
+      { $ref: "#/components/schemas/Envelope" },
+      {
+        type: "object",
+        required: [
+          "ticker",
+          "window_hours",
+          "since",
+          "until",
+          "relevance_filter",
+          "truncated",
+          "totals",
+          "count",
+          "disclosures",
+        ],
+        properties: {
+          ticker: { type: "string" },
+          window_hours: { type: "integer" },
+          since: { type: "string", format: "date-time" },
+          until: { type: "string", format: "date-time" },
+          relevance_filter: {
+            type: "object",
+            required: ["task", "min_prob", "applied"],
+            properties: {
+              task: { type: "string" },
+              min_prob: { type: "number" },
+              applied: { type: "boolean" },
+            },
+          },
+          truncated: { type: "boolean" },
+          totals: {
+            type: "object",
+            required: [
+              "disclosures",
+              "picked_up",
+              "pickup_rate",
+              "median_first_lag_minutes",
+              "outlets",
+              "zones",
+            ],
+            properties: {
+              disclosures: { type: "integer" },
+              picked_up: { type: "integer" },
+              pickup_rate: { type: ["number", "null"] },
+              median_first_lag_minutes: { type: ["number", "null"] },
+              outlets: { type: "integer" },
+              zones: { type: "object", additionalProperties: { type: "number" } },
+            },
+          },
+          count: { type: "integer" },
+          disclosures: {
+            type: "array",
+            items: { $ref: "#/components/schemas/V1PickupDisclosure" },
+          },
+        },
+      },
+    ],
+  };
+
   const sourceListResponse = {
     allOf: [
       { $ref: "#/components/schemas/Envelope" },
@@ -238,6 +344,9 @@ function buildSchemas(): Record<string, unknown> {
     ClusterListResponse: clusterListResponse,
     ClusterItemResponse: clusterItemResponse,
     SourceListResponse: sourceListResponse,
+    V1PickupSource: v1PickupSource,
+    V1PickupDisclosure: v1PickupDisclosure,
+    KapPickupResponse: kapPickupResponse,
   };
 }
 

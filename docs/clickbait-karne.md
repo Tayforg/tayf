@@ -170,13 +170,38 @@ g) Also record the EXPLAIN, the eligible-outlet count, and the existing
 
 ## Results (per-zone precision)
 
-**Not yet measured.** The Step-0 blind label pass (part d above) has not
-been run. This section will hold, once it has:
+**Measured 2026-09-28** on the Step 0c sample (200 rows, `jev_prob >= 0.7`,
+question set `2026-09-24.1`, salt `tik-tuzagi-v1`). Blind labelling: two
+independent model-proxy labellers (Opus) labelled all 200 rows from title +
+description only (no outlet, no `jev_prob`); raw agreement 198/200 (99%); a
+third labeller adjudicated the 2 disagreements. This is a model-proxy check,
+not a human one, and copy must never claim otherwise.
 
-- Overall precision (`k`/200).
-- Precision broken down by `zone` (iktidar / bagimsiz / muhalefet) among the
-  200 flagged rows, computed the same way from
-  `tests/fixtures/clickbait-precision.json`.
+| Scope | Clickbait / flagged | Precision |
+|---|---|---|
+| All | 153 / 200 | **0.765** |
+| iktidar | 82 / 90 | 0.911 |
+| muhalefet | 53 / 75 | 0.707 |
+| bağımsız | 18 / 35 | 0.514 |
+
+By flag threshold (same sample, rows with `jev_prob` at or above t):
+
+| t | n | Precision | bağımsız |
+|---|---|---|---|
+| 0.70 | 200 | 0.765 | 18/35 |
+| 0.80 | 86 | 0.814 | 5/11 |
+| 0.85 | 45 | 0.822 | 0/3 |
+| 0.90 | 13 | 1.000 | 0/0 |
+
+**Decision: gate stays closed** (`CLICKBAIT_PRECISION_CHECK = null`).
+Overall precision is below the 0.80 floor, and — more importantly — the false
+positives are not spread evenly: the question over-flags bağımsız outlets'
+headlines (about half of their flags are not clickbait), so a public per-outlet
+ranking would systematically penalise one zone. Raising the threshold does
+not fix the zone skew at any n large enough to rank outlets. Next step is a
+question rewrite (as the kap_class rewrite did), then re-run Step 0 on the new
+question set. The real rows (no titles) are in
+`tests/fixtures/clickbait-precision.json`.
 
 ## Runbook
 

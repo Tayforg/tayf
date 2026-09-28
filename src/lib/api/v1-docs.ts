@@ -5,6 +5,8 @@ import {
   V1_MAX_SINCE_DAYS,
   V1_POLITICS_THRESHOLD,
 } from "@/lib/api/v1-clusters";
+import { V1_PICKUP_DEFAULT_DAYS, V1_PICKUP_MAX_DAYS } from "@/lib/api/v1-kap-pickup";
+import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
 
 /**
  * Pack `gelistirici` — the single typed source of truth for the keyed
@@ -36,7 +38,12 @@ export interface V1ResponseDoc {
   status: number;
   descriptionTr: string;
   descriptionEn: string;
-  schema?: "ClusterListResponse" | "ClusterItemResponse" | "SourceListResponse" | "Error";
+  schema?:
+    | "ClusterListResponse"
+    | "ClusterItemResponse"
+    | "SourceListResponse"
+    | "KapPickupResponse"
+    | "Error";
 }
 
 export interface V1EndpointDoc {
@@ -122,6 +129,30 @@ const ID_PARAM: V1ParamDoc = {
   schema: { type: "string", format: "uuid" },
   descriptionTr: "Küme UUID'si.",
   descriptionEn: "The cluster's UUID.",
+};
+
+const TICKER_PARAM: V1ParamDoc = {
+  name: "ticker",
+  in: "query",
+  required: true,
+  schema: { type: "string" },
+  descriptionTr: "2–6 büyük harf/rakamdan oluşan hisse kodu (girişte büyük harfe çevrilir).",
+  descriptionEn: "A 2–6 character uppercase-alphanumeric ticker (input is normalized to upper).",
+};
+
+const PICKUP_SINCE_PARAM: V1ParamDoc = {
+  name: "since",
+  in: "query",
+  required: false,
+  schema: { type: "string", format: "date-time" },
+  descriptionTr: `KAP bildirimi için alt sınır, tam ISO 8601 zaman damgası. Varsayılan: ${V1_PICKUP_DEFAULT_DAYS} gün önce. Gelecekteki bir değer reddedilir (400); ${V1_PICKUP_MAX_DAYS} günden eski değerler sessizce ${V1_PICKUP_MAX_DAYS} güne çekilir.`,
+  descriptionEn: `Lower bound on the KAP disclosure timestamp, a full ISO 8601 timestamp. Default: ${V1_PICKUP_DEFAULT_DAYS} days ago. A future value is rejected (400); values older than ${V1_PICKUP_MAX_DAYS} days are silently clamped to ${V1_PICKUP_MAX_DAYS} days.`,
+};
+
+const PICKUP_LIMIT_PARAM: V1ParamDoc = {
+  ...LIMIT_PARAM,
+  descriptionTr: `Döndürülecek en çok bildirim sayısı, 1–${V1_MAX_LIMIT} arası tam sayı (varsayılan ${V1_DEFAULT_LIMIT}), en yeniden en eskiye.`,
+  descriptionEn: `Maximum number of disclosures to return, an integer 1–${V1_MAX_LIMIT} (default ${V1_DEFAULT_LIMIT}), most recent first.`,
 };
 
 export const V1_ENDPOINTS: V1EndpointDoc[] = [
@@ -236,6 +267,49 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
   {
     method: "OPTIONS",
     path: "/api/v1/sources",
+    auth: "none",
+    summaryTr: "CORS ön-uçuş isteği",
+    summaryEn: "CORS preflight request",
+    notesTr: [],
+    params: [],
+    responses: [
+      {
+        status: 204,
+        descriptionTr: "Anahtarsız ön-uçuş yanıtı, gövde yok.",
+        descriptionEn: "Keyless preflight response, no body.",
+      },
+    ],
+  },
+  {
+    method: "GET",
+    path: "/api/v1/kap/pickup",
+    auth: "bearer",
+    summaryTr: "KAP bildirimlerinin medyada yankısı",
+    summaryEn: "Media pickup of a ticker's KAP disclosures",
+    notesTr: [
+      `"/ekonomi/[ticker]" sayfasındaki "Medyada yankı" panelinin anahtarlı yansımasıdır: her KAP bildirimi için, bildirimden sonraki ${PICKUP_WINDOW_HOURS} saat içinde hangi bölgeden (iktidar/bağımsız/muhalefet) ne kadar basın yankısı oluştuğunu döner.`,
+      "Pencere kuralı harfiyendir: her bildirim, kendi [bildirim_zamanı, bildirim_zamanı+48s) penceresinde yayınlanan her haberi sayar; bildirimden önceki bir haber asla yankı sayılmaz. İki bildirim 48 saat içine düşerse aynı haber her ikisine de sayılabilir — bu, her kayıttaki overlapping_disclosures alanıyla görünür kılınır, sessizce tekilleştirilmez.",
+      "relevance_filter: Jev'in ticker_relevance gölge modelinin 0.2 altında puanladığı haberler dışlanır (ör. aynı adlı bir siyasi parti-hisse kodu çakışması); puanlanmamış haberler her zaman tutulur. İlgi puanı sorgusu başarısız olursa uç nokta 500 dönmek yerine relevance_filter.applied: false ile açık başarısız olur.",
+      "disclosure_coverage görünümü asla sorgulanmaz (üretimde 60 saniyede zaman aşımına uğradı); sorgu her zaman kap_disclosures / article_tickers üzerinden hisse kodu ve zaman sınırlıdır.",
+    ],
+    params: [TICKER_PARAM, PICKUP_SINCE_PARAM, PICKUP_LIMIT_PARAM],
+    responses: [
+      {
+        status: 200,
+        descriptionTr: "Bildirim yankı listesi.",
+        descriptionEn: "The disclosure pickup list.",
+        schema: "KapPickupResponse",
+      },
+      RESP_400,
+      RESP_401,
+      RESP_403,
+      RESP_429,
+      RESP_500,
+    ],
+  },
+  {
+    method: "OPTIONS",
+    path: "/api/v1/kap/pickup",
     auth: "none",
     summaryTr: "CORS ön-uçuş isteği",
     summaryEn: "CORS preflight request",

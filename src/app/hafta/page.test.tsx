@@ -434,9 +434,20 @@ describe("WeeklyPage — week archive nav", () => {
     expect(text).not.toContain("Geçmiş haftalar:");
   });
 
-  it("does not add a sixth h2 heading for the archive nav", async () => {
+  it("does not add a seventh h2 heading for the archive nav", async () => {
+    // Exact list, not just a count: proves the archive nav (rendered here
+    // via the default mocks.recentWeeks with a non-empty `previous`) adds
+    // no h2 of its own beyond the six section headings the page already
+    // has without it.
     const headings = collectTag(await WeeklyPage(), "h2");
-    expect(headings).toHaveLength(5);
+    expect(headings).toEqual([
+      "Bu hafta kim neyi öne çıkardı",
+      "En geniş yelpaze",
+      "Kör noktalar",
+      "Aynı hafta, farklı kelimeler",
+      "Sessiz kaynaklar",
+      "Etiket değişiklikleri",
+    ]);
   });
 });
 

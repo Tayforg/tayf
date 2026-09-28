@@ -80,8 +80,10 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
   const handlers = discoverHandlers();
   const doc = buildOpenApiDocument("https://x.test");
 
-  it("finds exactly 7 (method, path) handler pairs today", () => {
-    expect(handlers).toHaveLength(7);
+  // 9 today: clusters (GET+OPTIONS), clusters/{id} (GET+OPTIONS), sources
+  // (GET+OPTIONS), kap/pickup (GET+OPTIONS), and openapi.json (GET only).
+  it("finds exactly 9 (method, path) handler pairs today", () => {
+    expect(handlers).toHaveLength(9);
   });
 
   it("every handler pair exists in V1_ENDPOINTS and in the OpenAPI document's paths", () => {
@@ -221,7 +223,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
 });
 
 describe("GET /api/v1/openapi.json", () => {
-  it("returns 200 JSON with CORS *, the cache header, and exactly the 4 expected paths", async () => {
+  it("returns 200 JSON with CORS *, the cache header, and exactly the 5 expected paths", async () => {
     const { GET } = await import("@/app/api/v1/openapi.json/route");
     const res = GET();
     expect(res.status).toBe(200);
@@ -234,6 +236,7 @@ describe("GET /api/v1/openapi.json", () => {
       [
         "/api/v1/clusters",
         "/api/v1/clusters/{id}",
+        "/api/v1/kap/pickup",
         "/api/v1/openapi.json",
         "/api/v1/sources",
       ].sort(),
