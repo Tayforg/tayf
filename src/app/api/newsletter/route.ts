@@ -14,10 +14,38 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 // fills the form once; this absorbs accidental double-clicks but cuts off any
 // scripted abuse from a single IP. Mirrors the admin-post limiter shape so we
 // have a single rate-limit pattern across mutating routes.
+//
+// This is process-local, same limitation as every other limiter in
+// src/lib/rate-limit.ts: a durable cross-instance cooldown needs a shared
+// store (Redis) or a DB column, not in scope here.
 const newsletterPostLimit = createRateLimiter("newsletter-post", {
   capacity: 5,
   refillPerSecond: 1 / 30,
 });
+
+// Per-address cap: at most one confirmation mail per address per 10
+// minutes per instance, independent of the IP limiter above (a script that
+// rotates IPs but keeps re-submitting the same unconfirmed address would
+// otherwise get a fresh confirm mail on every request). `rate-limit.ts`
+// evicts idle buckets after DEFAULT_TTL_MS (10 minutes), so a longer window
+// would be illusory — the bucket would just reset before it mattered.
+const newsletterAddressLimit = createRateLimiter("newsletter-address", {
+  capacity: 1,
+  refillPerSecond: 1 / 600,
+});
+
+// Keys the address limiter by a SHA-256 hex digest rather than the raw
+// email, so a rate-limit bucket never holds a subscriber's address in the
+// clear (even transiently, in process memory).
+async function addressRateLimitKey(email: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(email),
+  );
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 // Pragmatic email regex — matches "local@domain.tld" with at least one dot in
 // the domain. Not RFC-5322 perfect, but good enough to catch typos client-side
@@ -109,15 +137,21 @@ export const POST = withApiErrors(async (request: Request) => {
       return NextResponse.json({ success: true });
     }
 
-    const confirmUrl = `${siteUrl()}/api/newsletter/confirm?token=${encodeURIComponent(existing.confirm_token)}`;
-    after(async () => {
-      const r = await sendEmail({
-        to: email,
-        subject: "Tayf bültenine kaydını onayla",
-        html: confirmEmailHtml(confirmUrl),
+    const addressKey = await addressRateLimitKey(email);
+    if (newsletterAddressLimit(addressKey).allowed) {
+      const confirmUrl = `${siteUrl()}/api/newsletter/confirm?token=${encodeURIComponent(existing.confirm_token)}`;
+      after(async () => {
+        const r = await sendEmail({
+          to: email,
+          subject: "Tayf bültenine kaydını onayla",
+          html: confirmEmailHtml(confirmUrl),
+        });
+        if ("ok" in r && !r.ok) console.error("[newsletter] confirm mail failed", r.error);
       });
-      if ("ok" in r && !r.ok) console.error("[newsletter] confirm mail failed", r.error);
-    });
+    }
+    // Neutral response either way — a re-POST that lands inside the
+    // per-address cooldown must look identical to one that sent, so a
+    // script probing the endpoint learns nothing about timing.
     return NextResponse.json({ success: true });
   }
 
@@ -142,15 +176,18 @@ export const POST = withApiErrors(async (request: Request) => {
     return apiServerError(insertError);
   }
 
-  const confirmUrl = `${siteUrl()}/api/newsletter/confirm?token=${encodeURIComponent(confirmToken)}`;
-  after(async () => {
-    const r = await sendEmail({
-      to: email,
-      subject: "Tayf bültenine kaydını onayla",
-      html: confirmEmailHtml(confirmUrl),
+  const addressKey = await addressRateLimitKey(email);
+  if (newsletterAddressLimit(addressKey).allowed) {
+    const confirmUrl = `${siteUrl()}/api/newsletter/confirm?token=${encodeURIComponent(confirmToken)}`;
+    after(async () => {
+      const r = await sendEmail({
+        to: email,
+        subject: "Tayf bültenine kaydını onayla",
+        html: confirmEmailHtml(confirmUrl),
+      });
+      if ("ok" in r && !r.ok) console.error("[newsletter] confirm mail failed", r.error);
     });
-    if ("ok" in r && !r.ok) console.error("[newsletter] confirm mail failed", r.error);
-  });
+  }
 
   return NextResponse.json({ success: true });
 });

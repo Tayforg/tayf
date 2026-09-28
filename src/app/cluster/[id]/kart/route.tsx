@@ -14,7 +14,7 @@ import type { MediaDnaZone } from "@/types";
 // page) instead of Next's hashed /opengraph-image path.
 //
 // Editorial contract — mostly enforced by the data layer (src/lib/cards/
-// story-card.ts), with the two exceptions this file has to handle itself:
+// story-card.ts), with the exceptions this file has to handle itself:
 //   * headlines ONLY — no excerpt, no summary, no article image, so the
 //     card needs no `excerpt_allowed` right from any outlet; outlet names
 //     and their own headlines are all it shows.
@@ -31,6 +31,13 @@ import type { MediaDnaZone } from "@/types";
 //   * every count carries its denominator (the zone yield), and an
 //     unknown, zero or count-exceeding denominator says so in words
 //     instead of printing an impossible fraction.
+//   * story-card.ts buckets ONLY voting-kind members (outlet/wire) into
+//     zones and coverage — the same partition the cluster page and OG
+//     image use (voting members / bias_distribution). Non-voting members
+//     (aggregator, niche) are excluded from every zone and every count;
+//     `card.nonVotingCount` is the unique-source count of those excluded
+//     members, rendered as one extra line under the counter row so their
+//     absence from the spectrum above is explicit rather than silent.
 //
 // Satori (the engine behind ImageResponse) supports no Tailwind, no grid
 // and no pseudo-elements: every rule below is an inline `style`, every
@@ -237,6 +244,11 @@ function renderCard({
             </div>
           ))}
         </div>
+        {card.nonVotingCount > 0 ? (
+          <div style={{ fontSize: 22, color: MUTED }}>
+            {`+${card.nonVotingCount} toplayıcı / niş kaynak spektruma sayılmaz`}
+          </div>
+        ) : null}
         <div
           style={{
             display: "flex",

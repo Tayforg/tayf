@@ -137,9 +137,10 @@ describe("middleware.ts /konu status-code gate", () => {
     }
   });
 
-  it("redirects politika with a 308 and 404s anything else not in KONU_SLUGS", () => {
+  it("redirects politika with a 308 and rewrites anything else not in KONU_SLUGS to the not-found sink", () => {
     expect(middlewareSrc).toContain("politika");
     expect(middlewareSrc).toContain("308");
-    expect(middlewareSrc).toMatch(/status:\s*404/);
+    expect(middlewareSrc).toContain("NextResponse.rewrite(");
+    expect(middlewareSrc).toContain("__tayf-not-found");
   });
 });

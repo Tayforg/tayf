@@ -45,14 +45,25 @@ export async function generateStaticParams() {
 // redirect/404 is what the reader gets, not a meta tag.
 export async function generateMetadata({
   params,
+  searchParams,
 }: PageProps): Promise<Metadata> {
   const { slug } = await params;
   if (isTopicSlug(slug)) {
     const base = topicMetadata(slug);
+    // seo-2: self-canonical per page — without this, every ?sayfa=N page
+    // inherited page 1's canonical, telling crawlers pages 2+ are
+    // duplicates and burying them from the index. Parsed identically to
+    // the page body (Array.isArray -> first value; clampTopicPage keeps
+    // the "use cache" key space finite) so the canonical always matches
+    // what actually rendered.
+    const { sayfa } = await searchParams;
+    const raw = Array.isArray(sayfa) ? sayfa[0] : sayfa;
+    const page = clampTopicPage(parseInt(raw ?? "1", 10));
     return {
       ...base,
       alternates: {
         ...base.alternates,
+        canonical: page > 1 ? `/konu/${slug}?sayfa=${page}` : `/konu/${slug}`,
         types: { "application/rss+xml": `/rss/${slug}.xml` },
       },
     };

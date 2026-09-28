@@ -116,6 +116,68 @@ describe("SourceChips", () => {
   });
 });
 
+describe("SourceChips — mobile künye wrap (B)", () => {
+  it("the wrapper carries flex-wrap and min-w-0", () => {
+    const el = SourceChips({ slug: "sabah" }) as MinimalNode;
+    expect(el.props?.className ?? "").toContain("flex-wrap");
+    expect(el.props?.className ?? "").toContain("min-w-0");
+  });
+
+  it("the ownership chip wraps on mobile and stays nowrap from sm: up", () => {
+    const el = SourceChips({ slug: "sabah" });
+    const [ownershipChip] = findAll(
+      el,
+      (n) =>
+        typeof n.props?.title === "string" &&
+        n.props.title.startsWith("Sahiplik:"),
+    );
+    expect(ownershipChip).toBeDefined();
+    const chipClass = ownershipChip?.props?.className ?? "";
+    expect(chipClass).toContain("whitespace-normal");
+    expect(chipClass).toContain("sm:whitespace-nowrap");
+    // twMerge must have removed the base 'whitespace-nowrap' utility.
+    expect(chipClass).not.toMatch(/(?<!sm:)whitespace-nowrap/);
+  });
+
+  it("the ownership label does not use bare truncate", () => {
+    const el = SourceChips({ slug: "sabah" });
+    const [ownershipChip] = findAll(
+      el,
+      (n) =>
+        typeof n.props?.title === "string" &&
+        n.props.title.startsWith("Sahiplik:"),
+    );
+    const labels = findAll(
+      ownershipChip?.props?.children,
+      (n) => typeof n.props?.className === "string",
+    );
+    const labelClass = String(labels[0]?.props?.className ?? "");
+    expect(labelClass).not.toMatch(/(?<!sm:)\btruncate\b/);
+    expect(labelClass).toContain("sm:truncate");
+  });
+
+  it("the ownership chip still carries its Sahiplik title", () => {
+    const el = SourceChips({ slug: "sabah" });
+    const [ownershipChip] = findAll(
+      el,
+      (n) =>
+        typeof n.props?.title === "string" &&
+        n.props.title.startsWith("Sahiplik:"),
+    );
+    expect(ownershipChip).toBeDefined();
+  });
+
+  it("the factuality chip is unchanged", () => {
+    const el = SourceChips({ slug: "sabah" });
+    const [factChip] = findAll(
+      el,
+      (n) => n.props?.title === "Karışık doğruluk",
+    );
+    expect(factChip).toBeDefined();
+    expect(String(factChip?.props?.className)).not.toContain("whitespace-normal");
+  });
+});
+
 describe("ownershipLabel", () => {
   it("disambiguates the independent-owner value from the Bağımsız zone", () => {
     expect(ownershipLabel("Bağımsız")).toBe("Bağımsız sahiplik");

@@ -5,6 +5,7 @@ import {
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
+import { partitionByVote } from "@/lib/sources/kind";
 import type { MediaDnaZone } from "@/types";
 
 // Pure data selection for the U-02 "Manşet Kartı" share card
@@ -45,6 +46,12 @@ export interface StoryCard {
    *  when the zone has no members, or every member's title was filtered. */
   headlines: Record<MediaDnaZone, StoryCardHeadline | null>;
   coverage: Record<MediaDnaZone, StoryCardZoneCoverage>;
+  /** Unique source slugs among members whose kind does not vote in
+   *  bias_distribution / blindspot / trends (aggregator, niche — see
+   *  `src/lib/sources/kind.ts`). Excluded entirely from `headlines` and
+   *  `coverage`, but counted here so the card can say so instead of
+   *  silently under-counting real coverage. */
+  nonVotingCount: number;
 }
 
 function emptyCoverage(): StoryCardZoneCoverage {
@@ -59,22 +66,32 @@ function emptyCoverage(): StoryCardZoneCoverage {
 /**
  * Select the per-zone headline + coverage data the share card renders.
  *
- * `null` for an empty cluster (no members at all) — the route handler
- * must treat that the same as "unknown id" (404), not render an empty
- * card.
+ * Only voting-kind members ("outlet" / "wire" — see `partitionByVote` in
+ * `@/lib/sources/kind`) are bucketed into zones: this mirrors the cluster
+ * page and OG image, which both derive their spectrum from voting members
+ * / `bias_distribution`. Non-voting members (aggregator, niche) never
+ * become a zone headline and are never counted toward `coverage`; they
+ * are surfaced only via `nonVotingCount`.
+ *
+ * `null` when there are no VOTING members at all — the route handler
+ * must treat that the same as "unknown id" (404): three empty zones would
+ * misrepresent a cluster that in fact has no spectrum-eligible coverage.
  */
 export function selectStoryCard(
   members: ClusterDetailMember[],
   health: ZoneFeedHealth | null,
 ): StoryCard | null {
-  if (members.length === 0) return null;
+  const { voting, nonVoting } = partitionByVote(members);
+  if (voting.length === 0) return null;
+
+  const nonVotingCount = new Set(nonVoting.map((m) => m.source.slug)).size;
 
   const byZone: Record<MediaDnaZone, ClusterDetailMember[]> = {
     iktidar: [],
     bagimsiz: [],
     muhalefet: [],
   };
-  for (const member of members) {
+  for (const member of voting) {
     byZone[zoneOf(member.source.bias)].push(member);
   }
 
@@ -118,5 +135,5 @@ export function selectStoryCard(
     }
   }
 
-  return { headlines, coverage };
+  return { headlines, coverage, nonVotingCount };
 }

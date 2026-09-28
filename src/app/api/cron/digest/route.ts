@@ -243,6 +243,12 @@ export const GET = withApiErrors(async (request: Request) => {
   const origin = siteUrl();
 
   function toEmail(row: SubscriberRow) {
+    // Built once per row and reused for both the visible footer link
+    // (buildDigestHtml) and the RFC 2369/8058 headers below, so the two
+    // never drift apart. The link now lands on the confirm page (a GET
+    // that renders a form) rather than unsubscribing outright — see
+    // src/app/api/newsletter/unsubscribe/route.ts.
+    const unsubscribeUrl = `${origin}/api/newsletter/unsubscribe?token=${encodeURIComponent(row.unsubscribe_token)}`;
     return {
       to: row.email,
       subject: DIGEST_SUBJECT,
@@ -250,8 +256,15 @@ export const GET = withApiErrors(async (request: Request) => {
         clusters: topClusters,
         blindspot: topBlindspot,
         siteUrl: origin,
-        unsubscribeUrl: `${origin}/api/newsletter/unsubscribe?token=${encodeURIComponent(row.unsubscribe_token)}`,
+        unsubscribeUrl,
       }),
+      // RFC 2369/8058: lets mail clients render a native "Unsubscribe"
+      // action and lets providers send the POST directly (One-Click),
+      // without a human ever loading the confirm page.
+      headers: {
+        "List-Unsubscribe": `<${unsubscribeUrl}>`,
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      },
     };
   }
 

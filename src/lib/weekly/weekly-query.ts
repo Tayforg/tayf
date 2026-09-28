@@ -7,6 +7,7 @@ import {
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
 import { applyRecallVeto } from "@/lib/clusters/recall-veto";
+import { dedupeByTitle } from "@/lib/weekly/dedupe-titles";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
@@ -204,10 +205,21 @@ export function summariseWeek(
   const byArticleCountDesc = <T extends { articleCount: number }>(a: T, b: T) =>
     b.articleCount - a.articleCount;
 
+  // browser-qa-15: Jev's clustering can split one real-world story into two
+  // clusters with cosmetically different headlines (case, punctuation, an
+  // added "!") — de-dupe by folded title AFTER sorting by rank, so "first"
+  // (kept) is always the higher-article-count duplicate, then re-slice to
+  // the list size from whatever real rows remain.
   return {
     zoneCounts,
-    topClusters: topClusters.sort(byArticleCountDesc).slice(0, WEEKLY_LIST_SIZE),
-    blindspots: blindspots.sort(byArticleCountDesc).slice(0, WEEKLY_LIST_SIZE),
+    topClusters: dedupeByTitle(
+      topClusters.sort(byArticleCountDesc),
+      (c) => c.title,
+    ).slice(0, WEEKLY_LIST_SIZE),
+    blindspots: dedupeByTitle(
+      blindspots.sort(byArticleCountDesc),
+      (b) => b.title,
+    ).slice(0, WEEKLY_LIST_SIZE),
   };
 }
 

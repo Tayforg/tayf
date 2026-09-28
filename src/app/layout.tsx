@@ -6,6 +6,7 @@ import { Footer } from "@/components/layout/footer";
 import { KbdShortcuts } from "@/components/kbd-shortcuts";
 import { Analytics } from "@vercel/analytics/next";
 import { siteUrl } from "@/lib/site-url";
+import { buildSiteJsonLd, serializeJsonLd } from "@/lib/seo/json-ld";
 import "./globals.css";
 
 // Editorial serif for headlines — authoritative, warm character.
@@ -94,10 +95,11 @@ export const metadata: Metadata = {
       ],
     },
   },
-  icons: {
-    icon: "/icon.svg",
-    apple: "/apple-icon.svg",
-  },
+  // browser-qa-13: no hard-coded `icons` key — favicon.ico, icon.svg and
+  // the apple-touch-icon route under src/app/ are file-convention routes
+  // Next.js 16 wires into <link> tags automatically. The old hard-coded
+  // apple-icon entry pointed at a plain SVG, which iOS's "Add to Home
+  // Screen" cannot route as an apple-touch-icon at all.
 };
 
 export const viewport: Viewport = {
@@ -120,6 +122,19 @@ export default function RootLayout({
       className={`${serif.variable} ${sans.variable} ${mono.variable} h-full antialiased dark`}
     >
       <body className="min-h-full flex flex-col">
+        {/* seo-4/seo-5: sitewide Organization + WebSite graph, once per
+            page load — gives every page a stable entity to hang
+            NewsArticle.publisher (cluster/[id]/page.tsx) off of, and lets
+            Google attach a Sitelinks search box / knowledge panel to the
+            site itself. Same script-injection-safety rationale as the
+            per-page NewsArticle/BreadcrumbList blocks: `serializeJsonLd`
+            escapes every "<" so this can never terminate the element early
+            (buildSiteJsonLd's inputs are all static/env-derived, but the
+            escape costs nothing and keeps the pattern uniform). */}
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: serializeJsonLd(buildSiteJsonLd()) }}
+        />
         <Suspense>
           <Header />
         </Suspense>

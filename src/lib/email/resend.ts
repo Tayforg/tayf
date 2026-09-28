@@ -18,6 +18,17 @@ export interface SendEmailInput {
   subject: string;
   html: string;
   text?: string;
+  /**
+   * Extra mail headers (e.g. RFC 2369/8058 `List-Unsubscribe` /
+   * `List-Unsubscribe-Post` on the digest — see
+   * src/app/api/cron/digest/route.ts). Values are sanitized before they
+   * reach the request body: a CR/LF in a header value could otherwise
+   * smuggle an extra header into the request (header injection), so any
+   * run of `\r`/`\n` is collapsed to a single space. Standard casing like
+   * `List-Unsubscribe` is fine as written — mail headers are
+   * case-insensitive.
+   */
+  headers?: Record<string, string>;
 }
 
 export type SendEmailResult =
@@ -57,6 +68,15 @@ export async function sendEmail(
 
   const from = process.env.NEWSLETTER_FROM ?? "Tayf <bulten@tayfhaber.com>";
 
+  const sanitizedHeaders = input.headers
+    ? Object.fromEntries(
+        Object.entries(input.headers).map(([key, value]) => [
+          key,
+          value.replace(/[\r\n]+/g, " "),
+        ]),
+      )
+    : undefined;
+
   try {
     const res = await fetch(RESEND_API_URL, {
       method: "POST",
@@ -70,6 +90,9 @@ export async function sendEmail(
         subject: input.subject,
         html: input.html,
         ...(input.text ? { text: input.text } : {}),
+        ...(sanitizedHeaders && Object.keys(sanitizedHeaders).length > 0
+          ? { headers: sanitizedHeaders }
+          : {}),
       }),
     });
 

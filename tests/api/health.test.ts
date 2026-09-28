@@ -35,6 +35,11 @@ vi.mock("next/server", async (importOriginal) => {
 
 type TableName = "sources" | "articles" | "clusters" | "worker_metrics";
 
+// ingest-health: incremented every time the sources-status `select(...)`
+// branch above is entered -- lets a test prove the anonymous path never
+// even builds this query.
+let sourcesStatusCallCount = 0;
+
 interface SelectResponse {
   data?: unknown;
   error?: { message: string } | null;
@@ -42,11 +47,16 @@ interface SelectResponse {
 
 const responders: {
   sourcesSelect: () => Promise<SelectResponse>;
+  sourcesStatus: () => Promise<SelectResponse>;
   articlesMaybeSingle: () => Promise<SelectResponse>;
   clustersMaybeSingle: () => Promise<SelectResponse>;
   workerMetricsSelect: () => Promise<SelectResponse>;
 } = {
   sourcesSelect: async () => ({ data: [{ id: "s1" }], error: null }),
+  // ingest-health: `.from("sources").select("...latest:articles...")...` --
+  // the authed-only sources-status check. Empty by default (no active
+  // sources) so a test must opt in to whatever shape it needs.
+  sourcesStatus: async () => ({ data: [], error: null }),
   articlesMaybeSingle: async () => ({
     data: { created_at: new Date().toISOString() },
     error: null,
@@ -74,12 +84,32 @@ const responders: {
 
 vi.mock("@supabase/supabase-js", () => ({
   createClient: () => {
+    // ingest-health: `.from("sources")` is now called from TWO different
+    // probes with two different select shapes -- the pre-existing cheap DB
+    // probe (`select("id").limit(1)`) and the new authed-only sources-status
+    // check (`select("...latest:articles...")...`). Told apart by whether
+    // the `select(...)` argument contains "latest:", not by call order, so
+    // both probes can run in the same request without one confusing the
+    // other's fixture.
     function sourcesChain() {
-      const chain = {
-        select: () => chain,
-        limit: () => responders.sourcesSelect(),
+      return {
+        select: (arg?: string) => {
+          if (typeof arg === "string" && arg.includes("latest:")) {
+            sourcesStatusCallCount++;
+            const statusChain = {
+              eq: () => statusChain,
+              lte: () => statusChain,
+              order: () => statusChain,
+              limit: () => responders.sourcesStatus(),
+            };
+            return statusChain;
+          }
+          const dbChain = {
+            limit: () => responders.sourcesSelect(),
+          };
+          return dbChain;
+        },
       };
-      return chain;
     }
     function articlesChain() {
       const chain = {
@@ -142,6 +172,8 @@ beforeEach(() => {
     data: [{ id: "s1" }],
     error: null,
   });
+  responders.sourcesStatus = async () => ({ data: [], error: null });
+  sourcesStatusCallCount = 0;
   responders.articlesMaybeSingle = async () => ({
     data: { created_at: new Date().toISOString() },
     error: null,
@@ -593,5 +625,174 @@ describe("GET /api/health", () => {
     );
     expect(status).toBe(503);
     expect(body.checks).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // ingest-health: authed-only `checks.sources` -- silent/never-delivered
+  // active sources, purely informational (never flips the verdict).
+  // ---------------------------------------------------------------------------
+
+  describe("checks.sources [ingest-health]", () => {
+    it("lists a never-delivered source and a 4-day-stale one with failStreak and quarantined", async () => {
+      const staleIso = new Date(
+        Date.now() - 4 * 24 * 60 * 60 * 1000,
+      ).toISOString();
+      responders.sourcesStatus = async () => ({
+        data: [
+          {
+            slug: "never-delivered",
+            name: "Never Delivered",
+            bias: "center",
+            kind: "outlet",
+            fetch_last_status: 200,
+            fetch_last_at: new Date().toISOString(),
+            fetch_fail_streak: 0,
+            fetch_quarantined_until: null,
+            latest: [],
+          },
+          {
+            slug: "stale-4d",
+            name: "Stale Four Days",
+            bias: "center",
+            kind: "outlet",
+            fetch_last_status: 403,
+            fetch_last_at: new Date().toISOString(),
+            fetch_fail_streak: 12,
+            fetch_quarantined_until: new Date(
+              Date.now() + 60 * 60 * 1000,
+            ).toISOString(),
+            latest: [{ published_at: staleIso }],
+          },
+          {
+            slug: "healthy-outlet",
+            name: "Healthy Outlet",
+            bias: "center",
+            kind: "outlet",
+            fetch_last_status: 200,
+            fetch_last_at: new Date().toISOString(),
+            fetch_fail_streak: 0,
+            fetch_quarantined_until: null,
+            latest: [{ published_at: new Date().toISOString() }],
+          },
+        ],
+        error: null,
+      });
+
+      const { status, body } = await callGet();
+      expect(status).toBe(200);
+      expect(sourcesStatusCallCount).toBe(1);
+
+      const sources = body.checks.sources as {
+        ok: boolean;
+        active: number;
+        silent: number;
+        votingActive: number;
+        votingSilent: number;
+        silentSources: Array<{
+          slug: string;
+          never: boolean;
+          lastItemAt: string | null;
+          lastHttpStatus: number | null;
+          failStreak: number;
+          quarantined: boolean;
+        }>;
+      };
+      expect(sources.active).toBe(3);
+      expect(sources.silent).toBe(2);
+      // Never-delivered sorts first.
+      expect(sources.silentSources[0]?.slug).toBe("never-delivered");
+      expect(sources.silentSources[0]?.never).toBe(true);
+      expect(sources.silentSources[0]?.lastItemAt).toBeNull();
+      const stale = sources.silentSources.find((s) => s.slug === "stale-4d");
+      expect(stale).toBeDefined();
+      expect(stale?.never).toBe(false);
+      expect(stale?.lastHttpStatus).toBe(403);
+      expect(stale?.failStreak).toBe(12);
+      expect(stale?.quarantined).toBe(true);
+    });
+
+    it("flips sources.ok false when 3 of 4 voting sources are silent, without touching the overall verdict", async () => {
+      const now = new Date().toISOString();
+      const freshRow = (slug: string) => ({
+        slug,
+        name: slug,
+        bias: "center",
+        kind: "outlet",
+        fetch_last_status: 200,
+        fetch_last_at: now,
+        fetch_fail_streak: 0,
+        fetch_quarantined_until: null,
+        latest: [{ published_at: now }],
+      });
+      const silentRow = (slug: string) => ({
+        slug,
+        name: slug,
+        bias: "center",
+        kind: "outlet",
+        fetch_last_status: 200,
+        fetch_last_at: now,
+        fetch_fail_streak: 3,
+        fetch_quarantined_until: null,
+        latest: [],
+      });
+      responders.sourcesStatus = async () => ({
+        data: [
+          silentRow("s1"),
+          silentRow("s2"),
+          silentRow("s3"),
+          freshRow("s4"),
+        ],
+        error: null,
+      });
+
+      const { status, body } = await callGet();
+      expect(status).toBe(200);
+      expect(body.status).toBe("healthy");
+      const sources = body.checks.sources as { ok: boolean; votingActive: number; votingSilent: number };
+      expect(sources.votingActive).toBe(4);
+      expect(sources.votingSilent).toBe(3);
+      expect(sources.ok).toBe(false);
+    });
+
+    it("never queries sources-status for an anonymous caller", async () => {
+      responders.sourcesStatus = async () => ({
+        data: [
+          {
+            slug: "should-not-be-queried",
+            name: "x",
+            bias: "center",
+            kind: "outlet",
+            fetch_last_status: 200,
+            fetch_last_at: new Date().toISOString(),
+            fetch_fail_streak: 0,
+            fetch_quarantined_until: null,
+            latest: [],
+          },
+        ],
+        error: null,
+      });
+
+      const { status, body } = await callGet(
+        new Request("http://localhost/api/health"),
+      );
+      expect(status).toBe(200);
+      expect(sourcesStatusCallCount).toBe(0);
+      expect((body as { checks?: unknown }).checks).toBeUndefined();
+    });
+
+    it("surfaces a sources-status query error without changing the verdict", async () => {
+      responders.sourcesStatus = async () => ({
+        data: null,
+        error: { message: "sources status query boom" },
+      });
+
+      const { status, body } = await callGet();
+      expect(status).toBe(200);
+      expect(body.status).toBe("healthy");
+      const sources = body.checks.sources as { ok: boolean; error?: string };
+      expect(sources.ok).toBe(false);
+      expect(sources.error).toMatch(/sources status query boom/);
+      expect(body.checks.database.ok).toBe(true);
+    });
   });
 });

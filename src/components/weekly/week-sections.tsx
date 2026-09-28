@@ -75,7 +75,7 @@ export function ZoneShares({
               <span className={metaClass}>
                 {delivering === null
                   ? "payda bilinmiyor"
-                  : `${delivering} kaynak haber verdi`}
+                  : `${delivering} kaynak haber verdi (toplayıcı / niş dahil)`}
               </span>
             </li>
           );
@@ -92,7 +92,10 @@ export function ZoneShares({
  * *shares* are computed over delivering sources, which is not how either
  * figure in the rows above is computed, so /hafta states its own two bases:
  * the percentage's denominator (the week's article total) and what the
- * per-zone source figure counts (72 h delivering sources).
+ * per-zone source figure counts (72 h delivering sources, toplayıcı / niş
+ * dahil — mixed with the spektruma-sayılan-only feedStatus basis below,
+ * which is why both bases are now stated explicitly rather than folded
+ * into one ambiguous "kaynak" count — browser-qa-15).
  */
 export function BasisNote({
   total,
@@ -105,10 +108,10 @@ export function BasisNote({
 
   return (
     <p className="text-xs text-muted-foreground">
-      {`Yüzdeler bu haftanın toplam ${total} haberi üzerinden hesaplanır. Kaynak sayıları ise son 72 saatte en az bir haber veren kaynakları gösterir`}
+      {`Yüzdeler bu haftanın toplam ${total} haberi üzerinden hesaplanır. Bölge satırlarındaki kaynak sayıları son 72 saatte en az bir haber veren tüm kaynakları (toplayıcı / niş dahil) gösterir`}
       {known
-        ? `; sitenin genelinde ${feedStatus.delivering} / ${feedStatus.total} kaynak haber verdi. `
-        : "; bu sayı şu anda bilinmiyor. "}
+        ? `; spektruma sayılan kaynaklardan ${feedStatus.delivering} / ${feedStatus.total} tanesi haber verdi. `
+        : "; spektruma sayılan kaynakların durumu şu anda bilinmiyor. "}
       <Link
         href="/kaynaklar/durum"
         className="underline decoration-dotted underline-offset-2 hover:text-foreground"

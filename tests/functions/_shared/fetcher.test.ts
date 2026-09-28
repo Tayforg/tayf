@@ -27,12 +27,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // individual SSRF tests override it per-case.
 // ---------------------------------------------------------------------------
 
-const { xmlParseCalls } = vi.hoisted(() => ({ xmlParseCalls: [] as string[] }));
+const { xmlParseCalls, xmlParseOverride } = vi.hoisted(() => ({
+  xmlParseCalls: [] as string[],
+  // ingest-health: when set, the mock parser returns THIS object instead of
+  // the default single-item RSS feed -- lets a test drive the NotAFeedError
+  // branch (an HTML/empty/legit-empty-feed root) without a real XML parser.
+  xmlParseOverride: { value: undefined as Record<string, unknown> | undefined },
+}));
 
 vi.mock("https://esm.sh/fast-xml-parser@4.5.0", () => ({
   XMLParser: class {
     parse(xml: string) {
       xmlParseCalls.push(xml);
+      if (xmlParseOverride.value !== undefined) return xmlParseOverride.value;
       return {
         rss: {
           channel: {
@@ -135,6 +142,7 @@ function stubFetch(respond: () => Response) {
 
 beforeEach(() => {
   xmlParseCalls.length = 0;
+  xmlParseOverride.value = undefined;
   // Default: resolves to a public IPv4 so the SEC-01 guard's allow-check
   // passes and every pre-existing test keeps exercising the same
   // request/response path it did before the guard was added.
@@ -417,5 +425,183 @@ describe("fetchFeed SSRF guard [SEC-01]", () => {
     expect(xmlParseCalls).toHaveLength(1);
     expect(xmlParseCalls[0]).toContain("şık");
     expect(xmlParseCalls[0]).not.toContain("�");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ingest-health: HTML/404/'Invalid url' bodies are fetch failures, and
+// <atom:link> items resolve a link even with no plain <link>.
+// ---------------------------------------------------------------------------
+
+describe("fetchFeed NotAFeedError handling [ingest-health]", () => {
+  it("treats an HTML body as not-a-feed and restores the pre-request cache entry", async () => {
+    xmlParseOverride.value = { html: { body: {} } };
+    stubFetch(
+      () =>
+        new Response("<html><body>nope</body></html>", {
+          status: 200,
+          headers: {
+            "Content-Type": "text/html; charset=utf-8",
+            ETag: '"new"',
+          },
+        }),
+    );
+    const conditionalCache = new Map([[source.id, { etag: 'W/"old"' }]]);
+
+    const result = await fetchFeed(source, { conditionalCache });
+
+    expect(result.error).toMatch(/^not a feed/);
+    expect(result.error).toContain("html");
+    expect(result.items).toEqual([]);
+    expect(result.status).toBe(200);
+    expect(result.notAFeed).toBe(true);
+    expect(result.etag).toBeUndefined();
+    expect(result.lastModified).toBeUndefined();
+    expect(result.bodyHash).toBeUndefined();
+    // Cache restored to its PRE-request value -- the new ETag the bad body
+    // arrived with must never be persisted (it would turn next cycle's
+    // re-fetch of the same bad body into a spurious "not modified").
+    expect(conditionalCache.get(source.id)).toEqual({ etag: 'W/"old"' });
+  });
+
+  it("clears the cache entry (rather than leaving a stale one) when there was none before", async () => {
+    xmlParseOverride.value = { html: { body: {} } };
+    stubFetch(
+      () =>
+        new Response("<html></html>", {
+          status: 200,
+          headers: { "Content-Type": "text/html", ETag: '"new"' },
+        }),
+    );
+    const conditionalCache = new Map<string, { etag?: string }>();
+
+    await fetchFeed(source, { conditionalCache });
+
+    expect(conditionalCache.has(source.id)).toBe(false);
+  });
+
+  it("reports 'not a feed: empty' for a body that parses to an empty object", async () => {
+    xmlParseOverride.value = {};
+    stubFetch(
+      () =>
+        new Response("", {
+          status: 200,
+          headers: { "Content-Type": "text/plain" },
+        }),
+    );
+
+    const result = await fetchFeed(source);
+
+    expect(result.error).toBe("not a feed: empty");
+    expect(result.notAFeed).toBe(true);
+  });
+
+  it("treats a recognised root with zero items as a legitimately empty feed (no error)", async () => {
+    xmlParseOverride.value = { rss: { channel: {} } };
+    stubFetch(
+      () =>
+        new Response("<rss><channel></channel></rss>", {
+          status: 200,
+          headers: { "Content-Type": "application/rss+xml" },
+        }),
+    );
+
+    const result = await fetchFeed(source);
+
+    expect(result.items).toEqual([]);
+    expect(result.error).toBeUndefined();
+    expect(result.notAFeed).toBeUndefined();
+  });
+
+  it("resolves an item's link from atom:link + a non-permalink guid when <link> is absent", async () => {
+    xmlParseOverride.value = {
+      rss: {
+        channel: {
+          item: [
+            {
+              title: "Milliyet item",
+              "atom:link": { href: "https://www.milliyet.com.tr/gundem/haber-7669353" },
+              guid: { "#text": "7669353", isPermaLink: "false" },
+            },
+          ],
+        },
+      },
+    };
+    stubFetch(
+      () =>
+        new Response("<rss><channel><item/></channel></rss>", {
+          status: 200,
+          headers: { "Content-Type": "application/rss+xml" },
+        }),
+    );
+
+    const result = await fetchFeed(source);
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.link).toBe(
+      "https://www.milliyet.com.tr/gundem/haber-7669353",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ingest-health: pubDate cleanup + dateFallbacks/dateFallbackSample.
+// ---------------------------------------------------------------------------
+
+describe("fetchFeed date cleanup [ingest-health]", () => {
+  it("counts an unparseable pubDate as a fallback and samples the raw value", async () => {
+    xmlParseOverride.value = {
+      rss: {
+        channel: {
+          item: [
+            {
+              title: "Bad date",
+              link: "https://example.com/bad-date",
+              pubDate: "garbage",
+            },
+          ],
+        },
+      },
+    };
+    stubFetch(
+      () =>
+        new Response("<rss><channel><item/></channel></rss>", {
+          status: 200,
+          headers: { "Content-Type": "application/rss+xml" },
+        }),
+    );
+
+    const result = await fetchFeed(source);
+
+    expect(result.dateFallbacks).toBe(1);
+    expect(result.dateFallbackSample).toBe("garbage");
+  });
+
+  it("does not count a cleaned Sözcü-style entity-encoded-offset date as a fallback", async () => {
+    xmlParseOverride.value = {
+      rss: {
+        channel: {
+          item: [
+            {
+              title: "Sözcü item",
+              link: "https://example.com/sozcu-1",
+              pubDate: "Mon, 28 Sep 2026 22:25:43 &#x2B;0300",
+            },
+          ],
+        },
+      },
+    };
+    stubFetch(
+      () =>
+        new Response("<rss><channel><item/></channel></rss>", {
+          status: 200,
+          headers: { "Content-Type": "application/rss+xml" },
+        }),
+    );
+
+    const result = await fetchFeed({ ...source, slug: "sozcu" });
+
+    expect(result.dateFallbacks).toBe(0);
+    expect(result.items[0]?.pubDate).toBe("Mon, 28 Sep 2026 22:25:43 +0300");
   });
 });

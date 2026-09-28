@@ -29,10 +29,27 @@ import { NextResponse, type NextRequest } from "next/server";
 //     @supabase/supabase-js transitively, neither of which belong in the
 //     Edge middleware bundle.
 //
-//  3. /admin/:path* (except /admin/login) — unauthenticated requests get a
+//  3. /cluster/:id — gate 4: a segment that fails the UUID shape gate (and
+//     contains no further "/") rewrites to the not-found sink below instead
+//     of streaming a 200 shell for something that can never resolve. This
+//     does NOT probe the database for a well-formed-but-unknown id — same
+//     deliberate deviation as /ekonomi/:ticker and /konu/:slug above — an
+//     unknown-but-well-formed UUID still streams through to the page's own
+//     notFound(). The matcher is the single literal segment '/cluster/:id',
+//     never a ':path*' — that would also catch /cluster/<id>/kart and the
+//     per-cluster /opengraph-image route, which must stay unmatched.
+//
+//  4. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
 //     requireAdminSession() call, and each page's own call, stay as
 //     defence in depth; this middleware is not the only check.
+//
+// Real 404s: gates 1-3 used to return `new NextResponse(null, { status:
+// 404 })` — a real status code, but a 0-byte body with none of the site's
+// chrome (header/footer/theme) and none of the honest not-found copy.
+// `notFoundRewrite` below rewrites to a path no route matches
+// (NOT_FOUND_REWRITE_PATH), so Next falls through to `app/not-found.tsx` —
+// same 404 status on the wire, now with the real page.
 //
 // session.ts's admin_session verifier imports `server-only` and
 // `node:crypto`, so it cannot be imported into Edge middleware as-is. This
@@ -41,7 +58,13 @@ import { NextResponse, type NextRequest } from "next/server";
 // shape and `expiresAt` check — not a weaker cookie-presence check.
 
 export const config = {
-  matcher: ["/admin", "/admin/:path*", "/ekonomi/:ticker", "/konu/:slug"],
+  matcher: [
+    "/admin",
+    "/admin/:path*",
+    "/ekonomi/:ticker",
+    "/konu/:slug",
+    "/cluster/:id",
+  ],
 };
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/i;
@@ -49,7 +72,15 @@ const TICKER_RE = /^[A-Z0-9]{2,6}$/i;
 // see the header comment above). Pinned against the real export by
 // tests/app/konu-routes.test.ts.
 const KONU_SLUGS = new Set(["dunya", "ekonomi", "spor", "yasam", "teknoloji", "genel"]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// No route matches this path — Next renders app/not-found.tsx with a real
+// 404 status and the site's own chrome, instead of a 0-byte response.
+const NOT_FOUND_REWRITE_PATH = "/__tayf-not-found";
 const ADMIN_COOKIE_NAME = "admin_session";
+
+function notFoundRewrite(req: NextRequest): NextResponse {
+  return NextResponse.rewrite(new URL(NOT_FOUND_REWRITE_PATH, req.url));
+}
 
 function base64UrlEncode(bytes: Uint8Array): string {
   let binary = "";
@@ -108,15 +139,27 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   if (pathname.startsWith("/konu/")) {
     const slug = pathname.slice("/konu/".length);
     if (slug === "politika") return NextResponse.redirect(new URL("/", req.url), 308);
-    if (!KONU_SLUGS.has(slug)) return new NextResponse(null, { status: 404 });
+    if (!KONU_SLUGS.has(slug)) return notFoundRewrite(req);
     return NextResponse.next();
   }
 
   if (pathname.startsWith("/ekonomi/")) {
     const ticker = pathname.slice("/ekonomi/".length);
     if (!TICKER_RE.test(ticker)) {
-      return new NextResponse(null, { status: 404 });
+      return notFoundRewrite(req);
     }
+    return NextResponse.next();
+  }
+
+  if (pathname.startsWith("/cluster/")) {
+    const segment = pathname.slice("/cluster/".length);
+    // A nested path (e.g. /cluster/<id>/kart, /cluster/<id>/opengraph-image)
+    // never reaches here in production (the matcher is the single literal
+    // segment '/cluster/:id'), but the function must still fall through
+    // safely if somehow invoked with one, rather than 404 or fall into the
+    // admin branch below.
+    if (segment.includes("/")) return NextResponse.next();
+    if (!UUID_RE.test(segment)) return notFoundRewrite(req);
     return NextResponse.next();
   }
 

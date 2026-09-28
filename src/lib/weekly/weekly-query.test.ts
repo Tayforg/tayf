@@ -413,10 +413,70 @@ describe("summariseWeek — topClusters", () => {
     });
   });
 
+  it("collapses two clusters that are the same story under a cosmetically different title (browser-qa-15) into one topClusters row", () => {
+    const rows = [
+      row({
+        id: "dup-a",
+        title_tr_neutral: null,
+        title_tr: "Mansur Yavaş CHP'den istifa etti",
+        article_count: 29,
+        bias_distribution: dist({ pro_government: 2, opposition: 2 }),
+      }),
+      row({
+        id: "dup-b",
+        title_tr_neutral: null,
+        title_tr: "MANSUR YAVAŞ CHP’DEN İSTİFA ETTİ!",
+        article_count: 26,
+        bias_distribution: dist({ pro_government: 2, opposition: 2 }),
+      }),
+      row({
+        id: "other",
+        title_tr_neutral: null,
+        title_tr: "Deprem yönetmeliği",
+        article_count: 10,
+        bias_distribution: dist({ pro_government: 2, opposition: 2 }),
+      }),
+    ];
+
+    const summary = summariseWeek(rows, null);
+
+    expect(summary.topClusters.map((c) => c.id)).toEqual(["dup-a", "other"]);
+    expect(summary.topClusters.map((c) => c.articleCount)).toEqual([29, 10]);
+  });
+
+  it("still fills to WEEKLY_LIST_SIZE from the remaining rows after de-duplication", () => {
+    const rows = [
+      row({ id: "dup-a", title_tr_neutral: null, title_tr: "Aynı haber", article_count: 20, bias_distribution: dist({ pro_government: 2, opposition: 2 }) }),
+      row({ id: "dup-b", title_tr_neutral: null, title_tr: "aynı  haber!", article_count: 18, bias_distribution: dist({ pro_government: 2, opposition: 2 }) }),
+      ...["c1", "c2", "c3", "c4", "c5"].map((id, i) =>
+        row({
+          id,
+          title_tr_neutral: null,
+          title_tr: `Haber ${id}`,
+          article_count: 10 - i,
+          bias_distribution: dist({ pro_government: 2, opposition: 2 }),
+        }),
+      ),
+    ];
+
+    const summary = summariseWeek(rows, null);
+
+    expect(summary.topClusters).toHaveLength(5);
+    expect(summary.topClusters.map((c) => c.id)).toEqual([
+      "dup-a",
+      "c1",
+      "c2",
+      "c3",
+      "c4",
+    ]);
+  });
+
   it("orders by article_count desc and caps at five", () => {
     const rows = [3, 9, 5, 1, 7, 6].map((n, i) =>
       row({
         id: `c${i}`,
+        title_tr_neutral: null,
+        title_tr: `Haber ${i}`,
         article_count: n,
         bias_distribution: dist({ pro_government: n, opposition: 1 }),
       }),
@@ -524,6 +584,33 @@ describe("summariseWeek — blindspots", () => {
     expect(summary.blindspots.map((b) => b.id)).toEqual(["muhalefet-side"]);
   });
 
+  it("collapses two blindspot rows for the same story (browser-qa-15) into one", () => {
+    const rows = [
+      row({
+        id: "dup-a",
+        title_tr_neutral: null,
+        title_tr: "İhale iptal edildi",
+        is_blindspot: true,
+        blindspot_side: "opposition",
+        bias_distribution: dist({ opposition: 5 }),
+        article_count: 9,
+      }),
+      row({
+        id: "dup-b",
+        title_tr_neutral: null,
+        title_tr: "İhale İptal Edildi!",
+        is_blindspot: true,
+        blindspot_side: "opposition",
+        bias_distribution: dist({ opposition: 5 }),
+        article_count: 6,
+      }),
+    ];
+
+    const summary = summariseWeek(rows, null);
+
+    expect(summary.blindspots.map((b) => b.id)).toEqual(["dup-a"]);
+  });
+
   it("suppresses nothing when health is null (fail open)", () => {
     const rows = [
       row({
@@ -570,6 +657,8 @@ describe("summariseWeek — blindspots", () => {
     const rows = [
       row({
         id: "null-veto",
+        title_tr_neutral: null,
+        title_tr: "Null veto haberi",
         is_blindspot: true,
         blindspot_side: "opposition",
         blindspot_recall_veto: null,
@@ -578,6 +667,8 @@ describe("summariseWeek — blindspots", () => {
       }),
       row({
         id: "absent-veto",
+        title_tr_neutral: null,
+        title_tr: "Absent veto haberi",
         is_blindspot: true,
         blindspot_side: "opposition",
         bias_distribution: dist({ opposition: 3 }),
@@ -595,6 +686,8 @@ describe("summariseWeek — blindspots", () => {
     const rows = [2, 8, 4, 1, 9, 6, 3].map((n, i) =>
       row({
         id: `b${i}`,
+        title_tr_neutral: null,
+        title_tr: `Kör nokta haberi ${i}`,
         is_blindspot: true,
         blindspot_side: "opposition",
         bias_distribution: dist({ opposition: n }),

@@ -204,6 +204,34 @@ describe("GET /api/cron/digest", () => {
     }
   });
 
+  it("carries List-Unsubscribe / List-Unsubscribe-Post headers matching the html unsubscribe link's token", async () => {
+    process.env.CRON_SECRET = "shhh";
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "never@example.com", unsubscribe_token: "t-1", last_sent_at: null },
+    ];
+
+    const { sendBatch } = await import("@/lib/email/resend");
+    (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+      list.map(() => ({ ok: true, id: "resend-id" })),
+    );
+
+    const mod = await importRoute();
+    const res = await mod.GET(req("shhh"));
+    expect(res.status).toBe(200);
+
+    const item = (sendBatch as unknown as Mock).mock.calls[0]![0][0] as {
+      headers?: Record<string, string>;
+      html: string;
+    };
+    expect(item.headers).toEqual({
+      "List-Unsubscribe": "<https://test.tayfhaber.com/api/newsletter/unsubscribe?token=t-1>",
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    });
+    expect(item.html).toContain(
+      "https://test.tayfhaber.com/api/newsletter/unsubscribe?token=t-1",
+    );
+  });
+
   it("does not update last_sent_at for a subscriber whose send failed", async () => {
     process.env.CRON_SECRET = "shhh";
     supabaseFake.state.subscribers = [

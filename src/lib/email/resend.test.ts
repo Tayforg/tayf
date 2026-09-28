@@ -109,6 +109,41 @@ describe("sendEmail", () => {
     expect(result.error).toContain("422");
   });
 
+  it("puts sanitized headers in the JSON body when provided", async () => {
+    process.env.RESEND_API_KEY = "re_test_key";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "email_789" }), { status: 200 }),
+    );
+
+    await sendEmail({
+      ...INPUT,
+      headers: {
+        "List-Unsubscribe": "<https://x/u?token=t\r\ninjected: evil>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+      },
+    });
+
+    const [, init] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(init?.body as string);
+    expect(body.headers).toEqual({
+      "List-Unsubscribe": "<https://x/u?token=t injected: evil>",
+      "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    });
+  });
+
+  it("omits the headers key entirely when no headers are provided", async () => {
+    process.env.RESEND_API_KEY = "re_test_key";
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "email_790" }), { status: 200 }),
+    );
+
+    await sendEmail(INPUT);
+
+    const [, init] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(init?.body as string);
+    expect("headers" in body).toBe(false);
+  });
+
   it("returns ok:false without throwing when fetch itself rejects", async () => {
     process.env.RESEND_API_KEY = "re_test_key";
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network down"));

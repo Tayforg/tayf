@@ -67,3 +67,68 @@ describe("ReadAcrossSpectrum — feed-degraded empty state (Pack C item 8)", () 
     expect(markup).not.toContain("ulaşamıyoruz");
   });
 });
+
+describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (browser-qa-11 / D)", () => {
+  it("(a) names the non-voting writer count for a single-pole blindspot", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum
+        members={ZERO_MUHALEFET_MEMBERS}
+        isBlindspot={true}
+        nonVotingZoneCounts={{ muhalefet: 1 }}
+      />,
+    );
+    expect(markup).toContain(
+      "Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (Muhalefet) · 1 toplayıcı / niş kaynak yazdı (spektruma sayılmaz)",
+    );
+  });
+
+  it("(b) omits the suffix entirely when no counts are given", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
+    );
+    expect(markup).toContain(
+      "Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (Muhalefet)",
+    );
+    expect(markup).not.toContain("toplayıcı / niş kaynak yazdı");
+  });
+
+  it("(c) leaves the non-blindspot empty copy unchanged, with the degraded suffix when set", () => {
+    const plain = renderToStaticMarkup(
+      <ReadAcrossSpectrum
+        members={ZERO_MUHALEFET_MEMBERS}
+        isBlindspot={false}
+        nonVotingZoneCounts={{ muhalefet: 1 }}
+      />,
+    );
+    expect(plain).toContain("Muhalefet tarafında henüz haber yok");
+    expect(plain).not.toContain("toplayıcı / niş kaynak yazdı");
+
+    const degraded = renderToStaticMarkup(
+      <ReadAcrossSpectrum
+        members={ZERO_MUHALEFET_MEMBERS}
+        isBlindspot={false}
+        feedDegraded={true}
+        nonVotingZoneCounts={{ muhalefet: 1 }}
+      />,
+    );
+    expect(degraded).toContain("Muhalefet tarafında henüz haber yok — bu taraftaki bazı kaynaklara şu an ulaşamıyoruz");
+  });
+
+  it("(d) sums both poles' non-voting counts when both poles are empty", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={[]} isBlindspot={true} nonVotingZoneCounts={{ iktidar: 2, muhalefet: 3 }} />,
+    );
+    expect(markup).toContain("İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı · 5 toplayıcı / niş kaynak yazdı (spektruma sayılmaz)");
+  });
+
+  it("(e) never renders 'İzlediğimiz'", () => {
+    const cases = [
+      renderToStaticMarkup(<ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />),
+      renderToStaticMarkup(<ReadAcrossSpectrum members={[]} isBlindspot={true} />),
+      renderToStaticMarkup(<ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={false} />),
+    ];
+    for (const markup of cases) {
+      expect(markup).not.toContain("İzlediğimiz");
+    }
+  });
+});
