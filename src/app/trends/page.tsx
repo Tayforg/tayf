@@ -12,33 +12,38 @@ export const metadata: Metadata = {
   alternates: { canonical: "/trends" },
 };
 import { ZONE_META } from "@/lib/bias/config";
-import { fetchTimeline, WINDOW_DAYS } from "@/lib/clusters/trends-query";
+import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import type { MediaDnaZone } from "@/types";
 
 // /trends — 30-day historical Medya DNA mix.
 //
-// What it shows: for each of the past 30 calendar days (UTC), how many
-// articles were published per Medya DNA zone (iktidar / bagimsiz /
-// muhalefet). Rendered as 30 vertical stacked bars in a single inline SVG
-// — no chart library, no client JS. Lets a reader scan a month at a glance
-// and spot days where one zone dominated the news.
+// What it shows: for each of the past 30 Europe/Istanbul calendar days,
+// how many articles were published per Medya DNA zone (iktidar / bagimsiz
+// / muhalefet), counting only voting-kind sources (outlet, wire — see
+// src/lib/sources/kind.ts). Rendered as 30 vertical stacked bars in a
+// single inline SVG — no chart library, no client JS. Lets a reader scan
+// a month at a glance and spot days where one zone dominated the news.
 //
-// Data path: server-side aggregation via the `trends_daily_bias_counts`
-// view (see supabase/migrations/023_trends_daily_histogram.sql). PostgREST
-// returns ≤ WINDOW_DAYS × 3 = 90 rows — one per (day, zone) — so egress is
-// bounded regardless of how many articles the window contains. The old
-// approach paged through raw articles (15-25k rows) just to fold the same
-// histogram in JS. The page is still wrapped in `revalidate=3600` so the
+// Data path: server-side aggregation via the
+// `trends_daily_zone_counts_ist` view (see
+// supabase/migrations/087_trends_istanbul_day.sql), which buckets by the
+// Istanbul calendar day of least(published_at, created_at) and filters to
+// voting kinds only — both of which the older UTC-day, all-kinds
+// `trends_daily_bias_counts` view (migration 023, still used elsewhere)
+// does not do. PostgREST returns ≤ WINDOW_DAYS × 3 = 90 rows — one per
+// (day, zone) — so egress is bounded regardless of how many articles the
+// window contains. The page is still wrapped in `revalidate=3600` so the
 // DB is hit at most once an hour per region.
 //
-// Fetch + bucketing logic lives in `@/lib/clusters/trends-query` (unit
-// tested there). `fetchTimeline` never throws — a throw inside a "use
+// Fetch + bucketing logic lives in `@/lib/trends/daily-zones` (unit tested
+// there). `fetchIstanbulTimeline` never throws — a throw inside a "use
 // cache" function aborts the whole `next build` prerender, which happened
 // twice in production when the aggregate query hit a statement timeout. On
-// a Supabase failure it logs and resolves `null`; this page renders an
-// honest "unavailable" state for that case rather than silently rendering
-// an all-zero month or crashing the build. `src/app/trends/error.tsx`
-// still catches genuine render errors (it's untouched by this).
+// a Supabase failure (or an empty result, which must never be cached as a
+// real answer) it logs and resolves `null`; this page renders an honest
+// "unavailable" state for that case rather than silently rendering an
+// all-zero month or crashing the build. `src/app/trends/error.tsx` still
+// catches genuine render errors (it's untouched by this).
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -66,7 +71,7 @@ const ZONE_FILL: Record<MediaDnaZone, string> = {
 };
 
 export default async function TrendsPage() {
-  const buckets = await fetchTimeline();
+  const buckets = await fetchIstanbulTimeline();
 
   // `null` means the fetch itself failed (Supabase error, or — at build
   // time — env vars not yet wired) — a distinct, honest state from "zero
@@ -120,9 +125,15 @@ export default async function TrendsPage() {
 
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="text-xs text-muted-foreground">
-            Toplam <span className="font-mono">{totalArticles.toLocaleString("tr-TR")}</span> haber, son{" "}
-            {WINDOW_DAYS} gün
+          <div className="text-xs text-muted-foreground space-y-0.5">
+            <div>
+              Toplam <span className="font-mono">{totalArticles.toLocaleString("tr-TR")}</span> haber, son{" "}
+              {WINDOW_DAYS} gün
+            </div>
+            <div>
+              Yalnızca spektruma sayılan kaynaklar (haber siteleri ve ajanslar) · günler
+              Türkiye saatine göre
+            </div>
           </div>
           <ul className="flex flex-wrap items-center gap-3">
             {ZONES.map((z) => {

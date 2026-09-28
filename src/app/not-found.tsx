@@ -1,5 +1,28 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { Compass } from "lucide-react";
+
+// Real 404s (browser-qa-5 / seo-1): src/middleware.ts rewrites malformed
+// /konu, /ekonomi and /cluster segments here so Next renders this page with
+// the site's own chrome and a genuine 404 status. Without this metadata,
+// Next's error-convention metadata resolver (resolve-metadata.js's
+// collectMetadata()) would still merge the root layout's `alternates.
+// canonical: "/"` and default `robots: index,follow` into the streamed
+// 404 — this must never look like a duplicate of the homepage.
+// `openGraph` deliberately carries no `url` key: an inherited/merged one
+// would claim the homepage as this page's canonical social URL.
+export const metadata: Metadata = {
+  title: "Sayfa bulunamadı",
+  description: "Aradığınız sayfa bulunamadı.",
+  robots: { index: false, follow: true },
+  alternates: { canonical: null },
+  openGraph: {
+    title: "Sayfa bulunamadı — Tayf",
+    siteName: "Tayf",
+    locale: "tr_TR",
+    type: "website",
+  },
+};
 
 export default function NotFound() {
   return (

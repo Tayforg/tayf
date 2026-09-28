@@ -22,7 +22,7 @@ export function SourceBadge({ trusteeSince }: SourceBadgeProps) {
 
   return (
     <span
-      className="inline-flex items-center rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0 text-[10px] font-medium text-amber-700 dark:text-amber-400"
+      className="inline-flex shrink-0 items-center whitespace-nowrap rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0 text-[10px] font-medium text-amber-700 dark:text-amber-400"
       title="Kayyum yönetiminde"
     >
       {`Kayyum · ${trusteeDate}`}

@@ -3,6 +3,11 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { isVotingKind } from "@/lib/bias/config";
+import {
+  toFeedStatusRows,
+  type SourceFeedStatusRawRow,
+} from "@/lib/sources/feed-status";
 
 /**
  * Lightweight health check endpoint (E1 / Observability + B8 worker-stream
@@ -14,6 +19,13 @@ import { clientKey, createRateLimiter } from "@/lib/rate-limit";
  * (or a malformed `worker_metrics` view) downgrades the affected probe to a
  * non-critical "degraded" signal but never flips the whole endpoint to 503,
  * since these are operational concerns rather than user-facing outages.
+ *
+ * ingest-health: authenticated callers also get a `sources` check naming
+ * WHICH active sources are silent/never-delivered, with their last HTTP
+ * status, fail streak, and quarantine state. It is purely informational —
+ * migration 077's `ops_health_report().dead_feeds` is the pager, this just
+ * names names for whoever's already looking. Anonymous callers never
+ * trigger the underlying query.
  *
  * RESPONSE SHAPES
  * ---------------
@@ -47,6 +59,27 @@ interface QueueMetric {
 
 type HealthVerdict = "healthy" | "degraded" | "unhealthy";
 
+/** One row of `checks.sources.silentSources` (ingest-health). */
+interface SilentSourceRow {
+  slug: string;
+  kind: string;
+  lastItemAt: string | null;
+  never: boolean;
+  lastHttpStatus: number | null;
+  failStreak: number;
+  quarantined: boolean;
+}
+
+interface SourcesCheck {
+  ok: boolean;
+  active: number;
+  silent: number;
+  votingActive: number;
+  votingSilent: number;
+  silentSources: SilentSourceRow[];
+  error?: string;
+}
+
 interface HealthChecks {
   database: { ok: boolean; latencyMs?: number; error?: string };
   env: { ok: boolean; missing: string[] };
@@ -57,6 +90,9 @@ interface HealthChecks {
     error?: string;
   };
   queues: { ok: boolean; metrics?: QueueMetric[]; error?: string };
+  /** ingest-health: authenticated-only, informational (never flips the
+   * overall verdict) -- see the file header. */
+  sources: SourcesCheck;
 }
 
 interface DetailedHealthBody {
@@ -99,6 +135,13 @@ const QUEUE_DEPTH_THRESHOLDS: Record<string, { depth: number }> = {
 // strictest configured bound rather than growing unwatched.
 const FALLBACK_QUEUE_DEPTH_THRESHOLD = 100;
 const QUEUE_OLDEST_AGE_THRESHOLD_SEC = 30 * 60;
+
+// ingest-health: mirrors migration 077's own dead_feeds fail-ratio bound --
+// a majority of voting (outlet/wire) sources going silent is the "something
+// is systemically wrong with ingest" signal; a minority silent is normal
+// churn (a handful of dead/slow feeds at any given time). 077 measured
+// 35/96 = 36.4% at ship time, comfortably under this.
+const SOURCES_SILENT_MAX_VOTING_SHARE = 0.5;
 
 // Anonymous callers are rate-limited per client key so the public `{status}`
 // envelope path can't be used to hammer Supabase for free. The limiter is
@@ -217,6 +260,14 @@ export const GET = withApiErrors(async (request: Request) => {
     ingestion: { ok: false },
     clustering: { ok: false },
     queues: { ok: false },
+    sources: {
+      ok: false,
+      active: 0,
+      silent: 0,
+      votingActive: 0,
+      votingSilent: 0,
+      silentSources: [],
+    },
   };
 
   // 1. Env check — cheap, synchronous, runs first so a misconfigured deploy
@@ -409,6 +460,106 @@ export const GET = withApiErrors(async (request: Request) => {
     checks.queues = queuesResult.value;
   } else {
     checks.queues = { ok: false, error: queuesResult.error };
+  }
+
+  // 6. Sources check (ingest-health) — AUTHED CALLERS ONLY. Anonymous
+  //    callers never trigger this query (or any Supabase call below this
+  //    point never even builds for them) -- the same "no operational
+  //    reconnaissance for the open internet" posture the file header
+  //    documents for the rest of this route. Purely informational: it
+  //    never changes `verdict`/`status` below, only names which sources are
+  //    silent/never-delivered for whoever already has the detailed envelope.
+  if (authed) {
+    const sourcesResult = await safeProbe(async () => {
+      const supabase = createServerClient();
+      const nowIso = new Date().toISOString();
+      // Same cheap `latest:articles(published_at)` embed PERF-01 measured at
+      // 33-122ms for `getSourceFeedStatuses` -- a single ordered, limited
+      // index-range scan (idx_articles_source_published, migration 044),
+      // not a per-source aggregate.
+      const { data, error } = await supabase
+        .from("sources")
+        .select(
+          "slug, name, bias, kind, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, latest:articles(published_at)",
+        )
+        .eq("active", true)
+        .lte("latest.published_at", nowIso)
+        .order("published_at", { referencedTable: "latest", ascending: false })
+        .limit(1, { referencedTable: "latest" });
+      if (error) {
+        return {
+          ok: false as const,
+          active: 0,
+          silent: 0,
+          votingActive: 0,
+          votingSilent: 0,
+          silentSources: [] as SilentSourceRow[],
+          error: error.message,
+        };
+      }
+
+      const rows = toFeedStatusRows(
+        (data ?? []) as unknown as SourceFeedStatusRawRow[],
+        Date.now(),
+      );
+      const active = rows.length;
+      const silentRows = rows.filter((r) => r.silent);
+      const votingRows = rows.filter((r) => isVotingKind(r.kind));
+      const votingActive = votingRows.length;
+      const votingSilent = votingRows.filter((r) => r.silent).length;
+
+      // Never-delivered first, then oldest lastItemAt, then slug.
+      const silentSources: SilentSourceRow[] = [...silentRows]
+        .sort((a, b) => {
+          const aNever = a.lastItemAt === null;
+          const bNever = b.lastItemAt === null;
+          if (aNever !== bNever) return aNever ? -1 : 1;
+          if (!aNever && !bNever) {
+            const diff =
+              Date.parse(a.lastItemAt as string) -
+              Date.parse(b.lastItemAt as string);
+            if (diff !== 0) return diff;
+          }
+          return a.slug.localeCompare(b.slug);
+        })
+        .map((r) => ({
+          slug: r.slug,
+          kind: r.kind,
+          lastItemAt: r.lastItemAt,
+          never: r.lastItemAt === null,
+          lastHttpStatus: r.lastHttpStatus,
+          failStreak: r.failStreak,
+          quarantined: r.quarantined,
+        }));
+
+      // Mirrors 077's own dead_feeds fail-ratio rule -- see
+      // SOURCES_SILENT_MAX_VOTING_SHARE above.
+      const ok =
+        votingActive > 0 &&
+        votingSilent / votingActive < SOURCES_SILENT_MAX_VOTING_SHARE;
+
+      return {
+        ok,
+        active,
+        silent: silentRows.length,
+        votingActive,
+        votingSilent,
+        silentSources,
+      };
+    }, "sources");
+    if (sourcesResult.ok) {
+      checks.sources = sourcesResult.value;
+    } else {
+      checks.sources = {
+        ok: false,
+        active: 0,
+        silent: 0,
+        votingActive: 0,
+        votingSilent: 0,
+        silentSources: [],
+        error: sourcesResult.error,
+      };
+    }
   }
 
   // Status rollup:

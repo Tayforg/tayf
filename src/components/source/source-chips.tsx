@@ -66,6 +66,14 @@ const CHIP_LABEL_CLASS = "truncate min-w-0";
 const OWNERSHIP_CLASS =
   "bg-zinc-500/10 text-zinc-700 border-zinc-500/20 dark:text-zinc-300";
 
+// B2 (browser-qa-6): the ownership chip is the long one ("Turkuvaz Medya
+// (Kalyon Grubu)") and was clipping off-card at 390px. Below `sm:` it wraps
+// onto its own line(s) instead of forcing single-line `whitespace-nowrap`
+// (which CHIP_BASE sets); `cn()` is twMerge, so these classes — applied
+// after CHIP_BASE — win the conflicting whitespace/rounded utilities.
+const OWNERSHIP_WRAP_CLASS =
+  "whitespace-normal break-words leading-tight rounded-lg sm:whitespace-nowrap sm:leading-none sm:rounded-full";
+
 const UNCLASSIFIED_CLASS =
   "bg-muted/40 text-muted-foreground border-border/60";
 
@@ -148,10 +156,10 @@ export function SourceChips({
       )}
       {meta.ownership !== null && (
         <span
-          className={cn(CHIP_BASE, OWNERSHIP_CLASS)}
+          className={cn(CHIP_BASE, OWNERSHIP_CLASS, OWNERSHIP_WRAP_CLASS)}
           title={`Sahiplik: ${meta.ownership}`}
         >
-          <span className={CHIP_LABEL_CLASS}>{ownershipLabel(meta.ownership)}</span>
+          <span className="min-w-0 sm:truncate">{ownershipLabel(meta.ownership)}</span>
         </span>
       )}
     </span>

@@ -310,9 +310,9 @@ describe("WeeklyPage — data present", () => {
 
     // zoneYieldDenominator(health, zone) is a SOURCE count; dividing an
     // article count into it would publish a nonsensical ratio.
-    expect(text).toContain("24 kaynak haber verdi");
-    expect(text).toContain("33 kaynak haber verdi");
-    expect(text).toContain("15 kaynak haber verdi");
+    expect(text).toContain("24 kaynak haber verdi (toplayıcı / niş dahil)");
+    expect(text).toContain("33 kaynak haber verdi (toplayıcı / niş dahil)");
+    expect(text).toContain("15 kaynak haber verdi (toplayıcı / niş dahil)");
     expect(text).not.toContain("6 / 24 kaynak");
     expect(text).not.toContain("3 / 33 kaynak");
     expect(text).not.toContain("1 / 15 kaynak");
@@ -399,10 +399,16 @@ describe("WeeklyPage — data present", () => {
     // `delivering` is a 72 h measurement (FEED_YIELD_WINDOW_MS), so the
     // copy may not claim a 7-day silence.
     expect(text).toContain(
-      "41 kaynak son 72 saatte hiç haber vermedi (72 / 113 kaynak haber verdi).",
+      "41 spektruma sayılan kaynak son 72 saatte hiç haber vermedi (72 / 113 haber verdi).",
     );
     expect(text).not.toContain("kaynak bu hafta hiç haber vermedi");
     expect(hrefs).toContain("/kaynaklar/durum");
+  });
+
+  it("states the BasisNote's second, spektruma-sayılan basis explicitly", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain("spektruma sayılan kaynaklardan 72 / 113 tanesi haber verdi");
   });
 
   it("says the silent-source count is unknown when the summary is null", async () => {

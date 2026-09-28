@@ -61,9 +61,15 @@ describe("GET /robots.txt", () => {
     }
   });
 
-  it("carries a License: line pointing at /llms.txt", async () => {
+  it("carries no License: directive (Lighthouse flags it as an unknown robots.txt rule)", async () => {
     const body = await (await GET()).text();
-    expect(body).toMatch(/^License: https:\/\/tayf\.test\/llms\.txt$/m);
+    expect(body).not.toMatch(/^License:/m);
+  });
+
+  it("carries a comment pointing at /llms.txt instead", async () => {
+    const body = await (await GET()).text();
+    expect(body).toMatch(/^# .*License.*\/llms\.txt$/m);
+    expect(body).toContain("https://tayf.test/llms.txt");
   });
 
   it("preserves today's User-agent: * behaviour exactly", async () => {
@@ -114,7 +120,7 @@ describe("GET /robots.txt", () => {
     delete process.env.NEXT_PUBLIC_SITE_URL;
     const body = await (await GET()).text();
     expect(body).toContain("Sitemap: http://localhost:3000/sitemap.xml");
-    expect(body).toContain("License: http://localhost:3000/llms.txt");
+    expect(body).toContain("http://localhost:3000/llms.txt");
   });
 
   it("never emits a bare `Disallow: /` line for any AI bot (no blocking)", async () => {

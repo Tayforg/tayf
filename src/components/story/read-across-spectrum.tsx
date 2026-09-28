@@ -5,6 +5,7 @@ import { TrackedLink } from "@/components/ui/tracked-link";
 import { pickOtherSide } from "@/lib/clusters/read-across";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
+import type { MediaDnaZone } from "@/types";
 
 /**
  * "Karşı tarafı oku" — the one-tap next action for a visitor landing
@@ -30,6 +31,15 @@ interface ReadAcrossSpectrumProps {
   // gap instead of silently falling back to the generic "no news yet"
   // wording a genuine non-blindspot gets.
   feedDegraded?: boolean;
+  /**
+   * browser-qa-11: how many DEDUPED (by source.slug) toplayıcı / niş
+   * (non-voting) members wrote from each zone. When the silent pole of a
+   * genuine blindspot has one or more non-voting writers, the empty-state
+   * copy names them instead of implying total silence — "İzlediğimiz
+   * kaynaklar arasında…" reads as a factual claim that nobody covered the
+   * story, which is false when a niche/aggregator source did.
+   */
+  nonVotingZoneCounts?: Partial<Record<MediaDnaZone, number>>;
 }
 
 // Literal Tailwind class strings per pole, drawn from the same red /
@@ -48,6 +58,7 @@ export function ReadAcrossSpectrum({
   members,
   isBlindspot,
   feedDegraded = false,
+  nonVotingZoneCounts,
 }: ReadAcrossSpectrumProps) {
   const { zone, member, counts } = pickOtherSide(members);
   const zoneLabel = ZONE_META[zone].label;
@@ -61,12 +72,23 @@ export function ReadAcrossSpectrum({
     const degradedSuffix = feedDegraded
       ? " — bu taraftaki bazı kaynaklara şu an ulaşamıyoruz"
       : "";
+    // browser-qa-11: name non-voting (toplayıcı / niş) writers from the
+    // silent side(s) instead of letting the copy imply total silence. For a
+    // single empty pole, only that zone's non-voting count matters; for
+    // both-poles-empty, either pole's non-voting writers are worth naming.
+    const nonVotingCount = bothPolesEmpty
+      ? (nonVotingZoneCounts?.iktidar ?? 0) + (nonVotingZoneCounts?.muhalefet ?? 0)
+      : (nonVotingZoneCounts?.[zone] ?? 0);
+    const nonVotingSuffix =
+      isBlindspot && nonVotingCount > 0
+        ? ` · ${nonVotingCount} toplayıcı / niş kaynak yazdı (spektruma sayılmaz)`
+        : "";
     const emptyText = bothPolesEmpty
       ? isBlindspot
-        ? "İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı"
+        ? `İki kutupta da haber yok — sadece bağımsız kaynaklar yazdı${nonVotingSuffix}`
         : "İki kutupta da henüz haber yok"
       : isBlindspot
-        ? `İzlediğimiz kaynaklar arasında bu tarafta haber yok — kör nokta (${zoneLabel})`
+        ? `Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (${zoneLabel})${nonVotingSuffix}`
         : `${zoneLabel} tarafında henüz haber yok${degradedSuffix}`;
     return (
       <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground/60">

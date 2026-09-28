@@ -481,6 +481,55 @@ describe("GET /cluster/[id]/kart", () => {
     expect(headers["Content-Disposition"]).toContain("inline");
   });
 
+  it("renders the non-voting-source line only when a niche/aggregator member is excluded", async () => {
+    getZoneFeedHealth.mockResolvedValue(null);
+    getClusterDetail.mockResolvedValueOnce(
+      mkDetail([
+        mkMember("a1", GOV, GOV_TITLE),
+        mkMember(
+          "a2",
+          mkSource({ id: "niche1", name: "Niş Kaynak", bias: "center", kind: "niche" }),
+          "Niş kaynak başlığı",
+        ),
+      ]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).toContain("+1 toplayıcı / niş kaynak spektruma sayılmaz");
+    expect(text).not.toContain("Niş kaynak başlığı");
+  });
+
+  it("omits the non-voting-source line entirely when every member votes", async () => {
+    getZoneFeedHealth.mockResolvedValue(null);
+    getClusterDetail.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, GOV_TITLE)]),
+    );
+
+    await callGET(ID);
+
+    const text = collectText(captured).join(" ");
+    expect(text).not.toContain("toplayıcı / niş kaynak");
+  });
+
+  it("404s when every member is a non-voting kind (no spectrum coverage at all)", async () => {
+    getClusterDetail.mockResolvedValueOnce(
+      mkDetail([
+        mkMember(
+          "a1",
+          mkSource({ id: "niche1", bias: "center", kind: "niche" }),
+          "Niş kaynak başlığı",
+        ),
+      ]),
+    );
+
+    const res = await callGET(ID);
+
+    expect(res.status).toBe(404);
+    expect(captured).toBeNull();
+  });
+
   it("still renders when feed health lookup returns null (never throws)", async () => {
     getZoneFeedHealth.mockResolvedValue(null);
     getClusterDetail.mockResolvedValueOnce(

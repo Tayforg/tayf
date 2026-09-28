@@ -136,6 +136,12 @@ const sourceFetchStateWrites: Array<{
 // per-row fallback.
 let existingArticleHashPairs: Array<{ source_id: string; content_hash: string }> = [];
 
+// ingest-health: when set, `.from("articles").upsert(rows)` fails whenever
+// `rows` contains an item whose `url` equals this value — independent of
+// the (source_id, content_hash) collision mechanism above, so a test can
+// exercise `upsertWithBisect`'s isolation directly.
+let forcedPoisonedUrl: string | null = null;
+
 // One entry per `.from("articles").upsert(rows, opts)` call this test made
 // — lets the migration-041 F2 test assert the offending row never reaches
 // an upsert call at all (batched OR per-row fallback), not just that it's
@@ -334,7 +340,45 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
                 ) => Promise.resolve(result).then(onFul, onRej),
               };
             }
+            // ingest-health: simulates a batch that fails whenever it
+            // contains a specific "poisoned" url — lets a test drive
+            // `upsertWithBisect`'s O(log n) isolation directly, independent
+            // of the (source_id, content_hash) collision path above.
+            const hasPoisonedUrl =
+              forcedPoisonedUrl !== null &&
+              (arr as Array<Record<string, unknown>>).some(
+                (r) => r.url === forcedPoisonedUrl,
+              );
+            if (hasPoisonedUrl) {
+              const result = {
+                data: null,
+                error: { message: "simulated poisoned row upsert failure" },
+              };
+              return {
+                select: () => Promise.resolve(result),
+                then: (
+                  onFul?: (v: typeof result) => unknown,
+                  onRej?: (e: unknown) => unknown,
+                ) => Promise.resolve(result).then(onFul, onRej),
+              };
+            }
             for (const r of arr) upserted.push(r as Record<string, unknown>);
+            // Reflect the TRUE batch length (not a fixed single-row stub) so
+            // `inserted` counts computed from `data.length` are meaningful
+            // for the multi-row bisect tests above.
+            const okResult = {
+              data: (arr as Array<Record<string, unknown>>).map((_, idx) => ({
+                id: `fake-row-id-${upserted.length}-${idx}`,
+              })),
+              error: null,
+            };
+            return {
+              select: () => Promise.resolve(okResult),
+              then: (
+                onFul?: (v: typeof okResult) => unknown,
+                onRej?: (e: unknown) => unknown,
+              ) => Promise.resolve(okResult).then(onFul, onRej),
+            };
           } else if (table === "sources") {
             // Regression tripwire: a partial-row upsert on `sources` fails
             // in the real DB (23502) — record it under its own `fn` so the
@@ -456,6 +500,7 @@ type FetchOverride = {
   lastModified?: string | null;
   bodyHash?: string;
   error?: string;
+  notAFeed?: boolean;
 };
 
 const fetcherItems: Record<string, MockFeedItem[]> = {};
@@ -487,6 +532,7 @@ vi.mock("../../supabase/functions/_shared/rss/fetcher.ts", () => ({
       lastModified?: string | null;
       bodyHash?: string;
       error?: string;
+      notAFeed?: boolean;
     }> => {
       fetchFeedCalls.push({
         sourceId: source.id,
@@ -551,6 +597,7 @@ beforeEach(() => {
   fetchFeedCalls.length = 0;
   articlesUpsertCalls.length = 0;
   existingArticleHashPairs = [];
+  forcedPoisonedUrl = null;
   storedArticlesByUrl = {};
   forcedTitleLookupError = null;
   forcedTitleVersionInsertError = null;
@@ -994,6 +1041,76 @@ describe("ingest_cycles telemetry [migration 039]", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Fair upsert order + bisecting fallback (ingest-health).
+// ---------------------------------------------------------------------------
+
+describe("ingest-health: bisecting upsert fallback", () => {
+  it(
+    "isolates a single poisoned row in O(log n) upsert calls: " +
+      "inserted = n-1, rowErrors = 1, calls <= 1 + 2*ceil(log2 n)",
+    async () => {
+      const handler = await importIngestHandler();
+      expect(handler).toBeDefined();
+      if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+      const N = 20;
+      fakeSources.push({
+        id: "src-bisect",
+        name: "Bisect Fixture",
+        slug: "bisect-fixture",
+        url: "https://example.com",
+        rss_url: "https://example.com/bisect.rss",
+        active: true,
+      });
+      const fixtureItems: MockFeedItem[] = Array.from({ length: N }, (_, i) => ({
+        title: `Bisect item ${i}`,
+        link: `https://example.com/bisect/${i}`,
+        pubDate: "Mon, 01 Jan 2024 00:00:00 GMT",
+      }));
+      fetcherItems["https://example.com/bisect.rss"] = fixtureItems;
+      forcedPoisonedUrl = "https://example.com/bisect/13";
+
+      const res = await handler(
+        authedRequest("http://localhost/ingest", { method: "POST" }),
+      );
+      const body = (await res.json()) as { rowErrors?: number; upsertSkipped?: number };
+
+      expect(upserted.length).toBe(N - 1);
+      expect(upserted.some((r) => r.url === forcedPoisonedUrl)).toBe(false);
+      expect(body.rowErrors).toBe(1);
+      const bound = 1 + 2 * Math.ceil(Math.log2(N));
+      expect(articlesUpsertCalls.length).toBeLessThanOrEqual(bound);
+      expect(body.upsertSkipped ?? 0).toBe(0);
+    },
+  );
+
+  it("reports upsertSkipped in the cycle JSON (0 on a normal, on-time cycle)", async () => {
+    const handler = await importIngestHandler();
+    expect(handler).toBeDefined();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-skipped-shape",
+      name: "Skipped Shape Fixture",
+      slug: "skipped-shape-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/skipped-shape.rss",
+      active: true,
+    });
+    fetcherItems["https://example.com/skipped-shape.rss"] = [
+      { title: "Shape", link: "https://example.com/skipped-shape/1" },
+    ];
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    const body = (await res.json()) as { upsertSkipped?: number };
+    expect(typeof body.upsertSkipped).toBe("number");
+    expect(body.upsertSkipped).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Conditional-fetch state persistence (migration 041) — hydrating
 // `conditionalCache` from `sources` at cycle start, treating an unchanged
 // body hash like a 304, and writing updated validators back in one upsert.
@@ -1192,6 +1309,50 @@ describe("ingest conditional-fetch state [migration 041]", () => {
     expect(row?.fetch_last_modified).toBe("Wed, 02 Jan 2025 00:00:00 GMT");
     expect(row?.fetch_body_hash).toBe("new-hash");
     expect(row?.fetch_last_status).toBe(200);
+  });
+
+  it("counts an HTML/not-a-feed 2xx body as a failure and advances fetch_fail_streak without adopting new validators [ingest-health]", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-health-notafeed",
+      name: "Not A Feed Fixture",
+      slug: "notafeed-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/notafeed.rss",
+      active: true,
+      fetch_etag: 'W/"stored-etag"',
+      fetch_last_modified: null,
+      fetch_body_hash: "stored-body-hash",
+      fetch_fail_streak: 3,
+    });
+    // fetchFeed itself is mocked in this file (see the module mock above) --
+    // this simulates the real fetcher.ts's NotAFeedError branch, which
+    // returns `error`/`notAFeed` WITHOUT etag/lastModified/bodyHash.
+    fetcherResultOverrides["https://example.com/notafeed.rss"] = {
+      error: "not a feed: html",
+      status: 200,
+      notAFeed: true,
+    };
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    const body = (await res.json()) as { failed?: number; notAFeed?: number };
+    expect(body.failed).toBeGreaterThanOrEqual(1);
+    expect(body.notAFeed).toBe(1);
+
+    const row = sourceFetchStateWrites
+      .find((w) => w.fn === "ingest_set_source_fetch_state")
+      ?.rows.find((r) => r.id === "src-health-notafeed");
+    expect(row).toBeDefined();
+    // No fresh validators on the wire for a notAFeed result -- the stored
+    // ones must be kept untouched, never blanked or replaced by the bad
+    // body's own etag/hash.
+    expect(row?.fetch_etag).toBe('W/"stored-etag"');
+    expect(row?.fetch_body_hash).toBe("stored-body-hash");
+    expect(row?.fetch_fail_streak).toBe(4);
   });
 
   it(

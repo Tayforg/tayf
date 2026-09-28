@@ -23,18 +23,18 @@ type Bucket = {
 
 let mockBuckets: Bucket[] | null = null;
 
-vi.mock("@/lib/clusters/trends-query", async () => {
+vi.mock("@/lib/trends/daily-zones", async () => {
   const actual = await vi.importActual<
-    typeof import("@/lib/clusters/trends-query")
-  >("@/lib/clusters/trends-query");
+    typeof import("@/lib/trends/daily-zones")
+  >("@/lib/trends/daily-zones");
   return {
     ...actual,
-    fetchTimeline: vi.fn(async () => mockBuckets),
+    fetchIstanbulTimeline: vi.fn(async () => mockBuckets),
   };
 });
 
 import TrendsPage from "./page";
-import { WINDOW_DAYS } from "@/lib/clusters/trends-query";
+import { WINDOW_DAYS } from "@/lib/trends/daily-zones";
 
 /** Collects every string/number leaf under a React element tree. */
 function collectText(node: unknown, out: string[] = []): string[] {
@@ -118,5 +118,16 @@ describe("/trends page", () => {
     expect(text).not.toContain(UNAVAILABLE_COPY);
     expect(text).not.toContain(EMPTY_COPY);
     expect(text).toContain("5");
+  });
+
+  it("shows the Istanbul-day / voting-kinds caption", async () => {
+    mockBuckets = zeroBuckets();
+
+    const tree = await TrendsPage();
+    const text = collectText(tree).join(" ");
+
+    expect(text).toContain(
+      "Yalnızca spektruma sayılan kaynaklar (haber siteleri ve ajanslar) · günler Türkiye saatine göre",
+    );
   });
 });

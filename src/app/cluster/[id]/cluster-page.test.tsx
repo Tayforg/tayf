@@ -11,6 +11,7 @@ import { FramingComparison } from "@/components/story/framing-comparison";
 import { MediaDna } from "@/components/story/media-dna";
 import { StoryTimeline } from "@/components/story/story-timeline";
 import { FactCheckBox } from "@/components/story/fact-check-box";
+import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -1122,5 +1123,197 @@ describe("ClusterDetailPage — Bu konuda doğrulama (fact-check box)", () => {
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
     expect(hasElementOfType(tree, FactCheckBox)).toBe(false);
     expect(collectText(tree).join("")).not.toContain("Bu konuda doğrulama");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A4 — missing-row generateMetadata hygiene: a soft-404 must not carry
+// index,follow or a homepage canonical, even though the page body itself
+// still streams 200 until the DB-backed check (notFound()) runs.
+// ---------------------------------------------------------------------------
+describe("generateMetadata — missing cluster (A4)", () => {
+  it("returns noindex and no canonical when getClusterDetail resolves null", async () => {
+    getClusterDetail.mockResolvedValue(null);
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "missing" }) });
+
+    expect(metadata.title).toBe("Sayfa bulunamadı");
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.alternates).toEqual({ canonical: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B — mobile "Kaynak künyesi" clipping (browser-qa-6): the <li> and <ul>
+// under the "Kaynak künyesi" heading must wrap instead of overflowing.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — Kaynak künyesi wrap (B)", () => {
+  it("gives the <ul> min-w-0 and each <li> flex-wrap/min-w-0/max-w-full", async () => {
+    // sabah is a known-tagged slug (see source-chips.test.ts).
+    const source = makeSource({ id: "sabah", slug: "sabah", name: "Sabah" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    function findByType(node: unknown, type: string): { props?: Record<string, unknown> } | null {
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          const found = findByType(child, type);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (node && typeof node === "object") {
+        const el = node as { type?: unknown; props?: { children?: ReactNode } };
+        if (el.type === type) return el as { props?: Record<string, unknown> };
+        if (el.props?.children !== undefined) return findByType(el.props.children, type);
+      }
+      return null;
+    }
+
+    const ul = findByType(tree, "ul");
+    // There are multiple <ul>s on the page; walk all of them and find the
+    // one whose className mentions gap-x-3 (the künye list's signature).
+    function findAllByType(node: unknown, type: string, out: { props?: Record<string, unknown> }[] = []) {
+      if (Array.isArray(node)) {
+        for (const child of node) findAllByType(child, type, out);
+        return out;
+      }
+      if (node && typeof node === "object") {
+        const el = node as { type?: unknown; props?: { children?: ReactNode } };
+        if (el.type === type) out.push(el as { props?: Record<string, unknown> });
+        if (el.props?.children !== undefined) findAllByType(el.props.children, type, out);
+      }
+      return out;
+    }
+    const uls = findAllByType(tree, "ul");
+    const kunyeUl = uls.find((u) =>
+      String(u.props?.className ?? "").includes("gap-x-3"),
+    );
+    expect(kunyeUl).toBeDefined();
+    expect(String(kunyeUl?.props?.className)).toContain("min-w-0");
+    void ul;
+
+    const lis = findAllByType(tree, "li");
+    const kunyeLi = lis.find((li) => String(li.props?.className ?? "").includes("animate-fade-up"));
+    expect(kunyeLi).toBeDefined();
+    const liClass = String(kunyeLi?.props?.className);
+    expect(liClass).toContain("flex-wrap");
+    expect(liClass).toContain("min-w-0");
+    expect(liClass).toContain("max-w-full");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D — blindspot copy names non-voting writers from the silent side
+// (browser-qa-11). nonVotingZoneCounts is computed from nonVotingMembers,
+// deduped by source.slug, and passed to <ReadAcrossSpectrum>.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — nonVotingZoneCounts (D)", () => {
+  it("passes a zone-keyed count of deduped non-voting members to ReadAcrossSpectrum", async () => {
+    const voter = makeSource({ id: "gov", slug: "gov", name: "Gov Outlet", bias: "pro_government", kind: "outlet" });
+    const niche1 = makeSource({ id: "niche1", slug: "niche-muhalefet", name: "Niche 1", bias: "opposition", kind: "niche" });
+    const niche2 = makeSource({ id: "niche2", slug: "niche-muhalefet", name: "Niche 1 dup", bias: "opposition", kind: "niche" });
+
+    const members: ClusterDetailMember[] = [
+      makeMember("a-gov", voter),
+      makeMember("a-niche1", niche1),
+      makeMember("a-niche2", niche2),
+    ];
+
+    const distribution = emptyDistribution();
+    distribution.pro_government = 1;
+
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members,
+      allSources: [voter, niche1, niche2],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 3, memberCount: 3 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, ReadAcrossSpectrum);
+    expect(el).not.toBeNull();
+    expect(el?.props.nonVotingZoneCounts).toEqual({
+      iktidar: 0,
+      bagimsiz: 0,
+      muhalefet: 1,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F — structured data: NewsArticle author/publisher is Tayf, with outlets
+// listed in isBasedOn instead of masquerading as bylines.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — structured data (F)", () => {
+  it("author is Tayf (never an outlet name), publisher carries a logo, and isBasedOn lists member article URLs", async () => {
+    const s1 = makeSource({ id: "s1", slug: "s1", name: "Outlet One" });
+    const s2 = makeSource({ id: "s2", slug: "s2", name: "Outlet Two" });
+    const members: ClusterDetailMember[] = [
+      makeMember("a1", s1, "2026-09-06T12:00:00.000Z"),
+      makeMember("a2", s2, "2026-09-06T12:00:00.000Z"),
+    ];
+
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [s1, s2],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 2, memberCount: 2 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const html = findJsonLd(tree);
+    expect(html).not.toBeNull();
+    const parsed = JSON.parse(html!);
+
+    expect(parsed.author).toEqual([
+      { "@type": "Organization", name: "Tayf", url: "https://tayf.test" },
+    ]);
+    for (const a of parsed.author) {
+      expect(a.name).not.toBe("Outlet One");
+      expect(a.name).not.toBe("Outlet Two");
+    }
+    expect(parsed.publisher.logo.url).toMatch(/\/apple-icon$/);
+    expect(parsed.isBasedOn).toEqual([
+      "https://example.com/articles/a1",
+      "https://example.com/articles/a2",
+    ]);
+  });
+
+  it("omits isBasedOn when no member has an http(s) article url", async () => {
+    const s1 = makeSource({ id: "s1", slug: "s1", name: "Outlet One" });
+    const members: ClusterDetailMember[] = [makeMember("a1", s1)];
+    members[0]!.article.url = "not-a-url";
+
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [s1],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const html = findJsonLd(tree);
+    const parsed = JSON.parse(html!);
+    expect(parsed.isBasedOn).toBeUndefined();
   });
 });

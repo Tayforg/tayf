@@ -133,8 +133,12 @@ function SilentSources({
           ? "Sessiz kaynak sayısı bilinmiyor."
           : // `delivering` is measured over FEED_YIELD_WINDOW_MS (72 h), not
             // the 7-day page window — the copy states the window the data
-            // actually covers.
-            `${feedStatus.total - feedStatus.delivering} kaynak son 72 saatte hiç haber vermedi (${feedStatus.delivering} / ${feedStatus.total} kaynak haber verdi).`}
+            // actually covers. `getFeedStatusSummary` counts only
+            // spektruma-sayılan (voting) sources — a different basis than
+            // week-sections.tsx's ZoneShares rows, which count every kind
+            // including toplayıcı / niş — so the copy names its own basis
+            // explicitly instead of implying it's the same "kaynak" count.
+            `${feedStatus.total - feedStatus.delivering} spektruma sayılan kaynak son 72 saatte hiç haber vermedi (${feedStatus.delivering} / ${feedStatus.total} haber verdi).`}
       </p>
       <Link
         href="/kaynaklar/durum"

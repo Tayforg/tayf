@@ -1,8 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">
-  <!-- Dark background for Apple touch icon -->
-  <rect width="180" height="180" rx="40" fill="#0a0a0a"/>
-  <!-- Tayf spectrum bars — scaled up -->
-  <rect x="42" y="80" width="24" height="56" rx="12" fill="#ef4444"/>
-  <rect x="78" y="44" width="24" height="92" rx="12" fill="#d4a030"/>
-  <rect x="114" y="62" width="24" height="74" rx="12" fill="#10b981"/>
-</svg>

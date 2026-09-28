@@ -1,7 +1,9 @@
+import { Suspense } from "react";
 import Link from "next/link";
 import { Separator } from "@/components/ui/separator";
 import { NavLinks } from "@/components/layout/nav-links";
 import { hasAdminSession } from "@/lib/admin/session";
+import { NewsletterStatusBanner } from "@/components/newsletter/newsletter-status-banner";
 
 export async function Header() {
   // Server-side session check so the admin link is invisible to anyone
@@ -53,6 +55,15 @@ export async function Header() {
 
         <NavLinks showAdmin={showAdmin} />
       </div>
+
+      {/* Shows the `?bulten=` flag left by the newsletter confirm/unsubscribe
+          redirects (src/app/api/newsletter/{confirm,unsubscribe}/route.ts).
+          useSearchParams() requires a Suspense boundary; the root layout
+          already wraps <Header> in one, but this local boundary keeps the
+          rest of the header's static content out of that dynamic subtree. */}
+      <Suspense fallback={null}>
+        <NewsletterStatusBanner />
+      </Suspense>
     </header>
   );
 }

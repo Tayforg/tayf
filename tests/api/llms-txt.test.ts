@@ -5,22 +5,30 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 // string as pack B's REGISTRY_LICENCE constant so /llms.txt and the
 // /api/sources registry can never drift apart — see the licence-string
 // assertion below.
+//
+// Restructured per llmstxt.org: '# Tayf', a '> ' one-line summary, then
+// h2 sections, every pointer as a markdown link `[Name](url)` rather than
+// a bare URL — bare URLs are unclickable in most llms.txt-aware readers
+// and Lighthouse-style link audits skip them entirely.
 // ---------------------------------------------------------------------------
 
 import { GET } from "@/app/llms.txt/route";
 
 const ORIGINAL_ENV = { ...process.env };
+const CONTACT_KEY = "NEXT_PUBLIC_CONTACT_EMAIL";
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
 });
 
 afterEach(() => {
-  for (const k of ["NEXT_PUBLIC_SITE_URL"]) {
+  for (const k of ["NEXT_PUBLIC_SITE_URL", CONTACT_KEY]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
   }
 });
+
+const LINK_RE = /\[[^\]]+\]\(https?:\/\/[^)]+\)/g;
 
 describe("GET /llms.txt", () => {
   it("returns 200 text/plain with a cache header", async () => {
@@ -39,9 +47,32 @@ describe("GET /llms.txt", () => {
     expect(body).toContain("CC BY-SA 4.0 — Tayf'a göre");
   });
 
-  it("points to /metodoloji", async () => {
+  it("starts with '# Tayf' followed by a '> ' summary line", async () => {
     const body = await (await GET()).text();
-    expect(body).toContain("/metodoloji");
+    const lines = body.split("\n");
+    expect(lines[0]).toBe("# Tayf");
+    const summaryIdx = lines.findIndex((l) => l.startsWith("> "));
+    expect(summaryIdx).toBeGreaterThan(0);
+    expect(summaryIdx).toBeLessThanOrEqual(2);
+  });
+
+  it("contains at least 8 markdown links, including the CC BY-SA 4.0 licence link", async () => {
+    const body = await (await GET()).text();
+    const links = body.match(LINK_RE) ?? [];
+    expect(links.length).toBeGreaterThanOrEqual(8);
+    expect(body).toContain(
+      "[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/)",
+    );
+  });
+
+  it("no longer points at non-existent contact details on /metodoloji", async () => {
+    const body = await (await GET()).text();
+    expect(body).not.toContain("see the contact details at");
+  });
+
+  it("points to /metodoloji as a markdown link", async () => {
+    const body = await (await GET()).text();
+    expect(body).toMatch(/\[[^\]]+\]\(https:\/\/tayf\.test\/metodoloji\)/);
   });
 
   it("points to the registry JSON at /api/sources", async () => {
@@ -76,9 +107,11 @@ describe("GET /llms.txt", () => {
     );
   });
 
-  it("points to the correction/dispute route for zone labels", async () => {
+  it("points to the correction/dispute route for zone labels as a markdown link", async () => {
     const body = await (await GET()).text();
-    expect(body).toContain("/metodoloji#duzeltme");
+    expect(body).toMatch(
+      /\[[^\]]+\]\(https:\/\/tayf\.test\/metodoloji#duzeltme\)/,
+    );
   });
 
   it("builds absolute links from NEXT_PUBLIC_SITE_URL", async () => {
@@ -90,5 +123,28 @@ describe("GET /llms.txt", () => {
     delete process.env.NEXT_PUBLIC_SITE_URL;
     const body = await (await GET()).text();
     expect(body).toContain("http://localhost:3000/metodoloji");
+  });
+
+  it("includes a mailto contact link when NEXT_PUBLIC_CONTACT_EMAIL is set to a valid address", async () => {
+    process.env[CONTACT_KEY] = "iletisim@example.test";
+    const body = await (await GET()).text();
+    expect(body).toContain("[E-posta](mailto:iletisim@example.test)");
+    delete process.env[CONTACT_KEY];
+  });
+
+  it("has no mailto link and states no separate e-mail is published when the env var is unset", async () => {
+    delete process.env[CONTACT_KEY];
+    const body = await (await GET()).text();
+    expect(body).not.toContain("mailto:");
+    expect(body).toContain(
+      "Tayf şu anda ayrı bir e-posta adresi yayımlamıyor",
+    );
+  });
+
+  it("ignores an invalid NEXT_PUBLIC_CONTACT_EMAIL value", async () => {
+    process.env[CONTACT_KEY] = "x y";
+    const body = await (await GET()).text();
+    expect(body).not.toContain("mailto:");
+    delete process.env[CONTACT_KEY];
   });
 });

@@ -19,8 +19,11 @@ interface ExistingRow {
 const dbState = vi.hoisted(() => ({
   existingSubscriber: null as ExistingRow | null,
   confirmGoodToken: "good-confirm-token",
-  unsubGoodToken: "good-unsub-token",
+  // Unsubscribe tokens must look like crypto.randomUUID() output — the
+  // route validates the shape before ever reaching the DB.
+  unsubGoodToken: "11111111-1111-4111-8111-111111111111",
   forceInsertError: false,
+  forceUnsubDeleteError: false,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -42,9 +45,12 @@ const supabaseFake = await vi.hoisted(async () => {
             ? { data: [{ id: "row-confirm-1" }], error: null }
             : { data: [], error: null };
         }
-        // GET /api/newsletter/unsubscribe's delete-by-token.
+        // POST /api/newsletter/unsubscribe's delete-by-token.
         const unsubEq = state.eq.find((p) => p.col === "unsubscribe_token");
         if (unsubEq) {
+          if (dbState.forceUnsubDeleteError) {
+            return { data: null, error: { message: "boom" } };
+          }
           return unsubEq.val === dbState.unsubGoodToken
             ? { data: [{ id: "row-unsub-1" }], error: null }
             : { data: [], error: null };
@@ -98,6 +104,7 @@ beforeEach(() => {
   supabaseFake.calls.rpc.length = 0;
   dbState.existingSubscriber = null;
   dbState.forceInsertError = false;
+  dbState.forceUnsubDeleteError = false;
   sendEmailMock.mockClear();
   isMailConfiguredMock.mockClear();
   isMailConfiguredMock.mockReturnValue(true);
@@ -126,6 +133,29 @@ function postRequest(body: unknown, ip = "203.0.113.1"): Request {
 function getRequest(url: string, ip = "203.0.113.1"): Request {
   return new Request(url, {
     headers: { "x-forwarded-for": ip },
+  });
+}
+
+function unsubFormRequest(
+  url: string,
+  fields: Record<string, string>,
+  ip = "203.0.113.1",
+): Request {
+  return new Request(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "x-forwarded-for": ip,
+    },
+    body: new URLSearchParams(fields).toString(),
+  });
+}
+
+function unsubJsonRequest(url: string, ip = "203.0.113.1"): Request {
+  return new Request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-forwarded-for": ip },
+    body: "{}",
   });
 }
 
@@ -242,6 +272,53 @@ describe("POST /api/newsletter", () => {
     expect(res.status).toBe(429);
   });
 
+  it("per-address limit: two POSTs for the same unconfirmed email both return 200, but sendEmail runs once", async () => {
+    dbState.existingSubscriber = {
+      confirm_token: "already-issued-token",
+      confirmed_at: null,
+    };
+
+    const mod = await import("@/app/api/newsletter/route");
+    const first = await mod.POST(
+      postRequest({ email: "repeat@example.com" }, "198.51.100.30"),
+    );
+    const second = await mod.POST(
+      postRequest({ email: "repeat@example.com" }, "198.51.100.31"),
+    );
+
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ success: true });
+    expect(second.status).toBe(200);
+    expect(await second.json()).toEqual({ success: true });
+
+    // Different IPs (so the IP limiter isn't what's blocking the second
+    // send) — only the per-address limiter should suppress the resend.
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("per-address limit: two different emails both send", async () => {
+    dbState.existingSubscriber = {
+      confirm_token: "already-issued-token",
+      confirmed_at: null,
+    };
+
+    const mod = await import("@/app/api/newsletter/route");
+    await mod.POST(postRequest({ email: "one@example.com" }, "198.51.100.32"));
+    await mod.POST(postRequest({ email: "two@example.com" }, "198.51.100.33"));
+
+    expect(sendEmailMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("per-address limit: a new signup still inserts and sends exactly once", async () => {
+    const mod = await import("@/app/api/newsletter/route");
+    const res = await mod.POST(
+      postRequest({ email: "fresh@example.com" }, "198.51.100.34"),
+    );
+    expect(res.status).toBe(200);
+    expect(supabaseFake.calls.insert("newsletter_subscribers")).toHaveLength(1);
+    expect(sendEmailMock).toHaveBeenCalledTimes(1);
+  });
+
   it("returns 400 for a malformed JSON body", async () => {
     const mod = await import("@/app/api/newsletter/route");
     const req = new Request("http://example.com/api/newsletter", {
@@ -315,7 +392,7 @@ describe("GET /api/newsletter/confirm", () => {
 });
 
 describe("GET /api/newsletter/unsubscribe", () => {
-  it("deletes the row and redirects to ?bulten=ayrildi for a known token", async () => {
+  it("renders a self-contained confirm page for a valid token, WITHOUT deleting anything", async () => {
     const mod = await import("@/app/api/newsletter/unsubscribe/route");
     const res = await mod.GET(
       getRequest(
@@ -323,7 +400,77 @@ describe("GET /api/newsletter/unsubscribe", () => {
         "198.51.100.13",
       ),
     );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+
+    const html = await res.text();
+    expect(html).toContain('<form method="post" action="/api/newsletter/unsubscribe">');
+    expect(html).toContain(
+      `<input type="hidden" name="token" value="${dbState.unsubGoodToken}">`,
+    );
+    expect(html).toContain("Evet, bültenden ayrıl");
+
+    expect(supabaseFake.calls.delete("newsletter_subscribers")).toHaveLength(0);
+  });
+
+  it("HTML-escapes a token containing markup before rendering it", async () => {
+    // Fails TOKEN_RE, so this actually exercises the redirect path — but it
+    // also proves the token is never reflected unescaped anywhere, in case
+    // that validation is ever loosened.
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.GET(
+      getRequest(
+        `http://example.com/api/newsletter/unsubscribe?token=${encodeURIComponent('"><script>')}`,
+        "198.51.100.14",
+      ),
+    );
     expect(res.status).toBe(302);
+    const html = await res.text();
+    expect(html).not.toContain("<script>");
+  });
+
+  it("redirects to ?bulten=gecersiz for a token that isn't a UUID, with no DB call", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.GET(
+      getRequest(
+        "http://example.com/api/newsletter/unsubscribe?token=not-a-real-token",
+        "198.51.100.15",
+      ),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      "https://tayfhaber.com/?bulten=gecersiz",
+    );
+    expect(supabaseFake.calls.delete("newsletter_subscribers")).toHaveLength(0);
+  });
+
+  it("redirects to ?bulten=gecersiz when the token is missing entirely, with no DB call", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.GET(
+      getRequest("http://example.com/api/newsletter/unsubscribe", "198.51.100.16"),
+    );
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(
+      "https://tayfhaber.com/?bulten=gecersiz",
+    );
+    expect(supabaseFake.calls.delete("newsletter_subscribers")).toHaveLength(0);
+  });
+});
+
+describe("POST /api/newsletter/unsubscribe — browser form", () => {
+  it("deletes by unsubscribe_token and redirects 303 to ?bulten=ayrildi for a known token", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.POST(
+      unsubFormRequest(
+        "http://example.com/api/newsletter/unsubscribe",
+        { token: dbState.unsubGoodToken },
+        "198.51.100.17",
+      ),
+    );
+    expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe(
       "https://tayfhaber.com/?bulten=ayrildi",
     );
@@ -337,15 +484,129 @@ describe("GET /api/newsletter/unsubscribe", () => {
     ).toBe(true);
   });
 
-  it("redirects to ?bulten=gecersiz for an unknown token", async () => {
+  it("redirects 303 to ?bulten=gecersiz for an unknown token", async () => {
     const mod = await import("@/app/api/newsletter/unsubscribe/route");
-    const res = await mod.GET(
-      getRequest(
-        "http://example.com/api/newsletter/unsubscribe?token=not-a-real-token",
-        "198.51.100.14",
+    const unknownToken = "22222222-2222-4222-8222-222222222222";
+    const res = await mod.POST(
+      unsubFormRequest(
+        "http://example.com/api/newsletter/unsubscribe",
+        { token: unknownToken },
+        "198.51.100.18",
       ),
     );
-    expect(res.status).toBe(302);
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(
+      "https://tayfhaber.com/?bulten=gecersiz",
+    );
+  });
+
+  it("redirects 303 to ?bulten=gecersiz on a DB error, logging no token or email", async () => {
+    dbState.forceUnsubDeleteError = true;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.POST(
+      unsubFormRequest(
+        "http://example.com/api/newsletter/unsubscribe",
+        { token: dbState.unsubGoodToken },
+        "198.51.100.19",
+      ),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe(
+      "https://tayfhaber.com/?bulten=gecersiz",
+    );
+
+    const loggedText = JSON.stringify(errSpy.mock.calls);
+    expect(loggedText).not.toContain(dbState.unsubGoodToken);
+    expect(loggedText).not.toContain("@");
+
+    errSpy.mockRestore();
+  });
+});
+
+describe("POST /api/newsletter/unsubscribe — RFC 8058 one-click", () => {
+  function oneClickRequest(token: string, ip = "198.51.100.20"): Request {
+    return unsubFormRequest(
+      `http://example.com/api/newsletter/unsubscribe?token=${token}`,
+      { "List-Unsubscribe": "One-Click" },
+      ip,
+    );
+  }
+
+  it("deletes and returns 200 {success:true} for a known token", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.POST(oneClickRequest(dbState.unsubGoodToken));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+
+    const deletes = supabaseFake.calls.delete("newsletter_subscribers");
+    expect(deletes).toHaveLength(1);
+  });
+
+  it("is idempotent: an unknown/already-removed token still returns 200 {success:true}", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.POST(
+      oneClickRequest("22222222-2222-4222-8222-222222222222", "198.51.100.21"),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+  });
+
+  it("is idempotent even for a malformed token: returns 200 {success:true}", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.POST(oneClickRequest("not-a-uuid", "198.51.100.22"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+  });
+
+  it("returns the standard 500 envelope on a DB error", async () => {
+    dbState.forceUnsubDeleteError = true;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.POST(
+      oneClickRequest(dbState.unsubGoodToken, "198.51.100.23"),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toBe("Internal server error");
+
+    errSpy.mockRestore();
+  });
+});
+
+describe("POST /api/newsletter/unsubscribe — rate limit", () => {
+  it("returns 429 after the bucket is empty", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const ip = "198.51.100.24";
+    for (let i = 0; i < 10; i++) {
+      const res = await mod.POST(
+        unsubFormRequest(
+          "http://example.com/api/newsletter/unsubscribe",
+          { token: dbState.unsubGoodToken },
+          ip,
+        ),
+      );
+      expect(res.status).toBe(303);
+    }
+    const res = await mod.POST(
+      unsubFormRequest(
+        "http://example.com/api/newsletter/unsubscribe",
+        { token: dbState.unsubGoodToken },
+        ip,
+      ),
+    );
+    expect(res.status).toBe(429);
+  });
+
+  it("does not blow up on a JSON body (formData() throws, treated as no fields)", async () => {
+    const mod = await import("@/app/api/newsletter/unsubscribe/route");
+    const res = await mod.POST(
+      unsubJsonRequest("http://example.com/api/newsletter/unsubscribe", "198.51.100.25"),
+    );
+    // No token anywhere (body nor query) -> invalid, browser-style redirect.
+    expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe(
       "https://tayfhaber.com/?bulten=gecersiz",
     );

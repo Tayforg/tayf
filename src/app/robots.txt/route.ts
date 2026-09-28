@@ -12,9 +12,15 @@
 // Every AI-bot group below is ALLOW-WITH-TERMS, never Disallow: blocking a
 // crawler removes Tayf from the retrieval set it wants citations from,
 // which is the exact failure mode M-05 exists to avoid. The terms are
-// carried in the leading comment block and in License:, not enforced by
-// robots.txt itself (robots.txt has no mechanism to enforce terms — it is
-// a crawling directive, not a contract).
+// carried in the leading comment block, not enforced by robots.txt itself
+// (robots.txt has no mechanism to enforce terms — it is a crawling
+// directive, not a contract).
+//
+// No `License:` directive: Lighthouse's robots-txt audit flags `License:`
+// as an unrecognised directive (it is RSL's robots.txt integration, not
+// part of RFC 9309), so the pointer to the machine-readable terms lives in
+// a `#`-prefixed comment below and in llms.txt itself, never as a bare
+// directive line a strict parser could choke on.
 
 // Bots that get the ALLOW-WITH-TERMS + /api/sources carve-out. The
 // carve-out exists because pack B (M-04) publishes the machine-readable
@@ -86,14 +92,14 @@ export function GET(): Response {
 # remain with the publishing outlet.
 #
 # RSL (Really Simple Licensing, https://rslstandard.org) robots.txt
-# integration: the License: line below points at the machine-readable
-# terms. The licence it declares (CC BY-SA 4.0) applies to Tayf's own
-# output only (cluster groupings, neutral titles, Turkish summaries, zone
-# labels, source-registry metadata) — outlet headlines, excerpts,
-# photographs and full text remain the property of the publishing outlet
-# and are NOT licensed by Tayf. See llms.txt for the machine-readable form
-# of this scoping statement.
-License: ${baseUrl}/llms.txt
+# integration normally uses a License: line; Lighthouse flags that as an
+# unknown directive, so the pointer to the machine-readable terms lives in
+# this comment instead. The licence it declares (CC BY-SA 4.0) applies to
+# Tayf's own output only (cluster groupings, neutral titles, Turkish
+# summaries, zone labels, source-registry metadata) — outlet headlines,
+# excerpts, photographs and full text remain the property of the
+# publishing outlet and are NOT licensed by Tayf.
+# License / Lisans (RSL): ${baseUrl}/llms.txt
 
 ${group("*")}
 

@@ -178,9 +178,14 @@ export async function generateMetadata({
   const profile = await getSourceProfile(slug);
 
   if (!profile) {
-    // The root layout's `title.template` is `%s — Tayf`, so we return just
-    // the page-specific part here and let the template add the suffix.
-    return { title: "Kaynak bulunamadı" };
+    // A4: a missing source still streams a 200 shell here (notFound() runs
+    // later in the page body, after PPR has flushed), so this soft-404
+    // must carry honest metadata: no homepage canonical, no index,follow.
+    return {
+      title: "Kaynak bulunamadı",
+      robots: { index: false, follow: true },
+      alternates: { canonical: null },
+    };
   }
 
   const { source, articleCount7d } = profile;
@@ -191,20 +196,24 @@ export async function generateMetadata({
     // Plain title — root layout's `title.template = "%s — Tayf"` adds suffix.
     title: source.name,
     description,
+    // seo-9: no own `images` key on openGraph/twitter — the logo_url used to
+    // be pointed at here is typically a 64px Google favicon (s2/favicons),
+    // a low-res, blurry, un-branded social card. Omitting `images` entirely
+    // (not even `[]`) lets Next's file-convention opengraph-image.tsx /
+    // twitter-image.tsx (both re-exporting the root's generated 1200x630
+    // Tayf card) wire in automatically instead.
     openGraph: {
       title: source.name,
       description,
       type: "profile",
       url: `/source/${source.slug}`,
-      images: source.logo_url ? [{ url: source.logo_url }] : [],
       locale: "tr_TR",
       siteName: "Tayf",
     },
     twitter: {
-      card: "summary",
+      card: "summary_large_image",
       title: source.name,
       description,
-      images: source.logo_url ? [source.logo_url] : [],
     },
     alternates: {
       canonical: `/source/${source.slug}`,

@@ -442,6 +442,7 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // BIAS_TO_ZONE (same shape as 071's), so parseZoneCase can't read it
       // either; it is pinned by tests/migrations/077-ops-health-report.test.ts.
       "077_ops_health_report.sql",
+      "087_trends_istanbul_day.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
@@ -471,6 +472,14 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
     let im: RegExpExecArray | null;
     while ((im = itemRe.exec(body)) !== null) parsed.push(im[1] as string);
     expect(new Set(parsed)).toEqual(new Set(ZONE_KEYS));
+  });
+});
+
+describe("migration 087 (Istanbul-day trends view) matches the contract", () => {
+  it("its zone CASE deep-equals BIAS_TO_ZONE", () => {
+    const sql = read("087_trends_istanbul_day.sql");
+    const parsed = parseZoneCase(sql);
+    expect(parsed).toEqual(contractZoneMap);
   });
 });
 

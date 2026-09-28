@@ -39,6 +39,12 @@ import {
   nextQuarantineState,
   QUARANTINE_AFTER_FAILURES,
 } from "../_shared/rss/quarantine.ts";
+import {
+  groupChunkBySource,
+  interleaveBySource,
+  rotateForCycle,
+  upsertWithBisect,
+} from "./order.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
@@ -176,6 +182,21 @@ interface CycleStats {
   // Outlet headline write-backs applied via the `apply_article_title_edits`
   // RPC this cycle (migration 074, decision (b): write-back at ingest).
   titleWriteBacks: number;
+  // ingest-health: fetches whose 2xx body had none of the recognised feed
+  // roots (an HTML/plain-text/404 body). Already counted in `failed` too --
+  // this breaks that failure reason out so it's visible without grepping logs.
+  notAFeed: number;
+  // ingest-health: items whose (isoDate ?? pubDate) was absent or still
+  // unparseable after `cleanFeedDate` -- fetch time was used instead, but
+  // flagged here (and in the per-source log line) rather than silently.
+  dateFallbacks: number;
+  // ingest-health: rows never attempted this cycle because
+  // `upsertWithBisect` hit the deadline mid-chunk, PLUS every row of a
+  // whole upsert chunk never reached at all because the outer loop itself
+  // hit the deadline first. The direct starvation signal -- distinct from
+  // `rowErrors`, which only counts rows that were attempted and individually
+  // failed.
+  upsertSkipped: number;
   durationMs: number;
 }
 
@@ -638,6 +659,9 @@ async function runCycle(): Promise<CycleStats> {
     quarantined: 0,
     prefilterErrors: 0,
     titleWriteBacks: 0,
+    notAFeed: 0,
+    dateFallbacks: 0,
+    upsertSkipped: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -699,7 +723,14 @@ async function runCycleBody(
   // elapses, at which point the NEXT attempt is a "probe" that can either
   // reset the streak (a success) or re-escalate the backoff (another
   // failure).
-  const toFetch = liveSources.filter((s) => !isQuarantined(s, startedAt));
+  // ingest-health: rotate the fetch order by a startedAt-derived offset so a
+  // fixed `.order("slug")` base order doesn't always place the same
+  // early-alphabet sources first every cycle -- over enough 3-minute cycles
+  // the rotation walks all the way around the roster.
+  const toFetch = rotateForCycle(
+    liveSources.filter((s) => !isQuarantined(s, startedAt)),
+    startedAt,
+  );
   stats.quarantined = liveSources.length - toFetch.length;
 
   // Hydrate the module-scope conditionalCache from what we persisted last
@@ -742,6 +773,11 @@ async function runCycleBody(
         // instead of the DB replaying a stale ETag that gets a 200 (and
         // another parse failure) every cycle while memory already moved on.
         stats.failed++;
+        // ingest-health: an HTML/plain-text/404 body -- already counted in
+        // `failed` above; broken out separately so this failure reason is
+        // visible without grepping logs (and reaches quarantine the same
+        // way any other fetch failure does).
+        if (result.notAFeed) stats.notAFeed++;
         console.error(`[ingest] ${source.slug} fetch failed: ${result.error}`);
         const isParseError2xx = result.status >= 200 && result.status < 300;
         const failState = buildFetchStateUpdate(
@@ -802,6 +838,18 @@ async function runCycleBody(
       await maybeFlushFetchState(supabase, fetchStateUpdates);
 
       stats.fetched++;
+      // ingest-health: items whose date fetcher.ts couldn't clean into
+      // something parseable -- fetch time is still used as the fallback
+      // (unchanged), but flagged here once per source per cycle rather than
+      // silently, so a source that quietly stopped emitting parseable dates
+      // shows up in the logs and the cycle JSON instead of only in a
+      // clustered-by-fetch-time symptom days later.
+      if (result.dateFallbacks) {
+        stats.dateFallbacks += result.dateFallbacks;
+        console.log(
+          `[ingest] ${source.slug}: ${result.dateFallbacks} item(s) without a parseable date — fetch time used (sample: ${JSON.stringify(result.dateFallbackSample)})`,
+        );
+      }
       // One nowMs per fetched source -- every item off THIS feed clamps and
       // (for cnn-turk) corrects against the same instant (migration 074).
       const sourceNowMs = Date.now();
@@ -833,18 +881,40 @@ async function runCycleBody(
   // `maybeFlushFetchState`'s in-pool threshold).
   await persistSourceFetchState(supabase, drainFetchState(fetchStateUpdates));
 
-  // Single batched upsert at cycle end. `ignoreDuplicates: true` against the
-  // `url` UNIQUE constraint preserves the legacy "first insert wins" semantic
-  // while the `(source_id, content_hash)` UNIQUE constraint (migration 013)
-  // is the backstop for any seen-set miss. The AFTER INSERT trigger from
-  // migration 025 fans queue work for every truly inserted row.
+  // Upsert at cycle end, chunked to UPSERT_BATCH. `ignoreDuplicates: true`
+  // against the `url` UNIQUE constraint preserves the legacy "first insert
+  // wins" semantic while the `(source_id, content_hash)` UNIQUE constraint
+  // (migration 013) is the backstop for any seen-set miss. The AFTER INSERT
+  // trigger from migration 025 fans queue work for every truly inserted row.
+  //
+  // ingest-health: chunks are cut from `interleaveBySource(allRows)`, not
+  // `allRows` itself -- the fetch pool appends rows in fetch-completion
+  // order, so a fixed slug-ordered fetch would otherwise put every
+  // early-alphabet source's rows in the first chunk and every late-alphabet
+  // source's rows in the last, meaning a deadline cut starves whole
+  // late-alphabet sources instead of trimming everyone's oldest items
+  // evenly. Interleaved, the first chunk holds every source's NEWEST items.
   if (allRows.length > 0 && Date.now() <= deadline) {
-    for (let i = 0; i < allRows.length; i += UPSERT_BATCH) {
-      if (Date.now() > deadline) break;
-      const rawChunk = allRows.slice(i, i + UPSERT_BATCH);
+    const interleaved = interleaveBySource(allRows);
+    for (let i = 0; i < interleaved.length; i += UPSERT_BATCH) {
+      if (Date.now() > deadline) {
+        // The deadline hit before this (and every later) chunk was even
+        // attempted -- direct starvation signal, distinct from a
+        // bisect-level `skipped` count below.
+        stats.upsertSkipped += interleaved.length - i;
+        break;
+      }
+      const slice = interleaved.slice(i, i + UPSERT_BATCH);
+      // Re-group this interleaved slice by source_id BEFORE the pre-filter
+      // below: an interleaved chunk can carry up to `slice.length` distinct
+      // source ids (one per row in the worst case), which would otherwise
+      // blow up `dropExistingSourceContentHashRows`'s `.in("source_id", ids)`
+      // query string (the same migration 074 proxy-limit failure mode);
+      // grouped, each PREFILTER_CHUNK-sized slice spans far fewer sources.
+      const rawChunk = groupChunkBySource(slice);
       // Drop same-(source_id, content_hash) repeats before they can hit
-      // `articles_source_content_hash_key` — covers both the batched
-      // upsert below and its per-row fallback in one pass (migration 041).
+      // `articles_source_content_hash_key` — covers both the upsert below
+      // and its bisect fallback in one pass (migration 041).
       const { rows: intraDeduped, deduped: intraDeduplicated } =
         dedupeBySourceContentHash(rawChunk);
       // Then drop rows whose (source_id, content_hash) pair is already
@@ -875,16 +945,42 @@ async function runCycleBody(
       // clock against the cycle deadline. Articles always win the deadline
       // race: a miss on the title-version side just means this chunk's
       // changes go uncollected.
-      const [{ titleVersions, titleWriteBacks }, { data: upserted, error: upsertError }] =
-        await Promise.all([
-          Date.now() <= deadline
-            ? recordTitleVersions(supabase, chunk)
-            : Promise.resolve({ titleVersions: 0, titleWriteBacks: 0 }),
-          supabase
-            .from("articles")
-            .upsert(chunk, { onConflict: "url", ignoreDuplicates: true })
-            .select("id"),
-        ]);
+      const [{ titleVersions, titleWriteBacks }, bisectResult] = await Promise.all([
+        Date.now() <= deadline
+          ? recordTitleVersions(supabase, chunk)
+          : Promise.resolve({ titleVersions: 0, titleWriteBacks: 0 }),
+        // ingest-health: bisecting fallback replaces the old
+        // batched-upsert-then-per-row-retry -- a single poisoned row now
+        // costs at most `1 + 2*ceil(log2(chunk.length))` upsert calls
+        // instead of up to `chunk.length + 1`. `isPastDeadline` is checked
+        // per popped batch, so a chunk still mid-bisect when the deadline
+        // hits contributes to `skipped`, not `rowErrors`.
+        upsertWithBisect(
+          chunk,
+          async (batch) => {
+            const { data, error } = await supabase
+              .from("articles")
+              .upsert(batch, { onConflict: "url", ignoreDuplicates: true })
+              .select("id");
+            return { inserted: data?.length ?? 0, error: error?.message ?? null };
+          },
+          {
+            isPastDeadline: () => Date.now() > deadline,
+            onRowError: (row, error) => {
+              // Surface the real per-row failure (schema drift, constraint
+              // violations) instead of swallowing it — and count it so the
+              // cycle response reports the loss (audit P3-9).
+              console.error(
+                `[ingest] row upsert failed: ${JSON.stringify({
+                  url: row.url,
+                  source_id: row.source_id,
+                  error,
+                })}`,
+              );
+            },
+          },
+        ),
+      ]);
       if (titleVersions > 0) {
         stats.titleVersions += titleVersions;
         console.log(
@@ -897,35 +993,16 @@ async function runCycleBody(
           `[ingest] wrote back ${titleWriteBacks} headline(s) in chunk ${i}-${i + chunk.length}`,
         );
       }
-      if (upsertError) {
+      stats.inserted += bisectResult.inserted;
+      stats.rowErrors += bisectResult.rowErrors;
+      stats.upsertSkipped += bisectResult.skipped;
+      if (bisectResult.firstError) {
+        // ONE log line per failing chunk, same discipline as before —
+        // `upsertWithBisect` retries internally, this just reports that the
+        // chunk needed to.
         console.error(
-          `[ingest] batched upsert (chunk ${i}-${i + chunk.length}) failed: ${upsertError.message}`,
+          `[ingest] batched upsert (chunk ${i}-${i + chunk.length}) failed: ${bisectResult.firstError}`,
         );
-        // Per-row fallback so one bad row can't poison the rest of the chunk.
-        for (const row of chunk) {
-          if (Date.now() > deadline) break;
-          const { data: one, error: oneErr } = await supabase
-            .from("articles")
-            .upsert([row], { onConflict: "url", ignoreDuplicates: true })
-            .select("id");
-          if (oneErr) {
-            // Surface the real per-row failure (schema drift, constraint
-            // violations) instead of swallowing it — and count it so the
-            // cycle response reports the loss (audit P3-9).
-            stats.rowErrors++;
-            console.error(
-              `[ingest] row upsert failed: ${JSON.stringify({
-                url: row.url,
-                source_id: row.source_id,
-                error: oneErr.message,
-              })}`,
-            );
-            continue;
-          }
-          stats.inserted += one?.length ?? 0;
-        }
-      } else {
-        stats.inserted += upserted?.length ?? 0;
       }
     }
   }

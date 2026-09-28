@@ -50,8 +50,10 @@ import {
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
-import { serializeJsonLd } from "@/lib/seo/json-ld";
+import { buildTayfOrganization, serializeJsonLd } from "@/lib/seo/json-ld";
 import { siteUrl } from "@/lib/site-url";
+import { zoneOf } from "@/lib/bias/config";
+import type { MediaDnaZone } from "@/types";
 
 /**
  * "Kim önce yazdı?" data. Both lookups are skipped below the 3-source floor,
@@ -88,9 +90,15 @@ export async function generateMetadata({
   const detail = await getClusterDetail(id);
 
   if (!detail) {
-    // The root layout's `title.template` is `%s — Tayf`, so we return just
-    // the page-specific part here and let the template add the suffix.
-    return { title: "Sayfa bulunamadı" };
+    // A4: a missing cluster (bad id, or genuinely deleted) still streams a
+    // 200 shell here — the DB-backed notFound() check runs later in the
+    // page body, after PPR has already flushed — so this soft-404 must at
+    // least carry honest metadata: no homepage canonical, no index,follow.
+    return {
+      title: "Sayfa bulunamadı",
+      robots: { index: false, follow: true },
+      alternates: { canonical: null },
+    };
   }
 
   const { cluster, members, wire } = detail;
@@ -167,6 +175,24 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // reading from the full `members` list.
   const { voting: votingMembers, nonVoting: nonVotingMembers } =
     partitionByVote(members);
+
+  // browser-qa-11: zone-keyed count of non-voting (toplayıcı / niş) members,
+  // deduped by source.slug (a single niche outlet can appear as multiple
+  // articles/members) — passed to <ReadAcrossSpectrum> so a genuine
+  // blindspot's empty-state copy can name who actually wrote from the
+  // silent side instead of implying total silence.
+  const dedupedNonVoting = Array.from(
+    new Map(nonVotingMembers.map((m) => [m.source.slug, m])).values(),
+  );
+  const nonVotingZoneCounts: Record<MediaDnaZone, number> = {
+    iktidar: 0,
+    bagimsiz: 0,
+    muhalefet: 0,
+  };
+  for (const m of dedupedNonVoting) {
+    const z = zoneOf(m.source.bias);
+    nonVotingZoneCounts[z] += 1;
+  }
 
   // Derive inputs for the cross-spectrum surprise detector from only the
   // VOTING member list. `detectCrossSpectrum` also filters internally via
@@ -333,14 +359,23 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     // finding). siteUrl() is required because schema.org `image` must be an
     // absolute URL.
     image: [`${siteUrl()}/cluster/${id}/opengraph-image`],
-    publisher: {
-      "@type": "Organization",
-      name: "Tayf",
-    },
-    author: members.slice(0, 5).map((m) => ({
-      "@type": "Organization",
-      name: m.source.name,
-    })),
+    // seo-4/seo-5: Tayf is the byline and the publisher — a cluster is the
+    // union of multiple independent outlets' coverage, so no single outlet
+    // can honestly be named "the author". The outlets themselves are
+    // credited via `isBasedOn` below instead of masquerading as bylines.
+    publisher: buildTayfOrganization(),
+    author: [{ "@type": "Organization", name: "Tayf", url: siteUrl() }],
+    // seo-7: up to 5 member article URLs this cluster is based on. Only
+    // http(s) URLs qualify — a falsy or malformed `article.url` is dropped
+    // rather than publishing a broken schema.org reference — and the key is
+    // omitted entirely (not `[]`) when nothing qualifies.
+    ...(() => {
+      const isBasedOn = members
+        .slice(0, 5)
+        .map((m) => m.article.url)
+        .filter((u): u is string => typeof u === "string" && /^https?:\/\//i.test(u));
+      return isBasedOn.length > 0 ? { isBasedOn } : {};
+    })(),
   };
 
   return (
@@ -521,6 +556,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               members={votingMembers}
               isBlindspot={cluster.is_blindspot}
               feedDegraded={blindspotSuppressed}
+              nonVotingZoneCounts={nonVotingZoneCounts}
             />
 
             {/* Summary attribution (idea #7): clusters.summary_tr is one
@@ -556,11 +592,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 <div className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80">
                   Kaynak künyesi
                 </div>
-                <ul className="flex flex-wrap gap-x-3 gap-y-1.5">
+                <ul className="flex flex-wrap gap-x-3 gap-y-1.5 min-w-0">
                   {uniqueRatedSources.map((source, i) => (
                     <li
                       key={source.id}
-                      className={`inline-flex items-center gap-1.5 animate-fade-up stagger-${i}`}
+                      className={`flex flex-wrap items-center gap-1.5 min-w-0 max-w-full animate-fade-up stagger-${i}`}
                     >
                       <span className="font-mono text-[10px] uppercase tracking-wider text-foreground/80">
                         {source.name}

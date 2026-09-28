@@ -14,6 +14,8 @@
 import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.0";
 import { decodeRssBody } from "./charset.ts";
 import { safeResponse, SafeFetchError } from "../safe-fetch.ts";
+import { pickItemLink } from "./items.ts";
+import { cleanFeedDate, isParseableFeedDate } from "./dates.ts";
 
 export interface RssSource {
   id: string;
@@ -52,6 +54,16 @@ export interface FetchResult {
   /** SHA-256 hex digest of the raw (pre-decode) response body on a 2xx. */
   bodyHash?: string;
   error?: string;
+  /** Set when the parsed body had none of the recognised feed roots (rss,
+   * feed, rdf:RDF, RDF) -- an HTML/plain-text/404 body masquerading as a
+   * 2xx feed response (ingest-health). `error` is set alongside this. */
+  notAFeed?: boolean;
+  /** Count of items whose (isoDate ?? pubDate) is absent or fails
+   * `isParseableFeedDate` after `cleanFeedDate` -- ingest-health. */
+  dateFallbacks?: number;
+  /** The first present-but-unparseable raw date value this fetch saw,
+   * sliced to 80 chars -- ingest-health. */
+  dateFallbackSample?: string;
 }
 
 export interface ConditionalCacheEntry {
@@ -317,6 +329,26 @@ export async function fetchFeed(
   try {
     items = parseFeed(xml);
   } catch (err) {
+    if (err instanceof NotAFeedError) {
+      // ingest-health: an HTML/plain-text/404 body parsed by fast-xml-parser
+      // into SOMETHING, but nothing with a recognised feed root. Restore the
+      // conditional cache to its pre-request value -- `cache.set(...)` above
+      // already stamped this fetch's (bad body's) etag/lastModified, and
+      // persisting THOSE would turn next cycle's re-fetch of the same bad
+      // body into a spurious "not modified" success that resets
+      // fetch_fail_streak instead of advancing it toward quarantine.
+      if (cache) {
+        if (cached) cache.set(source.id, cached);
+        else cache.delete(source.id);
+      }
+      return {
+        source,
+        items: [],
+        status: response.status,
+        error: `not a feed: ${err.message}`,
+        notAFeed: true,
+      };
+    }
     return {
       source,
       items: [],
@@ -329,6 +361,31 @@ export async function fetchFeed(
     };
   }
 
+  // ingest-health: clean each item's date fields BEFORE they reach
+  // normalize.ts's parseDate -- see dates.ts's file header for why (encoded
+  // offset signs, a literal-Z-then-numeric-offset shape, extra internal
+  // whitespace). `dateFallbacks`/`dateFallbackSample` are computed off the
+  // RAW (pre-clean) value so operators see the actual bad string, not the
+  // cleaned-but-still-unparseable one.
+  let dateFallbacks = 0;
+  let dateFallbackSample: string | undefined;
+  items = items.map((item) => {
+    const cleanedIsoDate = cleanFeedDate(item.isoDate, source.slug);
+    const cleanedPubDate = cleanFeedDate(item.pubDate, source.slug);
+    const effective = cleanedIsoDate ?? cleanedPubDate;
+    const ok = effective !== undefined && isParseableFeedDate(effective, source.slug);
+    if (!ok) {
+      dateFallbacks++;
+      if (dateFallbackSample === undefined) {
+        const raw = item.isoDate ?? item.pubDate;
+        if (raw !== undefined && raw.trim() !== "") {
+          dateFallbackSample = raw.slice(0, 80);
+        }
+      }
+    }
+    return { ...item, pubDate: cleanedPubDate, isoDate: cleanedIsoDate };
+  });
+
   return {
     source,
     items,
@@ -337,6 +394,8 @@ export async function fetchFeed(
     etag,
     lastModified,
     bodyHash,
+    dateFallbacks,
+    dateFallbackSample,
   };
 }
 
@@ -346,32 +405,47 @@ export async function fetchFeed(
 
 type XmlNode = Record<string, unknown>;
 
+// ingest-health: thrown by `parseFeed` when the parsed object has none of
+// the recognised feed roots (`rss`, `feed`, `rdf:RDF`, `RDF`) -- an HTML
+// error page, a plain-text 404 body, or an empty response masquerading as
+// a 2xx feed. `message` is the first top-level key fast-xml-parser produced
+// (e.g. `"html"`), or `"empty"` when the parsed object has no keys at all.
+export class NotAFeedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NotAFeedError";
+  }
+}
+
 function parseFeed(xml: string): RawFeedItem[] {
   const parsed = xmlParser.parse(xml) as XmlNode;
+
   // RSS 2.0: rss > channel > item[]
-  const rssChannel = (parsed.rss as XmlNode | undefined)?.channel;
-  const rssItems = (rssChannel as XmlNode | undefined)?.item;
-  if (Array.isArray(rssItems)) {
-    return (rssItems as XmlNode[]).map(mapRssItem);
+  if (parsed.rss !== undefined) {
+    const rssChannel = (parsed.rss as XmlNode | undefined)?.channel;
+    const rssItems = (rssChannel as XmlNode | undefined)?.item;
+    return Array.isArray(rssItems) ? (rssItems as XmlNode[]).map(mapRssItem) : [];
   }
 
   // Atom: feed > entry[]
-  const feed = parsed.feed as XmlNode | undefined;
-  const atomEntries = feed?.entry;
-  if (Array.isArray(atomEntries)) {
-    return (atomEntries as XmlNode[]).map(mapAtomEntry);
+  if (parsed.feed !== undefined) {
+    const feed = parsed.feed as XmlNode;
+    const atomEntries = feed.entry;
+    return Array.isArray(atomEntries)
+      ? (atomEntries as XmlNode[]).map(mapAtomEntry)
+      : [];
   }
 
   // RDF / RSS 1.0: rdf:RDF > item[]
-  const rdf =
-    (parsed["rdf:RDF"] as XmlNode | undefined) ??
-    (parsed.RDF as XmlNode | undefined);
-  const rdfItems = rdf?.item;
-  if (Array.isArray(rdfItems)) {
-    return (rdfItems as XmlNode[]).map(mapRssItem);
+  if (parsed["rdf:RDF"] !== undefined || parsed.RDF !== undefined) {
+    const rdf = (parsed["rdf:RDF"] as XmlNode | undefined) ?? (parsed.RDF as XmlNode);
+    const rdfItems = rdf.item;
+    return Array.isArray(rdfItems) ? (rdfItems as XmlNode[]).map(mapRssItem) : [];
   }
 
-  return [];
+  // No recognised feed root at all -- an HTML/plain-text/other body.
+  const firstKey = Object.keys(parsed)[0];
+  throw new NotAFeedError(firstKey ?? "empty");
 }
 
 function asString(v: unknown): string | undefined {
@@ -406,7 +480,10 @@ function firstUrl(node: unknown): string | undefined {
 function mapRssItem(node: XmlNode): RawFeedItem {
   const item: RawFeedItem = {
     title: asString(node.title),
-    link: asString(node.link),
+    // ingest-health: Milliyet omits <link> entirely, relying on
+    // <atom:link href=.../> plus a non-permalink <guid> -- pickItemLink
+    // falls through both before giving up.
+    link: pickItemLink(node),
     content: asString(node.description),
     contentSnippet: asString(node.description),
     contentEncoded: asString(node["content:encoded"]),
