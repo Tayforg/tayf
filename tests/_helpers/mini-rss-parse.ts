@@ -45,7 +45,8 @@ function parseAttrs(attrSrc: string): Record<string, string> {
 }
 
 function firstTag(body: string, tag: string): string | undefined {
-  const esc = tag.replace(/[:.]/g, "\\$&");
+  // Full regex escape (backslash included), not just the XML-name punctuation.
+  const esc = tag.replace(/[\\^$.*+?()[\]{}|:-]/g, "\\$&");
   const m = new RegExp(`<${esc}(?:\\s[^>]*)?>([\\s\\S]*?)</${esc}>`).exec(body);
   return m ? textOf(m[1] as string) : undefined;
 }
