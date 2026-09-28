@@ -2,15 +2,21 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { cookies } from "next/headers";
 
-import { AdminSection, EmptyState, FieldLabel, Meter } from "@/components/admin/admin-ui";
+import { AdminSection, EmptyState, FieldLabel, Meter, StatusBadge } from "@/components/admin/admin-ui";
 import { requireAdminSession } from "@/lib/admin/session";
 import {
   JEV_GOLD_MIN_N,
   JEV_LABELER_COOKIE,
   getJevGoldNext,
+  getJevGoldNextPrioritized,
   getJevGoldScorecard,
+  getJevGoldProvisionalScorecard,
   parseLabelerCookie,
+  priorityBadge,
+  buildProvisionalScorecardLines,
   type JevGoldScorecard,
+  type JevGoldNext,
+  type JevGoldNextPrioritized,
 } from "@/lib/admin/jev-gold";
 import { JevGoldLabeler } from "@/components/admin/jev-gold-labeler";
 import { JevGoldLabelerSwitch } from "@/components/admin/jev-gold-labeler-switch";
@@ -99,8 +105,24 @@ export default async function JevAltinPage() {
   const store = await cookies();
   const labeler = parseLabelerCookie(store.get(JEV_LABELER_COOKIE)?.value);
 
-  const [next, scorecard] = await Promise.all([getJevGoldNext(labeler), getJevGoldScorecard()]);
+  const [prioritized, scorecard, provisionalScorecard] = await Promise.all([
+    getJevGoldNextPrioritized(labeler),
+    getJevGoldScorecard(),
+    getJevGoldProvisionalScorecard(),
+  ]);
+
+  // 076 may not be applied yet -- labeling must keep working either way, so
+  // fall back to the plain, un-prioritized queue and render without any
+  // priority info rather than surfacing an error.
+  const next: JevGoldNext | JevGoldNextPrioritized | null =
+    prioritized !== null ? prioritized : await getJevGoldNext(labeler);
+  const priority = prioritized !== null ? prioritized.priority : null;
+  const disagreements = prioritized !== null ? prioritized.disagreements : null;
+
   const pct = next !== null && next.total > 0 ? (next.done / next.total) * 100 : 0;
+  const disagreePct =
+    disagreements !== null && disagreements.total > 0 ? (disagreements.done / disagreements.total) * 100 : 0;
+  const badge = priorityBadge(priority);
 
   return (
     <div className="mx-auto w-full max-w-3xl min-w-0 space-y-6 px-4 py-6 sm:py-8">
@@ -111,6 +133,10 @@ export default async function JevAltinPage() {
         <h1 className="font-serif text-2xl">Jev altın küme</h1>
         <p className="text-sm text-muted-foreground">
           İki kişi bağımsız etiketler; iki etiket de aynıysa o satır altın kabul edilir. Jev ve akış etiketi bu altına karşı ölçülür.
+        </p>
+        <p className="text-sm text-muted-foreground">
+          Sıralama: Anlaşmazlıklar önce. Geçici etiketle (model etiketi, 20 Eylül 2026) Jev&apos;in farklı cevap
+          verdiği haberler önce gelir. Etiketlerken ikisinin ne dediği gösterilmez.
         </p>
       </div>
 
@@ -130,6 +156,20 @@ export default async function JevAltinPage() {
               <p className="text-xs text-muted-foreground">
                 {`${(next.total - next.done).toLocaleString("tr-TR")} haber kaldı`}
               </p>
+              {disagreements !== null && (
+                <>
+                  <p className="text-sm text-foreground">
+                    Anlaşmazlıklar: {disagreements.done.toLocaleString("tr-TR")} /{" "}
+                    {disagreements.total.toLocaleString("tr-TR")} karara bağlandı
+                  </p>
+                  <Meter pct={disagreePct} label="Anlaşmazlık ilerlemesi" />
+                  {disagreements.total > 0 && disagreements.done >= disagreements.total && (
+                    <p className="text-xs text-muted-foreground">
+                      Anlaşmazlıkların hepsi karara bağlandı. Kalan etiketleme isteğe bağlı.
+                    </p>
+                  )}
+                </>
+              )}
               {next.article === null ? (
                 next.total === 0 ? (
                   <EmptyState>
@@ -141,6 +181,16 @@ export default async function JevAltinPage() {
               ) : (
                 <div className="space-y-3 rounded-xl border border-border p-4">
                   <div className="space-y-1">
+                    {badge && (
+                      <div className="space-y-1">
+                        <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
+                        {priority === "disagreement" && (
+                          <p className="text-xs text-muted-foreground">
+                            Geçici etiket ile Jev bu haberde farklı cevap verdi.
+                          </p>
+                        )}
+                      </div>
+                    )}
                     <p className="text-lg font-medium text-foreground">{next.article.title}</p>
                     {next.article.description && (
                       <p className="text-sm text-muted-foreground">{next.article.description}</p>
@@ -182,6 +232,25 @@ export default async function JevAltinPage() {
                     <p className="text-xs text-muted-foreground">{SCORECARD_LABEL_HELP[line.label]}</p>
                   )}
                 </div>
+                <dd className="shrink-0 tabular-nums text-right text-foreground">{line.text}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+      </AdminSection>
+
+      <AdminSection
+        id="gecici-karne"
+        title="Geçici etiket karnesi"
+        help="Geçici etiketler bir dil modelinindir; insan etiketi değildir ve yukarıdaki karneye hiç karışmaz. Jev cevabı: canlı tahmin varsa o, yoksa 20 Eylül test düzeneğinin yalnız başlıkla verdiği cevap."
+      >
+        {provisionalScorecard === null ? (
+          <EmptyState kind="error">Geçici karne okunamadı.</EmptyState>
+        ) : (
+          <dl className="space-y-2 text-sm">
+            {buildProvisionalScorecardLines(provisionalScorecard).map((line) => (
+              <div key={line.label} className="flex items-start justify-between gap-3">
+                <dt className="min-w-0 text-foreground">{line.label}</dt>
                 <dd className="shrink-0 tabular-nums text-right text-foreground">{line.text}</dd>
               </div>
             ))}

@@ -42,7 +42,8 @@ platform manages automatically:**
    every server-rendered page and API route that talks to Postgres.
 2. **GitHub Actions repository secret** — read by
    `.github/workflows/cluster-audit.yml` (daily 03:00 UTC audit +
-   `workflow_dispatch`).
+   `workflow_dispatch`) and `.github/workflows/ops-heartbeat.yml` (`*/30`
+   ops heartbeat + `workflow_dispatch`; see `ops-heartbeat.md`).
 3. **Supabase Vault secret named `service_role_key`** — read at *run time*
    (not deploy time) by three of the six pg_cron jobs migration 038/043/045
    installed: `ingest-drain`, `cluster-drain`, and `image-drain`. Each job's
@@ -152,6 +153,9 @@ limit 10;
 # waiting for 03:00 UTC.
 gh workflow run cluster-audit.yml --repo <org>/<repo>
 # Then check the run is green, not failing on a Supabase auth error.
+
+# Same check for the ops heartbeat (does not wait for the next */30 tick):
+gh workflow run ops-heartbeat.yml --repo <org>/<repo>
 ```
 
 **Blast radius if leaked:** the highest in this list. `service_role`

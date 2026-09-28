@@ -1325,6 +1325,7 @@ Before declaring the migration complete:
 
 - [`key-rotation.md`](key-rotation.md) — rotation runbook for every secret this system uses (Vercel env, GitHub Actions secrets, Supabase Vault, Edge Function secrets).
 - [`backup-posture.md`](backup-posture.md) — what Supabase backs up automatically, what isn't backed up at all, the nightly jobs a restore has to be reconciled with, and the quarterly restore-drill procedure.
+- [`ops-heartbeat.md`](ops-heartbeat.md) — the `ops_health_report()` (077) thresholds table, GitHub cron caveats, and the kill switch.
 
 ## 064 — Jev canlı küme paketi (pair_marginal, kör nokta geri çağırma, ayırma kuyruğu)
 
@@ -1624,6 +1625,35 @@ update public.clusters set blindspot_recall_veto = false, blindspot_recall_veto_
 ```
 
 **Rollback:** do **not** drop the columns while this branch is deployed (the 400 above). Unschedule and clear as in the kill switch; drop the columns only after reverting the app.
+
+## 077 — Ops heartbeat (ops_health_report + GitHub Action): APPLY 077 BEFORE MERGING THE WORKFLOW
+
+> **APPLY 077 TO PRODUCTION BEFORE `.github/workflows/ops-heartbeat.yml` REACHES THE DEFAULT BRANCH.** The workflow calls `public.ops_health_report()` over PostgREST on a `*/30` schedule; if the function doesn't exist yet, every run 404s and `scripts/ops-heartbeat.mjs` exits 2 — a confusing red CI run rather than a real alert, and 48 of them a day until 077 lands.
+
+What 077 does (additive only, read-only):
+
+- Adds `public.ops_health_report()` — a SECURITY DEFINER, `search_path = ''`, `service_role`-only function returning 10 fixed pass/warn/fail/unknown/skip rows (cron failures, Edge Function HTTP error rate, ingest cycle throughput, per-zone ingest freshness ×3, jev-shadow freshness, the 071 blindspot-veto cron, unacked Jev alerts, and dead feeds). It never writes any table and never reads `cron.job.command` or `cron.job_run_details.return_message`.
+- Reaches `cron.*` / `net.*` only through `EXECUTE` behind `to_regclass`, so a project without `pg_cron` or `pg_net` still returns 10 rows (status `'unknown'` for the affected checks) instead of raising.
+
+Steps:
+
+1. **Apply the migration** (the SQL editor or the one-at-a-time psql pattern from step 1). It records itself as version `'077'` in `supabase_migrations.schema_migrations`.
+2. **Verify before merging the workflow:**
+
+   ```sql
+   select * from public.ops_health_report();
+   -- expect exactly 10 rows, in the fixed order documented on the function's comment, no exception raised
+   ```
+
+3. **Then** let the branch containing `.github/workflows/ops-heartbeat.yml` merge to the default branch (GitHub only runs `schedule:` triggers from there). Trigger once by hand to confirm:
+
+   ```bash
+   gh workflow run ops-heartbeat.yml --repo <org>/<repo>
+   ```
+
+See [`ops-heartbeat.md`](ops-heartbeat.md) for the full thresholds table (with the Step 0 numbers each was tuned from), the required secrets (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — already set for `cluster-audit.yml`), who receives the failure email, and the kill switch.
+
+**Rollback:** `gh workflow disable ops-heartbeat.yml` stops the poll immediately, no database change needed. The function itself is inert (read-only, called by nothing else) — there is no reason to drop it, but doing so is safe at any time since nothing else references it.
 
 ## 081 — Jev günlük özet + ops artığı temizliği (jev-shadow-daily, ops-exhaust-prune)
 

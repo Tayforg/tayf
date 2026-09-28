@@ -31,6 +31,37 @@ const fixture = vi.hoisted(() => ({
   } as unknown,
   nextError: null as { message: string } | null,
   scorecardError: null as { message: string } | null,
+  nextPrioritizedRow: [
+    {
+      article_id: "22222222-2222-3333-4444-555555555555",
+      title: "Anlaşmazlık",
+      description: null,
+      category: "politika",
+      source_slug: "kaynak",
+      gold_position: 1,
+      total: 304,
+      done: 10,
+      priority: "disagreement",
+      disagree_total: 54,
+      disagree_done: 5,
+    },
+  ] as unknown[],
+  provisionalScorecard: {
+    provisional_n: 360,
+    jev_n: 340,
+    jev_live_n: 30,
+    jev_agree_n: 286,
+    disagree_n: 54,
+    adjudicated_n: 10,
+    human_sided_jev: 6,
+    human_sided_provisional: 4,
+    human_n: 10,
+    provisional_vs_human_agree: 8,
+    jev_vs_human_n: 10,
+    jev_vs_human_agree: 6,
+  } as unknown,
+  nextPrioritizedError: null as { message: string } | null,
+  provisionalScorecardError: null as { message: string } | null,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -45,6 +76,14 @@ const supabaseFake = await vi.hoisted(async () => {
         if (fixture.scorecardError) return { data: null, error: fixture.scorecardError };
         return { data: fixture.scorecard, error: null };
       },
+      jev_gold_next_prioritized: () => {
+        if (fixture.nextPrioritizedError) return { data: null, error: fixture.nextPrioritizedError };
+        return { data: fixture.nextPrioritizedRow, error: null };
+      },
+      jev_gold_provisional_scorecard: () => {
+        if (fixture.provisionalScorecardError) return { data: null, error: fixture.provisionalScorecardError };
+        return { data: fixture.provisionalScorecard, error: null };
+      },
     },
   });
 });
@@ -56,10 +95,16 @@ vi.mock("@supabase/supabase-js", () => ({
 import {
   getJevGoldNext,
   getJevGoldScorecard,
+  getJevGoldNextPrioritized,
+  getJevGoldProvisionalScorecard,
   parseLabelerCookie,
   isJevLabeler,
   isJevGoldTopic,
+  priorityBadge,
+  buildProvisionalScorecardLines,
   JEV_GOLD_TOPICS,
+  JEV_GOLD_MIN_N,
+  type JevGoldProvisionalScorecard,
 } from "./jev-gold";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -90,6 +135,37 @@ beforeEach(() => {
   };
   fixture.nextError = null;
   fixture.scorecardError = null;
+  fixture.nextPrioritizedRow = [
+    {
+      article_id: "22222222-2222-3333-4444-555555555555",
+      title: "Anlaşmazlık",
+      description: null,
+      category: "politika",
+      source_slug: "kaynak",
+      gold_position: 1,
+      total: 304,
+      done: 10,
+      priority: "disagreement",
+      disagree_total: 54,
+      disagree_done: 5,
+    },
+  ];
+  fixture.provisionalScorecard = {
+    provisional_n: 360,
+    jev_n: 340,
+    jev_live_n: 30,
+    jev_agree_n: 286,
+    disagree_n: 54,
+    adjudicated_n: 10,
+    human_sided_jev: 6,
+    human_sided_provisional: 4,
+    human_n: 10,
+    provisional_vs_human_agree: 8,
+    jev_vs_human_n: 10,
+    jev_vs_human_agree: 6,
+  };
+  fixture.nextPrioritizedError = null;
+  fixture.provisionalScorecardError = null;
   supabaseFake.calls.rpc.length = 0;
 });
 
@@ -309,5 +385,265 @@ describe("vocabulary", () => {
       "teknoloji",
       "genel",
     ]);
+  });
+});
+
+// Pack "gold-seed" (migration 076), W2. getJevGoldNextPrioritized /
+// getJevGoldProvisionalScorecard follow the exact same fixture-RPC style as
+// getJevGoldNext / getJevGoldScorecard above -- see that pair's fixture
+// wiring for the shared chainable Supabase fake.
+
+describe("getJevGoldNextPrioritized", () => {
+  it("returns the article, progress, priority and disagreement counters", async () => {
+    const result = await getJevGoldNextPrioritized(1);
+
+    expect(result).toEqual({
+      article: {
+        article_id: "22222222-2222-3333-4444-555555555555",
+        title: "Anlaşmazlık",
+        description: null,
+        category: "politika",
+        source_slug: "kaynak",
+        position: 1,
+      },
+      total: 304,
+      done: 10,
+      priority: "disagreement",
+      disagreements: { total: 54, done: 5 },
+    });
+  });
+
+  it("passes p_labeler through to the RPC", async () => {
+    await getJevGoldNextPrioritized(2);
+
+    const call = supabaseFake.calls.rpc.find((c) => c.name === "jev_gold_next_prioritized");
+    expect(call).toBeDefined();
+    expect(call!.args).toEqual({ p_labeler: 2 });
+  });
+
+  it("coerces numeric-string totals/counters", async () => {
+    fixture.nextPrioritizedRow = [
+      {
+        article_id: "a1",
+        title: "t",
+        description: null,
+        category: "dunya",
+        source_slug: "s",
+        gold_position: "1",
+        total: "304",
+        done: "10",
+        priority: "gold",
+        disagree_total: "54",
+        disagree_done: "5",
+      },
+    ];
+
+    const result = await getJevGoldNextPrioritized(1);
+
+    expect(result!.total).toBe(304);
+    expect(result!.done).toBe(10);
+    expect(result!.disagreements).toEqual({ total: 54, done: 5 });
+    expect(result!.article!.position).toBe(1);
+  });
+
+  it("a null article_id -> article null, priority still mapped (or null)", async () => {
+    fixture.nextPrioritizedRow = [
+      {
+        article_id: null,
+        title: null,
+        description: null,
+        category: null,
+        source_slug: null,
+        gold_position: null,
+        total: "304",
+        done: "304",
+        priority: null,
+        disagree_total: "54",
+        disagree_done: "54",
+      },
+    ];
+
+    const result = await getJevGoldNextPrioritized(1);
+
+    expect(result).not.toBeNull();
+    expect(result!.article).toBeNull();
+    expect(result!.priority).toBeNull();
+    expect(result!.disagreements).toEqual({ total: 54, done: 54 });
+  });
+
+  it("maps each priority string through unchanged", async () => {
+    for (const priority of ["disagreement", "gold", "provisional"] as const) {
+      fixture.nextPrioritizedRow = [
+        {
+          article_id: "a1",
+          title: "t",
+          description: null,
+          category: "dunya",
+          source_slug: "s",
+          gold_position: 1,
+          total: 304,
+          done: 10,
+          priority,
+          disagree_total: 54,
+          disagree_done: 5,
+        },
+      ];
+      const result = await getJevGoldNextPrioritized(1);
+      expect(result!.priority).toBe(priority);
+    }
+  });
+
+  it("an RPC error -> null (e.g. 076 not applied yet)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.nextPrioritizedError = { message: 'function "jev_gold_next_prioritized" does not exist' };
+
+    const result = await getJevGoldNextPrioritized(1);
+
+    expect(result).toBeNull();
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+
+  it("missing env vars -> null, never throws", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getJevGoldNextPrioritized(1)).resolves.toBeNull();
+    expect(errorSpy).toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+  });
+});
+
+describe("getJevGoldProvisionalScorecard", () => {
+  it("maps every camelCase field from the jsonb keys", async () => {
+    const result = await getJevGoldProvisionalScorecard();
+
+    expect(result).toEqual({
+      provisionalN: 360,
+      jevN: 340,
+      jevLiveN: 30,
+      jevAgreeN: 286,
+      disagreeN: 54,
+      adjudicatedN: 10,
+      humanSidedJev: 6,
+      humanSidedProvisional: 4,
+      humanN: 10,
+      provisionalVsHumanAgree: 8,
+      jevVsHumanN: 10,
+      jevVsHumanAgree: 6,
+    });
+  });
+
+  it("coerces numeric strings", async () => {
+    fixture.provisionalScorecard = {
+      provisional_n: "360",
+      jev_n: "340",
+      jev_live_n: "30",
+      jev_agree_n: "286",
+      disagree_n: "54",
+      adjudicated_n: "10",
+      human_sided_jev: "6",
+      human_sided_provisional: "4",
+      human_n: "10",
+      provisional_vs_human_agree: "8",
+      jev_vs_human_n: "10",
+      jev_vs_human_agree: "6",
+    };
+
+    const result = await getJevGoldProvisionalScorecard();
+
+    expect(result!.provisionalN).toBe(360);
+    expect(typeof result!.provisionalN).toBe("number");
+  });
+
+  it("missing keys -> zeros, not a throw", async () => {
+    fixture.provisionalScorecard = {};
+
+    const result = await getJevGoldProvisionalScorecard();
+
+    expect(result).not.toBeNull();
+    expect(result!.provisionalN).toBe(0);
+    expect(result!.disagreeN).toBe(0);
+  });
+
+  it("an RPC error -> null", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.provisionalScorecardError = { message: "boom" };
+
+    const result = await getJevGoldProvisionalScorecard();
+
+    expect(result).toBeNull();
+
+    errorSpy.mockRestore();
+  });
+});
+
+describe("priorityBadge", () => {
+  it("disagreement -> Anlaşmazlık / warn", () => {
+    expect(priorityBadge("disagreement")).toEqual({ label: "Anlaşmazlık", tone: "warn" });
+  });
+
+  it("gold -> Altın küme örneği / neutral", () => {
+    expect(priorityBadge("gold")).toEqual({ label: "Altın küme örneği", tone: "neutral" });
+  });
+
+  it("provisional -> Geçici etiketli / muted", () => {
+    expect(priorityBadge("provisional")).toEqual({ label: "Geçici etiketli", tone: "muted" });
+  });
+
+  it("null -> null (no badge)", () => {
+    expect(priorityBadge(null)).toBeNull();
+  });
+});
+
+describe("buildProvisionalScorecardLines", () => {
+  const fullCard: JevGoldProvisionalScorecard = {
+    provisionalN: 360,
+    jevN: 340,
+    jevLiveN: 30,
+    jevAgreeN: 286,
+    disagreeN: 54,
+    adjudicatedN: 40,
+    humanSidedJev: 24,
+    humanSidedProvisional: 16,
+    humanN: 40,
+    provisionalVsHumanAgree: 32,
+    jevVsHumanN: 40,
+    jevVsHumanAgree: 28,
+  };
+
+  it("returns one line per figure with real numbers when n is at/above JEV_GOLD_MIN_N", () => {
+    const lines = buildProvisionalScorecardLines(fullCard);
+    expect(lines.length).toBeGreaterThan(0);
+    const byLabel = Object.fromEntries(lines.map((l) => [l.label, l.text]));
+    expect(byLabel["Geçici etiketli haber"]).toContain("360");
+    expect(byLabel["Anlaşmazlık"]).toContain("54");
+  });
+
+  it("gates rate lines below JEV_GOLD_MIN_N with 'henüz yok'", () => {
+    const smallCard: JevGoldProvisionalScorecard = {
+      ...fullCard,
+      adjudicatedN: JEV_GOLD_MIN_N - 1,
+      humanN: JEV_GOLD_MIN_N - 1,
+      jevVsHumanN: JEV_GOLD_MIN_N - 1,
+    };
+    const lines = buildProvisionalScorecardLines(smallCard);
+    const byLabel = Object.fromEntries(lines.map((l) => [l.label, l.text]));
+    expect(byLabel["Geçici etiketin insanla uyumu"]).toContain("henüz yok");
+    expect(byLabel["Jev'in insanla uyumu"]).toContain("henüz yok");
+  });
+
+  it("shows a rate once n reaches JEV_GOLD_MIN_N", () => {
+    const bigCard: JevGoldProvisionalScorecard = {
+      ...fullCard,
+      humanN: JEV_GOLD_MIN_N,
+      provisionalVsHumanAgree: JEV_GOLD_MIN_N - 2,
+    };
+    const lines = buildProvisionalScorecardLines(bigCard);
+    const byLabel = Object.fromEntries(lines.map((l) => [l.label, l.text]));
+    expect(byLabel["Geçici etiketin insanla uyumu"]).not.toContain("henüz yok");
   });
 });

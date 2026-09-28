@@ -11,7 +11,11 @@ import { getRecentArchiveExports } from "@/lib/admin/archive-status";
 import { getJevShadowStatus } from "@/lib/admin/jev-shadow-status";
 import { getJevRegressionStatus } from "@/lib/admin/jev-regression";
 import { getJevSignalsStatus } from "@/lib/admin/jev-signals";
-import { getJevUnlinkCandidates, getJevBlindspotSuspects } from "@/lib/admin/jev-cluster";
+import {
+  getJevUnlinkCandidates,
+  getJevBlindspotSuspects,
+  getJevUnlinkTriage,
+} from "@/lib/admin/jev-cluster";
 import { getFramingVoteStatus } from "@/lib/admin/framing-votes";
 import { getLlmBudgetStatus } from "@/lib/admin/llm-budget-status";
 import { getApiKeysStatus } from "@/lib/admin/api-keys-status";
@@ -51,6 +55,7 @@ export default async function AdminPage() {
     regression,
     signals,
     unlink,
+    unlinkTriage,
     blindspot,
     framing,
     llmBudget,
@@ -64,6 +69,7 @@ export default async function AdminPage() {
     getJevRegressionStatus(),
     getJevSignalsStatus(),
     getJevUnlinkCandidates(),
+    getJevUnlinkTriage(),
     getJevBlindspotSuspects(),
     getFramingVoteStatus(),
     getLlmBudgetStatus(),
@@ -142,7 +148,7 @@ export default async function AdminPage() {
       >
         <JevAlertsSection status={signals} now={now} />
         <JevDisagreementQueue status={shadow} now={now} />
-        <JevUnlinkSection candidates={unlink} now={now} />
+        <JevUnlinkSection candidates={unlink} now={now} triage={unlinkTriage} />
         <CorrectionsList corrections={corrections} now={now} />
       </AdminGroup>
 

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
+import { DistinctiveWords } from "@/components/weekly/distinctive-words";
 import { BIAS_LABELS, ZONE_META } from "@/lib/bias/config";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import {
@@ -11,6 +12,7 @@ import {
 } from "@/lib/clusters/feed-health";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { getFeedStatusSummary } from "@/lib/sources/feed-status";
+import { getWeeklyDistinctiveWords } from "@/lib/weekly/distinctive-words-query";
 import {
   getWeeklyClusters,
   getWeeklyLabelChanges,
@@ -36,6 +38,12 @@ import type { MediaDnaZone } from "@/types";
 // "payda bilinmiyor" instead of inventing one. All aggregation lives in
 // src/lib/weekly/weekly-query.ts (unit tested there); this file only
 // decides how to render null / [] / real data.
+//
+// "Aynı hafta, farklı kelimeler" (src/components/weekly/distinctive-words.tsx)
+// is an LLM-free, always-rendered companion section: it shows the headline
+// words/phrases each Medya DNA zone uses significantly more than the other
+// two over the trailing 7 days (Fightin' Words), sourced independently of
+// the cluster read above so it still renders when clusters === null.
 //
 // No `export const dynamic` / `revalidate`: under cacheComponents every
 // fetcher is a "use cache" function that resolves to null on error, so this
@@ -74,11 +82,12 @@ const DEGRADED_CAVEAT =
 const TRUNCATED_CAVEAT = `En büyük ${WEEKLY_CLUSTER_LIMIT} küme üzerinden hesaplandı; haftanın tamamı değil.`;
 
 export default async function WeeklyPage() {
-  const [clusters, health, feedStatus, labelChanges] = await Promise.all([
+  const [clusters, health, feedStatus, labelChanges, words] = await Promise.all([
     getWeeklyClusters(),
     getZoneFeedHealth(),
     getFeedStatusSummary(),
     getWeeklyLabelChanges(),
+    getWeeklyDistinctiveWords(),
   ]);
 
   const summary =
@@ -120,6 +129,8 @@ export default async function WeeklyPage() {
           <Blindspots summary={summary} health={health} />
         </>
       )}
+
+      <DistinctiveWords data={words} />
 
       <SilentSources feedStatus={feedStatus} />
       <LabelChanges changes={labelChanges} />

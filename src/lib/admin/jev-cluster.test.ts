@@ -16,12 +16,22 @@ const queryLog = vi.hoisted(() => ({
 const fixture = vi.hoisted(() => ({
   unlinkCandidates: [] as unknown[],
   unlinkError: null as { message: string } | null,
-  candidateRows: [] as Array<{ id: number; cluster_id: string; article_id: string; status: string }>,
+  candidateRows: [] as Array<{
+    id: number;
+    cluster_id: string;
+    article_id: string;
+    status: string;
+    band?: string | null;
+  }>,
   suspectClusters: [] as unknown[],
   suspectClustersError: null as { message: string } | null,
   blindspotPredictions: [] as unknown[],
   blindspotPredictionsError: null as { message: string } | null,
   rpcResult: { data: 4, error: null } as { data: unknown; error: { message: string } | null },
+  triageBandCounts: { likely_unlink: 0, review: 0, untriaged: 0 },
+  triageError: null as { message: string } | null,
+  dryRunRows: [] as unknown[],
+  dryRunError: null as { message: string } | null,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -33,6 +43,33 @@ const supabaseFake = await vi.hoisted(async () => {
       // `status` predicate — the single-row lookup/update).
       jev_unlink_candidates: (state) => {
         queryLog.unlinkCandidateStates.push(state);
+
+        const headOpts = state.selectArgs[1] as { head?: boolean } | undefined;
+        if (headOpts?.head) {
+          if (fixture.triageError) return { data: null, error: fixture.triageError };
+          const bandEq = state.eq.find((e) => e.col === "band");
+          const bandIs = state.is.find((e) => e.col === "band");
+          let key: "likely_unlink" | "review" | "untriaged" = "untriaged";
+          if (bandEq?.val === "likely_unlink") key = "likely_unlink";
+          else if (bandEq?.val === "review") key = "review";
+          else if (bandIs) key = "untriaged";
+          return { data: null, error: null, count: fixture.triageBandCounts[key] };
+        }
+
+        const idIn = state.in.find((e) => e.col === "id");
+        if (idIn !== undefined) {
+          if (fixture.unlinkError) return { data: null, error: fixture.unlinkError };
+          const statusEq = state.eq.find((e) => e.col === "status");
+          const bandEq = state.eq.find((e) => e.col === "band");
+          const matched = fixture.candidateRows.filter(
+            (r) =>
+              idIn.vals.map(String).includes(String(r.id)) &&
+              (!statusEq || r.status === statusEq.val) &&
+              (!bandEq || r.band === bandEq.val),
+          );
+          return { data: matched.map((r) => ({ id: r.id })), error: null };
+        }
+
         const idEq = state.eq.find((e) => e.col === "id");
         if (idEq !== undefined) {
           if (fixture.unlinkError) return { data: null, error: fixture.unlinkError };
@@ -57,6 +94,10 @@ const supabaseFake = await vi.hoisted(async () => {
         if (fixture.blindspotPredictionsError) return { data: null, error: fixture.blindspotPredictionsError };
         return { data: fixture.blindspotPredictions, error: null };
       },
+      jev_unlink_dryrun: () => {
+        if (fixture.dryRunError) return { data: null, error: fixture.dryRunError };
+        return { data: fixture.dryRunRows, error: null };
+      },
     },
     rpc: {
       cluster_unlink_article: () => fixture.rpcResult,
@@ -73,6 +114,8 @@ import {
   getJevBlindspotSuspects,
   unlinkClusterArticle,
   keepClusterArticle,
+  getJevUnlinkTriage,
+  keepClusterArticles,
   JEV_UNLINK_LIMIT,
   JEV_BLINDSPOT_SUSPECT_LIMIT,
   JEV_BLINDSPOT_SUSPECT_DAYS,
@@ -88,6 +131,10 @@ beforeEach(() => {
   fixture.candidateRows = [];
   fixture.suspectClusters = [];
   fixture.suspectClustersError = null;
+  fixture.triageBandCounts = { likely_unlink: 0, review: 0, untriaged: 0 };
+  fixture.triageError = null;
+  fixture.dryRunRows = [];
+  fixture.dryRunError = null;
   fixture.blindspotPredictions = [];
   fixture.blindspotPredictionsError = null;
   fixture.rpcResult = { data: 4, error: null };
@@ -108,7 +155,7 @@ afterEach(() => {
 });
 
 describe("getJevUnlinkCandidates", () => {
-  it("filters status=pending, orders by jev_prob ascending, limits to JEV_UNLINK_LIMIT", async () => {
+  it("filters status=pending, orders by band then jev_prob ascending, limits to JEV_UNLINK_LIMIT", async () => {
     fixture.unlinkCandidates = [
       {
         id: 1,
@@ -116,6 +163,8 @@ describe("getJevUnlinkCandidates", () => {
         article_id: "a1",
         jev_prob: 0.12,
         created_at: "2026-09-20T10:00:00.000Z",
+        title_jaccard: 0.15,
+        band: "likely_unlink",
         cluster: { title_tr: "Kume 1", title_tr_neutral: null },
         article: { title: "Haber 1", source: { slug: "kaynak-1" } },
       },
@@ -133,18 +182,46 @@ describe("getJevUnlinkCandidates", () => {
         clusterTitle: "Kume 1",
         articleTitle: "Haber 1",
         sourceSlug: "kaynak-1",
+        titleJaccard: 0.15,
+        band: "likely_unlink",
       },
     ]);
 
     expect(JEV_UNLINK_LIMIT).toBe(30);
     const state = queryLog.unlinkCandidateStates[0] as {
+      selectArgs: unknown[];
       eq: Array<{ col: string; val: unknown }>;
       order: Array<{ col: string; opts: unknown }>;
       limit: number | null;
     };
+    expect(String(state.selectArgs[0])).toMatch(/\btitle_jaccard\b/);
+    expect(String(state.selectArgs[0])).toMatch(/\bband\b/);
     expect(state.eq).toContainEqual({ col: "status", val: "pending" });
-    expect(state.order).toContainEqual({ col: "jev_prob", opts: { ascending: true } });
+    expect(state.order).toEqual([
+      { col: "band", opts: { ascending: true, nullsFirst: false } },
+      { col: "jev_prob", opts: { ascending: true } },
+    ]);
     expect(state.limit).toBe(JEV_UNLINK_LIMIT);
+  });
+
+  it("maps a bad band string and non-finite title_jaccard to null", async () => {
+    fixture.unlinkCandidates = [
+      {
+        id: 9,
+        cluster_id: "c9",
+        article_id: "a9",
+        jev_prob: 0.2,
+        created_at: "2026-09-20T10:00:00.000Z",
+        title_jaccard: "not-a-number",
+        band: "something_else",
+        cluster: { title_tr: "K", title_tr_neutral: null },
+        article: { title: "H", source: null },
+      },
+    ];
+
+    const result = await getJevUnlinkCandidates();
+    expect(result?.[0]?.titleJaccard).toBeNull();
+    expect(result?.[0]?.band).toBeNull();
   });
 
   it("prefers title_tr_neutral over title_tr and degrades to null on a query error", async () => {
@@ -328,5 +405,83 @@ describe("keepClusterArticle", () => {
     expect(updates[0]?.state.eq).toContainEqual({ col: "id", val: 5 });
     expect(updates[0]?.state.eq).toContainEqual({ col: "status", val: "pending" });
     expect(supabaseFake.calls.rpc).toHaveLength(0);
+  });
+});
+
+describe("getJevUnlinkTriage", () => {
+  it("the happy path returns band counts and the dry-run summary", async () => {
+    fixture.triageBandCounts = { likely_unlink: 3, review: 40, untriaged: 5 };
+    fixture.dryRunRows = [
+      {
+        candidate_id: 1,
+        jev_prob: 0.05,
+        title_jaccard: 0.1,
+        cluster_size: 5,
+        would_unlink: true,
+        skip_reasons: [],
+        first_evaluated_at: "2026-09-28T00:00:00.000Z",
+        candidate: {
+          status: "pending",
+          article: { title: "Haber" },
+          cluster: { title_tr: "Küme", title_tr_neutral: null },
+        },
+      },
+    ];
+
+    const result = await getJevUnlinkTriage();
+
+    expect(result?.bands).toEqual({ likelyUnlink: 3, review: 40, untriaged: 5 });
+    expect(result?.dryRun.evaluated).toBe(1);
+    expect(result?.dryRun.wouldUnlink).toBe(1);
+  });
+
+  it("degrades to null on a query error and never throws", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.triageError = { message: "relation does not exist" };
+
+    await expect(getJevUnlinkTriage()).resolves.toBeNull();
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+
+  it("degrades to null when the dry-run read errors", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.dryRunError = { message: "relation does not exist" };
+
+    await expect(getJevUnlinkTriage()).resolves.toBeNull();
+    expect(errorSpy).toHaveBeenCalled();
+    errorSpy.mockRestore();
+  });
+});
+
+describe("keepClusterArticles", () => {
+  it("updates only pending, band 'review' rows among the given ids to kept with a string decided_at", async () => {
+    fixture.candidateRows = [
+      { id: 1, cluster_id: "c1", article_id: "a1", status: "pending", band: "review" },
+      { id: 2, cluster_id: "c2", article_id: "a2", status: "pending", band: "review" },
+      { id: 3, cluster_id: "c3", article_id: "a3", status: "pending", band: "likely_unlink" },
+    ];
+
+    const result = await keepClusterArticles([1, 2, 3]);
+
+    expect(result).toEqual({ ok: true, kept: 2, skipped: 1 });
+    const updates = supabaseFake.calls.update("jev_unlink_candidates");
+    expect(updates).toHaveLength(1);
+    const patch = updates[0]?.patch as { status: string; decided_at: unknown };
+    expect(patch.status).toBe("kept");
+    expect(typeof patch.decided_at).toBe("string");
+    expect(updates[0]?.state.in).toContainEqual({ col: "id", vals: [1, 2, 3] });
+    expect(updates[0]?.state.eq).toContainEqual({ col: "status", val: "pending" });
+    expect(updates[0]?.state.eq).toContainEqual({ col: "band", val: "review" });
+    expect(supabaseFake.calls.rpc).toHaveLength(0);
+  });
+
+  it("never throws; a query error returns ok:false", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.unlinkError = { message: "boom" };
+
+    const result = await keepClusterArticles([1]);
+    expect(result).toEqual({ ok: false, reason: "error" });
+    errorSpy.mockRestore();
   });
 });

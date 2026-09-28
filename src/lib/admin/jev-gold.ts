@@ -180,6 +180,202 @@ export async function getJevGoldNext(labeler: JevLabeler): Promise<JevGoldNext |
   }
 }
 
+// ---------------------------------------------------------------------------
+// Gold seed (migration 076): provisional labeler 0 from the paid Opus
+// labels ("Anlaşmazlıklar önce"). Additive to everything above -- neither
+// JevGoldNext nor JevGoldScorecard gains a field, and getJevGoldNext /
+// getJevGoldScorecard are unchanged. See supabase/migrations/076_jev_gold_
+// provisional.sql for the SQL side and its header for the full rationale.
+// ---------------------------------------------------------------------------
+
+export const JEV_PROVISIONAL_THRESHOLD = 0.5;
+export const JEV_PROVISIONAL_LABEL_SOURCE = "opus-2026-09-20";
+
+export type JevGoldPriority = "disagreement" | "gold" | "provisional";
+
+export interface JevGoldNextPrioritized extends JevGoldNext {
+  priority: JevGoldPriority | null;
+  disagreements: { total: number; done: number };
+}
+
+export interface JevGoldProvisionalScorecard {
+  provisionalN: number;
+  jevN: number;
+  jevLiveN: number;
+  jevAgreeN: number;
+  disagreeN: number;
+  adjudicatedN: number;
+  humanSidedJev: number;
+  humanSidedProvisional: number;
+  humanN: number;
+  provisionalVsHumanAgree: number;
+  jevVsHumanN: number;
+  jevVsHumanAgree: number;
+}
+
+interface RawJevGoldNextPrioritizedRow extends RawJevGoldNextRow {
+  priority: string | null;
+  disagree_total: number | string;
+  disagree_done: number | string;
+}
+
+interface RawJevGoldProvisionalScorecard {
+  provisional_n?: number | string;
+  jev_n?: number | string;
+  jev_live_n?: number | string;
+  jev_agree_n?: number | string;
+  disagree_n?: number | string;
+  adjudicated_n?: number | string;
+  human_sided_jev?: number | string;
+  human_sided_provisional?: number | string;
+  human_n?: number | string;
+  provisional_vs_human_agree?: number | string;
+  jev_vs_human_n?: number | string;
+  jev_vs_human_agree?: number | string;
+}
+
+function isJevGoldPriority(v: unknown): v is JevGoldPriority {
+  return v === "disagreement" || v === "gold" || v === "provisional";
+}
+
+export async function getJevGoldNextPrioritized(labeler: JevLabeler): Promise<JevGoldNextPrioritized | null> {
+  try {
+    const supabase = createServerClient();
+    const { data, error } = await supabase.rpc("jev_gold_next_prioritized", { p_labeler: labeler });
+
+    if (error) {
+      console.error(`[admin] jev gold next prioritized unavailable: ${error.message}`);
+      return null;
+    }
+
+    const rows = Array.isArray(data)
+      ? (data as RawJevGoldNextPrioritizedRow[])
+      : data
+        ? [data as RawJevGoldNextPrioritizedRow]
+        : [];
+    const row = rows[0];
+    if (!row) {
+      console.error("[admin] jev gold next prioritized unavailable: empty rpc result");
+      return null;
+    }
+
+    const article: JevGoldArticle | null =
+      row.article_id === null || row.article_id === undefined
+        ? null
+        : {
+            article_id: String(row.article_id),
+            title: String(row.title ?? ""),
+            description: row.description === null || row.description === undefined ? null : String(row.description),
+            category: String(row.category ?? ""),
+            source_slug: String(row.source_slug ?? ""),
+            position: toNum(row.gold_position),
+          };
+
+    return {
+      article,
+      total: toNum(row.total),
+      done: toNum(row.done),
+      priority: isJevGoldPriority(row.priority) ? row.priority : null,
+      disagreements: {
+        total: toNum(row.disagree_total),
+        done: toNum(row.disagree_done),
+      },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[admin] jev gold next prioritized unavailable: ${message}`);
+    return null;
+  }
+}
+
+export async function getJevGoldProvisionalScorecard(): Promise<JevGoldProvisionalScorecard | null> {
+  try {
+    const supabase = createServerClient();
+    const { data, error } = await supabase.rpc("jev_gold_provisional_scorecard");
+
+    if (error) {
+      console.error(`[admin] jev gold provisional scorecard unavailable: ${error.message}`);
+      return null;
+    }
+
+    const raw = (data ?? {}) as RawJevGoldProvisionalScorecard;
+
+    return {
+      provisionalN: toNum(raw.provisional_n),
+      jevN: toNum(raw.jev_n),
+      jevLiveN: toNum(raw.jev_live_n),
+      jevAgreeN: toNum(raw.jev_agree_n),
+      disagreeN: toNum(raw.disagree_n),
+      adjudicatedN: toNum(raw.adjudicated_n),
+      humanSidedJev: toNum(raw.human_sided_jev),
+      humanSidedProvisional: toNum(raw.human_sided_provisional),
+      humanN: toNum(raw.human_n),
+      provisionalVsHumanAgree: toNum(raw.provisional_vs_human_agree),
+      jevVsHumanN: toNum(raw.jev_vs_human_n),
+      jevVsHumanAgree: toNum(raw.jev_vs_human_agree),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[admin] jev gold provisional scorecard unavailable: ${message}`);
+    return null;
+  }
+}
+
+interface PriorityBadge {
+  label: string;
+  tone: "warn" | "neutral" | "muted";
+}
+
+const PRIORITY_BADGES: Record<JevGoldPriority, PriorityBadge> = {
+  disagreement: { label: "Anlaşmazlık", tone: "warn" },
+  gold: { label: "Altın küme örneği", tone: "neutral" },
+  provisional: { label: "Geçici etiketli", tone: "muted" },
+};
+
+export function priorityBadge(priority: JevGoldPriority | null): PriorityBadge | null {
+  return priority === null ? null : PRIORITY_BADGES[priority];
+}
+
+export interface ProvisionalScorecardLine {
+  label: string;
+  text: string;
+}
+
+function provisionalRateLine(n: number, correct: number): string {
+  if (n < JEV_GOLD_MIN_N) return "henüz yok";
+  const pct = n > 0 ? Math.round((correct / n) * 100) : 0;
+  return `%${pct} (n=${n.toLocaleString("tr-TR")})`;
+}
+
+export function buildProvisionalScorecardLines(card: JevGoldProvisionalScorecard): ProvisionalScorecardLine[] {
+  return [
+    { label: "Geçici etiketli haber", text: card.provisionalN.toLocaleString("tr-TR") },
+    { label: "Jev cevabı olan (canlı / test düzeneği)", text: card.jevN.toLocaleString("tr-TR") },
+    { label: "Jev ile geçici etiket aynı", text: card.jevAgreeN.toLocaleString("tr-TR") },
+    { label: "Anlaşmazlık", text: card.disagreeN.toLocaleString("tr-TR") },
+    {
+      label: "Karara bağlanan anlaşmazlık",
+      text: `${card.adjudicatedN.toLocaleString("tr-TR")} / ${card.disagreeN.toLocaleString("tr-TR")}`,
+    },
+    {
+      label: "İnsan Jev'i haklı buldu",
+      text: provisionalRateLine(card.adjudicatedN, card.humanSidedJev),
+    },
+    {
+      label: "İnsan geçici etiketi haklı buldu",
+      text: provisionalRateLine(card.adjudicatedN, card.humanSidedProvisional),
+    },
+    {
+      label: "Geçici etiketin insanla uyumu",
+      text: provisionalRateLine(card.humanN, card.provisionalVsHumanAgree),
+    },
+    {
+      label: "Jev'in insanla uyumu",
+      text: provisionalRateLine(card.jevVsHumanN, card.jevVsHumanAgree),
+    },
+  ];
+}
+
 export async function getJevGoldScorecard(): Promise<JevGoldScorecard | null> {
   try {
     const supabase = createServerClient();

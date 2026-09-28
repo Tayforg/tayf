@@ -438,6 +438,10 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // BIAS_TO_ZONE (not a CASE), so parseZoneCase can't read it; it is
       // pinned by tests/migrations/071-blindspot-recall-veto.test.ts.
       "071_blindspot_recall_veto.sql",
+      // 077's ops_health_report() carries an eighth VALUES-list copy of
+      // BIAS_TO_ZONE (same shape as 071's), so parseZoneCase can't read it
+      // either; it is pinned by tests/migrations/077-ops-health-report.test.ts.
+      "077_ops_health_report.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
