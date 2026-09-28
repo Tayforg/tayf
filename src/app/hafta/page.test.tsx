@@ -26,6 +26,24 @@ type Summary = {
   }>;
 };
 
+type WordsResult =
+  | null
+  | { status: "insufficient"; sample: Record<string, number> }
+  | {
+      status: "ok";
+      sample: Record<string, number>;
+      zones: Record<
+        string,
+        Array<{
+          term: string;
+          display: string;
+          count: number;
+          z: number;
+          example: { title: string; url: string | null; sourceName: string } | null;
+        }>
+      >;
+    };
+
 const mocks = vi.hoisted(() => ({
   clusters: null as unknown[] | null,
   labelChanges: null as
@@ -48,6 +66,7 @@ const mocks = vi.hoisted(() => ({
     { delivering: number; total: number; degraded: boolean }
   > | null,
   feedStatus: null as { delivering: number; total: number } | null,
+  words: null as WordsResult,
 }));
 
 vi.mock("@/lib/weekly/weekly-query", () => ({
@@ -69,6 +88,10 @@ vi.mock("@/lib/clusters/feed-health", () => ({
 
 vi.mock("@/lib/sources/feed-status", () => ({
   getFeedStatusSummary: () => Promise.resolve(mocks.feedStatus),
+}));
+
+vi.mock("@/lib/weekly/distinctive-words-query", () => ({
+  getWeeklyDistinctiveWords: () => Promise.resolve(mocks.words),
 }));
 
 import WeeklyPage, { metadata } from "./page";
@@ -183,6 +206,53 @@ beforeEach(() => {
     muhalefet: zone(15, 20),
   };
   mocks.feedStatus = { delivering: 72, total: 113 };
+  mocks.words = {
+    status: "ok",
+    sample: { iktidar: 280, bagimsiz: 245, muhalefet: 260 },
+    zones: {
+      iktidar: [
+        {
+          term: "gözaltı",
+          display: "gözaltı",
+          count: 42,
+          z: 4.6789,
+          example: {
+            title: "Örnek başlık iktidar",
+            url: "https://example.com/iktidar-1",
+            sourceName: "Örnek Gazete",
+          },
+        },
+        {
+          term: "ekonomi paketi",
+          display: "Ekonomi paketi",
+          count: 30,
+          z: 3.2,
+          example: null,
+        },
+      ],
+      bagimsiz: [],
+      muhalefet: [
+        {
+          term: "yolsuzluk",
+          display: "yolsuzluk",
+          count: 55,
+          z: 5.1234,
+          example: {
+            title: "Örnek başlık muhalefet",
+            url: "https://example.com/muhalefet-1",
+            sourceName: "Muhalif Gazete",
+          },
+        },
+        {
+          term: "skandal",
+          display: "skandal",
+          count: 20,
+          z: 2.0,
+          example: null,
+        },
+      ],
+    },
+  };
 });
 
 describe("metadata", () => {
@@ -199,16 +269,17 @@ describe("metadata", () => {
 });
 
 describe("WeeklyPage — data present", () => {
-  it("renders all five section headings", async () => {
+  it("renders all six section headings", async () => {
     const tree = await WeeklyPage();
     const headings = collectTag(tree, "h2");
 
     expect(headings).toContain("Bu hafta kim neyi öne çıkardı");
     expect(headings).toContain("En geniş yelpaze");
     expect(headings).toContain("Kör noktalar");
+    expect(headings).toContain("Aynı hafta, farklı kelimeler");
     expect(headings).toContain("Sessiz kaynaklar");
     expect(headings).toContain("Etiket değişiklikleri");
-    expect(headings).toHaveLength(5);
+    expect(headings).toHaveLength(6);
   });
 
   it("states each zone's percentage against the week's article total", async () => {
@@ -434,5 +505,89 @@ describe("WeeklyPage — empty and unavailable states", () => {
     expect(text).toContain("Haftanın yelpazesi");
     expect(text).toContain("Örnek Gazete");
     expect(headings).toContain("Etiket değişiklikleri");
+  });
+});
+
+const BANNED_WORDS = ["taraflı", "yanlı", "propaganda", "manipülasyon", "çarpıtma"];
+
+describe("WeeklyPage — Aynı hafta, farklı kelimeler", () => {
+  it("renders the zone caption, a term, 'başlık' and a tr-TR formatted z", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain(
+      "Bu hafta İktidar medyasında belirgin şekilde daha sık geçen kelimeler",
+    );
+    expect(text).toContain("gözaltı");
+    expect(text).toContain("başlık");
+    expect(text).toContain("z 4,7");
+  });
+
+  it("renders the example line with the title and source name", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain("Örnek başlık iktidar");
+    expect(text).toContain("Örnek Gazete");
+  });
+
+  it("renders every example href as http(s)", async () => {
+    const hrefs = collectHrefs(await WeeklyPage());
+    const exampleHrefs = hrefs.filter((h) => h.includes("example.com"));
+
+    expect(exampleHrefs.length).toBeGreaterThan(0);
+    for (const href of exampleHrefs) {
+      expect(href).toMatch(/^https?:\/\//i);
+    }
+  });
+
+  it("renders the footnote with the real sample counts", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain("İktidar 280");
+    expect(text).toContain("Bağımsız 245");
+    expect(text).toContain("Muhalefet 260 başlık");
+  });
+
+  it("renders the empty-zone copy for a zone with no distinctive terms", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain("Bu hafta belirgin şekilde öne çıkan kelime yok.");
+  });
+
+  it("renders the unavailable copy when data is null", async () => {
+    mocks.words = null;
+
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain("Kelime karşılaştırması şu anda hesaplanamıyor.");
+  });
+
+  it("renders the insufficient copy when status is 'insufficient'", async () => {
+    mocks.words = {
+      status: "insufficient",
+      sample: { iktidar: 280, bagimsiz: 150, muhalefet: 260 },
+    };
+
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain("Bu hafta kelime karşılaştırması için yeterli başlık yok.");
+  });
+
+  it("still renders the section when clusters === null", async () => {
+    mocks.clusters = null;
+
+    const tree = await WeeklyPage();
+    const text = collectText(tree).join(" ");
+    const headings = collectTag(tree, "h2");
+
+    expect(headings).toContain("Aynı hafta, farklı kelimeler");
+    expect(text).toContain("gözaltı");
+  });
+
+  it("never renders any of the banned bias-claim words", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    for (const word of BANNED_WORDS) {
+      expect(text.toLocaleLowerCase("tr")).not.toContain(word);
+    }
   });
 });

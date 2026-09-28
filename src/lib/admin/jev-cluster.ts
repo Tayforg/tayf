@@ -1,4 +1,11 @@
 import { createServerClient } from "@/lib/supabase/server";
+import {
+  isJevUnlinkBand,
+  summariseDryRun,
+  JEV_UNLINK_DRYRUN_READ_LIMIT,
+  type JevUnlinkBand,
+  type JevUnlinkDryRunSummary,
+} from "@/lib/admin/jev-unlink-triage";
 
 // Pack A ("Jev canlı küme", migration 064) — the /admin readers/writers for
 // two of the three P3/P5 mechanisms: the outlier-ejection queue
@@ -39,6 +46,21 @@ export interface JevUnlinkCandidateView {
   clusterTitle: string;
   articleTitle: string;
   sourceSlug: string | null;
+  /** Migration 075. Optional so attention.ts and any view-building fixture
+   * that predates the triage columns keep compiling. */
+  titleJaccard?: number | null;
+  /** Migration 075. Optional for the same reason as titleJaccard. */
+  band?: JevUnlinkBand | null;
+}
+
+/** Migration 075: band counts + the dry-run summary for /admin's triage UI. */
+export interface JevUnlinkTriageView {
+  bands: {
+    likelyUnlink: number;
+    review: number;
+    untriaged: number;
+  };
+  dryRun: JevUnlinkDryRunSummary;
 }
 
 export interface JevBlindspotSuspectView {
@@ -55,7 +77,7 @@ export interface JevBlindspotSuspectView {
 }
 
 const JEV_UNLINK_SELECT =
-  "id, cluster_id, article_id, jev_prob, created_at, " +
+  "id, cluster_id, article_id, jev_prob, created_at, title_jaccard, band, " +
   "cluster:clusters ( title_tr, title_tr_neutral ), " +
   "article:articles ( title, source:sources ( slug ) )";
 
@@ -111,8 +133,19 @@ interface RawUnlinkRow {
   article_id?: unknown;
   jev_prob?: unknown;
   created_at?: unknown;
+  title_jaccard?: unknown;
+  band?: unknown;
   cluster?: Embed<TitleRow>;
   article?: Embed<ArticleEmbed>;
+}
+
+// A7 lesson (see unlinkClusterArticle below): Number(null) is 0, not NaN, so
+// null/undefined must be rejected before the Number.isFinite guard or a
+// genuinely missing title_jaccard silently becomes 0.
+function toFiniteNumberOrNull(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
 }
 
 function toUnlinkView(row: RawUnlinkRow): JevUnlinkCandidateView {
@@ -127,6 +160,8 @@ function toUnlinkView(row: RawUnlinkRow): JevUnlinkCandidateView {
     clusterTitle: preferredTitle(one(row.cluster)),
     articleTitle: article ? asString(article.title) : "",
     sourceSlug: sourceSlugOf(article),
+    titleJaccard: toFiniteNumberOrNull(row.title_jaccard),
+    band: isJevUnlinkBand(row.band) ? row.band : null,
   };
 }
 
@@ -142,6 +177,10 @@ export async function getJevUnlinkCandidates(): Promise<JevUnlinkCandidateView[]
       .from("jev_unlink_candidates")
       .select(JEV_UNLINK_SELECT)
       .eq("status", "pending")
+      // Migration 075: 'likely_unlink' sorts before 'review' alphabetically
+      // (nullsFirst: false keeps untriaged/null rows last, not first), then
+      // lowest jev_prob (most suspicious) first within a band.
+      .order("band", { ascending: true, nullsFirst: false })
       .order("jev_prob", { ascending: true })
       .limit(JEV_UNLINK_LIMIT);
 
@@ -390,6 +429,112 @@ export async function keepClusterArticle(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[admin] jev keep failed: ${message}`);
+    return { ok: false, reason: "error" };
+  }
+}
+
+interface RawDryRunEmbedRow {
+  candidate_id?: unknown;
+  jev_prob?: unknown;
+  title_jaccard?: unknown;
+  cluster_size?: unknown;
+  would_unlink?: unknown;
+  skip_reasons?: unknown;
+  first_evaluated_at?: unknown;
+  candidate?: unknown;
+}
+
+/**
+ * Band counts + the dry-run auto-unlink evaluation (migration 075) for
+ * /admin's "Otomatik ayırma provası" block. Two independent reads: three
+ * head-count queries over jev_unlink_candidates, and one read of
+ * jev_unlink_dryrun with its candidate/article/cluster embed. Never throws
+ * — see the module docblock.
+ */
+export async function getJevUnlinkTriage(): Promise<JevUnlinkTriageView | null> {
+  try {
+    const supabase = createServerClient();
+
+    const [likelyRes, reviewRes, untriagedRes, dryRunRes] = await Promise.all([
+      supabase
+        .from("jev_unlink_candidates")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending")
+        .eq("band", "likely_unlink"),
+      supabase
+        .from("jev_unlink_candidates")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending")
+        .eq("band", "review"),
+      supabase
+        .from("jev_unlink_candidates")
+        .select("id", { count: "exact", head: true })
+        .eq("status", "pending")
+        .is("band", null),
+      supabase
+        .from("jev_unlink_dryrun")
+        .select(
+          "candidate_id, jev_prob, title_jaccard, cluster_size, would_unlink, skip_reasons, first_evaluated_at, " +
+            "candidate:jev_unlink_candidates ( status, article:articles ( title ), cluster:clusters ( title_tr, title_tr_neutral ) )",
+        )
+        .order("first_evaluated_at", { ascending: false })
+        .limit(JEV_UNLINK_DRYRUN_READ_LIMIT),
+    ]);
+
+    for (const res of [likelyRes, reviewRes, untriagedRes, dryRunRes]) {
+      if (res.error) {
+        console.error(`[admin] jev unlink triage unavailable: ${res.error.message}`);
+        return null;
+      }
+    }
+
+    const rows = Array.isArray(dryRunRes.data) ? (dryRunRes.data as RawDryRunEmbedRow[]) : [];
+
+    return {
+      bands: {
+        likelyUnlink: likelyRes.count ?? 0,
+        review: reviewRes.count ?? 0,
+        untriaged: untriagedRes.count ?? 0,
+      },
+      dryRun: summariseDryRun(rows),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[admin] jev unlink triage unavailable: ${message}`);
+    return null;
+  }
+}
+
+/**
+ * Bulk "Kalsın": marks up to JEV_UNLINK_BULK_MAX pending candidates kept,
+ * restricted server-side to band 'review' (migration 075's boundary — a
+ * 'likely_unlink' row always requires a one-by-one decision). No RPC call,
+ * no revalidation — nothing reader-facing changed. Never throws.
+ */
+export async function keepClusterArticles(
+  ids: number[],
+): Promise<{ ok: true; kept: number; skipped: number } | { ok: false; reason: "error" }> {
+  try {
+    const supabase = createServerClient();
+
+    const { data, error } = await supabase
+      .from("jev_unlink_candidates")
+      .update({ status: "kept", decided_at: new Date().toISOString() })
+      .in("id", ids)
+      .eq("status", "pending")
+      .eq("band", "review")
+      .select("id");
+
+    if (error) {
+      console.error(`[admin] jev bulk keep failed: ${error.message}`);
+      return { ok: false, reason: "error" };
+    }
+
+    const kept = Array.isArray(data) ? data.length : 0;
+    return { ok: true, kept, skipped: ids.length - kept };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[admin] jev bulk keep failed: ${message}`);
     return { ok: false, reason: "error" };
   }
 }
