@@ -7,7 +7,7 @@ import type {
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { BLINDSPOT } from "@/lib/bias/config";
-import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import { attemptCached } from "@/lib/cache-resilience";
 import {
   dedupeBySource,
   passesFeedFilters,
@@ -304,8 +304,6 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
   return { bundles: bundles.slice(0, DISPLAY_LIMIT) };
 }
 
-const BLINDSPOTS_FALLBACK: { bundles: BlindspotBundle[] } = { bundles: [] };
-
 // Build-safety: `attemptCached` swallows whatever `fetchBlindspots` throws
 // instead of letting it cross the `"use cache: remote"` boundary — a throw
 // here fails `next build`'s prerender even when every caller catches (see
@@ -319,15 +317,15 @@ async function getBlindspotsCached() {
 
 // Public cached entry point. The /blindspots page and the weekly digest
 // cron both call this identical signature — the cache layer is invisible
-// from the call site. On a cache-attempt failure this retries the query
-// live once before falling back to `{ bundles: [] }`; never throws.
+// from the call site. Still THROWS on failure (unchanged contract): the
+// digest cron, the social cron and rss/[topic] depend on that — they each
+// catch it themselves. On a cache-attempt failure this retries the query
+// live once (bypassing the cache boundary, never memoising a failure)
+// before letting a genuine, still-failing outage propagate as a throw.
 export async function getBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
-  return resolveCachedOrRetry(
-    "blindspots-query",
-    getBlindspotsCached,
-    fetchBlindspots,
-    BLINDSPOTS_FALLBACK,
-  );
+  const attempt = await getBlindspotsCached();
+  if (attempt.ok) return attempt.data;
+  return fetchBlindspots();
 }
 
 export type BlindspotsResult =

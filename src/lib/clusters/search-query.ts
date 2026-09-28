@@ -1,6 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
-import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import { turkishQueryVariants } from "./turkish-query";
 import { getZoneFeedHealth } from "./feed-health";
