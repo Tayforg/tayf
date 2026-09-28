@@ -9,6 +9,7 @@ import type {
 import type { BiasDistribution, Source } from "@/types";
 import { FramingComparison } from "@/components/story/framing-comparison";
 import { MediaDna } from "@/components/story/media-dna";
+import { StoryTimeline } from "@/components/story/story-timeline";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -41,6 +42,22 @@ vi.mock("@/lib/clusters/cluster-detail-query", async (importOriginal) => {
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
 }));
+// Story timeline ("Kim önce yazdı?"): the created_at lookup and the per-zone
+// feed health are both Supabase-backed — mocked so the page never reaches a
+// real client. Defaults (null = unknown/fail-open) are set in beforeEach.
+const getMemberSeenAt = vi.fn();
+vi.mock("@/lib/clusters/story-timeline-query", () => ({
+  getMemberSeenAt: (...args: unknown[]) => getMemberSeenAt(...args),
+}));
+const getZoneFeedHealth = vi.fn();
+vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/clusters/feed-health")>();
+  return {
+    ...actual,
+    getZoneFeedHealth: (...args: unknown[]) => getZoneFeedHealth(...args),
+  };
+});
 
 import ClusterDetailPage, { generateMetadata } from "./page";
 
@@ -303,6 +320,10 @@ const ORIGINAL_SITE_URL_ENV = process.env.NEXT_PUBLIC_SITE_URL;
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+  getMemberSeenAt.mockReset();
+  getMemberSeenAt.mockResolvedValue(null);
+  getZoneFeedHealth.mockReset();
+  getZoneFeedHealth.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -354,6 +375,7 @@ describe("ClusterDetailPage — source-kind UI", () => {
         memberCount: 3,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -394,6 +416,7 @@ describe("ClusterDetailPage — source-kind UI", () => {
         memberCount: 1,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -446,6 +469,7 @@ describe("ClusterDetailPage — source-kind UI", () => {
         memberCount: 2,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -479,6 +503,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         memberCount: 1,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -517,6 +542,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         memberCount: 1,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -552,6 +578,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         memberCount: 1,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -586,6 +613,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         memberCount: 1,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -639,6 +667,7 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         memberCount: 2,
       },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
 
     getClusterDetail.mockResolvedValue(detail);
@@ -667,6 +696,7 @@ describe("generateMetadata — seo-3 archived noindex", () => {
       allSources: [source],
       wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
     getClusterDetail.mockResolvedValue(detail);
 
@@ -683,6 +713,7 @@ describe("generateMetadata — seo-3 archived noindex", () => {
       allSources: [source],
       wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
     getClusterDetail.mockResolvedValue(detail);
 
@@ -705,6 +736,7 @@ describe("ClusterDetailPage — title provenance label (tests-2)", () => {
       allSources: [source],
       wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
     getClusterDetail.mockResolvedValue(detail);
 
@@ -728,6 +760,7 @@ describe("ClusterDetailPage — title provenance label (tests-2)", () => {
       allSources: [source],
       wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
     getClusterDetail.mockResolvedValue(detail);
 
@@ -774,6 +807,7 @@ describe("ClusterDetailPage — heading outline (react-1)", () => {
       allSources: [outlet, aggregator],
       wire: { isWireRedistribution: false, effectiveArticleCount: 2, memberCount: 2 },
       blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
     };
     getClusterDetail.mockResolvedValue(detail);
 
@@ -787,5 +821,137 @@ describe("ClusterDetailPage — heading outline (react-1)", () => {
       if (h === "h2") sawH2 = true;
       if (h === "h3") expect(sawH2).toBe(true);
     }
+  });
+});
+
+/** First element of the given component type in the tree, or null. */
+function findElementOfType(
+  node: unknown,
+  type: unknown,
+): { props: Record<string, unknown> } | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElementOfType(child, type);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: { children?: ReactNode } };
+    if (el.type === type) return el as { props: Record<string, unknown> };
+    if (el.props?.children !== undefined) return findElementOfType(el.props.children, type);
+  }
+  return null;
+}
+
+describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
+  function detailFor(members: ClusterDetailMember[]): ClusterDetail {
+    const distribution = emptyDistribution();
+    for (const m of members) distribution[m.source.bias] += 1;
+    return {
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members,
+      allSources: members.map((m) => m.source),
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: members.length,
+        memberCount: members.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  const sabah = makeSource({ id: "s-sabah", name: "Sabah", bias: "pro_government", kind: "outlet" });
+  const cnn = makeSource({ id: "s-cnn", name: "CNN Türk", bias: "gov_leaning", kind: "outlet" });
+  const sozcu = makeSource({ id: "s-sozcu", name: "Sözcü", bias: "opposition_leaning", kind: "outlet" });
+  const karar = makeSource({ id: "s-karar", name: "Karar", bias: "center", kind: "outlet" });
+  const aggregator = makeSource({
+    id: "s-agg",
+    name: "Haberler.com",
+    bias: "center",
+    kind: "aggregator",
+  });
+
+  it("renders the timeline for a 3-source cluster, clamping a future pubDate to created_at", async () => {
+    getClusterDetail.mockResolvedValue(
+      detailFor([
+        makeMember("a-sabah", sabah, "2026-09-27T06:12:00.000Z"),
+        // CNN Türk-style future pubDate; Tayf saw it at 06:05Z.
+        makeMember("a-cnn", cnn, "2026-09-27T09:00:00.000Z"),
+        makeMember("a-sozcu", sozcu, "2026-09-27T08:22:00.000Z"),
+        // Aggregators never vote — must not count toward bağımsız coverage.
+        makeMember("a-agg", aggregator, "2026-09-27T06:00:00.000Z"),
+      ]),
+    );
+    getMemberSeenAt.mockResolvedValue({ "a-cnn": "2026-09-27T06:05:00.000Z" });
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, StoryTimeline);
+    expect(el).not.toBeNull();
+    expect(getMemberSeenAt).toHaveBeenCalledWith("c1");
+    // bağımsız has no voting member → health is consulted for the wording.
+    expect(getZoneFeedHealth).toHaveBeenCalledTimes(1);
+
+    const html = renderToStaticMarkup(
+      el as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(html).toContain("Kim önce yazdı?");
+    expect(html).toContain(
+      "İlk: CNN Türk · 09:05 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet 2 sa 17 dk sonra katıldı",
+    );
+    expect(html).toContain("Tüm sıra (3 kaynak)");
+    expect(html).not.toContain("Haberler.com");
+    // Acceptance criterion 3: never a claim of silence.
+    expect(html).not.toMatch(/yazmad/);
+    expect(collectText(tree).join("")).not.toMatch(/yazmad/);
+  });
+
+  it("skips the feed-health lookup when every zone has a member", async () => {
+    getClusterDetail.mockResolvedValue(
+      detailFor([
+        makeMember("a-sabah", sabah, "2026-09-27T06:12:00.000Z"),
+        makeMember("a-karar", karar, "2026-09-27T06:40:00.000Z"),
+        makeMember("a-sozcu", sozcu, "2026-09-27T08:22:00.000Z"),
+      ]),
+    );
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(hasElementOfType(tree, StoryTimeline)).toBe(true);
+    expect(getZoneFeedHealth).not.toHaveBeenCalled();
+  });
+
+  it("omits the timeline (and both lookups) for a 2-source cluster", async () => {
+    getClusterDetail.mockResolvedValue(
+      detailFor([
+        makeMember("a-sabah", sabah, "2026-09-27T06:12:00.000Z"),
+        makeMember("a-sozcu", sozcu, "2026-09-27T08:22:00.000Z"),
+        makeMember("a-agg", aggregator, "2026-09-27T06:00:00.000Z"),
+      ]),
+    );
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(hasElementOfType(tree, StoryTimeline)).toBe(false);
+    expect(collectText(tree).join("")).not.toContain("Kim önce yazdı");
+    expect(getMemberSeenAt).not.toHaveBeenCalled();
+    expect(getZoneFeedHealth).not.toHaveBeenCalled();
+  });
+
+  it("still renders from published times when the created_at lookup fails open", async () => {
+    getClusterDetail.mockResolvedValue(
+      detailFor([
+        makeMember("a-sabah", sabah, "2026-09-27T06:12:00.000Z"),
+        makeMember("a-karar", karar, "2026-09-27T06:40:00.000Z"),
+        makeMember("a-sozcu", sozcu, "2026-09-27T08:22:00.000Z"),
+      ]),
+    );
+    getMemberSeenAt.mockResolvedValue(null);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, StoryTimeline);
+    const timeline = el?.props.timeline as { summary: string } | undefined;
+    expect(timeline?.summary).toBe(
+      "İlk: Sabah · 09:12 — Bağımsız 28 dk sonra katıldı — Muhalefet 2 sa 10 dk sonra katıldı",
+    );
   });
 });

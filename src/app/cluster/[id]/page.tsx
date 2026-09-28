@@ -15,6 +15,7 @@ import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { SourceChips } from "@/components/source/source-chips";
 import { SourceBadge } from "@/components/story/source-badge";
 import { OwnershipLine } from "@/components/story/ownership-line";
+import { StoryTimeline } from "@/components/story/story-timeline";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import {
   detectCrossSpectrum,
@@ -29,7 +30,17 @@ import {
   isFramingReceiptPublic,
   shouldShowPublicFramingReceipt,
 } from "@/lib/clusters/framing-receipt";
+import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { buildShareText } from "@/lib/clusters/share";
+import {
+  buildStoryTimeline,
+  missingZones,
+  STORY_TIMELINE_MIN_SOURCES,
+  timelineMembersFrom,
+  votingSourceCount,
+  type StoryTimeline as StoryTimelineData,
+} from "@/lib/clusters/story-timeline";
+import { getMemberSeenAt } from "@/lib/clusters/story-timeline-query";
 import {
   describeForMeta,
   summaryAttribution,
@@ -39,6 +50,25 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { serializeJsonLd } from "@/lib/seo/json-ld";
 import { siteUrl } from "@/lib/site-url";
+
+/**
+ * "Kim önce yazdı?" data. Both lookups are skipped below the 3-source floor,
+ * and feed health (only used to word an absent zone) is skipped when every
+ * zone has a member. Both fail open to null — a missing created_at map just
+ * means published times are used as-is.
+ */
+async function loadStoryTimeline(
+  clusterId: string,
+  votingMembers: Parameters<typeof timelineMembersFrom>[0],
+): Promise<StoryTimelineData | null> {
+  const members = timelineMembersFrom(votingMembers);
+  if (votingSourceCount(members) < STORY_TIMELINE_MIN_SOURCES) return null;
+  const [seenAt, health] = await Promise.all([
+    getMemberSeenAt(clusterId),
+    missingZones(members).length > 0 ? getZoneFeedHealth() : Promise.resolve(null),
+  ]);
+  return buildStoryTimeline(members, seenAt, health);
+}
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise and must be awaited.
@@ -273,6 +303,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     ? await getCachedClusterFramingReceipt(id)
     : null;
 
+  // "Kim önce yazdı?" — per-story first-mover timeline, voting members only
+  // (an aggregator reposting first must not read as a zone "joining").
+  const storyTimeline = await loadStoryTimeline(id, votingMembers);
+
   // Schema.org NewsArticle structured data. Lets Google surface the
   // cluster in news-rich results and gives social previews a clean
   // headline/date/image triple. Authors are listed as the source
@@ -452,6 +486,8 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 <p className="mt-1.5 text-[11px] text-muted-foreground">{spectrumCaption}</p>
               )}
             </div>
+
+            {storyTimeline && <StoryTimeline timeline={storyTimeline} />}
 
             <OwnershipLine members={members} />
 
