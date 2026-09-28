@@ -34,6 +34,11 @@ import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
 import { canonicalizeUrl, normalizeArticles } from "../_shared/rss/normalize.ts";
+import {
+  isQuarantined,
+  nextQuarantineState,
+  QUARANTINE_AFTER_FAILURES,
+} from "../_shared/rss/quarantine.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
@@ -47,6 +52,14 @@ await initSentry("ingest");
 const FETCH_TIMEOUT_MS = 10_000;
 const FETCH_CONCURRENCY = 16;
 const UPSERT_BATCH = 500;
+// Rows-per-chunk cap for `dropExistingSourceContentHashRows`'s
+// (source_id, content_hash) lookup -- same bound as `TITLE_LOOKUP_BATCH`
+// below, for the same reason: a single `.in(...)` over hundreds of hashes
+// x source ids produces a query string that silently degrades ("drop
+// nothing") once it's long enough to trip a proxy's request-line limit
+// (ingest-fixes / migration 074 evidence: ~25 KB for 500 hashes x 118
+// source ids observed in production).
+const PREFILTER_CHUNK = 100;
 // Wall-clock safety. Edge Functions allow ≤400 s; we cap well below so a
 // pathological tail can't push us past the slot. The Vercel cron retries
 // every 3 min so partial progress is harmless. The fetch pool gets the
@@ -83,6 +96,8 @@ interface SourceRow extends RssSource {
   fetch_body_hash: string | null;
   fetch_last_status: number | null;
   fetch_last_at: string | null;
+  fetch_fail_streak: number | null;
+  fetch_quarantined_until: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +164,18 @@ interface CycleStats {
   // discipline as `dedupedInBatch` above -- this is collection-only
   // telemetry, nothing here is published anywhere.
   titleVersions: number;
+  // Sources skipped this cycle because they're still inside their
+  // quarantine backoff window (migration 074) -- never reached the fetch
+  // pool at all.
+  quarantined: number;
+  // Chunk failures from the (source_id, content_hash) pre-filter lookup
+  // (`dropExistingSourceContentHashRows`) -- a failing chunk degrades only
+  // itself (its rows are kept, not dropped) and increments this counter.
+  // Persisted on `ingest_cycles.prefilter_errors` (migration 074).
+  prefilterErrors: number;
+  // Outlet headline write-backs applied via the `apply_article_title_edits`
+  // RPC this cycle (migration 074, decision (b): write-back at ingest).
+  titleWriteBacks: number;
   durationMs: number;
 }
 
@@ -202,11 +229,16 @@ export function dedupeBySourceContentHash<
 // cross product), so the exact-pair check happens client-side against the
 // returned rows; a lookup failure degrades to "don't drop anything" and
 // lets the pre-existing per-row fallback catch the 23505 as before.
-async function dropExistingSourceContentHashRows(
+// Looks up one PREFILTER_CHUNK-sized slice of `rows`' (source_id,
+// content_hash) pairs against `articles`. A failing lookup degrades ONLY
+// this slice -- its rows are kept (not dropped) and the caller's
+// `lookupErrors` counter is incremented -- so one bad chunk can never mask
+// or block the rest of the pre-filter (migration 074 §4).
+async function dropExistingSourceContentHashRowsChunk(
   supabase: ReturnType<typeof createServiceClient>,
   rows: readonly IngestArticleRow[],
-): Promise<{ rows: IngestArticleRow[]; dropped: number }> {
-  if (rows.length === 0) return { rows: [], dropped: 0 };
+): Promise<{ rows: IngestArticleRow[]; dropped: number; lookupErrors: number }> {
+  if (rows.length === 0) return { rows: [], dropped: 0, lookupErrors: 0 };
   const sourceIds = [...new Set(rows.map((r) => r.source_id))];
   const hashes = [...new Set(rows.map((r) => r.content_hash))];
 
@@ -219,14 +251,14 @@ async function dropExistingSourceContentHashRows(
       .in("content_hash", hashes);
     if (error) {
       console.error(`[ingest] existing (source_id, content_hash) lookup failed: ${error.message}`);
-      return { rows: [...rows], dropped: 0 };
+      return { rows: [...rows], dropped: 0, lookupErrors: 1 };
     }
     existingPairs = (data ?? []) as Array<{ source_id: string; content_hash: string }>;
   } catch (err) {
     console.error("[ingest] existing (source_id, content_hash) lookup threw", err);
-    return { rows: [...rows], dropped: 0 };
+    return { rows: [...rows], dropped: 0, lookupErrors: 1 };
   }
-  if (existingPairs.length === 0) return { rows: [...rows], dropped: 0 };
+  if (existingPairs.length === 0) return { rows: [...rows], dropped: 0, lookupErrors: 0 };
 
   const existingKeys = new Set(
     existingPairs.map((r) => `${r.source_id}\x1f${r.content_hash}`),
@@ -240,7 +272,30 @@ async function dropExistingSourceContentHashRows(
     }
     out.push(row);
   }
-  return { rows: out, dropped };
+  return { rows: out, dropped, lookupErrors: 0 };
+}
+
+// Chunks `rows` by `PREFILTER_CHUNK` (migration 074 §4 -- was previously ONE
+// `.in()` call over the whole batch, up to 500 rows x 118 source ids
+// (~25 KB of query string), which silently degraded to "drop nothing" once
+// a proxy's request-line limit was tripped). Each chunk queries only its own
+// distinct source ids / hashes; a failing chunk degrades only itself.
+async function dropExistingSourceContentHashRows(
+  supabase: ReturnType<typeof createServiceClient>,
+  rows: readonly IngestArticleRow[],
+): Promise<{ rows: IngestArticleRow[]; dropped: number; lookupErrors: number }> {
+  if (rows.length === 0) return { rows: [], dropped: 0, lookupErrors: 0 };
+  const out: IngestArticleRow[] = [];
+  let dropped = 0;
+  let lookupErrors = 0;
+  for (let i = 0; i < rows.length; i += PREFILTER_CHUNK) {
+    const slice = rows.slice(i, i + PREFILTER_CHUNK);
+    const result = await dropExistingSourceContentHashRowsChunk(supabase, slice);
+    out.push(...result.rows);
+    dropped += result.dropped;
+    lookupErrors += result.lookupErrors;
+  }
+  return { rows: out, dropped, lookupErrors };
 }
 
 // ---------------------------------------------------------------------------
@@ -278,12 +333,52 @@ async function dropExistingSourceContentHashRows(
 // the end stays bounded to this chunk's urls either way.
 const TITLE_LOOKUP_BATCH = 100;
 
+export interface RecordTitleVersionsResult {
+  titleVersions: number;
+  // Outlet headline write-backs applied this chunk via the
+  // `apply_article_title_edits` RPC (migration 074, decision (b)). Runs
+  // INDEPENDENTLY of whether the version upsert above inserted anything --
+  // it covers the A->B->A oscillation case too, since the ledger dedupes on
+  // (article_id, new_title_hash) but the outlet's CURRENT headline still
+  // needs writing back every time it changes.
+  titleWriteBacks: number;
+}
+
+// Applies the write-back RPC for one chunk's full-title edits. FULL,
+// unclamped titles, same-source only -- the word-Jaccard >= 0.2 eligibility
+// gate lives ONLY in SQL (`apply_article_title_edits`), so every same-source
+// title change is sent here; the DB decides whether it's a real edit or
+// URL-reuse-onto-a-different-story. Never throws: any RPC failure is logged
+// and swallowed, exactly like every other helper in this file.
+async function applyHeadlineWriteBack(
+  supabase: ReturnType<typeof createServiceClient>,
+  edits: ReadonlyArray<{ article_id: string; old_title: string; new_title: string }>,
+): Promise<number> {
+  if (edits.length === 0) return 0;
+  try {
+    const { data, error } = await supabase.rpc("apply_article_title_edits", {
+      p_rows: edits,
+    });
+    if (error) {
+      console.error(`[ingest] headline write-back failed: ${error.message}`);
+      return 0;
+    }
+    return typeof data === "number" ? data : 0;
+  } catch (err) {
+    console.error(
+      `[ingest] headline write-back failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return 0;
+  }
+}
+
 export async function recordTitleVersions(
   supabase: ReturnType<typeof createServiceClient>,
   chunk: readonly IngestArticleRow[],
-): Promise<number> {
+): Promise<RecordTitleVersionsResult> {
+  const empty: RecordTitleVersionsResult = { titleVersions: 0, titleWriteBacks: 0 };
   try {
-    if (chunk.length === 0) return 0;
+    if (chunk.length === 0) return empty;
 
     const urls = chunk.map((row) => row.url);
     const stored = new Map<
@@ -297,7 +392,7 @@ export async function recordTitleVersions(
         .in("url", urls.slice(j, j + TITLE_LOOKUP_BATCH));
       if (error) {
         console.error(`[ingest] title-version lookup failed: ${error.message}`);
-        return 0;
+        return empty;
       }
       for (const row of (data ?? []) as Array<{
         id: string;
@@ -323,6 +418,11 @@ export async function recordTitleVersions(
       old_title: string;
       new_title: string;
     }> = [];
+    // FULL, unclamped titles -- fed to `applyHeadlineWriteBack` below.
+    // Same detection loop as `versions` (same rows qualify: same-source,
+    // trim-only-differs-doesn't-count), just without the 500-char clamp
+    // `article_title_versions.old_title`/`new_title` apply.
+    const edits: Array<{ article_id: string; old_title: string; new_title: string }> = [];
     for (const row of chunk) {
       const existing = stored.get(row.url);
       if (!existing) continue;
@@ -339,6 +439,11 @@ export async function recordTitleVersions(
         old_title: existing.title.slice(0, 500),
         new_title: row.title.slice(0, 500),
       });
+      edits.push({
+        article_id: existing.id,
+        old_title: existing.title,
+        new_title: row.title,
+      });
     }
     if (crossSourceCollisions > 0) {
       console.warn(
@@ -346,26 +451,32 @@ export async function recordTitleVersions(
       );
     }
 
-    if (versions.length === 0) return 0;
+    if (versions.length === 0) return empty;
 
     // `ignoreDuplicates: true` against the (article_id, new_title_hash)
     // unique index (migration 056) means a headline that stays changed
     // across multiple 3-minute cycles is recorded once, not every cycle.
-    const { data: insertedRows, error: insertError } = await supabase
-      .from("article_title_versions")
-      .upsert(versions, {
-        onConflict: "article_id,new_title_hash",
-        ignoreDuplicates: true,
-      })
-      .select("id");
+    // Run in parallel with the write-back RPC below -- the two are
+    // independent (one is a ledger insert, the other mutates `articles`/
+    // `clusters`), and running them serially would only cost wall clock.
+    const [{ data: insertedRows, error: insertError }, titleWriteBacks] = await Promise.all([
+      supabase
+        .from("article_title_versions")
+        .upsert(versions, {
+          onConflict: "article_id,new_title_hash",
+          ignoreDuplicates: true,
+        })
+        .select("id"),
+      applyHeadlineWriteBack(supabase, edits),
+    ]);
     if (insertError) {
       console.error(`[ingest] title-version insert failed: ${insertError.message}`);
-      return 0;
+      return { titleVersions: 0, titleWriteBacks };
     }
-    return insertedRows?.length ?? 0;
+    return { titleVersions: insertedRows?.length ?? 0, titleWriteBacks };
   } catch (err) {
     console.error("[ingest] title-version recording threw", err);
-    return 0;
+    return empty;
   }
 }
 
@@ -379,6 +490,8 @@ interface SourceFetchState {
   fetch_body_hash: string | null;
   fetch_last_status: number;
   fetch_last_at: string;
+  fetch_fail_streak: number;
+  fetch_quarantined_until: string | null;
 }
 
 // Builds the row to persist for one attempted source this cycle. `fresh`
@@ -386,17 +499,24 @@ interface SourceFetchState {
 // error, non-2xx, 304) keeps the source's existing etag/lastModified/
 // bodyHash untouched and only bumps status + timestamp -- there is nothing
 // new to remember when the wire didn't hand us a body.
+// `ok` drives `nextQuarantineState` (migration 074): a parsed 2xx or a
+// 304/body-hash "not modified" resets the streak; any `result.error`
+// (including a 2xx that failed to parse) advances it and, past
+// `QUARANTINE_AFTER_FAILURES`, sets an escalating `fetch_quarantined_until`.
 function buildFetchStateUpdate(
   source: SourceRow,
   status: number,
+  ok: boolean,
   fresh?: { etag: string | null; lastModified: string | null; bodyHash: string | null },
 ): SourceFetchState {
+  const quarantine = nextQuarantineState(source.fetch_fail_streak, ok, Date.now());
   return {
     fetch_etag: fresh ? fresh.etag : source.fetch_etag,
     fetch_last_modified: fresh ? fresh.lastModified : source.fetch_last_modified,
     fetch_body_hash: fresh ? fresh.bodyHash : source.fetch_body_hash,
     fetch_last_status: status,
     fetch_last_at: new Date().toISOString(),
+    ...quarantine,
   };
 }
 
@@ -478,6 +598,12 @@ async function recordIngestCycle(
       inserted: stats.inserted,
       row_errors: stats.rowErrors,
       failed: stats.failed,
+      // Migration 074: pre-filter chunk-lookup failures this cycle -- see
+      // `dropExistingSourceContentHashRows`. A non-zero, non-decreasing
+      // trend here (against a flat row_errors) is the acceptance signal
+      // that the chunked pre-filter, not something else, drove the
+      // 23505-retry rate down.
+      prefilter_errors: stats.prefilterErrors,
       // Fall back to an on-the-spot measurement for the (should-not-happen)
       // case where an unguarded throw unwinds before stats.durationMs was
       // ever assigned.
@@ -509,6 +635,9 @@ async function runCycle(): Promise<CycleStats> {
     rowErrors: 0,
     dedupedInBatch: 0,
     titleVersions: 0,
+    quarantined: 0,
+    prefilterErrors: 0,
+    titleWriteBacks: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -547,7 +676,7 @@ async function runCycleBody(
   const { data: sources, error: sourcesError } = await supabase
     .from("sources")
     .select(
-      "id, name, slug, url, rss_url, fetch_etag, fetch_last_modified, fetch_body_hash, fetch_last_status, fetch_last_at",
+      "id, name, slug, url, rss_url, fetch_etag, fetch_last_modified, fetch_body_hash, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until",
     )
     .eq("active", true)
     .order("slug");
@@ -564,13 +693,22 @@ async function runCycleBody(
     return stats;
   }
 
+  // Skip sources still inside their quarantine backoff window (migration
+  // 074, §4) -- 23 dead feeds cost ~11,000 failed fetches/day; a
+  // quarantined feed spends no pool slot until `fetch_quarantined_until`
+  // elapses, at which point the NEXT attempt is a "probe" that can either
+  // reset the streak (a success) or re-escalate the backoff (another
+  // failure).
+  const toFetch = liveSources.filter((s) => !isQuarantined(s, startedAt));
+  stats.quarantined = liveSources.length - toFetch.length;
+
   // Hydrate the module-scope conditionalCache from what we persisted last
   // cycle so the first fetch after a cold start (empty Map) still sends
   // If-None-Match / If-Modified-Since instead of re-fetching every feed
   // from scratch (migration 041). Skip sources the cache already knows —
   // a warm instance's in-memory state is always at least as fresh as the
   // database, since we write the database from that same state.
-  for (const source of liveSources) {
+  for (const source of toFetch) {
     if (conditionalCache.has(source.id)) continue;
     if (source.fetch_etag || source.fetch_last_modified) {
       conditionalCache.set(source.id, {
@@ -587,7 +725,7 @@ async function runCycleBody(
   const seenIntraCycle = new Set<string>();
 
   await runPool(
-    liveSources,
+    toFetch,
     FETCH_CONCURRENCY,
     async (source) => {
       const result = await fetchFeed(source, {
@@ -606,20 +744,29 @@ async function runCycleBody(
         stats.failed++;
         console.error(`[ingest] ${source.slug} fetch failed: ${result.error}`);
         const isParseError2xx = result.status >= 200 && result.status < 300;
-        fetchStateUpdates.set(
-          source.id,
-          buildFetchStateUpdate(
-            source,
-            result.status,
-            isParseError2xx
-              ? {
-                  etag: result.etag ?? source.fetch_etag,
-                  lastModified: result.lastModified ?? source.fetch_last_modified,
-                  bodyHash: result.bodyHash ?? source.fetch_body_hash,
-                }
-              : undefined,
-          ),
+        const failState = buildFetchStateUpdate(
+          source,
+          result.status,
+          false,
+          isParseError2xx
+            ? {
+                etag: result.etag ?? source.fetch_etag,
+                lastModified: result.lastModified ?? source.fetch_last_modified,
+                bodyHash: result.bodyHash ?? source.fetch_body_hash,
+              }
+            : undefined,
         );
+        fetchStateUpdates.set(source.id, failState);
+        if (
+          failState.fetch_quarantined_until &&
+          failState.fetch_fail_streak === QUARANTINE_AFTER_FAILURES
+        ) {
+          // Log once, right when a source crosses into quarantine -- never
+          // the url/title, just the slug/streak/until (migration 074 §4).
+          console.log(
+            `[ingest] quarantined ${source.slug} after ${failState.fetch_fail_streak} consecutive failures until ${failState.fetch_quarantined_until}`,
+          );
+        }
         return;
       }
       if (result.notModified) {
@@ -629,7 +776,7 @@ async function runCycleBody(
         stats.notModified++;
         fetchStateUpdates.set(
           source.id,
-          buildFetchStateUpdate(source, result.status, {
+          buildFetchStateUpdate(source, result.status, true, {
             etag: result.etag ?? source.fetch_etag,
             lastModified: result.lastModified ?? source.fetch_last_modified,
             bodyHash: result.bodyHash ?? source.fetch_body_hash,
@@ -646,7 +793,7 @@ async function runCycleBody(
       // actually present.
       fetchStateUpdates.set(
         source.id,
-        buildFetchStateUpdate(source, result.status, {
+        buildFetchStateUpdate(source, result.status, true, {
           etag: result.etag ?? source.fetch_etag,
           lastModified: result.lastModified ?? source.fetch_last_modified,
           bodyHash: result.bodyHash ?? source.fetch_body_hash,
@@ -655,7 +802,10 @@ async function runCycleBody(
       await maybeFlushFetchState(supabase, fetchStateUpdates);
 
       stats.fetched++;
-      const normalized = normalizeArticles(source, result.items);
+      // One nowMs per fetched source -- every item off THIS feed clamps and
+      // (for cnn-turk) corrects against the same instant (migration 074).
+      const sourceNowMs = Date.now();
+      const normalized = normalizeArticles(source, result.items, sourceNowMs);
       stats.itemsNormalized += normalized.length;
 
       for (const row of normalized) {
@@ -701,7 +851,7 @@ async function runCycleBody(
       // sitting in `articles` under a different `url` (migration 041 F2) —
       // the actual production 23505, which the intra-cycle check above
       // cannot see.
-      const { rows: chunk, dropped: crossDeduplicated } =
+      const { rows: chunk, dropped: crossDeduplicated, lookupErrors } =
         await dropExistingSourceContentHashRows(supabase, intraDeduped);
       const deduped = intraDeduplicated + crossDeduplicated;
       if (deduped > 0) {
@@ -709,6 +859,9 @@ async function runCycleBody(
         console.log(
           `[ingest] deduped ${deduped} row(s) sharing (source_id, content_hash) in chunk ${i}-${i + rawChunk.length}`,
         );
+      }
+      if (lookupErrors > 0) {
+        stats.prefilterErrors += lookupErrors;
       }
       // Both dedupe passes together removed everything in this chunk —
       // skip the upsert call entirely rather than sending an empty batch.
@@ -722,17 +875,26 @@ async function runCycleBody(
       // clock against the cycle deadline. Articles always win the deadline
       // race: a miss on the title-version side just means this chunk's
       // changes go uncollected.
-      const [titleVersions, { data: upserted, error: upsertError }] = await Promise.all([
-        Date.now() <= deadline ? recordTitleVersions(supabase, chunk) : Promise.resolve(0),
-        supabase
-          .from("articles")
-          .upsert(chunk, { onConflict: "url", ignoreDuplicates: true })
-          .select("id"),
-      ]);
+      const [{ titleVersions, titleWriteBacks }, { data: upserted, error: upsertError }] =
+        await Promise.all([
+          Date.now() <= deadline
+            ? recordTitleVersions(supabase, chunk)
+            : Promise.resolve({ titleVersions: 0, titleWriteBacks: 0 }),
+          supabase
+            .from("articles")
+            .upsert(chunk, { onConflict: "url", ignoreDuplicates: true })
+            .select("id"),
+        ]);
       if (titleVersions > 0) {
         stats.titleVersions += titleVersions;
         console.log(
           `[ingest] recorded ${titleVersions} headline version(s) in chunk ${i}-${i + chunk.length}`,
+        );
+      }
+      if (titleWriteBacks > 0) {
+        stats.titleWriteBacks += titleWriteBacks;
+        console.log(
+          `[ingest] wrote back ${titleWriteBacks} headline(s) in chunk ${i}-${i + chunk.length}`,
         );
       }
       if (upsertError) {

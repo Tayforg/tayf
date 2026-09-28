@@ -214,12 +214,103 @@ function cleanDescription(raw?: string | null): string | null {
   return text.length > 500 ? text.slice(0, 497) + "..." : text;
 }
 
-function parseDate(raw?: string): string {
-  if (!raw) return new Date().toISOString();
-  const date = new Date(raw);
-  return Number.isNaN(date.getTime())
-    ? new Date().toISOString()
-    : date.toISOString();
+// ---------------------------------------------------------------------------
+// Date parsing (ingest-fixes, migration 074)
+//
+// The Deno Edge runtime always runs in UTC; a bare `new Date(raw)` on a
+// zone-less timestamp string is interpreted as UTC by the ECMAScript spec,
+// which silently mislabels an Istanbul wall-clock time as UTC -- a +3h
+// (Turkey has had no DST since 2016) skew for every source that omits a
+// zone designator. cnn-turk went further and stamped a UTC-looking
+// designator (Z/GMT) on what is still Istanbul wall-clock time, an
+// additional -3h correction on top of that. Every rule below must resolve
+// its OWN explicit offset before ever touching `new Date(...)`, so no
+// code path here passes a zone-less string straight to the Date
+// constructor and lets the runtime's UTC default decide.
+// ---------------------------------------------------------------------------
+
+const TR_WALL_CLOCK_AS_UTC_SLUGS: ReadonlySet<string> = new Set(["cnn-turk"]);
+
+// Trailing `Z`, a numeric offset (`+03:00` / `+0300` / `-05:00`), or a named
+// zone token (GMT, UTC, UT, or a US abbreviation like EST/PDT).
+const ZONE_DESIGNATOR_RE = /(?:Z|[+-]\d{2}:?\d{2}|GMT|UTC?|[PMCE][SD]T)\s*$/i;
+
+// A UTC-*labelled* designator specifically -- the subset rule 3 subtracts
+// 3h from, because it's the shape CNN Türk's feed emits over what is
+// actually still Istanbul wall-clock time.
+const UTC_LIKE_DESIGNATOR_RE = /(?:Z|UTC?|GMT|\+00:?00)\s*$/i;
+
+const ISO_LIKE_RE = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
+
+// A recognisable RFC-822-ish date/time with no zone designator, e.g.
+// "Mon, 28 Sep 2026 12:00:00" or "28 Sep 2026 12:00:00" -- deliberately
+// narrow so garbage strings (e.g. "not a date") never reach the
+// append-a-zone-and-reparse path, where some engines parse the mutated
+// string leniently into a nonsense (but non-NaN) date instead of failing.
+const RFC822_NO_ZONE_RE =
+  /^(?:[A-Za-z]{3},\s*)?\d{1,2}\s+[A-Za-z]{3,9}\.?\s+\d{2,4}\s+\d{2}:\d{2}(:\d{2})?$/;
+
+export interface ParseDateOptions {
+  nowMs: number;
+  sourceSlug?: string;
+}
+
+/**
+ * Parse an RSS item's date string into an ISO-8601 UTC timestamp, per the
+ * ingest-fixes (migration 074) rules:
+ *
+ *   1. Empty / unparseable -> `nowMs` (today's behaviour).
+ *   2. No zone designator -> interpret as Europe/Istanbul (+03:00), never
+ *      the runtime's default UTC interpretation.
+ *   3. `sourceSlug` is in `TR_WALL_CLOCK_AS_UTC_SLUGS` AND the designator is
+ *      UTC-like -> subtract 3h (the source labelled Istanbul wall-clock
+ *      time as UTC).
+ *   4. Clamp: the result is never later than `nowMs` -- `published_at`
+ *      must never outrun ingest time.
+ */
+export function parseDate(raw: string | undefined, opts: ParseDateOptions): string {
+  const { nowMs, sourceSlug } = opts;
+  const fallback = new Date(nowMs).toISOString();
+  const trimmed = raw?.trim();
+  if (!trimmed) return fallback;
+
+  let normalized = trimmed;
+  const hasDesignator = ZONE_DESIGNATOR_RE.test(trimmed);
+  if (!hasDesignator) {
+    // Rule 2: no zone at all -- treat as Istanbul local time. Only a
+    // recognised zone-less shape gets a zone appended and re-parsed; any
+    // other string falls through to rule 1 (unparseable -> fallback)
+    // rather than being mutated into something a lenient Date parser might
+    // accept as garbage.
+    if (ISO_LIKE_RE.test(trimmed)) {
+      normalized = trimmed.replace(" ", "T") + "+03:00";
+    } else if (RFC822_NO_ZONE_RE.test(trimmed)) {
+      normalized = `${trimmed} +0300`;
+    } else {
+      return fallback;
+    }
+  }
+
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return fallback;
+
+  let ms = date.getTime();
+
+  // Rule 3: a UTC-labelled designator from a source known to actually stamp
+  // Istanbul wall-clock time -- correct the mislabel.
+  if (
+    hasDesignator &&
+    sourceSlug &&
+    TR_WALL_CLOCK_AS_UTC_SLUGS.has(sourceSlug) &&
+    UTC_LIKE_DESIGNATOR_RE.test(trimmed)
+  ) {
+    ms -= 3 * 60 * 60 * 1000;
+  }
+
+  // Rule 4: never later than ingest time.
+  ms = Math.min(ms, nowMs);
+
+  return new Date(ms).toISOString();
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +403,7 @@ function absolutiseUrl(rawLink: string, source: RssSource): string {
 export function normalizeItem(
   source: RssSource,
   item: RawFeedItem,
+  nowMs: number = Date.now(),
 ): NormalizedArticle | null {
   const rawTitle = item.title?.trim() ?? "";
   const rawLink = item.link?.trim() ?? "";
@@ -326,7 +418,10 @@ export function normalizeItem(
 
   const description = cleanDescription(item.contentSnippet ?? item.content);
   const imageUrl = extractImage(item);
-  const publishedAt = parseDate(item.isoDate ?? item.pubDate);
+  const publishedAt = parseDate(item.isoDate ?? item.pubDate, {
+    nowMs,
+    sourceSlug: source.slug,
+  });
 
   // Strict sha1-of-shingles content hash. Fallbacks mirror the worker's
   // chain so `content_hash` is never null — the column is NOT NULL. The
@@ -361,10 +456,11 @@ export function normalizeItem(
 export function normalizeArticles(
   source: RssSource,
   items: RawFeedItem[],
+  nowMs: number = Date.now(),
 ): NormalizedArticle[] {
   const out: NormalizedArticle[] = [];
   for (const item of items) {
-    const row = normalizeItem(source, item);
+    const row = normalizeItem(source, item, nowMs);
     if (row) out.push(row);
   }
   return out;

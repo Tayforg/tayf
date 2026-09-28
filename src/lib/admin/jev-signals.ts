@@ -16,6 +16,14 @@ export type JevAlertKind = (typeof JEV_ALERT_KINDS)[number];
 export const SOURCE_DRIFT_DAYS = 7;
 export const JEV_ALERT_LIMIT = 20;
 
+// Pinned against migration 073's jev_alerts_resolved_reason_check CHECK
+// list by tests/migrations/073-jev-pipeline-lifecycle.test.ts -- keep this
+// a single-line array literal so the regex finds it.
+export const JEV_ALERT_RESOLVED_REASONS = ["question_set_changed", "agreement_recovered", "drift_quiet"] as const;
+export type JevAlertResolvedReason = (typeof JEV_ALERT_RESOLVED_REASONS)[number];
+
+export const JEV_ALERT_RESOLVED_WINDOW_DAYS = 7;
+
 export interface SourceDriftRow {
   source_id: string;
   source_slug: string;
@@ -46,6 +54,14 @@ export interface JevSignalsStatus {
    * actually queued, not how many happen to fit on the page.
    */
   alertsTotal: number;
+  /**
+   * Count of alerts that auto-resolved (migration 073's
+   * jev_alerts_auto_resolve()) in the last JEV_ALERT_RESOLVED_WINDOW_DAYS
+   * days. Optional -- and separately fetched -- so a failure on this one
+   * extra count query degrades to "unknown" instead of nulling the whole
+   * status (unlike drift/alerts, which are load-bearing).
+   */
+  resolvedRecent?: number | null;
 }
 
 interface RawSourceEmbed {
@@ -137,7 +153,9 @@ export async function getJevSignalsStatus(): Promise<JevSignalsStatus | null> {
       .toISOString()
       .slice(0, 10);
 
-    const [driftRes, alertsRes] = await Promise.all([
+    const resolvedSince = new Date(Date.now() - JEV_ALERT_RESOLVED_WINDOW_DAYS * 86_400_000).toISOString();
+
+    const [driftRes, alertsRes, resolvedRes] = await Promise.all([
       supabase
         .from("source_drift_daily")
         .select("source_id, day, n, politics_share, drift_score, baseline, source:sources(slug, name)")
@@ -149,8 +167,16 @@ export async function getJevSignalsStatus(): Promise<JevSignalsStatus | null> {
         .from("jev_alerts")
         .select("id, kind, day, subject, payload, created_at", { count: "exact" })
         .is("acknowledged_at", null)
+        .is("resolved_at", null)
         .order("created_at", { ascending: false })
         .limit(JEV_ALERT_LIMIT),
+      // Load-bearing for the "N alerts auto-closed" line only -- an error
+      // here must never null the whole status (drift/alerts still render).
+      supabase
+        .from("jev_alerts")
+        .select("id", { count: "exact", head: true })
+        .not("resolved_at", "is", null)
+        .gte("resolved_at", resolvedSince),
     ]);
 
     for (const res of [driftRes, alertsRes]) {
@@ -165,6 +191,7 @@ export async function getJevSignalsStatus(): Promise<JevSignalsStatus | null> {
       drift: toSourceDriftRows(driftRes.data),
       alerts,
       alertsTotal: alertsRes.count ?? alerts.length,
+      resolvedRecent: resolvedRes.error ? null : (resolvedRes.count ?? null),
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

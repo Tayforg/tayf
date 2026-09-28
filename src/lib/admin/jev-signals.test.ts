@@ -35,9 +35,12 @@ const fixture = vi.hoisted(() => ({
   alertsError: null as { message: string } | null,
   driftState: null as unknown,
   alertsState: null as unknown,
+  resolvedState: null as unknown,
   // undefined -> derive from fixture.alerts.length (the common case); set to
   // a number or null to exercise getJevSignalsStatus's alertsTotal fallback.
   alertsCount: undefined as number | null | undefined,
+  resolvedCount: 0 as number | null,
+  resolvedError: null as { message: string } | null,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -49,7 +52,17 @@ const supabaseFake = await vi.hoisted(async () => {
         if (fixture.driftError) return { data: null, error: fixture.driftError };
         return { data: fixture.drift, error: null };
       },
+      // getJevSignalsStatus fires TWO queries against jev_alerts in the
+      // same Promise.all -- the open-alerts list (no `.not()` call) and
+      // the resolved-recently head count (`.not('resolved_at', 'is', null)`).
+      // Branch on state.not to tell them apart, the same way the SUT does.
       jev_alerts: (state) => {
+        const isResolvedCountQuery = state.not.length > 0;
+        if (isResolvedCountQuery) {
+          fixture.resolvedState = state;
+          if (fixture.resolvedError) return { data: null, error: fixture.resolvedError };
+          return { data: null, error: null, count: fixture.resolvedCount };
+        }
         fixture.alertsState = state;
         if (fixture.alertsError) return { data: null, error: fixture.alertsError };
         return {
@@ -99,7 +112,10 @@ beforeEach(() => {
   fixture.alertsError = null;
   fixture.driftState = null;
   fixture.alertsState = null;
+  fixture.resolvedState = null;
   fixture.alertsCount = undefined;
+  fixture.resolvedCount = 0;
+  fixture.resolvedError = null;
 });
 
 afterEach(() => {
@@ -238,15 +254,38 @@ describe("getJevSignalsStatus", () => {
     expect(String(state.gte[0]!.val)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it("requests unacknowledged alerts newest first, limited to JEV_ALERT_LIMIT", async () => {
+  it("requests unacknowledged, unresolved alerts newest first, limited to JEV_ALERT_LIMIT", async () => {
     await getJevSignalsStatus();
 
     const state = fixture.alertsState as BuilderState;
     expect(state).not.toBeNull();
     expect(state.is).toContainEqual({ col: "acknowledged_at", val: null });
+    expect(state.is).toContainEqual({ col: "resolved_at", val: null });
     expect(state.order).toContainEqual({ col: "created_at", opts: { ascending: false } });
     expect(state.limit).toBe(JEV_ALERT_LIMIT);
     expect(JEV_ALERT_LIMIT).toBe(20);
+  });
+
+  it("counts recently-resolved alerts via a head count with .not('resolved_at', 'is', null)", async () => {
+    fixture.resolvedCount = 3;
+
+    const result = await getJevSignalsStatus();
+
+    const state = fixture.resolvedState as BuilderState;
+    expect(state).not.toBeNull();
+    expect(state.not).toContainEqual({ col: "resolved_at", op: "is", val: null });
+    expect(state.gte.some((g) => g.col === "resolved_at")).toBe(true);
+    expect(result!.resolvedRecent).toBe(3);
+  });
+
+  it("a resolved-count query error gives resolvedRecent null while alerts still render", async () => {
+    fixture.resolvedError = { message: "relation does not exist" };
+
+    const result = await getJevSignalsStatus();
+
+    expect(result).not.toBeNull();
+    expect(result!.resolvedRecent).toBeNull();
+    expect(result!.alerts.length).toBeGreaterThan(0);
   });
 
   it("a query error -> null and exactly one PII-free [admin] line", async () => {

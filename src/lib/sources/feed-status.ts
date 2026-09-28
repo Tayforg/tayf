@@ -81,6 +81,19 @@ export interface SourceFeedStatus {
   lastHttpStatus: number | null;
   lastFetchAt: string | null;
   silent: boolean;
+  /** Consecutive ingest fetch failures (migration 074). Defaults to 0. */
+  failStreak: number;
+  /** True while `fetch_quarantined_until` is still in the future. */
+  quarantined: boolean;
+}
+
+// Local 3-line quarantine check -- deliberately not imported from
+// `supabase/functions/_shared/rss/quarantine.ts` (Deno-side code, not part
+// of this Next.js bundle's module graph). Same semantics as that module's
+// `isQuarantined`: an unparseable/absent `until` is never quarantined.
+function isRowQuarantined(until: string | null | undefined, nowMs: number): boolean {
+  if (until == null) return false;
+  return Date.parse(until) > nowMs;
 }
 
 /** Raw shape of one row from the `getSourceFeedStatuses` select below. */
@@ -91,6 +104,8 @@ export interface SourceFeedStatusRawRow {
   kind?: SourceKind | string | null;
   fetch_last_status: number | null;
   fetch_last_at: string | null;
+  fetch_fail_streak?: number | null;
+  fetch_quarantined_until?: string | null;
   latest?: Array<{ published_at: string }>;
 }
 
@@ -137,6 +152,8 @@ export function toFeedStatusRows(
       lastHttpStatus: row.fetch_last_status ?? null,
       lastFetchAt: row.fetch_last_at ?? null,
       silent,
+      failStreak: row.fetch_fail_streak ?? 0,
+      quarantined: isRowQuarantined(row.fetch_quarantined_until, nowMs),
     });
   }
 
@@ -251,7 +268,7 @@ export async function getSourceFeedStatuses(): Promise<SourceFeedStatus[] | null
     const { data, error } = await supabase
       .from("sources")
       .select(
-        "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, latest:articles(published_at)",
+        "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, latest:articles(published_at)",
       )
       .eq("active", true)
       .lte("latest.published_at", nowIso)

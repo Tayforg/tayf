@@ -191,6 +191,53 @@ describe("KaynakDurumBody", () => {
   });
 });
 
+describe("KaynakDurumBody quarantine [migration 074]", () => {
+  function shapedRows(raw: SourceFeedStatusRawRow[]) {
+    return toFeedStatusRows(raw, NOW);
+  }
+
+  it("renders the 'karantinada' badge and its title for a quarantined row", () => {
+    const rows = shapedRows([
+      rawRow({
+        fetch_fail_streak: 21,
+        fetch_quarantined_until: new Date(NOW + 6 * 60 * 60 * 1000).toISOString(),
+      }),
+    ]);
+    const tree = KaynakDurumBody({
+      rows,
+      itemsPerDayPromise: Promise.resolve({}),
+    });
+    const text = collectText(tree).join(" ");
+    expect(text).toContain("karantinada");
+  });
+
+  it("adds the karantinada summary sentence when >=1 row is quarantined", () => {
+    const rows = shapedRows([
+      rawRow({
+        fetch_fail_streak: 20,
+        fetch_quarantined_until: new Date(NOW + 60 * 60 * 1000).toISOString(),
+      }),
+    ]);
+    const tree = KaynakDurumBody({
+      rows,
+      itemsPerDayPromise: Promise.resolve({}),
+    });
+    const text = collectText(tree).join(" ");
+    expect(text).toContain("besleme karantinada");
+    expect(text).toContain("1 saat, 6 saat, sonra günde bir yeniden denenir");
+  });
+
+  it("does not render the badge or the summary sentence when nothing is quarantined", () => {
+    const rows = shapedRows([rawRow()]);
+    const tree = KaynakDurumBody({
+      rows,
+      itemsPerDayPromise: Promise.resolve({}),
+    });
+    const text = collectText(tree).join(" ");
+    expect(text).not.toContain("karantinada");
+  });
+});
+
 describe("ItemsPerDayCell", () => {
   it("A-07: formats the 7-day rate with tr-TR NumberFormat (comma decimal), streamed in behind the row", async () => {
     const el = await ItemsPerDayCell({

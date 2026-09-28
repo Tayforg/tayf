@@ -95,6 +95,7 @@ export function KaynakDurumBody({
   itemsPerDayPromise: ItemsPerDayPromise;
 }) {
   const { all: summary } = summariseFeedStatus(rows);
+  const quarantinedCount = rows.filter((r) => r.quarantined).length;
 
   // Silent-first, then alphabetical (the underlying query already sorts by
   // name — Array#sort is stable, so this only reorders across the
@@ -136,6 +137,14 @@ export function KaynakDurumBody({
         tanesi son 72 saatte en az bir haber verdi;{" "}
         <span className="font-mono">{summary.silent}</span> kaynak bu
         pencerede sessiz.
+        {quarantinedCount > 0 && (
+          <>
+            {" "}
+            <span className="font-mono">{quarantinedCount}</span> besleme
+            karantinada: art arda 20 kez çekilemeyen beslemeler 1 saat, 6
+            saat, sonra günde bir yeniden denenir.
+          </>
+        )}
       </p>
 
       <div className="rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6">
@@ -217,13 +226,23 @@ export function KaynakDurumBody({
                       </Suspense>
                     </td>
                     <td className="py-2.5">
-                      {row.silent ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[11px] text-amber-700 dark:text-amber-500 font-medium">
-                          sessiz
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground/50">—</span>
-                      )}
+                      <span className="inline-flex items-center gap-1.5">
+                        {row.silent ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[11px] text-amber-700 dark:text-amber-500 font-medium">
+                            sessiz
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground/50">—</span>
+                        )}
+                        {row.quarantined ? (
+                          <span
+                            title={`Art arda ${row.failStreak} başarısız çekim — besleme geçici olarak atlanıyor`}
+                            className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-700 dark:text-rose-500 font-medium"
+                          >
+                            karantinada
+                          </span>
+                        ) : null}
+                      </span>
                     </td>
                   </tr>
                 ))}

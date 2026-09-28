@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
-// New coverage — no test file existed for src/app/sitemap.ts before.
-// Uses a predicate-honouring resolver so this also proves archived rows are
-// actually dropped from the emitted <url> list, not just from the query shape.
+// /sitemap.xml (index) + /sitemaps/[file] (leaves) — route-level coverage.
+// Unit coverage for the XML shape and query filters lives in
+// src/lib/seo/sitemaps.test.ts; this file exercises the two Next.js route
+// handlers end to end (status codes, content-type, cache headers).
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -12,8 +13,9 @@ vi.mock("next/cache", () => ({
 }));
 
 const fixture = vi.hoisted(() => ({
-  data: [] as Array<Record<string, unknown>>,
-  lastState: null as unknown,
+  clusters: [] as Array<Record<string, unknown>>,
+  sources: [] as Array<Record<string, unknown>>,
+  clustersError: null as { message: string } | null,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -21,8 +23,19 @@ const supabaseFake = await vi.hoisted(async () => {
   return helper.createSupabaseFake({
     tables: {
       clusters: (state) => {
-        fixture.lastState = state;
-        const rows = fixture.data.filter((r) =>
+        if (fixture.clustersError) {
+          return { data: null, error: fixture.clustersError };
+        }
+        let rows = fixture.clusters.filter((r) =>
+          state.eq.every(({ col, val }) => r[col] === val),
+        );
+        if (state.range) {
+          rows = rows.slice(state.range.from, state.range.to + 1);
+        }
+        return { data: rows, error: null };
+      },
+      sources: (state) => {
+        const rows = fixture.sources.filter((r) =>
           state.eq.every(({ col, val }) => r[col] === val),
         );
         return { data: rows, error: null };
@@ -35,17 +48,24 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
-import sitemap from "@/app/sitemap";
-import type { BuilderState } from "../_helpers/supabase-fake";
+import { GET as getSitemapIndex } from "@/app/sitemap.xml/route";
+import { GET as getSitemapFile } from "@/app/sitemaps/[file]/route";
 
 const ORIGINAL_ENV = { ...process.env };
+
+function callFile(file: string) {
+  return getSitemapFile(new Request(`https://tayf.test/sitemaps/${file}`), {
+    params: Promise.resolve({ file }),
+  });
+}
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
-  fixture.data = [];
-  fixture.lastState = null;
+  fixture.clusters = [];
+  fixture.sources = [];
+  fixture.clustersError = null;
 });
 
 afterEach(() => {
@@ -59,129 +79,105 @@ afterEach(() => {
   }
 });
 
-describe("sitemap query shape", () => {
-  it("filters archived clusters out of the query", async () => {
-    await sitemap();
+describe("GET /sitemap.xml", () => {
+  it("returns a sitemap index listing the leaf sitemaps", async () => {
+    const res = await getSitemapIndex();
 
-    const state = fixture.lastState as BuilderState;
-    expect(state.eq).toEqual([{ col: "is_archived", val: false }]);
-    expect(state.gte).toEqual([{ col: "article_count", val: 2 }]);
-    expect(state.order).toEqual([
-      { col: "updated_at", opts: { ascending: false } },
-    ]);
-    expect(state.limit).toBe(1000);
-  });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/xml; charset=utf-8");
 
-  it("no longer joins cluster_articles into the query", async () => {
-    await sitemap();
-
-    const state = fixture.lastState as BuilderState;
-    const select = String(state.selectArgs[0] ?? "");
-    expect(select).toContain("id");
-    expect(select).toContain("updated_at");
-    expect(select).not.toContain("cluster_articles");
-    expect(select).not.toContain("image_url");
+    const body = await res.text();
+    expect(body).toContain("<sitemapindex");
+    expect(body).toContain("https://tayf.test/sitemaps/news.xml");
+    expect(body).toContain("https://tayf.test/sitemaps/static.xml");
+    expect(body).toContain("https://tayf.test/sitemaps/sources.xml");
   });
 });
 
-describe("sitemap output", () => {
-  it("omits archived cluster URLs from the emitted sitemap", async () => {
-    fixture.data = [
+describe("GET /sitemaps/[file]", () => {
+  it("news.xml → 200", async () => {
+    fixture.clusters = [
+      {
+        id: "n1",
+        is_archived: false,
+        article_count: 3,
+        title_tr: "Başlık",
+        title_tr_neutral: "Başlık",
+        first_published: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ];
+    const res = await callFile("news.xml");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/xml; charset=utf-8");
+    const body = await res.text();
+    expect(body).toContain("https://tayf.test/cluster/n1");
+  });
+
+  it("clusters-2026-09.xml → 200", async () => {
+    fixture.clusters = [
+      {
+        id: "c1",
+        is_archived: false,
+        article_count: 5,
+        updated_at: "2026-09-05T00:00:00.000Z",
+      },
+    ];
+    const res = await callFile("clusters-2026-09.xml");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("https://tayf.test/cluster/c1");
+  });
+
+  it("sources.xml → 200", async () => {
+    fixture.sources = [{ slug: "kaynak-a", active: true }];
+    const res = await callFile("sources.xml");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("https://tayf.test/source/kaynak-a");
+  });
+
+  it("bogus.xml → 404", async () => {
+    const res = await callFile("bogus.xml");
+    expect(res.status).toBe(404);
+  });
+
+  it("a Supabase error → 503 no-store", async () => {
+    fixture.clustersError = { message: "boom" };
+    const res = await callFile("news.xml");
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("archived clusters are absent from clusters-YYYY-MM.xml", async () => {
+    fixture.clusters = [
+      { id: "active-1", is_archived: false, article_count: 5, updated_at: "2026-09-05T00:00:00.000Z" },
+      { id: "archived-1", is_archived: true, article_count: 5, updated_at: "2026-09-05T00:00:00.000Z" },
+    ];
+    const res = await callFile("clusters-2026-09.xml");
+    const body = await res.text();
+    expect(body).toContain("https://tayf.test/cluster/active-1");
+    expect(body).not.toContain("https://tayf.test/cluster/archived-1");
+  });
+
+  // LEG-04 — no Google "image:image" extension, and no outlet CDN URL
+  // (Tayf re-hosts/serves outlet photos; it must not advertise them as its
+  // own images in Google Images).
+  it("LEG-04: never emits an <image:image> extension or an outlet CDN URL", async () => {
+    fixture.clusters = [
       {
         id: "active-1",
         is_archived: false,
-        updated_at: "2026-04-18T11:00:00.000Z",
+        article_count: 5,
+        updated_at: "2026-09-05T00:00:00.000Z",
         cluster_articles: [
-          {
-            articles: {
-              image_url: "https://img/1.jpg",
-              published_at: "2026-04-18T10:00:00.000Z",
-            },
-          },
-        ],
-      },
-      {
-        id: "archived-1",
-        is_archived: true,
-        updated_at: "2026-04-17T11:00:00.000Z",
-        cluster_articles: [
-          {
-            articles: {
-              image_url: "https://img/2.jpg",
-              published_at: "2026-04-17T10:00:00.000Z",
-            },
-          },
+          { articles: { image_url: "https://cdn.outlet.example/foto.jpg" } },
         ],
       },
     ];
-
-    const entries = await sitemap();
-    const urls = entries.map((e) => e.url);
-
-    expect(urls).toContain("https://tayf.test/cluster/active-1");
-    expect(urls).not.toContain("https://tayf.test/cluster/archived-1");
-    expect(urls).toContain("https://tayf.test/");
-  });
-
-  it("A-M4: includes /kaynaklar/durum among the static routes", async () => {
-    const entries = await sitemap();
-    const urls = entries.map((e) => e.url);
-
-    expect(urls).toContain("https://tayf.test/kaynaklar/durum");
-  });
-
-  it("S-18: includes /duzeltmeler among the static routes", async () => {
-    const entries = await sitemap();
-    const urls = entries.map((e) => e.url);
-
-    expect(urls).toContain("https://tayf.test/duzeltmeler");
-  });
-
-  it("E1: includes /kalite among the static routes, with changeFrequency daily and priority 0.5", async () => {
-    const entries = await sitemap();
-
-    const kalite = entries.find((e) => e.url === "https://tayf.test/kalite");
-
-    expect(kalite).toBeDefined();
-    expect(kalite?.changeFrequency).toBe("daily");
-    expect(kalite?.priority).toBe(0.5);
-  });
-
-  it("G2: includes /hafta among the static routes, with changeFrequency daily and priority 0.6", async () => {
-    const entries = await sitemap();
-
-    const hafta = entries.find((e) => e.url === "https://tayf.test/hafta");
-
-    expect(hafta).toBeDefined();
-    expect(hafta?.changeFrequency).toBe("daily");
-    expect(hafta?.priority).toBe(0.6);
-  });
-});
-
-describe("sitemap image entries", () => {
-  it("emits no images key even when the join data is present in the row", async () => {
-    fixture.data = [
-      {
-        id: "active-1",
-        is_archived: false,
-        updated_at: "2026-04-18T11:00:00.000Z",
-        cluster_articles: [
-          {
-            articles: {
-              image_url: "https://cdn.outlet.example/foto.jpg",
-              published_at: "2026-04-18T10:00:00.000Z",
-            },
-          },
-        ],
-      },
-    ];
-
-    const entries = await sitemap();
-
-    expect(entries.every((e) => !("images" in e))).toBe(true);
-    const c = entries.find((e) => e.url === "https://tayf.test/cluster/active-1");
-    expect(c).toBeDefined();
-    expect(c?.images).toBeUndefined();
-    expect(JSON.stringify(entries)).not.toContain("cdn.outlet.example");
+    const res = await callFile("clusters-2026-09.xml");
+    const body = await res.text();
+    expect(body).not.toContain("<image:image>");
+    expect(body).not.toContain("cdn.outlet.example");
   });
 });

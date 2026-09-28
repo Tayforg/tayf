@@ -13,7 +13,7 @@ import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 
 const slugPagePath = resolve(__dirname, "../../src/app/konu/[slug]/page.tsx");
 const indexPagePath = resolve(__dirname, "../../src/app/konu/page.tsx");
-const sitemapPath = resolve(__dirname, "../../src/app/sitemap.ts");
+const sitemapPath = resolve(__dirname, "../../src/lib/seo/sitemaps.ts");
 const footerPath = resolve(__dirname, "../../src/components/layout/footer.tsx");
 const middlewarePath = resolve(__dirname, "../../src/middleware.ts");
 
@@ -100,12 +100,10 @@ describe("/konu index page", () => {
 
 describe("sitemap.ts /konu rows", () => {
   it("lists /konu and the six hub URLs and never lists /konu/politika", () => {
-    expect(sitemapSrc).toContain("/konu`");
+    expect(sitemapSrc).toContain('path: "/konu"');
     expect(sitemapSrc).toContain("TOPIC_SLUGS");
     expect(sitemapSrc).toContain("/konu/${slug}");
     expect(sitemapSrc).not.toContain("/konu/politika");
-    // Additive only — the existing cluster query and its limit are untouched.
-    expect(sitemapSrc).toContain("CLUSTER_LIMIT");
   });
 });
 

@@ -218,6 +218,41 @@ describe("toFeedStatusRows", () => {
   });
 });
 
+describe("toFeedStatusRows quarantine [migration 074]", () => {
+  it("marks a row quarantined when fetch_quarantined_until is in the future", () => {
+    const [row] = toFeedStatusRows(
+      [
+        rawRow({
+          fetch_fail_streak: 20,
+          fetch_quarantined_until: new Date(NOW + 60 * 60 * 1000).toISOString(),
+        }),
+      ],
+      NOW,
+    );
+    expect(row!.quarantined).toBe(true);
+    expect(row!.failStreak).toBe(20);
+  });
+
+  it("marks a row not quarantined when fetch_quarantined_until is in the past (expired)", () => {
+    const [row] = toFeedStatusRows(
+      [
+        rawRow({
+          fetch_fail_streak: 20,
+          fetch_quarantined_until: new Date(NOW - 60 * 1000).toISOString(),
+        }),
+      ],
+      NOW,
+    );
+    expect(row!.quarantined).toBe(false);
+  });
+
+  it("defaults failStreak to 0 and quarantined to false when the columns are absent", () => {
+    const [row] = toFeedStatusRows([rawRow({ fetch_fail_streak: undefined, fetch_quarantined_until: undefined })], NOW);
+    expect(row!.failStreak).toBe(0);
+    expect(row!.quarantined).toBe(false);
+  });
+});
+
 describe("toItemsPerDayMap", () => {
   function statsRow(overrides: Partial<ItemsPerDayRawRow> = {}): ItemsPerDayRawRow {
     return { slug: "ornek-kaynak", stats: [{ count: 14 }], ...overrides };
@@ -378,6 +413,14 @@ describe("getSourceFeedStatuses", () => {
     const select = String(state.selectArgs[0] ?? "");
     expect(select).toContain("latest:articles(published_at)");
     expect(select).not.toContain("stats:articles");
+  });
+
+  it("migration 074: selects fetch_fail_streak and fetch_quarantined_until", async () => {
+    await getSourceFeedStatuses();
+    const state = fixture.lastState as BuilderState;
+    const select = String(state.selectArgs[0] ?? "");
+    expect(select).toContain("fetch_fail_streak");
+    expect(select).toContain("fetch_quarantined_until");
   });
 
   it("A-10 / DURUM-01: has NO gte lower bound on latest.published_at", async () => {

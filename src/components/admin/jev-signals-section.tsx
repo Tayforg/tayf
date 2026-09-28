@@ -10,6 +10,16 @@ import {
   Tr,
 } from "@/components/admin/admin-ui";
 import { fmtDateTime, fmtInt, fmtRelative } from "@/lib/admin/format";
+
+function resolvedRecentLine(status: JevSignalsStatus) {
+  const n = status.resolvedRecent;
+  if (!n || n <= 0) return null;
+  return (
+    <p className="text-xs text-muted-foreground">
+      Son 7 günde {fmtInt(n)} uyarı, koşulu ortadan kalktığı için kendiliğinden kapandı.
+    </p>
+  );
+}
 import { JevAlertActions } from "@/components/admin/jev-alert-actions";
 
 // Pack "Sinyaller" (migration 065) — the /admin "Kaynak sapması" + "Uyarılar"
@@ -86,15 +96,18 @@ export function JevAlertsSection({
     <AdminSection
       id="uyarilar"
       title="Uyarılar"
-      help="Jev'in ölçümlerinde olağandışı bir şey görüldüğünde açılan uyarılar."
-      action="Her birine göz atın. 'Onayla' uyarıyı listeden kaldırır; haberlere veya kaynaklara hiçbir şey yapılmaz."
+      help="Jev'in ölçümlerinde olağandışı bir şey görüldüğünde açılan uyarılar. Koşul ortadan kalkınca kendiliğinden kapanırlar."
+      action="Her birine göz atın. 'Onayla' uyarıyı listeden kaldırır; koşulu geçen uyarılar zaten kendiliğinden kapanır. Haberlere veya kaynaklara hiçbir şey yapılmaz."
       count={status?.alertsTotal ?? "—"}
       tone={status !== null && status.alertsTotal > 0 ? "bad" : "neutral"}
     >
       {status === null ? (
         <EmptyState kind="error">Uyarılar okunamadı.</EmptyState>
       ) : status.alerts.length === 0 ? (
-        <EmptyState>Onay bekleyen uyarı yok.</EmptyState>
+        <>
+          <EmptyState>Onay bekleyen uyarı yok.</EmptyState>
+          {resolvedRecentLine(status)}
+        </>
       ) : (
         <>
           <ul className="divide-y divide-border/60">
@@ -112,8 +125,8 @@ export function JevAlertsSection({
                 <p className="text-base font-medium text-foreground">{alertSummary(row)}</p>
                 {row.kind === "source_drift" ? (
                   <p className="text-sm text-muted-foreground">
-                    Bu kaynağın siyaset haberi payı, son 14 günlük olağan düzeyinden belirgin
-                    biçimde saptı. Ayrıntı:{" "}
+                    Bu kaynağın siyaset haberi payı iki gün üst üste, son 14 günlük olağan
+                    düzeyinden belirgin biçimde saptı. Ayrıntı:{" "}
                     <a href="#kaynak-sapmasi" className="text-brand hover:underline">
                       Kaynak sapması tablosu
                     </a>
@@ -138,6 +151,7 @@ export function JevAlertsSection({
               İlk {fmtInt(status.alerts.length)} uyarı gösteriliyor.
             </p>
           )}
+          {resolvedRecentLine(status)}
         </>
       )}
     </AdminSection>

@@ -17,10 +17,12 @@ vi.mock("@/lib/clusters/cluster-detail-query", () => ({
 // no coverage: flipping `is_blindspot` or deleting the ribbon JSX would
 // pass the old status-code-only assertions unchanged.
 let captured: ReactElement | null = null;
+let capturedOptions: Record<string, unknown> | null = null;
 vi.mock("next/og", () => ({
   ImageResponse: class {
-    constructor(element: ReactElement) {
+    constructor(element: ReactElement, options: Record<string, unknown>) {
       captured = element;
+      capturedOptions = options;
       return new Response(new Uint8Array([1]), {
         status: 200,
         headers: { "content-type": "image/png" },
@@ -93,6 +95,7 @@ function mkDetail(
 describe("cluster opengraph-image", () => {
   beforeEach(() => {
     captured = null;
+    capturedOptions = null;
   });
 
   it("renders a 200 PNG with the blindspot ribbon", async () => {
@@ -259,15 +262,35 @@ describe("cluster opengraph-image", () => {
     expect(text).toContain("tayfhaber.com/metodoloji");
   });
 
+  it("passes the exact edge cache-control header for the real card, lower-case key only", async () => {
+    getClusterDetail.mockResolvedValueOnce(mkDetail({}));
+    const { default: Image, OG_CACHE_HEADERS } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: "x" }) });
+
+    expect(OG_CACHE_HEADERS).toEqual({
+      "cache-control": "public, s-maxage=600, stale-while-revalidate=86400",
+    });
+    const headers = capturedOptions?.headers as Record<string, string>;
+    expect(headers).toEqual(OG_CACHE_HEADERS);
+    expect(headers["Cache-Control"]).toBeUndefined();
+  });
+
   it("falls back to a 200 PNG when the cluster no longer exists", async () => {
     getClusterDetail.mockResolvedValueOnce(null);
-    const { default: Image } = await import("./opengraph-image");
+    const { default: Image, OG_FALLBACK_CACHE_HEADERS } = await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: "gone" }) });
 
     expect(res).toBeInstanceOf(Response);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
+
+    expect(OG_FALLBACK_CACHE_HEADERS).toEqual({ "cache-control": "public, s-maxage=60" });
+    const headers = capturedOptions?.headers as Record<string, string>;
+    expect(headers).toEqual(OG_FALLBACK_CACHE_HEADERS);
+    expect(headers["Cache-Control"]).toBeUndefined();
+
     const body = await res.arrayBuffer();
     expect(body.byteLength).toBeGreaterThan(0);
   });

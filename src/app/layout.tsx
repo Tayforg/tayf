@@ -69,6 +69,22 @@ export const metadata: Metadata = {
   robots: {
     index: true,
     follow: true,
+    "max-image-preview": "large",
+    googleBot: {
+      index: true,
+      follow: true,
+      "max-image-preview": "large",
+    },
+  },
+  // Search-console ownership verification. Each env var is optional — an
+  // unset one drops its key entirely (Next omits `undefined` metadata
+  // fields) instead of emitting an empty/placeholder verification tag.
+  verification: {
+    google: process.env.GOOGLE_SITE_VERIFICATION || undefined,
+    yandex: process.env.YANDEX_VERIFICATION || undefined,
+    other: process.env.BING_VERIFICATION
+      ? { "msvalidate.01": process.env.BING_VERIFICATION }
+      : undefined,
   },
   alternates: {
     canonical: "/",

@@ -189,10 +189,31 @@ const titleVersionInsertCalls: Array<Array<Record<string, unknown>>> = [];
 // exactly like the DB silently no-opping a duplicate upsert.
 const recordedTitleVersionKeys = new Set<string>();
 
+// One entry per `.rpc("apply_article_title_edits", { p_rows })` call this
+// test made -- migration 074's headline write-back (decision (b): write the
+// outlet's CURRENT headline back into `articles.title` at ingest, guarded
+// only in SQL by word-Jaccard >= 0.2; TS sends every same-source change).
+const titleEditRpcCalls: Array<Array<Record<string, unknown>>> = [];
+// When set, the `apply_article_title_edits` RPC above returns this as an
+// error -- proves the write-back is swallowed (never throws, never touches
+// the article upsert or the cycle's response).
+let forcedTitleEditRpcError: string | null = null;
+
 // When set, the "ingest_cycles" `insert()` mock below returns this as an
 // error instead of recording the row — used to prove `recordIngestCycle`'s
 // try/catch absorbs a telemetry-write failure instead of failing the cycle.
 let forcedIngestCyclesInsertError: string | null = null;
+
+// One entry per `.from("articles").select("source_id, content_hash").in(...)
+// .in(...)` call this test made -- the chunked (source_id, content_hash)
+// pre-filter lookup (`dropExistingSourceContentHashRowsChunk`, migration
+// 074 §4). Lets the tests assert both the number of chunks (rows-per-chunk
+// = PREFILTER_CHUNK = 100) and, via `forcedPrefilterErrorOnCall`, that a
+// single failing chunk degrades only itself.
+const prefilterLookupCalls: Array<{ sourceIds: string[]; hashes: string[] }> = [];
+// 1-indexed call number (into `prefilterLookupCalls`) that should fail --
+// null means never fail.
+let forcedPrefilterErrorOnCall: number | null = null;
 
 // Per-test source roster. The ingest handler reads from `sources` via
 // `.from("sources").select(...).eq("active", true).order("slug")` and
@@ -243,6 +264,20 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
           // per-row `.upsert(...)` calls below return their own thenable
           // and never hit this `settle()`) — i.e.
           // `dropExistingSourceContentHashRows`'s existing-pair lookup.
+          const sourceIdIn = inCalls.find((c) => c.column === "source_id");
+          const hashIn = inCalls.find((c) => c.column === "content_hash");
+          if (sourceIdIn && hashIn) {
+            prefilterLookupCalls.push({
+              sourceIds: [...(sourceIdIn.values as string[])],
+              hashes: [...(hashIn.values as string[])],
+            });
+            if (forcedPrefilterErrorOnCall === prefilterLookupCalls.length) {
+              return {
+                data: null,
+                error: { message: "simulated prefilter chunk lookup failure" },
+              };
+            }
+          }
           return { data: [...existingArticleHashPairs], error: null };
         }
         return { data: null, error: null };
@@ -383,6 +418,13 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
           rows: (args?.p_rows ?? []) as Array<Record<string, unknown>>,
         });
       }
+      if (fn === "apply_article_title_edits") {
+        titleEditRpcCalls.push((args?.p_rows ?? []) as Array<Record<string, unknown>>);
+        if (forcedTitleEditRpcError) {
+          return { data: null, error: { message: forcedTitleEditRpcError } };
+        }
+        return { data: (args?.p_rows as unknown[] | undefined)?.length ?? 0, error: null };
+      }
       return { data: null, error: null };
     }),
   }),
@@ -512,6 +554,10 @@ beforeEach(() => {
   storedArticlesByUrl = {};
   forcedTitleLookupError = null;
   forcedTitleVersionInsertError = null;
+  titleEditRpcCalls.length = 0;
+  forcedTitleEditRpcError = null;
+  prefilterLookupCalls.length = 0;
+  forcedPrefilterErrorOnCall = null;
   articlesUrlLookupCalls.length = 0;
   titleVersionInsertCalls.length = 0;
   recordedTitleVersionKeys.clear();
@@ -1317,7 +1363,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/changed", title: "Yeni başlık", source_id: "source-1" },
     ];
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(1);
     expect(titleVersionInsertCalls).toHaveLength(1);
@@ -1343,7 +1389,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/unchanged", title: "Aynı başlık", source_id: "source-1" },
     ];
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(0);
     expect(titleVersionInsertCalls).toHaveLength(0);
@@ -1371,7 +1417,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/case", title: "DEGISEN BASLIK", source_id: "source-1" },
     ];
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(1);
     expect(titleVersionInsertCalls).toHaveLength(1);
@@ -1393,7 +1439,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/never-stored", title: "Herhangi bir şey", source_id: "source-1" },
     ];
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(0);
     expect(titleVersionInsertCalls).toHaveLength(0);
@@ -1417,7 +1463,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/multi-2", title: "Yeni D", source_id: "source-2" },
     ];
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(2);
     // Exactly ONE insert call carrying both rows, not two separate calls.
@@ -1475,7 +1521,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/no-change", title: "Sabit başlık", source_id: "source-1" },
     ];
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(0);
     // Not just "no rows recorded" -- the insert() call must never happen.
@@ -1485,7 +1531,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
   it("returns 0 on an empty chunk without making any calls", async () => {
     const { recordTitleVersions, supabase } = await importRecordTitleVersions();
 
-    const count = await recordTitleVersions(supabase, []);
+    const { titleVersions: count } = await recordTitleVersions(supabase, []);
 
     expect(count).toBe(0);
     expect(articlesUrlLookupCalls).toHaveLength(0);
@@ -1504,7 +1550,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/throws", title: "Bir şey", source_id: "source-1" },
     ];
 
-    await expect(recordTitleVersions(throwingSupabase, chunk)).resolves.toBe(0);
+    await expect(recordTitleVersions(throwingSupabase, chunk)).resolves.toEqual({ titleVersions: 0, titleWriteBacks: 0 });
   });
 
   it("degrades to 0 (never throws) when the lookup select itself returns an error", async () => {
@@ -1515,7 +1561,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/select-fails", title: "Bir şey", source_id: "source-1" },
     ];
 
-    await expect(recordTitleVersions(supabase, chunk)).resolves.toBe(0);
+    await expect(recordTitleVersions(supabase, chunk)).resolves.toEqual({ titleVersions: 0, titleWriteBacks: 0 });
     expect(titleVersionInsertCalls).toHaveLength(0);
   });
 
@@ -1532,7 +1578,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/insert-fails", title: "Yeni başlık", source_id: "source-1" },
     ];
 
-    await expect(recordTitleVersions(supabase, chunk)).resolves.toBe(0);
+    await expect(recordTitleVersions(supabase, chunk)).resolves.toMatchObject({ titleVersions: 0 });
     // The insert was attempted (and failed) -- distinguishes this from the
     // "nothing changed, insert never called" case above.
     expect(titleVersionInsertCalls).toHaveLength(1);
@@ -1556,12 +1602,12 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       { url: "https://example.com/dup-cycle", title: "Yeni başlık", source_id: "source-1" },
     ];
 
-    const first = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: first } = await recordTitleVersions(supabase, chunk);
     expect(first).toBe(1);
 
     // Same chunk presented again, as it would be on the next 3-minute
     // cycle while the item stays in the feed with the same new title.
-    const second = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: second } = await recordTitleVersions(supabase, chunk);
     expect(second).toBe(0);
     // Both cycles attempt the upsert -- the dedupe happens at the DB layer
     // (unique index + ignoreDuplicates), not by skipping the call.
@@ -1588,7 +1634,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       },
     ];
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(0);
     expect(titleVersionInsertCalls).toHaveLength(0);
@@ -1615,7 +1661,7 @@ describe("recordTitleVersions [migration 056, U-07 collection half]", () => {
       chunk.push({ url, title: n === 0 ? "Yeni başlık" : `Sabit başlık ${n}`, source_id: "source-1" });
     }
 
-    const count = await recordTitleVersions(supabase, chunk);
+    const { titleVersions: count } = await recordTitleVersions(supabase, chunk);
 
     expect(count).toBe(1);
     expect(articlesUrlLookupCalls).toHaveLength(5);
@@ -1768,5 +1814,295 @@ describe("ingest cycle + recordTitleVersions integration [migration 056]", () =>
     expect(ingestCycleInserts).toHaveLength(1);
     expect((ingestCycleInserts[0] as { inserted?: number }).inserted).toBe(1);
     expect(titleVersionInsertCalls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chunked pre-filter (migration 074 §4) -- `dropExistingSourceContentHashRows`
+// now chunks ROWS by PREFILTER_CHUNK (100), one `.in(...).in(...)` lookup per
+// chunk instead of a single call over the whole batch.
+// ---------------------------------------------------------------------------
+
+describe("chunked (source_id, content_hash) pre-filter [migration 074]", () => {
+  it("splits 250 rows into 3 lookups of at most 100 each, dropping existing pairs in every chunk", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const rssSource = {
+      id: "src-074-prefilter",
+      name: "Prefilter Fixture",
+      slug: "prefilter-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/prefilter.rss",
+    };
+    const items = Array.from({ length: 250 }, (_, n) => ({
+      title: `Prefilter item ${n}`,
+      link: `https://example.com/prefilter/${n}`,
+    }));
+    const normalized = normalizeArticles(rssSource, items);
+
+    // Seed one already-"existing" (source_id, content_hash) pair per
+    // expected chunk (0-99, 100-199, 200-249) so all three chunks exercise
+    // a drop, not just the first.
+    existingArticleHashPairs.push(
+      { source_id: rssSource.id, content_hash: normalized[0]!.content_hash },
+      { source_id: rssSource.id, content_hash: normalized[100]!.content_hash },
+      { source_id: rssSource.id, content_hash: normalized[200]!.content_hash },
+    );
+
+    fakeSources.push({ ...rssSource, active: true });
+    fetcherItems["https://example.com/prefilter.rss"] = items;
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    const body = (await res.json()) as { dedupedInBatch?: number };
+
+    expect(prefilterLookupCalls).toHaveLength(3);
+    for (const call of prefilterLookupCalls) {
+      expect(call.hashes.length).toBeLessThanOrEqual(100);
+    }
+    expect(
+      prefilterLookupCalls.reduce((sum, c) => sum + c.hashes.length, 0),
+    ).toBe(250);
+    // One dropped row per chunk -- 3 total.
+    expect(body.dedupedInBatch).toBe(3);
+    expect(upserted.length).toBe(247);
+  });
+
+  it("a forced chunk lookup error degrades only that chunk and records prefilter_errors = 1", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const rssSource = {
+      id: "src-074-prefilter-err",
+      name: "Prefilter Error Fixture",
+      slug: "prefilter-error-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/prefilter-err.rss",
+    };
+    const items = Array.from({ length: 150 }, (_, n) => ({
+      title: `Prefilter err item ${n}`,
+      link: `https://example.com/prefilter-err/${n}`,
+    }));
+
+    fakeSources.push({ ...rssSource, active: true });
+    fetcherItems["https://example.com/prefilter-err.rss"] = items;
+    // Fail the 2nd chunk (rows 100-149) -- the 1st chunk (0-99) must still
+    // succeed and go through the upsert unaffected.
+    forcedPrefilterErrorOnCall = 2;
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+
+    expect(prefilterLookupCalls).toHaveLength(2);
+    // The failing chunk's rows are KEPT (not dropped), so all 150 items
+    // still reach the upsert.
+    expect(upserted.length).toBe(150);
+
+    expect(ingestCycleInserts).toHaveLength(1);
+    expect(
+      (ingestCycleInserts[0] as { prefilter_errors?: number }).prefilter_errors,
+    ).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Feed quarantine (migration 074 §4) -- a source whose
+// `fetch_quarantined_until` is still in the future is skipped entirely (no
+// `fetchFeed` call, no pool slot spent); one whose quarantine already
+// expired is fetched normally (a "probe").
+// ---------------------------------------------------------------------------
+
+describe("feed quarantine [migration 074]", () => {
+  it("never calls fetchFeed for a source whose quarantine is still in the future", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-074-quarantined",
+      name: "Quarantined Fixture",
+      slug: "quarantined-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/quarantined.rss",
+      active: true,
+      fetch_fail_streak: 25,
+      fetch_quarantined_until: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+    fetcherItems["https://example.com/quarantined.rss"] = [
+      { title: "Should never be seen", link: "https://example.com/quarantined/1" },
+    ];
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    const body = (await res.json()) as { quarantined?: number };
+
+    expect(fetchFeedCalls.some((c) => c.sourceId === "src-074-quarantined")).toBe(
+      false,
+    );
+    expect(upserted).toHaveLength(0);
+    expect(body.quarantined).toBeGreaterThanOrEqual(1);
+  });
+
+  it("fetches a source whose quarantine has already expired", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-074-expired-quarantine",
+      name: "Expired Quarantine Fixture",
+      slug: "expired-quarantine-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/expired-quarantine.rss",
+      active: true,
+      fetch_fail_streak: 20,
+      fetch_quarantined_until: new Date(Date.now() - 60 * 1000).toISOString(),
+    });
+    fetcherItems["https://example.com/expired-quarantine.rss"] = [
+      { title: "Probe item", link: "https://example.com/expired-quarantine/1" },
+    ];
+
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+
+    expect(
+      fetchFeedCalls.some((c) => c.sourceId === "src-074-expired-quarantine"),
+    ).toBe(true);
+  });
+
+  it("streak 19 + a failing fetch quarantines for ~1h (streak 20)", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-074-streak19",
+      name: "Streak 19 Fixture",
+      slug: "streak19-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/streak19.rss",
+      active: true,
+      fetch_fail_streak: 19,
+    });
+    fetcherResultOverrides["https://example.com/streak19.rss"] = {
+      status: 0,
+      error: "simulated network failure",
+    };
+
+    const before = Date.now();
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    const after = Date.now();
+
+    const row = sourceFetchStateWrites
+      .find((w) => w.fn === "ingest_set_source_fetch_state")
+      ?.rows.find((r) => r.id === "src-074-streak19");
+    expect(row).toBeDefined();
+    expect(row?.fetch_fail_streak).toBe(20);
+    const untilMs = Date.parse(String(row?.fetch_quarantined_until));
+    expect(untilMs).toBeGreaterThanOrEqual(before + 3_600_000 - 5_000);
+    expect(untilMs).toBeLessThanOrEqual(after + 3_600_000 + 5_000);
+  });
+
+  it("a 304 (not modified) resets the streak to 0 and clears quarantine", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-074-reset",
+      name: "Reset Fixture",
+      slug: "reset-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/reset.rss",
+      active: true,
+      fetch_fail_streak: 7,
+    });
+    fetcherItems["https://example.com/reset.rss"] = [
+      { title: "Ignored", link: "https://example.com/reset/1" },
+    ];
+    fetcherResultOverrides["https://example.com/reset.rss"] = { notModified: true };
+
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+
+    const row = sourceFetchStateWrites
+      .find((w) => w.fn === "ingest_set_source_fetch_state")
+      ?.rows.find((r) => r.id === "src-074-reset");
+    expect(row).toBeDefined();
+    expect(row?.fetch_fail_streak).toBe(0);
+    expect(row?.fetch_quarantined_until).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Headline write-back (migration 074 §1/§4, decision (b)) -- a changed,
+// same-source headline calls `apply_article_title_edits` with FULL,
+// unclamped titles; an RPC error is swallowed.
+// ---------------------------------------------------------------------------
+
+describe("headline write-back [migration 074]", () => {
+  it("calls apply_article_title_edits with full titles when a headline changes", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-074-writeback",
+      name: "Write-back Fixture",
+      slug: "writeback-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/writeback.rss",
+      active: true,
+    });
+    fetcherItems["https://example.com/writeback.rss"] = [
+      { title: "Güncellenmiş başlık", link: "https://example.com/writeback/1" },
+    ];
+    storedArticlesByUrl["https://example.com/writeback/1"] = {
+      id: "article-writeback",
+      title: "Eski başlık",
+      source_id: "src-074-writeback",
+    };
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+
+    expect(titleEditRpcCalls).toHaveLength(1);
+    expect(titleEditRpcCalls[0]).toEqual([
+      {
+        article_id: "article-writeback",
+        old_title: "Eski başlık",
+        new_title: "Güncellenmiş başlık",
+      },
+    ]);
+  });
+
+  it("swallows an apply_article_title_edits RPC error -- the cycle still returns 200 and articles are still upserted", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-074-writeback-err",
+      name: "Write-back Error Fixture",
+      slug: "writeback-error-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/writeback-err.rss",
+      active: true,
+    });
+    fetcherItems["https://example.com/writeback-err.rss"] = [
+      { title: "Yeni başlık", link: "https://example.com/writeback-err/1" },
+    ];
+    storedArticlesByUrl["https://example.com/writeback-err/1"] = {
+      id: "article-writeback-err",
+      title: "Eski başlık",
+      source_id: "src-074-writeback-err",
+    };
+    forcedTitleEditRpcError = "simulated apply_article_title_edits failure";
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+    expect(upserted.length).toBe(1);
+    expect(titleEditRpcCalls).toHaveLength(1);
   });
 });
