@@ -183,7 +183,15 @@ describe("getJevBlindspotSuspects", () => {
     ).toISOString();
 
     fixture.suspectClusters = [
-      { id: "c1", title_tr: "K1", title_tr_neutral: null, blindspot_recall_checked_at: "2026-09-19T00:00:00.000Z" },
+      {
+        id: "c1",
+        title_tr: "K1",
+        title_tr_neutral: null,
+        blindspot_recall_checked_at: "2026-09-19T00:00:00.000Z",
+        blindspot_recall_veto: true,
+        blindspot_recall_veto_at: "2026-09-19T00:07:00.000Z",
+      },
+      // Pre-071 row shape (no veto columns) — must degrade to "not vetoed".
       { id: "c2", title_tr: "K2", title_tr_neutral: "K2 nötr", blindspot_recall_checked_at: "2026-09-18T00:00:00.000Z" },
     ];
     fixture.blindspotPredictions = [
@@ -202,6 +210,8 @@ describe("getJevBlindspotSuspects", () => {
         topArticleTitle: "H1a",
         topSourceSlug: "kaynakY",
         topProb: 0.85,
+        vetoed: true,
+        vetoedAt: "2026-09-19T00:07:00.000Z",
       },
       {
         clusterId: "c2",
@@ -210,16 +220,30 @@ describe("getJevBlindspotSuspects", () => {
         topArticleTitle: "H2a",
         topSourceSlug: "kaynakX",
         topProb: 0.91,
+        vetoed: false,
+        vetoedAt: null,
       },
     ]);
 
     const clusterState = queryLog.suspectClusterStates[0] as {
+      selectArgs: unknown[];
       eq: Array<{ col: string; val: unknown }>;
       gte: Array<{ col: string; val: unknown }>;
+      or: string[];
       limit: number | null;
     };
-    expect(clusterState.eq).toContainEqual({ col: "blindspot_recall_suspect", val: true });
-    expect(clusterState.gte).toContainEqual({ col: "blindspot_recall_checked_at", val: sinceIso });
+    // Migration 071: a recall-vetoed cluster is always reviewable here, even
+    // when 064's independently computed suspect flag is false or its check
+    // is older than the 7-day window (a veto can be refreshed from
+    // updated_at alone). Suspects stay bounded by the window.
+    expect(clusterState.or).toEqual([
+      `blindspot_recall_veto.eq.true,and(blindspot_recall_suspect.eq.true,blindspot_recall_checked_at.gte."${sinceIso}")`,
+    ]);
+    expect(clusterState.eq).not.toContainEqual({ col: "blindspot_recall_suspect", val: true });
+    expect(clusterState.gte).toEqual([]);
+    // Migration 071: the admin view shows which suspects were hidden from readers.
+    expect(String(clusterState.selectArgs[0])).toMatch(/\bblindspot_recall_veto\b/);
+    expect(String(clusterState.selectArgs[0])).toMatch(/\bblindspot_recall_veto_at\b/);
     expect(clusterState.limit).toBe(JEV_BLINDSPOT_SUSPECT_LIMIT);
 
     const predictionState = queryLog.blindspotPredictionStates[0] as {

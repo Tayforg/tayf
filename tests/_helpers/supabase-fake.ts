@@ -120,6 +120,8 @@ export interface BuilderState {
   in: Array<{ col: string; vals: unknown[] }>;
   is: Array<{ col: string; val: unknown }>;
   not: Array<{ col: string; op: string; val: unknown }>;
+  /** Raw PostgREST logic-tree strings passed to `.or(filters)`, in call order. */
+  or: string[];
   gt: Array<{ col: string; val: unknown }>;
   gte: Array<{ col: string; val: unknown }>;
   lt: Array<{ col: string; val: unknown }>;
@@ -145,6 +147,7 @@ function freshState(table: string): BuilderState {
     in: [],
     is: [],
     not: [],
+    or: [],
     gt: [],
     gte: [],
     lt: [],
@@ -328,6 +331,9 @@ function makeBuilder(
                 op: String(args[1]),
                 val: args[2],
               });
+              break;
+            case "or":
+              state.or.push(String(args[0]));
               break;
             case "gt":
               state.gt.push({ col: String(args[0]), val: args[1] });

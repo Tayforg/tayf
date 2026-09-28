@@ -434,6 +434,10 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // (vote in ('iktidar', 'muhalefet', 'none')); it copies no bias->zone
       // MAP, so it isn't another zone-map copy.
       "068_framing_votes.sql",
+      // 071's blindspot_recall_veto_refresh() carries a VALUES-list copy of
+      // BIAS_TO_ZONE (not a CASE), so parseZoneCase can't read it; it is
+      // pinned by tests/migrations/071-blindspot-recall-veto.test.ts.
+      "071_blindspot_recall_veto.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

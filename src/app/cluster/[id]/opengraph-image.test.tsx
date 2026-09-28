@@ -86,6 +86,7 @@ function mkDetail(
       ...wireOverrides,
     },
     blindspotSuppressed: false,
+    blindspotRecallVetoed: false,
   };
 }
 

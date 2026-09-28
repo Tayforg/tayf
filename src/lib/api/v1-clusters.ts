@@ -1,6 +1,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import { zoneOf } from "@/lib/bias/config";
+import { applyRecallVeto } from "@/lib/clusters/recall-veto";
 import { siteUrl } from "@/lib/site-url";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
@@ -20,7 +21,7 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
  * JEV_POLITICS_CATEGORIES.
  */
 
-export const V1_CLUSTER_SELECT = `id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, article_count, first_published, updated_at,
+export const V1_CLUSTER_SELECT = `id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
          cluster_articles (
            articles (
              category,
@@ -76,6 +77,8 @@ export interface V1ClusterRow {
   bias_distribution: unknown;
   is_blindspot: boolean;
   blindspot_side: string | null;
+  /** Migration 071 recall veto — read here, never forwarded on the wire. */
+  blindspot_recall_veto?: boolean | null;
   article_count: number;
   first_published: string;
   updated_at: string;
@@ -183,6 +186,10 @@ export function toV1ClusterRecord(
       return a.slug.localeCompare(b.slug);
     });
 
+  // Migration 071: the public API must match the site — a blindspot claim
+  // the recall veto withdrew is reported as no blindspot, with no side.
+  const veto = applyRecallVeto(row);
+
   return {
     id: row.id,
     title,
@@ -191,8 +198,8 @@ export function toV1ClusterRecord(
     updated_at: row.updated_at,
     article_count: row.article_count,
     bias_distribution: normalizeBiasDistribution(row.bias_distribution),
-    is_blindspot: row.is_blindspot,
-    blindspot_side: row.blindspot_side,
+    is_blindspot: veto.isBlindspot,
+    blindspot_side: veto.blindspotSide,
     topic7: topic7 ?? null,
     sources,
   };

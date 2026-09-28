@@ -1584,3 +1584,43 @@ update public.report_share_links set revoked_at = now() where revoked_at is null
 #    migration change, no redeploy: the very next cron tick picks it up.
 vercel env rm ANTHROPIC_API_KEY production
 ```
+
+## 071 — Kör nokta geri çağırma vetosu (blindspot recall veto): APPLY 071 BEFORE THE VERCEL DEPLOY
+
+> **DEPLOY ORDER IS CRITICAL. Apply migration 071 to production *before* the Vercel deploy of this branch reaches Production.** Every reader-facing cluster query in this branch (`CLUSTER_EMBED_SELECT` in `politics-query.ts`, `cluster-detail-query.ts`, `blindspots-query.ts`, `weekly-query.ts`, `V1_CLUSTER_SELECT` in `v1-clusters.ts`, and the admin suspects list) now selects `clusters.blindspot_recall_veto`. PostgREST answers a `select` naming an unknown column with **HTTP 400**, and those fetchers throw on error — so deploying the app first takes down **home, /konu, search, RSS, /blindspots, /hafta, every /cluster page (and its OG/twitter images and /kart), and /api/v1/clusters** until 071 lands. Put the same warning in the PR body.
+
+What 071 does (additive only):
+
+- Adds `clusters.blindspot_recall_veto boolean not null default false` and `clusters.blindspot_recall_veto_at timestamptz`, plus the partial index `clusters_blindspot_recall_veto_idx`.
+- Adds `public.blindspot_recall_veto_refresh(p_since interval default '26 hours', p_min_prob numeric default 0.85)` — SECURITY DEFINER, `search_path = ''`, execute granted to `service_role` only. It adds each distinct voting (outlet/wire) source with a `blindspot_recall` match at `jev_prob >= 0.85` that is not already a member to the cluster's live tally, and sets the veto when the BLINDSPOT contract (≥5 sources, dominant zone ≥0.8) held before and fails after. It **never writes `is_blindspot`, `blindspot_side` or `updated_at`**; read paths treat `is_blindspot AND NOT blindspot_recall_veto` as the public claim (`src/lib/clusters/recall-veto.ts`).
+- Schedules pg_cron job `blindspot-recall-veto` at `7-59/10 * * * *` (7 minutes after each `jev-shadow` tick) and runs a one-off 30-day backfill.
+
+Steps:
+
+1. **Apply the migration** (the SQL editor or the one-at-a-time psql pattern from step 1). It records itself as version `'071'` in `supabase_migrations.schema_migrations`.
+2. **Verify before deploying:**
+
+   ```sql
+   -- column exists (the app's selects depend on it)
+   select column_name from information_schema.columns
+    where table_schema = 'public' and table_name = 'clusters' and column_name like 'blindspot_recall_veto%';
+   -- the backfill moved data (~7-8 on 2026-09-28)
+   select count(*) from public.clusters
+    where is_blindspot and blindspot_recall_veto and updated_at > now() - interval '7 days';
+   -- idempotent: a second run changes nothing
+   select public.blindspot_recall_veto_refresh();   -- expect 0
+   -- the schedule exists
+   select jobname, schedule from cron.job where jobname = 'blindspot-recall-veto';
+   ```
+
+3. **Then** let the Vercel deploy go to Production. After ~10 minutes, check `cron.job_run_details` for `blindspot-recall-veto` succeeding.
+
+**Kill switch** (no redeploy; readers see every DB-flagged blindspot again on the next cache refresh):
+
+```sql
+select cron.unschedule('blindspot-recall-veto');
+update public.clusters set blindspot_recall_veto = false, blindspot_recall_veto_at = null
+ where blindspot_recall_veto;
+```
+
+**Rollback:** do **not** drop the columns while this branch is deployed (the 400 above). Unschedule and clear as in the kill switch; drop the columns only after reverting the app.

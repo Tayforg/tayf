@@ -6,6 +6,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
+import { applyRecallVeto } from "@/lib/clusters/recall-veto";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
@@ -57,7 +58,7 @@ const ZONE_ORDER: readonly MediaDnaZone[] = [
 ];
 
 const CLUSTER_SELECT =
-  "id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, article_count, first_published";
+  "id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published";
 
 // `!inner` (plus the `source.active` filter below) is what keeps this read
 // inside migration 055's public policy: orphan history rows (source_id null
@@ -74,6 +75,8 @@ export interface WeeklyClusterRow {
   bias_distribution: BiasDistribution | null;
   is_blindspot: boolean;
   blindspot_side: BiasCategory | null;
+  /** Migration 071 recall veto; `true` withdraws the blindspot claim. */
+  blindspot_recall_veto?: boolean | null;
   article_count: number;
   first_published: string;
 }
@@ -178,7 +181,10 @@ export function summariseWeek(
       });
     }
 
-    if (row.is_blindspot) {
+    // Migration 071 recall veto: a withdrawn claim leaves the blindspot
+    // list only — the story still counts toward zone totals and topClusters.
+    const veto = applyRecallVeto(row);
+    if (veto.isBlindspot) {
       const side = row.blindspot_side
         ? zoneOf(row.blindspot_side)
         : dominantZoneOf(counts);

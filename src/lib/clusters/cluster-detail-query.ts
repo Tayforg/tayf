@@ -10,6 +10,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
+import { applyRecallVeto, logRecallVeto } from "@/lib/clusters/recall-veto";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone, Source } from "@/types";
@@ -118,6 +119,11 @@ export interface ClusterDetail {
   // but the silent pole's feeds are too broken to trust the silence" so it
   // can show a different explanation instead of silently changing wording.
   blindspotSuppressed: boolean;
+  // True only when the migration-071 recall veto withdrew this cluster's
+  // blindspot claim: Jev matched same-event coverage from the silent side
+  // that the clusterer put in another cluster. A matching fact, not a feed
+  // outage, so it is independent of `blindspotSuppressed` (never both).
+  blindspotRecallVetoed: boolean;
 }
 
 /**
@@ -161,6 +167,8 @@ type ClusterRow = {
   bias_distribution: unknown;
   is_blindspot: boolean;
   blindspot_side: BiasCategory | null;
+  /** Migration 071 recall veto. Optional: pre-071 rows/fixtures pass through. */
+  blindspot_recall_veto?: boolean | null;
   first_published: string;
   updated_at: string;
   /** seo-3 (migration 037): true once the retention cron has archived this
@@ -253,7 +261,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       supabase
         .from("clusters")
         .select(
-          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, first_published, updated_at, is_archived"
+          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived"
         )
         .eq("id", id)
         .maybeSingle<ClusterRow>(),
@@ -313,8 +321,14 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     // never writes clusters.is_blindspot — only the value returned here.
     // Only pay for the health fetch when the DB already flagged the
     // cluster (the common case is not a blindspot at all).
-    let isBlindspot = clusterRow.is_blindspot;
-    let blindspotSide = clusterRow.blindspot_side;
+    //
+    // Migration 071 recall veto runs FIRST: a vetoed cluster skips the
+    // feed-health fetch entirely (the veto is a matching fact, not a feed
+    // outage, so blindspotSuppressed stays false).
+    const veto = applyRecallVeto(clusterRow);
+    if (veto.vetoed) logRecallVeto(id);
+    let isBlindspot = veto.isBlindspot;
+    let blindspotSide = veto.blindspotSide;
     let blindspotSuppressed = false;
     if (isBlindspot) {
       const dominantZone = dominantZoneOf(distribution);
@@ -464,6 +478,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         }))
       ),
       blindspotSuppressed,
+      blindspotRecallVetoed: veto.vetoed,
     };
   } catch (err) {
     // Rethrow — swallowing to null would cache a 404 for a real cluster.

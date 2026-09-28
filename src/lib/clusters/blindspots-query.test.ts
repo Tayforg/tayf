@@ -141,10 +141,12 @@ describe("getBlindspots query shape", () => {
 
     const state = fixture.lastState as BuilderState;
     expect(state.table).toBe("clusters");
-    // Two boolean-flag predicates: is_blindspot (existing) + is_archived (new).
-    expect(state.eq).toHaveLength(2);
+    // Three boolean-flag predicates: is_blindspot, is_archived, and the
+    // migration-071 recall veto (a vetoed cluster never reaches the feed).
+    expect(state.eq).toHaveLength(3);
     expect(state.eq).toContainEqual({ col: "is_blindspot", val: true });
     expect(state.eq).toContainEqual({ col: "is_archived", val: false });
+    expect(state.eq).toContainEqual({ col: "blindspot_recall_veto", val: false });
     expect(state.gte).toEqual([{ col: "article_count", val: 3 }]);
     expect(state.lt[0]?.col).toBe("first_published");
     expect(state.order).toEqual([
@@ -154,6 +156,8 @@ describe("getBlindspots query shape", () => {
 
     // BL-13: sources embed must carry both rights flags.
     const selectArg = state.selectArgs[0] as string;
+    // Migration 071: the cluster row carries the recall veto column.
+    expect(selectArg).toMatch(/\bblindspot_recall_veto\b/);
     expect(selectArg).toMatch(/sources\s*\([^)]*\bimage_allowed\b/);
     expect(selectArg).toMatch(/sources\s*\([^)]*\bexcerpt_allowed\b/);
   });

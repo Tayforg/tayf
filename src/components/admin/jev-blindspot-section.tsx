@@ -25,7 +25,7 @@ export function JevBlindspotSection({
     <AdminSection
       id="kor-nokta"
       title="Şüpheli kör noktalar"
-      help="Kör nokta: bir olayı yalnızca bir tarafın medyasının yazdığı küme. Jev burada susan tarafın da aynı olayı yazdığını buldu; yani bu kör nokta aslında bir eşleştirme hatası olabilir. Son 7 gün."
+      help="Kör nokta: bir olayı yalnızca bir tarafın medyasının yazdığı küme. Jev burada susan tarafın da aynı olayı yazdığını buldu; yani bu kör nokta aslında bir eşleştirme hatası olabilir. Son 7 gün; okurdan gizlenen kümeler her zaman listelenir."
       action="Bulunan haberin gerçekten aynı olay olup olmadığına bakın."
       collapsible
     >
@@ -48,6 +48,21 @@ export function JevBlindspotSection({
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2 text-sm">
+                {row.vetoed ? (
+                  // Migration 071 recall veto: the silent side's matched
+                  // coverage breaks the BLINDSPOT contract, so readers no
+                  // longer see this cluster as a blindspot. The veto time is
+                  // visible text (not a title tooltip) so touch, keyboard
+                  // and screen-reader users get it too.
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
+                    <StatusBadge tone="warn">Okurdan gizlendi</StatusBadge>
+                    {row.vetoedAt ? (
+                      <span className="text-xs text-muted-foreground">
+                        {fmtDateTime(row.vetoedAt)} itibarıyla
+                      </span>
+                    ) : null}
+                  </span>
+                ) : null}
                 <StatusBadge tone="muted">{row.topSourceSlug ?? "—"}</StatusBadge>
                 <span className="text-foreground">
                   Aynı olay olasılığı: {row.topProb !== null ? fmtPct(row.topProb) : "—"}

@@ -157,7 +157,7 @@ describe("getWeeklyClusters", () => {
 
     const select = String(state.selectArgs[0]);
     expect(select).toBe(
-      "id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, article_count, first_published",
+      "id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published",
     );
 
     expect(state.eq).toContainEqual({ col: "is_archived", val: false });
@@ -537,6 +537,58 @@ describe("summariseWeek — blindspots", () => {
 
     expect(summariseWeek(rows, null).blindspots).toHaveLength(1);
     expect(summariseWeek(rows, health()).blindspots).toHaveLength(1);
+  });
+
+  it("excludes a recall-vetoed blindspot (migration 071) but still counts it in topClusters", () => {
+    const rows = [
+      row({
+        id: "vetoed",
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        blindspot_recall_veto: true,
+        // Two zones so the row qualifies for topClusters too.
+        bias_distribution: dist({ pro_government: 5, center: 1 }),
+        article_count: 6,
+      }),
+      row({
+        id: "kept",
+        is_blindspot: true,
+        blindspot_side: "opposition",
+        blindspot_recall_veto: false,
+        bias_distribution: dist({ opposition: 4 }),
+        article_count: 4,
+      }),
+    ];
+
+    const summary = summariseWeek(rows, null);
+
+    expect(summary.blindspots.map((b) => b.id)).toEqual(["kept"]);
+    expect(summary.topClusters.map((c) => c.id)).toEqual(["vetoed"]);
+  });
+
+  it("treats a null/absent recall veto as pass-through", () => {
+    const rows = [
+      row({
+        id: "null-veto",
+        is_blindspot: true,
+        blindspot_side: "opposition",
+        blindspot_recall_veto: null,
+        bias_distribution: dist({ opposition: 5 }),
+        article_count: 5,
+      }),
+      row({
+        id: "absent-veto",
+        is_blindspot: true,
+        blindspot_side: "opposition",
+        bias_distribution: dist({ opposition: 3 }),
+        article_count: 3,
+      }),
+    ];
+
+    expect(summariseWeek(rows, null).blindspots.map((b) => b.id)).toEqual([
+      "null-veto",
+      "absent-veto",
+    ]);
   });
 
   it("orders blindspots by article_count desc and caps at five", () => {
