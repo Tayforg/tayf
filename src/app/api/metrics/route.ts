@@ -153,25 +153,39 @@ export const GET = withApiErrors(async (request: Request) => {
     .select("row_errors")
     .gte("finished_at", new Date(Date.now() - 3600_000).toISOString());
 
-  // Run all the counts in parallel.
+  // Headline-cron health pair (eligible / neutralized) in ONE scan via the
+  // 083 RPC — the two head-counts it replaces were the 1.75 s-mean shape.
+  // Exact values, same `article_count >= 3` semantics. Deliberately NOT the
+  // cached getNeutralizedStatus(): this endpoint stays live and fail-closed.
+  const neutralCountsQuery = supabase.rpc("headline_neutral_counts");
+
+  // Run all the counts in parallel. Count modes are chosen by measured cost:
+  // `planned` (planner estimate, typically within a few %) for the full-table
+  // shapes that take >= 100 ms exact (articlesTotal, articlesWithImage);
+  // everything else is index-bounded or small and stays `exact`.
   const queries = [
-    { name: "articlesTotal", q: supabase.from("articles").select("*", { count: "exact", head: true }) },
+    { name: "articlesTotal", q: supabase.from("articles").select("*", { count: "planned", head: true }) },
     { name: "articlesLast24h", q: supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 24 * 3600_000).toISOString()) },
     { name: "articlesLastHour", q: supabase.from("articles").select("*", { count: "exact", head: true }).gte("created_at", new Date(Date.now() - 3600_000).toISOString()) },
     { name: "politicsNullImage", q: supabase.from("articles").select("*", { count: "exact", head: true }).is("image_url", null).in("category", ["politika", "son_dakika"]) },
     { name: "politicsTotal", q: supabase.from("articles").select("*", { count: "exact", head: true }).in("category", ["politika", "son_dakika"]) },
-    { name: "articlesWithImage", q: supabase.from("articles").select("*", { count: "exact", head: true }).not("image_url", "is", null) },
+    { name: "articlesWithImage", q: supabase.from("articles").select("*", { count: "planned", head: true }).not("image_url", "is", null) },
     { name: "clustersTotal", q: supabase.from("clusters").select("*", { count: "exact", head: true }) },
     { name: "clustersMulti", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 2) },
     { name: "clustersBlindspots", q: supabase.from("clusters").select("*", { count: "exact", head: true }).eq("is_blindspot", true) },
-    { name: "clustersNeutralizedEligible", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 3) },
-    { name: "clustersNeutralized", q: supabase.from("clusters").select("*", { count: "exact", head: true }).gte("article_count", 3).not("title_neutral_at", "is", null) },
     { name: "sourcesTotal", q: supabase.from("sources").select("*", { count: "exact", head: true }) },
     { name: "sourcesActive", q: supabase.from("sources").select("*", { count: "exact", head: true }).eq("active", true) },
   ];
-  const [results, oldestPendingNeutralRes, latestQualitySnapshotRes, ingestRowErrorsRes] =
+  const [
+    results,
+    neutralCountsRes,
+    oldestPendingNeutralRes,
+    latestQualitySnapshotRes,
+    ingestRowErrorsRes,
+  ] =
     await Promise.all([
       Promise.all(queries.map((entry) => entry.q)),
+      neutralCountsQuery,
       oldestPendingNeutralQuery,
       latestQualitySnapshotQuery,
       ingestRowErrorsQuery,
@@ -194,7 +208,7 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   // results[i] is guaranteed defined: the `queries` array is a literal of
-  // exactly 13 entries, so Promise.all returns exactly 13 results. The non-
+  // exactly 11 entries, so Promise.all returns exactly 11 results. The non-
   // null assertions below mirror that invariant for the strict tsconfig
   // (noUncheckedIndexedAccess); the alternative is a tuple type, which is
   // noisier for the same guarantee.
@@ -207,10 +221,32 @@ export const GET = withApiErrors(async (request: Request) => {
   const clustersTotal = results[6]!;
   const clustersMulti = results[7]!;
   const clustersBlindspots = results[8]!;
-  const clustersNeutralizedEligible = results[9]!;
-  const clustersNeutralized = results[10]!;
-  const sourcesTotal = results[11]!;
-  const sourcesActive = results[12]!;
+  const sourcesTotal = results[9]!;
+  const sourcesActive = results[10]!;
+
+  // Parse the RPC the way src/lib/headline/status.ts does (single-row table
+  // function; tolerate a bare object). Fail closed on error / no row /
+  // non-finite values — a flatlined 0 would read as "headline cron caught up".
+  const neutralRow = (
+    Array.isArray(neutralCountsRes.data) ? neutralCountsRes.data[0] : neutralCountsRes.data
+  ) as { eligible?: unknown; neutralized?: unknown } | null | undefined;
+  const eligibleCount = Number(neutralRow?.eligible);
+  const neutralizedCount = Number(neutralRow?.neutralized);
+  if (
+    neutralCountsRes.error ||
+    !neutralRow ||
+    !Number.isFinite(eligibleCount) ||
+    !Number.isFinite(neutralizedCount)
+  ) {
+    console.error(
+      "[metrics] supabase headline_neutral_counts failure",
+      neutralCountsRes.error ?? "missing or malformed row",
+    );
+    return apiError(503, "metrics query failed", {
+      code: "METRICS_QUERY_FAILED",
+      details: { queries: ["headlineNeutralCounts"] },
+    });
+  }
 
   if (oldestPendingNeutralRes.error) {
     console.error(
@@ -270,8 +306,6 @@ export const GET = withApiErrors(async (request: Request) => {
   const totalArticles = articlesTotal.count ?? 0;
   const politicsNullImageCount = politicsNullImage.count ?? 0;
   const politicsTotalCount = politicsTotal.count ?? 0;
-  const eligibleCount = clustersNeutralizedEligible.count ?? 0;
-  const neutralizedCount = clustersNeutralized.count ?? 0;
   const oldestPendingFirstPublished =
     (oldestPendingNeutralRes.data as { first_published: string | null } | null)
       ?.first_published ?? null;

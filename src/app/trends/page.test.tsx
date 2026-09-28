@@ -2,13 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
-// trends-query.ts's fetchTimeline is a "use cache" cached fetcher — mocked
+// daily-zones.ts's fetchIstanbulTimeline is a "use cache" cached fetcher — mocked
 // wholesale (mirrors src/app/metodoloji/page.test.tsx's `@/lib/headline/
 // status` mock) so this suite exercises only TrendsPage's three-state
 // branching (null / empty / data), not Supabase or Next's cache machinery.
 //
-// fetchTimeline now resolves `null` on a Supabase error instead of throwing
-// (see src/lib/clusters/trends-query.ts) — a throw inside a "use cache"
+// fetchIstanbulTimeline resolves `null` on a Supabase error instead of throwing
+// (see src/lib/trends/daily-zones.ts) — a throw inside a "use cache"
 // function aborts the whole `next build` prerender. The page must render an
 // honest "unavailable" state for `null`, distinct from the existing
 // "veri bulunamadı" copy for a genuinely empty (all-zero) result.
@@ -83,7 +83,7 @@ const UNAVAILABLE_COPY = "Trend verileri şu anda yüklenemiyor.";
 const EMPTY_COPY = "Son 30 gün için veri bulunamadı.";
 
 describe("/trends page", () => {
-  it("renders the honest unavailable state (not the empty-data state) when fetchTimeline resolves null", async () => {
+  it("renders the honest unavailable state (not the empty-data state) when fetchIstanbulTimeline resolves null", async () => {
     mockBuckets = null;
 
     const tree = await TrendsPage();

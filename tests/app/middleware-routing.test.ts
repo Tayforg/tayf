@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 import { middleware, config } from "@/middleware";
 
@@ -56,5 +56,62 @@ describe("middleware — real 404 rewrite (A1)", () => {
     const res = await middleware(req("/admin"));
     expect(res.status).toBe(307);
     expect(res.headers.get("location")).toBe(`${ORIGIN}/admin/login`);
+  });
+});
+
+describe("middleware — /source/:slug gate", () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    fetchMock.mockReset();
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const u = String(input);
+      if (u.includes("slug=eq.")) return new Response("[]", { status: 200 });
+      return new Response(JSON.stringify([{ slug: "cnn-turk" }]), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://proj.supabase.co");
+    vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "anon");
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("rewrites an unknown source to the not-found sink, not a bare 404", async () => {
+    const res = await middleware(req("/source/nonexistent-src"));
+    expect(res.headers.get("x-middleware-rewrite")).toContain("/__tayf-not-found");
+    expect(res.status).not.toBe(404);
+  });
+
+  it("passes a known source through", async () => {
+    const res = await middleware(req("/source/cnn-turk"));
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("rewrites a malformed slug without any fetch", async () => {
+    const res = await middleware(req("/source/Bad_Slug!"));
+    expect(res.headers.get("x-middleware-rewrite")).toContain("/__tayf-not-found");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves nested /source/<slug>/opengraph-image alone", async () => {
+    const res = await middleware(req("/source/cnn-turk/opengraph-image"));
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails open when the lookup errors", async () => {
+    fetchMock.mockReset();
+    fetchMock.mockRejectedValue(new Error("down"));
+    // Fresh module: the shared gate may hold a just-loaded set from earlier tests.
+    vi.resetModules();
+    const { middleware: fresh } = await import("@/middleware");
+    const res = await fresh(req("/source/some-other-src"));
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("matcher has /source/:slug and never /source/:path*", () => {
+    expect(config.matcher).toContain("/source/:slug");
+    expect(config.matcher).not.toContain("/source/:path*");
   });
 });

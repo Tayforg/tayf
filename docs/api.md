@@ -53,13 +53,14 @@ Live counts for articles, clusters, and sources.
 - `avgArticlesPerCluster` averages over ALL clusters (singletons included); `avgArticlesPerMultiCluster` averages only over multi-article clusters — `(total articles - singleton clusters) / multiArticle`, 2 decimals, 0 when `multiArticle` is 0
 - `neutralizedRatio`: `neutralized / neutralizedEligible`, 2 decimals; `oldestPendingNeutralAgeSec` is null when no eligible cluster is awaiting a neutral headline
 - `quality` (migration 039): summary of the latest `cluster_quality_snapshots` row (written by `node scripts/audit-clusters.mjs --json --persist`) — `null` before the first audit run, or during a partially-applied 039 migration window
+- Planner estimates: `articles.total` and `articles.withImage` are read with `Prefer: count=planned` (Postgres statistics estimate, typically within a few %, refreshed by autovacuum ANALYZE), so `avgArticlesPerCluster` and `avgArticlesPerMultiCluster` (which use `articles.total`) are approximate. All other counts (`last24h`, `lastHour`, `politics*`, `clusters.total`/`multiArticle`/`blindspots`, `sources.*`) are exact. `neutralizedEligible` and `neutralized` are exact, served by `headline_neutral_counts()` (migration 083) in a single scan; an RPC failure returns 503 with `details.queries: ["headlineNeutralCounts"]`
 - `ingest.rowErrorsLastHour` (migration 039): `sum(row_errors)` over `ingest_cycles` rows finished in the last hour; `0` when the table is empty or not yet migrated
 
 ---
 
 ### `GET /api/admin`
 
-Admin statistics. Not rate-limited (read-only).
+Admin statistics. Not rate-limited (read-only). `articles`, `clusters` and `missingImages` are planner estimates (`Prefer: count=planned`); `sources` is exact. The admin UI marks the estimated tiles with `≈`.
 
 **Response** `200`:
 ```json

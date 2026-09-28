@@ -23,7 +23,7 @@ vi.mock("next/server", async (importOriginal) => {
 // ---------------------------------------------------------------------------
 // Supabase mock plumbing for /api/metrics.
 //
-// The route issues Promise.all over thirteen count queries. Each one starts with
+// The route issues Promise.all over eleven count queries plus one RPC. Each one starts with
 // `supabase.from("<table>").select("*", { count: "exact", head: true })` and
 // then chains zero or more filter predicates (.gte / .is / .in / .not / .eq).
 // Every chain is thenable (the route `await`s on them directly via Promise.all)
@@ -65,14 +65,12 @@ const DEFAULT_COUNTS: CountResponse[] = [
   { count: 40, error: null }, // 6  clustersTotal
   { count: 12, error: null }, // 7  clustersMulti
   { count: 2, error: null }, // 8  clustersBlindspots
-  { count: 10, error: null }, // 9  clustersNeutralizedEligible
-  { count: 7, error: null }, // 10 clustersNeutralized
-  { count: 8, error: null }, // 11 sourcesTotal
-  { count: 7, error: null }, // 12 sourcesActive
-  // 13 oldestPendingNeutral — null data means "no pending row"; the
+  { count: 8, error: null }, // 9  sourcesTotal
+  { count: 7, error: null }, // 10 sourcesActive
+  // 11 oldestPendingNeutral — null data means "no pending row"; the
   // route renders this as `oldestPendingNeutralAgeSec: null`.
   { count: null, data: null, error: null },
-  // 14 latestQualitySnapshot — a present row; the route renders this as
+  // 12 latestQualitySnapshot — a present row; the route renders this as
   // `clusters.quality`.
   {
     count: null,
@@ -84,12 +82,30 @@ const DEFAULT_COUNTS: CountResponse[] = [
     },
     error: null,
   },
-  // 15 ingestRowErrors — two cycles finished in the last hour.
+  // 13 ingestRowErrors — two cycles finished in the last hour.
   { count: null, data: [{ row_errors: 2 }, { row_errors: 1 }], error: null },
 ];
 
 let currentCounts: CountResponse[] = [...DEFAULT_COUNTS];
 let callIndex = 0;
+
+// select() options in call order, so tests can assert the count mode
+// (exact vs planned) chosen for each positional query.
+let selectOpts: unknown[] = [];
+
+// rpc() plumbing for headline_neutral_counts (migration 083).
+interface RpcResponse {
+  data: unknown;
+  error: { message: string; code?: string } | null;
+}
+const DEFAULT_RPC: Record<string, RpcResponse> = {
+  headline_neutral_counts: {
+    data: [{ eligible: 10, neutralized: 7 }],
+    error: null,
+  },
+};
+let currentRpc: Record<string, RpcResponse> = { ...DEFAULT_RPC };
+let rpcCalls: string[] = [];
 
 vi.mock("@supabase/supabase-js", () => ({
   createClient: () => ({
@@ -98,7 +114,7 @@ vi.mock("@supabase/supabase-js", () => ({
       // thenable whose resolved value is the next configured CountResponse.
       const thenable: {
         then: Promise<CountResponse>["then"];
-        select: () => typeof thenable;
+        select: (_c?: string, opts?: unknown) => typeof thenable;
         gte: () => typeof thenable;
         is: () => typeof thenable;
         in: () => typeof thenable;
@@ -110,7 +126,7 @@ vi.mock("@supabase/supabase-js", () => ({
       } = {} as never;
 
       const chain: {
-        select: () => typeof thenable;
+        select: (_c?: string, opts?: unknown) => typeof thenable;
         gte: () => typeof thenable;
         is: () => typeof thenable;
         in: () => typeof thenable;
@@ -121,7 +137,10 @@ vi.mock("@supabase/supabase-js", () => ({
         maybeSingle: () => typeof thenable;
         then: Promise<CountResponse>["then"];
       } = {
-        select: () => thenable,
+        select: (_c?: string, opts?: unknown) => {
+          selectOpts.push(opts);
+          return thenable;
+        },
         gte: () => thenable,
         is: () => thenable,
         in: () => thenable,
@@ -140,6 +159,10 @@ vi.mock("@supabase/supabase-js", () => ({
       Object.assign(thenable, chain);
       return thenable;
     },
+    rpc: (name: string) => {
+      rpcCalls.push(name);
+      return Promise.resolve(currentRpc[name] ?? { data: null, error: null });
+    },
   }),
 }));
 
@@ -155,6 +178,9 @@ beforeEach(() => {
   process.env.CRON_SECRET = TEST_CRON_SECRET;
   currentCounts = [...DEFAULT_COUNTS];
   callIndex = 0;
+  selectOpts = [];
+  currentRpc = { ...DEFAULT_RPC };
+  rpcCalls = [];
 });
 
 afterEach(() => {
@@ -217,7 +243,7 @@ describe("GET /api/metrics", () => {
       // 7 / 10 = 0.70 — well below the 0.9 page threshold the docs
       // call out as the headline-cron drift signal.
       neutralizedRatio: 0.7,
-      // null because the fake's index-13 row returns data: null,
+      // null because the fake's index-11 row returns data: null,
       // meaning "no pending row at all".
       oldestPendingNeutralAgeSec: null,
       quality: {
@@ -318,7 +344,7 @@ describe("GET /api/metrics", () => {
 
   it("sets clusters.quality to null before the first audit-clusters --persist run", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    currentCounts[14] = { count: null, data: null, error: null }; // latestQualitySnapshot
+    currentCounts[12] = { count: null, data: null, error: null }; // latestQualitySnapshot
     const { status, body } = await callGet();
     expect(status).toBe(200);
     expect(body.clusters.quality).toBeNull();
@@ -326,7 +352,7 @@ describe("GET /api/metrics", () => {
 
   it("sets ingest.rowErrorsLastHour to 0 when ingest_cycles is empty", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    currentCounts[15] = { count: null, data: [], error: null }; // ingestRowErrors
+    currentCounts[13] = { count: null, data: [], error: null }; // ingestRowErrors
     const { status, body } = await callGet();
     expect(status).toBe(200);
     expect(body.ingest.rowErrorsLastHour).toBe(0);
@@ -334,7 +360,7 @@ describe("GET /api/metrics", () => {
 
   it("treats a missing row_errors value on an ingest_cycles row as 0", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    currentCounts[15] = {
+    currentCounts[13] = {
       count: null,
       data: [{ row_errors: null }, { row_errors: 4 }],
       error: null,
@@ -345,7 +371,7 @@ describe("GET /api/metrics", () => {
 
   it("returns 503 when the latest-quality-snapshot query errors", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    currentCounts[14] = { count: null, error: { message: "boom" } }; // latestQualitySnapshot
+    currentCounts[12] = { count: null, error: { message: "boom" } }; // latestQualitySnapshot
     const { status, body } = await callGet();
     expect(status).toBe(503);
     expect(body.code).toBe("METRICS_QUERY_FAILED");
@@ -354,7 +380,7 @@ describe("GET /api/metrics", () => {
 
   it("returns 503 when the ingest-row-errors query errors", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    currentCounts[15] = { count: null, error: { message: "boom" } }; // ingestRowErrors
+    currentCounts[13] = { count: null, error: { message: "boom" } }; // ingestRowErrors
     const { status, body } = await callGet();
     expect(status).toBe(503);
     expect(body.code).toBe("METRICS_QUERY_FAILED");
@@ -368,7 +394,7 @@ describe("GET /api/metrics", () => {
   // instead of 503ing the whole endpoint (docs/migration-guide.md F2).
   it("treats a missing cluster_quality_snapshots table (PGRST205) as quality: null instead of 503", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    currentCounts[14] = { count: null, data: null, error: { message: "not found", code: "PGRST205" } };
+    currentCounts[12] = { count: null, data: null, error: { message: "not found", code: "PGRST205" } };
     const { status, body } = await callGet();
     expect(status).toBe(200);
     expect(body.clusters.quality).toBeNull();
@@ -376,9 +402,81 @@ describe("GET /api/metrics", () => {
 
   it("treats a missing ingest_cycles table (Postgres 42P01) as rowErrorsLastHour: 0 instead of 503", async () => {
     currentCounts = [...DEFAULT_COUNTS];
-    currentCounts[15] = { count: null, data: null, error: { message: "relation does not exist", code: "42P01" } };
+    currentCounts[13] = { count: null, data: null, error: { message: "relation does not exist", code: "42P01" } };
     const { status, body } = await callGet();
     expect(status).toBe(200);
     expect(body.ingest.rowErrorsLastHour).toBe(0);
+  });
+
+  // exact-counts: count modes are chosen by measured cost. Positional,
+  // matching the order of the `queries` array in the route. The three
+  // non-count selects (oldest-pending / quality / row_errors) pass no
+  // options, so filtering on defined options leaves the 11 count queries.
+  it("uses planned counts only for the expensive full-table shapes", async () => {
+    await callGet();
+    const countOpts = selectOpts.filter((o) => o !== undefined);
+    expect(countOpts).toHaveLength(11);
+    selectOpts = countOpts;
+    const planned = { count: "planned", head: true };
+    const exact = { count: "exact", head: true };
+    expect(selectOpts[0]).toEqual(planned); // articlesTotal
+    expect(selectOpts[1]).toEqual(exact); // articlesLast24h
+    expect(selectOpts[2]).toEqual(exact); // articlesLastHour
+    expect(selectOpts[3]).toEqual(exact); // politicsNullImage
+    expect(selectOpts[4]).toEqual(exact); // politicsTotal
+    expect(selectOpts[5]).toEqual(planned); // articlesWithImage
+    expect(selectOpts[6]).toEqual(exact); // clustersTotal
+    expect(selectOpts[7]).toEqual(exact); // clustersMulti
+    expect(selectOpts[8]).toEqual(exact); // clustersBlindspots
+    expect(selectOpts[9]).toEqual(exact); // sourcesTotal
+    expect(selectOpts[10]).toEqual(exact); // sourcesActive
+  });
+
+  it("reads the neutral pair with a single headline_neutral_counts RPC", async () => {
+    await callGet();
+    expect(rpcCalls).toEqual(["headline_neutral_counts"]);
+  });
+
+  it("returns 503 with headlineNeutralCounts when the RPC errors", async () => {
+    currentRpc.headline_neutral_counts = { data: null, error: { message: "boom" } };
+    const { status, body } = await callGet();
+    expect(status).toBe(503);
+    expect(body.code).toBe("METRICS_QUERY_FAILED");
+    expect(body.details.queries).toEqual(["headlineNeutralCounts"]);
+  });
+
+  it("returns 503 when the RPC row is malformed", async () => {
+    currentRpc.headline_neutral_counts = { data: [{ eligible: "x" }], error: null };
+    const { status, body } = await callGet();
+    expect(status).toBe(503);
+    expect(body.details.queries).toEqual(["headlineNeutralCounts"]);
+  });
+
+  it("returns 503 when the RPC returns no row", async () => {
+    currentRpc.headline_neutral_counts = { data: [], error: null };
+    const { status } = await callGet();
+    expect(status).toBe(503);
+  });
+
+  it("maps an RPC that returns a single object instead of an array", async () => {
+    currentRpc.headline_neutral_counts = {
+      data: { eligible: 20, neutralized: 5 },
+      error: null,
+    };
+    const { status, body } = await callGet();
+    expect(status).toBe(200);
+    expect(body.clusters.neutralizedEligible).toBe(20);
+    expect(body.clusters.neutralized).toBe(5);
+    expect(body.clusters.neutralizedRatio).toBe(0.25);
+  });
+
+  it("accepts numeric strings from the RPC (bigint over PostgREST)", async () => {
+    currentRpc.headline_neutral_counts = {
+      data: [{ eligible: "10646", neutralized: "0" }],
+      error: null,
+    };
+    const { body } = await callGet();
+    expect(body.clusters.neutralizedEligible).toBe(10646);
+    expect(body.clusters.neutralized).toBe(0);
   });
 });

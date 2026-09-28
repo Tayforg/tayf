@@ -14,7 +14,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('Star', 'star', 'http://www.star.com.tr', 'http://www.star.com.tr/rss/sondakika.xml', 'pro_government', 'outlet', true),
   ('Takvim', 'takvim', 'https://www.takvim.com.tr', 'https://www.takvim.com.tr/rss/anasayfa.xml', 'pro_government', 'outlet', true),
   ('Diriliş Postası', 'dirilis-postasi', 'https://www.dirilispostasi.com', 'https://www.dirilispostasi.com/rss', 'pro_government', 'outlet', true),
-  ('Türkiye Gazetesi', 'turkiye-gazetesi', 'https://www.turkiyegazetesi.com.tr', 'https://www.turkiyegazetesi.com.tr/rss/rss.xml', 'pro_government', 'outlet', true),
+  ('Türkiye Gazetesi', 'turkiye-gazetesi', 'https://www.turkiyegazetesi.com.tr', 'https://www.turkiyegazetesi.com.tr/rss', 'pro_government', 'outlet', true),
   ('GZT', 'gzt', 'https://www.gzt.com', 'https://www.gzt.com/rss', 'pro_government', 'outlet', true),
   ('Vahdet', 'vahdet', 'https://www.vahdet.com.tr', 'https://www.vahdet.com.tr/rss', 'pro_government', 'outlet', false),
   ('Yenisöz', 'yenisoz', 'https://www.yenisoz.com.tr', 'https://www.yenisoz.com.tr/rss', 'pro_government', 'outlet', false),
@@ -27,11 +27,11 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('Milliyet', 'milliyet', 'http://www.milliyet.com.tr', 'http://www.milliyet.com.tr/rss/rssNew/gundemRss.xml', 'gov_leaning', 'outlet', true),
   ('CNN Türk', 'cnn-turk', 'https://www.cnnturk.com', 'https://www.cnnturk.com/feed/rss/all/news', 'gov_leaning', 'outlet', true),
   ('NTV', 'ntv', 'https://www.ntv.com.tr', 'https://www.ntv.com.tr/gundem.rss', 'gov_leaning', 'outlet', true),
-  ('Posta', 'posta', 'http://www.posta.com.tr', 'http://www.posta.com.tr/xml/rss/rss_3_0.xml', 'gov_leaning', 'outlet', true),
+  ('Posta', 'posta', 'http://www.posta.com.tr', 'https://www.posta.com.tr/rss/anasayfa.xml', 'gov_leaning', 'outlet', true),
   ('Akşam', 'aksam', 'https://www.aksam.com.tr', 'https://www.aksam.com.tr/rss/rss.asp', 'gov_leaning', 'outlet', true),
   ('Güneş', 'gunes', 'https://www.gunes.com', 'https://www.gunes.com/rss', 'gov_leaning', 'outlet', false),
   ('Yeni Asır', 'yeni-asir', 'https://www.yeniasir.com.tr', 'https://www.yeniasir.com.tr/rss/anasayfa.xml', 'gov_leaning', 'outlet', true),
-  ('Milat', 'milat', 'http://www.milatgazetesi.com', 'http://www.milatgazetesi.com/rss.php', 'gov_leaning', 'outlet', true),
+  ('Milat', 'milat', 'http://www.milatgazetesi.com', 'https://www.milatgazetesi.com/rss', 'gov_leaning', 'outlet', true),
   ('Şok', 'sok', 'https://www.sok.com.tr', 'https://www.sok.com.tr/rss', 'gov_leaning', 'outlet', false),
   ('En Son Haber', 'en-son-haber', 'https://www.ensonhaber.com', 'https://www.ensonhaber.com/rss/ensonhaber.xml', 'gov_leaning', 'outlet', true),
   ('Mynet', 'mynet', 'https://www.mynet.com', 'https://www.mynet.com/haber/rss/sondakika', 'gov_leaning', 'outlet', true),
@@ -50,10 +50,10 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   -- State Media
   ('Anadolu Ajansı', 'anadolu-ajansi', 'https://www.aa.com.tr', 'https://www.aa.com.tr/tr/rss/default?cat=guncel', 'state_media', 'wire', true),
   ('TRT Haber', 'trt-haber', 'http://www.trthaber.com', 'http://www.trthaber.com/sondakika.rss', 'state_media', 'outlet', true),
-  ('TRT World', 'trt-world', 'https://www.trtworld.com', 'https://www.trtworld.com/news/rss', 'state_media', 'outlet', true),
+  ('TRT World', 'trt-world', 'https://www.trtworld.com', 'https://www.trtworld.com/feed/rss.xml', 'state_media', 'outlet', true),
   ('A News', 'a-news', 'https://www.anews.com.tr', 'https://www.anews.com.tr/rss/news.xml', 'state_media', 'outlet', true),
   ('Daily Sabah', 'daily-sabah', 'https://www.dailysabah.com', 'https://www.dailysabah.com/rss/home-page', 'state_media', 'outlet', true),
-  ('MFA Turkey', 'mfa-turkey', 'https://www.mfa.gov.tr', 'https://www.mfa.gov.tr/rss.en.mfa', 'state_media', 'niche', true),
+  ('MFA Turkey', 'mfa-turkey', 'https://www.mfa.gov.tr', 'https://www.mfa.gov.tr/en.rss.mfa?ad9093da-8e71-4678-a1b6-05f297baadc4', 'state_media', 'niche', true),
 
   -- Center / Independent
   ('T24', 't24', 'https://t24.com.tr', 'https://t24.com.tr/rss', 'center', 'outlet', true),
@@ -76,7 +76,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('F5 Haber', 'f5-haber', 'https://www.f5haber.com', 'https://www.f5haber.com/export/rss', 'center', 'aggregator', true),
   ('Platform 24', 'platform-24', 'http://platform24.org', 'http://platform24.org/rss', 'center', 'niche', false),
   ('Açık Gazete', 'acik-gazete', 'https://www.acikgazete.com', 'https://www.acikgazete.com/feed/', 'center', 'outlet', true),
-  ('Ajans Haber', 'ajans-haber', 'https://www.ajanshaber.com', 'https://www.ajanshaber.com/rss', 'center', 'aggregator', true),
+  ('Ajans Haber', 'ajans-haber', 'https://www.ajanshaber.com', 'https://ajanshaber.com.tr/rss.xml', 'center', 'aggregator', true),
   ('Haber3', 'haber3', 'https://www.haber3.com', 'https://www.haber3.com/rss', 'center', 'aggregator', true),
   ('Son Dakika', 'son-dakika', 'http://www.sondakika.com', 'http://rss.sondakika.com/rss_standart.asp', 'center', 'aggregator', false),
   ('Beyaz Gazete', 'beyaz-gazete', 'https://beyazgazete.com', 'https://beyazgazete.com/rss/guncel.xml', 'center', 'aggregator', true),
@@ -124,7 +124,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('İleri Haber', 'ileri-haber', 'http://ilerihaber.org', 'http://ilerihaber.org/rss.xml', 'opposition_leaning', 'outlet', false),
   ('En Politik', 'en-politik', 'https://www.enpolitik.com', 'https://www.enpolitik.com/rss.xml', 'opposition_leaning', 'outlet', true),
   ('Medya Gazete', 'medya-gazete', 'https://www.medyagazete.com', 'https://www.medyagazete.com/rss/genel-0', 'opposition_leaning', 'outlet', true),
-  ('Muhalif', 'muhalif', 'https://www.muhalif.com.tr', 'https://www.muhalif.com.tr/rss/genel-0', 'opposition_leaning', 'outlet', true),
+  ('Muhalif', 'muhalif', 'https://www.muhalif.com.tr', 'https://www.muhalif.com.tr/rss/news', 'opposition_leaning', 'outlet', true),
   ('Elips Haber', 'elips-haber', 'https://www.elipshaber.com', 'https://www.elipshaber.com/rss', 'opposition_leaning', 'outlet', true),
 
   -- Opposition
@@ -147,7 +147,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   -- Islamist / Conservative
   ('Milli Gazete', 'milli-gazete', 'https://www.milligazete.com.tr', 'https://www.milligazete.com.tr/rss', 'islamist_conservative', 'outlet', true),
   ('Yeni Asya', 'yeni-asya', 'https://www.yeniasya.com.tr', 'https://www.yeniasya.com.tr/rss', 'islamist_conservative', 'outlet', false),
-  ('Yeni Mesaj', 'yeni-mesaj', 'http://www.yenimesaj.com.tr', 'http://www.yenimesaj.com.tr/rss.php', 'islamist_conservative', 'outlet', true),
+  ('Yeni Mesaj', 'yeni-mesaj', 'http://www.yenimesaj.com.tr', 'https://www.yenimesaj.com.tr/rss.xml', 'islamist_conservative', 'outlet', true),
   ('Diyanet Haber', 'diyanet-haber', 'https://www.diyanethaber.com.tr', 'https://www.diyanethaber.com.tr/rss', 'islamist_conservative', 'niche', true),
   ('Doğru Haber', 'dogru-haber', 'https://dogruhaber.com.tr', 'https://dogruhaber.com.tr/rss', 'islamist_conservative', 'outlet', true),
   ('İlke TV', 'ilke-tv', 'https://ilketv.com.tr', 'https://ilketv.com.tr/feed/', 'islamist_conservative', 'outlet', true),
@@ -167,7 +167,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('Al Ain Türkçe', 'al-ain-turkce', 'https://tr.al-ain.com', 'https://tr.al-ain.com/feed', 'international', 'outlet', true),
   ('Al Jazeera Turk', 'al-jazeera-turk', 'http://aljazeera.com.tr', 'http://aljazeera.com.tr/rss.xml', 'international', 'outlet', false),
   ('Ahval News', 'ahval-news', 'https://ahvalnews.com', 'https://ahvalnews.com/rss.xml', 'international', 'outlet', false),
-  ('Hürriyet Daily News', 'hurriyet-daily-news', 'https://www.hurriyetdailynews.com', 'https://www.hurriyetdailynews.com/rss', 'international', 'outlet', true),
+  ('Hürriyet Daily News', 'hurriyet-daily-news', 'https://www.hurriyetdailynews.com', 'https://www.hurriyetdailynews.com/rss/news', 'international', 'outlet', true),
   ('Türkiye Today', 'turkiye-today', 'https://www.turkiyetoday.com', 'https://www.turkiyetoday.com/feed/', 'international', 'outlet', false)
 on conflict (slug) do update set
   name = excluded.name,

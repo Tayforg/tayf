@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { createSourceSlugGate } from "@/lib/seo/source-slug-gate";
+
 // Edge middleware — runs before any response commits, so (unlike a
 // notFound()/redirect() thrown from inside a cacheComponents/PPR page or
 // layout body, which can only swap already-streamed content) the statuses
@@ -29,7 +31,7 @@ import { NextResponse, type NextRequest } from "next/server";
 //     @supabase/supabase-js transitively, neither of which belong in the
 //     Edge middleware bundle.
 //
-//  3. /cluster/:id — gate 4: a segment that fails the UUID shape gate (and
+//  3. /cluster/:id — a segment that fails the UUID shape gate (and
 //     contains no further "/") rewrites to the not-found sink below instead
 //     of streaming a 200 shell for something that can never resolve. This
 //     does NOT probe the database for a well-formed-but-unknown id — same
@@ -39,10 +41,37 @@ import { NextResponse, type NextRequest } from "next/server";
 //     never a ':path*' — that would also catch /cluster/<id>/kart and the
 //     per-cluster /opengraph-image route, which must stay unmatched.
 //
-//  4. /admin/:path* (except /admin/login) — unauthenticated requests get a
+//  4. /source/:slug — a real 404 for a slug that is not in `sources`. The
+//     key space is small (tens of rows), so src/lib/seo/source-slug-gate.ts
+//     keeps a per-isolate Set of slugs (5 min TTL, anon-key PostgREST read),
+//     confirms an absent slug with one targeted lookup (so a source just
+//     added via /admin never 404s off a stale set) and negative-caches
+//     misses for 60 s. Any lookup failure ("unknown") fails open to the
+//     page's own soft 404 with noindex. The matcher is the literal segment
+//     "/source/:slug" — never ":path*" — so /source/<slug>/opengraph-image
+//     and /twitter-image stay unmatched.
+//
+//  5. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
 //     requireAdminSession() call, and each page's own call, stay as
 //     defence in depth; this middleware is not the only check.
+//
+// Why /cluster/:id stays shape-only (no existence check), and why the
+// investigation says a page-level fix cannot work: under cacheComponents,
+// runtime `params` must be read inside a Suspense boundary. src/app/
+// loading.tsx and the segment loading.tsx files provide one, so the static
+// shell has already flushed a 200 before any page-level notFound() runs; a
+// cached existence check in generateMetadata does not help either, because
+// metadata that depends on params also streams after the shell (see the
+// bundled Next docs: not-found.md "Calling notFound() after streaming has
+// started" and loading.md "Status Codes"). Only a check before streaming,
+// i.e. here, yields a real status. For clusters we do not do it:
+//   - cluster ids are unbounded, so no per-isolate set can hold them;
+//   - a per-request PostgREST probe would sit in front of every view of the
+//     most-shared page, whose PPR shell is otherwise CDN-served;
+//   - a missing cluster already renders "Sayfa bulunamadı" with noindex
+//     (generateMetadata plus the noindex that notFound injects).
+// Revisit if Search Console reports soft-404 volume.
 //
 // Real 404s: gates 1-3 used to return `new NextResponse(null, { status:
 // 404 })` — a real status code, but a 0-byte body with none of the site's
@@ -64,8 +93,13 @@ export const config = {
     "/ekonomi/:ticker",
     "/konu/:slug",
     "/cluster/:id",
+    "/source/:slug",
   ],
 };
+
+// Module-level so the slug Set and negative cache persist across requests
+// within an isolate.
+const sourceGate = createSourceSlugGate();
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/i;
 // Mirrors topic-query.ts's TOPIC_SLUGS as inline literals (not imported —
@@ -161,6 +195,15 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     if (segment.includes("/")) return NextResponse.next();
     if (!UUID_RE.test(segment)) return notFoundRewrite(req);
     return NextResponse.next();
+  }
+
+  if (pathname.startsWith("/source/")) {
+    const slug = pathname.slice("/source/".length);
+    if (slug.includes("/")) return NextResponse.next();
+    // Fail open: "unknown" falls through to the page's own soft 404.
+    return (await sourceGate.check(slug)) === "missing"
+      ? notFoundRewrite(req)
+      : NextResponse.next();
   }
 
   if (pathname === "/admin/login" || pathname.startsWith("/admin/login/")) {

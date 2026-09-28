@@ -52,6 +52,12 @@ export const OG_FALLBACK_CACHE_HEADERS = {
   "cache-control": "public, s-maxage=60",
 };
 
+// A malformed id can never resolve to a cluster: answer 404 (cacheable
+// briefly) before any database work. A well-formed but missing UUID still
+// gets the 200 fallback card below, and genuine fetch errors still throw.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const OG_NOT_FOUND_HEADERS = { "cache-control": "public, s-maxage=300" };
+
 interface ImageProps {
   // Next.js 16: dynamic-route `params` is a Promise. Same shape as the
   // page component itself — keeps the contract obvious.
@@ -72,6 +78,9 @@ const ZONE_STYLE: Record<
 
 export default async function Image({ params }: ImageProps) {
   const { id } = await params;
+  if (!UUID_RE.test(id)) {
+    return new Response(null, { status: 404, headers: OG_NOT_FOUND_HEADERS });
+  }
   const detail = await getClusterDetail(id);
 
   // Fallback card if the cluster vanished between SSR and the OG fetch.

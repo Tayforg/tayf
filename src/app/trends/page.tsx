@@ -29,8 +29,9 @@ import type { MediaDnaZone } from "@/types";
 // supabase/migrations/087_trends_istanbul_day.sql), which buckets by the
 // Istanbul calendar day of least(published_at, created_at) and filters to
 // voting kinds only — both of which the older UTC-day, all-kinds
-// `trends_daily_bias_counts` view (migration 023, still used elsewhere)
-// does not do. PostgREST returns ≤ WINDOW_DAYS × 3 = 90 rows — one per
+// `trends_daily_bias_counts` view (migration 023) does not do. The app no longer
+// reads that view since trends-query.ts was removed; dropping it is a
+// separate, non-additive follow-up. PostgREST returns ≤ WINDOW_DAYS × 3 = 90 rows — one per
 // (day, zone) — so egress is bounded regardless of how many articles the
 // window contains. The page is still wrapped in `revalidate=3600` so the
 // DB is hit at most once an hour per region.
