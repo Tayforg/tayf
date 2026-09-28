@@ -84,6 +84,26 @@ describe("cluster opengraph-image (real Satori render)", () => {
     expect(bytes.byteLength).toBeGreaterThan(10_000);
   });
 
+  it("sets the exact edge cache-control header on the real Response", async () => {
+    getClusterDetail.mockResolvedValueOnce(blindspotDetail());
+    const { default: Image } = await import("./opengraph-image");
+
+    const res = await Image({ params: Promise.resolve({ id: "x" }) });
+
+    expect(res.headers.get("cache-control")).toBe(
+      "public, s-maxage=600, stale-while-revalidate=86400",
+    );
+  });
+
+  it("sets the shorter fallback cache-control header on the not-found card", async () => {
+    getClusterDetail.mockResolvedValueOnce(null);
+    const { default: Image } = await import("./opengraph-image");
+
+    const res = await Image({ params: Promise.resolve({ id: "gone" }) });
+
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=60");
+  });
+
   it("renders the twitter-image re-export through the same card", async () => {
     getClusterDetail.mockResolvedValueOnce(null);
     const tw = await import("./twitter-image");

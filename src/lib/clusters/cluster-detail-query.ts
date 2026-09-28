@@ -475,6 +475,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         dedupedMembers.map((m) => ({
           id: m.article.id,
           content_hash: m.article.content_hash,
+          title: m.article.title,
         }))
       ),
       blindspotSuppressed,

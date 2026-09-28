@@ -849,6 +849,34 @@ describe("getClusterDetail wire signal", () => {
   });
 });
 
+describe("getClusterDetail wire signal — independent headlines (reader-data)", () => {
+  it("folds 3 same-headline members with distinct hashes into independentHeadlineCount 1", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a1", "s1", "2026-04-17T10:00:00Z", {
+            article: { content_hash: "hash-1", title: "Mansur Yavaş CHP'den istifa etti" },
+          }),
+          mkEmbeddedMember("a2", "s2", "2026-04-17T09:00:00Z", {
+            article: { content_hash: "hash-2", title: "mansur yavaş chp'den istifa etti" },
+          }),
+          mkEmbeddedMember("a3", "s3", "2026-04-17T08:00:00Z", {
+            article: { content_hash: "hash-3", title: "MANSUR YAVAŞ CHP'DEN İSTİFA ETTİ" },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("cluster-1");
+    expect(result!.wire.independentHeadlineCount).toBe(1);
+    expect(result!.wire.effectiveArticleCount).toBe(3);
+    expect(result!.wire.isWireRedistribution).toBe(false);
+  });
+});
+
 describe("getClusterDetail feed-health suppression", () => {
   // A shared link must never show a blindspot claim the /blindspots feed has
   // already withdrawn — same gate, applied to the DB-stored `is_blindspot`

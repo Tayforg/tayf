@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
+
+vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
 // ---------------------------------------------------------------------------
 // Permanent guard for SEC-09/TS-07.
@@ -42,5 +44,33 @@ describe("finance dev-fixtures / production bundle graph boundary", () => {
   it("no file under src/ outside *.test.ts(x) references tests/_helpers (SEC-09/TS-07)", () => {
     const offenders = walkNonTestSourceFiles(SRC_ROOT).filter((f) => readFileSync(f, "utf8").includes("tests/_helpers"));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe("reader-data: /ekonomi still renders end-to-end under TAYF_FAKE_FINANCE=1", () => {
+  it("fetchEconFeed / fetchTopTickers / fetchTickerPage all resolve without throwing against the fake client", async () => {
+    const ORIGINAL_ENV = { ...process.env };
+    process.env.NODE_ENV = "development";
+    process.env.TAYF_FAKE_FINANCE = "1";
+    try {
+      // createFinanceServerClient() (src/lib/supabase/server.ts) checks
+      // NODE_ENV + TAYF_FAKE_FINANCE itself and dynamically imports
+      // dev-fixtures.ts directly — no @supabase/supabase-js mock needed.
+      const queries = await import("./queries");
+
+      const feed = await queries.fetchEconFeed(80);
+      expect(Array.isArray(feed)).toBe(true);
+      expect(feed.length).toBeGreaterThan(0);
+
+      const top = await queries.fetchTopTickers(2, 24);
+      expect(Array.isArray(top)).toBe(true);
+
+      const page = await queries.fetchTickerPage("THYAO");
+      expect(page.attention).toBeDefined();
+      expect(Array.isArray(page.articles)).toBe(true);
+    } finally {
+      process.env = ORIGINAL_ENV;
+      vi.resetModules();
+    }
   });
 });

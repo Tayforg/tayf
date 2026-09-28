@@ -1,11 +1,29 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { createFinanceServerClient } from "@/lib/supabase/server";
+import {
+  aggregateAttention,
+  fetchLowRelevanceSince,
+  fetchRelevanceScores,
+  filterFeedTickers,
+  isHiddenMatch,
+  relevanceKey,
+  type AttentionRawRow,
+} from "@/lib/finance/ticker-relevance";
 
 // Read side of the finance substrate (migrations 049-051) for the
 // /ekonomi pages and /admin/ekonomi. Every fetcher throws on a Supabase
 // error so the route's error.tsx renders instead of a cached empty page
 // (same rule as trends-query).
+//
+// reader-data (§4(b)): the relevance LOOKUPS in this file
+// (fetchRelevanceScores / fetchLowRelevanceSince, both in
+// ticker-relevance.ts) are the one deliberate exception to "every fetcher
+// throws" — they fail open (warn + return a partial/empty result) so a
+// broken Jev shadow table degrades to "show/count everything" instead of
+// taking down /ekonomi. Every other query in this file, including the new
+// article_tickers reads in fetchTopTickers/fetchTickerPage, still throws
+// on error exactly as before.
 
 export interface FeedSource {
   name: string;
@@ -179,9 +197,11 @@ export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
   const supabase = await createFinanceServerClient();
-  const { data, error } = await supabase.rpc("econ_feed", { p_limit: limit });
+  // reader-data (§4b): over-fetch 25% so the ~20% of items a hidden-ticker
+  // drop can remove still leave close to `limit` items on screen.
+  const { data, error } = await supabase.rpc("econ_feed", { p_limit: Math.ceil(limit * 1.25) });
   if (error) throw new Error(`[finance] fetchEconFeed: ${error.message}`);
-  return ((data ?? []) as EconFeedRow[]).map((r) => ({
+  const items = ((data ?? []) as EconFeedRow[]).map((r) => ({
     id: r.id,
     title: r.title,
     url: r.url,
@@ -190,6 +210,9 @@ export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
     source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
     tickers: [...new Set(r.tickers ?? [])].sort(),
   }));
+  const keys = items.flatMap((i) => i.tickers.map((t) => relevanceKey(i.id, t)));
+  const scores = await fetchRelevanceScores(supabase, keys);
+  return filterFeedTickers(items, scores).slice(0, limit);
 }
 
 function istDate(offsetDays = 0): string {
@@ -237,6 +260,50 @@ export function rankAttention(
 }
 
 const BASELINE_DAYS = 6;
+const ARTICLE_TICKERS_PAGE_SIZE = 1000;
+const ARTICLE_TICKERS_MAX_PAGES = 20;
+
+/**
+ * Page over `article_tickers` for everything published on/after `sinceIso`,
+ * ordered deterministically (published_at, article_id, ticker) so paging
+ * with `.range()` never skips or duplicates a row. PostgREST caps a single
+ * response at 1,000 rows, so this always pages rather than trusting one
+ * `.limit()` call — the same rule `ticker_articles`/`fetchTickerPage`
+ * already followed via its RPC. Throws on error (this is page content, not
+ * a fail-open relevance lookup).
+ */
+async function fetchArticleTickersSince(
+  supabase: Awaited<ReturnType<typeof createFinanceServerClient>>,
+  sinceIso: string,
+): Promise<AttentionRawRow[]> {
+  const out: AttentionRawRow[] = [];
+  for (let page = 0; page < ARTICLE_TICKERS_MAX_PAGES; page++) {
+    const from = page * ARTICLE_TICKERS_PAGE_SIZE;
+    const to = from + ARTICLE_TICKERS_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from("article_tickers")
+      .select("ticker,article_id,published_at,source_id")
+      .gte("published_at", sinceIso)
+      .order("published_at")
+      .order("article_id")
+      .order("ticker")
+      .range(from, to);
+    if (error) throw new Error(`[finance] fetchTopTickers article_tickers: ${error.message}`);
+    const rows = (data ?? []) as AttentionRawRow[];
+    out.push(...rows);
+    if (rows.length < ARTICLE_TICKERS_PAGE_SIZE) break;
+  }
+  return out;
+}
+
+function scoreMapFromLowRows(rows: Array<{ subject_id: string; jev_prob: unknown }>): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const r of rows) {
+    const n = Number(r.jev_prob);
+    if (Number.isFinite(n)) map.set(r.subject_id, n);
+  }
+  return map;
+}
 
 /** Most-mentioned tickers over the last `days` Istanbul days, with a ratio to the prior 6 days. */
 export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAttention[]> {
@@ -245,12 +312,12 @@ export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAtten
   cacheTag("finance-feed");
   const supabase = await createFinanceServerClient();
   const splitDay = istDate(-(days - 1));
-  const { data, error } = await supabase
-    .from("ticker_attention_daily")
-    .select("ticker,day,articles,sources")
-    .gte("day", istDate(-(days - 1 + BASELINE_DAYS)));
-  if (error) throw new Error(`[finance] fetchTopTickers: ${error.message}`);
-  const rows = (data ?? []) as AttentionRow[];
+  const sinceIso = `${istDate(-(days - 1 + BASELINE_DAYS))}T00:00:00+03:00`;
+  const raw = await fetchArticleTickersSince(supabase, sinceIso);
+  const lowSinceIso = new Date(Date.parse(sinceIso) - 86400_000).toISOString();
+  const low = await fetchLowRelevanceSince(supabase, lowSinceIso);
+  const scores = scoreMapFromLowRows(low);
+  const rows = aggregateAttention(raw, scores);
   const tickers = [...new Set(rows.map((r) => r.ticker))];
   const titles = new Map<string, string>();
   if (tickers.length > 0) {
@@ -472,7 +539,11 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
 
   const [companyRes, attentionRes, articlesRes, disclosuresRes, coverageRes] = await Promise.all([
     supabase.from("bist_companies").select("kap_member_oid,tickers,title,city,shares_traded").contains("tickers", [ticker]).limit(1),
-    supabase.from("ticker_attention_daily").select("day,articles,sources").eq("ticker", ticker).gte("day", istDate(-29)).order("day"),
+    // reader-data (§4b): reads article_tickers directly (the
+    // ticker_attention_daily materialized view stays unfiltered for its
+    // other SQL consumers — see the header note above) so the relevance
+    // gate can be applied at query time without a migration.
+    supabase.from("article_tickers").select("article_id,published_at,source_id").eq("ticker", ticker).gte("published_at", `${istDate(-29)}T00:00:00+03:00`).limit(1000),
     // Starts from the indexed article_tickers side (migration 054); the
     // embedded-filter form timed out in production.
     supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: 60 }),
@@ -485,20 +556,35 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
 
   const c = (companyRes.data ?? [])[0] as { kap_member_oid: string; tickers: string[]; title: string; city: string | null; shares_traded: boolean } | undefined;
   const disclosures = ((disclosuresRes.data ?? []) as DisclosureRow[]).map(toDisclosure);
-  const attention = ((attentionRes.data ?? []) as AttentionDay[]).map((d) => ({ day: String(d.day), articles: Number(d.articles), sources: Number(d.sources) }));
+  const attentionRaw = ((attentionRes.data ?? []) as Array<{ article_id: string; published_at: string; source_id: string }>).map((r) => ({
+    ticker,
+    article_id: r.article_id,
+    published_at: r.published_at,
+    source_id: r.source_id,
+  }));
+  const articleRows = (articlesRes.data ?? []) as TickerArticleRow[];
+  const relevanceKeys = [
+    ...attentionRaw.map((r) => relevanceKey(r.article_id, ticker)),
+    ...articleRows.map((r) => relevanceKey(r.id, ticker)),
+  ];
+  const scores = await fetchRelevanceScores(supabase, relevanceKeys);
+  const attention = aggregateAttention(attentionRaw, scores).map((d) => ({ day: d.day, articles: d.articles, sources: d.sources }));
+  attention.sort((a, b) => a.day.localeCompare(b.day));
   const baselineDaily = attention.reduce((s, d) => s + d.articles, 0) / 30;
   return {
     company: c ? { kapMemberOid: c.kap_member_oid, tickers: c.tickers, title: c.title, city: c.city, sharesTraded: c.shares_traded } : null,
     attention,
-    articles: ((articlesRes.data ?? []) as TickerArticleRow[]).map((r) => ({
-      id: r.id,
-      title: r.title,
-      url: r.url,
-      publishedAt: r.published_at,
-      category: r.category,
-      source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
-      tickers: [ticker],
-    })),
+    articles: articleRows
+      .filter((r) => !isHiddenMatch(scores.get(relevanceKey(r.id, ticker))))
+      .map((r) => ({
+        id: r.id,
+        title: r.title,
+        url: r.url,
+        publishedAt: r.published_at,
+        category: r.category,
+        source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
+        tickers: [ticker],
+      })),
     disclosures,
     coverage: coverageStats((coverageRes.data ?? []) as Array<{ disclosure_index: number; lag_minutes: number }>, disclosures.length, baselineDaily),
   };

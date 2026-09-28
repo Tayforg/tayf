@@ -63,6 +63,7 @@ const BASE: Record<string, { prev: number; rvol: number }> = {
 interface FakeState {
   eq: Array<{ col: string; val: unknown }>;
   gte: Array<{ col: string; val: unknown }>;
+  lt: Array<{ col: string; val: unknown }>;
   contains: Array<{ col: string; val: unknown }>;
   in: Array<{ col: string; vals: unknown[] }>;
   order: Array<{ col: string; opts: unknown }>;
@@ -76,7 +77,7 @@ type TableResolver = (state: FakeState) => PgResult;
 type TableFixture = unknown[] | TableResolver;
 
 function freshState(): FakeState {
-  return { eq: [], gte: [], contains: [], in: [], order: [], limit: null };
+  return { eq: [], gte: [], lt: [], contains: [], in: [], order: [], limit: null };
 }
 
 // Predicate methods that record onto `state` and keep the chain going. Any
@@ -85,6 +86,7 @@ function freshState(): FakeState {
 const RECORD: Record<string, (state: FakeState, args: unknown[]) => void> = {
   eq: (s, [col, val]) => s.eq.push({ col: String(col), val }),
   gte: (s, [col, val]) => s.gte.push({ col: String(col), val }),
+  lt: (s, [col, val]) => s.lt.push({ col: String(col), val }),
   contains: (s, [col, val]) => s.contains.push({ col: String(col), val }),
   in: (s, [col, vals]) => s.in.push({ col: String(col), vals: (vals as unknown[]) ?? [] }),
   order: (s, [col, opts]) => s.order.push({ col: String(col), opts }),
@@ -158,6 +160,9 @@ function containsVal(state: FakeState, col: string): string[] | undefined {
 function inVals(state: FakeState, col: string): unknown[] | undefined {
   return state.in.find((e) => e.col === col)?.vals;
 }
+function ltVal(state: FakeState, col: string): number | undefined {
+  return state.lt.find((e) => e.col === col)?.val as number | undefined;
+}
 
 /**
  * Everything below depends on "now", either directly (`iso`) or through a
@@ -201,6 +206,28 @@ export function createFinanceFakeClient(): unknown {
     source: SOURCES[a.src as keyof typeof SOURCES],
     article_tickers: a.t.map((ticker) => ({ ticker })),
   }));
+
+  // reader-data (§4b): article_tickers rows derived 1:1 from ARTICLES so
+  // fetchTopTickers/fetchTickerPage (which now read article_tickers
+  // directly instead of the ticker_attention_daily view) have something to
+  // aggregate under TAYF_FAKE_FINANCE=1. source_id is the source slug —
+  // this dev fixture has no real source table to join against, and
+  // aggregateAttention only needs it to count distinct sources.
+  const ARTICLE_TICKERS = ARTICLES.flatMap((a) =>
+    a.article_tickers.map((t) => ({
+      article_id: a.id,
+      ticker: t.ticker,
+      published_at: a.published_at,
+      source_id: a.source.slug,
+    })),
+  );
+
+  // One deliberately low (fake-match) score on a1:THYAO so /ekonomi under
+  // TAYF_FAKE_FINANCE=1 exercises the hide-below-0.2 path too — every
+  // other article:ticker pair is unscored (fail-open, shown/counted).
+  const JEV_SHADOW_PREDICTIONS = [
+    { subject_id: "a1:THYAO", jev_prob: 0.1, created_at: iso(0.4 * H) },
+  ];
 
   const DISCLOSURES = [
     { i: 1662301, ago: 0.5 * H, codes: ["THYAO"], subject: "Özel Durum Açıklaması (Genel)", summary: "Eylül 2026 trafik sonuçları hk.", cls: "ODA" },
@@ -377,6 +404,30 @@ export function createFinanceFakeClient(): unknown {
       },
       finance_health: HEALTH,
       finance_signals: SIGNALS,
+      article_tickers: (state) => {
+        const t = eqVal(state, "ticker");
+        const since = gteVal(state, "published_at") ?? "0000";
+        return {
+          data: ARTICLE_TICKERS.filter((r) => (!t || r.ticker === t) && r.published_at >= since),
+          error: null,
+        };
+      },
+      jev_shadow_predictions: (state) => {
+        const inFilter = inVals(state, "subject_id");
+        if (inFilter) {
+          const wanted = new Set(inFilter as string[]);
+          return { data: JEV_SHADOW_PREDICTIONS.filter((r) => wanted.has(r.subject_id)), error: null };
+        }
+        const belowProb = ltVal(state, "jev_prob");
+        if (belowProb != null) {
+          const since = gteVal(state, "created_at") ?? "0000";
+          return {
+            data: JEV_SHADOW_PREDICTIONS.filter((r) => r.jev_prob < belowProb && r.created_at >= since),
+            error: null,
+          };
+        }
+        return { data: [], error: null };
+      },
     },
     rpc: {
       ticker_articles: (args) => {

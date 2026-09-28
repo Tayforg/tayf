@@ -446,6 +446,22 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 <span>{formatTurkishTimeAgo(cluster.updated_at)}</span>
                 <span className="text-muted-foreground/60">•</span>
                 <span>{wire.effectiveArticleCount} kaynak</span>
+                {/* Honest source count v2 (reader-data): when several of
+                    the shown sources used the exact same headline (folded
+                    for case/punctuation/quotes), say so without calling it
+                    "kopya" — a short factual headline can coincide
+                    naturally, so the "N kaynak" number itself is untouched. */}
+                {wire.memberCount >= 3 &&
+                  typeof wire.independentHeadlineCount === "number" &&
+                  wire.independentHeadlineCount < wire.effectiveArticleCount && (
+                    <Link
+                      href="/metodoloji#tek-kaynak"
+                      title="Aynı başlığı kullanan kaynaklar tek başlık sayılır."
+                      className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                    >
+                      · {wire.independentHeadlineCount} bağımsız başlık
+                    </Link>
+                  )}
                 {/* wire-redistribution: violet, not amber — amber above is
                     reserved for the Kör nokta ribbon so the two claims
                     (single-source dispatch vs. one-sided coverage) don't

@@ -40,6 +40,14 @@ export const metadata: Metadata = {
 const CHANGELOG = [
   {
     date: "2026-09-28",
+    text: "Bağımsız başlık sayısı: aynı başlığı kullanan kaynaklar küme sayfasında ayrıca belirtiliyor (ör. \"12 kaynak · 4 bağımsız başlık\").",
+  },
+  {
+    date: "2026-09-28",
+    text: "Ekonomi: Tayf'ın sınıflandırıcısının (Jev) ilgisiz bulduğu şirket eşleşmeleri — örneğin aynı adı taşıyan bir parti ya da ilçe — hisse listelerinden gizleniyor ve ilgi sayımlarına katılmıyor.",
+  },
+  {
+    date: "2026-09-28",
     text: "Kör nokta doğrulaması: karşı taraftan aynı olayı anlatan haber bulunan kümelerde kör nokta işareti artık gösterilmiyor.",
   },
   {
@@ -340,6 +348,16 @@ export default async function MethodologyPage() {
             gösterilen kaynak sayısı, kopya sayısı yerine benzersiz dispeç
             sayısına indirilir — böylece &quot;7 kaynak&quot; aslında tek bir
             ajans haberinin 7 kopyası olduğunda bu dürüstçe belirtilir.
+          </p>
+          <p className={proseClass}>
+            Tayf ayrıca aynı başlığı kullanan kaynakları sayar: büyük/küçük
+            harf, noktalama ve tırnak farkları yok sayıldığında başlığı
+            birebir aynı olan haberler tek başlık kabul edilir ve küme
+            sayfasında &quot;12 kaynak · 4 bağımsız başlık&quot; biçiminde
+            gösterilir. 25 karakterden ve 4 kelimeden kısa başlıklar (ör.
+            &quot;Son dakika: deprem&quot;) gruplanmaz. Aynı başlık her zaman
+            kopya demek değildir: kısa, olgusal başlıklar doğal olarak aynı
+            olabilir; bu yüzden kaynak sayısı düşürülmez.
           </p>
           <p className={noteClass}>
             Güncel kalite sayıları:{" "}

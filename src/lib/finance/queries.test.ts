@@ -24,6 +24,14 @@ const fixture = vi.hoisted(() => ({
     | { blocked_until: string | null; last_status: number | null; last_error: string | null; updated_at: string }
     | null
     | undefined,
+  // reader-data (§4(b)): article_tickers rows for fetchTopTickers /
+  // fetchTickerPage, and the shared jev_shadow_predictions ticker_relevance
+  // rows both the `.in('subject_id', …)` (fetchRelevanceScores) and
+  // `.lt('jev_prob', …)` (fetchLowRelevanceSince) call shapes read from.
+  articleTickers: [] as Array<{ ticker: string; article_id: string; published_at: string; source_id: string }>,
+  jevRows: [] as Array<{ subject_id: string; jev_prob: number; created_at: string }>,
+  bistCompanies: [] as Array<{ tickers: string[]; title: string }>,
+  tickerArticlesRows: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -48,9 +56,40 @@ const supabaseFake = await vi.hoisted(async () => {
         }
         return { data: fixture.kapFetchStateRow, error: null };
       },
+      article_tickers: (state: unknown) => {
+        const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
+        const ticker = s.eq.find((e) => e.col === "ticker")?.val as string | undefined;
+        const since = s.gte.find((g) => g.col === "published_at")?.val as string | undefined;
+        let rows = fixture.articleTickers.filter(
+          (r) => (!ticker || r.ticker === ticker) && (!since || r.published_at >= since),
+        );
+        if (s.range) rows = rows.slice(s.range.from, s.range.to + 1);
+        return { data: rows, error: null };
+      },
+      jev_shadow_predictions: (state: unknown) => {
+        const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
+        const inFilter = s.in.find((i) => i.col === "subject_id");
+        if (inFilter) {
+          const wanted = new Set(inFilter.vals as string[]);
+          return { data: fixture.jevRows.filter((r) => wanted.has(r.subject_id)), error: null };
+        }
+        const ltFilter = s.lt.find((l) => l.col === "jev_prob");
+        const since = s.gte.find((g) => g.col === "created_at")?.val as string | undefined;
+        if (ltFilter) {
+          return {
+            data: fixture.jevRows.filter(
+              (r) => r.jev_prob < (ltFilter.val as number) && (!since || r.created_at >= since),
+            ),
+            error: null,
+          };
+        }
+        return { data: [], error: null };
+      },
+      bist_companies: () => ({ data: fixture.bistCompanies, error: null }),
     },
     rpc: {
       econ_feed: () => ({ data: fixture.econFeedRows, error: null }),
+      ticker_articles: () => ({ data: fixture.tickerArticlesRows, error: null }),
     },
   });
 });
@@ -68,6 +107,8 @@ import {
   fetchIntraday,
   fetchKapBreakerState,
   fetchRecentDisclosures,
+  fetchTickerPage,
+  fetchTopTickers,
   rankAttention,
   toFeedItem,
 } from "./queries";
@@ -83,6 +124,10 @@ beforeEach(() => {
   fixture.econFeedRows = [];
   fixture.lastKapState = null;
   fixture.kapFetchStateRow = undefined;
+  fixture.articleTickers = [];
+  fixture.jevRows = [];
+  fixture.bistCompanies = [];
+  fixture.tickerArticlesRows = [];
   supabaseFake.calls.rpc.length = 0;
 });
 
@@ -230,7 +275,9 @@ describe("finance query fetchers (live Supabase shape)", () => {
         tickers: ["ASELS", "VESTL"],
       },
     ]);
-    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 10 } });
+    // reader-data (§4b): over-fetches 1.25x so a hidden-ticker drop still
+    // leaves close to `limit` items — ceil(10 * 1.25) = 13.
+    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 13 } });
   });
 
   // SEC-07 follow-up: fetchKapBreakerState is a deliberate exception to
@@ -267,6 +314,10 @@ describe("finance query fetchers (live Supabase shape)", () => {
   });
 
   it("fetchEconFeed maps a row with no source (source_slug null) to source: null", async () => {
+    // reader-data (§4b): fetchEconFeed now drops any item left with zero
+    // tickers (filterFeedTickers), so this fixture carries one real ticker
+    // to isolate what this test actually checks — the source:null mapping
+    // — from that unrelated behavior (covered separately below).
     fixture.econFeedRows = [
       {
         id: "a2",
@@ -276,7 +327,7 @@ describe("finance query fetchers (live Supabase shape)", () => {
         category: "ekonomi",
         source_name: null,
         source_slug: null,
-        tickers: null,
+        tickers: ["THYAO"],
       },
     ];
     const items = await fetchEconFeed(10);
@@ -288,8 +339,133 @@ describe("finance query fetchers (live Supabase shape)", () => {
         publishedAt: "2026-09-13T09:00:00Z",
         category: "ekonomi",
         source: null,
-        tickers: [],
+        tickers: ["THYAO"],
       },
     ]);
+  });
+
+  it("fetchEconFeed drops an item left with zero tickers after mapping (never crashes on tickers: null)", async () => {
+    fixture.econFeedRows = [
+      {
+        id: "a3",
+        title: "Etiketsiz genel ekonomi haberi",
+        url: "https://x/3",
+        published_at: "2026-09-13T09:00:00Z",
+        category: "ekonomi",
+        source_name: null,
+        source_slug: null,
+        tickers: null,
+      },
+    ];
+    const items = await fetchEconFeed(10);
+    expect(items).toEqual([]);
+  });
+});
+
+describe("reader-data (§4b): Jev ticker-relevance gate", () => {
+  it("fetchEconFeed asks econ_feed for 1.25x the display limit and hides a p<0.2 ticker", async () => {
+    fixture.econFeedRows = [
+      {
+        id: "a1",
+        title: "DEVA'dan açıklama geldi",
+        url: "https://x/1",
+        published_at: "2026-09-13T08:00:00Z",
+        category: "ekonomi",
+        source_name: "Dünya",
+        source_slug: "dunya",
+        tickers: ["DEVA", "THYAO"],
+      },
+      {
+        id: "a2",
+        title: "Sadece hisse eşleşmesi düşük olan haber",
+        url: "https://x/2",
+        published_at: "2026-09-13T07:00:00Z",
+        category: "ekonomi",
+        source_name: "Sözcü",
+        source_slug: "sozcu",
+        tickers: ["EREGL"],
+      },
+      {
+        id: "a3",
+        title: "Skoru henüz yok",
+        url: "https://x/3",
+        published_at: "2026-09-13T06:00:00Z",
+        category: "ekonomi",
+        source_name: "NTV",
+        source_slug: "ntv",
+        tickers: ["ASELS"],
+      },
+    ];
+    fixture.jevRows = [
+      { subject_id: "a1:DEVA", jev_prob: 0.05, created_at: "2026-09-13T08:00:00Z" },
+      { subject_id: "a2:EREGL", jev_prob: 0.1, created_at: "2026-09-13T07:00:00Z" },
+      // a3:ASELS deliberately unscored — fail-open, always shown.
+    ];
+
+    const items = await fetchEconFeed(80);
+
+    expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 100 } });
+    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
+    // a1 keeps THYAO but loses the hidden DEVA match.
+    expect(byId.a1?.tickers).toEqual(["THYAO"]);
+    // a2's only ticker was hidden — the whole item drops out of the feed.
+    expect(byId.a2).toBeUndefined();
+    // a3's unscored ticker is fail-open shown.
+    expect(byId.a3?.tickers).toEqual(["ASELS"]);
+  });
+
+  it("fetchTopTickers excludes a <0.5 scored row from articles/sources but counts an unscored row", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T12:00:00Z"));
+    fixture.articleTickers = [
+      { ticker: "AAA", article_id: "a1", published_at: "2026-09-13T08:00:00Z", source_id: "s1" },
+      { ticker: "AAA", article_id: "a2", published_at: "2026-09-13T09:00:00Z", source_id: "s2" },
+    ];
+    fixture.jevRows = [
+      { subject_id: "a1:AAA", jev_prob: 0.3, created_at: "2026-09-13T08:00:00Z" },
+      // a2:AAA is unscored — fail-open, counts.
+    ];
+
+    const result = await fetchTopTickers(2, 10);
+    const aaa = result.find((r) => r.ticker === "AAA");
+    expect(aaa).toBeDefined();
+    expect(aaa!.articles).toBe(1);
+    expect(aaa!.sources).toBe(1);
+  });
+
+  it("fetchTickerPage filters both the article list and the attention series by relevance", async () => {
+    fixture.articleTickers = [
+      { ticker: "BBB", article_id: "a1", published_at: "2026-09-13T08:00:00Z", source_id: "s1" },
+      { ticker: "BBB", article_id: "a2", published_at: "2026-09-13T09:00:00Z", source_id: "s2" },
+    ];
+    fixture.tickerArticlesRows = [
+      {
+        id: "a1",
+        title: "İlgisiz eşleşme",
+        url: "https://x/1",
+        published_at: "2026-09-13T08:00:00Z",
+        category: "ekonomi",
+        source_name: "Dünya",
+        source_slug: "dunya",
+        matched_on: "alias",
+      },
+      {
+        id: "a2",
+        title: "İlgili haber",
+        url: "https://x/2",
+        published_at: "2026-09-13T09:00:00Z",
+        category: "ekonomi",
+        source_name: "Sözcü",
+        source_slug: "sozcu",
+        matched_on: "alias",
+      },
+    ];
+    fixture.jevRows = [{ subject_id: "a1:BBB", jev_prob: 0.05, created_at: "2026-09-13T08:00:00Z" }];
+
+    const page = await fetchTickerPage("BBB");
+
+    expect(page.articles.map((a) => a.id)).toEqual(["a2"]);
+    const totalAttentionArticles = page.attention.reduce((s, d) => s + d.articles, 0);
+    expect(totalAttentionArticles).toBe(1);
   });
 });

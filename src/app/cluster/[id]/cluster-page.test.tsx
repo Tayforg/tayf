@@ -695,6 +695,108 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
   });
 });
 
+describe("ClusterDetailPage — honest source count v2 (reader-data)", () => {
+  it('renders "12 kaynak · 4 bağımsız başlık" when independentHeadlineCount < effectiveArticleCount', async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 12,
+        memberCount: 12,
+        independentHeadlineCount: 4,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const text = collectText(tree).join("");
+    const hrefs = collectHrefs(tree);
+
+    expect(text).toContain("12 kaynak");
+    expect(text).toContain("4 bağımsız başlık");
+    expect(hrefs).toContain("/metodoloji#tek-kaynak");
+    expect(text).not.toContain("kopya sayılır");
+    expect(text).not.toMatch(/bağımsız başlık.*kopya|kopya.*bağımsız başlık/);
+  });
+
+  it("does not render the independent-headline note when the counts are equal", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 5,
+        memberCount: 5,
+        independentHeadlineCount: 5,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const text = collectText(tree).join("");
+
+    expect(text).not.toContain("bağımsız başlık");
+  });
+
+  it("does not render the note when memberCount < 3 even if headline counts differ", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 2,
+        memberCount: 2,
+        independentHeadlineCount: 1,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const text = collectText(tree).join("");
+
+    expect(text).not.toContain("bağımsız başlık");
+  });
+
+  it("does not render the note when independentHeadlineCount is undefined", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members: ClusterDetailMember[] = [makeMember("a1", source)];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 5,
+        memberCount: 5,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const text = collectText(tree).join("");
+
+    expect(text).not.toContain("bağımsız başlık");
+  });
+});
+
 describe("generateMetadata — seo-3 archived noindex", () => {
   it("marks robots index:false, follow:true when the cluster is archived (page itself still serves 200)", async () => {
     const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });

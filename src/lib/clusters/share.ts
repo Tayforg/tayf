@@ -61,3 +61,73 @@ export function buildShareText(input: {
 
   return text;
 }
+
+// ---------------------------------------------------------------------------
+// Per-channel share links (seo-share). Pure — no window/navigator access —
+// so `ShareButton` ('use client') can compute every href during render
+// (including on the server: reader-data's cluster-page.test SSRs this
+// component) instead of only inside a click handler.
+// ---------------------------------------------------------------------------
+
+export type ShareChannel = "whatsapp" | "telegram" | "x" | "bluesky" | "copy" | "native";
+
+/** The 4 channels that render as a share-chip link (as opposed to the
+ *  existing native-share / clipboard button). */
+export const SHARE_LINK_CHANNELS = ["whatsapp", "telegram", "x", "bluesky"] as const;
+
+/**
+ * Builds the UTM-tagged cluster URL for one channel.
+ *
+ * `origin` is caller-supplied rather than read from `window`/`siteUrl()`
+ * here so this stays a pure function: the native-share/clipboard path in
+ * `ShareButton` passes `window.location.origin` (click-time only), and the
+ * 4 channel chips pass `siteUrl()` (safe at render time, server or client).
+ */
+export function buildShareUrl(
+  origin: string,
+  clusterId: string,
+  channel: ShareChannel,
+): string {
+  const base = origin.replace(/\/$/, "");
+  return (
+    `${base}/cluster/${encodeURIComponent(clusterId)}` +
+    `?utm_source=${channel}&utm_medium=share&utm_campaign=cluster`
+  );
+}
+
+const CHANNEL_TEXT_LIMIT = 240;
+
+/** Appends "…" once `body` exceeds `max` characters — X and Bluesky both
+ *  have a hard character cap on the composed post. */
+function truncate(body: string, max: number): string {
+  return body.length > max ? `${body.slice(0, max)}…` : body;
+}
+
+/**
+ * Builds the prefilled share-intent href for one of the 4 link channels.
+ * `url` should already be a `buildShareUrl(...)` result (UTM-tagged);
+ * `body` is `buildShareText`'s bias line (or the headline, see
+ * `ShareButton`).
+ */
+export function buildChannelShareHref(
+  channel: (typeof SHARE_LINK_CHANNELS)[number],
+  url: string,
+  body: string,
+): string {
+  const enc = encodeURIComponent;
+
+  switch (channel) {
+    case "whatsapp":
+      return `https://wa.me/?text=${enc(`${body}\n${url}`)}`;
+    case "telegram":
+      return `https://t.me/share/url?url=${enc(url)}&text=${enc(body)}`;
+    case "x":
+      return `https://twitter.com/intent/tweet?text=${enc(
+        truncate(body, CHANNEL_TEXT_LIMIT),
+      )}&url=${enc(url)}`;
+    case "bluesky":
+      return `https://bsky.app/intent/compose?text=${enc(
+        `${truncate(body, CHANNEL_TEXT_LIMIT)} ${url}`,
+      )}`;
+  }
+}

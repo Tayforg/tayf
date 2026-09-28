@@ -33,6 +33,25 @@ export const alt = "Tayf — haber kümesi kartı";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
+// next/og's own default (node_modules/next/dist/server/og/image-response.js)
+// serves this route with `public, max-age=0, must-revalidate` — every
+// WhatsApp/Telegram/Twitter unfurl was an edge-cache MISS at 1–5.7s TTFB.
+// `ImageResponse`'s constructor applies `options.headers` via `Headers.set`,
+// so an explicit `cache-control` here REPLACES that default rather than
+// merging with it. Lower-case keys deliberately (PR #67 lesson: `Headers`
+// normalises case on read, but a literal `"Cache-Control"` key next to a
+// lower-case one here would be visually misleading and this repo standardises
+// on lower-case for every header record it authors).
+export const OG_CACHE_HEADERS = {
+  "cache-control": "public, s-maxage=600, stale-while-revalidate=86400",
+};
+// Shorter TTL for the "cluster vanished" fallback card — it should stop
+// being served the moment the cluster reappears (undelete/reindex), not
+// linger for the same 10 minutes as a real card.
+export const OG_FALLBACK_CACHE_HEADERS = {
+  "cache-control": "public, s-maxage=60",
+};
+
 interface ImageProps {
   // Next.js 16: dynamic-route `params` is a Promise. Same shape as the
   // page component itself — keeps the contract obvious.
@@ -90,7 +109,7 @@ export default async function Image({ params }: ImageProps) {
           </div>
         </div>
       ),
-      { ...size },
+      { ...size, headers: OG_FALLBACK_CACHE_HEADERS },
     );
   }
 
@@ -409,6 +428,6 @@ export default async function Image({ params }: ImageProps) {
         </div>
       </div>
     ),
-    { ...size },
+    { ...size, headers: OG_CACHE_HEADERS },
   );
 }

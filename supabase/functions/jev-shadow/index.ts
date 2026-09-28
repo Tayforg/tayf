@@ -22,6 +22,7 @@
 // See `evaluateOnce` / `evaluateWithRetries` below.
 
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
+import { collectPendingArticles } from "../_shared/jev-pending.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
 import {
@@ -65,9 +66,20 @@ import { VOTING_SOURCE_KINDS } from "../_shared/cluster/source-kind.ts";
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
-/** Hard cap on fetchPendingArticles' forward paging (JEV-A4) -- bounds a
- * pathological 24h backlog to a fixed number of round trips per run. */
+/** Hard cap on fetchPendingArticles' total paging across both passes
+ * (JEV-A4) -- bounds a pathological 24h backlog to a fixed number of round
+ * trips per run. */
 const JEV_ARTICLE_FETCH_MAX_PAGES = 10;
+
+/** Cap on fetchPendingArticles' pass-1 (newest-first, "fresh") paging
+ * (jev-pipeline). At pageSize = 2 x JEV_ARTICLE_LIMIT (300 rows/page at the
+ * current 150-article limit), 4 pages is ~1,200 rows, roughly 5h of
+ * articles at the ~225/h steady-state ingest rate -- comfortably past the
+ * 10-min tick's ~37 new articles, so a fresh article is scored within one
+ * or two runs instead of waiting for the whole 24h backlog ahead of it to
+ * drain. The remaining budget (JEV_ARTICLE_FETCH_MAX_PAGES -
+ * pagesReadByPass1) still goes to pass 2's oldest-first backlog drain. */
+const JEV_ARTICLE_FRESH_MAX_PAGES = 4;
 
 /** PostgREST page size for fetchPreviousRegressionAnswers (066). */
 const JEV_REGRESSION_ANSWER_PAGE = 1000;
@@ -295,46 +307,53 @@ function makePorts(apiKey: string): JevPorts {
     },
 
     async fetchPendingArticles(sinceIso, limit): Promise<JevArticleRow[]> {
-      // Oldest-first is deliberate (drains the first-run 24h backlog --
-      // pack.md). At steady state (144 sources, thousands of articles/day)
-      // a single fixed-size oldest page is already fully seen, so page
-      // forward through the window -- subtracting the anti-join per page --
-      // until `limit` unseen rows are found or the window is exhausted,
-      // hard-capped at JEV_ARTICLE_FETCH_MAX_PAGES so a pathological
-      // backlog can't turn one run into an unbounded scan.
+      // Newest-first is deliberate (jev-pipeline): the old oldest-first
+      // pager let a pathological 24h backlog starve every fresh article
+      // behind it (an 8.7h p50 / 15.3h p90 prediction lag in production).
+      // collectPendingArticles (_shared/jev-pending.ts) runs pass 1 against
+      // the newest rows first -- so an article scores within a run or two
+      // of publication -- then spends whatever page budget remains on
+      // pass 2, an oldest-first drain of the backlog, all within the same
+      // JEV_ARTICLE_FETCH_MAX_PAGES round-trip cap.
       const pageSize = limit * 2;
-      const out: JevArticleRow[] = [];
-      for (let page = 0; page < JEV_ARTICLE_FETCH_MAX_PAGES && out.length < limit; page++) {
-        const from = page * pageSize;
-        const { data, error } = await supabase
-          .from("articles")
-          .select("id, title, description, category, published_at, source:sources(slug)")
-          .gte("published_at", sinceIso)
-          .order("published_at", { ascending: true })
-          .range(from, from + pageSize - 1);
-        if (error) throw new Error(`jev-shadow: fetchPendingArticles failed: ${error.message}`);
-        const rows = (data ?? []) as unknown as RawArticleFetchRow[];
-        if (rows.length === 0) break;
-        const seen = await anti_join(
-          "politics",
-          rows.map((r) => r.id),
-        );
-        for (const r of rows) {
-          if (seen.has(r.id)) continue;
-          const source = flattenEmbed(r.source);
-          out.push({
-            id: r.id,
-            title: r.title,
-            description: r.description,
-            category: r.category,
-            published_at: r.published_at,
-            source_slug: source?.slug ?? null,
-          });
-          if (out.length >= limit) break;
-        }
-        if (rows.length < pageSize) break; // exhausted the 24h window
-      }
-      return out;
+      const rawSelect = "id, title, description, category, published_at, source:sources(slug)";
+
+      const mapRow = (r: RawArticleFetchRow): JevArticleRow => {
+        const source = flattenEmbed(r.source);
+        return {
+          id: r.id,
+          title: r.title,
+          description: r.description,
+          category: r.category,
+          published_at: r.published_at,
+          source_slug: source?.slug ?? null,
+        };
+      };
+
+      const result = await collectPendingArticles({
+        limit,
+        pageSize,
+        maxPages: JEV_ARTICLE_FETCH_MAX_PAGES,
+        freshMaxPages: JEV_ARTICLE_FRESH_MAX_PAGES,
+        async fetchPage(order, from, to) {
+          const { data, error } = await supabase
+            .from("articles")
+            .select(rawSelect)
+            .gte("published_at", sinceIso)
+            .order("published_at", { ascending: order === "asc" })
+            .order("id", { ascending: true })
+            .range(from, to);
+          if (error) throw new Error(`jev-shadow: fetchPendingArticles failed: ${error.message}`);
+          return (data ?? []) as unknown as RawArticleFetchRow[];
+        },
+        seen: (ids) => anti_join("politics", ids),
+      });
+
+      console.log(
+        `[jev-shadow] pending articles fresh=${result.freshRows} backlog=${result.backfillRows} pages=${result.pagesRead}`,
+      );
+
+      return result.rows.map(mapRow);
     },
 
     async fetchRecentClusters(sinceIso, limit): Promise<JevClusterRow[]> {

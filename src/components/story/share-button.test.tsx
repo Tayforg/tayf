@@ -1,6 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ShareButton } from "./share-button";
+
+const ORIGINAL_ENV = { ...process.env };
+
+beforeEach(() => {
+  process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+});
+
+afterEach(() => {
+  if ("NEXT_PUBLIC_SITE_URL" in ORIGINAL_ENV) {
+    process.env.NEXT_PUBLIC_SITE_URL = ORIGINAL_ENV.NEXT_PUBLIC_SITE_URL;
+  } else {
+    delete process.env.NEXT_PUBLIC_SITE_URL;
+  }
+});
 
 // react-a11y-1: the live region must NOT be a descendant of the <button> —
 // ARIA 1.2 marks `button` children-presentational, so a role="status"
@@ -43,5 +57,76 @@ describe("ShareButton — Kartı indir link", () => {
     // since the URL's last segment is "kart".
     expect(anchor).toContain('download="tayf-kart.png"');
     expect(anchor).not.toContain('target="_blank"');
+  });
+});
+
+// The 4 channel chips. Regex-on-markup, same SSR-only convention as the
+// suites above — this repo has no jsdom/testing-library dependency.
+describe("ShareButton — channel chips", () => {
+  const CLUSTER_ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+
+  function renderHtml(text?: string) {
+    return renderToStaticMarkup(
+      <ShareButton clusterId={CLUSTER_ID} title="Başlık" text={text} />,
+    );
+  }
+
+  const EXPECTED = [
+    { channel: "whatsapp", label: "WhatsApp", host: "wa.me" },
+    { channel: "telegram", label: "Telegram", host: "t.me" },
+    { channel: "x", label: "X", host: "twitter.com" },
+    { channel: "bluesky", label: "Bluesky", host: "bsky.app" },
+  ] as const;
+
+  it("renders exactly 4 links, one per channel, with the right host/rel/target/aria-label", () => {
+    const html = renderHtml("12 kaynak · %70 iktidar");
+
+    for (const { channel, label, host } of EXPECTED) {
+      const re = new RegExp(
+        `<a[^>]*aria-label="${label} ile paylaş"[^>]*>${label}</a>`,
+      );
+      const match = html.match(re);
+      expect(match, `missing chip for ${channel}`).not.toBeNull();
+      const anchor = match![0];
+      expect(anchor).toContain(`href="https://${host}`);
+      expect(anchor).toContain('target="_blank"');
+      expect(anchor).toContain('rel="noopener noreferrer"');
+
+      const hrefMatch = anchor.match(/href="([^"]*)"/);
+      const decoded = decodeURIComponent(hrefMatch![1]!.replace(/&amp;/g, "&"));
+      expect(decoded).toContain(`utm_source=${channel}`);
+      expect(decoded).toContain("utm_medium=share");
+      expect(decoded).toContain("utm_campaign=cluster");
+      expect(decoded).toContain(`/cluster/${CLUSTER_ID}?`);
+    }
+  });
+});
+
+describe("ShareButton — click tracking (trackChannelShare)", () => {
+  it("fires track('share', { clusterId, kind }) for the clicked channel", async () => {
+    vi.resetModules();
+    const trackMock = vi.fn();
+    vi.doMock("@/lib/track", () => ({ track: trackMock }));
+
+    const { trackChannelShare } = await import("./share-button");
+    trackChannelShare("c1", "whatsapp");
+
+    expect(trackMock).toHaveBeenCalledWith("share", { clusterId: "c1", kind: "whatsapp" });
+
+    vi.doUnmock("@/lib/track");
+  });
+});
+
+describe("ShareButton — SSR without window", () => {
+  it("renders without throwing when window is not defined", () => {
+    const original = (globalThis as { window?: unknown }).window;
+    delete (globalThis as { window?: unknown }).window;
+    try {
+      expect(() =>
+        renderToStaticMarkup(<ShareButton clusterId="c1" title="t" text="x" />),
+      ).not.toThrow();
+    } finally {
+      (globalThis as { window?: unknown }).window = original;
+    }
   });
 });

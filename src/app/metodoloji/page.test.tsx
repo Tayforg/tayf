@@ -238,4 +238,27 @@ describe("/metodoloji page", () => {
       expect(text).not.toContain("kümenin başlığı tarafsızlaştırıldı");
     });
   });
+
+  describe("reader-data: honest source count v2 + ekonomi ticker relevance", () => {
+    it("adds the same-headline paragraph to the #tek-kaynak card", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain("aynı başlığı kullanan kaynakları sayar");
+      expect(text).toContain("12 kaynak · 4 bağımsız başlık");
+      expect(text).toContain("25 karakterden ve 4 kelimeden kısa başlıklar");
+    });
+
+    it("adds both new CHANGELOG entries, dated 2026-09-28", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain(
+        "Bağımsız başlık sayısı: aynı başlığı kullanan kaynaklar küme sayfasında ayrıca belirtiliyor",
+      );
+      expect(text).toContain(
+        "ilgisiz bulduğu şirket eşleşmeleri",
+      );
+    });
+  });
 });
