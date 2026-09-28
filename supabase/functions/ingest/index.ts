@@ -22,6 +22,11 @@
 //      can't see that constraint). The `AFTER INSERT ON articles` trigger
 //      (migration 025) takes over from here to enqueue `cluster_work` and
 //      `image_backfill` messages.
+//   5. Persists per-source fetch state. The fresh validators (ETag,
+//      Last-Modified, body hash) of a source that produced rows are committed
+//      only after all its rows were upserted, deduped or skipped as already
+//      stored (silent-feeds): a feed whose rows were starved by the deadline
+//      or failed must be re-offered next cycle, not answered with a 304.
 //
 // Wall-clock budget: 60 s (the Edge Functions hard ceiling is 400 s). We
 // stay well under because the 16-way pool keeps the slowest tail fetch
@@ -45,6 +50,7 @@ import {
   rotateForCycle,
   upsertWithBisect,
 } from "./order.ts";
+import { collectSourceIds, partitionWithRowErrorGrace } from "./settle.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
@@ -87,6 +93,10 @@ const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
 // We use that to keep ETag / Last-Modified validators warm — the second
 // poll against a healthy outlet should land on `304 Not Modified` and
 // skip XML parsing entirely.
+// silent-feeds: consecutive cycles a source was withheld for row errors only
+// (module-level, best-effort across warm invocations; resets on cold start).
+const rowErrorWithholds = new Map<string, number>();
+
 const conditionalCache = new Map<
   string,
   { etag?: string; lastModified?: string }
@@ -197,6 +207,11 @@ interface CycleStats {
   // `rowErrors`, which only counts rows that were attempted and individually
   // failed.
   upsertSkipped: number;
+  // silent-feeds: sources whose fresh etag/last-modified/body-hash were NOT
+  // saved this cycle because at least one of their rows was skipped or
+  // errored (the old validators are kept so the feed is re-offered). Summary
+  // line and HTTP JSON only: there is no `ingest_cycles` column for it.
+  validatorsWithheld: number;
   durationMs: number;
 }
 
@@ -662,6 +677,7 @@ async function runCycle(): Promise<CycleStats> {
     notAFeed: 0,
     dateFallbacks: 0,
     upsertSkipped: 0,
+    validatorsWithheld: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -754,11 +770,31 @@ async function runCycleBody(
   // article inside one feed collapse before the upsert. Keyed by
   // `${source_id}\x1f${content_hash}`.
   const seenIntraCycle = new Set<string>();
+  // silent-feeds: sources that produced rows this cycle. Their fresh
+  // validators are parked here (never in `fetchStateUpdates`) until the upsert
+  // phase shows whether every row landed.
+  const deferred = new Map<
+    string,
+    {
+      source: SourceRow;
+      status: number;
+      fresh: { etag: string | null; lastModified: string | null; bodyHash: string | null };
+    }
+  >();
+  // Sources with at least one row that was skipped, never attempted or failed.
+  const unsettled = new Set<string>();
+  // Sources with a row that failed in isolation (possibly poison): withheld
+  // only for a bounded number of consecutive cycles.
+  const rowFailed = new Set<string>();
 
   await runPool(
     toFetch,
     FETCH_CONCURRENCY,
     async (source) => {
+      // Snapshot BEFORE the call: `fetchFeed` overwrites the entry on a 2xx,
+      // and a deferred source must get its previous validators back.
+      const cacheBefore = conditionalCache.get(source.id);
+      const cacheBeforeCopy = cacheBefore ? { ...cacheBefore } : undefined;
       const result = await fetchFeed(source, {
         conditionalCache,
         timeoutMs: FETCH_TIMEOUT_MS,
@@ -827,15 +863,11 @@ async function runCycleBody(
       // out a validator we already had (migration 041 F4) — mirrors the
       // fetcher's own cache.set, which only ever writes headers that were
       // actually present.
-      fetchStateUpdates.set(
-        source.id,
-        buildFetchStateUpdate(source, result.status, true, {
-          etag: result.etag ?? source.fetch_etag,
-          lastModified: result.lastModified ?? source.fetch_last_modified,
-          bodyHash: result.bodyHash ?? source.fetch_body_hash,
-        }),
-      );
-      await maybeFlushFetchState(supabase, fetchStateUpdates);
+      const fresh = {
+        etag: result.etag ?? source.fetch_etag,
+        lastModified: result.lastModified ?? source.fetch_last_modified,
+        bodyHash: result.bodyHash ?? source.fetch_body_hash,
+      };
 
       stats.fetched++;
       // ingest-health: items whose date fetcher.ts couldn't clean into
@@ -856,6 +888,7 @@ async function runCycleBody(
       const normalized = normalizeArticles(source, result.items, sourceNowMs);
       stats.itemsNormalized += normalized.length;
 
+      let pushed = 0;
       for (const row of normalized) {
         const key = `${row.source_id}\x1f${row.content_hash}`;
         if (seenIntraCycle.has(key)) continue;
@@ -865,6 +898,26 @@ async function runCycleBody(
         // practice — the column stays nullable for any future producer
         // that can't compute one.
         allRows.push({ ...row, canonical_url: canonicalizeUrl(row.url, source.slug) });
+        pushed++;
+      }
+
+      if (pushed === 0) {
+        // Nothing to lose: no row of this feed can be starved, so the fresh
+        // validators are safe to save right away.
+        fetchStateUpdates.set(
+          source.id,
+          buildFetchStateUpdate(source, result.status, true, fresh),
+        );
+        await maybeFlushFetchState(supabase, fetchStateUpdates);
+      } else {
+        // silent-feeds: saving these validators now (the old behaviour) means
+        // a starved or failed upsert leaves the feed answered with a 304 /
+        // body-hash hit forever while its rows never landed. Park them, and
+        // put the module cache back as it was before `fetchFeed` stamped the
+        // fresh values on it; both are committed once the rows are durable.
+        deferred.set(source.id, { source, status: result.status, fresh });
+        if (cacheBeforeCopy) conditionalCache.set(source.id, cacheBeforeCopy);
+        else conditionalCache.delete(source.id);
       }
     },
     fetchDeadline,
@@ -894,7 +947,12 @@ async function runCycleBody(
   // source's rows in the last, meaning a deadline cut starves whole
   // late-alphabet sources instead of trimming everyone's oldest items
   // evenly. Interleaved, the first chunk holds every source's NEWEST items.
-  if (allRows.length > 0 && Date.now() <= deadline) {
+  if (allRows.length > 0 && Date.now() > deadline) {
+    // The fetch pool overran: the whole upsert loop is skipped. Count it (it
+    // used to be silent) and mark every source involved as unsettled.
+    stats.upsertSkipped += allRows.length;
+    collectSourceIds(allRows, unsettled);
+  } else if (allRows.length > 0) {
     const interleaved = interleaveBySource(allRows);
     for (let i = 0; i < interleaved.length; i += UPSERT_BATCH) {
       if (Date.now() > deadline) {
@@ -902,6 +960,7 @@ async function runCycleBody(
         // attempted -- direct starvation signal, distinct from a
         // bisect-level `skipped` count below.
         stats.upsertSkipped += interleaved.length - i;
+        collectSourceIds(interleaved.slice(i), unsettled);
         break;
       }
       const slice = interleaved.slice(i, i + UPSERT_BATCH);
@@ -966,7 +1025,9 @@ async function runCycleBody(
           },
           {
             isPastDeadline: () => Date.now() > deadline,
+            onSkipped: (b) => collectSourceIds(b, unsettled),
             onRowError: (row, error) => {
+              rowFailed.add(row.source_id);
               // Surface the real per-row failure (schema drift, constraint
               // violations) instead of swallowing it — and count it so the
               // cycle response reports the loss (audit P3-9).
@@ -1005,6 +1066,53 @@ async function runCycleBody(
         );
       }
     }
+  }
+
+  // silent-feeds: commit the deferred validators of sources whose rows all
+  // landed (or were already stored); keep the OLD validators for the rest so
+  // the next cycle re-offers their feed. Either way the source is healthy, so
+  // the fail streak resets (`ok = true`). The `finally` in `runCycle`
+  // persists these in one RPC (never more than two writes per cycle).
+  const { settled, withheld, gaveUp, streakOf } = partitionWithRowErrorGrace(
+    deferred.keys(),
+    unsettled,
+    rowFailed,
+    rowErrorWithholds,
+  );
+  for (const id of settled) {
+    const d = deferred.get(id);
+    if (!d) continue;
+    fetchStateUpdates.set(id, buildFetchStateUpdate(d.source, d.status, true, d.fresh));
+    // Memory now equals what the DB will hold.
+    if (d.fresh.etag || d.fresh.lastModified) {
+      conditionalCache.set(id, {
+        etag: d.fresh.etag ?? undefined,
+        lastModified: d.fresh.lastModified ?? undefined,
+      });
+    }
+  }
+  for (const id of withheld) {
+    const d = deferred.get(id);
+    if (!d) continue;
+    fetchStateUpdates.set(id, buildFetchStateUpdate(d.source, d.status, true));
+  }
+  stats.validatorsWithheld = withheld.length;
+  if (withheld.length > 0) {
+    const list = withheld
+      .map((id) => {
+        const streak = streakOf.get(id);
+        return `${deferred.get(id)?.source.slug ?? id}${streak ? `(row-error streak ${streak})` : ""}`;
+      })
+      .join(", ");
+    console.log(
+      `[ingest] withheld fresh validators for ${withheld.length} source(s) whose rows did not all land this cycle: ${list}`,
+    );
+  }
+  if (gaveUp.length > 0) {
+    const list = gaveUp.map((id) => deferred.get(id)?.source.slug ?? id).join(", ");
+    console.warn(
+      `[ingest] committed validators despite persistent row errors (poison rows) for ${gaveUp.length} source(s): ${list}`,
+    );
   }
 
   stats.durationMs = Date.now() - startedAt;

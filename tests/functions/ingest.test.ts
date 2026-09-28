@@ -2267,3 +2267,143 @@ describe("headline write-back [migration 074]", () => {
     expect(titleEditRpcCalls).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// silent-feeds: a fetched feed's fresh validators (etag / last-modified / body
+// hash) are committed only after every one of its rows is durable. A feed
+// whose rows were skipped or failed keeps its OLD validators, so the next
+// cycle re-offers it instead of getting a 304 / body-hash hit forever.
+// ---------------------------------------------------------------------------
+describe("validators follow row durability [silent-feeds]", () => {
+  function seedSource(
+    id: string,
+    extra: Record<string, unknown> = {},
+  ): string {
+    const rssUrl = `https://example.com/${id}.rss`;
+    fakeSources.push({
+      id,
+      name: id,
+      slug: id,
+      url: "https://example.com",
+      rss_url: rssUrl,
+      active: true,
+      fetch_etag: null,
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 3,
+      ...extra,
+    });
+    return rssUrl;
+  }
+
+  function items(id: string, n: number): MockFeedItem[] {
+    return Array.from({ length: n }, (_, i) => ({
+      title: `${id} baslik ${i + 1} ozel haber metni ${i * 7919}`,
+      link: `https://example.com/${id}/${i + 1}`,
+      pubDate: "Mon, 01 Jan 2024 00:00:00 GMT",
+    }));
+  }
+
+  async function run() {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  function persisted(id: string) {
+    return sourceFetchStateWrites.flatMap((w) => w.rows).find((r) => r.id === id);
+  }
+
+  it("a poisoned row withholds the fresh validators (old ones kept, streak reset) and the next call re-sends the old etag", async () => {
+    const rssUrl = seedSource("sf-poison", {
+      fetch_etag: 'W/"old"',
+      fetch_body_hash: "stored-hash",
+    });
+    fetcherItems[rssUrl] = items("sf-poison", 4);
+    fetcherResultOverrides[rssUrl] = { etag: '"new"', bodyHash: "hash-new" };
+    forcedPoisonedUrl = "https://example.com/sf-poison/2";
+
+    const body = await run();
+
+    expect(body.validatorsWithheld).toBe(1);
+    expect(body.rowErrors).toBe(1);
+    const row = persisted("sf-poison");
+    expect(row?.fetch_etag).toBe('W/"old"');
+    expect(row?.fetch_body_hash).toBe("stored-hash");
+    expect(row?.fetch_fail_streak).toBe(0);
+    expect(row?.fetch_last_status).toBe(200);
+
+    forcedPoisonedUrl = null;
+    sourceFetchStateWrites.length = 0;
+    await run();
+    expect(fetchFeedCalls.at(-1)?.sourceId).toBe("sf-poison");
+    expect(fetchFeedCalls.at(-1)?.cached?.etag).toBe('W/"old"');
+  });
+
+  it("commits the fresh validators once every row was dropped as already stored", async () => {
+    const rssUrl = seedSource("sf-stored", {
+      fetch_etag: 'W/"old2"',
+      fetch_body_hash: "stored-hash-2",
+    });
+    const feedItems = items("sf-stored", 3);
+    fetcherItems[rssUrl] = feedItems;
+    fetcherResultOverrides[rssUrl] = { etag: '"new2"', bodyHash: "hash-new2" };
+    const normalized = normalizeArticles(
+      { id: "sf-stored", name: "sf-stored", slug: "sf-stored", url: "https://example.com", rss_url: rssUrl },
+      feedItems,
+      Date.now(),
+    );
+    existingArticleHashPairs = normalized.map((r) => ({
+      source_id: r.source_id,
+      content_hash: r.content_hash,
+    }));
+
+    const body = await run();
+
+    expect(body.validatorsWithheld).toBe(0);
+    expect(body.dedupedInBatch).toBe(3);
+    expect(upserted).toHaveLength(0);
+    const row = persisted("sf-stored");
+    expect(row?.fetch_etag).toBe('"new2"');
+    expect(row?.fetch_body_hash).toBe("hash-new2");
+  });
+
+  it("two sources: the clean one is committed, the poisoned one withheld, at most two RPC writes", async () => {
+    const cleanUrl = seedSource("sf-two-clean", { fetch_etag: 'W/"c-old"', fetch_body_hash: "c-old-hash" });
+    const badUrl = seedSource("sf-two-bad", { fetch_etag: 'W/"b-old"', fetch_body_hash: "b-old-hash" });
+    fetcherItems[cleanUrl] = items("sf-two-clean", 3);
+    fetcherItems[badUrl] = items("sf-two-bad", 3);
+    fetcherResultOverrides[cleanUrl] = { etag: '"c-new"', bodyHash: "c-new-hash" };
+    fetcherResultOverrides[badUrl] = { etag: '"b-new"', bodyHash: "b-new-hash" };
+    forcedPoisonedUrl = "https://example.com/sf-two-bad/1";
+
+    const body = await run();
+
+    expect(body.validatorsWithheld).toBe(1);
+    expect(persisted("sf-two-clean")?.fetch_etag).toBe('"c-new"');
+    expect(persisted("sf-two-clean")?.fetch_body_hash).toBe("c-new-hash");
+    expect(persisted("sf-two-bad")?.fetch_etag).toBe('W/"b-old"');
+    expect(persisted("sf-two-bad")?.fetch_body_hash).toBe("b-old-hash");
+    expect(sourceFetchStateWrites.length).toBeLessThanOrEqual(2);
+    expect(upserted.some((r) => r.source_id === "sf-two-clean")).toBe(true);
+  });
+
+  it("a clean single-source cycle still makes exactly one RPC call and the next call sees the fresh etag", async () => {
+    const rssUrl = seedSource("sf-clean");
+    fetcherItems[rssUrl] = items("sf-clean", 3);
+    fetcherResultOverrides[rssUrl] = { etag: '"fresh-e"', lastModified: "Thu, 02 Jan 2025 00:00:00 GMT", bodyHash: "fresh-h" };
+
+    const body = await run();
+
+    expect(body.validatorsWithheld).toBe(0);
+    expect(sourceFetchStateWrites).toHaveLength(1);
+    expect(sourceFetchStateWrites[0]?.fn).toBe("ingest_set_source_fetch_state");
+    expect(persisted("sf-clean")?.fetch_etag).toBe('"fresh-e"');
+    expect(persisted("sf-clean")?.fetch_body_hash).toBe("fresh-h");
+
+    await run();
+    expect(fetchFeedCalls.at(-1)?.cached?.etag).toBe('"fresh-e"');
+    expect(fetchFeedCalls.at(-1)?.cached?.lastModified).toBe("Thu, 02 Jan 2025 00:00:00 GMT");
+  });
+});

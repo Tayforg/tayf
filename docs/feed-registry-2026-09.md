@@ -93,6 +93,23 @@ The feed is valid XML, `fetchFeed` parses items and `normalizeArticles` returns 
 
 `platform-24` and `turkiye-haber-ajansi` still use `http://` rss_urls in prod and pass through a redirect; they are fetched fine, so they were left alone.
 
+### Root cause (2026-09-29)
+
+The five sources above are silent because of an ingest defect, not because of their feeds (migration 094 plus an `ingest` fix). Evidence, read-only, 2026-09-29 ~00:15 UTC. `journo` (section 2, valid-stale) turned out to be a sixth victim.
+
+| slug | stored validators match live (etag/last-modified, body sha256) | live feed items missing from `articles` | server answers 304 to stored validators | verdict |
+|---|---|---|---|---|
+| iklim-haber | yes / yes | 10 of 10 | yes | H1, reset in 094 |
+| investing-com-tr | yes / yes | 2 of 10 | yes | H1, reset in 094 |
+| newslab-turkey | yes / yes | 12 of 12 | yes | H1, reset in 094 |
+| platform-24 | yes / yes | 4 of 18 | yes | H1, reset in 094 |
+| turkiye-haber-ajansi | no validators on the wire / yes (hash) | 20 of 20 | n/a (body-hash short-circuit) | H1, reset in 094 |
+| journo | yes / yes | 2 of 10 | n/a (not replayed) | H1, reset in 094 |
+
+Nothing was stored under a different source_id (no registry problem). Ingest regime, last 6 h: 114 cycles, p50 11.4 s, 34 cycles at the 49.5 s deadline, 34 with row errors.
+
+`ingest` saved a fetched feed's fresh ETag, Last-Modified and body hash before that feed's rows were upserted. When the cycle deadline, a row error or a skipped batch then lost some of the rows, the validators still said "seen", so the next cycle got a 304 (or the body-hash short-circuit fired, which is turkiye-haber-ajansi's case) and the rows were never offered again until the outlet changed the feed. Slow niche and wire feeds change rarely and get one shot per change, so they lose the most. The fix commits a source's validators only after all its rows were upserted, deduped or skipped as already stored. 094 resets their validators (six slugs: iklim-haber, investing-com-tr, newslab-turkey, platform-24, turkiye-haber-ajansi, journo) so the current items are re-offered; http:// URLs work via redirect and are unchanged. Fixtures for the five audited feeds are in `tests/fixtures/feeds/`.
+
 ## 4. UA/IP-blocked
 
 None. No worklist row returned 200 XML to the browser UA and 403 to the ingest UA. If a datacenter-IP-only block shows up after applying 093, the fix is a `SOURCE_HEADERS` override in `supabase/functions/_shared/rss/fetcher.ts`, which is a follow-up (`supabase/functions` is not touched here).
