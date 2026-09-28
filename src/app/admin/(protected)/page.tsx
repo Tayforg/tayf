@@ -21,6 +21,7 @@ import { getLlmBudgetStatus } from "@/lib/admin/llm-budget-status";
 import { getApiKeysStatus } from "@/lib/admin/api-keys-status";
 import { getRecentCorrections } from "@/lib/admin/corrections-status";
 import { getJevGoldNext } from "@/lib/admin/jev-gold";
+import { getJevAdmissionStatus } from "@/lib/admin/jev-admission";
 import { buildAttentionItems, countNeedsAction } from "@/lib/admin/attention";
 
 import { AdminGroup, AdminNav, AdminSection, AttentionStrip } from "@/components/admin/admin-ui";
@@ -31,6 +32,7 @@ import { JevRegressionSection } from "@/components/admin/jev-regression-section"
 import { JevAlertsSection, SourceDriftSection } from "@/components/admin/jev-signals-section";
 import { JevUnlinkSection } from "@/components/admin/jev-unlink-section";
 import { JevBlindspotSection } from "@/components/admin/jev-blindspot-section";
+import { JevAdmissionSection } from "@/components/admin/jev-admission-section";
 import { FramingVotesSection } from "@/components/admin/framing-votes-section";
 import { LlmBudgetSection } from "@/components/admin/llm-budget-section";
 import { ApiKeysSection } from "@/components/admin/api-keys-section";
@@ -63,6 +65,7 @@ export default async function AdminPage() {
     corrections,
     goldLabeler1,
     goldLabeler2,
+    admission,
   ] = await Promise.all([
     getRecentArchiveExports(),
     getJevShadowStatus(),
@@ -77,6 +80,7 @@ export default async function AdminPage() {
     getRecentCorrections(),
     getJevGoldNext(1),
     getJevGoldNext(2),
+    getJevAdmissionStatus(),
   ]);
 
   const now = currentTimeMs();
@@ -165,6 +169,7 @@ export default async function AdminPage() {
         <JevShadowSection status={shadow} now={now} />
         <JevRegressionSection status={regression} now={now} />
         <JevBlindspotSection suspects={blindspot} now={now} />
+        <JevAdmissionSection status={admission} />
       </AdminGroup>
 
       <AdminGroup

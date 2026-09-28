@@ -12,6 +12,7 @@ import {
   JEV_TOPIC7_CHOICES,
   JEV_USD_PER_TOKEN,
   questionRegistryHash,
+  taskQuestionFingerprint,
   type JevRegressionItemKind,
   type JevRegressionRunStatus,
   type JevRunStatus,
@@ -684,6 +685,45 @@ describe("question set version + registry hash (JEV-A20)", () => {
   it("pins JEV_QUESTION_SET_VERSION and questionRegistryHash together — bump BOTH or neither", async () => {
     expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-24.1");
     expect(await questionRegistryHash()).toBe("4259abdc8db9062f8eea76650689c5e85f6c052dd22b640c0f4000d48a62fb39");
+  });
+
+  // 088 (JEV-A): taskQuestionFingerprint pins, sitting next to JEV-A20 above.
+  // If JEV-A20's registryHash pin is still green (it is, checked above) and
+  // one of these still differs, report it -- do not re-pin blindly (the
+  // ADMIT item's shadowPins depend on the politics and topic7 values).
+  it("pins taskQuestionFingerprint for politics, topic7, kap_class and kap_materiality", () => {
+    expect(taskQuestionFingerprint("politics")).toBe("fnv1a64:b28f24b28b0aa1e2");
+    expect(taskQuestionFingerprint("topic7")).toBe("fnv1a64:a5be77748d03273a");
+    expect(taskQuestionFingerprint("kap_class")).toBe("fnv1a64:4b45cd2a1c4f9cf3");
+    expect(taskQuestionFingerprint("kap_materiality")).toBe("fnv1a64:18fd8c4cc9909d75");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// JEV-A16 (088 extension): 088_jev_spend_ledger.sql's jev_shadow_month_usage
+// default cap also matches JEV_MONTHLY_TOKEN_CAP_DEFAULT.
+// ---------------------------------------------------------------------------
+
+describe("088_jev_spend_ledger.sql cost constant parity (JEV-A16)", () => {
+  it("088's jev_shadow_month_usage default cap matches JEV_MONTHLY_TOKEN_CAP_DEFAULT", () => {
+    expect(read("088_jev_spend_ledger.sql")).toContain(`p_cap bigint default ${JEV_MONTHLY_TOKEN_CAP_DEFAULT}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 088: fetchPendingKap's anti-join moved from kap_class to kap_materiality
+// (KAP sampling). Static check in the JEV-A1 regex style.
+// ---------------------------------------------------------------------------
+
+describe("jev-shadow/index.ts fetchPendingKap anti-join (088)", () => {
+  it('fetchPendingKap anti-joins on "kap_materiality", not "kap_class"', () => {
+    const indexTs = readFileSync(resolve(FUNCTIONS_DIR, "jev-shadow", "index.ts"), "utf8");
+    const fnMatch = indexTs.match(/async fetchPendingKap[\s\S]*?\n    \},\n/);
+    expect(fnMatch, "could not find fetchPendingKap in jev-shadow/index.ts").not.toBeNull();
+    const body = fnMatch![0];
+    expect(body).toMatch(/anti_join\(\s*\n?\s*"kap_materiality"/);
+    expect(body).not.toContain('anti_join(\n        "kap_class"');
+    expect(body).not.toMatch(/anti_join\(\s*"kap_class"/);
   });
 });
 

@@ -79,7 +79,15 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
-import { getJevSignalsStatus, toSourceDriftRows, toAlertRows, JEV_ALERT_KINDS, JEV_ALERT_LIMIT } from "./jev-signals";
+import {
+  getJevSignalsStatus,
+  toSourceDriftRows,
+  toAlertRows,
+  JEV_ALERT_KINDS,
+  JEV_ALERT_LIMIT,
+  JEV_ALERT_RESOLVED_REASONS,
+  JEV_ALERT_RESOLVED_REASON_LABELS_TR,
+} from "./jev-signals";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -341,7 +349,24 @@ describe("getJevSignalsStatus", () => {
 });
 
 describe("vocabulary", () => {
-  it("JEV_ALERT_KINDS matches migration 065's CHECK list", () => {
-    expect(JEV_ALERT_KINDS).toEqual(["source_drift", "kap_class_canary"]);
+  it("JEV_ALERT_KINDS matches migration 088's CHECK list (065 + 088's stage_budget)", () => {
+    expect(JEV_ALERT_KINDS).toEqual(["source_drift", "kap_class_canary", "stage_budget"]);
+  });
+
+  it("JEV_ALERT_RESOLVED_REASONS matches migration 088's CHECK list", () => {
+    expect(JEV_ALERT_RESOLVED_REASONS).toEqual([
+      "question_set_changed",
+      "agreement_recovered",
+      "drift_quiet",
+      "under_allowance",
+    ]);
+  });
+
+  it("every JEV_ALERT_RESOLVED_REASONS entry has a Turkish label, including 'Bütçe altına döndü'", () => {
+    for (const reason of JEV_ALERT_RESOLVED_REASONS) {
+      expect(typeof JEV_ALERT_RESOLVED_REASON_LABELS_TR[reason]).toBe("string");
+      expect(JEV_ALERT_RESOLVED_REASON_LABELS_TR[reason].length).toBeGreaterThan(0);
+    }
+    expect(JEV_ALERT_RESOLVED_REASON_LABELS_TR.under_allowance).toBe("Bütçe altına döndü");
   });
 });

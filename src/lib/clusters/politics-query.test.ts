@@ -110,6 +110,8 @@ interface MkClusterOpts {
     image_url?: string | null;
     /** BL-13 rights gate — omit for "flag absent, treated as allowed". */
     image_allowed?: boolean;
+    /** Migration 089 ("ADMIT") — omit for "never admitted". */
+    politics_admitted_at?: string | null;
   }>;
 }
 
@@ -138,6 +140,7 @@ function mkCluster(opts: MkClusterOpts) {
         source_id: m.sourceId,
         category: m.category ?? "politika",
         content_hash: m.content_hash === undefined ? `h-${m.id}` : m.content_hash,
+        politics_admitted_at: m.politics_admitted_at ?? null,
         sources: {
           id: m.sourceId,
           name: m.sourceName ?? `Source ${m.sourceId}`,
@@ -194,6 +197,8 @@ describe("getPoliticsClusters query shape", () => {
     expect(selectArg).toMatch(/sources\s*\([^)]*\bexcerpt_allowed\b/);
     // H2 neutral-headline column.
     expect(selectArg).toMatch(/\btitle_tr_neutral\b/);
+    // Migration 089 ("ADMIT"): the 60%-politics gate must see the stamp.
+    expect(selectArg).toMatch(/\bpolitics_admitted_at\b/);
 
     // ≥2 members, newest clusters first, capped at 200 (CANDIDATE_LIMIT).
     const gte = steps.find((s) => s.method === "gte");
@@ -274,6 +279,69 @@ describe("politics majority filter", () => {
     response = { data: [bad], error: null };
     const { bundles } = await getPoliticsClusters();
     expect(bundles).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 089 ("ADMIT"): politics-admitted members count toward the 60%
+// gate exactly like a politika/son_dakika category member.
+// ---------------------------------------------------------------------------
+
+describe("politics-admission gate (migration 089)", () => {
+  it("2 politika + 2 admitted (non-politika) members pass the 60% gate", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c-admitted-pass",
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "politika" },
+            { id: "a3", sourceId: "s3", category: "ekonomi", politics_admitted_at: iso(0) },
+            { id: "a4", sourceId: "s4", category: "ekonomi", politics_admitted_at: iso(0) },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(1);
+  });
+
+  it("2 + 2 non-admitted (unstamped) members fail the 60% gate", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c-unstamped-fail",
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "politika" },
+            { id: "a3", sourceId: "s3", category: "ekonomi", politics_admitted_at: null },
+            { id: "a4", sourceId: "s4", category: "ekonomi", politics_admitted_at: null },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(0);
+  });
+
+  it("1 politika + 2 admitted members passes (3/3 = 100% >= 60%)", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c-1plus2",
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "ekonomi", politics_admitted_at: iso(0) },
+            { id: "a3", sourceId: "s3", category: "ekonomi", politics_admitted_at: iso(0) },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles).toHaveLength(1);
   });
 });
 

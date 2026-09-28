@@ -160,6 +160,8 @@ describe("getBlindspots query shape", () => {
     expect(selectArg).toMatch(/\bblindspot_recall_veto\b/);
     expect(selectArg).toMatch(/sources\s*\([^)]*\bimage_allowed\b/);
     expect(selectArg).toMatch(/sources\s*\([^)]*\bexcerpt_allowed\b/);
+    // Migration 089 ("ADMIT"): politics_share must see the admission stamp.
+    expect(selectArg).toMatch(/\bpolitics_admitted_at\b/);
   });
 });
 

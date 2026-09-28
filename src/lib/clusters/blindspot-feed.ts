@@ -1,4 +1,4 @@
-import { BLINDSPOT, isVotingKind, tallyZones } from "@/lib/bias/config";
+import { BLINDSPOT, isPoliticsMember, isVotingKind, tallyZones } from "@/lib/bias/config";
 import type { ZoneTally } from "../../../supabase/functions/_shared/cluster/blindspot";
 import type { BiasCategory, NewsCategory, SourceKind } from "@/types";
 
@@ -29,6 +29,9 @@ export type EmbeddedArticle = {
   source_id: string;
   category: NewsCategory;
   content_hash: string | null;
+  /** Migration 089 ("ADMIT") — non-null once Jev has admitted this article
+   * into political clustering under a live claim. See isPoliticsMember. */
+  politics_admitted_at?: string | null;
   sources: EmbeddedSource | null;
 };
 
@@ -40,8 +43,6 @@ type FeedFilterResult = {
   ok: boolean;
   reason?: "min_sources" | "seo_pattern" | "wire_dedup" | "dunya_share" | "politics_share";
 };
-
-const POLITICS_CATEGORIES: readonly NewsCategory[] = ["politika", "son_dakika"];
 
 // A5 fix #3: "kimdir / kaç yaşında / son dakika: / canlı / ne dedi" titles are SEO explainers, not coverage gaps.
 const SEO_PATTERN =
@@ -91,9 +92,9 @@ export function passesFeedFilters(
     return { ok: false, reason: "dunya_share" };
   }
 
-  const politicsHits = deduped.filter((m) =>
-    POLITICS_CATEGORIES.includes(m.category)
-  ).length;
+  // Migration 089 ("ADMIT"): isPoliticsMember counts a live-admitted member
+  // toward politics_share too. The dunya_share gate above is unaffected.
+  const politicsHits = deduped.filter((m) => isPoliticsMember(m)).length;
   if (politicsHits / deduped.length < POLITICS_CATEGORY_SHARE_MIN) {
     return { ok: false, reason: "politics_share" };
   }

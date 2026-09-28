@@ -39,6 +39,14 @@ export interface JevQueueRow {
   created_at: string;
 }
 
+/** 088: one row of jev_budget_daily's per-stage today/yesterday spend. */
+export interface JevBudgetRow {
+  stage: string;
+  today: number | null;
+  yesterday: number | null;
+  allowance: number | null;
+}
+
 export interface JevShadowStatus {
   agreement24h: JevAgreementRow[];
   agreement7d: JevAgreementRow[];
@@ -53,7 +61,30 @@ export interface JevShadowStatus {
   };
   lastRun: JevRunRow | null;
   queue: JevQueueRow[];
+  /** 088: null when jev_budget_daily is unavailable (migration not yet
+   * applied, or a PostgREST error) -- the rest of the status still renders. */
+  budget: JevBudgetRow[] | null;
 }
+
+/** 088: Turkish display name for every jev-shadow ledger stage key, plus the
+ * SQL-only 'live_pair_marginal' and the pre-088 fallback 'unattributed'. An
+ * unknown key renders as-is (see toBudgetRows callers). Exported so
+ * jev-signals-section.tsx / jev-shadow-section.tsx import the same map. */
+export const JEV_STAGE_LABELS_TR: Record<string, string> = {
+  articles: "Haberler",
+  clusters: "Kümeler",
+  blindspot_recall: "Kör nokta geri çağırma",
+  pairs: "Eşleşmeler",
+  kap: "KAP",
+  title_versions: "Başlık değişiklikleri",
+  tickers: "Hisse eşleşmeleri",
+  "audit:pairs": "Gece denetimi: eşleşmeler",
+  "audit:audit_pairs": "Gece denetimi: küme içi",
+  "regression:regression_articles": "Regresyon: haberler",
+  "regression:regression_pairs": "Regresyon: eşleşmeler",
+  live_pair_marginal: "Canlı sınır doğrulama",
+  unattributed: "Atanmamış (eski kayıt)",
+};
 
 export const JEV_QUEUE_LIMIT = 30;
 
@@ -129,6 +160,62 @@ function toQueueRows(data: unknown): JevQueueRow[] {
   });
 }
 
+interface RawBudgetRow {
+  day?: string | null;
+  stage?: string | null;
+  tokens?: number | string | null;
+  allowance?: number | string | null;
+}
+
+/** Pure, exported (088): groups jev_budget_daily's per-day rows by stage,
+ * coerces numbers (PostgREST may send strings), maps day === todayUtc to
+ * `today` and the day before to `yesterday`, and sorts by yesterday desc. */
+export function toBudgetRows(data: unknown, todayUtc: string): JevBudgetRow[] {
+  const rows = Array.isArray(data) ? (data as RawBudgetRow[]) : [];
+  const yesterdayUtc = new Date(Date.parse(`${todayUtc}T00:00:00.000Z`) - 86_400_000)
+    .toISOString()
+    .slice(0, 10);
+
+  const byStage = new Map<string, JevBudgetRow>();
+  for (const row of rows) {
+    const stage = String(row.stage ?? "");
+    if (!stage) continue;
+    const day = String(row.day ?? "");
+    const tokens = row.tokens === null || row.tokens === undefined ? null : Number(row.tokens);
+    const allowance = row.allowance === null || row.allowance === undefined ? null : Number(row.allowance);
+    const existing = byStage.get(stage) ?? { stage, today: null, yesterday: null, allowance: null };
+    if (allowance !== null && Number.isFinite(allowance)) existing.allowance = allowance;
+    if (day === todayUtc) {
+      existing.today = tokens !== null && Number.isFinite(tokens) ? tokens : null;
+    } else if (day === yesterdayUtc) {
+      existing.yesterday = tokens !== null && Number.isFinite(tokens) ? tokens : null;
+    }
+    byStage.set(stage, existing);
+  }
+
+  return [...byStage.values()].sort((a, b) => (b.yesterday ?? -Infinity) - (a.yesterday ?? -Infinity));
+}
+
+/** 088: fetched OUTSIDE the load-bearing error loop -- a failure or throw
+ * here logs once and returns null, but never nulls the rest of the status. */
+async function fetchBudgetRows(
+  supabase: ReturnType<typeof createServerClient>,
+): Promise<JevBudgetRow[] | null> {
+  try {
+    const todayUtc = new Date(Date.now()).toISOString().slice(0, 10);
+    const { data, error } = await supabase.rpc("jev_budget_daily", { p_days: 2 });
+    if (error) {
+      console.error(`[admin] jev_budget_daily unavailable: ${error.message}`);
+      return null;
+    }
+    return toBudgetRows(data, todayUtc);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[admin] jev_budget_daily unavailable: ${message}`);
+    return null;
+  }
+}
+
 export async function getJevShadowStatus(): Promise<JevShadowStatus | null> {
   try {
     const supabase = createServerClient();
@@ -191,12 +278,18 @@ export async function getJevShadowStatus(): Promise<JevShadowStatus | null> {
     const usd = inputTokens * JEV_USD_PER_TOKEN;
     const pct = cap > 0 ? Math.round((inputTokens / cap) * 100) : 0;
 
+    // 088: fetched after the load-bearing Promise.all above resolves, so a
+    // jev_budget_daily failure (088 not yet applied, or a PostgREST hiccup)
+    // never nulls agreement/month/lastRun/queue -- only budget goes null.
+    const budget = await fetchBudgetRows(supabase);
+
     return {
       agreement24h: toAgreementRows(agreement24hRes.data),
       agreement7d: toAgreementRows(agreement7dRes.data),
       month: { runs, calls, inputTokens, usd, cap, pct, exceeded },
       lastRun: (lastRunRes.data ?? null) as JevRunRow | null,
       queue: toQueueRows(queueRes.data),
+      budget,
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

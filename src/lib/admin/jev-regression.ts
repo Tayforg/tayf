@@ -19,6 +19,15 @@ export interface JevRegressionItemCounts {
   inGold: number;
 }
 
+/** 088: one gold split (dev = stratum opus_seed, heldout = every other
+ * stratum). politics050 is correct_050 / n; topic7 is correct / n. Both
+ * null when n === 0 or the field is missing/malformed. */
+export interface ProvSplitView {
+  n: number;
+  politics050: number | null;
+  topic7: number | null;
+}
+
 export interface JevRegressionRunView {
   id: number;
   questionSet: string;
@@ -29,9 +38,13 @@ export interface JevRegressionRunView {
   calls: number;
   flipRate: number | null;
   firstRun: boolean;
-  flips: { politics: number | null; topic: number | null; pair: number | null };
+  flips: { politics: number | null; topic: number | null; pair: number | null; topic7: number | null };
   /** correct_070 / n, or null when n === 0 (or the field is missing/malformed). */
   goldPolitics070: number | null;
+  /** 088: correct / n for the topic7 gold block, or null when n === 0. */
+  goldTopic7: number | null;
+  /** 088: null when deltas.gold.provisional is absent or malformed. */
+  provisional: { dev: ProvSplitView; heldout: ProvSplitView } | null;
 }
 
 export interface JevRegressionStatus {
@@ -57,6 +70,22 @@ interface DeltaTaskShape {
 interface DeltaGoldPoliticsShape {
   n?: unknown;
   correct_070?: unknown;
+  correct_050?: unknown;
+}
+
+interface DeltaGoldTopic7Shape {
+  n?: unknown;
+  correct?: unknown;
+}
+
+interface DeltaProvSplitShape {
+  politics?: { n?: unknown; correct_050?: unknown };
+  topic7?: { n?: unknown; correct?: unknown };
+}
+
+interface DeltaProvisionalShape {
+  dev?: DeltaProvSplitShape;
+  heldout?: DeltaProvSplitShape;
 }
 
 interface DeltaShape {
@@ -64,10 +93,15 @@ interface DeltaShape {
   tasks?: {
     politics?: DeltaTaskShape;
     topic?: DeltaTaskShape;
+    topic7?: DeltaTaskShape;
     pair_negative?: DeltaTaskShape;
   };
   overall?: { flip_rate?: unknown };
-  gold?: { politics?: DeltaGoldPoliticsShape };
+  gold?: {
+    politics?: DeltaGoldPoliticsShape;
+    topic7?: DeltaGoldTopic7Shape;
+    provisional?: DeltaProvisionalShape;
+  };
 }
 
 /**
@@ -111,6 +145,15 @@ export function toRegressionRunView(row: unknown): JevRegressionRunView {
   const goldPolitics070 =
     goldN !== null && goldN > 0 && goldCorrect070 !== null ? goldCorrect070 / goldN : null;
 
+  const goldTopic7Obj = asObject<DeltaGoldTopic7Shape>(gold?.topic7);
+  const goldTopic7N = num(goldTopic7Obj?.n);
+  const goldTopic7Correct = num(goldTopic7Obj?.correct);
+  const goldTopic7 =
+    goldTopic7N !== null && goldTopic7N > 0 && goldTopic7Correct !== null ? goldTopic7Correct / goldTopic7N : null;
+
+  const provisionalObj = asObject<DeltaProvisionalShape>(gold?.provisional);
+  const provisional = provisionalObj ? { dev: toProvSplitView(provisionalObj.dev), heldout: toProvSplitView(provisionalObj.heldout) } : null;
+
   return {
     id: num(r.id) ?? 0,
     questionSet: str(r.question_set),
@@ -125,9 +168,26 @@ export function toRegressionRunView(row: unknown): JevRegressionRunView {
       politics: num(tasks?.politics?.flips),
       topic: num(tasks?.topic?.flips),
       pair: num(tasks?.pair_negative?.flips),
+      topic7: num(tasks?.topic7?.flips),
     },
     goldPolitics070,
+    goldTopic7,
+    provisional,
   };
+}
+
+function toProvSplitView(split: DeltaProvSplitShape | undefined): ProvSplitView {
+  const n = num(split?.politics?.n) ?? num(split?.topic7?.n) ?? 0;
+  const politicsN = num(split?.politics?.n);
+  const politicsCorrect = num(split?.politics?.correct_050);
+  const politics050 =
+    politicsN !== null && politicsN > 0 && politicsCorrect !== null ? politicsCorrect / politicsN : null;
+
+  const topic7N = num(split?.topic7?.n);
+  const topic7Correct = num(split?.topic7?.correct);
+  const topic7 = topic7N !== null && topic7N > 0 && topic7Correct !== null ? topic7Correct / topic7N : null;
+
+  return { n, politics050, topic7 };
 }
 
 /**

@@ -117,7 +117,7 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
         `id, title_tr, title_tr_neutral, summary_tr, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published, updated_at,
          cluster_articles (
            articles (
-             id, title, url, image_url, published_at, source_id, category, content_hash,
+             id, title, url, image_url, published_at, source_id, category, content_hash, politics_admitted_at,
              sources ( id, name, bias, kind, image_allowed, excerpt_allowed )
            )
          )`

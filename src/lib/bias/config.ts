@@ -274,3 +274,18 @@ export const ZONE_META: Record<
 export function zoneOf(bias: BiasCategory): MediaDnaZone {
   return BIAS_TO_ZONE[bias];
 }
+
+// ===========================================================================
+// Politics-admission contract re-exports (migration 089, "ADMIT")
+// ===========================================================================
+//
+// isPoliticsMember is the single source of truth every 60%-politics read
+// path (politics-query, blindspots-query/blindspot-feed, /api/v1) uses to
+// decide whether a cluster member counts as "politics": its own category is
+// politika/son_dakika, OR it carries a non-null politics_admitted_at stamp.
+export {
+  isPoliticsMember,
+  POLITICS_CATEGORIES,
+  JEV_ADMISSION_POLICY,
+  type AdmissionPin,
+} from "../../../supabase/functions/_shared/cluster/politics-admission";

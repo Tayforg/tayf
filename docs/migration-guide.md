@@ -1745,3 +1745,46 @@ select count(*) from public.jev_shadow_predictions;
 -- tasks with at least 500 comparable rows, and the section should load well
 -- under PostgREST's 8s statement_timeout.
 ```
+
+## 088 — Jev harcama defteri (aşama bütçesi, KAP örneklemesi, soru parmak izleri): APPLY 088 BEFORE DEPLOYING jev-shadow
+
+**Preconditions:** migration 073 must already be applied — 088's leading guard block raises `'088 requires 073 (jev_alerts.resolved_at + jev_alerts_auto_resolve) to be applied first'` and rolls back the whole transaction otherwise. 088 is copied from the lead's validated `083_jev_spend_ledger.sql`, renumbered, with 073's step (c) `drift_quiet` day+1 existence guard restored (the lead's copy had dropped it, which would resolve a `source_drift` alert as `drift_quiet` on a day with no day+1 measurement at all) and a `set local lock_timeout = '5s'` added before the two `ALTER TABLE`s.
+
+**Deploy order (load-bearing):**
+
+1. Apply `073_jev_pipeline_lifecycle.sql` if not already applied.
+2. Apply `088_jev_spend_ledger.sql`.
+3. Deploy the `jev-shadow` Edge Function (writes `jev_shadow_runs.stage_tokens`, stamps `jev_answer.question_hash`/`.pack`, and samples `kap_class` at 1-in-5 via `kapClassSampled`). **Deploying jev-shadow before 088 is applied makes every `finishRun`/`recordTokens` PostgREST write 400 on the unknown `stage_tokens` column — runs never close and the monthly-cap accounting breaks.**
+4. Deploy the Vercel branch (adds the "Aşama bütçesi" table, the `stage_budget` alert kind/label, the `under_allowance` resolved-reason label, the topic7/`Konu (7)` relabel, and the regression section's three new columns). No strict ordering against step 3, but do it in the same window.
+
+The KAP anti-join move (`fetchPendingKap` now anti-joins on `kap_materiality`, not `kap_class`) must ship in the SAME jev-shadow deploy as the sampling change in step 3 — deploying sampling without the anti-join move re-asks every unsampled disclosure on every 10-minute tick.
+
+**Verification SELECTs (read-only, safe to run in production after step 2):**
+
+```sql
+select version from supabase_migrations.schema_migrations where version = '088';
+
+select conname, pg_get_constraintdef(oid) from pg_constraint
+ where conrelid = 'public.jev_alerts'::regclass and contype = 'c';
+-- kind CHECK must include 'stage_budget'; resolved_reason CHECK must include 'under_allowance'
+
+select * from public.jev_stage_budgets order by stage;
+-- 12 seeded rows, articles 11,000,000 .. live_pair_marginal 150,000
+
+select day, stage, calls, tokens, allowance from public.jev_budget_daily(2) order by 1 desc, 2;
+
+select jobname, schedule from cron.job where jobname = 'jev-budget-nightly';
+-- '15 4 * * *', only present if pg_cron is installed
+```
+
+**Regression freeze runbook:** the frozen regression set replay (`mode: 'regression'`) now covers all 660 gold-frozen items in one pass — `JEV_REGRESSION_ITEM_LIMIT` rose 500 → 700 and `JEV_REGRESSION_CONCURRENCY` (32, regression stages only; shadow/audit stay at `JEV_CONCURRENCY`=8) keeps ~660 calls inside `JEV_DEADLINE_MS`. After deploying, trigger one on-demand regression run from `/admin` and confirm it closes `ok` (not `partial`) with `items` = 660 + the frozen pair count, and that `deltas.gold` now carries `topic7` and (when the provisional label fetch succeeds) a `provisional.dev` / `provisional.heldout` split.
+
+**Rollback:**
+
+```sql
+update cron.job set active = false where jobname = 'jev-budget-nightly';
+```
+
+Redeploy the previous `jev-shadow` Edge Function version (pre-`stage_tokens`/pre-sampling). The `jev_alerts_auto_resolve()` redefinition from 088 may stay in place — its step (a) only changes behavior for `kap_class_canary` alerts, which is backward-compatible with the pre-088 reader.
+
+See also `docs/jev-politics-admission.md` (migration 089, the ADMIT item) and `docs/topic7-v2.md` (migration 090, the T7a item) for the two migrations that build on top of 088 in this same wave.

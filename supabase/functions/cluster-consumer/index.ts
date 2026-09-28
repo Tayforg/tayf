@@ -71,6 +71,16 @@ import {
   type JevLiveRow,
   type JevLiveState,
 } from "../_shared/cluster/jev-verify.ts";
+import {
+  admissionMode,
+  claimArgs,
+  isPoliticsMember,
+  JEV_ADMISSION_POLICY,
+  parseAdmitTag,
+  routeMessage,
+  type AdmissionMode,
+} from "../_shared/cluster/politics-admission.ts";
+import { admissionEffect } from "../_shared/cluster/admission-effect.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -104,7 +114,12 @@ const MAX_INVOCATION_MS = 30_000;           // 30 s wall budget per invocation
 const READ_BUDGET_FLOOR_MS = 5_000;
 const CLUSTER_CONTEXT_TTL_MS = 60_000;      // refresh rolling-window context
 
-const POLITICS_CATEGORIES = ["politika", "son_dakika"];
+// POLITICS_CATEGORIES / isPoliticsMember / admissionMode / routeMessage /
+// claimArgs / parseAdmitTag now live in
+// ../_shared/cluster/politics-admission.ts (imported above), migration 089
+// ("ADMIT"). Ships with JEV_POLITICS_ADMISSION off, so none of this changes
+// drain behaviour, writes or JSON in this PR beyond the `admission` summary
+// block below.
 
 // BIAS_KEYS / BiasKey / detectBlindspot now live in
 // ../_shared/cluster/blindspot.ts (imported above) so the zone-based
@@ -131,6 +146,7 @@ interface ArticleRow {
   fingerprint: string | null;
   entities: string[] | null;
   category: string | null;
+  politics_admitted_at: string | null;
 }
 
 interface EnrichedArticle extends ArticleRow {
@@ -166,6 +182,7 @@ interface ClusterMemberArticle {
   fingerprint: string | null;
   entities: string[] | null;
   category: string | null;
+  politics_admitted_at?: string | null;
   signature?: Uint32Array;
   minhash_sig?: number[] | null;
   minhash_version?: number | null;
@@ -196,6 +213,7 @@ interface ClusterContext {
 
 interface QueueMessage {
   article_id: string;
+  admit?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,14 +427,16 @@ async function loadClusterContext(): Promise<ClusterContext> {
 
   const articleRows = await inChunked<ClusterMemberArticle & { source_id: string | null }>(
     "articles",
-    "id, source_id, title, description, published_at, fingerprint, entities, category, minhash_sig, minhash_version",
+    "id, source_id, title, description, published_at, fingerprint, entities, category, politics_admitted_at, minhash_sig, minhash_version",
     "id",
     allArticleIds,
     100,
   );
-  const politicsArticleRows = articleRows.filter((a) =>
-    a.category != null && POLITICS_CATEGORIES.includes(a.category),
-  );
+  // isPoliticsMember (migration 089): NOT flag-gated -- a cluster seeded
+  // only by an admitted (politics_admitted_at-stamped) member must still
+  // load as a seed even while the flag is off, or a later live claim would
+  // silently orphan it from the rolling context.
+  const politicsArticleRows = articleRows.filter((a) => isPoliticsMember(a));
   const memberArticles = new Map(politicsArticleRows.map((a) => [a.id, a]));
 
   const sourceIdsByCluster = new Map<string, Set<string>>();
@@ -794,6 +814,23 @@ interface AddResult {
   reason?: string;
 }
 
+// Pure, read-only dedupe check for a dry-run (shadow) claim: reads only the
+// in-memory cluster context's sourceIdsByCluster, never touches the DB.
+// Migration 089's rule -- "dry-run must never call addArticleToCluster: even
+// its dedupe branch can issue a DB read" -- means a dry-run that hasn't
+// warmed the cache for this cluster yet treats it as "no duplicate" rather
+// than falling back to a live query.
+function wouldDuplicate(
+  ctx: ClusterContext,
+  clusterId: string,
+  article: EnrichedArticle,
+): boolean {
+  if (!article.source_id) return false;
+  const existingSources = ctx.sourceIdsByCluster.get(clusterId);
+  if (!existingSources) return false;
+  return existingSources.has(article.source_id);
+}
+
 async function addArticleToCluster(
   sourceLookup: Map<string, SourceRow>,
   clusterId: string,
@@ -921,20 +958,39 @@ async function recordMarginal(row: JevLiveRow): Promise<void> {
 // Per-message processing
 // ---------------------------------------------------------------------------
 
-type ProcessResult = "matched" | "created" | "skipped" | "not-found" | "not-politics";
+type ProcessResult =
+  | "matched"
+  | "created"
+  | "skipped"
+  | "not-found"
+  | "not-politics"
+  | "would_match"
+  | "would_create"
+  | "disabled"
+  | "rejected";
 
 // Carries the touched cluster id alongside the outcome so drainQueue can
 // build the revalidation tag list without re-deriving it from scratch.
+// score/sourcesBefore (089) are populated only for admission-claimed
+// (admit-tagged) messages, read-only copies taken BEFORE any mutation, so a
+// plain (non-admitted) message's outcome shape is unaffected.
 interface ProcessOutcome {
   result: ProcessResult;
   clusterId?: string;
+  score?: number;
+  sourcesBefore?: string[];
+  articleSourceId?: string | null;
 }
 
-async function processArticle(articleId: string): Promise<ProcessOutcome> {
+async function processArticle(
+  articleId: string,
+  admitTag: "shadow" | "live" | null,
+  mode: AdmissionMode,
+): Promise<ProcessOutcome> {
   const artRes = await supabase
     .from("articles")
     .select(
-      "id, source_id, title, description, url, content_hash, published_at, fingerprint, entities, category",
+      "id, source_id, title, description, url, content_hash, published_at, fingerprint, entities, category, politics_admitted_at",
     )
     .eq("id", articleId)
     .maybeSingle();
@@ -943,12 +999,26 @@ async function processArticle(articleId: string): Promise<ProcessOutcome> {
   }
   if (!artRes.data) return { result: "not-found" };
   const raw = artRes.data as ArticleRow;
-  if (!raw.category || !POLITICS_CATEGORIES.includes(raw.category)) {
-    return { result: "not-politics" };
-  }
+
+  const route = routeMessage(raw, admitTag, mode);
 
   try {
-    return await clusterArticle(raw);
+    switch (route) {
+      case "cluster": {
+        const outcome = await clusterArticle(raw);
+        return { ...outcome, articleSourceId: raw.source_id };
+      }
+      case "dry-run": {
+        const outcome = await clusterArticle(raw, { dryRun: true });
+        return { ...outcome, articleSourceId: raw.source_id };
+      }
+      case "not-politics":
+        return { result: "not-politics", articleSourceId: raw.source_id };
+      case "disabled":
+        return { result: "disabled", articleSourceId: raw.source_id };
+      case "rejected":
+        return { result: "rejected", articleSourceId: raw.source_id };
+    }
   } catch (err) {
     // Stamp the article URL onto the error so drainQueue's msg-error log
     // can include it without re-fetching the row (audit O14).
@@ -959,7 +1029,11 @@ async function processArticle(articleId: string): Promise<ProcessOutcome> {
   }
 }
 
-async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
+async function clusterArticle(
+  raw: ArticleRow,
+  opts: { dryRun?: boolean } = {},
+): Promise<ProcessOutcome> {
+  const dryRun = opts.dryRun === true;
   // Idempotency is enforced inside `cluster_link_atomic` via the
   // (cluster_id, article_id) primary key + per-cluster advisory lock:
   // a duplicate INSERT is a no-op but the recompute still runs, which
@@ -969,7 +1043,9 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
   // short-circuit on a pre-existing cluster_articles row anymore.
 
   const article = enrichArticleInMemory(raw);
-  await persistEnrichment(article);
+  if (!dryRun) {
+    await persistEnrichment(article);
+  }
 
   const ctx = await getClusterContext();
   const sourceLookup = await getSourceLookup();
@@ -981,6 +1057,21 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
     const blocked = new Set<string>();
     for (const clusterId of fpHit) {
       if (blocked.has(clusterId)) continue;
+      if (dryRun) {
+        // wouldDuplicate is pure and read-only (in-memory context only) --
+        // dry-run must never call addArticleToCluster, even its dedupe
+        // branch can issue a DB read.
+        if (wouldDuplicate(ctx, clusterId, article)) {
+          blocked.add(clusterId);
+          continue;
+        }
+        return {
+          result: "would_match",
+          clusterId,
+          score: 1,
+          sourcesBefore: [...(ctx.sourceIdsByCluster.get(clusterId) ?? [])],
+        };
+      }
       try {
         const result = await addArticleToCluster(sourceLookup, clusterId, article);
         if (result.skipped) {
@@ -1110,7 +1201,7 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
     inputTokens: number;
   } | null = null;
 
-  if (jevLive.enabled && primary && band !== "none") {
+  if (jevLive.enabled && primary && band !== "none" && !dryRun) {
     // Budget is gated on ATTEMPTS, not successes -- jevLiveAttempts is
     // bumped immediately before the gateway call below regardless of
     // outcome, so a gateway outage (timeouts/5xx on every call) still
@@ -1266,6 +1357,18 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
       // fall through into a genuinely sub-threshold join in [FALLBACK_FLOOR,
       // MATCH_THRESHOLD) -- a join the ensemble alone would never make.
       if (cand.score < (marginalRejectedClusterId ? MATCH_THRESHOLD : FALLBACK_FLOOR)) break;
+      if (dryRun) {
+        if (wouldDuplicate(ctx, cand.clusterId, article)) {
+          blocked.add(cand.clusterId);
+          continue;
+        }
+        return {
+          result: "would_match",
+          clusterId: cand.clusterId,
+          score: cand.score,
+          sourcesBefore: [...(ctx.sourceIdsByCluster.get(cand.clusterId) ?? [])],
+        };
+      }
       const result = await addArticleToCluster(sourceLookup, cand.clusterId, article);
       if (result.skipped) {
         blocked.add(cand.clusterId);
@@ -1276,8 +1379,14 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
     }
   }
 
-  // No viable match → spawn a new cluster. registerNewClusterInCache makes
-  // sure subsequent dequeues in this same invocation see it.
+  // No viable match. In a dry run, report what would happen without ever
+  // calling createCluster/registerNewClusterInCache/addMemberToIndices.
+  if (dryRun) {
+    return { result: "would_create", score: primary?.score, sourcesBefore: [] };
+  }
+
+  // → spawn a new cluster. registerNewClusterInCache makes sure subsequent
+  // dequeues in this same invocation see it.
   const newId = await createCluster(sourceLookup, article);
   registerNewClusterInCache(newId, {
     id: article.id,
@@ -1297,6 +1406,38 @@ async function clusterArticle(raw: ArticleRow): Promise<ProcessOutcome> {
 // Top-level invocation handler
 // ---------------------------------------------------------------------------
 
+interface AdmissionSummary {
+  mode: AdmissionMode;
+  claim: "skipped" | "ok" | "error";
+  claimed: number;
+  live_claimed: number;
+  would_match: number;
+  would_create: number;
+  matched: number;
+  created: number;
+  rejected: number;
+  disabled: number;
+  not_found: number;
+  record_errors: number;
+}
+
+function newAdmissionSummary(mode: AdmissionMode): AdmissionSummary {
+  return {
+    mode,
+    claim: "skipped",
+    claimed: 0,
+    live_claimed: 0,
+    would_match: 0,
+    would_create: 0,
+    matched: 0,
+    created: 0,
+    rejected: 0,
+    disabled: 0,
+    not_found: 0,
+    record_errors: 0,
+  };
+}
+
 interface InvocationSummary {
   drained: number;
   matched: number;
@@ -1309,6 +1450,7 @@ interface InvocationSummary {
   duration_ms: number;
   budgeted_out: boolean;
   jev_live: JevLiveState;
+  admission: AdmissionSummary;
 }
 
 // /api/revalidate rejects payloads over MAX_TAGS; reserve room for the two
@@ -1362,6 +1504,62 @@ async function triggerRevalidation(clusterIds: string[]): Promise<void> {
   }
 }
 
+// Records the routing outcome of an admit-tagged claim (migration 089).
+// Only ever called for messages that carried an `admit` tag -- a plain
+// (non-admitted) message never reaches this function. Wrapped by the
+// caller in try/catch: a record error must still archive the message and
+// count admission.record_errors, never failedTransient, and must log only
+// the error code, never the message or article contents.
+/** p_outcome values, per the migration's CHECK constraint. */
+type AdmissionOutcome =
+  | "matched"
+  | "created"
+  | "would_match"
+  | "would_create"
+  | "disabled"
+  | "rejected"
+  | "not_found";
+
+async function recordAdmission(
+  articleId: string,
+  outcomeName: AdmissionOutcome,
+  outcome: ProcessOutcome,
+  extra: { sourceLookup: Map<string, SourceRow>; articleSourceId: string | null },
+): Promise<void> {
+  const sourceLookup = extra.sourceLookup;
+  const before = (outcome.sourcesBefore ?? []).map((id) => sourceLookup.get(id) ?? null);
+  const added = extra.articleSourceId ? sourceLookup.get(extra.articleSourceId) ?? null : null;
+  const effect = admissionEffect(before, added);
+
+  const dryRun = outcomeName === "would_match" || outcomeName === "would_create";
+  let clusterSeededByAdmission = false;
+  if (!dryRun && outcomeName === "matched" && outcome.clusterId) {
+    const seedRes = await supabase
+      .from("jev_politics_admissions")
+      .select("article_id")
+      .eq("cluster_id", outcome.clusterId)
+      .eq("outcome", "created")
+      .is("rolled_back_at", null)
+      .limit(1);
+    clusterSeededByAdmission = Boolean(seedRes.data && seedRes.data.length > 0);
+  }
+
+  const res = await supabase.rpc("jev_politics_admission_record", {
+    p_article_id: articleId,
+    p_outcome: outcomeName,
+    p_cluster_id: outcome.clusterId ?? null,
+    p_score: outcome.score ?? null,
+    p_sources_before: outcome.sourcesBefore?.length ?? null,
+    p_blindspot_before: effect.blindspotBefore,
+    p_blindspot_after: effect.blindspotAfter,
+    p_zone_added: effect.zoneAdded,
+    p_cluster_seeded_by_admission: clusterSeededByAdmission,
+  });
+  if (res.error) {
+    throw new Error(res.error.code ?? "record-failed");
+  }
+}
+
 async function drainQueue(): Promise<InvocationSummary> {
   // FIRST statement: reset the live-verification counters for this
   // invocation. Read the env here (not at module load) so the Deno-env
@@ -1373,6 +1571,11 @@ async function drainQueue(): Promise<InvocationSummary> {
     ),
   );
   jevLiveAttempts = 0;
+
+  // Migration 089 ("ADMIT"): read the flag inside drainQueue (not at module
+  // load) so the Deno-env polyfill test harness keeps working, same
+  // discipline as jevLive above.
+  const admissionModeValue = admissionMode(Deno.env.get(JEV_ADMISSION_POLICY.envFlag) ?? undefined);
 
   const startedAt = Date.now();
   const summary: InvocationSummary = {
@@ -1387,6 +1590,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     duration_ms: 0,
     budgeted_out: false,
     jev_live: jevLive,
+    admission: newAdmissionSummary(admissionModeValue),
   };
 
   // Best-effort depth sample for the drain summary log (audit O13).
@@ -1401,6 +1605,32 @@ async function drainQueue(): Promise<InvocationSummary> {
   // per-message path is read-only against the cache (cheap).
   await getClusterContext();
   await getSourceLookup();
+
+  // One admission claim per drain, after the context warm-up and before the
+  // first readBatch. A claim error is non-fatal -- logged with only the
+  // error code, never the message -- and leaves summary.admission.claim as
+  // "error" so the drain proceeds exactly as if the flag were off.
+  if (admissionModeValue !== "off") {
+    try {
+      const claimRes = await supabase.rpc(
+        "jev_politics_admission_claim",
+        claimArgs(admissionModeValue),
+      );
+      if (claimRes.error) {
+        summary.admission.claim = "error";
+        console.warn("[cluster-consumer] admission claim failed", { code: claimRes.error.code });
+      } else {
+        summary.admission.claim = "ok";
+        const row = Array.isArray(claimRes.data) ? claimRes.data[0] : claimRes.data;
+        summary.admission.claimed = Number(row?.claimed ?? 0);
+        summary.admission.live_claimed = Number(row?.live ?? 0);
+      }
+    } catch (err) {
+      summary.admission.claim = "error";
+      const code = (err as { code?: string } | null)?.code ?? "unknown";
+      console.warn("[cluster-consumer] admission claim failed", { code });
+    }
+  }
 
   while (true) {
     // Lease a new batch only while enough budget remains to actually
@@ -1451,8 +1681,10 @@ async function drainQueue(): Promise<InvocationSummary> {
         continue;
       }
 
+      const admitTag = parseAdmitTag(msg.message?.admit);
+
       try {
-        const outcome = await processArticle(articleId);
+        const outcome = await processArticle(articleId, admitTag, admissionModeValue);
         await archive(supabase, QUEUE_NAME, msg.msg_id);
         summary.drained += 1;
         switch (outcome.result) {
@@ -1473,6 +1705,50 @@ async function drainQueue(): Promise<InvocationSummary> {
           case "not-politics":
             summary.notPolitics += 1;
             break;
+          // Dry-run and disabled/rejected outcomes never touch matched/
+          // created, touchedClusterIds or revalidation -- see the
+          // admission.* counters below.
+          case "would_match":
+            summary.admission.would_match += 1;
+            break;
+          case "would_create":
+            summary.admission.would_create += 1;
+            break;
+          case "disabled":
+            summary.admission.disabled += 1;
+            break;
+          case "rejected":
+            summary.admission.rejected += 1;
+            break;
+        }
+        if (outcome.result === "matched" && admitTag !== null) summary.admission.matched += 1;
+        if (outcome.result === "created" && admitTag !== null) summary.admission.created += 1;
+        if (outcome.result === "not-found" && admitTag !== null) summary.admission.not_found += 1;
+
+        if (admitTag !== null) {
+          const admissionOutcome: AdmissionOutcome | null =
+            outcome.result === "not-found"
+              ? "not_found"
+              : outcome.result === "matched" ||
+                  outcome.result === "created" ||
+                  outcome.result === "would_match" ||
+                  outcome.result === "would_create" ||
+                  outcome.result === "disabled" ||
+                  outcome.result === "rejected"
+                ? outcome.result
+                : null;
+          if (admissionOutcome) {
+            try {
+              await recordAdmission(articleId, admissionOutcome, outcome, {
+                sourceLookup: await getSourceLookup(),
+                articleSourceId: outcome.articleSourceId ?? null,
+              });
+            } catch (recErr) {
+              summary.admission.record_errors += 1;
+              const code = (recErr as Error | undefined)?.message ?? "unknown";
+              console.warn("[cluster-consumer] admission record failed", { code });
+            }
+          }
         }
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);

@@ -7,20 +7,30 @@ import { createServerClient } from "@/lib/supabase/server";
 // a missing migration, a Supabase hiccup, or a bad row shape all render as a
 // status sentence on the page, never a 500. `null` means "could not read".
 
-// Pinned against migration 065's jev_alerts.kind CHECK list by the SIG-A1
+// Pinned against migration 088's jev_alerts.kind CHECK list by the SIG-A1
 // cross-worker guard in tests/migrations/jev-signals-parity.test.ts (W1) —
 // keep this a single-line array literal so the regex finds it.
-export const JEV_ALERT_KINDS = ["source_drift", "kap_class_canary"] as const;
+export const JEV_ALERT_KINDS = ["source_drift", "kap_class_canary", "stage_budget"] as const;
 export type JevAlertKind = (typeof JEV_ALERT_KINDS)[number];
 
 export const SOURCE_DRIFT_DAYS = 7;
 export const JEV_ALERT_LIMIT = 20;
 
-// Pinned against migration 073's jev_alerts_resolved_reason_check CHECK
-// list by tests/migrations/073-jev-pipeline-lifecycle.test.ts -- keep this
-// a single-line array literal so the regex finds it.
-export const JEV_ALERT_RESOLVED_REASONS = ["question_set_changed", "agreement_recovered", "drift_quiet"] as const;
+// Pinned against migration 088's jev_alerts_resolved_reason_check CHECK
+// list by tests/migrations/073-jev-pipeline-lifecycle.test.ts (073's own
+// list is this minus 'under_allowance') and tests/migrations/088-jev-spend-
+// ledger.test.ts -- keep this a single-line array literal so the regex finds it.
+export const JEV_ALERT_RESOLVED_REASONS = ["question_set_changed", "agreement_recovered", "drift_quiet", "under_allowance"] as const;
 export type JevAlertResolvedReason = (typeof JEV_ALERT_RESOLVED_REASONS)[number];
+
+/** 088: Turkish label for every JEV_ALERT_RESOLVED_REASONS entry, rendered
+ * next to a resolved alert on /admin. */
+export const JEV_ALERT_RESOLVED_REASON_LABELS_TR: Record<JevAlertResolvedReason, string> = {
+  question_set_changed: "KAP sınıfı soru metni değişti",
+  agreement_recovered: "Uyum düzeldi",
+  drift_quiet: "Sapma sustu",
+  under_allowance: "Bütçe altına döndü",
+};
 
 export const JEV_ALERT_RESOLVED_WINDOW_DAYS = 7;
 

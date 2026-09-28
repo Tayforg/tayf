@@ -150,6 +150,25 @@ describe("passesFeedFilters", () => {
       reason: "politics_share",
     });
   });
+
+  it("migration 089: politics_share counts a live-admitted (politics_admitted_at) member", () => {
+    const cat: NewsCategory[] = ["spor", "spor", "spor", "politika", "son_dakika"];
+    const deduped = makeDedupedFive(cat.map((category) => ({ category })));
+    // Two of the three "spor" members are now admitted -- 4/5 = 80% >= 60%.
+    deduped[0] = { ...deduped[0], politics_admitted_at: "2026-09-28T00:00:00.000Z" };
+    deduped[1] = { ...deduped[1], politics_admitted_at: "2026-09-28T00:00:00.000Z" };
+    expect(passesFeedFilters({ title_tr: "Bakanlıktan açıklama" }, deduped)).toEqual({ ok: true });
+  });
+
+  it("migration 089: dunya_share gate is unaffected by politics_admitted_at", () => {
+    const cat: NewsCategory[] = ["dunya", "dunya", "dunya", "politika", "politika"];
+    const deduped = makeDedupedFive(cat.map((category) => ({ category })));
+    deduped[0] = { ...deduped[0], politics_admitted_at: "2026-09-28T00:00:00.000Z" };
+    expect(passesFeedFilters({ title_tr: "Bakanlıktan açıklama" }, deduped)).toEqual({
+      ok: false,
+      reason: "dunya_share",
+    });
+  });
 });
 
 describe("zoneTallyOf", () => {

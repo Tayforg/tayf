@@ -23,11 +23,13 @@ const fixture = vi.hoisted(() => ({
   ] as unknown[],
   queue: [] as unknown[],
   lastRun: [] as unknown[],
+  budgetDaily: [] as unknown[],
   agreementError: null as { message: string } | null,
   rollupError: null as { message: string } | null,
   monthError: null as { message: string } | null,
   queueError: null as { message: string } | null,
   runsError: null as { message: string } | null,
+  budgetError: null as { message: string } | null,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -57,6 +59,10 @@ const supabaseFake = await vi.hoisted(async () => {
         if (fixture.queueError) return { data: null, error: fixture.queueError };
         return { data: fixture.queue, error: null };
       },
+      jev_budget_daily: () => {
+        if (fixture.budgetError) return { data: null, error: fixture.budgetError };
+        return { data: fixture.budgetDaily, error: null };
+      },
     },
   });
 });
@@ -65,7 +71,7 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
-import { getJevShadowStatus, JEV_QUEUE_LIMIT } from "./jev-shadow-status";
+import { getJevShadowStatus, JEV_QUEUE_LIMIT, toBudgetRows } from "./jev-shadow-status";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -80,11 +86,13 @@ beforeEach(() => {
   ];
   fixture.queue = [];
   fixture.lastRun = [];
+  fixture.budgetDaily = [];
   fixture.agreementError = null;
   fixture.rollupError = null;
   fixture.monthError = null;
   fixture.queueError = null;
   fixture.runsError = null;
+  fixture.budgetError = null;
   supabaseFake.calls.rpc.length = 0;
 });
 
@@ -271,5 +279,68 @@ describe("getJevShadowStatus", () => {
     expect(result!.agreement24h).toEqual([
       { task: "politics", total: 80, agreed: 60, undecided: 5, rate: 60 / 80 },
     ]);
+  });
+
+  it("088: the jev_budget_daily RPC is called with { p_days: 2 }", async () => {
+    await getJevShadowStatus();
+    const rpcCalls = supabaseFake.calls.rpc;
+    expect(
+      rpcCalls.some((c) => c.name === "jev_budget_daily" && (c.args as { p_days: number }).p_days === 2),
+    ).toBe(true);
+  });
+
+  it("088: a jev_budget_daily RPC error yields budget: null while the rest of the status is non-null", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.budgetError = { message: "function jev_budget_daily does not exist" };
+
+    const result = await getJevShadowStatus();
+
+    expect(result).not.toBeNull();
+    expect(result!.budget).toBeNull();
+    expect(result!.month.runs).toBe(12);
+    errorSpy.mockRestore();
+  });
+
+  it("088: budget rows are populated when jev_budget_daily succeeds", async () => {
+    fixture.budgetDaily = [{ day: "2026-09-27", stage: "articles", calls: 10, tokens: 5000, allowance: 11_000_000 }];
+
+    const result = await getJevShadowStatus();
+
+    expect(result!.budget).not.toBeNull();
+    expect(result!.budget!.length).toBeGreaterThan(0);
+  });
+});
+
+describe("toBudgetRows (088)", () => {
+  it("maps today vs yesterday by UTC day and passes allowance null through", () => {
+    const rows = toBudgetRows(
+      [
+        { day: "2026-09-28", stage: "articles", tokens: "5000", allowance: null },
+        { day: "2026-09-27", stage: "articles", tokens: 4000, allowance: "11000000" },
+      ],
+      "2026-09-28",
+    );
+    expect(rows).toEqual([{ stage: "articles", today: 5000, yesterday: 4000, allowance: 11_000_000 }]);
+  });
+
+  it("sorts by yesterday desc", () => {
+    const rows = toBudgetRows(
+      [
+        { day: "2026-09-27", stage: "kap", tokens: 100, allowance: 800_000 },
+        { day: "2026-09-27", stage: "articles", tokens: 9000, allowance: 11_000_000 },
+      ],
+      "2026-09-28",
+    );
+    expect(rows.map((r) => r.stage)).toEqual(["articles", "kap"]);
+  });
+
+  it("returns [] for non-array input", () => {
+    expect(toBudgetRows(null, "2026-09-28")).toEqual([]);
+    expect(toBudgetRows(undefined, "2026-09-28")).toEqual([]);
+  });
+
+  it("a null allowance stays null when no day for that stage carries one", () => {
+    const rows = toBudgetRows([{ day: "2026-09-28", stage: "unseeded", tokens: 10, allowance: null }], "2026-09-28");
+    expect(rows[0]).toEqual({ stage: "unseeded", today: 10, yesterday: null, allowance: null });
   });
 });

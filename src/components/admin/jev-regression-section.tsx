@@ -63,6 +63,14 @@ function flipRateTone(rate: number | null): Tone {
   return "ok";
 }
 
+/** "siyaset %x · konu7 %y (n=N)" per provisional split, or "—" when absent. */
+function fmtProvSplit(split: { n: number; politics050: number | null; topic7: number | null } | undefined): string {
+  if (!split || split.n === 0) return "—";
+  const politicsPct = split.politics050 === null ? "—" : `%${Math.round(split.politics050 * 100)}`;
+  const topic7Pct = split.topic7 === null ? "—" : `%${Math.round(split.topic7 * 100)}`;
+  return `siyaset ${politicsPct} · konu7 ${topic7Pct} (n=${split.n})`;
+}
+
 export function JevRegressionSection({
   status,
   now,
@@ -118,6 +126,13 @@ export function JevRegressionSection({
                       >
                         Altına uyum (≥0,70)
                       </Th>
+                      <Th numeric>Değişen: Konu (7)</Th>
+                      <Th numeric title="Jev'in 7'li konu cevabının altın etiketlerle aynı olma oranı">
+                        Konu (7) altına uyum
+                      </Th>
+                      <Th title="Henüz insan çift-etiketleyici uyumundan geçmemiş, dev (opus_seed) / ayrılmış (diğer katmanlar) bölünmüş geçici etiketlerle karşılaştırma">
+                        Geçici etiket: geliştirme / ayrılmış
+                      </Th>
                     </Tr>
                   </thead>
                   <tbody>
@@ -149,6 +164,18 @@ export function JevRegressionSection({
                         <Td numeric>{fmtInt(run.flips.topic)}</Td>
                         <Td numeric>{fmtInt(run.flips.pair)}</Td>
                         <Td numeric>{fmtPct(run.goldPolitics070)}</Td>
+                        <Td numeric>{fmtInt(run.flips.topic7)}</Td>
+                        <Td numeric>{fmtPct(run.goldTopic7)}</Td>
+                        <Td>
+                          {run.provisional === null ? (
+                            "—"
+                          ) : (
+                            <div className="space-y-0.5 text-xs">
+                              <div>geliştirme: {fmtProvSplit(run.provisional.dev)}</div>
+                              <div>ayrılmış: {fmtProvSplit(run.provisional.heldout)}</div>
+                            </div>
+                          )}
+                        </Td>
                       </Tr>
                     ))}
                   </tbody>
