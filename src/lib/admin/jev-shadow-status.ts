@@ -136,7 +136,24 @@ export async function getJevShadowStatus(): Promise<JevShadowStatus | null> {
     const [agreement24hRes, agreement7dRes, monthRes, queueRes, lastRunRes] =
       await Promise.all([
         supabase.rpc("jev_shadow_agreement", { p_hours: 24 }),
-        supabase.rpc("jev_shadow_agreement", { p_hours: 168 }),
+        // Migration 081: the 7-day window now reads jev_shadow_agreement_rollup
+        // (complete UTC days from jev_shadow_daily + today's raw tail), not a
+        // rolling 168h scan of jev_shadow_predictions — that table grows
+        // ~50 MB/day and is never pruned, so the raw scan only gets slower
+        // over time. "7 days" here means 6 complete UTC days plus today, not
+        // a rolling 168 hours. Falls back to the original raw
+        // jev_shadow_agreement({p_hours:168}) call only if the rollup RPC
+        // errors (e.g. migration 081 not yet applied) — same output shape
+        // (task, total, agreed, undecided), so toAgreementRows and
+        // JevShadowStatus are unchanged either way.
+        (async () => {
+          const r = await supabase.rpc("jev_shadow_agreement_rollup", { p_days: 7 });
+          if (!r.error) return r;
+          console.warn(
+            `[admin] jev_shadow_agreement_rollup unavailable, using raw 168h: ${r.error.message}`,
+          );
+          return supabase.rpc("jev_shadow_agreement", { p_hours: 168 });
+        })(),
         // No p_cap argument — the SQL default is the single source of
         // truth for the monthly cap (see migration 061's comment on
         // jev_shadow_month_usage()).

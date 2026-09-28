@@ -6,6 +6,7 @@ import { cache } from "react";
 
 import { DataNote } from "@/components/finance/data-note";
 import { IntradayChart } from "@/components/finance/intraday-chart";
+import { KapPickupPanel } from "@/components/finance/kap-pickup-panel";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
 import { fmtPct, fmtPrice, fmtWhen, fmtX, istToday, limitFlag, moveClass } from "@/lib/finance/format";
@@ -239,6 +240,8 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
           </p>
         </Panel>
       </div>
+
+      <KapPickupPanel ticker={ticker} />
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <Panel title="Haberler" meta={`${page.articles.length} haber`}>

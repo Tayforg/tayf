@@ -2,6 +2,7 @@
 
 import type { ComponentPropsWithoutRef, MouseEvent } from "react";
 import { track, type TrackEvent, type TrackProps } from "@/lib/track";
+import { recordReadingClick } from "@/lib/diet/diet-store";
 
 interface TrackedLinkProps extends ComponentPropsWithoutRef<"a"> {
   event: TrackEvent;
@@ -12,7 +13,8 @@ interface TrackedLinkProps extends ComponentPropsWithoutRef<"a"> {
 // can keep their outbound anchors without becoming client components.
 export function TrackedLink({ event, data, onClick, ...rest }: TrackedLinkProps) {
   function handleClick(e: MouseEvent<HTMLAnchorElement>) {
-    track(event, data);
+    track(event, data); // unchanged, first: Vercel analytics payload
+    recordReadingClick(event, data); // device-local "haber diyetim" mirror, never throws
     onClick?.(e);
   }
   return <a {...rest} onClick={handleClick} />;

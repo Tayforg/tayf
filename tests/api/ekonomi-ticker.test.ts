@@ -86,6 +86,14 @@ vi.mock("next/server", async (importOriginal) => {
 
 vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
+// kap-media-pickup: this file's @/lib/supabase/server mock below lacks
+// createFinanceServerClient (used by getTickerPickup/kap-pickup-query),
+// and the panel is purely additive to this page — stub it out so the
+// existing assertions stay untouched and independent of the pickup path.
+vi.mock("@/components/finance/kap-pickup-panel", () => ({
+  KapPickupPanel: () => null,
+}));
+
 vi.mock("@/lib/finance/queries", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/finance/queries")>();
   return {

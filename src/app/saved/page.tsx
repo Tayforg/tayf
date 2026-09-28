@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 
 import { SavedList } from "@/components/bookmark/saved-list";
 
@@ -19,6 +20,15 @@ export default function SavedPage() {
       <h1 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight mb-4">
         Kaydedilenler
       </h1>
+      <p className="-mt-2 mb-4 text-[12px] text-muted-foreground">
+        Hangi taraftan ne kadar okuduğunu görmek için:{" "}
+        <Link
+          href="/diyetim"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          Haber diyetim
+        </Link>
+      </p>
       <SavedList />
     </div>
   );

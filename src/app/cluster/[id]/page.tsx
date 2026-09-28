@@ -16,6 +16,8 @@ import { SourceChips } from "@/components/source/source-chips";
 import { SourceBadge } from "@/components/story/source-badge";
 import { OwnershipLine } from "@/components/story/ownership-line";
 import { StoryTimeline } from "@/components/story/story-timeline";
+import { FactCheckBox } from "@/components/story/fact-check-box";
+import { getClusterFactChecks } from "@/lib/fact-checks/cluster-fact-checks-query";
 import { getSourceMetadata } from "@/lib/sources/factuality";
 import {
   detectCrossSpectrum,
@@ -306,6 +308,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // "Kim önce yazdı?" — per-story first-mover timeline, voting members only
   // (an aggregator reposting first must not read as a zone "joining").
   const storyTimeline = await loadStoryTimeline(id, votingMembers);
+  const factChecks = await getClusterFactChecks(id);
 
   // Schema.org NewsArticle structured data. Lets Google surface the
   // cluster in news-rich results and gives social previews a clean
@@ -524,6 +527,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 </p>
               </div>
             )}
+            {factChecks.length > 0 && <FactCheckBox items={factChecks} />}
 
             {/* A1-CHIPWIRE: factuality + ownership lineage per participating
                 source. Renders nothing when no member source has been tagged,
