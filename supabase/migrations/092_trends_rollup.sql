@@ -115,6 +115,19 @@ create policy "public read trends_daily_zone_counts_ist_rollup"
 -- relying only on Supabase's default per-table privilege.
 grant select on public.trends_daily_zone_counts_ist_rollup to anon, authenticated, service_role;
 
+-- 091 revoked TRUNCATE/TRIGGER/REFERENCES unconditionally from every
+-- existing public table (never governed by RLS) and INSERT/UPDATE/DELETE
+-- from anon/authenticated wherever no policy grants them, because
+-- Supabase's platform-level `alter default privileges` attaches those
+-- write grants to every newly created table by default. This table is
+-- brand new (created above, in this same migration) and has only a
+-- SELECT policy, so it must get the identical explicit revoke 091's own
+-- header calls out as required follow-up work for every future
+-- `create table` migration — otherwise the default grants silently
+-- reintroduce exactly the class of privilege 091 exists to close.
+revoke insert, update, delete, truncate, trigger, references
+  on public.trends_daily_zone_counts_ist_rollup from anon, authenticated;
+
 -- 2. Refresh function -----------------------------------------------------------
 
 create or replace function public.trends_daily_zone_counts_ist_refresh(
@@ -159,8 +172,14 @@ begin
          -- created_at) <= created_at always, so created_at in
          -- [v_day, v_day + 3 days) cannot miss a row whose bucketed day is
          -- v_day.
-         and a.created_at >= v_day::timestamptz
-         and a.created_at <  v_day::timestamptz + interval '3 days'
+         -- Explicit Europe/Istanbul-zoned cast, matching the bucketing
+         -- key's `at time zone 'Europe/Istanbul'` above: a bare
+         -- `v_day::timestamptz` uses the SESSION's TimeZone setting (UTC
+         -- on prod), anchoring the window 3 hours later than the
+         -- Istanbul day it's supposed to cover and silently dropping
+         -- every row whose created_at falls in that 3-hour gap.
+         and a.created_at >= (v_day::timestamp at time zone 'Europe/Istanbul')
+         and a.created_at <  (v_day::timestamp at time zone 'Europe/Istanbul') + interval '3 days'
          and s.kind in ('outlet', 'wire')
        group by 1
     )

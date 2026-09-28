@@ -57,7 +57,12 @@ describe("migration 092_trends_rollup.sql (SQL contract)", () => {
   it("is additive-only: no DROP TABLE, DROP VIEW, or destructive DML", () => {
     expect(code).not.toMatch(/\bdrop\s+(table|view)\b/i);
     expect(code).not.toMatch(/\balter\s+table\s+public\.articles\b/i);
-    expect(code).not.toMatch(/\btruncate\b/i);
+    // TRUNCATE the DML statement is destructive; `revoke truncate ... on
+    // <table> from anon, authenticated` (091's own pattern, mirrored here
+    // for the new rollup table) is a privilege grant/revoke, not DML —
+    // narrow the guard to the statement form, same as
+    // 091-revoke-anon-write-grants.test.ts's `/\btruncate\s+table\b/i`.
+    expect(code).not.toMatch(/\btruncate\s+table\b/i);
     expect(code).not.toMatch(/\bdelete\s+from\b/i);
   });
 
@@ -167,5 +172,28 @@ describe("migration 092_trends_rollup.sql (SQL contract)", () => {
   it("buckets by the Istanbul day of least(published_at, created_at), matching 087", () => {
     expect(code).toMatch(/least\s*\(\s*a\.published_at\s*,\s*a\.created_at\s*\)/i);
     expect(code).toMatch(/at\s+time\s+zone\s+'Europe\/Istanbul'/i);
+  });
+
+  it("anchors the per-day refresh window on the Istanbul day boundary, not a bare v_day::timestamptz (session-TimeZone-independent)", () => {
+    // The bucketing key casts `least(published_at, created_at)` to Istanbul
+    // time before taking `::date`. The window bound that's supposed to
+    // cover the same Istanbul day must ALSO go through an explicit
+    // `at time zone 'Europe/Istanbul'` cast — a bare `v_day::timestamptz`
+    // instead uses the session's TimeZone setting (UTC on prod), anchoring
+    // the window 3 hours later than the Istanbul day it's meant to cover.
+    expect(code).not.toMatch(/v_day\s*::\s*timestamptz/i);
+    expect(code).not.toMatch(/v_day\s*\+\s*\d+\s*\)?\s*::\s*timestamptz/i);
+    // Both the lower and upper bound must derive from an explicit
+    // Europe/Istanbul-zoned cast of v_day.
+    const windowClause = /a\.created_at\s*>=[\s\S]*?a\.created_at\s*<[\s\S]{0,200}/i.exec(code);
+    expect(windowClause).not.toBeNull();
+    const clause = (windowClause as RegExpExecArray)[0];
+    expect(clause).toMatch(/v_day[\s\S]{0,60}at\s+time\s+zone\s+'Europe\/Istanbul'/i);
+  });
+
+  it("revokes anon/authenticated write privileges on the new rollup table (mirrors 091's unconditional TRUNCATE/TRIGGER/REFERENCES revoke, plus INSERT/UPDATE/DELETE since it has no write policy)", () => {
+    expect(code).toMatch(
+      /revoke\s+insert\s*,\s*update\s*,\s*delete\s*,\s*truncate\s*,\s*trigger\s*,\s*references\s+on\s+public\.trends_daily_zone_counts_ist_rollup\s+from\s+anon\s*,\s*authenticated\s*;/i,
+    );
   });
 });

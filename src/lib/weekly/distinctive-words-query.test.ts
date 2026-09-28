@@ -112,15 +112,14 @@ describe("fetchWeeklyDistinctiveWords", () => {
   });
 });
 
-describe("getWeeklyDistinctiveWords (fail-open wrapper)", () => {
-  it("resolves to null when the sources read errors", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+describe("getWeeklyDistinctiveWords (never-throws, retry-once wrapper)", () => {
+  it("resolves to null when the sources read errors on both the cache attempt and the live retry", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
     fixture.sourcesError = { message: "boom" };
     await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
-    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("[weekly-words] unavailable"));
   });
 
-  it("resolves to null when an articles read errors", async () => {
+  it("resolves to null when an articles read errors on both the cache attempt and the live retry", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     fixture.articlesError = { message: "articles boom" };
     await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
@@ -130,5 +129,12 @@ describe("getWeeklyDistinctiveWords (fail-open wrapper)", () => {
     fixture.articlesData = [];
     const result = await getWeeklyDistinctiveWords();
     expect(result).not.toBeNull();
+  });
+
+  it("never throws even when the underlying fetch throws synchronously via a bad Supabase response", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.sourcesError = { message: "connection reset" };
+    await expect(getWeeklyDistinctiveWords()).resolves.not.toThrow;
+    await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
   });
 });

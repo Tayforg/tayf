@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import {
   buildWeeklyDistinctiveWords,
@@ -13,9 +14,17 @@ import { BIAS_TO_ZONE, isVotingKind } from "@/lib/bias/config";
 // IO layer for "Ayrışan Kelimeler" (/hafta): fetches the trailing 7 days of
 // headlines, sampled per zone per day, and hands them to the pure
 // `buildWeeklyDistinctiveWords`. Mirrors src/lib/clusters/search-query.ts's
-// fetch/cache split: the cached function THROWS on any error (so a
-// transient Supabase blip is never cached as an empty week), and the
-// uncached wrapper below fails open to null.
+// (and politics-query.ts's) fetch/cache split: `fetchWeeklyDistinctiveWords`
+// is the uncached raw fetch and THROWS on any error (so a transient
+// Supabase blip is never cached as an empty week); it's called twice — once
+// wrapped by `attemptCached` inside the `"use cache"` boundary below, and
+// once more, live, as `getWeeklyDistinctiveWords`'s retry on a cache-attempt
+// failure. Build-safety: a throw that crosses a `"use cache"` boundary fails
+// `next build`'s prerender even when every caller catches (see
+// src/lib/cache-resilience.ts's file header for the incident this fixes:
+// /trends and /rss.xml, 2026-09-28) — `fetchWeeklyDistinctiveWords` itself
+// used to carry the `"use cache"` directive directly, which reintroduced
+// exactly that hazard for /hafta.
 
 export const WEEKLY_WORDS_DAYS = 7;
 export const WEEKLY_WORDS_PER_ZONE_PER_DAY = 300;
@@ -26,15 +35,13 @@ const ZONE_ORDER: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"]
 const ARTICLE_SELECT = "id, title, url, source_id, created_at";
 
 /**
- * Cached fetch + pure assembly. Throws on any Supabase error — the caller
- * (`getWeeklyDistinctiveWords`) is the only place that converts a failure
- * into `null`.
+ * Uncached raw fetch + pure assembly. Throws on any Supabase error — kept
+ * free of the `"use cache"` directive so it can be called twice: once
+ * (wrapped by `attemptCached`) inside the cache boundary below, and once
+ * more, live, as `getWeeklyDistinctiveWords`'s retry on a cache-attempt
+ * failure.
  */
 export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWords> {
-  "use cache";
-  cacheLife("hours");
-  cacheTag("weekly-words");
-
   const supabase = createServerClient();
 
   // One clock read, same pattern as weekly-query.ts: two Date.now() calls
@@ -105,18 +112,30 @@ export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWo
   return buildWeeklyDistinctiveWords(allRows, sources);
 }
 
+// Cached entry point. Build-safety: this never throws — `attemptCached`
+// swallows whatever `fetchWeeklyDistinctiveWords` throws and reports
+// `{ ok: false }` instead, so a throw never crosses this `"use cache"`
+// boundary during `next build`'s prerender.
+async function getCachedWeeklyDistinctiveWords() {
+  "use cache";
+  cacheLife("hours");
+  cacheTag("weekly-words");
+  return attemptCached("weekly-words", fetchWeeklyDistinctiveWords);
+}
+
 /**
- * Uncached, fail-open wrapper. `null` on any error — the page renders that
- * as "kelime karşılaştırması şu anda hesaplanamıyor" without failing the
- * rest of /hafta.
+ * Public, uncached entry point. `null` on a sustained failure (the cached
+ * attempt AND a live retry both fail) — the page renders that as "kelime
+ * karşılaştırması şu anda hesaplanamıyor" without failing the rest of
+ * /hafta. On a cache-attempt failure this retries the query live once (so
+ * a transient Supabase blip is not pinned as "the week" for the whole
+ * `hours` cacheLife window) before falling back to `null`. Never throws.
  */
 export async function getWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWords | null> {
-  try {
-    return await fetchWeeklyDistinctiveWords();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    // No titles, no ids — just the failure reason.
-    console.error("[weekly-words] unavailable: " + message);
-    return null;
-  }
+  return resolveCachedOrRetry(
+    "weekly-words",
+    getCachedWeeklyDistinctiveWords,
+    fetchWeeklyDistinctiveWords,
+    null,
+  );
 }

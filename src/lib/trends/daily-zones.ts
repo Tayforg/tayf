@@ -16,6 +16,21 @@ import type { MediaDnaZone } from "@/types";
 //   * voting kinds only (outlet, wire) — aggregator/niche sources never
 //     counted toward bias_distribution or blindspot detection, and now
 //     never counted here either (src/lib/sources/kind.ts's contract).
+//
+// Deferred follow-up (NOT done in this change): migration 092 adds
+// `trends_daily_zone_counts_ist_rollup`, a pre-aggregated table meant to
+// replace the live `trends_daily_zone_counts_ist` view this file still
+// reads — the view's cold-cache group-by is the root cause of the
+// 2026-09-28 /trends build-timeout incident this branch otherwise makes
+// non-fatal (via `attemptCached` below), but does not make faster or less
+// likely to time out on a cold cache. 092's own header requires a strict
+// deploy order (apply migration → run the 32-day backfill → THEN ship the
+// code repoint below) that this branch has not executed against
+// production, so repointing this fetcher now would query a table that may
+// not exist yet in every environment. Track the repoint
+// (`.from("trends_daily_zone_counts_ist_rollup")` instead of the view,
+// same `AggregateRow` shape) as an explicit follow-up PR once 092 is
+// applied and backfilled in production.
 
 export const WINDOW_DAYS = 30;
 export const TRENDS_TIME_ZONE = "Europe/Istanbul";
