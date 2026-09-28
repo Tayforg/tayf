@@ -488,15 +488,34 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
   }
 }
 
-// Public cached entry point. With Cache Components the `id` argument
-// is automatically part of the cache key — no per-id wrapper Map needed.
+// Cached implementation. With Cache Components the `id` argument is
+// automatically part of the cache key — no per-id wrapper Map needed.
 // Callers / workers can invalidate a single cluster with
-// `revalidateTag(\`cluster-detail:\${id}\`)`.
-export async function getClusterDetail(
+// `revalidateTag(\`cluster-detail:\${id}\`)`. Not exported: every caller
+// must go through `getClusterDetail`'s UUID guard below so a malformed id
+// (e.g. `/cluster/not-a-uuid`) never reaches Supabase or this cache layer.
+async function getClusterDetailCached(
   id: string
 ): Promise<ClusterDetail | null> {
-  "use cache";
+  "use cache: remote";
   cacheLife("cluster-feed");
   cacheTag(`cluster-detail:${id}`, "clusters");
   return fetchClusterDetail(id);
+}
+
+// UUID guard (reader-queries E3): `clusters.id` is a Postgres `uuid`
+// column, so a malformed id can never match a row — but before this guard
+// existed, a request like `/cluster/not-a-uuid` still reached
+// `getClusterDetailCached`, paying for (and populating) a cache entry for
+// a lookup that was guaranteed to return null. Rejecting the id here,
+// before it ever becomes part of the cache key, is free (a static regex
+// test) and keeps that cache layer's key space bounded to actual UUIDs.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export async function getClusterDetail(
+  id: string
+): Promise<ClusterDetail | null> {
+  if (!UUID_RE.test(id)) return null;
+  return getClusterDetailCached(id);
 }

@@ -41,7 +41,7 @@ function setSupabaseFixtures(options: SupabaseFakeOptions): void {
 
 function mkClusterRow(overrides: Record<string, unknown> = {}) {
   return {
-    id: "cluster-1",
+    id: "11111111-1111-4111-8111-111111111111",
     title_tr: "Başlık",
     title_tr_neutral: null,
     title_neutral_model: null,
@@ -194,7 +194,7 @@ describe("buildYelpazeReport — coverage, framing, timeline, ownership (known f
 
   it("produces three coverage rows with the right outlet counts and denominators", async () => {
     setHappyPathFixtures();
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report).not.toBeNull();
 
     const rows = report!.coverage.rows;
@@ -223,7 +223,7 @@ describe("buildYelpazeReport — coverage, framing, timeline, ownership (known f
 
   it("gives the single-article bagimsiz zone a null `last` framing half, not a fabricated pair", async () => {
     setHappyPathFixtures();
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
 
     const bagimsiz = report!.framing.find((p) => p.zone === "bagimsiz")!;
     expect(bagimsiz).toBeTruthy();
@@ -240,7 +240,7 @@ describe("buildYelpazeReport — coverage, framing, timeline, ownership (known f
 
   it("computes each zone's timeline lag against the cluster's first_published", async () => {
     setHappyPathFixtures();
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
 
     // cluster.first_published = 06:00; iktidar's first article (sabah) is
     // 07:00 → 1h lag. bagimsiz (bianet) is 08:00 → 2h lag.
@@ -256,7 +256,7 @@ describe("buildYelpazeReport — coverage, framing, timeline, ownership (known f
 
   it("reports ownership's taggedShare unrounded", async () => {
     setHappyPathFixtures();
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
 
     // 4 covering sources: sabah/hurriyet/bianet tagged, the 4th untagged.
     expect(report!.ownership.totalSourceCount).toBe(4);
@@ -295,7 +295,7 @@ describe("buildYelpazeReport — coverage denominator is the yield axis, not fet
       },
     });
 
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report).not.toBeNull();
 
     const muhalefet = report!.coverage.rows.find((r) => r.zone === "muhalefet")!;
@@ -339,7 +339,7 @@ describe("buildYelpazeReport — ownership trustee flags (pack G3)", () => {
       },
     });
 
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report).not.toBeNull();
 
     expect(report!.ownership.trusteedSources).toEqual([
@@ -392,7 +392,7 @@ describe("buildYelpazeReport — feed health unknown", () => {
       },
     });
 
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report).not.toBeNull();
 
     for (const row of report!.coverage.rows) {
@@ -432,7 +432,7 @@ describe("buildYelpazeReport — coverage numerator/denominator population misma
       },
     });
 
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report).not.toBeNull();
 
     const muhalefet = report!.coverage.rows.find((r) => r.zone === "muhalefet")!;
@@ -467,7 +467,7 @@ describe("buildYelpazeReport — blindspot suppression", () => {
       },
     });
 
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report).not.toBeNull();
 
     expect(report!.blindspot.blindspotSuppressed).toBe(true);
@@ -490,7 +490,7 @@ describe("buildYelpazeReport — blindspot suppression", () => {
       },
     });
 
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report!.blindspot.healthStatus).toBe("none");
     expect(report!.blindspot.blindspotSuppressed).toBe(false);
     expect(report!.blindspot.caveat).toBe("");
@@ -521,7 +521,7 @@ describe("buildYelpazeReport — KVKK guard (D-KVKK-SUMMARY)", () => {
       },
     });
 
-    const report = await buildYelpazeReport("cluster-1");
+    const report = await buildYelpazeReport("11111111-1111-4111-8111-111111111111");
     expect(report).not.toBeNull();
 
     // ReportHeader must not carry `summary` (or any of the other unused

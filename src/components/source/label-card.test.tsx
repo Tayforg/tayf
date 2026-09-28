@@ -241,6 +241,20 @@ describe("LabelCard — owner group", () => {
     const text = collectText(el).join(" ");
     expect(text).toContain("Ciner Medya");
   });
+
+  it("does not duplicate the owner name when the group label and ownership string are identical (cnn-turk/demiroren)", () => {
+    const el = LabelCard({ ...BASE_PROPS, slug: "cnn-turk" });
+    const texts = collectText(el);
+    const occurrences = texts.filter((t) => t.includes("Demirören Medya")).length;
+    expect(occurrences).toBe(1);
+  });
+
+  it("never repeats 'kayyum' twice when the trustee badge is shown (haberturk/can-holding)", () => {
+    const el = LabelCard({ ...BASE_PROPS, slug: "haberturk", trusteeSince: "2025-09-11" });
+    const texts = collectText(el);
+    const kayyumCount = texts.filter((t) => /kayyum/i.test(t)).length;
+    expect(kayyumCount).toBeLessThanOrEqual(1);
+  });
 });
 
 describe("LabelCard — dispute link", () => {

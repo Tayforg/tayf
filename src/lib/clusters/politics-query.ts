@@ -262,26 +262,31 @@ async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
   try {
     const supabase = createServerClient();
 
-    // Feed-health gate (Pack C): fetched once per feed build, not per
-    // cluster. `null` means "health unknown" — buildClusterBundle below
-    // treats that identically to "no health data at all" (fail open, no
-    // suppression). Never throws (see feed-health.ts's file header).
-    const health = await getZoneFeedHealth();
-
-    // Single round-trip: cluster → cluster_articles → articles → sources.
-    // The nested shape is produced by PostgREST following the foreign
-    // keys declared in migrations 001-003. This replaces the previous
-    // four sequential queries.
-    const { data, error } = await supabase
-      .from("clusters")
-      .select(CLUSTER_EMBED_SELECT)
-      // Archived (migration 037) clusters are excluded from every reader-facing
-      // surface; the detail page still resolves them so shared links never 404.
-      .eq("is_archived", false)
-      .gte("article_count", 2)
-      .order("updated_at", { ascending: false })
-      .limit(CANDIDATE_LIMIT)
-      .returns<EmbeddedClusterRow[]>();
+    // Feed-health gate (Pack C) + the main select run IN PARALLEL — neither
+    // depends on the other, and the audit found this serial await added a
+    // full extra round-trip of latency to every fetchPoliticsClusters call
+    // (blindspots-query.ts had the identical bug at cluster-detail-query.ts
+    // and blindspots-query.ts's own equivalent points; this is the E2 fix).
+    // `null` means "health unknown" — buildClusterBundle below treats that
+    // identically to "no health data at all" (fail open, no suppression).
+    // getZoneFeedHealth never throws (see feed-health.ts's file header).
+    const [health, { data, error }] = await Promise.all([
+      getZoneFeedHealth(),
+      // Single round-trip: cluster → cluster_articles → articles → sources.
+      // The nested shape is produced by PostgREST following the foreign
+      // keys declared in migrations 001-003. This replaces the previous
+      // four sequential queries.
+      supabase
+        .from("clusters")
+        .select(CLUSTER_EMBED_SELECT)
+        // Archived (migration 037) clusters are excluded from every reader-facing
+        // surface; the detail page still resolves them so shared links never 404.
+        .eq("is_archived", false)
+        .gte("article_count", 2)
+        .order("updated_at", { ascending: false })
+        .limit(CANDIDATE_LIMIT)
+        .returns<EmbeddedClusterRow[]>(),
+    ]);
 
     if (error) {
       // Throw — never return an empty result for a failed query. The
@@ -807,7 +812,7 @@ function scoreCluster(
 // `revalidateTag("clusters-politics")` after a write cycle to push fresh
 // data immediately without waiting for the 30s TTL.
 export async function getPoliticsClusters(): Promise<PoliticsClustersResult> {
-  "use cache";
+  "use cache: remote";
   cacheLife("cluster-feed");
   cacheTag("clusters-politics");
   return fetchPoliticsClusters();

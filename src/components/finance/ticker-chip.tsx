@@ -27,19 +27,19 @@ export function TickerChip({
     <Link
       href={`/ekonomi/${ticker}`}
       className={cn(
-        "inline-flex items-baseline gap-1.5 border border-border/80 px-1.5 py-0.5 font-mono text-[11px] leading-none whitespace-nowrap transition-colors hover:border-brand/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "inline-flex max-w-full min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5 border border-border/80 px-1.5 py-0.5 font-mono text-[11px] leading-none transition-colors hover:border-brand/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
     >
-      <span className="text-brand">{ticker}</span>
+      <span className="whitespace-nowrap text-brand">{ticker}</span>
       {quote ? (
         <>
-          <span className="tabular-nums text-foreground/90">{fmtPrice(quote.price)}</span>
-          <span className={cn("tabular-nums", moveClass(quote.changePct))}>{fmtPct(quote.changePct)}</span>
-          {limit ? <span className="bg-brand/20 px-1 text-[10px] text-brand">{limit}</span> : null}
+          <span className="whitespace-nowrap tabular-nums text-foreground/90">{fmtPrice(quote.price)}</span>
+          <span className={cn("whitespace-nowrap tabular-nums", moveClass(quote.changePct))}>{fmtPct(quote.changePct)}</span>
+          {limit ? <span className="whitespace-nowrap bg-brand/20 px-1 text-[10px] text-brand">{limit}</span> : null}
           {sinceNews != null ? (
-            <span className={cn("border-l border-border/80 pl-1.5 tabular-nums", moveClass(sinceNews))}>
-              {fmtPct(sinceNews)} <span className="text-muted-foreground">haberden</span>
+            <span className={cn("whitespace-nowrap border-l border-border/80 pl-1.5 tabular-nums", moveClass(sinceNews))}>
+              {fmtPct(sinceNews)} <span className="hidden text-muted-foreground sm:inline">haberden</span>
             </span>
           ) : null}
         </>

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Suspense } from "react";
 import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
 
@@ -13,6 +14,7 @@ export const metadata: Metadata = {
 };
 
 import { PageHero } from "@/components/ui/page-hero";
+import { RetryButton } from "@/components/ui/retry-button";
 import { BiasBadge } from "@/components/story/bias-badge";
 import { SourceChips } from "@/components/source/source-chips";
 import { DenominatorNote } from "@/components/source/denominator-note";
@@ -21,6 +23,8 @@ import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { countClassifiedSources } from "@/lib/sources/classification";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
+import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
+import { weeklyCountFromPerDay, sortGroupedByActivity } from "@/lib/sources/directory";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import { buildRegistryDataset, serializeJsonLd } from "@/lib/seo/json-ld";
@@ -60,7 +64,6 @@ import type { BiasCategory, Source } from "@/types";
 // "sınıflandırılmamış" chip that would otherwise dominate most cards.
 
 interface SourceRow extends Source {
-  articleCount7d: number;
   lastPublishedAt: string | null;
 }
 
@@ -81,6 +84,13 @@ function emptyGrouped(): GroupedSources {
   };
 }
 
+// reader-queries G2: `stats:articles(count)` (the PERF-01 aggregate,
+// measured bimodal 177-4639ms — see feed-status.ts's own header) and its
+// `.gte("stats.published_at", ...)` are GONE from this select. The 7-day
+// weekly-activity count now comes from `getSourceItemsPerDay()`
+// (feed-status.ts, already used by /kaynaklar/durum), fetched separately
+// and streamed in behind its own <Suspense> boundary below (see
+// `SourceCountsGrid`) so the directory shell paints without waiting on it.
 async function getSources(): Promise<GroupedSources> {
   "use cache";
   cacheLife("source-directory");
@@ -88,9 +98,8 @@ async function getSources(): Promise<GroupedSources> {
 
   const supabase = createServerClient();
 
-  // Window: last 7 days, anchored to "now" at cache-fill time. The 5-minute
-  // cache TTL means the window can drift by up to 5 minutes between
-  // refreshes — well within the resolution of "haftalık aktivite".
+  // Window: last 7 days, anchored to "now" at cache-fill time — only used
+  // for the cheap `latest` existence probe now.
   const sevenDaysAgo = new Date(
     Date.now() - 7 * 24 * 60 * 60 * 1000,
   ).toISOString();
@@ -98,10 +107,9 @@ async function getSources(): Promise<GroupedSources> {
   const { data, error } = await supabase
     .from("sources")
     .select(
-      "id, name, slug, url, rss_url, bias, logo_url, active, kind, stats:articles(count), latest:articles(published_at)",
+      "id, name, slug, url, rss_url, bias, logo_url, active, kind, latest:articles(published_at)",
     )
     .eq("active", true)
-    .gte("stats.published_at", sevenDaysAgo)
     .gte("latest.published_at", sevenDaysAgo)
     .order("published_at", { referencedTable: "latest", ascending: false })
     .limit(1, { referencedTable: "latest" })
@@ -112,7 +120,6 @@ async function getSources(): Promise<GroupedSources> {
   }
 
   type Row = Source & {
-    stats: Array<{ count: number }>;
     latest: Array<{ published_at: string }>;
   };
   const sourceRows = (data ?? []) as unknown as Row[];
@@ -123,26 +130,58 @@ async function getSources(): Promise<GroupedSources> {
   for (const source of sourceRows) {
     const bias = source.bias as BiasCategory;
     if (!(bias in grouped)) continue;
-    const { stats, latest, ...rest } = source;
+    const { latest, ...rest } = source;
     grouped[bias].push({
       ...rest,
-      articleCount7d: stats[0]?.count ?? 0,
       lastPublishedAt: latest[0]?.published_at ?? null,
     });
-  }
-
-  // Within each bias bucket, surface the most-active sources first; ties
-  // fall back to alphabetical (already pre-sorted by the SQL ORDER BY).
-  for (const bias of BIAS_ORDER) {
-    grouped[bias].sort((a, b) => b.articleCount7d - a.articleCount7d);
   }
 
   return grouped;
 }
 
+export type SourcesResult =
+  | { ok: true; grouped: GroupedSources }
+  | { ok: false };
+
+/**
+ * Never-throw wrapper for the page component — sits OUTSIDE the cache
+ * boundary (mirroring search-query.ts's searchClusters) so a failure is
+ * never memoised as "no sources" for the cache window.
+ */
+async function getSourcesSafe(): Promise<SourcesResult> {
+  try {
+    const grouped = await getSources();
+    return { ok: true, grouped };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[sources] unavailable: ${message}`);
+    return { ok: false };
+  }
+}
+
 export default async function SourcesPage() {
   await connection();
-  const grouped = await getSources();
+  const result = await getSourcesSafe();
+
+  if (!result.ok) {
+    return (
+      <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
+        <PageHero
+          kicker="Türkiye medya haritası"
+          title="Kaynaklar"
+          subtitle="Tayf'ın izlediği Türk haber kaynakları, siyasi duruşlarıyla birlikte."
+        />
+        <p className="text-sm text-muted-foreground">
+          Kaynak listesi şu an yüklenemedi. Birkaç dakika içinde tekrar
+          deneyin.
+        </p>
+        <RetryButton />
+      </div>
+    );
+  }
+
+  const { grouped } = result;
 
   const totalSources = BIAS_ORDER.reduce(
     (acc, bias) => acc + (grouped[bias]?.length ?? 0),
@@ -240,6 +279,82 @@ export default async function SourcesPage() {
         konumundan bağımsız bir bilgidir.
       </p>
 
+      <Suspense
+        fallback={
+          <SourceDirectory
+            grouped={sortGroupedByActivity(grouped, null)}
+            countLabel={PENDING_COUNT_LABEL}
+          />
+        }
+      >
+        <SourceDirectoryWithCounts grouped={grouped} />
+      </Suspense>
+      {karne ? (
+        <ClickbaitKarneSection karne={karne} check={CLICKBAIT_PRECISION_CHECK} />
+      ) : null}
+      </div>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// reader-queries G2: the weekly-activity count streams in separately from
+// the directory shell above (which paints as soon as getSourcesSafe()
+// resolves). PENDING_COUNT_LABEL renders in the <Suspense> fallback (the
+// aggregate hasn't been asked for yet); `null` counts (the aggregate
+// resolved but the query failed) render as an em dash; a resolved counts
+// map renders the real number for every source (missing from the map ==
+// zero articles in the window, per getSourceItemsPerDay's contract).
+// ---------------------------------------------------------------------------
+
+const PENDING_COUNT_LABEL = "son 7 günde … haber";
+
+function countLabelFromCounts(
+  counts: Record<string, number> | null,
+  slug: string,
+): string {
+  if (counts === null) return "son 7 günde — haber";
+  return `son 7 günde ${counts[slug] ?? 0} haber`;
+}
+
+// Exported (in addition to the default page export) so tests can render
+// the streamed directory body directly without needing a full
+// Suspense-aware renderer — see page.test.tsx.
+export async function SourceDirectoryWithCounts({
+  grouped,
+}: {
+  grouped: GroupedSources;
+}) {
+  const perDay = await getSourceItemsPerDay();
+  const weekly =
+    perDay === null
+      ? null
+      : Object.fromEntries(
+          Object.entries(perDay).map(([slug, value]) => [
+            slug,
+            weeklyCountFromPerDay(value),
+          ]),
+        );
+  const sorted = sortGroupedByActivity(grouped, weekly);
+  return (
+    <SourceDirectory
+      grouped={sorted}
+      countLabel={(slug) => countLabelFromCounts(weekly, slug)}
+    />
+  );
+}
+
+// Exported (in addition to the default page export) so tests can render
+// the kind-badge grid directly — see page.test.tsx.
+export function SourceDirectory({
+  grouped,
+  countLabel,
+}: {
+  grouped: GroupedSources;
+  countLabel: string | ((slug: string) => string);
+}) {
+  return (
+    <>
       {BIAS_ORDER.map((bias) => {
         const bucket = grouped[bias] ?? [];
         if (bucket.length === 0) return null;
@@ -262,6 +377,10 @@ export default async function SourcesPage() {
                 const cardClassName = voting
                   ? `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6}`
                   : `group relative rounded-xl ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 p-4 transition-all hover-lift animate-fade-up stagger-${srcIdx < 6 ? srcIdx + 1 : 6} opacity-70`;
+                const label =
+                  typeof countLabel === "string"
+                    ? countLabel
+                    : countLabel(source.slug);
                 return (
                   <div key={source.id} className={cardClassName}>
                   <Link
@@ -298,7 +417,7 @@ export default async function SourcesPage() {
                           <SourceChips slug={source.slug} />
                         </div>
                         <p className="text-muted-foreground">
-                          <span className="font-mono text-[10px]">son 7 günde {source.articleCount7d} haber</span>
+                          <span className="font-mono text-[10px]">{label}</span>
                         </p>
                         {source.lastPublishedAt && (
                           <p className="text-[10px] text-muted-foreground/70">
@@ -324,10 +443,6 @@ export default async function SourcesPage() {
           </section>
         );
       })}
-      {karne ? (
-        <ClickbaitKarneSection karne={karne} check={CLICKBAIT_PRECISION_CHECK} />
-      ) : null}
-      </div>
     </>
   );
 }

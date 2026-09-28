@@ -115,7 +115,7 @@ export default async function EkonomiPage() {
                     >
                       {item.title}
                     </a>
-                    <div className="flex flex-wrap gap-1">
+                    <div className="flex min-w-0 flex-wrap gap-1">
                       {item.tickers.map((t) => {
                         const q = quotes[t];
                         const since = pctChange(refs[refKey(item.id, t)], q?.price);

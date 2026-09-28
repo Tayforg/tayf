@@ -97,7 +97,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 // Import AFTER mocks are declared.
-import SourcesPage from "./page";
+import SourcesPage, { SourceDirectory, SourceDirectoryWithCounts } from "./page";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
@@ -106,25 +106,39 @@ import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
  * Collects every string/number leaf under a React element tree. Expands
  * `<ClickbaitKarneSection>` the same way collectHrefs below expands
  * `<DenominatorNote>` — a one-level-deep function component whose own text
- * lives in its rendered output, not its props.
+ * lives in its rendered output, not its props. Also expands
+ * `<SourceDirectoryWithCounts>` and the `<SourceDirectory>` element it
+ * returns (reader-queries G2: the kind-badge grid streams behind its own
+ * <Suspense> boundary, two component layers deep, so neither is reachable
+ * via `.props.children`) — the outer one is async, so this walker is too.
  */
-function collectText(node: unknown, out: string[] = []): string[] {
+async function collectText(node: unknown, out: string[] = []): Promise<string[]> {
   if (typeof node === "string" || typeof node === "number") {
     out.push(String(node));
     return out;
   }
   if (Array.isArray(node)) {
-    for (const child of node) collectText(child, out);
+    for (const child of node) await collectText(child, out);
     return out;
   }
   if (node && typeof node === "object") {
     const el = node as { type?: unknown; props?: { children?: ReactNode; [k: string]: unknown } };
     if (el.type === ClickbaitKarneSection && el.props) {
       const props = el.props as unknown as Parameters<typeof ClickbaitKarneSection>[0];
-      collectText(ClickbaitKarneSection(props), out);
+      await collectText(ClickbaitKarneSection(props), out);
       return out;
     }
-    if (el.props?.children !== undefined) collectText(el.props.children, out);
+    if (el.type === SourceDirectoryWithCounts && el.props) {
+      const props = el.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+      await collectText(await SourceDirectoryWithCounts(props), out);
+      return out;
+    }
+    if (el.type === SourceDirectory && el.props) {
+      const props = el.props as unknown as Parameters<typeof SourceDirectory>[0];
+      await collectText(SourceDirectory(props), out);
+      return out;
+    }
+    if (el.props?.children !== undefined) await collectText(el.props.children, out);
   }
   return out;
 }
@@ -135,9 +149,9 @@ function collectText(node: unknown, out: string[] = []): string[] {
  * own href lives in its rendered output, not its props) so its
  * /kaynaklar/durum link is reachable without a full renderer.
  */
-function collectHrefs(node: unknown, out: string[] = []): string[] {
+async function collectHrefs(node: unknown, out: string[] = []): Promise<string[]> {
   if (Array.isArray(node)) {
-    for (const child of node) collectHrefs(child, out);
+    for (const child of node) await collectHrefs(child, out);
     return out;
   }
   if (node && typeof node === "object") {
@@ -147,11 +161,21 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
     };
     if (el.type === DenominatorNote && el.props) {
       const props = el.props as unknown as Parameters<typeof DenominatorNote>[0];
-      collectHrefs(DenominatorNote(props), out);
+      await collectHrefs(DenominatorNote(props), out);
+      return out;
+    }
+    if (el.type === SourceDirectoryWithCounts && el.props) {
+      const props = el.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+      await collectHrefs(await SourceDirectoryWithCounts(props), out);
+      return out;
+    }
+    if (el.type === SourceDirectory && el.props) {
+      const props = el.props as unknown as Parameters<typeof SourceDirectory>[0];
+      await collectHrefs(SourceDirectory(props), out);
       return out;
     }
     if (typeof el.props?.href === "string") out.push(el.props.href);
-    if (el.props?.children !== undefined) collectHrefs(el.props.children, out);
+    if (el.props?.children !== undefined) await collectHrefs(el.props.children, out);
   }
   return out;
 }
@@ -159,8 +183,8 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
 describe("/sources page — source-kind UI", () => {
   it("shows the classified-count line and kind badges", async () => {
     const tree = await SourcesPage();
-    const text = collectText(tree).join("");
-    const hrefs = collectHrefs(tree);
+    const text = (await collectText(tree)).join("");
+    const hrefs = await collectHrefs(tree);
 
     expect(text).toContain("Yanlılık dağılımına sayılan: ");
     expect(text).toContain("2/3");
@@ -172,8 +196,8 @@ describe("/sources page — source-kind UI", () => {
 
   it("A-M4 / PERF-01: links to /kaynaklar/durum via the DenominatorNote, derived from the already-fetched rows with no second query", async () => {
     const tree = await SourcesPage();
-    const hrefs = collectHrefs(tree);
-    const text = collectText(tree).join("");
+    const hrefs = await collectHrefs(tree);
+    const text = (await collectText(tree)).join("");
 
     expect(hrefs).toContain("/kaynaklar/durum");
     // Fixture: 2 voting sources (outlet + wire), neither with a
@@ -195,7 +219,7 @@ describe("/sources page — clickbait-karne gate", () => {
     clickbaitFixture.public = false;
 
     const tree = await SourcesPage();
-    const text = collectText(tree).join(" ");
+    const text = (await collectText(tree)).join(" ");
 
     expect(getClickbaitKarne).not.toHaveBeenCalled();
     expect(text).not.toMatch(/tık tuzağı/i);
@@ -225,7 +249,7 @@ describe("/sources page — clickbait-karne gate", () => {
     };
 
     const tree = await SourcesPage();
-    const text = collectText(tree).join(" ");
+    const text = (await collectText(tree)).join(" ");
 
     expect(getClickbaitKarne).toHaveBeenCalled();
     expect(text).toMatch(/tık tuzağı karnesi/i);

@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState, startTransition } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
 import { track } from "@/lib/track";
+import { searchNavTarget } from "./search-nav";
 
 export function SearchBar() {
   const router = useRouter();
@@ -33,15 +34,10 @@ export function SearchBar() {
       const q = value.trim();
       if (q && !searchedRef.current) track("search");
       searchedRef.current = q.length > 0;
-      const params = new URLSearchParams(searchParams.toString());
-      if (q) {
-        params.set("q", q);
-      } else {
-        params.delete("q");
-      }
-      const query = params.toString();
+      const target = searchNavTarget({ value, pathname, search: searchParams.toString() });
+      if (target === null) return;
       startTransition(() => {
-        router.push(`${pathname}${query ? "?" + query : ""}`);
+        router.replace(target, { scroll: false });
       });
     }, 300);
     return () => clearTimeout(t);

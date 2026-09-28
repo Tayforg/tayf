@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
-// Uses the shared proxy-based Supabase fake (tests/_helpers/supabase-fake.ts)
-// per tests/api/corrections.test.ts convention, extended in this pass with
-// `textSearch` support (it didn't record that predicate before).
+// Uses the shared proxy-based Supabase fake (tests/_helpers/supabase-fake.ts).
+// search-query.ts now resolves ids via the 083 migration's
+// `search_cluster_ids` RPC, then fetches the embed with `.in('id', ids)` —
+// no `textSearch` call anywhere in this file any more.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -29,14 +30,18 @@ vi.mock("./feed-health", async (importOriginal) => {
   };
 });
 
-// Mutable fixture the `clusters` table resolver reads on every query, plus
-// the last builder state it saw — lets tests assert on the exact
-// select/textSearch/filter/order/limit chain without a bespoke fake.
+// Mutable fixture the `clusters` table resolver reads on every embed query,
+// plus the last builder state it saw, and a separate mutable fixture for
+// the `search_cluster_ids` RPC.
 const fixture = vi.hoisted(() => ({
   data: [] as unknown[],
   error: null as { message: string } | null,
   throwOnQuery: false,
   lastState: null as unknown,
+  rpcIds: [] as string[],
+  rpcError: null as { message: string } | null,
+  rpcThrows: false,
+  rpcCalls: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -47,6 +52,17 @@ const supabaseFake = await vi.hoisted(async () => {
         fixture.lastState = state;
         if (fixture.throwOnQuery) throw new Error("connection reset");
         return { data: fixture.error ? null : fixture.data, error: fixture.error };
+      },
+    },
+    rpc: {
+      search_cluster_ids: (args: unknown) => {
+        fixture.rpcCalls.push(args);
+        if (fixture.rpcThrows) throw new Error("rpc connection reset");
+        if (fixture.rpcError) return { data: null, error: fixture.rpcError };
+        return {
+          data: fixture.rpcIds.map((id) => ({ id })),
+          error: null,
+        };
       },
     },
   });
@@ -69,6 +85,10 @@ beforeEach(() => {
   fixture.error = null;
   fixture.throwOnQuery = false;
   fixture.lastState = null;
+  fixture.rpcIds = [];
+  fixture.rpcError = null;
+  fixture.rpcThrows = false;
+  fixture.rpcCalls = [];
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
 });
@@ -132,33 +152,31 @@ function mkRow(opts: {
 // ---------------------------------------------------------------------------
 
 describe("searchClusters query shape", () => {
-  it("issues a single clusters query with textSearch + the documented filters/order/limit", async () => {
-    await searchClusters("İmamoğlu");
+  it("calls the RPC with the Turkish-aware variants and p_limit", async () => {
+    fixture.rpcIds = [];
+    await searchClusters("IŞIK");
+
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["ışık", "işik", "işık"], p_limit: 12 },
+    ]);
+  });
+
+  it("uses .in('id', ids) for the embed, with no textSearch anywhere", async () => {
+    fixture.rpcIds = ["c1"];
+    fixture.data = [mkRow({ id: "c1", members: [{ id: "a1", sourceId: "s1" }] })];
+
+    await searchClusters("deprem");
 
     const state = fixture.lastState as BuilderState;
     expect(state.table).toBe("clusters");
-
-    const selectArg = state.selectArgs[0] as string;
-    expect(selectArg).toMatch(/cluster_articles\s*\(/);
-    expect(selectArg).toMatch(/articles\s*\(/);
-    expect(selectArg).toMatch(/sources\s*\(/);
-
-    expect(state.textSearch).toEqual([
-      { col: "search_tsv", query: "İmamoğlu", opts: { config: "turkish", type: "websearch" } },
-    ]);
-    expect(state.gte).toEqual([{ col: "article_count", val: 2 }]);
-    expect(state.eq).toEqual([{ col: "is_archived", val: false }]);
-    expect(state.order).toEqual([
-      { col: "article_count", opts: { ascending: false } },
-      { col: "updated_at", opts: { ascending: false } },
-    ]);
-    expect(state.limit).toBe(12);
+    expect(state.textSearch).toEqual([]);
+    expect(state.in).toEqual([{ col: "id", vals: ["c1"] }]);
   });
 
-  it("trims the query before sending it to textSearch", async () => {
+  it("trims and caps the query before building variants", async () => {
+    fixture.rpcIds = [];
     await searchClusters("  seçim  ");
-    const state = fixture.lastState as BuilderState;
-    expect(state.textSearch[0]?.query).toBe("seçim");
+    expect(fixture.rpcCalls[0]).toEqual({ p_variants: ["seçim"], p_limit: 12 });
   });
 });
 
@@ -167,39 +185,53 @@ describe("searchClusters query shape", () => {
 // ---------------------------------------------------------------------------
 
 describe("short query guard", () => {
-  it("returns [] without querying Supabase for a 0-character query", async () => {
+  it("returns { ok: true, bundles: [] } without any Supabase call for a 0-character query", async () => {
     const result = await searchClusters("");
-    expect(result).toEqual([]);
+    expect(result).toEqual({ ok: true, bundles: [] });
+    expect(fixture.rpcCalls).toEqual([]);
     expect(fixture.lastState).toBeNull();
   });
 
-  it("returns [] without querying Supabase for a 1-character (post-trim) query", async () => {
+  it("returns { ok: true, bundles: [] } for a 1-character (post-trim) query", async () => {
     const result = await searchClusters("  a  ");
-    expect(result).toEqual([]);
-    expect(fixture.lastState).toBeNull();
+    expect(result).toEqual({ ok: true, bundles: [] });
+    expect(fixture.rpcCalls).toEqual([]);
   });
 
-  it("queries once the trimmed length reaches 2 characters", async () => {
-    fixture.data = [];
+  it("calls the RPC once the trimmed length reaches 2 characters", async () => {
+    fixture.rpcIds = [];
     const result = await searchClusters(" ab ");
-    expect(result).toEqual([]);
-    expect(fixture.lastState).not.toBeNull();
+    expect(result).toEqual({ ok: true, bundles: [] });
+    expect(fixture.rpcCalls).toHaveLength(1);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Error handling — never throws.
+// Error handling — never throws, always { ok: false } on failure.
 // ---------------------------------------------------------------------------
 
 describe("searchClusters error handling", () => {
-  it("returns [] (does not throw) when the query errors", async () => {
-    fixture.error = { message: "db down" };
-    await expect(searchClusters("merhaba")).resolves.toEqual([]);
+  it("returns { ok: false } when the rpc errors", async () => {
+    fixture.rpcError = { message: "db down" };
+    await expect(searchClusters("merhaba")).resolves.toEqual({ ok: false });
   });
 
-  it("returns [] (does not throw) when the query itself throws", async () => {
-    fixture.throwOnQuery = true;
-    await expect(searchClusters("merhaba")).resolves.toEqual([]);
+  it("returns { ok: false } when the rpc itself throws", async () => {
+    fixture.rpcThrows = true;
+    await expect(searchClusters("merhaba")).resolves.toEqual({ ok: false });
+  });
+
+  it("returns { ok: false } when the embed select errors", async () => {
+    fixture.rpcIds = ["c1"];
+    fixture.error = { message: "embed down" };
+    await expect(searchClusters("merhaba")).resolves.toEqual({ ok: false });
+  });
+
+  it("returns { ok: true, bundles: [] } when the rpc result is empty, with no clusters query", async () => {
+    fixture.rpcIds = [];
+    const result = await searchClusters("hiçbirşey");
+    expect(result).toEqual({ ok: true, bundles: [] });
+    expect(fixture.lastState).toBeNull();
   });
 });
 
@@ -209,6 +241,7 @@ describe("searchClusters error handling", () => {
 
 describe("row assembly", () => {
   it("builds a ClusterBundle per row, deduping same-source members", async () => {
+    fixture.rpcIds = ["c1"];
     fixture.data = [
       mkRow({
         id: "c1",
@@ -222,8 +255,10 @@ describe("row assembly", () => {
       }),
     ];
     const result = await searchClusters("deprem");
-    expect(result).toHaveLength(1);
-    const b = result[0]!;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles).toHaveLength(1);
+    const b = result.bundles[0]!;
     expect(b.cluster.id).toBe("c1");
     // H2 neutral-headline coalesce reused from politics-query.
     expect(b.cluster.title_tr).toBe("neutral version");
@@ -232,10 +267,20 @@ describe("row assembly", () => {
     expect(b.sources.map((s) => s.id).sort()).toEqual(["s1", "s2"]);
   });
 
+  it("follows the RPC's id order even when the embed returns rows shuffled", async () => {
+    fixture.rpcIds = ["c2", "c1", "c3"];
+    fixture.data = [
+      mkRow({ id: "c1", members: [{ id: "a1", sourceId: "s1" }] }),
+      mkRow({ id: "c3", members: [{ id: "a3", sourceId: "s3" }] }),
+      mkRow({ id: "c2", members: [{ id: "a2", sourceId: "s2" }] }),
+    ];
+    const result = await searchClusters("deprem");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["c2", "c1", "c3"]);
+  });
+
   it("does NOT apply the politics-majority category gate (unlike getPoliticsClusters)", async () => {
-    // All members are "spor" (sports) — politics-query would drop this
-    // cluster entirely. Full-text search has no such gate: it's an
-    // archive fallback across all clusters, not a politics feed.
+    fixture.rpcIds = ["sports-cluster"];
     fixture.data = [
       mkRow({
         id: "sports-cluster",
@@ -247,11 +292,13 @@ describe("row assembly", () => {
       }),
     ];
     const result = await searchClusters("galatasaray");
-    expect(result).toHaveLength(1);
-    expect(result[0]?.cluster.id).toBe("sports-cluster");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles).toHaveLength(1);
+    expect(result.bundles[0]?.cluster.id).toBe("sports-cluster");
   });
 
   it("drops a row whose every embedded article join is null", async () => {
+    fixture.rpcIds = ["empty"];
     fixture.data = [
       {
         id: "empty",
@@ -268,22 +315,14 @@ describe("row assembly", () => {
       },
     ];
     const result = await searchClusters("boş");
-    expect(result).toEqual([]);
-  });
-
-  it("returns [] when the query matches no rows", async () => {
-    fixture.data = [];
-    const result = await searchClusters("hiçbirşey");
-    expect(result).toEqual([]);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles).toEqual([]);
   });
 });
 
 // ---------------------------------------------------------------------------
 // Feed-health-gated blindspot suppression (Pack C) — search results thread
-// the same `health` the home feed uses through buildClusterBundle, mirrored
-// from politics-query.test.ts's "feed-health gated blindspot suppression"
-// cases so a suppressed cluster never disagrees between the home feed and
-// a search result.
+// the same `health` the home feed uses through buildClusterBundle.
 // ---------------------------------------------------------------------------
 
 describe("feed-health gated blindspot suppression (search results)", () => {
@@ -303,6 +342,7 @@ describe("feed-health gated blindspot suppression (search results)", () => {
 
   it("withdraws is_blindspot/blindspot_side when the silent pole zone is degraded", async () => {
     feedHealth.getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: true }));
+    fixture.rpcIds = ["suppressed"];
     fixture.data = [
       mkRow({
         id: "suppressed",
@@ -316,13 +356,15 @@ describe("feed-health gated blindspot suppression (search results)", () => {
       }),
     ];
     const result = await searchClusters("deprem");
-    expect(result).toHaveLength(1);
-    expect(result[0]?.cluster.is_blindspot).toBe(false);
-    expect(result[0]?.cluster.blindspot_side).toBeNull();
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles).toHaveLength(1);
+    expect(result.bundles[0]?.cluster.is_blindspot).toBe(false);
+    expect(result.bundles[0]?.cluster.blindspot_side).toBeNull();
   });
 
   it("leaves is_blindspot/blindspot_side untouched when feed health is unknown (null passthrough)", async () => {
     feedHealth.getZoneFeedHealth.mockResolvedValue(null);
+    fixture.rpcIds = ["unaffected-unknown-health"];
     fixture.data = [
       mkRow({
         id: "unaffected-unknown-health",
@@ -336,8 +378,9 @@ describe("feed-health gated blindspot suppression (search results)", () => {
       }),
     ];
     const result = await searchClusters("deprem");
-    expect(result).toHaveLength(1);
-    expect(result[0]?.cluster.is_blindspot).toBe(true);
-    expect(result[0]?.cluster.blindspot_side).toBe("pro_government");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles).toHaveLength(1);
+    expect(result.bundles[0]?.cluster.is_blindspot).toBe(true);
+    expect(result.bundles[0]?.cluster.blindspot_side).toBe("pro_government");
   });
 });

@@ -178,6 +178,9 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                         aria-hidden="true"
                       />
                       {source.name}
+                      <span className="sr-only">
+                        {" — " + biasLabel + (isVoting ? "" : " · " + kindLabel + " · yanlılık dağılımına sayılmaz")}
+                      </span>
                       {!isVoting && (
                         <span className="ml-0.5 text-[9px] uppercase tracking-wider opacity-70">
                           {kindLabel}

@@ -25,6 +25,14 @@ vi.mock("@/lib/admin/session", () => ({
   deleteAdminSession: vi.fn(async () => {}),
 }));
 
+const throttleMock = vi.fn(async (_key: string) => ({ allowed: true }) as
+  | { allowed: true }
+  | { allowed: false; reason: "limited"; retryAfterSeconds: number }
+  | { allowed: false; reason: "unavailable" });
+vi.mock("@/lib/admin/login-throttle", () => ({
+  checkAdminLoginThrottle: (k: string) => throttleMock(k),
+}));
+
 import { loginAction } from "./actions";
 
 function setIp(ip: string) {
@@ -53,6 +61,8 @@ describe("loginAction", () => {
     vi.clearAllMocks();
     mockHeaders.clear();
     vi.useFakeTimers();
+    throttleMock.mockReset();
+    throttleMock.mockResolvedValue({ allowed: true });
   });
 
   afterEach(() => {
@@ -101,6 +111,80 @@ describe("loginAction", () => {
   it("creates a session and redirects to /admin on a correct password within budget", async () => {
     setIp("203.0.113.14");
     checkAdminPasswordMock.mockReturnValue(true);
+
+    await attempt("correct");
+
+    expect(createAdminSessionMock).toHaveBeenCalledTimes(1);
+    expect(redirectMock).toHaveBeenCalledWith("/admin");
+  });
+
+  it("(a) returns the too-many-attempts error when the DB throttle says limited, without calling checkAdminPassword", async () => {
+    setIp("203.0.113.15");
+    throttleMock.mockResolvedValue({ allowed: false, reason: "limited", retryAfterSeconds: 300 });
+
+    const result = await attempt("correct");
+
+    expect(result).toEqual({
+      error: "Çok fazla deneme. Lütfen biraz sonra tekrar deneyin.",
+    });
+    expect(checkAdminPasswordMock).not.toHaveBeenCalled();
+  });
+
+  it("(b) fails closed with the SAME generic error as a rate-limited attempt when the DB throttle is unavailable, without calling checkAdminPassword", async () => {
+    // The two "not allowed" reasons ("limited" vs "unavailable") must be
+    // indistinguishable to the caller — a different message per reason
+    // would leak which layer of the throttle is currently degraded to an
+    // unauthenticated attacker.
+    setIp("203.0.113.16");
+    throttleMock.mockResolvedValue({ allowed: false, reason: "unavailable" });
+
+    const result = await attempt("correct");
+
+    expect(result).toEqual({
+      error: "Çok fazla deneme. Lütfen biraz sonra tekrar deneyin.",
+    });
+    expect(checkAdminPasswordMock).not.toHaveBeenCalled();
+  });
+
+  it("(c) never calls the DB throttle once the in-memory budget is already exhausted", async () => {
+    setIp("203.0.113.17");
+    checkAdminPasswordMock.mockReturnValue(false);
+    for (let i = 0; i < 5; i++) {
+      await attempt("wrong");
+    }
+    throttleMock.mockClear();
+
+    await attempt("wrong");
+
+    expect(throttleMock).not.toHaveBeenCalled();
+  });
+
+  it("(d) passes the request's clientKey to the DB throttle and never logs the IP", async () => {
+    const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    setIp("203.0.113.20");
+    checkAdminPasswordMock.mockReturnValue(true);
+
+    await attempt("correct");
+
+    expect(throttleMock).toHaveBeenCalledWith("203.0.113.20");
+    for (const spy of [consoleSpy, consoleLogSpy, consoleErrorSpy]) {
+      for (const call of spy.mock.calls) {
+        for (const arg of call) {
+          expect(String(arg)).not.toContain("203.0.113.20");
+        }
+      }
+    }
+    consoleSpy.mockRestore();
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("(e) creates a session and redirects when the password is correct and the DB throttle allows", async () => {
+    setIp("203.0.113.21");
+    checkAdminPasswordMock.mockReturnValue(true);
+    throttleMock.mockResolvedValue({ allowed: true });
 
     await attempt("correct");
 

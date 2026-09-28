@@ -50,8 +50,19 @@ import type { VercelConfig } from "@vercel/config/v1";
  *
  * Full architecture in `docs/adr/001-worker-stream-system.md`; operator
  * cutover steps in `docs/migration-guide.md`.
+ *
+ * REGION
+ * ------
+ * Supabase lives in `eu-west-2` (London) -- confirmed live via
+ * `select inet_server_addr()` returning a `2a05:d01c::/32` address, AWS's
+ * eu-west-2 range (audit fix A, 2026-09-28). Every DB round trip from the
+ * default `iad1` (Washington, D.C.) region currently crosses the Atlantic
+ * twice per request. A single Vercel region is allowed on every plan
+ * (including Hobby), so pinning to `lhr1` (London) removes that hop with
+ * no plan upgrade required.
  */
 const config: VercelConfig = {
+  regions: ["lhr1"],
   crons: [
     { path: "/api/cron/headline", schedule: "*/5 * * * *" },
     { path: "/api/cron/digest", schedule: "0 6 * * 6" },

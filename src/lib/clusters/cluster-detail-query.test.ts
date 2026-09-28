@@ -124,7 +124,7 @@ import type { ClusterDetailMember } from "./cluster-detail-query";
 
 function mkClusterRow(overrides: Record<string, unknown> = {}) {
   return {
-    id: "cluster-1",
+    id: "11111111-1111-4111-8111-111111111111",
     title_tr: "Original başlık",
     title_tr_neutral: null,
     summary_tr: "Kısa özet",
@@ -212,7 +212,7 @@ describe("getClusterDetail query shape", () => {
       },
     };
 
-    await getClusterDetail("cluster-1");
+    await getClusterDetail("11111111-1111-4111-8111-111111111111");
 
     // clusters query: select → eq("id", …) → maybeSingle
     const clustersCall = callLog.find((c) => c.table === "clusters");
@@ -230,7 +230,7 @@ describe("getClusterDetail query shape", () => {
     // the select must fetch is_archived so the page can read it.
     expect(selectArg).toMatch(/\bis_archived\b/);
     const clusterEq = clustersCall!.steps.find((s) => s.method === "eq");
-    expect(clusterEq!.args).toEqual(["id", "cluster-1"]);
+    expect(clusterEq!.args).toEqual(["id", "11111111-1111-4111-8111-111111111111"]);
     expect(
       clustersCall!.steps.some((s) => s.method === "maybeSingle")
     ).toBe(true);
@@ -252,7 +252,7 @@ describe("getClusterDetail query shape", () => {
     expect(embedded).toMatch(/source:sources\s*\([^)]*\btrustee_since\b/);
     expect(embedded).toMatch(/source:sources\s*\([^)]*\btrustee_note\b/);
     const membersEq = membersCall!.steps.find((s) => s.method === "eq");
-    expect(membersEq!.args).toEqual(["cluster_id", "cluster-1"]);
+    expect(membersEq!.args).toEqual(["cluster_id", "11111111-1111-4111-8111-111111111111"]);
 
     // sources query: active=true, ordered by name.
     const sourcesCall = callLog.find((c) => c.table === "sources");
@@ -284,7 +284,7 @@ describe("getClusterDetail row shaping", () => {
     };
     responses.sources = { returns: { data: [mkSource("s1")], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result).not.toBeNull();
 
     // Two distinct sources survive dedupe.
@@ -299,7 +299,7 @@ describe("getClusterDetail row shaping", () => {
     // article_count reflects the POST-dedupe truth, not the DB column.
     expect(result!.cluster.article_count).toBe(2);
     // But everything else comes from the cluster row.
-    expect(result!.cluster.id).toBe("cluster-1");
+    expect(result!.cluster.id).toBe("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.summary_tr).toBe("Kısa özet");
     expect(result!.cluster.is_blindspot).toBe(false);
 
@@ -322,7 +322,7 @@ describe("getClusterDetail row shaping", () => {
         error: null,
       },
     };
-    let result = await getClusterDetail("cluster-1");
+    let result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.title_tr).toBe("neutral version");
     expect(result!.cluster.title_original).toBe("orig");
     expect(result!.cluster.title_method).toBe("llm");
@@ -339,7 +339,7 @@ describe("getClusterDetail row shaping", () => {
         error: null,
       },
     };
-    result = await getClusterDetail("cluster-1");
+    result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.title_tr).toBe("picked version");
     expect(result!.cluster.title_original).toBe("orig");
     expect(result!.cluster.title_method).toBe("extractive");
@@ -352,7 +352,7 @@ describe("getClusterDetail row shaping", () => {
         error: null,
       },
     };
-    result = await getClusterDetail("cluster-1");
+    result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.title_tr).toBe("orig");
     expect(result!.cluster.title_original).toBeNull();
 
@@ -364,7 +364,7 @@ describe("getClusterDetail row shaping", () => {
         error: null,
       },
     };
-    result = await getClusterDetail("cluster-1");
+    result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.title_tr).toBe("orig");
     expect(result!.cluster.title_original).toBeNull();
 
@@ -377,7 +377,7 @@ describe("getClusterDetail row shaping", () => {
         error: null,
       },
     };
-    result = await getClusterDetail("cluster-1");
+    result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.title_tr).toBe("Aynı");
     expect(result!.cluster.title_original).toBeNull();
   });
@@ -402,7 +402,7 @@ describe("getClusterDetail row shaping", () => {
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     const dist = result!.cluster.bias_distribution;
 
     // Real numeric entry preserved.
@@ -437,7 +437,7 @@ describe("getClusterDetail row shaping", () => {
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.bias_distribution.pro_government).toBe(0);
     expect(result!.cluster.bias_distribution.opposition).toBe(0);
   });
@@ -465,7 +465,7 @@ describe("getClusterDetail row shaping", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.members).toHaveLength(1);
     expect(result!.members[0].source.id).toBe("s-ok");
   });
@@ -489,7 +489,7 @@ describe("getClusterDetail row shaping", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     const bySource = Object.fromEntries(
       result!.members.map((m) => [m.source.id, m.source.kind])
     );
@@ -507,7 +507,7 @@ describe("seo-3 is_archived pass-through", () => {
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.is_archived).toBe(true);
   });
 
@@ -518,7 +518,7 @@ describe("seo-3 is_archived pass-through", () => {
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.is_archived).toBe(false);
   });
 });
@@ -541,7 +541,7 @@ describe("BL-13 per-source rights flags", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     const bySource = Object.fromEntries(
       result!.members.map((m) => [m.source.id, m.source]),
     );
@@ -574,7 +574,7 @@ describe("pack G3 trustee plumbing", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     const bySource = Object.fromEntries(
       result!.members.map((m) => [m.source.id, m.source]),
     );
@@ -650,7 +650,7 @@ describe("getClusterDetail error handling", () => {
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    await expect(getClusterDetail("cluster-1")).rejects.toThrow(
+    await expect(getClusterDetail("11111111-1111-4111-8111-111111111111")).rejects.toThrow(
       /cluster boom/,
     );
   });
@@ -662,7 +662,7 @@ describe("getClusterDetail error handling", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    await expect(getClusterDetail("cluster-1")).rejects.toThrow(
+    await expect(getClusterDetail("11111111-1111-4111-8111-111111111111")).rejects.toThrow(
       /members boom/,
     );
   });
@@ -677,10 +677,10 @@ describe("getClusterDetail error handling", () => {
       returns: { data: null, error: { message: "sources boom" } },
     };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result).not.toBeNull();
     expect(result!.allSources).toEqual([]);
-    expect(result!.cluster.id).toBe("cluster-1");
+    expect(result!.cluster.id).toBe("11111111-1111-4111-8111-111111111111");
   });
 
   it("gracefully handles empty member + source results", async () => {
@@ -688,7 +688,7 @@ describe("getClusterDetail error handling", () => {
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.members).toEqual([]);
     expect(result!.allSources).toEqual([]);
     expect(result!.cluster.article_count).toBe(0); // post-dedupe count
@@ -722,7 +722,7 @@ describe("getClusterDetail wire signal", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.wire.isWireRedistribution).toBe(true);
     expect(result!.wire.effectiveArticleCount).toBe(2);
     expect(result!.wire.memberCount).toBe(5);
@@ -754,7 +754,7 @@ describe("getClusterDetail wire signal", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.wire.isWireRedistribution).toBe(false);
     expect(result!.wire.effectiveArticleCount).toBe(5);
     expect(result!.wire.memberCount).toBe(5);
@@ -786,7 +786,7 @@ describe("getClusterDetail wire signal", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.wire.isWireRedistribution).toBe(false);
     expect(result!.wire.effectiveArticleCount).toBe(5);
   });
@@ -808,7 +808,7 @@ describe("getClusterDetail wire signal", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.wire.isWireRedistribution).toBe(false);
     expect(result!.wire.effectiveArticleCount).toBe(2);
     expect(result!.wire.memberCount).toBe(2);
@@ -841,7 +841,7 @@ describe("getClusterDetail wire signal", () => {
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.article_count).toBe(2);
     expect(result!.wire.memberCount).toBe(2);
     expect(result!.wire.effectiveArticleCount).toBe(2);
@@ -870,7 +870,7 @@ describe("getClusterDetail wire signal — independent headlines (reader-data)",
     };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.wire.independentHeadlineCount).toBe(1);
     expect(result!.wire.effectiveArticleCount).toBe(3);
     expect(result!.wire.isWireRedistribution).toBe(false);
@@ -911,7 +911,7 @@ describe("getClusterDetail feed-health suppression", () => {
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
-      const result = await getClusterDetail("cluster-1");
+      const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
 
       expect(result!.cluster.is_blindspot).toBe(false);
       // The DB invariant (migration 032) is blindspot_side non-null only
@@ -931,7 +931,7 @@ describe("getClusterDetail feed-health suppression", () => {
       );
       expect(suppressionLogs).toHaveLength(1);
       expect(suppressionLogs[0]?.[0]).toContain(
-        "suppressed blindspot for cluster cluster-1",
+        "suppressed blindspot for cluster 11111111-1111-4111-8111-111111111111",
       );
       expect(suppressionLogs[0]?.[0]).toContain("muhalefet");
       expect(suppressionLogs[0]?.[0]).toContain("2/10 feeds healthy");
@@ -963,7 +963,7 @@ describe("getClusterDetail feed-health suppression", () => {
 
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
-      const result = await getClusterDetail("cluster-1");
+      const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
 
       expect(result!.cluster.is_blindspot).toBe(true);
       // Passthrough: health unknown -> the DB-stored side is untouched
@@ -989,7 +989,7 @@ describe("getClusterDetail feed-health suppression", () => {
     responses.cluster_articles = { returns: { data: [], error: null } };
     responses.sources = { returns: { data: [], error: null } };
 
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
 
     expect(result!.cluster.is_blindspot).toBe(false);
     expect(feedHealthMock.shouldSuppressBlindspot).not.toHaveBeenCalled();
@@ -1015,7 +1015,7 @@ describe("getClusterDetail blindspot recall veto (migration 071)", () => {
 
   it("selects blindspot_recall_veto on the cluster row", async () => {
     setVetoRow(false);
-    await getClusterDetail("cluster-1");
+    await getClusterDetail("11111111-1111-4111-8111-111111111111");
     const clusterCall = callLog.find((c) => c.table === "clusters");
     const select = clusterCall!.steps.find((s) => s.method === "select");
     expect(String(select!.args[0])).toMatch(/\bblindspot_recall_veto\b/);
@@ -1025,7 +1025,7 @@ describe("getClusterDetail blindspot recall veto (migration 071)", () => {
     setVetoRow(true);
     const infoSpy = vi.spyOn(console, "info").mockImplementation(() => {});
     try {
-      const result = await getClusterDetail("cluster-1");
+      const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
       expect(result!.cluster.is_blindspot).toBe(false);
       expect(result!.cluster.blindspot_side).toBeNull();
       expect(result!.blindspotRecallVetoed).toBe(true);
@@ -1034,7 +1034,7 @@ describe("getClusterDetail blindspot recall veto (migration 071)", () => {
       expect(feedHealthMock.getZoneFeedHealth).not.toHaveBeenCalled();
       expect(feedHealthMock.shouldSuppressBlindspot).not.toHaveBeenCalled();
       expect(infoSpy).toHaveBeenCalledWith(
-        "[recall-veto] withdrew blindspot for cluster cluster-1",
+        "[recall-veto] withdrew blindspot for cluster 11111111-1111-4111-8111-111111111111",
       );
     } finally {
       infoSpy.mockRestore();
@@ -1047,7 +1047,7 @@ describe("getClusterDetail blindspot recall veto (migration 071)", () => {
     ["absent (pre-071 row)", undefined],
   ])("keeps the blindspot and runs the feed-health gate when the veto is %s", async (_l, veto) => {
     setVetoRow(veto);
-    const result = await getClusterDetail("cluster-1");
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result!.cluster.is_blindspot).toBe(true);
     expect(result!.cluster.blindspot_side).toBe("pro_government");
     expect(result!.blindspotRecallVetoed).toBe(false);
@@ -1064,12 +1064,35 @@ describe("getClusterDetail blindspot recall veto (migration 071)", () => {
     feedHealthMock.shouldSuppressBlindspot.mockReturnValue(true);
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
-      const result = await getClusterDetail("cluster-1");
+      const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
       expect(result!.cluster.is_blindspot).toBe(false);
       expect(result!.blindspotSuppressed).toBe(true);
       expect(result!.blindspotRecallVetoed).toBe(false);
     } finally {
       logSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// E3: UUID guard — a malformed id must never reach Supabase / the cache.
+// ---------------------------------------------------------------------------
+
+describe("getClusterDetail UUID guard", () => {
+  it("returns null for a non-UUID id without issuing any query", async () => {
+    callLog = [];
+    const result = await getClusterDetail("not-a-uuid");
+    expect(result).toBeNull();
+    expect(callLog).toHaveLength(0);
+  });
+
+  it("accepts a well-formed UUID and proceeds to query", async () => {
+    callLog = [];
+    responses = {
+      clusters: { maybeSingle: { data: null, error: null } },
+    };
+    const result = await getClusterDetail("123e4567-e89b-12d3-a456-426614174000");
+    expect(result).toBeNull();
+    expect(callLog.length).toBeGreaterThan(0);
   });
 });

@@ -1015,3 +1015,35 @@ describe("getPoliticsClusters error handling", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// E2: fetchPoliticsClusters runs getZoneFeedHealth() and the clusters select
+// IN PARALLEL, not serially awaited one after another.
+// ---------------------------------------------------------------------------
+
+describe("getPoliticsClusters parallel health + select (E2)", () => {
+  it("issues the clusters query before the deferred health promise resolves", async () => {
+    response = { data: [], error: null };
+    let resolveHealth!: (v: unknown) => void;
+    const deferred = new Promise((resolve) => {
+      resolveHealth = resolve;
+    });
+    feedHealth.getZoneFeedHealth.mockReturnValue(deferred);
+
+    const pending = getPoliticsClusters();
+
+    // Flush microtasks so any synchronous work before the first real
+    // `await` inside fetchPoliticsClusters has had a chance to run.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The clusters query must already have been issued even though the
+    // health promise is still pending — a serial `await
+    // getZoneFeedHealth()` before the select would leave callLog empty
+    // here.
+    expect(callLog).toHaveLength(1);
+
+    resolveHealth(null);
+    await pending;
+  });
+});

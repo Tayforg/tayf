@@ -75,6 +75,14 @@ const nextConfig: NextConfig = {
     minimumCacheTTL: 86400,
     qualities: [50, 75, 90],
     contentDispositionType: "inline",
+    // A `sizes` value with no `vw` term (e.g. the desktop thumbnail's fixed
+    // "160px") makes next/image emit every configured width as a srcset
+    // candidate instead of scaling by viewport, so the device-size list has
+    // to include something near that slot (160/320 land inside imageSizes
+    // below) — and our 100vw mobile slots never need anything above the
+    // layout's max-w-5xl, so the top end (2048/3840) is dead weight.
+    deviceSizes: [384, 640, 750, 828, 1080, 1200, 1920],
+    imageSizes: [32, 48, 64, 96, 128, 160, 256, 320],
   },
   logging: {
     fetches: {
