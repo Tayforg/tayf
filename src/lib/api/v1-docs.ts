@@ -21,6 +21,13 @@ import { BLINDSPOT } from "@/lib/bias/config";
  * route sources directly and fails if this module falls out of sync).
  */
 
+// Hand-kept (NOT imported from karne.ts / v1-source-profile.ts): this module
+// is loaded by /gelistirici and the prerendered openapi.json. The contract
+// test pins these to the KARNE_* values.
+export const V1_PROFILE_WINDOW_DAYS = 30;
+export const V1_PROFILE_MIN_CLUSTERS = 20;
+export const V1_PROFILE_MIN_MULTI = 10;
+
 export interface V1ParamDoc {
   name: string;
   in: "query" | "path";
@@ -45,6 +52,7 @@ export interface V1ResponseDoc {
     | "ClusterListResponse"
     | "ClusterItemResponse"
     | "SourceListResponse"
+    | "SourceProfileResponse"
     | "KapPickupResponse"
     | "AlertListResponse"
     | "Error";
@@ -88,6 +96,12 @@ const RESP_404_CLUSTER: V1ResponseDoc = {
   status: 404,
   descriptionTr: "Küme bulunamadı veya arşivlenmiş.",
   descriptionEn: "Unknown or archived cluster id.",
+  schema: "Error",
+};
+const RESP_404_SOURCE: V1ResponseDoc = {
+  status: 404,
+  descriptionTr: "Kaynak bulunamadı veya etkin değil.",
+  descriptionEn: "Unknown or inactive source slug.",
   schema: "Error",
 };
 const RESP_429: V1ResponseDoc = {
@@ -135,6 +149,17 @@ const ID_PARAM: V1ParamDoc = {
   schema: { type: "string", format: "uuid" },
   descriptionTr: "Küme UUID'si.",
   descriptionEn: "The cluster's UUID.",
+};
+
+const SLUG_PARAM: V1ParamDoc = {
+  name: "slug",
+  in: "path",
+  required: true,
+  schema: { type: "string" },
+  descriptionTr:
+    "Kaynağın kısa adı (/api/v1/sources yanıtındaki slug); küçük harf, rakam ve tire, en çok 64 karakter.",
+  descriptionEn:
+    "The source slug as returned by /api/v1/sources; lowercase letters, digits and hyphens, at most 64 characters.",
 };
 
 const TICKER_PARAM: V1ParamDoc = {
@@ -300,6 +325,52 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
   {
     method: "OPTIONS",
     path: "/api/v1/sources",
+    auth: "none",
+    summaryTr: "CORS ön-uçuş isteği",
+    summaryEn: "CORS preflight request",
+    notesTr: [],
+    params: [],
+    responses: [
+      {
+        status: 204,
+        descriptionTr: "Anahtarsız ön-uçuş yanıtı, gövde yok.",
+        descriptionEn: "Keyless preflight response, no body.",
+      },
+    ],
+  },
+  {
+    method: "GET",
+    path: "/api/v1/sources/{slug}/profile",
+    auth: "bearer",
+    summaryTr: "Bir kaynağın 30 günlük kapsama profili",
+    summaryEn: "A source's 30-day coverage profile",
+    notesTr: [
+      `Kaynak sayfasındaki Kapsama karnesinin anahtarlı yansımasıdır: kaynağın son ${V1_PROFILE_WINDOW_DAYS} günde yayımladığı ve Tayf'ın bir kümeye eşleştirdiği haberlerden hesaplanır; kümelenmeyen (siyaset dışı) haberler sayılmaz.`,
+      "Sayılar günde bir kez yeniden hesaplanır; window_start, window_end ve computed_at hesaplamanın zamanını verir. Henüz hesaplanmamış bir kaynak için profile null döner.",
+      `Sitedeki eşikler aynen uygulanır: ${V1_PROFILE_MIN_CLUSTERS} kümeden azsa yalnızca n_clusters döner, diğer sayılar null olur; ${V1_PROFILE_MIN_MULTI} çok kaynaklı haberden azsa co_covering_zones null olur.`,
+      "co_covering_zones: kaynağın yazdığı çok kaynaklı haberlerden kaçında her bölgeden (iktidar/bağımsız/muhalefet) en az bir başka kaynağın da yazdığı; bir haber birden çok bölgede sayılabilir.",
+      "public_blindspot_appearances: sitenin kör nokta tanımına (geri çağırma vetosu uygulanmış) giren haberlerden kaçında bu kaynağın da haberi var; public_blindspot_same_side: bunların kaçında haberi ağırlıkla yazan bölge kaynağın kendi bölgesiydi.",
+      "Bu uç nokta tık tuzağı puanı veya başlık değişikliği verisi içermez.",
+    ],
+    params: [SLUG_PARAM],
+    responses: [
+      {
+        status: 200,
+        descriptionTr: "Kaynak kaydı ve 30 günlük kapsama profili (henüz hesaplanmadıysa null).",
+        descriptionEn: "The source record and its 30-day coverage profile (null if not yet computed).",
+        schema: "SourceProfileResponse",
+      },
+      RESP_400,
+      RESP_401,
+      RESP_403,
+      RESP_404_SOURCE,
+      RESP_429,
+      RESP_500,
+    ],
+  },
+  {
+    method: "OPTIONS",
+    path: "/api/v1/sources/{slug}/profile",
     auth: "none",
     summaryTr: "CORS ön-uçuş isteği",
     summaryEn: "CORS preflight request",
