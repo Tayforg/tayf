@@ -42,8 +42,12 @@ vi.mock("@/lib/clusters/cluster-detail-query", async (importOriginal) => {
     getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
   };
 });
+const permanentRedirect = vi.fn((_url: string) => {
+  throw new Error("REDIRECT");
+});
 vi.mock("next/navigation", () => ({
   notFound: vi.fn(),
+  permanentRedirect: (url: string) => permanentRedirect(url),
 }));
 // Story timeline ("Kim önce yazdı?"): the created_at lookup and the per-zone
 // feed health are both Supabase-backed — mocked so the page never reaches a
@@ -1374,5 +1378,50 @@ describe("ClusterDetailPage — structured data (F)", () => {
     const html = findJsonLd(tree);
     const parsed = JSON.parse(html!);
     expect(parsed.isBasedOn).toBeUndefined();
+  });
+});
+
+// Migration 099: a cluster merged into another one redirects permanently
+// (streamed fallback for the middleware gate's cold / over-cap cases) and its
+// metadata is noindex with the canonical pointing at the survivor.
+describe("merged cluster (migration 099)", () => {
+  const TARGET = "22222222-2222-4222-8222-222222222222";
+
+  function mergedDetail(): ClusterDetail {
+    const src = makeSource({ id: "s1", kind: "outlet" });
+    return {
+      cluster: { ...makeCluster({ bias_distribution: emptyDistribution(), is_archived: true }), merged_into: TARGET },
+      members: [makeMember("a1", src)],
+      allSources: [src],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  beforeEach(() => {
+    permanentRedirect.mockClear();
+    getClusterDetail.mockResolvedValue(mergedDetail());
+  });
+
+  it("permanently redirects the page to the surviving cluster", async () => {
+    await expect(ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) })).rejects.toThrow("REDIRECT");
+    expect(permanentRedirect).toHaveBeenCalledWith(`/cluster/${TARGET}`);
+  });
+
+  it("returns noindex,follow metadata canonicalised to the survivor", async () => {
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.alternates?.canonical).toBe(`/cluster/${TARGET}`);
+    expect(permanentRedirect).not.toHaveBeenCalled();
+  });
+
+  it("does not redirect a live cluster", async () => {
+    const d = mergedDetail();
+    d.cluster.merged_into = null;
+    d.cluster.is_archived = false;
+    getClusterDetail.mockResolvedValue(d);
+    await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(permanentRedirect).not.toHaveBeenCalled();
   });
 });

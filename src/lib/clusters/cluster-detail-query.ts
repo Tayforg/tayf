@@ -110,6 +110,10 @@ export interface ClusterDetail {
     updated_at: string;
     /** seo-3 (migration 037): archived → noindex,follow on the detail page. */
     is_archived: boolean;
+    /** Migration 099: the surviving cluster this one was merged into. Set
+     *  only when it is a UUID different from `id`. Optional so pre-099
+     *  fixtures compile. */
+    merged_into?: string | null;
   };
   members: ClusterDetailMember[];
   allSources: Source[]; // all 144, for MediaDNA rendering
@@ -175,7 +179,11 @@ type ClusterRow = {
   /** seo-3 (migration 037): true once the retention cron has archived this
    *  cluster — the detail page still serves it but must go noindex. */
   is_archived: boolean;
+  /** Migration 099. Optional: pre-099 rows/fixtures pass through. */
+  merged_into?: string | null;
 };
+
+const MERGED_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Narrow the jsonb `bias_distribution` blob into a strongly typed
@@ -262,7 +270,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       supabase
         .from("clusters")
         .select(
-          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived"
+          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived, merged_into"
         )
         .eq("id", id)
         .maybeSingle<ClusterRow>(),
@@ -469,6 +477,12 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         first_published: clusterRow.first_published,
         updated_at: clusterRow.updated_at,
         is_archived: clusterRow.is_archived,
+        merged_into:
+          typeof clusterRow.merged_into === "string" &&
+          MERGED_UUID_RE.test(clusterRow.merged_into) &&
+          clusterRow.merged_into.toLowerCase() !== clusterRow.id.toLowerCase()
+            ? clusterRow.merged_into.toLowerCase()
+            : null,
       },
       members: dedupedMembers,
       allSources: sourcesRes.data ?? [],

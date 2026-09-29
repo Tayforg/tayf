@@ -1109,3 +1109,32 @@ describe("getClusterDetail UUID guard", () => {
     expect(callLog.length).toBeGreaterThan(0);
   });
 });
+
+describe("migration 099 merged_into pass-through", () => {
+  const ID = "11111111-1111-4111-8111-111111111111";
+  const TARGET = "22222222-2222-4222-8222-222222222222";
+
+  async function detailWith(mergedInto: unknown) {
+    responses.clusters = {
+      maybeSingle: { data: mkClusterRow({ merged_into: mergedInto }), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    return getClusterDetail(ID);
+  }
+
+  it("selects merged_into on the cluster row", async () => {
+    await detailWith(null);
+    const clusterCall = callLog.find((c) => c.table === "clusters");
+    const select = clusterCall!.steps.find((s) => s.method === "select");
+    expect(String(select!.args[0])).toMatch(/\bmerged_into\b/);
+  });
+
+  it("exposes merged_into when it is a UUID different from the id", async () => {
+    expect((await detailWith(TARGET))!.cluster.merged_into).toBe(TARGET);
+  });
+
+  it.each([[null], [undefined], [ID], ["not-a-uuid"], [42]])("exposes null for %j", async (v) => {
+    expect((await detailWith(v))!.cluster.merged_into).toBeNull();
+  });
+});
