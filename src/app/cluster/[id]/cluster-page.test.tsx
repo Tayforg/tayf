@@ -11,6 +11,7 @@ import { FramingComparison } from "@/components/story/framing-comparison";
 import { MediaDna } from "@/components/story/media-dna";
 import { StoryTimeline } from "@/components/story/story-timeline";
 import { FactCheckBox } from "@/components/story/fact-check-box";
+import { ThreadLink } from "@/components/story/thread-link";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,12 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 const getClusterFactChecks = vi.fn();
 vi.mock("@/lib/fact-checks/cluster-fact-checks-query", () => ({
   getClusterFactChecks: (...args: unknown[]) => getClusterFactChecks(...args),
+}));
+// "Bu hikayenin devamı" thread pill (migration 098): Supabase-backed lookup,
+// mocked so the page never reaches a real client. Defaults to null below.
+const getPublishedThreadForCluster = vi.fn();
+vi.mock("@/lib/story-threads/public-query", () => ({
+  getPublishedThreadForCluster: (...args: unknown[]) => getPublishedThreadForCluster(...args),
 }));
 
 import ClusterDetailPage, { generateMetadata } from "./page";
@@ -334,6 +341,8 @@ beforeEach(() => {
   getZoneFeedHealth.mockResolvedValue(null);
   getClusterFactChecks.mockReset();
   getClusterFactChecks.mockResolvedValue([]);
+  getPublishedThreadForCluster.mockReset();
+  getPublishedThreadForCluster.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -1123,6 +1132,56 @@ describe("ClusterDetailPage — Bu konuda doğrulama (fact-check box)", () => {
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
     expect(hasElementOfType(tree, FactCheckBox)).toBe(false);
     expect(collectText(tree).join("")).not.toContain("Bu konuda doğrulama");
+  });
+});
+
+describe("ClusterDetailPage — Bu hikayenin devamı (story thread link)", () => {
+  function simpleDetail(): ClusterDetail {
+    const sabah = makeSource({ id: "s-sabah", name: "Sabah", bias: "pro_government" });
+    const sozcu = makeSource({ id: "s-sozcu", name: "Sözcü", bias: "opposition_leaning" });
+    const members = [makeMember("a-sabah", sabah), makeMember("a-sozcu", sozcu)];
+    const distribution = emptyDistribution();
+    for (const m of members) distribution[m.source.bias] += 1;
+    return {
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members,
+      allSources: members.map((m) => m.source),
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: members.length,
+        memberCount: members.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  it("renders the pill linking to /hikaye/{slug} for a published thread", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+    getPublishedThreadForCluster.mockResolvedValue({
+      slug: "sarpyener-fon-a1b2c3",
+      title: "Sarpyener fon soruşturması",
+    });
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(getPublishedThreadForCluster).toHaveBeenCalledWith("c1");
+
+    const el = findElementOfType(tree, ThreadLink);
+    expect(el).not.toBeNull();
+    const html = renderToStaticMarkup(
+      el as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(html).toContain('href="/hikaye/sarpyener-fon-a1b2c3"');
+    expect(html).toContain("Bu hikayenin devamı");
+    expect(html).toContain("Sarpyener fon soruşturması");
+  });
+
+  it("renders no link when the cluster is in no published thread", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(hasElementOfType(tree, ThreadLink)).toBe(false);
+    expect(collectText(tree).join("")).not.toContain("Bu hikayenin devamı");
   });
 });
 

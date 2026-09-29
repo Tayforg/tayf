@@ -41,12 +41,14 @@ const OPERATION_IDS: Record<string, string> = {
   "GET /api/v1/clusters": "listClusters",
   "GET /api/v1/clusters/{id}": "getCluster",
   "GET /api/v1/sources": "listSources",
+  "GET /api/v1/sources/{slug}/profile": "getSourceProfile",
   "GET /api/v1/kap/pickup": "getKapPickup",
   "GET /api/v1/alerts/blindspots": "listBlindspotAlerts",
   "GET /api/v1/openapi.json": "getOpenApi",
   "OPTIONS /api/v1/clusters": "optionsClusters",
   "OPTIONS /api/v1/clusters/{id}": "optionsCluster",
   "OPTIONS /api/v1/sources": "optionsSources",
+  "OPTIONS /api/v1/sources/{slug}/profile": "optionsSourceProfile",
   "OPTIONS /api/v1/kap/pickup": "optionsKapPickup",
   "OPTIONS /api/v1/alerts/blindspots": "optionsBlindspotAlerts",
 };
@@ -337,6 +339,64 @@ function buildSchemas(): Record<string, unknown> {
     ],
   };
 
+  const sourceProfile = {
+    type: "object",
+    required: [
+      "window_days",
+      "window_start",
+      "window_end",
+      "computed_at",
+      "n_clusters",
+      "min_clusters",
+      "sufficient",
+      "n_multi",
+      "n_solo",
+      "min_multi_for_zones",
+      "co_covering_zones",
+      "public_blindspot_appearances",
+      "public_blindspot_same_side",
+    ],
+    properties: {
+      window_days: { type: "integer" },
+      window_start: { type: "string", format: "date-time" },
+      window_end: { type: "string", format: "date-time" },
+      computed_at: { type: "string", format: "date-time" },
+      n_clusters: { type: "integer" },
+      min_clusters: { type: "integer" },
+      sufficient: { type: "boolean" },
+      n_multi: { type: ["integer", "null"] },
+      n_solo: { type: ["integer", "null"] },
+      min_multi_for_zones: { type: "integer" },
+      co_covering_zones: {
+        type: ["object", "null"],
+        required: ZONE_ENUM,
+        properties: {
+          iktidar: { type: "integer" },
+          bagimsiz: { type: "integer" },
+          muhalefet: { type: "integer" },
+        },
+      },
+      public_blindspot_appearances: { type: ["integer", "null"] },
+      public_blindspot_same_side: { type: ["integer", "null"] },
+    },
+  };
+
+  const sourceProfileResponse = {
+    allOf: [
+      { $ref: "#/components/schemas/Envelope" },
+      {
+        type: "object",
+        required: ["source", "profile"],
+        properties: {
+          source: { $ref: "#/components/schemas/RegistryRecord" },
+          profile: {
+            oneOf: [{ $ref: "#/components/schemas/SourceProfile" }, { type: "null" }],
+          },
+        },
+      },
+    ],
+  };
+
   const v1Alert = {
     type: "object",
     required: [
@@ -402,6 +462,8 @@ function buildSchemas(): Record<string, unknown> {
     ClusterListResponse: clusterListResponse,
     ClusterItemResponse: clusterItemResponse,
     SourceListResponse: sourceListResponse,
+    SourceProfile: sourceProfile,
+    SourceProfileResponse: sourceProfileResponse,
     V1PickupSource: v1PickupSource,
     V1PickupDisclosure: v1PickupDisclosure,
     KapPickupResponse: kapPickupResponse,

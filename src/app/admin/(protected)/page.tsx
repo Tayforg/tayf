@@ -124,6 +124,12 @@ export default async function AdminPage() {
           >
             Jev altın küme
           </Link>
+          <Link
+            href="/admin/hikayeler"
+            className="inline-flex h-9 items-center rounded-md px-2 text-sm text-muted-foreground hover:text-foreground sm:h-7"
+          >
+            Gelişen hikayeler
+          </Link>
           <form action={logoutAction}>
             <Button type="submit" variant="ghost" size="sm" className="h-9 text-xs sm:h-7">
               <LogOut className="h-3 w-3 mr-1.5" />

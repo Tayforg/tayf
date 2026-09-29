@@ -323,6 +323,58 @@ Identical record shape to `GET /api/sources` above (reuses the same
 
 ---
 
+### `GET /api/v1/sources/{slug}/profile`
+
+Keyed mirror of the "Kapsama karnesi" card on a source page: how the
+outlet's clustered stories behaved over the last 30 days. `{slug}` is the
+slug from `GET /api/v1/sources` (lowercase letters, digits, hyphens, at
+most 64 characters). Only active sources resolve.
+
+**Response** `200`:
+
+```json
+{
+  "...envelope": "...",
+  "source": { "slug": "sabah", "name": "Sabah", "zone": "iktidar", "...": "RegistryRecord" },
+  "profile": {
+    "window_days": 30,
+    "window_start": "2026-08-30T00:00:00.000Z",
+    "window_end": "2026-09-29T00:00:00.000Z",
+    "computed_at": "2026-09-29T03:00:00.000Z",
+    "n_clusters": 40,
+    "min_clusters": 20,
+    "sufficient": true,
+    "n_multi": 25,
+    "n_solo": 15,
+    "min_multi_for_zones": 10,
+    "co_covering_zones": { "iktidar": 10, "bagimsiz": 5, "muhalefet": 20 },
+    "public_blindspot_appearances": 3,
+    "public_blindspot_same_side": 1
+  }
+}
+```
+
+Null and threshold rules (same as the site):
+
+- Fewer than 20 clustered stories (`sufficient: false`): only the window
+  fields and `n_clusters` are set; `n_multi`, `n_solo`, `co_covering_zones`
+  and both blindspot fields are `null`.
+- 20 or more stories but fewer than 10 multi-source stories:
+  `co_covering_zones` is `null`, the rest is present.
+- `profile` itself is `null` when the source has no computed row yet (or the
+  row fails validation). The status is still `200`.
+- `co_covering_zones` counts stories per zone; one story can count in
+  several zones, so the values do not sum to `n_multi`.
+- No clickbait score and no headline-edit data are exposed.
+
+The numbers are recomputed once a day; `computed_at` is the time of the
+last refresh.
+
+**Response** `400`: slug is malformed (no database query is made).
+**Response** `404`: unknown or inactive source.
+
+---
+
 ### `GET /api/v1/kap/pickup`
 
 Keyed mirror of the "Medyada yankı" panel on `/ekonomi/[ticker]`: for each

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
@@ -13,6 +13,20 @@ import { V1_DEFAULT_LIMIT, V1_MAX_LIMIT, toV1ClusterRecord, type V1ClusterRow } 
 import { API_TIER_LIMITS } from "@/lib/api/keys";
 import { toRegistryRecord, type RegistrySourceRow } from "@/lib/sources/registry";
 import { toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
+import { toV1SourceProfile } from "@/lib/api/v1-source-profile";
+import {
+  V1_PROFILE_MIN_CLUSTERS,
+  V1_PROFILE_MIN_MULTI,
+  V1_PROFILE_WINDOW_DAYS,
+} from "@/lib/api/v1-docs";
+import {
+  KARNE_MIN_CLUSTERS,
+  KARNE_MIN_MULTI_FOR_ZONES,
+  KARNE_WINDOW_DAYS,
+  toSourceKarne,
+} from "@/lib/sources/karne";
+
+vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
 // ---------------------------------------------------------------------------
 // Contract test: every v1 route handler must be documented, and every
@@ -81,11 +95,11 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
   const handlers = discoverHandlers();
   const doc = buildOpenApiDocument("https://x.test");
 
-  // 11 today: clusters (GET+OPTIONS), clusters/{id} (GET+OPTIONS), sources
-  // (GET+OPTIONS), kap/pickup (GET+OPTIONS), alerts/blindspots (GET+OPTIONS)
-  // and openapi.json (GET only).
-  it("finds exactly 11 (method, path) handler pairs today", () => {
-    expect(handlers).toHaveLength(11);
+  // 13 today: clusters (GET+OPTIONS), clusters/{id} (GET+OPTIONS), sources
+  // (GET+OPTIONS), sources/{slug}/profile (GET+OPTIONS), kap/pickup
+  // (GET+OPTIONS), alerts/blindspots (GET+OPTIONS) and openapi.json (GET only).
+  it("finds exactly 13 (method, path) handler pairs today", () => {
+    expect(handlers).toHaveLength(13);
   });
 
   it("every handler pair exists in V1_ENDPOINTS and in the OpenAPI document's paths", () => {
@@ -240,6 +254,36 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     );
   });
 
+  it("SourceProfile schema property names equal Object.keys(toV1SourceProfile(fixture))", () => {
+    const karne = toSourceKarne({
+      window_days: 30,
+      window_start: "2026-08-30T00:00:00.000Z",
+      window_end: "2026-09-29T00:00:00.000Z",
+      n_clusters: 40,
+      n_multi: 25,
+      co_iktidar: 10,
+      co_bagimsiz: 5,
+      co_muhalefet: 20,
+      n_blindspot: 3,
+      n_blindspot_same_side: 1,
+      computed_at: "2026-09-29T03:00:00.000Z",
+    });
+    expect(karne).not.toBeNull();
+    const record = toV1SourceProfile(karne!);
+    const schema = doc.components.schemas.SourceProfile as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    expect(Object.keys(schema.properties).sort()).toEqual(Object.keys(record).sort());
+    expect([...schema.required].sort()).toEqual(Object.keys(record).sort());
+  });
+
+  it("v1-docs profile constants are pinned to the KARNE_* values", () => {
+    expect(V1_PROFILE_MIN_CLUSTERS).toBe(KARNE_MIN_CLUSTERS);
+    expect(V1_PROFILE_MIN_MULTI).toBe(KARNE_MIN_MULTI_FOR_ZONES);
+    expect(V1_PROFILE_WINDOW_DAYS).toBe(KARNE_WINDOW_DAYS);
+  });
+
   it("every $ref in the document resolves to a real component schema", () => {
     const schemaNames = new Set(Object.keys(doc.components.schemas));
     const refs: string[] = [];
@@ -262,7 +306,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
 });
 
 describe("GET /api/v1/openapi.json", () => {
-  it("returns 200 JSON with CORS *, the cache header, and exactly the 6 expected paths", async () => {
+  it("returns 200 JSON with CORS *, the cache header, and exactly the 7 expected paths", async () => {
     const { GET } = await import("@/app/api/v1/openapi.json/route");
     const res = GET();
     expect(res.status).toBe(200);
@@ -279,6 +323,7 @@ describe("GET /api/v1/openapi.json", () => {
         "/api/v1/kap/pickup",
         "/api/v1/openapi.json",
         "/api/v1/sources",
+        "/api/v1/sources/{slug}/profile",
       ].sort(),
     );
   });
