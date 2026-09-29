@@ -63,6 +63,7 @@ import {
   parseJevResponse,
   retryDelayMs,
   runJevShadow,
+  parseArticlePack,
 } from "../_shared/jev.ts";
 import { VOTING_SOURCE_KINDS } from "../_shared/cluster/source-kind.ts";
 
@@ -1030,7 +1031,12 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
     const rawCap = Deno.env.get("JEV_MONTHLY_TOKEN_CAP");
     const parsedCap = rawCap === undefined || rawCap.trim() === "" ? NaN : Number(rawCap);
     const cap = Number.isFinite(parsedCap) && parsedCap >= 0 ? parsedCap : JEV_MONTHLY_TOKEN_CAP_DEFAULT;
-    const result = await runJevShadow(makePorts(apiKey), { deadlineMs: JEV_DEADLINE_MS, cap, mode });
+    const result = await runJevShadow(makePorts(apiKey), {
+      deadlineMs: JEV_DEADLINE_MS,
+      cap,
+      mode,
+      articlePack: parseArticlePack(Deno.env.get("JEV_ARTICLE_PACK")),
+    });
     console.log("[jev-shadow]", JSON.stringify(result));
     return jsonResponse(result);
   } catch (err) {

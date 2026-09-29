@@ -20,6 +20,8 @@ import {
   JEV_PROB_MAX_NUMERIC,
   JEV_QUESTION_REGISTRY,
   JEV_QUESTION_SET_VERSION,
+  JEV_QUESTION_SET_VERSION_SLIM,
+  parseArticlePack,
   JEV_REGRESSION_ITEM_LIMIT,
   JEV_REGRESSION_CONCURRENCY,
   JEV_KAP_CLASS_SAMPLE_MOD,
@@ -3889,4 +3891,142 @@ describe("jev-shadow/index.ts fetchBlindspotCandidates sources query shape (A-AD
       /\.in\(\s*"kind"\s*,\s*VOTING_SOURCE_KINDS as unknown as string\[\]\s*\)/,
     );
   });
+});
+
+// --- JEV-B: JEV_ARTICLE_PACK full | slim ------------------------------------------
+
+describe("JEV-B article pack (full | slim)", () => {
+  const FULL_KEYS = ["clickbait", "framing", "opinion", "politics", "sensational", "topic", "topic7"];
+  const SLIM_KEYS = ["clickbait", "framing", "politics", "topic", "topic7"];
+  const allAnswers = {
+    politics: { type: "boolean", probability: 0.9 },
+    topic: { type: "choice", choice: "other" },
+    topic7: { type: "choice", choice: "ekonomi" },
+    opinion: { type: "boolean", probability: 0.2 },
+    clickbait: { type: "boolean", probability: 0.8 },
+    framing: { type: "choice", choice: "neutral" },
+    sensational: { type: "score", score: 2.5 },
+  } as const;
+
+  // Echo only the questions actually asked, like the real gateway does.
+  const echoEvaluate = async (req: { questions: Record<string, unknown> }) => ({
+    response: {
+      answers: Object.fromEntries(
+        Object.keys(req.questions).map((k) => [k, (allAnswers as Record<string, unknown>)[k]]),
+      ),
+      usage: { inputTokens: 50, outputTokens: 5 },
+    },
+    latencyMs: 3,
+  });
+
+  it("parseArticlePack: 'slim' selects slim; unset, empty, unknown and junk are full", () => {
+    expect(parseArticlePack("slim")).toBe("slim");
+    expect(parseArticlePack(" SLIM ")).toBe("slim");
+    expect(parseArticlePack("full")).toBe("full");
+    for (const v of [undefined, null, "", "fast", "1", "sl1m"]) expect(parseArticlePack(v)).toBe("full");
+  });
+
+  it("version strings are distinct and the slim one is a fresh constant", () => {
+    expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-24.1");
+    expect(JEV_QUESTION_SET_VERSION_SLIM).toBe("2026-10-04.1");
+    expect(JEV_QUESTION_SET_VERSION_SLIM).not.toBe(JEV_QUESTION_SET_VERSION);
+  });
+
+  it("call shape: default and 'full' ask 7 keys; 'slim' asks exactly 5, for every category incl. null", () => {
+    for (const category of ["politika", "spor", "ekonomi", null] as const) {
+      const a = articleRow({ category });
+      expect(Object.keys(buildArticleCall(a).questions).sort()).toEqual(FULL_KEYS);
+      expect(Object.keys(buildArticleCall(a, "full").questions).sort()).toEqual(FULL_KEYS);
+      const slim = buildArticleCall(a, "slim");
+      expect(Object.keys(slim.questions).sort()).toEqual(SLIM_KEYS);
+      expect(slim.state).toEqual(buildArticleCall(a, "full").state);
+    }
+  });
+
+  it("question text is byte-identical across packs and fingerprints do not move", () => {
+    const full = buildArticleCall(articleRow(), "full").questions;
+    const slim = buildArticleCall(articleRow(), "slim").questions;
+    for (const k of SLIM_KEYS) expect(slim[k]).toEqual(full[k]);
+    expect(taskQuestionFingerprint("politics")).toBe("fnv1a64:b28f24b28b0aa1e2");
+    expect(taskQuestionFingerprint("topic7")).toBe("fnv1a64:a5be77748d03273a");
+    expect(taskQuestionFingerprint("framing")).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+  });
+
+  it("full pack run (default and explicit): 7 rows with a category, 6 without, all stamped with the current version", async () => {
+    for (const opts of [undefined, { articlePack: "full" as const }]) {
+      const rec = makePorts({
+        fetchPendingArticles: async () => [
+          articleRow({ id: "a1", category: "politika" }),
+          articleRow({ id: "a2", category: null }),
+        ],
+        evaluate: echoEvaluate,
+      });
+      await runJevShadow(rec.ports, opts);
+      const rows = rec.insertPredictionsCalls.flat();
+      expect(rows.filter((r) => r.subject_id === "a1")).toHaveLength(7);
+      expect(rows.filter((r) => r.subject_id === "a2")).toHaveLength(6);
+      expect(rows.some((r) => r.task === "opinion")).toBe(true);
+      expect(rows.some((r) => r.task === "sensational")).toBe(true);
+      for (const r of rows) expect((r.jev_answer as { question_set: string }).question_set).toBe(JEV_QUESTION_SET_VERSION);
+    }
+  });
+
+  it("slim pack run: 5 rows with a category, 4 without (null skips politics), framing on all, no opinion/sensational, slim version", async () => {
+    const rec = makePorts({
+      fetchPendingArticles: async () => [
+        articleRow({ id: "a1", category: "politika" }),
+        articleRow({ id: "a2", category: null }),
+      ],
+      evaluate: echoEvaluate,
+    });
+    await runJevShadow(rec.ports, { articlePack: "slim" });
+    const rows = rec.insertPredictionsCalls.flat();
+    expect(rows.filter((r) => r.subject_id === "a1")).toHaveLength(5);
+    expect(rows.filter((r) => r.subject_id === "a2")).toHaveLength(4);
+    expect(rows.some((r) => r.task === "opinion" || r.task === "sensational")).toBe(false);
+    for (const id of ["a1", "a2"]) {
+      expect(rows.find((r) => r.task === "framing" && r.subject_id === id)).toBeDefined();
+      expect(rows.find((r) => r.task === "clickbait" && r.subject_id === id)).toBeDefined();
+    }
+    for (const r of rows) {
+      const ans = r.jev_answer as { question_set: string; pack: string[]; question_hash: string };
+      expect(ans.question_set).toBe(JEV_QUESTION_SET_VERSION_SLIM);
+      expect(ans.pack).toEqual(SLIM_KEYS);
+      expect(ans.question_hash).toBe(taskQuestionFingerprint(r.task));
+    }
+  });
+
+  it("slim pack only re-stamps article rows: cluster/other stages keep the current version", async () => {
+    const rec = makePorts({
+      fetchPendingArticles: async () => [articleRow({ id: "a1" })],
+      evaluate: echoEvaluate,
+    });
+    await runJevShadow(rec.ports, { articlePack: "slim" });
+    const rows = rec.insertPredictionsCalls.flat();
+    const articleTasks = new Set(["politics", "topic", "topic7", "clickbait", "framing"]);
+    for (const r of rows.filter((x) => !articleTasks.has(x.task))) {
+      expect((r.jev_answer as { question_set: string }).question_set).toBe(JEV_QUESTION_SET_VERSION);
+    }
+  });
+
+  for (const [pack, keys, version] of [
+    ["full", FULL_KEYS, JEV_QUESTION_SET_VERSION],
+    ["slim", SLIM_KEYS, JEV_QUESTION_SET_VERSION_SLIM],
+  ] as const) {
+    it(`regression (${pack}): recorded task keys equal the request keys and the run header carries ${version}`, async () => {
+      const seen: string[][] = [];
+      const rec = makePorts({
+        fetchRegressionItems: async (kind) => (kind === "article" ? [regressionArticleItem()] : []),
+        evaluate: async (req) => {
+          seen.push(Object.keys(req.questions).sort());
+          return echoEvaluate(req);
+        },
+      });
+      await runJevShadow(rec.ports, { mode: "regression", articlePack: pack });
+      const rows = rec.insertRegressionAnswersCalls.flat();
+      expect([...new Set(rows.map((r) => r.task))].sort()).toEqual(keys);
+      expect(seen[0]).toEqual(keys);
+      expect(rec.startRegressionRunCalls).toEqual([version]);
+    });
+  }
 });

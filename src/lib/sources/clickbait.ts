@@ -45,7 +45,12 @@ export const CLICKBAIT_PRECISION_SAMPLE = 200;
  * test (tests/migrations/078-source-clickbait.test.ts) forces a decision
  * whenever Jev's version bumps: append (questions byte-identical) or
  * replace (questions differ, which resets the window). */
-export const CLICKBAIT_QUESTION_SETS = ["2026-09-24.1"] as const;
+export const CLICKBAIT_QUESTION_SETS = [
+  "2026-09-24.1",
+  // JEV-B slim pack (JEV_ARTICLE_PACK=slim): clickbait text is byte-identical,
+  // so the window continues across the switch.
+  "2026-10-04.1",
+] as const;
 /** sha256 hex of JSON.stringify(buildArticleCall({title:'t',
  * description:'d'}).questions), pinned so a silent wording change in the
  * shared article call trips a parity test rather than silently drifting the
