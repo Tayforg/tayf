@@ -517,7 +517,8 @@ retry), `X-Tayf-Timestamp` (unix seconds, fresh per attempt),
 Signature: HMAC-SHA256, keyed with the webhook secret, over the timestamp,
 then a full stop, then the exact raw request body; hex-encoded and prefixed
 with `sha256=`. Recompute it over the raw bytes, compare in constant time and
-reject stale timestamps.
+reject timestamps more than 5 minutes (300 s) from your clock (replay window;
+snippet in `docs/newsroom-alerts.md`).
 
 Delivery: https and port 443 only, no redirect following (3xx = failed), 5 s
 timeout, responses are read to at most 4 KB and discarded. 2xx succeeds;

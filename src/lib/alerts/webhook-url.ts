@@ -74,6 +74,7 @@ const V4: Array<[string, number]> = [
   ["172.16.0.0", 12],
   ["192.0.0.0", 24],
   ["192.0.2.0", 24],
+  ["192.88.99.0", 24], // deprecated 6to4 relay anycast (RFC 7526)
   ["192.168.0.0", 16],
   ["198.18.0.0", 15],
   ["198.51.100.0", 24],
@@ -87,6 +88,7 @@ const V6: Array<[string, number]> = [
   ["::1", 128],
   ["fc00::", 7],
   ["fe80::", 10],
+  ["fec0::", 10], // deprecated site-local (RFC 3879)
   ["2001:db8::", 32],
   ["ff00::", 8],
   // Every IPv4-mapped (::ffff:a.b.c.d) and IPv4-compatible (::a.b.c.d)
