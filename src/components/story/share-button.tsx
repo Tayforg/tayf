@@ -5,6 +5,7 @@ import { Share2, Check } from "lucide-react";
 import { track } from "@/lib/track";
 import { buildChannelShareHref, buildShareUrl, SHARE_LINK_CHANNELS } from "@/lib/clusters/share";
 import { siteUrl } from "@/lib/site-url";
+import { buildEmbedSnippet } from "@/lib/cards/badge-embed";
 
 // Literal chip classes shared by every pill in this component (the
 // original "Paylaş"/"Kartı indir" buttons and the 4 channel chips below) —
@@ -29,6 +30,21 @@ export function trackChannelShare(
   track("share", { clusterId, kind: channel });
 }
 
+// Copies the "Sitene ekle" <a><img></a> snippet for the cluster's spectrum
+// badge. Exported for the same DOM-less testability reason as above.
+// Resolves false when the id is not a uuid or the clipboard is unavailable.
+export async function copyEmbedCode(clusterId: string): Promise<boolean> {
+  const snippet = buildEmbedSnippet(siteUrl(), clusterId);
+  if (!snippet) return false;
+  try {
+    await navigator.clipboard.writeText(snippet.html);
+  } catch {
+    return false;
+  }
+  track("share", { clusterId, kind: "embed" });
+  return true;
+}
+
 interface ShareButtonProps {
   clusterId: string;
   title: string;
@@ -41,6 +57,8 @@ interface ShareButtonProps {
 
 export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
   const [copied, setCopied] = useState(false);
+  const [embedCopied, setEmbedCopied] = useState(false);
+  const canEmbed = buildEmbedSnippet(siteUrl(), clusterId) !== null;
   const body = text ? `${title}\n${text}` : title;
 
   async function handleShare() {
@@ -63,6 +81,13 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
       setTimeout(() => setCopied(false), 2000);
     } catch {
       // Clipboard API unavailable
+    }
+  }
+
+  async function handleEmbed() {
+    if (await copyEmbedCode(clusterId)) {
+      setEmbedCopied(true);
+      setTimeout(() => setEmbedCopied(false), 2000);
     }
   }
 
@@ -91,6 +116,16 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
       >
         Kartı indir
       </a>
+      {canEmbed && (
+        <button
+          type="button"
+          onClick={handleEmbed}
+          title="Bu haberin yelpaze rozetini sitenize ekleyin"
+          className={CHIP_CLASS}
+        >
+          Sitene ekle
+        </button>
+      )}
       <span className="inline-flex items-center gap-1" aria-label="Kanal ile paylaş">
         {SHARE_LINK_CHANNELS.map((channel) => {
           const label = CHANNEL_LABELS[channel];
@@ -110,7 +145,7 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
         })}
       </span>
       <span className="sr-only" role="status" aria-live="polite">
-        {copied ? "Kopyalandı" : ""}
+        {copied ? "Kopyalandı" : embedCopied ? "Kod kopyalandı" : ""}
       </span>
     </>
   );

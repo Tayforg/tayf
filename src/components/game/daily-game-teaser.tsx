@@ -6,11 +6,9 @@ interface DailyGameTeaserProps {
 }
 
 /**
- * A static Server Component teaser for "Günün Tayf'ı", meant for the home
- * page. NOT mounted anywhere yet (mounting src/app/page.tsx is out of
- * scope for this file set — see the daily-game (gunun-tayfi) spec's file
- * ownership list, which does not include page.tsx). A future pass wires
- * this into the home page.
+ * A static Server Component teaser for "Günün Tayf'ı". Mounted on the home
+ * page (src/app/page.tsx) right after the first section, on page 1 without
+ * a search only (see `dailyTeaserSlot` in src/lib/game/daily-teaser.ts).
  */
 export function DailyGameTeaser({ puzzleNumber }: DailyGameTeaserProps) {
   const title =

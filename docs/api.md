@@ -394,6 +394,83 @@ Notes:
 **Response** `400`: invalid/missing `ticker`, invalid `since` (not ISO 8601
 or in the future), or `limit` outside 1–100.
 
+### `GET /api/v1/alerts/blindspots`
+
+Keyed alert feed (newsroom-alerts, b2b-5), JSON or RSS. Bearer auth only
+(there is **no** `?key=` parameter); the same anonymous floor, per-minute
+and per-day metering as every other `/api/v1` route.
+
+**Query params**:
+- `since` (optional ISO 8601): default now minus 24h, clamped to 7 days.
+- `limit` (optional integer, 1-100, default 50).
+- `format` (optional): `json` or `rss`. Anything else -> `400 Invalid format`.
+  When absent, RSS is served if `Accept` includes `application/rss+xml`,
+  otherwise JSON. RSS responses carry
+  `Content-Type: application/rss+xml; charset=utf-8` and
+  `Vary: Origin, Authorization, Accept`.
+
+**Two alert types**, merged newest first (`updated_at` descending):
+- `blindspot`: exactly the `/blindspots` page rule (recall veto applied,
+  at least 5 voting sources with 80% or more in one zone, 24h delay,
+  suppressed when the silent pole zone's feeds are degraded), capped at 30.
+- `one_zone_silent`: at least 5 voting sources, exactly one zone at zero,
+  cluster first published at least 6h ago, not vetoed, not archived. Dropped
+  when the silent zone's feeds are degraded; when feed health cannot be read
+  the pull feed fails open (the push webhook fails closed).
+
+"Silent" means **Tayf could not match a story from that zone**, never that
+the zone chose not to cover it. The copy avoids accusatory wording.
+
+**Response** `200` (JSON):
+```json
+{
+  "licence": "...", "attribution": "...", "methodology": "...", "generated_at": "...",
+  "since": "2026-09-28T12:00:00.000Z",
+  "count": 1,
+  "alerts": [{
+    "id": "one_zone_silent:<cluster uuid>",
+    "type": "one_zone_silent",
+    "cluster_id": "<cluster uuid>",
+    "title": "...",
+    "url": "https://.../cluster/<cluster uuid>",
+    "first_published": "...", "updated_at": "...",
+    "source_count": 5,
+    "zone_counts": { "iktidar": 3, "bagimsiz": 2, "muhalefet": 0 },
+    "dominant_zone": null,
+    "silent_zones": ["muhalefet"]
+  }]
+}
+```
+`dominant_zone` is set for `blindspot` only. For RSS, item `guid` is the bare
+cluster URL and `link` carries `utm_source=api&utm_medium=alerts&utm_campaign=alerts`.
+
+#### Signed webhooks (optional, per key)
+
+An operator registers one https address per API key at `/admin/api-webhooks`
+(`POST /api/admin/api-keys/webhook`, below). The secret is shown once. Every
+new alert is then POSTed as JSON `{ "event": "tayf.alert", "alert": {...},
+"licence": "...", "attribution": "..." }` (`alert` is the same record as the
+feed). Only alerts whose `updated_at` is at or after the webhook's creation
+are sent, and each `alert.id` at most once per key.
+
+Headers: `X-Tayf-Event`, `X-Tayf-Delivery` (delivery id, identical on every
+retry), `X-Tayf-Timestamp` (unix seconds, fresh per attempt),
+`X-Tayf-Signature`.
+
+Signature: HMAC-SHA256, keyed with the webhook secret, over the timestamp,
+then a full stop, then the exact raw request body; hex-encoded and prefixed
+with `sha256=`. Recompute it over the raw bytes, compare in constant time and
+reject stale timestamps.
+
+Delivery: https and port 443 only, no redirect following (3xx = failed), 5 s
+timeout, responses are read to at most 4 KB and discarded. 2xx succeeds;
+5xx, 408, 429, timeouts and network errors retry after 1, 5, 15 and 60
+minutes (5 attempts total); other 4xx fail at once. 20 consecutive failures
+disable the webhook. Destinations resolving to private, loopback,
+link-local or otherwise non-public addresses are refused at registration and
+again at connect time. The queue ticks every 10 minutes
+(`/api/cron/alerts-webhooks`); set `ALERT_WEBHOOKS_DISABLED=1` to stop it.
+
 ### `GET /api/v1/openapi.json`
 
 Static OpenAPI 3.1 description of the whole `/api/v1` surface, generated
@@ -478,6 +555,21 @@ Same admin gate + same rate-limit bucket as the create route above.
 **Response** `404`: no key with that id, or it was already revoked.
 
 ---
+
+### `POST /api/admin/api-keys/webhook` and `DELETE`
+
+Admin-session only (`401` otherwise), rate-limited by the shared
+`admin-api-keys` limiter. Body `{ "keyId": <int>, "url": "https://..." }`
+(`DELETE` needs only `keyId`).
+
+- `POST` validates the URL (https, no userinfo, no IP literal, port 443, a
+  dotted public-looking host, at most 2048 chars, no fragment) and resolves
+  it: every address must be public. Any URL failure is a generic
+  `400 Invalid webhook URL`, never a reason. An unknown or revoked key is
+  `404`. Success: `200 { ok, key_id, host, secret }`; the secret
+  (`whsec_` plus 64 hex) is returned once, replaces any previous secret and
+  resets `fail_streak`.
+- `DELETE` removes the webhook row and its unsent queue rows.
 
 ## Core Library Functions
 

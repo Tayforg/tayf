@@ -1,8 +1,9 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { apiBadRequest, apiError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
+import { clusterIdsFromTags, pingIndexNowForClusters } from "@/lib/seo/indexnow";
 
 /**
  * On-demand cache revalidation for trusted internal callers (currently the
@@ -91,6 +92,12 @@ export const POST = withApiErrors(async (request: Request) => {
   for (const tag of uniqueTags) {
     revalidateTag(tag, "max");
   }
+
+  // Tell IndexNow engines about the changed stories after the response is
+  // sent. A no-op unless INDEXNOW_KEY is configured (see docs/indexnow.md);
+  // pingIndexNowForClusters never throws.
+  const ids = clusterIdsFromTags(uniqueTags);
+  if (ids.length) after(() => pingIndexNowForClusters(ids));
 
   return NextResponse.json({ revalidated: uniqueTags.length });
 });

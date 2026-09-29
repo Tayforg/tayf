@@ -1,6 +1,8 @@
 "use client";
 import { useCallback, useSyncExternalStore } from "react";
 
+import { captureSnapshot, removeSnapshot } from "@/components/bookmark/bookmark-snapshots";
+
 const KEY = "tayf:bookmarks";
 
 const EMPTY_SET: ReadonlySet<string> = new Set();
@@ -68,9 +70,15 @@ export function useBookmarks() {
   const toggle = useCallback(
     (id: string) => {
       const next = new Set(ids);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      writeSet(next);
+      if (next.has(id)) {
+        next.delete(id);
+        writeSet(next);
+        removeSnapshot(id);
+      } else {
+        next.add(id);
+        writeSet(next);
+        void captureSnapshot(id);
+      }
     },
     [ids],
   );

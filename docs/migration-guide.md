@@ -2045,3 +2045,34 @@ update public.sources s
   from public.sources_fetch_state_backup_094 b
  where b.id = s.id;
 ```
+
+## 097 — newsroom-alerts webhooks (additive, service_role only)
+
+**What it does:** creates `public.api_key_webhooks` (one signed webhook per API key) and `public.api_key_webhook_deliveries` (the durable queue, unique `(key_id, alert_id)` for idempotency), the `public.api_webhook_claim(int, interval)` claim function (`security definer`, empty `search_path`, `for update of d skip locked`), and the `api-webhook-deliveries-retention` pg_cron job (daily 03:37 UTC, 30 days). Nothing existing is altered. Both tables: RLS on with zero policies, everything revoked from anon/authenticated/public (including the PG17 MAINTAIN guard), grants to service_role only.
+
+**Deploy order:**
+
+1. Apply `097_api_key_webhooks.sql`. Applying it early is harmless: nothing reads the tables until the cron ships.
+2. Deploy the app. The new Vercel cron `/api/cron/alerts-webhooks` (`*/10 * * * *`) then runs; with no webhook registered it returns `{"skipped":"no webhooks"}` before any other query.
+3. Register a receiver at `/admin/api-webhooks` (the secret is shown once).
+
+Deploying the app BEFORE 097 is also safe for the public feed (`/api/v1/alerts/blindspots` never touches the new tables); the cron would fail its first query with a logged 500 until 097 lands.
+
+**Kill switch:** `ALERT_WEBHOOKS_DISABLED=1` makes the cron a no-op.
+
+**Verify:**
+
+```sql
+select relname, relrowsecurity from pg_class where relname in ('api_key_webhooks','api_key_webhook_deliveries');
+select has_function_privilege('anon', 'public.api_webhook_claim(int,interval)', 'execute') as anon_exec;  -- expect false
+select jobname, schedule from cron.job where jobname = 'api-webhook-deliveries-retention';
+```
+
+**Rollback** (data; drops queued deliveries and stored secrets):
+
+```sql
+select cron.unschedule('api-webhook-deliveries-retention');
+drop function public.api_webhook_claim(int, interval);
+drop table public.api_key_webhook_deliveries, public.api_key_webhooks;
+delete from supabase_migrations.schema_migrations where version = '097';
+```

@@ -7,6 +7,8 @@ import {
 } from "@/lib/api/v1-clusters";
 import { V1_PICKUP_DEFAULT_DAYS, V1_PICKUP_MAX_DAYS } from "@/lib/api/v1-kap-pickup";
 import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
+import { SILENT_MIN_AGE_H, SILENT_MIN_SOURCES } from "@/lib/alerts/alert-feed";
+import { BLINDSPOT } from "@/lib/bias/config";
 
 /**
  * Pack `gelistirici` — the single typed source of truth for the keyed
@@ -29,6 +31,7 @@ export interface V1ParamDoc {
     minimum?: number;
     maximum?: number;
     default?: number;
+    enum?: string[];
   };
   descriptionTr: string;
   descriptionEn: string;
@@ -43,7 +46,10 @@ export interface V1ResponseDoc {
     | "ClusterItemResponse"
     | "SourceListResponse"
     | "KapPickupResponse"
+    | "AlertListResponse"
     | "Error";
+  /** Also offer `application/rss+xml` (a plain string body) beside JSON. */
+  alsoRss?: boolean;
 }
 
 export interface V1EndpointDoc {
@@ -154,6 +160,33 @@ const PICKUP_LIMIT_PARAM: V1ParamDoc = {
   descriptionTr: `Döndürülecek en çok bildirim sayısı, 1–${V1_MAX_LIMIT} arası tam sayı (varsayılan ${V1_DEFAULT_LIMIT}), en yeniden en eskiye.`,
   descriptionEn: `Maximum number of disclosures to return, an integer 1–${V1_MAX_LIMIT} (default ${V1_DEFAULT_LIMIT}), most recent first.`,
 };
+
+const ALERT_LIMIT_PARAM: V1ParamDoc = {
+  ...LIMIT_PARAM,
+  descriptionTr: `Döndürülecek en çok uyarı sayısı, 1–${V1_MAX_LIMIT} arası tam sayı (varsayılan ${V1_DEFAULT_LIMIT}), en yeniden en eskiye.`,
+  descriptionEn: `Maximum number of alerts to return, an integer 1–${V1_MAX_LIMIT} (default ${V1_DEFAULT_LIMIT}), most recent first.`,
+};
+
+const FORMAT_PARAM: V1ParamDoc = {
+  name: "format",
+  in: "query",
+  required: false,
+  schema: { type: "string", enum: ["json", "rss"] },
+  descriptionTr:
+    "json veya rss. Başka bir değer 400 döner. Verilmezse Accept başlığı application/rss+xml içeriyorsa RSS, aksi halde JSON döner.",
+  descriptionEn:
+    "json or rss. Any other value returns 400. When absent, RSS is served if the Accept header includes application/rss+xml, otherwise JSON.",
+};
+
+const ALERT_NOTES_TR: string[] = [
+  `İki kural, tek akış. Kör nokta: geri çağırma (recall veto) uygulanmış, en az ${BLINDSPOT.minSources} oy veren kaynak ve tek bölgeden %${Math.round(BLINDSPOT.dominantShare * 100)} veya fazlası, ${BLINDSPOT.feedDelayHours} saat gecikmeli, yayın sağlığı bozuk bölge için bastırılmış; en çok 30 kayıt (sitedeki /blindspots ile aynı).`,
+  `Sessiz bölge: tam olarak bir bölgede sıfır kaynak, en az ${SILENT_MIN_SOURCES} oy veren kaynak, küme en az ${SILENT_MIN_AGE_H} saat önce başlamış, veto yok, arşivlenmemiş. Sessiz bölgenin yayın akışları bozuksa kayıt düşer; sağlık bilgisi alınamazsa akış açık kalır.`,
+  "sessiz = Tayf eşleştiremedi: bir bölgenin sessiz görünmesi o bölgenin haberi yapmamayı seçtiği anlamına gelmez, yalnızca Tayf'ın o bölgeden bu kümeye eşleşen haber bulamadığı anlamına gelir.",
+  "RSS: format=rss verilirse veya format yokken Accept başlığı application/rss+xml içerirse RSS 2.0 döner (Content-Type application/rss+xml, Vary Origin, Authorization, Accept). Anahtar yalnızca Authorization başlığıyla gönderilir; adres satırında anahtar parametresi yoktur.",
+  "Webhook (isteğe bağlı, anahtar başına, yönetici tanımlar): her yeni uyarı için imzalı bir POST gönderilir. Gövde JSON: event (tayf.alert), alert (bu uç noktadaki kayıtla aynı), licence, attribution. Başlıklar: X-Tayf-Event, X-Tayf-Delivery (teslimat numarası; yeniden denemelerde aynı kalır), X-Tayf-Timestamp (saniye), X-Tayf-Signature.",
+  "İmza: zaman damgasının, bir noktanın ve ham gövdenin art arda birleşimi imza anahtarıyla HMAC-SHA256'dan geçirilir; sonuç onaltılık yazılır ve başına sha256= eklenir. Alıcı ham gövde üzerinden yeniden hesaplayıp sabit zamanlı karşılaştırmalı, zaman damgası eskiyse reddetmelidir. İmza anahtarı yalnızca tanımlanırken bir kez gösterilir.",
+  "Teslimat kuralları: yalnızca https ve 443 numaralı kapı; yönlendirmeler izlenmez (3xx başarısız sayılır). 2xx başarıdır; 5xx, 408, 429, zaman aşımı ve ağ hataları 1, 5, 15 ve 60 dakika arayla en çok 5 denemeye kadar yeniden denenir; diğer 4xx başarısız sayılır. Art arda 20 başarısızlık webhook'u kapatır. Aynı alert.id bir alıcıya en fazla bir kez teslim edilir; yine de X-Tayf-Delivery veya alert.id ile tekilleştirin.",
+];
 
 export const V1_ENDPOINTS: V1EndpointDoc[] = [
   {
@@ -310,6 +343,45 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
   {
     method: "OPTIONS",
     path: "/api/v1/kap/pickup",
+    auth: "none",
+    summaryTr: "CORS ön-uçuş isteği",
+    summaryEn: "CORS preflight request",
+    notesTr: [],
+    params: [],
+    responses: [
+      {
+        status: 204,
+        descriptionTr: "Anahtarsız ön-uçuş yanıtı, gövde yok.",
+        descriptionEn: "Keyless preflight response, no body.",
+      },
+    ],
+  },
+  {
+    method: "GET",
+    path: "/api/v1/alerts/blindspots",
+    auth: "bearer",
+    summaryTr: "Kör nokta ve sessiz bölge uyarıları",
+    summaryEn: "Blindspot and one-zone-silent alerts",
+    notesTr: ALERT_NOTES_TR,
+    params: [SINCE_PARAM, ALERT_LIMIT_PARAM, FORMAT_PARAM],
+    responses: [
+      {
+        status: 200,
+        descriptionTr: "Uyarı listesi (JSON) veya RSS 2.0.",
+        descriptionEn: "The alert list (JSON) or an RSS 2.0 feed.",
+        schema: "AlertListResponse",
+        alsoRss: true,
+      },
+      RESP_400,
+      RESP_401,
+      RESP_403,
+      RESP_429,
+      RESP_500,
+    ],
+  },
+  {
+    method: "OPTIONS",
+    path: "/api/v1/alerts/blindspots",
     auth: "none",
     summaryTr: "CORS ön-uçuş isteği",
     summaryEn: "CORS preflight request",

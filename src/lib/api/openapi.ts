@@ -42,11 +42,13 @@ const OPERATION_IDS: Record<string, string> = {
   "GET /api/v1/clusters/{id}": "getCluster",
   "GET /api/v1/sources": "listSources",
   "GET /api/v1/kap/pickup": "getKapPickup",
+  "GET /api/v1/alerts/blindspots": "listBlindspotAlerts",
   "GET /api/v1/openapi.json": "getOpenApi",
   "OPTIONS /api/v1/clusters": "optionsClusters",
   "OPTIONS /api/v1/clusters/{id}": "optionsCluster",
   "OPTIONS /api/v1/sources": "optionsSources",
   "OPTIONS /api/v1/kap/pickup": "optionsKapPickup",
+  "OPTIONS /api/v1/alerts/blindspots": "optionsBlindspotAlerts",
 };
 
 const ZONE_ENUM = ["iktidar", "bagimsiz", "muhalefet"];
@@ -335,6 +337,62 @@ function buildSchemas(): Record<string, unknown> {
     ],
   };
 
+  const v1Alert = {
+    type: "object",
+    required: [
+      "id",
+      "type",
+      "cluster_id",
+      "title",
+      "url",
+      "first_published",
+      "updated_at",
+      "source_count",
+      "zone_counts",
+      "dominant_zone",
+      "silent_zones",
+    ],
+    properties: {
+      id: { type: "string" },
+      type: { type: "string", enum: ["blindspot", "one_zone_silent"] },
+      cluster_id: { type: "string", format: "uuid" },
+      title: { type: "string" },
+      url: { type: "string" },
+      first_published: { type: "string", format: "date-time" },
+      updated_at: { type: "string", format: "date-time" },
+      source_count: { type: "integer" },
+      zone_counts: {
+        type: "object",
+        required: ZONE_ENUM,
+        properties: {
+          iktidar: { type: "integer" },
+          bagimsiz: { type: "integer" },
+          muhalefet: { type: "integer" },
+        },
+      },
+      dominant_zone: { type: ["string", "null"], enum: [...ZONE_ENUM, null] },
+      silent_zones: { type: "array", items: { type: "string", enum: ZONE_ENUM } },
+    },
+  };
+
+  const alertListResponse = {
+    allOf: [
+      { $ref: "#/components/schemas/Envelope" },
+      {
+        type: "object",
+        required: ["since", "count", "alerts"],
+        properties: {
+          since: { type: "string", format: "date-time" },
+          count: { type: "integer" },
+          alerts: {
+            type: "array",
+            items: { $ref: "#/components/schemas/V1Alert" },
+          },
+        },
+      },
+    ],
+  };
+
   return {
     Envelope: envelope,
     V1ClusterSource: v1ClusterSource,
@@ -347,6 +405,8 @@ function buildSchemas(): Record<string, unknown> {
     V1PickupSource: v1PickupSource,
     V1PickupDisclosure: v1PickupDisclosure,
     KapPickupResponse: kapPickupResponse,
+    V1Alert: v1Alert,
+    AlertListResponse: alertListResponse,
   };
 }
 
@@ -366,7 +426,9 @@ function buildResponse(resp: V1ResponseDoc): Record<string, unknown> {
   };
   const ref = schemaRefFor(resp.schema);
   if (ref) {
-    out.content = { "application/json": { schema: ref } };
+    const content: Record<string, unknown> = { "application/json": { schema: ref } };
+    if (resp.alsoRss) content["application/rss+xml"] = { schema: { type: "string" } };
+    out.content = content;
   }
   if (resp.status === 200) {
     out.headers = { "X-Tayf-Tier": TIER_HEADER };

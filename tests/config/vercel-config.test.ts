@@ -12,13 +12,14 @@ describe("vercel.ts", () => {
     expect((config as VercelConfig).regions).toEqual(["lhr1"]);
   });
 
-  it("keeps the 4 existing crons (paths and schedules) unchanged", () => {
+  it("keeps the 4 existing crons unchanged and adds alerts-webhooks every 10 minutes", () => {
     const crons = (config as VercelConfig).crons;
     expect(crons).toEqual([
       { path: "/api/cron/headline", schedule: "*/5 * * * *" },
       { path: "/api/cron/digest", schedule: "0 6 * * 6" },
       { path: "/api/cron/fact-checks", schedule: "23 * * * *" },
       { path: "/api/cron/social", schedule: "*/20 5-20 * * *" },
+      { path: "/api/cron/alerts-webhooks", schedule: "*/10 * * * *" },
     ]);
   });
 });
