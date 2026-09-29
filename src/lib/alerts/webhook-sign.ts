@@ -12,6 +12,8 @@ import { siteUrl } from "@/lib/site-url";
  */
 
 export const WEBHOOK_SECRET_RE = /^whsec_[0-9a-f]{64}$/;
+/** Receivers must refuse signatures whose timestamp is further than this from their clock. */
+export const WEBHOOK_REPLAY_WINDOW_SEC = 300;
 export const WEBHOOK_EVENT = "tayf.alert";
 
 export function generateWebhookSecret(): string {
@@ -28,7 +30,11 @@ export function verifyWebhookSignature(
   timestampSec: number,
   body: string,
   signature: string,
+  nowSec: number = Math.floor(Date.now() / 1000),
 ): boolean {
+  if (!Number.isFinite(timestampSec) || Math.abs(nowSec - timestampSec) > WEBHOOK_REPLAY_WINDOW_SEC) {
+    return false;
+  }
   if (typeof signature !== "string" || signature.length === 0) return false;
   const expected = Buffer.from(signWebhook(secret, timestampSec, body), "utf8");
   const given = Buffer.from(signature, "utf8");

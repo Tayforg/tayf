@@ -89,7 +89,7 @@ src/
 │   ├── api/                    # API error helpers
 │   ├── rate-limit.ts           # In-memory token-bucket rate limiter
 │   ├── time.ts                 # Turkish relative time formatting
-│   └── utils.ts                # cn() + timeAgo()
+│   └── utils.ts                # cn()
 └── types/                      # Shared TypeScript types
 ```
 

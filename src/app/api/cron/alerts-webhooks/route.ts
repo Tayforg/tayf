@@ -4,6 +4,7 @@ import { toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
 import { getAlertItems } from "@/lib/alerts/alert-query";
 import {
   DISABLE_AFTER_FAILS,
+  MAX_ATTEMPTS,
   classify,
   nextAttemptAt,
   postWebhook,
@@ -216,7 +217,20 @@ export const GET = withApiErrors(async (request: Request) => {
     p_limit: CLAIM_LIMIT,
   });
   if (claimError) return apiServerError(claimError);
-  const claimed = (Array.isArray(claimData) ? claimData : []) as ClaimRow[];
+  const claimedAll = (Array.isArray(claimData) ? claimData : []) as ClaimRow[];
+  // Ceiling for rows reclaimed as stale: every reclaim bumps attempts, so a
+  // row whose worker keeps dying before recording an outcome would loop
+  // forever. Past MAX_ATTEMPTS it is failed without another POST.
+  const exhausted = claimedAll.filter((r) => Number(r.attempts) > MAX_ATTEMPTS);
+  const claimed = claimedAll.filter((r) => Number(r.attempts) <= MAX_ATTEMPTS);
+  for (const row of exhausted) {
+    const { error: exhaustedError } = await supabase
+      .from("api_key_webhook_deliveries")
+      .update({ status: "failed", last_error: "attempts_exceeded" })
+      .eq("id", Number(row.id))
+      .eq("status", "sending");
+    if (exhaustedError) console.warn("[alerts-webhooks] could not fail an exhausted delivery");
+  }
 
   const outcomes: Outcome[] = await mapConcurrent(claimed, CONCURRENCY, async (row) => {
     const body = JSON.stringify(row.payload);
@@ -258,7 +272,7 @@ export const GET = withApiErrors(async (request: Request) => {
   const nowIso = new Date().toISOString();
   let delivered = 0;
   let retried = 0;
-  let failed = 0;
+  let failed = exhausted.length;
 
   for (const { row, result } of outcomes) {
     const keyId = Number(row.key_id);
@@ -319,7 +333,7 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   console.log(
-    `[alerts-webhooks] enqueued=${enqueued} claimed=${claimed.length} delivered=${delivered} retried=${retried} failed=${failed}`,
+    `[alerts-webhooks] enqueued=${enqueued} claimed=${claimedAll.length} delivered=${delivered} retried=${retried} failed=${failed}`,
   );
   return NextResponse.json({ ok: true, enqueued, delivered, retried, failed });
 });

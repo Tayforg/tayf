@@ -32,7 +32,35 @@ Public contract: `docs/api.md` (section `GET /api/v1/alerts/blindspots`), `/geli
 3. Blindspot rows are re-read fresh; only `is_blindspot` true, veto false, suspect false, checked_at set and not archived are pushed.
 4. Enqueue per webhook, only items with `updated_at >= webhook.created_at`, via `upsert(..., {onConflict:'key_id,alert_id', ignoreDuplicates:true})`. The payload is stored once, so every retry sends identical bytes and the same `X-Tayf-Delivery`.
 5. `api_webhook_claim(p_limit := 20)`, deliver with concurrency 4 and a 5 s timeout, fresh timestamp and signature per attempt.
-6. Success: `delivered`, streak reset. Retryable failure: `pending` with backoff of 1, 5, 15, 60 minutes, `failed` at 5 attempts. Any failure bumps `fail_streak`; the 20th consecutive one sets `enabled=false, disabled_reason='too_many_failures'`.
+6. Success: `delivered`, streak reset. Retryable failure: `pending` with backoff of 1, 5, 15, 60 minutes, `failed` at 5 attempts. A row reclaimed as stale (worker died before recording an outcome) has its `attempts` bumped by each claim; the cron fails any claimed row whose `attempts` exceeds `MAX_ATTEMPTS` (`last_error = 'attempts_exceeded'`) without another POST, so no row can loop forever. The guard is code-side; no migration. Any failure bumps `fail_streak`; the 20th consecutive one sets `enabled=false, disabled_reason='too_many_failures'`.
+
+## Verifying a delivery (receivers)
+
+Reject any request whose `X-Tayf-Timestamp` is more than **5 minutes (300 s)**
+away from your clock, in either direction, before or together with the HMAC
+check. Every attempt is signed with a fresh timestamp, so a retry is never
+stale; only a captured request replayed later is. Use the raw body bytes.
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const REPLAY_WINDOW_SEC = 300;
+
+export function verifyTayfWebhook(secret: string, headers: Headers, rawBody: string): boolean {
+  const ts = Number(headers.get("x-tayf-timestamp"));
+  const given = headers.get("x-tayf-signature") ?? "";
+  if (!Number.isFinite(ts)) return false;
+  if (Math.abs(Date.now() / 1000 - ts) > REPLAY_WINDOW_SEC) return false; // replay window
+  const expected = "sha256=" + createHmac("sha256", secret).update(`${ts}.${rawBody}`).digest("hex");
+  const a = Buffer.from(expected);
+  const b = Buffer.from(given);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+```
+
+The in-repo helper `verifyWebhookSignature` (`webhook-sign.ts`) enforces the
+same window (`WEBHOOK_REPLAY_WINDOW_SEC = 300`). Also dedupe on
+`X-Tayf-Delivery`, which is identical across retries.
 
 Logs carry counts only, never a URL path, secret, header or body.
 
@@ -42,7 +70,7 @@ Logs carry counts only, never a URL path, secret, header or body.
 2. `assertPublicHost` at registration: every resolved address must be public, and the name must resolve.
 3. `pinnedLookup` at connect time (`https.request({ lookup })`): resolves again and refuses any blocked address, closing the DNS-rebinding gap between 2 and delivery. Both `options.all` shapes are supported.
 
-`isBlockedAddress` uses two `node:net` BlockLists (IPv4 and IPv6 kept apart, because Node matches an IPv4 address against IPv4-mapped IPv6 subnets in a mixed list). It blocks the spec's IPv4 and IPv6 ranges, every IPv4-mapped (`::ffff:0:0/96`) and IPv4-compatible (`::/96`) literal, plus NAT64 `64:ff9b::/96` and 6to4 `2002::/16` (both embed an IPv4 address). Unparseable input is blocked.
+`isBlockedAddress` uses two `node:net` BlockLists (IPv4 and IPv6 kept apart, because Node matches an IPv4 address against IPv4-mapped IPv6 subnets in a mixed list). It blocks the spec's IPv4 and IPv6 ranges, every IPv4-mapped (`::ffff:0:0/96`) and IPv4-compatible (`::/96`) literal, plus NAT64 `64:ff9b::/96` and 6to4 `2002::/16` (both embed an IPv4 address), the deprecated 6to4 relay anycast `192.88.99.0/24` and site-local `fec0::/10`. Unparseable input is blocked.
 
 ## Verification record
 

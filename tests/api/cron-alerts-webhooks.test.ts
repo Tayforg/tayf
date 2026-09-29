@@ -417,6 +417,27 @@ describe("GET /api/cron/alerts-webhooks", () => {
     expect(patch).not.toHaveProperty("next_attempt_at");
   });
 
+  it("a row reclaimed past MAX_ATTEMPTS is failed without any POST (no infinite stale loop)", async () => {
+    fx.claimRows = [claimRow({ attempts: 6 })];
+    const body = await (await run()).json();
+    expect(fx.postCalls).toHaveLength(0);
+    expect(body).toMatchObject({ delivered: 0, retried: 0, failed: 1 });
+    const upd = supabaseFake.calls.update("api_key_webhook_deliveries")[0]!;
+    expect(upd.patch).toMatchObject({ status: "failed", last_error: "attempts_exceeded" });
+    expect(upd.patch).not.toHaveProperty("next_attempt_at");
+    expect(upd.state.eq).toContainEqual({ col: "id", val: 501 });
+    expect(upd.state.eq).toContainEqual({ col: "status", val: "sending" });
+  });
+
+  it("only the over-ceiling row is short-circuited; a live row in the same batch is still delivered", async () => {
+    fx.claimRows = [claimRow({ id: 501, attempts: 9 }), claimRow({ id: 502, attempts: 1 })];
+    fx.postResults = [{ status: 204 }];
+    const body = await (await run()).json();
+    expect(fx.postCalls).toHaveLength(1);
+    expect(fx.postCalls[0]!.headers["X-Tayf-Delivery"]).toBe("502");
+    expect(body).toMatchObject({ delivered: 1, failed: 1 });
+  });
+
   it("a 302 or a 4xx is terminally failed at once (no redirect following, no retry)", async () => {
     fx.claimRows = [claimRow({ attempts: 1 })];
     fx.postResults = [{ status: 302 }];
