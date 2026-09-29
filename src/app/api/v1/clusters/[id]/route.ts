@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { apiBadRequest, apiNotFound, apiServerError, withApiErrors } from "@/lib/api/errors";
+import { apiBadRequest, apiError, apiNotFound, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { apiV1Headers, requireApiKey, withApiV1Headers } from "@/lib/api/keys";
 import {
   V1_CLUSTER_SELECT,
@@ -43,7 +43,27 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
     .maybeSingle<V1ClusterRow>();
 
   if (error) return withApiV1Headers(apiServerError(error), auth.tier);
-  if (!data) return withApiV1Headers(apiNotFound("Cluster not found"), auth.tier);
+  if (!data) {
+    // Miss path only (the hot path above is one query): an archived cluster
+    // may have been merged into another (migration 099). A lookup error, e.g.
+    // the column not existing yet, stays a plain 404.
+    const { data: mergedRow, error: mergedError } = await supabase
+      .from("clusters")
+      .select("merged_into")
+      .eq("id", id)
+      .maybeSingle<{ merged_into: string | null }>();
+    const mergedInto = mergedError ? null : mergedRow?.merged_into;
+    if (typeof mergedInto === "string" && UUID_RE.test(mergedInto)) {
+      const target = mergedInto.toLowerCase();
+      const res = withApiV1Headers(
+        apiError(301, "Cluster merged", { details: { merged_into: target } }),
+        auth.tier,
+      );
+      res.headers.set("Location", `/api/v1/clusters/${target}`);
+      return res;
+    }
+    return withApiV1Headers(apiNotFound("Cluster not found"), auth.tier);
+  }
 
   const topic7Map = await fetchTopic7(supabase, [data.id]);
   const cluster = toV1ClusterRecord(data, topic7Map.get(data.id) ?? null);

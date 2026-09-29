@@ -92,6 +92,12 @@ const RESP_403: V1ResponseDoc = {
   descriptionEn: "The presented API key has been revoked.",
   schema: "Error",
 };
+const RESP_301_CLUSTER: V1ResponseDoc = {
+  status: 301,
+  descriptionTr: "Küme başka bir kümeyle birleştirildi; Location yeni kümeyi gösterir.",
+  descriptionEn: "Cluster was merged; Location points to the surviving cluster.",
+  schema: "Error",
+};
 const RESP_404_CLUSTER: V1ResponseDoc = {
   status: 404,
   descriptionTr: "Küme bulunamadı veya arşivlenmiş.",
@@ -280,6 +286,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_400,
       RESP_401,
       RESP_403,
+      RESP_301_CLUSTER,
       RESP_404_CLUSTER,
       RESP_429,
       RESP_500,

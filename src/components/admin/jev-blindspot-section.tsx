@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import type { JevBlindspotSuspectView } from "@/lib/admin/jev-cluster";
 import { AdminSection, EmptyState, FieldLabel, StatusBadge } from "@/components/admin/admin-ui";
 import { fmtDateTime, fmtPct, fmtRelative } from "@/lib/admin/format";
@@ -29,6 +31,11 @@ export function JevBlindspotSection({
       action="Bulunan haberin gerçekten aynı olay olup olmadığına bakın."
       collapsible
     >
+      <p className="pb-3 text-sm">
+        <Link href="/admin/birlestir" className="underline underline-offset-2">
+          Birleştirme kuyruğunu aç
+        </Link>
+      </p>
       {suspects === null ? (
         <EmptyState kind="error">Şüpheli kör noktalar okunamadı.</EmptyState>
       ) : suspects.length === 0 ? (

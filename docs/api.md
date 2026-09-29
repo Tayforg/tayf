@@ -229,6 +229,8 @@ floor, not at 600/min.
 
 **Response codes** (canonical `{error, code?, details?}` envelope on every
 non-2xx):
+- `301`: (`GET /api/v1/clusters/[id]` only) the cluster was merged into
+  another; `Location` points to the surviving cluster.
 - `401`: missing/malformed `Authorization` header, or a well-formed key
   whose hash is not on file.
 - `403`: a well-formed, previously-valid key that has been revoked.
@@ -309,7 +311,10 @@ fails (e.g. the column is absent on a preview deploy) the field degrades to
 
 **Response** `200`: `{ ...envelope, "cluster": <same shape as above> }`.
 **Response** `400`: `id` is not a UUID.
-**Response** `404`: unknown id, or the cluster is archived.
+**Response** `301`: the cluster was merged into another one. `Location` is
+`/api/v1/clusters/<surviving id>` and the body is `{ "error": "Cluster merged",
+"details": { "merged_into": "<surviving id>" } }`.
+**Response** `404`: unknown id, or the cluster is archived without a merge target.
 
 ---
 

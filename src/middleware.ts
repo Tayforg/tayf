@@ -1,5 +1,6 @@
-import { NextResponse, type NextRequest } from "next/server";
+import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
 
+import { createMergedClusterGate } from "@/lib/seo/merged-cluster-gate";
 import { createSourceSlugGate } from "@/lib/seo/source-slug-gate";
 
 // Edge middleware — runs before any response commits, so (unlike a
@@ -37,7 +38,14 @@ import { createSourceSlugGate } from "@/lib/seo/source-slug-gate";
 //     does NOT probe the database for a well-formed-but-unknown id — same
 //     deliberate deviation as /ekonomi/:ticker and /konu/:slug above — an
 //     unknown-but-well-formed UUID still streams through to the page's own
-//     notFound(). The matcher is the single literal segment '/cluster/:id',
+//     notFound(). A cluster that was MERGED into another (migration 099) gets
+//     a real 308 to the survivor: src/lib/seo/merged-cluster-gate.ts keeps a
+//     per-isolate map of merged ids (5 min TTL, newest 1000, anon-key
+//     PostgREST read) refreshed in the background via event.waitUntil. That
+//     is a set of merged ids, not a per-request probe: lookup() is a
+//     synchronous Map read, so it adds zero latency. A cold isolate or a merge
+//     older than the 1000-row window falls back to the page's own
+//     permanentRedirect(). The matcher is the single literal segment '/cluster/:id',
 //     never a ':path*' — that would also catch /cluster/<id>/kart and the
 //     per-cluster /opengraph-image route, which must stay unmatched.
 //
@@ -100,6 +108,7 @@ export const config = {
 // Module-level so the slug Set and negative cache persist across requests
 // within an isolate.
 const sourceGate = createSourceSlugGate();
+const mergedGate = createMergedClusterGate();
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/i;
 // Mirrors topic-query.ts's TOPIC_SLUGS as inline literals (not imported —
@@ -167,7 +176,7 @@ async function verifyAdminToken(token: string | undefined, secret: string): Prom
   }
 }
 
-export async function middleware(req: NextRequest): Promise<NextResponse> {
+export async function middleware(req: NextRequest, event?: NextFetchEvent): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
 
   if (pathname.startsWith("/konu/")) {
@@ -194,6 +203,17 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
     // admin branch below.
     if (segment.includes("/")) return NextResponse.next();
     if (!UUID_RE.test(segment)) return notFoundRewrite(req);
+
+    // Merged clusters (migration 099): background refresh, synchronous lookup.
+    const refresh = mergedGate.refreshIfStale();
+    if (event) event.waitUntil(refresh);
+    else void refresh.catch(() => {});
+    const target = mergedGate.lookup(segment);
+    if (target && target !== segment.toLowerCase()) {
+      const url = req.nextUrl.clone();
+      url.pathname = `/cluster/${target}`;
+      return NextResponse.redirect(url, 308);
+    }
     return NextResponse.next();
   }
 

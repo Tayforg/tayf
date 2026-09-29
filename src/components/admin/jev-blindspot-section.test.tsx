@@ -48,3 +48,12 @@ describe("JevBlindspotSection recall-veto badge (migration 071)", () => {
     expect(html).not.toContain("Okurdan gizlendi");
   });
 });
+
+describe("JevBlindspotSection merge-queue link", () => {
+  it("links to /admin/birlestir in every state", () => {
+    for (const suspects of [null, [], [suspect()]]) {
+      const html = renderToStaticMarkup(<JevBlindspotSection suspects={suspects} now={NOW} />);
+      expect(html).toMatch(/<a[^>]*href="\/admin\/birlestir"[^>]*>Birleştirme kuyruğunu aç<\/a>/);
+    }
+  });
+});

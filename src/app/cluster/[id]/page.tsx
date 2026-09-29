@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Copy } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
@@ -103,6 +103,16 @@ export async function generateMetadata({
     };
   }
 
+  if (detail.cluster.merged_into) {
+    // Migration 099: merged clusters are archived; keep them out of the index
+    // and point search engines at the survivor.
+    return {
+      title: "Haber taşındı",
+      robots: { index: false, follow: true },
+      alternates: { canonical: `/cluster/${detail.cluster.merged_into}` },
+    };
+  }
+
   const { cluster, members, wire } = detail;
   // Attributed summary (or null when blank / a bare wire copy) — see
   // summary-attribution.ts. describeForMeta keeps the result under the
@@ -168,6 +178,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
   const detail = await getClusterDetail(id);
   if (!detail) notFound();
+  // Streamed fallback for merged clusters when the middleware gate was cold or
+  // the merge is older than its 1000-row window (migration 099).
+  if (detail.cluster.merged_into) permanentRedirect(`/cluster/${detail.cluster.merged_into}`);
 
   const { cluster, members, allSources, wire, blindspotSuppressed } = detail;
 
