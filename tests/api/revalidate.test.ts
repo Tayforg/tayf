@@ -10,9 +10,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 //   3. `next/cache`'s revalidateTag is mocked so no real cache is touched.
 // ---------------------------------------------------------------------------
 
-const { revalidateTagMock } = vi.hoisted(() => ({
+const { revalidateTagMock, pingMock } = vi.hoisted(() => ({
   revalidateTagMock: vi.fn(),
+  pingMock: vi.fn(async () => ({ status: "sent", count: 1 })),
 }));
+
+// IndexNow ping is mocked so no DB/network is touched; `after` runs its
+// callback inline (there is no request scope in vitest).
+vi.mock("@/lib/seo/indexnow", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/seo/indexnow")>();
+  return { ...actual, pingIndexNowForClusters: pingMock };
+});
 
 vi.mock("next/cache", () => ({
   revalidateTag: revalidateTagMock,
@@ -23,6 +31,9 @@ vi.mock("next/server", async (importOriginal) => {
   return {
     ...actual,
     connection: async () => {},
+    after: (cb: () => unknown) => {
+      void cb();
+    },
   };
 });
 
@@ -31,6 +42,7 @@ const VALID_CLUSTER_TAG = "cluster-detail:11111111-2222-3333-4444-555555555555";
 
 beforeEach(() => {
   revalidateTagMock.mockClear();
+  pingMock.mockClear();
 });
 
 afterEach(() => {
@@ -227,5 +239,31 @@ describe("POST /api/revalidate", () => {
       makeRequest({ tags: ["clusters"] }, { auth: "Bearer shhh", ip }),
     );
     expect(res.status).toBe(429);
+  });
+
+  it("pings IndexNow with the cluster ids from cluster-detail tags", async () => {
+    process.env.CRON_SECRET = "shhh";
+    const mod = await import("@/app/api/revalidate/route");
+    const other = "cluster-detail:99999999-2222-3333-4444-555555555555";
+    const res = await mod.POST(
+      makeRequest({ tags: ["clusters", VALID_CLUSTER_TAG, other, VALID_CLUSTER_TAG] }, { auth: "Bearer shhh" }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revalidated: 3 });
+    expect(pingMock).toHaveBeenCalledTimes(1);
+    expect(pingMock).toHaveBeenCalledWith([
+      "11111111-2222-3333-4444-555555555555",
+      "99999999-2222-3333-4444-555555555555",
+    ]);
+  });
+
+  it("does not ping for static-only tags", async () => {
+    process.env.CRON_SECRET = "shhh";
+    const mod = await import("@/app/api/revalidate/route");
+    const res = await mod.POST(
+      makeRequest({ tags: ["clusters", "sources", "finance-ticker:THYAO"] }, { auth: "Bearer shhh" }),
+    );
+    expect(res.status).toBe(200);
+    expect(pingMock).not.toHaveBeenCalled();
   });
 });

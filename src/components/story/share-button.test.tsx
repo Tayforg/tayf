@@ -130,3 +130,45 @@ describe("ShareButton — SSR without window", () => {
     }
   });
 });
+
+describe("ShareButton — Sitene ekle (embed snippet)", () => {
+  const CLUSTER_ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+
+  it("renders the chip with its title, outside the live region", () => {
+    const html = renderToStaticMarkup(<ShareButton clusterId={CLUSTER_ID} title="t" />);
+    const m = html.match(/<button[^>]*title="Bu haberin yelpaze rozetini sitenize ekleyin"[^>]*>[^<]*<\/button>/);
+    expect(m).not.toBeNull();
+    expect(m![0]).toContain("Sitene ekle");
+    expect(m![0]).toContain('type="button"');
+    // exactly one live region
+    expect(html.match(/role="status"/g)).toHaveLength(1);
+  });
+
+  it("hides the chip when the id is not a uuid", () => {
+    const html = renderToStaticMarkup(<ShareButton clusterId="c1" title="t" />);
+    expect(html).not.toContain("Sitene ekle");
+  });
+
+  it("copyEmbedCode copies the html snippet for the uuid and tracks kind 'embed'", async () => {
+    vi.resetModules();
+    const trackMock = vi.fn();
+    vi.doMock("@/lib/track", () => ({ track: trackMock }));
+    const writeText = vi.fn(async () => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    const { copyEmbedCode } = await import("./share-button");
+    const { buildEmbedSnippet } = await import("@/lib/cards/badge-embed");
+    const ok = await copyEmbedCode(CLUSTER_ID);
+
+    expect(ok).toBe(true);
+    expect(writeText).toHaveBeenCalledWith(buildEmbedSnippet("https://tayf.test", CLUSTER_ID)!.html);
+    expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "embed" });
+
+    writeText.mockRejectedValueOnce(new Error("denied"));
+    expect(await copyEmbedCode(CLUSTER_ID)).toBe(false);
+    expect(await copyEmbedCode("nope")).toBe(false);
+
+    vi.unstubAllGlobals();
+    vi.doUnmock("@/lib/track");
+  });
+});

@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { AdminSection, EmptyState } from "@/components/admin/admin-ui";
 import { ApiKeysActions } from "@/components/admin/api-keys-actions";
 import type { ApiKeyRow } from "@/lib/admin/api-keys-status";
@@ -33,7 +35,14 @@ export function ApiKeysSection({
       {keys === null ? (
         <EmptyState kind="error">API anahtarları okunamadı.</EmptyState>
       ) : (
-        <ApiKeysActions keys={keys} now={now} />
+        <>
+          <ApiKeysActions keys={keys} now={now} />
+          <p className="mt-3 text-xs">
+            <Link href="/admin/api-webhooks" className="text-muted-foreground hover:text-foreground">
+              Webhook ayarları →
+            </Link>
+          </p>
+        </>
       )}
     </AdminSection>
   );

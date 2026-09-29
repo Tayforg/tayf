@@ -448,6 +448,9 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // parseZoneCase can't read it either; it is pinned by
       // tests/migrations/092-trends-rollup.test.ts.
       "092_trends_rollup.sql",
+      // 096's source_karne_refresh() carries another VALUES-list copy of
+      // BIAS_TO_ZONE; pinned by tests/migrations/096-source-karne.test.ts.
+      "096_source_karne.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

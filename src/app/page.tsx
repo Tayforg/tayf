@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
-import { Suspense } from "react";
+import { Fragment, Suspense } from "react";
 import Link from "next/link";
 import { Newspaper, SearchX } from "lucide-react";
 
 import { SearchBar } from "@/components/filters/search-bar";
 import { currentTimeMs } from "@/lib/time";
+import { DailyGameTeaser } from "@/components/game/daily-game-teaser";
+import { dailyTeaserSlot } from "@/lib/game/daily-teaser";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { PageHero } from "@/components/ui/page-hero";
@@ -328,6 +330,20 @@ async function HomeFeed({
   // though they're now nested inside <section> wrappers.
   let renderIndex = 0;
 
+  // "Günün Tayf'ı" teaser: page 1, no search, only after the first rendered
+  // section so it never sits above the first story card.
+  const teaserSlot = dailyTeaserSlot({
+    page: safePage,
+    q,
+    hasInFeedMatches,
+    nowMs,
+  });
+  const teaser = teaserSlot ? (
+    <aside aria-label="Günün Tayf'ı">
+      <DailyGameTeaser puzzleNumber={teaserSlot.puzzleNumber} />
+    </aside>
+  ) : null;
+
   return (
     <>
       <NewSinceLastVisit timestamps={renderedTimestamps} />
@@ -362,9 +378,11 @@ async function HomeFeed({
                   </div>
                 </section>
               )}
+              {breaking.length > 0 && teaser}
 
-              {bucketsWithClusters.map((bucket) => (
-                <section key={bucket.key} className="space-y-3">
+              {bucketsWithClusters.map((bucket, bucketIdx) => (
+                <Fragment key={bucket.key}>
+                <section className="space-y-3">
                   <div className="flex items-center gap-3">
                     <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
                       {bucket.label}
@@ -380,6 +398,8 @@ async function HomeFeed({
                     )}
                   </div>
                 </section>
+                {breaking.length === 0 && bucketIdx === 0 && teaser}
+                </Fragment>
               ))}
 
               <Pagination

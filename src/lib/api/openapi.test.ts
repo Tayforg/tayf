@@ -33,9 +33,10 @@ describe("buildOpenApiDocument", () => {
     const optionsClusters = doc.paths["/api/v1/clusters"]?.options;
     const optionsCluster = doc.paths["/api/v1/clusters/{id}"]?.options;
     const optionsSources = doc.paths["/api/v1/sources"]?.options;
+    const optionsAlerts = doc.paths["/api/v1/alerts/blindspots"]?.options;
     const getOpenApi = doc.paths["/api/v1/openapi.json"]?.get;
 
-    for (const op of [optionsClusters, optionsCluster, optionsSources, getOpenApi]) {
+    for (const op of [optionsClusters, optionsCluster, optionsSources, optionsAlerts, getOpenApi]) {
       expect(op).toBeDefined();
       expect(op?.security).toEqual([]);
     }
@@ -67,5 +68,27 @@ describe("buildOpenApiDocument", () => {
     }
     // At least one 200 actually exists so the loop above is not vacuous.
     expect(doc.paths["/api/v1/clusters"]?.get?.responses["200"]).toBeDefined();
+  });
+
+  it("names the alert operations and offers RSS beside JSON on the alerts 200", () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    const paths = doc.paths["/api/v1/alerts/blindspots"];
+    expect(paths?.get?.operationId).toBe("listBlindspotAlerts");
+    expect(paths?.options?.operationId).toBe("optionsBlindspotAlerts");
+    const ok = paths?.get?.responses["200"] as { content: Record<string, unknown> };
+    expect(Object.keys(ok.content).sort()).toEqual(["application/json", "application/rss+xml"]);
+    // Only the alerts 200 gets an RSS media type.
+    const clusters200 = doc.paths["/api/v1/clusters"]?.get?.responses["200"] as {
+      content: Record<string, unknown>;
+    };
+    expect(Object.keys(clusters200.content)).toEqual(["application/json"]);
+  });
+
+  it("passes a param enum through to the schema", () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    const format = doc.paths["/api/v1/alerts/blindspots"]?.get?.parameters?.find(
+      (p) => p.name === "format",
+    ) as { schema: { enum: string[] } };
+    expect(format.schema.enum).toEqual(["json", "rss"]);
   });
 });

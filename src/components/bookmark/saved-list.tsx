@@ -5,6 +5,14 @@ import Link from "next/link";
 import { Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
+import {
+  changeBadgeLabels,
+  pruneSnapshots,
+  readSnapshots,
+  reconcileSnapshots,
+  writeSnapshots,
+  type SavedChange,
+} from "@/components/bookmark/bookmark-snapshots";
 import { formatTurkishTimeAgo } from "@/lib/time";
 
 interface SavedRow {
@@ -12,6 +20,7 @@ interface SavedRow {
   title_tr: string;
   title_tr_neutral: string | null;
   article_count: number;
+  bias_distribution: unknown;
   updated_at: string;
 }
 
@@ -22,6 +31,7 @@ export function SavedList() {
   // null = still loading (or first paint before the effect runs).
   const [rows, setRows] = useState<SavedRow[] | null>(null);
   const [failed, setFailed] = useState(false);
+  const [changes, setChanges] = useState<Record<string, SavedChange>>({});
 
   useEffect(() => {
     // Nothing to fetch when empty — the count === 0 branch below renders
@@ -33,7 +43,7 @@ export function SavedList() {
         const { createBrowserClient } = await import("@/lib/supabase/browser");
         const { data, error } = await createBrowserClient()
           .from("clusters")
-          .select("id, title_tr, title_tr_neutral, article_count, updated_at")
+          .select("id, title_tr, title_tr_neutral, article_count, bias_distribution, updated_at")
           .in("id", idList)
           .order("updated_at", { ascending: false })
           .returns<SavedRow[]>();
@@ -44,8 +54,15 @@ export function SavedList() {
           setRows([]);
           return;
         }
+        const loaded = data ?? [];
+        // Device-local change detection; effect-only (never during render).
+        const snaps = readSnapshots();
+        const { changes: found, toWrite } = reconcileSnapshots(loaded, snaps, new Date().toISOString());
+        if (Object.keys(toWrite).length > 0) writeSnapshots({ ...snaps, ...toWrite });
+        pruneSnapshots(idList);
+        setChanges(found);
         setFailed(false);
-        setRows(data ?? []);
+        setRows(loaded);
       } catch (err) {
         if (cancelled) return;
         console.warn("[saved] title lookup error:", err instanceof Error ? err.message : String(err));
@@ -103,10 +120,20 @@ export function SavedList() {
   }
 
   // Bookmarked ids whose cluster no longer exists (pruned upstream) are
-  // simply not rendered; the localStorage entry stays harmless.
+  // simply not rendered; the stored id stays harmless.
+  const changedCount = rows.filter((r) => changes[r.id]).length;
+
   return (
+    <>
+    {changedCount > 0 && (
+      <p className="mb-3 text-xs text-muted-foreground">
+        {changedCount} kayıtlı hikâyede, kaydettiğinizden beri yeni gelişme var.
+      </p>
+    )}
     <ul className="space-y-2">
-      {rows.map((row, i) => (
+      {rows.map((row, i) => {
+        const change = changes[row.id];
+        return (
         <li
           key={row.id}
           className={`relative animate-fade-up stagger-${Math.min(i + 1, 8)}`}
@@ -125,6 +152,19 @@ export function SavedList() {
               </span>
               <span>{formatTurkishTimeAgo(row.updated_at)}</span>
             </span>
+            {change && (
+              <span className="mt-2 flex flex-wrap gap-1.5">
+                {changeBadgeLabels(change).map((label) => (
+                  <span
+                    key={label}
+                    title={change.basis === "save" ? "Kaydettiğinizden beri" : "Bu listeyi ilk açtığınızdan beri"}
+                    className="inline-flex items-center rounded-full border border-brand/30 bg-brand/10 px-2 py-0.5 text-[10px] font-medium text-brand"
+                  >
+                    {label}
+                  </span>
+                ))}
+              </span>
+            )}
           </Link>
           {/* Sibling of the Link (not nested) — button-in-anchor is invalid. */}
           <button
@@ -137,7 +177,9 @@ export function SavedList() {
             <X className="h-4 w-4" />
           </button>
         </li>
-      ))}
+        );
+      })}
     </ul>
+    </>
   );
 }

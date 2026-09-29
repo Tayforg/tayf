@@ -12,6 +12,7 @@ import {
 import { V1_DEFAULT_LIMIT, V1_MAX_LIMIT, toV1ClusterRecord, type V1ClusterRow } from "@/lib/api/v1-clusters";
 import { API_TIER_LIMITS } from "@/lib/api/keys";
 import { toRegistryRecord, type RegistrySourceRow } from "@/lib/sources/registry";
+import { toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
 
 // ---------------------------------------------------------------------------
 // Contract test: every v1 route handler must be documented, and every
@@ -80,10 +81,11 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
   const handlers = discoverHandlers();
   const doc = buildOpenApiDocument("https://x.test");
 
-  // 9 today: clusters (GET+OPTIONS), clusters/{id} (GET+OPTIONS), sources
-  // (GET+OPTIONS), kap/pickup (GET+OPTIONS), and openapi.json (GET only).
-  it("finds exactly 9 (method, path) handler pairs today", () => {
-    expect(handlers).toHaveLength(9);
+  // 11 today: clusters (GET+OPTIONS), clusters/{id} (GET+OPTIONS), sources
+  // (GET+OPTIONS), kap/pickup (GET+OPTIONS), alerts/blindspots (GET+OPTIONS)
+  // and openapi.json (GET only).
+  it("finds exactly 11 (method, path) handler pairs today", () => {
+    expect(handlers).toHaveLength(11);
   });
 
   it("every handler pair exists in V1_ENDPOINTS and in the OpenAPI document's paths", () => {
@@ -179,6 +181,43 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     );
   });
 
+  it("V1Alert schema property names equal Object.keys(toV1AlertRecord(fixture))", () => {
+    const fixture: AlertItem = {
+      type: "one_zone_silent",
+      clusterId: "11111111-2222-3333-4444-555555555555",
+      title: "Başlık",
+      firstPublished: "2026-09-20T10:00:00.000Z",
+      updatedAt: "2026-09-21T09:00:00.000Z",
+      sourceCount: 5,
+      zoneCounts: { iktidar: 3, bagimsiz: 2, muhalefet: 0 },
+      dominantZone: null,
+      silentZones: ["muhalefet"],
+    };
+    const record = toV1AlertRecord(fixture);
+    const schema = doc.components.schemas.V1Alert as { properties: Record<string, unknown> };
+    expect(Object.keys(schema.properties).sort()).toEqual(Object.keys(record).sort());
+  });
+
+  it("documents the alerts endpoint: format enum, RSS media type, the webhook contract", () => {
+    const get = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/alerts/blindspots");
+    const format = get?.params.find((p) => p.name === "format");
+    expect(format?.schema.enum).toEqual(["json", "rss"]);
+    const ok = doc.paths["/api/v1/alerts/blindspots"]?.get?.responses["200"] as {
+      content: Record<string, { schema: unknown }>;
+    };
+    expect(ok.content["application/json"]).toBeDefined();
+    expect(ok.content["application/rss+xml"]).toEqual({ schema: { type: "string" } });
+    const fmtParam = doc.paths["/api/v1/alerts/blindspots"]?.get?.parameters?.find((p) => p.name === "format") as {
+      schema: { enum?: string[] };
+    };
+    expect(fmtParam.schema.enum).toEqual(["json", "rss"]);
+    const notes = (get?.notesTr ?? []).join(" ");
+    expect(notes).toContain("sessiz = Tayf eşleştiremedi");
+    expect(notes).toContain("X-Tayf-Signature");
+    expect(notes).not.toContain("$");
+    expect(notes).not.toMatch(/whsec_[0-9a-f]{8}/);
+  });
+
   it("RegistryRecord schema property names equal Object.keys(toRegistryRecord(fixture))", () => {
     const fixtureRow: RegistrySourceRow = {
       slug: "sabah",
@@ -223,7 +262,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
 });
 
 describe("GET /api/v1/openapi.json", () => {
-  it("returns 200 JSON with CORS *, the cache header, and exactly the 5 expected paths", async () => {
+  it("returns 200 JSON with CORS *, the cache header, and exactly the 6 expected paths", async () => {
     const { GET } = await import("@/app/api/v1/openapi.json/route");
     const res = GET();
     expect(res.status).toBe(200);
@@ -234,6 +273,7 @@ describe("GET /api/v1/openapi.json", () => {
     const body = JSON.parse(await res.text());
     expect(Object.keys(body.paths).sort()).toEqual(
       [
+        "/api/v1/alerts/blindspots",
         "/api/v1/clusters",
         "/api/v1/clusters/{id}",
         "/api/v1/kap/pickup",

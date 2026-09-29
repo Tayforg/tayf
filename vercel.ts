@@ -48,6 +48,18 @@ import type { VercelConfig } from "@vercel/config/v1";
  *     Fail-closed against a missing `CRON_SECRET`. See
  *     `src/app/api/cron/social/route.ts` and `docs/owned-channels.md`.
  *
+ *   - `/api/cron/alerts-webhooks` — newsroom-alerts: signed webhook push
+ *     of the keyed alert feed (`/api/v1/alerts/blindspots`), every 10
+ *     minutes. Loads enabled webhooks on live API keys (migration 097) and,
+ *     with none registered, returns `{skipped:'no webhooks'}` before any
+ *     other query. Fails CLOSED when feed health is unknown, re-reads
+ *     blindspot rows fresh (veto / suspect / unchecked / archived never
+ *     push), enqueues idempotently (unique key_id + alert_id), then delivers
+ *     with HMAC-SHA256 signatures, no redirect following and an SSRF-pinned
+ *     connect. `ALERT_WEBHOOKS_DISABLED=1` turns it off. Fail-closed against
+ *     a missing `CRON_SECRET`. See `src/app/api/cron/alerts-webhooks/route.ts`
+ *     and `docs/newsroom-alerts.md`.
+ *
  * Full architecture in `docs/adr/001-worker-stream-system.md`; operator
  * cutover steps in `docs/migration-guide.md`.
  *
@@ -68,6 +80,7 @@ const config: VercelConfig = {
     { path: "/api/cron/digest", schedule: "0 6 * * 6" },
     { path: "/api/cron/fact-checks", schedule: "23 * * * *" },
     { path: "/api/cron/social", schedule: "*/20 5-20 * * *" },
+    { path: "/api/cron/alerts-webhooks", schedule: "*/10 * * * *" },
   ],
 };
 

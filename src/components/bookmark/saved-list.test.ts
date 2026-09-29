@@ -17,3 +17,25 @@ describe("saved-list.tsx source", () => {
     expect(src).toContain(`await import("@/lib/supabase/browser")`);
   });
 });
+
+describe("saved-list.tsx change badges", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+
+  it("selects bias_distribution", () => {
+    expect(src).toMatch(/\.select\("[^"]*bias_distribution[^"]*"\)/);
+  });
+
+  it("imports reconcileSnapshots and changeBadgeLabels", () => {
+    expect(src).toMatch(/import\s*\{[^}]*reconcileSnapshots[^}]*\}\s*from\s*["']@\/components\/bookmark\/bookmark-snapshots["']/);
+    expect(src).toMatch(/import\s*\{[^}]*changeBadgeLabels[^}]*\}\s*from\s*["']@\/components\/bookmark\/bookmark-snapshots["']/);
+  });
+
+  it("never touches localStorage directly and reads snapshots only inside the effect", () => {
+    expect(src).not.toContain("localStorage");
+    const effectAt = src.indexOf("useEffect(");
+    const firstRead = src.indexOf("readSnapshots(");
+    expect(effectAt).toBeGreaterThan(-1);
+    expect(firstRead).toBeGreaterThan(effectAt);
+    expect(src.indexOf("readSnapshots(", firstRead + 1)).toBe(-1);
+  });
+});
