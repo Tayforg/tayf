@@ -6,6 +6,8 @@ import {
   JEV_NEUTRAL_MODEL_ID,
   JEV_POLITICS_CATEGORIES,
   JEV_QUESTION_SET_VERSION,
+  JEV_QUESTION_SET_VERSION_SLIM,
+  buildArticleCall,
   JEV_REGRESSION_ARTICLE_DEFAULT,
   JEV_REGRESSION_PAIR_DEFAULT,
   JEV_TASKS,
@@ -684,6 +686,8 @@ describe("question set version + registry hash (JEV-A20)", () => {
   // design against" -- "Two workers, one question-set version").
   it("pins JEV_QUESTION_SET_VERSION and questionRegistryHash together — bump BOTH or neither", async () => {
     expect(JEV_QUESTION_SET_VERSION).toBe("2026-09-24.1");
+    // JEV-B slim pack: same registry text (hash unchanged), fresh version string.
+    expect(JEV_QUESTION_SET_VERSION_SLIM).toBe("2026-10-04.1");
     expect(await questionRegistryHash()).toBe("4259abdc8db9062f8eea76650689c5e85f6c052dd22b640c0f4000d48a62fb39");
   });
 
@@ -696,6 +700,16 @@ describe("question set version + registry hash (JEV-A20)", () => {
     expect(taskQuestionFingerprint("topic7")).toBe("fnv1a64:a5be77748d03273a");
     expect(taskQuestionFingerprint("kap_class")).toBe("fnv1a64:4b45cd2a1c4f9cf3");
     expect(taskQuestionFingerprint("kap_materiality")).toBe("fnv1a64:18fd8c4cc9909d75");
+  });
+
+  it("JEV-B: fingerprints of every slim-pack task are identical to the full pack (question text unchanged)", () => {
+    const { questions: full } = buildArticleCall({ id: "x", title: "t", description: "d", source_slug: null, category: null } as never, "full");
+    const { questions: slim } = buildArticleCall({ id: "x", title: "t", description: "d", source_slug: null, category: null } as never, "slim");
+    for (const k of Object.keys(slim)) {
+      expect(slim[k]).toEqual(full[k]);
+      expect(taskQuestionFingerprint(k)).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+    }
+    expect(Object.keys(slim).sort()).toEqual(["clickbait", "framing", "politics", "topic", "topic7"]);
   });
 });
 

@@ -27,6 +27,7 @@ export const ARCHIVE_DEADLINE_MS = 50_000;
 // object read from jev_shadow_predictions -- one model's shadow answers
 // under a pinned question set, declared as such in the manifest. Zero
 // gateway calls: this only reads rows jev-shadow already wrote.
+// JEV-B (JEV_ARTICLE_PACK=slim): sensational is null for new rows.
 export const ARCHIVE_LABEL_TASKS = ["politics", "topic", "clickbait", "framing", "sensational"] as const;
 export const ARCHIVE_LABEL_SOURCE = "typesafe-ai/jev via jev-shadow";
 

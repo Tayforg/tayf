@@ -95,6 +95,25 @@ export const JEV_NEUTRAL_MODEL_ID = "extractive-v1";
  * again, re-run that test and re-measure rather than assuming it's still
  * cheap. */
 export const JEV_QUESTION_SET_VERSION = "2026-09-24.1";
+/** JEV-B "slim" article pack: opinion and sensational retired from the
+ * article call. Stamped on article rows (and the regression run header) ONLY
+ * while JEV_ARTICLE_PACK=slim. 2026-10-04 is the earliest date the rollout
+ * precondition allows: it is the Sunday of the first same-set 660-item
+ * replay (jev-regression-weekly, 04:20 UTC), which is the noise floor the
+ * slim replay is compared against. Never reuse this string: a rollback that
+ * restores different text must bump again. Question text and per-task
+ * fingerprints are identical in both packs. */
+export const JEV_QUESTION_SET_VERSION_SLIM = "2026-10-04.1";
+/** Article-call pack. 'full' (default) = today's seven questions; 'slim' =
+ * politics, topic, topic7, clickbait, framing. */
+export type JevArticlePack = "full" | "slim";
+/** Parses the JEV_ARTICLE_PACK env value; anything but 'slim' is 'full'. */
+export function parseArticlePack(raw: string | null | undefined): JevArticlePack {
+  return typeof raw === "string" && raw.trim().toLowerCase() === "slim" ? "slim" : "full";
+}
+export function questionSetVersionFor(pack: JevArticlePack): string {
+  return pack === "slim" ? JEV_QUESTION_SET_VERSION_SLIM : JEV_QUESTION_SET_VERSION;
+}
 /** Migration 064: a cluster_member prediction below this probability queues
  * the (cluster, article) pair into jev_unlink_candidates for a human to
  * review on /admin. */
@@ -1017,7 +1036,7 @@ function neutralPickScoreQuestion(key: string): JevQuestion {
  * the wording, so handing the model the outlet name would let it key on the
  * source instead of the headline — exactly the confound this suite exists
  * to measure. source_slug stays on the row for analysis, not in the prompt. */
-export function buildArticleCall(a: JevArticleRow): JevRequest {
+export function buildArticleCall(a: JevArticleRow, pack: JevArticlePack = "full"): JevRequest {
   const state = {
     title: clamp(a.title, JEV_TITLE_CLAMP),
     description: clamp(a.description, JEV_DESC_CLAMP),
@@ -1032,6 +1051,11 @@ export function buildArticleCall(a: JevArticleRow): JevRequest {
     framing: choiceQuestion("framing"),
     sensational: scoreQuestion("sensational"),
   };
+  if (pack === "slim") {
+    // JEV-B: opinion (15% precision) and sensational (20%) are retired.
+    delete questions.opinion;
+    delete questions.sensational;
+  }
 
   return { state, questions };
 }
@@ -1709,6 +1733,8 @@ export function predictionRow(args: {
   /** 088: the sorted list of tasks asked in this call (article and KAP rows
    * only). Absent from jev_answer entirely when not given, never `[]`. */
   pack?: readonly string[];
+  /** Overrides jev_answer.question_set (JEV-B slim article rows). */
+  questionSet?: string;
 }): JevPredictionRow {
   const jevProb =
     args.answer.type === "boolean"
@@ -1731,7 +1757,7 @@ export function predictionRow(args: {
     jev_answer: {
       answer: args.answerExtra ? { ...args.answer, ...args.answerExtra } : args.answer,
       question_id: args.questionId,
-      question_set: JEV_QUESTION_SET_VERSION,
+      question_set: args.questionSet ?? JEV_QUESTION_SET_VERSION,
       question_hash: taskQuestionFingerprint(args.task),
       ...(args.pack ? { pack: [...args.pack].sort() } : {}),
       call_id: args.callId,
@@ -1921,6 +1947,7 @@ interface RunCtx {
   deadlineMs: number;
   cap: number;
   mode: JevRunMode;
+  articlePack: JevArticlePack;
   monthTokens: number;
   calls: number;
   errors: number;
@@ -1992,7 +2019,7 @@ export function stageLedger(mode: JevRunMode, ledger: Record<string, { calls: nu
   return out;
 }
 
-function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number, cap: number, mode: JevRunMode): RunCtx {
+function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number, cap: number, mode: JevRunMode, articlePack: JevArticlePack = "full"): RunCtx {
   return {
     ports,
     runId,
@@ -2000,6 +2027,7 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     deadlineMs,
     cap,
     mode,
+    articlePack,
     monthTokens: 0,
     calls: 0,
     errors: 0,
@@ -2217,9 +2245,11 @@ function buildArticleRows(
   preview: string,
   latencyMs: number,
   pack: readonly string[],
+  articlePack: JevArticlePack = "full",
 ): JevPredictionRow[] {
   const rows: JevPredictionRow[] = [];
   const common = {
+    questionSet: questionSetVersionFor(articlePack),
     articleId: article.id,
     clusterId: null,
     stateHash: hash,
@@ -2284,7 +2314,11 @@ function buildArticleRows(
     );
   }
 
-  for (const task of ["opinion", "clickbait", "framing", "sensational"] as const) {
+  const tail =
+    articlePack === "slim"
+      ? (["clickbait", "framing"] as const)
+      : (["opinion", "clickbait", "framing", "sensational"] as const);
+  for (const task of tail) {
     const answer = response.answers[task];
     if (!answer) continue;
     rows.push(
@@ -2670,7 +2704,7 @@ function buildTickerRows(
 async function runArticlesStage(ctx: RunCtx, sinceIso: string): Promise<void> {
   const items = await ctx.ports.fetchPendingArticles(sinceIso, JEV_ARTICLE_LIMIT);
   await processStage(ctx, "articles", items, async (article) => {
-    const request = buildArticleCall(article);
+    const request = buildArticleCall(article, ctx.articlePack);
     const result = await callOnce(ctx, "articles", request);
     if (!result) {
       ctx.stages.articles.errors += 1;
@@ -2689,6 +2723,7 @@ async function runArticlesStage(ctx: RunCtx, sinceIso: string): Promise<void> {
       preview,
       result.latencyMs,
       Object.keys(request.questions),
+      ctx.articlePack,
     );
     ctx.stages.articles.rows += rows.length;
     await pushRows(ctx, rows);
@@ -3030,18 +3065,8 @@ async function runRegressionArticlesStage(ctx: RunCtx): Promise<void> {
   }
   if (ctx.regression) ctx.regression.items.push(...items);
 
-  const keyToTask: Readonly<Record<string, string>> = {
-    politics: "politics",
-    topic: "topic",
-    topic7: "topic7",
-    opinion: "opinion",
-    clickbait: "clickbait",
-    framing: "framing",
-    sensational: "sensational",
-  };
-
   await processStage(ctx, "regression_articles", items, async (item) => {
-    const request = buildArticleCall(regressionArticleRow(item));
+    const request = buildArticleCall(regressionArticleRow(item), ctx.articlePack);
     const result = await callOnce(ctx, "regression_articles", request);
     if (!result) {
       ctx.stages.regression_articles.errors += 1;
@@ -3049,6 +3074,10 @@ async function runRegressionArticlesStage(ctx: RunCtx): Promise<void> {
     }
     ctx.stages.regression_articles.calls += 1;
     const runId = ctx.regression?.runId ?? ctx.runId;
+    // Keys double as task names, so this is safe in both packs.
+    const keyToTask: Readonly<Record<string, string>> = Object.fromEntries(
+      Object.keys(request.questions).map((k) => [k, k]),
+    );
     const rows = regressionAnswerRows(runId, item.id, result.response, keyToTask);
     ctx.stages.regression_articles.rows += rows.length;
     if (ctx.regression) ctx.regression.answers.push(...rows);
@@ -3292,7 +3321,7 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
  */
 export async function runJevShadow(
   ports: JevPorts,
-  opts: { deadlineMs?: number; cap?: number; nowIso?: string; mode?: JevRunMode } = {},
+  opts: { deadlineMs?: number; cap?: number; nowIso?: string; mode?: JevRunMode; articlePack?: JevArticlePack } = {},
 ): Promise<JevShadowResult> {
   const t0 = ports.now();
   const deadlineMs = opts.deadlineMs ?? JEV_DEADLINE_MS;
@@ -3301,7 +3330,8 @@ export async function runJevShadow(
 
   const month = await ports.monthTokens(cap);
   const runId = await ports.startRun();
-  const ctx = makeCtx(ports, runId, t0, deadlineMs, cap, mode);
+  const articlePack: JevArticlePack = opts.articlePack ?? "full";
+  const ctx = makeCtx(ports, runId, t0, deadlineMs, cap, mode, articlePack);
   ctx.monthTokens = month.input_tokens;
 
   let status: JevRunStatus = "ok";
@@ -3318,7 +3348,7 @@ export async function runJevShadow(
       // month.exceeded above must open NO regression run row and make ZERO
       // evaluate() calls.
       if (mode === "regression") {
-        const regressionRunId = await ports.startRegressionRun(JEV_QUESTION_SET_VERSION);
+        const regressionRunId = await ports.startRegressionRun(questionSetVersionFor(articlePack));
         ctx.regression = { runId: regressionRunId, items: [], answers: [], pending: [], writeErrors: 0 };
       }
       await runStages(ctx, opts.nowIso);
