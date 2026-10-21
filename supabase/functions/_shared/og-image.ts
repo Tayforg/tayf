@@ -23,6 +23,7 @@
 //   - All fetches are GET-only, follow at most 3 redirects, and reject any
 //     hop whose target resolves to a private IP.
 
+import { normalizeImageUrl } from "./image-url.ts";
 import { safeFetch, SafeFetchError } from "./safe-fetch.ts";
 
 const OG_IMAGE_REGEX =
@@ -101,7 +102,7 @@ export async function fetchOgImage(
     if (result.status < 200 || result.status >= 300) return null;
     const match = result.body.match(OG_IMAGE_REGEX) ||
       result.body.match(OG_IMAGE_REGEX_ALT);
-    return match?.[1] ?? null;
+    return match?.[1] ? normalizeImageUrl(match[1]) : null;
   } catch (err) {
     // SafeFetchError is the SSRF-policy violation path; AbortError surfaces
     // as a generic Error on timeout. Both collapse to null per the contract.
@@ -112,7 +113,8 @@ export async function fetchOgImage(
 
 /**
  * Run the ordered set of hero-image regexes over an HTML blob and return the
- * first match that `isValidImageUrl` accepts. Exported for unit testing.
+ * first match that survives `normalizeImageUrl` and `isValidImageUrl`
+ * (returned in its normalised spelling). Exported for unit testing.
  */
 export function extractHeroImageFromHtml(html: string): string | null {
   if (!html) return null;
@@ -128,7 +130,9 @@ export function extractHeroImageFromHtml(html: string): string | null {
     (h) => h.match(JSONLD_IMAGE_STRING_REGEX)?.[1],
   ];
   for (const extract of extractors) {
-    const candidate = extract(html);
+    // ingest-hygiene: repair (`https://h//x`, `//host/x`) before validating,
+    // and return the repaired value.
+    const candidate = normalizeImageUrl(extract(html));
     if (candidate && isValidImageUrl(candidate)) return candidate;
   }
   return null;

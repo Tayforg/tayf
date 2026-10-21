@@ -6,6 +6,7 @@ import { ArrowLeft, ExternalLink } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
 import { BIAS_LABELS } from "@/lib/bias/config";
+import { firstPartyLogoUrl } from "@/lib/images/image-url";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { createServerClient } from "@/lib/supabase/server";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
@@ -282,7 +283,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
           {source.logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={source.logo_url}
+              src={firstPartyLogoUrl(source.logo_url, 128) ?? source.logo_url}
               alt=""
               className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 object-contain bg-background ring-1 ring-brand/20"
               loading="eager"

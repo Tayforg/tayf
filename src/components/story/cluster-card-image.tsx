@@ -4,6 +4,8 @@ import { useState } from "react";
 import Image from "next/image";
 import { Newspaper } from "lucide-react";
 
+import { firstPartyLogoUrl, normalizeImageUrl } from "@/lib/images/image-url";
+
 // Client child of ClusterCard used to render the cluster hero image.
 //
 // Why this file exists:
@@ -110,16 +112,29 @@ export function ClusterCardImage({
   height,
   sizes,
 }: ClusterCardImageProps) {
-  // Build a deduped candidate list from (src, ...srcs), stripping nulls.
-  // Dedup by string identity because the same URL can appear twice if
-  // multiple articles in a cluster happen to share a CDN thumbnail.
+  // Build a deduped candidate list from (src, ...srcs), normalising each
+  // URL (protocol-relative `//host/x` -> https, doubled leading path slash
+  // collapsed) and stripping anything that is not a usable http(s) URL.
+  // Dedup by string identity AFTER normalising, because the same URL can
+  // appear twice if multiple articles in a cluster happen to share a CDN
+  // thumbnail -- or differ only by the stray slash. Doing this at render
+  // time heals rows already stored with the bad spelling (no backfill).
   const candidates = Array.from(
     new Set(
-      [src, ...(srcs ?? [])].filter(
-        (s): s is string => typeof s === "string" && s.length > 0,
-      ),
+      [src, ...(srcs ?? [])]
+        .map(normalizeImageUrl)
+        .filter((s): s is string => s !== null),
     ),
   );
+
+  // `credits` is keyed by the URL as stored on the article; the lookup below
+  // uses the normalised `currentSrc`, so normalise the keys the same way
+  // (falling back to the raw key when it cannot be normalised).
+  const normalizedCredits = credits
+    ? Object.fromEntries(
+        Object.entries(credits).map(([k, v]) => [normalizeImageUrl(k) ?? k, v]),
+      )
+    : undefined;
 
   // Index into `candidates`. Advances on each image error. When it
   // walks past the end of the array, we either fall through to the
@@ -173,14 +188,16 @@ export function ClusterCardImage({
         aria-label={logoAlt ? `${alt} — ${logoAlt}` : alt}
         className={`${className ?? ""} relative rounded-lg overflow-hidden ${GRADIENT_CLASSES} flex flex-col items-center justify-center gap-2 p-3`}
       >
-        {/* Plain <img> (not next/image): this is a tiny ~64px favicon
-            from Google S2 that's already WebP-friendly, and sending it
-            through the Next.js optimizer on the FALLBACK tier would
-            mean an extra /_next/image round-trip for a degraded path.
-            `loading="lazy"` keeps it out of the preload critical path. */}
+        {/* Plain <img> (not next/image): the src is built by
+            `firstPartyLogoUrl`, which routes a Google S2 favicon through
+            our own /_next/image (first-party, cached, sized to the 64px
+            slot) and leaves every other logo URL untouched. A static
+            <img> keeps the fallback tier out of next/image's
+            layout/preload machinery. `loading="lazy"` keeps it out of
+            the preload critical path. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src={logoSrc}
+          src={firstPartyLogoUrl(logoSrc) ?? logoSrc}
           alt={logoAlt ?? alt}
           className="max-h-[50%] max-w-[50%] object-contain opacity-60"
           loading="lazy"
@@ -210,7 +227,7 @@ export function ClusterCardImage({
   // Keyed by `currentSrc` (not `src`/`heroSrc`) so the credit tracks
   // whichever candidate is actually on screen right now, including after
   // `onError` below has advanced `idx` past the first one.
-  const credit = credits?.[currentSrc];
+  const credit = normalizedCredits?.[currentSrc];
   return (
     <>
       <div

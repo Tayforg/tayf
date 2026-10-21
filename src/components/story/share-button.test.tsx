@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ShareButton } from "./share-button";
+import { buildEmbedSnippet } from "@/lib/cards/badge-embed";
+import {
+  ShareButton,
+  ManualCopyBox,
+  copyText,
+  resolveEmbedCopy,
+  resolveShareCopy,
+} from "./share-button";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -170,5 +177,178 @@ describe("ShareButton — Sitene ekle (embed snippet)", () => {
 
     vi.unstubAllGlobals();
     vi.doUnmock("@/lib/track");
+  });
+});
+
+// Visible failure + manual-copy fallback. The click handlers are not
+// reachable without a DOM, so the clipboard outcome is extracted into pure
+// helpers (copyText / resolveEmbedCopy / resolveShareCopy) and the fallback
+// UI into ManualCopyBox; both are asserted here.
+describe("ShareButton — clipboard failure fallback", () => {
+  const UUID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+  const SHARE_URL = "https://tayf.test/cluster/x";
+
+  function stubClipboard(writeText: (value: string) => Promise<void>) {
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+  }
+
+  function deniedClipboard() {
+    return vi.fn(async (_value: string) => {
+      throw new Error("denied");
+    });
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe("copyText", () => {
+    it("resolves true when the clipboard write succeeds", async () => {
+      const writeText = vi.fn(async (_value: string) => {});
+      stubClipboard(writeText);
+      expect(await copyText("abc")).toBe(true);
+      expect(writeText).toHaveBeenCalledWith("abc");
+    });
+
+    it("resolves false when the clipboard write rejects", async () => {
+      stubClipboard(deniedClipboard());
+      expect(await copyText("abc")).toBe(false);
+    });
+
+    it("resolves false when navigator.clipboard is missing", async () => {
+      vi.stubGlobal("navigator", {});
+      expect(await copyText("abc")).toBe(false);
+    });
+  });
+
+  describe("resolveEmbedCopy", () => {
+    it("returns the html snippet as the manual fallback when the clipboard is denied", async () => {
+      stubClipboard(deniedClipboard());
+      expect(await resolveEmbedCopy(UUID)).toEqual({
+        ok: false,
+        manual: buildEmbedSnippet("https://tayf.test", UUID)!.html,
+      });
+    });
+
+    it("returns the html snippet as the manual fallback when navigator.clipboard is missing", async () => {
+      vi.stubGlobal("navigator", {});
+      expect(await resolveEmbedCopy(UUID)).toEqual({
+        ok: false,
+        manual: buildEmbedSnippet("https://tayf.test", UUID)!.html,
+      });
+    });
+
+    it("returns manual null when the id is not a uuid (nothing to show)", async () => {
+      stubClipboard(vi.fn(async (_value: string) => {}));
+      expect(await resolveEmbedCopy("nope")).toEqual({ ok: false, manual: null });
+    });
+
+    it("returns ok and still tracks kind 'embed' when the write resolves", async () => {
+      vi.resetModules();
+      const trackMock = vi.fn();
+      vi.doMock("@/lib/track", () => ({ track: trackMock }));
+      const writeText = vi.fn(async (_value: string) => {});
+      stubClipboard(writeText);
+
+      const mod = await import("./share-button");
+      expect(await mod.resolveEmbedCopy(UUID)).toEqual({ ok: true });
+      expect(writeText).toHaveBeenCalledWith(buildEmbedSnippet("https://tayf.test", UUID)!.html);
+      expect(trackMock).toHaveBeenCalledWith("share", { clusterId: UUID, kind: "embed" });
+
+      vi.doUnmock("@/lib/track");
+    });
+
+    it("does not track an embed share when the copy failed", async () => {
+      vi.resetModules();
+      const trackMock = vi.fn();
+      vi.doMock("@/lib/track", () => ({ track: trackMock }));
+      stubClipboard(deniedClipboard());
+
+      const mod = await import("./share-button");
+      await mod.resolveEmbedCopy(UUID);
+      expect(trackMock).not.toHaveBeenCalled();
+
+      vi.doUnmock("@/lib/track");
+    });
+  });
+
+  describe("resolveShareCopy", () => {
+    it("returns the url as the manual fallback when the clipboard is denied", async () => {
+      stubClipboard(deniedClipboard());
+      expect(await resolveShareCopy(SHARE_URL, "metin")).toEqual({
+        ok: false,
+        manual: SHARE_URL,
+      });
+    });
+
+    it("returns the url as the manual fallback when navigator.clipboard is missing", async () => {
+      vi.stubGlobal("navigator", {});
+      expect(await resolveShareCopy(SHARE_URL)).toEqual({ ok: false, manual: SHARE_URL });
+    });
+
+    it("copies 'text\\nurl' when text is given and reports ok", async () => {
+      const writeText = vi.fn(async (_value: string) => {});
+      stubClipboard(writeText);
+      expect(await resolveShareCopy(SHARE_URL, "metin")).toEqual({ ok: true });
+      expect(writeText).toHaveBeenCalledWith(`metin\n${SHARE_URL}`);
+    });
+
+    it("copies the bare url when no text is given", async () => {
+      const writeText = vi.fn(async (_value: string) => {});
+      stubClipboard(writeText);
+      expect(await resolveShareCopy(SHARE_URL)).toEqual({ ok: true });
+      expect(writeText).toHaveBeenCalledWith(SHARE_URL);
+    });
+  });
+
+  describe("ManualCopyBox", () => {
+    const escapeHtml = (v: string) =>
+      v
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#x27;");
+
+    it("renders a labelled read-only textarea with the escaped value and a caption", () => {
+      const snippetHtml = buildEmbedSnippet("https://tayf.test", UUID)!.html;
+      const html = renderToStaticMarkup(<ManualCopyBox label="Gömme kodu" value={snippetHtml} />);
+
+      expect(html).toContain("<textarea");
+      // React's SSR output spells the attribute `readOnly=""`; HTML attribute
+      // names are case-insensitive, so match it that way.
+      expect(html).toMatch(/\sreadonly=""/i);
+      expect(html).toContain('aria-label="Gömme kodu"');
+      expect(html).toContain(escapeHtml(snippetHtml));
+      expect(html).toContain("Otomatik kopyalanamadı");
+      // the raw snippet must never leak out as live markup
+      expect(html).not.toContain("<img");
+    });
+
+    it("wraps onto its own line in a flex-wrap parent (basis-full)", () => {
+      const html = renderToStaticMarkup(<ManualCopyBox label="Paylaşım bağlantısı" value={SHARE_URL} />);
+      expect(html).toMatch(/^<span class="basis-full flex flex-col gap-1">/);
+      expect(html).toContain(SHARE_URL);
+    });
+  });
+
+  describe("ShareButton initial render", () => {
+    it("shows no manual-copy textarea until a copy has failed", () => {
+      expect(renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />)).not.toContain(
+        "<textarea",
+      );
+      expect(renderToStaticMarkup(<ShareButton clusterId="c1" title="t" text="x" />)).not.toContain(
+        "<textarea",
+      );
+    });
+
+    it("keeps one empty live region and bare-text buttons with the default labels", () => {
+      const html = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
+      expect(html.match(/role="status"/g)).toHaveLength(1);
+      expect(html).toMatch(/<span[^>]*role="status"[^>]*><\/span>/);
+      expect(html).toMatch(/<button[^>]*>[^<]*Sitene ekle[^<]*<\/button>/);
+      expect(html).toContain("<span>Paylaş</span>");
+      expect(html).not.toContain("Kopyalanamadı");
+    });
   });
 });

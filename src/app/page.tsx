@@ -211,7 +211,9 @@ async function loadFeed(): Promise<PoliticsClustersResult | null> {
   }
 }
 
-async function HomeFeed({
+// Exported (in addition to the default page export) so tests can render the
+// data-dependent body directly — same precedent as BlindspotsFeed.
+export async function HomeFeed({
   searchParams,
 }: {
   searchParams: Promise<{ q?: string; page?: string }>;
@@ -230,6 +232,12 @@ async function HomeFeed({
   ]);
 
   if (feed === null) {
+    // Deliberately NO robots noindex here (unlike /blindspots and /sources):
+    // this state is transient (a cold DB read timing out) and "/" is the
+    // most-crawled URL on the site. A soft-error snapshot is replaced on the
+    // next crawl, while a noindex seen during a blip drops the homepage from
+    // the index until Google re-crawls it, which it does less often for
+    // noindexed URLs. Route-level error boundaries still carry noindex.
     return (
       <>
         <NewSinceLastVisit timestamps={[]} />

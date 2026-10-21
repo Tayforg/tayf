@@ -3,6 +3,7 @@ import { ExternalLink } from "lucide-react";
 import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { groupMembersByZone } from "@/lib/clusters/framing";
+import { firstPartyLogoUrl } from "@/lib/images/image-url";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { MediaDnaZone } from "@/types";
@@ -66,7 +67,10 @@ function HeadlineEntry({
           {member.source.logo_url ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
-              src={member.source.logo_url}
+              src={
+                firstPartyLogoUrl(member.source.logo_url) ??
+                member.source.logo_url
+              }
               alt=""
               width={14}
               height={14}

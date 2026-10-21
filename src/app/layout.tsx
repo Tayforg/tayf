@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Suspense } from "react";
 import { DM_Serif_Display, Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/google";
-import { Header } from "@/components/layout/header";
+import { Header, HeaderFallback } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { KbdShortcuts } from "@/components/kbd-shortcuts";
 import { Analytics } from "@vercel/analytics/next";
@@ -135,7 +135,9 @@ export default function RootLayout({
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: serializeJsonLd(buildSiteJsonLd()) }}
         />
-        <Suspense>
+        {/* Header no longer suspends (only <HeaderNav> inside it does), so
+            this fallback is a safety net that reserves the header's 59px. */}
+        <Suspense fallback={<HeaderFallback />}>
           <Header />
         </Suspense>
         {/* id is the skip-link target (header.tsx); tabIndex={-1} makes it programmatically focusable so Safari actually moves focus, not just scroll */}

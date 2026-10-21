@@ -22,7 +22,14 @@ export default function TrendsError({
   }, [error]);
 
   return (
-    <div className="container mx-auto px-4 py-24 max-w-lg">
+    <div
+      className="container mx-auto px-4 py-24 max-w-lg"
+      data-digest={error.digest}
+    >
+      {/* Failed state: keep it out of the index. React 19 hoists this into
+          <head>; the most restrictive directive wins over the layout's
+          index,follow. */}
+      <meta name="robots" content="noindex" />
       <div className="flex flex-col items-center text-center space-y-4">
         <div className="h-14 w-14 rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
           <AlertTriangle className="h-6 w-6 text-amber-600 dark:text-amber-500" />
@@ -30,11 +37,6 @@ export default function TrendsError({
         <h1 className="text-2xl font-bold tracking-tight">
           Trend verileri şu anda yüklenemiyor.
         </h1>
-        {error.digest && (
-          <p className="text-[10px] font-mono text-muted-foreground/60">
-            Hata kodu: {error.digest}
-          </p>
-        )}
         <button
           type="button"
           onClick={reset}

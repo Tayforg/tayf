@@ -185,3 +185,118 @@ describe("normalize.ts image extraction: video skip + rcman thumbnail upgrade", 
     expect(row!.image_url).toBe("https://cdn.test/normal.jpg");
   });
 });
+
+// ---------------------------------------------------------------------------
+// ingest-hygiene: image URL normalisation + legal-notice filter.
+//
+// haber7-style `https://h//x.jpg` image URLs have their doubled leading slash
+// collapsed at ingest (shared normalizeImageUrl); protocol-relative and
+// non-http(s) candidates are repaired / skipped. BİK court and official
+// notices (all-caps titles ending in an institution name) are dropped
+// entirely: normalizeItem returns null and normalizeArticles omits them.
+// ---------------------------------------------------------------------------
+describe("normalize.ts ingest-hygiene: image URL normalisation", () => {
+  it("collapses a doubled leading slash in an enclosure URL", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/n1",
+      enclosure: { url: "https://h//x.jpg", type: "image/jpeg" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBe("https://h/x.jpg");
+  });
+
+  it("upgrades a protocol-relative media:content URL to https", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/n2",
+      mediaContent: { $: { url: "//cdn.test/photo.jpg" } },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/photo.jpg");
+  });
+
+  it("skips a non-http(s) candidate and falls through to the next one", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/n3",
+      enclosure: { url: "ftp://cdn.test/a.jpg" },
+      mediaThumbnail: { $: { url: "https://cdn.test/b.jpg" } },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/b.jpg");
+  });
+
+  it("normalises before the rcman thumbnail upgrade", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/n4",
+      mediaContent: {
+        $: { url: "https://img.test//rcman/Cw150h84q95gc/storage/x.jpg" },
+      },
+    });
+    expect(row!.image_url).toBe(
+      "https://img.test/rcman/Cw1280h720q95gc/storage/x.jpg",
+    );
+  });
+
+  it("normalises the itemImage fallback", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/n5",
+      itemImage: "https://cdn.test//photos/item.jpg",
+    });
+    expect(row!.image_url).toBe("https://cdn.test/photos/item.jpg");
+  });
+
+  it("normalises the <img src> fallback in item HTML", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/n6",
+      content: '<p><img src="https://cdn.test//photos/inline.jpg" alt=""></p>',
+    });
+    expect(row!.image_url).toBe("https://cdn.test/photos/inline.jpg");
+  });
+
+  it("ignores a relative <img src> (cannot be rendered by the optimizer)", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/n7",
+      content: '<p><img src="/photos/inline-relative.jpg" alt=""></p>',
+    });
+    expect(row!.image_url).toBeNull();
+  });
+});
+
+describe("normalize.ts ingest-hygiene: legal-notice filter", () => {
+  it("returns null for a court notice title", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "T.C. SAMSUN 2. SULH HUKUK MAHKEMESİNDEN",
+      link: "/ilan-1",
+    });
+    expect(row).toBeNull();
+  });
+
+  it("returns null for an /ilan/ url regardless of title case", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Satılık araç",
+      link: "https://example.test/ilan/12345",
+    });
+    expect(row).toBeNull();
+  });
+
+  it("still normalises an ordinary headline", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Merkez Bankası faizi sabit tuttu",
+      link: "/haber/faiz",
+    });
+    expect(row).not.toBeNull();
+    expect(row!.title).toBe("Merkez Bankası faizi sabit tuttu");
+  });
+
+  it("still normalises real all-caps news that mentions a court mid-headline", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "ANAYASA MAHKEMESİ CHP'NİN BAŞVURUSUNU REDDETTİ",
+      link: "/haber/aym",
+    });
+    expect(row).not.toBeNull();
+  });
+});

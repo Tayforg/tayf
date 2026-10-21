@@ -10,6 +10,7 @@ import {
   fetchRelevanceScores,
   filterFeedTickers,
   isHiddenMatch,
+  isLegalNotice,
   istanbulDay,
   relevanceKey,
   RELEVANCE_CHUNK,
@@ -275,5 +276,61 @@ describe("static guard: jev.ts subject_id format (read-only)", () => {
     const text = readFileSync(jevPath, "utf8");
     expect(text).toContain("subjectId: `${t.article_id}:${t.ticker}`");
     expect(text).toContain('"ticker_relevance"');
+  });
+});
+
+describe("filterFeedTickers: legal-notice filter (ingest-hygiene)", () => {
+  it("drops an unscored item whose title is a court notice", () => {
+    const items = [
+      {
+        id: "n1",
+        tickers: ["GARAN"],
+        title: "T.C. SAMSUN 2. SULH HUKUK MAHKEMESİNDEN",
+        url: "https://example.com/haber/n1",
+      },
+      {
+        id: "n2",
+        tickers: ["GARAN"],
+        title: "Garanti BBVA kâr açıkladı",
+        url: "https://example.com/haber/n2",
+      },
+    ];
+    const out = filterFeedTickers(items, new Map());
+    expect(out.map((i) => i.id)).toEqual(["n2"]);
+  });
+
+  it("drops an item whose url path is an /ilan/ section", () => {
+    const out = filterFeedTickers(
+      [
+        {
+          id: "n1",
+          tickers: ["GARAN"],
+          title: "Garanti BBVA satılık",
+          url: "https://www.cnnturk.com/ilan/abc",
+        },
+      ],
+      new Map(),
+    );
+    expect(out).toEqual([]);
+  });
+
+  it("keeps an item without a title (fail-open)", () => {
+    const out = filterFeedTickers([{ id: "n3", tickers: ["THYAO"] }], new Map());
+    expect(out).toEqual([{ id: "n3", tickers: ["THYAO"] }]);
+  });
+
+  it("keeps an item whose title/url are not strings (fail-open)", () => {
+    const out = filterFeedTickers(
+      [{ id: "n4", tickers: ["THYAO"], title: 42, url: { href: "x" } }],
+      new Map(),
+    );
+    expect(out).toHaveLength(1);
+  });
+});
+
+describe("isLegalNotice re-export", () => {
+  it("is exposed from ticker-relevance for finance queries", () => {
+    expect(isLegalNotice("BARTIN 2. ASLİYE HUKUK MAHKEMESİ")).toBe(true);
+    expect(isLegalNotice("Merkez Bankası faizi sabit tuttu")).toBe(false);
   });
 });

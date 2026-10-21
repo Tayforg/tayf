@@ -77,8 +77,13 @@ export default async function TrendsPage() {
   // `null` means the fetch itself failed (Supabase error, or — at build
   // time — env vars not yet wired) — a distinct, honest state from "zero
   // articles this month". Render inside the normal layout (no throw) so a
-  // `next build` prerender always succeeds; the cache entry stays empty
-  // until the next request revalidates it.
+  // `next build` prerender always succeeds. The { ok: false } sentinel is
+  // memoised for the whole cacheLife window (3600s) and can be baked into
+  // the static HTML, so this branch deliberately carries NO
+  // `<meta name="robots" content="noindex">`: a build-time Supabase blip
+  // would otherwise serve noindex to Googlebot for an hour or more and
+  // could de-index /trends. (The uncached surfaces — /, /blindspots,
+  // /sources — are request-time and do noindex their failed state.)
   if (buckets === null) {
     return (
       <div className="container mx-auto px-4 py-8 max-w-5xl space-y-6">
@@ -226,9 +231,10 @@ export default async function TrendsPage() {
                       height={segHeight}
                       fill={ZONE_FILL[zone]}
                     >
-                      <title>
-                        {bucket.day} · {ZONE_META[zone].label}: {count}
-                      </title>
+                      {/* A single string child: React 19 renders a <title>
+                          with multiple children (day, label, count as
+                          separate JSX expressions) as an empty <title></title>. */}
+                      <title>{`${bucket.day} · ${ZONE_META[zone].label}: ${count}`}</title>
                     </rect>
                   );
                 });

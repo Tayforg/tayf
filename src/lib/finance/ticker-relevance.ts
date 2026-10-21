@@ -1,5 +1,12 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+import { isLegalNotice } from "../../../supabase/functions/_shared/rss/legal-notice";
+
+// ingest-hygiene: BİK court / official notices are dropped at ingest, but rows
+// already stored (and any that slip through) are filtered here at read time.
+// Re-exported so finance queries share the one Deno/Next implementation.
+export { isLegalNotice };
+
 // Jev ticker-relevance gate (§4(b), reader-data, no migration).
 //
 // Jev's "ticker_relevance" shadow task (supabase/functions/_shared/jev.ts)
@@ -134,14 +141,18 @@ export async function fetchLowRelevanceSince(
 interface FeedTickerItem {
   id: string;
   tickers: string[];
+  title?: unknown;
+  url?: unknown;
   [key: string]: unknown;
 }
 
 /**
- * Drop hidden ticker matches (score < 0.2) from each item's ticker list,
- * then drop any item left with zero tickers. Used for /ekonomi's feed —
+ * First drop legal/official notices (`isLegalNotice` on title + url), then
+ * drop hidden ticker matches (score < 0.2) from each item's ticker list, then
+ * drop any item left with zero tickers. Used for /ekonomi's feed —
  * over-fetching upstream (fetchEconFeed requests 1.25x the display limit)
- * absorbs the items this drops.
+ * absorbs the items this drops. The notice check is fail-open: an item
+ * without a string title is never dropped by it.
  */
 export function filterFeedTickers<T extends FeedTickerItem>(
   items: readonly T[],
@@ -149,6 +160,12 @@ export function filterFeedTickers<T extends FeedTickerItem>(
 ): T[] {
   const out: T[] = [];
   for (const item of items) {
+    if (
+      typeof item.title === "string" &&
+      isLegalNotice(item.title, typeof item.url === "string" ? item.url : null)
+    ) {
+      continue;
+    }
     const kept = item.tickers.filter((t) => !isHiddenMatch(scores.get(relevanceKey(item.id, t))));
     if (kept.length === 0) continue;
     out.push({ ...item, tickers: kept });
