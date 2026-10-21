@@ -1129,7 +1129,7 @@ Treat the first weeks of this count as threshold-calibration data, not ground tr
    -- ~126 calls, comfortably inside the 50s deadline; closes 'ok'
    ```
 
-   The `/admin` button's RPC call carries no arguments, so it always tops up to the SQL defaults (400/100), which are now believed to fit comfortably inside the deadline (see step 5's timing above). The top-up is additive — there is no shrink path from `/admin` (no delete route, and the table has no service_role DELETE path in code) — so an operator who wants a small set should freeze by hand first, before ever pressing "Seti dondur".
+   The `/admin` button's RPC call carries no arguments, so it always tops up to the SQL defaults (400/100), which are now believed to fit comfortably inside the deadline (see step 5's timing above). The top-up is additive — there is no shrink path from `/admin` (no delete route, and the table has no service_role DELETE path in code) — so an operator who wants a small set should freeze by hand first, before ever pressing "Seti dondur". (Since migration 104 froze all 660 gold articles, pressing it also tops the pairs up from 60 to 100 and so changes the set; read "104" below before pressing it.)
 
    Re-running the freeze is also how a previously-random article gets upgraded: if an article was frozen by step 5b (`in_gold=false`) and has since entered `jev_gold_set` via the 063 labelling flow, the next `jev_regression_freeze()` call flips it to `in_gold=true` in place (no new row, no quota spent) so it becomes visible to the gold comparison.
 
@@ -1662,7 +1662,7 @@ See [`ops-heartbeat.md`](ops-heartbeat.md) for the full thresholds table (with t
 1. **A daily rollup** (`public.jev_shadow_daily`, refreshed by `public.jev_shadow_daily_refresh(p_days)`) of `public.jev_shadow_predictions` — one row per (UTC day, task, question_set). `public.jev_shadow_agreement_rollup(p_days)` reads complete days from the rollup plus a raw tail (today, or since the rollup last ran) and returns the same `(task, total, agreed, undecided)` shape as the existing `jev_shadow_agreement(p_hours)`. `src/lib/admin/jev-shadow-status.ts`'s 7-day call now uses the rollup, with an automatic fallback to the original raw `jev_shadow_agreement({p_hours: 168})` if the rollup RPC errors (e.g. this migration hasn't landed yet). The 24h call is untouched.
 2. **Retention of SYSTEM exhaust only** — `public.ops_exhaust_prune(p_cron_keep, p_net_keep, p_batch, p_max_batches)` deletes old rows from `cron.job_run_details` and `net._http_response`. It **never** touches `public.jev_shadow_predictions` or any other product table — enforced by a static SQL-contract test (`tests/migrations/081-ops-retention.test.ts`) that scans the migration file for every `delete from` target and fails the build if anything outside those two system tables appears.
 
-`jev_shadow_predictions` itself is **deliberately left alone** — still ~413 MB and growing ~50 MB/day. This migration is the prerequisite for a later, separate decision about pruning the raw table; it does not make that decision.
+`jev_shadow_predictions` itself is **deliberately left alone** by 081 — still ~413 MB and growing ~50 MB/day (2.2 GB / 1.96 M rows by 2026-10-21). This migration is the prerequisite for a later, separate decision about pruning the raw table; it does not make that decision. **Migration 102 made it:** a nightly, IRREVERSIBLE prune (`jev-shadow-prune`, 04:50 UTC, first possible deletion 2026-11-05) now removes rows older than 45 days, and the rollups below are then the only record of the pruned days. From that point 081 must not be re-applied and its backfill must not be re-run; see "102" below.
 
 ### Step 0 numbers (measured 2026-09-28, read-only — see the migration file's own header for the full detail and the savings math)
 
@@ -1684,9 +1684,9 @@ Expected effect: the first `ops_exhaust_prune()` run makes ~174 MB reusable insi
    # ...or: supabase db push
    ```
 
-   The migration itself runs a one-off backfill (`select public.jev_shadow_daily_refresh(400);`) inside the same transaction, rolling up every complete day since the table's 2026-09-20 start.
+   The migration itself runs a one-off backfill (`select public.jev_shadow_daily_refresh(400);`) inside the same transaction, rolling up every complete day since the table's 2026-09-20 start. **That backfill is only safe while nothing has been pruned:** once 102's `jev-shadow-prune` has deleted anything (2026-11-05 04:50 UTC at the earliest), never re-apply 081 and never run `jev_shadow_daily_refresh(400)`, because it upserts every day from the raw table and overwrites the preserved history near the cutoff with smaller, partial numbers. See "102" below for the maximum safe window of each rollup refresh.
 
-2. **If the SQL editor times out on the backfill:** this migration is one transaction, so a timeout rolls the *entire* file back, including the table/function creation. Apply the file with the backfill line removed, then run the backfill separately (it can take a lot longer safely outside a single-timeout window):
+2. **If the SQL editor times out on the backfill (first apply only, before any 102 prune; never after it, see "102" below):** this migration is one transaction, so a timeout rolls the *entire* file back, including the table/function creation. Apply the file with the backfill line removed, then run the backfill separately (it can take a lot longer safely outside a single-timeout window):
 
    ```sql
    -- with "select public.jev_shadow_daily_refresh(400);" deleted from the file:
@@ -1740,6 +1740,7 @@ select count(*) from cron.job_run_details where start_time < now() - interval '1
 
 select count(*) from public.jev_shadow_predictions;
 -- must never decrease across an ops_exhaust_prune() run
+-- (102's jev-shadow-prune is a different job and does shrink it, from 2026-11-05)
 
 -- /admin 7-day rates should be within ~2 points of the pre-081 raw values for
 -- tasks with at least 500 comparable rows, and the section should load well
@@ -1777,7 +1778,7 @@ select jobname, schedule from cron.job where jobname = 'jev-budget-nightly';
 -- '15 4 * * *', only present if pg_cron is installed
 ```
 
-**Regression freeze runbook:** the frozen regression set replay (`mode: 'regression'`) now covers all 660 gold-frozen items in one pass — `JEV_REGRESSION_ITEM_LIMIT` rose 500 → 700 and `JEV_REGRESSION_CONCURRENCY` (32, regression stages only; shadow/audit stay at `JEV_CONCURRENCY`=8) keeps ~660 calls inside `JEV_DEADLINE_MS`. After deploying, trigger one on-demand regression run from `/admin` and confirm it closes `ok` (not `partial`) with `items` = 660 + the frozen pair count, and that `deltas.gold` now carries `topic7` and (when the provisional label fetch succeeds) a `provisional.dev` / `provisional.heldout` split.
+**Regression freeze runbook:** the frozen regression set replay (`mode: 'regression'`) can cover all 660 gold-frozen articles in one pass — `JEV_REGRESSION_ITEM_LIMIT` rose 500 → 700 and `JEV_REGRESSION_CONCURRENCY` (32, regression stages only; shadow/audit stay at `JEV_CONCURRENCY`=8) keeps ~660 calls inside `JEV_DEADLINE_MS`. **The freeze itself was never run in production until migration 104:** before 104 a replay covers only 180 items (120 articles + 60 pairs, the manual `jev_regression_freeze(120, 60)`), so `items` = 660 + the frozen pair count (720 with the 60 frozen pairs) is true only after 104 is applied (see "104" below). After 104, trigger one on-demand regression run with the `/admin` "Regresyonu çalıştır" button (or `select public.jev_regression_trigger();`) and confirm it closes `ok` (not `partial`) with that `items` count, and that `deltas.gold` now carries `topic7` and (when the provisional label fetch succeeds) a `provisional.dev` / `provisional.heldout` split. The run button is safe; **do not press "Seti dondur"** while the JEV-B same-set precondition (`docs/jev-pack-slim.md`) is being collected, because it tops the pairs up to 100 and changes the set.
 
 **Rollback:**
 
@@ -2113,3 +2114,215 @@ Re-applying 100 re-schedules the job and therefore re-enables it.
 **Rollback:** `select cron.unschedule('net-response-compact'); drop function public.ops_net_response_compact(bigint);`, then re-apply `077_ops_health_report.sql` to restore the 10-row report and remove the ledger row for version 100.
 
 This supersedes the manual `truncate` step in "net._http_response bloat: the operator step" above: that step still works for a one-off, but the job now does it.
+
+## 101 — DB hot paths (`cluster_topics_refresh` join, two partial indexes, `cron-log-compact`): PRE-BUILD THE INDEXES BEFORE APPLYING 101
+
+**Why:** the same 2026-10-21 incident as 100. The database runs on a Micro instance (`shared_buffers` 256 MB against a 5.2 GB database), so every cron statement that reads cold pages evicts the page cache the site depends on. 101 trims the statements that read more than they must and caps the one pg_cron log table that grows without bound between the daily prunes.
+
+**What it does** (additive, one transaction, safe to re-apply; it starts with `set local lock_timeout = '5s'` and `set local statement_timeout = '60s'`; needs 061, 064 and 067 already applied):
+
+1. `public.cluster_topics_refresh(interval)` is 067's function with one join changed: the topic7 predictions are probed through the unique `(task, subject_id)` key (`p.task = 'topic7' and p.subject_id = ca.article_id::text`) instead of the wide `article_id` index. It selects the same rows (0 exceptions over all 253,806 topic7 rows) with about 39% fewer cold page reads. The 067 cron job is not touched.
+2. `clusters_blindspot_checked_idx`, a partial index on `public.clusters (blindspot_recall_checked_at desc) where is_blindspot`, so `blindspot_recall_veto_refresh()` (071) can BitmapOr it with 064's `clusters_blindspot_recall_idx` instead of filtering 941 blindspots to find 36.
+3. `jev_shadow_predictions_live_marginal_idx`, a partial covering index for the `live` CTEs of `jev_shadow_month_usage` and `jev_budget_daily` (088).
+4. Autovacuum `reloptions` on `public.jev_shadow_predictions` (`autovacuum_vacuum_scale_factor = 0.02`, `autovacuum_vacuum_insert_scale_factor = 0.02`, `autovacuum_analyze_scale_factor = 0.01`; the 0.2 defaults waited for ~390k tuples). 102's prune relies on these and does not set them.
+5. `public.ops_cron_log_compact(p_max_bytes bigint default 150 MiB, p_keep interval default 1 day)` and the pg_cron job `cron-log-compact` (hourly, minute 35). Above the cap it copies the rows younger than `p_keep` aside, `TRUNCATE`s `cron.job_run_details` and puts them back (081's `DELETE` prune cannot shrink the heap), so cron history older than `p_keep` is gone after a compaction. It returns `ok <size>`, `compacted <size>, kept <n>` or `skipped: no pg_cron | no truncate privilege | no insert privilege | busy | lock` (the `lock` skip swallows the 55P03 so pg_cron shows success and the next tick retries). The cap is floored at 16 MiB and `p_keep` is clamped to 1 hour .. 3 days. `service_role` only.
+
+**Deploy order (load-bearing): pre-build both indexes, then apply.**
+
+1. **Pre-build the two indexes.** Run each statement on its own, outside any transaction block (`CREATE INDEX CONCURRENTLY` cannot run inside one; use `psql` in autocommit). Inserts into `jev_shadow_predictions` and `clusters` keep flowing while they build, and 101's own `create index if not exists` then does nothing:
+
+   ```sql
+   create index concurrently if not exists jev_shadow_predictions_live_marginal_idx on public.jev_shadow_predictions (created_at) include (input_tokens) where task = 'pair_marginal' and run_id is null;
+   create index concurrently if not exists clusters_blindspot_checked_idx on public.clusters (blindspot_recall_checked_at desc) where is_blindspot;
+   ```
+
+   Do NOT build a third index on `public.clusters (updated_at desc) where is_blindspot`: it already exists as `clusters_blindspot_recall_idx` (064) and a copy would double the write cost for nothing.
+
+2. **Check that no build was left invalid.** A failed or cancelled `CONCURRENTLY` build leaves an INVALID index behind, and `create index if not exists` skips it silently. Expect 0 rows:
+
+   ```sql
+   select c.relname from pg_catalog.pg_index i join pg_catalog.pg_class c on c.oid = i.indexrelid where c.relname in ('jev_shadow_predictions_live_marginal_idx', 'clusters_blindspot_checked_idx') and not i.indisvalid;
+   ```
+
+   If a name comes back, run `drop index concurrently <name>;` and rebuild it. 101 re-checks `indisvalid` itself and aborts with that instruction.
+
+3. **Apply `101_db_hot_paths.sql`.** If a pre-build was skipped, 101 builds the missing index inside its own transaction, which takes a SHARE lock that blocks writes to the table. The 60 s `statement_timeout` then aborts the whole migration with **57014** (`query_canceled`) on a table too big to index in that time, and nothing is recorded in the ledger: build the index concurrently (step 1) and re-apply. A `55P03` (the 5 s `lock_timeout`) only means a table was busy; re-apply.
+
+There is no ordering constraint with the app deploy.
+
+**Verify:**
+
+```sql
+select c.relname, i.indisvalid from pg_catalog.pg_index i join pg_catalog.pg_class c on c.oid = i.indexrelid where c.relname in ('jev_shadow_predictions_live_marginal_idx', 'clusters_blindspot_checked_idx');  -- 2 rows, both true
+select reloptions from pg_catalog.pg_class where oid = 'public.jev_shadow_predictions'::regclass;  -- the three autovacuum settings
+select jobname, schedule, active from cron.job where jobname = 'cron-log-compact';  -- 35 * * * *, active
+select public.ops_cron_log_compact();  -- 'ok <size>' while cron.job_run_details is under 150 MiB; it compacts for real above that
+select has_function_privilege('anon', 'public.ops_cron_log_compact(bigint,interval)', 'execute');  -- expect false
+```
+
+Do not call `ops_cron_log_compact(0)` to "test" it: the cap is floored at 16 MiB, so on a table larger than that (79 MB when measured) it truncates the log down to the last day.
+
+**Kill switch:**
+
+```sql
+update cron.job set active = false where jobname = 'cron-log-compact';
+-- or: select cron.unschedule('cron-log-compact');
+```
+
+Re-applying 101 re-schedules the job and therefore re-enables it.
+
+**Rollback:** re-apply 067's `create or replace function public.cluster_topics_refresh`; `drop index concurrently if exists clusters_blindspot_checked_idx;`; `drop index concurrently if exists jev_shadow_predictions_live_marginal_idx;`; `alter table public.jev_shadow_predictions reset (autovacuum_vacuum_scale_factor, autovacuum_vacuum_insert_scale_factor, autovacuum_analyze_scale_factor);`; `select cron.unschedule('cron-log-compact'); drop function public.ops_cron_log_compact(bigint, interval);`; then `delete from supabase_migrations.schema_migrations where version = '101';`.
+
+## 102 — `jev_shadow_predictions` retention (`jev_shadow_prune`, `jev-shadow-prune`): THE DELETE IS IRREVERSIBLE
+
+**Why:** `public.jev_shadow_predictions` reached 2.2 GB / 1,962,216 rows (about 78 MB and 68k rows per day) with nothing ever deleting from it (2026-10-21 incident, finding 4).
+
+**What it does** (additive, one transaction, safe to re-apply):
+
+1. `jev_politics_admissions_prediction_idx`, a partial index on `jev_politics_admissions (politics_prediction_id)`: the FK column of 089's `ON DELETE SET NULL`, so a deleted prediction does not seq scan the admissions table.
+2. `public.jev_shadow_prune(p_keep interval default '45 days', p_batch int default 20000, p_max_batches int default 20)`, `SECURITY DEFINER`, `service_role` only, returning `(deleted, batches, cutoff, note)`. The keep window is floored at 21 days (no argument, not null, zero or negative, can go below it) and the batch size and count are clamped (1000..50000 and 1..200). At most `p_batch x p_max_batches` rows (400k by default) go per run, in ONE transaction.
+3. The pg_cron job `jev-shadow-prune`, daily at 04:50 UTC.
+
+**The delete is IRREVERSIBLE.** There is no soft delete, no archive table and no undo: a pruned row is gone and only the rollups keep its aggregate. The first row is from 2026-09-20 15:30 UTC, so at the default 45-day keep nothing qualifies before about 2026-11-04 and **the first nightly run that can delete anything is 2026-11-05 04:50 UTC**. Until then the job returns `ok: nothing older than cutoff`. Take a `pg_dump` of the table (or rely on the Supabase point-in-time backup) before you tighten the keep window below its default.
+
+**Never deleted** (all inside the delete's own predicate): rows with a `jev_shadow_reviews` row (that FK is `ON DELETE CASCADE`, so a naive delete would destroy the founder's verdicts); rows referenced by `jev_politics_admissions`; rows of a `jev_gold_set` article; rows whose `subject_id` is a frozen `jev_regression_items.subject_id`; every row of the tasks `pair_marginal`, `blindspot_recall`, `ticker_relevance`, `kap_class`, `kap_materiality` and `pair_positive` (reader- or spend-facing); rows of a cluster that is still live (`clusters.updated_at >= cutoff`); and rows whose UTC day and task are not yet in `jev_shadow_daily`. The function returns `skipped: rollup behind` instead of deleting when the 081 rollup lags, and `skipped: busy` when another run holds its advisory lock.
+
+**Deploy order:**
+
+1. Apply `102_jev_shadow_retention.sql` (needs 089 for the index; the prune reads 061, 063, 066 and 081 objects at run time). Applying it early is harmless: the job is a no-op until 2026-11-05.
+2. **Before 2026-11-05, back-fill the yardstick rollup.** `jev_topic7_yardstick_daily` stopped at 2026-10-16 although topic7 predictions exist for 10-17 onwards, because its nightly job (`jev-topic7-yardsticks`, 00:25 UTC) failed with a statement timeout on 2026-10-20 and 2026-10-21:
+
+   ```sql
+   select public.jev_topic7_yardstick_refresh(10);
+   ```
+
+3. **Check that all four rollups are current** before the first prune. Only `jev_shadow_daily` is enforced in SQL (the `skipped: rollup behind` guard and the per-(day, task) exemption); the other three are an operator check:
+
+   ```sql
+   select 'jev_shadow_daily' t, max(day) from public.jev_shadow_daily
+   union all select 'source_clickbait_daily', max(day) from public.source_clickbait_daily
+   union all select 'jev_topic7_yardstick_daily', max(day) from public.jev_topic7_yardstick_daily
+   union all select 'source_drift_daily', max(day) from public.source_drift_daily;
+   ```
+
+**Dry run (read-only).** Before tightening the keep window, count per task what a prune with that cutoff would remove. It carries the same predicates as the delete (a test pins the header copy to the delete's text); change the interval in the first line (21 days or more):
+
+```sql
+with k as (select pg_catalog.now() - interval '30 days' as cutoff)
+select p.task, count(*) as would_delete
+  from public.jev_shadow_predictions p, k
+ where p.created_at < k.cutoff
+   and p.task not in ('pair_marginal', 'blindspot_recall', 'ticker_relevance', 'kap_class', 'kap_materiality', 'pair_positive')
+   and not exists (select 1 from public.jev_shadow_reviews r where r.prediction_id = p.id)
+   and not exists (select 1 from public.jev_politics_admissions a where a.politics_prediction_id = p.id)
+   and not exists (select 1 from public.jev_gold_set g where g.article_id = p.article_id)
+   and not exists (select 1 from public.jev_gold_set g where g.article_id::text = p.subject_id)
+   and not exists (select 1 from public.jev_regression_items i where i.subject_id = p.subject_id)
+   and not exists (select 1 from public.cluster_articles ca join public.clusters c on c.id = ca.cluster_id where ca.article_id = p.article_id and c.updated_at >= k.cutoff)
+   and not exists (select 1 from public.clusters c where c.id = p.cluster_id and c.updated_at >= k.cutoff)
+   and exists (select 1 from public.jev_shadow_daily d where d.day = (p.created_at at time zone 'utc')::date and d.task = p.task)
+ group by 1
+ order by 2 desc;
+```
+
+**Tightening the window** (21-30 days instead of 45): reschedule with an argument. Tightening to 21 days as of 2026-10-21 would delete up to about 596k rows, over at least two nights.
+
+```sql
+select cron.unschedule('jev-shadow-prune');
+select cron.schedule('jev-shadow-prune', '50 4 * * *',
+  $$ set statement_timeout = '10min'; select * from public.jev_shadow_prune(interval '30 days'); $$);
+```
+
+Re-applying 102 reschedules the job with the default command, so it also reverts a tightened window to 45 days.
+
+**AFTER THE FIRST PRUNE: never re-apply 081, and never run a rollup refresh wider than the keep window.** 081's last statement is the one-off backfill `select public.jev_shadow_daily_refresh(400);`, which upserts every complete day from the raw table. After a prune the days near the cutoff are partial, so it overwrites the preserved history with smaller numbers. The same applies to every rollup refresh. With `keep_days` = the `p_keep` in days (45 by default, never below 21) and `today_utc` = the current UTC date, the maximum safe argument is:
+
+| Function | Safe argument | At the 45-day default / 21-day floor |
+|---|---|---|
+| `public.jev_shadow_daily_refresh(p_days)` | `p_days <= keep_days - 1` | 44 / 20 (nightly job: 2) |
+| `public.source_clickbait_rollup(p_from, p_to)` | `p_from >= today_utc - (keep_days - 1)` | its own 40-day span clamp is safe only while `keep_days >= 41` (nightly: yesterday..today) |
+| `public.jev_topic7_yardstick_refresh(p_days)` | `p_days <= keep_days - 1` | 44 (its own clamp is 31) / 20 (nightly: 2) |
+| `public.jev_source_drift_compute(p_day)` | `p_day >= today_utc - (keep_days - 15)` | the last 30 days / the last 6 days (nightly: yesterday) |
+
+Also: `archive-export` exports the previous UTC day nightly. A manual backfill (`POST {"day": ...}`) older than the keep window would export that day without its labels, so do not backfill past the keep window.
+
+**Verify:**
+
+```sql
+select jobname, schedule, active from cron.job where jobname = 'jev-shadow-prune';  -- 50 4 * * *, active
+select has_function_privilege('anon', 'public.jev_shadow_prune(interval,integer,integer)', 'execute');  -- expect false
+select count(*) from public.jev_shadow_predictions where created_at < pg_catalog.now() - interval '45 days';  -- 0 until about 2026-11-04; after the first prune only the exempt rows are left
+```
+
+Do not "test" `jev_shadow_prune` by hand: any call whose cutoff has eligible rows really deletes them.
+
+**Kill switch (no deploy):**
+
+```sql
+update cron.job set active = false where jobname = 'jev-shadow-prune';
+```
+
+Re-applying 102 re-enables it.
+
+**Rollback:** rows already deleted can only come back from a dump or point-in-time restore. To remove the machinery: `select cron.unschedule('jev-shadow-prune'); drop function public.jev_shadow_prune(interval, integer, integer); drop index if exists public.jev_politics_admissions_prediction_idx;` and `delete from supabase_migrations.schema_migrations where version = '102';`.
+
+## 103 — ops heartbeat row 12 (`jev_shadow_cron_failures_30m`): REDEPLOY `jev-shadow` WITH `--no-verify-jwt`
+
+**Why:** when the database timed out inside `jev-shadow`'s first calls, the function answered 500 having written NO `jev_shadow_runs` row, and pg_cron reports `succeeded` for an http-poking job the instant `net.http_post` queues the request. Nothing recorded the failure, and `jev_shadow_last_run_min` only fires after three ticks are already lost.
+
+**What it does** (read-only, additive, safe to re-apply): `create or replace` of `public.ops_health_report()` with 100's eleven checks unchanged and a 12th row, `jev_shadow_cron_failures_30m` (warn >= 1, fail >= 2). Its value is the sum, over the last 30 minutes, of (a) failed pg_cron runs of `jev-shadow`, `jev-cluster-audit` and `jev-regression-weekly`, and (b) `net._http_response` rows with `status_code >= 500` whose body contains the `"fn":"jev-shadow"` marker. No table, no cron job, no data. Same signature and `service_role`-only grants. `scripts/lib/ops-heartbeat.mjs` does not enumerate check names, so the heartbeat workflow simply starts seeing 12 rows. Details: `docs/ops-heartbeat.md`.
+
+**Deploy order:**
+
+1. Apply `103_jev_shadow_stall_check.sql` (after 100: it repeats 100's function body and adds the row last).
+2. **Redeploy `jev-shadow`.** The same release makes it retry its first two calls and the closing `finishRun` once, answer a stable 503 `db-unavailable`, and stamp the `"fn":"jev-shadow"` marker into every error body:
+
+   ```bash
+   supabase functions deploy jev-shadow --project-ref <ref> --no-verify-jwt
+   ```
+
+   Always with `--no-verify-jwt`, like every Edge Function in this guide. Until it is redeployed, the HTTP half of the row has nothing to count: the row reflects cron failures only, and its `detail` says so. Steps 1 and 2 may happen in either order.
+
+**Verify:**
+
+```sql
+select count(*) from public.ops_health_report();  -- 12
+select check_name, status, observed, threshold, detail from public.ops_health_report() where check_name = 'jev_shadow_cron_failures_30m';  -- pass, observed 0 on a healthy project
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute');  -- expect false
+```
+
+**Kill switch:** none needed, the function is read-only and nothing calls it except the heartbeat poll (`gh workflow disable ops-heartbeat.yml` stops that).
+
+**Rollback:** re-apply `100_pgnet_bloat_guard.sql` to restore the 11-row report (its cron reschedule is idempotent), then `delete from supabase_migrations.schema_migrations where version = '103';`. The redeployed `jev-shadow` can stay.
+
+## 104 — regression freeze to 660 articles: DO NOT PRESS "Seti dondur" WHILE THE JEV-B PRECONDITION IS COLLECTED
+
+**Why:** 088 shipped the code side (`JEV_REGRESSION_ITEM_LIMIT` = 700, `JEV_REGRESSION_CONCURRENCY` = 32) and seeded the `regression:regression_articles` budget at 1.2M tokens for "660 frozen articles", but the freeze itself was never run. Production still replays 180 items (120 articles + 60 pairs, the manual `jev_regression_freeze(120, 60)`). 104 carries the freeze out.
+
+**What it does** (additive, one transaction, idempotent; `lock_timeout` 5 s, `statement_timeout` 60 s):
+
+1. Takes 066's advisory lock (`hashtext('jev_regression_freeze')`), so it serializes with the "Seti dondur" button. If a freeze is mid-flight it fails fast with `55P03`; re-apply.
+2. Inserts every `jev_gold_set` article that has no `jev_regression_items` row yet (`in_gold = true`, state = the `{title, description clamped to 600}` snapshot). On production that is 540 rows: 660 gold articles + the 60 pairs = 720 items.
+3. Runs 066's upgrade path: a frozen article that is in `jev_gold_set` but still `in_gold = false` is flipped to true (a no-op on production today).
+4. Guards that roll the whole migration back: more than 700 article items (`fetchRegressionItems` orders by id and would cut the newest gold rows out of every replay), or any gold article still without an `in_gold` item.
+
+Pairs stay at 60, nothing is deleted, no grant changes, and existing items are never refreshed except for the `in_gold` flag. Re-applying inserts 0 rows.
+
+**Deploy order:**
+
+1. Apply `104_jev_regression_freeze_660.sql` and run the verification below.
+2. `jev-shadow` must be writing `jev_shadow_runs` again before the first replay, which is the **Sunday 2026-10-25 04:20 UTC** `jev-regression-weekly` run (or a manual `select public.jev_regression_trigger();`). The 2026-10-18 run never happened: pg_cron said `succeeded` but `jev-shadow` opened no run row, which is what the 103 row and the `jev-shadow` retry now surface.
+3. A replay is about 720 calls and 0.8M tokens, inside the 1.2M allowance.
+
+**Do NOT press "Seti dondur" in `/admin` while the JEV-B precondition is being collected** (two same-set replays, `docs/jev-pack-slim.md`). With no arguments it tops the pairs up from 60 to 100, which changes the set, so the replays are no longer same-set and the count restarts. The "Regresyonu çalıştır" button and `jev_regression_trigger()` are safe. Runs 5 and 6 (2026-10-04 and 2026-10-11) replayed 180 items and do not count.
+
+**Verify** (read-only):
+
+```sql
+select kind, count(*) n, count(*) filter (where in_gold) gold from public.jev_regression_items group by kind order by kind;  -- article n = gold = 660 (plus any pre-existing random rows), pair 60
+select count(*) from public.jev_gold_set g where not exists (select 1 from public.jev_regression_items i where i.kind='article' and i.subject_id=g.article_id::text and i.in_gold);  -- 0
+```
+
+After the first replay: `select id, status, items, started_at from public.jev_regression_runs order by id desc limit 3;` should show `ok` with `items` = 720.
+
+**Kill switch / rollback:** none. It is a one-off data freeze and there is no shrink path from `/admin`. Undoing it would mean deleting the added `jev_regression_items` rows by hand (their `jev_regression_answers` go with them, `ON DELETE CASCADE`) plus the ledger row for version 104, and it changes the replay set again, so do not do that once a replay has run.

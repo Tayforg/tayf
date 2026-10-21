@@ -10,6 +10,7 @@ import {
   JEV_BLINDSPOT_FORWARD_HOURS,
   JEV_CLUSTER_MEMBER_MAX,
   JEV_CONCURRENCY,
+  JEV_DB_RETRY_DELAY_MS,
   JEV_DESC_CLAMP,
   JEV_KAP_LIMIT,
   JEV_MODEL,
@@ -29,6 +30,7 @@ import {
   JEV_TASKS,
   JEV_TICKER_LIMIT,
   JEV_TITLE_CLAMP,
+  JevDbUnavailableError,
   JevDeadlineError,
   JevRateLimitError,
   JevResponseError,
@@ -54,6 +56,7 @@ import {
   fnv1a64Hex,
   goldTopicToJevChoice,
   isRateLimitStatus,
+  jevShadowErrorEnvelope,
   kapClassSampled,
   offendingQuestionIds,
   pairKey,
@@ -339,6 +342,7 @@ interface Recorder {
   evaluateCalls: JevRequest[];
   monthTokensCalls: number[];
   startRunCalls: number;
+  sleepCalls: number[];
   finishRunCalls: Array<{ id: number; patch: Parameters<JevPorts["finishRun"]>[1] }>;
   insertPredictionsCalls: JevPredictionRow[][];
   recordTokensCalls: Array<{ runId: number; calls: number; inputTokens: number; stageTokens: JevStageLedger }>;
@@ -370,6 +374,7 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
     evaluateCalls: [],
     monthTokensCalls: [],
     startRunCalls: 0,
+    sleepCalls: [],
     finishRunCalls: [],
     insertPredictionsCalls: [],
     recordTokensCalls: [],
@@ -398,6 +403,11 @@ function makePorts(overrides: Partial<JevPorts> = {}): Recorder {
   const base: JevPorts = {
     now: () => tick,
     random: mulberry32(42),
+    // resilience-1021: runJevShadow's DB retries sleep JEV_DB_RETRY_DELAY_MS
+    // between attempts; record the request instead of really waiting.
+    sleep: async (ms) => {
+      rec.sleepCalls.push(ms);
+    },
     evaluate: async (req) => {
       rec.order.push("evaluate");
       rec.evaluateCalls.push(req);
@@ -1891,6 +1901,313 @@ describe("runJevShadow", () => {
     expect(result.stages.pairs.calls).toBe(0);
     // No pair-stage row should have been written.
     expect(rec.insertPredictionsCalls.flat().some((r) => r.task === "pair_negative")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resilience-1021. A DB timeout in monthTokens or startRun used to surface as
+// an unretried 500 'internal-error' with no run row; a finishRun failure left
+// the row 'running'. Each DB step now gets one retry after
+// JEV_DB_RETRY_DELAY_MS, then a typed JevDbUnavailableError (the Edge handler
+// maps it to a stable 503), and the close tries a third time without
+// stage_tokens (the 088-style schema hazard) before giving up.
+// ---------------------------------------------------------------------------
+
+describe("startup/close resilience (resilience-1021)", () => {
+  type FinishPatch = Parameters<JevPorts["finishRun"]>[1];
+
+  const TIMEOUT_MSG = "canceling statement due to statement timeout";
+
+  /** finishRun that records every attempt's patch (and, optionally, the call
+   * order) and throws on the first `failures` attempts. */
+  function finishRunRecording(
+    failures: number,
+    attempts: FinishPatch[],
+    order?: string[],
+  ): JevPorts["finishRun"] {
+    return async (_id, patch) => {
+      order?.push("finishRun");
+      attempts.push(patch);
+      if (attempts.length <= failures) throw new Error("jev-shadow: finishRun failed: connection reset");
+    };
+  }
+
+  it("JEV_DB_RETRY_DELAY_MS is 2000", () => {
+    expect(JEV_DB_RETRY_DELAY_MS).toBe(2000);
+  });
+
+  it("(1) monthTokens failing once is retried after the delay and the run proceeds", async () => {
+    const rec: Recorder = makePorts({
+      monthTokens: async (cap) => {
+        rec.monthTokensCalls.push(cap);
+        if (rec.monthTokensCalls.length === 1) throw new Error(TIMEOUT_MSG);
+        return { input_tokens: 0, cap, exceeded: false };
+      },
+    });
+
+    const result = await runJevShadow(rec.ports);
+
+    expect(result.status).toBe("ok");
+    expect(rec.monthTokensCalls).toEqual([JEV_MONTHLY_TOKEN_CAP_DEFAULT, JEV_MONTHLY_TOKEN_CAP_DEFAULT]);
+    expect(rec.sleepCalls).toEqual([2000]);
+    expect(rec.startRunCalls).toBe(1);
+    expect(rec.finishRunCalls).toHaveLength(1);
+  });
+
+  it("(2) monthTokens failing twice rejects with JevDbUnavailableError(monthTokens) before any run row is opened", async () => {
+    let attempts = 0;
+    const rec = makePorts({
+      monthTokens: async () => {
+        attempts += 1;
+        throw new Error(`statement timeout #${attempts}`);
+      },
+    });
+
+    const err = await runJevShadow(rec.ports).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(JevDbUnavailableError);
+    expect((err as JevDbUnavailableError).step).toBe("monthTokens");
+    expect((err as JevDbUnavailableError).name).toBe("JevDbUnavailableError");
+    // the cause is the SECOND failure, and the message carries it
+    expect(((err as JevDbUnavailableError).cause as Error).message).toBe("statement timeout #2");
+    expect((err as JevDbUnavailableError).message).toBe(
+      "jev-shadow: monthTokens failed after retry: statement timeout #2",
+    );
+    expect(attempts).toBe(2);
+    expect(rec.sleepCalls).toEqual([2000]);
+    expect(rec.startRunCalls).toBe(0);
+    expect(rec.finishRunCalls).toHaveLength(0);
+    expect(rec.evaluateCalls).toHaveLength(0);
+  });
+
+  it("(3) startRun failing once is retried after the delay and the run proceeds", async () => {
+    let startAttempts = 0;
+    const rec: Recorder = makePorts({
+      startRun: async () => {
+        startAttempts += 1;
+        if (startAttempts === 1) throw new Error(TIMEOUT_MSG);
+        rec.startRunCalls += 1;
+        return 7;
+      },
+    });
+
+    const result = await runJevShadow(rec.ports);
+
+    expect(result.status).toBe("ok");
+    expect(result.run_id).toBe(7);
+    expect(startAttempts).toBe(2);
+    expect(rec.monthTokensCalls).toHaveLength(1); // monthTokens is not re-run for a startRun retry
+    expect(rec.startRunCalls).toBe(1);
+    expect(rec.sleepCalls).toEqual([2000]);
+    expect(rec.finishRunCalls).toHaveLength(1);
+    expect(rec.finishRunCalls[0]?.id).toBe(7);
+  });
+
+  it("(4) startRun failing twice rejects with JevDbUnavailableError(startRun): no evaluate, no finishRun", async () => {
+    const rec = makePorts({
+      startRun: async () => {
+        throw new Error("jev-shadow: startRun failed: timeout");
+      },
+    });
+
+    const err = await runJevShadow(rec.ports).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(JevDbUnavailableError);
+    expect((err as JevDbUnavailableError).step).toBe("startRun");
+    expect((err as JevDbUnavailableError).message).toBe(
+      "jev-shadow: startRun failed after retry: jev-shadow: startRun failed: timeout",
+    );
+    expect(rec.monthTokensCalls).toHaveLength(1);
+    expect(rec.sleepCalls).toEqual([2000]);
+    expect(rec.evaluateCalls).toHaveLength(0);
+    expect(rec.finishRunCalls).toHaveLength(0);
+  });
+
+  it("clamps the cause message to 500 chars and tolerates a non-Error cause", async () => {
+    const long = "x".repeat(2000);
+    const rec = makePorts({
+      monthTokens: async () => {
+        throw new Error(long);
+      },
+    });
+    const err = (await runJevShadow(rec.ports).catch((e: unknown) => e)) as JevDbUnavailableError;
+    expect(err.message).toBe(`jev-shadow: monthTokens failed after retry: ${"x".repeat(500)}`);
+
+    const rec2 = makePorts({
+      startRun: async () => {
+        throw "plain string rejection";
+      },
+    });
+    const err2 = (await runJevShadow(rec2.ports).catch((e: unknown) => e)) as JevDbUnavailableError;
+    expect(err2).toBeInstanceOf(JevDbUnavailableError);
+    expect(err2.step).toBe("startRun");
+    expect(err2.message).toBe("jev-shadow: startRun failed after retry: plain string rejection");
+    expect(err2.cause).toBe("plain string rejection");
+  });
+
+  it("(5) finishRun failing once is retried with the identical patch and the run still resolves", async () => {
+    const attempts: FinishPatch[] = [];
+    const rec = makePorts({ finishRun: finishRunRecording(1, attempts) });
+
+    const result = await runJevShadow(rec.ports);
+
+    expect(result.status).toBe("ok");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toEqual(attempts[0]);
+    expect(Object.keys(attempts[1] ?? {})).toContain("stage_tokens");
+    expect(rec.sleepCalls).toEqual([2000]);
+  });
+
+  it("(6) finishRun failing twice gets a third try WITHOUT stage_tokens (088-style schema hazard) and still resolves", async () => {
+    const attempts: FinishPatch[] = [];
+    const rec = makePorts({ finishRun: finishRunRecording(2, attempts) });
+
+    const result = await runJevShadow(rec.ports);
+
+    expect(result.status).toBe("ok");
+    expect(attempts).toHaveLength(3);
+    expect(attempts[1]).toEqual(attempts[0]); // the second try is still the full patch
+    expect(Object.keys(attempts[0] ?? {})).toContain("stage_tokens");
+    const third = attempts[2] as Record<string, unknown>;
+    expect(Object.keys(third)).not.toContain("stage_tokens");
+    const { stage_tokens: _dropped, ...rest } = attempts[0] as Record<string, unknown>;
+    expect(third).toEqual(rest);
+    expect(third.status).toBe("ok");
+    // only the first retry waits; the stripped attempt follows immediately
+    expect(rec.sleepCalls).toEqual([2000]);
+  });
+
+  it("(7) finishRun failing three times rejects with JevDbUnavailableError(finishRun), message keeps the underlying text", async () => {
+    const attempts: FinishPatch[] = [];
+    const rec = makePorts({ finishRun: finishRunRecording(3, attempts) });
+
+    const err = await runJevShadow(rec.ports).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(JevDbUnavailableError);
+    expect((err as JevDbUnavailableError).step).toBe("finishRun");
+    expect((err as JevDbUnavailableError).message).toContain("finishRun failed");
+    expect((err as JevDbUnavailableError).message).toContain("finishRun failed after retry");
+    expect(attempts).toHaveLength(3);
+  });
+
+  it("a stage error closes 'partial' on the first finishRun attempt: no retry, no sleep (happy path unchanged)", async () => {
+    const attempts: FinishPatch[] = [];
+    const rec = makePorts({
+      finishRun: finishRunRecording(0, attempts),
+      fetchPendingArticles: async () => {
+        throw new Error("boom");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports);
+
+    expect(result.status).toBe("partial");
+    expect(attempts).toHaveLength(1);
+    expect(rec.sleepCalls).toEqual([]);
+    expect(rec.monthTokensCalls).toHaveLength(1);
+    expect(rec.startRunCalls).toBe(1);
+  });
+
+  it("(8) month exceeded together with a startRun retry still closes 'budget_exceeded' with zero evaluate calls", async () => {
+    let startAttempts = 0;
+    const rec: Recorder = makePorts({
+      monthTokens: async (cap) => ({ input_tokens: cap, cap, exceeded: true }),
+      startRun: async () => {
+        startAttempts += 1;
+        if (startAttempts === 1) throw new Error(TIMEOUT_MSG);
+        rec.startRunCalls += 1;
+        return 3;
+      },
+    });
+
+    const result = await runJevShadow(rec.ports);
+
+    expect(result.status).toBe("budget_exceeded");
+    expect(result.calls).toBe(0);
+    expect(startAttempts).toBe(2);
+    expect(rec.evaluateCalls).toHaveLength(0);
+    expect(rec.sleepCalls).toEqual([2000]);
+    expect(rec.finishRunCalls).toHaveLength(1);
+    expect(rec.finishRunCalls[0]?.patch).toMatchObject({
+      status: "budget_exceeded",
+      note: "monthly cap reached",
+      calls: 0,
+      stage_tokens: {},
+    });
+  });
+
+  it("keeps the B2 close order: flushRemaining (insertPredictions) before every finishRun attempt", async () => {
+    const attempts: FinishPatch[] = [];
+    const recorded = finishRunRecording(1, attempts);
+    const rec: Recorder = makePorts({
+      fetchPendingArticles: async () => [articleRow({ id: "a1" })],
+      finishRun: async (id, patch) => {
+        rec.order.push("finishRun");
+        return recorded(id, patch);
+      },
+    });
+
+    const result = await runJevShadow(rec.ports);
+
+    expect(result.status).toBe("ok");
+    const lastInsert = rec.order.lastIndexOf("insertPredictions");
+    expect(lastInsert).toBeGreaterThan(-1);
+    expect(rec.order.indexOf("finishRun")).toBeGreaterThan(lastInsert);
+    expect(rec.order.filter((n) => n === "finishRun")).toHaveLength(2);
+    // the retry only repeats finishRun: rows are not flushed a second time
+    expect(rec.order.filter((n) => n === "insertPredictions")).toHaveLength(1);
+    expect(attempts).toHaveLength(2);
+  });
+
+  describe("(9) jevShadowErrorEnvelope", () => {
+    const REQ = "9b2f7d8e-0000-4000-8000-000000000001";
+
+    it("maps JevDeadlineError to 504 deadline", () => {
+      expect(jevShadowErrorEnvelope(new JevDeadlineError("articles"), REQ)).toEqual({
+        status: 504,
+        body: { ok: false, error: "deadline", fn: "jev-shadow", request_id: REQ },
+      });
+    });
+
+    it("maps JevDbUnavailableError to 503 db-unavailable with the failing step", () => {
+      for (const step of ["monthTokens", "startRun", "finishRun"] as const) {
+        expect(jevShadowErrorEnvelope(new JevDbUnavailableError(step, new Error("x")), REQ)).toEqual({
+          status: 503,
+          body: { ok: false, error: "db-unavailable", step, fn: "jev-shadow", request_id: REQ },
+        });
+      }
+    });
+
+    it("maps everything else (Error, string, null, undefined) to 500 internal-error", () => {
+      for (const err of [new Error("boom"), new TypeError("bad"), "str", null, undefined, 42]) {
+        expect(jevShadowErrorEnvelope(err, REQ)).toEqual({
+          status: 500,
+          body: { ok: false, error: "internal-error", fn: "jev-shadow", request_id: REQ },
+        });
+      }
+    });
+
+    it("always includes fn and request_id and never leaks the error message or cause", () => {
+      const secret = "password=hunter2 host=db.internal";
+      const errors: unknown[] = [
+        new Error(secret),
+        new JevDeadlineError(secret),
+        new JevDbUnavailableError("startRun", new Error(secret)),
+        secret,
+      ];
+      for (const err of errors) {
+        const { status, body } = jevShadowErrorEnvelope(err, REQ);
+        expect([500, 503, 504]).toContain(status);
+        expect(body.fn).toBe("jev-shadow");
+        expect(body.request_id).toBe(REQ);
+        expect(body.ok).toBe(false);
+        const json = JSON.stringify(body);
+        expect(json).not.toContain("hunter2");
+        expect(json).not.toContain("db.internal");
+        // the marker migration 103's pg_net LIKE pattern greps for
+        expect(json).toContain('"fn":"jev-shadow"');
+      }
+    });
   });
 });
 
