@@ -15,8 +15,9 @@ Nothing changes until the flag is switched on.
 | unset, `full`, anything unknown | today: 7 questions, `question_set` = `JEV_QUESTION_SET_VERSION` (`2026-09-24.1`) |
 | `slim` | 5 questions, no opinion/sensational rows, article rows and the regression run header carry `JEV_QUESTION_SET_VERSION_SLIM` (`2026-10-04.1`) |
 
-- `2026-10-04` is the earliest date the precondition allows (the Sunday of the first
-  same-set replay). If the switch happens later, that is fine; the string is never reused.
+- `2026-10-04` is only the date baked into the version string. The precondition is not met on
+  that date (see Precondition: the same-set 660-article count starts after migration 104, earliest
+  2026-10-25). If the switch happens later, that is fine; the string is never reused.
   If the text is ever changed again, bump to a new string.
 - Question text and `question_hash` fingerprints are identical in both packs, so ADMIT pins and
   KAP canaries are unaffected. Only article-stage rows get the slim version; cluster, pair and
@@ -28,10 +29,30 @@ Nothing changes until the flag is switched on.
 
 ## Precondition
 
-Two same-set 660-item regression replays exist (the noise floor). The first is the Sunday
-2026-10-04 04:20 UTC `jev-regression-weekly` run; a second same-set replay is needed before
-switching (a manual `select public.jev_regression_trigger();` after the first is enough).
+Two same-set **660-article** regression replays exist (the noise floor). The count only
+starts after migration `104_jev_regression_freeze_660.sql` is applied.
+
+The earlier plan counted the Sunday 2026-10-04 run as the first 660-item replay. It was not:
+the runs on 2026-10-04 and 2026-10-11 (regression runs 5 and 6) replayed **180 items**
+(120 articles + 60 pairs, the manual `jev_regression_freeze(120, 60)`), because the 088 runbook
+freeze was never run. Migration 104 freezes all 660 `jev_gold_set` articles (the pairs stay at
+60), so a replay becomes about 720 calls. Runs 1-6 are a different set and do not count.
+
+1. Apply 104 and check it (the two verification queries are in its header: article `n` = `gold` =
+   660, pair = 60, and 0 gold articles without an `in_gold` item).
+2. First candidate: the Sunday **2026-10-25 04:20 UTC** `jev-regression-weekly` run, or a manual
+   `select public.jev_regression_trigger();` run by the founder after 104.
+3. A second same-set replay is needed before switching: another manual
+   `select public.jev_regression_trigger();` once the first has closed.
+4. Both runs must close status `ok` with `items` = 660 + pairs (720 with the 60 frozen pairs).
+   A `partial` or `error` run does not count:
+   `select id, status, items, started_at from public.jev_regression_runs order by id desc limit 3;`
+
 Do not switch before both exist.
+
+**Warning: do NOT press "Seti dondur" in /admin while this precondition is being collected.**
+With no arguments it tops pairs up to 100, which changes the set and resets the count (the two
+replays would no longer be same-set).
 
 ## Switch
 

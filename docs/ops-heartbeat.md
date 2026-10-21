@@ -1,6 +1,6 @@
-# Ops heartbeat (077, 100)
+# Ops heartbeat (077, 100, 103)
 
-`public.ops_health_report()` (migrations 077 and 100) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077, 100 and 103) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
@@ -15,13 +15,14 @@ fires.
 
 ## What it checks
 
-11 fixed-order rows (the first ten from migration 077, the eleventh added by
-migration 100), `status` one of `pass | warn | fail | unknown | skip`.
-`threshold` is the fail limit (or the warn limit, for the two warn-only
-checks). The thresholds for rows 1-10 were tuned from a 2026-09-28 read-only
-survey of the live project (see the migration 077 header for the exact
-queries and observed numbers); row 11 comes from the 2026-10-21 incident
-(see the migration 100 header).
+12 fixed-order rows (the first ten from migration 077, the eleventh added by
+migration 100, the twelfth by migration 103), `status` one of
+`pass | warn | fail | unknown | skip`. `threshold` is the fail limit (or the
+warn limit, for the two warn-only checks). The thresholds for rows 1-10 were
+tuned from a 2026-09-28 read-only survey of the live project (see the
+migration 077 header for the exact queries and observed numbers); row 11
+comes from the 2026-10-21 incident (see the migration 100 header); row 12
+closes the jev-shadow blind spot described in the migration 103 header.
 
 | # | check_name | What it measures | Threshold | Where the number came from |
 |---|---|---|---|---|
@@ -34,10 +35,12 @@ queries and observed numbers); row 11 comes from the 2026-10-21 incident
 | 9 | `jev_alerts_unacked_72h` | Count of unacknowledged `jev_alerts` older than 72h (warn-only: a queue, not an outage) | warn ≥ 1 | 13 unacked observed (12 older than 72h), matching the pre-survey estimate — kept as drafted |
 | 10 | `dead_feeds` | Active outlet/wire sources with no `articles.published_at` in the last 72h | fail ≥ 50% of active sources; warn > 38 | Observed 35 of 96 (36.4%) — well above the drafted 35%/25 assumption. Raised the fail ratio to 0.50 and the warn count to observed + 3 = 38 so today's real baseline reads `'pass'` instead of paging on day one. **Known follow-up, not urgent:** 15 of those 35 sources have never published anything at all — worth a separate look at whether their RSS/URL config is actually broken. |
 | 11 | `net_response_heap_mb` | Total on-disk size of `net._http_response` (pg_net's response log) in MiB. `ops_net_response_compact()` (pg_cron `net-response-compact`, every 15 min) truncates it above 64 MiB, so a warn or fail means the compactor is being skipped (job disabled, lock never free, `TRUNCATE` privilege lost) while the table bloats again | pass < 64; warn 64-200; fail > 200 | 2026-10-21 incident: 278 MB of heap behind 552 live rows made pg_net's TTL `DELETE` the #1 DB time consumer and pages took 8-22 s. Added by migration 100 |
+| 12 | `jev_shadow_cron_failures_30m` | Sum of two counts over the last 30 min: (a) `'failed'` pg_cron runs of the Jev jobs `jev-shadow`, `jev-cluster-audit` and `jev-regression-weekly` (same runid window as row 1); (b) `net._http_response` rows with `status_code >= 500` whose body contains `"fn":"jev-shadow"`, the marker every error response from `jev-shadow` now carries (504 `deadline`, 503 `db-unavailable`, 500 `internal-error`). `'unknown'` only when both `pg_cron` and `pg_net` are missing | fail ≥ 2; warn = 1 | Finding 1(a): a database timeout in `jev-shadow`'s first calls used to return an unretried 500 with no `jev_shadow_runs` row, and `pg_cron` records `'succeeded'` for the http poke regardless, so nothing paged until `jev_shadow_last_run_min` passed 30 min. Now the function retries those steps once, then answers a stable 503 `db-unavailable`, and this row counts it. No `jev_alerts` row is written (its `kind` CHECK, migration 088, allows only `source_drift`, `kap_class_canary`, `stage_budget`). **The HTTP half only counts responses from a `jev-shadow` deployed with the marker** (redeploy the function after applying 103); until then the row reflects cron failures only, and its `detail` says so. Added by migration 103 |
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
-11 rows.
+12 rows. (Row 12 degrades gracefully: with only one of the two present it
+counts that half and treats the other as zero.)
 
 ## Required repo secrets
 

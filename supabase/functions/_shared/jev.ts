@@ -37,6 +37,11 @@ export const JEV_ENDPOINT = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model
 export const JEV_PROTOCOL_VERSION = "0.0.1";
 export const JEV_SPEC_VERSION = "4";
 export const JEV_DEADLINE_MS = 50_000; // same budget as ARCHIVE_DEADLINE_MS
+/** resilience-1021: pause before the single retry of a startup/close DB step
+ * (monthTokens, startRun, finishRun). Long enough to ride out a statement
+ * timeout or a brief connection reset, short enough to leave the 50s run
+ * budget (and the cron's 60s timeout) intact. */
+export const JEV_DB_RETRY_DELAY_MS = 2000;
 export const JEV_CONCURRENCY = 8;
 export const JEV_ARTICLE_LIMIT = 150;
 export const JEV_CLUSTER_LIMIT = 40;
@@ -278,6 +283,51 @@ export class JevResponseError extends Error {
     super(msg);
     this.name = "JevResponseError";
   }
+}
+
+/** The three DB round trips runJevShadow retries once before giving up. */
+export type JevDbStep = "monthTokens" | "startRun" | "finishRun";
+
+/**
+ * resilience-1021: a startup/close DB step (monthTokens, startRun, finishRun)
+ * failed its first attempt AND its retry. The jev-shadow handler maps this to
+ * a stable 503 `db-unavailable` (jevShadowErrorEnvelope) instead of an opaque
+ * 500, so ops can tell "the database was unreachable" from "a code bug". The
+ * message embeds the (clamped) cause for logs and Sentry; the HTTP body never
+ * carries it.
+ */
+export class JevDbUnavailableError extends Error {
+  readonly step: JevDbStep;
+  // `cause` is the standard ES2022 Error field (set by the super call below).
+  constructor(step: JevDbStep, cause: unknown) {
+    super(`jev-shadow: ${step} failed after retry: ${clampErrorMessage(cause)}`, { cause });
+    this.name = "JevDbUnavailableError";
+    this.step = step;
+  }
+}
+
+/**
+ * The HTTP status + JSON body jev-shadow returns for an error that escaped
+ * runJevShadow. 504 deadline, 503 db-unavailable (with the failing step),
+ * 500 internal-error for everything else. Every body carries `fn` (the marker
+ * migration 103's net._http_response LIKE pattern greps for) and `request_id`
+ * (to find the log line), and NEVER err.message: that can embed database
+ * hostnames or statement text.
+ */
+export function jevShadowErrorEnvelope(
+  err: unknown,
+  requestId: string,
+): { status: number; body: Record<string, unknown> } {
+  if (err instanceof JevDeadlineError) {
+    return { status: 504, body: { ok: false, error: "deadline", fn: "jev-shadow", request_id: requestId } };
+  }
+  if (err instanceof JevDbUnavailableError) {
+    return {
+      status: 503,
+      body: { ok: false, error: "db-unavailable", step: err.step, fn: "jev-shadow", request_id: requestId },
+    };
+  }
+  return { status: 500, body: { ok: false, error: "internal-error", fn: "jev-shadow", request_id: requestId } };
 }
 
 // ---------------------------------------------------------------------------
@@ -1785,6 +1835,11 @@ export function predictionRow(args: {
 export interface JevPorts {
   now(): number;
   random(): number;
+  /** resilience-1021: the pause between a DB step's two attempts. Optional so
+   * the other JevPorts consumers (cluster-consumer, jev-pending) keep
+   * compiling; runJevShadow falls back to a setTimeout promise. Tests inject
+   * a recorder so no real 2 s waits happen. */
+  sleep?(ms: number): Promise<void>;
   evaluate(req: JevRequest): Promise<{ response: JevResponse; latencyMs: number }>;
   monthTokens(cap: number): Promise<{ input_tokens: number; cap: number; exceeded: boolean }>;
   startRun(): Promise<number>;
@@ -1798,8 +1853,12 @@ export interface JevPorts {
       status: JevRunStatus;
       note: string | null;
       /** 088: {} on the budget-exceeded early close (zero evaluate() calls
-       * were made); otherwise stageLedger(mode, ctx.ledger). */
-      stage_tokens: JevStageLedger;
+       * were made); otherwise stageLedger(mode, ctx.ledger). Optional since
+       * resilience-1021: the last-resort close attempt omits it, so a
+       * database that predates 088 (no stage_tokens column) still lets the
+       * row leave 'running'. recordTokens checkpoints already put the
+       * ledger on the row. */
+      stage_tokens?: JevStageLedger;
     },
   ): Promise<void>;
   insertPredictions(rows: readonly JevPredictionRow[]): Promise<number>;
@@ -3296,11 +3355,76 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
   }
 }
 
+const defaultSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * resilience-1021: runs a startup DB step (monthTokens, startRun) once, and on
+ * ANY failure waits JEV_DB_RETRY_DELAY_MS and tries exactly once more. A
+ * second failure becomes a JevDbUnavailableError(step), which the handler
+ * renders as a stable 503 instead of the old unretried 500. No run row is
+ * touched on this path.
+ */
+async function withDbRetry<T>(ports: JevPorts, step: JevDbStep, op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch {
+    await (ports.sleep ?? defaultSleep)(JEV_DB_RETRY_DELAY_MS);
+  }
+  try {
+    return await op();
+  } catch (err) {
+    throw new JevDbUnavailableError(step, err);
+  }
+}
+
+/**
+ * resilience-1021: closes the run row in up to three attempts so a transient
+ * database fault (or a missing column) does not leave it 'running':
+ *   1. finishRun with the full patch;
+ *   2. after JEV_DB_RETRY_DELAY_MS, the same full patch again;
+ *   3. once more WITHOUT stage_tokens -- the 088-style schema hazard (a
+ *      database that predates the stage_tokens column rejects the whole
+ *      UPDATE). recordTokens checkpoints already put the ledger on the row,
+ *      so dropping it loses almost nothing.
+ * All three failing throws JevDbUnavailableError('finishRun') with the last
+ * error as its cause.
+ */
+async function closeRunRow(
+  ports: JevPorts,
+  runId: number,
+  patch: Parameters<JevPorts["finishRun"]>[1],
+): Promise<void> {
+  try {
+    await ports.finishRun(runId, patch);
+    return;
+  } catch {
+    // fall through to the delayed retry
+  }
+  await (ports.sleep ?? defaultSleep)(JEV_DB_RETRY_DELAY_MS);
+  try {
+    await ports.finishRun(runId, patch);
+    return;
+  } catch {
+    // fall through to the schema-hazard attempt
+  }
+  const withoutLedger = { ...patch };
+  delete withoutLedger.stage_tokens;
+  try {
+    await ports.finishRun(runId, withoutLedger);
+  } catch (err) {
+    throw new JevDbUnavailableError("finishRun", err);
+  }
+}
+
 /**
  * Runs one jev-shadow invocation end to end. Contract:
  *  - monthTokens(cap) FIRST (before startRun). If exceeded: open a run row,
  *    close it immediately with status 'budget_exceeded', calls 0, note
  *    'monthly cap reached', make ZERO evaluate() calls.
+ *  - monthTokens and startRun are each tried once, and once more after
+ *    JEV_DB_RETRY_DELAY_MS (ports.sleep). A second failure throws
+ *    JevDbUnavailableError(step) before any evaluate() call; the handler
+ *    renders it as a stable 503 (jevShadowErrorEnvelope).
  *  - Shadow mode stages run articles -> clusters -> pairs -> kap ->
  *    title_versions -> tickers; audit mode runs audit_pairs -> pairs only,
  *    never touching the other five ports; regression mode (066) runs
@@ -3317,7 +3441,10 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
  *    the run mid-flight with status 'budget_exceeded'.
  *  - Rows are inserted via insertPredictions in chunks of 200.
  *  - finishRun always runs (try/finally), including on a throw (status
- *    'error', note = err.message clamped to 500 chars).
+ *    'error', note = err.message clamped to 500 chars). It is attempted up to
+ *    three times (full patch, full patch after the delay, then the patch
+ *    without stage_tokens); only if all three fail does the run throw
+ *    JevDbUnavailableError('finishRun').
  */
 export async function runJevShadow(
   ports: JevPorts,
@@ -3328,8 +3455,13 @@ export async function runJevShadow(
   const cap = opts.cap ?? JEV_MONTHLY_TOKEN_CAP_DEFAULT;
   const mode: JevRunMode = opts.mode ?? "shadow";
 
-  const month = await ports.monthTokens(cap);
-  const runId = await ports.startRun();
+  const month = await withDbRetry(ports, "monthTokens", () => ports.monthTokens(cap));
+  // A startRun response lost AFTER the insert committed can leave an orphan
+  // 'running' row when the retry then opens a second one. That is harmless:
+  // jev_shadow_last_run_min (migration 077) reads max(finished_at), which an
+  // unfinished row never touches, and the orphan's spend is zero (no
+  // evaluate() call has happened yet).
+  const runId = await withDbRetry(ports, "startRun", () => ports.startRun());
   const articlePack: JevArticlePack = opts.articlePack ?? "full";
   const ctx = makeCtx(ports, runId, t0, deadlineMs, cap, mode, articlePack);
   ctx.monthTokens = month.input_tokens;
@@ -3388,7 +3520,7 @@ export async function runJevShadow(
         note = clampErrorMessage(flushErr);
       }
     }
-    await ports.finishRun(runId, {
+    await closeRunRow(ports, runId, {
       finished_at: new Date(ports.now()).toISOString(),
       calls: ctx.calls,
       input_tokens: ctx.runTokens,

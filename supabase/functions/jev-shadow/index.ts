@@ -41,7 +41,7 @@ import {
   JEV_SPEC_VERSION,
   type JevGoldLabelRow,
   type JevKapRow,
-  JevDeadlineError,
+  JevDbUnavailableError,
   type JevMemberRow,
   type JevPairCandidate,
   type JevPorts,
@@ -59,6 +59,7 @@ import {
   type JevUnlinkCandidateRow,
   agreedGoldLabels,
   isRateLimitStatus,
+  jevShadowErrorEnvelope,
   offendingQuestionIds,
   parseJevResponse,
   retryDelayMs,
@@ -240,6 +241,8 @@ function makePorts(apiKey: string): JevPorts {
   return {
     now: () => Date.now(),
     random: () => Math.random(),
+    // resilience-1021: runJevShadow's pause between a DB step's two attempts.
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 
     async evaluate(request: JevRequest) {
       return evaluateWithRetries(apiKey, request);
@@ -301,7 +304,10 @@ function makePorts(apiKey: string): JevPorts {
         errors: number;
         status: JevRunStatus;
         note: string | null;
-        stage_tokens: JevStageLedger;
+        // Optional: runJevShadow's last-resort close attempt omits it (the
+        // 088 schema hazard). supabase-js drops undefined keys, so the patch
+        // is passed through untouched.
+        stage_tokens?: JevStageLedger;
       },
     ) {
       const { error } = await supabase.from("jev_shadow_runs").update(patch).eq("id", id);
@@ -1043,7 +1049,13 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
     const request_id = crypto.randomUUID();
     captureException("jev-shadow", err);
     console.error(`[jev-shadow] ${request_id}`, err);
-    const status = err instanceof JevDeadlineError ? 504 : 500;
-    return jsonResponse({ ok: false, error: err instanceof JevDeadlineError ? "deadline" : "internal-error", request_id }, status);
+    // resilience-1021: a DB step that failed twice is its own greppable log
+    // line (and, below, a 503 whose body carries the fn marker that
+    // ops_health_report's jev_shadow_cron_failures_30m counts).
+    if (err instanceof JevDbUnavailableError) {
+      console.error(`[jev-shadow] ${request_id} db-unavailable step=${err.step}`);
+    }
+    const env = jevShadowErrorEnvelope(err, request_id);
+    return jsonResponse(env.body, env.status);
   }
 }));

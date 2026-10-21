@@ -455,6 +455,11 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // net_response_heap_mb check), so it repeats 077's VALUES-list copy of
       // BIAS_TO_ZONE; pinned by tests/migrations/100-pgnet-bloat-guard.test.ts.
       "100_pgnet_bloat_guard.sql",
+      // 103 re-creates ops_health_report() again (100's body verbatim plus the
+      // jev_shadow_cron_failures_30m check), so it repeats the same
+      // VALUES-list copy of BIAS_TO_ZONE; pinned by
+      // tests/migrations/103-jev-shadow-stall-check.test.ts.
+      "103_jev_shadow_stall_check.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
