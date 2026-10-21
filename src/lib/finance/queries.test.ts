@@ -434,6 +434,10 @@ describe("reader-data (§4b): Jev ticker-relevance gate", () => {
   });
 
   it("fetchTickerPage filters both the article list and the attention series by relevance", async () => {
+    // Freeze the clock like the sibling tests: fetchTickerPage windows by
+    // Date.now(), so real time silently ages these fixtures out.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-13T12:00:00Z"));
     fixture.articleTickers = [
       { ticker: "BBB", article_id: "a1", published_at: "2026-09-13T08:00:00Z", source_id: "s1" },
       { ticker: "BBB", article_id: "a2", published_at: "2026-09-13T09:00:00Z", source_id: "s2" },
