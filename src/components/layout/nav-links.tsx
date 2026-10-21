@@ -22,9 +22,19 @@ interface NavLinksProps {
   showAdmin?: boolean;
 }
 
-export function NavLinks({ showAdmin = false }: NavLinksProps) {
-  const pathname = usePathname();
-
+/**
+ * Hook-free nav markup. `pathname === null` means "no link is active". This
+ * is what the header's static-shell <Suspense> fallback renders: calling
+ * usePathname() there would itself suspend on fallback-param routes under
+ * cacheComponents, defeating the fallback.
+ */
+export function NavLinksView({
+  pathname,
+  showAdmin = false,
+}: {
+  pathname: string | null;
+  showAdmin?: boolean;
+}) {
   const isHome = pathname === "/";
   const isBlindspots = pathname?.startsWith("/blindspots") ?? false;
   const isEkonomi = pathname?.startsWith("/ekonomi") ?? false;
@@ -91,4 +101,11 @@ export function NavLinks({ showAdmin = false }: NavLinksProps) {
       )}
     </nav>
   );
+}
+
+export function NavLinks({ showAdmin = false }: NavLinksProps) {
+  const pathname = usePathname();
+  // Called as a function (not <NavLinksView />) so the returned element tree
+  // is the <nav> itself — the tree-walking a11y tests rely on that.
+  return NavLinksView({ pathname, showAdmin });
 }

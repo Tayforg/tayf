@@ -80,6 +80,12 @@ describe("fetchWeeklyDistinctiveWords", () => {
     expect(state.eq).toEqual([{ col: "active", val: true }]);
   });
 
+  it("selects slug on sources (the English-outlet allow-list depends on it)", async () => {
+    await fetchWeeklyDistinctiveWords();
+    const state = fixture.sourcesState as BuilderState;
+    expect(state.selectArgs[0]).toBe("id, name, slug, bias, kind, active");
+  });
+
   it("runs exactly 21 article reads (3 zones x 7 days)", async () => {
     await fetchWeeklyDistinctiveWords();
     expect(fixture.articleStates.length).toBe(21);

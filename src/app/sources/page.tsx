@@ -20,6 +20,7 @@ import { SourceChips } from "@/components/source/source-chips";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
+import { firstPartyLogoUrl } from "@/lib/images/image-url";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { countClassifiedSources } from "@/lib/sources/classification";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
@@ -167,6 +168,12 @@ export default async function SourcesPage() {
   if (!result.ok) {
     return (
       <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
+        {/* An error state must not be indexed as the /sources page. This
+            route is request-time (connection()) and streams behind
+            loading.tsx, so the tag most likely lands in <body>, not <head>
+            (same unproven-for-crawlers caveat as "/" and /blindspots; see
+            the placement note in src/app/page.tsx). */}
+        <meta name="robots" content="noindex" />
         <PageHero
           kicker="Türkiye medya haritası"
           title="Kaynaklar"
@@ -392,7 +399,7 @@ export function SourceDirectory({
                       {source.logo_url ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
-                          src={source.logo_url}
+                          src={firstPartyLogoUrl(source.logo_url) ?? source.logo_url}
                           alt=""
                           className="h-8 w-8 rounded shrink-0 object-contain bg-background ring-1 ring-border/30"
                           loading="lazy"

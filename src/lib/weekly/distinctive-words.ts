@@ -1,5 +1,5 @@
 import { fightinWords, type FwDoc } from "@/lib/text/fightin-words";
-import { headlineKey, headlineTerms } from "@/lib/text/tokenize-tr";
+import { headlineKey, headlineTerms, tokenizeHeadline } from "@/lib/text/tokenize-tr";
 import { BIAS_TO_ZONE, isVotingKind } from "@/lib/bias/config";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
@@ -23,6 +23,7 @@ export interface WeeklyWordsArticleRow {
 export interface WeeklyWordsSourceRow {
   id: string;
   name: string | null;
+  slug?: string | null;
   bias: BiasCategory | null;
   kind: string | null;
   active: boolean | null;
@@ -48,6 +49,83 @@ export type WeeklyDistinctiveWords =
     };
 
 const ZONE_ORDER: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
+
+/**
+ * English function words used to spot English-language headlines. Matched
+ * against `surface.toLowerCase()` (plain, never the Turkish locale: that maps
+ * "IN" to "ın"). "on" is deliberately here even though it means "ten" in
+ * Turkish: a single hit never flags a title (see EN_MIN_FUNCTION_WORDS).
+ */
+export const EN_FUNCTION_WORDS: ReadonlySet<string> = new Set([
+  "the", "in", "to", "for", "of", "with", "and", "on",
+  "at", "by", "from", "as", "is", "are", "after", "over",
+]);
+
+/** A title needs at least this many English function words to count as English. */
+export const EN_MIN_FUNCTION_WORDS = 2;
+
+/**
+ * English-language outlets (the ones already named in
+ * supabase/functions/_shared/cluster/entities.ts). Every row from these
+ * sources is dropped: their headlines often carry just one function word
+ * ("Besiktas, Anadolu Efes claim EuroLeague wins in Round 6"), below the
+ * heuristic's threshold.
+ */
+export const ENGLISH_SOURCE_SLUGS: ReadonlySet<string> = new Set([
+  "a-news",
+  "daily-sabah",
+  "hurriyet-daily-news",
+  "trt-world",
+]);
+
+const TURKISH_LETTER_RE = /[çğıöşüÇĞİÖŞÜ]/;
+
+/**
+ * Heuristic: an English headline has no Turkish letter and at least
+ * EN_MIN_FUNCTION_WORDS English function words.
+ */
+export function isLikelyEnglishHeadline(title: string): boolean {
+  if (TURKISH_LETTER_RE.test(title.normalize("NFC"))) return false;
+  let count = 0;
+  for (const token of tokenizeHeadline(title)) {
+    if (EN_FUNCTION_WORDS.has(token.surface.toLowerCase())) count += 1;
+  }
+  return count >= EN_MIN_FUNCTION_WORDS;
+}
+
+const HOROSCOPE_WORDS: ReadonlySet<string> = new Set([
+  "burç", "burçlar", "burçları", "burçlara", "burcunuz",
+]);
+
+/** "<sign> burcu" forms; bare "Burcu" is a common given name (Burcu Köksal). */
+const BURCU_FORMS: ReadonlySet<string> = new Set([
+  "burcu", "burcunu", "burcunun", "burcuna",
+]);
+
+const ZODIAC_SIGNS: ReadonlySet<string> = new Set([
+  "koç", "boğa", "ikizler", "yengeç", "aslan", "başak",
+  "terazi", "akrep", "yay", "oğlak", "kova", "balık",
+]);
+
+/**
+ * Horoscope filler ("Günlük Burç Yorumları", "Koç burcu haftalık yorum").
+ * Token-based, not `\b`: `\b` does not work next to ç, and a bare /burcu/
+ * match would drop every "Burcu Köksal" headline.
+ */
+export function isHoroscopeHeadline(title: string): boolean {
+  const tokens = title
+    .normalize("NFC")
+    .toLocaleLowerCase("tr")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(Boolean);
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (HOROSCOPE_WORDS.has(token) || token.startsWith("astroloj")) return true;
+    if (BURCU_FORMS.has(token) && i > 0 && ZODIAC_SIGNS.has(tokens[i - 1]!)) return true;
+  }
+  return false;
+}
 
 const HTTP_URL_RE = /^https?:\/\//i;
 
@@ -104,7 +182,7 @@ export function buildWeeklyDistinctiveWords(
   for (const s of sources) sourceById.set(s.id, s);
 
   // 1. Zone mapping — drop rows with unknown/inactive/non-mapped/non-voting
-  // sources.
+  // sources, and rows from English-language outlets.
   const mapped: Array<{ row: WeeklyWordsArticleRow; zone: MediaDnaZone; sourceName: string }> = [];
   for (const row of rows) {
     const source = sourceById.get(row.source_id);
@@ -112,11 +190,14 @@ export function buildWeeklyDistinctiveWords(
     if (source.active !== true) continue;
     if (!isVotingKind(source.kind)) continue;
     if (!source.bias || !(source.bias in BIAS_TO_ZONE)) continue;
+    if (source.slug && ENGLISH_SOURCE_SLUGS.has(source.slug)) continue;
     const zone = BIAS_TO_ZONE[source.bias];
     mapped.push({ row, zone, sourceName: source.name ?? "Kaynak" });
   }
 
-  // 2. Order by id, drop empty titles, dedupe per zone by headlineKey.
+  // 2. Order by id, drop empty titles, English and horoscope headlines, then
+  // dedupe per zone by headlineKey. Dropped headlines count toward neither
+  // the sample nor the terms.
   mapped.sort((a, b) => (a.row.id < b.row.id ? -1 : a.row.id > b.row.id ? 1 : 0));
 
   const keptByZone: Record<MediaDnaZone, KeptDoc[]> = {
@@ -133,6 +214,7 @@ export function buildWeeklyDistinctiveWords(
   for (const { row, zone, sourceName } of mapped) {
     const title = row.title;
     if (!title || title.trim().length === 0) continue;
+    if (isLikelyEnglishHeadline(title) || isHoroscopeHeadline(title)) continue;
     const key = headlineKey(title);
     if (seenKeyByZone[zone].has(key)) continue;
     seenKeyByZone[zone].add(key);

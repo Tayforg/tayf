@@ -93,3 +93,119 @@ describe("ClusterCardImage — photo credit (R1-F1)", () => {
     expect(markup).not.toContain("Görsel:");
   });
 });
+
+describe("ClusterCardImage — image URL normalisation (ingest-hygiene)", () => {
+  it("renders the normalised src for a protocol-relative '//' URL", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="//cdn.outlet.example/foto.jpg"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://cdn.outlet.example/foto.jpg"');
+    expect(markup).not.toContain('src="//cdn.outlet.example');
+  });
+
+  it("collapses a doubled leading path slash on existing rows", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://i12.haber7.net//fotogaleri/x.jpg"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://i12.haber7.net/fotogaleri/x.jpg"');
+  });
+
+  it("drops candidates that cannot be normalised and uses the next valid one", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="/relative-only.jpg"
+        srcs={["data:image/png;base64,AAAA", "https://cdn.outlet.example/ok.jpg"]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://cdn.outlet.example/ok.jpg"');
+  });
+
+  it("dedupes candidates that only differ by the doubled slash", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://h.example//a.jpg"
+        srcs={["https://h.example/a.jpg"]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    // Single <img> in the output: the two spellings collapse to one candidate.
+    expect(markup.match(/<img /g)).toHaveLength(1);
+  });
+
+  it("still renders the credit when `credits` is keyed by the raw '//' URL", () => {
+    const RAW = "//cdn.outlet.example/foto.jpg";
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={RAW}
+        credits={{
+          [RAW]: {
+            href: "https://example.com/articles/a-outlet",
+            name: "Outlet Gazete",
+          },
+        }}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain("Görsel:");
+    expect(markup).toContain("Outlet Gazete");
+  });
+});
+
+describe("ClusterCardImage — first-party logo tier (ingest-hygiene)", () => {
+  it("routes a Google S2 favicon logo through /_next/image", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://www.google.com/s2/favicons?domain=ntv.com.tr&sz=64"
+        logoAlt="NTV"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    // `&` is serialised as `&amp;` in markup.
+    expect(markup).toContain(
+      'src="/_next/image?url=https%3A%2F%2Fwww.google.com%2Fs2%2Ffavicons',
+    );
+    expect(markup).toContain("&amp;w=64&amp;q=75");
+  });
+
+  it("leaves a non-Google logo URL unchanged", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Outlet Gazete"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://example.com/logo.png"');
+    expect(markup).not.toContain("/_next/image");
+  });
+});

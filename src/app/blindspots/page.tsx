@@ -117,6 +117,16 @@ export async function BlindspotsFeed() {
 
       {!result.ok ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-16 text-center">
+          {/* Failed state only: keep it out of the index. PLACEMENT CAVEAT:
+              this renders inside the <Suspense> boundary around
+              BlindspotsFeed, so it is streamed into <body>, not hoisted into
+              <head> (React 19 only hoists shell content). Whether Googlebot
+              honours a body robots meta is unproven: verify with Search
+              Console URL Inspection (rendered HTML) on a staging deploy
+              pointed at a dead DB, and if it is ignored emit robots from
+              generateMetadata via getBlindspotsSafe instead. Absent from the
+              ok and ok-but-empty paths. */}
+          <meta name="robots" content="noindex" />
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
             <EyeOff className="h-7 w-7" aria-hidden="true" />
           </div>

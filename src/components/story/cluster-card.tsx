@@ -5,6 +5,7 @@ import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { ZONE_META } from "@/lib/bias/config";
+import { firstPartyLogoUrl } from "@/lib/images/image-url";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
@@ -331,7 +332,7 @@ export function ClusterCard({
                   {a.source_logo_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={a.source_logo_url}
+                      src={firstPartyLogoUrl(a.source_logo_url) ?? a.source_logo_url}
                       alt=""
                       width={14}
                       height={14}

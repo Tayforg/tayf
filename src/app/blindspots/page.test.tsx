@@ -21,7 +21,7 @@ vi.mock("next/server", () => ({
 }));
 
 const getBlindspots = vi.fn(
-  async (): Promise<{ ok: true; bundles: unknown[] }> => ({
+  async (): Promise<{ ok: true; bundles: unknown[] } | { ok: false }> => ({
     ok: true,
     bundles: [],
   }),
@@ -47,7 +47,8 @@ const ORIGINAL_ENV = { ...process.env };
 
 beforeEach(() => {
   delete process.env.RESEND_API_KEY; // isMailConfigured() -> false, no NewsletterForm
-  getBlindspots.mockClear();
+  getBlindspots.mockReset();
+  getBlindspots.mockImplementation(async () => ({ ok: true, bundles: [] }));
   getFeedStatusSummary.mockClear();
 });
 
@@ -152,5 +153,66 @@ describe("/blindspots page", () => {
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("yanlılık dağılımına sayılan");
+  });
+});
+
+type Elementish = { type?: unknown; props?: Record<string, unknown> };
+
+/** Collects every element in the tree (props.children walked recursively). */
+function collectElements(node: unknown, out: Elementish[] = []): Elementish[] {
+  if (Array.isArray(node)) {
+    for (const child of node) collectElements(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as Elementish;
+    if (el.type !== undefined) out.push(el);
+    if (el.props?.children !== undefined) {
+      collectElements(el.props.children, out);
+    }
+  }
+  return out;
+}
+
+function noindexMetas(tree: unknown): Elementish[] {
+  return collectElements(tree).filter(
+    (el) =>
+      el.type === "meta" &&
+      el.props?.name === "robots" &&
+      el.props?.content === "noindex",
+  );
+}
+
+describe("/blindspots page — noindex on the failed feed state only (seo-error-states)", () => {
+  it("emits <meta name=robots content=noindex> when getBlindspotsSafe reports { ok: false }", async () => {
+    getBlindspots.mockResolvedValueOnce({ ok: false });
+
+    const tree = await BlindspotsFeed();
+
+    expect(noindexMetas(tree)).toHaveLength(1);
+  });
+
+  it("makes the noindex meta the first child of the failure container", async () => {
+    getBlindspots.mockResolvedValueOnce({ ok: false });
+
+    const tree = await BlindspotsFeed();
+
+    const failure = collectElements(tree).find(
+      (el) =>
+        el.type === "div" &&
+        Array.isArray(el.props?.children) &&
+        (el.props.children as Elementish[])[0]?.type === "meta",
+    );
+    expect(failure).toBeDefined();
+    expect(noindexMetas(failure)).toHaveLength(1);
+  });
+
+  it("does not emit noindex on the ok-but-empty path", async () => {
+    getBlindspots.mockResolvedValueOnce({ ok: true, bundles: [] });
+
+    const tree = await BlindspotsFeed();
+
+    expect(noindexMetas(tree)).toHaveLength(0);
+    expect(collectText(tree).join(" ")).toContain("belirgin bir kör nokta yok");
   });
 });

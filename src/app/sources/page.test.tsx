@@ -92,8 +92,16 @@ function makeFakeClient() {
   return createSupabaseFake({ tables: { sources: sourceRows } }).client;
 }
 
+// ingest-hygiene (handed over from seo-error-states): flips the mocked
+// client factory into a throwing one so SourcesPage's `!result.ok` branch
+// (the "Kaynak listesi şu an yüklenemedi" fallback) can be exercised.
+const supabaseFixture = vi.hoisted(() => ({ fail: false }));
+
 vi.mock("@/lib/supabase/server", () => ({
-  createServerClient: () => makeFakeClient(),
+  createServerClient: () => {
+    if (supabaseFixture.fail) throw new Error("supabase unavailable");
+    return makeFakeClient();
+  },
 }));
 
 // Import AFTER mocks are declared.
@@ -253,5 +261,65 @@ describe("/sources page — clickbait-karne gate", () => {
 
     expect(getClickbaitKarne).toHaveBeenCalled();
     expect(text).toMatch(/tık tuzağı karnesi/i);
+  });
+});
+
+/**
+ * Depth-first search of a React element tree for an element of the given
+ * intrinsic type (e.g. "meta"), returning its props. Only walks `children`.
+ */
+function findElementProps(
+  node: unknown,
+  type: string,
+): Record<string, unknown> | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findElementProps(child, type);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: { children?: ReactNode } };
+    if (el.type === type && el.props) return el.props as Record<string, unknown>;
+    if (el.props?.children !== undefined) {
+      return findElementProps(el.props.children, type);
+    }
+  }
+  return null;
+}
+
+describe("/sources page — noindex on the error state (seo-error-states)", () => {
+  beforeEach(() => {
+    supabaseFixture.fail = false;
+    clickbaitFixture.public = false;
+    clickbaitFixture.karne = null;
+  });
+
+  it("emits <meta name=robots content=noindex> as the FIRST child of the container when the directory fails to load", async () => {
+    supabaseFixture.fail = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const tree = (await SourcesPage()) as {
+        props: { children: unknown[] };
+      };
+      const first = tree.props.children[0] as {
+        type?: unknown;
+        props?: Record<string, unknown>;
+      };
+      expect(first.type).toBe("meta");
+      expect(first.props).toMatchObject({ name: "robots", content: "noindex" });
+
+      const text = (await collectText(tree)).join(" ");
+      expect(text).toContain("Kaynak listesi şu an yüklenemedi");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not emit a noindex meta on the ok path", async () => {
+    supabaseFixture.fail = false;
+    const tree = await SourcesPage();
+    expect(findElementProps(tree, "meta")).toBeNull();
   });
 });

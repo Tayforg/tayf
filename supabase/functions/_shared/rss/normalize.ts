@@ -19,7 +19,9 @@
 // the image extractor are ported verbatim — they are dialect, not algorithm.
 
 import { sha1, strictFingerprint } from "../cluster/fingerprint.ts";
+import { normalizeImageUrl } from "../image-url.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
+import { isLegalNotice } from "./legal-notice.ts";
 
 export type NewsCategory =
   | "son_dakika"
@@ -128,6 +130,9 @@ function isValidImageUrl(url: string): boolean {
   if (!url || url.length < 10) return false;
   if (url.startsWith("data:")) return false;
   if (/favicon|icon|logo|pixel|tracker|1x1|spacer/i.test(url)) return false;
+  // ingest-hygiene: must also be a repairable http(s) URL (shared with the
+  // render side) -- a relative path or ftp: value is not a usable image.
+  if (normalizeImageUrl(url) === null) return false;
   return true;
 }
 
@@ -169,7 +174,12 @@ export function upgradeThumbnailUrl(u: string): string {
 
 function firstNonVideoCandidate(candidates: ReadonlyArray<string | null | undefined>): string | null {
   for (const c of candidates) {
-    if (c && !isVideoUrl(c)) return upgradeThumbnailUrl(c);
+    // ingest-hygiene: repair (`//host/x`, `https://h//x`) or skip (relative,
+    // data:, ftp:) each candidate BEFORE the video / thumbnail checks.
+    const normalized = normalizeImageUrl(c);
+    if (normalized && !isVideoUrl(normalized)) {
+      return upgradeThumbnailUrl(normalized);
+    }
   }
   return null;
 }
@@ -184,15 +194,17 @@ function extractImage(item: RawFeedItem): string | null {
   ]);
   if (fromFields) return fromFields;
 
-  if (item.itemImage && isValidImageUrl(item.itemImage) && !isVideoUrl(item.itemImage)) {
-    return upgradeThumbnailUrl(item.itemImage);
+  const itemImage = normalizeImageUrl(item.itemImage);
+  if (itemImage && isValidImageUrl(itemImage) && !isVideoUrl(itemImage)) {
+    return upgradeThumbnailUrl(itemImage);
   }
 
   const htmlContent = item.contentEncoded ?? item.content ?? "";
   if (htmlContent) {
     const m = htmlContent.match(/<img[^>]+src=["']([^"']+)["']/i);
-    if (m?.[1] && isValidImageUrl(m[1]) && !isVideoUrl(m[1])) {
-      return upgradeThumbnailUrl(m[1]);
+    const inline = normalizeImageUrl(m?.[1]);
+    if (inline && isValidImageUrl(inline) && !isVideoUrl(inline)) {
+      return upgradeThumbnailUrl(inline);
     }
   }
   return null;
@@ -438,7 +450,8 @@ function absolutiseUrl(rawLink: string, source: RssSource): string {
 /**
  * Normalise a single raw RSS item into the row shape expected by the
  * `articles` table. `content_hash` is computed via `strictFingerprint`
- * exclusively. Returns `null` if the item lacks a title or a link.
+ * exclusively. Returns `null` if the item lacks a title or a link, or if it
+ * is a BİK legal notice (`isLegalNotice`).
  */
 export function normalizeItem(
   source: RssSource,
@@ -454,6 +467,10 @@ export function normalizeItem(
   // `cleanDescription`.
   const title = stripTags(decodeEntities(rawTitle)).trim();
   const absoluteUrl = absolutiseUrl(rawLink, source);
+
+  // ingest-hygiene: BİK court / official notices are not news.
+  if (isLegalNotice(title, absoluteUrl)) return null;
+
   const canonicalUrl = canonicalizeUrl(absoluteUrl, source.slug);
 
   const description = cleanDescription(item.contentSnippet ?? item.content);

@@ -1,16 +1,39 @@
 import { Suspense } from "react";
 import Link from "next/link";
 import { Separator } from "@/components/ui/separator";
-import { NavLinks } from "@/components/layout/nav-links";
+import { NavLinks, NavLinksView } from "@/components/layout/nav-links";
 import { hasAdminSession } from "@/lib/admin/session";
 import { NewsletterStatusBanner } from "@/components/newsletter/newsletter-status-banner";
 
-export async function Header() {
-  // Server-side session check so the admin link is invisible to anyone
-  // without a valid cookie. Runs per-request; negligible cost (HMAC verify
-  // of a short string) and keeps /admin out of the HTML entirely.
+/**
+ * Reads the admin session cookie (cookies() → dynamic) and renders the real
+ * nav. Kept out of <Header> so only this leaf suspends, never the whole
+ * header. Server-side check so the admin link is invisible to anyone without
+ * a valid cookie; runs per-request, negligible cost (HMAC verify of a short
+ * string), and keeps /admin out of the HTML entirely.
+ */
+export async function HeaderNav() {
   const showAdmin = await hasAdminSession();
+  return <NavLinks showAdmin={showAdmin} />;
+}
 
+/**
+ * Same-height placeholder for the root layout's <Suspense> around <Header>.
+ * Header no longer suspends, so this is a safety net. 59px = 2px accent line
+ * + h-14 (56px) row + 1px border-b (border-box includes the border).
+ */
+export function HeaderFallback() {
+  return (
+    <div
+      aria-hidden="true"
+      className="sticky top-0 z-50 h-[59px] border-b border-border/40 bg-background/90"
+    />
+  );
+}
+
+// Synchronous on purpose: the header (logo, skip link, nav shell) is part of
+// the static prerender, so it never arrives late and shifts the page (CLS).
+export function Header() {
   return (
     <header className="sticky top-0 z-50 border-b border-border/40 bg-background/90 backdrop-blur-xl">
       {/* Skip link: first focusable element in the document (Header is the
@@ -53,14 +76,21 @@ export async function Header() {
           </div>
         </Link>
 
-        <NavLinks showAdmin={showAdmin} />
+        {/* NavLinksView (no usePathname) is the fallback: usePathname
+            suspends on fallback-param routes under cacheComponents, so the
+            fallback must stay hook-free. It gives the same markup with no
+            active link; the real nav replaces it once the cookie read
+            resolves. */}
+        <Suspense fallback={<NavLinksView pathname={null} showAdmin={false} />}>
+          <HeaderNav />
+        </Suspense>
       </div>
 
       {/* Shows the `?bulten=` flag left by the newsletter confirm/unsubscribe
           redirects (src/app/api/newsletter/{confirm,unsubscribe}/route.ts).
-          useSearchParams() requires a Suspense boundary; the root layout
-          already wraps <Header> in one, but this local boundary keeps the
-          rest of the header's static content out of that dynamic subtree. */}
+          useSearchParams() requires a Suspense boundary; this local boundary
+          keeps the rest of the header's static content out of that dynamic
+          subtree. */}
       <Suspense fallback={null}>
         <NewsletterStatusBanner />
       </Suspense>

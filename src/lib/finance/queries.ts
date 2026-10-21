@@ -7,6 +7,7 @@ import {
   fetchRelevanceScores,
   filterFeedTickers,
   isHiddenMatch,
+  isLegalNotice,
   relevanceKey,
   type AttentionRawRow,
 } from "@/lib/finance/ticker-relevance";
@@ -575,7 +576,7 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
     company: c ? { kapMemberOid: c.kap_member_oid, tickers: c.tickers, title: c.title, city: c.city, sharesTraded: c.shares_traded } : null,
     attention,
     articles: articleRows
-      .filter((r) => !isHiddenMatch(scores.get(relevanceKey(r.id, ticker))))
+      .filter((r) => !isLegalNotice(r.title, r.url) && !isHiddenMatch(scores.get(relevanceKey(r.id, ticker))))
       .map((r) => ({
         id: r.id,
         title: r.title,

@@ -50,7 +50,7 @@ export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWo
 
   const { data: sourceRows, error: sourcesError } = await supabase
     .from("sources")
-    .select("id, name, bias, kind, active")
+    .select("id, name, slug, bias, kind, active")
     .eq("active", true)
     .returns<WeeklyWordsSourceRow[]>();
 

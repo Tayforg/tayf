@@ -45,6 +45,57 @@ export async function copyEmbedCode(clusterId: string): Promise<boolean> {
   return true;
 }
 
+// Writes to the clipboard and reports the outcome instead of throwing.
+// Resolves false on a rejected write AND on a missing navigator.clipboard
+// (insecure context, SSR) — the TypeError is caught by the same try.
+export async function copyText(value: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// "Sitene ekle" outcome. On failure `manual` is the html snippet the reader
+// can select and copy by hand (null when the id is not a uuid, i.e. there is
+// no snippet to show).
+export async function resolveEmbedCopy(
+  clusterId: string,
+): Promise<{ ok: true } | { ok: false; manual: string | null }> {
+  if (await copyEmbedCode(clusterId)) return { ok: true };
+  return { ok: false, manual: buildEmbedSnippet(siteUrl(), clusterId)?.html ?? null };
+}
+
+// "Paylaş" clipboard-fallback outcome. On failure `manual` is the share url.
+export async function resolveShareCopy(
+  url: string,
+  text?: string,
+): Promise<{ ok: true } | { ok: false; manual: string }> {
+  if (await copyText(text ? `${text}\n${url}` : url)) return { ok: true };
+  return { ok: false, manual: url };
+}
+
+// Read-only fallback shown when the clipboard is unavailable or denied.
+// `basis-full` pushes it onto its own line inside a flex-wrap parent.
+export function ManualCopyBox({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="basis-full flex flex-col gap-1">
+      <span className="text-[11px] text-muted-foreground">
+        Otomatik kopyalanamadı — metni seçip kopyalayın.
+      </span>
+      <textarea
+        readOnly
+        aria-label={label}
+        value={value}
+        rows={3}
+        onFocus={(e) => e.currentTarget.select()}
+        className="w-full rounded-md border border-border/60 bg-muted/30 p-2 font-mono text-[11px] text-foreground"
+      />
+    </span>
+  );
+}
+
 interface ShareButtonProps {
   clusterId: string;
   title: string;
@@ -58,6 +109,11 @@ interface ShareButtonProps {
 export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
   const [copied, setCopied] = useState(false);
   const [embedCopied, setEmbedCopied] = useState(false);
+  const [shareFailed, setShareFailed] = useState(false);
+  const [embedFailed, setEmbedFailed] = useState(false);
+  // Manual-copy text persists until the next successful copy of the same kind.
+  const [shareManual, setShareManual] = useState<string | null>(null);
+  const [embedManual, setEmbedManual] = useState<string | null>(null);
   const canEmbed = buildEmbedSnippet(siteUrl(), clusterId) !== null;
   const body = text ? `${title}\n${text}` : title;
 
@@ -75,19 +131,28 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
     }
     track("share", { clusterId, kind: "clipboard" });
     // Clipboard fallback
-    try {
-      await navigator.clipboard.writeText(text ? `${text}\n${url}` : url);
+    const r = await resolveShareCopy(url, text);
+    if (r.ok) {
       setCopied(true);
+      setShareManual(null);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      // Clipboard API unavailable
+    } else {
+      setShareFailed(true);
+      setShareManual(r.manual);
+      setTimeout(() => setShareFailed(false), 2000);
     }
   }
 
   async function handleEmbed() {
-    if (await copyEmbedCode(clusterId)) {
+    const r = await resolveEmbedCopy(clusterId);
+    if (r.ok) {
       setEmbedCopied(true);
+      setEmbedManual(null);
       setTimeout(() => setEmbedCopied(false), 2000);
+    } else {
+      setEmbedFailed(true);
+      setEmbedManual(r.manual);
+      setTimeout(() => setEmbedFailed(false), 2000);
     }
   }
 
@@ -103,7 +168,7 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
         ) : (
           <Share2 className="h-3 w-3" />
         )}
-        <span>{copied ? "Kopyalandı" : "Paylaş"}</span>
+        <span>{copied ? "Kopyalandı" : shareFailed ? "Kopyalanamadı" : "Paylaş"}</span>
       </button>
       <a
         href={`/cluster/${clusterId}/kart`}
@@ -123,7 +188,7 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
           title="Bu haberin yelpaze rozetini sitenize ekleyin"
           className={CHIP_CLASS}
         >
-          Sitene ekle
+          {embedCopied ? "Kod kopyalandı" : embedFailed ? "Kopyalanamadı" : "Sitene ekle"}
         </button>
       )}
       <span className="inline-flex items-center gap-1" aria-label="Kanal ile paylaş">
@@ -145,8 +210,16 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
         })}
       </span>
       <span className="sr-only" role="status" aria-live="polite">
-        {copied ? "Kopyalandı" : embedCopied ? "Kod kopyalandı" : ""}
+        {copied
+          ? "Kopyalandı"
+          : embedCopied
+            ? "Kod kopyalandı"
+            : shareFailed || embedFailed
+              ? "Kopyalanamadı"
+              : ""}
       </span>
+      {shareManual && <ManualCopyBox label="Paylaşım bağlantısı" value={shareManual} />}
+      {embedManual && <ManualCopyBox label="Gömme kodu" value={embedManual} />}
     </>
   );
 }
