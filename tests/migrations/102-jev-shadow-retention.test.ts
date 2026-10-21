@@ -488,9 +488,22 @@ describe("102 grants", () => {
 
   it("the function comment says IRREVERSIBLE and names the kill switch", () => {
     // Adjacent string literals (separated by a newline) concatenate in SQL.
-    const c = code.match(/comment\s+on\s+function\s+public\.jev_shadow_prune\([^)]*\)\s+is((?:\s*'(?:[^']|'')*')+)\s*;/i);
-    expect(c).not.toBeNull();
-    const text = [...(c?.[1] ?? "").matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1]).join("");
+    // Scanned by hand (not one regex) so the literal parser stays linear.
+    const head = /comment\s+on\s+function\s+public\.jev_shadow_prune\([^)]*\)\s+is\b/i.exec(code);
+    expect(head).not.toBeNull();
+    let i = (head?.index ?? 0) + (head?.[0].length ?? 0);
+    let text = "";
+    for (;;) {
+      while (/\s/.test(code[i] ?? "")) i++;
+      if (code[i] !== "'") break;
+      i++;
+      while (i < code.length) {
+        if (code[i] === "'" && code[i + 1] === "'") { text += "''"; i += 2; continue; }
+        if (code[i] === "'") { i++; break; }
+        text += code[i++];
+      }
+    }
+    expect(code[i]).toBe(";");
     expect(text).toMatch(/IRREVERSIBLE/);
     expect(text).toMatch(/update cron\.job set active = ?false where jobname = ''jev-shadow-prune''/);
     expect(text).toMatch(/21 days/);
