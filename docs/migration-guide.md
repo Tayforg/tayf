@@ -2076,3 +2076,40 @@ drop function public.api_webhook_claim(int, interval);
 drop table public.api_key_webhook_deliveries, public.api_key_webhooks;
 delete from supabase_migrations.schema_migrations where version = '097';
 ```
+
+## 100 — pg_net bloat guard (`net-response-compact`, `net_response_heap_mb`)
+
+**Why:** on 2026-10-21 `net._http_response` (pg_net's response log, owned by `supabase_admin`) sat at 278 MB of heap behind 552 live rows. pg_net's own TTL `DELETE` became the #1 database time consumer (683k s, 310k calls) and evicted the page cache on the Micro instance: pages took 8-22 s and `/rss.xml` returned 500. A hand-run `truncate net._http_response` fixed it at once (pages back to 0.2-0.7 s). 100 automates that, because `DELETE` never shrinks the heap (081's `ops_exhaust_prune` cannot help: every row is under 6 h old) and `VACUUM FULL` cannot run inside the job's function (on PG15 and earlier `postgres` also does not own the table; on prod's PG 17.6 the table's ACL grants `MAINTAIN` to PUBLIC, so a manual `VACUUM FULL` as `postgres` is probably allowed there, untested).
+
+**What it does** (additive, one transaction, safe to re-apply):
+
+1. `public.ops_net_response_compact(p_max_bytes bigint default 64 MiB)` returns `text`: `'ok <size>'` under the threshold, `'truncated <size>'` after truncating, `'skipped: lock'` if pg_net's worker held the table for the whole 20 s `lock_timeout` (the 55P03 is caught, so pg_cron shows success and the next tick retries), and `'skipped: ...'` when pg_net is absent, the role lacks `TRUNCATE`, or a previous run still holds the advisory lock. `service_role` only. The threshold is floored at 1 MiB.
+2. pg_cron job `net-response-compact`, every 15 minutes.
+3. `public.ops_health_report()` gains an 11th row, `net_response_heap_mb` (total relation size in MiB: pass < 64, warn 64-200, fail > 200). The other ten rows are byte-identical to 077's. A warn or fail means the compactor is being skipped (job disabled, lock never free, privilege lost) while the table bloats again.
+
+**Deploy order:** no ordering constraint with the app. Apply 100 any time; the heartbeat workflow just starts seeing 11 rows (`scripts/lib/ops-heartbeat.mjs` does not enumerate check names).
+
+**Verify:**
+
+```sql
+select public.ops_net_response_compact();            -- 'ok <size>' on a healthy table
+select jobname, schedule, active from cron.job where jobname = 'net-response-compact';  -- */15 * * * *, active
+select check_name, status, observed from public.ops_health_report() where check_name = 'net_response_heap_mb';
+select has_function_privilege('anon', 'public.ops_net_response_compact(bigint)', 'execute');  -- expect false
+```
+
+pg_cron records only the command tag, so the `truncated` / `skipped: lock` text is visible only when you call the function by hand; a lock-skip also writes a `LOG` line to the Postgres log.
+
+**Trade-off:** each truncate drops at most ~6 h of pg_net response log. Its only reader is `edge_http_errors_30m` (last 30 minutes), which reads an empty window as `pass`, so an error burst right before a truncate can go unseen for one window.
+
+**Kill switch:**
+
+```sql
+update cron.job set active = false where jobname = 'net-response-compact';
+```
+
+Re-applying 100 re-schedules the job and therefore re-enables it.
+
+**Rollback:** `select cron.unschedule('net-response-compact'); drop function public.ops_net_response_compact(bigint);`, then re-apply `077_ops_health_report.sql` to restore the 10-row report and remove the ledger row for version 100.
+
+This supersedes the manual `truncate` step in "net._http_response bloat: the operator step" above: that step still works for a one-off, but the job now does it.

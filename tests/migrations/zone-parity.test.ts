@@ -451,6 +451,10 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // 096's source_karne_refresh() carries another VALUES-list copy of
       // BIAS_TO_ZONE; pinned by tests/migrations/096-source-karne.test.ts.
       "096_source_karne.sql",
+      // 100 re-creates ops_health_report() (077's body verbatim plus the
+      // net_response_heap_mb check), so it repeats 077's VALUES-list copy of
+      // BIAS_TO_ZONE; pinned by tests/migrations/100-pgnet-bloat-guard.test.ts.
+      "100_pgnet_bloat_guard.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

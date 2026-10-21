@@ -1,6 +1,6 @@
-# Ops heartbeat (077)
+# Ops heartbeat (077, 100)
 
-`public.ops_health_report()` (migration 077) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077 and 100) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
@@ -15,11 +15,13 @@ fires.
 
 ## What it checks
 
-10 fixed-order rows, `status` one of `pass | warn | fail | unknown | skip`.
+11 fixed-order rows (the first ten from migration 077, the eleventh added by
+migration 100), `status` one of `pass | warn | fail | unknown | skip`.
 `threshold` is the fail limit (or the warn limit, for the two warn-only
-checks). All thresholds below were tuned from a 2026-09-28 read-only survey
-of the live project (see the migration 077 header for the exact queries and
-observed numbers).
+checks). The thresholds for rows 1-10 were tuned from a 2026-09-28 read-only
+survey of the live project (see the migration 077 header for the exact
+queries and observed numbers); row 11 comes from the 2026-10-21 incident
+(see the migration 100 header).
 
 | # | check_name | What it measures | Threshold | Where the number came from |
 |---|---|---|---|---|
@@ -31,10 +33,11 @@ observed numbers).
 | 8 | `blindspot_veto_cron_min` | Minutes since the last succeeded `blindspot-recall-veto` cron run (071); `'warn'` if the job doesn't exist (071 not applied), `'skip'` if inactive | fail > 30 | Job existed, active, last succeeded run minutes old — kept as drafted |
 | 9 | `jev_alerts_unacked_72h` | Count of unacknowledged `jev_alerts` older than 72h (warn-only: a queue, not an outage) | warn ≥ 1 | 13 unacked observed (12 older than 72h), matching the pre-survey estimate — kept as drafted |
 | 10 | `dead_feeds` | Active outlet/wire sources with no `articles.published_at` in the last 72h | fail ≥ 50% of active sources; warn > 38 | Observed 35 of 96 (36.4%) — well above the drafted 35%/25 assumption. Raised the fail ratio to 0.50 and the warn count to observed + 3 = 38 so today's real baseline reads `'pass'` instead of paging on day one. **Known follow-up, not urgent:** 15 of those 35 sources have never published anything at all — worth a separate look at whether their RSS/URL config is actually broken. |
+| 11 | `net_response_heap_mb` | Total on-disk size of `net._http_response` (pg_net's response log) in MiB. `ops_net_response_compact()` (pg_cron `net-response-compact`, every 15 min) truncates it above 64 MiB, so a warn or fail means the compactor is being skipped (job disabled, lock never free, `TRUNCATE` privilege lost) while the table bloats again | pass < 64; warn 64-200; fail > 200 | 2026-10-21 incident: 278 MB of heap behind 552 live rows made pg_net's TTL `DELETE` the #1 DB time consumer and pages took 8-22 s. Added by migration 100 |
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
-10 rows.
+11 rows.
 
 ## Required repo secrets
 
