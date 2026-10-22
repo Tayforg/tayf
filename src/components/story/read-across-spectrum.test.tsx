@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-// House pattern: see cluster-card-image.test.tsx. This branch only ever
-// renders the plain empty-state <p> (no TrackedLink/ExternalLink), so no
-// client-only mocking is needed for these two cases.
+// House pattern: see cluster-card-image.test.tsx. TrackedLink is a hookless
+// <a> wrapper and ExternalLink a plain lucide SVG, so both the empty-state
+// <p> and the CTA anchor render under renderToStaticMarkup without any
+// client-only mocking.
 import { ReadAcrossSpectrum } from "./read-across-spectrum";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import type { Source } from "@/types";
@@ -130,5 +131,50 @@ describe("ReadAcrossSpectrum — non-voting writers on the blindspot side (brows
     for (const markup of cases) {
       expect(markup).not.toContain("İzlediğimiz");
     }
+  });
+});
+
+describe("ReadAcrossSpectrum — CTA text contrast (WCAG 1.4.3, contrast-sweep)", () => {
+  // One iktidar + one muhalefet member: a tie sends the reader to muhalefet.
+  const TIE_MEMBERS: ClusterDetailMember[] = [
+    mkMember("gov1", "pro_government", "2026-07-01T10:00:00Z"),
+    mkMember("opp1", "opposition", "2026-07-01T11:00:00Z"),
+  ];
+  // One iktidar vs two muhalefet: iktidar is the thinner pole, so the
+  // iktidar-coloured CTA is the one rendered.
+  const IKTIDAR_CTA_MEMBERS: ClusterDetailMember[] = [
+    mkMember("gov1", "pro_government", "2026-07-01T10:00:00Z"),
+    mkMember("opp1", "opposition", "2026-07-01T11:00:00Z"),
+    mkMember("opp2", "opposition", "2026-07-01T09:00:00Z"),
+  ];
+
+  it("renders the CTA anchor with its source line and relative time (not the empty state)", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={TIE_MEMBERS} isBlindspot={false} />,
+    );
+    expect(markup).toContain("Karşı tarafı oku");
+    expect(markup).toContain("Source opp1");
+    expect(markup).toContain("https://example.com/opp1/article");
+  });
+
+  it.each([
+    ["muhalefet CTA", TIE_MEMBERS],
+    ["iktidar CTA", IKTIDAR_CTA_MEMBERS],
+  ] as const)("%s: no opacity-80 / opacity-70 text fading (hierarchy comes from 11px/10px sizes)", (_name, members) => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={[...members]} isBlindspot={false} />,
+    );
+    expect(markup).toContain("Karşı tarafı oku");
+    expect(markup).not.toContain("opacity-80");
+    expect(markup).not.toContain("opacity-70");
+  });
+
+  it("keeps the 11px source line and 10px timestamp sizes that carry the hierarchy", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={TIE_MEMBERS} isBlindspot={false} />,
+    );
+    expect(markup).toContain("text-[13px]");
+    expect(markup).toContain("text-[11px]");
+    expect(markup).toContain("text-[10px]");
   });
 });

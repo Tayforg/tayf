@@ -192,6 +192,13 @@ function firstNonVideoCandidate(candidates: ReadonlyArray<string | null | undefi
   return null;
 }
 
+// posta-image-url (2026-10-22): posta's feed has no enclosure / media:* /
+// <image>; its picture is the first `<img src>` in <description> (-> `content`),
+// and the PUBLISHER writes two glued ObjectIds there
+// (`.../0x0/<id1>.jpg<id2>.jpg`, a 404). That string is literally in the feed
+// XML, not produced by our parser, and every candidate below already routes
+// through normalizeImageUrl -- so its shared joined-segment repair is the
+// generic ingest fix and no extractor logic changes here.
 function extractImage(item: RawFeedItem): string | null {
   const fromFields = firstNonVideoCandidate([
     getImageEnclosure(item),

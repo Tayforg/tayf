@@ -6,6 +6,12 @@ import type { MediaDnaZone } from "@/types";
 import { PageHero } from "@/components/ui/page-hero";
 import { CorrectionForm } from "@/components/story/correction-form";
 import {
+  BALANCE_BALANCED_MIN,
+  BALANCE_LABELS,
+  BALANCE_MIN_SOURCES,
+  BALANCE_ONE_SIDED_MAX,
+} from "@/lib/bias/balance";
+import {
   BIAS_LABELS,
   BIAS_ORDER,
   BIAS_TO_ZONE,
@@ -36,8 +42,14 @@ export const metadata: Metadata = {
 };
 
 // Per-entry dates recovered from git history (git log -S on the distinctive
-// substring of each line, src/app/metodoloji/page.tsx), newest first.
+// substring of each line, src/app/metodoloji/page.tsx), newest first. The
+// "Son güncelleme" footer reads CHANGELOG[0].date, so keep the newest entry
+// on top (pinned by page.test.tsx).
 const CHANGELOG = [
+  {
+    date: "2026-10-22",
+    text: "Denge puanı eklendi: kartlarda ve küme sayfasında kapsamanın üç bölgeye ne kadar dengeli dağıldığını gösteren 0–100 arası puan.",
+  },
   {
     date: "2026-09-28",
     text: "Bağımsız başlık sayısı: aynı başlığı kullanan kaynaklar küme sayfasında ayrıca belirtiliyor (ör. \"12 kaynak · 4 bağımsız başlık\").",
@@ -72,13 +84,13 @@ const CHANGELOG = [
 // scanner, so every className must be a string it can see at build time).
 const cardClass = "rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
 const proseClass = "max-w-[65ch] text-sm text-muted-foreground leading-relaxed";
-const noteClass = "max-w-[65ch] text-xs text-muted-foreground/80 leading-relaxed";
+const noteClass = "max-w-[65ch] text-xs text-muted-foreground leading-relaxed";
 const ruleCard = "rounded-lg ring-1 ring-border/50 bg-muted/20 p-3 space-y-1";
 const ruleTerm =
-  "text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/80";
+  "text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground";
 const ruleDef = "text-sm text-foreground/90 leading-relaxed";
 const brandLink =
-  "text-brand underline decoration-dotted underline-offset-2 hover:text-brand/80";
+  "text-brand underline decoration-dotted underline-offset-2 hover:decoration-solid";
 const quietLink = "underline decoration-dotted underline-offset-2 hover:text-foreground";
 const tocPill =
   "inline-flex items-center rounded-full border border-border/60 bg-muted/40 px-3 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-brand/40 hover:bg-muted hover:text-brand";
@@ -98,6 +110,7 @@ const SECTIONS = [
   { id: "kaynaklar", short: "Etiketleme" },
   { id: "kor-nokta", short: "Kör nokta" },
   { id: "surpriz", short: "Sürpriz" },
+  { id: "denge-puani", short: "Denge puanı" },
   { id: "tek-kaynak", short: "Tek kaynak" },
   { id: "guvenilirlik", short: "Güvenilirlik" },
   { id: "basliklar", short: "Başlıklar" },
@@ -123,7 +136,7 @@ function SectionHeading({
         {title}
       </h2>
       {meta ? (
-        <span className="shrink-0 text-[11px] text-muted-foreground/70">{meta}</span>
+        <span className="shrink-0 text-[11px] text-muted-foreground">{meta}</span>
       ) : null}
     </div>
   );
@@ -334,6 +347,52 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
+      <section aria-labelledby="denge-puani" className="scroll-mt-24 space-y-3">
+        <SectionHeading id="denge-puani" title="Denge puanı" meta="0–100" />
+        <div className={cardClass + " space-y-3"}>
+          <p className={proseClass}>
+            Denge puanı, bir kümeyi hangi Medya DNA bölgelerinin haber
+            yaptığını tek bir sayıyla özetler. Yalnızca sınıflandırılmış (oy
+            veren) kaynaklar sayılır; toplayıcı ve niş kaynaklar, spektrum
+            çubuğunda olduğu gibi, hesaba katılmaz. Puan, üç bölgenin
+            paylarının normalleştirilmiş Shannon entropisidir: tek bölgeden
+            gelen kapsama 0, üç bölgeye eşit dağılan kapsama 100 alır; iki
+            bölgeye eşit bölünen bir küme yaklaşık 63 alır.
+          </p>
+          <p className="max-w-[65ch] rounded-lg ring-1 ring-border/50 bg-muted/20 px-3 py-2 font-mono text-xs text-foreground leading-relaxed">
+            Formül: puan = 100 × (−Σ pᵢ · ln pᵢ) / ln 3 — pᵢ, bir bölgenin oy
+            veren kaynaklar içindeki payıdır.
+          </p>
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>{BALANCE_LABELS.dengeli}</dt>
+              <dd className={ruleDef}>Puan ≥ {BALANCE_BALANCED_MIN}</dd>
+            </div>
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>{BALANCE_LABELS.yakin}</dt>
+              <dd className={ruleDef}>
+                {BALANCE_ONE_SIDED_MAX + 1}–{BALANCE_BALANCED_MIN - 1}
+              </dd>
+            </div>
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>{BALANCE_LABELS.tek}</dt>
+              <dd className={ruleDef}>Puan ≤ {BALANCE_ONE_SIDED_MAX}</dd>
+            </div>
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>Kaynak eşiği</dt>
+              <dd className={ruleDef}>
+                Kümede {BALANCE_MIN_SOURCES} sınıflandırılmış kaynaktan azı
+                varsa puan hesaplanmaz (&quot;Az kaynak&quot;).
+              </dd>
+            </div>
+          </dl>
+          <p className={noteClass}>
+            Puan bir kalite notu değildir ve haberlerin sıralamasını
+            değiştirmez; yalnızca kapsamanın genişliğini gösterir.
+          </p>
+        </div>
+      </section>
+
       <section aria-labelledby="tek-kaynak" className="scroll-mt-24 space-y-3">
         <SectionHeading
           id="tek-kaynak"
@@ -469,7 +528,7 @@ export default async function MethodologyPage() {
           <details className="group rounded-lg ring-1 ring-border/50 bg-muted/20">
             <summary className="flex cursor-pointer select-none items-center gap-2 px-3 py-2 text-xs font-medium text-muted-foreground list-none [&::-webkit-details-marker]:hidden hover:text-foreground">
               <span
-                className="text-[10px] text-muted-foreground/70 transition-transform group-open:rotate-90"
+                className="text-[10px] text-muted-foreground transition-transform group-open:rotate-90"
                 aria-hidden="true"
               >
                 ▶
@@ -537,16 +596,17 @@ export default async function MethodologyPage() {
       </section>
 
       <section className="space-y-3 border-t border-border/40 pt-6">
-        <p className="text-[11px] text-muted-foreground/70">
-          Son güncelleme: <span className="font-mono">2026-09-07</span>
+        <p className="text-[11px] text-muted-foreground">
+          Son güncelleme:{" "}
+          <span className="font-mono">{CHANGELOG[0].date}</span>
         </p>
         <ul className="space-y-2 border-l border-border/40 pl-4">
           {CHANGELOG.map((entry) => (
             <li
               key={entry.text}
-              className="text-xs text-muted-foreground/70 leading-relaxed"
+              className="text-xs text-muted-foreground leading-relaxed"
             >
-              <span className="font-mono text-[11px] text-muted-foreground/50">
+              <span className="font-mono text-[11px] text-muted-foreground">
                 {entry.date}
               </span>{" "}
               {entry.text}

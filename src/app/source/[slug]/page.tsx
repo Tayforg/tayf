@@ -8,6 +8,7 @@ import { BIAS_LABELS } from "@/lib/bias/config";
 import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
+import { normalizeImageUrl } from "@/lib/images/image-url";
 import { LabelCard } from "@/components/source/label-card";
 import { ClickbaitKarneLine } from "@/components/source/clickbait-karne";
 import { SourceKarneCard } from "@/components/source/source-karne";
@@ -246,44 +247,52 @@ export default async function SourceProfilePage({ params }: PageProps) {
           </p>
         ) : (
           <ul className="space-y-2">
-            {articles.map((article, i) => (
-              <li
-                key={article.id}
-                className={`animate-fade-up stagger-${Math.min(i + 1, 8)} rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 transition-all hover-lift`}
-              >
-                <a
-                  href={article.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-start gap-3 p-3 sm:p-4"
+            {articles.map((article, i) => {
+              // Heal stored spellings at render (doubled slash, protocol-
+              // relative, posta's glued ObjectIds); null falls back to the
+              // placeholder block instead of a broken <img>.
+              const img = articleImageEligible(article, source)
+                ? normalizeImageUrl(article.image_url)
+                : null;
+              return (
+                <li
+                  key={article.id}
+                  className={`animate-fade-up stagger-${Math.min(i + 1, 8)} rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 transition-all hover-lift`}
                 >
-                  {articleImageEligible(article, source) ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={article.image_url}
-                      alt=""
-                      className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 object-cover bg-muted"
-                      loading="lazy"
-                    />
-                  ) : (
-                    <div className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 bg-muted/60" />
-                  )}
-                  <div className="min-w-0 flex-1 space-y-1">
-                    <p className="text-sm font-semibold leading-snug line-clamp-2 group-hover:text-foreground">
-                      {article.title}
-                    </p>
-                    {articleExcerptEligible(article, source) ? (
-                      <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
-                        {article.description}
+                  <a
+                    href={article.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-start gap-3 p-3 sm:p-4"
+                  >
+                    {img ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={img}
+                        alt=""
+                        className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 object-cover bg-muted"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 bg-muted/60" />
+                    )}
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <p className="text-sm font-semibold leading-snug line-clamp-2 group-hover:text-foreground">
+                        {article.title}
                       </p>
-                    ) : null}
-                    <p className="font-mono text-[10px] text-muted-foreground/70">
-                      {formatTurkishTimeAgo(article.published_at)}
-                    </p>
-                  </div>
-                </a>
-              </li>
-            ))}
+                      {articleExcerptEligible(article, source) ? (
+                        <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
+                          {article.description}
+                        </p>
+                      ) : null}
+                      <p className="font-mono text-[10px] text-muted-foreground">
+                        {formatTurkishTimeAgo(article.published_at)}
+                      </p>
+                    </div>
+                  </a>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

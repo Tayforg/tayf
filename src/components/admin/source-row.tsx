@@ -56,10 +56,11 @@ export function SourceRow({
               href={source.url}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-muted-foreground/50 hover:text-muted-foreground"
+              aria-label="Kaynak sitesini yeni sekmede aç"
+              className="text-muted-foreground hover:text-foreground"
               onClick={(e) => e.stopPropagation()}
             >
-              <ExternalLink className="h-2.5 w-2.5" />
+              <ExternalLink aria-hidden="true" className="h-2.5 w-2.5" />
             </a>
           </div>
         </div>

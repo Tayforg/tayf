@@ -128,7 +128,7 @@ export default async function TimelinePage() {
                 <h2 className="text-sm font-mono text-brand font-semibold uppercase tracking-[0.12em]">
                   {formatHourLabel(bucket.hourISO)}
                 </h2>
-                <span className="text-[11px] text-muted-foreground/70">
+                <span className="text-[11px] text-muted-foreground">
                   {bucket.rows.length} küme
                 </span>
               </div>

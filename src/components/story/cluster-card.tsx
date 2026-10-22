@@ -2,9 +2,11 @@ import { AlertTriangle, Clock, Copy, Users } from "lucide-react";
 import Link from "next/link";
 
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
+import { BalanceChip } from "@/components/story/balance-chip";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { SourceLogo } from "@/components/source/source-logo";
+import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
 import { ZONE_META } from "@/lib/bias/config";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
@@ -77,11 +79,12 @@ interface ClusterCardProps {
   index?: number;
   /**
    * Whether this cluster is "aging" (latest update older than 48h) and
-   * should render with a subtle opacity dim. Computed in the parent and
-   * passed in as a prop because Next.js 16's `react-hooks/purity` rule
-   * forbids calling `Date.now()` (or other impure functions) inside a
-   * Server Component render body. The parent page is allowed to compute
-   * this once per request and pass the resulting boolean down.
+   * should render with desaturated images (text keeps full contrast).
+   * Computed in the parent and passed in as a prop because Next.js 16's
+   * `react-hooks/purity` rule forbids calling `Date.now()` (or other impure
+   * functions) inside a Server Component render body. The parent page is
+   * allowed to compute this once per request and pass the resulting boolean
+   * down.
    */
   isAging?: boolean;
   /** True when the cluster is one wire dispatch reprinted by N outlets. */
@@ -98,6 +101,7 @@ const PRIORITY_CARD_COUNT = 3;
 // ---------------------------------------------------------------------------
 //
 // Renders the per-card metadata pill row: article count, time-ago, optional
+// "Denge puanı" chip (only when enough classified sources voted), optional
 // dominant-zone pill (only shown when dominantPct ≥ 0.6), and an optional
 // "kör nokta" badge. Was a separate file; only ever consumed here, so it's
 // inlined to keep cluster-card.tsx self-contained.
@@ -111,6 +115,11 @@ interface ClusterMetaBadgesProps {
   dominantPct?: number;
   isWireRedistribution?: boolean;
   effectiveArticleCount?: number;
+  /**
+   * Balance score of the cluster's coverage across the 3 Medya DNA zones.
+   * `null`/omitted (too few classified sources) renders no chip.
+   */
+  balance?: BalanceScore | null;
 }
 
 function ClusterMetaBadges({
@@ -121,6 +130,7 @@ function ClusterMetaBadges({
   dominantPct,
   isWireRedistribution,
   effectiveArticleCount,
+  balance,
 }: ClusterMetaBadgesProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -133,6 +143,10 @@ function ClusterMetaBadges({
         <Clock className="h-3 w-3" />
         {formatTurkishTimeAgo(firstPublished)}
       </span>
+
+      {balance && (
+        <BalanceChip balance={balance} variant="compact" />
+      )}
 
       {/* wire-redistribution: violet is the only palette hue not already
           bound to a Medya DNA zone, a bias category, or the Kör nokta
@@ -196,8 +210,10 @@ export function ClusterCard({
     );
 
   // Aging dim: clusters whose latest update is older than 48h are still
-  // valid but visually de-emphasised so fresher stories pop. opacity-80
-  // is intentionally subtle — they're not stale, just no longer hot.
+  // valid but visually de-emphasised so fresher stories pop. Only the images
+  // are desaturated ([&_img]:grayscale); the text keeps full contrast, since
+  // an opacity dim on the whole card pushed muted text below WCAG 1.4.3.
+  // They're not stale, just no longer hot.
   // The boolean is computed in the parent (page.tsx / blindspots/page.tsx)
   // because `Date.now()` is impure and Next.js 16's `react-hooks/purity`
   // rule disallows it in a Server Component render body.
@@ -247,7 +263,7 @@ export function ClusterCard({
           ? "ring-amber-500/40 hover:ring-amber-500/60"
           : "ring-border/60 hover:ring-border"
       } bg-card/60 overflow-hidden transition-colors hover:bg-card/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring${
-        isAging ? " opacity-80" : ""
+        isAging ? " [&_img]:grayscale" : ""
       }`}
     >
       <article>
@@ -295,6 +311,7 @@ export function ClusterCard({
                 isBlindspot={false}
                 isWireRedistribution={isWireRedistribution}
                 effectiveArticleCount={effectiveArticleCount}
+                balance={balanceFromDistribution(cluster.bias_distribution)}
               />
             </div>
 

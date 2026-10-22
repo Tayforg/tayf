@@ -3,7 +3,9 @@
 //  - `normalizeImageUrl` is re-exported from the Deno/Next shared module so
 //    ingest and render agree on one spelling (precedent: src/lib/bias/config.ts
 //    re-exporting supabase/functions/_shared/cluster/*). Applying it at render
-//    heals rows already stored as `https://h//x.jpg` or `//cdn/x.jpg`.
+//    heals rows already stored as `https://h//x.jpg`, `//cdn/x.jpg` or posta's
+//    glued `<id1>.jpg<id2>.jpg` last segment (rewritten to the real second
+//    image) -- no backfill.
 //  - `isOptimizableImageUrl` is the same shared module's animated-GIF guard
 //    (gif-filter / http-1): a 22 MB placeholder GIF passes through
 //    /_next/image unmodified, so every render boundary filters with it.

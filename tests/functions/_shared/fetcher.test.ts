@@ -605,3 +605,60 @@ describe("fetchFeed date cleanup [ingest-health]", () => {
     expect(result.items[0]?.pubDate).toBe("Mon, 28 Sep 2026 22:25:43 +0300");
   });
 });
+
+// ---------------------------------------------------------------------------
+// posta-image-url (2026-10-22): decision (A) evidence. The live posta feed
+// has NO <enclosure>, <media:*> or <image> element; the picture is the first
+// `<img src>` of the CDATA <description>, and the publisher itself writes the
+// glued `<id1>.jpg<id2>.jpg` string there. This pins that mapRssItem hands the
+// description to normalize.ts verbatim (no merging of two nodes/attributes)
+// and invents no media candidate, so the shared normalizeImageUrl repair is
+// the one place the defect is fixed. xmlParseOverride mirrors the shape
+// fast-xml-parser produces for that item.
+// ---------------------------------------------------------------------------
+
+describe("fetchFeed posta-shaped item [posta-image-url]", () => {
+  const JOINED =
+    "https://image.posta.com.tr/i/posta/90/0x0/627e113be4bfdc26aca117f5.jpg6ad93ca7b65de53ef53ba8ca.jpg";
+
+  it("passes the publisher's <description> img src through verbatim and adds no media candidates", async () => {
+    const description = `<img src="${JOINED}"/><p>Aksaray’da 3 araç ile bir motosikletin karıştığı zincirleme trafik kazasında...</p>`;
+    xmlParseOverride.value = {
+      rss: {
+        channel: {
+          item: [
+            {
+              guid: { "#text": "3055026", isPermaLink: "false" },
+              link: "https://www.posta.com.tr/gundem/yer-aksaray-4-arac-birbirine-girdi-3-yarali-3055026",
+              title: "Yer: Aksaray! 4 araç birbirine girdi: 3 yaralı",
+              description,
+              pubDate: "Wed, 21 Oct 2026 22:28:56 Z",
+              "atom:link": {
+                href: "https://www.posta.com.tr/gundem/yer-aksaray-4-arac-birbirine-girdi-3-yarali-3055026",
+              },
+            },
+          ],
+        },
+      },
+    };
+    stubFetch(
+      () =>
+        new Response("<rss><channel><item/></channel></rss>", {
+          status: 200,
+          headers: { "Content-Type": "application/rss+xml" },
+        }),
+    );
+
+    const result = await fetchFeed({ ...source, slug: "posta" });
+
+    expect(result.items).toHaveLength(1);
+    const item = result.items[0];
+    expect(item?.content).toBe(description);
+    expect(item?.content).toContain(JOINED);
+    expect(item?.enclosure).toBeUndefined();
+    expect(item?.mediaContent).toBeUndefined();
+    expect(item?.mediaThumbnail).toBeUndefined();
+    expect(item?.mediaGroup).toBeUndefined();
+    expect(item?.itemImage).toBeUndefined();
+  });
+});

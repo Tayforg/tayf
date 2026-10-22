@@ -112,11 +112,11 @@ export function ReadAcrossSpectrum({
         <span className="block text-[13px] font-bold leading-tight">
           Karşı tarafı oku
         </span>
-        <span className="block truncate text-[11px] font-medium opacity-80">
+        <span className="block truncate text-[11px] font-medium">
           {zoneLabel} · {member.source.name}
         </span>
       </span>
-      <span className="shrink-0 text-[10px] tabular-nums opacity-70">
+      <span className="shrink-0 text-[10px] tabular-nums">
         {formatTurkishTimeAgo(member.article.published_at)}
       </span>
     </TrackedLink>

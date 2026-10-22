@@ -6,13 +6,19 @@
 // from `src/lib/images/image-url.ts`), which is what lets render-time
 // normalisation heal rows already stored with a bad spelling -- no backfill.
 //
-// Two real-world defects it fixes:
+// Three real-world defects it fixes:
 //
 //   1. A doubled leading path slash, e.g. haber7's
 //      `https://i12.haber7.net//fotogaleri/x.jpg`. The upstream CDN 404s for
 //      it behind the Next optimizer, while `/fotogaleri/x.jpg` works.
 //   2. Protocol-relative values (`//cdn.example/a.jpg`) that a bare
 //      `new URL(...)` rejects and an `<img>` would resolve against the page.
+//   3. Two glued Mongo ObjectIds as the last path segment, e.g. posta's
+//      `.../0x0/627e113be4bfdc26aca117f5.jpg6acfb319b65de53ef53b8d3c.jpg`
+//      (posta, 2026-10-22: 1,231 rows in 7 days). The publisher writes that
+//      string itself in the feed's <img src>; the CDN 404s for it. The first
+//      id is a constant placeholder asset, the second is the real image, so
+//      the last segment is rewritten to `/<second id>.<second ext>`.
 //
 // Deliberately NOT done: URL re-serialisation. `new URL(u).toString()` would
 // lowercase hosts, percent-encode characters and add a trailing slash,
@@ -23,6 +29,40 @@
 // is kept, as are the query string and hash, byte for byte.
 
 const LEADING_PATH_SLASHES = /^(https?:\/\/[^\/?#]+)\/{2,}/i;
+
+// `/<24 hex>.<ext><24 hex>.<ext>` as the LAST path segment (anchored with `$`,
+// so it is applied to the path only, never to a query or hash).
+const JOINED_OBJECT_ID_SEGMENT =
+  /\/([0-9a-f]{24})\.(jpe?g|png|webp)([0-9a-f]{24})\.(jpe?g|png|webp)$/i;
+
+// Scheme + authority prefix; a match must start after it so the host is never
+// rewritten (`https://<id>.jpg<id>.jpg` has a `/` right before the "first id").
+const AUTHORITY_PREFIX = /^(?:[a-z][a-z0-9+.-]*:)?\/\/[^\/]*/i;
+
+/**
+ * Heal a URL whose last path segment is two glued Mongo ObjectIds
+ * (`/<id1>.<ext1><id2>.<ext2>`, posta) by keeping the SECOND id and extension:
+ * `/<id2>.<ext2>`. HEAD-verified 2026-10-22: the joined URL is a 404, `<id1>`
+ * is one constant 1,650-byte placeholder image, `<id2>` is the real article
+ * image.
+ *
+ * Only the path (before the first `?` / `#`) is inspected and rewritten; the
+ * query and hash are kept byte for byte, the host is never touched, and hex /
+ * extension case is preserved. A string that is not that exact shape is
+ * returned `===` unchanged. `null` is reserved for a recognised joined shape
+ * with no verified-resolvable half; every shape handled today (posta) has one,
+ * so the function is currently total.
+ */
+export function repairJoinedImageSegment(u: string): string | null {
+  const cut = u.search(/[?#]/);
+  const path = cut === -1 ? u : u.slice(0, cut);
+  const m = JOINED_OBJECT_ID_SEGMENT.exec(path);
+  if (!m) return u;
+  const authorityEnd = AUTHORITY_PREFIX.exec(path)?.[0].length ?? 0;
+  if (m.index < authorityEnd) return u;
+  const tail = cut === -1 ? "" : u.slice(cut);
+  return `${path.slice(0, m.index)}/${m[3]}.${m[4]}${tail}`;
+}
 
 export function normalizeImageUrl(u: string | null | undefined): string | null {
   if (typeof u !== "string") return null;
@@ -38,8 +78,10 @@ export function normalizeImageUrl(u: string | null | undefined): string | null {
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
 
-  if (LEADING_PATH_SLASHES.test(s)) return s.replace(LEADING_PATH_SLASHES, "$1/");
-  return s;
+  // Order matters: collapse the leading slashes first so a URL carrying both
+  // defects heals in a single call.
+  if (LEADING_PATH_SLASHES.test(s)) s = s.replace(LEADING_PATH_SLASHES, "$1/");
+  return repairJoinedImageSegment(s);
 }
 
 /**

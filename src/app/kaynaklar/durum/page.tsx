@@ -218,7 +218,7 @@ export function KaynakDurumBody({
                       {row.lastHttpStatus ?? "—"}
                     </td>
                     <td className="py-2.5 pr-4 whitespace-nowrap font-mono text-muted-foreground">
-                      <Suspense fallback={<span className="text-muted-foreground/40">…</span>}>
+                      <Suspense fallback={<span className="text-muted-foreground">…</span>}>
                         <ItemsPerDayCell
                           slug={row.slug}
                           itemsPerDayPromise={itemsPerDayPromise}
@@ -232,7 +232,7 @@ export function KaynakDurumBody({
                             sessiz
                           </span>
                         ) : (
-                          <span className="text-muted-foreground/50">—</span>
+                          <span className="text-muted-foreground">—</span>
                         )}
                         {row.quarantined ? (
                           <span

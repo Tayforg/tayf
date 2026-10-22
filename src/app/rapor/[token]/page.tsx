@@ -76,10 +76,10 @@ export default async function RaporTokenPage({ params }: PageProps) {
           Tayf Yelpaze <span className="text-brand">Raporu</span>
         </h1>
         <p className="text-muted-foreground">{report.header.title}</p>
-        <p className="text-[10px] text-muted-foreground/80">
+        <p className="text-[10px] text-muted-foreground">
           Oluşturma: {formatTurkishDate(report.generatedAt)}
         </p>
-        <p className="text-[10px] text-muted-foreground/80">{REGISTRY_LICENCE}</p>
+        <p className="text-[10px] text-muted-foreground">{REGISTRY_LICENCE}</p>
         <a
           href={`/rapor/${token}/markdown`}
           className="inline-block text-[11px] underline decoration-dotted underline-offset-2 hover:text-foreground"

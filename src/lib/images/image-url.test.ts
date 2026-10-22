@@ -25,6 +25,24 @@ describe("normalizeImageUrl (re-export)", () => {
     expect(normalizeImageUrl("//cdn.x/a.jpg")).toBe("https://cdn.x/a.jpg");
     expect(normalizeImageUrl("/rel.jpg")).toBeNull();
   });
+
+  // posta-image-url: rows already stored as two glued ObjectIds
+  // (`<id1>.jpg<id2>.jpg`, which 404s) heal at render time -- no backfill.
+  it("heals a stored posta joined-ObjectId URL to its real (second) image", () => {
+    expect(
+      normalizeImageUrl(
+        "https://image.posta.com.tr/i/posta/90/0x0/627e113be4bfdc26aca117f5.jpg6acfb319b65de53ef53b8d3c.jpg",
+      ),
+    ).toBe(
+      "https://image.posta.com.tr/i/posta/90/0x0/6acfb319b65de53ef53b8d3c.jpg",
+    );
+  });
+
+  it("leaves a clean posta URL untouched", () => {
+    const clean =
+      "https://image.posta.com.tr/i/posta/90/0x0/6acfb319b65de53ef53b8d3c.jpg";
+    expect(normalizeImageUrl(clean)).toBe(clean);
+  });
 });
 
 describe("isOptimizableImageUrl (re-export)", () => {

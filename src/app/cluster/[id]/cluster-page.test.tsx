@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -13,6 +16,7 @@ import { StoryTimeline } from "@/components/story/story-timeline";
 import { FactCheckBox } from "@/components/story/fact-check-box";
 import { ThreadLink } from "@/components/story/thread-link";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
+import { BalanceChip } from "@/components/story/balance-chip";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -1508,5 +1512,101 @@ describe("ClusterDetailPage — timeout is not a 404", () => {
 
     const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
     expect(metadata.title).toBe("Sayfa bulunamadı");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Denge puanı — the 0-100 balance chip under the spectrum caption. Same basis
+// as the spectrum above it: bias_distribution collapsed to the 3 zones.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — Denge puanı chip", () => {
+  function detailWith(distribution: BiasDistribution): ClusterDetail {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak", kind: "outlet" });
+    return {
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members: [makeMember("a1", source)],
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  it("renders the full chip and the methodology link for a 2/2/2-zone distribution", async () => {
+    const distribution = emptyDistribution();
+    distribution.pro_government = 2;
+    distribution.center = 2;
+    distribution.opposition = 2;
+    getClusterDetail.mockResolvedValue(detailWith(distribution));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, BalanceChip);
+    expect(el).not.toBeNull();
+    expect(el?.props.variant).toBe("full");
+
+    const html = renderToStaticMarkup(
+      el as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(html).toContain("Denge puanı 100/100: Dengeli kapsama");
+    expect(collectHrefs(tree)).toContain("/metodoloji#denge-puani");
+    expect(collectText(tree).join("")).toContain("Denge puanı nedir?");
+  });
+
+  it("counts zones, not categories: 4 iktidar categories vs 1 muhalefet is not balanced", async () => {
+    const distribution = emptyDistribution();
+    distribution.pro_government = 2;
+    distribution.gov_leaning = 2;
+    distribution.nationalist = 2;
+    distribution.state_media = 2;
+    distribution.opposition = 1;
+    getClusterDetail.mockResolvedValue(detailWith(distribution));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, BalanceChip);
+    const html = renderToStaticMarkup(
+      el as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(html).toContain("Tek tarafta");
+    expect(html).not.toContain("Dengeli kapsama");
+  });
+
+  it("shows the 'Az kaynak' chip when fewer than 5 classified sources voted", async () => {
+    const distribution = emptyDistribution();
+    distribution.pro_government = 1;
+    distribution.opposition = 1;
+    getClusterDetail.mockResolvedValue(detailWith(distribution));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const el = findElementOfType(tree, BalanceChip);
+    expect(el).not.toBeNull();
+    const html = renderToStaticMarkup(
+      el as unknown as Parameters<typeof renderToStaticMarkup>[0],
+    );
+    expect(html).toContain("Denge puanı yok · Az kaynak");
+  });
+
+  it("renders no Denge puanı at all when the distribution total is 0", async () => {
+    getClusterDetail.mockResolvedValue(detailWith(emptyDistribution()));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(hasElementOfType(tree, BalanceChip)).toBe(false);
+    expect(collectText(tree).join("")).not.toContain("Denge puanı");
+    expect(collectHrefs(tree)).not.toContain("/metodoloji#denge-puani");
+  });
+});
+
+describe("cluster/[id]/page.tsx — contrast sweep", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const pageSource = readFileSync(join(here, "page.tsx"), "utf8");
+
+  it("no longer dims the Toplayıcı / niş section with opacity-70", () => {
+    expect(pageSource).not.toContain("p-4 opacity-70");
+    expect(pageSource).not.toMatch(/\bopacity-70\b/);
+  });
+
+  it("keeps the dashed border and tinted background that set the section apart", () => {
+    expect(pageSource).toContain(
+      "rounded-xl border border-dashed border-border/50 bg-card/20 p-4 animate-fade-up stagger-2",
+    );
   });
 });

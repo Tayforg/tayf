@@ -37,7 +37,7 @@ export const metadata: Metadata = {
 const proseClass = "max-w-[65ch] text-sm text-muted-foreground leading-relaxed";
 const cardClass = "rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
 const itemClass = "rounded-lg ring-1 ring-border/50 bg-muted/20 p-3 space-y-1";
-const metaClass = "text-[11px] uppercase tracking-[0.12em] text-muted-foreground/80";
+const metaClass = "text-[11px] uppercase tracking-[0.12em] text-muted-foreground";
 
 function formatDate(iso: string | null): string {
   return iso ? formatDdMmYyyy(iso) : "—";

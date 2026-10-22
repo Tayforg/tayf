@@ -29,9 +29,9 @@ export const metadata: Metadata = {
 
 const cardClass = "rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
 const proseClass = "max-w-[65ch] text-sm text-muted-foreground leading-relaxed";
-const noteClass = "max-w-[65ch] text-xs text-muted-foreground/80 leading-relaxed";
+const noteClass = "max-w-[65ch] text-xs text-muted-foreground leading-relaxed";
 const brandLink =
-  "text-brand underline decoration-dotted underline-offset-2 hover:text-brand/80";
+  "text-brand underline decoration-dotted underline-offset-2 hover:decoration-solid";
 const tocPill =
   "inline-flex items-center rounded-full border border-border/60 bg-muted/40 px-3 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-brand/40 hover:bg-muted hover:text-brand";
 const codeBlockClass =
@@ -43,7 +43,7 @@ function SectionHeading({ id, title, meta }: { id: string; title: string; meta?:
       <h2 id={id} className="scroll-mt-24 font-serif text-xl sm:text-2xl font-normal tracking-tight">
         {title}
       </h2>
-      {meta ? <span className="shrink-0 text-[11px] text-muted-foreground/70">{meta}</span> : null}
+      {meta ? <span className="shrink-0 text-[11px] text-muted-foreground">{meta}</span> : null}
     </div>
   );
 }
