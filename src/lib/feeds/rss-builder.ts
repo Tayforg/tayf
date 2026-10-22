@@ -22,9 +22,33 @@ export interface RssBuildInput {
   items: RssItemInput[];
 }
 
-/** Escapes the five XML predefined entities: & < > " '. */
+// XML 1.0 `Char` allows only: U+0009, U+000A, U+000D, U+0020-U+D7FF,
+// U+E000-U+FFFD and U+10000-U+10FFFF. Everything else makes a document that
+// no conforming parser accepts ("PCDATA invalid Char value 11"), and ONE bad
+// character in ONE item breaks the whole feed for every subscriber. Feed-
+// sourced titles can carry such characters: ingest's decodeEntities() turns
+// numeric references like &#11; into raw control characters. So this strips
+//   - C0 controls other than tab / LF / CR,
+//   - the BMP non-characters U+FFFE and U+FFFF,
+//   - unpaired UTF-16 surrogates (a valid pair, i.e. an astral char such as an
+//     emoji, is left alone).
+// The same C0 rule lives in src/lib/seo/sitemaps.ts (which does not yet cover
+// U+FFFE/U+FFFF or lone surrogates).
+const INVALID_XML_CHARS_RE =
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** Removes every character XML 1.0 forbids, leaving legal text untouched. */
+export function stripInvalidXmlChars(input: string): string {
+  return input.replace(INVALID_XML_CHARS_RE, "");
+}
+
+/**
+ * Makes `input` safe to embed in XML text or an attribute: drops characters
+ * XML 1.0 forbids (see stripInvalidXmlChars), then escapes the five
+ * predefined entities: & < > " '.
+ */
 export function escapeXml(input: string): string {
-  return input
+  return stripInvalidXmlChars(input)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

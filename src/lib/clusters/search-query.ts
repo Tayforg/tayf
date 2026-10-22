@@ -112,11 +112,24 @@ async function fetchSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
 // remote cache handler (see next/dist/docs' use-cache-remote.md, "When to
 // avoid remote caching") — an in-memory per-instance cache is the right
 // fit here, unlike the hot fetchers in E1.
+//
+// Cache lifetime follows the outcome (same rule as topic-query.ts): a read
+// keeps the `cluster-feed` window, a failed attempt ({ ok: false }) is
+// memoised for `minutes` only. `cacheLife` used to run BEFORE the attempt, so
+// one cold-read timeout was pinned for the whole feed window and every later
+// hit for that query bypassed the cache's answer and went live to the DB.
+// Exactly one `cacheLife` call per invocation, after the attempt, with one
+// literal per call (Next 16.4 types cacheLife as single-literal overloads;
+// tests/guards/cache-life-literal.test.ts); `cacheTag` stays first.
 async function cachedSearchClusters(trimmed: string) {
   "use cache";
-  cacheLife("cluster-feed");
   cacheTag("clusters-search");
-  return attemptCached("clusters-search", () => fetchSearchClusters(trimmed));
+  const r = await attemptCached("clusters-search", () =>
+    fetchSearchClusters(trimmed),
+  );
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
 }
 
 // Public entry point. `q` becomes part of the cached function's key

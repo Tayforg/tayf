@@ -28,6 +28,13 @@ export default function SavedPage() {
         >
           Haber diyetim
         </Link>
+        {" · "}
+        <Link
+          href="/takip"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          Takip ettiklerim
+        </Link>
       </p>
       <SavedList />
     </div>

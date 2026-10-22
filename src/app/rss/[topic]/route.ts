@@ -1,7 +1,5 @@
 import { connection } from "next/server";
 
-import { ZONE_META } from "@/lib/bias/config";
-import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
 import {
   getTopicClusters,
   TOPIC_LABELS_TR,
@@ -9,6 +7,7 @@ import {
   type TopicSlug,
 } from "@/lib/clusters/topic-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
+import { blindspotsFeedResponse } from "@/lib/feeds/blindspots-feed";
 import { buildRssXml, withUtm, type RssItemInput } from "@/lib/feeds/rss-builder";
 import { formatZoneLine, zoneCountsFromSources } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
@@ -81,27 +80,6 @@ function topicItem(base: string, slug: TopicSlug, bundle: ClusterBundle): RssIte
   };
 }
 
-function blindspotItem(base: string, bundle: BlindspotBundle): RssItemInput {
-  const link = withUtm(`${base}/cluster/${bundle.cluster.id}`, {
-    source: "rss",
-    medium: "feed",
-    campaign: "kor_nokta",
-  });
-  const zoneLine = formatZoneLine(zoneCountsFromSources(bundle.sources));
-  const n = bundle.sources.length;
-  const zoneLabel = ZONE_META[bundle.dominantZone].label;
-  const pct = Math.round(bundle.dominantPct * 100);
-  const prefix = `Kör nokta: ağırlıkla ${zoneLabel} kaynakları (%${pct}). `;
-
-  return {
-    title: bundle.cluster.title_tr,
-    link,
-    guid: `${base}/cluster/${bundle.cluster.id}`,
-    pubDate: bundle.cluster.first_published,
-    description: `${prefix}${n} kaynak · ${zoneLine}`,
-  };
-}
-
 export async function GET(
   _request: Request,
   { params }: RouteContext,
@@ -118,29 +96,12 @@ export async function GET(
   const slug = match[1]!;
   if (!ALLOWED_SLUGS.has(slug)) return notFoundResponse();
 
-  const base = siteUrl();
-
   if (slug === KOR_NOKTALAR_SLUG) {
-    let bundles: BlindspotBundle[];
-    try {
-      const result = await getBlindspots();
-      bundles = result.bundles;
-    } catch {
-      return unavailableResponse();
-    }
-
-    const items = bundles.slice(0, MAX_ITEMS).map((b) => blindspotItem(base, b));
-    const xml = buildRssXml({
-      title: "Tayf — Kör noktalar",
-      link: `${base}/blindspots`,
-      selfUrl: `${base}/rss/${KOR_NOKTALAR_SLUG}.xml`,
-      description:
-        "Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler.",
-      items,
-    });
-    return rssResponse(xml);
+    // Shared with /blindspots/rss.xml so the two URLs cannot drift.
+    return blindspotsFeedResponse(`/rss/${KOR_NOKTALAR_SLUG}.xml`);
   }
 
+  const base = siteUrl();
   const topicSlug = slug as TopicSlug;
   const result = await getTopicClusters(topicSlug, 1);
   if (result === null) return unavailableResponse();

@@ -12,6 +12,7 @@ import { FramingReceiptCard } from "@/components/story/framing-receipt";
 import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption";
 import { ShareButton } from "@/components/story/share-button";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
+import { CompareButton } from "@/components/compare/compare-button";
 import { SourceChips } from "@/components/source/source-chips";
 import { SourceBadge } from "@/components/story/source-badge";
 import { OwnershipLine } from "@/components/story/ownership-line";
@@ -551,6 +552,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   text={shareText}
                 />
                 <BookmarkButton clusterId={id} />
+                <CompareButton clusterId={id} />
                 <Link
                   href={`/metodoloji?cluster=${id}#duzeltme`}
                   className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"

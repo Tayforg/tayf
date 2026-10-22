@@ -80,17 +80,26 @@ describe("GET /llms.txt", () => {
     expect(body).toContain("/api/sources");
   });
 
-  it("points to /sources, /kaynaklar/durum, /blindspots, /rss.xml and /sitemap.xml", async () => {
+  it("points to /sources, /kaynaklar/durum, /blindspots, /blindspots/rss.xml, /rss.xml and /sitemap.xml", async () => {
     const body = await (await GET()).text();
     for (const path of [
       "/sources",
       "/kaynaklar/durum",
       "/blindspots",
+      "/blindspots/rss.xml",
       "/rss.xml",
       "/sitemap.xml",
     ]) {
       expect(body).toContain(path);
     }
+  });
+
+  it("lists the blindspots and per-topic RSS feeds as markdown links", async () => {
+    const body = await (await GET()).text();
+    expect(body).toContain(
+      "[Kör noktalar RSS](https://tayf.test/blindspots/rss.xml)",
+    );
+    expect(body).toContain("[Konu RSS](https://tayf.test/rss/{konu}.xml)");
   });
 
   it("points to /gelistirici and /api/v1/openapi.json", async () => {

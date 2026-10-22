@@ -42,6 +42,8 @@ vi.mock("@/lib/sources/feed-status", () => ({
 
 import { BlindspotsFeed } from "./page";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
+import type { SilenceDigest } from "@/lib/clusters/silence-digest";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -214,5 +216,86 @@ describe("/blindspots page — noindex on the failed feed state only (seo-error-
 
     expect(noindexMetas(tree)).toHaveLength(0);
     expect(collectText(tree).join(" ")).toContain("belirgin bir kör nokta yok");
+  });
+});
+
+describe("/blindspots page — silence digest band", () => {
+  const NOW = Date.parse("2026-10-22T12:00:00Z");
+
+  beforeEach(() => {
+    // Only Date is faked: the page reads Date.now() once for nowMs, and the
+    // mocked fetchers resolve via microtasks, so no timers need faking.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function mkBundle(id: string, updatedAtMs: number) {
+    return {
+      cluster: { id, updated_at: new Date(updatedAtMs).toISOString() },
+      articles: [],
+      sources: [{ id: `${id}-s`, name: "Kaynak", bias: "pro_government" }],
+      dominantZone: "iktidar",
+      dominantPct: 1,
+      isWireRedistribution: false,
+      effectiveArticleCount: 1,
+    };
+  }
+
+  function bands(tree: unknown): Elementish[] {
+    return collectElements(tree).filter((el) => el.type === SilenceDigestBand);
+  }
+
+  it("renders one band, derived from the loaded bundles, when the feed has a bundle updated 1 h ago", async () => {
+    getBlindspots.mockResolvedValueOnce({
+      ok: true,
+      bundles: [mkBundle("c1", NOW - 3_600_000)],
+    });
+
+    const tree = await BlindspotsFeed();
+
+    const found = bands(tree);
+    expect(found).toHaveLength(1);
+    const digest = found[0]?.props?.digest as SilenceDigest;
+    expect(digest.windowTotal).toBe(1);
+    expect(digest.rows.map((r) => r.zone)).toEqual([
+      "iktidar",
+      "bagimsiz",
+      "muhalefet",
+    ]);
+  });
+
+  it("uses the page's existing nowMs: a bundle updated 25 h ago is outside the window", async () => {
+    getBlindspots.mockResolvedValueOnce({
+      ok: true,
+      bundles: [
+        mkBundle("fresh", NOW - 3_600_000),
+        mkBundle("stale", NOW - 25 * 3_600_000),
+      ],
+    });
+
+    const tree = await BlindspotsFeed();
+
+    const digest = bands(tree)[0]?.props?.digest as SilenceDigest;
+    expect(digest.windowTotal).toBe(1);
+  });
+
+  it("does not render the band when the feed failed ({ ok: false })", async () => {
+    getBlindspots.mockResolvedValueOnce({ ok: false });
+
+    const tree = await BlindspotsFeed();
+
+    expect(bands(tree)).toHaveLength(0);
+  });
+
+  it("does not render the band on the ok-but-empty path", async () => {
+    getBlindspots.mockResolvedValueOnce({ ok: true, bundles: [] });
+
+    const tree = await BlindspotsFeed();
+
+    expect(bands(tree)).toHaveLength(0);
   });
 });
