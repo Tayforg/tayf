@@ -56,7 +56,7 @@ export function SearchBar() {
         value={value}
         onChange={(e) => setValue(e.target.value)}
         placeholder="Haberlerde ara..."
-        className="h-10 w-full rounded-full bg-muted/50 border border-border/60 pl-9 pr-12 text-sm placeholder:text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:bg-background transition-colors"
+        className="h-10 w-full rounded-full bg-muted/50 border border-border/60 pl-9 pr-12 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:bg-background transition-colors"
       />
       <kbd
         aria-hidden="true"

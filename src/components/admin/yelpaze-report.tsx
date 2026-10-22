@@ -167,7 +167,7 @@ export function YelpazeReportView({
                 Yelpaze <span className="text-brand">Raporu</span>
               </h1>
               <p className="text-muted-foreground">{report.header.title}</p>
-              <p className="text-[10px] text-muted-foreground/80">
+              <p className="text-[10px] text-muted-foreground">
                 Küme: {report.header.clusterId} · Oluşturma: {fmtDate(report.generatedAt)}
               </p>
             </div>
@@ -235,7 +235,7 @@ export function YelpazeReportView({
             ))}
           </tbody>
         </table>
-        <p className="mt-1.5 text-[10px] text-muted-foreground/80">
+        <p className="mt-1.5 text-[10px] text-muted-foreground">
           Payda kaynağı:{" "}
           {report.coverage.denominatorBasis === "yield"
             ? "son 72 saatte yayın yapan kaynaklar (yield)"
@@ -340,7 +340,7 @@ export function YelpazeReportView({
             ))}
           </tbody>
         </table>
-        <p className="mt-1.5 text-[10px] text-muted-foreground/80">
+        <p className="mt-1.5 text-[10px] text-muted-foreground">
           {report.timeline.overallWire.isWireRedistribution
             ? `Genel: ${report.timeline.overallWire.memberCount} kaynaktan ${report.timeline.overallWire.effectiveArticleCount} tekil dispatch (ajans kopyası tespit edildi).`
             : `Genel: ${report.timeline.overallWire.memberCount} kaynağın tamamı bağımsız yayın (ajans kopyası tespit edilmedi).`}{" "}
@@ -366,13 +366,13 @@ export function YelpazeReportView({
             ))}
           </ul>
         )}
-        <p className="mt-1.5 text-[10px] text-muted-foreground/80">
+        <p className="mt-1.5 text-[10px] text-muted-foreground">
           {report.ownership.dominant
             ? `Baskın grup: ${report.ownership.dominant.label} (${report.ownership.dominant.sourceCount} kaynak).`
             : "Baskın sahip grubu yok (etiketli kaynakların yarısından fazlasını oluşturan tek grup bulunamadı)."}
         </p>
         {(report.ownership.trusteedSources ?? []).length > 0 && (
-          <ul className="mt-1.5 space-y-1 text-[10px] text-muted-foreground/80">
+          <ul className="mt-1.5 space-y-1 text-[10px] text-muted-foreground">
             {(report.ownership.trusteedSources ?? []).map((t) => {
               const date = fmtTrusteeDate(t.since);
               return date ? (

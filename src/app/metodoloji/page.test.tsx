@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ReactNode } from "react";
 
@@ -18,6 +21,12 @@ vi.mock("@/lib/headline/status", () => ({
 }));
 
 import { BIAS_LABELS, BLINDSPOT, SURPRISE, ZONE_META } from "@/lib/bias/config";
+import {
+  BALANCE_BALANCED_MIN,
+  BALANCE_LABELS,
+  BALANCE_MIN_SOURCES,
+  BALANCE_ONE_SIDED_MAX,
+} from "@/lib/bias/balance";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
@@ -193,6 +202,9 @@ describe("/metodoloji page", () => {
     const anchors = collectHrefs(tree).filter((href) => href.startsWith("#"));
     expect(anchors.length).toBeGreaterThanOrEqual(7);
     for (const href of anchors) expect(ids).toContain(href.slice(1));
+    // The cluster page and card deep-link here: both ends must exist.
+    expect(anchors).toContain("#denge-puani");
+    expect(ids).toContain("denge-puani");
   });
 
   // Regression guard: catches the stale "144 Türk haber kaynağı" claim
@@ -260,6 +272,127 @@ describe("/metodoloji page", () => {
       expect(text).toContain(
         "ilgisiz bulduğu şirket eşleşmeleri",
       );
+    });
+  });
+  describe("Denge puanı (balance score)", () => {
+    it("explains the entropy formula and what counts", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain("Denge puanı, bir kümeyi hangi Medya DNA bölgelerinin haber yaptığını tek bir sayıyla özetler.");
+      expect(text).toContain("Yalnızca sınıflandırılmış (oy veren) kaynaklar sayılır; toplayıcı ve niş kaynaklar, spektrum çubuğunda olduğu gibi, hesaba katılmaz.");
+      expect(text).toContain("Shannon entropisi");
+      expect(text).toContain(
+        "tek bölgeden gelen kapsama 0, üç bölgeye eşit dağılan kapsama 100 alır; iki bölgeye eşit bölünen bir küme yaklaşık 63 alır.",
+      );
+      expect(text).toContain(
+        "Formül: puan = 100 × (−Σ pᵢ · ln pᵢ) / ln 3 — pᵢ, bir bölgenin oy veren kaynaklar içindeki payıdır.",
+      );
+    });
+
+    it("renders the tier thresholds from the shared constants", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain(`Puan ≥ ${BALANCE_BALANCED_MIN}`);
+      expect(text).toContain(`Puan ≤ ${BALANCE_ONE_SIDED_MAX}`);
+      expect(text).toContain(
+        `${BALANCE_ONE_SIDED_MAX + 1}–${BALANCE_BALANCED_MIN - 1}`,
+      );
+      for (const label of Object.values(BALANCE_LABELS)) {
+        expect(text).toContain(label);
+      }
+    });
+
+    it("states the source floor from the shared constant", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain(
+        `Kümede ${BALANCE_MIN_SOURCES} sınıflandırılmış kaynaktan azı varsa puan hesaplanmaz ("Az kaynak").`,
+      );
+    });
+
+    it("says the score is not a quality grade and does not reorder stories", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain(
+        "Puan bir kalite notu değildir ve haberlerin sıralamasını değiştirmez; yalnızca kapsamanın genişliğini gösterir.",
+      );
+    });
+
+    it("lists the section in the table of contents and as a heading", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const tree = await MethodologyPage();
+      expect(collectHrefs(tree)).toContain("#denge-puani");
+      expect(collectIds(tree)).toContain("denge-puani");
+      // The TOC pill text, and the SectionHeading props (title + meta).
+      expect(collectText(tree)).toContain("Denge puanı");
+      const strings = collectStringProps(tree);
+      expect(strings).toContain("Denge puanı");
+      expect(strings).toContain("0–100");
+    });
+
+    it("adds the 2026-10-22 changelog entry", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain("2026-10-22");
+      expect(text).toContain(
+        "Denge puanı eklendi: kartlarda ve küme sayfasında kapsamanın üç bölgeye ne kadar dengeli dağıldığını gösteren 0–100 arası puan.",
+      );
+    });
+  });
+
+  // The footer date must be derived from the CHANGELOG, not hard-coded: a
+  // stale "Son güncelleme" next to a newer changelog entry contradicts itself
+  // on a transparency page.
+  describe("Son güncelleme footer", () => {
+    const DATE = /\d{4}-\d{2}-\d{2}/g;
+
+    it("equals the newest CHANGELOG entry date", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      const footer = /Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(text);
+      expect(footer).not.toBeNull();
+
+      // Every date on the page is a CHANGELOG date (the footer included);
+      // ISO dates sort lexicographically, so the max is the newest entry.
+      const dates = text.match(DATE) ?? [];
+      const newest = [...dates].sort().at(-1);
+      expect(footer?.[1]).toBe(newest);
+    });
+
+    it("is not older than any CHANGELOG entry (newest-first ordering holds)", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      const footer = /Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(text)?.[1];
+      const entryDates = text
+        .slice(text.indexOf("Son güncelleme:"))
+        .match(DATE)
+        ?.slice(1);
+      expect(entryDates?.length).toBeGreaterThan(0);
+      // The first rendered entry is the newest and must match the footer.
+      expect(entryDates?.[0]).toBe(footer);
+    });
+  });
+
+  // Contrast sweep (a11y-2): opacity-modified text tokens composite below the
+  // WCAG 1.4.3 floor; this page now uses the full tokens everywhere.
+  describe("contrast sweep", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pageSource = readFileSync(join(here, "page.tsx"), "utf8");
+
+    it("uses no opacity-modified muted-foreground or brand text token", () => {
+      expect(pageSource).not.toContain("text-muted-foreground/");
+      expect(pageSource).not.toContain("text-brand/");
+    });
+
+    it("keeps the brand link hover on the underline, not on a faded colour", () => {
+      expect(pageSource).toContain("hover:decoration-solid");
     });
   });
 });

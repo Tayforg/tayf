@@ -81,7 +81,10 @@ function HeadlineEntry({
           <span className="font-mono text-[10px] uppercase tracking-wider text-foreground/80">
             {member.source.name}
           </span>
-          <ExternalLink className="h-2.5 w-2.5 text-muted-foreground/50 opacity-0 transition-opacity group-hover/entry:opacity-100" />
+          <ExternalLink
+            aria-hidden="true"
+            className="h-2.5 w-2.5 text-muted-foreground/50 opacity-0 transition-opacity group-hover/entry:opacity-100"
+          />
           <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
             {formatTurkishTimeAgo(member.article.published_at)}
           </span>

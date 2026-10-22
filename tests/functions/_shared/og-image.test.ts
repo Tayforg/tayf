@@ -39,6 +39,25 @@ describe("extractHeroImageFromHtml: image URL normalisation", () => {
     expect(extractHeroImageFromHtml(html)).toBe("https://cdn.test/tw/a.jpg");
   });
 
+  // posta-image-url: a joined `<id1>.jpg<id2>.jpg` value (the publisher glues
+  // two ObjectIds together; the first is a constant placeholder) is healed to
+  // the real second image on every og:image / twitter:image style path.
+  it("heals a joined posta ObjectId og:image", () => {
+    const html =
+      '<head><meta property="og:image" content="https://image.posta.com.tr/i/posta/90/0x0/627e113be4bfdc26aca117f5.jpg6acfb319b65de53ef53b8d3c.jpg"></head>';
+    expect(extractHeroImageFromHtml(html)).toBe(
+      "https://image.posta.com.tr/i/posta/90/0x0/6acfb319b65de53ef53b8d3c.jpg",
+    );
+  });
+
+  it("heals a joined posta ObjectId twitter:image and keeps its query string", () => {
+    const html =
+      '<meta name="twitter:image" content="https://image.posta.com.tr/i/posta/90/0x0/627e113be4bfdc26aca117f5.jpg6acfb319b65de53ef53b8d3c.jpg?v=1">';
+    expect(extractHeroImageFromHtml(html)).toBe(
+      "https://image.posta.com.tr/i/posta/90/0x0/6acfb319b65de53ef53b8d3c.jpg?v=1",
+    );
+  });
+
   it("returns null for empty html", () => {
     expect(extractHeroImageFromHtml("")).toBeNull();
   });

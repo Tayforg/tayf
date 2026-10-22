@@ -36,7 +36,7 @@ const cardClass = "rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
 const proseClass = "max-w-[65ch] text-sm text-muted-foreground leading-relaxed";
 const ruleCard = "rounded-lg ring-1 ring-border/50 bg-muted/20 p-3 space-y-1";
 const ruleTerm =
-  "text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/80";
+  "text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground";
 const ruleDef = "text-sm text-foreground/90 leading-relaxed";
 
 const PRECISION_RECALL_SENTENCE =
@@ -369,7 +369,7 @@ function Definitions() {
         Bu sayıların nasıl hesaplandığına dair tam yöntem için{" "}
         <Link
           href="/metodoloji"
-          className="text-brand underline decoration-dotted underline-offset-2 hover:text-brand/80"
+          className="text-brand underline decoration-dotted underline-offset-2 hover:decoration-solid"
         >
           Metodoloji
         </Link>{" "}

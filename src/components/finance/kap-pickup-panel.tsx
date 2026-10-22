@@ -105,7 +105,7 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
                   </>
                 )}
                 {p.overlapping > 0 ? (
-                  <span className="ml-1 text-muted-foreground/70">
+                  <span className="ml-1 text-muted-foreground">
                     (yakın tarihli {p.overlapping} bildirimle ortak pencere)
                   </span>
                 ) : null}

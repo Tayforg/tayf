@@ -68,3 +68,50 @@ describe("cluster-card.tsx text contrast (a11y-2)", () => {
     expect(src).toMatch(/className="text-\[11px\] text-brand"/);
   });
 });
+
+describe("cluster-card.tsx balance chip (Denge puanı)", () => {
+  it("renders <BalanceChip> inside ClusterMetaBadges, not in ClusterCard", () => {
+    const badgesStart = src.indexOf("function ClusterMetaBadges");
+    const cardStart = src.indexOf("export function ClusterCard");
+    const chip = src.indexOf("<BalanceChip");
+    expect(badgesStart).toBeGreaterThan(-1);
+    expect(cardStart).toBeGreaterThan(badgesStart);
+    expect(chip).toBeGreaterThan(badgesStart);
+    expect(chip).toBeLessThan(cardStart);
+    expect(count(src, "<BalanceChip")).toBe(1);
+  });
+
+  it("uses the compact variant and only for a non-null score", () => {
+    expect(src).toContain('<BalanceChip balance={balance} variant="compact" />');
+    expect(src).toMatch(/\{balance && \(\s*<BalanceChip/);
+  });
+
+  it("sits right after the Clock pill", () => {
+    const clock = src.indexOf("<Clock");
+    const chip = src.indexOf("<BalanceChip");
+    const wire = src.indexOf("{isWireRedistribution && (");
+    expect(clock).toBeGreaterThan(-1);
+    expect(chip).toBeGreaterThan(clock);
+    expect(chip).toBeLessThan(wire);
+  });
+
+  it("derives the score from the same distribution the BiasSpectrum bar uses", () => {
+    expect(src).toContain("balanceFromDistribution(cluster.bias_distribution)");
+    expect(src).toContain("balance={balanceFromDistribution(cluster.bias_distribution)}");
+    expect(src).toContain(
+      "<BiasSpectrum distribution={cluster.bias_distribution} compact />",
+    );
+  });
+});
+
+describe("cluster-card.tsx aging treatment (contrast sweep)", () => {
+  it("never dims the whole card with an opacity utility (text keeps full contrast)", () => {
+    // Raw source: stale prose mentioning the old class must go too.
+    expect(raw).not.toContain("opacity-80");
+  });
+
+  it("desaturates only the images of an aging card", () => {
+    expect(src).toContain('isAging ? " [&_img]:grayscale" : ""');
+    expect(src).toContain("[&_img]:grayscale");
+  });
+});

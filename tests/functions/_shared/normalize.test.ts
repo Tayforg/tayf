@@ -267,6 +267,77 @@ describe("normalize.ts ingest-hygiene: image URL normalisation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// posta-image-url (2026-10-22): posta's feed has no enclosure / media:* /
+// <image>; the picture is the first `<img src>` in the CDATA <description>
+// (mapRssItem puts it in `content`), and the publisher itself glues two Mongo
+// ObjectIds together there: `<id1>.jpg<id2>.jpg`. The joined string is
+// literally in the XML, so the shared normalizeImageUrl repair is the ingest
+// fix and extractImage needed no logic change. The first id is a constant
+// placeholder; the second is the real image (see
+// tests/functions/_shared/image-url.test.ts for the HEAD evidence).
+// ---------------------------------------------------------------------------
+describe("normalize.ts posta-image-url: joined ObjectId <img src> in the description", () => {
+  const BASE = "https://image.posta.com.tr/i/posta/90/0x0/";
+  const JOINED = `${BASE}627e113be4bfdc26aca117f5.jpg6ad93ca7b65de53ef53ba8ca.jpg`;
+  const HEALED = `${BASE}6ad93ca7b65de53ef53ba8ca.jpg`;
+
+  it("stores the healed URL for a posta-shaped item (content = <description> HTML)", () => {
+    const html = `<img src="${JOINED}"/><p>Aksaray’da 3 araç ile bir motosikletin karıştığı zincirleme trafik kazasında...</p>`;
+    const row = mod!.normalizeItem(source, {
+      title: "Yer: Aksaray! 4 araç birbirine girdi: 3 yaralı",
+      link: "https://www.posta.com.tr/gundem/yer-aksaray-4-arac-birbirine-girdi-3-yarali-3055026",
+      content: html,
+      contentSnippet: html,
+      pubDate: "Wed, 21 Oct 2026 22:28:56 Z",
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBe(HEALED);
+  });
+
+  it("heals a joined URL in the content:encoded HTML as well", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/posta-ce",
+      contentEncoded: `<p><img src='${JOINED}' alt=''></p>`,
+    });
+    expect(row!.image_url).toBe(HEALED);
+  });
+
+  it("heals a joined URL carried by an enclosure / media candidate too", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/posta-enc",
+      enclosure: { url: JOINED, type: "image/jpeg" },
+    });
+    expect(row!.image_url).toBe(HEALED);
+    const viaMedia = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/posta-media",
+      mediaContent: { $: { url: JOINED } },
+    });
+    expect(viaMedia!.image_url).toBe(HEALED);
+  });
+
+  it("heals the doubled-slash + joined combination in one pass", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/posta-both",
+      content: `<img src="https://image.posta.com.tr//i/posta/90/0x0/627e113be4bfdc26aca117f5.jpg6ad93ca7b65de53ef53ba8ca.jpg"/>`,
+    });
+    expect(row!.image_url).toBe(HEALED);
+  });
+
+  it("leaves an already-clean posta image URL unchanged", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/posta-clean",
+      content: `<img src="${HEALED}"/>`,
+    });
+    expect(row!.image_url).toBe(HEALED);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // gif-filter (http-1): haber7 and elips-haber advertise a 22.3 MB animated
 // placeholder GIF as the feed image. /_next/image passes animated GIFs through
 // unmodified, so ingest stores NULL (not the .gif) and lets the next

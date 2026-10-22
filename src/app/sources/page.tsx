@@ -423,7 +423,7 @@ export function SourceDirectory({
                           <span className="font-mono text-[10px]">{label}</span>
                         </p>
                         {source.lastPublishedAt && (
-                          <p className="text-[10px] text-muted-foreground/70">
+                          <p className="text-[10px] text-muted-foreground">
                             {formatTurkishTimeAgo(source.lastPublishedAt)}
                           </p>
                         )}
@@ -435,7 +435,7 @@ export function SourceDirectory({
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label={`${source.name} sitesini yeni sekmede aç`}
-                    className="absolute top-3 right-3 text-[11px] text-muted-foreground/70 hover:text-foreground leading-none px-1.5 py-0.5 rounded hover:bg-muted/60"
+                    className="absolute top-3 right-3 text-[11px] text-muted-foreground hover:text-foreground leading-none px-1.5 py-0.5 rounded hover:bg-muted/60"
                   >
                     ↗
                   </a>

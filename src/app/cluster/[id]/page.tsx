@@ -4,6 +4,7 @@ import { notFound, permanentRedirect } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Copy } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
+import { BalanceChip } from "@/components/story/balance-chip";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { MediaDna } from "@/components/story/media-dna";
@@ -55,6 +56,7 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { buildTayfOrganization, serializeJsonLd } from "@/lib/seo/json-ld";
 import { siteUrl } from "@/lib/site-url";
+import { balanceFromDistribution } from "@/lib/bias/balance";
 import { zoneOf } from "@/lib/bias/config";
 import type { MediaDnaZone } from "@/types";
 
@@ -312,6 +314,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     (a, b) => a + b,
     0,
   );
+  // Denge puanı: same 3-zone basis as the spectrum bar above it. `null` below
+  // the classified-source floor (rendered as the "Az kaynak" chip).
+  const balance = balanceFromDistribution(biasDistribution);
   // The stored jsonb is voting-only just for rows the post-034 consumer wrote
   // or the 48h backfill touched; older clusters still carry all-member counts
   // (one vote per article, every kind). `members` is deduped per source while
@@ -576,6 +581,21 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               {spectrumCaption && (
                 <p className="mt-1.5 text-[11px] text-muted-foreground">{spectrumCaption}</p>
               )}
+              {/* Denge puanı: how evenly the voting sources above spread over
+                  the three zones (0-100). Only when the bar exists; the chip
+                  itself says "Az kaynak" below the source floor. Explained at
+                  /metodoloji#denge-puani. */}
+              {distributionTotal > 0 && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
+                  <BalanceChip balance={balance} variant="full" />
+                  <Link
+                    href="/metodoloji#denge-puani"
+                    className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                  >
+                    Denge puanı nedir?
+                  </Link>
+                </div>
+              )}
             </div>
 
             {storyTimeline && <StoryTimeline timeline={storyTimeline} />}
@@ -687,12 +707,14 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       )}
 
       {/* Toplayıcı / niş kaynaklar — cluster members whose kind never votes
-          in the spectrum above, kept visible but visually separated and
-          dimmed so the distinction is legible without hiding them. */}
+          in the spectrum above, kept visible but visually separated (dashed
+          border, tinted background) so the distinction is legible without
+          hiding them. Not dimmed with opacity: that dropped the muted text
+          below WCAG 1.4.3 (tests/guards/text-contrast-tokens.test.ts). */}
       {nonVotingMembers.length > 0 && (
         <section
           aria-label="Toplayıcı / niş kaynaklar"
-          className="rounded-xl border border-dashed border-border/50 bg-card/20 p-4 opacity-70 animate-fade-up stagger-2"
+          className="rounded-xl border border-dashed border-border/50 bg-card/20 p-4 animate-fade-up stagger-2"
         >
           <div className="flex items-baseline justify-between gap-2">
             <h2 className="font-serif text-sm font-semibold">
