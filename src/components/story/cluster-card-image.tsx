@@ -4,7 +4,11 @@ import { useState } from "react";
 import Image from "next/image";
 import { Newspaper } from "lucide-react";
 
-import { firstPartyLogoUrl, normalizeImageUrl } from "@/lib/images/image-url";
+import {
+  firstPartyLogoUrl,
+  isOptimizableImageUrl,
+  normalizeImageUrl,
+} from "@/lib/images/image-url";
 
 // Client child of ClusterCard used to render the cluster hero image.
 //
@@ -119,11 +123,16 @@ export function ClusterCardImage({
   // appear twice if multiple articles in a cluster happen to share a CDN
   // thumbnail -- or differ only by the stray slash. Doing this at render
   // time heals rows already stored with the bad spelling (no backfill).
+  //
+  // gif-filter (http-1): animated GIFs are dropped too. haber7 / elips-haber
+  // placeholder GIFs are 22 MB and /_next/image passes them through
+  // unmodified. The query boundaries already null them; this is defence in
+  // depth for any caller that builds the candidate list some other way.
   const candidates = Array.from(
     new Set(
       [src, ...(srcs ?? [])]
         .map(normalizeImageUrl)
-        .filter((s): s is string => s !== null),
+        .filter((s): s is string => s !== null && isOptimizableImageUrl(s)),
     ),
   );
 

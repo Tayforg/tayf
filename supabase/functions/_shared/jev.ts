@@ -37,6 +37,15 @@ export const JEV_ENDPOINT = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model
 export const JEV_PROTOCOL_VERSION = "0.0.1";
 export const JEV_SPEC_VERSION = "4";
 export const JEV_DEADLINE_MS = 50_000; // same budget as ARCHIVE_DEADLINE_MS
+/** db-1: the wall-clock budget a cron poke gets, counted from the moment
+ * migration 108's cron command queued it (the body's enqueued_at), not from
+ * when the function booted. pg_net can hold a request for a while before it
+ * is sent, so the run's own JEV_DEADLINE_MS clock alone can overrun the
+ * caller. */
+export const JEV_POKE_BUDGET_MS = 45_000;
+/** db-1: floor for the poke-bounded deadline -- a stale poke still gets
+ * enough time to open and close its run row rather than a zero budget. */
+export const JEV_MIN_DEADLINE_MS = 10_000;
 /** resilience-1021: pause before the single retry of a startup/close DB step
  * (monthTokens, startRun, finishRun). Long enough to ride out a statement
  * timeout or a brief connection reset, short enough to leave the 50s run
@@ -262,6 +271,26 @@ export interface JevResponse {
   warnings?: unknown[];
   rounding?: unknown;
   providerMetadata?: Record<string, unknown>;
+}
+
+/**
+ * db-1: the deadline for one request, derived from the poke body. The cron
+ * job (migration 108) posts `{"enqueued_at": "<ISO-8601 UTC>"}`; the budget
+ * is JEV_POKE_BUDGET_MS minus the time the request already spent queued,
+ * clamped to [JEV_MIN_DEADLINE_MS, JEV_DEADLINE_MS]. A body without a usable
+ * enqueued_at (manual pokes, `{}`, `{"mode":"audit"}`, the weekly regression
+ * and audit crons) keeps the full JEV_DEADLINE_MS. A timestamp from the
+ * future (clock skew) counts as age zero. Pure: `nowMs` is the caller's
+ * Date.now().
+ */
+export function requestDeadlineMs(body: unknown, nowMs: number): number {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return JEV_DEADLINE_MS;
+  const enqueuedAt = (body as { enqueued_at?: unknown }).enqueued_at;
+  if (typeof enqueuedAt !== "string") return JEV_DEADLINE_MS;
+  const t = Date.parse(enqueuedAt);
+  if (!Number.isFinite(t)) return JEV_DEADLINE_MS;
+  const age = Math.max(0, nowMs - t);
+  return Math.min(JEV_DEADLINE_MS, Math.max(JEV_MIN_DEADLINE_MS, JEV_POKE_BUDGET_MS - age));
 }
 
 export class JevRateLimitError extends Error {
@@ -2020,6 +2049,11 @@ interface RunCtx {
    * still closes -- as 'partial', naming them -- instead of one stage's
    * PostgREST error taking every later stage down with it. */
   failedStages: StageName[];
+  /** db-1: where the run first ran into its deadline (first hit wins), so a
+   * 'partial' close can say so in jev_shadow_runs.note instead of leaving it
+   * NULL. 'startup' means the clock was already spent before any stage began
+   * (t0 precedes monthTokens and startRun, so their time counts). */
+  deadlineHit: { stage: StageName | "startup"; elapsedMs: number } | null;
   /** 088: private per-stage ledger, mirrored into ctx.stages[stage].tokens
    * and written out via stageLedger() at every checkpoint and at close.
    * Invariant: sum of ledger tokens === ctx.runTokens at all times. */
@@ -2096,6 +2130,7 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     stopReason: null,
     callSeq: 0,
     failedStages: [],
+    deadlineHit: null,
     regression: null,
     stages: {
       articles: emptyStageStats(),
@@ -2126,6 +2161,11 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
 
 function isPastDeadline(ctx: RunCtx): boolean {
   return ctx.ports.now() - ctx.t0 > ctx.deadlineMs;
+}
+
+/** db-1: remember the FIRST place the deadline was hit. */
+function noteDeadlineHit(ctx: RunCtx, stage: StageName | "startup"): void {
+  ctx.deadlineHit ??= { stage, elapsedMs: Math.round(ctx.ports.now() - ctx.t0) };
 }
 
 function nextCallId(ctx: RunCtx): string {
@@ -2277,6 +2317,7 @@ async function processStage<T>(
         if (isPastDeadline(ctx)) throw new JevDeadlineError(stageName);
       } catch (err) {
         if (err instanceof JevDeadlineError) {
+          noteDeadlineHit(ctx, stageName);
           ctx.stopReason = "partial";
           return;
         }
@@ -3326,16 +3367,20 @@ async function runStages(ctx: RunCtx, nowIso: string | undefined): Promise<void>
             { name: "tickers", run: () => runTickersStage(ctx, sinceIso) },
           ];
 
+  let lastStage: StageName | "startup" = "startup";
   for (const { name, run } of stageDefs) {
     if (ctx.stopReason) break;
     if (isPastDeadline(ctx)) {
+      noteDeadlineHit(ctx, lastStage);
       ctx.stopReason = "partial";
       break;
     }
+    lastStage = name;
     try {
       await run();
     } catch (err) {
       if (err instanceof JevDeadlineError) {
+        noteDeadlineHit(ctx, name);
         ctx.stopReason = "partial";
         break;
       }
@@ -3488,6 +3533,12 @@ export async function runJevShadow(
       if (ctx.failedStages.length > 0) {
         if (status === "ok") status = "partial";
         note = `stage failed: ${ctx.failedStages.join(",")}`;
+      }
+      // db-1: a deadline stop used to close with note NULL, which is what made
+      // the 2026-10-22 stall unreadable from the table. A failed-stage note
+      // wins; this one is plain text -- no URL, no error text.
+      if (status === "partial" && note === null && ctx.deadlineHit) {
+        note = `deadline: ${ctx.deadlineHit.stage} at ${ctx.deadlineHit.elapsedMs}ms, calls=${ctx.calls}`;
       }
     }
   } catch (err) {

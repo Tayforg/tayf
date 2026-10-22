@@ -19,7 +19,7 @@
 // the image extractor are ported verbatim — they are dialect, not algorithm.
 
 import { sha1, strictFingerprint } from "../cluster/fingerprint.ts";
-import { normalizeImageUrl } from "../image-url.ts";
+import { isOptimizableImageUrl, normalizeImageUrl } from "../image-url.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 import { isLegalNotice } from "./legal-notice.ts";
 
@@ -129,6 +129,9 @@ function classifyCategory(
 function isValidImageUrl(url: string): boolean {
   if (!url || url.length < 10) return false;
   if (url.startsWith("data:")) return false;
+  // gif-filter (http-1): never store an animated GIF (haber7 / elips-haber
+  // ship a 22.3 MB placeholder that /_next/image passes through unmodified).
+  if (!isOptimizableImageUrl(url)) return false;
   if (/favicon|icon|logo|pixel|tracker|1x1|spacer/i.test(url)) return false;
   // ingest-hygiene: must also be a repairable http(s) URL (shared with the
   // render side) -- a relative path or ftp: value is not a usable image.
@@ -140,6 +143,9 @@ function getImageEnclosure(item: RawFeedItem): string | null {
   if (!item.enclosure?.url) return null;
   const type = item.enclosure.type ?? "";
   if (type && !type.startsWith("image/")) return null;
+  // gif-filter (http-1): an `image/gif` enclosure is skipped even when its
+  // URL has no `.gif` extension (the URL check below cannot see those).
+  if (type.toLowerCase() === "image/gif") return null;
   return item.enclosure.url;
 }
 
@@ -176,8 +182,10 @@ function firstNonVideoCandidate(candidates: ReadonlyArray<string | null | undefi
   for (const c of candidates) {
     // ingest-hygiene: repair (`//host/x`, `https://h//x`) or skip (relative,
     // data:, ftp:) each candidate BEFORE the video / thumbnail checks.
+    // gif-filter (http-1): animated GIFs are skipped so the next candidate
+    // (or null) is stored instead of a 22 MB placeholder.
     const normalized = normalizeImageUrl(c);
-    if (normalized && !isVideoUrl(normalized)) {
+    if (normalized && !isVideoUrl(normalized) && isOptimizableImageUrl(normalized)) {
       return upgradeThumbnailUrl(normalized);
     }
   }

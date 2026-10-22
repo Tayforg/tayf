@@ -5,7 +5,7 @@ import { ArrowLeft, ExternalLink } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
 import { BIAS_LABELS } from "@/lib/bias/config";
-import { firstPartyLogoUrl } from "@/lib/images/image-url";
+import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { LabelCard } from "@/components/source/label-card";
@@ -174,17 +174,15 @@ export default async function SourceProfilePage({ params }: PageProps) {
           detail hero so the two profile-style pages feel related. */}
       <header className="rounded-xl border border-border/60 bg-card/40 p-5 sm:p-6">
         <div className="flex items-start gap-4 sm:gap-5">
-          {source.logo_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={firstPartyLogoUrl(source.logo_url, 128) ?? source.logo_url}
-              alt=""
-              className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 object-contain bg-background ring-1 ring-brand/20"
-              loading="eager"
-            />
-          ) : (
-            <div className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 bg-muted/60 ring-1 ring-brand/20" />
-          )}
+          <SourceLogo
+            logoUrl={source.logo_url}
+            name={source.name}
+            width={128}
+            loading="eager"
+            className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 object-contain bg-background ring-1 ring-brand/20"
+            fallback="square"
+            fallbackClassName="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 bg-muted/60 ring-1 ring-brand/20"
+          />
 
           <div className="min-w-0 flex-1 space-y-2">
             <h1 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight leading-tight truncate">

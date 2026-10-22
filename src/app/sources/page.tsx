@@ -20,7 +20,7 @@ import { SourceChips } from "@/components/source/source-chips";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { BIAS_LABELS, BIAS_ORDER } from "@/lib/bias/config";
-import { firstPartyLogoUrl } from "@/lib/images/image-url";
+import { SourceLogo } from "@/components/source/source-logo";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { countClassifiedSources } from "@/lib/sources/classification";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
@@ -396,17 +396,13 @@ export function SourceDirectory({
                     aria-label={`${source.name} profili`}
                   >
                     <div className="flex items-start gap-3">
-                      {source.logo_url ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={firstPartyLogoUrl(source.logo_url) ?? source.logo_url}
-                          alt=""
-                          className="h-8 w-8 rounded shrink-0 object-contain bg-background ring-1 ring-border/30"
-                          loading="lazy"
-                        />
-                      ) : (
-                        <div className="h-8 w-8 rounded shrink-0 bg-muted/60 ring-1 ring-border/30" />
-                      )}
+                      <SourceLogo
+                        logoUrl={source.logo_url}
+                        name={source.name}
+                        className="h-8 w-8 rounded shrink-0 object-contain bg-background ring-1 ring-border/30"
+                        fallback="square"
+                        fallbackClassName="h-8 w-8 rounded shrink-0 bg-muted/60 ring-1 ring-border/30"
+                      />
                       <div className="min-w-0 flex-1 space-y-1">
                         <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-5">
                           {source.name}

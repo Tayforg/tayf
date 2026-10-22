@@ -37,6 +37,7 @@ vi.mock("@/lib/trends/daily-zones", async () => {
 import TrendsPage from "./page";
 import { WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { ZONE_META } from "@/lib/bias/config";
+import { ScrollToEnd } from "@/components/trends/scroll-to-end";
 
 /** Collects every string/number leaf under a React element tree. */
 function collectText(node: unknown, out: string[] = []): string[] {
@@ -219,6 +220,37 @@ describe("/trends page — never noindex (the unavailable state is memoised)", (
     const tree = await TrendsPage();
 
     expect(noindexMetas(tree)).toHaveLength(0);
+  });
+});
+
+describe("/trends page — chart scroller opens on the newest days (browser-5)", () => {
+  it("wraps the server-rendered svg in <ScrollToEnd> on the data branch", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const tree = await TrendsPage();
+
+    const scrollers = collectElements(tree).filter(
+      (el) => el.type === ScrollToEnd,
+    );
+    expect(scrollers).toHaveLength(1);
+    const scroller = scrollers[0]!;
+    // The scroller keeps the original overflow container classes.
+    expect(scroller.props?.className).toBe(
+      "w-full overflow-x-auto spectrum-glow",
+    );
+    // The chart stays server-rendered as the scroller's children.
+    const svgInside = collectElements(scroller.props?.children).filter(
+      (el) => el.type === "svg",
+    );
+    expect(svgInside).toHaveLength(1);
+  });
+
+  it("does not render a scroller on the unavailable branch (no chart)", async () => {
+    mockBuckets = null;
+
+    const tree = await TrendsPage();
+
+    expect(collectElements(tree).filter((el) => el.type === ScrollToEnd)).toHaveLength(0);
   });
 });
 

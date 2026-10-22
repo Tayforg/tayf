@@ -1,9 +1,9 @@
 import { ExternalLink } from "lucide-react";
 
 import { ZONE_META } from "@/lib/bias/config";
+import { SourceLogo } from "@/components/source/source-logo";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { groupMembersByZone } from "@/lib/clusters/framing";
-import { firstPartyLogoUrl } from "@/lib/images/image-url";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { MediaDnaZone } from "@/types";
@@ -65,17 +65,13 @@ function HeadlineEntry({
       >
         <span className="flex items-center gap-1.5">
           {member.source.logo_url ? (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img
-              src={
-                firstPartyLogoUrl(member.source.logo_url) ??
-                member.source.logo_url
-              }
-              alt=""
-              width={14}
-              height={14}
+            <SourceLogo
+              logoUrl={member.source.logo_url}
+              name={member.source.name}
+              size={14}
               className="h-3.5 w-3.5 rounded shrink-0"
-              loading="lazy"
+              fallback="initials"
+              fallbackClassName="inline-flex h-3.5 w-3.5 items-center justify-center rounded bg-muted text-[8px] font-bold text-muted-foreground shrink-0"
             />
           ) : (
             <span

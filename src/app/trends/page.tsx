@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { ScrollToEnd } from "@/components/trends/scroll-to-end";
 import { PageHero } from "@/components/ui/page-hero";
 
 // Own metadata so the page doesn't inherit the root layout's title and
@@ -160,7 +161,7 @@ export default async function TrendsPage() {
           </ul>
         </div>
 
-        <div className="w-full overflow-x-auto spectrum-glow">
+        <ScrollToEnd className="w-full overflow-x-auto spectrum-glow">
           <svg
             viewBox={`0 0 ${CHART_W} ${CHART_H}`}
             role="img"
@@ -269,7 +270,7 @@ export default async function TrendsPage() {
               })}
             </g>
           </svg>
-        </div>
+        </ScrollToEnd>
 
         {totalArticles === 0 ? (
           <p className="text-xs text-muted-foreground text-center pt-2">

@@ -24,6 +24,27 @@ describe("articleImageEligible", () => {
   it("not eligible when article.image_url is null, regardless of the flag", () => {
     expect(articleImageEligible(noImage, { image_allowed: true })).toBe(false);
   });
+
+  // gif-filter (http-1): the 22 MB haber7 / elips-haber placeholder GIFs pass
+  // through /_next/image unmodified, so an animated GIF is never a usable
+  // cover image even when the source allows image reuse.
+  it("not eligible when article.image_url is a .gif, even when image_allowed is true", () => {
+    expect(
+      articleImageEligible({ image_url: "https://h/a.gif" }, { image_allowed: true }),
+    ).toBe(false);
+    expect(
+      articleImageEligible({ image_url: "https://h/a.GIF?x=1" }, { image_allowed: undefined }),
+    ).toBe(false);
+  });
+
+  it("still eligible for a .jpg and for a URL that only mentions gif in its query", () => {
+    expect(
+      articleImageEligible({ image_url: "https://h/a.jpg" }, { image_allowed: true }),
+    ).toBe(true);
+    expect(
+      articleImageEligible({ image_url: "https://h/img?format=gif" }, { image_allowed: true }),
+    ).toBe(true);
+  });
 });
 
 describe("articleExcerptEligible", () => {

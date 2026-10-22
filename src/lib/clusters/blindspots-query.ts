@@ -8,6 +8,7 @@ import type {
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { BLINDSPOT } from "@/lib/bias/config";
 import { attemptCached } from "@/lib/cache-resilience";
+import { isOptimizableImageUrl } from "@/lib/images/image-url";
 import {
   dedupeBySource,
   passesFeedFilters,
@@ -96,7 +97,7 @@ const EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribut
          cluster_articles (
            articles (
              id, title, url, image_url, published_at, source_id, category, content_hash, politics_admitted_at,
-             sources ( id, name, bias, kind, image_allowed, excerpt_allowed )
+             sources ( id, name, bias, logo_url, kind, image_allowed, excerpt_allowed )
            )
          )`;
 
@@ -188,6 +189,10 @@ function toBlindspotBundle(
         id: m.sources.id,
         name: m.sources.name,
         bias: m.sources.bias,
+        // browser-3: the headline rows render a favicon from this field
+        // (ClusterCardSource.logo_url); it was missing from the embed, so
+        // every /blindspots row showed no logo.
+        logo_url: m.sources.logo_url ?? null,
       });
     }
   }
@@ -213,7 +218,12 @@ function toBlindspotBundle(
       // photos gets image_allowed = false — null the URL here so it can
       // never surface as a hero/card image candidate. `undefined` (legacy
       // rows/fixtures predating migration 047) is treated as allowed.
-      image_url: m.sources?.image_allowed === false ? null : m.image_url,
+      // gif-filter (http-1): an animated GIF is nulled too (22 MB haber7 /
+      // elips-haber placeholder that /_next/image passes through unmodified).
+      image_url:
+        m.sources?.image_allowed === false || !isOptimizableImageUrl(m.image_url)
+          ? null
+          : m.image_url,
       published_at: m.published_at,
       source_id: m.source_id,
     })),

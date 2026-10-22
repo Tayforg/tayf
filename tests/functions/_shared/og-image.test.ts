@@ -42,6 +42,22 @@ describe("extractHeroImageFromHtml: image URL normalisation", () => {
   it("returns null for empty html", () => {
     expect(extractHeroImageFromHtml("")).toBeNull();
   });
+
+  // gif-filter (http-1): a 22 MB animated placeholder GIF must never be
+  // backfilled into articles.image_url.
+  it("skips a .gif og:image and returns the jpg twitter:image", () => {
+    const html =
+      '<meta property="og:image" content="https://i12.haber7.net/x/rlQtL_1579004365_7688.gif">' +
+      '<meta name="twitter:image" content="https://cdn.test/tw/a.jpg">';
+    expect(extractHeroImageFromHtml(html)).toBe("https://cdn.test/tw/a.jpg");
+  });
+
+  it("returns null when every candidate is a .gif", () => {
+    const html =
+      '<meta property="og:image" content="https://cdn.test/a.gif">' +
+      '<meta name="twitter:image" content="https://cdn.test/b.GIF?x=1">';
+    expect(extractHeroImageFromHtml(html)).toBeNull();
+  });
 });
 
 describe("isValidImageUrl keeps its rules", () => {
@@ -53,5 +69,16 @@ describe("isValidImageUrl keeps its rules", () => {
 
   it("accepts a plain https image URL", () => {
     expect(isValidImageUrl("https://cdn.test/photos/a.jpg")).toBe(true);
+  });
+
+  it("rejects an animated .gif (gif-filter, http-1)", () => {
+    expect(isValidImageUrl("https://h/a.gif")).toBe(false);
+    expect(isValidImageUrl("https://cdn.test/photos/A.GIF?x=1")).toBe(false);
+    expect(isValidImageUrl("https://i12.haber7.net/x/rlQtL_1579004365_7688.gif")).toBe(false);
+  });
+
+  it("still accepts a URL that only mentions gif in its query string or as .gifv", () => {
+    expect(isValidImageUrl("https://cdn.test/img?format=gif")).toBe(true);
+    expect(isValidImageUrl("https://cdn.test/a.gifv")).toBe(true);
   });
 });

@@ -16,6 +16,12 @@
 // remains draining the oldest unscored backlog (pass 2, oldest-first, only
 // when pass 1 didn't already fill the limit and the window isn't already
 // exhausted). Total fetchPage calls never exceed maxPages.
+//
+// db-1: `isPastDeadline` (optional) is consulted before EVERY fetchPage in both
+// passes. Once it is true the pager stops and returns what it has collected
+// so far (stoppedAtDeadline = true), so a cold-cache page fetch can no longer
+// start after the run's deadline and drag the response past the caller's
+// timeout. The caller still gets a usable partial list.
 export type PendingOrder = "desc" | "asc";
 
 export interface CollectPendingArticlesOpts<R extends { id: string }> {
@@ -25,6 +31,8 @@ export interface CollectPendingArticlesOpts<R extends { id: string }> {
   freshMaxPages: number;
   fetchPage(order: PendingOrder, from: number, to: number): Promise<R[]>;
   seen(ids: string[]): Promise<Set<string>>;
+  /** db-1: true once the run's deadline has passed; checked before every page. */
+  isPastDeadline?: () => boolean;
 }
 
 export interface CollectPendingArticlesResult<R> {
@@ -32,12 +40,15 @@ export interface CollectPendingArticlesResult<R> {
   freshRows: number;
   backfillRows: number;
   pagesRead: number;
+  /** db-1: true when isPastDeadline stopped the pager before it finished. */
+  stoppedAtDeadline: boolean;
 }
 
 export async function collectPendingArticles<R extends { id: string }>(
   opts: CollectPendingArticlesOpts<R>,
 ): Promise<CollectPendingArticlesResult<R>> {
   const { limit, pageSize, maxPages, freshMaxPages, fetchPage, seen } = opts;
+  const isPastDeadline = opts.isPastDeadline ?? (() => false);
 
   const out: R[] = [];
   const picked = new Set<string>();
@@ -45,11 +56,16 @@ export async function collectPendingArticles<R extends { id: string }>(
   let freshRows = 0;
   let backfillRows = 0;
   let windowExhausted = false;
+  let stoppedAtDeadline = false;
 
   // Pass 1 -- fresh: newest-first, capped at freshMaxPages (and never past
   // the overall maxPages budget).
   const freshCap = Math.min(freshMaxPages, maxPages);
   for (let page = 0; page < freshCap && out.length < limit; page++) {
+    if (isPastDeadline()) {
+      stoppedAtDeadline = true;
+      break;
+    }
     const from = page * pageSize;
     const to = from + pageSize - 1;
     const rows = await fetchPage("desc", from, to);
@@ -76,9 +92,13 @@ export async function collectPendingArticles<R extends { id: string }>(
   // Pass 2 -- backlog: oldest-first, only when pass 1 didn't fill the
   // limit and the window isn't already known-exhausted, with whatever page
   // budget pass 1 left behind.
-  if (out.length < limit && !windowExhausted) {
+  if (out.length < limit && !windowExhausted && !stoppedAtDeadline) {
     const remainingPages = maxPages - pagesRead;
     for (let page = 0; page < remainingPages && out.length < limit; page++) {
+      if (isPastDeadline()) {
+        stoppedAtDeadline = true;
+        break;
+      }
       const from = page * pageSize;
       const to = from + pageSize - 1;
       const rows = await fetchPage("asc", from, to);
@@ -97,5 +117,5 @@ export async function collectPendingArticles<R extends { id: string }>(
     }
   }
 
-  return { rows: out, freshRows, backfillRows, pagesRead };
+  return { rows: out, freshRows, backfillRows, pagesRead, stoppedAtDeadline };
 }

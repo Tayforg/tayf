@@ -31,7 +31,6 @@ import {
   type JevBlindspotCandidateQuery,
   type JevBlindspotClusterRow,
   type JevClusterRow,
-  JEV_DEADLINE_MS,
   JEV_ENDPOINT,
   JEV_MAX_RETRIES,
   JEV_MODEL,
@@ -42,6 +41,7 @@ import {
   type JevGoldLabelRow,
   type JevKapRow,
   JevDbUnavailableError,
+  JevDeadlineError,
   type JevMemberRow,
   type JevPairCandidate,
   type JevPorts,
@@ -62,6 +62,7 @@ import {
   jevShadowErrorEnvelope,
   offendingQuestionIds,
   parseJevResponse,
+  requestDeadlineMs,
   retryDelayMs,
   runJevShadow,
   parseArticlePack,
@@ -219,13 +220,18 @@ function flattenEmbed<T>(value: T | T[] | null): T | null {
 // stays singular for the whole file.
 // ---------------------------------------------------------------------------
 
-function makePorts(apiKey: string): JevPorts {
+function makePorts(apiKey: string, deadlineAt?: number): JevPorts {
   const supabase = createServiceClient();
 
   async function anti_join(task: string, ids: readonly string[]): Promise<Set<string>> {
     if (ids.length === 0) return new Set();
     const seen = new Set<string>();
     for (let i = 0; i < ids.length; i += JEV_ID_CHUNK) {
+      // db-1: a cold-cache chunk can burn the whole 8 s statement timeout, and
+      // a few of them in a row used to run the request past the caller's
+      // pg_net timeout. Past the deadline, stop; runStages maps this to a
+      // 'partial' close with a "deadline: ..." note.
+      if (deadlineAt !== undefined && Date.now() > deadlineAt) throw new JevDeadlineError(`anti_join ${task}`);
       const chunk = ids.slice(i, i + JEV_ID_CHUNK) as string[];
       const { data, error } = await supabase
         .from("jev_shadow_predictions")
@@ -368,10 +374,11 @@ function makePorts(apiKey: string): JevPorts {
           return (data ?? []) as unknown as RawArticleFetchRow[];
         },
         seen: (ids) => anti_join("politics", ids),
+        isPastDeadline: () => deadlineAt !== undefined && Date.now() > deadlineAt,
       });
 
       console.log(
-        `[jev-shadow] pending articles fresh=${result.freshRows} backlog=${result.backfillRows} pages=${result.pagesRead}`,
+        `[jev-shadow] pending articles fresh=${result.freshRows} backlog=${result.backfillRows} pages=${result.pagesRead} deadline_stop=${result.stoppedAtDeadline}`,
       );
 
       return result.rows.map(mapRow);
@@ -1037,8 +1044,14 @@ Deno.serve(withSentry("jev-shadow", async (req: Request) => {
     const rawCap = Deno.env.get("JEV_MONTHLY_TOKEN_CAP");
     const parsedCap = rawCap === undefined || rawCap.trim() === "" ? NaN : Number(rawCap);
     const cap = Number.isFinite(parsedCap) && parsedCap >= 0 ? parsedCap : JEV_MONTHLY_TOKEN_CAP_DEFAULT;
-    const result = await runJevShadow(makePorts(apiKey), {
-      deadlineMs: JEV_DEADLINE_MS,
+    // db-1: the cron poke carries `enqueued_at` (migration 108); the budget is
+    // what is left of JEV_POKE_BUDGET_MS after the time it sat in pg_net's
+    // queue, never more than JEV_DEADLINE_MS. The same instant bounds the
+    // adapter's own DB paging (anti_join, fetchPendingArticles) below.
+    const deadlineMs = requestDeadlineMs(parsed, Date.now());
+    const deadlineAt = Date.now() + deadlineMs;
+    const result = await runJevShadow(makePorts(apiKey, deadlineAt), {
+      deadlineMs,
       cap,
       mode,
       articlePack: parseArticlePack(Deno.env.get("JEV_ARTICLE_PACK")),

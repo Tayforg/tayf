@@ -266,6 +266,95 @@ describe("normalize.ts ingest-hygiene: image URL normalisation", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// gif-filter (http-1): haber7 and elips-haber advertise a 22.3 MB animated
+// placeholder GIF as the feed image. /_next/image passes animated GIFs through
+// unmodified, so ingest stores NULL (not the .gif) and lets the next
+// candidate -- or the logo-fallback tier at render time -- take over.
+// ---------------------------------------------------------------------------
+describe("normalize.ts gif-filter: animated GIFs are never stored as image_url", () => {
+  const GIF = "https://i12.haber7.net/x/rlQtL_1579004365_7688.gif";
+
+  it("prefers a jpg media:thumbnail over a .gif enclosure", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif1",
+      enclosure: { url: GIF },
+      mediaThumbnail: { $: { url: "https://cdn.test/poster.jpg" } },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBe("https://cdn.test/poster.jpg");
+  });
+
+  it("returns null image_url for a .gif-only enclosure", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif2",
+      enclosure: { url: GIF, type: "image/gif" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("skips an image/gif enclosure even when the URL has no .gif extension", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif3",
+      enclosure: { url: "https://cdn.test/media/12345", type: "image/gif" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("treats the enclosure type case-insensitively", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif3b",
+      enclosure: { url: "https://cdn.test/media/12345", type: "Image/GIF" },
+      mediaThumbnail: { $: { url: "https://cdn.test/b.jpg" } },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/b.jpg");
+  });
+
+  it("returns null for an inline <img src> that is a .gif", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif4",
+      content: '<p><img src="https://h/a.gif" alt=""></p>',
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("returns null for an itemImage that is a .gif", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif5",
+      itemImage: "https://cdn.test/photos/item.GIF?v=1",
+    });
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("skips a .gif media:content and uses the media:group thumbnail", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif6",
+      mediaContent: { $: { url: GIF } },
+      mediaGroup: { "media:thumbnail": { $: { url: "https://cdn.test/g.jpg" } } },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/g.jpg");
+  });
+
+  it("still stores a jpg enclosure typed image/jpeg (regression)", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/gif7",
+      enclosure: { url: "https://cdn.test/a.jpg", type: "image/jpeg" },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/a.jpg");
+  });
+});
+
 describe("normalize.ts ingest-hygiene: legal-notice filter", () => {
   it("returns null for a court notice title", () => {
     const row = mod!.normalizeItem(source, {

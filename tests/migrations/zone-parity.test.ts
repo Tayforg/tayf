@@ -465,6 +465,11 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       // the own-zone lookup and the zmap CTE); pinned by
       // tests/migrations/106-source-karne-resilient.test.ts.
       "106_source_karne_resilient.sql",
+      // 108 re-creates ops_health_report() once more (103's body verbatim
+      // except checks 5, jev_alerts_unacked_72h and 12), so it repeats the
+      // same VALUES-list copy of BIAS_TO_ZONE; pinned by
+      // tests/migrations/108-jev-stall-check-v2.test.ts.
+      "108_jev_stall_check_v2.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

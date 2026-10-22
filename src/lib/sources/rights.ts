@@ -10,17 +10,29 @@
 // src/lib/clusters/summary-attribution.ts:69 and
 // src/lib/clusters/politics-query.ts:585.
 
+import { isOptimizableImageUrl } from "@/lib/images/image-url";
+
 /**
  * Whether an article's cover image may be shown, given its source's
  * `image_allowed` flag. `undefined`/`null` (not withdrawn) and `true` are
  * eligible; only an explicit `false` is not. A null/missing `image_url`
  * is never eligible regardless of the flag — there's nothing to show.
+ *
+ * gif-filter (http-1): an animated GIF is never eligible either. haber7 and
+ * elips-haber serve a 22 MB placeholder GIF that /_next/image passes through
+ * unmodified, so the raw article `<img>` on /source/[slug] (which gates on
+ * this function) must not render it. Existing rows heal at render time; no
+ * backfill.
  */
 export function articleImageEligible<A extends { image_url: string | null }>(
   article: A,
   source: { image_allowed?: boolean | null },
 ): article is A & { image_url: string } {
-  return Boolean(article.image_url) && source.image_allowed !== false;
+  return (
+    Boolean(article.image_url) &&
+    isOptimizableImageUrl(article.image_url) &&
+    source.image_allowed !== false
+  );
 }
 
 /**

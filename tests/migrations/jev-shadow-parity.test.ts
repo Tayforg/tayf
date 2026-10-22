@@ -859,12 +859,12 @@ describe("jev-shadow/index.ts HTTP envelope ordering + kill switch (JEV-A21)", (
     const iBearer = indexTs.indexOf("requireServiceRoleBearer(req)");
     const iDisabled = indexTs.indexOf('Deno.env.get("JEV_DISABLED")');
     const iApiKey = indexTs.indexOf('Deno.env.get("AI_GATEWAY_API_KEY")');
-    const iMakePorts = indexTs.indexOf("makePorts(apiKey)");
+    const iMakePorts = indexTs.indexOf("makePorts(apiKey, deadlineAt)");
     for (const [label, idx] of [
       ["requireServiceRoleBearer(req)", iBearer],
       ['Deno.env.get("JEV_DISABLED")', iDisabled],
       ['Deno.env.get("AI_GATEWAY_API_KEY")', iApiKey],
-      ["makePorts(apiKey)", iMakePorts],
+      ["makePorts(apiKey, deadlineAt)", iMakePorts],
     ] as const) {
       expect(idx, `could not find "${label}" in jev-shadow/index.ts`).toBeGreaterThan(-1);
     }

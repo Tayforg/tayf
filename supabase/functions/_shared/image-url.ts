@@ -41,3 +41,30 @@ export function normalizeImageUrl(u: string | null | undefined): string | null {
   if (LEADING_PATH_SLASHES.test(s)) return s.replace(LEADING_PATH_SLASHES, "$1/");
   return s;
 }
+
+/**
+ * Whether `u` may be handed to `next/image` / an `<img>` as a story image.
+ *
+ * False for an animated GIF (path ending in `.gif`, case-insensitive; the
+ * query string and fragment are ignored, so `a.gif?x=1` is out but
+ * `img?format=gif` and `a.gifv` are not) and for null / undefined / empty
+ * input.
+ *
+ * Why: haber7 and elips-haber advertise a 22.3 MB animated placeholder GIF
+ * as their feed image. `/_next/image` passes animated GIFs through
+ * UNMODIFIED (it never re-encodes them), so every card that picks one ships
+ * 22 MB to the browser. The filter therefore sits at ingest, at each
+ * server-side query boundary (so the URL never reaches the RSC/HTML payload)
+ * and in `ClusterCardImage` as defence in depth.
+ *
+ * Deliberately a pure string check: it does not normalise or parse, so the
+ * verdict is the same for `//cdn/a.gif`, `https://h//a.gif` and
+ * `https://h/a.gif`.
+ */
+export function isOptimizableImageUrl(u: string | null | undefined): boolean {
+  if (typeof u !== "string") return false;
+  const s = u.trim();
+  if (!s) return false;
+  const path = s.split(/[?#]/, 1)[0] ?? "";
+  return !path.toLowerCase().endsWith(".gif");
+}

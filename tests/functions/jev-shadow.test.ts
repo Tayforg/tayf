@@ -11,12 +11,15 @@ import {
   JEV_CLUSTER_MEMBER_MAX,
   JEV_CONCURRENCY,
   JEV_DB_RETRY_DELAY_MS,
+  JEV_DEADLINE_MS,
   JEV_DESC_CLAMP,
+  JEV_MIN_DEADLINE_MS,
   JEV_KAP_LIMIT,
   JEV_MODEL,
   JEV_MONTHLY_TOKEN_CAP_DEFAULT,
   JEV_NEUTRAL_MODEL_ID,
   JEV_PAIRS_PER_CALL,
+  JEV_POKE_BUDGET_MS,
   JEV_PREVIEW_CLAMP,
   JEV_PROB_MAX_NUMERIC,
   JEV_QUESTION_REGISTRY,
@@ -71,6 +74,7 @@ import {
   regressionAnswerRows,
   regressionArticleRow,
   regressionPair,
+  requestDeadlineMs,
   retryDelayMs,
   runJevShadow,
   sampleClusterPairs,
@@ -4346,4 +4350,188 @@ describe("JEV-B article pack (full | slim)", () => {
       expect(rec.startRegressionRunCalls).toEqual([version]);
     });
   }
+});
+
+// --- db-1: a deadline stop leaves a plain-text note on the run row -----------------------
+
+describe("deadline notes (db-1)", () => {
+  /** A clock that reads 0 until `jump()` is called, then 60_000. */
+  function jumpClock() {
+    let t = 0;
+    return { now: () => t, jump: () => void (t = 60_000) };
+  }
+
+  it("(a) a deadline already spent before the first stage notes 'startup' and the elapsed time", async () => {
+    const ticks = [0, 999_999];
+    let i = 0;
+    const rec = makePorts({ now: () => ticks[Math.min(i++, ticks.length - 1)] ?? 0 });
+
+    const result = await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+
+    expect(result.status).toBe("partial");
+    expect(rec.finishRunCalls).toHaveLength(1);
+    expect(rec.finishRunCalls[0]?.patch.status).toBe("partial");
+    expect(rec.finishRunCalls[0]?.patch.note).toBe("deadline: startup at 999999ms, calls=0");
+  });
+
+  it("(b) the clock passing the deadline inside the articles stage notes 'articles' and makes no evaluate call", async () => {
+    const clock = jumpClock();
+    const rec = makePorts({
+      now: clock.now,
+      fetchPendingArticles: async () => {
+        clock.jump();
+        return [articleRow({ id: "a1" }), articleRow({ id: "a2" }), articleRow({ id: "a3" })];
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+
+    expect(result.status).toBe("partial");
+    expect(rec.evaluateCalls).toHaveLength(0);
+    expect(rec.finishRunCalls[0]?.patch.note).toBe("deadline: articles at 60000ms, calls=0");
+  });
+
+  it("(c) an empty fetch followed by a clock jump names the last stage that ran", async () => {
+    const clock = jumpClock();
+    const rec = makePorts({
+      now: clock.now,
+      fetchPendingArticles: async () => {
+        clock.jump();
+        return [];
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+
+    expect(result.status).toBe("partial");
+    const note = rec.finishRunCalls[0]?.patch.note ?? "";
+    expect(note.startsWith("deadline: articles at")).toBe(true);
+    // the next stage never started
+    expect(rec.fetchRecentClustersCalls).toHaveLength(0);
+  });
+
+  it("(d) a JevDeadlineError thrown from a fetch (the anti-join) closes partial and names that stage", async () => {
+    const rec = makePorts({
+      fetchPendingKap: async () => {
+        throw new JevDeadlineError("anti_join kap_materiality");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+
+    expect(result.status).toBe("partial");
+    expect(result.errors).toBe(0);
+    const note = rec.finishRunCalls[0]?.patch.note ?? "";
+    expect(note.startsWith("deadline: kap at")).toBe(true);
+    // stages after the one that hit the deadline never ran
+    expect(rec.fetchPendingTitleVersionsCalls).toHaveLength(0);
+  });
+
+  it("(e) regression mode keeps its 'regression; ' prefix in front of the deadline note", async () => {
+    const ticks = [0, 999_999];
+    let i = 0;
+    const rec = makePorts({ now: () => ticks[Math.min(i++, ticks.length - 1)] ?? 0 });
+
+    const result = await runJevShadow(rec.ports, { mode: "regression", deadlineMs: 50_000 });
+
+    expect(result.status).toBe("partial");
+    expect(rec.finishRunCalls[0]?.patch.note?.startsWith("regression; deadline: ")).toBe(true);
+  });
+
+  it("(f) a failed stage keeps its own note, even when a deadline hit follows it", async () => {
+    const clock = jumpClock();
+    const rec = makePorts({
+      now: clock.now,
+      fetchPendingArticles: async () => {
+        clock.jump();
+        throw new Error("boom");
+      },
+    });
+
+    const result = await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+
+    expect(result.status).toBe("partial");
+    expect(rec.finishRunCalls[0]?.patch.note).toBe("stage failed: articles");
+  });
+
+  it("a run that finishes inside the deadline has no note", async () => {
+    const rec = makePorts();
+    const result = await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+    expect(result.status).toBe("ok");
+    expect(rec.finishRunCalls[0]?.patch.note).toBeNull();
+  });
+
+  it("the first deadline hit wins: a later hit does not rewrite the note", async () => {
+    const clock = jumpClock();
+    const rec = makePorts({
+      now: clock.now,
+      fetchPendingArticles: async () => {
+        clock.jump();
+        return [articleRow({ id: "a1" })];
+      },
+    });
+    await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+    // processStage recorded 'articles'; runStages' before-stage check for the
+    // next stage must not overwrite it.
+    expect(rec.finishRunCalls[0]?.patch.note).toBe("deadline: articles at 60000ms, calls=0");
+  });
+
+  it("the note is plain text: no URL, no error text", async () => {
+    const rec = makePorts({
+      fetchPendingKap: async () => {
+        throw new JevDeadlineError("anti_join https://secret.example/?key=abc");
+      },
+    });
+    await runJevShadow(rec.ports, { deadlineMs: 50_000 });
+    const note = rec.finishRunCalls[0]?.patch.note ?? "";
+    expect(note).toMatch(/^deadline: kap at \d+ms, calls=0$/);
+    expect(note).not.toMatch(/https?:|secret|key=/);
+  });
+});
+
+describe("requestDeadlineMs (db-1)", () => {
+  const NOW = Date.parse("2026-10-22T23:50:05.123Z");
+  const agoMs = (ms: number) => ({ enqueued_at: new Date(NOW - ms).toISOString() });
+
+  it("exposes the poke budget and floor", () => {
+    expect(JEV_DEADLINE_MS).toBe(50_000);
+    expect(JEV_POKE_BUDGET_MS).toBe(45_000);
+    expect(JEV_MIN_DEADLINE_MS).toBe(10_000);
+  });
+
+  it("returns the full deadline when the body carries no usable enqueued_at", () => {
+    expect(requestDeadlineMs(undefined, NOW)).toBe(50_000);
+    expect(requestDeadlineMs(null, NOW)).toBe(50_000);
+    expect(requestDeadlineMs({}, NOW)).toBe(50_000);
+    expect(requestDeadlineMs({ mode: "audit" }, NOW)).toBe(50_000);
+    expect(requestDeadlineMs("garbage", NOW)).toBe(50_000);
+    expect(requestDeadlineMs(12345, NOW)).toBe(50_000);
+    expect(requestDeadlineMs([], NOW)).toBe(50_000);
+    expect(requestDeadlineMs({ enqueued_at: "not-a-date" }, NOW)).toBe(50_000);
+    expect(requestDeadlineMs({ enqueued_at: 1_700_000_000_000 }, NOW)).toBe(50_000);
+    expect(requestDeadlineMs({ enqueued_at: null }, NOW)).toBe(50_000);
+  });
+
+  it("spends the poke budget minus the queue age", () => {
+    expect(requestDeadlineMs(agoMs(5_000), NOW)).toBe(40_000);
+    expect(requestDeadlineMs(agoMs(0), NOW)).toBe(45_000);
+    expect(requestDeadlineMs(agoMs(30_000), NOW)).toBe(15_000);
+  });
+
+  it("never drops below the floor, however stale the poke is", () => {
+    expect(requestDeadlineMs(agoMs(35_000), NOW)).toBe(10_000);
+    expect(requestDeadlineMs(agoMs(40_000), NOW)).toBe(10_000);
+    expect(requestDeadlineMs(agoMs(120_000), NOW)).toBe(10_000);
+    expect(requestDeadlineMs(agoMs(24 * 3600_000), NOW)).toBe(10_000);
+  });
+
+  it("treats a timestamp from the future (clock skew) as age zero", () => {
+    expect(requestDeadlineMs(agoMs(-3_000), NOW)).toBe(45_000);
+  });
+
+  it("never exceeds the full deadline", () => {
+    for (const age of [-60_000, 0, 1_000, 44_000, 200_000]) {
+      expect(requestDeadlineMs(agoMs(age), NOW)).toBeLessThanOrEqual(JEV_DEADLINE_MS);
+    }
+  });
 });
