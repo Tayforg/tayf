@@ -28,7 +28,9 @@ jobs:
           node-version: 24
           cache: npm
 
-      - run: npm ci
+      # --no-audit: npm ci's built-in audit request stalled PR runs for npm's
+      # full 300 s fetch timeout (2026-10-22); Dependabot + `npm audit` cover it.
+      - run: npm ci --no-audit --no-fund --prefer-offline
 
       - name: Lint
         run: npm run lint
