@@ -139,6 +139,8 @@ goes through `social_post_claim` / `social_post_finish`).
 - `/rss/kor-noktalar.xml` — the same list as `/blindspots` (24h delay,
   recall veto, live contract, feed-health suppression), linked from
   `/blindspots`.
+- `/blindspots/rss.xml` — serves the identical feed (same implementation,
+  `src/lib/feeds/blindspots-feed.ts`); only the `atom:link` self URL differs.
 - `/hafta/2026-W39` — ISO-week permalink into the weekly archive.
   `2026-W38` is the earliest week (`/hafta` shipped 2026-09-19); `/hafta`
   itself stays the rolling trailing-7-day page with canonical `/hafta`.

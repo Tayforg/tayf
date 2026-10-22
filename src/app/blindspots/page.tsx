@@ -21,6 +21,8 @@ import { NewsletterForm } from "@/components/newsletter/newsletter-form";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
+import { buildSilenceDigest } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
 import {
@@ -144,29 +146,35 @@ export async function BlindspotsFeed() {
           </p>
         </div>
       ) : (
-        <div className="space-y-4">
-          {result.bundles.map((b, i) => {
-            const hoursAgo =
-              (nowMs - new Date(b.cluster.updated_at).getTime()) / 3_600_000;
-            const prevZone =
-              i > 0 ? result.bundles[i - 1]?.dominantZone ?? null : null;
-            const showDivider = i > 0 && b.dominantZone !== prevZone;
-            return (
-              <div key={b.cluster.id}>
-                {showDivider && (
-                  <div className="h-px bg-gradient-to-r from-transparent via-border/30 to-transparent my-6" />
-                )}
-                <div className={`animate-fade-up stagger-${i < 6 ? i + 1 : 6}`}>
-                  <BlindspotCard
-                    bundle={b}
-                    index={i}
-                    isAging={hoursAgo > 48}
-                  />
+        <>
+          {/* Derived from the bundles already loaded above and the same
+              nowMs as the aging check below: no extra query, no extra
+              clock read. */}
+          <SilenceDigestBand digest={buildSilenceDigest(result.bundles, nowMs)} />
+          <div className="space-y-4">
+            {result.bundles.map((b, i) => {
+              const hoursAgo =
+                (nowMs - new Date(b.cluster.updated_at).getTime()) / 3_600_000;
+              const prevZone =
+                i > 0 ? result.bundles[i - 1]?.dominantZone ?? null : null;
+              const showDivider = i > 0 && b.dominantZone !== prevZone;
+              return (
+                <div key={b.cluster.id}>
+                  {showDivider && (
+                    <div className="h-px bg-gradient-to-r from-transparent via-border/30 to-transparent my-6" />
+                  )}
+                  <div className={`animate-fade-up stagger-${i < 6 ? i + 1 : 6}`}>
+                    <BlindspotCard
+                      bundle={b}
+                      index={i}
+                      isAging={hoursAgo > 48}
+                    />
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {isMailConfigured() && (

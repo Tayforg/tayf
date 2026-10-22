@@ -88,6 +88,8 @@ also carries the full methodology and licence terms.
 - [OpenAPI](${baseUrl}/api/v1/openapi.json): OpenAPI 3.1 description of /api/v1
 - [Kör noktalar](${baseUrl}/blindspots): stories one political pole is not covering
 - [RSS](${baseUrl}/rss.xml): RSS feed
+- [Kör noktalar RSS](${baseUrl}/blindspots/rss.xml): RSS feed of current blindspot stories (same list as /blindspots)
+- [Konu RSS](${baseUrl}/rss/{konu}.xml): per-topic RSS feeds (dunya, ekonomi, spor, yasam, teknoloji, genel)
 - [Site haritası](${baseUrl}/sitemap.xml): sitemap
 
 ## Koşullar / Terms

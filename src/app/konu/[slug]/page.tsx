@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
 
+import { FollowButton } from "@/components/follow/follow-button";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { PageHero } from "@/components/ui/page-hero";
 import {
@@ -141,22 +142,25 @@ export default async function TopicHubPage({
         subtitle={`Son 7 günde ${label} konusunda kümelenen haberler.`}
       />
 
-      <p className={noteClass}>
-        {TOPIC_NOTE_PREFIX}
-        <Link
-          href="/metodoloji#konu"
-          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
-        >
-          {TOPIC_NOTE_LINK_LABEL}
-        </Link>
-        {" · "}
-        <Link
-          href={`/rss/${slug}.xml`}
-          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
-        >
-          RSS
-        </Link>
-      </p>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className={noteClass}>
+          {TOPIC_NOTE_PREFIX}
+          <Link
+            href="/metodoloji#konu"
+            className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            {TOPIC_NOTE_LINK_LABEL}
+          </Link>
+          {" · "}
+          <Link
+            href={`/rss/${slug}.xml`}
+            className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            RSS
+          </Link>
+        </p>
+        <FollowButton kind="konu" value={slug} />
+      </div>
 
       {result === null ? (
         <div className={unavailableWrapClass}>

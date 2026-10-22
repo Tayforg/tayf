@@ -72,6 +72,7 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import { searchClusters } from "./search-query";
 import type { ZoneFeedHealth } from "./feed-health";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
@@ -91,6 +92,8 @@ beforeEach(() => {
   fixture.rpcCalls = [];
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
 });
 
 afterEach(() => {
@@ -232,6 +235,71 @@ describe("searchClusters error handling", () => {
     const result = await searchClusters("hiçbirşey");
     expect(result).toEqual({ ok: true, bundles: [] });
     expect(fixture.lastState).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cache lifetime follows the outcome. cacheLife must be called AFTER the
+// attempt: calling it first pinned a failed attempt's { ok: false } for the
+// whole `cluster-feed` window, so every later hit skipped the cache's
+// answer and went live to the DB (the cold-read load amplifier that /takip
+// would have made worse). A failure is memoised for `minutes` only, and
+// exactly one cacheLife call happens per cached invocation.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters cache lifetime", () => {
+  it("keeps the cluster-feed window for a successful read", async () => {
+    fixture.rpcIds = [];
+    await searchClusters("merhaba");
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheTag).toHaveBeenCalledWith("clusters-search");
+  });
+
+  it("keeps the cluster-feed window for a successful read with results", async () => {
+    fixture.rpcIds = ["c1"];
+    fixture.data = [mkRow({ id: "c1", members: [{ id: "a1", sourceId: "s1" }] })];
+    await searchClusters("deprem");
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("caches a failing RPC for 'minutes', never for 'cluster-feed'", async () => {
+    fixture.rpcError = { message: "db down" };
+    await expect(searchClusters("merhaba")).resolves.toEqual({ ok: false });
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+    // The tag is still registered so a revalidate can evict the entry.
+    expect(cacheTag).toHaveBeenCalledWith("clusters-search");
+  });
+
+  it("caches a throwing RPC for 'minutes'", async () => {
+    fixture.rpcThrows = true;
+    await expect(searchClusters("merhaba")).resolves.toEqual({ ok: false });
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("caches a failing embed select for 'minutes'", async () => {
+    fixture.rpcIds = ["c1"];
+    fixture.error = { message: "embed down" };
+    await expect(searchClusters("merhaba")).resolves.toEqual({ ok: false });
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("does not enter the cached function at all for a too-short query", async () => {
+    await searchClusters("a");
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
   });
 });
 

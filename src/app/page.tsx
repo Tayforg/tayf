@@ -8,6 +8,7 @@ import { currentTimeMs } from "@/lib/time";
 import { DailyGameTeaser } from "@/components/game/daily-game-teaser";
 import { dailyTeaserSlot } from "@/lib/game/daily-teaser";
 import { ClusterCard } from "@/components/story/cluster-card";
+import { FollowButton } from "@/components/follow/follow-button";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
@@ -355,6 +356,13 @@ export async function HomeFeed({
   return (
     <>
       <NewSinceLastVisit timestamps={renderedTimestamps} />
+
+      {q && q.length >= 2 && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-xs text-muted-foreground">“{q}” için sonuçlar</p>
+          <FollowButton kind="q" value={q} />
+        </div>
+      )}
 
       {!q && bundles.length === 0 && breakingBundles.length === 0 ? (
         <EmptyClusters />
