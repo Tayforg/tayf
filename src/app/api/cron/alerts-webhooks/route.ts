@@ -158,6 +158,9 @@ export const GET = withApiErrors(async (request: Request) => {
       sinceIso: new Date(nowMs - ALERT_WINDOW_MS).toISOString(),
       limit: ALERT_LIMIT,
       health,
+      // Cron: keep the plain client (no 4 s reader cap) so a cold read can
+      // use the full 8 s statement_timeout instead of aborting the tick.
+      profile: "batch",
     });
   } catch (err) {
     return apiServerError(err);

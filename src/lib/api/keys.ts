@@ -1,6 +1,11 @@
 import crypto from "node:crypto";
 
-import { apiError, apiServerError, apiUnauthorized } from "@/lib/api/errors";
+import {
+  apiError,
+  apiNotFound,
+  apiServerError,
+  apiUnauthorized,
+} from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { createServerClient } from "@/lib/supabase/server";
 import { REGISTRY_LICENCE } from "@/lib/sources/registry";
@@ -84,6 +89,11 @@ export function apiV1Headers(tier: ApiTier): Record<string, string> {
     "Access-Control-Allow-Methods": "GET, OPTIONS",
     "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Max-Age": "86400",
+    // Without this a browser hides every non-CORS-safelisted response header
+    // from `fetch()`, so a cross-origin client could read the 429 body but not
+    // when to retry, nor which tier it was served as. Kept in step with the
+    // "Tarayıcıdan okunabilen başlıklar" note in v1-docs.ts (V1_COMMON_NOTES_TR).
+    "Access-Control-Expose-Headers": "X-Tayf-Tier, Retry-After",
     "Vary": "Origin, Authorization",
   };
 }
@@ -113,18 +123,91 @@ export function withApiV1Headers(res: Response, tier?: ApiTier): Response {
   });
 }
 
-// Anonymous flood gate: keyed by clientKey(request), NOT by API key, so an
-// unauthenticated burst (garbage/missing Authorization headers) never even
-// reaches Supabase to look up a hash. Deliberately generous (30/1s) — this
-// is a floor under every caller, authenticated or not, not the per-key
-// limit itself.
+type V1RateLimitCode = "ip_floor" | "key_minute" | "key_day";
+
+/**
+ * 429 for every limiter under /api/v1. Same envelope as before
+ * (`{error, details: {retryAfterMs}}`) plus a machine-readable `code` naming
+ * WHICH limit tripped, and the standard `Retry-After` header in whole seconds
+ * (never below 1, so a client that honours it cannot spin). `tier` is passed
+ * only where the key was resolved (key_minute / key_day).
+ */
+function v1TooManyRequests(
+  retryAfterMs: number,
+  code: V1RateLimitCode,
+  tier?: ApiTier,
+): Response {
+  const message = code === "key_day" ? "Daily limit exceeded" : "Too many requests";
+  const res = withApiV1Headers(
+    apiError(429, message, { code, details: { retryAfterMs } }),
+    tier,
+  );
+  res.headers.set("Retry-After", String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
+  return res;
+}
+
+/**
+ * 401 with the RFC 6750 challenge. `invalidToken` is false when the caller
+ * sent no Authorization header at all (bare realm: "authenticate here"), and
+ * true when it sent a credential that is malformed or not on file
+ * (`error="invalid_token"`: "what you sent is no good"). The body is the same
+ * either way.
+ */
+function v1Unauthorized(invalidToken: boolean): Response {
+  const res = withApiV1Headers(apiUnauthorized("Missing or invalid API key"));
+  res.headers.set(
+    "WWW-Authenticate",
+    invalidToken ? 'Bearer realm="tayf-api", error="invalid_token"' : 'Bearer realm="tayf-api"',
+  );
+  return res;
+}
+
+/**
+ * 405 for every method a /api/v1 route does not serve. Routes bind
+ * `export const POST = methodNotAllowed` (and PUT/PATCH/DELETE) so a wrong
+ * method gets the JSON envelope, CORS and an `Allow` header instead of
+ * Next's bodyless default. HEAD is allowed because Next derives it from GET.
+ * Async + argument-free on purpose: it is a valid route handler as-is, and it
+ * touches no key, database or limiter.
+ */
+export async function methodNotAllowed(): Promise<Response> {
+  const res = withApiV1Headers(apiError(405, "Method not allowed"));
+  res.headers.set("Allow", "GET, HEAD, OPTIONS");
+  return res;
+}
+
+/** 404 for an unknown /api/v1/* path (used by the `[...path]` catch-all). */
+export async function v1NotFound(): Promise<Response> {
+  return withApiV1Headers(apiNotFound("Not found"));
+}
+
+// Strict per-IP floor for callers WITHOUT a working key: keyed by
+// clientKey(request), NOT by API key, so an unauthenticated burst (garbage or
+// missing Authorization headers) never even reaches Supabase to look up a
+// hash. It is charged to (a) requests with no / malformed credentials and
+// (b) requests whose well-formed key turns out to be unknown or revoked. A
+// VALID key is never charged here: a partner on a shared egress IP must not
+// be throttled to the anonymous rate.
 //
 // Exported so /gelistirici (src/app/gelistirici/page.tsx) can derive its
-// "a single IP is capped at ~60/min regardless of tier" copy from the same
-// numbers this limiter actually runs on, instead of a hand-typed "30" and
-// "1" the two could silently drift apart on.
+// "a single IP is capped at ~60/min" copy from the same numbers this limiter
+// actually runs on, instead of a hand-typed "30" and "1" the two could
+// silently drift apart on.
 export const API_V1_ANON_LIMIT = { capacity: 30, refillPerSecond: 1 } as const;
 const anonLimiter = createRateLimiter("api-v1-anon", API_V1_ANON_LIMIT);
+
+// Generous per-IP ceiling for requests that PRESENT a syntactically valid key,
+// checked BEFORE the api_key_touch round trip. Without it, a flood of made-up
+// well-formed keys would each cost a database RPC (the anonymous bucket is
+// only charged after the lookup says "unknown"). Sized so it never binds a
+// legitimate caller: burst = 2x the free per-minute cap, sustained = the
+// partner per-minute cap, i.e. it only ever trips on a single IP doing more
+// than the best tier is entitled to anyway. Exported for /gelistirici.
+export const API_V1_KEYED_IP_LIMIT = {
+  capacity: 2 * API_TIER_LIMITS.free.perMinute,
+  refillPerSecond: API_TIER_LIMITS.partner.perMinute / 60,
+} as const;
+const keyedIpLimiter = createRateLimiter("api-v1-keyed-ip", API_V1_KEYED_IP_LIMIT);
 
 // Per-minute buckets, one per tier, keyed by `k${keyId}` (never by IP —
 // a partner key legitimately fans out across many client IPs). Capacity
@@ -161,49 +244,59 @@ interface ApiKeyTouchRow {
  * ready-to-return `Response` describing exactly why it was refused.
  *
  * ORDER IS NON-NEGOTIABLE (each step gates the next; do not reorder):
- *   1. Anonymous bucket (`api-v1-anon`, keyed by client IP) — runs before
- *      ANY parsing so an unauthenticated flood never reaches Supabase.
- *   2. Parse the `Authorization: Bearer tayf_<40 hex>` header.
- *      Missing/malformed -> 401 immediately, no DB call at all.
- *   3. Hash the presented key (sha256 hex) and call the `api_key_touch`
+ *   1. Parse the `Authorization: Bearer tayf_<40 hex>` header
+ *      (`parseBearerApiKey`, pure: no I/O, no limiter).
+ *   2. NO VALID KEY (header missing, wrong scheme, malformed token): charge the
+ *      strict anonymous bucket (`api-v1-anon`, keyed by client IP). Denied ->
+ *      429 `ip_floor`. Otherwise -> 401 with a `WWW-Authenticate` challenge
+ *      (`error="invalid_token"` only if an Authorization header was present).
+ *      No database call on this path, ever.
+ *   3. VALID-FORMAT KEY: charge the generous keyed-IP bucket
+ *      (`api-v1-keyed-ip`) BEFORE any database call. Denied -> 429
+ *      `ip_floor`. This bounds a flood of made-up well-formed keys, which
+ *      would otherwise each cost an `api_key_touch` round trip.
+ *   4. Hash the presented key (sha256 hex) and call the `api_key_touch`
  *      RPC. This is a SINGLE round trip that ALSO durably increments
  *      today's `api_key_usage_daily.calls` row for a live, non-revoked
- *      key as a side effect (migration 069) — by the time step 6 below
+ *      key as a side effect (migration 069) — by the time step 5 below
  *      reads that counter, THIS call has already been counted.
- *   4. Empty result (`api_key_touch` returns unknown OR revoked keys as
- *      an empty row set, indistinguishably) -> ONE extra lookup, ONLY on
- *      this failure path, to tell the two apart for the caller:
+ *      Empty result (`api_key_touch` returns unknown OR revoked keys as an
+ *      empty row set, indistinguishably): charge the strict anonymous bucket
+ *      for this IP (denied -> 429 `ip_floor`, and the extra lookup is
+ *      skipped), then ONE extra lookup, ONLY on this failure path, to tell
+ *      the two apart for the caller:
  *      `.from('api_keys').select('id').eq('key_hash', h).not('revoked_at','is',null).maybeSingle()`.
- *      A row -> 403 (revoked). No row -> 401 (never existed / bad key).
- *   5. Per-minute bucket, keyed by `k${keyId}` (tier-specific capacity).
- *   6. Durable per-day check against `api_key_usage_daily` for
- *      (key_id, UTC today). Because step 3 already incremented the
- *      counter, the comparison is `calls > perDay` — the call that pushes
- *      the count one PAST the cap is the one that gets refused, not the
- *      call that reaches exactly the cap.
+ *      A row -> 403 (revoked). No row -> 401 `invalid_token` (never existed).
+ *   5. A VALID key goes to the per-minute bucket, keyed by `k${keyId}`
+ *      (tier-specific capacity; 429 `key_minute`), and then the durable
+ *      per-day check against `api_key_usage_daily` for (key_id, UTC today)
+ *      (429 `key_day`). Because step 4 already incremented the counter, the
+ *      comparison is `calls > perDay` — the call that pushes the count one
+ *      PAST the cap is the one that gets refused, not the call that reaches
+ *      exactly the cap.
+ *
+ * The anonymous bucket is never charged for a valid key, so a partner sharing
+ * an egress IP with noisy keyless traffic is not throttled by it.
  *
  * Never logs, returns, or Sentry-captures the presented key or its hash
  * anywhere in this function or its error paths.
  */
 export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
-  const anonRl = anonLimiter(clientKey(request));
-  if (!anonRl.allowed) {
-    return {
-      ok: false,
-      response: withApiV1Headers(
-        apiError(429, "Too many requests", {
-          details: { retryAfterMs: anonRl.retryAfterMs },
-        }),
-      ),
-    };
+  const ip = clientKey(request);
+  const authorization = request.headers.get("authorization");
+  const presented = parseBearerApiKey(authorization);
+
+  if (presented === null) {
+    const anonRl = anonLimiter(ip);
+    if (!anonRl.allowed) {
+      return { ok: false, response: v1TooManyRequests(anonRl.retryAfterMs, "ip_floor") };
+    }
+    return { ok: false, response: v1Unauthorized(authorization !== null) };
   }
 
-  const presented = parseBearerApiKey(request.headers.get("authorization"));
-  if (presented === null) {
-    return {
-      ok: false,
-      response: withApiV1Headers(apiUnauthorized("Missing or invalid API key")),
-    };
+  const keyedIpRl = keyedIpLimiter(ip);
+  if (!keyedIpRl.allowed) {
+    return { ok: false, response: v1TooManyRequests(keyedIpRl.retryAfterMs, "ip_floor") };
   }
 
   const hash = hashApiKey(presented);
@@ -223,6 +316,12 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
       : [];
 
   if (touchRows.length === 0) {
+    // Unknown or revoked: this IP is presenting a credential that does not
+    // work, which is exactly what the strict anonymous bucket is for.
+    const anonRl = anonLimiter(ip);
+    if (!anonRl.allowed) {
+      return { ok: false, response: v1TooManyRequests(anonRl.retryAfterMs, "ip_floor") };
+    }
     const { data: revokedRow, error: revokedError } = await supabase
       .from("api_keys")
       .select("id")
@@ -235,10 +334,7 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
     if (revokedRow) {
       return { ok: false, response: withApiV1Headers(apiError(403, "API key revoked")) };
     }
-    return {
-      ok: false,
-      response: withApiV1Headers(apiUnauthorized("Missing or invalid API key")),
-    };
+    return { ok: false, response: v1Unauthorized(true) };
   }
 
   const touched = touchRows[0]!;
@@ -250,12 +346,7 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
   if (!minuteRl.allowed) {
     return {
       ok: false,
-      response: withApiV1Headers(
-        apiError(429, "Too many requests", {
-          details: { retryAfterMs: minuteRl.retryAfterMs },
-        }),
-        tier,
-      ),
+      response: v1TooManyRequests(minuteRl.retryAfterMs, "key_minute", tier),
     };
   }
 
@@ -274,12 +365,7 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
   if (calls > perDay) {
     return {
       ok: false,
-      response: withApiV1Headers(
-        apiError(429, "Daily limit exceeded", {
-          details: { retryAfterMs: msUntilNextUtcMidnight(now) },
-        }),
-        tier,
-      ),
+      response: v1TooManyRequests(msUntilNextUtcMidnight(now), "key_day", tier),
     };
   }
 

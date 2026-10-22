@@ -1,7 +1,7 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { withApiErrors } from "@/lib/api/errors";
+import { apiError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isVotingKind } from "@/lib/bias/config";
 import {
@@ -19,6 +19,24 @@ import {
  * (or a malformed `worker_metrics` view) downgrades the affected probe to a
  * non-critical "degraded" signal but never flips the whole endpoint to 503,
  * since these are operational concerns rather than user-facing outages.
+ *
+ * cold-read resilience: `readPath` runs the same embedded read the homepage
+ * does (clusters + cluster_articles -> articles -> sources). The cheap
+ * `select id from sources limit 1` DB probe stays green on a cold Micro
+ * compute (256 MB shared_buffers vs a 5.2 GB database) while that real read
+ * blows through PostgREST's 8 s statement_timeout, so the endpoint used to
+ * report "healthy" during a user-facing outage. The probe runs for anonymous
+ * AND authed callers (an external uptime monitor is anonymous), in parallel
+ * with the database probe, and is bounded by the per-check budget
+ * (`AbortSignal.timeout` + `withTimeout`). Anonymous callers share one
+ * in-flight probe and a short-TTL memo of its verdict (15 s clean, 5 s
+ * otherwise) so the public endpoint costs at most one heavy statement per TTL
+ * per instance; authed callers always get a fresh reading:
+ *   - errored / aborted / timed out            -> CRITICAL -> unhealthy / 503
+ *   - succeeded but slower than 1500 ms        -> degraded / 200
+ *   - succeeded in time                        -> no effect on the verdict
+ * Only the authed body carries `checks.readPath` (and its `latencyMs`); the
+ * anonymous body stays exactly `{ status, timestamp }`.
  *
  * ingest-health: authenticated callers also get a `sources` check naming
  * WHICH active sources are silent/never-delivered, with their last HTTP
@@ -42,7 +60,11 @@ import {
  * Constraints:
  *   - Must never block the caller for more than ~2s per check. Each
  *     subsystem call is wrapped in `withTimeout` so a hung Postgres
- *     connection can't pin the request open forever.
+ *     connection can't pin the request open forever. The database and
+ *     readPath probes run concurrently, so they share one 2s window.
+ *   - The anonymous 429 uses the canonical `apiError` envelope
+ *     (`details.retryAfterMs`) plus a standard `Retry-After` header (whole
+ *     seconds) and `Cache-Control: no-store`.
  *   - Must stay GET-only and dynamic so platform caches (Vercel CDN,
  *     browser) can't serve stale "healthy" responses while the underlying
  *     service melts down.
@@ -82,6 +104,10 @@ interface SourcesCheck {
 
 interface HealthChecks {
   database: { ok: boolean; latencyMs?: number; error?: string };
+  /** cold-read resilience: the homepage-shaped embedded read. `error` set
+   * (timeout / abort / query error) is CRITICAL; slow-but-successful is
+   * `ok: false` without an `error` (degraded). */
+  readPath: { ok: boolean; latencyMs?: number; error?: string };
   env: { ok: boolean; missing: string[] };
   ingestion: { ok: boolean; lastArticleAgeSec?: number; error?: string };
   clustering: {
@@ -107,6 +133,12 @@ interface AnonymousHealthBody {
 }
 
 const PER_CHECK_TIMEOUT_MS = 2000;
+// cold-read resilience: a read-path probe that SUCCEEDS but takes longer than
+// this is "degraded" (a warm homepage read is well under 500 ms; past 1.5 s the
+// cache is cold and the next request is likely to cross the 8 s PostgREST
+// statement_timeout). It must stay below PER_CHECK_TIMEOUT_MS or the degraded
+// band would be unreachable.
+const READ_PATH_DEGRADED_MS = 1500;
 const STALE_INGESTION_THRESHOLD_SEC = 600; // 10 minutes — see AGENTS.md
 // B8: clustering must move within 15 minutes; the consumer drains every
 // minute via pg_cron so a 15-minute gap means the consumer (or pgmq) is
@@ -147,8 +179,11 @@ const SOURCES_SILENT_MAX_VOTING_SHARE = 0.5;
 // envelope path can't be used to hammer Supabase for free. The limiter is
 // process-local (`src/lib/rate-limit.ts`): on a multi-instance deploy each
 // instance keeps its own buckets, so this bounds probe cost PER INSTANCE —
-// it is not a global flood defense. Capacity stays small so N instances ×
-// capacity remains cheap against Supabase. The bearer path (authenticated
+// it is not a global flood defense. It bounds request RATE only: the heavy
+// read-path probe is additionally coalesced (`readPathShared`: one in-flight
+// probe + a short memo per instance), because an aborted request keeps its
+// statement running in Postgres and a rate of 1 req/s would otherwise leave a
+// stack of 8 s statements behind. The bearer path (authenticated
 // via CRON_SECRET) bypasses this limiter — the monitoring / cron system has
 // a legitimate need to probe at high cadence, and the bearer check is
 // already constant-time-safe + secret-gated.
@@ -209,6 +244,96 @@ async function safeProbe<T>(
   }
 }
 
+type ProbeResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+interface ReadPathValue {
+  ok: boolean;
+  latencyMs: number;
+  error?: string;
+}
+
+/**
+ * The homepage-shaped embedded read (cold-read resilience). `abortSignal`
+ * makes supabase-js cancel the in-flight HTTP request at the per-check budget
+ * (it surfaces as an error object, not a throw); `withTimeout` inside
+ * `safeProbe` is the backstop if the transport hangs. NOTE the abort only
+ * frees THIS caller: the statement keeps running in Postgres until it
+ * finishes or hits statement_timeout (8 s) -- which is why anonymous callers
+ * go through `readPathShared` below instead of calling this directly.
+ */
+function runReadPathProbe(): Promise<ProbeResult<ReadPathValue>> {
+  return safeProbe(async () => {
+    const supabase = createServerClient();
+    const t0 = performance.now();
+    const { error } = await supabase
+      .from("clusters")
+      .select(
+        "id, updated_at, cluster_articles(articles(id, published_at, sources(id, bias)))",
+      )
+      .eq("is_archived", false)
+      .gte("article_count", 2)
+      .order("updated_at", { ascending: false })
+      .limit(20)
+      .abortSignal(AbortSignal.timeout(PER_CHECK_TIMEOUT_MS));
+    const latencyMs = Math.round(performance.now() - t0);
+    if (error) {
+      return { ok: false as const, latencyMs, error: error.message };
+    }
+    return { ok: latencyMs <= READ_PATH_DEGRADED_MS, latencyMs };
+  }, "readPath");
+}
+
+// Cost bound for the PUBLIC endpoint: the read-path probe is a heavy embedded
+// read, and the per-IP limiter is process-local (it multiplies by instance
+// count) and only limits request RATE, not how many heavy statements pile up
+// behind aborted requests. Anonymous callers therefore share ONE in-flight
+// probe and a short-TTL memo of its verdict (the small `{ok, latencyMs,
+// error?}` shape only), so a flood costs at most one heavy statement per TTL
+// per instance. Authed (CRON_SECRET) callers bypass it for a fresh reading.
+//
+// TTLs: a clean verdict is reused for 15 s; anything else (error, timeout,
+// slow-but-successful) for only 5 s so an outage is re-checked, and recovery
+// noticed, quickly. The clock is `performance.now()` (monotonic, the same one
+// the latency is measured with); a negative age (clock reset) counts as
+// expired.
+const READ_PATH_MEMO_OK_TTL_MS = 15_000;
+const READ_PATH_MEMO_NOT_OK_TTL_MS = 5_000;
+
+let readPathMemo: {
+  at: number;
+  ttlMs: number;
+  result: ProbeResult<ReadPathValue>;
+} | null = null;
+let readPathInFlight: Promise<ProbeResult<ReadPathValue>> | null = null;
+
+function readPathShared(): Promise<ProbeResult<ReadPathValue>> {
+  if (readPathMemo) {
+    const age = performance.now() - readPathMemo.at;
+    if (age >= 0 && age < readPathMemo.ttlMs) {
+      return Promise.resolve(readPathMemo.result);
+    }
+  }
+  if (readPathInFlight) return readPathInFlight;
+
+  const flight = runReadPathProbe()
+    .then((result) => {
+      const clean = result.ok && result.value.ok;
+      readPathMemo = {
+        at: performance.now(),
+        ttlMs: clean
+          ? READ_PATH_MEMO_OK_TTL_MS
+          : READ_PATH_MEMO_NOT_OK_TTL_MS,
+        result,
+      };
+      return result;
+    })
+    .finally(() => {
+      if (readPathInFlight === flight) readPathInFlight = null;
+    });
+  readPathInFlight = flight;
+  return flight;
+}
+
 // Next's route validator rejects optional params; guards below still allow GET().
 export const GET = withApiErrors(async (request: Request) => {
   // Next.js 16 with cacheComponents prerenders GET handlers at build time.
@@ -241,21 +366,18 @@ export const GET = withApiErrors(async (request: Request) => {
   if (!authed && request !== undefined) {
     const rl = anonHealthLimit(clientKey(request));
     if (!rl.allowed) {
-      return NextResponse.json(
-        { status: "rate_limited", retryAfterMs: rl.retryAfterMs },
-        {
-          status: 429,
-          headers: {
-            "Cache-Control": "no-store",
-            "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)),
-          },
-        },
-      );
+      const res = apiError(429, "Too many requests", {
+        details: { retryAfterMs: rl.retryAfterMs },
+      });
+      res.headers.set("Cache-Control", "no-store");
+      res.headers.set("Retry-After", String(Math.ceil(rl.retryAfterMs / 1000)));
+      return res;
     }
   }
 
   const checks: HealthChecks = {
     database: { ok: false },
+    readPath: { ok: false },
     env: { ok: false, missing: [] },
     ingestion: { ok: false },
     clustering: { ok: false },
@@ -283,23 +405,45 @@ export const GET = withApiErrors(async (request: Request) => {
     return respond("unhealthy", checks, 503, authed);
   }
 
-  // 2. DB check — `select 1`-equivalent against a tiny, always-present table.
-  //    We use `sources` because it's small and read-only in normal traffic,
-  //    so the query is effectively free even on a busy primary.
-  const dbResult = await safeProbe(async () => {
-    const supabase = createServerClient();
-    const t0 = performance.now();
-    const { error } = await supabase.from("sources").select("id").limit(1);
-    const latencyMs = Math.round(performance.now() - t0);
-    if (error) {
-      return { ok: false as const, latencyMs, error: error.message };
-    }
-    return { ok: true as const, latencyMs };
-  }, "database");
+  // 2. DB check + 2b. read-path check, concurrently.
+  //
+  //    DB: `select 1`-equivalent against a tiny, always-present table. We use
+  //    `sources` because it's small and read-only in normal traffic, so the
+  //    query is effectively free even on a busy primary. That is ALSO why it
+  //    cannot see a cold cache: it touches one hot page.
+  //
+  //    readPath (cold-read resilience): the homepage's real shape -- live
+  //    multi-source clusters with the cluster_articles -> articles -> sources
+  //    embed, newest 20. This is the read that times out on a cold Micro
+  //    compute (see `runReadPathProbe`). Anonymous callers share one in-flight
+  //    probe plus a 15 s / 5 s memo of its verdict (`readPathShared`) so the
+  //    public endpoint cannot be used to stack heavy statements; authed
+  //    callers always run it fresh. Both probes start together so the pair
+  //    costs one budget, not two.
+  const [dbResult, readPathResult] = await Promise.all([
+    safeProbe(async () => {
+      const supabase = createServerClient();
+      const t0 = performance.now();
+      const { error } = await supabase.from("sources").select("id").limit(1);
+      const latencyMs = Math.round(performance.now() - t0);
+      if (error) {
+        return { ok: false as const, latencyMs, error: error.message };
+      }
+      return { ok: true as const, latencyMs };
+    }, "database"),
+    // Anonymous: shared single-flight + short memo (cost bound). Authed: a
+    // fresh reading every time.
+    authed ? runReadPathProbe() : readPathShared(),
+  ]);
   if (dbResult.ok) {
     checks.database = dbResult.value;
   } else {
     checks.database = { ok: false, error: dbResult.error };
+  }
+  if (readPathResult.ok) {
+    checks.readPath = readPathResult.value;
+  } else {
+    checks.readPath = { ok: false, error: readPathResult.error };
   }
 
   // 3. Ingestion check — newest article's age. We treat "no rows" as a soft
@@ -563,18 +707,25 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   // Status rollup:
-  //   - DB or env failure                  -> unhealthy / 503 (page someone)
+  //   - DB, env or read-path failure       -> unhealthy / 503 (page someone)
   //   - ingestion / clustering / queues    -> degraded / 200 (warn, no page)
+  //   - read path slow but successful      -> degraded / 200 (warn, no page)
   //   - everything green                   -> healthy / 200
   //
   // Clustering and queues are intentionally NOT critical: a stuck consumer
   // is bad but not a user-facing outage (the homepage keeps serving the
   // last good cluster set). DB / env failures break every page render and
-  // SHOULD page.
-  const anyCritical = !checks.database.ok || !checks.env.ok;
+  // SHOULD page. A read path that ERRORS (statement timeout, abort, hung
+  // transport) is the same user-facing outage -- the homepage cannot render --
+  // even while the one-row DB probe is green, so it pages too. A read path
+  // that merely answers slowly has not failed yet: warn, don't page.
+  const readPathCritical = checks.readPath.error !== undefined;
+  const anyCritical =
+    !checks.database.ok || !checks.env.ok || readPathCritical;
   const allOk =
     checks.database.ok &&
     checks.env.ok &&
+    checks.readPath.ok &&
     checks.ingestion.ok &&
     checks.clustering.ok &&
     checks.queues.ok;

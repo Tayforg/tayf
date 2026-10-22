@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 
-import { V1_ENDPOINTS } from "@/lib/api/v1-docs";
+import { V1_COMMON_NOTES_TR, V1_ENDPOINTS } from "@/lib/api/v1-docs";
 import { API_TIER_LIMITS } from "@/lib/api/keys";
 
 // The page is a synchronous Server Component (no fetch, no Date), so it
@@ -40,6 +40,31 @@ describe("/gelistirici page", () => {
     expect(html).toContain(
       "politika/son dakika kategorisinde olan kümeler döner",
     );
+  });
+
+  it("states the real per-IP limits: strict for keyless, generous for keyed, never the old 1800", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    // 30-burst / 1-per-second anonymous bucket == 60/min, NOT 30 * 60.
+    expect(html).toContain("dakikada yaklaşık 60 istek (anlık en fazla 30)");
+    // 120-burst / 10-per-second keyed bucket == 600/min.
+    expect(html).toContain("dakikada en fazla yaklaşık 600 istek (anlık en fazla 120)");
+    expect(html).toContain("Anahtarsız ya da geçersiz anahtarlı istekler");
+    expect(html).toContain("Geçerli bir anahtarla gelen istekler");
+    expect(html).toContain("Retry-After");
+    expect(html).toContain("details.retryAfterMs");
+    expect(html).not.toContain("1800");
+    // The old "regardless of tier" claim is gone.
+    expect(html).not.toContain("katmandan bağımsız");
+  });
+
+  it("renders the shared v1 notes (404, 405 + Allow, exposed headers)", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    expect(V1_COMMON_NOTES_TR).toHaveLength(3);
+    for (const note of V1_COMMON_NOTES_TR) {
+      expect(html).toContain(note);
+    }
   });
 
   it("shows no price and no currency marker, since every plan's priceTr is null", async () => {

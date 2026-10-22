@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { RetryButton } from "@/components/ui/retry-button";
 import { ZoneGuessGame } from "@/components/game/zone-guess-game";
 import { FramingGame } from "@/components/game/framing-game";
 import { DailyGame } from "@/components/game/daily-game";
@@ -11,7 +12,9 @@ import type { DailyPuzzle } from "@/lib/game/daily-set";
 type OyunMode = "bolge" | "cerceve" | "gunluk";
 
 interface OyunModesProps {
-  headlines: readonly GameHeadline[];
+  /** `null` = the headline fetch FAILED (offer a retry); `[]` = the fetch
+   * worked but nothing qualifies right now. */
+  headlines: readonly GameHeadline[] | null;
   daily: DailyPuzzle | null;
   todayKey: string;
   /** Which tab is active on first render — "bolge" unless the URL carries
@@ -66,7 +69,12 @@ export function OyunModes({ headlines, daily, todayKey, initialMode = "bolge" }:
       </div>
 
       {mode === "bolge" ? (
-        headlines.length === 0 ? (
+        headlines === null ? (
+          <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
+            <p className="text-sm text-muted-foreground">Başlıklar şu an yüklenemedi.</p>
+            <RetryButton />
+          </div>
+        ) : headlines.length === 0 ? (
           <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
             <p className="text-sm text-muted-foreground">
               Şu an oynanacak başlık yok. Birazdan tekrar dene.

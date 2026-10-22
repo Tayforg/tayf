@@ -323,9 +323,11 @@ export const GET = withApiErrors(async (request: Request) => {
   let blindspotBundles: BlindspotBundle[];
   let topBundles: ClusterBundle[];
   try {
+    // "batch": see the digest cron -- a cron tick must not be aborted by the
+    // 4 s user-facing reader cap on a cold database.
     const [blindspotResult, politicsResult] = await Promise.all([
-      getBlindspots(),
-      getPoliticsClusters(),
+      getBlindspots({ profile: "batch" }),
+      getPoliticsClusters({ profile: "batch" }),
     ]);
     blindspotBundles = blindspotResult.bundles;
     topBundles = politicsResult.bundles;

@@ -61,6 +61,8 @@ import {
   renderNewsUrlset,
   renderSitemapIndex,
   getSitemapIndexXml,
+  getCurrentSitemapMonth,
+  utcMonthKey,
   getStaticSitemapXml,
   getSourcesSitemapXml,
   getNewsSitemapXml,
@@ -68,6 +70,7 @@ import {
   SITEMAP_FIRST_MONTH,
   NEWS_LIMIT,
 } from "./sitemaps";
+import { cacheLife } from "next/cache";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -222,6 +225,48 @@ describe("renderSitemapIndex", () => {
   });
 });
 
+describe("utcMonthKey", () => {
+  it("formats an instant as its UTC YYYY-MM", () => {
+    expect(utcMonthKey(Date.parse("2026-09-28T12:00:00.000Z"))).toBe("2026-09");
+  });
+
+  it("stays in December on the last UTC minute of the year", () => {
+    expect(utcMonthKey(Date.parse("2026-12-31T23:59:00.000Z"))).toBe("2026-12");
+  });
+
+  it("stays in November on the last UTC minute of the month", () => {
+    expect(utcMonthKey(Date.parse("2026-11-30T23:59:00.000Z"))).toBe("2026-11");
+  });
+
+  it("rolls over exactly at the UTC month boundary (not Istanbul's)", () => {
+    // 21:00Z on the 31st is already the 1st in Europe/Istanbul (UTC+3);
+    // the sitemap months are UTC, so it must still be the old month.
+    expect(utcMonthKey(Date.parse("2026-10-31T21:00:00.000Z"))).toBe("2026-10");
+    expect(utcMonthKey(Date.parse("2026-11-01T00:00:00.000Z"))).toBe("2026-11");
+  });
+
+  it("zero-pads single-digit months", () => {
+    expect(utcMonthKey(Date.parse("2027-01-05T00:00:00.000Z"))).toBe("2027-01");
+  });
+});
+
+describe("getCurrentSitemapMonth", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns the current UTC month key and caches for an hour", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-03T00:30:00.000Z"));
+    vi.mocked(cacheLife).mockClear();
+
+    await expect(getCurrentSitemapMonth()).resolves.toBe("2026-11");
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith({ revalidate: 3600 });
+  });
+});
+
 describe("getSitemapIndexXml", () => {
   it("lists the 3 fixed files plus every month through the current one", () => {
     vi.useFakeTimers();
@@ -236,6 +281,22 @@ describe("getSitemapIndexXml", () => {
         }
         expect(xml).not.toContain("clusters-2026-10.xml");
       });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("adds the new month as soon as the UTC month rolls over", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-31T23:59:00.000Z"));
+      const before = await getSitemapIndexXml("https://tayf.test");
+      expect(before).toContain("clusters-2026-10.xml");
+      expect(before).not.toContain("clusters-2026-11.xml");
+
+      vi.setSystemTime(new Date("2026-11-01T00:00:00.000Z"));
+      const after = await getSitemapIndexXml("https://tayf.test");
+      expect(after).toContain("clusters-2026-11.xml");
     } finally {
       vi.useRealTimers();
     }

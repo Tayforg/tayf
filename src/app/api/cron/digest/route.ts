@@ -206,9 +206,12 @@ export const GET = withApiErrors(async (request: Request) => {
 
   // Fetch the digest content once — identical for every subscriber except
   // the per-subscriber unsubscribe link.
+  // "batch": a weekly job must not abort at the 4 s user-facing reader cap
+  // on a cold database -- the 8 s statement_timeout would have let it finish,
+  // and a failed run means no mail until next Saturday.
   const [politicsResult, blindspotResult] = await Promise.all([
-    getPoliticsClusters(),
-    getBlindspots(),
+    getPoliticsClusters({ profile: "batch" }),
+    getBlindspots({ profile: "batch" }),
   ]);
 
   const topClusterBundles = [...politicsResult.bundles]

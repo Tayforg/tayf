@@ -21,7 +21,11 @@ import {
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
 import { wireSignalOf } from "@/lib/clusters/wire";
-import { createServerClient } from "@/lib/supabase/server";
+import {
+  createReaderClient,
+  createServerClient,
+  type ReadProfile,
+} from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
 // Names the pole zone whose degraded feeds caused a blindspot to be
@@ -221,10 +225,17 @@ function toBlindspotBundle(
   };
 }
 
+// "reader" (/blindspots, RSS, public alerts API) fails fast at 4 s; "batch"
+// (digest, social and alerts-webhooks crons) keeps the plain client so a cold
+// read can use the 8 s statement_timeout instead of skipping the run.
+function clientFor(profile: ReadProfile) {
+  return profile === "batch" ? createServerClient() : createReaderClient();
+}
+
 /** Step A: the lean id-only candidate select — no embed, so the cost never
  * scales with the number of candidates that end up discarded. */
-async function fetchCandidateIds(): Promise<string[]> {
-  const supabase = createServerClient();
+async function fetchCandidateIds(profile: ReadProfile): Promise<string[]> {
+  const supabase = clientFor(profile);
   const blindspotCutoffIso = new Date(
     Date.now() - BLINDSPOT.feedDelayHours * 3600 * 1000,
   ).toISOString();
@@ -249,8 +260,11 @@ async function fetchCandidateIds(): Promise<string[]> {
 
 /** Step B: fetch the embed for one batch of ids (order/limit-free — the
  * candidate ORDER already came from Step A). */
-async function fetchEmbedBatch(ids: string[]): Promise<EmbeddedClusterRow[]> {
-  const supabase = createServerClient();
+async function fetchEmbedBatch(
+  ids: string[],
+  profile: ReadProfile,
+): Promise<EmbeddedClusterRow[]> {
+  const supabase = clientFor(profile);
   const { data, error } = await supabase
     .from("clusters")
     .select(EMBED_SELECT)
@@ -265,8 +279,10 @@ async function fetchEmbedBatch(ids: string[]): Promise<EmbeddedClusterRow[]> {
 
 // Internal (uncached) implementation. The exported `getBlindspots` wraps
 // this with `"use cache"` below.
-async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
-  const ids = await fetchCandidateIds();
+async function fetchBlindspots(
+  profile: ReadProfile,
+): Promise<{ bundles: BlindspotBundle[] }> {
+  const ids = await fetchCandidateIds(profile);
   if (ids.length === 0) return { bundles: [] };
 
   const order = new Map(ids.map((id, i) => [id, i]));
@@ -281,12 +297,12 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
       // later batch reuses it.
       const [fetchedHealth, batchRows] = await Promise.all([
         getZoneFeedHealth(),
-        fetchEmbedBatch(batchIds),
+        fetchEmbedBatch(batchIds, profile),
       ]);
       health = fetchedHealth;
       rows = batchRows;
     } else {
-      rows = await fetchEmbedBatch(batchIds);
+      rows = await fetchEmbedBatch(batchIds, profile);
     }
 
     const sortedRows = [...rows].sort(
@@ -308,11 +324,15 @@ async function fetchBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
 // instead of letting it cross the `"use cache: remote"` boundary — a throw
 // here fails `next build`'s prerender even when every caller catches (see
 // src/lib/cache-resilience.ts).
-async function getBlindspotsCached() {
+//
+// `profile` is an argument on purpose: it becomes part of the cache key, so a
+// capped "reader" entry (and its cached `{ ok: false }` sentinel) is never
+// served to a "batch" cron, and the cron's own miss runs uncapped.
+async function getBlindspotsCached(profile: ReadProfile) {
   "use cache: remote";
   cacheLife("cluster-feed");
   cacheTag("clusters", "clusters-politics");
-  return attemptCached("blindspots-query", fetchBlindspots);
+  return attemptCached("blindspots-query", () => fetchBlindspots(profile));
 }
 
 // Public cached entry point. The /blindspots page and the weekly digest
@@ -322,10 +342,13 @@ async function getBlindspotsCached() {
 // catch it themselves. On a cache-attempt failure this retries the query
 // live once (bypassing the cache boundary, the live result is not memoised; the cached ok:false sentinel is)
 // before letting a genuine, still-failing outage propagate as a throw.
-export async function getBlindspots(): Promise<{ bundles: BlindspotBundle[] }> {
-  const attempt = await getBlindspotsCached();
+export async function getBlindspots(
+  opts?: { profile?: ReadProfile },
+): Promise<{ bundles: BlindspotBundle[] }> {
+  const profile = opts?.profile ?? "reader";
+  const attempt = await getBlindspotsCached(profile);
   if (attempt.ok) return attempt.data;
-  return fetchBlindspots();
+  return fetchBlindspots(profile);
 }
 
 export type BlindspotsResult =

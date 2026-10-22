@@ -82,8 +82,10 @@ const RESP_400: V1ResponseDoc = {
 };
 const RESP_401: V1ResponseDoc = {
   status: 401,
-  descriptionTr: "Authorization başlığı eksik, biçimsiz veya bilinmeyen bir anahtar.",
-  descriptionEn: "Missing/malformed Authorization header, or an unknown key.",
+  descriptionTr:
+    'Authorization başlığı eksik, biçimsiz veya bilinmeyen bir anahtar. WWW-Authenticate başlığı taşır: başlık yoksa Bearer realm="tayf-api", varsa ek olarak error="invalid_token".',
+  descriptionEn:
+    'Missing/malformed Authorization header, or an unknown key. Carries a WWW-Authenticate header: Bearer realm="tayf-api" when no header was sent, plus error="invalid_token" when one was.',
   schema: "Error",
 };
 const RESP_403: V1ResponseDoc = {
@@ -113,9 +115,15 @@ const RESP_404_SOURCE: V1ResponseDoc = {
 const RESP_429: V1ResponseDoc = {
   status: 429,
   descriptionTr:
-    "Anonim taban, dakikalık veya günlük sınır aşıldı; details.retryAfterMs taşır.",
+    "IP tabanı, dakikalık veya günlük sınır aşıldı. Retry-After başlığı (saniye) ve details.retryAfterMs (milisaniye) taşır; code hangi sınırın aşıldığını söyler: ip_floor (IP tabanı), key_minute (anahtarın dakikalık sınırı), key_day (anahtarın günlük sınırı).",
   descriptionEn:
-    "Anonymous floor, per-minute or daily cap exceeded; carries details.retryAfterMs.",
+    "Per-IP floor, per-minute or daily cap exceeded. Carries a Retry-After header (seconds) and details.retryAfterMs (milliseconds); code names the limit that tripped: ip_floor (per-IP floor), key_minute (the key's per-minute cap), key_day (the key's daily cap).",
+  schema: "Error",
+};
+const RESP_405: V1ResponseDoc = {
+  status: 405,
+  descriptionTr: "Bu yol yalnızca GET, HEAD ve OPTIONS kabul eder (Allow başlığı).",
+  descriptionEn: "Only GET, HEAD and OPTIONS are allowed (Allow header).",
   schema: "Error",
 };
 const RESP_500: V1ResponseDoc = {
@@ -219,6 +227,19 @@ const ALERT_NOTES_TR: string[] = [
   "Teslimat kuralları: yalnızca https ve 443 numaralı kapı; yönlendirmeler izlenmez (3xx başarısız sayılır). 2xx başarıdır; 5xx, 408, 429, zaman aşımı ve ağ hataları 1, 5, 15 ve 60 dakika arayla en çok 5 denemeye kadar yeniden denenir; diğer 4xx başarısız sayılır. Art arda 20 başarısızlık webhook'u kapatır. Aynı alert.id bir alıcıya en fazla bir kez teslim edilir; yine de X-Tayf-Delivery veya alert.id ile tekilleştirin.",
 ];
 
+/**
+ * Behaviour shared by EVERY /api/v1 path rather than one endpoint -- rendered
+ * under the limits on /gelistirici (src/app/gelistirici/page.tsx) and mirrored
+ * in docs/api.md. The routes enforce all three (the `[...path]` catch-all,
+ * `methodNotAllowed`, and `apiV1Headers`' Access-Control-Expose-Headers);
+ * tests/api/v1-errors.test.ts pins them.
+ */
+export const V1_COMMON_NOTES_TR: string[] = [
+  "Bilinmeyen /api/v1 yolları JSON 404 döner (CORS başlıklarıyla).",
+  "GET, HEAD ve OPTIONS dışındaki yöntemler JSON 405 ve Allow: GET, HEAD, OPTIONS döner.",
+  "Tarayıcıdan okunabilen başlıklar: X-Tayf-Tier, Retry-After.",
+];
+
 export const V1_ENDPOINTS: V1EndpointDoc[] = [
   {
     method: "GET",
@@ -246,6 +267,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_400,
       RESP_401,
       RESP_403,
+      RESP_405,
       RESP_429,
       RESP_500,
     ],
@@ -288,6 +310,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_403,
       RESP_301_CLUSTER,
       RESP_404_CLUSTER,
+      RESP_405,
       RESP_429,
       RESP_500,
     ],
@@ -325,6 +348,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       },
       RESP_401,
       RESP_403,
+      RESP_405,
       RESP_429,
       RESP_500,
     ],
@@ -371,6 +395,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_401,
       RESP_403,
       RESP_404_SOURCE,
+      RESP_405,
       RESP_429,
       RESP_500,
     ],
@@ -414,6 +439,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_400,
       RESP_401,
       RESP_403,
+      RESP_405,
       RESP_429,
       RESP_500,
     ],
@@ -453,6 +479,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_400,
       RESP_401,
       RESP_403,
+      RESP_405,
       RESP_429,
       RESP_500,
     ],
@@ -487,6 +514,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
         descriptionTr: "Bu belgenin kendisi, statik OpenAPI 3.1 JSON.",
         descriptionEn: "This document itself, static OpenAPI 3.1 JSON.",
       },
+      RESP_405,
     ],
   },
 ];

@@ -261,9 +261,18 @@ describe("GET /api/cron/alerts-webhooks", () => {
   it("queries alerts for the trailing 24h, limit 100, with the health it read", async () => {
     await run();
     expect(fx.getAlertItemsCalls).toHaveLength(1);
-    const call = fx.getAlertItemsCalls[0] as { sinceIso: string; limit: number; health: unknown };
+    const call = fx.getAlertItemsCalls[0] as {
+      sinceIso: string;
+      limit: number;
+      health: unknown;
+      profile?: string;
+    };
     expect(call.limit).toBe(100);
     expect(call.health).toBe(HEALTHY);
+    // Cold-read resilience: the cron keeps the plain (uncapped) client, so
+    // the 4 s reader cap never aborts a read that the 8 s statement_timeout
+    // would have let finish.
+    expect(call.profile).toBe("batch");
     expect(Math.abs(Date.parse(call.sinceIso) - (Date.now() - 24 * H))).toBeLessThan(60_000);
   });
 

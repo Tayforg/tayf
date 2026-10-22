@@ -258,6 +258,27 @@ describe("GET /api/cron/digest", () => {
     expect(updates[0]?.state.eq.find((p) => p.col === "id")?.val).toBe("s1");
   });
 
+  it("reads its content through the uncapped batch profile (the 4 s reader cap must not abort a weekly digest)", async () => {
+    process.env.CRON_SECRET = "shhh";
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "never@example.com", unsubscribe_token: "t1", last_sent_at: null },
+    ];
+    const { sendBatch } = await import("@/lib/email/resend");
+    (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+      list.map(() => ({ ok: true, id: "resend-id" })),
+    );
+    const { getPoliticsClusters } = await import("@/lib/clusters/politics-query");
+    const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+    (getPoliticsClusters as unknown as Mock).mockClear();
+    (getBlindspots as unknown as Mock).mockClear();
+
+    const mod = await importRoute();
+    const res = await mod.GET(req("shhh"));
+    expect(res.status).toBe(200);
+    expect(getPoliticsClusters).toHaveBeenCalledWith({ profile: "batch" });
+    expect(getBlindspots).toHaveBeenCalledWith({ profile: "batch" });
+  });
+
   it("skips sending entirely (0/0) when no subscriber is due", async () => {
     process.env.CRON_SECRET = "shhh";
     supabaseFake.state.subscribers = [

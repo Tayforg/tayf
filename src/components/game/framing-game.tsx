@@ -14,7 +14,11 @@ import {
   type FramingTally,
   type FramingVote,
 } from "@/lib/game/framing";
-import { classifyDrawResponse, startRoundClock } from "@/lib/game/framing-draw";
+import {
+  classifyDrawResponse,
+  fetchDrawResponse,
+  startRoundClock,
+} from "@/lib/game/framing-draw";
 
 type Phase = "idle" | "loading" | "playing" | "revealed" | "finished" | "error";
 
@@ -94,17 +98,15 @@ export function FramingGame() {
 
   const drawHeadline = useCallback(async () => {
     setPhase("loading");
-    let res: { ok: boolean; body: unknown } | null = null;
-    try {
-      const fetchRes = await fetch("/api/oyun/cerceve/next", {
+    // One retry after a 503 (the route's "draw timed out, try again"); the
+    // phase stays "loading" throughout, so the player just sees the loading
+    // line a little longer instead of the error panel.
+    const res = await fetchDrawResponse(() =>
+      fetch("/api/oyun/cerceve/next", {
         method: "GET",
         signal: AbortSignal.timeout(8000),
-      });
-      const body = fetchRes.ok ? await fetchRes.json().catch(() => null) : null;
-      res = { ok: fetchRes.ok, body };
-    } catch {
-      res = null;
-    }
+      }),
+    );
     const outcome = classifyDrawResponse(res);
 
     if (outcome.kind === "headline") {

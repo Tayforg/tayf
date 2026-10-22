@@ -90,7 +90,20 @@ export interface MutationCall {
 export interface RpcCall {
   name: string;
   args: unknown;
+  /** Set when the SUT chained `.abortSignal(signal)` onto this `.rpc()` call. */
+  signal?: AbortSignal;
 }
+
+/**
+ * What `client.rpc()` returns: a plain envelope Promise (R0.2 -- never
+ * chainable with `.single()` / `.limit()` / ...) plus `abortSignal`, the one
+ * PostgREST filter-builder method the draw routes chain to bound a call.
+ * `abortSignal` records the signal on that call's `RpcCall` and returns the
+ * same promise.
+ */
+export type RpcPromise = Promise<PgResult> & {
+  abortSignal: (signal: AbortSignal) => RpcPromise;
+};
 
 export interface SupabaseFakeCalls {
   /** All mutating calls in order. */
@@ -437,7 +450,7 @@ function makeBuilder(
 export function createSupabaseFake(options: SupabaseFakeOptions = {}): {
   client: {
     from: (table: string) => unknown;
-    rpc: (name: string, args?: unknown) => Promise<PgResult>;
+    rpc: (name: string, args?: unknown) => RpcPromise;
     auth: {
       getUser: () => Promise<{
         data: { user: null };
@@ -467,13 +480,22 @@ export function createSupabaseFake(options: SupabaseFakeOptions = {}): {
 
   const client = {
     from: (table: string) => makeBuilder(table, options, mutations),
-    rpc: async (name: string, args?: unknown): Promise<PgResult> => {
-      rpcCalls.push({ name, args });
+    rpc: (name: string, args?: unknown): RpcPromise => {
+      const call: RpcCall = { name, args };
+      rpcCalls.push(call);
       const fn = options.rpc?.[name];
-      if (fn) {
-        return await fn(args);
-      }
-      return { data: null, error: null };
+      const promise = (async (): Promise<PgResult> => {
+        if (fn) {
+          return await fn(args);
+        }
+        return { data: null, error: null };
+      })();
+      const withAbort = promise as RpcPromise;
+      withAbort.abortSignal = (signal: AbortSignal): RpcPromise => {
+        call.signal = signal;
+        return withAbort;
+      };
+      return withAbort;
     },
     auth: {
       getUser: async () => ({ data: { user: null }, error: null }),

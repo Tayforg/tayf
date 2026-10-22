@@ -269,6 +269,19 @@ describe("GET /api/cron/social — happy paths", () => {
     expect((finishCalls[0]!.args as { p_status: string }).p_status).toBe("posted");
   });
 
+  it("reads blindspots and politics through the uncapped batch profile (the 4 s reader cap must not skip a tick)", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "t";
+    process.env.TELEGRAM_CHANNEL_ID = "c";
+    const { GET } = await import("@/app/api/cron/social/route");
+    const { getBlindspots } = await import("@/lib/clusters/blindspots-query");
+    const { getPoliticsClusters } = await import("@/lib/clusters/politics-query");
+    vi.mocked(getBlindspots).mockClear();
+    vi.mocked(getPoliticsClusters).mockClear();
+    await GET(request());
+    expect(getBlindspots).toHaveBeenCalledWith({ profile: "batch" });
+    expect(getPoliticsClusters).toHaveBeenCalledWith({ profile: "batch" });
+  });
+
   it("claim null means no post call (second-run idempotency)", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "t";
     process.env.TELEGRAM_CHANNEL_ID = "c";

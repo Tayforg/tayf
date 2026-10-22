@@ -4,7 +4,7 @@
 
 ### `GET /api/health`
 
-Health check. Returns subsystem status for database, environment, ingestion freshness, clustering freshness, and queue depth.
+Health check. Returns subsystem status for database, the homepage read path, environment, ingestion freshness, clustering freshness, and queue depth.
 
 Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "status", "timestamp" }` and are rate-limited (5-token bucket, 1 token/sec refill; the limiter is process-local, so the cap applies per serverless instance, not globally). Callers presenting `Authorization: Bearer <CRON_SECRET>` get the full per-check breakdown and bypass the rate limit; the bearer gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`) — case-insensitive scheme, constant-time compare, FAIL-CLOSED 503 when `CRON_SECRET` is unset/empty, 401 on a mismatched token.
 
@@ -15,6 +15,7 @@ Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "st
   "timestamp": "2026-04-16T12:00:00.000Z",
   "checks": {
     "database": { "ok": true, "latencyMs": 42 },
+    "readPath": { "ok": true, "latencyMs": 310 },
     "env": { "ok": true, "missing": [] },
     "ingestion": { "ok": true, "lastArticleAgeSec": 120 },
     "clustering": { "ok": true, "lastClusterAgeSec": 300 },
@@ -23,12 +24,13 @@ Two-tier response. Anonymous callers (no `Authorization` header) get only `{ "st
 }
 ```
 
-- `unhealthy` (503): database or env failure
-- `degraded` (200): ingestion stale (>10 min since last article), clustering stale (>15 min), queue alarm (per-queue depth bound — `cluster_work` >500, `image_backfill` >100 — or oldest message >30 min), or a malformed `worker_metrics` row (NULL / non-numeric `queue_length`)
+- `unhealthy` (503): database or env failure, or a **read-path error** (`checks.readPath.error` present: the probe errored, was aborted, or timed out at 2s)
+- `degraded` (200): the read path **succeeded but took longer than 1500 ms** (`readPath.ok` false, no `error`), ingestion stale (>10 min since last article), clustering stale (>15 min), queue alarm (per-queue depth bound — `cluster_work` >500, `image_backfill` >100 — or oldest message >30 min), or a malformed `worker_metrics` row (NULL / non-numeric `queue_length`)
 - `401`: `Authorization` header present but token mismatch
 - `503` + error envelope: `Authorization` header present but `CRON_SECRET` not configured (FAIL-CLOSED)
-- `429`: anonymous rate limit exhausted
+- `429`: anonymous rate limit exhausted. Canonical error envelope `{ "error": "Too many requests", "details": { "retryAfterMs": 640 } }` with `Retry-After: <whole seconds, >= 1>` and `Cache-Control: no-store`
 - Each subsystem check has a 2s timeout
+- `readPath` (cold-read resilience) runs the homepage's real read — live multi-source `clusters` with the `cluster_articles -> articles -> sources` embed, newest 20 — for **both anonymous and bearer callers**, concurrently with the `database` probe. The one-row `database` probe stays green on a cold cache (Supabase Micro: 256 MB `shared_buffers` vs a 5 GB database) while this read blows through PostgREST's 8 s `statement_timeout`; `readPath` is what turns that outage into a 503. `latencyMs` appears only in the bearer body; anonymous callers still get exactly `{ "status", "timestamp" }`.
 
 ---
 
@@ -220,22 +222,56 @@ serverless instance — see `src/lib/rate-limit.ts`), so the advertised
 per-minute ceiling is a per-replica figure, not a hard global cap. The
 **per-day** limit is durable (`api_key_usage_daily`, incremented server-side
 on every accepted call) and holds across replicas — it is the only number
-callers should treat as a hard global ceiling. An additional, unconditional
-per-source-IP floor of roughly 60 req/min (30 burst, 1 token/s) applies to
-every `/api/v1` request regardless of tier or key — so the advertised
-per-minute ceilings above are only reachable by a caller fanning out across
-multiple source IPs; a single-host `partner` consumer is capped at this
-floor, not at 600/min.
+callers should treat as a hard global ceiling.
+
+Two **per-source-IP** limiters sit in front of the per-key ones (same
+process-local caveat). Which one applies depends on what the caller
+presents:
+
+| Caller | Limiter | Burst | Sustained |
+|---|---|---|---|
+| no key, malformed key, or a well-formed key that is unknown/revoked | `api-v1-anon` | 30 | 60/min (1 token/s) |
+| a syntactically valid key (checked **before** any database call) | `api-v1-keyed-ip` | 120 | 600/min (10 tokens/s) |
+
+A **valid** key is never charged to the anonymous bucket: a `partner`
+consumer behind a shared egress IP is bounded by its own 600/min key bucket
+(and the 600/min keyed-IP ceiling), not by the 60/min anonymous floor. The
+keyed-IP ceiling exists so a flood of made-up well-formed keys cannot turn
+into unbounded `api_key_touch` database calls: once it is spent the request is
+refused `429 ip_floor` without touching the database. A single IP is
+therefore still capped at roughly 600/min on a keyed path, which is the
+`partner` per-minute figure, so the 600/min tier ceiling is reachable from one
+host.
 
 **Response codes** (canonical `{error, code?, details?}` envelope on every
 non-2xx):
 - `301`: (`GET /api/v1/clusters/[id]` only) the cluster was merged into
   another; `Location` points to the surviving cluster.
 - `401`: missing/malformed `Authorization` header, or a well-formed key
-  whose hash is not on file.
+  whose hash is not on file. Carries `WWW-Authenticate`:
+  `Bearer realm="tayf-api"` when **no** `Authorization` header was sent, and
+  `Bearer realm="tayf-api", error="invalid_token"` when one was sent and is
+  malformed or unknown.
 - `403`: a well-formed, previously-valid key that has been revoked.
-- `429`: per-minute or per-day cap exceeded; `details.retryAfterMs` is
-  included on both (per-day: milliseconds until the next UTC midnight).
+- `404`: (`GET /api/v1/clusters/[id]`, `.../sources/{slug}/profile`) unknown
+  id/slug — and **any unknown `/api/v1/*` path** (JSON `{"error":"Not found"}`
+  with CORS headers, from the `src/app/api/v1/[...path]/route.ts` catch-all;
+  keyless, no database call, no rate-limit charge). It applies to every method.
+- `405`: any method other than `GET`, `HEAD` and `OPTIONS` on a real route
+  (`{"error":"Method not allowed"}`) with `Allow: GET, HEAD, OPTIONS` and the
+  CORS headers. No key is needed and nothing is charged.
+- `429`: a limit was exceeded. Always carries `Retry-After` (whole seconds,
+  `max(1, ceil(details.retryAfterMs / 1000))`), `details.retryAfterMs`
+  (milliseconds) and a `code` naming the limit:
+
+  | `code` | `error` | Meaning |
+  |---|---|---|
+  | `ip_floor` | `Too many requests` | per-source-IP limiter (anonymous 30 / 60 per min, or keyed-IP 120 / 600 per min) |
+  | `key_minute` | `Too many requests` | the key's per-minute bucket (tier-specific) |
+  | `key_day` | `Daily limit exceeded` | the key's durable daily cap; `retryAfterMs` is milliseconds until the next UTC midnight |
+
+  `X-Tayf-Tier` is present on `key_minute` / `key_day` (the key was resolved)
+  and absent on `ip_floor` (the caller may be unidentified).
 - `500`: unexpected server error (never echoes a raw Supabase error).
 
 **Headers on every response (2xx and non-2xx alike)**:
@@ -246,8 +282,14 @@ Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: GET, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type
 Access-Control-Max-Age: 86400
+Access-Control-Expose-Headers: X-Tayf-Tier, Retry-After
 Vary: Origin, Authorization
 ```
+`Access-Control-Expose-Headers` is what lets browser code read `X-Tayf-Tier`
+and `Retry-After` cross-origin; without it `fetch()` hides both. It is also
+sent on `GET /api/v1/openapi.json`. Per-response extras: `Retry-After` on
+every `429`, `WWW-Authenticate` on every `401`, `Allow` on every `405`.
+
 CORS is GET-from-anywhere (this is a read-only public API — any origin may
 call it from the browser as long as it presents a valid key). Every
 `/api/v1/*` route also answers `OPTIONS` with a bare `204` carrying the

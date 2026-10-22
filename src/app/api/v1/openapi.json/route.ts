@@ -1,3 +1,4 @@
+import { methodNotAllowed } from "@/lib/api/keys";
 import { buildOpenApiDocument } from "@/lib/api/openapi";
 import { siteUrl } from "@/lib/site-url";
 
@@ -12,6 +13,10 @@ import { siteUrl } from "@/lib/site-url";
  * Next 16 `cacheComponents` instead of opting the route into dynamic
  * rendering. Do NOT add `export const dynamic`/`revalidate` here; either
  * would defeat that.
+ *
+ * Every non-GET/HEAD/OPTIONS method is bound to the shared JSON-405
+ * `methodNotAllowed` like every other /api/v1 route (it reads no request
+ * state either, so it does not affect the static GET).
  */
 export function GET(): Response {
   const body = JSON.stringify(buildOpenApiDocument(siteUrl()), null, 2);
@@ -21,6 +26,14 @@ export function GET(): Response {
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "public, max-age=3600, s-maxage=86400",
       "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": "X-Tayf-Tier, Retry-After",
     },
   });
 }
+
+// Every other method gets the JSON 405 envelope with an `Allow` header (and
+// CORS) rather than Next's bodyless default. HEAD is derived from GET by Next.
+export const POST = methodNotAllowed;
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;

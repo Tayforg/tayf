@@ -2,8 +2,13 @@ import type { Metadata } from "next";
 
 import { PageHero } from "@/components/ui/page-hero";
 import { TrackedLink } from "@/components/ui/tracked-link";
-import { API_TIER_LIMITS, API_V1_ANON_LIMIT } from "@/lib/api/keys";
-import { API_PLANS, V1_ENDPOINTS, type V1EndpointDoc } from "@/lib/api/v1-docs";
+import { API_TIER_LIMITS, API_V1_ANON_LIMIT, API_V1_KEYED_IP_LIMIT } from "@/lib/api/keys";
+import {
+  API_PLANS,
+  V1_COMMON_NOTES_TR,
+  V1_ENDPOINTS,
+  type V1EndpointDoc,
+} from "@/lib/api/v1-docs";
 import { REGISTRY_LICENCE } from "@/lib/sources/registry";
 import { siteUrl } from "@/lib/site-url";
 
@@ -127,7 +132,14 @@ function EndpointCard({ endpoint }: { endpoint: V1EndpointDoc }) {
 export default function DeveloperApiPage() {
   const base = siteUrl();
   const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
-  const anonPerMinute = API_V1_ANON_LIMIT.capacity * 60 * API_V1_ANON_LIMIT.refillPerSecond;
+  // One template literal per sentence on purpose: renderToStaticMarkup (and
+  // React's hydration) splits adjacent JSX text/expression children into
+  // separate text nodes, which would break the sentence apart in the markup.
+  // The numbers come from the limiters themselves (refillPerSecond * 60 is the
+  // sustained per-minute rate; capacity is the instantaneous burst).
+  const anonIpNote = `Anahtarsız ya da geçersiz anahtarlı istekler tek bir IP adresinden dakikada yaklaşık ${API_V1_ANON_LIMIT.refillPerSecond * 60} istek (anlık en fazla ${API_V1_ANON_LIMIT.capacity}) ile sınırlıdır.`;
+  const keyedIpNote = `Geçerli bir anahtarla gelen istekler anahtarın kendi dakikalık sınırına tabidir; tek bir IP adresi yine de dakikada en fazla yaklaşık ${API_V1_KEYED_IP_LIMIT.refillPerSecond * 60} istek (anlık en fazla ${API_V1_KEYED_IP_LIMIT.capacity}) gönderebilir.`;
+  const retryAfterNote = "429 yanıtı Retry-After başlığı (saniye) ve details.retryAfterMs taşır.";
   const getEndpoints = V1_ENDPOINTS.filter((e) => e.method === "GET" && e.path !== "/api/v1/openapi.json");
   const hasAnyPrice = API_PLANS.some((plan) => plan.priceTr !== null);
 
@@ -245,11 +257,14 @@ for (const cluster of data.clusters) {
           <ul className="space-y-1.5">
             <li className={noteClass}>Günlük sayaç UTC gece yarısında sıfırlanır ve tek küresel sınırdır.</li>
             <li className={noteClass}>Dakikalık sınır sunucu örneği başınadır.</li>
-            <li className={noteClass}>
-              Tek bir IP adresi, katmandan bağımsız olarak dakikada yaklaşık{" "}
-              {Math.round(anonPerMinute)} istekle sınırlıdır.
-            </li>
-            <li className={noteClass}>429 yanıtı details.retryAfterMs taşır.</li>
+            <li className={noteClass}>{anonIpNote}</li>
+            <li className={noteClass}>{keyedIpNote}</li>
+            <li className={noteClass}>{retryAfterNote}</li>
+            {V1_COMMON_NOTES_TR.map((note) => (
+              <li key={note} className={noteClass}>
+                {note}
+              </li>
+            ))}
             <li className={noteClass}>Hizmet düzeyi taahhüdü (SLA) yoktur.</li>
           </ul>
         </div>

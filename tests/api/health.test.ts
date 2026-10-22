@@ -51,6 +51,8 @@ const responders: {
   articlesMaybeSingle: () => Promise<SelectResponse>;
   clustersMaybeSingle: () => Promise<SelectResponse>;
   workerMetricsSelect: () => Promise<SelectResponse>;
+  /** cold-read resilience: the `clusters` + `cluster_articles(...)` read-path probe. */
+  readPathSelect: () => Promise<SelectResponse>;
 } = {
   sourcesSelect: async () => ({ data: [{ id: "s1" }], error: null }),
   // ingest-health: `.from("sources").select("...latest:articles...")...` --
@@ -80,7 +82,20 @@ const responders: {
     ],
     error: null,
   }),
+  readPathSelect: async () => ({ data: [], error: null }),
 };
+
+// cold-read resilience: what the read-path probe actually sent to PostgREST,
+// so a test can pin the query shape (and that it is bounded by an abort
+// signal) instead of only its verdict.
+const readPathCalls: {
+  count: number;
+  select?: string;
+  eq: Array<[string, unknown]>;
+  gte: Array<[string, unknown]>;
+  limit?: number;
+  signal?: unknown;
+} = { count: 0, eq: [], gte: [] };
 
 vi.mock("@supabase/supabase-js", () => ({
   createClient: () => {
@@ -120,11 +135,50 @@ vi.mock("@supabase/supabase-js", () => ({
       };
       return chain;
     }
+    // cold-read resilience: the read-path probe selects the embedded
+    // `cluster_articles(...)` graph the homepage reads, then filters/orders/
+    // limits and awaits the chain WITHOUT a terminal method, so its chain is
+    // thenable. Told apart from the clustering-staleness probe by whether the
+    // `select(...)` argument contains "cluster_articles".
+    function readPathChain() {
+      const chain: Record<string, unknown> = {};
+      Object.assign(chain, {
+        eq: (col: string, val: unknown) => {
+          readPathCalls.eq.push([col, val]);
+          return chain;
+        },
+        gte: (col: string, val: unknown) => {
+          readPathCalls.gte.push([col, val]);
+          return chain;
+        },
+        order: () => chain,
+        limit: (n: number) => {
+          readPathCalls.limit = n;
+          return chain;
+        },
+        abortSignal: (signal: unknown) => {
+          readPathCalls.signal = signal;
+          return chain;
+        },
+        then: (
+          onFul?: (v: SelectResponse) => unknown,
+          onRej?: (e: unknown) => unknown,
+        ) => responders.readPathSelect().then(onFul, onRej),
+      });
+      return chain;
+    }
     // The clustering probe mirrors the articles probe one-for-one
     // (`.select(...).order(...).limit(1).maybeSingle()`).
     function clustersChain() {
       const chain = {
-        select: () => chain,
+        select: (arg?: string) => {
+          if (typeof arg === "string" && arg.includes("cluster_articles")) {
+            readPathCalls.count++;
+            readPathCalls.select = arg;
+            return readPathChain();
+          }
+          return chain;
+        },
         order: () => chain,
         limit: () => chain,
         maybeSingle: () => responders.clustersMaybeSingle(),
@@ -174,6 +228,13 @@ beforeEach(() => {
   });
   responders.sourcesStatus = async () => ({ data: [], error: null });
   sourcesStatusCallCount = 0;
+  responders.readPathSelect = async () => ({ data: [], error: null });
+  readPathCalls.count = 0;
+  readPathCalls.select = undefined;
+  readPathCalls.eq = [];
+  readPathCalls.gte = [];
+  readPathCalls.limit = undefined;
+  readPathCalls.signal = undefined;
   responders.articlesMaybeSingle = async () => ({
     data: { created_at: new Date().toISOString() },
     error: null,
@@ -200,6 +261,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   // Restore env keys we touched to their original values (or delete if they
   // weren't there before).
   for (const k of [
@@ -233,7 +295,7 @@ async function callGet(request?: Request) {
     });
   const res = await mod.GET(authedRequest);
   const body = await res.json();
-  return { status: res.status, body };
+  return { status: res.status, body, headers: res.headers };
 }
 
 describe("GET /api/health", () => {
@@ -550,13 +612,21 @@ describe("GET /api/health", () => {
     expect(allowed.length).toBe(5);
     expect(denied.length).toBe(1);
 
-    const limitedBody = denied[0]!.body as {
-      status: string;
-      retryAfterMs: number;
+    // Canonical `apiError` envelope (not the legacy `{status: "rate_limited"}`
+    // shape), with the retry hint in the body AND the standard header.
+    const limited = denied[0]!;
+    const limitedBody = limited.body as {
+      error: string;
+      details: { retryAfterMs: number };
     };
-    expect(limitedBody.status).toBe("rate_limited");
-    expect(typeof limitedBody.retryAfterMs).toBe("number");
-    expect(limitedBody.retryAfterMs).toBeGreaterThan(0);
+    expect(limitedBody.error).toBe("Too many requests");
+    expect(typeof limitedBody.details.retryAfterMs).toBe("number");
+    expect(limitedBody.details.retryAfterMs).toBeGreaterThan(0);
+    expect(Number(limited.headers.get("Retry-After"))).toBeGreaterThanOrEqual(1);
+    expect(limited.headers.get("Retry-After")).toBe(
+      String(Math.ceil(limitedBody.details.retryAfterMs / 1000)),
+    );
+    expect(limited.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("authenticated bearer callers bypass the anonymous rate limit", async () => {
@@ -631,6 +701,380 @@ describe("GET /api/health", () => {
   // ingest-health: authed-only `checks.sources` -- silent/never-delivered
   // active sources, purely informational (never flips the verdict).
   // ---------------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------------
+  // cold-read resilience: `checks.readPath`.
+  //
+  // On the Micro compute (256 MB shared_buffers vs a 5.2 GB DB) the cheap
+  // `select id from sources limit 1` probe stays green while the real homepage
+  // read -- clusters + the embedded cluster_articles/articles/sources graph --
+  // blows through PostgREST's 8 s statement_timeout. The probe therefore runs
+  // that same shape, for anonymous AND authed callers (so an external uptime
+  // monitor sees it), bounded by the per-check 2 s budget:
+  //   - errored / aborted / timed out        -> critical -> unhealthy / 503
+  //   - succeeded but slower than 1500 ms    -> degraded  / 200
+  //   - succeeded fast                       -> contributes nothing
+  // ---------------------------------------------------------------------------
+
+  describe("checks.readPath [cold-read resilience]", () => {
+    /**
+     * Drive a GET under fake timers. Only setTimeout/clearTimeout/performance
+     * are faked (Date stays real so the staleness fixtures keep their meaning);
+     * the clock is advanced in 100 ms steps until the handler settles.
+     */
+    async function callGetFake(request?: Request) {
+      const mod = await import("@/app/api/health/route");
+      vi.useFakeTimers({
+        toFake: ["setTimeout", "clearTimeout", "performance"],
+      });
+      const authedRequest =
+        request ??
+        new Request("http://localhost/api/health", {
+          headers: { Authorization: `Bearer ${TEST_CRON_SECRET}` },
+        });
+      let settled = false;
+      const pending = mod.GET(authedRequest).then(
+        (r) => {
+          settled = true;
+          return r;
+        },
+        (e) => {
+          settled = true;
+          throw e;
+        },
+      );
+      for (let i = 0; i < 100 && !settled; i++) {
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      const res = await pending;
+      const body = await res.json();
+      return { status: res.status, body, headers: res.headers };
+    }
+
+    function anonRequest(ip: string): Request {
+      return new Request("http://localhost/api/health", {
+        headers: { "x-forwarded-for": ip },
+      });
+    }
+
+    it("is ok with a numeric latencyMs when the read path answers quickly", async () => {
+      const { status, body } = await callGet();
+      expect(status).toBe(200);
+      expect(body.status).toBe("healthy");
+      expect(body.checks.readPath.ok).toBe(true);
+      expect(typeof body.checks.readPath.latencyMs).toBe("number");
+      expect(body.checks.readPath.error).toBeUndefined();
+    });
+
+    it("sends the homepage-shaped read: embedded cluster_articles graph, live clusters, 20 rows, bounded by an AbortSignal", async () => {
+      await callGet();
+      expect(readPathCalls.count).toBe(1);
+      expect(readPathCalls.select).toContain("cluster_articles");
+      expect(readPathCalls.select).toContain("articles");
+      expect(readPathCalls.select).toContain("sources");
+      expect(readPathCalls.eq).toContainEqual(["is_archived", false]);
+      expect(readPathCalls.gte).toContainEqual(["article_count", 2]);
+      expect(readPathCalls.limit).toBe(20);
+      expect(readPathCalls.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it("runs for an anonymous caller too, without leaking it into the body", async () => {
+      const { status, body } = await callGet(anonRequest("203.0.113.150"));
+      expect(status).toBe(200);
+      expect(readPathCalls.count).toBe(1);
+      expect(Object.keys(body).sort()).toEqual(["status", "timestamp"]);
+    });
+
+    it("runs in parallel with the database probe (neither waits for the other)", async () => {
+      let release!: () => void;
+      const readStarted = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      // If the DB probe ran first and to completion, it would block on a
+      // read-path call that has not started yet and time out after 2 s.
+      responders.sourcesSelect = async () => {
+        await readStarted;
+        return { data: [{ id: "s1" }], error: null };
+      };
+      responders.readPathSelect = async () => {
+        release();
+        return { data: [], error: null };
+      };
+      const { status, body } = await callGetFake();
+      expect(status).toBe(200);
+      expect(body.checks.database.ok).toBe(true);
+      expect(body.checks.readPath.ok).toBe(true);
+    });
+
+    it("is degraded (200), not unhealthy, when the read succeeds but takes 1600 ms", async () => {
+      responders.readPathSelect = () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ data: [], error: null }), 1600);
+        });
+      const { status, body } = await callGetFake();
+      expect(status).toBe(200);
+      expect(body.status).toBe("degraded");
+      expect(body.checks.readPath.ok).toBe(false);
+      expect(body.checks.readPath.latencyMs).toBeGreaterThanOrEqual(1500);
+      expect(body.checks.readPath.error).toBeUndefined();
+      // Everything else stays green: this is a read-path-only degradation.
+      expect(body.checks.database.ok).toBe(true);
+      expect(body.checks.ingestion.ok).toBe(true);
+    });
+
+    it("treats exactly 1500 ms as still ok (the bound is inclusive)", async () => {
+      responders.readPathSelect = () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ data: [], error: null }), 1500);
+        });
+      const { status, body } = await callGetFake();
+      expect(status).toBe(200);
+      expect(body.status).toBe("healthy");
+      expect(body.checks.readPath.ok).toBe(true);
+      expect(body.checks.readPath.latencyMs).toBe(1500);
+    });
+
+    it("is unhealthy (503) when the read never resolves, and names the timeout", async () => {
+      responders.readPathSelect = () => new Promise(() => {});
+      const { status, body } = await callGetFake();
+      expect(status).toBe(503);
+      expect(body.status).toBe("unhealthy");
+      expect(body.checks.readPath.ok).toBe(false);
+      expect(body.checks.readPath.error).toMatch(/timed out/);
+      // The cheap DB probe is still green: the whole point of the new probe.
+      expect(body.checks.database.ok).toBe(true);
+    });
+
+    it("an anonymous caller of a hung read path gets 503 and ONLY {status, timestamp}", async () => {
+      responders.readPathSelect = () => new Promise(() => {});
+      const { status, body } = await callGetFake(anonRequest("203.0.113.151"));
+      expect(status).toBe(503);
+      expect(body).toEqual({
+        status: "unhealthy",
+        timestamp: expect.any(String),
+      });
+      expect(Object.keys(body).sort()).toEqual(["status", "timestamp"]);
+    });
+
+    it("is unhealthy (503) when the read comes back with an AbortError", async () => {
+      responders.readPathSelect = async () => ({
+        data: null,
+        error: { message: "AbortError: x" },
+      });
+      const { status, body } = await callGet();
+      expect(status).toBe(503);
+      expect(body.status).toBe("unhealthy");
+      expect(body.checks.readPath.ok).toBe(false);
+      expect(body.checks.readPath.error).toBe("AbortError: x");
+      expect(typeof body.checks.readPath.latencyMs).toBe("number");
+    });
+
+    it("is unhealthy (503) on a plain query error such as a statement timeout", async () => {
+      responders.readPathSelect = async () => ({
+        data: null,
+        error: { message: "canceling statement due to statement timeout" },
+      });
+      const { status, body } = await callGet();
+      expect(status).toBe(503);
+      expect(body.checks.readPath.error).toMatch(/statement timeout/);
+    });
+
+    it("is unhealthy (503) when the read path throws outright", async () => {
+      responders.readPathSelect = async () => {
+        throw new Error("socket hang up");
+      };
+      const { status, body } = await callGet();
+      expect(status).toBe(503);
+      expect(body.checks.readPath.ok).toBe(false);
+      expect(body.checks.readPath.error).toMatch(/socket hang up/);
+    });
+
+    it("an anonymous caller of a failing read path gets 503 and ONLY {status, timestamp}", async () => {
+      responders.readPathSelect = async () => ({
+        data: null,
+        error: { message: "boom" },
+      });
+      const { status, body } = await callGet(anonRequest("203.0.113.152"));
+      expect(status).toBe(503);
+      expect(Object.keys(body).sort()).toEqual(["status", "timestamp"]);
+    });
+
+    it("an anonymous caller of a slow (1600 ms) read path gets 200 degraded and no latency", async () => {
+      responders.readPathSelect = () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ data: [], error: null }), 1600);
+        });
+      const { status, body } = await callGetFake(anonRequest("203.0.113.153"));
+      expect(status).toBe(200);
+      expect(body.status).toBe("degraded");
+      expect(Object.keys(body).sort()).toEqual(["status", "timestamp"]);
+    });
+
+    // -----------------------------------------------------------------------
+    // Cost bound for the PUBLIC endpoint. The probe is a heavy embedded read
+    // and an aborted client request keeps running in Postgres until
+    // statement_timeout, so an anonymous flood must not turn into a flood of
+    // heavy statements. Anonymous callers share ONE in-flight probe and a
+    // short-TTL memo of its verdict; authed (CRON_SECRET) callers bypass it.
+    // -----------------------------------------------------------------------
+    describe("anonymous coalescing [cost bound]", () => {
+      /**
+       * Several sequential calls against ONE module instance under fake
+       * timers (callGetFake re-imports and re-installs the clock, which would
+       * reset the memo's clock between calls). performance is faked so the
+       * memo's TTL clock advances with `advance`.
+       */
+      async function fakeCaller() {
+        const mod = await import("@/app/api/health/route");
+        vi.useFakeTimers({
+          toFake: ["setTimeout", "clearTimeout", "performance"],
+        });
+        async function call(request: Request) {
+          let settled = false;
+          const pending = mod.GET(request).then(
+            (r) => {
+              settled = true;
+              return r;
+            },
+            (e) => {
+              settled = true;
+              throw e;
+            },
+          );
+          for (let i = 0; i < 100 && !settled; i++) {
+            await vi.advanceTimersByTimeAsync(100);
+          }
+          const res = await pending;
+          return { status: res.status, body: await res.json() };
+        }
+        return { call, advance: (ms: number) => vi.advanceTimersByTimeAsync(ms) };
+      }
+
+      function authedRequest(): Request {
+        return new Request("http://localhost/api/health", {
+          headers: { Authorization: `Bearer ${TEST_CRON_SECRET}` },
+        });
+      }
+
+      it("N sequential anonymous requests inside the TTL trigger ONE read-path query", async () => {
+        for (let i = 0; i < 8; i++) {
+          const { status } = await callGet(anonRequest(`198.51.100.${10 + i}`));
+          expect(status).toBe(200);
+        }
+        expect(readPathCalls.count).toBe(1);
+      });
+
+      it("concurrent anonymous requests share one in-flight probe (single-flight)", async () => {
+        responders.readPathSelect = () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({ data: [], error: null }), 25);
+          });
+        const results = await Promise.all(
+          Array.from({ length: 10 }, (_, i) =>
+            callGet(anonRequest(`198.51.100.${40 + i}`)),
+          ),
+        );
+        expect(results.every((r) => r.status === 200)).toBe(true);
+        expect(readPathCalls.count).toBe(1);
+      });
+
+      it("re-probes once a successful verdict is older than 15 s, and not before", async () => {
+        const { call, advance } = await fakeCaller();
+        await call(anonRequest("198.51.100.60"));
+        expect(readPathCalls.count).toBe(1);
+
+        await advance(14_000);
+        await call(anonRequest("198.51.100.61"));
+        expect(readPathCalls.count).toBe(1);
+
+        await advance(1_500); // 15.5 s after the probe settled
+        await call(anonRequest("198.51.100.62"));
+        expect(readPathCalls.count).toBe(2);
+      });
+
+      it("a failed verdict is memoised for only 5 s: anonymous callers keep seeing 503, then it re-probes", async () => {
+        responders.readPathSelect = async () => ({
+          data: null,
+          error: { message: "canceling statement due to statement timeout" },
+        });
+        const { call, advance } = await fakeCaller();
+
+        const first = await call(anonRequest("198.51.100.70"));
+        expect(first.status).toBe(503);
+        expect(readPathCalls.count).toBe(1);
+
+        await advance(3_000);
+        const second = await call(anonRequest("198.51.100.71"));
+        expect(second.status).toBe(503);
+        expect(readPathCalls.count).toBe(1);
+
+        // Recovered upstream: the next probe after the 5 s failure TTL heals.
+        responders.readPathSelect = async () => ({ data: [], error: null });
+        await advance(2_500); // 5.5 s after the failed probe
+        const third = await call(anonRequest("198.51.100.72"));
+        expect(third.status).toBe(200);
+        expect(readPathCalls.count).toBe(2);
+      });
+
+      it("a slow-but-successful (degraded) verdict is not memoised as long as a clean one", async () => {
+        responders.readPathSelect = () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({ data: [], error: null }), 1600);
+          });
+        const { call, advance } = await fakeCaller();
+
+        const first = await call(anonRequest("198.51.100.80"));
+        expect(first.body.status).toBe("degraded");
+        expect(readPathCalls.count).toBe(1);
+
+        await advance(5_500);
+        await call(anonRequest("198.51.100.81"));
+        expect(readPathCalls.count).toBe(2);
+      });
+
+      it("authed callers bypass the memo and always get a fresh reading", async () => {
+        const { call } = await fakeCaller();
+
+        await call(anonRequest("198.51.100.90"));
+        expect(readPathCalls.count).toBe(1);
+
+        // The database went bad AFTER the anonymous verdict was memoised.
+        responders.readPathSelect = async () => ({
+          data: null,
+          error: { message: "boom" },
+        });
+        const authed = await call(authedRequest());
+        expect(authed.status).toBe(503);
+        expect(authed.body.checks.readPath.error).toBe("boom");
+        expect(readPathCalls.count).toBe(2);
+
+        await call(authedRequest());
+        expect(readPathCalls.count).toBe(3);
+      });
+
+      it("a memoised failure never leaks detail into the anonymous body", async () => {
+        responders.readPathSelect = async () => ({
+          data: null,
+          error: { message: "secret internal detail" },
+        });
+        const { call } = await fakeCaller();
+        await call(anonRequest("198.51.100.95"));
+        const again = await call(anonRequest("198.51.100.96"));
+        expect(again.status).toBe(503);
+        expect(Object.keys(again.body).sort()).toEqual(["status", "timestamp"]);
+      });
+    });
+
+    it("skips the read-path probe when env is broken (short-circuit), still 503", async () => {
+      delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+      delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      const { status, body } = await callGet();
+      expect(status).toBe(503);
+      expect(readPathCalls.count).toBe(0);
+      expect(body.checks.readPath.ok).toBe(false);
+      expect(body.checks.readPath.error).toBeUndefined();
+    });
+  });
 
   describe("checks.sources [ingest-health]", () => {
     it("lists a never-delivered source and a 4-day-stale one with failStreak and quarantined", async () => {

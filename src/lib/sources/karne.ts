@@ -27,11 +27,24 @@ import type { MediaDnaZone } from "@/types";
 // Deliberately NOT here: clickbait (precision gate closed), headline edits
 // (056 counsel gate), first-mover counts, any "skipped stories" list.
 //
-// No Date.now(): the window bounds come from the row itself.
+// Clock reads: `toSourceKarne` / `buildKarneView` never read the clock (the
+// window bounds come from the row itself). The ONE clock read is
+// `getKarneFreshnessCached`, which runs inside a "use cache" scope, so a
+// prerender never sees an uncached Date.now() and the live-retry path of
+// `getSourceKarne` is covered by the same scope.
+//
+// Freshness (migration 106): the refresh runs in bounded cron batches and a
+// row older than KARNE_STALE_AFTER_HOURS means the batches are not keeping up
+// (or the job is failing). The card then says so instead of presenting old
+// numbers as current.
 
 export const KARNE_WINDOW_DAYS = 30;
 export const KARNE_MIN_CLUSTERS = 20;
 export const KARNE_MIN_MULTI_FOR_ZONES = 10;
+export const KARNE_STALE_AFTER_HOURS = 48;
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
 
 export interface SourceKarne {
   windowDays: number;
@@ -45,6 +58,16 @@ export interface SourceKarne {
   nBlindspotSameSide: number;
   computedAt: string;
 }
+
+export interface SourceKarneFreshness {
+  /** computed_at is older than KARNE_STALE_AFTER_HOURS. */
+  isStale: boolean;
+  /** Whole days since computed_at (0 for a future or unparseable date). */
+  ageDays: number;
+}
+
+/** A validated row plus its freshness; what the page and the card consume. */
+export type SourceKarneRead = SourceKarne & SourceKarneFreshness;
 
 function count(v: unknown): number | null {
   return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null;
@@ -96,6 +119,23 @@ export function toSourceKarne(raw: unknown): SourceKarne | null {
     nBlindspot,
     nBlindspotSameSide: nSame,
     computedAt,
+  };
+}
+
+/**
+ * Pure freshness of a `computed_at` timestamp at `nowMs`. Unparseable input
+ * and clock skew (future dates) are never reported as stale.
+ */
+export function karneFreshness(
+  computedAt: string,
+  nowMs: number,
+): SourceKarneFreshness {
+  const computedMs = Date.parse(computedAt);
+  if (Number.isNaN(computedMs)) return { isStale: false, ageDays: 0 };
+  const ageMs = Math.max(0, nowMs - computedMs);
+  return {
+    isStale: ageMs > KARNE_STALE_AFTER_HOURS * HOUR_MS,
+    ageDays: Math.floor(ageMs / DAY_MS),
   };
 }
 
@@ -192,13 +232,27 @@ async function getSourceKarneCached(sourceId: string) {
   return attemptCached("source-karne", () => fetchKarneRow(sourceId));
 }
 
+// The only clock read. Pure body (cannot throw across the cache boundary);
+// keyed on computed_at, so a refreshed row gets a fresh entry.
+async function getKarneFreshnessCached(
+  computedAt: string,
+): Promise<SourceKarneFreshness> {
+  "use cache";
+  cacheLife("hours");
+  return karneFreshness(computedAt, Date.now());
+}
+
 /** Never throws; null for a non-uuid id, a missing/invalid row or an outage. */
-export async function getSourceKarne(sourceId: string): Promise<SourceKarne | null> {
+export async function getSourceKarne(
+  sourceId: string,
+): Promise<SourceKarneRead | null> {
   if (typeof sourceId !== "string" || !UUID_RE.test(sourceId)) return null;
-  return resolveCachedOrRetry(
+  const karne = await resolveCachedOrRetry(
     "source-karne",
     () => getSourceKarneCached(sourceId),
     () => fetchKarneRow(sourceId),
     null,
   );
+  if (!karne) return null;
+  return { ...karne, ...(await getKarneFreshnessCached(karne.computedAt)) };
 }

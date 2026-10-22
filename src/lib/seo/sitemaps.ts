@@ -1,6 +1,6 @@
 import { cacheLife } from "next/cache";
 
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 
 // seo-share — sitemap index + monthly cluster sitemaps + Google News
@@ -214,14 +214,36 @@ function monthRangeUtc(month: string): { start: string; end: string } {
 // Cached builders
 // ---------------------------------------------------------------------------
 
+/** The UTC `YYYY-MM` key of an instant. Sitemap months are UTC, matching
+ *  `monthRangeUtc` below. */
+export function utcMonthKey(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+/** The current UTC month, as the route handler needs it to tell a CLOSED
+ *  month (long CDN cache) from the current one. The handler itself must not
+ *  read the clock (Next 16 prerender rule), so the read lives in this
+ *  `"use cache"` function. The hour of cache lag is harmless and errs on the
+ *  safe side: for up to an hour after a month boundary the just-closed
+ *  month still looks "current" and keeps the short cache header, never the
+ *  other way round. */
+export async function getCurrentSitemapMonth(): Promise<string> {
+  "use cache";
+  cacheLife({ revalidate: 3600 });
+
+  return utcMonthKey(Date.now());
+}
+
 /** No DB. Lists the 3 fixed files plus one clusters-YYYY-MM.xml per month
- *  from SITEMAP_FIRST_MONTH through the current UTC month. */
+ *  from SITEMAP_FIRST_MONTH through the current UTC month. The index route
+ *  awaits `connection()` first, so this runs per request (not frozen at
+ *  build) and a new month appears within the hour its cache entry lives. */
 export async function getSitemapIndexXml(baseUrl: string): Promise<string> {
   "use cache";
   cacheLife({ revalidate: 3600 });
 
-  const now = new Date();
-  const currentMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+  const currentMonth = utcMonthKey(Date.now());
   const months = monthsBetween(SITEMAP_FIRST_MONTH, currentMonth);
 
   const locs = [
@@ -265,7 +287,7 @@ export async function getSourcesSitemapXml(baseUrl: string): Promise<string> {
   "use cache";
   cacheLife({ revalidate: 3600 });
 
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("sources")
     .select("slug")
@@ -297,7 +319,7 @@ export async function getNewsSitemapXml(baseUrl: string): Promise<string> {
   const now = new Date();
   const since = new Date(now.getTime() - NEWS_WINDOW_HOURS * 3600 * 1000);
 
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("clusters")
     .select("id, title_tr, title_tr_neutral, first_published")
@@ -335,7 +357,7 @@ export async function getClustersMonthXml(baseUrl: string, month: string): Promi
   cacheLife({ revalidate: 3600 });
 
   const { start, end } = monthRangeUtc(month);
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
 
   const entries: SitemapUrlEntry[] = [];
 
