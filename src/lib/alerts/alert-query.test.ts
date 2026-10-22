@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const state = vi.hoisted(() => ({
+  /** Every argument list `getBlindspots` was called with. */
+  blindspotCalls: [] as unknown[][],
   bundles: [] as unknown[],
   silentRows: [] as unknown[],
   silentError: null as { message: string } | null,
@@ -27,7 +29,10 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 vi.mock("@/lib/clusters/blindspots-query", () => ({
-  getBlindspots: async () => ({ bundles: state.bundles }),
+  getBlindspots: async (...args: unknown[]) => {
+    state.blindspotCalls.push(args);
+    return { bundles: state.bundles };
+  },
 }));
 
 import { getAlertItems } from "@/lib/alerts/alert-query";
@@ -68,10 +73,31 @@ function health(degraded: Partial<Record<"iktidar" | "bagimsiz" | "muhalefet", b
 }
 
 beforeEach(() => {
+  state.blindspotCalls = [];
   state.bundles = [];
   state.silentRows = [];
   state.silentError = null;
   captured.states.length = 0;
+});
+
+describe("getAlertItems read profile", () => {
+  it("reads blindspots through the capped reader profile by default (the public alerts API)", async () => {
+    await getAlertItems({ sinceIso: SINCE, limit: 50, health: null, nowMs: NOW });
+    expect(state.blindspotCalls).toHaveLength(1);
+    const opts = state.blindspotCalls[0]![0] as { profile?: string } | undefined;
+    expect(opts?.profile ?? "reader").toBe("reader");
+  });
+
+  it("forwards the batch profile (the alerts-webhooks cron) so its read is uncapped", async () => {
+    await getAlertItems({
+      sinceIso: SINCE,
+      limit: 50,
+      health: null,
+      nowMs: NOW,
+      profile: "batch",
+    });
+    expect(state.blindspotCalls).toEqual([[{ profile: "batch" }]]);
+  });
 });
 
 describe("getAlertItems", () => {

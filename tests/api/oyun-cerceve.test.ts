@@ -29,11 +29,18 @@ const cerceveState = vi.hoisted(() => ({
   // Queue of { data, error } envelopes consumed (shift) by
   // framing_next_headline, one per RPC call. Falls back to
   // `nextDefault` once drained.
-  nextQueue: [] as Array<{ data: unknown; error: { message: string } | null }>,
+  nextQueue: [] as Array<{
+    data: unknown;
+    error: { message: string; code?: string } | null;
+  }>,
   nextDefault: { data: [ELIGIBLE_ROW], error: null } as {
     data: unknown;
-    error: { message: string } | null;
+    error: { message: string; code?: string } | null;
   },
+  // When set, framing_next_headline THROWS this instead of resolving an
+  // envelope (supabase-js can reject, e.g. with throwOnError or a transport
+  // failure that escapes postgrest-js' own try/catch).
+  nextThrow: null as unknown,
   forceUpsertError: false,
   // Set to a Postgres error code (e.g. "23503") to make the upsert fail
   // with that specific code instead of the generic "upsert boom" message.
@@ -61,6 +68,9 @@ const supabaseFake = await vi.hoisted(async () => {
     },
     rpc: {
       framing_next_headline: () => {
+        if (cerceveState.nextThrow !== null) {
+          throw cerceveState.nextThrow;
+        }
         if (cerceveState.nextQueue.length > 0) {
           return cerceveState.nextQueue.shift()!;
         }
@@ -83,11 +93,13 @@ beforeEach(() => {
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
   cerceveState.nextQueue = [];
+  cerceveState.nextThrow = null;
   cerceveState.forceUpsertError = false;
   cerceveState.forceUpsertErrorCode = null;
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -203,6 +215,157 @@ describe("GET /api/oyun/cerceve/next", () => {
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(body).not.toEqual({ article_id: null, title: null });
+  });
+
+  describe("draw timeout (cold-read resilience)", () => {
+    const COOKIE = "0123456789abcdef0123456789abcdef";
+
+    async function expectRetryable503(res: Response) {
+      expect(res.status).toBe(503);
+      expect(res.headers.get("retry-after")).toBe("5");
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(await res.json()).toEqual({
+        error: "Service unavailable",
+        details: { retryAfterMs: 5000 },
+      });
+    }
+
+    it("answers an AbortError from the aborted fetch with a retryable 503, not a 500", async () => {
+      cerceveState.nextQueue = [
+        {
+          data: null,
+          error: { message: "AbortError: The user aborted a request.", code: "" },
+        },
+      ];
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      // No cookie: a minted-cookie request must still NOT set one on a failure.
+      const res = await mod.GET(makeGetRequest("198.51.100.20"));
+      await expectRetryable503(res);
+    });
+
+    it("answers a TimeoutError (AbortSignal.timeout) with a retryable 503", async () => {
+      cerceveState.nextQueue = [
+        {
+          data: null,
+          error: {
+            message: "TimeoutError: The operation was aborted due to timeout",
+            code: "",
+          },
+        },
+      ];
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.21", COOKIE));
+      await expectRetryable503(res);
+    });
+
+    it("answers a Postgres statement timeout (57014) with a retryable 503", async () => {
+      cerceveState.nextQueue = [
+        {
+          data: null,
+          error: { message: "canceling statement due to statement timeout", code: "57014" },
+        },
+      ];
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.22", COOKIE));
+      await expectRetryable503(res);
+    });
+
+    it("treats a THROWN abort/timeout the same way as a returned one", async () => {
+      cerceveState.nextThrow = new DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      );
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.23"));
+      await expectRetryable503(res);
+    });
+
+    it("keeps any other RPC error a 500 (no Retry-After)", async () => {
+      cerceveState.nextQueue = [{ data: null, error: { message: "boom", code: "XX000" } }];
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.24"));
+      expect(res.status).toBe(500);
+      expect(res.headers.get("retry-after")).toBeNull();
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    });
+
+    it("keeps any other THROWN error a 500", async () => {
+      cerceveState.nextThrow = new Error("kaboom");
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.25"));
+      expect(res.status).toBe(500);
+      expect(res.headers.get("retry-after")).toBeNull();
+    });
+
+    it("a timeout on the PII redraw (second RPC) is also a 503, never a partial 200", async () => {
+      cerceveState.nextQueue = [
+        { data: [PII_ROW], error: null },
+        { data: null, error: { message: "AbortError: The user aborted a request.", code: "" } },
+      ];
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.26", COOKIE));
+      await expectRetryable503(res);
+      expect(supabaseFake.calls.rpc.filter((c) => c.name === "framing_next_headline")).toHaveLength(2);
+    });
+
+    it("chains an AbortSignal onto the RPC", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.27", COOKIE));
+      expect(res.status).toBe(200);
+      const call = supabaseFake.calls.rpc.find((c) => c.name === "framing_next_headline");
+      expect(call?.signal).toBeInstanceOf(AbortSignal);
+      expect(call?.signal?.aborted).toBe(false);
+    });
+
+    it("shares ONE deadline signal across PII redraws so the whole draw stays within the budget", async () => {
+      cerceveState.nextQueue = [
+        { data: [PII_ROW], error: null },
+        { data: [ELIGIBLE_ROW], error: null },
+      ];
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.28", COOKIE));
+      expect(res.status).toBe(200);
+      const rpcCalls = supabaseFake.calls.rpc.filter((c) => c.name === "framing_next_headline");
+      expect(rpcCalls).toHaveLength(2);
+      expect(rpcCalls[0]?.signal).toBeInstanceOf(AbortSignal);
+      expect(rpcCalls[1]?.signal).toBe(rpcCalls[0]?.signal);
+    });
+
+    it("never logs the session hash, the raw cookie or the title", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+      const hash = await hashSessionId(COOKIE);
+      const timeoutEnvelopes = [
+        { data: null, error: { message: "AbortError: The user aborted a request.", code: "" } },
+        { data: null, error: { message: "canceling statement due to statement timeout", code: "57014" } },
+      ];
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      for (const [i, envelope] of timeoutEnvelopes.entries()) {
+        cerceveState.nextQueue = [envelope];
+        const res = await mod.GET(makeGetRequest(`198.51.100.${30 + i}`, COOKIE));
+        expect(res.status).toBe(503);
+      }
+      // A successful draw and a plain 500 must not leak either.
+      cerceveState.nextQueue = [{ data: [ELIGIBLE_ROW], error: null }];
+      await mod.GET(makeGetRequest("198.51.100.40", COOKIE));
+      cerceveState.nextQueue = [{ data: null, error: { message: "boom" } }];
+      await mod.GET(makeGetRequest("198.51.100.41", COOKIE));
+
+      const logged = [...warn.mock.calls, ...error.mock.calls];
+      expect(warn).toHaveBeenCalledWith("[oyun/cerceve] draw timed out", { code: "" });
+      expect(warn).toHaveBeenCalledWith("[oyun/cerceve] draw timed out", { code: "57014" });
+      for (const args of logged) {
+        for (const arg of args) {
+          const serialized = JSON.stringify(arg) ?? "";
+          expect(serialized).not.toContain(hash);
+          expect(serialized).not.toContain(COOKIE);
+          expect(serialized).not.toContain(ELIGIBLE_ROW.title);
+        }
+      }
+    });
   });
 
   it("returns 429 with retryAfterMs after its bucket is exhausted", async () => {

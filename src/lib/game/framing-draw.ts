@@ -65,3 +65,56 @@ export function startRoundClock(
 ): number {
   return currentEndsAtMs > 0 ? currentEndsAtMs : nowMs + roundSeconds * 1000;
 }
+
+/** Longest wait before the one draw retry, whatever `Retry-After` says. */
+export const DRAW_RETRY_MAX_MS = 5000;
+/** Wait before the draw retry when a 503 has no usable `Retry-After`. */
+export const DRAW_RETRY_DEFAULT_MS = 2000;
+
+/**
+ * How long to wait before retrying a draw, or `null` when the response is
+ * not retryable. Only a 503 is: the route answers it when the draw's DB read
+ * timed out (a cold read), which a second attempt usually finds warm. A 500
+ * or 429 is never retried here -- a 500 is a real failure and a 429 means
+ * slow down, not hammer.
+ *
+ * `retryAfter` is the raw `Retry-After` header. Integer seconds >= 0 are
+ * honoured up to `DRAW_RETRY_MAX_MS`; a missing or unparseable value
+ * (including HTTP-date form) falls back to `DRAW_RETRY_DEFAULT_MS`.
+ */
+export function drawRetryDelayMs(
+  status: number,
+  retryAfter: string | null,
+): number | null {
+  if (status !== 503) return null;
+  if (retryAfter !== null && /^\d+$/.test(retryAfter.trim())) {
+    return Math.min(Number(retryAfter.trim()) * 1000, DRAW_RETRY_MAX_MS);
+  }
+  return DRAW_RETRY_DEFAULT_MS;
+}
+
+/**
+ * Fetch a draw, retrying ONCE after a 503 (see `drawRetryDelayMs`), and
+ * shape the result for `classifyDrawResponse`: `{ ok, body }`, or `null`
+ * when a fetch threw (network failure, `AbortSignal` timeout). At most two
+ * fetches. `doFetch` is called afresh for the retry so each attempt gets its
+ * own timeout signal.
+ */
+export async function fetchDrawResponse(
+  doFetch: () => Promise<Response>,
+  sleep: (ms: number) => Promise<void> = (ms) =>
+    new Promise<void>((r) => setTimeout(r, ms)),
+): Promise<{ ok: boolean; body: unknown } | null> {
+  try {
+    let res = await doFetch();
+    const delayMs = drawRetryDelayMs(res.status, res.headers.get("Retry-After"));
+    if (delayMs !== null) {
+      await sleep(delayMs);
+      res = await doFetch();
+    }
+    const body = res.ok ? await res.json().catch(() => null) : null;
+    return { ok: res.ok, body };
+  } catch {
+    return null;
+  }
+}

@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import { turkishQueryVariants } from "./turkish-query";
 import { getZoneFeedHealth } from "./feed-health";
 import {
@@ -51,7 +51,7 @@ async function fetchSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
   const variants = turkishQueryVariants(trimmed);
   if (variants.length === 0) return [];
 
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
 
   const { data, error } = await supabase.rpc("search_cluster_ids", {
     p_variants: variants,

@@ -1,6 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
-import { createFinanceServerClient } from "@/lib/supabase/server";
+import { READER_TIMEOUT_MS, createFinanceServerClient } from "@/lib/supabase/server";
 import {
   aggregateAttention,
   fetchLowRelevanceSince,
@@ -197,7 +197,7 @@ export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   // reader-data (§4b): over-fetch 25% so the ~20% of items a hidden-ticker
   // drop can remove still leave close to `limit` items on screen.
   const { data, error } = await supabase.rpc("econ_feed", { p_limit: Math.ceil(limit * 1.25) });
@@ -311,7 +311,7 @@ export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAtten
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const splitDay = istDate(-(days - 1));
   const sinceIso = `${istDate(-(days - 1 + BASELINE_DAYS))}T00:00:00+03:00`;
   const raw = await fetchArticleTickersSince(supabase, sinceIso);
@@ -364,7 +364,7 @@ export async function fetchRecentDisclosures(limit = 40, ticker?: string): Promi
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   // TS-06: `.not('subject','ilike',CIRCUIT_BREAKER)` compiles to
   // `subject NOT ILIKE ...`, which is NULL (not TRUE) for a NULL subject —
   // PostgREST drops those rows even though they plainly aren't circuit
@@ -388,7 +388,7 @@ export async function fetchCircuitBreakers(limit = 60): Promise<Disclosure[]> {
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase
     .from("kap_disclosures")
     .select(DISCLOSURE_SELECT)
@@ -417,7 +417,7 @@ export async function fetchQuoteStats(tickers: readonly string[]): Promise<Recor
   cacheTag("finance-bars");
   const unique = [...new Set(tickers)].sort();
   if (unique.length === 0) return {};
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase.from("bist_quote_stats").select("*").in("ticker", unique);
   if (error) throw new Error(`[finance] fetchQuoteStats: ${error.message}`);
   const out: Record<string, QuoteStat> = {};
@@ -444,7 +444,7 @@ export async function fetchReferencePrices(articleIds: readonly string[]): Promi
   cacheTag("finance-bars");
   const ids = [...new Set(articleIds)].sort();
   if (ids.length === 0) return {};
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase.rpc("feed_reference_prices", { p_article_ids: ids });
   if (error) throw new Error(`[finance] fetchReferencePrices: ${error.message}`);
   const out: Record<string, number> = {};
@@ -459,7 +459,7 @@ export async function fetchIntraday(ticker: string): Promise<{ day: string | nul
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-bars", `finance-ticker:${ticker}`);
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data: last, error: lErr } = await supabase
     .from("bist_bars_5m")
     .select("ts")
@@ -535,7 +535,7 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
   "use cache";
   cacheLife(FEED_CACHE);
   cacheTag("finance-feed", `finance-ticker:${ticker}`);
-  const supabase = await createFinanceServerClient();
+  const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const since30 = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
 
   const [companyRes, attentionRes, articlesRes, disclosuresRes, coverageRes] = await Promise.all([

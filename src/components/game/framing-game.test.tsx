@@ -82,6 +82,7 @@ describe("FramingGame — source guard: the round clock only starts once a headl
     const drawEnd = source.indexOf("const handleStart = useCallback(");
     expect(drawStart).toBeGreaterThan(-1);
     const body = source.slice(drawStart, drawEnd);
+    expect(body).toContain("fetchDrawResponse(");
     expect(body).toContain("classifyDrawResponse(res)");
     expect(body).toContain("startRoundClock(");
   });
@@ -151,7 +152,7 @@ describe("FramingGame — source guard: the loading phase never renders a blank 
 
   it("times out the headline draw fetch so a stall falls through to finishRound, not a hang", () => {
     expect(source).toContain(
-      'fetch("/api/oyun/cerceve/next", {\n        method: "GET",\n        signal: AbortSignal.timeout(8000),\n      });',
+      'fetch("/api/oyun/cerceve/next", {\n        method: "GET",\n        signal: AbortSignal.timeout(8000),\n      }),',
     );
   });
 

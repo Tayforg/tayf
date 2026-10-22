@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("next/cache", () => ({
   cacheLife: vi.fn(),
@@ -8,6 +8,8 @@ vi.mock("next/cache", () => ({
 const fixture = vi.hoisted(() => ({
   data: null as unknown,
   error: null as { message: string } | null,
+  /** Fail this many calls with `error`-like "boom", then serve `data`. */
+  failFirst: 0,
   calls: 0,
 }));
 
@@ -17,6 +19,10 @@ const supabaseFake = await vi.hoisted(async () => {
     tables: {
       source_karne_30d: () => {
         fixture.calls += 1;
+        if (fixture.failFirst > 0) {
+          fixture.failFirst -= 1;
+          return { data: null, error: { message: "boom" } };
+        }
         return { data: fixture.data, error: fixture.error };
       },
     },
@@ -30,9 +36,11 @@ vi.mock("@supabase/supabase-js", () => ({
 import {
   KARNE_MIN_CLUSTERS,
   KARNE_MIN_MULTI_FOR_ZONES,
+  KARNE_STALE_AFTER_HOURS,
   KARNE_WINDOW_DAYS,
   buildKarneView,
   getSourceKarne,
+  karneFreshness,
   pct,
   toSourceKarne,
   type SourceKarne,
@@ -67,15 +75,24 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.data = null;
   fixture.error = null;
+  fixture.failFirst = 0;
   fixture.calls = 0;
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
 
 describe("constants", () => {
   it("pins the thresholds", () => {
     expect(KARNE_WINDOW_DAYS).toBe(30);
     expect(KARNE_MIN_CLUSTERS).toBe(20);
     expect(KARNE_MIN_MULTI_FOR_ZONES).toBe(10);
+    expect(KARNE_STALE_AFTER_HOURS).toBe(48);
   });
 });
 
@@ -96,6 +113,12 @@ describe("toSourceKarne", () => {
     });
   });
 
+  it("keeps the v1 profile contract: no freshness fields on the validated row", () => {
+    const k = toSourceKarne(raw())!;
+    expect(k).not.toHaveProperty("isStale");
+    expect(k).not.toHaveProperty("ageDays");
+  });
+
   it.each([
     ["null", null],
     ["string", "x"],
@@ -110,6 +133,46 @@ describe("toSourceKarne", () => {
   ])("rejects %s", (_n, input) => {
     expect(toSourceKarne(input)).toBeNull();
   });
+});
+
+describe("karneFreshness", () => {
+  const NOW = Date.parse("2026-10-22T12:00:00Z");
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+
+  it("47 h old is not stale and rounds down to 1 day", () => {
+    expect(karneFreshness(ago(47 * HOUR_MS), NOW)).toEqual({ isStale: false, ageDays: 1 });
+  });
+
+  it("49 h old is stale and is 2 days", () => {
+    expect(karneFreshness(ago(49 * HOUR_MS), NOW)).toEqual({ isStale: true, ageDays: 2 });
+  });
+
+  it("is stale strictly after 48 h (exactly 48 h is still fresh)", () => {
+    expect(karneFreshness(ago(48 * HOUR_MS), NOW)).toEqual({ isStale: false, ageDays: 2 });
+    expect(karneFreshness(ago(48 * HOUR_MS + 1), NOW)).toEqual({ isStale: true, ageDays: 2 });
+  });
+
+  it("9 days old gives ageDays 9", () => {
+    expect(karneFreshness(ago(9 * DAY_MS), NOW)).toEqual({ isStale: true, ageDays: 9 });
+  });
+
+  it("a brand-new row is fresh at 0 days", () => {
+    expect(karneFreshness(ago(0), NOW)).toEqual({ isStale: false, ageDays: 0 });
+  });
+
+  it("a future computed_at (clock skew) clamps to 0 days and is not stale", () => {
+    expect(karneFreshness(new Date(NOW + 3 * DAY_MS).toISOString(), NOW)).toEqual({
+      isStale: false,
+      ageDays: 0,
+    });
+  });
+
+  it.each([["garbage"], [""], ["2026-13-45"]])(
+    "unparseable input %j is not stale and 0 days",
+    (input) => {
+      expect(karneFreshness(input, NOW)).toEqual({ isStale: false, ageDays: 0 });
+    },
+  );
 });
 
 describe("pct", () => {
@@ -173,6 +236,32 @@ describe("getSourceKarne", () => {
     const k = await getSourceKarne(ID);
     expect(k?.nClusters).toBe(100);
     expect(fixture.calls).toBeGreaterThan(0);
+  });
+
+  it("a 9-day-old row is stale with ageDays 9", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-08T06:00:00Z"));
+    fixture.data = raw({ computed_at: "2026-09-29T06:00:00Z" });
+    const k = await getSourceKarne(ID);
+    expect(k).toMatchObject({ isStale: true, ageDays: 9, nClusters: 100 });
+  });
+
+  it("a fresh row is not stale", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-29T18:00:00Z"));
+    fixture.data = raw({ computed_at: "2026-09-29T06:00:00Z" });
+    const k = await getSourceKarne(ID);
+    expect(k).toMatchObject({ isStale: false, ageDays: 0 });
+  });
+
+  it("still computes freshness on the live-retry path (cache attempt fails, retry succeeds)", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-08T06:00:00Z"));
+    fixture.data = raw({ computed_at: "2026-09-29T06:00:00Z" });
+    fixture.failFirst = 1;
+    const k = await getSourceKarne(ID);
+    expect(fixture.calls).toBe(2);
+    expect(k).toMatchObject({ isStale: true, ageDays: 9 });
   });
 
   it("returns null for a missing row", async () => {

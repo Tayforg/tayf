@@ -7,6 +7,7 @@ import {
   V1_ENDPOINTS,
   V1_CANDIDATE_MULTIPLIER,
   V1_CANDIDATE_CAP,
+  V1_COMMON_NOTES_TR,
   API_PLANS,
 } from "@/lib/api/v1-docs";
 import { V1_DEFAULT_LIMIT, V1_MAX_LIMIT, toV1ClusterRecord, type V1ClusterRow } from "@/lib/api/v1-clusters";
@@ -65,10 +66,33 @@ function routeFileToPath(filePath: string): string {
 const METHOD_EXPORT_RE =
   /export\s+(?:const|function|async function)\s+(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\b/g;
 
+// `export const POST = methodNotAllowed;` is a refusal, not a documented
+// operation: it binds a method to the shared JSON-405 handler so it does not
+// count as a handler pair the docs must describe.
+const REFUSAL_EXPORT_RE =
+  /export\s+const\s+(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s*=\s*methodNotAllowed\s*;/g;
+
+// The catch-all 404 lives in a `[...path]` directory. It answers every
+// unmatched path, so it is not a (method, path) pair and has no doc entry.
+const CATCH_ALL_DIR = "[...path]";
+
+function isCatchAllRoute(filePath: string): boolean {
+  return path.relative(V1_ROOT, filePath).split(path.sep).includes(CATCH_ALL_DIR);
+}
+
+function collectRefusalMethods(source: string): Set<string> {
+  const methods = new Set<string>();
+  for (const match of source.matchAll(REFUSAL_EXPORT_RE)) {
+    methods.add(match[1]!);
+  }
+  return methods;
+}
+
 function collectExportedMethods(source: string): string[] {
+  const refused = collectRefusalMethods(source);
   const methods = new Set<string>();
   for (const match of source.matchAll(METHOD_EXPORT_RE)) {
-    methods.add(match[1]!);
+    if (!refused.has(match[1]!)) methods.add(match[1]!);
   }
   return [...methods];
 }
@@ -79,7 +103,7 @@ interface HandlerPair {
 }
 
 function discoverHandlers(): HandlerPair[] {
-  const files = walkRouteFiles(V1_ROOT);
+  const files = walkRouteFiles(V1_ROOT).filter((f) => !isCatchAllRoute(f));
   const pairs: HandlerPair[] = [];
   for (const file of files) {
     const source = readFileSync(file, "utf8");
@@ -298,6 +322,83 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     }
   });
 
+  it("every non-catch-all v1 route binds POST, PUT, PATCH and DELETE to methodNotAllowed", () => {
+    const files = walkRouteFiles(V1_ROOT).filter((f) => !isCatchAllRoute(f));
+    // 7 documented routes; if one is added this loop covers it automatically.
+    expect(files).toHaveLength(7);
+    for (const file of files) {
+      const source = readFileSync(file, "utf8");
+      const refused = collectRefusalMethods(source);
+      for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+        expect(
+          refused.has(method),
+          `${path.relative(V1_ROOT, file)} must \`export const ${method} = methodNotAllowed\``,
+        ).toBe(true);
+      }
+      expect(source, `${path.relative(V1_ROOT, file)} must import methodNotAllowed`).toMatch(
+        /import\s*\{[^}]*\bmethodNotAllowed\b[^}]*\}\s*from\s*"@\/lib\/api\/keys"/,
+      );
+    }
+  });
+
+  it("the refusal bindings are not counted as documented handlers", () => {
+    for (const { method } of handlers) {
+      expect(["GET", "OPTIONS"]).toContain(method);
+    }
+    expect(handlers.some((h) => h.routePath.includes("..."))).toBe(false);
+  });
+
+  it("the catch-all route exists and exports GET and OPTIONS (plus the 404 for the other methods)", () => {
+    const file = path.join(V1_ROOT, CATCH_ALL_DIR, "route.ts");
+    const source = readFileSync(file, "utf8");
+    const methods = collectExportedMethods(source);
+    expect(methods).toEqual(expect.arrayContaining(["GET", "OPTIONS"]));
+    for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE"]) {
+      expect(methods, `catch-all must export ${method}`).toContain(method);
+    }
+    expect(source).toContain("v1NotFound");
+  });
+
+  it("documents the 405 on every GET endpoint (and only GET endpoints)", () => {
+    for (const endpoint of V1_ENDPOINTS) {
+      const has405 = endpoint.responses.some((r) => r.status === 405);
+      expect(has405, `${endpoint.method} ${endpoint.path}`).toBe(endpoint.method === "GET");
+    }
+    const resp405 = V1_ENDPOINTS.find((e) => e.method === "GET")!.responses.find(
+      (r) => r.status === 405,
+    );
+    expect(resp405).toEqual({
+      status: 405,
+      descriptionTr: "Bu yol yalnızca GET, HEAD ve OPTIONS kabul eder (Allow başlığı).",
+      descriptionEn: "Only GET, HEAD and OPTIONS are allowed (Allow header).",
+      schema: "Error",
+    });
+    for (const [routePath, ops] of Object.entries(doc.paths)) {
+      const get = ops.get as { responses: Record<string, unknown> } | undefined;
+      if (get) expect(get.responses["405"], `${routePath} GET 405`).toBeDefined();
+    }
+  });
+
+  it("documents Retry-After, WWW-Authenticate and the 429 codes in the shared error responses", () => {
+    const clusters = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters")!;
+    const r401 = clusters.responses.find((r) => r.status === 401)!;
+    expect(`${r401.descriptionTr} ${r401.descriptionEn}`).toContain("WWW-Authenticate");
+    const r429 = clusters.responses.find((r) => r.status === 429)!;
+    const text429 = `${r429.descriptionTr} ${r429.descriptionEn}`;
+    expect(text429).toContain("Retry-After");
+    for (const code of ["ip_floor", "key_minute", "key_day"]) {
+      expect(text429).toContain(code);
+    }
+  });
+
+  it("V1_COMMON_NOTES_TR carries the three shared notes, verbatim", () => {
+    expect(V1_COMMON_NOTES_TR).toEqual([
+      "Bilinmeyen /api/v1 yolları JSON 404 döner (CORS başlıklarıyla).",
+      "GET, HEAD ve OPTIONS dışındaki yöntemler JSON 405 ve Allow: GET, HEAD, OPTIONS döner.",
+      "Tarayıcıdan okunabilen başlıklar: X-Tayf-Tier, Retry-After.",
+    ]);
+  });
+
   it("is openapi 3.1.0, echoes servers[0].url, and embeds no live timestamp value", () => {
     expect(doc.openapi).toBe("3.1.0");
     expect(doc.servers[0]?.url).toBe("https://x.test");
@@ -312,6 +413,7 @@ describe("GET /api/v1/openapi.json", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe("X-Tayf-Tier, Retry-After");
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=3600, s-maxage=86400");
 
     const body = JSON.parse(await res.text());

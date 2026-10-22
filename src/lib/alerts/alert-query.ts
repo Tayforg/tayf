@@ -8,7 +8,7 @@ import {
 import { tallyZones } from "@/lib/bias/config";
 import { getBlindspots } from "@/lib/clusters/blindspots-query";
 import type { ZoneFeedHealth } from "@/lib/clusters/feed-health";
-import { createServerClient } from "@/lib/supabase/server";
+import { createServerClient, type ReadProfile } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
 
 /**
@@ -47,6 +47,12 @@ export interface AlertQueryInput {
   sinceIso: string;
   limit: number;
   health?: ZoneFeedHealth | null;
+  /**
+   * "reader" (default; the public alerts API) reads blindspots with the 4 s
+   * fail-fast cap. The alerts-webhooks cron passes "batch" so a cold read
+   * keeps the full 8 s statement_timeout instead of aborting the tick.
+   */
+  profile?: ReadProfile;
   /** Injectable clock for tests; defaults to the request-time clock. */
   nowMs?: number;
 }
@@ -56,13 +62,13 @@ function isTitle(v: string | null | undefined): v is string {
 }
 
 export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]> {
-  const { sinceIso, limit, health } = input;
+  const { sinceIso, limit, health, profile = "reader" } = input;
   const nowMs = input.nowMs ?? Date.now();
   const sinceMs = Date.parse(sinceIso);
 
   const items: AlertItem[] = [];
 
-  const { bundles } = await getBlindspots();
+  const { bundles } = await getBlindspots({ profile });
   for (const b of bundles.slice(0, BLINDSPOT_CAP)) {
     if (Date.parse(b.cluster.updated_at) < sinceMs) continue;
     const tally = tallyZones(normalizeDistribution(b.cluster.bias_distribution));

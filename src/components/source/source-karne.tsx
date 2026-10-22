@@ -2,14 +2,14 @@ import Link from "next/link";
 
 import { ZONE_META } from "@/lib/bias/config";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
-import { buildKarneView, type SourceKarne } from "@/lib/sources/karne";
+import { buildKarneView, type SourceKarneRead } from "@/lib/sources/karne";
 
 // "Kapsama karnesi" card on /source/[slug], under the Etiket kartı.
 // Server Component, plain props, no Supabase. Neutral wording only: never
 // claims a source "skipped" or "ignored" anything (see docs/source-karne.md).
 
 export interface SourceKarneCardProps {
-  karne: SourceKarne | null;
+  karne: SourceKarneRead | null;
   slug: string;
 }
 
@@ -28,7 +28,13 @@ export function SourceKarneCard({ karne, slug }: SourceKarneCardProps) {
         <h2 className="font-serif text-lg font-semibold tracking-tight">
           Kapsama karnesi
         </h2>
-        <p className="text-[11px] text-muted-foreground">{subtitle}</p>
+        {karne.isStale ? (
+          <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+            {`Son hesaplama ${karne.ageDays} gün önce — veriler güncel değil`}
+          </p>
+        ) : (
+          <p className="text-[11px] text-muted-foreground">{subtitle}</p>
+        )}
       </div>
 
       {view.state === "insufficient" ? (

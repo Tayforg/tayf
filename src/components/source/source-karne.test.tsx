@@ -3,9 +3,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 
 import { SourceKarneCard } from "./source-karne";
-import { toSourceKarne, type SourceKarne } from "@/lib/sources/karne";
+import { toSourceKarne, type SourceKarneRead } from "@/lib/sources/karne";
 
-function karne(over: Partial<SourceKarne> = {}): SourceKarne {
+function karne(over: Partial<SourceKarneRead> = {}): SourceKarneRead {
   return {
     ...toSourceKarne({
       source_id: "9236e05a-56d9-47b0-a378-02ec8e880180",
@@ -21,16 +21,18 @@ function karne(over: Partial<SourceKarne> = {}): SourceKarne {
       n_blindspot_same_side: 2,
       computed_at: "2026-09-29T06:00:00Z",
     })!,
+    isStale: false,
+    ageDays: 0,
     ...over,
   };
 }
 
-function html(k: SourceKarne | null, slug = "sozcu"): string {
+function html(k: SourceKarneRead | null, slug = "sozcu"): string {
   return renderToStaticMarkup(createElement(SourceKarneCard, { karne: k, slug }));
 }
 
 // renderToStaticMarkup HTML-escapes apostrophes; compare on decoded text.
-function text(k: SourceKarne | null, slug = "sozcu"): string {
+function text(k: SourceKarneRead | null, slug = "sozcu"): string {
   return html(k, slug)
     .replace(/<[^>]+>/g, " ")
     .replace(/&#x27;/g, "'")
@@ -47,6 +49,32 @@ describe("SourceKarneCard", () => {
     const t = text(karne());
     expect(t).toContain("Kapsama karnesi");
     expect(t).toContain("Son 30 gün · 30.08.2026–29.09.2026 · n = 120 haber kümesi");
+  });
+
+  it("a fresh row keeps the window subtitle and has no stale banner", () => {
+    const h = html(karne());
+    expect(h).toContain("Son 30 gün ·");
+    expect(h).not.toContain("veriler güncel değil");
+    expect(h).not.toContain("text-amber-700");
+  });
+
+  it("a stale row swaps the subtitle for the amber stale banner", () => {
+    const k = karne({ isStale: true, ageDays: 9 });
+    const t = text(k);
+    expect(t).toContain("Son hesaplama 9 gün önce — veriler güncel değil");
+    expect(t).not.toContain("Son 30 gün ·");
+    expect(html(k)).toContain(
+      '<p class="text-[11px] font-medium text-amber-700 dark:text-amber-400">Son hesaplama 9 gün önce — veriler güncel değil</p>',
+    );
+    // The rest of the card is unchanged.
+    expect(t).toContain("%50 (60/120)");
+    expect(t).toContain("Nasıl hesaplanıyor?");
+  });
+
+  it("a stale row in the insufficient state still shows the banner", () => {
+    const t = text(karne({ nClusters: 19, nMulti: 5, nSolo: 14, isStale: true, ageDays: 3 }));
+    expect(t).toContain("Son hesaplama 3 gün önce — veriler güncel değil");
+    expect(t).toContain("Son 30 günde karne için yeterli haber yok (n = 19, en az 20 gerekir).");
   });
 
   it("renders rows 1 and 2, zone block, note, blindspot row and footnote", () => {

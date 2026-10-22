@@ -46,6 +46,7 @@ function makeFakeClient() {
 
 vi.mock("@/lib/supabase/server", () => ({
   createServerClient: vi.fn(() => makeFakeClient()),
+  createReaderClient: vi.fn(() => makeFakeClient()),
 }));
 
 // Pack C (feed-health-gated blindspots): fetchPoliticsClusters() now calls
@@ -72,6 +73,7 @@ vi.mock("./feed-health", async (importOriginal) => {
 
 import { getPoliticsClusters } from "./politics-query";
 import type { ZoneFeedHealth } from "./feed-health";
+import { createReaderClient, createServerClient } from "@/lib/supabase/server";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -157,6 +159,8 @@ function mkCluster(opts: MkClusterOpts) {
 beforeEach(() => {
   callLog = [];
   response = { data: [], error: null };
+  vi.mocked(createReaderClient).mockClear();
+  vi.mocked(createServerClient).mockClear();
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
   vi.useFakeTimers();
@@ -214,6 +218,44 @@ describe("getPoliticsClusters query shape", () => {
     ]);
     const limit = steps.find((s) => s.method === "limit");
     expect(limit!.args).toEqual([200]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Read profile (cold-read resilience): the 4 s reader cap belongs to
+// user-facing callers only. The digest / social crons and the alerts-webhooks
+// cron feed off the SAME fetcher, and a weekly job that aborts at 4 s on a
+// cold database (where the 8 s statement_timeout would have let it finish)
+// silently skips its send until the next run.
+// ---------------------------------------------------------------------------
+
+describe("getPoliticsClusters read profile", () => {
+  it("defaults to the capped reader client", async () => {
+    await getPoliticsClusters();
+    expect(createReaderClient).toHaveBeenCalledTimes(1);
+    expect(createServerClient).not.toHaveBeenCalled();
+  });
+
+  it("an explicit reader profile also uses the capped client", async () => {
+    await getPoliticsClusters({ profile: "reader" });
+    expect(createReaderClient).toHaveBeenCalledTimes(1);
+    expect(createServerClient).not.toHaveBeenCalled();
+  });
+
+  it("the batch profile (crons) uses the plain, uncapped client and never the reader client", async () => {
+    await getPoliticsClusters({ profile: "batch" });
+    expect(createServerClient).toHaveBeenCalledTimes(1);
+    expect(createReaderClient).not.toHaveBeenCalled();
+  });
+
+  it("the batch live retry after a failed cache attempt is uncapped too", async () => {
+    response = { data: null, error: { message: "boom" } };
+    await expect(getPoliticsClusters({ profile: "batch" })).rejects.toThrow(
+      /embedded select error: boom/,
+    );
+    // cached attempt + live retry: two fetches, neither capped.
+    expect(createServerClient).toHaveBeenCalledTimes(2);
+    expect(createReaderClient).not.toHaveBeenCalled();
   });
 });
 

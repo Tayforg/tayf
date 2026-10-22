@@ -12,6 +12,13 @@ vi.mock("next/cache", () => ({
   cacheTag: vi.fn(),
 }));
 
+// connection() throws outside a request scope in vitest; stub it so we can
+// assert the index handler opts out of prerendering.
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, connection: vi.fn(async () => {}) };
+});
+
 const fixture = vi.hoisted(() => ({
   clusters: [] as Array<Record<string, unknown>>,
   sources: [] as Array<Record<string, unknown>>,
@@ -48,6 +55,9 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+import { cacheLife } from "next/cache";
+import { connection } from "next/server";
+
 import { GET as getSitemapIndex } from "@/app/sitemap.xml/route";
 import { GET as getSitemapFile } from "@/app/sitemaps/[file]/route";
 
@@ -60,6 +70,7 @@ function callFile(file: string) {
 }
 
 beforeEach(() => {
+  vi.mocked(connection).mockClear();
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
@@ -69,6 +80,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const k of [
     "NEXT_PUBLIC_SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
@@ -91,6 +103,85 @@ describe("GET /sitemap.xml", () => {
     expect(body).toContain("https://tayf.test/sitemaps/news.xml");
     expect(body).toContain("https://tayf.test/sitemaps/static.xml");
     expect(body).toContain("https://tayf.test/sitemaps/sources.xml");
+  });
+
+  it("runs per request: awaits connection() and picks up a new UTC month the hour it starts", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-03T00:30:00Z"));
+
+    const res = await getSitemapIndex();
+
+    expect(connection).toHaveBeenCalledTimes(1);
+    const body = await res.text();
+    expect(body).toContain("https://tayf.test/sitemaps/clusters-2026-11.xml");
+    expect(res.headers.get("cache-control")).toBe(
+      "public, s-maxage=3600, stale-while-revalidate=86400",
+    );
+  });
+
+  it("calls connection() before touching the cache layer", async () => {
+    const order: string[] = [];
+    vi.mocked(connection).mockImplementationOnce(async () => {
+      order.push("connection");
+    });
+    vi.mocked(cacheLife).mockImplementationOnce(() => {
+      order.push("cacheLife");
+    });
+
+    await getSitemapIndex();
+
+    expect(order[0]).toBe("connection");
+  });
+});
+
+describe("GET /sitemaps/[file] cache headers", () => {
+  const SHORT = "public, s-maxage=3600, stale-while-revalidate=86400";
+  const LONG = "public, s-maxage=86400, stale-while-revalidate=604800";
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-22T12:00:00Z"));
+  });
+
+  it("a CLOSED month (clusters-2026-09.xml) gets the long CDN cache", async () => {
+    const res = await callFile("clusters-2026-09.xml");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe(LONG);
+  });
+
+  it("the CURRENT month (clusters-2026-10.xml) keeps the short cache", async () => {
+    const res = await callFile("clusters-2026-10.xml");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe(SHORT);
+  });
+
+  it("a FUTURE month never gets the long cache", async () => {
+    const res = await callFile("clusters-2026-11.xml");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe(SHORT);
+  });
+
+  it("static.xml and sources.xml keep the default cache; news.xml keeps its own", async () => {
+    expect((await callFile("static.xml")).headers.get("cache-control")).toBe(SHORT);
+    expect((await callFile("sources.xml")).headers.get("cache-control")).toBe(SHORT);
+    expect((await callFile("news.xml")).headers.get("cache-control")).toBe(
+      "public, s-maxage=600, stale-while-revalidate=3600",
+    );
+  });
+
+  it("flips a month to the long cache once the UTC month rolls over", async () => {
+    vi.setSystemTime(new Date("2026-11-03T00:30:00Z"));
+    const res = await callFile("clusters-2026-10.xml");
+    expect(res.headers.get("cache-control")).toBe(LONG);
+  });
+
+  it("a 503 on a closed month is still no-store (a failure is never long-cached)", async () => {
+    fixture.clustersError = { message: "boom" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await callFile("clusters-2026-09.xml");
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    errSpy.mockRestore();
   });
 });
 

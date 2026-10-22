@@ -2,7 +2,7 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { zoneOf } from "@/lib/bias/config";
 import { sourceKindOf } from "@/lib/sources/kind";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 import { isGameEligibleTitle } from "./pii-filter";
 
@@ -139,9 +139,15 @@ export function sampleHeadlines(
   return copy.slice(0, limit);
 }
 
-async function fetchGameHeadlinePool(): Promise<GameHeadline[]> {
+/**
+ * Fetches and filters the eligible pool. NEVER throws, and distinguishes the
+ * two "nothing to show" cases the UI must treat differently:
+ *   - `[]`   a valid empty pool (the query worked; no cluster qualifies);
+ *   - `null` the fetch FAILED (select error, thrown error, missing env).
+ */
+async function fetchGameHeadlinePool(): Promise<GameHeadline[] | null> {
   try {
-    const supabase = createServerClient();
+    const supabase = createReaderClient();
 
     const { data, error } = await supabase
       .from("clusters")
@@ -161,31 +167,56 @@ async function fetchGameHeadlinePool(): Promise<GameHeadline[]> {
       .returns<GameClusterRow[]>();
 
     if (error) {
-      // Fail-open: unlike blindspots-query.ts (where a cached empty result
-      // would poison the feed for the cache window), an empty /oyun pool
-      // just shows an honest "şu an oynanacak başlık yok" state. Never
-      // throw inside `"use cache"`.
+      // Fail-open, but as `null` rather than `[]`: the caller must be able
+      // to tell "the fetch failed" from "no headlines qualify", because
+      // `getGameHeadlines` below memoises its return value and gives a
+      // failure a much shorter lifetime. Never throw inside `"use cache"`.
       console.error("[oyun] headline pool select error", error.message);
-      return [];
+      return null;
     }
 
     return selectGameHeadlines(data ?? []);
   } catch (err) {
     console.error("[oyun] unexpected headline pool error", err);
-    return [];
+    return null;
   }
 }
 
-// Public cached entry point. Caches the ELIGIBLE POOL (every candidate that
-// passes `selectGameHeadlines`'s five rules), not the game's final 10 —
-// reuses the existing "cluster-feed" profile (5-minute revalidate) rather
-// than adding a new next.config.ts cacheLife entry for one surface. The
+// Cached entry point. Caches the ELIGIBLE POOL (every candidate that passes
+// `selectGameHeadlines`'s five rules), not the game's final 10. The
 // per-request sample (which 10, in which order) is drawn by the caller via
 // `sampleHeadlines`, so it rotates on every request even while this pool
 // stays cached.
-export async function getGameHeadlines(): Promise<GameHeadline[]> {
+//
+// The cache lifetime depends on the outcome (Next's "conditional cache
+// lifetimes": exactly one `cacheLife` call per invocation). A pool,
+// including a valid empty `[]`, reuses the existing "cluster-feed" profile
+// (5-minute revalidate) rather than adding a new next.config.ts entry for
+// one surface. A failed fetch (`null`) is memoised too, because the return
+// value of a `"use cache"` function always is, so it gets the built-in
+// "minutes" profile (revalidate 60 s) and heals quickly instead of pinning
+// /oyun on "unavailable" for the whole success window.
+export async function getGameHeadlines(): Promise<GameHeadline[] | null> {
   "use cache";
-  cacheLife("cluster-feed");
   cacheTag("articles");
-  return fetchGameHeadlinePool();
+  const pool = await fetchGameHeadlinePool();
+  if (pool === null) {
+    cacheLife("minutes");
+    return null;
+  }
+  cacheLife("cluster-feed");
+  return pool;
+}
+
+/**
+ * Uncached entry point for the /oyun page: the cached pool, plus one live
+ * retry when the cached value is a failure (`null`). Returns `null` only
+ * when both the cached attempt and the live retry failed; `[]` (a valid
+ * empty pool) is returned as-is and not retried. Never throws.
+ *
+ * Call it only after `connection()`: the live retry reads the wall clock
+ * (`selectGameHeadlines`' 48 h window), which a static prerender forbids.
+ */
+export async function loadGameHeadlines(): Promise<GameHeadline[] | null> {
+  return (await getGameHeadlines()) ?? (await fetchGameHeadlinePool());
 }

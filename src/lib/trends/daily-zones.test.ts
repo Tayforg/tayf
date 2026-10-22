@@ -40,6 +40,8 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+import { cacheLife } from "next/cache";
+
 import {
   istanbulDayKey,
   bucketIstanbulDays,
@@ -57,6 +59,7 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  vi.mocked(cacheLife).mockClear();
 });
 
 afterEach(() => {
@@ -189,6 +192,59 @@ describe("fetchIstanbulTimeline", () => {
 
     await expect(fetchIstanbulTimeline()).resolves.toBeNull();
 
+    errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Conditional cache lifetime. The `{ ok: false }` sentinel IS memoised by
+// `"use cache"`, so the cached function must pick its lifetime AFTER it knows
+// the outcome: a success keeps the hourly window, a failure gets the short
+// "minutes" profile so a cold-read blip heals within ~60 s instead of
+// pinning /trends on "unavailable" for an hour. Exactly one cacheLife call
+// per invocation (Next's "Conditional cache lifetimes" rule).
+// ---------------------------------------------------------------------------
+describe("fetchIstanbulTimeline cache lifetime", () => {
+  it("success: one cacheLife call with { revalidate: 3600 }", async () => {
+    fixture.data = [{ day: "2026-09-29", zone: "iktidar", count: 1 }];
+
+    await expect(fetchIstanbulTimeline()).resolves.not.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith({ revalidate: 3600 });
+  });
+
+  it("Supabase error: one cacheLife call with 'minutes' and a null result", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(fetchIstanbulTimeline()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    errSpy.mockRestore();
+  });
+
+  it("empty result: one cacheLife call with 'minutes'", async () => {
+    fixture.data = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(fetchIstanbulTimeline()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    errSpy.mockRestore();
+  });
+
+  it("missing env vars (a throw inside the fetch): 'minutes', not the hourly window", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(fetchIstanbulTimeline()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
     errSpy.mockRestore();
   });
 });

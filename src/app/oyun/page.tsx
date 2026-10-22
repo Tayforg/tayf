@@ -4,7 +4,7 @@ import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
 import { OyunModes } from "@/components/game/oyun-modes";
-import { getGameHeadlines, sampleHeadlines } from "@/lib/game/headline-pool";
+import { loadGameHeadlines, sampleHeadlines } from "@/lib/game/headline-pool";
 import { getDailyPuzzle } from "@/lib/game/daily-query";
 import { istanbulDateKey, resolvePuzzleDate } from "@/lib/game/daily-set";
 import { currentTimeMs } from "@/lib/time";
@@ -20,9 +20,10 @@ export const metadata: Metadata = {
 
 // /oyun — three games behind one mode switch (OyunModes, "use client"),
 // picked from a Server Component that fetches the Bölge headline pool
-// (getGameHeadlines, cached + rotating) and the Günün Tayf'ı daily puzzle
-// (getDailyPuzzle, cached for days per date key) and hands both down as
-// props.
+// (loadGameHeadlines: the cached pool plus one live retry, sampled per
+// request; `null` means the fetch failed, `[]` means nothing qualifies) and
+// the Günün Tayf'ı daily puzzle (getDailyPuzzle, cached for days per date
+// key) and hands both down as props.
 //
 // THE COOKIE/STORAGE SPLIT (read this before assuming "no cookies" covers
 // the whole page — it no longer does):
@@ -74,7 +75,9 @@ export default async function OyunPage({
   const initialMode = sp.mod === "gunluk" || sp.gun ? "gunluk" : "bolge";
 
   const [headlines, daily] = await Promise.all([
-    getGameHeadlines().then(sampleHeadlines),
+    loadGameHeadlines().then((pool) =>
+      pool === null ? null : sampleHeadlines(pool),
+    ),
     getDailyPuzzle(dateKey),
   ]);
 

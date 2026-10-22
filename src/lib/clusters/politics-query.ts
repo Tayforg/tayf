@@ -8,7 +8,11 @@ import type {
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
 import { attemptCached } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import {
+  createReaderClient,
+  createServerClient,
+  type ReadProfile,
+} from "@/lib/supabase/server";
 import type {
   BiasCategory,
   BiasDistribution,
@@ -259,9 +263,15 @@ export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr,
 
 // Internal (uncached) implementation. The exported `getPoliticsClusters`
 // wraps this with `unstable_cache` below.
-async function fetchPoliticsClusters(): Promise<PoliticsClustersResult> {
+async function fetchPoliticsClusters(
+  profile: ReadProfile,
+): Promise<PoliticsClustersResult> {
   try {
-    const supabase = createServerClient();
+    // "reader" (pages, RSS) fails fast at 4 s; "batch" (digest + social
+    // crons) keeps the plain client so a cold read can use the 8 s
+    // statement_timeout instead of skipping the run.
+    const supabase =
+      profile === "batch" ? createServerClient() : createReaderClient();
 
     // Feed-health gate (Pack C) + the main select run IN PARALLEL — neither
     // depends on the other, and the audit found this serial await added a
@@ -819,11 +829,15 @@ function scoreCluster(
 // build`'s prerender even though `getPoliticsClusters` below wraps every
 // call (see src/lib/cache-resilience.ts's file header for the incident
 // this fixes: /trends and /rss.xml, 2026-09-28).
-async function getPoliticsClustersCached() {
+//
+// `profile` is an argument on purpose: it becomes part of the cache key, so a
+// capped "reader" entry (and its cached `{ ok: false }` sentinel) is never
+// served to a "batch" cron, and the cron's own miss runs uncapped.
+async function getPoliticsClustersCached(profile: ReadProfile) {
   "use cache: remote";
   cacheLife("cluster-feed");
   cacheTag("clusters-politics");
-  return attemptCached("politics-query", fetchPoliticsClusters);
+  return attemptCached("politics-query", () => fetchPoliticsClusters(profile));
 }
 
 // Public entry point. The page component (and the RSS/cron consumers)
@@ -835,8 +849,11 @@ async function getPoliticsClustersCached() {
 // this retries the query live once (the cached `{ ok: false }` sentinel
 // is memoised for the cacheLife window, and this retry is what heals it)
 // before letting a genuine, still-failing outage propagate.
-export async function getPoliticsClusters(): Promise<PoliticsClustersResult> {
-  const attempt = await getPoliticsClustersCached();
+export async function getPoliticsClusters(
+  opts?: { profile?: ReadProfile },
+): Promise<PoliticsClustersResult> {
+  const profile = opts?.profile ?? "reader";
+  const attempt = await getPoliticsClustersCached(profile);
   if (attempt.ok) return attempt.data;
-  return fetchPoliticsClusters();
+  return fetchPoliticsClusters(profile);
 }

@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { apiBadRequest, apiError, apiNotFound, apiServerError, withApiErrors } from "@/lib/api/errors";
-import { apiV1Headers, requireApiKey, withApiV1Headers } from "@/lib/api/keys";
+import {
+  apiV1Headers,
+  methodNotAllowed,
+  requireApiKey,
+  withApiV1Headers,
+} from "@/lib/api/keys";
 import {
   V1_CLUSTER_SELECT,
   fetchTopic7,
@@ -76,3 +81,10 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
 export const OPTIONS = withApiErrors(async () =>
   new NextResponse(null, { status: 204, headers: apiV1Headers("free") }),
 );
+
+// Every other method gets the JSON 405 envelope with an `Allow` header (and
+// CORS) rather than Next's bodyless default. HEAD is derived from GET by Next.
+export const POST = methodNotAllowed;
+export const PUT = methodNotAllowed;
+export const PATCH = methodNotAllowed;
+export const DELETE = methodNotAllowed;

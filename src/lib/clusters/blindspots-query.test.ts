@@ -21,6 +21,8 @@ const fixture = vi.hoisted(() => ({
   embedError: null as { message: string } | null,
   lastIdState: null as unknown,
   embedStates: [] as unknown[],
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -47,7 +49,10 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
 // feed-health.ts is owned by a concurrent worker in this pack — mocked here
@@ -143,6 +148,7 @@ beforeEach(() => {
   fixture.embedError = null;
   fixture.lastIdState = null;
   fixture.embedStates = [];
+  fixture.clientOpts = [];
   feedHealthMock.getZoneFeedHealth.mockReset();
   feedHealthMock.shouldSuppressBlindspot.mockReset();
   feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
@@ -180,6 +186,51 @@ describe("getBlindspots query shape (Step A: lean candidate select)", () => {
     await expect(getBlindspots()).rejects.toThrow(
       "[blindspots] candidate select error: db down",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Read profile (cold-read resilience): the 4 s reader cap belongs to
+// user-facing callers only. The digest / social crons and the alerts-webhooks
+// cron call the same fetcher; they must keep the plain client (no per-request
+// timeout) so a cold read can use the full 8 s statement_timeout.
+// ---------------------------------------------------------------------------
+
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+describe("getBlindspots read profile", () => {
+  it("defaults to capped reader clients for both Step A and Step B", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots();
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(2);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+
+  it("the batch profile (crons) builds only plain, uncapped clients", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots({ profile: "batch" });
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(2);
+    expect(fixture.clientOpts.some(isCappedClientOpts)).toBe(false);
+  });
+
+  it("the batch live retry after a failed cache attempt is uncapped too", async () => {
+    fixture.candidateError = { message: "db down" };
+    await expect(getBlindspots({ profile: "batch" })).rejects.toThrow(
+      "[blindspots] candidate select error: db down",
+    );
+    // cached attempt + live retry
+    expect(fixture.clientOpts).toHaveLength(2);
+    expect(fixture.clientOpts.some(isCappedClientOpts)).toBe(false);
+  });
+
+  it("getBlindspotsSafe (the /blindspots page) stays on the capped reader client", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspotsSafe();
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
   });
 });
 

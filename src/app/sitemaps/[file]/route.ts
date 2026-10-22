@@ -1,5 +1,6 @@
 import {
   getClustersMonthXml,
+  getCurrentSitemapMonth,
   getNewsSitemapXml,
   getSourcesSitemapXml,
   getStaticSitemapXml,
@@ -14,7 +15,14 @@ import { siteUrl } from "@/lib/site-url";
 //
 // No `Date.now()`/`new Date()` in this handler body: every date read
 // (the current UTC month, the 48h news window, the month's UTC bounds)
-// happens inside a `"use cache"` builder in src/lib/seo/sitemaps.ts.
+// happens inside a `"use cache"` function in src/lib/seo/sitemaps.ts.
+//
+// Cache-Control by file: a CLOSED month (strictly before the current UTC
+// month) can no longer gain clusters that belong to it, so it gets a long
+// CDN lifetime and spares the database a repeat of its paged scan. The
+// current month and any future month keep the short default. Because
+// `getCurrentSitemapMonth` lags by at most an hour, the just-closed month
+// keeps the short header for that hour, which is the safe direction.
 
 interface RouteContext {
   params: Promise<{ file: string }>;
@@ -26,6 +34,9 @@ const NEWS_CACHE_HEADERS = {
 };
 const DEFAULT_CACHE_HEADERS = {
   "Cache-Control": "public, s-maxage=3600, stale-while-revalidate=86400",
+};
+const CLOSED_MONTH_CACHE_HEADERS = {
+  "Cache-Control": "public, s-maxage=86400, stale-while-revalidate=604800",
 };
 const ERROR_HEADERS = { "Cache-Control": "no-store", "Retry-After": "600" };
 
@@ -54,7 +65,10 @@ export async function GET(_req: Request, { params }: RouteContext): Promise<Resp
       cacheHeaders = NEWS_CACHE_HEADERS;
     } else {
       xml = await getClustersMonthXml(baseUrl, parsed.month);
-      cacheHeaders = DEFAULT_CACHE_HEADERS;
+      cacheHeaders =
+        parsed.month < (await getCurrentSitemapMonth())
+          ? CLOSED_MONTH_CACHE_HEADERS
+          : DEFAULT_CACHE_HEADERS;
     }
 
     return new Response(xml, {
