@@ -244,6 +244,37 @@ describe("GET /api/cron/social — kill switches / config", () => {
     expect(supabaseFake.fake.calls.rpc.length).toBe(0);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("dry run builds the zone line on the voting basis: bundle sources carry kind, an aggregator is counted in 'N kaynak' only", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "t";
+    process.env.TELEGRAM_CHANNEL_ID = "c";
+    process.env.SOCIAL_POST_DRY_RUN = "1";
+    mocks.blindspots = {
+      bundles: [
+        blindspotBundle("bs-agg", {
+          sources: [
+            { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
+            { id: "s2", name: "B", bias: "gov_leaning", kind: "outlet" },
+            { id: "s3", name: "C", bias: "state_media", kind: "wire" },
+            { id: "s4", name: "D", bias: "nationalist", kind: "outlet" },
+            { id: "s5", name: "E", bias: "islamist_conservative", kind: "outlet" },
+            { id: "s6", name: "F", bias: "center", kind: "aggregator" },
+          ],
+        }),
+      ],
+    };
+    supabaseFake.state.fresh = [freshRow("bs-agg")];
+
+    const { GET } = await import("@/app/api/cron/social/route");
+    const res = await GET(request());
+    const body = await res.json();
+
+    const preview = (body.previews as Array<{ clusterId: string; text: string }>).find(
+      (p) => p.clusterId === "bs-agg",
+    );
+    expect(preview).toBeDefined();
+    expect(preview!.text).toContain("6 kaynak: İktidar 5 · Bağımsız 0 · Muhalefet 0");
+  });
 });
 
 describe("GET /api/cron/social — happy paths", () => {

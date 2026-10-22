@@ -227,6 +227,20 @@ Cache tags (`cacheTag`) enable targeted invalidation: `clusters`, `clusters-poli
 
 The public Çerçeveleme makbuzu (migration 068) reuses the `cluster-feed` profile and the `cluster-detail:{id}` tag, and only ever runs when `FRAMING_RECEIPT_PUBLIC` is set; /oyun's Çerçeve endpoints (`GET`/`POST /api/oyun/cerceve*`) are always `Cache-Control: no-store`.
 
+## Metadata for crawlers
+
+With Cache Components, `generateMetadata` output (`<title>`, description, canonical, robots) **streams** into `<body>` after the static shell. That is the default for humans and keeps the shell fast.
+
+Crawlers that read metadata straight out of `<head>` need it there. `next.config.ts` sets `htmlLimitedBots` to `HTML_LIMITED_BOTS` (`src/lib/seo/html-limited-bots.ts`): Next's built-in list plus Googlebot, Google-InspectionTool, GoogleOther, bingbot, YandexBot and Chrome-Lighthouse. Next's default does not match `Googlebot` or `GoogleOther`, and setting the key **replaces** that default, so the file keeps the whole default regex and appends ours. Matching user agents get blocking metadata in `<head>`, so the canonical and the noindex-on-error hardening are honoured. Human UAs still stream.
+
+Trade-off: a matching UA also bypasses the PPR static shell, so each crawl is a full dynamic render and `generateMetadata` latency lands in the crawler's TTFB. A cold 4-5 s is acceptable for crawlers; it never reaches users. Metadata readers must keep using `createReaderClient()` (4 s cap) so a slow database cannot stall a crawl indefinitely.
+
+Parity: `src/lib/seo/html-limited-bots.test.ts` asserts the source starts with Next's current default. A Next upgrade that changes `HTML_LIMITED_BOT_UA_RE` fails that test; re-copy the new default into `NEXT_DEFAULT_HTML_LIMITED_BOTS`.
+
+`next build` also writes the source into `prerender-manifest.json` as a user-agent `bypassFor` matcher (used by Vercel, possibly case-sensitive), which is why the extra bots are listed in their real casing.
+
+The viewport is dark-only (`themeColor: "#0c0806"`, `colorScheme: "dark"` in `src/app/layout.tsx`), matching `<html class="dark">`.
+
 ## Security
 
 - **CSP headers** on all routes (script/style/img/connect directives)

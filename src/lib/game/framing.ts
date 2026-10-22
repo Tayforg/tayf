@@ -21,6 +21,8 @@
  * of `newSessionId`'s randomness.
  */
 
+import { roundPercents } from "@/lib/bias/round-percents";
+
 export const FRAMING_VOTES = ["iktidar", "muhalefet", "none"] as const;
 export type FramingVote = (typeof FRAMING_VOTES)[number];
 
@@ -133,8 +135,14 @@ export function pluralityVote(tally: FramingTally): FramingVote | null {
 
 export function formatTallyLine(tally: FramingTally): string {
   if (tally.n === 0) return "Henüz oy yok";
-  const pct = (count: number) => Math.round((count / tally.n) * 100);
-  return `${tally.n} oy · İktidar %${pct(tally.iktidar)} · Muhalefet %${pct(tally.muhalefet)} · Tarafsız %${pct(tally.none)}`;
+  // Largest-remainder rounding so the three shown percentages total 100
+  // (independent Math.round gave 33/33/33 for 1/1/1 and 88/13/0 for 7/1/0).
+  const [iktidar = 0, muhalefet = 0, none = 0] = roundPercents([
+    tally.iktidar,
+    tally.muhalefet,
+    tally.none,
+  ]);
+  return `${tally.n} oy · İktidar %${iktidar} · Muhalefet %${muhalefet} · Tarafsız %${none}`;
 }
 
 export function summariseFramingRound(entries: readonly FramingRoundEntry[]): {

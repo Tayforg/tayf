@@ -55,6 +55,8 @@ interface BundleOpts {
   effectiveArticleCount?: number;
   isBlindspot?: unknown;
   biases?: string[];
+  /** Per-source `kind`, aligned with `biases` by index; omitted = no kind (voting). */
+  kinds?: Array<string | null | undefined>;
   firstPublished?: string;
   updatedAt?: string;
 }
@@ -77,6 +79,7 @@ function bundle(o: BundleOpts) {
       id: `s${i}`,
       name: `Kaynak ${i}`,
       bias,
+      ...(o.kinds !== undefined ? { kind: o.kinds[i] } : {}),
     })),
     ...(o.effectiveArticleCount !== undefined
       ? { effectiveArticleCount: o.effectiveArticleCount }
@@ -345,6 +348,62 @@ describe("GET /api/takip -- item shape", () => {
         },
       ],
     });
+  });
+
+  it("builds the zone line on the VOTING basis: aggregator and niche sources are not counted", async () => {
+    searchClustersMock.mockResolvedValue({
+      ok: true,
+      bundles: [
+        bundle({
+          id: "v1",
+          articleCount: 5,
+          biases: ["pro_government", "opposition", "center", "center", "opposition"],
+          kinds: ["outlet", "wire", "aggregator", "niche", "aggregator"],
+        }),
+      ],
+    });
+    const res = await call("?q=seçim");
+    const body = (await res.json()) as {
+      items: Array<{ zoneLine: string; sourceCount: number }>;
+    };
+    // The card's tally: 1 outlet (iktidar) + 1 wire (muhalefet). The
+    // aggregator (x2) and the niche feed are listed on the card, never voted.
+    expect(body.items[0]?.zoneLine).toBe("İktidar 1 · Bağımsız 0 · Muhalefet 1");
+    // "N kaynak" is not a voting tally and stays the cluster's own count.
+    expect(body.items[0]?.sourceCount).toBe(5);
+  });
+
+  it("counts a source with a missing or null kind as voting (legacy rows)", async () => {
+    searchClustersMock.mockResolvedValue({
+      ok: true,
+      bundles: [
+        bundle({
+          id: "v2",
+          biases: ["pro_government", "center", "opposition", "opposition"],
+          kinds: [undefined, null, "outlet", "aggregator"],
+        }),
+      ],
+    });
+    const res = await call("?q=seçim");
+    const body = (await res.json()) as { items: Array<{ zoneLine: string }> };
+    expect(body.items[0]?.zoneLine).toBe("İktidar 1 · Bağımsız 1 · Muhalefet 1");
+  });
+
+  it("the topic path uses the same voting basis", async () => {
+    getTopicClustersMock.mockResolvedValue({
+      bundles: [
+        bundle({
+          id: "v3",
+          biases: ["center", "center"],
+          kinds: ["outlet", "aggregator"],
+        }),
+      ],
+      hasMore: false,
+      page: 1,
+    });
+    const res = await call("?konu=ekonomi");
+    const body = (await res.json()) as { items: Array<{ zoneLine: string }> };
+    expect(body.items[0]?.zoneLine).toBe("İktidar 0 · Bağımsız 1 · Muhalefet 0");
   });
 
   it("prefers effectiveArticleCount (wire-collapsed) over article_count", async () => {

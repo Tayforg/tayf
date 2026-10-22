@@ -23,7 +23,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
     <section aria-labelledby="kim-once-yazdi" className="space-y-1.5">
       <h2
         id="kim-once-yazdi"
-        className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80"
+        className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
       >
         Kim önce yazdı?
       </h2>
@@ -41,7 +41,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
       </div>
       <div
         aria-hidden="true"
-        className="flex justify-between font-mono text-[10px] tabular-nums text-muted-foreground/70"
+        className="flex justify-between font-mono text-[10px] tabular-nums text-muted-foreground"
       >
         <span>{timeline.first.clock}</span>
         {last.t !== timeline.first.t && <span>{last.clock}</span>}
@@ -83,7 +83,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
         </ol>
       </details>
 
-      <p className="text-[10px] text-muted-foreground/70">
+      <p className="text-[10px] text-muted-foreground">
         Saatler yayıncının RSS tarihine göredir; Tayf haberi daha önce gördüyse o an kullanılır.
       </p>
     </section>

@@ -1,7 +1,7 @@
-import { zoneOf } from "@/lib/bias/config";
 import { shouldSuppressBlindspot, type ZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { votingZoneCounts } from "@/lib/feeds/zone-line";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
-import type { BiasCategory, MediaDnaZone } from "@/types";
+import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 // Pure selection rules for the owned-channels auto-poster
 // (src/app/api/cron/social/route.ts). Every gate here is fail-CLOSED —
@@ -30,7 +30,13 @@ export interface SocialCandidateBundle {
     title_tr: string;
     first_published: string;
   };
-  sources: ReadonlyArray<{ id: string; bias: BiasCategory }>;
+  /**
+   * `kind` drives the "covers at least 2 zones" gate on the VOTING basis
+   * (outlet, wire), the same basis the post text prints via
+   * `votingZoneCounts`. Optional/nullable like `Source.kind`: a missing or
+   * null kind counts as voting.
+   */
+  sources: ReadonlyArray<{ id: string; bias: BiasCategory; kind?: SourceKind | null }>;
   dominantZone?: MediaDnaZone;
   dominantPct?: number;
   effectiveArticleCount?: number;
@@ -54,11 +60,15 @@ function hoursSince(iso: string, nowMs: number): number {
 }
 
 /** Distinct Medya DNA zones represented among a bundle's (already
- * distinct-per-source) sources. */
-function zonesCoveredOf(sources: ReadonlyArray<{ bias: BiasCategory }>): number {
-  const zones = new Set<MediaDnaZone>();
-  for (const source of sources) zones.add(zoneOf(source.bias));
-  return zones.size;
+ * distinct-per-source) VOTING sources. Aggregators and niche feeds never
+ * vote, so they cannot make a one-sided story look cross-zone; this is the
+ * same basis the composed post prints ("N bölge"), so the gate and the text
+ * cannot disagree. */
+function zonesCoveredOf(
+  sources: ReadonlyArray<{ bias: BiasCategory; kind?: SourceKind | null }>,
+): number {
+  const counts = votingZoneCounts(sources);
+  return (Object.values(counts) as number[]).filter((c) => c > 0).length;
 }
 
 export interface SelectBlindspotsArgs {

@@ -201,7 +201,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
       </div>
 
       {showsNonVotingChip && (
-        <p className="text-[10px] text-muted-foreground/70">
+        <p className="text-[10px] text-muted-foreground">
           Soluk gösterilen toplayıcı / niş kaynaklar kümelerde listelenir ama
           yanlılık dağılımına sayılmaz.
         </p>

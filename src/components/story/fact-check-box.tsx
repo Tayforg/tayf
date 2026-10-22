@@ -27,7 +27,7 @@ export function FactCheckBox({ items }: { items: ClusterFactCheck[] }) {
     >
       <h2
         id="dogrulama"
-        className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80"
+        className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground"
       >
         Bu konuda doğrulama
       </h2>
@@ -61,7 +61,7 @@ export function FactCheckBox({ items }: { items: ClusterFactCheck[] }) {
         ))}
       </ul>
 
-      <p className="text-xs text-muted-foreground/80">
+      <p className="text-xs text-muted-foreground">
         Bağımsız doğrulama kuruluşlarının bu konuyla ilgili olabilecek
         yayınlarına bağlantı. Eşleştirme otomatiktir ve hatalı olabilir;
         içerik ve varılan sonuç ilgili kuruluşa aittir.

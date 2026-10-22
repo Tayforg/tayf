@@ -95,6 +95,29 @@ describe("GET /rss/[topic].xml", () => {
     expect(body).not.toContain("OUTLET WORDS");
   });
 
+  it("builds the zone line on the voting basis: an aggregator is counted in 'N kaynak' but not in the zones", async () => {
+    mocks.topicClusters = {
+      bundles: [
+        bundle({
+          sources: [
+            { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
+            { id: "s2", name: "B", bias: "center", kind: "wire" },
+            { id: "s3", name: "C", bias: "opposition", kind: "aggregator" },
+            { id: "s4", name: "D", bias: "opposition", kind: "niche" },
+            { id: "s5", name: "E", bias: "gov_leaning", kind: null },
+          ],
+        }),
+      ],
+      hasMore: false,
+      page: 1,
+    };
+    const res = await callRoute("dunya.xml");
+    const body = await res.text();
+    // 5 listed sources, 3 voting (outlet, wire, kind-null default).
+    expect(body).toContain("5 kaynak · İktidar 2 · Bağımsız 1 · Muhalefet 0");
+    expect(body).not.toContain("Muhalefet 1");
+  });
+
   it("404s an unknown slug like politika.xml", async () => {
     const res = await callRoute("politika.xml");
     expect(res.status).toBe(404);
@@ -131,6 +154,8 @@ describe("GET /rss/[topic].xml", () => {
         bundle({
           dominantZone: "iktidar",
           dominantPct: 0.8,
+          // The blindspot feed reads the voting tally the card is built on.
+          votingZoneCounts: { iktidar: 4, bagimsiz: 1, muhalefet: 0 },
         }),
       ],
     };
@@ -138,6 +163,7 @@ describe("GET /rss/[topic].xml", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("Kör nokta: ağırlıkla İktidar kaynakları (%80).");
+    expect(body).toContain("2 kaynak · İktidar 4 · Bağımsız 1 · Muhalefet 0");
     expect(body).toContain("Tayf — Kör noktalar");
   });
 

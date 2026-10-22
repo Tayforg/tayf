@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { FollowButton, FollowButtonView } from "./follow-button";
@@ -51,11 +52,22 @@ describe("FollowButton -- server render", () => {
     expect(markup).not.toContain('href="/takip"');
   });
 
-  it("renders for a valid keyword and escapes nothing it should not render", () => {
+  it("names a keyword follow after the normalised keyword", () => {
     const markup = renderToStaticMarkup(<FollowButton kind="q" value="  Seçim " />);
     expect(markup).toContain("Takip et");
-    // The keyword is never written into the markup (it is only a button label).
-    expect(markup).not.toContain("seçim");
+    expect(markup).toContain('aria-label="Takip et: “seçim”"');
+  });
+
+  it("escapes a hostile keyword in the accessible name instead of writing markup", () => {
+    const markup = renderToStaticMarkup(<FollowButton kind="q" value="<b>xx</b>" />);
+    expect(markup).toContain("&lt;b&gt;");
+    expect(markup).not.toContain("<b>");
+    expect(markup).not.toContain("</b>");
+  });
+
+  it("names a topic follow after its label", () => {
+    const markup = renderToStaticMarkup(<FollowButton kind="konu" value="ekonomi" />);
+    expect(markup).toContain('aria-label="Takip et: Ekonomi"');
   });
 
   it.each([
@@ -87,6 +99,18 @@ describe("FollowButton -- server render", () => {
   });
 });
 
+// FollowButtonView uses useId, so it can only be called inside a render; a probe
+// component gives us its element tree to walk (handlers and raw props).
+function viewTree(props: ComponentProps<typeof FollowButtonView>): unknown {
+  let tree: unknown = null;
+  function Probe() {
+    tree = FollowButtonView(props);
+    return null;
+  }
+  renderToStaticMarkup(<Probe />);
+  return tree;
+}
+
 describe("FollowButtonView -- states", () => {
   it("not followed: 'Takip et', pressed=false, no companion link", () => {
     const markup = renderToStaticMarkup(
@@ -108,15 +132,80 @@ describe("FollowButtonView -- states", () => {
     expect(markup).toContain("Takip ettiklerim");
   });
 
-  it("full and not followed: disabled with the explanatory title", () => {
+  it("full and not followed: aria-disabled (still focusable) with a visible, linked explanation", () => {
     const markup = renderToStaticMarkup(
       <FollowButtonView followed={false} full onToggle={() => {}} />,
     );
-    expect(markup).toContain('disabled=""');
-    expect(markup).toContain(
-      "En fazla 20 takip; /takip sayfasından birini çıkarın.",
-    );
+    expect(markup).toContain('aria-disabled="true"');
+    // Natively disabled buttons drop out of the tab order and hide the reason.
+    expect(markup).not.toContain('disabled=""');
+    expect(markup).not.toContain("title=");
+    expect(markup).toContain("En fazla 20 takip");
+    expect(markup).toMatch(/<a [^>]*href="\/takip"[^>]*>birini çıkarın<\/a>/);
     expect(MAX_FOLLOWS).toBe(20);
+
+    const describedBy = /aria-describedby="([^"]+)"/.exec(markup)?.[1];
+    expect(describedBy).toBeTruthy();
+    expect(markup).toMatch(
+      new RegExp(`<span id="${describedBy}"[^>]*>En fazla 20 takip`),
+    );
+  });
+
+  it("full and not followed: pressing the button does nothing", () => {
+    const onToggle = vi.fn();
+    const tree = viewTree({ followed: false, full: true, onToggle });
+    const button = collect(tree).find((el) => el.type === "button");
+    expect(button?.props?.disabled).toBeUndefined();
+    (button?.props?.onClick as () => void)();
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it("not full: pressing the button toggles", () => {
+    const onToggle = vi.fn();
+    const tree = viewTree({ followed: false, full: false, onToggle });
+    const button = collect(tree).find((el) => el.type === "button");
+    expect(button?.props?.["aria-disabled"]).toBeUndefined();
+    expect(button?.props?.["aria-describedby"]).toBeUndefined();
+    (button?.props?.onClick as () => void)();
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it("not blocked: no explanation span and no aria-describedby", () => {
+    const markup = renderToStaticMarkup(
+      <FollowButtonView followed={false} full={false} onToggle={() => {}} />,
+    );
+    expect(markup).not.toContain("aria-describedby");
+    expect(markup).not.toContain("birini çıkarın");
+    expect(markup).not.toContain('aria-disabled="');
+  });
+
+  it("an optional label becomes the accessible name, 'Takip et' / 'Takip ediliyor' first", () => {
+    const off = renderToStaticMarkup(
+      <FollowButtonView followed={false} full={false} onToggle={() => {}} label="Ekonomi" />,
+    );
+    expect(off).toContain('aria-label="Takip et: Ekonomi"');
+    const on = renderToStaticMarkup(
+      <FollowButtonView followed full={false} onToggle={() => {}} label="Ekonomi" />,
+    );
+    expect(on).toContain('aria-label="Takip ediliyor: Ekonomi"');
+    const bare = renderToStaticMarkup(
+      <FollowButtonView followed={false} full={false} onToggle={() => {}} />,
+    );
+    expect(bare).not.toContain("aria-label");
+  });
+
+  it("the button and the 'Takip ettiklerim' link are at least 44px tall", () => {
+    const off = renderToStaticMarkup(
+      <FollowButtonView followed={false} full={false} onToggle={() => {}} />,
+    );
+    expect(off).toContain("min-h-[44px]");
+    expect(off).toContain("touch-manipulation");
+    const on = renderToStaticMarkup(
+      <FollowButtonView followed full={false} onToggle={() => {}} />,
+    );
+    const link = /<a [^>]*href="\/takip"[^>]*>/.exec(on)?.[0] ?? "";
+    expect(link).toContain("min-h-[44px]");
+    expect(link).toContain("touch-manipulation");
   });
 
   it("full but followed: stays enabled so the reader can unfollow", () => {

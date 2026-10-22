@@ -107,10 +107,19 @@ const W_VELOCITY = 1.0;
 const BREAKING_WINDOW_MS = 2 * 60 * 60 * 1000;
 const BREAKING_LIMIT = 6;
 
+/**
+ * A card source plus its `kind`, so consumers outside the card (RSS and
+ * social zone lines, via `votingZoneCounts` in feeds/zone-line.ts) can tally
+ * on the voting basis. Optional/nullable so existing ClusterCardSource
+ * fixtures keep compiling; a missing or null kind counts as voting
+ * (`isVotingKind`'s default). ClusterCard itself ignores the extra field.
+ */
+export type BundleSource = ClusterCardSource & { kind?: SourceKind | null };
+
 export interface ClusterBundle {
   cluster: ClusterCardCluster;
   articles: ClusterCardArticle[];
-  sources: ClusterCardSource[];
+  sources: BundleSource[];
   /**
    * R2 wire-collapse: true when ≥50% of the cluster's deduped members
    * share the same `content_hash`, meaning the cluster is one AA/DHA/IHA
@@ -538,7 +547,7 @@ export function buildClusterBundle(
 
   // Collect per-cluster sources (deduped) from the embedded join so
   // ClusterCard can resolve source_name/bias without another query.
-  const sourceMap = new Map<string, ClusterCardSource>();
+  const sourceMap = new Map<string, BundleSource>();
   for (const m of dedupedMembers) {
     if (m.sources && !sourceMap.has(m.sources.id)) {
       sourceMap.set(m.sources.id, {
@@ -546,6 +555,7 @@ export function buildClusterBundle(
         name: m.sources.name,
         bias: m.sources.bias,
         logo_url: m.sources.logo_url,
+        kind: m.sources.kind ?? null,
       });
     }
   }

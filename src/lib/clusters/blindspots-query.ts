@@ -3,7 +3,6 @@ import { cacheLife, cacheTag } from "next/cache";
 import type {
   ClusterCardArticle,
   ClusterCardCluster,
-  ClusterCardSource,
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { BLINDSPOT } from "@/lib/bias/config";
@@ -21,6 +20,7 @@ import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
+import type { BundleSource } from "@/lib/clusters/politics-query";
 import { wireSignalOf } from "@/lib/clusters/wire";
 import {
   createReaderClient,
@@ -104,7 +104,13 @@ const EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr, bias_distribut
 export interface BlindspotBundle {
   cluster: ClusterCardCluster;
   articles: ClusterCardArticle[];
-  sources: ClusterCardSource[];
+  /**
+   * Every de-duplicated source, each with its `kind`. Includes the
+   * non-voting kinds (aggregator, niche); a zone line must tally them with
+   * `votingZoneCounts` (feeds/zone-line.ts), or read `votingZoneCounts`
+   * below directly.
+   */
+  sources: BundleSource[];
   dominantZone: MediaDnaZone;
   dominantPct: number;
   /**
@@ -190,7 +196,7 @@ function toBlindspotBundle(
       new Date(b.published_at).getTime() - new Date(a.published_at).getTime(),
   );
 
-  const sourceMap = new Map<string, ClusterCardSource>();
+  const sourceMap = new Map<string, BundleSource>();
   for (const m of deduped) {
     if (m.sources && !sourceMap.has(m.sources.id)) {
       sourceMap.set(m.sources.id, {
@@ -201,6 +207,7 @@ function toBlindspotBundle(
         // (ClusterCardSource.logo_url); it was missing from the embed, so
         // every /blindspots row showed no logo.
         logo_url: m.sources.logo_url ?? null,
+        kind: m.sources.kind ?? null,
       });
     }
   }

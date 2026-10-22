@@ -515,7 +515,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               )}
               <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
                 <span>{formatTurkishTimeAgo(cluster.updated_at)}</span>
-                <span className="text-muted-foreground/60">•</span>
+                <span aria-hidden="true" className="text-muted-foreground">•</span>
                 <span>{wire.effectiveArticleCount} kaynak</span>
                 {/* Honest source count v2 (reader-data): when several of
                     the shown sources used the exact same headline (folded
@@ -628,7 +628,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 instead of colliding with the framing comparison below. */}
             {uniqueRatedSources.length > 0 && (
               <div className="space-y-1.5">
-                <div className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/80">
+                <div className="font-serif text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                   Kaynak künyesi
                 </div>
                 <ul className="flex flex-wrap gap-x-3 gap-y-1.5 min-w-0">
@@ -722,7 +722,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-[10px] text-muted-foreground/70">
+          <p className="mt-2 text-[10px] text-muted-foreground">
             <Link
               href="/metodoloji#kaynaklar"
               className="underline decoration-dotted underline-offset-2 hover:text-foreground"

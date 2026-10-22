@@ -363,6 +363,79 @@ describe("selectTopStory", () => {
     expect(out).toBeNull();
   });
 
+  it("counts zones on the voting basis: 9 outlets in one zone plus an aggregator in another is NOT selected", () => {
+    const sources = [
+      ...Array.from({ length: 9 }, (_, i) => ({
+        id: `o${i}`,
+        bias: "pro_government" as const,
+        kind: "outlet" as const,
+      })),
+      { id: "agg", bias: "center" as const, kind: "aggregator" as const },
+    ];
+    const out = selectTopStory({
+      bundles: [topBundle("c1", { sources })],
+      nowMs: NOW,
+      postedIds: new Set(),
+      lastTopStoryAtMs: null,
+    });
+    expect(out).toBeNull();
+  });
+
+  it("a niche source in a second zone does not satisfy the >= 2 zones rule", () => {
+    const sources = [
+      ...Array.from({ length: 9 }, (_, i) => ({
+        id: `o${i}`,
+        bias: "opposition" as const,
+        kind: "outlet" as const,
+      })),
+      { id: "n1", bias: "pro_government" as const, kind: "niche" as const },
+    ];
+    const out = selectTopStory({
+      bundles: [topBundle("c1", { sources })],
+      nowMs: NOW,
+      postedIds: new Set(),
+      lastTopStoryAtMs: null,
+    });
+    expect(out).toBeNull();
+  });
+
+  it("two voting kinds (outlet + wire) in different zones satisfy the zones rule", () => {
+    const sources = [
+      ...Array.from({ length: 9 }, (_, i) => ({
+        id: `o${i}`,
+        bias: "pro_government" as const,
+        kind: "outlet" as const,
+      })),
+      { id: "w1", bias: "opposition" as const, kind: "wire" as const },
+    ];
+    const bundle = topBundle("c1", { sources });
+    const out = selectTopStory({
+      bundles: [bundle],
+      nowMs: NOW,
+      postedIds: new Set(),
+      lastTopStoryAtMs: null,
+    });
+    expect(out).toBe(bundle);
+  });
+
+  it("a missing or null kind counts as voting for the zones rule", () => {
+    const sources = [
+      ...Array.from({ length: 9 }, (_, i) => ({
+        id: `o${i}`,
+        bias: "pro_government" as const,
+      })),
+      { id: "x", bias: "opposition" as const, kind: null },
+    ];
+    const bundle = topBundle("c1", { sources });
+    const out = selectTopStory({
+      bundles: [bundle],
+      nowMs: NOW,
+      postedIds: new Set(),
+      lastTopStoryAtMs: null,
+    });
+    expect(out).toBe(bundle);
+  });
+
   it("requires first_published within 6h", () => {
     const bundles = [
       topBundle("c1", {

@@ -105,10 +105,10 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
-    { media: "(prefers-color-scheme: dark)", color: "#0a0a0a" },
-  ],
+  // Dark-only site (<html class="dark">): one theme-color, no media split.
+  // #0c0806 is --background oklch(0.14 0.008 60) as measured by Lighthouse.
+  themeColor: "#0c0806",
+  colorScheme: "dark",
 };
 
 export default function RootLayout({

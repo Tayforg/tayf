@@ -20,7 +20,8 @@ vi.mock("./use-compare-tray", async (importOriginal) => {
   };
 });
 
-import { CompareButton } from "./compare-button";
+import { CompareButton, CompareButtonView } from "./compare-button";
+import { COMPARE_HINT_ONE, COMPARE_HINT_TWO } from "@/lib/compare/compare-tray";
 
 const ID = "aaaaaaaa-1111-4111-8111-bbbbbbbbbbbb";
 const OTHER = "cccccccc-2222-4222-8222-dddddddddddd";
@@ -65,9 +66,14 @@ function collectElements(node: unknown, out: El[] = []): El[] {
   return out;
 }
 
-/** Calls the (hook-mocked) function component directly and returns its tree. */
-function treeFor(clusterId: string): ReactNode {
-  return (CompareButton as (p: { clusterId: string }) => ReactNode)({ clusterId });
+/**
+ * Calls the hook-free view directly and returns its tree. The tray comes from
+ * `override` (so each test keeps reading `override = fakeTray(...)`); `notice`
+ * is the CompareButton wrapper's local state, passed in explicitly.
+ */
+function treeFor(clusterId: string, notice = ""): ReactNode {
+  const { tray } = override ?? fakeTray([]);
+  return CompareButtonView({ clusterId, tray, add, remove, clear, notice });
 }
 
 function buttonWithText(tree: unknown, text: string): El {
@@ -191,12 +197,17 @@ function rootChildren(tree: unknown): Array<El | null | false> {
   return (Array.isArray(children) ? children : [children]) as Array<El | null | false>;
 }
 
-const STATES: Array<[string, readonly string[]]> = [
-  ["empty tray", []],
-  ["other id only", [OTHER]],
-  ["current id only", [ID]],
-  ["two ids incl. current", [OTHER, ID]],
-  ["full tray without current", [OTHER, THIRD]],
+const CLEARED = "Seçim temizlendi";
+const WITHDRAWN = "Karşılaştırmadan çıkarıldı";
+
+const STATES: Array<[string, readonly string[], string]> = [
+  ["empty tray", [], ""],
+  ["other id only", [OTHER], ""],
+  ["current id only", [ID], ""],
+  ["two ids incl. current", [OTHER, ID], ""],
+  ["full tray without current", [OTHER, THIRD], ""],
+  ["empty tray after Temizle", [], CLEARED],
+  ["empty tray after Vazgeç", [], WITHDRAWN],
 ];
 
 function buttonSlot(children: Array<El | null | false>): number {
@@ -205,9 +216,9 @@ function buttonSlot(children: Array<El | null | false>): number {
 
 describe("CompareButton — focus stays put across state changes", () => {
   it("keeps the same slot count and the <button> at the same slot in every state", () => {
-    const shapes = STATES.map(([, tray]) => {
+    const shapes = STATES.map(([, tray, notice]) => {
       override = fakeTray(tray);
-      const children = rootChildren(treeFor(ID));
+      const children = rootChildren(treeFor(ID, notice));
       return { length: children.length, button: buttonSlot(children) };
     });
     const first = shapes[0];
@@ -216,17 +227,17 @@ describe("CompareButton — focus stays put across state changes", () => {
   });
 
   it("renders exactly one <button> in every state", () => {
-    for (const [, tray] of STATES) {
+    for (const [, tray, notice] of STATES) {
       override = fakeTray(tray);
-      const buttons = collectElements(treeFor(ID)).filter((el) => el.type === "button");
+      const buttons = collectElements(treeFor(ID, notice)).filter((el) => el.type === "button");
       expect(buttons).toHaveLength(1);
     }
   });
 
   it("never gives the activated <button> a state-dependent key", () => {
-    for (const [, tray] of STATES) {
+    for (const [, tray, notice] of STATES) {
       override = fakeTray(tray);
-      const children = rootChildren(treeFor(ID));
+      const children = rootChildren(treeFor(ID, notice));
       const button = children[buttonSlot(children)] as unknown as { key: unknown };
       expect(button.key).toBeNull();
     }
@@ -251,9 +262,9 @@ describe("CompareButton — focus stays put across state changes", () => {
 });
 
 describe("CompareButton — status is announced", () => {
-  function statusOf(tray: readonly string[]): El {
+  function statusOf(tray: readonly string[], notice = ""): El {
     override = fakeTray(tray);
-    const status = rootChildren(treeFor(ID)).find(
+    const status = rootChildren(treeFor(ID, notice)).find(
       (c): c is El => !!c && c.props?.role === "status",
     );
     if (!status) throw new Error("no role=status element");
@@ -261,16 +272,16 @@ describe("CompareButton — status is announced", () => {
   }
 
   it("mounts a polite live region in every state", () => {
-    for (const [, tray] of STATES) {
-      const status = statusOf(tray);
+    for (const [, tray, notice] of STATES) {
+      const status = statusOf(tray, notice);
       expect(status.props?.["aria-live"]).toBe("polite");
     }
   });
 
   it("keeps the live region at the same slot in every state", () => {
-    const slots = STATES.map(([, tray]) => {
+    const slots = STATES.map(([, tray, notice]) => {
       override = fakeTray(tray);
-      return rootChildren(treeFor(ID)).findIndex((c) => !!c && c.props?.role === "status");
+      return rootChildren(treeFor(ID, notice)).findIndex((c) => !!c && c.props?.role === "status");
     });
     expect(slots[0]).toBeGreaterThanOrEqual(0);
     expect(new Set(slots).size).toBe(1);
@@ -284,26 +295,149 @@ describe("CompareButton — status is announced", () => {
 
   it("[current]: the visible hint lives inside the live region", () => {
     const status = statusOf([ID]);
+    expect(collectText(status.props?.children).join("")).toBe(COMPARE_HINT_ONE);
+    expect(String(status.props?.className)).not.toContain("sr-only");
+  });
+
+  it("[other]: the visible hint says this story would be the second pick", () => {
+    const status = statusOf([OTHER]);
     expect(collectText(status.props?.children).join("")).toBe(
-      "Karşılaştırmaya eklendi · ikinci haberi açıp “Karşılaştır”a dokunun",
+      "1 haber seçili · bunu ikinci olarak ekleyin",
     );
     expect(String(status.props?.className)).not.toContain("sr-only");
   });
 
+  it("[other, third]: the visible region warns that adding evicts the first pick", () => {
+    const status = statusOf([OTHER, THIRD]);
+    expect(collectText(status.props?.children).join("")).toBe(
+      "2 haber seçili · eklerseniz ilk seçim çıkar",
+    );
+    expect(String(status.props?.className)).not.toContain("sr-only");
+  });
+
+  it.each([
+    ["Temizle", CLEARED],
+    ["Vazgeç", WITHDRAWN],
+  ])("empty tray after %s: the notice is announced, screen-reader-only", (_a, notice) => {
+    const status = statusOf([], notice);
+    expect(collectText(status.props?.children).join("")).toBe(notice);
+    expect(String(status.props?.className)).toContain("sr-only");
+  });
+
+  it("in-tray states ignore a leftover notice", () => {
+    expect(collectText(statusOf([ID], CLEARED).props?.children).join("")).toBe(COMPARE_HINT_ONE);
+    expect(collectText(statusOf([OTHER, ID], CLEARED).props?.children).join("")).toBe(
+      COMPARE_HINT_TWO,
+    );
+  });
+
   it("two ids: announces readiness to screen readers without extra visual clutter", () => {
     const status = statusOf([OTHER, ID]);
-    expect(collectText(status.props?.children).join("")).toBe(
-      "İki haber seçildi · karşılaştırmaya hazır",
-    );
+    expect(collectText(status.props?.children).join("")).toBe(COMPARE_HINT_TWO);
     expect(String(status.props?.className)).toContain("sr-only");
   });
 
   it("markup carries role=status and aria-live=polite in all states", () => {
-    for (const [, tray] of STATES) {
-      override = fakeTray(tray);
-      const markup = renderToStaticMarkup(<CompareButton clusterId={ID} />);
+    for (const [, tray, notice] of STATES) {
+      const markup = renderToStaticMarkup(
+        <CompareButtonView
+          clusterId={ID}
+          tray={tray}
+          add={add}
+          remove={remove}
+          clear={clear}
+          notice={notice}
+        />,
+      );
       expect(markup).toContain('role="status"');
       expect(markup).toContain('aria-live="polite"');
     }
+  });
+
+  it("markup of the real wrapper still carries the live region (pre-hydration)", () => {
+    const markup = renderToStaticMarkup(<CompareButton clusterId={ID} />);
+    expect(markup).toContain('role="status"');
+    expect(markup).toContain('aria-live="polite"');
+  });
+});
+
+describe("CompareButtonView — invalid ids", () => {
+  it("renders nothing for an id that is not a UUID", () => {
+    expect(treeFor("<script>")).toBeNull();
+    expect(treeFor("")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hit targets (WCAG 2.5.5 / 2.5.8): every control is at least 44px tall.
+// ---------------------------------------------------------------------------
+
+describe("CompareButton — 44px hit targets", () => {
+  it("the text buttons ('Vazgeç' / 'Temizle') are at least 44px tall", () => {
+    override = fakeTray([ID]);
+    expect(String(buttonWithText(treeFor(ID), "Vazgeç").props?.className)).toContain(
+      "min-h-[44px]",
+    );
+    override = fakeTray([OTHER, ID]);
+    expect(String(buttonWithText(treeFor(ID), "Temizle").props?.className)).toContain(
+      "min-h-[44px]",
+    );
+  });
+
+  it("the chip button and the 'Karşılaştır (2)' link are at least 44px tall too", () => {
+    override = fakeTray([]);
+    expect(String(buttonWithText(treeFor(ID), "Karşılaştır").props?.className)).toContain(
+      "min-h-[44px]",
+    );
+    override = fakeTray([OTHER, ID]);
+    const link = collectElements(treeFor(ID)).find((el) => typeof el.props?.href === "string");
+    expect(String(link?.props?.className)).toContain("min-h-[44px]");
+  });
+
+  it("keeps the shared chip look (rounded pill, 11px label) on those taller controls", () => {
+    override = fakeTray([]);
+    const cls = String(buttonWithText(treeFor(ID), "Karşılaştır").props?.className);
+    expect(cls).toContain("rounded-full");
+    expect(cls).toContain("text-[11px]");
+    expect(cls).toContain("touch-manipulation");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The wrapper owns the hook and the `notice` state. It is called inside a probe
+// component so its hooks run in a real render; the element it returns is the
+// view, whose handlers we then invoke.
+// ---------------------------------------------------------------------------
+
+describe("CompareButton — wrapper wiring", () => {
+  function viewPropsOf(tray: readonly string[]) {
+    override = fakeTray(tray);
+    let captured: { props: Record<string, unknown> } | null = null;
+    function Probe() {
+      captured = CompareButton({ clusterId: ID }) as unknown as {
+        props: Record<string, unknown>;
+      };
+      return null;
+    }
+    renderToStaticMarkup(<Probe />);
+    if (!captured) throw new Error("CompareButton returned nothing");
+    return (captured as { props: Record<string, unknown> }).props;
+  }
+
+  it("renders the view with the tray, the id and an empty notice", () => {
+    const props = viewPropsOf([OTHER]);
+    expect(props.clusterId).toBe(ID);
+    expect(props.tray).toEqual([OTHER]);
+    expect(props.notice).toBe("");
+  });
+
+  it("forwards add / remove / clear to the tray hook", () => {
+    const props = viewPropsOf([]);
+    (props.add as (id: string) => void)(ID);
+    expect(add).toHaveBeenCalledExactlyOnceWith(ID);
+    (props.remove as (id: string) => void)(ID);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(ID);
+    (props.clear as () => void)();
+    expect(clear).toHaveBeenCalledTimes(1);
   });
 });

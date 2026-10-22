@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  COMPARE_HINT_ONE,
+  COMPARE_HINT_TWO,
   COMPARE_TRAY_EVENT,
   COMPARE_TRAY_KEY,
   COMPARE_TRAY_MAX,
   addToTray,
+  compareHint,
   parseTray,
   removeFromTray,
   trayHref,
@@ -119,5 +122,75 @@ describe("trayHref", () => {
 
   it("returns the compare href for two ids", () => {
     expect(trayHref([A, B])).toBe(`/karsilastir?a=${A}&b=${B}`);
+  });
+});
+
+describe("compareHint", () => {
+  const NOTICE = "Seçim temizlendi";
+
+  it("pins the two in-tray copies", () => {
+    expect(COMPARE_HINT_ONE).toBe(
+      "Karşılaştırmaya eklendi · ikinci haberi açıp “Karşılaştır”a dokunun",
+    );
+    expect(COMPARE_HINT_TWO).toBe("İki haber seçildi · karşılaştırmaya hazır");
+  });
+
+  it("empty tray, no notice: an empty, screen-reader-only region", () => {
+    expect(compareHint({ tray: [], id: A, notice: "" })).toEqual({
+      text: "",
+      srOnly: true,
+    });
+    // `notice` is optional.
+    expect(compareHint({ tray: [], id: A })).toEqual({ text: "", srOnly: true });
+  });
+
+  it("empty tray with a notice: announces it, screen-reader-only", () => {
+    expect(compareHint({ tray: [], id: A, notice: NOTICE })).toEqual({
+      text: NOTICE,
+      srOnly: true,
+    });
+  });
+
+  it("one OTHER story in the tray: tells the reader this would be the second pick", () => {
+    expect(compareHint({ tray: [B], id: A, notice: "" })).toEqual({
+      text: "1 haber seçili · bunu ikinci olarak ekleyin",
+      srOnly: false,
+    });
+  });
+
+  it("two OTHER stories in the tray: warns that adding evicts the first pick", () => {
+    expect(compareHint({ tray: [B, C], id: A, notice: "" })).toEqual({
+      text: "2 haber seçili · eklerseniz ilk seçim çıkar",
+      srOnly: false,
+    });
+  });
+
+  it("only this story in the tray: the visible 'second story' hint", () => {
+    expect(compareHint({ tray: [A], id: A, notice: "" })).toEqual({
+      text: COMPARE_HINT_ONE,
+      srOnly: false,
+    });
+  });
+
+  it("two stories incl. this one: readiness, screen-reader-only (the link says it on screen)", () => {
+    expect(compareHint({ tray: [B, A], id: A, notice: "" })).toEqual({
+      text: COMPARE_HINT_TWO,
+      srOnly: true,
+    });
+    expect(compareHint({ tray: [A, B], id: A, notice: "" })).toEqual({
+      text: COMPARE_HINT_TWO,
+      srOnly: true,
+    });
+  });
+
+  it("in-tray states ignore a leftover notice", () => {
+    expect(compareHint({ tray: [A], id: A, notice: NOTICE }).text).toBe(COMPARE_HINT_ONE);
+    expect(compareHint({ tray: [B, A], id: A, notice: NOTICE }).text).toBe(COMPARE_HINT_TWO);
+    expect(compareHint({ tray: [B], id: A, notice: NOTICE }).text).toBe(
+      "1 haber seçili · bunu ikinci olarak ekleyin",
+    );
+    expect(compareHint({ tray: [B, C], id: A, notice: NOTICE }).text).toBe(
+      "2 haber seçili · eklerseniz ilk seçim çıkar",
+    );
   });
 });

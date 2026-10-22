@@ -12,7 +12,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("@/lib/track", () => ({ track: vi.fn() }));
 
 import { Header } from "./header";
-import { NavLinks } from "./nav-links";
+import { NavLinks, NavLinksView } from "./nav-links";
 
 // ---------------------------------------------------------------------------
 // Local tree walkers (house pattern — see ownership-line.test.tsx,
@@ -115,6 +115,21 @@ describe("Header — skip link", () => {
 });
 
 describe("NavLinks — accessible names", () => {
+  it("labels the <nav> landmark 'Ana menü' (the footer's is 'Alt menü')", () => {
+    const tree = NavLinks({}) as { type: unknown; props: Record<string, unknown> };
+    expect(tree.type).toBe("nav");
+    expect(tree.props["aria-label"]).toBe("Ana menü");
+  });
+
+  it("keeps the label on the header's static-shell fallback (pathname: null)", () => {
+    const tree = NavLinksView({ pathname: null }) as {
+      type: unknown;
+      props: Record<string, unknown>;
+    };
+    expect(tree.type).toBe("nav");
+    expect(tree.props["aria-label"]).toBe("Ana menü");
+  });
+
   it("gives every nav link a name that survives the mobile icon-only layout", () => {
     const tree = NavLinks({ showAdmin: true });
 

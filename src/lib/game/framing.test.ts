@@ -122,6 +122,17 @@ describe("formatTallyLine", () => {
       "10 oy · İktidar %50 · Muhalefet %30 · Tarafsız %20",
     );
   });
+
+  it("uses largest-remainder rounding so the three percentages total 100", () => {
+    // Naive Math.round gives 33 + 33 + 33 = 99.
+    expect(formatTallyLine({ n: 3, iktidar: 1, muhalefet: 1, none: 1 })).toBe(
+      "3 oy · İktidar %34 · Muhalefet %33 · Tarafsız %33",
+    );
+    // Naive Math.round gives 88 + 13 + 0 = 101.
+    expect(formatTallyLine({ n: 8, iktidar: 7, muhalefet: 1, none: 0 })).toBe(
+      "8 oy · İktidar %88 · Muhalefet %12 · Tarafsız %0",
+    );
+  });
 });
 
 describe("summariseFramingRound", () => {

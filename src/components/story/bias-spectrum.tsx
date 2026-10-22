@@ -5,6 +5,7 @@ import {
   BIAS_SHORT_LABELS,
   zoneOf,
 } from "@/lib/bias/config";
+import { roundPercents } from "@/lib/bias/round-percents";
 import { BIAS_BADGE_CONFIG } from "./bias-badge";
 
 // Spectrum segments are derived from the canonical order + color palette in
@@ -65,12 +66,18 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
 
     const activeZones = ZONE_SEGMENTS.filter((z) => zones[z.key] > 0);
 
+    // Largest-remainder percents, computed once for the whole bar so the
+    // labels always total 100 (independent Math.round gave 88 + 13 = 101).
+    // Bar widths below keep the exact fractions.
+    const zonePcts = roundPercents(ZONE_SEGMENTS.map((z) => zones[z.key]));
+    const pctByZone = new Map(ZONE_SEGMENTS.map((z, i) => [z.key, zonePcts[i] ?? 0]));
+
     return (
       <div className="space-y-2">
         {/* Bar */}
         <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted">
           {activeZones.map((segment) => {
-            const pct = Math.round((zones[segment.key] / zoneTotal) * 100);
+            const pct = pctByZone.get(segment.key) ?? 0;
             return (
               <div
                 key={segment.key}
@@ -85,7 +92,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
         {/* Legend */}
         <div className="flex flex-wrap gap-x-4 gap-y-1.5">
           {activeZones.map((segment) => {
-            const pct = Math.round((zones[segment.key] / zoneTotal) * 100);
+            const pct = pctByZone.get(segment.key) ?? 0;
             return (
               <span
                 key={segment.key}
@@ -94,7 +101,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
               >
                 <span className={`inline-block h-2 w-2 rounded-full ${segment.dot}`} />
                 {segment.label}
-                <span className="text-muted-foreground/60">{pct}%</span>
+                <span className="tabular-nums text-muted-foreground">{pct}%</span>
               </span>
             );
           })}
@@ -108,12 +115,17 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
 
   const active = SEGMENTS.filter((s) => distribution[s.key] > 0);
 
+  // Same largest-remainder rounding as the compact branch (see above); bar
+  // widths keep the exact fractions.
+  const segmentPcts = roundPercents(SEGMENTS.map((s) => distribution[s.key]));
+  const pctBySegment = new Map(SEGMENTS.map((s, i) => [s.key, segmentPcts[i] ?? 0]));
+
   return (
     <div className="space-y-2">
       {/* Bar */}
       <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted">
         {active.map((segment) => {
-          const pct = Math.round((distribution[segment.key] / total) * 100);
+          const pct = pctBySegment.get(segment.key) ?? 0;
           return (
             <div
               key={segment.key}
@@ -128,7 +140,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
       {/* Legend */}
       <div className="flex flex-wrap gap-x-4 gap-y-1.5">
         {active.map((segment) => {
-          const pct = Math.round((distribution[segment.key] / total) * 100);
+          const pct = pctBySegment.get(segment.key) ?? 0;
           return (
             <span
               key={segment.key}
@@ -137,7 +149,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
             >
               <span className={`inline-block h-2 w-2 rounded-full ${segment.dot}`} />
               {segment.label}
-              <span className="text-muted-foreground/60">{pct}%</span>
+              <span className="tabular-nums text-muted-foreground">{pct}%</span>
             </span>
           );
         })}
