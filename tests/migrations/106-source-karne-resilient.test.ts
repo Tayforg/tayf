@@ -334,11 +334,24 @@ describe("migration 106_source_karne_resilient.sql (SQL contract)", () => {
   // ---- comments ------------------------------------------------------------
 
   it("comments tell the real cadence: no comment on string mentions 6 h / 6 hours", () => {
-    const comments = [
-      ...code.matchAll(
-        /comment\s+on\s+(?:table|function)\s+[\w.]+(?:\([^)]*\))?\s+is\s+((?:'(?:[^']|'')*'\s*)+);/gi,
-      ),
-    ].map((m) => m[0]);
+    // Header by regex, literals by a hand scan, so parsing stays linear.
+    const comments: string[] = [];
+    for (const h of code.matchAll(/comment\s+on\s+(?:table|function)\s+[\w.]+(?:\([^)]*\))?\s+is\b/gi)) {
+      let i = (h.index ?? 0) + h[0].length;
+      let sawLiteral = false;
+      for (;;) {
+        while (/\s/.test(code[i] ?? "")) i++;
+        if (code[i] !== "'") break;
+        sawLiteral = true;
+        i++;
+        while (i < code.length) {
+          if (code[i] === "'" && code[i + 1] === "'") { i += 2; continue; }
+          if (code[i] === "'") { i++; break; }
+          i++;
+        }
+      }
+      if (sawLiteral && code[i] === ";") comments.push(code.slice(h.index, i + 1));
+    }
     // 3 functions + the source_karne_30d table comment fix.
     expect(comments).toHaveLength(4);
     for (const c of comments) {
