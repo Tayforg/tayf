@@ -301,7 +301,17 @@ export function ClusterCard({
             {/* Desktop-only side thumbnail. Hidden below sm (mobile gets the
                 banner above). Fixed aspect keeps card heights predictable in
                 the cluster grid. Rendered unconditionally: ClusterCardImage
-                falls back to a muted placeholder when `heroSrc` is null. */}
+                falls back to a muted placeholder when `heroSrc` is null.
+
+                Never preloaded (browser-6): the mobile banner above is the
+                one image a priority card may preload/eager-fetch; doing both
+                downloaded two copies of the hero. Lazy + display:none on
+                mobile means this image is never fetched there; on desktop an
+                above-the-fold lazy image loads at once (Next image docs,
+                "theme detection" note), and fetchPriority="high" lifts it for
+                priority cards. The banner's preload uses imagesizes
+                "(max-width: 640px) 100vw, 0px", so desktop only fetches the
+                smallest srcset candidate for it. */}
             <div className="hidden sm:block shrink-0 w-32 h-24 sm:w-40 sm:h-28 overflow-hidden rounded-lg bg-muted">
               <ClusterCardImage
                 src={heroSrc}
@@ -312,7 +322,8 @@ export function ClusterCard({
                 width={320}
                 height={224}
                 sizes="160px"
-                priority={isPriority}
+                priority={false}
+                fetchPriority={isPriority ? "high" : undefined}
                 className="h-full w-full object-cover"
               />
             </div>
@@ -348,7 +359,7 @@ export function ClusterCard({
                 </li>
               ))}
               {extra > 0 && (
-                <li className="text-[11px] text-brand/60">
+                <li className="text-[11px] text-brand">
                   +{extra} başka kaynak
                 </li>
               )}

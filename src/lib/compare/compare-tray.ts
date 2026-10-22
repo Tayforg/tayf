@@ -51,3 +51,46 @@ export function trayHref(tray: readonly string[]): string | null {
   if (tray.length !== COMPARE_TRAY_MAX) return null;
   return compareHref(tray[0], tray[1]);
 }
+
+export const COMPARE_HINT_ONE =
+  "Karşılaştırmaya eklendi · ikinci haberi açıp “Karşılaştır”a dokunun";
+export const COMPARE_HINT_TWO = "İki haber seçildi · karşılaştırmaya hazır";
+
+/**
+ * What the compare chip's live region says. `srOnly` = for screen readers
+ * only (the visible UI already shows it, or there is nothing to show).
+ * Precedence:
+ *  1. this story is in a full tray  -> "ready" (the link says it on screen)
+ *  2. this story is in the tray     -> how to pick the second story
+ *  3. the tray holds two others     -> adding this one evicts the oldest pick
+ *  4. the tray holds one other      -> adding this one makes the pair
+ *  5. otherwise                     -> `notice`, the outcome of the reader's
+ *     last "Vazgeç" / "Temizle" (the tray emptied, so nothing visible changed).
+ * The `notice` never overrides a tray state: it is stale once the tray is
+ * non-empty again.
+ */
+export function compareHint({
+  tray,
+  id,
+  notice = "",
+}: {
+  tray: readonly string[];
+  id: string;
+  notice?: string;
+}): { text: string; srOnly: boolean } {
+  const inTray = tray.includes(id);
+  if (inTray && tray.length >= COMPARE_TRAY_MAX) {
+    return { text: COMPARE_HINT_TWO, srOnly: true };
+  }
+  if (inTray) return { text: COMPARE_HINT_ONE, srOnly: false };
+  if (tray.length >= COMPARE_TRAY_MAX) {
+    return {
+      text: `${tray.length} haber seçili · eklerseniz ilk seçim çıkar`,
+      srOnly: false,
+    };
+  }
+  if (tray.length === 1) {
+    return { text: "1 haber seçili · bunu ikinci olarak ekleyin", srOnly: false };
+  }
+  return { text: notice, srOnly: true };
+}

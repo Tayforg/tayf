@@ -1,4 +1,5 @@
 import { zoneOf } from "@/lib/bias/config";
+import { roundPercents } from "@/lib/bias/round-percents";
 import type { BiasDistribution, MediaDnaZone } from "@/types";
 
 // Pure helpers for collapsing a cluster's 10-category `BiasDistribution`
@@ -25,48 +26,16 @@ export function zoneCountsOf(
 
 /**
  * Integer percents that sum to exactly 100 when total > 0, via
- * largest-remainder rounding (Hamilton's method): floor each zone's exact
- * share, then hand out the leftover percentage points one at a time to
- * the zones with the largest fractional remainder. Ties in the remainder
- * are broken by `ZONE_ORDER` (stable sort keeps iktidar/bagimsiz/muhalefet
- * order), so the result is deterministic across calls. All zeros when the
- * total is 0.
+ * largest-remainder rounding (Hamilton's method) -- see `roundPercents`.
+ * Ties in the remainder are broken by `ZONE_ORDER`
+ * (iktidar, bagimsiz, muhalefet), so the result is deterministic across
+ * calls. All zeros when the total is 0.
  */
 export function zonePercents(
   counts: Record<MediaDnaZone, number>,
 ): Record<MediaDnaZone, number> {
-  const percents: Record<MediaDnaZone, number> = {
-    iktidar: 0,
-    bagimsiz: 0,
-    muhalefet: 0,
-  };
-
-  const total = counts.iktidar + counts.bagimsiz + counts.muhalefet;
-  if (total <= 0) return percents;
-
-  const shares = ZONE_ORDER.map((zone) => {
-    const scaled = counts[zone] * 100;
-    return {
-      zone,
-      floor: Math.floor(scaled / total),
-      remainder: scaled % total,
-    };
-  });
-
-  let assigned = 0;
-  for (const { zone, floor } of shares) {
-    percents[zone] = floor;
-    assigned += floor;
-  }
-
-  // 100 - assigned is always a small non-negative integer (< ZONE_ORDER.length)
-  // since we only floored fractional shares of a total that sums to 100%.
-  let remaining = 100 - assigned;
-  for (const { zone } of [...shares].sort((a, b) => b.remainder - a.remainder)) {
-    if (remaining <= 0) break;
-    percents[zone] += 1;
-    remaining -= 1;
-  }
-
-  return percents;
+  const [iktidar = 0, bagimsiz = 0, muhalefet = 0] = roundPercents(
+    ZONE_ORDER.map((zone) => counts[zone]),
+  );
+  return { iktidar, bagimsiz, muhalefet };
 }

@@ -1,5 +1,12 @@
-import { describe, it, expect, vi } from "vitest";
+import { beforeEach, describe, it, expect, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+
+// Props every mocked next/image render received, in call order. Hoisted so
+// the vi.mock factory below (itself hoisted above the imports) can close
+// over it. Lets a test assert on the props ClusterCardImage hands to
+// next/image (preload / loading / fetchPriority) rather than on how a
+// plain <img> happens to serialise them.
+const calls = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 
 // next/image needs the App Router's image-optimization machinery
 // (request context, loader config) that isn't present when rendering a
@@ -9,6 +16,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 // header-a11y.test.tsx for the same style of minimal per-test mocking.
 vi.mock("next/image", () => ({
   default: (props: Record<string, unknown>) => {
+    calls.push(props);
     // eslint-disable-next-line @next/next/no-img-element, jsx-a11y/alt-text
     return <img {...props} />;
   },
@@ -17,6 +25,10 @@ vi.mock("next/image", () => ({
 import { ClusterCardImage } from "./cluster-card-image";
 
 const CREDIT_URL = "https://cdn.outlet.example/foto.jpg";
+
+beforeEach(() => {
+  calls.length = 0;
+});
 
 describe("ClusterCardImage — photo credit (R1-F1)", () => {
   it("renders the credit line for the currently-displayed candidate when `credits` has an entry for it", () => {
@@ -193,6 +205,23 @@ describe("ClusterCardImage — first-party logo tier (ingest-hygiene)", () => {
     expect(markup).toContain("&amp;w=64&amp;q=75");
   });
 
+  it("captions the logo with a full-contrast muted token (no opacity modifier)", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Outlet Gazete"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain("Outlet Gazete");
+    expect(markup).toContain("text-muted-foreground");
+    expect(markup).not.toContain("text-muted-foreground/70");
+  });
+
   it("leaves a non-Google logo URL unchanged", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
@@ -293,5 +322,92 @@ describe("ClusterCardImage — animated GIF filter (http-1)", () => {
     );
 
     expect(markup).toContain('src="https://cdn.outlet.example/img?format=gif"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// browser-6: a priority card renders the same hero twice (the mobile banner
+// and the hidden desktop thumbnail). Only the mobile one may preload; the
+// desktop one stays lazy but can still raise its fetch priority.
+// ---------------------------------------------------------------------------
+describe("ClusterCardImage — preload / loading / fetchPriority (browser-6)", () => {
+  it("priority={true} preloads and loads eagerly", () => {
+    renderToStaticMarkup(
+      <ClusterCardImage
+        src={CREDIT_URL}
+        alt="Test görseli"
+        width={768}
+        height={576}
+        priority
+      />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.preload).toBe(true);
+    expect(calls[0]!.loading).toBe("eager");
+  });
+
+  it("priority={false} + fetchPriority=\"high\" stays lazy without a preload", () => {
+    renderToStaticMarkup(
+      <ClusterCardImage
+        src={CREDIT_URL}
+        alt="Test görseli"
+        width={320}
+        height={224}
+        priority={false}
+        fetchPriority="high"
+      />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.loading).toBe("lazy");
+    expect(calls[0]!.fetchPriority).toBe("high");
+    expect(calls[0]!.preload).toBeFalsy();
+  });
+
+  it("defaults to lazy with no preload when neither prop is passed", () => {
+    renderToStaticMarkup(
+      <ClusterCardImage
+        src={CREDIT_URL}
+        alt="Test görseli"
+        width={320}
+        height={224}
+      />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.loading).toBe("lazy");
+    expect(calls[0]!.preload).toBeFalsy();
+  });
+
+  it("leaves fetchPriority undefined when the prop is not passed", () => {
+    renderToStaticMarkup(
+      <ClusterCardImage
+        src={CREDIT_URL}
+        alt="Test görseli"
+        width={768}
+        height={576}
+        priority
+      />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.fetchPriority).toBeUndefined();
+  });
+
+  it("forwards fetchPriority=\"low\" and \"auto\" untouched", () => {
+    for (const value of ["low", "auto"] as const) {
+      calls.length = 0;
+      renderToStaticMarkup(
+        <ClusterCardImage
+          src={CREDIT_URL}
+          alt="Test görseli"
+          width={320}
+          height={224}
+          fetchPriority={value}
+        />,
+      );
+      expect(calls[0]!.fetchPriority).toBe(value);
+    }
   });
 });

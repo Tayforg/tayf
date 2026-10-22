@@ -90,6 +90,16 @@ interface ClusterCardImageProps {
   className?: string;
   /** True for above-the-fold cards so the browser preloads the asset. */
   priority?: boolean;
+  /**
+   * Forwarded to next/image as the `<img fetchpriority>` hint. Independent of
+   * `priority`: `priority` (-> `preload` + `loading="eager"`) puts a `<link
+   * rel="preload">` in the document head and fetches immediately, whereas
+   * this only tells the browser how to rank the request. Pass `"high"` with
+   * `priority={false}` for an image that must stay lazy (e.g. a thumbnail
+   * hidden by CSS on mobile) yet should be fetched first once it is actually
+   * shown. Omit to leave the attribute off entirely.
+   */
+  fetchPriority?: "high" | "low" | "auto";
   /** Intrinsic width in px — required by next/image for remote sources. */
   width: number;
   /** Intrinsic height in px — required by next/image for remote sources. */
@@ -112,6 +122,7 @@ export function ClusterCardImage({
   alt,
   className,
   priority = false,
+  fetchPriority,
   width,
   height,
   sizes,
@@ -213,7 +224,7 @@ export function ClusterCardImage({
           onError={() => setLogoFailed(true)}
         />
         {logoAlt && (
-          <span className="text-[10px] sm:text-xs font-medium text-muted-foreground/70 text-center line-clamp-1 max-w-full px-2">
+          <span className="text-[10px] sm:text-xs font-medium text-muted-foreground text-center line-clamp-1 max-w-full px-2">
             {logoAlt}
           </span>
         )}
@@ -253,6 +264,7 @@ export function ClusterCardImage({
           // Next.js 16 deprecated `priority` in favour of `preload` + loading.
           preload={priority}
           loading={priority ? "eager" : "lazy"}
+          fetchPriority={fetchPriority}
           onError={() => {
             // Reset loaded state and advance to the next candidate. If we
             // walk past the end, `currentSrc` becomes undefined and the

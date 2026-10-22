@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ReactNode } from "react";
 
 import type {
@@ -274,6 +276,55 @@ describe("CompareBody — fetching", () => {
     expect(hrefs).toContain(`/karsilastir?a=${A}`);
   });
 
+  it("names each 'Bu tarafı kaldır' link after the side it removes, and gives it a 44px target", async () => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      makeDetail(id, id),
+    );
+    const tree = await render({ a: A, b: B });
+    const removers = collectElements(tree).filter(
+      (el) => collectText(el.props?.children).join("") === "Bu tarafı kaldır",
+    );
+    expect(removers).toHaveLength(2);
+    const labels = removers.map((el) => el.props?.["aria-label"]);
+    // Side A is removed by linking to B alone, and vice versa; the title is the id here.
+    expect(labels).toEqual(
+      expect.arrayContaining([`Bu tarafı kaldır: ${A}`, `Bu tarafı kaldır: ${B}`]),
+    );
+    expect(new Set(labels).size).toBe(2);
+    for (const el of removers) {
+      expect(String(el.props?.className)).toContain("min-h-[44px]");
+      expect(String(el.props?.className)).toContain("touch-manipulation");
+    }
+    const hrefOf = (label: string) =>
+      removers.find((el) => el.props?.["aria-label"] === label)?.props?.href;
+    expect(hrefOf(`Bu tarafı kaldır: ${A}`)).toBe(`/karsilastir?a=${B}`);
+    expect(hrefOf(`Bu tarafı kaldır: ${B}`)).toBe(`/karsilastir?a=${A}`);
+  });
+
+  it("gives the merged-side survivor link a 44px target", async () => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      id === A
+        ? makeDetail(id, "Eski", { merged_into: SURVIVOR })
+        : makeDetail(id, "Diğer hikâye"),
+    );
+    const tree = await render({ a: A, b: B });
+    const link = collectElements(tree).find(
+      (el) => collectText(el.props?.children).join("") === "Güncel haberle karşılaştır",
+    );
+    expect(String(link?.props?.className)).toContain("min-h-[44px]");
+  });
+
+  it("renders the empty-zone note at full text contrast (no /opacity muted text)", async () => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      makeDetail(id, id),
+    );
+    const tree = await render({ a: A, b: B });
+    const note = collectElements(tree).find(
+      (el) => collectText(el.props?.children).join("") === "Bu bölgeden kaynak yok",
+    );
+    expect(note?.props?.className).toBe("text-[13px] text-muted-foreground");
+  });
+
   it("one side rejecting still renders the unavailable copy and the other side's title", async () => {
     getClusterDetailOrThrow.mockImplementation(async (id: string) => {
       if (id === A) throw new Error("reader timeout");
@@ -372,5 +423,12 @@ describe("CompareBody — fetching", () => {
       }
     }
     expect(hrefs).toContain(`/cluster/${A}`);
+  });
+});
+
+describe("/karsilastir source", () => {
+  it("never dims text with a muted-foreground opacity modifier (contrast)", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    expect(src).not.toContain("text-muted-foreground/");
   });
 });

@@ -1,5 +1,7 @@
 import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
+// Relative path on purpose: the config loader cannot resolve the '@/' alias.
+import { HTML_LIMITED_BOTS } from "./src/lib/seo/html-limited-bots";
 
 /**
  * W4-Q7 Next.js 16 config review (2026-04-06)
@@ -51,6 +53,14 @@ import { withSentryConfig } from "@sentry/nextjs";
  */
 const nextConfig: NextConfig = {
   cacheComponents: true,
+  // Under cacheComponents, generateMetadata output streams into <body> for
+  // humans, which lets Google ignore the canonical and the noindex-on-error
+  // hardening. Next's default htmlLimitedBots list omits Googlebot and
+  // GoogleOther, so we extend it (see src/lib/seo/html-limited-bots.ts).
+  // Trade-off: matching bots bypass the PPR shell, so every crawl is a full
+  // dynamic render and generateMetadata latency lands in their TTFB.
+  // Details: docs/architecture.md, "Metadata for crawlers".
+  htmlLimitedBots: HTML_LIMITED_BOTS,
   cacheLife: {
     // Cluster-worker cycles every 15-60s (adaptive), so a 5-min revalidate
     // window keeps the homepage at most ~5 min stale while cutting Supabase

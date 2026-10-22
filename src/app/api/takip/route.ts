@@ -4,7 +4,7 @@ import { withApiErrors } from "@/lib/api/errors";
 import { searchClusters } from "@/lib/clusters/search-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import { getTopicClusters, isTopicSlug } from "@/lib/clusters/topic-query";
-import { formatZoneLine, zoneCountsFromSources } from "@/lib/feeds/zone-line";
+import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
   FOLLOW_ITEMS_MAX,
@@ -86,7 +86,9 @@ function toItems(bundles: readonly ClusterBundle[]) {
     updatedAt: b.cluster.updated_at,
     sourceCount: b.effectiveArticleCount ?? b.cluster.article_count,
     isBlindspot: b.cluster.is_blindspot === true,
-    zoneLine: formatZoneLine(zoneCountsFromSources(b.sources)),
+    // Voting basis, like the card the reader clicks through to: aggregators and
+    // niche feeds are listed on it but never counted in its zone tally.
+    zoneLine: formatZoneLine(votingZoneCounts(b.sources)),
   }));
 }
 

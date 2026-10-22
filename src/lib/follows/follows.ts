@@ -1,11 +1,14 @@
 // "Takip ettiklerim" -- client-side follows of a keyword or a /konu slug.
 //
-// Pure module: NO React, NO next/*, NO server imports. It is bundled to the
-// client (use-follows.ts, follow-button.tsx, follow-feed.tsx) and unit-tested
-// in the node environment. Follows live in localStorage only (key below); the
-// server never sees them, it just answers GET /api/takip for one follow at a
-// time. Every function here treats stored data as untrusted: localStorage can
-// hold anything (an older build's shape, another script's write, hand edits).
+// Pure module: NO React, NO next/*, NO server imports (the one allowed import,
+// @/lib/time, is itself dependency-free). It is bundled to the client
+// (use-follows.ts, follow-button.tsx, follow-feed.tsx) and unit-tested in the
+// node environment. Follows live in localStorage only (key below); the server
+// never sees them, it just answers GET /api/takip for one follow at a time.
+// Every function here treats stored data as untrusted: localStorage can hold
+// anything (an older build's shape, another script's write, hand edits).
+
+import { formatTurkishTimeAgo } from "@/lib/time";
 
 export const FOLLOWS_KEY = "tayf:follows";
 export const FOLLOWS_CHANGE_EVENT = "tayf:follows-change";
@@ -254,6 +257,22 @@ export function followListCaption(kind: FollowKind): string | null {
   return kind === "q" ? "En çok kaynaklı eşleşmeler · yeniden eskiye" : null;
 }
 
+/**
+ * Where keyboard / screen-reader focus should go once `removed` leaves `keys`
+ * (the follows in display order): the follow that takes its place (the next
+ * one), else the one before it, else null (the list is now empty -- the caller
+ * focuses the empty state). null as well for a key that is not in the list,
+ * since nothing was removed and focus should stay put.
+ */
+export function focusTargetAfterRemove(
+  keys: readonly string[],
+  removed: string,
+): string | null {
+  const index = keys.indexOf(removed);
+  if (index < 0) return null;
+  return keys[index + 1] ?? keys[index - 1] ?? null;
+}
+
 export function followApiPath(f: Pick<Follow, "kind" | "value">): string {
   return f.kind === "q"
     ? `/api/takip?q=${encodeURIComponent(f.value)}`
@@ -295,6 +314,24 @@ function coerceItem(v: unknown): FollowItem | null {
     isBlindspot: o.isBlindspot,
     zoneLine: o.zoneLine,
   };
+}
+
+/**
+ * The meta line under a /takip row: '{n} kaynak · {time ago} · {zone line}'.
+ * The age is measured from firstPublished -- the same instant ClusterCard
+ * shows and countNew() compares against seenAt -- NOT from updatedAt, which
+ * moves whenever a late article joins the cluster and would make an old story
+ * read as fresh. `now` is injectable for tests; it defaults to the clock.
+ */
+export function followRowMeta(
+  item: Pick<FollowItem, "sourceCount" | "firstPublished" | "zoneLine">,
+  now?: number,
+): string {
+  const ago = formatTurkishTimeAgo(
+    item.firstPublished,
+    now === undefined ? undefined : { now },
+  );
+  return `${item.sourceCount} kaynak · ${ago} · ${item.zoneLine}`;
 }
 
 /**

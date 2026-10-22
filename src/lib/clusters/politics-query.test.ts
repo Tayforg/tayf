@@ -72,7 +72,12 @@ vi.mock("./feed-health", async (importOriginal) => {
 });
 
 import { cacheLife } from "next/cache";
-import { getPoliticsClusters } from "./politics-query";
+import {
+  buildClusterBundle,
+  flattenClusterMembers,
+  getPoliticsClusters,
+  type EmbeddedClusterRow,
+} from "./politics-query";
 import type { ZoneFeedHealth } from "./feed-health";
 import { createReaderClient, createServerClient } from "@/lib/supabase/server";
 
@@ -489,6 +494,68 @@ describe("same-source dedupe + newest-first ordering", () => {
     expect(b.cluster.article_count).toBe(2);
     // Sources list matches.
     expect(b.sources.map((s) => s.id).sort()).toEqual(["s1", "s2"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bundle.sources carry `kind` so every user-facing zone line (RSS, social) can
+// tally on the card's VOTING basis (votingZoneCounts in feeds/zone-line.ts)
+// instead of counting aggregators and niche feeds as a zone voice.
+// ---------------------------------------------------------------------------
+
+describe("buildClusterBundle source kind", () => {
+  it("copies kind onto bundle.sources, keeping an aggregator member's kind and giving a kind-null member null", () => {
+    const row = mkCluster({
+      id: "c-kind",
+      members: [
+        { id: "a-out", sourceId: "s-out", kind: "outlet", bias: "center" },
+        { id: "a-agg", sourceId: "s-agg", kind: "aggregator", bias: "center" },
+        { id: "a-wire", sourceId: "s-wire", kind: "wire", bias: "center" },
+        { id: "a-null", sourceId: "s-null", kind: null, bias: "center" },
+        // Column absent in the embed (legacy select): coalesces to null too.
+        { id: "a-none", sourceId: "s-none", bias: "center" },
+      ],
+    }) as unknown as EmbeddedClusterRow;
+
+    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row));
+
+    const kindById = Object.fromEntries(
+      bundle.sources.map((s) => [s.id, s.kind]),
+    );
+    expect(kindById).toEqual({
+      "s-out": "outlet",
+      "s-agg": "aggregator",
+      "s-wire": "wire",
+      "s-null": null,
+      "s-none": null,
+    });
+  });
+
+  it("still carries the existing card fields alongside kind", () => {
+    const row = mkCluster({
+      id: "c-kind-2",
+      members: [
+        {
+          id: "a1",
+          sourceId: "s1",
+          sourceName: "Kaynak Bir",
+          kind: "niche",
+          bias: "opposition",
+        },
+      ],
+    }) as unknown as EmbeddedClusterRow;
+
+    const { bundle } = buildClusterBundle(row, flattenClusterMembers(row));
+
+    expect(bundle.sources).toEqual([
+      {
+        id: "s1",
+        name: "Kaynak Bir",
+        bias: "opposition",
+        logo_url: null,
+        kind: "niche",
+      },
+    ]);
   });
 });
 

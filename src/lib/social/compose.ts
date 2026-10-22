@@ -1,7 +1,7 @@
-import { formatZoneLine, zoneCountsFromSources } from "@/lib/feeds/zone-line";
+import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
 import { withUtm } from "@/lib/feeds/rss-builder";
 import { ZONE_META } from "@/lib/bias/config";
-import type { BiasCategory, MediaDnaZone } from "@/types";
+import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 // Pure text composition for the owned-channels auto-poster. Telegram gets
 // the full text plus a URL line (link_preview_options carries the actual
@@ -17,6 +17,13 @@ const BLUESKY_MAX_GRAPHEMES = 300;
 
 export interface ComposeSource {
   bias: BiasCategory;
+  /**
+   * Zone lines and the "N bölge" count tally only voting kinds (outlet,
+   * wire) via `votingZoneCounts`, matching the card. Optional/nullable like
+   * `Source.kind`: a missing or null kind counts as voting. "N kaynak" stays
+   * the full `sources.length`, as on the card.
+   */
+  kind?: SourceKind | null;
 }
 
 export interface ComposeBlindspotInput {
@@ -53,7 +60,7 @@ function utmUrl(clusterUrl: string, channel: "telegram" | "bluesky", campaign: "
 }
 
 export function composeTelegramBlindspot(input: ComposeBlindspotInput): TelegramText {
-  const counts = zoneCountsFromSources(input.sources);
+  const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
   const n = input.sources.length;
   const zoneLabel = ZONE_META[input.dominantZone].label;
@@ -71,7 +78,7 @@ export function composeTelegramBlindspot(input: ComposeBlindspotInput): Telegram
 }
 
 export function composeTelegramTopStory(input: ComposeTopStoryInput): TelegramText {
-  const counts = zoneCountsFromSources(input.sources);
+  const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
   const n = input.sources.length;
   const url = utmUrl(input.clusterUrl, "telegram", "gundem");
@@ -136,7 +143,7 @@ function buildBlueskyText(lines: string[], titleIndex: number): string {
 }
 
 export function composeBlueskyBlindspot(input: ComposeBlindspotInput): BlueskyText {
-  const counts = zoneCountsFromSources(input.sources);
+  const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
   const n = input.sources.length;
   const zoneLabel = ZONE_META[input.dominantZone].label;
@@ -158,7 +165,7 @@ export function composeBlueskyBlindspot(input: ComposeBlindspotInput): BlueskyTe
 }
 
 export function composeBlueskyTopStory(input: ComposeTopStoryInput): BlueskyText {
-  const counts = zoneCountsFromSources(input.sources);
+  const counts = votingZoneCounts(input.sources);
   const zoneLine = formatZoneLine(counts);
   const n = input.sources.length;
   const zoneCount = countZonesCovered(counts);

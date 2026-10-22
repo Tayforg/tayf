@@ -45,6 +45,9 @@ function bundle(overrides: Record<string, unknown> = {}) {
     ],
     dominantZone: "iktidar",
     dominantPct: 0.8,
+    // The feed's zone line reads the bundle's voting tally (the one
+    // dominantZone / dominantPct come from), not a recount of `sources`.
+    votingZoneCounts: { iktidar: 1, bagimsiz: 1, muhalefet: 0 },
     ...overrides,
   };
 }
@@ -169,7 +172,7 @@ describe("GET /blindspots/rss.xml", () => {
   it("describes each item with the blindspot prefix, source count and zone line", async () => {
     const body = await (await callRoute()).text();
     expect(body).toContain("Kör nokta: ağırlıkla İktidar kaynakları (%80).");
-    expect(body).toContain(" kaynak · İktidar ");
+    expect(body).toContain("2 kaynak · İktidar 1 · Bağımsız 1 · Muhalefet 0");
   });
 
   it("tags the item link with utm_campaign=kor_nokta and keeps the guid clean", async () => {

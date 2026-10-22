@@ -1,7 +1,7 @@
 import { ZONE_META } from "@/lib/bias/config";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
 import { buildRssXml, withUtm, type RssItemInput } from "@/lib/feeds/rss-builder";
-import { formatZoneLine, zoneCountsFromSources } from "@/lib/feeds/zone-line";
+import { formatZoneLine } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 
 // The blindspots RSS feed, served from two URLs that MUST stay identical:
@@ -25,7 +25,10 @@ export function blindspotRssItem(
     medium: "feed",
     campaign: "kor_nokta",
   });
-  const zoneLine = formatZoneLine(zoneCountsFromSources(bundle.sources));
+  // The exact voting tally dominantZone/dominantPct are derived from, so the
+  // zone line agrees with the "%N" in the prefix; "N kaynak" stays the full
+  // source count, as on the card.
+  const zoneLine = formatZoneLine(bundle.votingZoneCounts);
   const n = bundle.sources.length;
   const zoneLabel = ZONE_META[bundle.dominantZone].label;
   const pct = Math.round(bundle.dominantPct * 100);

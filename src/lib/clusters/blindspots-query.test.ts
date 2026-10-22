@@ -74,6 +74,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 
 import { cacheLife } from "next/cache";
 import { getBlindspots, getBlindspotsSafe } from "./blindspots-query";
+import { votingZoneCounts } from "@/lib/feeds/zone-line";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 import type { BiasCategory, SourceKind } from "@/types";
 
@@ -532,6 +533,64 @@ describe("getBlindspots votingZoneCounts", () => {
       bagimsiz: 0,
       muhalefet: 5,
     });
+  });
+});
+
+// bundle.sources carry `kind`, so zone lines outside the card (RSS, social)
+// can recount on the voting basis from the sources alone and land on exactly
+// the tally the card's dominantZone / dominantPct are built from.
+describe("getBlindspots source kind", () => {
+  it("carries kind on bundle.sources, null when the embed has none", async () => {
+    const row = mkMixedRow("vk-kind", [
+      { bias: "pro_government" },
+      { bias: "pro_government" },
+      { bias: "gov_leaning" },
+      { bias: "state_media", kind: "wire" },
+      { bias: "nationalist" },
+      { bias: "opposition", kind: "aggregator" },
+      { bias: "center", kind: "niche" },
+    ]);
+    // A legacy member whose embedded source has no kind column at all.
+    delete (row.cluster_articles[2]!.articles.sources as { kind?: SourceKind }).kind;
+    seedRows([row]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const kindById = Object.fromEntries(
+      bundles[0]!.sources.map((s) => [s.id, s.kind]),
+    );
+    expect(kindById).toEqual({
+      "vk-kind-s0": "outlet",
+      "vk-kind-s1": "outlet",
+      "vk-kind-s2": null,
+      "vk-kind-s3": "wire",
+      "vk-kind-s4": "outlet",
+      "vk-kind-s5": "aggregator",
+      "vk-kind-s6": "niche",
+    });
+  });
+
+  it("votingZoneCounts(bundle.sources) deep-equals bundle.votingZoneCounts", async () => {
+    seedRows([
+      mkMixedRow("vk-eq", [
+        { bias: "pro_government" },
+        { bias: "pro_government" },
+        { bias: "gov_leaning" },
+        { bias: "state_media", kind: "wire" },
+        { bias: "nationalist" },
+        { bias: "opposition", kind: "aggregator" },
+        { bias: "center", kind: "niche" },
+      ]),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const bundle = bundles[0]!;
+    expect(votingZoneCounts(bundle.sources)).toEqual(bundle.votingZoneCounts);
+    // The raw source list is wider than the voting basis.
+    expect(bundle.sources).toHaveLength(7);
   });
 });
 

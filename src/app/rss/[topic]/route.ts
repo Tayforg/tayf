@@ -9,7 +9,7 @@ import {
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import { blindspotsFeedResponse } from "@/lib/feeds/blindspots-feed";
 import { buildRssXml, withUtm, type RssItemInput } from "@/lib/feeds/rss-builder";
-import { formatZoneLine, zoneCountsFromSources } from "@/lib/feeds/zone-line";
+import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 
 // GET /rss/[topic].xml — one RSS 2.0 feed per topic hub (TOPIC_SLUGS) plus
@@ -68,7 +68,7 @@ function topicItem(base: string, slug: TopicSlug, bundle: ClusterBundle): RssIte
     medium: "feed",
     campaign: `konu_${slug}`,
   });
-  const zoneLine = formatZoneLine(zoneCountsFromSources(bundle.sources));
+  const zoneLine = formatZoneLine(votingZoneCounts(bundle.sources));
   const n = bundle.sources.length;
 
   return {

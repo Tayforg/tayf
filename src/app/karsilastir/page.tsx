@@ -215,7 +215,7 @@ function SideColumn({
           </p>
           <Link
             href={compareHref(state.survivorId, otherId)}
-            className="inline-flex text-sm font-medium text-brand underline decoration-dotted underline-offset-2"
+            className="inline-flex min-h-[44px] items-center touch-manipulation text-sm font-medium text-brand underline decoration-dotted underline-offset-2"
           >
             Güncel haberle karşılaştır
           </Link>
@@ -272,7 +272,7 @@ function SideColumn({
                       {names.join(", ")}
                     </p>
                   ) : (
-                    <p className="text-[13px] text-muted-foreground/70">
+                    <p className="text-[13px] text-muted-foreground">
                       Bu bölgeden kaynak yok
                     </p>
                   )}
@@ -289,7 +289,8 @@ function SideColumn({
 
           <Link
             href={compareHref(otherId)}
-            className="inline-flex text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+            aria-label={`Bu tarafı kaldır: ${view.title}`}
+            className="inline-flex min-h-[44px] items-center touch-manipulation text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
           >
             Bu tarafı kaldır
           </Link>

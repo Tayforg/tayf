@@ -17,11 +17,13 @@ import {
   FOLLOWS_CHANGE_EVENT,
   FOLLOWS_KEY,
   followApiPath,
+  focusTargetAfterRemove,
   followEmptyText,
   followHref,
   followKey,
   followLabel,
   followListCaption,
+  followRowMeta,
   hasFollow,
   isFollowTopicSlug,
   KEYWORD_MAX,
@@ -38,8 +40,10 @@ import {
   runWithConcurrency,
   serializeFollows,
   type Follow,
+  type FollowItem,
 } from "./follows";
 import { TOPIC_LABELS_TR, TOPIC_SLUGS } from "@/lib/clusters/topic-query";
+import { formatTurkishTimeAgo } from "@/lib/time";
 
 const NOW = "2026-10-22T09:00:00.000Z";
 
@@ -572,11 +576,100 @@ describe("hasFollow", () => {
   });
 });
 
+describe("focusTargetAfterRemove", () => {
+  it("hands focus to the NEXT follow when there is one", () => {
+    expect(focusTargetAfterRemove(["a", "b", "c"], "b")).toBe("c");
+    expect(focusTargetAfterRemove(["a", "b", "c"], "a")).toBe("b");
+  });
+
+  it("falls back to the PREVIOUS follow when the last one is removed", () => {
+    expect(focusTargetAfterRemove(["a", "b", "c"], "c")).toBe("b");
+  });
+
+  it("is null when the removed follow was the only one", () => {
+    expect(focusTargetAfterRemove(["a"], "a")).toBeNull();
+  });
+
+  it("is null for a key that is not in the list (nothing was removed)", () => {
+    expect(focusTargetAfterRemove(["a", "b"], "zzz")).toBeNull();
+    expect(focusTargetAfterRemove([], "a")).toBeNull();
+  });
+
+  it("does not mutate its input", () => {
+    const keys = Object.freeze(["a", "b", "c"]) as readonly string[];
+    focusTargetAfterRemove(keys, "b");
+    expect(keys).toEqual(["a", "b", "c"]);
+  });
+});
+
+describe("followRowMeta", () => {
+  const NOW_MS = Date.parse("2026-10-22T12:00:00.000Z");
+  const ITEM: FollowItem = {
+    id: "aaaaaaaa-1111-4111-8111-bbbbbbbbbbbb",
+    title: "Başlık",
+    // Published 3 hours ago, but the cluster was touched 10 minutes ago: the
+    // row must age by when the STORY first appeared (ClusterCard and the
+    // "yeni" count use firstPublished too), not by the last update.
+    firstPublished: "2026-10-22T09:00:00+00:00",
+    updatedAt: "2026-10-22T11:50:00+00:00",
+    sourceCount: 4,
+    isBlindspot: false,
+    zoneLine: "İktidar 1 · Bağımsız 2 · Muhalefet 1",
+  };
+
+  it("is '{n} kaynak · {firstPublished ago} · {zoneLine}'", () => {
+    expect(followRowMeta(ITEM, NOW_MS)).toBe(
+      `${ITEM.sourceCount} kaynak · ${formatTurkishTimeAgo(ITEM.firstPublished, { now: NOW_MS })} · ${ITEM.zoneLine}`,
+    );
+    expect(followRowMeta(ITEM, NOW_MS)).toBe(
+      "4 kaynak · 3 saat önce · İktidar 1 · Bağımsız 2 · Muhalefet 1",
+    );
+  });
+
+  it("differs from the updatedAt variant when the two instants differ", () => {
+    const byUpdated = `${ITEM.sourceCount} kaynak · ${formatTurkishTimeAgo(ITEM.updatedAt, { now: NOW_MS })} · ${ITEM.zoneLine}`;
+    expect(byUpdated).toContain("10 dakika önce");
+    expect(followRowMeta(ITEM, NOW_MS)).not.toBe(byUpdated);
+    expect(followRowMeta(ITEM, NOW_MS)).not.toContain("10 dakika önce");
+  });
+
+  it("falls back to the real clock when no `now` is given", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(NOW_MS);
+      expect(followRowMeta(ITEM)).toBe(followRowMeta(ITEM, NOW_MS));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("switches to an absolute date for an old story", () => {
+    const old = { ...ITEM, firstPublished: "2026-09-01T08:00:00+00:00" };
+    expect(followRowMeta(old, NOW_MS)).toBe(
+      `4 kaynak · 1 Eylül 2026 · ${ITEM.zoneLine}`,
+    );
+  });
+
+  it("keeps the count and zone line when the date is unparseable (empty time-ago)", () => {
+    const bad = { ...ITEM, firstPublished: "not-a-date" };
+    const meta = followRowMeta(bad, NOW_MS);
+    expect(meta.startsWith("4 kaynak · ")).toBe(true);
+    expect(meta.endsWith(ITEM.zoneLine)).toBe(true);
+  });
+});
+
 describe("module purity (bundled to the client)", () => {
-  it("imports nothing from react, next or the server", () => {
+  it("imports nothing from react, next or the server -- only the pure time helpers", () => {
     const src = readFileSync(resolve(__dirname, "follows.ts"), "utf8");
     const imports = src.match(/^\s*(?:import|export)\s[^;]*?from\s+["'][^"']+["']/gm) ?? [];
-    expect(imports).toEqual([]);
+    const specifiers = imports.map((i) => /from\s+["']([^"']+)["']/.exec(i)?.[1]);
+    expect(specifiers).toEqual(["@/lib/time"]);
     expect(src).not.toMatch(/\brequire\s*\(/);
+  });
+
+  it("the one allowed dependency is itself import-free", () => {
+    const src = readFileSync(resolve(__dirname, "../time.ts"), "utf8");
+    const imports = src.match(/^\s*(?:import|export)\s[^;]*?from\s+["'][^"']+["']/gm) ?? [];
+    expect(imports).toEqual([]);
   });
 });

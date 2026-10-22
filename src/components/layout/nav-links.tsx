@@ -42,7 +42,7 @@ export function NavLinksView({
   const isAdmin = pathname?.startsWith("/admin") ?? false;
 
   return (
-    <nav className="flex items-center gap-1 text-[13px]">
+    <nav aria-label="Ana menü" className="flex items-center gap-1 text-[13px]">
       <Link
         href="/"
         aria-current={isHome ? "page" : undefined}
@@ -91,7 +91,7 @@ export function NavLinksView({
             className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
               isAdmin
                 ? active
-                : "text-muted-foreground/60 hover:text-foreground hover:bg-muted/50"
+                : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
             }`}
           >
             <Settings className="h-3.5 w-3.5" />

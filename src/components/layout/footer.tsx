@@ -29,7 +29,7 @@ async function ActiveSourceCount() {
 
   return (
     <span
-      className="text-[10px] text-muted-foreground/40 font-mono"
+      className="text-[10px] text-muted-foreground font-mono"
       title="Son 7 günde en az bir haber gönderen aktif kaynak sayısı"
     >
       son 7 günde {count} kaynak
@@ -54,26 +54,26 @@ export function Footer() {
                 Tayf
               </span>
             </div>
-            <p className="text-[11px] text-muted-foreground/60 max-w-xs leading-relaxed">
+            <p className="text-[11px] text-muted-foreground max-w-xs leading-relaxed">
               Aynı haber, farklı dünyalar. Türk haber kaynaklarından otomatik
               kümelenmiş politika haberleri ve medya yanlılığı analizi.
             </p>
           </div>
 
           {/* Navigation */}
-          <nav className="flex flex-wrap gap-x-5 gap-y-2">
+          <nav aria-label="Alt menü" className="flex flex-wrap gap-x-5 gap-y-2">
             {NAV_LINKS.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
-                className="text-[11px] text-muted-foreground/50 hover:text-foreground transition-colors"
+                className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
               >
                 {link.label}
               </Link>
             ))}
             <Link
               href="/rss.xml"
-              className="text-[11px] text-muted-foreground/50 hover:text-brand transition-colors"
+              className="text-[11px] text-muted-foreground hover:text-brand transition-colors"
             >
               RSS
             </Link>
@@ -82,7 +82,7 @@ export function Footer() {
 
         {/* Bottom rule */}
         <div className="mt-8 pt-5 border-t border-border/20 flex items-center justify-between">
-          <span className="text-[10px] text-muted-foreground/40">
+          <span className="text-[10px] text-muted-foreground">
             2026 Tayf
           </span>
           <div className="h-[1px] flex-1 mx-6 bg-gradient-to-r from-red-500/10 via-brand/15 to-emerald-500/10" />
@@ -97,7 +97,7 @@ export function Footer() {
           </div>
         )}
 
-        <p className="mt-3 text-[10px] text-muted-foreground/40 leading-relaxed">
+        <p className="mt-3 text-[10px] text-muted-foreground leading-relaxed">
           Reklam ya da izleme çerezi kullanmıyoruz. Okuyucu tarafındaki tek çerez, Çerçeve oyununun aynı başlığı
           tekrar göstermemek için 30 gün sakladığı anonim oturum çerezidir. Yer imleri yalnızca tarayıcınızda
           saklanır. Ziyaret sayıları anonim olarak ölçülür (Vercel Web Analytics).

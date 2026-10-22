@@ -82,7 +82,7 @@ function HeadlineEntry({
             {member.source.name}
           </span>
           <ExternalLink className="h-2.5 w-2.5 text-muted-foreground/50 opacity-0 transition-opacity group-hover/entry:opacity-100" />
-          <span className="ml-auto text-[10px] tabular-nums text-muted-foreground/70">
+          <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
             {formatTurkishTimeAgo(member.article.published_at)}
           </span>
         </span>
@@ -133,13 +133,13 @@ export function FramingComparison({ members }: FramingComparisonProps) {
                   {zoneMembers.length} manşet
                 </span>
               </div>
-              <p className="text-[10px] text-muted-foreground/70">
+              <p className="text-[10px] text-muted-foreground">
                 {meta.description}
               </p>
 
               {zoneMembers.length === 0 ? (
                 <div className="mt-3 rounded-lg border border-dashed border-border/50 px-3 py-6 text-center">
-                  <span className="text-[11px] italic text-muted-foreground/60">
+                  <span className="text-[11px] italic text-muted-foreground">
                     — bu tarafta sessizlik —
                   </span>
                 </div>

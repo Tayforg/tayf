@@ -91,7 +91,7 @@ export function ReadAcrossSpectrum({
         ? `Spektruma sayılan kaynaklar arasında bu tarafta haber yok — kör nokta (${zoneLabel})${nonVotingSuffix}`
         : `${zoneLabel} tarafında henüz haber yok${degradedSuffix}`;
     return (
-      <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground/60">
+      <p className="rounded-lg border border-dashed border-border/50 px-3.5 py-2 text-[12px] text-muted-foreground">
         {emptyText}
       </p>
     );
