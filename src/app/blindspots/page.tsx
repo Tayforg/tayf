@@ -147,10 +147,9 @@ export async function BlindspotsFeed() {
         </div>
       ) : (
         <>
-          {/* Derived from the bundles already loaded above and the same
-              nowMs as the aging check below: no extra query, no extra
-              clock read. */}
-          <SilenceDigestBand digest={buildSilenceDigest(result.bundles, nowMs)} />
+          {/* Derived from the bundles already loaded above (the whole page
+              is the window): no extra query, no clock read. */}
+          <SilenceDigestBand digest={buildSilenceDigest(result.bundles)} />
           <div className="space-y-4">
             {result.bundles.map((b, i) => {
               const hoursAgo =

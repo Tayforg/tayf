@@ -6,19 +6,20 @@ import {
 } from "@/lib/clusters/silence-digest";
 
 // Three-row band at the top of the /blindspots feed: per zone, how many of
-// the blindspot stories on the page that zone gave no coverage at all in the
-// last 24 hours. Server-safe on purpose (no 'use client', no hooks); the
-// digest is derived in the page from bundles it already loaded.
+// the blindspot stories on the page that zone gave no coverage at all
+// (judged on voting sources only, see silence-digest.ts). Server-safe on
+// purpose (no 'use client', no hooks); the digest is derived in the page from
+// bundles it already loaded.
 export function SilenceDigestBand({ digest }: { digest: SilenceDigest }) {
   if (digest.windowTotal === 0) return null;
 
   return (
     <section
-      aria-label="Son 24 saatte yer verilmeyen hikâyeler"
+      aria-label="Bu listedeki kör noktalarda yer verilmeyen hikâyeler"
       className="rounded-xl border border-border/60 bg-card/40 p-4 space-y-2"
     >
       <h2 className="font-serif text-sm font-semibold">
-        Son 24 saat: kim yer vermedi?
+        Bu listede kim yer vermedi?
       </h2>
       <ul className="space-y-1 text-[13px]">
         {digest.rows.map((row) => (

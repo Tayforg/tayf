@@ -25,7 +25,7 @@ const DIGEST: SilenceDigest = {
 };
 
 describe("SilenceDigestBand", () => {
-  it("renders nothing when no story fell in the window", () => {
+  it("renders nothing when the page has no counted story", () => {
     const markup = renderToStaticMarkup(
       <SilenceDigestBand digest={{ ...DIGEST, windowTotal: 0 }} />,
     );
@@ -34,14 +34,25 @@ describe("SilenceDigestBand", () => {
 
   it("renders a labelled section with exactly 3 list items and the heading", () => {
     const markup = renderToStaticMarkup(<SilenceDigestBand digest={DIGEST} />);
-    expect(markup).toContain('aria-label="Son 24 saatte yer verilmeyen hikâyeler"');
-    expect(markup).toContain("Son 24 saat: kim yer vermedi?");
+    expect(markup).toContain(
+      'aria-label="Bu listedeki kör noktalarda yer verilmeyen hikâyeler"',
+    );
+    expect(markup).toContain("Bu listede kim yer vermedi?");
     expect(markup.match(/<li[ >]/g)).toHaveLength(3);
   });
 
-  it("renders the footnote with the window total", () => {
+  it("no longer advertises a 24 hour window anywhere", () => {
     const markup = renderToStaticMarkup(<SilenceDigestBand digest={DIGEST} />);
-    expect(markup).toContain("son 24 saatte güncellenen 2 hikâye");
+    expect(markup).not.toContain("24 saat");
+    expect(markup).not.toContain("Son 24");
+  });
+
+  it("renders the footnote with the page story count and the voting-kind rule", () => {
+    const markup = renderToStaticMarkup(<SilenceDigestBand digest={DIGEST} />);
+    expect(markup).toContain("Bu sayfadaki 2 kör nokta hikâyesi sayıldı.");
+    expect(markup).toContain(
+      "toplayıcı ve niş siteler, kör nokta hesabında olduğu gibi, sayılmaz",
+    );
   });
 
   it("renders each row's sentence", () => {
