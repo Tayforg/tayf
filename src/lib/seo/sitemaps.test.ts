@@ -310,6 +310,22 @@ describe("getStaticSitemapXml", () => {
     expect(xml).toContain("<loc>https://tayf.test/konu/dunya</loc>");
     expect(xml).not.toContain("/konu/politika");
   });
+
+  it("lists /durum (Sistem durumu) right after /kaynaklar/durum, hourly at priority 0.4", async () => {
+    const xml = await getStaticSitemapXml("https://tayf.test");
+    expect(xml).toContain("<loc>https://tayf.test/durum</loc>");
+    const sourcesStatus = xml.indexOf("<loc>https://tayf.test/kaynaklar/durum</loc>");
+    const status = xml.indexOf("<loc>https://tayf.test/durum</loc>");
+    expect(sourcesStatus).toBeGreaterThan(-1);
+    expect(status).toBeGreaterThan(sourcesStatus);
+    // the very next <url> after /kaynaklar/durum is /durum
+    expect(xml.indexOf("<loc>", sourcesStatus + 1)).toBe(status);
+    const entry = xml.slice(status, xml.indexOf("</url>", status));
+    expect(entry).toContain("<changefreq>hourly</changefreq>");
+    expect(entry).toContain("<priority>0.4</priority>");
+    // listed exactly once
+    expect(xml.split("<loc>https://tayf.test/durum</loc>")).toHaveLength(2);
+  });
 });
 
 describe("getSourcesSitemapXml", () => {

@@ -56,6 +56,7 @@ const BASE_STATIC_ROUTES: ReadonlyArray<{
   { path: "/blindspots", changefreq: "hourly", priority: 0.9 },
   { path: "/sources", changefreq: "daily", priority: 0.7 },
   { path: "/kaynaklar/durum", changefreq: "hourly", priority: 0.6 },
+  { path: "/durum", changefreq: "hourly", priority: 0.4 },
   { path: "/metodoloji", changefreq: "monthly", priority: 0.5 },
   { path: "/kalite", changefreq: "daily", priority: 0.5 },
   { path: "/duzeltmeler", changefreq: "daily", priority: 0.4 },

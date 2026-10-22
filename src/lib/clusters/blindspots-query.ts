@@ -71,13 +71,13 @@ function logSuppression(
 const PREFILTER_MIN_ARTICLE_COUNT = 3;
 const CANDIDATE_LIMIT = 200;
 const DISPLAY_LIMIT = 30;
-const EMBED_BATCH_SIZE = 50;
+export const EMBED_BATCH_SIZE = 50;
 
 type EmbeddedClusterArticle = {
   articles: EmbeddedArticle | null;
 };
 
-type EmbeddedClusterRow = {
+export type EmbeddedClusterRow = {
   id: string;
   title_tr: string;
   title_tr_neutral: string | null;
@@ -287,7 +287,7 @@ async function fetchCandidateIds(profile: ReadProfile): Promise<string[]> {
 
 /** Step B: fetch the embed for one batch of ids (order/limit-free — the
  * candidate ORDER already came from Step A). */
-async function fetchEmbedBatch(
+export async function fetchEmbedBatch(
   ids: string[],
   profile: ReadProfile,
 ): Promise<EmbeddedClusterRow[]> {

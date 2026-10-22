@@ -21,7 +21,9 @@ import { NewsletterForm } from "@/components/newsletter/newsletter-form";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
+import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
 import { buildSilenceDigest } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
@@ -61,6 +63,13 @@ export default function BlindspotsPage() {
 
       <Suspense fallback={<BlindspotsSkeleton />}>
         <BlindspotsFeed />
+      </Suspense>
+
+      {/* Independent boundary AFTER the feed: "Kör noktaya yakın" is display
+          only (not blindspots), so its fetch never delays or fails the feed
+          and no skeleton is shown while it loads. */}
+      <Suspense fallback={null}>
+        <NearBlindspotsSection />
       </Suspense>
     </div>
   );
@@ -183,6 +192,16 @@ export async function BlindspotsFeed() {
       )}
     </>
   );
+}
+
+// "Kör noktaya yakın" (just below the blindspot threshold). Exported like
+// BlindspotsFeed so tests can render it directly. Deliberately NOT part of
+// BlindspotsFeed: the feed's SilenceDigestBand and DenominatorNote are built
+// from the main bundles only, and these stories are not blindspots.
+// `getNearBlindspotsSafe()` never throws; `null` hides the section.
+export async function NearBlindspotsSection() {
+  await connection();
+  return <NearBlindspotList items={await getNearBlindspotsSafe()} />;
 }
 
 interface BlindspotCardProps {

@@ -12,7 +12,9 @@ import { normalizeImageUrl } from "@/lib/images/image-url";
 import { LabelCard } from "@/components/source/label-card";
 import { ClickbaitKarneLine } from "@/components/source/clickbait-karne";
 import { SourceKarneCard } from "@/components/source/source-karne";
+import { SourceReliabilityCard } from "@/components/source/source-reliability";
 import { getSourceKarne } from "@/lib/sources/karne";
+import { getSourceReliability } from "@/lib/sources/reliability";
 import { getSourceProfile } from "@/lib/sources/source-profile-query";
 import { getSourceAgreement } from "@/lib/game/agreement";
 import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
@@ -125,7 +127,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
 
   const { source, articleCount7d, articles, zoneHistory } = profile;
 
-  // The three side lookups are independent - one round-trip, not three
+  // The four side lookups are independent - one round-trip, not four
   // sequential ones (each is capped at 4 s, so serial reads could stack).
   //   - reader agreement (U-03 follow-through): cached separately from the
   //     profile (its own "use cache" entry keyed by source id) so a busy /oyun
@@ -133,12 +135,16 @@ export default async function SourceProfilePage({ params }: PageProps) {
   //     label card's "Henüz yeterli tahmin yok".
   //   - "Kapsama karnesi" (migration 096): one cached point lookup; null (no
   //     row or outage) renders nothing.
+  //   - "Kaynak göstergeleri" (migration 111): same shape, its own table; null
+  //     renders nothing. Its blindspot row reuses the karne above.
   //   - "tık tuzağı karnesi" (migration 078): same gate as /sources.
-  const [readerAgreement, sourceKarne, karne] = await Promise.all([
-    getSourceAgreement(source.id),
-    getSourceKarne(source.id),
-    isClickbaitPublic() ? getClickbaitKarne() : Promise.resolve(null),
-  ]);
+  const [readerAgreement, sourceKarne, sourceReliability, karne] =
+    await Promise.all([
+      getSourceAgreement(source.id),
+      getSourceKarne(source.id),
+      getSourceReliability(source.id),
+      isClickbaitPublic() ? getClickbaitKarne() : Promise.resolve(null),
+    ]);
 
   // S-17: BreadcrumbList JSON-LD (Anasayfa → Kaynaklar → this source).
   const breadcrumbs = buildBreadcrumbs([
@@ -224,6 +230,12 @@ export default async function SourceProfilePage({ params }: PageProps) {
       />
 
       <SourceKarneCard karne={sourceKarne} slug={source.slug} />
+
+      <SourceReliabilityCard
+        reliability={sourceReliability}
+        karne={sourceKarne}
+        slug={source.slug}
+      />
 
       {karne ? (
         <ClickbaitKarneLine karne={karne} slug={source.slug} check={CLICKBAIT_PRECISION_CHECK} />

@@ -76,6 +76,17 @@ const nextConfig: NextConfig = {
       revalidate: 300,
       expire: 3600,
     },
+    // Public /durum snapshot. Every age on that page is measured against the
+    // snapshot's own `generated_at`, so a stale entry would read "all fine"
+    // long after the pipeline stalled. The built-in `minutes` profile keeps an
+    // entry for an hour and serves it stale-while-revalidate; here it is
+    // refreshed after 1 minute and can never be served older than 3 minutes
+    // (expire forces a synchronous regeneration).
+    'status': {
+      stale: 30,
+      revalidate: 60,
+      expire: 180,
+    },
   },
   images: {
     remotePatterns: [

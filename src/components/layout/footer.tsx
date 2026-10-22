@@ -15,6 +15,7 @@ const NAV_LINKS = [
   { href: "/konu", label: "Konular" },
   { href: "/oyun", label: "Tarafı Tahmin Et" },
   { href: "/metodoloji", label: "Metodoloji" },
+  { href: "/durum", label: "Sistem durumu" },
   { href: "/metodoloji#duzeltme", label: "İletişim" },
 ] as const;
 

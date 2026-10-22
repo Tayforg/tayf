@@ -29,6 +29,17 @@ import {
 } from "@/lib/bias/balance";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
+import {
+  NEAR_BLINDSPOT_DISPLAY_LIMIT,
+  NEAR_BLINDSPOT_LOOKBACK_DAYS,
+  NEAR_BLINDSPOT_MIN_SHARE,
+} from "@/lib/clusters/near-blindspot-rule";
+import {
+  KARNE_MIN_CLUSTERS,
+  KARNE_MIN_MULTI_FOR_ZONES,
+  KARNE_STALE_AFTER_HOURS,
+  KARNE_WINDOW_DAYS,
+} from "@/lib/sources/karne";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import {
   HEADLINE_MIN_ARTICLE_COUNT,
@@ -394,5 +405,198 @@ describe("/metodoloji page", () => {
     it("keeps the brand link hover on the underline, not on a faded colour", () => {
       expect(pageSource).toContain("hover:decoration-solid");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// near-blindspots + source-reliability additions (2026-10-22)
+// ---------------------------------------------------------------------------
+
+type Node = { type?: unknown; props?: Record<string, unknown> };
+
+/** First element (depth-first) whose props match `pred`. */
+function findElement(node: unknown, pred: (el: Node) => boolean): Node | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findElement(child, pred);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as Node;
+    if (el.props && pred(el)) return el;
+    if (el.props?.children !== undefined) return findElement(el.props.children, pred);
+  }
+  return null;
+}
+
+describe("/metodoloji page: Kör noktaya yakın", () => {
+  const nearPct = Math.round(NEAR_BLINDSPOT_MIN_SHARE * 100);
+  const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
+
+  it("states the band, the delay, the lookback and the cap from the shared constants", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain(
+      `Eşiğe ulaşmayan ama tek bir bölgenin ağırlıkta olduğu haberler Kör Noktalar sayfasında ayrı bir “Kör noktaya yakın” bölümünde listelenir: en az ${BLINDSPOT.minSources} oy veren kaynak ve en büyük bölgenin payı %${nearPct} ile %${dominantSharePct} arasında (%${dominantSharePct} hariç). Aynı ${BLINDSPOT.feedDelayHours} saatlik bekleme, kalite filtreleri ve besleme sağlığı kuralı uygulanır; son ${NEAR_BLINDSPOT_LOOKBACK_DAYS} günden en fazla ${NEAR_BLINDSPOT_DISPLAY_LIMIT} haber gösterilir. Bu haberler kör nokta sayılmaz; kör nokta sayımlarına ve “Bu listede kim yer vermedi?” özetine katılmaz.`,
+    );
+    // The two numbers the reader compares, from constants (not bare digits).
+    expect(nearPct).toBe(70);
+    expect(dominantSharePct).toBe(80);
+  });
+
+  it("anchors the subsection inside the #kor-nokta section, as an h3 deep link target", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = await MethodologyPage();
+
+    const section = findElement(
+      tree,
+      (el) => el.type === "section" && el.props?.["aria-labelledby"] === "kor-nokta",
+    );
+    expect(section).not.toBeNull();
+    expect(collectIds(section)).toContain("kor-noktaya-yakin");
+
+    const heading = findElement(
+      tree,
+      (el) => el.type === "h3" && el.props?.id === "kor-noktaya-yakin",
+    );
+    expect(heading).not.toBeNull();
+    expect(collectText(heading).join("")).toBe("Kör noktaya yakın");
+    expect(String(heading?.props?.className)).toContain("scroll-mt-24");
+  });
+
+  it("adds its changelog entry as the newest line, dated 2026-10-22", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain(
+      "Kör noktaya yakın: kör nokta eşiğinin hemen altında kalan, tek bölgenin ağırlıkta olduğu haberler Kör Noktalar sayfasında ayrı bir bölümde listeleniyor.",
+    );
+  });
+});
+
+describe("/metodoloji page: Kaynak göstergeleri", () => {
+  const W = KARNE_WINDOW_DAYS;
+
+  it("is in the TOC right after Güvenilirlik and resolves to a heading id, in the same order", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = await MethodologyPage();
+    const anchors = collectHrefs(tree).filter((h) => h.startsWith("#"));
+    const ids = collectIds(tree);
+
+    expect(anchors).toContain("#kaynak-gostergeleri");
+    expect(ids).toContain("kaynak-gostergeleri");
+    // TOC pills are the first anchors, in SECTIONS order.
+    expect(anchors.indexOf("#kaynak-gostergeleri")).toBe(
+      anchors.indexOf("#guvenilirlik") + 1,
+    );
+    // The section itself sits between Güvenilirlik and Başlıklar.
+    expect(ids.indexOf("kaynak-gostergeleri")).toBe(ids.indexOf("guvenilirlik") + 1);
+    expect(ids.indexOf("basliklar")).toBe(ids.indexOf("kaynak-gostergeleri") + 1);
+    expect(collectText(tree)).toContain("Kaynak göstergeleri");
+  });
+
+  it("titles the section and shows the window from KARNE_WINDOW_DAYS", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const strings = collectStringProps(await MethodologyPage());
+
+    expect(strings).toContain("Kaynak göstergeleri");
+    expect(strings).toContain(`Son ${W} gün`);
+  });
+
+  it("says the indicators are not a quality grade and never reorder anything", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain(
+      "Kaynak sayfalarındaki göstergeler Tayf’ın gördüğü yayın akışından hesaplanan sayılardır; bir doğruluk ya da kalite notu değildir ve hiçbir sıralamayı değiştirmez. Örnek sayısı yetersizse gösterge gizlenir.",
+    );
+    expect(text).toContain("kalite notu değildir");
+  });
+
+  it("describes the four indicators with the sample floors from the karne constants", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    for (const term of [
+      "Yayın sıklığı",
+      "Başka kaynaklarla aynı başlık ve özet",
+      "Kör nokta kümelerindeki payı",
+      "Bölge çeşitliliği",
+    ]) {
+      expect(text).toContain(term);
+    }
+
+    expect(text).toContain(
+      `Son ${W} günde yayımlanan haber sayısının ${W}’a bölümü; etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati).`,
+    );
+    expect(text).toContain(
+      `(kaynak başına bir haber alındığında en az 3 haber ve farklı içerik parmak izi oranı en fazla %${Math.round(WIRE_UNIQUE_HASH_RATIO * 100)})`,
+    );
+    expect(text).toContain(
+      "başlığı ve özeti başka bir kaynakla aynı olanların payı. Karşılaştırma başlık ve özetin parmak iziyle yapılır; haber gövdesi karşılaştırılmaz.",
+    );
+    expect(text).toContain(
+      `Yön belirtmez: başlık ve özeti ilk yayımlayan da aynen kullanan da sayılır; ajans haberi kullanmak olağan bir yayıncılık pratiğidir. En az ${KARNE_MIN_CLUSTERS} haber kümesi gerekir.`,
+    );
+    // The fingerprint covers title + RSS summary only, so the page must never
+    // claim the article text itself is identical.
+    expect(text).not.toMatch(/birebir aynı metin|aynı metin payı/);
+    expect(text).toContain(
+      `Kaynağın yer aldığı kümelerden kör nokta olarak işaretlenenlerin payı (yukarıdaki kural; Kapsama karnesiyle aynı sayım). En az ${KARNE_MIN_CLUSTERS} haber kümesi gerekir.`,
+    );
+    expect(text).toContain(
+      `En az ${BALANCE_MIN_SOURCES} oy veren kaynağı olan kümelerin Denge puanı ortalaması. En az ${KARNE_MIN_MULTI_FOR_ZONES} böyle küme gerekir.`,
+    );
+  });
+
+  it("links the Bölge çeşitliliği definition to the Denge puanı section", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = await MethodologyPage();
+
+    const dd = findElement(tree, (el) =>
+      collectText(el.props?.children).join("").startsWith(`En az ${BALANCE_MIN_SOURCES} oy veren kaynağı`),
+    );
+    expect(dd).not.toBeNull();
+    expect(collectHrefs(dd)).toEqual(["#denge-puani"]);
+  });
+
+  it("states the recompute cadence and the staleness window from KARNE_STALE_AFTER_HOURS", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain(
+      `Göstergeler kaynak kaynak, günde bir kez yeniden hesaplanır; ${KARNE_STALE_AFTER_HOURS} saatten eski bir hesaplama kaynak sayfasında belirtilir.`,
+    );
+  });
+
+  it("adds its changelog entry, dated 2026-10-22", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain(
+      "Kaynak göstergeleri: kaynak sayfalarında yayın sıklığı, başlık ve özeti başka kaynaklarla aynı olan haberlerin payı, kör nokta payı ve bölge çeşitliliği.",
+    );
+  });
+});
+
+describe("/metodoloji page: changelog order", () => {
+  it("lists the two new entries first (both 2026-10-22), then the Denge puanı entry; the footer date is the newest", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    const tail = text.slice(text.indexOf("Son güncelleme:"));
+    const near = tail.indexOf("Kör noktaya yakın: kör nokta eşiğinin hemen altında");
+    const sources = tail.indexOf("Kaynak göstergeleri: kaynak sayfalarında");
+    const denge = tail.indexOf("Denge puanı eklendi:");
+    expect(near).toBeGreaterThan(0);
+    expect(sources).toBeGreaterThan(near);
+    expect(denge).toBeGreaterThan(sources);
+
+    const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
+    expect(dates.slice(0, 4)).toEqual(["2026-10-22", "2026-10-22", "2026-10-22", "2026-10-22"]);
+    expect([...dates].sort().at(-1)).toBe(dates[0]);
   });
 });
