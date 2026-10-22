@@ -279,6 +279,29 @@ describe("GET /api/cron/digest", () => {
     expect(getBlindspots).toHaveBeenCalledWith({ profile: "batch" });
   });
 
+  it("looks up the rights-gated summary members through the uncapped batch profile too", async () => {
+    process.env.CRON_SECRET = "shhh";
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "never@example.com", unsubscribe_token: "t1", last_sent_at: null },
+    ];
+    const { sendBatch } = await import("@/lib/email/resend");
+    (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+      list.map(() => ({ ok: true, id: "resend-id" })),
+    );
+    const { getRssSummaryMembers } = await import(
+      "@/lib/clusters/rss-summary-attribution"
+    );
+    (getRssSummaryMembers as unknown as Mock).mockClear();
+
+    const mod = await importRoute();
+    const res = await mod.GET(req("shhh"));
+    expect(res.status).toBe(200);
+    expect(getRssSummaryMembers).toHaveBeenCalledTimes(1);
+    expect(getRssSummaryMembers).toHaveBeenCalledWith(expect.any(Array), {
+      profile: "batch",
+    });
+  });
+
   it("skips sending entirely (0/0) when no subscriber is due", async () => {
     process.env.CRON_SECRET = "shhh";
     supabaseFake.state.subscribers = [

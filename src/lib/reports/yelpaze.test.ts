@@ -20,8 +20,12 @@ vi.mock("next/cache", () => ({
 }));
 
 const hoisted = vi.hoisted(() => ({ createServerClient: vi.fn() }));
+// cluster-detail-query.ts and feed-health.ts read through the capped
+// createReaderClient (4 s); this suite does not care which factory is used,
+// so both resolve to the same fixture client.
 vi.mock("@/lib/supabase/server", () => ({
   createServerClient: hoisted.createServerClient,
+  createReaderClient: hoisted.createServerClient,
 }));
 
 import { createSupabaseFake, type SupabaseFakeOptions } from "../../../tests/_helpers/supabase-fake";

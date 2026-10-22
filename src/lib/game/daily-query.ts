@@ -29,8 +29,11 @@
 
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached, type CacheAttempt } from "@/lib/cache-resilience";
 import { sourceKindOf } from "@/lib/sources/kind";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
+
 import type { BiasCategory, SourceKind } from "@/types";
 import {
   DAILY_POLITICS_MIN_PROB,
@@ -82,8 +85,11 @@ interface TitleVersionRow {
  * non-null `article_id`. Returns the de-duplicated set of article ids —
  * order doesn't matter here, the caller re-sorts by `dailyHash`.
  */
-async function fetchEligibleArticleIds(startIso: string, endIso: string): Promise<string[]> {
-  const supabase = createServerClient();
+async function fetchEligibleArticleIds(
+  supabase: SupabaseClient,
+  startIso: string,
+  endIso: string,
+): Promise<string[]> {
   const ids = new Set<string>();
 
   for (let page = 0; page < MAX_PREDICTION_PAGES; page++) {
@@ -124,10 +130,9 @@ async function fetchEligibleArticleIds(startIso: string, endIso: string): Promis
  * dropped, and nothing from that table is ever surfaced).
  */
 async function fetchArticleChunk(
+  supabase: SupabaseClient,
   ids: readonly string[],
 ): Promise<{ rows: Map<string, ArticleRow>; edited: Set<string> }> {
-  const supabase = createServerClient();
-
   const [articlesResult, versionsResult] = await Promise.all([
     supabase
       .from("articles")
@@ -192,11 +197,16 @@ function toCandidate(row: ArticleRow): DailyCandidate | null {
  * Builds the puzzle for `dateKey`, throwing on any Supabase error or on an
  * incomplete set (fewer than `DAILY_GAME_SIZE` eligible candidates found
  * after exhausting the id list / chunk budget) — an empty/partial result
- * must never be cached.
+ * must never be cached as a puzzle (`fetchDailyPuzzleCached` below turns the
+ * throw into a short-lived `{ ok: false }`).
+ *
+ * ONE reader client (4 s cap per request) serves every page and chunk of the
+ * build, instead of a fresh client per helper call.
  */
 async function buildDailyPuzzle(dateKey: string): Promise<DailyPuzzle> {
+  const supabase = createReaderClient();
   const { startIso, endIso } = puzzleWindow(dateKey);
-  const ids = await fetchEligibleArticleIds(startIso, endIso);
+  const ids = await fetchEligibleArticleIds(supabase, startIso, endIso);
 
   const sortedIds = [...ids].sort(
     (a, b) => dailyHash(dateKey, a) - dailyHash(dateKey, b),
@@ -207,7 +217,7 @@ async function buildDailyPuzzle(dateKey: string): Promise<DailyPuzzle> {
 
   for (let start = 0; start < maxIds; start += ARTICLE_CHUNK_SIZE) {
     const chunk = sortedIds.slice(start, start + ARTICLE_CHUNK_SIZE);
-    const { rows, edited } = await fetchArticleChunk(chunk);
+    const { rows, edited } = await fetchArticleChunk(supabase, chunk);
 
     for (const id of chunk) {
       if (edited.has(id)) continue; // stale/edited headline — exclusion only
@@ -236,29 +246,41 @@ async function buildDailyPuzzle(dateKey: string): Promise<DailyPuzzle> {
 /**
  * Cached entry point. Keyed ONLY by `dateKey` (the cache key derives from
  * the function's arguments) — no clock is read anywhere in this call
- * graph, so the result is safe to cache for days at a time. Throws on
- * error/incompleteness so `"use cache"` never memoizes an empty puzzle;
- * `getDailyPuzzle` below is the fail-open wrapper every caller should use.
+ * graph, so a success is safe to cache for days at a time.
+ *
+ * Never throws (`attemptCached`): a throw across the `"use cache"` boundary
+ * fails `next build`'s prerender (src/lib/cache-resilience.ts). Exactly ONE
+ * `cacheLife` per invocation, chosen after the attempt: an error or an
+ * incomplete set (a Jev pause, a cold-database AbortError) is memoised for
+ * `minutes` only and heals on its own, instead of parking a failure for days.
+ * Renamed from `fetchDailyPuzzle` because the return shape changed (a stale
+ * pre-deploy entry must never be served with the old shape).
  */
-export async function fetchDailyPuzzle(dateKey: string): Promise<DailyPuzzle> {
+export async function fetchDailyPuzzleCached(
+  dateKey: string,
+): Promise<CacheAttempt<DailyPuzzle>> {
   "use cache";
-  cacheLife("days");
   cacheTag("daily-game");
-  return buildDailyPuzzle(dateKey);
+  const r = await attemptCached("gunun-tayfi", () => buildDailyPuzzle(dateKey));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("days");
+  else cacheLife("minutes");
+  return r;
 }
 
 /**
- * Uncached fail-open wrapper: swallows any error from `fetchDailyPuzzle`
- * (a Jev pause, a Supabase outage, an incomplete day) and returns `null`
- * instead, so a bad day degrades to the empty-state copy and is retried on
- * the very next request rather than being memoized as a permanent outage.
+ * Uncached fail-open wrapper: a failed attempt (a Jev pause, a Supabase
+ * outage or timeout, an incomplete day) becomes `null`, so a bad day degrades
+ * to the empty-state copy and is retried once the short `minutes` entry
+ * expires.
+ *
+ * Deliberately NO live retry (unlike politics-query / blindspots-query): a
+ * build is up to 14 sequential requests, far too heavy to repeat on every
+ * request against a cold database, and the failure heals within ~60 s anyway.
  */
 export async function getDailyPuzzle(dateKey: string): Promise<DailyPuzzle | null> {
-  try {
-    return await fetchDailyPuzzle(dateKey);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[gunun-tayfi] puzzle unavailable for ${dateKey}: ${message}`);
-    return null;
-  }
+  const r = await fetchDailyPuzzleCached(dateKey);
+  if (r.ok) return r.data;
+  console.error(`[gunun-tayfi] puzzle unavailable for ${dateKey}: ${r.error}`);
+  return null;
 }

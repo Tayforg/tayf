@@ -9,7 +9,7 @@ import {
 } from "@/lib/clusters/feed-health";
 import { applyRecallVeto } from "@/lib/clusters/recall-veto";
 import { dedupeByTitle } from "@/lib/weekly/dedupe-titles";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
 // Data layer for /hafta (P-07, "Medya Hava Durumu") — the trailing-7-day
@@ -231,7 +231,7 @@ export function summariseWeek(
  */
 async function fetchWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
   try {
-    const supabase = createServerClient();
+    const supabase = createReaderClient();
     // One clock read: two `Date.now()` calls could straddle a tick and
     // leave the window a millisecond wider than WEEK_MS.
     const nowMs = Date.now();
@@ -270,12 +270,18 @@ async function fetchWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
 // whole `cluster-feed` window. `getWeeklyClusters` below retries live once
 // on a `null` before falling back, so a transient Supabase blip is not
 // pinned for the rest of the window.
+//
+// Cache lifetime follows the outcome (exactly one `cacheLife` call, after the
+// fetch; `cacheTag` first): a read keeps the `cluster-feed` window, a failed
+// read (null, e.g. a 4 s reader-cap abort) is memoised for `minutes` only.
 async function getWeeklyClustersCached() {
   "use cache";
-  cacheLife("cluster-feed");
   cacheTag("clusters-politics");
 
   const data = await fetchWeeklyClusters();
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (data === null) cacheLife("minutes");
+  else cacheLife("cluster-feed");
   return data === null
     ? ({ ok: false, error: "weekly clusters unavailable" } as const)
     : ({ ok: true, data } as const);
@@ -353,7 +359,7 @@ async function fetchWeeklyLabelChanges(): Promise<
   WeeklyLabelChange[] | null
 > {
   try {
-    const supabase = createServerClient();
+    const supabase = createReaderClient();
     // One clock read, same as getWeeklyClusters: two `Date.now()` calls
     // could straddle a tick and widen the window past WEEK_MS.
     const nowMs = Date.now();
@@ -387,12 +393,16 @@ async function fetchWeeklyLabelChanges(): Promise<
   }
 }
 
+// Same outcome-driven lifetime as getWeeklyClustersCached: `source-directory`
+// on a read, `minutes` on a failed read.
 async function getWeeklyLabelChangesCached() {
   "use cache";
-  cacheLife("source-directory");
   cacheTag("sources");
 
   const data = await fetchWeeklyLabelChanges();
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (data === null) cacheLife("minutes");
+  else cacheLife("source-directory");
   return data === null
     ? ({ ok: false, error: "weekly label changes unavailable" } as const)
     : ({ ok: true, data } as const);

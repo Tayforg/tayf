@@ -26,7 +26,7 @@ import {
   summarizeSurprises,
 } from "@/lib/bias/cross-spectrum";
 import {
-  getClusterDetail,
+  getClusterDetailOrThrow,
   imageEligibleMembers,
 } from "@/lib/clusters/cluster-detail-query";
 import {
@@ -83,13 +83,28 @@ interface PageProps {
 
 // Dynamic SEO metadata. Per Next.js 16, dynamic-route metadata must be
 // produced by an exported async `generateMetadata` (the static `metadata`
-// object can't access `params`). The fetch goes through the same cached
-// `getClusterDetail` the page uses, so it's effectively free on warm hits.
+// object can't access `params`). The fetch goes through the same
+// `getClusterDetailOrThrow` the page uses (React `cache` shares one result
+// per request), so it's effectively free on warm hits.
+//
+// A timeout is NOT a 404: `getClusterDetailOrThrow` rejects on a sustained
+// read failure and resolves null only for a genuinely missing cluster. The
+// catch below answers a failure with a noindex "unavailable" shell instead
+// of the "Sayfa bulunamadı" soft-404 shell.
 export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
   const { id } = await params;
-  const detail = await getClusterDetail(id);
+  let detail: Awaited<ReturnType<typeof getClusterDetailOrThrow>>;
+  try {
+    detail = await getClusterDetailOrThrow(id);
+  } catch {
+    return {
+      title: "Haber şu anda yüklenemiyor",
+      robots: { index: false, follow: true },
+      alternates: { canonical: null },
+    };
+  }
 
   if (!detail) {
     // A4: a missing cluster (bad id, or genuinely deleted) still streams a
@@ -176,7 +191,9 @@ export async function generateMetadata({
 export default async function ClusterDetailPage({ params }: PageProps) {
   const { id } = await params;
 
-  const detail = await getClusterDetail(id);
+  // Null = genuinely missing -> notFound(). A read failure REJECTS and
+  // propagates to ./error.tsx (noindex) rather than masquerading as a 404.
+  const detail = await getClusterDetailOrThrow(id);
   if (!detail) notFound();
   // Streamed fallback for merged clusters when the middleware gate was cold or
   // the merge is older than its 1000-row window (migration 099).

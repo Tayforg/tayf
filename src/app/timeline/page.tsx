@@ -90,18 +90,31 @@ function bucketByHour(rows: ClusterRow[]): HourBucket[] {
 }
 
 export default async function TimelinePage() {
+  // null = the read failed (timeout / outage), [] = it read fine and nothing
+  // was minted. The two get different copy: a failure must never read as
+  // "0 clusters". No noindex here on purpose: the route is static and the
+  // failure is cached for "minutes", the same rule as /trends -- a noindex
+  // baked into a static shell could outlive the outage in crawlers.
   const rows = await getRecentClusters();
-  const buckets = bucketByHour(rows);
+  const buckets = rows === null ? [] : bucketByHour(rows);
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
       <PageHero
         kicker="Son 24 saat"
         title="Zaman çizelgesi"
-        subtitle={`Son 24 saatte oluşturulan ${rows.length} haber kümesi, saat saat sıralandı.`}
+        subtitle={
+          rows === null
+            ? "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı."
+            : `Son 24 saatte oluşturulan ${rows.length} haber kümesi, saat saat sıralandı.`
+        }
       />
 
-      {buckets.length === 0 ? (
+      {rows === null ? (
+        <p className="text-sm text-muted-foreground">
+          Zaman çizelgesi şu anda yüklenemiyor. Birkaç dakika içinde tekrar deneyin.
+        </p>
+      ) : buckets.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           Son 24 saatte yeni küme oluşturulmadı.
         </p>

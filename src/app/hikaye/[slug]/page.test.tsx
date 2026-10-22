@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
-const getPublishedThreadBySlug = vi.fn();
+// The page and generateMetadata read through the THROWING loader (a Supabase
+// timeout must not look like a missing thread); the never-throw
+// getPublishedThreadBySlug is no longer used here.
+const loadPublishedThreadBySlug = vi.fn();
 vi.mock("@/lib/story-threads/public-query", () => ({
-  getPublishedThreadBySlug: (...a: unknown[]) => getPublishedThreadBySlug(...a),
+  loadPublishedThreadBySlug: (...a: unknown[]) => loadPublishedThreadBySlug(...a),
 }));
 const notFound = vi.fn(() => {
   throw new Error("NEXT_NOT_FOUND");
@@ -25,19 +28,19 @@ const thread = {
 };
 
 beforeEach(() => {
-  getPublishedThreadBySlug.mockReset();
+  loadPublishedThreadBySlug.mockReset();
   notFound.mockClear();
 });
 
 describe("/hikaye/[slug]", () => {
   it("calls notFound for a missing thread", async () => {
-    getPublishedThreadBySlug.mockResolvedValue(null);
+    loadPublishedThreadBySlug.mockResolvedValue(null);
     await expect(StoryThreadPage({ params: Promise.resolve({ slug: "yok-boyle" }) })).rejects.toThrow("NEXT_NOT_FOUND");
     expect(notFound).toHaveBeenCalled();
   });
 
   it("renders the title, summary line, days and cluster links", async () => {
-    getPublishedThreadBySlug.mockResolvedValue(thread);
+    loadPublishedThreadBySlug.mockResolvedValue(thread);
     const html = renderToStaticMarkup(await StoryThreadPage({ params: Promise.resolve({ slug: thread.slug }) }));
     expect(html).toContain("Gelişen hikaye");
     expect(html).toContain("<h1");
@@ -53,16 +56,53 @@ describe("/hikaye/[slug]", () => {
   });
 
   it("metadata: not found is noindex with no canonical", async () => {
-    getPublishedThreadBySlug.mockResolvedValue(null);
+    loadPublishedThreadBySlug.mockResolvedValue(null);
     const m = await generateMetadata({ params: Promise.resolve({ slug: "x-y-z" }) });
     expect(m).toEqual({ title: "Sayfa bulunamadı", robots: { index: false, follow: true }, alternates: { canonical: null } });
   });
 
   it("metadata: found has canonical and description", async () => {
-    getPublishedThreadBySlug.mockResolvedValue(thread);
+    loadPublishedThreadBySlug.mockResolvedValue(thread);
     const m = await generateMetadata({ params: Promise.resolve({ slug: thread.slug }) });
     expect(m.title).toBe("Sarpyener fon soruşturması");
     expect(m.alternates).toEqual({ canonical: "/hikaye/sarpyener-fon-a1b2c3" });
     expect(m.description).toBe("Sarpyener fon soruşturması: 3 haber kümesi, 2 gün. Gün gün kaynak dağılımı.");
   });
 });
+
+describe("/hikaye/[slug] — timeout is not a 404", () => {
+  const TIMEOUT = new Error(
+    "[story-threads] thread fetch error: AbortError: Supabase request exceeded 4000 ms",
+  );
+
+  it("lets a read failure propagate to the error boundary instead of calling notFound()", async () => {
+    loadPublishedThreadBySlug.mockRejectedValue(TIMEOUT);
+
+    await expect(
+      StoryThreadPage({ params: Promise.resolve({ slug: thread.slug }) }),
+    ).rejects.toThrow("AbortError");
+    expect(notFound).not.toHaveBeenCalled();
+  });
+
+  it("metadata: a read failure is a noindex, canonical-less 'unavailable' shell, not 'not found'", async () => {
+    loadPublishedThreadBySlug.mockRejectedValue(TIMEOUT);
+
+    const m = await generateMetadata({ params: Promise.resolve({ slug: thread.slug }) });
+
+    expect(m).toEqual({
+      title: "Hikaye şu anda yüklenemiyor",
+      robots: { index: false, follow: true },
+      alternates: { canonical: null },
+    });
+  });
+
+  it("a genuinely missing thread (null) still 404s", async () => {
+    loadPublishedThreadBySlug.mockResolvedValue(null);
+
+    await expect(
+      StoryThreadPage({ params: Promise.resolve({ slug: "yok-boyle" }) }),
+    ).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(notFound).toHaveBeenCalledTimes(1);
+  });
+});
+

@@ -148,8 +148,21 @@ const supabaseState = vi.hoisted(() => ({
   },
 }));
 
+// The fetcher must use the capped createReaderClient (4 s fail-fast).
+// createServerClient throws so a regression to the plain client fails every
+// data-layer test, not just the explicit assertion below.
+const clientFactories = vi.hoisted(() => ({
+  createReaderClient: vi.fn(),
+  createServerClient: vi.fn(),
+}));
+
 vi.mock("@/lib/supabase/server", () => ({
-  createServerClient: () => ({
+  createReaderClient: clientFactories.createReaderClient,
+  createServerClient: clientFactories.createServerClient,
+}));
+
+function makeFakeClient() {
+  return {
     from: () => {
       const builder: Record<string, unknown> = {};
       const chain = (fn?: (...args: unknown[]) => void) =>
@@ -169,19 +182,29 @@ vi.mock("@/lib/supabase/server", () => ({
         resolve({ data: supabaseState.rows, error: supabaseState.error });
       return builder;
     },
-  }),
-}));
+  };
+}
 
 vi.mock("next/cache", () => ({
-  cacheLife: () => {},
-  cacheTag: () => {},
+  cacheLife: vi.fn(),
+  cacheTag: vi.fn(),
 }));
+
+import { cacheLife, cacheTag } from "next/cache";
 
 beforeEach(() => {
   supabaseState.rows = [];
   supabaseState.error = null;
   supabaseState.calls.gte = [];
   supabaseState.calls.lt = [];
+  clientFactories.createReaderClient.mockReset();
+  clientFactories.createReaderClient.mockImplementation(() => makeFakeClient());
+  clientFactories.createServerClient.mockReset();
+  clientFactories.createServerClient.mockImplementation(() => {
+    throw new Error("week-archive must use the capped createReaderClient()");
+  });
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
 });
 
 describe("getWeekArchiveClusters", () => {
@@ -220,3 +243,64 @@ describe("getWeekArchiveClusters", () => {
     expect(rows).toBeNull();
   });
 });
+
+describe("getWeekArchiveClusters read profile + cache lifetime", () => {
+  const TIMEOUT_MESSAGE = "AbortError: Supabase request exceeded 4000 ms";
+
+  it("builds its data client with the capped createReaderClient, never the plain one", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    await getWeekArchiveClusters("2026-W40");
+    expect(clientFactories.createReaderClient).toHaveBeenCalled();
+    expect(clientFactories.createServerClient).not.toHaveBeenCalled();
+  });
+
+  it("rows: cached for hours, exactly one cacheLife, tagged before the fetch", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    supabaseState.rows = [{ id: "c1" }];
+
+    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual([{ id: "c1" }]);
+
+    expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("an empty week is a successful answer: [] cached for hours", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    supabaseState.rows = [];
+
+    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual([]);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+  });
+
+  it("a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.error = { message: TIMEOUT_MESSAGE };
+
+    try {
+      await expect(getWeekArchiveClusters("2026-W40")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("hours");
+  });
+
+  it("an invalid key resolves null with exactly one cacheLife('hours') and no query", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+
+    await expect(getWeekArchiveClusters("nope")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+    expect(clientFactories.createReaderClient).not.toHaveBeenCalled();
+  });
+});
+

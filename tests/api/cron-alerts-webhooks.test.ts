@@ -35,6 +35,11 @@ const fx = vi.hoisted(() => ({
   webhookQuery: null as import("../_helpers/supabase-fake").BuilderState | null,
 }));
 
+// getZoneFeedHealth is a vi.fn so the cron's read profile can be asserted.
+const healthMock = vi.hoisted(() =>
+  vi.fn(async (_opts?: unknown): Promise<unknown> => null),
+);
+
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
   return helper.createSupabaseFake({
@@ -84,7 +89,7 @@ vi.mock("@/lib/alerts/alert-query", () => ({
 
 vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/clusters/feed-health")>();
-  return { ...actual, getZoneFeedHealth: async () => fx.health };
+  return { ...actual, getZoneFeedHealth: healthMock };
 });
 
 vi.mock("@/lib/alerts/webhook-deliver", async (importOriginal) => {
@@ -181,6 +186,8 @@ beforeEach(() => {
   fx.items = [];
   fx.health = HEALTHY;
   fx.getAlertItemsCalls = [];
+  healthMock.mockReset();
+  healthMock.mockImplementation(async () => fx.health);
   fx.postResults = [];
   fx.postCalls = [];
   fx.webhookQuery = null;
@@ -256,6 +263,12 @@ describe("GET /api/cron/alerts-webhooks", () => {
     expect(body).toEqual({ skipped: "feed health unknown" });
     expect(fx.getAlertItemsCalls).toHaveLength(0);
     expect(supabaseFake.calls.rpc).toHaveLength(0);
+  });
+
+  it("reads feed health through the uncapped batch profile (the 4 s reader cap must not skip a tick)", async () => {
+    await run();
+    expect(healthMock).toHaveBeenCalledTimes(1);
+    expect(healthMock).toHaveBeenCalledWith({ profile: "batch" });
   });
 
   it("queries alerts for the trailing 24h, limit 100, with the health it read", async () => {

@@ -1,19 +1,18 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound } from "next/navigation";
-import { cacheLife, cacheTag } from "next/cache";
+import { notFound, unstable_rethrow } from "next/navigation";
 import { ArrowLeft, ExternalLink } from "lucide-react";
 
 import { BiasBadge } from "@/components/story/bias-badge";
 import { BIAS_LABELS } from "@/lib/bias/config";
 import { firstPartyLogoUrl } from "@/lib/images/image-url";
 import { formatTurkishTimeAgo } from "@/lib/time";
-import { createServerClient } from "@/lib/supabase/server";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
-import { LabelCard, type ZoneHistoryEntry } from "@/components/source/label-card";
+import { LabelCard } from "@/components/source/label-card";
 import { ClickbaitKarneLine } from "@/components/source/clickbait-karne";
 import { SourceKarneCard } from "@/components/source/source-karne";
 import { getSourceKarne } from "@/lib/sources/karne";
+import { getSourceProfile } from "@/lib/sources/source-profile-query";
 import { getSourceAgreement } from "@/lib/game/agreement";
 import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
 import {
@@ -21,7 +20,6 @@ import {
   getClickbaitKarne,
   isClickbaitPublic,
 } from "@/lib/sources/clickbait";
-import type { BiasCategory, Source } from "@/types";
 
 // /source/[slug] — single-source profile page.
 //
@@ -34,151 +32,43 @@ import type { BiasCategory, Source } from "@/types";
 //   - dynamic SEO must come from an exported `generateMetadata` (not the
 //     static `metadata` object — it can't see params)
 //
-// Data layer is wrapped in `unstable_cache` so warm hits skip the round-trip
-// to Supabase. Cache TTL matches the route segment `revalidate` so the SSR
-// shell and the data evict together.
+// The data layer lives in src/lib/sources/source-profile-query.ts: a cached,
+// never-throwing read under the 4 s reader cap. `getSourceProfile` returns
+// null ONLY for "no such source"; a sustained read failure throws, so a cold
+// database renders the root error boundary (noindex, "Tekrar dene") and
+// never a 404 for a real source.
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise.
   params: Promise<{ slug: string }>;
 }
 
-interface ArticleRow {
-  id: string;
-  title: string;
-  description: string | null;
-  url: string;
-  image_url: string | null;
-  published_at: string;
-}
-
-// S-20/M-04 registry columns (migration 055) — not yet on the shared
-// `Source` type, so extended locally here rather than editing
-// `@/types` (out of this file's ownership scope).
-interface SourceRegistryFields {
-  zone_rationale: string | null;
-  zone_rationale_at: string | null;
-  trustee_since: string | null;
-  trustee_note: string | null;
-}
-
-type SourceWithRegistry = Source & SourceRegistryFields;
-
-interface ZoneHistoryRow {
-  old_bias: string | null;
-  new_bias: string;
-  reason: string | null;
-  rater: string | null;
-  changed_at: string;
-}
-
-interface SourceProfile {
-  source: SourceWithRegistry;
-  articleCount7d: number;
-  articles: ArticleRow[];
-  zoneHistory: ZoneHistoryEntry[];
-}
-
-async function getSourceProfile(slug: string): Promise<SourceProfile | null> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("sources", "articles");
-
-  const supabase = createServerClient();
-
-    const { data: sourceRow, error: sourceError } = await supabase
-      .from("sources")
-      .select(
-        "id, name, slug, url, rss_url, bias, logo_url, active, image_allowed, excerpt_allowed, zone_rationale, zone_rationale_at, trustee_since, trustee_note",
-      )
-      .eq("slug", slug)
-      .maybeSingle();
-
-    // `maybeSingle` returns null (not an error) when no row matches; only a
-    // genuine query failure should throw. notFound() is handled by the page.
-    if (sourceError) {
-      throw new Error(`source query failed: ${sourceError.message}`);
-    }
-    if (!sourceRow) return null;
-
-    const source = sourceRow as SourceWithRegistry;
-
-    // Three read-only fetches that depend only on source.id — fire in
-    // parallel (one round-trip). The 7-day count uses head/exact to avoid
-    // pulling row bodies; the recent-articles list is capped at 20 to keep
-    // the payload small; the zone-history list is capped at 20, newest
-    // first.
-    const sevenDaysAgo = new Date(
-      Date.now() - 7 * 24 * 60 * 60 * 1000,
-    ).toISOString();
-
-    const [countResult, articlesResult, historyResult] = await Promise.all([
-      supabase
-        .from("articles")
-        .select("id", { count: "exact", head: true })
-        .eq("source_id", source.id)
-        .gte("published_at", sevenDaysAgo),
-      supabase
-        .from("articles")
-        .select("id, title, description, url, image_url, published_at")
-        .eq("source_id", source.id)
-        .order("published_at", { ascending: false })
-        .limit(20),
-      supabase
-        .from("source_zone_history")
-        .select("old_bias, new_bias, reason, rater, changed_at")
-        .eq("source_id", source.id)
-        .order("changed_at", { ascending: false })
-        .limit(20),
-    ]);
-
-    if (countResult.error) {
-      throw new Error(`count query failed: ${countResult.error.message}`);
-    }
-    if (articlesResult.error) {
-      throw new Error(
-        `articles query failed: ${articlesResult.error.message}`,
-      );
-    }
-    // Deliberately non-fatal, unlike the two checks above: a
-    // source_zone_history read failure renders the card without a history
-    // list (LabelCard's own empty state) rather than 404-ing the whole
-    // profile over a secondary, non-essential fetch. Still logged (not
-    // swallowed) so a permanently-broken query doesn't silently masquerade
-    // as the honest "Bu etiket hiç değişmedi." empty state forever.
-    if (historyResult.error) {
-      console.error(
-        "[source-profile] zone history query failed",
-        historyResult.error,
-      );
-    }
-    const zoneHistory: ZoneHistoryEntry[] = historyResult.error
-      ? []
-      : ((historyResult.data ?? []) as ZoneHistoryRow[]).map((row) => ({
-          oldBias: row.old_bias as BiasCategory | null,
-          newBias: row.new_bias as BiasCategory,
-          reason: row.reason,
-          rater: row.rater,
-          changedAt: row.changed_at,
-        }));
-
-  return {
-    source,
-    articleCount7d: countResult.count ?? 0,
-    articles: (articlesResult.data ?? []) as ArticleRow[],
-    zoneHistory,
-  };
-}
-
 // Dynamic SEO metadata. Per Next.js 16, dynamic-route metadata must be
 // produced by an exported async `generateMetadata` (the static `metadata`
-// object can't access `params`). The fetch goes through the same cached
-// `getSourceProfile` the page uses, so it's effectively free on warm hits.
+// object can't access `params`). The fetch goes through the same
+// `getSourceProfile` the page uses (React `cache` dedupes it within the
+// request), so it's effectively free.
 export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
   const { slug } = await params;
-  const profile = await getSourceProfile(slug);
+  let profile: Awaited<ReturnType<typeof getSourceProfile>>;
+  try {
+    profile = await getSourceProfile(slug);
+  } catch (err) {
+    // Next control-flow signals (dynamic-usage bailouts, postpone) must keep
+    // propagating; only a genuine read failure is handled below.
+    unstable_rethrow(err);
+    // A sustained read failure (cold database). The page body re-throws the
+    // same (request-memoised) error and the error boundary renders; the
+    // metadata must not claim the source is missing, must not be indexed, and
+    // must not advertise the homepage canonical.
+    return {
+      title: "Kaynak şu anda yüklenemiyor",
+      robots: { index: false, follow: true },
+      alternates: { canonical: null },
+    };
+  }
 
   if (!profile) {
     // A4: a missing source still streams a 200 shell here (notFound() runs
@@ -227,23 +117,27 @@ export async function generateMetadata({
 export default async function SourceProfilePage({ params }: PageProps) {
   const { slug } = await params;
 
+  // null = no such source -> 404. A sustained read failure THROWS and
+  // propagates to the root error boundary (never a 404 for a real source).
   const profile = await getSourceProfile(slug);
   if (!profile) notFound();
 
   const { source, articleCount7d, articles, zoneHistory } = profile;
 
-  // U-03 follow-through — cached separately from the profile (its own
-  // "use cache" entry keyed by source id) so a busy /oyun ledger never
-  // slows the profile down, and never throws: `null` renders the label
-  // card's "Henüz yeterli tahmin yok".
-  const readerAgreement = await getSourceAgreement(source.id);
-
-  // "Kapsama karnesi" (migration 096) — one cached point lookup; null (no row
-  // or outage) renders nothing.
-  const sourceKarne = await getSourceKarne(source.id);
-
-  // "tık tuzağı karnesi" (migration 078) — same gate as /sources.
-  const karne = isClickbaitPublic() ? await getClickbaitKarne() : null;
+  // The three side lookups are independent - one round-trip, not three
+  // sequential ones (each is capped at 4 s, so serial reads could stack).
+  //   - reader agreement (U-03 follow-through): cached separately from the
+  //     profile (its own "use cache" entry keyed by source id) so a busy /oyun
+  //     ledger never slows the profile down; never throws, `null` renders the
+  //     label card's "Henüz yeterli tahmin yok".
+  //   - "Kapsama karnesi" (migration 096): one cached point lookup; null (no
+  //     row or outage) renders nothing.
+  //   - "tık tuzağı karnesi" (migration 078): same gate as /sources.
+  const [readerAgreement, sourceKarne, karne] = await Promise.all([
+    getSourceAgreement(source.id),
+    getSourceKarne(source.id),
+    isClickbaitPublic() ? getClickbaitKarne() : Promise.resolve(null),
+  ]);
 
   // S-17: BreadcrumbList JSON-LD (Anasayfa → Kaynaklar → this source).
   const breadcrumbs = buildBreadcrumbs([

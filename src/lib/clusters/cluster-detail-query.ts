@@ -1,5 +1,6 @@
 import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 import { cacheLife, cacheTag } from "next/cache";
+import { cache } from "react";
 
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { normalizeSourceKind } from "@/lib/bias/config";
@@ -13,7 +14,7 @@ import {
 } from "@/lib/clusters/feed-health";
 import { applyRecallVeto, logRecallVeto } from "@/lib/clusters/recall-veto";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone, Source } from "@/types";
 
 // Names the pole zone whose degraded feeds caused a blindspot to be
@@ -77,6 +78,10 @@ function dominantZoneOf(distribution: BiasDistribution): MediaDnaZone | null {
 //
 //   Wrapped in `unstable_cache` with a 30s TTL keyed per cluster id so
 //   repeat hits within the TTL skip Supabase entirely.
+//
+//   Reads run on the capped reader client (4 s, see createReaderClient):
+//   on a cold database a visitor gets a fast failure instead of an 8 s
+//   wait, and a failure is cached for `minutes` only (never `cluster-feed`).
 
 export interface ClusterDetailMember {
   source: Source;
@@ -254,7 +259,7 @@ type EmbeddedClusterArticleRow = {
 // wraps this with `unstable_cache` below.
 async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
   try {
-    const supabase = createServerClient();
+    const supabase = createReaderClient();
 
     // Two parallel round-trips:
     //   (a) cluster row + its members (embedded articles + sources)
@@ -511,11 +516,20 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
 // `{ ok: true, data: null }`. Not exported: every caller must go through
 // `getClusterDetail`'s UUID guard below so a malformed id (e.g.
 // `/cluster/not-a-uuid`) never reaches Supabase or this cache layer.
+//
+// Cache lifetime follows the outcome (same shape as daily-zones.ts): a
+// success keeps the `cluster-feed` window, a failed attempt is memoised for
+// `minutes` only, so a cold-read timeout is retried within a minute instead
+// of being pinned for the whole window. Exactly one `cacheLife` call per
+// invocation; `cacheTag` comes first so the entry is tagged on every path.
 async function getClusterDetailCached(id: string) {
   "use cache: remote";
-  cacheLife("cluster-feed");
   cacheTag(`cluster-detail:${id}`, "clusters");
-  return attemptCached("cluster-detail", () => fetchClusterDetail(id));
+  const r = await attemptCached("cluster-detail", () => fetchClusterDetail(id));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
 }
 
 // UUID guard (reader-queries E3): `clusters.id` is a Postgres `uuid`
@@ -548,3 +562,30 @@ export async function getClusterDetail(
     null,
   );
 }
+
+/**
+ * Throwing sibling of `getClusterDetail` for the cluster page and its
+ * `generateMetadata`. `getClusterDetail` maps a sustained outage to `null`,
+ * which the page reads as "no such cluster" and turns into a 404 -- a Supabase
+ * timeout must not look like a missing story (search engines would drop it).
+ * This variant resolves `null` ONLY for a malformed id or a row that is
+ * genuinely absent, and otherwise REJECTS: the cached attempt failed and the
+ * live retry did too, so the error propagates to `error.tsx` (noindex) and
+ * `generateMetadata` answers with a noindex "unavailable" shell.
+ *
+ * Wrapped in React `cache` so `generateMetadata` and the page body in one
+ * request share a single result (and a single live retry) per id. Never call
+ * it from a `"use cache"` body: it can throw.
+ *
+ * `getClusterDetail` keeps its never-throw contract for the callers that
+ * must degrade silently (kart, opengraph, rozet, yelpaze).
+ */
+export const getClusterDetailOrThrow = cache(
+  async (id: string): Promise<ClusterDetail | null> => {
+    if (!UUID_RE.test(id)) return null;
+    const cached = await getClusterDetailCached(id);
+    if (cached.ok) return cached.data;
+    return fetchClusterDetail(id);
+  },
+);
+

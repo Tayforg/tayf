@@ -296,7 +296,7 @@ async function fetchBlindspots(
       // Fetch feed health once, alongside the FIRST batch only — every
       // later batch reuses it.
       const [fetchedHealth, batchRows] = await Promise.all([
-        getZoneFeedHealth(),
+        getZoneFeedHealth({ profile }),
         fetchEmbedBatch(batchIds, profile),
       ]);
       health = fetchedHealth;
@@ -328,11 +328,21 @@ async function fetchBlindspots(
 // `profile` is an argument on purpose: it becomes part of the cache key, so a
 // capped "reader" entry (and its cached `{ ok: false }` sentinel) is never
 // served to a "batch" cron, and the cron's own miss runs uncapped.
+//
+// Exactly ONE `cacheLife` per invocation, chosen after the attempt: a failed
+// attempt (typically the 4 s reader abort on a cold database) is memoised for
+// `minutes` only, so a blip cannot park the `{ ok: false }` sentinel for a
+// whole `cluster-feed` window; a success keeps the normal lifetime.
 async function getBlindspotsCached(profile: ReadProfile) {
   "use cache: remote";
-  cacheLife("cluster-feed");
   cacheTag("clusters", "clusters-politics");
-  return attemptCached("blindspots-query", () => fetchBlindspots(profile));
+  const r = await attemptCached("blindspots-query", () =>
+    fetchBlindspots(profile),
+  );
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
 }
 
 // Public cached entry point. The /blindspots page and the weekly digest

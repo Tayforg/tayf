@@ -314,7 +314,9 @@ export const GET = withApiErrors(async (request: Request) => {
     return NextResponse.json({ skipped: true, reason: "no channels configured" });
   }
 
-  const health = await getZoneFeedHealth();
+  // "batch": the 4 s user-facing reader cap must not skip a tick on a cold
+  // database (the 8 s statement_timeout would have let the read finish).
+  const health = await getZoneFeedHealth({ profile: "batch" });
   if (health === null) {
     console.log("[social] feed health unknown; skipping this tick");
     return NextResponse.json({ skipped: true, reason: "feed health unknown" });

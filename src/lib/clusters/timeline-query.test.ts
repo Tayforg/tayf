@@ -14,6 +14,8 @@ const fixture = vi.hoisted(() => ({
   data: [] as unknown[],
   error: null as { message: string } | null,
   lastState: null as unknown,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -29,9 +31,19 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+import { cacheLife, cacheTag } from "next/cache";
 import { getRecentClusters } from "./timeline-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -43,9 +55,14 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -64,5 +81,74 @@ describe("getRecentClusters query shape", () => {
       { col: "first_published", opts: { ascending: false } },
     ]);
     expect(state.limit).toBe(100);
+  });
+});
+
+const TIMEOUT_MESSAGE = "AbortError: Supabase request exceeded 4000 ms";
+
+describe("getRecentClusters read profile", () => {
+  it("builds only capped reader clients", async () => {
+    await getRecentClusters();
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+});
+
+describe("getRecentClusters result + cache lifetime", () => {
+  it("returns the rows on success and caches them for cluster-feed, once", async () => {
+    fixture.data = [
+      {
+        id: "c1",
+        title_tr: "Bir",
+        title_tr_neutral: null,
+        article_count: 3,
+        first_published: "2026-09-18T10:00:00.000Z",
+      },
+    ];
+
+    const rows = await getRecentClusters();
+
+    expect(rows).toEqual(fixture.data);
+    expect(cacheTag).toHaveBeenCalledWith("clusters");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("returns [] (not null) when the window legitimately matched nothing", async () => {
+    fixture.data = [];
+    await expect(getRecentClusters()).resolves.toEqual([]);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("returns null on a Supabase error and never throws into the prerender", async () => {
+    fixture.error = { message: "relation missing" };
+
+    await expect(getRecentClusters()).resolves.toBeNull();
+  });
+
+  it("a timeout resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.error = { message: TIMEOUT_MESSAGE };
+
+    await expect(getRecentClusters()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("tags the entry before the fetch (cacheTag precedes cacheLife)", async () => {
+    await getRecentClusters();
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("does not retry live: a failed attempt builds exactly one client (static route, the clock read stays inside the cache scope)", async () => {
+    fixture.error = { message: TIMEOUT_MESSAGE };
+
+    await getRecentClusters();
+
+    // One fetch = one createReaderClient() = one createClient().
+    expect(fixture.clientOpts).toHaveLength(1);
   });
 });

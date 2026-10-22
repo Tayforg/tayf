@@ -282,6 +282,17 @@ describe("GET /api/cron/social — happy paths", () => {
     expect(getPoliticsClusters).toHaveBeenCalledWith({ profile: "batch" });
   });
 
+  it("reads feed health through the uncapped batch profile too (the 4 s reader cap must not skip a tick)", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "t";
+    process.env.TELEGRAM_CHANNEL_ID = "c";
+    const { GET } = await import("@/app/api/cron/social/route");
+    const { getZoneFeedHealth } = await import("@/lib/clusters/feed-health");
+    vi.mocked(getZoneFeedHealth).mockClear();
+    await GET(request());
+    expect(getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    expect(getZoneFeedHealth).toHaveBeenCalledWith({ profile: "batch" });
+  });
+
   it("claim null means no post call (second-run idempotency)", async () => {
     process.env.TELEGRAM_BOT_TOKEN = "t";
     process.env.TELEGRAM_CHANNEL_ID = "c";

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -9,11 +9,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 //   the directive is a no-op string literal; we only need the two helpers
 //   to exist so the import doesn't blow up.
 //
-// @/lib/supabase/server: the whole point. We replace createServerClient
-//   with a factory that returns a fake client built by `makeFakeClient`
-//   (see below). Each test sets the canned responses before calling the
-//   fetcher so we can verify (a) that the builder issued the right
-//   queries against the right tables/columns/filters, and (b) that the
+// @/lib/supabase/server: the whole point. We replace createReaderClient
+//   (the 4 s capped client this module must use) with a factory that returns
+//   a fake client built by `makeFakeClient` (see below). createServerClient
+//   throws, so any regression to the plain client fails every test here, not
+//   just the dedicated assertion. Each test sets the canned responses before
+//   calling the fetcher so we can verify (a) that the builder issued the
+//   right queries against the right tables/columns/filters, and (b) that the
 //   builder reshapes those rows correctly.
 
 vi.mock("next/cache", () => ({
@@ -30,26 +32,40 @@ type CallLog = Array<{
 
 interface FakeResult {
   data: unknown;
-  error: { message: string } | null;
+  error: { message: string; code?: string } | null;
+  status?: number;
 }
 
 // Response lookup keyed by table name. maybeSingle responses go in a
 // separate slot because the fetcher uses both terminal kinds.
+// `maybeSingleOnce` is consumed first (one entry per call), so a test can
+// fail the cached attempt and succeed on the live retry.
 interface ResponseMap {
   [table: string]: {
     maybeSingle?: FakeResult;
+    maybeSingleOnce?: FakeResult[];
     returns?: FakeResult;
   };
 }
 
+/** What a 4 s cap abort looks like once postgrest-js has swallowed it. */
+const TIMEOUT_RESULT: FakeResult = {
+  data: null,
+  error: { message: "AbortError: Supabase request exceeded 4000 ms", code: "" },
+  status: 0,
+};
+
 let callLog: CallLog = [];
 let responses: ResponseMap = {};
+/** Interleaved cacheTag / from() events, to pin "cacheTag before the await". */
+let events: string[] = [];
 
 function makeFakeClient() {
   return {
     from(table: string) {
       const steps: Array<{ method: string; args: unknown[] }> = [];
       callLog.push({ table, steps });
+      events.push(`from:${table}`);
 
       // Builder object. Every intermediate method (.select, .eq, .order)
       // just records the call and returns `this`. The terminal methods
@@ -66,6 +82,8 @@ function makeFakeClient() {
 
       builder.maybeSingle = async (...args: unknown[]) => {
         steps.push({ method: "maybeSingle", args });
+        const once = responses[table]?.maybeSingleOnce?.shift();
+        if (once) return once;
         const r = responses[table]?.maybeSingle;
         return r ?? { data: null, error: null };
       };
@@ -89,8 +107,14 @@ function makeFakeClient() {
   };
 }
 
+const clientFactories = vi.hoisted(() => ({
+  createReaderClient: vi.fn(),
+  createServerClient: vi.fn(),
+}));
+
 vi.mock("@/lib/supabase/server", () => ({
-  createServerClient: vi.fn(() => makeFakeClient()),
+  createReaderClient: clientFactories.createReaderClient,
+  createServerClient: clientFactories.createServerClient,
 }));
 
 // feed-health.ts is owned by a concurrent worker in this pack — mocked here
@@ -115,7 +139,12 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 });
 
 // Import AFTER mocks are declared.
-import { getClusterDetail, imageEligibleMembers } from "./cluster-detail-query";
+import { cacheLife, cacheTag } from "next/cache";
+import {
+  getClusterDetail,
+  getClusterDetailOrThrow,
+  imageEligibleMembers,
+} from "./cluster-detail-query";
 import type { ClusterDetailMember } from "./cluster-detail-query";
 
 // ---------------------------------------------------------------------------
@@ -179,6 +208,18 @@ function mkEmbeddedMember(
 beforeEach(() => {
   callLog = [];
   responses = {};
+  events = [];
+  clientFactories.createReaderClient.mockReset();
+  clientFactories.createReaderClient.mockImplementation(() => makeFakeClient());
+  clientFactories.createServerClient.mockReset();
+  clientFactories.createServerClient.mockImplementation(() => {
+    throw new Error("cluster-detail-query must use the capped createReaderClient()");
+  });
+  vi.mocked(cacheLife).mockReset();
+  vi.mocked(cacheTag).mockReset();
+  vi.mocked(cacheTag).mockImplementation(() => {
+    events.push("cacheTag");
+  });
   feedHealthMock.getZoneFeedHealth.mockReset();
   feedHealthMock.shouldSuppressBlindspot.mockReset();
   feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
@@ -1136,5 +1177,156 @@ describe("migration 099 merged_into pass-through", () => {
 
   it.each([[null], [undefined], [ID], ["not-a-uuid"], [42]])("exposes null for %j", async (v) => {
     expect((await detailWith(v))!.cluster.merged_into).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cold-read resilience (wave 2): capped client, failure cached for minutes
+// only, and "a timeout is not a 404" via getClusterDetailOrThrow.
+// ---------------------------------------------------------------------------
+
+const GOOD_ID = "11111111-1111-4111-8111-111111111111";
+
+function seedHealthyDetail() {
+  responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+  responses.cluster_articles = { returns: { data: [], error: null } };
+  responses.sources = { returns: { data: [], error: null } };
+}
+
+function clustersQueryCount(): number {
+  return callLog.filter((c) => c.table === "clusters").length;
+}
+
+describe("cluster detail read profile", () => {
+  it("builds its data client with the capped createReaderClient, never the plain one", async () => {
+    seedHealthyDetail();
+    await getClusterDetail(GOOD_ID);
+    expect(clientFactories.createReaderClient).toHaveBeenCalled();
+    expect(clientFactories.createServerClient).not.toHaveBeenCalled();
+  });
+});
+
+describe("cluster detail cache lifetime", () => {
+  it("tags the entry before issuing any query", async () => {
+    seedHealthyDetail();
+    await getClusterDetail(GOOD_ID);
+    expect(events[0]).toBe("cacheTag");
+    expect(cacheTag).toHaveBeenCalledWith(`cluster-detail:${GOOD_ID}`, "clusters");
+  });
+
+  it("success: exactly one cacheLife, cluster-feed", async () => {
+    seedHealthyDetail();
+    await getClusterDetail(GOOD_ID);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a genuine missing row is a successful answer: cluster-feed, and no live retry", async () => {
+    responses.clusters = { maybeSingle: { data: null, error: null } };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    await expect(getClusterDetail(GOOD_ID)).resolves.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(clustersQueryCount()).toBe(1);
+  });
+
+  it("failure: exactly one cacheLife, minutes (the live retry is uncached)", async () => {
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(getClusterDetail(GOOD_ID)).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+    // cached attempt + live retry
+    expect(clustersQueryCount()).toBe(2);
+  });
+});
+
+describe("getClusterDetailOrThrow (a timeout is not a 404)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("rejects when the cached attempt AND the live retry both time out", async () => {
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    await expect(getClusterDetailOrThrow(GOOD_ID)).rejects.toThrow(/AbortError/);
+    // cached attempt + live retry, then the throw reaches the caller
+    expect(clustersQueryCount()).toBe(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("rejects on a members-query failure too (a memberless detail must not render)", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = { returns: { data: null, error: { message: "members boom" } } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    await expect(getClusterDetailOrThrow(GOOD_ID)).rejects.toThrow("members boom");
+  });
+
+  it("returns the detail when the live retry succeeds after a failed cached attempt", async () => {
+    responses.clusters = {
+      maybeSingleOnce: [TIMEOUT_RESULT],
+      maybeSingle: { data: mkClusterRow(), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const detail = await getClusterDetailOrThrow(GOOD_ID);
+    expect(detail).not.toBeNull();
+    expect(detail!.cluster.id).toBe(GOOD_ID);
+    expect(clustersQueryCount()).toBe(2);
+  });
+
+  it("returns the cached detail without a live retry when the first attempt succeeds", async () => {
+    seedHealthyDetail();
+    const detail = await getClusterDetailOrThrow(GOOD_ID);
+    expect(detail!.cluster.id).toBe(GOOD_ID);
+    expect(clustersQueryCount()).toBe(1);
+  });
+
+  it("returns null (and does not throw) for a row that is genuinely missing", async () => {
+    responses.clusters = { maybeSingle: { data: null, error: null } };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    await expect(getClusterDetailOrThrow(GOOD_ID)).resolves.toBeNull();
+    expect(clustersQueryCount()).toBe(1);
+  });
+
+  it("returns null for a non-UUID id without issuing any query", async () => {
+    await expect(getClusterDetailOrThrow("not-a-uuid")).resolves.toBeNull();
+    await expect(getClusterDetailOrThrow("")).resolves.toBeNull();
+    expect(callLog).toHaveLength(0);
+    expect(cacheLife).not.toHaveBeenCalled();
+  });
+
+  it("getClusterDetail keeps its never-throw contract on the same sustained timeout", async () => {
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    await expect(getClusterDetail(GOOD_ID)).resolves.toBeNull();
   });
 });

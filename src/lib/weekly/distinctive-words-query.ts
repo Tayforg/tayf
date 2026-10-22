@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import {
   buildWeeklyDistinctiveWords,
   type WeeklyDistinctiveWords,
@@ -42,7 +42,7 @@ const ARTICLE_SELECT = "id, title, url, source_id, created_at";
  * failure.
  */
 export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWords> {
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
 
   // One clock read, same pattern as weekly-query.ts: two Date.now() calls
   // could straddle a tick and widen a window past a day boundary.
@@ -116,11 +116,18 @@ export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWo
 // swallows whatever `fetchWeeklyDistinctiveWords` throws and reports
 // `{ ok: false }` instead, so a throw never crosses this `"use cache"`
 // boundary during `next build`'s prerender.
+//
+// Cache lifetime follows the outcome (exactly one `cacheLife` call, after the
+// attempt; `cacheTag` first): a result keeps `hours`, a failed attempt (e.g. a
+// 4 s reader-cap abort on any of the 22 reads) is memoised for `minutes` only.
 async function getCachedWeeklyDistinctiveWords() {
   "use cache";
-  cacheLife("hours");
   cacheTag("weekly-words");
-  return attemptCached("weekly-words", fetchWeeklyDistinctiveWords);
+  const r = await attemptCached("weekly-words", fetchWeeklyDistinctiveWords);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("hours");
+  else cacheLife("minutes");
+  return r;
 }
 
 /**

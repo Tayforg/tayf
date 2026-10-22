@@ -215,7 +215,24 @@ export function toV1ClusterRecord(
 // the answer, so a consumer can never distinguish "no topic" from
 // "column not shipped yet" — both render as `topic7: null` forever until
 // the next process/deploy.
+//
+// The latch trips ONLY on a definitive "column does not exist" signal
+// (`isMissingTopic7Column`). A reader-cap abort (`AbortError: Supabase
+// request exceeded 4000 ms`), a statement_timeout or a thrown network error
+// says nothing about the schema: it degrades THIS request to an empty map and
+// leaves the latch alone, so one cold-database blip cannot blank `topic7` for
+// the rest of the serverless instance's life.
 let topic7Available = true;
+
+function isMissingTopic7Column(error: { message?: string; code?: string }): boolean {
+  // 42703 = Postgres undefined_column; PGRST204 = PostgREST schema-cache miss.
+  if (error.code === "42703" || error.code === "PGRST204") return true;
+  const message = error.message ?? "";
+  return (
+    /topic7/i.test(message) &&
+    /does not exist|schema cache|could not find/i.test(message)
+  );
+}
 
 export async function fetchTopic7(
   supabase: SupabaseClient,
@@ -231,12 +248,14 @@ export async function fetchTopic7(
       .select("id, topic7")
       .in("id", ids));
   } catch {
-    topic7Available = false;
+    // Network failure / client throw: transient, do not latch.
     return new Map();
   }
 
   if (error) {
-    topic7Available = false;
+    if (isMissingTopic7Column(error as { message?: string; code?: string })) {
+      topic7Available = false;
+    }
     return new Map();
   }
 

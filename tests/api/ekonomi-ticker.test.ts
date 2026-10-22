@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Pack E / worker E2 — SEC-04/SEC-11 for /ekonomi/[ticker].
@@ -19,6 +19,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // PPR a well-formed-but-unknown ticker still streams a 200 shell (see
 // src/middleware.ts for the wire-level shape gate, and page.tsx's
 // tickerExists() header comment for the measured detail).
+//
+// Cold-read resilience: the probe runs under the 4 s reader cap
+// (createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS })) and has three
+// outcomes, not two. A timeout/error is NEVER a 404: "missing" (every probe
+// answered, none found the ticker) calls notFound(); "unknown" (a probe
+// errored/timed out and nothing else proved the ticker exists) throws a plain
+// Error so src/app/ekonomi/error.tsx renders ("Tekrar dene") and the metadata
+// is noindex without claiming "Hisse bulunamadı".
 //
 // next/navigation.notFound() normally throws (a special Next digest error)
 // to unwind the render; the fake here throws too so a test that forgets to
@@ -48,6 +56,7 @@ const {
   articlesProbeMock,
   disclosuresProbeMock,
   probeState,
+  createFinanceClientMock,
 } = vi.hoisted(() => ({
   notFoundMock: vi.fn(() => {
     throw new NotFoundSignal();
@@ -66,10 +75,12 @@ const {
   articlesProbeMock: vi.fn(),
   disclosuresProbeMock: vi.fn(),
   probeState: {
-    company: { data: [] as unknown[], error: null as { message: string } | null },
-    articles: { data: [] as unknown[], error: null as { message: string } | null },
-    disclosures: { data: [] as unknown[], error: null as { message: string } | null },
+    company: { data: [] as unknown[] | null, error: null as { message: string } | null },
+    articles: { data: [] as unknown[] | null, error: null as { message: string } | null },
+    disclosures: { data: [] as unknown[] | null, error: null as { message: string } | null },
   },
+  // createFinanceServerClient(opts) — async, resolves to the fake below.
+  createFinanceClientMock: vi.fn(),
 }));
 companyProbeMock.mockImplementation(async () => probeState.company);
 articlesProbeMock.mockImplementation(async () => probeState.articles);
@@ -77,6 +88,12 @@ disclosuresProbeMock.mockImplementation(async () => probeState.disclosures);
 
 vi.mock("next/navigation", () => ({
   notFound: notFoundMock,
+  // The real unstable_rethrow only re-throws Next control-flow errors
+  // (notFound/redirect/postpone/dynamic bailouts) and is a no-op for a plain
+  // Error; the fake's only control-flow signal is NotFoundSignal.
+  unstable_rethrow: (err: unknown) => {
+    if (err instanceof NotFoundSignal) throw err;
+  },
 }));
 
 vi.mock("next/server", async (importOriginal) => {
@@ -108,31 +125,34 @@ vi.mock("@/lib/finance/quotes", () => ({
   getQuotes: (...args: unknown[]) => getQuotesMock(...args),
 }));
 
-vi.mock("@/lib/supabase/server", () => ({
-  createServerClient: () => ({
-    from: (table: string) => {
-      if (table === "bist_companies") {
-        return {
-          select: (_cols: string) => ({
-            contains: (_col: string, _val: unknown[]) => ({ limit: companyProbeMock }),
-          }),
-        };
-      }
-      if (table === "article_tickers") {
-        return {
-          select: (_cols: string) => ({
-            eq: (_col: string, _val: unknown) => ({ limit: articlesProbeMock }),
-          }),
-        };
-      }
-      // kap_disclosures
+const fakeClient = {
+  from: (table: string) => {
+    if (table === "bist_companies") {
       return {
         select: (_cols: string) => ({
-          contains: (_col: string, _val: unknown[]) => ({ limit: disclosuresProbeMock }),
+          contains: (_col: string, _val: unknown[]) => ({ limit: companyProbeMock }),
         }),
       };
-    },
-  }),
+    }
+    if (table === "article_tickers") {
+      return {
+        select: (_cols: string) => ({
+          eq: (_col: string, _val: unknown) => ({ limit: articlesProbeMock }),
+        }),
+      };
+    }
+    // kap_disclosures
+    return {
+      select: (_cols: string) => ({
+        contains: (_col: string, _val: unknown[]) => ({ limit: disclosuresProbeMock }),
+      }),
+    };
+  },
+};
+
+vi.mock("@/lib/supabase/server", () => ({
+  READER_TIMEOUT_MS: 4000,
+  createFinanceServerClient: (opts?: unknown) => createFinanceClientMock(opts),
 }));
 
 import TickerPage, { generateMetadata } from "@/app/ekonomi/[ticker]/page";
@@ -150,6 +170,13 @@ beforeEach(() => {
   probeState.company = { data: [], error: null };
   probeState.articles = { data: [], error: null };
   probeState.disclosures = { data: [], error: null };
+  createFinanceClientMock.mockReset();
+  createFinanceClientMock.mockImplementation(async () => fakeClient);
+  vi.spyOn(console, "error").mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe("/ekonomi/[ticker] — existence-gated notFound() call order", () => {
@@ -270,5 +297,180 @@ describe("generateMetadata — neutral title for a ticker with no coverage", () 
     probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
     const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "asels" }) });
     expect(metadata.title).toBe("ASELS — hisse haberleri ve KAP bildirimleri");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cold-read resilience: a timeout is not a 404.
+// ---------------------------------------------------------------------------
+
+const TIMEOUT = {
+  message: "AbortError: Supabase request exceeded 4000 ms",
+  hint: "Request was aborted (timeout or manual cancellation)",
+  code: "",
+};
+
+function stubRenderableTickerPage() {
+  fetchTickerPageMock.mockResolvedValue({
+    company: null,
+    attention: [],
+    articles: [],
+    disclosures: [],
+    coverage: { disclosures: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+  });
+  fetchQuoteStatsMock.mockResolvedValue({});
+  fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
+  getQuotesMock.mockResolvedValue({});
+}
+
+describe("/ekonomi/[ticker] — existence probe under the reader cap", () => {
+  it("creates the finance client with the 4 s reader timeout", async () => {
+    probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
+    stubRenderableTickerPage();
+
+    await TickerPage({ params: Promise.resolve({ ticker: "ASELS" }) });
+
+    expect(createFinanceClientMock).toHaveBeenCalledTimes(1);
+    expect(createFinanceClientMock).toHaveBeenCalledWith({ timeoutMs: 4000 });
+  });
+
+  it("the page and generateMetadata share one probe set (React cache dedupes by ticker)", async () => {
+    // Outside an RSC render React's cache() is a pass-through, so this only
+    // pins the cap: every client the probe builds is created with the timeout.
+    probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
+    await generateMetadata({ params: Promise.resolve({ ticker: "ASELS" }) });
+    for (const call of createFinanceClientMock.mock.calls) {
+      expect(call[0]).toEqual({ timeoutMs: 4000 });
+    }
+  });
+});
+
+describe("/ekonomi/[ticker] — a timeout is not a 404 (page)", () => {
+  it("a company-probe AbortError rejects with a plain Error: no notFound(), no fetchTickerPage, no connection()", async () => {
+    probeState.company = { data: null, error: TIMEOUT };
+
+    const result = TickerPage({ params: Promise.resolve({ ticker: "ASELS" }) });
+    await expect(result).rejects.toThrow("[ekonomi] ticker existence unknown: ASELS");
+    await expect(result).rejects.not.toBeInstanceOf(NotFoundSignal);
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(fetchTickerPageMock).not.toHaveBeenCalled();
+    expect(connectionMock).not.toHaveBeenCalled();
+    // The company probe failing short-circuits: no point probing further.
+    expect(articlesProbeMock).not.toHaveBeenCalled();
+    expect(disclosuresProbeMock).not.toHaveBeenCalled();
+  });
+
+  it("company miss + articles probe timeout + empty disclosures rejects and does not 404", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: null, error: TIMEOUT };
+    probeState.disclosures = { data: [], error: null };
+
+    await expect(
+      TickerPage({ params: Promise.resolve({ ticker: "ZZZZZZ" }) }),
+    ).rejects.toThrow("[ekonomi] ticker existence unknown: ZZZZZZ");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(fetchTickerPageMock).not.toHaveBeenCalled();
+    expect(connectionMock).not.toHaveBeenCalled();
+  });
+
+  it("company miss + empty articles + disclosures probe timeout also rejects and does not 404", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: [], error: null };
+    probeState.disclosures = { data: null, error: TIMEOUT };
+
+    await expect(
+      TickerPage({ params: Promise.resolve({ ticker: "ZZZZZZ" }) }),
+    ).rejects.toThrow("[ekonomi] ticker existence unknown: ZZZZZZ");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+  });
+
+  it("company miss + articles ERROR + a disclosure row present renders: positive evidence beats a failed sibling probe", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: null, error: TIMEOUT };
+    probeState.disclosures = { data: [{ disclosure_index: 42 }], error: null };
+    stubRenderableTickerPage();
+
+    await TickerPage({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(connectionMock).toHaveBeenCalledTimes(1);
+    expect(fetchTickerPageMock).toHaveBeenCalledWith("ZZZZZZ");
+  });
+
+  it("company miss + an article row + disclosures ERROR renders too", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: [{ ticker: "ZZZZZZ" }], error: null };
+    probeState.disclosures = { data: null, error: TIMEOUT };
+    stubRenderableTickerPage();
+
+    await TickerPage({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(fetchTickerPageMock).toHaveBeenCalledWith("ZZZZZZ");
+  });
+
+  it("all three probes answering empty is the only way to a 404", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: [], error: null };
+    probeState.disclosures = { data: [], error: null };
+
+    await expect(
+      TickerPage({ params: Promise.resolve({ ticker: "ZZZZZZ" }) }),
+    ).rejects.toThrow(NotFoundSignal);
+
+    expect(notFoundMock).toHaveBeenCalledTimes(1);
+    expect(connectionMock).not.toHaveBeenCalled();
+  });
+
+  it("a thrown client construction (missing env) is unknown, not a 404", async () => {
+    createFinanceClientMock.mockRejectedValue(new Error("Missing NEXT_PUBLIC_SUPABASE_URL"));
+
+    await expect(
+      TickerPage({ params: Promise.resolve({ ticker: "ASELS" }) }),
+    ).rejects.toThrow("[ekonomi] ticker existence unknown: ASELS");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(companyProbeMock).not.toHaveBeenCalled();
+  });
+
+  it("a probe that throws (rather than returning an error envelope) is unknown, not a 404", async () => {
+    companyProbeMock.mockRejectedValueOnce(new Error("socket hang up"));
+
+    await expect(
+      TickerPage({ params: Promise.resolve({ ticker: "ASELS" }) }),
+    ).rejects.toThrow("[ekonomi] ticker existence unknown: ASELS");
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("generateMetadata — a timeout is not 'Hisse bulunamadı'", () => {
+  it("returns a noindex, non-'not found' title when the existence probe is unknown", async () => {
+    probeState.company = { data: null, error: TIMEOUT };
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "ASELS" }) });
+
+    expect(metadata.title).toBe("Hisse sayfası şu anda yüklenemiyor");
+    expect(metadata.title).not.toBe("Hisse bulunamadı");
+    expect(metadata.robots).toEqual({ index: false, follow: false });
+    expect(metadata.alternates).toBeUndefined();
+  });
+
+  it("an unknown probe in the fallback tier is also not reported as missing", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: null, error: TIMEOUT };
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+
+    expect(metadata.title).not.toBe("Hisse bulunamadı");
+    expect(metadata.robots).toMatchObject({ index: false });
+  });
+
+  it("still returns the missing-ticker metadata only when every probe answered empty", async () => {
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+    expect(metadata.title).toBe("Hisse bulunamadı");
   });
 });

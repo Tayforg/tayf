@@ -34,19 +34,32 @@ import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 // anyway per the worker brief so importing it never depends on a live
 // Next.js request context.
 const getClusterDetail = vi.fn();
+// Records that the page/metadata went through the THROWING variant.
+const getClusterDetailOrThrowSpy = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", async (importOriginal) => {
   const actual =
     await importOriginal<typeof import("@/lib/clusters/cluster-detail-query")>();
   return {
     ...actual,
     getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
+    // The page and generateMetadata read through the throwing variant (a
+    // timeout must not look like a missing cluster). Mapped to the SAME
+    // vi.fn so every fixture below keeps driving the page unchanged; the
+    // "timeout is not a 404" block feeds it a rejection.
+    getClusterDetailOrThrow: (...args: unknown[]) => {
+      getClusterDetailOrThrowSpy(...args);
+      return getClusterDetail(...args);
+    },
   };
 });
 const permanentRedirect = vi.fn((_url: string) => {
   throw new Error("REDIRECT");
 });
+// notFound is a no-op by default (every fixture resolves to a non-null
+// detail); the 404 tests make it throw the way Next's real one does.
+const notFound = vi.fn();
 vi.mock("next/navigation", () => ({
-  notFound: vi.fn(),
+  notFound: () => notFound(),
   permanentRedirect: (url: string) => permanentRedirect(url),
 }));
 // Story timeline ("Kim önce yazdı?"): the created_at lookup and the per-zone
@@ -339,6 +352,9 @@ const ORIGINAL_SITE_URL_ENV = process.env.NEXT_PUBLIC_SITE_URL;
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+  notFound.mockReset();
+  getClusterDetail.mockReset();
+  getClusterDetailOrThrowSpy.mockReset();
   getMemberSeenAt.mockReset();
   getMemberSeenAt.mockResolvedValue(null);
   getZoneFeedHealth.mockReset();
@@ -1423,5 +1439,74 @@ describe("merged cluster (migration 099)", () => {
     getClusterDetail.mockResolvedValue(d);
     await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
     expect(permanentRedirect).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cold-read resilience: a Supabase timeout is NOT a 404. The page and
+// generateMetadata read through getClusterDetailOrThrow, which rejects on a
+// sustained failure and resolves null only for a genuinely missing row.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — timeout is not a 404", () => {
+  const TIMEOUT = new Error(
+    "[cluster-detail] cluster query error: AbortError: Supabase request exceeded 4000 ms",
+  );
+
+  it("reads the page body and the metadata through getClusterDetailOrThrow", async () => {
+    getClusterDetail.mockResolvedValue(null);
+    notFound.mockImplementation(() => {
+      throw new Error("NEXT_NOT_FOUND");
+    });
+
+    await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    expect(getClusterDetailOrThrowSpy).toHaveBeenCalledTimes(1);
+    expect(getClusterDetailOrThrowSpy).toHaveBeenLastCalledWith("c1");
+
+    await expect(
+      ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) }),
+    ).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(getClusterDetailOrThrowSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("lets a read failure propagate to error.tsx instead of calling notFound()", async () => {
+    getClusterDetail.mockRejectedValue(TIMEOUT);
+
+    await expect(
+      ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) }),
+    ).rejects.toThrow("AbortError");
+    expect(notFound).not.toHaveBeenCalled();
+  });
+
+  it("answers generateMetadata with a noindex, canonical-less 'unavailable' shell", async () => {
+    getClusterDetail.mockRejectedValue(TIMEOUT);
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata).toEqual({
+      title: "Haber şu anda yüklenemiyor",
+      robots: { index: false, follow: true },
+      alternates: { canonical: null },
+    });
+    // Distinct from the soft-404 shell: this is "try again", not "gone".
+    expect(metadata.title).not.toBe("Sayfa bulunamadı");
+  });
+
+  it("still calls notFound() for a genuinely missing cluster (null)", async () => {
+    getClusterDetail.mockResolvedValue(null);
+    notFound.mockImplementation(() => {
+      throw new Error("NEXT_NOT_FOUND");
+    });
+
+    await expect(
+      ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) }),
+    ).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(notFound).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the soft-404 metadata for a genuinely missing cluster", async () => {
+    getClusterDetail.mockResolvedValue(null);
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    expect(metadata.title).toBe("Sayfa bulunamadı");
   });
 });

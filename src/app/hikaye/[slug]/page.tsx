@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
-import { getPublishedThreadBySlug } from "@/lib/story-threads/public-query";
+import { loadPublishedThreadBySlug } from "@/lib/story-threads/public-query";
 import { buildThreadTimeline } from "@/lib/story-threads/timeline";
 
 // /hikaye/[slug] — a published "Gelişen hikaye" thread (migration 098): the
@@ -19,9 +19,22 @@ interface PageProps {
   params: Promise<{ slug: string }>;
 }
 
+// A timeout is NOT a 404: `loadPublishedThreadBySlug` rejects on a sustained
+// read failure and resolves null only for a thread that is genuinely missing
+// (or unpublished). The catch answers a failure with a noindex "unavailable"
+// shell instead of the "Sayfa bulunamadı" shell.
 export async function generateMetadata({ params }: PageProps): Promise<Metadata> {
   const { slug } = await params;
-  const thread = await getPublishedThreadBySlug(slug);
+  let thread: Awaited<ReturnType<typeof loadPublishedThreadBySlug>>;
+  try {
+    thread = await loadPublishedThreadBySlug(slug);
+  } catch {
+    return {
+      title: "Hikaye şu anda yüklenemiyor",
+      robots: { index: false, follow: true },
+      alternates: { canonical: null },
+    };
+  }
 
   if (!thread) {
     return {
@@ -51,7 +64,9 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
 
 export default async function StoryThreadPage({ params }: PageProps) {
   const { slug } = await params;
-  const thread = await getPublishedThreadBySlug(slug);
+  // Null = genuinely missing -> notFound(). A read failure REJECTS and
+  // propagates to the root error.tsx (noindex) rather than masquerading as a 404.
+  const thread = await loadPublishedThreadBySlug(slug);
   if (!thread) notFound();
 
   const timeline = buildThreadTimeline(thread.members);

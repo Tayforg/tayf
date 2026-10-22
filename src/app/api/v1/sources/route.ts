@@ -7,7 +7,7 @@ import {
   requireApiKey,
   withApiV1Headers,
 } from "@/lib/api/keys";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import {
   registryEnvelope,
   toRegistryRecord,
@@ -31,7 +31,7 @@ export const GET = withApiErrors(async (request: Request) => {
   const auth = await requireApiKey(request);
   if (!auth.ok) return auth.response;
 
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("sources")
     .select(REGISTRY_COLUMNS)

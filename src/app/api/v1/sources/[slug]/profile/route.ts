@@ -18,7 +18,7 @@ import {
   toRegistryRecord,
   type RegistrySourceRow,
 } from "@/lib/sources/registry";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import { isValidSourceSlug } from "@/lib/validation/source-input";
 
 interface RouteContext {
@@ -35,7 +35,7 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
     return withApiV1Headers(apiBadRequest("Invalid slug"), auth.tier);
   }
 
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("sources")
     .select(V1_PROFILE_SOURCE_COLUMNS)

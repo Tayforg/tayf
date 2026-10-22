@@ -22,6 +22,8 @@ const fixture = vi.hoisted(() => ({
   articlesError: null as { message: string } | null,
   articleStates: [] as unknown[],
   sourcesState: null as unknown,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -41,9 +43,19 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+import { cacheLife, cacheTag } from "next/cache";
 import {
   fetchWeeklyDistinctiveWords,
   getWeeklyDistinctiveWords,
@@ -62,6 +74,9 @@ beforeEach(() => {
   fixture.articlesError = null;
   fixture.articleStates = [];
   fixture.sourcesState = null;
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
 });
 
 afterEach(() => {
@@ -141,5 +156,56 @@ describe("getWeeklyDistinctiveWords (never-throws, retry-once wrapper)", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     fixture.sourcesError = { message: "connection reset" };
     await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
+  });
+});
+
+describe("weekly distinctive words: capped client + cache lifetime", () => {
+  it("builds only capped reader clients", async () => {
+    await getWeeklyDistinctiveWords();
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+
+  it("the live retry after a failed cached attempt is capped too", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.sourcesError = { message: "AbortError: Supabase request exceeded 4000 ms" };
+
+    await getWeeklyDistinctiveWords();
+
+    // cached attempt + live retry
+    expect(fixture.clientOpts).toHaveLength(2);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+
+  it("success: exactly one cacheLife('hours'), tagged before the fetch", async () => {
+    await getWeeklyDistinctiveWords();
+
+    expect(cacheTag).toHaveBeenCalledWith("weekly-words");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.sourcesError = { message: "AbortError: Supabase request exceeded 4000 ms" };
+
+    await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
+
+    // cached attempt (cacheLife) + live retry (uncached, no cacheLife)
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("hours");
+  });
+
+  it("an articles-read timeout is a failure too, cached for minutes", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.articlesError = { message: "AbortError: Supabase request exceeded 4000 ms" };
+
+    await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
   });
 });

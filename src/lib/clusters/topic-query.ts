@@ -10,7 +10,7 @@ import {
 } from "@/lib/clusters/politics-query";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { resolveCachedOrRetry } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import { siteUrl } from "@/lib/site-url";
 
 // Topic-hub read for /konu and /konu/[slug] (Pack C, "Konu", migration 067's
@@ -96,7 +96,7 @@ async function fetchTopicClusters(
   const clampedPage = clampTopicPage(page);
 
   try {
-    const supabase = createServerClient();
+    const supabase = createReaderClient();
     // One clock read: two `Date.now()` calls could straddle a tick and
     // leave the window a millisecond wider than TOPIC_WINDOW_MS.
     const nowMs = Date.now();
@@ -153,12 +153,19 @@ async function fetchTopicClusters(
   }
 }
 
+// Cache lifetime follows the outcome: a read keeps the `cluster-feed` window,
+// a failed read (null) is memoised for `minutes` only, so a cold-read timeout
+// is retried within a minute and the failed /konu shell (which carries a
+// noindex) is never pinned for the whole window. Exactly one `cacheLife` call
+// per invocation, after the fetch; `cacheTag` stays first.
 async function getTopicClustersCached(slug: TopicSlug, page: number) {
   "use cache";
-  cacheLife("cluster-feed");
   cacheTag("clusters-politics");
 
   const data = await fetchTopicClusters(slug, page);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (data === null) cacheLife("minutes");
+  else cacheLife("cluster-feed");
   return data === null
     ? ({ ok: false, error: "konu clusters unavailable" } as const)
     : ({ ok: true, data } as const);
@@ -183,7 +190,7 @@ export async function getTopicClusters(
 
 async function fetchTopicCounts(): Promise<Record<TopicSlug, number> | null> {
   try {
-    const supabase = createServerClient();
+    const supabase = createReaderClient();
     const nowMs = Date.now();
     const sinceIso = new Date(nowMs - TOPIC_WINDOW_MS).toISOString();
 
@@ -232,10 +239,13 @@ async function fetchTopicCounts(): Promise<Record<TopicSlug, number> | null> {
 
 async function getTopicCountsCached() {
   "use cache";
-  cacheLife("cluster-feed");
   cacheTag("clusters-politics");
 
   const data = await fetchTopicCounts();
+  // Same outcome-driven lifetime as getTopicClustersCached above.
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (data === null) cacheLife("minutes");
+  else cacheLife("cluster-feed");
   return data === null
     ? ({ ok: false, error: "konu counts unavailable" } as const)
     : ({ ok: true, data } as const);

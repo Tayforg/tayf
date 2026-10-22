@@ -1,6 +1,11 @@
 import { cacheLife, cacheTag } from "next/cache";
 
-import { createServerClient } from "@/lib/supabase/server";
+import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import {
+  createReaderClient,
+  createServerClient,
+  type ReadProfile,
+} from "@/lib/supabase/server";
 import type { BiasCategory } from "@/types";
 import type { SummaryMember } from "./summary-attribution";
 
@@ -69,22 +74,20 @@ function dedupeBySource(rows: EmbeddedArticleRow[]): SummaryMember[] {
   return members;
 }
 
-// Internal, cached implementation. THROWS on a Supabase error/exception —
-// mirroring search-query.ts's cachedSearchClusters/searchClusters split —
-// because this function carries the "use cache" boundary. A caught-and-
-// swallowed error here would cache an empty {} as truth for the whole
-// cluster-feed window (every cluster degrading to the generic label or a
-// hidden summary for minutes after one Supabase blip). The public
-// `getRssSummaryMembers` below sits outside the cache and converts the
-// throw into the documented never-throw, fail-closed-on-honesty contract.
-async function cachedRssSummaryMembers(
+// Internal, uncached implementation. THROWS on a Supabase error/exception.
+// The cached wrapper below converts that throw into a `{ ok: false }` sentinel
+// (never let it cross the "use cache" boundary), and the public entry's live
+// retry calls this directly.
+//
+// "reader" (/rss.xml) fails fast at 4 s; "batch" (the weekly digest cron)
+// keeps the plain client so a cold read can use the 8 s statement_timeout
+// instead of skipping the run.
+async function fetchRssSummaryMembers(
   clusterIds: string[],
+  profile: ReadProfile,
 ): Promise<Record<string, SummaryMember[]>> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag("clusters-politics");
-
-  const supabase = createServerClient();
+  const supabase =
+    profile === "batch" ? createServerClient() : createReaderClient();
   const { data, error } = await supabase
     .from("cluster_articles")
     .select(
@@ -112,6 +115,32 @@ async function cachedRssSummaryMembers(
   return result;
 }
 
+// Cached entry. Build-safety: `attemptCached` swallows whatever
+// `fetchRssSummaryMembers` throws, so nothing crosses the "use cache"
+// boundary (a throw there fails `next build`'s prerender). A failed attempt is
+// still cached, but only for `minutes` (exactly ONE `cacheLife` per
+// invocation, chosen after the attempt) so one cold-read timeout cannot park
+// an `{ ok: false }` sentinel for a whole `cluster-feed` window; the public
+// entry's live retry heals it per request in the meantime.
+//
+// `profile` is an argument on purpose: it is part of the cache key, so a
+// capped "reader" entry (or its cached failure) is never served to the
+// "batch" digest cron, and the cron's own miss runs uncapped.
+async function rssSummaryMembersCached(
+  clusterIds: string[],
+  profile: ReadProfile,
+) {
+  "use cache";
+  cacheTag("clusters-politics");
+  const r = await attemptCached("rss-summary-attribution", () =>
+    fetchRssSummaryMembers(clusterIds, profile),
+  );
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
+}
+
 export interface RssSummaryMembersResult {
   members: Record<string, SummaryMember[]>;
   /**
@@ -130,25 +159,36 @@ export interface RssSummaryMembersResult {
 }
 
 // Public, uncached entry point. Lives OUTSIDE the cache boundary so a
-// failure is never memoised: it catches whatever `cachedRssSummaryMembers`
-// throws, logs it, and returns `{ members: {}, lookupFailed: true }` for
-// THIS request only — the next request gets a fresh attempt instead of a
-// cached failure. `lookupFailed` is the fail-closed-on-rights signal
-// callers must check before falling back to summaryAttributionWithoutMembers
-// (see that function and resolveSummaryAttribution in
-// summary-attribution.ts): an empty `members` result alone is ambiguous
-// between "no attributable members" (safe to degrade) and "the lookup
-// broke" (must hide the excerpt, not degrade to it).
+// failure is never memoised: on a cached-attempt failure it retries the
+// lookup live once (`resolveCachedOrRetry`), and only when that also fails
+// does it return `{ members: {}, lookupFailed: true }` for THIS request - the
+// next request gets a fresh attempt instead of a cached failure. Never
+// throws. `lookupFailed` is the fail-closed-on-rights signal callers must
+// check before falling back to summaryAttributionWithoutMembers (see that
+// function and resolveSummaryAttribution in summary-attribution.ts): an empty
+// `members` result alone is ambiguous between "no attributable members" (safe
+// to degrade) and "the lookup broke" (must hide the excerpt, not degrade to
+// it).
+//
+// `opts.profile` defaults to the capped "reader" (/rss.xml). The digest cron
+// shares this lookup and must pass `{ profile: "batch" }` (CI guard:
+// tests/guards/cron-read-profile.test.ts).
 export async function getRssSummaryMembers(
   clusterIds: string[],
+  opts?: { profile?: ReadProfile },
 ): Promise<RssSummaryMembersResult> {
   if (clusterIds.length === 0) return { members: {}, lookupFailed: false };
 
-  try {
-    const members = await cachedRssSummaryMembers(clusterIds);
-    return { members, lookupFailed: false };
-  } catch (err) {
-    console.warn("[rss-summary-attribution] lookup failed:", err);
-    return { members: {}, lookupFailed: true };
-  }
+  const profile = opts?.profile ?? "reader";
+  const members = await resolveCachedOrRetry<Record<
+    string,
+    SummaryMember[]
+  > | null>(
+    "rss-summary-attribution",
+    () => rssSummaryMembersCached(clusterIds, profile),
+    () => fetchRssSummaryMembers(clusterIds, profile),
+    null,
+  );
+  if (members === null) return { members: {}, lookupFailed: true };
+  return { members, lookupFailed: false };
 }
