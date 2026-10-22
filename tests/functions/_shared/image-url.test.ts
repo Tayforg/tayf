@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeImageUrl } from "../../../supabase/functions/_shared/image-url.ts";
+import {
+  isOptimizableImageUrl,
+  normalizeImageUrl,
+} from "../../../supabase/functions/_shared/image-url.ts";
 
 // ---------------------------------------------------------------------------
 // ingest-hygiene: one shared normaliser for image URLs. haber7 (and a few
@@ -84,5 +87,53 @@ describe("normalizeImageUrl", () => {
 
   it("returns null for a bare '//' (no host)", () => {
     expect(normalizeImageUrl("//")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// gif-filter (http-1): haber7 and elips-haber ship a 22.3 MB animated
+// placeholder GIF that /_next/image passes through UNMODIFIED (the optimizer
+// never re-encodes animated GIFs), so the filter has to live at the query
+// boundary, ingest, and the card -- never at the CDN.
+// ---------------------------------------------------------------------------
+
+describe("isOptimizableImageUrl", () => {
+  it.each([
+    ["a .gif", "https://i12.haber7.net/x/rlQtL_1579004365_7688.gif"],
+    ["an upper-case .GIF", "https://i12.haber7.net/x/rlQtL_1579004365_7688.GIF"],
+    ["a .gif with a query string", "https://h/a.gif?x=1"],
+    ["a .gif with a fragment", "https://h/a.gif#a"],
+    ["a protocol-relative .gif", "//cdn.x/a.gif"],
+    ["a .gif padded with whitespace", "  https://h/a.gif \n"],
+  ])("is false for %s", (_label, input) => {
+    expect(isOptimizableImageUrl(input)).toBe(false);
+  });
+
+  it("is false for null, undefined and the empty string", () => {
+    expect(isOptimizableImageUrl(null)).toBe(false);
+    expect(isOptimizableImageUrl(undefined)).toBe(false);
+    expect(isOptimizableImageUrl("")).toBe(false);
+  });
+
+  it("is false for a whitespace-only string and for non-string input", () => {
+    expect(isOptimizableImageUrl("   ")).toBe(false);
+    expect(isOptimizableImageUrl(42 as unknown as string)).toBe(false);
+    expect(isOptimizableImageUrl({} as unknown as string)).toBe(false);
+  });
+
+  it.each([
+    ["a .jpg", "https://h/a.jpg"],
+    ["a .webp", "https://h/a.webp"],
+    ["a .png with a query", "https://h/a.png?w=100"],
+    ["an extensionless URL whose query merely mentions gif", "https://h/img?format=gif"],
+    ["a .gifv path (not a .gif)", "https://h/a.gifv"],
+    ["a path that contains 'gif' mid-name", "https://h/gift/a.jpg"],
+  ])("is true for %s", (_label, input) => {
+    expect(isOptimizableImageUrl(input)).toBe(true);
+  });
+
+  it("does not re-normalise: a doubled leading slash does not change the verdict", () => {
+    expect(isOptimizableImageUrl("https://h//a.jpg")).toBe(true);
+    expect(isOptimizableImageUrl("https://h//a.gif")).toBe(false);
   });
 });

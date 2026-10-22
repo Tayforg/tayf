@@ -557,6 +557,84 @@ describe("BL-13 image_allowed gate", () => {
 });
 
 // ---------------------------------------------------------------------------
+// gif-filter (http-1) — haber7 / elips-haber ship a 22 MB animated placeholder
+// GIF that /_next/image passes through unmodified. The bundle boundary nulls
+// it so the URL never reaches the RSC/HTML payload, not just the <Image>.
+// ---------------------------------------------------------------------------
+
+describe("gif-filter image_url gate", () => {
+  it("nulls a .gif member image_url and leaves a .jpg member untouched", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            {
+              id: "a-gif",
+              sourceId: "s-gif",
+              image_url: "https://i12.haber7.net/x/rlQtL_1579004365_7688.gif",
+              published_at: iso(5 * 60 * 1000),
+            },
+            {
+              id: "a-jpg",
+              sourceId: "s-jpg",
+              image_url: "https://cdn.allowed.example/foto.jpg",
+              published_at: iso(10 * 60 * 1000),
+            },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    const byId = Object.fromEntries(bundles[0].articles.map((a) => [a.id, a]));
+    expect(byId["a-gif"].image_url).toBeNull();
+    expect(byId["a-jpg"].image_url).toBe("https://cdn.allowed.example/foto.jpg");
+  });
+
+  it("nulls an upper-case .GIF with a query string even when image_allowed is true", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            {
+              id: "a-gif",
+              sourceId: "s-gif",
+              image_url: "https://cdn.elips.example/ph.GIF?v=2",
+              image_allowed: true,
+            },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].articles[0].image_url).toBeNull();
+  });
+
+  it("keeps a URL that only mentions gif in its query string", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            {
+              id: "a-q",
+              sourceId: "s-q",
+              image_url: "https://cdn.example/img?format=gif",
+            },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    expect(bundles[0].articles[0].image_url).toBe("https://cdn.example/img?format=gif");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // H2 neutral-headline coalesce
 // ---------------------------------------------------------------------------
 

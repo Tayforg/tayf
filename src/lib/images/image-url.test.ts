@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { firstPartyLogoUrl, normalizeImageUrl } from "./image-url";
+import {
+  firstPartyLogoUrl,
+  isOptimizableImageUrl,
+  normalizeImageUrl,
+} from "./image-url";
 
 // ---------------------------------------------------------------------------
 // ingest-hygiene: render-side image helpers.
@@ -20,6 +24,15 @@ describe("normalizeImageUrl (re-export)", () => {
     );
     expect(normalizeImageUrl("//cdn.x/a.jpg")).toBe("https://cdn.x/a.jpg");
     expect(normalizeImageUrl("/rel.jpg")).toBeNull();
+  });
+});
+
+describe("isOptimizableImageUrl (re-export)", () => {
+  it("is the shared implementation", () => {
+    expect(isOptimizableImageUrl("https://h.test/a.jpg")).toBe(true);
+    expect(isOptimizableImageUrl("https://i12.haber7.net/x/rlQtL_1579004365_7688.gif")).toBe(
+      false,
+    );
   });
 });
 

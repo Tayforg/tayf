@@ -8,6 +8,7 @@ import type {
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
 import { attemptCached } from "@/lib/cache-resilience";
+import { isOptimizableImageUrl } from "@/lib/images/image-url";
 import {
   createReaderClient,
   createServerClient,
@@ -617,7 +618,16 @@ export function buildClusterBundle(
       // consumer of this bundle (cluster-card.tsx picks its hero from
       // this exact field). `undefined` (legacy rows/fixtures predating
       // migration 047) is treated as allowed so nothing regresses.
-      image_url: m.sources?.image_allowed === false ? null : m.image_url,
+      //
+      // gif-filter (http-1): an animated GIF is nulled here too. haber7 /
+      // elips-haber ship a 22 MB placeholder GIF that /_next/image passes
+      // through unmodified; nulling at the bundle boundary keeps the URL out
+      // of the RSC/HTML payload, not just out of the <Image>. Existing rows
+      // heal at render time (no backfill).
+      image_url:
+        m.sources?.image_allowed === false || !isOptimizableImageUrl(m.image_url)
+          ? null
+          : m.image_url,
       published_at: m.published_at,
       source_id: m.source_id,
     })),

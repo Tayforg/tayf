@@ -2381,3 +2381,37 @@ After the deploy, a ticker whose attention was mostly notices (for example a ban
 **Kill switch:** `select cron.unschedule('legal-notice-mark');` stops the backstop. To make the readers count everything again without a deploy, empty the table as the owner: `delete from public.legal_notice_articles;` (the next cron tick or backfill refills it, so unschedule first).
 
 **Rollback:** nothing depends on 107, and the readers fail open. `select cron.unschedule('legal-notice-mark'); drop function public.legal_notice_mark(timestamptz, timestamptz); drop function public.is_legal_notice(text, text); drop table public.legal_notice_articles; delete from supabase_migrations.schema_migrations where version = '107';` Redeploying the previous app build is optional.
+
+## 108 — ops heartbeat v2 + jev-shadow cron (timeout 120 s, enqueued_at): REDEPLOY jev-shadow WITH --no-verify-jwt
+
+**Why:** the 2026-10-22 `jev-shadow` stall read green. pg_net rows 329690 and 329711 had `timed_out = true` and a NULL status (no body, so row 12's 5xx count saw nothing), and the function kept closing zero-call `partial` runs (3622, 3623) that advanced `max(finished_at)`, so `jev_shadow_last_run_min` (row 7 in `docs/ops-heartbeat.md`) passed too. The run rows also carried a NULL `note`, and the 60 s pg_net timeout is shorter than the run's wall time (50 s deadline + startup + queue time). Separately, 41 of the 42 unacked `jev_alerts` were already resolved, so `jev_alerts_unacked_72h` warned for nothing.
+
+**What it does** (one transaction, no new table, safe to re-apply):
+
+1. `create or replace` of `public.ops_health_report()`: 103's body verbatim except three checks. `jev_shadow_last_run_min` reads only runs that closed `ok`/`budget_exceeded` or made a call (`budget_exceeded` counts as fresh, so a deliberate monthly cap does not page); `jev_alerts_unacked_72h` counts only unresolved alerts; `jev_shadow_cron_failures_30m` adds zero-call `partial`/`error` runs of the last 30 minutes and reports `timed_out` pg_net rows in its `detail` (they only raise `pass` to `warn`). Same signature, `service_role`-only grants.
+2. Reschedules the `jev-shadow` pg_cron job (`*/10 * * * *`, url and headers as in 061) with `timeout_milliseconds := 120000` and a body `{"enqueued_at": "<UTC ISO-8601, ms precision>"}`. Same guards as 061: if `pg_cron`/`pg_net` or the Vault secrets `service_role_key` / `functions_base_url` are missing it raises a NOTICE and does nothing. It reads only `cron.job.active`, never the command.
+
+**Deploy order:**
+
+1. Apply `108_jev_stall_check_v2.sql` (after 103; it repeats 103's function body). Expect no NOTICE on production; a "skipping jev-shadow reschedule" NOTICE means the cron half did nothing and must be investigated (Vault secrets, see 038).
+2. **Redeploy `jev-shadow`:**
+
+   ```bash
+   supabase functions deploy jev-shadow --project-ref <ref> --no-verify-jwt
+   ```
+
+   Always with `--no-verify-jwt`, like every Edge Function in this guide. The new code (a) derives its deadline from `enqueued_at` (`JEV_POKE_BUDGET_MS` 45 s minus the queue age, floor `JEV_MIN_DEADLINE_MS` 10 s, never above `JEV_DEADLINE_MS` 50 s; a body without `enqueued_at`, such as the audit/regression crons or a manual poke, keeps 50 s), (b) stops the anti-join and the article pager once that deadline passes, and (c) writes `deadline: <stage> at <ms>ms, calls=<n>` into `jev_shadow_runs.note` when a deadline stop closes the run `partial` (a `stage failed: ...` note wins; regression runs keep their `regression; ` prefix). Steps 1 and 2 may happen in either order: the old function ignores `enqueued_at`, and the new one works without it.
+
+**Kill switch preserved:** if an operator paused the job (`update cron.job set active = false where jobname = 'jev-shadow';`), the migration reads `active` before unscheduling and sets it back to `false` after rescheduling, so applying 108 never re-enables a paused job. A job that did not exist is created active.
+
+**Verify** (read-only; never select `cron.job.command` in a shared terminal):
+
+```sql
+select count(*) from public.ops_health_report();  -- 12
+select check_name, status, observed, detail from public.ops_health_report() where check_name in ('jev_shadow_last_run_min', 'jev_alerts_unacked_72h', 'jev_shadow_cron_failures_30m');
+select jobname, schedule, active from cron.job where jobname = 'jev-shadow';  -- */10 * * * *, active as before
+select id, status, calls, note from public.jev_shadow_runs order by id desc limit 5;  -- a deadline stop now has a note
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute');  -- expect false
+```
+
+**Rollback:** re-apply `103_jev_shadow_stall_check.sql` to restore the previous function, re-run the `do $$ ... $$` block of `061_jev_shadow.sql` to restore the 60 s timeout and empty-body cron command (re-pause the job afterwards if it was paused), then `delete from supabase_migrations.schema_migrations where version = '108';`. The redeployed `jev-shadow` can stay.

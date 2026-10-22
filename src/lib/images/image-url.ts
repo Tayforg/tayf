@@ -4,9 +4,15 @@
 //    ingest and render agree on one spelling (precedent: src/lib/bias/config.ts
 //    re-exporting supabase/functions/_shared/cluster/*). Applying it at render
 //    heals rows already stored as `https://h//x.jpg` or `//cdn/x.jpg`.
+//  - `isOptimizableImageUrl` is the same shared module's animated-GIF guard
+//    (gif-filter / http-1): a 22 MB placeholder GIF passes through
+//    /_next/image unmodified, so every render boundary filters with it.
 //  - `firstPartyLogoUrl` routes Google S2 favicons through our own image
 //    optimizer.
-export { normalizeImageUrl } from "../../../supabase/functions/_shared/image-url";
+export {
+  isOptimizableImageUrl,
+  normalizeImageUrl,
+} from "../../../supabase/functions/_shared/image-url";
 
 // Widths present in next.config.ts `images.imageSizes`. /_next/image rejects
 // any other `w`, and `q=75` is in `images.qualities`.

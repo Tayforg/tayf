@@ -6,6 +6,7 @@ import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import { isOptimizableImageUrl } from "@/lib/images/image-url";
 import {
   degradedSilentZone,
   getZoneFeedHealth,
@@ -400,7 +401,13 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
           title: article.title,
           url: article.url,
           published_at: article.published_at,
-          image_url: article.image_url,
+          // gif-filter (http-1): an animated GIF is nulled at the query
+          // boundary (22 MB haber7 / elips-haber placeholder that
+          // /_next/image passes through unmodified), so the hero, credits and
+          // alt text fall to the next member's image automatically.
+          image_url: isOptimizableImageUrl(article.image_url)
+            ? article.image_url
+            : null,
           content_hash: article.content_hash,
           description: article.description ?? null,
         },

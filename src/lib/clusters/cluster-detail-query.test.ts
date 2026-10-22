@@ -593,6 +593,51 @@ describe("BL-13 per-source rights flags", () => {
   });
 });
 
+describe("gif-filter article image_url (http-1)", () => {
+  it("nulls a member whose article image is a .gif and keeps a .jpg member's image", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a-gif", "s-gif", "2026-04-17T10:00:00Z", {
+            article: { image_url: "https://i12.haber7.net/x/rlQtL_1579004365_7688.gif" },
+          }),
+          mkEmbeddedMember("a-jpg", "s-jpg", "2026-04-17T09:00:00Z", {
+            article: { image_url: "https://cdn.example/a-jpg.jpg" },
+          }),
+          mkEmbeddedMember("a-upper", "s-upper", "2026-04-17T08:00:00Z", {
+            article: { image_url: "https://cdn.example/PH.GIF?v=2" },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    const byArticle = Object.fromEntries(
+      result!.members.map((m) => [m.article.id, m.article]),
+    );
+    expect(byArticle["a-gif"].image_url).toBeNull();
+    expect(byArticle["a-jpg"].image_url).toBe("https://cdn.example/a-jpg.jpg");
+    expect(byArticle["a-upper"].image_url).toBeNull();
+  });
+
+  it("leaves a null article image_url null", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [mkEmbeddedMember("a-none", "s-none", "2026-04-17T10:00:00Z")],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.members[0].article.image_url).toBeNull();
+  });
+});
+
 describe("pack G3 trustee plumbing", () => {
   it("threads trustee_since/trustee_note through to each member's source, defaulting missing fields to null", async () => {
     responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };

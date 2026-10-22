@@ -209,3 +209,89 @@ describe("ClusterCardImage — first-party logo tier (ingest-hygiene)", () => {
     expect(markup).not.toContain("/_next/image");
   });
 });
+
+// ---------------------------------------------------------------------------
+// gif-filter (http-1): haber7 / elips-haber placeholder GIFs are 22 MB and
+// pass through /_next/image unmodified. The query boundaries already null
+// them; the card drops them too (defence in depth) so a GIF can never reach
+// next/image no matter which caller builds the candidate list.
+// ---------------------------------------------------------------------------
+describe("ClusterCardImage — animated GIF filter (http-1)", () => {
+  const GIF = "https://i12.haber7.net/x/rlQtL_1579004365_7688.gif";
+
+  it("skips a .gif src and renders the next jpg candidate", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={GIF}
+        srcs={["https://cdn.outlet.example/ok.jpg"]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://cdn.outlet.example/ok.jpg"');
+    expect(markup).not.toContain(".gif");
+  });
+
+  it("skips a .gif that appears in srcs (query string and upper-case included)", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://cdn.outlet.example/a.GIF"
+        srcs={["https://cdn.outlet.example/b.gif?x=1", "https://cdn.outlet.example/c.webp"]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://cdn.outlet.example/c.webp"');
+    expect(markup.toLowerCase()).not.toContain(".gif");
+  });
+
+  it("falls to the logo tier when the only candidate is a .gif", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={GIF}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Outlet Gazete"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://example.com/logo.png"');
+    expect(markup).toContain("Outlet Gazete");
+    expect(markup).not.toContain(".gif");
+  });
+
+  it("falls to the placeholder when the only candidate is a .gif and there is no logo", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={GIF}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).not.toContain("<img");
+    expect(markup).not.toContain(".gif");
+    expect(markup).toContain('role="img"');
+    expect(markup).toContain('aria-label="Test görseli"');
+  });
+
+  it("still renders a .gifv-named or query-only-gif URL (only a .gif path is filtered)", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://cdn.outlet.example/img?format=gif"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://cdn.outlet.example/img?format=gif"');
+  });
+});

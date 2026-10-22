@@ -4,8 +4,8 @@ import Link from "next/link";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
+import { SourceLogo } from "@/components/source/source-logo";
 import { ZONE_META } from "@/lib/bias/config";
-import { firstPartyLogoUrl } from "@/lib/images/image-url";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
@@ -329,21 +329,14 @@ export function ClusterCard({
                   key={a.id}
                   className="flex items-center gap-1.5 leading-relaxed min-w-0"
                 >
-                  {a.source_logo_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={firstPartyLogoUrl(a.source_logo_url) ?? a.source_logo_url}
-                      alt=""
-                      width={14}
-                      height={14}
-                      className="h-3.5 w-3.5 rounded shrink-0"
-                      loading="lazy"
-                    />
-                  ) : (
-                    <span className="inline-flex h-3.5 w-3.5 items-center justify-center rounded bg-muted text-[8px] font-bold text-muted-foreground shrink-0">
-                      {a.source_name.slice(0, 2).toUpperCase()}
-                    </span>
-                  )}
+                  <SourceLogo
+                    logoUrl={a.source_logo_url}
+                    name={a.source_name}
+                    size={14}
+                    className="h-3.5 w-3.5 rounded shrink-0"
+                    fallback="initials"
+                    fallbackClassName="inline-flex h-3.5 w-3.5 items-center justify-center rounded bg-muted text-[8px] font-bold text-muted-foreground shrink-0"
+                  />
                   <span className="block truncate min-w-0">
                     <span className="text-foreground font-mono font-medium text-[10px] mr-1.5">
                       {a.source_name}

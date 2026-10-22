@@ -89,7 +89,12 @@ function mkMember(
   clusterId: string,
   index: number,
   bias: BiasCategory,
-  overrides: { image_url?: string | null; image_allowed?: boolean } = {},
+  overrides: {
+    image_url?: string | null;
+    image_allowed?: boolean;
+    /** browser-3: `undefined` leaves the key off the embed (legacy row). */
+    logo_url?: string | null;
+  } = {},
 ) {
   const sourceId = `${clusterId}-s${index}`;
   return {
@@ -108,6 +113,7 @@ function mkMember(
         bias,
         kind: "outlet",
         image_allowed: overrides.image_allowed,
+        ...(overrides.logo_url !== undefined ? { logo_url: overrides.logo_url } : {}),
       },
     },
   };
@@ -116,7 +122,11 @@ function mkMember(
 function mkBlindspotClusterRow(
   id: string,
   bias: BiasCategory,
-  memberOverrides: Array<{ image_url?: string | null; image_allowed?: boolean }> = [],
+  memberOverrides: Array<{
+    image_url?: string | null;
+    image_allowed?: boolean;
+    logo_url?: string | null;
+  }> = [],
 ) {
   return {
     id,
@@ -338,6 +348,9 @@ describe("getBlindspots Step B: batched embed", () => {
     expect(selectArg).toMatch(/\bblindspot_recall_veto\b/);
     expect(selectArg).toMatch(/sources\s*\([^)]*\bimage_allowed\b/);
     expect(selectArg).toMatch(/sources\s*\([^)]*\bexcerpt_allowed\b/);
+    // browser-3: the sources embed must carry logo_url so the headline rows
+    // can render favicons (ClusterCardSource.logo_url).
+    expect(selectArg).toMatch(/sources\s*\([^)]*\blogo_url\b/);
     // Migration 089 ("ADMIT"): politics_share must see the admission stamp.
     expect(selectArg).toMatch(/\bpolitics_admitted_at\b/);
   });
@@ -430,6 +443,64 @@ describe("getBlindspots BL-13 image_allowed gate", () => {
     expect(byId["cluster-gate-a1"]?.image_url).toBe(
       "https://cdn.allowed.example/foto.jpg",
     );
+  });
+});
+
+describe("getBlindspots gif-filter image_url gate (http-1)", () => {
+  it("nulls a .gif member image_url, leaving a .jpg member untouched", async () => {
+    seedRows([
+      mkBlindspotClusterRow("cluster-gif", "pro_government", [
+        { image_url: "https://i12.haber7.net/x/rlQtL_1579004365_7688.gif" },
+        { image_url: "https://cdn.allowed.example/foto.jpg" },
+        { image_url: "https://cdn.elips.example/ph.GIF?v=2", image_allowed: true },
+      ]),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const byId = Object.fromEntries(bundles[0]!.articles.map((a) => [a.id, a]));
+    expect(byId["cluster-gif-a0"]?.image_url).toBeNull();
+    expect(byId["cluster-gif-a1"]?.image_url).toBe("https://cdn.allowed.example/foto.jpg");
+    expect(byId["cluster-gif-a2"]?.image_url).toBeNull();
+  });
+});
+
+describe("getBlindspots source logo_url (browser-3)", () => {
+  it("surfaces the embedded source logo_url on bundle.sources", async () => {
+    const logo = "https://www.google.com/s2/favicons?domain=x.com&sz=64";
+    seedRows([
+      mkBlindspotClusterRow("cluster-logo", "pro_government", [{ logo_url: logo }]),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const byId = Object.fromEntries(bundles[0]!.sources.map((s) => [s.id, s]));
+    expect(byId["cluster-logo-s0"]?.logo_url).toBe(logo);
+  });
+
+  it("falls back to null when the embed carries no logo_url", async () => {
+    seedRows([mkBlindspotClusterRow("cluster-nologo", "pro_government")]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]!.sources.length).toBeGreaterThan(0);
+    for (const src of bundles[0]!.sources) {
+      expect(src.logo_url).toBeNull();
+    }
+  });
+
+  it("keeps an explicit null logo_url as null", async () => {
+    seedRows([
+      mkBlindspotClusterRow("cluster-nulllogo", "pro_government", [{ logo_url: null }]),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    const first = bundles[0]!.sources.find((s) => s.id === "cluster-nulllogo-s0");
+    expect(first?.logo_url).toBeNull();
   });
 });
 

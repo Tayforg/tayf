@@ -23,7 +23,7 @@
 //   - All fetches are GET-only, follow at most 3 redirects, and reject any
 //     hop whose target resolves to a private IP.
 
-import { normalizeImageUrl } from "./image-url.ts";
+import { isOptimizableImageUrl, normalizeImageUrl } from "./image-url.ts";
 import { safeFetch, SafeFetchError } from "./safe-fetch.ts";
 
 const OG_IMAGE_REGEX =
@@ -72,6 +72,12 @@ export interface FetchOgImageOptions {
  * Validate that a URL looks like a real content image — not a favicon, logo,
  * pixel tracker, spacer, or a data: URI. Same rule set as the Node helper so
  * all three call sites agree.
+ *
+ * gif-filter (http-1): an animated GIF is rejected too. haber7 and
+ * elips-haber advertise a 22.3 MB placeholder GIF that /_next/image passes
+ * through unmodified. This is also the image-consumer gate
+ * (image-consumer/index.ts), so a GIF returned by `fetchOgImage` is recorded
+ * as `not-found` and capped by the existing attempts logic.
  */
 export function isValidImageUrl(url: unknown): url is string {
   if (!url || typeof url !== "string") return false;
@@ -79,6 +85,7 @@ export function isValidImageUrl(url: unknown): url is string {
   if (url.startsWith("data:")) return false;
   if (!/^https?:\/\//i.test(url)) return false;
   if (/favicon|icon|logo|pixel|tracker|1x1|spacer/i.test(url)) return false;
+  if (!isOptimizableImageUrl(url)) return false;
   return true;
 }
 

@@ -175,6 +175,126 @@ describe("collectPendingArticles", () => {
   });
 });
 
+describe("collectPendingArticles: isPastDeadline (db-1)", () => {
+  it("stops before the next page once isPastDeadline turns true, returning the rows collected so far", async () => {
+    const rows = makeRows(40);
+    const { fetchPage, calls } = fakeFetchPage(rows);
+    let pastDeadline = false;
+    const result = await collectPendingArticles({
+      limit: 30,
+      pageSize: 5,
+      maxPages: 8,
+      freshMaxPages: 4,
+      fetchPage: async (order, from, to) => {
+        const page = await fetchPage(order, from, to);
+        pastDeadline = true; // the clock runs out while page 1 is in flight
+        return page;
+      },
+      seen: seenFactory(new Set()),
+      isPastDeadline: () => pastDeadline,
+    });
+    expect(calls).toHaveLength(1);
+    expect(result.stoppedAtDeadline).toBe(true);
+    expect(result.rows.map((r) => r.id)).toEqual(["a39", "a38", "a37", "a36", "a35"]);
+    expect(result.pagesRead).toBe(1);
+    expect(result.freshRows).toBe(5);
+    expect(result.backfillRows).toBe(0);
+  });
+
+  it("a deadline already past before page 1 fetches nothing", async () => {
+    const { fetchPage, calls } = fakeFetchPage(makeRows(10));
+    const result = await collectPendingArticles({
+      limit: 5,
+      pageSize: 3,
+      maxPages: 4,
+      freshMaxPages: 2,
+      fetchPage,
+      seen: seenFactory(new Set()),
+      isPastDeadline: () => true,
+    });
+    expect(calls).toHaveLength(0);
+    expect(result.rows).toEqual([]);
+    expect(result.stoppedAtDeadline).toBe(true);
+  });
+
+  it("a deadline reached between pass 1 and pass 2 skips the backlog pass", async () => {
+    const rows = makeRows(20);
+    // Everything seen except a0 (backlog) and a19 (fresh): pass 1 cannot fill the limit.
+    const seen = new Set(rows.map((r) => r.id).filter((id) => id !== "a0" && id !== "a19"));
+    const { fetchPage, calls } = fakeFetchPage(rows);
+    let fetched = 0;
+    const result = await collectPendingArticles({
+      limit: 5,
+      pageSize: 5,
+      maxPages: 8,
+      freshMaxPages: 1,
+      fetchPage: async (order, from, to) => {
+        fetched++;
+        return fetchPage(order, from, to);
+      },
+      seen: seenFactory(seen),
+      isPastDeadline: () => fetched >= 1,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.order).toBe("desc");
+    expect(result.rows.map((r) => r.id)).toEqual(["a19"]);
+    expect(result.stoppedAtDeadline).toBe(true);
+  });
+
+  it("a deadline reached mid-backlog returns the fresh and backlog rows found so far", async () => {
+    const rows = makeRows(30);
+    const seen = new Set(rows.map((r) => r.id).filter((id) => id !== "a29" && id !== "a0" && id !== "a1"));
+    const { fetchPage, calls } = fakeFetchPage(rows);
+    let fetched = 0;
+    const result = await collectPendingArticles({
+      limit: 10,
+      pageSize: 5,
+      maxPages: 8,
+      freshMaxPages: 1,
+      fetchPage: async (order, from, to) => {
+        fetched++;
+        return fetchPage(order, from, to);
+      },
+      seen: seenFactory(seen),
+      isPastDeadline: () => fetched >= 2, // after one fresh page and one backlog page
+    });
+    expect(calls.map((c) => c.order)).toEqual(["desc", "asc"]);
+    expect(result.rows.map((r) => r.id)).toEqual(["a29", "a0", "a1"]);
+    expect(result.stoppedAtDeadline).toBe(true);
+  });
+
+  it("when isPastDeadline is never true behaviour is unchanged and stoppedAtDeadline is false", async () => {
+    const rows = makeRows(20);
+    const seen = new Set(rows.map((r) => r.id).filter((id) => id !== "a0" && id !== "a19"));
+    const baseOpts = { limit: 5, pageSize: 5, maxPages: 4, freshMaxPages: 2, seen: seenFactory(seen) };
+    const plain = fakeFetchPage(rows);
+    const without = await collectPendingArticles({ ...baseOpts, fetchPage: plain.fetchPage });
+    const guarded = fakeFetchPage(rows);
+    const withGuard = await collectPendingArticles({
+      ...baseOpts,
+      fetchPage: guarded.fetchPage,
+      isPastDeadline: () => false,
+    });
+    expect(withGuard).toEqual(without);
+    expect(guarded.calls).toEqual(plain.calls);
+    expect(withGuard.stoppedAtDeadline).toBe(false);
+    expect(without.stoppedAtDeadline).toBe(false);
+  });
+
+  it("returns the full result shape, with stoppedAtDeadline false, on an empty window", async () => {
+    const { fetchPage } = fakeFetchPage([]);
+    const result = await collectPendingArticles({
+      limit: 10,
+      pageSize: 5,
+      maxPages: 4,
+      freshMaxPages: 2,
+      fetchPage,
+      seen: seenFactory(new Set()),
+    });
+    expect(result).toEqual({ rows: [], freshRows: 0, backfillRows: 0, pagesRead: 1, stoppedAtDeadline: false });
+  });
+});
+
 describe("jev-shadow/index.ts static guard (jev-pipeline)", () => {
   const indexTs = readFileSync(
     resolve(__dirname, "..", "..", "supabase", "functions", "jev-shadow", "index.ts"),
@@ -192,5 +312,22 @@ describe("jev-shadow/index.ts static guard (jev-pipeline)", () => {
     expect(freshMatch).not.toBeNull();
     expect(maxMatch).not.toBeNull();
     expect(Number(freshMatch?.[1])).toBeLessThan(Number(maxMatch?.[1]));
+  });
+
+  it("derives the per-request deadline from the poke body and hands it to makePorts (db-1)", () => {
+    expect(indexTs).toContain("requestDeadlineMs(parsed, Date.now())");
+    expect(indexTs).toContain("makePorts(apiKey, deadlineAt)");
+    expect(indexTs).toContain("deadlineMs,");
+    expect(indexTs).not.toContain("deadlineMs: JEV_DEADLINE_MS");
+  });
+
+  it("makes the anti-join stop at the deadline instead of running past it (db-1)", () => {
+    expect(indexTs).toContain("throw new JevDeadlineError(");
+    expect(indexTs).toMatch(/deadlineAt !== undefined && Date\.now\(\) > deadlineAt/);
+  });
+
+  it("passes isPastDeadline to collectPendingArticles and logs deadline_stop (db-1)", () => {
+    expect(indexTs).toMatch(/isPastDeadline:\s*\(\)\s*=>\s*deadlineAt !== undefined && Date\.now\(\) > deadlineAt/);
+    expect(indexTs).toContain("deadline_stop=${result.stoppedAtDeadline}");
   });
 });

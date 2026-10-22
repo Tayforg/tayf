@@ -140,8 +140,16 @@ export default function RootLayout({
         <Suspense fallback={<HeaderFallback />}>
           <Header />
         </Suspense>
-        {/* id is the skip-link target (header.tsx); tabIndex={-1} makes it programmatically focusable so Safari actually moves focus, not just scroll */}
-        <main id="main" tabIndex={-1} className="flex-1">
+        {/* id is the skip-link target (header.tsx); tabIndex={-1} makes it programmatically focusable so Safari actually moves focus, not just scroll.
+            min-h reserves one small viewport minus the 59px header (keep in
+            sync with HeaderFallback in header.tsx; layout-main.test.ts pins
+            both). Under a short loading.tsx skeleton the footer therefore
+            starts below the first viewport instead of painting inside it and
+            being pushed off-screen when content streams in — moving an
+            off-screen element is not counted as CLS (browser-2: 0.27 on
+            /sources desktop). Genuinely short pages (404, error boundary)
+            keep their content at the top with the footer just below the fold. */}
+        <main id="main" tabIndex={-1} className="flex-1 min-h-[calc(100svh-59px)]">
           {children}
         </main>
         <Footer />

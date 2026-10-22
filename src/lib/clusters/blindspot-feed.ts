@@ -9,6 +9,10 @@ export type EmbeddedSource = {
   id: string;
   name: string;
   bias: BiasCategory;
+  // browser-3: source favicon for the /blindspots headline rows. Optional so
+  // the existing fixtures (no logo_url column in the embed) keep compiling;
+  // blindspots-query.ts coalesces a missing value to null.
+  logo_url?: string | null;
   // Optional so the existing `sources(id, bias)` fixtures (no kind column)
   // keep compiling. `zoneTallyOf` treats a missing/null kind as voting via
   // `isVotingKind`.
