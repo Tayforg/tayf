@@ -66,7 +66,8 @@ describe("BalanceChip — compact", () => {
 
   it("does not repeat the tier label in the short text", () => {
     const markup = render(DENGELI, "compact");
-    const visible = markup.replace(/<[^>]*>/g, "");
+    // Text nodes only (static markup from our own component; not a sanitizer).
+    const visible = [...markup.matchAll(/>([^<]+)</g)].map((m) => m[1]).join("");
     expect(visible).toBe("Denge 72");
   });
 });
