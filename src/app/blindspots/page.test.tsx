@@ -221,10 +221,11 @@ describe("/blindspots page — noindex on the failed feed state only (seo-error-
 
 describe("/blindspots page — silence digest band", () => {
   const NOW = Date.parse("2026-10-22T12:00:00Z");
+  const DAY = 24 * 3_600_000;
 
   beforeEach(() => {
-    // Only Date is faked: the page reads Date.now() once for nowMs, and the
-    // mocked fetchers resolve via microtasks, so no timers need faking.
+    // Only Date is faked: the page reads Date.now() once (card aging), and
+    // the mocked fetchers resolve via microtasks, so no timers need faking.
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(NOW);
   });
@@ -240,6 +241,7 @@ describe("/blindspots page — silence digest band", () => {
       sources: [{ id: `${id}-s`, name: "Kaynak", bias: "pro_government" }],
       dominantZone: "iktidar",
       dominantPct: 1,
+      votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 0 },
       isWireRedistribution: false,
       effectiveArticleCount: 1,
     };
@@ -268,19 +270,35 @@ describe("/blindspots page — silence digest band", () => {
     ]);
   });
 
-  it("uses the page's existing nowMs: a bundle updated 25 h ago is outside the window", async () => {
+  it("renders the band whenever the feed is ok and has bundles: a story updated 5 days ago still counts", async () => {
+    getBlindspots.mockResolvedValueOnce({
+      ok: true,
+      bundles: [mkBundle("old", NOW - 5 * DAY)],
+    });
+
+    const tree = await BlindspotsFeed();
+
+    const found = bands(tree);
+    expect(found).toHaveLength(1);
+    const digest = found[0]?.props?.digest as SilenceDigest;
+    expect(digest.windowTotal).toBe(1);
+    expect(digest.rows.map((r) => r.silentCount)).toEqual([0, 1, 1]);
+  });
+
+  it("counts every distinct bundle on the page, fresh or stale", async () => {
     getBlindspots.mockResolvedValueOnce({
       ok: true,
       bundles: [
         mkBundle("fresh", NOW - 3_600_000),
         mkBundle("stale", NOW - 25 * 3_600_000),
+        mkBundle("ancient", NOW - 40 * DAY),
       ],
     });
 
     const tree = await BlindspotsFeed();
 
     const digest = bands(tree)[0]?.props?.digest as SilenceDigest;
-    expect(digest.windowTotal).toBe(1);
+    expect(digest.windowTotal).toBe(3);
   });
 
   it("does not render the band when the feed failed ({ ok: false })", async () => {

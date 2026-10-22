@@ -28,6 +28,7 @@ function bundle(
     ],
     dominantZone: "iktidar",
     dominantPct: 0.8,
+    votingZoneCounts: { iktidar: 4, bagimsiz: 1, muhalefet: 0 },
     isWireRedistribution: false,
     effectiveArticleCount: 5,
     ...overrides,

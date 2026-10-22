@@ -1,18 +1,19 @@
 import { ZONE_META } from "@/lib/bias/config";
 import type { BlindspotBundle } from "@/lib/clusters/blindspots-query";
-import { zoneCountsFromSources } from "@/lib/feeds/zone-line";
 import type { MediaDnaZone } from "@/types";
 
-// "Kim yer vermedi?" band on /blindspots. Pure derivation over the bundles
-// BlindspotsFeed already loaded: no query, no clock read (the caller passes
-// `nowMs`), no I/O.
+// "Bu listede kim yer vermedi?" band on /blindspots. Pure derivation over the
+// bundles BlindspotsFeed already loaded: no query, no clock, no I/O.
 //
-// WINDOW: rolling `SILENCE_WINDOW_HOURS` on cluster.updated_at, not the
-// Istanbul calendar day. /blindspots only lists clusters whose
-// first_published is older than BLINDSPOT.feedDelayHours (24 h), so a
-// calendar-day window would be close to empty every morning.
-
-export const SILENCE_WINDOW_HOURS = 24;
+// WINDOW: every distinct bundle on the page. /blindspots only lists clusters
+// whose first_published is older than BLINDSPOT.feedDelayHours (24 h), so a
+// "last 24 hours" cut on updated_at left the band with 0-1 stories almost
+// always. The page itself is the window.
+//
+// SILENCE: judged on the VOTING tally (BlindspotBundle.votingZoneCounts, the
+// one dominantZone / dominantPct are built from), never on bundle.sources,
+// which also lists non-voting aggregator and niche outlets. Counting those
+// let a single aggregator in a pole zone mask a "%100 tek tarafta" card.
 
 export const ZONE_ROW_ORDER: readonly MediaDnaZone[] = [
   "iktidar",
@@ -20,44 +21,41 @@ export const ZONE_ROW_ORDER: readonly MediaDnaZone[] = [
   "muhalefet",
 ];
 
-/** Future timestamps up to this far ahead of `nowMs` still count (clock skew). */
-const CLOCK_SKEW_TOLERANCE_MS = 5 * 60_000;
-const HOUR_MS = 3_600_000;
-
 export interface SilenceRow {
   zone: MediaDnaZone;
-  /** In-window stories on which this zone had no source at all. */
+  /** Page stories on which this zone had no voting source at all. */
   silentCount: number;
   /** Non-zero breakdown of those stories by dominant zone, in ZONE_ROW_ORDER. */
   byDominant: Array<{ zone: MediaDnaZone; count: number }>;
 }
 
 export interface SilenceDigest {
-  /** In-window, de-duplicated stories the rows were computed from. */
+  /** De-duplicated page stories the rows were computed from. */
   windowTotal: number;
   /** Always exactly three rows, in ZONE_ROW_ORDER. */
   rows: SilenceRow[];
 }
 
-type DigestBundle = Pick<BlindspotBundle, "cluster" | "sources" | "dominantZone">;
+type DigestBundle = Pick<
+  BlindspotBundle,
+  "cluster" | "dominantZone" | "votingZoneCounts"
+>;
 
 function emptyZoneTally(): Record<MediaDnaZone, number> {
   return { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
 }
 
 /**
- * For each zone, counts the in-window blindspot stories on which that zone
- * had zero sources. Strict zero: a single source from the zone means it is
- * not silent. `bundle.sources` includes non-voting outlets, which is
- * deliberately conservative so "yer vermedi" is literally true. The bundle's
- * own dominant zone is never silent on it. One story can count in two rows.
+ * For each zone Y, counts the page's blindspot stories on which Y was silent:
+ * Y is not the bundle's dominant zone AND `votingZoneCounts[Y] === 0`. Strict
+ * zero: a single voting source from the zone means it is not silent.
+ * Non-voting kinds are never counted, matching how the blindspot itself is
+ * computed. Bundles are de-duplicated by cluster id (first occurrence wins);
+ * one story can count in two rows.
  */
 export function buildSilenceDigest(
   bundles: ReadonlyArray<DigestBundle>,
-  nowMs: number,
-  windowHours: number = SILENCE_WINDOW_HOURS,
 ): SilenceDigest {
-  const windowMs = windowHours * HOUR_MS;
   const seen = new Set<string>();
 
   // silent[zone][dominant] = stories where `zone` was silent and `dominant` led.
@@ -69,18 +67,12 @@ export function buildSilenceDigest(
   let windowTotal = 0;
 
   for (const bundle of bundles) {
-    const updatedMs = Date.parse(bundle.cluster.updated_at);
-    if (!Number.isFinite(updatedMs)) continue;
-    if (updatedMs > nowMs + CLOCK_SKEW_TOLERANCE_MS) continue;
-    if (nowMs - updatedMs > windowMs) continue;
-
     if (seen.has(bundle.cluster.id)) continue;
     seen.add(bundle.cluster.id);
     windowTotal += 1;
 
-    const counts = zoneCountsFromSources(bundle.sources);
     for (const zone of ZONE_ROW_ORDER) {
-      if (zone !== bundle.dominantZone && counts[zone] === 0) {
+      if (zone !== bundle.dominantZone && bundle.votingZoneCounts[zone] === 0) {
         silent[zone][bundle.dominantZone] += 1;
       }
     }
@@ -124,6 +116,6 @@ export function formatSilenceRow(row: SilenceRow): string {
   return `${subject} ${row.silentCount} hikâyeye yer vermedi (${parts})`;
 }
 
-export function silenceFootnote(windowTotal: number): string {
-  return `Bu sayfadaki kör noktalardan son 24 saatte güncellenen ${windowTotal} hikâye sayıldı. Bir bölgeden izlediğimiz hiçbir kaynak haberi yapmadıysa “yer vermedi” sayılır; bir hikâye birden fazla satırda sayılabilir.`;
+export function silenceFootnote(storyCount: number): string {
+  return `Bu sayfadaki ${storyCount} kör nokta hikâyesi sayıldı. Bir bölgedeki gazete, TV ve ajanslardan hiçbiri haberi yapmadıysa “yer vermedi” sayılır (toplayıcı ve niş siteler, kör nokta hesabında olduğu gibi, sayılmaz); bir hikâye birden fazla satırda sayılabilir.`;
 }

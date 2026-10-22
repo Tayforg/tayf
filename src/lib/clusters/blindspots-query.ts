@@ -107,6 +107,14 @@ export interface BlindspotBundle {
   sources: ClusterCardSource[];
   dominantZone: MediaDnaZone;
   dominantPct: number;
+  /**
+   * Per-zone count of VOTING sources (outlet, wire) on the de-duplicated
+   * member set: the very tally `dominantZone` / `dominantPct` are derived
+   * from. Unlike `sources` it excludes the non-voting kinds (aggregator,
+   * niche), so a consumer asking "did zone Y cover this story" gets the same
+   * answer the card's "%100 tek tarafta" label is built on.
+   */
+  votingZoneCounts: Record<MediaDnaZone, number>;
   isWireRedistribution: boolean;
   effectiveArticleCount: number;
 }
@@ -230,6 +238,8 @@ function toBlindspotBundle(
     sources: Array.from(sourceMap.values()),
     dominantZone,
     dominantPct,
+    // Copied from the same `tally` that produced dominantZone/dominantPct.
+    votingZoneCounts: { ...tally.counts },
     isWireRedistribution: wire.isWireRedistribution,
     effectiveArticleCount: wire.effectiveArticleCount,
   };

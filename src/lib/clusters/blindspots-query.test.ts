@@ -75,7 +75,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 import { cacheLife } from "next/cache";
 import { getBlindspots, getBlindspotsSafe } from "./blindspots-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
-import type { BiasCategory } from "@/types";
+import type { BiasCategory, SourceKind } from "@/types";
 
 const ORIGINAL_ENV = { ...process.env };
 
@@ -94,6 +94,8 @@ function mkMember(
     image_allowed?: boolean;
     /** browser-3: `undefined` leaves the key off the embed (legacy row). */
     logo_url?: string | null;
+    /** Source kind; defaults to the voting "outlet". */
+    kind?: SourceKind;
   } = {},
 ) {
   const sourceId = `${clusterId}-s${index}`;
@@ -111,7 +113,7 @@ function mkMember(
         id: sourceId,
         name: `Kaynak ${sourceId}`,
         bias,
-        kind: "outlet",
+        kind: overrides.kind ?? "outlet",
         image_allowed: overrides.image_allowed,
         ...(overrides.logo_url !== undefined ? { logo_url: overrides.logo_url } : {}),
       },
@@ -415,6 +417,121 @@ describe("getBlindspots Step B: batched embed", () => {
     await expect(getBlindspots()).rejects.toThrow(
       "[blindspots] embedded select error: embed down",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// votingZoneCounts: the per-zone VOTING tally the card's dominantZone /
+// dominantPct come from. The silence band reads it, so it must be that very
+// tally and never a recount over bundle.sources (which also holds the
+// non-voting aggregator / niche kinds).
+// ---------------------------------------------------------------------------
+
+function mkMixedRow(
+  id: string,
+  members: Array<{ bias: BiasCategory; kind?: SourceKind }>,
+) {
+  return {
+    ...mkBlindspotClusterRow(id, "pro_government"),
+    cluster_articles: members.map((m, i) =>
+      mkMember(id, i, m.bias, m.kind ? { kind: m.kind } : {}),
+    ),
+  };
+}
+
+describe("getBlindspots votingZoneCounts", () => {
+  it("is the voting tally the card is built from (prod case: 5 outlets, 100% iktidar)", async () => {
+    seedRows([mkBlindspotClusterRow("vz-prod", "pro_government")]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]!.dominantZone).toBe("iktidar");
+    expect(bundles[0]!.dominantPct).toBe(1);
+    expect(bundles[0]!.votingZoneCounts).toEqual({
+      iktidar: 5,
+      bagimsiz: 0,
+      muhalefet: 0,
+    });
+  });
+
+  it("excludes non-voting kinds even though they stay in bundle.sources", async () => {
+    seedRows([
+      mkMixedRow("vz-agg", [
+        { bias: "pro_government" },
+        { bias: "pro_government" },
+        { bias: "gov_leaning" },
+        { bias: "state_media", kind: "wire" },
+        { bias: "nationalist" },
+        { bias: "opposition", kind: "aggregator" },
+        { bias: "center", kind: "niche" },
+      ]),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const bundle = bundles[0]!;
+    // The aggregator and niche sources are listed on the card ...
+    expect(bundle.sources).toHaveLength(7);
+    // ... but never vote: neither the zone counts nor the 100% share see them.
+    expect(bundle.votingZoneCounts).toEqual({
+      iktidar: 5,
+      bagimsiz: 0,
+      muhalefet: 0,
+    });
+    expect(bundle.dominantZone).toBe("iktidar");
+    expect(bundle.dominantPct).toBe(1);
+  });
+
+  it("counts a voting minority source and agrees with dominantPct", async () => {
+    seedRows([
+      mkMixedRow("vz-mixed", [
+        { bias: "pro_government" },
+        { bias: "pro_government" },
+        { bias: "pro_government" },
+        { bias: "pro_government" },
+        { bias: "opposition" },
+      ]),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const { votingZoneCounts, dominantZone, dominantPct } = bundles[0]!;
+    expect(votingZoneCounts).toEqual({ iktidar: 4, bagimsiz: 0, muhalefet: 1 });
+    const total =
+      votingZoneCounts.iktidar + votingZoneCounts.bagimsiz + votingZoneCounts.muhalefet;
+    expect(votingZoneCounts[dominantZone] / total).toBe(dominantPct);
+  });
+
+  it("counts each source once (same-source duplicates are deduped before the tally)", async () => {
+    const row = mkMixedRow("vz-dedupe", [
+      { bias: "opposition" },
+      { bias: "opposition" },
+      { bias: "opposition" },
+      { bias: "opposition" },
+      { bias: "opposition" },
+    ]);
+    // A second, later article from the first source: must not inflate the count.
+    row.cluster_articles.push({
+      articles: {
+        ...row.cluster_articles[0]!.articles,
+        id: "vz-dedupe-dup",
+        published_at: "2026-01-09T00:00:00.000Z",
+      },
+    });
+    seedRows([row]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    expect(bundles[0]!.dominantZone).toBe("muhalefet");
+    expect(bundles[0]!.votingZoneCounts).toEqual({
+      iktidar: 0,
+      bagimsiz: 0,
+      muhalefet: 5,
+    });
   });
 });
 
