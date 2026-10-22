@@ -12,6 +12,8 @@ const fixture = vi.hoisted(() => ({
   data: [] as unknown[] | null,
   error: null as { message: string } | null,
   lastState: null as unknown,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -27,13 +29,25 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
-import { fetchMemberSeenAt, getMemberSeenAt } from "./story-timeline-query";
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+import { cacheLife, cacheTag } from "next/cache";
+import * as storyTimelineQuery from "./story-timeline-query";
+import { getMemberSeenAt } from "./story-timeline-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
+const TIMEOUT_MESSAGE = "AbortError: Supabase request exceeded 4000 ms";
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
@@ -41,6 +55,10 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -51,9 +69,9 @@ afterEach(() => {
   }
 });
 
-describe("fetchMemberSeenAt", () => {
+describe("getMemberSeenAt query", () => {
   it("queries cluster_articles for one cluster with the articles(created_at) embed", async () => {
-    await fetchMemberSeenAt("c1");
+    await getMemberSeenAt("c1");
     const state = fixture.lastState as BuilderState;
     expect(state.table).toBe("cluster_articles");
     expect(String(state.selectArgs[0]).replace(/\s+/g, " ")).toBe(
@@ -71,28 +89,58 @@ describe("fetchMemberSeenAt", () => {
       { article_id: "a4", articles: { created_at: null } },
       { article_id: "a5", articles: [] },
     ];
-    await expect(fetchMemberSeenAt("c1")).resolves.toEqual({
+    await expect(getMemberSeenAt("c1")).resolves.toEqual({
       a1: "2026-09-27T09:03:25Z",
       a2: "2026-09-27T08:54:47Z",
     });
   });
 
-  it("rethrows inside the cached function so an error is never cached as an empty map", async () => {
-    fixture.error = { message: "boom" };
-    await expect(fetchMemberSeenAt("c1")).rejects.toThrow("boom");
+  it("no longer exports the throwing raw fetcher (nothing can call it across the cache boundary)", () => {
+    expect("fetchMemberSeenAt" in storyTimelineQuery).toBe(false);
   });
 });
 
-describe("getMemberSeenAt (fail-open wrapper)", () => {
-  it("returns the map on success", async () => {
+describe("getMemberSeenAt read profile", () => {
+  it("builds only capped reader clients", async () => {
+    await getMemberSeenAt("c1");
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+});
+
+describe("getMemberSeenAt (fail-open wrapper) + cache lifetime", () => {
+  it("returns the map on success and caches it for cluster-feed, once", async () => {
     fixture.data = [{ article_id: "a1", articles: { created_at: "2026-09-27T09:03:25Z" } }];
+
     await expect(getMemberSeenAt("c1")).resolves.toEqual({ a1: "2026-09-27T09:03:25Z" });
+
+    expect(cacheTag).toHaveBeenCalledWith("clusters");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
   });
 
-  it("returns null and warns on error", async () => {
+  it("an empty cluster is a successful (cacheable) {} answer, not a failure", async () => {
+    fixture.data = [];
+    await expect(getMemberSeenAt("c1")).resolves.toEqual({});
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("returns null and warns on error, never an empty map", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     fixture.error = { message: "boom" };
+
     await expect(getMemberSeenAt("c1")).resolves.toBeNull();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("[story-timeline]"));
+  });
+
+  it("a timeout resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    fixture.error = { message: TIMEOUT_MESSAGE };
+
+    await expect(getMemberSeenAt("c1")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
   });
 });

@@ -25,6 +25,8 @@ const fixture = vi.hoisted(() => ({
   historyError: null as { message: string } | null,
   clusterState: null as unknown,
   historyState: null as unknown,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -47,9 +49,19 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+import { cacheLife, cacheTag } from "next/cache";
 import {
   WEEK_MS,
   getWeeklyClusters,
@@ -73,6 +85,9 @@ beforeEach(() => {
   fixture.historyError = null;
   fixture.clusterState = null;
   fixture.historyState = null;
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -216,6 +231,77 @@ describe("getWeeklyClusters", () => {
     fixture.clustersThrows = true;
 
     await expect(getWeeklyClusters()).resolves.toBeNull();
+  });
+});
+
+// --- read profile + cache lifetime (cold-read resilience) ------------------
+
+const TIMEOUT_MESSAGE = "AbortError: Supabase request exceeded 4000 ms";
+
+describe("weekly readers: capped client", () => {
+  it("getWeeklyClusters builds only capped reader clients", async () => {
+    await getWeeklyClusters();
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+
+  it("getWeeklyLabelChanges builds only capped reader clients", async () => {
+    await getWeeklyLabelChanges();
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+});
+
+describe("weekly readers: a failure is cached for minutes only", () => {
+  it("getWeeklyClusters: success is cluster-feed, exactly once, tagged before the fetch", async () => {
+    fixture.clusters = [row({ id: "a" })];
+
+    await getWeeklyClusters();
+
+    expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("getWeeklyClusters: an empty week is a successful answer (cluster-feed)", async () => {
+    fixture.clusters = [];
+    await expect(getWeeklyClusters()).resolves.toEqual([]);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getWeeklyClusters: a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
+    fixture.clustersError = { message: TIMEOUT_MESSAGE };
+
+    await expect(getWeeklyClusters()).resolves.toBeNull();
+
+    // cached attempt (cacheLife) + live retry (uncached, no cacheLife)
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getWeeklyLabelChanges: success is source-directory, exactly once", async () => {
+    fixture.history = [];
+
+    await expect(getWeeklyLabelChanges()).resolves.toEqual([]);
+
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("getWeeklyLabelChanges: a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
+    fixture.historyError = { message: TIMEOUT_MESSAGE };
+
+    await expect(getWeeklyLabelChanges()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
   });
 });
 

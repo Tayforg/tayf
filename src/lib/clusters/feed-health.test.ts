@@ -16,8 +16,10 @@ vi.mock("next/cache", () => ({
 
 const fixture = vi.hoisted(() => ({
   data: [] as unknown[],
-  error: null as { message: string } | null,
+  error: null as { message: string; hint?: string; code?: string } | null,
   lastState: null as unknown,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const tracker = vi.hoisted(() => {
@@ -56,13 +58,17 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => ({
-    ...supabaseFake.client,
-    from: (table: string) =>
-      tracker.wrapTracking(supabaseFake.client.from(table)),
-  }),
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return {
+      ...supabaseFake.client,
+      from: (table: string) =>
+        tracker.wrapTracking(supabaseFake.client.from(table)),
+    };
+  },
 }));
 
+import { cacheLife } from "next/cache";
 import {
   degradedSilentZone,
   getZoneFeedHealth,
@@ -111,6 +117,8 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
   tracker.calls.length = 0;
   recentSeq = 0;
   vi.useFakeTimers();
@@ -442,6 +450,92 @@ describe("getZoneFeedHealth error handling (fail open)", () => {
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0]?.[0]).toMatch(/^\[feed-health\] health unknown:/);
     warnSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Read profile + conditional cache lifetime (cold-read resilience)
+// ---------------------------------------------------------------------------
+
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+describe("getZoneFeedHealth read profile", () => {
+  it("defaults to the capped reader client", async () => {
+    await getZoneFeedHealth();
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(true);
+  });
+
+  it("an empty options object is still the capped reader client", async () => {
+    await getZoneFeedHealth({});
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(true);
+  });
+
+  it("the explicit reader profile gets the capped client", async () => {
+    await getZoneFeedHealth({ profile: "reader" });
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(true);
+  });
+
+  it("the batch profile (crons) gets the plain, uncapped client", async () => {
+    await getZoneFeedHealth({ profile: "batch" });
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(false);
+  });
+});
+
+describe("getZoneFeedHealth cache lifetime", () => {
+  it("success calls cacheLife exactly once with the normal source-directory profile", async () => {
+    fixture.data = [row({ bias: "pro_government" })];
+    const health = await getZoneFeedHealth();
+    expect(health).not.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a query error returns null and is cached only for the short minutes lifetime", async () => {
+    fixture.error = { message: "connection reset" };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(getZoneFeedHealth()).resolves.toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a reader timeout (AbortError) returns null and is cached only for minutes", async () => {
+    fixture.error = {
+      message: "AbortError: Supabase request exceeded 4000 ms",
+      hint: "Request was aborted (timeout or manual cancellation)",
+      code: "",
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(getZoneFeedHealth({ profile: "reader" })).resolves.toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a thrown client-construction error also fails open to null with the minutes lifetime", async () => {
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(getZoneFeedHealth()).resolves.toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
   });
 });
 

@@ -1,7 +1,8 @@
 import { cacheLife, cacheTag } from "next/cache";
+import { cache } from "react";
 
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import { isStoryThreadsEnabled, isValidThreadSlug } from "./config";
 import type { ThreadMemberCluster } from "./timeline";
 
@@ -9,6 +10,11 @@ import type { ThreadMemberCluster } from "./timeline";
 // never-throw: a missing migration, an outage or a draft all read as null.
 // Only PUBLISHED threads are ever returned; status is re-checked in TS on
 // top of the query filter.
+//
+// Reads run on the capped reader client (4 s), and a failed cache attempt is
+// memoised for `minutes` only (a success keeps `hours`). The /hikaye/[slug]
+// page uses `loadPublishedThreadBySlug` instead, which REJECTS on a sustained
+// failure so a timeout is not served as a 404.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MEMBER_LIMIT = 100;
@@ -27,7 +33,7 @@ export interface ClusterThreadRef {
 }
 
 async function fetchThreadBySlug(slug: string): Promise<PublishedThread | null> {
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data: t, error: tErr } = await supabase
     .from("story_threads")
     .select("id, slug, title_tr, status, published_at")
@@ -67,11 +73,17 @@ async function fetchThreadBySlug(slug: string): Promise<PublishedThread | null> 
   };
 }
 
+// Cache lifetime follows the outcome (exactly one `cacheLife` call, after the
+// attempt; `cacheTag` first): a result -- including "no such thread" -- keeps
+// `hours`, a failed attempt is memoised for `minutes` only.
 async function getThreadBySlugCached(slug: string) {
   "use cache";
-  cacheLife("hours");
   cacheTag("story-threads");
-  return attemptCached("story-threads", () => fetchThreadBySlug(slug));
+  const r = await attemptCached("story-threads", () => fetchThreadBySlug(slug));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("hours");
+  else cacheLife("minutes");
+  return r;
 }
 
 /** Never throws; null for an invalid slug, a draft/missing thread or an outage. */
@@ -85,8 +97,28 @@ export async function getPublishedThreadBySlug(slug: string): Promise<PublishedT
   );
 }
 
+/**
+ * Throwing sibling of `getPublishedThreadBySlug` for the /hikaye/[slug] page
+ * and its `generateMetadata`. Resolves `null` ONLY for an invalid slug or a
+ * thread that is genuinely absent / not published; on a sustained read failure
+ * (the cached attempt AND the live retry both fail) it REJECTS, so the page
+ * can surface an error instead of a 404 that search engines would act on.
+ *
+ * Wrapped in React `cache` so `generateMetadata` and the page body in one
+ * request share a single result (and a single live retry) per slug. Never call
+ * it from a `"use cache"` body: it can throw.
+ */
+export const loadPublishedThreadBySlug = cache(
+  async (slug: string): Promise<PublishedThread | null> => {
+    if (!isValidThreadSlug(slug)) return null;
+    const cached = await getThreadBySlugCached(slug);
+    if (cached.ok) return cached.data;
+    return fetchThreadBySlug(slug);
+  },
+);
+
 async function fetchThreadForCluster(clusterId: string): Promise<ClusterThreadRef | null> {
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("story_thread_members")
     .select("thread_id, story_threads!inner(slug, title_tr, status)")
@@ -109,9 +141,14 @@ async function fetchThreadForCluster(clusterId: string): Promise<ClusterThreadRe
 
 async function getThreadForClusterCached(clusterId: string) {
   "use cache";
-  cacheLife("hours");
   cacheTag("story-threads");
-  return attemptCached("story-threads", () => fetchThreadForCluster(clusterId));
+  const r = await attemptCached("story-threads", () =>
+    fetchThreadForCluster(clusterId),
+  );
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("hours");
+  else cacheLife("minutes");
+  return r;
 }
 
 /** Never throws; null when off, non-uuid, unthreaded, draft or on outage. */

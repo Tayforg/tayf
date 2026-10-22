@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
 
 // "Kapsama karnesi" (migration 096) -- how one outlet's CLUSTERED stories
@@ -211,9 +211,14 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const COLUMNS =
   "source_id, window_days, window_start, window_end, n_clusters, n_multi, co_iktidar, co_bagimsiz, co_muhalefet, n_blindspot, n_blindspot_same_side, computed_at";
 
-/** One point lookup on the PK. Throws on a Supabase error. */
+/**
+ * One point lookup on the PK. Throws on a Supabase error. Runs under the 4 s
+ * reader cap (user-facing: /source/[slug]); the cached attempt turns the
+ * resulting AbortError into `{ ok: false }` and the caller's live retry
+ * heals it.
+ */
 async function fetchKarneRow(sourceId: string): Promise<SourceKarne | null> {
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("source_karne_30d")
     .select(COLUMNS)
@@ -225,11 +230,18 @@ async function fetchKarneRow(sourceId: string): Promise<SourceKarne | null> {
   return data ? toSourceKarne(data) : null;
 }
 
+// Exactly ONE `cacheLife` per invocation, chosen after the attempt: a failed
+// attempt (typically the 4 s reader abort on a cold database) is memoised for
+// `minutes` only, so one blip cannot park an `{ ok: false }` sentinel for
+// hours; a success - including a legitimately missing row - keeps `hours`.
 async function getSourceKarneCached(sourceId: string) {
   "use cache";
-  cacheLife("hours");
   cacheTag("sources");
-  return attemptCached("source-karne", () => fetchKarneRow(sourceId));
+  const r = await attemptCached("source-karne", () => fetchKarneRow(sourceId));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("hours");
+  else cacheLife("minutes");
+  return r;
 }
 
 // The only clock read. Pure body (cannot throw across the cache boundary);

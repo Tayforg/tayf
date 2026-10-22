@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
-import { createServerClient } from "@/lib/supabase/server";
+import { attemptCached } from "@/lib/cache-resilience";
+import { createReaderClient } from "@/lib/supabase/server";
 
 // When Tayf first saw each member article (`articles.created_at`), for the
 // "Kim önce yazdı?" story timeline. A separate module on purpose:
@@ -25,18 +26,17 @@ function createdAtOf(row: SeenAtRow): string | null {
 }
 
 /**
- * Cached article id → created_at map for one cluster. Throws on a Supabase
- * error so "use cache" never stores an empty map for a transient failure;
- * callers go through `getMemberSeenAt`, which fails open.
+ * Raw article id → created_at map for one cluster. Uncached and THROWS on a
+ * Supabase error (including a 4 s reader-cap abort) so a transient failure is
+ * never mistaken for an empty map. Not exported: it is only called from
+ * `getMemberSeenAtCached`, which wraps it in `attemptCached`, so the throw
+ * never crosses the `"use cache"` boundary (a throw there fails `next build`'s
+ * prerender even when every caller catches -- see src/lib/cache-resilience.ts).
  */
-export async function fetchMemberSeenAt(
+async function fetchMemberSeenAtRaw(
   clusterId: string,
 ): Promise<Record<string, string>> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag("clusters");
-
-  const { data, error } = await createServerClient()
+  const { data, error } = await createReaderClient()
     .from("cluster_articles")
     .select("article_id, articles ( created_at )")
     .eq("cluster_id", clusterId)
@@ -54,21 +54,34 @@ export async function fetchMemberSeenAt(
   return seenAt;
 }
 
+// Cache lifetime follows the outcome: a map (possibly empty -- a real answer)
+// keeps the `cluster-feed` window, a failed attempt is memoised for `minutes`
+// only. Exactly one `cacheLife` call per invocation, after the attempt;
+// `cacheTag` first.
+async function getMemberSeenAtCached(clusterId: string) {
+  "use cache";
+  cacheTag("clusters");
+  const r = await attemptCached("story-timeline", () =>
+    fetchMemberSeenAtRaw(clusterId),
+  );
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
  * Uncached fail-open wrapper: `null` on any error, which the timeline reads
- * as "use published times as-is".
+ * as "use published times as-is". Never throws. No live retry: the timeline is
+ * a nicety, and the page's own budget is better spent elsewhere.
  */
 export async function getMemberSeenAt(
   clusterId: string,
 ): Promise<Record<string, string> | null> {
-  try {
-    return await fetchMemberSeenAt(clusterId);
-  } catch (err) {
-    console.warn(
-      `[story-timeline] seenAt unavailable for ${clusterId}: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return null;
-  }
+  const r = await getMemberSeenAtCached(clusterId);
+  if (r.ok) return r.data;
+  console.warn(
+    `[story-timeline] seenAt unavailable for ${clusterId}: ${r.error}`,
+  );
+  return null;
 }

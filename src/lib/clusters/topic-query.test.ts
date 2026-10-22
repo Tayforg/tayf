@@ -51,6 +51,8 @@ const fixture = vi.hoisted(() => ({
   // C1-COUNTS-NULL-ZERO's fix (treat null count like the error branch,
   // never `?? 0`) has a regression case.
   countNullSlug: null as string | null,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -81,8 +83,17 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
+
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
 
 import { cacheLife, cacheTag } from "next/cache";
 import {
@@ -117,6 +128,7 @@ beforeEach(() => {
   fixture.countsBySlug = {};
   fixture.countError = null;
   fixture.countNullSlug = null;
+  fixture.clientOpts = [];
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -204,6 +216,7 @@ describe("getTopicClusters", () => {
     expect(fromMs).toBeGreaterThanOrEqual(before - TOPIC_WINDOW_MS);
     expect(fromMs).toBeLessThanOrEqual(after - TOPIC_WINDOW_MS);
 
+    expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
     expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
   });
@@ -314,6 +327,90 @@ describe("getTopicCounts", () => {
     fixture.countNullSlug = "spor";
 
     await expect(getTopicCounts()).resolves.toBeNull();
+  });
+});
+
+// --- read profile + cache lifetime (cold-read resilience) --------------------
+
+const TIMEOUT_MESSAGE = "AbortError: Supabase request exceeded 4000 ms";
+
+describe("topic hub read profile", () => {
+  it("getTopicClusters builds only capped reader clients", async () => {
+    await getTopicClusters("dunya", 1);
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+
+  it("getTopicCounts builds only capped reader clients", async () => {
+    await getTopicCounts();
+    expect(fixture.clientOpts.length).toBeGreaterThanOrEqual(1);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+});
+
+describe("topic hub cache lifetime: a failure is cached for minutes only", () => {
+  it("getTopicClusters: a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
+    fixture.clustersError = { message: TIMEOUT_MESSAGE };
+
+    await expect(getTopicClusters("dunya", 1)).resolves.toBeNull();
+
+    // cached attempt (cacheLife) + live retry (uncached, no cacheLife)
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getTopicClusters: a thrown query also lands on 'minutes'", async () => {
+    fixture.clustersThrows = true;
+
+    await expect(getTopicClusters("dunya", 1)).resolves.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("getTopicClusters: an empty-but-read window is a success: cluster-feed, once", async () => {
+    fixture.clusters = [];
+
+    const result = await getTopicClusters("dunya", 1);
+    expect(result).not.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getTopicClusters: tags the entry before the fetch", async () => {
+    await getTopicClusters("dunya", 1);
+    expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("getTopicCounts: a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
+    fixture.countError = { message: TIMEOUT_MESSAGE };
+
+    await expect(getTopicCounts()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getTopicCounts: a null count (nothing counted) is a failure, not a cached zero", async () => {
+    fixture.countNullSlug = "spor";
+
+    await expect(getTopicCounts()).resolves.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("getTopicCounts: success is cached for cluster-feed, once", async () => {
+    fixture.countsBySlug = { dunya: 1 };
+
+    const counts = await getTopicCounts();
+    expect(counts).not.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
   });
 });
 

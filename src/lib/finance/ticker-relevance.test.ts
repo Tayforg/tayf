@@ -6,12 +6,14 @@ import { dirname, resolve } from "node:path";
 import {
   aggregateAttention,
   countsTowardAttention,
+  fetchLegalNoticeIdsSince,
   fetchLowRelevanceSince,
   fetchRelevanceScores,
   filterFeedTickers,
   isHiddenMatch,
   isLegalNotice,
   istanbulDay,
+  LEGAL_NOTICE_LOOKUP_LIMIT,
   relevanceKey,
   RELEVANCE_CHUNK,
   TICKER_ATTENTION_MIN,
@@ -113,6 +115,37 @@ describe("aggregateAttention", () => {
   });
 });
 
+describe("aggregateAttention: legal-notice exclusion", () => {
+  const rows = [
+    { ticker: "GARAN", article_id: "n1", published_at: "2026-09-13T10:00:00.000Z", source_id: "s1" },
+    { ticker: "GARAN", article_id: "a2", published_at: "2026-09-13T11:00:00.000Z", source_id: "s2" },
+    { ticker: "AKBNK", article_id: "n1", published_at: "2026-09-13T10:00:00.000Z", source_id: "s1" },
+  ];
+
+  it("skips every row whose article_id is in the exclude set, whatever the ticker", () => {
+    const out = aggregateAttention(rows, new Map(), new Set(["n1"]));
+    expect(out).toEqual([{ ticker: "GARAN", day: "2026-09-13", articles: 1, sources: 1 }]);
+  });
+
+  it("omits a (ticker, day) group left empty by the exclusion", () => {
+    const out = aggregateAttention(rows, new Map(), new Set(["n1", "a2"]));
+    expect(out).toEqual([]);
+  });
+
+  it("is a no-op without a set or with an empty set", () => {
+    const baseline = aggregateAttention(rows, new Map());
+    expect(aggregateAttention(rows, new Map(), undefined)).toEqual(baseline);
+    expect(aggregateAttention(rows, new Map(), new Set())).toEqual(baseline);
+    expect(baseline.reduce((s, r) => s + r.articles, 0)).toBe(3);
+  });
+
+  it("composes with the relevance gate (both filters apply)", () => {
+    const scores = new Map<string, number>([["a2:GARAN", 0.1]]);
+    const out = aggregateAttention(rows, scores, new Set(["n1"]));
+    expect(out).toEqual([]);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // fetchRelevanceScores / fetchLowRelevanceSince — chunking + fail-open.
 // A tiny hand-rolled fake mirroring the shape of the real chainable
@@ -120,19 +153,25 @@ describe("aggregateAttention", () => {
 // ---------------------------------------------------------------------------
 
 interface FakeState {
+  select: string | null;
   eq: Array<[string, unknown]>;
   in: Array<[string, unknown[]]>;
   lt: Array<[string, unknown]>;
   gte: Array<[string, unknown]>;
+  order: Array<[string, unknown]>;
+  range: [number, number] | null;
   limit: number | null;
 }
 
 function makeFakeSupabase(resolver: (table: string, state: FakeState) => { data: unknown; error: { message: string } | null }) {
   return {
     from(table: string) {
-      const state: FakeState = { eq: [], in: [], lt: [], gte: [], limit: null };
+      const state: FakeState = { select: null, eq: [], in: [], lt: [], gte: [], order: [], range: null, limit: null };
       const builder = {
-        select: () => builder,
+        select: (cols?: string) => {
+          state.select = cols ?? null;
+          return builder;
+        },
         eq: (col: string, val: unknown) => {
           state.eq.push([col, val]);
           return builder;
@@ -147,6 +186,14 @@ function makeFakeSupabase(resolver: (table: string, state: FakeState) => { data:
         },
         gte: (col: string, val: unknown) => {
           state.gte.push([col, val]);
+          return builder;
+        },
+        order: (col: string, opts?: unknown) => {
+          state.order.push([col, opts]);
+          return builder;
+        },
+        range: (from: number, to: number) => {
+          state.range = [from, to];
           return builder;
         },
         limit: (n: number) => {
@@ -257,6 +304,165 @@ describe("fetchLowRelevanceSince", () => {
       const rows = await fetchLowRelevanceSince(supabase as never, "2026-09-06T00:00:00+03:00");
       expect(rows).toEqual([]);
       expect(warnSpy).toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+describe("fetchLegalNoticeIdsSince (migration 107)", () => {
+  it("reads legal_notice_articles.article_id since the cut-off with limit 5000 and returns the id set", async () => {
+    let seenTable = "";
+    let seenState: FakeState | null = null;
+    const supabase = makeFakeSupabase((table, state) => {
+      seenTable = table;
+      seenState = state;
+      return { data: [{ article_id: "n1" }, { article_id: "n2" }, { article_id: "n1" }], error: null };
+    });
+    const ids = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+    expect(seenTable).toBe("legal_notice_articles");
+    expect(seenState!.select).toBe("article_id");
+    expect(seenState!.gte).toEqual([["published_at", "2026-09-06T00:00:00+03:00"]]);
+    expect(seenState!.limit).toBe(5000);
+    expect(seenState!.range).toBeNull();
+    // Deterministic order, so continuation pages never skip or repeat a row.
+    expect(seenState!.order).toEqual([
+      ["published_at", { ascending: false }],
+      ["article_id", undefined],
+    ]);
+    expect(LEGAL_NOTICE_LOOKUP_LIMIT).toBe(5000);
+    expect(ids).toBeInstanceOf(Set);
+    expect([...ids].sort()).toEqual(["n1", "n2"]);
+  });
+
+  // PostgREST truncates every response at max_rows (1,000) whatever .limit()
+  // asks for. Migration 107 Step 0: about 27 notices a day, so the 30-day set is
+  // ~820 rows today and will cross 1,000. A response of exactly 1,000 rows
+  // means "cut off": the reader continues with .range() pages.
+  describe("PostgREST max_rows (1,000) continuation", () => {
+    const ids = (from: number, n: number) => Array.from({ length: n }, (_, i) => ({ article_id: `n${from + i}` }));
+
+    it("does not page when the first response is below the 1,000-row cap", async () => {
+      let calls = 0;
+      const supabase = makeFakeSupabase(() => {
+        calls++;
+        return { data: ids(0, 999), error: null };
+      });
+      const out = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+      expect(calls).toBe(1);
+      expect(out.size).toBe(999);
+    });
+
+    it("continues with .range() pages while a response comes back full, and stops at the first short page", async () => {
+      const seen: Array<{ range: [number, number] | null; limit: number | null }> = [];
+      const supabase = makeFakeSupabase((_table, state) => {
+        seen.push({ range: state.range, limit: state.limit });
+        const from = state.range ? state.range[0] : 0;
+        // 2,350 rows exist; the server caps each response at 1,000.
+        return { data: ids(from, Math.max(0, Math.min(1000, 2350 - from))), error: null };
+      });
+      const out = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+      expect(seen).toEqual([
+        { range: null, limit: 5000 },
+        { range: [1000, 1999], limit: null },
+        { range: [2000, 2999], limit: null },
+      ]);
+      expect(out.size).toBe(2350);
+      expect(out.has("n0") && out.has("n1000") && out.has("n2349")).toBe(true);
+    });
+
+    it("never reads past LEGAL_NOTICE_LOOKUP_LIMIT rows (5 pages of 1,000)", async () => {
+      let calls = 0;
+      const supabase = makeFakeSupabase((_table, state) => {
+        calls++;
+        const from = state.range ? state.range[0] : 0;
+        return { data: ids(from, 1000), error: null };
+      });
+      const out = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+      expect(calls).toBe(5);
+      expect(out.size).toBe(5000);
+    });
+
+    it("keeps the ids read so far and warns when a continuation page fails", async () => {
+      let calls = 0;
+      const supabase = makeFakeSupabase(() => {
+        calls++;
+        return calls === 1
+          ? { data: ids(0, 1000), error: null }
+          : { data: null, error: { message: "canceling statement due to statement timeout" } };
+      });
+      const warnSpy = vi_spyOnConsoleWarn();
+      try {
+        const out = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+        expect(out.size).toBe(1000);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(String(warnSpy.mock.calls[0]![0])).toContain("legal-notice lookup unavailable");
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+
+  it("returns an empty set for no rows or null data", async () => {
+    const none = makeFakeSupabase(() => ({ data: [], error: null }));
+    expect((await fetchLegalNoticeIdsSince(none as never, "2026-09-06T00:00:00+03:00")).size).toBe(0);
+    const nul = makeFakeSupabase(() => ({ data: null, error: null }));
+    expect((await fetchLegalNoticeIdsSince(nul as never, "2026-09-06T00:00:00+03:00")).size).toBe(0);
+  });
+
+  it("ignores rows without a usable article_id", async () => {
+    const supabase = makeFakeSupabase(() => ({
+      data: [{ article_id: "n1" }, { article_id: null }, {}, { article_id: 42 }],
+      error: null,
+    }));
+    const ids = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+    expect([...ids]).toEqual(["n1"]);
+  });
+
+  it("fails open (empty set) and warns on a Supabase error, e.g. a statement timeout", async () => {
+    const supabase = makeFakeSupabase(() => ({
+      data: null,
+      error: { message: "canceling statement due to statement timeout" },
+    }));
+    const warnSpy = vi_spyOnConsoleWarn();
+    try {
+      const ids = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+      expect(ids.size).toBe(0);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]![0])).toContain("[finance] legal-notice lookup unavailable:");
+      expect(String(warnSpy.mock.calls[0]![0])).toContain("statement timeout");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("fails open and warns when the query throws (table missing before the migration is applied)", async () => {
+    const supabase = {
+      from() {
+        throw new Error('relation "public.legal_notice_articles" does not exist');
+      },
+    };
+    const warnSpy = vi_spyOnConsoleWarn();
+    try {
+      const ids = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+      expect(ids.size).toBe(0);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]![0])).toContain("[finance] legal-notice lookup unavailable:");
+      expect(String(warnSpy.mock.calls[0]![0])).toContain("does not exist");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("fails open when the awaited builder rejects (network abort), including a non-Error rejection", async () => {
+    const supabase = makeFakeSupabase(() => {
+      throw "aborted";
+    });
+    const warnSpy = vi_spyOnConsoleWarn();
+    try {
+      const ids = await fetchLegalNoticeIdsSince(supabase as never, "2026-09-06T00:00:00+03:00");
+      expect(ids.size).toBe(0);
+      expect(String(warnSpy.mock.calls[0]![0])).toContain("aborted");
     } finally {
       warnSpy.mockRestore();
     }

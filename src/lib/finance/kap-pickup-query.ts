@@ -14,7 +14,8 @@ import {
   type PickupSource,
   type PickupTotals,
 } from "@/lib/finance/kap-pickup";
-import { createFinanceServerClient } from "@/lib/supabase/server";
+import { attemptCached } from "@/lib/cache-resilience";
+import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 
 /**
  * kap-media-pickup — IO layer. Every query here is per-ticker and
@@ -218,18 +219,37 @@ const PICKUP_LOOKBACK_MS = 30 * 86_400_000;
 const PICKUP_LIMIT = 60;
 
 /**
- * Cached, page-facing entry point. `nowMs` is read INSIDE this function
- * (same precedent as fetchTickerPage, queries.ts:471-470) — never in a
- * component body, or every render of a cached shell would see a stale
- * "now" baked in at build/first-render time.
+ * Cached attempt. `nowMs` is read INSIDE the cache scope (same precedent as
+ * fetchTickerPage, queries.ts:471-470) - never in a component body, or every
+ * render of a cached shell would see a stale "now" baked in at
+ * build/first-render time.
+ *
+ * Never throws (`attemptCached`): a throw across the `"use cache"` boundary
+ * fails `next build`'s prerender (src/lib/cache-resilience.ts). The read runs
+ * under the 4 s reader cap (user-facing panel on /ekonomi/[ticker]), and
+ * exactly ONE `cacheLife` is called per invocation, chosen after the attempt:
+ * a failure (typically the cap's AbortError on a cold database) is memoised
+ * for `minutes` only; a success keeps the normal 5-minute profile.
  */
-export async function getTickerPickup(ticker: string): Promise<TickerPickup> {
+async function getTickerPickupAttempt(ticker: string) {
   "use cache";
-  cacheLife({ stale: 60, revalidate: 300, expire: 3600 });
   cacheTag("finance-feed", `finance-ticker:${ticker}`);
-  const nowMs = Date.now();
-  const supabase = await createFinanceServerClient();
-  return fetchTickerPickup(supabase, ticker, nowMs - PICKUP_LOOKBACK_MS, nowMs, { limit: PICKUP_LIMIT });
+  const r = await attemptCached("finance-pickup", async () => {
+    const nowMs = Date.now();
+    const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
+    return fetchTickerPickup(supabase, ticker, nowMs - PICKUP_LOOKBACK_MS, nowMs, { limit: PICKUP_LIMIT });
+  });
+  // Exactly one call on either branch (the overloads do not accept a union).
+  if (r.ok) cacheLife({ stale: 60, revalidate: 300, expire: 3600 });
+  else cacheLife("minutes");
+  return r;
+}
+
+/** Page-facing entry point. Throws when the cached attempt failed; see getTickerPickupSafe. */
+export async function getTickerPickup(ticker: string): Promise<TickerPickup> {
+  const r = await getTickerPickupAttempt(ticker);
+  if (!r.ok) throw new Error(r.error);
+  return r.data;
 }
 
 /** Never throws — a panel/component-safe wrapper. Logs and returns null on any failure. */

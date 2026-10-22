@@ -71,6 +71,7 @@ vi.mock("./feed-health", async (importOriginal) => {
   };
 });
 
+import { cacheLife } from "next/cache";
 import { getPoliticsClusters } from "./politics-query";
 import type { ZoneFeedHealth } from "./feed-health";
 import { createReaderClient, createServerClient } from "@/lib/supabase/server";
@@ -161,6 +162,7 @@ beforeEach(() => {
   response = { data: [], error: null };
   vi.mocked(createReaderClient).mockClear();
   vi.mocked(createServerClient).mockClear();
+  vi.mocked(cacheLife).mockClear();
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
   vi.useFakeTimers();
@@ -256,6 +258,63 @@ describe("getPoliticsClusters read profile", () => {
     // cached attempt + live retry: two fetches, neither capped.
     expect(createServerClient).toHaveBeenCalledTimes(2);
     expect(createReaderClient).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The feed-health gate follows the caller's profile, and the cached entry's
+// lifetime depends on the outcome (failures live for "minutes", never for a
+// full cluster-feed window).
+// ---------------------------------------------------------------------------
+
+describe("getPoliticsClusters feed-health profile forwarding", () => {
+  it("forwards { profile: 'reader' } to getZoneFeedHealth by default", async () => {
+    await getPoliticsClusters();
+    expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledWith({ profile: "reader" });
+  });
+
+  it("forwards an explicit reader profile", async () => {
+    await getPoliticsClusters({ profile: "reader" });
+    expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledWith({ profile: "reader" });
+  });
+
+  it("forwards { profile: 'batch' } for the crons, so their health read is uncapped too", async () => {
+    await getPoliticsClusters({ profile: "batch" });
+    expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    expect(feedHealth.getZoneFeedHealth).toHaveBeenCalledWith({ profile: "batch" });
+  });
+});
+
+describe("getPoliticsClusters cache lifetime", () => {
+  it("success calls cacheLife exactly once with cluster-feed", async () => {
+    response = { data: [], error: null };
+    await getPoliticsClusters();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a failed attempt calls cacheLife exactly once with minutes (the live retry is outside the cache)", async () => {
+    response = { data: null, error: { message: "AbortError: Supabase request exceeded 4000 ms" } };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await expect(getPoliticsClusters()).rejects.toThrow(/embedded select error/);
+    } finally {
+      errSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("the public contract is unchanged: a failure still throws, a success still returns the result", async () => {
+    response = { data: [], error: null };
+    await expect(getPoliticsClusters()).resolves.toEqual({
+      bundles: [],
+      breakingBundles: [],
+      prefilterCount: 0,
+    });
   });
 });
 

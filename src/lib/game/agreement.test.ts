@@ -20,8 +20,12 @@ const fixture = vi.hoisted(() => ({
   total: 0,
   correct: 0,
   nullCount: false,
-  error: null as { message: string } | null,
+  error: null as { message: string; hint?: string; code?: string } | null,
+  /** Error only the second (`correct = true`) count query. */
+  errorOnCorrect: null as { message: string } | null,
   states: [] as unknown[],
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -31,6 +35,12 @@ const supabaseFake = await vi.hoisted(async () => {
       zone_guesses: (state) => {
         fixture.states.push(state);
         if (fixture.error) return { data: null, error: fixture.error };
+        if (
+          fixture.errorOnCorrect &&
+          state.eq.some((e) => e.col === "correct" && e.val === true)
+        ) {
+          return { data: null, error: fixture.errorOnCorrect };
+        }
         if (fixture.nullCount) return { data: null, error: null, count: null };
         const wantsCorrect = state.eq.some(
           (e) => e.col === "correct" && e.val === true,
@@ -47,9 +57,13 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
+import { cacheLife } from "next/cache";
 import {
   AGREEMENT_MIN_GUESSES,
   getSourceAgreement,
@@ -66,7 +80,10 @@ beforeEach(() => {
   fixture.correct = 0;
   fixture.nullCount = false;
   fixture.error = null;
+  fixture.errorOnCorrect = null;
   fixture.states = [];
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
 });
 
 afterEach(() => {
@@ -203,13 +220,16 @@ describe("getSourceAgreement", () => {
     await expect(getSourceAgreement("src-1")).resolves.toBeNull();
   });
 
-  it("returns null (never throws) on a query error and logs it", async () => {
+  it("returns null (never throws) on a query error and logs it once", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     fixture.error = { message: 'relation "zone_guesses" does not exist' };
 
     await expect(getSourceAgreement("src-1")).resolves.toBeNull();
+    // The log line now comes from attemptCached (cache-resilience.ts), which
+    // wraps the throwing fetch inside the "use cache" body.
+    expect(errorSpy).toHaveBeenCalledTimes(1);
     expect(errorSpy).toHaveBeenCalledWith(
-      '[agreement] reader agreement unavailable: relation "zone_guesses" does not exist',
+      '[agreement] error: relation "zone_guesses" does not exist',
     );
 
     errorSpy.mockRestore();
@@ -228,6 +248,102 @@ describe("getSourceAgreement", () => {
 
   it("returns null for an empty source id without querying", async () => {
     await expect(getSourceAgreement("")).resolves.toBeNull();
+    expect(states()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cold-read resilience: the 4 s reader cap, and a cache lifetime that depends
+// on the outcome. There is deliberately NO live retry here: the agreement
+// number is decoration on /source/[slug] and `null` simply renders "Henüz
+// yeterli tahmin yok", so a failure costs one cheap, cached "minutes" entry
+// rather than a second 4 s wait inside the request.
+// ---------------------------------------------------------------------------
+
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+const TIMEOUT_ERROR = {
+  message: "AbortError: Supabase request exceeded 4000 ms",
+  hint: "Request was aborted (timeout or manual cancellation)",
+  code: "",
+};
+
+describe("getSourceAgreement reader cap", () => {
+  it("uses exactly one capped reader client for both count queries", async () => {
+    fixture.total = 30;
+    fixture.correct = 19;
+
+    await getSourceAgreement("src-1");
+
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(true);
+  });
+});
+
+describe("getSourceAgreement cache lifetime", () => {
+  it("a published result calls cacheLife exactly once with source-directory", async () => {
+    fixture.total = 30;
+    fixture.correct = 19;
+
+    await getSourceAgreement("src-1");
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("below the threshold is a legitimate result: source-directory, not minutes", async () => {
+    fixture.total = 29;
+
+    await expect(getSourceAgreement("src-1")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a timeout on the first count returns null without throwing and is cached for minutes only", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.error = TIMEOUT_ERROR;
+
+    await expect(getSourceAgreement("src-1")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    // No live retry: one client, one query.
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(states()).toHaveLength(1);
+  });
+
+  it("an error on the second (correct = true) count also returns null and is cached for minutes", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.total = 30;
+    fixture.errorOnCorrect = { message: "statement timeout" };
+
+    await expect(getSourceAgreement("src-1")).resolves.toBeNull();
+
+    expect(states()).toHaveLength(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a missing-env failure is cached for minutes and still never throws", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getSourceAgreement("src-1")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("an empty source id returns null before any cache entry or query", async () => {
+    await expect(getSourceAgreement("")).resolves.toBeNull();
+
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(fixture.clientOpts).toHaveLength(0);
     expect(states()).toHaveLength(0);
   });
 });

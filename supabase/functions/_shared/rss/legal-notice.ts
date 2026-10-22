@@ -19,9 +19,20 @@
 // Pure and import-free (no lookbehind: the TS target is ES2017) so the same
 // function runs in the Deno ingest function and in Next (re-exported from
 // `src/lib/finance/ticker-relevance.ts`).
+//
+// SQL twin: `public.is_legal_notice(title, url)` (migration 107) classifies
+// rows that were stored before the ingest filter existed, or that slipped
+// past it, for the ticker attention counts. It embeds the `.source` of every
+// pattern in LEGAL_NOTICE_PATTERNS verbatim, so each pattern here must stay
+// valid and equivalent as a Postgres ARE too: no lookbehind, no named groups,
+// no `\-` escape (a literal hyphen goes last in the class), no `\p{..}`. The
+// parity test (tests/migrations/107-legal-notice-articles.test.ts) fails the
+// build when the SQL drifts from these sources.
 
-const MIN_LETTERS = 8;
-const MIN_UPPER_RATIO = 0.85;
+/** Fewest letters a title needs before the uppercase ratio is trusted. */
+export const LEGAL_NOTICE_MIN_LETTERS = 8;
+/** Smallest share of uppercase letters that still counts as "mostly uppercase". */
+export const LEGAL_NOTICE_MIN_UPPER_RATIO = 0.85;
 
 // (i) ends with an institution name, optionally ablative, trailing
 // punctuation tolerated. [İI] / [ĞG] accept feeds that strip Turkish letters.
@@ -32,16 +43,30 @@ const CONTAINS_ABLATIVE =
   /(MAHKEMES[İI]NDEN|[İI]CRA DA[İI]RES[İI]NDEN|DA[İI]RE BAŞKANLI[ĞG]INDAN)/u;
 // (iii) "T.C. <anything> MAHKEMESİ".
 const TC_COURT = /^T\.\s?C\.\s.*MAHKEMES[İI]/u;
-// (iv) starts with the word İLAN followed by a separator or the end.
-const STARTS_WITH_ILAN = /^[İI]LAN([\s:.\-–]|$)/u;
+// (iv) starts with the word İLAN followed by a separator or the end. The
+// class is written without an escaped hyphen (the trailing "-" is literal) so
+// its `.source` is valid in a Postgres ARE unchanged.
+const STARTS_WITH_ILAN = /^[İI]LAN([\s:.–-]|$)/u;
 
 // B: /ilan/, /ilanlar/, /resmi-ilan/, /resmi-ilanlar/ as a whole path segment
 // ("/haber/bilanco-aciklandi" must not match).
 const ILAN_PATH = /(^|\/)(ilan|ilanlar|resmi-ilan|resmi-ilanlar)(\/|$)/i;
 
 /**
+ * The five rules, exported so the SQL twin can be checked against them
+ * (see the header). Not part of the runtime API: callers use isLegalNotice.
+ */
+export const LEGAL_NOTICE_PATTERNS = {
+  ENDS_WITH_INSTITUTION,
+  CONTAINS_ABLATIVE,
+  TC_COURT,
+  STARTS_WITH_ILAN,
+  ILAN_PATH,
+} as const;
+
+/**
  * True when at least `minLetters` letters are present and at least
- * MIN_UPPER_RATIO of them are uppercase. Case is decided with the Turkish
+ * LEGAL_NOTICE_MIN_UPPER_RATIO of them are uppercase. Case is decided with the Turkish
  * locale so dotted/dotless I behave (İ is upper, ı is lower).
  */
 function isMostlyUppercase(s: string, minLetters: number): boolean {
@@ -51,7 +76,7 @@ function isMostlyUppercase(s: string, minLetters: number): boolean {
   for (const ch of letters) {
     if (ch !== ch.toLocaleLowerCase("tr")) upper++;
   }
-  return upper / letters.length >= MIN_UPPER_RATIO;
+  return upper / letters.length >= LEGAL_NOTICE_MIN_UPPER_RATIO;
 }
 
 export function isLegalNotice(title: string, url?: string | null): boolean {
@@ -60,14 +85,14 @@ export function isLegalNotice(title: string, url?: string | null): boolean {
     // every [İ] class below.
     const t = title.normalize("NFC").trim();
     if (
-      isMostlyUppercase(t, MIN_LETTERS) &&
+      isMostlyUppercase(t, LEGAL_NOTICE_MIN_LETTERS) &&
       (ENDS_WITH_INSTITUTION.test(t) ||
         CONTAINS_ABLATIVE.test(t) ||
         TC_COURT.test(t))
     ) {
       return true;
     }
-    // (iv) A bare "İLAN" / "İLAN:" header has fewer than MIN_LETTERS letters
+    // (iv) A bare "İLAN" / "İLAN:" header has fewer than LEGAL_NOTICE_MIN_LETTERS letters
     // but is exactly the notice marker, so it only needs the ratio gate
     // (3 letters = the word itself).
     if (STARTS_WITH_ILAN.test(t) && isMostlyUppercase(t, 3)) return true;

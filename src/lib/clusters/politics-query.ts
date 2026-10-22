@@ -280,9 +280,10 @@ async function fetchPoliticsClusters(
     // and blindspots-query.ts's own equivalent points; this is the E2 fix).
     // `null` means "health unknown" — buildClusterBundle below treats that
     // identically to "no health data at all" (fail open, no suppression).
-    // getZoneFeedHealth never throws (see feed-health.ts's file header).
+    // getZoneFeedHealth never throws (see feed-health.ts's file header). It
+    // takes the caller's profile so the cron's health read is uncapped too.
     const [health, { data, error }] = await Promise.all([
-      getZoneFeedHealth(),
+      getZoneFeedHealth({ profile }),
       // Single round-trip: cluster → cluster_articles → articles → sources.
       // The nested shape is produced by PostgREST following the foreign
       // keys declared in migrations 001-003. This replaces the previous
@@ -833,11 +834,21 @@ function scoreCluster(
 // `profile` is an argument on purpose: it becomes part of the cache key, so a
 // capped "reader" entry (and its cached `{ ok: false }` sentinel) is never
 // served to a "batch" cron, and the cron's own miss runs uncapped.
+//
+// Exactly ONE `cacheLife` per invocation, chosen after the attempt: a failed
+// attempt (typically the 4 s reader abort on a cold database) is memoised for
+// `minutes` only, so a blip cannot park the `{ ok: false }` sentinel for a
+// whole `cluster-feed` window; a success keeps the normal lifetime.
 async function getPoliticsClustersCached(profile: ReadProfile) {
   "use cache: remote";
-  cacheLife("cluster-feed");
   cacheTag("clusters-politics");
-  return attemptCached("politics-query", () => fetchPoliticsClusters(profile));
+  const r = await attemptCached("politics-query", () =>
+    fetchPoliticsClusters(profile),
+  );
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
 }
 
 // Public entry point. The page component (and the RSS/cron consumers)

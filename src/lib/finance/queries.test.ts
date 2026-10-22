@@ -32,6 +32,14 @@ const fixture = vi.hoisted(() => ({
   jevRows: [] as Array<{ subject_id: string; jev_prob: number; created_at: string }>,
   bistCompanies: [] as Array<{ tickers: string[]; title: string }>,
   tickerArticlesRows: [] as unknown[],
+  tickerArticlesError: null as string | null,
+  // migration 107: ids of BİK court / official notices. The ticker readers
+  // drop these before aggregating. `legalNoticeError` simulates the lookup
+  // failing (statement timeout, or the table not applied yet); `lastLegalState`
+  // records the builder state of the most recent lookup.
+  legalNotices: [] as Array<{ article_id: string; published_at: string }>,
+  legalNoticeError: null as string | null,
+  lastLegalState: null as unknown,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -86,10 +94,26 @@ const supabaseFake = await vi.hoisted(async () => {
         return { data: [], error: null };
       },
       bist_companies: () => ({ data: fixture.bistCompanies, error: null }),
+      legal_notice_articles: (state: unknown) => {
+        const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
+        fixture.lastLegalState = s;
+        if (fixture.legalNoticeError) return { data: null, error: { message: fixture.legalNoticeError } };
+        const since = s.gte.find((g) => g.col === "published_at")?.val as string | undefined;
+        const rows = fixture.legalNotices
+          .filter((r) => !since || r.published_at >= since)
+          .sort((a, b) => b.published_at.localeCompare(a.published_at) || a.article_id.localeCompare(b.article_id));
+        // Like PostgREST: a response never exceeds max_rows (1,000), whatever limit/range asks.
+        const from = s.range ? s.range.from : 0;
+        const asked = s.range ? s.range.to - s.range.from + 1 : (s.limit ?? rows.length);
+        return { data: rows.slice(from, from + Math.min(asked, 1000)), error: null };
+      },
     },
     rpc: {
       econ_feed: () => ({ data: fixture.econFeedRows, error: null }),
-      ticker_articles: () => ({ data: fixture.tickerArticlesRows, error: null }),
+      ticker_articles: () =>
+        fixture.tickerArticlesError
+          ? { data: null, error: { message: fixture.tickerArticlesError } }
+          : { data: fixture.tickerArticlesRows, error: null },
     },
   });
 });
@@ -128,6 +152,10 @@ beforeEach(() => {
   fixture.jevRows = [];
   fixture.bistCompanies = [];
   fixture.tickerArticlesRows = [];
+  fixture.tickerArticlesError = null;
+  fixture.legalNotices = [];
+  fixture.legalNoticeError = null;
+  fixture.lastLegalState = null;
   supabaseFake.calls.rpc.length = 0;
 });
 
@@ -471,5 +499,179 @@ describe("reader-data (§4b): Jev ticker-relevance gate", () => {
     expect(page.articles.map((a) => a.id)).toEqual(["a2"]);
     const totalAttentionArticles = page.attention.reduce((s, d) => s + d.articles, 0);
     expect(totalAttentionArticles).toBe(1);
+  });
+});
+
+describe("ticker-legal-notices (migration 107): BİK notices do not count as ticker attention", () => {
+  const NOW = "2026-09-13T12:00:00Z";
+
+  function warnSpy() {
+    return vi.spyOn(console, "warn").mockImplementation(() => {});
+  }
+
+  function topTickerRows() {
+    return [
+      // n1 is a court notice that string-matched GARAN ("Garanti" in a debtor name).
+      { ticker: "GARAN", article_id: "n1", published_at: "2026-09-13T08:00:00Z", source_id: "s1" },
+      { ticker: "GARAN", article_id: "a2", published_at: "2026-09-13T09:00:00Z", source_id: "s2" },
+    ];
+  }
+
+  it("fetchTopTickers does not count a GARAN row whose article is in legal_notice_articles", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    fixture.legalNotices = [{ article_id: "n1", published_at: "2026-09-13T08:00:00Z" }];
+
+    const garan = (await fetchTopTickers(2, 10)).find((r) => r.ticker === "GARAN");
+
+    expect(garan).toBeDefined();
+    expect(garan!.articles).toBe(1);
+    expect(garan!.sources).toBe(1);
+  });
+
+  it("drops a ticker whose only articles are notices from the ranking altogether", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = [topTickerRows()[0]!];
+    fixture.legalNotices = [{ article_id: "n1", published_at: "2026-09-13T08:00:00Z" }];
+
+    expect(await fetchTopTickers(2, 10)).toEqual([]);
+  });
+
+  it("fetchTopTickers asks for notice ids over the same 8-day window as article_tickers, newest cap 5000", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+
+    await fetchTopTickers(2, 10);
+
+    const state = fixture.lastLegalState as BuilderState;
+    expect(state.table).toBe("legal_notice_articles");
+    // days=2, baseline 6 -> 7 Istanbul days back from 2026-09-13.
+    expect(state.gte).toEqual([{ col: "published_at", val: "2026-09-06T00:00:00+03:00" }]);
+    expect(state.limit).toBe(5000);
+  });
+
+  it("fetchTopTickers excludes a notice that sits beyond PostgREST's 1,000-row response cap", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    // 1,200 newer notices fill the first response; n1 is the oldest, row 1,201.
+    fixture.legalNotices = [
+      ...Array.from({ length: 1200 }, (_, i) => ({
+        article_id: `x${String(i).padStart(4, "0")}`,
+        published_at: new Date(Date.parse("2026-09-13T11:00:00Z") - i * 1000).toISOString(),
+      })),
+      { article_id: "n1", published_at: "2026-09-13T08:00:00Z" },
+    ];
+
+    const garan = (await fetchTopTickers(2, 10)).find((r) => r.ticker === "GARAN");
+
+    expect(garan!.articles).toBe(1);
+    expect(garan!.sources).toBe(1);
+  });
+
+  it("fetchTopTickers counts the notice row when the lookup errors (fail-open) and warns", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    fixture.legalNotices = [{ article_id: "n1", published_at: "2026-09-13T08:00:00Z" }];
+    fixture.legalNoticeError = "canceling statement due to statement timeout";
+    const spy = warnSpy();
+    try {
+      const garan = (await fetchTopTickers(2, 10)).find((r) => r.ticker === "GARAN");
+      expect(garan!.articles).toBe(2);
+      expect(garan!.sources).toBe(2);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes("legal-notice lookup unavailable"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("fetchTopTickers still counts everything on a pre-migration database (no notice rows)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    const garan = (await fetchTopTickers(2, 10)).find((r) => r.ticker === "GARAN");
+    expect(garan!.articles).toBe(2);
+  });
+
+  function tickerPageArticles() {
+    return [
+      {
+        id: "n1",
+        title: "Garanti Faktoring borçlusu için satış duyurusu",
+        url: "https://x/n1",
+        published_at: "2026-09-13T08:00:00Z",
+        category: "ekonomi",
+        source_name: "Dünya",
+        source_slug: "dunya",
+        matched_on: "alias",
+      },
+      {
+        id: "a2",
+        title: "Garanti BBVA kâr açıkladı",
+        url: "https://x/a2",
+        published_at: "2026-09-13T09:00:00Z",
+        category: "ekonomi",
+        source_name: "Sözcü",
+        source_slug: "sozcu",
+        matched_on: "alias",
+      },
+    ];
+  }
+
+  it("fetchTickerPage's attention series and article list both exclude the notice id", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    fixture.tickerArticlesRows = tickerPageArticles();
+    fixture.legalNotices = [{ article_id: "n1", published_at: "2026-09-13T08:00:00Z" }];
+
+    const page = await fetchTickerPage("GARAN");
+
+    // The list: n1's title is not caught by the title filter, only by the id set.
+    expect(page.articles.map((a) => a.id)).toEqual(["a2"]);
+    expect(page.attention.reduce((s, d) => s + d.articles, 0)).toBe(1);
+  });
+
+  it("fetchTickerPage looks notices up over its 30-day attention window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    fixture.tickerArticlesRows = tickerPageArticles();
+
+    await fetchTickerPage("GARAN");
+
+    const state = fixture.lastLegalState as BuilderState;
+    expect(state.table).toBe("legal_notice_articles");
+    expect(state.gte).toEqual([{ col: "published_at", val: "2026-08-15T00:00:00+03:00" }]);
+    expect(state.limit).toBe(5000);
+  });
+
+  it("fetchTickerPage does not throw when the lookup errors, and keeps everything (fail-open)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    fixture.tickerArticlesRows = tickerPageArticles();
+    fixture.legalNotices = [{ article_id: "n1", published_at: "2026-09-13T08:00:00Z" }];
+    fixture.legalNoticeError = 'relation "public.legal_notice_articles" does not exist';
+    const spy = warnSpy();
+    try {
+      const page = await fetchTickerPage("GARAN");
+      expect(page.articles.map((a) => a.id).sort()).toEqual(["a2", "n1"]);
+      expect(page.attention.reduce((s, d) => s + d.articles, 0)).toBe(2);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes("legal-notice lookup unavailable"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("fetchTickerPage still throws on a real page-content error (the lookup is the only fail-open read)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.tickerArticlesError = "ticker_articles boom";
+    await expect(fetchTickerPage("GARAN")).rejects.toThrow(/fetchTickerPage articles: ticker_articles boom/);
   });
 });

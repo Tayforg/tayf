@@ -2326,3 +2326,58 @@ select count(*) from public.jev_gold_set g where not exists (select 1 from publi
 After the first replay: `select id, status, items, started_at from public.jev_regression_runs order by id desc limit 3;` should show `ok` with `items` = 720.
 
 **Kill switch / rollback:** none. It is a one-off data freeze and there is no shrink path from `/admin`. Undoing it would mean deleting the added `jev_regression_items` rows by hand (their `jev_regression_answers` go with them, `ON DELETE CASCADE`) plus the ledger row for version 104, and it changes the replay set again, so do not do that once a replay has run.
+
+## 107 — BİK mahkeme/resmi ilanları ticker dikkatinden çıkar (`legal_notice_articles`, cron `legal-notice-mark`): APPLY 107, BACKFILL, THEN DEPLOY
+
+**Why:** the `/ekonomi` attention totals (`fetchTopTickers`, the per-ticker attention series) are summed in JS over `article_tickers` rows, which carry no title. A BİK notice such as "GARANTİ FAKTORİNG ... İCRA DAİRESİ" string-matches a ticker and inflates its article and source counts. Ingest already drops notices (`supabase/functions/_shared/rss/legal-notice.ts`), but rows stored before that filter, rows that slip past it, and rows ingested by a lagging edge deploy are still counted. The `/ekonomi` feed and the per-ticker list already filter by title; the totals could not. A read-time join on `articles.title` or an ILIKE pre-scan would add reads that cannot fit the 4 s reader cap on a cold Micro database (Step 0 numbers are in the migration header), so 107 keeps a small service-role table of notice article ids and the readers drop those rows before aggregating.
+
+**What it does** (additive, one transaction, idempotent, safe to re-apply):
+
+1. `public.legal_notice_articles(article_id, published_at, marked_at)`: RLS on, every default grant revoked from `anon`/`authenticated`/`public` (plus the PG17-guarded `MAINTAIN` revoke), `SELECT` granted to `service_role`. Rows cascade with their article.
+2. `public.is_legal_notice(p_title, p_url)`: the SQL twin of `isLegalNotice()`. The five regexes are the JS `.source` of `LEGAL_NOTICE_PATTERNS`, copied verbatim; `tests/migrations/107-legal-notice-articles.test.ts` fails the build on drift.
+3. `public.legal_notice_mark(p_from, p_to)`: marks the notices published in `[p_from, p_to)` idempotently and returns the number of newly marked rows. It raises unless both bounds are given, `p_from < p_to` and the window is at most 2 days.
+4. Cron `legal-notice-mark` (`23 */6 * * *`, `statement_timeout` 2 min) re-marks the last 30 hours and the next 3: a backstop for slips and edge-deploy lag.
+
+No backfill runs inside the migration. The readers are FAIL-OPEN (`fetchLegalNoticeIdsSince` warns `[finance] legal-notice lookup unavailable: ...` and counts every row, i.e. the behaviour before 107), so the app may deploy before or after the migration; before it, every uncached `/ekonomi` render logs that warning.
+
+**Deploy order:**
+
+1. Apply `107_legal_notice_articles.sql`. It needs `public.articles` and nothing else; pg_cron missing only skips the schedule with a notice.
+2. Run the backfill below, once. Until it has run, the table is empty and the totals are unchanged.
+3. Merge/deploy the app. `/ekonomi` caches (`finance-feed`: 60 s revalidate, 10 min expire) pick the change up on their own; no tag purge needed.
+4. **No `ingest` redeploy is required.** The `legal-notice.ts` change only exports the rule constants and rewrites one character class without a behaviour change (`deno check` clean). If you redeploy anyway, use `--no-verify-jwt` like every Edge Function in this guide.
+
+**Backfill** (operator, once; idempotent and resumable; one call per 2-day slice, each its own statement so none risks the API timeout; about 25k articles and a couple of seconds a slice on production):
+
+```bash
+for i in $(seq 30 -2 0); do
+  psql "$DATABASE_URL" -Atc "set statement_timeout = '2min'; select public.legal_notice_mark(date_trunc('day', now()) - interval '$i days', date_trunc('day', now()) - interval '$i days' + interval '2 days');"
+done
+```
+
+Without psql, run the same `select` in the SQL editor one slice at a time (`$i` = 30, 28, ... 2, 0). 30 days is what the widest reader window uses. Expect roughly 27 new rows per day (about 820 over the 30 days, measured 2026-10-22: 82 notices among 34,319 articles in 3 days); re-running returns 0.
+
+**Verify:**
+
+```sql
+select count(*), min(published_at), max(published_at) from public.legal_notice_articles;  -- ~820 over 30 days after the backfill
+select jobname, schedule, active from cron.job where jobname = 'legal-notice-mark';  -- '23 */6 * * *', active
+select has_table_privilege('anon', 'public.legal_notice_articles', 'select');  -- false
+select has_table_privilege('authenticated', 'public.legal_notice_articles', 'select');  -- false
+select has_function_privilege('anon', 'public.legal_notice_mark(timestamptz, timestamptz)', 'execute');  -- false
+select has_function_privilege('anon', 'public.is_legal_notice(text, text)', 'execute');  -- false
+select relacl from pg_class where oid = 'public.legal_notice_articles'::regclass;  -- no anon= / authenticated= entry (service_role keeps Supabase's default grants, like 105's pool table)
+select t.title from public.legal_notice_articles l join public.articles t on t.id = l.article_id order by l.published_at desc limit 20;  -- eyeball: all notices, no real news
+```
+
+After the deploy, a ticker whose attention was mostly notices (for example a bank named in debtor notices) should drop in the `/ekonomi` ranking within a few minutes.
+
+**Limits to know:**
+
+- PostgREST truncates a response at `max_rows` (1,000), whatever `.limit()` asks (the reader asks for 5,000). The 30-day set is already ~820 rows, so `fetchLegalNoticeIdsSince` continues with `.range()` pages (newest first) whenever a response comes back with exactly 1,000 rows, up to 5,000 ids in total. Past 5,000 ids the oldest notices of the window stop being excluded; raise `LEGAL_NOTICE_LOOKUP_LIMIT` if the volume ever gets there.
+- Accepted divergences from the JS predicate: letters outside the Turkish/ASCII sets are not counted (JS counts any `\p{L}`), and `.` / `\s` treat newlines and Unicode spaces differently. Titles are single-line after ingest; NBSP and BOM are trimmed explicitly.
+- A notice the rules do not recognise is still counted (this is a filter, not a classifier). Add the shape to `legal-notice.ts` and 107's SQL together (the parity test enforces that), then re-run the backfill.
+
+**Kill switch:** `select cron.unschedule('legal-notice-mark');` stops the backstop. To make the readers count everything again without a deploy, empty the table as the owner: `delete from public.legal_notice_articles;` (the next cron tick or backfill refills it, so unschedule first).
+
+**Rollback:** nothing depends on 107, and the readers fail open. `select cron.unschedule('legal-notice-mark'); drop function public.legal_notice_mark(timestamptz, timestamptz); drop function public.is_legal_notice(text, text); drop table public.legal_notice_articles; delete from supabase_migrations.schema_migrations where version = '107';` Redeploying the previous app build is optional.

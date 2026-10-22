@@ -14,13 +14,15 @@ vi.mock("next/cache", () => ({
 
 const fixture = vi.hoisted(() => ({
   predictionRows: [] as Array<{ article_id: string | null }>,
-  predictionError: null as { message: string } | null,
+  predictionError: null as { message: string; hint?: string; code?: string } | null,
   articleRows: [] as unknown[],
   articlesError: null as { message: string } | null,
   versionRows: [] as Array<{ article_id: string }>,
   predictionCalls: [] as unknown[],
   articleCalls: [] as unknown[],
   versionCalls: [] as unknown[],
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -46,10 +48,15 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
-const { fetchDailyPuzzle, getDailyPuzzle } = await import("./daily-query");
+import { cacheLife } from "next/cache";
+
+const { fetchDailyPuzzleCached, getDailyPuzzle } = await import("./daily-query");
 const { dailyHash, puzzleWindow } = await import("./daily-set");
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -85,6 +92,10 @@ function articleRow(i: number, zone: keyof typeof ZONE_BIAS, overrides: Record<s
 
 // 6 candidates spread across the 3 zones — one extra beyond the minimum 5
 // so a single edited-title exclusion still leaves a full playable set.
+function sixPredictionRows() {
+  return Array.from({ length: 6 }, (_, i) => ({ article_id: `article-${i}` }));
+}
+
 function sixEligibleRows() {
   const zones: Array<keyof typeof ZONE_BIAS> = [
     "iktidar",
@@ -108,6 +119,8 @@ beforeEach(() => {
   fixture.predictionCalls = [];
   fixture.articleCalls = [];
   fixture.versionCalls = [];
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
 });
 
 afterEach(() => {
@@ -115,7 +128,7 @@ afterEach(() => {
   delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 });
 
-describe("fetchDailyPuzzle — predictions paging", () => {
+describe("daily puzzle — predictions paging", () => {
   it("records the exact predicate/paging shape and stops on a short page", async () => {
     fixture.predictionRows = [{ article_id: "article-0" }, { article_id: "article-1" }];
     fixture.articleRows = sixEligibleRows();
@@ -135,7 +148,7 @@ describe("fetchDailyPuzzle — predictions paging", () => {
   });
 });
 
-describe("fetchDailyPuzzle — article fetch order", () => {
+describe("daily puzzle — article fetch order", () => {
   it("requests articles with .in in dailyHash order", async () => {
     fixture.predictionRows = [
       { article_id: "article-0" },
@@ -166,7 +179,7 @@ describe("fetchDailyPuzzle — article fetch order", () => {
   });
 });
 
-describe("fetchDailyPuzzle — edited-title exclusion", () => {
+describe("daily puzzle — edited-title exclusion", () => {
   it("excludes an article with a row in article_title_versions", async () => {
     fixture.predictionRows = [
       { article_id: "article-0" },
@@ -179,19 +192,51 @@ describe("fetchDailyPuzzle — edited-title exclusion", () => {
     fixture.articleRows = sixEligibleRows();
     fixture.versionRows = [{ article_id: "article-0" }];
 
-    const puzzle = await fetchDailyPuzzle(DATE_KEY);
+    const attempt = await fetchDailyPuzzleCached(DATE_KEY);
 
-    expect(puzzle.headlines).toHaveLength(5);
-    expect(puzzle.headlines.some((h) => h.articleId === "article-0")).toBe(false);
+    expect(attempt.ok).toBe(true);
+    if (!attempt.ok) return;
+    expect(attempt.data.headlines).toHaveLength(5);
+    expect(attempt.data.headlines.some((h) => h.articleId === "article-0")).toBe(false);
   });
 });
 
-describe("fetchDailyPuzzle — error handling", () => {
-  it("rejects on a Supabase error, and getDailyPuzzle fails open to null", async () => {
+describe("daily puzzle — error handling", () => {
+  it("a Supabase error comes back as { ok: false } (it never rejects), and getDailyPuzzle fails open to null", async () => {
     fixture.predictionError = { message: "connection reset" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    await expect(fetchDailyPuzzle(DATE_KEY)).rejects.toThrow();
+    const attempt = await fetchDailyPuzzleCached(DATE_KEY);
+    expect(attempt.ok).toBe(false);
+    if (!attempt.ok) expect(attempt.error).toContain("connection reset");
+
     await expect(getDailyPuzzle(DATE_KEY)).resolves.toBeNull();
+    errSpy.mockRestore();
+  });
+
+  it("a reader-cap timeout (AbortError) is a failed attempt, not a rejection", async () => {
+    fixture.predictionError = {
+      message: "AbortError: Supabase request exceeded 4000 ms",
+      hint: "Request was aborted (timeout or manual cancellation)",
+      code: "",
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const attempt = await fetchDailyPuzzleCached(DATE_KEY);
+    expect(attempt.ok).toBe(false);
+    if (!attempt.ok) expect(attempt.error).toContain("AbortError");
+
+    await expect(getDailyPuzzle(DATE_KEY)).resolves.toBeNull();
+    errSpy.mockRestore();
+  });
+
+  it("a missing-env failure is contained too: { ok: false }, never a throw across the cache boundary", async () => {
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(fetchDailyPuzzleCached(DATE_KEY)).resolves.toMatchObject({ ok: false });
+    await expect(getDailyPuzzle(DATE_KEY)).resolves.toBeNull();
+    errSpy.mockRestore();
   });
 
   it("logs the failure with the [gunun-tayfi] prefix and the date key", async () => {
@@ -205,8 +250,8 @@ describe("fetchDailyPuzzle — error handling", () => {
   });
 });
 
-describe("fetchDailyPuzzle — incomplete set", () => {
-  it("rejects when fewer than 5 eligible candidates exist", async () => {
+describe("daily puzzle — incomplete set", () => {
+  it("is a failed attempt ({ ok: false }) when fewer than 5 eligible candidates exist", async () => {
     fixture.predictionRows = [
       { article_id: "article-0" },
       { article_id: "article-1" },
@@ -217,8 +262,106 @@ describe("fetchDailyPuzzle — incomplete set", () => {
       articleRow(1, "bagimsiz"),
       articleRow(2, "muhalefet"),
     ];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-    await expect(fetchDailyPuzzle(DATE_KEY)).rejects.toThrow();
+    const attempt = await fetchDailyPuzzleCached(DATE_KEY);
+    expect(attempt.ok).toBe(false);
+    if (!attempt.ok) expect(attempt.error).toContain("incomplete daily set");
+
     await expect(getDailyPuzzle(DATE_KEY)).resolves.toBeNull();
+    errSpy.mockRestore();
+  });
+});
+
+describe("daily puzzle — cache lifetime", () => {
+  it("success calls cacheLife exactly once with days", async () => {
+    fixture.predictionRows = sixPredictionRows();
+    fixture.articleRows = sixEligibleRows();
+
+    const attempt = await fetchDailyPuzzleCached(DATE_KEY);
+
+    expect(attempt.ok).toBe(true);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("days");
+  });
+
+  it("an error calls cacheLife exactly once with minutes (a blip must not park a failure for days)", async () => {
+    fixture.predictionError = { message: "connection reset" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await fetchDailyPuzzleCached(DATE_KEY);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    errSpy.mockRestore();
+  });
+
+  it("an incomplete set calls cacheLife exactly once with minutes", async () => {
+    fixture.predictionRows = [{ article_id: "article-0" }];
+    fixture.articleRows = [articleRow(0, "iktidar")];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await fetchDailyPuzzleCached(DATE_KEY);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    errSpy.mockRestore();
+  });
+
+  it("getDailyPuzzle makes exactly one cached call and does NOT retry live (a build is too heavy to repeat per request)", async () => {
+    fixture.predictionError = { message: "connection reset" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(getDailyPuzzle(DATE_KEY)).resolves.toBeNull();
+
+    expect(fixture.predictionCalls).toHaveLength(1);
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    errSpy.mockRestore();
+  });
+
+  it("getDailyPuzzle returns the puzzle on success", async () => {
+    fixture.predictionRows = sixPredictionRows();
+    fixture.articleRows = sixEligibleRows();
+
+    const puzzle = await getDailyPuzzle(DATE_KEY);
+
+    expect(puzzle?.dateKey).toBe(DATE_KEY);
+    expect(puzzle?.headlines).toHaveLength(5);
+  });
+});
+
+describe("daily puzzle — reader cap", () => {
+  /** A capped client is built with a custom `global.fetch`; a plain one is not. */
+  function isCappedClientOpts(opts: unknown): boolean {
+    const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+    return typeof g?.fetch === "function";
+  }
+
+  it("a build creates exactly ONE capped client", async () => {
+    fixture.predictionRows = sixPredictionRows();
+    fixture.articleRows = sixEligibleRows();
+
+    await getDailyPuzzle(DATE_KEY);
+
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(true);
+  });
+
+  it("still exactly one client when the build needs several article chunks and several prediction pages", async () => {
+    // 1000-row first page forces a second prediction page; 154 ghost ids
+    // (no article row) + the 6 real ones spread across >= 2 chunks of 80.
+    const real = ["article-0", "article-1", "article-2", "article-3", "article-4", "article-5"];
+    const ghosts = Array.from({ length: 994 }, (_, i) => `ghost-${i}`);
+    fixture.predictionRows = [...real, ...ghosts].map((article_id) => ({ article_id }));
+    fixture.articleRows = sixEligibleRows();
+
+    const attempt = await fetchDailyPuzzleCached(DATE_KEY);
+
+    expect(fixture.predictionCalls.length).toBeGreaterThanOrEqual(2);
+    expect(fixture.articleCalls.length).toBeGreaterThanOrEqual(2);
+    expect(attempt.ok).toBe(true);
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(true);
   });
 });

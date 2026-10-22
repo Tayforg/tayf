@@ -16,7 +16,7 @@ import {
   toV1ClusterRecord,
   type V1ClusterRow,
 } from "@/lib/api/v1-clusters";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import { registryEnvelope } from "@/lib/sources/registry";
 
 /**
@@ -50,7 +50,7 @@ export const GET = withApiErrors(async (request: Request) => {
   const limit = limitResult;
   const candidateLimit = Math.min(limit * CANDIDATE_MULTIPLIER, CANDIDATE_CAP);
 
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("clusters")
     .select(V1_CLUSTER_SELECT)

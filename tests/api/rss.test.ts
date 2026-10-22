@@ -25,6 +25,7 @@ let mockBundles: unknown[] = [];
 let mockMembers: Record<string, unknown> = {};
 let mockMemberLookupFailed = false;
 let memberLookupCalls: string[][] = [];
+let memberLookupOpts: unknown[] = [];
 // Default mirrors production reality per the neutralizer-honesty audit:
 // zero clusters have ever been neutralized, so the AI-disclosure sentence
 // must be absent unless a test opts into a non-zero count.
@@ -40,8 +41,9 @@ vi.mock("@/lib/clusters/politics-query", () => ({
 // Whole module mocked — it imports next/cache and its "use cache" body
 // would throw outside a Next request context.
 vi.mock("@/lib/clusters/rss-summary-attribution", () => ({
-  getRssSummaryMembers: vi.fn(async (ids: string[]) => {
+  getRssSummaryMembers: vi.fn(async (ids: string[], opts?: unknown) => {
     memberLookupCalls.push(ids);
+    memberLookupOpts.push(opts);
     return { members: mockMembers, lookupFailed: mockMemberLookupFailed };
   }),
 }));
@@ -56,6 +58,7 @@ beforeEach(() => {
   mockMembers = {};
   mockMemberLookupFailed = false;
   memberLookupCalls = [];
+  memberLookupOpts = [];
   mockNeutralStatus = { neutralized: 0, eligible: 0 };
 });
 
@@ -333,5 +336,24 @@ describe("GET /rss.xml", () => {
 
       expect(desc).toBe("3 kaynaktan haberler. Anadolu Ajansı: AA metni");
     });
+  });
+});
+
+describe("GET /rss.xml summary-member lookup read profile", () => {
+  it("stays on the default capped reader profile (only the digest cron opts into batch)", async () => {
+    mockBundles = [
+      bundle({
+        id: "c1",
+        summary: "Metin",
+        articleCount: 3,
+        effectiveArticleCount: 3,
+        isWireRedistribution: false,
+      }),
+    ];
+    const { GET } = await import("@/app/rss.xml/route");
+    await GET();
+    expect(memberLookupCalls).toEqual([["c1"]]);
+    const opts = memberLookupOpts[0] as { profile?: string } | undefined;
+    expect(opts?.profile ?? "reader").toBe("reader");
   });
 });

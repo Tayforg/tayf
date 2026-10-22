@@ -145,7 +145,9 @@ export const GET = withApiErrors(async (request: Request) => {
   }
   const hooks = allHooks.slice(0, MAX_WEBHOOKS);
 
-  const health = await getZoneFeedHealth();
+  // "batch": the 4 s user-facing reader cap must not skip a tick on a cold
+  // database (the 8 s statement_timeout would have let the read finish).
+  const health = await getZoneFeedHealth({ profile: "batch" });
   if (health === null) {
     console.log("[alerts-webhooks] feed health unknown; skipping this tick");
     return NextResponse.json({ skipped: "feed health unknown" });

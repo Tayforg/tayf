@@ -72,6 +72,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
   };
 });
 
+import { cacheLife } from "next/cache";
 import { getBlindspots, getBlindspotsSafe } from "./blindspots-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 import type { BiasCategory } from "@/types";
@@ -149,6 +150,7 @@ beforeEach(() => {
   fixture.lastIdState = null;
   fixture.embedStates = [];
   fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
   feedHealthMock.getZoneFeedHealth.mockReset();
   feedHealthMock.shouldSuppressBlindspot.mockReset();
   feedHealthMock.getZoneFeedHealth.mockResolvedValue(null);
@@ -231,6 +233,65 @@ describe("getBlindspots read profile", () => {
     seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
     await getBlindspotsSafe();
     expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The feed-health gate follows the caller's profile, and the cached entry's
+// lifetime depends on the outcome (failures live for "minutes", never for a
+// full cluster-feed window).
+// ---------------------------------------------------------------------------
+
+describe("getBlindspots feed-health profile forwarding", () => {
+  it("forwards { profile: 'reader' } to getZoneFeedHealth by default", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots();
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledWith({ profile: "reader" });
+  });
+
+  it("forwards { profile: 'batch' } for the crons, so their health read is uncapped too", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots({ profile: "batch" });
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(1);
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledWith({ profile: "batch" });
+  });
+
+  it("getBlindspotsSafe (the /blindspots page) forwards the reader profile", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspotsSafe();
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledWith({ profile: "reader" });
+  });
+});
+
+describe("getBlindspots cache lifetime", () => {
+  it("success calls cacheLife exactly once with cluster-feed", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("an empty candidate list is a success: cluster-feed, not minutes", async () => {
+    await getBlindspots();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a failed attempt calls cacheLife exactly once with minutes (the live retry is outside the cache)", async () => {
+    fixture.candidateError = {
+      message: "AbortError: Supabase request exceeded 4000 ms",
+    };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(getBlindspots()).rejects.toThrow(
+        "[blindspots] candidate select error",
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
   });
 });
 

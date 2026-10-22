@@ -1,7 +1,11 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { zoneOf } from "@/lib/bias/config";
-import { createServerClient } from "@/lib/supabase/server";
+import {
+  createReaderClient,
+  createServerClient,
+  type ReadProfile,
+} from "@/lib/supabase/server";
 import type { BiasCategory, MediaDnaZone } from "@/types";
 
 // Per-zone RSS feed health, read from `sources.fetch_last_status` /
@@ -175,17 +179,21 @@ export function isZoneDegraded(
 }
 
 /**
- * Per-zone feed health across every active, RSS-backed source. `null`
- * means "health unknown" (a Supabase error) — callers must fail OPEN on
- * null, i.e. behave exactly as if this function did not exist.
+ * The uncached, never-throwing computation. `null` means "health unknown"
+ * (a Supabase error, an AbortError from the 4 s reader cap, or a client
+ * construction failure). The clock is read in here, inside the cache scope
+ * of `getZoneFeedHealthCached` below.
  */
-export async function getZoneFeedHealth(): Promise<ZoneFeedHealth | null> {
-  "use cache: remote";
-  cacheLife("source-directory");
-  cacheTag("sources");
-
+async function computeZoneFeedHealth(
+  profile: ReadProfile,
+): Promise<ZoneFeedHealth | null> {
   try {
-    const supabase = createServerClient();
+    // "reader" (pages) fails fast at 4 s; "batch" (social + alerts-webhooks
+    // crons, reached through their shared fetchers) keeps the plain client so
+    // a cold read can use the 8 s statement_timeout instead of skipping the
+    // run.
+    const supabase =
+      profile === "batch" ? createServerClient() : createReaderClient();
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     const yieldSince = new Date(nowMs - FEED_YIELD_WINDOW_MS).toISOString();
@@ -253,6 +261,45 @@ export async function getZoneFeedHealth(): Promise<ZoneFeedHealth | null> {
     );
     return null;
   }
+}
+
+// `profile` is an argument on purpose: it becomes part of the `"use cache"`
+// key, so a capped "reader" entry (and a cached `null` from a 4 s abort) is
+// never served to a "batch" cron, and the cron's own miss runs uncapped.
+//
+// Exactly ONE `cacheLife` per invocation, chosen after the compute: a `null`
+// (health unknown) is cached only for the short `minutes` lifetime so one
+// blip does not blank the blindspot feed-health gate for the whole
+// `source-directory` window; a real result keeps the normal lifetime.
+// `cacheTag` is called before the await. The body never throws (a throw
+// across the cache boundary fails `next build`'s prerender).
+async function getZoneFeedHealthCached(
+  profile: ReadProfile,
+): Promise<ZoneFeedHealth | null> {
+  "use cache: remote";
+  cacheTag("sources");
+  const health = await computeZoneFeedHealth(profile);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (health === null) cacheLife("minutes");
+  else cacheLife("source-directory");
+  return health;
+}
+
+/**
+ * Per-zone feed health across every active, RSS-backed source. `null`
+ * means "health unknown" (a Supabase error) — callers must fail OPEN on
+ * null, i.e. behave exactly as if this function did not exist.
+ *
+ * Uncached public entry: serves BOTH pages and crons (via politics-query /
+ * blindspots-query and the social + alerts-webhooks crons directly), so it
+ * takes a `ReadProfile` like those fetchers. Defaults to the capped
+ * "reader"; crons pass `{ profile: "batch" }`. The profile is forwarded as a
+ * string, never the options object, so it is a stable cache-key argument.
+ */
+export async function getZoneFeedHealth(opts?: {
+  profile?: ReadProfile;
+}): Promise<ZoneFeedHealth | null> {
+  return getZoneFeedHealthCached(opts?.profile ?? "reader");
 }
 
 /**

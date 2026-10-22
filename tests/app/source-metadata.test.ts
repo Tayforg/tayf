@@ -6,6 +6,12 @@ vi.mock("next/cache", () => ({
   cacheTag: vi.fn(),
 }));
 
+// A failed cached attempt falls through to `connection()` before the live
+// retry; there is no request scope in vitest, so stub it.
+vi.mock("next/server", () => ({
+  connection: vi.fn(async () => {}),
+}));
+
 const foundClient = createSupabaseFake({
   tables: {
     sources: [
@@ -37,11 +43,23 @@ const notFoundClient = createSupabaseFake({
   },
 }).client;
 
+// The 4 s reader cap surfaces as a PostgREST-shaped error envelope, not a
+// throw (supabase-js turns the AbortError into `{ data: null, error }`).
+const timeoutClient = createSupabaseFake({
+  tables: {
+    sources: () => ({
+      data: null,
+      error: { message: "AbortError: Supabase request exceeded 4000 ms" },
+    }),
+  },
+}).client;
+
 describe("/source/[slug] generateMetadata (A4 + H)", () => {
   it("returns noindex + null canonical for a missing source", async () => {
     vi.resetModules();
     vi.doMock("@/lib/supabase/server", () => ({
       createServerClient: () => notFoundClient,
+      createReaderClient: () => notFoundClient,
     }));
     const { generateMetadata } = await import("@/app/source/[slug]/page");
 
@@ -56,6 +74,7 @@ describe("/source/[slug] generateMetadata (A4 + H)", () => {
     vi.resetModules();
     vi.doMock("@/lib/supabase/server", () => ({
       createServerClient: () => foundClient,
+      createReaderClient: () => foundClient,
     }));
     const { generateMetadata } = await import("@/app/source/[slug]/page");
 
@@ -67,6 +86,28 @@ describe("/source/[slug] generateMetadata (A4 + H)", () => {
       "summary_large_image",
     );
     expect(meta.alternates?.canonical).toBe("/source/cnn-turk");
+  });
+
+  it("a read timeout is noindex + null canonical and never claims the source is missing", async () => {
+    vi.resetModules();
+    vi.doMock("@/lib/supabase/server", () => ({
+      createServerClient: () => timeoutClient,
+      createReaderClient: () => timeoutClient,
+    }));
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { generateMetadata } = await import("@/app/source/[slug]/page");
+
+      const meta = await generateMetadata({ params: Promise.resolve({ slug: "cnn-turk" }) });
+
+      expect(meta.title).toBe("Kaynak şu anda yüklenemiyor");
+      expect(meta.title).not.toBe("Kaynak bulunamadı");
+      expect(meta.robots).toEqual({ index: false, follow: true });
+      expect(meta.alternates).toEqual({ canonical: null });
+      expect(meta).not.toHaveProperty("openGraph");
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 

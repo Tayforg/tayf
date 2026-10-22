@@ -7,18 +7,25 @@ import { resolve, dirname, join, relative } from "node:path";
 // Permanent CI guard (cold-read resilience): the 4 s reader cap
 // (`createReaderClient`, src/lib/supabase/server.ts) is for user-facing reads.
 // The shared fetchers that BOTH pages and crons use -- getPoliticsClusters,
-// getBlindspots, getAlertItems -- default to that cap, so every call from a
-// cron route must opt out with `{ profile: "batch" }`. A cron that forgets
-// aborts at 4 s on a cold Micro database where the 8 s statement_timeout
-// would have let it finish (the weekly digest then sends nothing until the
-// next Saturday). Route tests pin today's three crons; this sweep catches the
-// next one.
+// getBlindspots, getAlertItems, getZoneFeedHealth (feed-health.ts) and
+// getRssSummaryMembers (rss-summary-attribution.ts) -- default to that cap, so
+// every call from a cron route must opt out with `{ profile: "batch" }`. A
+// cron that forgets aborts at 4 s on a cold Micro database where the 8 s
+// statement_timeout would have let it finish (the weekly digest then sends
+// nothing until the next Saturday). Route tests pin today's three crons; this
+// sweep catches the next one.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CRON_DIR = resolve(here, "../../src/app/api/cron");
 
-const SHARED_READERS = ["getPoliticsClusters", "getBlindspots", "getAlertItems"];
+const SHARED_READERS = [
+  "getPoliticsClusters",
+  "getBlindspots",
+  "getAlertItems",
+  "getZoneFeedHealth",
+  "getRssSummaryMembers",
+];
 
 function walk(dir: string): string[] {
   const out: string[] = [];
@@ -81,6 +88,13 @@ function sweep(): Violation[] {
   return violations;
 }
 
+function callerFiles(fn: string): string[] {
+  const re = new RegExp(`\\b${fn}\\s*\\(`);
+  return walk(CRON_DIR).filter((f) =>
+    re.test(blankComments(readFileSync(f, "utf8"))),
+  );
+}
+
 describe("cron routes keep the uncapped read profile", () => {
   it("finds the crons that call the shared readers (the sweep is not vacuous)", () => {
     const files = walk(CRON_DIR);
@@ -89,11 +103,27 @@ describe("cron routes keep the uncapped read profile", () => {
         new RegExp(`\\b${fn}\\s*\\(`).test(blankComments(readFileSync(f, "utf8"))),
       ),
     );
-    // digest (politics + blindspots), social (both), alerts-webhooks (alerts).
+    // digest (politics + blindspots + summary members), social (both +
+    // health), alerts-webhooks (alerts + health).
     expect(callers.length).toBeGreaterThanOrEqual(3);
   });
 
-  it('every cron call to getPoliticsClusters / getBlindspots / getAlertItems passes { profile: "batch" }', () => {
+  it.each(SHARED_READERS)(
+    "%s has at least one cron caller (a renamed or removed reader must not leave the sweep guarding nothing)",
+    (fn) => {
+      expect(callerFiles(fn).length).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  it("does not count a type-position mention (typeof getZoneFeedHealth>) as a call", () => {
+    // social/route.ts mentions `ReturnType<typeof getZoneFeedHealth>`; the
+    // trailing `\s*\(` in the sweep regex means only a real call matches.
+    const re = new RegExp("\\bgetZoneFeedHealth\\s*\\(");
+    expect(re.test("Awaited<ReturnType<typeof getZoneFeedHealth>>")).toBe(false);
+    expect(re.test("await getZoneFeedHealth()")).toBe(true);
+  });
+
+  it('every cron call to a shared reader (getPoliticsClusters / getBlindspots / getAlertItems / getZoneFeedHealth / getRssSummaryMembers) passes { profile: "batch" }', () => {
     expect(sweep()).toEqual([]);
   });
 });

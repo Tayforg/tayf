@@ -230,7 +230,7 @@ export const GET = withApiErrors(async (request: Request) => {
     attributionClusterIds.push(topBlindspotBundle.cluster.id);
   }
   const { members: membersByCluster, lookupFailed: memberLookupFailed } =
-    await getRssSummaryMembers(attributionClusterIds);
+    await getRssSummaryMembers(attributionClusterIds, { profile: "batch" });
 
   const topClusters = topClusterBundles.map((bundle) =>
     toClusterItem(bundle, resolveSummary(bundle, membersByCluster, memberLookupFailed)),

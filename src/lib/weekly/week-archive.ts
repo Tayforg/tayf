@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import {
   WEEKLY_CLUSTER_LIMIT,
   WEEKLY_MIN_ARTICLES,
@@ -178,20 +178,16 @@ export function weekLabelTr(key: string): string {
 export const WEEK_ARCHIVE_CLUSTER_SELECT =
   "id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published";
 
-/** One archived week's cluster rows. `null` = could not be read; `[]` =
- * read fine, the week produced nothing (or every candidate is archived). */
-export async function getWeekArchiveClusters(
-  key: string,
-): Promise<WeeklyClusterRow[] | null> {
-  "use cache";
-  cacheLife("hours");
-  cacheTag("clusters-politics");
-
-  const range = weekRange(key);
-  if (!range) return null;
-
+/** Raw read of one archived week. `null` = could not be read (Supabase error,
+ * a 4 s reader-cap abort, or a throw); `[]` = read fine, nothing in the week.
+ * Never throws. Called only from `getWeekArchiveClustersCached`, i.e. from
+ * inside the cache scope, which is why the clock read below is allowed. */
+async function fetchWeekArchiveClusters(range: {
+  startIso: string;
+  endIso: string;
+}): Promise<WeeklyClusterRow[] | null> {
   try {
-    const supabase = createServerClient();
+    const supabase = createReaderClient();
     // Single clock read, same rationale as weekly-query.ts: the upper
     // bound must not let a source-controlled future first_published leak
     // a cluster into a past week.
@@ -220,6 +216,38 @@ export async function getWeekArchiveClusters(
     console.error(`[week-archive] clusters unavailable: ${message}`);
     return null;
   }
+}
+
+// Cache lifetime follows the outcome (exactly one `cacheLife` call per
+// invocation; `cacheTag` first): a read -- including an empty week -- keeps
+// `hours`, a failed read is memoised for `minutes` only, and an unparseable
+// key is a stable answer (`null`, `hours`) that never touches Supabase.
+async function getWeekArchiveClustersCached(
+  key: string,
+): Promise<WeeklyClusterRow[] | null> {
+  "use cache";
+  cacheTag("clusters-politics");
+
+  const range = weekRange(key);
+  if (!range) {
+    cacheLife("hours");
+    return null;
+  }
+
+  const data = await fetchWeekArchiveClusters(range);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (data === null) cacheLife("minutes");
+  else cacheLife("hours");
+  return data;
+}
+
+/** One archived week's cluster rows. `null` = could not be read (or the key
+ * is not a valid ISO week); `[]` = read fine, the week produced nothing (or
+ * every candidate is archived). Never throws. */
+export async function getWeekArchiveClusters(
+  key: string,
+): Promise<WeeklyClusterRow[] | null> {
+  return getWeekArchiveClustersCached(key);
 }
 
 export interface RecentWeekKeys {

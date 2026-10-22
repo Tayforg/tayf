@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, unstable_rethrow } from "next/navigation";
 import { connection } from "next/server";
 import { cache } from "react";
 
@@ -12,7 +12,7 @@ import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
 import { fmtPct, fmtPrice, fmtWhen, fmtX, istToday, limitFlag, moveClass } from "@/lib/finance/format";
 import { fetchIntraday, fetchQuoteStats, fetchTickerPage } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
-import { createServerClient } from "@/lib/supabase/server";
+import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 import { cn } from "@/lib/utils";
 
 // /ekonomi/[ticker] — one company: last price and five-session line, the
@@ -63,35 +63,56 @@ const NOT_FOUND_METADATA: Metadata = {
  * ticker — or one still behind the company-sync breaker's up-to-6h window
  * — can have real article/disclosure coverage before its company row
  * exists (see TickerPage's own tolerance of a null `page.company`), so
- * this only 404s when bist_companies AND article_tickers AND
- * kap_disclosures all miss. Any query error fails OPEN (treated as
- * "exists") rather than 500ing the page or generateMetadata over a
- * transient read.
+ * this only reports "missing" when bist_companies AND article_tickers AND
+ * kap_disclosures all ANSWERED and all came back empty.
+ *
+ * Three outcomes, not two (cold-read resilience): the probe runs under the
+ * 4 s reader cap, and on a cold database a timeout is routine. A probe that
+ * errored or timed out has not said the ticker is absent, so that is
+ * "unknown" — never "missing". The page turns "unknown" into a thrown Error
+ * (src/app/ekonomi/error.tsx renders "Tekrar dene") and the metadata into a
+ * noindex "yüklenemiyor" title; only "missing" is a 404. Positive evidence
+ * still wins: a row from one probe proves existence even if its sibling
+ * errored.
  */
-const tickerExists = cache(async (ticker: string): Promise<boolean> => {
-  const supabase = createServerClient();
-  const { data: companyRows, error: companyError } = await supabase
-    .from("bist_companies")
-    .select("kap_member_oid")
-    .contains("tickers", [ticker])
-    .limit(1);
-  if (companyError) {
-    console.error(`[ekonomi] tickerExists: bist_companies probe failed: ${companyError.message}`);
-    return true;
-  }
-  if ((companyRows ?? []).length > 0) return true;
+type TickerExistence = "exists" | "missing" | "unknown";
 
-  const [articlesRes, disclosuresRes] = await Promise.all([
-    supabase.from("article_tickers").select("ticker").eq("ticker", ticker).limit(1),
-    supabase.from("kap_disclosures").select("disclosure_index").contains("stock_codes", [ticker]).limit(1),
-  ]);
-  if (articlesRes.error) {
-    console.error(`[ekonomi] tickerExists: article_tickers probe failed: ${articlesRes.error.message}`);
+const tickerExistence = cache(async (ticker: string): Promise<TickerExistence> => {
+  try {
+    const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
+    const { data: companyRows, error: companyError } = await supabase
+      .from("bist_companies")
+      .select("kap_member_oid")
+      .contains("tickers", [ticker])
+      .limit(1);
+    if (companyError) {
+      console.error(`[ekonomi] tickerExistence: bist_companies probe failed: ${companyError.message}`);
+      return "unknown";
+    }
+    if ((companyRows ?? []).length > 0) return "exists";
+
+    const [articlesRes, disclosuresRes] = await Promise.all([
+      supabase.from("article_tickers").select("ticker").eq("ticker", ticker).limit(1),
+      supabase.from("kap_disclosures").select("disclosure_index").contains("stock_codes", [ticker]).limit(1),
+    ]);
+    if (articlesRes.error) {
+      console.error(`[ekonomi] tickerExistence: article_tickers probe failed: ${articlesRes.error.message}`);
+    }
+    if (disclosuresRes.error) {
+      console.error(`[ekonomi] tickerExistence: kap_disclosures probe failed: ${disclosuresRes.error.message}`);
+    }
+    if ((articlesRes.data ?? []).length > 0 || (disclosuresRes.data ?? []).length > 0) return "exists";
+    if (articlesRes.error || disclosuresRes.error) return "unknown";
+    return "missing";
+  } catch (err) {
+    // Next control-flow signals (dynamic-usage bailouts, postpone) must keep
+    // propagating; only a genuine probe failure is "unknown".
+    unstable_rethrow(err);
+    console.error(
+      `[ekonomi] tickerExistence: probe threw: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "unknown";
   }
-  if (disclosuresRes.error) {
-    console.error(`[ekonomi] tickerExists: kap_disclosures probe failed: ${disclosuresRes.error.message}`);
-  }
-  return (articlesRes.data ?? []).length > 0 || (disclosuresRes.data ?? []).length > 0;
 });
 
 export async function generateMetadata({ params }: { params: Promise<{ ticker: string }> }): Promise<Metadata> {
@@ -102,8 +123,17 @@ export async function generateMetadata({ params }: { params: Promise<{ ticker: s
   // the page's outbound lookups have to be applied here too — otherwise a
   // junk or unknown segment gets echoed straight into
   // <title>/<meta description>/canonical.
-  if (!TICKER_RE.test(ticker) || !(await tickerExists(ticker))) {
-    return NOT_FOUND_METADATA;
+  if (!TICKER_RE.test(ticker)) return NOT_FOUND_METADATA;
+  const existence = await tickerExistence(ticker);
+  if (existence === "missing") return NOT_FOUND_METADATA;
+  if (existence === "unknown") {
+    // The probe timed out / errored: say nothing about the ticker (no
+    // "bulunamadı", no canonical, no description) and keep the shell out of
+    // the index. The page body throws, so the error boundary renders.
+    return {
+      title: "Hisse sayfası şu anda yüklenemiyor",
+      robots: { index: false, follow: false },
+    };
   }
   return {
     title: `${ticker} — hisse haberleri ve KAP bildirimleri`,
@@ -128,12 +158,19 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // same shape at the edge). The existence probe additionally protects
   // against rendering the full data fetch for a ticker with zero coverage
   // anywhere, but for a well-formed unknown ticker it only swaps streamed
-  // content — see tickerExists()'s header comment for the measured detail.
+  // content — see tickerExistence()'s header comment for the measured detail.
   if (!TICKER_RE.test(ticker)) notFound();
-  if (!(await tickerExists(ticker))) notFound();
+  const existence = await tickerExistence(ticker);
+  if (existence === "missing") notFound();
+  // "unknown" = a probe timed out / errored: NOT a 404. Throw so
+  // src/app/ekonomi/error.tsx renders ("Tekrar dene"); still before
+  // connection(), exactly like the notFound() above.
+  if (existence === "unknown") {
+    throw new Error(`[ekonomi] ticker existence unknown: ${ticker}`);
+  }
   await connection();
 
-  // tickerExists() confirms the ticker has SOME coverage (a bist_companies
+  // tickerExistence() confirms the ticker has SOME coverage (a bist_companies
   // row, or at least one article/disclosure), not specifically a company
   // row — see its header comment (E-06) — so `page.company` can still
   // legitimately be null here for a real, freshly-listed or alias-only

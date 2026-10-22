@@ -3,6 +3,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import { READER_TIMEOUT_MS, createFinanceServerClient } from "@/lib/supabase/server";
 import {
   aggregateAttention,
+  fetchLegalNoticeIdsSince,
   fetchLowRelevanceSince,
   fetchRelevanceScores,
   filterFeedTickers,
@@ -18,13 +19,23 @@ import {
 // (same throw-inside-the-cache rule as src/lib/trends/daily-zones.ts).
 //
 // reader-data (§4(b)): the relevance LOOKUPS in this file
-// (fetchRelevanceScores / fetchLowRelevanceSince, both in
-// ticker-relevance.ts) are the one deliberate exception to "every fetcher
-// throws" — they fail open (warn + return a partial/empty result) so a
-// broken Jev shadow table degrades to "show/count everything" instead of
-// taking down /ekonomi. Every other query in this file, including the new
-// article_tickers reads in fetchTopTickers/fetchTickerPage, still throws
-// on error exactly as before.
+// (fetchRelevanceScores / fetchLowRelevanceSince / fetchLegalNoticeIdsSince,
+// all in ticker-relevance.ts) are the one deliberate exception to "every
+// fetcher throws" — they fail open (warn + return a partial/empty result) so
+// a broken Jev shadow table, or a notice table that is missing or too slow
+// on a cold database, degrades to "show/count everything" instead of taking
+// down /ekonomi. Every other query in this file, including the
+// article_tickers reads in fetchTopTickers/fetchTickerPage, still throws on
+// error exactly as before.
+//
+// ticker-legal-notices (migration 107): the attention totals in
+// fetchTopTickers / fetchTickerPage are summed in JS over article_tickers
+// rows, which carry no title. BİK court / official notices that string-match a
+// ticker would inflate them, so both fetchers also read the small id set in
+// `legal_notice_articles` for their window (in parallel with the main reads)
+// and drop those rows before aggregating. The /ekonomi feed and the
+// per-ticker article list keep their `isLegalNotice` title filter as well; the
+// per-ticker list additionally drops the id set.
 
 export interface FeedSource {
   name: string;
@@ -314,11 +325,16 @@ export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAtten
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const splitDay = istDate(-(days - 1));
   const sinceIso = `${istDate(-(days - 1 + BASELINE_DAYS))}T00:00:00+03:00`;
-  const raw = await fetchArticleTickersSince(supabase, sinceIso);
+  // Notice ids are fetched in parallel with the main read; the lookup is
+  // fail-open (empty set), so it can never turn into a thrown error here.
+  const [raw, legalIds] = await Promise.all([
+    fetchArticleTickersSince(supabase, sinceIso),
+    fetchLegalNoticeIdsSince(supabase, sinceIso),
+  ]);
   const lowSinceIso = new Date(Date.parse(sinceIso) - 86400_000).toISOString();
   const low = await fetchLowRelevanceSince(supabase, lowSinceIso);
   const scores = scoreMapFromLowRows(low);
-  const rows = aggregateAttention(raw, scores);
+  const rows = aggregateAttention(raw, scores, legalIds);
   const tickers = [...new Set(rows.map((r) => r.ticker))];
   const titles = new Map<string, string>();
   if (tickers.length > 0) {
@@ -538,18 +554,23 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const since30 = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
 
-  const [companyRes, attentionRes, articlesRes, disclosuresRes, coverageRes] = await Promise.all([
+  // The attention window is 30 Istanbul days; the notice-id lookup covers the same span.
+  const attentionSinceIso = `${istDate(-29)}T00:00:00+03:00`;
+
+  const [companyRes, attentionRes, articlesRes, disclosuresRes, coverageRes, legalIds] = await Promise.all([
     supabase.from("bist_companies").select("kap_member_oid,tickers,title,city,shares_traded").contains("tickers", [ticker]).limit(1),
     // reader-data (§4b): reads article_tickers directly (the
     // ticker_attention_daily materialized view stays unfiltered for its
     // other SQL consumers — see the header note above) so the relevance
     // gate can be applied at query time without a migration.
-    supabase.from("article_tickers").select("article_id,published_at,source_id").eq("ticker", ticker).gte("published_at", `${istDate(-29)}T00:00:00+03:00`).limit(1000),
+    supabase.from("article_tickers").select("article_id,published_at,source_id").eq("ticker", ticker).gte("published_at", attentionSinceIso).limit(1000),
     // Starts from the indexed article_tickers side (migration 054); the
     // embedded-filter form timed out in production.
     supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: 60 }),
     supabase.from("kap_disclosures").select(DISCLOSURE_SELECT).contains("stock_codes", [ticker]).gte("published_at", since30).order("published_at", { ascending: false }).limit(60),
     supabase.from("disclosure_coverage").select("disclosure_index,lag_minutes").eq("ticker", ticker).gte("disclosed_at", since30).limit(2000),
+    // ticker-legal-notices (107): fail-open, so it stays out of the throwing loop below.
+    fetchLegalNoticeIdsSince(supabase, attentionSinceIso),
   ]);
   for (const [name, res] of [["company", companyRes], ["attention", attentionRes], ["articles", articlesRes], ["disclosures", disclosuresRes], ["coverage", coverageRes]] as const) {
     if (res.error) throw new Error(`[finance] fetchTickerPage ${name}: ${res.error.message}`);
@@ -569,14 +590,19 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
     ...articleRows.map((r) => relevanceKey(r.id, ticker)),
   ];
   const scores = await fetchRelevanceScores(supabase, relevanceKeys);
-  const attention = aggregateAttention(attentionRaw, scores).map((d) => ({ day: d.day, articles: d.articles, sources: d.sources }));
+  const attention = aggregateAttention(attentionRaw, scores, legalIds).map((d) => ({ day: d.day, articles: d.articles, sources: d.sources }));
   attention.sort((a, b) => a.day.localeCompare(b.day));
   const baselineDaily = attention.reduce((s, d) => s + d.articles, 0) / 30;
   return {
     company: c ? { kapMemberOid: c.kap_member_oid, tickers: c.tickers, title: c.title, city: c.city, sharesTraded: c.shares_traded } : null,
     attention,
     articles: articleRows
-      .filter((r) => !isLegalNotice(r.title, r.url) && !isHiddenMatch(scores.get(relevanceKey(r.id, ticker))))
+      .filter(
+        (r) =>
+          !legalIds.has(r.id) &&
+          !isLegalNotice(r.title, r.url) &&
+          !isHiddenMatch(scores.get(relevanceKey(r.id, ticker))),
+      )
       .map((r) => ({
         id: r.id,
         title: r.title,

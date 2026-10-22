@@ -160,6 +160,16 @@ export default async function TopicHubPage({
 
       {result === null ? (
         <div className={unavailableWrapClass}>
+          {/* Failed state only: keep it out of the index. The failure is
+              cached for "minutes" (topic-query.ts), so this prerendered
+              noindex lasts about a minute, not a cluster-feed window.
+              PLACEMENT CAVEAT (same as /blindspots): this is streamed into
+              <body>, not hoisted into <head>; whether Googlebot honours a
+              body robots meta is unproven, so verify with Search Console
+              URL Inspection on a staging deploy pointed at a dead DB.
+              Absent from the ok and ok-but-empty states: the empty branch
+              below is a real, readable answer and stays indexable. */}
+          <meta name="robots" content="noindex" />
           <p className={unavailableTextClass}>{UNAVAILABLE_COPY}</p>
         </div>
       ) : result.bundles.length === 0 ? (

@@ -24,13 +24,34 @@ export { isLegalNotice };
 // `countsTowardAttention` both treat `undefined` as "show it" / "count it".
 // Nothing in this file may throw.
 //
-// This module has NO migration behind it: it reads an existing table
+// The relevance gate has NO migration behind it: it reads an existing table
 // (jev_shadow_predictions) at query time. The only DB write is jev.ts's
 // existing shadow-run insert, untouched here.
+//
+// The legal-notice gate DOES: migration 107 adds `legal_notice_articles`, a
+// service-role-only table of BİK court / official notice article ids kept
+// current by ingest-time rules mirrored in SQL (`is_legal_notice`) plus a cron
+// backstop. The attention totals are summed in JS over article_tickers rows
+// (no title on them), so the readers fetch that one small id set per window and
+// drop matching rows before aggregating. Joining articles.title or ILIKE-ing
+// articles instead would add reads that cannot fit the 4 s reader cap on a
+// cold Micro database. `fetchLegalNoticeIdsSince` is FAIL-OPEN like the rest.
 
 export const TICKER_HIDE_BELOW = 0.2;
 export const TICKER_ATTENTION_MIN = 0.5;
 export const RELEVANCE_CHUNK = 100;
+/**
+ * Total row cap of the legal-notice id lookup. Measured volume (migration 107
+ * Step 0): about 27 notices a day, so ~820 rows over the longest window (30
+ * days) and ~220 over fetchTopTickers' 8 days.
+ */
+export const LEGAL_NOTICE_LOOKUP_LIMIT = 5000;
+/**
+ * PostgREST truncates every response at its `max_rows` (1,000 on Supabase)
+ * whatever `.limit()` asks for. A response of exactly this many rows therefore
+ * means "cut off", and `fetchLegalNoticeIdsSince` continues with `.range()`.
+ */
+const POSTGREST_MAX_ROWS = 1000;
 
 export function relevanceKey(articleId: string, ticker: string): string {
   return `${articleId}:${ticker}`;
@@ -138,6 +159,63 @@ export async function fetchLowRelevanceSince(
   return (data ?? []) as RelevanceRow[];
 }
 
+/**
+ * Ids of the BİK court / official notices published since `sinceIso`, from
+ * `legal_notice_articles` (migration 107; written only by `legal_notice_mark`
+ * and served by the table's own published_at index). Callers pass the result
+ * to `aggregateAttention` so a notice that string-matched a ticker
+ * ("... GARANTİ BANKASI ... İCRA DAİRESİ") stops counting as attention.
+ *
+ * The first request asks for LEGAL_NOTICE_LOOKUP_LIMIT rows. PostgREST cuts a
+ * response at 1,000 rows, so when exactly that many come back the lookup
+ * continues with `.range()` pages (stable order: newest first, then id) up to
+ * the same total cap. The 30-day set is ~820 rows today, so this is normally
+ * one request.
+ *
+ * FAIL-OPEN: an error, or a throw (the table does not exist before the
+ * migration is applied; the request aborts at the reader timeout), warns and
+ * returns what was read so far -- an empty Set on the first request, i.e.
+ * "nothing is known to be a notice, count every row", the behaviour before
+ * 107. Never throws.
+ */
+export async function fetchLegalNoticeIdsSince(
+  supabase: RelevanceSupabase,
+  sinceIso: string,
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+  try {
+    let read = 0;
+    while (read < LEGAL_NOTICE_LOOKUP_LIMIT) {
+      const base = supabase
+        .from("legal_notice_articles")
+        .select("article_id")
+        .gte("published_at", sinceIso)
+        .order("published_at", { ascending: false })
+        .order("article_id");
+      const { data, error } =
+        read === 0
+          ? await base.limit(LEGAL_NOTICE_LOOKUP_LIMIT)
+          : await base.range(read, Math.min(read + POSTGREST_MAX_ROWS, LEGAL_NOTICE_LOOKUP_LIMIT) - 1);
+      if (error) {
+        console.warn(`[finance] legal-notice lookup unavailable: ${error.message}`);
+        return ids;
+      }
+      const rows = (data ?? []) as Array<{ article_id?: unknown }>;
+      for (const row of rows) {
+        if (typeof row.article_id === "string") ids.add(row.article_id);
+      }
+      read += rows.length;
+      // A short page is the end; a full 1,000-row page may have been cut off.
+      if (rows.length < POSTGREST_MAX_ROWS) break;
+    }
+  } catch (err) {
+    console.warn(
+      `[finance] legal-notice lookup unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return ids;
+}
+
 interface FeedTickerItem {
   id: string;
   tickers: string[];
@@ -196,15 +274,19 @@ export interface AttentionRow {
  * Aggregate raw article_tickers rows into per-(ticker, Istanbul day)
  * attention counts, honoring the relevance gate: a row only counts when
  * `countsTowardAttention` says so (fail-open for unscored/>=0.5 rows,
- * excluded for < 0.5). Empty (ticker, day) groups are omitted entirely
- * rather than emitted as a zero row.
+ * excluded for < 0.5). Rows whose article is in `excludeArticleIds` (the
+ * legal-notice set, see `fetchLegalNoticeIdsSince`) are skipped for every
+ * ticker. Empty (ticker, day) groups are omitted entirely rather than emitted
+ * as a zero row.
  */
 export function aggregateAttention(
   rows: readonly AttentionRawRow[],
   scores: Map<string, number>,
+  excludeArticleIds?: ReadonlySet<string>,
 ): AttentionRow[] {
   const groups = new Map<string, { ticker: string; day: string; articles: number; sourceIds: Set<string> }>();
   for (const row of rows) {
+    if (excludeArticleIds?.has(row.article_id)) continue;
     const score = scores.get(relevanceKey(row.article_id, row.ticker));
     if (!countsTowardAttention(score)) continue;
     const day = istanbulDay(row.published_at);

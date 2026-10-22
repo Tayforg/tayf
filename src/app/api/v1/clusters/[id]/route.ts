@@ -13,7 +13,7 @@ import {
   toV1ClusterRecord,
   type V1ClusterRow,
 } from "@/lib/api/v1-clusters";
-import { createServerClient } from "@/lib/supabase/server";
+import { createReaderClient } from "@/lib/supabase/server";
 import { registryEnvelope } from "@/lib/sources/registry";
 
 // Duplicated locally rather than imported — same pattern every other
@@ -36,7 +36,7 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
     return withApiV1Headers(apiBadRequest("Invalid cluster id"), auth.tier);
   }
 
-  const supabase = createServerClient();
+  const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("clusters")
     .select(V1_CLUSTER_SELECT)
@@ -51,12 +51,18 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
   if (!data) {
     // Miss path only (the hot path above is one query): an archived cluster
     // may have been merged into another (migration 099). A lookup error, e.g.
-    // the column not existing yet, stays a plain 404.
+    // the column not existing yet, stays a plain 404 -- EXCEPT a timeout
+    // (the 4 s reader cap aborts with an `AbortError: ...` message): that
+    // says nothing about whether the cluster exists, so it is the generic 500,
+    // never a 404 a client would cache or act on.
     const { data: mergedRow, error: mergedError } = await supabase
       .from("clusters")
       .select("merged_into")
       .eq("id", id)
       .maybeSingle<{ merged_into: string | null }>();
+    if (mergedError?.message.startsWith("AbortError")) {
+      return withApiV1Headers(apiServerError(mergedError), auth.tier);
+    }
     const mergedInto = mergedError ? null : mergedRow?.merged_into;
     if (typeof mergedInto === "string" && UUID_RE.test(mergedInto)) {
       const target = mergedInto.toLowerCase();

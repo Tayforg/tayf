@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // kap-media-pickup — IO layer tests. Uses the shared chainable Supabase
@@ -8,7 +8,12 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 // "use cache" getTickerPickup(Safe) wrappers.
 // ---------------------------------------------------------------------------
 
-vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
+const cacheMocks = vi.hoisted(() => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
+
+vi.mock("next/cache", () => ({
+  cacheLife: cacheMocks.cacheLife,
+  cacheTag: cacheMocks.cacheTag,
+}));
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -222,6 +227,115 @@ describe("fetchTickerPickup", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Cold-read resilience for the page-facing wrappers: the panel is user-facing
+// (/ekonomi/[ticker]), so the read runs under the 4 s reader cap, the "use
+// cache" body never throws (attemptCached), and a failed attempt is memoised
+// for "minutes" only. `getTickerPickup` still THROWS on failure (its callers
+// decide), `getTickerPickupSafe` never does.
+// ---------------------------------------------------------------------------
+
+const TIMEOUT_ERROR = {
+  message: "AbortError: Supabase request exceeded 4000 ms",
+  hint: "Request was aborted (timeout or manual cancellation)",
+  code: "",
+};
+
+describe("getTickerPickup / getTickerPickupSafe (cached attempt)", () => {
+  const financeClient = vi.fn();
+
+  async function loadWithClient(tables: Record<string, () => { data: unknown; error: unknown }>) {
+    const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+    const { client } = createSupabaseFake({ tables: tables as never });
+    financeClient.mockReset();
+    financeClient.mockImplementation(async () => client);
+    vi.doMock("@/lib/supabase/server", () => ({
+      READER_TIMEOUT_MS: 4000,
+      createFinanceServerClient: (opts?: unknown) => financeClient(opts),
+    }));
+    return import("@/lib/finance/kap-pickup-query");
+  }
+
+  beforeEach(() => {
+    vi.resetModules();
+    cacheMocks.cacheLife.mockClear();
+    cacheMocks.cacheTag.mockClear();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("builds the finance client with the 4 s reader timeout", async () => {
+    const { getTickerPickup } = await loadWithClient({
+      kap_disclosures: () => ({ data: [], error: null }),
+    });
+    await getTickerPickup("THYAO");
+    expect(financeClient).toHaveBeenCalledTimes(1);
+    expect(financeClient).toHaveBeenCalledWith({ timeoutMs: 4000 });
+  });
+
+  it("success calls cacheLife exactly once with the normal 5-minute profile and tags the ticker", async () => {
+    const { getTickerPickup } = await loadWithClient({
+      kap_disclosures: () => ({ data: [], error: null }),
+    });
+    const result = await getTickerPickup("THYAO");
+    expect(result.ticker).toBe("THYAO");
+    expect(result.pickups).toEqual([]);
+    expect(cacheMocks.cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheMocks.cacheLife).toHaveBeenCalledWith({ stale: 60, revalidate: 300, expire: 3600 });
+    expect(cacheMocks.cacheTag).toHaveBeenCalledWith("finance-feed", "finance-ticker:THYAO");
+  });
+
+  it("a timeout calls cacheLife exactly once with minutes, and getTickerPickup rejects", async () => {
+    const { getTickerPickup } = await loadWithClient({
+      kap_disclosures: () => ({ data: null, error: TIMEOUT_ERROR }),
+    });
+    await expect(getTickerPickup("THYAO")).rejects.toThrow(/AbortError: Supabase request exceeded 4000 ms/);
+    expect(cacheMocks.cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheMocks.cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("getTickerPickupSafe returns null on a timeout instead of throwing, still cached for minutes", async () => {
+    const { getTickerPickupSafe } = await loadWithClient({
+      kap_disclosures: () => ({ data: null, error: TIMEOUT_ERROR }),
+    });
+    await expect(getTickerPickupSafe("THYAO")).resolves.toBeNull();
+    expect(cacheMocks.cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheMocks.cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a client-construction failure is contained in the cached attempt: minutes, and Safe returns null", async () => {
+    const { getTickerPickupSafe } = await loadWithClient({});
+    financeClient.mockRejectedValue(new Error("Missing NEXT_PUBLIC_SUPABASE_URL"));
+    await expect(getTickerPickupSafe("THYAO")).resolves.toBeNull();
+    expect(cacheMocks.cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheMocks.cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("reads the clock inside the cached attempt: the 30-day lookback is anchored on the call time", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(NOW));
+    try {
+      let seen: { gte: Array<{ col: string; val: unknown }> } | undefined;
+      const { getTickerPickup } = await loadWithClient({
+        kap_disclosures: ((state: unknown) => {
+          seen = state as typeof seen;
+          return { data: [], error: null };
+        }) as never,
+      });
+      const result = await getTickerPickup("THYAO");
+      expect(result.until).toBe(iso(NOW));
+      expect(result.since).toBe(iso(NOW - 30 * DAY));
+      expect(seen?.gte[0]?.val).toBe(iso(NOW - 30 * DAY));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("getTickerPickupSafe", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -229,6 +343,7 @@ describe("getTickerPickupSafe", () => {
 
   it("returns null when fetchTickerPickup throws", async () => {
     vi.doMock("@/lib/supabase/server", () => ({
+      READER_TIMEOUT_MS: 4000,
       createFinanceServerClient: async () => ({}) as never,
     }));
     vi.doMock("@/lib/finance/kap-pickup-query", async (importOriginal) => {
@@ -236,11 +351,13 @@ describe("getTickerPickupSafe", () => {
       return actual;
     });
 
-    // Force a real failure path: no env vars / a client whose .from() throws.
+    // Force a real failure path: a client whose .from() is not a function.
     const { getTickerPickupSafe } = await import("@/lib/finance/kap-pickup-query");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const result = await getTickerPickupSafe("THYAO");
     expect(result).toBeNull();
     warnSpy.mockRestore();
+    errSpy.mockRestore();
   });
 });

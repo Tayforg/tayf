@@ -11,6 +11,8 @@ const fixture = vi.hoisted(() => ({
   /** Fail this many calls with `error`-like "boom", then serve `data`. */
   failFirst: 0,
   calls: 0,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -30,9 +32,13 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    fixture.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
 
+import { cacheLife } from "next/cache";
 import {
   KARNE_MIN_CLUSTERS,
   KARNE_MIN_MULTI_FOR_ZONES,
@@ -77,6 +83,8 @@ beforeEach(() => {
   fixture.error = null;
   fixture.failFirst = 0;
   fixture.calls = 0;
+  fixture.clientOpts = [];
+  vi.mocked(cacheLife).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -284,5 +292,78 @@ describe("getSourceKarne", () => {
     expect(await getSourceKarne("not-a-uuid")).toBeNull();
     expect(await getSourceKarne("")).toBeNull();
     expect(fixture.calls).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cold-read resilience: the karne read is a user-facing point lookup, so it
+// runs under the 4 s reader cap, and a failed cache attempt is memoised for
+// "minutes" only (a success keeps the "hours" lifetime).
+//
+// `getKarneFreshnessCached` is a second, clock-only "use cache" function that
+// also calls cacheLife("hours") when a row exists; the "exactly once"
+// assertions below therefore use the cases where it does not run (missing row,
+// outage), and the others assert on the call set.
+// ---------------------------------------------------------------------------
+
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
+
+describe("getSourceKarne reader cap", () => {
+  it("builds a capped reader client", async () => {
+    fixture.data = raw();
+    await getSourceKarne(ID);
+    expect(fixture.clientOpts).toHaveLength(1);
+    expect(isCappedClientOpts(fixture.clientOpts[0])).toBe(true);
+  });
+
+  it("the live retry after a failed cache attempt is capped too", async () => {
+    fixture.data = raw();
+    fixture.failFirst = 1;
+    await getSourceKarne(ID);
+    expect(fixture.clientOpts).toHaveLength(2);
+    expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
+  });
+});
+
+describe("getSourceKarne cache lifetime", () => {
+  it("a missing row is a legitimate result: cacheLife hours, exactly once", async () => {
+    fixture.data = null;
+    await expect(getSourceKarne(ID)).resolves.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+  });
+
+  it("a hit never uses the short failure lifetime", async () => {
+    fixture.data = raw();
+    await getSourceKarne(ID);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+  });
+
+  it("a timeout (cache attempt AND retry fail) calls cacheLife exactly once, with minutes, and returns null", async () => {
+    fixture.error = {
+      message: "AbortError: Supabase request exceeded 4000 ms",
+    };
+    await expect(getSourceKarne(ID)).resolves.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a blip that the live retry heals still caches the failed attempt for minutes only", async () => {
+    fixture.data = raw();
+    fixture.failFirst = 1;
+    const k = await getSourceKarne(ID);
+    expect(k?.nClusters).toBe(100);
+    expect(vi.mocked(cacheLife).mock.calls.filter((c) => c[0] === "minutes")).toHaveLength(1);
+  });
+
+  it("a non-uuid id touches neither the cache nor the database", async () => {
+    await expect(getSourceKarne("not-a-uuid")).resolves.toBeNull();
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(fixture.clientOpts).toHaveLength(0);
   });
 });

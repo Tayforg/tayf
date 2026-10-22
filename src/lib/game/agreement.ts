@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
-import { createServerClient } from "@/lib/supabase/server";
+import { attemptCached } from "@/lib/cache-resilience";
+import { createReaderClient } from "@/lib/supabase/server";
 
 // U-03 follow-through — per-outlet *reader agreement*, aggregated from the
 // `zone_guesses` ledger written by /oyun (migration 057).
@@ -55,52 +56,66 @@ export function summariseCounts(
 }
 
 /**
- * Reader agreement for one source. Never throws — a missing table, a broken
- * Supabase call or a missing env var renders as "not enough guesses yet"
- * rather than taking the source profile down.
+ * Uncached implementation: the two head counts under the 4 s reader cap
+ * (`/source/[slug]` is user-facing). THROWS on either count error so the
+ * cached wrapper below can tell "unavailable" from "fewer than
+ * AGREEMENT_MIN_GUESSES guesses" (a legitimate `null`). Both counts share one
+ * client.
+ */
+async function fetchAgreement(
+  sourceId: string,
+): Promise<ReaderAgreement | null> {
+  const supabase = createReaderClient();
+
+  const { count: total, error } = await supabase
+    .from("zone_guesses")
+    .select("correct", { count: "exact", head: true })
+    .eq("source_id", sourceId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (typeof total !== "number" || total < AGREEMENT_MIN_GUESSES) return null;
+
+  const { count: correct, error: correctError } = await supabase
+    .from("zone_guesses")
+    .select("correct", { count: "exact", head: true })
+    .eq("source_id", sourceId)
+    .eq("correct", true);
+
+  if (correctError) {
+    throw new Error(correctError.message);
+  }
+
+  return summariseCounts(total, correct ?? 0);
+}
+
+// Cached entry. Never throws (`attemptCached`), so nothing crosses the
+// "use cache" boundary. Exactly ONE `cacheLife` per invocation, chosen after
+// the attempt: a failure (typically the 4 s reader abort on a cold database)
+// is memoised for `minutes` only, a success - including the legitimate
+// "too few guesses" `null` - keeps `source-directory`.
+async function getSourceAgreementAttemptCached(sourceId: string) {
+  "use cache";
+  cacheTag("sources");
+  const r = await attemptCached("agreement", () => fetchAgreement(sourceId));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
+/**
+ * Reader agreement for one source. Never throws - a missing table, a broken
+ * Supabase call, a timeout or a missing env var renders as "not enough
+ * guesses yet" rather than taking the source profile down. Deliberately NO
+ * live retry: the number is decoration on the profile, and a second 4 s wait
+ * inside the request is worse than the label card's empty state for a minute.
  */
 export async function getSourceAgreement(
   sourceId: string,
 ): Promise<ReaderAgreement | null> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("sources");
-
   if (!sourceId) return null;
-
-  try {
-    const supabase = createServerClient();
-
-    const { count: total, error } = await supabase
-      .from("zone_guesses")
-      .select("correct", { count: "exact", head: true })
-      .eq("source_id", sourceId);
-
-    if (error) {
-      console.error(
-        `[agreement] reader agreement unavailable: ${error.message}`,
-      );
-      return null;
-    }
-    if (typeof total !== "number" || total < AGREEMENT_MIN_GUESSES) return null;
-
-    const { count: correct, error: correctError } = await supabase
-      .from("zone_guesses")
-      .select("correct", { count: "exact", head: true })
-      .eq("source_id", sourceId)
-      .eq("correct", true);
-
-    if (correctError) {
-      console.error(
-        `[agreement] reader agreement unavailable: ${correctError.message}`,
-      );
-      return null;
-    }
-
-    return summariseCounts(total, correct ?? 0);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[agreement] reader agreement unavailable: ${message}`);
-    return null;
-  }
+  const r = await getSourceAgreementAttemptCached(sourceId);
+  return r.ok ? r.data : null;
 }

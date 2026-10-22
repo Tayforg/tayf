@@ -47,7 +47,20 @@ const CLUSTERS = [
 const dbState = vi.hoisted(() => ({
   clusterQueries: [] as Array<{ select: string; archivedEq: boolean }>,
   lookupError: false,
+  /** The merged_into lookup times out (4 s reader cap) instead of erroring. */
+  lookupAbort: false,
+  /** The primary cluster read times out. */
+  primaryAbort: false,
+  /** The options object each `createClient(url, key, opts)` call received. */
+  clientOpts: [] as unknown[],
 }));
+
+/** What a 4 s cap abort looks like once postgrest-js has swallowed it. */
+const ABORT_RESULT = {
+  data: null,
+  error: { message: "AbortError: Supabase request exceeded 4000 ms", code: "" },
+  status: 0,
+};
 
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
@@ -60,6 +73,8 @@ const supabaseFake = await vi.hoisted(async () => {
           archivedEq: archivedEq !== undefined,
         });
         const isLookup = String(state.selectArgs[0]) === "merged_into";
+        if (isLookup && dbState.lookupAbort) return ABORT_RESULT;
+        if (archivedEq && dbState.primaryAbort) return ABORT_RESULT;
         if (isLookup && dbState.lookupError) {
           return { data: null, error: { message: 'column "merged_into" does not exist' } };
         }
@@ -84,8 +99,17 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: (_url: string, _key: string, opts?: unknown) => {
+    dbState.clientOpts.push(opts);
+    return supabaseFake.client;
+  },
 }));
+
+/** A capped client is built with a custom `global.fetch`; a plain one is not. */
+function isCappedClientOpts(opts: unknown): boolean {
+  const g = (opts as { global?: { fetch?: unknown } } | undefined)?.global;
+  return typeof g?.fetch === "function";
+}
 
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
@@ -101,6 +125,9 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayfhaber.com";
   dbState.clusterQueries = [];
   dbState.lookupError = false;
+  dbState.lookupAbort = false;
+  dbState.primaryAbort = false;
+  dbState.clientOpts = [];
 });
 
 afterEach(() => {
@@ -158,3 +185,64 @@ describe("GET /api/v1/clusters/[id] — merged clusters", () => {
     expect(res.headers.get("Location")).toBeNull();
   });
 });
+
+// Cold-read resilience: the data reads run on the 4 s capped client, and a
+// timeout is a 500 -- never a 404 ("this cluster does not exist").
+describe("GET /api/v1/clusters/[id] — timeouts are not 404s", () => {
+  it("reads through the capped reader client", async () => {
+    const res = await get(LIVE);
+    expect(res.status).toBe(200);
+    // requireApiKey's plain client (api_key_touch RPC) is a write path and
+    // stays uncapped; the data-read client is the capped one.
+    expect(dbState.clientOpts.some(isCappedClientOpts)).toBe(true);
+  });
+
+  it("a primary cluster read that times out is the generic 500", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      dbState.primaryAbort = true;
+      const res = await get(LIVE);
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toBe("Internal server error");
+      expect(JSON.stringify(body)).not.toContain("AbortError");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("primary row missing + merged_into lookup AbortError is a 500, not a 404", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      dbState.lookupAbort = true;
+      const res = await get(MISSING);
+      expect(res.status).toBe(500);
+      expect(res.headers.get("Location")).toBeNull();
+      expect(res.headers.get("X-Tayf-Tier")).toBe("free");
+      const body = await res.json();
+      expect(body.error).toBe("Internal server error");
+      // The raw timeout text must never reach the caller.
+      expect(JSON.stringify(body)).not.toContain("AbortError");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("an archived cluster whose merged_into lookup times out is a 500, not a 404", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      dbState.lookupAbort = true;
+      const res = await get(MERGED);
+      expect(res.status).toBe(500);
+      expect(res.headers.get("Location")).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("a non-timeout lookup error stays a 404 (route works before 099 is applied)", async () => {
+    dbState.lookupError = true;
+    expect((await get(MISSING)).status).toBe(404);
+  });
+});
+
