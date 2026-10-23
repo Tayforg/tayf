@@ -11,11 +11,14 @@
  * because it's the API available in both the browser and every Next.js
  * runtime without a bundler alias.
  *
- * PRIVACY: the raw session id (a random 32-hex string minted by
- * `newSessionId`, held only in the `tayf_cerceve_sid` cookie) never leaves
- * the browser/cookie jar. Only its sha256 (`hashSessionId`) is ever sent
- * to, or stored in, the database — see `framing_votes.session_hash`
- * (migration 068). `hashSessionId` is async because `subtle.digest` is.
+ * PRIVACY: the `tayf_cerceve_sid` cookie is `<id>.<hmac>`: a random 32-hex
+ * id (minted by `newSessionId`) plus an HMAC-SHA256 over it that only the
+ * server can produce (src/lib/game/framing-session.ts signs and verifies it;
+ * a vote is counted only for a verified cookie). The id never leaves the
+ * browser/cookie jar and the signature never reaches the database: only
+ * sha256(id) (`hashSessionId`) is ever sent to, or stored in, the database —
+ * see `framing_votes.session_hash` (migration 068). `hashSessionId` is async
+ * because `subtle.digest` is.
  *
  * Every export below is pure / side-effect-free, with the sole exception
  * of `newSessionId`'s randomness.
@@ -49,37 +52,12 @@ export const FRAMING_SESSION_MAX_AGE_SECONDS = 2592000;
 export const FRAMING_MIN_TALLY_N = 3;
 export const FRAMING_ROUND_SECONDS = 60;
 
-const SESSION_ID_RE = /^[0-9a-f]{32}$/;
-
 /** True for exactly "iktidar" | "muhalefet" | "none" — nothing else. */
 export function isFramingVote(value: unknown): value is FramingVote {
   return (
     typeof value === "string" &&
     (FRAMING_VOTES as readonly string[]).includes(value)
   );
-}
-
-/**
- * Parses the raw `Cookie` request header and returns
- * `FRAMING_SESSION_COOKIE`'s value ONLY when it is exactly 32 lowercase hex
- * characters — an absent cookie, a short/garbled value, or anything that
- * doesn't match the shape `newSessionId` produces all fold to `null` so
- * the caller mints a fresh session rather than trusting a malformed one.
- */
-export function readSessionCookie(request: Request): string | null {
-  const header = request.headers.get("cookie");
-  if (!header) return null;
-
-  for (const part of header.split(";")) {
-    const eq = part.indexOf("=");
-    if (eq === -1) continue;
-    const key = part.slice(0, eq).trim();
-    if (key !== FRAMING_SESSION_COOKIE) continue;
-    const value = part.slice(eq + 1).trim();
-    return SESSION_ID_RE.test(value) ? value : null;
-  }
-
-  return null;
 }
 
 /** 32 lowercase hex chars — a fresh, opaque, unguessable session id. */

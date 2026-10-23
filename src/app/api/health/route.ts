@@ -1,7 +1,7 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { apiError, withApiErrors } from "@/lib/api/errors";
+import { apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isVotingKind } from "@/lib/bias/config";
 import {
@@ -62,9 +62,10 @@ import {
  *     subsystem call is wrapped in `withTimeout` so a hung Postgres
  *     connection can't pin the request open forever. The database and
  *     readPath probes run concurrently, so they share one 2s window.
- *   - The anonymous 429 uses the canonical `apiError` envelope
- *     (`details.retryAfterMs`) plus a standard `Retry-After` header (whole
- *     seconds) and `Cache-Control: no-store`.
+ *   - The anonymous 429 is the shared `apiTooManyRequests` answer: the
+ *     canonical envelope (`details.retryAfterMs`) plus a standard
+ *     `Retry-After` header (whole seconds, at least 1) and
+ *     `Cache-Control: no-store`.
  *   - Must stay GET-only and dynamic so platform caches (Vercel CDN,
  *     browser) can't serve stale "healthy" responses while the underlying
  *     service melts down.
@@ -366,12 +367,7 @@ export const GET = withApiErrors(async (request: Request) => {
   if (!authed && request !== undefined) {
     const rl = anonHealthLimit(clientKey(request));
     if (!rl.allowed) {
-      const res = apiError(429, "Too many requests", {
-        details: { retryAfterMs: rl.retryAfterMs },
-      });
-      res.headers.set("Cache-Control", "no-store");
-      res.headers.set("Retry-After", String(Math.ceil(rl.retryAfterMs / 1000)));
-      return res;
+      return apiTooManyRequests(rl.retryAfterMs);
     }
   }
 

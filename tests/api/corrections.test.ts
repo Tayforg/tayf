@@ -129,6 +129,9 @@ describe("POST /api/corrections", () => {
     }
     const res = await mod.POST(makeRequest(VALID_BODY, ip));
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect((await res.json()).details.retryAfterMs).toBeGreaterThan(0);
   });
 
   it("returns 400 for a message longer than 2000 characters, and 201 at exactly 2000", async () => {

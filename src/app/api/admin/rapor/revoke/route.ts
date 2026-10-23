@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
-  apiError,
+  apiTooManyRequests,
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
@@ -31,9 +31,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = adminRaporShareLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

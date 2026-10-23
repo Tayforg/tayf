@@ -41,7 +41,7 @@ vi.mock("react", async (importOriginal) => {
 import { ClusterCardImage } from "./cluster-card-image";
 
 const NEXT_IMG =
-  "/_next/image?url=https%3A%2F%2Fcdn.outlet.example%2Ffoto.jpg&w=828&q=75";
+  "/_next/image?url=https%3A%2F%2Fimg.piri.net%2Ffoto.jpg&w=828&q=75";
 const W_SRCSET = `/_next/image?url=x&w=384&q=75 384w, ${NEXT_IMG} 828w`;
 
 /** Probe `Image` stand-in: resolves with `naturalWidth` after a microtask. */
@@ -80,8 +80,8 @@ function fakeImg(overrides: Partial<Record<string, unknown>> = {}) {
 function renderOnLoad({ withFloor = true }: { withFloor?: boolean } = {}) {
   renderToStaticMarkup(
     <ClusterCardImage
-      src="https://cdn.outlet.example/foto.jpg"
-      srcs={["https://cdn.outlet.example/second.jpg"]}
+      src="https://img.piri.net/foto.jpg"
+      srcs={["https://img.piri.net/second.jpg"]}
       alt="Test"
       width={768}
       height={576}

@@ -1,19 +1,16 @@
 import { NextResponse } from "next/server";
-import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
-  apiError,
-  apiServerError,
+  apiTooManyRequests,
   withApiErrors,
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isValidSourceSlug } from "@/lib/validation/source-input";
+import { registryEnvelope, toRegistryRecord } from "@/lib/sources/registry";
 import {
-  registryEnvelope,
-  toRegistryRecord,
-  type RegistrySourceRow,
-} from "@/lib/sources/registry";
-import { summariseCounts } from "@/lib/game/agreement";
+  getRegistryDetail,
+  getRegistryRows,
+} from "@/lib/sources/registry-query";
 
 /**
  * GET /api/sources/[slug] — one source's registry record plus its
@@ -25,6 +22,13 @@ import { summariseCounts } from "@/lib/game/agreement";
  * (B-SEC-05), same 60/1-per-second bucket and limiter name as the list
  * route in ../route.ts.
  *
+ * Cache-key discipline: the slug from the URL is only ever compared against
+ * the cached registry rows (`getRegistryRows()`, no argument). The detail is
+ * then read by the matching row's ID (`getRegistryDetail(row.id)`), so the key
+ * space is bounded by the real sources and neither a query string nor an
+ * invented slug can mint a cache entry or a Supabase read. This handler never
+ * reads `searchParams`.
+ *
  * `params` is a `Promise` (Next.js 16 route handler signature) and MUST be
  * awaited before the slug is validated — reading it synchronously is a
  * type error, not just a style nit.
@@ -32,9 +36,6 @@ import { summariseCounts } from "@/lib/game/agreement";
 interface RouteContext {
   params: Promise<{ slug: string }>;
 }
-
-const REGISTRY_COLUMNS =
-  "id, slug, name, url, bias, kind, active, zone_rationale, zone_rationale_at, trustee_since, trustee_note";
 
 // stale-while-revalidate is capped much lower than the list route's 86400s:
 // a retraction (rationale/bias correction) published through the admin
@@ -46,19 +47,11 @@ const REGISTRY_HEADERS = {
 };
 
 // Short public negative-cache so repeated unknown-slug probes (unauthed,
-// unrate-limited, well-formed-slug keyspace is effectively unbounded) are
-// answered by the CDN instead of costing a Supabase round trip per hit.
+// well-formed-slug keyspace is effectively unbounded) are answered by the CDN
+// instead of costing a registry lookup per hit.
 const NOT_FOUND_HEADERS = {
   "Cache-Control": "public, s-maxage=300",
 };
-
-/**
- * Newest-first, capped at 50: a citable "recent changes" window rather than
- * an unbounded export. `.order(..., { ascending: false })` is load-bearing
- * — do not drop it, the history is meaningless (and the cap picks the
- * wrong 50 rows) without it.
- */
-const ZONE_HISTORY_LIMIT = 50;
 
 const sourcesJsonLimit = createRateLimiter("sources-json", {
   capacity: 60,
@@ -68,80 +61,36 @@ const sourcesJsonLimit = createRateLimiter("sources-json", {
 export const GET = withApiErrors(
   async (request: Request, ctx: RouteContext) => {
     const rl = sourcesJsonLimit(clientKey(request));
-    if (!rl.allowed) {
-      return apiError(429, "Too many requests", {
-        details: { retryAfterMs: rl.retryAfterMs },
-      });
-    }
+    if (!rl.allowed) return apiTooManyRequests(rl.retryAfterMs);
 
     const { slug } = await ctx.params;
     if (!isValidSourceSlug(slug)) {
       return apiBadRequest("Invalid slug");
     }
 
-    const supabase = createServerClient();
-    const { data, error } = await supabase
-      .from("sources")
-      .select(REGISTRY_COLUMNS)
-      .eq("slug", slug)
-      .eq("active", true)
-      .maybeSingle();
-
-    if (error) return apiServerError(error);
-    if (!data) {
+    // The registry rows are active sources only, so a deactivated slug is a
+    // 404 here exactly as it was when the route filtered on `active` itself.
+    const rows = await getRegistryRows();
+    const row = rows.find((r) => r.slug === slug);
+    if (!row) {
       // Same shape as apiNotFound("Source not found"), but with a short
-      // public Cache-Control so the CDN — not Supabase — answers repeated
-      // probes for unknown or deactivated slugs.
+      // public Cache-Control so the CDN answers repeated probes for unknown
+      // or deactivated slugs.
       return NextResponse.json(
         { error: "Source not found" },
         { status: 404, headers: NOT_FOUND_HEADERS },
       );
     }
 
-    const row = data as unknown as RegistrySourceRow & { id: string };
+    const detail = await getRegistryDetail(row.id);
 
-    const { data: historyRows, error: historyError } = await supabase
-      .from("source_zone_history")
-      .select("old_bias, new_bias, reason, rater, changed_at")
-      .eq("source_id", row.id)
-      .order("changed_at", { ascending: false })
-      .limit(ZONE_HISTORY_LIMIT);
-
-    if (historyError) return apiServerError(historyError);
-
-    // U-03 follow-through — aggregate reader agreement from /oyun. Two
-    // `count: "exact", head: true` queries (all guesses, then the correct
-    // ones): head requests return no rows at all, so the wire can carry the
-    // share and the n — the true total, not a capped window — but never an
-    // individual guess. `summariseCounts` suppresses anything below the
-    // publication threshold.
-    //
-    // A failure here is NOT a 500: the registry record and its zone history
-    // are the contract; the agreement is a bonus field that degrades to
-    // null rather than taking the endpoint down.
-    const { count: guessTotal, error: guessError } = await supabase
-      .from("zone_guesses")
-      .select("correct", { count: "exact", head: true })
-      .eq("source_id", row.id);
-
-    let readerAgreement = null as ReturnType<typeof summariseCounts>;
-    if (!guessError && typeof guessTotal === "number") {
-      const { count: guessCorrect, error: correctError } = await supabase
-        .from("zone_guesses")
-        .select("correct", { count: "exact", head: true })
-        .eq("source_id", row.id)
-        .eq("correct", true);
-
-      if (!correctError) {
-        readerAgreement = summariseCounts(guessTotal, guessCorrect ?? 0);
-      }
-    }
-
+    // `generated_at` is stamped here, per request, never inside the cached
+    // reader: it must say when THIS response was built.
     return NextResponse.json(
       registryEnvelope({
         source: toRegistryRecord(row),
-        zone_history: historyRows ?? [],
-        reader_agreement: readerAgreement,
+        zone_history: detail.zone_history,
+        reader_agreement: detail.reader_agreement,
       }),
       { headers: REGISTRY_HEADERS },
     );

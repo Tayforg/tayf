@@ -10,9 +10,9 @@ import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 const VALID_ID = "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187b";
 const MISSING_ID = "11111111-2222-4333-8444-555555555555";
 
-const getClusterDetail = vi.fn();
+const getClusterDetailOrThrow = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
-  getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
+  getClusterDetailOrThrow: (...args: unknown[]) => getClusterDetailOrThrow(...args),
 }));
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -61,7 +61,7 @@ async function pngBytes(res: Response): Promise<Uint8Array> {
 
 describe("cluster opengraph-image (real Satori render)", () => {
   it("renders the blindspot ribbon card to a real PNG", async () => {
-    getClusterDetail.mockResolvedValueOnce(blindspotDetail());
+    getClusterDetailOrThrow.mockResolvedValueOnce(blindspotDetail());
     const { default: Image } = await import("./opengraph-image");
 
     const bytes = await pngBytes(
@@ -73,7 +73,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
   });
 
   it("renders the densest layout — blindspot ribbon + wire pill + chips — to a real PNG", async () => {
-    getClusterDetail.mockResolvedValueOnce({
+    getClusterDetailOrThrow.mockResolvedValueOnce({
       ...blindspotDetail(),
       wire: { isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 7 },
     });
@@ -88,7 +88,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
   });
 
   it("sets the exact edge cache-control header on the real Response", async () => {
-    getClusterDetail.mockResolvedValueOnce(blindspotDetail());
+    getClusterDetailOrThrow.mockResolvedValueOnce(blindspotDetail());
     const { default: Image } = await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: VALID_ID }) });
@@ -99,7 +99,7 @@ describe("cluster opengraph-image (real Satori render)", () => {
   });
 
   it("sets the shorter fallback cache-control header on the not-found card", async () => {
-    getClusterDetail.mockResolvedValueOnce(null);
+    getClusterDetailOrThrow.mockResolvedValueOnce(null);
     const { default: Image } = await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
@@ -107,8 +107,25 @@ describe("cluster opengraph-image (real Satori render)", () => {
     expect(res.headers.get("cache-control")).toBe("public, s-maxage=60");
   });
 
+  it("renders the generic unavailable card to a real PNG with no-store when the reader throws", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getClusterDetailOrThrow.mockRejectedValueOnce(new Error("db down"));
+    const { default: Image } = await import("./opengraph-image");
+
+    try {
+      const res = await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const bytes = await pngBytes(res);
+      expect(Array.from(bytes.slice(0, 8))).toEqual(PNG_SIGNATURE);
+      expect(bytes.byteLength).toBeGreaterThan(1_000);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
   it("renders the twitter-image re-export through the same card", async () => {
-    getClusterDetail.mockResolvedValueOnce(null);
+    getClusterDetailOrThrow.mockResolvedValueOnce(null);
     const tw = await import("./twitter-image");
     const og = await import("./opengraph-image");
 

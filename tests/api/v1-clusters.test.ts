@@ -13,6 +13,13 @@ import crypto from "node:crypto";
 // off one small in-memory KEYS_DB so both the happy path and every auth
 // failure mode (unknown / revoked / over-cap) are exercised through the
 // real requireApiKey() gate, not a stub.
+//
+// The clusters fake also understands the keyset-paging query shape: it sorts by
+// the recorded `.order()` chain (updated_at desc, id desc) and applies the
+// `.or('updated_at.lt."U",and(updated_at.eq."U",id.lt."I")')` cursor filter by
+// comparing the RAW strings, exactly like Postgres would compare the raw
+// timestamps, so a cursor that lost microsecond precision would visibly
+// skip or repeat rows.
 // ---------------------------------------------------------------------------
 
 function sha256(s: string): string {
@@ -141,11 +148,42 @@ const CLUSTERS = [
   },
 ];
 
+interface FakeOrder {
+  col: string;
+  opts: unknown;
+}
+
 const dbState = vi.hoisted(() => ({
   clustersQueryCount: 0,
   dailyUsage: {} as Record<number, number>,
   forceClustersError: false,
+  // When set, replaces CLUSTERS as the table contents (the paging suites).
+  clusterRows: null as Array<Record<string, unknown>> | null,
+  // Every clusters query that carried an .order() (i.e. the list query).
+  listQueries: [] as Array<{ or: string[]; order: FakeOrder[]; limit: number | null }>,
 }));
+
+const KEYSET_OR_RE =
+  /^updated_at\.lt\."([^"]+)",and\(updated_at\.eq\."([^"]+)",id\.lt\."([^"]+)"\)$/;
+
+function compareRows(
+  a: Record<string, unknown>,
+  b: Record<string, unknown>,
+  order: FakeOrder[],
+): number {
+  const specs: FakeOrder[] = order.length
+    ? order
+    : [{ col: "updated_at", opts: { ascending: false } }];
+  for (const o of specs) {
+    const av = a[o.col] as string;
+    const bv = b[o.col] as string;
+    if (av === bv) continue;
+    const asc = (o.opts as { ascending?: boolean } | undefined)?.ascending !== false;
+    const cmp = av < bv ? -1 : 1;
+    return asc ? cmp : -cmp;
+  }
+  return 0;
+}
 
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
@@ -161,7 +199,16 @@ const supabaseFake = await vi.hoisted(async () => {
         const gteUpdated = state.gte.find((g) => g.col === "updated_at");
         const inIds = state.in.find((i) => i.col === "id");
 
-        let rows = CLUSTERS as unknown[] as Array<(typeof CLUSTERS)[number]>;
+        if (state.order.length > 0) {
+          dbState.listQueries.push({
+            or: [...state.or],
+            order: [...state.order],
+            limit: state.limit,
+          });
+        }
+
+        type Row = Record<string, unknown> & { id: string; updated_at: string };
+        let rows = (dbState.clusterRows ?? CLUSTERS) as unknown[] as Row[];
         if (idEq) rows = rows.filter((r) => r.id === idEq.val);
         if (inIds) rows = rows.filter((r) => inIds.vals.includes(r.id));
         if (archivedEq !== undefined) {
@@ -170,7 +217,16 @@ const supabaseFake = await vi.hoisted(async () => {
         if (gteUpdated) {
           rows = rows.filter((r) => r.updated_at >= (gteUpdated.val as string));
         }
-        rows = [...rows].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+        for (const filter of state.or) {
+          const m = KEYSET_OR_RE.exec(filter);
+          if (!m) throw new Error(`fake cannot parse .or(${filter})`);
+          const [, lt, eq, id] = m as unknown as [string, string, string, string];
+          if (lt !== eq) throw new Error("keyset .or() must use the same timestamp twice");
+          rows = rows.filter(
+            (r) => r.updated_at < lt || (r.updated_at === lt && r.id < id),
+          );
+        }
+        rows = [...rows].sort((a, b) => compareRows(a, b, state.order));
         if (state.limit != null) rows = rows.slice(0, state.limit);
         return { data: rows, error: null };
       },
@@ -228,6 +284,8 @@ beforeEach(() => {
   dbState.clustersQueryCount = 0;
   dbState.dailyUsage = {};
   dbState.forceClustersError = false;
+  dbState.clusterRows = null;
+  dbState.listQueries = [];
   supabaseFake.calls.rpc.length = 0;
   supabaseFake.calls.mutations.length = 0;
 });
@@ -249,10 +307,12 @@ function listRequest(opts: {
   ip?: string;
   since?: string;
   limit?: string;
+  before?: string;
 } = {}): Request {
   const url = new URL("http://example.com/api/v1/clusters");
   if (opts.since !== undefined) url.searchParams.set("since", opts.since);
   if (opts.limit !== undefined) url.searchParams.set("limit", opts.limit);
+  if (opts.before !== undefined) url.searchParams.set("before", opts.before);
   const headers: Record<string, string> = { "x-forwarded-for": opts.ip ?? nextIp() };
   if (opts.key) headers.authorization = `Bearer ${opts.key}`;
   return new Request(url, { headers });
@@ -364,6 +424,8 @@ describe("GET /api/v1/clusters", () => {
     // C1 and C5 are both recent + politics-majority; C2 fails the
     // majority filter, C3 fails the since window, C4 is archived.
     expect(new Set(ids)).toEqual(new Set([CLUSTER_C1, CLUSTER_C5]));
+    // Everything in the window was scanned, so there is no next page.
+    expect(body).toHaveProperty("next_cursor", null);
     expect(ids).not.toContain(CLUSTER_C2); // non-political majority
     expect(ids).not.toContain(CLUSTER_C3); // outside the since window
     expect(ids).not.toContain(CLUSTER_C4); // archived
@@ -404,6 +466,307 @@ describe("GET /api/v1/clusters", () => {
     expect(res.status).toBe(500);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Keyset paging (api-9): `?before=<next_cursor>` continues after the last
+// row of the previous page, ordered (updated_at desc, id desc).
+// ---------------------------------------------------------------------------
+
+/** A PostgREST-style timestamptz string with microseconds: 2026-10-23T12:34:56.789123+00:00 */
+function rawTs(msAgo: number, micro = "123"): string {
+  return new Date(NOW_MS - msAgo)
+    .toISOString()
+    .replace(/\.(\d{3})Z$/, `.$1${micro}+00:00`);
+}
+
+function uuidN(n: number): string {
+  return `a0000000-0000-4000-8000-${n.toString(16).padStart(12, "0")}`;
+}
+
+function pageCluster(id: string, updatedAt: string, politics = true) {
+  return {
+    id,
+    title_tr: `Küme ${id.slice(-4)}`,
+    title_tr_neutral: null,
+    bias_distribution: {},
+    is_blindspot: false,
+    blindspot_side: null,
+    article_count: 2,
+    first_published: updatedAt,
+    updated_at: updatedAt,
+    is_archived: false,
+    cluster_articles: [
+      {
+        articles: {
+          category: politics ? "politika" : "spor",
+          sources: { slug: "sabah", bias: "pro_government" },
+        },
+      },
+      {
+        articles: {
+          category: politics ? "son_dakika" : "spor",
+          sources: { slug: "birgun", bias: "opposition" },
+        },
+      },
+    ],
+  };
+}
+
+function encodeRawCursor(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+}
+
+function decodeRawCursor(cursor: string): { u: string; i: string } {
+  return JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+}
+
+async function getPage(opts: { limit?: string; before?: string } = {}) {
+  const { GET } = await import("@/app/api/v1/clusters/route");
+  const res = await GET(listRequest({ key: PARTNER_KEY, ...opts }));
+  return res;
+}
+
+describe("GET /api/v1/clusters — keyset paging", () => {
+  // Seven politics clusters, newest first. C and D share the same updated_at
+  // (the tie), so id desc decides: D (…04) is listed before C (…03).
+  const T3 = rawTs(3 * 60_000);
+  const A = pageCluster(uuidN(1), rawTs(1 * 60_000));
+  const B = pageCluster(uuidN(2), rawTs(2 * 60_000));
+  const C = pageCluster(uuidN(3), T3);
+  const D = pageCluster(uuidN(4), T3);
+  const E = pageCluster(uuidN(5), rawTs(4 * 60_000));
+  const F = pageCluster(uuidN(6), rawTs(5 * 60_000));
+  const G = pageCluster(uuidN(7), rawTs(6 * 60_000));
+  const EXPECTED_ORDER = [A, B, D, C, E, F, G].map((c) => c.id);
+
+  beforeEach(() => {
+    dbState.clusterRows = [G, C, A, F, D, B, E];
+  });
+
+  it("?limit=2 returns the two newest clusters and a next_cursor", async () => {
+    const res = await getPage({ limit: "2" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.clusters.map((c: { id: string }) => c.id)).toEqual([A.id, B.id]);
+    expect(body.count).toBe(2);
+    expect(typeof body.next_cursor).toBe("string");
+    expect(body.next_cursor).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(body.next_cursor.length).toBeLessThanOrEqual(200);
+  });
+
+  it("queries ordered by (updated_at desc, id desc) with no .or() on the first page", async () => {
+    await getPage({ limit: "2" });
+    expect(dbState.listQueries).toHaveLength(1);
+    const q = dbState.listQueries[0]!;
+    expect(q.order).toEqual([
+      { col: "updated_at", opts: { ascending: false } },
+      { col: "id", opts: { ascending: false } },
+    ]);
+    expect(q.or).toEqual([]);
+    // limit * 3 candidates (CANDIDATE_MULTIPLIER), capped at 300.
+    expect(q.limit).toBe(6);
+  });
+
+  it("?before=<next_cursor> returns the next two with no overlap and in order", async () => {
+    const first = await (await getPage({ limit: "2" })).json();
+    const second = await (await getPage({ limit: "2", before: first.next_cursor })).json();
+
+    expect(second.clusters.map((c: { id: string }) => c.id)).toEqual([D.id, C.id]);
+    const firstIds = new Set(first.clusters.map((c: { id: string }) => c.id));
+    for (const c of second.clusters) expect(firstIds.has(c.id)).toBe(false);
+    expect(typeof second.next_cursor).toBe("string");
+
+    // The cursor query: strictly after (updated_at, id), on the raw strings.
+    const cursor = decodeRawCursor(first.next_cursor);
+    const q = dbState.listQueries[1]!;
+    expect(q.or).toEqual([
+      `updated_at.lt."${cursor.u}",and(updated_at.eq."${cursor.u}",id.lt."${cursor.i}")`,
+    ]);
+  });
+
+  it("walking one row at a time visits every cluster once, in order, across the updated_at tie", async () => {
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 20; page++) {
+      const res = await getPage({ limit: "1", ...(before ? { before } : {}) });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      for (const c of body.clusters) seen.push(c.id);
+      if (body.next_cursor === null) break;
+      before = body.next_cursor;
+    }
+    expect(seen).toEqual(EXPECTED_ORDER);
+  });
+
+  it("next_cursor is null once the scan is exhausted", async () => {
+    const all = await (await getPage({ limit: "10" })).json();
+    expect(all.clusters.map((c: { id: string }) => c.id)).toEqual(EXPECTED_ORDER);
+    expect(all.next_cursor).toBeNull();
+
+    // The last page of a limit=2 walk (G alone) is exhausted too.
+    const cursorBeforeG = encodeRawCursor({ u: F.updated_at, i: F.id });
+    const last = await (await getPage({ limit: "2", before: cursorBeforeG })).json();
+    expect(last.clusters.map((c: { id: string }) => c.id)).toEqual([G.id]);
+    expect(last.next_cursor).toBeNull();
+  });
+
+  it("a page that ends exactly on the last cluster still reports null when nothing is left", async () => {
+    const res = await (await getPage({ limit: "7" })).json();
+    expect(res.clusters).toHaveLength(7);
+    expect(res.next_cursor).toBeNull();
+  });
+
+  it("the cursor carries the RAW updated_at string, microseconds intact", async () => {
+    const body = await (await getPage({ limit: "3" })).json();
+    // Third row is D (the tie). Its raw updated_at has six fractional digits.
+    expect(body.clusters.at(-1).id).toBe(D.id);
+    const cursor = decodeRawCursor(body.next_cursor);
+    expect(cursor).toEqual({ u: D.updated_at, i: D.id });
+    expect(cursor.u).toMatch(/\.\d{6}\+00:00$/);
+    expect(cursor.u).not.toMatch(/Z$/);
+    // And exactly that string reaches the database filter.
+    const next = await getPage({ limit: "3", before: body.next_cursor });
+    expect(next.status).toBe(200);
+    expect(dbState.listQueries[1]!.or[0]).toContain(`"${D.updated_at}"`);
+    expect((await next.json()).clusters[0].id).toBe(C.id);
+  });
+
+  it("microsecond neighbours page correctly (a millisecond-truncated cursor would repeat or skip one)", async () => {
+    const m1 = pageCluster(uuidN(11), rawTs(10 * 60_000, "111"));
+    const m2 = pageCluster(uuidN(12), rawTs(10 * 60_000, "222"));
+    const m3 = pageCluster(uuidN(13), rawTs(10 * 60_000, "333"));
+    dbState.clusterRows = [m1, m2, m3];
+    const seen: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 6; page++) {
+      const body = await (await getPage({ limit: "1", ...(before ? { before } : {}) })).json();
+      for (const c of body.clusters) seen.push(c.id);
+      if (body.next_cursor === null) break;
+      before = body.next_cursor;
+    }
+    expect(seen).toEqual([m3.id, m2.id, m1.id]);
+  });
+
+  it("when 300 scanned candidates hold fewer politics rows than limit, next_cursor is the last scanned candidate", async () => {
+    // 320 clusters, newest first. Only every 60th is politics, so the first
+    // 300 candidates hold 5 politics rows (limit=100 asks for far more).
+    const rows = Array.from({ length: 320 }, (_, k) =>
+      pageCluster(uuidN(1000 + k), rawTs((k + 1) * 1000, String(100 + (k % 900))), k % 60 === 0),
+    );
+    dbState.clusterRows = rows;
+
+    const first = await (await getPage({ limit: "100" })).json();
+    expect(dbState.listQueries[0]!.limit).toBe(300);
+    expect(first.clusters.map((c: { id: string }) => c.id)).toEqual(
+      rows.slice(0, 300).filter((_, k) => k % 60 === 0).map((c) => c.id),
+    );
+    expect(first.count).toBe(5);
+    expect(first.count).toBeLessThan(100);
+
+    const last = rows[299]!;
+    expect(decodeRawCursor(first.next_cursor)).toEqual({ u: last.updated_at, i: last.id });
+
+    // The next window starts right after row 300 and finds the rest.
+    const second = await (await getPage({ limit: "100", before: first.next_cursor })).json();
+    expect(second.clusters.map((c: { id: string }) => c.id)).toEqual(
+      rows.slice(300).filter((_, k) => (300 + k) % 60 === 0).map((c) => c.id),
+    );
+    expect(second.next_cursor).toBeNull();
+  });
+
+  it("a truncated page resumes right after the last RETURNED row, not the last scanned one", async () => {
+    // 30 candidates (limit 10 * 3), all politics: 30 > 10 -> truncated page.
+    // The 20 unreturned politics rows must be re-scanned by the next page.
+    const rows = Array.from({ length: 40 }, (_, k) =>
+      pageCluster(uuidN(2000 + k), rawTs((k + 1) * 1000)),
+    );
+    dbState.clusterRows = rows;
+    const body = await (await getPage({ limit: "10" })).json();
+    expect(body.count).toBe(10);
+    expect(decodeRawCursor(body.next_cursor)).toEqual({
+      u: rows[9]!.updated_at,
+      i: rows[9]!.id,
+    });
+  });
+
+  it("omits nothing from the old payload: since, count, clusters and the licence envelope are still there", async () => {
+    const body = await (await getPage({ limit: "2" })).json();
+    for (const key of ["since", "count", "clusters", "next_cursor", "licence", "attribution", "methodology", "generated_at"]) {
+      expect(body, key).toHaveProperty(key);
+    }
+  });
+
+  describe("a bad ?before is a 400 'Invalid cursor' before any clusters query", () => {
+    const GOOD_I = uuidN(1);
+    const GOOD_U = rawTs(60_000);
+    const cases: Record<string, string> = {
+      "not base64": "!!!not-base64!!!",
+      "base64 of non-JSON": Buffer.from("nope", "utf8").toString("base64url"),
+      "JSON that is not an object": encodeRawCursor("just a string"),
+      "JSON null": encodeRawCursor(null),
+      "JSON array": encodeRawCursor([GOOD_U, GOOD_I]),
+      "missing u": encodeRawCursor({ i: GOOD_I }),
+      "missing i": encodeRawCursor({ u: GOOD_U }),
+      "u is not a string": encodeRawCursor({ u: 1234, i: GOOD_I }),
+      "u is not a timestamp": encodeRawCursor({ u: "yesterday", i: GOOD_I }),
+      "u has no time part": encodeRawCursor({ u: "2026-10-20", i: GOOD_I }),
+      "u has no timezone": encodeRawCursor({ u: "2026-10-20T10:00:00", i: GOOD_I }),
+      "u has too many fraction digits": encodeRawCursor({ u: "2026-10-20T10:00:00.1234567Z", i: GOOD_I }),
+      "u is an impossible date": encodeRawCursor({ u: "2026-13-45T10:00:00Z", i: GOOD_I }),
+      "u smuggles filter syntax": encodeRawCursor({ u: `2026-10-20T10:00:00Z"),id.gt."0`, i: GOOD_I }),
+      "i is not a uuid": encodeRawCursor({ u: GOOD_U, i: "not-a-uuid" }),
+      "i smuggles filter syntax": encodeRawCursor({ u: GOOD_U, i: `${GOOD_I}"),is_archived.eq."true` }),
+      "longer than 200 characters": "A".repeat(201),
+    };
+
+    for (const [name, before] of Object.entries(cases)) {
+      it(name, async () => {
+        const res = await getPage({ before });
+        expect(res.status).toBe(400);
+        expect((await res.json()).error).toBe("Invalid cursor");
+        expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+        expect(res.headers.get("X-Tayf-Tier")).toBe("partner");
+        expect(dbState.listQueries).toHaveLength(0);
+        expect(dbState.clustersQueryCount).toBe(0);
+      });
+    }
+
+    it("a blank ?before= is treated as absent, like a blank since or limit", async () => {
+      const res = await getPage({ before: "" });
+      expect(res.status).toBe(200);
+      expect(dbState.listQueries[0]!.or).toEqual([]);
+    });
+
+    it("an unauthenticated request with a bad cursor is still a 401, not a 400", async () => {
+      const { GET } = await import("@/app/api/v1/clusters/route");
+      const res = await GET(listRequest({ before: "!!!" }));
+      expect(res.status).toBe(401);
+    });
+  });
+
+  it("encodeV1Cursor and decodeV1Cursor round-trip, and decode refuses anything else", async () => {
+    const { encodeV1Cursor, decodeV1Cursor } = await import("@/lib/api/v1-clusters");
+    const cursor = { u: "2026-10-20T10:00:00.123456+00:00", i: uuidN(9) };
+    const encoded = encodeV1Cursor(cursor);
+    expect(encoded).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(decodeRawCursor(encoded)).toEqual(cursor);
+    expect(decodeV1Cursor(encoded)).toEqual(cursor);
+
+    expect(decodeV1Cursor("")).toBeNull();
+    expect(decodeV1Cursor("%%%")).toBeNull();
+    expect(decodeV1Cursor(encodeRawCursor({ u: "x", i: uuidN(9) }))).toBeNull();
+    // Offsets, with and without fractions, and Z, are all valid timestamptz renderings.
+    for (const u of [
+      "2026-10-20T10:00:00Z",
+      "2026-10-20T10:00:00.1Z",
+      "2026-10-20T10:00:00.123456Z",
+      "2026-10-20T10:00:00+03:00",
+      "2026-10-20T10:00:00.5-01:30",
+    ]) {
+      expect(decodeV1Cursor(encodeV1Cursor({ u, i: uuidN(9) })), u).toEqual({ u, i: uuidN(9) });
+    }
   });
 });
 

@@ -219,6 +219,15 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+// registry-query.ts wraps its reads in "use cache" functions that call
+// cacheLife/cacheTag; outside a Next render those are no-ops here, so the
+// functions just run and every contract assertion below still sees real rows
+// from the Supabase fake.
+vi.mock("next/cache", () => ({
+  cacheLife: vi.fn(),
+  cacheTag: vi.fn(),
+}));
+
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
   return {
@@ -413,8 +422,11 @@ describe("GET /api/sources", () => {
     }
     const res = await GET(listRequest(ip));
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
     const body = await res.json();
     expect(typeof body.error).toBe("string");
+    expect(typeof body.details.retryAfterMs).toBe("number");
   });
 });
 
@@ -553,8 +565,11 @@ describe("GET /api/sources/[slug]", () => {
     }
     const res = await GET(detailRequest("haberturk", ip), paramsFor("haberturk"));
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
     const body = await res.json();
     expect(typeof body.error).toBe("string");
+    expect(typeof body.details.retryAfterMs).toBe("number");
   });
 
   // U-03 follow-through — aggregate reader agreement rides on the detail

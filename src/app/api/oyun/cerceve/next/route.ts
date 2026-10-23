@@ -1,15 +1,19 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
+import {
+  apiError,
+  apiServerError,
+  apiTooManyRequests,
+  withApiErrors,
+} from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import {
   FRAMING_SESSION_COOKIE,
   FRAMING_SESSION_MAX_AGE_SECONDS,
   hashSessionId,
-  newSessionId,
-  readSessionCookie,
 } from "@/lib/game/framing";
+import { mintSignedSession, readSignedSessionCookie } from "@/lib/game/framing-session";
 
 /**
  * GET /api/oyun/cerceve/next — draws one headline for the Çerçeve
@@ -24,9 +28,10 @@ import {
  * discards any RPC row the filter rejects and re-draws (up to 3 times)
  * rather than trusting the RPC's own candidate pool to already be clean.
  *
- * COOKIE: `tayf_cerceve_sid` holds a random, opaque 32-hex id, minted here
- * only when absent or malformed. The raw value is never logged, never
- * returned in a body, and never reaches the database — only its sha256
+ * COOKIE: `tayf_cerceve_sid` is `<random 32-hex id>.<hmac>` (see
+ * framing-session.ts), minted here only when absent, unsigned or failing
+ * verification. The cookie is never logged, never returned in a body, and
+ * never reaches the database — only the sha256 of the id part
  * (`hashSessionId`) is sent to `framing_next_headline`, so the one
  * identifier this route ever hands the RPC is a hash, never an IP, never
  * a raw cookie.
@@ -89,17 +94,17 @@ export const GET = withApiErrors(async (request: Request) => {
       retryAfterMs: rl.retryAfterMs,
       anonKey: key === "anon",
     });
-    return noStore(
-      apiError(429, "Too many requests", {
-        details: { retryAfterMs: rl.retryAfterMs },
-      }),
-    );
+    return noStore(apiTooManyRequests(rl.retryAfterMs));
   }
 
-  const existingRaw = readSessionCookie(request);
-  const raw = existingRaw ?? newSessionId();
-  const minted = existingRaw === null;
-  const sessionHash = await hashSessionId(raw);
+  let sessionId = await readSignedSessionCookie(request);
+  let freshCookieValue: string | null = null;
+  if (sessionId === null) {
+    const fresh = await mintSignedSession();
+    sessionId = fresh.id;
+    freshCookieValue = fresh.cookieValue;
+  }
+  const sessionHash = await hashSessionId(sessionId);
 
   const supabase = createServerClient();
 
@@ -167,8 +172,8 @@ export const GET = withApiErrors(async (request: Request) => {
     { status: 200, headers: { "Cache-Control": "no-store" } },
   );
 
-  if (minted) {
-    res.cookies.set(FRAMING_SESSION_COOKIE, raw, {
+  if (freshCookieValue !== null) {
+    res.cookies.set(FRAMING_SESSION_COOKIE, freshCookieValue, {
       httpOnly: true,
       sameSite: "lax",
       path: "/",

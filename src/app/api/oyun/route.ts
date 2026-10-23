@@ -3,7 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
   apiNotFound,
-  apiError,
+  apiTooManyRequests,
   apiServerError,
   withApiErrors,
 } from "@/lib/api/errors";
@@ -68,9 +68,7 @@ export const POST = withApiErrors(async (request: Request) => {
       retryAfterMs: rl.retryAfterMs,
       anonKey: key === "anon",
     });
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

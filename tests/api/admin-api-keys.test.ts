@@ -150,6 +150,8 @@ describe("POST /api/admin/api-keys", () => {
     }
     const res = await POST(createRequest({ label: "one-too-many", tier: "free" }, ip));
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 });
 

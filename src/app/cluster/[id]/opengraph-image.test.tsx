@@ -4,14 +4,14 @@ import type { ReactElement } from "react";
 import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 
 // Mocked BEFORE importing the module under test so the dynamic
-// `getClusterDetail` import inside opengraph-image.tsx resolves to this
+// `getClusterDetailOrThrow` import inside opengraph-image.tsx resolves to this
 // mock instead of hitting Supabase.
 const VALID_ID = "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187b";
 const MISSING_ID = "11111111-2222-4333-8444-555555555555";
 
-const getClusterDetail = vi.fn();
+const getClusterDetailOrThrow = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
-  getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
+  getClusterDetailOrThrow: (...args: unknown[]) => getClusterDetailOrThrow(...args),
 }));
 
 // Mock next/og so the element tree Image() builds is observable instead
@@ -102,7 +102,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("renders a 200 PNG with the blindspot ribbon", async () => {
-    getClusterDetail.mockResolvedValueOnce(mkDetail({}));
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail({}));
     const { default: Image } = await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: VALID_ID }) });
@@ -118,7 +118,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("omits the ribbon when the cluster is not a blindspot", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail({ is_blindspot: false, blindspot_side: null }),
     );
     const { default: Image } = await import("./opengraph-image");
@@ -130,7 +130,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("falls back to the dominant zone when blindspot_side is null", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail({
         blindspot_side: null,
         bias_distribution: {
@@ -161,7 +161,7 @@ describe("cluster opengraph-image", () => {
     // ribbon/top-row/chips, overflowed the column enough that yoga
     // shrank the ribbon to an unreadable sliver. The cap is now 95 chars
     // in the ribbon case.
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail({
         title_tr:
           "Ankara ve İstanbul'da yapılan geniş katılımlı toplantıda hükümet ve muhalefet temsilcileri ekonomik istikrar paketi üzerinde uzlaşmaya varamadı ve görüşmeler yarın sabah devam edecek",
@@ -181,7 +181,7 @@ describe("cluster opengraph-image", () => {
 
   it("shows the %share form (not 'sadece') when the DB flag fires below 100%", async () => {
     // 4-of-5 = 80% share, the contract's minimum flagging threshold.
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail({
         article_count: 5,
         bias_distribution: {
@@ -208,7 +208,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("shows the honest source count and the wire-redistribution pill", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail(
         { article_count: 7, is_blindspot: false, blindspot_side: null },
         { isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 7 },
@@ -224,7 +224,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("omits the wire pill when the cluster is not a wire redistribution", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail(
         { article_count: 5, is_blindspot: false, blindspot_side: null },
         { isWireRedistribution: false, effectiveArticleCount: 5, memberCount: 5 },
@@ -240,7 +240,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("renders both the blindspot ribbon and the wire pill together (densest layout)", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail(
         { article_count: 7 },
         { isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 7 },
@@ -256,7 +256,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("shows the muted methodology link in the bottom-right", async () => {
-    getClusterDetail.mockResolvedValueOnce(mkDetail({}));
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail({}));
     const { default: Image } = await import("./opengraph-image");
 
     await Image({ params: Promise.resolve({ id: VALID_ID }) });
@@ -266,7 +266,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("passes the exact edge cache-control header for the real card, lower-case key only", async () => {
-    getClusterDetail.mockResolvedValueOnce(mkDetail({}));
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail({}));
     const { default: Image, OG_CACHE_HEADERS } = await import("./opengraph-image");
 
     await Image({ params: Promise.resolve({ id: VALID_ID }) });
@@ -280,7 +280,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("falls back to a 200 PNG when the cluster no longer exists", async () => {
-    getClusterDetail.mockResolvedValueOnce(null);
+    getClusterDetailOrThrow.mockResolvedValueOnce(null);
     const { default: Image, OG_FALLBACK_CACHE_HEADERS } = await import("./opengraph-image");
 
     const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
@@ -299,7 +299,7 @@ describe("cluster opengraph-image", () => {
   });
 
   it("404s an empty body for a non-UUID id without touching the database", async () => {
-    getClusterDetail.mockClear();
+    getClusterDetailOrThrow.mockClear();
     const { default: Image, OG_NOT_FOUND_HEADERS } = await import("./opengraph-image");
     expect(OG_NOT_FOUND_HEADERS).toEqual({ "cache-control": "public, s-maxage=300" });
 
@@ -309,21 +309,82 @@ describe("cluster opengraph-image", () => {
       expect(res.headers.get("cache-control")).toBe(OG_NOT_FOUND_HEADERS["cache-control"]);
       expect((await res.arrayBuffer()).byteLength).toBe(0);
     }
-    expect(getClusterDetail).not.toHaveBeenCalled();
+    expect(getClusterDetailOrThrow).not.toHaveBeenCalled();
   });
 
   it("twitter-image re-export 404s a non-UUID id too", async () => {
-    getClusterDetail.mockClear();
+    getClusterDetailOrThrow.mockClear();
     const tw = await import("./twitter-image");
     const res = await tw.default({ params: Promise.resolve({ id: "not-a-uuid" }) });
     expect(res.status).toBe(404);
     expect((await res.arrayBuffer()).byteLength).toBe(0);
-    expect(getClusterDetail).not.toHaveBeenCalled();
+    expect(getClusterDetailOrThrow).not.toHaveBeenCalled();
   });
 
-  it("lets a genuine fetch error throw so crawlers retry", async () => {
-    getClusterDetail.mockRejectedValueOnce(new Error("db down"));
-    const { default: Image } = await import("./opengraph-image");
-    await expect(Image({ params: Promise.resolve({ id: VALID_ID }) })).rejects.toThrow("db down");
+  it("serves the generic card, uncached, when the reader throws (outage is not 'not found')", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getClusterDetailOrThrow.mockRejectedValueOnce(new Error("db down"));
+    const { default: Image, OG_UNAVAILABLE_CACHE_HEADERS } = await import(
+      "./opengraph-image"
+    );
+
+    try {
+      const res = await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+      // A 200 PNG, so a crawler still unfurls something -- but marked
+      // no-store so the generic card is never pinned in a CDN or a crawler's
+      // cache past the outage.
+      expect(res).toBeInstanceOf(Response);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("image/png");
+      expect(OG_UNAVAILABLE_CACHE_HEADERS).toEqual({ "cache-control": "no-store" });
+      const headers = capturedOptions?.headers as Record<string, string>;
+      expect(headers).toEqual(OG_UNAVAILABLE_CACHE_HEADERS);
+      expect(headers["Cache-Control"]).toBeUndefined();
+      expect(capturedOptions).toMatchObject({ width: 1200, height: 630 });
+
+      const text = collectText(captured).join(" ");
+      expect(text).toContain("Tayf");
+      expect(text).toContain("Aynı haber, farklı dünyalar.");
+      // It must not claim the cluster is gone: the cluster is fine, the
+      // read failed.
+      expect(text).not.toContain("bulunamadı");
+      expect((await res.arrayBuffer()).byteLength).toBeGreaterThan(0);
+      expect(errSpy).toHaveBeenCalledWith(
+        `[cluster-og] ${VALID_ID} failed: db down`,
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("keeps 'not found' and 'unavailable' distinct: null still says 'Haber kümesi bulunamadı' with the short public TTL", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(null);
+    const { default: Image, OG_FALLBACK_CACHE_HEADERS, OG_UNAVAILABLE_CACHE_HEADERS } =
+      await import("./opengraph-image");
+
+    const res = await Image({ params: Promise.resolve({ id: MISSING_ID }) });
+
+    expect(res.status).toBe(200);
+    expect(collectText(captured).join(" ")).toContain("Haber kümesi bulunamadı");
+    const headers = capturedOptions?.headers as Record<string, string>;
+    expect(headers).toEqual(OG_FALLBACK_CACHE_HEADERS);
+    expect(headers).not.toEqual(OG_UNAVAILABLE_CACHE_HEADERS);
+  });
+
+  it("twitter-image re-export also serves the uncached generic card on a read failure", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getClusterDetailOrThrow.mockRejectedValueOnce(new Error("db down"));
+    const tw = await import("./twitter-image");
+
+    try {
+      const res = await tw.default({ params: Promise.resolve({ id: VALID_ID }) });
+      expect(res.status).toBe(200);
+      expect((capturedOptions?.headers as Record<string, string>)["cache-control"]).toBe(
+        "no-store",
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });

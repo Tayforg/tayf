@@ -19,9 +19,9 @@ import type { Source } from "@/types";
 // asserted on the REAL Response so no mock can certify a header the
 // framework might drop.
 
-const getClusterDetail = vi.fn();
+const getClusterDetailOrThrow = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
-  getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
+  getClusterDetailOrThrow: (...args: unknown[]) => getClusterDetailOrThrow(...args),
 }));
 
 const getZoneFeedHealth = vi.fn();
@@ -131,7 +131,7 @@ function detailWithLongHeadlines(): ClusterDetail {
 
 describe("GET /cluster/[id]/kart (real Satori render)", () => {
   it("rasterises a 1080×1920 PNG and keeps its real cache headers", async () => {
-    getClusterDetail.mockResolvedValueOnce(detailWithLongHeadlines());
+    getClusterDetailOrThrow.mockResolvedValueOnce(detailWithLongHeadlines());
     getZoneFeedHealth.mockResolvedValue(null);
 
     const { GET } = await import("./route");

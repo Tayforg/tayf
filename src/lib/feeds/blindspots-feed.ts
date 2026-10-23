@@ -1,6 +1,11 @@
 import { ZONE_META } from "@/lib/bias/config";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
-import { buildRssXml, withUtm, type RssItemInput } from "@/lib/feeds/rss-builder";
+import {
+  buildRssXml,
+  rssUnavailableResponse,
+  withUtm,
+  type RssItemInput,
+} from "@/lib/feeds/rss-builder";
 import { formatZoneLine } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 
@@ -61,17 +66,6 @@ export function buildBlindspotsRssXml(
   });
 }
 
-function unavailableResponse(): Response {
-  return new Response("Service unavailable", {
-    status: 503,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Retry-After": "300",
-      "Cache-Control": "no-store",
-    },
-  });
-}
-
 export async function blindspotsFeedResponse(
   selfPath: string,
 ): Promise<Response> {
@@ -81,7 +75,7 @@ export async function blindspotsFeedResponse(
   try {
     bundles = (await getBlindspots()).bundles;
   } catch {
-    return unavailableResponse();
+    return rssUnavailableResponse();
   }
 
   return new Response(buildBlindspotsRssXml(base, bundles, selfPath), {

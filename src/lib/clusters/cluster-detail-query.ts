@@ -588,8 +588,10 @@ export async function getClusterDetail(
  * request share a single result (and a single live retry) per id. Never call
  * it from a `"use cache"` body: it can throw.
  *
- * `getClusterDetail` keeps its never-throw contract for the callers that
- * must degrade silently (kart, opengraph, rozet, yelpaze).
+ * Kart, opengraph-image and rozet (alongside the cluster page, embed and
+ * oembed) use this throwing variant and answer a rejection with an uncached
+ * 503 / generic card. `getClusterDetail` keeps its never-throw contract for
+ * the one caller that must degrade silently: yelpaze.
  */
 export const getClusterDetailOrThrow = cache(
   async (id: string): Promise<ClusterDetail | null> => {

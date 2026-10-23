@@ -11,7 +11,7 @@
  */
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { apiBadRequest, apiError, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
+import { apiBadRequest, apiTooManyRequests, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { isJevLabeler, JEV_LABELER_COOKIE, JEV_LABELER_COOKIE_MAX_AGE } from "@/lib/admin/jev-gold";
@@ -31,9 +31,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = jevGoldLabelerLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

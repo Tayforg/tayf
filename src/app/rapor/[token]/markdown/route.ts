@@ -11,7 +11,7 @@
  * that failed to assemble) is a 404 via apiNotFound — indistinguishable
  * from the outside, per the share-link contract.
  */
-import { apiError, apiNotFound, withApiErrors } from "@/lib/api/errors";
+import { apiTooManyRequests, apiNotFound, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { createServerClient } from "@/lib/supabase/server";
 import { resolveShareToken, SHARE_TOKEN_RE } from "@/lib/reports/share";
@@ -30,9 +30,7 @@ interface RouteContext {
 export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => {
   const rl = reportShareMarkdownLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   const { token } = await ctx.params;

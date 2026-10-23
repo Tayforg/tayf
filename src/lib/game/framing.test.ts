@@ -3,7 +3,6 @@ import { describe, it, expect } from "vitest";
 import {
   FRAMING_VOTES,
   isFramingVote,
-  readSessionCookie,
   newSessionId,
   hashSessionId,
   normalizeTally,
@@ -37,25 +36,6 @@ describe("isFramingVote", () => {
     expect(isFramingVote(undefined)).toBe(false);
     expect(isFramingVote({})).toBe(false);
     expect(isFramingVote(["iktidar"])).toBe(false);
-  });
-});
-
-function cookieRequest(cookieHeader: string | null): Request {
-  const headers: Record<string, string> = {};
-  if (cookieHeader !== null) headers["Cookie"] = cookieHeader;
-  return new Request("http://example.com/", { headers });
-}
-
-describe("readSessionCookie", () => {
-  const VALID = "0123456789abcdef0123456789abcdef";
-
-  it("returns the 32-hex value and null for an absent, short or non-hex cookie", () => {
-    expect(readSessionCookie(cookieRequest(`tayf_cerceve_sid=${VALID}`))).toBe(VALID);
-    expect(readSessionCookie(cookieRequest(`other=1; tayf_cerceve_sid=${VALID}`))).toBe(VALID);
-    expect(readSessionCookie(cookieRequest(null))).toBeNull();
-    expect(readSessionCookie(cookieRequest("tayf_cerceve_sid=abc123"))).toBeNull();
-    expect(readSessionCookie(cookieRequest(`tayf_cerceve_sid=${"g".repeat(32)}`))).toBeNull();
-    expect(readSessionCookie(cookieRequest("some_other_cookie=1"))).toBeNull();
   });
 });
 

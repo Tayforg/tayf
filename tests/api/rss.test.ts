@@ -1,4 +1,6 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+
+import { miniParseRss } from "../_helpers/mini-rss-parse";
 
 // ---------------------------------------------------------------------------
 // GET /rss.xml
@@ -22,6 +24,9 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // ---------------------------------------------------------------------------
 
 let mockBundles: unknown[] = [];
+// Set to make the cluster read reject / the summary-member read throw.
+let mockPoliticsError: Error | null = null;
+let mockMembersError: Error | null = null;
 let mockMembers: Record<string, unknown> = {};
 let mockMemberLookupFailed = false;
 let memberLookupCalls: string[][] = [];
@@ -34,14 +39,33 @@ let mockNeutralStatus: { neutralized: number; eligible: number } | null = {
   eligible: 0,
 };
 
+// `connection()` throws outside a request scope; the route awaits it first so
+// a 503 is never prerendered at build. Same mock as rss-topic.test.ts, but a
+// spy so the ordering contract (connection before any read) is assertable.
+const callOrder: string[] = [];
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return {
+    ...actual,
+    connection: async () => {
+      callOrder.push("connection");
+    },
+  };
+});
+
 vi.mock("@/lib/clusters/politics-query", () => ({
-  getPoliticsClusters: vi.fn(async () => ({ bundles: mockBundles })),
+  getPoliticsClusters: vi.fn(async () => {
+    callOrder.push("getPoliticsClusters");
+    if (mockPoliticsError) throw mockPoliticsError;
+    return { bundles: mockBundles };
+  }),
 }));
 
 // Whole module mocked — it imports next/cache and its "use cache" body
 // would throw outside a Next request context.
 vi.mock("@/lib/clusters/rss-summary-attribution", () => ({
   getRssSummaryMembers: vi.fn(async (ids: string[], opts?: unknown) => {
+    if (mockMembersError) throw mockMembersError;
     memberLookupCalls.push(ids);
     memberLookupOpts.push(opts);
     return { members: mockMembers, lookupFailed: mockMemberLookupFailed };
@@ -55,11 +79,23 @@ vi.mock("@/lib/headline/status", () => ({
 
 beforeEach(() => {
   mockBundles = [];
+  mockPoliticsError = null;
+  mockMembersError = null;
+  callOrder.length = 0;
   mockMembers = {};
   mockMemberLookupFailed = false;
   memberLookupCalls = [];
   memberLookupOpts = [];
   mockNeutralStatus = { neutralized: 0, eligible: 0 };
+});
+
+let consoleErrorSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.useRealTimers();
+  consoleErrorSpy?.mockRestore();
+  consoleErrorSpy = null;
 });
 
 const T0 = "2026-04-17T08:00:00.000Z";
@@ -355,5 +391,236 @@ describe("GET /rss.xml summary-member lookup read profile", () => {
     expect(memberLookupCalls).toEqual([["c1"]]);
     const opts = memberLookupOpts[0] as { profile?: string } | undefined;
     expect(opts?.profile ?? "reader").toBe("reader");
+  });
+});
+
+
+describe("GET /rss.xml hardening", () => {
+  function titled(id: string, title: string, firstPublished = T0) {
+    return {
+      cluster: {
+        id,
+        title_tr: title,
+        summary_tr: "",
+        article_count: 3,
+        first_published: firstPublished,
+      },
+      articles: [],
+      sources: [],
+      effectiveArticleCount: 3,
+      isWireRedistribution: false,
+    };
+  }
+
+  // Characters XML 1.0 forbids: C0 control, the BMP non-characters, a lone
+  // high surrogate. One of these in one feed-sourced title breaks the feed
+  // for every subscriber.
+  const ILLEGAL_XML_RE =
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+
+  it("strips XML-illegal characters from a title and the feed still parses", async () => {
+    mockBundles = [
+      titled("bad1", "Kötü\u000B başlık\uFFFE sonu\uD800"),
+      titled("ok1", "Temiz başlık"),
+    ];
+
+    const { GET } = await import("@/app/rss.xml/route");
+    const res = await GET();
+    expect(res.status).toBe(200);
+    const xml = await res.text();
+
+    expect(ILLEGAL_XML_RE.test(xml)).toBe(false);
+    expect(xml).not.toContain("\u000B");
+    expect(xml).not.toContain("\uFFFE");
+    expect(xml).not.toContain("\uD800");
+
+    const parsed = miniParseRss(xml) as {
+      rss: { channel: { item: Array<{ title: string }> } };
+    };
+    expect(parsed.rss.channel.item.map((i) => i.title)).toEqual([
+      "Kötü başlık sonu",
+      "Temiz başlık",
+    ]);
+  });
+
+  it("escapes entities in a title exactly once (no double escaping)", async () => {
+    mockBundles = [titled("amp1", "Tom & Jerry <canlı>")];
+
+    const { GET } = await import("@/app/rss.xml/route");
+    const xml = await (await GET()).text();
+
+    expect(xml).toContain("<title>Tom &amp; Jerry &lt;canlı&gt;</title>");
+    expect(xml).not.toContain("&amp;amp;");
+  });
+
+  it("falls back to 'Başlıksız' for a cluster without a title", async () => {
+    mockBundles = [titled("nt1", "x")];
+    (mockBundles[0] as { cluster: { title_tr: string | null } }).cluster.title_tr = null;
+
+    const { GET } = await import("@/app/rss.xml/route");
+    const xml = await (await GET()).text();
+
+    expect(xml).toContain("<title>Başlıksız</title>");
+  });
+
+  describe("503 failure path", () => {
+    function expectUnavailable(res: Response) {
+      expect(res.status).toBe(503);
+      expect(res.headers.get("Retry-After")).toBe("300");
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      expect(res.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    }
+
+    it("returns 503 (never a cached empty feed) when getPoliticsClusters rejects", async () => {
+      consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockPoliticsError = new Error("reader timeout");
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const res = await GET();
+
+      expectUnavailable(res);
+      expect(await res.text()).toBe("Service unavailable");
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[rss.xml] unavailable: reader timeout",
+      );
+    });
+
+    it("returns the same 503 when getRssSummaryMembers throws", async () => {
+      consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockBundles = [
+        bundle({
+          id: "m1",
+          summary: "Özet",
+          articleCount: 3,
+          effectiveArticleCount: 3,
+          isWireRedistribution: false,
+        }),
+      ];
+      mockMembersError = new Error("members boom");
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const res = await GET();
+
+      expectUnavailable(res);
+      expect(await res.text()).toBe("Service unavailable");
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[rss.xml] unavailable: members boom",
+      );
+    });
+
+    it("logs a non-Error rejection without crashing the handler", async () => {
+      consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockPoliticsError = "plain string" as unknown as Error;
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const res = await GET();
+
+      expectUnavailable(res);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        "[rss.xml] unavailable: plain string",
+      );
+    });
+
+    it("awaits connection() before any read, so a 503 is never prerendered at build", async () => {
+      mockBundles = [titled("c1", "Başlık")];
+
+      const { GET } = await import("@/app/rss.xml/route");
+      await GET();
+
+      expect(callOrder[0]).toBe("connection");
+      expect(callOrder.indexOf("connection")).toBeLessThan(
+        callOrder.indexOf("getPoliticsClusters"),
+      );
+    });
+  });
+
+  describe("absolute links use siteUrl()", () => {
+    it("prefixes channel link, self link, item link and guid with NEXT_PUBLIC_SITE_URL", async () => {
+      vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://example.test");
+      mockBundles = [titled("link1", "Başlık")];
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const xml = await (await GET()).text();
+
+      expect(xml).toContain("<link>https://example.test/</link>");
+      expect(xml).toContain(
+        '<atom:link href="https://example.test/rss.xml" rel="self" type="application/rss+xml" />',
+      );
+      expect(xml).toContain("<link>https://example.test/cluster/link1</link>");
+      expect(xml).toContain(
+        '<guid isPermaLink="true">https://example.test/cluster/link1</guid>',
+      );
+    });
+
+    it("falls back to the Vercel production host when NEXT_PUBLIC_SITE_URL is unset (siteUrl() chain)", async () => {
+      vi.stubEnv("NEXT_PUBLIC_SITE_URL", "");
+      vi.stubEnv("VERCEL_PROJECT_PRODUCTION_URL", "prod.example.test");
+      mockBundles = [titled("link2", "Başlık")];
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const xml = await (await GET()).text();
+
+      expect(xml).toContain("<link>https://prod.example.test/cluster/link2</link>");
+    });
+  });
+
+  describe("success response", () => {
+    it("keeps the public + stale-while-revalidate Cache-Control and the RSS content type", async () => {
+      mockBundles = [titled("h1", "Başlık")];
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const res = await GET();
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Cache-Control")).toBe(
+        "public, max-age=300, s-maxage=300, stale-while-revalidate=3600",
+      );
+      expect(res.headers.get("Content-Type")).toBe(
+        "application/rss+xml; charset=utf-8",
+      );
+    });
+
+    it("lastBuildDate is the newest item's pubDate, never the request time", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2031-01-02T03:04:05Z"));
+      mockBundles = [
+        titled("old", "Eski", "2026-04-17T08:00:00.000Z"),
+        titled("new", "Yeni", "2026-04-19T09:30:00.000Z"),
+        titled("mid", "Orta", "2026-04-18T10:00:00.000Z"),
+      ];
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const xml = await (await GET()).text();
+
+      const newest = new Date("2026-04-19T09:30:00.000Z").toUTCString();
+      expect(xml).toContain(`<lastBuildDate>${newest}</lastBuildDate>`);
+      expect(xml).not.toContain("2031");
+    });
+
+    it("serves a valid empty feed with no lastBuildDate when there are no clusters", async () => {
+      mockBundles = [];
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const res = await GET();
+      const xml = await res.text();
+
+      expect(res.status).toBe(200);
+      expect(xml).toContain("<channel>");
+      expect(xml).not.toContain("<lastBuildDate>");
+      expect(xml).not.toContain("<item>");
+    });
+
+    it("keeps the channel title, language and the 30-item cap", async () => {
+      mockBundles = Array.from({ length: 35 }, (_, i) =>
+        titled(`n${i}`, `Başlık ${i}`),
+      );
+
+      const { GET } = await import("@/app/rss.xml/route");
+      const xml = await (await GET()).text();
+
+      expect(xml).toContain("<title>Tayf — Türkiye Haber Analizi</title>");
+      expect(xml).toContain("<language>tr-TR</language>");
+      expect(parseItems(xml)).toHaveLength(30);
+    });
   });
 });

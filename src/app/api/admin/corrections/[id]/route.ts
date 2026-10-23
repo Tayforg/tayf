@@ -24,7 +24,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
   apiNotFound,
-  apiError,
+  apiTooManyRequests,
   apiServerError,
   apiUnauthorized,
   withApiErrors,
@@ -57,9 +57,7 @@ export const PATCH = withApiErrors(
 
     const rl = adminCorrectionsLimit(clientKey(request));
     if (!rl.allowed) {
-      return apiError(429, "Too many requests", {
-        details: { retryAfterMs: rl.retryAfterMs },
-      });
+      return apiTooManyRequests(rl.retryAfterMs);
     }
 
     const { id } = await ctx.params;
@@ -118,9 +116,7 @@ export const DELETE = withApiErrors(
 
     const rl = adminCorrectionsLimit(clientKey(request));
     if (!rl.allowed) {
-      return apiError(429, "Too many requests", {
-        details: { retryAfterMs: rl.retryAfterMs },
-      });
+      return apiTooManyRequests(rl.retryAfterMs);
     }
 
     const { id } = await ctx.params;

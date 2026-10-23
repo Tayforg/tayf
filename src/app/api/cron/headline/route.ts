@@ -2,7 +2,7 @@ import { connection, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
+import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
   buildHeadlinePrompt,
@@ -210,9 +210,7 @@ export const GET = withApiErrors(async (request: Request) => {
 
   const rl = headlineLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   // HEADLINE_PAUSED kill switch — an explicit, reversible pause that does

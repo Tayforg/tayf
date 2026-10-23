@@ -1,7 +1,7 @@
 import { after, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { apiBadRequest, apiError, withApiErrors } from "@/lib/api/errors";
+import { apiBadRequest, apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { clusterIdsFromTags, pingIndexNowForClusters } from "@/lib/seo/indexnow";
 
@@ -56,9 +56,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = revalidateLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

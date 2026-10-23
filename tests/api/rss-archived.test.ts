@@ -12,6 +12,13 @@ vi.mock("next/cache", () => ({
   cacheTag: vi.fn(),
 }));
 
+// The route awaits `connection()` first; it throws outside a request scope,
+// so stub it the way rss-topic.test.ts does.
+vi.mock("next/server", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("next/server")>();
+  return { ...actual, connection: async () => {} };
+});
+
 const fixture = vi.hoisted(() => ({
   data: [] as Array<Record<string, unknown>>,
 }));

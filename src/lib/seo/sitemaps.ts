@@ -1,5 +1,6 @@
 import { cacheLife } from "next/cache";
 
+import { escapeXml } from "@/lib/feeds/rss-builder";
 import { createReaderClient } from "@/lib/supabase/server";
 import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 
@@ -89,25 +90,12 @@ export interface NewsUrlEntry {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-const XML_ESCAPES: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  "'": "&apos;",
-  '"': "&quot;",
-};
-
-// XML 1.0's legal character set excludes most C0 controls (it allows only
-// tab U+0009, LF U+000A and CR U+000D). A raw control byte anywhere in a
-// feed-sourced title would produce a document no XML parser accepts, so
-// every builder strips these before escaping the rest.
-const CONTROL_CHARS_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g;
-
-export function escapeXml(input: string): string {
-  return input
-    .replace(CONTROL_CHARS_RE, "")
-    .replace(/[&<>'"]/g, (ch) => XML_ESCAPES[ch] ?? ch);
-}
+// One XML escaper for the whole repo: it lives in the RSS builder and strips
+// everything XML 1.0 forbids (C0 controls, U+FFFE/U+FFFF, lone surrogates)
+// before escaping the five entities. A raw illegal character anywhere in a
+// feed-sourced title would otherwise produce a document no XML parser accepts.
+// tests/guards/xml-escaper-single-source.test.ts forbids a second definition.
+export { escapeXml };
 
 function urlEntryXml(entry: SitemapUrlEntry): string {
   const parts = [`<loc>${escapeXml(entry.loc)}</loc>`];

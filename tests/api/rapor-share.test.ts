@@ -321,6 +321,8 @@ describe("POST /api/admin/rapor/share", () => {
     }
     const res = await POST(shareRequest({ cluster_id: CLUSTER_ID }, ip));
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
     const body = await res.json();
     expect(typeof body.details?.retryAfterMs).toBe("number");
   });
@@ -407,5 +409,7 @@ describe("GET /rapor/[token]/markdown", () => {
     }
     const res = await GET(markdownRequest(LIVE_TOKEN, ip), paramsFor(LIVE_TOKEN));
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 });

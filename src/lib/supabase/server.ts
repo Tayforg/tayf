@@ -117,7 +117,9 @@ export type ReadProfile = "reader" | "batch";
  * (`getSourceProfile`), karne (`getSourceKarne`), reader agreement
  * (`getSourceAgreement`), `/ekonomi/[ticker]`'s existence probe
  * (`tickerExistence`) and KAP pickup panel (`getTickerPickup`), the /oyun
- * daily puzzle (`getDailyPuzzle`), and `getZoneFeedHealth` /
+ * daily puzzle (`getDailyPuzzle`), the public registry JSON behind
+ * `/api/sources*` (`getRegistryRows` / `getRegistryDetail`,
+ * src/lib/sources/registry-query.ts), and `getZoneFeedHealth` /
  * `getRssSummaryMembers` (both `ReadProfile`, "reader" by default).
  *
  * Deliberately uncapped (keep `createServerClient()`):
@@ -129,7 +131,7 @@ export type ReadProfile = "reader" | "batch";
  *   - low-traffic readers: corrections/public-log.ts, quality/snapshots.ts,
  *     headline/status.ts;
  *   - /rapor/[token];
- *   - /api/sources*, /api/oyun*, the newsletter and corrections routes.
+ *   - /api/oyun*, the newsletter and corrections routes.
  */
 export function createReaderClient(): SupabaseClient {
   return createServerClient({ timeoutMs: READER_TIMEOUT_MS });

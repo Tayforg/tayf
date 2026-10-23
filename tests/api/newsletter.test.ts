@@ -2,7 +2,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the newsletter double-opt-in flow:
-//   POST /api/newsletter, GET /api/newsletter/confirm, GET /api/newsletter/unsubscribe.
+//   POST /api/newsletter, GET + POST /api/newsletter/confirm,
+//   GET + POST /api/newsletter/unsubscribe.
+//
+// GET /confirm (like GET /unsubscribe) is a same-origin interstitial that
+// NEVER touches the database: mail scanners and link prefetchers follow GET
+// links, and a GET that flipped `confirmed_at` let any scanner subscribe a
+// reader who never clicked. The write happens on the POST the page's form
+// submits.
 //
 // Uses the shared proxy-based Supabase fake (tests/_helpers/supabase-fake.ts)
 // per tests/api/corrections.test.ts convention. `@/lib/email/resend` is
@@ -18,12 +25,18 @@ interface ExistingRow {
 // Mutable knobs the fixture function reads per-test. Reset in beforeEach.
 const dbState = vi.hoisted(() => ({
   existingSubscriber: null as ExistingRow | null,
-  confirmGoodToken: "good-confirm-token",
+  // Confirm tokens are crypto.randomUUID() output too; both confirm handlers
+  // validate the shape before the token ever reaches the DB or the HTML.
+  confirmGoodToken: "33333333-3333-4333-8333-333333333333",
+  // The row a confirm token resolves to; null = an unknown token.
+  confirmRow: null as { id: string; confirmed_at: string | null } | null,
   // Unsubscribe tokens must look like crypto.randomUUID() output — the
   // route validates the shape before ever reaching the DB.
   unsubGoodToken: "11111111-1111-4111-8111-111111111111",
   forceInsertError: false,
   forceUnsubDeleteError: false,
+  forceConfirmError: false,
+  forceConfirmLookupError: false,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -38,11 +51,33 @@ const supabaseFake = await vi.hoisted(async () => {
             ? { data: [dbState.existingSubscriber], error: null }
             : { data: [], error: null };
         }
-        // GET /api/newsletter/confirm's update-by-token.
+        // POST /api/newsletter/confirm: the guarded update and the follow-up
+        // select, both addressed by confirm_token.
         const confirmEq = state.eq.find((p) => p.col === "confirm_token");
         if (confirmEq) {
-          return confirmEq.val === dbState.confirmGoodToken
-            ? { data: [{ id: "row-confirm-1" }], error: null }
+          const guardedUpdate = state.is.some(
+            (p) => p.col === "confirmed_at" && p.val === null,
+          );
+          if (dbState.forceConfirmError && guardedUpdate) {
+            return { data: null, error: { message: "boom" } };
+          }
+          const row =
+            confirmEq.val === dbState.confirmGoodToken ? dbState.confirmRow : null;
+          const guarded = state.is.some(
+            (p) => p.col === "confirmed_at" && p.val === null,
+          );
+          if (guarded) {
+            // UPDATE ... WHERE confirm_token = $1 AND confirmed_at IS NULL
+            return row && row.confirmed_at === null
+              ? { data: [{ id: row.id }], error: null }
+              : { data: [], error: null };
+          }
+          // Plain select by confirm_token (the already-confirmed lookup).
+          if (dbState.forceConfirmLookupError) {
+            return { data: null, error: { message: "lookup boom" } };
+          }
+          return row
+            ? { data: [{ confirmed_at: row.confirmed_at }], error: null }
             : { data: [], error: null };
         }
         // POST /api/newsletter/unsubscribe's delete-by-token.
@@ -105,12 +140,16 @@ beforeEach(() => {
   dbState.existingSubscriber = null;
   dbState.forceInsertError = false;
   dbState.forceUnsubDeleteError = false;
+  dbState.forceConfirmError = false;
+  dbState.forceConfirmLookupError = false;
+  dbState.confirmRow = { id: "row-confirm-1", confirmed_at: null };
   sendEmailMock.mockClear();
   isMailConfiguredMock.mockClear();
   isMailConfiguredMock.mockReturnValue(true);
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const k of [
     "NEXT_PUBLIC_SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
@@ -149,6 +188,11 @@ function unsubFormRequest(
     },
     body: new URLSearchParams(fields).toString(),
   });
+}
+
+/** Counts every `supabase.from(...)` call, i.e. every table query a route makes. */
+function spyOnTableQueries() {
+  return vi.spyOn(supabaseFake.client, "from");
 }
 
 function unsubJsonRequest(url: string, ip = "203.0.113.1"): Request {
@@ -270,6 +314,16 @@ describe("POST /api/newsletter", () => {
     }
     const res = await mod.POST(postRequest({ email: "last@example.com" }, ip));
     expect(res.status).toBe(429);
+    // apiTooManyRequests: Retry-After in whole seconds (>= 1), no-store, and
+    // the canonical details.retryAfterMs body.
+    expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = await res.json();
+    expect(body.error).toBe("Too many requests");
+    expect(body.details.retryAfterMs).toBeGreaterThan(0);
+    expect(res.headers.get("retry-after")).toBe(
+      String(Math.max(1, Math.ceil(body.details.retryAfterMs / 1000))),
+    );
   });
 
   it("per-address limit: two POSTs for the same unconfirmed email both return 200, but sendEmail runs once", async () => {
@@ -341,8 +395,9 @@ describe("POST /api/newsletter", () => {
   });
 });
 
-describe("GET /api/newsletter/confirm", () => {
-  it("sets confirmed_at and redirects to ?bulten=onaylandi for a known token", async () => {
+describe("GET /api/newsletter/confirm — interstitial", () => {
+  it("renders a self-contained confirm page for a valid token, WITHOUT touching the database", async () => {
+    const from = spyOnTableQueries();
     const mod = await import("@/app/api/newsletter/confirm/route");
     const res = await mod.GET(
       getRequest(
@@ -350,44 +405,346 @@ describe("GET /api/newsletter/confirm", () => {
         "198.51.100.10",
       ),
     );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe(
-      "https://tayfhaber.com/?bulten=onaylandi",
-    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("x-robots-tag")).toBe("noindex");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
 
-    const updates = supabaseFake.calls.update("newsletter_subscribers");
-    expect(updates).toHaveLength(1);
-    expect(updates[0]?.patch).toMatchObject({ confirmed_at: expect.any(String) });
-    expect(
-      updates[0]?.state.eq.some(
-        (p) => p.col === "confirm_token" && p.val === dbState.confirmGoodToken,
-      ),
-    ).toBe(true);
+    const html = await res.text();
+    expect(html).toContain('<form method="post" action="/api/newsletter/confirm">');
+    expect(html).toContain(
+      `<input type="hidden" name="token" value="${dbState.confirmGoodToken}">`,
+    );
+    expect(html).toContain("<title>Bülten aboneliğini onayla — Tayf</title>");
+    expect(html).toContain("<h1>Tayf bültenine aboneliğini onaylıyor musun?</h1>");
+    expect(html).toContain(
+      "<p>Onayladığında haftalık bülteni bu adrese göndermeye başlayacağız.</p>",
+    );
+    expect(html).toContain("Evet, aboneliğimi onayla");
+    expect(html).toContain("Vazgeç, Tayf'a dön");
+    expect(html).toContain('href="https://tayfhaber.com/"');
+
+    // Zero database calls: no query, no mutation, no RPC.
+    expect(from).not.toHaveBeenCalled();
+    expect(supabaseFake.calls.mutations).toHaveLength(0);
+    expect(supabaseFake.calls.rpc).toHaveLength(0);
   });
 
-  it("redirects to ?bulten=gecersiz for an unknown token", async () => {
+  it("accepts an upper-case UUID token and trims surrounding whitespace", async () => {
     const mod = await import("@/app/api/newsletter/confirm/route");
+    const upper = dbState.confirmGoodToken.toUpperCase();
     const res = await mod.GET(
       getRequest(
-        "http://example.com/api/newsletter/confirm?token=not-a-real-token",
-        "198.51.100.11",
+        `http://example.com/api/newsletter/confirm?token=${encodeURIComponent(` ${upper} `)}`,
+        "198.51.100.26",
       ),
     );
-    expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe(
-      "https://tayfhaber.com/?bulten=gecersiz",
-    );
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain(`value="${upper}"`);
   });
 
-  it("redirects to ?bulten=gecersiz when the token is missing entirely", async () => {
+  it("redirects 302 to ?bulten=gecersiz for a malformed token, with no DB call", async () => {
+    const from = spyOnTableQueries();
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    for (const token of ["not-a-real-token", `${dbState.confirmGoodToken}x`, '"><script>']) {
+      const res = await mod.GET(
+        getRequest(
+          `http://example.com/api/newsletter/confirm?token=${encodeURIComponent(token)}`,
+          "198.51.100.11",
+        ),
+      );
+      expect(res.status, token).toBe(302);
+      expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=gecersiz");
+      expect(await res.text()).not.toContain("<script>");
+    }
+    expect(from).not.toHaveBeenCalled();
+    expect(supabaseFake.calls.mutations).toHaveLength(0);
+  });
+
+  it("redirects 302 to ?bulten=gecersiz when the token is missing entirely, with no DB call", async () => {
+    const from = spyOnTableQueries();
     const mod = await import("@/app/api/newsletter/confirm/route");
     const res = await mod.GET(
       getRequest("http://example.com/api/newsletter/confirm", "198.51.100.12"),
     );
     expect(res.status).toBe(302);
-    expect(res.headers.get("location")).toBe(
-      "https://tayfhaber.com/?bulten=gecersiz",
+    expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=gecersiz");
+    expect(from).not.toHaveBeenCalled();
+    expect(supabaseFake.calls.mutations).toHaveLength(0);
+  });
+
+  it("a GET never confirms anything, however many times it is followed (scanner / prefetch)", async () => {
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    for (let i = 0; i < 5; i++) {
+      const res = await mod.GET(
+        getRequest(
+          `http://example.com/api/newsletter/confirm?token=${dbState.confirmGoodToken}`,
+          "198.51.100.13",
+        ),
+      );
+      expect(res.status).toBe(200);
+    }
+    expect(supabaseFake.calls.update("newsletter_subscribers")).toHaveLength(0);
+    expect(dbState.confirmRow?.confirmed_at).toBeNull();
+  });
+});
+
+describe("POST /api/newsletter/confirm", () => {
+  const CONFIRM_URL = "http://example.com/api/newsletter/confirm";
+
+  it("sets confirmed_at only where it is still null, then redirects 303 to ?bulten=onaylandi", async () => {
+    const from = spyOnTableQueries();
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const res = await mod.POST(
+      unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, "198.51.100.30"),
     );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=onaylandi");
+
+    const updates = supabaseFake.calls.update("newsletter_subscribers");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.patch).toEqual({ confirmed_at: expect.any(String) });
+    const stamped = (updates[0]?.patch as { confirmed_at: string }).confirmed_at;
+    expect(new Date(stamped).toISOString()).toBe(stamped);
+    expect(updates[0]?.state.eq).toEqual([
+      { col: "confirm_token", val: dbState.confirmGoodToken },
+    ]);
+    // The guard that makes the write idempotent: never overwrite an
+    // existing confirmed_at.
+    expect(updates[0]?.state.is).toEqual([{ col: "confirmed_at", val: null }]);
+    // The update matched, so no follow-up lookup was needed.
+    expect(from).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the token from the query string when the body is not a form", async () => {
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const res = await mod.POST(
+      unsubJsonRequest(`${CONFIRM_URL}?token=${dbState.confirmGoodToken}`, "198.51.100.31"),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=onaylandi");
+    expect(supabaseFake.calls.update("newsletter_subscribers")).toHaveLength(1);
+  });
+
+  it("prefers the form token over the query string", async () => {
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const other = "44444444-4444-4444-8444-444444444444";
+    const res = await mod.POST(
+      unsubFormRequest(
+        `${CONFIRM_URL}?token=${other}`,
+        { token: dbState.confirmGoodToken },
+        "198.51.100.32",
+      ),
+    );
+    expect(res.status).toBe(303);
+    const updates = supabaseFake.calls.update("newsletter_subscribers");
+    expect(updates[0]?.state.eq).toEqual([
+      { col: "confirm_token", val: dbState.confirmGoodToken },
+    ]);
+  });
+
+  it("an already-confirmed token still lands on onaylandi and its confirmed_at is NOT overwritten", async () => {
+    dbState.confirmRow = { id: "row-confirm-1", confirmed_at: "2026-01-01T00:00:00.000Z" };
+    const from = spyOnTableQueries();
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const res = await mod.POST(
+      unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, "198.51.100.33"),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=onaylandi");
+
+    // The only write attempted is the guarded one (it matched nothing), then
+    // a plain select tells "already confirmed" apart from "unknown".
+    const updates = supabaseFake.calls.update("newsletter_subscribers");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.state.is).toEqual([{ col: "confirmed_at", val: null }]);
+    expect(from).toHaveBeenCalledTimes(2);
+    expect(dbState.confirmRow.confirmed_at).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("an unknown token redirects 303 to ?bulten=gecersiz", async () => {
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const res = await mod.POST(
+      unsubFormRequest(
+        CONFIRM_URL,
+        { token: "55555555-5555-4555-8555-555555555555" },
+        "198.51.100.34",
+      ),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=gecersiz");
+  });
+
+  it("a malformed or absent token redirects 303 to ?bulten=gecersiz with no DB call", async () => {
+    const from = spyOnTableQueries();
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const attempts: Request[] = [
+      unsubFormRequest(CONFIRM_URL, { token: "not-a-real-token" }, "198.51.100.35"),
+      unsubFormRequest(CONFIRM_URL, { token: "" }, "198.51.100.35"),
+      unsubFormRequest(CONFIRM_URL, {}, "198.51.100.35"),
+      unsubJsonRequest(CONFIRM_URL, "198.51.100.35"),
+      unsubJsonRequest(`${CONFIRM_URL}?token=${dbState.confirmGoodToken}'--`, "198.51.100.35"),
+    ];
+    for (const req of attempts) {
+      const res = await mod.POST(req);
+      expect(res.status).toBe(303);
+      expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=gecersiz");
+    }
+    expect(from).not.toHaveBeenCalled();
+    expect(supabaseFake.calls.mutations).toHaveLength(0);
+  });
+
+  it("a DB error redirects 303 to ?bulten=gecersiz and logs neither the token nor an email", async () => {
+    dbState.forceConfirmError = true;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const res = await mod.POST(
+      unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, "198.51.100.36"),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=gecersiz");
+
+    const logged = JSON.stringify([err.mock.calls, warn.mock.calls, log.mock.calls]);
+    expect(logged).not.toContain(dbState.confirmGoodToken);
+    expect(logged).not.toContain("@");
+  });
+
+  it("a DB error on the already-confirmed lookup also redirects 303 to gecersiz", async () => {
+    // The guarded update matches nothing (already confirmed); the follow-up
+    // select then fails. Not knowing the row's state must not read as success.
+    dbState.confirmRow = { id: "row-confirm-1", confirmed_at: "2026-01-01T00:00:00.000Z" };
+    dbState.forceConfirmLookupError = true;
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const res = await mod.POST(
+      unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, "198.51.100.37"),
+    );
+    expect(res.status).toBe(303);
+    expect(res.headers.get("location")).toBe("https://tayfhaber.com/?bulten=gecersiz");
+    expect(JSON.stringify(err.mock.calls)).not.toContain(dbState.confirmGoodToken);
+  });
+
+  it("the 11th rapid POST from one IP is 429 with Retry-After and no-store", async () => {
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    const ip = "198.51.100.38";
+    for (let i = 0; i < 10; i++) {
+      const res = await mod.POST(
+        unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, ip),
+      );
+      expect(res.status, `request ${i + 1}`).toBe(303);
+    }
+    const from = spyOnTableQueries();
+    const res = await mod.POST(
+      unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, ip),
+    );
+    expect(res.status).toBe(429);
+    expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = await res.json();
+    expect(body.error).toBe("Too many requests");
+    expect(body.details.retryAfterMs).toBeGreaterThan(0);
+    expect(res.headers.get("retry-after")).toBe(
+      String(Math.max(1, Math.ceil(body.details.retryAfterMs / 1000))),
+    );
+    // Refused before any database work.
+    expect(from).not.toHaveBeenCalled();
+  });
+
+  it("the limiter is per client: another IP is unaffected", async () => {
+    const mod = await import("@/app/api/newsletter/confirm/route");
+    for (let i = 0; i < 11; i++) {
+      await mod.POST(
+        unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, "198.51.100.39"),
+      );
+    }
+    const res = await mod.POST(
+      unsubFormRequest(CONFIRM_URL, { token: dbState.confirmGoodToken }, "198.51.100.40"),
+    );
+    expect(res.status).toBe(303);
+  });
+});
+
+describe("newsletter interstitial page (src/lib/newsletter/interstitial.ts)", () => {
+  async function load() {
+    return import("@/lib/newsletter/interstitial");
+  }
+
+  const PAGE = {
+    title: "Başlık — Tayf",
+    heading: "Soru?",
+    body: "Açıklama.",
+    action: "/api/newsletter/confirm",
+    token: "33333333-3333-4333-8333-333333333333",
+    submitLabel: "Evet",
+  };
+
+  it("escapeHtml escapes & < > \" ' and leaves plain text alone", async () => {
+    const { escapeHtml } = await load();
+    expect(escapeHtml(`&<>"'`)).toBe("&amp;&lt;&gt;&quot;&#39;");
+    expect(escapeHtml("Tayf bülteni — ğüşiöç")).toBe("Tayf bülteni — ğüşiöç");
+    expect(escapeHtml("")).toBe("");
+  });
+
+  it("renders a complete Turkish, mobile-ready, non-indexable document", async () => {
+    const { interstitialPage } = await load();
+    const html = interstitialPage(PAGE);
+    expect(html.startsWith("<!doctype html>")).toBe(true);
+    expect(html).toContain('<html lang="tr">');
+    expect(html).toContain('<meta charset="utf-8">');
+    expect(html).toContain('<meta name="viewport" content="width=device-width, initial-scale=1">');
+    expect(html).toContain('<meta name="robots" content="noindex">');
+    expect(html).toContain("<title>Başlık — Tayf</title>");
+    expect(html).toContain("<h1>Soru?</h1>");
+    expect(html).toContain("<p>Açıklama.</p>");
+    expect(html).toContain('<form method="post" action="/api/newsletter/confirm">');
+    expect(html).toContain('<input type="hidden" name="token" value="33333333-3333-4333-8333-333333333333">');
+    expect(html).toContain("Evet</button>");
+    expect(html).toContain("Vazgeç, Tayf'a dön");
+    expect(html.trimEnd().endsWith("</html>")).toBe(true);
+  });
+
+  it("gives the submit button a touch target of at least 12px 20px padding (WCAG 2.5.8)", async () => {
+    const { interstitialPage } = await load();
+    const html = interstitialPage(PAGE);
+    const button = /<button[^>]*style="([^"]*)"/.exec(html);
+    expect(button).not.toBeNull();
+    const padding = /padding:\s*(\d+)px\s+(\d+)px/.exec(button?.[1] ?? "");
+    expect(padding).not.toBeNull();
+    expect(Number(padding?.[1])).toBeGreaterThanOrEqual(12);
+    expect(Number(padding?.[2])).toBeGreaterThanOrEqual(20);
+  });
+
+  it("escapes the token and every caller-supplied text field", async () => {
+    const { interstitialPage } = await load();
+    const html = interstitialPage({
+      ...PAGE,
+      title: "<b>t</b>",
+      heading: "<i>h</i>",
+      body: "<u>b</u>",
+      submitLabel: "<s>x</s>",
+      token: '"><script>alert(1)</script>',
+    });
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("<b>t</b>");
+    expect(html).not.toContain("<i>h</i>");
+    expect(html).not.toContain("<u>b</u>");
+    expect(html).not.toContain("<s>x</s>");
+    expect(html).toContain('value="&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"');
+  });
+
+  it("INTERSTITIAL_HEADERS are html, no-store, noindex and no-referrer", async () => {
+    const { INTERSTITIAL_HEADERS } = await load();
+    expect(INTERSTITIAL_HEADERS).toEqual({
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Robots-Tag": "noindex",
+      "Referrer-Policy": "no-referrer",
+    });
   });
 });
 
@@ -598,6 +955,9 @@ describe("POST /api/newsletter/unsubscribe — rate limit", () => {
       ),
     );
     expect(res.status).toBe(429);
+    expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect((await res.json()).details.retryAfterMs).toBeGreaterThan(0);
   });
 
   it("does not blow up on a JSON body (formData() throws, treated as no fields)", async () => {

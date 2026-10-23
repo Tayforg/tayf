@@ -1,7 +1,7 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
+import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isMailConfigured, sendBatch } from "@/lib/email/resend";
 import { siteUrl } from "@/lib/site-url";
@@ -164,9 +164,7 @@ export const GET = withApiErrors(async (request: Request) => {
 
   const rl = digestLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   // Fail closed, same rule as the footer form and POST /api/newsletter: no

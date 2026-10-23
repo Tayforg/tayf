@@ -9,11 +9,11 @@ import type { ZoneFeedHealth, ZoneHealth } from "@/lib/clusters/feed-health";
 import type { MediaDnaZone, Source } from "@/types";
 
 // Mocked BEFORE the module under test is imported so the route's
-// `getClusterDetail` / `getZoneFeedHealth` imports resolve to these stubs
+// `getClusterDetailOrThrow` / `getZoneFeedHealth` imports resolve to these stubs
 // instead of hitting Supabase (and so `"use cache"` never runs here).
-const getClusterDetail = vi.fn();
+const getClusterDetailOrThrow = vi.fn();
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
-  getClusterDetail: (...args: unknown[]) => getClusterDetail(...args),
+  getClusterDetailOrThrow: (...args: unknown[]) => getClusterDetailOrThrow(...args),
 }));
 
 const getZoneFeedHealth = vi.fn();
@@ -189,7 +189,7 @@ describe("GET /cluster/[id]/kart", () => {
     // client key — without a module reset the 11th test in this file
     // would start getting 429s from the previous tests' spend.
     vi.resetModules();
-    getClusterDetail.mockReset();
+    getClusterDetailOrThrow.mockReset();
     getZoneFeedHealth.mockReset();
     getZoneFeedHealth.mockResolvedValue(null);
   });
@@ -198,27 +198,56 @@ describe("GET /cluster/[id]/kart", () => {
     const res = await callGET("not-a-uuid");
 
     expect(res.status).toBe(404);
-    expect(getClusterDetail).not.toHaveBeenCalled();
+    expect(getClusterDetailOrThrow).not.toHaveBeenCalled();
   });
 
   it("404s on an id-shaped path traversal attempt without touching the database", async () => {
     const res = await callGET("../../etc/passwd");
 
     expect(res.status).toBe(404);
-    expect(getClusterDetail).not.toHaveBeenCalled();
+    expect(getClusterDetailOrThrow).not.toHaveBeenCalled();
   });
 
   it("404s when the cluster does not exist", async () => {
-    getClusterDetail.mockResolvedValueOnce(null);
+    getClusterDetailOrThrow.mockResolvedValueOnce(null);
 
     const res = await callGET(ID);
 
     expect(res.status).toBe(404);
-    expect(getClusterDetail).toHaveBeenCalledWith(ID);
+    expect(getClusterDetailOrThrow).toHaveBeenCalledWith(ID);
+  });
+
+  it("503s no-store with Retry-After 60 when the reader throws, instead of a cacheable 404", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    getClusterDetailOrThrow.mockRejectedValueOnce(new Error("db down"));
+
+    try {
+      const res = await callGET(ID);
+
+      expect(res.status).toBe(503);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("retry-after")).toBe("60");
+      expect(errSpy).toHaveBeenCalledWith(`[kart] ${ID} failed: db down`);
+      // The failure ends the request: no feed-health read, no card.
+      expect(getZoneFeedHealth).not.toHaveBeenCalled();
+      expect(captured).toBeNull();
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("keeps a genuinely unknown cluster a plain 404 (not the 503 path)", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(null);
+
+    const res = await callGET(ID);
+
+    expect(res.status).toBe(404);
+    expect(res.headers.get("retry-after")).toBeNull();
+    expect(res.headers.get("cache-control")).not.toBe("no-store");
   });
 
   it("404s when the cluster has no members at all", async () => {
-    getClusterDetail.mockResolvedValueOnce(mkDetail([]));
+    getClusterDetailOrThrow.mockResolvedValueOnce(mkDetail([]));
 
     const res = await callGET(ID);
 
@@ -226,7 +255,7 @@ describe("GET /cluster/[id]/kart", () => {
   });
 
   it("renders a PNG carrying the title, one headline per zone and the wordmark", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
         mkMember("a1", GOV, GOV_TITLE),
         mkMember("a2", CENTER, CENTER_TITLE),
@@ -254,7 +283,7 @@ describe("GET /cluster/[id]/kart", () => {
   });
 
   it("carries no article excerpt or image — headlines only", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)], {
         summary_tr: "GIZLI-OZET-METNI",
       }),
@@ -269,7 +298,7 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("falls back to the wording-only counter when feed health is unknown", async () => {
     getZoneFeedHealth.mockResolvedValue(null);
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)]),
     );
 
@@ -285,7 +314,7 @@ describe("GET /cluster/[id]/kart", () => {
     getZoneFeedHealth.mockResolvedValue(
       mkHealth({ iktidar: { delivering: 5 }, muhalefet: { delivering: 3 } }),
     );
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
         mkMember("a1", GOV, GOV_TITLE),
         mkMember("a2", OPP, OPP_TITLE),
@@ -302,7 +331,7 @@ describe("GET /cluster/[id]/kart", () => {
   });
 
   it("renders the silent-zone line for a zone with no members", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)]),
     );
 
@@ -317,7 +346,7 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("adds the degraded-feed caveat only for a silent zone whose feeds are broken", async () => {
     getZoneFeedHealth.mockResolvedValue(mkHealth({ muhalefet: { degraded: true } }));
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)]),
     );
 
@@ -330,7 +359,7 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("omits a headline whose title the PII filter excludes, keeping its coverage count", async () => {
     getZoneFeedHealth.mockResolvedValue(null);
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
         mkMember("a1", GOV, "17 yaşındaki çocuk kayboldu"),
         mkMember("a2", CENTER, "17 yaşındaki çocuk kayboldu"),
@@ -358,7 +387,7 @@ describe("GET /cluster/[id]/kart", () => {
         muhalefet: { degraded: true },
       }),
     );
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
         mkMember("a1", GOV, "17 yaşındaki çocuk kayboldu"),
         mkMember("a2", CENTER, "17 yaşındaki çocuk kayboldu"),
@@ -374,7 +403,7 @@ describe("GET /cluster/[id]/kart", () => {
   });
 
   it("404s without rendering anything when the cluster title itself trips the PII filter", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)], {
         title_tr: "17 yaşındaki çocuk gözaltına alındı",
       }),
@@ -393,7 +422,7 @@ describe("GET /cluster/[id]/kart", () => {
     getZoneFeedHealth.mockResolvedValue(
       mkHealth({ iktidar: { delivering: 3 }, muhalefet: { delivering: 0 } }),
     );
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
         mkMember("a1", GOV, GOV_TITLE),
         mkMember("a2", mkSource({ id: "gov2", bias: "pro_government" }), GOV_TITLE),
@@ -417,7 +446,7 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("truncates by code point so a cut never splits a surrogate pair", async () => {
     const longTitle = "😀".repeat(400);
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)], { title_tr: longTitle }),
     );
 
@@ -431,7 +460,7 @@ describe("GET /cluster/[id]/kart", () => {
   });
 
   it("rate limits the render and stops hitting the database once the bucket is empty", async () => {
-    getClusterDetail.mockResolvedValue(
+    getClusterDetailOrThrow.mockResolvedValue(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)]),
     );
 
@@ -440,20 +469,32 @@ describe("GET /cluster/[id]/kart", () => {
     for (let i = 0; i < 10; i += 1) {
       expect((await callGET("not-a-uuid")).status).toBe(404);
     }
-    getClusterDetail.mockClear();
+    getClusterDetailOrThrow.mockClear();
 
     const res = await callGET(ID);
 
     expect(res.status).toBe(429);
-    expect(Number(res.headers.get("retry-after"))).toBeGreaterThan(0);
-    expect(getClusterDetail).not.toHaveBeenCalled();
+    // apiTooManyRequests: whole seconds, at least 1, and never cached by a
+    // shared cache (a cached 429 would keep throttling other readers).
+    const retryAfter = Number(res.headers.get("retry-after"));
+    expect(Number.isInteger(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThanOrEqual(1);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const body = (await res.json()) as {
+      error: string;
+      details: { retryAfterMs: number };
+    };
+    expect(typeof body.error).toBe("string");
+    expect(body.details.retryAfterMs).toBeGreaterThan(0);
+    expect(retryAfter).toBe(Math.max(1, Math.ceil(body.details.retryAfterMs / 1000)));
+    expect(getClusterDetailOrThrow).not.toHaveBeenCalled();
     expect(captured).toBeNull();
   });
 
   it("truncates an overlong title and headline instead of overflowing the card", async () => {
     const longTitle = "A".repeat(400);
     const longHeadline = "B".repeat(400);
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, longHeadline)], { title_tr: longTitle }),
     );
 
@@ -467,7 +508,7 @@ describe("GET /cluster/[id]/kart", () => {
   });
 
   it("renders at 1080×1920 with a cacheable inline-PNG disposition", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)]),
     );
 
@@ -483,7 +524,7 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("renders the non-voting-source line only when a niche/aggregator member is excluded", async () => {
     getZoneFeedHealth.mockResolvedValue(null);
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
         mkMember("a1", GOV, GOV_TITLE),
         mkMember(
@@ -503,7 +544,7 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("omits the non-voting-source line entirely when every member votes", async () => {
     getZoneFeedHealth.mockResolvedValue(null);
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", GOV, GOV_TITLE)]),
     );
 
@@ -514,7 +555,7 @@ describe("GET /cluster/[id]/kart", () => {
   });
 
   it("404s when every member is a non-voting kind (no spectrum coverage at all)", async () => {
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([
         mkMember(
           "a1",
@@ -532,7 +573,7 @@ describe("GET /cluster/[id]/kart", () => {
 
   it("still renders when feed health lookup returns null (never throws)", async () => {
     getZoneFeedHealth.mockResolvedValue(null);
-    getClusterDetail.mockResolvedValueOnce(
+    getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail([mkMember("a1", CENTER, CENTER_TITLE)]),
     );
 

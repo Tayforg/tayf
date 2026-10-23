@@ -239,6 +239,8 @@ describe("POST /api/revalidate", () => {
       makeRequest({ tags: ["clusters"] }, { auth: "Bearer shhh", ip }),
     );
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("pings IndexNow with the cluster ids from cluster-detail tags", async () => {

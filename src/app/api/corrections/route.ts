@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { apiBadRequest, apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
+import { apiBadRequest, apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 // Corrections/objections: 5-token bucket refilling at 1 token / 12min (5/hour).
@@ -28,9 +28,7 @@ function isValidUrl(value: string): boolean {
 export const POST = withApiErrors(async (request: Request) => {
   const rl = correctionsPostLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

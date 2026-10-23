@@ -1,7 +1,8 @@
 import { ImageResponse } from "next/og";
 
+import { apiTooManyRequests } from "@/lib/api/errors";
 import { selectStoryCard, type StoryCard } from "@/lib/cards/story-card";
-import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
+import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
@@ -288,12 +289,7 @@ export async function GET(
   ctx: { params: Promise<{ id: string }> },
 ): Promise<Response> {
   const { allowed, retryAfterMs } = kartLimit(clientKey(req));
-  if (!allowed) {
-    return new Response(null, {
-      status: 429,
-      headers: { "retry-after": String(Math.ceil(retryAfterMs / 1000)) },
-    });
-  }
+  if (!allowed) return apiTooManyRequests(retryAfterMs);
 
   const { id } = await ctx.params;
 
@@ -301,7 +297,21 @@ export async function GET(
   // footer text, so anything that is not a uuid is a 404, not a query.
   if (!UUID_RE.test(id)) return new Response(null, { status: 404 });
 
-  const detail = await getClusterDetail(id);
+  // "Not found" and "unavailable" are different answers. The throwing reader
+  // resolves null only for an absent cluster (404, as before) and REJECTS on a
+  // sustained database outage: that is a 503 that no cache may keep, not a 404
+  // a sharing app would remember as "this story does not exist".
+  let detail: Awaited<ReturnType<typeof getClusterDetailOrThrow>>;
+  try {
+    detail = await getClusterDetailOrThrow(id);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[kart] ${id} failed: ${message}`);
+    return new Response(null, {
+      status: 503,
+      headers: { "cache-control": "no-store", "retry-after": "60" },
+    });
+  }
   if (!detail) return new Response(null, { status: 404 });
 
   const health = await getZoneFeedHealth();

@@ -13,6 +13,7 @@ import {
   optimizedThumbUrl,
   THUMB_WIDTHS,
 } from "./image-url";
+import { isAllowedRemoteImageUrl } from "./remote-image-hosts";
 
 // ---------------------------------------------------------------------------
 // ingest-hygiene: render-side image helpers.
@@ -88,6 +89,14 @@ describe("firstPartyLogoUrl", () => {
     expect(firstPartyLogoUrl(S2, w)).toContain(`&w=${w}&q=75`);
   });
 
+  it("only ever routes a URL the image allowlist accepts (api-1: the S2 path is listed explicitly)", () => {
+    for (const u of [S2, "https://google.com/s2/favicons?domain=a.com"]) {
+      const routed = firstPartyLogoUrl(u);
+      expect(routed?.startsWith("/_next/image?url=")).toBe(true);
+      expect(isAllowedRemoteImageUrl(u)).toBe(true);
+    }
+  });
+
   it("falls back to w=64 for a width that is not in next.config imageSizes", () => {
     expect(firstPartyLogoUrl(S2, 77)).toContain("&w=64&q=75");
   });
@@ -142,22 +151,23 @@ describe("isPlaceholderImageUrl (re-export)", () => {
 // ---------------------------------------------------------------------------
 
 describe("optimizedThumbUrl", () => {
-  const SRC = "https://cdn.x/a.jpg";
-  const ENC = "https%3A%2F%2Fcdn.x%2Fa.jpg";
+  // A host on the generated /_next/image allowlist (api-1).
+  const SRC = "https://img.piri.net/a.jpg";
+  const ENC = "https%3A%2F%2Fimg.piri.net%2Fa.jpg";
 
   it.each([128, 160, 256])("returns the next/image optimizer key for w=%i", (w) => {
     expect(optimizedThumbUrl(SRC, w)).toBe(`/_next/image?url=${ENC}&w=${w}&q=75`);
   });
 
   it("normalises first: a protocol-relative URL with a doubled slash is healed", () => {
-    expect(optimizedThumbUrl("//cdn.x//a.jpg", 128)).toBe(
+    expect(optimizedThumbUrl("//img.piri.net//a.jpg", 128)).toBe(
       `/_next/image?url=${ENC}&w=128&q=75`,
     );
   });
 
   it("encodes a query string into the url parameter", () => {
-    expect(optimizedThumbUrl("https://cdn.x/a.jpg?w=1&h=2", 160)).toBe(
-      "/_next/image?url=https%3A%2F%2Fcdn.x%2Fa.jpg%3Fw%3D1%26h%3D2&w=160&q=75",
+    expect(optimizedThumbUrl("https://img.piri.net/a.jpg?w=1&h=2", 160)).toBe(
+      "/_next/image?url=https%3A%2F%2Fimg.piri.net%2Fa.jpg%3Fw%3D1%26h%3D2&w=160&q=75",
     );
   });
 
@@ -167,8 +177,8 @@ describe("optimizedThumbUrl", () => {
     ["the empty string", ""],
     ["a relative path", "/rel.jpg"],
     ["a data: URI", "data:image/png;base64,AAAA"],
-    ["a .gif", "https://cdn.x/a.gif"],
-    ["a 'son dakika' placeholder", "https://cdn.x/img/son-dakika.jpg"],
+    ["a .gif", "https://img.piri.net/a.gif"],
+    ["a 'son dakika' placeholder", "https://img.piri.net/img/son-dakika.jpg"],
     [
       "a publisher logo card",
       "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg",
@@ -183,12 +193,28 @@ describe("optimizedThumbUrl", () => {
       expect(optimizedThumbUrl(SRC, w)).toBeNull();
     },
   );
+
+  // api-1: the optimizer answers 400 for a host that is not on the allowlist,
+  // so a thumbnail from one must fall back to the neutral block, not a broken
+  // /_next/image request.
+  it.each([
+    ["an unlisted https host", "https://cdn.x/a.jpg"],
+    ["an attacker host", "https://evil.example/a.jpg"],
+    ["a listed host plus a suffix", "https://img.piri.net.evil.tld/a.jpg"],
+    ["a listed host on an explicit port", "https://img.piri.net:8443/a.jpg"],
+    ["a protocol-relative URL on an unlisted host", "//cdn.x/a.jpg"],
+    ["plain http on a listed host", "http://img.piri.net/a.jpg"],
+    ["the gstatic favicon target", "https://www.gstatic.com/images/branding/product/1x/googleg_48dp.png"],
+    ["a non-favicon google.com path", "https://www.google.com/images/x.png"],
+  ])("returns null for %s", (_label, input) => {
+    expect(optimizedThumbUrl(input, 128)).toBeNull();
+  });
 });
 
 describe("optimizedThumbSrcSet", () => {
   it("returns the 128 src and the 128w/160w/256w srcSet", () => {
-    const enc = "https%3A%2F%2Fcdn.x%2Fa.jpg";
-    expect(optimizedThumbSrcSet("https://cdn.x/a.jpg")).toEqual({
+    const enc = "https%3A%2F%2Fimg.piri.net%2Fa.jpg";
+    expect(optimizedThumbSrcSet("https://img.piri.net/a.jpg")).toEqual({
       src: `/_next/image?url=${enc}&w=128&q=75`,
       srcSet:
         `/_next/image?url=${enc}&w=128&q=75 128w, ` +
@@ -200,15 +226,17 @@ describe("optimizedThumbSrcSet", () => {
   it.each([
     ["null", null],
     ["a relative path", "/rel.jpg"],
-    ["a .gif", "https://cdn.x/a.gif"],
-    ["a placeholder", "https://cdn.x/son-dakika.jpg"],
+    ["a .gif", "https://img.piri.net/a.gif"],
+    ["a placeholder", "https://img.piri.net/son-dakika.jpg"],
+    ["an unlisted host", "https://cdn.x/a.jpg"],
+    ["plain http", "http://img.piri.net/a.jpg"],
   ])("returns null for %s", (_label, input) => {
     expect(optimizedThumbSrcSet(input)).toBeNull();
   });
 
   it("never contains a raw publisher URL", () => {
-    const t = optimizedThumbSrcSet("https://cdn.x/a.jpg");
-    expect(t?.srcSet).not.toContain("https://cdn.x");
+    const t = optimizedThumbSrcSet("https://img.piri.net/a.jpg");
+    expect(t?.srcSet).not.toContain("https://img.piri.net");
     expect(t?.src.startsWith("/_next/image?url=")).toBe(true);
   });
 });

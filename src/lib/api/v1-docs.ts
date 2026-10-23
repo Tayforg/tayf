@@ -156,6 +156,17 @@ const LIMIT_PARAM: V1ParamDoc = {
   descriptionEn: `Maximum number of clusters to return, an integer 1–${V1_MAX_LIMIT} (default ${V1_DEFAULT_LIMIT}).`,
 };
 
+const BEFORE_PARAM: V1ParamDoc = {
+  name: "before",
+  in: "query",
+  required: false,
+  schema: { type: "string" },
+  descriptionTr:
+    "Sayfalama imleci: bir önceki yanıttaki next_cursor değeri, olduğu gibi gönderilir. Verilirse yalnızca o imleçten sonraki (daha eski) kümeler döner. since ve limit'i sonraki sayfalarda da aynı gönderin. Geçersiz bir değer 400 döner.",
+  descriptionEn:
+    "Pagination cursor: the next_cursor value from the previous response, sent unchanged. Only clusters after (older than) that point are returned. Send the same since and limit on later pages. An invalid value returns 400.",
+};
+
 const ID_PARAM: V1ParamDoc = {
   name: "id",
   in: "path",
@@ -250,13 +261,13 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
     notesTr: [
       `Yalnızca üyelerinin en az %${Math.round(V1_POLITICS_THRESHOLD * 100)}'ı politika/son dakika kategorisinde olan kümeler döner; ekonomi ve spor kümeleri bu uç noktada yoktur.`,
       `since, updated_at için alt sınırdır; ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir.`,
-      "Yanıt, limit'ten az küme içerebilir: en yeni en çok 300 aday arasından süzülür.",
+      "Her sayfa en çok 300 aday arasından süzülür, bu yüzden bir sayfa limit'ten az küme içerebilir. Devamı için yanıttaki next_cursor değerini before parametresiyle gönderin; next_cursor null ise liste bitmiştir.",
       "title, özgün başlığa geri düşebilir; bu durumda başlığın hakları ilgili yayın kuruluşuna aittir.",
       "blindspot_side, haberi YAPAN tarafın kategorisidir — sessiz kalan taraf değil.",
       "is_blindspot, sitenin kör nokta geri çağırma (recall veto) kuralını uygular.",
       "sources listesi toplayıcı ve niş türündeki kaynakları da içerir.",
     ],
-    params: [SINCE_PARAM, LIMIT_PARAM],
+    params: [SINCE_PARAM, LIMIT_PARAM, BEFORE_PARAM],
     responses: [
       {
         status: 200,
@@ -550,7 +561,8 @@ export const API_PLANS: ApiPlan[] = [
 // Pinned against the identical literals in
 // src/app/api/v1/clusters/route.ts (CANDIDATE_MULTIPLIER / CANDIDATE_CAP)
 // by tests/api/v1-openapi-contract.test.ts, which reads that route's
-// source with readFileSync — the route is NOT edited by this pack, so
-// these constants must be hand-kept equal to it, not imported from it.
+// source with readFileSync — these constants are hand-kept equal to the
+// route's, not imported from it (the route pulls in Supabase and
+// next/server, which the docs page and the static openapi.json must not).
 export const V1_CANDIDATE_MULTIPLIER = 3;
 export const V1_CANDIDATE_CAP = 300;

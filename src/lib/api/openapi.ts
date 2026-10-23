@@ -192,10 +192,13 @@ function buildSchemas(): Record<string, unknown> {
       { $ref: "#/components/schemas/Envelope" },
       {
         type: "object",
-        required: ["since", "count", "clusters"],
+        required: ["since", "count", "next_cursor", "clusters"],
         properties: {
           since: { type: "string", format: "date-time" },
           count: { type: "integer" },
+          // Always present: the opaque value to send back as ?before= for the
+          // next page, or null when the scan reached the end of the data.
+          next_cursor: { type: ["string", "null"] },
           clusters: {
             type: "array",
             items: { $ref: "#/components/schemas/V1Cluster" },
