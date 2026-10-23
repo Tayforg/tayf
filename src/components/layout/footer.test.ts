@@ -34,3 +34,22 @@ describe("footer.tsx contrast + landmarks", () => {
     expect(src).toContain('<nav aria-label="Alt menü"');
   });
 });
+
+// /durum ("Sistem durumu") is a public transparency page; the footer is the
+// only site-wide nav that links to it, placed with the other trust links and
+// ahead of the "İletişim" entry that closes the list.
+describe("footer.tsx Sistem durumu link", () => {
+  const src = readFileSync(join(__dirname, "footer.tsx"), "utf8");
+
+  it("links /durum with the label Sistem durumu", () => {
+    expect(src).toContain('href: "/durum"');
+    expect(src).toContain('{ href: "/durum", label: "Sistem durumu" }');
+  });
+
+  it("sits in NAV_LINKS before İletişim, and only once", () => {
+    const nav = src.slice(src.indexOf("const NAV_LINKS"), src.indexOf("] as const"));
+    expect(nav.indexOf('href: "/durum"')).toBeGreaterThan(-1);
+    expect(nav.indexOf('href: "/durum"')).toBeLessThan(nav.indexOf('label: "İletişim"'));
+    expect(src.split('href: "/durum"')).toHaveLength(2);
+  });
+});

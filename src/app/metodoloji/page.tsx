@@ -19,8 +19,19 @@ import {
   SURPRISE,
   ZONE_META,
 } from "@/lib/bias/config";
+import {
+  NEAR_BLINDSPOT_DISPLAY_LIMIT,
+  NEAR_BLINDSPOT_LOOKBACK_DAYS,
+  NEAR_BLINDSPOT_MIN_SHARE,
+} from "@/lib/clusters/near-blindspot-rule";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
+import {
+  KARNE_MIN_CLUSTERS,
+  KARNE_MIN_MULTI_FOR_ZONES,
+  KARNE_STALE_AFTER_HOURS,
+  KARNE_WINDOW_DAYS,
+} from "@/lib/sources/karne";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import { SOURCE_METADATA } from "@/lib/sources/factuality";
 import {
@@ -46,6 +57,14 @@ export const metadata: Metadata = {
 // "Son güncelleme" footer reads CHANGELOG[0].date, so keep the newest entry
 // on top (pinned by page.test.tsx).
 const CHANGELOG = [
+  {
+    date: "2026-10-22",
+    text: "Kör noktaya yakın: kör nokta eşiğinin hemen altında kalan, tek bölgenin ağırlıkta olduğu haberler Kör Noktalar sayfasında ayrı bir bölümde listeleniyor.",
+  },
+  {
+    date: "2026-10-22",
+    text: "Kaynak göstergeleri: kaynak sayfalarında yayın sıklığı, başlık ve özeti başka kaynaklarla aynı olan haberlerin payı, kör nokta payı ve bölge çeşitliliği.",
+  },
   {
     date: "2026-10-22",
     text: "Denge puanı eklendi: kartlarda ve küme sayfasında kapsamanın üç bölgeye ne kadar dengeli dağıldığını gösteren 0–100 arası puan.",
@@ -113,6 +132,7 @@ const SECTIONS = [
   { id: "denge-puani", short: "Denge puanı" },
   { id: "tek-kaynak", short: "Tek kaynak" },
   { id: "guvenilirlik", short: "Güvenilirlik" },
+  { id: "kaynak-gostergeleri", short: "Kaynak göstergeleri" },
   { id: "basliklar", short: "Başlıklar" },
   { id: "konu", short: "Konu" },
   { id: "duzeltme", short: "Düzeltme" },
@@ -154,6 +174,7 @@ export default async function MethodologyPage() {
   const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
   const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
   const surpriseSharePct = Math.round(SURPRISE.dominantShare * 100);
+  const nearBlindspotPct = Math.round(NEAR_BLINDSPOT_MIN_SHARE * 100);
   const wireRatioPct = Math.round(WIRE_UNIQUE_HASH_RATIO * 100);
   // Computed, not asserted: if entries are added/removed from
   // SOURCE_METADATA these counts move with them instead of going stale.
@@ -306,6 +327,15 @@ export default async function MethodologyPage() {
             {Math.round(RECALL_VETO_MIN_PROB * 100)}). Bulunan kaynaklar
             sayıma eklendiğinde baskınlık eşiği artık tutmuyorsa, o kümede kör
             nokta işareti gösterilmez.
+          </p>
+          <h3
+            id="kor-noktaya-yakin"
+            className="scroll-mt-24 font-serif text-base font-semibold tracking-tight"
+          >
+            Kör noktaya yakın
+          </h3>
+          <p className={proseClass}>
+            {`Eşiğe ulaşmayan ama tek bir bölgenin ağırlıkta olduğu haberler Kör Noktalar sayfasında ayrı bir “Kör noktaya yakın” bölümünde listelenir: en az ${BLINDSPOT.minSources} oy veren kaynak ve en büyük bölgenin payı %${nearBlindspotPct} ile %${dominantSharePct} arasında (%${dominantSharePct} hariç). Aynı ${BLINDSPOT.feedDelayHours} saatlik bekleme, kalite filtreleri ve besleme sağlığı kuralı uygulanır; son ${NEAR_BLINDSPOT_LOOKBACK_DAYS} günden en fazla ${NEAR_BLINDSPOT_DISPLAY_LIMIT} haber gösterilir. Bu haberler kör nokta sayılmaz; kör nokta sayımlarına ve “Bu listede kim yer vermedi?” özetine katılmaz.`}
           </p>
         </div>
       </section>
@@ -488,6 +518,58 @@ export default async function MethodologyPage() {
               ))}
             </ul>
           </div>
+        </div>
+      </section>
+
+      <section
+        aria-labelledby="kaynak-gostergeleri"
+        className="scroll-mt-24 space-y-3"
+      >
+        <SectionHeading
+          id="kaynak-gostergeleri"
+          title="Kaynak göstergeleri"
+          meta={`Son ${KARNE_WINDOW_DAYS} gün`}
+        />
+        <div className={cardClass + " space-y-3"}>
+          <p className={proseClass}>
+            Kaynak sayfalarındaki göstergeler Tayf’ın gördüğü yayın akışından
+            hesaplanan sayılardır; bir doğruluk ya da kalite notu değildir ve
+            hiçbir sıralamayı değiştirmez. Örnek sayısı yetersizse gösterge
+            gizlenir.
+          </p>
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>Yayın sıklığı</dt>
+              <dd className={ruleDef}>
+                {`Son ${KARNE_WINDOW_DAYS} günde yayımlanan haber sayısının ${KARNE_WINDOW_DAYS}’a bölümü; etkin gün, en az bir haber yayımlanan takvim günüdür (Türkiye saati).`}
+              </dd>
+            </div>
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>Başka kaynaklarla aynı başlık ve özet</dt>
+              <dd className={ruleDef}>
+                {`Kaynağın kümelenen haberlerinden, ajans dağıtımı sayılan kümelerde (kaynak başına bir haber alındığında en az 3 haber ve farklı içerik parmak izi oranı en fazla %${wireRatioPct}) başlığı ve özeti başka bir kaynakla aynı olanların payı. Karşılaştırma başlık ve özetin parmak iziyle yapılır; haber gövdesi karşılaştırılmaz. Yön belirtmez: başlık ve özeti ilk yayımlayan da aynen kullanan da sayılır; ajans haberi kullanmak olağan bir yayıncılık pratiğidir. En az ${KARNE_MIN_CLUSTERS} haber kümesi gerekir.`}
+              </dd>
+            </div>
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>Kör nokta kümelerindeki payı</dt>
+              <dd className={ruleDef}>
+                {`Kaynağın yer aldığı kümelerden kör nokta olarak işaretlenenlerin payı (yukarıdaki kural; Kapsama karnesiyle aynı sayım). En az ${KARNE_MIN_CLUSTERS} haber kümesi gerekir.`}
+              </dd>
+            </div>
+            <div className={ruleCard}>
+              <dt className={ruleTerm}>Bölge çeşitliliği</dt>
+              <dd className={ruleDef}>
+                {`En az ${BALANCE_MIN_SOURCES} oy veren kaynağı olan kümelerin `}
+                <a href="#denge-puani" className={brandLink}>
+                  Denge puanı
+                </a>
+                {` ortalaması. En az ${KARNE_MIN_MULTI_FOR_ZONES} böyle küme gerekir.`}
+              </dd>
+            </div>
+          </dl>
+          <p className={noteClass}>
+            {`Göstergeler kaynak kaynak, günde bir kez yeniden hesaplanır; ${KARNE_STALE_AFTER_HOURS} saatten eski bir hesaplama kaynak sayfasında belirtilir.`}
+          </p>
         </div>
       </section>
 

@@ -69,6 +69,17 @@ export default async function KaynakDurumPage() {
         subtitle="Tayf'taki her pay — yanlılık dağılımı, kör nokta — yalnızca son 72 saatte en az bir haber veren kaynaklar üzerinden hesaplanır; toplam aktif kaynak sayısı üzerinden değil. Bu sayfa o paydayı kaynak kaynak açar."
       />
 
+      <p className="text-xs text-muted-foreground">
+        Haber akışının genel durumu için{" "}
+        <Link
+          href="/durum"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          Sistem durumu
+        </Link>{" "}
+        sayfasına bakın.
+      </p>
+
       {rows === null ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
           <p className="text-sm text-muted-foreground">

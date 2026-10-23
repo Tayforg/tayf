@@ -1,4 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -255,5 +257,38 @@ describe("ItemsPerDayCell", () => {
     });
     const text = collectText(el).join("");
     expect(text).toBe("—");
+  });
+});
+
+describe("KaynakDurumPage cross-link to /durum", () => {
+  // Source-text assertion: the page is an async Server Component, so the
+  // link is pinned in the file rather than by resolving the whole tree.
+  const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+
+  it("points readers at the overall Sistem durumu page", () => {
+    expect(src).toContain('href="/durum"');
+    expect(src).toContain("Haber akışının genel durumu için");
+    expect(src).toContain("Sistem durumu");
+  });
+
+  it("places the pointer in the static shell, right after the PageHero and before the table branch", () => {
+    const hero = src.indexOf("<PageHero");
+    const pointer = src.indexOf('href="/durum"');
+    const branch = src.indexOf("rows === null");
+    expect(hero).toBeGreaterThan(-1);
+    expect(pointer).toBeGreaterThan(hero);
+    expect(pointer).toBeLessThan(branch);
+  });
+
+  it("renders the pointer in the page tree for both the data and the unavailable state", async () => {
+    fixture.data = [rawRow()];
+    fixture.error = null;
+    const ok = collectText(await KaynakDurumPage()).join(" ");
+    expect(ok).toContain("Haber akışının genel durumu için");
+
+    fixture.data = [];
+    fixture.error = { message: "canceling statement due to statement timeout" };
+    const down = collectText(await KaynakDurumPage()).join(" ");
+    expect(down).toContain("Haber akışının genel durumu için");
   });
 });

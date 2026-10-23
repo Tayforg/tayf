@@ -40,8 +40,17 @@ vi.mock("@/lib/sources/feed-status", () => ({
   getFeedStatusSummary: () => getFeedStatusSummary(),
 }));
 
-import { BlindspotsFeed } from "./page";
+const getNearBlindspots = vi.fn(
+  async (): Promise<unknown[] | null> => [],
+);
+vi.mock("@/lib/clusters/near-blindspots-query", () => ({
+  getNearBlindspotsSafe: () => getNearBlindspots(),
+}));
+
+import BlindspotsPage, { BlindspotsFeed, NearBlindspotsSection } from "./page";
+import { Suspense } from "react";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
 import type { SilenceDigest } from "@/lib/clusters/silence-digest";
 
@@ -52,6 +61,8 @@ beforeEach(() => {
   getBlindspots.mockReset();
   getBlindspots.mockImplementation(async () => ({ ok: true, bundles: [] }));
   getFeedStatusSummary.mockClear();
+  getNearBlindspots.mockReset();
+  getNearBlindspots.mockImplementation(async () => []);
 });
 
 afterEach(() => {
@@ -315,5 +326,118 @@ describe("/blindspots page — silence digest band", () => {
     const tree = await BlindspotsFeed();
 
     expect(bands(tree)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Kör noktaya yakın": a second, independent Suspense boundary AFTER the main
+// feed. It must not couple to the feed: the feed never reads it, the silence
+// digest never sees its items, and a failure only hides the section.
+// ---------------------------------------------------------------------------
+describe("/blindspots page — Kör noktaya yakın section", () => {
+  const NEAR_ITEM = {
+    id: "near-1",
+    title: "Yakın haber",
+    dominantZone: "iktidar",
+    dominantShare: 0.7,
+    votingTotal: 10,
+    balance: null,
+    updatedAt: "2026-10-21T10:00:00.000Z",
+  };
+
+  it("NearBlindspotsSection hands the fetched items to NearBlindspotList", async () => {
+    getNearBlindspots.mockResolvedValueOnce([NEAR_ITEM]);
+
+    const tree = (await NearBlindspotsSection()) as Elementish;
+
+    expect(tree.type).toBe(NearBlindspotList);
+    expect(tree.props?.items).toEqual([NEAR_ITEM]);
+  });
+
+  it("NearBlindspotsSection passes null through (the list hides itself)", async () => {
+    getNearBlindspots.mockResolvedValueOnce(null);
+
+    const tree = (await NearBlindspotsSection()) as Elementish;
+
+    expect(tree.type).toBe(NearBlindspotList);
+    expect(tree.props?.items).toBeNull();
+  });
+
+  it("the page mounts it in its own Suspense (fallback null) AFTER the main feed's Suspense", () => {
+    const tree = BlindspotsPage();
+    const suspenses = collectElements(tree).filter((el) => el.type === Suspense);
+
+    const childType = (el: Elementish) =>
+      (el.props?.children as Elementish | undefined)?.type;
+    const feedIdx = suspenses.findIndex((el) => childType(el) === BlindspotsFeed);
+    const nearIdx = suspenses.findIndex(
+      (el) => childType(el) === NearBlindspotsSection,
+    );
+
+    expect(feedIdx).toBeGreaterThanOrEqual(0);
+    expect(nearIdx).toBeGreaterThan(feedIdx);
+    expect(suspenses[nearIdx]?.props?.fallback).toBeNull();
+    // The feed keeps its skeleton fallback.
+    expect(suspenses[feedIdx]?.props?.fallback).not.toBeNull();
+  });
+
+  it("BlindspotsFeed never reads the near-blindspot fetcher", async () => {
+    getBlindspots.mockResolvedValueOnce({
+      ok: true,
+      bundles: [
+        {
+          cluster: { id: "b1", updated_at: "2026-10-22T11:00:00.000Z" },
+          articles: [],
+          sources: [{ id: "b1-s", name: "Kaynak", bias: "pro_government" }],
+          dominantZone: "iktidar",
+          dominantPct: 1,
+          votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 0 },
+          isWireRedistribution: false,
+          effectiveArticleCount: 1,
+        },
+      ],
+    });
+
+    await BlindspotsFeed();
+    await BlindspotsFeed(); // also on the empty path
+    getBlindspots.mockResolvedValueOnce({ ok: false });
+    await BlindspotsFeed(); // and the failed path
+
+    expect(getNearBlindspots).not.toHaveBeenCalled();
+  });
+
+  it("the SilenceDigestBand digest counts only the main bundles, never the near items", async () => {
+    getNearBlindspots.mockResolvedValue([NEAR_ITEM, { ...NEAR_ITEM, id: "near-2" }]);
+    getBlindspots.mockResolvedValueOnce({
+      ok: true,
+      bundles: [
+        {
+          cluster: { id: "only", updated_at: "2026-10-22T11:00:00.000Z" },
+          articles: [],
+          sources: [{ id: "only-s", name: "Kaynak", bias: "pro_government" }],
+          dominantZone: "iktidar",
+          dominantPct: 1,
+          votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 0 },
+          isWireRedistribution: false,
+          effectiveArticleCount: 1,
+        },
+      ],
+    });
+
+    const tree = await BlindspotsFeed();
+
+    const band = collectElements(tree).find((el) => el.type === SilenceDigestBand);
+    expect((band?.props?.digest as SilenceDigest).windowTotal).toBe(1);
+    expect(getNearBlindspots).not.toHaveBeenCalled();
+  });
+
+  it("a failed near-blindspot fetch leaves the main feed untouched", async () => {
+    getNearBlindspots.mockResolvedValue(null);
+
+    const feed = await BlindspotsFeed();
+    const near = (await NearBlindspotsSection()) as Elementish;
+
+    expect(collectText(feed).join(" ")).toContain("belirgin bir kör nokta yok");
+    expect(near.props?.items).toBeNull();
   });
 });
