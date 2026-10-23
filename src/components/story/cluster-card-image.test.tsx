@@ -25,7 +25,12 @@ vi.mock("next/image", () => ({
   },
 }));
 
-import { ClusterCardImage, isUndersizedForSlot } from "./cluster-card-image";
+import {
+  ClusterCardImage,
+  isUndersizedForSlot,
+  measureIntrinsicWidth,
+  PROBE_TIMEOUT_MS,
+} from "./cluster-card-image";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const componentSource = readFileSync(join(here, "cluster-card-image.tsx"), "utf8");
@@ -467,6 +472,243 @@ describe("isUndersizedForSlot (minIntrinsicWidth)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// #121 regression: with a srcset of w-descriptors, `img.naturalWidth` is
+// DENSITY-CORRECTED (intrinsic px / (selected w / sizes px)), so on a DPR>=2
+// screen a real 460px photo reads ~216 and was wrongly skipped by the 320
+// floor. The slot must judge the real intrinsic width, measured by a probe
+// `Image` that has no srcset (so it reports pixels, not CSS px).
+// ---------------------------------------------------------------------------
+describe("measureIntrinsicWidth (density-corrected naturalWidth, #121)", () => {
+  // What next/image emits for the 390px mobile card hero at DPR2: the first
+  // deviceSize >= 2 * 390 is 828, so the browser picks the 828w candidate.
+  const NEXT_IMG =
+    "/_next/image?url=https%3A%2F%2Fcdn.outlet.example%2Ffoto.jpg&w=828&q=75";
+  const W_SRCSET = `/_next/image?url=x&w=384&q=75 384w, ${NEXT_IMG} 828w`;
+
+  type Outcome = { kind: "load"; naturalWidth: number } | { kind: "error" };
+
+  /**
+   * Fake `Image` constructor. Records every probe it builds. Assigning `src`
+   * schedules the load/error asynchronously, like a real (cached) image.
+   */
+  function fakeImageFactory(outcome: Outcome) {
+    const probes: Array<{
+      src: string;
+      srcset?: string;
+      sizes?: string;
+      naturalWidth: number;
+      onload: (() => void) | null;
+      onerror: (() => void) | null;
+    }> = [];
+    const make = vi.fn(() => {
+      let src = "";
+      const probe = {
+        naturalWidth: 0,
+        onload: null as (() => void) | null,
+        onerror: null as (() => void) | null,
+        get src() {
+          return src;
+        },
+        set src(value: string) {
+          src = value;
+          queueMicrotask(() => {
+            if (outcome.kind === "load") {
+              probe.naturalWidth = outcome.naturalWidth;
+              probe.onload?.();
+            } else {
+              probe.onerror?.();
+            }
+          });
+        },
+      };
+      probes.push(probe);
+      return probe as unknown as HTMLImageElement;
+    });
+    return { make, probes };
+  }
+
+  it("(a) reads the real 460px width through the probe when naturalWidth is density-corrected to 216 (Milliyet)", async () => {
+    const { make, probes } = fakeImageFactory({ kind: "load", naturalWidth: 460 });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 216, currentSrc: NEXT_IMG, srcset: W_SRCSET },
+      make,
+    );
+
+    expect(width).toBe(460);
+    // The probe loads exactly the URL the element chose, with no srcset/sizes
+    // of its own, so it reports raw pixels and comes from the memory cache.
+    expect(make).toHaveBeenCalledTimes(1);
+    expect(probes[0]!.src).toBe(NEXT_IMG);
+    expect(probes[0]!.srcset).toBeUndefined();
+    expect(probes[0]!.sizes).toBeUndefined();
+    // The real width clears the 320 floor ...
+    expect(
+      isUndersizedForSlot({ naturalWidth: width, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(false);
+    // ... whereas the raw density-corrected value is what caused the bug.
+    expect(
+      isUndersizedForSlot({ naturalWidth: 216, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(true);
+  });
+
+  it("(a) also keeps the 639px Son Dakika photo that reads 300 through naturalWidth", async () => {
+    const { make } = fakeImageFactory({ kind: "load", naturalWidth: 639 });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 300, currentSrc: NEXT_IMG, srcset: W_SRCSET },
+      make,
+    );
+
+    expect(width).toBe(639);
+    expect(
+      isUndersizedForSlot({ naturalWidth: width, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(false);
+  });
+
+  it("(b) still flags a genuinely tiny image (artigercek 150x84) as undersized", async () => {
+    const { make } = fakeImageFactory({ kind: "load", naturalWidth: 150 });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 70, currentSrc: NEXT_IMG, srcset: W_SRCSET },
+      make,
+    );
+
+    expect(width).toBe(150);
+    expect(
+      isUndersizedForSlot({ naturalWidth: width, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(true);
+  });
+
+  it("(c) returns naturalWidth as-is, with no probe, when the srcset is empty", async () => {
+    const { make } = fakeImageFactory({ kind: "load", naturalWidth: 9999 });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 460, currentSrc: "https://cdn.outlet.example/foto.jpg", srcset: "" },
+      make,
+    );
+
+    expect(width).toBe(460);
+    expect(make).not.toHaveBeenCalled();
+  });
+
+  it("(d) resolves 0 (unknown, so the image is kept) when the probe errors", async () => {
+    const { make } = fakeImageFactory({ kind: "error" });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 216, currentSrc: NEXT_IMG, srcset: W_SRCSET },
+      make,
+    );
+
+    expect(width).toBe(0);
+    expect(
+      isUndersizedForSlot({ naturalWidth: width, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(false);
+  });
+
+  it("resolves 0 (keep the image) when the probe never settles", async () => {
+    vi.useFakeTimers();
+    try {
+      const silent = () => ({}) as unknown as HTMLImageElement;
+      const pending = measureIntrinsicWidth(
+        { naturalWidth: 216, currentSrc: NEXT_IMG, srcset: W_SRCSET },
+        silent,
+      );
+      await vi.advanceTimersByTimeAsync(PROBE_TIMEOUT_MS);
+      await expect(pending).resolves.toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("probes for an x-descriptor srcset too (naturalWidth is density-corrected there as well)", async () => {
+    const { make } = fakeImageFactory({ kind: "load", naturalWidth: 700 });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 350, currentSrc: NEXT_IMG, srcset: `${NEXT_IMG} 1x, ${NEXT_IMG} 2x` },
+      make,
+    );
+
+    expect(width).toBe(700);
+    expect(make).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves 0 without probing when there is a srcset but no currentSrc to probe", async () => {
+    // An empty `src` never fires load/error, so probing would hang forever.
+    const { make } = fakeImageFactory({ kind: "load", naturalWidth: 460 });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 216, currentSrc: "", srcset: W_SRCSET },
+      make,
+    );
+
+    expect(width).toBe(0);
+    expect(make).not.toHaveBeenCalled();
+  });
+
+  it("resolves 0 when the probe reports no decoded width", async () => {
+    const { make } = fakeImageFactory({ kind: "load", naturalWidth: 0 });
+
+    const width = await measureIntrinsicWidth(
+      { naturalWidth: 216, currentSrc: NEXT_IMG, srcset: W_SRCSET },
+      make,
+    );
+
+    expect(width).toBe(0);
+  });
+
+  it("defaults to the DOM global Image constructor (not the next/image component imported in the module)", async () => {
+    const constructed: Array<{ src: string }> = [];
+    class GlobalFakeImage {
+      naturalWidth = 0;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      private _src = "";
+      constructor() {
+        constructed.push(this);
+      }
+      get src() {
+        return this._src;
+      }
+      set src(value: string) {
+        this._src = value;
+        queueMicrotask(() => {
+          this.naturalWidth = 512;
+          this.onload?.();
+        });
+      }
+    }
+    vi.stubGlobal("Image", GlobalFakeImage);
+    try {
+      const width = await measureIntrinsicWidth({
+        naturalWidth: 240,
+        currentSrc: NEXT_IMG,
+        srcset: W_SRCSET,
+      });
+
+      expect(width).toBe(512);
+      expect(constructed).toHaveLength(1);
+      expect(constructed[0]!.src).toBe(NEXT_IMG);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("resolves 0 instead of rejecting when the probe cannot be constructed", async () => {
+    const make = vi.fn(() => {
+      throw new Error("no Image in this environment");
+    });
+
+    await expect(
+      measureIntrinsicWidth(
+        { naturalWidth: 216, currentSrc: NEXT_IMG, srcset: W_SRCSET },
+        make as unknown as () => HTMLImageElement,
+      ),
+    ).resolves.toBe(0);
+  });
+});
+
 describe("ClusterCardImage — minIntrinsicWidth wiring", () => {
   it("does not forward minIntrinsicWidth to next/image, and still wires onLoad", () => {
     renderToStaticMarkup(
@@ -500,16 +742,42 @@ describe("ClusterCardImage — minIntrinsicWidth wiring", () => {
     expect(markup).not.toContain("second.jpg");
   });
 
-  it("source guard: the Image onLoad block consults isUndersizedForSlot and advances idx", () => {
+  it("source guard: the Image onLoad block judges the measured intrinsic width via isUndersizedForSlot and advances idx", () => {
     const start = componentSource.indexOf("onLoad={");
     expect(start).toBeGreaterThan(-1);
     const block = componentSource.slice(start, componentSource.indexOf("/>", start));
+    // The width fed to the floor is the probed real width (#121), never the
+    // density-corrected img.naturalWidth or a DPR multiple of it.
+    expect(block).toContain("measureIntrinsicWidth");
     expect(block).toContain("isUndersizedForSlot");
+    expect(block).not.toMatch(/naturalWidth:\s*img\.naturalWidth/);
+    expect(block).not.toContain("devicePixelRatio");
+    expect(componentSource).not.toContain("devicePixelRatio");
     expect(block).toContain("setIdx");
     // A skipped image must never fade in (no blurry flash).
     expect(block).toContain("setLoaded(false)");
     // The renderedWidth input is what protects the display:none desktop banner.
     expect(block).toContain("clientWidth");
+    // The synchronous path (no floor / not rendered) still reveals at once.
+    expect(block).toContain("minIntrinsicWidth === undefined");
+    expect(block).toContain("setLoaded(true)");
+  });
+
+  it("source guard: a probe result is dropped only when the <img> element is no longer connected", () => {
+    const start = componentSource.indexOf("onLoad={");
+    const block = componentSource.slice(start, componentSource.indexOf("/>", start));
+    // The decision happens after the await, behind an element check: the
+    // keyed <Image> is removed from the DOM on unmount and on candidate
+    // advance, but stays connected inside a hidden <Activity>.
+    expect(block).toMatch(/\.isConnected/);
+    expect(block.indexOf("isConnected")).toBeGreaterThan(block.indexOf("measureIntrinsicWidth"));
+    expect(block.indexOf("isConnected")).toBeLessThan(block.indexOf("isUndersizedForSlot"));
+    // No effect-lifetime guard: effect cleanup also runs when <Activity>
+    // hides the tree, which dropped the probe and left the hero at
+    // opacity-0 after the tree was shown again.
+    expect(componentSource).not.toContain("liveRef");
+    expect(componentSource).not.toMatch(/\buseEffect\b/);
+    expect(componentSource).not.toMatch(/\buseRef\b/);
   });
 
   it("source guard: the logo <img> class string is untouched (allow-listed by the contrast guard)", () => {
