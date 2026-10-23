@@ -4,17 +4,18 @@ import { Suspense } from "react";
 import { DietSummary } from "@/components/diet/diet-summary";
 import { DietSuggestions } from "@/components/diet/diet-suggestions";
 import { ClearDietButton } from "@/components/diet/clear-diet-button";
+import { noindexPageMetadata } from "@/lib/seo/page-metadata";
 
 // Per-user, device-local page — like /saved, this is deliberately kept out
 // of the crawlable/canonical surface (nothing here means anything to a
 // second visitor, let alone a search engine).
-export const metadata: Metadata = {
+export const metadata: Metadata = noindexPageMetadata({
   title: "Haber diyetim",
   description:
     "Tayf'ta hangi medya dünyasından haber okuduğunu yalnızca bu cihazda gösteren sayfa.",
-  alternates: { canonical: "/diyetim" },
-  robots: { index: false, follow: false },
-};
+  path: "/diyetim",
+  follow: false,
+});
 
 export default function DiyetimPage() {
   return (

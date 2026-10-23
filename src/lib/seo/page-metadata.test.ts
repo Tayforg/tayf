@@ -8,7 +8,11 @@ vi.mock("next/og", () => ({ ImageResponse: class {} }));
 
 import { alt, contentType, size } from "@/app/opengraph-image";
 
-import { SITE_TITLE_SUFFIX, staticPageMetadata } from "./page-metadata";
+import {
+  SITE_TITLE_SUFFIX,
+  noindexPageMetadata,
+  staticPageMetadata,
+} from "./page-metadata";
 
 type Image = { url: string; width: number; height: number; alt: string; type: string };
 type Shape = {
@@ -124,6 +128,73 @@ describe("staticPageMetadata", () => {
     "throws for the invalid path %j",
     (path) => {
       expect(() => build({ path })).toThrow(/staticPageMetadata: invalid path/);
+    },
+  );
+});
+
+describe("noindexPageMetadata", () => {
+  const page = { title: "Karşılaştır", description: "D", path: "/karsilastir" };
+
+  function buildNoindex(
+    overrides: Partial<Parameters<typeof noindexPageMetadata>[0]> = {},
+  ): Shape {
+    return noindexPageMetadata({
+      ...page,
+      follow: true,
+      ...overrides,
+    }) as unknown as Shape;
+  }
+
+  it("sets robots to noindex,nofollow when follow is false", () => {
+    expect(buildNoindex({ follow: false }).robots).toEqual({ index: false, follow: false });
+  });
+
+  it("sets robots to noindex,follow when follow is true", () => {
+    expect(buildNoindex({ follow: true }).robots).toEqual({ index: false, follow: true });
+  });
+
+  it("keeps og:url identical to the canonical and to the path (no inherited homepage '/')", () => {
+    const m = buildNoindex();
+    expect(m.openGraph.url).toBe("/karsilastir");
+    expect(m.alternates.canonical).toBe("/karsilastir");
+    expect(m.openGraph.url).toBe(m.alternates.canonical);
+  });
+
+  it("gives openGraph and twitter their own title with the site suffix", () => {
+    const m = buildNoindex();
+    expect(m.openGraph.title).toBe("Karşılaştır — Tayf");
+    expect(m.twitter.title).toBe("Karşılaştır — Tayf");
+  });
+
+  it("points og:image / twitter:image at the root card routes", () => {
+    const m = buildNoindex();
+    expect(m.openGraph.images).toHaveLength(1);
+    expect(m.twitter.images).toHaveLength(1);
+    expect(m.openGraph.images[0]?.url).toBe("/opengraph-image");
+    expect(m.twitter.images[0]?.url).toBe("/twitter-image");
+  });
+
+  it.each([true, false])(
+    "equals staticPageMetadata apart from robots (follow=%s)",
+    (follow) => {
+      const { robots, ...rest } = noindexPageMetadata({ ...page, follow });
+      expect(robots).toEqual({ index: false, follow });
+      expect(rest).toEqual(staticPageMetadata(page));
+    },
+  );
+
+  it("does not leak the follow flag into the output", () => {
+    expect("follow" in buildNoindex()).toBe(false);
+  });
+
+  it("leaves staticPageMetadata without robots (the helper is the only noindex path)", () => {
+    expect("robots" in (staticPageMetadata(page) as object)).toBe(false);
+  });
+
+  it.each(["/karsilastir?a=1", "karsilastir", "/karsilastir/", "/Karsilastir", ""])(
+    "throws for the invalid path %j",
+    (path) => {
+      expect(() => buildNoindex({ path })).toThrow(/invalid path/);
     },
   );
 });

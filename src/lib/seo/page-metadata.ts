@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 
-// Metadata for the public, indexable static pages (/durum, /metodoloji, ...).
+// Metadata for static pages: the public, indexable ones (/durum, /metodoloji,
+// ...) via staticPageMetadata(), and the ones that stay out of the index
+// (/karsilastir, /takip, /saved, /diyetim) via noindexPageMetadata().
 //
 // Why this sets openGraph / twitter / images explicitly: Next replaces the
 // parent's whole resolved `openGraph` and `twitter` objects when a page
@@ -70,4 +72,28 @@ export function staticPageMetadata(input: {
       images: [{ url: "/twitter-image", ...ROOT_SHARE_IMAGE }],
     },
   };
+}
+
+/**
+ * staticPageMetadata() plus `robots: { index: false, follow }`, for static
+ * pages that stay out of the index but must not inherit the homepage's og:url
+ * '/' and title (a shared /karsilastir link used to unfurl as the homepage
+ * card).
+ *
+ * og:url equals the canonical path, so the page keeps one stable social object
+ * that matches its canonical.
+ *
+ * Never use it for a capability-URL page such as rapor/[token], whose path
+ * carries a credential: the token would land in og:url and the canonical.
+ * Those pages hand-write a bare `robots: { index: false }` instead; a guard
+ * test (tests/guards/static-page-metadata.test.ts) pins both rules.
+ */
+export function noindexPageMetadata(input: {
+  title: string;
+  description: string;
+  path: string;
+  follow: boolean;
+}): Metadata {
+  const { follow, ...page } = input;
+  return { ...staticPageMetadata(page), robots: { index: false, follow } };
 }

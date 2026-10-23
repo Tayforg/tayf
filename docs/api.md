@@ -213,7 +213,7 @@ A read failure is a `503`, never a cacheable `404`, so an outage cannot unpublis
 
 The headline goes through the same KVKK private-individual filter as the kart route (`isGameEligibleTitle`); a rejected title is replaced by the generic "Bu haberin medya yelpazesi".
 
-**Framing policy (security-sensitive).** The rest of the site is not frameable by third parties (CSP `frame-ancestors 'self'` plus `X-Frame-Options: SAMEORIGIN`). `/embed/*` is the single exception and gets its own header rule (`src/lib/security/headers.ts`, wired into `next.config.ts`, guarded by `tests/guards/frame-headers.test.ts`):
+**Framing policy (security-sensitive).** The rest of the site is not frameable by third parties (CSP `frame-ancestors 'self'` plus `X-Frame-Options: SAMEORIGIN`). `/embed/cluster/{id}` is the single exception (every other `/embed/...` path keeps the site policy and answers a script-less 404) and gets its own header rule (`src/lib/security/headers.ts`, wired into `next.config.ts`, guarded by `tests/guards/frame-headers.test.ts`):
 
 ```
 Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors *

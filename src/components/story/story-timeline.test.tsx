@@ -131,8 +131,40 @@ describe("StoryTimeline — 'Tüm sıra' list", () => {
     expect(rows[0] ?? "").toContain("(toplayıcı / niş)");
     for (const row of rows.slice(1)) expect(row).not.toContain("toplayıcı / niş");
     expect(fullList(html).match(/\(toplayıcı \/ niş\)/g)).toHaveLength(1);
-    // Not hidden from sighted users or screen readers.
-    expect(rows[0] ?? "").toMatch(/<span>\(toplayıcı \/ niş\)<\/span>/);
+    // Not hidden from sighted users or screen readers, and it can neither
+    // shrink nor wrap (otherwise it breaks to two lines at 390px).
+    const tag = (rows[0] ?? "").match(/<span class="([^"]*)">\(toplayıcı \/ niş\)<\/span>/);
+    expect(tag, "tag span").not.toBeNull();
+    const tagClasses = (tag?.[1] ?? "").split(/\s+/);
+    expect(tagClasses).toContain("shrink-0");
+    expect(tagClasses).toContain("whitespace-nowrap");
+    expect(tagClasses).toContain("text-[10px]");
+    expect(tagClasses).not.toContain("sr-only");
+    expect(tag?.[0]).not.toContain("aria-hidden");
+  });
+
+  it("keeps every row on one line: no flex-wrap, title truncates", () => {
+    const rows = fullListRows(render(WITH_NON_VOTING));
+    expect(rows).toHaveLength(WITH_NON_VOTING.points.length);
+    rows.forEach((row, i) => {
+      const anchor = row.match(/<a [^>]*class="([^"]*)"/);
+      expect(anchor, `row ${i} anchor`).not.toBeNull();
+      const anchorClasses = (anchor?.[1] ?? "").split(/\s+/);
+      expect(anchorClasses).toContain("flex");
+      expect(anchorClasses).toContain("min-h-[32px]");
+      expect(anchorClasses).not.toContain("flex-wrap");
+
+      const title = `${WITH_NON_VOTING.points[i]?.title}</span>`;
+      const titleAt = row.indexOf(title);
+      expect(titleAt, `row ${i} title`).toBeGreaterThan(-1);
+      expect(row).toContain(`<span class="min-w-0 truncate">${title}`);
+    });
+
+    // The non-voting tag sits before the (truncating) title.
+    const nvRow = rows[0] ?? "";
+    const tagAt = nvRow.indexOf("(toplayıcı / niş)");
+    expect(tagAt).toBeGreaterThan(-1);
+    expect(tagAt).toBeLessThan(nvRow.indexOf('<span class="min-w-0 truncate">'));
   });
 
   it("draws a non-voting row's dot hollow and a voting row's dot filled", () => {
