@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
+import { SavedMixCard } from "@/components/bookmark/saved-mix-card";
 import {
   changeBadgeLabels,
   pruneSnapshots,
@@ -125,6 +126,7 @@ export function SavedList() {
 
   return (
     <>
+    <SavedMixCard rows={rows} />
     {changedCount > 0 && (
       <p className="mb-3 text-xs text-muted-foreground">
         {changedCount} kayıtlı hikâyede, kaydettiğinizden beri yeni gelişme var.

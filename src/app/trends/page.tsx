@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { RisingTopics } from "@/components/trends/rising-topics";
 import { ScrollToEnd } from "@/components/trends/scroll-to-end";
 import { PageHero } from "@/components/ui/page-hero";
 
@@ -9,11 +10,12 @@ import { PageHero } from "@/components/ui/page-hero";
 export const metadata: Metadata = {
   title: "Medya DNA Trendi",
   description:
-    "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi.",
+    "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi ve bugün yükselen konular.",
   alternates: { canonical: "/trends" },
 };
 import { ZONE_META } from "@/lib/bias/config";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
+import { getRisingEntities } from "@/lib/trends/rising-query";
 import type { MediaDnaZone } from "@/types";
 
 // /trends — 30-day historical Medya DNA mix.
@@ -46,6 +48,12 @@ import type { MediaDnaZone } from "@/types";
 // "unavailable" state for that case rather than silently rendering an
 // all-zero month or crashing the build. `src/app/trends/error.tsx` still
 // catches genuine render errors (it's untouched by this).
+//
+// "Yükselen Konular" (migration 112) sits right under the hero in BOTH
+// branches. `getRisingEntities` is a second, independent "use cache" fetcher
+// over the per-entity daily rollup; it also resolves `null` instead of
+// throwing, and the section degrades on its own copy, so a failure of either
+// fetch never hides the other.
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -73,7 +81,10 @@ const ZONE_FILL: Record<MediaDnaZone, string> = {
 };
 
 export default async function TrendsPage() {
-  const buckets = await fetchIstanbulTimeline();
+  const [buckets, rising] = await Promise.all([
+    fetchIstanbulTimeline(),
+    getRisingEntities(),
+  ]);
 
   // `null` means the fetch itself failed (Supabase error, or — at build
   // time — env vars not yet wired) — a distinct, honest state from "zero
@@ -93,6 +104,7 @@ export default async function TrendsPage() {
           title="Medya DNA Trendi"
           subtitle="Her gün hangi taraf ne kadar haber üretti? Kırmızı iktidara yakın, gri bağımsız, yeşil muhalefete yakın kaynaklardır."
         />
+        <RisingTopics data={rising} />
         <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6">
           <p className="text-sm text-muted-foreground text-center py-12">
             Trend verileri şu anda yüklenemiyor.{" "}
@@ -129,6 +141,7 @@ export default async function TrendsPage() {
         title="Medya DNA Trendi"
         subtitle="Her gün hangi taraf ne kadar haber üretti? Kırmızı iktidara yakın, gri bağımsız, yeşil muhalefete yakın kaynaklardır."
       />
+      <RisingTopics data={rising} />
 
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-6 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">

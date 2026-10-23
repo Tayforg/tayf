@@ -24,6 +24,11 @@ const LIGHTHOUSE =
 const FACEBOOK =
   "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)";
 const TWITTERBOT = "Twitterbot/1.0";
+// oEmbed consumers: they fetch a page and look for the discovery <link> in
+// <head>, so they must get blocking metadata too.
+const WORDPRESS = "WordPress/6.6.2; https://example.org";
+const IFRAMELY = "Iframely/1.3.1 (+https://iframely.com/docs/about)";
+const EMBEDLY = "Mozilla/5.0 (compatible; Embedly/0.2; +http://support.embed.ly/)";
 
 const CHROME_MAC =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -60,6 +65,9 @@ describe("HTML_LIMITED_BOTS crawler matching", () => {
     ["Chrome-Lighthouse", LIGHTHOUSE],
     ["facebookexternalhit", FACEBOOK],
     ["Twitterbot", TWITTERBOT],
+    ["WordPress (oEmbed consumer)", WORDPRESS],
+    ["Iframely (oEmbed consumer)", IFRAMELY],
+    ["Embedly (oEmbed consumer)", EMBEDLY],
   ])("matches %s", (_name, ua) => {
     expect(re.test(ua)).toBe(true);
   });
@@ -91,6 +99,12 @@ describe("Next runtime mirror (shouldServeStreamingMetadata)", () => {
     expect(shouldServeStreamingMetadata(BINGBOT, HTML_LIMITED_BOTS.source)).toBe(
       false,
     );
+  });
+
+  it("serves blocking metadata to the oEmbed consumers", () => {
+    for (const ua of [WORDPRESS, IFRAMELY, EMBEDLY]) {
+      expect(shouldServeStreamingMetadata(ua, HTML_LIMITED_BOTS.source)).toBe(false);
+    }
   });
 
   it("keeps streaming metadata for desktop Chrome", () => {

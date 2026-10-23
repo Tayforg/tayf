@@ -111,6 +111,28 @@ describe("GET /robots.txt", () => {
     }
   });
 
+  it("keeps the script-less /embed/ widget out of every crawler group (it is a frame target, not a page)", async () => {
+    const body = await (await GET()).text();
+    const lines = body.split("\n");
+    const userAgents = lines.filter((l) => l.startsWith("User-agent:")).map((l) => l.slice("User-agent: ".length));
+    expect(userAgents).toEqual(expect.arrayContaining(["*", "Googlebot", "Bingbot", ...AI_BOTS]));
+    for (const ua of userAgents) {
+      const startIdx = lines.findIndex((l) => l === `User-agent: ${ua}`);
+      let endIdx = lines.findIndex((l, i) => i > startIdx && l.startsWith("User-agent:"));
+      if (endIdx === -1) endIdx = lines.length;
+      const group = lines.slice(startIdx, endIdx).join("\n");
+      expect(group, `group for ${ua}`).toContain("Disallow: /embed/");
+    }
+    expect(body.match(/^Disallow: \/embed\/$/gm)).toHaveLength(userAgents.length);
+  });
+
+  it("does not disallow /embed (no trailing slash): only the widget namespace is hidden", async () => {
+    const body = await (await GET()).text();
+    expect(body).not.toMatch(/^Disallow: \/embed$/m);
+    const disallows = new Set(body.match(/^Disallow: .*$/gm));
+    expect([...disallows].sort()).toEqual(["Disallow: /admin", "Disallow: /api/", "Disallow: /embed/"]);
+  });
+
   it("builds the Sitemap line from NEXT_PUBLIC_SITE_URL", async () => {
     const body = await (await GET()).text();
     expect(body).toContain("Sitemap: https://tayf.test/sitemap.xml");

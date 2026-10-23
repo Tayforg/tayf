@@ -2415,3 +2415,59 @@ select has_function_privilege('anon', 'public.ops_health_report()', 'execute'); 
 ```
 
 **Rollback:** re-apply `103_jev_shadow_stall_check.sql` to restore the previous function, re-run the `do $$ ... $$` block of `061_jev_shadow.sql` to restore the 60 s timeout and empty-body cron command (re-pause the job afterwards if it was paused), then `delete from supabase_migrations.schema_migrations where version = '108';`. The redeployed `jev-shadow` can stay.
+
+## 112 — Yükselen Konular (`trends_daily_entity_counts_ist_rollup`, folded into cron `trends-rollup-refresh`): APPLY 112, THEN DEPLOY
+
+**Why:** `/trends` now opens with a "Yükselen Konular" card: people, institutions, countries and economy terms whose article count today is far above their own trailing-week average. The only trends rollup was per (day, zone) (092), `articles.entities` is EMPTY in production (098 header), and the page must not scan `articles`. 112 tokenizes article **titles** against a curated vocabulary (`src/lib/trends/rising-entities.ts`, 62 entities) one Istanbul day at a time and stores one count per (day, entity).
+
+**What it does** (one transaction, additive, safe to re-apply):
+
+1. Creates `public.trends_daily_entity_counts_ist_rollup (day, entity, count, updated_at)`. Service-role only: RLS on with no policy, every default grant revoked (anon, authenticated, public; PG17 `MAINTAIN` too), `SELECT` granted to `service_role`. There is no public read; the app reads it through the service-role `createReaderClient()`.
+2. Creates `public.trends_daily_entity_counts_ist_refresh(p_days default 2)`: `SECURITY DEFINER`, `search_path = ''`, service-role-only. Recomputes the last `p_days` (cap 10) Istanbul days plus the days hit by late-ingested rows, one statement per day, counting outlet/wire **articles** (once per entity), excluding legal notices (107), and writing a row for **every** vocabulary entity (zero included). A failure (including a statement timeout) raises a `WARNING` and returns `-1`; it never aborts the transaction it shares with the zone refresh. An overlapping call returns `0`.
+3. `cron.alter_job` on `trends-rollup-refresh`: the command becomes `select public.trends_daily_zone_counts_ist_refresh(); select public.trends_daily_entity_counts_ist_refresh();`. The schedule (`25 * * * *`, 109) is not touched. Without `pg_cron` or without that job it raises a NOTICE and skips.
+4. Backfills with `refresh(9)` (today plus 8 days), roughly 20-40 s, inside a `DO` block that **fails the migration** when `refresh()` returns `-1` (the preceding `WARNING: 112 entity refresh failed: ...` names the cause, e.g. a role/pooler `statement_timeout`) or when fewer than 9 days were written (an overlapping cron refresh holds the lock and returns `0`). The whole transaction then rolls back: no table, no cron change, no `112` ledger row. Fix the cause (raise the timeout for the session, or retry away from the `:25` cron run) and re-apply.
+
+**Deploy order:**
+
+1. Apply `112_trends_entity_rollup.sql` (before the Vercel deploy, so the first prerender already has data):
+
+   ```bash
+   supabase db push --linked        # or: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f supabase/migrations/112_trends_entity_rollup.sql
+   ```
+
+2. Ship the Vercel deploy. Before step 1 (or if the table is empty) the card shows "Yükselen konular şu anda hesaplanamıyor." and retries within about a minute (failures cache for the short `minutes` lifetime); the chart is unaffected.
+
+**Verify** (read-only):
+
+```sql
+select count(*), count(distinct day), count(distinct entity), min(day), max(day)
+  from public.trends_daily_entity_counts_ist_rollup;  -- right after the backfill: 558, 9, 62, today-8, today
+select command, schedule, active from cron.job where jobname = 'trends-rollup-refresh';
+  -- command holds BOTH calls, schedule still '25 * * * *'
+select day, entity, count from public.trends_daily_entity_counts_ist_rollup
+ where day = (now() at time zone 'Europe/Istanbul')::date and count > 0 order by count desc limit 10;
+select has_table_privilege('anon', 'public.trends_daily_entity_counts_ist_rollup', 'select');  -- false
+select has_table_privilege('authenticated', 'public.trends_daily_entity_counts_ist_rollup', 'select');  -- false
+select has_function_privilege('anon', 'public.trends_daily_entity_counts_ist_refresh(integer)', 'execute');  -- false
+select jobid, status, return_message, start_time, end_time from cron.job_run_details
+ where jobid = (select jobid from cron.job where jobname = 'trends-rollup-refresh') order by runid desc limit 3;
+  -- the next :25 run; the duration includes the zone refresh (6 h avg 34 s before 112)
+```
+
+The migration aborts rather than commit a partial backfill, so a successful apply already means 9 days. If the table later has fewer than 9 days (for example after an operator pruned it), re-run the refresh; it is idempotent and bounded per day: `select public.trends_daily_entity_counts_ist_refresh(9);` (service role / SQL editor). The hourly run only refreshes the last 2 days, so a missing older day does not fill by itself, and "Yükselen konular için yeterli geçmiş veri henüz yok." shows until 6 of the 7 baseline days exist.
+
+**Cost:** the per-day statement was timed read-only on production before writing the migration: 0.95-2.1 s for yesterday, 3.6 s for a 21-day-old day nobody had touched (the statement narrows each day with two index range scans so a late-ingest repair day does not heap-scan every article since then; the plain `created_at >=` form took 10.1 s cold for 2026-10-13). A normal hourly run does 2-4 such statements. If the combined cron run ever gets too long, split it: `select cron.alter_job((select jobid from cron.job where jobname = 'trends-rollup-refresh'), command := 'select public.trends_daily_zone_counts_ist_refresh();');` and schedule `select public.trends_daily_entity_counts_ist_refresh();` as its own job.
+
+**Changing the vocabulary:** edit `src/lib/trends/rising-entities.ts` and write a new migration that `create or replace`s the refresh function with the new `emap` VALUES and re-runs the backfill; `tests/migrations/112-trends-entity-rollup.test.ts` pins the migration to the TS list and its fold strings.
+
+**Rollback:** nothing else depends on 112; the card degrades to its "hesaplanamıyor" copy.
+
+```sql
+select cron.alter_job((select jobid from cron.job where jobname = 'trends-rollup-refresh'),
+  command := 'select public.trends_daily_zone_counts_ist_refresh();');
+drop function public.trends_daily_entity_counts_ist_refresh(integer);
+drop table public.trends_daily_entity_counts_ist_rollup;
+delete from supabase_migrations.schema_migrations where version = '112';
+```
+
+The migration itself never deletes: days that leave the rolling window keep their last counts (about 62 rows a day, 23k a year).

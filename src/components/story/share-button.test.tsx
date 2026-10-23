@@ -1,11 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { buildEmbedSnippet } from "@/lib/cards/badge-embed";
+import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
 import {
   ShareButton,
   ManualCopyBox,
   copyText,
   resolveEmbedCopy,
+  resolveIframeCopy,
   resolveShareCopy,
 } from "./share-button";
 
@@ -177,6 +179,142 @@ describe("ShareButton — Sitene ekle (embed snippet)", () => {
 
     vi.unstubAllGlobals();
     vi.doUnmock("@/lib/track");
+  });
+});
+
+describe("ShareButton — Gömme kodu (live iframe widget)", () => {
+  const CLUSTER_ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+
+  it("renders the chip next to 'Sitene ekle' without touching the badge chip", () => {
+    const html = renderToStaticMarkup(<ShareButton clusterId={CLUSTER_ID} title="t" />);
+    const m = html.match(
+      /<button[^>]*title="Canlı yelpaze kutusunu \(iframe\) sitenize ekleyin"[^>]*>[^<]*<\/button>/,
+    );
+    expect(m).not.toBeNull();
+    expect(m![0]).toContain("Gömme kodu");
+    expect(m![0]).toContain('type="button"');
+    // the original badge chip is still there, unchanged
+    expect(html).toMatch(/<button[^>]*title="Bu haberin yelpaze rozetini sitenize ekleyin"[^>]*>Sitene ekle<\/button>/);
+    // exactly one live region, still outside both buttons
+    expect(html.match(/role="status"/g)).toHaveLength(1);
+  });
+
+  it("hides the chip when the id is not a uuid", () => {
+    const html = renderToStaticMarkup(<ShareButton clusterId="c1" title="t" />);
+    expect(html).not.toContain("Gömme kodu");
+  });
+
+  it("reuses the shared chip class", () => {
+    const html = renderToStaticMarkup(<ShareButton clusterId={CLUSTER_ID} title="t" />);
+    const chip = html.match(/<button[^>]*title="Canlı yelpaze kutusunu[^>]*>/)![0];
+    expect(chip).toContain("rounded-full");
+    expect(chip).toContain("text-muted-foreground");
+  });
+
+  it("copyIframeCode writes the sandboxed iframe snippet and tracks kind 'embed_iframe'", async () => {
+    vi.resetModules();
+    const trackMock = vi.fn();
+    vi.doMock("@/lib/track", () => ({ track: trackMock }));
+    const writeText = vi.fn(async (_value: string) => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    const { copyIframeCode } = await import("./share-button");
+    const ok = await copyIframeCode(CLUSTER_ID);
+
+    expect(ok).toBe(true);
+    expect(writeText).toHaveBeenCalledWith(buildIframeSnippet("https://tayf.test", CLUSTER_ID));
+    expect(writeText.mock.calls[0]![0]).toContain('sandbox="allow-popups allow-popups-to-escape-sandbox"');
+    expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "embed_iframe" });
+    // the badge kind is untouched
+    expect(trackMock).not.toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "embed" });
+
+    vi.unstubAllGlobals();
+    vi.doUnmock("@/lib/track");
+  });
+
+  it("copyIframeCode returns false for a non-uuid without touching the clipboard or tracking", async () => {
+    vi.resetModules();
+    const trackMock = vi.fn();
+    vi.doMock("@/lib/track", () => ({ track: trackMock }));
+    const writeText = vi.fn(async (_value: string) => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    const { copyIframeCode } = await import("./share-button");
+    expect(await copyIframeCode("nope")).toBe(false);
+    expect(writeText).not.toHaveBeenCalled();
+    expect(trackMock).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+    vi.doUnmock("@/lib/track");
+  });
+
+  it("copyIframeCode returns false and does not track when the clipboard rejects or is missing", async () => {
+    vi.resetModules();
+    const trackMock = vi.fn();
+    vi.doMock("@/lib/track", () => ({ track: trackMock }));
+    vi.stubGlobal("navigator", {
+      clipboard: {
+        writeText: vi.fn(async (_value: string) => {
+          throw new Error("denied");
+        }),
+      },
+    });
+    const mod = await import("./share-button");
+    expect(await mod.copyIframeCode(CLUSTER_ID)).toBe(false);
+
+    vi.stubGlobal("navigator", {});
+    expect(await mod.copyIframeCode(CLUSTER_ID)).toBe(false);
+    expect(trackMock).not.toHaveBeenCalled();
+
+    vi.unstubAllGlobals();
+    vi.doUnmock("@/lib/track");
+  });
+
+  describe("resolveIframeCopy", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("returns ok when the write resolves", async () => {
+      vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn(async (_value: string) => {}) } });
+      expect(await resolveIframeCopy(CLUSTER_ID)).toEqual({ ok: true });
+    });
+
+    it("returns the iframe snippet as the manual fallback when the clipboard is denied", async () => {
+      vi.stubGlobal("navigator", {
+        clipboard: {
+          writeText: vi.fn(async (_value: string) => {
+            throw new Error("denied");
+          }),
+        },
+      });
+      expect(await resolveIframeCopy(CLUSTER_ID)).toEqual({
+        ok: false,
+        manual: buildIframeSnippet("https://tayf.test", CLUSTER_ID),
+      });
+    });
+
+    it("returns the iframe snippet as the manual fallback when navigator.clipboard is missing", async () => {
+      vi.stubGlobal("navigator", {});
+      expect(await resolveIframeCopy(CLUSTER_ID)).toEqual({
+        ok: false,
+        manual: buildIframeSnippet("https://tayf.test", CLUSTER_ID),
+      });
+    });
+
+    it("returns manual null for a non-uuid (nothing to show)", async () => {
+      vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn(async (_value: string) => {}) } });
+      expect(await resolveIframeCopy("nope")).toEqual({ ok: false, manual: null });
+    });
+  });
+
+  it("the manual-copy box labels the iframe code for assistive tech", () => {
+    const html = renderToStaticMarkup(
+      <ManualCopyBox label="iframe gömme kodu" value={buildIframeSnippet("https://tayf.test", CLUSTER_ID)!} />,
+    );
+    expect(html).toContain('aria-label="iframe gömme kodu"');
+    expect(html).toContain("&lt;iframe");
+    expect(html).toContain("readOnly");
   });
 });
 

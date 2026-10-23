@@ -9,6 +9,7 @@ import type {
   ClusterDetail,
   ClusterDetailMember,
 } from "@/lib/clusters/cluster-detail-query";
+import type { StoryTimeline as StoryTimelineData } from "@/lib/clusters/story-timeline";
 import type { BiasDistribution, Source } from "@/types";
 import { FramingComparison } from "@/components/story/framing-comparison";
 import { MediaDna } from "@/components/story/media-dna";
@@ -868,6 +869,30 @@ describe("ClusterDetailPage — honest source count v2 (reader-data)", () => {
   });
 });
 
+describe("generateMetadata — oEmbed discovery", () => {
+  it("advertises the oEmbed endpoint for the cluster URL next to the canonical", async () => {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution(), is_archived: false }),
+      members: [makeMember("a1", source)],
+      allSources: [source],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    const types = (metadata.alternates?.types ?? {}) as Record<string, Array<{ url: string }>>;
+    const link = types["application/json+oembed"]?.[0];
+    if (!link) throw new Error("no oEmbed discovery link");
+    expect(metadata.alternates?.canonical).toBe("/cluster/c1");
+    expect(link.url).toContain("/api/oembed?url=");
+    expect(decodeURIComponent(link.url)).toContain("/cluster/c1");
+    expect(link.url).toContain("format=json");
+  });
+});
+
 describe("generateMetadata — seo-3 archived noindex", () => {
   it("marks robots index:false, follow:true when the cluster is archived (page itself still serves 200)", async () => {
     const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
@@ -1062,7 +1087,8 @@ describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
         // CNN Türk-style future pubDate; Tayf saw it at 06:05Z.
         makeMember("a-cnn", cnn, "2026-09-27T09:00:00.000Z"),
         makeMember("a-sozcu", sozcu, "2026-09-27T08:22:00.000Z"),
-        // Aggregators never vote — must not count toward bağımsız coverage.
+        // Aggregators never vote — must not count toward bağımsız coverage,
+        // the first mover or the summary, but they ARE plotted (hollow ring).
         makeMember("a-agg", aggregator, "2026-09-27T06:00:00.000Z"),
       ]),
     );
@@ -1082,8 +1108,26 @@ describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
     expect(html).toContain(
       "İlk: CNN Türk · 09:05 — Bağımsız kaynaklardan bu kümede haber yok — Muhalefet 2 sa 17 dk sonra katıldı",
     );
-    expect(html).toContain("Tüm sıra (3 kaynak)");
-    expect(html).not.toContain("Haberler.com");
+    // 3 voting + the (earlier) aggregator, plotted as a non-voting point.
+    expect(html).toContain("Tüm sıra (4 kaynak)");
+    expect(html).toContain("Haberler.com");
+    expect(html).toContain("(toplayıcı / niş)");
+    expect(html).toContain("İçi boş daire");
+    // Zone list: voting zones only — bağımsız has no VOTING member.
+    expect(html).toContain('aria-label="Bölgelerin ilk haber saatleri"');
+    expect(html).toContain(
+      "<span class=\"text-foreground\">İktidar</span><span class=\"font-mono tabular-nums\">09:05</span>",
+    );
+    expect(html).not.toContain('<span class="text-foreground">Bağımsız</span>');
+    const timeline = (el as unknown as { props: { timeline: StoryTimelineData } }).props.timeline;
+    expect(timeline.points.map((p) => [p.sourceName, p.voting])).toEqual([
+      ["Haberler.com", false],
+      ["CNN Türk", true],
+      ["Sabah", true],
+      ["Sözcü", true],
+    ]);
+    expect(timeline.first.sourceName).toBe("CNN Türk");
+    expect(timeline.zoneFirsts.map((z) => z.zone)).toEqual(["iktidar", "muhalefet"]);
     // Acceptance criterion 3: never a claim of silence.
     expect(html).not.toMatch(/yazmad/);
     expect(collectText(tree).join("")).not.toMatch(/yazmad/);
@@ -1115,6 +1159,25 @@ describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
     expect(hasElementOfType(tree, StoryTimeline)).toBe(false);
     expect(collectText(tree).join("")).not.toContain("Kim önce yazdı");
+    expect(getMemberSeenAt).not.toHaveBeenCalled();
+    expect(getZoneFeedHealth).not.toHaveBeenCalled();
+  });
+
+  it("does not let non-voting sources reach the 3-source floor", async () => {
+    const aggregator2 = makeSource({ id: "s-agg2", name: "Haber Sitesi", bias: "center", kind: "aggregator" });
+    const aggregator3 = makeSource({ id: "s-agg3", name: "Derleme", bias: "center", kind: "aggregator" });
+    getClusterDetail.mockResolvedValue(
+      detailFor([
+        makeMember("a-sabah", sabah, "2026-09-27T06:12:00.000Z"),
+        makeMember("a-sozcu", sozcu, "2026-09-27T08:22:00.000Z"),
+        makeMember("a-agg", aggregator, "2026-09-27T06:00:00.000Z"),
+        makeMember("a-agg2", aggregator2, "2026-09-27T06:01:00.000Z"),
+        makeMember("a-agg3", aggregator3, "2026-09-27T06:02:00.000Z"),
+      ]),
+    );
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    expect(hasElementOfType(tree, StoryTimeline)).toBe(false);
     expect(getMemberSeenAt).not.toHaveBeenCalled();
     expect(getZoneFeedHealth).not.toHaveBeenCalled();
   });

@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
 // Relative path on purpose: the config loader cannot resolve the '@/' alias.
 import { HTML_LIMITED_BOTS } from "./src/lib/seo/html-limited-bots";
+import { buildSecurityHeaders } from "./src/lib/security/headers";
 
 /**
  * W4-Q7 Next.js 16 config review (2026-04-06)
@@ -113,57 +114,11 @@ const nextConfig: NextConfig = {
       ignore: [/^\/_next\//, /\/__nextjs_/],
     },
   },
+  // Frame policy split: everything is SAMEORIGIN-only except the script-less
+  // /embed/ widget. All header literals live in src/lib/security/headers.ts
+  // (guarded by tests/guards/frame-headers.test.ts).
   async headers() {
-    // Dev HMR needs eval; drop it in production since Vercel Web Analytics
-    // loads same-origin from /_vercel/insights/script.js (no host to add).
-    const scriptSrc =
-      process.env.NODE_ENV === "production"
-        ? "script-src 'self' 'unsafe-inline'"
-        : "script-src 'self' 'unsafe-inline' 'unsafe-eval'";
-    // connect-src allows local Supabase (54321) only outside production —
-    // that origin is dev-only (`supabase start`) and has no reason to be
-    // in the production CSP.
-    const connectSrc =
-      process.env.NODE_ENV === "production"
-        ? "connect-src 'self' https: ws: wss:"
-        : "connect-src 'self' https: http://127.0.0.1:54321 ws: wss:";
-    return [
-      {
-        source: "/(.*)",
-        headers: [
-          {
-            key: "Content-Security-Policy",
-            value: [
-              "default-src 'self'",
-              scriptSrc,
-              "style-src 'self' 'unsafe-inline'",
-              // Permissive img-src: Tayf renders favicons via Google S2 plus cover
-              // images from ~144 Turkish news CDNs (see images.remotePatterns note).
-              "img-src 'self' data: blob: https:",
-              "font-src 'self' data:",
-              // connect-src allows arbitrary https/ws for RSS-driven previews and
-              // dev HMR sockets; local Supabase (54321) is added only outside
-              // production (see `connectSrc` above).
-              connectSrc,
-              "frame-ancestors 'self'",
-              "base-uri 'self'",
-              "form-action 'self'",
-            ].join("; "),
-          },
-          {
-            key: "Strict-Transport-Security",
-            value: "max-age=31536000; includeSubDomains",
-          },
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "X-Frame-Options", value: "SAMEORIGIN" },
-          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-          {
-            key: "Permissions-Policy",
-            value: "camera=(), microphone=(), geolocation=()",
-          },
-        ],
-      },
-    ];
+    return buildSecurityHeaders(process.env.NODE_ENV);
   },
 };
 
