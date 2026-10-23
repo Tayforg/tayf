@@ -158,11 +158,35 @@ Per-cluster errors in the success envelope are coarse-tagged (`"rewriteClusterHe
 
 Newsletter email signup.
 
-**Rate limit**: 5-token bucket, 1 token/30s refill.
+**Rate limit**: 5-token bucket, 1 token/30s refill. A refused request is `429` with the canonical envelope (`details.retryAfterMs`), `Retry-After` (whole seconds, >= 1) and `Cache-Control: no-store`.
 
 **Body**: `{ "email": "user@example.com" }`
 
 **Response**: `{ "success": true }` (also returns success for duplicates to avoid email enumeration)
+
+---
+
+### `GET /api/newsletter/confirm?token=<uuid>`
+
+The double-opt-in link in the confirmation e-mail. **It never writes.** Mail scanners and link prefetchers follow every GET link in a message, and the old GET that confirmed on sight let any of them subscribe a reader who never clicked.
+
+- `200` `text/html`: a same-origin page ("Tayf bültenine aboneliğini onaylıyor musun?") with a `<form method="post" action="/api/newsletter/confirm">` carrying the token in a hidden field. Headers: `Cache-Control: no-store`, `X-Robots-Tag: noindex`, `Referrer-Policy: no-referrer`.
+- `302` to `/?bulten=gecersiz`: the token is missing or is not a UUID.
+- No database call on either path.
+
+### `POST /api/newsletter/confirm`
+
+What the page's form submits. The token is read from the urlencoded form body (`token=`), falling back to the `?token=` query string; it must be a UUID. Never logged.
+
+**Rate limit**: 10-token bucket, 1 token / 6 s refill, per client IP (the 11th rapid POST is `429`, with `Retry-After` and `Cache-Control: no-store`).
+
+The update is `set confirmed_at = now() where confirm_token = $1 and confirmed_at is null`, so re-submitting the form (or following the e-mail link twice) never moves an existing `confirmed_at`. When it matches nothing, one plain select tells an already-confirmed address from an unknown token.
+
+**Response** (always a `303` redirect back to the site): `/?bulten=onaylandi` when the address is confirmed (now, or already), `/?bulten=gecersiz` for an unknown token, a malformed or absent token, or a database error.
+
+### `GET /api/newsletter/unsubscribe?token=<uuid>` and `POST`
+
+The same two-step shape: GET renders the "Tayf bülteninden ayrılmak istiyor musun?" page (no database call, `302 /?bulten=gecersiz` for a bad token); POST deletes the row and redirects `303` to `/?bulten=ayrildi` (or `gecersiz`). An RFC 8058 one-click POST (`List-Unsubscribe=One-Click`, token in the query string) answers `200 {"success": true}` instead. **Rate limit**: 10-token bucket, 1 token / 6 s, `429` as above.
 
 ---
 
@@ -185,6 +209,20 @@ Reader-submitted correction or objection, from the `/metodoloji#duzeltme` form.
 **Response** `429`: rate limit exhausted.
 
 Rows are inserted into `public.corrections` (service-role only, no PostgREST access for anon/authenticated) and reviewed in `/admin`.
+
+---
+
+### `GET /api/oyun/cerceve/next` and `POST /api/oyun/cerceve`
+
+The Çerçeve ("Framing") game: one political headline at a time, outlet hidden, an anonymous crowd vote.
+
+**Session cookie**: `tayf_cerceve_sid` (HttpOnly, SameSite=Lax, 30 days) is `<32-hex id>.<base64url HMAC-SHA256 signature>`. The server signs the id; a vote is **counted only when the signature verifies**, so a client cannot choose its own session id (and with it a fresh `unique (article_id, session_hash)` slot per vote). Only `sha256("tayf-cerceve:" + id)` reaches the database; the id and the signature never do.
+
+- Key: `FRAMING_SESSION_SECRET` (>= 16 characters, optional) if set, otherwise derived from `ADMIN_SESSION_SECRET` as `HMAC-SHA256(ADMIN_SESSION_SECRET, "tayf-cerceve-v1")`. No new required variable. Rotating either secret invalidates every issued cookie.
+- With no usable secret nothing verifies: `GET .../next` still draws, `POST` answers `{ "ok": false, ... }` and never records, and one `[oyun/cerceve] session signing unavailable` warning is logged per process.
+- An absent, unsigned (the pre-signing format), tampered or foreign-signed cookie is replaced by a freshly minted signed one; that request's vote is not counted (`ok: false`) and the next one is.
+
+**Rate limits** (`429` with `Retry-After` and `Cache-Control: no-store`): `GET .../next` 60-token bucket, 0.5 token/s; `POST` 30-token bucket, 0.5 token/s.
 
 ---
 
@@ -302,6 +340,18 @@ per-minute ceiling is a per-replica figure, not a hard global cap. The
 on every accepted call) and holds across replicas — it is the only number
 callers should treat as a hard global ceiling.
 
+**A refused per-minute request costs no daily quota.** The daily counter is
+incremented by the `api_key_touch` database call, so the per-minute bucket
+(keyed by the key's sha256, never by IP) is charged *before* that call for any
+key this instance has already seen: a `429 key_minute` makes no database round
+trip and leaves the day's count untouched. The instance remembers a key's tier
+in a process-local memo (at most 5,000 keys, oldest evicted; only keys the
+database vouched for are stored, so made-up keys cannot grow it). The first
+request for a key the instance has not seen is touched first, because the tier
+is only known once the database answers, and charged right after. A key whose
+tier changed is charged to its new tier's bucket after the touch; a key the
+database reports unknown or revoked is dropped from the memo.
+
 Two **per-source-IP** limiters sit in front of the per-key ones (same
 process-local caveat). Which one applies depends on what the caller
 presents:
@@ -345,7 +395,7 @@ non-2xx):
   | `code` | `error` | Meaning |
   |---|---|---|
   | `ip_floor` | `Too many requests` | per-source-IP limiter (anonymous 30 / 60 per min, or keyed-IP 120 / 600 per min) |
-  | `key_minute` | `Too many requests` | the key's per-minute bucket (tier-specific) |
+  | `key_minute` | `Too many requests` | the key's per-minute bucket (tier-specific); refused before the database, so it costs no daily quota |
   | `key_day` | `Daily limit exceeded` | the key's durable daily cap; `retryAfterMs` is milliseconds until the next UTC midnight |
 
   `X-Tayf-Tier` is present on `key_minute` / `key_day` (the key was resolved)
@@ -383,7 +433,9 @@ endpoint's own payload keys.
 ### `GET /api/v1/clusters`
 
 **Query params**: `since` (ISO 8601 timestamp, default 24h ago, clamped to
-at most 7 days ago), `limit` (integer 1–100, default 50).
+at most 7 days ago), `limit` (integer 1–100, default 50), `before` (optional
+pagination cursor: the `next_cursor` of the previous response, sent unchanged;
+see *Paging* below).
 
 **Response** `200`:
 ```json
@@ -394,6 +446,7 @@ at most 7 days ago), `limit` (integer 1–100, default 50).
   "generated_at": "2026-09-21T12:00:00.000Z",
   "since": "2026-09-20T12:00:00.000Z",
   "count": 12,
+  "next_cursor": "eyJ1IjoiMjAyNi0wOS0yMFQxMTozMDowMC4xMjM0NTYrMDA6MDAiLCJpIjoiYzExMTExMTEtMTExMS0xMTExLTExMTEtMTExMTExMTExMTExIn0",
   "clusters": [
     {
       "id": "...",
@@ -422,8 +475,19 @@ cluster. The column is probed once per server process; if the probe ever
 fails (e.g. the column is absent on a preview deploy) the field degrades to
 `null` for the remaining lifetime of that process rather than erroring.
 
+**Paging** (keyset): clusters are ordered `updated_at` descending, then `id`
+descending. `next_cursor` is always present: send it back as `?before=` (with
+the same `since` and `limit`) to get the clusters strictly after the last one
+of this page, with no overlap even when several clusters share an `updated_at`.
+Each page is filtered from at most 300 candidates (`limit` × 3, capped at 300),
+so a page can hold **fewer than `limit`** clusters and still carry a
+`next_cursor`: keep following it until `next_cursor` is `null`, which means the
+list is finished. The cursor is opaque (base64url, at most 200 characters) and
+carries the last row's `updated_at` verbatim, microseconds included.
+
 **Response** `400`: invalid `since` (not ISO 8601) or `limit` (outside
-1–100).
+1–100), or a `before` that is not a cursor this API issued (`{"error":
+"Invalid cursor"}`). A blank `before=` is treated as absent.
 
 ---
 

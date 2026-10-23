@@ -1,12 +1,13 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
+import { apiServerError, apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
+import { INTERSTITIAL_HEADERS, interstitialPage } from "@/lib/newsletter/interstitial";
 import { siteUrl } from "@/lib/site-url";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 // Tokens are minted via crypto.randomUUID() (see POST /api/newsletter), so a
 // canonical UUID shape is a cheap, sufficient validity check before it ever
-// reaches a query or gets echoed into the confirm page's HTML.
+// reaches a query or gets echoed into the interstitial's HTML.
 const TOKEN_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -19,36 +20,15 @@ const newsletterUnsubscribeLimit = createRateLimiter("newsletter-unsubscribe", {
   refillPerSecond: 1 / 6,
 });
 
-const HTML_ESCAPES: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-};
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c] as string);
-}
-
 function confirmPageHtml(token: string): string {
-  const escapedToken = escapeHtml(token);
-  const home = `${siteUrl()}/`;
-  return (
-    `<!doctype html><html lang="tr"><head>` +
-    `<meta charset="utf-8">` +
-    `<meta name="robots" content="noindex">` +
-    `<title>Bültenden ayrıl — Tayf</title>` +
-    `</head><body style="font-family:sans-serif;color:#111;max-width:480px;margin:0 auto;padding:24px">` +
-    `<h1>Tayf bülteninden ayrılmak istiyor musun?</h1>` +
-    `<p>Onayladığında haftalık bülteni bu adrese bir daha göndermeyiz.</p>` +
-    `<form method="post" action="/api/newsletter/unsubscribe">` +
-    `<input type="hidden" name="token" value="${escapedToken}">` +
-    `<button type="submit">Evet, bültenden ayrıl</button>` +
-    `</form>` +
-    `<p><a href="${home}">Vazgeç, Tayf'a dön</a></p>` +
-    `</body></html>`
-  );
+  return interstitialPage({
+    title: "Bültenden ayrıl — Tayf",
+    heading: "Tayf bülteninden ayrılmak istiyor musun?",
+    body: "Onayladığında haftalık bülteni bu adrese bir daha göndermeyiz.",
+    action: "/api/newsletter/unsubscribe",
+    token,
+    submitLabel: "Evet, bültenden ayrıl",
+  });
 }
 
 /**
@@ -73,12 +53,7 @@ export const GET = withApiErrors(async (request: Request) => {
 
   return new NextResponse(confirmPageHtml(token), {
     status: 200,
-    headers: {
-      "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": "no-store",
-      "X-Robots-Tag": "noindex",
-      "Referrer-Policy": "no-referrer",
-    },
+    headers: INTERSTITIAL_HEADERS,
   });
 });
 
@@ -125,9 +100,7 @@ async function readUnsubscribePost(
 export const POST = withApiErrors(async (request: Request) => {
   const rl = newsletterUnsubscribeLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   const { token, oneClick } = await readUnsubscribePost(request);

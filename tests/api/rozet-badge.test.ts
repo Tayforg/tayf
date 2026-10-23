@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// The route must use the THROWING reader: the never-throw `getClusterDetail`
+// maps a sustained outage to null, which the badge would then serve as a
+// cacheable 404. Only `getClusterDetailOrThrow` is mocked, so an import of the
+// never-throw variant fails loudly here.
 // A throwing vi.fn is reported by vitest as a test failure even when the SUT
 // catches it, so the throw lives in a plain wrapper around the spy.
 const { getClusterDetailMock, control } = vi.hoisted(() => ({
@@ -7,7 +11,7 @@ const { getClusterDetailMock, control } = vi.hoisted(() => ({
   control: { throwNext: false },
 }));
 vi.mock("@/lib/clusters/cluster-detail-query", () => ({
-  getClusterDetail: async (id: string) => {
+  getClusterDetailOrThrow: async (id: string) => {
     if (control.throwNext) throw new Error("db");
     return getClusterDetailMock(id);
   },
@@ -38,11 +42,30 @@ describe("GET /rozet/[file]", () => {
     expect(res.headers.get("cache-control")).toBe("public, s-maxage=300");
   });
 
-  it("503s no-store when the query throws", async () => {
+  it("503s no-store with Retry-After 60 when the reader throws (outage is not 'not found')", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     control.throwNext = true;
-    const res = await call(`${ID}.svg`);
-    expect(res.status).toBe(503);
-    expect(res.headers.get("cache-control")).toBe("no-store");
+    try {
+      const res = await call(`${ID}.svg`);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("retry-after")).toBe("60");
+      expect(await res.text()).toBe("Service unavailable");
+      expect(errSpy).toHaveBeenCalledWith(`[rozet] ${ID} failed: db`);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("never caches the failure: the 503 carries no public/s-maxage directive", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    control.throwNext = true;
+    try {
+      const res = await call(`${ID}.svg`);
+      expect(res.headers.get("cache-control")).not.toMatch(/public|s-maxage/);
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 
   it("200s with the exact headers and an SVG body", async () => {

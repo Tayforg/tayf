@@ -20,7 +20,7 @@ import {
   apiNotFound,
   apiServerError,
   apiUnauthorized,
-  apiError,
+  apiTooManyRequests,
   withApiErrors,
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
@@ -47,9 +47,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = jevAdmissionReviewLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

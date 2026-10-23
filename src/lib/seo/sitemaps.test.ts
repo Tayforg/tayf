@@ -71,6 +71,7 @@ import {
   NEWS_LIMIT,
 } from "./sitemaps";
 import { cacheLife } from "next/cache";
+import { escapeXml as rssBuilderEscapeXml } from "@/lib/feeds/rss-builder";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -111,6 +112,20 @@ describe("escapeXml", () => {
 
   it("keeps tab, newline and carriage return (legal XML whitespace)", () => {
     expect(escapeXml("a\tb\nc\rd")).toBe("a\tb\nc\rd");
+  });
+
+  it("strips the BMP non-characters U+FFFE and U+FFFF", () => {
+    expect(escapeXml("x￾y￿z")).toBe("xyz");
+  });
+
+  it("strips lone surrogates but keeps a valid pair (emoji)", () => {
+    expect(escapeXml("a\uD800b")).toBe("ab"); // lone high
+    expect(escapeXml("a\uDC00b")).toBe("ab"); // lone low
+    expect(escapeXml("a😀b")).toBe("a😀b");
+  });
+
+  it("is the shared RSS-builder escaper, not a second copy", () => {
+    expect(escapeXml).toBe(rssBuilderEscapeXml);
   });
 });
 

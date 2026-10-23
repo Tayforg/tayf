@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildRssXml,
   escapeXml,
+  rssUnavailableResponse,
   stripInvalidXmlChars,
   withUtm,
 } from "./rss-builder";
@@ -179,5 +180,20 @@ describe("buildRssXml well-formedness", () => {
     });
     expect(ILLEGAL_XML_RE.test(xml)).toBe(false);
     expect(xml).toContain("<title>AB başlık </title>");
+  });
+});
+
+describe("rssUnavailableResponse", () => {
+  it("is a plain-text 503 that tells crawlers to retry in 5 minutes and is never cached", async () => {
+    const res = rssUnavailableResponse();
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("300");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Content-Type")).toBe("text/plain; charset=utf-8");
+    expect(await res.text()).toBe("Service unavailable");
+  });
+
+  it("returns a fresh Response each call (a body can only be read once)", () => {
+    expect(rssUnavailableResponse()).not.toBe(rssUnavailableResponse());
   });
 });

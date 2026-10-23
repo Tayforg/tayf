@@ -19,7 +19,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import {
   apiBadRequest,
-  apiError,
+  apiTooManyRequests,
   apiNotFound,
   apiServerError,
   apiUnauthorized,
@@ -47,9 +47,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = jevGoldLabelLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

@@ -9,6 +9,7 @@ import {
   isOptimizableImageUrl,
   normalizeImageUrl,
 } from "@/lib/images/image-url";
+import { isAllowedRemoteImageUrl } from "@/lib/images/remote-image-hosts";
 
 // Client child of ClusterCard used to render the cluster hero image.
 //
@@ -82,8 +83,14 @@ import {
 //   keeps the image.
 //
 // Optimization:
-//   `next.config.ts` declares a wildcard `images.remotePatterns` so
-//   the built-in Next.js optimizer handles every RSS image host.
+//   `next.config.ts` lists the hosts the built-in Next.js optimizer may fetch
+//   from (`images.remotePatterns` = IMAGE_REMOTE_PATTERNS, https-only and
+//   generated from the hosts articles really use; there is no wildcard, api-1).
+//   A candidate on an unlisted host is dropped here with the same predicate
+//   (`isAllowedRemoteImageUrl`): the optimizer would answer 400, and next/image
+//   throws in dev for an unlisted host, so `onError` alone is not enough. The
+//   chain then continues exactly as for an errored image: next candidate, logo
+//   tier, placeholder.
 
 interface ClusterCardImageProps {
   /** Primary remote image URL. `null`/`undefined` triggers the placeholder. */
@@ -266,11 +273,17 @@ export function ClusterCardImage({
   // placeholder GIFs are 22 MB and /_next/image passes them through
   // unmodified. The query boundaries already null them; this is defence in
   // depth for any caller that builds the candidate list some other way.
+  //
+  // api-1: so is any URL /_next/image is not configured to fetch (plain http
+  // or a host that is not on the generated allowlist), see "Optimization".
   const candidates = Array.from(
     new Set(
       [src, ...(srcs ?? [])]
         .map(normalizeImageUrl)
-        .filter((s): s is string => s !== null && isOptimizableImageUrl(s)),
+        .filter(
+          (s): s is string =>
+            s !== null && isOptimizableImageUrl(s) && isAllowedRemoteImageUrl(s),
+        ),
     ),
   );
 

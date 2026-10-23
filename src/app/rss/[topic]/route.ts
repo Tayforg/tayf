@@ -8,7 +8,12 @@ import {
 } from "@/lib/clusters/topic-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import { blindspotsFeedResponse } from "@/lib/feeds/blindspots-feed";
-import { buildRssXml, withUtm, type RssItemInput } from "@/lib/feeds/rss-builder";
+import {
+  buildRssXml,
+  rssUnavailableResponse,
+  withUtm,
+  type RssItemInput,
+} from "@/lib/feeds/rss-builder";
 import { formatZoneLine, votingZoneCounts } from "@/lib/feeds/zone-line";
 import { siteUrl } from "@/lib/site-url";
 
@@ -17,9 +22,6 @@ import { siteUrl } from "@/lib/site-url";
 // (no generateStaticParams): the underlying reads can transiently return
 // null/throw, and baking a 503 into the build would be worse than paying a
 // per-request round trip for a low-traffic feed endpoint.
-//
-// Do NOT modify src/app/rss.xml/route.ts — this is a separate, additive
-// surface (see the pack's "do not touch" list).
 
 const SLUG_PATTERN = /^([a-z-]+)\.xml$/;
 const MAX_ITEMS = 30;
@@ -38,17 +40,6 @@ function notFoundResponse(): Response {
   return new Response("Not found", {
     status: 404,
     headers: { "Content-Type": "text/plain; charset=utf-8" },
-  });
-}
-
-function unavailableResponse(): Response {
-  return new Response("Service unavailable", {
-    status: 503,
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Retry-After": "300",
-      "Cache-Control": "no-store",
-    },
   });
 }
 
@@ -104,7 +95,7 @@ export async function GET(
   const base = siteUrl();
   const topicSlug = slug as TopicSlug;
   const result = await getTopicClusters(topicSlug, 1);
-  if (result === null) return unavailableResponse();
+  if (result === null) return rssUnavailableResponse();
 
   const label = TOPIC_LABELS_TR[topicSlug];
   const items = result.bundles

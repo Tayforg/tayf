@@ -14,12 +14,15 @@
 //  - `firstPartyLogoUrl` routes Google S2 favicons through our own image
 //    optimizer.
 //  - `optimizedThumbUrl` / `optimizedThumbSrcSet` (perf-2) do the same for
-//    article thumbnails that are rendered with a plain `<img>`.
+//    article thumbnails that are rendered with a plain `<img>`. A host that is
+//    not on the generated /_next/image allowlist (api-1) yields null: the
+//    optimizer would answer 400, so the caller shows its neutral block.
 import {
   isOptimizableImageUrl,
   isPlaceholderImageUrl,
   normalizeImageUrl,
 } from "../../../supabase/functions/_shared/image-url";
+import { isAllowedRemoteImageUrl } from "./remote-image-hosts";
 
 export { isOptimizableImageUrl, isPlaceholderImageUrl, normalizeImageUrl };
 
@@ -33,9 +36,11 @@ const DEFAULT_LOGO_WIDTH = 64;
  * (`https://www.google.com/s2/favicons?domain=...&sz=64`). Rendered raw, every
  * visitor's browser hits google.com for ~44 logos on the home page. Routing
  * them through `/_next/image` makes them first-party: fetched once by the
- * optimizer (the 301 to gstatic is within `maximumRedirects`' default of 3),
- * then served from our cache at the requested size. The remotePatterns
- * wildcard in next.config already allows google.com, so no config change.
+ * optimizer (the 301 to gstatic is within `maximumRedirects`' default of 3 and
+ * redirect targets are not re-checked, so gstatic needs no entry), then served
+ * from our cache at the requested size. next.config has no wildcard any more:
+ * remote-image-hosts.ts lists exactly `www.google.com` and `google.com` with
+ * the `/s2/favicons` pathname, which is the only shape rewritten here.
  *
  * Only an exact google.com / www.google.com host with the exact
  * `/s2/favicons` path is rewritten -- `google.com.evil.tld` and other google
@@ -74,8 +79,9 @@ const THUMB_QUALITY = 75;
 /**
  * `/_next/image` URL for an article thumbnail at one optimizer width, or null
  * when the image must not be rendered: `width` is not in OPTIMIZER_IMAGE_SIZES,
- * or the URL is unusable (not absolute http(s)), an animated GIF, or a
- * publisher placeholder.
+ * or the URL is unusable (not absolute http(s)), an animated GIF, a publisher
+ * placeholder, or on a host the optimizer is not configured to fetch from
+ * (anything but an https URL on the generated allowlist, api-1).
  *
  * The string is exactly what `next/image`'s default loader builds
  * (`url=<encoded src>&w=<width>&q=75`), so a plain `<img>` using it shares the
@@ -90,6 +96,7 @@ export function optimizedThumbUrl(
   const normalized = normalizeImageUrl(u);
   if (normalized === null) return null;
   if (!isOptimizableImageUrl(normalized) || isPlaceholderImageUrl(normalized)) return null;
+  if (!isAllowedRemoteImageUrl(normalized)) return null;
   return `/_next/image?url=${encodeURIComponent(normalized)}&w=${width}&q=${THUMB_QUALITY}`;
 }
 

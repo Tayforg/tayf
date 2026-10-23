@@ -456,7 +456,10 @@ describe("GET /api/takip -- rate limit", () => {
     const retryAfter = Number(res.headers.get("retry-after"));
     expect(Number.isInteger(retryAfter)).toBe(true);
     expect(retryAfter).toBeGreaterThanOrEqual(1);
-    expect(await res.json()).toEqual({ error: "Çok fazla istek" });
+    expect(await res.json()).toEqual({
+      error: "Çok fazla istek",
+      details: { retryAfterMs: expect.any(Number) },
+    });
     expect(searchClustersMock).toHaveBeenCalledTimes(40);
   });
 

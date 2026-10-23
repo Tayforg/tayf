@@ -228,6 +228,8 @@ describe("POST /api/oyun", () => {
     }
     const res = await mod.POST(makeRequest(VALID_CORRECT_GUESS, ip));
     expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
     expect(res.headers.get("set-cookie")).toBeNull();
     const body = await res.json();
     expect(typeof body.details.retryAfterMs).toBe("number");

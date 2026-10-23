@@ -171,6 +171,46 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     expect(V1_CANDIDATE_CAP).toBe(300);
   });
 
+  it("documents the clusters keyset paging: the before param, next_cursor and the 300-candidate note", () => {
+    const get = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters");
+    expect(get).toBeDefined();
+
+    const before = get?.params.find((p) => p.name === "before");
+    expect(before).toMatchObject({ in: "query", required: false, schema: { type: "string" } });
+    expect(before?.descriptionTr).toContain("next_cursor");
+    expect(before?.descriptionEn).toContain("next_cursor");
+    expect(get?.params.map((p) => p.name)).toEqual(["since", "limit", "before"]);
+
+    const notes = get?.notesTr ?? [];
+    expect(notes).toContain(
+      "Her sayfa en çok 300 aday arasından süzülür, bu yüzden bir sayfa limit'ten az küme içerebilir. Devamı için yanıttaki next_cursor değerini before parametresiyle gönderin; next_cursor null ise liste bitmiştir.",
+    );
+    // The pre-paging sentence promised nothing about getting the rest.
+    expect(notes.join(" ")).not.toContain("en yeni en çok 300 aday");
+
+    // OpenAPI: the parameter is emitted and the envelope field is required + nullable.
+    const parameters = doc.paths["/api/v1/clusters"]?.get?.parameters ?? [];
+    expect(parameters.map((p) => p.name)).toEqual(["since", "limit", "before"]);
+    const list = doc.components.schemas.ClusterListResponse as {
+      allOf: Array<{ required?: string[]; properties?: Record<string, { type?: unknown }> }>;
+    };
+    const body = list.allOf.find((part) => part.required);
+    expect(body?.required).toContain("next_cursor");
+    expect(body?.properties?.next_cursor?.type).toEqual(["string", "null"]);
+  });
+
+  it("every documented query param of GET /api/v1/clusters is read by the route", () => {
+    const source = readFileSync(path.join(V1_ROOT, "clusters/route.ts"), "utf8");
+    const get = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters");
+    for (const param of get?.params ?? []) {
+      expect(source, `route never reads ?${param.name}`).toContain(
+        `searchParams.get("${param.name}")`,
+      );
+    }
+    // And the envelope the docs promise is the one the route emits.
+    expect(source).toContain("next_cursor");
+  });
+
   it("documents limit with min 1, max V1_MAX_LIMIT and default V1_DEFAULT_LIMIT", () => {
     const clustersGet = V1_ENDPOINTS.find(
       (e) => e.method === "GET" && e.path === "/api/v1/clusters",

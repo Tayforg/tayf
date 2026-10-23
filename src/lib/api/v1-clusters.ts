@@ -127,6 +127,99 @@ export function parseLimit(raw: string | null): number | { error: string } {
   return n;
 }
 
+// ---------------------------------------------------------------------------
+// Keyset cursor for GET /api/v1/clusters?before=
+//
+// The list is ordered (updated_at desc, id desc); a cursor names the last row
+// a page ended on and the next page is everything strictly after it:
+//   updated_at < u  OR  (updated_at = u AND id < i).
+// `u` is the row's updated_at EXACTLY as PostgREST rendered it (microseconds
+// intact). Re-deriving it through a JS Date would truncate to milliseconds and
+// make the equality branch miss or repeat rows whose timestamps differ only in
+// the last three digits. The cursor is opaque base64url JSON, not signed: it
+// carries nothing a caller could not already send as `since`, and both fields
+// are validated to a closed shape before they are interpolated into the
+// PostgREST filter, so a crafted cursor cannot inject filter syntax.
+// ---------------------------------------------------------------------------
+
+export interface V1Cursor {
+  /** The last row's updated_at, verbatim (e.g. 2026-10-20T10:00:00.123456+00:00). */
+  u: string;
+  /** The last row's id (a UUID). */
+  i: string;
+}
+
+const CURSOR_MAX_LENGTH = 200;
+const CURSOR_ALPHABET_RE = /^[A-Za-z0-9_-]+$/;
+const CURSOR_TIMESTAMP_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,6})?(Z|[+-](\d{2}):(\d{2}))$/;
+const CURSOR_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64UrlToText(value: string): string | null {
+  if (!CURSOR_ALPHABET_RE.test(value)) return null;
+  try {
+    const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/"));
+    const bytes = new Uint8Array(binary.length);
+    for (let k = 0; k < binary.length; k++) bytes[k] = binary.charCodeAt(k);
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+export function encodeV1Cursor(cursor: V1Cursor): string {
+  return bytesToBase64Url(
+    new TextEncoder().encode(JSON.stringify({ u: cursor.u, i: cursor.i })),
+  );
+}
+
+function isValidCursorTimestamp(value: string): boolean {
+  const m = CURSOR_TIMESTAMP_RE.exec(value);
+  if (!m) return false;
+  const [year, month, day, hour, minute, second] = [m[1], m[2], m[3], m[4], m[5], m[6]].map(
+    Number,
+  ) as [number, number, number, number, number, number];
+  // Date.parse alone lets an impossible calendar day through in some engines
+  // (and Postgres would reject it with a 500 further down), so check it here.
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth) return false;
+  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (m[9] !== undefined && (Number(m[9]) > 15 || Number(m[10]) > 59)) return false;
+  return Number.isFinite(Date.parse(value));
+}
+
+/**
+ * The cursor encoded in a `?before=` value, or `null` when it is anything
+ * other than a cursor this API produced (not base64url, longer than 200
+ * characters, not a JSON object, a malformed or impossible timestamp, or an
+ * id that is not a UUID).
+ */
+export function decodeV1Cursor(raw: string): V1Cursor | null {
+  if (raw.length === 0 || raw.length > CURSOR_MAX_LENGTH) return null;
+  const text = base64UrlToText(raw);
+  if (text === null) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+
+  const { u, i } = parsed as Record<string, unknown>;
+  if (typeof u !== "string" || typeof i !== "string") return null;
+  if (!isValidCursorTimestamp(u) || !CURSOR_UUID_RE.test(i)) return null;
+  return { u, i };
+}
+
 export function isPoliticsMajority(row: V1ClusterRow): boolean {
   const members = (row.cluster_articles ?? [])
     .map((ca) => ca.articles)

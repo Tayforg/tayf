@@ -13,7 +13,7 @@
  */
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { apiError, apiServerError, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
+import { apiTooManyRequests, apiServerError, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 
@@ -31,9 +31,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = jevGoldSeedLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   // Body is optional and ignored — swallow a malformed one rather than

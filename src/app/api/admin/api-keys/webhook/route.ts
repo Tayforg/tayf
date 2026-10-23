@@ -5,7 +5,7 @@ import { generateWebhookSecret } from "@/lib/alerts/webhook-sign";
 import { hasAdminSession } from "@/lib/admin/session";
 import {
   apiBadRequest,
-  apiError,
+  apiTooManyRequests,
   apiNotFound,
   apiServerError,
   apiUnauthorized,
@@ -54,7 +54,7 @@ async function gate(request: Request): Promise<Response | null> {
   if (!(await hasAdminSession())) return apiUnauthorized();
   const rl = adminApiKeysLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", { details: { retryAfterMs: rl.retryAfterMs } });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
   return null;
 }

@@ -42,6 +42,21 @@ describe("/gelistirici page", () => {
     );
   });
 
+  it("documents the clusters before cursor and the 300-candidate paging note", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    const clusters = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters");
+    const before = clusters?.params.find((p) => p.name === "before");
+    expect(before).toBeDefined();
+    // The params table shows the name and the Turkish description.
+    expect(html).toContain(">before<");
+    expect(html).toContain("next_cursor");
+    expect(html).toContain(
+      "Her sayfa en çok 300 aday arasından süzülür, bu yüzden bir sayfa limit&#x27;ten az küme içerebilir. Devamı için yanıttaki next_cursor değerini before parametresiyle gönderin; next_cursor null ise liste bitmiştir.",
+    );
+    expect(html).not.toContain("en yeni en çok 300 aday");
+  });
+
   it("states the real per-IP limits: strict for keyless, generous for keyed, never the old 1800", async () => {
     delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
     const html = await renderPage();

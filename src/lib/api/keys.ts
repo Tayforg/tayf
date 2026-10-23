@@ -4,6 +4,7 @@ import {
   apiError,
   apiNotFound,
   apiServerError,
+  apiTooManyRequests,
   apiUnauthorized,
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
@@ -126,11 +127,11 @@ export function withApiV1Headers(res: Response, tier?: ApiTier): Response {
 type V1RateLimitCode = "ip_floor" | "key_minute" | "key_day";
 
 /**
- * 429 for every limiter under /api/v1. Same envelope as before
- * (`{error, details: {retryAfterMs}}`) plus a machine-readable `code` naming
- * WHICH limit tripped, and the standard `Retry-After` header in whole seconds
- * (never below 1, so a client that honours it cannot spin). `tier` is passed
- * only where the key was resolved (key_minute / key_day).
+ * 429 for every limiter under /api/v1: the shared `apiTooManyRequests` body
+ * (`{error, code, details: {retryAfterMs}}`, `Retry-After` in whole seconds and
+ * never below 1, so a client that honours it cannot spin), wrapped with the
+ * v1 CORS / cache-control contract. `code` names WHICH limit tripped. `tier`
+ * is passed only where the key was resolved (key_minute / key_day).
  */
 function v1TooManyRequests(
   retryAfterMs: number,
@@ -138,12 +139,7 @@ function v1TooManyRequests(
   tier?: ApiTier,
 ): Response {
   const message = code === "key_day" ? "Daily limit exceeded" : "Too many requests";
-  const res = withApiV1Headers(
-    apiError(429, message, { code, details: { retryAfterMs } }),
-    tier,
-  );
-  res.headers.set("Retry-After", String(Math.max(1, Math.ceil(retryAfterMs / 1000))));
-  return res;
+  return withApiV1Headers(apiTooManyRequests(retryAfterMs, { message, code }), tier);
 }
 
 /**
@@ -209,11 +205,13 @@ export const API_V1_KEYED_IP_LIMIT = {
 } as const;
 const keyedIpLimiter = createRateLimiter("api-v1-keyed-ip", API_V1_KEYED_IP_LIMIT);
 
-// Per-minute buckets, one per tier, keyed by `k${keyId}` (never by IP —
-// a partner key legitimately fans out across many client IPs). Capacity
-// equals the advertised per-minute ceiling; refill spreads that same
-// ceiling evenly across 60s so a key that spends its whole minute budget
-// immediately has to wait roughly a minute for the next token.
+// Per-minute buckets, one per tier, keyed by `h${sha256 of the key}` (never by
+// IP — a partner key legitimately fans out across many client IPs). The hash,
+// not the key id, because for a key this instance has already seen the bucket
+// is charged BEFORE the `api_key_touch` round trip, which is the call that
+// reveals the id. Capacity equals the advertised per-minute ceiling; refill
+// spreads that same ceiling evenly across 60s so a key that spends its whole
+// minute budget immediately has to wait roughly a minute for the next token.
 const minuteLimiterFree = createRateLimiter("api-v1-min-free", {
   capacity: API_TIER_LIMITS.free.perMinute,
   refillPerSecond: API_TIER_LIMITS.free.perMinute / 60,
@@ -222,6 +220,34 @@ const minuteLimiterPartner = createRateLimiter("api-v1-min-partner", {
   capacity: API_TIER_LIMITS.partner.perMinute,
   refillPerSecond: API_TIER_LIMITS.partner.perMinute / 60,
 });
+
+// Process-local memo of the tier `api_key_touch` last reported for a key hash,
+// so a repeat caller's per-minute bucket can be charged BEFORE the touch (a
+// refused request then costs neither a database round trip nor a unit of the
+// key's DAILY quota, which the touch increments as a side effect). Only keys
+// the database vouched for are ever stored: an unknown or revoked key is never
+// memoised, so a flood of made-up keys cannot grow it. Capped at
+// API_TIER_MEMO_CAP entries; the oldest insertion is evicted first (a plain
+// Map keeps insertion order). A wrong or missing entry is harmless: it only
+// decides WHEN the minute bucket is charged, never whether a key is valid.
+const API_TIER_MEMO_CAP = 5000;
+const tierMemo = new Map<string, ApiTier>();
+
+function memoiseTier(hash: string, tier: ApiTier): void {
+  // Re-inserting (a tier change) moves the entry to the newest position.
+  tierMemo.delete(hash);
+  while (tierMemo.size >= API_TIER_MEMO_CAP) {
+    const oldest = tierMemo.keys().next();
+    if (oldest.done) break;
+    tierMemo.delete(oldest.value);
+  }
+  tierMemo.set(hash, tier);
+}
+
+function minuteBucketFor(tier: ApiTier, hash: string): { allowed: boolean; retryAfterMs: number } {
+  const limiter = tier === "partner" ? minuteLimiterPartner : minuteLimiterFree;
+  return limiter(`h${hash}`);
+}
 
 function utcDayString(now: Date): string {
   return now.toISOString().slice(0, 10);
@@ -255,25 +281,31 @@ interface ApiKeyTouchRow {
  *      (`api-v1-keyed-ip`) BEFORE any database call. Denied -> 429
  *      `ip_floor`. This bounds a flood of made-up well-formed keys, which
  *      would otherwise each cost an `api_key_touch` round trip.
- *   4. Hash the presented key (sha256 hex) and call the `api_key_touch`
- *      RPC. This is a SINGLE round trip that ALSO durably increments
- *      today's `api_key_usage_daily.calls` row for a live, non-revoked
- *      key as a side effect (migration 069) — by the time step 5 below
- *      reads that counter, THIS call has already been counted.
+ *   4. Hash the presented key (sha256 hex). If this instance has seen the key
+ *      before (the tier memo), charge that tier's per-minute bucket
+ *      (`h${hash}`) BEFORE the database: denied -> 429 `key_minute` with that
+ *      tier and NO `api_key_touch` call, so a refused request costs the key no
+ *      daily quota. Then call the `api_key_touch` RPC: a SINGLE round trip that
+ *      ALSO durably increments today's `api_key_usage_daily.calls` row for a
+ *      live, non-revoked key as a side effect (migration 069) — by the time
+ *      step 5 reads that counter, THIS call has already been counted.
  *      Empty result (`api_key_touch` returns unknown OR revoked keys as an
- *      empty row set, indistinguishably): charge the strict anonymous bucket
- *      for this IP (denied -> 429 `ip_floor`, and the extra lookup is
- *      skipped), then ONE extra lookup, ONLY on this failure path, to tell
- *      the two apart for the caller:
+ *      empty row set, indistinguishably): drop any memo entry for the key,
+ *      charge the strict anonymous bucket for this IP (denied -> 429
+ *      `ip_floor`, and the extra lookup is skipped), then ONE extra lookup,
+ *      ONLY on this failure path, to tell the two apart for the caller:
  *      `.from('api_keys').select('id').eq('key_hash', h).not('revoked_at','is',null).maybeSingle()`.
  *      A row -> 403 (revoked). No row -> 401 `invalid_token` (never existed).
- *   5. A VALID key goes to the per-minute bucket, keyed by `k${keyId}`
- *      (tier-specific capacity; 429 `key_minute`), and then the durable
- *      per-day check against `api_key_usage_daily` for (key_id, UTC today)
- *      (429 `key_day`). Because step 4 already incremented the counter, the
- *      comparison is `calls > perDay` — the call that pushes the count one
- *      PAST the cap is the one that gets refused, not the call that reaches
- *      exactly the cap.
+ *   5. A VALID key: memoise the tier the touch reported. A key with no memo
+ *      entry (first sight on this instance, or evicted) is charged to its
+ *      tier's per-minute bucket now — the only post-touch charge, because the
+ *      tier was unknown until the touch answered; a key whose tier changed is
+ *      charged to the NEW tier's bucket (the pre-touch charge went to the old
+ *      one). Denied -> 429 `key_minute`. Then the durable per-day check
+ *      against `api_key_usage_daily` for (key_id, UTC today) (429 `key_day`).
+ *      Because step 4 already incremented the counter, the comparison is
+ *      `calls > perDay` — the call that pushes the count one PAST the cap is
+ *      the one that gets refused, not the call that reaches exactly the cap.
  *
  * The anonymous bucket is never charged for a valid key, so a partner sharing
  * an egress IP with noisy keyless traffic is not throttled by it.
@@ -300,6 +332,20 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
   }
 
   const hash = hashApiKey(presented);
+
+  // A key this instance has seen: charge its per-minute bucket before the
+  // touch, so a refused request never reaches the database or the daily count.
+  const memoTier = tierMemo.get(hash);
+  if (memoTier !== undefined) {
+    const preRl = minuteBucketFor(memoTier, hash);
+    if (!preRl.allowed) {
+      return {
+        ok: false,
+        response: v1TooManyRequests(preRl.retryAfterMs, "key_minute", memoTier),
+      };
+    }
+  }
+
   const supabase = createServerClient();
 
   const { data: touchData, error: touchError } = await supabase.rpc("api_key_touch", {
@@ -316,8 +362,10 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
       : [];
 
   if (touchRows.length === 0) {
-    // Unknown or revoked: this IP is presenting a credential that does not
-    // work, which is exactly what the strict anonymous bucket is for.
+    // Unknown or revoked: forget anything remembered about the key, and note
+    // that this IP is presenting a credential that does not work, which is
+    // exactly what the strict anonymous bucket is for.
+    tierMemo.delete(hash);
     const anonRl = anonLimiter(ip);
     if (!anonRl.allowed) {
       return { ok: false, response: v1TooManyRequests(anonRl.retryAfterMs, "ip_floor") };
@@ -341,13 +389,18 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
   const keyId = Number(touched.key_id);
   const tier: ApiTier = touched.tier === "partner" ? "partner" : "free";
 
-  const minuteLimiter = tier === "partner" ? minuteLimiterPartner : minuteLimiterFree;
-  const minuteRl = minuteLimiter(`k${keyId}`);
-  if (!minuteRl.allowed) {
-    return {
-      ok: false,
-      response: v1TooManyRequests(minuteRl.retryAfterMs, "key_minute", tier),
-    };
+  // Memo hit with the same tier: already charged before the touch. A miss
+  // (tier unknown until now) or a changed tier (the pre-touch charge hit the
+  // old tier's bucket) is remembered and charged to THIS tier's bucket here.
+  if (memoTier !== tier) {
+    memoiseTier(hash, tier);
+    const postRl = minuteBucketFor(tier, hash);
+    if (!postRl.allowed) {
+      return {
+        ok: false,
+        response: v1TooManyRequests(postRl.retryAfterMs, "key_minute", tier),
+      };
+    }
   }
 
   const now = new Date();

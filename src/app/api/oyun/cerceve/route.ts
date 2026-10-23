@@ -1,16 +1,20 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { apiBadRequest, apiError, apiServerError, withApiErrors } from "@/lib/api/errors";
+import {
+  apiBadRequest,
+  apiServerError,
+  apiTooManyRequests,
+  withApiErrors,
+} from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
   FRAMING_SESSION_COOKIE,
   FRAMING_SESSION_MAX_AGE_SECONDS,
   hashSessionId,
   isFramingVote,
-  newSessionId,
   normalizeTally,
-  readSessionCookie,
 } from "@/lib/game/framing";
+import { mintSignedSession, readSignedSessionCookie } from "@/lib/game/framing-session";
 
 /**
  * POST /api/oyun/cerceve — records one anonymous Çerçeve ("Framing") vote
@@ -37,9 +41,9 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Every response, success or error, always carries Cache-Control: no-store
-// (shared contract section 2). apiBadRequest/apiError/apiServerError don't
-// set it themselves (src/lib/api/errors.ts is shared by every other route,
-// out of this pack's file set), so every return in this handler is wrapped.
+// (shared contract section 2). apiBadRequest/apiServerError don't set it
+// themselves (src/lib/api/errors.ts is shared by every other route, out of
+// this pack's file set), so every return in this handler is wrapped.
 const noStore = (res: Response): Response => {
   res.headers.set("Cache-Control", "no-store");
   return res;
@@ -53,11 +57,7 @@ export const POST = withApiErrors(async (request: Request) => {
       retryAfterMs: rl.retryAfterMs,
       anonKey: key === "anon",
     });
-    return noStore(
-      apiError(429, "Too many requests", {
-        details: { retryAfterMs: rl.retryAfterMs },
-      }),
-    );
+    return noStore(apiTooManyRequests(rl.retryAfterMs));
   }
 
   let body: unknown;
@@ -82,23 +82,26 @@ export const POST = withApiErrors(async (request: Request) => {
   }
   const vote = b.vote;
 
-  // A request that never carries a pre-existing `tayf_cerceve_sid` cookie
-  // has no stable session identity yet — hashing a freshly minted id would
+  // A vote is COUNTED only when the request carries a `tayf_cerceve_sid`
+  // cookie this server SIGNED (framing-session.ts). A request without one
+  // has no trustworthy session identity: hashing a freshly minted id would
   // make `unique (article_id, session_hash)` a no-op (a fresh hash every
-  // time never collides), so a vote is COUNTED only when the cookie already
-  // existed. The legitimate client always calls GET .../cerceve/next first
-  // (framing-game.tsx's drawHeadline), which mints the cookie, so no real
-  // player loses a vote — only a cookie-less first hit is left uncounted,
-  // and the cookie minted below makes the NEXT request from that client
-  // count. `ok` reflects whether this specific request was recorded.
-  const existingRaw = readSessionCookie(request);
-  const raw = existingRaw ?? newSessionId();
-  const minted = existingRaw === null;
-  const sessionHash = await hashSessionId(raw);
+  // time never collides), and trusting a client-chosen id would let anyone
+  // pick a new hash per vote. So an absent, unsigned (legacy or forged),
+  // tampered or foreign-signed cookie is replaced by a freshly minted signed
+  // one and the vote is left uncounted. The legitimate client always calls
+  // GET .../cerceve/next first (framing-game.tsx's drawHeadline), which
+  // mints the cookie, so no real player loses a vote; the cookie minted
+  // below makes the NEXT request from that client count. `ok` reflects
+  // whether this specific request was recorded.
+  const verifiedId = await readSignedSessionCookie(request);
+  const fresh = verifiedId === null ? await mintSignedSession() : null;
+  const minted = fresh !== null;
 
   const supabase = createServerClient();
 
-  if (!minted) {
+  if (verifiedId !== null) {
+    const sessionHash = await hashSessionId(verifiedId);
     const { error: upsertError } = await supabase.from("framing_votes").upsert(
       { article_id: articleId, vote, session_hash: sessionHash },
       { onConflict: "article_id,session_hash", ignoreDuplicates: true },
@@ -130,8 +133,8 @@ export const POST = withApiErrors(async (request: Request) => {
     { status: 200, headers: { "Cache-Control": "no-store" } },
   );
 
-  if (minted) {
-    res.cookies.set(FRAMING_SESSION_COOKIE, raw, {
+  if (fresh !== null) {
+    res.cookies.set(FRAMING_SESSION_COOKIE, fresh.cookieValue, {
       httpOnly: true,
       sameSite: "lax",
       path: "/",

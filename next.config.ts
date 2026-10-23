@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
 // Relative path on purpose: the config loader cannot resolve the '@/' alias.
 import { HTML_LIMITED_BOTS } from "./src/lib/seo/html-limited-bots";
+import { IMAGE_REMOTE_PATTERNS } from "./src/lib/images/remote-image-hosts";
 import { buildSecurityHeaders } from "./src/lib/security/headers";
 
 /**
@@ -16,7 +17,7 @@ import { buildSecurityHeaders } from "./src/lib/security/headers";
  *   - 02-guides/upgrading/version-16.md             (defaults changes + deprecations list)
  *
  * Verified keys (all still valid in 16):
- *   - images.remotePatterns       (stable since 12.3; wildcard form intentional, see note below)
+ *   - images.remotePatterns       (stable since 12.3; a generated https-only allowlist, see note below)
  *   - images.minimumCacheTTL      (16 default is 14400s; we override to 86400s)
  *   - images.qualities            (16 default narrowed to [75]; we allow 50/75/90)
  *   - images.contentDispositionType (still supported; "inline" needed for direct /_next/image hits)
@@ -42,15 +43,29 @@ import { buildSecurityHeaders } from "./src/lib/security/headers";
  *
  * Tayf aggregates RSS feeds from 144 Turkish news outlets. Each outlet
  * serves cover images from its own CDN (i.sabah.com.tr, cdn.ahaber.com.tr,
- * iasbh.tmgrup.com.tr, static.daktilo.com, imgrosetta.mynet.com.tr, etc.),
- * producing hundreds of distinct hostnames — too many to whitelist by hand.
+ * iasbh.tmgrup.com.tr, static.daktilo.com, imgrosetta.mynet.com.tr, etc.), so
+ * the optimizer needs a host allowlist that tracks them.
  *
- * Trade-off: we use a wildcard `remotePatterns` so the Next.js image
- * optimizer will fetch ANY https/http URL. This is acceptable here because
- * image URLs only enter the pipeline through our RSS normalizer writing
- * `articles.image_url`, never from untrusted user input. We keep the
- * optimizer (automatic resizing, lazy loading, WebP conversion) instead of
- * falling back to `unoptimized: true`.
+ * Why the list is generated and not a catch-all: this file used to allow
+ * every https and http host, on the premise that image URLs only enter the
+ * pipeline through our RSS normalizer writing `articles.image_url`, never
+ * from untrusted input. That premise was false. /_next/image takes
+ * `?url=<anything>` from the request itself, so a catch-all made the endpoint
+ * an open proxy: anyone could make our origin fetch, resize and re-serve any
+ * image on the internet, over plain http too (api-1).
+ *
+ * `images.remotePatterns` is now IMAGE_REMOTE_PATTERNS: an https-only list
+ * generated from the hosts `articles.image_url` really uses
+ * (scripts/gen-image-hosts.mjs; the regeneration runbook is in its header, run
+ * it monthly and whenever a source is added), plus the Google S2 favicon path
+ * behind every source logo. An unlisted host never reaches the optimizer: the
+ * render boundaries filter with isAllowedRemoteImageUrl, so the image falls
+ * back to the next candidate, then the logo tier, then the placeholder. Next
+ * validates at most 50 patterns (fatal under `images`), so the generated hosts
+ * are packed into brace groups; see src/lib/images/remote-image-hosts.ts and
+ * tests/guards/image-remote-patterns.test.ts, which keeps a catch-all from
+ * coming back. We keep the optimizer (automatic resizing, lazy loading, WebP
+ * conversion) instead of falling back to `unoptimized: true`.
  */
 const nextConfig: NextConfig = {
   cacheComponents: true,
@@ -90,10 +105,7 @@ const nextConfig: NextConfig = {
     },
   },
   images: {
-    remotePatterns: [
-      { protocol: "https", hostname: "**" },
-      { protocol: "http", hostname: "**" },
-    ],
+    remotePatterns: IMAGE_REMOTE_PATTERNS,
     minimumCacheTTL: 86400,
     qualities: [50, 75, 90],
     contentDispositionType: "inline",

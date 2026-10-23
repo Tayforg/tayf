@@ -16,15 +16,58 @@ export interface ApiError {
   details?: Record<string, unknown>;
 }
 
-/** Build a consistent error response. */
+/**
+ * Build a consistent error response. `init.headers` is passed straight to
+ * `NextResponse.json` for the few errors that carry headers (`Retry-After`,
+ * `Cache-Control: no-store`); omit it and the response is unchanged.
+ */
 export function apiError(
   status: number,
   message: string,
-  opts: Omit<ApiError, "error"> = {}
+  opts: Omit<ApiError, "error"> = {},
+  init?: { headers?: HeadersInit }
 ) {
   return NextResponse.json<ApiError>(
     { error: message, ...opts },
-    { status }
+    init?.headers ? { status, headers: init.headers } : { status }
+  );
+}
+
+// A named constant, not a literal: tests/guards/rate-limit-429.test.ts bans
+// `apiError(429` everywhere in src/, and this file must not be the exception.
+const HTTP_TOO_MANY_REQUESTS = 429;
+
+/**
+ * 429 — the one shared rate-limit answer for every route that owns a
+ * `createRateLimiter` bucket (tests/guards/rate-limit-429.test.ts keeps it
+ * that way). Body is the canonical envelope with `details.retryAfterMs`
+ * (whole milliseconds, 0 for a non-finite or non-positive input); the
+ * standard `Retry-After` header carries whole seconds, never below 1 (a
+ * `Retry-After: 0` invites an immediate retry storm), and `Cache-Control:
+ * no-store` keeps a CDN from pinning a transient throttle for everyone behind
+ * the same edge.
+ */
+export function apiTooManyRequests(
+  retryAfterMs: number,
+  opts: { message?: string; code?: string } = {}
+) {
+  const ms =
+    Number.isFinite(retryAfterMs) && retryAfterMs > 0
+      ? Math.ceil(retryAfterMs)
+      : 0;
+  return apiError(
+    HTTP_TOO_MANY_REQUESTS,
+    opts.message ?? "Too many requests",
+    {
+      ...(opts.code ? { code: opts.code } : {}),
+      details: { retryAfterMs: ms },
+    },
+    {
+      headers: {
+        "Retry-After": String(Math.max(1, Math.ceil(ms / 1000))),
+        "Cache-Control": "no-store",
+      },
+    }
   );
 }
 

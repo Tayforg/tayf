@@ -25,7 +25,7 @@ import { revalidateTag } from "next/cache";
 import {
   apiBadRequest,
   apiNotFound,
-  apiError,
+  apiTooManyRequests,
   apiServerError,
   apiUnauthorized,
   withApiErrors,
@@ -55,9 +55,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = adminJevUnlinkLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

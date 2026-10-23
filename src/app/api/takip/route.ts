@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { withApiErrors } from "@/lib/api/errors";
+import { apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
 import { searchClusters } from "@/lib/clusters/search-query";
 import type { ClusterBundle } from "@/lib/clusters/politics-query";
 import { getTopicClusters, isTopicSlug } from "@/lib/clusters/topic-query";
@@ -47,7 +47,8 @@ const takipGetLimit = createRateLimiter("takip-get", {
   refillPerSecond: 0.5,
 });
 
-// NextResponse.json with explicit headers: apiError() cannot set headers.
+// NextResponse.json with explicit headers for the 400/503 answers. The 429 goes
+// through the shared apiTooManyRequests (Retry-After + no-store + canonical body).
 function errorResponse(
   status: number,
   message: string,
@@ -102,9 +103,7 @@ function okResponse(bundles: readonly ClusterBundle[], opts: { recencySort: bool
 export const GET = withApiErrors(async (request: Request) => {
   const rl = takipGetLimit(clientKey(request));
   if (!rl.allowed) {
-    return errorResponse(429, "Çok fazla istek", {
-      "Retry-After": String(Math.max(1, Math.ceil(rl.retryAfterMs / 1000))),
-    });
+    return apiTooManyRequests(rl.retryAfterMs, { message: "Çok fazla istek" });
   }
 
   const params = new URL(request.url).searchParams;

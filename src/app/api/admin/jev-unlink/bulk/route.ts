@@ -15,7 +15,7 @@
  * nothing reader-facing changes when a candidate is marked kept.
  */
 import { NextResponse } from "next/server";
-import { apiBadRequest, apiError, apiServerError, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
+import { apiBadRequest, apiTooManyRequests, apiServerError, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { keepClusterArticles } from "@/lib/admin/jev-cluster";
@@ -35,9 +35,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
   const rl = adminJevUnlinkBulkLimit(clientKey(request));
   if (!rl.allowed) {
-    return apiError(429, "Too many requests", {
-      details: { retryAfterMs: rl.retryAfterMs },
-    });
+    return apiTooManyRequests(rl.retryAfterMs);
   }
 
   let body: unknown;

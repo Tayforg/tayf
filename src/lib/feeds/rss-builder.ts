@@ -1,5 +1,8 @@
-// Pure RSS 2.0 builder shared by every /rss/[topic].xml feed
-// (src/app/rss/[topic]/route.ts). Never reads the clock: `lastBuildDate`
+// Pure RSS 2.0 builder shared by every RSS feed: /rss.xml
+// (src/app/rss.xml/route.ts), /rss/[topic].xml (src/app/rss/[topic]/route.ts)
+// and the blindspots feed (src/lib/feeds/blindspots-feed.ts). Also the single
+// home of the repo's XML escaper (escapeXml) -- tests/guards/
+// xml-escaper-single-source.test.ts keeps it that way. Never reads the clock: `lastBuildDate`
 // is derived from the newest item's own `pubDate`, not `new Date()` — a
 // clock read here would be a Next 16 cacheComponents violation the moment
 // this is called from a cached context, and is dishonest anyway (the feed
@@ -32,8 +35,8 @@ export interface RssBuildInput {
 //   - the BMP non-characters U+FFFE and U+FFFF,
 //   - unpaired UTF-16 surrogates (a valid pair, i.e. an astral char such as an
 //     emoji, is left alone).
-// The same C0 rule lives in src/lib/seo/sitemaps.ts (which does not yet cover
-// U+FFFE/U+FFFF or lone surrogates).
+// src/lib/seo/sitemaps.ts re-exports this escaper, so the sitemaps and every
+// feed strip exactly the same set.
 const INVALID_XML_CHARS_RE =
   /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
@@ -54,6 +57,24 @@ export function escapeXml(input: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+/**
+ * The 503 every RSS endpoint answers when its data read fails. `no-store` so a
+ * CDN never pins the outage, and `Retry-After: 300` (the feeds' own 5-minute
+ * freshness window) so readers and crawlers back off instead of hammering a
+ * struggling database. A 503 -- never a 200 with an empty feed, which a reader
+ * would take as "the publisher deleted everything".
+ */
+export function rssUnavailableResponse(): Response {
+  return new Response("Service unavailable", {
+    status: 503,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Retry-After": "300",
+      "Cache-Control": "no-store",
+    },
+  });
 }
 
 function toRfc822(iso: string): string {

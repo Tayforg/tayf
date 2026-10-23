@@ -35,7 +35,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const componentSource = readFileSync(join(here, "cluster-card-image.tsx"), "utf8");
 
-const CREDIT_URL = "https://cdn.outlet.example/foto.jpg";
+const CREDIT_URL = "https://img.piri.net/foto.jpg";
 
 beforeEach(() => {
   calls.length = 0;
@@ -81,7 +81,7 @@ describe("ClusterCardImage — photo credit (R1-F1)", () => {
       <ClusterCardImage
         src={CREDIT_URL}
         credits={{
-          "https://cdn.outlet.example/some-other-photo.jpg": {
+          "https://img.piri.net/some-other-photo.jpg": {
             href: "https://example.com/articles/other",
             name: "Başka Gazete",
           },
@@ -121,15 +121,15 @@ describe("ClusterCardImage — image URL normalisation (ingest-hygiene)", () => 
   it("renders the normalised src for a protocol-relative '//' URL", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
-        src="//cdn.outlet.example/foto.jpg"
+        src="//img.piri.net/foto.jpg"
         alt="Test görseli"
         width={768}
         height={576}
       />,
     );
 
-    expect(markup).toContain('src="https://cdn.outlet.example/foto.jpg"');
-    expect(markup).not.toContain('src="//cdn.outlet.example');
+    expect(markup).toContain('src="https://img.piri.net/foto.jpg"');
+    expect(markup).not.toContain('src="//img.piri.net');
   });
 
   it("collapses a doubled leading path slash on existing rows", () => {
@@ -149,21 +149,21 @@ describe("ClusterCardImage — image URL normalisation (ingest-hygiene)", () => 
     const markup = renderToStaticMarkup(
       <ClusterCardImage
         src="/relative-only.jpg"
-        srcs={["data:image/png;base64,AAAA", "https://cdn.outlet.example/ok.jpg"]}
+        srcs={["data:image/png;base64,AAAA", "https://img.piri.net/ok.jpg"]}
         alt="Test görseli"
         width={768}
         height={576}
       />,
     );
 
-    expect(markup).toContain('src="https://cdn.outlet.example/ok.jpg"');
+    expect(markup).toContain('src="https://img.piri.net/ok.jpg"');
   });
 
   it("dedupes candidates that only differ by the doubled slash", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
-        src="https://h.example//a.jpg"
-        srcs={["https://h.example/a.jpg"]}
+        src="https://img.piri.net//a.jpg"
+        srcs={["https://img.piri.net/a.jpg"]}
         alt="Test görseli"
         width={768}
         height={576}
@@ -175,7 +175,7 @@ describe("ClusterCardImage — image URL normalisation (ingest-hygiene)", () => 
   });
 
   it("still renders the credit when `credits` is keyed by the raw '//' URL", () => {
-    const RAW = "//cdn.outlet.example/foto.jpg";
+    const RAW = "//img.piri.net/foto.jpg";
     const markup = renderToStaticMarkup(
       <ClusterCardImage
         src={RAW}
@@ -263,29 +263,29 @@ describe("ClusterCardImage — animated GIF filter (http-1)", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
         src={GIF}
-        srcs={["https://cdn.outlet.example/ok.jpg"]}
+        srcs={["https://img.piri.net/ok.jpg"]}
         alt="Test görseli"
         width={768}
         height={576}
       />,
     );
 
-    expect(markup).toContain('src="https://cdn.outlet.example/ok.jpg"');
+    expect(markup).toContain('src="https://img.piri.net/ok.jpg"');
     expect(markup).not.toContain(".gif");
   });
 
   it("skips a .gif that appears in srcs (query string and upper-case included)", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
-        src="https://cdn.outlet.example/a.GIF"
-        srcs={["https://cdn.outlet.example/b.gif?x=1", "https://cdn.outlet.example/c.webp"]}
+        src="https://img.piri.net/a.GIF"
+        srcs={["https://img.piri.net/b.gif?x=1", "https://img.piri.net/c.webp"]}
         alt="Test görseli"
         width={768}
         height={576}
       />,
     );
 
-    expect(markup).toContain('src="https://cdn.outlet.example/c.webp"');
+    expect(markup).toContain('src="https://img.piri.net/c.webp"');
     expect(markup.toLowerCase()).not.toContain(".gif");
   });
 
@@ -325,14 +325,14 @@ describe("ClusterCardImage — animated GIF filter (http-1)", () => {
   it("still renders a .gifv-named or query-only-gif URL (only a .gif path is filtered)", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
-        src="https://cdn.outlet.example/img?format=gif"
+        src="https://img.piri.net/img?format=gif"
         alt="Test görseli"
         width={768}
         height={576}
       />,
     );
 
-    expect(markup).toContain('src="https://cdn.outlet.example/img?format=gif"');
+    expect(markup).toContain('src="https://img.piri.net/img?format=gif"');
   });
 });
 
@@ -483,7 +483,7 @@ describe("measureIntrinsicWidth (density-corrected naturalWidth, #121)", () => {
   // What next/image emits for the 390px mobile card hero at DPR2: the first
   // deviceSize >= 2 * 390 is 828, so the browser picks the 828w candidate.
   const NEXT_IMG =
-    "/_next/image?url=https%3A%2F%2Fcdn.outlet.example%2Ffoto.jpg&w=828&q=75";
+    "/_next/image?url=https%3A%2F%2Fimg.piri.net%2Ffoto.jpg&w=828&q=75";
   const W_SRCSET = `/_next/image?url=x&w=384&q=75 384w, ${NEXT_IMG} 828w`;
 
   type Outcome = { kind: "load"; naturalWidth: number } | { kind: "error" };
@@ -585,7 +585,7 @@ describe("measureIntrinsicWidth (density-corrected naturalWidth, #121)", () => {
     const { make } = fakeImageFactory({ kind: "load", naturalWidth: 9999 });
 
     const width = await measureIntrinsicWidth(
-      { naturalWidth: 460, currentSrc: "https://cdn.outlet.example/foto.jpg", srcset: "" },
+      { naturalWidth: 460, currentSrc: "https://img.piri.net/foto.jpg", srcset: "" },
       make,
     );
 
@@ -722,7 +722,7 @@ describe("ClusterCardImage — visible on first paint (perf-1)", () => {
   it("server-renders the photo without opacity-0 when a floor is requested", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
-        src="https://x.example/a.jpg"
+        src="https://img.piri.net/a.jpg"
         alt="a"
         width={640}
         height={360}
@@ -743,7 +743,7 @@ describe("ClusterCardImage — visible on first paint (perf-1)", () => {
   it("server-renders the photo without opacity-0 when no floor is requested", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
-        src="https://x.example/a.jpg"
+        src="https://img.piri.net/a.jpg"
         alt="a"
         width={640}
         height={360}
@@ -763,7 +763,7 @@ describe("ClusterCardImage — visible on first paint (perf-1)", () => {
   it("keeps the gradient wrapper as the loading backdrop behind the photo", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
-        src="https://x.example/a.jpg"
+        src="https://img.piri.net/a.jpg"
         alt="a"
         width={640}
         height={360}
@@ -776,7 +776,7 @@ describe("ClusterCardImage — visible on first paint (perf-1)", () => {
   it("forwards quality to next/image", () => {
     renderToStaticMarkup(
       <ClusterCardImage
-        src="https://x.example/a.jpg"
+        src="https://img.piri.net/a.jpg"
         alt="a"
         width={640}
         height={360}
@@ -791,7 +791,7 @@ describe("ClusterCardImage — visible on first paint (perf-1)", () => {
   it("leaves quality undefined (next/image default) when the prop is omitted", () => {
     renderToStaticMarkup(
       <ClusterCardImage
-        src="https://x.example/a.jpg"
+        src="https://img.piri.net/a.jpg"
         alt="a"
         width={640}
         height={360}
@@ -824,7 +824,7 @@ describe("ClusterCardImage — minIntrinsicWidth wiring", () => {
     const markup = renderToStaticMarkup(
       <ClusterCardImage
         src={CREDIT_URL}
-        srcs={["https://cdn.outlet.example/second.jpg"]}
+        srcs={["https://img.piri.net/second.jpg"]}
         alt="Test görseli"
         width={768}
         height={576}
@@ -881,5 +881,168 @@ describe("ClusterCardImage — minIntrinsicWidth wiring", () => {
     expect(componentSource).toContain(
       'className="max-h-[50%] max-w-[50%] object-contain opacity-60"',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// api-1: /_next/image only serves hosts on the generated allowlist
+// (src/lib/images/remote-image-hosts.ts). In dev next/image THROWS for an
+// unlisted host and in production the optimizer answers 400, so the candidate
+// filter drops such a URL up front and the chain continues exactly as it does
+// for an errored image: next candidate, then the logo tier, then the placeholder.
+// ---------------------------------------------------------------------------
+describe("ClusterCardImage — unlisted image hosts (api-1)", () => {
+  const LISTED_A = "https://img.piri.net/a.jpg";
+  const LISTED_B = "https://i12.haber7.net/fotogaleri/b.jpg";
+  const UNLISTED = "https://evil.example/x.jpg";
+
+  it("skips an unlisted-host src and renders the next listed candidate", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={UNLISTED}
+        srcs={[LISTED_A]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain(`src="${LISTED_A}"`);
+    expect(markup).not.toContain("evil.example");
+    // The unlisted URL never reached next/image (which would throw in dev).
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.src).toBe(LISTED_A);
+  });
+
+  it("skips an unlisted host in the middle of srcs and keeps the listed order", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        srcs={[UNLISTED, "https://cdn.other.example/y.jpg", LISTED_B, LISTED_A]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain(`src="${LISTED_B}"`);
+    expect(markup).not.toContain("evil.example");
+    expect(markup).not.toContain("other.example");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("falls to the logo tier when the only candidate is on an unlisted host", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={UNLISTED}
+        logoSrc="https://www.google.com/s2/favicons?domain=ntv.com.tr&sz=64"
+        logoAlt="NTV"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(calls).toHaveLength(0);
+    expect(markup).not.toContain("evil.example");
+    expect(markup).toContain("NTV");
+    // The S2 logo is routed through the optimizer, which lists that exact path.
+    expect(markup).toContain(
+      'src="/_next/image?url=https%3A%2F%2Fwww.google.com%2Fs2%2Ffavicons',
+    );
+  });
+
+  it("falls to the placeholder when every candidate is unlisted and there is no logo", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={UNLISTED}
+        srcs={["https://cdn.other.example/y.jpg"]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(calls).toHaveLength(0);
+    expect(markup).not.toContain("<img");
+    expect(markup).toContain('role="img"');
+    expect(markup).toContain('aria-label="Test görseli"');
+  });
+
+  it("skips plain http even on a listed host (the allowlist is https-only)", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="http://img.piri.net/a.jpg"
+        srcs={[LISTED_B]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain(`src="${LISTED_B}"`);
+    expect(markup).not.toContain('src="http://');
+  });
+
+  it("skips look-alike and apex-of-wildcard hosts", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://img.piri.net.evil.tld/a.jpg"
+        srcs={["https://tmgrup.com.tr/b.jpg", "https://img.piri.net:8443/c.jpg", LISTED_A]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain(`src="${LISTED_A}"`);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("shows the credit of the candidate that is actually rendered, not of a skipped unlisted one", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={UNLISTED}
+        srcs={[LISTED_A]}
+        credits={{
+          [UNLISTED]: { href: "https://example.com/articles/evil", name: "Kötü Gazete" },
+          [LISTED_A]: { href: "https://example.com/articles/piri", name: "Piri Gazete" },
+        }}
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain("Piri Gazete");
+    expect(markup).not.toContain("Kötü Gazete");
+  });
+
+  it("still renders a logo from any host directly (a plain <img>, never the optimizer)", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://cdn.unlisted-outlet.example/logo.png"
+        logoAlt="Outlet Gazete"
+        alt="Test görseli"
+        width={768}
+        height={576}
+      />,
+    );
+
+    expect(markup).toContain('src="https://cdn.unlisted-outlet.example/logo.png"');
+    expect(markup).not.toContain("/_next/image");
+  });
+
+  it("source guard: the candidate filter uses the shared allowlist predicate", () => {
+    const start = componentSource.indexOf("const candidates = Array.from(");
+    expect(start).toBeGreaterThan(-1);
+    const block = componentSource.slice(start, componentSource.indexOf(");", start));
+    expect(block).toContain("isAllowedRemoteImageUrl");
+    expect(componentSource).toMatch(
+      /import\s*\{[^}]*\bisAllowedRemoteImageUrl\b[^}]*\}\s*from\s*["']@\/lib\/images\/remote-image-hosts["']/,
+    );
+    // The old wildcard premise must not survive in the explanatory comment.
+    expect(componentSource).not.toMatch(/wildcard\s+`?images\.remotePatterns/);
   });
 });

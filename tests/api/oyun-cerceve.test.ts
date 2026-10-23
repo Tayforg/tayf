@@ -87,9 +87,14 @@ vi.mock("@supabase/supabase-js", () => ({
 
 const ORIGINAL_ENV = { ...process.env };
 
+const ADMIN_SECRET = "x".repeat(32);
+
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  // The session cookie is HMAC-signed with a key derived from this secret.
+  process.env.ADMIN_SESSION_SECRET = ADMIN_SECRET;
+  delete process.env.FRAMING_SESSION_SECRET;
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
   cerceveState.nextQueue = [];
@@ -100,12 +105,34 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
+  for (const k of [
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "ADMIN_SESSION_SECRET",
+    "FRAMING_SESSION_SECRET",
+  ]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
   }
   vi.resetModules();
 });
+
+/** `<id>.<hmac>` exactly as the routes mint it, under the CURRENT env secrets. */
+async function signedCookie(id: string): Promise<string> {
+  const { signSessionId } = await import("@/lib/game/framing-session");
+  const value = await signSessionId(id);
+  if (value === null) throw new Error("test setup: session signing unavailable");
+  return value;
+}
+
+const SIGNED_COOKIE_RE = /^[0-9a-f]{32}\.[A-Za-z0-9_-]{43}$/;
+
+/** The `tayf_cerceve_sid` value a response sets, or null when it sets none. */
+function setCookieValue(res: Response): string | null {
+  const header = res.headers.get("set-cookie");
+  const m = header ? /tayf_cerceve_sid=([^;]*)/.exec(header) : null;
+  return m ? (m[1] ?? null) : null;
+}
 
 function makeGetRequest(ip: string, cookieValue?: string): Request {
   const headers: Record<string, string> = { "x-forwarded-for": ip };
@@ -138,24 +165,73 @@ describe("GET /api/oyun/cerceve/next", () => {
 
     const setCookie = res.headers.get("set-cookie");
     expect(setCookie).not.toBeNull();
-    expect(setCookie).toMatch(/tayf_cerceve_sid=[0-9a-f]{32}/);
+    expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
     expect(setCookie).toMatch(/HttpOnly/i);
+    expect(setCookie).toMatch(/SameSite=lax/i);
+    expect(setCookie).toMatch(/Path=\//);
+    expect(setCookie).toMatch(/Max-Age=2592000/);
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
-  it("reuses an existing valid session cookie and sets no new cookie", async () => {
+  it("reuses an existing SIGNED session cookie and sets no new cookie", async () => {
     const mod = await import("@/app/api/oyun/cerceve/next/route");
-    const existing = "0123456789abcdef0123456789abcdef";
+    const existing = await signedCookie("0123456789abcdef0123456789abcdef");
     const res = await mod.GET(makeGetRequest("198.51.100.2", existing));
     expect(res.status).toBe(200);
     expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("replaces a forged unsigned 32-hex cookie with a fresh signed one and never hashes the forged id", async () => {
+    const mod = await import("@/app/api/oyun/cerceve/next/route");
+    const forgedId = "abababababababababababababababab";
+    const res = await mod.GET(makeGetRequest("198.51.100.50", forgedId));
+    expect(res.status).toBe(200);
+
+    const minted = setCookieValue(res);
+    expect(minted).toMatch(SIGNED_COOKIE_RE);
+    expect((minted as string).split(".")[0]).not.toBe(forgedId);
+
+    const rpcCall = supabaseFake.calls.rpc.find((c) => c.name === "framing_next_headline");
+    expect(rpcCall?.args).not.toEqual({ p_session_hash: await hashSessionId(forgedId) });
+    expect(rpcCall?.args).toEqual({
+      p_session_hash: await hashSessionId((minted as string).split(".")[0] as string),
+    });
+  });
+
+  it("replaces a cookie with a tampered signature", async () => {
+    const mod = await import("@/app/api/oyun/cerceve/next/route");
+    const good = await signedCookie("0123456789abcdef0123456789abcdef");
+    const tampered = good.slice(0, -1) + (good.endsWith("A") ? "B" : "A");
+    const res = await mod.GET(makeGetRequest("198.51.100.51", tampered));
+    expect(res.status).toBe(200);
+    expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
+    expect(setCookieValue(res)).not.toBe(tampered);
+  });
+
+  it("without any usable secret still draws (200), sets the plain id cookie and warns once", async () => {
+    delete process.env.ADMIN_SESSION_SECRET;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mod = await import("@/app/api/oyun/cerceve/next/route");
+    const first = await mod.GET(makeGetRequest("198.51.100.52"));
+    const second = await mod.GET(makeGetRequest("198.51.100.52"));
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await first.json()).toEqual({
+      article_id: ELIGIBLE_ROW.article_id,
+      title: ELIGIBLE_ROW.title,
+    });
+    expect(setCookieValue(first)).toMatch(/^[0-9a-f]{32}$/);
+    const unavailable = warn.mock.calls.filter(
+      (args) => args[0] === "[oyun/cerceve] session signing unavailable",
+    );
+    expect(unavailable).toHaveLength(1);
   });
 
   it("passes the sha256 session hash to the RPC, never the raw cookie value and never an IP", async () => {
     const mod = await import("@/app/api/oyun/cerceve/next/route");
     const raw = "0123456789abcdef0123456789abcdef";
     const ip = "198.51.100.3";
-    const res = await mod.GET(makeGetRequest(ip, raw));
+    const res = await mod.GET(makeGetRequest(ip, await signedCookie(raw)));
     expect(res.status).toBe(200);
 
     const expectedHash = await hashSessionId(raw);
@@ -218,7 +294,12 @@ describe("GET /api/oyun/cerceve/next", () => {
   });
 
   describe("draw timeout (cold-read resilience)", () => {
-    const COOKIE = "0123456789abcdef0123456789abcdef";
+    const COOKIE_ID = "0123456789abcdef0123456789abcdef";
+    // The SIGNED cookie value, built per test once the env secret is set.
+    let COOKIE = "";
+    beforeEach(async () => {
+      COOKIE = await signedCookie(COOKIE_ID);
+    });
 
     async function expectRetryable503(res: Response) {
       expect(res.status).toBe(503);
@@ -337,7 +418,7 @@ describe("GET /api/oyun/cerceve/next", () => {
     it("never logs the session hash, the raw cookie or the title", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       const error = vi.spyOn(console, "error").mockImplementation(() => {});
-      const hash = await hashSessionId(COOKIE);
+      const hash = await hashSessionId(COOKIE_ID);
       const timeoutEnvelopes = [
         { data: null, error: { message: "AbortError: The user aborted a request.", code: "" } },
         { data: null, error: { message: "canceling statement due to statement timeout", code: "57014" } },
@@ -361,6 +442,7 @@ describe("GET /api/oyun/cerceve/next", () => {
         for (const arg of args) {
           const serialized = JSON.stringify(arg) ?? "";
           expect(serialized).not.toContain(hash);
+          expect(serialized).not.toContain(COOKIE_ID);
           expect(serialized).not.toContain(COOKIE);
           expect(serialized).not.toContain(ELIGIBLE_ROW.title);
         }
@@ -381,6 +463,11 @@ describe("GET /api/oyun/cerceve/next", () => {
     expect(typeof body.details.retryAfterMs).toBe("number");
     expect(body.details.retryAfterMs).toBeGreaterThan(0);
     expect(res.headers.get("cache-control")).toBe("no-store");
+    // apiTooManyRequests: whole seconds, never below 1.
+    expect(Number(res.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(res.headers.get("retry-after")).toBe(
+      String(Math.max(1, Math.ceil(body.details.retryAfterMs / 1000))),
+    );
   });
 });
 
@@ -388,8 +475,12 @@ describe("POST /api/oyun/cerceve", () => {
   it("upserts exactly {article_id, vote, session_hash} with ignoreDuplicates and returns only the crowd tally", async () => {
     const mod = await import("@/app/api/oyun/cerceve/route");
     const raw = "abcdef0123456789abcdef0123456789";
-    const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.10", raw));
+    const res = await mod.POST(
+      makePostRequest(VALID_VOTE_BODY, "198.51.100.10", await signedCookie(raw)),
+    );
     expect(res.status).toBe(200);
+    // A verified cookie is not re-issued.
+    expect(res.headers.get("set-cookie")).toBeNull();
 
     const upserts = supabaseFake.calls.upsert("framing_votes");
     expect(upserts).toHaveLength(1);
@@ -418,10 +509,110 @@ describe("POST /api/oyun/cerceve", () => {
     expect(res.status).toBe(200);
     const setCookie = res.headers.get("set-cookie");
     expect(setCookie).not.toBeNull();
-    expect(setCookie).toMatch(/tayf_cerceve_sid=[0-9a-f]{32}/);
+    expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
     expect(setCookie).toMatch(/HttpOnly/i);
     expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(0);
     expect((await res.json()).ok).toBe(false);
+  });
+
+  describe("signed session cookie (api-7)", () => {
+    const FORGED_ID = "abcdef0123456789abcdef0123456789";
+
+    async function expectNotCounted(res: Response) {
+      expect(res.status).toBe(200);
+      expect((await res.json()).ok).toBe(false);
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(0);
+      const minted = setCookieValue(res);
+      expect(minted).toMatch(SIGNED_COOKIE_RE);
+      // A brand new id, never the attacker-chosen one.
+      expect((minted as string).split(".")[0]).not.toBe(FORGED_ID);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+    }
+
+    it("a forged unsigned 32-hex cookie is not counted and is replaced by a signed one", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.60", FORGED_ID));
+      await expectNotCounted(res);
+      expect(res.headers.get("set-cookie")).toMatch(/^tayf_cerceve_sid=[0-9a-f]{32}\.[A-Za-z0-9_-]{43};/);
+    });
+
+    it("a cookie minted by GET /api/oyun/cerceve/next is counted, hashing only the 32-hex part", async () => {
+      const next = await import("@/app/api/oyun/cerceve/next/route");
+      const post = await import("@/app/api/oyun/cerceve/route");
+      const minted = setCookieValue(await next.GET(makeGetRequest("198.51.100.61"))) as string;
+      expect(minted).toMatch(SIGNED_COOKIE_RE);
+      const id = minted.split(".")[0] as string;
+
+      const res = await post.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.62", minted));
+      expect(res.status).toBe(200);
+      expect((await res.json()).ok).toBe(true);
+
+      const upserts = supabaseFake.calls.upsert("framing_votes");
+      expect(upserts).toHaveLength(1);
+      const patch = upserts[0]?.patch as { session_hash: string };
+      expect(patch.session_hash).toBe(await hashSessionId(id));
+      expect(patch.session_hash).not.toBe(await hashSessionId(minted));
+      expect(JSON.stringify(patch)).not.toContain(minted);
+    });
+
+    it("a cookie whose last signature char is flipped is treated as unsigned", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const good = await signedCookie(FORGED_ID);
+      const flipped = good.slice(0, -1) + (good.endsWith("A") ? "B" : "A");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.63", flipped));
+      await expectNotCounted(res);
+    });
+
+    it("a cookie signed under another secret is treated as unsigned", async () => {
+      process.env.ADMIN_SESSION_SECRET = "z".repeat(32);
+      const foreign = await signedCookie(FORGED_ID);
+      process.env.ADMIN_SESSION_SECRET = ADMIN_SECRET;
+
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.64", foreign));
+      await expectNotCounted(res);
+    });
+
+    it("with FRAMING_SESSION_SECRET set, a cookie signed with the ADMIN-derived key is treated as unsigned", async () => {
+      const adminSigned = await signedCookie(FORGED_ID);
+      process.env.FRAMING_SESSION_SECRET = "framing-secret-0123456789";
+
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.65", adminSigned));
+      await expectNotCounted(res);
+    });
+
+    it("with FRAMING_SESSION_SECRET set, a cookie signed with it is counted", async () => {
+      process.env.FRAMING_SESSION_SECRET = "framing-secret-0123456789";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(
+        makePostRequest(VALID_VOTE_BODY, "198.51.100.66", await signedCookie(FORGED_ID)),
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()).ok).toBe(true);
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(1);
+    });
+
+    it("with no usable secret a vote is never counted, nothing throws, and it warns once", async () => {
+      delete process.env.ADMIN_SESSION_SECRET;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const mod = await import("@/app/api/oyun/cerceve/route");
+
+      const a = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.67", FORGED_ID));
+      const b = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.68"));
+      for (const res of [a, b]) {
+        expect(res.status).toBe(200);
+        expect((await res.json()).ok).toBe(false);
+        // Degraded: the plain id is set, but it can never be counted.
+        expect(setCookieValue(res)).toMatch(/^[0-9a-f]{32}$/);
+      }
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(0);
+
+      const unavailable = warn.mock.calls.filter(
+        (args) => args[0] === "[oyun/cerceve] session signing unavailable",
+      );
+      expect(unavailable).toHaveLength(1);
+    });
   });
 
   it("returns 400 with no Supabase call for an unknown vote value", async () => {
@@ -468,12 +659,15 @@ describe("POST /api/oyun/cerceve", () => {
     expect(typeof body.details.retryAfterMs).toBe("number");
     expect(body.details.retryAfterMs).toBeGreaterThan(0);
     expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("retry-after")).toBe(
+      String(Math.max(1, Math.ceil(body.details.retryAfterMs / 1000))),
+    );
   });
 
   it("returns 500, not a silent 200, when the upsert fails", async () => {
     cerceveState.forceUpsertError = true;
     const mod = await import("@/app/api/oyun/cerceve/route");
-    const raw = "abcdef0123456789abcdef0123456789";
+    const raw = await signedCookie("abcdef0123456789abcdef0123456789");
     const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.17", raw));
     expect(res.status).toBe(500);
   });
@@ -481,7 +675,7 @@ describe("POST /api/oyun/cerceve", () => {
   it("returns 400 (not 500) when the upsert fails on a foreign-key violation for a non-existent article_id", async () => {
     cerceveState.forceUpsertErrorCode = "23503";
     const mod = await import("@/app/api/oyun/cerceve/route");
-    const raw = "abcdef0123456789abcdef0123456789";
+    const raw = await signedCookie("abcdef0123456789abcdef0123456789");
     const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.19", raw));
     expect(res.status).toBe(400);
     const body = await res.json();
@@ -493,6 +687,7 @@ describe("PII guard", () => {
   it("neither route ever writes an ip, user agent or raw cookie value into framing_votes", async () => {
     const postMod = await import("@/app/api/oyun/cerceve/route");
     const raw = "fedcba9876543210fedcba9876543210";
+    const signed = await signedCookie(raw);
     const ip = "198.51.100.18";
     const res = await postMod.POST(
       new Request("http://example.com/api/oyun/cerceve", {
@@ -501,7 +696,7 @@ describe("PII guard", () => {
           "Content-Type": "application/json",
           "x-forwarded-for": ip,
           "user-agent": "TestAgent/1.0",
-          Cookie: `tayf_cerceve_sid=${raw}`,
+          Cookie: `tayf_cerceve_sid=${signed}`,
         },
         body: JSON.stringify(VALID_VOTE_BODY),
       }),
@@ -514,6 +709,7 @@ describe("PII guard", () => {
     expect(Object.keys(patch).sort()).toEqual(["article_id", "session_hash", "vote"]);
     const serialized = JSON.stringify(patch);
     expect(serialized).not.toContain(raw);
+    expect(serialized).not.toContain(signed.split(".")[1] as string);
     expect(serialized).not.toContain(ip);
     expect(serialized).not.toContain("TestAgent");
   });

@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-import { getClusterDetail } from "@/lib/clusters/cluster-detail-query";
+import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { tallyZones, zoneOf } from "@/lib/bias/config";
 import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
 import type { MediaDnaZone } from "@/types";
@@ -51,10 +51,18 @@ export const OG_CACHE_HEADERS = {
 export const OG_FALLBACK_CACHE_HEADERS = {
   "cache-control": "public, s-maxage=60",
 };
+// The read FAILED (sustained database outage): the cluster is not gone, we just
+// cannot see it. Serve the generic brand card so a crawler still unfurls
+// something, but `no-store` so neither the edge nor a crawler pins it -- the
+// real card must appear on the very next fetch after the database recovers.
+export const OG_UNAVAILABLE_CACHE_HEADERS = {
+  "cache-control": "no-store",
+};
 
 // A malformed id can never resolve to a cluster: answer 404 (cacheable
 // briefly) before any database work. A well-formed but missing UUID still
-// gets the 200 fallback card below, and genuine fetch errors still throw.
+// gets the 200 "bulunamadı" fallback card below; a failed read gets a 200
+// generic card that is never cached (OG_UNAVAILABLE_CACHE_HEADERS).
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const OG_NOT_FOUND_HEADERS = { "cache-control": "public, s-maxage=300" };
 
@@ -81,7 +89,48 @@ export default async function Image({ params }: ImageProps) {
   if (!UUID_RE.test(id)) {
     return new Response(null, { status: 404, headers: OG_NOT_FOUND_HEADERS });
   }
-  const detail = await getClusterDetail(id);
+  // The throwing reader resolves null ONLY for an absent cluster; a sustained
+  // outage rejects, and must not be told to the crawler as "not found".
+  let detail: Awaited<ReturnType<typeof getClusterDetailOrThrow>>;
+  try {
+    detail = await getClusterDetailOrThrow(id);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[cluster-og] ${id} failed: ${message}`);
+    return new ImageResponse(
+      (
+        <div
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#0a0a0a",
+            color: "#fafafa",
+            fontSize: 64,
+            fontWeight: 700,
+            letterSpacing: "-0.02em",
+          }}
+        >
+          <div style={{ display: "flex" }}>Tayf</div>
+          <div
+            style={{
+              display: "flex",
+              fontSize: 28,
+              fontWeight: 500,
+              color: "#a1a1aa",
+              marginTop: 16,
+            }}
+          >
+            Aynı haber, farklı dünyalar.
+          </div>
+        </div>
+      ),
+      { ...size, headers: OG_UNAVAILABLE_CACHE_HEADERS },
+    );
+  }
 
   // Fallback card if the cluster vanished between SSR and the OG fetch.
   // We still return a 200 with a usable card so social crawlers don't
