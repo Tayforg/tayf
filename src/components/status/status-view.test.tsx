@@ -46,9 +46,9 @@ function render(view: StatusViewModel | null): string {
 function text(html: string): string {
   return html
     .replace(/<[^>]+>/g, " ")
-    .replace(/&amp;/g, "&")
     .replace(/&#x27;/g, "'")
     .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ")
     .trim();
 }
