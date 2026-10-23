@@ -48,6 +48,19 @@ import {
 //   visible underneath. Once `onLoad` fires we mark it loaded and the
 //   image fades in.
 //
+// Undersized candidates:
+//   Some outlets (artigercek: 150x84) ship a thumbnail as their og:image.
+//   Stretched across a full-width hero it is a blurry smear, worse than the
+//   logo tier. Full-width heroes opt in with `minIntrinsicWidth`: when a
+//   candidate finishes loading and its real pixel width is under that, it is
+//   skipped exactly like an error (advance `idx`, never `setLoaded(true)`, so
+//   it does not fade in), and the walk ends in the logo tier / placeholder if
+//   every candidate is too small. The check only runs for an image that is
+//   actually rendered (clientWidth > 0): the `sm:hidden` mobile hero is
+//   display:none on desktop yet still fetched at the smallest srcset width
+//   (documented #118 trade-off), so its naturalWidth is tiny there and
+//   judging it would walk and fetch every candidate. Off by default.
+//
 // Optimization:
 //   `next.config.ts` declares a wildcard `images.remotePatterns` so
 //   the built-in Next.js optimizer handles every RSS image host.
@@ -106,12 +119,46 @@ interface ClusterCardImageProps {
   height: number;
   /** Forwarded to next/image `sizes` for responsive srcset generation. */
   sizes?: string;
+  /**
+   * Opt-in floor, in real image pixels, for full-width hero slots. A loaded
+   * candidate narrower than this (e.g. a 150x84 og:image) is skipped like an
+   * `onError`: the next candidate is tried, and when none is left the logo
+   * tier / gray placeholder is shown, instead of upscaling a thumbnail into
+   * a blurry banner. Ignored while the image is not rendered (display:none),
+   * so a hidden duplicate cannot walk the chain. Omit for thumbnails: the
+   * check is off and next/image behaves exactly as before. Not forwarded to
+   * next/image.
+   */
+  minIntrinsicWidth?: number;
 }
 
 // Subtle dark-theme gradient used for both the "no src" placeholder
 // and the loading skeleton beneath the real <Image>.
 const GRADIENT_CLASSES =
   "bg-gradient-to-br from-muted via-muted/50 to-muted/20";
+
+/**
+ * True when a loaded image is too small for a slot that asked for
+ * `minIntrinsicWidth`. Pure so the rule is unit-testable without a browser.
+ *
+ * - `renderedWidth` (the element's `clientWidth`) must be > 0: a hidden
+ *   (display:none) image reports 0 and is never judged.
+ * - `naturalWidth` must be > 0: 0 means "unknown/undecoded", not "tiny".
+ * - The threshold is exclusive: an image exactly `minIntrinsicWidth` wide
+ *   is kept.
+ */
+export function isUndersizedForSlot(o: {
+  naturalWidth: number;
+  renderedWidth: number;
+  minIntrinsicWidth?: number;
+}): boolean {
+  return (
+    o.minIntrinsicWidth !== undefined &&
+    o.renderedWidth > 0 &&
+    o.naturalWidth > 0 &&
+    o.naturalWidth < o.minIntrinsicWidth
+  );
+}
 
 export function ClusterCardImage({
   src,
@@ -126,6 +173,7 @@ export function ClusterCardImage({
   width,
   height,
   sizes,
+  minIntrinsicWidth,
 }: ClusterCardImageProps) {
   // Build a deduped candidate list from (src, ...srcs), normalising each
   // URL (protocol-relative `//host/x` -> https, doubled leading path slash
@@ -272,7 +320,23 @@ export function ClusterCardImage({
             setLoaded(false);
             setIdx((i) => i + 1);
           }}
-          onLoad={() => setLoaded(true)}
+          onLoad={(e) => {
+            const img = e.currentTarget;
+            if (
+              isUndersizedForSlot({
+                naturalWidth: img.naturalWidth,
+                renderedWidth: img.clientWidth,
+                minIntrinsicWidth,
+              })
+            ) {
+              // Too small for this slot: skip it like an error, and never
+              // mark it loaded so it does not fade in.
+              setLoaded(false);
+              setIdx((i) => i + 1);
+              return;
+            }
+            setLoaded(true);
+          }}
         />
       </div>
       {credit && (

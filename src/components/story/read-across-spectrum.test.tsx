@@ -178,3 +178,39 @@ describe("ReadAcrossSpectrum — CTA text contrast (WCAG 1.4.3, contrast-sweep)"
     expect(markup).toContain("text-[10px]");
   });
 });
+
+describe("ReadAcrossSpectrum — CTA accessible name (WCAG 2.5.3 label-in-name)", () => {
+  const TIE_MEMBERS: ClusterDetailMember[] = [
+    mkMember("gov1", "pro_government", "2026-07-01T10:00:00Z"),
+    mkMember("opp1", "opposition", "2026-07-01T11:00:00Z"),
+  ];
+  const markup = renderToStaticMarkup(
+    <ReadAcrossSpectrum members={TIE_MEMBERS} isBlindspot={false} />,
+  );
+
+  it("has no aria-label on the anchor, so the visible text is the accessible name", () => {
+    const openTag = markup.match(/<a [^>]*>/);
+    expect(openTag).toBeTruthy();
+    expect(openTag![0]).not.toContain("aria-label");
+  });
+
+  it("keeps the visible 'Karşı tarafı oku' text and the zone / source line inside the anchor", () => {
+    const anchor = markup.match(/<a [^>]*>[\s\S]*<\/a>/);
+    expect(anchor).toBeTruthy();
+    expect(anchor![0]).toContain("Karşı tarafı oku");
+    expect(anchor![0]).toContain("Muhalefet · Source opp1");
+  });
+
+  it("announces the new-tab behaviour through a trailing sr-only span", () => {
+    expect(markup).toContain('<span class="sr-only"> (yeni sekmede açılır)</span>');
+    // It is the link's last child, after the visible time-ago span.
+    expect(markup).toMatch(/\(yeni sekmede açılır\)<\/span><\/a>$/);
+  });
+
+  it("hides the decorative ExternalLink icon from assistive tech", () => {
+    const svg = markup.match(/<svg[^>]*>/);
+    expect(svg).toBeTruthy();
+    expect(svg![0]).toContain('aria-hidden="true"');
+  });
+});
+

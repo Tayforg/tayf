@@ -281,6 +281,7 @@ export function ClusterCard({
             width={640}
             height={360}
             sizes="(max-width: 640px) 100vw, 0px"
+            minIntrinsicWidth={320}
             priority={isPriority}
             className="h-full w-full object-cover"
           />

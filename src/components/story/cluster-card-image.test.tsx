@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, it, expect, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -22,7 +25,10 @@ vi.mock("next/image", () => ({
   },
 }));
 
-import { ClusterCardImage } from "./cluster-card-image";
+import { ClusterCardImage, isUndersizedForSlot } from "./cluster-card-image";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const componentSource = readFileSync(join(here, "cluster-card-image.tsx"), "utf8");
 
 const CREDIT_URL = "https://cdn.outlet.example/foto.jpg";
 
@@ -409,5 +415,106 @@ describe("ClusterCardImage — preload / loading / fetchPriority (browser-6)", (
       );
       expect(calls[0]!.fetchPriority).toBe(value);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Undersized candidates: artigercek ships a 150x84 thumbnail as its og:image.
+// Stretched across a full-width hero (~358px mobile, 384px cluster page) it
+// renders as a blurry smear. Full-width heroes opt in with `minIntrinsicWidth`;
+// a candidate whose real pixel width is below it is skipped exactly like an
+// onError (next candidate, then logo tier, then gray placeholder).
+// ---------------------------------------------------------------------------
+describe("isUndersizedForSlot (minIntrinsicWidth)", () => {
+  it("flags a 150px-wide image rendered in a visible 358px slot", () => {
+    expect(
+      isUndersizedForSlot({ naturalWidth: 150, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(true);
+  });
+
+  it("never flags an image that is not rendered (display:none desktop banner)", () => {
+    // The sm:hidden mobile hero is still fetched at the smallest srcset width
+    // on desktop, so its naturalWidth is tiny there. clientWidth is 0, and
+    // the check must not walk (and fetch) every candidate.
+    expect(
+      isUndersizedForSlot({ naturalWidth: 150, renderedWidth: 0, minIntrinsicWidth: 320 }),
+    ).toBe(false);
+  });
+
+  it("keeps an image that is wide enough", () => {
+    expect(
+      isUndersizedForSlot({ naturalWidth: 1080, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(false);
+  });
+
+  it("keeps an image exactly at the threshold (boundary is exclusive)", () => {
+    expect(
+      isUndersizedForSlot({ naturalWidth: 320, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(false);
+  });
+
+  it("ignores an unknown natural width (0 before decode / on broken images)", () => {
+    expect(
+      isUndersizedForSlot({ naturalWidth: 0, renderedWidth: 358, minIntrinsicWidth: 320 }),
+    ).toBe(false);
+  });
+
+  it("is off when minIntrinsicWidth is not provided", () => {
+    expect(
+      isUndersizedForSlot({ naturalWidth: 150, renderedWidth: 358, minIntrinsicWidth: undefined }),
+    ).toBe(false);
+    expect(isUndersizedForSlot({ naturalWidth: 150, renderedWidth: 358 })).toBe(false);
+  });
+});
+
+describe("ClusterCardImage — minIntrinsicWidth wiring", () => {
+  it("does not forward minIntrinsicWidth to next/image, and still wires onLoad", () => {
+    renderToStaticMarkup(
+      <ClusterCardImage
+        src={CREDIT_URL}
+        alt="Test görseli"
+        width={768}
+        height={576}
+        minIntrinsicWidth={320}
+      />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).not.toHaveProperty("minIntrinsicWidth");
+    expect(typeof calls[0]!.onLoad).toBe("function");
+  });
+
+  it("renders the first candidate normally (the check only runs after the client load)", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={CREDIT_URL}
+        srcs={["https://cdn.outlet.example/second.jpg"]}
+        alt="Test görseli"
+        width={768}
+        height={576}
+        minIntrinsicWidth={320}
+      />,
+    );
+
+    expect(markup).toContain(`src="${CREDIT_URL}"`);
+    expect(markup).not.toContain("second.jpg");
+  });
+
+  it("source guard: the Image onLoad block consults isUndersizedForSlot and advances idx", () => {
+    const start = componentSource.indexOf("onLoad={");
+    expect(start).toBeGreaterThan(-1);
+    const block = componentSource.slice(start, componentSource.indexOf("/>", start));
+    expect(block).toContain("isUndersizedForSlot");
+    expect(block).toContain("setIdx");
+    // A skipped image must never fade in (no blurry flash).
+    expect(block).toContain("setLoaded(false)");
+    // The renderedWidth input is what protects the display:none desktop banner.
+    expect(block).toContain("clientWidth");
+  });
+
+  it("source guard: the logo <img> class string is untouched (allow-listed by the contrast guard)", () => {
+    expect(componentSource).toContain(
+      'className="max-h-[50%] max-w-[50%] object-contain opacity-60"',
+    );
   });
 });

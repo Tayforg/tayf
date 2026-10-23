@@ -136,6 +136,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
           required
           maxLength={512}
           defaultValue={defaultUrl}
+          autoComplete="off"
           placeholder="https://..."
           className="min-h-[44px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
         />
@@ -152,6 +153,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
           minLength={10}
           maxLength={2000}
           rows={5}
+          autoComplete="off"
           placeholder={messagePlaceholder}
           className="min-h-[110px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
         />
@@ -165,6 +167,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
           id="correction-email"
           name="email"
           type="email"
+          autoComplete="email"
           maxLength={254}
           placeholder="ornek@eposta.com"
           className="min-h-[44px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"

@@ -45,7 +45,8 @@ import {
 // -- placeholder, empty and list -- so it never remounts and a removal can be
 // announced. Unfollowing moves focus to the neighbouring follow's heading (or
 // the empty state's) instead of dropping it on <body>. A failed follow offers
-// a retry that re-fetches only that follow.
+// a retry that re-fetches only that follow, and the same region then announces
+// how the retry ended (loaded with N stories, nothing matched, or failed).
 
 const FETCH_CONCURRENCY = 3;
 const ROWS_PER_FOLLOW = 5;
@@ -53,6 +54,21 @@ const ROWS_PER_FOLLOW = 5;
 type FeedState =
   | { status: "ok"; items: FollowItem[] }
   | { status: "error"; reason: "rate" | "down" };
+
+// What the polite region says once a RETRY's fetch has landed (WCAG 4.1.3).
+// The count is the rows actually shown, which is why it is capped at
+// ROWS_PER_FOLLOW. The empty case mirrors the visible followEmptyText: an empty
+// list means "nothing matched", not "no new news".
+export function retryResultAnnouncement(label: string, state: FeedState): string {
+  if (state.status === "ok") {
+    return state.items.length === 0
+      ? `${label} yüklendi · eşleşen hikâye yok`
+      : `${label} yüklendi · ${Math.min(state.items.length, ROWS_PER_FOLLOW)} hikâye`;
+  }
+  return state.reason === "rate"
+    ? `${label}: çok sık yenilendi, biraz sonra tekrar deneyin`
+    : `${label} şu an yüklenemedi`;
+}
 
 async function fetchFollowState(
   follow: Pick<Follow, "kind" | "value">,
@@ -123,6 +139,11 @@ export function FollowFeed() {
   // would hammer a failing endpoint every time any follow changes); only the
   // reader's explicit "Tekrar dene" takes a key out of here.
   const erroredKeys = useRef<Set<string>>(new Set());
+  // key -> label of a follow whose retry result must be announced. Only
+  // "Tekrar dene" puts a key here, so initial loads stay silent. An aborted
+  // run leaves the entry in place; the re-run fetches the key again and
+  // announces then.
+  const retryPending = useRef<Map<string, string>>(new Map());
 
   // Focus handoff after an unfollow. `pendingFocus` is written by the click
   // handler (undefined = nothing pending, null = the list is now empty) and
@@ -168,6 +189,9 @@ export function FollowFeed() {
     for (const key of [...erroredKeys.current]) {
       if (!live.has(key)) erroredKeys.current.delete(key);
     }
+    for (const key of [...retryPending.current.keys()]) {
+      if (!live.has(key)) retryPending.current.delete(key);
+    }
 
     // Everything that is neither loaded nor failed: new follows, plus any
     // fetch an earlier run of this effect aborted while it was in flight.
@@ -188,6 +212,11 @@ export function FollowFeed() {
           erroredKeys.current.add(item.key);
         }
         setResults((prev) => ({ ...prev, [item.key]: outcome }));
+        const label = retryPending.current.get(item.key);
+        if (label !== undefined) {
+          retryPending.current.delete(item.key);
+          setAnnouncement(retryResultAnnouncement(label, outcome));
+        }
       });
       if (controller.signal.aborted) return;
       const seen = new Set(
@@ -218,6 +247,8 @@ export function FollowFeed() {
   function handleRetry(follow: Follow) {
     const key = followKey(follow);
     erroredKeys.current.delete(key);
+    // Registered before the nonce bump, so the re-run's fetch finds it.
+    retryPending.current.set(key, followLabel(follow));
     // Back to the skeleton until the new answer lands.
     setResults((prev) => {
       const next = { ...prev };
@@ -361,7 +392,7 @@ export function FollowSection({
         <Link
           href={followHref(follow)}
           aria-label={`Tümü: ${label}`}
-          className="ml-auto inline-flex min-h-[44px] shrink-0 items-center px-1 touch-manipulation text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+          className="ml-auto inline-flex min-h-[44px] min-w-[44px] shrink-0 items-center justify-center px-1 touch-manipulation text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
         >
           Tümü
         </Link>

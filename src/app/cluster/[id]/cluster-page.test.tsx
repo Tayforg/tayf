@@ -201,6 +201,38 @@ function findHeroSrc(node: unknown): string | null | undefined {
 }
 
 /**
+ * Like `findCredits` but returns the `minIntrinsicWidth` prop of the same
+ * element (the hero `<ClusterCardImage>`): the full-width hero opts in to
+ * skipping tiny source thumbnails (e.g. artigercek's 150x84) instead of
+ * stretching them into a blurry banner.
+ */
+function findHeroMinIntrinsicWidth(node: unknown): number | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findHeroMinIntrinsicWidth(child);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    const el = node as {
+      props?: {
+        credits?: unknown;
+        minIntrinsicWidth?: number;
+        children?: ReactNode;
+      };
+    };
+    if (el.props?.credits !== undefined) {
+      return el.props.minIntrinsicWidth;
+    }
+    if (el.props?.children !== undefined) {
+      return findHeroMinIntrinsicWidth(el.props.children);
+    }
+  }
+  return undefined;
+}
+
+/**
  * Walks the tree (same shape as `collectHrefs`) looking for the
  * `<script type="application/ld+json">` element and returns its
  * `dangerouslySetInnerHTML.__html` string, or `null` if none is found.
@@ -640,6 +672,11 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
         name: "Outlet Gazete",
       },
     });
+
+    // The hero is full-width (384px on desktop, 100vw on mobile): it opts in
+    // to skipping source thumbnails narrower than 320px so a 150x84 og:image
+    // is never stretched into a blurry banner.
+    expect(findHeroMinIntrinsicWidth(tree)).toBe(320);
   });
 
   it("passes an empty credits map when no member has an image", async () => {

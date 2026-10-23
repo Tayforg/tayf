@@ -59,6 +59,22 @@ describe("cluster-card.tsx image priority wiring (browser-6)", () => {
   });
 });
 
+describe("cluster-card.tsx undersized-thumbnail guard (minIntrinsicWidth)", () => {
+  it("opts the full-width mobile hero in exactly once, never the 160px desktop thumb", () => {
+    expect(count(src, "minIntrinsicWidth={320}")).toBe(1);
+    expect(src).not.toMatch(/minIntrinsicWidth=\{(?!320\})/);
+
+    // The prop must sit in the sm:hidden hero, i.e. before the desktop
+    // thumbnail's fixed 160px slot.
+    const heroStart = src.indexOf("sm:hidden");
+    const prop = src.indexOf("minIntrinsicWidth={320}");
+    expect(heroStart).toBeGreaterThan(-1);
+    expect(prop).toBeGreaterThan(heroStart);
+    expect(prop).toBeLessThan(src.indexOf('sizes="160px"'));
+    expect(prop).toBeLessThan(src.indexOf("hidden sm:block"));
+  });
+});
+
 describe("cluster-card.tsx text contrast (a11y-2)", () => {
   it("has no opacity-modified brand text token", () => {
     expect(src).not.toContain("text-brand/");
