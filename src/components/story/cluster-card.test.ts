@@ -3,13 +3,20 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { MOBILE_BANNER_SIZES, mobileBannerImageProps } from "./cluster-card";
+
 // Source guard (repo convention: no render tests of server components --
 // ClusterCard is an async-data Server Component). Pins the image-priority
-// wiring the browser-6 fix depends on, so a refactor cannot quietly bring
-// back a second eager/preloaded hero on every priority card.
+// wiring the browser-6 / perf-3 fixes depend on, so a refactor cannot quietly
+// bring back a second eager/preloaded hero or a preload on every top card.
+// The pure `mobileBannerImageProps` helper is exercised directly.
 
 const here = dirname(fileURLToPath(import.meta.url));
 const raw = readFileSync(join(here, "cluster-card.tsx"), "utf8");
+const nextConfigSource = readFileSync(
+  join(here, "..", "..", "..", "next.config.ts"),
+  "utf8",
+);
 
 // Blanks line and block comments (offsets kept) so prose can't satisfy or trip a pattern.
 function blankComments(src: string): string {
@@ -26,32 +33,99 @@ function count(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
 }
 
-describe("cluster-card.tsx image priority wiring (browser-6)", () => {
-  it("passes priority={isPriority} exactly once (the sm:hidden mobile hero)", () => {
-    expect(count(src, "priority={isPriority}")).toBe(1);
+describe("mobileBannerImageProps (perf-3)", () => {
+  const SIZES = "(max-width: 640px) calc(100vw - 2rem), 0px";
+
+  it("exports the banner sizes: the viewport minus the 1rem page gutters on mobile, nothing on desktop", () => {
+    expect(MOBILE_BANNER_SIZES).toBe(SIZES);
+  });
+
+  it("preloads at high priority for the first card only (index 0)", () => {
+    expect(mobileBannerImageProps(0)).toEqual({
+      priority: true,
+      fetchPriority: "high",
+      sizes: SIZES,
+      quality: 50,
+    });
+  });
+
+  it.each([1, 2, 3, 10])("does not preload or raise priority for card %i", (index) => {
+    expect(mobileBannerImageProps(index)).toEqual({
+      priority: false,
+      fetchPriority: undefined,
+      sizes: SIZES,
+      quality: 50,
+    });
+  });
+
+  it("does not preload when the index is omitted", () => {
+    expect(mobileBannerImageProps()).toEqual({
+      priority: false,
+      fetchPriority: undefined,
+      sizes: SIZES,
+      quality: 50,
+    });
+    expect(mobileBannerImageProps(undefined)).toEqual(mobileBannerImageProps());
+  });
+
+  it("only ever hints fetchPriority together with priority", () => {
+    for (const index of [undefined, 0, 1, 2, 3, 10]) {
+      const p = mobileBannerImageProps(index);
+      expect(p.fetchPriority === "high").toBe(p.priority);
+    }
+  });
+
+  it("asks for a quality that next.config.ts images.qualities allows", () => {
+    expect(nextConfigSource).toMatch(/qualities:\s*\[[^\]]*\b50\b/);
+    expect(mobileBannerImageProps(0).quality).toBe(50);
+  });
+});
+
+describe("cluster-card.tsx image priority wiring (browser-6 / perf-3)", () => {
+  const heroStart = src.indexOf("sm:hidden");
+  const thumbStart = src.indexOf("hidden sm:block");
+
+  it("derives the banner props once from mobileBannerImageProps(index)", () => {
+    expect(count(src, "mobileBannerImageProps(index)")).toBe(1);
+    expect(src).toContain("const banner = mobileBannerImageProps(index)");
+  });
+
+  it.each([
+    "priority={banner.priority}",
+    "fetchPriority={banner.fetchPriority}",
+    "quality={banner.quality}",
+    "sizes={banner.sizes}",
+  ])("passes %s exactly once, inside the sm:hidden mobile banner", (prop) => {
+    expect(count(src, prop)).toBe(1);
 
     // ...and that one sits inside the sm:hidden banner, not the desktop slot.
-    const heroStart = src.indexOf("sm:hidden");
-    const thumbStart = src.indexOf("hidden sm:block");
-    const heroProp = src.indexOf("priority={isPriority}");
+    const at = src.indexOf(prop);
     expect(heroStart).toBeGreaterThan(-1);
     expect(thumbStart).toBeGreaterThan(heroStart);
-    expect(heroProp).toBeGreaterThan(heroStart);
-    expect(heroProp).toBeLessThan(thumbStart);
+    expect(at).toBeGreaterThan(heroStart);
+    expect(at).toBeLessThan(thumbStart);
   });
 
-  it("keeps the desktop thumbnail lazy: priority={false} once, after the hero", () => {
+  it("keeps the desktop thumbnail lazy: priority={false} once, after the banner", () => {
     expect(count(src, "priority={false}")).toBe(1);
-    expect(src.indexOf("priority={false}")).toBeGreaterThan(
-      src.indexOf("hidden sm:block"),
-    );
+    expect(src.indexOf("priority={false}")).toBeGreaterThan(thumbStart);
   });
 
-  it("raises the desktop thumbnail's fetchPriority for priority cards only", () => {
-    expect(count(src, 'fetchPriority={isPriority ? "high" : undefined}')).toBe(1);
-    expect(src.indexOf('fetchPriority={isPriority ? "high" : undefined}')).toBeGreaterThan(
-      src.indexOf("hidden sm:block"),
-    );
+  it("gives the lazy desktop thumbnail no fetchPriority hint (the banner carries the only one)", () => {
+    expect(count(src, "fetchPriority=")).toBe(1);
+  });
+
+  it("no longer ranks the top three cards: no PRIORITY_CARD_COUNT, no per-card flag, no default index", () => {
+    // Raw source: stale prose naming the old identifiers must go too.
+    expect(raw).not.toContain("isPriority");
+    expect(raw).not.toContain("PRIORITY_CARD_COUNT");
+    // `index` is optional with NO default: an omitted index is never card 0.
+    expect(src).not.toMatch(/\bindex\s*=(?!=)/);
+  });
+
+  it("has no inline banner sizes literal left (it lives in MOBILE_BANNER_SIZES)", () => {
+    expect(src).not.toContain('sizes="(max-width');
+    expect(count(src, "MOBILE_BANNER_SIZES")).toBeGreaterThanOrEqual(1);
   });
 
   it('keeps the fixed sizes="160px" slot the next-images config test pins', () => {

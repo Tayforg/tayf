@@ -37,6 +37,32 @@ describe("articleImageEligible", () => {
     ).toBe(false);
   });
 
+  // db-4: a publisher logo card / 'son dakika' stand-in is never a usable
+  // cover image either, so /source/[slug] shows its neutral block instead.
+  it("not eligible when article.image_url is a known placeholder, even when image_allowed is true", () => {
+    expect(
+      articleImageEligible(
+        { image_url: "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg" },
+        { image_allowed: true },
+      ),
+    ).toBe(false);
+    expect(
+      articleImageEligible(
+        { image_url: "https://img.piri.net/resim/imagecrop/2026/04/01/09/50/tr_son_dakika_530x530.jpg" },
+        { image_allowed: undefined },
+      ),
+    ).toBe(false);
+  });
+
+  it("still eligible for a normal photo on the same CDN as a placeholder", () => {
+    expect(
+      articleImageEligible(
+        { image_url: "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9e.jpg" },
+        { image_allowed: true },
+      ),
+    ).toBe(true);
+  });
+
   it("still eligible for a .jpg and for a URL that only mentions gif in its query", () => {
     expect(
       articleImageEligible({ image_url: "https://h/a.jpg" }, { image_allowed: true }),

@@ -43,23 +43,31 @@ import {
 //   subtitle. Only if the logo ALSO errors (or no logo was provided)
 //   do we finally show the plain gray placeholder.
 //
-// Skeleton state:
-//   While the current <Image> is downloading we keep the gradient layer
-//   visible underneath. Once `onLoad` fires we mark it loaded and the
-//   image fades in.
+// First paint (perf-1):
+//   The photo is visible in the server-rendered HTML: it carries no opacity
+//   gate and no client "loaded" flag, so it paints as soon as its bytes
+//   decode, without waiting for hydration. (It used to render invisible until
+//   a client `onLoad` revealed it, which kept every hero from being the LCP
+//   element.) While the bytes are still downloading, the gradient wrapper
+//   behind the <Image> is the loading backdrop. tests/guards/
+//   image-first-paint.test.ts keeps a hidden first paint from coming back.
 //
 // Undersized candidates:
 //   Some outlets (artigercek: 150x84) ship a thumbnail as their og:image.
 //   Stretched across a full-width hero it is a blurry smear, worse than the
 //   logo tier. Full-width heroes opt in with `minIntrinsicWidth`: when a
 //   candidate finishes loading and its real pixel width is under that, it is
-//   skipped exactly like an error (advance `idx`, never `setLoaded(true)`, so
-//   it does not fade in), and the walk ends in the logo tier / placeholder if
-//   every candidate is too small. The check only runs for an image that is
-//   actually rendered (clientWidth > 0): the `sm:hidden` mobile hero is
-//   display:none on desktop yet still fetched at the smallest srcset width
-//   (documented #118 trade-off), so its naturalWidth is tiny there and
-//   judging it would walk and fetch every candidate. Off by default.
+//   skipped exactly like an error (advance `idx`, which re-keys the <Image>
+//   so the undersized element unmounts in that same commit), and the walk
+//   ends in the logo tier / placeholder if every candidate is too small.
+//   Accepted trade-off: because the photo is not hidden while it is judged,
+//   an undersized one is visible for the duration of the probe, about one
+//   frame from the memory cache and at most PROBE_TIMEOUT_MS. The check only
+//   runs for an image that is actually rendered (clientWidth > 0): the
+//   `sm:hidden` mobile hero is display:none on desktop yet still fetched at
+//   the smallest srcset width (documented #118 trade-off), so its
+//   naturalWidth is tiny there and judging it would walk and fetch every
+//   candidate. Off by default.
 //
 //   "Real pixel width" is NOT `img.naturalWidth`. next/image gives the <img> a
 //   srcset of w-descriptors plus `sizes`, and per the HTML spec the element's
@@ -70,8 +78,8 @@ import {
 //   regression). `measureIntrinsicWidth` instead loads the chosen URL
 //   (`currentSrc`) into a probe `Image` WITHOUT a srcset, whose naturalWidth is
 //   the true pixel width; the bytes are already in the memory cache, so it is
-//   not a second download. The image stays opacity-0 until that decision. A
-//   probe failure counts as "unknown" (0), which keeps the image.
+//   not a second download. A probe failure counts as "unknown" (0), which
+//   keeps the image.
 //
 // Optimization:
 //   `next.config.ts` declares a wildcard `images.remotePatterns` so
@@ -125,6 +133,11 @@ interface ClusterCardImageProps {
    * shown. Omit to leave the attribute off entirely.
    */
   fetchPriority?: "high" | "low" | "auto";
+  /**
+   * Forwarded to next/image `quality`. Must be listed in `images.qualities`
+   * in next.config.ts. Omit to keep next/image's default (75).
+   */
+  quality?: number;
   /** Intrinsic width in px — required by next/image for remote sources. */
   width: number;
   /** Intrinsic height in px — required by next/image for remote sources. */
@@ -136,7 +149,8 @@ interface ClusterCardImageProps {
    * candidate narrower than this (e.g. a 150x84 og:image) is skipped like an
    * `onError`: the next candidate is tried, and when none is left the logo
    * tier / gray placeholder is shown, instead of upscaling a thumbnail into
-   * a blurry banner. "Real pixels" are measured with a no-srcset probe
+   * a blurry banner. The photo is visible while it is judged (about one frame,
+   * at most PROBE_TIMEOUT_MS), not hidden until the verdict. "Real pixels" are measured with a no-srcset probe
    * (`measureIntrinsicWidth`), not `img.naturalWidth`, which is
    * density-corrected under a w-descriptor srcset. Ignored while the image is
    * not rendered (display:none), so a hidden duplicate cannot walk the chain.
@@ -234,6 +248,7 @@ export function ClusterCardImage({
   className,
   priority = false,
   fetchPriority,
+  quality,
   width,
   height,
   sizes,
@@ -273,7 +288,6 @@ export function ClusterCardImage({
   // logo tier (if `logoSrc` is set and hasn't errored) or the final
   // gray placeholder.
   const [idx, setIdx] = useState(0);
-  const [loaded, setLoaded] = useState(false);
   // Separate error flag for the logo tier — we can't just keep
   // advancing `idx` because the logo isn't part of the `candidates`
   // array (different rendering: contained, muted, with a caption).
@@ -372,31 +386,22 @@ export function ClusterCardImage({
           width={width}
           height={height}
           sizes={sizes}
-          className={`absolute inset-0 h-full w-full object-cover transition-all duration-500 group-hover:scale-105 ${loaded ? "opacity-100" : "opacity-0"}`}
+          quality={quality}
+          className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
           // Next.js 16 deprecated `priority` in favour of `preload` + loading.
           preload={priority}
           loading={priority ? "eager" : "lazy"}
           fetchPriority={fetchPriority}
-          onError={() => {
-            // Reset loaded state and advance to the next candidate. If we
-            // walk past the end, `currentSrc` becomes undefined and the
-            // next render either drops to the logo tier or the placeholder.
-            setLoaded(false);
-            setIdx((i) => i + 1);
-          }}
+          onError={() => setIdx((i) => i + 1)}
           onLoad={(e) => {
             const img = e.currentTarget;
             const renderedWidth = img.clientWidth;
             // No floor requested, or the element is not rendered
-            // (display:none -> clientWidth 0): nothing to judge, reveal now.
-            if (minIntrinsicWidth === undefined || renderedWidth === 0) {
-              setLoaded(true);
-              return;
-            }
+            // (display:none -> clientWidth 0): nothing to judge.
+            if (minIntrinsicWidth === undefined || renderedWidth === 0) return;
             // img.naturalWidth is density-corrected under next/image's
             // w-descriptor srcset (a 460px photo reads ~216 at DPR2), so the
-            // floor is judged on the probed real width instead. The image
-            // stays opacity-0 until this resolves.
+            // floor is judged on the probed real width instead.
             void measureIntrinsicWidth(img).then((realWidth) => {
               // Stale-result guard: drop the result when this <img> left the
               // DOM while the probe was loading. The <Image> is keyed by
@@ -405,8 +410,8 @@ export function ClusterCardImage({
               // for it must not advance `idx` past a candidate it never
               // judged. Guard on the element, not on effect lifetime: a hidden
               // <Activity> runs effect cleanups but keeps the element
-              // connected, and a result dropped there would leave the hero at
-              // opacity-0 once the tree is shown again.
+              // connected, and a result dropped there would leave an
+              // undersized photo on screen once the tree is shown again.
               if (!img.isConnected) return;
               if (
                 isUndersizedForSlot({
@@ -415,13 +420,11 @@ export function ClusterCardImage({
                   minIntrinsicWidth,
                 })
               ) {
-                // Too small for this slot: skip it like an error, and never
-                // mark it loaded so it does not fade in.
-                setLoaded(false);
+                // Too small for this slot: skip it like an error. Advancing
+                // idx re-keys the <Image>, so this element unmounts in the
+                // same commit; no separate rejected flag is needed.
                 setIdx((i) => i + 1);
-                return;
               }
-              setLoaded(true);
             });
           }}
         />

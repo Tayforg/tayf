@@ -8,7 +8,7 @@ import { BIAS_LABELS } from "@/lib/bias/config";
 import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
-import { normalizeImageUrl } from "@/lib/images/image-url";
+import { optimizedThumbSrcSet } from "@/lib/images/image-url";
 import { LabelCard } from "@/components/source/label-card";
 import { ClickbaitKarneLine } from "@/components/source/clickbait-karne";
 import { SourceKarneCard } from "@/components/source/source-karne";
@@ -260,11 +260,17 @@ export default async function SourceProfilePage({ params }: PageProps) {
         ) : (
           <ul className="space-y-2">
             {articles.map((article, i) => {
-              // Heal stored spellings at render (doubled slash, protocol-
-              // relative, posta's glued ObjectIds); null falls back to the
-              // placeholder block instead of a broken <img>.
-              const img = articleImageEligible(article, source)
-                ? normalizeImageUrl(article.image_url)
+              // The thumbnail is served by our own /_next/image at the slot
+              // size (80 px slot: 128/160/256 w), never as the publisher's
+              // full-size original. optimizedThumbSrcSet also heals stored
+              // spellings (doubled slash, protocol-relative, posta's glued
+              // ObjectIds); null (unusable, gif or a logo/'son dakika'
+              // placeholder) falls back to the neutral block instead of a
+              // broken image. A plain img, not next/image: this is a server
+              // component and the image is decorative (the title is the link
+              // text), so it avoids 20 client boundaries.
+              const thumb = articleImageEligible(article, source)
+                ? optimizedThumbSrcSet(article.image_url)
                 : null;
               return (
                 <li
@@ -277,13 +283,18 @@ export default async function SourceProfilePage({ params }: PageProps) {
                     rel="noopener noreferrer"
                     className="flex items-start gap-3 p-3 sm:p-4"
                   >
-                    {img ? (
+                    {thumb ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
-                        src={img}
+                        src={thumb.src}
+                        srcSet={thumb.srcSet}
+                        sizes="(min-width: 640px) 80px, 64px"
+                        width={80}
+                        height={80}
                         alt=""
-                        className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 object-cover bg-muted"
                         loading="lazy"
+                        decoding="async"
+                        className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 object-cover bg-muted"
                       />
                     ) : (
                       <div className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 bg-muted/60" />

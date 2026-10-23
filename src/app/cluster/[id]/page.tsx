@@ -501,6 +501,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               sizes="(min-width: 640px) 384px, 100vw"
               minIntrinsicWidth={320}
               priority
+              fetchPriority="high"
               className="h-44 sm:h-72 w-full object-cover"
             />
           </div>

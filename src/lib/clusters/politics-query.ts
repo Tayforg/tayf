@@ -8,7 +8,7 @@ import type {
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
 import { attemptCached } from "@/lib/cache-resilience";
-import { isOptimizableImageUrl } from "@/lib/images/image-url";
+import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
   createReaderClient,
   createServerClient,
@@ -634,8 +634,13 @@ export function buildClusterBundle(
       // through unmodified; nulling at the bundle boundary keeps the URL out
       // of the RSC/HTML payload, not just out of the <Image>. Existing rows
       // heal at render time (no backfill).
+      // db-4: a publisher logo card / 'son dakika' stand-in is nulled here
+      // too, so the hero falls through to the next member's photo or the
+      // logo tier.
       image_url:
-        m.sources?.image_allowed === false || !isOptimizableImageUrl(m.image_url)
+        m.sources?.image_allowed === false ||
+        !isOptimizableImageUrl(m.image_url) ||
+        isPlaceholderImageUrl(m.image_url)
           ? null
           : m.image_url,
       published_at: m.published_at,

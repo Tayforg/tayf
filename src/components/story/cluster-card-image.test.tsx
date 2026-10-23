@@ -709,6 +709,100 @@ describe("measureIntrinsicWidth (density-corrected naturalWidth, #121)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// perf-1: the tier-1 photo used to render opacity-0 until a client `onLoad`
+// flipped a `loaded` flag, so the SSR HTML shipped an invisible hero and the
+// LCP waited for hydration. The <Image> now paints as soon as its bytes decode;
+// the gradient wrapper stays behind it as the loading backdrop.
+// ---------------------------------------------------------------------------
+describe("ClusterCardImage — visible on first paint (perf-1)", () => {
+  const TIER1_CLASSES =
+    "absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105";
+
+  it("server-renders the photo without opacity-0 when a floor is requested", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://x.example/a.jpg"
+        alt="a"
+        width={640}
+        height={360}
+        priority
+        minIntrinsicWidth={320}
+      />,
+    );
+
+    expect(markup).not.toContain("opacity-0");
+    expect(calls).toHaveLength(1);
+    const className = calls[0]!.className as string;
+    expect(className).not.toMatch(/opacity/);
+    expect(className).not.toContain("transition-all");
+    expect(className).toContain("transition-transform");
+    expect(className).toBe(TIER1_CLASSES);
+  });
+
+  it("server-renders the photo without opacity-0 when no floor is requested", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://x.example/a.jpg"
+        alt="a"
+        width={640}
+        height={360}
+        priority
+      />,
+    );
+
+    expect(markup).not.toContain("opacity-0");
+    expect(calls).toHaveLength(1);
+    const className = calls[0]!.className as string;
+    expect(className).not.toMatch(/opacity/);
+    expect(className).not.toContain("transition-all");
+    expect(className).toContain("transition-transform");
+    expect(className).toBe(TIER1_CLASSES);
+  });
+
+  it("keeps the gradient wrapper as the loading backdrop behind the photo", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://x.example/a.jpg"
+        alt="a"
+        width={640}
+        height={360}
+      />,
+    );
+
+    expect(markup).toContain("bg-gradient-to-br from-muted via-muted/50 to-muted/20");
+  });
+
+  it("forwards quality to next/image", () => {
+    renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://x.example/a.jpg"
+        alt="a"
+        width={640}
+        height={360}
+        quality={50}
+      />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.quality).toBe(50);
+  });
+
+  it("leaves quality undefined (next/image default) when the prop is omitted", () => {
+    renderToStaticMarkup(
+      <ClusterCardImage
+        src="https://x.example/a.jpg"
+        alt="a"
+        width={640}
+        height={360}
+      />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.quality).toBeUndefined();
+  });
+});
+
 describe("ClusterCardImage — minIntrinsicWidth wiring", () => {
   it("does not forward minIntrinsicWidth to next/image, and still wires onLoad", () => {
     renderToStaticMarkup(
@@ -754,13 +848,16 @@ describe("ClusterCardImage — minIntrinsicWidth wiring", () => {
     expect(block).not.toContain("devicePixelRatio");
     expect(componentSource).not.toContain("devicePixelRatio");
     expect(block).toContain("setIdx");
-    // A skipped image must never fade in (no blurry flash).
-    expect(block).toContain("setLoaded(false)");
     // The renderedWidth input is what protects the display:none desktop banner.
     expect(block).toContain("clientWidth");
-    // The synchronous path (no floor / not rendered) still reveals at once.
+    // No floor requested / not rendered: nothing to judge, so no probe at all.
     expect(block).toContain("minIntrinsicWidth === undefined");
-    expect(block).toContain("setLoaded(true)");
+    // perf-1: there is no reveal state any more. The photo is painted by the
+    // SSR HTML, so nothing is "loaded" or "revealed" from JS (a hero that
+    // waits for hydration cannot be the LCP element).
+    expect(componentSource).not.toContain("setLoaded");
+    expect(componentSource).not.toMatch(/\bopacity-0\b/);
+    expect(componentSource).not.toContain("transition-all");
   });
 
   it("source guard: a probe result is dropped only when the <img> element is no longer connected", () => {

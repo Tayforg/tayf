@@ -152,12 +152,15 @@ export default async function TopicHubPage({
             {TOPIC_NOTE_LINK_LABEL}
           </Link>
           {" · "}
-          <Link
+          {/* Plain <a>: next/link would prefetch this DB-backed feed route
+              handler as an RSC request (perf-6). */}
+          <a
             href={`/rss/${slug}.xml`}
+            type="application/rss+xml"
             className="underline decoration-dotted underline-offset-2 hover:text-foreground"
           >
             RSS
-          </Link>
+          </a>
         </p>
         <FollowButton kind="konu" value={slug} />
       </div>
