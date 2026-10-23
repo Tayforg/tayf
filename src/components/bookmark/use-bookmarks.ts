@@ -2,6 +2,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 
 import { captureSnapshot, removeSnapshot } from "@/components/bookmark/bookmark-snapshots";
+import { pinForOffline, unpinForOffline } from "@/lib/pwa/offline-pins";
 
 const KEY = "tayf:bookmarks";
 
@@ -74,10 +75,12 @@ export function useBookmarks() {
         next.delete(id);
         writeSet(next);
         removeSnapshot(id);
+        unpinForOffline(id);
       } else {
         next.add(id);
         writeSet(next);
         void captureSnapshot(id);
+        pinForOffline(id);
       }
     },
     [ids],

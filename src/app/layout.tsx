@@ -4,6 +4,7 @@ import { DM_Serif_Display, Plus_Jakarta_Sans, JetBrains_Mono } from "next/font/g
 import { Header, HeaderFallback } from "@/components/layout/header";
 import { Footer } from "@/components/layout/footer";
 import { KbdShortcuts } from "@/components/kbd-shortcuts";
+import { SwRegistrar } from "@/components/pwa/sw-registrar";
 import { Analytics } from "@vercel/analytics/next";
 import { siteUrl } from "@/lib/site-url";
 import { buildSiteJsonLd, serializeJsonLd } from "@/lib/seo/json-ld";
@@ -156,6 +157,7 @@ export default function RootLayout({
         <KbdShortcuts />
         {/* Dev builds would load va.vercel-scripts.com, which the CSP script-src blocks. */}
         {process.env.NODE_ENV === "production" ? <Analytics /> : null}
+        {process.env.NODE_ENV === "production" ? <SwRegistrar /> : null}
       </body>
     </html>
   );

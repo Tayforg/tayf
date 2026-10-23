@@ -50,6 +50,7 @@ const PAGES = [
 const NOINDEX_PAGES: Record<string, boolean> = {
   "diyetim/page.tsx": false,
   "karsilastir/page.tsx": true,
+  "offline/page.tsx": false,
   "saved/page.tsx": false,
   "takip/page.tsx": false,
 };
@@ -61,6 +62,7 @@ const TOKEN_PAGES = ["rapor/[token]/page.tsx"];
 const EXPECTED_NOINDEX = [
   "diyetim/page.tsx",
   "karsilastir/page.tsx",
+  "offline/page.tsx",
   "rapor/[token]/page.tsx",
   "saved/page.tsx",
   "takip/page.tsx",
@@ -237,12 +239,12 @@ describe("static public pages use staticPageMetadata", () => {
       expect(offenders).toEqual([]);
     });
 
-    it("finds exactly the 5 known noindex pages (scanner sanity check)", () => {
+    it("finds exactly the 6 known noindex pages (scanner sanity check)", () => {
       const noindex = pages
         .filter(({ code }) => usesNoindex(code) || handWritesNoindex(code))
         .map(({ rel }) => rel)
         .sort();
-      expect(EXPECTED_NOINDEX).toHaveLength(5);
+      expect(EXPECTED_NOINDEX).toHaveLength(6);
       expect(noindex).toEqual([...EXPECTED_NOINDEX].sort());
     });
 
