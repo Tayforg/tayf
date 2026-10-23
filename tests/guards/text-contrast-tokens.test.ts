@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -23,16 +23,35 @@ import { describe, expect, it } from "vitest";
 // Scope: every non-test .tsx under src/ (components and app routes alike).
 // This was originally limited to src/components/story/ plus the cluster page;
 // the sweep widened it so a new page cannot reintroduce the pattern.
+//
+// Second guard (qa-wave-i, story-chips): the same arithmetic applies to the
+// element-level `opacity-NN` utility, which fades the text AND its background
+// tint together. The Medya DNA chips used opacity-50 / opacity-30 and the kind
+// label opacity-70, which measured 2.0-3.25:1. Under src/components/story/
+// no class may carry a bare `opacity-5`..`opacity-99` or `opacity-[x]`.
+// `opacity-0` / `opacity-100` (show / hide toggles) and variant forms such as
+// `hover:`, `disabled:`, `group-hover/x:` and `data-*:` (state affordances
+// that do not rest on screen) are not matched. The one exception is the
+// logo-tier <img> source badge, allow-listed below; it is not text.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(here, "../..");
 const SRC_DIR = join(ROOT, "src");
+const STORY_DIR = join(ROOT, "src/components/story");
 const CLUSTER_PAGE = join(ROOT, "src/app/cluster/[id]/page.tsx");
 
 // Any numeric opacity suffix except `/100` (which is the full token).
 const LOW_CONTRAST_TEXT = /\btext-(?:muted-foreground|brand)\/(?!100\b)\d+\b/;
 const LOW_CONTRAST_TEXT_GLOBAL = new RegExp(LOW_CONTRAST_TEXT.source, "g");
+
+// A bare element-opacity utility: opacity-5 .. opacity-99, or an arbitrary
+// opacity-[x]. The lookbehind rejects any variant prefix (`hover:`,
+// `disabled:`, `group-hover/entry:`, `data-[open]:` all end in `:`) and
+// compounds such as `transition-opacity`; the lookahead rejects opacity-0 /
+// opacity-100 / opacity-25-style longer tokens being cut short.
+const BARE_OPACITY = /(?<![\w:\/-])opacity-(?:[1-9]\d?|\[[^\]\s]+\])(?![\w-])/;
+const BARE_OPACITY_GLOBAL = new RegExp(BARE_OPACITY.source, "g");
 
 /**
  * Non-text decorative icons, exempt from 1.4.3 (it governs text; icons fall
@@ -62,6 +81,23 @@ const ALLOWED_ICON_CLASSES: ReadonlyArray<{ file: string; classes: string; why: 
   },
 ];
 
+/**
+ * Element-opacity class strings that stay under src/components/story/ because
+ * the element is not text. Each entry is the exact class string as written in
+ * `file` (repo-relative); the list is stripped per file, so one file's entry
+ * can never excuse another file. Two tests keep it honest:
+ *  - staleness: the string must still exist in THAT file;
+ *  - element kind: every occurrence must sit on an <img> (a raster logo with
+ *    its own alt text, governed by 1.4.11 / 1.1.1 rather than 1.4.3).
+ */
+const ALLOWED_BARE_OPACITY: ReadonlyArray<{ file: string; classes: string; why: string }> = [
+  {
+    file: "src/components/story/cluster-card-image.tsx",
+    classes: "max-h-[50%] max-w-[50%] object-contain opacity-60",
+    why: "logo-tier <img> source badge, not text",
+  },
+];
+
 function walk(dir: string): string[] {
   const out: string[] = [];
   for (const name of readdirSync(dir)) {
@@ -80,6 +116,33 @@ function withoutAllowedIcons(src: string): string {
   let out = src;
   for (const { classes } of ALLOWED_ICON_CLASSES) out = out.split(classes).join("");
   return out;
+}
+
+/** Repo-relative, forward-slash path of a scanned file. */
+function repoPath(file: string): string {
+  return relative(ROOT, file).split(sep).join("/");
+}
+
+/** Source with the allow-listed bare-opacity class strings of THIS file removed. */
+function withoutAllowedOpacity(file: string, src: string): string {
+  let out = src;
+  for (const entry of ALLOWED_BARE_OPACITY) {
+    if (entry.file === repoPath(file)) out = out.split(entry.classes).join("");
+  }
+  return out;
+}
+
+/** `file:line  match` for every bare-opacity hit in one source file. */
+function bareOpacityOffenders(file: string, src: string): string[] {
+  const offenders: string[] = [];
+  withoutAllowedOpacity(file, src)
+    .split("\n")
+    .forEach((line, i) => {
+      for (const match of line.matchAll(BARE_OPACITY_GLOBAL)) {
+        offenders.push(`${repoPath(file)}:${i + 1}  ${match[0]}`);
+      }
+    });
+  return offenders;
 }
 
 /**
@@ -194,6 +257,117 @@ describe("text-contrast tokens (a11y-2)", () => {
     it("keeps every entry repo-relative to src/", () => {
       for (const { file } of ALLOWED_ICON_CLASSES) {
         expect(file).toMatch(/^src\/.+\.tsx$/);
+      }
+    });
+  });
+});
+
+describe("no bare element opacity in story components (qa-wave-i, WCAG 1.4.3)", () => {
+  const storyFiles = [...sources.keys()].filter((f) => f.startsWith(STORY_DIR + sep));
+
+  it("scans the non-test .tsx files under src/components/story/ (media-dna included)", () => {
+    expect(storyFiles).toContain(join(STORY_DIR, "media-dna.tsx"));
+    expect(storyFiles).toContain(join(STORY_DIR, "cluster-card-image.tsx"));
+    expect(storyFiles.some((f) => /\.test\./.test(f))).toBe(false);
+    expect(storyFiles.length).toBeGreaterThan(10);
+  });
+
+  it("uses no opacity-5..opacity-99 / opacity-[x] class (fading text fails 1.4.3)", () => {
+    const offenders = storyFiles.flatMap((f) => bareOpacityOffenders(f, sources.get(f) ?? ""));
+    expect(
+      offenders,
+      `Do not fade story components with element opacity; use a dashed border, a transparent background or a full-strength token instead:\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("lets the show / hide toggles and state-variant forms through with no allow-list entry", () => {
+    // framing-comparison: opacity-0 + group-hover/entry:opacity-100.
+    // correction-form: opacity-0 (honeypot) + disabled:opacity-50.
+    for (const name of ["framing-comparison.tsx", "correction-form.tsx"]) {
+      const file = join(STORY_DIR, name);
+      expect(sources.has(file), `${name} is not a scanned file`).toBe(true);
+      expect(sources.get(file)).toMatch(/\bopacity-0\b/);
+      expect(bareOpacityOffenders(file, sources.get(file) ?? "")).toEqual([]);
+      expect(ALLOWED_BARE_OPACITY.some((e) => e.file.endsWith(name))).toBe(false);
+    }
+  });
+
+  it("flags the offending forms (the guard itself works)", () => {
+    for (const bad of ["opacity-50", '"opacity-30"', " opacity-70", "opacity-5", "opacity-[0.6]"]) {
+      expect(BARE_OPACITY.test(bad), bad).toBe(true);
+    }
+    for (const ok of [
+      "opacity-0",
+      "opacity-100",
+      "disabled:opacity-50",
+      "hover:opacity-80",
+      "group-hover/entry:opacity-100",
+      "peer-disabled:opacity-50",
+      "transition-opacity",
+    ]) {
+      expect(BARE_OPACITY.test(ok), ok).toBe(false);
+    }
+  });
+
+  it("reports offenders as file:line with the line of the hit", () => {
+    const file = join(STORY_DIR, "fixture.tsx");
+    const src = 'const a = "opacity-100";\nconst b = "rounded opacity-50";\n';
+    expect(bareOpacityOffenders(file, src)).toEqual([
+      "src/components/story/fixture.tsx:2  opacity-50",
+    ]);
+  });
+
+  describe("ALLOWED_BARE_OPACITY", () => {
+    it.each(ALLOWED_BARE_OPACITY.map((e) => [e.why, e.file, e.classes] as const))(
+      "still exists in its own file: %s",
+      (_why, file, classes) => {
+        const abs = join(ROOT, file);
+        expect(storyFiles, `${file} is not a scanned story .tsx file`).toContain(abs);
+        expect(
+          sources.get(abs)?.includes(classes),
+          `Allow-listed class string "${classes}" no longer appears in ${file}; remove it from ALLOWED_BARE_OPACITY.`,
+        ).toBe(true);
+      },
+    );
+
+    it.each(ALLOWED_BARE_OPACITY.map((e) => [e.why, e.file, e.classes] as const))(
+      "is carried by an <img> element: %s",
+      (_why, file, classes) => {
+        const src = sources.get(join(ROOT, file)) ?? "";
+        const slices: string[] = [];
+        for (let idx = src.indexOf(classes); idx !== -1; idx = src.indexOf(classes, idx + 1)) {
+          slices.push(elementSliceAt(src, idx));
+        }
+        expect(slices.length, `"${classes}" not found in ${file}`).toBeGreaterThan(0);
+        for (const slice of slices) {
+          expect(
+            slice.startsWith("<img"),
+            `Allow-listed opacity in ${file} is only excused on a logo <img>, never on text:\n${slice}`,
+          ).toBe(true);
+        }
+      },
+    );
+
+    it("the <img> check can fail (element slice helper)", () => {
+      const img = '<img alt="x" className="object-contain opacity-60" />';
+      const span = '<span className="object-contain opacity-60">x</span>';
+      const at = (src: string) => elementSliceAt(src, src.indexOf("object-contain"));
+      expect(at(img).startsWith("<img")).toBe(true);
+      expect(at(span).startsWith("<img")).toBe(false);
+    });
+
+    it("strips an entry only from its own file", () => {
+      const entry = ALLOWED_BARE_OPACITY[0]!;
+      const own = join(ROOT, entry.file);
+      const other = join(STORY_DIR, "media-dna.tsx");
+      const src = `<img className="${entry.classes}" />`;
+      expect(bareOpacityOffenders(own, src)).toEqual([]);
+      expect(bareOpacityOffenders(other, src)).toHaveLength(1);
+    });
+
+    it("keeps every entry under src/components/story/", () => {
+      for (const { file } of ALLOWED_BARE_OPACITY) {
+        expect(file).toMatch(/^src\/components\/story\/.+\.tsx$/);
       }
     });
   });

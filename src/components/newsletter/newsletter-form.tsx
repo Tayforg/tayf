@@ -64,6 +64,7 @@ export function NewsletterForm() {
           id={emailId}
           name="email"
           type="email"
+          autoComplete="email"
           required
           maxLength={254}
           placeholder="ornek@eposta.com"

@@ -17,19 +17,23 @@ import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/ki
  * Default view: only the sources in `highlightSlugs` (the outlets that
  * actually covered this cluster) — typically 3-20 chips. A toggle button
  * underneath flips to "show all 144" mode, in which non-participating
- * sources render at `opacity-30` to preserve the directory-level signal.
+ * sources keep their text and border but lose the zone tint (transparent
+ * background), so the directory still reads as background context.
  *
  * If `highlightSlugs` is `undefined` or empty, the component starts in
- * the show-all state (there's no filter to apply, so dimming everything
- * would be wrong).
+ * the show-all state (there's no filter to apply, so dropping the tint
+ * from everything would be wrong).
  *
  * The proportional 3-segment top bar always reflects the FULL directory
  * distribution regardless of toggle state.
  *
  * Non-voting kinds (toplayıcı / niş) still get highlighted like any other
- * participating source, but render at `opacity-50` instead of full opacity
- * and carry a small kind label — a visual reminder that they're cluster
- * members without being counted in bias_distribution / blindspot / trends.
+ * participating source, but carry a dashed border and a small kind label —
+ * a visual reminder that they're cluster members without being counted in
+ * bias_distribution / blindspot / trends. Text stays at full strength:
+ * nothing here is faded with an opaklık utility (WCAG 1.4.3 — the old soluk
+ * chips measured 2.0-3.25:1), and `tests/guards/text-contrast-tokens.test.ts`
+ * keeps it that way.
  */
 
 interface MediaDnaProps {
@@ -51,6 +55,21 @@ const ZONE_BAR_FILL: Record<MediaDnaZone, string> = {
   bagimsiz: "bg-zinc-400",
   iktidar: "bg-red-500",
 };
+
+/**
+ * Class string for one source chip. Pure and exported so the contrast rules
+ * are testable without rendering: no opacity utility ever (full-strength
+ * `chipText`), non-voting chips get a dashed border, and expanded-mode
+ * non-participants swap the zone tint for a transparent background while
+ * keeping `chipText` and `chipBorder`. The literal strings stay in source
+ * so Tailwind 4 can see them.
+ */
+export function mediaDnaChipClass(
+  meta: (typeof ZONE_META)[MediaDnaZone],
+  o: { isVoting: boolean; isHighlighted: boolean },
+): string {
+  return `inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-colors ${o.isHighlighted ? meta.chipBg : "bg-transparent"} ${meta.chipText} ${meta.chipBorder}${o.isVoting ? "" : " border-dashed"}`;
+}
 
 export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
   // When there's no highlight set (or it's empty), there's no filter to
@@ -138,8 +157,8 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                     {meta.label}
                   </span>
                 </div>
-                <span className="text-[10px] text-muted-foreground">
-                  {visibleMembers.length} kaynak
+                <span className={`text-[10px] ${meta.zoneLabel}`}>
+                  {`${visibleMembers.length} kaynak`}
                 </span>
               </div>
 
@@ -156,9 +175,10 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                   const isVoting = isVotingSource(source);
                   const kindLabel = SOURCE_KIND_META[sourceKindOf(source)].label;
                   // In collapsed mode every visible chip is a participant,
-                  // so they're all full-opacity. In expanded mode we dim
-                  // the non-participating ones so the directory still
-                  // reads as background context.
+                  // so they all keep the zone tint. In expanded mode the
+                  // non-participating ones swap the tint for a transparent
+                  // background (text and border stay full strength) so the
+                  // directory still reads as background context.
                   const isHighlighted =
                     !showAll ||
                     highlightSlugs === undefined ||
@@ -169,9 +189,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                       title={`${source.name} — ${biasLabel}${
                         isVoting ? "" : ` · ${kindLabel} · yanlılık dağılımına sayılmaz`
                       }`}
-                      className={`inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition-opacity duration-300 ${meta.chipBg} ${meta.chipText} ${meta.chipBorder} ${
-                        isHighlighted ? (isVoting ? "opacity-100" : "opacity-50") : "opacity-30"
-                      }`}
+                      className={mediaDnaChipClass(meta, { isVoting, isHighlighted })}
                     >
                       <span
                         className={`h-1 w-1 rounded-full ${meta.dot}`}
@@ -182,7 +200,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                         {" — " + biasLabel + (isVoting ? "" : " · " + kindLabel + " · yanlılık dağılımına sayılmaz")}
                       </span>
                       {!isVoting && (
-                        <span className="ml-0.5 text-[9px] uppercase tracking-wider opacity-70">
+                        <span className="ml-0.5 text-[10px] uppercase tracking-wider">
                           {kindLabel}
                         </span>
                       )}
@@ -202,8 +220,8 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
 
       {showsNonVotingChip && (
         <p className="text-[10px] text-muted-foreground">
-          Soluk gösterilen toplayıcı / niş kaynaklar kümelerde listelenir ama
-          yanlılık dağılımına sayılmaz.
+          Kesikli çerçeveyle gösterilen toplayıcı / niş kaynaklar kümelerde
+          listelenir ama yanlılık dağılımına sayılmaz.
         </p>
       )}
 

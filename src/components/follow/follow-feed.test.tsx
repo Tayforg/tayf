@@ -9,6 +9,7 @@ import {
   FeedFrame,
   FollowFeed,
   FollowSection,
+  retryResultAnnouncement,
   SectionBody,
 } from "./follow-feed";
 import {
@@ -130,6 +131,101 @@ describe("FeedFrame / live region", () => {
   });
 });
 
+describe("retryResultAnnouncement", () => {
+  type State = Parameters<typeof retryResultAnnouncement>[1];
+
+  it("reads the loaded count, capped at the five rows actually shown", () => {
+    const items = Array.from({ length: 7 }, (_, i) =>
+      item({ id: `aaaaaaaa-1111-4111-8111-00000000000${i}` }),
+    );
+    const state: State = { status: "ok", items };
+    expect(retryResultAnnouncement("“seçim”", state)).toBe("“seçim” yüklendi · 5 hikâye");
+  });
+
+  it("reads the exact count below the cap", () => {
+    const state: State = { status: "ok", items: [item()] };
+    expect(retryResultAnnouncement("Ekonomi", state)).toBe("Ekonomi yüklendi · 1 hikâye");
+  });
+
+  it("says there is no match (not 'no news') when the list came back empty", () => {
+    const state: State = { status: "ok", items: [] };
+    const text = retryResultAnnouncement("Ekonomi", state);
+    expect(text).toBe("Ekonomi yüklendi · eşleşen hikâye yok");
+    expect(text).not.toContain("yeni haber yok");
+  });
+
+  it("explains a rate-limited retry", () => {
+    const state: State = { status: "error", reason: "rate" };
+    expect(retryResultAnnouncement("“seçim”", state)).toBe(
+      "“seçim”: çok sık yenilendi, biraz sonra tekrar deneyin",
+    );
+  });
+
+  it("reports a retry that failed again", () => {
+    const state: State = { status: "error", reason: "down" };
+    expect(retryResultAnnouncement("“seçim”", state)).toBe("“seçim” şu an yüklenemedi");
+  });
+
+  it("every outcome names the follow it is about", () => {
+    const states: State[] = [
+      { status: "ok", items: [item()] },
+      { status: "ok", items: [] },
+      { status: "error", reason: "rate" },
+      { status: "error", reason: "down" },
+    ];
+    for (const state of states) {
+      expect(retryResultAnnouncement("Ekonomi", state)).toContain("Ekonomi");
+    }
+  });
+});
+
+describe("retry result announcement wiring (source guard: effects need a browser)", () => {
+  const src = readFileSync(resolve(__dirname, "follow-feed.tsx"), "utf8");
+  const retryStart = src.indexOf("function handleRetry");
+  const handleRetry = src.slice(retryStart, src.indexOf("\n  }\n", retryStart));
+  const effectStart = src.indexOf("useEffect(() => {");
+  const effectEnd = src.indexOf("}, [keysSignature, retryNonce]);");
+  const fetchEffect = src.slice(effectStart, effectEnd);
+
+  it("slices the code it is guarding (the guards below are not vacuous)", () => {
+    expect(retryStart).toBeGreaterThan(-1);
+    expect(handleRetry).toContain("setRetryNonce");
+    expect(effectStart).toBeGreaterThan(-1);
+    expect(effectEnd).toBeGreaterThan(effectStart);
+    expect(fetchEffect).toContain("fetchFollowState");
+  });
+
+  it("keeps the follows awaiting an announcement in a ref map of key -> label", () => {
+    expect(src).toContain("retryPending = useRef<Map<string, string>>(new Map())");
+  });
+
+  it("handleRetry registers the follow BEFORE it bumps the nonce that triggers the fetch", () => {
+    const set = handleRetry.indexOf("retryPending.current.set(key");
+    expect(set).toBeGreaterThan(-1);
+    expect(set).toBeLessThan(handleRetry.indexOf("setRetryNonce"));
+  });
+
+  it("the fetch effect announces only after the not-aborted check", () => {
+    const aborted = fetchEffect.indexOf("if (controller.signal.aborted) return;");
+    const get = fetchEffect.indexOf("retryPending.current.get(item.key)");
+    expect(aborted).toBeGreaterThan(-1);
+    expect(get).toBeGreaterThan(aborted);
+    expect(fetchEffect).toContain("setAnnouncement(retryResultAnnouncement(");
+    expect(fetchEffect.indexOf("setAnnouncement(retryResultAnnouncement(")).toBeGreaterThan(get);
+  });
+
+  it("consumes the entry once it has announced, and prunes entries of unfollowed keys", () => {
+    expect(fetchEffect).toContain("retryPending.current.delete(");
+    // Both the per-item consume and the live-set prune delete from the map.
+    expect(count(fetchEffect, "retryPending.current.delete(")).toBe(2);
+  });
+
+  it("still has exactly one live region (announcing reuses it)", () => {
+    expect(count(src, 'role="status"')).toBe(1);
+    expect(count(src, 'aria-live="polite"')).toBe(1);
+  });
+});
+
 describe("EmptyState", () => {
   it("has a focusable heading so focus can land there after the last unfollow", () => {
     const markup = renderToStaticMarkup(<EmptyState />);
@@ -180,6 +276,16 @@ describe("FollowSection", () => {
     expect(markup).toContain("touch-manipulation");
     // The icon itself stays small; only the hit area grew.
     expect(markup).toMatch(/<svg [^>]*class="[^"]*h-4 w-4/);
+  });
+
+  it("makes the 'Tümü' link 44px in BOTH dimensions (WCAG 2.5.8), not just tall", () => {
+    const markup = renderToStaticMarkup(section(SECIM, undefined));
+    const cls = /<a [^>]*aria-label="Tümü: “seçim”"[^>]*class="([^"]*)"/.exec(markup)?.[1];
+    expect(cls).toBeDefined();
+    expect(cls).toContain("min-h-[44px]");
+    expect(cls).toContain("min-w-[44px]");
+    // A 44px-wide box with a short word in it: the word is centred, not left-stuck.
+    expect(cls).toContain("justify-center");
   });
 
   it("renders a focusable heading with the follow's label", () => {

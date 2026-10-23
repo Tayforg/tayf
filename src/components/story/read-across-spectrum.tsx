@@ -104,10 +104,9 @@ export function ReadAcrossSpectrum({
       href={member.article.url}
       target="_blank"
       rel="noopener noreferrer"
-      aria-label={`Karşı tarafı oku: ${zoneLabel} — ${member.source.name}`}
       className={`flex min-h-[44px] touch-manipulation items-center gap-2.5 rounded-lg border px-3.5 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${POLE_STYLE[zone]}`}
     >
-      <ExternalLink className="h-4 w-4 shrink-0" strokeWidth={2.5} />
+      <ExternalLink className="h-4 w-4 shrink-0" strokeWidth={2.5} aria-hidden="true" />
       <span className="min-w-0 flex-1">
         <span className="block text-[13px] font-bold leading-tight">
           Karşı tarafı oku
@@ -119,6 +118,7 @@ export function ReadAcrossSpectrum({
       <span className="shrink-0 text-[10px] tabular-nums">
         {formatTurkishTimeAgo(member.article.published_at)}
       </span>
+      <span className="sr-only"> (yeni sekmede açılır)</span>
     </TrackedLink>
   );
 }
