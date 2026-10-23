@@ -168,6 +168,39 @@ const FIX =
   "drops characters XML 1.0 forbids; String.fromCodePoint throws a RangeError " +
   "on &#1114112; and one throw drops a whole source's items.";
 
+/**
+ * The one exception: a call whose immediately preceding line returns early for
+ * every code point fromCodePoint rejects (non-positive/NaN, above U+10FFFF,
+ * surrogates). The service worker's self-contained runtime string
+ * (src/lib/pwa/sw-source.ts) and its TS twin (sw-policy.ts) decode <title>
+ * entities this way because a worker script cannot import entities.ts.
+ */
+function isRangeGuardedCall(src: string, line: number): boolean {
+  const prev = src.split("\n")[line - 2] ?? "";
+  return (
+    /!\(cp > 0\)/.test(prev) &&
+    /cp > (?:0x10ffff|1114111)/i.test(prev) &&
+    /cp >= (?:0xd800|55296) && cp <= (?:0xdfff|57343)/i.test(prev) &&
+    /return\s/.test(prev)
+  );
+}
+
+describe("isRangeGuardedCall", () => {
+  it("accepts a call right after the full range check (hex or decimal bounds)", () => {
+    const hex = 'if (!(cp > 0) || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "x";\nreturn String.fromCodePoint(cp);';
+    const dec = 'if (!(cp > 0) || cp > 1114111 || (cp >= 55296 && cp <= 57343)) return "x";\nreturn String.fromCodePoint(cp);';
+    expect(isRangeGuardedCall(hex, 2)).toBe(true);
+    expect(isRangeGuardedCall(dec, 2)).toBe(true);
+  });
+
+  it("rejects a partial check or a call that is not directly after it", () => {
+    const noSurrogate = 'if (!(cp > 0) || cp > 0x10ffff) return "x";\nreturn String.fromCodePoint(cp);';
+    const gap = 'if (!(cp > 0) || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return "x";\nfoo();\nreturn String.fromCodePoint(cp);';
+    expect(isRangeGuardedCall(noSurrogate, 2)).toBe(false);
+    expect(isRangeGuardedCall(gap, 3)).toBe(false);
+  });
+});
+
 function repoRelative(file: string): string {
   return relative(ROOT, file).split("\\").join("/");
 }
@@ -188,7 +221,12 @@ describe("String.fromCodePoint is confined to entities.ts", () => {
   it("no other runtime file calls fromCodePoint", () => {
     const violations = files
       .filter((f) => repoRelative(f) !== ENTITIES_FILE)
-      .flatMap((f) => findRawCalls(readFileSync(f, "utf8"), repoRelative(f)));
+      .flatMap((f) => {
+        const src = readFileSync(f, "utf8");
+        return findRawCalls(src, repoRelative(f)).filter(
+          (v) => !isRangeGuardedCall(src, v.line),
+        );
+      });
     expect(
       violations,
       `fromCodePoint outside entities.ts:\n${violations
