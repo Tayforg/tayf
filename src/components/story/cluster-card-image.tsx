@@ -61,6 +61,18 @@ import {
 //   (documented #118 trade-off), so its naturalWidth is tiny there and
 //   judging it would walk and fetch every candidate. Off by default.
 //
+//   "Real pixel width" is NOT `img.naturalWidth`. next/image gives the <img> a
+//   srcset of w-descriptors plus `sizes`, and per the HTML spec the element's
+//   naturalWidth is then DENSITY-CORRECTED: intrinsic px / (selected w / sizes
+//   px). A 460px photo on a 390px, DPR2 phone selects the 828w candidate
+//   (828 / 390 = 2.12) and reads naturalWidth ~216, so comparing that to the
+//   320 floor false-skipped every photo under ~680px on retina screens (#121
+//   regression). `measureIntrinsicWidth` instead loads the chosen URL
+//   (`currentSrc`) into a probe `Image` WITHOUT a srcset, whose naturalWidth is
+//   the true pixel width; the bytes are already in the memory cache, so it is
+//   not a second download. The image stays opacity-0 until that decision. A
+//   probe failure counts as "unknown" (0), which keeps the image.
+//
 // Optimization:
 //   `next.config.ts` declares a wildcard `images.remotePatterns` so
 //   the built-in Next.js optimizer handles every RSS image host.
@@ -124,10 +136,12 @@ interface ClusterCardImageProps {
    * candidate narrower than this (e.g. a 150x84 og:image) is skipped like an
    * `onError`: the next candidate is tried, and when none is left the logo
    * tier / gray placeholder is shown, instead of upscaling a thumbnail into
-   * a blurry banner. Ignored while the image is not rendered (display:none),
-   * so a hidden duplicate cannot walk the chain. Omit for thumbnails: the
-   * check is off and next/image behaves exactly as before. Not forwarded to
-   * next/image.
+   * a blurry banner. "Real pixels" are measured with a no-srcset probe
+   * (`measureIntrinsicWidth`), not `img.naturalWidth`, which is
+   * density-corrected under a w-descriptor srcset. Ignored while the image is
+   * not rendered (display:none), so a hidden duplicate cannot walk the chain.
+   * Omit for thumbnails: the check is off and next/image behaves exactly as
+   * before. Not forwarded to next/image.
    */
   minIntrinsicWidth?: number;
 }
@@ -158,6 +172,56 @@ export function isUndersizedForSlot(o: {
     o.naturalWidth > 0 &&
     o.naturalWidth < o.minIntrinsicWidth
   );
+}
+
+/**
+ * The real intrinsic pixel width of the image an `<img>` element loaded.
+ *
+ * Why not just `img.naturalWidth`: when the element has a srcset (next/image
+ * always emits one), the HTML spec makes naturalWidth DENSITY-CORRECTED, i.e.
+ * intrinsic px / (selected w / sizes px) for w-descriptors, or intrinsic px /
+ * density for x-descriptors. On a DPR>=2 screen that is roughly half the real
+ * width, so a 460px photo reads ~216.
+ *
+ * - Empty `srcset`: nothing corrects the value, so `img.naturalWidth` is the
+ *   real width and no probe is built.
+ * - Otherwise a probe `Image` with NO srcset/sizes loads `img.currentSrc` (the
+ *   exact URL the element chose, so the bytes come from the memory cache) and
+ *   its naturalWidth is the true pixel width.
+ * - Anything that prevents a measurement (probe error, no decodable width, no
+ *   `currentSrc` to load, no `Image` constructor) resolves 0, which
+ *   `isUndersizedForSlot` treats as "unknown", i.e. keep the image. Never
+ *   rejects.
+ */
+export const PROBE_TIMEOUT_MS = 2000;
+
+export function measureIntrinsicWidth(
+  img: { naturalWidth: number; currentSrc: string; srcset: string },
+  // `globalThis.Image`, not bare `Image`: this module imports next/image's
+  // component under that name, which would shadow the DOM constructor.
+  makeImage: () => HTMLImageElement = () => new globalThis.Image(),
+): Promise<number> {
+  if (!img.srcset) return Promise.resolve(img.naturalWidth);
+  // An empty src never fires load or error; probing it would hang forever.
+  if (!img.currentSrc) return Promise.resolve(0);
+  return new Promise<number>((resolve) => {
+    // The probe should come straight from the memory cache; if it somehow
+    // never settles (cache miss on a stalled network), keep the image rather
+    // than leave the hero hidden.
+    const timer = setTimeout(() => resolve(0), PROBE_TIMEOUT_MS);
+    const settle = (width: number) => {
+      clearTimeout(timer);
+      resolve(width);
+    };
+    try {
+      const probe = makeImage();
+      probe.onload = () => settle(probe.naturalWidth);
+      probe.onerror = () => settle(0);
+      probe.src = img.currentSrc;
+    } catch {
+      settle(0);
+    }
+  });
 }
 
 export function ClusterCardImage({
@@ -322,20 +386,43 @@ export function ClusterCardImage({
           }}
           onLoad={(e) => {
             const img = e.currentTarget;
-            if (
-              isUndersizedForSlot({
-                naturalWidth: img.naturalWidth,
-                renderedWidth: img.clientWidth,
-                minIntrinsicWidth,
-              })
-            ) {
-              // Too small for this slot: skip it like an error, and never
-              // mark it loaded so it does not fade in.
-              setLoaded(false);
-              setIdx((i) => i + 1);
+            const renderedWidth = img.clientWidth;
+            // No floor requested, or the element is not rendered
+            // (display:none -> clientWidth 0): nothing to judge, reveal now.
+            if (minIntrinsicWidth === undefined || renderedWidth === 0) {
+              setLoaded(true);
               return;
             }
-            setLoaded(true);
+            // img.naturalWidth is density-corrected under next/image's
+            // w-descriptor srcset (a 460px photo reads ~216 at DPR2), so the
+            // floor is judged on the probed real width instead. The image
+            // stays opacity-0 until this resolves.
+            void measureIntrinsicWidth(img).then((realWidth) => {
+              // Stale-result guard: drop the result when this <img> left the
+              // DOM while the probe was loading. The <Image> is keyed by
+              // candidate, so its element is removed on unmount and when the
+              // chain advances (or the candidate list changes), and a result
+              // for it must not advance `idx` past a candidate it never
+              // judged. Guard on the element, not on effect lifetime: a hidden
+              // <Activity> runs effect cleanups but keeps the element
+              // connected, and a result dropped there would leave the hero at
+              // opacity-0 once the tree is shown again.
+              if (!img.isConnected) return;
+              if (
+                isUndersizedForSlot({
+                  naturalWidth: realWidth,
+                  renderedWidth,
+                  minIntrinsicWidth,
+                })
+              ) {
+                // Too small for this slot: skip it like an error, and never
+                // mark it loaded so it does not fade in.
+                setLoaded(false);
+                setIdx((i) => i + 1);
+                return;
+              }
+              setLoaded(true);
+            });
           }}
         />
       </div>
