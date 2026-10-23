@@ -79,6 +79,18 @@ describe("/durum metadata", () => {
     expect(metadata.alternates?.canonical).toBe("/durum");
     expect(metadata.robots).toBeUndefined();
   });
+
+  it("sends its own og:url / og:title / twitter:title / og:image instead of the homepage's", () => {
+    const m = metadata as unknown as {
+      openGraph: { url: string; title: string; images: { url: string }[] };
+      twitter: { title: string; images: { url: string }[] };
+    };
+    expect(m.openGraph.url).toBe("/durum");
+    expect(m.openGraph.title).toBe("Sistem durumu — Tayf");
+    expect(m.twitter.title).toBe("Sistem durumu — Tayf");
+    expect(m.openGraph.images[0]?.url).toBe("/opengraph-image");
+    expect(m.twitter.images[0]?.url).toBe("/twitter-image");
+  });
 });
 
 describe("/durum page shell", () => {

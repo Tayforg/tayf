@@ -9,6 +9,7 @@ import {
   TOPIC_NOTE_PREFIX,
   TOPIC_SLUGS,
 } from "@/lib/clusters/topic-query";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /konu — Pack C ("Konu") index. Lists the six reader-facing topic hubs
 // (politika is deliberately absent — it's a valid clusters.topic7 value but
@@ -18,12 +19,13 @@ import {
 // resolves to null on error, so this page prerenders into its honest
 // unavailable state rather than failing the build.
 
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Konular",
   description:
     "Tayf kümelerini konuya göre gezin: dünya, ekonomi, spor, yaşam, teknoloji, genel. Konu etiketleri otomatik atanır.",
-  alternates: { canonical: "/konu" },
-};
+  path: "/konu",
+});
 
 // Shared class tokens — literal strings only (Tailwind 4 has no runtime
 // scanner). Mirrors /hafta's token set.

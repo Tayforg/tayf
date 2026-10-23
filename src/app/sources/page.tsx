@@ -3,15 +3,17 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Kaynaklar",
   description:
     "Tayf'ın izlediği Türk haber kaynakları — yanlılık kategorisi, son 7 günlük aktivite ve son görülme zamanıyla birlikte.",
-  alternates: { canonical: "/sources" },
-};
+  path: "/sources",
+});
 
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";

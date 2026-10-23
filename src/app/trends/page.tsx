@@ -4,15 +4,17 @@ import Link from "next/link";
 import { RisingTopics } from "@/components/trends/rising-topics";
 import { ScrollToEnd } from "@/components/trends/scroll-to-end";
 import { PageHero } from "@/components/ui/page-hero";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Medya DNA Trendi",
   description:
     "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi ve bugün yükselen konular.",
-  alternates: { canonical: "/trends" },
-};
+  path: "/trends",
+});
 import { ZONE_META } from "@/lib/bias/config";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { getRisingEntities } from "@/lib/trends/rising-query";

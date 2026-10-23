@@ -7,6 +7,7 @@ import {
   getPublicCorrections,
   type PublicCorrection,
 } from "@/lib/corrections/public-log";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /duzeltmeler — S-18, the public corrections log. Every cluster page carries
 // a correction form; this page is the other half of that promise: what came
@@ -25,12 +26,13 @@ import {
 // (default 12), so the log is a rolling ~12-month window, not an all-time
 // record — the page says so rather than implying an unbroken archive.
 
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Düzeltmeler",
   description:
     "Okurların bildirdiği ve Tayf'ın incelediği düzeltmelerin açık kaydı.",
-  alternates: { canonical: "/duzeltmeler" },
-};
+  path: "/duzeltmeler",
+});
 
 // Literal class tokens only — Tailwind 4 has no runtime scanner. Mirrors
 // /kalite's token set.

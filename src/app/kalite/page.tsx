@@ -7,6 +7,7 @@ import {
   getQualitySnapshots,
   type QualitySnapshot,
 } from "@/lib/quality/snapshots";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /kalite — M-09, the pipeline's own quality scoreboard. Publishes the
 // exact numbers `node scripts/audit-clusters.mjs --json --persist` writes
@@ -22,12 +23,13 @@ import {
 // a human-labelled gold set. Showing them as "precision: X%" would imply an
 // accuracy claim the pipeline cannot back yet.
 
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Küme kalitesi",
   description:
     "Tayf'ın kümeleme ardışık düzeninin her gece kendi üzerinde ölçtüğü kalite sayıları: haber ve küme sayısı, tekil küme oranı, kaynak çeşitliliği ve kör nokta tutarsızlık oranı.",
-  alternates: { canonical: "/kalite" },
-};
+  path: "/kalite",
+});
 
 // Shared class tokens — literal strings only (Tailwind 4 has no runtime
 // scanner, so every className must be a string it can see at build time).

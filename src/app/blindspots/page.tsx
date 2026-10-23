@@ -3,18 +3,18 @@ import Link from "next/link";
 import { Suspense } from "react";
 import { connection } from "next/server";
 import { Eye, EyeOff } from "lucide-react";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Kör Noktalar",
   description:
     "Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Türk medyasındaki kör noktaları tek ekranda görün.",
-  alternates: {
-    canonical: "/blindspots",
-    types: { "application/rss+xml": "/rss/kor-noktalar.xml" },
-  },
-};
+  path: "/blindspots",
+  alternateTypes: { "application/rss+xml": "/rss/kor-noktalar.xml" },
+});
 
 import { ClusterCard } from "@/components/story/cluster-card";
 import { NewsletterForm } from "@/components/newsletter/newsletter-form";
