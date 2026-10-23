@@ -472,6 +472,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "108_jev_stall_check_v2.sql",
       // VALUES-list copy of BIAS_TO_ZONE in source_reliability_refresh_source(); pinned by tests/migrations/111-source-reliability.test.ts
       "111_source_reliability.sql",
+      // 114 re-creates ops_health_report() with 108's body verbatim plus row 13, so it repeats 108's VALUES-list copy of BIAS_TO_ZONE; pinned by tests/migrations/114-sources-newly-dark.test.ts
+      "114_sources_newly_dark.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

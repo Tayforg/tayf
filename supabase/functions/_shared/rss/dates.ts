@@ -20,6 +20,7 @@
 // stays entirely inside `normalize.ts`'s `parseDate` — imported here
 // read-only, never edited.
 
+import { codePointToString } from "./entities.ts";
 import { parseDate } from "./normalize.ts";
 
 /** Per-slug post-clean rewrite, applied after the generic steps below. */
@@ -38,14 +39,16 @@ export const SOURCE_DATE_RULES: Record<string, SourceDateRule> = {};
 const DATE_ENTITY_RE = /&(amp|nbsp|#x[0-9a-fA-F]+|#\d+);/g;
 
 function decodeDateEntities(raw: string): string {
-  return raw.replace(DATE_ENTITY_RE, (match, entity: string) => {
+  return raw.replace(DATE_ENTITY_RE, (_match, entity: string) => {
     if (entity === "amp") return "&";
     if (entity === "nbsp") return " ";
     const isHex = entity[1] === "x" || entity[1] === "X";
     const codePoint = isHex
       ? parseInt(entity.slice(2), 16)
       : Number(entity.slice(1));
-    return Number.isNaN(codePoint) ? match : String.fromCodePoint(codePoint);
+    // codePointToString never throws: an out-of-range or XML-illegal reference
+    // (&#1114112;, &#0;, &#xD800;) is dropped instead of dropping the source.
+    return codePointToString(codePoint);
   });
 }
 

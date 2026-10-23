@@ -85,8 +85,35 @@ let currentFx: { fx: Fixture; bytes: Buffer } | null = null;
 
 function makeArticlesBuilder() {
   const ins: Array<{ col: string; vals: unknown[] }> = [];
+  const gtes: Array<{ col: string; val: unknown }> = [];
   const b: Record<string, unknown> = {};
   const readResult = () => {
+    // Twin lookup (migration 113): the stored rows of these sources that carry
+    // one of these source_article_keys and were created at or after the gte
+    // bound -- a cross product, like the real table.
+    const keyIn = ins.find((c) => c.col === "source_article_key");
+    if (keyIn) {
+      const sidIn = ins.find((c) => c.col === "source_id");
+      const since = gtes.find((g) => g.col === "created_at")?.val;
+      const sinceMs = typeof since === "string" ? Date.parse(since) : Number.NEGATIVE_INFINITY;
+      const rows = [...articlesStore.values()]
+        .filter(
+          (r) =>
+            (sidIn?.vals ?? []).includes(r.source_id) &&
+            typeof r.source_article_key === "string" &&
+            keyIn.vals.includes(r.source_article_key) &&
+            Date.parse(String(r.created_at)) >= sinceMs,
+        )
+        .map((r) => ({
+          id: r.id,
+          url: r.url,
+          title: r.title,
+          source_id: r.source_id,
+          source_article_key: r.source_article_key,
+          created_at: r.created_at,
+        }));
+      return { data: rows, error: null };
+    }
     const url = ins.find((c) => c.col === "url");
     if (url) {
       const rows = (url.vals as string[])
@@ -107,6 +134,10 @@ function makeArticlesBuilder() {
   };
   Object.assign(b, {
     select: () => b,
+    gte: (col: string, val: unknown) => {
+      gtes.push({ col, val });
+      return b;
+    },
     in: (col: string, vals: unknown) => {
       ins.push({ col, vals: Array.isArray(vals) ? vals : [vals] });
       return b;
@@ -121,7 +152,7 @@ function makeArticlesBuilder() {
         for (const r of arr) {
           if (articlesStore.has(r.url)) continue; // ignoreDuplicates on url
           const id = `art-${articlesStore.size + 1}`;
-          articlesStore.set(r.url, { ...r, id });
+          articlesStore.set(r.url, { ...r, id, created_at: new Date().toISOString() });
           inserted.push({ id });
         }
         return { data: inserted, error: null };

@@ -197,3 +197,82 @@ export async function upsertWithBisect<T>(
 
   return result;
 }
+
+// ---------------------------------------------------------------------------
+// Parse budget (twin-articles item, part B)
+// ---------------------------------------------------------------------------
+//
+// Edge Functions are killed when one invocation burns too much CPU (HTTP 546,
+// reason CPUTime), and a killed cycle loses everything it fetched. The CPU of
+// a cycle is dominated by decoding, XML-parsing and normalising the feeds that
+// CHANGED (a 304 or a body-hash hit costs almost nothing). The budget caps how
+// many changed feeds, and how many body bytes, one cycle parses; the feeds it
+// refuses are deferred, not dropped (see `prioritizeIds`).
+
+export interface ParseBudget {
+  /**
+   * Asks whether a changed feed with a body of `bytes` may be parsed now, and
+   * if so books it. `priority` marks a feed deferred by the previous cycle.
+   * Rules, in order:
+   *   1. `maxParses` reached -> refuse.
+   *   2. nothing parsed yet this cycle -> admit, however big the body (a feed
+   *      bigger than the byte budget would otherwise never be parsed).
+   *   3. it fits (`bytes so far + bytes <= maxBytes`) -> admit.
+   *   4. `priority` and no overshoot yet this cycle -> admit, once.
+   *   5. otherwise refuse.
+   * A refusal changes nothing. Pure and synchronous: it never throws.
+   */
+  admit(bytes: number, priority?: boolean): boolean;
+  /** Parses admitted so far. */
+  readonly parses: number;
+  /** Body bytes admitted so far. */
+  readonly bytes: number;
+}
+
+export function createParseBudget(maxParses: number, maxBytes: number): ParseBudget {
+  let parses = 0;
+  let used = 0;
+  let overshot = false;
+  return {
+    admit(bytes: number, priority = false): boolean {
+      if (parses >= maxParses) return false;
+      if (parses === 0 || used + bytes <= maxBytes) {
+        parses++;
+        used += bytes;
+        return true;
+      }
+      if (priority && !overshot) {
+        overshot = true;
+        parses++;
+        used += bytes;
+        return true;
+      }
+      return false;
+    },
+    get parses() {
+      return parses;
+    },
+    get bytes() {
+      return used;
+    },
+  };
+}
+
+/**
+ * Stable reorder of `rows`: the rows whose `id` is in `ids` first, then the
+ * rest, each group in its original order. Used to put the feeds the previous
+ * cycle deferred at the front of this cycle's fetch order, so a deferred feed
+ * is not starved by the rotation. Returns a new array; ids that match no row
+ * are ignored.
+ */
+export function prioritizeIds<T extends { id: string }>(
+  rows: readonly T[],
+  ids: Iterable<string>,
+): T[] {
+  const first = new Set(ids);
+  if (first.size === 0) return [...rows];
+  const head: T[] = [];
+  const tail: T[] = [];
+  for (const row of rows) (first.has(row.id) ? head : tail).push(row);
+  return [...head, ...tail];
+}

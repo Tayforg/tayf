@@ -221,6 +221,37 @@ const prefilterLookupCalls: Array<{ sourceIds: string[]; hashes: string[] }> = [
 // null means never fail.
 let forcedPrefilterErrorOnCall: number | null = null;
 
+// Twin-articles (migration 113): rows "stored" in `articles` that carry a
+// source_article_key, read by `dropExistingSourceArticleKeyRows`'s
+// `select("id, url, title, source_id, source_article_key, created_at")
+// .in("source_id", ids).in("source_article_key", keys).gte("created_at", since)`.
+// The mock tells that lookup apart from the other two `articles` reads by its
+// `.in("source_article_key", ...)` call, and answers like the real table does:
+// every stored row whose source_id AND key are in the two lists (a cross
+// product, not a pairwise match -- the SUT must check exact pairs itself) and
+// whose created_at is >= the gte value.
+type StoredKeyRow = {
+  id: string;
+  url: string;
+  title: string;
+  source_id: string;
+  source_article_key: string;
+  created_at?: string;
+};
+let storedArticlesByKey: StoredKeyRow[] = [];
+// When set, the key lookup returns this as a Supabase `error`.
+let forcedKeyLookupError: string | null = null;
+// When true, the key lookup throws instead of returning an envelope.
+let forcedKeyLookupThrow = false;
+// One entry per key lookup this test made.
+const keyLookupCalls: Array<{
+  sourceIds: string[];
+  keys: string[];
+  gte: Array<{ column: string; value: unknown }>;
+}> = [];
+// Every `.gte(column, value)` call on an `articles` query this test made.
+const articlesGteCalls: Array<{ column: string; value: unknown }> = [];
+
 // Per-test source roster. The ingest handler reads from `sources` via
 // `.from("sources").select(...).eq("active", true).order("slug")` and
 // awaits the chain directly — so the chainable mock terminates via `then`.
@@ -237,6 +268,7 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
       // the url-keyed title-version lookup, both against `articles`) never
       // bleed into each other.
       const inCalls: Array<{ column: string; values: unknown[] }> = [];
+      const gteCalls: Array<{ column: string; value: unknown }> = [];
       const settle = () => {
         if (table === "sources") {
           if (forcedSourcesError) {
@@ -266,6 +298,26 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
               );
             return { data: rows, error: null };
           }
+          // `dropExistingSourceArticleKeyRows`'s lookup (migration 113):
+          // `.in("source_id", ids).in("source_article_key", keys).gte(...)`.
+          const keyIn = inCalls.find((c) => c.column === "source_article_key");
+          if (keyIn) {
+            const ids = (inCalls.find((c) => c.column === "source_id")?.values ?? []) as string[];
+            const keys = keyIn.values as string[];
+            keyLookupCalls.push({ sourceIds: [...ids], keys: [...keys], gte: [...gteCalls] });
+            if (forcedKeyLookupThrow) throw new Error("simulated key lookup throw");
+            if (forcedKeyLookupError) {
+              return { data: null, error: { message: forcedKeyLookupError } };
+            }
+            const since = gteCalls.find((c) => c.column === "created_at")?.value;
+            const sinceMs = typeof since === "string" ? Date.parse(since) : Number.NEGATIVE_INFINITY;
+            const hours1Ago = new Date(Date.now() - 3_600_000).toISOString();
+            const rows = storedArticlesByKey
+              .filter((r) => ids.includes(r.source_id) && keys.includes(r.source_article_key))
+              .map((r) => ({ ...r, created_at: r.created_at ?? hours1Ago }))
+              .filter((r) => Date.parse(r.created_at) >= sinceMs);
+            return { data: rows, error: null };
+          }
           // Only reached by a plain `.select(...)` read (the batched/
           // per-row `.upsert(...)` calls below return their own thenable
           // and never hit this `settle()`) — i.e.
@@ -293,6 +345,11 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
         eq: () => chain,
         order: () => chain,
         limit: () => chain,
+        gte: (column: string, value: unknown) => {
+          gteCalls.push({ column, value });
+          if (table === "articles") articlesGteCalls.push({ column, value });
+          return chain;
+        },
         in: (column: string, values: unknown) => {
           inCalls.push({
             column,
@@ -501,6 +558,12 @@ type FetchOverride = {
   bodyHash?: string;
   error?: string;
   notAFeed?: boolean;
+  // Parse budget (twin-articles item, part B). `bodyBytes` is what the mocked
+  // fetcher reports to `opts.admitParse` for a changed body (default 1000); it
+  // is not part of the returned result. `parseDeferred` lets a test force that
+  // flag onto a result directly.
+  bodyBytes?: number;
+  parseDeferred?: boolean;
 };
 
 const fetcherItems: Record<string, MockFeedItem[]> = {};
@@ -522,7 +585,10 @@ vi.mock("../../supabase/functions/_shared/rss/fetcher.ts", () => ({
   fetchFeed: vi.fn(
     async (
       source: { id: string; rss_url: string },
-      opts?: { conditionalCache?: Map<string, { etag?: string; lastModified?: string }> },
+      opts?: {
+        conditionalCache?: Map<string, { etag?: string; lastModified?: string }>;
+        admitParse?: (bodyBytes: number) => boolean;
+      },
     ): Promise<{
       source: unknown;
       items: MockFeedItem[];
@@ -533,13 +599,28 @@ vi.mock("../../supabase/functions/_shared/rss/fetcher.ts", () => ({
       bodyHash?: string;
       error?: string;
       notAFeed?: boolean;
+      parseDeferred?: boolean;
     }> => {
       fetchFeedCalls.push({
         sourceId: source.id,
         cached: opts?.conditionalCache?.get(source.id),
       });
       const items = fetcherItems[source.rss_url] ?? [];
-      const override = fetcherResultOverrides[source.rss_url] ?? {};
+      const { bodyBytes, ...override } = fetcherResultOverrides[source.rss_url] ?? {};
+      // Like the real fetcher: the parse budget is asked only for a changed
+      // 2xx body -- never for an error, a 304 or a body-hash hit.
+      if (opts?.admitParse && !override.error && !override.notModified) {
+        if (!opts.admitParse(bodyBytes ?? 1000)) {
+          // The real fetcher stamps the response's validators on the cache
+          // before it consults the budget and restores them itself; this mock
+          // stamps and does NOT restore, so the tests prove the ingest worker
+          // puts the cache back on its own.
+          if (override.etag && opts.conditionalCache) {
+            opts.conditionalCache.set(source.id, { etag: override.etag });
+          }
+          return { source, items: [], status: override.status ?? 200, parseDeferred: true };
+        }
+      }
       return { source, items, status: 200, ...override };
     },
   ),
@@ -605,6 +686,11 @@ beforeEach(() => {
   forcedTitleEditRpcError = null;
   prefilterLookupCalls.length = 0;
   forcedPrefilterErrorOnCall = null;
+  storedArticlesByKey = [];
+  forcedKeyLookupError = null;
+  forcedKeyLookupThrow = false;
+  keyLookupCalls.length = 0;
+  articlesGteCalls.length = 0;
   articlesUrlLookupCalls.length = 0;
   titleVersionInsertCalls.length = 0;
   recordedTitleVersionKeys.clear();
@@ -2405,5 +2491,841 @@ describe("validators follow row durability [silent-feeds]", () => {
     await run();
     expect(fetchFeedCalls.at(-1)?.cached?.etag).toBe('"fresh-e"');
     expect(fetchFeedCalls.at(-1)?.cached?.lastModified).toBe("Thu, 02 Jan 2025 00:00:00 GMT");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Twin articles (migration 113): a headline edit gives an article a new URL
+// slug and keeps the numeric id its CMS put in the URL. The url-keyed upsert
+// and the (source_id, content_hash) check both miss that, so the edit used to
+// become a second row. `source_article_key` (the id) is stored on every row;
+// a re-polled item whose key is already stored for the same source under a
+// DIFFERENT url is a twin: it is not inserted, its new headline is recorded
+// through the existing title-version path instead.
+// ---------------------------------------------------------------------------
+describe("twin drop: same source_article_key under another url [migration 113]", () => {
+  const AKSAM = {
+    id: "src-aksam-113",
+    name: "Akşam",
+    slug: "aksam",
+    url: "https://www.aksam.com.tr",
+    rss_url: "https://www.aksam.com.tr/rss.xml",
+  };
+  const URL_A =
+    "https://www.aksam.com.tr/guncel/bakan-gulerden-mekke-ittifaki-vurgusu/haber-1708664";
+  const URL_B =
+    "https://www.aksam.com.tr/guncel/bakan-gulerden-mekke-ittifaki-vurgusu-husilerle-catismaya-girilmeyecek/haber-1708664";
+  const TITLE_A = "Bakan Güler'den Mekke ittifakı vurgusu";
+  const TITLE_B = "Bakan Güler: Husilerle çatışmaya girilmeyecek";
+
+  function seed(
+    source: { id: string; name: string; slug: string; url: string; rss_url: string },
+    feed: MockFeedItem[],
+    extra: Record<string, unknown> = {},
+  ): string {
+    fakeSources.push({
+      ...source,
+      active: true,
+      fetch_etag: null,
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 0,
+      ...extra,
+    });
+    fetcherItems[source.rss_url] = feed;
+    return source.rss_url;
+  }
+
+  async function run() {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  const upsertedUrls = () => articlesUpsertCalls.flat().map((r) => r.url);
+
+  function persisted(id: string) {
+    return sourceFetchStateWrites.flatMap((w) => w.rows).find((r) => r.id === id);
+  }
+
+  it("1. drops the twin, records its headline against the stored article and still commits the validators", async () => {
+    const rssUrl = seed(
+      AKSAM,
+      [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }],
+      { fetch_etag: 'W/"old"', fetch_body_hash: "stored-hash" },
+    );
+    fetcherResultOverrides[rssUrl] = { etag: '"new"', bodyHash: "hash-new" };
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+
+    const body = await run();
+
+    // The twin never reaches an upsert call (and an all-twin chunk sends none).
+    expect(upsertedUrls()).not.toContain(URL_B);
+    expect(articlesUpsertCalls).toHaveLength(0);
+    expect(body.twinsDropped).toBe(1);
+    expect(body.inserted).toBe(0);
+
+    // The new headline is recorded against the STORED article, with no extra
+    // url lookup (the stored row was already resolved by the key lookup).
+    expect(titleVersionInsertCalls).toEqual([
+      [{ article_id: "art-1", source_id: AKSAM.id, old_title: TITLE_A, new_title: TITLE_B }],
+    ]);
+    expect(titleEditRpcCalls).toEqual([
+      [{ article_id: "art-1", old_title: TITLE_A, new_title: TITLE_B }],
+    ]);
+    expect(articlesUrlLookupCalls).toHaveLength(0);
+    expect(body.titleVersions).toBe(1);
+    expect(body.titleWriteBacks).toBe(1);
+
+    // A twin counts as stored: the source settles and its validators commit.
+    expect(body.validatorsWithheld).toBe(0);
+    const row = persisted(AKSAM.id);
+    expect(row?.fetch_etag).toBe('"new"');
+    expect(row?.fetch_body_hash).toBe("hash-new");
+    expect(row?.fetch_fail_streak).toBe(0);
+  });
+
+  it("1b. a twin whose headline did not change is dropped without a title version", async () => {
+    seed(AKSAM, [{ title: TITLE_A, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+
+    const body = await run();
+
+    expect(body.twinsDropped).toBe(1);
+    expect(upsertedUrls()).not.toContain(URL_B);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+    expect(titleEditRpcCalls).toHaveLength(0);
+  });
+
+  it("1c. a twin and a new article in one chunk: the new one is upserted, the twin is recorded, and only the new url is looked up", async () => {
+    const URL_NEW = "https://www.aksam.com.tr/spor/baska-bir-haber/haber-1708999";
+    seed(AKSAM, [
+      { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: "Tamamen başka bir haber", link: URL_NEW, pubDate: "Fri, 23 Oct 2026 17:20:00 GMT" },
+    ]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([URL_NEW]);
+    expect(body.twinsDropped).toBe(1);
+    expect(body.inserted).toBe(1);
+    expect(titleVersionInsertCalls).toHaveLength(1);
+    expect(titleVersionInsertCalls[0]).toEqual([
+      { article_id: "art-1", source_id: AKSAM.id, old_title: TITLE_A, new_title: TITLE_B },
+    ]);
+    // ONE url select for the whole chunk, and it names only the url that was
+    // not already resolved through its key.
+    expect(articlesUrlLookupCalls).toHaveLength(1);
+    expect(articlesUrlLookupCalls[0]?.urls).toEqual([URL_NEW]);
+  });
+
+  it("2. leaves a row alone when the stored row with that key has the SAME url (the normal re-poll path)", async () => {
+    seed(AKSAM, [{ title: TITLE_A, link: URL_A, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([URL_A]);
+    expect(body.twinsDropped).toBe(0);
+    expect(keyLookupCalls).toHaveLength(1);
+  });
+
+  it("2b. keeps the row when ANY match has its url, even beside a different-url match", async () => {
+    seed(AKSAM, [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+      { id: "art-2", source_id: AKSAM.id, source_article_key: "1708664", url: URL_B, title: TITLE_B },
+    ];
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([URL_B]);
+    expect(body.twinsDropped).toBe(0);
+  });
+
+  it("3. does not treat the same key under ANOTHER source_id as a twin (exact (source_id, key) pair)", async () => {
+    // Two sources in one chunk, so the lookup's two `.in()` lists are a cross
+    // product that returns BOTH stored rows. Source X's item carries the key
+    // that is stored for source Y, and the other way round.
+    const SRC_X = { id: "src-x-113", name: "X", slug: "x-113", url: "https://x.test", rss_url: "https://x.test/rss" };
+    const SRC_Y = { id: "src-y-113", name: "Y", slug: "y-113", url: "https://y.test", rss_url: "https://y.test/rss" };
+    seed(SRC_X, [{ title: "X haberi bir", link: "https://x.test/a/haber-2222222" }]);
+    seed(SRC_Y, [{ title: "Y haberi bir", link: "https://y.test/a/haber-1111111" }]);
+    storedArticlesByKey = [
+      { id: "art-x", source_id: SRC_X.id, source_article_key: "1111111", url: "https://x.test/old/haber-1111111", title: "x eski" },
+      { id: "art-y", source_id: SRC_Y.id, source_article_key: "2222222", url: "https://y.test/old/haber-2222222", title: "y eski" },
+    ];
+
+    const body = await run();
+
+    expect(upsertedUrls().sort()).toEqual(["https://x.test/a/haber-2222222", "https://y.test/a/haber-1111111"]);
+    expect(body.twinsDropped).toBe(0);
+    // The cross product really was returned: the lookup ran with both lists.
+    expect(keyLookupCalls).toHaveLength(1);
+    expect(keyLookupCalls[0]?.sourceIds.sort()).toEqual([SRC_X.id, SRC_Y.id]);
+    expect(keyLookupCalls[0]?.keys.sort()).toEqual(["1111111", "2222222"]);
+  });
+
+  it("4. never looks up a row without a key, and upserts it", async () => {
+    const URL_SLUG = "https://www.aksam.com.tr/guncel/sadece-slug-var";
+    seed(AKSAM, [{ title: "Anahtarsız haber", link: URL_SLUG, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+
+    const body = await run();
+
+    expect(keyLookupCalls).toHaveLength(0);
+    expect(upserted.map((r) => r.url)).toEqual([URL_SLUG]);
+    expect(upserted[0]?.source_article_key).toBeNull();
+    expect(body.twinsDropped).toBe(0);
+  });
+
+  it("4b. a source in ARTICLE_KEY_EXCLUDED_SLUGS (daily-sabah) gets no key even when its url has a digit run", async () => {
+    const DS = {
+      id: "src-ds-113",
+      name: "Daily Sabah",
+      slug: "daily-sabah",
+      url: "https://www.dailysabah.com",
+      rss_url: "https://www.dailysabah.com/rss",
+    };
+    const urlA = "https://www.dailysabah.com/business/economy/german-industry-lost-nearly-500000-jobs-since-2019-ifo";
+    const urlB = "https://www.dailysabah.com/world/mid-east/funding-shortfall-forces-wfp-to-cut-food-aid-to-500000-gazans";
+    seed(DS, [
+      { title: "German industry lost nearly 500,000 jobs since 2019: Ifo", link: urlA },
+      { title: "Funding shortfall forces WFP to cut food aid to 500,000 Gazans", link: urlB },
+    ]);
+
+    const body = await run();
+
+    expect(keyLookupCalls).toHaveLength(0);
+    expect(upserted.map((r) => r.url).sort()).toEqual([urlA, urlB].sort());
+    expect(upserted.every((r) => r.source_article_key === null)).toBe(true);
+    expect(body.twinsDropped).toBe(0);
+  });
+
+  it("5. a key lookup error keeps the row (fail-open) and counts one prefilter error", async () => {
+    seed(AKSAM, [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+    forcedKeyLookupError = "simulated key lookup failure";
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([URL_B]);
+    expect(body.twinsDropped).toBe(0);
+    expect(body.prefilterErrors).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(1);
+    expect((ingestCycleInserts[0] as { prefilter_errors?: number }).prefilter_errors).toBe(1);
+  });
+
+  it("5b. a key lookup that THROWS also keeps the row and counts one prefilter error", async () => {
+    seed(AKSAM, [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    forcedKeyLookupThrow = true;
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([URL_B]);
+    expect(body.prefilterErrors).toBe(1);
+  });
+
+  it("6. two twins inside one feed: one is upserted, the other counts as dropped", async () => {
+    seed(AKSAM, [
+      { title: TITLE_A, link: URL_A, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+
+    const body = await run();
+
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]?.url).toBe(URL_A);
+    expect(body.twinsDropped).toBe(1);
+    expect(body.dedupedInBatch).toBe(0);
+    // Dropped before the chunk loop: nothing was stored to look the key up against.
+    expect(upsertedUrls()).not.toContain(URL_B);
+  });
+
+  it("6b. a repeat with the same content hash counts as deduped, not as a twin", async () => {
+    seed(AKSAM, [
+      { title: TITLE_A, link: URL_A, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: TITLE_A, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+
+    const body = await run();
+
+    expect(upserted).toHaveLength(1);
+    expect(body.twinsDropped).toBe(0);
+  });
+
+  it("7. bounds the lookup to the last 7 days with gte(created_at, now - 7d)", async () => {
+    seed(AKSAM, [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+
+    await run();
+
+    expect(articlesGteCalls).toHaveLength(1);
+    const call = articlesGteCalls[0]!;
+    expect(call.column).toBe("created_at");
+    expect(typeof call.value).toBe("string");
+    const expected = Date.now() - 7 * 24 * 3_600_000;
+    expect(Math.abs(Date.parse(call.value as string) - expected)).toBeLessThan(60_000);
+  });
+
+  it("7b. a stored row older than the 7-day window is not a twin", async () => {
+    seed(AKSAM, [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    storedArticlesByKey = [
+      {
+        id: "art-old",
+        source_id: AKSAM.id,
+        source_article_key: "1708664",
+        url: URL_A,
+        title: TITLE_A,
+        created_at: new Date(Date.now() - 8 * 24 * 3_600_000).toISOString(),
+      },
+    ];
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([URL_B]);
+    expect(body.twinsDropped).toBe(0);
+  });
+
+  it("8. stamps source_article_key on every upserted row", async () => {
+    const URL_C = "https://www.aksam.com.tr/yasam/baska-haber/haber-1708701";
+    seed(AKSAM, [
+      { title: "Sekiz numaralı haber", link: URL_C, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+
+    await run();
+
+    expect(upserted).toHaveLength(1);
+    expect(upserted[0]?.source_article_key).toBe("1708701");
+    // The key rides in the upsert only: ingest_cycles has no column for it.
+    expect(JSON.stringify(ingestCycleInserts)).not.toContain("1708701");
+  });
+
+  it("reports twinsDropped in the cycle JSON summary and not as an ingest_cycles column", async () => {
+    seed(AKSAM, [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await run();
+      const cycleCall = logSpy.mock.calls.find((args) => args[0] === "[ingest] cycle") as
+        | [string, string]
+        | undefined;
+      expect(cycleCall).toBeDefined();
+      const summary = JSON.parse(cycleCall?.[1] ?? "{}") as { twinsDropped?: number };
+      expect(summary.twinsDropped).toBe(1);
+      // A count-only log line: neither url nor title appears in it.
+      const twinLines = logSpy.mock.calls
+        .map((args) => args.join(" "))
+        .filter((l) => /twin/i.test(l) && !l.startsWith("[ingest] cycle"));
+      expect(twinLines.length).toBeGreaterThan(0);
+      for (const l of twinLines) {
+        expect(l).not.toContain(URL_B);
+        expect(l).not.toContain("Husilerle");
+      }
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("twins_dropped");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dropExistingSourceArticleKeyRows, called directly (same technique as
+// dedupeBySourceContentHash / recordTitleVersions above).
+// ---------------------------------------------------------------------------
+
+type KeyedRow = { source_id: string; url: string; source_article_key: string | null };
+type ExistingKeyed = {
+  id: string;
+  url: string;
+  title: string;
+  source_id: string;
+  source_article_key: string;
+  created_at: string;
+};
+type DropKeyFn = (
+  supabase: unknown,
+  rows: ReadonlyArray<KeyedRow>,
+  sinceIso: string,
+) => Promise<{
+  rows: KeyedRow[];
+  twins: Array<{ row: KeyedRow; existing: ExistingKeyed }>;
+  lookupErrors: number;
+}>;
+
+async function importDropKey(): Promise<{ drop: DropKeyFn; supabase: unknown }> {
+  const mod = (await import("../../supabase/functions/ingest/index.ts")) as {
+    dropExistingSourceArticleKeyRows: DropKeyFn;
+  };
+  const { createServiceClient } = (await import(
+    "../../supabase/functions/_shared/supabase.ts"
+  )) as { createServiceClient: () => unknown };
+  return { drop: mod.dropExistingSourceArticleKeyRows, supabase: createServiceClient() };
+}
+
+describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
+  const SINCE = "2026-10-16T00:00:00.000Z";
+
+  it("returns the rows untouched and makes no query when nothing carries a key", async () => {
+    const { drop, supabase } = await importDropKey();
+    const rows: KeyedRow[] = [
+      { source_id: "s1", url: "https://a.test/x", source_article_key: null },
+      { source_id: "s1", url: "https://a.test/y", source_article_key: null },
+    ];
+    const out = await drop(supabase, rows, SINCE);
+    expect(out.rows).toEqual(rows);
+    expect(out.twins).toEqual([]);
+    expect(out.lookupErrors).toBe(0);
+    expect(keyLookupCalls).toHaveLength(0);
+  });
+
+  it("returns an empty result for an empty input", async () => {
+    const { drop, supabase } = await importDropKey();
+    const out = await drop(supabase, [], SINCE);
+    expect(out).toEqual({ rows: [], twins: [], lookupErrors: 0 });
+    expect(keyLookupCalls).toHaveLength(0);
+  });
+
+  it("looks up keyed rows only and keeps unkeyed rows in their original order", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      { id: "a1", source_id: "s1", source_article_key: "1111111", url: "https://a.test/old-1111111", title: "t" },
+    ];
+    const rows: KeyedRow[] = [
+      { source_id: "s1", url: "https://a.test/none-1", source_article_key: null },
+      { source_id: "s1", url: "https://a.test/new-1111111", source_article_key: "1111111" },
+      { source_id: "s1", url: "https://a.test/none-2", source_article_key: null },
+      { source_id: "s1", url: "https://a.test/fresh-2222222", source_article_key: "2222222" },
+    ];
+    const out = await drop(supabase, rows, SINCE);
+    expect(out.rows.map((r) => r.url)).toEqual([
+      "https://a.test/none-1",
+      "https://a.test/none-2",
+      "https://a.test/fresh-2222222",
+    ]);
+    expect(out.twins.map((t) => t.row.url)).toEqual(["https://a.test/new-1111111"]);
+    expect(keyLookupCalls).toHaveLength(1);
+    expect(keyLookupCalls[0]?.keys.sort()).toEqual(["1111111", "2222222"]);
+  });
+
+  it("picks the EARLIEST created_at match as the stored article of a twin", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      { id: "later", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v2-1111111", title: "v2", created_at: "2026-10-20T10:00:00.000Z" },
+      { id: "earliest", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v1-1111111", title: "v1", created_at: "2026-10-20T08:00:00.000Z" },
+      { id: "middle", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v15-1111111", title: "v1.5", created_at: "2026-10-20T09:00:00.000Z" },
+    ];
+    const out = await drop(
+      supabase,
+      [{ source_id: "s1", url: "https://a.test/v3-1111111", source_article_key: "1111111" }],
+      SINCE,
+    );
+    expect(out.rows).toEqual([]);
+    expect(out.twins).toHaveLength(1);
+    expect(out.twins[0]?.existing.id).toBe("earliest");
+    expect(out.twins[0]?.existing.title).toBe("v1");
+  });
+
+  it("splits keyed rows into lookups of at most 100 (PREFILTER_CHUNK)", async () => {
+    const { drop, supabase } = await importDropKey();
+    const rows: KeyedRow[] = Array.from({ length: 250 }, (_, n) => ({
+      source_id: "s1",
+      url: `https://a.test/x-${1000000 + n}`,
+      source_article_key: String(1000000 + n),
+    }));
+    const out = await drop(supabase, rows, SINCE);
+    expect(out.rows).toHaveLength(250);
+    expect(keyLookupCalls.map((c) => c.keys.length)).toEqual([100, 100, 50]);
+    for (const c of keyLookupCalls) {
+      expect(c.gte).toEqual([{ column: "created_at", value: SINCE }]);
+    }
+  });
+
+  it("a failing slice keeps only its own rows and counts one lookup error", async () => {
+    const { drop, supabase } = await importDropKey();
+    forcedKeyLookupError = "boom";
+    const rows: KeyedRow[] = Array.from({ length: 150 }, (_, n) => ({
+      source_id: "s1",
+      url: `https://a.test/x-${1000000 + n}`,
+      source_article_key: String(1000000 + n),
+    }));
+    const out = await drop(supabase, rows, SINCE);
+    expect(out.rows).toHaveLength(150);
+    expect(out.twins).toEqual([]);
+    expect(out.lookupErrors).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parse budget (twin-articles item, part B). A cycle that decoded, parsed and
+// normalised every changed feed was killed on the platform CPU limit (HTTP 546,
+// reason CPUTime) and lost everything it had fetched. Now at most
+// MAX_PARSES_PER_CYCLE changed feeds (and PARSE_BUDGET_BYTES of body) are
+// parsed per cycle; the rest are DEFERRED: no rows, no fetch-state write, the
+// conditional cache put back, and they go first in the next cycle.
+// ---------------------------------------------------------------------------
+describe("parse budget: deferring changed feeds [parse budget]", () => {
+  const ENV_KEYS = ["INGEST_MAX_PARSES_PER_CYCLE", "INGEST_PARSE_BUDGET_BYTES"] as const;
+  // The default MAX_PARSES_PER_CYCLE (pinned by the constants test below).
+  const CAP = 55;
+
+  // The ingest module keeps the previous cycle's deferred ids in a module-level
+  // set, and this file imports the module once. Every test here uses its own
+  // source-id prefix, so ids left over from an earlier test never match.
+  afterEach(() => {
+    for (const k of ENV_KEYS) delete process.env[k];
+  });
+
+  function seedChanged(prefix: string, n: number, extra: Record<string, unknown> = {}): string[] {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = `${prefix}-${String(i).padStart(3, "0")}`;
+      const rssUrl = `https://${prefix}.test/${id}.rss`;
+      fakeSources.push({
+        id,
+        name: id,
+        slug: id,
+        url: `https://${prefix}.test`,
+        rss_url: rssUrl,
+        active: true,
+        fetch_etag: null,
+        fetch_last_modified: null,
+        fetch_body_hash: null,
+        fetch_fail_streak: 0,
+        ...extra,
+      });
+      fetcherItems[rssUrl] = [
+        { title: `${id} benzersiz haber basligi ${i * 104729}`, link: `https://${prefix}.test/${id}/haber`, pubDate: "Fri, 23 Oct 2026 10:00:00 GMT" },
+      ];
+      fetcherResultOverrides[rssUrl] = { etag: `"${id}-new"`, bodyHash: `${id}-hash` };
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  function seedNotModified(prefix: string, n: number): string[] {
+    const ids: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const id = `${prefix}-nm-${String(i).padStart(3, "0")}`;
+      const rssUrl = `https://${prefix}.test/${id}.rss`;
+      fakeSources.push({
+        id,
+        name: id,
+        slug: id,
+        url: `https://${prefix}.test`,
+        rss_url: rssUrl,
+        active: true,
+        fetch_etag: 'W/"nm"',
+        fetch_last_modified: null,
+        fetch_body_hash: null,
+        fetch_fail_streak: 0,
+      });
+      fetcherResultOverrides[rssUrl] = { notModified: true, status: 304 };
+      ids.push(id);
+    }
+    return ids;
+  }
+
+  async function run() {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  const persistedIds = () => new Set(sourceFetchStateWrites.flatMap((w) => w.rows).map((r) => r.id as string));
+  const upsertedSourceIds = () => new Set(upserted.map((r) => r.source_id as string));
+
+  it("100 changed + 10 not-modified sources: exactly CAP are parsed, the rest are deferred without a fetch-state write", async () => {
+    const changed = seedChanged("pb1", 100);
+    const notModified = seedNotModified("pb1", 10);
+
+    const body = await run();
+
+    const parsed = upsertedSourceIds();
+    expect(parsed.size).toBe(CAP);
+    expect(upserted).toHaveLength(CAP);
+    expect(body.fetched).toBe(CAP);
+    expect(body.parseDeferred).toBe(100 - CAP);
+    expect(body.notModified).toBe(10);
+    expect(body.failed).toBe(0);
+
+    const deferred = changed.filter((id) => !parsed.has(id));
+    expect(deferred).toHaveLength(100 - CAP);
+    const persisted = persistedIds();
+    // A deferred source leaves NO trace in the fetch-state write: its old
+    // validators, status and fail streak stay exactly as they were.
+    for (const id of deferred) expect(persisted.has(id), `deferred ${id} must not be persisted`).toBe(false);
+    // The 10 not-modified sources are written as usual; so are the CAP parsed.
+    for (const id of notModified) expect(persisted.has(id), `not-modified ${id} is persisted`).toBe(true);
+    for (const id of parsed) expect(persisted.has(id), `parsed ${id} is persisted`).toBe(true);
+    expect(persisted.size).toBe(CAP + 10);
+  });
+
+  it("on the next invocation the deferred sources are fetched first", async () => {
+    // 120 changed against CAP 55: 65 are deferred, more than one cycle's budget.
+    const changed = seedChanged("pb2", 120);
+    seedNotModified("pb2", 10);
+
+    await run();
+    const deferred = new Set(changed.filter((id) => !upsertedSourceIds().has(id)));
+    expect(deferred.size).toBe(120 - CAP);
+
+    fetchFeedCalls.length = 0;
+    upserted.length = 0;
+    sourceFetchStateWrites.length = 0;
+    await run();
+
+    const firstDeferred = fetchFeedCalls.slice(0, deferred.size).map((c) => c.sourceId);
+    expect(new Set(firstDeferred)).toEqual(deferred);
+    // They are also the ones that get the budget: CAP of the 65 are parsed.
+    const parsed = upsertedSourceIds();
+    expect(parsed.size).toBe(CAP);
+    for (const id of parsed) expect(deferred.has(id)).toBe(true);
+  });
+
+  it("drains: with room in the budget the deferred sources are all parsed and nothing stays deferred", async () => {
+    const changed = seedChanged("pb3", CAP + 20);
+
+    const first = await run();
+    expect(first.parseDeferred).toBe(20);
+
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1000";
+    upserted.length = 0;
+    const second = await run();
+    expect(second.parseDeferred).toBe(0);
+    expect(second.fetched).toBe(CAP + 20);
+
+    // A third cycle (default budget again) has no priority set left over.
+    delete process.env.INGEST_MAX_PARSES_PER_CYCLE;
+    fetchFeedCalls.length = 0;
+    const third = await run();
+    expect(third.parseDeferred).toBe(20);
+    expect(changed).toHaveLength(CAP + 20);
+  });
+
+  it("3 sources of 3,000,000 bytes with a 4,000,000 byte budget: 1 parsed, 2 deferred", async () => {
+    process.env.INGEST_PARSE_BUDGET_BYTES = "4000000";
+    const ids = seedChanged("pb4", 3);
+    for (const id of ids) fetcherResultOverrides[`https://pb4.test/${id}.rss`]!.bodyBytes = 3_000_000;
+
+    const body = await run();
+
+    expect(body.fetched).toBe(1);
+    expect(body.parseDeferred).toBe(2);
+    expect(body.parsedBytes).toBe(3_000_000);
+    expect(upsertedSourceIds().size).toBe(1);
+    // The parsed-bytes figure is cycle JSON only.
+    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("parsed_bytes");
+    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("parse_deferred");
+  });
+
+  it("a feed bigger than the budget cannot starve: deferred once, it goes first next cycle and is parsed even over budget", async () => {
+    process.env.INGEST_PARSE_BUDGET_BYTES = "4000000";
+    const ids = seedChanged("pb5", 3);
+    for (const id of ids) fetcherResultOverrides[`https://pb5.test/${id}.rss`]!.bodyBytes = 3_000_000;
+
+    await run();
+    const deferred = ids.filter((id) => !upsertedSourceIds().has(id));
+    expect(deferred).toHaveLength(2);
+
+    fetchFeedCalls.length = 0;
+    upserted.length = 0;
+    const second = await run();
+
+    expect(new Set(fetchFeedCalls.slice(0, 2).map((c) => c.sourceId))).toEqual(new Set(deferred));
+    // First deferred one: first parse of the cycle. Second deferred one: it
+    // is priority, so it may overshoot the byte budget once. The third source
+    // is not priority and loses.
+    expect(second.fetched).toBe(2);
+    expect(second.parseDeferred).toBe(1);
+    for (const id of upsertedSourceIds()) expect(deferred).toContain(id);
+  });
+
+  it("restores the conditional cache of a deferred source and keeps its stored validators", async () => {
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1";
+    const [a, b] = seedChanged("pb6", 2, { fetch_etag: 'W/"old"', fetch_body_hash: "stored-hash" });
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+
+    const body = await run();
+    expect(body.parseDeferred).toBe(1);
+    const deferredId = [a!, b!].find((id) => !upsertedSourceIds().has(id))!;
+    // Nothing about the deferred source was written to the database.
+    expect(persistedIds().has(deferredId)).toBe(false);
+
+    // The (mock) fetcher stamped '"<id>-new"' on the cache and left it there;
+    // the worker must put the previous validators back.
+    fetchFeedCalls.length = 0;
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1000";
+    await run();
+    const call = fetchFeedCalls.find((c) => c.sourceId === deferredId);
+    expect(call?.cached?.etag).toBe('W/"old"');
+  });
+
+  it("deletes the conditional cache entry of a deferred source that had none", async () => {
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1";
+    const [a, b] = seedChanged("pb7", 2);
+
+    await run();
+    const deferredId = [a!, b!].find((id) => !upsertedSourceIds().has(id))!;
+
+    fetchFeedCalls.length = 0;
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1000";
+    await run();
+    expect(fetchFeedCalls.find((c) => c.sourceId === deferredId)?.cached).toBeUndefined();
+  });
+
+  it("checks parseDeferred BEFORE error and notModified", async () => {
+    const [id] = seedChanged("pb8", 1);
+    const rssUrl = `https://pb8.test/${id}.rss`;
+    fetcherResultOverrides[rssUrl] = { parseDeferred: true, notModified: true, error: "ignored", status: 200 };
+
+    const body = await run();
+
+    expect(body.parseDeferred).toBe(1);
+    expect(body.notModified).toBe(0);
+    expect(body.failed).toBe(0);
+    expect(persistedIds().has(id!)).toBe(false);
+    expect(upserted).toHaveLength(0);
+  });
+
+  it("a deferred source is not counted as failed and does not advance its fail streak or quarantine", async () => {
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1";
+    const ids = seedChanged("pb9", 2, { fetch_fail_streak: 19 });
+
+    const body = await run();
+
+    expect(body.failed).toBe(0);
+    expect(body.quarantined).toBe(0);
+    const deferredId = ids.find((id) => !upsertedSourceIds().has(id))!;
+    expect(persistedIds().has(deferredId)).toBe(false);
+  });
+
+  it("falls back to the default for anything but a positive integer in INGEST_MAX_PARSES_PER_CYCLE", async () => {
+    for (const bad of ["abc", "0", "-5", "1.5", "", "12abc", " 7 ", "1e1", "0x10"]) {
+      fakeSources.length = 0;
+      for (const k of Object.keys(fetcherItems)) delete fetcherItems[k];
+      for (const k of Object.keys(fetcherResultOverrides)) delete fetcherResultOverrides[k];
+      upserted.length = 0;
+      process.env.INGEST_MAX_PARSES_PER_CYCLE = bad;
+      seedChanged("pb10", CAP + 5);
+      const body = await run();
+      expect(body.fetched, `INGEST_MAX_PARSES_PER_CYCLE=${JSON.stringify(bad)} -> default ${CAP}`).toBe(CAP);
+      expect(body.parseDeferred).toBe(5);
+    }
+  });
+
+  it("honours a positive-integer INGEST_MAX_PARSES_PER_CYCLE and INGEST_PARSE_BUDGET_BYTES", async () => {
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "7";
+    seedChanged("pb11", 20);
+    const body = await run();
+    expect(body.fetched).toBe(7);
+    expect(body.parseDeferred).toBe(13);
+  });
+
+  it("falls back to the default byte budget for a bad INGEST_PARSE_BUDGET_BYTES", async () => {
+    // Default is 8 MB: four 3 MB bodies -> 3 MB, 6 MB parsed; the third would
+    // reach 9 MB > 8 MB and is deferred, so 2 parsed, 2 deferred.
+    for (const bad of ["abc", "0", "-1", "2.5"]) {
+      fakeSources.length = 0;
+      for (const k of Object.keys(fetcherItems)) delete fetcherItems[k];
+      for (const k of Object.keys(fetcherResultOverrides)) delete fetcherResultOverrides[k];
+      process.env.INGEST_PARSE_BUDGET_BYTES = bad;
+      const ids = seedChanged("pb12", 4);
+      for (const id of ids) fetcherResultOverrides[`https://pb12.test/${id}.rss`]!.bodyBytes = 3_000_000;
+      const body = await run();
+      expect(body.fetched, `INGEST_PARSE_BUDGET_BYTES=${JSON.stringify(bad)}`).toBe(2);
+      expect(body.parseDeferred).toBe(2);
+    }
+  });
+
+  it("reports parseDeferredMaxStreak: the longest run of consecutive cycles any feed has been deferred", async () => {
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1";
+    seedChanged("pb14", 3);
+
+    // Cycle 1: one feed parsed, two deferred once.
+    const first = await run();
+    expect(first.parseDeferred).toBe(2);
+    expect(first.parseDeferredMaxStreak).toBe(1);
+
+    // Cycle 2: the two deferred feeds go first; one is parsed, the other is
+    // deferred a second time in a row, the third (parsed last time) once.
+    const second = await run();
+    expect(second.parseDeferred).toBe(2);
+    expect(second.parseDeferredMaxStreak).toBe(2);
+
+    // With room again everything drains and the streak counter resets.
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1000";
+    const drained = await run();
+    expect(drained.parseDeferred).toBe(0);
+    expect(drained.parseDeferredMaxStreak).toBe(0);
+
+    process.env.INGEST_MAX_PARSES_PER_CYCLE = "1";
+    const fresh = await run();
+    expect(fresh.parseDeferredMaxStreak, "a drained feed starts again at 1").toBe(1);
+    // Summary and HTTP JSON only: there is no ingest_cycles column for it.
+    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("parse_deferred_max_streak");
+  });
+
+  it("an on-budget cycle is unchanged: nothing deferred, parsedBytes sums the bodies", async () => {
+    seedChanged("pb13", 5);
+    const body = await run();
+    expect(body.fetched).toBe(5);
+    expect(body.parseDeferred).toBe(0);
+    expect(body.parseDeferredMaxStreak).toBe(0);
+    expect(body.parsedBytes).toBe(5000);
+    expect(upserted).toHaveLength(5);
+  });
+});
+
+describe("parse budget constants and env parsing [parse budget]", () => {
+  // Why 55 and not a round 40: ingest_cycles, 3 days to 2026-10-23 (1,328
+  // finished cycles; `fetched` = changed feeds parsed): p50 45, p90 55, p99
+  // 71, max 78; hours 06-08 UTC p50 52, p90 68. A cap of 40 would have deferred
+  // 74% of the cycles (6.8 feeds on average, 14.4 at 06-08 UTC where every
+  // cycle exceeds it), so deferral would be the steady state. 55 defers about
+  // 10% of the cycles (0.8 feeds on average, 2.6 at 06-08 UTC) and still
+  // trims the tail above p90, where most of the 546 kills cluster (hours 07-09
+  // and 13 UTC: 15 to 33% of the expected cycles missing).
+  it("exports MAX_PARSES_PER_CYCLE = 55 and a PARSE_BUDGET_BYTES between 0.5 MB and 8 MB on a 0.5 MB step", async () => {
+    const mod = (await import("../../supabase/functions/ingest/index.ts")) as {
+      MAX_PARSES_PER_CYCLE: number;
+      PARSE_BUDGET_BYTES: number;
+    };
+    expect(mod.MAX_PARSES_PER_CYCLE).toBe(55);
+    expect(mod.PARSE_BUDGET_BYTES).toBeGreaterThanOrEqual(500_000);
+    expect(mod.PARSE_BUDGET_BYTES).toBeLessThanOrEqual(8_000_000);
+    expect(mod.PARSE_BUDGET_BYTES % 500_000).toBe(0);
+  });
+
+  it("positiveIntEnv accepts only plain positive integers", async () => {
+    const mod = (await import("../../supabase/functions/ingest/index.ts")) as {
+      positiveIntEnv: (raw: string | undefined, fallback: number) => number;
+    };
+    expect(mod.positiveIntEnv("7", 40)).toBe(7);
+    expect(mod.positiveIntEnv("4000000", 1)).toBe(4_000_000);
+    for (const bad of [undefined, "", " ", "0", "-3", "1.5", "abc", "7x", "x7", "1e3", "0x10", "+5", " 7", "7 "]) {
+      expect(mod.positiveIntEnv(bad, 40), JSON.stringify(bad)).toBe(40);
+    }
+    // Beyond Number.MAX_SAFE_INTEGER a digit string is not a usable budget.
+    expect(mod.positiveIntEnv("99999999999999999999", 40)).toBe(40);
   });
 });

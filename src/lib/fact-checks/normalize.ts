@@ -1,3 +1,4 @@
+import { codePointToString } from "../../../supabase/functions/_shared/rss/entities";
 import type { FactCheckPublisher, FactCheckPublisherKey } from "./feeds";
 
 /**
@@ -35,13 +36,14 @@ const NAMED_ENTITIES: Record<string, string> = {
 
 function decodeEntities(s: string): string {
   return s.replace(/&(#\d+|#x[0-9a-fA-F]+|[a-zA-Z]+);/g, (m, code: string) => {
+    // Numeric references go through codePointToString: it never throws and
+    // drops anything XML 1.0 forbids. Number.isFinite let 1114112 through and
+    // String.fromCodePoint(1114112) is a RangeError that lost the whole feed.
     if (code.startsWith("#x") || code.startsWith("#X")) {
-      const cp = parseInt(code.slice(2), 16);
-      return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+      return codePointToString(parseInt(code.slice(2), 16));
     }
     if (code.startsWith("#")) {
-      const cp = parseInt(code.slice(1), 10);
-      return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+      return codePointToString(parseInt(code.slice(1), 10));
     }
     const named = NAMED_ENTITIES[code];
     return named ?? m;

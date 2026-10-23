@@ -2471,3 +2471,117 @@ delete from supabase_migrations.schema_migrations where version = '112';
 ```
 
 The migration itself never deletes: days that leave the rolling window keep their last counts (about 62 rows a day, 23k a year).
+
+## 113 — source_article_key + twin drop + parse budget: PRE-BUILD, APPLY 113, BACKFILL, THEN DEPLOY ingest
+
+**Why:** two ingest problems, one deploy.
+
+- **Twin articles.** An outlet that edits a headline publishes the same article under a new URL slug and keeps the numeric id its CMS gave it (aksam `.../haber-1708664` before and after, articles `1fe98b20` and `8f291028`). Ingest upserts on `url` and checks `(source_id, content_hash)`; both change with the headline, so every edit became a second row that clusters and counts as a second article of the same source (23 of 104 blindspot clusters held such a pair). 113 stores the id as `articles.source_article_key`; the new ingest drops a re-polled item whose `(source_id, key)` is already stored under a different url and records the new headline through the existing title-version path (`article_title_versions` + `apply_article_title_edits`) instead.
+- **CPUTime kills.** Cycles were dying with HTTP 546 (reason `CPUTime`), losing everything they had fetched: over 3 days only 417 to 456 of the 480 scheduled cycles finished per full day. A cycle decoded, parsed and normalised every changed feed (parse + normalise is 17 to 48 ms per MB; the numbers are in `supabase/functions/ingest/index.ts`). The new ingest parses at most 55 changed feeds and 8 MB of body per cycle and defers the rest to the front of the next cycle (55 is about the p90 of the load, see Verify; a cap of 40 would be below the median and make deferral the steady state). This half needs no migration.
+
+**What 113 does** (additive, one transaction, safe to re-apply; starts with `set local lock_timeout = '5s'` and `set local statement_timeout = '60s'`):
+
+1. `articles.source_article_key text` (nullable, no default) and the partial index `articles_source_article_key_idx` on `(source_id, source_article_key) where source_article_key is not null`.
+2. `public.source_article_key(p_url text)`: the SQL twin of `sourceArticleKey()` in `supabase/functions/_shared/rss/article-key.ts` (the last run of 6 to 20 digits in the last path segment that is neither date-shaped nor round: one or two significant digits followed by at least four zeros, such as `100000`, a quantity in a headline slug). The four regexes are copied verbatim; `tests/migrations/113-source-article-key.test.ts` fails the build on drift and, with `TAYF_PSQL` set, runs the shared fixture table through a real Postgres.
+3. `public.articles_source_key_backfill(p_from, p_to)`: fills NULL keys of the rows created in `[p_from, p_to)`, at most 2 days at a time, skipping the sources in `ARTICLE_KEY_EXCLUDED_SLUGS` (today `a-news` and `daily-sabah`: their urls carry numbers in the slug, not ids; a 7-day replay merged two daily-sabah stories on `500000`, and a 30-day replay found three false a-news groups on `100000`, `250000` and `300000`, two of them inside the 7-day twin window). Both functions are `SECURITY DEFINER`, `search_path = ''`, `service_role` only. No table, no cron, nothing granted to `anon`/`authenticated`.
+
+**Deploy order (load-bearing): pre-build, apply, backfill, then deploy ingest.** An ingest deployed before the column exists fails every upsert (unknown column).
+
+1. **Pre-build the column and the index.** Run each statement on its own, outside any transaction block (`CREATE INDEX CONCURRENTLY` cannot run inside one; use `psql` in autocommit). Inserts into `articles` keep flowing while the index builds, and 113's own `if not exists` statements then do nothing:
+
+   ```sql
+   set lock_timeout = '5s'; alter table public.articles add column if not exists source_article_key text;
+   create index concurrently if not exists articles_source_article_key_idx on public.articles (source_id, source_article_key) where source_article_key is not null;
+   ```
+
+2. **Check that the build was not left invalid** (expect 0 rows). If a name comes back, `drop index concurrently articles_source_article_key_idx;` and rebuild; 113 re-checks `indisvalid` itself and aborts with that instruction:
+
+   ```sql
+   select c.relname from pg_catalog.pg_index i join pg_catalog.pg_class c on c.oid = i.indexrelid where c.relname = 'articles_source_article_key_idx' and not i.indisvalid;
+   ```
+
+3. **Apply `113_source_article_key.sql`.** Do not skip step 1. 113 fails closed: if `articles_source_article_key_idx` does not exist and `articles` is over 64 MB (it is 1850 MB), its first guard raises `public.articles is N MB and articles_source_article_key_idx does not exist yet ... Run the ORCHESTRATOR PRE-BUILD first` before touching anything (no lock, no column, no ledger row): run step 1 and re-apply. The reason: `alter table ... add column if not exists` takes ACCESS EXCLUSIVE on `articles` before it checks the column, even when it is a no-op, and holds it until commit, so a non-concurrent index build in the same transaction would block every read of `articles` (the public site) as well as every write (ingest) for the whole build. With the pre-build done the transaction is sub-second (0.03 s on a 97 MB scratch table); a long reader ahead of its lock wait can make new readers queue for at most 5 s (`lock_timeout`), after which 113 aborts with **55P03** and records nothing: re-apply. On a small database (a fresh dev or CI one) 113 adds the column and builds the index itself.
+
+4. **Backfill** (operator, once; idempotent and resumable; NOT part of the migration; one call per 2-day slice, each its own statement; the anchor `T0` keeps the slices gapless). About 112,600 rows over 14 days (about 8,000 a day; 1.2 s for a 43,000-row slice on a scratch Postgres 15):
+
+   ```bash
+   T0=$(psql "$DATABASE_URL" -Atc "select now()")
+   for i in 14 12 10 8 6 4 2; do
+     psql -q "$DATABASE_URL" -Atc "set statement_timeout = '2min'; select public.articles_source_key_backfill('$T0'::timestamptz - interval '$i days', '$T0'::timestamptz - interval '$i days' + interval '2 days');"
+   done
+   ```
+
+   Without psql, run each `select` in the SQL editor one slice at a time. Verify (the `keyed` count should be close to `total`; the unkeyed rows are slug-only urls, `a-news`, `daily-sabah`, round numbers in a slug, and rows without an id in the url):
+
+   ```sql
+   select count(*) total, count(source_article_key) keyed, count(*) filter (where source_article_key is null) unkeyed from public.articles where created_at >= now() - interval '14 days';
+   ```
+
+5. **Deploy ingest** with `--no-verify-jwt` like every Edge Function in this guide: `npx supabase functions deploy ingest --no-verify-jwt`. Rows older than 14 days stay NULL (the lookup window is 7 days).
+6. **Catch-up** (after the deploy; the old ingest wrote no key between `T0` and the deploy): `select public.articles_source_key_backfill('<T0>'::timestamptz, now() + interval '1 hour');`
+
+The Vercel app does not read the column; there is no ordering constraint with an app deploy.
+
+**Tuning without a deploy** (Edge Function secrets; both are read once per cycle, and anything but a positive integer falls back to the default, so a typo cannot disable the budget):
+
+```bash
+npx supabase secrets set INGEST_MAX_PARSES_PER_CYCLE=55 INGEST_PARSE_BUDGET_BYTES=8000000
+```
+
+**Verify** (read-only; give the new ingest a day):
+
+```sql
+-- twin replay: keys with 2+ urls that were BOTH created in the last 24 h. About 180 groups before the deploy, about 0 after.
+select count(*) from (
+  select source_id, source_article_key from public.articles
+   where created_at >= now() - interval '24 hours' and source_article_key is not null
+   group by 1, 2 having count(distinct url) >= 2
+) g;
+-- cycles per day: at least 470 of the 480 scheduled (417 to 456 before)
+select date_trunc('day', started_at) d, count(*) from public.ingest_cycles where started_at >= now() - interval '3 days' group by 1 order by 1;
+-- the index and the privileges
+select indexrelid::regclass, indisvalid from pg_index where indexrelid = 'public.articles_source_article_key_idx'::regclass;  -- true
+select has_function_privilege('anon', 'public.source_article_key(text)', 'execute');  -- false
+select has_function_privilege('anon', 'public.articles_source_key_backfill(timestamptz, timestamptz)', 'execute');  -- false
+```
+
+In the Supabase Logs Explorer (function_edge_logs) the number of ingest responses with `status_code = 546` should drop to about 0:
+
+```sql
+select cast(timestamp as date) as day, count(*) as n
+from function_edge_logs
+  cross join unnest(metadata) as m
+  cross join unnest(m.response) as r
+where r.status_code = 546
+group by 1 order by 1 desc
+```
+
+The cycle summary line (`[ingest] cycle {...}`, function logs) now carries `twinsDropped` (rows not inserted because the same source already holds that article under another url), `parseDeferred` (changed feeds postponed to the next cycle), `parseDeferredMaxStreak` (the longest run of consecutive cycles any feed has been deferred, counting this one; best effort, a cold start resets it) and `parsedBytes` (body bytes admitted to a parse). They are JSON-only: there is no `ingest_cycles` column. A twin-only chunk prints `dropped N twin row(s) ...` (counts, never a url or headline), a cycle with deferrals prints `parse budget: deferred N changed feed(s) ... longest deferral streak S`, and a lookup failure counts in `prefilter_errors`.
+
+**`parseDeferred` is not expected to be 0.** The default cap, 55 changed feeds a cycle, sits at about the p90 of the load, not above its peak. `ingest_cycles.fetched` is the number of changed feeds a cycle parsed; over the 3 days to 2026-10-23 (1,328 cycles) it had p50 45, p90 55, p99 71, max 78, and in hours 06-08 UTC p50 52, p90 68 (overnight, 22:00 to 03:00 UTC, p90 46 or less). Replayed against that load a cap of 55 defers about 10% of the cycles, 0.8 feeds a cycle on average and 2.6 at 06-08 UTC (30% of the cycles in those hours); a cap of 40 would have deferred 74% of them (6.8 feeds on average, 14.4 at 06-08 UTC), which is why it is not the default. Deferred feeds go first next cycle, so a backlog drains by itself once the tail of the load passes. A healthy 24 hours looks like this (count the `parse budget: deferred` log lines against the 480 scheduled cycles):
+
+- cycles with deferrals: about 10% (the replay figure; look into it above 25%), clustered at 06-09 UTC and around 13 UTC, almost none overnight;
+- `parseDeferred` on a deferring cycle: typically 1 to 10, occasionally 20 at 07-09 UTC;
+- `longest deferral streak`: 1, rarely 2; a value of 4 or more means a feed is starving, so raise the cap;
+- 546 responses: down from about 6% (27 of 454 over 24 h) toward 0.
+
+If 546s persist (above about 1% of the cycles), lower the cap with `INGEST_MAX_PARSES_PER_CYCLE` (for example 45); if deferral stays high and the 546s are gone, raise it (for example 65). The share of expected cycles missing from `ingest_cycles` was highest where the load tail is longest (hours 07-09 and 13 UTC, 15 to 33%); the killed cycles write no row, so their own load is not in that table and the cap is a judgement from the survivors, hence the secret.
+
+**Limits to know:**
+
+- A twin is detected against rows created in the last 7 days, per source. An edit that comes back later than that is inserted as before.
+- A source whose urls carry no article id has no key and is untouched. Sources whose digit runs are slug numbers, not ids, are listed in `ARTICLE_KEY_EXCLUDED_SLUGS` in `article-key.ts` and in the backfill's `WHERE` clause (`a-news` and `daily-sabah` today); add a slug to both (the migration test compares them) the day a replay shows a false group for it. A round number in a slug (`100000`, `250000`, `1000000`) is never a key for any source, so the common false group is closed for outlets not on the list; the rare real id of that shape simply is not deduped.
+- One CMS item reused as a rolling bulletin (haber7 "Borsa güne yükselişle başladı" then "Borsa İstanbul'da düşüş devam ediyor!") keeps its id, so only the first url is stored and the later headlines are recorded as title versions.
+- A feed bigger than the byte budget is not starved: a feed deferred last cycle goes first and may exceed the budget once per cycle.
+
+**Rollback** (nothing depends on 113 until the new ingest is deployed):
+
+1. Redeploy the previous ingest function (it neither reads nor writes the column).
+2. `drop function public.articles_source_key_backfill(timestamptz, timestamptz); drop function public.source_article_key(text); drop index concurrently if exists articles_source_article_key_idx;`
+3. Only after step 1 (the new ingest writes the column on every upsert): `alter table public.articles drop column if exists source_article_key;`
+4. `delete from supabase_migrations.schema_migrations where version = '113';`
+
+## 114 — sources_newly_dark: APPLY 114 only, no deploy (see docs/ops-heartbeat.md)
+
+Adds `ops_health_report()` row 13 `sources_newly_dark` (warn only) and a small baseline table of the sources already known to be dark; additive, one transaction, safe to re-apply, no Edge Function or app deploy.
+Apply `114_sources_newly_dark.sql`; the new row is described in `docs/ops-heartbeat.md`.

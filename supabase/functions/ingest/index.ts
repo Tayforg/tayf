@@ -19,14 +19,26 @@
 //      repeat a (source_id, content_hash) pair already seen this chunk or
 //      already stored under a different url (migration 041 — the second
 //      check is a DB round trip per chunk since `onConflict: "url"` alone
-//      can't see that constraint). The `AFTER INSERT ON articles` trigger
-//      (migration 025) takes over from here to enqueue `cluster_work` and
-//      `image_backfill` messages.
+//      can't see that constraint). A third check drops "twins": a re-polled
+//      item whose `source_article_key` (the numeric id in its url, migration
+//      113) is already stored for the same source under a DIFFERENT url -- an
+//      outlet that edits a headline publishes the same article under a new
+//      slug, and that used to become a second row. The twin is not inserted;
+//      its new headline goes through the title-version path instead. The
+//      `AFTER INSERT ON articles` trigger (migration 025) takes over from here
+//      to enqueue `cluster_work` and `image_backfill` messages.
 //   5. Persists per-source fetch state. The fresh validators (ETag,
 //      Last-Modified, body hash) of a source that produced rows are committed
 //      only after all its rows were upserted, deduped or skipped as already
 //      stored (silent-feeds): a feed whose rows were starved by the deadline
 //      or failed must be re-offered next cycle, not answered with a 304.
+//
+// CPU budget: the platform kills an invocation that burns too much CPU (HTTP
+// 546, reason CPUTime) and a killed cycle loses everything it fetched. The CPU
+// of a cycle is the decode + XML parse + normalise of the feeds that CHANGED,
+// so a cycle parses at most MAX_PARSES_PER_CYCLE of them and
+// PARSE_BUDGET_BYTES of body (see the constants below); the rest are
+// deferred -- no rows, no fetch-state write -- and go first in the next cycle.
 //
 // Wall-clock budget: 60 s (the Edge Functions hard ceiling is 400 s). We
 // stay well under because the 16-way pool keeps the slowest tail fetch
@@ -39,17 +51,21 @@ import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
 import { canonicalizeUrl, normalizeArticles } from "../_shared/rss/normalize.ts";
+import { sourceArticleKeyFor } from "../_shared/rss/article-key.ts";
 import {
   isQuarantined,
   nextQuarantineState,
   QUARANTINE_AFTER_FAILURES,
 } from "../_shared/rss/quarantine.ts";
 import {
+  createParseBudget,
   groupChunkBySource,
   interleaveBySource,
+  prioritizeIds,
   rotateForCycle,
   upsertWithBisect,
 } from "./order.ts";
+import type { BisectUpsertResult } from "./order.ts";
 import { collectSourceIds, partitionWithRowErrorGrace } from "./settle.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
@@ -72,6 +88,11 @@ const UPSERT_BATCH = 500;
 // (ingest-fixes / migration 074 evidence: ~25 KB for 500 hashes x 118
 // source ids observed in production).
 const PREFILTER_CHUNK = 100;
+// How far back a stored row can make a re-polled item a "twin" (same source,
+// same `source_article_key`, different url). A headline edit shows up in the
+// feed within hours; a week keeps the lookup on recent index pages only and
+// bounds the cost (the lookup rides the partial index of migration 113).
+const TWIN_WINDOW_MS = 7 * 24 * 3_600_000;
 // Wall-clock safety. Edge Functions allow ≤400 s; we cap well below so a
 // pathological tail can't push us past the slot. The Vercel cron retries
 // every 3 min so partial progress is harmless. The fetch pool gets the
@@ -83,6 +104,64 @@ const PREFILTER_CHUNK = 100;
 // the cycle summary inside that window instead of racing it.
 const CYCLE_DEADLINE_MS = 50_000;
 const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
+
+// ---------------------------------------------------------------------------
+// Parse budget (CPUTime kills)
+// ---------------------------------------------------------------------------
+//
+// Measured with a scratch Deno script (not committed) on a synthetic
+// 300-item feed of about 2.6 to 2.8 MB, median of 8 warm runs on the dev
+// machine; the per-MB cost depends on the feed's shape:
+//
+//   stage                      CDATA-heavy   entity-escaped   many small elements
+//   decodeRssBody                1.3 ms/MB       1.3 ms/MB          1.0 ms/MB
+//   fast-xml-parser (fetcher)    1.9 ms/MB      11.1 ms/MB         36.4 ms/MB
+//   item mapping + cleanFeedDate 0.3 ms/MB       0.2 ms/MB          0.3 ms/MB
+//   normalizeArticles (300)     13.8 ms/MB      13.0 ms/MB         10.5 ms/MB
+//   total per feed              17.3 ms/MB      25.7 ms/MB         48.1 ms/MB
+//
+// interleaveBySource over 5,000 rows takes 1.4 to 1.8 ms once per cycle, so it
+// is not a hot loop. Parse + normalise is where the CPU goes. The worst shape
+// (48 ms/MB) puts about 800 ms of CPU at 16.6 MB; the byte budget is the
+// smaller of that, rounded down to 0.5 MB, and the 8 MB feed-size cap
+// (DEFAULT_MAX_BYTES in the fetcher), i.e. 8_000_000. The Edge runtime is
+// slower than the dev machine; the parse-count cap below is the tighter bound
+// for the many-small-feeds case that dominates in production.
+//
+// Why 55 parses (a data-derived number, not a round one). `ingest_cycles`, the
+// 3 days to 2026-10-23, 1,328 finished cycles; `fetched` there is the number
+// of changed feeds a cycle parsed (a 304 or a body-hash hit is `notModified`):
+//   p50 45, p90 55, p99 71, max 78; hours 06-08 UTC: p50 52, p90 68.
+// Cycles that were killed (546) write no row, so their load is not in that
+// data. Counting the missing ones against the 60 expected per hour, the share
+// is highest where the tail is longest (hours 07-09 and 13 UTC: p90 62 to 69,
+// 15 to 33% missing) and under 9% wherever p90 is 58 or less. A cap of 40
+// would sit BELOW the median load: it would have deferred 74% of the cycles
+// (6.8 feeds on average, 14.4 at 06-08 UTC, where every cycle exceeds 40), so
+// deferral would be the steady state and every deferred feed would wait at
+// least one 3-minute cycle at peak news hours.
+// Replaying the same cycles against a cap of 55 defers about 10% of them (0.8
+// feeds on average, 2.6 at 06-08 UTC, 30% of the cycles there): only the tail
+// above p90 is trimmed. Expect that, not 0: `parseDeferred` is non-zero in a
+// few cycles an hour and usually drains next cycle because deferred feeds go
+// first (`parseDeferredMaxStreak` shows a feed that waits longer). Tune without a
+// deploy with INGEST_MAX_PARSES_PER_CYCLE: lower it if 546s persist, raise it
+// if deferral stays high while 546s are gone.
+// Both limits can be overridden per deployment without a code change.
+export const MAX_PARSES_PER_CYCLE = 55;
+export const PARSE_BUDGET_BYTES = 8_000_000;
+
+/**
+ * Reads a positive-integer environment override. Anything else (unset, empty,
+ * zero, negative, fractional, a suffix, an exponent, hex, a number beyond the
+ * safe-integer range) falls back to `fallback`, so a typo in a deployment
+ * secret can never disable or zero the budget.
+ */
+export function positiveIntEnv(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || !/^[1-9][0-9]*$/.test(raw)) return fallback;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : fallback;
+}
 
 // ---------------------------------------------------------------------------
 // In-instance caches
@@ -101,6 +180,14 @@ const conditionalCache = new Map<
   string,
   { etag?: string; lastModified?: string }
 >();
+
+// Parse budget: the sources whose parse the previous cycle deferred, mapped to
+// the number of consecutive cycles each has now been deferred (1 = deferred
+// once). Module-level, so best-effort across warm invocations (a cold start
+// simply loses the priority and the streak, and the rotation reaches the feed
+// again). Copied and cleared at the start of every cycle: it only ever holds
+// the NEXT cycle's priorities.
+const parseDeferredIds = new Map<string, number>();
 
 // A `sources` row plus the five fetch-state columns (migration 041) used to
 // hydrate `conditionalCache` at cycle start and to fall back to a body-hash
@@ -212,6 +299,23 @@ interface CycleStats {
   // errored (the old validators are kept so the feed is re-offered). Summary
   // line and HTTP JSON only: there is no `ingest_cycles` column for it.
   validatorsWithheld: number;
+  // Twin-articles (migration 113): rows not inserted because the same source
+  // already holds an article with the same `source_article_key` under another
+  // url (a headline edit), either stored earlier or seen earlier this cycle.
+  // Summary line and HTTP JSON only: there is no `ingest_cycles` column for it.
+  twinsDropped: number;
+  // Parse budget: changed feeds this cycle refused a parse because the cycle
+  // already used its MAX_PARSES_PER_CYCLE / PARSE_BUDGET_BYTES. Not failures:
+  // they are retried first next cycle. Summary line and HTTP JSON only.
+  parseDeferred: number;
+  // The longest run of consecutive cycles any feed has been deferred, counting
+  // this one (0 when nothing was deferred): starvation made visible. Best
+  // effort across warm invocations, like the priority set. Summary line and
+  // HTTP JSON only.
+  parseDeferredMaxStreak: number;
+  // Body bytes of the feeds this cycle admitted to a parse. Summary and HTTP
+  // JSON only: there is no `ingest_cycles` column for it.
+  parsedBytes: number;
   durationMs: number;
 }
 
@@ -221,7 +325,15 @@ interface CycleStats {
 // (same pure `canonicalizeUrl` the normaliser uses) so it can ride along
 // in the same upsert as an additive `canonical_url` column (migration 039)
 // without changing the normaliser's public shape.
-type IngestArticleRow = NormalizedArticle & { canonical_url: string | null };
+//
+// `source_article_key` (migration 113) rides in the same upsert: the numeric
+// article id the outlet put in the url (null when the url has none, or for the
+// sources in ARTICLE_KEY_EXCLUDED_SLUGS), computed by the same pure
+// `sourceArticleKeyFor` the SQL twin `public.source_article_key` mirrors.
+type IngestArticleRow = NormalizedArticle & {
+  canonical_url: string | null;
+  source_article_key: string | null;
+};
 
 // ---------------------------------------------------------------------------
 // Batch de-dup (migration 041)
@@ -335,6 +447,108 @@ async function dropExistingSourceContentHashRows(
 }
 
 // ---------------------------------------------------------------------------
+// Twin drop (migration 113)
+// ---------------------------------------------------------------------------
+//
+// An outlet that edits a headline publishes the same article under a new url
+// slug and keeps the numeric id its CMS put in the url. Both existing checks
+// miss that: the upsert conflicts on `url` (new) and `content_hash` changes
+// with the title. `source_article_key` is that id; a re-polled item whose
+// (source_id, key) is already stored under a DIFFERENT url is a twin of the
+// stored article.
+//
+// Only keyed rows are looked up (a null key has nothing to match), in slices
+// of PREFILTER_CHUNK like the content-hash pre-filter, against the partial
+// index of migration 113. As there, `.in()` on both columns is a cross
+// product, so the exact (source_id, key) pair is matched client-side. A row is
+// kept when no stored row has its pair, or when ANY stored row with that pair
+// has its own url (the normal re-poll: the url upsert ignores the duplicate).
+// Otherwise it is a twin, and the stored article it duplicates is the match
+// with the earliest created_at. A failing lookup degrades only its own slice
+// (those rows are kept, fail-open) and is counted in `lookupErrors`, which
+// the caller adds to `stats.prefilterErrors`.
+
+export interface ExistingKeyedArticle {
+  id: string;
+  url: string;
+  title: string;
+  source_id: string;
+  source_article_key: string;
+  created_at: string;
+}
+
+export async function dropExistingSourceArticleKeyRows<
+  T extends { source_id: string; url: string; source_article_key: string | null },
+>(
+  supabase: ReturnType<typeof createServiceClient>,
+  rows: readonly T[],
+  sinceIso: string,
+): Promise<{
+  rows: T[];
+  twins: Array<{ row: T; existing: ExistingKeyedArticle }>;
+  lookupErrors: number;
+}> {
+  const keyed = rows.filter((r) => r.source_article_key !== null);
+  if (keyed.length === 0) return { rows: [...rows], twins: [], lookupErrors: 0 };
+
+  const twinOf = new Map<T, ExistingKeyedArticle>();
+  let lookupErrors = 0;
+  for (let i = 0; i < keyed.length; i += PREFILTER_CHUNK) {
+    const slice = keyed.slice(i, i + PREFILTER_CHUNK);
+    const sourceIds = [...new Set(slice.map((r) => r.source_id))];
+    const keys = [...new Set(slice.map((r) => r.source_article_key as string))];
+
+    let found: ExistingKeyedArticle[];
+    try {
+      const { data, error } = await supabase
+        .from("articles")
+        .select("id, url, title, source_id, source_article_key, created_at")
+        .in("source_id", sourceIds)
+        .in("source_article_key", keys)
+        .gte("created_at", sinceIso);
+      if (error) {
+        console.error(`[ingest] existing (source_id, source_article_key) lookup failed: ${error.message}`);
+        lookupErrors++;
+        continue;
+      }
+      found = (data ?? []) as ExistingKeyedArticle[];
+    } catch (err) {
+      console.error("[ingest] existing (source_id, source_article_key) lookup threw", err);
+      lookupErrors++;
+      continue;
+    }
+    if (found.length === 0) continue;
+
+    const byPair = new Map<string, ExistingKeyedArticle[]>();
+    for (const e of found) {
+      const pair = `${e.source_id}\x1f${e.source_article_key}`;
+      const list = byPair.get(pair);
+      if (list) list.push(e);
+      else byPair.set(pair, [e]);
+    }
+    for (const row of slice) {
+      const matches = byPair.get(`${row.source_id}\x1f${row.source_article_key}`);
+      if (!matches || matches.length === 0) continue;
+      if (matches.some((m) => m.url === row.url)) continue;
+      let earliest = matches[0] as ExistingKeyedArticle;
+      for (const m of matches) {
+        if (Date.parse(m.created_at) < Date.parse(earliest.created_at)) earliest = m;
+      }
+      twinOf.set(row, earliest);
+    }
+  }
+
+  const kept: T[] = [];
+  const twins: Array<{ row: T; existing: ExistingKeyedArticle }> = [];
+  for (const row of rows) {
+    const existing = twinOf.get(row);
+    if (existing) twins.push({ row, existing });
+    else kept.push(row);
+  }
+  return { rows: kept, twins, lookupErrors };
+}
+
+// ---------------------------------------------------------------------------
 // Headline-version collection (migration 056, U-07 collection half)
 // ---------------------------------------------------------------------------
 //
@@ -408,19 +622,25 @@ async function applyHeadlineWriteBack(
   }
 }
 
+// `preResolved` (migration 113): rows already matched to their stored article
+// without a url lookup -- the twins `dropExistingSourceArticleKeyRows` found,
+// keyed by the twin's NEW url. They seed `stored`, and only the urls not in it
+// are selected, so a twin-only chunk makes no url query at all. Called with
+// two arguments the behaviour is unchanged.
 export async function recordTitleVersions(
   supabase: ReturnType<typeof createServiceClient>,
-  chunk: readonly IngestArticleRow[],
+  chunk: readonly Pick<IngestArticleRow, "url" | "title" | "source_id">[],
+  preResolved?: ReadonlyMap<string, { id: string; title: string; source_id: string }>,
 ): Promise<RecordTitleVersionsResult> {
   const empty: RecordTitleVersionsResult = { titleVersions: 0, titleWriteBacks: 0 };
   try {
     if (chunk.length === 0) return empty;
 
-    const urls = chunk.map((row) => row.url);
     const stored = new Map<
       string,
       { id: string; title: string; source_id: string }
-    >();
+    >(preResolved ?? []);
+    const urls = chunk.map((row) => row.url).filter((url) => !stored.has(url));
     for (let j = 0; j < urls.length; j += TITLE_LOOKUP_BATCH) {
       const { data, error } = await supabase
         .from("articles")
@@ -678,6 +898,10 @@ async function runCycle(): Promise<CycleStats> {
     dateFallbacks: 0,
     upsertSkipped: 0,
     validatorsWithheld: 0,
+    twinsDropped: 0,
+    parseDeferred: 0,
+    parseDeferredMaxStreak: 0,
+    parsedBytes: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -743,11 +967,27 @@ async function runCycleBody(
   // fixed `.order("slug")` base order doesn't always place the same
   // early-alphabet sources first every cycle -- over enough 3-minute cycles
   // the rotation walks all the way around the roster.
-  const toFetch = rotateForCycle(
-    liveSources.filter((s) => !isQuarantined(s, startedAt)),
-    startedAt,
+  //
+  // Parse budget: the sources the previous cycle deferred go FIRST (a stable
+  // reorder of the rotated list), so a deferred feed is not starved by the
+  // rotation. The module-level set is copied and cleared here; this cycle
+  // refills it with its own deferrals.
+  const deferredBefore = new Map(parseDeferredIds);
+  const priorityIds = new Set(deferredBefore.keys());
+  parseDeferredIds.clear();
+  const toFetch = prioritizeIds(
+    rotateForCycle(
+      liveSources.filter((s) => !isQuarantined(s, startedAt)),
+      startedAt,
+    ),
+    priorityIds,
   );
   stats.quarantined = liveSources.length - toFetch.length;
+  // Read once per cycle; anything but a positive integer means the default.
+  const budget = createParseBudget(
+    positiveIntEnv(Deno.env.get("INGEST_MAX_PARSES_PER_CYCLE"), MAX_PARSES_PER_CYCLE),
+    positiveIntEnv(Deno.env.get("INGEST_PARSE_BUDGET_BYTES"), PARSE_BUDGET_BYTES),
+  );
 
   // Hydrate the module-scope conditionalCache from what we persisted last
   // cycle so the first fetch after a cold start (empty Map) still sends
@@ -764,6 +1004,10 @@ async function runCycleBody(
       });
     }
   }
+
+  // Twin-articles (migration 113): stored rows created before this instant
+  // are not looked up. Fixed per cycle.
+  const twinSinceIso = new Date(startedAt - TWIN_WINDOW_MS).toISOString();
 
   const allRows: IngestArticleRow[] = [];
   // Per-source intra-cycle de-dup so two section-slug variants of the same
@@ -799,7 +1043,27 @@ async function runCycleBody(
         conditionalCache,
         timeoutMs: FETCH_TIMEOUT_MS,
         knownBodyHash: source.fetch_body_hash ?? undefined,
+        // Asked only when a changed body is about to be decoded and parsed.
+        admitParse: (bodyBytes) => budget.admit(bodyBytes, priorityIds.has(source.id)),
       });
+
+      // Parse budget: checked FIRST. The fetcher refused to decode and parse
+      // this feed's changed body, so there is nothing to record about it: no
+      // fetch-state entry (its stored validators, status and fail streak stay
+      // as they were, and it is neither a failure nor a not-modified), the
+      // conditional cache back to its pre-request value (the fetcher stamped
+      // this response's validators on it; keeping them would answer the next
+      // poll with a 304 for a body that was never read), and a place at the
+      // front of the next cycle.
+      if (result.parseDeferred) {
+        stats.parseDeferred++;
+        const streak = (deferredBefore.get(source.id) ?? 0) + 1;
+        parseDeferredIds.set(source.id, streak);
+        if (streak > stats.parseDeferredMaxStreak) stats.parseDeferredMaxStreak = streak;
+        if (cacheBeforeCopy) conditionalCache.set(source.id, cacheBeforeCopy);
+        else conditionalCache.delete(source.id);
+        return;
+      }
 
       if (result.error) {
         // A parse error can still land on a 2xx response (fetcher.ts
@@ -893,11 +1157,29 @@ async function runCycleBody(
         const key = `${row.source_id}\x1f${row.content_hash}`;
         if (seenIntraCycle.has(key)) continue;
         seenIntraCycle.add(key);
+        // Twin-articles (migration 113): the outlet's numeric article id from
+        // the url. A second row of this feed with the same key is the same
+        // article under an edited headline (new slug): skip it, the first one
+        // stands. Null (no id in the url, or an excluded slug) is never
+        // tracked, so it can never merge two rows.
+        const articleKey = sourceArticleKeyFor(source.slug, row.url);
+        if (articleKey !== null) {
+          const twinKey = `${row.source_id}\x1fk\x1f${articleKey}`;
+          if (seenIntraCycle.has(twinKey)) {
+            stats.twinsDropped++;
+            continue;
+          }
+          seenIntraCycle.add(twinKey);
+        }
         // Additive: canonicalizeUrl never throws (it catches internally and
         // falls back to the raw URL), so this is always a string in
         // practice — the column stays nullable for any future producer
         // that can't compute one.
-        allRows.push({ ...row, canonical_url: canonicalizeUrl(row.url, source.slug) });
+        allRows.push({
+          ...row,
+          canonical_url: canonicalizeUrl(row.url, source.slug),
+          source_article_key: articleKey,
+        });
         pushed++;
       }
 
@@ -922,6 +1204,13 @@ async function runCycleBody(
     },
     fetchDeadline,
   );
+  stats.parsedBytes = budget.bytes;
+  if (stats.parseDeferred > 0) {
+    // Count only: never a url or a headline.
+    console.log(
+      `[ingest] parse budget: deferred ${stats.parseDeferred} changed feed(s) to the next cycle (parsed ${budget.parses}, ${budget.bytes} bytes, longest deferral streak ${stats.parseDeferredMaxStreak})`,
+    );
+  }
 
   // Flush whatever fetch-state accumulated during the pool right away
   // (migration 041 F3) rather than waiting for the cycle-end `finally` —
@@ -980,8 +1269,19 @@ async function runCycleBody(
       // sitting in `articles` under a different `url` (migration 041 F2) —
       // the actual production 23505, which the intra-cycle check above
       // cannot see.
-      const { rows: chunk, dropped: crossDeduplicated, lookupErrors } =
-        await dropExistingSourceContentHashRows(supabase, intraDeduped);
+      const {
+        rows: afterContentHash,
+        dropped: crossDeduplicated,
+        lookupErrors,
+      } = await dropExistingSourceContentHashRows(supabase, intraDeduped);
+      // Then the twins (migration 113): a row whose (source_id,
+      // source_article_key) is already stored under a different url is the
+      // same article under an edited headline -- it is not inserted.
+      const {
+        rows: chunk,
+        twins,
+        lookupErrors: twinLookupErrors,
+      } = await dropExistingSourceArticleKeyRows(supabase, afterContentHash, twinSinceIso);
       const deduped = intraDeduplicated + crossDeduplicated;
       if (deduped > 0) {
         stats.dedupedInBatch += deduped;
@@ -989,12 +1289,68 @@ async function runCycleBody(
           `[ingest] deduped ${deduped} row(s) sharing (source_id, content_hash) in chunk ${i}-${i + rawChunk.length}`,
         );
       }
-      if (lookupErrors > 0) {
-        stats.prefilterErrors += lookupErrors;
+      if (lookupErrors + twinLookupErrors > 0) {
+        stats.prefilterErrors += lookupErrors + twinLookupErrors;
       }
-      // Both dedupe passes together removed everything in this chunk —
-      // skip the upsert call entirely rather than sending an empty batch.
-      if (chunk.length === 0) continue;
+      if (twins.length > 0) {
+        stats.twinsDropped += twins.length;
+        // Count only: never the url or the headline.
+        console.log(
+          `[ingest] dropped ${twins.length} twin row(s) sharing (source_id, source_article_key) with a stored article in chunk ${i}-${i + rawChunk.length}`,
+        );
+      }
+      // The dedupe passes and the twin drop together removed everything in
+      // this chunk -- skip the upsert call entirely rather than sending an
+      // empty batch. A chunk of twins only still goes on: their new headlines
+      // are recorded below.
+      if (chunk.length === 0 && twins.length === 0) continue;
+      // Twins count as stored: they never reach the upsert, so their source
+      // settles and its validators commit. Their stored articles were already
+      // resolved by the key lookup; hand them to `recordTitleVersions` so the
+      // edited headline is recorded without another url select.
+      const twinRows = twins.map((t) => t.row);
+      const preResolved = new Map(
+        twins.map((t) => [
+          t.row.url,
+          { id: t.existing.id, title: t.existing.title, source_id: t.existing.source_id },
+        ]),
+      );
+      // ingest-health: bisecting fallback replaces the old
+      // batched-upsert-then-per-row-retry -- a single poisoned row now costs
+      // at most `1 + 2*ceil(log2(chunk.length))` upsert calls instead of up to
+      // `chunk.length + 1`. `isPastDeadline` is checked per popped batch, so a
+      // chunk still mid-bisect when the deadline hits contributes to
+      // `skipped`, not `rowErrors`. A chunk of twins only has nothing to upsert.
+      const upsertChunk = (): Promise<BisectUpsertResult> =>
+        chunk.length === 0
+          ? Promise.resolve({ inserted: 0, rowErrors: 0, skipped: 0, calls: 0, firstError: null })
+          : upsertWithBisect(
+              chunk,
+              async (batch) => {
+                const { data, error } = await supabase
+                  .from("articles")
+                  .upsert(batch, { onConflict: "url", ignoreDuplicates: true })
+                  .select("id");
+                return { inserted: data?.length ?? 0, error: error?.message ?? null };
+              },
+              {
+                isPastDeadline: () => Date.now() > deadline,
+                onSkipped: (b) => collectSourceIds(b, unsettled),
+                onRowError: (row, error) => {
+                  rowFailed.add(row.source_id);
+                  // Surface the real per-row failure (schema drift, constraint
+                  // violations) instead of swallowing it — and count it so the
+                  // cycle response reports the loss (audit P3-9).
+                  console.error(
+                    `[ingest] row upsert failed: ${JSON.stringify({
+                      url: row.url,
+                      source_id: row.source_id,
+                      error,
+                    })}`,
+                  );
+                },
+              },
+            );
       // Record any headline change (migration 056 / U-07) IN PARALLEL with
       // the article upsert below, not before it: `recordTitleVersions`
       // never rejects (its own try/catch returns 0) and the upsert never
@@ -1006,41 +1362,9 @@ async function runCycleBody(
       // changes go uncollected.
       const [{ titleVersions, titleWriteBacks }, bisectResult] = await Promise.all([
         Date.now() <= deadline
-          ? recordTitleVersions(supabase, chunk)
+          ? recordTitleVersions(supabase, [...chunk, ...twinRows], preResolved)
           : Promise.resolve({ titleVersions: 0, titleWriteBacks: 0 }),
-        // ingest-health: bisecting fallback replaces the old
-        // batched-upsert-then-per-row-retry -- a single poisoned row now
-        // costs at most `1 + 2*ceil(log2(chunk.length))` upsert calls
-        // instead of up to `chunk.length + 1`. `isPastDeadline` is checked
-        // per popped batch, so a chunk still mid-bisect when the deadline
-        // hits contributes to `skipped`, not `rowErrors`.
-        upsertWithBisect(
-          chunk,
-          async (batch) => {
-            const { data, error } = await supabase
-              .from("articles")
-              .upsert(batch, { onConflict: "url", ignoreDuplicates: true })
-              .select("id");
-            return { inserted: data?.length ?? 0, error: error?.message ?? null };
-          },
-          {
-            isPastDeadline: () => Date.now() > deadline,
-            onSkipped: (b) => collectSourceIds(b, unsettled),
-            onRowError: (row, error) => {
-              rowFailed.add(row.source_id);
-              // Surface the real per-row failure (schema drift, constraint
-              // violations) instead of swallowing it — and count it so the
-              // cycle response reports the loss (audit P3-9).
-              console.error(
-                `[ingest] row upsert failed: ${JSON.stringify({
-                  url: row.url,
-                  source_id: row.source_id,
-                  error,
-                })}`,
-              );
-            },
-          },
-        ),
+        upsertChunk(),
       ]);
       if (titleVersions > 0) {
         stats.titleVersions += titleVersions;

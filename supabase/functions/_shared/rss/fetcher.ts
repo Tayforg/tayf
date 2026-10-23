@@ -64,6 +64,12 @@ export interface FetchResult {
   /** The first present-but-unparseable raw date value this fetch saw,
    * sliced to 80 chars -- ingest-health. */
   dateFallbackSample?: string;
+  /** Set when `FetchOptions.admitParse` refused the parse of a changed 2xx
+   * body (parse budget): nothing was decoded or parsed, `items` is empty and
+   * NO validators (etag, lastModified, bodyHash) are returned -- the
+   * conditional cache is restored so the next poll fetches the feed again
+   * instead of answering it with a 304. Not an error, not a failure. */
+  parseDeferred?: boolean;
 }
 
 export interface ConditionalCacheEntry {
@@ -82,6 +88,12 @@ export interface FetchOptions {
   /** Maximum bytes read from the feed body. Default DEFAULT_MAX_BYTES — lets
    * tests drive the cap with a tiny body without touching the module const. */
   maxBytes?: number;
+  /** Parse budget. Called with the body's byte length once the body is in
+   * memory and hashed, only when a decode + XML parse would actually follow:
+   * never for a 304, a non-2xx, an oversize body or a body-hash hit. Returning
+   * false defers the feed (`FetchResult.parseDeferred`); a throw counts as
+   * true. Omit it for the unconditional behaviour. */
+  admitParse?: (bodyBytes: number) => boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -318,6 +330,35 @@ export async function fetchFeed(
       etag,
       lastModified,
     };
+  }
+
+  // Parse budget (twin-articles item, part B): the decode, the XML parse and
+  // the date cleanup below are the CPU-heavy part of a cycle. The caller can
+  // refuse them for this feed; the body is dropped and the feed is simply
+  // fetched again on a later cycle. Restore the conditional cache exactly like
+  // the NotAFeed branch below: `cache.set(...)` above already stamped this
+  // response's etag/lastModified, and keeping them would turn the next poll
+  // into a 304 for a body that was never parsed.
+  if (opts.admitParse) {
+    let admitted = true;
+    try {
+      admitted = opts.admitParse(buf.byteLength);
+    } catch {
+      // A throwing budget must not cost the feed: parse as if unbudgeted.
+      admitted = true;
+    }
+    if (!admitted) {
+      if (cache) {
+        if (cached) cache.set(source.id, cached);
+        else cache.delete(source.id);
+      }
+      return {
+        source,
+        items: [],
+        status: response.status,
+        parseDeferred: true,
+      };
+    }
   }
 
   const { text: xml, charset } = decodeRssBody(

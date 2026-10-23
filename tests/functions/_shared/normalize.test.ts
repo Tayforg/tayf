@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { INVALID_XML_CHARS_RE } from "../../../supabase/functions/_shared/rss/entities.ts";
 
 // ---------------------------------------------------------------------------
 // Sanitisation coverage for supabase/functions/_shared/rss/normalize.ts.
@@ -33,6 +34,9 @@ interface NormalizeModule {
   isVideoUrl: typeof import(
     "../../../supabase/functions/_shared/rss/normalize.ts"
   )["isVideoUrl"];
+  normalizeArticles: typeof import(
+    "../../../supabase/functions/_shared/rss/normalize.ts"
+  )["normalizeArticles"];
 }
 
 let mod: NormalizeModule | null = null;
@@ -43,7 +47,11 @@ beforeAll(async () => {
     const m = await import(
       "../../../supabase/functions/_shared/rss/normalize.ts"
     );
-    mod = { normalizeItem: m.normalizeItem, isVideoUrl: m.isVideoUrl };
+    mod = {
+      normalizeItem: m.normalizeItem,
+      isVideoUrl: m.isVideoUrl,
+      normalizeArticles: m.normalizeArticles,
+    };
   } catch (err) {
     loadError = err;
   }
@@ -458,5 +466,215 @@ describe("normalize.ts ingest-hygiene: legal-notice filter", () => {
       link: "/haber/aym",
     });
     expect(row).not.toBeNull();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// entity-decode: one bad numeric entity must never throw out of
+// normalizeArticles (String.fromCodePoint(0x110000) is a RangeError, and one
+// throw used to drop EVERY item of the source for that run), and titles /
+// descriptions must contain only characters XML 1.0 allows (a `&#11;` decoded
+// to a raw VT once broke the whole RSS feed for every subscriber).
+// ---------------------------------------------------------------------------
+describe("normalize.ts entity-decode: bad numeric references never throw and never leak illegal characters", () => {
+  // NON-global copy: a /g regex keeps lastIndex between .test() calls and
+  // would make this assertion flaky.
+  const illegal = new RegExp(INVALID_XML_CHARS_RE.source);
+
+  const good = { title: "Sağlam başlık", link: "/good", contentSnippet: "Sağlam özet" };
+
+  it.each([
+    ["a &#1114112; b", "a  b"],
+    ["a &#x110000; b", "a  b"],
+    ["a &#0; b", "a  b"],
+    ["a &#11; b", "a  b"],
+    ["a &#xD800; b", "a  b"],
+    ["x&#99999999999999999999;", "x"],
+  ])("normalizeArticles survives %j and keeps both rows", (badTitle, expected) => {
+    let rows: ReturnType<NormalizeModule["normalizeArticles"]> = [];
+    expect(() => {
+      rows = mod!.normalizeArticles(source, [
+        good,
+        { title: badTitle, link: "/bad" },
+      ]);
+    }).not.toThrow();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.title).toBe("Sağlam başlık");
+    expect(rows[1]!.title).toBe(expected);
+  });
+
+  it("also survives a bad numeric entity in the description", () => {
+    const rows = mod!.normalizeArticles(source, [
+      { title: "Başlık", link: "/d", contentSnippet: "özet &#1114112; sonu &#x110000;!" },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.description).toBe("özet  sonu !");
+  });
+
+  it("survives an entity so long that Number() overflows to Infinity", () => {
+    const rows = mod!.normalizeArticles(source, [
+      { title: `a &#${"9".repeat(400)}; b`, link: "/inf" },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.title).toBe("a  b");
+  });
+
+  it("strips raw XML-illegal characters from the title and from the description", () => {
+    const raw = "a\u0001b￾c\uD800d";
+    const [row] = mod!.normalizeArticles(source, [
+      { title: raw, link: "/raw", contentSnippet: raw },
+    ]);
+    expect(row!.title).toBe("abcd");
+    expect(row!.description).toBe("abcd");
+  });
+
+  it("keeps a legal tab / newline inside a description", () => {
+    const [row] = mod!.normalizeArticles(source, [
+      { title: "Başlık", link: "/ws", contentSnippet: "bir\tiki\nüç" },
+    ]);
+    expect(row!.description).toBe("bir\tiki\nüç");
+  });
+
+  it("still decodes legal numeric references", () => {
+    const [row] = mod!.normalizeArticles(source, [
+      { title: "ba&#351;l&#x15F;k &#x1F600;", link: "/ok" },
+    ]);
+    expect(row!.title).toBe("başlşk 😀");
+  });
+
+  it("decodes '&#351;' and '&#x15F;' to 'ş' and '&#x1F600;' to the emoji", () => {
+    const titles = ["&#351;", "&#x15F;", "&#x1F600;"].map(
+      (t) => mod!.normalizeArticles(source, [{ title: t, link: "/e" }])[0]!.title,
+    );
+    expect(titles).toEqual(["ş", "ş", "😀"]);
+  });
+
+  it("keeps single-pass decoding: '&amp;lt;' is the literal '&lt;'", () => {
+    const [row] = mod!.normalizeArticles(source, [
+      { title: "a &amp;lt; b", link: "/amp" },
+    ]);
+    expect(row!.title).toBe("a &lt; b");
+  });
+
+  it("does not turn an entity-decoded control character back into markup-free garbage", () => {
+    // &#60;b&#62; decodes to "<b>", which stripTags removes; the NUL beside it
+    // must vanish too.
+    const [row] = mod!.normalizeArticles(source, [
+      { title: "&#60;b&#62;Kalın&#0;&#60;/b&#62;", link: "/mix" },
+    ]);
+    expect(row!.title).toBe("Kalın");
+  });
+
+  it("a description cut at 500 characters never ends in half an emoji", () => {
+    // 496 chars + an emoji (2 UTF-16 units) puts the clamp point at 497,
+    // inside the surrogate pair.
+    const long = "a".repeat(496) + "😀" + "b".repeat(50);
+    const [row] = mod!.normalizeArticles(source, [
+      { title: "Başlık", link: "/long", contentSnippet: long },
+    ]);
+    expect(row!.description!.endsWith("...")).toBe(true);
+    expect(illegal.test(row!.description!)).toBe(false);
+    expect(row!.description!.length).toBeLessThanOrEqual(500);
+  });
+
+  it("no returned title or description contains an XML-illegal character", () => {
+    const nasty = [
+      "a &#1114112; b",
+      "a &#0; b &#11; c &#xD800; d &#xDFFF; e &#xFFFE; f &#xFFFF;",
+      "raw \u0000\u0001\u0008\u000B\u000C\u001F￾￿\uD800 \uDC00 end",
+      "&#x1F600; 😀 \uD83D",
+    ];
+    const items = nasty.map((t, i) => ({
+      title: t,
+      link: `/n${i}`,
+      contentSnippet: t,
+    }));
+    const rows = mod!.normalizeArticles(source, items);
+    expect(rows).toHaveLength(nasty.length);
+    for (const r of rows) {
+      expect(illegal.test(r.title), `title ${JSON.stringify(r.title)}`).toBe(false);
+      expect(
+        illegal.test(r.description ?? ""),
+        `description ${JSON.stringify(r.description)}`,
+      ).toBe(false);
+    }
+  });
+});
+
+describe("normalize.ts normalizeArticles: one throwing item is skipped on its own", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("skips an item whose title is not a string, keeps the good row, logs once", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rows = mod!.normalizeArticles(source, [
+      { title: "Önce", link: "/first" },
+      { title: {} as unknown as string, link: "/bad" },
+      { title: "Sonra", link: "/last" },
+    ]);
+    expect(rows.map((r) => r.title)).toEqual(["Önce", "Sonra"]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const line = String(spy.mock.calls[0]![0]);
+    expect(line).toContain(source.slug);
+    expect(line).toContain("skipped 1");
+  });
+
+  it("logs ONE line per call however many items threw, with the count", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const bad = { title: {} as unknown as string, link: "/bad" };
+    const rows = mod!.normalizeArticles(source, [
+      bad,
+      { title: "İyi", link: "/ok" },
+      { ...bad, link: "/bad2" },
+      { ...bad, link: "/bad3" },
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0]![0])).toContain("skipped 3");
+  });
+
+  it("does not log when nothing threw", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mod!.normalizeArticles(source, [
+      { title: "İyi", link: "/ok" },
+      { title: "", link: "/no-title" }, // filtered out, not an error
+    ]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("never logs a title or a URL, and truncates the message to 200 characters", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const long = "x".repeat(500);
+    const throwing = {
+      get title(): string {
+        throw new Error(`boom https://secret.example/path?token=1 ${long}`);
+      },
+      link: "https://secret.example/article",
+    } as unknown as { title: string; link: string };
+    mod!.normalizeArticles(source, [
+      { title: "Gizli başlık", link: "https://secret.example/ok" },
+      throwing,
+    ]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const line = String(spy.mock.calls[0]![0]);
+    expect(line).not.toContain("Gizli başlık");
+    expect(line).not.toContain("secret.example");
+    expect(line).toContain("skipped 1");
+    const message = line.split("that threw: ")[1]!;
+    expect(message.length).toBeLessThanOrEqual(200);
+  });
+
+  it("keeps the return shape and order for a clean batch", () => {
+    const rows = mod!.normalizeArticles(source, [
+      { title: "Bir", link: "/1" },
+      { title: "İki", link: "/2" },
+    ]);
+    expect(rows.map((r) => r.title)).toEqual(["Bir", "İki"]);
+    expect(rows[0]).toMatchObject({
+      source_id: "src-1",
+      url: "https://example.test/1",
+    });
   });
 });
