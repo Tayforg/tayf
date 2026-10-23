@@ -14,7 +14,7 @@
 // consistently instead of re-deriving it (or getting it wrong) file by
 // file.
 //
-// The pattern has two halves:
+// The pattern has two halves and a safety rule:
 //
 //   1. `attemptCached` — call THIS from inside the `"use cache"` function
 //      body, wrapping the real (throwing) fetch. It never rejects: a
@@ -34,9 +34,40 @@
 //      fetch live (uncached); the retry is what heals a transient blip
 //      per request, not cache expiry. Only a genuinely sustained outage
 //      (cached attempt AND live retry both fail) falls through to
-//      `fallback`. This half also never throws. Callers that must not
-//      degrade silently (crons, RSS) should follow the getBlindspots
-//      shape instead: attempt, live retry, then let the throw propagate.
+//      `fallback`. This half never throws for a DATA failure. Callers that
+//      must not degrade silently (crons, RSS) should follow the
+//      getBlindspots shape instead: attempt, live retry, then let the throw
+//      propagate.
+//
+//   3. Prerender safety — `resolveCachedOrRetry` awaits `connection()`
+//      (`awaitRequestScope`) before the live retry. The retry is an
+//      UNCACHED fetch that may read the clock (fetchTopicCounts does,
+//      topic-query.ts) and Next 16 cacheComponents fails `next build` on a
+//      clock read in an uncached prerender path. When the cached attempt
+//      failed during `next build` (or a background revalidation prerender),
+//      the await postpones the subtree to the nearest Suspense (the root
+//      src/app/loading.tsx covers every public page) instead of running the
+//      retry. At request time it resolves at once and nothing changes: one
+//      live retry, then `fallback`. NEVER call `resolveCachedOrRetry`, a
+//      getter built on it, or `connection()` inside a `"use cache"` body:
+//      there `connection()` throws AND records
+//      `workStore.invalidDynamicUsageError`, which fails the build even
+//      when caught. tests/guards/cache-retry-prerender.test.ts enforces
+//      this, the await-before-retry order, and the call-site shape.
+//      Facts, from node_modules/next/dist/server/request/connection.js:
+//        - prerender / prerender-runtime / prerender-client: returns a
+//          hanging promise, so the subtree postpones;
+//        - request scope: resolves (crons and route handlers already await
+//          `connection()` first);
+//        - no work store (vitest without a mock, node scripts): throws
+//          "`connection` was called outside a request scope"
+//          (work-unit-async-storage.external.js), the one error
+//          `awaitRequestScope` swallows;
+//        - inside a `"use cache"` body: throws and records
+//          `invalidDynamicUsageError`;
+//        - inside `after()`: throws a different message, which propagates.
+import { connection } from "next/server";
+
 export type CacheAttempt<T> =
   | { ok: true; data: T }
   | { ok: false; error: string };
@@ -64,9 +95,48 @@ export async function attemptCached<T>(
 }
 
 /**
- * The uncached public entry point paired with `attemptCached`. Never
- * throws: a cache-attempt failure triggers one live retry, and a retry
- * failure (or throw) falls back to `fallback` rather than propagating.
+ * Wait until we are in a real request, so the caller may run uncached,
+ * possibly clock-reading work. Wraps `connection()` from next/server. What it
+ * does per scope (node_modules/next/dist/server/request/connection.js):
+ *
+ * - prerender / prerender-runtime / prerender-client (`next build`,
+ *   background revalidation): `connection()` returns a hanging promise.
+ *   This function therefore never settles, and the subtree postpones to the
+ *   nearest Suspense boundary (src/app/loading.tsx covers every public page).
+ * - request scope: resolves. Crons and route handlers already await
+ *   `connection()` first.
+ * - no work store (vitest without a mock, node scripts): `connection()`
+ *   throws "`connection` was called outside a request scope"
+ *   (work-unit-async-storage.external.js). That one error is swallowed and
+ *   this resolves, so the caller proceeds.
+ * - inside a `"use cache"` body: `connection()` throws AND records
+ *   `workStore.invalidDynamicUsageError`, which fails the build even when
+ *   caught. Never call this from a cache body (guarded by
+ *   tests/guards/cache-retry-prerender.test.ts).
+ * - inside `after()`: throws a different message; propagated.
+ *
+ * Only the outside-scope error is swallowed. Next control flow (the hanging
+ * promise's rejection at prerender abort, the prerender-legacy interrupt)
+ * and misuse (`use cache`, `after()`) propagate.
+ */
+export async function awaitRequestScope(): Promise<void> {
+  try {
+    await connection();
+  } catch (err) {
+    if (err instanceof Error && err.message.includes("outside a request scope")) {
+      return;
+    }
+    throw err;
+  }
+}
+
+/**
+ * The uncached public entry point paired with `attemptCached`. Never throws
+ * for a data failure: a cache-attempt failure triggers one live retry, and a
+ * retry failure (or throw) falls back to `fallback` rather than propagating.
+ * Next request-scope control flow from `awaitRequestScope` (a prerender
+ * postpone, an `after()` misuse) propagates; it is deliberately kept outside
+ * the try so a postpone signal can never be mistaken for `fallback`.
  */
 export async function resolveCachedOrRetry<T>(
   label: string,
@@ -76,6 +146,8 @@ export async function resolveCachedOrRetry<T>(
 ): Promise<T> {
   const result = await cached();
   if (result.ok) return result.data;
+
+  await awaitRequestScope();
 
   try {
     return await retry();

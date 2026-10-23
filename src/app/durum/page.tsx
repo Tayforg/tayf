@@ -6,6 +6,7 @@ import { StatusView } from "@/components/status/status-view";
 import { PageHero } from "@/components/ui/page-hero";
 import { getPublicStatus } from "@/lib/status/public-status";
 import { buildStatusView } from "@/lib/status/verdict";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /durum ("Sistem durumu") — a public, plain-language answer to "is Tayf
 // keeping up?": how fresh the newest article, cluster and classification are,
@@ -17,12 +18,13 @@ import { buildStatusView } from "@/lib/status/verdict";
 // `canonical: "/"`. It is indexable on purpose (listed in the static sitemap);
 // the "snapshot unavailable" state adds its own `noindex` meta, so an outage
 // is never indexed as the page's content.
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Sistem durumu",
   description:
     "Tayf’ın haber toplama, kümeleme ve sınıflandırma adımlarının ne kadar güncel olduğu — yaklaşık dakikada bir güncellenir.",
-  alternates: { canonical: "/durum" },
-};
+  path: "/durum",
+});
 
 // Synchronous static shell (hero + skeleton) so it prerenders; the data read
 // streams in behind <Suspense>.

@@ -12,6 +12,7 @@ import {
   summariseFeedStatus,
 } from "@/lib/sources/feed-status";
 import { SOURCE_KIND_META } from "@/lib/sources/kind";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import type { MediaDnaZone } from "@/types";
 
 // /kaynaklar/durum — the public evidence page behind every "N/M kaynak"
@@ -36,12 +37,13 @@ import type { MediaDnaZone } from "@/types";
 //
 // Own metadata so this page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark it a duplicate of the homepage).
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Kaynak Durumu",
   description:
     "Tayf'ın izlediği her aktif kaynağın son haber zamanı, son HTTP durumu ve 7 günlük yayın sıklığı — yanlılık ve kör nokta paylarının hesaplandığı payda burada.",
-  alternates: { canonical: "/kaynaklar/durum" },
-};
+  path: "/kaynaklar/durum",
+});
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 

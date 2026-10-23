@@ -26,6 +26,7 @@ import {
   WEEKLY_CLUSTER_LIMIT,
   type WeeklyLabelChange,
 } from "@/lib/weekly/weekly-query";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /hafta — P-07 "Medya Hava Durumu", the weekly content spine: what each
 // Medya DNA zone led with over the trailing 7 days, the stories that drew
@@ -49,12 +50,13 @@ import {
 // page prerenders into its honest unavailable state rather than failing the
 // build.
 
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Haftanın yelpazesi",
   description:
     "Son 7 günde hangi taraf neyi öne çıkardı: bölge payları, en geniş yelpazeli haberler, kör noktalar, sessiz kaynaklar ve etiket değişiklikleri.",
-  alternates: { canonical: "/hafta" },
-};
+  path: "/hafta",
+});
 
 const UNAVAILABLE_COPY =
   "Haftalık özet şu anda hesaplanamıyor. Birkaç dakika içinde tekrar deneyin.";

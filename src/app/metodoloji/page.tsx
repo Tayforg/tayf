@@ -39,18 +39,20 @@ import {
   HEADLINE_PROMPT_TEMPLATE,
 } from "@/lib/headline/prompt";
 import { getNeutralizedStatus } from "@/lib/headline/status";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /metodoloji — Tayf's methodology + trust page. Every number on this page
 // is imported from the same contract modules the pipeline runs on
 // (supabase/functions/_shared/cluster/blindspot.ts, wire.ts, ownership.ts)
 // so the prose can never drift from the code that actually enforces it.
 
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Metodoloji",
   description:
     "Tayf'ın kaynak etiketleme, kör nokta tespiti, sürpriz kesişim, tek kaynak dağıtımı, güvenilirlik ve başlık tarafsızlaştırma kurallarının tam açıklaması.",
-  alternates: { canonical: "/metodoloji" },
-};
+  path: "/metodoloji",
+});
 
 // Per-entry dates recovered from git history (git log -S on the distinctive
 // substring of each line, src/app/metodoloji/page.tsx), newest first. The

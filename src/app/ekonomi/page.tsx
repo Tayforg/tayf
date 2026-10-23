@@ -16,13 +16,15 @@ import {
   refKey,
 } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Ekonomi",
   description:
     "Borsa İstanbul şirketlerini anan haberler, KAP bildirimleri ve hisselerin günlük hareketi tek ekranda.",
-  alternates: { canonical: "/ekonomi" },
-};
+  path: "/ekonomi",
+});
 
 // /ekonomi — the terminal. Three feeds share one screen:
 //   news that names a listed company (article_tickers), each row carrying

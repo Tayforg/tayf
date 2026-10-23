@@ -8,15 +8,17 @@ import { loadGameHeadlines, sampleHeadlines } from "@/lib/game/headline-pool";
 import { getDailyPuzzle } from "@/lib/game/daily-query";
 import { istanbulDateKey, resolvePuzzleDate } from "@/lib/game/daily-set";
 import { currentTimeMs } from "@/lib/time";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Tarafı Tahmin Et",
   description:
     "60 saniyede 10 manşet: hangi taraf yazdı, tahmin et. Tayf'ın 118 kaynak etiketi için oyuncuların ilk dış çapraz kontrolü.",
-  alternates: { canonical: "/oyun" },
-};
+  path: "/oyun",
+});
 
 // /oyun — three games behind one mode switch (OyunModes, "use client"),
 // picked from a Server Component that fetches the Bölge headline pool

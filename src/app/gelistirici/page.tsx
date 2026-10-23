@@ -11,6 +11,7 @@ import {
 } from "@/lib/api/v1-docs";
 import { REGISTRY_LICENCE } from "@/lib/sources/registry";
 import { siteUrl } from "@/lib/site-url";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /gelistirici — developer docs for the keyed /api/v1 surface. A static
 // Server Component: no fetch, no Date anywhere (this page must prerender
@@ -20,12 +21,13 @@ import { siteUrl } from "@/lib/site-url";
 // literal — so this page and the OpenAPI document it links to can never
 // silently drift from the route handlers both describe.
 
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Geliştirici API",
   description:
     "Tayf'ın anahtarlı, salt okunur /api/v1 JSON API'si için geliştirici belgeleri: kimlik doğrulama, kullanım sınırları, uç noktalar ve OpenAPI 3.1 tanımı.",
-  alternates: { canonical: "/gelistirici" },
-};
+  path: "/gelistirici",
+});
 
 const cardClass = "rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
 const proseClass = "max-w-[65ch] text-sm text-muted-foreground leading-relaxed";

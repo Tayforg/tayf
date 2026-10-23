@@ -3,15 +3,17 @@ import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
 import { getRecentClusters, type ClusterRow } from "@/lib/clusters/timeline-query";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
-export const metadata: Metadata = {
+// staticPageMetadata also sets its own og:* / twitter:* url, title and image.
+export const metadata: Metadata = staticPageMetadata({
   title: "Zaman çizelgesi",
   description:
     "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı.",
-  alternates: { canonical: "/timeline" },
-};
+  path: "/timeline",
+});
 
 // /timeline — chronological feed of every cluster Tayf has minted in the
 // last 24 hours, grouped by the hour the cluster first published. Acts as a
