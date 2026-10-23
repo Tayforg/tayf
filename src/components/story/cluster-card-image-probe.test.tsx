@@ -8,8 +8,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 //     the test can pull `onLoad` out and call it with a fake <img> element;
 //   - `react`'s useState is wrapped so the component's state setters are
 //     spies. A server render never applies updates, so the spies are the
-//     observable "did the component reveal / skip the image" signal.
-// The component declares its state in the order idx, loaded, logoFailed.
+//     observable "did the component skip the image" signal.
+// The photo is visible from the first paint (perf-1), so there is no reveal
+// state: the component declares only idx, logoFailed (in that order), and the
+// probe's sole outcome is advancing `idx` past an undersized candidate.
 const h = vi.hoisted(() => ({
   imageProps: [] as Array<Record<string, unknown>>,
   setters: [] as Array<ReturnType<typeof vi.fn>>,
@@ -75,7 +77,7 @@ function fakeImg(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
-function renderOnLoad() {
+function renderOnLoad({ withFloor = true }: { withFloor?: boolean } = {}) {
   renderToStaticMarkup(
     <ClusterCardImage
       src="https://cdn.outlet.example/foto.jpg"
@@ -83,12 +85,13 @@ function renderOnLoad() {
       alt="Test"
       width={768}
       height={576}
-      minIntrinsicWidth={320}
+      minIntrinsicWidth={withFloor ? 320 : undefined}
     />,
   );
   const onLoad = h.imageProps[0]!.onLoad as (e: { currentTarget: unknown }) => void;
-  const [setIdx, setLoaded] = [h.setters[0]!, h.setters[1]!];
-  return { onLoad, setIdx, setLoaded };
+  const onError = h.imageProps[0]!.onError as () => void;
+  const [setIdx, setLogoFailed] = [h.setters[0]!, h.setters[1]!];
+  return { onLoad, onError, setIdx, setLogoFailed };
 }
 
 /** Let the probe's microtask and the `.then` continuation run. */
@@ -104,34 +107,39 @@ afterEach(() => {
 });
 
 describe("ClusterCardImage — probe stale-result guard", () => {
-  it("reveals a 460px photo (naturalWidth reads 216 at DPR2) once the probe resolves", async () => {
-    stubProbeImage(460);
-    const { onLoad, setIdx, setLoaded } = renderOnLoad();
+  it("declares exactly two state slots, idx then logoFailed (no reveal flag)", () => {
+    renderOnLoad();
 
-    onLoad({ currentTarget: fakeImg() });
-    // Still opacity-0 while the probe is in flight.
-    expect(setLoaded).not.toHaveBeenCalled();
-    await settle();
-
-    expect(setLoaded).toHaveBeenCalledWith(true);
-    expect(setIdx).not.toHaveBeenCalled();
+    expect(h.setters).toHaveLength(2);
   });
 
-  it("skips a genuinely tiny image: advances the candidate and never reveals it", async () => {
+  it("keeps a 460px photo (naturalWidth reads 216 at DPR2): the probe resolves and idx stays put", async () => {
+    stubProbeImage(460);
+    const { onLoad, setIdx, setLogoFailed } = renderOnLoad();
+
+    onLoad({ currentTarget: fakeImg() });
+    await settle();
+
+    expect(setIdx).not.toHaveBeenCalled();
+    expect(setLogoFailed).not.toHaveBeenCalled();
+  });
+
+  it("skips a genuinely tiny image: advances the candidate exactly once", async () => {
     stubProbeImage(150);
-    const { onLoad, setIdx, setLoaded } = renderOnLoad();
+    const { onLoad, setIdx, setLogoFailed } = renderOnLoad();
 
     onLoad({ currentTarget: fakeImg({ naturalWidth: 70 }) });
     await settle();
 
     expect(setIdx).toHaveBeenCalledTimes(1);
-    expect(setLoaded).toHaveBeenCalledWith(false);
-    expect(setLoaded).not.toHaveBeenCalledWith(true);
+    const updater = setIdx.mock.calls[0]![0] as (i: number) => number;
+    expect(updater(0)).toBe(1);
+    expect(setLogoFailed).not.toHaveBeenCalled();
   });
 
   it("drops the result when the <img> was removed from the DOM mid-probe (unmount / candidate advance)", async () => {
     stubProbeImage(150);
-    const { onLoad, setIdx, setLoaded } = renderOnLoad();
+    const { onLoad, setIdx, setLogoFailed } = renderOnLoad();
     const img = fakeImg({ naturalWidth: 70 });
 
     onLoad({ currentTarget: img });
@@ -139,35 +147,61 @@ describe("ClusterCardImage — probe stale-result guard", () => {
     await settle();
 
     expect(setIdx).not.toHaveBeenCalled();
-    expect(setLoaded).not.toHaveBeenCalled();
+    expect(setLogoFailed).not.toHaveBeenCalled();
   });
 
   it("still applies the result while the <img> stays connected, as it does inside a hidden <Activity>", async () => {
     // A hidden <Activity> runs effect cleanups but keeps the host nodes in the
     // document (display:none). The probe resolving meanwhile must not be
-    // discarded, or the hero stays opacity-0 after the tree is shown again.
-    stubProbeImage(460);
-    const { onLoad, setIdx, setLoaded } = renderOnLoad();
-    const img = fakeImg();
+    // discarded, or an undersized photo would stay on screen after the tree
+    // is shown again.
+    stubProbeImage(150);
+    const { onLoad, setIdx, setLogoFailed } = renderOnLoad();
+    const img = fakeImg({ naturalWidth: 70 });
 
     onLoad({ currentTarget: img });
     // (hide: <img> stays in the DOM, isConnected remains true)
     await settle();
 
     expect(img.isConnected).toBe(true);
-    expect(setLoaded).toHaveBeenCalledWith(true);
-    expect(setIdx).not.toHaveBeenCalled();
+    expect(setIdx).toHaveBeenCalledTimes(1);
+    expect(setLogoFailed).not.toHaveBeenCalled();
   });
 
-  it("reveals at once, without probing, when the element is not rendered (display:none)", () => {
+  it("does nothing, and never probes, when the element is not rendered (display:none)", async () => {
     const probeCtor = vi.fn();
     vi.stubGlobal("Image", probeCtor);
-    const { onLoad, setIdx, setLoaded } = renderOnLoad();
+    const { onLoad, setIdx, setLogoFailed } = renderOnLoad();
 
     onLoad({ currentTarget: fakeImg({ clientWidth: 0 }) });
+    await settle();
 
-    expect(setLoaded).toHaveBeenCalledWith(true);
-    expect(setIdx).not.toHaveBeenCalled();
     expect(probeCtor).not.toHaveBeenCalled();
+    expect(setIdx).not.toHaveBeenCalled();
+    expect(setLogoFailed).not.toHaveBeenCalled();
+  });
+
+  it("does nothing, and never probes, when no minIntrinsicWidth was requested", async () => {
+    const probeCtor = vi.fn();
+    vi.stubGlobal("Image", probeCtor);
+    const { onLoad, setIdx, setLogoFailed } = renderOnLoad({ withFloor: false });
+
+    onLoad({ currentTarget: fakeImg() });
+    await settle();
+
+    expect(probeCtor).not.toHaveBeenCalled();
+    expect(setIdx).not.toHaveBeenCalled();
+    expect(setLogoFailed).not.toHaveBeenCalled();
+  });
+
+  it("onError only advances to the next candidate", () => {
+    const { onError, setIdx, setLogoFailed } = renderOnLoad();
+
+    onError();
+
+    expect(setIdx).toHaveBeenCalledTimes(1);
+    const updater = setIdx.mock.calls[0]![0] as (i: number) => number;
+    expect(updater(0)).toBe(1);
+    expect(setLogoFailed).not.toHaveBeenCalled();
   });
 });

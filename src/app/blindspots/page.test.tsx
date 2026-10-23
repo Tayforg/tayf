@@ -330,9 +330,10 @@ describe("/blindspots page — silence digest band", () => {
 });
 
 // ---------------------------------------------------------------------------
-// "Kör noktaya yakın": a second, independent Suspense boundary AFTER the main
-// feed. It must not couple to the feed: the feed never reads it, the silence
-// digest never sees its items, and a failure only hides the section.
+// "Kör noktaya yakın": a Suspense boundary NESTED as the last child of the
+// feed (perf-4), so it can only reveal after the feed has laid out. It must
+// not couple to the feed: the feed never awaits it, the silence digest never
+// sees its items, and a failure only hides the section.
 // ---------------------------------------------------------------------------
 describe("/blindspots page — Kör noktaya yakın section", () => {
   const NEAR_ITEM = {
@@ -363,22 +364,74 @@ describe("/blindspots page — Kör noktaya yakın section", () => {
     expect(tree.props?.items).toBeNull();
   });
 
-  it("the page mounts it in its own Suspense (fallback null) AFTER the main feed's Suspense", () => {
+  it("the page has exactly one Suspense boundary, around BlindspotsFeed (perf-4: no sibling band boundary)", () => {
     const tree = BlindspotsPage();
-    const suspenses = collectElements(tree).filter((el) => el.type === Suspense);
+    const all = collectElements(tree);
+    const suspenses = all.filter((el) => el.type === Suspense);
 
-    const childType = (el: Elementish) =>
-      (el.props?.children as Elementish | undefined)?.type;
-    const feedIdx = suspenses.findIndex((el) => childType(el) === BlindspotsFeed);
-    const nearIdx = suspenses.findIndex(
-      (el) => childType(el) === NearBlindspotsSection,
+    expect(suspenses).toHaveLength(1);
+    const only = suspenses[0];
+    expect((only?.props?.children as Elementish | undefined)?.type).toBe(
+      BlindspotsFeed,
+    );
+    // The feed keeps its skeleton fallback.
+    expect(only?.props?.fallback).not.toBeNull();
+    // The band is no longer a sibling of the page: it lives inside the feed.
+    expect(all.some((el) => el.type === NearBlindspotsSection)).toBe(false);
+  });
+
+  const BUNDLE_FIXTURE = {
+    cluster: { id: "b1", updated_at: "2026-10-22T11:00:00.000Z" },
+    articles: [],
+    sources: [{ id: "b1-s", name: "Kaynak", bias: "pro_government" }],
+    dominantZone: "iktidar",
+    dominantPct: 1,
+    votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 0 },
+    isWireRedistribution: false,
+    effectiveArticleCount: 1,
+  };
+
+  // perf-4: React reveals a nested boundary only after its parent has
+  // revealed, so mounting the band as the LAST child of the feed (in every
+  // state) means it streams in below already-laid-out content: no shift.
+  it.each([
+    ["ok with one bundle", { ok: true, bundles: [BUNDLE_FIXTURE] }],
+    ["ok-empty", { ok: true, bundles: [] }],
+    ["failed", { ok: false }],
+  ] as const)(
+    "BlindspotsFeed (%s) ends with a null-fallback Suspense around NearBlindspotsSection",
+    async (_label, state) => {
+      getBlindspots.mockResolvedValueOnce(
+        state as { ok: true; bundles: unknown[] } | { ok: false },
+      );
+
+      const tree = (await BlindspotsFeed()) as Elementish;
+
+      const near = collectElements(tree).filter(
+        (el) =>
+          el.type === Suspense &&
+          (el.props?.children as Elementish | undefined)?.type ===
+            NearBlindspotsSection,
+      );
+      expect(near).toHaveLength(1);
+      expect(near[0]?.props?.fallback).toBeNull();
+
+      const children = tree.props?.children as unknown[];
+      expect(Array.isArray(children)).toBe(true);
+      expect(children[children.length - 1]).toBe(near[0]);
+    },
+  );
+
+  // perf-6: next/link would viewport-prefetch the DB-backed route handler as
+  // an RSC request. A plain anchor never prefetches.
+  it("the RSS link is a plain <a>, not a next/link", () => {
+    const rss = collectElements(BlindspotsPage()).filter(
+      (el) => el.props?.href === "/rss/kor-noktalar.xml",
     );
 
-    expect(feedIdx).toBeGreaterThanOrEqual(0);
-    expect(nearIdx).toBeGreaterThan(feedIdx);
-    expect(suspenses[nearIdx]?.props?.fallback).toBeNull();
-    // The feed keeps its skeleton fallback.
-    expect(suspenses[feedIdx]?.props?.fallback).not.toBeNull();
+    expect(rss).toHaveLength(1);
+    expect(rss[0]?.type).toBe("a");
+    expect(rss[0]?.props?.type).toBe("application/rss+xml");
   });
 
   it("BlindspotsFeed never reads the near-blindspot fetcher", async () => {

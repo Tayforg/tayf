@@ -72,9 +72,11 @@ interface ClusterCardProps {
   articles: ClusterCardArticle[];
   sources: ClusterCardSource[];
   /**
-   * Position of the card in the page's cluster grid. Used purely to flag
-   * above-the-fold cards so their hero image preloads eagerly. Defaults
-   * to a non-priority slot when omitted.
+   * Position of the card in the page's cluster list, counted across every
+   * section of the page. Only the first card (index 0) is the mobile LCP
+   * candidate, so only it preloads its banner at high priority; every other
+   * value, and an omitted index, gets a lazy banner. No default: omitting it
+   * must never promote a card.
    */
   index?: number;
   /**
@@ -94,7 +96,47 @@ interface ClusterCardProps {
 }
 
 const MAX_VISIBLE_ARTICLES = 4;
-const PRIORITY_CARD_COUNT = 3;
+
+// ---------------------------------------------------------------------------
+// Mobile banner image hints (perf-3)
+// ---------------------------------------------------------------------------
+//
+// Only the FIRST card on a page is the mobile LCP candidate: the banner is a
+// full-width 16:9 photo and the first card is the only one in the first
+// viewport. Preloading the next two as well (the old top-three rule) put three
+// `<link rel="preload" fetchpriority="high">` hints ahead of the real LCP and
+// split the phone's bandwidth between them. So index 0 alone is eager,
+// preloaded and ranked high; every other card stays lazy.
+//
+// `sizes` describes the banner's real slot: the viewport minus the page's
+// 1rem gutters on each side below the sm breakpoint, and nothing on desktop,
+// where the banner is display:none and only the smallest candidate is wanted.
+// The old `100vw` over-fetched a width the box never has. `quality` 50 is
+// already allowed by `images.qualities` in next.config.ts: the banner is a
+// small, heavily downscaled photo with a gradient scrim over its lower part.
+
+/** next/image `sizes` for the `sm:hidden` mobile banner. */
+export const MOBILE_BANNER_SIZES = "(max-width: 640px) calc(100vw - 2rem), 0px";
+
+/**
+ * Loading hints for a card's mobile banner. Pure so the rule is unit-testable
+ * without rendering a Server Component. Index 0 is eager + preloaded +
+ * `fetchpriority=high`; anything else (including `undefined`) gets none.
+ */
+export function mobileBannerImageProps(index?: number): {
+  priority: boolean;
+  fetchPriority: "high" | undefined;
+  sizes: string;
+  quality: number;
+} {
+  const isLcpCandidate = index === 0;
+  return {
+    priority: isLcpCandidate,
+    fetchPriority: isLcpCandidate ? "high" : undefined,
+    sizes: MOBILE_BANNER_SIZES,
+    quality: 50,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // ClusterMetaBadges (inlined from former cluster-meta-badges.tsx)
@@ -186,7 +228,7 @@ export function ClusterCard({
   cluster,
   articles,
   sources,
-  index = PRIORITY_CARD_COUNT,
+  index,
   isAging = false,
   isWireRedistribution,
   effectiveArticleCount,
@@ -237,7 +279,7 @@ export function ClusterCard({
   const heroSrc = heroCandidates[0] ?? null;
   const heroFallbacks = heroCandidates.slice(1);
   const heroAlt = heroArticle?.title ?? cluster.title_tr;
-  const isPriority = index < PRIORITY_CARD_COUNT;
+  const banner = mobileBannerImageProps(index);
 
   // Approach A (b-8): the entire card is a single <Link> to /cluster/{id}.
   // We deliberately convert the previously-linked article list items into
@@ -280,9 +322,11 @@ export function ClusterCard({
             alt={heroAlt}
             width={640}
             height={360}
-            sizes="(max-width: 640px) 100vw, 0px"
+            sizes={banner.sizes}
+            quality={banner.quality}
             minIntrinsicWidth={320}
-            priority={isPriority}
+            priority={banner.priority}
+            fetchPriority={banner.fetchPriority}
             className="h-full w-full object-cover"
           />
           <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-card/80 to-transparent" />
@@ -321,15 +365,15 @@ export function ClusterCard({
                 the cluster grid. Rendered unconditionally: ClusterCardImage
                 falls back to a muted placeholder when `heroSrc` is null.
 
-                Never preloaded (browser-6): the mobile banner above is the
-                one image a priority card may preload/eager-fetch; doing both
+                Never preloaded and given no fetch-priority hint (browser-6,
+                perf-3): the mobile banner above is the one image per page
+                (the first card's) that may preload or rank high; doing both
                 downloaded two copies of the hero. Lazy + display:none on
                 mobile means this image is never fetched there; on desktop an
                 above-the-fold lazy image loads at once (Next image docs,
-                "theme detection" note), and fetchPriority="high" lifts it for
-                priority cards. The banner's preload uses imagesizes
-                "(max-width: 640px) 100vw, 0px", so desktop only fetches the
-                smallest srcset candidate for it. */}
+                "theme detection" note) without a hint. The banner's sizes
+                (MOBILE_BANNER_SIZES) resolve to 0px on desktop, so desktop
+                only fetches the smallest srcset candidate for it. */}
             <div className="hidden sm:block shrink-0 w-32 h-24 sm:w-40 sm:h-28 overflow-hidden rounded-lg bg-muted">
               <ClusterCardImage
                 src={heroSrc}
@@ -341,7 +385,6 @@ export function ClusterCard({
                 height={224}
                 sizes="160px"
                 priority={false}
-                fetchPriority={isPriority ? "high" : undefined}
                 className="h-full w-full object-cover"
               />
             </div>

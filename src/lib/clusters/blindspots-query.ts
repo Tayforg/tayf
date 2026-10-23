@@ -7,7 +7,7 @@ import type {
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { BLINDSPOT } from "@/lib/bias/config";
 import { attemptCached } from "@/lib/cache-resilience";
-import { isOptimizableImageUrl } from "@/lib/images/image-url";
+import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
   dedupeBySource,
   passesFeedFilters,
@@ -235,8 +235,12 @@ function toBlindspotBundle(
       // rows/fixtures predating migration 047) is treated as allowed.
       // gif-filter (http-1): an animated GIF is nulled too (22 MB haber7 /
       // elips-haber placeholder that /_next/image passes through unmodified).
+      // db-4: a publisher logo card / 'son dakika' stand-in is nulled too, so
+      // the hero falls through to the next member's photo or the logo tier.
       image_url:
-        m.sources?.image_allowed === false || !isOptimizableImageUrl(m.image_url)
+        m.sources?.image_allowed === false ||
+        !isOptimizableImageUrl(m.image_url) ||
+        isPlaceholderImageUrl(m.image_url)
           ? null
           : m.image_url,
       published_at: m.published_at,

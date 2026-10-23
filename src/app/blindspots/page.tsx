@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { Suspense } from "react";
 import { connection } from "next/server";
 import { Eye, EyeOff } from "lucide-react";
@@ -43,6 +42,11 @@ import { getFeedStatusSummary } from "@/lib/sources/feed-status";
 // the data-dependent part streams in behind its own <Suspense> boundary as
 // `BlindspotsFeed`, which never lets a Supabase failure reach the error
 // boundary — `getBlindspotsSafe()` degrades to a retry affordance instead.
+//
+// The page owns exactly ONE boundary. "Kör noktaya yakın" is nested inside
+// the feed (see BlindspotsFeed): React reveals a nested boundary only after
+// its parent has revealed, so the band can never paint before the feed and
+// push it down (perf-4 layout shift).
 export default function BlindspotsPage() {
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
@@ -53,23 +57,20 @@ export default function BlindspotsPage() {
       />
 
       <p className="text-xs text-muted-foreground">
-        <Link
+        {/* Plain <a>, not next/link: Link would prefetch this DB-backed route
+            handler as an RSC request whenever it scrolls into view (perf-6).
+            Pinned by tests/guards/feed-links-plain-anchor.test.ts. */}
+        <a
           href="/rss/kor-noktalar.xml"
+          type="application/rss+xml"
           className="underline decoration-dotted underline-offset-2 hover:text-foreground"
         >
           RSS
-        </Link>
+        </a>
       </p>
 
       <Suspense fallback={<BlindspotsSkeleton />}>
         <BlindspotsFeed />
-      </Suspense>
-
-      {/* Independent boundary AFTER the feed: "Kör noktaya yakın" is display
-          only (not blindspots), so its fetch never delays or fails the feed
-          and no skeleton is shown while it loads. */}
-      <Suspense fallback={null}>
-        <NearBlindspotsSection />
       </Suspense>
     </div>
   );
@@ -190,14 +191,27 @@ export async function BlindspotsFeed() {
           <NewsletterForm />
         </div>
       )}
+
+      {/* "Kör noktaya yakın" (display only, not blindspots) is the LAST child,
+          in every state (ok, empty, failed), so the visual order is unchanged.
+          Nested boundary: React reveals it only after this feed has revealed,
+          so it always streams in below already-laid-out content and cannot
+          shift it (perf-4). It still never blocks or couples to the feed:
+          the feed does not await it, a slow or failed fetch only delays or
+          hides the band (no skeleton, fallback null), and SilenceDigestBand
+          and DenominatorNote above use the main bundles only. */}
+      <Suspense fallback={null}>
+        <NearBlindspotsSection />
+      </Suspense>
     </>
   );
 }
 
 // "Kör noktaya yakın" (just below the blindspot threshold). Exported like
-// BlindspotsFeed so tests can render it directly. Deliberately NOT part of
-// BlindspotsFeed: the feed's SilenceDigestBand and DenominatorNote are built
-// from the main bundles only, and these stories are not blindspots.
+// BlindspotsFeed so tests can render it directly. Mounted by BlindspotsFeed
+// in its own nested <Suspense>, but deliberately NOT awaited or fed into it:
+// the feed's SilenceDigestBand and DenominatorNote are built from the main
+// bundles only, and these stories are not blindspots.
 // `getNearBlindspotsSafe()` never throws; `null` hides the section.
 export async function NearBlindspotsSection() {
   await connection();

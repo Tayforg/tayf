@@ -623,6 +623,37 @@ describe("gif-filter article image_url (http-1)", () => {
     expect(byArticle["a-upper"].image_url).toBeNull();
   });
 
+  // db-4: a publisher logo card / 'son dakika' stand-in is nulled at the same
+  // boundary, so the hero and credit fall through to the next member's photo.
+  it("nulls a member whose article image is a known placeholder and keeps a .jpg member's image", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a-logo", "s-logo", "2026-04-17T10:00:00Z", {
+            article: { image_url: "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg" },
+          }),
+          mkEmbeddedMember("a-sd", "s-sd", "2026-04-17T09:30:00Z", {
+            article: { image_url: "https://foto.haberler.com/haber/2026/07/03/son-dakika_o.jpg" },
+          }),
+          mkEmbeddedMember("a-jpg", "s-jpg", "2026-04-17T09:00:00Z", {
+            article: { image_url: "https://cdn.example/a-jpg.jpg" },
+          }),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    const byArticle = Object.fromEntries(
+      result!.members.map((m) => [m.article.id, m.article]),
+    );
+    expect(byArticle["a-logo"].image_url).toBeNull();
+    expect(byArticle["a-sd"].image_url).toBeNull();
+    expect(byArticle["a-jpg"].image_url).toBe("https://cdn.example/a-jpg.jpg");
+  });
+
   it("leaves a null article image_url null", async () => {
     responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
     responses.cluster_articles = {

@@ -702,6 +702,50 @@ describe("gif-filter image_url gate", () => {
 });
 
 // ---------------------------------------------------------------------------
+// db-4 — publisher logo cards and 'son dakika' stand-ins (CNN TÜRK's red logo
+// card was attached to 174 distinct titles in 48 h) are nulled at the same
+// bundle boundary, so the hero falls through to the next member's photo.
+// ---------------------------------------------------------------------------
+
+describe("placeholder image_url gate (db-4)", () => {
+  it("nulls a known placeholder and a 'son dakika' basename, keeps a .jpg sibling", async () => {
+    response = {
+      data: [
+        mkCluster({
+          id: "c1",
+          members: [
+            {
+              id: "a-logo",
+              sourceId: "s-logo",
+              image_url: "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg",
+              published_at: iso(5 * 60 * 1000),
+            },
+            {
+              id: "a-sd",
+              sourceId: "s-sd",
+              image_url: "https://img.piri.net/resim/imagecrop/2026/04/01/09/50/tr_son_dakika_530x530.jpg",
+              published_at: iso(7 * 60 * 1000),
+            },
+            {
+              id: "a-jpg",
+              sourceId: "s-jpg",
+              image_url: "https://cdn.allowed.example/foto.jpg",
+              published_at: iso(10 * 60 * 1000),
+            },
+          ],
+        }),
+      ],
+      error: null,
+    };
+    const { bundles } = await getPoliticsClusters();
+    const byId = Object.fromEntries(bundles[0].articles.map((a) => [a.id, a]));
+    expect(byId["a-logo"].image_url).toBeNull();
+    expect(byId["a-sd"].image_url).toBeNull();
+    expect(byId["a-jpg"].image_url).toBe("https://cdn.allowed.example/foto.jpg");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // H2 neutral-headline coalesce
 // ---------------------------------------------------------------------------
 

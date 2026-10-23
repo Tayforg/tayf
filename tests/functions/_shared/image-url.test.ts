@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   isOptimizableImageUrl,
+  isPlaceholderImageUrl,
   normalizeImageUrl,
+  PLACEHOLDER_IMAGE_ASSETS,
   repairJoinedImageSegment,
 } from "../../../supabase/functions/_shared/image-url.ts";
 
@@ -309,5 +311,235 @@ describe("repairJoinedImageSegment / normalizeImageUrl: posta joined ObjectId se
   it("does not change the animated-GIF verdict for a healed URL", () => {
     expect(isOptimizableImageUrl(JOINED)).toBe(true);
     expect(isOptimizableImageUrl(HEALED)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// db-4 / perf-2: publisher logo cards and 'son dakika' placeholders are
+// reused across dozens of unrelated stories (read-only prod sample, trailing
+// 48 h: one image_url spread over 10-174 distinct titles at ten sources).
+// They must never become a hero, a card thumb or a /source thumb. Render-only
+// for now: nothing is rewritten in the database.
+// ---------------------------------------------------------------------------
+
+describe("isPlaceholderImageUrl (db-4)", () => {
+  // The ten verified rows from the 2026-10-23 sample. The `via` column says
+  // whether the denylist catches it by exact asset or by basename pattern.
+  const VERIFIED: ReadonlyArray<readonly [string, string, string]> = [
+    [
+      "cnn-turk",
+      "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg",
+      "asset",
+    ],
+    [
+      "yeni-safak",
+      "https://img.piri.net/resim/imagecrop/2026/04/01/09/50/tr_son_dakika_530x530.jpg",
+      "pattern",
+    ],
+    [
+      "aksam",
+      "https://img3.aksam.com.tr/imgsdisk2026/01/01/210220191220255418101_2.jpg",
+      "asset",
+    ],
+    ["diken", "https://www.diken.com.tr/wp-content/uploads/2021/10/gunun_11.jpg", "asset"],
+    [
+      "star",
+      "https://imgs.star.com.tr/imgsdisk/2026/10/02/1138373167528_2-15012019114103500.jpg",
+      "asset",
+    ],
+    [
+      "isci-haber",
+      "https://www.iscihaber.net/cropImages/1280x720/uploads/haberler/default_news_photo.jpg",
+      "pattern",
+    ],
+    [
+      "gzt",
+      "https://img.piri.net/resim/imagecrop/2018/04/20/06/49/resized_9641d-8b15395cgztsondakika.jpg",
+      "asset",
+    ],
+    [
+      "haber-global",
+      "https://i.haberglobal.com/storage/files/images/2021/09/23/haberglobal-sondakika-1jxM.png",
+      "asset",
+    ],
+    [
+      "a-haber",
+      "https://iaahbr.tmgrup.com.tr/c18248/1200/675/0/0/1200/675?u=https://iahbr.tmgrup.com.tr/Defaults/Upload/ahbr-default-1754911102530.png",
+      "asset",
+    ],
+    ["haberler-com", "https://foto.haberler.com/haber/2026/07/03/son-dakika_o.jpg", "pattern"],
+  ];
+
+  it("covers all ten verified sources", () => {
+    expect(new Set(VERIFIED.map(([slug]) => slug)).size).toBe(10);
+  });
+
+  it.each(VERIFIED.map(([slug, url, via]) => [slug, via, url] as const))(
+    "is true for the %s placeholder (%s)",
+    (_slug, _via, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(true);
+    },
+  );
+
+  it("the asset set is a ReadonlySet keyed by lower-case host + path", () => {
+    expect(PLACEHOLDER_IMAGE_ASSETS.has("image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg")).toBe(true);
+    for (const key of PLACEHOLDER_IMAGE_ASSETS) {
+      expect(key).not.toMatch(/^[a-z]+:/);
+      expect(key).not.toMatch(/[?#]/);
+      expect(key.split("/")[0]).toBe(key.split("/")[0]?.toLowerCase());
+    }
+  });
+
+  describe("exact asset: spelling variants", () => {
+    const CNN = "image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg";
+    it.each([
+      ["a cache-busting query", `https://${CNN}?v=2`],
+      ["a fragment", `https://${CNN}#x`],
+      ["a protocol-relative form", `//${CNN}`],
+      ["a doubled leading slash", "https://image.cnnturk.com//i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg"],
+      ["an upper-case host", "https://IMAGE.CnnTurk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg"],
+      ["http instead of https", `http://${CNN}`],
+      ["surrounding whitespace", `  https://${CNN} `],
+    ])("is true with %s", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(true);
+    });
+  });
+
+  describe("resizer wrapper: the wrapped origin in `u` is checked too", () => {
+    it("is true for another crop of the same a-haber default image", () => {
+      expect(
+        isPlaceholderImageUrl(
+          "https://iaahbr.tmgrup.com.tr/ffffff/0/0/0/0/2048/1365?u=https://iahbr.tmgrup.com.tr/Defaults/Upload/ahbr-default-1754911102530.png",
+        ),
+      ).toBe(true);
+    });
+
+    it("is false for a real a-haber photo behind the same resizer", () => {
+      expect(
+        isPlaceholderImageUrl(
+          "https://iaahbr.tmgrup.com.tr/c18248/1200/675/0/0/1200/675?u=https://iahbr.tmgrup.com.tr/albums/2026/10/22/a-real-photo.jpg",
+        ),
+      ).toBe(false);
+    });
+
+    it("is false when `u` is not an http(s) URL", () => {
+      expect(isPlaceholderImageUrl("https://cdn.x/a.jpg?u=javascript:alert(1)")).toBe(false);
+      expect(isPlaceholderImageUrl("https://cdn.x/a.jpg?u=")).toBe(false);
+    });
+
+    it("applies the basename pattern to the wrapped URL", () => {
+      expect(isPlaceholderImageUrl("https://r.x/c1/1/1?u=https://o.x/img/son-dakika.jpg")).toBe(true);
+    });
+  });
+
+  describe("basename pattern", () => {
+    it.each([
+      "https://cdn.x/img/son-dakika.jpg",
+      "https://cdn.x/img/son_dakika.png",
+      "https://cdn.x/img/sondakika.webp",
+      "https://cdn.x/img/SON-DAKIKA.JPG",
+      "https://cdn.x/img/son-dakika-haberleri.jpg",
+      "https://cdn.x/img/son_dakika_default.jpg",
+      "https://cdn.x/img/son-dakika-logo.png",
+      "https://cdn.x/img/son-dakika-1.jpg",
+      "https://cdn.x/img/son-dakika-1200x675.jpg",
+      "https://cdn.x/img/tr-son-dakika.jpg",
+      "https://cdn.x/img/tr_son_dakika_530x530.jpg",
+      "https://cdn.x/img/son%2Ddakika.jpg",
+      "https://cdn.x/img/default_news_photo.jpg",
+      "https://cdn.x/img/default-news-photo-2.png",
+      "https://cdn.x/img/Default_News_Photo.JPG?w=100",
+    ])("is true for %s", (url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(true);
+    });
+  });
+
+  describe("false cases", () => {
+    it("is false for the same CDN host with another hex file", () => {
+      expect(
+        isPlaceholderImageUrl(
+          "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9e.jpg",
+        ),
+      ).toBe(false);
+    });
+
+    it("is false when only the host differs from a known asset", () => {
+      expect(
+        isPlaceholderImageUrl(
+          "https://image.cnnturk.net/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg",
+        ),
+      ).toBe(false);
+    });
+
+    it.each([
+      ["son-dakika in the middle of an article basename", "https://cdn.x/2026/10/erdogan-son-dakika-aciklama-18123456.jpg"],
+      ["a slug that starts with son-dakika", "https://cdn.x/2026/10/son-dakika-erdogan-aciklama-18123456.jpg"],
+      ["a slug that starts with son-dakika, no extension noise", "https://cdn.x/son-dakika-deprem-oldu.jpg"],
+      ["default-news-photo as a prefix of a slug", "https://cdn.x/default-news-photo-of-the-minister.jpg"],
+      ["a basename that merely ends with sondakika", "https://cdn.x/yeni-sondakika-gelisme.jpg"],
+    ])("is false for %s", (_label, url) => {
+      expect(isPlaceholderImageUrl(url)).toBe(false);
+    });
+
+    it("is false for a /son-dakika/ directory holding a normal file", () => {
+      expect(isPlaceholderImageUrl("https://cdn.x/son-dakika/2026/10/22/foto-123.jpg")).toBe(false);
+      expect(isPlaceholderImageUrl("https://cdn.x/son-dakika/default-news-photo/abc.jpg")).toBe(false);
+    });
+
+    it("is false for a trailing-slash path (no basename)", () => {
+      expect(isPlaceholderImageUrl("https://cdn.x/son-dakika/")).toBe(false);
+      expect(isPlaceholderImageUrl("https://cdn.x/")).toBe(false);
+    });
+
+    it("is false for a placeholder-named query value (path is what counts)", () => {
+      expect(isPlaceholderImageUrl("https://cdn.x/a.jpg?name=son-dakika.jpg")).toBe(false);
+    });
+
+    it.each([
+      ["null", null],
+      ["undefined", undefined],
+      ["the empty string", ""],
+      ["whitespace", "   "],
+      ["a non-URL string", "not a url"],
+      ["a relative path", "/son-dakika.jpg"],
+      ["a data: URI", "data:image/png;base64,AAAA"],
+      ["an ftp: URL", "ftp://h.test/son-dakika.jpg"],
+      ["a number", 42 as unknown as string],
+      ["an object", {} as unknown as string],
+    ])("is false for %s", (_label, input) => {
+      expect(isPlaceholderImageUrl(input)).toBe(false);
+    });
+
+    it("does not throw on malformed percent-encoding and returns false", () => {
+      for (const bad of [
+        "https://cdn.x/%E0%A4%A.jpg",
+        "https://cdn.x/%ZZ.jpg",
+        "https://cdn.x/son-dakika%.jpg",
+        "https://cdn.x/a.jpg?u=%E0%A4%A",
+        "https://cdn.x/a.jpg?u=https://o.x/%E0%A4%A.jpg",
+      ]) {
+        expect(() => isPlaceholderImageUrl(bad)).not.toThrow();
+        expect(isPlaceholderImageUrl(bad)).toBe(false);
+      }
+    });
+  });
+
+  it("is not a gif check: the gif verdict is independent", () => {
+    expect(isOptimizableImageUrl("https://cdn.x/img/son-dakika.jpg")).toBe(true);
+    expect(isPlaceholderImageUrl("https://cdn.x/img/photo.gif")).toBe(false);
+  });
+
+  it("stays linear on adversarial basenames (no catastrophic backtracking)", () => {
+    const started = Date.now();
+    for (const name of [
+      `son-dakika${"-1".repeat(5000)}!`,
+      `son-dakika${"1".repeat(20000)}!`,
+      `son-dakika-${"1".repeat(20000)}x`,
+      `tr${"_".repeat(20000)}`,
+      `default-news-photo${"-1".repeat(5000)}!`,
+    ]) {
+      expect(isPlaceholderImageUrl(`https://cdn.x/${name}.jpg`)).toBe(false);
+    }
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });

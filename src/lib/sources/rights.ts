@@ -10,7 +10,7 @@
 // src/lib/clusters/summary-attribution.ts:69 and
 // src/lib/clusters/politics-query.ts:585.
 
-import { isOptimizableImageUrl } from "@/lib/images/image-url";
+import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 
 /**
  * Whether an article's cover image may be shown, given its source's
@@ -23,6 +23,9 @@ import { isOptimizableImageUrl } from "@/lib/images/image-url";
  * unmodified, so the raw article `<img>` on /source/[slug] (which gates on
  * this function) must not render it. Existing rows heal at render time; no
  * backfill.
+ *
+ * db-4: a publisher logo card / 'son dakika' placeholder is not eligible
+ * either; /source/[slug] shows its neutral block rather than a reused logo.
  */
 export function articleImageEligible<A extends { image_url: string | null }>(
   article: A,
@@ -31,6 +34,7 @@ export function articleImageEligible<A extends { image_url: string | null }>(
   return (
     Boolean(article.image_url) &&
     isOptimizableImageUrl(article.image_url) &&
+    !isPlaceholderImageUrl(article.image_url) &&
     source.image_allowed !== false
   );
 }

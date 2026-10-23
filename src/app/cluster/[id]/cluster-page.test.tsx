@@ -202,6 +202,30 @@ function findHeroSrc(node: unknown): string | null | undefined {
 }
 
 /**
+ * Like `findCredits` but returns ALL props of the same element (the hero
+ * `<ClusterCardImage>`), for assertions on the image-loading hints the page
+ * passes down (`priority`, `fetchPriority`). `undefined` when no element in
+ * the tree carries `credits`.
+ */
+function findHeroProps(node: unknown): Record<string, unknown> | undefined {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findHeroProps(child);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  }
+  if (node && typeof node === "object") {
+    const el = node as {
+      props?: { credits?: unknown; children?: ReactNode } & Record<string, unknown>;
+    };
+    if (el.props?.credits !== undefined) return el.props;
+    if (el.props?.children !== undefined) return findHeroProps(el.props.children);
+  }
+  return undefined;
+}
+
+/**
  * Like `findCredits` but returns the `minIntrinsicWidth` prop of the same
  * element (the hero `<ClusterCardImage>`): the full-width hero opts in to
  * skipping tiny source thumbnails (e.g. artigercek's 150x84) instead of
@@ -678,6 +702,13 @@ describe("ClusterDetailPage — JSON-LD ve görsel kredisi", () => {
     // to skipping source thumbnails narrower than 320px so a 150x84 og:image
     // is never stretched into a blurry banner.
     expect(findHeroMinIntrinsicWidth(tree)).toBe(320);
+
+    // perf-1: the hero is the true mobile LCP on /cluster/<id>. It is both
+    // preloaded (`priority`) and ranked first by the browser (`fetchPriority`).
+    const heroProps = findHeroProps(tree);
+    expect(heroProps).toBeDefined();
+    expect(heroProps!.priority).toBe(true);
+    expect(heroProps!.fetchPriority).toBe("high");
   });
 
   it("passes an empty credits map when no member has an image", async () => {

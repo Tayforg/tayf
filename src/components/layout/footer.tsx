@@ -72,12 +72,15 @@ export function Footer() {
                 {link.label}
               </Link>
             ))}
-            <Link
+            {/* Plain <a>: a next/link here would prefetch the DB-backed feed
+                route handler on every page view (perf-6). */}
+            <a
               href="/rss.xml"
+              type="application/rss+xml"
               className="text-[11px] text-muted-foreground hover:text-brand transition-colors"
             >
               RSS
-            </Link>
+            </a>
           </nav>
         </div>
 

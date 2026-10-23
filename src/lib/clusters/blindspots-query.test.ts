@@ -642,6 +642,26 @@ describe("getBlindspots gif-filter image_url gate (http-1)", () => {
   });
 });
 
+describe("getBlindspots placeholder image_url gate (db-4)", () => {
+  it("nulls a known publisher logo card, leaving a .jpg sibling untouched", async () => {
+    seedRows([
+      mkBlindspotClusterRow("cluster-ph", "pro_government", [
+        { image_url: "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg" },
+        { image_url: "https://cdn.allowed.example/foto.jpg" },
+        { image_url: "https://foto.haberler.com/haber/2026/07/03/son-dakika_o.jpg" },
+      ]),
+    ]);
+
+    const { bundles } = await getBlindspots();
+
+    expect(bundles).toHaveLength(1);
+    const byId = Object.fromEntries(bundles[0]!.articles.map((a) => [a.id, a]));
+    expect(byId["cluster-ph-a0"]?.image_url).toBeNull();
+    expect(byId["cluster-ph-a1"]?.image_url).toBe("https://cdn.allowed.example/foto.jpg");
+    expect(byId["cluster-ph-a2"]?.image_url).toBeNull();
+  });
+});
+
 describe("getBlindspots source logo_url (browser-3)", () => {
   it("surfaces the embedded source logo_url on bundle.sources", async () => {
     const logo = "https://www.google.com/s2/favicons?domain=x.com&sz=64";
