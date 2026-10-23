@@ -137,6 +137,32 @@ describe("cleanFeedDate", () => {
     );
   });
 
+  it("does not throw on an out-of-range numeric entity in a pubDate (it used to drop the whole source)", () => {
+    let cleaned: string | undefined;
+    expect(() => {
+      cleaned = cleanFeedDate("Mon, 28 Sep 2026 12:00:00 &#1114112;+0300");
+    }).not.toThrow();
+    expect(cleaned).toBe("Mon, 28 Sep 2026 12:00:00 +0300");
+  });
+
+  it.each(["&#x110000;", "&#0;", "&#11;", "&#xD800;", "&#99999999999999999999;"])(
+    "drops %s from a pubDate instead of throwing",
+    (entity) => {
+      expect(cleanFeedDate(`Mon, 28 Sep 2026 12:00:00 ${entity}+0300`)).toBe(
+        "Mon, 28 Sep 2026 12:00:00 +0300",
+      );
+    },
+  );
+
+  it("still decodes '&#x2B;0300' and '&#43;0300' to '+0300'", () => {
+    expect(cleanFeedDate("Mon, 28 Sep 2026 12:00:00 &#x2B;0300")).toBe(
+      "Mon, 28 Sep 2026 12:00:00 +0300",
+    );
+    expect(cleanFeedDate("Mon, 28 Sep 2026 12:00:00 &#43;0300")).toBe(
+      "Mon, 28 Sep 2026 12:00:00 +0300",
+    );
+  });
+
   it("returns undefined for undefined input", () => {
     expect(cleanFeedDate(undefined)).toBeUndefined();
   });

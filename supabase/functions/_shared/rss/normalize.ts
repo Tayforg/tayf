@@ -19,6 +19,7 @@
 // the image extractor are ported verbatim — they are dialect, not algorithm.
 
 import { sha1, strictFingerprint } from "../cluster/fingerprint.ts";
+import { codePointToString, stripInvalidXmlChars } from "./entities.ts";
 import { isOptimizableImageUrl, normalizeImageUrl } from "../image-url.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 import { isLegalNotice } from "./legal-notice.ts";
@@ -243,6 +244,11 @@ const NAMED_ENTITIES: Record<string, string> = {
 // ("&amp;lt;" decodes to the literal "&lt;", never to "<"). Matches the named
 // entities, decimal (&#N;) and hex (&#xN;) numeric references the legacy
 // modules handled.
+//
+// Numeric references go through `codePointToString` (./entities.ts), which
+// never throws and yields '' for anything XML 1.0 forbids: out-of-range
+// (&#1114112;), overflowing (&#99999999999999999999;), NUL, C0 controls,
+// surrogates and U+FFFE / U+FFFF. A bad reference is dropped, not replaced.
 function decodeEntities(text: string): string {
   return text.replace(
     /&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[0-9a-fA-F]+);/g,
@@ -252,7 +258,7 @@ function decodeEntities(text: string): string {
           entity[1] === "x" || entity[1] === "X"
             ? parseInt(entity.slice(2), 16)
             : Number(entity.slice(1));
-        return Number.isNaN(codePoint) ? match : String.fromCodePoint(codePoint);
+        return codePointToString(codePoint);
       }
       return NAMED_ENTITIES[entity] ?? match;
     },
@@ -276,9 +282,18 @@ function cleanDescription(raw?: string | null): string | null {
   if (!raw) return null;
   // Decode FIRST so entity-encoded markup becomes real angle brackets, then
   // strip tags to a fixpoint so reintroduced or nested markup can't survive.
-  const text = stripTags(decodeEntities(raw)).trim();
+  //
+  // Raw characters XML 1.0 forbids (C0 controls, U+FFFE / U+FFFF, lone
+  // surrogates) are removed AFTER the tag strip and BEFORE the trim and the
+  // 500-character clamp, so they can neither survive nor shift the clamp.
+  const text = stripInvalidXmlChars(stripTags(decodeEntities(raw))).trim();
   if (!text) return null;
-  return text.length > 500 ? text.slice(0, 497) + "..." : text;
+  if (text.length <= 500) return text;
+  // Clamp to 497 UTF-16 units + "...", but never cut an astral character (an
+  // emoji) in half: a dangling high surrogate is itself XML-illegal.
+  const lastKept = text.charCodeAt(496);
+  const end = lastKept >= 0xd800 && lastKept <= 0xdbff ? 496 : 497;
+  return text.slice(0, end) + "...";
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +495,7 @@ export function normalizeItem(
   // Titles are short plain text; decode entities then strip any (possibly
   // reintroduced or nested) markup to a fixpoint, same discipline as
   // `cleanDescription`.
-  const title = stripTags(decodeEntities(rawTitle)).trim();
+  const title = stripInvalidXmlChars(stripTags(decodeEntities(rawTitle))).trim();
   const absoluteUrl = absolutiseUrl(rawLink, source);
 
   // ingest-hygiene: BİK court / official notices are not news.
@@ -524,6 +539,12 @@ export function normalizeItem(
 /**
  * Normalise an array of raw items, dropping any that fail the title/link
  * filter. Order preserved.
+ *
+ * One item that throws (a malformed field the decoders did not anticipate)
+ * must not take the rest of the source's items down with it: it is skipped on
+ * its own and counted, and ONE summary line is logged per call. The line
+ * carries the source slug, the count and the first error message only -- never
+ * a title or a URL (URLs inside the message are redacted).
  */
 export function normalizeArticles(
   source: RssSource,
@@ -531,9 +552,25 @@ export function normalizeArticles(
   nowMs: number = Date.now(),
 ): NormalizedArticle[] {
   const out: NormalizedArticle[] = [];
+  let skipped = 0;
+  let firstMessage = "";
   for (const item of items) {
-    const row = normalizeItem(source, item, nowMs);
-    if (row) out.push(row);
+    try {
+      const row = normalizeItem(source, item, nowMs);
+      if (row) out.push(row);
+    } catch (err) {
+      if (skipped === 0) {
+        firstMessage = (err instanceof Error ? err.message : String(err))
+          .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>")
+          .slice(0, 200);
+      }
+      skipped++;
+    }
+  }
+  if (skipped > 0) {
+    console.error(
+      `[normalize] ${source.slug}: skipped ${skipped} item(s) that threw: ${firstMessage}`,
+    );
   }
   return out;
 }

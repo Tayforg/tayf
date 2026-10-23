@@ -662,3 +662,172 @@ describe("fetchFeed posta-shaped item [posta-image-url]", () => {
     expect(item?.itemImage).toBeUndefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Parse budget (twin-articles item, part B): ingest cycles were dying on the
+// platform CPU limit (HTTP 546, reason CPUTime) because one cycle decoded,
+// parsed and normalised every changed feed. `admitParse(bodyBytes)` lets the
+// caller refuse the CPU-heavy part -- decode + XML parse + date cleanup -- for
+// a feed whose body is already downloaded and hashed. It is asked ONLY when a
+// parse would actually happen: never for a 304, a non-2xx, an oversize body
+// or a body-hash hit.
+// ---------------------------------------------------------------------------
+
+describe("fetchFeed admitParse [parse budget]", () => {
+  // Turkish characters so the UTF-8 byte length differs from the string length.
+  const BODY = FEED_XML.replace("Hello", "Başlık çğıöşü");
+  const BODY_BYTES = new TextEncoder().encode(BODY).byteLength;
+  const feedResponse = (headers: Record<string, string> = {}) =>
+    new Response(BODY, {
+      status: 200,
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8", ...headers },
+    });
+
+  it("sanity: the fixture body is longer in bytes than in characters", () => {
+    expect(BODY_BYTES).toBeGreaterThan(BODY.length);
+  });
+
+  it("is never asked on a 304", async () => {
+    stubFetch(() => new Response(null, { status: 304 }));
+    const admitParse = vi.fn(() => true);
+
+    const result = await fetchFeed(source, { admitParse });
+
+    expect(result.notModified).toBe(true);
+    expect(admitParse).not.toHaveBeenCalled();
+    expect(result.parseDeferred).toBeUndefined();
+  });
+
+  it("is never asked on a non-2xx response", async () => {
+    stubFetch(() => new Response("nope", { status: 503 }));
+    const admitParse = vi.fn(() => false);
+
+    const result = await fetchFeed(source, { admitParse });
+
+    expect(result.error).toBe("Status code 503");
+    expect(admitParse).not.toHaveBeenCalled();
+    expect(result.parseDeferred).toBeUndefined();
+  });
+
+  it("is never asked when the body exceeds the size cap", async () => {
+    stubFetch(() => feedResponse());
+    const admitParse = vi.fn(() => false);
+
+    const result = await fetchFeed(source, { admitParse, maxBytes: 10 });
+
+    expect(result.error).toMatch(/exceeded/);
+    expect(admitParse).not.toHaveBeenCalled();
+    expect(result.parseDeferred).toBeUndefined();
+  });
+
+  it("is never asked on a body-hash hit (the not-modified short-circuit)", async () => {
+    stubFetch(() => feedResponse());
+    const admitParse = vi.fn(() => false);
+
+    const result = await fetchFeed(source, {
+      admitParse,
+      knownBodyHash: await sha256Hex(BODY),
+    });
+
+    expect(result.notModified).toBe(true);
+    expect(admitParse).not.toHaveBeenCalled();
+    expect(result.parseDeferred).toBeUndefined();
+    expect(xmlParseCalls).toHaveLength(0);
+  });
+
+  it("is asked exactly once, with the body's byte length, for a changed body; true parses normally", async () => {
+    stubFetch(() => feedResponse({ ETag: '"fresh"' }));
+    const admitParse = vi.fn(() => true);
+    const conditionalCache = new Map<string, { etag?: string; lastModified?: string }>();
+
+    const result = await fetchFeed(source, {
+      admitParse,
+      conditionalCache,
+      knownBodyHash: "an-older-hash",
+    });
+
+    expect(admitParse).toHaveBeenCalledTimes(1);
+    expect(admitParse).toHaveBeenCalledWith(BODY_BYTES);
+    expect(result.parseDeferred).toBeUndefined();
+    expect(result.items).toHaveLength(1);
+    expect(result.etag).toBe('"fresh"');
+    expect(result.bodyHash).toBe(await sha256Hex(BODY));
+    expect(xmlParseCalls).toHaveLength(1);
+    expect(conditionalCache.get(source.id)).toEqual({ etag: '"fresh"', lastModified: undefined });
+  });
+
+  it("false defers the parse: no items, no validators, no decode or XML parse, status kept", async () => {
+    stubFetch(() => feedResponse({ ETag: '"fresh"', "Last-Modified": "Thu, 23 Oct 2026 10:00:00 GMT" }));
+    const admitParse = vi.fn(() => false);
+
+    const result = await fetchFeed(source, { admitParse });
+
+    expect(admitParse).toHaveBeenCalledTimes(1);
+    expect(result.parseDeferred).toBe(true);
+    expect(result.items).toEqual([]);
+    expect(result.status).toBe(200);
+    expect(result.error).toBeUndefined();
+    expect(result.notModified).toBeUndefined();
+    expect(result.notAFeed).toBeUndefined();
+    expect(result.etag).toBeUndefined();
+    expect(result.lastModified).toBeUndefined();
+    expect(result.bodyHash).toBeUndefined();
+    expect(result.dateFallbacks).toBeUndefined();
+    expect(xmlParseCalls).toHaveLength(0);
+  });
+
+  it("false restores the conditional cache entry the request was sent with", async () => {
+    stubFetch(() => feedResponse({ ETag: '"fresh"', "Last-Modified": "Thu, 23 Oct 2026 10:00:00 GMT" }));
+    const before = { etag: 'W/"old"', lastModified: "Wed, 01 Jan 2025 00:00:00 GMT" };
+    const conditionalCache = new Map([[source.id, before]]);
+
+    await fetchFeed(source, { admitParse: () => false, conditionalCache });
+
+    // The fresh validators were stamped on the cache before the budget check;
+    // persisting them would answer the next poll with a 304 and lose the feed.
+    expect(conditionalCache.get(source.id)).toEqual(before);
+  });
+
+  it("false deletes the cache entry when there was none before", async () => {
+    stubFetch(() => feedResponse({ ETag: '"fresh"' }));
+    const conditionalCache = new Map<string, { etag?: string; lastModified?: string }>();
+
+    await fetchFeed(source, { admitParse: () => false, conditionalCache });
+
+    expect(conditionalCache.has(source.id)).toBe(false);
+  });
+
+  it("false with no cache passed does not throw", async () => {
+    stubFetch(() => feedResponse({ ETag: '"fresh"' }));
+
+    const result = await fetchFeed(source, { admitParse: () => false });
+
+    expect(result.parseDeferred).toBe(true);
+  });
+
+  it("a throwing admitParse is treated as true: the feed is parsed as if unbudgeted", async () => {
+    stubFetch(() => feedResponse({ ETag: '"fresh"' }));
+    const conditionalCache = new Map<string, { etag?: string; lastModified?: string }>();
+
+    const result = await fetchFeed(source, {
+      admitParse: () => {
+        throw new Error("budget bug");
+      },
+      conditionalCache,
+    });
+
+    expect(result.parseDeferred).toBeUndefined();
+    expect(result.items).toHaveLength(1);
+    expect(conditionalCache.get(source.id)?.etag).toBe('"fresh"');
+  });
+
+  it("without admitParse behaves exactly as before", async () => {
+    stubFetch(() => feedResponse());
+
+    const result = await fetchFeed(source);
+
+    expect(result.parseDeferred).toBeUndefined();
+    expect(result.items).toHaveLength(1);
+    expect(xmlParseCalls).toHaveLength(1);
+  });
+});

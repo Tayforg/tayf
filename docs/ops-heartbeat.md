@@ -1,12 +1,16 @@
-# Ops heartbeat (077, 100, 103, 108)
+# Ops heartbeat (077, 100, 103, 108, 114)
 
-`public.ops_health_report()` (migrations 077, 100, 103 and 108) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077, 100, 103, 108 and 114) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
 of `net._http_response`: 844×200, 9×546 (`WORKER_RESOURCE_LIMIT`, an error),
 4 timeouts, 1 send failure — while `cron.job_run_details` showed 0 failures
 over the preceding 7 days. Nothing paged anyone. This is the pager.
+
+The 546 baseline, re-measured 2026-10-23 over 24 h: 27×546 against 427×200
+(about 6%, up to 25% an hour at 06-09 UTC, reason `CPUTime`). It is addressed
+by the ingest parse budget (migration 113, see `docs/migration-guide.md`).
 
 The Action runs every 30 minutes, calls the function over PostgREST, and
 `exit 1`s on any `'fail'` row (or an empty/mostly-`'unknown'` report) so
@@ -15,22 +19,24 @@ fires.
 
 ## What it checks
 
-12 fixed-order rows (the first ten from migration 077, the eleventh added by
-migration 100, the twelfth by migration 103; rows 7, 9 and 12 were
-reworked by migration 108), `status` one of
+13 fixed-order rows (the first ten from migration 077, the eleventh added by
+migration 100, the twelfth by migration 103, the thirteenth by migration 114;
+rows 7, 9 and 12 were reworked by migration 108), `status` one of
 `pass | warn | fail | unknown | skip`. `threshold` is the fail limit (or the
-warn limit, for the two warn-only checks). The thresholds for rows 1-10 were
+warn limit, for warn-only checks such as rows 9 and 13). The thresholds for rows 1-10 were
 tuned from a 2026-09-28 read-only survey of the live project (see the
 migration 077 header for the exact queries and observed numbers); row 11
 comes from the 2026-10-21 incident (see the migration 100 header); row 12
 closes the jev-shadow blind spot described in the migration 103 header, and
 the 108 rework closes the 2026-10-22 stall that still read green (see the
-migration 108 header).
+migration 108 header); row 13 names the outlet/wire sources that went silent
+between 2026-10-15 and 10-23 without any other row noticing (see the
+migration 114 header and "Susan kaynaklar (baseline)" below).
 
 | # | check_name | What it measures | Threshold | Where the number came from |
 |---|---|---|---|---|
 | 1 | `cron_failed_runs_30m` | Any pg_cron job with a `'failed'` run in the last 30 min (runid-windowed, since `job_run_details` has no `start_time` index) | fail ≥ 1 | As drafted — pg_cron failures are already rare/actionable at any count |
-| 2 | `edge_http_errors_30m` | `net._http_response` rows in the last 30 min with `status_code >= 500`, `401`, `403`, a timeout, or an error message | fail ≥ 5 and ≥ 5% of the batch; warn ≥ 2 | Healthy baseline was ~140 responses/hour with 1–4 errors/hour (~0.5–2 per 30 min) — kept as drafted |
+| 2 | `edge_http_errors_30m` | `net._http_response` rows in the last 30 min with `status_code >= 500`, `401`, `403`, a timeout, or an error message | fail ≥ 5 and ≥ 5% of the batch; warn ≥ 2 | Healthy baseline was ~140 responses/hour with 1–4 errors/hour (~0.5–2 per 30 min) — kept as drafted. Re-measured 2026-10-23 over 24 h: 27×546 vs 427×200 (about 6%, up to 25% an hour at 06-09 UTC, reason `CPUTime`), addressed by the ingest parse budget (migration 113) |
 | 3 | `ingest_cycles_30m` | Rows in `public.ingest_cycles` finished in the last 30 min (ingest-drain runs every 3 min ⇒ ~10 expected) | fail < 5; warn < 8 | 3-day survey: p5 was 8 per 30-minute bucket, consistent with the "432–459 cycles/day" estimate — kept as drafted |
 | 4–6 | `ingest_fresh_{iktidar,bagimsiz,muhalefet}_min` | Minutes since the newest `articles.created_at` from an active outlet/wire source in that Medya DNA zone | fail > 158; warn > 79 | 7-day gap survey: max gap 104.9 min (bagimsiz), p99 15.0 min. Raised from the drafted 90/45 to `max(90, ceil(1.5 × 104.9)) = 158` / `158 / 2 = 79` to clear the real spread |
 | 7 | `jev_shadow_last_run_min` | Minutes since the last finished `jev_shadow_runs` row **that did work**: status `ok` or `budget_exceeded`, or any run with `calls > 0` (migration 108). A `partial`/`error` run with zero calls still sets `finished_at` but no longer keeps this fresh. `budget_exceeded` counts as fresh on purpose, so a deliberate monthly cap (`JEV_MONTHLY_TOKEN_CAP`) does not page as a stall. `'skip'` if the `jev-shadow` cron job exists and is inactive; `detail` is `son 2 günde ok ya da çağrılı koşu yok` when no qualifying run started in the last 2 days | fail > 30; warn > 20 (unchanged) | 3-day survey: max gap 10.6 min — kept as drafted. 2026-10-22 stall: zero-call partial runs 3622 and 3623 advanced `max(finished_at)`, so this row read pass while nothing was being scored. Changed by migration 108 |
@@ -39,11 +45,57 @@ migration 108 header).
 | 10 | `dead_feeds` | Active outlet/wire sources with no `articles.published_at` in the last 72h | fail ≥ 50% of active sources; warn > 38 | Observed 35 of 96 (36.4%) — well above the drafted 35%/25 assumption. Raised the fail ratio to 0.50 and the warn count to observed + 3 = 38 so today's real baseline reads `'pass'` instead of paging on day one. **Known follow-up, not urgent:** 15 of those 35 sources have never published anything at all — worth a separate look at whether their RSS/URL config is actually broken. |
 | 11 | `net_response_heap_mb` | Total on-disk size of `net._http_response` (pg_net's response log) in MiB. `ops_net_response_compact()` (pg_cron `net-response-compact`, every 15 min) truncates it above 64 MiB, so a warn or fail means the compactor is being skipped (job disabled, lock never free, `TRUNCATE` privilege lost) while the table bloats again | pass < 64; warn 64-200; fail > 200 | 2026-10-21 incident: 278 MB of heap behind 552 live rows made pg_net's TTL `DELETE` the #1 DB time consumer and pages took 8-22 s. Added by migration 100 |
 | 12 | `jev_shadow_cron_failures_30m` | Sum of three counts over the last 30 min: (a) `'failed'` pg_cron runs of the Jev jobs `jev-shadow`, `jev-cluster-audit` and `jev-regression-weekly` (same runid window as row 1); (b) `net._http_response` rows with `status_code >= 500` whose body contains `"fn":"jev-shadow"`, the marker every error response from `jev-shadow` carries (504 `deadline`, 503 `db-unavailable`, 500 `internal-error`); (c) `jev_shadow_runs` rows started in the window that closed `partial` or `error` with `calls = 0` (migration 108). `timed_out` pg_net rows (status NULL, no body, cannot be attributed to a function) are counted separately in the `detail` (`zaman aşımı (fonksiyon bilinmiyor)`): they raise `pass` to `warn` but never count toward `fail`. `detail` = `cron hatası · HTTP 5xx · sıfır çağrılı koşu · zaman aşımı (son 30 dk)`, with ` · pg_cron ve pg_net yok` appended when both extensions are missing. `'unknown'` only when the query itself errors | fail ≥ 2; warn = 1, or any `timed_out` request | Finding 1(a) (migration 103): a database timeout in `jev-shadow`'s first calls used to return an unretried 500 with no `jev_shadow_runs` row, and `pg_cron` records `'succeeded'` for the http poke regardless. The function now retries those steps once, then answers a stable 503 `db-unavailable`, and this row counts it. No `jev_alerts` row is written (its `kind` CHECK, migration 088, allows only `source_drift`, `kap_class_canary`, `stage_budget`). 2026-10-22 stall (migration 108): pg_net rows 329690 and 329711 had `timed_out = true` and status NULL, and zero-call partial runs 3622 and 3623 closed cleanly, so neither half of 103 saw anything; (c) and the timeout note close that gap. The same release gives a deadline stop a note on the run row (`deadline: <stage> at <ms>ms, calls=<n>`) and reschedules the cron with a 120 s pg_net timeout and an `enqueued_at` body field; redeploy `jev-shadow` with `--no-verify-jwt` after applying 108. Added by migration 103, extended by 108 |
+| 13 | `sources_newly_dark` | Active `outlet`/`wire` sources that are **not** in `public.ops_dark_source_baseline`, have at least 50 `articles` (by `created_at`, ingest time) in the 14 days before the last 12 hours, and none in the last 12 hours. `detail` names them with that count, largest first: `son 12 saatte haber gelmedi (önceki 14 günde en az 50 haber vardı): slug (n), …`, cut at 500 characters; `yeni susan kaynak yok` when none. **Warn-only**: never `fail`, so the Action does not exit non-zero and nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors (a missing baseline table included) | warn ≥ 1 (threshold 1) | 2026-10-15 to 10-23: five active sources went dark one after another and no row noticed (`dead_feeds` waits 72 h and warns above 38 sources; the per-zone freshness rows are satisfied by any other outlet in the zone). Three of the five are `opposition_leaning`, so the `muhalefet` zone loses about 9k articles a month. Step 0 (migration 114 header): the predicate runs in about 50 ms on an index-only scan of `idx_articles_created_source`. A 7-day replay at 6-hour steps flagged 22 distinct sources; of the 146 flags with a full 24 h of follow-up, 89 saw an article within 24 h (low-volume outlets with an overnight gap over 12 h), while `halk-tv` and `gazete-pencere` never resumed. Added by migration 114 |
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
-12 rows. (Row 12 degrades gracefully: with only one of the two present it
+13 rows. (Row 12 degrades gracefully: with only one of the two present it
 counts that half and treats the other as zero.)
+
+## Susan kaynaklar (baseline)
+
+Row 13 (`sources_newly_dark`, migration 114) is the heartbeat's answer to a
+source that had real volume and stopped. Read it as a prompt to look, not as
+an outage:
+
+- **Warn-only, does not page.** It never reaches `fail` (see the exit rules in
+  `scripts/lib/ops-heartbeat.mjs`), so a flagged source costs a line in the
+  step summary, not an email.
+- **The baseline.** `public.ops_dark_source_baseline (slug, reason, noted_in,
+  added_at)` lists the sources already known to be dark; the row skips every
+  slug in it. Migration 114 seeds the 25 sources of
+  `docs/feed-registry-2026-09.md` section 2 (`reason` is that table's class:
+  `blocked-403`, `dns-timeout`, `not-a-feed`, `redirect-offsite`,
+  `valid-stale`). The table is service_role only; use the SQL editor or the
+  service key.
+- **Ack** a source you have decided to leave dark, so it stops warning:
+
+  ```sql
+  insert into public.ops_dark_source_baseline (slug, reason)
+  values ('<slug>', '<why>')
+  on conflict (slug) do nothing;
+  ```
+
+  **Re-arm** it, for example once the feed is repointed:
+
+  ```sql
+  delete from public.ops_dark_source_baseline where slug = '<slug>';
+  ```
+
+- **The five that went dark** between 2026-10-15 and 10-23 are `halk-tv`,
+  `gazete-pencere`, `benguturk`, `medya-gazete` and `arti-gercek`. They are
+  deliberately not in the baseline, so the row names them until something
+  changes. Repointing a feed, a relay or deactivating a source is a founder
+  decision (`docs/feed-registry-2026-09.md`): migration 114 touches no
+  source, and neither does this page. Do not ack these five unless the
+  founder has decided to leave them dark.
+- **Expect some noise.** At 50 articles / 12 hours the row also flags
+  low-volume outlets during an overnight lull and clears them when they
+  publish again. If that becomes tiresome, tune it in a new migration (see
+  "Tuning a threshold"): over the same 7-day replay, a 24-hour window with at
+  least 200 prior articles flagged only `halk-tv` and `gazete-pencere`, and
+  none of its flags resumed within 24 hours. The numbers are in the migration
+  114 header.
 
 ## Required repo secrets
 

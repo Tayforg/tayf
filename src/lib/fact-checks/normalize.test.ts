@@ -43,6 +43,33 @@ describe("cleanTitle", () => {
     expect(cleanTitle("a &lt;b&gt; c")).toBe("a c");
   });
 
+  it("does not throw on an out-of-range numeric entity and leaves no illegal character", () => {
+    // Non-global copy of the XML 1.0 illegal-character set (lastIndex-free).
+    const illegal =
+      /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    for (const raw of [
+      "a &#1114112; b",
+      "a &#x110000; b",
+      "a &#0; b",
+      "a &#11; b",
+      "a &#xD800; b",
+      "a &#99999999999999999999; b",
+    ]) {
+      let out: string | null = null;
+      expect(() => {
+        out = cleanTitle(raw);
+      }, raw).not.toThrow();
+      expect(out, raw).toBe("a b");
+      expect(illegal.test(out!), raw).toBe(false);
+    }
+  });
+
+  it("decodes '&#351;' and '&#x15F;' to 'ş' and '&#x1F600;' to the emoji", () => {
+    expect(cleanTitle("&#351;")).toBe("ş");
+    expect(cleanTitle("&#x15F;")).toBe("ş");
+    expect(cleanTitle("&#x1F600;")).toBe("😀");
+  });
+
   it("strips tags", () => {
     expect(cleanTitle("<b>Kalın</b> başlık <i>metni</i>")).toBe("Kalın başlık metni");
   });

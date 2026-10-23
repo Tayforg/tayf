@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CYCLE_PERIOD_MS,
+  createParseBudget,
   groupChunkBySource,
   interleaveBySource,
+  prioritizeIds,
   rotateForCycle,
   upsertWithBisect,
 } from "../../supabase/functions/ingest/order.ts";
@@ -271,5 +273,160 @@ describe("upsertWithBisect onSkipped [silent-feeds]", () => {
     });
     expect(result.skipped).toBe(0);
     expect(onSkipped).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Parse budget (twin-articles item, part B): ingest cycles died on the
+// platform CPU limit (HTTP 546, reason CPUTime) because one cycle parsed every
+// changed feed. `createParseBudget` decides, per changed feed, whether this
+// cycle may still afford its decode + XML parse + normalise; a refused feed is
+// deferred to the front of the next cycle (`prioritizeIds`).
+// ---------------------------------------------------------------------------
+
+describe("createParseBudget", () => {
+  it("starts empty", () => {
+    const b = createParseBudget(40, 4_000_000);
+    expect(b.parses).toBe(0);
+    expect(b.bytes).toBe(0);
+  });
+
+  it("refuses once maxParses parses were admitted, whatever the bytes or priority", () => {
+    const b = createParseBudget(2, 1_000_000);
+    expect(b.admit(10)).toBe(true);
+    expect(b.admit(10)).toBe(true);
+    expect(b.admit(1, false)).toBe(false);
+    expect(b.admit(1, true)).toBe(false);
+    expect(b.parses).toBe(2);
+    expect(b.bytes).toBe(20);
+  });
+
+  it("admits the first parse of a cycle even when it is bigger than the whole byte budget", () => {
+    const b = createParseBudget(40, 1_000);
+    expect(b.admit(5_000)).toBe(true);
+    expect(b.parses).toBe(1);
+    expect(b.bytes).toBe(5_000);
+  });
+
+  it("admits while the running total stays within maxBytes, boundary inclusive", () => {
+    const b = createParseBudget(40, 1_000);
+    expect(b.admit(400)).toBe(true);
+    expect(b.admit(600)).toBe(true); // 1_000 exactly: <= maxBytes
+    expect(b.bytes).toBe(1_000);
+    expect(b.admit(1)).toBe(false); // 1_001 > 1_000
+    expect(b.bytes).toBe(1_000);
+  });
+
+  it("refuses a feed that does not fit, and the refusal leaves the counters alone", () => {
+    const b = createParseBudget(40, 1_000);
+    expect(b.admit(900)).toBe(true);
+    expect(b.admit(200)).toBe(false);
+    expect(b.parses).toBe(1);
+    expect(b.bytes).toBe(900);
+    // A smaller feed later in the same cycle still fits.
+    expect(b.admit(100)).toBe(true);
+    expect(b.parses).toBe(2);
+    expect(b.bytes).toBe(1_000);
+  });
+
+  it("lets a PRIORITY feed overshoot the byte budget once per cycle, then refuses further overshoots", () => {
+    const b = createParseBudget(40, 1_000);
+    expect(b.admit(900)).toBe(true);
+    expect(b.admit(500, true)).toBe(true); // 1_400: the one overshoot
+    expect(b.bytes).toBe(1_400);
+    expect(b.admit(500, true)).toBe(false); // a second overshoot, priority or not
+    expect(b.admit(500, false)).toBe(false);
+    expect(b.parses).toBe(2);
+  });
+
+  it("never lets a NON-priority feed overshoot", () => {
+    const b = createParseBudget(40, 1_000);
+    expect(b.admit(900)).toBe(true);
+    expect(b.admit(500, false)).toBe(false);
+    expect(b.admit(500)).toBe(false);
+    expect(b.bytes).toBe(900);
+  });
+
+  it("a priority feed that fits does not spend the overshoot", () => {
+    const b = createParseBudget(40, 1_000);
+    expect(b.admit(300, true)).toBe(true);
+    expect(b.admit(300, true)).toBe(true);
+    expect(b.admit(900, true)).toBe(true); // 1_500: still has its one overshoot
+    expect(b.admit(900, true)).toBe(false);
+  });
+
+  it("a feed bigger than the budget cannot starve: it is first in the next cycle and always admitted", () => {
+    // Cycle 1: a 3 MB feed behind a 3 MB feed loses the budget race...
+    const c1 = createParseBudget(40, 4_000_000);
+    expect(c1.admit(3_000_000, false)).toBe(true);
+    expect(c1.admit(3_000_000, false)).toBe(false);
+    // ...cycle 2: it is deferred-first (priority) and parses.
+    const c2 = createParseBudget(40, 4_000_000);
+    expect(c2.admit(3_000_000, true)).toBe(true);
+  });
+
+  it("is independent per instance (no shared module state)", () => {
+    const a = createParseBudget(1, 10);
+    const b = createParseBudget(1, 10);
+    expect(a.admit(5)).toBe(true);
+    expect(a.admit(5)).toBe(false);
+    expect(b.admit(5)).toBe(true);
+  });
+
+  it("with maxParses 0 refuses everything, even the first parse", () => {
+    const b = createParseBudget(0, 1_000_000);
+    expect(b.admit(1, true)).toBe(false);
+    expect(b.parses).toBe(0);
+  });
+
+  it("handles 0-byte bodies without special cases", () => {
+    const b = createParseBudget(3, 0);
+    expect(b.admit(0)).toBe(true); // first parse
+    expect(b.admit(0)).toBe(true); // 0 + 0 <= 0
+    expect(b.admit(1)).toBe(false);
+  });
+});
+
+describe("prioritizeIds", () => {
+  const rows = ["a", "b", "c", "d", "e"].map((id) => ({ id }));
+
+  it("moves the given ids to the front and keeps both groups in their original order", () => {
+    const out = prioritizeIds(rows, new Set(["d", "b"]));
+    expect(out.map((r) => r.id)).toEqual(["b", "d", "a", "c", "e"]);
+  });
+
+  it("ignores the order of the ids argument (stable on the rows' order)", () => {
+    const one = prioritizeIds(rows, ["e", "a"]).map((r) => r.id);
+    const two = prioritizeIds(rows, ["a", "e"]).map((r) => r.id);
+    expect(one).toEqual(["a", "e", "b", "c", "d"]);
+    expect(two).toEqual(one);
+  });
+
+  it("returns a copy in the same order for an empty id set", () => {
+    const out = prioritizeIds(rows, new Set());
+    expect(out).toEqual(rows);
+    expect(out).not.toBe(rows);
+  });
+
+  it("ignores ids that are not in the rows", () => {
+    const out = prioritizeIds(rows, ["zzz", "c"]);
+    expect(out.map((r) => r.id)).toEqual(["c", "a", "b", "d", "e"]);
+  });
+
+  it("does not mutate its input and keeps object identity", () => {
+    const input = [...rows];
+    const out = prioritizeIds(input, ["e"]);
+    expect(input).toEqual(rows);
+    expect(out[0]).toBe(rows[4]);
+  });
+
+  it("handles an empty row list and all-priority lists", () => {
+    expect(prioritizeIds([], ["a"])).toEqual([]);
+    expect(prioritizeIds(rows, rows.map((r) => r.id))).toEqual(rows);
+  });
+
+  it("keeps other row fields intact", () => {
+    const rich = [{ id: "x", n: 1 }, { id: "y", n: 2 }];
+    expect(prioritizeIds(rich, ["y"])).toEqual([{ id: "y", n: 2 }, { id: "x", n: 1 }]);
   });
 });
