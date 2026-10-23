@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { FollowFeed } from "@/components/follow/follow-feed";
+import { noindexPageMetadata } from "@/lib/seo/page-metadata";
 
 // Server shell around the client FollowFeed. Follows live in localStorage, so
 // all data work happens client-side (via GET /api/takip); this wrapper exists
@@ -13,13 +14,14 @@ import { FollowFeed } from "@/components/follow/follow-feed";
 // fetch its matches. The route neither logs nor stores it, yet platform
 // request logs can still see the URL -- so the copy must not say "only on this
 // device" (compare /diyetim, which really never leaves the device).
-export const metadata: Metadata = {
+//
+// Per-user page — nothing for crawlers here (noindex, nofollow).
+export const metadata: Metadata = noindexPageMetadata({
   title: "Takip ettiklerim",
   description: "Takip ettiğiniz konu ve anahtar kelimelerle eşleşen hikâyeler.",
-  alternates: { canonical: "/takip" },
-  // Per-user page — nothing for crawlers here.
-  robots: { index: false, follow: false },
-};
+  path: "/takip",
+  follow: false,
+});
 
 export default function TakipPage() {
   return (

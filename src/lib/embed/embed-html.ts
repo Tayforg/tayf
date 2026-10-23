@@ -102,13 +102,29 @@ export function buildEmbedModel(detail: ClusterDetail, origin: string): EmbedMod
   };
 }
 
-// Layout budget (worst case, 320x200 with ribbon and a two-line legend):
-// 2 border + 24 padding + 13.5 brand + 17 ribbon + 42.5 title (2 lines) +
-// 10 bar + 32.4 legend (2 lines) + 16.2 link + 5x6 gaps = ~188px < 200.
-// Frames shorter than 160px (oEmbed allows down to 120) drop the decorative
-// brand line and tighten the padding so the ribbon, a one-line title, the bar,
-// the legend and the link still fit. html/body never scroll; anything that
-// still overflows is clipped rather than scrolled.
+// Layout budget (heights in px; html/body never scroll, so anything that does
+// not fit is clipped -- the budgets below keep that from ever happening
+// inside oEmbed's documented range of 120-240, default 200):
+// - Full layout, worst case (320x200 with ribbon and a two-line legend): 2
+//   border + 24 padding + 13.5 brand + 17 ribbon + 42.5 title (2 lines) + 10
+//   bar + 32.4 legend (2 lines) + 16.2 link + 5x6 gaps = ~188px < 200.
+// - Compact layout (max-height:187px, one px below that worst case): every
+//   frame the full layout cannot hold takes it. The title is a shrinkable
+//   flex item, so in a frame shorter than the full layout needs the container
+//   would squeeze it to a fractional line count and overflow:hidden would cut
+//   the second line mid-glyph (seen in headless Chrome at 320x168..186 with a
+//   ribbon and 320x161..163 without one when the breakpoint was 160). The
+//   breakpoint must therefore stay >= the full layout's need minus 1.
+// - 320x120 with ribbon (compact: no brand, 15px one-line title, one-line
+//   legend, 8px padding, 4px gaps): 2+16+17+18.75+10+16.2+16.2+5x4 = ~116px
+//   <= 120. The title's min-height is exactly one 15px line, so it can never
+//   be squeezed below one line (no mid-glyph cut).
+// - 120x120: ~95px without a ribbon, ~116px with a one-line ribbon.
+// - 120x200 with ribbon (narrow frame: no brand, 15px title, 8px 10px
+//   padding, 4px gaps): 2+16+17+37.5+10+48.6 (legend clamped to 3 lines)
+//   +16.2+20 = ~167px <= 200.
+// The ribbon and the link never wrap: they ellipsize. The link is left
+// stretched to the full width (no align-self) so its tap target stays wide.
 const STYLE = [
   ":root{--fg:#18181b;--mu:#52525b;--bg:#ffffff;--bd:#e4e4e7;--rb:#fef3c7;--rf:#92400e}",
   "@media (prefers-color-scheme: dark){:root{--fg:#fafafa;--mu:#a1a1aa;--bg:#0a0a0a;--bd:#27272a;--rb:#422006;--rf:#fcd34d}}",
@@ -117,14 +133,15 @@ const STYLE = [
   'body{background:var(--bg);color:var(--fg);font:14px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}',
   ".c{height:100%;display:flex;flex-direction:column;gap:6px;padding:12px 14px;border:1px solid var(--bd);border-radius:8px;overflow:hidden}",
   ".b{flex:none;font-size:10px;font-weight:600;letter-spacing:.08em;color:var(--mu)}",
-  ".r{flex:none;align-self:flex-start;max-width:100%;padding:1px 8px;border-radius:999px;background:var(--rb);color:var(--rf);font-size:11px;font-weight:600}",
+  ".r{flex:none;align-self:flex-start;max-width:100%;padding:1px 8px;border-radius:999px;background:var(--rb);color:var(--rf);font-size:11px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
   "h1{flex:0 1 auto;min-height:21px;margin:0;font-size:17px;line-height:1.25;font-weight:700;overflow:hidden;overflow-wrap:anywhere;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;line-clamp:2}",
   ".bar{flex:none;display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--bd)}",
   ".bar span{display:block;height:100%}",
   ".zi{background:#ef4444}.zb{background:#a1a1aa}.zm{background:#10b981}",
-  ".l{flex:none;margin:0;font-size:12px;color:var(--mu)}",
-  ".a{flex:none;margin-top:auto;font-size:12px;font-weight:600;color:var(--fg);text-decoration:underline}",
-  "@media (max-height:160px){.b{display:none}.c{padding:8px 12px;gap:4px}}",
+  ".l{flex:none;margin:0;font-size:12px;color:var(--mu);overflow:hidden;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;line-clamp:3}",
+  ".a{flex:none;max-width:100%;margin-top:auto;font-size:12px;font-weight:600;color:var(--fg);text-decoration:underline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+  "@media (max-height:187px){.b{display:none}.c{padding:8px 12px;gap:4px}h1{font-size:15px;min-height:1.25em;-webkit-line-clamp:1;line-clamp:1}.l{-webkit-line-clamp:1;line-clamp:1}}",
+  "@media (max-width:240px){.b{display:none}.c{padding:8px 10px;gap:4px}h1{font-size:15px}}",
 ].join("");
 
 const HEAD_META =

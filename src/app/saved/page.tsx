@@ -2,17 +2,18 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { SavedList } from "@/components/bookmark/saved-list";
+import { noindexPageMetadata } from "@/lib/seo/page-metadata";
 
 // Server shell around the client SavedList. Bookmarks live in
 // localStorage, so all data work happens client-side; this wrapper exists
 // to own the route metadata (a "use client" page can't export it).
-export const metadata: Metadata = {
+// Per-user page — nothing for crawlers here (noindex, nofollow).
+export const metadata: Metadata = noindexPageMetadata({
   title: "Kaydedilenler",
   description: "Kaydettiğiniz hikâyeler.",
-  alternates: { canonical: "/saved" },
-  // Per-user page — nothing for crawlers here.
-  robots: { index: false, follow: false },
-};
+  path: "/saved",
+  follow: false,
+});
 
 export default function SavedPage() {
   return (

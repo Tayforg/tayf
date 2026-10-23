@@ -191,10 +191,78 @@ describe("renderEmbedHtml", () => {
     expect(html).toMatch(/body\{[^}]*margin:0/);
     expect(html).toMatch(/line-clamp:2/);
     // short frames (oEmbed allows maxheight down to 120) drop the brand line
-    expect(html).toContain("@media (max-height:160px){.b{display:none}");
+    expect(html).toContain("@media (max-height:187px){.b{display:none}");
     expect(html).toContain("system-ui");
     // never a fixed pixel width that could force a horizontal scrollbar at 320
-    expect(html).not.toMatch(/\bwidth:\s*[2-9]\d\dpx/);
+    // (`max-width:240px` in the media query is a condition, not a width)
+    expect(html).not.toMatch(/(?<![-\w])width:\s*\d{3,}px/);
+    expect(html).not.toMatch(/min-width:\s*\d{3,}px/);
+  });
+
+  describe("layout inside the documented 120px minimum envelope", () => {
+    const style = html.match(/<style>([\s\S]*?)<\/style>/)![1]!;
+    const rule = (selector: string) => style.match(new RegExp(`(?:^|\\})${selector.replace(".", "\\.")}\\{([^}]*)\\}`))?.[1] ?? "";
+
+    it("clamps the title and the legend to one line in short frames", () => {
+      const start = style.indexOf("@media (max-height:187px){");
+      expect(start).toBeGreaterThan(-1);
+      const block = style.slice(start, style.indexOf("@media (max-width:240px){"));
+      expect(block).toContain("h1{font-size:15px;min-height:1.25em;-webkit-line-clamp:1;line-clamp:1}");
+      expect(block).toContain(".l{-webkit-line-clamp:1;line-clamp:1}");
+    });
+
+    // Full layout, worst case (320x200 with ribbon and a two-line legend): ~188px
+    // (see the budget comment in embed-html.ts). Any frame shorter than that
+    // must take the compact block, because in the full layout the title is a
+    // shrinkable flex item and the container squeezes it to a fractional line
+    // count that overflow:hidden then cuts mid-glyph. Verified by rendering in
+    // headless Chrome: the old 160px breakpoint clipped the title's second
+    // line at 320x168..186 (ribbon) and 320x161..163 (no ribbon).
+    it("takes the compact block for every height the full layout cannot hold (oEmbed default 200 stays full)", () => {
+      const breakpoint = Number(style.match(/@media \(max-height:(\d+)px\)\{/)?.[1]);
+      expect(Number.isInteger(breakpoint)).toBe(true);
+      for (const height of [120, 160, 161, 168, 170, 180, 186, 187]) {
+        expect(height, `a ${height}px-tall frame must get the compact layout`).toBeLessThanOrEqual(breakpoint);
+      }
+      // 188px is the full layout's worst-case need, and the default oEmbed
+      // height (200) must keep the brand line and the two-line title.
+      for (const height of [188, 200, 240]) {
+        expect(height, `a ${height}px-tall frame keeps the full layout`).toBeGreaterThan(breakpoint);
+      }
+    });
+
+    it("tightens padding and drops the brand line in narrow frames, after the short-frame block", () => {
+      const heightAt = style.indexOf("@media (max-height:187px){");
+      const widthAt = style.indexOf("@media (max-width:240px){");
+      expect(heightAt).toBeGreaterThan(-1);
+      expect(widthAt).toBeGreaterThan(heightAt);
+      const block = style.slice(widthAt);
+      expect(block).toContain(".b{display:none}");
+      expect(block).toContain(".c{padding:8px 10px;gap:4px}");
+      expect(block).toContain("h1{font-size:15px}");
+    });
+
+    it("never wraps or overflows the link", () => {
+      const a = rule(".a");
+      expect(a).toContain("white-space:nowrap");
+      expect(a).toContain("overflow:hidden");
+      expect(a).toContain("text-overflow:ellipsis");
+      expect(a).toContain("max-width:100%");
+    });
+
+    it("never wraps the ribbon", () => {
+      const r = rule(".r");
+      expect(r).toContain("white-space:nowrap");
+      expect(r).toContain("text-overflow:ellipsis");
+    });
+
+    it("caps the legend at three lines", () => {
+      const l = rule(".l");
+      expect(l).toContain("overflow:hidden");
+      expect(l).toContain("display:-webkit-box");
+      expect(l).toContain("-webkit-line-clamp:3");
+      expect(l).toContain("line-clamp:3");
+    });
   });
 
   it("renders the body parts in order: brand, h1, bar, legend, link", () => {
@@ -278,6 +346,13 @@ describe("renderEmbedMessageHtml", () => {
     expect(html).toContain("Haber bulunamadı");
     expect(html).not.toMatch(/<script|<a |<img|<link/i);
     expect(html).not.toMatch(/https?:\/\//);
+  });
+
+  it("ships the same layout STYLE as the widget document", () => {
+    const style = (doc: string) => doc.match(/<style>([\s\S]*?)<\/style>/)![1];
+    const widget = renderEmbedHtml(buildEmbedModel(detail({}), ORIGIN));
+    expect(style(html)).toBeTruthy();
+    expect(style(html)).toBe(style(widget));
   });
 
   it("escapes the message", () => {

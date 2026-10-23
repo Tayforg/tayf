@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildCustomRoute } from "next/dist/lib/build-custom-route";
 import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
 
 import { buildSecurityHeaders } from "../../src/lib/security/headers";
@@ -9,7 +10,8 @@ import { buildSecurityHeaders } from "../../src/lib/security/headers";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (security-sensitive): the site is NOT frameable by
 // third parties (CSP `frame-ancestors 'self'` + `X-Frame-Options: SAMEORIGIN`
-// on every path) with exactly ONE exception, the script-less /embed/ widget.
+// on every path) with exactly ONE exception, the script-less
+// /embed/cluster/:id widget.
 //
 // Rather than eyeballing regexes, every case below runs the rule `source`
 // strings through Next's own matcher (`getPathMatch`, the same
@@ -43,6 +45,22 @@ function matchingRules(path: string, ...env: [] | [string | undefined]) {
   return buildSecurityHeaders(nodeEnv).filter((rule) => getPathMatch(rule.source)(path) !== false);
 }
 
+/**
+ * Same, but through the regex Next actually ships for `headers()` in
+ * production: `buildCustomRoute` runs `modifyRouteRegex`, which turns the
+ * trailing `$` into `(?:\/)?$` (an optional trailing slash that
+ * `getPathMatch({ strict: true })` does not have). A lookahead that ends in a
+ * bare `$` therefore fails to exclude `/embed/cluster/<id>/`, and that is
+ * exactly the overlap this helper exists to catch. Header sources match
+ * case-insensitively.
+ */
+function matchingRulesStrict(path: string) {
+  return buildSecurityHeaders("production").filter((rule) => {
+    const { regex } = buildCustomRoute("header", { source: rule.source, headers: [] });
+    return new RegExp(regex, "i").test(path);
+  });
+}
+
 /** Lower-cased header name -> value, merged across every matching rule. */
 function headersFor(path: string, ...env: [] | [string | undefined]) {
   const merged = new Map<string, string>();
@@ -64,6 +82,14 @@ const FRAME_LOCKED_PATHS = [
   "/api/v1/clusters",
   "/admin",
   "/embed",
+  "/embed/",
+  "/embed/x",
+  "/embed/foo",
+  "/EMBED/foo",
+  "/embed/cluster",
+  "/embed/cluster/",
+  `/embed/cluster/${ID}/x`,
+  "/embed/anything/else/here",
   "/embedx",
   "/embed-cluster/x",
   "/embeds/cluster/x",
@@ -77,7 +103,6 @@ const EMBEDDABLE_PATHS = [
   `/embed/cluster/${ID}`,
   `/embed/cluster/${ID.toUpperCase()}`,
   "/embed/cluster/not-a-uuid",
-  "/embed/anything/else/here",
 ];
 
 describe("buildSecurityHeaders — frame policy per path (Next's own matcher)", () => {
@@ -100,35 +125,78 @@ describe("buildSecurityHeaders — frame policy per path (Next's own matcher)", 
     expect(csp).not.toContain("script-src");
   });
 
-  it.each([...FRAME_LOCKED_PATHS, ...EMBEDDABLE_PATHS, "/embed/x"])(
+  it.each([...FRAME_LOCKED_PATHS, ...EMBEDDABLE_PATHS])(
     "%s is matched by exactly one rule (never two conflicting frame policies)",
     (path) => {
       expect(matchingRules(path)).toHaveLength(1);
     },
   );
 
-  it("never gives the frameable policy to the bare '/embed' or '/embed/' (the latter is only a trailing-slash redirect)", () => {
+  it.each([
+    ...FRAME_LOCKED_PATHS,
+    ...EMBEDDABLE_PATHS,
+    `/embed/cluster/${ID}/`,
+    "/embed/cluster/not-a-uuid/",
+    "/embed/cluster//",
+    "/embed/cluster/a/b",
+  ])(
+    "%s is matched by exactly one rule under the regex Next ships for headers() in production",
+    (path) => {
+      expect(matchingRulesStrict(path)).toHaveLength(1);
+    },
+  );
+
+  it("gives the bare '/embed' and '/embed/' exactly one rule, and that rule is the site policy (A)", () => {
     for (const path of ["/embed", "/embed/"]) {
-      for (const rule of matchingRules(path)) {
-        expect(rule.headers.find((h) => h.key === "Content-Security-Policy")!.value).not.toContain(
-          "frame-ancestors *",
-        );
-      }
+      const rules = matchingRules(path);
+      expect(rules, path).toHaveLength(1);
+      const h = headersFor(path);
+      expect(h.get("x-frame-options"), path).toBe("SAMEORIGIN");
+      expect(directives(h.get("content-security-policy")!), path).toContain("frame-ancestors 'self'");
+      expect(rules[0]!.headers.find((x) => x.key === "Content-Security-Policy")!.value, path).not.toContain(
+        "frame-ancestors *",
+      );
     }
-    expect(matchingRules("/embed")).toHaveLength(1);
   });
 
-  it("only the exact /embed/ namespace can ever be matched by the frameable rule", () => {
+  it("only /embed/cluster/:id can match the frameable rule", () => {
     const frameable = buildSecurityHeaders("production").find((r) =>
       r.headers.some((h) => h.value.includes("frame-ancestors *")),
     )!;
     const match = getPathMatch(frameable.source);
-    for (const path of ["/", "/embed", "/embedx", "/embed-x/y", "/a/embed/x", "/cluster/embed/x", "/api/embed/x", "/admin"]) {
+    for (const path of [
+      "/",
+      "/embed",
+      "/embedx",
+      "/embed-x/y",
+      "/a/embed/x",
+      "/cluster/embed/x",
+      "/api/embed/x",
+      "/admin",
+      "/embed/x",
+      "/embed/cluster",
+      `/embed/cluster/${ID}/x`,
+      "/embed/foo",
+    ]) {
       expect(match(path), path).toBe(false);
     }
-    for (const path of ["/embed/x", "/embed/cluster/y"]) {
+    for (const path of [`/embed/cluster/${ID}`, "/embed/cluster/y"]) {
       expect(match(path), path).not.toBe(false);
     }
+  });
+
+  // Documented residual (see the header comment in headers.ts): Next matches
+  // header sources case-insensitively, while app routes are case-sensitive, so
+  // an upper-cased namespace gets the frameable rule although app/not-found.tsx
+  // answers it. Rule B's CSP (default-src 'none', no script-src) lets none of
+  // that page's scripts, styles or fonts load. Closing it needs middleware
+  // lowercasing, which is deferred.
+  it("documented residual: /EMBED/cluster/<id> matches the frameable rule B (header sources are case-insensitive, routes are not)", () => {
+    const path = `/EMBED/cluster/${ID}`;
+    const rules = matchingRules(path);
+    expect(rules).toHaveLength(1);
+    expect(headersFor(path).get("content-security-policy")).toBe(EMBED_CSP);
+    expect(headersFor(path).has("x-frame-options")).toBe(false);
   });
 
   it("behaves the same under the dev NODE_ENV", () => {
@@ -208,6 +276,41 @@ describe("buildSecurityHeaders — module hygiene", () => {
     const src = readFileSync(resolve(ROOT, "src/lib/security/headers.ts"), "utf-8");
     expect(src).not.toMatch(/from\s*["']@\//);
     expect(src).not.toMatch(/^\s*import\s/m);
+  });
+});
+
+describe("src/app/embed -- only script-less route handlers", () => {
+  const embedRoot = resolve(ROOT, "src/app/embed");
+
+  function walk(dir: string): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      const full = resolve(dir, entry.name);
+      return entry.isDirectory() ? walk(full) : [full];
+    });
+  }
+
+  const files = walk(embedRoot).map((f) => f.slice(embedRoot.length + 1).split("\\").join("/"));
+
+  it("holds nothing but route.ts files (no page, layout, not-found, loading or error)", () => {
+    const offenders = files.filter((f) => f.split("/").at(-1) !== "route.ts");
+    expect(
+      offenders,
+      "every HTML response under /embed/ must come from a script-less route handler",
+    ).toEqual([]);
+    for (const banned of ["page.tsx", "layout.tsx", "not-found.tsx", "loading.tsx", "error.tsx"]) {
+      expect(
+        files.filter((f) => f.split("/").at(-1) === banned),
+        "every HTML response under /embed/ must come from a script-less route handler",
+      ).toEqual([]);
+    }
+  });
+
+  it("has exactly the widget route and the script-less catch-all", () => {
+    const dirs = files.map((f) => f.slice(0, -"/route.ts".length)).sort();
+    expect(
+      dirs,
+      "every HTML response under /embed/ must come from a script-less route handler",
+    ).toEqual(["[...rest]", "cluster/[id]"]);
   });
 });
 

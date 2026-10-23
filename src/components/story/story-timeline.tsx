@@ -129,7 +129,7 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
                 <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-foreground/80">
                   {p.sourceName}
                 </span>
-                {!p.voting && <span>(toplayıcı / niş)</span>}
+                {!p.voting && <span className="shrink-0 whitespace-nowrap text-[10px]">(toplayıcı / niş)</span>}
                 <span className="min-w-0 truncate">{p.title}</span>
               </TrackedLink>
             </li>

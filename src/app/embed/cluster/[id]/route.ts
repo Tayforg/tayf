@@ -8,7 +8,7 @@ import { siteUrl } from "@/lib/site-url";
 // KbdShortcuts and Analytics, so a page.tsx here could not be chrome-less.
 //
 // This is the one place the site may be framed by third parties; the
-// relaxed frame policy for /embed/ lives in src/lib/security/headers.ts
+// relaxed frame policy for exactly /embed/cluster/:id lives in src/lib/security/headers.ts
 // (CSP without script-src, `frame-ancestors *`, no X-Frame-Options). No
 // cookie is ever set, and nothing is exported besides GET -- no
 // `dynamic`/`revalidate` under cacheComponents: freshness is expressed

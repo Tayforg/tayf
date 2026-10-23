@@ -21,18 +21,22 @@ import {
   toSideState,
   type SideState,
 } from "@/lib/compare/compare-view";
+import { noindexPageMetadata } from "@/lib/seo/page-metadata";
 import type { MediaDnaZone } from "@/types";
 
 // A shareable view of two clusters: noindex (the URL space is unbounded and
 // the page is a tool, not content) but follow, with a fixed canonical so the
-// query string never forks it into duplicates.
-export const metadata: Metadata = {
+// query string never forks it into duplicates. og:url follows the fixed
+// canonical '/karsilastir' rather than being omitted: that gives one stable
+// social object matching the canonical. The card is static either way, so a
+// shared ?a=&b= link unfurls as 'Karşılaştır — Tayf', not the homepage.
+export const metadata: Metadata = noindexPageMetadata({
   title: "Karşılaştır",
   description:
     "İki hikâyeyi yan yana görün: kaynak dağılımı, taraf yelpazesi, ilk yayın zamanı.",
-  alternates: { canonical: "/karsilastir" },
-  robots: { index: false, follow: true },
-};
+  path: "/karsilastir",
+  follow: true,
+});
 
 type SearchParams = { a?: string | string[]; b?: string | string[] };
 
