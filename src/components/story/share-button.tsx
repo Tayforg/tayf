@@ -6,6 +6,7 @@ import { track } from "@/lib/track";
 import { buildChannelShareHref, buildShareUrl, SHARE_LINK_CHANNELS } from "@/lib/clusters/share";
 import { siteUrl } from "@/lib/site-url";
 import { buildEmbedSnippet } from "@/lib/cards/badge-embed";
+import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
 
 // Literal chip classes shared by every pill in this component (the
 // original "Paylaş"/"Kartı indir" buttons and the 4 channel chips below) —
@@ -45,6 +46,21 @@ export async function copyEmbedCode(clusterId: string): Promise<boolean> {
   return true;
 }
 
+// Copies the live-widget <iframe> snippet (/embed/cluster/<id>, "Gömme kodu").
+// Same contract as copyEmbedCode: false for a non-uuid id or an unavailable /
+// denied clipboard, and nothing is tracked unless the write succeeded.
+export async function copyIframeCode(clusterId: string): Promise<boolean> {
+  const snippet = buildIframeSnippet(siteUrl(), clusterId);
+  if (!snippet) return false;
+  try {
+    await navigator.clipboard.writeText(snippet);
+  } catch {
+    return false;
+  }
+  track("share", { clusterId, kind: "embed_iframe" });
+  return true;
+}
+
 // Writes to the clipboard and reports the outcome instead of throwing.
 // Resolves false on a rejected write AND on a missing navigator.clipboard
 // (insecure context, SSR) — the TypeError is caught by the same try.
@@ -65,6 +81,15 @@ export async function resolveEmbedCopy(
 ): Promise<{ ok: true } | { ok: false; manual: string | null }> {
   if (await copyEmbedCode(clusterId)) return { ok: true };
   return { ok: false, manual: buildEmbedSnippet(siteUrl(), clusterId)?.html ?? null };
+}
+
+// "Gömme kodu" outcome. On failure `manual` is the iframe snippet the reader
+// can select and copy by hand (null when the id is not a uuid).
+export async function resolveIframeCopy(
+  clusterId: string,
+): Promise<{ ok: true } | { ok: false; manual: string | null }> {
+  if (await copyIframeCode(clusterId)) return { ok: true };
+  return { ok: false, manual: buildIframeSnippet(siteUrl(), clusterId) };
 }
 
 // "Paylaş" clipboard-fallback outcome. On failure `manual` is the share url.
@@ -111,10 +136,14 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
   const [embedCopied, setEmbedCopied] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
   const [embedFailed, setEmbedFailed] = useState(false);
+  const [iframeCopied, setIframeCopied] = useState(false);
+  const [iframeFailed, setIframeFailed] = useState(false);
   // Manual-copy text persists until the next successful copy of the same kind.
   const [shareManual, setShareManual] = useState<string | null>(null);
   const [embedManual, setEmbedManual] = useState<string | null>(null);
+  const [iframeManual, setIframeManual] = useState<string | null>(null);
   const canEmbed = buildEmbedSnippet(siteUrl(), clusterId) !== null;
+  const canEmbedIframe = buildIframeSnippet(siteUrl(), clusterId) !== null;
   const body = text ? `${title}\n${text}` : title;
 
   async function handleShare() {
@@ -156,6 +185,19 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
     }
   }
 
+  async function handleIframe() {
+    const r = await resolveIframeCopy(clusterId);
+    if (r.ok) {
+      setIframeCopied(true);
+      setIframeManual(null);
+      setTimeout(() => setIframeCopied(false), 2000);
+    } else {
+      setIframeFailed(true);
+      setIframeManual(r.manual);
+      setTimeout(() => setIframeFailed(false), 2000);
+    }
+  }
+
   return (
     <>
       <button
@@ -191,6 +233,16 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
           {embedCopied ? "Kod kopyalandı" : embedFailed ? "Kopyalanamadı" : "Sitene ekle"}
         </button>
       )}
+      {canEmbedIframe && (
+        <button
+          type="button"
+          onClick={handleIframe}
+          title="Canlı yelpaze kutusunu (iframe) sitenize ekleyin"
+          className={CHIP_CLASS}
+        >
+          {iframeCopied ? "Kod kopyalandı" : iframeFailed ? "Kopyalanamadı" : "Gömme kodu"}
+        </button>
+      )}
       <span className="inline-flex items-center gap-1" aria-label="Kanal ile paylaş">
         {SHARE_LINK_CHANNELS.map((channel) => {
           const label = CHANNEL_LABELS[channel];
@@ -212,14 +264,15 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
       <span className="sr-only" role="status" aria-live="polite">
         {copied
           ? "Kopyalandı"
-          : embedCopied
+          : embedCopied || iframeCopied
             ? "Kod kopyalandı"
-            : shareFailed || embedFailed
+            : shareFailed || embedFailed || iframeFailed
               ? "Kopyalanamadı"
               : ""}
       </span>
       {shareManual && <ManualCopyBox label="Paylaşım bağlantısı" value={shareManual} />}
       {embedManual && <ManualCopyBox label="Gömme kodu" value={embedManual} />}
+      {iframeManual && <ManualCopyBox label="iframe gömme kodu" value={iframeManual} />}
     </>
   );
 }

@@ -53,6 +53,11 @@ export interface StoryTimelinePoint {
   offsetPct: number;
   title: string;
   url: string;
+  /**
+   * False for a toplayıcı / niş (non-voting) source: plotted on the axis for
+   * context, but never the first mover and never a zone's join.
+   */
+  voting: boolean;
 }
 
 export interface StoryZoneJoin {
@@ -61,7 +66,18 @@ export interface StoryZoneJoin {
   lagMin: number;
 }
 
+/** One zone's first voting report — a row of the "İlk haber" list. */
+export interface StoryZoneFirst {
+  zone: MediaDnaZone;
+  label: string;
+  /** Istanbul clock of the zone's first voting report. */
+  clock: string;
+  /** Null for the earliest zone; else "aynı dakikada" or "+28 dk". */
+  lag: string | null;
+}
+
 export interface StoryTimeline {
+  /** Voting AND non-voting points, merged and sorted by time then name. */
   points: StoryTimelinePoint[];
   first: {
     sourceName: string;
@@ -77,8 +93,13 @@ export interface StoryTimeline {
   absentZones: MediaDnaZone[];
   /** The subset of `absentZones` whose feeds are currently degraded. */
   degradedAbsentZones: MediaDnaZone[];
+  /** Whether the plotted axis (all points) spans an Istanbul midnight. */
   crossesMidnight: boolean;
   summary: string;
+  /** One entry per zone with a dated voting point, ordered by join time. */
+  zoneFirsts: StoryZoneFirst[];
+  /** `zoneFirsts` as one shareable line: "İlk haber: İktidar 09:12 · …". */
+  zoneLine: string;
 }
 
 /** Adapter from the cluster page's member rows (voting members only). */
@@ -169,6 +190,49 @@ function effectiveTime(
   return candidates.length > 0 ? Math.min(...candidates) : null;
 }
 
+/**
+ * Position of `t` on the axis, 0..100. The axis runs first → last, padded by
+ * `AXIS_PADDING` of the span (half on each side) so no dot sits on an edge.
+ * A zero/negative span or any non-finite input has no meaningful axis: centre.
+ */
+export function timelineOffsetPct(t: number, firstT: number, lastT: number): number {
+  if (!Number.isFinite(t) || !Number.isFinite(firstT) || !Number.isFinite(lastT)) return 50;
+  const span = lastT - firstT;
+  if (!(span > 0)) return 50;
+  const axisStart = firstT - (span * AXIS_PADDING) / 2;
+  const axisLength = span * (1 + AXIS_PADDING);
+  const pct = ((t - axisStart) / axisLength) * 100;
+  return Math.min(100, Math.max(0, pct));
+}
+
+interface DatedEntry {
+  m: StoryTimelineMember;
+  t: number;
+}
+
+/** One entry per source: its earliest effective article. Undated rows drop out. */
+function earliestPerSource(
+  members: readonly StoryTimelineMember[],
+  seenAt: Readonly<Record<string, string>> | null,
+): DatedEntry[] {
+  const bySource = new Map<string, DatedEntry>();
+  for (const m of members) {
+    const t = effectiveTime(m, seenAt);
+    if (t === null) continue;
+    const prev = bySource.get(m.sourceId);
+    if (!prev || t < prev.t) bySource.set(m.sourceId, { m, t });
+  }
+  return [...bySource.values()];
+}
+
+function byTimeThenName(a: DatedEntry, b: DatedEntry): number {
+  return a.t - b.t || a.m.sourceName.localeCompare(b.m.sourceName, "tr");
+}
+
+function crossesIstanbulMidnight(firstT: number, lastT: number): boolean {
+  return ISTANBUL_DAY.format(new Date(firstT)) !== ISTANBUL_DAY.format(new Date(lastT));
+}
+
 function firstMoverLabel(names: readonly string[]): string {
   if (names.length <= MAX_TIE_NAMES) return names.join(" ve ");
   const shown = names.slice(0, MAX_TIE_NAMES);
@@ -177,77 +241,100 @@ function firstMoverLabel(names: readonly string[]): string {
 
 /**
  * Builds the timeline, or `null` when fewer than
- * `STORY_TIMELINE_MIN_SOURCES` distinct sources carry a valid time.
+ * `STORY_TIMELINE_MIN_SOURCES` distinct VOTING sources carry a valid time.
  *
  * `members` must be voting members only. `seenAt` maps article id → the
  * article's `created_at` (when Tayf first saw it); it caps a source-supplied
  * future pubDate (CNN Türk runs ~2.84 h ahead) but never moves a point
  * later. `health` only explains an absent zone; null means unknown and
  * never marks anything degraded.
+ *
+ * `nonVoting` (toplayıcı / niş sources) are plotted as context only: they
+ * widen the axis and appear in `points` with `voting: false`, but never
+ * count toward the source floor, the first mover, a zone's join, absence,
+ * the summary or `zoneFirsts` — an aggregator reposting first must not read
+ * as a zone "joining". Clocks inside the summary / zone line follow the
+ * VOTING span's midnight crossing (so a niche source can't rewrite them);
+ * the point clocks follow the plotted axis's.
  */
 export function buildStoryTimeline(
   members: readonly StoryTimelineMember[],
   seenAt: Readonly<Record<string, string>> | null,
   health: ZoneFeedHealth | null,
+  nonVoting: readonly StoryTimelineMember[] = [],
 ): StoryTimeline | null {
-  // One point per source: its earliest effective article.
-  const bySource = new Map<string, { m: StoryTimelineMember; t: number }>();
-  for (const m of members) {
-    const t = effectiveTime(m, seenAt);
-    if (t === null) continue;
-    const prev = bySource.get(m.sourceId);
-    if (!prev || t < prev.t) bySource.set(m.sourceId, { m, t });
-  }
-  const ordered = [...bySource.values()].sort(
-    (a, b) => a.t - b.t || a.m.sourceName.localeCompare(b.m.sourceName, "tr"),
-  );
-  const firstEntry = ordered[0];
-  const lastEntry = ordered[ordered.length - 1];
-  if (ordered.length < STORY_TIMELINE_MIN_SOURCES || !firstEntry || !lastEntry) {
+  const votingOrdered = earliestPerSource(members, seenAt).sort(byTimeThenName);
+  const votingFirst = votingOrdered[0];
+  const votingLast = votingOrdered[votingOrdered.length - 1];
+  if (votingOrdered.length < STORY_TIMELINE_MIN_SOURCES || !votingFirst || !votingLast) {
     return null;
   }
-  const firstT = firstEntry.t;
-  const lastT = lastEntry.t;
-  const span = lastT - firstT;
-  const crossesMidnight =
-    ISTANBUL_DAY.format(new Date(firstT)) !== ISTANBUL_DAY.format(new Date(lastT));
+  const firstT = votingFirst.t;
 
-  const axisStart = firstT - (span * AXIS_PADDING) / 2;
-  const axisLength = span * (1 + AXIS_PADDING);
-  const points: StoryTimelinePoint[] = ordered.map(({ m, t }) => ({
+  const nonVotingOrdered = earliestPerSource(nonVoting, seenAt).sort(byTimeThenName);
+  const all = [
+    ...votingOrdered.map((e) => ({ ...e, voting: true })),
+    ...nonVotingOrdered.map((e) => ({ ...e, voting: false })),
+  ].sort(byTimeThenName);
+  const axisFirst = all[0] ?? votingFirst;
+  const axisLast = all[all.length - 1] ?? votingLast;
+
+  const votingCrossesMidnight = crossesIstanbulMidnight(firstT, votingLast.t);
+  const axisCrossesMidnight = crossesIstanbulMidnight(axisFirst.t, axisLast.t);
+
+  const points: StoryTimelinePoint[] = all.map(({ m, t, voting }) => ({
     sourceName: m.sourceName,
     zone: zoneOf(m.bias),
     t,
-    clock: formatStoryClock(t, crossesMidnight),
-    offsetPct: span === 0 ? 50 : ((t - axisStart) / axisLength) * 100,
+    clock: formatStoryClock(t, axisCrossesMidnight),
+    offsetPct: timelineOffsetPct(t, axisFirst.t, axisLast.t),
     title: m.title,
     url: m.url,
+    voting,
   }));
+
+  // Everything below is voting-only: first mover, joins, ties, summary.
+  const votingPoints = points.filter((p) => p.voting);
+  const votingClock = (t: number) => formatStoryClock(t, votingCrossesMidnight);
 
   const zoneJoin: Record<MediaDnaZone, StoryZoneJoin | null> = {
     iktidar: null,
     bagimsiz: null,
     muhalefet: null,
   };
-  for (const p of points) {
+  const zoneFirsts: StoryZoneFirst[] = [];
+  for (const p of votingPoints) {
     if (zoneJoin[p.zone]) continue;
     const lagMs = p.t - firstT;
     zoneJoin[p.zone] = { t: p.t, lagMs, lagMin: Math.floor(lagMs / 60_000) };
+    zoneFirsts.push({
+      zone: p.zone,
+      label: ZONE_META[p.zone].label,
+      clock: votingClock(p.t),
+      lag:
+        zoneFirsts.length === 0
+          ? null
+          : lagMs < STORY_TIE_MS
+            ? "aynı dakikada"
+            : `+${formatLag(lagMs)}`,
+    });
   }
+  const zoneLine = `İlk haber: ${zoneFirsts.map((z) => `${z.label} ${z.lag ?? z.clock}`).join(" · ")}`;
 
-  // Absence is judged over every member passed in, dated or not: a member
-  // whose times are both unparseable is still coverage, just not placeable.
+  // Absence is judged over every voting member passed in, dated or not: a
+  // member whose times are both unparseable is still coverage, just not
+  // placeable. Non-voting members are never coverage.
   const absentZones = missingZones(members);
   const degradedAbsentZones = absentZones.filter((z) => health?.[z].degraded === true);
 
-  const tied = points.filter((p) => p.t - firstT < STORY_TIE_MS);
-  const head = points[0];
-  if (!head) return null; // unreachable: ordered.length >= STORY_TIMELINE_MIN_SOURCES
+  const tied = votingPoints.filter((p) => p.t - firstT < STORY_TIE_MS);
+  const head = votingPoints[0];
+  if (!head) return null; // unreachable: votingOrdered.length >= STORY_TIMELINE_MIN_SOURCES
   const first = {
     sourceName: head.sourceName,
     zone: head.zone,
     t: head.t,
-    clock: head.clock,
+    clock: votingClock(head.t),
     tie: tied.length > 1,
     tiedWith: tied.slice(1).map((p) => p.sourceName),
   };
@@ -281,7 +368,9 @@ export function buildStoryTimeline(
     zoneJoin,
     absentZones,
     degradedAbsentZones,
-    crossesMidnight,
+    crossesMidnight: axisCrossesMidnight,
     summary: parts.join(" — "),
+    zoneFirsts,
+    zoneLine,
   };
 }

@@ -71,6 +71,9 @@ function group(userAgent: string): string {
     "Allow: /api/sources",
     "Disallow: /admin",
     "Disallow: /api/",
+    // The script-less iframe widget (src/app/embed): a frame target for other
+    // sites, not a page to index. It also answers X-Robots-Tag: noindex.
+    "Disallow: /embed/",
   ].join("\n");
 }
 

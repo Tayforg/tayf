@@ -23,6 +23,12 @@ const TAYF_EXTRA_BOTS = [
   "bingbot",
   "YandexBot",
   "Chrome-Lighthouse",
+  // oEmbed consumers: they look for the <link rel="alternate"
+  // type="application/json+oembed"> discovery tag in <head>, so they need
+  // blocking metadata rather than the streamed <body> kind.
+  "WordPress",
+  "Iframely",
+  "Embedly",
 ] as const;
 
 export const HTML_LIMITED_BOTS_SOURCE = `${NEXT_DEFAULT_HTML_LIMITED_BOTS}|${TAYF_EXTRA_BOTS.join("|")}`;

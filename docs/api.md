@@ -194,6 +194,84 @@ RSS 2.0 feed of the top 30 politics clusters. Cached 5 minutes.
 
 ---
 
+### `GET /embed/cluster/{id}`
+
+The live "Yelpaze kutusu": a self-contained, **script-less** HTML document (no JavaScript, no external resource, no cookie) that shows how media zones covered one cluster -- a "TAYF" brand line, an optional "Kör nokta" ribbon, the headline (two lines max), a three-segment İktidar / Bağımsız / Muhalefet bar with a percent legend and the source count, and a "tayfhaber.com'da oku" link (`target=_blank rel=noopener`, UTM-tagged `utm_source=embed&utm_medium=iframe`). It is designed to be put in someone else's `<iframe>` at 560 x 200 (down to 320 wide) in light and dark colour schemes.
+
+It is a **route handler**, not a page: `app/layout.tsx` always renders the site chrome, so a chrome-less page is impossible without moving every route. The kart and rozet routes are the precedent.
+
+`id` is a cluster UUID, validated before any read.
+
+| Status | Meaning | `Cache-Control` |
+| --- | --- | --- |
+| `200` | the widget | `public, s-maxage=300, stale-while-revalidate=600` |
+| `308` | the cluster was merged; `Location: /embed/cluster/{survivor}` (relative) | `public, s-maxage=300` |
+| `404` | malformed id or unknown cluster; tiny noindex HTML ("Haber bulunamadı") | `public, s-maxage=300` |
+| `503` | the read failed (sustained outage); noindex HTML ("Şu anda yüklenemiyor"), `Retry-After: 60` | `no-store` |
+
+A read failure is a `503`, never a cacheable `404`, so an outage cannot unpublish a real story from every embedding page. Every response carries `X-Robots-Tag: noindex` and the document has `<meta name="robots" content="noindex,nofollow">`; `/robots.txt` disallows `/embed/` in every group.
+
+The headline goes through the same KVKK private-individual filter as the kart route (`isGameEligibleTitle`); a rejected title is replaced by the generic "Bu haberin medya yelpazesi".
+
+**Framing policy (security-sensitive).** The rest of the site is not frameable by third parties (CSP `frame-ancestors 'self'` plus `X-Frame-Options: SAMEORIGIN`). `/embed/*` is the single exception and gets its own header rule (`src/lib/security/headers.ts`, wired into `next.config.ts`, guarded by `tests/guards/frame-headers.test.ts`):
+
+```
+Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors *
+```
+
+There is no `script-src`, so nothing can execute even if the markup were ever injected, and there is no `X-Frame-Options` header on those paths. The copy-paste snippet adds `sandbox="allow-popups allow-popups-to-escape-sandbox"` (no scripts, no same-origin) as defence in depth.
+
+Snippet (the "Gömme kodu" chip on the cluster page copies this; the older "Sitene ekle" chip still copies the static `<a><img>` rozet badge):
+
+```html
+<iframe src="https://tayfhaber.com/embed/cluster/{id}" width="560" height="200" title="Tayf yelpazesi: bu haberi hangi medya bölgeleri yazdı" loading="lazy" style="border:0;max-width:100%" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>
+```
+
+---
+
+### `GET /api/oembed`
+
+[oEmbed 1.0](https://oembed.com) provider for cluster URLs, JSON only. Public, unkeyed, CORS-open.
+
+| Parameter | Meaning |
+| --- | --- |
+| `url` | **required.** `https://tayfhaber.com/cluster/{uuid}` (or the `www.` host, or the site's own host when `NEXT_PUBLIC_SITE_URL` is https). A query string, hash and one trailing slash are ignored. |
+| `format` | optional. Only `json` is supported; anything else (including `xml`) is `501`. |
+| `maxwidth` | optional integer, clamped to 120-560 (default 560). Anything that is not 1-5 plain digits falls back to the default. |
+| `maxheight` | optional integer, clamped to 120-240 (default 200), same parsing. |
+
+**Response** `200`:
+
+```json
+{
+  "version": "1.0",
+  "type": "rich",
+  "provider_name": "Tayf",
+  "provider_url": "https://tayfhaber.com",
+  "title": "...",
+  "html": "<iframe src=\"https://tayfhaber.com/embed/cluster/{id}\" width=\"560\" height=\"200\" ... sandbox=\"allow-popups allow-popups-to-escape-sandbox\"></iframe>",
+  "width": 560,
+  "height": 200,
+  "cache_age": 3600
+}
+```
+
+`Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`. A cluster that was merged into another is embedded as its survivor. `title` uses the same KVKK filter as the widget; a rejected title becomes `"Tayf haberi"`.
+
+Status order (first match wins):
+
+1. `501` -- `format` is present and not `json`.
+2. `400` -- `url` is missing or empty.
+3. `404` -- `url` is not a Tayf cluster URL (wrong scheme/host/port/path, userinfo, non-uuid id, longer than 2048 characters).
+4. `503` -- the cluster read failed (`Cache-Control: no-store`).
+5. `404` -- no such cluster (`Cache-Control: public, s-maxage=300`).
+
+**SSRF.** The endpoint never requests the given `url`. It is only parsed; the extracted UUID is the only thing that reaches the database, through the same cached, 4 s capped reader as the cluster page.
+
+Every response, success or error, is `application/json; charset=utf-8` with `Access-Control-Allow-Origin: *`; `OPTIONS` answers `204` with the same header. Discovery tags (`<link rel="alternate" type="application/json+oembed">`) are not emitted yet; `WordPress`, `Iframely` and `Embedly` are already in the `htmlLimitedBots` list so those consumers will get them in `<head>` when they are added.
+
+---
+
 ## /api/v1 (keyed)
 
 Pack E / B11 — a keyed, rate-limited public API for third-party consumers

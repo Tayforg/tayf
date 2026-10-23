@@ -39,3 +39,24 @@ describe("saved-list.tsx change badges", () => {
     expect(src.indexOf("readSnapshots(", firstRead + 1)).toBe(-1);
   });
 });
+
+describe("saved-list.tsx reading-diet card", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+
+  it("imports SavedMixCard from the saved-mix-card module", () => {
+    expect(src).toMatch(/import\s*\{[^}]*SavedMixCard[^}]*\}\s*from\s*["']@\/components\/bookmark\/saved-mix-card["']/);
+  });
+
+  it("renders the card with the already-loaded rows", () => {
+    expect(src).toContain("<SavedMixCard rows={rows} />");
+  });
+
+  it("does not import the click tracker (the diet is computed, never sent)", () => {
+    expect(src).not.toContain("@/lib/track");
+    expect(src).not.toMatch(/\btrack\(/);
+  });
+
+  it("still issues exactly one clusters query (no new fetch for the diet)", () => {
+    expect(src.match(/\.from\("clusters"\)/g)).toHaveLength(1);
+  });
+});

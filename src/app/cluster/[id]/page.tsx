@@ -56,19 +56,24 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 import { buildTayfOrganization, serializeJsonLd } from "@/lib/seo/json-ld";
 import { siteUrl } from "@/lib/site-url";
+import { oembedDiscoveryHref } from "@/lib/embed/embed-snippet";
 import { balanceFromDistribution } from "@/lib/bias/balance";
 import { zoneOf } from "@/lib/bias/config";
 import type { MediaDnaZone } from "@/types";
 
 /**
- * "Kim önce yazdı?" data. Both lookups are skipped below the 3-source floor,
- * and feed health (only used to word an absent zone) is skipped when every
- * zone has a member. Both fail open to null — a missing created_at map just
- * means published times are used as-is.
+ * "Kim önce yazdı?" data. Both lookups are skipped below the 3-source floor
+ * (judged on VOTING members only), and feed health (only used to word an
+ * absent zone) is skipped when every voting zone has a member. Both fail open
+ * to null — a missing created_at map just means published times are used
+ * as-is. Non-voting (toplayıcı / niş) members are plotted for context but
+ * never reach the floor, the first mover or the zone checks; `getMemberSeenAt`
+ * already covers every cluster member, so they cost no extra query.
  */
 async function loadStoryTimeline(
   clusterId: string,
   votingMembers: Parameters<typeof timelineMembersFrom>[0],
+  nonVotingMembers: Parameters<typeof timelineMembersFrom>[0],
 ): Promise<StoryTimelineData | null> {
   const members = timelineMembersFrom(votingMembers);
   if (votingSourceCount(members) < STORY_TIMELINE_MIN_SOURCES) return null;
@@ -76,7 +81,12 @@ async function loadStoryTimeline(
     getMemberSeenAt(clusterId),
     missingZones(members).length > 0 ? getZoneFeedHealth() : Promise.resolve(null),
   ]);
-  return buildStoryTimeline(members, seenAt, health);
+  return buildStoryTimeline(
+    members,
+    seenAt,
+    health,
+    timelineMembersFrom(nonVotingMembers),
+  );
 }
 
 interface PageProps {
@@ -155,8 +165,15 @@ export async function generateMetadata({
     // the root layout's `canonical: "/"` here — telling crawlers every
     // cluster page is a duplicate of the homepage and deindexing the long
     // tail. Same pattern as source/[slug].
+    // `types` emits the oEmbed discovery <link> so WordPress, Iframely and
+    // Embedly can turn a pasted story URL into the /embed/ widget.
     alternates: {
       canonical: `/cluster/${id}`,
+      types: {
+        "application/json+oembed": [
+          { url: oembedDiscoveryHref(siteUrl(), id), title: cluster.title_tr },
+        ],
+      },
     },
     // seo-3: an archived cluster (migration 037's retention cron) still
     // serves a real 200 — old shared links must keep working — but it must
@@ -369,9 +386,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     ? await getCachedClusterFramingReceipt(id)
     : null;
 
-  // "Kim önce yazdı?" — per-story first-mover timeline, voting members only
-  // (an aggregator reposting first must not read as a zone "joining").
-  const storyTimeline = await loadStoryTimeline(id, votingMembers);
+  // "Kim önce yazdı?" — per-story first-mover timeline. Only voting members
+  // can be first or make a zone "join" (an aggregator reposting first must
+  // not); non-voting members are just plotted as hollow rings.
+  const storyTimeline = await loadStoryTimeline(id, votingMembers, nonVotingMembers);
   const [factChecks, thread] = await Promise.all([
     getClusterFactChecks(id),
     getPublishedThreadForCluster(id),

@@ -24,6 +24,15 @@ type Bucket = {
 
 let mockBuckets: Bucket[] | null = null;
 
+// "Yükselen Konular" (migration 112): getRisingEntities is another "use cache"
+// fetcher, mocked wholesale for the same reason. Default `null` keeps every
+// pre-existing test on the failure branch of the new section.
+let mockRising: RisingResult | null = null;
+
+vi.mock("@/lib/trends/rising-query", () => ({
+  getRisingEntities: vi.fn(async () => mockRising),
+}));
+
 vi.mock("@/lib/trends/daily-zones", async () => {
   const actual = await vi.importActual<
     typeof import("@/lib/trends/daily-zones")
@@ -34,8 +43,11 @@ vi.mock("@/lib/trends/daily-zones", async () => {
   };
 });
 
-import TrendsPage from "./page";
+import TrendsPage, { metadata } from "./page";
 import { WINDOW_DAYS } from "@/lib/trends/daily-zones";
+import { RisingTopics } from "@/components/trends/rising-topics";
+import { PageHero } from "@/components/ui/page-hero";
+import type { RisingResult } from "@/lib/trends/rising";
 import { ZONE_META } from "@/lib/bias/config";
 import { ScrollToEnd } from "@/components/trends/scroll-to-end";
 
@@ -284,5 +296,113 @@ describe("/trends page — SVG <title> is a single string", () => {
 
     expect(markup).toContain(`<title>${lastDay} · `);
     expect(markup).not.toContain("<title></title>");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// "Yükselen Konular" (migration 112): the section sits right after the hero in
+// BOTH branches (null buckets and data), is fed by getRisingEntities, and
+// degrades on its own without taking the chart down.
+// ---------------------------------------------------------------------------
+
+const RISING_OK: RisingResult = {
+  status: "ok",
+  dayLabel: "Bugün",
+  day: "2026-10-23",
+  items: [
+    {
+      key: "erdogan",
+      label: "Erdoğan",
+      href: "/?q=Erdo%C4%9Fan",
+      count: 15,
+      baseline: 3,
+      ratio: 5,
+      ratioLabel: "5,0",
+      ratioIsLowerBound: false,
+      isNew: false,
+    },
+  ],
+};
+
+/** The element list of the page's root container (its direct children). */
+function rootChildren(tree: unknown): Elementish[] {
+  const root = tree as { props?: { children?: unknown } };
+  const kids = root.props?.children;
+  return (Array.isArray(kids) ? kids : [kids]).filter(Boolean) as Elementish[];
+}
+
+describe("/trends page — Yükselen Konular section", () => {
+  it.each([
+    ["null buckets (fetch failed)", () => null as Bucket[] | null],
+    ["data", () => seededBuckets().buckets as Bucket[] | null],
+  ])("renders <RisingTopics> right after the hero: %s", async (_name, make) => {
+    mockBuckets = make();
+    mockRising = RISING_OK;
+
+    const tree = await TrendsPage();
+
+    const kids = rootChildren(tree);
+    const heroIdx = kids.findIndex((el) => el.type === PageHero);
+    expect(heroIdx).toBe(0);
+    expect(kids[heroIdx + 1]?.type).toBe(RisingTopics);
+    expect(kids[heroIdx + 1]?.props?.data).toBe(RISING_OK);
+    expect(collectElements(tree).filter((el) => el.type === RisingTopics)).toHaveLength(1);
+  });
+
+  it.each([
+    ["null buckets", () => null as Bucket[] | null],
+    ["data", () => seededBuckets().buckets as Bucket[] | null],
+  ])("the section heading renders in the %s branch", async (_name, make) => {
+    mockBuckets = make();
+    mockRising = RISING_OK;
+
+    const tree = await TrendsPage();
+    const section = collectElements(tree).find((el) => el.type === RisingTopics);
+    const html = renderToStaticMarkup(section as unknown as React.ReactElement);
+
+    expect(html).toContain("Yükselen Konular");
+    expect(html).toContain("Erdoğan");
+  });
+
+  it("a null rising result shows the 'hesaplanamıyor' copy and leaves the chart alone", async () => {
+    mockBuckets = seededBuckets().buckets;
+    mockRising = null;
+
+    const tree = await TrendsPage();
+    const section = collectElements(tree).find((el) => el.type === RisingTopics);
+    const html = renderToStaticMarkup(section as unknown as React.ReactElement);
+
+    expect(html).toContain("Yükselen konular şu anda hesaplanamıyor.");
+    // The chart still renders.
+    expect(collectElements(tree).filter((el) => el.type === "svg")).toHaveLength(1);
+    expect(collectText(tree).join(" ")).not.toContain(UNAVAILABLE_COPY);
+  });
+
+  it("a failed chart does not hide the rising section", async () => {
+    mockBuckets = null;
+    mockRising = RISING_OK;
+
+    const tree = await TrendsPage();
+
+    expect(collectText(tree).join(" ")).toContain(UNAVAILABLE_COPY);
+    expect(collectElements(tree).filter((el) => el.type === RisingTopics)).toHaveLength(1);
+  });
+
+  it("fetches the timeline and the rising list exactly once per render", async () => {
+    const { getRisingEntities } = await import("@/lib/trends/rising-query");
+    const { fetchIstanbulTimeline } = await import("@/lib/trends/daily-zones");
+    mockBuckets = zeroBuckets();
+    mockRising = RISING_OK;
+    vi.mocked(getRisingEntities).mockClear();
+    vi.mocked(fetchIstanbulTimeline).mockClear();
+
+    await TrendsPage();
+
+    expect(getRisingEntities).toHaveBeenCalledTimes(1);
+    expect(fetchIstanbulTimeline).toHaveBeenCalledTimes(1);
+  });
+
+  it("the page description mentions today's rising topics", () => {
+    expect(String(metadata.description)).toContain("bugün yükselen konular");
   });
 });
