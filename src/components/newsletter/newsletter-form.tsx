@@ -68,7 +68,7 @@ export function NewsletterForm() {
           required
           maxLength={254}
           placeholder="ornek@eposta.com"
-          className="min-h-[40px] w-full sm:max-w-[240px] rounded-lg border border-input bg-transparent px-3 py-2 text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+          className="min-h-[40px] w-full sm:max-w-[240px] rounded-lg border border-input bg-transparent px-3 py-2 text-base sm:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
         />
         <button
           type="submit"

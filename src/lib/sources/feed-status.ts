@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { BIAS_TO_ZONE, isVotingKind } from "@/lib/bias/config";
+import { attemptCached } from "@/lib/cache-resilience";
 import { normalizeSourceKind } from "@/lib/sources/kind";
 import { classifySilence, type SilenceReason } from "@/lib/sources/silence-reason";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
@@ -76,11 +77,21 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 // retried once with the select that ran before 119, and every silent source
 // reads as reachable-and-current (`sessiz`) or `erişim yok` from its status.
 //
-// Fail-open discipline (mirrors src/lib/sources/active-count.ts and
-// src/lib/clusters/feed-health.ts verbatim): never throw. A Supabase error
-// resolves to `null`, and every caller renders an honest "durum bilinmiyor"
-// state instead of a fabricated figure — a throw inside "use cache" during
-// prerender fails the Vercel build even though the caller catches.
+// Fail-open discipline, and what a failure costs (2026-10-24 /sources '—'
+// incident): a `"use cache"` body must never throw (a throw there fails
+// `next build`'s prerender even when the caller catches), so each reader splits
+// into a raw `fetchX` that THROWS on a Supabase error, a `getXCached` that runs
+// it through `attemptCached` and only THEN picks the cache lifetime, and the
+// public `getX` that unwraps to `null` = "unknown". The lifetime used to be
+// fixed before the query ran, so one transient timeout was memoised as `null`
+// for the whole 1 h `source-directory` window and every denominator footnote
+// read "—" for that hour. Now a success keeps `source-directory` and a failure
+// is cached for `minutes` only. Callers keep the contract: `null` renders an
+// honest "durum bilinmiyor" state instead of a fabricated figure. There is
+// deliberately no live retry: the fetchers read `Date.now()`, which is only
+// allowed inside the cache scope on these static routes (same rule and shape as
+// src/lib/clusters/timeline-query.ts, guarded by
+// tests/guards/cache-life-after-attempt.test.ts).
 
 export interface SourceFeedStatus {
   slug: string;
@@ -285,6 +296,54 @@ const FEED_STATUS_SELECT_LEGACY =
 const FEED_STATUS_SELECT =
   "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, fetch_newest_item_at, fetch_items_count, latest:articles(published_at)";
 
+// Raw read: THROWS on a Supabase error so a failure can never be mistaken for
+// "no active sources". Runs inside `getSourceFeedStatusesCached`, so the clock
+// read below stays within the cache scope.
+async function fetchSourceFeedStatuses(): Promise<SourceFeedStatus[]> {
+  const nowMs = Date.now();
+  const supabase = createServerClient();
+  const nowIso = new Date(nowMs).toISOString();
+
+  const query = (columns: string) =>
+    supabase
+      .from("sources")
+      .select(columns)
+      .eq("active", true)
+      .lte("latest.published_at", nowIso)
+      .order("published_at", { referencedTable: "latest", ascending: false })
+      .limit(1, { referencedTable: "latest" })
+      .order("name", { ascending: true });
+
+  let { data, error } = await query(FEED_STATUS_SELECT);
+  if (error?.code === "42703") {
+    // Migration 119 is not applied yet: one retry with the select that ran
+    // before it. Never a loop; a second error falls through to the throw.
+    ({ data, error } = await query(FEED_STATUS_SELECT_LEGACY));
+  }
+
+  if (error) {
+    throw new Error(`source feed statuses query failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as unknown as SourceFeedStatusRawRow[];
+  return toFeedStatusRows(rows, nowMs);
+}
+
+// `attemptCached` swallows whatever the fetch throws instead of letting it
+// cross the `"use cache"` boundary. Lifetime follows the outcome: rows keep
+// the `source-directory` window, a failed attempt is memoised for `minutes`
+// only. Exactly one `cacheLife` call per invocation, after the attempt;
+// `cacheTag` first.
+async function getSourceFeedStatusesCached() {
+  "use cache";
+  cacheTag("sources");
+  const r = await attemptCached("feed-status", fetchSourceFeedStatuses);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
  * Per-source feed status CORE for every active source — the row-level
  * evidence behind /kaynaklar/durum's table (name/zone/kind/last item/last
@@ -292,51 +351,12 @@ const FEED_STATUS_SELECT =
  * tallies. Does NOT include the 7-day items/day figure — see
  * `getSourceItemsPerDay()`. `null` means "status unknown" (a Supabase
  * error) — callers must render an honest empty state, never a fabricated
- * figure. See the file header for the fail-open contract.
+ * figure; `[]` means it read fine and there are no active sources. Never
+ * throws. See the file header for the fail-open contract.
  */
 export async function getSourceFeedStatuses(): Promise<SourceFeedStatus[] | null> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("sources");
-
-  const nowMs = Date.now();
-
-  try {
-    const supabase = createServerClient();
-    const nowIso = new Date(nowMs).toISOString();
-
-    const query = (columns: string) =>
-      supabase
-        .from("sources")
-        .select(columns)
-        .eq("active", true)
-        .lte("latest.published_at", nowIso)
-        .order("published_at", { referencedTable: "latest", ascending: false })
-        .limit(1, { referencedTable: "latest" })
-        .order("name", { ascending: true });
-
-    let { data, error } = await query(FEED_STATUS_SELECT);
-    if (error?.code === "42703") {
-      // Migration 119 is not applied yet: one retry with the select that ran
-      // before it. Never a loop, never a throw.
-      ({ data, error } = await query(FEED_STATUS_SELECT_LEGACY));
-    }
-
-    if (error) {
-      // Never throw — see the file header. A "use cache" throw during
-      // prerender fails the Vercel build even though callers catch.
-      console.warn(`[feed-status] status unknown: ${error.message}`);
-      return null;
-    }
-
-    const rows = (data ?? []) as unknown as SourceFeedStatusRawRow[];
-    return toFeedStatusRows(rows, nowMs);
-  } catch (err) {
-    console.warn(
-      `[feed-status] status unknown: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
+  const r = await getSourceFeedStatusesCached();
+  return r.ok ? r.data : null;
 }
 
 /** Raw shape of one row from the `getSourceItemsPerDay` select below. */
@@ -361,6 +381,37 @@ export function toItemsPerDayMap(
   return out;
 }
 
+// Raw read: THROWS on a Supabase error (see `fetchSourceFeedStatuses`).
+async function fetchSourceItemsPerDay(): Promise<Record<string, number>> {
+  const supabase = createServerClient();
+  const sevenDaysAgoIso = new Date(
+    Date.now() - 7 * 24 * 60 * 60 * 1000,
+  ).toISOString();
+
+  const { data, error } = await supabase
+    .from("sources")
+    .select("slug, stats:articles(count)")
+    .eq("active", true)
+    .gte("stats.published_at", sevenDaysAgoIso);
+
+  if (error) {
+    throw new Error(`source items/day query failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as unknown as ItemsPerDayRawRow[];
+  return toItemsPerDayMap(rows);
+}
+
+// Same shape as `getSourceFeedStatusesCached`: tag, attempt, then one lifetime.
+async function getSourceItemsPerDayCached() {
+  "use cache";
+  cacheTag("sources");
+  const r = await attemptCached("items-per-day", fetchSourceItemsPerDay);
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
  * slug -> 7-day items/day (rounded to one decimal). The ONLY remaining
  * caller of the `stats:articles(count)` aggregate PERF-01 measured bimodal
@@ -368,38 +419,11 @@ export function toItemsPerDayMap(
  * from the cheap `getSourceFeedStatuses()` core while this streams in
  * behind its own nested <Suspense> for just the "7 günlük gün başına
  * haber" column. `null` means "unknown" (a Supabase error); callers should
- * render a neutral placeholder ("—"), not fabricate 0.
+ * render a neutral placeholder ("—"), not fabricate 0. Never throws.
  */
 export async function getSourceItemsPerDay(): Promise<Record<string, number> | null> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("sources");
-
-  try {
-    const supabase = createServerClient();
-    const sevenDaysAgoIso = new Date(
-      Date.now() - 7 * 24 * 60 * 60 * 1000,
-    ).toISOString();
-
-    const { data, error } = await supabase
-      .from("sources")
-      .select("slug, stats:articles(count)")
-      .eq("active", true)
-      .gte("stats.published_at", sevenDaysAgoIso);
-
-    if (error) {
-      console.warn(`[feed-status] items/day unknown: ${error.message}`);
-      return null;
-    }
-
-    const rows = (data ?? []) as unknown as ItemsPerDayRawRow[];
-    return toItemsPerDayMap(rows);
-  } catch (err) {
-    console.warn(
-      `[feed-status] items/day unknown: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
+  const r = await getSourceItemsPerDayCached();
+  return r.ok ? r.data : null;
 }
 
 /** Raw shape of one row from the `getFeedStatusSummary` select below. */
@@ -413,55 +437,60 @@ export interface FeedStatusSummaryCounts {
   total: number;
 }
 
+// Raw read: THROWS on a Supabase error (see `fetchSourceFeedStatuses`).
+async function fetchFeedStatusSummary(): Promise<FeedStatusSummaryCounts> {
+  const supabase = createServerClient();
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const yieldSince = new Date(nowMs - FEED_YIELD_WINDOW_MS).toISOString();
+
+  const { data, error } = await supabase
+    .from("sources")
+    .select("kind, recent:articles(id)")
+    .eq("active", true)
+    .gte("recent.published_at", yieldSince)
+    // SEC-01: bound the probe on both sides — see the file header.
+    .lte("recent.published_at", nowIso)
+    .limit(1, { referencedTable: "recent" });
+
+  if (error) {
+    throw new Error(`feed status summary query failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as unknown as FeedStatusSummaryRawRow[];
+  let total = 0;
+  let delivering = 0;
+  for (const row of rows) {
+    if (!isVotingKind(row.kind)) continue;
+    total += 1;
+    if ((row.recent?.length ?? 0) > 0) delivering += 1;
+  }
+  return { total, delivering };
+}
+
+// Same shape as `getSourceFeedStatusesCached`: tag, attempt, then one lifetime.
+async function getFeedStatusSummaryCached() {
+  "use cache";
+  cacheTag("sources");
+  const r = await attemptCached("feed-summary", fetchFeedStatusSummary);
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
  * Cheap voting-kind `{ delivering, total }` pair for a DenominatorNote
  * footnote — an existence probe (`recent:articles(id)` +
  * `limit(1, { referencedTable: "recent" })`, the same shape as
  * src/lib/sources/active-count.ts and src/lib/clusters/feed-health.ts),
- * never the `stats:articles(count)` aggregate. Used by /blindspots, which
- * has no per-source rows of its own; /sources derives the same pair for
- * free from rows `getSources()` already fetched instead of calling this
+ * never the `stats:articles(count)` aggregate. Used by /blindspots and /hafta,
+ * which have no per-source rows of their own; /sources derives the same pair
+ * for free from rows `getSources()` already fetched instead of calling this
  * (see src/app/sources/page.tsx). `null` means "unknown" (a Supabase
- * error) — callers must render the wording-without-numbers fallback.
+ * error) — callers must render the wording-without-numbers fallback. Never
+ * throws.
  */
 export async function getFeedStatusSummary(): Promise<FeedStatusSummaryCounts | null> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("sources");
-
-  try {
-    const supabase = createServerClient();
-    const nowMs = Date.now();
-    const nowIso = new Date(nowMs).toISOString();
-    const yieldSince = new Date(nowMs - FEED_YIELD_WINDOW_MS).toISOString();
-
-    const { data, error } = await supabase
-      .from("sources")
-      .select("kind, recent:articles(id)")
-      .eq("active", true)
-      .gte("recent.published_at", yieldSince)
-      // SEC-01: bound the probe on both sides — see the file header.
-      .lte("recent.published_at", nowIso)
-      .limit(1, { referencedTable: "recent" });
-
-    if (error) {
-      console.warn(`[feed-status] summary unknown: ${error.message}`);
-      return null;
-    }
-
-    const rows = (data ?? []) as unknown as FeedStatusSummaryRawRow[];
-    let total = 0;
-    let delivering = 0;
-    for (const row of rows) {
-      if (!isVotingKind(row.kind)) continue;
-      total += 1;
-      if ((row.recent?.length ?? 0) > 0) delivering += 1;
-    }
-    return { total, delivering };
-  } catch (err) {
-    console.warn(
-      `[feed-status] summary unknown: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
+  const r = await getFeedStatusSummaryCached();
+  return r.ok ? r.data : null;
 }

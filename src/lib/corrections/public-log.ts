@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 
 // Fetcher for /duzeltmeler (S-18) — the public, honest log of corrections a
@@ -26,8 +27,15 @@ import { createServerClient } from "@/lib/supabase/server";
 // crowd out recent decisions; `created_at` breaks the remaining ties.
 //
 // Never throws: a throw inside "use cache" during prerender fails the build,
-// so a Supabase hiccup degrades to null (the page renders an honest
-// "unavailable" state) rather than taking the route down.
+// so the read is a raw `fetchPublicCorrections` that throws, wrapped by
+// `attemptCached` inside `getPublicCorrectionsCached`, and a Supabase hiccup
+// degrades to null (the page renders an honest "unavailable" state) rather
+// than taking the route down. The cache lifetime is chosen AFTER the attempt
+// (2026-10-24 /sources '—' incident): a log keeps the 1 h `source-directory`
+// window, a failed read is cached for `minutes` only. (`cacheLife` used to run
+// before the query, so one timeout showed "unavailable" for the whole hour.)
+// No live retry; same shape as src/lib/clusters/timeline-query.ts, guarded by
+// tests/guards/cache-life-after-attempt.test.ts.
 
 /**
  * The only columns that may leave the database for the public log.
@@ -97,39 +105,50 @@ export function shapePublicCorrections(rows: RawCorrectionRow[]): PublicCorrecti
   return shaped;
 }
 
+// Raw read: THROWS on a Supabase error so a failure can never be mistaken for
+// "nothing reviewed yet". Only the error message is carried into the throw,
+// never a row (the reader's message and email stay out of logs).
+async function fetchPublicCorrections(limit: number): Promise<PublicCorrection[]> {
+  const supabase = createServerClient();
+
+  const { data, error } = await supabase
+    .from("corrections")
+    .select(PUBLIC_LOG_SELECT)
+    .eq("status", "reviewed")
+    .order("reviewed_at", { ascending: false, nullsFirst: false })
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`public corrections query failed: ${error.message}`);
+  }
+
+  return shapePublicCorrections((data ?? []) as RawCorrectionRow[]);
+}
+
+// `attemptCached` keeps the throw from crossing the `"use cache"` boundary.
+// Lifetime follows the outcome: a log keeps `source-directory`, a failed
+// attempt is memoised for `minutes` only. `limit` is part of the cache key.
+// Exactly one `cacheLife` call per invocation, after the attempt; `cacheTag`
+// first.
+async function getPublicCorrectionsCached(limit: number) {
+  "use cache";
+  cacheTag("corrections");
+  const r = await attemptCached("corrections-log", () => fetchPublicCorrections(limit));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
  * Reviewed corrections, newest decision first. `null` means "could not read"
  * (the page says so); `[]` means "nothing reviewed yet" (the page says that
- * instead — an empty log is an honest state, not an error).
+ * instead — an empty log is an honest state, not an error). Never throws.
  */
 export async function getPublicCorrections(
   limit = PUBLIC_LOG_LIMIT
 ): Promise<PublicCorrection[] | null> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("corrections");
-
-  try {
-    const supabase = createServerClient();
-
-    const { data, error } = await supabase
-      .from("corrections")
-      .select(PUBLIC_LOG_SELECT)
-      .eq("status", "reviewed")
-      .order("reviewed_at", { ascending: false, nullsFirst: false })
-      .order("created_at", { ascending: false })
-      .limit(limit);
-
-    if (error) {
-      // Never throw — see the file header.
-      console.error(`[corrections] public log unavailable: ${error.message}`);
-      return null;
-    }
-
-    return shapePublicCorrections((data ?? []) as RawCorrectionRow[]);
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    console.error(`[corrections] public log unavailable: ${message}`);
-    return null;
-  }
+  const r = await getPublicCorrectionsCached(limit);
+  return r.ok ? r.data : null;
 }

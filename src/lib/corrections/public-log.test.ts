@@ -9,6 +9,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // The privacy contract is the point of this suite: the reader's `message`
 // and `email` columns must never leave the database, so the select string is
 // pinned both as a constant and as the value the fake actually recorded.
+//
+// 2026-10-24 /sources '—' incident: a failed read used to be cached for the
+// full 1 h `source-directory` life (cacheLife ran before the query). The
+// "cache lifetime" block at the end pins the fix: a failure is memoised for
+// `minutes` only.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -41,6 +46,7 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import { getPublicCorrections, PUBLIC_LOG_SELECT } from "./public-log";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -53,6 +59,8 @@ beforeEach(() => {
   fixture.error = null;
   fixture.lastState = null;
   fixture.throwOnQuery = false;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
@@ -248,5 +256,104 @@ describe("getPublicCorrections", () => {
 
     await expect(getPublicCorrections()).resolves.toBeNull();
     expect(console.error).toHaveBeenCalled();
+  });
+});
+
+describe("getPublicCorrections cache lifetime", () => {
+  it("a Supabase error resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.error = { message: "permission denied for table corrections" };
+
+    await expect(getPublicCorrections()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a thrown query resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.throwOnQuery = true;
+
+    await expect(getPublicCorrections()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("missing Supabase env resolves null and is cached for minutes only", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getPublicCorrections()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("logs a failed attempt once through attemptCached, without the reader's message or email", async () => {
+    fixture.error = { message: "connection refused" };
+
+    await getPublicCorrections();
+
+    expect(console.error).toHaveBeenCalledTimes(1);
+    const logged = String(vi.mocked(console.error).mock.calls[0]![0]);
+    expect(logged).toMatch(/^\[[a-z-]+\] error: .*connection refused/);
+    expect(logged).not.toMatch(/email|message/i);
+  });
+
+  it("success returns the rows and is cached for source-directory, once", async () => {
+    fixture.data = [
+      {
+        id: "c1",
+        cluster_id: "k1",
+        created_at: "2026-09-10T08:00:00.000Z",
+        reviewed_at: "2026-09-11T09:30:00.000Z",
+        cluster: { id: "k1", title_tr: "Ham", title_tr_neutral: "Nötr" },
+      },
+    ];
+
+    const rows = await getPublicCorrections();
+
+    expect(rows).toHaveLength(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("an empty successful log returns [] (not null) and keeps source-directory", async () => {
+    fixture.data = [];
+
+    await expect(getPublicCorrections()).resolves.toEqual([]);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("tags the entry 'corrections' before cacheLife runs (cacheTag precedes cacheLife), on success and failure", async () => {
+    await getPublicCorrections();
+    expect(cacheTag).toHaveBeenCalledWith("corrections");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+
+    vi.mocked(cacheTag).mockClear();
+    vi.mocked(cacheLife).mockClear();
+    fixture.error = { message: "boom" };
+    await getPublicCorrections();
+    expect(cacheTag).toHaveBeenCalledWith("corrections");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("the limit stays an argument of the cached read (an explicit limit reaches the query on both outcomes)", async () => {
+    await getPublicCorrections(7);
+    expect(state().limit).toBe(7);
+
+    fixture.error = { message: "boom" };
+    await expect(getPublicCorrections(7)).resolves.toBeNull();
+    expect(state().limit).toBe(7);
+    expect(cacheLife).toHaveBeenLastCalledWith("minutes");
   });
 });

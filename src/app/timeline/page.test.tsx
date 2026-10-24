@@ -5,19 +5,25 @@ import type { ReactNode } from "react";
 // /timeline failed state. Same harness as src/app/hafta/page.test.tsx: mock the
 // data module and call the default export as a plain async function.
 //
-// getRecentClusters now returns null when the read failed (it used to throw
-// out of "use cache"). The page must say so honestly -- not "0 haber kümesi",
+// getRecentClusters returns null when the read failed (it used to throw
+// out of "use cache"), else { rows, total }: `total` is the real count of
+// qualifying clusters (article_count >= 2) minted in the window, or null when
+// the count read failed. The page must say so honestly -- not "0 haber kümesi",
 // not "yeni küme oluşturulmadı" -- and must NOT emit noindex: the route is
 // static and its failure is cached for "minutes", the same rule as /trends,
 // so a noindex baked into the shell would outlive the outage in crawlers.
+// The subtitle never claims a number it did not read: when the list is capped
+// (rows < total) it names both, and when the total is unknown it says
+// "en yeni N küme" instead of presenting the capped length as the day's count.
 // ---------------------------------------------------------------------------
 
 const mocks = vi.hoisted(() => ({
-  rows: null as unknown,
+  /** null (read failed) or { rows, total } exactly as getRecentClusters resolves. */
+  result: null as unknown,
 }));
 
 vi.mock("@/lib/clusters/timeline-query", () => ({
-  getRecentClusters: () => Promise.resolve(mocks.rows),
+  getRecentClusters: () => Promise.resolve(mocks.result),
 }));
 
 import { PageHero } from "@/components/ui/page-hero";
@@ -81,13 +87,25 @@ function findParagraph(tree: unknown, text: string): El | null {
   return hit;
 }
 
+function mkRows(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `c${i}`,
+    title_tr: `Küme ${i}`,
+    title_tr_neutral: null,
+    article_count: 2,
+    first_published: new Date(
+      Date.UTC(2026, 8, 18, 10, 0, 0) - i * 60_000,
+    ).toISOString(),
+  }));
+}
+
 beforeEach(() => {
-  mocks.rows = null;
+  mocks.result = null;
 });
 
 describe("/timeline", () => {
   it("null (read failed): unavailable copy, count-free subtitle, no noindex", async () => {
-    mocks.rows = null;
+    mocks.result = null;
 
     const tree = await TimelinePage();
 
@@ -102,8 +120,8 @@ describe("/timeline", () => {
     expect(hasRobotsMeta(tree)).toBe(false);
   });
 
-  it("[] (read fine, nothing minted): the empty copy, not the unavailable one", async () => {
-    mocks.rows = [];
+  it("no rows (read fine, nothing minted): the empty copy, not the unavailable one", async () => {
+    mocks.result = { rows: [], total: 0 };
 
     const tree = await TimelinePage();
 
@@ -114,23 +132,37 @@ describe("/timeline", () => {
     );
   });
 
-  it("rows: the count subtitle and the hour sections, no unavailable copy", async () => {
-    mocks.rows = [
-      {
-        id: "c1",
-        title_tr: "Bir",
-        title_tr_neutral: null,
-        article_count: 3,
-        first_published: "2026-09-18T10:05:00.000Z",
-      },
-      {
-        id: "c2",
-        title_tr: "İki",
-        title_tr_neutral: "İki nötr",
-        article_count: 2,
-        first_published: "2026-09-18T10:40:00.000Z",
-      },
-    ];
+  it("no rows and an unknown total: still the plain 0 copy, never 'en yeni 0'", async () => {
+    mocks.result = { rows: [], total: null };
+
+    const tree = await TimelinePage();
+
+    expect(subtitleOf(tree)).toBe(
+      "Son 24 saatte oluşturulan 0 haber kümesi, saat saat sıralandı.",
+    );
+    expect(findParagraph(tree, EMPTY_COPY)).not.toBeNull();
+  });
+
+  it("rows with total === rows.length: the count subtitle and the hour sections, no unavailable copy", async () => {
+    mocks.result = {
+      rows: [
+        {
+          id: "c1",
+          title_tr: "Bir",
+          title_tr_neutral: null,
+          article_count: 3,
+          first_published: "2026-09-18T10:05:00.000Z",
+        },
+        {
+          id: "c2",
+          title_tr: "İki",
+          title_tr_neutral: "İki nötr",
+          article_count: 2,
+          first_published: "2026-09-18T10:40:00.000Z",
+        },
+      ],
+      total: 2,
+    };
 
     const tree = await TimelinePage();
 
@@ -141,5 +173,29 @@ describe("/timeline", () => {
     expect(text).not.toContain(UNAVAILABLE_COPY);
     expect(text).toContain("İki nötr");
     expect(hasRobotsMeta(tree)).toBe(false);
+  });
+
+  it("unknown total (count read failed) with rows: 'en yeni N küme', never the capped length as the day's count", async () => {
+    mocks.result = { rows: mkRows(3), total: null };
+
+    const tree = await TimelinePage();
+
+    expect(subtitleOf(tree)).toBe(
+      "Son 24 saatte oluşturulan en yeni 3 küme, saat saat sıralandı.",
+    );
+    expect(subtitleOf(tree)).not.toContain("haber kümesi");
+    expect(hasRobotsMeta(tree)).toBe(false);
+  });
+
+  it("capped list (rows < total): names the real total and how many are shown", async () => {
+    mocks.result = { rows: mkRows(200), total: 234 };
+
+    const tree = await TimelinePage();
+
+    expect(subtitleOf(tree)).toBe(
+      "Son 24 saatte oluşturulan 234 haber kümesinin en yeni 200 tanesi, saat saat sıralandı.",
+    );
+    expect(hasRobotsMeta(tree)).toBe(false);
+    expect(collectText(tree).join("")).not.toContain(UNAVAILABLE_COPY);
   });
 });

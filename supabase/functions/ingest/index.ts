@@ -24,10 +24,16 @@
 //      113) is already stored for the same source under a DIFFERENT url -- an
 //      outlet that edits a headline publishes the same article under a new
 //      slug, and that used to become a second row. The twin is not inserted;
-//      its new headline goes through the title-version path instead. The
-//      cycle reports two counters for it: `twinsDroppedStored` (the real twin
-//      prevention) and `twinsDroppedIntraFeed` (the same key twice in one feed,
-//      re-counted on every re-parse of a long feed). The
+//      its new headline goes through the title-version path instead. A shared
+//      id alone is not enough: some CMSs reuse an id for a different story, so
+//      the headlines must also share words (word-Jaccard >= 0.2, the gate of
+//      the SQL write-back; see _shared/rss/title-jaccard.ts) or the row is a
+//      distinct story and is kept. The cycle reports four counters for it:
+//      `twinsDroppedStored` (the real twin prevention), `twinsDroppedIntraFeed`
+//      (the same key twice in one feed, re-counted on every re-parse of a long
+//      feed), `twinsKeptDistinct` (same key, unrelated headline, stored) and
+//      `twinsKeyCapped` (an id repeated past MAX_KEPT_TITLES_PER_KEY in one
+//      feed: kept, no longer compared, so the gate's CPU stays bounded). The
 //      `AFTER INSERT ON articles` trigger (migration 025) takes over from here
 //      to enqueue `cluster_work` and `image_backfill` messages.
 //   5. Persists per-source fetch state. The fresh validators (ETag,
@@ -65,6 +71,11 @@ import type { FeedFreshness } from "../_shared/rss/feed-freshness.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
 import { canonicalizeUrl, normalizeArticles } from "../_shared/rss/normalize.ts";
 import { sourceArticleKeyFor } from "../_shared/rss/article-key.ts";
+import {
+  TITLE_TWIN_MIN_JACCARD,
+  jaccardOfSets,
+  titleTokens,
+} from "../_shared/rss/title-jaccard.ts";
 import {
   isQuarantined,
   nextQuarantineState,
@@ -107,6 +118,22 @@ const PREFILTER_CHUNK = 100;
 // feed within hours; a week keeps the lookup on recent index pages only and
 // bounds the cost (the lookup rides the partial index of migration 113).
 const TWIN_WINDOW_MS = 7 * 24 * 3_600_000;
+// CPU bound of the twin title gate. The source article key is the last digit
+// run of the last path segment of an item url, so it is chosen by the feed
+// (a CMS bug, or a hostile or tampered feed, can repeat one id on thousands of
+// items with unrelated headlines). Comparing every such item with every kept
+// one is quadratic and a CPU-killed cycle (546) writes nothing, for every
+// source. So per (source, key) at most this many headlines are tracked and
+// compared: in the feed loop (the first ones kept) and against the stored
+// matches (the earliest by created_at). An id repeated more often than this is
+// not a usable twin signal; the extra items are kept as distinct stories
+// (`twinsKeyCapped`), which is what a url with no key gets.
+export const MAX_KEPT_TITLES_PER_KEY = 8;
+// Row cap of the stored (source_id, source_article_key) lookup: a slice is
+// PREFILTER_CHUNK keys, each with at most MAX_KEPT_TITLES_PER_KEY matches that
+// are ever compared. The lookup is ordered by created_at ascending, so what
+// the limit cuts is the newest of a pathological pile-up.
+export const KEY_LOOKUP_LIMIT = PREFILTER_CHUNK * MAX_KEPT_TITLES_PER_KEY;
 // Wall-clock safety. Edge Functions allow ≤400 s; we cap well below so a
 // pathological tail can't push us past the slot. The Vercel cron retries
 // every 3 min so partial progress is harmless. The fetch pool gets the
@@ -329,13 +356,15 @@ interface CycleStats {
   // line and HTTP JSON only: there is no `ingest_cycles` column for it.
   validatorsWithheld: number;
   // Twin-articles (migration 113). Summary line and HTTP JSON only: there is
-  // no `ingest_cycles` column for any of the three counters below.
+  // no `ingest_cycles` column for any of the counters below.
   //
   // `twinsDroppedStored`: the key is already stored for the source under
-  // another url within the 7-day window (a headline edit). This is the real
-  // twin prevention of #128.
+  // another url within the 7-day window, with a headline that shares words
+  // with the new one (a headline edit). This is the real twin prevention of
+  // #128.
   twinsDroppedStored: number;
-  // `twinsDroppedIntraFeed`: a later item of the same feed with the same key;
+  // `twinsDroppedIntraFeed`: a later item of the same feed with the same key
+  // and a headline that shares words with an earlier kept one of this cycle;
   // the first one stands. This check runs before any stored lookup, so a long
   // feed that is parsed again re-counts pairs that are already stored. That is
   // why it is high at night and is not a #128 signal.
@@ -343,6 +372,19 @@ interface CycleStats {
   // `twinsDropped`: the sum of the two above. It stays for one release for
   // dashboards and log queries and goes in the next ingest release.
   twinsDropped: number;
+  // `twinsKeptDistinct`: rows that share a key with another row (a stored one,
+  // or an earlier item of this cycle) but whose headline shares no words with
+  // it: the CMS reused the id for a different story, so the row is stored
+  // instead of being dropped as a twin. Counted per row and per path, so one
+  // item can add to it in the feed check and again in the stored check.
+  // Summary line and HTTP JSON only: no `ingest_cycles` column.
+  twinsKeptDistinct: number;
+  // `twinsKeyCapped`: items of one feed whose (source, key) already tracks
+  // MAX_KEPT_TITLES_PER_KEY headlines this cycle and which matched none of
+  // them: kept (stored) without being tracked, so the id repeated that often
+  // costs a bounded amount of CPU (see MAX_KEPT_TITLES_PER_KEY). Not counted in
+  // `twinsKeptDistinct`. Normally 0. Summary line and HTTP JSON only.
+  twinsKeyCapped: number;
   // Parse budget: changed feeds this cycle refused a parse because the cycle
   // already used its MAX_PARSES_PER_CYCLE / PARSE_BUDGET_BYTES. Not failures:
   // they are retried first next cycle. Summary line and HTTP JSON only.
@@ -498,7 +540,8 @@ async function dropExistingSourceContentHashRows(
 // miss that: the upsert conflicts on `url` (new) and `content_hash` changes
 // with the title. `source_article_key` is that id; a re-polled item whose
 // (source_id, key) is already stored under a DIFFERENT url is a twin of the
-// stored article.
+// stored article -- provided the headlines share words (see the title gate
+// below).
 //
 // Only keyed rows are looked up (a null key has nothing to match), in slices
 // of PREFILTER_CHUNK like the content-hash pre-filter, against the partial
@@ -506,10 +549,27 @@ async function dropExistingSourceContentHashRows(
 // product, so the exact (source_id, key) pair is matched client-side. A row is
 // kept when no stored row has its pair, or when ANY stored row with that pair
 // has its own url (the normal re-poll: the url upsert ignores the duplicate).
-// Otherwise it is a twin, and the stored article it duplicates is the match
-// with the earliest created_at. A failing lookup degrades only its own slice
-// (those rows are kept, fail-open) and is counted in `lookupErrors`, which
-// the caller adds to `stats.prefilterErrors`.
+//
+// Title gate (ingest-gates). A shared id is not proof of a shared article:
+// some CMSs reuse a numeric id for a different story (aksam 1708103, odatv
+// 120168027 and yenicag 1084546 on 2026-10-24: the row and the stored article
+// shared no word at all), and dropping those rows ate real stories. So of the
+// matches with another url only those whose headline shares words with the
+// row's count (word-Jaccard >= TITLE_TWIN_MIN_JACCARD, the same gate as
+// the SQL headline write-back). With none, the row is a distinct story: kept,
+// and counted in `keptDistinct`. Otherwise it is a twin, and the stored
+// article it duplicates is the match with the earliest created_at AMONG THE
+// PASSING ones (not among all of them: an earlier unrelated match must not
+// take the headline edit).
+//
+// CPU bound: the key comes from an untrusted url, and a reused key piles up
+// stored rows over the window. The lookup is ordered by created_at and limited
+// to KEY_LOOKUP_LIMIT rows, and a row is compared against at most the
+// MAX_KEPT_TITLES_PER_KEY EARLIEST matches of its pair, each tokenized once
+// (the same-url re-poll check still sees every returned match). A failing
+// lookup degrades only its own slice (those
+// rows are kept, fail-open) and is counted in `lookupErrors`, which the caller
+// adds to `stats.prefilterErrors`.
 
 export interface ExistingKeyedArticle {
   id: string;
@@ -521,7 +581,12 @@ export interface ExistingKeyedArticle {
 }
 
 export async function dropExistingSourceArticleKeyRows<
-  T extends { source_id: string; url: string; source_article_key: string | null },
+  T extends {
+    source_id: string;
+    url: string;
+    title: string;
+    source_article_key: string | null;
+  },
 >(
   supabase: ReturnType<typeof createServiceClient>,
   rows: readonly T[],
@@ -530,12 +595,18 @@ export async function dropExistingSourceArticleKeyRows<
   rows: T[];
   twins: Array<{ row: T; existing: ExistingKeyedArticle }>;
   lookupErrors: number;
+  // Rows kept although another url is stored under their (source_id, key):
+  // none of those headlines shares words with the row's (an id reuse).
+  keptDistinct: number;
 }> {
   const keyed = rows.filter((r) => r.source_article_key !== null);
-  if (keyed.length === 0) return { rows: [...rows], twins: [], lookupErrors: 0 };
+  if (keyed.length === 0) {
+    return { rows: [...rows], twins: [], lookupErrors: 0, keptDistinct: 0 };
+  }
 
   const twinOf = new Map<T, ExistingKeyedArticle>();
   let lookupErrors = 0;
+  let keptDistinct = 0;
   for (let i = 0; i < keyed.length; i += PREFILTER_CHUNK) {
     const slice = keyed.slice(i, i + PREFILTER_CHUNK);
     const sourceIds = [...new Set(slice.map((r) => r.source_id))];
@@ -548,7 +619,9 @@ export async function dropExistingSourceArticleKeyRows<
         .select("id, url, title, source_id, source_article_key, created_at")
         .in("source_id", sourceIds)
         .in("source_article_key", keys)
-        .gte("created_at", sinceIso);
+        .gte("created_at", sinceIso)
+        .order("created_at", { ascending: true })
+        .limit(KEY_LOOKUP_LIMIT);
       if (error) {
         console.error(`[ingest] existing (source_id, source_article_key) lookup failed: ${error.message}`);
         lookupErrors++;
@@ -562,20 +635,56 @@ export async function dropExistingSourceArticleKeyRows<
     }
     if (found.length === 0) continue;
 
-    const byPair = new Map<string, ExistingKeyedArticle[]>();
+    // Per (source, key): every url seen (the normal re-poll check must see ALL
+    // matches), and the EARLIEST MAX_KEPT_TITLES_PER_KEY matches with their
+    // headline tokenized once. Rows are compared against that bounded list
+    // only, however many matches a reused key has piled up.
+    const byPair = new Map<
+      string,
+      {
+        urls: Set<string>;
+        earliest: Array<{ match: ExistingKeyedArticle; tokens: ReadonlySet<string> }>;
+      }
+    >();
+    const createdMs = (e: ExistingKeyedArticle): number => {
+      const ms = Date.parse(e.created_at);
+      return Number.isNaN(ms) ? Number.POSITIVE_INFINITY : ms;
+    };
+    const grouped = new Map<string, ExistingKeyedArticle[]>();
     for (const e of found) {
       const pair = `${e.source_id}\x1f${e.source_article_key}`;
-      const list = byPair.get(pair);
+      const list = grouped.get(pair);
       if (list) list.push(e);
-      else byPair.set(pair, [e]);
+      else grouped.set(pair, [e]);
+    }
+    for (const [pair, list] of grouped) {
+      const earliest = [...list]
+        .sort((a, b) => {
+          const x = createdMs(a);
+          const y = createdMs(b);
+          return x < y ? -1 : x > y ? 1 : 0;
+        })
+        .slice(0, MAX_KEPT_TITLES_PER_KEY)
+        .map((match) => ({ match, tokens: titleTokens(match.title) }));
+      byPair.set(pair, { urls: new Set(list.map((e) => e.url)), earliest });
     }
     for (const row of slice) {
-      const matches = byPair.get(`${row.source_id}\x1f${row.source_article_key}`);
-      if (!matches || matches.length === 0) continue;
-      if (matches.some((m) => m.url === row.url)) continue;
-      let earliest = matches[0] as ExistingKeyedArticle;
-      for (const m of matches) {
-        if (Date.parse(m.created_at) < Date.parse(earliest.created_at)) earliest = m;
+      const candidates = byPair.get(`${row.source_id}\x1f${row.source_article_key}`);
+      if (!candidates) continue;
+      if (candidates.urls.has(row.url)) continue;
+      const rowTokens = titleTokens(row.title);
+      // The list is ordered earliest first, so the first passing match is the
+      // earliest PASSING one.
+      let earliest: ExistingKeyedArticle | null = null;
+      for (const c of candidates.earliest) {
+        if (jaccardOfSets(rowTokens, c.tokens) >= TITLE_TWIN_MIN_JACCARD) {
+          earliest = c.match;
+          break;
+        }
+      }
+      if (earliest === null) {
+        keptDistinct++;
+        continue;
       }
       twinOf.set(row, earliest);
     }
@@ -588,7 +697,7 @@ export async function dropExistingSourceArticleKeyRows<
     if (existing) twins.push({ row, existing });
     else kept.push(row);
   }
-  return { rows: kept, twins, lookupErrors };
+  return { rows: kept, twins, lookupErrors, keptDistinct };
 }
 
 // ---------------------------------------------------------------------------
@@ -995,6 +1104,8 @@ async function runCycle(): Promise<CycleStats> {
     twinsDroppedStored: 0,
     twinsDroppedIntraFeed: 0,
     twinsDropped: 0,
+    twinsKeptDistinct: 0,
+    twinsKeyCapped: 0,
     parseDeferred: 0,
     parseDeferredMaxStreak: 0,
     parsedBytes: 0,
@@ -1118,6 +1229,16 @@ async function runCycleBody(
   // article inside one feed collapse before the upsert. Keyed by
   // `${source_id}\x1f${content_hash}`.
   const seenIntraCycle = new Set<string>();
+  // Twin-articles (migration 113): the headlines of the rows KEPT so far this
+  // cycle per `${source_id}\x1fk\x1f${source_article_key}`. A later item with
+  // the same key is a twin only when its headline shares words with one of
+  // them (word-Jaccard >= TITLE_TWIN_MIN_JACCARD); an unrelated one is a
+  // different story under a reused id and is kept (and added to the list).
+  // Created per cycle, so nothing outlives it.
+  // At most MAX_KEPT_TITLES_PER_KEY tokenized headlines per key: the feed is
+  // untrusted input and an id repeated on thousands of items must not make the
+  // gate quadratic.
+  const keptTitlesByKey = new Map<string, Array<ReadonlySet<string>>>();
   // silent-feeds: sources that produced rows this cycle. Their fresh
   // validators are parked here (never in `fetchStateUpdates`) until the upsert
   // phase shows whether every row landed.
@@ -1278,6 +1399,8 @@ async function runCycleBody(
 
       let pushed = 0;
       let intraFeedTwins = 0;
+      let intraFeedKeptDistinct = 0;
+      let intraFeedKeyCapped = 0;
       for (const row of normalized) {
         const key = `${row.source_id}\x1f${row.content_hash}`;
         if (seenIntraCycle.has(key)) continue;
@@ -1285,18 +1408,33 @@ async function runCycleBody(
         // Twin-articles (migration 113): the outlet's numeric article id from
         // the url. A second row of this feed with the same key is the same
         // article under an edited headline (new slug): skip it, the first one
-        // stands. Null (no id in the url, or an excluded slug) is never
+        // stands -- unless its headline shares no words with ANY kept one, in
+        // which case the CMS reused the id for another story and the item is
+        // kept too. Null (no id in the url, or an excluded slug) is never
         // tracked, so it can never merge two rows.
         const articleKey = sourceArticleKeyFor(source.slug, row.url);
         if (articleKey !== null) {
           const twinKey = `${row.source_id}\x1fk\x1f${articleKey}`;
-          if (seenIntraCycle.has(twinKey)) {
+          const rowTokens = titleTokens(row.title);
+          const keptTitles = keptTitlesByKey.get(twinKey);
+          if (keptTitles === undefined) {
+            keptTitlesByKey.set(twinKey, [rowTokens]);
+          } else if (
+            keptTitles.some((t) => jaccardOfSets(rowTokens, t) >= TITLE_TWIN_MIN_JACCARD)
+          ) {
             stats.twinsDroppedIntraFeed++;
             stats.twinsDropped++;
             intraFeedTwins++;
             continue;
+          } else if (keptTitles.length < MAX_KEPT_TITLES_PER_KEY) {
+            keptTitles.push(rowTokens);
+            stats.twinsKeptDistinct++;
+            intraFeedKeptDistinct++;
+          } else {
+            // The key already tracks its maximum: kept, not tracked.
+            stats.twinsKeyCapped++;
+            intraFeedKeyCapped++;
           }
-          seenIntraCycle.add(twinKey);
         }
         // Additive: canonicalizeUrl never throws (it catches internally and
         // falls back to the raw URL), so this is always a string in
@@ -1312,6 +1450,19 @@ async function runCycleBody(
       if (intraFeedTwins > 0) {
         // Slug and count only: never a url or a headline.
         console.log(`[ingest] ${source.slug}: ${intraFeedTwins} intra-feed twin(s)`);
+      }
+      if (intraFeedKeptDistinct > 0) {
+        // Slug and count only: never a url or a headline.
+        console.log(
+          `[ingest] ${source.slug}: ${intraFeedKeptDistinct} same-id item(s) kept, headline unrelated`,
+        );
+      }
+
+      if (intraFeedKeyCapped > 0) {
+        // Slug and count only: never a url or a headline.
+        console.log(
+          `[ingest] ${source.slug}: ${intraFeedKeyCapped} item(s) kept past the per-id headline cap (${MAX_KEPT_TITLES_PER_KEY})`,
+        );
       }
 
       if (pushed === 0) {
@@ -1406,12 +1557,16 @@ async function runCycleBody(
         lookupErrors,
       } = await dropExistingSourceContentHashRows(supabase, intraDeduped);
       // Then the twins (migration 113): a row whose (source_id,
-      // source_article_key) is already stored under a different url is the
-      // same article under an edited headline -- it is not inserted.
+      // source_article_key) is already stored under a different url, with a
+      // headline that shares words with the row's, is the same article under
+      // an edited headline -- it is not inserted. A same-key row with an
+      // unrelated headline is a different story under a reused id: it stays in
+      // `chunk` and counts as `keptDistinct`.
       const {
         rows: chunk,
         twins,
         lookupErrors: twinLookupErrors,
+        keptDistinct,
       } = await dropExistingSourceArticleKeyRows(supabase, afterContentHash, twinSinceIso);
       const deduped = intraDeduplicated + crossDeduplicated;
       if (deduped > 0) {
@@ -1429,6 +1584,13 @@ async function runCycleBody(
         // Count only: never the url or the headline.
         console.log(
           `[ingest] dropped ${twins.length} twin row(s) sharing (source_id, source_article_key) with a stored article in chunk ${i}-${i + rawChunk.length}`,
+        );
+      }
+      if (keptDistinct > 0) {
+        stats.twinsKeptDistinct += keptDistinct;
+        // Count only: never the url or the headline.
+        console.log(
+          `[ingest] kept ${keptDistinct} row(s) sharing (source_id, source_article_key) with a stored article but an unrelated headline in chunk ${i}-${i + rawChunk.length}`,
         );
       }
       // The dedupe passes and the twin drop together removed everything in

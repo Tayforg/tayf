@@ -11,6 +11,7 @@ import {
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { resolveCachedOrRetry } from "@/lib/cache-resilience";
 import { createReaderClient } from "@/lib/supabase/server";
+import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { siteUrl } from "@/lib/site-url";
 
 // Topic-hub read for /konu and /konu/[slug] (Pack C, "Konu", migration 067's
@@ -113,6 +114,10 @@ async function fetchTopicClusters(
       .eq("is_archived", false)
       .eq("topic7", slug)
       .gte("updated_at", sinceIso)
+      // The site's own cluster definition: a story needs at least two
+      // articles (same rule as /clusters and the timeline). Without it a hub
+      // listed single-article rows the rest of the site hides.
+      .gte("article_count", 2)
       .order("updated_at", { ascending: false })
       // Tiebreaker: clusters.updated_at is stamped now() by cluster_link_atomic
       // (migration 027), so members linked in one transaction can share a
@@ -201,7 +206,10 @@ async function fetchTopicCounts(): Promise<Record<TopicSlug, number> | null> {
           .select("id", { count: "exact", head: true })
           .eq("is_archived", false)
           .eq("topic7", slug)
-          .gte("updated_at", sinceIso),
+          .gte("updated_at", sinceIso)
+          // Same definition as fetchTopicClusters, so the index page's
+          // "N küme" equals what the hub renders.
+          .gte("article_count", 2),
       ),
     );
 
@@ -298,25 +306,42 @@ export function buildTopicCollectionPage(args: {
   };
 }
 
-/** Pure. The exact Metadata object /konu/[slug] exports. */
-export function topicMetadata(slug: TopicSlug): Metadata {
+/** Pure. The exact Metadata object /konu/[slug] exports.
+ *
+ *  Built with staticPageMetadata() so the hub has its own og:* / twitter:*
+ *  identity: a page-level `openGraph` / `twitter` REPLACES the parent's
+ *  resolved object wholesale (root file-convention images included), so the
+ *  site share card must be named explicitly, and a hub that left them unset
+ *  unfurled with the homepage's og:url "/" and title. Deliberately no `robots`
+ *  key: omitting it lets the root layout's `index: true, follow: true`
+ *  inherit.
+ *
+ *  `page` > 1 makes the canonical and og:url self-referencing
+ *  (`?sayfa=N`), so pages 2+ are not read as duplicates of page 1. The
+ *  caller passes the already-parsed page; it is clamped again here so a
+ *  hand-built value can never mint an out-of-range canonical. */
+export function topicMetadata(slug: TopicSlug, page = 1): Metadata {
   const label = TOPIC_LABELS_TR[slug];
+  const path = `/konu/${slug}`;
 
-  return {
-    // Plain title — the root layout's `title.template = "%s — Tayf"` adds
-    // the suffix automatically, rendering "Dünya haberleri — Tayf". The
-    // package spec's literal "Dünya haberleri | Tayf" predates that
-    // template; a hard-coded pipe would be the only page on the site using
-    // one, so the template supplies the brand instead (flagged deviation,
-    // see the pack report).
+  // Plain title — the root layout's `title.template = "%s — Tayf"` adds the
+  // suffix automatically, rendering "Dünya haberleri — Tayf" (og:/twitter:
+  // titles get the suffix from staticPageMetadata itself).
+  const meta = staticPageMetadata({
     title: `${label} haberleri`,
     description: `Son 7 günde ${label} başlığı altında kümelenen haberler. Konu etiketleri otomatik atanır (Jev, eşik 0,8).`,
-    alternates: { canonical: `/konu/${slug}` },
-    // Deliberately no `openGraph.images` / `twitter.images` key at all —
-    // setting one silently disables Next's file-convention
-    // `opengraph-image.tsx` (see the seo-3 note in
-    // src/app/cluster/[id]/page.tsx:93-114). Deliberately no `robots` key
-    // either — omitting it lets the root layout's `index: true, follow:
-    // true` inherit.
+    path,
+  });
+
+  const clamped = clampTopicPage(page);
+  if (clamped === 1) return meta;
+
+  // staticPageMetadata's PATH_RE forbids a query string, so the paged URL is
+  // applied AFTER the call.
+  const pagedPath = `${path}?sayfa=${clamped}`;
+  return {
+    ...meta,
+    alternates: { ...meta.alternates, canonical: pagedPath },
+    openGraph: { ...meta.openGraph, url: pagedPath },
   };
 }

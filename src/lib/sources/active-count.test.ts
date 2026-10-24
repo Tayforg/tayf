@@ -8,6 +8,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // `{ referencedTable }` options object — so the query-shape test below
 // wraps `from()`'s return value to record every method call (name + raw
 // args) and asserts on that instead of on `BuilderState`.
+//
+// 2026-10-24 /sources '—' incident: a failed read used to be cached for the
+// full 1 h `source-directory` life (cacheLife ran before the query), hiding
+// the footer chip for an hour. The "cache lifetime" block pins the fix.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -19,6 +23,8 @@ const fixture = vi.hoisted(() => ({
   data: [] as unknown[],
   error: null as { message: string } | null,
   lastState: null as unknown,
+  // a query that throws (client blew up) instead of answering with an error
+  throwOnQuery: false,
 }));
 
 const tracker = vi.hoisted(() => {
@@ -50,6 +56,7 @@ const supabaseFake = await vi.hoisted(async () => {
     tables: {
       sources: (state: unknown) => {
         fixture.lastState = state;
+        if (fixture.throwOnQuery) throw new Error("connection reset");
         return { data: fixture.data, error: fixture.error };
       },
     },
@@ -64,6 +71,7 @@ vi.mock("@supabase/supabase-js", () => ({
   }),
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import {
   countDeliveringSources,
   getDeliveringSourceCount,
@@ -79,10 +87,16 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  fixture.throwOnQuery = false;
   tracker.calls.length = 0;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
+  // attemptCached logs every failed attempt with console.error
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -142,5 +156,95 @@ describe("getDeliveringSourceCount", () => {
     fixture.error = { message: "canceling statement due to statement timeout" };
 
     await expect(getDeliveringSourceCount()).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cache lifetime: `cacheLife` is chosen AFTER the query ran. A failed read is
+// memoised for `minutes`, a success (even zero delivering sources) for the
+// `source-directory` window. `null` stays the "unknown" contract: the footer
+// hides the chip rather than showing a wrong number.
+// ---------------------------------------------------------------------------
+
+describe("getDeliveringSourceCount cache lifetime", () => {
+  it("a Supabase error resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+
+    await expect(getDeliveringSourceCount()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a thrown query resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.throwOnQuery = true;
+
+    await expect(getDeliveringSourceCount()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("missing Supabase env resolves null and is cached for minutes only", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getDeliveringSourceCount()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("logs a failed attempt once through attemptCached ('[label] error: ...')", async () => {
+    fixture.error = { message: "connection refused" };
+
+    await getDeliveringSourceCount();
+
+    expect(console.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(console.error).mock.calls[0]![0]).toMatch(
+      /^\[[a-z-]+\] error: .*connection refused/,
+    );
+  });
+
+  it("success returns the count and is cached for source-directory, once", async () => {
+    fixture.data = [
+      { id: "s1", recent: [{ id: "a1" }] },
+      { id: "s2", recent: [] },
+    ];
+
+    await expect(getDeliveringSourceCount()).resolves.toBe(1);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("an empty successful read returns 0 (not null) and keeps source-directory", async () => {
+    fixture.data = [];
+
+    await expect(getDeliveringSourceCount()).resolves.toBe(0);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("tags the entry 'sources' before cacheLife runs (cacheTag precedes cacheLife), on success and failure", async () => {
+    await getDeliveringSourceCount();
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+
+    vi.mocked(cacheTag).mockClear();
+    vi.mocked(cacheLife).mockClear();
+    fixture.error = { message: "boom" };
+    await getDeliveringSourceCount();
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
   });
 });

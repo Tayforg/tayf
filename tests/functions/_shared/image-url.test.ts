@@ -94,6 +94,133 @@ describe("normalizeImageUrl", () => {
 });
 
 // ---------------------------------------------------------------------------
+// file:// image URLs (Hurriyet, 2026-10-24): the feed's <img src> sometimes
+// reads `file://image.hurimg.com/i/hurriyet/75/620x350/<id>.jpg`, a path
+// copied from a local editor. The publisher's CDN serves the same path over
+// https. A `file:` URL is never loadable in a browser, so the only safe
+// healing is: a dotted DNS host with nothing else in the authority becomes
+// https, everything else (a local path, localhost, an IP, userinfo, a port)
+// stays rejected. The rewrite is a string rewrite -- no URL re-serialisation.
+// ---------------------------------------------------------------------------
+
+describe("normalizeImageUrl: file:// scheme", () => {
+  it("heals a file:// URL on a DNS host to https", () => {
+    expect(
+      normalizeImageUrl(
+        "file://image.hurimg.com/i/hurriyet/75/620x350/6ad8d7b322393fcfc7d3c38b.jpg",
+      ),
+    ).toBe("https://image.hurimg.com/i/hurriyet/75/620x350/6ad8d7b322393fcfc7d3c38b.jpg");
+  });
+
+  it("matches the scheme case-insensitively", () => {
+    expect(normalizeImageUrl("FILE://image.hurimg.com/a.jpg")).toBe(
+      "https://image.hurimg.com/a.jpg",
+    );
+    expect(normalizeImageUrl("File://image.hurimg.com/a.jpg")).toBe(
+      "https://image.hurimg.com/a.jpg",
+    );
+  });
+
+  it("keeps the host's case (a string rewrite, not a URL re-serialisation)", () => {
+    expect(normalizeImageUrl("file://Image.HURIMG.com/A.jpg")).toBe(
+      "https://Image.HURIMG.com/A.jpg",
+    );
+  });
+
+  it("trims surrounding whitespace before looking at the scheme", () => {
+    expect(normalizeImageUrl("  file://image.hurimg.com/a.jpg \n")).toBe(
+      "https://image.hurimg.com/a.jpg",
+    );
+  });
+
+  it("collapses a doubled leading path slash after the rewrite", () => {
+    expect(normalizeImageUrl("file://image.hurimg.com//a.jpg")).toBe(
+      "https://image.hurimg.com/a.jpg",
+    );
+  });
+
+  it("keeps the query string and hash byte for byte", () => {
+    expect(normalizeImageUrl("file://image.hurimg.com/a.jpg?x=1&y=%20z#frag")).toBe(
+      "https://image.hurimg.com/a.jpg?x=1&y=%20z#frag",
+    );
+    expect(normalizeImageUrl("file://image.hurimg.com?x=1")).toBe(
+      "https://image.hurimg.com?x=1",
+    );
+    expect(normalizeImageUrl("file://image.hurimg.com#top")).toBe(
+      "https://image.hurimg.com#top",
+    );
+  });
+
+  it("accepts a bare host (nothing after it)", () => {
+    expect(normalizeImageUrl("file://image.hurimg.com")).toBe("https://image.hurimg.com");
+  });
+
+  it("still repairs a joined ObjectId segment after the rewrite", () => {
+    expect(
+      normalizeImageUrl(
+        "file://image.posta.com.tr/i/posta/90/0x0/627e113be4bfdc26aca117f5.jpg6acfb319b65de53ef53b8d3c.jpg",
+      ),
+    ).toBe("https://image.posta.com.tr/i/posta/90/0x0/6acfb319b65de53ef53b8d3c.jpg");
+  });
+
+  it.each([
+    ["an empty host (a local path)", "file:///etc/x.jpg"],
+    ["localhost", "file://localhost/x.jpg"],
+    ["LOCALHOST", "file://LOCALHOST/x.jpg"],
+    ["an IPv4 address", "file://127.0.0.1/x.jpg"],
+    ["another IPv4 address", "file://10.0.0.5/x.jpg"],
+    ["an IPv4 address with an out-of-range octet", "file://256.256.256.256/x.jpg"],
+    ["a hex IPv4 spelling", "file://0x7f.0.0.1/x.jpg"],
+    ["a short IPv4 spelling", "file://127.1/x.jpg"],
+    ["a bracketed IPv6 address", "file://[::1]/x.jpg"],
+    ["a single-label host", "file://intranet/x.jpg"],
+    ["nothing after the scheme", "file://"],
+    ["whitespace after the scheme", "file://   "],
+    ["a single slash after the scheme", "file:/image.hurimg.com/a.jpg"],
+    ["userinfo in the authority", "file://u@image.hurimg.com/a.jpg"],
+    ["a port in the authority", "file://image.hurimg.com:8080/a.jpg"],
+    ["a backslash in the authority", "file://image.hurimg.com\\a.jpg"],
+    ["a label starting with a hyphen", "file://-bad.example/a.jpg"],
+    ["an empty label", "file://image..hurimg.com/a.jpg"],
+    ["a trailing dot", "file://image.hurimg.com./a.jpg"],
+    ["a Windows drive path", "file://C:/Users/x/a.jpg"],
+    ["a space inside the host", "file://image hurimg.com/a.jpg"],
+    ["a non-ASCII host", "file://görsel.example/a.jpg"],
+  ])("returns null for %s", (_label, input) => {
+    expect(normalizeImageUrl(input)).toBeNull();
+  });
+
+  it("leaves every non-file input exactly as before", () => {
+    expect(normalizeImageUrl("https://image.hurimg.com/a.jpg")).toBe(
+      "https://image.hurimg.com/a.jpg",
+    );
+    expect(normalizeImageUrl("//image.hurimg.com/a.jpg")).toBe("https://image.hurimg.com/a.jpg");
+    expect(normalizeImageUrl("ftp://image.hurimg.com/a.jpg")).toBeNull();
+    // `file` inside the path or query of an https URL is not a scheme.
+    const u = "https://h.test/file://x.jpg?u=file://evil.example/a.jpg";
+    expect(normalizeImageUrl(u)).toBe(u);
+  });
+
+  it("is idempotent: the healed URL normalises to itself", () => {
+    const once = normalizeImageUrl("file://image.hurimg.com//a.jpg?x=1#y");
+    expect(once).toBe("https://image.hurimg.com/a.jpg?x=1#y");
+    expect(normalizeImageUrl(once)).toBe(once);
+  });
+});
+
+describe("isPlaceholderImageUrl: file:// spelling", () => {
+  it("judges a healed file:// URL like its https spelling", () => {
+    expect(
+      isPlaceholderImageUrl(
+        "file://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg",
+      ),
+    ).toBe(true);
+    expect(isPlaceholderImageUrl("file://image.hurimg.com/a.jpg")).toBe(false);
+    expect(isPlaceholderImageUrl("file:///etc/x.jpg")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // gif-filter (http-1): haber7 and elips-haber ship a 22.3 MB animated
 // placeholder GIF that /_next/image passes through UNMODIFIED (the optimizer
 // never re-encodes animated GIFs), so the filter has to live at the query

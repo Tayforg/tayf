@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { DailyGame } from "./daily-game";
+import { DailyGame, resolveDailyPhase, resolveFinalMarks, type Phase } from "./daily-game";
 import type { DailyHeadline, DailyPuzzle } from "@/lib/game/daily-set";
 
 // ---------------------------------------------------------------------------
@@ -136,5 +136,121 @@ describe("DailyGame — source guard: focus management on phase transition", () 
     expect(effectBody).toMatch(/firstZoneRef\.current\?\.focus\(\)/);
     expect(effectBody).toMatch(/phase === "revealed"/);
     expect(effectBody).toMatch(/nextRef\.current\?\.focus\(\)/);
+  });
+});
+
+describe("resolveDailyPhase — a stored result wins until this session plays", () => {
+  const PHASES: readonly Phase[] = ["idle", "playing", "revealed", "finished"];
+
+  it.each(PHASES)(
+    "stored result, not played this session -> finished whatever localPhase is (%s)",
+    (localPhase) => {
+      expect(resolveDailyPhase({ hasStoredResult: true, playedThisSession: false, localPhase })).toBe(
+        "finished",
+      );
+    },
+  );
+
+  it.each(PHASES)("stored result, played this session -> localPhase (%s)", (localPhase) => {
+    expect(resolveDailyPhase({ hasStoredResult: true, playedThisSession: true, localPhase })).toBe(
+      localPhase,
+    );
+  });
+
+  it.each(PHASES)("nothing stored -> localPhase (%s)", (localPhase) => {
+    expect(resolveDailyPhase({ hasStoredResult: false, playedThisSession: false, localPhase })).toBe(
+      localPhase,
+    );
+    expect(resolveDailyPhase({ hasStoredResult: false, playedThisSession: true, localPhase })).toBe(
+      localPhase,
+    );
+  });
+});
+
+describe("resolveFinalMarks — the marks the result screen and Paylaş use", () => {
+  const STORED = [true, false, true, false, true];
+
+  it("a stored result opened without playing wins over partial local marks (the other-tab finish)", () => {
+    // Tab B answered 2 headlines, tab A finished the round: the storage event
+    // makes the phase "finished" with openedAlreadyPlayed true. B's two marks
+    // are an abandoned round, never the score to show or to share.
+    expect(
+      resolveFinalMarks({ storedMarks: STORED, openedAlreadyPlayed: true, localMarks: [true, true] }),
+    ).toEqual(STORED);
+    expect(
+      resolveFinalMarks({ storedMarks: STORED, openedAlreadyPlayed: true, localMarks: [false] }),
+    ).toEqual(STORED);
+  });
+
+  it("a stored result opened without playing and no local marks -> the stored marks", () => {
+    expect(
+      resolveFinalMarks({ storedMarks: STORED, openedAlreadyPlayed: true, localMarks: [] }),
+    ).toEqual(STORED);
+  });
+
+  it("this session finished the round -> the local marks, even though a result is now stored", () => {
+    const local = [false, false, true, true, false];
+    expect(
+      resolveFinalMarks({ storedMarks: STORED, openedAlreadyPlayed: false, localMarks: local }),
+    ).toEqual(local);
+  });
+
+  it("nothing stored -> the local marks (a round in progress)", () => {
+    expect(
+      resolveFinalMarks({ storedMarks: undefined, openedAlreadyPlayed: false, localMarks: [true] }),
+    ).toEqual([true]);
+    expect(
+      resolveFinalMarks({ storedMarks: undefined, openedAlreadyPlayed: false, localMarks: [] }),
+    ).toEqual([]);
+  });
+
+  it("never reads the stored marks unless the result was opened already played", () => {
+    // Defensive: openedAlreadyPlayed true with nothing stored cannot happen
+    // (it is derived from the stored result), but must not throw.
+    expect(
+      resolveFinalMarks({ storedMarks: undefined, openedAlreadyPlayed: true, localMarks: [true, false] }),
+    ).toEqual([true, false]);
+  });
+});
+
+describe("DailyGame — source guard: the shown marks follow the same predicate as the phase", () => {
+  it("derives finalMarks through resolveFinalMarks with openedAlreadyPlayed, not with marks.length", () => {
+    expect(source).toMatch(/const finalMarks = resolveFinalMarks\(/);
+    expect(source).toMatch(/resolveFinalMarks\(\{[^}]*openedAlreadyPlayed,/);
+    expect(source).not.toMatch(/marks\.length === 0/);
+  });
+});
+
+describe("DailyGame — source guard: derive the phase, never seed it from the hydration snapshot", () => {
+  // The server snapshot is null, so the first client render has no stored
+  // result; React keeps useState's initializer from that first render, so
+  // seeding `phase` / `openedAlreadyPlayed` from `existingResult` froze them
+  // at "idle" / false for a visitor who had already played (Başla showed and
+  // a replay POSTed 5 guesses). The values must be derived on every render.
+  it("no useState call has an initializer that mentions existingResult", () => {
+    expect(source).not.toMatch(/useState[^;]*existingResult/);
+  });
+
+  it("the matcher catches both seeded forms it was written for", () => {
+    const seededBool = "const [openedAlreadyPlayed] = useState(() => Boolean(existingResult));";
+    const seededPhase = 'const [phase, setPhase] = useState<Phase>(existingResult ? "finished" : "idle");';
+    expect(seededBool).toMatch(/useState[^;]*existingResult/);
+    expect(seededPhase).toMatch(/useState[^;]*existingResult/);
+    expect("const [index, setIndex] = useState(0);").not.toMatch(/useState[^;]*existingResult/);
+  });
+
+  it("derives phase through resolveDailyPhase and keeps getServerSnapshot null", () => {
+    expect(source).toMatch(/const phase = resolveDailyPhase\(/);
+    expect(source).toMatch(/function getServerSnapshot\(\): string \| null \{\s*return null;\s*\}/);
+  });
+
+  it("only the local phase is state: setPhase is gone, finishRound marks the session as played", () => {
+    expect(source).not.toMatch(/\bsetPhase\(/);
+    expect(source).toMatch(/\bsetLocalPhase\(/);
+    expect(source).toMatch(/\bsetPlayedThisSession\(true\)/);
+  });
+
+  it("guesses are only accepted while the derived phase is \"playing\"", () => {
+    expect(source).toMatch(/if \(!current \|\| phase !== "playing"\) return;/);
   });
 });

@@ -6,7 +6,7 @@
 // from `src/lib/images/image-url.ts`), which is what lets render-time
 // normalisation heal rows already stored with a bad spelling -- no backfill.
 //
-// Three real-world defects it fixes:
+// Four real-world defects it fixes:
 //
 //   1. A doubled leading path slash, e.g. haber7's
 //      `https://i12.haber7.net//fotogaleri/x.jpg`. The upstream CDN 404s for
@@ -19,6 +19,17 @@
 //      string itself in the feed's <img src>; the CDN 404s for it. The first
 //      id is a constant placeholder asset, the second is the real image, so
 //      the last segment is rewritten to `/<second id>.<second ext>`.
+//   4. A `file://` scheme in front of a real DNS host, e.g. hurriyet's
+//      `file://image.hurimg.com/i/hurriyet/75/620x350/<id>.jpg` (a path
+//      copied from a local editor into the feed's <img src>). A `file:` URL is
+//      never loadable by a browser, but the publisher's CDN serves the same
+//      path over https, so `file://` becomes `https://`. Only a host that is a
+//      dotted DNS name (no userinfo, port, bracket, backslash or space) and
+//      does not end in a number is healed: `file:///etc/x.jpg`,
+//      `file://localhost/x.jpg` and every IP spelling stay rejected. The
+//      rewrite is a string rewrite and the host keeps its case. Whether the
+//      healed host may be RENDERED is still decided by the remote-image
+//      allowlist (`isAllowedRemoteImageUrl`), not here.
 //
 // Deliberately NOT done: URL re-serialisation. `new URL(u).toString()` would
 // lowercase hosts, percent-encode characters and add a trailing slash,
@@ -34,6 +45,31 @@ const LEADING_PATH_SLASHES = /^(https?:\/\/[^\/?#]+)\/{2,}/i;
 // so it is applied to the path only, never to a query or hash).
 const JOINED_OBJECT_ID_SEGMENT =
   /\/([0-9a-f]{24})\.(jpe?g|png|webp)([0-9a-f]{24})\.(jpe?g|png|webp)$/i;
+
+// `file://` + authority. The authority of a healable URL is exactly a dotted DNS
+// name: LDH labels of 1-63 characters, at least two of them.
+const FILE_SCHEME = /^file:\/\//i;
+const DNS_HOST =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/i;
+const MAX_HOST_LENGTH = 253;
+// The WHATWG URL parser reads a host whose LAST label is a decimal or `0x` hex
+// number as an IPv4 address (`1.2.3.4`, but also `127.1` and `0x7f.0.0.1`).
+// No real DNS name ends in a number, so none of those is healed.
+const ENDS_IN_NUMBER = /(?:^|\.)(?:\d+|0x[0-9a-f]*)$/i;
+
+/**
+ * `file://<dns host>/...` -> `https://<dns host>/...` by string rewrite, or
+ * null when the authority is anything but a dotted DNS name. `s` must start
+ * with `file://` (case-insensitive).
+ */
+function healFileScheme(s: string): string | null {
+  const rest = s.slice(7);
+  const end = rest.search(/[\/?#]/);
+  const host = end === -1 ? rest : rest.slice(0, end);
+  if (host.length > MAX_HOST_LENGTH) return null;
+  if (!DNS_HOST.test(host) || ENDS_IN_NUMBER.test(host)) return null;
+  return "https://" + rest;
+}
 
 // Scheme + authority prefix; a match must start after it so the host is never
 // rewritten (`https://<id>.jpg<id>.jpg` has a `/` right before the "first id").
@@ -68,6 +104,11 @@ export function normalizeImageUrl(u: string | null | undefined): string | null {
   if (typeof u !== "string") return null;
   let s = u.trim();
   if (!s) return null;
+  if (FILE_SCHEME.test(s)) {
+    const healed = healFileScheme(s);
+    if (healed === null) return null;
+    s = healed;
+  }
   if (s.startsWith("//")) s = "https:" + s;
 
   let parsed: URL;

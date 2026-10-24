@@ -372,3 +372,127 @@ describe("no bare element opacity in story components (qa-wave-i, WCAG 1.4.3)", 
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Third guard (hunt2 wave U, tinted status pills): a pill tinted with
+// `bg-<hue>-500/15` is a 15 % wash over the card, so its 11 px label needs the
+// darker shades to reach 4.5:1 in both themes: 800 (or 900) in light mode and
+// 200 / 300 / 400 in dark mode. `text-rose-700 dark:text-rose-500` (the old
+// "karantinada" pill) measures below AA in both. The AA-safe pairs live in
+// SILENCE_BADGE_CLASS (src/app/kaynaklar/durum/page.tsx).
+//
+// Scoped, not global: other files still carry the 700 / 500 pairs (cluster
+// card, follow feed, status view) and moving them is a design change of its
+// own. The list grows file by file: add a path to TINTED_PILL_FILES in the
+// same change that fixes that file's pills, and the guard keeps them fixed.
+// ---------------------------------------------------------------------------
+
+const TINTED_PILL_FILES = ["src/app/kaynaklar/durum/page.tsx"];
+
+const TINTED_BG = /\bbg-([a-z]+)-500\/15(?![\w-])/;
+
+/**
+ * Double-quoted and template-literal strings of one source file, per line for
+ * double quotes (a stray `"` in a comment cannot swallow the next line).
+ * Block comments and whole-line `//` comments are blanked first, so an odd
+ * number of backticks in prose cannot shift the template-literal pairing.
+ * Single quotes are skipped on purpose: Turkish apostrophes in comments would
+ * mis-pair, and class strings in this codebase are never single-quoted.
+ */
+function classStringLiterals(src: string): string[] {
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+  const out: string[] = [];
+  for (const match of code.matchAll(/"([^"\n]*)"|`([^`]*)`/g)) out.push(match[1] ?? match[2] ?? "");
+  return out;
+}
+
+/** Why a tinted-pill class string fails AA, or null when it passes (or is not a tinted pill). */
+function tintedPillProblem(classes: string): string | null {
+  const tint = TINTED_BG.exec(classes);
+  if (!tint) return null;
+  const hue = tint[1]!;
+  const light = new RegExp(`(?<![\\w:/-])text-${hue}-(?:800|900)(?![\\w-])`);
+  const dark = new RegExp(`(?<![\\w])dark:text-${hue}-(?:200|300|400)(?![\\w-])`);
+  const problems: string[] = [];
+  if (!light.test(classes)) problems.push(`needs text-${hue}-800 or -900 in light mode`);
+  if (!dark.test(classes)) problems.push(`needs dark:text-${hue}-200, -300 or -400 in dark mode`);
+  return problems.length > 0 ? problems.join("; ") : null;
+}
+
+describe("tinted status pills keep AA text shades (WCAG 1.4.3)", () => {
+  const pillLiterals = TINTED_PILL_FILES.flatMap((file) =>
+    classStringLiterals(readFileSync(join(ROOT, file), "utf8"))
+      .filter((literal) => TINTED_BG.test(literal))
+      .map((literal) => ({ file, literal })),
+  );
+
+  it("scans the listed files and finds their tinted pills (not vacuous)", () => {
+    for (const file of TINTED_PILL_FILES) {
+      expect(files, `${file} is not a scanned src/**/*.tsx file`).toContain(join(ROOT, file));
+      expect(
+        pillLiterals.filter((p) => p.file === file).length,
+        `${file} no longer has a bg-<hue>-500/15 pill; remove it from TINTED_PILL_FILES`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+    // three silence reasons + the karantinada pill
+    expect(pillLiterals.filter((p) => p.file === "src/app/kaynaklar/durum/page.tsx").length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("every bg-<hue>-500/15 string uses a 800/900 light shade and a 200/300/400 dark shade of its hue", () => {
+    const offenders = pillLiterals.flatMap(({ file, literal }) => {
+      const problem = tintedPillProblem(literal);
+      return problem ? [`${file}  "${literal}"  ${problem}`] : [];
+    });
+    expect(
+      offenders,
+      `Tinted pills need AA text shades (WCAG 1.4.3), e.g. text-rose-800 dark:text-rose-300:\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("flags the old pair and accepts the AA-safe ones (the guard itself works)", () => {
+    // the old karantinada pill
+    expect(
+      tintedPillProblem(
+        "inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-700 dark:text-rose-500 font-medium",
+      ),
+    ).not.toBeNull();
+    expect(tintedPillProblem("bg-rose-500/15 text-rose-700 dark:text-rose-500")).toContain("light mode");
+    expect(tintedPillProblem("bg-rose-500/15 text-rose-700 dark:text-rose-500")).toContain("dark mode");
+    // the erisim_yok string, and its siblings
+    expect(tintedPillProblem("bg-rose-500/15 border-rose-500/30 text-rose-800 dark:text-rose-300")).toBeNull();
+    expect(tintedPillProblem("bg-sky-500/15 border-sky-500/30 text-sky-800 dark:text-sky-300")).toBeNull();
+    expect(tintedPillProblem("bg-amber-500/15 border-amber-500/30 text-amber-800 dark:text-amber-400")).toBeNull();
+    expect(tintedPillProblem("bg-emerald-500/15 text-emerald-900 dark:text-emerald-200")).toBeNull();
+  });
+
+  it("does not let a prefixed or foreign-hue shade stand in for the real one", () => {
+    // a dark-only shade is not a light-mode shade
+    expect(tintedPillProblem("bg-rose-500/15 dark:text-rose-800 dark:text-rose-300")).toContain("light mode");
+    // another hue's text shade does not count
+    expect(tintedPillProblem("bg-rose-500/15 text-sky-800 dark:text-sky-300")).not.toBeNull();
+    // a light-only fix leaves dark mode below AA
+    expect(tintedPillProblem("bg-rose-500/15 text-rose-800")).toContain("dark mode");
+    // 600 is still below AA on the 15 % wash; 500 in dark too
+    expect(tintedPillProblem("bg-rose-500/15 text-rose-600 dark:text-rose-300")).toContain("light mode");
+    expect(tintedPillProblem("bg-rose-500/15 text-rose-800 dark:text-rose-500")).toContain("dark mode");
+  });
+
+  it("ignores strings that are not tinted pills", () => {
+    expect(tintedPillProblem("bg-rose-500/10 text-rose-700")).toBeNull();
+    expect(tintedPillProblem("bg-rose-500 text-white")).toBeNull();
+    expect(tintedPillProblem("text-rose-700")).toBeNull();
+  });
+
+  it("extracts double-quoted and template literals, one line at a time", () => {
+    const src = [
+      "// Tayf'ın comment with a lone apostrophe, a \"quote and one `backtick",
+      "/* block comment with `one backtick too */",
+      'const a = "bg-sky-500/15 text-sky-800 dark:text-sky-300";',
+      "const b = `bg-rose-500/15 ${x ? \"y\" : \"z\"}`;",
+    ].join("\n");
+    const literals = classStringLiterals(src);
+    expect(literals).toContain("bg-sky-500/15 text-sky-800 dark:text-sky-300");
+    expect(literals.some((l) => l.startsWith("bg-rose-500/15"))).toBe(true);
+    expect(literals.some((l) => l.includes("backtick"))).toBe(false);
+  });
+});

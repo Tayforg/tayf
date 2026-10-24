@@ -215,6 +215,9 @@ describe("getTopicClusters", () => {
     const fromMs = Date.parse(String(from!.val));
     expect(fromMs).toBeGreaterThanOrEqual(before - TOPIC_WINDOW_MS);
     expect(fromMs).toBeLessThanOrEqual(after - TOPIC_WINDOW_MS);
+    // The site's own cluster definition (article_count >= 2): a hub must not
+    // list single-article "clusters" that /clusters and the home feed hide.
+    expect(state.gte).toContainEqual({ col: "article_count", val: 2 });
 
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
@@ -309,6 +312,9 @@ describe("getTopicCounts", () => {
     for (const state of fixture.countStates as BuilderState[]) {
       expect(state.eq).toContainEqual({ col: "is_archived", val: false });
       expect(state.gte.some((g) => g.col === "updated_at")).toBe(true);
+      // Same definition as the list: the index page's "N küme" must equal
+      // what the hub then renders.
+      expect(state.gte).toContainEqual({ col: "article_count", val: 2 });
     }
 
     fixture.countError = { message: "timeout" };
@@ -482,17 +488,77 @@ describe("TOPIC_NOTE_PREFIX / TOPIC_NOTE_LINK_LABEL", () => {
 
 // --- topicMetadata --------------------------------------------------------
 
+type OgImage = { url: string | URL };
+
+function firstImageUrl(images: unknown): string | undefined {
+  const list = Array.isArray(images) ? (images as OgImage[]) : [];
+  const first = list[0];
+  return first === undefined ? undefined : String(first.url);
+}
+
 describe("topicMetadata", () => {
-  it("sets the Turkish title and the /konu/<slug> canonical, and omits openGraph images and the robots key", () => {
+  it("keeps the Turkish title, the description, and no robots key (the root layout's index,follow inherits)", () => {
     const meta = topicMetadata("dunya");
 
     expect(meta.title).toBe("Dünya haberleri");
-    expect(meta.alternates).toEqual({ canonical: "/konu/dunya" });
     expect(meta.robots).toBeUndefined();
-    expect((meta as { openGraph?: unknown }).openGraph).toBeUndefined();
-    expect((meta as { twitter?: unknown }).twitter).toBeUndefined();
     expect(typeof meta.description).toBe("string");
     expect(String(meta.description)).toContain("0,8");
+    expect(String(meta.description)).toContain("Dünya");
+  });
+
+  describe.each(TOPIC_SLUGS)("share metadata for %s", (slug) => {
+    const label = TOPIC_LABELS_TR[slug];
+
+    it("canonical equals og:url equals /konu/<slug>", () => {
+      const meta = topicMetadata(slug);
+      expect(meta.alternates?.canonical).toBe(`/konu/${slug}`);
+      expect(meta.openGraph?.url).toBe(`/konu/${slug}`);
+    });
+
+    it("og:title carries the brand suffix, og:description equals the meta description", () => {
+      const meta = topicMetadata(slug);
+      expect(meta.title).toBe(`${label} haberleri`);
+      expect(meta.openGraph?.title).toBe(`${label} haberleri — Tayf`);
+      expect(meta.openGraph?.description).toBe(meta.description);
+    });
+
+    it("names the root share card explicitly (a page-level openGraph replaces the parent wholesale)", () => {
+      const meta = topicMetadata(slug);
+      expect(firstImageUrl(meta.openGraph?.images)).toBe("/opengraph-image");
+      expect(firstImageUrl(meta.twitter?.images)).toBe("/twitter-image");
+    });
+
+    it("sets twitter title and description to the same brand-suffixed copy", () => {
+      const meta = topicMetadata(slug);
+      expect(meta.twitter?.title).toBe(`${label} haberleri — Tayf`);
+      expect(meta.twitter?.description).toBe(meta.description);
+    });
+
+    it("leaves robots undefined", () => {
+      expect(topicMetadata(slug).robots).toBeUndefined();
+    });
+  });
+
+  it("page 1 and an omitted page carry no query string", () => {
+    for (const meta of [topicMetadata("spor"), topicMetadata("spor", 1)]) {
+      expect(meta.alternates?.canonical).toBe("/konu/spor");
+      expect(meta.openGraph?.url).toBe("/konu/spor");
+    }
+  });
+
+  it("page N > 1 is self-canonical: canonical and og:url both carry ?sayfa=N", () => {
+    const meta = topicMetadata("spor", 3);
+    expect(meta.alternates?.canonical).toBe("/konu/spor?sayfa=3");
+    expect(meta.openGraph?.url).toBe("/konu/spor?sayfa=3");
+  });
+
+  it("a page > 1 keeps the rest of the share metadata (title, image, twitter) intact", () => {
+    const meta = topicMetadata("spor", 2);
+    expect(meta.openGraph?.title).toBe("Spor haberleri — Tayf");
+    expect(firstImageUrl(meta.openGraph?.images)).toBe("/opengraph-image");
+    expect(firstImageUrl(meta.twitter?.images)).toBe("/twitter-image");
+    expect(meta.robots).toBeUndefined();
   });
 });
 

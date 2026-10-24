@@ -248,6 +248,8 @@ const keyLookupCalls: Array<{
   sourceIds: string[];
   keys: string[];
   gte: Array<{ column: string; value: unknown }>;
+  order: Array<{ column: string; ascending: boolean }>;
+  limit: number | null;
 }> = [];
 // Every `.gte(column, value)` call on an `articles` query this test made.
 const articlesGteCalls: Array<{ column: string; value: unknown }> = [];
@@ -259,6 +261,27 @@ const articlesGteCalls: Array<{ column: string; value: unknown }> = [];
 // a single source pointing at the fixture URL.
 const fakeSources: Array<Record<string, unknown>> = [];
 
+// Counts the title-similarity comparisons the SUT makes (both the string form
+// and the pre-tokenized set form), so the twin gate's CPU bound is asserted as
+// a number of calls, not as a flaky wall-clock figure. The real functions
+// still run.
+const jaccardWork = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("../../supabase/functions/_shared/rss/title-jaccard.ts", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../supabase/functions/_shared/rss/title-jaccard.ts")>();
+  return {
+    ...actual,
+    titleWordJaccard: (a: string | null | undefined, b: string | null | undefined) => {
+      jaccardWork.calls++;
+      return actual.titleWordJaccard(a, b);
+    },
+    jaccardOfSets: (a: ReadonlySet<string>, b: ReadonlySet<string>) => {
+      jaccardWork.calls++;
+      return actual.jaccardOfSets(a, b);
+    },
+  };
+});
+
 vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
   createServiceClient: () => ({
     from: (table: string) => {
@@ -269,6 +292,8 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
       // bleed into each other.
       const inCalls: Array<{ column: string; values: unknown[] }> = [];
       const gteCalls: Array<{ column: string; value: unknown }> = [];
+      const orderCalls: Array<{ column: string; ascending: boolean }> = [];
+      let limitCall: number | null = null;
       const settle = () => {
         if (table === "sources") {
           if (forcedSourcesError) {
@@ -304,7 +329,13 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
           if (keyIn) {
             const ids = (inCalls.find((c) => c.column === "source_id")?.values ?? []) as string[];
             const keys = keyIn.values as string[];
-            keyLookupCalls.push({ sourceIds: [...ids], keys: [...keys], gte: [...gteCalls] });
+            keyLookupCalls.push({
+              sourceIds: [...ids],
+              keys: [...keys],
+              gte: [...gteCalls],
+              order: [...orderCalls],
+              limit: limitCall,
+            });
             if (forcedKeyLookupThrow) throw new Error("simulated key lookup throw");
             if (forcedKeyLookupError) {
               return { data: null, error: { message: forcedKeyLookupError } };
@@ -312,10 +343,19 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
             const since = gteCalls.find((c) => c.column === "created_at")?.value;
             const sinceMs = typeof since === "string" ? Date.parse(since) : Number.NEGATIVE_INFINITY;
             const hours1Ago = new Date(Date.now() - 3_600_000).toISOString();
-            const rows = storedArticlesByKey
+            let rows = storedArticlesByKey
               .filter((r) => ids.includes(r.source_id) && keys.includes(r.source_article_key))
               .map((r) => ({ ...r, created_at: r.created_at ?? hours1Ago }))
               .filter((r) => Date.parse(r.created_at) >= sinceMs);
+            // Like PostgREST: order first, then cut to the limit.
+            const byCreated = orderCalls.find((c) => c.column === "created_at");
+            if (byCreated) {
+              const dir = byCreated.ascending ? 1 : -1;
+              rows = [...rows].sort(
+                (a, b) => dir * (Date.parse(a.created_at) - Date.parse(b.created_at)),
+              );
+            }
+            if (limitCall !== null) rows = rows.slice(0, limitCall);
             return { data: rows, error: null };
           }
           // Only reached by a plain `.select(...)` read (the batched/
@@ -343,8 +383,14 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
       Object.assign(chain, {
         select: () => chain,
         eq: () => chain,
-        order: () => chain,
-        limit: () => chain,
+        order: (column: string, opts?: { ascending?: boolean }) => {
+          orderCalls.push({ column, ascending: opts?.ascending !== false });
+          return chain;
+        },
+        limit: (n: number) => {
+          limitCall = n;
+          return chain;
+        },
         gte: (column: string, value: unknown) => {
           gteCalls.push({ column, value });
           if (table === "articles") articlesGteCalls.push({ column, value });
@@ -690,6 +736,7 @@ beforeEach(() => {
   forcedKeyLookupError = null;
   forcedKeyLookupThrow = false;
   keyLookupCalls.length = 0;
+  jaccardWork.calls = 0;
   articlesGteCalls.length = 0;
   articlesUrlLookupCalls.length = 0;
   titleVersionInsertCalls.length = 0;
@@ -2886,6 +2933,310 @@ describe("twin drop: same source_article_key under another url [migration 113]",
     expect(JSON.stringify(ingestCycleInserts)).not.toContain("1708701");
   });
 
+  // -------------------------------------------------------------------------
+  // Title gate (ingest-gates). Some CMSs reuse a numeric id for a different
+  // story, so "same (source, key), other url" is not enough to call a row a
+  // twin: a real headline edit keeps words (word-Jaccard >= 0.2, the same gate
+  // as the SQL write-back), an id reuse shares none. A reuse is a distinct
+  // story and must be stored.
+  // -------------------------------------------------------------------------
+  const AKSAM_REUSE_KEY = "1708103";
+  const AKSAM_REUSE_STORED_URL =
+    "https://www.aksam.com.tr/spor/trabzonspor-hearts-macina-hazir/haber-1708103";
+  const AKSAM_REUSE_NEW_URL =
+    "https://www.aksam.com.tr/spor/fenerbahcede-derbi-mesaisi-ara-vermeden-basladi/haber-1708103";
+  const AKSAM_REUSE_STORED_TITLE = "Trabzonspor, Hearts maçına hazır";
+  const AKSAM_REUSE_NEW_TITLE = "Fenerbahçe'de derbi mesaisi ara vermeden başladı";
+
+  it("9. a CMS id reused for a different story is stored, not dropped as a twin (aksam 1708103)", async () => {
+    seed(AKSAM, [
+      { title: AKSAM_REUSE_NEW_TITLE, link: AKSAM_REUSE_NEW_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    storedArticlesByKey = [
+      {
+        id: "art-reuse",
+        source_id: AKSAM.id,
+        source_article_key: AKSAM_REUSE_KEY,
+        url: AKSAM_REUSE_STORED_URL,
+        title: AKSAM_REUSE_STORED_TITLE,
+      },
+    ];
+
+    const { body, lines } = await runLogged();
+
+    expect(upsertedUrls()).toEqual([AKSAM_REUSE_NEW_URL]);
+    expect(upserted[0]?.source_article_key).toBe(AKSAM_REUSE_KEY);
+    expect(body.inserted).toBe(1);
+    expect(body.twinsDroppedStored).toBe(0);
+    expect(body.twinsDroppedIntraFeed).toBe(0);
+    expect(body.twinsDropped).toBe(0);
+    expect(body.twinsKeptDistinct).toBe(1);
+    // A reuse is not an edit of the stored article: no version, no write-back.
+    expect(titleVersionInsertCalls).toEqual([]);
+    expect(titleEditRpcCalls).toEqual([]);
+    expect(body.titleVersions).toBe(0);
+    expect(body.titleWriteBacks).toBe(0);
+    // The key lookup did run (the row was checked, then kept).
+    expect(keyLookupCalls).toHaveLength(1);
+    // Count-only log line for the kept row.
+    const keptLines = lines.filter((l) => /kept .*unrelated headline/.test(l));
+    expect(keptLines).toHaveLength(1);
+    for (const l of lines) {
+      expect(l).not.toContain(AKSAM_REUSE_NEW_URL);
+      expect(l).not.toContain(AKSAM_REUSE_STORED_URL);
+      expect(l).not.toContain("Fenerbahçe");
+      expect(l).not.toContain("Trabzonspor");
+    }
+  });
+
+  it("9b. a reuse and a genuine edit in one feed: the reuse is stored, the edit is still a twin", async () => {
+    const URL_OTHER_STORED = "https://www.aksam.com.tr/spor/baska-haber/haber-1709000";
+    const URL_OTHER_EDIT = "https://www.aksam.com.tr/spor/baska-haber-duzenlendi/haber-1709000";
+    seed(AKSAM, [
+      { title: AKSAM_REUSE_NEW_TITLE, link: AKSAM_REUSE_NEW_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: "Başka haber düzenlendi", link: URL_OTHER_EDIT, pubDate: "Fri, 23 Oct 2026 17:17:00 GMT" },
+    ]);
+    storedArticlesByKey = [
+      { id: "art-reuse", source_id: AKSAM.id, source_article_key: AKSAM_REUSE_KEY, url: AKSAM_REUSE_STORED_URL, title: AKSAM_REUSE_STORED_TITLE },
+      { id: "art-edit", source_id: AKSAM.id, source_article_key: "1709000", url: URL_OTHER_STORED, title: "Başka haber" },
+    ];
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([AKSAM_REUSE_NEW_URL]);
+    expect(body.twinsDroppedStored).toBe(1);
+    expect(body.twinsKeptDistinct).toBe(1);
+    expect(body.twinsDropped).toBe(1);
+    expect(titleVersionInsertCalls).toEqual([
+      [{ article_id: "art-edit", source_id: AKSAM.id, old_title: "Başka haber", new_title: "Başka haber düzenlendi" }],
+    ]);
+  });
+
+  it("9c. a stored row with the same url wins: kept, and not counted as a reuse", async () => {
+    seed(AKSAM, [
+      { title: AKSAM_REUSE_NEW_TITLE, link: AKSAM_REUSE_NEW_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    storedArticlesByKey = [
+      { id: "art-reuse", source_id: AKSAM.id, source_article_key: AKSAM_REUSE_KEY, url: AKSAM_REUSE_STORED_URL, title: AKSAM_REUSE_STORED_TITLE },
+      { id: "art-same", source_id: AKSAM.id, source_article_key: AKSAM_REUSE_KEY, url: AKSAM_REUSE_NEW_URL, title: AKSAM_REUSE_NEW_TITLE },
+    ];
+
+    const body = await run();
+
+    expect(upsertedUrls()).toEqual([AKSAM_REUSE_NEW_URL]);
+    expect(body.twinsDropped).toBe(0);
+    expect(body.twinsKeptDistinct).toBe(0);
+  });
+
+  it("9d. intra-feed: two items with one id and unrelated headlines are both stored", async () => {
+    seed(AKSAM, [
+      { title: AKSAM_REUSE_STORED_TITLE, link: AKSAM_REUSE_STORED_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: AKSAM_REUSE_NEW_TITLE, link: AKSAM_REUSE_NEW_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+
+    const { body, lines } = await runLogged();
+
+    expect(upsertedUrls().sort()).toEqual([AKSAM_REUSE_NEW_URL, AKSAM_REUSE_STORED_URL].sort());
+    expect(body.twinsDroppedIntraFeed).toBe(0);
+    expect(body.twinsDroppedStored).toBe(0);
+    expect(body.twinsDropped).toBe(0);
+    expect(body.twinsKeptDistinct).toBe(1);
+    for (const l of lines) {
+      expect(l).not.toContain(AKSAM_REUSE_NEW_URL);
+      expect(l).not.toContain(AKSAM_REUSE_STORED_URL);
+      expect(l).not.toContain("Fenerbahçe");
+      expect(l).not.toContain("Trabzonspor");
+    }
+  });
+
+  it("9e. intra-feed: a later item that matches ANY earlier kept headline is dropped, an unrelated one is kept", async () => {
+    // 1: A (kept). 2: unrelated reuse (kept, +1 distinct). 3: an edit of the
+    // FIRST headline (matches A, dropped). 4: an edit of the SECOND (matches
+    // the reuse title, which is in the kept list, dropped).
+    const URL_X = "https://www.aksam.com.tr/guncel/baska-bir-haber/haber-1708664";
+    const URL_Y = "https://www.aksam.com.tr/guncel/baska-bir-haber-duzenlendi/haber-1708664";
+    seed(AKSAM, [
+      { title: TITLE_A, link: URL_A, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: "Hafta sonu hava durumu açıklandı", link: URL_X, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: "Hafta sonu hava durumu yarın açıklandı", link: URL_Y, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+
+    const body = await run();
+
+    expect(upsertedUrls().sort()).toEqual([URL_A, URL_X].sort());
+    expect(body.twinsKeptDistinct).toBe(1);
+    expect(body.twinsDroppedIntraFeed).toBe(2);
+    expect(body.twinsDropped).toBe(2);
+  });
+
+  it("9f. intra-feed kept titles are scoped to the cycle and to (source, key): another source with the same key is untouched", async () => {
+    const SRC_X = { id: "src-x-9f", name: "X", slug: "x-9f", url: "https://x.test", rss_url: "https://x.test/rss" };
+    seed(AKSAM, [
+      { title: AKSAM_REUSE_STORED_TITLE, link: AKSAM_REUSE_STORED_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    seed(SRC_X, [{ title: "Tamamen farklı bir kaynak haberi", link: "https://x.test/a/haber-1708103" }]);
+
+    const body = await run();
+
+    expect(upserted).toHaveLength(2);
+    expect(body.twinsDropped).toBe(0);
+    expect(body.twinsKeptDistinct).toBe(0);
+  });
+
+  it("9h. the kept-title map lives for one cycle: an edit seen in the NEXT cycle is not dropped by it", async () => {
+    // Cycle 1 keeps A. In cycle 2 the feed only has B (an edit of A, same
+    // key, other url). Nothing is stored in the fake table, so the stored
+    // lookup finds nothing either: if cycle 1's kept title survived, B would
+    // be dropped as an intra-feed twin here.
+    const rssUrl = seed(AKSAM, [
+      { title: TITLE_A, link: URL_A, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    const first = await run();
+    expect(upsertedUrls()).toEqual([URL_A]);
+    expect(first.twinsDropped).toBe(0);
+
+    fetcherItems[rssUrl] = [
+      { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:20:00 GMT" },
+    ];
+    const second = await run();
+
+    expect(upsertedUrls()).toEqual([URL_A, URL_B]);
+    expect(second.twinsDroppedIntraFeed).toBe(0);
+    expect(second.twinsKeptDistinct).toBe(0);
+  });
+
+  it("9g. a reuse does not touch the headline write-back of a genuine edit of the SAME stored article", async () => {
+    // Stored A. Feed: B (an edit of A, a twin) and the unrelated reuse R with
+    // the same key. B is recorded against A; R is stored.
+    seed(AKSAM, [
+      { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: "Hava durumu raporu yayımlandı", link: "https://www.aksam.com.tr/guncel/hava/haber-1708664", pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+
+    const body = await run();
+
+    // Intra-feed: B is first (kept), R is unrelated to B (kept, +1 distinct).
+    // Stored: B matches A (twin, dropped), R matches nothing (kept, +1 distinct).
+    expect(upsertedUrls()).toEqual(["https://www.aksam.com.tr/guncel/hava/haber-1708664"]);
+    expect(body.twinsDroppedStored).toBe(1);
+    expect(body.twinsKeptDistinct).toBe(2);
+    expect(titleVersionInsertCalls).toEqual([
+      [{ article_id: "art-1", source_id: AKSAM.id, old_title: TITLE_A, new_title: TITLE_B }],
+    ]);
+  });
+
+  // -------------------------------------------------------------------------
+  // CPU bound (ingest-gates). The feed is untrusted input: one that repeats an
+  // id on thousands of items with unrelated headlines must not turn the title
+  // gate into N^2 comparisons (a CPU-killed 546 cycle writes no row and loses
+  // every feed's work). Per key, at most MAX_KEPT_TITLES_PER_KEY headlines are
+  // tracked; every item compares against at most that many.
+  // -------------------------------------------------------------------------
+  it("9i. a feed repeating ONE id on 3000 unrelated headlines does bounded work, not N^2", async () => {
+    const { MAX_KEPT_TITLES_PER_KEY } = (await import(
+      "../../supabase/functions/ingest/index.ts"
+    )) as { MAX_KEPT_TITLES_PER_KEY: number };
+    const N = 3000;
+    // One unique token per headline: no two share a word, so none is a twin.
+    seed(
+      AKSAM,
+      Array.from({ length: N }, (_, n) => ({
+        title: `benzersiz${n}kelime ${n}tekil`,
+        link: `https://www.aksam.com.tr/spor/yazi-${n}/haber-1708103`,
+        pubDate: "Fri, 23 Oct 2026 17:16:00 GMT",
+      })),
+    );
+
+    const t0 = performance.now();
+    const body = await run();
+    const elapsedMs = performance.now() - t0;
+
+    // The quadratic form made N*(N-1)/2 = 4.5M comparisons here.
+    expect(jaccardWork.calls).toBeLessThanOrEqual(N * MAX_KEPT_TITLES_PER_KEY);
+    expect(elapsedMs).toBeLessThan(20_000);
+    // Nothing is lost: every unrelated item is stored.
+    expect(upsertedUrls()).toHaveLength(N);
+    expect(body.twinsDropped).toBe(0);
+    // The first MAX titles are tracked (the first one is just the first); the
+    // rest are kept without being tracked and counted in twinsKeyCapped.
+    expect(body.twinsKeptDistinct).toBe(MAX_KEPT_TITLES_PER_KEY - 1);
+    expect(body.twinsKeyCapped).toBe(N - MAX_KEPT_TITLES_PER_KEY);
+  });
+
+  it("9j. past the per-key cap a headline that matches a TRACKED one is still dropped as a twin", async () => {
+    const { MAX_KEPT_TITLES_PER_KEY } = (await import(
+      "../../supabase/functions/ingest/index.ts"
+    )) as { MAX_KEPT_TITLES_PER_KEY: number };
+    const unrelated = MAX_KEPT_TITLES_PER_KEY + 3;
+    const items = Array.from({ length: unrelated }, (_, n) => ({
+      title: `benzersiz${n}kelime ${n}tekil`,
+      link: `https://www.aksam.com.tr/spor/yazi-${n}/haber-1708103`,
+      pubDate: "Fri, 23 Oct 2026 17:16:00 GMT",
+    }));
+    // An edit of the FIRST headline (tracked), arriving after the cap is full.
+    items.push({
+      title: "benzersiz0kelime 0tekil guncellendi",
+      link: "https://www.aksam.com.tr/spor/yazi-0-guncellendi/haber-1708103",
+      pubDate: "Fri, 23 Oct 2026 17:16:00 GMT",
+    });
+    seed(AKSAM, items);
+
+    const body = await run();
+
+    expect(body.twinsDroppedIntraFeed).toBe(1);
+    expect(body.twinsDropped).toBe(1);
+    expect(upsertedUrls()).toHaveLength(unrelated);
+    expect(upsertedUrls()).not.toContain(
+      "https://www.aksam.com.tr/spor/yazi-0-guncellendi/haber-1708103",
+    );
+    expect(body.twinsKeyCapped).toBe(unrelated - MAX_KEPT_TITLES_PER_KEY);
+  });
+
+  it("9k. twinsKeyCapped is 0 for a normal feed (an id repeated within the cap is fully checked)", async () => {
+    seed(AKSAM, [
+      { title: AKSAM_REUSE_STORED_TITLE, link: AKSAM_REUSE_STORED_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: AKSAM_REUSE_NEW_TITLE, link: AKSAM_REUSE_NEW_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    const body = await run();
+    expect(body.twinsKeyCapped).toBe(0);
+    expect(body.twinsKeptDistinct).toBe(1);
+  });
+
+  it("reports twinsKeptDistinct in the cycle JSON summary and not as an ingest_cycles column", async () => {
+    seed(AKSAM, [
+      { title: AKSAM_REUSE_NEW_TITLE, link: AKSAM_REUSE_NEW_URL, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    storedArticlesByKey = [
+      { id: "art-reuse", source_id: AKSAM.id, source_article_key: AKSAM_REUSE_KEY, url: AKSAM_REUSE_STORED_URL, title: AKSAM_REUSE_STORED_TITLE },
+    ];
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let httpBody: Record<string, unknown>;
+    try {
+      httpBody = await run();
+      const cycleCall = logSpy.mock.calls.find((args) => args[0] === "[ingest] cycle") as
+        | [string, string]
+        | undefined;
+      expect(cycleCall).toBeDefined();
+      const summary = JSON.parse(cycleCall?.[1] ?? "{}") as { twinsKeptDistinct?: number };
+      expect(summary.twinsKeptDistinct).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(httpBody.twinsKeptDistinct).toBe(1);
+    // Summary line and HTTP JSON only: no ingest_cycles column for it.
+    expect(ingestCycleInserts).toHaveLength(1);
+    const cycleKeys = Object.keys(ingestCycleInserts[0] ?? {});
+    for (const k of ["twins_kept_distinct", "twinsKeptDistinct", "twins_kept", "kept_distinct"]) {
+      expect(cycleKeys).not.toContain(k);
+    }
+    expect(JSON.stringify(ingestCycleInserts)).not.toContain("KeptDistinct");
+    expect(JSON.stringify(ingestCycleInserts)).not.toContain("kept_distinct");
+  });
+
   it("reports twinsDropped in the cycle JSON summary and not as an ingest_cycles column", async () => {
     seed(AKSAM, [{ title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" }]);
     storedArticlesByKey = [
@@ -2937,7 +3288,7 @@ describe("twin drop: same source_article_key under another url [migration 113]",
 // dedupeBySourceContentHash / recordTitleVersions above).
 // ---------------------------------------------------------------------------
 
-type KeyedRow = { source_id: string; url: string; source_article_key: string | null };
+type KeyedRow = { source_id: string; url: string; title: string; source_article_key: string | null };
 type ExistingKeyed = {
   id: string;
   url: string;
@@ -2954,6 +3305,7 @@ type DropKeyFn = (
   rows: KeyedRow[];
   twins: Array<{ row: KeyedRow; existing: ExistingKeyed }>;
   lookupErrors: number;
+  keptDistinct: number;
 }>;
 
 async function importDropKey(): Promise<{ drop: DropKeyFn; supabase: unknown }> {
@@ -2972,33 +3324,34 @@ describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
   it("returns the rows untouched and makes no query when nothing carries a key", async () => {
     const { drop, supabase } = await importDropKey();
     const rows: KeyedRow[] = [
-      { source_id: "s1", url: "https://a.test/x", source_article_key: null },
-      { source_id: "s1", url: "https://a.test/y", source_article_key: null },
+      { source_id: "s1", url: "https://a.test/x", title: "Birinci haber", source_article_key: null },
+      { source_id: "s1", url: "https://a.test/y", title: "İkinci haber", source_article_key: null },
     ];
     const out = await drop(supabase, rows, SINCE);
     expect(out.rows).toEqual(rows);
     expect(out.twins).toEqual([]);
     expect(out.lookupErrors).toBe(0);
+    expect(out.keptDistinct).toBe(0);
     expect(keyLookupCalls).toHaveLength(0);
   });
 
   it("returns an empty result for an empty input", async () => {
     const { drop, supabase } = await importDropKey();
     const out = await drop(supabase, [], SINCE);
-    expect(out).toEqual({ rows: [], twins: [], lookupErrors: 0 });
+    expect(out).toEqual({ rows: [], twins: [], lookupErrors: 0, keptDistinct: 0 });
     expect(keyLookupCalls).toHaveLength(0);
   });
 
   it("looks up keyed rows only and keeps unkeyed rows in their original order", async () => {
     const { drop, supabase } = await importDropKey();
     storedArticlesByKey = [
-      { id: "a1", source_id: "s1", source_article_key: "1111111", url: "https://a.test/old-1111111", title: "t" },
+      { id: "a1", source_id: "s1", source_article_key: "1111111", url: "https://a.test/old-1111111", title: "Bakan açıklama yaptı" },
     ];
     const rows: KeyedRow[] = [
-      { source_id: "s1", url: "https://a.test/none-1", source_article_key: null },
-      { source_id: "s1", url: "https://a.test/new-1111111", source_article_key: "1111111" },
-      { source_id: "s1", url: "https://a.test/none-2", source_article_key: null },
-      { source_id: "s1", url: "https://a.test/fresh-2222222", source_article_key: "2222222" },
+      { source_id: "s1", url: "https://a.test/none-1", title: "Anahtarsız bir", source_article_key: null },
+      { source_id: "s1", url: "https://a.test/new-1111111", title: "Bakan açıklama yaptı bugün", source_article_key: "1111111" },
+      { source_id: "s1", url: "https://a.test/none-2", title: "Anahtarsız iki", source_article_key: null },
+      { source_id: "s1", url: "https://a.test/fresh-2222222", title: "Yeni haber", source_article_key: "2222222" },
     ];
     const out = await drop(supabase, rows, SINCE);
     expect(out.rows.map((r) => r.url)).toEqual([
@@ -3007,6 +3360,7 @@ describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
       "https://a.test/fresh-2222222",
     ]);
     expect(out.twins.map((t) => t.row.url)).toEqual(["https://a.test/new-1111111"]);
+    expect(out.keptDistinct).toBe(0);
     expect(keyLookupCalls).toHaveLength(1);
     expect(keyLookupCalls[0]?.keys.sort()).toEqual(["1111111", "2222222"]);
   });
@@ -3014,19 +3368,20 @@ describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
   it("picks the EARLIEST created_at match as the stored article of a twin", async () => {
     const { drop, supabase } = await importDropKey();
     storedArticlesByKey = [
-      { id: "later", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v2-1111111", title: "v2", created_at: "2026-10-20T10:00:00.000Z" },
-      { id: "earliest", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v1-1111111", title: "v1", created_at: "2026-10-20T08:00:00.000Z" },
-      { id: "middle", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v15-1111111", title: "v1.5", created_at: "2026-10-20T09:00:00.000Z" },
+      { id: "later", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v2-1111111", title: "Gündem haberi ikinci sürüm", created_at: "2026-10-20T10:00:00.000Z" },
+      { id: "earliest", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v1-1111111", title: "Gündem haberi birinci sürüm", created_at: "2026-10-20T08:00:00.000Z" },
+      { id: "middle", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v15-1111111", title: "Gündem haberi 1.5 sürüm", created_at: "2026-10-20T09:00:00.000Z" },
     ];
     const out = await drop(
       supabase,
-      [{ source_id: "s1", url: "https://a.test/v3-1111111", source_article_key: "1111111" }],
+      [{ source_id: "s1", url: "https://a.test/v3-1111111", title: "Gündem haberi üçüncü sürüm", source_article_key: "1111111" }],
       SINCE,
     );
     expect(out.rows).toEqual([]);
     expect(out.twins).toHaveLength(1);
     expect(out.twins[0]?.existing.id).toBe("earliest");
-    expect(out.twins[0]?.existing.title).toBe("v1");
+    expect(out.twins[0]?.existing.title).toBe("Gündem haberi birinci sürüm");
+    expect(out.keptDistinct).toBe(0);
   });
 
   it("splits keyed rows into lookups of at most 100 (PREFILTER_CHUNK)", async () => {
@@ -3034,6 +3389,7 @@ describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
     const rows: KeyedRow[] = Array.from({ length: 250 }, (_, n) => ({
       source_id: "s1",
       url: `https://a.test/x-${1000000 + n}`,
+      title: `Haber ${n}`,
       source_article_key: String(1000000 + n),
     }));
     const out = await drop(supabase, rows, SINCE);
@@ -3050,12 +3406,314 @@ describe("dropExistingSourceArticleKeyRows [migration 113]", () => {
     const rows: KeyedRow[] = Array.from({ length: 150 }, (_, n) => ({
       source_id: "s1",
       url: `https://a.test/x-${1000000 + n}`,
+      title: `Haber ${n}`,
       source_article_key: String(1000000 + n),
     }));
     const out = await drop(supabase, rows, SINCE);
     expect(out.rows).toHaveLength(150);
     expect(out.twins).toEqual([]);
     expect(out.lookupErrors).toBe(2);
+    expect(out.keptDistinct).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Title gate (ingest-gates): a match only makes a twin when its headline
+  // shares words with the row's (word-Jaccard >= 0.2, the SQL write-back gate).
+  // The two pairs below are real CMS-id reuses seen in prod on 2026-10-24.
+  // -------------------------------------------------------------------------
+  it.each([
+    [
+      "odatv 120168027",
+      "odatv",
+      "120168027",
+      "https://www.odatv.com/gundem/eski-spk-baskani-erman-cete-ye-gozalti-karari-120168027",
+      "Eski SPK Başkanı Erman Çete'ye gözaltı kararı",
+      "https://www.odatv.com/gundem/feridun-gecgel-ve-enver-gecgel-5-milyar-tl-iade-etti-120168027",
+      "Feridun Geçgel ve Enver Geçgel 5 milyar TL iade etti",
+    ],
+    [
+      "yenicag 1084546",
+      "yenicag",
+      "1084546",
+      "https://www.yenicaggazetesi.com.tr/arnavutkoy-de-okullara-10-bin-parca-spor-malzemesi-destegi-1084546h.htm",
+      "Arnavutköy'de okullara 10 bin parça spor malzemesi desteği",
+      "https://www.yenicaggazetesi.com.tr/kartal-da-kahkaha-firtinasi-ruh-salatasi-oyunu-1084546h.htm",
+      "Kartal'da kahkaha fırtınası: Ruh Salatası oyunu",
+    ],
+  ])(
+    "keeps a row whose id is reused for a different story (%s) and counts it as keptDistinct",
+    async (_label, sourceId, key, storedUrl, storedTitle, rowUrl, rowTitle) => {
+      const { drop, supabase } = await importDropKey();
+      storedArticlesByKey = [
+        { id: "stored-1", source_id: sourceId, source_article_key: key, url: storedUrl, title: storedTitle },
+      ];
+      const row: KeyedRow = { source_id: sourceId, url: rowUrl, title: rowTitle, source_article_key: key };
+
+      const out = await drop(supabase, [row], SINCE);
+
+      expect(out.rows).toEqual([row]);
+      expect(out.twins).toEqual([]);
+      expect(out.keptDistinct).toBe(1);
+      expect(out.lookupErrors).toBe(0);
+    },
+  );
+
+  it("takes the EARLIEST PASSING match: an unrelated earliest match is skipped for a later related one", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      // Earliest overall, but a different story that reused the id.
+      { id: "unrelated-earliest", source_id: "s1", source_article_key: "1111111", url: "https://a.test/other-1111111", title: "Trabzonspor, Hearts maçına hazır", created_at: "2026-10-20T07:00:00.000Z" },
+      { id: "related-late", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v2-1111111", title: "Bakan Güler: Husilerle çatışmaya girilmeyecek", created_at: "2026-10-20T10:00:00.000Z" },
+      { id: "related-early", source_id: "s1", source_article_key: "1111111", url: "https://a.test/v1-1111111", title: "Bakan Güler'den Mekke ittifakı vurgusu", created_at: "2026-10-20T09:00:00.000Z" },
+    ];
+    const out = await drop(
+      supabase,
+      [{ source_id: "s1", url: "https://a.test/v3-1111111", title: "Bakan Güler: üçüncü başlık", source_article_key: "1111111" }],
+      SINCE,
+    );
+    expect(out.rows).toEqual([]);
+    expect(out.twins).toHaveLength(1);
+    // Earlier than "related-late" and passing; "unrelated-earliest" is skipped.
+    expect(out.twins[0]?.existing.id).toBe("related-early");
+    expect(out.keptDistinct).toBe(0);
+  });
+
+  it("keeps the row (keptDistinct 1, not 2) when EVERY match is unrelated", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      { id: "u1", source_id: "s1", source_article_key: "1111111", url: "https://a.test/u1-1111111", title: "Trabzonspor, Hearts maçına hazır" },
+      { id: "u2", source_id: "s1", source_article_key: "1111111", url: "https://a.test/u2-1111111", title: "Hava durumu raporu yayımlandı" },
+    ];
+    const row: KeyedRow = {
+      source_id: "s1",
+      url: "https://a.test/new-1111111",
+      title: "Fenerbahçe'de derbi mesaisi ara vermeden başladı",
+      source_article_key: "1111111",
+    };
+    const out = await drop(supabase, [row], SINCE);
+    expect(out.rows).toEqual([row]);
+    expect(out.twins).toEqual([]);
+    expect(out.keptDistinct).toBe(1);
+  });
+
+  it("counts keptDistinct per row across a mixed batch", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      { id: "s-a", source_id: "s1", source_article_key: "1111111", url: "https://a.test/a-1111111", title: "Merkez Bankası faizi sabit tuttu" },
+      { id: "s-b", source_id: "s1", source_article_key: "2222222", url: "https://a.test/b-2222222", title: "Merkez Bankası faiz kararını açıkladı" },
+      { id: "s-c", source_id: "s1", source_article_key: "3333333", url: "https://a.test/c-3333333", title: "Derbi öncesi kritik açıklama" },
+    ];
+    const reuse1: KeyedRow = { source_id: "s1", url: "https://a.test/r1-1111111", title: "Deprem sonrası yeni açıklama", source_article_key: "1111111" };
+    const edit: KeyedRow = { source_id: "s1", url: "https://a.test/e-2222222", title: "Merkez Bankası faiz kararını duyurdu", source_article_key: "2222222" };
+    const reuse3: KeyedRow = { source_id: "s1", url: "https://a.test/r3-3333333", title: "Hava durumu raporu yayımlandı", source_article_key: "3333333" };
+    const fresh: KeyedRow = { source_id: "s1", url: "https://a.test/f-4444444", title: "Hiç görülmemiş haber", source_article_key: "4444444" };
+
+    const out = await drop(supabase, [reuse1, edit, reuse3, fresh], SINCE);
+
+    expect(out.rows).toEqual([reuse1, reuse3, fresh]);
+    expect(out.twins.map((t) => t.row)).toEqual([edit]);
+    expect(out.twins[0]?.existing.id).toBe("s-b");
+    expect(out.keptDistinct).toBe(2);
+  });
+
+  it("does not count a same-url match as a reuse (the normal re-poll), even beside an unrelated match", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      { id: "other", source_id: "s1", source_article_key: "1111111", url: "https://a.test/other-1111111", title: "Trabzonspor, Hearts maçına hazır" },
+      { id: "same", source_id: "s1", source_article_key: "1111111", url: "https://a.test/new-1111111", title: "Fenerbahçe'de derbi mesaisi ara vermeden başladı" },
+    ];
+    const row: KeyedRow = {
+      source_id: "s1",
+      url: "https://a.test/new-1111111",
+      title: "Fenerbahçe'de derbi mesaisi ara vermeden başladı",
+      source_article_key: "1111111",
+    };
+    const out = await drop(supabase, [row], SINCE);
+    expect(out.rows).toEqual([row]);
+    expect(out.twins).toEqual([]);
+    expect(out.keptDistinct).toBe(0);
+  });
+
+  it("applies the gate inclusively at 0.2: one shared word of five is a twin, one of six is a reuse", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      { id: "edge", source_id: "s1", source_article_key: "1111111", url: "https://a.test/edge-1111111", title: "a b c" },
+      { id: "below", source_id: "s1", source_article_key: "2222222", url: "https://a.test/below-2222222", title: "a b c" },
+    ];
+    const atGate: KeyedRow = { source_id: "s1", url: "https://a.test/n-1111111", title: "a d e", source_article_key: "1111111" };
+    const belowGate: KeyedRow = { source_id: "s1", url: "https://a.test/n-2222222", title: "a d e f", source_article_key: "2222222" };
+
+    const out = await drop(supabase, [atGate, belowGate], SINCE);
+
+    expect(out.twins.map((t) => t.row)).toEqual([atGate]);
+    expect(out.rows).toEqual([belowGate]);
+    expect(out.keptDistinct).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // CPU / row bound (ingest-gates): the stored matches of a reused key pile up
+  // over the 7-day window and the key comes from an untrusted url. The lookup
+  // is ordered and limited, and a row is compared against at most
+  // MAX_KEPT_TITLES_PER_KEY of the (earliest) matches.
+  // -------------------------------------------------------------------------
+  it("orders the lookup by created_at ascending and limits it to PREFILTER_CHUNK * MAX_KEPT_TITLES_PER_KEY", async () => {
+    const { drop, supabase } = await importDropKey();
+    const mod = (await import("../../supabase/functions/ingest/index.ts")) as {
+      MAX_KEPT_TITLES_PER_KEY: number;
+      KEY_LOOKUP_LIMIT: number;
+    };
+    expect(mod.KEY_LOOKUP_LIMIT).toBe(100 * mod.MAX_KEPT_TITLES_PER_KEY);
+    await drop(
+      supabase,
+      [{ source_id: "s1", url: "https://a.test/x-1111111", title: "Haber", source_article_key: "1111111" }],
+      SINCE,
+    );
+    expect(keyLookupCalls).toHaveLength(1);
+    expect(keyLookupCalls[0]?.order).toEqual([{ column: "created_at", ascending: true }]);
+    expect(keyLookupCalls[0]?.limit).toBe(mod.KEY_LOOKUP_LIMIT);
+  });
+
+  it("compares a row against at most MAX_KEPT_TITLES_PER_KEY stored matches, however many pile up", async () => {
+    const { drop, supabase } = await importDropKey();
+    const { MAX_KEPT_TITLES_PER_KEY } = (await import(
+      "../../supabase/functions/ingest/index.ts"
+    )) as { MAX_KEPT_TITLES_PER_KEY: number };
+    storedArticlesByKey = Array.from({ length: 2000 }, (_, n) => ({
+      id: `stored-${n}`,
+      source_id: "s1",
+      source_article_key: "1111111",
+      url: `https://a.test/old-${n}-1111111`,
+      title: `eski${n}kelime ${n}baska`,
+    }));
+    const row: KeyedRow = {
+      source_id: "s1",
+      url: "https://a.test/new-1111111",
+      title: "tamamen farkli yeni baslik",
+      source_article_key: "1111111",
+    };
+
+    const out = await drop(supabase, [row], SINCE);
+
+    expect(jaccardWork.calls).toBeLessThanOrEqual(MAX_KEPT_TITLES_PER_KEY);
+    expect(out.rows).toEqual([row]);
+    expect(out.twins).toEqual([]);
+    expect(out.keptDistinct).toBe(1);
+  });
+
+  it("bounds a whole slice of rows that share one key: at most rows x MAX comparisons", async () => {
+    const { drop, supabase } = await importDropKey();
+    const { MAX_KEPT_TITLES_PER_KEY } = (await import(
+      "../../supabase/functions/ingest/index.ts"
+    )) as { MAX_KEPT_TITLES_PER_KEY: number };
+    storedArticlesByKey = Array.from({ length: 50 }, (_, n) => ({
+      id: `stored-${n}`,
+      source_id: "s1",
+      source_article_key: "1111111",
+      url: `https://a.test/old-${n}-1111111`,
+      title: `eski${n}kelime ${n}baska`,
+    }));
+    const rows: KeyedRow[] = Array.from({ length: 400 }, (_, n) => ({
+      source_id: "s1",
+      url: `https://a.test/new-${n}-1111111`,
+      title: `yeni${n}kelime ${n}farkli`,
+      source_article_key: "1111111",
+    }));
+
+    const out = await drop(supabase, rows, SINCE);
+
+    expect(jaccardWork.calls).toBeLessThanOrEqual(rows.length * MAX_KEPT_TITLES_PER_KEY);
+    expect(out.rows).toHaveLength(400);
+    expect(out.keptDistinct).toBe(400);
+  });
+
+  it("looks at the EARLIEST matches by created_at: a related earliest match wins whatever the array order", async () => {
+    const { drop, supabase } = await importDropKey();
+    const { MAX_KEPT_TITLES_PER_KEY } = (await import(
+      "../../supabase/functions/ingest/index.ts"
+    )) as { MAX_KEPT_TITLES_PER_KEY: number };
+    // Newer unrelated matches first in the array, the related original last
+    // (and the oldest): the sorted lookup must still reach it.
+    const noise = Array.from({ length: MAX_KEPT_TITLES_PER_KEY + 4 }, (_, n) => ({
+      id: `noise-${n}`,
+      source_id: "s1",
+      source_article_key: "1111111",
+      url: `https://a.test/noise-${n}-1111111`,
+      title: `gurultu${n}kelime ${n}baska`,
+      created_at: `2026-10-20T1${n % 10}:00:00.000Z`,
+    }));
+    storedArticlesByKey = [
+      ...noise,
+      {
+        id: "original",
+        source_id: "s1",
+        source_article_key: "1111111",
+        url: "https://a.test/original-1111111",
+        title: "Merkez Bankası faiz kararını duyurdu",
+        created_at: "2026-10-19T00:00:00.000Z",
+      },
+    ];
+    const edit: KeyedRow = {
+      source_id: "s1",
+      url: "https://a.test/edit-1111111",
+      title: "Merkez Bankası faiz kararını açıkladı",
+      source_article_key: "1111111",
+    };
+
+    const out = await drop(supabase, [edit], SINCE);
+
+    expect(out.twins).toHaveLength(1);
+    expect(out.twins[0]?.existing.id).toBe("original");
+    expect(out.rows).toEqual([]);
+  });
+
+  it("a same-url match beyond the compared window still marks the row as a normal re-poll", async () => {
+    const { drop, supabase } = await importDropKey();
+    const { MAX_KEPT_TITLES_PER_KEY } = (await import(
+      "../../supabase/functions/ingest/index.ts"
+    )) as { MAX_KEPT_TITLES_PER_KEY: number };
+    const sameUrl = "https://a.test/same-1111111";
+    storedArticlesByKey = [
+      ...Array.from({ length: MAX_KEPT_TITLES_PER_KEY }, (_, n) => ({
+        id: `early-${n}`,
+        source_id: "s1",
+        source_article_key: "1111111",
+        url: `https://a.test/early-${n}-1111111`,
+        title: `Merkez Bankası faiz kararı ${n}`,
+        created_at: `2026-10-18T0${n}:00:00.000Z`,
+      })),
+      {
+        id: "own",
+        source_id: "s1",
+        source_article_key: "1111111",
+        url: sameUrl,
+        title: "Merkez Bankası faiz kararını duyurdu",
+        created_at: "2026-10-20T00:00:00.000Z",
+      },
+    ];
+    const row: KeyedRow = {
+      source_id: "s1",
+      url: sameUrl,
+      title: "Merkez Bankası faiz kararını duyurdu",
+      source_article_key: "1111111",
+    };
+
+    const out = await drop(supabase, [row], SINCE);
+
+    expect(out.rows).toEqual([row]);
+    expect(out.twins).toEqual([]);
+    expect(out.keptDistinct).toBe(0);
+  });
+
+  it("treats a stored row without a usable title as unrelated (kept, fail-open)", async () => {
+    const { drop, supabase } = await importDropKey();
+    storedArticlesByKey = [
+      { id: "blank", source_id: "s1", source_article_key: "1111111", url: "https://a.test/old-1111111", title: "" },
+    ];
+    const row: KeyedRow = { source_id: "s1", url: "https://a.test/new-1111111", title: "Yeni başlık", source_article_key: "1111111" };
+    const out = await drop(supabase, [row], SINCE);
+    expect(out.rows).toEqual([row]);
+    expect(out.twins).toEqual([]);
+    expect(out.keptDistinct).toBe(1);
   });
 });
 

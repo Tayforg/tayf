@@ -52,6 +52,18 @@ describe("normalizeImageUrl (re-export)", () => {
       "https://image.posta.com.tr/i/posta/90/0x0/6acfb319b65de53ef53b8d3c.jpg";
     expect(normalizeImageUrl(clean)).toBe(clean);
   });
+
+  // hurriyet: rows already stored as `file://image.hurimg.com/...` heal at
+  // render time through this re-export -- no backfill.
+  it("heals a stored hurriyet file:// URL to https, and keeps rejecting a local path", () => {
+    expect(
+      normalizeImageUrl(
+        "file://image.hurimg.com/i/hurriyet/75/620x350/6ad8d7b322393fcfc7d3c38b.jpg",
+      ),
+    ).toBe("https://image.hurimg.com/i/hurriyet/75/620x350/6ad8d7b322393fcfc7d3c38b.jpg");
+    expect(normalizeImageUrl("file:///etc/x.jpg")).toBeNull();
+    expect(normalizeImageUrl("file://localhost/x.jpg")).toBeNull();
+  });
 });
 
 describe("isOptimizableImageUrl (re-export)", () => {
@@ -142,6 +154,14 @@ describe("isPlaceholderImageUrl (re-export)", () => {
     expect(isPlaceholderImageUrl("https://h.test/a.jpg")).toBe(false);
     expect(isPlaceholderImageUrl(null)).toBe(false);
   });
+
+  // The file:// healing must not change any existing verdict.
+  it("is unchanged for non-file input and for a file:// URL that cannot be healed", () => {
+    expect(isPlaceholderImageUrl("file:///etc/x.jpg")).toBe(false);
+    expect(isPlaceholderImageUrl("file://localhost/son-dakika.jpg")).toBe(false);
+    expect(isPlaceholderImageUrl("https://img.piri.net/img/son-dakika.jpg")).toBe(true);
+    expect(isPlaceholderImageUrl("ftp://img.piri.net/img/son-dakika.jpg")).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -163,6 +183,25 @@ describe("optimizedThumbUrl", () => {
     expect(optimizedThumbUrl("//img.piri.net//a.jpg", 128)).toBe(
       `/_next/image?url=${ENC}&w=128&q=75`,
     );
+  });
+
+  // hurriyet: a stored `file://image.hurimg.com/...` heals to https and then
+  // goes through the same allowlist as any other URL.
+  it("renders a healed file:// URL on an allowlisted host (image.hurimg.com)", () => {
+    const healed = "https://image.hurimg.com/i/hurriyet/75/620x350/6ad8d7b322393fcfc7d3c38b.jpg";
+    expect(
+      optimizedThumbUrl(
+        "file://image.hurimg.com/i/hurriyet/75/620x350/6ad8d7b322393fcfc7d3c38b.jpg",
+        128,
+      ),
+    ).toBe(`/_next/image?url=${encodeURIComponent(healed)}&w=128&q=75`);
+  });
+
+  it("still gates a file:// URL on the allowlist: healing is not a licence to render any host", () => {
+    expect(normalizeImageUrl("file://evil.example/a.jpg")).toBe("https://evil.example/a.jpg");
+    expect(optimizedThumbUrl("file://evil.example/a.jpg", 128)).toBeNull();
+    expect(optimizedThumbUrl("file:///etc/x.jpg", 128)).toBeNull();
+    expect(optimizedThumbUrl("file://localhost/x.jpg", 128)).toBeNull();
   });
 
   it("encodes a query string into the url parameter", () => {

@@ -32,7 +32,7 @@ vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
   };
 });
 
-import TopicHubPage from "./page";
+import TopicHubPage, { generateMetadata } from "./page";
 
 const UNAVAILABLE_COPY =
   "Konu listesi şu anda yüklenemiyor. Birkaç dakika içinde tekrar deneyin.";
@@ -138,5 +138,74 @@ describe("/konu/[slug] failed state", () => {
 
     expect(robotsMetas(tree)).toEqual([]);
     expect(collectText(tree).join("")).toContain("Bu sayfada küme yok.");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// generateMetadata: the share/canonical identity of each hub page. The real
+// topicMetadata runs (only the fetcher is mocked above), so this pins the
+// wiring: slug + parsed ?sayfa= -> canonical and og:url agree, and the RSS
+// alternate survives the merge.
+// ---------------------------------------------------------------------------
+
+function meta(slug: string, sayfa?: string | string[]) {
+  return generateMetadata({
+    params: Promise.resolve({ slug }),
+    searchParams: Promise.resolve(sayfa === undefined ? {} : { sayfa }),
+  });
+}
+
+describe("/konu/[slug] generateMetadata", () => {
+  it("page 1: canonical and og:url are /konu/<slug>, and the RSS alternate is advertised", async () => {
+    const m = await meta("spor");
+
+    expect(m.alternates?.canonical).toBe("/konu/spor");
+    expect(m.openGraph?.url).toBe("/konu/spor");
+    expect(m.alternates?.types).toEqual({
+      "application/rss+xml": "/rss/spor.xml",
+    });
+    expect(m.title).toBe("Spor haberleri");
+    expect(m.openGraph?.title).toBe("Spor haberleri — Tayf");
+    expect(m.robots).toBeUndefined();
+  });
+
+  it('?sayfa=2: canonical and og:url both carry "?sayfa=2"', async () => {
+    const m = await meta("spor", "2");
+
+    expect(m.alternates?.canonical).toBe("/konu/spor?sayfa=2");
+    expect(m.openGraph?.url).toBe("/konu/spor?sayfa=2");
+    expect(m.alternates?.types).toEqual({
+      "application/rss+xml": "/rss/spor.xml",
+    });
+  });
+
+  it('?sayfa=999 is clamped: both carry "?sayfa=20"', async () => {
+    const m = await meta("spor", "999");
+
+    expect(m.alternates?.canonical).toBe("/konu/spor?sayfa=20");
+    expect(m.openGraph?.url).toBe("/konu/spor?sayfa=20");
+  });
+
+  it("a repeated ?sayfa= uses the first value, exactly like the page body", async () => {
+    const m = await meta("ekonomi", ["3", "7"]);
+
+    expect(m.alternates?.canonical).toBe("/konu/ekonomi?sayfa=3");
+    expect(m.openGraph?.url).toBe("/konu/ekonomi?sayfa=3");
+  });
+
+  it.each(["abc", "0", "-4", "1"])(
+    "?sayfa=%s falls back to page 1 (no query on the canonical or og:url)",
+    async (raw) => {
+      const m = await meta("dunya", raw);
+
+      expect(m.alternates?.canonical).toBe("/konu/dunya");
+      expect(m.openGraph?.url).toBe("/konu/dunya");
+    },
+  );
+
+  it("politika (redirect slug) and unknown slugs get {}: the redirect/404 is the answer, not a meta tag", async () => {
+    await expect(meta("politika")).resolves.toEqual({});
+    await expect(meta("saglik")).resolves.toEqual({});
+    await expect(meta("../admin")).resolves.toEqual({});
   });
 });

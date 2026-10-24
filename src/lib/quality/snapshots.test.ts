@@ -6,6 +6,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // (tests/_helpers/supabase-fake.ts) plus a mocked next/cache so the
 // "use cache" directive's cacheLife/cacheTag calls don't throw outside a
 // real Next.js request scope.
+//
+// 2026-10-24 /sources '—' incident: a failed read used to be cached for the
+// full 1 h `source-directory` life (cacheLife ran before the query). The
+// "cache lifetime" block at the end pins the fix: a failure is memoised for
+// `minutes` only.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -17,6 +22,8 @@ const fixture = vi.hoisted(() => ({
   data: [] as unknown[],
   error: null as { message: string } | null,
   lastState: null as unknown,
+  // a query that throws (client blew up) instead of answering with an error
+  throwOnQuery: false,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -25,6 +32,7 @@ const supabaseFake = await vi.hoisted(async () => {
     tables: {
       cluster_quality_snapshots: (state) => {
         fixture.lastState = state;
+        if (fixture.throwOnQuery) throw new Error("connection reset");
         if (fixture.error) return { data: null, error: fixture.error };
         return { data: fixture.data, error: null };
       },
@@ -36,6 +44,7 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import {
   getQualitySnapshots,
   shapeQualitySnapshots,
@@ -51,9 +60,15 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  fixture.throwOnQuery = false;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
+  // attemptCached logs every failed attempt with console.error
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -226,16 +241,84 @@ describe("getQualitySnapshots", () => {
     expect(state.limit).toBe(30);
   });
 
-  it("logs a PII-free '[quality] snapshots unavailable: ...' message on error", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("logs a PII-free '[quality-snapshots] error: ...' message once on error (attemptCached)", async () => {
     fixture.error = { message: "connection refused" };
 
     await getQualitySnapshots();
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      "[quality] snapshots unavailable: connection refused",
+    expect(console.error).toHaveBeenCalledTimes(1);
+    const logged = String(vi.mocked(console.error).mock.calls[0]![0]);
+    expect(logged).toMatch(/^\[quality-snapshots\] error: .*connection refused/);
+    expect(logged).not.toContain("test-service-role-key");
+  });
+});
+
+describe("getQualitySnapshots cache lifetime", () => {
+  it("a Supabase error resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+
+    await expect(getQualitySnapshots()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a thrown query resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.throwOnQuery = true;
+
+    await expect(getQualitySnapshots()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("missing Supabase env resolves null and is cached for minutes only", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getQualitySnapshots()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("success returns the shaped rows and is cached for source-directory, once", async () => {
+    fixture.data = [rawRow()];
+
+    const result = await getQualitySnapshots();
+
+    expect(result).toHaveLength(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("an empty successful read returns [] (not null) and keeps source-directory", async () => {
+    fixture.data = [];
+
+    await expect(getQualitySnapshots()).resolves.toEqual([]);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("tags the entry 'quality' before cacheLife runs (cacheTag precedes cacheLife), on success and failure", async () => {
+    await getQualitySnapshots();
+    expect(cacheTag).toHaveBeenCalledWith("quality");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
     );
 
-    errorSpy.mockRestore();
+    vi.mocked(cacheTag).mockClear();
+    vi.mocked(cacheLife).mockClear();
+    fixture.error = { message: "boom" };
+    await getQualitySnapshots();
+    expect(cacheTag).toHaveBeenCalledWith("quality");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
   });
 });

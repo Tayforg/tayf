@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 
 // Fetcher for /kalite (M-09) — reads the nightly `cluster_quality_snapshots`
@@ -30,11 +31,18 @@ import { createServerClient } from "@/lib/supabase/server";
 // a numeric string depending on the PostgREST/pg-driver path — shapeRow
 // below defends against both, plus a totally missing/errored query.
 //
-// Never throws: a throw inside "use cache" during prerender fails the
-// Vercel build (same discipline as src/lib/sources/active-count.ts and
-// src/lib/headline/status.ts). A Supabase error, a missing table (migration
-// pending), or missing env resolves to null; the page renders that as an
-// honest "unavailable" state instead of fabricating zeros.
+// Never throws: a throw inside "use cache" during prerender fails the Vercel
+// build (same discipline as src/lib/sources/active-count.ts and
+// src/lib/headline/status.ts), so the read is a raw `fetchQualitySnapshots`
+// that throws, wrapped by `attemptCached` inside `getQualitySnapshotsCached`.
+// A Supabase error, a missing table (migration pending), or missing env
+// resolves to null; the page renders that as an honest "unavailable" state
+// instead of fabricating zeros. The cache lifetime is chosen AFTER the attempt
+// (2026-10-24 /sources '—' incident): snapshots keep the 1 h `source-directory`
+// window, a failed read is cached for `minutes` only. (`cacheLife` used to run
+// before the query, so one timeout showed "unavailable" for the whole hour.)
+// No live retry; same shape as src/lib/clusters/timeline-query.ts, guarded by
+// tests/guards/cache-life-after-attempt.test.ts.
 
 export type QualitySizeHistogram = {
   "1": number;
@@ -153,35 +161,48 @@ export function shapeQualitySnapshots(
 
 const SNAPSHOT_LIMIT = 30;
 
-export async function getQualitySnapshots(): Promise<QualitySnapshot[] | null> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("quality");
+// Raw read: THROWS on a Supabase error so a failure can never be mistaken for
+// "no snapshot rows yet" (or for migration 059 landing before/after this
+// branch deploys).
+async function fetchQualitySnapshots(): Promise<QualitySnapshot[]> {
+  const supabase = createServerClient();
 
-  try {
-    const supabase = createServerClient();
+  const { data, error } = await supabase
+    .from("cluster_quality_snapshots")
+    .select(
+      "id, taken_at, window_hours, article_count, cluster_count, singleton_rate, size_histogram, source_diversity, precision_probe_count, recall_probe_count, blindspot_flip_rate",
+    )
+    .order("taken_at", { ascending: false })
+    .limit(SNAPSHOT_LIMIT)
+    .returns<QualitySnapshotRawRow[]>();
 
-    const { data, error } = await supabase
-      .from("cluster_quality_snapshots")
-      .select(
-        "id, taken_at, window_hours, article_count, cluster_count, singleton_rate, size_histogram, source_diversity, precision_probe_count, recall_probe_count, blindspot_flip_rate",
-      )
-      .order("taken_at", { ascending: false })
-      .limit(SNAPSHOT_LIMIT)
-      .returns<QualitySnapshotRawRow[]>();
-
-    if (error) {
-      // Never throw — see the file header. Swallow and return null so the
-      // "use cache" prerender never fails the build on a Supabase hiccup
-      // (or on migration 059 landing before/after this branch deploys).
-      console.error(`[quality] snapshots unavailable: ${error.message}`);
-      return null;
-    }
-
-    return shapeQualitySnapshots(data);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(`[quality] snapshots unavailable: ${message}`);
-    return null;
+  if (error) {
+    throw new Error(`quality snapshots query failed: ${error.message}`);
   }
+
+  return shapeQualitySnapshots(data);
+}
+
+// `attemptCached` keeps the throw from crossing the `"use cache"` boundary.
+// Lifetime follows the outcome: snapshots keep `source-directory`, a failed
+// attempt is memoised for `minutes` only. Exactly one `cacheLife` call per
+// invocation, after the attempt; `cacheTag` first.
+async function getQualitySnapshotsCached() {
+  "use cache";
+  cacheTag("quality");
+  const r = await attemptCached("quality-snapshots", fetchQualitySnapshots);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
+/**
+ * Latest nightly cluster-quality snapshots, newest first. `null` = the read
+ * failed (the page renders an honest "unavailable" state); `[]` = it read fine
+ * and no snapshot exists yet. Never throws.
+ */
+export async function getQualitySnapshots(): Promise<QualitySnapshot[] | null> {
+  const r = await getQualitySnapshotsCached();
+  return r.ok ? r.data : null;
 }
