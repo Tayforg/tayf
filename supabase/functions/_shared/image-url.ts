@@ -205,10 +205,13 @@ function parseNormalized(u: string): URL | null {
  * PLACEHOLDER_BASENAME. A resizer URL that wraps its origin in a `u=` query
  * value is checked on the wrapped origin as well.
  *
- * Render-only for now: callers null the URL at the query boundary, so the
- * hero and credit fall through to the next member's photo or to the logo
- * tier. Ingest still stores the URL and nothing is backfilled. Never throws;
- * null, empty, unparseable and non-http(s) input is simply `false`.
+ * Three layers use it. Ingest drops a placeholder at normalize time (the row
+ * gets a NULL image_url, which queues the og:image backfill). The og:image
+ * backfill rejects a placeholder too and counts it as an attempt, so it never
+ * stores one and cannot loop. The render filter stays as defence for
+ * historical rows: callers null the URL at the query boundary, so the hero and
+ * credit fall through to the next member's photo or to the logo tier. Never
+ * throws; null, empty, unparseable and non-http(s) input is simply `false`.
  */
 export function isPlaceholderImageUrl(u: string | null | undefined): boolean {
   try {

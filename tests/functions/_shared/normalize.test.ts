@@ -434,6 +434,130 @@ describe("normalize.ts gif-filter: animated GIFs are never stored as image_url",
   });
 });
 
+// ---------------------------------------------------------------------------
+// db-4 ingest half: publisher logo cards and 'son dakika' stand-ins are never
+// stored as articles.image_url. A NULL image_url is what queues the og:image
+// backfill (articles_image_enqueue trigger), so nulling here is enough for the
+// real photo to be found later. Fixture URLs are the verified prod rows already
+// used by tests/functions/_shared/image-url.test.ts.
+// ---------------------------------------------------------------------------
+describe("normalize.ts db-4 ingest half: placeholder images are never stored as image_url", () => {
+  const CNN =
+    "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg";
+  const YENI_SAFAK =
+    "https://img.piri.net/resim/imagecrop/2026/04/01/09/50/tr_son_dakika_530x530.jpg";
+  const ISCI_HABER =
+    "https://www.iscihaber.net/cropImages/1280x720/uploads/haberler/default_news_photo.jpg";
+  const HABERLER_COM = "https://foto.haberler.com/haber/2026/07/03/son-dakika_o.jpg";
+  const A_HABER =
+    "https://iaahbr.tmgrup.com.tr/c18248/1200/675/0/0/1200/675?u=https://iahbr.tmgrup.com.tr/Defaults/Upload/ahbr-default-1754911102530.png";
+
+  it("returns null image_url for a cnn-turk placeholder enclosure", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph1",
+      enclosure: { url: CNN, type: "image/jpeg" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("skips a placeholder enclosure and uses the real media:thumbnail", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph2",
+      enclosure: { url: CNN, type: "image/jpeg" },
+      mediaThumbnail: { $: { url: "https://cdn.test/real-photo.jpg" } },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/real-photo.jpg");
+  });
+
+  it("skips a placeholder media:content and uses the media:group thumbnail", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph3",
+      mediaContent: { $: { url: HABERLER_COM } },
+      mediaGroup: { "media:thumbnail": { $: { url: "https://cdn.test/g.jpg" } } },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/g.jpg");
+  });
+
+  it("returns null for a yeni-safak tr_son_dakika itemImage", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph4",
+      itemImage: YENI_SAFAK,
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("returns null for an inline <img src> that is the isci-haber default photo", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph5",
+      content: `<p><img src="${ISCI_HABER}" alt=""></p>`,
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("returns null for an a-haber resizer URL wrapping the default image in u=", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph6",
+      enclosure: { url: A_HABER, type: "image/jpeg" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("returns null when every candidate on every path is a placeholder", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph7",
+      enclosure: { url: CNN },
+      mediaThumbnail: { $: { url: HABERLER_COM } },
+      itemImage: YENI_SAFAK,
+      content: `<img src="${ISCI_HABER}">`,
+    });
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("falls through a placeholder itemImage to a real inline <img>", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph8",
+      itemImage: YENI_SAFAK,
+      content: '<p><img src="https://cdn.test/inline-photo.jpg" alt=""></p>',
+    });
+    expect(row!.image_url).toBe("https://cdn.test/inline-photo.jpg");
+  });
+
+  it("leaves a normal article photo unchanged", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph9",
+      enclosure: { url: "https://cdn.test/photos/2026/10/24/erdogan-konusma.jpg", type: "image/jpeg" },
+    });
+    expect(row!.image_url).toBe("https://cdn.test/photos/2026/10/24/erdogan-konusma.jpg");
+  });
+
+  it("does not reject an article slug that merely contains son-dakika", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ph10",
+      enclosure: {
+        url: "https://cdn.test/img/son-dakika-erdogan-aciklama-18123456.jpg",
+        type: "image/jpeg",
+      },
+    });
+    expect(row!.image_url).toBe(
+      "https://cdn.test/img/son-dakika-erdogan-aciklama-18123456.jpg",
+    );
+  });
+});
+
 describe("normalize.ts ingest-hygiene: legal-notice filter", () => {
   it("returns null for a court notice title", () => {
     const row = mod!.normalizeItem(source, {

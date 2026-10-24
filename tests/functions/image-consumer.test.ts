@@ -610,3 +610,134 @@ describe("image-consumer Edge Function", () => {
     expect(pgmqState.archived.length + pgmqState.deleted.length).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// db-4 ingest half: the og:image backfill must never store a publisher logo
+// card or a 'son dakika' stand-in. A rejected placeholder is counted as an
+// attempt (bumpAttempt, parked after 5) and the message is archived, so it
+// cannot loop. The mocked `isValidImageUrl` above accepts any http(s) URL on
+// purpose: only the explicit isPlaceholderImageUrl check in the SUT stands
+// between a placeholder og:image and the row.
+// ---------------------------------------------------------------------------
+
+describe("image-consumer db-4 ingest half: placeholder og:image is never stored", () => {
+  const CNN =
+    "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg";
+
+  type FixtureRow = {
+    id: string;
+    url: string;
+    image_url: string | null;
+    image_backfill_attempts: number;
+  };
+
+  function seedArticle(id: string, attempts: number, ogImage: string): void {
+    const row: FixtureRow = {
+      id,
+      url: `https://news.example.com/${id}`,
+      image_url: null,
+      image_backfill_attempts: attempts,
+    };
+    fakeArticles[id] = row as unknown as { url: string; image_url?: string | null };
+    htmlResponses[row.url] =
+      "<html><head>" +
+      `<meta property="og:image" content="${ogImage}" />` +
+      "</head></html>";
+  }
+
+  function patchesFor(id: string): Array<Record<string, unknown>> {
+    return supabaseFake.fake.calls
+      .update("articles")
+      .filter((m) => m.state.eq.some((p) => p.col === "id" && p.val === id))
+      .map((m) => (m.patch ?? {}) as Record<string, unknown>);
+  }
+
+  async function runOne(
+    msgId: number,
+    articleId: string,
+  ): Promise<Record<string, number>> {
+    const handler = await importHandler();
+    if (!handler) throw new Error("handler not registered");
+    pgmqState.pending = [
+      { msg_id: msgId, read_ct: 1, message: { article_id: articleId } },
+    ];
+    const res = await handler(
+      authedRequest("http://localhost/image-consumer", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, number>;
+  }
+
+  it("rejects a cnn-turk placeholder og:image: no image_url write, attempts N -> N+1, archived, summary counts it", async () => {
+    seedArticle("art-ph-1", 2, CNN);
+
+    const summary = await runOne(301, "art-ph-1");
+
+    const patches = patchesFor("art-ph-1");
+    // Tripwire: the bump DID go through the fake, so the next assertion is
+    // not green merely because the chain no-op'd.
+    expect(patches).toHaveLength(1);
+    expect(patches.some((p) => "image_url" in p)).toBe(false);
+    expect(patches[0]?.image_backfill_attempts).toBe(3);
+    expect(pgmqState.archived).toContain(301);
+    expect(pgmqState.deleted).not.toContain(301);
+    expect(summary.placeholders).toBe(1);
+    expect(summary.found).toBe(0);
+    expect(summary.notFound).toBe(0);
+    expect(summary.errored).toBe(0);
+    expect(summary.drained).toBe(1);
+  });
+
+  it("parks the row (attempted_at about 7 days ahead) when a placeholder is the 5th attempt", async () => {
+    seedArticle("art-ph-2", 4, CNN);
+
+    const before = Date.now();
+    const summary = await runOne(302, "art-ph-2");
+
+    const patches = patchesFor("art-ph-2");
+    expect(patches).toHaveLength(1);
+    expect(patches.some((p) => "image_url" in p)).toBe(false);
+    expect(patches[0]?.image_backfill_attempts).toBe(5);
+    const parkedAt = Date.parse(String(patches[0]?.image_backfill_attempted_at));
+    const week = 7 * 24 * 3600 * 1000;
+    expect(parkedAt).toBeGreaterThanOrEqual(before + week - 1000);
+    expect(parkedAt).toBeLessThanOrEqual(Date.now() + week + 1000);
+    expect(pgmqState.archived).toContain(302);
+    expect(summary.placeholders).toBe(1);
+  });
+
+  it.each([
+    ["a basename-pattern placeholder", "https://foto.haberler.com/haber/2026/07/03/son-dakika_o.jpg"],
+    [
+      "a resizer URL wrapping a placeholder in u=",
+      "https://iaahbr.tmgrup.com.tr/c18248/1200/675/0/0/1200/675?u=https://iahbr.tmgrup.com.tr/Defaults/Upload/ahbr-default-1754911102530.png",
+    ],
+  ])("rejects %s the same way", async (_label, og) => {
+    seedArticle("art-ph-3", 0, og);
+
+    const summary = await runOne(303, "art-ph-3");
+
+    const patches = patchesFor("art-ph-3");
+    expect(patches.some((p) => "image_url" in p)).toBe(false);
+    expect(patches[0]?.image_backfill_attempts).toBe(1);
+    expect(pgmqState.archived).toContain(303);
+    expect(summary.placeholders).toBe(1);
+    expect(summary.found).toBe(0);
+  });
+
+  it("still backfills a real og:image and reports placeholders 0", async () => {
+    seedArticle("art-ph-4", 2, "https://cdn.example.com/real-cover.jpg");
+
+    const summary = await runOne(304, "art-ph-4");
+
+    expect(patchesFor("art-ph-4")).toContainEqual(
+      expect.objectContaining({
+        image_url: "https://cdn.example.com/real-cover.jpg",
+        image_backfill_attempts: 0,
+      }),
+    );
+    expect(pgmqState.archived).toContain(304);
+    expect(summary.found).toBe(1);
+    expect(summary.placeholders).toBe(0);
+  });
+});

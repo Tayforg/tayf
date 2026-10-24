@@ -22,6 +22,11 @@ const fixture = vi.hoisted(() => ({
   data: [] as unknown[],
   error: null as { message: string } | null,
   lastState: null as unknown,
+  // migration 119: every sources select string, in call order, and a switch that
+  // answers a select naming fetch_items_count with Postgres 42703 (column missing)
+  selects: [] as string[],
+  failNewColumns: false,
+  retryError: null as { message: string; code?: string } | null,
 }));
 
 const tracker = vi.hoisted(() => {
@@ -53,6 +58,22 @@ const supabaseFake = await vi.hoisted(async () => {
     tables: {
       sources: (state: unknown) => {
         fixture.lastState = state;
+        const select = String(
+          (state as { selectArgs?: unknown[] }).selectArgs?.[0] ?? "",
+        );
+        fixture.selects.push(select);
+        if (fixture.failNewColumns && select.includes("fetch_items_count")) {
+          return {
+            data: null,
+            error: {
+              message: "column sources.fetch_items_count does not exist",
+              code: "42703",
+            },
+          };
+        }
+        if (fixture.failNewColumns && fixture.retryError) {
+          return { data: null, error: fixture.retryError };
+        }
         return { data: fixture.data, error: fixture.error };
       },
     },
@@ -90,6 +111,9 @@ beforeEach(() => {
   fixture.data = [];
   fixture.error = null;
   fixture.lastState = null;
+  fixture.selects = [];
+  fixture.failNewColumns = false;
+  fixture.retryError = null;
   tracker.calls.length = 0;
 });
 
@@ -250,6 +274,116 @@ describe("toFeedStatusRows quarantine [migration 074]", () => {
     const [row] = toFeedStatusRows([rawRow({ fetch_fail_streak: undefined, fetch_quarantined_until: undefined })], NOW);
     expect(row!.failStreak).toBe(0);
     expect(row!.quarantined).toBe(false);
+  });
+});
+
+describe("toFeedStatusRows silenceReason [migration 119]", () => {
+  const HOUR = 60 * 60 * 1000;
+  // A source that delivered nothing for 4 days: silent in every case below.
+  const silentLatest = [{ published_at: new Date(NOW - 96 * HOUR).toISOString() }];
+  const reasonOf = (overrides: Partial<SourceFeedStatusRawRow>) => {
+    const [row] = toFeedStatusRows([rawRow({ latest: silentLatest, ...overrides })], NOW);
+    expect(row!.silent).toBe(true);
+    return row!.silenceReason;
+  };
+
+  it("is null for a source that delivered in the last 72 h, even if its feed looks frozen", () => {
+    const [row] = toFeedStatusRows(
+      [rawRow({ fetch_items_count: 0, fetch_newest_item_at: null })],
+      NOW,
+    );
+    expect(row!.silent).toBe(false);
+    expect(row!.silenceReason).toBeNull();
+  });
+
+  it("a feed that answers 200 but whose newest item is 100 h old is akis_donmus", () => {
+    expect(
+      reasonOf({
+        fetch_last_status: 200,
+        fetch_items_count: 12,
+        fetch_newest_item_at: new Date(NOW - 100 * HOUR).toISOString(),
+      }),
+    ).toBe("akis_donmus");
+  });
+
+  it("a feed that answers 200 whose newest item is only 30 h old (a paused outlet) is sessiz", () => {
+    expect(
+      reasonOf({
+        fetch_last_status: 200,
+        fetch_items_count: 12,
+        fetch_newest_item_at: new Date(NOW - 30 * HOUR).toISOString(),
+      }),
+    ).toBe("sessiz");
+  });
+
+  it("an empty feed (count 0) is akis_donmus", () => {
+    expect(reasonOf({ fetch_items_count: 0, fetch_newest_item_at: null })).toBe("akis_donmus");
+  });
+
+  it("a blocked feed (403, 0, 500) or an unknown status is erisim_yok, even with a stale newest item", () => {
+    const stale = new Date(NOW - 30 * HOUR).toISOString();
+    for (const status of [403, 404, 500, 0]) {
+      expect(reasonOf({ fetch_last_status: status, fetch_items_count: 12, fetch_newest_item_at: stale }), String(status)).toBe(
+        "erisim_yok",
+      );
+    }
+    expect(reasonOf({ fetch_last_status: null })).toBe("erisim_yok");
+  });
+
+  it("a quarantined source and a source with a fail streak are erisim_yok", () => {
+    expect(
+      reasonOf({ fetch_fail_streak: 21, fetch_quarantined_until: new Date(NOW + HOUR).toISOString() }),
+    ).toBe("erisim_yok");
+    expect(reasonOf({ fetch_last_status: 200, fetch_fail_streak: 2 })).toBe("erisim_yok");
+  });
+
+  it("an expired quarantine with a zero streak does not make it erisim_yok", () => {
+    expect(
+      reasonOf({
+        fetch_fail_streak: 0,
+        fetch_quarantined_until: new Date(NOW - HOUR).toISOString(),
+        fetch_items_count: 10,
+        fetch_newest_item_at: new Date(NOW - HOUR).toISOString(),
+      }),
+    ).toBe("sessiz");
+  });
+
+  it("304 counts as reachable: a current feed is sessiz", () => {
+    expect(
+      reasonOf({
+        fetch_last_status: 304,
+        fetch_items_count: 10,
+        fetch_newest_item_at: new Date(NOW - HOUR).toISOString(),
+      }),
+    ).toBe("sessiz");
+  });
+
+  it("a source never measured (columns null or absent) and reachable is sessiz", () => {
+    expect(reasonOf({ fetch_items_count: null, fetch_newest_item_at: null })).toBe("sessiz");
+    expect(reasonOf({})).toBe("sessiz");
+  });
+
+  it("an undated feed (count > 0, newest null) is sessiz, not frozen", () => {
+    expect(reasonOf({ fetch_items_count: 8, fetch_newest_item_at: null })).toBe("sessiz");
+  });
+
+  it("exactly 72 h is not frozen, 72 h + 1 ms is", () => {
+    expect(
+      reasonOf({ fetch_items_count: 8, fetch_newest_item_at: new Date(NOW - 72 * HOUR).toISOString() }),
+    ).toBe("sessiz");
+    expect(
+      reasonOf({ fetch_items_count: 8, fetch_newest_item_at: new Date(NOW - 72 * HOUR - 1).toISOString() }),
+    ).toBe("akis_donmus");
+  });
+
+  it("never exposes the raw timestamps or the count on the shaped row", () => {
+    const [row] = toFeedStatusRows(
+      [rawRow({ latest: silentLatest, fetch_items_count: 8, fetch_newest_item_at: new Date(NOW - 30 * HOUR).toISOString() })],
+      NOW,
+    );
+    expect(Object.keys(row!)).not.toContain("fetch_newest_item_at");
+    expect(Object.keys(row!)).not.toContain("fetch_items_count");
+    expect(JSON.stringify(row)).not.toContain(new Date(NOW - 30 * HOUR).toISOString());
   });
 });
 
@@ -421,6 +555,80 @@ describe("getSourceFeedStatuses", () => {
     const select = String(state.selectArgs[0] ?? "");
     expect(select).toContain("fetch_fail_streak");
     expect(select).toContain("fetch_quarantined_until");
+  });
+
+  it("migration 119: selects fetch_newest_item_at and fetch_items_count", async () => {
+    await getSourceFeedStatuses();
+    expect(fixture.selects).toHaveLength(1);
+    expect(fixture.selects[0]).toContain("fetch_newest_item_at");
+    expect(fixture.selects[0]).toContain("fetch_items_count");
+  });
+
+  it("migration 119: maps the reasons end-to-end through the fake Supabase client", async () => {
+    fixture.data = [
+      rawRow({
+        slug: "donmus",
+        name: "Donmuş",
+        latest: [{ published_at: new Date(Date.now() - 96 * 3_600_000).toISOString() }],
+        fetch_items_count: 5,
+        fetch_newest_item_at: new Date(Date.now() - 80 * 3_600_000).toISOString(),
+        fetch_last_at: new Date().toISOString(),
+      }),
+      rawRow({
+        slug: "engelli",
+        name: "Engelli",
+        latest: [{ published_at: new Date(Date.now() - 96 * 3_600_000).toISOString() }],
+        fetch_last_status: 403,
+      }),
+    ];
+    const rows = await getSourceFeedStatuses();
+    expect(rows!.map((r) => [r.slug, r.silenceReason])).toEqual([
+      ["donmus", "akis_donmus"],
+      ["engelli", "erisim_yok"],
+    ]);
+  });
+
+  it("migration 119: on Postgres 42703 (column missing) it retries ONCE with the legacy select and still returns rows", async () => {
+    fixture.failNewColumns = true;
+    fixture.data = [rawRow()];
+
+    const rows = await getSourceFeedStatuses();
+
+    expect(rows).not.toBeNull();
+    expect(rows).toHaveLength(1);
+    expect(rows![0]!.slug).toBe("ornek-kaynak");
+    expect(fixture.selects).toHaveLength(2);
+    expect(fixture.selects[0]).toContain("fetch_items_count");
+    expect(fixture.selects[1]).not.toContain("fetch_items_count");
+    expect(fixture.selects[1]).not.toContain("fetch_newest_item_at");
+    // the legacy select is the one that ran before 119, query shape intact
+    expect(fixture.selects[1]).toContain("fetch_quarantined_until");
+    expect(fixture.selects[1]).toContain("latest:articles(published_at)");
+    // the retry keeps the whole query shape (active filter, upper bound, ordering)
+    const state = fixture.lastState as BuilderState;
+    expect(state.eq).toContainEqual({ col: "active", val: true });
+    expect(state.lte.find((l) => l.col === "latest.published_at")).toBeDefined();
+  });
+
+  it("migration 119: the legacy rows of a 42703 fallback classify as sessiz when silent", async () => {
+    fixture.failNewColumns = true;
+    fixture.data = [rawRow({ latest: [{ published_at: new Date(Date.now() - 96 * 3_600_000).toISOString() }] })];
+    const rows = await getSourceFeedStatuses();
+    expect(rows![0]!.silent).toBe(true);
+    expect(rows![0]!.silenceReason).toBe("sessiz");
+  });
+
+  it("migration 119: any other error does not retry and resolves to null", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+    await expect(getSourceFeedStatuses()).resolves.toBeNull();
+    expect(fixture.selects).toHaveLength(1);
+  });
+
+  it("migration 119: an error on the retry resolves to null too (never throws)", async () => {
+    fixture.failNewColumns = true;
+    fixture.retryError = { message: "canceling statement due to statement timeout", code: "57014" };
+    await expect(getSourceFeedStatuses()).resolves.toBeNull();
+    expect(fixture.selects).toHaveLength(2);
   });
 
   it("A-10 / DURUM-01: has NO gte lower bound on latest.published_at", async () => {

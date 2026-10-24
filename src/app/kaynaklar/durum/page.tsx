@@ -12,6 +12,7 @@ import {
   summariseFeedStatus,
 } from "@/lib/sources/feed-status";
 import { SOURCE_KIND_META } from "@/lib/sources/kind";
+import { SILENCE_REASON_LABEL, type SilenceReason } from "@/lib/sources/silence-reason";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import type { MediaDnaZone } from "@/types";
 
@@ -46,6 +47,16 @@ export const metadata: Metadata = staticPageMetadata({
 });
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
+
+// Why a source is silent (migration 119) decides the badge colour. The classes
+// are literals on purpose: Tailwind only emits what it can read, and the 800 /
+// 300 / 400 text shades keep the 11 px label at WCAG 1.4.3 AA on the 15% tint
+// in both themes (the old amber-700 / dark:amber-500 badge was below it).
+const SILENCE_BADGE_CLASS: Record<SilenceReason, string> = {
+  akis_donmus: "bg-sky-500/15 border-sky-500/30 text-sky-800 dark:text-sky-300",
+  erisim_yok: "bg-rose-500/15 border-rose-500/30 text-rose-800 dark:text-rose-300",
+  sessiz: "bg-amber-500/15 border-amber-500/30 text-amber-800 dark:text-amber-400",
+};
 
 const itemsPerDayFormatter = new Intl.NumberFormat("tr-TR", {
   maximumFractionDigits: 1,
@@ -160,6 +171,17 @@ export function KaynakDurumBody({
         )}
       </p>
 
+      {summary.silent > 0 && (
+        <p className="text-xs text-muted-foreground">
+          Sessiz kaynakların yanındaki etiket nedenini söyler:{" "}
+          <strong>akış donmuş</strong> — besleme yanıt veriyor ama içindeki en
+          yeni haber 72 saatten eski, yani besleme güncellenmiyor;{" "}
+          <strong>erişim yok</strong> — besleme son denemede alınamadı ya da
+          karantinada; <strong>sessiz</strong> — besleme güncel, ama son 72
+          saatte Tayf&apos;a yeni haber eklenmedi.
+        </p>
+      )}
+
       <div className="rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6">
         <h2 id="durum-tablo" className="sr-only">
           Aktif kaynakların besleme durumu
@@ -241,8 +263,12 @@ export function KaynakDurumBody({
                     <td className="py-2.5">
                       <span className="inline-flex items-center gap-1.5">
                         {row.silent ? (
-                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[11px] text-amber-700 dark:text-amber-500 font-medium">
-                            sessiz
+                          <span
+                            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${
+                              SILENCE_BADGE_CLASS[row.silenceReason ?? "sessiz"]
+                            }`}
+                          >
+                            {SILENCE_REASON_LABEL[row.silenceReason ?? "sessiz"]}
                           </span>
                         ) : (
                           <span className="text-muted-foreground">—</span>

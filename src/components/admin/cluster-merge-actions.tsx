@@ -12,6 +12,11 @@ import type { MergeClusterRef, MergeQueueOrigin } from "@/lib/admin/merge-queue"
  * Farklı hikaye (POST action "dismiss": only hides the pair from this queue,
  * story_thread_candidates is untouched). Modeled on story-threads-actions.tsx:
  * the server's response text is never shown, only the fixed Turkish lines.
+ *
+ * origin "manual" is the Olası ikiz kümeler list: the pair is not in the queue,
+ * so there is nothing to dismiss (the dismiss API accepts only thread|recall)
+ * and "Farklı hikaye" is not rendered. Merge accepts "manual" and logs it as
+ * "Elle".
  */
 
 const GENERIC_ERROR = "İşlem başarısız, tekrar deneyin.";
@@ -58,7 +63,7 @@ export function ClusterMergeActions({
   a: MergeClusterRef;
   b: MergeClusterRef;
   defaultTargetId: string;
-  origin: MergeQueueOrigin;
+  origin: MergeQueueOrigin | "manual";
 }) {
   const { isPending, error, post } = useAdminPost();
   const [targetId, setTargetId] = useState(defaultTargetId);
@@ -92,16 +97,18 @@ export function ClusterMergeActions({
         >
           Yönü değiştir
         </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className={`${BTN} text-destructive/60 hover:text-destructive`}
-          disabled={isPending}
-          onClick={() => post({ action: "dismiss", a: a.id, b: b.id, origin })}
-        >
-          Farklı hikaye
-        </Button>
+        {origin === "manual" ? null : (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className={`${BTN} text-destructive/60 hover:text-destructive`}
+            disabled={isPending}
+            onClick={() => post({ action: "dismiss", a: a.id, b: b.id, origin })}
+          >
+            Farklı hikaye
+          </Button>
+        )}
       </div>
     </div>
   );

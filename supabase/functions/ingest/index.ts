@@ -35,6 +35,14 @@
 //      only after all its rows were upserted, deduped or skipped as already
 //      stored (silent-feeds): a feed whose rows were starved by the deadline
 //      or failed must be re-offered next cycle, not answered with a 304.
+//      Feed freshness (migration 119) rides along: the newest item date the feed
+//      itself reports and its item count, read from the raw parsed items (see
+//      _shared/rss/feed-freshness.ts). It describes the feed, not row
+//      durability, so it is written even when the validators are withheld, and
+//      never on a 304, a body-hash hit, a failure or a deferred parse (the
+//      stored values stay). A source whose count is still NULL is bootstrapped
+//      once: no conditional request, no body-hash short-circuit, one parse (a
+//      frozen feed with a byte-identical body is otherwise never parsed again).
 //
 // CPU budget: the platform kills an invocation that burns too much CPU (HTTP
 // 546, reason CPUTime) and a killed cycle loses everything it fetched. The CPU
@@ -52,6 +60,8 @@
 
 import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
+import { computeFeedFreshness, storableItemDate } from "../_shared/rss/feed-freshness.ts";
+import type { FeedFreshness } from "../_shared/rss/feed-freshness.ts";
 import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
 import { canonicalizeUrl, normalizeArticles } from "../_shared/rss/normalize.ts";
 import { sourceArticleKeyFor } from "../_shared/rss/article-key.ts";
@@ -69,6 +79,7 @@ import {
   upsertWithBisect,
 } from "./order.ts";
 import type { BisectUpsertResult } from "./order.ts";
+import { FETCH_STATE_WRITE_MAX_CALLS, isRowScopedPgError } from "./fetch-state.ts";
 import { collectSourceIds, partitionWithRowErrorGrace } from "./settle.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
@@ -204,7 +215,22 @@ interface SourceRow extends RssSource {
   fetch_last_at: string | null;
   fetch_fail_streak: number | null;
   fetch_quarantined_until: string | null;
+  // Feed freshness (migration 119). Optional on purpose: a row read with the
+  // legacy select (119 not applied yet) has neither key. `fetch_items_count ===
+  // null` (strictly) means "never measured" and bootstraps the source; an
+  // `undefined` one is a legacy row and never does.
+  fetch_newest_item_at?: string | null;
+  fetch_items_count?: number | null;
 }
+
+// The sources select. The legacy string is what ran before migration 119; the
+// current one adds the two freshness columns. A database without 119 answers
+// the current one with Postgres error 42703 (undefined column), and the cycle
+// retries ONCE with the legacy string: a missing column must never take ingest
+// down.
+const SOURCES_SELECT_LEGACY =
+  "id, name, slug, url, rss_url, fetch_etag, fetch_last_modified, fetch_body_hash, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until";
+const SOURCES_SELECT = `${SOURCES_SELECT_LEGACY}, fetch_newest_item_at, fetch_items_count`;
 
 // ---------------------------------------------------------------------------
 // Concurrency-bounded pool
@@ -329,6 +355,10 @@ interface CycleStats {
   // Body bytes of the feeds this cycle admitted to a parse. Summary and HTTP
   // JSON only: there is no `ingest_cycles` column for it.
   parsedBytes: number;
+  // Feed freshness (migration 119): sources parsed this cycle because their
+  // fetch_items_count was still NULL (the one-time bootstrap). Summary line and
+  // HTTP JSON only: there is no `ingest_cycles` column for it.
+  freshnessBootstraps: number;
   durationMs: number;
 }
 
@@ -761,6 +791,11 @@ interface SourceFetchState {
   fetch_last_at: string;
   fetch_fail_streak: number;
   fetch_quarantined_until: string | null;
+  // Feed freshness (migration 119). PRESENT only when this cycle parsed the
+  // feed; every other outcome omits both keys so the writer keeps the stored
+  // pair (a key that is merely undefined would still be a key in a test double).
+  fetch_newest_item_at?: string | null;
+  fetch_items_count?: number | null;
 }
 
 // Builds the row to persist for one attempted source this cycle. `fresh`
@@ -772,14 +807,17 @@ interface SourceFetchState {
 // 304/body-hash "not modified" resets the streak; any `result.error`
 // (including a 2xx that failed to parse) advances it and, past
 // `QUARANTINE_AFTER_FAILURES`, sets an escalating `fetch_quarantined_until`.
+// `freshness` (migration 119) is passed only by a cycle that parsed the feed;
+// when it is absent the two freshness keys are OMITTED, not nulled.
 function buildFetchStateUpdate(
   source: SourceRow,
   status: number,
   ok: boolean,
   fresh?: { etag: string | null; lastModified: string | null; bodyHash: string | null },
+  freshness?: FeedFreshness,
 ): SourceFetchState {
   const quarantine = nextQuarantineState(source.fetch_fail_streak, ok, Date.now());
-  return {
+  const state: SourceFetchState = {
     fetch_etag: fresh ? fresh.etag : source.fetch_etag,
     fetch_last_modified: fresh ? fresh.lastModified : source.fetch_last_modified,
     fetch_body_hash: fresh ? fresh.bodyHash : source.fetch_body_hash,
@@ -787,6 +825,15 @@ function buildFetchStateUpdate(
     fetch_last_at: new Date().toISOString(),
     ...quarantine,
   };
+  if (freshness) {
+    // `computeFeedFreshness` already ignores implausible dates; the storable
+    // bound is checked once more on the way out because Postgres refuses a
+    // year-0 or negative-year timestamp for the WHOLE batch (see
+    // persistSourceFetchState), and this is third-party input.
+    state.fetch_newest_item_at = storableItemDate(freshness.newestItemAt);
+    state.fetch_items_count = freshness.itemsCount;
+  }
+  return state;
 }
 
 // Best-effort persistence of updated fetch validators back onto `sources`
@@ -796,7 +843,12 @@ function buildFetchStateUpdate(
 // re-fetching every feed cold. One batched write (the
 // `ingest_set_source_fetch_state` RPC from migration 041 -- a plain
 // UPDATE ... FROM jsonb_to_recordset) covers every source actually
-// attempted this cycle. Deliberately NOT a PostgREST upsert: that is
+// attempted this cycle. A batch Postgres refuses for a reason that belongs to
+// one row's data (SQLSTATE class 22/23, e.g. a year-0 timestamp) is retried in
+// halves, so the bad row is dropped alone instead of erasing every other
+// source's validators, fail streak and freshness (migration 119); any other
+// failure (timeout, connection, permission) is NOT split, and the retries are
+// capped at FETCH_STATE_WRITE_MAX_CALLS. Deliberately NOT a PostgREST upsert: that is
 // INSERT ... ON CONFLICT (id) DO UPDATE, and Postgres checks `sources`'
 // NOT NULL columns (name, slug, url, rss_url, bias) on the proposed row
 // BEFORE the conflict arbiter, so an id + five-column payload fails with
@@ -809,12 +861,41 @@ async function persistSourceFetchState(
 ): Promise<void> {
   if (updates.size === 0) return;
   const rows = [...updates.entries()].map(([id, state]) => ({ id, ...state }));
+  let calls = 0;
+  // Set when a failure is not about a row's data: splitting would only repeat it.
+  let stop = false;
   try {
-    const { error } = await supabase.rpc("ingest_set_source_fetch_state", {
-      p_rows: rows,
-    });
-    if (error) {
-      console.error(`[ingest] source fetch-state write failed: ${error.message}`);
+    const result = await upsertWithBisect(
+      rows,
+      async (batch) => {
+        calls++;
+        try {
+          const { error } = await supabase.rpc("ingest_set_source_fetch_state", {
+            p_rows: batch,
+          });
+          if (!error) return { inserted: batch.length, error: null };
+          if (!isRowScopedPgError(error.code)) stop = true;
+          return { inserted: 0, error: error.message };
+        } catch (err) {
+          stop = true;
+          return { inserted: 0, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+      {
+        isPastDeadline: () => stop || calls >= FETCH_STATE_WRITE_MAX_CALLS,
+        onRowError: (row, message) =>
+          console.error(`[ingest] source fetch-state write dropped source ${row.id}: ${message}`),
+      },
+    );
+    if (result.firstError !== null) {
+      console.error(
+        `[ingest] source fetch-state write failed: ${result.firstError} (${calls} call(s), ${result.rowErrors + result.skipped} of ${rows.length} row(s) not written)`,
+      );
+    }
+    if (result.skipped > 0 && !stop) {
+      console.error(
+        `[ingest] source fetch-state write: call cap (${FETCH_STATE_WRITE_MAX_CALLS}) reached, ${result.skipped} row(s) not written`,
+      );
     }
   } catch (err) {
     console.error("[ingest] source fetch-state write threw", err);
@@ -917,6 +998,7 @@ async function runCycle(): Promise<CycleStats> {
     parseDeferred: 0,
     parseDeferredMaxStreak: 0,
     parsedBytes: 0,
+    freshnessBootstraps: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -952,19 +1034,23 @@ async function runCycleBody(
   stats: CycleStats,
   fetchStateUpdates: Map<string, SourceFetchState>,
 ): Promise<CycleStats> {
-  const { data: sources, error: sourcesError } = await supabase
-    .from("sources")
-    .select(
-      "id, name, slug, url, rss_url, fetch_etag, fetch_last_modified, fetch_body_hash, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until",
-    )
-    .eq("active", true)
-    .order("slug");
+  const selectActiveSources = (columns: string) =>
+    supabase.from("sources").select(columns).eq("active", true).order("slug");
+  let { data: sources, error: sourcesError } = await selectActiveSources(SOURCES_SELECT);
+  if (sourcesError?.code === "42703") {
+    // Migration 119 is not applied yet: carry on with the select that ran
+    // before it (no freshness, no bootstrap). Once, never a loop.
+    console.warn(
+      "[ingest] sources.fetch_newest_item_at / fetch_items_count missing (migration 119 not applied?): legacy select",
+    );
+    ({ data: sources, error: sourcesError } = await selectActiveSources(SOURCES_SELECT_LEGACY));
+  }
 
   if (sourcesError) {
     stats.durationMs = Date.now() - startedAt;
     throw new Error(`fetch sources failed: ${sourcesError.message}`);
   }
-  const liveSources = (sources ?? []) as SourceRow[];
+  const liveSources = (sources ?? []) as unknown as SourceRow[];
   stats.sources = liveSources.length;
   if (liveSources.length === 0) {
     stats.durationMs = Date.now() - startedAt;
@@ -1012,6 +1098,9 @@ async function runCycleBody(
   // database, since we write the database from that same state.
   for (const source of toFetch) {
     if (conditionalCache.has(source.id)) continue;
+    // Feed freshness bootstrap (migration 119): a source never measured must be
+    // fetched without validators once, so it is not hydrated.
+    if (source.fetch_items_count === null) continue;
     if (source.fetch_etag || source.fetch_last_modified) {
       conditionalCache.set(source.id, {
         etag: source.fetch_etag ?? undefined,
@@ -1038,6 +1127,7 @@ async function runCycleBody(
       source: SourceRow;
       status: number;
       fresh: { etag: string | null; lastModified: string | null; bodyHash: string | null };
+      freshness: FeedFreshness;
     }
   >();
   // Sources with at least one row that was skipped, never attempted or failed.
@@ -1050,6 +1140,13 @@ async function runCycleBody(
     toFetch,
     FETCH_CONCURRENCY,
     async (source) => {
+      // Feed freshness bootstrap (migration 119): `=== null` strictly, so a
+      // legacy row (the key is undefined) never bootstraps. A warm instance may
+      // still hold validators for it, so they go BEFORE the snapshot below: the
+      // request is unconditional and, if the parse is deferred, the next cycle
+      // starts from an empty entry too.
+      const bootstrap = source.fetch_items_count === null;
+      if (bootstrap) conditionalCache.delete(source.id);
       // Snapshot BEFORE the call: `fetchFeed` overwrites the entry on a 2xx,
       // and a deferred source must get its previous validators back.
       const cacheBefore = conditionalCache.get(source.id);
@@ -1057,7 +1154,7 @@ async function runCycleBody(
       const result = await fetchFeed(source, {
         conditionalCache,
         timeoutMs: FETCH_TIMEOUT_MS,
-        knownBodyHash: source.fetch_body_hash ?? undefined,
+        knownBodyHash: bootstrap ? undefined : (source.fetch_body_hash ?? undefined),
         // Asked only when a changed body is about to be decoded and parsed.
         admitParse: (bodyBytes) => budget.admit(bodyBytes, priorityIds.has(source.id)),
       });
@@ -1164,7 +1261,19 @@ async function runCycleBody(
       // One nowMs per fetched source -- every item off THIS feed clamps and
       // (for cnn-turk) corrects against the same instant (migration 074).
       const sourceNowMs = Date.now();
-      const normalized = normalizeArticles(source, result.items, sourceNowMs);
+      // Feed freshness (migration 119): the newest item date the feed reports
+      // and its raw item count, off the parsed items (never the normalised
+      // published_at, which falls back to "now" for an unparseable date).
+      const freshness = computeFeedFreshness(result.items, sourceNowMs, source.slug);
+      if (bootstrap) stats.freshnessBootstraps++;
+      // A bootstrap whose body is the one already stored: its rows are durable
+      // (the silent-feeds contract saved this hash only after they landed), so
+      // push none. Only the freshness is new.
+      const bootstrapUnchanged =
+        bootstrap && !!result.bodyHash && result.bodyHash === source.fetch_body_hash;
+      const normalized = bootstrapUnchanged
+        ? []
+        : normalizeArticles(source, result.items, sourceNowMs);
       stats.itemsNormalized += normalized.length;
 
       let pushed = 0;
@@ -1210,7 +1319,7 @@ async function runCycleBody(
         // validators are safe to save right away.
         fetchStateUpdates.set(
           source.id,
-          buildFetchStateUpdate(source, result.status, true, fresh),
+          buildFetchStateUpdate(source, result.status, true, fresh, freshness),
         );
         await maybeFlushFetchState(supabase, fetchStateUpdates);
       } else {
@@ -1219,7 +1328,7 @@ async function runCycleBody(
         // body-hash hit forever while its rows never landed. Park them, and
         // put the module cache back as it was before `fetchFeed` stamped the
         // fresh values on it; both are committed once the rows are durable.
-        deferred.set(source.id, { source, status: result.status, fresh });
+        deferred.set(source.id, { source, status: result.status, fresh, freshness });
         if (cacheBeforeCopy) conditionalCache.set(source.id, cacheBeforeCopy);
         else conditionalCache.delete(source.id);
       }
@@ -1429,7 +1538,10 @@ async function runCycleBody(
   for (const id of settled) {
     const d = deferred.get(id);
     if (!d) continue;
-    fetchStateUpdates.set(id, buildFetchStateUpdate(d.source, d.status, true, d.fresh));
+    fetchStateUpdates.set(
+      id,
+      buildFetchStateUpdate(d.source, d.status, true, d.fresh, d.freshness),
+    );
     // Memory now equals what the DB will hold.
     if (d.fresh.etag || d.fresh.lastModified) {
       conditionalCache.set(id, {
@@ -1441,7 +1553,12 @@ async function runCycleBody(
   for (const id of withheld) {
     const d = deferred.get(id);
     if (!d) continue;
-    fetchStateUpdates.set(id, buildFetchStateUpdate(d.source, d.status, true));
+    // The validators stay old (the feed is re-offered), but the freshness is a
+    // fact about the feed, not about row durability: it is saved either way.
+    fetchStateUpdates.set(
+      id,
+      buildFetchStateUpdate(d.source, d.status, true, undefined, d.freshness),
+    );
   }
   stats.validatorsWithheld = withheld.length;
   if (withheld.length > 0) {

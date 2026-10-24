@@ -2644,3 +2644,46 @@ And over HTTP: `curl -s -o /dev/null -w '%{http_code}' "$NEXT_PUBLIC_SUPABASE_UR
 - Default ACLs owned by `supabase_admin` cannot be altered by `postgres`; every object in `public` is owned by `postgres` today (66 tables, 10 views, 18 sequences, 108 functions), so nothing is affected.
 - The RLS `SELECT` policies from `017` stay in place (inert without the table privilege).
 - `docs/key-rotation.md` and `README.md` still describe the anon key in older terms; the anon key itself is unchanged and is not rotated by this rollout.
+
+## 119 — feed freshness: APPLY 119, THEN DEPLOY ingest
+
+**Why:** a frozen feed (HTTP 200, but the newest item never changes: `haberport`, `korkusuz` and `en-politik` on 2026-10-24) looked exactly like a quiet outlet in `ops_health_report()` row 13 `sources_newly_dark`, and unlike a blocked one (403, DNS) that needs a different fix. Ingest now stores what each feed reports about itself, and the report and `/kaynaklar/durum` label every silent source `erişim yok`, `akış donmuş` or `sessiz` (the labels and what to do about each are in `docs/ops-heartbeat.md`).
+
+**What 119 does** (additive, one transaction, safe to re-apply; starts with `set local lock_timeout = '5s'`):
+
+1. `public.sources.fetch_newest_item_at timestamptz` and `fetch_items_count integer` (nullable, no default, no grant: they inherit 117's empty anon/authenticated ACL).
+2. `ingest_set_source_fetch_state(jsonb)` re-created with 074's body plus the two keys. A payload without `fetch_items_count` keeps both stored values; a count with no date stores NULL (an undated feed is never fresh, never a bare `least()`); a date is clamped to now + 10 minutes; a negative count becomes 0.
+3. Ingest (edge half) ignores feed item dates before 1990 or after now + 10 minutes, bounds what it sends to 1990..2100, and retries a batched fetch-state write that Postgres refuses for a data reason (SQLSTATE 22/23) in halves, at most 24 calls, so one hostile feed cannot erase every other source's state. Watch the function log for `source fetch-state write failed` and `dropped source`.
+4. `ops_health_report()` re-created with 115's body (rows 1-12 byte-identical); row 13 appends ` · <reason>` to each entry. `akış donmuş` needs a feed whose newest item is over 72 hours old (or an empty feed): row 13 only lists a source after 24 silent hours, so a 24 hour threshold would have labelled every listed source frozen, a paused outlet included.
+
+**Steps (order is load-bearing, but neither order breaks anything):**
+
+1. Apply `supabase/migrations/119_feed_freshness.sql`. Check: `select column_name from information_schema.columns where table_schema = 'public' and table_name = 'sources' and column_name in ('fetch_newest_item_at','fetch_items_count');` returns two rows; `select count(*) from public.ops_health_report();` returns 13.
+2. Deploy the ingest Edge Function: `npx supabase functions deploy ingest --no-verify-jwt`. The new ingest selects the two columns and, on Postgres `42703` (119 not applied yet), retries once with the old select and carries on without freshness, so deploying first is safe but records nothing. The app (Vercel) half has the same fallback and needs no ordering.
+3. Wait three to four cycles (about 12 minutes). Every source whose `fetch_items_count` is NULL is **bootstrapped** once: ingest skips its etag and body-hash short-circuits, parses the feed (the parse budget still applies, so a deferred bootstrap is retried first next cycle), stores the freshness and, when the body is the one already stored, inserts no row. This is what makes the frozen feeds measurable: their byte-identical bodies are otherwise never parsed again. The cycle summary line (`[ingest] cycle {...}`) carries `freshnessBootstraps`; expect a burst of full fetches (about one per active source) in the first cycles, then 0.
+
+**Verify** (read-only, after the bootstrap):
+
+```sql
+-- unmeasured sources left (expect 0, or the blocked ones: they have no 2xx to parse)
+select count(*) from public.sources where active and fetch_items_count is null;
+-- the three frozen feeds carry their frozen newest item date (row 13 labels them `akış donmuş` once it is over 72 h old, `sessiz` before that)
+select slug, fetch_items_count, fetch_newest_item_at from public.sources where slug in ('haberport','korkusuz','en-politik');
+-- row 13 now names the reason
+select detail from public.ops_health_report() where check_name = 'sources_newly_dark';
+-- the new columns are not readable by anon/authenticated (expect f, f)
+select has_column_privilege('anon','public.sources','fetch_items_count','select'), has_column_privilege('authenticated','public.sources','fetch_newest_item_at','select');
+```
+
+On `/kaynaklar/durum` a silent source now shows its label (and a legend appears under the totals while anything is silent); the page is cached for the `source-directory` window, so allow a few minutes.
+
+**Rollback** (nothing else depends on 119; redeploy the previous ingest first):
+
+1. Redeploy the previous ingest function (it never sends the keys, and the old writer ignores them).
+2. Re-apply the `create or replace function` block of `074_ingest_fixes.sql` for `ingest_set_source_fetch_state(jsonb)` (with its comment, revoke and grant) and the `ops_health_report()` block of `115_sources_newly_dark_24h.sql` (with its comment, revoke and grant).
+3. The columns may stay (nullable, unread). To drop them as well, only after steps 1 and 2: `alter table public.sources drop column if exists fetch_newest_item_at, drop column if exists fetch_items_count;`
+4. Remove ledger row 119: `delete from supabase_migrations.schema_migrations where version = '119';`
+
+## 120 — twin cluster pairs: APPLY 120 only, no deploy
+
+Adds the read-only `service_role` function `public.admin_twin_cluster_pairs(integer, integer)` for `/admin/birlestir`; apply `120_*.sql`, nothing to deploy. Rollback: drop the function (`drop function public.admin_twin_cluster_pairs(integer, integer);`) and delete ledger row 120 (`delete from supabase_migrations.schema_migrations where version = '120';`).

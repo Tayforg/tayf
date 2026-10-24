@@ -233,6 +233,81 @@ async function recallCandidates(supabase: Supabase): Promise<Candidate[]> {
   return [...seen.values()];
 }
 
+/**
+ * Hydrates cluster ids into display refs: the cluster row plus up to three
+ * newest headlines each, read in one clusters query and one cluster_articles
+ * query. `archived` is true for an archived cluster and for one already merged
+ * into another (merged_into set): neither may be offered for a merge. An id
+ * with no cluster row is simply absent from the map. Throws ReadError on a read
+ * error, like every reader in this file; callers turn it into null.
+ */
+export async function loadClusterRefs(
+  supabase: Supabase,
+  ids: string[],
+): Promise<Map<string, MergeClusterRef & { archived: boolean }>> {
+  const out = new Map<string, MergeClusterRef & { archived: boolean }>();
+  if (ids.length === 0) return out;
+
+  const [cl, hl] = await Promise.all([
+    supabase
+      .from("clusters")
+      .select(
+        "id, title_tr, title_tr_neutral, article_count, first_published, bias_distribution, is_blindspot, is_archived, merged_into",
+      )
+      .in("id", ids),
+    supabase
+      .from("cluster_articles")
+      .select("cluster_id, article:articles(title, published_at, source:sources(name))")
+      .in("cluster_id", ids)
+      .limit(HEADLINE_ROW_LIMIT),
+  ]);
+  fail("merge clusters", cl.error);
+  fail("merge headlines", hl.error);
+
+  const heads = new Map<string, { title: string; sourceName: string; at: number }[]>();
+  for (const r of rows<Record<string, unknown>>(hl.data)) {
+    const cid = str(r.cluster_id);
+    const art = one(r.article as Record<string, unknown> | Record<string, unknown>[] | null);
+    const title = str(art?.title);
+    if (!cid || !title) continue;
+    const src = one(art?.source as Record<string, unknown> | Record<string, unknown>[] | null);
+    const at = Date.parse(str(art?.published_at));
+    const list = heads.get(cid) ?? [];
+    list.push({ title, sourceName: str(src?.name), at: Number.isNaN(at) ? 0 : at });
+    heads.set(cid, list);
+  }
+
+  for (const c of rows<ClusterRow>(cl.data)) {
+    out.set(c.id, {
+      id: c.id,
+      title: titleOf(c),
+      articleCount: typeof c.article_count === "number" ? c.article_count : 0,
+      firstPublished: c.first_published ?? null,
+      biasDistribution: normalizeBias(c.bias_distribution),
+      isBlindspot: c.is_blindspot === true,
+      headlines: (heads.get(c.id) ?? [])
+        .sort((x, y) => y.at - x.at)
+        .slice(0, HEADLINES_PER_CLUSTER)
+        .map(({ title, sourceName }) => ({ title, sourceName })),
+      archived: Boolean(c.is_archived || c.merged_into),
+    });
+  }
+  return out;
+}
+
+/** The display ref without the loader's `archived` flag. */
+export function toMergeClusterRef(r: MergeClusterRef): MergeClusterRef {
+  return {
+    id: r.id,
+    title: r.title,
+    articleCount: r.articleCount,
+    firstPublished: r.firstPublished,
+    biasDistribution: r.biasDistribution,
+    isBlindspot: r.isBlindspot,
+    headlines: r.headlines,
+  };
+}
+
 export async function getMergeQueue(): Promise<MergeQueueRow[] | null> {
   try {
     const supabase = createServerClient();
@@ -271,58 +346,16 @@ export async function getMergeQueue(): Promise<MergeQueueRow[] | null> {
     pairs = pairs.filter((p) => !dismissed.has(`${p.a}:${p.b}`)).slice(0, MERGE_QUEUE_CAP);
     if (pairs.length === 0) return [];
 
-    const ids = idsOf(pairs);
-    const [cl, hl] = await Promise.all([
-      supabase
-        .from("clusters")
-        .select(
-          "id, title_tr, title_tr_neutral, article_count, first_published, bias_distribution, is_blindspot, is_archived, merged_into",
-        )
-        .in("id", ids),
-      supabase
-        .from("cluster_articles")
-        .select("cluster_id, article:articles(title, published_at, source:sources(name))")
-        .in("cluster_id", ids)
-        .limit(HEADLINE_ROW_LIMIT),
-    ]);
-    fail("merge clusters", cl.error);
-    fail("merge headlines", hl.error);
-
-    const clusters = new Map(rows<ClusterRow>(cl.data).map((c) => [c.id, c]));
-    const heads = new Map<string, { title: string; sourceName: string; at: number }[]>();
-    for (const r of rows<Record<string, unknown>>(hl.data)) {
-      const cid = str(r.cluster_id);
-      const art = one(r.article as Record<string, unknown> | Record<string, unknown>[] | null);
-      const title = str(art?.title);
-      if (!cid || !title) continue;
-      const src = one(art?.source as Record<string, unknown> | Record<string, unknown>[] | null);
-      const at = Date.parse(str(art?.published_at));
-      const list = heads.get(cid) ?? [];
-      list.push({ title, sourceName: str(src?.name), at: Number.isNaN(at) ? 0 : at });
-      heads.set(cid, list);
-    }
-
-    const ref = (c: ClusterRow): MergeClusterRef => ({
-      id: c.id,
-      title: titleOf(c),
-      articleCount: typeof c.article_count === "number" ? c.article_count : 0,
-      firstPublished: c.first_published ?? null,
-      biasDistribution: normalizeBias(c.bias_distribution),
-      isBlindspot: c.is_blindspot === true,
-      headlines: (heads.get(c.id) ?? [])
-        .sort((x, y) => y.at - x.at)
-        .slice(0, HEADLINES_PER_CLUSTER)
-        .map(({ title, sourceName }) => ({ title, sourceName })),
-    });
+    const refs = await loadClusterRefs(supabase, idsOf(pairs));
 
     const out: MergeQueueRow[] = [];
     for (const p of pairs) {
-      const ca = clusters.get(p.a);
-      const cb = clusters.get(p.b);
+      const ca = refs.get(p.a);
+      const cb = refs.get(p.b);
       if (!ca || !cb) continue;
-      if (ca.is_archived || cb.is_archived || ca.merged_into || cb.merged_into) continue;
-      const a = ref(ca);
-      const b = ref(cb);
+      if (ca.archived || cb.archived) continue;
+      const a = toMergeClusterRef(ca);
+      const b = toMergeClusterRef(cb);
       out.push({
         key: `${p.a}:${p.b}`,
         a,

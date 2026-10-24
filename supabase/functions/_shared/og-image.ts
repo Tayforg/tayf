@@ -23,7 +23,11 @@
 //   - All fetches are GET-only, follow at most 3 redirects, and reject any
 //     hop whose target resolves to a private IP.
 
-import { isOptimizableImageUrl, normalizeImageUrl } from "./image-url.ts";
+import {
+  isOptimizableImageUrl,
+  isPlaceholderImageUrl,
+  normalizeImageUrl,
+} from "./image-url.ts";
 import { safeFetch, SafeFetchError } from "./safe-fetch.ts";
 
 const OG_IMAGE_REGEX =
@@ -78,6 +82,12 @@ export interface FetchOgImageOptions {
  * through unmodified. This is also the image-consumer gate
  * (image-consumer/index.ts), so a GIF returned by `fetchOgImage` is recorded
  * as `not-found` and capped by the existing attempts logic.
+ *
+ * db-4 ingest half: a publisher logo card or 'son dakika' stand-in
+ * (isPlaceholderImageUrl) is rejected too. extractHeroImageFromHtml therefore
+ * falls through to twitter:image, itemprop and the other candidates, and the
+ * image-consumer gate never stores a placeholder og:image; the consumer counts
+ * it as an attempt, so the row parks after 5 and cannot loop.
  */
 export function isValidImageUrl(url: unknown): url is string {
   if (!url || typeof url !== "string") return false;
@@ -86,6 +96,7 @@ export function isValidImageUrl(url: unknown): url is string {
   if (!/^https?:\/\//i.test(url)) return false;
   if (/favicon|icon|logo|pixel|tracker|1x1|spacer/i.test(url)) return false;
   if (!isOptimizableImageUrl(url)) return false;
+  if (isPlaceholderImageUrl(url)) return false;
   return true;
 }
 
