@@ -262,7 +262,8 @@ describe("SourceLogoFallback — the post-onError view", () => {
     const html = renderToStaticMarkup(
       <SourceLogoFallback kind="square" name={name} className={SQUARE_CLASS} />,
     );
-    const text = html.replace(/<[^>]*>/g, "");
+    // Text nodes only: the runs between a tag's `>` and the next `<`.
+    const text = (html.match(/>[^<]+</g) ?? []).map((run) => run.slice(1, -1)).join("");
     expect(text.length).toBeGreaterThan(0);
     expect(html).not.toMatch(/<span[^>]*><\/span>/);
     // Exactly one visible glyph (one code point; ß-style expansions are not in this list).

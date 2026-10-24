@@ -266,9 +266,20 @@ describe("121 additive shape", () => {
   });
 
   it("comments the function for 121 and keeps the liveness note", () => {
-    const m = /comment\s+on\s+function\s+public\.cluster_link_atomic\s*\(\s*uuid,\s*uuid,\s*jsonb,\s*boolean,\s*text,\s*timestamptz\s*\)\s+is\s+((?:'(?:[^']|'')*'\s*)+);/i.exec(code);
-    expect(m, "comment on function").not.toBeNull();
-    const text = (m as RegExpExecArray)[1] as string;
+    const head = /comment\s+on\s+function\s+public\.cluster_link_atomic\s*\(\s*uuid,\s*uuid,\s*jsonb,\s*boolean,\s*text,\s*timestamptz\s*\)\s+is\s+/i.exec(code);
+    expect(head, "comment on function").not.toBeNull();
+    // Hand scan to the first `;` outside a quoted literal ('' is an escaped quote,
+    // which toggles twice and so needs no special case) -- no nested quantifier.
+    const start = (head as RegExpExecArray).index + (head as RegExpExecArray)[0].length;
+    let end = start;
+    let quoted = false;
+    for (; end < code.length; end++) {
+      const ch = code[end];
+      if (ch === "'") quoted = !quoted;
+      else if (ch === ";" && !quoted) break;
+    }
+    expect(end, "comment terminated").toBeLessThan(code.length);
+    const text = code.slice(start, end);
     expect(text).toContain("cluster_unlink_article");
     expect(text).toMatch(/ignored/i);
     expect(text).toContain("121");
