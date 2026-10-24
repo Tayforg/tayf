@@ -378,7 +378,7 @@ describe("runProbe: happy path", () => {
     const r = await probe();
     for (const { url } of r.calls) {
       expect(url).not.toContain("?");
-      expect(url.startsWith(ORIGIN)).toBe(true);
+      expect(new URL(url).origin).toBe(ORIGIN);
     }
   });
 
