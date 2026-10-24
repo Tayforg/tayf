@@ -226,3 +226,20 @@ gh workflow disable ops-heartbeat.yml
 
 No database change needed — this only stops the scheduled poll;
 `public.ops_health_report()` itself is inert until called.
+
+## Page latency probe
+
+The heartbeat watches only the database. On 2026-10-21 public pages took 8-22 s (cold reads stuck at the 8.1 s `statement_timeout`) while every cron and every heartbeat row read green, so nothing paged. `.github/workflows/page-latency.yml` measures the other side: how long a visitor waits.
+
+- **Routes (9):** `/`, `/blindspots`, `/sources`, `/trends`, `/ekonomi`, `/hafta`, `/kalite`, `/rss.xml` and `/sitemap.xml`. Each gets N sequential GETs (default 3, at most 5), one at a time, with a 25 s timeout per request.
+- **Thresholds, per sample:** pass under 4000 ms; warn from 4000 to 8000 ms or on a 4xx; fail above 8000 ms, on a 5xx, or on a timeout or network error. A route takes its worst sample and the run takes its worst route. It exits 1 only on a fail, so a warn shows in the table and the step summary without paging.
+- **Manual only:** Actions, then Page Latency Probe, then Run workflow (inputs `base_url`, default `https://www.tayfhaber.com`, and `samples`). There is no schedule, no secret and no `npm ci`; the job holds `contents: read`.
+- **Locally:** `PROBE_BASE_URL` falls back to `NEXT_PUBLIC_SITE_URL`, must be `https://` (or `http://localhost`), and only its origin is used. It does not read `.env.local`.
+
+  ```
+  PROBE_BASE_URL=https://www.tayfhaber.com PROBE_SAMPLES=2 node scripts/page-latency.mjs
+  ```
+
+- **Reading it:** the table has `ROUTE`, `VERDICT`, `MEDIAN_MS`, `MAX_MS`, `STATUS` and `CACHE` (the `x-vercel-cache` header) with one value per sample, in order, so `MISS, HIT` is a cold first request and a warm second one.
+
+It measures what a visitor gets (CDN and data cache included) and does not force a cold data-cache fill: there is no cache-busting query string, so an x-vercel-cache HIT can hide a cold database. A MISS at 8 s or more is the 2026-10-21 signature.

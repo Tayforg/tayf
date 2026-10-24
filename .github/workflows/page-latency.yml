@@ -1,0 +1,32 @@
+name: Page Latency Probe
+on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Origin to probe (https://, or http://localhost)
+        default: https://www.tayfhaber.com
+      samples:
+        description: Sequential GETs per route (1-5)
+        default: "3"
+permissions:
+  contents: read
+concurrency:
+  group: page-latency
+  cancel-in-progress: false
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    # worst case: 5 samples x 9 routes x 25 s timeout = 18.75 min
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: page latency
+        env:
+          PROBE_BASE_URL: ${{ inputs.base_url }}
+          PROBE_SAMPLES: ${{ inputs.samples }}
+        run: node scripts/page-latency.mjs
