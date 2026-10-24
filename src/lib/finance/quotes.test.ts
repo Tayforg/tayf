@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // `getQuote`/`getQuotes` are wrapped in "use cache"; next/cache's real
 // cacheLife() throws outside a Next.js cacheComponents build ("`cacheLife()`
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // here the same way src/lib/finance/queries.test.ts stubs it.
 vi.mock("next/cache", () => ({ cacheLife: vi.fn() }));
 
+import { cacheLife } from "next/cache";
 import { fmtPct, fmtWhen, fmtX, limitFlag, moveClass, pctChange } from "./format";
 import { getQuotes, parseYahooChart, YahooQuoteSource } from "./quotes";
 
@@ -159,6 +160,92 @@ describe("getQuotes", () => {
     vi.stubGlobal("fetch", fetchSpy as unknown as typeof fetch);
     expect(await getQuotes([])).toEqual({});
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cached-failure-sweep: getQuote's lifetime follows the outcome. A real quote
+// keeps the 5-minute window; a Yahoo non-200, a reject, or an unknown symbol
+// (YahooQuoteSource turns all of them into "no quote") is memoised for
+// 'minutes' only, so a blip cannot blank a ticker chip for 5-15 minutes.
+// ---------------------------------------------------------------------------
+
+describe("getQuotes cache lifetime", () => {
+  const QUOTE_PROFILE = { stale: 60, revalidate: 300, expire: 900 };
+
+  beforeEach(() => {
+    vi.mocked(cacheLife).mockClear();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.mocked(console.warn).mockRestore();
+    vi.unstubAllGlobals();
+  });
+
+  it("success: the quote and exactly one cacheLife with the object profile", async () => {
+    vi.stubGlobal("fetch", (async () => new Response(JSON.stringify(SAMPLE), { status: 200 })) as typeof fetch);
+
+    const quotes = await getQuotes(["THYAO"]);
+
+    expect(Object.keys(quotes)).toEqual(["THYAO"]);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith(QUOTE_PROFILE);
+  });
+
+  it("a Yahoo non-200: no quote, cached for 'minutes' only", async () => {
+    vi.stubGlobal("fetch", (async () => new Response("nope", { status: 503 })) as typeof fetch);
+
+    await expect(getQuotes(["THYAO"])).resolves.toEqual({});
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a rejecting fetch (network down): no quote, cached for 'minutes' only", async () => {
+    vi.stubGlobal("fetch", (async () => {
+      throw new TypeError("fetch failed");
+    }) as typeof fetch);
+
+    await expect(getQuotes(["THYAO"])).resolves.toEqual({});
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("an unknown symbol payload (no result): no quote, cached for 'minutes' only", async () => {
+    vi.stubGlobal(
+      "fetch",
+      (async () =>
+        new Response(JSON.stringify({ chart: { result: null, error: { code: "Not Found" } } }), {
+          status: 200,
+        })) as typeof fetch,
+    );
+
+    await expect(getQuotes(["XXXX"])).resolves.toEqual({});
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("each ticker picks its own lifetime: one live quote and one dead symbol", async () => {
+    vi.stubGlobal("fetch", (async (url: string | URL | Request) => {
+      if (String(url).includes("DEAD.IS")) return new Response("nope", { status: 404 });
+      return new Response(JSON.stringify(SAMPLE), { status: 200 });
+    }) as typeof fetch);
+
+    const quotes = await getQuotes(["THYAO", "DEAD"]);
+
+    expect(Object.keys(quotes)).toEqual(["THYAO"]);
+    expect(cacheLife).toHaveBeenCalledTimes(2);
+    const profiles = vi.mocked(cacheLife).mock.calls.map((c) => c[0]);
+    expect(profiles).toContainEqual(QUOTE_PROFILE);
+    expect(profiles).toContain("minutes");
+  });
+
+  it("the empty list short-circuits before any cache entry: no cacheLife at all", async () => {
+    await expect(getQuotes([])).resolves.toEqual({});
+    expect(cacheLife).not.toHaveBeenCalled();
   });
 });
 

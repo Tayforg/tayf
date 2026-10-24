@@ -20,6 +20,13 @@ const fixture = vi.hoisted(() => ({
   lastClustersState: null as unknown,
   lastSourcesState: null as unknown,
   rangeCalls: [] as Array<{ from: number; to: number }>,
+  // cached-failure-sweep: the first N reads of each table fail (a blip the
+  // live retry can heal), a page-2 failure (no partial month), and a count of
+  // supabase-js client builds (1 = no retry, 2 = attempt + one live retry).
+  sourcesBlips: 0,
+  clustersBlips: 0,
+  clustersFailFromPage: null as number | null,
+  clientBuilds: 0,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -28,8 +35,19 @@ const supabaseFake = await vi.hoisted(async () => {
     tables: {
       clusters: (state) => {
         fixture.lastClustersState = state;
+        if (fixture.clustersBlips > 0) {
+          fixture.clustersBlips -= 1;
+          return { data: null, error: { message: "blip" } };
+        }
         if (fixture.clustersError) {
           return { data: null, error: fixture.clustersError };
+        }
+        if (
+          fixture.clustersFailFromPage !== null &&
+          state.range &&
+          state.range.from >= fixture.clustersFailFromPage * 1000
+        ) {
+          return { data: null, error: { message: "page boom" } };
         }
         if (state.range) {
           fixture.rangeCalls.push({ from: state.range.from, to: state.range.to });
@@ -40,6 +58,10 @@ const supabaseFake = await vi.hoisted(async () => {
       },
       sources: (state) => {
         fixture.lastSourcesState = state;
+        if (fixture.sourcesBlips > 0) {
+          fixture.sourcesBlips -= 1;
+          return { data: null, error: { message: "blip" } };
+        }
         if (fixture.sourcesError) {
           return { data: null, error: fixture.sourcesError };
         }
@@ -50,7 +72,10 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: () => {
+    fixture.clientBuilds += 1;
+    return supabaseFake.client;
+  },
 }));
 
 import {
@@ -84,6 +109,11 @@ beforeEach(() => {
   fixture.lastClustersState = null;
   fixture.lastSourcesState = null;
   fixture.rangeCalls = [];
+  fixture.sourcesBlips = 0;
+  fixture.clustersBlips = 0;
+  fixture.clustersFailFromPage = null;
+  fixture.clientBuilds = 0;
+  vi.mocked(cacheLife).mockClear();
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
 });
@@ -439,5 +469,151 @@ describe("getClustersMonthXml", () => {
     await expect(getClustersMonthXml("https://tayf.test", "2026-09")).rejects.toThrow(
       /range boom/,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cached-failure-sweep: the three DB-backed builders choose their cacheLife
+// AFTER the read. A failed read is memoised for 'minutes' only, is retried
+// live once per request (behind awaitRequestScope), and a still-failing retry
+// REJECTS -- the sitemap route maps that to 503 no-store. It is never rendered
+// as an empty <urlset>, which would de-index a month or the news feed.
+// ---------------------------------------------------------------------------
+
+describe("cached-failure-sweep: DB sitemap builders", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  const BASE = "https://tayf.test";
+  const BUILDERS = [
+    {
+      name: "getSourcesSitemapXml",
+      build: () => getSourcesSitemapXml(BASE),
+      profile: { revalidate: 3600 },
+      fail: () => {
+        fixture.sourcesError = { message: "sources down" };
+      },
+      blip: () => {
+        fixture.sourcesBlips = 1;
+        fixture.sources = [{ slug: "kaynak-a", active: true }];
+      },
+      healed: "<loc>https://tayf.test/source/kaynak-a</loc>",
+    },
+    {
+      name: "getNewsSitemapXml",
+      build: () => getNewsSitemapXml(BASE),
+      profile: { revalidate: 600 },
+      fail: () => {
+        fixture.clustersError = { message: "clusters down" };
+      },
+      blip: () => {
+        fixture.clustersBlips = 1;
+        fixture.clusters = [
+          { id: "n1", title_tr: "Başlık", title_tr_neutral: null, first_published: "2026-09-27T10:00:00.000Z" },
+        ];
+      },
+      healed: "<news:title>Başlık</news:title>",
+    },
+    {
+      name: "getClustersMonthXml",
+      build: () => getClustersMonthXml(BASE, "2026-09"),
+      profile: { revalidate: 3600 },
+      fail: () => {
+        fixture.clustersError = { message: "clusters down" };
+      },
+      blip: () => {
+        fixture.clustersBlips = 1;
+        fixture.clusters = [{ id: "c1", updated_at: "2026-09-02T00:00:00.000Z" }];
+      },
+      healed: "<loc>https://tayf.test/cluster/c1</loc>",
+    },
+  ] as const;
+
+  it.each(BUILDERS)(
+    "$name: a failing read rejects after one live retry, never resolving to a urlset; the failure is cached for 'minutes'",
+    async ({ build, fail }) => {
+      fail();
+
+      let resolved: string | null = null;
+      await expect(
+        build().then((xml) => {
+          resolved = xml;
+          return xml;
+        }),
+      ).rejects.toThrow(/down/);
+
+      expect(resolved).toBeNull();
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+      expect(cacheLife).not.toHaveBeenCalledWith(expect.objectContaining({ revalidate: expect.anything() }));
+      // The cached attempt + exactly one live retry.
+      expect(fixture.clientBuilds).toBe(2);
+    },
+  );
+
+  it.each(BUILDERS)(
+    "$name: a blip on the cached attempt is healed by the live retry (real urlset), cached for 'minutes' only",
+    async ({ build, blip, healed }) => {
+      blip();
+
+      const xml = await build();
+
+      expect(xml).toContain("<urlset");
+      expect(xml).toContain(healed);
+      expect(fixture.clientBuilds).toBe(2);
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+    },
+  );
+
+  it.each(BUILDERS)(
+    "$name: a successful read keeps its revalidate profile and builds one client",
+    async ({ build, profile }) => {
+      const xml = await build();
+
+      expect(xml).toContain("<urlset");
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith(profile);
+      expect(fixture.clientBuilds).toBe(1);
+    },
+  );
+
+  it("a legitimately empty result is a success: an empty urlset cached for the full window", async () => {
+    fixture.sources = [];
+    const xml = await getSourcesSitemapXml(BASE);
+    expect(xml).toContain("<urlset");
+    expect(xml).not.toContain("<url>");
+    expect(cacheLife).toHaveBeenCalledWith({ revalidate: 3600 });
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+  });
+
+  it("getClustersMonthXml never serves a partial month: a page-2 failure rejects the whole build", async () => {
+    fixture.clusters = Array.from({ length: 1000 }, (_, i) => ({
+      id: `p1-${i}`,
+      updated_at: "2026-09-01T00:00:00.000Z",
+    }));
+    fixture.clustersFailFromPage = 1;
+
+    await expect(getClustersMonthXml(BASE, "2026-09")).rejects.toThrow(/page boom/);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+});
+
+describe("cached-failure-sweep: the pure builders are unchanged", () => {
+  it("getStaticSitemapXml and getSitemapIndexXml build no client and keep one revalidate:3600", async () => {
+    await getStaticSitemapXml("https://tayf.test");
+    await getSitemapIndexXml("https://tayf.test");
+    expect(fixture.clientBuilds).toBe(0);
+    expect(cacheLife).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(cacheLife).mock.calls).toEqual([[{ revalidate: 3600 }], [{ revalidate: 3600 }]]);
   });
 });

@@ -42,12 +42,27 @@ import { resolve, dirname, join, relative, sep } from "node:path";
 // `cacheLife(` call appears before its first `await`, because the lifetime is
 // then decided before the outcome of any read is known.
 //
-// Ratchet: functions that predate this guard and still decide the lifetime up
-// front are listed in KNOWN_EARLY_CACHELIFE with the number of offending
-// bodies per file. The table is compared with `toEqual`, so it can only
-// shrink: fixing a file makes the comparison fail until its entry is removed,
-// and a new offender fails until a reviewer consciously adds it. Do not add
-// entries; convert the function to the shape above instead.
+// Ratchet: EMPTY. The 2026-10-24 sweep converted every body that predated this
+// guard (finance/queries.ts, seo/sitemaps.ts, weekly/week-archive.ts,
+// headline/status.ts, fact-checks, finance/quotes.ts, framing-receipt.ts,
+// app/sources/page.tsx, sources/clickbait.ts), so there is no debt table any
+// more and `found` must equal `{}`. A new offender fails with the file and the
+// function NAME, and there is no allowance to add: convert the function to the
+// shape above. The only exemption is PURE_CACHE_BODIES, a short list of bodies
+// verified by hand to read nothing from the outside world (a clock and a
+// pure computation: nothing that can fail or be cached wrongly). Each entry
+// is still checked on every run: it must exist, and its body must pass
+// isPureCacheBody (no await, no client factory, no query, no fetch, no call to
+// a get/fetch/load/read helper), so a pure body that later gains a read fails
+// here instead of hiding behind its name.
+//
+// The shapes that replaced the debt:
+//   - null / empty contract, no live retry: the exported function does
+//     `return r.ok ? r.data : <failure value>` on the `Cached` result;
+//   - throw contract: `resolveCachedOrThrow(label, cached, retry)` in the
+//     uncached exported function (one live retry behind awaitRequestScope, the
+//     retry error propagates);
+//   - fallback contract: `resolveCachedOrRetry(label, cached, retry, fallback)`.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -55,35 +70,43 @@ const ROOT = resolve(here, "../..");
 const SRC = resolve(ROOT, "src");
 
 /**
- * Repo-relative path (posix separators) -> number of offending bodies.
- * Entries are debt, not a licence: convert the function, then delete the line.
+ * Bodies that are exempt BY NAME because they are pure: one clock read and a
+ * computation, no I/O. Repo-relative path (posix separators) -> function names
+ * as findEarlyCacheLife reports them. Not a licence: each entry must exist and
+ * pass isPureCacheBody on every run (see the tests at the bottom). A body that
+ * gains a read must be converted to the attemptCached shape instead.
  */
-const KNOWN_EARLY_CACHELIFE: Record<string, number> = {
-  // Not audited yet: the lifetime is fixed before the read runs.
-  "src/lib/fact-checks/cluster-fact-checks-query.ts": 1,
-  "src/lib/finance/queries.ts": 11,
-  "src/lib/finance/quotes.ts": 1,
-  "src/lib/headline/status.ts": 1,
-  "src/lib/seo/sitemaps.ts": 6,
-  "src/lib/weekly/week-archive.ts": 2,
-  // Delegated read: `return getClusterFramingReceipt(id)` after cacheLife.
-  "src/lib/clusters/framing-receipt.ts": 1,
-  // Throw-based fetchers (a throw is never memoised, but a throw out of a
-  // "use cache" body is the build hazard documented in cache-resilience.ts).
-  "src/app/sources/page.tsx": 1,
-  "src/lib/sources/clickbait.ts": 1,
-  // Pure bodies (one clock read, nothing that can fail). A text scan cannot
-  // tell them from a delegated read; they stay listed rather than exempted.
-  "src/lib/sources/karne.ts": 1,
-  "src/lib/sources/reliability.ts": 1,
+const PURE_CACHE_BODIES: Record<string, string[]> = {
+  "src/lib/seo/sitemaps.ts": [
+    "getCurrentSitemapMonth",
+    "getSitemapIndexXml",
+    "getStaticSitemapXml",
+  ],
+  "src/lib/weekly/week-archive.ts": ["getRecentWeekKeys"],
+  "src/lib/sources/karne.ts": ["getKarneFreshnessCached"],
+  "src/lib/sources/reliability.ts": ["getReliabilityFreshnessCached"],
 };
 
-/** The four readers fixed together with this guard. They must stay clean. */
+/**
+ * Readers fixed together with this guard or converted by the later sweep. They
+ * must stay clean: never an offender, and (a stale-exemption check) never
+ * listed in PURE_CACHE_BODIES unless they are one of its pure bodies.
+ */
 const FIXED_WITH_THE_GUARD = [
   "src/lib/sources/feed-status.ts",
   "src/lib/sources/active-count.ts",
   "src/lib/corrections/public-log.ts",
   "src/lib/quality/snapshots.ts",
+  // cached-failure-sweep:
+  "src/lib/fact-checks/cluster-fact-checks-query.ts",
+  "src/lib/finance/queries.ts",
+  "src/lib/finance/quotes.ts",
+  "src/lib/headline/status.ts",
+  "src/lib/seo/sitemaps.ts",
+  "src/lib/weekly/week-archive.ts",
+  "src/lib/clusters/framing-receipt.ts",
+  "src/app/sources/page.tsx",
+  "src/lib/sources/clickbait.ts",
 ];
 
 function walk(dir: string): string[] {
@@ -179,17 +202,45 @@ const MASKED_DIRECTIVE = /^[ \t]+(["'])\s+\1;?\s*$/;
 // The raw directive: `"use cache"`, optionally `"use cache: remote"` etc.
 const RAW_DIRECTIVE = /^[ \t]+["']use cache(?::\s*[a-z-]+)?["'];?\s*$/;
 
+export interface EarlyCacheLifeBody {
+  /** Nearest enclosing `function NAME` / `NAME = async`, else `<anonymous>@<line>`. */
+  name: string;
+  /** The masked body: comments blanked, string contents blanked. */
+  body: string;
+}
+
+const FUNCTION_NAME_RE = /\bfunction\s+([A-Za-z0-9_$]+)|\b([A-Za-z0-9_$]+)\s*=\s*async\b/g;
+
 /**
- * Number of `"use cache"` bodies in `source` that call `cacheLife(` before
- * their first `await` (see the file header). A body with no `await` at all
- * counts too: it either delegates the read by returning its promise
- * (`return getX()`, so the outcome is still unknown when the lifetime is
- * fixed) or is a pure computation, and a text scan cannot tell the two apart.
+ * Name of the function that owns the directive on masked line `lineIdx`: the
+ * nearest preceding `function NAME` or `NAME = async`, provided no column-0 `}`
+ * line (the end of an earlier top-level body) sits between it and the
+ * directive. A `} | null> {` that closes a multi-line return type is not one.
  */
-export function countEarlyCacheLife(source: string): number {
+function ownerName(masked: string[], lineIdx: number): string {
+  const before = masked.slice(0, lineIdx).join("\n");
+  let found: { name: string; end: number } | null = null;
+  FUNCTION_NAME_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = FUNCTION_NAME_RE.exec(before)) !== null) {
+    found = { name: (m[1] ?? m[2]) as string, end: m.index + m[0].length };
+  }
+  if (found && !/^\};?\s*$/m.test(before.slice(found.end))) return found.name;
+  return `<anonymous>@${lineIdx + 1}`;
+}
+
+/**
+ * Every `"use cache"` body in `source` that calls `cacheLife(` before its first
+ * `await` (see the file header), with the name of the owning function. A body
+ * with no `await` at all counts too: it either delegates the read by returning
+ * its promise (`return getX()`, so the outcome is still unknown when the
+ * lifetime is fixed) or is a pure computation, and a text scan cannot tell the
+ * two apart (PURE_CACHE_BODIES + isPureCacheBody do).
+ */
+export function findEarlyCacheLife(source: string): EarlyCacheLifeBody[] {
   const raw = source.split("\n");
   const masked = mask(source).split("\n");
-  let offenders = 0;
+  const offenders: EarlyCacheLifeBody[] = [];
 
   for (let i = 0; i < raw.length; i++) {
     if (!RAW_DIRECTIVE.test(raw[i] ?? "")) continue;
@@ -206,17 +257,55 @@ export function countEarlyCacheLife(source: string): number {
     const awaitAt = text.search(/\bawait\b/);
     const lifeAt = text.search(/\bcacheLife\s*\(/);
     if (lifeAt === -1) continue;
-    if (awaitAt === -1 || lifeAt < awaitAt) offenders += 1;
+    if (awaitAt === -1 || lifeAt < awaitAt) {
+      offenders.push({ name: ownerName(masked, i), body: text });
+    }
   }
 
   return offenders;
 }
 
-function scanRepo(): Record<string, number> {
-  const found: Record<string, number> = {};
+/** Number of offending bodies in `source` (kept for the scanner self-tests). */
+export function countEarlyCacheLife(source: string): number {
+  return findEarlyCacheLife(source).length;
+}
+
+/**
+ * A pure body reads nothing: no `await`, no client factory, no query builder
+ * call, no `fetch`, and no call to a `get*` / `fetch*` / `load*` / `read*`
+ * helper (the usual names for a delegated read). `body` is already masked, so a
+ * word in a comment or a string cannot trip it.
+ */
+export function isPureCacheBody(maskedBody: string): boolean {
+  if (/\bawait\b/.test(maskedBody)) return false;
+  if (/\bcreate\w*Client\s*\(/.test(maskedBody)) return false;
+  if (/\.(from|rpc|select|insert|update|upsert|delete)\s*\(/.test(maskedBody)) return false;
+  if (/\bfetch\s*\(/.test(maskedBody)) return false;
+  if (/\b(get|fetch|load|read)[A-Z]\w*\s*\(/.test(maskedBody)) return false;
+  return true;
+}
+
+const toRel = (file: string) => relative(ROOT, file).split(sep).join("/");
+
+/** Offenders per file, before the PURE exemption. */
+function scanRaw(): Record<string, EarlyCacheLifeBody[]> {
+  const found: Record<string, EarlyCacheLifeBody[]> = {};
   for (const file of walk(SRC)) {
-    const count = countEarlyCacheLife(readFileSync(file, "utf8"));
-    if (count > 0) found[relative(ROOT, file).split(sep).join("/")] = count;
+    const bodies = findEarlyCacheLife(readFileSync(file, "utf8"));
+    if (bodies.length > 0) found[toRel(file)] = bodies;
+  }
+  return found;
+}
+
+/** file -> offending function names, minus the PURE bodies that really are pure. */
+function scanRepo(): Record<string, string[]> {
+  const found: Record<string, string[]> = {};
+  for (const [file, bodies] of Object.entries(scanRaw())) {
+    const pure = new Set(PURE_CACHE_BODIES[file] ?? []);
+    const names = bodies
+      .filter((b) => !(pure.has(b.name) && isPureCacheBody(b.body)))
+      .map((b) => b.name);
+    if (names.length > 0) found[file] = names;
   }
   // Stable key order so a failing diff is readable.
   return Object.fromEntries(Object.entries(found).sort(([a], [b]) => a.localeCompare(b)));
@@ -372,23 +461,153 @@ async function b() {
   });
 });
 
+describe("owner names and purity (scanner self-tests)", () => {
+  it("names a body after its `function NAME` (exported, async or not)", () => {
+    const src = `
+export async function getAlpha() {
+  "use cache";
+  cacheLife("hours");
+  return 1;
+}
+`;
+    expect(findEarlyCacheLife(src).map((b) => b.name)).toEqual(["getAlpha"]);
+  });
+
+  it("names a body after `NAME = async` for an arrow function", () => {
+    const src = `
+const getBeta = async (id: string) => {
+  "use cache";
+  cacheLife("hours");
+  return id;
+};
+`;
+    // The arrow's closing brace is `};` at column 0, which is also where the
+    // body scan stops, so the directive line is the whole story here.
+    expect(findEarlyCacheLife(src).map((b) => b.name)).toEqual(["getBeta"]);
+  });
+
+  it("uses the nearest preceding name, not the first in the file", () => {
+    const src = `
+async function first() {
+  "use cache";
+  const r = await attemptCached("a", read);
+  if (r.ok) cacheLife("hours");
+  else cacheLife("minutes");
+  return r;
+}
+
+async function second() {
+  "use cache";
+  cacheLife("hours");
+  return read();
+}
+`;
+    expect(findEarlyCacheLife(src).map((b) => b.name)).toEqual(["second"]);
+  });
+
+  it("falls back to <anonymous>@line when no function owns the directive", () => {
+    const src = `
+async function closed() {
+  return 1;
+}
+
+export default async () => {
+  "use cache";
+  cacheLife("hours");
+  return read();
+};
+`;
+    const found = findEarlyCacheLife(src);
+    expect(found).toHaveLength(1);
+    expect(found[0]!.name).toBe("<anonymous>@7");
+  });
+
+  it("does not take a name from a comment or a string", () => {
+    const src = `
+// function fromComment() {}
+const label = "function fromString() {}";
+export default async () => {
+  "use cache";
+  cacheLife("hours");
+  return read();
+};
+`;
+    expect(findEarlyCacheLife(src)[0]!.name).toMatch(/^<anonymous>@\d+$/);
+  });
+
+  it("passes the karne freshness body: a clock read and a pure computation", () => {
+    const src = `
+async function getKarneFreshnessCached(
+  computedAt: string,
+): Promise<SourceKarneFreshness> {
+  "use cache";
+  cacheLife("hours");
+  return karneFreshness(computedAt, Date.now());
+}
+`;
+    const found = findEarlyCacheLife(src);
+    expect(found.map((b) => b.name)).toEqual(["getKarneFreshnessCached"]);
+    expect(isPureCacheBody(found[0]!.body)).toBe(true);
+  });
+
+  it("rejects a body with an await", () => {
+    expect(isPureCacheBody("\n  cacheLife('x');\n  const v = await thing();\n")).toBe(false);
+  });
+
+  it("rejects a body that builds a client or runs a query", () => {
+    expect(isPureCacheBody("\n  const s = createReaderClient();\n  return 1;")).toBe(false);
+    expect(isPureCacheBody("\n  return supabase.from(\"t\").select(\"*\");")).toBe(false);
+    expect(isPureCacheBody("\n  return supabase.rpc(\"f\");")).toBe(false);
+    expect(isPureCacheBody("\n  return fetch(url);")).toBe(false);
+  });
+
+  it("rejects a body that calls a get/fetch/load/read helper (a delegated read)", () => {
+    expect(isPureCacheBody("\n  return getX(id);")).toBe(false);
+    expect(isPureCacheBody("\n  return fetchThing();")).toBe(false);
+    expect(isPureCacheBody("\n  return loadRows();")).toBe(false);
+    expect(isPureCacheBody("\n  return readRow(id);")).toBe(false);
+  });
+
+  it("does not mistake a word in a longer identifier or a comment for a read", () => {
+    // `budget(` and `widget(` contain no get/fetch/load/read + Capital call.
+    expect(isPureCacheBody("\n  return budget(widget(1));")).toBe(true);
+  });
+});
+
 describe("cacheLife is decided after the read in every \"use cache\" body", () => {
   const found = scanRepo();
 
-  it("matches the ratchet exactly (it can only shrink)", () => {
-    expect(found).toEqual(KNOWN_EARLY_CACHELIFE);
+  it("has no offender at all: the ratchet is empty", () => {
+    expect(found).toEqual({});
   });
 
-  it("keeps the readers fixed with this guard clean", () => {
+  it("keeps the converted readers clean", () => {
     for (const file of FIXED_WITH_THE_GUARD) {
       expect(found, file).not.toHaveProperty([file]);
-      expect(KNOWN_EARLY_CACHELIFE, file).not.toHaveProperty([file]);
     }
   });
 
-  it("only lists files that exist", () => {
-    for (const file of Object.keys(KNOWN_EARLY_CACHELIFE)) {
+  it("lists the fixed readers as files that exist", () => {
+    for (const file of FIXED_WITH_THE_GUARD) {
       expect(() => statSync(resolve(ROOT, file)), file).not.toThrow();
+    }
+  });
+
+  it("only exempts files that exist", () => {
+    for (const file of Object.keys(PURE_CACHE_BODIES)) {
+      expect(() => statSync(resolve(ROOT, file)), file).not.toThrow();
+    }
+  });
+
+  it("every exempt name exists and is still pure (a pure body that gains a read fails here)", () => {
+    const raw = scanRaw();
+    for (const [file, names] of Object.entries(PURE_CACHE_BODIES)) {
+      const bodies = raw[file] ?? [];
+      for (const name of names) {
+        const hit = bodies.find((b) => b.name === name);
+        expect(hit, `${file}: ${name} is not an early-cacheLife body (stale exemption: remove it)`).toBeDefined();
+        expect(isPureCacheBody(hit!.body), `${file}: ${name} is no longer pure`).toBe(true);
+      }
     }
   });
 });

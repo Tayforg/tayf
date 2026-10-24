@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 
 // T11 (migration 068) — the Çerçeveleme makbuzu (framing receipt): a
@@ -109,6 +110,28 @@ function mapRow(row: RawFramingReceiptRow): FramingReceipt {
 }
 
 /**
+ * The raw, uncached read. THROWS on an rpc error (or when the client cannot be
+ * built); resolves `null` for "no row", which is a successful answer. Both the
+ * admin fetcher and the cached public one build on it.
+ */
+async function readClusterFramingReceipt(
+  clusterId: string,
+): Promise<FramingReceipt | null> {
+  const supabase = createServerClient();
+
+  const { data, error } = await supabase.rpc("cluster_framing_receipt", {
+    p_cluster_id: clusterId,
+  });
+
+  if (error) throw new Error(error.message);
+
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row) return null;
+
+  return mapRow(row as RawFramingReceiptRow);
+}
+
+/**
  * Plain, uncached fetcher — used by the admin report (/admin/rapor/[id]),
  * which must never use "use cache". Never throws: a missing migration or a
  * Supabase hiccup renders as `null` (the caller's "could not read" state)
@@ -118,23 +141,7 @@ export async function getClusterFramingReceipt(
   clusterId: string,
 ): Promise<FramingReceipt | null> {
   try {
-    const supabase = createServerClient();
-
-    const { data, error } = await supabase.rpc("cluster_framing_receipt", {
-      p_cluster_id: clusterId,
-    });
-
-    if (error) {
-      console.error(
-        `[framing-receipt] cluster framing receipt unavailable: ${error.message}`,
-      );
-      return null;
-    }
-
-    const row = Array.isArray(data) ? data[0] : data;
-    if (!row) return null;
-
-    return mapRow(row as RawFramingReceiptRow);
+    return await readClusterFramingReceipt(clusterId);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(
@@ -144,20 +151,36 @@ export async function getClusterFramingReceipt(
   }
 }
 
+// The cached body wraps the THROWING read in `attemptCached` and only then
+// picks the lifetime: a read -- including "no receipt for this cluster", a
+// legitimate `null` -- keeps `cluster-feed`; a failed attempt (rpc error, a
+// missing migration, a client that cannot be built) is memoised for `minutes`
+// only. It must never read process.env (see isFramingReceiptPublic's doc
+// comment above).
+async function getCachedClusterFramingReceiptCached(clusterId: string) {
+  "use cache";
+  cacheTag(`cluster-detail:${clusterId}`, "clusters");
+  const r = await attemptCached("framing-receipt", () =>
+    readClusterFramingReceipt(clusterId),
+  );
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
- * Cached wrapper used by the public cluster page ONLY. Delegates entirely
- * to getClusterFramingReceipt — this function itself must never read
- * process.env (see isFramingReceiptPublic's doc comment above); the caller
- * checks the flag first and skips awaiting this altogether when it's off,
- * so a flag-off deploy adds zero queries to the hottest public page.
+ * Cached wrapper used by the public cluster page ONLY. Null contract, no live
+ * retry: a failed read resolves `null` (the card is simply not shown). This
+ * function itself never reads process.env; the caller checks the flag first
+ * and skips awaiting this altogether when it's off, so a flag-off deploy adds
+ * zero queries to the hottest public page.
  */
 export async function getCachedClusterFramingReceipt(
   clusterId: string,
 ): Promise<FramingReceipt | null> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag(`cluster-detail:${clusterId}`, "clusters");
-  return getClusterFramingReceipt(clusterId);
+  const r = await getCachedClusterFramingReceiptCached(clusterId);
+  return r.ok ? r.data : null;
 }
 
 // Turkish possessive suffix keyed by the number's last significant

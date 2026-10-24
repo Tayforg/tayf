@@ -227,6 +227,189 @@ describe("createSourceSlugGate", () => {
   });
 });
 
+/**
+ * A fetch fake whose backend health can be flipped mid-test, with counters for
+ * the two RPCs. Modes: "ok" answers like fakeFetch; the rest are the three ways
+ * a Supabase brownout shows up (HTTP 503, a thrown network error / timeout, and
+ * a 200 whose body is not the expected shape).
+ */
+type Health = "ok" | "http503" | "reject" | "badBody";
+
+function switchable(all: string[], confirm: Record<string, boolean> = {}) {
+  let health: Health = "ok";
+  const f = vi.fn(async (input: RequestInfo | URL) => {
+    if (health === "reject") throw new Error("down");
+    if (health === "http503") return json({ message: "unavailable" }, 503);
+    if (health === "badBody") return json({ message: "nope" });
+    const m = String(input).match(/rpc\/source_slug_exists\?p_slug=([^&]+)/);
+    if (m) return json(confirm[decodeURIComponent(m[1]!)] === true);
+    return json(all.map((slug) => ({ slug })));
+  });
+  return {
+    f: f as unknown as ReturnType<typeof fakeFetch>,
+    setHealth: (h: Health) => {
+      health = h;
+    },
+    calls: () => f.mock.calls.length,
+    loads: () => f.mock.calls.filter(([u]) => String(u).includes("rpc/source_slugs")).length,
+    probes: () => f.mock.calls.filter(([u]) => String(u).includes("rpc/source_slug_exists")).length,
+  };
+}
+
+describe("createSourceSlugGate — failure backoff (mirrors merged-cluster-gate)", () => {
+  it.each(["http503", "reject", "badBody"] as const)(
+    "(a) %s: 6 sequential checks make exactly 1 request; the retry opens at exactly 30 000 ms",
+    async (health) => {
+      const b = switchable(["a"]);
+      b.setHealth(health);
+      const { gate, advance } = mk(b.f);
+      for (let i = 0; i < 6; i++) expect(await gate.check("a"), `check ${i}`).toBe("unknown");
+      expect(b.calls()).toBe(1);
+      advance(29_999);
+      expect(await gate.check("a")).toBe("unknown");
+      expect(b.calls()).toBe(1);
+      advance(1);
+      expect(await gate.check("a")).toBe("unknown");
+      expect(b.calls()).toBe(2);
+    },
+  );
+
+  it("(b) serves a stale set during the backoff with one refresh attempt, and never probes", async () => {
+    const b = switchable(["known"]);
+    const { gate, advance } = mk(b.f);
+    expect(await gate.check("known")).toBe("exists");
+    expect(b.loads()).toBe(1);
+
+    advance(400_000); // past setTtlMs (300s), inside staleMaxMs (3600s)
+    b.setHealth("http503");
+    for (let i = 0; i < 5; i++) expect(await gate.check("known"), `check ${i}`).toBe("exists");
+    expect(b.loads()).toBe(2); // exactly one refresh attempt
+
+    // An absent slug would normally cost a per-slug probe; the backend is down, so it does not.
+    expect(await gate.check("absent")).toBe("unknown");
+    expect(b.probes()).toBe(0);
+    expect(b.calls()).toBe(2);
+  });
+
+  it("(b) a negative-cached slug still answers missing during the backoff", async () => {
+    const b = switchable(["known"]);
+    // Negative entries outlive the set TTL here so one can be live while a refresh fails.
+    const { gate, advance } = mk(b.f, { negativeTtlMs: 1_000_000 });
+    expect(await gate.check("gone")).toBe("missing"); // list + probe, negative-cached
+    expect(b.probes()).toBe(1);
+
+    advance(400_000); // set stale, negative entry still live
+    b.setHealth("reject");
+    expect(await gate.check("gone")).toBe("missing"); // negative cache answers before the backoff check
+    expect(b.loads()).toBe(2); // the refresh attempt that armed the backoff
+    expect(await gate.check("other")).toBe("unknown"); // no live negative entry: no probe
+    expect(b.probes()).toBe(1);
+  });
+
+  it("(b) stale verdict is evaluated against staleMaxMs during the backoff, not just at the failure", async () => {
+    const b = switchable(["a"]);
+    // Backoff longer than staleMaxMs so the stale window can expire inside it.
+    const { gate, advance } = mk(b.f, { failureBackoffMs: 10_000_000 });
+    expect(await gate.check("a")).toBe("exists");
+    advance(400_000);
+    b.setHealth("reject");
+    expect(await gate.check("a")).toBe("exists"); // stale but usable; backoff armed
+    advance(3_600_000);
+    expect(await gate.check("a")).toBe("unknown"); // stale set too old; still no request
+    expect(b.loads()).toBe(2);
+  });
+
+  it("(c) recovers after the window, reloads the set, and re-arms on a later failure", async () => {
+    const b = switchable(["a"]);
+    b.setHealth("http503");
+    const { gate, advance } = mk(b.f);
+    expect(await gate.check("a")).toBe("unknown");
+    expect(b.loads()).toBe(1);
+
+    advance(30_000);
+    b.setHealth("ok");
+    expect(await gate.check("a")).toBe("exists"); // set reloaded
+    expect(b.loads()).toBe(2);
+    // The successful load cleared the backoff, so the probe path works at once.
+    expect(await gate.check("zzz")).toBe("missing");
+    expect(b.probes()).toBe(1);
+
+    advance(400_000);
+    b.setHealth("http503");
+    expect(await gate.check("a")).toBe("exists"); // stale, refresh failed, backoff armed again
+    expect(b.loads()).toBe(3);
+    for (let i = 0; i < 4; i++) expect(await gate.check("a")).toBe("exists");
+    expect(await gate.check("other")).toBe("unknown");
+    expect(b.loads()).toBe(3);
+    expect(b.probes()).toBe(1);
+
+    advance(30_000);
+    expect(await gate.check("a")).toBe("exists");
+    expect(b.loads()).toBe(4); // second window elapsed: one more attempt
+  });
+
+  it("(d) three parallel checks during a failing load share one request", async () => {
+    let rejectLoad!: (e: Error) => void;
+    const f = vi.fn(
+      () =>
+        new Promise<Response>((_, reject) => {
+          // Only the first request is held open; any later one fails at once, so a
+          // regression shows up as a request count rather than a hung test.
+          if (f.mock.calls.length === 1) rejectLoad = reject;
+          else reject(new Error("down"));
+        }),
+    );
+    const { gate } = mk(f as unknown as ReturnType<typeof fakeFetch>);
+    const pending = Promise.all([gate.check("a"), gate.check("b"), gate.check("c")]);
+    expect(f).toHaveBeenCalledTimes(1);
+    rejectLoad(new Error("down"));
+    expect(await pending).toEqual(["unknown", "unknown", "unknown"]);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(await gate.check("a")).toBe("unknown"); // and a late caller does not start a new load
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("(e) honours a custom failureBackoffMs, shorter and longer than the default", async () => {
+    for (const ms of [5_000, 120_000]) {
+      const b = switchable(["a"]);
+      b.setHealth("reject");
+      const { gate, advance } = mk(b.f, { failureBackoffMs: ms });
+      expect(await gate.check("a")).toBe("unknown");
+      advance(ms - 1);
+      expect(await gate.check("a")).toBe("unknown");
+      expect(b.calls(), `ms=${ms} before`).toBe(1);
+      advance(1);
+      expect(await gate.check("a")).toBe("unknown");
+      expect(b.calls(), `ms=${ms} after`).toBe(2);
+    }
+  });
+
+  it("a failed probe alone does not arm the backoff", async () => {
+    const f = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("source_slug_exists")) throw new Error("probe timeout");
+      return json([{ slug: "a" }]);
+    });
+    const { gate } = mk(f as unknown as ReturnType<typeof fakeFetch>);
+    expect(await gate.check("x")).toBe("unknown");
+    expect(await gate.check("y")).toBe("unknown");
+    expect(await gate.check("x")).toBe("unknown");
+    const probes = f.mock.calls.filter(([u]) => String(u).includes("source_slug_exists")).length;
+    expect(probes).toBe(3); // every absent slug still gets its probe
+    expect(await gate.check("a")).toBe("exists");
+  });
+
+  it("the backoff is per gate: one failing gate does not silence another", async () => {
+    const down = switchable(["a"]);
+    down.setHealth("reject");
+    const up = switchable(["a"]);
+    const g1 = mk(down.f).gate;
+    const g2 = mk(up.f).gate;
+    expect(await g1.check("a")).toBe("unknown");
+    expect(await g2.check("a")).toBe("exists");
+    expect(up.loads()).toBe(1);
+  });
+});
+
 describe("SOURCE_SLUG_RE parity with isValidSourceSlug", () => {
   it("agrees on a sample list", () => {
     const sample = ["cnn-turk", "CNN", "-x", "a".repeat(64), "a".repeat(65), "a", "ç", "", "a b", "x_y", "0", "a-"];

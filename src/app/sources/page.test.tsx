@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 
 import { createSupabaseFake } from "../../../tests/_helpers/supabase-fake";
@@ -188,6 +188,24 @@ async function collectHrefs(node: unknown, out: string[] = []): Promise<string[]
   return out;
 }
 
+// Order independence (vitest --sequence.shuffle): every test starts from the
+// same fixture state no matter which test ran before it. The noindex test
+// flips `supabaseFixture.fail`, the karne test flips the clickbait fixture and
+// both clickbait mocks record calls, so all four are reset here, once, for the
+// whole file instead of inside the one describe that happened to need it.
+beforeEach(() => {
+  supabaseFixture.fail = false;
+  clickbaitFixture.public = false;
+  clickbaitFixture.karne = null;
+  vi.mocked(isClickbaitPublic).mockClear();
+  vi.mocked(getClickbaitKarne).mockClear();
+});
+
+afterEach(() => {
+  // console spies created with vi.spyOn must not outlive their test.
+  vi.restoreAllMocks();
+});
+
 describe("/sources page — source-kind UI", () => {
   it("shows the classified-count line and kind badges", async () => {
     const tree = await SourcesPage();
@@ -216,13 +234,6 @@ describe("/sources page — source-kind UI", () => {
 });
 
 describe("/sources page — clickbait-karne gate", () => {
-  beforeEach(() => {
-    clickbaitFixture.public = false;
-    clickbaitFixture.karne = null;
-    vi.mocked(isClickbaitPublic).mockClear();
-    vi.mocked(getClickbaitKarne).mockClear();
-  });
-
   it("with the gate closed, getClickbaitKarne is never called and there is no 'tık tuzağı' text", async () => {
     clickbaitFixture.public = false;
 
@@ -290,12 +301,6 @@ function findElementProps(
 }
 
 describe("/sources page — noindex on the error state (seo-error-states)", () => {
-  beforeEach(() => {
-    supabaseFixture.fail = false;
-    clickbaitFixture.public = false;
-    clickbaitFixture.karne = null;
-  });
-
   it("emits <meta name=robots content=noindex> as the FIRST child of the container when the directory fails to load", async () => {
     supabaseFixture.fail = true;
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

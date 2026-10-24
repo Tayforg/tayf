@@ -16,6 +16,7 @@ const fixture = vi.hoisted(() => ({
   error: null as { message: string } | null,
   throwOnQuery: false,
   lastState: null as unknown,
+  clientBuilds: 0,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -32,9 +33,13 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: () => {
+    fixture.clientBuilds += 1;
+    return supabaseFake.client;
+  },
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import { getClusterFactChecks } from "./cluster-fact-checks-query";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -48,9 +53,18 @@ beforeEach(() => {
   fixture.error = null;
   fixture.throwOnQuery = false;
   fixture.lastState = null;
+  fixture.clientBuilds = 0;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
+  // A failed read logs once from attemptCached (console.error) and once from
+  // the wrapper (console.warn); keep the output clean.
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.mocked(console.error).mockRestore();
+  vi.mocked(console.warn).mockRestore();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "FACT_CHECK_BOX"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -157,5 +171,107 @@ describe("getClusterFactChecks", () => {
     const result = await getClusterFactChecks("c1");
     expect(result).toEqual([]);
     expect(fixture.lastState).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cached-failure-sweep: cacheLife follows the outcome. An empty list from a
+// SUCCESSFUL query (the overwhelming majority of clusters) is legitimately
+// cached for the full 'cluster-feed' window; a failed read resolves [] and is
+// memoised for 'minutes' only, so a one-off blip (or a deploy that shipped
+// before migration 080) cannot hide the box for the whole window.
+// ---------------------------------------------------------------------------
+
+describe("getClusterFactChecks cache lifetime", () => {
+  it("flag off: [] with zero queries, no client, and no cache entry at all", async () => {
+    process.env.FACT_CHECK_BOX = "off";
+    fixture.data = [OBJECT_ROW];
+
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+
+    expect(fixture.lastState).toBeNull();
+    expect(fixture.clientBuilds).toBe(0);
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
+  });
+
+  it("success with rows: cached for 'cluster-feed', tagged before the lifetime", async () => {
+    fixture.data = [OBJECT_ROW];
+
+    const result = await getClusterFactChecks("c1");
+
+    expect(result).toHaveLength(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheTag).toHaveBeenCalledWith("fact-checks", "fact-checks:c1");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("success with an empty list is still a success: 'cluster-feed', not 'minutes'", async () => {
+    fixture.data = [];
+
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a rows-all-dropped read (disallowed url) is also a success", async () => {
+    fixture.data = [
+      {
+        score: 0.8,
+        fact_checks: {
+          id: "fc-bad",
+          publisher: "teyit",
+          url: "https://evil.example.com/x",
+          title: "Kötü url",
+          published_at: "2026-09-27T10:00:00Z",
+          is_published: true,
+        },
+      },
+    ];
+
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a Supabase error resolves [] and is cached for 'minutes' only", async () => {
+    fixture.error = { message: 'relation "cluster_fact_checks" does not exist' };
+
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a thrown query (connection reset) resolves [] and is cached for 'minutes' only", async () => {
+    fixture.throwOnQuery = true;
+
+    await expect(getClusterFactChecks("c1")).resolves.toEqual([]);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a failed read keeps the warn log, so an outage is visible", async () => {
+    fixture.error = { message: "boom" };
+
+    await getClusterFactChecks("c1");
+
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("[fact-checks] cluster-fact-checks-query failed:"),
+      expect.anything(),
+    );
+  });
+
+  it("does not retry live: the null contract has no second read", async () => {
+    fixture.error = { message: "boom" };
+
+    await getClusterFactChecks("c1");
+
+    expect(fixture.clientBuilds).toBe(1);
   });
 });

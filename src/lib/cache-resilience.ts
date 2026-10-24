@@ -35,12 +35,13 @@
 //      per request, not cache expiry. Only a genuinely sustained outage
 //      (cached attempt AND live retry both fail) falls through to
 //      `fallback`. This half never throws for a DATA failure. Callers that
-//      must not degrade silently (crons, RSS) should follow the
-//      getBlindspots shape instead: attempt, live retry, then let the throw
-//      propagate.
+//      must not degrade silently (finance pages, sitemaps, crons, RSS) use
+//      `resolveCachedOrThrow` instead: attempt, live retry, then let the
+//      retry's error propagate (the getBlindspots shape, plus the
+//      prerender-safe await below).
 //
-//   3. Prerender safety — `resolveCachedOrRetry` awaits `connection()`
-//      (`awaitRequestScope`) before the live retry. The retry is an
+//   3. Prerender safety — `resolveCachedOrRetry` and `resolveCachedOrThrow`
+//      await `connection()` (`awaitRequestScope`) before the live retry. The retry is an
 //      UNCACHED fetch that may read the clock (fetchTopicCounts does,
 //      topic-query.ts) and Next 16 cacheComponents fails `next build` on a
 //      clock read in an uncached prerender path. When the cached attempt
@@ -48,8 +49,9 @@
 //      the await postpones the subtree to the nearest Suspense (the root
 //      src/app/loading.tsx covers every public page) instead of running the
 //      retry. At request time it resolves at once and nothing changes: one
-//      live retry, then `fallback`. NEVER call `resolveCachedOrRetry`, a
-//      getter built on it, or `connection()` inside a `"use cache"` body:
+//      live retry, then `fallback` (or the retry's error). NEVER call
+//      `resolveCachedOrRetry`, `resolveCachedOrThrow`, a getter built on
+//      either, or `connection()` inside a `"use cache"` body:
 //      there `connection()` throws AND records
 //      `workStore.invalidDynamicUsageError`, which fails the build even
 //      when caught. tests/guards/cache-retry-prerender.test.ts enforces
@@ -154,5 +156,45 @@ export async function resolveCachedOrRetry<T>(
   } catch (err) {
     console.error(`[${label}] retry also failed: ${describeError(err)}`);
     return fallback;
+  }
+}
+
+/**
+ * The throw-contract twin of `resolveCachedOrRetry`, for fetchers whose callers
+ * must NOT degrade silently (the /ekonomi pages, whose error.tsx renders
+ * instead of a cached empty page; the sitemap route, which maps a throw to a
+ * 503 so a failed read is never served as an empty urlset). It is the
+ * getBlindspots shape (attempt, one live retry, then let the failure
+ * propagate) plus the prerender-safe `awaitRequestScope()`, so the uncached
+ * retry may read the clock.
+ *
+ * A cache hit returns untouched (a legitimately empty value included). On a
+ * miss it awaits the request scope, then runs `retry` once, uncached. The
+ * retry's error propagates unchanged after one log line under `label` (parity
+ * with `resolveCachedOrRetry`'s "retry also failed"); there is no `fallback`.
+ * The `awaitRequestScope` call sits outside the try, so Next control flow (a
+ * prerender postpone, an `after()` misuse) is never logged as a data failure
+ * and the retry is not run.
+ *
+ * `cached` is the `<name>Cached` function whose `"use cache"` body wraps the
+ * raw read in `attemptCached` and chooses `cacheLife` AFTER the outcome;
+ * `retry` is the raw, uncached read. Never call this from a `"use cache"` body
+ * (tests/guards/cache-retry-prerender.test.ts).
+ */
+export async function resolveCachedOrThrow<T>(
+  label: string,
+  cached: () => Promise<CacheAttempt<T>>,
+  retry: () => Promise<T>,
+): Promise<T> {
+  const result = await cached();
+  if (result.ok) return result.data;
+
+  await awaitRequestScope();
+
+  try {
+    return await retry();
+  } catch (err) {
+    console.error(`[${label}] retry also failed: ${describeError(err)}`);
+    throw err;
   }
 }

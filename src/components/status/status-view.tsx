@@ -51,15 +51,15 @@ const BADGE: Record<TileLevel, { label: string; className: string }> = {
   ok: {
     label: "Normal",
     className:
-      "border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-500",
+      "border-emerald-500/30 bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
   },
   gecikmeli: {
     label: "Gecikmeli",
-    className: "border-amber-500/30 bg-amber-500/15 text-amber-700 dark:text-amber-500",
+    className: "border-amber-500/30 bg-amber-500/15 text-amber-700 dark:text-amber-400",
   },
   sorunlu: {
     label: "Sorunlu",
-    className: "border-rose-500/30 bg-rose-500/15 text-rose-700 dark:text-rose-500",
+    className: "border-rose-500/30 bg-rose-500/15 text-rose-700 dark:text-rose-400",
   },
   bilinmiyor: {
     label: "Bilinmiyor",

@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 // ---------------------------------------------------------------------------
 // reader-queries F1: getNeutralizedStatus() now calls the 083 migration's
@@ -39,6 +41,7 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import { getNeutralizedStatus } from "./status";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -50,9 +53,14 @@ beforeEach(() => {
   fixture.neutralized = 0;
   fixture.error = null;
   fixture.malformed = false;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
+  // attemptCached logs a failed read with console.error; keep the output clean.
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.mocked(console.error).mockRestore();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -145,5 +153,85 @@ describe("getNeutralizedStatus", () => {
       const [message] = warnSpy.mock.calls[0] as [string];
       expect(message).toBe("[headline-status] unavailable: malformed counts");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cached-failure-sweep: the lifetime follows the outcome. A failed read
+// (rpc error, malformed counts, a client that cannot be built) resolves null
+// and is memoised for 'minutes' only -- never for the whole 'cluster-feed'
+// window, which would hide the "N başlık tarafsızlaştırıldı" claim copy for
+// that long after a one-off timeout.
+// ---------------------------------------------------------------------------
+
+describe("getNeutralizedStatus cache lifetime", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.mocked(console.warn).mockRestore();
+  });
+
+  it("success: the counts and exactly one cacheLife('cluster-feed'), tagged first", async () => {
+    fixture.eligible = 12;
+    fixture.neutralized = 5;
+
+    await expect(getNeutralizedStatus()).resolves.toEqual({ eligible: 12, neutralized: 5 });
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("a zero count is a successful answer: cached for 'cluster-feed'", async () => {
+    fixture.eligible = 0;
+    fixture.neutralized = 0;
+
+    await expect(getNeutralizedStatus()).resolves.toEqual({ eligible: 0, neutralized: 0 });
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("an rpc error resolves null and is cached for 'minutes' only", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+
+    await expect(getNeutralizedStatus()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("malformed counts resolve null and are cached for 'minutes' only", async () => {
+    fixture.malformed = true;
+
+    await expect(getNeutralizedStatus()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a client that cannot be built (missing env) resolves null and is cached for 'minutes' only", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getNeutralizedStatus()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("never throws across the cache boundary, whatever the rpc does", async () => {
+    fixture.error = { message: "boom" };
+    await expect(getNeutralizedStatus()).resolves.toBeNull();
+  });
+
+  it("stays a \"use cache: remote\" entry (the cross-instance cache) on the cached function", () => {
+    const src = readFileSync(resolve(__dirname, "status.ts"), "utf8");
+    expect(src).toMatch(/^\s+"use cache: remote";/m);
   });
 });

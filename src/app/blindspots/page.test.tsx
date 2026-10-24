@@ -56,16 +56,24 @@ import type { SilenceDigest } from "@/lib/clusters/silence-digest";
 
 const ORIGINAL_ENV = { ...process.env };
 
+// Order independence (vitest --sequence.shuffle): mockClear() only drops call
+// records, so an implementation swapped in by one test (PERF-01) or a
+// mockResolvedValueOnce it never consumed leaked into whichever test ran next.
+// All three fetcher mocks are therefore mockReset() and given their default
+// implementation again before every test, and fake Date timers never outlive a
+// test (the digest-band describe installs them in its own beforeEach).
 beforeEach(() => {
   delete process.env.RESEND_API_KEY; // isMailConfigured() -> false, no NewsletterForm
   getBlindspots.mockReset();
   getBlindspots.mockImplementation(async () => ({ ok: true, bundles: [] }));
-  getFeedStatusSummary.mockClear();
+  getFeedStatusSummary.mockReset();
+  getFeedStatusSummary.mockImplementation(async () => ({ delivering: 59, total: 96 }));
   getNearBlindspots.mockReset();
   getNearBlindspots.mockImplementation(async () => []);
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const k of ["RESEND_API_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];

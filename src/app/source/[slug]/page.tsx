@@ -188,7 +188,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
             loading="eager"
             className="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 object-contain bg-background ring-1 ring-brand/20"
             fallback="square"
-            fallbackClassName="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 bg-muted/60 ring-1 ring-brand/20"
+            fallbackClassName="h-16 w-16 sm:h-20 sm:w-20 rounded-lg shrink-0 bg-muted/60 ring-1 ring-brand/20 text-2xl sm:text-3xl"
           />
 
           <div className="min-w-0 flex-1 space-y-2">

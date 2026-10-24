@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import { zoneOf } from "@/lib/bias/config";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
@@ -259,17 +260,14 @@ function mapRawRow(raw: RawClickbaitRpcRow): ClickbaitOutletRow {
 }
 
 /**
- * Cached fetch of the 30-day rollup via `source_clickbait_30d`. THROWS on an
- * rpc error (never resolves to an empty/partial result silently) so a
- * transient DB error can never get cached as "no eligible outlets" for the
- * whole cacheLife("hours") window — the uncached wrapper (getClickbaitKarne)
- * is the one that fails open.
+ * The raw, uncached fetch of the 30-day rollup via `source_clickbait_30d`.
+ * THROWS on an rpc error (never resolves to an empty/partial result silently)
+ * so a transient DB error can never get cached as "no eligible outlets" for the
+ * whole cacheLife("hours") window: `fetchClickbaitRowsCached` absorbs the throw
+ * with `attemptCached` and picks the lifetime afterwards, and the uncached
+ * wrapper (getClickbaitKarne) is the one that fails open.
  */
-export async function fetchClickbaitRows(minN: number): Promise<ClickbaitOutletRow[]> {
-  "use cache";
-  cacheLife("hours");
-  cacheTag("sources");
-
+export async function readClickbaitRows(minN: number): Promise<ClickbaitOutletRow[]> {
   const supabase = createServerClient();
   const { data, error } = await supabase.rpc("source_clickbait_30d", {
     p_question_sets: [...CLICKBAIT_QUESTION_SETS],
@@ -284,20 +282,36 @@ export async function fetchClickbaitRows(minN: number): Promise<ClickbaitOutletR
   return ((data ?? []) as RawClickbaitRpcRow[]).map(mapRawRow);
 }
 
+// Exactly ONE `cacheLife` per invocation, chosen after the attempt: a failed
+// attempt (a timeout, a missing migration 078) is memoised for `minutes` only,
+// so one blip cannot park an `{ ok: false }` sentinel for the whole `hours`
+// window; any answer -- an empty rollup included -- keeps `hours`.
+async function fetchClickbaitRowsCached(minN: number) {
+  "use cache";
+  cacheTag("sources");
+  const r = await attemptCached("clickbait", () => readClickbaitRows(minN));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("hours");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
  * Uncached, fail-open wrapper. Every public caller (/sources, /source/[slug])
  * runs at request time already (connection() / dynamic params), so there is
  * no build-time cost to calling this uncached — it exists purely so a
  * missing migration 078 or an rpc error can never take a public page down;
- * it just hides the section.
+ * it just hides the section. A failed cached attempt is retried live once
+ * (behind awaitRequestScope); a still-failing retry resolves `null`.
  */
 export async function getClickbaitKarne(): Promise<ClickbaitKarne | null> {
-  try {
-    const rows = await fetchClickbaitRows(CLICKBAIT_MIN_N);
-    return buildClickbaitKarne(rows);
-  } catch {
-    return null;
-  }
+  const rows = await resolveCachedOrRetry<ClickbaitOutletRow[] | null>(
+    "clickbait",
+    () => fetchClickbaitRowsCached(CLICKBAIT_MIN_N),
+    () => readClickbaitRows(CLICKBAIT_MIN_N),
+    null,
+  );
+  return rows ? buildClickbaitKarne(rows) : null;
 }
 
 /**

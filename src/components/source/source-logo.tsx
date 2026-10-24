@@ -9,8 +9,10 @@ import { firstPartyLogoUrl } from "@/lib/images/image-url";
 // Source logos are Google S2 favicon URLs routed through `/_next/image`
 // (see firstPartyLogoUrl). For an outlet Google has no favicon for, the
 // optimizer answers 404 and a bare <img> shows the browser's broken-image
-// glyph. This client island swaps to a muted square (or an initials badge)
-// that carries the SAME size classes as the image, so nothing shifts.
+// glyph. This client island swaps to a tinted tile carrying the outlet's
+// initial (or an initials badge) with the SAME size classes as the image, so
+// nothing shifts. A bare empty tile read as a rendering bug on /sources and
+// /source/<slug> (gazete.net, krttv.com.tr), hence the letter.
 //
 // Two failure windows are covered:
 //  - after hydration: the <img> `onError` handler flips `failed`;
@@ -40,8 +42,27 @@ export function sourceInitials(name: string): string {
 }
 
 /**
+ * The outlet's first letter for the 'square' tile: the first code point of the
+ * trimmed name (so an emoji is never cut in half), upper-cased with Turkish
+ * rules ("istanbul" -> "İ", "ılık" -> "I"). Empty name -> "". Pure, so the
+ * server and client renders agree (hydration-safe).
+ */
+export function sourceMonogram(name: string): string {
+  const first = Array.from(name.trim())[0];
+  return first === undefined ? "" : first.toLocaleUpperCase("tr-TR");
+}
+
+/**
  * The no-logo / failed-logo view. Exported so it can be rendered directly in
  * tests (the node test env cannot trigger `onError`).
+ *
+ * - "initials": a self-contained badge; `className` carries its look (the
+ *   caller adds inline-flex, centring and a font size) and holds two letters.
+ * - "square": a tinted tile with the outlet's initial. `className` is the
+ *   tile's box (size, radius, tint, ring) and must be a flex item or otherwise
+ *   block-level so h-/w- apply; the letter fills it and centres itself, and its
+ *   font size is inherited from `className` (e.g. `text-2xl`), so there is no
+ *   separate prop for it.
  */
 export function SourceLogoFallback({
   kind,
@@ -52,9 +73,18 @@ export function SourceLogoFallback({
   name: string;
   className: string;
 }) {
+  if (kind === "initials") {
+    return (
+      <span aria-hidden="true" className={className}>
+        {sourceInitials(name)}
+      </span>
+    );
+  }
   return (
     <span aria-hidden="true" className={className}>
-      {kind === "initials" ? sourceInitials(name) : null}
+      <span className="flex h-full w-full items-center justify-center font-semibold leading-none text-muted-foreground">
+        {sourceMonogram(name)}
+      </span>
     </span>
   );
 }

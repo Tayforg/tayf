@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 import { FACT_CHECK_PUBLISHERS, type FactCheckPublisherKey } from "./feeds";
 import { isAllowedFactCheckUrl } from "./normalize";
@@ -55,22 +56,17 @@ function normalizeEmbed(embed: FactCheckEmbed | FactCheckEmbed[]): FactCheckEmbe
 }
 
 /**
- * Internal, cached implementation. THROWS on a Supabase error -- mirroring
+ * The raw, uncached read. THROWS on a Supabase error -- mirroring
  * search-query.ts's fetch/cache split -- so a transient Supabase failure
  * (or a deploy that shipped before migration 080 landed) can never be
  * memoised as "this cluster has no fact-checks" for the whole cluster-feed
- * cache window. The public `getClusterFactChecks` wrapper below sits
- * outside the cache and converts the throw into the documented
- * never-throw contract; an empty array from a SUCCESSFUL query (the
+ * cache window: `getClusterFactChecksCached` wraps it in `attemptCached` and
+ * only then picks the lifetime. An empty array from a SUCCESSFUL query (the
  * overwhelming majority of clusters) is legitimately cached.
  */
-async function fetchClusterFactChecks(
+async function readClusterFactChecks(
   clusterId: string,
 ): Promise<ClusterFactCheck[]> {
-  "use cache";
-  cacheLife("cluster-feed");
-  cacheTag("fact-checks", `fact-checks:${clusterId}`);
-
   const supabase = createServerClient();
 
   const { data, error } = await supabase
@@ -118,21 +114,35 @@ async function fetchClusterFactChecks(
   return out;
 }
 
+// `attemptCached` keeps a failed read from crossing the `"use cache"`
+// boundary (a throw there fails `next build`'s prerender) and lets the
+// lifetime follow the outcome: a successful read -- an empty list included --
+// keeps `cluster-feed`; a failed attempt is memoised for `minutes` only. Exactly
+// one `cacheLife` per invocation, after the attempt; `cacheTag` first.
+async function getClusterFactChecksCached(clusterId: string) {
+  "use cache";
+  cacheTag("fact-checks", `fact-checks:${clusterId}`);
+  const r = await attemptCached("fact-checks", () => readClusterFactChecks(clusterId));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  return r;
+}
+
 /**
  * Public entry point. Flag off -> `[]` with ZERO Supabase queries (the
  * cluster page is the hottest route on the site; this must stay free on
- * the common path). Any thrown error (missing table pre-migration, a
- * Supabase blip) is caught, logged, and swallowed to `[]` so the page is
- * never affected by this feature failing.
+ * the common path, so the flag check stays first, outside the cache). A failed
+ * read (missing table pre-migration, a Supabase blip) is logged and resolves
+ * to `[]` so the page is never affected by this feature failing; there is no
+ * live retry, the next request after `minutes` reads again.
  */
 export async function getClusterFactChecks(
   clusterId: string,
 ): Promise<ClusterFactCheck[]> {
   if (!isFactCheckBoxEnabled()) return [];
-  try {
-    return await fetchClusterFactChecks(clusterId);
-  } catch (err) {
-    console.warn("[fact-checks] cluster-fact-checks-query failed:", err);
-    return [];
-  }
+  const r = await getClusterFactChecksCached(clusterId);
+  if (r.ok) return r.data;
+  console.warn("[fact-checks] cluster-fact-checks-query failed:", r.error);
+  return [];
 }

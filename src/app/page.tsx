@@ -378,7 +378,7 @@ export async function HomeFeed({
                         className="h-2 w-2 animate-pulse rounded-full bg-red-600 dark:bg-red-500"
                         aria-hidden="true"
                       />
-                      <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-red-600 dark:text-red-500">
+                      <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-red-600 dark:text-red-400">
                         Son Dakika
                       </h2>
                     </div>

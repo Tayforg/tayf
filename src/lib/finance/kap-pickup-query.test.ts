@@ -23,6 +23,23 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
+// Order independence (vitest --sequence.shuffle): `vi.doMock` registrations
+// survive `vi.resetModules()`, so the getTickerPickupSafe test's mocks of
+// @/lib/supabase/server (a client whose .from is not a function) and of the
+// module under test used to leak into whichever describe ran next. Every test
+// therefore starts on a fresh module graph and leaves no doMock, fake timer or
+// spy behind. The hoisted `vi.mock("next/cache")` above is unaffected by both.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+afterEach(() => {
+  vi.doUnmock("@/lib/supabase/server");
+  vi.doUnmock("@/lib/finance/kap-pickup-query");
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
 describe("fetchTickerPickup", () => {
   it("no disclosures -> an empty legitimate result with no article_tickers query", async () => {
     const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
@@ -257,15 +274,11 @@ describe("getTickerPickup / getTickerPickupSafe (cached attempt)", () => {
   }
 
   beforeEach(() => {
-    vi.resetModules();
+    financeClient.mockReset();
     cacheMocks.cacheLife.mockClear();
     cacheMocks.cacheTag.mockClear();
     vi.spyOn(console, "error").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
   });
 
   it("builds the finance client with the 4 s reader timeout", async () => {
@@ -337,10 +350,6 @@ describe("getTickerPickup / getTickerPickupSafe (cached attempt)", () => {
 });
 
 describe("getTickerPickupSafe", () => {
-  beforeEach(() => {
-    vi.resetModules();
-  });
-
   it("returns null when fetchTickerPickup throws", async () => {
     vi.doMock("@/lib/supabase/server", () => ({
       READER_TIMEOUT_MS: 4000,

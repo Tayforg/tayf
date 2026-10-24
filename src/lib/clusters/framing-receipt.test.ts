@@ -4,10 +4,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // helper, its exact-copy sentence builder, and its plain fetcher
 // (getClusterFramingReceipt). Mirrors src/lib/game/agreement.test.ts for
 // the shared chainable Supabase fake (tests/_helpers/supabase-fake.ts) and
-// the next/cache stub. getCachedClusterFramingReceipt is a thin
-// "use cache" wrapper over getClusterFramingReceipt and is deliberately
-// NOT tested here — a "use cache" function needs the real Next.js runtime
-// to exercise caching semantics, and vitest doesn't run one.
+// the next/cache stub. getCachedClusterFramingReceipt is the "use cache"
+// wrapper used by the public cluster page. A "use cache" directive is a no-op
+// string under vitest, so the caching itself is not exercised; what IS pinned
+// below (cached-failure-sweep) is which cacheLife each outcome picks, since
+// next/cache is stubbed and the call can be counted.
 
 vi.mock("next/cache", () => ({
   cacheLife: vi.fn(),
@@ -35,8 +36,10 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import {
   framingReceiptSentence,
+  getCachedClusterFramingReceipt,
   getClusterFramingReceipt,
   isFramingReceiptPublic,
   numberPossessive,
@@ -52,6 +55,8 @@ beforeEach(() => {
   delete process.env.FRAMING_RECEIPT_PUBLIC;
   fixture.row = null;
   fixture.error = null;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
 });
 
 afterEach(() => {
@@ -156,6 +161,97 @@ describe("getClusterFramingReceipt", () => {
     expect(errorSpy).toHaveBeenCalled();
 
     errorSpy.mockRestore();
+  });
+});
+
+describe("getCachedClusterFramingReceipt cache lifetime (cached-failure-sweep)", () => {
+  const ROW = {
+    members: 12,
+    scored: 9,
+    pro_government: 4,
+    pro_opposition: 3,
+    neutral: 2,
+    question_set: "2026-09-21.1",
+  };
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it("a row: the mapped counts, cached for 'cluster-feed', tags before the lifetime", async () => {
+    fixture.row = ROW;
+
+    await expect(getCachedClusterFramingReceipt("cluster-1")).resolves.toEqual({
+      members: 12,
+      scored: 9,
+      proGovernment: 4,
+      proOpposition: 3,
+      neutral: 2,
+      questionSet: "2026-09-21.1",
+    });
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+    expect(cacheTag).toHaveBeenCalledWith("cluster-detail:cluster-1", "clusters");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("no row is a SUCCESSFUL read: null, cached for 'cluster-feed' (not 'minutes')", async () => {
+    fixture.row = null;
+
+    await expect(getCachedClusterFramingReceipt("cluster-1")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("an rpc error: null, cached for 'minutes' only", async () => {
+    fixture.error = { message: 'function "cluster_framing_receipt" does not exist' };
+
+    await expect(getCachedClusterFramingReceipt("cluster-1")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("missing Supabase env vars (the client cannot be built): null, cached for 'minutes' only", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getCachedClusterFramingReceipt("cluster-1")).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("never reads the public flag: the same answer with the flag off and on", async () => {
+    fixture.row = ROW;
+    delete process.env.FRAMING_RECEIPT_PUBLIC;
+    const off = await getCachedClusterFramingReceipt("cluster-1");
+    process.env.FRAMING_RECEIPT_PUBLIC = "1";
+    const on = await getCachedClusterFramingReceipt("cluster-1");
+    expect(on).toEqual(off);
+    expect(on).not.toBeNull();
+  });
+
+  it("the admin path stays uncached: no cacheLife, no cacheTag, even on an error", async () => {
+    fixture.error = { message: "boom" };
+
+    await expect(getClusterFramingReceipt("cluster-1")).resolves.toBeNull();
+    fixture.error = null;
+    fixture.row = ROW;
+    await expect(getClusterFramingReceipt("cluster-1")).resolves.not.toBeNull();
+
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
   });
 });
 

@@ -1,5 +1,7 @@
 import { cacheLife } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
+
 // Quote boundary for the Ekonomi pages. Business code only sees
 // `QuoteSource`; the Yahoo implementation is constructed at the edge in
 // `getQuotes()` so a test can hand in a fake without touching the network.
@@ -147,14 +149,24 @@ export function defaultQuoteSource(): QuoteSource {
 
 /**
  * Single-ticker cache boundary. Each ticker's quote is cached independently
- * (5 min) under its own Next cache key, so the key never depends on which
- * other tickers happened to be requested alongside it in a given call.
+ * under its own Next cache key, so the key never depends on which other
+ * tickers happened to be requested alongside it in a given call.
+ *
+ * The lifetime follows the outcome: a real quote keeps the 5-minute window,
+ * while "no quote" -- a Yahoo non-200, a rejected fetch, an unknown symbol
+ * (YahooQuoteSource turns every one of them into an empty list) or a throw
+ * that attemptCached absorbs -- is memoised for `minutes` only, so a blip
+ * cannot blank a ticker's chip for 5-15 minutes. Exactly one `cacheLife` per
+ * invocation, after the attempt.
  */
 async function getQuote(ticker: string): Promise<Quote | null> {
   "use cache";
-  cacheLife({ stale: 60, revalidate: 300, expire: 900 });
-  const [quote] = await defaultQuoteSource().getQuotes([ticker]);
-  return quote ?? null;
+  const r = await attemptCached("quote", () => defaultQuoteSource().getQuotes([ticker]));
+  const quote = r.ok ? (r.data[0] ?? null) : null;
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (quote) cacheLife({ stale: 60, revalidate: 300, expire: 900 });
+  else cacheLife("minutes");
+  return quote;
 }
 
 /** Quotes keyed by ticker, fanned out over the per-ticker cache boundary above. */

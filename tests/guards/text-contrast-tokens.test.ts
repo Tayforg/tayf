@@ -496,3 +496,350 @@ describe("tinted status pills keep AA text shades (WCAG 1.4.3)", () => {
     expect(literals.some((l) => l.includes("backtick"))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fourth guard (wave V hygiene, dark-mode hue text): no `dark:text-<hue>-500`,
+// `-600` or `-700` anywhere under src/ (.ts and .tsx, comments excluded).
+//
+// Why this exists, stated honestly: the repo had no contrast tooling, so this
+// file now carries a small one (OKLCH -> sRGB -> WCAG relative luminance, with
+// washes alpha-composited in gamma-encoded sRGB like the browser does). The
+// numbers below were measured with it against tailwindcss 4.3.3 (theme.css)
+// and the dark tokens of src/app/globals.css: card oklch(0.19 0.01 60),
+// background oklch(0.14 0.008 60).
+//
+//   shade 500 text on     card   background   own bg-<hue>-500/15 wash
+//   red                   4.84   5.21          4.21  (below 4.5)
+//   rose                  4.92   5.30          4.30  (below 4.5)
+//   blue                  4.92   5.30          4.19  (below 4.5)
+//   indigo                4.04   4.35          3.51  (below 4.5 everywhere)
+//   violet                4.20   4.52          3.64  (below 4.5 on card, wash)
+//   purple                4.49   4.84          3.88  (below 4.5 on card, wash)
+//   pink                  5.16   5.56          4.42  (wash below 4.5)
+//   orange                6.39   6.89          5.23
+//   emerald               7.50   8.08          6.03
+//   amber                 8.62   9.28          6.64
+//   yellow                9.66  10.41          7.26
+//
+// So -500 was never uniformly broken: amber, yellow and emerald (most of the
+// 14 hits when this guard landed) cleared 4.5:1 with room to spare. What did
+// fail was rose-500 on its own 15 % wash (4.30, the status-view "karantina"
+// pill), and red/rose sit within 0.4 of the floor even on the plain card, so
+// any change to the card tone or a smaller text size removes the margin.
+// -600 / -700 are darker than -500 and only get worse on a dark surface. The
+// ban is therefore about margin and the washes, applied to every hue so the
+// rule is one line instead of a per-hue table. Shade 400 is the replacement:
+// its worst case over all 17 hues is indigo at 5.93 (card), 6.38 (background)
+// and 5.16 (wash); the test below asserts >= 4.5 for each hue and surface.
+//
+// Out of scope on purpose: light-theme classes (the light shades are governed
+// by the tinted-pill guard above), `dark:bg-*` fills, and 300 / 200 / 950
+// (dark text on a solid bright fill, e.g. `dark:text-amber-950`).
+// Large-text relief (3:1 for >= 24 px or >= 18.66 px bold) is not wired in:
+// no offender needed it. Add an allow-list here only for a genuine case.
+// ---------------------------------------------------------------------------
+
+const DARK_LOW_SHADE =
+  /(?<![\w-])dark:(?:[a-z0-9-]+:)*text-(red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-(500|600|700)(?:\/\d+)?(?![\w-])/g;
+
+/** Non-test .ts and .tsx files under `dir` (the .tsx-only `walk` above misses .ts). */
+function walkSource(dir: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const full = join(dir, name);
+    if (statSync(full).isDirectory()) out.push(...walkSource(full));
+    else if (/\.tsx?$/.test(name) && !/\.test\./.test(name)) out.push(full);
+  }
+  return out;
+}
+
+/**
+ * `src` with every `//` and block comment replaced by spaces (newlines kept so
+ * line numbers survive). Quoted strings are tracked so a `//` inside
+ * "https://..." does not blank the rest of the line; ' and " strings end at the
+ * line break (a lone Turkish apostrophe in JSX text cannot swallow the file),
+ * template literals span lines. Any slip here leaves a comment un-blanked
+ * (a visible false positive), never hides real code.
+ */
+function blankComments(src: string): string {
+  let out = "";
+  let i = 0;
+  let quote: string | null = null;
+  while (i < src.length) {
+    const c = src[i]!;
+    const next = src[i + 1];
+    if (quote !== null) {
+      out += c;
+      if (c === "\\" && next !== undefined) {
+        out += next;
+        i += 2;
+        continue;
+      }
+      if (c === quote || (c === "\n" && quote !== "`")) quote = null;
+      i++;
+      continue;
+    }
+    if (c === "/" && next === "/") {
+      for (; i < src.length && src[i] !== "\n"; i++) out += " ";
+      continue;
+    }
+    if (c === "/" && next === "*") {
+      const end = src.indexOf("*/", i + 2);
+      const stop = end === -1 ? src.length : end + 2;
+      for (; i < stop; i++) out += src[i] === "\n" ? "\n" : " ";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** `file:line  match` for every banned dark hue text shade in one source file. */
+function darkLowShadeOffenders(file: string, src: string): string[] {
+  const offenders: string[] = [];
+  blankComments(src)
+    .split("\n")
+    .forEach((line, i) => {
+      for (const match of line.matchAll(DARK_LOW_SHADE)) {
+        offenders.push(`${repoPath(file)}:${i + 1}  ${match[0]}`);
+      }
+    });
+  return offenders;
+}
+
+/** True when the class string contains a banned shade (stateless: String.match resets lastIndex). */
+const hasDarkLowShade = (classes: string): boolean => (classes.match(DARK_LOW_SHADE) ?? []).length > 0;
+
+// --- contrast helper -------------------------------------------------------
+
+/** Gamma-encoded sRGB, each channel 0..1. */
+type Rgb = readonly [number, number, number];
+
+const WHITE: Rgb = [1, 1, 1];
+const BLACK: Rgb = [0, 0, 0];
+
+const srgbEncode = (v: number): number => (v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055);
+const srgbDecode = (v: number): number => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+
+/** `oklch(70.4% 0.191 22.216)` or `oklch(0.19 0.01 60)` -> gamma-encoded sRGB, gamut-clamped. */
+function oklchToSrgb(value: string): Rgb {
+  const m = /oklch\(\s*([\d.]+)(%?)\s+([\d.]+)\s+([\d.]+)\s*\)/.exec(value);
+  if (!m) throw new Error(`not an oklch() colour: ${value}`);
+  const L = Number(m[1]) / (m[2] === "%" ? 100 : 1);
+  const C = Number(m[3]);
+  const hue = (Number(m[4]) * Math.PI) / 180;
+  const a = C * Math.cos(hue);
+  const b = C * Math.sin(hue);
+  // OKLab -> LMS' -> LMS (cube) -> linear sRGB (Ottosson's reference matrices).
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const mm = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const linear = [
+    4.0767416621 * l - 3.3077115913 * mm + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * mm - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * mm + 1.707614701 * s,
+  ].map((v) => srgbEncode(Math.min(1, Math.max(0, v))));
+  return [linear[0]!, linear[1]!, linear[2]!];
+}
+
+/** WCAG 2.x relative luminance of a gamma-encoded sRGB colour. */
+function relativeLuminance(rgb: Rgb): number {
+  const [r, g, b] = rgb.map(srgbDecode) as [number, number, number];
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/** WCAG contrast ratio, 1..21, order-independent. */
+function contrastRatio(a: Rgb, b: Rgb): number {
+  const la = relativeLuminance(a);
+  const lb = relativeLuminance(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+/** `fg` at `alpha` over `bg`, composited in gamma-encoded sRGB (how browsers blend). */
+function composite(fg: Rgb, bg: Rgb, alpha: number): Rgb {
+  return [0, 1, 2].map((i) => alpha * fg[i]! + (1 - alpha) * bg[i]!) as unknown as Rgb;
+}
+
+const TAILWIND_THEME = readFileSync(join(ROOT, "node_modules/tailwindcss/theme.css"), "utf8");
+const GLOBALS_CSS = readFileSync(join(SRC_DIR, "app/globals.css"), "utf8");
+
+/** `--color-<hue>-<shade>` of the Tailwind default palette. */
+function tailwindColor(hue: string, shade: number): Rgb {
+  const m = new RegExp(`--color-${hue}-${shade}:\\s*(oklch\\([^)]*\\))`).exec(TAILWIND_THEME);
+  if (!m) throw new Error(`--color-${hue}-${shade} not found in tailwindcss/theme.css`);
+  return oklchToSrgb(m[1]!);
+}
+
+/** A custom property from the `.dark { ... }` block of globals.css. */
+function darkToken(name: string): Rgb {
+  const block = /^\.dark\s*\{([^}]*)\}/m.exec(GLOBALS_CSS);
+  if (!block) throw new Error(".dark block not found in src/app/globals.css");
+  const m = new RegExp(`--${name}:\\s*(oklch\\([^)]*\\))`).exec(block[1]!);
+  if (!m) throw new Error(`--${name} not found in the .dark block`);
+  return oklchToSrgb(m[1]!);
+}
+
+/** The hue alternation of DARK_LOW_SHADE, so the contrast test cannot drift from the regex. */
+const BANNED_HUES = /text-\(([a-z|]+)\)-\(500/.exec(DARK_LOW_SHADE.source)![1]!.split("|");
+
+describe("dark-mode hue text shades (WCAG 1.4.3, wave V)", () => {
+  const sourceFiles = walkSource(SRC_DIR).sort();
+
+  it("scans every non-test .ts and .tsx under src/ (not vacuous)", () => {
+    const rel = sourceFiles.map(repoPath);
+    expect(rel).toContain("src/app/page.tsx");
+    expect(rel).toContain("src/components/status/status-view.tsx");
+    expect(rel.some((f) => f.endsWith(".ts") && !f.endsWith(".d.ts"))).toBe(true);
+    expect(rel).toContain("src/lib/supabase/server.ts");
+    expect(rel.some((f) => /\.test\./.test(f))).toBe(false);
+    expect(sourceFiles.length).toBeGreaterThan(200);
+  });
+
+  it("uses no dark:text-<hue>-500/600/700 (dark mode wants shade 400 or lighter)", () => {
+    const offenders = sourceFiles.flatMap((f) => darkLowShadeOffenders(f, readFileSync(f, "utf8")));
+    expect(
+      offenders,
+      `Use dark:text-<hue>-400 (or 300): -500..-700 text loses its margin on the dark card and falls below 4.5:1 on a bg-<hue>-500/15 wash (WCAG 1.4.3):\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("flags the offending forms (the guard itself works)", () => {
+    for (const bad of [
+      "dark:text-red-500",
+      "dark:text-yellow-500/70",
+      "dark:hover:text-rose-600",
+      "dark:group-hover:text-amber-700",
+      "text-red-600 dark:text-red-500 font-medium",
+      "md:dark:text-sky-600",
+      'className="x dark:text-emerald-500"',
+    ]) {
+      expect(hasDarkLowShade(bad), bad).toBe(true);
+    }
+  });
+
+  it("passes the AA-safe and out-of-scope forms", () => {
+    for (const ok of [
+      "dark:text-red-400",
+      "dark:text-amber-300",
+      "dark:text-yellow-400",
+      "dark:hover:text-yellow-300",
+      "text-red-500",
+      "text-red-600 dark:text-red-400",
+      "dark:bg-red-500",
+      "dark:bg-red-500/15",
+      "dark:border-red-500",
+      "dark:text-muted-foreground",
+      "dark:text-amber-950",
+      "dark:text-red-5000",
+      "xdark:text-red-500",
+    ]) {
+      expect(hasDarkLowShade(ok), ok).toBe(false);
+    }
+  });
+
+  it("reports offenders as file:line with the line of the hit", () => {
+    const file = join(SRC_DIR, "fixture.tsx");
+    const src = 'const a = "dark:text-red-400";\nconst b = "x dark:text-rose-600";\n';
+    expect(darkLowShadeOffenders(file, src)).toEqual(["src/fixture.tsx:2  dark:text-rose-600"]);
+  });
+
+  it("ignores // and block comments but keeps strings that contain //", () => {
+    const file = join(SRC_DIR, "fixture.ts");
+    const src = [
+      "// dark:text-red-500 in a line comment",
+      "/* dark:text-red-500",
+      "   still the block comment */",
+      'const a = "https://x.test dark:text-amber-500";',
+      'const b = "dark:text-rose-600"; // dark:text-blue-500',
+      "const c = `dark:text-sky-700 ${x}`; /* dark:text-lime-500 */",
+      "const d = \"Tayf'ın\"; // dark:text-teal-500",
+      "const e = 1; // it's a comment with an apostrophe",
+      'const f = "dark:text-pink-500";',
+    ].join("\n");
+    expect(darkLowShadeOffenders(file, src)).toEqual([
+      "src/fixture.ts:4  dark:text-amber-500",
+      "src/fixture.ts:5  dark:text-rose-600",
+      "src/fixture.ts:6  dark:text-sky-700",
+      "src/fixture.ts:9  dark:text-pink-500",
+    ]);
+  });
+
+  it("keeps line numbers aligned after a multi-line block comment", () => {
+    const file = join(SRC_DIR, "fixture.tsx");
+    const src = "/*\n a\n b\n*/\nconst a = 'dark:text-red-500';\n";
+    expect(darkLowShadeOffenders(file, src)).toEqual(["src/fixture.tsx:5  dark:text-red-500"]);
+  });
+
+  describe("measured contrast helper", () => {
+    it("white on black is 21 and equal colours are 1", () => {
+      expect(contrastRatio(WHITE, BLACK)).toBeCloseTo(21, 6);
+      expect(contrastRatio(BLACK, WHITE)).toBeCloseTo(21, 6);
+      expect(contrastRatio(WHITE, WHITE)).toBeCloseTo(1, 6);
+      const grey: Rgb = [0.4, 0.4, 0.4];
+      expect(contrastRatio(grey, grey)).toBeCloseTo(1, 6);
+    });
+
+    it("matches published reference ratios (#767676 passes on white, #777777 does not)", () => {
+      const hex = (v: number): Rgb => [v / 255, v / 255, v / 255];
+      expect(contrastRatio(hex(0x76), WHITE)).toBeCloseTo(4.54, 2);
+      expect(contrastRatio(hex(0x77), WHITE)).toBeCloseTo(4.48, 2);
+    });
+
+    it("converts OKLCH to sRGB (white, black, and pure red)", () => {
+      expect(oklchToSrgb("oklch(100% 0 0)")).toEqual([expect.closeTo(1, 3), expect.closeTo(1, 3), expect.closeTo(1, 3)]);
+      expect(oklchToSrgb("oklch(0 0 0)")).toEqual([expect.closeTo(0, 3), expect.closeTo(0, 3), expect.closeTo(0, 3)]);
+      // sRGB #ff0000 expressed in OKLCH.
+      const red = oklchToSrgb("oklch(62.796% 0.25768 29.234)");
+      expect(red[0]).toBeCloseTo(1, 2);
+      expect(red[1]).toBeCloseTo(0, 2);
+      expect(red[2]).toBeCloseTo(0, 2);
+    });
+
+    it("reads both the percent and the fractional lightness forms", () => {
+      expect(oklchToSrgb("oklch(50% 0.1 120)")).toEqual(oklchToSrgb("oklch(0.5 0.1 120)"));
+      expect(() => oklchToSrgb("#fff")).toThrow();
+    });
+
+    it("composites in gamma space and clamps out-of-gamut values", () => {
+      expect(composite(WHITE, BLACK, 0.5)).toEqual([0.5, 0.5, 0.5]);
+      expect(composite(WHITE, BLACK, 0)).toEqual(BLACK);
+      expect(composite(WHITE, BLACK, 1)).toEqual(WHITE);
+      for (const channel of oklchToSrgb("oklch(70% 0.4 150)")) {
+        expect(channel).toBeGreaterThanOrEqual(0);
+        expect(channel).toBeLessThanOrEqual(1);
+      }
+    });
+
+    it("reads the dark card and background from globals.css", () => {
+      // card oklch(0.19 0.01 60) is lighter than background oklch(0.14 0.008 60), both near-black.
+      expect(relativeLuminance(darkToken("card"))).toBeGreaterThan(relativeLuminance(darkToken("background")));
+      expect(relativeLuminance(darkToken("card"))).toBeLessThan(0.02);
+      expect(contrastRatio(darkToken("card"), BLACK)).toBeLessThan(1.5);
+      expect(() => darkToken("no-such-token")).toThrow();
+      expect(() => tailwindColor("red", 12345)).toThrow();
+    });
+  });
+
+  describe("shade 400 (the replacement) clears 4.5:1 for every banned hue", () => {
+    it("covers the 17 hues of the regex", () => {
+      expect(BANNED_HUES).toHaveLength(17);
+      expect(BANNED_HUES).toContain("rose");
+      expect(BANNED_HUES).toContain("indigo");
+    });
+
+    it.each(BANNED_HUES)("%s-400 on the dark card, the dark background and its own 15 %% wash", (hue) => {
+      const text = tailwindColor(hue, 400);
+      const card = darkToken("card");
+      const background = darkToken("background");
+      const wash = composite(tailwindColor(hue, 500), card, 0.15);
+      const onCard = contrastRatio(text, card);
+      const onBackground = contrastRatio(text, background);
+      const onWash = contrastRatio(text, wash);
+      expect(onCard, `${hue}-400 on card ${onCard.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      expect(onBackground, `${hue}-400 on background ${onBackground.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+      expect(onWash, `${hue}-400 on bg-${hue}-500/15 ${onWash.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
+    });
+  });
+});

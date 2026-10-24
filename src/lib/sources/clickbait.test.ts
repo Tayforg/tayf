@@ -25,10 +25,20 @@ vi.mock("next/cache", () => ({
   cacheTag: vi.fn(),
 }));
 
+// getClickbaitKarne's failure path goes through resolveCachedOrRetry, which
+// awaits connection() before the live retry. Mocked to resolve at once (a
+// request scope); the prerender / outside-scope behaviour is pinned in
+// src/lib/cache-resilience.test.ts and tests/guards/cache-retry-prerender.
+vi.mock("next/server", () => ({
+  connection: vi.fn(async () => undefined),
+}));
+
 const fixture = vi.hoisted(() => ({
   rpcArgs: [] as unknown[],
   rows: [] as unknown[],
   error: null as { message: string } | null,
+  /** The first N rpc calls fail (a blip), later ones succeed. */
+  blips: 0,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -37,6 +47,10 @@ const supabaseFake = await vi.hoisted(async () => {
     rpc: {
       source_clickbait_30d: (args: unknown) => {
         fixture.rpcArgs.push(args);
+        if (fixture.blips > 0) {
+          fixture.blips -= 1;
+          return { data: null, error: { message: "blip" } };
+        }
         if (fixture.error) return { data: null, error: fixture.error };
         return { data: fixture.rows, error: null };
       },
@@ -60,7 +74,7 @@ import {
   CLICKBAIT_PRECISION_CHECK,
   isClickbaitPublic,
   buildClickbaitKarne,
-  fetchClickbaitRows,
+  readClickbaitRows,
   getClickbaitKarne,
   getClickbaitAdminRows,
   karneForSlug,
@@ -68,6 +82,7 @@ import {
   type ClickbaitPrecisionCheck,
 } from "./clickbait";
 import { JEV_QUESTION_REGISTRY, JEV_QUESTION_SET_VERSION } from "../../../supabase/functions/_shared/jev.ts";
+import { cacheLife, cacheTag } from "next/cache";
 
 function row(overrides: Partial<ClickbaitOutletRow> & { slug: string }): ClickbaitOutletRow {
   return {
@@ -93,6 +108,9 @@ beforeEach(() => {
   fixture.rpcArgs = [];
   fixture.rows = [];
   fixture.error = null;
+  fixture.blips = 0;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
 });
 
 afterEach(() => {
@@ -256,10 +274,10 @@ describe("karneForSlug", () => {
   });
 });
 
-describe("fetchClickbaitRows / getClickbaitKarne (rpc contract)", () => {
+describe("readClickbaitRows / getClickbaitKarne (rpc contract)", () => {
   it("calls source_clickbait_30d with the exact name and args", async () => {
     fixture.rows = [];
-    await fetchClickbaitRows(300).catch(() => {});
+    await readClickbaitRows(300).catch(() => {});
     expect(fixture.rpcArgs[0]).toEqual({
       p_question_sets: [...CLICKBAIT_QUESTION_SETS],
       p_days: CLICKBAIT_WINDOW_DAYS,
@@ -267,14 +285,19 @@ describe("fetchClickbaitRows / getClickbaitKarne (rpc contract)", () => {
     });
   });
 
-  it("throws on an rpc error inside the cached fetch", async () => {
+  it("the raw read throws on an rpc error (it is the cached body's attemptCached that absorbs it)", async () => {
     fixture.error = { message: "function does not exist" };
-    await expect(fetchClickbaitRows(300)).rejects.toThrow();
+    await expect(readClickbaitRows(300)).rejects.toThrow(/source_clickbait_30d rpc failed/);
   });
 
   it("getClickbaitKarne fails open (returns null) when the rpc errors", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     fixture.error = { message: "boom" };
-    await expect(getClickbaitKarne()).resolves.toBeNull();
+    try {
+      await expect(getClickbaitKarne()).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("getClickbaitAdminRows never throws and passes p_min_n: 1", async () => {
@@ -286,6 +309,93 @@ describe("fetchClickbaitRows / getClickbaitKarne (rpc contract)", () => {
     expect(rows).toHaveLength(1);
     const lastArgs = fixture.rpcArgs.at(-1) as { p_min_n: number };
     expect(lastArgs.p_min_n).toBe(1);
+  });
+});
+
+describe("getClickbaitKarne cache lifetime (cached-failure-sweep)", () => {
+  function eligibleRows(n: number) {
+    return Array.from({ length: n }, (_, i) => ({
+      source_id: `id-${i}`,
+      source_slug: `s${i}`,
+      source_name: `S${i}`,
+      source_bias: "center",
+      source_kind: "outlet",
+      n_total: 300,
+      n_flagged: 10 * (i + 1),
+      mean_prob: 0.5,
+      first_day: "2026-09-24",
+      last_day: "2026-09-28",
+    }));
+  }
+
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it("success: the karne, one read, exactly one cacheLife('hours'), tagged before it", async () => {
+    fixture.rows = eligibleRows(9);
+
+    const karne = await getClickbaitKarne();
+
+    expect(karne?.outletCount).toBe(9);
+    expect(fixture.rpcArgs).toHaveLength(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it("an empty result is a success too (null karne, cached for 'hours')", async () => {
+    fixture.rows = [];
+
+    await expect(getClickbaitKarne()).resolves.toBeNull();
+
+    expect(fixture.rpcArgs).toHaveLength(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+  });
+
+  it("an rpc error: null, cached for 'minutes' only, and the read is retried live exactly once", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+
+    await expect(getClickbaitKarne()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("hours");
+    // The cached attempt + one live retry.
+    expect(fixture.rpcArgs).toHaveLength(2);
+  });
+
+  it("a missing env (the client cannot be built): null, 'minutes' only", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(getClickbaitKarne()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a blip healed by the live retry returns the karne, and the failure stays cached for 'minutes'", async () => {
+    fixture.rows = eligibleRows(9);
+    // The first rpc (the cached attempt) fails, the live retry succeeds.
+    fixture.blips = 1;
+
+    const karne = await getClickbaitKarne();
+
+    expect(karne?.outletCount).toBe(9);
+    expect(fixture.rpcArgs).toHaveLength(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
   });
 });
 

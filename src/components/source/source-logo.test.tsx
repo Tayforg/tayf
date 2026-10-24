@@ -9,6 +9,7 @@ import {
   SourceLogoFallback,
   isBrokenImage,
   sourceInitials,
+  sourceMonogram,
 } from "./source-logo";
 
 // This suite runs in vitest's `node` environment (no jsdom, no RTL), so the
@@ -26,6 +27,11 @@ const IMG_CLASS = "h-8 w-8 rounded shrink-0 object-contain";
 const SQUARE_CLASS = "h-8 w-8 rounded shrink-0 bg-muted/60";
 const INITIALS_CLASS =
   "inline-flex h-3.5 w-3.5 items-center justify-center rounded bg-muted text-[8px] font-bold text-muted-foreground shrink-0";
+// The centred monogram the 'square' fallback renders inside the caller's tile.
+const MONOGRAM_CLASS =
+  "flex h-full w-full items-center justify-center font-semibold leading-none text-muted-foreground";
+const squareTile = (letter: string, outer = SQUARE_CLASS) =>
+  `<span aria-hidden="true" class="${outer}"><span class="${MONOGRAM_CLASS}">${letter}</span></span>`;
 
 describe("SourceLogo — URL routing", () => {
   it("routes a Google S2 favicon through /_next/image at the default width (64)", () => {
@@ -145,7 +151,7 @@ describe("SourceLogo — no logo", () => {
     },
   );
 
-  it("square fallback renders no <img> and an empty aria-hidden element with the fallback class", () => {
+  it("square fallback renders no <img> and an aria-hidden tile carrying the outlet's initial", () => {
     const html = renderToStaticMarkup(
       <SourceLogo
         logoUrl={null}
@@ -156,7 +162,7 @@ describe("SourceLogo — no logo", () => {
       />,
     );
     expect(html).not.toContain("<img");
-    expect(html).toBe(`<span aria-hidden="true" class="${SQUARE_CLASS}"></span>`);
+    expect(html).toBe(squareTile("N"));
   });
 
   it("uses the fallback class, never the img class, when there is no logo", () => {
@@ -195,7 +201,7 @@ describe("SourceLogoFallback — the post-onError view", () => {
     expect(fromFallback).toContain(INITIALS_CLASS);
   });
 
-  it("square kind matches the no-logo square markup and carries no text", () => {
+  it("square kind matches the no-logo square markup (logoUrl=null)", () => {
     const fromFallback = renderToStaticMarkup(
       <SourceLogoFallback kind="square" name="NTV" className={SQUARE_CLASS} />,
     );
@@ -209,7 +215,123 @@ describe("SourceLogoFallback — the post-onError view", () => {
       />,
     );
     expect(fromFallback).toBe(fromLogo);
-    expect(fromFallback).toBe(`<span aria-hidden="true" class="${SQUARE_CLASS}"></span>`);
+    expect(fromFallback).toBe(squareTile("N"));
+  });
+
+  it("square kind for 'Gazete.net': the initial, aria-hidden, caller class outside, centring inside", () => {
+    const html = renderToStaticMarkup(
+      <SourceLogoFallback kind="square" name="Gazete.net" className={SQUARE_CLASS} />,
+    );
+    expect(html).toContain(">G<");
+    expect(html).toContain('aria-hidden="true"');
+    // Outer span: the caller's box classes, nothing else.
+    expect(html).toMatch(new RegExp(`^<span aria-hidden="true" class="${SQUARE_CLASS}">`));
+    // Inner span: fills the tile and centres the letter.
+    const inner = html.match(/<span class="([^"]*)">G<\/span>/);
+    expect(inner).not.toBeNull();
+    for (const c of ["flex", "h-full", "w-full", "items-center", "justify-center", "font-semibold", "leading-none"]) {
+      expect(inner![1]!.split(" "), c).toContain(c);
+    }
+    // Full token only (text-contrast guard bans text-muted-foreground/NN).
+    expect(inner![1]!.split(" ")).toContain("text-muted-foreground");
+    expect(html).not.toMatch(/text-muted-foreground\//);
+    // The caller's font-size classes reach the letter by inheritance, not by a new prop.
+    expect(html).not.toMatch(/\btext-(?:xs|sm|base|lg|xl|\dxl)\b/);
+  });
+
+  it("square kind forwards a caller font size on the outer span only (inherited by the letter)", () => {
+    const cls = `${SQUARE_CLASS} text-2xl sm:text-3xl`;
+    const html = renderToStaticMarkup(
+      <SourceLogoFallback kind="square" name="KRT TV" className={cls} />,
+    );
+    expect(html).toBe(squareTile("K", cls));
+  });
+
+  it.each([
+    "Gazete.net",
+    "KRT TV",
+    "  ntv",
+    "istanbul",
+    "ılık",
+    "A",
+    "1 Haber",
+    "😀 Haber",
+    "Çarşı",
+    "\u00a0Habertürk",
+  ])("regression: the square fallback for %j is never an empty tile", (name) => {
+    const html = renderToStaticMarkup(
+      <SourceLogoFallback kind="square" name={name} className={SQUARE_CLASS} />,
+    );
+    const text = html.replace(/<[^>]*>/g, "");
+    expect(text.length).toBeGreaterThan(0);
+    expect(html).not.toMatch(/<span[^>]*><\/span>/);
+    // Exactly one visible glyph (one code point; ß-style expansions are not in this list).
+    expect(Array.from(text)).toHaveLength(1);
+  });
+
+  it("a name with no characters still renders the tile (empty letter), as it does today", () => {
+    for (const name of ["", "   "]) {
+      const html = renderToStaticMarkup(
+        <SourceLogoFallback kind="square" name={name} className={SQUARE_CLASS} />,
+      );
+      expect(html).toBe(squareTile(""));
+    }
+  });
+
+  it("initials kind output is unchanged (byte-identical to the pre-monogram markup)", () => {
+    const html = renderToStaticMarkup(
+      <SourceLogoFallback kind="initials" name="Sözcü" className={INITIALS_CLASS} />,
+    );
+    expect(html).toBe(`<span aria-hidden="true" class="${INITIALS_CLASS}">SÖ</span>`);
+  });
+});
+
+describe("SourceLogo — a failed Google S2 logo still shows the S2 URL through the optimizer first", () => {
+  it.each([
+    "https://www.google.com/s2/favicons?domain=gazete.net&sz=64",
+    "https://www.google.com/s2/favicons?domain=krttv.com.tr&sz=64",
+  ])("%s is routed through /_next/image and the image is not replaced up front", (url) => {
+    const html = renderToStaticMarkup(
+      <SourceLogo
+        logoUrl={url}
+        name="Gazete.net"
+        className={IMG_CLASS}
+        fallback="square"
+        fallbackClassName={SQUARE_CLASS}
+      />,
+    );
+    expect(html).toContain(S2_PROXY_PREFIX);
+    expect(html).toContain("<img");
+    expect(html).not.toContain(">G<");
+  });
+});
+
+describe("sourceMonogram", () => {
+  it.each([
+    ["Gazete.net", "G"],
+    ["KRT TV", "K"],
+    ["  ntv", "N"],
+    ["istanbul", "İ"], // Turkish dotted capital I
+    ["ılık", "I"], // dotless ı -> plain I
+    ["Çarşı", "Ç"],
+    ["", ""],
+  ])("%j -> %j", (name, expected) => {
+    expect(sourceMonogram(name)).toBe(expected);
+  });
+
+  it("is the first code point, never half of a surrogate pair", () => {
+    const out = sourceMonogram("😀 Haber");
+    expect(out).toBe("😀");
+    expect(Array.from(out)).toHaveLength(1);
+  });
+
+  it("returns '' for whitespace-only input", () => {
+    expect(sourceMonogram("   ")).toBe("");
+    expect(sourceMonogram("\t\n")).toBe("");
+  });
+
+  it("is pure: same input, same output", () => {
+    expect(sourceMonogram("Habertürk")).toBe(sourceMonogram("Habertürk"));
   });
 });
 
@@ -277,6 +399,35 @@ describe("source-logo.tsx — source guard", () => {
   it("has no useEffect at all (react-hooks/set-state-in-effect is enforced)", () => {
     expect(src).not.toMatch(/useEffect/);
     expect(src).not.toMatch(/useLayoutEffect/);
+  });
+
+  it("the monogram is hydration-safe: no Date.now, Math.random or locale-less casing", () => {
+    expect(src).not.toMatch(/Date\.now|Math\.random/);
+    expect(src).toContain("toLocaleUpperCase(\"tr-TR\")");
+  });
+
+  it("uses only the full text-muted-foreground token (no /NN opacity form)", () => {
+    expect(src).not.toMatch(/text-muted-foreground\/\d/);
+  });
+});
+
+describe("the two 'square' call sites", () => {
+  it.each(["src/app/sources/page.tsx", "src/app/source/[slug]/page.tsx"])(
+    "%s passes fallback=\"square\"",
+    (rel) => {
+      expect(read(rel)).toContain('fallback="square"');
+    },
+  );
+
+  it("the /source/[slug] hero tile sizes its letter via the fallback class (text-2xl sm:text-3xl)", () => {
+    const src = read("src/app/source/[slug]/page.tsx");
+    const m = src.match(/fallbackClassName="([^"]*)"/);
+    expect(m).not.toBeNull();
+    const tokens = m![1]!.split(/\s+/);
+    expect(tokens).toContain("text-2xl");
+    expect(tokens).toContain("sm:text-3xl");
+    // The tile keeps the same box as the <img> so nothing shifts.
+    expect(tokens).toEqual(expect.arrayContaining(["h-16", "w-16", "sm:h-20", "sm:w-20"]));
   });
 });
 
