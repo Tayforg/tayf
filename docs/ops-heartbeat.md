@@ -1,6 +1,6 @@
-# Ops heartbeat (077, 100, 103, 108, 114, 115, 119)
+# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122)
 
-`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115 and 119) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119 and 122) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
@@ -19,13 +19,14 @@ fires.
 
 ## What it checks
 
-13 fixed-order rows (the first ten from migration 077, the eleventh added by
-migration 100, the twelfth by migration 103, the thirteenth by migration 114;
+14 fixed-order rows (the first ten from migration 077, the eleventh added by
+migration 100, the twelfth by migration 103, the thirteenth by migration 114 and
+the fourteenth by migration 122;
 rows 7, 9 and 12 were reworked by migration 108, and row 13 by migration 115,
 which widened its silence window from 12 h to 24 h, and by migration 119, which
 added a reason label to every source it names), `status` one of
 `pass | warn | fail | unknown | skip`. `threshold` is the fail limit (or the
-warn limit, for warn-only checks such as rows 9 and 13). The thresholds for rows 1-10 were
+warn limit, for warn-only checks such as rows 9, 13 and 14). The thresholds for rows 1-10 were
 tuned from a 2026-09-28 read-only survey of the live project (see the
 migration 077 header for the exact queries and observed numbers); row 11
 comes from the 2026-10-21 incident (see the migration 100 header); row 12
@@ -49,10 +50,11 @@ migration 114 header, the 24 h window of the migration 115 header, and
 | 11 | `net_response_heap_mb` | Total on-disk size of `net._http_response` (pg_net's response log) in MiB. `ops_net_response_compact()` (pg_cron `net-response-compact`, every 15 min) truncates it above 64 MiB, so a warn or fail means the compactor is being skipped (job disabled, lock never free, `TRUNCATE` privilege lost) while the table bloats again | pass < 64; warn 64-200; fail > 200 | 2026-10-21 incident: 278 MB of heap behind 552 live rows made pg_net's TTL `DELETE` the #1 DB time consumer and pages took 8-22 s. Added by migration 100 |
 | 12 | `jev_shadow_cron_failures_30m` | Sum of three counts over the last 30 min: (a) `'failed'` pg_cron runs of the Jev jobs `jev-shadow`, `jev-cluster-audit` and `jev-regression-weekly` (same runid window as row 1); (b) `net._http_response` rows with `status_code >= 500` whose body contains `"fn":"jev-shadow"`, the marker every error response from `jev-shadow` carries (504 `deadline`, 503 `db-unavailable`, 500 `internal-error`); (c) `jev_shadow_runs` rows started in the window that closed `partial` or `error` with `calls = 0` (migration 108). `timed_out` pg_net rows (status NULL, no body, cannot be attributed to a function) are counted separately in the `detail` (`zaman aşımı (fonksiyon bilinmiyor)`): they raise `pass` to `warn` but never count toward `fail`. `detail` = `cron hatası · HTTP 5xx · sıfır çağrılı koşu · zaman aşımı (son 30 dk)`, with ` · pg_cron ve pg_net yok` appended when both extensions are missing. `'unknown'` only when the query itself errors | fail ≥ 2; warn = 1, or any `timed_out` request | Finding 1(a) (migration 103): a database timeout in `jev-shadow`'s first calls used to return an unretried 500 with no `jev_shadow_runs` row, and `pg_cron` records `'succeeded'` for the http poke regardless. The function now retries those steps once, then answers a stable 503 `db-unavailable`, and this row counts it. No `jev_alerts` row is written (its `kind` CHECK, migration 088, allows only `source_drift`, `kap_class_canary`, `stage_budget`). 2026-10-22 stall (migration 108): pg_net rows 329690 and 329711 had `timed_out = true` and status NULL, and zero-call partial runs 3622 and 3623 closed cleanly, so neither half of 103 saw anything; (c) and the timeout note close that gap. The same release gives a deadline stop a note on the run row (`deadline: <stage> at <ms>ms, calls=<n>`) and reschedules the cron with a 120 s pg_net timeout and an `enqueued_at` body field; redeploy `jev-shadow` with `--no-verify-jwt` after applying 108. Added by migration 103, extended by 108 |
 | 13 | `sources_newly_dark` | Active `outlet`/`wire` sources that are **not** in `public.ops_dark_source_baseline`, have at least 50 `articles` (by `created_at`, ingest time) in the 14 days before the last 24 hours, and none in the last 24 hours. `detail` names them with that count and a reason, largest first: `son 24 saatte haber gelmedi (önceki 14 günde en az 50 haber vardı): slug (n) · neden, …` (`neden` is `erişim yok`, `akış donmuş` or `sessiz`, see "Susan kaynakların nedeni" below), cut at 500 characters; `yeni susan kaynak yok` when none. **Warn-only**: never `fail`, so the Action does not exit non-zero and nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors (a missing baseline table included) | warn ≥ 1 (threshold 1) | 2026-10-15 to 10-23: five active sources went dark one after another and no row noticed (`dead_feeds` waits 72 h and warns above 38 sources; the per-zone freshness rows are satisfied by any other outlet in the zone). Three of the five are `opposition_leaning`, so the `muhalefet` zone loses about 9k articles a month. Step 0 (migration 114 header): the predicate runs in about 50 ms on an index-only scan of `idx_articles_created_source`. A 7-day replay at 6-hour steps with the original 12 h window flagged 22 distinct sources; of the 146 flags with a full 24 h of follow-up, 89 saw an article within 24 h (low-volume outlets with an overnight gap over 12 h), while `halk-tv` and `gazete-pencere` never resumed. Window widened from 12 h to 24 h by migration 115: same replay, 73 flags over 8 sources, 13 of 63 complete flags resumed within 24 h (21%), against 173 / 22 / 89 of 146 (61%) at 12 h; the `>= 50` floor, the baseline exclusion and the warn-only status are unchanged. Added by migration 114, window 24 h since migration 115, reason labels since migration 119 (2026-10-24: `haberport`, `korkusuz` and `en-politik` answer HTTP 200 every poll and publish nothing, which row 13 could not tell from a quiet outlet) |
+| 14 | `ingest_gaps` | Gaps over 5 minutes between consecutive `ingest_cycles.started_at` in the last 6 hours. `ingest-drain` runs every 3 minutes (migration 038), so a longer gap is at least one tick that left no row: the platform killed it (pg_net `546 WORKER_RESOURCE_LIMIT`), cron skipped it, or the row write failed. Row 3 cannot see this, because it only counts rows over 30 minutes and reads pass from 8 up. `detail`: `son 6 saatte 5 dakikadan uzun boşluk: n · en uzunu m dk · HH:MI→HH:MI, … (UTC)`, longest first, cut at 500 characters; `son 6 saatte 5 dakikadan uzun boşluk yok · en uzunu m dk` when there is none; `son 6 saatte ingest döngüsü yok` (warn, observed empty) when the window holds no cycle at all. **Warn-only**: never `fail`, nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors | warn at 3 or more gaps, or any gap over 10 minutes (threshold 3) | Added by migration 122 (2026-10-24). Step 0 (migration 122 header): over the retained 21,350 cycles, sliding 6 hour windows from 09-29 to 10-12 (ingest healthy) warned 16 of 625 times (2.6%); over the last 12 days 320 of 577 (55%), the degraded stretch since 10-13 (10-22: 11 gaps in one 6 hour bucket, 5 of them over 10 minutes, longest 33 minutes). 4 gaps or 15 minutes would have warned 40%, 5 gaps or 20 minutes 20%; thresholds kept at 3 and 10 minutes because 55% is a true reading of that stretch. Read at 16:55 UTC on 2026-10-24: 119 cycles, 1 gap of 6 minutes, pass; index scan, 0.13 ms |
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
-13 rows. (Row 12 degrades gracefully: with only one of the two present it
+14 rows. (Row 12 degrades gracefully: with only one of the two present it
 counts that half and treats the other as zero.)
 
 ## Susan kaynakların nedeni (migration 119)
@@ -98,6 +100,47 @@ it, stores the freshness and, when the body is the one already stored, inserts n
 row (`freshnessBootstraps` in the cycle summary line counts them; expect all
 sources within three to four cycles of the deploy). Until a source has been
 measured it reads `sessiz`, not `akış donmuş`.
+
+## Kayıp ingest turları (migration 122, row 14 `ingest_gaps`)
+
+`ingest-drain` fires every 3 minutes and the ingest function writes its
+`ingest_cycles` row at the **end** of a cycle. A tick that the platform kills
+before that (pg_net answers `546 WORKER_RESOURCE_LIMIT`) writes nothing, so the
+count in row 3 (`ingest_cycles_30m`, pass from 8 of the expected 10) can stay
+green while ticks are lost. Row 14 reads the spacing instead. Warn-only: it does
+not page.
+
+- **Reading it.** `detail` lists the gaps as `HH:MI→HH:MI` in **UTC**, longest
+  first: `13:57→14:03` means no cycle started between 13:57 and 14:03, i.e. at
+  least one lost tick (a 6 minute gap is one missing tick, 12 minutes is three).
+  The row warns at 3 or more gaps, or when the longest is over 10 minutes. A
+  single 6 minute gap reads `pass` and is still named.
+- **What to do when it warns.** Look for the kill itself before the evidence is
+  gone: `net._http_response` keeps only about 6 hours, and
+  `ops_net_response_compact()` (migration 100) truncates it from 64 MiB on a
+  15 minute cron. Read-only, in the SQL editor, for the minutes in the detail:
+
+  ```sql
+  select date_trunc('minute', r.created) as minute, r.status_code, r.timed_out,
+         left(r.content, 80) as body
+    from net._http_response r
+   where r.created >= now() - interval '6 hours'
+     and (r.status_code >= 500 or r.timed_out or r.error_msg is not null)
+   order by r.created;
+  ```
+
+  `status_code = 546` with `WORKER_RESOURCE_LIMIT` in the body is a killed
+  function (the responses do not name the function, so match the minute against
+  the gap; the `ingest-drain` tick starts on a multiple of 3). A gap without any
+  failed response points at the cron side instead (`cron.job_run_details` for
+  `ingest-drain`, a busy database) or at a swallowed row-write error in the
+  ingest log. The fix lives on the ingest side (the parse budget of migration
+  113); this row only makes the loss visible.
+- **Baseline and noise.** Measured on the retained history (migration 122 header,
+  Step 0): healthy stretches warn about 3% of the time (16 of 625 sliding windows
+  between 09-29 and 10-12), the degraded stretch since 10-13 about 55%. If it
+  stays noisy once the ticks are fixed, tune it in a new migration (see
+  "Tuning a threshold"), not here.
 
 ## Susan kaynaklar (baseline)
 

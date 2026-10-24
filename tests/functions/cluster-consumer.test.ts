@@ -299,6 +299,17 @@ vi.mock("../../supabase/functions/_shared/cluster/ensemble.ts", () => ({
 }));
 
 beforeEach(() => {
+  // Order independence (vitest --sequence.shuffle): the SUT keeps module-level
+  // state (clusterContextCache, sourceLookupCache, the Jev live counters,
+  // drainInFlight) that survives between tests, and a few tests grow the
+  // hoisted cluster fixtures. Each test therefore gets a freshly evaluated
+  // SUT (importHandler() below re-imports it after this reset) and an empty
+  // cluster fixture; the live-path describe re-seeds its own shared cluster in
+  // its beforeEach. Without this, a test saw whatever cache or cluster rows
+  // the previous test in the random order had left behind.
+  vi.resetModules();
+  clusterRows.length = 0;
+  clusterArticleRows.length = 0;
   resetPgmqState();
   for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
   // Reset the shared Supabase fake's mutation + rpc log so each test
@@ -319,6 +330,10 @@ beforeEach(() => {
   delete process.env.CRON_SECRET;
   // Migration 089 ("ADMIT"): off unless a test opts in.
   delete process.env.JEV_POLITICS_ADMISSION;
+  // Opt-in flags other describes set; never inherited from a previous test.
+  delete process.env.JEV_LIVE_PAIRS;
+  delete process.env.AI_GATEWAY_API_KEY;
+  delete process.env.REVALIDATE_FEED_TAGS;
 });
 
 afterEach(() => {
@@ -834,14 +849,14 @@ describe("cluster-consumer Edge Function", () => {
   // candidate cluster to score against so the jev-live block actually runs.
   //
   // clusterContextCache (module-level in the SUT) has a 60s TTL keyed off
-  // Date.now(), and persists across every `it` in this file since the SUT
-  // module is only evaluated once. `vi.useFakeTimers({ toFake: ["Date"] })`
-  // + a one-time forward jump in `beforeAll` invalidates whatever
-  // (empty) snapshot the tests above already warmed, so the FIRST test
-  // below reloads the cache and picks up the shared cluster seeded here --
-  // it then stays warm (frozen clock, never advanced again) for the rest
-  // of this block. `toFake: ["Date"]` leaves real timers (setTimeout,
-  // AbortSignal) untouched.
+  // Date.now(). The file-level beforeEach evaluates the SUT fresh for every
+  // test (vi.resetModules), so no cache survives from a previous test and the
+  // shared cluster seeded in this block's beforeEach is always what the first
+  // read loads, whatever order the tests run in. The Date fake below only
+  // freezes the clock for the block (a one-time forward jump in `beforeAll`,
+  // kept from the era when the module was evaluated once and the jump was
+  // what invalidated a warm cache); `toFake: ["Date"]` leaves real timers
+  // (setTimeout, AbortSignal) untouched.
   describe("P3 live marginal verification -- live path (A2 budget + A3 join/reject/timeout/db-error)", () => {
     const SHARED_CLUSTER_ID = "cluster-live-shared";
     const SHARED_MEMBER_ID = "member-live-shared";
@@ -884,7 +899,19 @@ describe("cluster-consumer Edge Function", () => {
     beforeAll(() => {
       vi.useFakeTimers({ toFake: ["Date"] });
       vi.setSystemTime(new Date(Date.now() + 61_000));
+    });
 
+    afterAll(() => {
+      vi.useRealTimers();
+    });
+
+    beforeEach(() => {
+      process.env.JEV_LIVE_PAIRS = "1";
+      process.env.AI_GATEWAY_API_KEY = "test-gateway-key";
+      // The shared candidate cluster is re-seeded for every test: the file-level
+      // beforeEach empties the hoisted cluster fixtures (so rows pushed by one
+      // test, e.g. [A-ADV-02]'s two Izmir clusters, never reach another) and
+      // the SUT is evaluated fresh, so it loads this row on its first read.
       const now = new Date().toISOString();
       clusterRows.push({
         id: SHARED_CLUSTER_ID,
@@ -895,15 +922,6 @@ describe("cluster-consumer Edge Function", () => {
         article_count: 1,
       });
       clusterArticleRows.push({ cluster_id: SHARED_CLUSTER_ID, article_id: SHARED_MEMBER_ID });
-    });
-
-    afterAll(() => {
-      vi.useRealTimers();
-    });
-
-    beforeEach(() => {
-      process.env.JEV_LIVE_PAIRS = "1";
-      process.env.AI_GATEWAY_API_KEY = "test-gateway-key";
       // addArticleToCluster reads `cluster_articles`/`articles` fresh on
       // every call (never cached) and the outer beforeEach above wipes
       // `fakeArticles` before each test -- restore the shared seed member

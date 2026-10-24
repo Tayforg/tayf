@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
+import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
@@ -94,15 +95,22 @@ function emptyGrouped(): GroupedSources {
 // (feed-status.ts, already used by /kaynaklar/durum), fetched separately
 // and streamed in behind its own <Suspense> boundary below (see
 // `SourceCountsGrid`) so the directory shell paints without waiting on it.
-async function getSources(): Promise<GroupedSources> {
-  "use cache";
-  cacheLife("source-directory");
-  cacheTag("sources");
-
+//
+// Failure handling: `readSourcesDirectory` is the raw, uncached read and
+// THROWS on a Supabase error. `getSourcesCached` wraps it in `attemptCached`
+// inside the "use cache" body and only then picks the lifetime: a directory
+// keeps `source-directory` (1 h), a failed read is memoised for `minutes`
+// only, so one 4 s timeout cannot park the "Kaynak listesi şu an yüklenemedi"
+// state for the whole hour (the 2026-10-24 incident shape; guarded by
+// tests/guards/cache-life-after-attempt.test.ts). `getSourcesSafe` then reads
+// the cache, retries live once on a failed attempt, and only a still-failing
+// retry renders the error state.
+async function readSourcesDirectory(): Promise<GroupedSources> {
   const supabase = createServerClient();
 
-  // Window: last 7 days, anchored to "now" at cache-fill time — only used
-  // for the cheap `latest` existence probe now.
+  // Window: last 7 days, anchored to "now" at cache-fill time (and at a live
+  // retry, which sits behind awaitRequestScope; the page also awaits
+  // connection()) — only used for the cheap `latest` existence probe now.
   const sevenDaysAgo = new Date(
     Date.now() - 7 * 24 * 60 * 60 * 1000,
   ).toISOString();
@@ -143,6 +151,16 @@ async function getSources(): Promise<GroupedSources> {
   return grouped;
 }
 
+async function getSourcesCached() {
+  "use cache";
+  cacheTag("sources");
+  const r = await attemptCached("sources", readSourcesDirectory);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
 export type SourcesResult =
   | { ok: true; grouped: GroupedSources }
   | { ok: false };
@@ -153,14 +171,17 @@ export type SourcesResult =
  * never memoised as "no sources" for the cache window.
  */
 async function getSourcesSafe(): Promise<SourcesResult> {
-  try {
-    const grouped = await getSources();
-    return { ok: true, grouped };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[sources] unavailable: ${message}`);
+  const grouped = await resolveCachedOrRetry<GroupedSources | null>(
+    "sources",
+    getSourcesCached,
+    readSourcesDirectory,
+    null,
+  );
+  if (grouped === null) {
+    console.warn("[sources] unavailable: the directory could not be read");
     return { ok: false };
   }
+  return { ok: true, grouped };
 }
 
 export default async function SourcesPage() {
@@ -205,10 +226,10 @@ export default async function SourcesPage() {
   );
 
   // PERF-01 / A-H1: the DenominatorNote footnote's pair, derived for free
-  // from the `grouped` rows getSources() already fetched — NOT a second
-  // full-directory query (do not touch getSources() itself; it doesn't
-  // need to change). `lastPublishedAt` on each row already carries the
-  // real timestamp within getSources()'s 7-day window, so "delivering"
+  // from the `grouped` rows readSourcesDirectory() already fetched — NOT a
+  // second full-directory query (do not touch the directory read itself; it
+  // doesn't need to change). `lastPublishedAt` on each row already carries
+  // the real timestamp within the read's 7-day window, so "delivering"
   // (within the shorter 72h yield window) is derivable locally. Must be
   // the VOTING-kind intersection (A-H1) — not every active source — since
   // that's the real denominator every share on this page divides by.

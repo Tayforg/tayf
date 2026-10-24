@@ -13,6 +13,17 @@
 // is not anon-readable after migration 117. Every failure (including a probe
 // body that is not a boolean) resolves to "unknown" so the middleware fails
 // open to the page's own soft 404.
+//
+// Brownout backoff, mirroring merged-cluster-gate.ts (FAILURE_BACKOFF_MS):
+// the gate is module-level in the middleware, so without a cool-down every
+// /source/<slug> request during a Supabase outage re-hits the failing RPC and
+// waits out the timeout. A failed full-set load (throw, non-OK, non-array
+// body) arms `retryAt` for failureBackoffMs (default 30 s). Inside that window
+// no request leaves the gate: the set check answers from the stale set when it
+// is still within staleMaxMs, and an absent slug resolves "unknown" instead of
+// probing, because the probe targets the same backend. A successful load clears
+// it. A failed probe alone does not arm it: one bad slug lookup says nothing
+// about the set endpoint.
 
 export const SOURCE_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -29,6 +40,8 @@ interface GateOptions {
   negativeTtlMs?: number;
   maxNegatives?: number;
   timeoutMs?: number;
+  /** After a failed set load, no request is made for this long (default 30 s, as merged-cluster-gate). */
+  failureBackoffMs?: number;
 }
 
 function defaultEnv(): { url?: string; anonKey?: string } {
@@ -49,10 +62,14 @@ export function createSourceSlugGate(o: GateOptions = {}): {
   const negativeTtlMs = o.negativeTtlMs ?? 60_000;
   const maxNegatives = o.maxNegatives ?? 500;
   const timeoutMs = o.timeoutMs ?? 1_500;
+  const failureBackoffMs = o.failureBackoffMs ?? 30_000;
 
   let known: Set<string> | null = null;
   let loadedAt = 0;
   let inflight: Promise<boolean> | null = null;
+  // After a failed set load, wait before touching the backend again so an
+  // outage cannot turn every request into an outbound call.
+  let retryAt = 0;
   // Map preserves insertion order, so the first key is the oldest.
   const negatives = new Map<string, number>();
 
@@ -69,9 +86,16 @@ export function createSourceSlugGate(o: GateOptions = {}): {
     return res.json();
   }
 
+  /** True when the set is loaded and not older than staleMaxMs. */
+  function staleVerdict(): boolean {
+    return known !== null && now() - loadedAt < staleMaxMs;
+  }
+
   /** Resolves true when a usable set (fresh or acceptably stale) exists. */
   function ensureSet(fetchFn: typeof fetch, url: string, anonKey: string): Promise<boolean> {
     if (known && now() - loadedAt < setTtlMs) return Promise.resolve(true);
+    // Cool-down after a failed load: answer from the stale set, make no request.
+    if (now() < retryAt) return Promise.resolve(staleVerdict());
     if (inflight) return inflight;
     inflight = (async () => {
       try {
@@ -79,9 +103,11 @@ export function createSourceSlugGate(o: GateOptions = {}): {
         if (!Array.isArray(body)) throw new Error("source_slugs: bad body");
         known = new Set((body as { slug: string }[]).map((r) => r.slug));
         loadedAt = now();
+        retryAt = 0;
         return true;
       } catch {
-        return known !== null && now() - loadedAt < staleMaxMs;
+        retryAt = now() + failureBackoffMs;
+        return staleVerdict();
       } finally {
         inflight = null;
       }
@@ -107,6 +133,10 @@ export function createSourceSlugGate(o: GateOptions = {}): {
       if (now() - negAt < negativeTtlMs) return "missing";
       negatives.delete(slug);
     }
+
+    // The set endpoint just failed: the probe hits the same backend, so skip it
+    // (fail open) until the cool-down ends.
+    if (now() < retryAt) return "unknown";
 
     try {
       const exists = await getJson(

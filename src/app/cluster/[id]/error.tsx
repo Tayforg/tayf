@@ -26,7 +26,7 @@ export default function ClusterError({
       <meta name="robots" content="noindex" />
       <div className="flex flex-col items-center text-center space-y-4">
         <div className="h-14 w-14 rounded-full bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
-          <AlertTriangle className="h-6 w-6 text-amber-600 dark:text-amber-500" />
+          <AlertTriangle className="h-6 w-6 text-amber-600 dark:text-amber-400" />
         </div>
         <h1 className="text-2xl font-bold tracking-tight">Hikâye yüklenemedi</h1>
         <p className="text-sm text-muted-foreground leading-relaxed max-w-md">

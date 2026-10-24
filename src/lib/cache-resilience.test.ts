@@ -14,6 +14,7 @@ import {
   attemptCached,
   awaitRequestScope,
   resolveCachedOrRetry,
+  resolveCachedOrThrow,
 } from "./cache-resilience";
 
 const OUTSIDE_SCOPE_MESSAGE =
@@ -273,6 +274,144 @@ describe("resolveCachedOrRetry", () => {
     );
     expect(result).toBe("fallback");
     expect(h.order).toEqual(["connection", "retry"]);
+  });
+});
+
+describe("resolveCachedOrThrow", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it("returns the cached value on a hit, with no retry and no connection()", async () => {
+    const retry = vi.fn(async () => "should not run");
+    const result = await resolveCachedOrThrow(
+      "label",
+      async () => ({ ok: true as const, data: "cached" }),
+      retry,
+    );
+    expect(result).toBe("cached");
+    expect(retry).not.toHaveBeenCalled();
+    expect(h.connection).not.toHaveBeenCalled();
+  });
+
+  it("returns a falsy-but-valid cached value (0, null, empty array) unchanged", async () => {
+    const hit = <T>(data: T) => async () => ({ ok: true as const, data });
+    const retry = vi.fn(async () => 999 as number | null | never[]);
+    expect(await resolveCachedOrThrow("label", hit(0), retry)).toBe(0);
+    expect(await resolveCachedOrThrow("label", hit(null), retry)).toBeNull();
+    expect(await resolveCachedOrThrow("label", hit([] as never[]), retry)).toEqual([]);
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("on a miss awaits connection() and then runs the retry exactly once", async () => {
+    const result = await resolveCachedOrThrow(
+      "label",
+      async () => ({ ok: false as const, error: "db down" }),
+      async () => {
+        h.order.push("retry");
+        return "fresh";
+      },
+    );
+    expect(result).toBe("fresh");
+    expect(h.order).toEqual(["connection", "retry"]);
+    expect(h.connection).toHaveBeenCalledTimes(1);
+  });
+
+  it("propagates a retry rejection unchanged (the same Error object, no fallback)", async () => {
+    const boom = new Error("retry also down");
+    await expect(
+      resolveCachedOrThrow(
+        "label",
+        async () => ({ ok: false as const, error: "db down" }),
+        async () => {
+          h.order.push("retry");
+          throw boom;
+        },
+      ),
+    ).rejects.toBe(boom);
+    expect(h.order).toEqual(["connection", "retry"]);
+  });
+
+  it("logs the failed retry under its label before rethrowing", async () => {
+    await expect(
+      resolveCachedOrThrow(
+        "my-label",
+        async () => ({ ok: false as const, error: "db down" }),
+        async () => {
+          throw new Error("retry also down");
+        },
+      ),
+    ).rejects.toThrow("retry also down");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[my-label] retry also failed: retry also down"),
+    );
+  });
+
+  it("propagates a non-Error retry rejection untouched", async () => {
+    await expect(
+      resolveCachedOrThrow(
+        "label",
+        async () => ({ ok: false as const, error: "db down" }),
+        async () => {
+          throw "stringy failure";
+        },
+      ),
+    ).rejects.toBe("stringy failure");
+  });
+
+  it("propagates an awaitRequestScope error that is not outside-scope, and never runs the retry", async () => {
+    h.connection.mockImplementation(() => {
+      throw new Error(AFTER_MESSAGE);
+    });
+    const retry = vi.fn(async () => "fresh");
+    await expect(
+      resolveCachedOrThrow(
+        "label",
+        async () => ({ ok: false as const, error: "db down" }),
+        retry,
+      ),
+    ).rejects.toThrow(AFTER_MESSAGE);
+    expect(retry).not.toHaveBeenCalled();
+  });
+
+  it("still runs the retry when connection() throws the outside-request-scope error", async () => {
+    h.connection.mockImplementation(() => {
+      throw new Error(OUTSIDE_SCOPE_MESSAGE);
+    });
+    const retry = vi.fn(async () => "fresh");
+    const result = await resolveCachedOrThrow(
+      "label",
+      async () => ({ ok: false as const, error: "db down" }),
+      retry,
+    );
+    expect(result).toBe("fresh");
+    expect(retry).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays pending and never runs the retry when connection() hangs (prerender)", async () => {
+    h.connection.mockImplementation(() => new Promise<void>(() => {}));
+    const retry = vi.fn(async () => "fresh");
+    let settled = false;
+    const pending = resolveCachedOrThrow(
+      "label",
+      async () => ({ ok: false as const, error: "db down" }),
+      retry,
+    ).finally(() => {
+      settled = true;
+    });
+    void pending.catch(() => {});
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(h.connection).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    expect(settled).toBe(false);
   });
 });
 

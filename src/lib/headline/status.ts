@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached } from "@/lib/cache-resilience";
 import { createServerClient } from "@/lib/supabase/server";
 
 // Live "has the neutralizer actually produced anything?" readout, reused by
@@ -25,45 +26,57 @@ import { createServerClient } from "@/lib/supabase/server";
 // `revalidateTag("clusters-politics", "max")`) so every copy that reads this
 // helper flips to the truth on the very next cron tick, with no redeploy.
 //
-// Never throws — copied verbatim from the never-throw/return-null discipline
-// in src/lib/sources/active-count.ts: a throw inside "use cache" during
-// prerender fails the Vercel build. A Supabase error (or anything else going
-// wrong) resolves to `null`, which every caller treats as "do not claim".
-export async function getNeutralizedStatus(): Promise<{
+// Never throws, and a failure is not remembered for long (the same shape as
+// src/lib/sources/active-count.ts): a throw inside "use cache" during
+// prerender fails the Vercel build, and a `null` memoised under a fixed
+// `cluster-feed` lifetime would hide the claim copy for that whole window
+// after one timeout. The Supabase read is a raw `readNeutralizedStatus` that
+// THROWS (an rpc error, a malformed row, a missing env var), wrapped by
+// `attemptCached` inside the `"use cache: remote"` function, and only then is
+// the lifetime chosen: counts keep `cluster-feed`, a failed read is cached for
+// `minutes`. The exported function maps a failed attempt to `null`, which
+// every caller treats as "do not claim". No live retry: this is a null
+// contract, and the next request after `minutes` reads again.
+
+export interface NeutralizedStatus {
   neutralized: number;
   eligible: number;
-} | null> {
-  "use cache: remote";
-  cacheLife("cluster-feed");
-  cacheTag("clusters-politics");
+}
 
-  try {
-    const supabase = createServerClient();
+async function readNeutralizedStatus(): Promise<NeutralizedStatus> {
+  // createServerClient() throws when Supabase env vars are missing; that is
+  // still a "do not claim" condition, handled by attemptCached.
+  const supabase = createServerClient();
 
-    const { data, error } = await supabase.rpc("headline_neutral_counts");
+  const { data, error } = await supabase.rpc("headline_neutral_counts");
 
-    if (error) {
-      // PII-free: Supabase's error.message is a query-level diagnostic
-      // (timeout, connection refused, etc.), never row data.
-      console.warn(`[headline-status] unavailable: ${error.message}`);
-      return null;
-    }
+  // PII-free: Supabase's error.message is a query-level diagnostic (timeout,
+  // connection refused, etc.), never row data.
+  if (error) throw new Error(error.message);
 
-    const row = Array.isArray(data) ? data[0] : data;
-    const eligible = Number(row?.eligible);
-    const neutralized = Number(row?.neutralized);
+  const row = Array.isArray(data) ? data[0] : data;
+  const eligible = Number(row?.eligible);
+  const neutralized = Number(row?.neutralized);
 
-    if (!row || !Number.isFinite(eligible) || !Number.isFinite(neutralized)) {
-      console.warn("[headline-status] unavailable: malformed counts");
-      return null;
-    }
-
-    return { eligible, neutralized };
-  } catch (err) {
-    // createServerClient() throws when Supabase env vars are missing; that
-    // is still a "do not claim" condition, not a build-time failure.
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[headline-status] unavailable: ${message}`);
-    return null;
+  if (!row || !Number.isFinite(eligible) || !Number.isFinite(neutralized)) {
+    throw new Error("malformed counts");
   }
+
+  return { eligible, neutralized };
+}
+
+async function getNeutralizedStatusCached() {
+  "use cache: remote";
+  cacheTag("clusters-politics");
+  const r = await attemptCached("headline-status", readNeutralizedStatus);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("cluster-feed");
+  else cacheLife("minutes");
+  if (!r.ok) console.warn(`[headline-status] unavailable: ${r.error}`);
+  return r;
+}
+
+export async function getNeutralizedStatus(): Promise<NeutralizedStatus | null> {
+  const r = await getNeutralizedStatusCached();
+  return r.ok ? r.data : null;
 }

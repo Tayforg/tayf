@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119).
+// 115, 119, 122).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -17,7 +17,10 @@ import { fileURLToPath } from "node:url";
 // (115 widened it from 114's noisy 12 h: 61% of the 12 h flags resumed within a
 // day, 21% at 24 h), keep the three reason labels 119 added to its detail
 // (erişim yok, akış donmuş, sessiz, read from sources.fetch_*), and grant
-// execute to service_role only.
+// execute to service_role only. 122 appended row 14 (`ingest_gaps`, gaps in
+// ingest_cycles.started_at over the last 6 hours): the newest version must carry
+// it as the LAST row and must never let it fail (warn only: a lost tick is a
+// signal to look at, not an outage by itself).
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -28,6 +31,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const MIGRATIONS_DIR = resolve(here, "..", "..", "supabase", "migrations");
 
 const NEWEST_CHECK = "sources_newly_dark";
+const LAST_CHECK = "ingest_gaps";
 
 function stripSqlComments(sql: string): string {
   return sql.replace(/--[^\n]*/g, "");
@@ -69,10 +73,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(7);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(8);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -150,6 +154,33 @@ describe("ops_health_report(): the newest version", () => {
     expect(after).toContain("fetch_newest_item_at");
     expect(after).toContain("fetch_items_count");
     expect(after).toMatch(/\|\|\s*v\.reason/);
+  });
+
+  it(`contains ${LAST_CHECK} (migration 122) as its LAST literal check, after ${NEWEST_CHECK}`, () => {
+    expect(newest.num).toBeGreaterThanOrEqual(122);
+    expect(newest.names).toContain(LAST_CHECK);
+    expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
+    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
+  });
+
+  it("ingest_gaps never assigns 'fail': a lost tick warns, it does not page", () => {
+    const m = /check_name\s*:=\s*'ingest_gaps'/i.exec(newest.body);
+    expect(m, "ingest_gaps segment").not.toBeNull();
+    const after = newest.body.slice((m as RegExpExecArray).index);
+    expect(after).not.toMatch(/status\s*:=\s*'fail'/i);
+    expect(after).not.toContain("'fail'");
+    expect(after).toMatch(/status\s*:=\s*'warn'/i);
+  });
+
+  it("ingest_gaps looks at the last 6 hours of ingest_cycles gaps over 5 minutes (ingest-drain runs every 3), warning at 3 gaps or one over 10 minutes", () => {
+    const m = /check_name\s*:=\s*'ingest_gaps'/i.exec(newest.body);
+    const after = newest.body.slice((m as RegExpExecArray).index).replace(/\s+/g, " ");
+    expect(after).toContain("threshold := 3");
+    expect(after).toContain("interval '6 hours'");
+    expect(after).toContain("interval '5 minutes'");
+    expect(after).toContain("public.ingest_cycles");
+    expect(after).toMatch(/lag\(c\.started_at\) over \(order by c\.started_at\)/);
+    expect(after).toMatch(/v_n >= 3 or coalesce\(v_zero, 0\) > 10/);
   });
 
   it("revokes from public, anon and authenticated, and grants execute only to service_role", () => {

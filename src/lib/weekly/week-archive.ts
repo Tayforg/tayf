@@ -219,9 +219,12 @@ async function fetchWeekArchiveClusters(range: {
 }
 
 // Cache lifetime follows the outcome (exactly one `cacheLife` call per
-// invocation; `cacheTag` first): a read -- including an empty week -- keeps
-// `hours`, a failed read is memoised for `minutes` only, and an unparseable
-// key is a stable answer (`null`, `hours`) that never touches Supabase.
+// invocation, after the read; `cacheTag` first): a read -- including an empty
+// week -- keeps `hours`, a failed read is memoised for `minutes` only. An
+// unparseable key never gets here: the exported function answers it before the
+// cache, so it makes no cache entry and touches neither Supabase nor
+// `cacheLife`. (`fetchWeekArchiveClusters` never throws, so no `attemptCached`
+// is needed: its `null` IS the failure signal.)
 async function getWeekArchiveClustersCached(
   key: string,
 ): Promise<WeeklyClusterRow[] | null> {
@@ -229,12 +232,7 @@ async function getWeekArchiveClustersCached(
   cacheTag("clusters-politics");
 
   const range = weekRange(key);
-  if (!range) {
-    cacheLife("hours");
-    return null;
-  }
-
-  const data = await fetchWeekArchiveClusters(range);
+  const data = range ? await fetchWeekArchiveClusters(range) : null;
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
   if (data === null) cacheLife("minutes");
   else cacheLife("hours");
@@ -247,6 +245,8 @@ async function getWeekArchiveClustersCached(
 export async function getWeekArchiveClusters(
   key: string,
 ): Promise<WeeklyClusterRow[] | null> {
+  // Pure: no Supabase, no clock, no cache entry for a key that can never match.
+  if (weekRange(key) === null) return null;
   return getWeekArchiveClustersCached(key);
 }
 

@@ -215,7 +215,7 @@ function ClusterMetaBadges({
       )}
 
       {isBlindspot && (
-        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-amber-700 dark:text-amber-500 font-medium">
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-amber-700 dark:text-amber-400 font-medium">
           <AlertTriangle className="h-3 w-3" />
           Kör nokta
         </span>
@@ -341,7 +341,7 @@ export function ClusterCard({
                     className="h-3.5 w-3.5 text-amber-500 animate-pulse"
                     strokeWidth={2.5}
                   />
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-500">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400">
                     Kör nokta
                   </span>
                 </div>

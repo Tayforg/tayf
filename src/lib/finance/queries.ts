@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { READER_TIMEOUT_MS, createFinanceServerClient } from "@/lib/supabase/server";
 import {
   aggregateAttention,
@@ -14,9 +15,29 @@ import {
 } from "@/lib/finance/ticker-relevance";
 
 // Read side of the finance substrate (migrations 049-051) for the
-// /ekonomi pages and /admin/ekonomi. Every fetcher throws on a Supabase
-// error so the route's error.tsx renders instead of a cached empty page
-// (same throw-inside-the-cache rule as src/lib/trends/daily-zones.ts).
+// /ekonomi pages and /admin/ekonomi. Every fetcher still THROWS on a Supabase
+// error so the route's error.tsx renders instead of a cached empty page, but
+// the throw now happens OUTSIDE the cache, after one live retry. A throw inside
+// a `"use cache"` body fails `next build`'s prerender and fixes the entry's
+// lifetime before the outcome is known, so each fetcher is three pieces:
+//
+//   readX         the raw, uncached read. THROWS on a Supabase error.
+//   fetchXCached  the `"use cache"` body: `cacheTag`, then `attemptCached`
+//                 around readX (never rejects), THEN one `cacheLife` -- the
+//                 success profile (FEED_CACHE / ADMIN_CACHE), or `minutes`
+//                 for a failed attempt so a blip cannot park an `{ ok: false }`
+//                 sentinel for 5-10 minutes.
+//   fetchX        the exported, uncached function: `resolveCachedOrThrow`.
+//                 A cache hit returns the data; a failed attempt awaits the
+//                 request scope (the retry reads the clock via istDate), runs
+//                 readX live once, and lets that error propagate to error.tsx.
+//
+// tests/guards/cache-life-after-attempt.test.ts pins the order inside the
+// cache body; tests/guards/cache-retry-prerender.test.ts pins the call shape.
+// Input normalisation and empty-input short-circuits (fetchQuoteStats,
+// fetchReferencePrices) live in the exported function, so the cached function
+// only ever sees the normalised argument and an empty request makes no cache
+// entry at all.
 //
 // reader-data (§4(b)): the relevance LOOKUPS in this file
 // (fetchRelevanceScores / fetchLowRelevanceSince / fetchLegalNoticeIdsSince,
@@ -204,10 +225,7 @@ interface EconFeedRow {
 // — "the wrong direction" (see 054's header). `econ_feed` (migration 058)
 // starts from the indexed article_tickers side instead, the same fix
 // `ticker_articles` (migration 054) applied to the per-ticker page below.
-export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
-  "use cache";
-  cacheLife(FEED_CACHE);
-  cacheTag("finance-feed");
+async function readEconFeed(limit: number): Promise<FeedItem[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   // reader-data (§4b): over-fetch 25% so the ~20% of items a hidden-ticker
   // drop can remove still leave close to `limit` items on screen.
@@ -225,6 +243,24 @@ export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
   const keys = items.flatMap((i) => i.tickers.map((t) => relevanceKey(i.id, t)));
   const scores = await fetchRelevanceScores(supabase, keys);
   return filterFeedTickers(items, scores).slice(0, limit);
+}
+
+async function fetchEconFeedCached(limit: number) {
+  "use cache";
+  cacheTag("finance-feed");
+  const r = await attemptCached("finance-econ-feed", () => readEconFeed(limit));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function fetchEconFeed(limit = 80): Promise<FeedItem[]> {
+  return resolveCachedOrThrow(
+    "finance-econ-feed",
+    () => fetchEconFeedCached(limit),
+    () => readEconFeed(limit),
+  );
 }
 
 function istDate(offsetDays = 0): string {
@@ -318,10 +354,7 @@ function scoreMapFromLowRows(rows: Array<{ subject_id: string; jev_prob: unknown
 }
 
 /** Most-mentioned tickers over the last `days` Istanbul days, with a ratio to the prior 6 days. */
-export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAttention[]> {
-  "use cache";
-  cacheLife(FEED_CACHE);
-  cacheTag("finance-feed");
+async function readTopTickers(days: number, limit: number): Promise<TickerAttention[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const splitDay = istDate(-(days - 1));
   const sinceIso = `${istDate(-(days - 1 + BASELINE_DAYS))}T00:00:00+03:00`;
@@ -350,6 +383,23 @@ export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAtten
   return rankAttention(rows, titles, limit, splitDay, days, BASELINE_DAYS);
 }
 
+async function fetchTopTickersCached(days: number, limit: number) {
+  "use cache";
+  cacheTag("finance-feed");
+  const r = await attemptCached("finance-top-tickers", () => readTopTickers(days, limit));
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function fetchTopTickers(days = 2, limit = 24): Promise<TickerAttention[]> {
+  return resolveCachedOrThrow(
+    "finance-top-tickers",
+    () => fetchTopTickersCached(days, limit),
+    () => readTopTickers(days, limit),
+  );
+}
+
 interface DisclosureRow {
   disclosure_index: number;
   published_at: string;
@@ -375,11 +425,7 @@ function toDisclosure(r: DisclosureRow): Disclosure {
 const DISCLOSURE_SELECT = "disclosure_index,published_at,kap_title,stock_codes,subject,summary,disclosure_class";
 const CIRCUIT_BREAKER = "%Devre Kesici%";
 
-/** Latest disclosures, circuit-breaker notices excluded (they get their own strip). */
-export async function fetchRecentDisclosures(limit = 40, ticker?: string): Promise<Disclosure[]> {
-  "use cache";
-  cacheLife(FEED_CACHE);
-  cacheTag("finance-feed");
+async function readRecentDisclosures(limit: number, ticker: string | undefined): Promise<Disclosure[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   // TS-06: `.not('subject','ilike',CIRCUIT_BREAKER)` compiles to
   // `subject NOT ILIKE ...`, which is NULL (not TRUE) for a NULL subject —
@@ -399,11 +445,25 @@ export async function fetchRecentDisclosures(limit = 40, ticker?: string): Promi
   return ((data ?? []) as DisclosureRow[]).map(toDisclosure);
 }
 
-/** Today's circuit-breaker notices (Istanbul day), newest first. */
-export async function fetchCircuitBreakers(limit = 60): Promise<Disclosure[]> {
+async function fetchRecentDisclosuresCached(limit: number, ticker: string | undefined) {
   "use cache";
-  cacheLife(FEED_CACHE);
   cacheTag("finance-feed");
+  const r = await attemptCached("finance-recent-disclosures", () => readRecentDisclosures(limit, ticker));
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+/** Latest disclosures, circuit-breaker notices excluded (they get their own strip). */
+export async function fetchRecentDisclosures(limit = 40, ticker?: string): Promise<Disclosure[]> {
+  return resolveCachedOrThrow(
+    "finance-recent-disclosures",
+    () => fetchRecentDisclosuresCached(limit, ticker),
+    () => readRecentDisclosures(limit, ticker),
+  );
+}
+
+async function readCircuitBreakers(limit: number): Promise<Disclosure[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase
     .from("kap_disclosures")
@@ -416,6 +476,24 @@ export async function fetchCircuitBreakers(limit = 60): Promise<Disclosure[]> {
   return ((data ?? []) as DisclosureRow[]).map(toDisclosure);
 }
 
+async function fetchCircuitBreakersCached(limit: number) {
+  "use cache";
+  cacheTag("finance-feed");
+  const r = await attemptCached("finance-circuit-breakers", () => readCircuitBreakers(limit));
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+/** Today's circuit-breaker notices (Istanbul day), newest first. */
+export async function fetchCircuitBreakers(limit = 60): Promise<Disclosure[]> {
+  return resolveCachedOrThrow(
+    "finance-circuit-breakers",
+    () => fetchCircuitBreakersCached(limit),
+    () => readCircuitBreakers(limit),
+  );
+}
+
 interface QuoteStatRow {
   ticker: string;
   last_day: string;
@@ -426,13 +504,7 @@ interface QuoteStatRow {
   rvol: number | null;
 }
 
-/** Relative volume and last settled close per ticker, from bist_quote_stats. */
-export async function fetchQuoteStats(tickers: readonly string[]): Promise<Record<string, QuoteStat>> {
-  "use cache";
-  cacheLife(FEED_CACHE);
-  cacheTag("finance-bars");
-  const unique = [...new Set(tickers)].sort();
-  if (unique.length === 0) return {};
+async function readQuoteStats(unique: string[]): Promise<Record<string, QuoteStat>> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase.from("bist_quote_stats").select("*").in("ticker", unique);
   if (error) throw new Error(`[finance] fetchQuoteStats: ${error.message}`);
@@ -451,15 +523,29 @@ export async function fetchQuoteStats(tickers: readonly string[]): Promise<Recor
   return out;
 }
 
+async function fetchQuoteStatsCached(unique: string[]) {
+  "use cache";
+  cacheTag("finance-bars");
+  const r = await attemptCached("finance-quote-stats", () => readQuoteStats(unique));
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+/** Relative volume and last settled close per ticker, from bist_quote_stats. */
+export async function fetchQuoteStats(tickers: readonly string[]): Promise<Record<string, QuoteStat>> {
+  const unique = [...new Set(tickers)].sort();
+  if (unique.length === 0) return {};
+  return resolveCachedOrThrow(
+    "finance-quote-stats",
+    () => fetchQuoteStatsCached(unique),
+    () => readQuoteStats(unique),
+  );
+}
+
 export const refKey = (articleId: string, ticker: string) => `${articleId}:${ticker}`;
 
-/** Price at each article's publish time, keyed by refKey(articleId, ticker). */
-export async function fetchReferencePrices(articleIds: readonly string[]): Promise<Record<string, number>> {
-  "use cache";
-  cacheLife(FEED_CACHE);
-  cacheTag("finance-bars");
-  const ids = [...new Set(articleIds)].sort();
-  if (ids.length === 0) return {};
+async function readReferencePrices(ids: string[]): Promise<Record<string, number>> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data, error } = await supabase.rpc("feed_reference_prices", { p_article_ids: ids });
   if (error) throw new Error(`[finance] fetchReferencePrices: ${error.message}`);
@@ -470,11 +556,27 @@ export async function fetchReferencePrices(articleIds: readonly string[]): Promi
   return out;
 }
 
-/** 5-minute bars for the ticker's most recent session that has any. */
-export async function fetchIntraday(ticker: string): Promise<{ day: string | null; bars: Bar5m[] }> {
+async function fetchReferencePricesCached(ids: string[]) {
   "use cache";
-  cacheLife(FEED_CACHE);
-  cacheTag("finance-bars", `finance-ticker:${ticker}`);
+  cacheTag("finance-bars");
+  const r = await attemptCached("finance-reference-prices", () => readReferencePrices(ids));
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+/** Price at each article's publish time, keyed by refKey(articleId, ticker). */
+export async function fetchReferencePrices(articleIds: readonly string[]): Promise<Record<string, number>> {
+  const ids = [...new Set(articleIds)].sort();
+  if (ids.length === 0) return {};
+  return resolveCachedOrThrow(
+    "finance-reference-prices",
+    () => fetchReferencePricesCached(ids),
+    () => readReferencePrices(ids),
+  );
+}
+
+async function readIntraday(ticker: string): Promise<{ day: string | null; bars: Bar5m[] }> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const { data: last, error: lErr } = await supabase
     .from("bist_bars_5m")
@@ -502,6 +604,24 @@ export async function fetchIntraday(ticker: string): Promise<{ day: string | nul
       volume: b.volume == null ? null : Number(b.volume),
     })),
   };
+}
+
+async function fetchIntradayCached(ticker: string) {
+  "use cache";
+  cacheTag("finance-bars", `finance-ticker:${ticker}`);
+  const r = await attemptCached("finance-intraday", () => readIntraday(ticker));
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+/** 5-minute bars for the ticker's most recent session that has any. */
+export async function fetchIntraday(ticker: string): Promise<{ day: string | null; bars: Bar5m[] }> {
+  return resolveCachedOrThrow(
+    "finance-intraday",
+    () => fetchIntradayCached(ticker),
+    () => readIntraday(ticker),
+  );
 }
 
 function median(nums: number[]): number | null {
@@ -547,10 +667,7 @@ export function coverageStats(
   };
 }
 
-export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
-  "use cache";
-  cacheLife(FEED_CACHE);
-  cacheTag("finance-feed", `finance-ticker:${ticker}`);
+async function readTickerPage(ticker: string): Promise<TickerPage> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const since30 = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
 
@@ -617,11 +734,26 @@ export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
   };
 }
 
+async function fetchTickerPageCached(ticker: string) {
+  "use cache";
+  cacheTag("finance-feed", `finance-ticker:${ticker}`);
+  const r = await attemptCached("finance-ticker-page", () => readTickerPage(ticker));
+  if (r.ok) cacheLife(FEED_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function fetchTickerPage(ticker: string): Promise<TickerPage> {
+  return resolveCachedOrThrow(
+    "finance-ticker-page",
+    () => fetchTickerPageCached(ticker),
+    () => readTickerPage(ticker),
+  );
+}
+
 // --- admin ------------------------------------------------------------------
 
-export async function fetchFinanceHealth(): Promise<FinanceHealth> {
-  "use cache";
-  cacheLife(ADMIN_CACHE);
+async function readFinanceHealth(): Promise<FinanceHealth> {
   const supabase = await createFinanceServerClient();
   const { data, error } = await supabase.from("finance_health").select("*").limit(1);
   if (error) throw new Error(`[finance] fetchFinanceHealth: ${error.message}`);
@@ -642,9 +774,19 @@ export async function fetchFinanceHealth(): Promise<FinanceHealth> {
   };
 }
 
-export async function fetchSignals(limit = 120): Promise<Signal[]> {
+async function fetchFinanceHealthCached() {
   "use cache";
-  cacheLife(ADMIN_CACHE);
+  const r = await attemptCached("finance-health", readFinanceHealth);
+  if (r.ok) cacheLife(ADMIN_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function fetchFinanceHealth(): Promise<FinanceHealth> {
+  return resolveCachedOrThrow("finance-health", fetchFinanceHealthCached, readFinanceHealth);
+}
+
+async function readSignals(limit: number): Promise<Signal[]> {
   const supabase = await createFinanceServerClient();
   const { data, error } = await supabase
     .from("finance_signals")
@@ -659,6 +801,22 @@ export async function fetchSignals(limit = 120): Promise<Signal[]> {
     evidence: s.evidence ?? {},
     observedAt: s.observed_at,
   }));
+}
+
+async function fetchSignalsCached(limit: number) {
+  "use cache";
+  const r = await attemptCached("finance-signals", () => readSignals(limit));
+  if (r.ok) cacheLife(ADMIN_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function fetchSignals(limit = 120): Promise<Signal[]> {
+  return resolveCachedOrThrow(
+    "finance-signals",
+    () => fetchSignalsCached(limit),
+    () => readSignals(limit),
+  );
 }
 
 export const LAG_BUCKETS: ReadonlyArray<{ label: string; min: number; max: number }> = [
@@ -720,9 +878,7 @@ export async function fetchKapBreakerState(): Promise<KapBreakerState | null> {
   };
 }
 
-export async function fetchLagHistogram(days = 7): Promise<LagBucket[]> {
-  "use cache";
-  cacheLife(ADMIN_CACHE);
+async function readLagHistogram(days: number): Promise<LagBucket[]> {
   const supabase = await createFinanceServerClient();
   const { data, error } = await supabase
     .from("disclosure_coverage")
@@ -731,4 +887,20 @@ export async function fetchLagHistogram(days = 7): Promise<LagBucket[]> {
     .limit(5000);
   if (error) throw new Error(`[finance] fetchLagHistogram: ${error.message}`);
   return bucketLags(((data ?? []) as Array<{ lag_minutes: number }>).map((r) => Number(r.lag_minutes)));
+}
+
+async function fetchLagHistogramCached(days: number) {
+  "use cache";
+  const r = await attemptCached("finance-lag-histogram", () => readLagHistogram(days));
+  if (r.ok) cacheLife(ADMIN_CACHE);
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function fetchLagHistogram(days = 7): Promise<LagBucket[]> {
+  return resolveCachedOrThrow(
+    "finance-lag-histogram",
+    () => fetchLagHistogramCached(days),
+    () => readLagHistogram(days),
+  );
 }

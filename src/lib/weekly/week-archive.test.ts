@@ -293,14 +293,58 @@ describe("getWeekArchiveClusters read profile + cache lifetime", () => {
     expect(cacheLife).not.toHaveBeenCalledWith("hours");
   });
 
-  it("an invalid key resolves null with exactly one cacheLife('hours') and no query", async () => {
+  it("an invalid key resolves null BEFORE the cache: no client, no cacheTag, no cacheLife", async () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
 
     await expect(getWeekArchiveClusters("nope")).resolves.toBeNull();
+    await expect(getWeekArchiveClusters("2026-W54")).resolves.toBeNull();
+    await expect(getWeekArchiveClusters("")).resolves.toBeNull();
 
+    expect(clientFactories.createReaderClient).not.toHaveBeenCalled();
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
+  });
+
+  it("a thrown client (cannot be built) resolves null and is cached for 'minutes' only", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    clientFactories.createReaderClient.mockImplementation(() => {
+      throw new Error("no env");
+    });
+    try {
+      await expect(getWeekArchiveClusters("2026-W40")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a failed read is tagged before its 'minutes' lifetime too", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.error = { message: "boom" };
+    try {
+      await getWeekArchiveClusters("2026-W40");
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+});
+
+describe("getRecentWeekKeys (pure cached body, unchanged)", () => {
+  it("is a single cacheLife('hours') with no client", async () => {
+    const { getRecentWeekKeys } = await import("./week-archive");
+    const keys = await getRecentWeekKeys();
+    expect(keys.current).toMatch(/^\d{4}-W\d{2}$/);
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("hours");
     expect(clientFactories.createReaderClient).not.toHaveBeenCalled();
   });
 });
-

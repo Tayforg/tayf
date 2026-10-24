@@ -1,11 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { sendEmail, sendBatch, isMailConfigured } from "./resend";
+
+// resend.ts keeps a module-level `warnedMissingKey` flag ("warn once per
+// process"). A static import would share it across tests, so "warns exactly
+// once" passed or failed depending on whether an earlier test had already
+// triggered the warning (vitest --sequence.shuffle). Every test gets a fresh
+// module instance instead; the names below are re-bound in beforeEach.
+let sendEmail: typeof import("./resend").sendEmail;
+let sendBatch: typeof import("./resend").sendBatch;
+let isMailConfigured: typeof import("./resend").isMailConfigured;
 
 const ORIGINAL_ENV = { ...process.env };
 const originalFetch = globalThis.fetch;
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.restoreAllMocks();
+  vi.resetModules();
+  ({ sendEmail, sendBatch, isMailConfigured } = await import("./resend"));
 });
 
 afterEach(() => {

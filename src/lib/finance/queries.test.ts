@@ -40,6 +40,17 @@ const fixture = vi.hoisted(() => ({
   legalNotices: [] as Array<{ article_id: string; published_at: string }>,
   legalNoticeError: null as string | null,
   lastLegalState: null as unknown,
+  // cached-failure-sweep: bist_quote_stats rows + the builder state of the
+  // last read (to see the normalised ticker list), and an econ_feed error.
+  quoteStats: [] as unknown[],
+  lastQuoteStatsState: null as unknown,
+  econFeedError: null as string | null,
+  // Counts every supabase-js createClient() call, and lets a test make the
+  // factory throw (a client that cannot be built = a failing read).
+  clientBuilds: 0,
+  clientFailure: null as string | null,
+  // The first N client builds throw, later ones succeed (a transient blip).
+  clientBlips: 0,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -57,6 +68,10 @@ const supabaseFake = await vi.hoisted(async () => {
         const rows = fixture.bars5m.filter((r) => !since || Date.parse(r.ts) >= Date.parse(since));
         const sorted = [...rows].sort((a, b) => (desc ? Date.parse(b.ts) - Date.parse(a.ts) : Date.parse(a.ts) - Date.parse(b.ts)));
         return { data: s.limit ? sorted.slice(0, s.limit) : sorted, error: null };
+      },
+      bist_quote_stats: (state: unknown) => {
+        fixture.lastQuoteStatsState = state;
+        return { data: fixture.quoteStats, error: null };
       },
       kap_fetch_state: () => {
         if (fixture.kapFetchStateRow === undefined) {
@@ -109,7 +124,10 @@ const supabaseFake = await vi.hoisted(async () => {
       },
     },
     rpc: {
-      econ_feed: () => ({ data: fixture.econFeedRows, error: null }),
+      econ_feed: () =>
+        fixture.econFeedError
+          ? { data: null, error: { message: fixture.econFeedError } }
+          : { data: fixture.econFeedRows, error: null },
       ticker_articles: () =>
         fixture.tickerArticlesError
           ? { data: null, error: { message: fixture.tickerArticlesError } }
@@ -119,18 +137,32 @@ const supabaseFake = await vi.hoisted(async () => {
 });
 
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => supabaseFake.client,
+  createClient: () => {
+    fixture.clientBuilds += 1;
+    if (fixture.clientBlips > 0) {
+      fixture.clientBlips -= 1;
+      throw new Error("blip");
+    }
+    if (fixture.clientFailure) throw new Error(fixture.clientFailure);
+    return supabaseFake.client;
+  },
 }));
 
+import { cacheLife, cacheTag } from "next/cache";
 import { istToday } from "./format";
 import {
   bucketLags,
   coverageStats,
   fetchCircuitBreakers,
   fetchEconFeed,
+  fetchFinanceHealth,
   fetchIntraday,
   fetchKapBreakerState,
+  fetchLagHistogram,
+  fetchQuoteStats,
   fetchRecentDisclosures,
+  fetchReferencePrices,
+  fetchSignals,
   fetchTickerPage,
   fetchTopTickers,
   rankAttention,
@@ -156,7 +188,15 @@ beforeEach(() => {
   fixture.legalNotices = [];
   fixture.legalNoticeError = null;
   fixture.lastLegalState = null;
+  fixture.quoteStats = [];
+  fixture.lastQuoteStatsState = null;
+  fixture.econFeedError = null;
+  fixture.clientBuilds = 0;
+  fixture.clientFailure = null;
+  fixture.clientBlips = 0;
   supabaseFake.calls.rpc.length = 0;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
 });
 
 afterEach(() => {
@@ -672,6 +712,199 @@ describe("ticker-legal-notices (migration 107): BİK notices do not count as tic
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
     fixture.tickerArticlesError = "ticker_articles boom";
-    await expect(fetchTickerPage("GARAN")).rejects.toThrow(/fetchTickerPage articles: ticker_articles boom/);
+    // The cached attempt logs once and the live retry once; the retry's own
+    // error is what the caller sees.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(fetchTickerPage("GARAN")).rejects.toThrow(/fetchTickerPage articles: ticker_articles boom/);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cached-failure-sweep: the cache lifetime follows the read's outcome, and a
+// failed read is retried live exactly once, then rethrown to the caller (the
+// route's error.tsx), never served as an empty page.
+//
+// Shape under test, per fetcher: `fetchX` (exported, uncached) =
+// resolveCachedOrThrow(label, <fetchX>Cached, readX). The Cached body picks its
+// cacheLife AFTER attemptCached. Failing client = the supabase-js factory
+// throws, so BOTH the cached attempt and the live retry fail, and the client
+// factory is built exactly twice. tests/guards/cache-life-after-attempt.test.ts
+// pins the textual order; this pins the behaviour.
+// ---------------------------------------------------------------------------
+
+const FEED_PROFILE = { stale: 30, revalidate: 60, expire: 600 };
+const ADMIN_PROFILE = { stale: 30, revalidate: 60, expire: 300 };
+
+const SWEPT_FETCHERS: Array<{
+  name: string;
+  call: () => Promise<unknown>;
+  tags: string[];
+  profile: typeof FEED_PROFILE;
+}> = [
+  { name: "fetchEconFeed", call: () => fetchEconFeed(10), tags: ["finance-feed"], profile: FEED_PROFILE },
+  { name: "fetchTopTickers", call: () => fetchTopTickers(2, 10), tags: ["finance-feed"], profile: FEED_PROFILE },
+  { name: "fetchRecentDisclosures", call: () => fetchRecentDisclosures(10), tags: ["finance-feed"], profile: FEED_PROFILE },
+  { name: "fetchCircuitBreakers", call: () => fetchCircuitBreakers(10), tags: ["finance-feed"], profile: FEED_PROFILE },
+  { name: "fetchQuoteStats", call: () => fetchQuoteStats(["THYAO"]), tags: ["finance-bars"], profile: FEED_PROFILE },
+  { name: "fetchReferencePrices", call: () => fetchReferencePrices(["a1"]), tags: ["finance-bars"], profile: FEED_PROFILE },
+  { name: "fetchIntraday", call: () => fetchIntraday("THYAO"), tags: ["finance-bars", "finance-ticker:THYAO"], profile: FEED_PROFILE },
+  { name: "fetchTickerPage", call: () => fetchTickerPage("THYAO"), tags: ["finance-feed", "finance-ticker:THYAO"], profile: FEED_PROFILE },
+  // The admin trio keeps having no cacheTag.
+  { name: "fetchFinanceHealth", call: () => fetchFinanceHealth(), tags: [], profile: ADMIN_PROFILE },
+  { name: "fetchSignals", call: () => fetchSignals(10), tags: [], profile: ADMIN_PROFILE },
+  { name: "fetchLagHistogram", call: () => fetchLagHistogram(7), tags: [], profile: ADMIN_PROFILE },
+];
+
+/** cacheTag (when the fetcher has tags) is invoked before the one cacheLife. */
+function expectTagsBeforeLife(tags: string[]) {
+  if (tags.length === 0) {
+    expect(cacheTag).not.toHaveBeenCalled();
+    return;
+  }
+  expect(cacheTag).toHaveBeenCalledWith(...tags);
+  expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+    vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+  );
+}
+
+describe("cached-failure-sweep: cacheLife follows the outcome of each finance fetcher", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  it("covers every \"use cache\" fetcher exported from queries.ts (11)", () => {
+    expect(SWEPT_FETCHERS.map((f) => f.name)).toHaveLength(11);
+    expect(new Set(SWEPT_FETCHERS.map((f) => f.name)).size).toBe(11);
+  });
+
+  it.each(SWEPT_FETCHERS)(
+    "$name: a failing client rejects after one live retry, and the failure is cached for 'minutes' only",
+    async ({ call, tags }) => {
+      fixture.clientFailure = "db down";
+
+      await expect(call()).rejects.toThrow(/db down/);
+
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+      expectTagsBeforeLife(tags);
+      // Attempt (inside the cache) + one live retry (outside it).
+      expect(fixture.clientBuilds).toBe(2);
+    },
+  );
+
+  it.each(SWEPT_FETCHERS)(
+    "$name: a successful read keeps its profile and builds the client once",
+    async ({ call, tags, profile }) => {
+      await call();
+
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith(profile);
+      expectTagsBeforeLife(tags);
+      expect(fixture.clientBuilds).toBe(1);
+    },
+  );
+
+  it("a Supabase error envelope (not just a throwing client) is also retried live once, then rethrown", async () => {
+    fixture.econFeedError = "canceling statement due to statement timeout";
+
+    await expect(fetchEconFeed(10)).rejects.toThrow(/fetchEconFeed: canceling statement/);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(supabaseFake.calls.rpc.filter((c) => c.name === "econ_feed")).toHaveLength(2);
+  });
+
+  it("a blip on the cached attempt is healed by the live retry: data returned, failure cached for 'minutes'", async () => {
+    // Only the first client build (the cached attempt) fails.
+    fixture.clientBlips = 1;
+    fixture.econFeedRows = [
+      {
+        id: "a1",
+        title: "Vestel'in kârı arttı",
+        url: "https://x/1",
+        published_at: "2026-09-13T08:00:00Z",
+        category: "ekonomi",
+        source_name: "Bloomberg HT",
+        source_slug: "bloomberght",
+        tickers: ["VESTL"],
+      },
+    ];
+
+    const items = await fetchEconFeed(10);
+
+    expect(items.map((i) => i.id)).toEqual(["a1"]);
+    expect(fixture.clientBuilds).toBe(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+});
+
+describe("cached-failure-sweep: input normalisation and short-circuits live in the exported function", () => {
+  it("fetchQuoteStats([]) returns {} without a client, a cache entry or a cacheLife", async () => {
+    await expect(fetchQuoteStats([])).resolves.toEqual({});
+    expect(fixture.clientBuilds).toBe(0);
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
+  });
+
+  it("fetchReferencePrices([]) returns {} without a client, a cache entry or a cacheLife", async () => {
+    await expect(fetchReferencePrices([])).resolves.toEqual({});
+    expect(fixture.clientBuilds).toBe(0);
+    expect(cacheLife).not.toHaveBeenCalled();
+    expect(cacheTag).not.toHaveBeenCalled();
+  });
+
+  it("fetchQuoteStats dedupes and sorts the tickers before the query, whatever the call order", async () => {
+    await fetchQuoteStats(["THYAO", "ASELS", "THYAO"]);
+    const first = fixture.lastQuoteStatsState as BuilderState;
+    expect(first.in).toEqual([{ col: "ticker", vals: ["ASELS", "THYAO"] }]);
+
+    fixture.lastQuoteStatsState = null;
+    await fetchQuoteStats(["ASELS", "THYAO"]);
+    const second = fixture.lastQuoteStatsState as BuilderState;
+    expect(second.in).toEqual(first.in);
+  });
+
+  it("fetchReferencePrices dedupes and sorts the article ids before the rpc", async () => {
+    await fetchReferencePrices(["b2", "a1", "b2"]);
+    expect(supabaseFake.calls.rpc.at(-1)).toEqual({
+      name: "feed_reference_prices",
+      args: { p_article_ids: ["a1", "b2"] },
+    });
+  });
+
+  it("fetchQuoteStats maps a bist_quote_stats row into a QuoteStat", async () => {
+    fixture.quoteStats = [
+      {
+        ticker: "THYAO",
+        last_day: "2026-09-12",
+        last_close: "300.25",
+        prev_close: null,
+        last_volume: 1000,
+        avg_volume_20: "800",
+        rvol: 1.25,
+      },
+    ];
+    await expect(fetchQuoteStats(["THYAO"])).resolves.toEqual({
+      THYAO: {
+        ticker: "THYAO",
+        lastDay: "2026-09-12",
+        lastClose: 300.25,
+        prevClose: null,
+        lastVolume: 1000,
+        avgVolume20: 800,
+        rvol: 1.25,
+      },
+    });
   });
 });

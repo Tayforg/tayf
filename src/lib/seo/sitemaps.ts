@@ -1,5 +1,6 @@
 import { cacheLife } from "next/cache";
 
+import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { escapeXml } from "@/lib/feeds/rss-builder";
 import { createReaderClient } from "@/lib/supabase/server";
 import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
@@ -17,6 +18,22 @@ import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 // de-index a whole month or the entire news feed for as long as the cache
 // entry lives. The route handler (src/app/sitemaps/[file]/route.ts) turns
 // that throw into a 503 + Retry-After instead of a 200 with zero <url>s.
+//
+// The throw happens OUTSIDE the cache (a throw inside a "use cache" body fails
+// `next build`'s prerender, and the lifetime must be chosen after the read's
+// outcome is known). Each DB builder is three pieces:
+//   readXSitemapXml          the raw read. THROWS on a Supabase error.
+//   getXSitemapXmlCached     the "use cache" body: attemptCached around the
+//                            read, then ONE cacheLife -- the revalidate window
+//                            on success, "minutes" for a failed attempt, so the
+//                            failure sentinel lives for minutes, not an hour.
+//   getXSitemapXml           exported, uncached: resolveCachedOrThrow. A hit
+//                            returns the XML; a failed attempt awaits the
+//                            request scope and reads live once more; a
+//                            still-failing read rejects (the route sends 503).
+// getCurrentSitemapMonth / getSitemapIndexXml / getStaticSitemapXml read
+// nothing from the outside world (a clock and a pure render), so they stay
+// plain cached bodies, exempt by name in tests/guards/cache-life-after-attempt.
 
 /** First calendar month with any non-archived, article_count >= 2 cluster.
  *  V1 (SBQ, 2026-09-28): min(first_published) among those rows is
@@ -272,10 +289,7 @@ interface SourceRow {
   slug: string;
 }
 
-export async function getSourcesSitemapXml(baseUrl: string): Promise<string> {
-  "use cache";
-  cacheLife({ revalidate: 3600 });
-
+async function readSourcesSitemapXml(baseUrl: string): Promise<string> {
   const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("sources")
@@ -294,6 +308,23 @@ export async function getSourcesSitemapXml(baseUrl: string): Promise<string> {
   return renderUrlset(entries);
 }
 
+async function getSourcesSitemapXmlCached(baseUrl: string) {
+  "use cache";
+  const r = await attemptCached("sources-sitemap", () => readSourcesSitemapXml(baseUrl));
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife({ revalidate: 3600 });
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function getSourcesSitemapXml(baseUrl: string): Promise<string> {
+  return resolveCachedOrThrow(
+    "sources-sitemap",
+    () => getSourcesSitemapXmlCached(baseUrl),
+    () => readSourcesSitemapXml(baseUrl),
+  );
+}
+
 interface NewsClusterRow {
   id: string;
   title_tr: string;
@@ -301,10 +332,7 @@ interface NewsClusterRow {
   first_published: string;
 }
 
-export async function getNewsSitemapXml(baseUrl: string): Promise<string> {
-  "use cache";
-  cacheLife({ revalidate: 600 });
-
+async function readNewsSitemapXml(baseUrl: string): Promise<string> {
   const now = new Date();
   const since = new Date(now.getTime() - NEWS_WINDOW_HOURS * 3600 * 1000);
 
@@ -336,15 +364,28 @@ export async function getNewsSitemapXml(baseUrl: string): Promise<string> {
   return renderNewsUrlset(entries);
 }
 
+async function getNewsSitemapXmlCached(baseUrl: string) {
+  "use cache";
+  const r = await attemptCached("news-sitemap", () => readNewsSitemapXml(baseUrl));
+  if (r.ok) cacheLife({ revalidate: 600 });
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function getNewsSitemapXml(baseUrl: string): Promise<string> {
+  return resolveCachedOrThrow(
+    "news-sitemap",
+    () => getNewsSitemapXmlCached(baseUrl),
+    () => readNewsSitemapXml(baseUrl),
+  );
+}
+
 interface MonthClusterRow {
   id: string;
   updated_at: string;
 }
 
-export async function getClustersMonthXml(baseUrl: string, month: string): Promise<string> {
-  "use cache";
-  cacheLife({ revalidate: 3600 });
-
+async function readClustersMonthXml(baseUrl: string, month: string): Promise<string> {
   const { start, end } = monthRangeUtc(month);
   const supabase = createReaderClient();
 
@@ -379,4 +420,20 @@ export async function getClustersMonthXml(baseUrl: string, month: string): Promi
   }
 
   return renderUrlset(entries);
+}
+
+async function getClustersMonthXmlCached(baseUrl: string, month: string) {
+  "use cache";
+  const r = await attemptCached("clusters-month-sitemap", () => readClustersMonthXml(baseUrl, month));
+  if (r.ok) cacheLife({ revalidate: 3600 });
+  else cacheLife("minutes");
+  return r;
+}
+
+export async function getClustersMonthXml(baseUrl: string, month: string): Promise<string> {
+  return resolveCachedOrThrow(
+    "clusters-month-sitemap",
+    () => getClustersMonthXmlCached(baseUrl, month),
+    () => readClustersMonthXml(baseUrl, month),
+  );
 }

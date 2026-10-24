@@ -2687,3 +2687,63 @@ On `/kaynaklar/durum` a silent source now shows its label (and a legend appears 
 ## 120 — twin cluster pairs: APPLY 120 only, no deploy
 
 Adds the read-only `service_role` function `public.admin_twin_cluster_pairs(integer, integer)` for `/admin/birlestir`; apply `120_*.sql`, nothing to deploy. Rollback: drop the function (`drop function public.admin_twin_cluster_pairs(integer, integer);`) and delete ledger row 120 (`delete from supabase_migrations.schema_migrations where version = '120';`).
+
+## 121 — cluster_link_atomic recomputes under the lock: APPLY 121 only, no deploy
+
+**Why:** `cluster_link_atomic` (027) locks the cluster and inserts the member, but wrote `bias_distribution`, `is_blindspot`, `blindspot_side` and `first_published` exactly as the cluster-consumer sent them, and the consumer builds those from a member snapshot it reads *before* the lock. Two links into one cluster at the same time each wrote a snapshot without the other's article, so the later writer erased the earlier writer's vote (`article_count`, recounted under the lock, stayed right). Production shows it on two clusters, `52823177-3a62-4b56-8312-18cd3f07b53e` and `e0c1324a-c47e-4952-beed-c37f858a15e3` (drift query below).
+
+**What 121 does** (additive, one transaction, safe to re-apply; starts with `set local lock_timeout = '5s'`): `create or replace function` on `cluster_link_atomic(uuid, uuid, jsonb, boolean, text, timestamptz)` (no `drop function`: that would strip the grants and break consumer calls in flight). The body keeps 027's advisory lock and idempotent insert, adds a `for update` row lock on the cluster after the advisory lock (099's order, so no deadlock against `cluster_merge_atomic`), and then calls `cluster_unlink_article(cluster, null)` (064), the canonical SQL recompute: `article_count`, `bias_distribution` (voting kinds `outlet` and `wire`, one vote per article, ten keys), `is_blindspot` / `blindspot_side` (five voting articles, 0.8 zone share), `first_published = min(published_at)` and `updated_at = now()` (still the `/api/health` liveness signal). The four aggregate parameters stay in the signature and are **ignored**, so the Edge Function needs no change and no redeploy. Still `security definer`, `search_path = ''`, volatile, `service_role` only.
+
+**Independent of 122, either order.** Nothing to deploy; it takes effect on the next link. The two drifted clusters are not backfilled: they heal on their next link or by the repair below.
+
+**Verify** (read-only):
+
+```sql
+-- the recomputing body is live (expect fb81251b45dd50907160832f6f84db0c, 2006, t, v)
+select md5(prosrc), length(prosrc), prosecdef, provolatile
+  from pg_proc where oid = 'public.cluster_link_atomic(uuid,uuid,jsonb,boolean,text,timestamptz)'::regprocedure;
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.cluster_link_atomic(uuid,uuid,jsonb,boolean,text,timestamptz)', 'execute'),
+       has_function_privilege('authenticated', 'public.cluster_link_atomic(uuid,uuid,jsonb,boolean,text,timestamptz)', 'execute'),
+       has_function_privilege('service_role', 'public.cluster_link_atomic(uuid,uuid,jsonb,boolean,text,timestamptz)', 'execute');
+select count(*) from supabase_migrations.schema_migrations where version = '121';  -- 1
+```
+
+**Drift query** (read-only; one row per live cluster whose stored distribution differs from the one recomputed from its members; expect the two clusters above before the repair, and no new ones after the apply):
+
+```sql
+with live as (select c.id, c.bias_distribution from public.clusters c where not c.is_archived and c.merged_into is null and c.article_count >= 2 and c.updated_at >= now() - interval '30 days'),
+votes as (select l.id, s.bias, count(*)::int n from live l join public.cluster_articles ca on ca.cluster_id = l.id join public.articles a on a.id = ca.article_id join public.sources s on s.id = a.source_id where s.kind in ('outlet','wire') group by l.id, s.bias),
+rec as (select l.id, coalesce(jsonb_object_agg(v.bias, v.n) filter (where v.bias is not null), '{}'::jsonb) d from live l left join votes v on v.id = l.id group by l.id),
+sto as (select l.id, coalesce((select jsonb_object_agg(e.key, (e.value)::int) from jsonb_each_text(l.bias_distribution) e where (e.value)::int > 0), '{}'::jsonb) d from live l)
+select sto.id, sto.d stored_nonzero, rec.d recomputed_nonzero from sto join rec using (id) where sto.d <> rec.d order by 1;
+```
+
+**Optional repair** (operator, not run by the migration): for each id the drift query returns, `select public.cluster_unlink_article('<id>'::uuid, null);` (service_role). It recomputes that cluster from its members and stamps `updated_at = now()`; if the old value matters, read it first and restore it afterwards the way 099 does (`update public.clusters set updated_at = '<old value>' where id = '<id>';`).
+
+**Rollback** (nothing else depends on 121): re-apply the `create or replace function` block of `027_cluster_link_atomic.sql` (write `create function` as `create or replace function`, skip its `drop function if exists` line; with its comment, revoke and grant), then remove ledger row 121: `delete from supabase_migrations.schema_migrations where version = '121';`.
+
+## 122 — ops heartbeat row 14 (`ingest_gaps`): APPLY 122 only, no deploy
+
+**Why:** the ingest function writes its `ingest_cycles` row at the *end* of a cycle, so a tick the platform kills (pg_net `546 WORKER_RESOURCE_LIMIT`) leaves no row, and row 3 (`ingest_cycles_30m`, pass from 8 of the expected 10) can read pass while ticks are lost. Row 14 looks at the spacing of `ingest_cycles.started_at` in the last 6 hours: `ingest-drain` runs every 3 minutes (038), so a gap over 5 minutes is at least one lost tick.
+
+**What 122 does** (additive, one transaction, safe to re-apply): re-creates `ops_health_report()` with 119's text verbatim through row 13 (the test compares the raw text) and appends row 14 `ingest_gaps`: `observed` = number of gaps over 5 minutes, **warn** at 3 or more gaps or any gap over 10 minutes (threshold 3), never `fail`, `detail` lists the gaps as `HH:MI→HH:MI` in UTC, longest first. The function returns 14 rows. `service_role` only, no table, no grant to anon/authenticated. The heartbeat workflow and `/durum` do not depend on the row count. Thresholds checked against the retained history (migration header, Step 0): quiet when ingest is healthy (2.6% of sliding windows), warning through the degraded stretch since 10-13 (55%).
+
+**Independent of 121, either order.** Nothing to deploy; the next heartbeat run (30 minutes) shows the row.
+
+**Verify** (read-only):
+
+```sql
+select count(*) from public.ops_health_report();  -- 14
+select status, observed, threshold, detail from public.ops_health_report() where check_name = 'ingest_gaps';
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('service_role', 'public.ops_health_report()', 'execute');
+-- md5(prosrc) should be f6548a98c236a3b998fedf8c192e6b7c (19,091 characters)
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;
+```
+
+When it warns, check `net._http_response` for 546 in the gap minutes *before* the compaction trims it: see `docs/ops-heartbeat.md`, "Kayıp ingest turları".
+
+**Rollback** (nothing else depends on 122): re-apply the `ops_health_report()` block of `119_feed_freshness.sql` (function, comment, revoke, grant; the report returns 13 rows again), then remove ledger row 122: `delete from supabase_migrations.schema_migrations where version = '122';`.
