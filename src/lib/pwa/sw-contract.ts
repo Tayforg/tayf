@@ -5,9 +5,12 @@
 // /sw.js for a registration, which an unregistered registration never does, so the page cannot rely on it).
 // Keep /sw.js routed (a 404 on update leaves old workers running) and keep SW_KILL = true for >= 30 days.
 // Normal update: bump SW_VERSION (new bytes -> install -> skipWaiting -> activate drops old versioned caches).
+// The worker never claims clients, so a first visit stays uncontrolled until its next navigation.
 export const SW_URL = "/sw.js";
 export const SW_SCOPE = "/";
-export const SW_VERSION = "v1";
+export const SW_VERSION = "v2";
+// How long the page waits for registration.active on an uncontrolled first visit (ready never settles without a registration).
+export const SW_READY_TIMEOUT_MS = 10_000;
 export const SW_KILL: boolean = false;
 export const OFFLINE_PATH = "/offline";
 export const CACHE_PREFIX = "tayf-";

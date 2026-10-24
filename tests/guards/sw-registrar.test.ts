@@ -121,8 +121,20 @@ describe("register.ts", () => {
     expect(calls[0]).toContain("SW_URL");
   });
 
-  it("never awaits navigator.serviceWorker.ready (it can hang forever)", () => {
+  it("has no .ready of its own (it can hang forever; only offline-pins races it against a timeout)", () => {
     expect(src).not.toMatch(/\.ready\b/);
+  });
+});
+
+describe("offline-pins.ts", () => {
+  const src = code("src/lib/pwa/offline-pins.ts");
+
+  it("touches serviceWorker.ready only raced against a timeout", () => {
+    // `ready` never settles when there is no registration, so a bare await would hang the page-side flow forever.
+    expect(count(src, /\.ready\b/g)).toBe(1);
+    expect(src).toContain("Promise.race(");
+    expect(src).toContain("setTimeout(");
+    expect(src).toContain("clearTimeout(");
   });
 });
 

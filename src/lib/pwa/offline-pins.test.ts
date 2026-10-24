@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { pinForOffline, readBookmarkIds, syncMessage, unpinForOffline } from "./offline-pins";
+import {
+  activeWorkerWithin,
+  pinForOffline,
+  readBookmarkIds,
+  syncMessage,
+  unpinForOffline,
+} from "./offline-pins";
+import { SW_READY_TIMEOUT_MS } from "./sw-contract";
 
 const ID_A = "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b";
 const ID_B = "a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d";
@@ -19,6 +26,28 @@ const navWith = (controller: { postMessage(m: unknown): void } | null) => ({
   serviceWorker: { controller },
 });
 
+type ReadyLike = PromiseLike<{ active: { postMessage(m: unknown): void } | null }>;
+
+/** A page no worker controls yet (first visit); `ready` is what the browser would offer instead. */
+const navUncontrolled = (ready: ReadyLike) => ({
+  serviceWorker: { controller: null, ready },
+});
+
+const resolvedWith = (active: { postMessage(m: unknown): void } | null): ReadyLike =>
+  Promise.resolve({ active });
+
+const never = (): ReadyLike => new Promise<never>(() => {});
+
+/** An uncontrolled navigator whose `ready` getter throws, like a blocked-storage SecurityError. */
+const navReadyGetterThrows = () => ({
+  serviceWorker: {
+    controller: null,
+    get ready(): never {
+      throw new DOMException("denied", "SecurityError");
+    },
+  },
+});
+
 function fakeCaches(hasSaved: boolean) {
   const del = vi.fn(async (_req: string) => true);
   const open = vi.fn(async (_name: string) => ({ delete: del }));
@@ -31,6 +60,7 @@ const flush = () => new Promise<void>((r) => setTimeout(r, 0));
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 describe("readBookmarkIds", () => {
@@ -155,6 +185,128 @@ describe("pinForOffline", () => {
   it("returns false when the global navigator has no controller (node)", () => {
     expect(pinForOffline(ID_A)).toBe(false);
   });
+
+  describe("on an uncontrolled page (first visit)", () => {
+    it("returns false right away, then posts the pin to registration.active", async () => {
+      const active = controllerSpy();
+      expect(pinForOffline(ID_A, navUncontrolled(resolvedWith(active)))).toBe(false);
+      expect(active.postMessage).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(active.postMessage).toHaveBeenCalledTimes(1));
+      expect(active.postMessage).toHaveBeenCalledWith({ type: "tayf:pin", id: ID_A });
+    });
+
+    it("posts nothing when the registration has no active worker yet (not to installing/waiting either)", async () => {
+      const other = controllerSpy();
+      const ready = Promise.resolve({ active: null, installing: other, waiting: other }) as ReadyLike;
+      expect(pinForOffline(ID_A, navUncontrolled(ready))).toBe(false);
+      await flush();
+      expect(other.postMessage).not.toHaveBeenCalled();
+    });
+
+    it("posts nothing for an invalid id", async () => {
+      const active = controllerSpy();
+      const ready = vi.fn(() => resolvedWith(active));
+      const nav = {
+        serviceWorker: {
+          controller: null,
+          get ready() {
+            return ready();
+          },
+        },
+      };
+      expect(pinForOffline("../x", nav)).toBe(false);
+      await flush();
+      expect(ready).not.toHaveBeenCalled();
+      expect(active.postMessage).not.toHaveBeenCalled();
+    });
+
+    it("gives up after SW_READY_TIMEOUT_MS when ready never settles, leaving no timer behind", async () => {
+      vi.useFakeTimers();
+      const late = controllerSpy();
+      let activate!: (r: { active: typeof late }) => void;
+      const ready: ReadyLike = new Promise((resolve) => {
+        activate = resolve;
+      });
+      expect(pinForOffline(ID_A, navUncontrolled(ready))).toBe(false);
+      await vi.advanceTimersByTimeAsync(SW_READY_TIMEOUT_MS - 1);
+      expect(vi.getTimerCount()).toBe(1); // still waiting: the timeout is armed
+      await vi.advanceTimersByTimeAsync(1);
+      expect(vi.getTimerCount()).toBe(0);
+      activate({ active: late }); // the worker shows up after we gave up: the next document's sync pins it
+      await vi.advanceTimersByTimeAsync(0);
+      expect(late.postMessage).not.toHaveBeenCalled();
+    });
+
+    it("clears its timer as soon as ready settles", async () => {
+      vi.useFakeTimers();
+      const active = controllerSpy();
+      pinForOffline(ID_A, navUncontrolled(resolvedWith(active)));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(active.postMessage).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("returns false and never throws or leaks a rejection when ready rejects", async () => {
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        const ready = Promise.reject(new Error("no registration"));
+        expect(pinForOffline(ID_A, navUncontrolled(ready))).toBe(false);
+        await flush();
+        await flush();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
+    it("returns false and never throws or leaks a rejection when the ready getter throws", async () => {
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      try {
+        expect(() => pinForOffline(ID_A, navReadyGetterThrows())).not.toThrow();
+        expect(pinForOffline(ID_A, navReadyGetterThrows())).toBe(false);
+        await flush();
+        await flush();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
+    it("never throws when the active worker's postMessage throws", async () => {
+      const unhandled = vi.fn();
+      process.on("unhandledRejection", unhandled);
+      const active = {
+        postMessage: vi.fn(() => {
+          throw new Error("clone");
+        }),
+      };
+      try {
+        expect(pinForOffline(ID_A, navUncontrolled(resolvedWith(active)))).toBe(false);
+        await vi.waitFor(() => expect(active.postMessage).toHaveBeenCalledTimes(1));
+        await flush();
+      } finally {
+        process.off("unhandledRejection", unhandled);
+      }
+      expect(unhandled).not.toHaveBeenCalled();
+    });
+
+    it("tolerates a ready that resolves to nothing", async () => {
+      const ready = Promise.resolve(undefined) as unknown as ReadyLike;
+      expect(pinForOffline(ID_A, navUncontrolled(ready))).toBe(false);
+      await flush();
+    });
+  });
+
+  it("never reads ready when a controller exists", () => {
+    const c = controllerSpy();
+    const readyGetter = vi.fn(() => never());
+    const serviceWorker = { controller: c };
+    Object.defineProperty(serviceWorker, "ready", { get: readyGetter });
+    expect(pinForOffline(ID_A, { serviceWorker })).toBe(true);
+    expect(readyGetter).not.toHaveBeenCalled();
+  });
 });
 
 describe("unpinForOffline", () => {
@@ -227,6 +379,53 @@ describe("unpinForOffline", () => {
     expect(unpinForOffline(ID_A, navWith(null), undefined)).toBe(false);
   });
 
+  describe("on an uncontrolled page (first visit)", () => {
+    it("posts the unpin to registration.active AND still deletes the saved copy directly", async () => {
+      const active = controllerSpy();
+      const f = fakeCaches(true);
+      expect(unpinForOffline(ID_A, navUncontrolled(resolvedWith(active)), f.storage)).toBe(false);
+      await vi.waitFor(() => expect(active.postMessage).toHaveBeenCalledTimes(1));
+      expect(active.postMessage).toHaveBeenCalledWith({ type: "tayf:unpin", id: ID_A });
+      await vi.waitFor(() => expect(f.del).toHaveBeenCalledTimes(1));
+      expect(f.open).toHaveBeenCalledWith("tayf-saved-v1");
+      expect(f.del).toHaveBeenCalledWith(`/cluster/${ID_A}`);
+    });
+
+    it("still deletes the saved copy when ready never settles", async () => {
+      vi.useFakeTimers();
+      const f = fakeCaches(true);
+      expect(unpinForOffline(ID_A, navUncontrolled(never()), f.storage)).toBe(false);
+      await vi.advanceTimersByTimeAsync(SW_READY_TIMEOUT_MS);
+      expect(f.del).toHaveBeenCalledWith(`/cluster/${ID_A}`);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("still deletes the saved copy when the ready getter throws", async () => {
+      const f = fakeCaches(true);
+      expect(unpinForOffline(ID_A, navReadyGetterThrows(), f.storage)).toBe(false);
+      await vi.waitFor(() => expect(f.del).toHaveBeenCalledWith(`/cluster/${ID_A}`));
+    });
+
+    it("posts nothing to the worker for an invalid id", async () => {
+      const active = controllerSpy();
+      const f = fakeCaches(true);
+      expect(unpinForOffline("nope", navUncontrolled(resolvedWith(active)), f.storage)).toBe(false);
+      await flush();
+      expect(active.postMessage).not.toHaveBeenCalled();
+      expect(f.del).not.toHaveBeenCalled();
+    });
+  });
+
+  it("never reads ready when a controller exists", () => {
+    const c = controllerSpy();
+    const f = fakeCaches(true);
+    const readyGetter = vi.fn(() => never());
+    const serviceWorker = { controller: c };
+    Object.defineProperty(serviceWorker, "ready", { get: readyGetter });
+    expect(unpinForOffline(ID_A, { serviceWorker }, f.storage)).toBe(true);
+    expect(readyGetter).not.toHaveBeenCalled();
+  });
+
   it("falls back to the cache when reading navigator throws", async () => {
     const f = fakeCaches(true);
     const nav = {
@@ -236,5 +435,35 @@ describe("unpinForOffline", () => {
     };
     expect(unpinForOffline(ID_A, nav, f.storage)).toBe(false);
     await vi.waitFor(() => expect(f.del).toHaveBeenCalledWith(`/cluster/${ID_A}`));
+  });
+});
+
+describe("activeWorkerWithin", () => {
+  it("resolves the active worker", async () => {
+    const active = controllerSpy();
+    await expect(activeWorkerWithin({ ready: resolvedWith(active) }, 1000)).resolves.toBe(active);
+  });
+
+  it("resolves null for no container, no ready, or no active worker", async () => {
+    await expect(activeWorkerWithin(undefined, 1000)).resolves.toBeNull();
+    await expect(activeWorkerWithin({}, 1000)).resolves.toBeNull();
+    await expect(activeWorkerWithin({ ready: resolvedWith(null) }, 1000)).resolves.toBeNull();
+  });
+
+  it("resolves null after the timeout when ready never settles, and clears the timer", async () => {
+    vi.useFakeTimers();
+    const pending = activeWorkerWithin({ ready: never() }, 250);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(pending).resolves.toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("resolves null (never rejects) when ready rejects or its getter throws", async () => {
+    await expect(
+      activeWorkerWithin({ ready: Promise.reject(new Error("nope")) }, 1000),
+    ).resolves.toBeNull();
+    await expect(activeWorkerWithin(navReadyGetterThrows().serviceWorker, 1000)).resolves.toBeNull();
   });
 });

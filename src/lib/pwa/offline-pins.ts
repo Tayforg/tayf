@@ -6,6 +6,7 @@
 import {
   CACHE_NAMES,
   CLUSTER_ID_RE,
+  SW_READY_TIMEOUT_MS,
   SYNC_MAX_IDS,
   clusterPath,
   type SwMessage,
@@ -22,8 +23,13 @@ interface ControllerLike {
   postMessage(message: unknown): void;
 }
 
+/** The slice of `navigator.serviceWorker` that can yield the registration's active worker. */
+interface ReadyContainerLike {
+  ready?: PromiseLike<{ active: ControllerLike | null }>;
+}
+
 export interface NavigatorLike {
-  serviceWorker?: { controller: ControllerLike | null };
+  serviceWorker?: { controller: ControllerLike | null } & ReadyContainerLike;
 }
 
 export interface SavedCacheStorageLike {
@@ -82,15 +88,59 @@ export function syncMessage(ids: string[]): SwMessage {
 }
 
 /**
+ * The registration's active worker, or null. For an uncontrolled page (first visit): the worker no longer claims
+ * clients, so `controller` stays null until the next navigation, but the registration's active worker can still be
+ * messaged. `ready` never settles when there is no registration, so it is only ever raced against a timeout; any
+ * failure (rejection, a getter that throws, no active worker, timeout) resolves null and never rejects.
+ */
+export async function activeWorkerWithin(
+  container: ReadyContainerLike | undefined,
+  ms: number,
+): Promise<ControllerLike | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    // Read inside the try: the getter itself can throw (SecurityError on blocked storage).
+    const ready = container?.ready;
+    if (!ready) return null;
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), ms);
+    });
+    return await Promise.race([ready.then((r) => r?.active ?? null), timeout]);
+  } catch {
+    return null;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Fire-and-forget: posts `message` to the active worker once there is one. Never rejects. */
+async function postWhenActive(nav: NavigatorLike | undefined, message: SwMessage): Promise<void> {
+  try {
+    const active = await activeWorkerWithin(nav?.serviceWorker, SW_READY_TIMEOUT_MS);
+    active?.postMessage(message);
+  } catch {
+    // Best effort: the next document's sync pins everything that is bookmarked.
+  }
+}
+
+/**
  * Asks the controlling worker to download and keep this story. Returns true
- * when the message was posted. With no controller (dev, first visit, browser
- * without service workers) or an invalid id it is a no-op returning false; the
- * next page load's sync pins everything that is bookmarked.
+ * only when the message was posted to the controller right now. On a first,
+ * uncontrolled visit (the worker does not claim clients) it instead posts to the
+ * registration's active worker as soon as there is one, fire-and-forget, and
+ * returns false. If the worker only activates later than SW_READY_TIMEOUT_MS,
+ * or there is no worker at all (dev, browser without service workers), it is a
+ * no-op: the next document's sync pins everything that is bookmarked. An
+ * invalid id is a no-op returning false.
  */
 export function pinForOffline(id: string, nav?: NavigatorLike): boolean {
   if (clusterPath(id) === null) return false;
-  const controller = controllerOf(nav ?? globalNavigator());
-  if (!controller) return false;
+  const target = nav ?? globalNavigator();
+  const controller = controllerOf(target);
+  if (!controller) {
+    void postWhenActive(target, { type: "tayf:pin", id } satisfies SwMessage);
+    return false;
+  }
   try {
     controller.postMessage({ type: "tayf:pin", id } satisfies SwMessage);
     return true;
@@ -116,10 +166,13 @@ async function deleteSavedCopy(
 
 /**
  * Removes the offline copy of an unbookmarked story. Returns true when the
- * request went to the controlling worker. Without a controller (or when it
- * cannot be reached) the page deletes the entry from the saved cache itself,
- * fire-and-forget, so unbookmarking removes the copy even when the worker is
- * not controlling this page; that path returns false.
+ * request went to the controlling worker. Without a controller (a first visit,
+ * or the worker cannot be reached) the page asks the registration's active
+ * worker as soon as there is one (waiting at most SW_READY_TIMEOUT_MS) AND
+ * deletes the entry from the saved cache itself, both fire-and-forget, so
+ * unbookmarking removes the copy even when the worker does not control this
+ * page; that path returns false. If the worker activates later than the
+ * timeout, the next document's sync prunes the story.
  */
 export function unpinForOffline(
   id: string,
@@ -128,7 +181,8 @@ export function unpinForOffline(
 ): boolean {
   const path = clusterPath(id);
   if (path === null) return false;
-  const controller = controllerOf(nav ?? globalNavigator());
+  const target = nav ?? globalNavigator();
+  const controller = controllerOf(target);
   if (controller) {
     try {
       controller.postMessage({ type: "tayf:unpin", id } satisfies SwMessage);
@@ -136,6 +190,8 @@ export function unpinForOffline(
     } catch {
       // fall through to the direct cache delete
     }
+  } else {
+    void postWhenActive(target, { type: "tayf:unpin", id } satisfies SwMessage);
   }
   void deleteSavedCopy(path, cacheStorage ?? globalCaches());
   return false;

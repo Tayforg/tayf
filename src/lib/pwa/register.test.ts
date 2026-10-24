@@ -1,11 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { registerServiceWorker, type SwContainerLike } from "./register";
+import { SW_READY_TIMEOUT_MS } from "./sw-contract";
 
 const ID_A = "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b";
 const ID_B = "a0b1c2d3-e4f5-4a6b-8c7d-9e0f1a2b3c4d";
 
-function makeContainer(opts: { controller?: boolean; regs?: number } = {}) {
+/** What `navigator.serviceWorker.ready` does: never settle, reject, or resolve a registration. */
+type ReadyMode = "hang" | "reject" | { active: { postMessage(m: unknown): void } | null };
+
+function makeContainer(opts: { controller?: boolean; regs?: number; ready?: ReadyMode } = {}) {
   const order: string[] = [];
   const post = vi.fn((_m: unknown) => {
     order.push("post");
@@ -16,14 +20,21 @@ function makeContainer(opts: { controller?: boolean; regs?: number } = {}) {
   });
   const unregisters = Array.from({ length: opts.regs ?? 2 }, () => vi.fn(async () => true));
   const getRegistrations = vi.fn(async () => unregisters.map((unregister) => ({ unregister })));
-  const readyGetter = vi.fn(() => new Promise<never>(() => {}));
+  const controlled = opts.controller !== false;
+  // An uncontrolled page defaults to "registered, but no active worker yet": settles at once, posts nothing.
+  const mode: ReadyMode = opts.ready ?? (controlled ? "hang" : { active: null });
+  const readyGetter = vi.fn(() => {
+    if (mode === "hang") return new Promise<never>(() => {});
+    if (mode === "reject") return Promise.reject(new Error("no registration"));
+    return Promise.resolve(mode);
+  });
   const container: SwContainerLike = {
-    controller: opts.controller === false ? null : { postMessage: post },
+    controller: controlled ? { postMessage: post } : null,
     register,
     getRegistrations,
   };
-  // `ready` can hang forever (no registration, uncontrolled): must never be touched.
-  Object.defineProperty(container, "ready", { get: readyGetter });
+  // `ready` can hang forever (no registration): only ever read, raced against a timeout, on an uncontrolled page.
+  Object.defineProperty(container, "ready", { get: readyGetter, configurable: true });
   return { container, post, register, unregisters, getRegistrations, readyGetter, order };
 }
 
@@ -47,6 +58,10 @@ const base = (container: SwContainerLike | undefined, over: Record<string, unkno
   kill: false,
   readIds: () => [ID_A, ID_B] as string[] | null,
   ...over,
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("registerServiceWorker", () => {
@@ -102,26 +117,126 @@ describe("registerServiceWorker", () => {
     expect(m.post).toHaveBeenCalledWith({ type: "tayf:sync", ids: [] });
   });
 
-  it("does not sync when ids are unreadable (null)", async () => {
+  it("does not sync when ids are unreadable (null), controlled or on a first visit", async () => {
     const m = makeContainer();
     await expect(registerServiceWorker(base(m.container, { readIds: () => null }))).resolves.toBe(
       "registered",
     );
     expect(m.register).toHaveBeenCalledTimes(1);
     expect(m.post).not.toHaveBeenCalled();
+
+    const activePost = vi.fn();
+    const first = makeContainer({ controller: false, ready: { active: { postMessage: activePost } } });
+    await expect(registerServiceWorker(base(first.container, { readIds: () => null }))).resolves.toBe(
+      "registered",
+    );
+    expect(activePost).not.toHaveBeenCalled();
+    expect(first.post).not.toHaveBeenCalled();
   });
 
-  it("does not sync when nothing controls the page yet", async () => {
-    const m = makeContainer({ controller: false });
-    await registerServiceWorker(base(m.container));
-    expect(m.post).not.toHaveBeenCalled();
+  describe("first visit (nothing controls the page yet)", () => {
+    it("syncs through registration.active once it is ready", async () => {
+      const activePost = vi.fn();
+      const m = makeContainer({ controller: false, ready: { active: { postMessage: activePost } } });
+      activePost.mockImplementation(() => {
+        m.order.push("post");
+      });
+      await expect(registerServiceWorker(base(m.container))).resolves.toBe("registered");
+      expect(activePost).toHaveBeenCalledTimes(1);
+      expect(activePost).toHaveBeenCalledWith({ type: "tayf:sync", ids: [ID_A, ID_B] });
+      expect(m.order).toEqual(["register", "post"]);
+      expect(m.post).not.toHaveBeenCalled();
+    });
+
+    it("reads the ids only after the target resolved, so a bookmark saved while waiting is synced", async () => {
+      const log: string[] = [];
+      let saved = [ID_A];
+      const activePost = vi.fn((_m: unknown) => {
+        log.push("post");
+      });
+      const m = makeContainer({ controller: false });
+      let release!: (v: { active: { postMessage(m: unknown): void } }) => void;
+      Object.defineProperty(m.container, "ready", {
+        get: () => {
+          log.push("ready");
+          return new Promise((resolve) => {
+            release = resolve;
+          });
+        },
+      });
+      const readIds = vi.fn(() => {
+        log.push("readIds");
+        return [...saved];
+      });
+      const done = registerServiceWorker(base(m.container, { readIds }));
+      await vi.waitFor(() => expect(log).toContain("ready"));
+      expect(readIds).not.toHaveBeenCalled(); // still waiting for the worker
+      saved = [ID_A, ID_B]; // the reader bookmarks another story in the meantime
+      release({ active: { postMessage: activePost } });
+      await expect(done).resolves.toBe("registered");
+      expect(log).toEqual(["ready", "readIds", "post"]);
+      expect(activePost).toHaveBeenCalledWith({ type: "tayf:sync", ids: [ID_A, ID_B] });
+    });
+
+    it("posts nothing, and does not read the ids, when the registration has no active worker", async () => {
+      const m = makeContainer({ controller: false, ready: { active: null } });
+      const readIds = vi.fn(() => [ID_A]);
+      await expect(registerServiceWorker(base(m.container, { readIds }))).resolves.toBe("registered");
+      expect(m.post).not.toHaveBeenCalled();
+      expect(readIds).not.toHaveBeenCalled();
+    });
+
+    it("gives up after SW_READY_TIMEOUT_MS when ready never settles: still registered, nothing posted", async () => {
+      vi.useFakeTimers();
+      const m = makeContainer({ controller: false, ready: "hang" });
+      let outcome: string | undefined;
+      const done = registerServiceWorker(base(m.container)).then((o) => {
+        outcome = o;
+        return o;
+      });
+      await vi.advanceTimersByTimeAsync(SW_READY_TIMEOUT_MS - 1);
+      expect(outcome).toBeUndefined(); // still waiting
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(done).resolves.toBe("registered");
+      expect(m.post).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("a rejecting ready is still registered (not failed) and posts nothing", async () => {
+      const m = makeContainer({ controller: false, ready: "reject" });
+      await expect(registerServiceWorker(base(m.container))).resolves.toBe("registered");
+      expect(m.readyGetter).toHaveBeenCalledTimes(1);
+      expect(m.post).not.toHaveBeenCalled();
+    });
+
+    it("a ready getter that throws is still registered (not failed)", async () => {
+      const m = makeContainer({ controller: false });
+      Object.defineProperty(m.container, "ready", {
+        get: () => {
+          throw new DOMException("denied", "SecurityError");
+        },
+      });
+      await expect(registerServiceWorker(base(m.container))).resolves.toBe("registered");
+      expect(m.post).not.toHaveBeenCalled();
+    });
+
+    it("an active worker whose postMessage throws gives failed (same as a controller that throws)", async () => {
+      const activePost = vi.fn(() => {
+        throw new Error("clone");
+      });
+      const m = makeContainer({ controller: false, ready: { active: { postMessage: activePost } } });
+      await expect(registerServiceWorker(base(m.container))).resolves.toBe("failed");
+    });
   });
 
-  it("never touches navigator.serviceWorker.ready", async () => {
+  it("never reads ready when a controller exists or the kill switch is on", async () => {
     const m = makeContainer();
     await registerServiceWorker(base(m.container));
     await registerServiceWorker(base(m.container, { kill: true }));
+    const uncontrolled = makeContainer({ controller: false });
+    await registerServiceWorker(base(uncontrolled.container, { kill: true }));
     expect(m.readyGetter).not.toHaveBeenCalled();
+    expect(uncontrolled.readyGetter).not.toHaveBeenCalled();
   });
 
   it("kill: unregisters every registration and never registers", async () => {

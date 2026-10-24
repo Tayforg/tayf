@@ -668,7 +668,15 @@ rollback;
 `;
   }
 
-  it("reports only the silent, non-baseline, active outlet with enough history; a second pass without it is pass", () => {
+  it("reports only the silent, non-baseline, active outlet with enough history; a second pass without it is pass", (ctx) => {
+    // Migration 115 widens row 13 to 24 h; this fixture's newest article is
+    // exactly 24 h old, so it only describes 114's 12 h function. Once 115 is
+    // applied the same fixtures are pinned by 115-sources-newly-dark-24h.test.ts.
+    const is114Function =
+      runPsql(
+        "select pg_catalog.strpos(p.prosrc, '14 days 12 hours') > 0 from pg_catalog.pg_proc p join pg_catalog.pg_namespace n on n.oid = p.pronamespace where n.nspname = 'public' and p.proname = 'ops_health_report';",
+      ).trim() === "t";
+    if (!is114Function) ctx.skip();
     const lines = runPsql(fixtureSql(articlesHaveContentHash()))
       .split("\n")
       .filter((l) => l.length > 0);

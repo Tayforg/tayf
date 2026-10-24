@@ -941,7 +941,9 @@ describe("install", () => {
 });
 
 describe("activate", () => {
-  it("drops old versioned tayf- caches, keeps current ones, tayf-saved-v1 and foreign caches, then claims", async () => {
+  // The worker never claims clients: claiming a first visit that is still loading would re-issue its in-flight
+  // preloads through the worker. skipWaiting() at install already moves pages controlled by an older version over.
+  it("drops old versioned tayf- caches, keeps current ones, tayf-saved-v1 and foreign caches, and never claims", async () => {
     const w = load();
     for (const name of [
       "tayf-static-v0", "tayf-pages-v0", "tayf-shell-v0", "tayf-meta-v0", CACHE_NAMES.static, CACHE_NAMES.pages,
@@ -953,14 +955,14 @@ describe("activate", () => {
     expect(w.caches.cacheNames().sort()).toEqual(
       [CACHE_NAMES.static, CACHE_NAMES.pages, CACHE_NAMES.shell, CACHE_NAMES.meta, "tayf-saved-v1", "other-lib"].sort(),
     );
-    expect(w.claim).toHaveBeenCalledTimes(1);
+    expect(w.claim).not.toHaveBeenCalled();
   });
 
-  it("still claims when listing caches fails", async () => {
+  it("still resolves, and still does not claim, when listing caches fails", async () => {
     const w = load();
     vi.spyOn(w.caches, "keys").mockRejectedValue(new Error("boom"));
-    await w.dispatchActivate();
-    expect(w.claim).toHaveBeenCalledTimes(1);
+    await w.dispatchActivate(); // a rejection here would fail the test
+    expect(w.claim).not.toHaveBeenCalled();
   });
 });
 

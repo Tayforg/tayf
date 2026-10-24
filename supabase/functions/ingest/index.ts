@@ -25,6 +25,9 @@
 //      outlet that edits a headline publishes the same article under a new
 //      slug, and that used to become a second row. The twin is not inserted;
 //      its new headline goes through the title-version path instead. The
+//      cycle reports two counters for it: `twinsDroppedStored` (the real twin
+//      prevention) and `twinsDroppedIntraFeed` (the same key twice in one feed,
+//      re-counted on every re-parse of a long feed). The
 //      `AFTER INSERT ON articles` trigger (migration 025) takes over from here
 //      to enqueue `cluster_work` and `image_backfill` messages.
 //   5. Persists per-source fetch state. The fresh validators (ETag,
@@ -299,10 +302,20 @@ interface CycleStats {
   // errored (the old validators are kept so the feed is re-offered). Summary
   // line and HTTP JSON only: there is no `ingest_cycles` column for it.
   validatorsWithheld: number;
-  // Twin-articles (migration 113): rows not inserted because the same source
-  // already holds an article with the same `source_article_key` under another
-  // url (a headline edit), either stored earlier or seen earlier this cycle.
-  // Summary line and HTTP JSON only: there is no `ingest_cycles` column for it.
+  // Twin-articles (migration 113). Summary line and HTTP JSON only: there is
+  // no `ingest_cycles` column for any of the three counters below.
+  //
+  // `twinsDroppedStored`: the key is already stored for the source under
+  // another url within the 7-day window (a headline edit). This is the real
+  // twin prevention of #128.
+  twinsDroppedStored: number;
+  // `twinsDroppedIntraFeed`: a later item of the same feed with the same key;
+  // the first one stands. This check runs before any stored lookup, so a long
+  // feed that is parsed again re-counts pairs that are already stored. That is
+  // why it is high at night and is not a #128 signal.
+  twinsDroppedIntraFeed: number;
+  // `twinsDropped`: the sum of the two above. It stays for one release for
+  // dashboards and log queries and goes in the next ingest release.
   twinsDropped: number;
   // Parse budget: changed feeds this cycle refused a parse because the cycle
   // already used its MAX_PARSES_PER_CYCLE / PARSE_BUDGET_BYTES. Not failures:
@@ -898,6 +911,8 @@ async function runCycle(): Promise<CycleStats> {
     dateFallbacks: 0,
     upsertSkipped: 0,
     validatorsWithheld: 0,
+    twinsDroppedStored: 0,
+    twinsDroppedIntraFeed: 0,
     twinsDropped: 0,
     parseDeferred: 0,
     parseDeferredMaxStreak: 0,
@@ -1153,6 +1168,7 @@ async function runCycleBody(
       stats.itemsNormalized += normalized.length;
 
       let pushed = 0;
+      let intraFeedTwins = 0;
       for (const row of normalized) {
         const key = `${row.source_id}\x1f${row.content_hash}`;
         if (seenIntraCycle.has(key)) continue;
@@ -1166,7 +1182,9 @@ async function runCycleBody(
         if (articleKey !== null) {
           const twinKey = `${row.source_id}\x1fk\x1f${articleKey}`;
           if (seenIntraCycle.has(twinKey)) {
+            stats.twinsDroppedIntraFeed++;
             stats.twinsDropped++;
+            intraFeedTwins++;
             continue;
           }
           seenIntraCycle.add(twinKey);
@@ -1181,6 +1199,10 @@ async function runCycleBody(
           source_article_key: articleKey,
         });
         pushed++;
+      }
+      if (intraFeedTwins > 0) {
+        // Slug and count only: never a url or a headline.
+        console.log(`[ingest] ${source.slug}: ${intraFeedTwins} intra-feed twin(s)`);
       }
 
       if (pushed === 0) {
@@ -1293,6 +1315,7 @@ async function runCycleBody(
         stats.prefilterErrors += lookupErrors + twinLookupErrors;
       }
       if (twins.length > 0) {
+        stats.twinsDroppedStored += twins.length;
         stats.twinsDropped += twins.length;
         // Count only: never the url or the headline.
         console.log(

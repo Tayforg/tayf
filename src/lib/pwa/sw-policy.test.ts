@@ -53,7 +53,7 @@ function res(over: Record<string, unknown> = {}, h: Record<string, string> = {})
 describe("SW_CONFIG", () => {
   it("carries the documented limits", () => {
     expect(SW_CONFIG).toMatchObject({
-      version: "v1",
+      version: "v2",
       cachePrefix: "tayf-",
       offlinePath: "/offline",
       swUrl: "/sw.js",

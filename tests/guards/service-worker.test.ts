@@ -46,7 +46,9 @@ afterEach(() => {
 describe.each(MODES)("worker source (%s mode)", (_mode, build) => {
   const src = build();
 
-  it.each(["eval(", "new Function", "importScripts", "http://", "https://", "`", "${"])(
+  // clients.claim() would take over a first visit that is still loading and re-issue its in-flight woff2 preloads
+  // through the worker ("preloaded but not used"). skipWaiting() at install already covers controlled pages.
+  it.each(["eval(", "new Function", "importScripts", "http://", "https://", "`", "${", "clients.claim"])(
     "does not contain %j",
     (needle) => {
       expect(src.includes(needle)).toBe(false);
