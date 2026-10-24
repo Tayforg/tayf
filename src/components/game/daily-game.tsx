@@ -28,7 +28,51 @@ interface DailyGameProps {
   todayKey: string;
 }
 
-type Phase = "idle" | "playing" | "revealed" | "finished";
+export type Phase = "idle" | "playing" | "revealed" | "finished";
+
+/**
+ * The phase to render. A result already in localStorage beats whatever this
+ * component instance holds locally until THIS session plays the round (then
+ * the local phase is the truth again).
+ *
+ * It is a pure function of the current render's inputs, never state seeded
+ * from the first render: the server snapshot of the store is null, so the
+ * first client render has no stored result, and a `useState` initializer
+ * would keep that "nothing stored" answer forever (the visitor who already
+ * played would see "Başla" and replaying would POST five more guesses).
+ */
+export function resolveDailyPhase({
+  hasStoredResult,
+  playedThisSession,
+  localPhase,
+}: {
+  hasStoredResult: boolean;
+  playedThisSession: boolean;
+  localPhase: Phase;
+}): Phase {
+  return hasStoredResult && !playedThisSession ? "finished" : localPhase;
+}
+
+/**
+ * The marks the result screen and Paylaş show. It follows the SAME predicate
+ * as the phase (`openedAlreadyPlayed`, i.e. a stored result and this session
+ * did not play the round): when a result lands from outside this session (a
+ * stored one after hydration, or another tab finishing the round), any local
+ * marks are an abandoned partial round and must not be scored or shared next
+ * to the "already played" banner. When this session finished the round the
+ * local marks are the truth (they equal what was just stored).
+ */
+export function resolveFinalMarks({
+  storedMarks,
+  openedAlreadyPlayed,
+  localMarks,
+}: {
+  storedMarks: readonly boolean[] | undefined;
+  openedAlreadyPlayed: boolean;
+  localMarks: boolean[];
+}): boolean[] {
+  return openedAlreadyPlayed && storedMarks ? [...storedMarks] : localMarks;
+}
 
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 // Own event name (not zone-guess-game.tsx's BEST_SCORE_CHANGE_EVENT) so the
@@ -91,28 +135,39 @@ function getServerSnapshot(): string | null {
  * zone-guess-game.tsx's personal-best key.
  *
  * If a result for `puzzle.dateKey` already exists in that local store, the
- * component opens straight on the finished/result screen and sends NO
- * guesses — this covers both a same-day reload after finishing and a
- * `?gun=` replay of an already-played past puzzle.
+ * component shows the finished/result screen and sends NO guesses — this
+ * covers both a same-day reload after finishing and a `?gun=` replay of an
+ * already-played past puzzle. The phase is derived from the store on every
+ * render (`resolveDailyPhase`), because the first client render still sees
+ * the null server snapshot.
  */
 export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
   const rawStore = useSyncExternalStore(subscribeStore, readRawStore, getServerSnapshot);
   const store = useMemo(() => parseDailyStore(rawStore), [rawStore]);
 
   const existingResult = puzzle ? store.results[puzzle.dateKey] : undefined;
-  // Captured once at mount: whether this puzzle was ALREADY played before
-  // this component instance ever rendered (vs. just finished during this
-  // session) — used only to decide whether to show the "already played
-  // today" banner, never to gate the no-second-POST behavior itself (that
-  // comes from `phase` starting at "finished" below).
-  const [openedAlreadyPlayed] = useState(() => Boolean(existingResult));
 
-  const [phase, setPhase] = useState<Phase>(existingResult ? "finished" : "idle");
+  // `localPhase` is only what THIS session did; the phase actually shown is
+  // derived below, so a stored result that shows up after hydration (or from
+  // another tab) takes over on the next render without any effect.
+  const [localPhase, setLocalPhase] = useState<Phase>("idle");
+  const [playedThisSession, setPlayedThisSession] = useState(false);
   const [index, setIndex] = useState(0);
   const [marks, setMarks] = useState<boolean[]>([]);
   const [guessedZone, setGuessedZone] = useState<MediaDnaZone | null>(null);
   const [copied, setCopied] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+
+  const phase = resolveDailyPhase({
+    hasStoredResult: Boolean(existingResult),
+    playedThisSession,
+    localPhase,
+  });
+  // Whether this puzzle was already in the store before this session
+  // finished it (vs. just finished now): decides only the "already played
+  // today" banner. The no-second-POST guarantee comes from `phase` being
+  // "finished", which makes handleGuess's `phase !== "playing"` bail out.
+  const openedAlreadyPlayed = Boolean(existingResult) && !playedThisSession;
 
   const startRef = useRef<HTMLButtonElement | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
@@ -132,9 +187,11 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
 
   const headlines: DailyHeadline[] = puzzle?.headlines ?? [];
   const current = headlines[index] ?? null;
-  const finalMarks = existingResult && phase === "finished" && marks.length === 0
-    ? existingResult.marks
-    : marks;
+  const finalMarks = resolveFinalMarks({
+    storedMarks: existingResult?.marks,
+    openedAlreadyPlayed,
+    localMarks: marks,
+  });
   const score = finalMarks.filter(Boolean).length;
 
   const handleStart = useCallback(() => {
@@ -142,7 +199,7 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
     setMarks([]);
     setGuessedZone(null);
     setAnnouncement("");
-    setPhase("playing");
+    setLocalPhase("playing");
   }, []);
 
   const handleGuess = useCallback(
@@ -151,7 +208,7 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
       const isMatch = zone === current.zone;
       setGuessedZone(zone);
       setMarks((prev) => [...prev, isMatch]);
-      setPhase("revealed");
+      setLocalPhase("revealed");
       setAnnouncement(
         isMatch
           ? `${current.sourceName} · ${ZONE_META[current.zone].label} — Tayf'ın etiketiyle aynı`
@@ -185,8 +242,13 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
         score: finalScore,
         marks: finishedMarks,
       });
+      // State first, then the store write: the write notifies the store
+      // subscriber, and both land in one batch, so no render ever sees the
+      // fresh result while `playedThisSession` is still false (that would
+      // flash the "already played" banner right after a normal finish).
+      setPlayedThisSession(true);
+      setLocalPhase("finished");
       writeRawStore(nextStore);
-      setPhase("finished");
       setAnnouncement(`Tayf'ın etiketiyle ${finalScore}/5 aynı.`);
     },
     [puzzle, store, todayKey],
@@ -200,7 +262,7 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
       return;
     }
     setIndex(nextIndex);
-    setPhase("playing");
+    setLocalPhase("playing");
   }, [index, headlines.length, finishRound, marks]);
 
   const copyToClipboard = useCallback((text: string) => {

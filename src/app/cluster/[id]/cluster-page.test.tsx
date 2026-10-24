@@ -924,6 +924,79 @@ describe("generateMetadata — oEmbed discovery", () => {
   });
 });
 
+// A mixed-case uuid in the URL (a pasted/uppercased link) is the same cluster:
+// Postgres resolves uuids case-insensitively, so the page renders. Every URL
+// the page ADVERTISES about itself (canonical, og:url, the oEmbed discovery
+// target, the JSON-LD image) must still be the one lowercase form, or crawlers
+// and unfurlers see two "different" pages for one story.
+const MIXED_CASE_ID = "367A01B2-8CB4-4614-B28E-E82CC26899DB";
+const LOWER_ID = "367a01b2-8cb4-4614-b28e-e82cc26899db";
+
+function mixedCaseDetail(): ClusterDetail {
+  const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+  return {
+    cluster: makeCluster({ bias_distribution: emptyDistribution(), is_archived: false }),
+    members: [makeMember("a1", source)],
+    allSources: [source],
+    wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+    blindspotSuppressed: false,
+    blindspotRecallVetoed: false,
+  };
+}
+
+describe("generateMetadata — canonical id casing", () => {
+  it("an uppercase uuid yields a lowercase canonical and og:url", async () => {
+    getClusterDetail.mockResolvedValue(mixedCaseDetail());
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: MIXED_CASE_ID }),
+    });
+
+    expect(metadata.alternates?.canonical).toBe(`/cluster/${LOWER_ID}`);
+    expect(metadata.openGraph?.url).toBe(`/cluster/${LOWER_ID}`);
+  });
+
+  it("the oEmbed discovery href targets the lowercase cluster URL only", async () => {
+    getClusterDetail.mockResolvedValue(mixedCaseDetail());
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: MIXED_CASE_ID }),
+    });
+    const types = (metadata.alternates?.types ?? {}) as Record<string, Array<{ url: string }>>;
+    const link = types["application/json+oembed"]?.[0];
+    if (!link) throw new Error("no oEmbed discovery link");
+    const decoded = decodeURIComponent(link.url);
+
+    expect(decoded).toContain(`/cluster/${LOWER_ID}`);
+    expect(decoded).not.toContain(MIXED_CASE_ID);
+    expect(link.url).not.toContain(MIXED_CASE_ID);
+  });
+
+  it("an already-lowercase id is untouched", async () => {
+    getClusterDetail.mockResolvedValue(mixedCaseDetail());
+
+    const metadata = await generateMetadata({
+      params: Promise.resolve({ id: LOWER_ID }),
+    });
+
+    expect(metadata.alternates?.canonical).toBe(`/cluster/${LOWER_ID}`);
+    expect(metadata.openGraph?.url).toBe(`/cluster/${LOWER_ID}`);
+  });
+
+  it("the JSON-LD image URL uses the lowercase id too", async () => {
+    getClusterDetail.mockResolvedValue(mixedCaseDetail());
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: MIXED_CASE_ID }) });
+    const html = findJsonLd(tree);
+
+    expect(html).not.toBeNull();
+    expect(JSON.parse(html!).image).toEqual([
+      `https://tayf.test/cluster/${LOWER_ID}/opengraph-image`,
+    ]);
+    expect(html!).not.toContain(MIXED_CASE_ID);
+  });
+});
+
 describe("generateMetadata — seo-3 archived noindex", () => {
   it("marks robots index:false, follow:true when the cluster is archived (page itself still serves 200)", async () => {
     const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });

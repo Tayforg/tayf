@@ -424,6 +424,115 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     expect(src).toContain("SILENCE_REASON_LABEL[row.silenceReason ?? \"sessiz\"]");
     expect(src).not.toContain("text-amber-700");
   });
+
+  describe("phone layout and contrast of the table (WCAG 1.4.3 / 1.4.10)", () => {
+    const classOf = (el: El | undefined): string => String(el?.props?.className);
+    const tokens = (cls: string) => cls.split(/\s+/);
+
+    const quarantined = () =>
+      body([
+        rawRow({
+          slug: "karantina",
+          name: "Karantina Haber",
+          latest: stale,
+          fetch_fail_streak: 21,
+          fetch_quarantined_until: new Date(NOW + 6 * HOUR).toISOString(),
+        }),
+      ]);
+
+    it("the karantinada pill uses the AA-safe rose shade (800 light / 300 dark), never 700 / 500", () => {
+      const pill = badgeOf(quarantined(), "karantina", "karantinada");
+      const cls = classOf(pill);
+      expect(cls).toContain("text-rose-800 dark:text-rose-300");
+      expect(cls).not.toContain("text-rose-700");
+      expect(cls).not.toContain("dark:text-rose-500");
+      expect(cls).toContain("bg-rose-500/15");
+    });
+
+    it("the karantinada pill never wraps and keeps its title", () => {
+      const pill = badgeOf(quarantined(), "karantina", "karantinada");
+      expect(tokens(classOf(pill))).toContain("whitespace-nowrap");
+      expect(String(pill.props?.title)).toContain("Art arda 21 başarısız çekim");
+      expect(textOf(pill)).toBe("karantinada");
+    });
+
+    it("every silence pill keeps its label on one line", () => {
+      const tree = body(fixtures());
+      for (const [slug, label] of [
+        ["donmus", "akış donmuş"],
+        ["engelli", "erişim yok"],
+        ["sakin", "sessiz"],
+      ] as const) {
+        expect(tokens(classOf(badgeOf(tree, slug, label))), `${slug} pill`).toContain(
+          "whitespace-nowrap",
+        );
+      }
+    });
+
+    it("the pill wrapper may wrap onto a second line instead of overflowing the cell", () => {
+      const tree = quarantined();
+      const wrapper = elements(rowOf(tree, "karantina")).find(
+        (e) => e.type === "span" && classOf(e).includes("gap-1.5"),
+      );
+      expect(wrapper, "pill wrapper span").toBeDefined();
+      expect(classOf(wrapper)).toContain("flex flex-wrap items-center gap-1.5");
+      expect(classOf(wrapper)).not.toContain("inline-flex");
+    });
+
+    it("the Kaynak column header is sticky on an opaque card background", () => {
+      const th = elements(body(fixtures())).find((e) => e.type === "th" && textOf(e) === "Kaynak");
+      expect(th, "Kaynak <th>").toBeDefined();
+      const cls = classOf(th);
+      expect(cls).toContain("sticky left-0");
+      expect(tokens(cls)).toContain("z-10");
+      expect(tokens(cls)).toContain("bg-card");
+    });
+
+    it("every row's name cell is sticky on an opaque card background", () => {
+      const tree = body(fixtures());
+      for (const slug of ["donmus", "engelli", "sakin", "aktif"]) {
+        const firstCell = elements(rowOf(tree, slug)).find((e) => e.type === "td");
+        expect(firstCell, `${slug} first <td>`).toBeDefined();
+        const cls = classOf(firstCell);
+        expect(cls, slug).toContain("sticky left-0");
+        expect(tokens(cls), slug).toContain("z-10");
+        expect(tokens(cls), slug).toContain("bg-card");
+        expect(textOf(firstCell)).toContain("Haber");
+      }
+    });
+
+    it("only the first column is sticky", () => {
+      const tree = body(fixtures());
+      const cells = elements(rowOf(tree, "aktif")).filter((e) => e.type === "td");
+      expect(cells.length).toBeGreaterThan(1);
+      for (const cell of cells.slice(1)) expect(classOf(cell)).not.toContain("sticky");
+      const heads = elements(tree).filter((e) => e.type === "th");
+      for (const th of heads.filter((h) => textOf(h) !== "Kaynak")) {
+        expect(classOf(th)).not.toContain("sticky");
+      }
+    });
+
+    it("the sticky cells sit inside the scroll region and the card behind them is opaque", () => {
+      const tree = body(fixtures());
+      const region = elements(tree).find((e) => e.props?.role === "region");
+      expect(region, "scroll region").toBeDefined();
+      expect(classOf(region)).toContain("overflow-x-auto");
+      expect(elements(region).some((e) => e.type === "th" && textOf(e) === "Kaynak")).toBe(true);
+
+      const card = elements(tree).find((e) => e.type === "div" && classOf(e).includes("ring-1"));
+      expect(card, "table card wrapper").toBeDefined();
+      expect(tokens(classOf(card))).toContain("bg-card");
+      expect(classOf(card)).not.toContain("bg-card/60");
+    });
+
+    it("pins the sticky and opaque classes in the page source (literal class strings)", () => {
+      const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+      expect(src).not.toContain("bg-card/60");
+      expect(src).not.toContain("text-rose-700");
+      expect(src).not.toContain("dark:text-rose-500");
+      expect(src).toContain("sticky left-0 z-10 bg-card");
+    });
+  });
 });
 
 describe("ItemsPerDayCell", () => {

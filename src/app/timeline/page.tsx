@@ -26,8 +26,11 @@ export const metadata: Metadata = staticPageMetadata({
 // <section> blocks — one per hour, newest first.
 //
 // Cached at the route segment with `revalidate = 60` so the wall feels
-// near-live without slamming Supabase on every navigation. The 100-row
-// LIMIT keeps the payload bounded even on a busy news day.
+// near-live without slamming Supabase on every navigation. The
+// TIMELINE_LIMIT (200) row cap keeps the payload bounded even on a busy news
+// day; a busy day mints more qualifying clusters than that, so the subtitle
+// names the real total (a separate head/exact count) whenever the list is
+// capped, instead of presenting the capped length as the day's count.
 
 interface HourBucket {
   // ISO of the top-of-hour the rows in this bucket belong to. Used as the
@@ -56,6 +59,18 @@ const HOUR_LABEL_FORMAT = new Intl.DateTimeFormat("tr-TR", {
   hour12: false,
   timeZone: "Europe/Istanbul",
 });
+
+// Subtitle honesty: `n` is what the list shows, `total` what the count read
+// found (null = the count failed). Never present a capped length as the total.
+function timelineSubtitle(n: number, total: number | null): string {
+  if (n === 0 || total === n) {
+    return `Son 24 saatte oluşturulan ${n} haber kümesi, saat saat sıralandı.`;
+  }
+  if (total === null) {
+    return `Son 24 saatte oluşturulan en yeni ${n} küme, saat saat sıralandı.`;
+  }
+  return `Son 24 saatte oluşturulan ${total} haber kümesinin en yeni ${n} tanesi, saat saat sıralandı.`;
+}
 
 function formatHourLabel(hourISO: string): string {
   return HOUR_LABEL_FORMAT.format(new Date(hourISO));
@@ -97,7 +112,8 @@ export default async function TimelinePage() {
   // "0 clusters". No noindex here on purpose: the route is static and the
   // failure is cached for "minutes", the same rule as /trends -- a noindex
   // baked into a static shell could outlive the outage in crawlers.
-  const rows = await getRecentClusters();
+  const recent = await getRecentClusters();
+  const rows = recent === null ? null : recent.rows;
   const buckets = rows === null ? [] : bucketByHour(rows);
 
   return (
@@ -106,9 +122,9 @@ export default async function TimelinePage() {
         kicker="Son 24 saat"
         title="Zaman çizelgesi"
         subtitle={
-          rows === null
+          recent === null
             ? "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı."
-            : `Son 24 saatte oluşturulan ${rows.length} haber kümesi, saat saat sıralandı.`
+            : timelineSubtitle(recent.rows.length, recent.total)
         }
       />
 

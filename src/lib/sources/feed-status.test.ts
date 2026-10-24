@@ -11,6 +11,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // The query-shape assertions use the same call-tracking proxy as
 // feed-health.test.ts: the shared fake's `BuilderState.limit` only records
 // the row-cap argument, not the `{ referencedTable }` options object.
+//
+// 2026-10-24 /sources '—' incident: a failed read used to be cached for the
+// full 1 h `source-directory` life because `cacheLife` ran before the query.
+// The "cache lifetime" block pins the fix for all three readers: a failure
+// (a Supabase error OR a thrown query) is cached for `minutes` only, a
+// success (even an empty one) for `source-directory`, exactly one cacheLife
+// per invocation, cacheTag first.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -27,6 +34,8 @@ const fixture = vi.hoisted(() => ({
   selects: [] as string[],
   failNewColumns: false,
   retryError: null as { message: string; code?: string } | null,
+  // a query that throws (client blew up) instead of answering with an error
+  throwOnQuery: false,
 }));
 
 const tracker = vi.hoisted(() => {
@@ -62,6 +71,7 @@ const supabaseFake = await vi.hoisted(async () => {
           (state as { selectArgs?: unknown[] }).selectArgs?.[0] ?? "",
         );
         fixture.selects.push(select);
+        if (fixture.throwOnQuery) throw new Error("connection reset");
         if (fixture.failNewColumns && select.includes("fetch_items_count")) {
           return {
             data: null,
@@ -99,6 +109,7 @@ import {
   type SourceFeedStatus,
   type ItemsPerDayRawRow,
 } from "./feed-status";
+import { cacheLife, cacheTag } from "next/cache";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -114,10 +125,16 @@ beforeEach(() => {
   fixture.selects = [];
   fixture.failNewColumns = false;
   fixture.retryError = null;
+  fixture.throwOnQuery = false;
   tracker.calls.length = 0;
+  vi.mocked(cacheLife).mockClear();
+  vi.mocked(cacheTag).mockClear();
+  // attemptCached logs every failed attempt with console.error
+  vi.spyOn(console, "error").mockImplementation(() => {});
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
@@ -736,5 +753,172 @@ describe("getFeedStatusSummary", () => {
     fixture.error = { message: "connection reset" };
 
     await expect(getFeedStatusSummary()).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cache lifetime (2026-10-24 /sources '—' incident). The three readers are
+// `"use cache"` functions; `cacheLife` must be chosen AFTER the query ran, so a
+// failed read is memoised for `minutes` and not the 1 h `source-directory`
+// window. `null` stays the "unknown" contract for every caller.
+// ---------------------------------------------------------------------------
+
+interface ReaderCase {
+  name: string;
+  call: () => Promise<unknown>;
+  okRows: unknown[];
+  okResult: unknown;
+  emptyResult: unknown;
+}
+
+const READERS: ReaderCase[] = [
+  {
+    name: "getSourceFeedStatuses",
+    call: getSourceFeedStatuses,
+    okRows: [rawRow()],
+    okResult: expect.arrayContaining([expect.objectContaining({ slug: "ornek-kaynak" })]),
+    emptyResult: [],
+  },
+  {
+    name: "getSourceItemsPerDay",
+    call: getSourceItemsPerDay,
+    okRows: [{ slug: "ornek-kaynak", stats: [{ count: 7 }] }],
+    okResult: { "ornek-kaynak": 1 },
+    emptyResult: {},
+  },
+  {
+    name: "getFeedStatusSummary",
+    call: getFeedStatusSummary,
+    okRows: [{ kind: "outlet", recent: [{ id: "r1" }] }],
+    okResult: { total: 1, delivering: 1 },
+    emptyResult: { total: 0, delivering: 0 },
+  },
+];
+
+describe.each(READERS)("$name cache lifetime", ({ call, okRows, okResult, emptyResult }) => {
+  it("a Supabase error resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+
+    await expect(call()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("a thrown query resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
+    fixture.throwOnQuery = true;
+
+    await expect(call()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("missing Supabase env resolves null and is cached for minutes only", async () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    await expect(call()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("logs a failed attempt once through attemptCached ('[label] error: ...')", async () => {
+    fixture.error = { message: "connection refused" };
+
+    await call();
+
+    expect(console.error).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(console.error).mock.calls[0]![0]).toMatch(
+      /^\[[a-z-]+\] error: .*connection refused/,
+    );
+  });
+
+  it("success returns the data and is cached for source-directory, once", async () => {
+    fixture.data = okRows;
+
+    await expect(call()).resolves.toEqual(okResult);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("an empty successful read returns the empty value (not null) and keeps source-directory", async () => {
+    fixture.data = [];
+
+    await expect(call()).resolves.toEqual(emptyResult);
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("tags the entry 'sources' before cacheLife runs (cacheTag precedes cacheLife), on success and failure", async () => {
+    fixture.data = okRows;
+    await call();
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+
+    vi.mocked(cacheTag).mockClear();
+    vi.mocked(cacheLife).mockClear();
+    fixture.error = { message: "boom" };
+    await call();
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
+      vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
+    );
+  });
+});
+
+describe("getSourceFeedStatuses cache lifetime with the 42703 legacy retry [migration 119]", () => {
+  it("42703 then success: rows, exactly two queries, cached for source-directory once", async () => {
+    fixture.failNewColumns = true;
+    fixture.data = [rawRow()];
+
+    const rows = await getSourceFeedStatuses();
+
+    expect(rows).toHaveLength(1);
+    expect(fixture.selects).toHaveLength(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+    expect(cacheLife).not.toHaveBeenCalledWith("minutes");
+  });
+
+  it("42703 then a second error: null, still exactly two queries (never a loop), cached for minutes once", async () => {
+    fixture.failNewColumns = true;
+    fixture.retryError = { message: "canceling statement due to statement timeout", code: "57014" };
+
+    await expect(getSourceFeedStatuses()).resolves.toBeNull();
+
+    expect(fixture.selects).toHaveLength(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("source-directory");
+  });
+
+  it("42703 then a second 42703: null after two queries, cached for minutes (the legacy select is never retried)", async () => {
+    fixture.failNewColumns = true;
+    fixture.retryError = { message: "column sources.fetch_fail_streak does not exist", code: "42703" };
+
+    await expect(getSourceFeedStatuses()).resolves.toBeNull();
+
+    expect(fixture.selects).toHaveLength(2);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a non-42703 first error does not retry and is cached for minutes", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+
+    await expect(getSourceFeedStatuses()).resolves.toBeNull();
+
+    expect(fixture.selects).toHaveLength(1);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
   });
 });

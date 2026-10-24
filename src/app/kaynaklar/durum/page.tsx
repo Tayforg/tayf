@@ -182,7 +182,7 @@ export function KaynakDurumBody({
         </p>
       )}
 
-      <div className="rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6">
+      <div className="rounded-xl ring-1 ring-border/60 bg-card p-4 sm:p-6">
         <h2 id="durum-tablo" className="sr-only">
           Aktif kaynakların besleme durumu
         </h2>
@@ -200,7 +200,10 @@ export function KaynakDurumBody({
             <table className="w-full border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-                  <th scope="col" className="py-2 pr-4 font-medium">
+                  <th
+                    scope="col"
+                    className="sticky left-0 z-10 bg-card py-2 pr-4 font-medium"
+                  >
                     Kaynak
                   </th>
                   <th scope="col" className="py-2 pr-4 font-medium">
@@ -226,7 +229,7 @@ export function KaynakDurumBody({
               <tbody className="divide-y divide-border/30">
                 {sortedRows.map((row) => (
                   <tr key={row.slug}>
-                    <td className="py-2.5 pr-4 font-medium text-foreground whitespace-nowrap">
+                    <td className="sticky left-0 z-10 bg-card py-2.5 pr-4 font-medium text-foreground whitespace-nowrap">
                       <Link
                         href={`/source/${row.slug}`}
                         className="hover:underline"
@@ -261,10 +264,10 @@ export function KaynakDurumBody({
                       </Suspense>
                     </td>
                     <td className="py-2.5">
-                      <span className="inline-flex items-center gap-1.5">
+                      <span className="flex flex-wrap items-center gap-1.5">
                         {row.silent ? (
                           <span
-                            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${
+                            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ${
                               SILENCE_BADGE_CLASS[row.silenceReason ?? "sessiz"]
                             }`}
                           >
@@ -276,7 +279,7 @@ export function KaynakDurumBody({
                         {row.quarantined ? (
                           <span
                             title={`Art arda ${row.failStreak} başarısız çekim — besleme geçici olarak atlanıyor`}
-                            className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-700 dark:text-rose-500 font-medium"
+                            className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-800 dark:text-rose-300 font-medium whitespace-nowrap"
                           >
                             karantinada
                           </span>

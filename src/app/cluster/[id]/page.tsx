@@ -142,6 +142,12 @@ export async function generateMetadata({
   }
 
   const { cluster, members, wire } = detail;
+  // Postgres resolves a uuid case-insensitively, so a pasted/uppercased link
+  // renders this page. Every self-referencing URL below uses the one
+  // lowercase form (the form every internal link and the sitemap emit), so
+  // crawlers and unfurlers never see two canonical URLs for one story. The
+  // canonical fix only: no middleware redirect.
+  const canonicalId = id.toLowerCase();
   // Attributed summary (or null when blank / a bare wire copy) — see
   // summary-attribution.ts. describeForMeta keeps the result under the
   // ~160 char SERP cap on its own.
@@ -168,10 +174,10 @@ export async function generateMetadata({
     // `types` emits the oEmbed discovery <link> so WordPress, Iframely and
     // Embedly can turn a pasted story URL into the /embed/ widget.
     alternates: {
-      canonical: `/cluster/${id}`,
+      canonical: `/cluster/${canonicalId}`,
       types: {
         "application/json+oembed": [
-          { url: oembedDiscoveryHref(siteUrl(), id), title: cluster.title_tr },
+          { url: oembedDiscoveryHref(siteUrl(), canonicalId), title: cluster.title_tr },
         ],
       },
     },
@@ -187,7 +193,7 @@ export async function generateMetadata({
       title: cluster.title_tr,
       description,
       type: "article",
-      url: `/cluster/${id}`,
+      url: `/cluster/${canonicalId}`,
       // Deliberately no `images` key here (not even `[]`): Next's
       // `mergeStaticMetadata` (next/dist/lib/metadata/resolve-metadata.js)
       // only wires in the generated `opengraph-image.tsx` card when this
@@ -417,7 +423,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     // photograph as this page's primary image (deck TOP-4 / SEC-05 sibling
     // finding). siteUrl() is required because schema.org `image` must be an
     // absolute URL.
-    image: [`${siteUrl()}/cluster/${id}/opengraph-image`],
+    image: [`${siteUrl()}/cluster/${id.toLowerCase()}/opengraph-image`],
     // seo-4/seo-5: Tayf is the byline and the publisher — a cluster is the
     // union of multiple independent outlets' coverage, so no single outlet
     // can honestly be named "the author". The outlets themselves are
