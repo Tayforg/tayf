@@ -21,6 +21,9 @@
 //      e. On not-found / errored: bump image_backfill_attempts +
 //         attempted_at, archive. We do NOT requeue — the AFTER UPDATE
 //         trigger and the safety-net resweep handle re-discovery.
+//      f. On a placeholder og:image (publisher logo card / 'son dakika'
+//         stand-in, db-4): never stored. Treated like (e) — attempt bumped
+//         (parked after 5), archived — and counted separately.
 //   3. Stops when the wall budget is exhausted or the queue is empty.
 
 import { createServiceClient, type SupabaseClient } from "../_shared/supabase.ts";
@@ -35,6 +38,7 @@ import {
   fetchOgImage,
   isValidImageUrl,
 } from "../_shared/og-image.ts";
+import { isPlaceholderImageUrl } from "../_shared/image-url.ts";
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 
@@ -135,6 +139,7 @@ interface ArticleRow {
 type Outcome =
   | "found"
   | "not-found"
+  | "placeholder"
   | "errored"
   | "skipped-no-url"
   | "skipped-already-imaged"
@@ -240,6 +245,17 @@ async function processMessage(
     await bumpAttempt(client, article);
     await safeArchive(client, msg.msg_id);
     return "errored";
+  }
+
+  // db-4 ingest half: the page advertises a publisher logo card / 'son dakika'
+  // stand-in. Never store it. Counted as an attempt (parked after
+  // IMG_BACKFILL_MAX_ATTEMPTS) and archived like every other single-attempt
+  // outcome, so a placeholder cannot loop. Checked before the generic gate so
+  // it is reported separately from a genuine not-found.
+  if (ogImage && isPlaceholderImageUrl(ogImage)) {
+    await bumpAttempt(client, article);
+    await safeArchive(client, msg.msg_id);
+    return "placeholder";
   }
 
   if (!ogImage || !isValidImageUrl(ogImage)) {
@@ -351,6 +367,7 @@ interface DrainSummary {
   drained: number;
   found: number;
   notFound: number;
+  placeholders: number;
   errored: number;
   skipped: number;
   permanentFailures: number;
@@ -362,6 +379,7 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
   let drained = 0;
   let found = 0;
   let notFound = 0;
+  let placeholders = 0;
   let errored = 0;
   let skipped = 0;
   let permanentFailures = 0;
@@ -418,6 +436,9 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
         case "not-found":
           notFound += 1;
           break;
+        case "placeholder":
+          placeholders += 1;
+          break;
         case "errored":
           errored += 1;
           break;
@@ -437,6 +458,7 @@ async function drain(client: SupabaseClient): Promise<DrainSummary> {
     drained,
     found,
     notFound,
+    placeholders,
     errored,
     skipped,
     permanentFailures,

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115).
+// 115, 119).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -15,7 +15,9 @@ import { fileURLToPath } from "node:url";
 // literal `check_name` of the version before it. The newest version must also
 // carry the newest check (sources_newly_dark, 114), keep its 24 h silence window
 // (115 widened it from 114's noisy 12 h: 61% of the 12 h flags resumed within a
-// day, 21% at 24 h), and grant execute to service_role only.
+// day, 21% at 24 h), keep the three reason labels 119 added to its detail
+// (erişim yok, akış donmuş, sessiz, read from sources.fetch_*), and grant
+// execute to service_role only.
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -67,10 +69,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(6);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(7);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -124,6 +126,30 @@ describe("ops_health_report(): the newest version", () => {
     expect(after).not.toContain("14 days 12 hours");
     expect(after).toContain("interval '14 days 24 hours'");
     expect(after).not.toContain("son 12 saatte");
+  });
+
+  it("sources_newly_dark: the akış donmuş threshold is longer than the 24 h silence window (every listed source already has no stored article in 24 h, so a 24 h threshold labels all of them frozen)", () => {
+    const m = /check_name\s*:=\s*'sources_newly_dark'/i.exec(newest.body);
+    expect(m, "sources_newly_dark segment").not.toBeNull();
+    const after = newest.body.slice((m as RegExpExecArray).index);
+    const frozen = /fetch_newest_item_at\s*<\s*v_now\s*-\s*interval\s*'(\d+)\s+hours'/i.exec(after);
+    expect(frozen, "the fetch_newest_item_at threshold").not.toBeNull();
+    const hours = Number((frozen as RegExpExecArray)[1]);
+    expect(hours).toBeGreaterThan(24);
+    // the same 72 h as dead_feeds and the app's silence gate (FEED_YIELD_WINDOW_MS)
+    expect(hours).toBe(72);
+  });
+
+  it("sources_newly_dark keeps migration 119's reason labels and the freshness columns; a copy-paste of 115's plain `slug (n)` detail must not come back", () => {
+    const m = /check_name\s*:=\s*'sources_newly_dark'/i.exec(newest.body);
+    expect(m, "sources_newly_dark segment").not.toBeNull();
+    const after = newest.body.slice((m as RegExpExecArray).index);
+    for (const label of ["akış donmuş", "erişim yok", "sessiz"]) {
+      expect(after, label).toContain(`'${label}'`);
+    }
+    expect(after).toContain("fetch_newest_item_at");
+    expect(after).toContain("fetch_items_count");
+    expect(after).toMatch(/\|\|\s*v\.reason/);
   });
 
   it("revokes from public, anon and authenticated, and grants execute only to service_role", () => {

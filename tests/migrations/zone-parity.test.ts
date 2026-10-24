@@ -476,6 +476,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "114_sources_newly_dark.sql",
       // 115 re-creates ops_health_report() with 114's body (row 13 window 24 h), repeating its VALUES-list copy of BIAS_TO_ZONE; pinned by tests/migrations/115-sources-newly-dark-24h.test.ts
       "115_sources_newly_dark_24h.sql",
+      // 119 re-creates ops_health_report() with 115's body (row 13 names the reason of each silent source), repeating its VALUES-list copy of BIAS_TO_ZONE; pinned by tests/migrations/119-feed-freshness.test.ts
+      "119_feed_freshness.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

@@ -1,6 +1,6 @@
-# Ops heartbeat (077, 100, 103, 108, 114, 115)
+# Ops heartbeat (077, 100, 103, 108, 114, 115, 119)
 
-`public.ops_health_report()` (migrations 077, 100, 103, 108, 114 and 115) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115 and 119) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
@@ -22,7 +22,8 @@ fires.
 13 fixed-order rows (the first ten from migration 077, the eleventh added by
 migration 100, the twelfth by migration 103, the thirteenth by migration 114;
 rows 7, 9 and 12 were reworked by migration 108, and row 13 by migration 115,
-which widened its silence window from 12 h to 24 h), `status` one of
+which widened its silence window from 12 h to 24 h, and by migration 119, which
+added a reason label to every source it names), `status` one of
 `pass | warn | fail | unknown | skip`. `threshold` is the fail limit (or the
 warn limit, for warn-only checks such as rows 9 and 13). The thresholds for rows 1-10 were
 tuned from a 2026-09-28 read-only survey of the live project (see the
@@ -47,18 +48,63 @@ migration 114 header, the 24 h window of the migration 115 header, and
 | 10 | `dead_feeds` | Active outlet/wire sources with no `articles.published_at` in the last 72h | fail ≥ 50% of active sources; warn > 38 | Observed 35 of 96 (36.4%) — well above the drafted 35%/25 assumption. Raised the fail ratio to 0.50 and the warn count to observed + 3 = 38 so today's real baseline reads `'pass'` instead of paging on day one. **Known follow-up, not urgent:** 15 of those 35 sources have never published anything at all — worth a separate look at whether their RSS/URL config is actually broken. |
 | 11 | `net_response_heap_mb` | Total on-disk size of `net._http_response` (pg_net's response log) in MiB. `ops_net_response_compact()` (pg_cron `net-response-compact`, every 15 min) truncates it above 64 MiB, so a warn or fail means the compactor is being skipped (job disabled, lock never free, `TRUNCATE` privilege lost) while the table bloats again | pass < 64; warn 64-200; fail > 200 | 2026-10-21 incident: 278 MB of heap behind 552 live rows made pg_net's TTL `DELETE` the #1 DB time consumer and pages took 8-22 s. Added by migration 100 |
 | 12 | `jev_shadow_cron_failures_30m` | Sum of three counts over the last 30 min: (a) `'failed'` pg_cron runs of the Jev jobs `jev-shadow`, `jev-cluster-audit` and `jev-regression-weekly` (same runid window as row 1); (b) `net._http_response` rows with `status_code >= 500` whose body contains `"fn":"jev-shadow"`, the marker every error response from `jev-shadow` carries (504 `deadline`, 503 `db-unavailable`, 500 `internal-error`); (c) `jev_shadow_runs` rows started in the window that closed `partial` or `error` with `calls = 0` (migration 108). `timed_out` pg_net rows (status NULL, no body, cannot be attributed to a function) are counted separately in the `detail` (`zaman aşımı (fonksiyon bilinmiyor)`): they raise `pass` to `warn` but never count toward `fail`. `detail` = `cron hatası · HTTP 5xx · sıfır çağrılı koşu · zaman aşımı (son 30 dk)`, with ` · pg_cron ve pg_net yok` appended when both extensions are missing. `'unknown'` only when the query itself errors | fail ≥ 2; warn = 1, or any `timed_out` request | Finding 1(a) (migration 103): a database timeout in `jev-shadow`'s first calls used to return an unretried 500 with no `jev_shadow_runs` row, and `pg_cron` records `'succeeded'` for the http poke regardless. The function now retries those steps once, then answers a stable 503 `db-unavailable`, and this row counts it. No `jev_alerts` row is written (its `kind` CHECK, migration 088, allows only `source_drift`, `kap_class_canary`, `stage_budget`). 2026-10-22 stall (migration 108): pg_net rows 329690 and 329711 had `timed_out = true` and status NULL, and zero-call partial runs 3622 and 3623 closed cleanly, so neither half of 103 saw anything; (c) and the timeout note close that gap. The same release gives a deadline stop a note on the run row (`deadline: <stage> at <ms>ms, calls=<n>`) and reschedules the cron with a 120 s pg_net timeout and an `enqueued_at` body field; redeploy `jev-shadow` with `--no-verify-jwt` after applying 108. Added by migration 103, extended by 108 |
-| 13 | `sources_newly_dark` | Active `outlet`/`wire` sources that are **not** in `public.ops_dark_source_baseline`, have at least 50 `articles` (by `created_at`, ingest time) in the 14 days before the last 24 hours, and none in the last 24 hours. `detail` names them with that count, largest first: `son 24 saatte haber gelmedi (önceki 14 günde en az 50 haber vardı): slug (n), …`, cut at 500 characters; `yeni susan kaynak yok` when none. **Warn-only**: never `fail`, so the Action does not exit non-zero and nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors (a missing baseline table included) | warn ≥ 1 (threshold 1) | 2026-10-15 to 10-23: five active sources went dark one after another and no row noticed (`dead_feeds` waits 72 h and warns above 38 sources; the per-zone freshness rows are satisfied by any other outlet in the zone). Three of the five are `opposition_leaning`, so the `muhalefet` zone loses about 9k articles a month. Step 0 (migration 114 header): the predicate runs in about 50 ms on an index-only scan of `idx_articles_created_source`. A 7-day replay at 6-hour steps with the original 12 h window flagged 22 distinct sources; of the 146 flags with a full 24 h of follow-up, 89 saw an article within 24 h (low-volume outlets with an overnight gap over 12 h), while `halk-tv` and `gazete-pencere` never resumed. Window widened from 12 h to 24 h by migration 115: same replay, 73 flags over 8 sources, 13 of 63 complete flags resumed within 24 h (21%), against 173 / 22 / 89 of 146 (61%) at 12 h; the `>= 50` floor, the baseline exclusion and the warn-only status are unchanged. Added by migration 114, window 24 h since migration 115 |
+| 13 | `sources_newly_dark` | Active `outlet`/`wire` sources that are **not** in `public.ops_dark_source_baseline`, have at least 50 `articles` (by `created_at`, ingest time) in the 14 days before the last 24 hours, and none in the last 24 hours. `detail` names them with that count and a reason, largest first: `son 24 saatte haber gelmedi (önceki 14 günde en az 50 haber vardı): slug (n) · neden, …` (`neden` is `erişim yok`, `akış donmuş` or `sessiz`, see "Susan kaynakların nedeni" below), cut at 500 characters; `yeni susan kaynak yok` when none. **Warn-only**: never `fail`, so the Action does not exit non-zero and nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors (a missing baseline table included) | warn ≥ 1 (threshold 1) | 2026-10-15 to 10-23: five active sources went dark one after another and no row noticed (`dead_feeds` waits 72 h and warns above 38 sources; the per-zone freshness rows are satisfied by any other outlet in the zone). Three of the five are `opposition_leaning`, so the `muhalefet` zone loses about 9k articles a month. Step 0 (migration 114 header): the predicate runs in about 50 ms on an index-only scan of `idx_articles_created_source`. A 7-day replay at 6-hour steps with the original 12 h window flagged 22 distinct sources; of the 146 flags with a full 24 h of follow-up, 89 saw an article within 24 h (low-volume outlets with an overnight gap over 12 h), while `halk-tv` and `gazete-pencere` never resumed. Window widened from 12 h to 24 h by migration 115: same replay, 73 flags over 8 sources, 13 of 63 complete flags resumed within 24 h (21%), against 173 / 22 / 89 of 146 (61%) at 12 h; the `>= 50` floor, the baseline exclusion and the warn-only status are unchanged. Added by migration 114, window 24 h since migration 115, reason labels since migration 119 (2026-10-24: `haberport`, `korkusuz` and `en-politik` answer HTTP 200 every poll and publish nothing, which row 13 could not tell from a quiet outlet) |
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
 13 rows. (Row 12 degrades gracefully: with only one of the two present it
 counts that half and treats the other as zero.)
 
+## Susan kaynakların nedeni (migration 119)
+
+Every source row 13 names carries a reason after its count, for example
+`halk-tv (1180) · erişim yok, en-politik (64) · akış donmuş`. The same label
+appears next to a silent source on `/kaynaklar/durum`, with a one-paragraph
+legend. The reason is read from what ingest stores on `public.sources`
+(`fetch_last_status`, `fetch_fail_streak`, `fetch_quarantined_until` and, since
+119, `fetch_newest_item_at` and `fetch_items_count`), evaluated in this order:
+
+| Label | When | What to do |
+| --- | --- | --- |
+| `erişim yok` | the source is quarantined now, or its fail streak is above 0, or it has no fetch status yet, or its last status is neither 2xx nor 304 (a block such as 403/404, a 5xx, or 0 for no HTTP answer) | Check the status and the quarantine: `select slug, fetch_last_status, fetch_fail_streak, fetch_quarantined_until, fetch_last_at from public.sources where slug = '<slug>'`. A 403 or a DNS failure usually means the publisher blocked us or moved the feed: see `docs/feed-registry-2026-09.md`. A quarantine lifts itself (1 h, 6 h, then daily probes). |
+| `akış donmuş` | the feed answers (2xx or 304) but holds no items, or its newest item is more than 72 hours old | The feed is alive and has not updated for three days, so waiting does not help: find a new feed URL or contact the publisher. Repointing a feed or deactivating a source is a founder decision (`docs/feed-registry-2026-09.md`). |
+| `sessiz` | everything else: the feed's newest item is 72 hours old or newer (a live outlet that paused over a night or a weekend, or one whose newest items Tayf refused to store), or it was never measured | Usually nothing: the outlet paused, or published nothing Tayf had not already stored (deduped), or ingest has not parsed the feed since 119. Look again later: a feed that is still frozen turns `akış donmuş` once its newest item passes 72 hours. A source that stays `sessiz` for days while its newest item is under 72 hours old and its articles are not stored points at a filter or dedupe problem, not at the feed. |
+
+Why 72 hours and not 24: row 13 lists a source only after 24 hours without a
+stored article, and ingest stores every usable item within minutes of the feed
+publishing it, so by the time a source is listed its newest feed item is already
+about 24 hours old. A 24 hour threshold would call every listed source frozen,
+a live outlet with an overnight or weekend gap included (21% of 115's complete
+flags resumed within 24 hours). 72 hours is the window `dead_feeds` and the
+`/kaynaklar/durum` silence gate use. The cost is that a frozen feed reads
+`sessiz` for its first three days. `tests/migrations/119-feed-freshness.test.ts`
+and `tests/guards/ops-health-checks.test.ts` keep the threshold above row 13's
+own window.
+
+How the freshness is measured: on every parse ingest stores the newest date the
+feed itself reports (`fetch_newest_item_at`, from the raw item dates, never from
+the stored `published_at`; unparseable dates are skipped, dates more than 10
+minutes in the future are ignored, and so are dates before 1990: the feed is
+third-party input, and Postgres refuses a year-0 timestamp for the whole batched
+write) and the number of entries (`fetch_items_count`). If Postgres still
+refuses the batch for a reason that belongs to one row's data, ingest retries it
+in halves (at most 24 calls) so only that source loses its write; any other
+failure (timeout, connection) is not split and shows up as
+`source fetch-state write failed` in the function log. A 304, a body-hash hit, a failure or a deferred parse
+leaves the stored values alone. A frozen feed with a byte-identical body is never
+parsed again, so a source whose `fetch_items_count` is still NULL is
+**bootstrapped** once: ingest skips its etag and body-hash short-circuits, parses
+it, stores the freshness and, when the body is the one already stored, inserts no
+row (`freshnessBootstraps` in the cycle summary line counts them; expect all
+sources within three to four cycles of the deploy). Until a source has been
+measured it reads `sessiz`, not `akış donmuş`.
+
 ## Susan kaynaklar (baseline)
 
 Row 13 (`sources_newly_dark`, migration 114; silence window 24 h since
-migration 115) is the heartbeat's answer to a source that had real volume and
-stopped. Read it as a prompt to look, not as an outage:
+migration 115; reason labels since migration 119) is the heartbeat's answer to a
+source that had real volume and stopped. Read it as a prompt to look, not as an
+outage:
 
 - **Warn-only, does not page.** It never reaches `fail` (see the exit rules in
   `scripts/lib/ops-heartbeat.mjs`), so a flagged source costs a line in the

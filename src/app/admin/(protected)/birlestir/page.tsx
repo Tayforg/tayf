@@ -13,6 +13,7 @@ import {
   type MergeQueueOrigin,
 } from "@/lib/admin/merge-queue";
 import { requireAdminSession } from "@/lib/admin/session";
+import { getTwinClusterPairs } from "@/lib/admin/twin-clusters";
 
 export const metadata: Metadata = {
   title: "Küme birleştirme",
@@ -25,6 +26,13 @@ export const metadata: Metadata = {
 const QUEUE_HELP =
   "Aynı olayı anlatan ama iki ayrı kümeye bölünmüş haberler. Birleştirince küçük küme büyüğüne taşınır, eski bağlantı yeni kümeye yönlenir ve kör nokta yeniden hesaplanır. Hiçbir şey otomatik birleşmez.";
 const READ_ERROR = "Veri okunamadı (099 uygulanmamış olabilir).";
+// "Olası ikiz kümeler" (migration 120): read-only list of cluster pairs that share
+// a same-source, same-source_article_key article pair. Twin merges are logged as
+// origin "manual" ("Elle" in the log); "İkiz haber" is only the row badge and is
+// deliberately not a LOG_ORIGIN_LABEL entry.
+const TWIN_HELP =
+  "Aynı kaynağın aynı haberi, başlığı değiştiği için ikinci bir adresle alınıp ayrı bir kümeye düşmüş olabilir (aynı haber kimliği, farklı adres). Son 14 günün en yeni 50 çifti, yenisi üstte. Hiçbir şey otomatik birleşmez: çifti inceleyin, uygunsa Birleştir'e basın.";
+const TWIN_READ_ERROR = "Veri okunamadı (120 uygulanmamış olabilir).";
 
 const QUEUE_ORIGIN_LABEL: Record<MergeQueueOrigin, string> = {
   thread: "Hikaye önerisi",
@@ -72,7 +80,11 @@ function Side({ c }: { c: MergeClusterRef }) {
 export default async function ClusterMergeAdminPage() {
   await requireAdminSession();
 
-  const [queue, merges] = await Promise.all([getMergeQueue(), getRecentMerges()]);
+  const [queue, twins, merges] = await Promise.all([getMergeQueue(), getTwinClusterPairs(), getRecentMerges()]);
+
+  // A pair already in the queue above is shown there, once.
+  const queued = new Set((queue ?? []).map((row) => row.key));
+  const twinRows = twins === null ? null : twins.filter((row) => !queued.has(row.key));
 
   return (
     <main className="mx-auto max-w-6xl space-y-6 px-4 py-6">
@@ -112,6 +124,41 @@ export default async function ClusterMergeAdminPage() {
                   b={row.b}
                   defaultTargetId={row.defaultTargetId}
                   origin={row.origin}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </AdminSection>
+      <AdminSection
+        id="olasi-ikiz-kumeler"
+        title="Olası ikiz kümeler"
+        help={TWIN_HELP}
+        count={twinRows === null ? undefined : twinRows.length}
+      >
+        {twinRows === null ? (
+          <EmptyState kind="error">{TWIN_READ_ERROR}</EmptyState>
+        ) : twinRows.length === 0 ? (
+          <EmptyState>Olası ikiz küme yok.</EmptyState>
+        ) : (
+          <ul className="space-y-3">
+            {twinRows.map((row) => (
+              <li key={row.key} className="space-y-3 rounded-lg border border-border/60 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge tone="neutral">İkiz haber</StatusBadge>
+                  <span className="text-xs text-muted-foreground">
+                    {`${row.detail} · son: ${fmtDateTime(row.newestAt)}`}
+                  </span>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Side c={row.a} />
+                  <Side c={row.b} />
+                </div>
+                <ClusterMergeActions
+                  a={row.a}
+                  b={row.b}
+                  defaultTargetId={row.defaultTargetId}
+                  origin="manual"
                 />
               </li>
             ))}

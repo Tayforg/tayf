@@ -2,6 +2,7 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { BIAS_TO_ZONE, isVotingKind } from "@/lib/bias/config";
 import { normalizeSourceKind } from "@/lib/sources/kind";
+import { classifySilence, type SilenceReason } from "@/lib/sources/silence-reason";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { createServerClient } from "@/lib/supabase/server";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
@@ -65,6 +66,16 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 // an unmapped bias value degrades to "row dropped" rather than a 500 on the
 // flagship page, mirroring src/app/sources/page.tsx's `getSources()` guard.
 //
+// Migration 119 (feed freshness): ingest stores the newest item date a feed
+// reports (`fetch_newest_item_at`) and its item count (`fetch_items_count`) next
+// to the fetch status. A silent source is labelled with WHY (SilenceReason, see
+// src/lib/sources/silence-reason.ts): the feed could not be fetched, the feed
+// answers but is frozen, or it is current and the outlet just published nothing
+// new. The row exposes only the reason, never the raw timestamps. A database
+// without 119 answers the select below with Postgres 42703; the query is then
+// retried once with the select that ran before 119, and every silent source
+// reads as reachable-and-current (`sessiz`) or `erişim yok` from its status.
+//
 // Fail-open discipline (mirrors src/lib/sources/active-count.ts and
 // src/lib/clusters/feed-health.ts verbatim): never throw. A Supabase error
 // resolves to `null`, and every caller renders an honest "durum bilinmiyor"
@@ -85,6 +96,8 @@ export interface SourceFeedStatus {
   failStreak: number;
   /** True while `fetch_quarantined_until` is still in the future. */
   quarantined: boolean;
+  /** Why the source is silent (migration 119); null when it is not silent. */
+  silenceReason: SilenceReason | null;
 }
 
 // Local 3-line quarantine check -- deliberately not imported from
@@ -106,6 +119,10 @@ export interface SourceFeedStatusRawRow {
   fetch_last_at: string | null;
   fetch_fail_streak?: number | null;
   fetch_quarantined_until?: string | null;
+  /** Migration 119: newest item date the feed reported at its last parse. */
+  fetch_newest_item_at?: string | null;
+  /** Migration 119: entries the feed held at its last parse (null = never measured). */
+  fetch_items_count?: number | null;
   latest?: Array<{ published_at: string }>;
 }
 
@@ -142,6 +159,10 @@ export function toFeedStatusRows(
       lastItemAtMs > nowMs ||
       nowMs - lastItemAtMs > FEED_YIELD_WINDOW_MS;
 
+    const failStreak = row.fetch_fail_streak ?? 0;
+    const quarantined = isRowQuarantined(row.fetch_quarantined_until, nowMs);
+    const lastHttpStatus = row.fetch_last_status ?? null;
+
     out.push({
       slug: row.slug,
       name: row.name,
@@ -149,11 +170,23 @@ export function toFeedStatusRows(
       zone,
       kind: normalizeSourceKind(row.kind),
       lastItemAt,
-      lastHttpStatus: row.fetch_last_status ?? null,
+      lastHttpStatus,
       lastFetchAt: row.fetch_last_at ?? null,
       silent,
-      failStreak: row.fetch_fail_streak ?? 0,
-      quarantined: isRowQuarantined(row.fetch_quarantined_until, nowMs),
+      failStreak,
+      quarantined,
+      silenceReason: silent
+        ? classifySilence(
+            {
+              lastHttpStatus,
+              failStreak,
+              quarantined,
+              newestFeedItemAt: row.fetch_newest_item_at ?? null,
+              feedItemsCount: row.fetch_items_count ?? null,
+            },
+            nowMs,
+          )
+        : null,
     });
   }
 
@@ -245,6 +278,13 @@ export function summariseFeedStatus(
   return { all, voting };
 }
 
+// The select that ran before migration 119, and the current one. The retry on
+// Postgres 42703 (undefined column) falls back to the legacy string.
+const FEED_STATUS_SELECT_LEGACY =
+  "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, latest:articles(published_at)";
+const FEED_STATUS_SELECT =
+  "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, fetch_newest_item_at, fetch_items_count, latest:articles(published_at)";
+
 /**
  * Per-source feed status CORE for every active source — the row-level
  * evidence behind /kaynaklar/durum's table (name/zone/kind/last item/last
@@ -265,16 +305,22 @@ export async function getSourceFeedStatuses(): Promise<SourceFeedStatus[] | null
     const supabase = createServerClient();
     const nowIso = new Date(nowMs).toISOString();
 
-    const { data, error } = await supabase
-      .from("sources")
-      .select(
-        "id, name, slug, url, bias, kind, active, fetch_last_status, fetch_last_at, fetch_fail_streak, fetch_quarantined_until, latest:articles(published_at)",
-      )
-      .eq("active", true)
-      .lte("latest.published_at", nowIso)
-      .order("published_at", { referencedTable: "latest", ascending: false })
-      .limit(1, { referencedTable: "latest" })
-      .order("name", { ascending: true });
+    const query = (columns: string) =>
+      supabase
+        .from("sources")
+        .select(columns)
+        .eq("active", true)
+        .lte("latest.published_at", nowIso)
+        .order("published_at", { referencedTable: "latest", ascending: false })
+        .limit(1, { referencedTable: "latest" })
+        .order("name", { ascending: true });
+
+    let { data, error } = await query(FEED_STATUS_SELECT);
+    if (error?.code === "42703") {
+      // Migration 119 is not applied yet: one retry with the select that ran
+      // before it. Never a loop, never a throw.
+      ({ data, error } = await query(FEED_STATUS_SELECT_LEGACY));
+    }
 
     if (error) {
       // Never throw — see the file header. A "use cache" throw during

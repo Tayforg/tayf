@@ -240,6 +240,192 @@ describe("KaynakDurumBody quarantine [migration 074]", () => {
   });
 });
 
+describe("KaynakDurumBody silence reasons [migration 119]", () => {
+  const HOUR = 60 * 60 * 1000;
+  const stale = [{ published_at: new Date(NOW - 96 * HOUR).toISOString() }];
+  const iso = (msAgo: number) => new Date(NOW - msAgo).toISOString();
+
+  function shapedRows(raw: SourceFeedStatusRawRow[]) {
+    return toFeedStatusRows(raw, NOW);
+  }
+
+  function body(raw: SourceFeedStatusRawRow[]) {
+    return KaynakDurumBody({
+      rows: shapedRows(raw),
+      itemsPerDayPromise: Promise.resolve({}),
+    });
+  }
+
+  type El = { type?: unknown; key?: unknown; props?: Record<string, unknown> };
+
+  /** Every element under the tree (depth first), expanding no components. */
+  function elements(node: unknown, out: El[] = []): El[] {
+    if (Array.isArray(node)) {
+      for (const child of node) elements(child, out);
+      return out;
+    }
+    if (node && typeof node === "object") {
+      const el = node as El;
+      out.push(el);
+      const children = el.props?.children;
+      if (children !== undefined) elements(children, out);
+    }
+    return out;
+  }
+
+  const textOf = (node: unknown) => collectText(node).join("");
+
+  function rowOf(tree: unknown, slug: string): El {
+    const tr = elements(tree).find((e) => e.type === "tr" && e.key === slug);
+    if (!tr) throw new Error(`no <tr> for ${slug}`);
+    return tr;
+  }
+
+  function badgeOf(tree: unknown, slug: string, label: string): El {
+    // the wrapper span has the same text; the badge is the innermost match
+    const badge = elements(rowOf(tree, slug))
+      .filter((e) => e.type === "span" && textOf(e) === label)
+      .pop();
+    if (!badge) throw new Error(`no "${label}" badge in ${slug}`);
+    return badge;
+  }
+
+  const fixtures = (): SourceFeedStatusRawRow[] => [
+    rawRow({
+      slug: "donmus",
+      name: "Donmuş Haber",
+      latest: stale,
+      fetch_items_count: 5,
+      fetch_newest_item_at: iso(80 * HOUR),
+    }),
+    rawRow({ slug: "engelli", name: "Engelli Haber", latest: stale, fetch_last_status: 403 }),
+    rawRow({
+      slug: "sakin",
+      name: "Sakin Haber",
+      latest: stale,
+      fetch_items_count: 5,
+      fetch_newest_item_at: iso(HOUR),
+    }),
+    rawRow({ slug: "aktif", name: "Aktif Haber" }),
+  ];
+
+  it("each silent row shows the label of its reason", () => {
+    const tree = body(fixtures());
+    expect(textOf(rowOf(tree, "donmus"))).toContain("akış donmuş");
+    expect(textOf(rowOf(tree, "engelli"))).toContain("erişim yok");
+    expect(textOf(rowOf(tree, "sakin"))).toContain("sessiz");
+    // and only its own
+    expect(textOf(rowOf(tree, "donmus"))).not.toMatch(/erişim yok|sessiz/);
+    expect(textOf(rowOf(tree, "engelli"))).not.toMatch(/akış donmuş|sessiz/);
+    expect(textOf(rowOf(tree, "sakin"))).not.toMatch(/akış donmuş|erişim yok/);
+  });
+
+  it("a row that is not silent shows a dash and no label", () => {
+    const tree = body(fixtures());
+    const text = textOf(rowOf(tree, "aktif"));
+    expect(text).toContain("—");
+    expect(text).not.toMatch(/akış donmuş|erişim yok|sessiz/);
+  });
+
+  it("the badge classes come from the AA-contrast map: sky, rose and amber, 800 in light and 300/300/400 in dark", () => {
+    const tree = body(fixtures());
+    const frozen = String(badgeOf(tree, "donmus", "akış donmuş").props?.className);
+    const blocked = String(badgeOf(tree, "engelli", "erişim yok").props?.className);
+    const quiet = String(badgeOf(tree, "sakin", "sessiz").props?.className);
+    expect(frozen).toContain("bg-sky-500/15 border-sky-500/30 text-sky-800 dark:text-sky-300");
+    expect(blocked).toContain("bg-rose-500/15 border-rose-500/30 text-rose-800 dark:text-rose-300");
+    expect(quiet).toContain("bg-amber-500/15 border-amber-500/30 text-amber-800 dark:text-amber-400");
+    // the old amber-700 / dark:amber-500 badge (below AA at 11 px) must not come back
+    for (const cls of [frozen, blocked, quiet]) {
+      expect(cls).not.toContain("text-amber-700");
+      expect(cls).not.toContain("dark:text-amber-500");
+      expect(cls).toContain("text-[11px]");
+      expect(cls).toContain("border");
+    }
+  });
+
+  it("keeps the karantinada badge next to the reason", () => {
+    const tree = body([
+      rawRow({
+        slug: "karantina",
+        name: "Karantina Haber",
+        latest: stale,
+        fetch_fail_streak: 21,
+        fetch_quarantined_until: new Date(NOW + 6 * HOUR).toISOString(),
+      }),
+    ]);
+    const text = textOf(rowOf(tree, "karantina"));
+    expect(text).toContain("erişim yok");
+    expect(text).toContain("karantinada");
+  });
+
+  it("a silent row of a legacy select (no freshness columns, reachable) reads sessiz", () => {
+    const tree = body([rawRow({ slug: "eski", name: "Eski", latest: stale })]);
+    expect(textOf(rowOf(tree, "eski"))).toContain("sessiz");
+  });
+
+  const LEGEND =
+    "Sessiz kaynakların yanındaki etiket nedenini söyler: akış donmuş — besleme yanıt veriyor ama içindeki en yeni haber 72 saatten eski, yani besleme güncellenmiyor; erişim yok — besleme son denemede alınamadı ya da karantinada; sessiz — besleme güncel, ama son 72 saatte Tayf'a yeni haber eklenmedi.";
+
+  it("shows the legend, word for word, when something is silent", () => {
+    const tree = body(fixtures());
+    const legend = elements(tree).find(
+      (e) => e.type === "p" && textOf(e).startsWith("Sessiz kaynakların yanındaki etiket"),
+    );
+    expect(legend, "legend paragraph").toBeDefined();
+    expect(textOf(legend)).toBe(LEGEND);
+  });
+
+  it("puts the three label words in <strong>, in order", () => {
+    const tree = body(fixtures());
+    const legend = elements(tree).find(
+      (e) => e.type === "p" && textOf(e).startsWith("Sessiz kaynakların yanındaki etiket"),
+    ) as El;
+    const strong = elements(legend)
+      .filter((e) => e.type === "strong")
+      .map((e) => textOf(e));
+    expect(strong).toEqual(["akış donmuş", "erişim yok", "sessiz"]);
+  });
+
+  it("places the legend under the totals paragraph and before the table", () => {
+    const text = collectText(body(fixtures())).join(" ");
+    const totals = text.indexOf("bu pencerede sessiz");
+    const legend = text.indexOf("Sessiz kaynakların yanındaki etiket");
+    const table = text.indexOf("Aktif kaynakların besleme durumu");
+    expect(totals).toBeGreaterThan(-1);
+    expect(legend).toBeGreaterThan(totals);
+    expect(table).toBeGreaterThan(legend);
+  });
+
+  it("does not show the legend when no source is silent", () => {
+    const tree = body([rawRow({ slug: "a" }), rawRow({ slug: "b" })]);
+    expect(collectText(tree).join(" ")).not.toContain("Sessiz kaynakların yanındaki etiket");
+    expect(elements(tree).filter((e) => e.type === "strong")).toHaveLength(0);
+  });
+
+  it("does not show the legend for an empty list", () => {
+    const tree = KaynakDurumBody({ rows: [], itemsPerDayPromise: Promise.resolve({}) });
+    expect(collectText(tree).join(" ")).not.toContain("Sessiz kaynakların yanındaki etiket");
+  });
+
+  it("never shows raw timestamps, the feed item count or error text", () => {
+    const tree = body(fixtures());
+    const text = collectText(tree).join(" ");
+    expect(text).not.toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+    expect(text).not.toContain("fetch_");
+    expect(text).not.toMatch(/\bundefined\b|\bnull\b|NaN/);
+  });
+
+  it("pins the literal class map and the legend in the page source", () => {
+    const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+    expect(src).toContain("bg-sky-500/15 border-sky-500/30 text-sky-800 dark:text-sky-300");
+    expect(src).toContain("bg-rose-500/15 border-rose-500/30 text-rose-800 dark:text-rose-300");
+    expect(src).toContain("bg-amber-500/15 border-amber-500/30 text-amber-800 dark:text-amber-400");
+    expect(src).toContain("SILENCE_REASON_LABEL[row.silenceReason ?? \"sessiz\"]");
+    expect(src).not.toContain("text-amber-700");
+  });
+});
+
 describe("ItemsPerDayCell", () => {
   it("A-07: formats the 7-day rate with tr-TR NumberFormat (comma decimal), streamed in behind the row", async () => {
     const el = await ItemsPerDayCell({

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 // The repo has no jsdom/testing-library (see share-button.test.tsx), so click
 // handlers cannot run through a DOM. Instead the hooks the component uses are
@@ -59,14 +60,16 @@ function ref(id: string, title: string): MergeClusterRef {
   };
 }
 
-const props = { a: ref(A, "Küme A"), b: ref(B, "Küme B"), defaultTargetId: B, origin: "thread" as const };
+type Props = Parameters<typeof ClusterMergeActions>[0];
+
+const props: Props = { a: ref(A, "Küme A"), b: ref(B, "Küme B"), defaultTargetId: B, origin: "thread" };
 
 type El = { props?: { children?: ReactNode; onClick?: () => void; className?: string } } | string | null;
 
-function render(p = props): El {
+function render(p: Props = props): El {
   h.cursor = 0;
   h.dirty = false;
-  return (ClusterMergeActions as unknown as (p: typeof props) => El)(p);
+  return (ClusterMergeActions as unknown as (p: Props) => El)(p);
 }
 
 function texts(node: unknown): string {
@@ -93,14 +96,14 @@ function find(node: unknown, label: string): { props: { onClick?: () => void; cl
   return find(el.props?.children, label);
 }
 
-async function click(label: string): Promise<El> {
-  const tree = render();
+async function click(label: string, p: Props = props): Promise<El> {
+  const tree = render(p);
   const btn = find(tree, label);
   expect(btn, `button ${label}`).not.toBeNull();
   btn!.props.onClick!();
   if (h.pending) await h.pending;
   h.pending = null;
-  return render();
+  return render(p);
 }
 
 const fetchMock = vi.fn();
@@ -190,5 +193,55 @@ describe("ClusterMergeActions", () => {
     expect(confirmMock).not.toHaveBeenCalled();
     expect(lastBody().body).toEqual({ action: "dismiss", a: A, b: B, origin: "thread" });
     expect(h.refresh).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// origin "manual" (the Olası ikiz kümeler list on /admin/birlestir). The merge
+// API accepts origin manual, the dismiss API accepts only thread|recall, so a
+// manual row must not offer "Farklı hikaye" at all. Static markup, the same
+// renderToStaticMarkup approach as api-keys-actions.test.tsx; the hooks are the
+// slot store above, so no router or transition is needed.
+// ---------------------------------------------------------------------------
+
+function markup(origin: Props["origin"]): string {
+  h.cursor = 0;
+  h.slots.length = 0;
+  return renderToStaticMarkup(<ClusterMergeActions {...props} origin={origin} />);
+}
+
+describe("ClusterMergeActions origin", () => {
+  it("manual: shows Birleştir and Yönü değiştir but not Farklı hikaye", () => {
+    const html = markup("manual");
+    expect(html).toContain("Birleştir");
+    expect(html).toContain("Yönü değiştir");
+    expect(html).not.toContain("Farklı hikaye");
+  });
+
+  it.each(["thread", "recall"] as const)("%s: shows all three buttons", (origin) => {
+    const html = markup(origin);
+    expect(html).toContain("Birleştir");
+    expect(html).toContain("Yönü değiştir");
+    expect(html).toContain("Farklı hikaye");
+  });
+
+  it("manual: the element tree has no Farklı hikaye button either", () => {
+    const tree = render({ ...props, origin: "manual" });
+    expect(find(tree, "Farklı hikaye")).toBeNull();
+    expect(find(tree, "Birleştir")).not.toBeNull();
+    expect(find(tree, "Yönü değiştir")).not.toBeNull();
+  });
+
+  it("manual: Birleştir posts action merge with origin manual", async () => {
+    await click("Birleştir", { ...props, origin: "manual" });
+    expect(lastBody().body).toEqual({ action: "merge", source: A, target: B, origin: "manual" });
+    expect(h.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("manual: never posts a dismiss", async () => {
+    await click("Yönü değiştir", { ...props, origin: "manual" });
+    await click("Birleştir", { ...props, origin: "manual" });
+    const bodies = fetchMock.mock.calls.map(([, init]) => JSON.parse((init as { body: string }).body) as { action: string });
+    expect(bodies.every((b) => b.action === "merge")).toBe(true);
   });
 });

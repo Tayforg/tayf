@@ -79,6 +79,60 @@ describe("extractHeroImageFromHtml: image URL normalisation", () => {
   });
 });
 
+// db-4 ingest half: the backfill must never store a publisher logo card or a
+// 'son dakika' stand-in either, or the very job that is meant to find the real
+// photo would write the placeholder straight back. Fixtures are the verified
+// prod rows from tests/functions/_shared/image-url.test.ts.
+describe("db-4 ingest half: placeholder og:image is rejected", () => {
+  const CNN =
+    "https://image.cnnturk.com/i/cnnturk/75/1200x675/57834bf8f0dc1e53e4fccb9d.jpg";
+  const HABERLER_COM = "https://foto.haberler.com/haber/2026/07/03/son-dakika_o.jpg";
+  const A_HABER =
+    "https://iaahbr.tmgrup.com.tr/c18248/1200/675/0/0/1200/675?u=https://iahbr.tmgrup.com.tr/Defaults/Upload/ahbr-default-1754911102530.png";
+
+  it("isValidImageUrl is false for an exact-asset placeholder", () => {
+    expect(isValidImageUrl(CNN)).toBe(false);
+  });
+
+  it("isValidImageUrl is false for a basename-pattern placeholder", () => {
+    expect(isValidImageUrl(HABERLER_COM)).toBe(false);
+    expect(
+      isValidImageUrl("https://img.piri.net/resim/imagecrop/2026/04/01/09/50/tr_son_dakika_530x530.jpg"),
+    ).toBe(false);
+  });
+
+  it("isValidImageUrl is false for a resizer URL wrapping a placeholder in u=", () => {
+    expect(isValidImageUrl(A_HABER)).toBe(false);
+  });
+
+  it("isValidImageUrl still accepts a real photo", () => {
+    expect(isValidImageUrl("https://image.cnnturk.com/i/cnnturk/75/1200x675/6710a1b2c3d4e5f607182930.jpg")).toBe(true);
+  });
+
+  it("falls through a placeholder og:image to a real twitter:image", () => {
+    const html =
+      `<meta property="og:image" content="${CNN}">` +
+      '<meta name="twitter:image" content="https://cdn.test/tw/real.jpg">';
+    expect(extractHeroImageFromHtml(html)).toBe("https://cdn.test/tw/real.jpg");
+  });
+
+  it("falls through a placeholder og:image and twitter:image to a real itemprop image", () => {
+    const html =
+      `<meta property="og:image" content="${CNN}">` +
+      `<meta name="twitter:image" content="${HABERLER_COM}">` +
+      '<meta itemprop="image" content="https://cdn.test/ip/real.jpg">';
+    expect(extractHeroImageFromHtml(html)).toBe("https://cdn.test/ip/real.jpg");
+  });
+
+  it("returns null when every candidate is a placeholder", () => {
+    const html =
+      `<meta property="og:image" content="${CNN}">` +
+      `<meta name="twitter:image" content="${HABERLER_COM}">` +
+      `<meta itemprop="image" content="${A_HABER}">`;
+    expect(extractHeroImageFromHtml(html)).toBeNull();
+  });
+});
+
 describe("isValidImageUrl keeps its rules", () => {
   it("rejects favicons, data: URIs and non-http(s) values", () => {
     expect(isValidImageUrl("https://cdn.test/favicon.png")).toBe(false);
