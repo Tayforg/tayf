@@ -8,11 +8,26 @@
 // when running under `supabase functions serve` locally with an .env file
 // that mirrors `.env.local`.
 //
-// We use `npm:@supabase/supabase-js@2` — Deno 2.x natively resolves the
+// We use `npm:@supabase/supabase-js@2.115.0` -- Deno 2.x natively resolves the
 // `npm:` specifier, so the same package the Node workers used is reused
 // here without a separate bundle step.
+//
+// The version is an EXACT pin on purpose. `deno.lock` is never committed (repo
+// rule), so a floating range (`@2`) would resolve to whatever is newest at
+// deploy time and ship it into a function that holds the service-role key.
+// The exact pin is the supply-chain control, and
+// tests/guards/edge-deps-pinned.test.ts fails the build on any floating
+// specifier. cluster-consumer/deno.json and image-consumer/deno.json carry the
+// same pin and must move with it.
+//
+// BUMP PROCEDURE (deliberate, roughly monthly):
+//   1. Change the exact version here and in the two deno.json files above.
+//   2. Run `deno check --no-lock index.ts` in all 7 functions (--no-lock keeps
+//      Deno from writing a deno.lock that must never be committed).
+//   3. Run `npm test`.
+//   4. Redeploy every function with `--no-verify-jwt`.
 
-import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2";
+import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2.115.0";
 
 function readEnv(name: string): string | undefined {
   // Deno.env.get can throw under restricted permissions; guard for safety.

@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 
-import { isLinkableUrl, isOpenStatus, statusTone } from "./corrections-list";
+import {
+  correctionsPageHref,
+  isLinkableUrl,
+  isOpenStatus,
+  statusTone,
+} from "./corrections-list";
 
 // ---------------------------------------------------------------------------
 // Pure-logic coverage for corrections-list.tsx (AGENTS.md: no render tests
@@ -67,5 +72,21 @@ describe("isLinkableUrl", () => {
 
   it("rejects an empty string", () => {
     expect(isLinkableUrl("")).toBe(false);
+  });
+});
+
+describe("correctionsPageHref", () => {
+  it("page 1 is the bare /admin URL (no query), anchored to the section", () => {
+    expect(correctionsPageHref(1)).toBe("/admin#duzeltmeler");
+  });
+
+  it("later pages carry ?duzeltme=<n> and keep the section anchor", () => {
+    expect(correctionsPageHref(2)).toBe("/admin?duzeltme=2#duzeltmeler");
+    expect(correctionsPageHref(3)).toBe("/admin?duzeltme=3#duzeltmeler");
+  });
+
+  it("treats a page below 1 as page 1", () => {
+    expect(correctionsPageHref(0)).toBe("/admin#duzeltmeler");
+    expect(correctionsPageHref(-4)).toBe("/admin#duzeltmeler");
   });
 });

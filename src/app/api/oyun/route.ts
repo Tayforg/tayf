@@ -7,6 +7,7 @@ import {
   apiServerError,
   withApiErrors,
 } from "@/lib/api/errors";
+import { checkDbThrottle, THROTTLE_POLICY } from "@/lib/api/db-throttle";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { ZONE_META, zoneOf } from "@/lib/bias/config";
 import type { BiasCategory, MediaDnaZone } from "@/types";
@@ -23,19 +24,35 @@ import type { BiasCategory, MediaDnaZone } from "@/types";
  * rejected outright (400) rather than recorded against the wrong outlet,
  * since a mismatch means a tampered or stale client.
  *
- * No PII: the `zone_guesses` insert (migration 057) carries only
+ * No PII in the row: the `zone_guesses` insert (migration 057) carries only
  * (article_id, source_id, guessed_zone, correct) — no session id, ip, user
- * agent or any other identifier is read or stored. No cookies are set.
+ * agent or any other identifier is read or stored there. No cookies are set.
+ * The throttle below (migration 118) keeps a separate, short-lived record:
+ * only an HMAC-SHA256 digest of the client key (the IP, never the
+ * User-Agent), never the raw IP, in a table nobody but the throttle function
+ * can read, swept after at most a day. Nothing links that digest to a guess.
+ *
+ * ABUSE BRAKES, outermost first:
+ *   1. The in-memory limiter below (40 requests/hour per client, per
+ *      instance): a cheap first filter. It is process-local, so on Vercel it
+ *      bounds one instance, not the fleet, and rotating IPs defeats it.
+ *   2. The DB throttle (src/lib/api/db-throttle.ts, migration 118): holds
+ *      across every instance. 40 recorded guesses/hour per client and 3 per
+ *      outlet per day per client. It fails OPEN (an unavailable throttle
+ *      never blocks the game).
+ * A guess over either DB limit is DROPPED SILENTLY: the response is
+ * byte-identical to a recorded one, so a forger cannot tell it from a
+ * success (and the honest player, who never reaches 3/outlet/day, is not
+ * affected). Together with AGREEMENT_MIN_GUESSES (src/lib/game/agreement.ts)
+ * this raises the cost of skewing an outlet's published "okur tahmini"; it
+ * does not make it poison-proof, which is why n is always shown.
  *
  * The handler reads the request body, so Next treats it as dynamic; it is never part of any
  * static/prerender path so it's always evaluated per-request.
  */
 // 40-token bucket refilling at 40/hour: roughly two full 10-round games
-// plus slack. NOTE: this limiter (src/lib/rate-limit.ts) is process-local,
-// so on Vercel it bounds a single instance, not the fleet — acceptable for
-// a game. The defence against a coordinated, distributed guessing effort
-// skewing an outlet's score is publishing per-day counts alongside any
-// aggregate figure, which is a later decision, not this limiter's job.
+// plus slack. First filter only: process-local (see ABUSE BRAKES above); the
+// fleet-wide cap is the DB throttle.
 const oyunPostLimit = createRateLimiter("oyun-post", {
   capacity: 40,
   refillPerSecond: 40 / 3600,
@@ -135,12 +152,38 @@ export const POST = withApiErrors(async (request: Request) => {
   const zone = zoneOf(bias);
   const correct = zone === guessedZone;
 
-  const { error: insertError } = await supabase.from("zone_guesses").insert({
-    article_id: articleId,
-    source_id: sourceId,
-    guessed_zone: guessedZone,
-    correct,
+  // Fleet-wide DB throttle (migration 118), sequential: the per-outlet check
+  // is only spent when the per-client hourly bucket allowed. Both fail open.
+  // A throttled guess skips the insert and still gets the normal 200 below.
+  const hourly = await checkDbThrottle({
+    ...THROTTLE_POLICY.oyunAll,
+    clientKey: key,
   });
+  let throttledBucket: string | null = hourly.allowed ? null : THROTTLE_POLICY.oyunAll.bucket;
+  if (hourly.allowed) {
+    const perOutlet = await checkDbThrottle({
+      bucket: `${THROTTLE_POLICY.oyunSourcePrefix}${sourceId.toLowerCase()}`,
+      clientKey: key,
+      limit: THROTTLE_POLICY.oyunSourceLimit,
+      windowSeconds: THROTTLE_POLICY.oyunSourceWindowSeconds,
+    });
+    if (!perOutlet.allowed) throttledBucket = "oyun:src";
+  }
+
+  if (throttledBucket !== null) {
+    // Bucket PREFIX only: never the client key, its digest or the outlet id.
+    console.warn("[oyun] guess not recorded: throttled", { bucket: throttledBucket });
+  }
+
+  const { error: insertError } =
+    throttledBucket === null
+      ? await supabase.from("zone_guesses").insert({
+          article_id: articleId,
+          source_id: sourceId,
+          guessed_zone: guessedZone,
+          correct,
+        })
+      : { error: null };
 
   if (insertError) {
     return apiServerError(insertError);

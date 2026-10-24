@@ -3,11 +3,16 @@
 // Deliberately imports nothing: no next/cache, no supabase-js, no
 // server-only, and not @/lib/validation/source-input (which pulls the bias
 // config into the edge bundle). SOURCE_SLUG_RE mirrors that module's
-// SLUG_RE and is pinned to it by source-slug-gate.test.ts.
+// SLUG_RE and is pinned to it by source-slug-gate.test.ts, and to the SQL
+// regex in migration 116 by tests/migrations/116-anon-public-rpcs.test.ts.
 //
-// Uses only the public anon key against PostgREST (sources rows are
-// anon-readable, migration 017). Every failure resolves to "unknown" so the
-// middleware fails open to the page's own soft 404.
+// Uses only the public anon key, and anon reaches data only through the two
+// bounded SECURITY DEFINER RPCs of migration 116 (GET, both STABLE):
+// source_slugs() for the full set and source_slug_exists(p_slug) for a
+// targeted probe that answers a bare JSON boolean. The sources table itself
+// is not anon-readable after migration 117. Every failure (including a probe
+// body that is not a boolean) resolves to "unknown" so the middleware fails
+// open to the page's own soft 404.
 
 export const SOURCE_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
@@ -51,13 +56,8 @@ export function createSourceSlugGate(o: GateOptions = {}): {
   // Map preserves insertion order, so the first key is the oldest.
   const negatives = new Map<string, number>();
 
-  async function get(
-    fetchFn: typeof fetch,
-    url: string,
-    anonKey: string,
-    path: string,
-  ): Promise<{ slug: string }[]> {
-    const res = await fetchFn(`${url}/rest/v1/sources?${path}`, {
+  async function getJson(fetchFn: typeof fetch, anonKey: string, requestUrl: string): Promise<unknown> {
+    const res = await fetchFn(requestUrl, {
       headers: {
         apikey: anonKey,
         Authorization: `Bearer ${anonKey}`,
@@ -65,10 +65,8 @@ export function createSourceSlugGate(o: GateOptions = {}): {
       },
       signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!res.ok) throw new Error(`sources ${res.status}`);
-    const body: unknown = await res.json();
-    if (!Array.isArray(body)) throw new Error("sources: bad body");
-    return body as { slug: string }[];
+    if (!res.ok) throw new Error(`source gate ${res.status}`);
+    return res.json();
   }
 
   /** Resolves true when a usable set (fresh or acceptably stale) exists. */
@@ -77,8 +75,9 @@ export function createSourceSlugGate(o: GateOptions = {}): {
     if (inflight) return inflight;
     inflight = (async () => {
       try {
-        const rows = await get(fetchFn, url, anonKey, "select=slug");
-        known = new Set(rows.map((r) => r.slug));
+        const body = await getJson(fetchFn, anonKey, `${url}/rest/v1/rpc/source_slugs`);
+        if (!Array.isArray(body)) throw new Error("source_slugs: bad body");
+        known = new Set((body as { slug: string }[]).map((r) => r.slug));
         loadedAt = now();
         return true;
       } catch {
@@ -110,13 +109,14 @@ export function createSourceSlugGate(o: GateOptions = {}): {
     }
 
     try {
-      const rows = await get(
+      const exists = await getJson(
         fetchFn,
-        url,
         anonKey,
-        `select=slug&slug=eq.${encodeURIComponent(slug)}&limit=1`,
+        `${url}/rest/v1/rpc/source_slug_exists?p_slug=${encodeURIComponent(slug)}`,
       );
-      if (rows.length > 0) {
+      // The RPC answers a bare JSON boolean; anything else is not an answer.
+      if (typeof exists !== "boolean") throw new Error("source_slug_exists: bad body");
+      if (exists) {
         known!.add(slug);
         return "exists";
       }

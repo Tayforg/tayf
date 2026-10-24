@@ -16,6 +16,11 @@ import {
 } from "@/components/bookmark/bookmark-snapshots";
 import { formatTurkishTimeAgo } from "@/lib/time";
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// saved_clusters (migration 116) truncates its input to 200 ids and returns at
+// most 200 rows, so send the newest 200 bookmarks.
+const SAVED_RPC_MAX_IDS = 200;
+
 interface SavedRow {
   id: string;
   title_tr: string;
@@ -41,13 +46,19 @@ export function SavedList() {
     let cancelled = false;
     (async () => {
       try {
+        // Set.add appends, so the tail of idList is the newest bookmarks.
+        // Malformed ids (hand-edited bookmark storage) cannot match a cluster and
+        // would turn the whole uuid[] argument into a 400.
+        const ids = idList
+          .filter((id) => typeof id === "string" && UUID_RE.test(id))
+          .slice(-SAVED_RPC_MAX_IDS);
+        if (ids.length === 0) {
+          setRows([]);
+          setFailed(false);
+          return;
+        }
         const { createBrowserClient } = await import("@/lib/supabase/browser");
-        const { data, error } = await createBrowserClient()
-          .from("clusters")
-          .select("id, title_tr, title_tr_neutral, article_count, bias_distribution, updated_at")
-          .in("id", idList)
-          .order("updated_at", { ascending: false })
-          .returns<SavedRow[]>();
+        const { data, error } = await createBrowserClient().rpc("saved_clusters", { p_ids: ids });
         if (cancelled) return;
         if (error) {
           console.warn("[saved] title lookup error:", error.message);
@@ -55,7 +66,7 @@ export function SavedList() {
           setRows([]);
           return;
         }
-        const loaded = data ?? [];
+        const loaded = (data ?? []) as SavedRow[];
         // Device-local change detection; effect-only (never during render).
         const snaps = readSnapshots();
         const { changes: found, toWrite } = reconcileSnapshots(loaded, snaps, new Date().toISOString());

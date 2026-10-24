@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   SNAPSHOT_KEY,
@@ -19,6 +19,17 @@ import {
   type BookmarkSnapshot,
   type StorageLike,
 } from "./bookmark-snapshots";
+
+// The browser client is mocked so defaultFetchRow can be exercised without a
+// network: `factory` counts evaluations of the module (i.e. real imports).
+const browser = vi.hoisted(() => ({
+  factory: vi.fn(),
+  createBrowserClient: vi.fn(),
+}));
+vi.mock("@/lib/supabase/browser", () => {
+  browser.factory();
+  return { createBrowserClient: browser.createBrowserClient };
+});
 
 const NOW = "2026-09-29T10:00:00.000Z";
 
@@ -256,12 +267,80 @@ describe("captureSnapshot", () => {
   });
 });
 
+describe("captureSnapshot default fetch (saved_clusters RPC, migration 116)", () => {
+  const ID = "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187b";
+  const fetchSpy = vi.fn();
+
+  beforeEach(() => {
+    vi.resetModules();
+    browser.factory.mockClear();
+    browser.createBrowserClient.mockReset();
+    fetchSpy.mockReset();
+    vi.stubGlobal("fetch", fetchSpy);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function clientReturning(result: { data: unknown; error: unknown }) {
+    // No `from` on purpose: a table read would throw and write no snapshot.
+    const rpc = vi.fn().mockResolvedValue(result);
+    browser.createBrowserClient.mockReturnValue({ rpc });
+    return rpc;
+  }
+
+  it("calls the RPC with the single id and snapshots the first returned row", async () => {
+    const rpc = clientReturning({
+      data: [{ id: ID, title_tr: "x", bias_distribution: { center: 2 }, article_count: 4, updated_at: NOW }],
+      error: null,
+    });
+    const s = memStorage();
+    await captureSnapshot(ID, { storage: s, isStillSaved: () => true, nowIso: NOW });
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith("saved_clusters", { p_ids: [ID] });
+    expect(readSnapshots(s)[ID]).toEqual(snap({ bagimsiz: 2 }, 4));
+  });
+
+  it("writes nothing on an RPC error, an empty result or a null result", async () => {
+    for (const result of [
+      { data: null, error: { message: "boom" } },
+      { data: [{ bias_distribution: {}, article_count: 1 }], error: { message: "boom" } },
+      { data: [], error: null },
+      { data: null, error: null },
+    ]) {
+      clientReturning(result);
+      const s = memStorage();
+      await captureSnapshot(ID, { storage: s, isStillSaved: () => true, nowIso: NOW });
+      expect(readSnapshots(s), JSON.stringify(result)).toEqual({});
+    }
+  });
+
+  it("returns null for a non-UUID id with no import and no network call", async () => {
+    clientReturning({ data: [{ bias_distribution: {}, article_count: 9 }], error: null });
+    for (const bad of ["not-a-uuid", "", "1; drop table clusters", "6ea8b39a-6ca7-4efe-ab30-71fdf1a2187b-extra", "x".repeat(5000)]) {
+      const s = memStorage();
+      await captureSnapshot(bad, { storage: s, isStillSaved: () => true, nowIso: NOW });
+      expect(readSnapshots(s), bad.slice(0, 20)).toEqual({});
+    }
+    expect(browser.factory).not.toHaveBeenCalled();
+    expect(browser.createBrowserClient).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("source guards", () => {
   const dir = __dirname;
   const staticImport = /^\s*import\s[^;]*from\s*["']@\/lib\/supabase\/browser["']/m;
 
   it("use-bookmarks.ts does not statically import the browser Supabase client", () => {
     expect(readFileSync(join(dir, "use-bookmarks.ts"), "utf8")).not.toMatch(staticImport);
+  });
+
+  it("bookmark-snapshots.ts reads through the saved_clusters RPC and never a table", () => {
+    const src = readFileSync(join(dir, "bookmark-snapshots.ts"), "utf8");
+    expect(src).toMatch(/\.rpc\(\s*["']saved_clusters["']\s*,\s*\{\s*p_ids:\s*\[id\]\s*\}\s*\)/);
+    // Array.from(...) is not a PostgREST table call.
+    expect(src.match(/(?<!Array)\.from\(/g)).toBeNull();
   });
 
   it("bookmark-snapshots.ts imports it only dynamically", () => {

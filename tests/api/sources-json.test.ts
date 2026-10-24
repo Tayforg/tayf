@@ -575,8 +575,8 @@ describe("GET /api/sources/[slug]", () => {
   // U-03 follow-through — aggregate reader agreement rides on the detail
   // envelope next to zone_history. Aggregate only: the route must never be
   // able to surface an individual guess.
-  it("carries reader_agreement: null when the outlet is below the 30-guess threshold", async () => {
-    dbState.guessRows = Array.from({ length: 29 }, () => ({ correct: true }));
+  it("carries reader_agreement: null when the outlet is below the 100-guess threshold", async () => {
+    dbState.guessRows = Array.from({ length: 99 }, () => ({ correct: true }));
     const { GET } = await import("@/app/api/sources/[slug]/route");
     const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
     expect(res.status).toBe(200);
@@ -586,21 +586,21 @@ describe("GET /api/sources/[slug]", () => {
     expect(body.reader_agreement).toBeNull();
   });
 
-  it("carries reader_agreement {n, share} once there are 30+ guesses", async () => {
-    dbState.guessRows = Array.from({ length: 30 }, (_, i) => ({
-      correct: i < 19,
+  it("carries reader_agreement {n, share} once there are 100+ guesses", async () => {
+    dbState.guessRows = Array.from({ length: 100 }, (_, i) => ({
+      correct: i < 63,
     }));
     const { GET } = await import("@/app/api/sources/[slug]/route");
     const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
     const body = await res.json();
 
-    expect(body.reader_agreement).toEqual({ n: 30, share: 0.633 });
+    expect(body.reader_agreement).toEqual({ n: 100, share: 0.63 });
     expect(Object.keys(body.reader_agreement).sort()).toEqual(["n", "share"]);
     expect(Array.isArray(body.zone_history)).toBe(true);
   });
 
   it("counts zone_guesses with head-only queries — never selects article_id, id or a row window", async () => {
-    dbState.guessRows = Array.from({ length: 30 }, () => ({ correct: true }));
+    dbState.guessRows = Array.from({ length: 100 }, () => ({ correct: true }));
     const { GET } = await import("@/app/api/sources/[slug]/route");
     await GET(detailRequest("haberturk"), paramsFor("haberturk"));
 
@@ -653,7 +653,7 @@ describe("GET /api/sources/[slug]", () => {
   });
 
   it("does not add reader_agreement to the registry record itself", async () => {
-    dbState.guessRows = Array.from({ length: 30 }, () => ({ correct: true }));
+    dbState.guessRows = Array.from({ length: 100 }, () => ({ correct: true }));
     const { GET } = await import("@/app/api/sources/[slug]/route");
     const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
     const body = await res.json();

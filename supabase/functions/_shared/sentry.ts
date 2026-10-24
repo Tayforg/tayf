@@ -29,11 +29,18 @@
 //     between cluster-consumer / ingest / image-consumer events) BEFORE the
 //     error is re-thrown for the outer handler to log + 500.
 //
-//   * The `npm:` specifier (`npm:@sentry/deno`) is Deno 2.x's compatibility
-//     layer for npm packages and is the canonical way to use the Sentry SDK
-//     under the Supabase Edge Function runtime. No additional install step
-//     is required — `supabase functions deploy` resolves npm: specifiers at
-//     bundle time.
+//   * The `npm:` specifier (`npm:@sentry/deno@10.73.0`) is Deno 2.x's
+//     compatibility layer for npm packages and is the canonical way to use the
+//     Sentry SDK under the Supabase Edge Function runtime. No additional
+//     install step is required — `supabase functions deploy` resolves npm:
+//     specifiers at bundle time. The specifier stays a LITERAL string inside
+//     the dynamic `import()` below so the deploy bundler can see it.
+//
+//   * The version is an EXACT pin because `deno.lock` is never committed (repo
+//     rule): a bare `npm:@sentry/deno` would resolve to whatever is newest at
+//     deploy time. tests/guards/edge-deps-pinned.test.ts enforces the pin, and
+//     tests/functions/_shared/sentry.test.ts mocks this exact specifier, so
+//     bump both together (see the bump procedure in _shared/supabase.ts).
 
 // Minimal surface of the @sentry/deno SDK we actually call. The full SDK
 // type is broad and version-volatile; typing only `init` + `captureException`
@@ -64,14 +71,14 @@ export async function initSentry(functionName: string): Promise<void> {
     // Dynamic import so the module load doesn't blow up if @sentry/deno is
     // unavailable for any reason — graceful degradation matters more than
     // strict Sentry coverage on every cold start.
-    const mod = (await import("npm:@sentry/deno")) as unknown as SentryModule;
+    const mod = (await import("npm:@sentry/deno@10.73.0")) as unknown as SentryModule;
     mod.init({
       dsn,
       // Edge Functions are short-lived; tracing adds latency without much
       // signal. Errors-only keeps the pipe narrow.
       tracesSampleRate: 0,
       // The function name tag is the dashboard filter you want most often;
-      // "which of my three Edge Functions started failing today?".
+      // "which of my seven Edge Functions started failing today?".
       initialScope: {
         tags: {
           function: functionName,

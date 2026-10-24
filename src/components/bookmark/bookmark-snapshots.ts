@@ -9,6 +9,7 @@ export const SNAPSHOT_MAX_ENTRIES = 500;
 export const MIN_NEW_SOURCES = 2;
 
 const BOOKMARKS_KEY = "tayf:bookmarks";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 const MAX_ZONE_BADGES = 2;
 
@@ -221,14 +222,14 @@ function defaultIsStillSaved(id: string): boolean {
 }
 
 async function defaultFetchRow(id: string): Promise<SnapshotRow | null> {
+  // The anon key only reaches clusters through saved_clusters (migration 116),
+  // whose argument is uuid[]: a malformed id would be a PostgREST 400 anyway,
+  // so skip the import and the request.
+  if (typeof id !== "string" || !UUID_RE.test(id)) return null;
   const { createBrowserClient } = await import("@/lib/supabase/browser");
-  const { data, error } = await createBrowserClient()
-    .from("clusters")
-    .select("id, bias_distribution, article_count")
-    .eq("id", id)
-    .maybeSingle();
-  if (error || !data) return null;
-  return data as SnapshotRow;
+  const { data, error } = await createBrowserClient().rpc("saved_clusters", { p_ids: [id] });
+  if (error) return null;
+  return ((data as SnapshotRow[] | null)?.[0] ?? null) as SnapshotRow | null;
 }
 
 /** Store a 'save' baseline for a freshly bookmarked story. Never throws. */

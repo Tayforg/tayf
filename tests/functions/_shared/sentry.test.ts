@@ -19,8 +19,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 //
 //   * sentry.ts keeps its SDK handle in a module-level variable set only by
 //     `initSentry`, so we drive initialisation through the exported API with
-//     a fake DSN rather than poking at internals. The `npm:@sentry/deno`
-//     dynamic import inside `initSentry` is intercepted with vi.mock —
+//     a fake DSN rather than poking at internals. The exact-pinned
+//     `npm:@sentry/deno@10.73.0` dynamic import inside `initSentry` (the pin
+//     is enforced by tests/guards/edge-deps-pinned.test.ts, so this mock
+//     specifier must be bumped together with it) is intercepted with vi.mock —
 //     vitest registers mocks for unresolvable specifiers when a factory is
 //     supplied, and routes the dynamic import through the mock registry
 //     before Node resolution would fail. Each test calls `loadSentryModule`
@@ -35,7 +37,7 @@ const sentryStub = vi.hoisted(() => ({
   captureException: vi.fn(),
 }));
 
-vi.mock("npm:@sentry/deno", () => sentryStub);
+vi.mock("npm:@sentry/deno@10.73.0", () => sentryStub);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,7 +101,7 @@ describe("initSentry", () => {
     await expect(mod.initSentry("cluster-consumer")).resolves.toBeUndefined();
 
     expect(envGet).toHaveBeenCalledWith("SENTRY_DSN");
-    // The mocked SDK is the only thing `import("npm:@sentry/deno")` can
+    // The mocked SDK is the only thing `import("npm:@sentry/deno@10.73.0")` can
     // resolve to here, and a successful import is immediately followed by
     // `mod.init(...)` while a failed one logs via console.error — so
     // "neither happened" means the dynamic import was never attempted.
