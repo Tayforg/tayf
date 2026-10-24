@@ -10,7 +10,7 @@ import type { JevRegressionStatus, JevRegressionRunView } from "@/lib/admin/jev-
 import type { JevGoldNext } from "@/lib/admin/jev-gold";
 import type { ArchiveExportRow } from "@/lib/admin/archive-status";
 import type { LlmBudgetStatus } from "@/lib/admin/llm-budget-status";
-import type { CorrectionRow } from "./corrections-status";
+import type { CorrectionsPage } from "./corrections-status";
 
 const NOW = Date.parse("2026-09-23T12:00:00Z");
 
@@ -90,17 +90,8 @@ function goldNext(overrides: Partial<JevGoldNext> = {}): JevGoldNext {
   return { article: null, total: 0, done: 0, ...overrides };
 }
 
-function correction(overrides: Partial<CorrectionRow> = {}): CorrectionRow {
-  return {
-    id: "c1",
-    status: "open",
-    created_at: "2026-09-23T10:00:00Z",
-    reviewed_at: null,
-    url: "https://example.com",
-    message: "test",
-    email: null,
-    ...overrides,
-  };
+function correctionsPage(overrides: Partial<CorrectionsPage> = {}): CorrectionsPage {
+  return { open: [], openTotal: 0, page: 1, pageCount: 1, closed: [], ...overrides };
 }
 
 function archiveRow(overrides: Partial<ArchiveExportRow> = {}): ArchiveExportRow {
@@ -242,16 +233,32 @@ describe("buildAttentionItems", () => {
     expect(gold.hint).toBe("Altın küme henüz oluşturulmadı");
   });
 
-  it("corrections: counts only open/new rows", () => {
-    const corrections = [
-      correction({ id: "1", status: "open" }),
-      correction({ id: "2", status: "new" }),
-      correction({ id: "3", status: "reviewed" }),
-    ];
+  it("corrections: shows the exact open total, not a page-capped count", () => {
+    const corrections = correctionsPage({ openTotal: 120, pageCount: 3 });
     const items = buildAttentionItems(baseInput({ corrections }));
     const item = items.find((i) => i.id === "corrections")!;
-    expect(item.value).toBe("2");
+    expect(item.value).toBe("120");
     expect(item.tone).toBe("warn");
+    expect(item.needsAction).toBe(true);
+    expect(item.hint).toBe("Okuyucu hata bildirimleri");
+    expect(item.hint).not.toContain("Son 50");
+    expect(item.href).toBe("#duzeltmeler");
+  });
+
+  it("corrections: no open reports is ok and needs no action", () => {
+    const items = buildAttentionItems(baseInput({ corrections: correctionsPage({ openTotal: 0 }) }));
+    const item = items.find((i) => i.id === "corrections")!;
+    expect(item.value).toBe("0");
+    expect(item.tone).toBe("ok");
+    expect(item.needsAction).toBe(false);
+  });
+
+  it("corrections: an unreadable reader (null) is muted with an em dash", () => {
+    const items = buildAttentionItems(baseInput({ corrections: null }));
+    const item = items.find((i) => i.id === "corrections")!;
+    expect(item.value).toBe("—");
+    expect(item.tone).toBe("muted");
+    expect(item.needsAction).toBe(false);
   });
 
   it("archive: today's export is ok, a 3-day-old export is bad, an empty list is warn", () => {

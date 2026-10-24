@@ -33,10 +33,15 @@ describe("createMergedClusterGate", () => {
     await gate.refreshIfStale();
     expect(f).toHaveBeenCalledTimes(1);
     const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toContain(
-      "/rest/v1/clusters?select=id,merged_into&merged_into=not.is.null&order=updated_at.desc&limit=1000",
-    );
-    expect(init.headers).toMatchObject({ apikey: "anon-key", Authorization: "Bearer anon-key" });
+    // Migration 116's bounded RPC, never the clusters table (117 revokes anon SELECT).
+    expect(url).toBe(`${ENV.url}/rest/v1/rpc/merged_cluster_map`);
+    expect(init.method ?? "GET").toBe("GET");
+    expect(init.headers).toMatchObject({
+      apikey: "anon-key",
+      Authorization: "Bearer anon-key",
+      Accept: "application/json",
+    });
+    expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(gate.lookup(A)).toBe(B);
     expect(gate.lookup(C)).toBeNull();
   });

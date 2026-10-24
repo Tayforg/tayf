@@ -10,14 +10,17 @@ function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
 }
 
-/** fetch fake: full list request has no `slug=eq.`; confirm request does. */
+/**
+ * fetch fake for migration 116's RPCs: `rpc/source_slugs` answers the full
+ * list, `rpc/source_slug_exists?p_slug=` answers a bare boolean.
+ */
 function fakeFetch(opts: { all?: string[]; confirm?: Record<string, boolean> }) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const u = String(input);
-    const m = u.match(/slug=eq\.([^&]+)/);
+    const m = u.match(/rpc\/source_slug_exists\?p_slug=([^&]+)/);
     if (m) {
       const slug = decodeURIComponent(m[1]);
-      return json(opts.confirm?.[slug] ? [{ slug }] : []);
+      return json(opts.confirm?.[slug] === true);
     }
     return json((opts.all ?? []).map((slug) => ({ slug })));
   });
@@ -166,20 +169,61 @@ describe("createSourceSlugGate", () => {
     expect(f.mock.calls.length).toBe(before + 1);
   });
 
-  it("sends the documented URLs and headers, encoding the slug", async () => {
+  it("sends the documented RPC URLs and headers", async () => {
     const f = fakeFetch({ all: [] });
     const { gate } = mk(f);
     await gate.check("cnn-turk");
     const [listUrl, listInit] = f.mock.calls[0] as unknown as [string, RequestInit];
-    expect(listUrl).toBe(`${URL_}/rest/v1/sources?select=slug`);
+    expect(listUrl).toBe(`${URL_}/rest/v1/rpc/source_slugs`);
     expect(listInit.headers).toMatchObject({
       apikey: KEY,
       Authorization: `Bearer ${KEY}`,
       Accept: "application/json",
     });
     expect(listInit.signal).toBeInstanceOf(AbortSignal);
-    const [confirmUrl] = f.mock.calls[1] as unknown as [string];
-    expect(confirmUrl).toBe(`${URL_}/rest/v1/sources?select=slug&slug=eq.cnn-turk&limit=1`);
+    const [confirmUrl, confirmInit] = f.mock.calls[1] as unknown as [string, RequestInit];
+    expect(confirmUrl).toBe(`${URL_}/rest/v1/rpc/source_slug_exists?p_slug=cnn-turk`);
+    expect(confirmInit.headers).toMatchObject({ apikey: KEY, Authorization: `Bearer ${KEY}` });
+    expect(confirmInit.signal).toBeInstanceOf(AbortSignal);
+    // Never the sources table: 117 revokes anon SELECT on it.
+    for (const [u] of f.mock.calls as unknown as [string][]) {
+      expect(u).not.toContain("/rest/v1/sources");
+    }
+  });
+
+  it("treats a non-boolean probe body as unknown and does not negative-cache it", async () => {
+    for (const bad of [[], {}, [true], "true", null, 1, { source_slug_exists: false }]) {
+      let probes = 0;
+      const f = vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("source_slug_exists")) {
+          probes++;
+          return json(bad);
+        }
+        return json([{ slug: "a" }]);
+      });
+      const { gate } = mk(f as unknown as ReturnType<typeof fakeFetch>);
+      expect(await gate.check("zzz"), JSON.stringify(bad)).toBe("unknown");
+      expect(await gate.check("zzz"), JSON.stringify(bad)).toBe("unknown");
+      expect(probes).toBe(2); // not cached as missing
+    }
+  });
+
+  it("treats a non-array list body as unknown", async () => {
+    const f = vi.fn(async () => json({ message: "nope" }));
+    const g = createSourceSlugGate({ getEnv: ENV, fetchImpl: f as unknown as typeof fetch });
+    expect(await g.check("a")).toBe("unknown");
+  });
+
+  it("a probe answering true joins the set; false is negative-cached", async () => {
+    const f = fakeFetch({ all: ["a"], confirm: { fresh: true } });
+    const { gate } = mk(f);
+    expect(await gate.check("fresh")).toBe("exists");
+    expect(await gate.check("gone")).toBe("missing");
+    const probes = () => f.mock.calls.filter(([u]) => String(u).includes("source_slug_exists")).length;
+    expect(probes()).toBe(2);
+    expect(await gate.check("fresh")).toBe("exists");
+    expect(await gate.check("gone")).toBe("missing");
+    expect(probes()).toBe(2);
   });
 });
 

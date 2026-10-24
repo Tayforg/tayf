@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { apiBadRequest, apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
+import { checkDbThrottle, THROTTLE_POLICY } from "@/lib/api/db-throttle";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 
 // Corrections/objections: 5-token bucket refilling at 1 token / 12min (5/hour).
 // Mirrors the newsletter-post limiter shape so mutating routes share one
-// rate-limit pattern.
+// rate-limit pattern. First filter only: it is process-local, so on Vercel it
+// bounds one instance, not the fleet. The fleet-wide cap is the DB throttle
+// (migration 118) checked just before the insert below.
 const correctionsPostLimit = createRateLimiter("corrections-post", {
   capacity: 5,
   refillPerSecond: 5 / 3600,
@@ -26,7 +29,8 @@ function isValidUrl(value: string): boolean {
 }
 
 export const POST = withApiErrors(async (request: Request) => {
-  const rl = correctionsPostLimit(clientKey(request));
+  const key = clientKey(request);
+  const rl = correctionsPostLimit(key);
   if (!rl.allowed) {
     return apiTooManyRequests(rl.retryAfterMs);
   }
@@ -68,6 +72,19 @@ export const POST = withApiErrors(async (request: Request) => {
   const clusterIdRaw = typeof b.clusterId === "string" ? b.clusterId.trim() : "";
   if (clusterIdRaw.length > 0 && !UUID_RE.test(clusterIdRaw)) {
     return apiBadRequest("Invalid clusterId");
+  }
+
+  // Fleet-wide DB throttle (migration 118): 5 accepted submissions/hour per
+  // client across every instance. It runs only after the honeypot and all
+  // validation, so a bot or a malformed body never spends a DB round-trip,
+  // and it fails OPEN (a throttle outage never blocks a reader's correction).
+  // Same 429 shape as the in-memory limiter above.
+  const throttle = await checkDbThrottle({
+    ...THROTTLE_POLICY.corrections,
+    clientKey: key,
+  });
+  if (!throttle.allowed) {
+    return apiTooManyRequests(throttle.retryAfterSeconds * 1000);
   }
 
   const supabase = createServerClient();

@@ -21,8 +21,10 @@ describe("saved-list.tsx source", () => {
 describe("saved-list.tsx change badges", () => {
   const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
 
-  it("selects bias_distribution", () => {
-    expect(src).toMatch(/\.select\("[^"]*bias_distribution[^"]*"\)/);
+  it("reads rows through the saved_clusters RPC (bias_distribution is in its return shape)", () => {
+    expect(src.match(/\.rpc\("saved_clusters"/g)).toHaveLength(1);
+    expect(src).toMatch(/\.rpc\("saved_clusters",\s*\{\s*p_ids:\s*ids\s*\}\)/);
+    expect(src).toContain("bias_distribution: unknown");
   });
 
   it("imports reconcileSnapshots and changeBadgeLabels", () => {
@@ -56,7 +58,33 @@ describe("saved-list.tsx reading-diet card", () => {
     expect(src).not.toMatch(/\btrack\(/);
   });
 
-  it("still issues exactly one clusters query (no new fetch for the diet)", () => {
-    expect(src.match(/\.from\("clusters"\)/g)).toHaveLength(1);
+  it("still issues exactly one lookup, now the saved_clusters RPC (no new fetch for the diet)", () => {
+    expect(src.match(/\.rpc\("saved_clusters"/g)).toHaveLength(1);
+    // Array.from(...) is not a PostgREST table call.
+    expect(src.match(/(?<!Array)\.from\(/g)).toBeNull();
+  });
+});
+
+describe("saved-list.tsx RPC input hygiene", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+
+  it("sends only well-formed UUIDs, capped at the newest 200 (the RPC's own cap)", () => {
+    expect(src).toMatch(/const SAVED_RPC_MAX_IDS = 200;/);
+    expect(src).toMatch(
+      /const ids = idList\s*\.filter\(\(id\) => typeof id === "string" && UUID_RE\.test\(id\)\)\s*\.slice\(-SAVED_RPC_MAX_IDS\);/,
+    );
+  });
+
+  it("short-circuits an empty id list without importing the client", () => {
+    const emptyAt = src.indexOf("ids.length === 0");
+    const importAt = src.indexOf(`await import("@/lib/supabase/browser")`);
+    expect(emptyAt).toBeGreaterThan(-1);
+    expect(importAt).toBeGreaterThan(emptyAt);
+    expect(src.slice(emptyAt, importAt)).toMatch(/setRows\(\[\]\);[\s\S]*setFailed\(false\);[\s\S]*return;/);
+  });
+
+  it("keeps the fail-open error copy and prunes snapshots against the full saved list", () => {
+    expect(src).toContain("Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.");
+    expect(src).toContain("pruneSnapshots(idList);");
   });
 });

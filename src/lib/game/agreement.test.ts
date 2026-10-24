@@ -98,8 +98,8 @@ function states(): BuilderState[] {
 }
 
 describe("AGREEMENT_MIN_GUESSES", () => {
-  it("is 30 — the publication threshold agreed with the deck (U-03)", () => {
-    expect(AGREEMENT_MIN_GUESSES).toBe(30);
+  it("is 100 — raised from 30 so a forged-guess flood from one client cannot publish a number alone (web-3)", () => {
+    expect(AGREEMENT_MIN_GUESSES).toBe(100);
   });
 });
 
@@ -108,21 +108,25 @@ describe("summariseCounts", () => {
     expect(summariseCounts(0, 0)).toBeNull();
   });
 
-  it("returns null one guess below the threshold (29 guesses)", () => {
-    expect(summariseCounts(29, 29)).toBeNull();
+  it("returns null one guess below the threshold (99 guesses)", () => {
+    expect(summariseCounts(99, 99)).toBeNull();
   });
 
-  it("publishes exactly at the threshold: 30 guesses, 19 correct -> 0.633", () => {
-    expect(summariseCounts(30, 19)).toEqual({ n: 30, share: 0.633 });
+  it("does not publish the old 30-guess threshold any more", () => {
+    expect(summariseCounts(30, 19)).toBeNull();
   });
 
-  it("rounds the share to 3 decimals (2/3 of 60 -> 0.667)", () => {
-    expect(summariseCounts(60, 40)).toEqual({ n: 60, share: 0.667 });
+  it("publishes exactly at the threshold: 100 guesses, 63 correct -> 0.63", () => {
+    expect(summariseCounts(100, 63)).toEqual({ n: 100, share: 0.63 });
+  });
+
+  it("rounds the share to 3 decimals (2/3 of 300 -> 0.667)", () => {
+    expect(summariseCounts(300, 200)).toEqual({ n: 300, share: 0.667 });
   });
 
   it("handles the boundary shares 0 and 1 without NaN", () => {
-    expect(summariseCounts(30, 0)).toEqual({ n: 30, share: 0 });
-    expect(summariseCounts(30, 30)).toEqual({ n: 30, share: 1 });
+    expect(summariseCounts(100, 0)).toEqual({ n: 100, share: 0 });
+    expect(summariseCounts(100, 100)).toEqual({ n: 100, share: 1 });
   });
 
   it("publishes the true total, not a capped window (120k guesses)", () => {
@@ -130,20 +134,20 @@ describe("summariseCounts", () => {
   });
 
   it("never publishes a share above 1 or below 0", () => {
-    expect(summariseCounts(30, 45)).toEqual({ n: 30, share: 1 });
-    expect(summariseCounts(30, -5)).toEqual({ n: 30, share: 0 });
+    expect(summariseCounts(100, 150)).toEqual({ n: 100, share: 1 });
+    expect(summariseCounts(100, -5)).toEqual({ n: 100, share: 0 });
   });
 
   it("treats a non-finite count as unpublishable / zero", () => {
     expect(summariseCounts(Number.NaN, 10)).toBeNull();
-    expect(summariseCounts(30, Number.NaN)).toEqual({ n: 30, share: 0 });
+    expect(summariseCounts(100, Number.NaN)).toEqual({ n: 100, share: 0 });
   });
 });
 
 describe("getSourceAgreement", () => {
   it("counts instead of windowing: two exact head counts, no limit, no order", async () => {
-    fixture.total = 30;
-    fixture.correct = 19;
+    fixture.total = 100;
+    fixture.correct = 63;
 
     await getSourceAgreement("src-1");
 
@@ -166,7 +170,7 @@ describe("getSourceAgreement", () => {
   });
 
   it("never selects identifying columns (no article_id, no id, no *)", async () => {
-    fixture.total = 30;
+    fixture.total = 100;
 
     await getSourceAgreement("src-1");
 
@@ -180,21 +184,21 @@ describe("getSourceAgreement", () => {
     }
   });
 
-  it("returns null below the threshold (29 guesses) without a second query", async () => {
-    fixture.total = 29;
-    fixture.correct = 20;
+  it("returns null below the threshold (99 guesses) without a second query", async () => {
+    fixture.total = 99;
+    fixture.correct = 60;
 
     await expect(getSourceAgreement("src-1")).resolves.toBeNull();
     expect(states()).toHaveLength(1);
   });
 
-  it("returns {n:30, share:0.633} for 30 guesses with 19 correct", async () => {
-    fixture.total = 30;
-    fixture.correct = 19;
+  it("returns {n:100, share:0.63} for 100 guesses with 63 correct", async () => {
+    fixture.total = 100;
+    fixture.correct = 63;
 
     await expect(getSourceAgreement("src-1")).resolves.toEqual({
-      n: 30,
-      share: 0.633,
+      n: 100,
+      share: 0.63,
     });
   });
 
@@ -274,8 +278,8 @@ const TIMEOUT_ERROR = {
 
 describe("getSourceAgreement reader cap", () => {
   it("uses exactly one capped reader client for both count queries", async () => {
-    fixture.total = 30;
-    fixture.correct = 19;
+    fixture.total = 100;
+    fixture.correct = 63;
 
     await getSourceAgreement("src-1");
 
@@ -286,8 +290,8 @@ describe("getSourceAgreement reader cap", () => {
 
 describe("getSourceAgreement cache lifetime", () => {
   it("a published result calls cacheLife exactly once with source-directory", async () => {
-    fixture.total = 30;
-    fixture.correct = 19;
+    fixture.total = 100;
+    fixture.correct = 63;
 
     await getSourceAgreement("src-1");
 
@@ -296,7 +300,7 @@ describe("getSourceAgreement cache lifetime", () => {
   });
 
   it("below the threshold is a legitimate result: source-directory, not minutes", async () => {
-    fixture.total = 29;
+    fixture.total = 99;
 
     await expect(getSourceAgreement("src-1")).resolves.toBeNull();
 
@@ -319,7 +323,7 @@ describe("getSourceAgreement cache lifetime", () => {
 
   it("an error on the second (correct = true) count also returns null and is cached for minutes", async () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
-    fixture.total = 30;
+    fixture.total = 100;
     fixture.errorOnCorrect = { message: "statement timeout" };
 
     await expect(getSourceAgreement("src-1")).resolves.toBeNull();

@@ -9,7 +9,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mutable so a single test can force the insert to fail (DB-error branch)
 // without needing a second fake instance / module reset.
-const dbState = vi.hoisted(() => ({ forceInsertError: false }));
+const dbState = vi.hoisted(() => ({
+  forceInsertError: false,
+  // Drives the `api_throttle` RPC fixture (migration 118): allow, deny (the
+  // per-client hourly bucket is full -> 120 s retry), or error (the RPC
+  // itself fails; the route must fail OPEN).
+  throttle: "allow" as "allow" | "deny" | "error",
+}));
 
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
@@ -19,6 +25,16 @@ const supabaseFake = await vi.hoisted(async () => {
         dbState.forceInsertError
           ? { data: null, error: { message: "boom" } }
           : { data: [], error: null },
+    },
+    rpc: {
+      api_throttle: () => {
+        if (dbState.throttle === "error") {
+          return { data: null, error: { code: "57014", message: "statement timeout" } };
+        }
+        return dbState.throttle === "deny"
+          ? { data: [{ allowed: false, retry_after_seconds: 120 }], error: null }
+          : { data: [{ allowed: true, retry_after_seconds: 0 }], error: null };
+      },
     },
   });
 });
@@ -40,16 +56,26 @@ const ORIGINAL_ENV = { ...process.env };
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
+  // The DB throttle HMACs the client key with this; without it the throttle
+  // degrades (fail-open) and never calls the RPC.
+  process.env.ADMIN_SESSION_SECRET = "corrections-test-secret-0123456789";
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
   dbState.forceInsertError = false;
+  dbState.throttle = "allow";
+  vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
 afterEach(() => {
-  for (const k of ["NEXT_PUBLIC_SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
+  for (const k of [
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "ADMIN_SESSION_SECRET",
+  ]) {
     if (k in ORIGINAL_ENV) process.env[k] = ORIGINAL_ENV[k] as string;
     else delete process.env[k];
   }
+  vi.restoreAllMocks();
   vi.resetModules();
 });
 
@@ -215,5 +241,147 @@ describe("POST /api/corrections", () => {
       email: "reader@example.com",
       cluster_id: clusterId,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fleet-wide DB throttle (migration 118, web-2). The in-memory limiter above
+// is the first filter; behind it, 5 accepted submissions per hour per client
+// are enforced in Postgres so the cap holds across every Vercel instance. It
+// runs AFTER the honeypot and all validation, so a bot or a malformed body
+// never spends (or learns about) a DB round-trip.
+// ---------------------------------------------------------------------------
+
+function throttleCalls() {
+  return supabaseFake.calls.rpc.filter((c) => c.name === "api_throttle");
+}
+
+describe("POST /api/corrections DB throttle (migration 118)", () => {
+  it("denied -> 429 via apiTooManyRequests with Retry-After from the DB, and no insert", async () => {
+    dbState.throttle = "deny";
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(VALID_BODY, "198.51.100.40"));
+
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("120");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      details: { retryAfterMs: 120_000 },
+    });
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(0);
+  });
+
+  it("the DB 429 has the same body shape as the in-memory 429", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const ip = "198.51.100.41";
+    for (let i = 0; i < 5; i++) await mod.POST(makeRequest(VALID_BODY, ip));
+    const inMemory = await mod.POST(makeRequest(VALID_BODY, ip));
+    expect(inMemory.status).toBe(429);
+
+    dbState.throttle = "deny";
+    const viaDb = await mod.POST(makeRequest(VALID_BODY, "198.51.100.42"));
+    expect(viaDb.status).toBe(429);
+
+    const a = await inMemory.json();
+    const b = await viaDb.json();
+    expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+    expect(Object.keys(a.details).sort()).toEqual(Object.keys(b.details).sort());
+    expect(a.error).toBe(b.error);
+    expect(inMemory.headers.get("Cache-Control")).toBe(viaDb.headers.get("Cache-Control"));
+  });
+
+  it("the in-memory limiter stays the first filter: its 429 never reaches the DB", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const ip = "198.51.100.43";
+    for (let i = 0; i < 5; i++) await mod.POST(makeRequest(VALID_BODY, ip));
+    expect(throttleCalls()).toHaveLength(5);
+
+    const res = await mod.POST(makeRequest(VALID_BODY, ip));
+    expect(res.status).toBe(429);
+    expect(throttleCalls()).toHaveLength(5);
+  });
+
+  it("allowed -> 201 and the row is inserted", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(VALID_BODY, "198.51.100.44"));
+    expect(res.status).toBe(201);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(1);
+  });
+
+  it("fails OPEN: an RPC error still inserts and returns 201", async () => {
+    dbState.throttle = "error";
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(VALID_BODY, "198.51.100.45"));
+    expect(res.status).toBe(201);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(1);
+  });
+
+  it("fails OPEN: a missing ADMIN_SESSION_SECRET skips the RPC and still inserts", async () => {
+    delete process.env.ADMIN_SESSION_SECRET;
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(VALID_BODY, "198.51.100.46"));
+    expect(res.status).toBe(201);
+    expect(throttleCalls()).toHaveLength(0);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(1);
+  });
+
+  it("uses the 'corrections:all' bucket at 5 per hour and sends only an HMAC digest, never the IP", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    await mod.POST(makeRequest(VALID_BODY, "203.0.113.1"));
+
+    const calls = throttleCalls();
+    expect(calls).toHaveLength(1);
+    const args = calls[0]?.args as Record<string, unknown>;
+    expect(args).toMatchObject({
+      p_bucket: "corrections:all",
+      p_limit: 5,
+      p_window_seconds: 3600,
+    });
+    expect(args.p_key_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(args)).not.toContain("203.0.113.1");
+  });
+
+  it("honeypot: returns 200 and makes no throttle call", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(
+      makeRequest({ ...VALID_BODY, website: "http://spam.example" }, "198.51.100.47"),
+    );
+    expect(res.status).toBe(200);
+    expect(throttleCalls()).toHaveLength(0);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(0);
+  });
+
+  it("an invalid body returns 400 and makes no throttle call", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const bad: unknown[] = [
+      { ...VALID_BODY, message: "too short" },
+      { ...VALID_BODY, url: "not-a-url" },
+      { ...VALID_BODY, email: "not-an-email" },
+      { ...VALID_BODY, clusterId: "not-a-uuid" },
+      "just a string",
+    ];
+    for (const [i, body] of bad.entries()) {
+      const res = await mod.POST(makeRequest(body, `198.51.100.${50 + i}`));
+      expect(res.status).toBe(400);
+    }
+    const malformed = await mod.POST(
+      new Request("http://example.com/api/corrections", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-forwarded-for": "198.51.100.60" },
+        body: "{not json",
+      }),
+    );
+    expect(malformed.status).toBe(400);
+
+    expect(throttleCalls()).toHaveLength(0);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(0);
+  });
+
+  it("a database insert failure after an allowed throttle is still a 500", async () => {
+    dbState.forceInsertError = true;
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(VALID_BODY, "198.51.100.61"));
+    expect(res.status).toBe(500);
   });
 });

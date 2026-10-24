@@ -1,21 +1,34 @@
 // supabase/functions/_shared/auth.ts
 //
-// Defence-in-depth bearer auth for Edge Function handlers. Supabase already
-// gates these functions behind a service-role JWT (the `--no-verify-jwt` deploy
-// flag is intentionally NOT used), but we layer an explicit constant-time
-// check here so that:
+// Bearer auth for Edge Function handlers.
 //
-//   1. A misdeploy (someone passes `--no-verify-jwt` by accident) does not
-//      silently expose the worker endpoints.
-//   2. Tests against a local supabase stack can exercise the auth path with
+// THIS HANDLER IS THE ONLY AUTH GATE. All 7 Edge Functions run with
+// `verify_jwt = false` and are deployed with `--no-verify-jwt`
+// (docs/migration-guide.md), so the Supabase gateway does NOT check a JWT in
+// front of them: every request that reaches a function reaches
+// `requireServiceRoleBearer` first, and nothing else stands between the public
+// internet and the worker endpoints. Never remove this call from a handler,
+// never move it behind method checks or body parsing, and never weaken it
+// (e.g. accept an empty secret, skip the comparison, or log the presented
+// token).
+//
+// Beyond being the gate, the explicit check gives us:
+//
+//   1. Tests against a local supabase stack can exercise the auth path with
 //      a known-good bearer token without involving JWT signing.
-//   3. The handler returns a deterministic JSON-shaped 401 rather than the
-//      generic gateway error, so observability dashboards can distinguish
-//      "auth failed" from "function crashed".
+//   2. A deterministic JSON-shaped 401 rather than the generic gateway error,
+//      so observability dashboards can distinguish "auth failed" from
+//      "function crashed".
 //
-// The expected bearer value is `SUPABASE_SERVICE_ROLE_KEY` from the runtime
-// env. Comparison is constant-time via byte-by-byte XOR over the UTF-8
-// encoding so a timing oracle cannot leak the key prefix.
+// The expected bearer value is `SUPABASE_SERVICE_ROLE_KEY` (or the operator's
+// `WORKER_CRON_SECRET`) from the runtime env. Comparison is constant-time via
+// byte-by-byte XOR over the UTF-8 encoding so a timing oracle cannot leak the
+// key prefix.
+//
+// The gate runs BEFORE authentication, so it is also reachable by anyone: its
+// own cost must not be attacker-controlled. The header is therefore
+// length-capped (MAX_AUTHORIZATION_LENGTH) before any regex runs, and the
+// parse itself (`parseBearer`) is linear.
 
 const JSON_HEADERS = { "content-type": "application/json" } as const;
 
@@ -42,6 +55,36 @@ function constantTimeEqual(a: string, b: string): boolean {
     diff |= ab[i]! ^ bb[i]!;
   }
   return diff === 0;
+}
+
+/**
+ * Longest `Authorization` header we are willing to parse. Real values are a
+ * scheme plus a service-role key or cron secret (a few hundred characters at
+ * most, `sb_secret_*` keys are ~40); 1 KiB leaves ample headroom while making
+ * the work an unauthenticated caller can force constant-bounded.
+ */
+export const MAX_AUTHORIZATION_LENGTH = 1024;
+
+// `\s` and `\S` are complementary classes, so no two adjacent quantifiers can
+// match the same character and the regex engine has exactly one way to split
+// any input: matching and failing are both linear. (The previous
+// `Bearer\s+(.+?)\s*$` let `.+?` and the trailing `\s*` fight over every
+// space in a long run: quadratic, ~1 s at 50k characters.)
+const BEARER_RE = /^\s*Bearer\s+(\S+)\s*$/i;
+
+/**
+ * Extracts the token from an `Authorization: Bearer <token>` header value, or
+ * returns `null` if the value is not exactly a Bearer scheme followed by one
+ * whitespace-free token. The scheme is case-insensitive (RFC 6750), any run of
+ * whitespace may separate scheme and token, and surrounding whitespace is
+ * ignored so multi-space pastes from operator runbooks still validate.
+ *
+ * Pure and linear in the header length; callers are still expected to cap the
+ * length first (see `MAX_AUTHORIZATION_LENGTH`).
+ */
+export function parseBearer(header: string): string | null {
+  const match = BEARER_RE.exec(header);
+  return match ? (match[1] ?? null) : null;
 }
 
 /**
@@ -79,14 +122,18 @@ export function requireServiceRoleBearer(req: Request): Response | null {
     return unauthorized("missing-authorization");
   }
 
-  // RFC 6750 scheme is case-insensitive. Trim once so multi-space pastes
-  // from operator runbooks still validate.
-  const match = /^\s*Bearer\s+(.+?)\s*$/i.exec(header);
-  if (!match) {
+  // Length cap FIRST, before any regex touches attacker-controlled input.
+  if (header.length > MAX_AUTHORIZATION_LENGTH) {
     return unauthorized("malformed-authorization");
   }
-  const presented = match[1] ?? "";
 
+  const presented = parseBearer(header);
+  if (presented === null) {
+    return unauthorized("malformed-authorization");
+  }
+
+  // Both comparisons are evaluated unconditionally (no `||` short-circuit
+  // between them) so response time does not reveal which secret matched.
   const okService = serviceKey.length > 0 && constantTimeEqual(presented, serviceKey);
   const okCron = cronSecret.length > 0 && constantTimeEqual(presented, cronSecret);
   if (!okService && !okCron) {

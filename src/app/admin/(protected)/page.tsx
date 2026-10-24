@@ -19,7 +19,7 @@ import {
 import { getFramingVoteStatus } from "@/lib/admin/framing-votes";
 import { getLlmBudgetStatus } from "@/lib/admin/llm-budget-status";
 import { getApiKeysStatus } from "@/lib/admin/api-keys-status";
-import { getRecentCorrections } from "@/lib/admin/corrections-status";
+import { getCorrectionsPage, parseCorrectionsPage } from "@/lib/admin/corrections-status";
 import { getJevGoldNext } from "@/lib/admin/jev-gold";
 import { getJevAdmissionStatus } from "@/lib/admin/jev-admission";
 import { buildAttentionItems, countNeedsAction } from "@/lib/admin/attention";
@@ -43,13 +43,21 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-export default async function AdminPage() {
+export default async function AdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ duzeltme?: string | string[] }>;
+}) {
   // Redirects to /admin/login if the session cookie is missing, expired, or
   // the HMAC doesn't match. All data fetching below is server-side; the
   // /api/admin route AdminPanel hits re-checks the session on every
   // mutating call, so the gate here is "nice redirect" layer, not the sole
   // security boundary. See (protected)/layout.tsx's docblock.
   await requireAdminSession();
+
+  // ?duzeltme=<n> pages the open corrections list (oldest first). Anything
+  // that is not a plain positive integer is page 1 (parseCorrectionsPage).
+  const { duzeltme } = await searchParams;
 
   const [
     archive,
@@ -77,7 +85,7 @@ export default async function AdminPage() {
     getFramingVoteStatus(),
     getLlmBudgetStatus(),
     getApiKeysStatus(),
-    getRecentCorrections(),
+    getCorrectionsPage(parseCorrectionsPage(duzeltme)),
     getJevGoldNext(1),
     getJevGoldNext(2),
     getJevAdmissionStatus(),

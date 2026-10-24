@@ -18,8 +18,17 @@ import { createReaderClient } from "@/lib/supabase/server";
 //      "doğruluk" (accuracy). It measures how often readers guessed the zone
 //      Tayf assigned — agreement with Tayf, not correctness of either.
 //
-// Gameability: repeated guesses can move the number, which is why /api/oyun
-// is rate limited and why the n is always shown next to the share.
+// Gameability: repeated guesses can move the number, so three things bound it.
+// /api/oyun caps recorded guesses at 3 per outlet per client per day, and 40
+// per hour per client in total, in the database (migration 118), so the cap
+// holds across every Vercel instance; the threshold is 100 guesses; and the n
+// is always shown next to the share. With those caps one client needs ~34
+// days from one IP (100 / 3 per day), or ~34 distinct IPs in a day, to fill
+// the threshold for an outlet ALONE. That raises the bar - it is NOT
+// poison-proof: a patient or distributed effort can still move a small-n
+// figure, which is exactly why n is never hidden. Weighting by distinct
+// clients was considered and rejected: it would need a per-guess identifier
+// in `zone_guesses`, and this table deliberately stores none.
 //
 // Counting: `n` is the *total* number of guesses for the source, taken from
 // two `count: "exact", head: true` queries (all guesses, and the ones with
@@ -27,7 +36,10 @@ import { createReaderClient } from "@/lib/supabase/server";
 // strictly aggregate and strictly cheaper than pulling a row window — and
 // the published n can never claim to be a total it is not.
 
-export const AGREEMENT_MIN_GUESSES = 30;
+// Raised from 30 to 100 (web-3): at 3 recorded guesses per outlet per client
+// per day, 30 guesses was ten client-days of effort; 100 makes a lone forger
+// wait ~34 days or recruit ~34 IPs.
+export const AGREEMENT_MIN_GUESSES = 100;
 
 export interface ReaderAgreement {
   /** Total number of guesses recorded for the source. */

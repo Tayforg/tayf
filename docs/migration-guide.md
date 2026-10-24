@@ -2590,3 +2590,57 @@ Apply `114_sources_newly_dark.sql`; the new row is described in `docs/ops-heartb
 
 Re-creates `ops_health_report()` with row 13 `sources_newly_dark` looking at the last 24 hours instead of 12 (still at least 50 articles in the 14 days before, baseline still excluded); every other row, the signature and the grants are unchanged. One transaction, safe to re-apply, no Edge Function or app deploy.
 Apply `115_sources_newly_dark_24h.sql`. Rollback: re-apply the `ops_health_report()` block (function, comment, revoke, grant) of `114_sources_newly_dark.sql`, then `delete from supabase_migrations.schema_migrations where version = '115';`.
+
+## Anon yüzeyi (116/117) devreye alma: APPLY 116, DEPLOY THE APP, VERIFY, THEN APPLY 117
+
+The public anon key (shipped to every browser and to the edge middleware) could `SELECT` 23 public relations and use 6 sequences (read-only prod facts, 2026-10-24; see the header of `117_revoke_anon_surface.sql`). The app only ever needed three things from it: resolving `/saved` bookmark ids, the merged-cluster 308 map and the `/source/<slug>` existence gate. After this rollout anon reaches data **only** through four bounded, read-only `SECURITY DEFINER` RPCs; nothing else is granted.
+
+- `116_anon_public_rpcs.sql` (additive): `saved_clusters(uuid[])` (input truncated to 200 ids, at most 200 rows), `merged_cluster_map()` (newest 1000 merges), `source_slugs()` (at most 2000), `source_slug_exists(text)` (regex `^[a-z0-9][a-z0-9-]{0,63}$`, one boolean). `language sql stable`, `search_path = ''`, executable by `anon` and `service_role` only, never `authenticated`. Ends with `notify pgrst, 'reload schema'`.
+- `117_revoke_anon_surface.sql` (revoke only): `revoke all on all tables / all sequences in schema public from anon, authenticated`, `trends_daily_bias_counts` becomes `security_invoker`, `alter default privileges for role postgres in schema public revoke ...` for tables, sequences and functions, and `revoke execute` on `public.rls_auto_enable()` (the only other definer function anon could run; guarded, so it also applies where it does not exist). `service_role` and `postgres` are never referenced.
+- App: `saved-list.tsx` and `bookmark-snapshots.ts` call `.rpc("saved_clusters", ...)`; `merged-cluster-gate.ts` and `source-slug-gate.ts` GET `/rest/v1/rpc/...`. Fail-open behaviour, timeouts and caches are unchanged.
+
+### Order matters (each step is its own deploy)
+
+1. **Apply `116`** (SQL editor or `supabase db push`). Nothing calls the functions yet, so this is harmless. Check: `select p.oid::regprocedure from pg_proc p where p.pronamespace = 'public'::regnamespace and p.proname in ('saved_clusters','merged_cluster_map','source_slugs','source_slug_exists');` returns four rows.
+2. **Deploy the app** (merge to `main`, Vercel builds it). No Edge Function redeploy is involved: the gates run in the Next.js edge middleware.
+3. **Verify, still before 117** (the old grants are still in place, so a failure here is not an outage):
+   - `/saved` with at least one bookmarked story lists it with its title, source count and time-ago. In the browser network tab the lookup is `POST /rest/v1/rpc/saved_clusters` (200), and there is no request to `/rest/v1/clusters`.
+   - A merged cluster: `curl -sI https://www.tayfhaber.com/cluster/<merged-id>` answers `308` with the survivor in `location`. At the time of writing production has no merged clusters (`select count(*) from public.clusters where merged_into is not null` is 0); if it is still 0, instead check `curl -s "$NEXT_PUBLIC_SUPABASE_URL/rest/v1/rpc/merged_cluster_map" -H "apikey: $ANON" -H "Authorization: Bearer $ANON"` answers `[]` with 200, and rely on `merged-cluster-gate.test.ts` for the redirect.
+   - `curl -s -o /dev/null -w '%{http_code}\n' https://www.tayfhaber.com/source/zz-not-a-source` answers `404` with the site's own not-found page (the middleware rewrite to `/__tayf-not-found`), and `/source/cnn-turk` (any real slug) still renders.
+   - RPC smoke with the anon key: `source_slug_exists?p_slug=<real slug>` answers `true`; `?p_slug=Bad!` answers `false`.
+4. **Apply `117`** only when step 3 is green. It is one short transaction (`lock_timeout` 5 s); the only real lock is the one view alter.
+
+If the order is violated nothing breaks hard: 117 before the app deploy makes the old gates fail open (no 308, no source 404 sink; the pages' own fallbacks answer) and `/saved` shows `Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.` until the deploy lands.
+
+### After 117: read-only checks (expect the stated result)
+
+```sql
+-- 0 rows: no relation readable by anon/authenticated
+select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'public' and c.relkind in ('r','p','v','m')
+   and (has_table_privilege('anon', c.oid, 'select') or has_table_privilege('authenticated', c.oid, 'select'));
+-- 0 rows: no sequence usable by anon/authenticated
+select c.relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
+ where n.nspname = 'public' and c.relkind = 'S'
+   and (has_sequence_privilege('anon', c.oid, 'usage') or has_sequence_privilege('authenticated', c.oid, 'usage'));
+-- exactly the four 116 functions
+select p.oid::regprocedure from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+ where n.nspname = 'public' and p.prosecdef and has_function_privilege('anon', p.oid, 'execute');
+-- no anon/authenticated entry for postgres-owned objects in public
+select d.defaclobjtype, d.defaclacl from pg_default_acl d join pg_namespace n on n.oid = d.defaclnamespace
+ where n.nspname = 'public' and d.defaclrole = 'postgres'::regrole;
+```
+
+And over HTTP: `curl -s -o /dev/null -w '%{http_code}' "$NEXT_PUBLIC_SUPABASE_URL/rest/v1/clusters?select=id&limit=1" -H "apikey: $ANON"` now answers `401` or `403` (`42501 permission denied for table clusters`), while `/saved`, `/cluster/<id>` and `/source/<slug>` keep working. Server routes, crons and Edge Functions use the service-role key and are unaffected.
+
+### Rollback
+
+- 117: the commented `-- ROLLBACK` block at the end of the file restores `SELECT` on the 23 relations (and `reset (security_invoker)`); it never re-grants writes, sequence usage or the default ACLs. The new app keeps working either way because it only calls the RPCs.
+- 116: the four `drop function` lines in its header, only after the app has been rolled back (the gates and `/saved` call them).
+
+### What this does not close (residual, by design)
+
+- `PUBLIC` still gets `EXECUTE` on every future function (a per-schema default cannot revoke it; a global one would break extension functions `service_role` relies on). Every new `SECURITY DEFINER` function still needs `revoke all on function ... from public, anon, authenticated`. `tests/guards/anon-surface.test.ts` fails any migration >= 116 that grants to anon/authenticated/public (other than the four 116 executes), grants through default privileges, or defines a definer function without an anon revoke. It also pins that only `saved-list.tsx` and `bookmark-snapshots.ts` import the browser client (no `.from(`, only `saved_clusters`) and that only `browser.ts` and the two gates read the anon key.
+- Default ACLs owned by `supabase_admin` cannot be altered by `postgres`; every object in `public` is owned by `postgres` today (66 tables, 10 views, 18 sequences, 108 functions), so nothing is affected.
+- The RLS `SELECT` policies from `017` stay in place (inert without the table privilege).
+- `docs/key-rotation.md` and `README.md` still describe the anon key in older terms; the anon key itself is unchanged and is not rotated by this rollout.

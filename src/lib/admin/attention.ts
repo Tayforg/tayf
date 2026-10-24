@@ -5,8 +5,7 @@ import type { JevUnlinkCandidateView } from "@/lib/admin/jev-cluster";
 import { JEV_UNLINK_LIMIT } from "@/lib/admin/jev-cluster";
 import type { JevRegressionStatus } from "@/lib/admin/jev-regression";
 import type { JevGoldNext } from "@/lib/admin/jev-gold";
-import type { CorrectionRow } from "./corrections-status";
-import { CORRECTIONS_LIMIT } from "./corrections-status";
+import type { CorrectionsPage } from "./corrections-status";
 import type { ArchiveExportRow } from "@/lib/admin/archive-status";
 import type { LlmBudgetStatus } from "@/lib/admin/llm-budget-status";
 import { fmtInt, fmtUsd, type Tone } from "./format";
@@ -45,7 +44,7 @@ export interface AttentionInput {
   unlink: JevUnlinkCandidateView[] | null;
   regression: JevRegressionStatus | null;
   gold: { labeler1: JevGoldNext | null; labeler2: JevGoldNext | null };
-  corrections: CorrectionRow[] | null;
+  corrections: CorrectionsPage | null;
   archive: ArchiveExportRow[] | null;
   llmBudget: LlmBudgetStatus | null;
 }
@@ -114,19 +113,20 @@ function unlinkItem(unlink: JevUnlinkCandidateView[] | null): AttentionItem {
   };
 }
 
-function correctionsItem(corrections: CorrectionRow[] | null): AttentionItem {
+function correctionsItem(corrections: CorrectionsPage | null): AttentionItem {
   const label = "Açık düzeltme";
   const href = "#duzeltmeler";
   if (!corrections) return nullItem("corrections", label, href);
 
-  const n = corrections.filter((c) => c.status === "open" || c.status === "new").length;
+  // openTotal is the exact count of open/new rows across every page (a
+  // count: "exact" select), not the size of the page that was fetched.
+  const n = corrections.openTotal;
   const tone: Tone = n > 0 ? "warn" : "ok";
-  const hint = corrections.length >= CORRECTIONS_LIMIT ? "Son 50 bildirim içinde" : "Okuyucu hata bildirimleri";
   return {
     id: "corrections",
     label,
     value: String(n),
-    hint,
+    hint: "Okuyucu hata bildirimleri",
     href,
     tone,
     needsAction: tone === "warn",

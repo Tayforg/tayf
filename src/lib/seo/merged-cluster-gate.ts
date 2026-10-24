@@ -8,9 +8,12 @@
 // permanentRedirect() is the fallback.
 //
 // The map holds merged ids only (clusters.merged_into is not null, migration
-// 099), newest 1000 by updated_at (PostgREST max-rows). Older merges rely on
-// the page fallback. Anon key only: clusters is anon-readable (017,
-// using (true)). Every failure keeps the previous map (fail open).
+// 099), newest 1000 by updated_at: that bound now lives in the RPC itself.
+// Older merges rely on the page fallback. Anon key only, and anon reaches
+// data only through the bounded SECURITY DEFINER RPC merged_cluster_map()
+// (migration 116, GET because it is STABLE). clusters itself is not
+// anon-readable after migration 117. Every failure keeps the previous map
+// (fail open).
 
 export interface MergedClusterGate {
   lookup(id: string): string | null;
@@ -56,17 +59,14 @@ export function createMergedClusterGate(o: GateOptions = {}): MergedClusterGate 
 
   async function load(url: string, anonKey: string, fetchFn: typeof fetch): Promise<void> {
     try {
-      const res = await fetchFn(
-        `${url}/rest/v1/clusters?select=id,merged_into&merged_into=not.is.null&order=updated_at.desc&limit=1000`,
-        {
-          headers: {
-            apikey: anonKey,
-            Authorization: `Bearer ${anonKey}`,
-            Accept: "application/json",
-          },
-          signal: AbortSignal.timeout(timeoutMs),
+      const res = await fetchFn(`${url}/rest/v1/rpc/merged_cluster_map`, {
+        headers: {
+          apikey: anonKey,
+          Authorization: `Bearer ${anonKey}`,
+          Accept: "application/json",
         },
-      );
+        signal: AbortSignal.timeout(timeoutMs),
+      });
       if (!res.ok) {
         retryAt = now() + FAILURE_BACKOFF_MS;
         return;

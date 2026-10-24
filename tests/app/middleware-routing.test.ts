@@ -65,7 +65,8 @@ describe("middleware — /source/:slug gate", () => {
     fetchMock.mockReset();
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const u = String(input);
-      if (u.includes("slug=eq.")) return new Response("[]", { status: 200 });
+      // Migration 116 RPCs: the probe answers a bare boolean, the list rows.
+      if (u.includes("source_slug_exists")) return new Response("false", { status: 200 });
       return new Response(JSON.stringify([{ slug: "cnn-turk" }]), { status: 200 });
     });
     vi.stubGlobal("fetch", fetchMock);
