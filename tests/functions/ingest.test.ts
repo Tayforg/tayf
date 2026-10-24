@@ -2517,6 +2517,8 @@ describe("twin drop: same source_article_key under another url [migration 113]",
     "https://www.aksam.com.tr/guncel/bakan-gulerden-mekke-ittifaki-vurgusu-husilerle-catismaya-girilmeyecek/haber-1708664";
   const TITLE_A = "Bakan Güler'den Mekke ittifakı vurgusu";
   const TITLE_B = "Bakan Güler: Husilerle çatışmaya girilmeyecek";
+  const URL_C = "https://www.aksam.com.tr/guncel/ucuncu-baslik/haber-1708664";
+  const TITLE_C = "Bakan Güler: üçüncü başlık";
 
   function seed(
     source: { id: string; name: string; slug: string; url: string; rss_url: string },
@@ -2544,6 +2546,18 @@ describe("twin drop: same source_article_key under another url [migration 113]",
     return (await res.json()) as Record<string, unknown>;
   }
 
+  // `run()` with console.log captured: each entry is one call's args joined by
+  // a space, the same shape the log-line assertions below read.
+  async function runLogged() {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const body = await run();
+      return { body, lines: logSpy.mock.calls.map((args) => args.join(" ")) };
+    } finally {
+      logSpy.mockRestore();
+    }
+  }
+
   const upsertedUrls = () => articlesUpsertCalls.flat().map((r) => r.url);
 
   function persisted(id: string) {
@@ -2561,13 +2575,17 @@ describe("twin drop: same source_article_key under another url [migration 113]",
       { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
     ];
 
-    const body = await run();
+    const { body, lines } = await runLogged();
 
     // The twin never reaches an upsert call (and an all-twin chunk sends none).
     expect(upsertedUrls()).not.toContain(URL_B);
     expect(articlesUpsertCalls).toHaveLength(0);
+    expect(body.twinsDroppedStored).toBe(1);
+    expect(body.twinsDroppedIntraFeed).toBe(0);
     expect(body.twinsDropped).toBe(1);
     expect(body.inserted).toBe(0);
+    // No second item of the feed shares the key: no intra-feed line is logged.
+    expect(lines.filter((l) => l.includes("intra-feed"))).toEqual([]);
 
     // The new headline is recorded against the STORED article, with no extra
     // url lookup (the stored row was already resolved by the key lookup).
@@ -2751,10 +2769,63 @@ describe("twin drop: same source_article_key under another url [migration 113]",
 
     expect(upserted).toHaveLength(1);
     expect(upserted[0]?.url).toBe(URL_A);
+    expect(upsertedUrls()).toEqual([URL_A]);
+    expect(body.twinsDroppedIntraFeed).toBe(1);
+    expect(body.twinsDroppedStored).toBe(0);
     expect(body.twinsDropped).toBe(1);
     expect(body.dedupedInBatch).toBe(0);
     // Dropped before the chunk loop: nothing was stored to look the key up against.
     expect(upsertedUrls()).not.toContain(URL_B);
+    // The first one stands and the dropped one is not recorded as a title
+    // version of it: intra-feed twins never reach recordTitleVersions.
+    expect(titleVersionInsertCalls).toEqual([]);
+    expect(titleEditRpcCalls).toEqual([]);
+  });
+
+  it("6c. three items with one key in a feed: two intra-feed drops, one count-only log line, the first stands", async () => {
+    seed(AKSAM, [
+      { title: TITLE_A, link: URL_A, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: TITLE_C, link: URL_C, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+
+    const { body, lines } = await runLogged();
+
+    expect(body.twinsDroppedIntraFeed).toBe(2);
+    expect(body.twinsDroppedStored).toBe(0);
+    expect(body.twinsDropped).toBe(2);
+    expect(upsertedUrls()).toEqual([URL_A]);
+
+    // Exactly one per-source line, slug and count only.
+    expect(lines.filter((l) => l === "[ingest] aksam: 2 intra-feed twin(s)")).toHaveLength(1);
+    expect(lines.filter((l) => l.includes("intra-feed"))).toHaveLength(1);
+    for (const l of lines) {
+      for (const u of [URL_A, URL_B, URL_C]) expect(l).not.toContain(u);
+      expect(l).not.toContain("Husilerle");
+      expect(l).not.toContain("üçüncü");
+    }
+  });
+
+  it("6d. one stored twin and one intra-feed twin in the same cycle are counted apart", async () => {
+    seed(AKSAM, [
+      { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: TITLE_C, link: URL_C, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+    ]);
+    storedArticlesByKey = [
+      { id: "art-1", source_id: AKSAM.id, source_article_key: "1708664", url: URL_A, title: TITLE_A },
+    ];
+
+    const body = await run();
+
+    // B is the first of the feed to carry the key, so it is the one checked
+    // against the stored row (a stored twin); C is the later item (intra-feed).
+    expect(body.twinsDroppedStored).toBe(1);
+    expect(body.twinsDroppedIntraFeed).toBe(1);
+    expect(body.twinsDropped).toBe(2);
+    expect(articlesUpsertCalls).toHaveLength(0);
+    expect(titleVersionInsertCalls).toEqual([
+      [{ article_id: "art-1", source_id: AKSAM.id, old_title: TITLE_A, new_title: TITLE_B }],
+    ]);
   });
 
   it("6b. a repeat with the same content hash counts as deduped, not as a twin", async () => {
@@ -2802,9 +2873,9 @@ describe("twin drop: same source_article_key under another url [migration 113]",
   });
 
   it("8. stamps source_article_key on every upserted row", async () => {
-    const URL_C = "https://www.aksam.com.tr/yasam/baska-haber/haber-1708701";
+    const URL_EIGHT = "https://www.aksam.com.tr/yasam/baska-haber/haber-1708701";
     seed(AKSAM, [
-      { title: "Sekiz numaralı haber", link: URL_C, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
+      { title: "Sekiz numaralı haber", link: URL_EIGHT, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
     ]);
 
     await run();
@@ -2827,7 +2898,13 @@ describe("twin drop: same source_article_key under another url [migration 113]",
         | [string, string]
         | undefined;
       expect(cycleCall).toBeDefined();
-      const summary = JSON.parse(cycleCall?.[1] ?? "{}") as { twinsDropped?: number };
+      const summary = JSON.parse(cycleCall?.[1] ?? "{}") as {
+        twinsDropped?: number;
+        twinsDroppedStored?: number;
+        twinsDroppedIntraFeed?: number;
+      };
+      expect(summary.twinsDroppedStored).toBe(1);
+      expect(summary.twinsDroppedIntraFeed).toBe(0);
       expect(summary.twinsDropped).toBe(1);
       // A count-only log line: neither url nor title appears in it.
       const twinLines = logSpy.mock.calls
@@ -2841,7 +2918,17 @@ describe("twin drop: same source_article_key under another url [migration 113]",
     } finally {
       logSpy.mockRestore();
     }
-    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("twins_dropped");
+    // Summary line and HTTP JSON only: no ingest_cycles column for any of them.
+    const cycleKeys = Object.keys(ingestCycleInserts[0] ?? {});
+    for (const k of [
+      "twins_dropped",
+      "twins_dropped_stored",
+      "twins_dropped_intra_feed",
+      "twinsDroppedStored",
+      "twinsDroppedIntraFeed",
+    ]) {
+      expect(cycleKeys).not.toContain(k);
+    }
   });
 });
 

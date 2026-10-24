@@ -1,11 +1,13 @@
 // Production-only service worker registration. Pure and injectable: the React
 // registrar (components/pwa/sw-registrar.tsx) passes the real browser objects,
 // tests pass fakes. Never throws, never logs (the bookmark ids are personal data).
-import { syncMessage } from "./offline-pins";
-import { CACHE_PREFIX, SW_SCOPE, SW_URL } from "./sw-contract";
+import { activeWorkerWithin, syncMessage } from "./offline-pins";
+import { CACHE_PREFIX, SW_READY_TIMEOUT_MS, SW_SCOPE, SW_URL } from "./sw-contract";
 
 export interface SwContainerLike {
   controller: { postMessage(m: unknown): void } | null;
+  /** Only ever raced against a timeout (activeWorkerWithin): it never settles without a registration. */
+  ready?: PromiseLike<{ active: { postMessage(m: unknown): void } | null }>;
   register(url: string, o: { scope: string; updateViaCache: "none" }): Promise<unknown>;
   getRegistrations(): Promise<ReadonlyArray<{ unregister(): Promise<boolean> }>>;
 }
@@ -66,13 +68,18 @@ export async function registerServiceWorker(d: {
 
     // updateViaCache "none": the browser re-fetches /sw.js on every check, so a
     // kill-switch or version bump is never hidden behind the HTTP cache.
-    // Do not await navigator.serviceWorker.ready: it never settles without a registration.
     await container.register(SW_URL, { scope: SW_SCOPE, updateViaCache: "none" });
 
-    // null = ids unreadable: skip, because an empty sync would prune every pin.
-    const ids = d.readIds();
-    if (ids !== null && container.controller) {
-      container.controller.postMessage(syncMessage(ids));
+    // The worker does not claim clients, so a first visit has no controller. Its registration's active worker
+    // is the sync target instead, waited for at most SW_READY_TIMEOUT_MS: ready never settles without a
+    // registration, so it is only ever raced against a timeout, inside activeWorkerWithin. Past the timeout the
+    // next document (controlled) syncs. Read the ids only once the target is known, so a story bookmarked while
+    // waiting is included.
+    const target = container.controller ?? (await activeWorkerWithin(container, SW_READY_TIMEOUT_MS));
+    if (target) {
+      // null = ids unreadable: skip, because an empty sync would prune every pin.
+      const ids = d.readIds();
+      if (ids !== null) target.postMessage(syncMessage(ids));
     }
     return "registered";
   } catch {

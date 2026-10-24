@@ -4,8 +4,8 @@
 // CONTRACT constant + a hand-written plain-JS runtime. Deliberately NOT in the
 // output: a build id, a Date, anything from process.env. The bytes only change
 // when SW_VERSION, the config or this runtime change, so browsers reinstall
-// the worker (and skipWaiting()/clients.claim() fire) only on a real version
-// bump -- not on every deploy.
+// the worker (and skipWaiting() fires) only on a real version bump -- not on
+// every deploy.
 //
 // The runtime cannot import sw-policy.ts (it ships as one string), so each
 // pure helper is re-declared below as a top-level `function` with the SAME
@@ -73,6 +73,13 @@ self.addEventListener("activate", function (event) {
 });
 `;
 
+// There is deliberately no claim() call in the activate handler below (tests/guards/service-worker.test.ts forbids
+// it in the built source, so the exact call must not be spelled out inside the template either). Claiming a first
+// visit that is still loading would route its in-flight requests through this worker a second time: the six woff2
+// preloads would be fetched again and Chrome would log "preloaded but not used". It is also unnecessary: skipWaiting()
+// at install already moves pages controlled by an older version to the new worker, and an uncontrolled first visit is
+// served normally by the network until its next navigation. The page reaches the worker through registration.active
+// instead (see activeWorkerWithin in offline-pins.ts).
 const RUNTIME = String.raw`
 const ID_RE = new RegExp(CONTRACT.idPattern, "i");
 const PAGE_RE = new RegExp(CONTRACT.pagePattern, "i");
@@ -670,7 +677,6 @@ self.addEventListener("activate", function (event) {
           })
         );
       } catch (e) {}
-      await self.clients.claim();
     })()
   );
 });
