@@ -2747,3 +2747,43 @@ select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_r
 When it warns, check `net._http_response` for 546 in the gap minutes *before* the compaction trims it: see `docs/ops-heartbeat.md`, "Kayıp ingest turları".
 
 **Rollback** (nothing else depends on 122): re-apply the `ops_health_report()` block of `119_feed_freshness.sql` (function, comment, revoke, grant; the report returns 13 rows again), then remove ledger row 122: `delete from supabase_migrations.schema_migrations where version = '122';`.
+
+## 123 — entity hubs (`entity_cluster_ids`): APPLY 123, THEN DEPLOY the app
+
+**Why:** `/gundem/<key>` hubs (roadmap G2) list the clusters about one person, party or institution from the 62-term curated vocabulary in `src/lib/trends/rising-entities.ts`. `articles.entities` is empty, so the hubs search the existing `clusters.search_tsv` GIN index.
+
+**What 123 does** (additive, one transaction, safe to re-apply): creates `public.entity_cluster_ids(p_variants text[], p_since timestamptz, p_limit integer)`, `SECURITY DEFINER`, `search_path = ''`, read-only. It returns ids of live clusters (not archived, `merged_into is null`, `article_count >= 2`) matching any variant, newest `updated_at` first, with the full match count via `count(*) over ()`. `p_since` defaults to 14 days and is clamped to at most 30; `p_limit` is clamped to 1..50. Execute is revoked from public/anon/authenticated and granted to `service_role` only; the app reads it through the server reader.
+
+**Order:** apply 123 before deploying the app. Before 123 the hub read fails and the page shows its "unavailable" state (noindex), so an early deploy degrades but does not break.
+
+**Verify** (read-only):
+
+```sql
+-- service_role only (expect f, f)
+select has_function_privilege('anon', 'public.entity_cluster_ids(text[],timestamptz,integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.entity_cluster_ids(text[],timestamptz,integer)', 'execute');
+-- a live hub returns rows; 422 for Erdoğan on 2026-11-01
+select total from public.entity_cluster_ids(array['Erdoğan'], now() - interval '14 days', 20) limit 1;
+```
+
+Then `curl -sI https://www.tayfhaber.com/gundem/erdogan` (200) and `/gundem/nope` (404 from the middleware gate).
+
+**Rollback:** `drop function public.entity_cluster_ids(text[], timestamptz, integer);` then `delete from supabase_migrations.schema_migrations where version = '123';`. The hubs fall back to their unavailable state.
+
+## 124 — saved list rows (`saved_clusters_v2`): APPLY 124, THEN DEPLOY the app
+
+**Why:** `/saved` rows show a compact bias bar and a "Kör nokta" pill per saved story. RPC `saved_clusters` (116) has no `is_blindspot`.
+
+**What 124 does** (additive, one transaction, safe to re-apply): creates `public.saved_clusters_v2(uuid[])`, 116's body plus `c.is_blindspot`, with the same bounds (at most 200 ids in, 200 rows out), `SECURITY DEFINER`, `search_path = ''`. Execute goes to `anon` and `service_role` only, the exact grant shape `tests/guards/anon-surface.test.ts` allowlists (it is the fifth and only new anon RPC). `saved_clusters` (v1) stays for `bookmark-snapshots.ts`.
+
+**Order:** apply 124 before deploying. The client falls back to v1 without pills on `PGRST202`, so an early deploy shows plain rows instead of failing.
+
+**Verify** (read-only):
+
+```sql
+-- anon yes, authenticated no (expect t, f)
+select has_function_privilege('anon', 'public.saved_clusters_v2(uuid[])', 'execute'),
+       has_function_privilege('authenticated', 'public.saved_clusters_v2(uuid[])', 'execute');
+```
+
+**Rollback:** `drop function public.saved_clusters_v2(uuid[]);` then `delete from supabase_migrations.schema_migrations where version = '124';`. `/saved` falls back to v1 rows on its own.
