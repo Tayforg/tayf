@@ -48,9 +48,68 @@ type FeedFilterResult = {
   reason?: "min_sources" | "seo_pattern" | "wire_dedup" | "dunya_share" | "politics_share";
 };
 
-// A5 fix #3: "kimdir / kaç yaşında / son dakika: / canlı / ne dedi" titles are SEO explainers, not coverage gaps.
-const SEO_PATTERN =
-  /kimdir|kaç yaşında|nedir\?|ne zaman|kaç bin|kaç tl|son dakika.*?:|canlı|ne dedi/i;
+// A5 fix #3 (rewritten for h13-biasdata-4): "kimdir / kaç yaşında / nedir? / ne zaman ...? /
+// kaç bin|tl ...? / canlı izle / ne dedi?" titles are SEO explainers, not coverage gaps. The
+// first version matched bare substrings (/canlı|ne zaman|son dakika.*?:/i), which also hid real
+// stories such as "Son Dakika! Bakan Kurum: ...", "Canlı | Başkan Erdoğan'dan ...",
+// "134 canlıya el koydu" and "Kudüs'e ne zaman girileceğini açıkladı" from /blindspots, its RSS
+// feed and the alerts feed while their cluster pages still showed "Kör nokta".
+//
+// Every pattern is word-bounded with Unicode-aware lookarounds (a JS \b is ASCII-only, so
+// "canlıya" would still match a \bcanlı\b), and the question forms need their "?".
+const NB = String.raw`(?<![\p{L}\p{N}])`; // not preceded by a letter or digit
+const NA = String.raw`(?![\p{L}\p{N}])`; // not followed by a letter or digit
+
+const SEO_EXPLAINER_PATTERNS: readonly RegExp[] = [
+  `${NB}kimdir${NA}`,
+  `${NB}kaç yaşında${NA}`,
+  String.raw`${NB}nedir\s*\?`,
+  String.raw`${NB}ne zaman${NA}.*\?\s*$`,
+  String.raw`${NB}kaç (?:bin|tl)${NA}.*\?\s*$`,
+  // "canlı izle" is the stream-page explainer; the bare word "canlı" is not.
+  `${NB}canlı izle${NA}`,
+  String.raw`${NB}ne dedi\s*\?`,
+].map((source) => new RegExp(source, "u"));
+
+// A leading breaking-news label. "canlı izle" is an explainer in its own right, so a leading
+// "Canlı izle: ..." is deliberately not treated as a label.
+const BREAKING_PREFIX = new RegExp(
+  String.raw`^\s*(?:son\s+dakika|canlı(?!\s+izle${NA}))${NA}[\s!.:|…\-–—]*`,
+  "u",
+);
+
+// Bounds the stripping loop: a title cannot stack labels forever.
+const MAX_PREFIX_STRIPS = 3;
+
+function stripBreakingPrefixes(lowered: string): string {
+  let t = lowered;
+  for (let i = 0; i < MAX_PREFIX_STRIPS; i++) {
+    const next = t.replace(BREAKING_PREFIX, "");
+    if (next === t) break;
+    t = next;
+  }
+  return t;
+}
+
+/**
+ * True for an SEO explainer title ("Ali Koç kimdir?", "Asgari ücret nedir?",
+ * "Altın fiyatları canlı izle"), false for a news headline, including one that
+ * merely starts with a breaking-news label ("Son Dakika! ...", "Canlı | ...") or
+ * contains an explainer stem inside a longer word ("canlıya", "kimdirler").
+ *
+ * The title is lower-cased with the Turkish locale (CANLI -> canlı, İ -> i). A
+ * locale-neutral lower-casing is tried as well so an upper-case title typed with
+ * an ASCII I ("ALI KOC KIMDIR?"), which the original /i regex caught, still filters.
+ */
+export function isSeoExplainerTitle(title: string): boolean {
+  if (typeof title !== "string" || title === "") return false;
+  const variants = new Set([title.toLocaleLowerCase("tr-TR"), title.toLowerCase()]);
+  for (const lowered of variants) {
+    const t = stripBreakingPrefixes(lowered);
+    if (SEO_EXPLAINER_PATTERNS.some((re) => re.test(t))) return true;
+  }
+  return false;
+}
 
 // A5 fix #4: below this share of distinct content_hashes, the cluster is one wire copy amplified by N outlets.
 const WIRE_UNIQUE_HASH_RATIO = 0.5;
@@ -82,7 +141,7 @@ export function passesFeedFilters(
   deduped: EmbeddedArticle[]
 ): FeedFilterResult {
   if (deduped.length < BLINDSPOT.minSources) return { ok: false, reason: "min_sources" };
-  if (SEO_PATTERN.test(cluster.title_tr)) return { ok: false, reason: "seo_pattern" };
+  if (isSeoExplainerTitle(cluster.title_tr)) return { ok: false, reason: "seo_pattern" };
 
   const distinctHashes = new Set(
     deduped.map((m) => m.content_hash ?? `__null__:${m.id}`)

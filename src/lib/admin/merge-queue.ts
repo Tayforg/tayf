@@ -1,5 +1,6 @@
 import { createServerClient } from "@/lib/supabase/server";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
+import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/finance/paging";
 import type { BiasDistribution } from "@/types";
 
 // Readers for /admin/birlestir (merge queue, migration 099). Plain async, no
@@ -18,7 +19,11 @@ export const MERGE_LOG_LIMIT = 20;
 const THREAD_LIMIT = 50;
 const RECALL_CLUSTER_LIMIT = 30;
 const RECALL_PREDICTION_LIMIT = 300;
+// The headline read is paged (.range(), pages of POSTGREST_MAX_ROWS): PostgREST cuts every response at
+// 1,000 rows whatever .limit() asks for, so the old `.limit(2000)` silently dropped the second thousand.
+// HEADLINE_ROW_LIMIT stays the total bound: two pages.
 const HEADLINE_ROW_LIMIT = 2000;
+const HEADLINE_MAX_PAGES = HEADLINE_ROW_LIMIT / POSTGREST_MAX_ROWS;
 const HEADLINES_PER_CLUSTER = 3;
 const UNTITLED = "(başlıksız küme)";
 
@@ -248,6 +253,8 @@ export async function loadClusterRefs(
   const out = new Map<string, MergeClusterRef & { archived: boolean }>();
   if (ids.length === 0) return out;
 
+  // A throw from readAllPages (a page error) propagates to the caller's catch, which returns null: a
+  // half-read headline list would show the wrong "newest" headlines as if they were right.
   const [cl, hl] = await Promise.all([
     supabase
       .from("clusters")
@@ -255,17 +262,23 @@ export async function loadClusterRefs(
         "id, title_tr, title_tr_neutral, article_count, first_published, bias_distribution, is_blindspot, is_archived, merged_into",
       )
       .in("id", ids),
-    supabase
-      .from("cluster_articles")
-      .select("cluster_id, article:articles(title, published_at, source:sources(name))")
-      .in("cluster_id", ids)
-      .limit(HEADLINE_ROW_LIMIT),
+    readAllPages<Record<string, unknown>>(
+      (from, to) =>
+        supabase
+          .from("cluster_articles")
+          .select("cluster_id, article:articles(title, published_at, source:sources(name))")
+          .in("cluster_id", ids)
+          // (cluster_id, article_id) is the primary key: a page boundary can neither skip nor repeat a row.
+          .order("cluster_id")
+          .order("article_id")
+          .range(from, to),
+      { label: "merge headlines", maxPages: HEADLINE_MAX_PAGES },
+    ),
   ]);
   fail("merge clusters", cl.error);
-  fail("merge headlines", hl.error);
 
   const heads = new Map<string, { title: string; sourceName: string; at: number }[]>();
-  for (const r of rows<Record<string, unknown>>(hl.data)) {
+  for (const r of hl.rows) {
     const cid = str(r.cluster_id);
     const art = one(r.article as Record<string, unknown> | Record<string, unknown>[] | null);
     const title = str(art?.title);

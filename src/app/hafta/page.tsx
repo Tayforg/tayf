@@ -23,7 +23,6 @@ import {
   getWeeklyClusters,
   getWeeklyLabelChanges,
   summariseWeek,
-  WEEKLY_CLUSTER_LIMIT,
   type WeeklyLabelChange,
 } from "@/lib/weekly/weekly-query";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
@@ -63,7 +62,7 @@ const UNAVAILABLE_COPY =
 const EMPTY_COPY = "Bu hafta yeterli küme oluşmadı.";
 
 export default async function WeeklyPage() {
-  const [clusters, health, feedStatus, labelChanges, words, recentWeeks] =
+  const [read, health, feedStatus, labelChanges, words, recentWeeks] =
     await Promise.all([
       getWeeklyClusters(),
       getZoneFeedHealth(),
@@ -73,16 +72,19 @@ export default async function WeeklyPage() {
       getRecentWeekKeys(),
     ]);
 
+  // `null` = the week could not be read; an empty `rows` = it produced nothing.
+  const clusters = read?.rows ?? null;
   const summary =
     clusters !== null && clusters.length > 0
       ? summariseWeek(clusters, health)
       : null;
 
-  // The cluster window is hard-capped and ordered by size, so hitting the
-  // cap means the figures below are the biggest WEEKLY_CLUSTER_LIMIT
-  // clusters, not the whole week. Say so rather than publishing a truncated
-  // total as "the week".
-  const truncated = clusters !== null && clusters.length >= WEEKLY_CLUSTER_LIMIT;
+  // The cluster read pages through the whole window and has its own ceiling.
+  // Only a read that actually stopped at that ceiling is cut off (the figures
+  // are then the biggest clusters, not the whole week), and it says so itself:
+  // a row count could never reveal it, because PostgREST caps any single
+  // response at 1,000 rows.
+  const truncated = read?.truncated === true;
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-10">

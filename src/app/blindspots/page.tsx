@@ -26,6 +26,7 @@ import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
 import { buildSilenceDigest } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
+import { cardEnterClass } from "@/lib/ui/card-enter";
 import {
   getBlindspotsSafe,
   type BlindspotBundle,
@@ -172,7 +173,7 @@ export async function BlindspotsFeed() {
                   {showDivider && (
                     <div className="h-px bg-gradient-to-r from-transparent via-border/30 to-transparent my-6" />
                   )}
-                  <div className={`animate-fade-up stagger-${i < 6 ? i + 1 : 6}`}>
+                  <div className={cardEnterClass(i, "cap6") || undefined}>
                     <BlindspotCard
                       bundle={b}
                       index={i}

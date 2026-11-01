@@ -7,9 +7,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // throw outside a real Next.js request scope.
 //
 // The two fetchers are pinned against the fake's recorded builder state
-// (table / select string / eq / gte / lte / order / limit) because the
+// (table / select string / eq / gte / lte / order / range) because the
 // weekly page's honesty depends on the exact window: a dropped `.gte()` on
 // first_published silently turns "the trailing 7 days" into "all time".
+//
+// The cluster window is PAGED (PostgREST cuts every response at 1,000 rows
+// whatever `.limit()` asks for), so the clusters handler below behaves like
+// PostgREST: it slices the fixture by the request's `.range(from, to)`.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -20,10 +24,14 @@ vi.mock("next/cache", () => ({
 const fixture = vi.hoisted(() => ({
   clusters: [] as unknown[],
   clustersError: null as { message: string } | null,
+  /** When set, only requests whose range starts at or after this row fail. */
+  clustersErrorFromRow: null as number | null,
   clustersThrows: false,
   history: [] as unknown[],
   historyError: null as { message: string } | null,
   clusterState: null as unknown,
+  /** Every clusters request, in order (one entry per page). */
+  clusterStates: [] as unknown[],
   historyState: null as unknown,
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
@@ -35,9 +43,18 @@ const supabaseFake = await vi.hoisted(async () => {
     tables: {
       clusters: (state) => {
         fixture.clusterState = state;
+        fixture.clusterStates.push(state);
         if (fixture.clustersThrows) throw new Error("boom");
-        if (fixture.clustersError) return { data: null, error: fixture.clustersError };
-        return { data: fixture.clusters, error: null };
+        const range = (state as { range: { from: number; to: number } | null }).range;
+        if (
+          fixture.clustersError &&
+          (fixture.clustersErrorFromRow === null || (range?.from ?? 0) >= fixture.clustersErrorFromRow)
+        ) {
+          return { data: null, error: fixture.clustersError };
+        }
+        // Like PostgREST: rows from..to inclusive of the ordered table.
+        const data = range ? fixture.clusters.slice(range.from, range.to + 1) : fixture.clusters;
+        return { data, error: null };
       },
       source_zone_history: (state) => {
         fixture.historyState = state;
@@ -63,14 +80,17 @@ function isCappedClientOpts(opts: unknown): boolean {
 
 import { cacheLife, cacheTag } from "next/cache";
 import {
+  WEEKLY_CLUSTER_LIMIT,
   WEEK_MS,
   getWeeklyClusters,
   getWeeklyLabelChanges,
   summariseWeek,
   type WeeklyClusterRow,
 } from "./weekly-query";
+import { zonePercents } from "@/lib/bias/zone-summary";
 import type { ZoneFeedHealth, ZoneHealth } from "@/lib/clusters/feed-health";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
+import { POSTGREST_MAX_ROWS } from "@/lib/db/paging";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -80,15 +100,18 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.clusters = [];
   fixture.clustersError = null;
+  fixture.clustersErrorFromRow = null;
   fixture.clustersThrows = false;
   fixture.history = [];
   fixture.historyError = null;
   fixture.clusterState = null;
+  fixture.clusterStates = [];
   fixture.historyState = null;
   fixture.clientOpts = [];
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
   vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -134,6 +157,36 @@ function row(overrides: Partial<WeeklyClusterRow> = {}): WeeklyClusterRow {
   };
 }
 
+/**
+ * A week of `n` clusters in the order the query returns them (article_count
+ * desc, then id asc). Each row's bias_distribution is derived from its index so
+ * the three zone sums differ between "the first 1,000 rows" and "every row".
+ */
+function orderedWindow(n: number): WeeklyClusterRow[] {
+  return Array.from({ length: n }, (_, i) =>
+    row({
+      id: `c${String(i).padStart(5, "0")}`,
+      article_count: 20 - Math.floor(i / 120),
+      bias_distribution: dist({
+        pro_government: (i % 5) + 1,
+        center: i % 3,
+        opposition: i % 4,
+      }),
+    }),
+  );
+}
+
+/** Independent of summariseWeek: pro_government -> iktidar, center -> bagimsiz, opposition -> muhalefet. */
+function directZoneSum(rows: WeeklyClusterRow[]): Record<MediaDnaZone, number> {
+  const sum: Record<MediaDnaZone, number> = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+  for (const r of rows) {
+    sum.iktidar += r.bias_distribution?.pro_government ?? 0;
+    sum.bagimsiz += r.bias_distribution?.center ?? 0;
+    sum.muhalefet += r.bias_distribution?.opposition ?? 0;
+  }
+  return sum;
+}
+
 function zoneHealth(overrides: Partial<ZoneHealth> = {}): ZoneHealth {
   return {
     total: 10,
@@ -164,7 +217,7 @@ const DEGRADED_MUHALEFET = health({
 // --- getWeeklyClusters -----------------------------------------------------
 
 describe("getWeeklyClusters", () => {
-  it("pins the clusters query: table, select columns, filters, order and limit", async () => {
+  it("pins the clusters query: table, select columns, filters, deterministic order and first range", async () => {
     await getWeeklyClusters();
 
     const state = fixture.clusterState as BuilderState;
@@ -177,11 +230,20 @@ describe("getWeeklyClusters", () => {
 
     expect(state.eq).toContainEqual({ col: "is_archived", val: false });
     expect(state.gte).toContainEqual({ col: "article_count", val: 2 });
-    expect(state.order).toContainEqual({
-      col: "article_count",
-      opts: { ascending: false },
-    });
-    expect(state.limit).toBe(2000);
+    // Deterministic and unique per row, so a page boundary never skips or
+    // repeats a cluster inside a tier of equal article_count.
+    expect(state.order).toEqual([
+      { col: "article_count", opts: { ascending: false } },
+      { col: "id", opts: { ascending: true } },
+    ]);
+    expect(state.range).toEqual({ from: 0, to: 999 });
+    // `.limit()` would be clamped to 1,000 by PostgREST; paging replaces it.
+    expect(state.limit).toBeNull();
+  });
+
+  it("allows up to five pages of 1,000 (WEEKLY_CLUSTER_LIMIT = 5,000)", () => {
+    expect(WEEKLY_CLUSTER_LIMIT).toBe(5000);
+    expect(WEEKLY_CLUSTER_LIMIT / POSTGREST_MAX_ROWS).toBe(5);
   });
 
   it("bounds first_published to the trailing 7 days (window, not all time)", async () => {
@@ -206,19 +268,85 @@ describe("getWeeklyClusters", () => {
     expect(toMs - fromMs).toBe(WEEK_MS);
   });
 
-  it("returns the rows Supabase gave it", async () => {
+  it("returns the rows Supabase gave it, not truncated", async () => {
     fixture.clusters = [row({ id: "a" }), row({ id: "b" })];
 
-    const rows = await getWeeklyClusters();
+    const read = await getWeeklyClusters();
 
-    expect(rows).toHaveLength(2);
-    expect(rows?.[0]?.id).toBe("a");
+    expect(read?.rows).toHaveLength(2);
+    expect(read?.rows[0]?.id).toBe("a");
+    expect(read?.truncated).toBe(false);
+    expect(fixture.clusterStates).toHaveLength(1);
   });
 
-  it("returns [] (not null) when the window has no clusters", async () => {
+  it("returns an empty read (not null) when the window has no clusters", async () => {
     fixture.clusters = [];
 
-    await expect(getWeeklyClusters()).resolves.toEqual([]);
+    await expect(getWeeklyClusters()).resolves.toEqual({ rows: [], truncated: false });
+  });
+
+  it("reads every cluster of a 1,991-row week in two pages, in a deterministic order (the 1,000-row PostgREST cap no longer hides rows 1001-1991)", async () => {
+    fixture.clusters = orderedWindow(1991);
+
+    const read = await getWeeklyClusters();
+
+    expect(read).not.toBeNull();
+    expect(read!.rows).toHaveLength(1991);
+    expect(read!.truncated).toBe(false);
+    // Row identity and order survive the page boundary: nothing skipped, nothing repeated.
+    expect(read!.rows.map((r) => r.id)).toEqual((fixture.clusters as WeeklyClusterRow[]).map((r) => r.id));
+
+    const states = fixture.clusterStates as BuilderState[];
+    expect(states.map((s) => s.range)).toEqual([
+      { from: 0, to: 999 },
+      { from: 1000, to: 1999 },
+    ]);
+    for (const s of states) {
+      expect(s.order).toEqual([
+        { col: "article_count", opts: { ascending: false } },
+        { col: "id", opts: { ascending: true } },
+      ]);
+    }
+    // One window for every page: a second clock read could drift the bounds.
+    const bounds = (s: BuilderState) => ({
+      from: s.gte.find((g) => g.col === "first_published")?.val,
+      to: s.lte.find((l) => l.col === "first_published")?.val,
+    });
+    expect(bounds(states[1]!)).toEqual(bounds(states[0]!));
+    // And one reader client for the whole paged read.
+    expect(fixture.clientOpts).toHaveLength(1);
+  });
+
+  it("ACCEPTANCE: the zone totals over the paged read equal the full sum, not the top-1,000 sum", async () => {
+    const window = orderedWindow(1991);
+    fixture.clusters = window;
+
+    const read = await getWeeklyClusters();
+    const zoneCounts = summariseWeek(read!.rows, null).zoneCounts;
+
+    expect(zoneCounts).toEqual(directZoneSum(window));
+    expect(zoneCounts).not.toEqual(directZoneSum(window.slice(0, 1000)));
+  });
+
+  it("is truncated only when the paged read hit its own ceiling: five full pages, exactly five requests", async () => {
+    fixture.clusters = orderedWindow(WEEKLY_CLUSTER_LIMIT);
+
+    const read = await getWeeklyClusters();
+
+    expect(read?.truncated).toBe(true);
+    expect(read?.rows).toHaveLength(WEEKLY_CLUSTER_LIMIT);
+    expect(fixture.clusterStates).toHaveLength(5);
+    expect(vi.mocked(console.warn)).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not truncated one row short of the ceiling (4,999 rows end on a short fifth page)", async () => {
+    fixture.clusters = orderedWindow(WEEKLY_CLUSTER_LIMIT - 1);
+
+    const read = await getWeeklyClusters();
+
+    expect(read?.truncated).toBe(false);
+    expect(read?.rows).toHaveLength(WEEKLY_CLUSTER_LIMIT - 1);
+    expect(fixture.clusterStates).toHaveLength(5);
   });
 
   it("returns null when Supabase errors, never throws", async () => {
@@ -268,9 +396,34 @@ describe("weekly readers: a failure is cached for minutes only", () => {
 
   it("getWeeklyClusters: an empty week is a successful answer (cluster-feed)", async () => {
     fixture.clusters = [];
-    await expect(getWeeklyClusters()).resolves.toEqual([]);
+    await expect(getWeeklyClusters()).resolves.toEqual({ rows: [], truncated: false });
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getWeeklyClusters: a multi-page read still calls cacheLife('cluster-feed') exactly once", async () => {
+    fixture.clusters = orderedWindow(1991);
+
+    await getWeeklyClusters();
+
+    expect(fixture.clusterStates).toHaveLength(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getWeeklyClusters: an error on page 2 discards page 1, resolves null and calls cacheLife('minutes') exactly once", async () => {
+    fixture.clusters = orderedWindow(1991);
+    fixture.clustersError = { message: TIMEOUT_MESSAGE };
+    fixture.clustersErrorFromRow = POSTGREST_MAX_ROWS;
+
+    // No partial week: a half-read total would be a wrong number shown as the right one.
+    await expect(getWeeklyClusters()).resolves.toBeNull();
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+    // The cached attempt reached page 2; the uncached live retry did too.
+    expect((fixture.clusterStates as BuilderState[]).map((s) => s.range?.from)).toEqual([0, 1000, 0, 1000]);
   });
 
   it("getWeeklyClusters: a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {
@@ -603,8 +756,81 @@ describe("summariseWeek — blindspots", () => {
     );
 
     expect(summary.blindspots).toEqual([
-      { id: "bs", title: "Nötr başlık", articleCount: 5, side: "muhalefet" },
+      { id: "bs", title: "Nötr başlık", articleCount: 5, side: "muhalefet", share: 1, sharePct: 100 },
     ]);
+  });
+
+  describe("share of the stored side (the 'Sadece' claim must be earned)", () => {
+    function blindspotOf(distribution: BiasDistribution | null, side: BiasCategory | null, articleCount = 20) {
+      const r = row({
+        id: "bs",
+        is_blindspot: true,
+        blindspot_side: side,
+        bias_distribution: distribution,
+        article_count: articleCount,
+      });
+      return summariseWeek([r], null).blindspots[0];
+    }
+
+    it("15 iktidar / 1 bağımsız / 1 muhalefet: share 15/17 and the bar's own 88", () => {
+      const b = blindspotOf(dist({ pro_government: 15, center: 1, opposition: 1 }), "pro_government");
+
+      expect(b?.side).toBe("iktidar");
+      expect(b?.share).toBeCloseTo(15 / 17, 10);
+      expect(b?.sharePct).toBe(88);
+    });
+
+    it("every article on the stored side: share exactly 1 and 100", () => {
+      const b = blindspotOf(dist({ pro_government: 6 }), "pro_government", 6);
+
+      expect(b?.share).toBe(1);
+      expect(b?.sharePct).toBe(100);
+    });
+
+    it("counts every category of the stored side's zone, against the zone total", () => {
+      // gov_leaning + pro_government are both iktidar; center + opposition_leaning are the other two zones.
+      const b = blindspotOf(
+        dist({ gov_leaning: 7, pro_government: 8, center: 1, opposition_leaning: 1 }),
+        "pro_government",
+        20,
+      );
+
+      expect(b?.share).toBeCloseTo(15 / 17, 10);
+      expect(b?.sharePct).toBe(88);
+    });
+
+    it("clamps a share below 1 that rounds to 100 down to 99, so only a true 100% reads 'Sadece'", () => {
+      const b = blindspotOf(dist({ pro_government: 199, center: 1 }), "pro_government", 200);
+
+      expect(b?.share).toBeCloseTo(0.995, 10);
+      expect(b?.share).toBeLessThan(1);
+      expect(b?.sharePct).toBe(99);
+    });
+
+    it("uses the same largest-remainder rounding as the bar (never an independent Math.round)", () => {
+      // 7 : 1 is 87.5% / 12.5%. Independent Math.round prints 88 + 13 = 101; the bar prints 88 + 12.
+      // The minor side discriminates: the row must say what the bar says (12), not 13.
+      const counts = { iktidar: 7, bagimsiz: 1, muhalefet: 0 };
+      const b = blindspotOf(dist({ pro_government: 7, center: 1 }), "center", 8);
+
+      expect(b?.side).toBe("bagimsiz");
+      expect(b?.sharePct).toBe(zonePercents(counts).bagimsiz);
+      expect(b?.sharePct).toBe(12);
+    });
+
+    it("a stored side with no zone evidence at all has no share (null, null) but is still listed", () => {
+      const b = blindspotOf(null, "pro_government", 3);
+
+      expect(b).toMatchObject({ side: "iktidar", share: null, sharePct: null });
+    });
+
+    it("a side inferred from the distribution has a real share", () => {
+      const b = blindspotOf(dist({ opposition: 6, center: 1 }), null, 7);
+
+      expect(b?.side).toBe("muhalefet");
+      expect(b?.share).toBeCloseTo(6 / 7, 10);
+      expect(b?.sharePct).toBe(86);
+    });
   });
 
   it("falls back to the zone with the largest count when blindspot_side is null", () => {

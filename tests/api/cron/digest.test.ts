@@ -20,10 +20,30 @@ interface SubscriberFixture {
 
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../../_helpers/supabase-fake");
-  const state: { subscribers: SubscriberFixture[] } = { subscribers: [] };
+  const state: {
+    subscribers: SubscriberFixture[];
+    /** When set, a subscriber page whose range starts at or after this row fails. */
+    errorFromRow: number | null;
+    /** One entry per subscriber SELECT (one per page), recorded from the builder state. */
+    pages: Array<{
+      range: { from: number; to: number } | null;
+      order: Array<{ col: string; opts: unknown }>;
+      not: Array<{ col: string; op: string; val: unknown }>;
+    }>;
+  } = { subscribers: [], errorFromRow: null, pages: [] };
   const fake = helper.createSupabaseFake({
     tables: {
-      newsletter_subscribers: () => ({ data: state.subscribers, error: null }),
+      // Range-aware like PostgREST: rows from..to inclusive of the ordered table.
+      newsletter_subscribers: (s) => {
+        // A last_sent_at UPDATE resolves through the same handler; only SELECTs are pages.
+        if (s.selectArgs.length === 0) return { data: state.subscribers, error: null };
+        state.pages.push({ range: s.range, order: s.order, not: s.not });
+        if (state.errorFromRow !== null && (s.range?.from ?? 0) >= state.errorFromRow) {
+          return { data: null, error: { message: "statement timeout" } };
+        }
+        const data = s.range ? state.subscribers.slice(s.range.from, s.range.to + 1) : state.subscribers;
+        return { data, error: null };
+      },
     },
   });
   return { fake, state };
@@ -115,6 +135,8 @@ beforeEach(async () => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   delete process.env.CRON_SECRET;
   supabaseFake.state.subscribers = [];
+  supabaseFake.state.errorFromRow = null;
+  supabaseFake.state.pages = [];
   supabaseFake.fake.calls.mutations.length = 0;
   supabaseFake.fake.calls.rpc.length = 0;
   afterCallbacks.length = 0;
@@ -236,6 +258,104 @@ describe("GET /api/cron/digest", () => {
     for (const u of updates) {
       expect((u.patch as { last_sent_at?: string }).last_sent_at).toBeTruthy();
     }
+  });
+
+  describe("subscriber paging (PostgREST caps one response at 1,000 rows)", () => {
+    function manySubscribers(n: number): SubscriberFixture[] {
+      return Array.from({ length: n }, (_, i) => ({
+        id: `s${String(i).padStart(5, "0")}`,
+        email: `user${i}@example.com`,
+        unsubscribe_token: `t${i}`,
+        last_sent_at: null,
+      }));
+    }
+
+    it("reads both pages of 1,001 confirmed, due subscribers and processes every one of them", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = manySubscribers(1001);
+
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ sent: 1001, skipped: 0 });
+
+      // Page 1 is full, so page 2 is read; the 1,001st subscriber is on it.
+      expect(supabaseFake.state.pages.map((p) => p.range)).toEqual([
+        { from: 0, to: 999 },
+        { from: 1000, to: 1999 },
+      ]);
+
+      const recipients = (sendBatch as unknown as Mock).mock.calls.flatMap(
+        (call) => (call[0] as Array<{ to: string }>).map((m) => m.to),
+      );
+      expect(recipients).toHaveLength(1001);
+      expect(new Set(recipients).size).toBe(1001);
+      expect(recipients).toContain("user1000@example.com");
+
+      const stamped = supabaseFake.fake.calls
+        .update("newsletter_subscribers")
+        .map((u) => u.state.eq.find((p) => p.col === "id")?.val);
+      expect(stamped).toHaveLength(1001);
+      expect(stamped).toContain("s01000");
+    });
+
+    it("pages with a unique per-row order (id asc) and keeps the confirmed-only filter on every page", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = manySubscribers(1001);
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+
+      const mod = await importRoute();
+      await mod.GET(req("shhh"));
+
+      expect(supabaseFake.state.pages).toHaveLength(2);
+      for (const page of supabaseFake.state.pages) {
+        expect(page.order).toEqual([{ col: "id", opts: { ascending: true } }]);
+        expect(page.not).toContainEqual({ col: "confirmed_at", op: "is", val: null });
+      }
+    });
+
+    it("a short first page costs a single request", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = manySubscribers(3);
+      const { sendBatch } = await import("@/lib/email/resend");
+      (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+        list.map(() => ({ ok: true, id: "resend-id" })),
+      );
+
+      const mod = await importRoute();
+      const res = await mod.GET(req("shhh"));
+
+      expect(await res.json()).toEqual({ sent: 3, skipped: 0 });
+      expect(supabaseFake.state.pages).toHaveLength(1);
+    });
+
+    it("an error on page 2 returns the same 500 as before and sends nothing (no half-read list)", async () => {
+      process.env.CRON_SECRET = "shhh";
+      supabaseFake.state.subscribers = manySubscribers(1001);
+      supabaseFake.state.errorFromRow = 1000;
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const { sendBatch } = await import("@/lib/email/resend");
+
+      try {
+        const mod = await importRoute();
+        const res = await mod.GET(req("shhh"));
+        expect(res.status).toBe(500);
+      } finally {
+        errSpy.mockRestore();
+      }
+
+      expect(sendBatch).not.toHaveBeenCalled();
+      expect(supabaseFake.fake.calls.update("newsletter_subscribers")).toHaveLength(0);
+    });
   });
 
   it("carries List-Unsubscribe / List-Unsubscribe-Post headers matching the html unsubscribe link's token", async () => {

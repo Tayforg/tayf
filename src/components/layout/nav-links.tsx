@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Telescope, Eye, Bookmark, Settings, TrendingUp } from "lucide-react";
-import { Separator } from "@/components/ui/separator";
 
 const baseLink =
   "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
@@ -23,6 +22,14 @@ interface NavLinksProps {
 }
 
 /**
+ * The dividers are plain <span role="separator">s with literal classes, not the
+ * shadcn <Separator>: that primitive is a client module (Base UI + cn() ->
+ * tailwind-merge, ~32 KB on every public route, h13-weight-2). The primitive's
+ * `data-vertical:w-px` never applied (Base UI emits data-orientation, and
+ * globals.css has no data-vertical variant), so the live divider has always been
+ * 0 px wide; these keep exactly that look. Adding `w-px` would draw a visible
+ * line, which is a separate design decision (docs/perf.md).
+ *
  * Hook-free nav markup. `pathname === null` means "no link is active". This
  * is what the header's static-shell <Suspense> fallback renders: calling
  * usePathname() there would itself suspend on fallback-param routes under
@@ -52,7 +59,11 @@ export function NavLinksView({
         <span className="sr-only sm:hidden">Haberler</span>
         <span className="hidden sm:inline">Haberler</span>
       </Link>
-      <Separator orientation="vertical" className="h-3 mx-0.5" />
+      <span
+        role="separator"
+        aria-orientation="vertical"
+        className="h-3 mx-0.5 shrink-0 bg-border"
+      />
       <Link
         href="/blindspots"
         aria-current={isBlindspots ? "page" : undefined}
@@ -62,7 +73,11 @@ export function NavLinksView({
         <span className="sr-only sm:hidden">Kör Noktalar</span>
         <span className="hidden sm:inline">Kör Noktalar</span>
       </Link>
-      <Separator orientation="vertical" className="h-3 mx-0.5" />
+      <span
+        role="separator"
+        aria-orientation="vertical"
+        className="h-3 mx-0.5 shrink-0 bg-border"
+      />
       <Link
         href="/ekonomi"
         aria-current={isEkonomi ? "page" : undefined}
@@ -72,7 +87,11 @@ export function NavLinksView({
         <span className="sr-only sm:hidden">Ekonomi</span>
         <span className="hidden sm:inline">Ekonomi</span>
       </Link>
-      <Separator orientation="vertical" className="h-3 mx-0.5" />
+      <span
+        role="separator"
+        aria-orientation="vertical"
+        className="h-3 mx-0.5 shrink-0 bg-border"
+      />
       <Link
         href="/saved"
         aria-current={isSaved ? "page" : undefined}
@@ -84,7 +103,11 @@ export function NavLinksView({
       </Link>
       {showAdmin && (
         <>
-          <Separator orientation="vertical" className="h-3 mx-0.5" />
+          <span
+            role="separator"
+            aria-orientation="vertical"
+            className="h-3 mx-0.5 shrink-0 bg-border"
+          />
           <Link
             href="/admin"
             aria-current={isAdmin ? "page" : undefined}

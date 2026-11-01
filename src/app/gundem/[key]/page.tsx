@@ -173,7 +173,7 @@ export default async function EntityHubPage({ params }: PageProps) {
             <h2 id="entity-spectrum-heading" className={spectrumHeadingClass}>
               Listelenen haberlerin kaynak dağılımı
             </h2>
-            <BiasSpectrum distribution={sumDistributions(result.bundles)} />
+            <BiasSpectrum distribution={sumDistributions(result.bundles)} compact />
           </section>
 
           <div className={listClass}>

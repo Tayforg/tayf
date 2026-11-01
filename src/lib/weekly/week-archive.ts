@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/db/paging";
 import { createReaderClient } from "@/lib/supabase/server";
 import {
   DAY_MS,
@@ -12,6 +13,7 @@ import {
 import {
   WEEKLY_CLUSTER_LIMIT,
   WEEKLY_MIN_ARTICLES,
+  type WeeklyClusterRead,
   type WeeklyClusterRow,
 } from "@/lib/weekly/weekly-query";
 
@@ -131,14 +133,22 @@ export function weekLabelTr(key: string): string {
 export const WEEK_ARCHIVE_CLUSTER_SELECT =
   "id, title_tr, title_tr_neutral, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, article_count, first_published";
 
-/** Raw read of one archived week. `null` = could not be read (Supabase error,
- * a 4 s reader-cap abort, or a throw); `[]` = read fine, nothing in the week.
- * Never throws. Called only from `getWeekArchiveClustersCached`, i.e. from
- * inside the cache scope, which is why the clock read below is allowed. */
+/** Requests the paged read may issue before it reports `truncated` (same
+ * ceiling as /hafta: WEEKLY_CLUSTER_LIMIT rows in pages of 1,000). */
+const WEEK_ARCHIVE_MAX_PAGES = WEEKLY_CLUSTER_LIMIT / POSTGREST_MAX_ROWS;
+
+/** Raw read of one archived week, every page of it (PostgREST cuts any single
+ * response at 1,000 rows, so a bare `.limit()` silently dropped the rest).
+ * `null` = could not be read (Supabase error on any page, a 4 s reader-cap
+ * abort, or a throw: no partial week is ever returned); empty `rows` = read
+ * fine, nothing in the week. `truncated` is true only when the read stopped at
+ * its own page ceiling. Never throws. Called only from
+ * `getWeekArchiveClustersCached`, i.e. from inside the cache scope, which is
+ * why the clock read below is allowed. */
 async function fetchWeekArchiveClusters(range: {
   startIso: string;
   endIso: string;
-}): Promise<WeeklyClusterRow[] | null> {
+}): Promise<WeeklyClusterRead | null> {
   try {
     const supabase = createReaderClient();
     // Single clock read, same rationale as weekly-query.ts: the upper
@@ -146,24 +156,27 @@ async function fetchWeekArchiveClusters(range: {
     // a cluster into a past week.
     const nowIso = new Date(Date.now()).toISOString();
 
-    const { data, error } = await supabase
-      .from("clusters")
-      .select(WEEK_ARCHIVE_CLUSTER_SELECT)
-      .eq("is_archived", false)
-      .gte("article_count", WEEKLY_MIN_ARTICLES)
-      .gte("first_published", range.startIso)
-      .lt("first_published", range.endIso)
-      .lte("first_published", nowIso)
-      .order("article_count", { ascending: false })
-      .limit(WEEKLY_CLUSTER_LIMIT)
-      .returns<WeeklyClusterRow[]>();
-
-    if (error) {
-      console.error(`[week-archive] clusters unavailable: ${error.message}`);
-      return null;
-    }
-
-    return data ?? [];
+    // A throw from readAllPages (a page error or an invalid page size) lands
+    // in the catch below and becomes `null`.
+    return await readAllPages(
+      (from, to) =>
+        supabase
+          .from("clusters")
+          .select(WEEK_ARCHIVE_CLUSTER_SELECT)
+          .eq("is_archived", false)
+          .gte("article_count", WEEKLY_MIN_ARTICLES)
+          .gte("first_published", range.startIso)
+          .lt("first_published", range.endIso)
+          .lte("first_published", nowIso)
+          // Same deterministic, per-row-unique order as /hafta: a page
+          // boundary inside an equal-article_count tier must not skip or
+          // repeat a cluster.
+          .order("article_count", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)
+          .returns<WeeklyClusterRow[]>(),
+      { label: "week archive clusters", maxPages: WEEK_ARCHIVE_MAX_PAGES },
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[week-archive] clusters unavailable: ${message}`);
@@ -180,7 +193,7 @@ async function fetchWeekArchiveClusters(range: {
 // is needed: its `null` IS the failure signal.)
 async function getWeekArchiveClustersCached(
   key: string,
-): Promise<WeeklyClusterRow[] | null> {
+): Promise<WeeklyClusterRead | null> {
   "use cache";
   cacheTag("clusters-politics");
 
@@ -192,12 +205,13 @@ async function getWeekArchiveClustersCached(
   return data;
 }
 
-/** One archived week's cluster rows. `null` = could not be read (or the key
- * is not a valid ISO week); `[]` = read fine, the week produced nothing (or
- * every candidate is archived). Never throws. */
+/** One archived week's cluster rows, all pages. `null` = could not be read (or
+ * the key is not a valid ISO week); empty `rows` = read fine, the week produced
+ * nothing (or every candidate is archived); `truncated` = the read hit its own
+ * page ceiling. Never throws. */
 export async function getWeekArchiveClusters(
   key: string,
-): Promise<WeeklyClusterRow[] | null> {
+): Promise<WeeklyClusterRead | null> {
   // Pure: no Supabase, no clock, no cache entry for a key that can never match.
   if (weekRange(key) === null) return null;
   return getWeekArchiveClustersCached(key);

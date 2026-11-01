@@ -4,6 +4,7 @@ import Link from "next/link";
 import { AdminSection, EmptyState, StatusBadge } from "@/components/admin/admin-ui";
 import { ClusterMergeActions } from "@/components/admin/cluster-merge-actions";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
+import { excludeKeys, getContentTwinPairs } from "@/lib/admin/content-twins";
 import { fmtDateTime } from "@/lib/admin/format";
 import {
   getMergeQueue,
@@ -33,6 +34,13 @@ const READ_ERROR = "Veri okunamadı (099 uygulanmamış olabilir).";
 const TWIN_HELP =
   "Aynı kaynağın aynı haberi, başlığı değiştiği için ikinci bir adresle alınıp ayrı bir kümeye düşmüş olabilir (aynı haber kimliği, farklı adres). Son 14 günün en yeni 50 çifti, yenisi üstte. Hiçbir şey otomatik birleşmez: çifti inceleyin, uygunsa Birleştir'e basın.";
 const TWIN_READ_ERROR = "Veri okunamadı (120 uygulanmamış olabilir).";
+// "Olası içerik ikizleri" (migration 139): read-only list of live cluster pairs opened within 6 hours
+// of each other whose seed titles share word stems, re-scored with the clustering scorer. Merges are
+// logged as origin "manual" ("Elle") like the twin list: "İçerik ikizi" is only the row badge, the
+// merge API does not know a "content" origin and LOG_ORIGIN_LABEL deliberately has no entry for it.
+const CONTENT_HELP =
+  "Farklı kaynakların aynı olayı anlatan haberleri, başlıkları neredeyse aynı olduğu halde ayrı kümelere düşmüş olabilir. Son 48 saatte birbirinden en çok 6 saat arayla açılmış canlı kümeler, kümeleme puanlayıcısıyla yeniden puanlanır; yalnızca eşiği geçen çiftler listelenir. Hiçbir şey otomatik birleşmez: çifti inceleyin, uygunsa Birleştir'e basın.";
+const CONTENT_READ_ERROR = "Veri okunamadı (139 uygulanmamış olabilir).";
 
 const QUEUE_ORIGIN_LABEL: Record<MergeQueueOrigin, string> = {
   thread: "Hikaye önerisi",
@@ -80,11 +88,18 @@ function Side({ c }: { c: MergeClusterRef }) {
 export default async function ClusterMergeAdminPage() {
   await requireAdminSession();
 
-  const [queue, twins, merges] = await Promise.all([getMergeQueue(), getTwinClusterPairs(), getRecentMerges()]);
+  const [queue, content, twins, merges] = await Promise.all([
+    getMergeQueue(),
+    getContentTwinPairs(),
+    getTwinClusterPairs(),
+    getRecentMerges(),
+  ]);
 
-  // A pair already in the queue above is shown there, once.
+  // A pair is shown once: in the queue first, then as a content twin, then as a keyed twin.
   const queued = new Set((queue ?? []).map((row) => row.key));
-  const twinRows = twins === null ? null : twins.filter((row) => !queued.has(row.key));
+  const contentRows = excludeKeys(content, queued);
+  const contentShown = new Set((contentRows ?? []).map((row) => row.key));
+  const twinRows = excludeKeys(twins, queued, contentShown);
 
   return (
     <main className="mx-auto max-w-6xl space-y-6 px-4 py-6">
@@ -124,6 +139,39 @@ export default async function ClusterMergeAdminPage() {
                   b={row.b}
                   defaultTargetId={row.defaultTargetId}
                   origin={row.origin}
+                />
+              </li>
+            ))}
+          </ul>
+        )}
+      </AdminSection>
+      <AdminSection
+        id="icerik-ikizleri"
+        title="Olası içerik ikizleri"
+        help={CONTENT_HELP}
+        count={contentRows === null ? undefined : contentRows.length}
+      >
+        {contentRows === null ? (
+          <EmptyState kind="error">{CONTENT_READ_ERROR}</EmptyState>
+        ) : contentRows.length === 0 ? (
+          <EmptyState>Olası içerik ikizi yok.</EmptyState>
+        ) : (
+          <ul className="space-y-3">
+            {contentRows.map((row) => (
+              <li key={row.key} className="space-y-3 rounded-lg border border-border/60 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusBadge tone="neutral">İçerik ikizi</StatusBadge>
+                  <span className="text-xs text-muted-foreground">{row.detail}</span>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <Side c={row.a} />
+                  <Side c={row.b} />
+                </div>
+                <ClusterMergeActions
+                  a={row.a}
+                  b={row.b}
+                  defaultTargetId={row.defaultTargetId}
+                  origin="manual"
                 />
               </li>
             ))}

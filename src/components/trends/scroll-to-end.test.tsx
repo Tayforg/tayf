@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   isAtStart,
+  OVERFLOW_SLACK_PX,
   ScrollHint,
   ScrollToEnd,
   scrollToEndIfOverflowing,
@@ -28,16 +29,47 @@ describe("scrollToEndIfOverflowing", () => {
     expect(el.scrollLeft).toBe(0);
   });
 
+  it("exports the slack both checks use", () => {
+    expect(OVERFLOW_SLACK_PX).toBe(8);
+  });
+
+  // h13-edgeux-1: on /trends at 1280x800 the scroller measured scrollWidth 944,
+  // clientWidth 942 (spectrum glow / rounding), so the old 1 px slack showed a
+  // phantom "← önceki günler" hint although all 30 days were visible.
+  it("treats the real /trends desktop case (944 vs 942) as not overflowing and leaves scrollLeft alone", () => {
+    const el = { scrollWidth: 944, clientWidth: 942, scrollLeft: 0 };
+    expect(scrollToEndIfOverflowing(el)).toBe(false);
+    expect(el.scrollLeft).toBe(0);
+  });
+
   it("treats a 1px rounding difference as not overflowing", () => {
     const el = { scrollWidth: 325, clientWidth: 324, scrollLeft: 0 };
     expect(scrollToEndIfOverflowing(el)).toBe(false);
     expect(el.scrollLeft).toBe(0);
   });
 
-  it("treats 2px of extra width as overflowing", () => {
-    const el = { scrollWidth: 326, clientWidth: 324, scrollLeft: 0 };
+  it("treats an overflow of exactly the slack (8px) as not overflowing", () => {
+    const el = { scrollWidth: 324 + OVERFLOW_SLACK_PX, clientWidth: 324, scrollLeft: 0 };
+    expect(scrollToEndIfOverflowing(el)).toBe(false);
+    expect(el.scrollLeft).toBe(0);
+  });
+
+  it("treats one pixel more than the slack (9px) as overflowing", () => {
+    const el = { scrollWidth: 324 + OVERFLOW_SLACK_PX + 1, clientWidth: 324, scrollLeft: 0 };
     expect(scrollToEndIfOverflowing(el)).toBe(true);
-    expect(el.scrollLeft).toBe(326);
+    expect(el.scrollLeft).toBe(333);
+  });
+
+  it("treats a genuinely wider chart (1100 vs 942) as overflowing and scrolls to the end", () => {
+    const el = { scrollWidth: 1100, clientWidth: 942, scrollLeft: 0 };
+    expect(scrollToEndIfOverflowing(el)).toBe(true);
+    expect(el.scrollLeft).toBe(1100);
+  });
+
+  it("treats 20px of extra width (660 vs 640) as overflowing even when already scrolled 2px", () => {
+    const el = { scrollWidth: 660, clientWidth: 640, scrollLeft: 2 };
+    expect(scrollToEndIfOverflowing(el)).toBe(true);
+    expect(el.scrollLeft).toBe(660);
   });
 });
 
@@ -46,13 +78,20 @@ describe("isAtStart", () => {
     expect(isAtStart({ scrollLeft: 0 })).toBe(true);
   });
 
-  it("is true within 1px of the start (sub-pixel rounding)", () => {
+  it("is true within the slack of the start (2px sub-pixel / glow offset)", () => {
     expect(isAtStart({ scrollLeft: 1 })).toBe(true);
+    expect(isAtStart({ scrollLeft: 2 })).toBe(true);
+  });
+
+  it("uses the same slack as the overflow check: 8 is the start, 9 is not", () => {
+    expect(isAtStart({ scrollLeft: OVERFLOW_SLACK_PX })).toBe(true);
+    expect(isAtStart({ scrollLeft: OVERFLOW_SLACK_PX + 1 })).toBe(false);
+    expect(isAtStart({ scrollLeft: 8 })).toBe(true);
+    expect(isAtStart({ scrollLeft: 9 })).toBe(false);
   });
 
   it("is false once scrolled away from the start", () => {
     expect(isAtStart({ scrollLeft: 316 })).toBe(false);
-    expect(isAtStart({ scrollLeft: 2 })).toBe(false);
   });
 });
 

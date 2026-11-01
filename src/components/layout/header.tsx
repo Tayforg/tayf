@@ -1,6 +1,5 @@
 import { Suspense } from "react";
 import Link from "next/link";
-import { Separator } from "@/components/ui/separator";
 import { NavLinks, NavLinksView } from "@/components/layout/nav-links";
 import { hasAdminSession } from "@/lib/admin/session";
 import { NewsletterStatusBanner } from "@/components/newsletter/newsletter-status-banner";
@@ -66,9 +65,12 @@ export function Header() {
             <span className="font-serif text-xl font-normal tracking-tight">
               Tayf
             </span>
-            <Separator
-              orientation="vertical"
-              className="h-3.5 mx-0 hidden sm:block bg-border/40"
+            {/* Plain span, not the client <Separator> primitive (h13-weight-2).
+                Zero-width today, exactly as before: no w-px. */}
+            <span
+              role="separator"
+              aria-orientation="vertical"
+              className="h-3.5 mx-0 hidden sm:block shrink-0 bg-border/40"
             />
             <span className="text-[11px] font-medium tracking-wide text-muted-foreground hidden sm:inline uppercase">
               Haber Analizi

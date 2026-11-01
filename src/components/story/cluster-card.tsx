@@ -402,7 +402,12 @@ export function ClusterCard({
                 above-the-fold lazy image loads at once (Next image docs,
                 "theme detection" note) without a hint. The banner's sizes
                 (MOBILE_BANNER_SIZES) resolve to 0px on desktop, so desktop
-                only fetches the smallest srcset candidate for it. */}
+                only fetches the smallest srcset candidate for it.
+
+                width 160 and NO `sizes`: next/image then emits a 1x/2x srcset
+                (two candidates). The old fixed-px `sizes` on a 320-wide image
+                had no vw term, so every configured width (15) went into the
+                srcset of each of the ~21 cards (h13-weight-2). */}
             <div className="hidden sm:block shrink-0 w-32 h-24 sm:w-40 sm:h-28 overflow-hidden rounded-lg bg-muted">
               <ClusterCardImage
                 src={heroSrc}
@@ -410,9 +415,8 @@ export function ClusterCard({
                 logoSrc={resolved[0]?.source_logo_url ?? null}
                 logoAlt={resolved[0]?.source_name ?? "Kaynak"}
                 alt=""
-                width={320}
-                height={224}
-                sizes="160px"
+                width={160}
+                height={112}
                 priority={false}
                 className="h-full w-full object-cover"
               />

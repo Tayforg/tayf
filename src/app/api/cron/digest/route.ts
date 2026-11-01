@@ -3,6 +3,7 @@ import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
+import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/db/paging";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isMailConfigured, sendBatch } from "@/lib/email/resend";
 import { siteUrl } from "@/lib/site-url";
@@ -64,10 +65,13 @@ const digestLimit = createRateLimiter("cron-digest", {
   refillPerSecond: 1 / 3600,
 });
 
-// Bounds one cron tick's work. The subscriber list is small today; this
-// keeps the query — and the sequential last_sent_at updates below — well
-// inside the 60s ceiling if it grows before pagination is added.
+// Bounds one cron tick's work. The subscriber list is small today; this keeps
+// the read — and the sequential last_sent_at updates below — well inside the
+// 60s ceiling if it grows. PostgREST returns at most 1,000 rows per response
+// whatever `.limit()` asks for, so the list is read in pages of
+// POSTGREST_MAX_ROWS (SUBSCRIBER_MAX_PAGES requests at most).
 const SUBSCRIBER_FETCH_LIMIT = 5000;
+const SUBSCRIBER_MAX_PAGES = SUBSCRIBER_FETCH_LIMIT / POSTGREST_MAX_ROWS;
 
 // Send + stamp in small chunks rather than one giant sendBatch: if the
 // invocation is killed mid-run (maxDuration), only the in-flight chunk's
@@ -187,19 +191,28 @@ export const GET = withCronOutcome("digest", withApiErrors(async (request: Reque
   // Confirmed subscribers only; the 6-day "due" window is applied in JS
   // below rather than a `.or()` PostgREST filter, keeping the query a
   // single trackable predicate.
-  const { data: subscriberRows, error: subscriberError } = await supabase
-    .from("newsletter_subscribers")
-    .select("id, email, unsubscribe_token, last_sent_at")
-    .not("confirmed_at", "is", null)
-    .limit(SUBSCRIBER_FETCH_LIMIT)
-    .returns<SubscriberRow[]>();
-
-  if (subscriberError) {
-    return apiServerError(subscriberError);
+  let subscriberRows: SubscriberRow[];
+  try {
+    ({ rows: subscriberRows } = await readAllPages(
+      (from, to) =>
+        supabase
+          .from("newsletter_subscribers")
+          .select("id, email, unsubscribe_token, last_sent_at")
+          .not("confirmed_at", "is", null)
+          // Unique per row, so a page boundary can neither skip nor repeat a subscriber.
+          .order("id", { ascending: true })
+          .range(from, to)
+          .returns<SubscriberRow[]>(),
+      { label: "digest subscribers", maxPages: SUBSCRIBER_MAX_PAGES },
+    ));
+  } catch (err) {
+    // A failed page discards the earlier ones: a half-read list would mail some
+    // subscribers and silently skip the rest. Same 500 path as a single-query error.
+    return apiServerError(err);
   }
 
   const nowMs = Date.now();
-  const due = (subscriberRows ?? []).filter((row) => isDue(row, nowMs));
+  const due = subscriberRows.filter((row) => isDue(row, nowMs));
 
   if (due.length === 0) {
     return NextResponse.json({ sent: 0, skipped: 0 });

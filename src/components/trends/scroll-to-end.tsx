@@ -17,19 +17,30 @@ import { useCallback, useState } from "react";
 type ScrollMetrics = { scrollWidth: number; clientWidth: number; scrollLeft: number };
 
 /**
- * Scrolls `el` to its right edge when its content overflows horizontally.
- * Returns whether it overflowed. The 1px slack absorbs sub-pixel rounding so
- * a chart that exactly fits never reports a phantom scrollbar.
+ * Pixels of horizontal slack before the scroller counts as overflowing, and
+ * before a scroll offset counts as "not at the start". /trends at 1280x800
+ * measured scrollWidth 944 against clientWidth 942 and scrollLeft 2 (the
+ * spectrum glow and sub-pixel rounding), which with a 1px slack showed a
+ * "← önceki günler" hint although all 30 days were on screen. A few pixels of
+ * overhang is never a hidden day; a real overflow (the 640px-min SVG on a
+ * phone, a wider chart) is hundreds of pixels.
+ */
+export const OVERFLOW_SLACK_PX = 8;
+
+/**
+ * Scrolls `el` to its right edge when its content overflows horizontally by
+ * more than OVERFLOW_SLACK_PX. Returns whether it overflowed. Within the slack
+ * nothing is scrolled, so a chart that fits never reports a phantom scrollbar.
  */
 export function scrollToEndIfOverflowing(el: ScrollMetrics): boolean {
-  const overflowing = el.scrollWidth > el.clientWidth + 1;
+  const overflowing = el.scrollWidth > el.clientWidth + OVERFLOW_SLACK_PX;
   if (overflowing) el.scrollLeft = el.scrollWidth;
   return overflowing;
 }
 
-/** True when the scroller sits at (or within 1px of) its left edge. */
+/** True when the scroller sits at (or within OVERFLOW_SLACK_PX of) its left edge. */
 export function isAtStart(el: { scrollLeft: number }): boolean {
-  return el.scrollLeft <= 1;
+  return el.scrollLeft <= OVERFLOW_SLACK_PX;
 }
 
 /**

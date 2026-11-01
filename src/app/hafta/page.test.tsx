@@ -23,6 +23,8 @@ type Summary = {
     title: string;
     articleCount: number;
     side: "iktidar" | "bagimsiz" | "muhalefet";
+    share: number | null;
+    sharePct: number | null;
   }>;
 };
 
@@ -45,7 +47,8 @@ type WordsResult =
     };
 
 const mocks = vi.hoisted(() => ({
-  clusters: null as unknown[] | null,
+  /** What getWeeklyClusters resolves: the paged read, or null when unreadable. */
+  clusters: null as { rows: unknown[]; truncated: boolean } | null,
   labelChanges: null as
     | Array<{
         slug: string;
@@ -74,9 +77,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/weekly/weekly-query", () => ({
-  // Mirrors the real WEEKLY_CLUSTER_LIMIT (weekly-query.ts) — the page
-  // compares the returned row count against it to caption truncation.
-  WEEKLY_CLUSTER_LIMIT: 2000,
+  // Mirrors the real WEEKLY_CLUSTER_LIMIT (weekly-query.ts): week-sections
+  // prints it in the truncation caveat. The page itself no longer compares
+  // a row count against it; the read reports `truncated`.
+  WEEKLY_CLUSTER_LIMIT: 5000,
   getWeeklyClusters: () => Promise.resolve(mocks.clusters),
   getWeeklyLabelChanges: () => Promise.resolve(mocks.labelChanges),
   summariseWeek: () => mocks.summary,
@@ -199,12 +203,27 @@ const FULL_SUMMARY: Summary = {
     },
   ],
   blindspots: [
-    { id: "bs-1", title: "İhale iptali", articleCount: 4, side: "muhalefet" },
+    {
+      id: "bs-1",
+      title: "İhale iptali",
+      articleCount: 4,
+      side: "muhalefet",
+      share: 1,
+      sharePct: 100,
+    },
+    {
+      id: "bs-2",
+      title: "Kısmi kör nokta haberi",
+      articleCount: 20,
+      side: "iktidar",
+      share: 15 / 17,
+      sharePct: 88,
+    },
   ],
 };
 
 beforeEach(() => {
-  mocks.clusters = [{ id: "cl-1" }];
+  mocks.clusters = { rows: [{ id: "cl-1" }], truncated: false };
   mocks.labelChanges = [];
   mocks.summary = FULL_SUMMARY;
   mocks.health = {
@@ -374,7 +393,16 @@ describe("WeeklyPage — data present", () => {
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("İhale iptali");
-    expect(text).toContain("Sadece Muhalefet tarafında");
+    expect(text).toContain("Sadece Muhalefet tarafında · 4 haber");
+  });
+
+  it("says 'Sadece' only for a 100% blindspot and states the share below that (15 / 1 / 1 -> %88)", async () => {
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).toContain("Kısmi kör nokta haberi");
+    expect(text).toContain("%88 İktidar · 20 haber");
+    expect(text).not.toContain("Sadece İktidar");
+    expect(text.match(/Sadece/g) ?? []).toHaveLength(1);
   });
 
   it("adds the degraded caveat only when a zone's feeds are degraded", async () => {
@@ -393,16 +421,28 @@ describe("WeeklyPage — data present", () => {
     expect(degraded).toContain(caveat);
   });
 
-  it("captions the size-capped window only when the cluster read hit the cap", async () => {
+  it("captions the size-capped window only when the cluster read reports truncated", async () => {
     const caveat =
-      "En büyük 2000 küme üzerinden hesaplandı; haftanın tamamı değil.";
+      "En büyük 5.000 küme üzerinden hesaplandı; haftanın tamamı değil.";
 
     const under = collectText(await WeeklyPage()).join(" ");
     expect(under).not.toContain(caveat);
 
-    mocks.clusters = Array.from({ length: 2000 }, (_, i) => ({ id: `c${i}` }));
+    mocks.clusters = { rows: [{ id: "cl-1" }], truncated: true };
     const capped = collectText(await WeeklyPage()).join(" ");
     expect(capped).toContain(caveat);
+  });
+
+  it("never infers truncation from the row count (a 5,000-row read that ended on its own is complete)", async () => {
+    mocks.clusters = {
+      rows: Array.from({ length: 5000 }, (_, i) => ({ id: `c${i}` })),
+      truncated: false,
+    };
+
+    const text = collectText(await WeeklyPage()).join(" ");
+
+    expect(text).not.toContain("En büyük");
+    expect(text).not.toContain("haftanın tamamı değil");
   });
 
   it("renders the honest empty copy when there are no blindspots", async () => {
@@ -538,7 +578,7 @@ describe("WeeklyPage — label changes", () => {
 
 describe("WeeklyPage — empty and unavailable states", () => {
   it("renders the honest empty state when the week produced no clusters", async () => {
-    mocks.clusters = [];
+    mocks.clusters = { rows: [], truncated: false };
 
     const text = collectText(await WeeklyPage()).join(" ");
 

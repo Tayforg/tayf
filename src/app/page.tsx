@@ -5,6 +5,7 @@ import { Newspaper, SearchX } from "lucide-react";
 
 import { SearchBar } from "@/components/filters/search-bar";
 import { currentTimeMs } from "@/lib/time";
+import { cardEnterClass } from "@/lib/ui/card-enter";
 import { DailyGameTeaser } from "@/components/game/daily-game-teaser";
 import { dailyTeaserSlot } from "@/lib/game/daily-teaser";
 import { ClusterCard } from "@/components/story/cluster-card";
@@ -151,7 +152,7 @@ function renderClusterCard(
   return (
     <div
       key={bundle.cluster.id}
-      className={`animate-fade-up stagger-${(idx % 8) + 1}`}
+      className={cardEnterClass(idx) || undefined}
     >
       <ClusterCard
         cluster={bundle.cluster}
