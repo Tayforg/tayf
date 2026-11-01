@@ -71,6 +71,8 @@ interface ArticleRow {
   published_at: string;
   created_at: string;
   source_id: string;
+  category: string | null;
+  politics_admitted_at: string | null;
   sources: EmbeddedSourceRow | null;
   cluster_articles: Array<{ cluster_id: string }> | null;
 }
@@ -138,6 +140,7 @@ async function fetchArticleChunk(
       .from("articles")
       .select(
         `id, title, url, published_at, created_at, source_id,
+         category, politics_admitted_at,
          sources ( id, name, slug, bias, kind, active ),
          cluster_articles ( cluster_id )`,
       )
@@ -179,6 +182,8 @@ function toCandidate(row: ArticleRow): DailyCandidate | null {
     publishedAt: row.published_at,
     createdAt: row.created_at,
     clusterId: row.cluster_articles?.[0]?.cluster_id ?? null,
+    category: row.category ?? null,
+    politicsAdmittedAt: row.politics_admitted_at ?? null,
     source: {
       id: source.id,
       name: source.name,

@@ -3,7 +3,8 @@ import { createServerClient } from "@/lib/supabase/server";
 
 /**
  * Fleet-wide, DB-backed per-client throttle for the anonymous write routes
- * (migration 118): POST /api/oyun and POST /api/corrections.
+ * (migration 118): POST /api/oyun, POST /api/corrections, GET
+ * /api/oyun/cerceve/next and POST /api/oyun/cerceve.
  *
  * src/lib/rate-limit.ts's in-memory limiter is process-local -- on Vercel
  * every instance has its own Map and a cold start resets it -- so on its own
@@ -39,9 +40,34 @@ export const DB_THROTTLE_TIMEOUT_MS = 3000;
  * agreement.ts gameability note share the same numbers. (Next.js rejects
  * non-handler exports from a route.ts file, so they cannot live in the routes.)
  *
- *   oyun:all                 40 / hour  per client, any outlet
- *   oyun:src:<source uuid>    3 / day   per client, per outlet
- *   corrections:all           5 / hour  per client
+ *   oyun:all                 40 / hour  per client, any outlet     POST /api/oyun
+ *   oyun:src:<source uuid>    3 / day   per client, per outlet     POST /api/oyun
+ *   corrections:all           5 / hour  per client                 POST /api/corrections
+ *   cerceve:vote            200 / hour  per client, counted votes  POST /api/oyun/cerceve
+ *   cerceve:art:<article>     2 / day   per client, per headline   POST /api/oyun/cerceve
+ *   cerceve:mint             20 / hour  per client, NEW sessions   POST /api/oyun/cerceve,
+ *                                                                  GET /api/oyun/cerceve/next
+ *
+ * The Çerçeve buckets exist because the session cookie is signed: a vote is
+ * counted only for an id the server minted, so the way to stuff the tally is
+ * to keep minting fresh sessions. `cerceve:mint` caps that per client;
+ * `cerceve:vote` caps the votes a client can land in total and
+ * `cerceve:art:<article>` the votes one client can put on ONE headline, which
+ * is what actually bounds a crowd split (the session cookie carries no expiry,
+ * so a client can hold many valid ones). Same chain as /api/oyun: the
+ * per-headline check is spent only when the hourly bucket allowed.
+ *
+ * `cerceve:vote` is sized to real play, not to abuse: a round is 60 s and a
+ * player answers a headline every few seconds, so a heavy hour is well under
+ * 200, and everyone behind one office, school or CGNAT address shares it.
+ * Neither Çerçeve vote bucket ever answers 429: a full one skips the write and
+ * still reveals the tally (200, ok:false), so a script cannot read when to
+ * rotate IPs and an honest player behind a shared address never loses the
+ * reveal, which is the game's payoff.
+ *
+ * They bound stuffing from one IP; they do not prevent it from many (the key
+ * is the IP only). No migration: api_throttle accepts any bucket matching
+ * BUCKET_RE below.
  */
 export const THROTTLE_POLICY = {
   oyunAll: { bucket: "oyun:all", limit: 40, windowSeconds: 3600 },
@@ -49,6 +75,11 @@ export const THROTTLE_POLICY = {
   oyunSourceLimit: 3,
   oyunSourceWindowSeconds: 86_400,
   corrections: { bucket: "corrections:all", limit: 5, windowSeconds: 3600 },
+  cerceveVote: { bucket: "cerceve:vote", limit: 200, windowSeconds: 3600 },
+  cerceveArticlePrefix: "cerceve:art:",
+  cerceveArticleLimit: 2,
+  cerceveArticleWindowSeconds: 86_400,
+  cerceveMint: { bucket: "cerceve:mint", limit: 20, windowSeconds: 3600 },
 } as const;
 
 /** Domain-separation label: keeps this HMAC subkey unrelated to (and

@@ -226,6 +226,35 @@ describe("PATCH/DELETE /api/admin/corrections/[id]", () => {
     expect(deletes[0]?.state.eq).toContainEqual({ col: "id", val: ID });
   });
 
+  it('revalidates the "corrections" tag on a successful DELETE so an erased report leaves /duzeltmeler at once', async () => {
+    const mod = await import("@/app/api/admin/corrections/[id]/route");
+    const res = await mod.DELETE(deleteRequest(), paramsFor(ID));
+    expect(res.status).toBe(200);
+    expect(revalidateTagMock).toHaveBeenCalledTimes(1);
+    expect(revalidateTagMock).toHaveBeenCalledWith("corrections", "max");
+  });
+
+  it("does not revalidate when a DELETE finds no row (404)", async () => {
+    dbState.rows = [];
+    const mod = await import("@/app/api/admin/corrections/[id]/route");
+    const res = await mod.DELETE(deleteRequest(), paramsFor(ID));
+    expect(res.status).toBe(404);
+    expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
+  it("does not revalidate when a DELETE is unauthenticated or the id is malformed", async () => {
+    const mod = await import("@/app/api/admin/corrections/[id]/route");
+
+    const bad = await mod.DELETE(deleteRequest(), paramsFor("not-a-uuid"));
+    expect(bad.status).toBe(400);
+
+    __adminAuthed = false;
+    const unauth = await mod.DELETE(deleteRequest(), paramsFor(ID));
+    expect(unauth.status).toBe(401);
+
+    expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
   it("never leaks email or message in a PATCH-200 or DELETE-200 response body", async () => {
     const mod = await import("@/app/api/admin/corrections/[id]/route");
 

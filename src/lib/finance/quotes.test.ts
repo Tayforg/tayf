@@ -128,6 +128,62 @@ describe("parseYahooChart", () => {
   });
 });
 
+// hasBaseline separates a real 0,00% from "no baseline known": the TS-13
+// fallback keeps changePct 0 / prevClose = price so nothing non-finite leaks,
+// but readers must show '—' for that move, never '+0,00%'.
+describe("parseYahooChart hasBaseline", () => {
+  type Json = { chart: { result: Array<{ meta: Record<string, unknown>; indicators: { quote: Array<{ close: unknown[] }> } }> } };
+
+  it("is true when regularMarketChangePercent is present", () => {
+    expect(parseYahooChart("THYAO", SAMPLE)!.hasBaseline).toBe(true);
+  });
+
+  it("is true for a genuine 0,00% move reported by Yahoo", () => {
+    const json = structuredClone(SAMPLE) as unknown as Json;
+    json.chart.result[0]!.meta.regularMarketChangePercent = 0;
+    const q = parseYahooChart("THYAO", json)!;
+    expect(q.hasBaseline).toBe(true);
+    expect(q.changePct).toBe(0);
+  });
+
+  it("is true when the baseline comes from the last two closes", () => {
+    const json = structuredClone(SAMPLE) as unknown as Json;
+    delete json.chart.result[0]!.meta.regularMarketChangePercent;
+    expect(parseYahooChart("THYAO", json)!.hasBaseline).toBe(true);
+  });
+
+  it("is true when the baseline comes from chartPreviousClose on a 1-day chart", () => {
+    const json = structuredClone(SAMPLE) as unknown as Json;
+    delete json.chart.result[0]!.meta.regularMarketChangePercent;
+    json.chart.result[0]!.indicators.quote[0]!.close = [300.25];
+    expect(parseYahooChart("THYAO", json)!.hasBaseline).toBe(true);
+  });
+
+  it("is false with no regularMarketChangePercent, at most one close and no chartPreviousClose", () => {
+    const json = structuredClone(SAMPLE) as unknown as Json;
+    delete json.chart.result[0]!.meta.regularMarketChangePercent;
+    delete json.chart.result[0]!.meta.chartPreviousClose;
+    json.chart.result[0]!.indicators.quote[0]!.close = [300.25];
+    const q = parseYahooChart("THYAO", json)!;
+    expect(q.hasBaseline).toBe(false);
+    expect(q.changePct).toBe(0);
+    expect(q.prevClose).toBe(300.25);
+
+    json.chart.result[0]!.indicators.quote[0]!.close = [];
+    expect(parseYahooChart("THYAO", json)!.hasBaseline).toBe(false);
+  });
+
+  it("is false for the changePct === -100 fallback (TS-13)", () => {
+    const json = structuredClone(SAMPLE) as unknown as Json;
+    delete json.chart.result[0]!.meta.chartPreviousClose;
+    json.chart.result[0]!.meta.regularMarketChangePercent = -100;
+    const q = parseYahooChart("THYAO", json)!;
+    expect(q.hasBaseline).toBe(false);
+    expect(q.changePct).toBe(0);
+    expect(q.prevClose).toBe(300.25);
+  });
+});
+
 describe("YahooQuoteSource", () => {
   it("skips symbols that fail and keeps the rest", async () => {
     const fetchImpl = (async (url: string | URL | Request) => {

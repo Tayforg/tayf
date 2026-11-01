@@ -15,6 +15,7 @@ import {
   type PickupTotals,
 } from "@/lib/finance/kap-pickup";
 import { attemptCached } from "@/lib/cache-resilience";
+import { readAllPages } from "@/lib/finance/paging";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 
 /**
@@ -22,10 +23,17 @@ import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/ser
  * time-bounded on `kap_disclosures` / `article_tickers` directly;
  * `disclosure_coverage` is never touched (60s timeouts on an unbounded
  * count — see data-3 evidence in the brief).
+ *
+ * The mention read pages with `.range()` (ordered by published_at, article_id):
+ * PostgREST truncates every response at 1,000 rows, so the former single
+ * `.limit(5000)` silently stopped at 1,000 and the "exactly 5000 means
+ * truncated" check could never fire. MENTION_MAX_PAGES x MENTION_PAGE_SIZE
+ * rows is the bound; reaching it with a full last page sets `truncated`.
  */
 
 const DISCLOSURE_SELECT = "disclosure_index,published_at,subject,disclosure_class";
-const MENTION_LIMIT = 5000;
+const MENTION_PAGE_SIZE = 1000;
+const MENTION_MAX_PAGES = 5;
 const RELEVANCE_CHUNK = 100;
 const SOURCE_CHUNK = 200;
 
@@ -135,22 +143,21 @@ export async function fetchTickerPickup(
   );
   const mentionLt = new Date(mentionLtMs).toISOString();
 
-  const { data: mentionData, error: mentionError } = await supabase
-    .from("article_tickers")
-    .select("article_id,published_at,created_at,source_id")
-    .eq("ticker", ticker)
-    .gte("published_at", mentionGte)
-    .lt("published_at", mentionLt)
-    .limit(MENTION_LIMIT);
-  if (mentionError) {
-    throw new Error(`[finance] fetchTickerPickup mentions: ${mentionError.message}`);
-  }
-
-  const mentionRows = (mentionData ?? []) as MentionRow[];
-  const truncated = mentionRows.length === MENTION_LIMIT;
-  if (truncated) {
-    console.warn(`[finance] fetchTickerPickup: mention limit ${MENTION_LIMIT} hit for ticker ${ticker}`);
-  }
+  // Throws `[finance] fetchTickerPickup mentions <ticker>: <message>` on a
+  // Supabase error, and warns by itself when the page cap truncates the result.
+  const { rows: mentionRows, truncated } = await readAllPages<MentionRow>(
+    (from, to) =>
+      supabase
+        .from("article_tickers")
+        .select("article_id,published_at,created_at,source_id")
+        .eq("ticker", ticker)
+        .gte("published_at", mentionGte)
+        .lt("published_at", mentionLt)
+        .order("published_at")
+        .order("article_id")
+        .range(from, to),
+    { label: `fetchTickerPickup mentions ${ticker}`, maxPages: MENTION_MAX_PAGES, pageSize: MENTION_PAGE_SIZE },
+  );
 
   let mentions: PickupMention[] = mentionRows.map((r) => ({
     articleId: r.article_id,

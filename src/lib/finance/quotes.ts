@@ -17,6 +17,14 @@ export interface Quote {
   prevClose: number;
   /** Percent change vs previous close, e.g. -1.56 */
   changePct: number;
+  /**
+   * False when no previous-session baseline could be derived (the TS-13
+   * fallback: changePct 0 and prevClose = price are placeholders, not a
+   * measured flat day). Readers must treat `hasBaseline === false` as an
+   * unknown move and show "—"; a cached entry written before this field
+   * existed has it undefined and renders as a known move.
+   */
+  hasBaseline: boolean;
   /** Daily closes, oldest first, for a sparkline. */
   closes: number[];
   currency: string;
@@ -66,6 +74,7 @@ export function parseYahooChart(ticker: string, json: unknown): Quote | null {
   //      one close), where it *is* the prior session's close.
   let changePct = NaN;
   let prevClose = NaN;
+  let hasBaseline = true;
   if (typeof meta.regularMarketChangePercent === "number" && Number.isFinite(meta.regularMarketChangePercent)) {
     changePct = meta.regularMarketChangePercent;
     prevClose = price / (1 + changePct / 100);
@@ -83,12 +92,14 @@ export function parseYahooChart(ticker: string, json: unknown): Quote | null {
   if (!Number.isFinite(changePct) || !Number.isFinite(prevClose) || prevClose <= 0) {
     changePct = 0;
     prevClose = price;
+    hasBaseline = false;
   }
   return {
     ticker,
     price,
     prevClose,
     changePct,
+    hasBaseline,
     closes,
     currency: meta.currency ?? "TRY",
     asOf: new Date((meta.regularMarketTime ?? Date.now() / 1000) * 1000).toISOString(),

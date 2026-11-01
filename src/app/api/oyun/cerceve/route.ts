@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
+import { checkDbThrottle, THROTTLE_POLICY } from "@/lib/api/db-throttle";
 import {
   apiBadRequest,
   apiServerError,
@@ -30,7 +31,19 @@ import { mintSignedSession, readSignedSessionCookie } from "@/lib/game/framing-s
  * route stays internally consistent with its own GET sibling rather than
  * matching a different feature's casing.
  *
- * Every 400 below fires BEFORE any Supabase call.
+ * Every 400 below fires BEFORE any Supabase call, and so does the in-memory
+ * limiter. The fleet-wide DB throttles (migration 118's api_throttle, see
+ * THROTTLE_POLICY in src/lib/api/db-throttle.ts) run right AFTER validation,
+ * so a malformed request never spends a database round-trip: `cerceve:vote`
+ * then `cerceve:art:<article>` (per headline) for a request that carries a
+ * verified session, `cerceve:mint` for one that would mint a new session. All
+ * fail OPEN (a throttle outage never takes the game down).
+ *
+ * The in-memory burst limiter is the ONLY 429 of this route. A full DB bucket
+ * skips the write and answers the normal 200 `{ ok: false, totals }`: the
+ * crowd tally is the game's payoff, a 429 would drop it for every honest
+ * player behind a shared address, and it would tell a script exactly when to
+ * switch IP (the same stance as /api/oyun and the /api/corrections honeypot).
  */
 const cercevePostLimit = createRateLimiter("oyun-cerceve-post", {
   capacity: 30,
@@ -94,13 +107,45 @@ export const POST = withApiErrors(async (request: Request) => {
   // mints the cookie, so no real player loses a vote; the cookie minted
   // below makes the NEXT request from that client count. `ok` reflects
   // whether this specific request was recorded.
+  //
+  // Signing alone does not stop a client that simply discards its cookie and
+  // takes a new one per vote, so both branches are capped per client by the
+  // DB throttle: NEW sessions (`cerceve:mint`) and counted votes
+  // (`cerceve:vote` overall, `cerceve:art:<article>` per headline, sequential
+  // like /api/oyun so the per-headline check is spent only when the hourly one
+  // allowed). A throttled mint is not an error: the tally is still returned,
+  // but no cookie is issued and the vote stays uncounted. A throttled vote is
+  // not an error either: the upsert is skipped and the tally is still revealed.
   const verifiedId = await readSignedSessionCookie(request);
-  const fresh = verifiedId === null ? await mintSignedSession() : null;
-  const minted = fresh !== null;
+  let fresh: Awaited<ReturnType<typeof mintSignedSession>> | null = null;
+  let recordVote = false;
+
+  if (verifiedId !== null) {
+    const hourly = await checkDbThrottle({ ...THROTTLE_POLICY.cerceveVote, clientKey: key });
+    let throttledBucket: string | null = hourly.allowed ? null : THROTTLE_POLICY.cerceveVote.bucket;
+    if (hourly.allowed) {
+      const perHeadline = await checkDbThrottle({
+        bucket: `${THROTTLE_POLICY.cerceveArticlePrefix}${articleId.toLowerCase()}`,
+        clientKey: key,
+        limit: THROTTLE_POLICY.cerceveArticleLimit,
+        windowSeconds: THROTTLE_POLICY.cerceveArticleWindowSeconds,
+      });
+      if (!perHeadline.allowed) throttledBucket = "cerceve:art";
+    }
+    if (throttledBucket === null) {
+      recordVote = true;
+    } else {
+      // Bucket PREFIX only: never the client key, its digest or the article id.
+      console.warn("[oyun/cerceve] vote not recorded: throttled", { bucket: throttledBucket });
+    }
+  } else {
+    const t = await checkDbThrottle({ ...THROTTLE_POLICY.cerceveMint, clientKey: key });
+    if (t.allowed) fresh = await mintSignedSession();
+  }
 
   const supabase = createServerClient();
 
-  if (verifiedId !== null) {
+  if (verifiedId !== null && recordVote) {
     const sessionHash = await hashSessionId(verifiedId);
     const { error: upsertError } = await supabase.from("framing_votes").upsert(
       { article_id: articleId, vote, session_hash: sessionHash },
@@ -129,7 +174,7 @@ export const POST = withApiErrors(async (request: Request) => {
   const totals = normalizeTally(row);
 
   const res = NextResponse.json(
-    { ok: !minted, totals },
+    { ok: recordVote, totals },
     { status: 200, headers: { "Cache-Control": "no-store" } },
   );
 

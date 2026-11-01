@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
+
 // ---------------------------------------------------------------------------
 // kap-media-pickup — IO layer tests. Uses the shared chainable Supabase
 // fake (tests/_helpers/supabase-fake.ts) directly against fetchTickerPickup
@@ -21,6 +23,27 @@ const NOW = new Date("2026-09-28T12:00:00.000Z").getTime();
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
+}
+
+/**
+ * An article_tickers handler that behaves like PostgREST: `total` rows in a
+ * stable order, sliced by `.range()` (or `.limit()`), and a single response
+ * NEVER longer than max_rows (1,000) whatever the caller asked for. Every
+ * builder state is recorded in `seen`.
+ */
+function pagedMentions(total: number, seen: BuilderState[]) {
+  const all = Array.from({ length: total }, (_, i) => ({
+    article_id: `a${String(i).padStart(5, "0")}`,
+    published_at: iso(NOW - HOUR),
+    created_at: iso(NOW - HOUR),
+    source_id: null,
+  }));
+  return (state: BuilderState) => {
+    seen.push(state);
+    const from = state.range ? state.range.from : 0;
+    const asked = state.range ? state.range.to - state.range.from + 1 : (state.limit ?? all.length);
+    return { data: all.slice(from, from + Math.min(asked, 1000)), error: null };
+  };
 }
 
 // Order independence (vitest --sequence.shuffle): `vi.doMock` registrations
@@ -193,7 +216,9 @@ describe("fetchTickerPickup", () => {
     });
 
     const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
-    await expect(fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 })).rejects.toThrow();
+    await expect(fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 })).rejects.toThrow(
+      /mentions.*db down/,
+    );
   });
 
   it("a source query error throws", async () => {
@@ -217,30 +242,108 @@ describe("fetchTickerPickup", () => {
     await expect(fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 })).rejects.toThrow();
   });
 
-  it("sets truncated=true when exactly MENTION_LIMIT (5000) mentions come back", async () => {
-    const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
-    const mentionRows = Array.from({ length: 5000 }, (_, i) => ({
-      article_id: `a${i}`,
-      published_at: iso(NOW - HOUR),
-      created_at: iso(NOW - HOUR),
-      source_id: null,
-    }));
-
-    const { client } = createSupabaseFake({
-      tables: {
-        kap_disclosures: () => ({
-          data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), subject: null, disclosure_class: null }],
-          error: null,
-        }),
-        article_tickers: () => ({ data: mentionRows, error: null }),
-        jev_shadow_predictions: () => ({ data: [], error: null }),
-        sources: () => ({ data: [], error: null }),
-      },
+  describe("mention paging (PostgREST clamps every response at 1,000 rows)", () => {
+    const oneDisclosure = () => ({
+      data: [{ disclosure_index: 1, published_at: iso(NOW - 2 * DAY), subject: null, disclosure_class: null }],
+      error: null,
     });
 
-    const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
-    const result = await fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 });
-    expect(result.truncated).toBe(true);
+    it("1000 rows on page 1 and 200 on page 2: both pages are read, all 1200 mentions are used, not truncated", async () => {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const seen: BuilderState[] = [];
+      const relevanceKeysSeen: string[] = [];
+
+      const { client } = createSupabaseFake({
+        tables: {
+          kap_disclosures: oneDisclosure,
+          article_tickers: pagedMentions(1200, seen) as never,
+          jev_shadow_predictions: (state) => {
+            relevanceKeysSeen.push(...((state.in.find((x) => x.col === "subject_id")?.vals as string[]) ?? []));
+            return { data: [], error: null };
+          },
+          sources: () => ({ data: [], error: null }),
+        },
+      });
+
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      const result = await fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 });
+
+      expect(seen.map((s) => s.range)).toEqual([
+        { from: 0, to: 999 },
+        { from: 1000, to: 1999 },
+      ]);
+      // Page 2's rows reach the relevance lookup (and so the pickup computation).
+      expect(relevanceKeysSeen).toHaveLength(1200);
+      expect(relevanceKeysSeen).toContain("a01199:THYAO");
+      expect(result.pickups[0]!.articles).toBe(1200);
+      expect(result.truncated).toBe(false);
+    });
+
+    it("a table of exactly 1000 mentions costs one empty extra page and is not truncated", async () => {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const seen: BuilderState[] = [];
+
+      const { client } = createSupabaseFake({
+        tables: {
+          kap_disclosures: oneDisclosure,
+          article_tickers: pagedMentions(1000, seen) as never,
+          jev_shadow_predictions: () => ({ data: [], error: null }),
+          sources: () => ({ data: [], error: null }),
+        },
+      });
+
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      const result = await fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 });
+
+      expect(seen).toHaveLength(2);
+      expect(result.truncated).toBe(false);
+    });
+
+    it("5 full pages: stops, truncated=true, and warns once naming the ticker", async () => {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const seen: BuilderState[] = [];
+
+      const { client } = createSupabaseFake({
+        tables: {
+          kap_disclosures: oneDisclosure,
+          article_tickers: pagedMentions(6000, seen) as never,
+          jev_shadow_predictions: () => ({ data: [], error: null }),
+          sources: () => ({ data: [], error: null }),
+        },
+      });
+
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      const result = await fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 });
+
+      expect(seen).toHaveLength(5);
+      expect(result.truncated).toBe(true);
+      const truncationWarnings = warn.mock.calls.filter((c) => String(c[0]).includes("THYAO") && /truncated/.test(String(c[0])));
+      expect(truncationWarnings).toHaveLength(1);
+    });
+
+    it("orders the mention reads by published_at, then article_id, so .range() pages never skip or repeat a row", async () => {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const seen: BuilderState[] = [];
+
+      const { client } = createSupabaseFake({
+        tables: {
+          kap_disclosures: oneDisclosure,
+          article_tickers: pagedMentions(1200, seen) as never,
+          jev_shadow_predictions: () => ({ data: [], error: null }),
+          sources: () => ({ data: [], error: null }),
+        },
+      });
+
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      await fetchTickerPickup(client as never, "THYAO", NOW - 30 * DAY, NOW, { limit: 60 });
+
+      expect(seen.length).toBeGreaterThan(1);
+      for (const s of seen) {
+        expect(s.order.map((o) => o.col)).toEqual(["published_at", "article_id"]);
+        expect(s.limit).toBeNull();
+      }
+    });
   });
 });
 

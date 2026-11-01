@@ -101,8 +101,20 @@ describe("aggregateAttention", () => {
     const result = aggregateAttention(rows, scores);
     const day13 = result.find((r) => r.day === "2026-09-13");
     const day14 = result.find((r) => r.day === "2026-09-14");
-    expect(day13).toEqual({ ticker: "THYAO", day: "2026-09-13", articles: 3, sources: 2 });
-    expect(day14).toEqual({ ticker: "THYAO", day: "2026-09-14", articles: 1, sources: 1 });
+    expect(day13).toEqual({ ticker: "THYAO", day: "2026-09-13", articles: 3, sources: 2, sourceIds: ["s1", "s2"] });
+    expect(day14).toEqual({ ticker: "THYAO", day: "2026-09-14", articles: 1, sources: 1, sourceIds: ["s4"] });
+  });
+
+  it("carries the distinct source ids of each group, sorted, so callers can union them across days", () => {
+    const rows = [
+      { ticker: "THYAO", article_id: "a1", published_at: "2026-09-13T10:00:00.000Z", source_id: "s9" },
+      { ticker: "THYAO", article_id: "a2", published_at: "2026-09-13T11:00:00.000Z", source_id: "s1" },
+      { ticker: "THYAO", article_id: "a3", published_at: "2026-09-13T12:00:00.000Z", source_id: "s9" },
+      { ticker: "THYAO", article_id: "a4", published_at: "2026-09-13T13:00:00.000Z", source_id: "s5" },
+    ];
+    const [row] = aggregateAttention(rows, new Map());
+    expect(row!.sourceIds).toEqual(["s1", "s5", "s9"]);
+    expect(row!.sources).toBe(row!.sourceIds.length);
   });
 
   it("omits empty groups entirely rather than emitting a zero row", () => {
@@ -124,7 +136,7 @@ describe("aggregateAttention: legal-notice exclusion", () => {
 
   it("skips every row whose article_id is in the exclude set, whatever the ticker", () => {
     const out = aggregateAttention(rows, new Map(), new Set(["n1"]));
-    expect(out).toEqual([{ ticker: "GARAN", day: "2026-09-13", articles: 1, sources: 1 }]);
+    expect(out).toEqual([{ ticker: "GARAN", day: "2026-09-13", articles: 1, sources: 1, sourceIds: ["s2"] }]);
   });
 
   it("omits a (ticker, day) group left empty by the exclusion", () => {
