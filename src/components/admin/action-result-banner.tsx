@@ -12,8 +12,8 @@ export function ActionResultBanner({ result }: { result: ActionResult }) {
     <div
       className={`mb-4 rounded-lg border p-3 text-sm ${
         result.error
-          ? "border-red-500/30 bg-red-500/10 text-red-400"
-          : "border-green-500/30 bg-green-500/10 text-green-400"
+          ? "border-red-500/30 bg-red-500/10 text-red-800 dark:text-red-400"
+          : "border-green-500/30 bg-green-500/10 text-green-800 dark:text-green-400"
       }`}
     >
       <div className="flex items-start gap-2">

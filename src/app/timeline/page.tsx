@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
+import { NewClustersPill } from "@/components/timeline/new-clusters-pill";
 import { PageHero } from "@/components/ui/page-hero";
+import { TIMELINE_HEAD_LIMIT } from "@/lib/clusters/timeline-head";
 import { getRecentClusters, type ClusterRow } from "@/lib/clusters/timeline-query";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
@@ -31,6 +33,15 @@ export const metadata: Metadata = staticPageMetadata({
 // day; a busy day mints more qualifying clusters than that, so the subtitle
 // names the real total (a separate head/exact count) whenever the list is
 // capped, instead of presenting the capped length as the day's count.
+//
+// Realtime-lite: <NewClustersPill> (client) polls /api/timeline/head every ~2
+// min while the tab is visible and offers "N yeni küme · Yenile" (router.refresh)
+// when the head holds clusters this page does not. The route reuses the same
+// getRecentClusters() "use cache" entry, so polling adds no DB read. The page
+// hands the pill the newest first_published and the ids of the first
+// TIMELINE_HEAD_LIMIT rows (the head's own window) to diff against. It is not
+// rendered when the read failed (rows === null). The hero and the pill share a
+// plain wrapper so an empty pill adds no space-y gap.
 
 interface HourBucket {
   // ISO of the top-of-hour the rows in this bucket belong to. Used as the
@@ -118,15 +129,23 @@ export default async function TimelinePage() {
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
-      <PageHero
-        kicker="Son 24 saat"
-        title="Zaman çizelgesi"
-        subtitle={
-          recent === null
-            ? "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı."
-            : timelineSubtitle(recent.rows.length, recent.total)
-        }
-      />
+      <div>
+        <PageHero
+          kicker="Son 24 saat"
+          title="Zaman çizelgesi"
+          subtitle={
+            recent === null
+              ? "Son 24 saatte oluşturulan haber kümeleri, saat saat sıralandı."
+              : timelineSubtitle(recent.rows.length, recent.total)
+          }
+        />
+        {rows !== null && (
+          <NewClustersPill
+            newestPublished={rows[0]?.first_published ?? null}
+            knownIds={rows.slice(0, TIMELINE_HEAD_LIMIT).map((r) => r.id)}
+          />
+        )}
+      </div>
 
       {rows === null ? (
         <p className="text-sm text-muted-foreground">

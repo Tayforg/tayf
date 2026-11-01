@@ -33,6 +33,9 @@ vi.mock("@/lib/clusters/topic-query", async (importOriginal) => {
   };
 });
 
+import { BiasSpectrum } from "@/components/story/bias-spectrum";
+import { ClusterCard } from "@/components/story/cluster-card";
+
 import TopicHubPage, { generateMetadata } from "./page";
 
 const UNAVAILABLE_COPY =
@@ -82,12 +85,13 @@ async function render(page = 1) {
   });
 }
 
-function bundle(id: string) {
+function bundle(id: string, dist?: unknown) {
   return {
     cluster: {
       id,
       title_tr: `Küme ${id}`,
       updated_at: "2026-09-18T11:00:00.000Z",
+      bias_distribution: dist,
     },
     articles: [],
     sources: [],
@@ -143,6 +147,155 @@ describe("/konu/[slug] failed state", () => {
     const text = collectText(tree).join("");
     expect(text).toContain("Bu sayfada küme yok.");
     expect(text).not.toContain(UNAVAILABLE_COPY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Aggregate source-mix bar. The page sums the listed bundles' own
+// bias_distribution (voting kinds only, written by cluster-consumer), so no new
+// query: page N aggregates page N, and the heading says "Listelenen".
+// ---------------------------------------------------------------------------
+
+const SPECTRUM_HEADING = "Listelenen haberlerin kaynak dağılımı";
+const SPECTRUM_EMPTY_COPY = "Listelenen haberlerde dağılıma sayılan kaynak yok.";
+
+function elementsOfType(tree: unknown, type: unknown) {
+  const out: Array<{ type?: unknown; props?: Record<string, unknown> }> = [];
+  walk(tree, (el) => {
+    if (el.type === type) out.push(el);
+  });
+  return out;
+}
+
+function spectrumSections(tree: unknown) {
+  const out: Array<{ type?: unknown; props?: Record<string, unknown> }> = [];
+  walk(tree, (el) => {
+    if (el.type === "section" && el.props?.["aria-labelledby"] === "topic-spectrum-heading") {
+      out.push(el);
+    }
+  });
+  return out;
+}
+
+function headingsById(tree: unknown, id: string) {
+  const out: Array<{ type?: unknown; props?: Record<string, unknown> }> = [];
+  walk(tree, (el) => {
+    if (el.type === "h2" && el.props?.id === id) out.push(el);
+  });
+  return out;
+}
+
+/** Document order of the first element matching each predicate (Infinity when absent). */
+function firstIndexOf(tree: unknown, match: (el: { type?: unknown; props?: Record<string, unknown> }) => boolean) {
+  let i = 0;
+  let found = Number.POSITIVE_INFINITY;
+  walk(tree, (el) => {
+    if (found === Number.POSITIVE_INFINITY && match(el)) found = i;
+    i += 1;
+  });
+  return found;
+}
+
+describe("/konu/[slug] kaynak dağılımı", () => {
+  it("renders one compact BiasSpectrum with the summed distribution above the cluster list", async () => {
+    mocks.result = {
+      bundles: [
+        bundle("c1", { pro_government: 2, opposition: 1 }),
+        bundle("c2", { opposition: 3, center: 1 }),
+      ],
+      hasMore: false,
+      page: 1,
+    };
+
+    const tree = await render();
+    const spectra = elementsOfType(tree, BiasSpectrum);
+
+    expect(spectra).toHaveLength(1);
+    expect(spectra[0]?.props?.compact).toBe(true);
+    expect(spectra[0]?.props?.distribution).toEqual({
+      pro_government: 2,
+      state_media: 0,
+      gov_leaning: 0,
+      islamist_conservative: 0,
+      center: 1,
+      international: 0,
+      pro_kurdish: 0,
+      opposition_leaning: 0,
+      opposition: 4,
+      nationalist: 0,
+    });
+    const text = collectText(tree).join("");
+    expect(text).toContain(SPECTRUM_HEADING);
+    expect(text).not.toContain(SPECTRUM_EMPTY_COPY);
+  });
+
+  it("wraps the heading in <section aria-labelledby=topic-spectrum-heading> placed before the ClusterCard list", async () => {
+    mocks.result = {
+      bundles: [bundle("c1", { opposition: 2 }), bundle("c2", { center: 1 })],
+      hasMore: false,
+      page: 1,
+    };
+
+    const tree = await render();
+    const sections = spectrumSections(tree);
+
+    expect(sections).toHaveLength(1);
+    expect(headingsById(sections[0], "topic-spectrum-heading")).toHaveLength(1);
+    expect(collectText(sections[0]).join("")).toContain(SPECTRUM_HEADING);
+
+    const sectionAt = firstIndexOf(
+      tree,
+      (el) => el.type === "section" && el.props?.["aria-labelledby"] === "topic-spectrum-heading",
+    );
+    const cardAt = firstIndexOf(tree, (el) => el.type === ClusterCard);
+    expect(sectionAt).toBeLessThan(cardAt);
+    expect(cardAt).not.toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["all zero", { pro_government: 0, opposition: 0 }],
+    ["malformed", { opposition: -2, center: "3" }],
+  ])(
+    "states honestly that nothing was counted, and draws no bar, when every distribution is %s",
+    async (_label, dist) => {
+      mocks.result = {
+        bundles: [bundle("c1", dist), bundle("c2", dist)],
+        hasMore: false,
+        page: 1,
+      };
+
+      const tree = await render();
+      const text = collectText(tree).join("");
+
+      expect(elementsOfType(tree, BiasSpectrum)).toHaveLength(0);
+      expect(spectrumSections(tree)).toHaveLength(1);
+      expect(text).toContain(SPECTRUM_HEADING);
+      expect(text).toContain(SPECTRUM_EMPTY_COPY);
+      // The clusters themselves still list.
+      expect(elementsOfType(tree, ClusterCard)).toHaveLength(2);
+    },
+  );
+
+  it("shows neither the heading nor a bar when the read failed (null)", async () => {
+    mocks.result = null;
+
+    const tree = await render();
+
+    expect(elementsOfType(tree, BiasSpectrum)).toHaveLength(0);
+    expect(spectrumSections(tree)).toHaveLength(0);
+    expect(collectText(tree).join("")).not.toContain(SPECTRUM_HEADING);
+  });
+
+  it.each([1, 3])("shows neither the heading nor a bar for an empty page %i", async (page) => {
+    mocks.result = { bundles: [], hasMore: false, page };
+
+    const tree = await render(page);
+
+    expect(elementsOfType(tree, BiasSpectrum)).toHaveLength(0);
+    expect(spectrumSections(tree)).toHaveLength(0);
+    expect(collectText(tree).join("")).not.toContain(SPECTRUM_HEADING);
   });
 });
 

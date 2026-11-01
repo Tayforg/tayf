@@ -106,15 +106,41 @@ export async function mergeClusters(i: {
   }
 }
 
+/**
+ * Every cluster-LIST cache tag. Any admin mutation that changes which articles
+ * belong to which cluster (merge, unlink) must revalidate all of them, or the
+ * stale list lingers for the whole cache window on the surface it missed.
+ * Owners (the files whose `cacheTag(...)` carries the tag):
+ *   - "clusters": timeline-query, story-timeline-query, cluster-detail-query,
+ *     framing-receipt, blindspots-query, near-blindspots-query.
+ *   - "clusters-politics": politics-query, topic-query, weekly-query,
+ *     week-archive, blindspots-query, near-blindspots-query, headline/status,
+ *     rss-summary-attribution.
+ *   - "clusters-search": search-query (the /ara results).
+ *   - "clusters-entity": entity-hub-query (the /gundem/<key> hubs).
+ * tests/guards/cluster-membership-tags.test.ts fails when a new `clusters*`
+ * cacheTag appears that is not listed here.
+ */
+export const CLUSTER_FEED_TAGS = [
+  "clusters",
+  "clusters-politics",
+  "clusters-search",
+  "clusters-entity",
+] as const;
+
+/**
+ * Cache tags for any change to cluster membership (an article leaving or
+ * joining a cluster): every cluster-list tag plus the per-cluster detail tag of
+ * each affected cluster. Call revalidateTag(tag, "max") on each.
+ */
+export function clusterMembershipTags(...clusterIds: string[]): string[] {
+  return [...CLUSTER_FEED_TAGS, ...clusterIds.map((id) => `cluster-detail:${id}`)];
+}
+
 /** Cache tags a merge invalidates (call revalidateTag on each after ok). */
 export function mergeRevalidationTags(source: string, target: string): string[] {
   return [
-    "clusters",
-    "clusters-politics",
-    "clusters-search",
-    // /gundem/<key> hubs (entity-hub-query.ts): without this a merged-away
-    // cluster stays next to its survivor for up to the cluster-feed window.
-    "clusters-entity",
+    ...CLUSTER_FEED_TAGS,
     "story-threads",
     `cluster-detail:${source}`,
     `cluster-detail:${target}`,

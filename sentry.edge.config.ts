@@ -12,7 +12,9 @@
  *
  * Data collection: `dataCollection: SENTRY_DATA_COLLECTION` keeps IPs, cookies,
  * request bodies and DB query data off (@sentry/nextjs 11 collects them by
- * default; see `src/lib/sentry/data-collection.ts`).
+ * default; see `src/lib/sentry/data-collection.ts`). The before* hooks scrub
+ * credential headers and the /rapor/<token> share URL (see
+ * `src/lib/sentry/redact.ts`).
  *
  * Note: tayf's Supabase Edge Functions (under `supabase/functions/`) are a
  * different runtime (Deno) and are NOT covered by this file. Those functions
@@ -21,6 +23,11 @@
  */
 import * as Sentry from "@sentry/nextjs";
 import { SENTRY_DATA_COLLECTION } from "./src/lib/sentry/data-collection";
+import {
+  scrubSentryBreadcrumb,
+  scrubSentryEvent,
+  scrubSentrySpan,
+} from "./src/lib/sentry/redact";
 
 const dsn = process.env.SENTRY_DSN ?? process.env.NEXT_PUBLIC_SENTRY_DSN;
 
@@ -37,27 +44,22 @@ Sentry.init({
   debug: process.env.SENTRY_DEBUG === "1",
   dataCollection: SENTRY_DATA_COLLECTION,
 
-  // The SDK attaches every incoming request header to route-handler
-  // events; drop the cron bearer and cookies before they leave the process.
-  // Also redact the /rapor/<token> share capability secret — it travels in
-  // the URL PATH, not a header, so a throw inside src/app/rapor/[token]/
-  // would otherwise ship a working, unexpired share link to Sentry.
-  beforeSend(event) {
-    const redact = (s?: string) => s?.replace(/\/rapor\/[0-9a-f]{32}/gi, "/rapor/[token]");
-    const h = event.request?.headers;
-    if (h) {
-      delete h.authorization;
-      delete h.cookie;
-      // Referrer-Policy strict-origin-when-cross-origin sends the FULL url
-      // same-origin, so the page's own "Markdown indir" click puts a live
-      // /rapor/<token> capability URL in Referer. Redact every header value,
-      // not just referer, so a future header can't reintroduce the leak.
-      for (const k of Object.keys(h)) {
-        if (typeof h[k] === "string") h[k] = redact(h[k])!;
-      }
-    }
-    if (event.request?.url) event.request.url = redact(event.request.url)!;
-    if (event.transaction) event.transaction = redact(event.transaction)!;
-    return event;
-  },
+  // The SDK attaches every incoming request header to route-handler events;
+  // scrubSentryEvent drops the cron bearer and cookies before they leave the
+  // process. The /rapor/<token> share capability secret travels in the URL
+  // PATH, so every channel that carries a URL is redacted too (src/lib/sentry/
+  // redact.ts; tests/guards/sentry-data-collection.test.ts feeds each hook):
+  //   - beforeSend: error events (request.url, Referer, transaction,
+  //     breadcrumbs, trace context).
+  //   - beforeSendSpan: @sentry/nextjs 11 defaults to traceLifecycle "stream",
+  //     where spans (name, url.* attributes, links) ship individually and this
+  //     is the effective tracing hook.
+  //   - beforeSendTransaction: runs ONLY under traceLifecycle "static"; ignored
+  //     by the default "stream", and removed in SDK v12. Kept so a switch to
+  //     "static" cannot silently reopen the leak.
+  //   - beforeBreadcrumb: navigation and fetch breadcrumbs, as they are added.
+  beforeSend: scrubSentryEvent,
+  beforeSendTransaction: scrubSentryEvent,
+  beforeSendSpan: scrubSentrySpan,
+  beforeBreadcrumb: scrubSentryBreadcrumb,
 });

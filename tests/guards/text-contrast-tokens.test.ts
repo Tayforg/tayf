@@ -3,7 +3,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
-import { ZONE_META } from "@/lib/bias/config";
+import { BIAS_COLORS, ZONE_META } from "@/lib/bias/config";
 
 // ---------------------------------------------------------------------------
 // Permanent CI guard (a11y-2): text must use the full `text-muted-foreground`
@@ -376,130 +376,6 @@ describe("no bare element opacity in story components (qa-wave-i, WCAG 1.4.3)", 
 });
 
 // ---------------------------------------------------------------------------
-// Third guard (hunt2 wave U, tinted status pills): a pill tinted with
-// `bg-<hue>-500/15` is a 15 % wash over the card, so its 11 px label needs the
-// darker shades to reach 4.5:1 in both themes: 800 (or 900) in light mode and
-// 200 / 300 / 400 in dark mode. `text-rose-700 dark:text-rose-500` (the old
-// "karantinada" pill) measures below AA in both. The AA-safe pairs live in
-// SILENCE_BADGE_CLASS (src/app/kaynaklar/durum/page.tsx).
-//
-// Scoped, not global: other files still carry the 700 / 500 pairs (cluster
-// card, follow feed, status view) and moving them is a design change of its
-// own. The list grows file by file: add a path to TINTED_PILL_FILES in the
-// same change that fixes that file's pills, and the guard keeps them fixed.
-// ---------------------------------------------------------------------------
-
-const TINTED_PILL_FILES = ["src/app/kaynaklar/durum/page.tsx", "src/components/bookmark/saved-list.tsx"];
-
-const TINTED_BG = /\bbg-([a-z]+)-500\/15(?![\w-])/;
-
-/**
- * Double-quoted and template-literal strings of one source file, per line for
- * double quotes (a stray `"` in a comment cannot swallow the next line).
- * Block comments and whole-line `//` comments are blanked first, so an odd
- * number of backticks in prose cannot shift the template-literal pairing.
- * Single quotes are skipped on purpose: Turkish apostrophes in comments would
- * mis-pair, and class strings in this codebase are never single-quoted.
- */
-function classStringLiterals(src: string): string[] {
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
-  const out: string[] = [];
-  for (const match of code.matchAll(/"([^"\n]*)"|`([^`]*)`/g)) out.push(match[1] ?? match[2] ?? "");
-  return out;
-}
-
-/** Why a tinted-pill class string fails AA, or null when it passes (or is not a tinted pill). */
-function tintedPillProblem(classes: string): string | null {
-  const tint = TINTED_BG.exec(classes);
-  if (!tint) return null;
-  const hue = tint[1]!;
-  const light = new RegExp(`(?<![\\w:/-])text-${hue}-(?:800|900)(?![\\w-])`);
-  const dark = new RegExp(`(?<![\\w])dark:text-${hue}-(?:200|300|400)(?![\\w-])`);
-  const problems: string[] = [];
-  if (!light.test(classes)) problems.push(`needs text-${hue}-800 or -900 in light mode`);
-  if (!dark.test(classes)) problems.push(`needs dark:text-${hue}-200, -300 or -400 in dark mode`);
-  return problems.length > 0 ? problems.join("; ") : null;
-}
-
-describe("tinted status pills keep AA text shades (WCAG 1.4.3)", () => {
-  const pillLiterals = TINTED_PILL_FILES.flatMap((file) =>
-    classStringLiterals(readFileSync(join(ROOT, file), "utf8"))
-      .filter((literal) => TINTED_BG.test(literal))
-      .map((literal) => ({ file, literal })),
-  );
-
-  it("scans the listed files and finds their tinted pills (not vacuous)", () => {
-    for (const file of TINTED_PILL_FILES) {
-      expect(files, `${file} is not a scanned src/**/*.tsx file`).toContain(join(ROOT, file));
-      expect(
-        pillLiterals.filter((p) => p.file === file).length,
-        `${file} no longer has a bg-<hue>-500/15 pill; remove it from TINTED_PILL_FILES`,
-      ).toBeGreaterThanOrEqual(1);
-    }
-    // three silence reasons + the karantinada pill
-    expect(pillLiterals.filter((p) => p.file === "src/app/kaynaklar/durum/page.tsx").length).toBeGreaterThanOrEqual(4);
-  });
-
-  it("every bg-<hue>-500/15 string uses a 800/900 light shade and a 200/300/400 dark shade of its hue", () => {
-    const offenders = pillLiterals.flatMap(({ file, literal }) => {
-      const problem = tintedPillProblem(literal);
-      return problem ? [`${file}  "${literal}"  ${problem}`] : [];
-    });
-    expect(
-      offenders,
-      `Tinted pills need AA text shades (WCAG 1.4.3), e.g. text-rose-800 dark:text-rose-300:\n${offenders.join("\n")}`,
-    ).toEqual([]);
-  });
-
-  it("flags the old pair and accepts the AA-safe ones (the guard itself works)", () => {
-    // the old karantinada pill
-    expect(
-      tintedPillProblem(
-        "inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-700 dark:text-rose-500 font-medium",
-      ),
-    ).not.toBeNull();
-    expect(tintedPillProblem("bg-rose-500/15 text-rose-700 dark:text-rose-500")).toContain("light mode");
-    expect(tintedPillProblem("bg-rose-500/15 text-rose-700 dark:text-rose-500")).toContain("dark mode");
-    // the erisim_yok string, and its siblings
-    expect(tintedPillProblem("bg-rose-500/15 border-rose-500/30 text-rose-800 dark:text-rose-300")).toBeNull();
-    expect(tintedPillProblem("bg-sky-500/15 border-sky-500/30 text-sky-800 dark:text-sky-300")).toBeNull();
-    expect(tintedPillProblem("bg-amber-500/15 border-amber-500/30 text-amber-800 dark:text-amber-400")).toBeNull();
-    expect(tintedPillProblem("bg-emerald-500/15 text-emerald-900 dark:text-emerald-200")).toBeNull();
-  });
-
-  it("does not let a prefixed or foreign-hue shade stand in for the real one", () => {
-    // a dark-only shade is not a light-mode shade
-    expect(tintedPillProblem("bg-rose-500/15 dark:text-rose-800 dark:text-rose-300")).toContain("light mode");
-    // another hue's text shade does not count
-    expect(tintedPillProblem("bg-rose-500/15 text-sky-800 dark:text-sky-300")).not.toBeNull();
-    // a light-only fix leaves dark mode below AA
-    expect(tintedPillProblem("bg-rose-500/15 text-rose-800")).toContain("dark mode");
-    // 600 is still below AA on the 15 % wash; 500 in dark too
-    expect(tintedPillProblem("bg-rose-500/15 text-rose-600 dark:text-rose-300")).toContain("light mode");
-    expect(tintedPillProblem("bg-rose-500/15 text-rose-800 dark:text-rose-500")).toContain("dark mode");
-  });
-
-  it("ignores strings that are not tinted pills", () => {
-    expect(tintedPillProblem("bg-rose-500/10 text-rose-700")).toBeNull();
-    expect(tintedPillProblem("bg-rose-500 text-white")).toBeNull();
-    expect(tintedPillProblem("text-rose-700")).toBeNull();
-  });
-
-  it("extracts double-quoted and template literals, one line at a time", () => {
-    const src = [
-      "// Tayf'ın comment with a lone apostrophe, a \"quote and one `backtick",
-      "/* block comment with `one backtick too */",
-      'const a = "bg-sky-500/15 text-sky-800 dark:text-sky-300";',
-      "const b = `bg-rose-500/15 ${x ? \"y\" : \"z\"}`;",
-    ].join("\n");
-    const literals = classStringLiterals(src);
-    expect(literals).toContain("bg-sky-500/15 text-sky-800 dark:text-sky-300");
-    expect(literals.some((l) => l.startsWith("bg-rose-500/15"))).toBe(true);
-    expect(literals.some((l) => l.includes("backtick"))).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Fourth guard (wave V hygiene, dark-mode hue text): no `dark:text-<hue>-500`,
 // `-600` or `-700` anywhere under src/ (.ts and .tsx, comments excluded).
 //
@@ -535,7 +411,7 @@ describe("tinted status pills keep AA text shades (WCAG 1.4.3)", () => {
 // and 5.16 (wash); the test below asserts >= 4.5 for each hue and surface.
 //
 // Out of scope on purpose: light-theme classes (the light shades are governed
-// by the tinted-pill guard above), `dark:bg-*` fills, and 300 / 200 / 950
+// by the site-wide tinted-text guard below), `dark:bg-*` fills, and 300 / 200 / 950
 // (dark text on a solid bright fill, e.g. `dark:text-amber-950`).
 // Large-text relief (3:1 for >= 24 px or >= 18.66 px bold) is not wired in:
 // no offender needed it. Add an allow-list here only for a genuine case.
@@ -627,11 +503,12 @@ const srgbDecode = (v: number): number => (v <= 0.04045 ? v / 12.92 : ((v + 0.05
 
 /** `oklch(70.4% 0.191 22.216)` or `oklch(0.19 0.01 60)` -> gamma-encoded sRGB, gamut-clamped. */
 function oklchToSrgb(value: string): Rgb {
-  const m = /oklch\(\s*([\d.]+)(%?)\s+([\d.]+)\s+([\d.]+)\s*\)/.exec(value);
+  const m = /oklch\(\s*([\d.]+)(%?)\s+([\d.]+|none)\s+([\d.]+|none)\s*\)/.exec(value);
   if (!m) throw new Error(`not an oklch() colour: ${value}`);
   const L = Number(m[1]) / (m[2] === "%" ? 100 : 1);
-  const C = Number(m[3]);
-  const hue = (Number(m[4]) * Math.PI) / 180;
+  // CSS Color 4 `none` is a missing component, i.e. 0 (Tailwind's neutral is `oklch(55.6% 0 none)`).
+  const C = m[3] === "none" ? 0 : Number(m[3]);
+  const hue = ((m[4] === "none" ? 0 : Number(m[4])) * Math.PI) / 180;
   const a = C * Math.cos(hue);
   const b = C * Math.sin(hue);
   // OKLab -> LMS' -> LMS (cube) -> linear sRGB (Ottosson's reference matrices).
@@ -929,5 +806,465 @@ describe("Medya DNA empty label (WCAG 1.4.3, wave W)", () => {
   it("media-dna.tsx no longer pairs text-muted-foreground with italic", () => {
     expect(mediaDnaSource).not.toContain("text-muted-foreground italic");
     expect(mediaDnaSource).toContain("text-foreground/80 italic");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sixth guard (wave X, site-wide tinted text): any class string that carries a
+// bare `bg-<hue>-<shade>/<pct>` tint of 20 % or less AND a palette text colour
+// (`text-<hue>-<shade>`, `dark:text-<hue>-<shade>`) must read at 4.5:1 or
+// better on the composited wash, in both themes, over the card and the page
+// background. It replaces the hand-kept TINTED_PILL_FILES list: every non-test
+// .ts and .tsx under src/ is scanned, so a new pill cannot ship with
+// `text-amber-700` on `bg-amber-500/15` (4.42:1 on the light card).
+//
+// Light mode additionally needs shade 800 or darker: the 700 shades sit within
+// a hair of the floor on a 15 % wash, so the rule is a one-liner that keeps
+// its margin instead of a per-hue table. Dark mode is measured only: the
+// effective dark colour is the `dark:text-*` shade when there is one, else the
+// bare `text-*` shade (the html element is forced dark in production).
+//
+// Scope and honest limits:
+//  - Only bare classes count. `hover:bg-red-500/20`, `dark:bg-*` and
+//    `md:text-*` are variants and are skipped (a state tint is not at rest).
+//  - A tint and its text must sit in the SAME class string. Both branches of a
+//    ternary inside `${...}` are separate strings, so they are never paired
+//    with each other. Runtime-composed tokens (BIAS_COLORS, ZONE_META) are
+//    covered by their own test below because the literal scan cannot see them.
+//  - Text on a tinted PARENT (a child element with its own class string) is
+//    invisible here; those call sites were fixed by hand in wave X.
+// ---------------------------------------------------------------------------
+
+/** Tints at or below this opacity count as washes the guard measures against. */
+const MAX_TINT_PERCENT = 20;
+
+const TINT = /(?<![\w:/-])bg-([a-z]+)-(\d{2,3})\/(\d{1,3})(?![\w-])/g;
+const LIGHT_TEXT = /(?<![\w:/-])text-([a-z]+)-(\d{2,3})(?![\w/-])/g;
+const DARK_TEXT = /(?<![\w-])dark:text-([a-z]+)-(\d{2,3})(?![\w/-])/g;
+
+const paletteCache = new Map<string, Rgb | null>();
+
+/** `--color-<hue>-<shade>` of the Tailwind palette, or null when there is no such colour. */
+function paletteColor(hue: string, shade: number): Rgb | null {
+  const key = `${hue}-${shade}`;
+  if (!paletteCache.has(key)) {
+    try {
+      paletteCache.set(key, tailwindColor(hue, shade));
+    } catch (error) {
+      // text-2xl, text-muted-foreground etc. are not palette colours; but a colour
+      // that exists and cannot be parsed must fail loudly, not vanish from the scan.
+      if (!(error instanceof Error) || !error.message.includes("not found in tailwindcss/theme.css")) throw error;
+      paletteCache.set(key, null);
+    }
+  }
+  return paletteCache.get(key) ?? null;
+}
+
+interface PaletteText {
+  hue: string;
+  shade: number;
+  rgb: Rgb;
+}
+
+interface PaletteTint extends PaletteText {
+  percent: number;
+}
+
+/** Every palette colour matched by `pattern` (group 1 = hue, group 2 = shade). */
+function paletteTexts(classes: string, pattern: RegExp): PaletteText[] {
+  const out: PaletteText[] = [];
+  for (const m of classes.matchAll(pattern)) {
+    const shade = Number(m[2]);
+    const rgb = paletteColor(m[1]!, shade);
+    if (rgb) out.push({ hue: m[1]!, shade, rgb });
+  }
+  return out;
+}
+
+/** The washes of `classes` that the guard measures (bare, palette, <= 20 %). */
+function paletteTints(classes: string): PaletteTint[] {
+  const out: PaletteTint[] = [];
+  for (const m of classes.matchAll(TINT)) {
+    const percent = Number(m[3]);
+    const shade = Number(m[2]);
+    const rgb = paletteColor(m[1]!, shade);
+    if (rgb && percent <= MAX_TINT_PERCENT) out.push({ hue: m[1]!, shade, rgb, percent });
+  }
+  return out;
+}
+
+/** True when the class string has a measured wash AND at least one palette text colour. */
+function isTintedPaletteText(classes: string): boolean {
+  return (
+    paletteTints(classes).length > 0 &&
+    (paletteTexts(classes, LIGHT_TEXT).length > 0 || paletteTexts(classes, DARK_TEXT).length > 0)
+  );
+}
+
+const SURFACES = ["card", "background"] as const;
+
+/**
+ * Why a class string fails AA on its own tint, or [] when it passes (or has no
+ * measured tint / no palette text). One message per failing text colour,
+ * wash, theme and surface; each names the hue, theme, surface and ratio.
+ */
+function tintedTextProblems(classes: string): string[] {
+  const tints = paletteTints(classes);
+  const lightTexts = paletteTexts(classes, LIGHT_TEXT);
+  const darkTexts = paletteTexts(classes, DARK_TEXT);
+  if (tints.length === 0 || (lightTexts.length === 0 && darkTexts.length === 0)) return [];
+
+  const effectiveDark = darkTexts.length > 0 ? darkTexts : lightTexts;
+  const problems = new Set<string>();
+
+  for (const tint of tints) {
+    const wash = `bg-${tint.hue}-${tint.shade}/${tint.percent}`;
+    for (const surface of SURFACES) {
+      for (const [theme, texts, token] of [
+        ["light", lightTexts, lightToken],
+        ["dark", effectiveDark, darkToken],
+      ] as const) {
+        const tile = composite(tint.rgb, token(surface), tint.percent / 100);
+        for (const text of texts) {
+          const ratio = contrastRatio(text.rgb, tile);
+          const tooLight = theme === "light" && text.shade < 800;
+          if (!tooLight && ratio >= 4.5) continue;
+          const name = `${theme === "dark" && darkTexts.length > 0 ? "dark:" : ""}text-${text.hue}-${text.shade}`;
+          problems.add(
+            `${name} on ${wash} (${text.hue} text, ${theme} ${surface}) is ${ratio.toFixed(2)}:1` +
+              (tooLight ? "; light text on a tint needs shade 800 or darker" : "; needs 4.5:1"),
+          );
+        }
+      }
+    }
+  }
+  return [...problems];
+}
+
+/**
+ * Class-string candidates of one source file:
+ *  (i)  every double-quoted string, including ones nested in a template's
+ *       `${...}` (a ternary's two branches stay two separate strings);
+ *  (ii) the static text of every template literal with each `${...}` removed
+ *       by a brace-depth counter.
+ * Comments are blanked first. Single quotes are skipped on purpose: Turkish
+ * apostrophes in JSX text would mis-pair, and class strings in this codebase
+ * are never single-quoted.
+ */
+function classStrings(src: string): string[] {
+  const code = blankComments(src);
+  const out: string[] = [];
+  for (const m of code.matchAll(/"([^"\n]*)"/g)) out.push(m[1]!);
+
+  /** Index after a ' or " string that opens at `start` (ends at its quote or the line break). */
+  const skipQuoted = (start: number): number => {
+    const quote = code[start]!;
+    let j = start + 1;
+    while (j < code.length && code[j] !== quote && code[j] !== "\n") j += code[j] === "\\" ? 2 : 1;
+    return j + 1;
+  };
+
+  /** Static text of the template that opens just before `start`; returns the index after its closing backtick. */
+  const readTemplate = (start: number): number => {
+    let text = "";
+    let i = start;
+    while (i < code.length) {
+      const c = code[i]!;
+      if (c === "\\") {
+        i += 2;
+      } else if (c === "`") {
+        out.push(text);
+        return i + 1;
+      } else if (c === "$" && code[i + 1] === "{") {
+        i = skipExpression(i + 2);
+      } else {
+        text += c;
+        i++;
+      }
+    }
+    out.push(text);
+    return i;
+  };
+
+  /** Index after the `}` that closes a `${` whose body starts at `start`. */
+  const skipExpression = (start: number): number => {
+    let depth = 1;
+    let i = start;
+    while (i < code.length) {
+      const c = code[i]!;
+      if (c === "`") i = readTemplate(i + 1);
+      else if (c === '"' || c === "'") i = skipQuoted(i);
+      else {
+        if (c === "{") depth++;
+        else if (c === "}" && --depth === 0) return i + 1;
+        i++;
+      }
+    }
+    return i;
+  };
+
+  let i = 0;
+  while (i < code.length) {
+    const c = code[i]!;
+    if (c === "`") i = readTemplate(i + 1);
+    else if (c === '"' || c === "'") i = skipQuoted(i);
+    else i++;
+  }
+  return out;
+}
+
+/**
+ * Large-text relief (WCAG 1.4.3 asks 3:1 for >= 24 px, or >= 18.66 px bold) is
+ * NOT wired in for ordinary pills: no offender needed it. An entry here is the
+ * exact class string as written in `file` (repo-relative, any non-test .ts or
+ * .tsx under src/) and may only excuse genuinely large text (see
+ * isLargeTextClasses). It is removed for its own file only. Add an entry for a
+ * real case, never to silence a small label.
+ */
+const ALLOWED_LARGE_TINTED_TEXT: ReadonlyArray<{ file: string; classes: string; why: string }> = [];
+
+/** text-2xl .. text-9xl, or text-xl together with a bold-or-heavier weight. */
+const isLargeTextClasses = (classes: string): boolean =>
+  /\btext-(?:2xl|[3-9]xl)\b/.test(classes) ||
+  (/\btext-xl\b/.test(classes) && /\bfont-(?:bold|extrabold|black)\b/.test(classes));
+
+describe("site-wide tinted text keeps AA contrast (WCAG 1.4.3, wave X)", () => {
+  const sourceFiles = walkSource(SRC_DIR).sort();
+  const tintedStrings = sourceFiles.flatMap((file) =>
+    classStrings(readFileSync(file, "utf8"))
+      .filter(isTintedPaletteText)
+      .map((classes) => ({ file: repoPath(file), classes })),
+  );
+
+  it("finds the tinted strings with palette text across src/ (not vacuous)", () => {
+    expect(tintedStrings.length).toBeGreaterThanOrEqual(15);
+    for (const file of [
+      "src/components/story/cluster-card.tsx",
+      "src/components/status/status-view.tsx",
+      "src/components/follow/follow-feed.tsx",
+      "src/app/kaynaklar/durum/page.tsx",
+    ]) {
+      expect(
+        tintedStrings.filter((s) => s.file === file).length,
+        `${file} has no tinted string with palette text; the extractor lost it`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("every tinted string clears 4.5:1 in both themes on the card and the background", () => {
+    const allowed = ALLOWED_LARGE_TINTED_TEXT;
+    const offenders = tintedStrings.flatMap(({ file, classes }) => {
+      if (allowed.some((e) => e.file === file && e.classes === classes)) return [];
+      const problems = tintedTextProblems(classes);
+      return problems.length > 0 ? [`${file}  "${classes}"  ${problems.join("; ")}`] : [];
+    });
+    expect(
+      offenders,
+      `Text on a bg-<hue>-<shade>/<=20 tint needs text-<hue>-800 (or darker) in light mode and 4.5:1 in dark mode (WCAG 1.4.3):\n${offenders.join("\n")}`,
+    ).toEqual([]);
+  });
+
+  describe("the guard works", () => {
+    it("flags 700 on a 15 % wash in light mode", () => {
+      const problems = tintedTextProblems("bg-amber-500/15 text-amber-700 dark:text-amber-400");
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.every((p) => p.includes("light"))).toBe(true);
+      // 4.49:1 on the light card, 4.33:1 on the light background: both below the floor.
+      for (const problem of problems) {
+        const ratio = Number(/(\d+\.\d\d):1/.exec(problem)![1]);
+        expect(ratio, problem).toBeGreaterThan(4);
+        expect(ratio, problem).toBeLessThan(4.5);
+      }
+    });
+
+    it("flags a text shade lighter than 800 even when it measures above 4.5:1", () => {
+      const problems = tintedTextProblems("bg-red-500/10 text-red-400");
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.every((p) => p.includes("light"))).toBe(true);
+      expect(problems.join(" ")).toContain("shade 800");
+    });
+
+    it("flags a dark shade on a bare tint in dark mode", () => {
+      const problems = tintedTextProblems("bg-emerald-500/10 text-emerald-900");
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.every((p) => p.includes("dark"))).toBe(true);
+      expect(problems.join(" ")).toMatch(/\d\.\d\d:1/);
+    });
+
+    it("names hue, theme, surface and ratio in every message", () => {
+      for (const problem of tintedTextProblems("bg-rose-500/15 text-rose-600 dark:text-rose-600")) {
+        expect(problem).toMatch(/rose/);
+        expect(problem).toMatch(/light|dark/);
+        expect(problem).toMatch(/card|background/);
+        expect(problem).toMatch(/\d+\.\d\d:1/);
+      }
+    });
+
+    it("accepts the AA-safe pair", () => {
+      expect(tintedTextProblems("bg-rose-500/15 text-rose-800 dark:text-rose-300")).toEqual([]);
+      expect(tintedTextProblems("bg-amber-500/15 border-amber-500/30 text-amber-800 dark:text-amber-400")).toEqual([]);
+    });
+
+    it("lets variant tints, heavy washes, solids and plain tokens through", () => {
+      for (const ok of [
+        "hover:bg-red-500/20 text-red-700",
+        "dark:bg-red-500/15 text-red-700",
+        "bg-rose-500/25 text-rose-700",
+        "bg-rose-500 text-white",
+        "text-rose-700",
+        "bg-muted text-muted-foreground",
+        "bg-primary/10 text-primary text-2xl",
+      ]) {
+        expect(tintedTextProblems(ok), ok).toEqual([]);
+        expect(isTintedPaletteText(ok), ok).toBe(false);
+      }
+    });
+
+    it("ignores variant text colours when deciding the light shade", () => {
+      // hover:/md: text is not the resting colour; only the bare text-* counts.
+      expect(tintedTextProblems("bg-amber-500/15 text-amber-800 hover:text-amber-600 dark:text-amber-400")).toEqual([]);
+    });
+
+    it("measures the dark colour from the bare text when there is no dark: text", () => {
+      // amber-800 on the dark amber wash is far below 4.5:1.
+      const problems = tintedTextProblems("bg-amber-500/15 text-amber-800");
+      expect(problems.length).toBeGreaterThan(0);
+      expect(problems.every((p) => p.includes("dark"))).toBe(true);
+    });
+
+    it("measures every tint of a string, not just the first", () => {
+      const problems = tintedTextProblems("bg-zinc-500/5 bg-amber-500/15 text-amber-700 dark:text-amber-400");
+      expect(problems.some((p) => p.includes("bg-amber-500/15"))).toBe(true);
+    });
+  });
+
+  describe("shade 800 (the replacement) clears 4.5:1 on its own -500/20 wash", () => {
+    const hues = [...BANNED_HUES, "zinc", "slate", "gray", "neutral", "stone"];
+
+    it("covers the 17 banned hues plus the five neutrals", () => {
+      expect(hues).toHaveLength(22);
+      expect(new Set(hues).size).toBe(22);
+    });
+
+    it.each(hues)("%s-800 over the light card and the light background", (hue) => {
+      const wash = tailwindColor(hue, 500);
+      for (const surface of SURFACES) {
+        const tile = composite(wash, lightToken(surface), 0.2);
+        const ratio = contrastRatio(tailwindColor(hue, 800), tile);
+        expect(ratio, `${hue}-800 on bg-${hue}-500/20 over the light ${surface}: ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+  });
+
+  describe("palette reader", () => {
+    it("reads achromatic entries whose hue is `none` (neutral) and rejects non-palette names", () => {
+      expect(oklchToSrgb("oklch(55.6% 0 none)")).toEqual(oklchToSrgb("oklch(55.6% 0 0)"));
+      expect(paletteColor("neutral", 800)).not.toBeNull();
+      expect(paletteColor("muted", 500)).toBeNull();
+      expect(paletteColor("red", 12345)).toBeNull();
+      expect(isTintedPaletteText("bg-neutral-500/15 text-neutral-700")).toBe(true);
+    });
+  });
+
+  describe("classStrings (extractor)", () => {
+    it("yields a nested string and the static text of a template, ternary branches apart", () => {
+      const src = 'const c = `a ${x ? "bg-sky-500/15 text-sky-800" : "y"} b`;';
+      const found = classStrings(src);
+      expect(found).toContain("bg-sky-500/15 text-sky-800");
+      expect(found).toContain("y");
+      expect(found).toContain("a  b");
+      // the two branches are never merged into one candidate
+      const branches = classStrings('const c = `${x ? "bg-sky-500/15" : "text-amber-700"}`;');
+      expect(branches).toContain("bg-sky-500/15");
+      expect(branches).toContain("text-amber-700");
+      expect(branches.some((s) => s.includes("bg-sky-500/15") && s.includes("text-amber-700"))).toBe(false);
+    });
+
+    it("handles braces, nested templates and strings inside ${...}", () => {
+      const src = "const c = `p ${fn({ a: 1 })} q ${y ? `bg-sky-500/15 ${z}` : \"}\"} r`;";
+      const found = classStrings(src);
+      expect(found).toContain("p  q  r");
+      expect(found).toContain("bg-sky-500/15 ");
+    });
+
+    it("ignores line and block comments and skips single-quoted text", () => {
+      const src = [
+        '// "bg-red-500/10 text-red-700" in a line comment',
+        '/* "bg-red-500/10 text-red-700" in a block comment */',
+        "const a = 'bg-red-500/10 text-red-700';",
+        'const b = "bg-sky-500/15 text-sky-800"; // trailing "comment"',
+      ].join("\n");
+      expect(classStrings(src)).toEqual(["bg-sky-500/15 text-sky-800"]);
+    });
+
+    it("does not pair strings across lines", () => {
+      expect(classStrings('const a = "open\nconst b = "bg-sky-500/15 text-sky-800";')).toContain(
+        "bg-sky-500/15 text-sky-800",
+      );
+    });
+  });
+
+  describe("runtime-composed tokens (invisible to the literal scan)", () => {
+    it("covers all ten BIAS_COLORS", () => {
+      expect(Object.keys(BIAS_COLORS)).toHaveLength(10);
+    });
+
+    it.each(Object.entries(BIAS_COLORS))("BIAS_COLORS.%s chipBg + chipText", (_category, color) => {
+      const classes = `${color.chipBg} ${color.chipText}`;
+      expect(isTintedPaletteText(classes), classes).toBe(true);
+      expect(tintedTextProblems(classes), classes).toEqual([]);
+    });
+
+    it.each(Object.entries(ZONE_META))("ZONE_META.%s chip and zone label", (_zone, meta) => {
+      for (const classes of [`${meta.chipBg} ${meta.chipText}`, `${meta.zoneBg} ${meta.zoneLabel}`]) {
+        expect(isTintedPaletteText(classes), classes).toBe(true);
+        expect(tintedTextProblems(classes), classes).toEqual([]);
+      }
+    });
+  });
+
+  describe("text on a tinted parent (child class strings the literal scan cannot pair)", () => {
+    // The tint sits on a parent element and the text on a child, in separate class
+    // strings. Pinned by hand: the pair must measure AA and the child's class
+    // string must still be in its file.
+    const PARENT_TINT_CHILDREN: ReadonlyArray<{ file: string; tint: string; text: string }> = [
+      { file: "src/components/story/fact-check-box.tsx", tint: "bg-sky-500/5", text: "text-sky-800 dark:text-sky-400" },
+      { file: "src/components/story/cross-spectrum-caption.tsx", tint: "bg-yellow-500/10", text: "text-yellow-800 dark:text-yellow-400" },
+      { file: "src/components/source/label-card.tsx", tint: "bg-amber-500/10", text: "text-amber-800 dark:text-amber-400" },
+      { file: "src/components/admin/api-keys-actions.tsx", tint: "bg-amber-500/10", text: "text-amber-800 dark:text-amber-400" },
+      { file: "src/components/admin/api-webhooks-actions.tsx", tint: "bg-amber-500/10", text: "text-amber-800 dark:text-amber-400" },
+    ];
+
+    it.each(PARENT_TINT_CHILDREN.map((e) => [e.file, e] as const))("%s", (_file, { file, tint, text }) => {
+      expect(isTintedPaletteText(`${tint} ${text}`)).toBe(true);
+      expect(tintedTextProblems(`${tint} ${text}`)).toEqual([]);
+      const src = readFileSync(join(ROOT, file), "utf8");
+      expect(src, `${file} lost its parent tint ${tint}`).toContain(tint);
+      expect(src, `${file} lost the AA child text "${text}"`).toContain(text);
+    });
+  });
+
+  describe("ALLOWED_LARGE_TINTED_TEXT", () => {
+    it("only lists large text that still exists in its own file", () => {
+      for (const { file, classes, why } of ALLOWED_LARGE_TINTED_TEXT) {
+        expect(isLargeTextClasses(classes), `${why}: "${classes}" is not large text (text-2xl+ or text-xl with bold)`).toBe(true);
+        expect(file, `${why}: entry file must be repo-relative under src/`).toMatch(/^src\/.+\.tsx?$/);
+        const abs = join(ROOT, file);
+        expect(sourceFiles, `${file} is not a scanned src/**/*.ts(x) file`).toContain(abs);
+        expect(
+          readFileSync(abs, "utf8").includes(classes),
+          `Allow-listed string "${classes}" no longer appears in ${file}; remove it from ALLOWED_LARGE_TINTED_TEXT.`,
+        ).toBe(true);
+      }
+    });
+
+    it("recognises large text and refuses ordinary labels", () => {
+      for (const large of ["text-2xl", "text-9xl font-medium", "text-xl font-bold", "text-xl font-black"]) {
+        expect(isLargeTextClasses(large), large).toBe(true);
+      }
+      for (const small of ["text-xl", "text-xl font-semibold", "text-lg font-bold", "text-[11px] font-bold", "text-xs"]) {
+        expect(isLargeTextClasses(small), small).toBe(false);
+      }
+    });
   });
 });

@@ -1,6 +1,6 @@
 /**
  * Sentry `dataCollection` block shared by the Node, Edge and browser inits
- * (sentry.server.config.ts / sentry.edge.config.ts / sentry.client.config.ts).
+ * (sentry.server.config.ts / sentry.edge.config.ts / instrumentation-client.ts).
  *
  * Why this exists: @sentry/nextjs 11 removed `sendDefaultPii`. Left unset, the
  * SDK now collects the client IP (`userInfo`), every cookie and header, the raw

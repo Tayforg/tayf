@@ -11,12 +11,12 @@ export function CrossSpectrumCaption({ lines }: { lines: string[] }) {
       />
       <div className="space-y-1 min-w-0">
         <div className="flex items-center gap-2">
-          <p className="text-xs font-semibold uppercase tracking-wider text-yellow-700 dark:text-yellow-400">
+          <p className="text-xs font-semibold uppercase tracking-wider text-yellow-800 dark:text-yellow-400">
             Sürpriz kesişimler
           </p>
           <Link
             href="/metodoloji#surpriz"
-            className="text-[11px] text-yellow-700/80 dark:text-yellow-400 underline decoration-dotted underline-offset-2 hover:text-yellow-700 dark:hover:text-yellow-300"
+            className="text-[11px] text-yellow-800 dark:text-yellow-400 underline decoration-dotted underline-offset-2 hover:text-yellow-900 dark:hover:text-yellow-300"
           >
             Neden?
           </Link>
@@ -24,7 +24,7 @@ export function CrossSpectrumCaption({ lines }: { lines: string[] }) {
         {lines.map((line, i) => (
           <p
             key={i}
-            className="text-[11px] leading-relaxed text-yellow-600 dark:text-yellow-400"
+            className="text-[11px] leading-relaxed text-yellow-800 dark:text-yellow-400"
           >
             {line}
           </p>

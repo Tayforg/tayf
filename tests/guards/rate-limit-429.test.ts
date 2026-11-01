@@ -36,6 +36,7 @@ const APP = resolve(SRC, "app");
 const PUBLIC_LIMITER_FILES = [
   "src/app/api/sources/route.ts",
   "src/app/api/sources/[slug]/route.ts",
+  "src/app/api/timeline/head/route.ts",
   "src/app/api/oyun/route.ts",
   "src/app/api/oyun/cerceve/route.ts",
   "src/app/api/oyun/cerceve/next/route.ts",

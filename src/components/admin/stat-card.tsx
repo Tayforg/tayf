@@ -20,7 +20,7 @@ export function StatCard({
           <div
             className={`rounded-md p-2 ${
               variant === "warning"
-                ? "bg-amber-500/15 text-amber-500"
+                ? "bg-amber-500/15 text-amber-800 dark:text-amber-400"
                 : "bg-muted text-muted-foreground"
             }`}
           >

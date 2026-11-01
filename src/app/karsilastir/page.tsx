@@ -245,7 +245,7 @@ function SideColumn({
           <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
             <span>{meta}</span>
             {view.isBlindspot && (
-              <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-700 dark:text-amber-400">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-800 dark:text-amber-400">
                 <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.5} />
                 Kör nokta
               </span>

@@ -43,9 +43,9 @@ const FACTUALITY_LABELS: Record<Factuality, string> = {
 };
 
 const FACTUALITY_CLASSES: Record<Factuality, string> = {
-  high: "bg-emerald-500/10 text-emerald-700 border-emerald-500/20 dark:text-emerald-400",
-  mixed: "bg-amber-500/10 text-amber-700 border-amber-500/20 dark:text-amber-400",
-  low: "bg-red-500/10 text-red-700 border-red-500/20 dark:text-red-400",
+  high: "bg-emerald-500/10 text-emerald-800 border-emerald-500/20 dark:text-emerald-400",
+  mixed: "bg-amber-500/10 text-amber-800 border-amber-500/20 dark:text-amber-400",
+  low: "bg-red-500/10 text-red-800 border-red-500/20 dark:text-red-400",
 };
 
 const FACTUALITY_DOT: Record<Factuality, string> = {
@@ -64,7 +64,7 @@ const CHIP_BASE =
 const CHIP_LABEL_CLASS = "truncate min-w-0";
 
 const OWNERSHIP_CLASS =
-  "bg-zinc-500/10 text-zinc-700 border-zinc-500/20 dark:text-zinc-300";
+  "bg-zinc-500/10 text-zinc-800 border-zinc-500/20 dark:text-zinc-300";
 
 // B2 (browser-qa-6): the ownership chip is the long one ("Turkuvaz Medya
 // (Kalyon Grubu)") and was clipping off-card at 390px. Below `sm:` it wraps

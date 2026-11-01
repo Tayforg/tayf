@@ -168,7 +168,7 @@ describe("POST /api/admin/jev-unlink", () => {
     expect(supabaseFake.calls.rpc).toHaveLength(0);
   });
 
-  it("unlink: 200 with article_count and revalidates clusters, clusters-politics and cluster-detail:<id>", async () => {
+  it("unlink: 200 with article_count and revalidates every cluster feed tag plus cluster-detail:<id>", async () => {
     dbState.candidates = [{ id: 3, cluster_id: "c3", article_id: "a3", status: "pending" }];
     dbState.articleCount = 6;
     const mod = await import("@/app/api/admin/jev-unlink/route");
@@ -179,10 +179,16 @@ describe("POST /api/admin/jev-unlink", () => {
     const body = await res.json();
     expect(body).toEqual({ ok: true, article_count: 6 });
 
-    expect(revalidateTagMock).toHaveBeenCalledTimes(3);
-    expect(revalidateTagMock).toHaveBeenCalledWith("clusters", "max");
-    expect(revalidateTagMock).toHaveBeenCalledWith("clusters-politics", "max");
-    expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:c3", "max");
+    // clusters-search and clusters-entity are cluster-list caches too (search
+    // results, /gundem/<key> hubs); an unlink must not leave them stale.
+    expect(revalidateTagMock).toHaveBeenCalledTimes(5);
+    expect(revalidateTagMock.mock.calls).toEqual([
+      ["clusters", "max"],
+      ["clusters-politics", "max"],
+      ["clusters-search", "max"],
+      ["clusters-entity", "max"],
+      ["cluster-detail:c3", "max"],
+    ]);
 
     const rpcCalls = supabaseFake.calls.rpc.filter((c) => c.name === "cluster_unlink_article");
     expect(rpcCalls).toHaveLength(1);
