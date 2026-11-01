@@ -9,8 +9,21 @@ import { IntradayChart } from "@/components/finance/intraday-chart";
 import { KapPickupPanel } from "@/components/finance/kap-pickup-panel";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
-import { fmtPct, fmtPrice, fmtWhen, fmtX, istToday, limitFlag, moveClass } from "@/lib/finance/format";
-import { fetchIntraday, fetchQuoteStats, fetchTickerPage } from "@/lib/finance/queries";
+import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
+import {
+  articleCountLabel,
+  coverageScopeNote,
+  disclosureWindowLabel,
+  fmtDayClock,
+  fmtPct,
+  fmtPrice,
+  fmtWhen,
+  fmtX,
+  istToday,
+  limitFlag,
+  moveClass,
+} from "@/lib/finance/format";
+import { fetchIntraday, fetchQuoteStats, fetchTickerPage, haltNoticeToShow, latestTradingHalt } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
 import {
   chartBaseline,
@@ -20,7 +33,8 @@ import {
   quoteFreshness,
   rvolLabel,
 } from "@/lib/finance/session";
-import { sharePageMetadata } from "@/lib/seo/page-metadata";
+import { isThinTicker } from "@/lib/finance/ticker-index";
+import { errorShellMetadata, sharePageMetadata } from "@/lib/seo/page-metadata";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 import { currentTimeMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -32,10 +46,12 @@ import { cn } from "@/lib/utils";
 
 const TICKER_RE = /^[A-Z0-9]{2,6}$/;
 
-const NOT_FOUND_METADATA: Metadata = {
-  title: "Hisse bulunamadı",
-  robots: { index: false, follow: false },
-};
+/** Display cap of the disclosure list in fetchTickerPage (TICKER_DISCLOSURES_LIMIT in queries.ts). */
+const DISCLOSURE_CAP = 60;
+
+// noindex AND no canonical: the layout's site-wide canonical '/' would
+// otherwise be inherited and the shell would point at the homepage.
+const NOT_FOUND_METADATA: Metadata = errorShellMetadata("Hisse bulunamadı");
 
 /**
  * SEC-04/SEC-11: a cheap existence probe run BEFORE `connection()` in both
@@ -84,26 +100,43 @@ const NOT_FOUND_METADATA: Metadata = {
  * noindex "yüklenemiyor" title; only "missing" is a 404. Positive evidence
  * still wins: a row from one probe proves existence even if its sibling
  * errored.
+ *
+ * h11-finance-4: the company read also selects `shares_traded`, returned as
+ * `company` so generateMetadata can keep thin tickers (no company row, not
+ * traded, under 4 characters, KTEST) out of the index; see isThinTicker.
+ * h11-finance-1: the kap_disclosures fallback uses the same stock_codes OR
+ * related_stocks filter as the readers, so a ticker whose only trace is a
+ * related_stocks-only notice (a halt, a ban) still exists. That OR is only
+ * cheap with kap_disclosures_related_stocks_idx (migration 133): without it the
+ * probe for an unknown code is a Seq Scan any anonymous visitor can trigger, so
+ * 133 must be applied BEFORE this code is merged (see its header).
  */
 type TickerExistence = "exists" | "missing" | "unknown";
 
-const tickerExistence = cache(async (ticker: string): Promise<TickerExistence> => {
+interface TickerProbe {
+  existence: TickerExistence;
+  /** The company row's trade flag; null when the ticker has no company row. */
+  company: { sharesTraded: boolean } | null;
+}
+
+const tickerExistence = cache(async (ticker: string): Promise<TickerProbe> => {
   try {
     const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
     const { data: companyRows, error: companyError } = await supabase
       .from("bist_companies")
-      .select("kap_member_oid")
+      .select("kap_member_oid,shares_traded")
       .contains("tickers", [ticker])
       .limit(1);
     if (companyError) {
       console.error(`[ekonomi] tickerExistence: bist_companies probe failed: ${companyError.message}`);
-      return "unknown";
+      return { existence: "unknown", company: null };
     }
-    if ((companyRows ?? []).length > 0) return "exists";
+    const companyRow = ((companyRows ?? []) as Array<{ shares_traded?: boolean | null }>)[0];
+    if (companyRow) return { existence: "exists", company: { sharesTraded: companyRow.shares_traded === true } };
 
     const [articlesRes, disclosuresRes] = await Promise.all([
       supabase.from("article_tickers").select("ticker").eq("ticker", ticker).limit(1),
-      supabase.from("kap_disclosures").select("disclosure_index").contains("stock_codes", [ticker]).limit(1),
+      supabase.from("kap_disclosures").select("disclosure_index").or(tickerDisclosureOr(ticker)).limit(1),
     ]);
     if (articlesRes.error) {
       console.error(`[ekonomi] tickerExistence: article_tickers probe failed: ${articlesRes.error.message}`);
@@ -111,9 +144,11 @@ const tickerExistence = cache(async (ticker: string): Promise<TickerExistence> =
     if (disclosuresRes.error) {
       console.error(`[ekonomi] tickerExistence: kap_disclosures probe failed: ${disclosuresRes.error.message}`);
     }
-    if ((articlesRes.data ?? []).length > 0 || (disclosuresRes.data ?? []).length > 0) return "exists";
-    if (articlesRes.error || disclosuresRes.error) return "unknown";
-    return "missing";
+    if ((articlesRes.data ?? []).length > 0 || (disclosuresRes.data ?? []).length > 0) {
+      return { existence: "exists", company: null };
+    }
+    if (articlesRes.error || disclosuresRes.error) return { existence: "unknown", company: null };
+    return { existence: "missing", company: null };
   } catch (err) {
     // Next control-flow signals (dynamic-usage bailouts, postpone) must keep
     // propagating; only a genuine probe failure is "unknown".
@@ -121,7 +156,7 @@ const tickerExistence = cache(async (ticker: string): Promise<TickerExistence> =
     console.error(
       `[ekonomi] tickerExistence: probe threw: ${err instanceof Error ? err.message : String(err)}`,
     );
-    return "unknown";
+    return { existence: "unknown", company: null };
   }
 });
 
@@ -134,22 +169,23 @@ export async function generateMetadata({ params }: { params: Promise<{ ticker: s
   // junk or unknown segment gets echoed straight into
   // <title>/<meta description>/canonical.
   if (!TICKER_RE.test(ticker)) return NOT_FOUND_METADATA;
-  const existence = await tickerExistence(ticker);
+  const { existence, company } = await tickerExistence(ticker);
   if (existence === "missing") return NOT_FOUND_METADATA;
   if (existence === "unknown") {
     // The probe timed out / errored: say nothing about the ticker (no
     // "bulunamadı", no canonical, no description) and keep the shell out of
     // the index. The page body throws, so the error boundary renders.
-    return {
-      title: "Hisse sayfası şu anda yüklenemiyor",
-      robots: { index: false, follow: false },
-    };
+    return errorShellMetadata("Hisse sayfası şu anda yüklenemiyor");
   }
-  return sharePageMetadata({
+  const metadata = sharePageMetadata({
     title: `${ticker} — hisse haberleri ve KAP bildirimleri`,
     description: `${ticker} hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.`,
     path: `/ekonomi/${ticker}`,
   });
+  // A page for a code that does not trade (KTEST, TGB, KOZAL, passive
+  // companies) is thin: reachable, followed, not indexed. Traded tickers are
+  // indexable; they are left out of the sitemap by choice (lib/seo/sitemaps.ts).
+  return isThinTicker(ticker, company) ? { ...metadata, robots: { index: false, follow: true } } : metadata;
 }
 
 function lagLabel(minutes: number | null): string {
@@ -170,7 +206,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   // anywhere, but for a well-formed unknown ticker it only swaps streamed
   // content — see tickerExistence()'s header comment for the measured detail.
   if (!TICKER_RE.test(ticker)) notFound();
-  const existence = await tickerExistence(ticker);
+  const { existence } = await tickerExistence(ticker);
   if (existence === "missing") notFound();
   // "unknown" = a probe timed out / errored: NOT a 404. Throw so
   // src/app/ekonomi/error.tsx renders ("Tekrar dene"); still before
@@ -204,9 +240,26 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   const fresh = quote ? quoteFreshness(quote.asOf, nowMs) : null;
   const halted = fresh?.kind === "halted";
   const knownMove = quote != null && quote.hasBaseline !== false && !halted;
-  const limit = quote && knownMove ? limitFlag(quote.changePct) : null;
+  const limit = quote && knownMove ? limitFlag(quote.changePct, quote.prevClose, quote.price) : null;
+  // h11-finance-1: a halt notice newer than the last trade explains the stale
+  // price. KAP files it under related_stocks, so it only reached this page
+  // after the disclosure filter learned that column.
+  const halt = haltNoticeToShow(latestTradingHalt(page.disclosures), quote?.asOf);
+  const haltLine = halt ? (
+    <a
+      href={`https://www.kap.org.tr/tr/Bildirim/${halt.disclosureIndex}`}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="mt-0.5 block text-[11px] text-amber-400 hover:underline"
+    >
+      İşlem sırası kapatıldı · KAP {fmtDayClock(halt.publishedAt)}
+    </a>
+  ) : null;
   const volume = halted ? null : rvolLabel(stat, intraday.day);
   const metaLine = companyMetaLine(page.company);
+  // h11-finance-3: the list is cut at DISCLOSURE_CAP, so "son 30 gün" is only
+  // true while it is not full.
+  const windowLabel = disclosureWindowLabel(page.disclosures.length, page.totalDisclosures30d, DISCLOSURE_CAP);
   const sessionDay = intraday.day;
   const markers = sessionDay
     ? [
@@ -254,6 +307,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
                     <span className="text-muted-foreground">{fresh.label}</span>
                   </div>
                 )}
+                {haltLine}
                 {volume ? (
                   <div className={cn("mt-0.5 text-[11px] tabular-nums", volume.rvol >= 2 ? "text-amber-400" : "text-muted-foreground")}>
                     hacim {fmtX(volume.rvol)}{" "}
@@ -266,7 +320,10 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
               <Sparkline values={quote.closes} className={knownMove ? moveClass(quote.changePct) : "text-muted-foreground"} width={140} height={40} />
             </>
           ) : (
-            <span className="text-[12px] text-muted-foreground">{priceEmptyLabel(page.company)}</span>
+            <div className="text-right">
+              <span className="text-[12px] text-muted-foreground">{priceEmptyLabel(page.company)}</span>
+              {haltLine}
+            </div>
           )}
         </div>
       </header>
@@ -294,11 +351,15 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         <Panel title="Basın ilgisi" meta="son 30 gün, günlük haber sayısı">
           <AttentionBars days={page.attention} today={istToday()} />
         </Panel>
-        <Panel title="KAP ile basın arası" meta="son 30 gün">
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-4">
+        <Panel title="KAP ile basın arası" meta={windowLabel}>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-5">
             <div>
               <dt className="text-muted-foreground">bildirim</dt>
               <dd className="text-lg tabular-nums">{page.coverage.disclosures}</dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">olay</dt>
+              <dd className="text-lg tabular-nums">{page.coverage.events}</dd>
             </div>
             <div>
               <dt className="text-muted-foreground">basında yer bulan</dt>
@@ -314,7 +375,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
             </div>
           </dl>
           <p className="border-t border-border/70 px-3 py-2 font-mono text-[10px] leading-relaxed text-muted-foreground">
-            İlk haber, bildirimden sonra çıkan ilk habere göre ölçülür. Ön ilgi: bildirimden önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı.
+            Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. İlk haber, olaydaki ilk bildirimden sonra çıkan ilk habere göre ölçülür. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. {coverageScopeNote(page.disclosures.length, page.coverage.disclosures)}
           </p>
         </Panel>
       </div>
@@ -322,7 +383,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
       <KapPickupPanel ticker={ticker} />
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
-        <Panel title="Haberler" meta={`${page.articles.length} haber`}>
+        <Panel title="Haberler" meta={articleCountLabel(page.articles.length, page.articlesTruncated)}>
           {page.articles.length === 0 ? (
             <PanelEmpty>Bu hisseyi anan haber henüz eşleşmedi.</PanelEmpty>
           ) : (
@@ -341,7 +402,7 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
             </ol>
           )}
         </Panel>
-        <Panel title="KAP bildirimleri" meta="son 30 gün">
+        <Panel title="KAP bildirimleri" meta={windowLabel}>
           {page.disclosures.length === 0 ? (
             <PanelEmpty>Son 30 günde bildirim yok.</PanelEmpty>
           ) : (

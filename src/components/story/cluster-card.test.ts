@@ -325,3 +325,54 @@ describe("card link accessible name (h10-a11y-1)", () => {
     expect(count(src, '<span className="sr-only">: </span>')).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h11-mobile-1: the overlay bookmark used to sit at `right-3 top-3` (12 px) on
+// every width, but from `sm` the card content is `p-5` (20 px) and the 160x112
+// side thumbnail starts at that padded corner. The 36 px button therefore stuck
+// out 8 px to the right of and above the thumbnail on every card at >= 640 px.
+// At `sm:right-7 sm:top-7` (20 px padding + 8 px) it sits inside the thumbnail;
+// below `sm` the 12 px offset keeps it over the 16:9 banner, which is unchanged.
+// ---------------------------------------------------------------------------
+
+describe("cluster-card.tsx bookmark position (h11-mobile-1)", () => {
+  const bookmarkTags = openingTagsOf(src, "<BookmarkButton");
+  const bookmarkTag = bookmarkTags[0] ?? "";
+
+  it("offsets the overlay by 12 px on mobile and 28 px (20 px padding + 8 px) from sm", () => {
+    expect(bookmarkTags).toHaveLength(1);
+    expect(bookmarkTag).toContain(
+      'className="absolute right-3 top-3 z-10 sm:right-7 sm:top-7"',
+    );
+  });
+
+  it("keeps the sm offset in step with the card padding (sm:p-5 = 20 px, so sm:right-7 = 28 px)", () => {
+    expect(src).toContain('className="p-6 sm:p-5 space-y-4"');
+    // Tailwind spacing: p-5 = 1.25rem = 20 px, right-7/top-7 = 1.75rem = 28 px,
+    // right-3/top-3 = 0.75rem = 12 px. A 36 px button 8 px inside the corner of
+    // a 160x112 thumbnail ends at 28 + 36 = 64 px from the corner, well inside.
+    const padding = 5 * 4;
+    const offset = 7 * 4;
+    const button = 36;
+    expect(offset - padding).toBe(8);
+    expect(offset + button).toBeLessThanOrEqual(padding + 160);
+    expect(offset + button).toBeLessThanOrEqual(padding + 112);
+  });
+
+  it('stays a sibling BEFORE the <Link>, inside <article className="relative">', () => {
+    const articleOpen = src.indexOf('<article className="relative">');
+    const bookmark = src.indexOf("<BookmarkButton");
+    const linkOpen = src.indexOf("<Link");
+    const articleClose = src.indexOf("</article>");
+    expect(articleOpen).toBeGreaterThan(-1);
+    expect(bookmark).toBeGreaterThan(articleOpen);
+    expect(linkOpen).toBeGreaterThan(bookmark);
+    expect(articleClose).toBeGreaterThan(src.indexOf("</Link>"));
+    // The button's own tag closes before the link opens: it never wraps or nests in it.
+    expect(bookmark + bookmarkTag.length).toBeLessThanOrEqual(linkOpen);
+  });
+
+  it("no longer uses the bare right-3 top-3 offset on every width", () => {
+    expect(src).not.toContain('className="absolute right-3 top-3 z-10"');
+  });
+});

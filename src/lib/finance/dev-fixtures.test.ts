@@ -3,6 +3,9 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 
+import { NOT_CIRCUIT_BREAKER_OR, tickerDisclosureOr } from "./disclosure-filter";
+import { createFinanceFakeClient } from "./dev-fixtures";
+
 vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
 // ---------------------------------------------------------------------------
@@ -72,5 +75,51 @@ describe("reader-data: /ekonomi still renders end-to-end under TAYF_FAKE_FINANCE
       process.env = ORIGINAL_ENV;
       vi.resetModules();
     }
+  });
+});
+
+describe("h11-finance-1: the dev fake honours the ticker inside the combined or() string", () => {
+  type Row = { disclosure_index: number; stock_codes: string[]; related_stocks: string[]; subject: string | null; summary: string | null };
+  type Query = {
+    select: (cols: string, opts?: { count?: string; head?: boolean }) => Query;
+    or: (f: string) => Query;
+    gte: (c: string, v: string) => Query;
+    order: (c: string, o?: unknown) => Query;
+    limit: (n: number) => Query;
+    then: (f: (v: { data: Row[] | null; count?: number; error: null }) => unknown) => unknown;
+  };
+  const kap = () => (createFinanceFakeClient() as { from: (t: string) => Query }).from("kap_disclosures");
+  const read = async (q: Query) => (await (q as unknown as Promise<{ data: Row[] | null; count?: number }>)).data ?? [];
+
+  it("returns only that ticker's notices, from stock_codes or from related_stocks, breakers excluded", async () => {
+    const rows = await read(kap().select("*").or(tickerDisclosureOr("THYAO")).limit(60));
+    expect(rows.length).toBeGreaterThanOrEqual(2);
+    for (const r of rows) expect([...r.stock_codes, ...r.related_stocks]).toContain("THYAO");
+    expect(rows.some((r) => /devre kesici/i.test(r.subject ?? ""))).toBe(false);
+  });
+
+  it("SASA: its devre kesici notice is skipped, but the related_stocks-only halt notice is listed", async () => {
+    const rows = await read(kap().select("*").or(tickerDisclosureOr("SASA")).limit(60));
+    expect(rows.map((r) => r.subject)).not.toContain("Pay Bazında Devre Kesici Bildirimi");
+    const halt = rows.find((r) => r.stock_codes.length === 0);
+    expect(halt?.related_stocks).toEqual(["SASA"]);
+    expect(halt?.summary).toBe("Pay Sırasının İşleme Kapatılması");
+  });
+
+  it("an unknown ticker matches nothing", async () => {
+    expect(await read(kap().select("*").or(tickerDisclosureOr("ZZZZ")).limit(60))).toEqual([]);
+  });
+
+  it("without a ticker the plain breaker or() lists the non-breaker stream across tickers", async () => {
+    const rows = await read(kap().select("*").or(NOT_CIRCUIT_BREAKER_OR).order("published_at", { ascending: false }).limit(40));
+    expect(new Set(rows.flatMap((r) => r.stock_codes)).size).toBeGreaterThan(3);
+    expect(rows.some((r) => /devre kesici/i.test(r.subject ?? ""))).toBe(false);
+  });
+
+  it("a head:true count read returns the count and no rows, ignoring limit", async () => {
+    const q = kap().select("disclosure_index", { count: "exact", head: true }).or(tickerDisclosureOr("THYAO"));
+    const res = await (q as unknown as Promise<{ data: Row[] | null; count?: number }>);
+    expect(res.data).toBeNull();
+    expect(res.count).toBeGreaterThanOrEqual(2);
   });
 });

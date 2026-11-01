@@ -96,6 +96,9 @@ export function cleanFeedDate(
 // value no genuine feed date can ever equal — detecting the silent fallback
 // without touching `normalize.ts` itself.
 const SENTINEL_NOW_MS = 8.64e15;
+// Built once: it used to be rebuilt on every isParseableFeedDate call, i.e. per
+// feed item.
+const SENTINEL_ISO = new Date(SENTINEL_NOW_MS).toISOString();
 
 /**
  * True when `cleaned` is both present and actually parses to something
@@ -107,8 +110,7 @@ export function isParseableFeedDate(
   sourceSlug?: string,
 ): boolean {
   if (!cleaned) return false;
-  const sentinel = new Date(SENTINEL_NOW_MS).toISOString();
   return (
-    parseDate(cleaned, { nowMs: SENTINEL_NOW_MS, sourceSlug }) !== sentinel
+    parseDate(cleaned, { nowMs: SENTINEL_NOW_MS, sourceSlug }) !== SENTINEL_ISO
   );
 }

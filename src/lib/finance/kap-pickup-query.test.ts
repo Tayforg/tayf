@@ -85,7 +85,7 @@ describe("fetchTickerPickup", () => {
     expect(articleTickersCalled).toBe(false);
   });
 
-  it("records contains(stock_codes,[T]), the Devre Kesici or() filter, and the mention gte = earliest disclosure - 3h", async () => {
+  it("sends ONE combined or() (stock_codes OR related_stocks, no Devre Kesici) and no contains filter, and the mention gte = earliest disclosure - 3h", async () => {
     const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
     const captured: { disclosures?: unknown; mentions?: unknown } = {};
 
@@ -121,8 +121,11 @@ describe("fetchTickerPickup", () => {
       or: string[];
       eq: Array<{ col: string; val: unknown }>;
     };
-    expect(dState.contains).toEqual([{ col: "stock_codes", val: ["THYAO"] }]);
-    expect(dState.or.some((f) => f.includes("Devre Kesici"))).toBe(true);
+    // h11-finance-1: related_stocks-only notices (halts, bans) belong to the ticker too.
+    expect(dState.or).toEqual([
+      "and(or(stock_codes.cs.{THYAO},related_stocks.cs.{THYAO}),or(subject.is.null,subject.not.ilike.*Devre Kesici*))",
+    ]);
+    expect(dState.contains).toEqual([]);
 
     const mState = captured.mentions as {
       eq: Array<{ col: string; val: unknown }>;
@@ -189,6 +192,78 @@ describe("fetchTickerPickup", () => {
 
     expect(result.relevanceApplied).toBe(false);
     expect(result.pickups[0]!.articles).toBe(1);
+  });
+
+  describe("h11-finance-3: the 30-day total behind the window label", () => {
+    const rowsOf = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        disclosure_index: i + 1,
+        published_at: iso(NOW - (i + 1) * 26 * HOUR),
+        subject: null,
+        disclosure_class: null,
+      }));
+
+    async function run(opts: { rows: number; count?: number | null; countError?: string; limit?: number }) {
+      const { createSupabaseFake } = await import("../../../tests/_helpers/supabase-fake");
+      const states: BuilderState[] = [];
+      const { client } = createSupabaseFake({
+        tables: {
+          kap_disclosures: (state) => {
+            states.push(state);
+            if ((state.selectArgs[1] as { head?: boolean } | undefined)?.head === true) {
+              if (opts.countError) return { data: null, error: { message: opts.countError } };
+              return { data: null, error: null, count: opts.count ?? null };
+            }
+            return { data: rowsOf(opts.rows), error: null };
+          },
+          article_tickers: () => ({ data: [], error: null }),
+          jev_shadow_predictions: () => ({ data: [], error: null }),
+          sources: () => ({ data: [], error: null }),
+        },
+      });
+      const { fetchTickerPickup } = await import("@/lib/finance/kap-pickup-query");
+      const result = await fetchTickerPickup(client as never, "ISMEN", NOW - 30 * DAY, NOW, { limit: opts.limit ?? 60 });
+      return { result, states };
+    }
+
+    it("totalDisclosures comes from a head:true count with the same or() and window as the list", async () => {
+      const { result, states } = await run({ rows: 60, count: 102 });
+      expect(result.totalDisclosures).toBe(102);
+      const count = states.find((s) => (s.selectArgs[1] as { head?: boolean } | undefined)?.head === true)!;
+      expect(count.selectArgs).toEqual(["disclosure_index", { count: "exact", head: true }]);
+      expect(count.or).toEqual([
+        "and(or(stock_codes.cs.{ISMEN},related_stocks.cs.{ISMEN}),or(subject.is.null,subject.not.ilike.*Devre Kesici*))",
+      ]);
+      expect(count.contains).toEqual([]);
+      expect(count.gte).toEqual([{ col: "published_at", val: iso(NOW - 30 * DAY) }]);
+      expect(count.lte).toEqual([{ col: "published_at", val: iso(NOW) }]);
+      expect(count.limit).toBeNull();
+    });
+
+    it("capped is true exactly when the list reached the limit", async () => {
+      expect((await run({ rows: 60, count: 102 })).result.capped).toBe(true);
+      expect((await run({ rows: 59, count: 59 })).result.capped).toBe(false);
+      expect((await run({ rows: 5, count: 5, limit: 5 })).result.capped).toBe(true);
+    });
+
+    it("totalDisclosures is null (with a warning, no throw) when the count fails", async () => {
+      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const { result } = await run({ rows: 3, countError: "canceling statement due to statement timeout" });
+      expect(result.totalDisclosures).toBeNull();
+      expect(result.pickups).toHaveLength(3);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes("fetchTickerPickup disclosure count ISMEN"))).toBe(true);
+    });
+
+    it("totalDisclosures is null when the count has no number", async () => {
+      expect((await run({ rows: 3, count: null })).result.totalDisclosures).toBeNull();
+    });
+
+    it("an empty list returns totalDisclosures 0 / capped false without a mention query", async () => {
+      const { result } = await run({ rows: 0, count: 0 });
+      expect(result.pickups).toEqual([]);
+      expect(result.totalDisclosures).toBe(0);
+      expect(result.capped).toBe(false);
+    });
   });
 
   it("a disclosure query error throws", async () => {

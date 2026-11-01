@@ -9,7 +9,12 @@ import { cn } from "@/lib/utils";
 // move since the headline it sits under. Colour is spent only on moves;
 // the code itself is brand amber because it is the link. A price at the
 // BIST limit gets a "tavan"/"taban" tag: for a retail reader that single
-// word matters more than the number.
+// word matters more than the number. The tag is tick-aware (limitFlag with the
+// previous close and the price): 0,66 -> 0,60 is taban although it is -9,09 %.
+//
+// The chip's vertical padding (py-1.5 around an 11 px line and a 1 px border)
+// makes it 25 px tall, over the 24 px minimum target size of WCAG 2.5.8; the
+// old py-0.5 chip was 15 px.
 //
 // A move is only shown when it is known: a quote without a baseline
 // (hasBaseline === false, so changePct is a 0 placeholder) or one the page
@@ -47,12 +52,12 @@ export function TickerChip({
   className?: string;
 }) {
   const knownMove = quote != null && quote.hasBaseline !== false && !stale;
-  const limit = quote && knownMove ? limitFlag(quote.changePct) : null;
+  const limit = quote && knownMove ? limitFlag(quote.changePct, quote.prevClose, quote.price) : null;
   return (
     <Link
       href={`/ekonomi/${ticker}`}
       className={cn(
-        "inline-flex max-w-full min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5 border border-border/80 px-1.5 py-0.5 font-mono text-[11px] leading-none transition-colors hover:border-brand/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        "inline-flex max-w-full min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5 border border-border/80 px-1.5 py-1.5 font-mono text-[11px] leading-none transition-colors hover:border-brand/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         className,
       )}
     >
@@ -104,7 +109,7 @@ export function TickerTape({
         const s = stats[t.ticker];
         const stale = staleTickers?.has(t.ticker) ?? false;
         const knownMove = q != null && q.hasBaseline !== false && !stale;
-        const limit = q && knownMove ? limitFlag(q.changePct) : null;
+        const limit = q && knownMove ? limitFlag(q.changePct, q.prevClose, q.price) : null;
         return (
           <Link
             key={t.ticker}

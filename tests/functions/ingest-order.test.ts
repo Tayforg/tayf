@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CYCLE_PERIOD_MS,
+  ISOLATE_ITEM_BUDGET,
+  createItemBudget,
   createParseBudget,
+  estimateItems,
   groupChunkBySource,
   interleaveBySource,
+  isolateItems,
   prioritizeIds,
   rotateForCycle,
   upsertWithBisect,
@@ -428,5 +432,137 @@ describe("prioritizeIds", () => {
   it("keeps other row fields intact", () => {
     const rich = [{ id: "x", n: 1 }, { id: "y", n: 2 }];
     expect(prioritizeIds(rich, ["y"])).toEqual([{ id: "y", n: 2 }, { id: "x", n: 1 }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Isolate item budget [A-ingest-cpu, hunt-11]
+//
+// The platform's 2 s CPU allowance is cumulative per isolate: on 2026-11-01 the
+// 2nd request of a reused isolate was shut down (CPUTime, 2000-2176 ms) 7 times
+// out of 12 two-request isolates. The parse budget above is per cycle; this one
+// is per isolate and counts ITEMS (the per-item cost dominates), estimated from
+// the body size before the parse and corrected to the real count after it.
+// ---------------------------------------------------------------------------
+
+describe("estimateItems", () => {
+  it("is max(1, floor(bytes / 1500))", () => {
+    expect(estimateItems(0)).toBe(1);
+    expect(estimateItems(1)).toBe(1);
+    expect(estimateItems(1499)).toBe(1);
+    expect(estimateItems(1500)).toBe(1);
+    expect(estimateItems(2999)).toBe(1);
+    expect(estimateItems(3000)).toBe(2);
+    expect(estimateItems(45 * 1500)).toBe(45);
+    expect(estimateItems(8_000_000)).toBe(Math.floor(8_000_000 / 1500));
+  });
+
+  it("never returns less than 1, whatever it is given", () => {
+    expect(estimateItems(-5)).toBe(1);
+    expect(estimateItems(Number.NaN)).toBe(1);
+    expect(estimateItems(Number.POSITIVE_INFINITY)).toBe(1);
+  });
+});
+
+describe("createItemBudget", () => {
+  const fresh = () => ({ used: 0, cycles: 0 });
+
+  it("a fresh isolate admits any one feed, however big", () => {
+    const state = fresh();
+    const budget = createItemBudget(100, state);
+    expect(budget.fits(1)).toBe(true);
+    expect(budget.fits(100)).toBe(true);
+    expect(budget.fits(1_000_000)).toBe(true);
+  });
+
+  it("once something is booked, only what fits under the limit is admitted", () => {
+    const state = fresh();
+    const budget = createItemBudget(100, state);
+    budget.book(40);
+    expect(budget.fits(60)).toBe(true);
+    expect(budget.fits(61)).toBe(false);
+    expect(budget.fits(1_000_000)).toBe(false);
+  });
+
+  it("has no priority exemption: fits takes the size only", () => {
+    const state = fresh();
+    const budget = createItemBudget(10, state);
+    budget.book(10);
+    expect(budget.fits(1)).toBe(false);
+    expect((budget.fits as (n: number, priority?: boolean) => boolean)(1, true)).toBe(false);
+  });
+
+  it("book adds to the shared state", () => {
+    const state = fresh();
+    const budget = createItemBudget(100, state);
+    budget.book(7);
+    budget.book(5);
+    expect(state.used).toBe(12);
+    expect(budget.used).toBe(12);
+  });
+
+  it("fits does not book", () => {
+    const state = fresh();
+    const budget = createItemBudget(100, state);
+    budget.fits(50);
+    expect(state.used).toBe(0);
+  });
+
+  it("settle replaces the booked estimate with the real count", () => {
+    const state = fresh();
+    const budget = createItemBudget(100, state);
+    budget.book(45);
+    budget.settle(45, 30); // fewer items than estimated: give the difference back
+    expect(state.used).toBe(30);
+    budget.book(10);
+    budget.settle(10, 25); // more items than estimated: charge the difference
+    expect(state.used).toBe(55);
+  });
+
+  it("settle never takes used below zero", () => {
+    const state = fresh();
+    const budget = createItemBudget(100, state);
+    budget.book(5);
+    budget.settle(50, 0);
+    expect(state.used).toBe(0);
+    budget.settle(10, 0);
+    expect(state.used).toBe(0);
+  });
+
+  it("two budgets sharing one state accumulate: that is two cycles on one isolate", () => {
+    const state = fresh();
+    const cycle1 = createItemBudget(60, state);
+    expect(cycle1.fits(45)).toBe(true);
+    cycle1.book(45);
+    cycle1.settle(45, 45);
+
+    const cycle2 = createItemBudget(60, state);
+    expect(cycle2.used).toBe(45);
+    expect(cycle2.fits(15)).toBe(true);
+    expect(cycle2.fits(16)).toBe(false);
+    cycle2.book(10);
+    expect(cycle1.used).toBe(55);
+  });
+
+  it("a different limit applies per budget, the used count is shared", () => {
+    const state = fresh();
+    createItemBudget(60, state).book(50);
+    expect(createItemBudget(60, state).fits(20)).toBe(false);
+    // An operator raising INGEST_ISOLATE_ITEM_BUDGET takes effect next cycle.
+    expect(createItemBudget(5000, state).fits(20)).toBe(true);
+  });
+
+  it("exposes its limit", () => {
+    expect(createItemBudget(123, fresh()).limit).toBe(123);
+  });
+});
+
+describe("isolate item budget defaults", () => {
+  it("ships at 5000 items per isolate", () => {
+    expect(ISOLATE_ITEM_BUDGET).toBe(5000);
+  });
+
+  it("starts with an empty module-scope state", () => {
+    expect(isolateItems).toEqual({ used: 0, cycles: 0 });
   });
 });

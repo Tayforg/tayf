@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { HTML_LIMITED_BOT_UA_RE } from "next/dist/shared/lib/router/utils/html-bots";
 import { shouldServeStreamingMetadata } from "next/dist/server/lib/streaming-metadata";
+import { GET as robotsTxt } from "@/app/robots.txt/route";
 import { HTML_LIMITED_BOTS, HTML_LIMITED_BOTS_SOURCE } from "./html-limited-bots";
 
 // Next only streams <title>/<meta>/<link rel=canonical>/robots into <body>
@@ -39,6 +40,46 @@ const VIBER = "Viber/23.0";
 const PINTEREST = "Pinterestbot/1.0";
 const LINE_APP = "Line/13.0";
 const KAKAOTALK = "kakaotalk-scrap/1.0";
+// AI and answer-engine fetchers (real UA strings). robots.txt allows them, but
+// before they were listed they got <title>, canonical and robots only inside
+// <body> (byte ~36871, after </head> at ~1511), which a head-only parser never
+// sees.
+const GPTBOT =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot";
+const OAI_SEARCHBOT =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OAI-SearchBot/1.0; +https://openai.com/searchbot";
+const CHATGPT_USER =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ChatGPT-User/1.0; +https://openai.com/bot";
+const CLAUDEBOT =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ClaudeBot/1.0; +claudebot@anthropic.com)";
+const CLAUDE_USER =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-User/1.0; +Claude-User@anthropic.com)";
+const CLAUDE_SEARCHBOT =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Claude-SearchBot/1.0; +Claude-SearchBot@anthropic.com)";
+const PERPLEXITYBOT =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot)";
+const PERPLEXITY_USER =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; Perplexity-User/1.0; +https://perplexity.ai/perplexity-user)";
+const AMAZONBOT =
+  "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; Amazonbot/0.1; +https://developer.amazon.com/support/amazonbot) Chrome/119.0.6045.214 Safari/537.36";
+const META_EXTERNALAGENT =
+  "meta-externalagent/1.1 (+https://developers.facebook.com/docs/sharing/webmasters/crawler)";
+const DUCKASSISTBOT = "DuckAssistBot/1.2; (+http://duckduckgo.com/duckassistbot.html)";
+
+const AI_FETCHERS: ReadonlyArray<readonly [string, string]> = [
+  ["GPTBot", GPTBOT],
+  ["OAI-SearchBot", OAI_SEARCHBOT],
+  ["ChatGPT-User", CHATGPT_USER],
+  ["ClaudeBot", CLAUDEBOT],
+  ["Claude-User", CLAUDE_USER],
+  ["Claude-SearchBot", CLAUDE_SEARCHBOT],
+  ["PerplexityBot", PERPLEXITYBOT],
+  ["Perplexity-User", PERPLEXITY_USER],
+  ["Amazonbot", AMAZONBOT],
+  ["meta-externalagent", META_EXTERNALAGENT],
+  ["DuckAssistBot", DUCKASSISTBOT],
+];
+
 // Telegram identifies as Twitterbot, so Next's default already covers it; the
 // case documents that dependency.
 const TELEGRAM = "TelegramBot (like TwitterBot)";
@@ -92,6 +133,7 @@ describe("HTML_LIMITED_BOTS crawler matching", () => {
     ["Line (link unfurler)", LINE_APP],
     ["kakaotalk-scrap (link unfurler)", KAKAOTALK],
     ["TelegramBot (via Twitterbot)", TELEGRAM],
+    ...AI_FETCHERS.map(([name, ua]) => [`${name} (AI / answer-engine fetcher)`, ua] as const),
   ])("matches %s", (_name, ua) => {
     expect(re.test(ua)).toBe(true);
   });
@@ -139,16 +181,108 @@ describe("Next runtime mirror (shouldServeStreamingMetadata)", () => {
     }
   });
 
+  it.each(AI_FETCHERS)(
+    "serves blocking metadata to %s (AI / answer-engine fetcher)",
+    (_name, ua) => {
+      expect(shouldServeStreamingMetadata(ua, HTML_LIMITED_BOTS.source)).toBe(false);
+    },
+  );
+
   it("keeps streaming metadata for desktop Chrome", () => {
     expect(
       shouldServeStreamingMetadata(CHROME_MAC, HTML_LIMITED_BOTS.source),
     ).toBe(true);
   });
 
+  it("keeps streaming metadata for every human UA", () => {
+    for (const ua of [CHROME_MAC, CHROME_ANDROID, SAFARI_IPHONE, FIREFOX_WINDOWS, OFFLINE_AGENT]) {
+      expect(shouldServeStreamingMetadata(ua, HTML_LIMITED_BOTS.source)).toBe(true);
+    }
+  });
+
   it("documents the gap: Next's built-in default alone does not cover Googlebot", () => {
     expect(
       shouldServeStreamingMetadata(GOOGLEBOT_DESKTOP, HTML_LIMITED_BOT_UA_RE.source),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Drift guard: robots.txt names AI / answer-engine bots and promises them the
+// site. A bot that is allowed there but missing from HTML_LIMITED_BOTS gets
+// <title>/canonical/robots after </head>, so every user-agent token in the AI
+// section of robots.txt must either match the list or sit in EXEMPT below with
+// a reason. Adding a bot to robots.txt without doing one of the two fails here.
+// ---------------------------------------------------------------------------
+
+const EXEMPT: Record<string, string> = {
+  // robots.txt-only product tokens: they control use of already-fetched content
+  // and never request a page, so there is no User-Agent header to match.
+  "anthropic-ai": "robots-only product token, never fetches pages",
+  "cohere-ai": "robots-only product token, never fetches pages",
+  // Bulk trainers: each crawl is a full dynamic render (a matching UA bypasses
+  // the PPR static shell), and they crawl the whole site for training, not for
+  // a citation. Not worth the render cost.
+  CCBot: "bulk trainer, each crawl would cost a full dynamic render",
+  Bytespider: "bulk trainer, each crawl would cost a full dynamic render",
+  Diffbot: "bulk trainer, each crawl would cost a full dynamic render",
+  Timpibot: "bulk trainer, each crawl would cost a full dynamic render",
+};
+
+// Search and user-triggered fetchers: a person is waiting on an answer that
+// cites the page, so they must never be exempted.
+const SEARCH_AND_USER_FETCHERS = [
+  "OAI-SearchBot",
+  "ChatGPT-User",
+  "Claude-SearchBot",
+  "Claude-User",
+  "PerplexityBot",
+  "Perplexity-User",
+] as const;
+
+async function aiRobotsTokens(): Promise<string[]> {
+  const text = await robotsTxt().text();
+  const start = text.indexOf("# --- AI / answer-engine bots");
+  const end = text.indexOf("User-agent: Googlebot");
+  expect(start).toBeGreaterThan(-1);
+  expect(end).toBeGreaterThan(start);
+  return [...text.slice(start, end).matchAll(/^User-agent:[ \t]*(\S+)[ \t]*$/gm)].map(
+    (m) => m[1]!,
+  );
+}
+
+describe("robots.txt AI section stays in step with HTML_LIMITED_BOTS (drift guard)", () => {
+  it("finds the AI user-agent tokens (the scan is not vacuous)", async () => {
+    const tokens = await aiRobotsTokens();
+    expect(tokens.length).toBeGreaterThanOrEqual(15);
+    expect(new Set(tokens).size).toBe(tokens.length);
+    for (const name of ["GPTBot", "ClaudeBot", "PerplexityBot", "CCBot", "anthropic-ai"]) {
+      expect(tokens).toContain(name);
+    }
+    expect(tokens).not.toContain("*");
+    expect(tokens).not.toContain("Googlebot");
+  });
+
+  it("every AI token either matches HTML_LIMITED_BOTS or is exempt with a reason", async () => {
+    const unmatched = (await aiRobotsTokens()).filter(
+      (t) => !HTML_LIMITED_BOTS.test(t) && !(t in EXEMPT),
+    );
+    expect(unmatched).toEqual([]);
+  });
+
+  it("EXEMPT lists exactly the tokens that do not match (no stale exemption)", async () => {
+    const notMatching = (await aiRobotsTokens()).filter((t) => !HTML_LIMITED_BOTS.test(t));
+    expect(Object.keys(EXEMPT).sort()).toEqual([...notMatching].sort());
+    for (const reason of Object.values(EXEMPT)) expect(reason.length).toBeGreaterThan(10);
+  });
+
+  it("never exempts the six search and user-triggered fetchers", async () => {
+    const tokens = await aiRobotsTokens();
+    for (const name of SEARCH_AND_USER_FETCHERS) {
+      expect(tokens).toContain(name);
+      expect(EXEMPT).not.toHaveProperty(name);
+      expect(HTML_LIMITED_BOTS.test(name)).toBe(true);
+    }
   });
 });
 

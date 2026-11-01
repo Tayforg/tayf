@@ -3,6 +3,7 @@ import { ImageResponse } from "next/og";
 import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { tallyZones, zoneOf } from "@/lib/bias/config";
 import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import { displayHeadline } from "@/lib/embed/embed-html";
 import { formatPctTr } from "@/lib/format/number-tr";
 import type { MediaDnaZone } from "@/types";
 
@@ -201,10 +202,13 @@ export default async function Image({ params }: ImageProps) {
   // for vertical space in the column.
   const titleFontSize = ribbonZone ? 56 : 64;
   const titleMaxChars = ribbonZone ? 95 : 110;
+  // A stored title with no letter or digit ('&nbsp', '-') would render as a
+  // blank headline; show the neutral "Haber" instead, then clamp.
+  const display = displayHeadline(cluster.title_tr);
   const title =
-    cluster.title_tr.length > titleMaxChars
-      ? cluster.title_tr.slice(0, titleMaxChars - 3) + "…"
-      : cluster.title_tr;
+    display.length > titleMaxChars
+      ? display.slice(0, titleMaxChars - 3) + "…"
+      : display;
 
   return new ImageResponse(
     (

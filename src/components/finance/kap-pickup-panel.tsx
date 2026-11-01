@@ -1,7 +1,7 @@
 import { ZONE_META } from "@/lib/bias/config";
 import { formatPickupLag } from "@/lib/finance/kap-pickup";
-import { getTickerPickupSafe } from "@/lib/finance/kap-pickup-query";
-import { fmtWhen } from "@/lib/finance/format";
+import { PICKUP_LIMIT, getTickerPickupSafe } from "@/lib/finance/kap-pickup-query";
+import { disclosureWindowLabel, fmtWhen } from "@/lib/finance/format";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import type { MediaDnaZone } from "@/types";
 
@@ -10,6 +10,10 @@ import type { MediaDnaZone } from "@/types";
 // after filing. Never throws: getTickerPickupSafe() swallows every failure
 // so a broken pickup computation can never replace the whole /ekonomi/[ticker]
 // page with error.tsx (the panel is purely additive).
+//
+// The window label is honest about the cap (h11-finance-3): the pickup read is
+// cut at PICKUP_LIMIT disclosures, so a busy ticker reads "son 60 bildirim
+// (30 günde 102)" instead of "son 30 gün" over a list that stops at 60.
 
 const ZONE_ORDER: MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
@@ -48,7 +52,10 @@ export async function KapPickupPanel({ ticker }: { ticker: string }) {
   const rateLabel = totals.pickupRate === null ? "—" : `${Math.round(totals.pickupRate * 100)}`;
 
   return (
-    <Panel title="Medyada yankı" meta="son 30 gün · bildirimden sonraki 48 saat">
+    <Panel
+      title="Medyada yankı"
+      meta={`${disclosureWindowLabel(data.pickups.length, data.totalDisclosures, PICKUP_LIMIT)} · bildirimden sonraki 48 saat`}
+    >
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 px-3 py-3 font-mono text-[11px] sm:grid-cols-4">
         <div>
           <dt className="text-muted-foreground">bildirim</dt>

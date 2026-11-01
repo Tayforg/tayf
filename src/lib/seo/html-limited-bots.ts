@@ -44,6 +44,28 @@ const TAYF_EXTRA_BOTS = [
   // here would make HTML_LIMITED_BOTS.source differ from this string.
   String.raw`\bLine\/`,
   "kakaotalk-scrap",
+  // AI / answer-engine fetchers. robots.txt allows them (allow-with-terms), but
+  // they read <title>, canonical and robots from <head>; with streaming
+  // metadata those sat about 35 KB into <body>, after </head>. The search and
+  // user-triggered fetchers (OAI-SearchBot, ChatGPT-User, Claude-SearchBot,
+  // Claude-User, PerplexityBot, Perplexity-User) matter most: a person is
+  // waiting on an answer that cites the page. Each match is a full dynamic
+  // render, so the bulk trainers (CCBot, Bytespider, Diffbot, Timpibot) are
+  // deliberately NOT listed, and the robots-only tokens (anthropic-ai,
+  // cohere-ai) never send a request. src/lib/seo/html-limited-bots.test.ts
+  // fails when robots.txt names an AI bot that is neither listed here nor
+  // exempted there with a reason.
+  "GPTBot",
+  "OAI-SearchBot",
+  "ChatGPT-User",
+  "ClaudeBot",
+  "Claude-User",
+  "Claude-SearchBot",
+  "PerplexityBot",
+  "Perplexity-User",
+  "Amazonbot",
+  "meta-externalagent",
+  "DuckAssistBot",
 ] as const;
 
 export const HTML_LIMITED_BOTS_SOURCE = `${NEXT_DEFAULT_HTML_LIMITED_BOTS}|${TAYF_EXTRA_BOTS.join("|")}`;

@@ -323,7 +323,7 @@ export function ClusterCard({
         clusterId={cluster.id}
         storyTitle={cluster.title_tr}
         variant="overlay"
-        className="absolute right-3 top-3 z-10"
+        className="absolute right-3 top-3 z-10 sm:right-7 sm:top-7"
       />
       <Link
       href={`/cluster/${cluster.id}`}

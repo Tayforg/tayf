@@ -256,6 +256,19 @@ describe("GET /api/oembed — title", () => {
     expect(JSON.stringify(body)).not.toContain("Ali Yılmaz");
   });
 
+  it("shows a contentless title ('&nbsp') as 'Haber', not an empty string", async () => {
+    getClusterDetailMock.mockResolvedValue(found({ title: "&nbsp" }));
+    const body = await (await call({ url: clusterUrl() })).json();
+    expect(body.title).toBe("Haber");
+  });
+
+  it("keeps 'Tayf haberi' for a PII rejection even when the title has content", async () => {
+    eligibleMock.mockReturnValue(false);
+    getClusterDetailMock.mockResolvedValue(found({ title: "Ali Yılmaz adlı şüpheli" }));
+    const body = await (await call({ url: clusterUrl() })).json();
+    expect(body.title).toBe("Tayf haberi");
+  });
+
   it("asks the filter about the cluster title", async () => {
     getClusterDetailMock.mockResolvedValue(found({ title: "Başlık Z" }));
     await call({ url: clusterUrl() });

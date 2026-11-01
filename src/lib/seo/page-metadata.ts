@@ -145,3 +145,22 @@ export function noindexPageMetadata(input: {
   const { follow, ...page } = input;
   return { ...staticPageMetadata(page), robots: { index: false, follow } };
 }
+
+/**
+ * Metadata for an error shell: a not-found or "could not load" page that still
+ * answers 200 because the segment's loading boundary had already flushed.
+ * `robots` keeps it out of the index, and `alternates.canonical: null` is what
+ * stops it from advertising the homepage: src/app/layout.tsx sets a site-wide
+ * `alternates: { canonical: '/' }` that every page inherits unless it sets
+ * its own `alternates`, so a bare noindex shell used to carry
+ * `<link rel="canonical" href="https://www.tayfhaber.com">`. Deliberately no
+ * description, openGraph or twitter: the shell says nothing about the segment
+ * (SEC-04/SEC-11, nothing from the URL is echoed into it).
+ */
+export function errorShellMetadata(title: string): Metadata {
+  return {
+    title,
+    robots: { index: false, follow: false },
+    alternates: { canonical: null },
+  };
+}

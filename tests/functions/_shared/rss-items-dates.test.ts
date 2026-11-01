@@ -203,3 +203,90 @@ describe("isParseableFeedDate", () => {
     expect(isParseableFeedDate(cleaned, "milliyet")).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// A-ingest-cpu (hunt-11): parseDate builds its "unparseable -> nowMs" fallback
+// lazily and isParseableFeedDate hoists its sentinel ISO string to a module
+// constant. Neither may change an output.
+// ---------------------------------------------------------------------------
+
+describe("parseDate fallback [A-ingest-cpu]", () => {
+  const NOW = Date.parse("2026-10-26T07:33:20Z");
+
+  it.each([
+    ["undefined", undefined],
+    ["empty", ""],
+    ["blank", "   "],
+    ["whitespace controls", "\t\n "],
+    ["garbage", "not a date"],
+    ["impossible day", "32 Foo 2026 99:99"],
+    ["impossible ISO month", "2026-13-45T25:00:00Z"],
+    ["slashed date", "2026/10/25"],
+    ["time only", "10:30"],
+  ])("falls back to nowMs for %s", (_name, raw) => {
+    expect(parseDate(raw as string | undefined, { nowMs: NOW })).toBe("2026-10-26T07:33:20.000Z");
+    expect(parseDate(raw as string | undefined, { nowMs: NOW })).toBe(new Date(NOW).toISOString());
+  });
+
+  it("the fallback follows whatever nowMs it is given, including the extremes", () => {
+    for (const nowMs of [0, 1, NOW, 8.64e15, -8.64e15]) {
+      expect(parseDate("", { nowMs })).toBe(new Date(nowMs).toISOString());
+      expect(parseDate("garbage", { nowMs, sourceSlug: "cnn-turk" })).toBe(new Date(nowMs).toISOString());
+    }
+  });
+
+  it("still parses real dates and clamps to nowMs", () => {
+    expect(parseDate("Mon, 26 Oct 2026 08:30:00 +0300", { nowMs: NOW })).toBe("2026-10-26T05:30:00.000Z");
+    expect(parseDate("2026-10-25 08:30", { nowMs: NOW })).toBe("2026-10-25T05:30:00.000Z");
+    expect(parseDate("2026-10-25T10:00:00Z", { nowMs: NOW, sourceSlug: "cnn-turk" })).toBe(
+      "2026-10-25T07:00:00.000Z",
+    );
+    // later than nowMs: clamped, never outruns ingest time
+    expect(parseDate("2099-01-01T00:00:00Z", { nowMs: NOW })).toBe("2026-10-26T07:33:20.000Z");
+  });
+});
+
+describe("isParseableFeedDate is unchanged [A-ingest-cpu]", () => {
+  // The previous implementation, copied inline: the sentinel string was built
+  // on every call.
+  function isParseableFeedDateOld(cleaned: string | undefined, sourceSlug?: string): boolean {
+    if (!cleaned) return false;
+    const sentinelNow = 8.64e15;
+    const sentinel = new Date(sentinelNow).toISOString();
+    return parseDate(cleaned, { nowMs: sentinelNow, sourceSlug }) !== sentinel;
+  }
+
+  const CASES: Array<[string | undefined, string | undefined, boolean]> = [
+    [undefined, undefined, false],
+    ["", undefined, false],
+    ["not a date", undefined, false],
+    ["32 Foo 2026 99:99", "sozcu", false],
+    ["2026-10-25 08:30", undefined, true],
+    ["Mon, 26 Oct 2026 08:30:00 +0300", "milliyet", true],
+    ["Mon, 26 Oct 2026 08:30:00", undefined, true],
+    ["2026-10-25T10:00:00Z", "cnn-turk", true],
+    ["2099-01-01T00:00:00Z", undefined, true],
+    // The sentinel itself is indistinguishable from the fallback by design.
+    [new Date(8.64e15).toISOString(), undefined, false],
+  ];
+
+  it.each(CASES)("%s (%s) -> %s", (cleaned, slug, expected) => {
+    expect(isParseableFeedDate(cleaned, slug)).toBe(expected);
+    expect(isParseableFeedDate(cleaned, slug)).toBe(isParseableFeedDateOld(cleaned, slug));
+  });
+
+  it("agrees with the old implementation on every cleaned corpus date", async () => {
+    const corpus = (await import("../../fixtures/ingest-corpus.json")).default as unknown as {
+      rows: Array<{ slug: string; item: { pubDate?: string } }>;
+    };
+    expect(corpus.rows.length).toBeGreaterThanOrEqual(200);
+    const mismatches: string[] = [];
+    for (const [i, row] of corpus.rows.entries()) {
+      const cleaned = cleanFeedDate(row.item.pubDate, row.slug);
+      if (isParseableFeedDate(cleaned, row.slug) !== isParseableFeedDateOld(cleaned, row.slug)) {
+        mismatches.push(`#${i}`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+});

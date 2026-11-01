@@ -40,6 +40,13 @@ const DIACRITIC_MAP: Record<string, string> = {
   û: "u", Û: "u",
 };
 
+// One regex over the map's own keys, so the fold is a single native pass
+// instead of a string append per character. Every key is a single BMP code
+// unit and none is a surrogate, so matching by UTF-16 unit is exactly
+// matching by code point. `g`-flag regexes are safe to share here: String
+// .prototype.replace resets lastIndex before it starts.
+const DIACRITIC_RE = new RegExp(`[${Object.keys(DIACRITIC_MAP).join("")}]`, "g");
+
 const STOP_WORDS: Set<string> = new Set([
   "ve", "ile", "bir", "bu", "da", "de", "ki", "mi", "mı", "mu", "mü",
   "o", "ne", "için", "icin", "ama", "fakat", "ancak", "ya", "ya da",
@@ -58,10 +65,7 @@ const STOP_WORDS: Set<string> = new Set([
  */
 export function normalizeTurkish(text: string | null | undefined): string {
   if (!text) return "";
-  let out = "";
-  for (const ch of text) {
-    out += DIACRITIC_MAP[ch] ?? ch;
-  }
+  let out = text.replace(DIACRITIC_RE, (ch) => DIACRITIC_MAP[ch]!);
   out = out.toLowerCase();
   out = out.replace(/[^a-z0-9\s]/g, " ");
   const tokens = out
@@ -168,12 +172,11 @@ export function headlineTokens(title: string | null | undefined): HeadlineTokens
   return { tokens, numbers };
 }
 
-export function shingleSet(
-  title: string | null | undefined,
-  description: string | null | undefined,
-  n = 4,
-): Set<string> {
-  const norm = normalizeTurkish(`${title || ""} ${description || ""}`);
+// The n-gram set of an ALREADY normalised string. Split out of `shingleSet`
+// so `strictFingerprint` can normalise once and reuse the result: it used to
+// normalise `title + description`, then call `shingleSet`, which normalised
+// the identical string again (hunt-11, A-ingest-cpu).
+function shinglesOfNorm(norm: string, n: number): Set<string> {
   const shingles = new Set<string>();
   if (!norm) return shingles;
   if (norm.length < n) {
@@ -186,6 +189,14 @@ export function shingleSet(
   return shingles;
 }
 
+export function shingleSet(
+  title: string | null | undefined,
+  description: string | null | undefined,
+  n = 4,
+): Set<string> {
+  return shinglesOfNorm(normalizeTurkish(`${title || ""} ${description || ""}`), n);
+}
+
 // ---------------------------------------------------------------------------
 // Strict fingerprint — sha1 of sorted unique 4-gram shingles
 // ---------------------------------------------------------------------------
@@ -196,7 +207,7 @@ export function strictFingerprint(
 ): string | null {
   const norm = normalizeTurkish(`${title || ""} ${description || ""}`);
   if (!norm) return null;
-  const shingles = shingleSet(title, description, 4);
+  const shingles = shinglesOfNorm(norm, 4);
   if (shingles.size === 0) return sha1(norm);
   const sorted = [...shingles].sort().join("|");
   return sha1(sorted);

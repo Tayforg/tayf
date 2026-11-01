@@ -3,7 +3,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // content_hash a fixture item will get, so the migration-041 F2 test below
 // can seed `existingArticleHashPairs` with a value the SUT will actually
 // produce, instead of a hand-picked string that happens to never collide.
-import { normalizeArticles } from "../../supabase/functions/_shared/rss/normalize.ts";
+import {
+  canonicalizeUrl,
+  normalizeArticles,
+} from "../../supabase/functions/_shared/rss/normalize.ts";
+import { sourceArticleKeyFor } from "../../supabase/functions/_shared/rss/article-key.ts";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the ingest Edge Function (audit T7 P1-22 verification).
@@ -291,6 +295,23 @@ vi.mock("../../supabase/functions/_shared/rss/title-jaccard.ts", async (importOr
     jaccardOfSets: (a: ReadonlySet<string>, b: ReadonlySet<string>) => {
       jaccardWork.calls++;
       return actual.jaccardOfSets(a, b);
+    },
+  };
+});
+
+// Counts the strictFingerprint calls the SUT makes. normalize.ts calls it once
+// per item that reaches the heavy (complete) phase and nowhere else, so the
+// number is "items that were fully normalised". The real function still runs.
+// Reset in beforeEach; read it BEFORE a test calls normalizeArticles itself.
+const heavyWork = vi.hoisted(() => ({ fingerprints: 0 }));
+vi.mock("../../supabase/functions/_shared/cluster/fingerprint.ts", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../supabase/functions/_shared/cluster/fingerprint.ts")>();
+  return {
+    ...actual,
+    strictFingerprint: (a: string | null | undefined, b: string | null | undefined) => {
+      heavyWork.fingerprints++;
+      return actual.strictFingerprint(a, b);
     },
   };
 });
@@ -761,7 +782,15 @@ function installFetchStub() {
   }) as typeof fetch;
 }
 
+// A-ingest-cpu: the ingest module keeps an isolate-wide item budget in module
+// state, and this file imports the module once. A budget no test reaches keeps
+// every other test independent of how many items earlier tests parsed; the
+// tests that exercise the budget set their own value and reset the module.
+const ORIGINAL_ISOLATE_ITEM_BUDGET = process.env.INGEST_ISOLATE_ITEM_BUDGET;
+
 beforeEach(() => {
+  process.env.INGEST_ISOLATE_ITEM_BUDGET = "100000000";
+  heavyWork.fingerprints = 0;
   upserted.length = 0;
   ingestCycleInserts.length = 0;
   sourceFetchStateWrites.length = 0;
@@ -802,6 +831,8 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   vi.clearAllMocks();
+  if (ORIGINAL_ISOLATE_ITEM_BUDGET === undefined) delete process.env.INGEST_ISOLATE_ITEM_BUDGET;
+  else process.env.INGEST_ISOLATE_ITEM_BUDGET = ORIGINAL_ISOLATE_ITEM_BUDGET;
 });
 
 // ---------------------------------------------------------------------------
@@ -2946,14 +2977,17 @@ describe("twin drop: same source_article_key under another url [migration 113]",
     expect(lines.filter((l) => l.includes("intra-feed"))).toEqual([]);
 
     // The new headline is recorded against the STORED article, with no extra
-    // url lookup (the stored row was already resolved by the key lookup).
+    // url lookup (the stored row was already resolved by the key lookup). The
+    // one url select of the cycle is the feed loop's lookup of what is stored
+    // (hunt-11), which names the twin's new url and found nothing.
     expect(titleVersionInsertCalls).toEqual([
       [{ article_id: "art-1", source_id: AKSAM.id, old_title: TITLE_A, new_title: TITLE_B }],
     ]);
     expect(titleEditRpcCalls).toEqual([
       [{ article_id: "art-1", old_title: TITLE_A, new_title: TITLE_B }],
     ]);
-    expect(articlesUrlLookupCalls).toHaveLength(0);
+    expect(articlesUrlLookupCalls).toHaveLength(1);
+    expect(articlesUrlLookupCalls[0]?.urls).toEqual([URL_B]);
     expect(body.titleVersions).toBe(1);
     expect(body.titleWriteBacks).toBe(1);
 
@@ -2979,7 +3013,7 @@ describe("twin drop: same source_article_key under another url [migration 113]",
     expect(titleEditRpcCalls).toHaveLength(0);
   });
 
-  it("1c. a twin and a new article in one chunk: the new one is upserted, the twin is recorded, and only the new url is looked up", async () => {
+  it("1c. a twin and a new article in one chunk: the new one is upserted, the twin is recorded, and the urls are selected once", async () => {
     const URL_NEW = "https://www.aksam.com.tr/spor/baska-bir-haber/haber-1708999";
     seed(AKSAM, [
       { title: TITLE_B, link: URL_B, pubDate: "Fri, 23 Oct 2026 17:16:00 GMT" },
@@ -2998,10 +3032,12 @@ describe("twin drop: same source_article_key under another url [migration 113]",
     expect(titleVersionInsertCalls[0]).toEqual([
       { article_id: "art-1", source_id: AKSAM.id, old_title: TITLE_A, new_title: TITLE_B },
     ]);
-    // ONE url select for the whole chunk, and it names only the url that was
-    // not already resolved through its key.
+    // ONE url select for the whole cycle (hunt-11): the feed loop's lookup, which
+    // names both urls of the feed in feed order. The title-version path selects
+    // nothing more: the twin's stored article was resolved through its key, and
+    // the new url was already confirmed absent by the lookup.
     expect(articlesUrlLookupCalls).toHaveLength(1);
-    expect(articlesUrlLookupCalls[0]?.urls).toEqual([URL_NEW]);
+    expect(articlesUrlLookupCalls[0]?.urls).toEqual([URL_B, URL_NEW]);
   });
 
   it("2. leaves a row alone when the stored row with that key has the SAME url (the normal re-poll path)", async () => {
@@ -4526,5 +4562,829 @@ describe("headline-less items are dropped and counted [hunt-10 C-entity-only-tit
 
     expect(first.body.contentlessTitlesDropped).toBe(1);
     expect(second.body.contentlessTitlesDropped).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A-ingest-cpu (hunt-11): per-item work spent on items that are never inserted.
+//
+// 2026-11-01 prod, 10:00-14:00 UTC: 252,949 items fully normalised against
+// 1,860 inserted (0.74%). Ingest now does the cheap part of normalisation
+// (link, cleaned title, absolute url) first, asks the database once per feed
+// which of those urls are already stored, and runs the heavy part (legal
+// notice, canonical url, description, image, date, hash, category) only for
+// the rest. An item whose url is stored for the same source under the same
+// headline is "known": it is counted (itemsKnownSkipped) and nothing else.
+// ---------------------------------------------------------------------------
+
+type LookupStoredByUrlFn = (
+  supabase: unknown,
+  urls: readonly string[],
+) => Promise<{
+  byUrl: Map<string, { id: string; title: string; source_id: string }>;
+  ok: boolean;
+}>;
+
+describe("known-url skip before the heavy normalisation [hunt-11 A-ingest-cpu]", () => {
+  const PUB = "Fri, 23 Oct 2026 10:00:00 GMT";
+
+  function mkSource(tag: string) {
+    return {
+      id: `src-ks-${tag}`,
+      name: `Known skip ${tag}`,
+      slug: `ks-${tag}`,
+      url: `https://${tag}.known.example`,
+      rss_url: `https://${tag}.known.example/rss.xml`,
+    };
+  }
+  type Src = ReturnType<typeof mkSource>;
+  const urlOf = (src: Src, i: number | string) => `${src.url}/haber/konu-${i}`;
+
+  function seed(src: Src, feed: MockFeedItem[], extra: Record<string, unknown> = {}): string {
+    fakeSources.push({
+      ...src,
+      active: true,
+      fetch_etag: null,
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 0,
+      ...extra,
+    });
+    fetcherItems[src.rss_url] = feed;
+    return src.rss_url;
+  }
+
+  function store(src: Src, item: MockFeedItem, over: Partial<{ id: string; title: string; source_id: string }> = {}) {
+    storedArticlesByUrl[item.link] = {
+      id: over.id ?? `art-${item.link}`,
+      title: over.title ?? item.title,
+      source_id: over.source_id ?? src.id,
+    };
+  }
+
+  async function run() {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  async function runLogged() {
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const body = await run();
+      return { body, lines: logSpy.mock.calls.map((args) => args.join(" ")) };
+    } finally {
+      logSpy.mockRestore();
+    }
+  }
+
+  const upsertedUrls = () => articlesUpsertCalls.flat().map((r) => r.url as string);
+  const lookedUpUrls = () => articlesUrlLookupCalls.flatMap((c) => c.urls);
+  const persisted = (id: string) =>
+    sourceFetchStateWrites.flatMap((w) => w.rows).find((r) => r.id === id);
+
+  it("an all-known feed: nothing is fully normalised, nothing is upserted, the validators are committed", async () => {
+    const src = mkSource("allknown");
+    const items: MockFeedItem[] = Array.from({ length: 20 }, (_, i) => ({
+      title: `Bilinen haber başlığı numara ${i}`,
+      link: urlOf(src, i),
+      pubDate: PUB,
+    }));
+    const rssUrl = seed(src, items, { fetch_etag: 'W/"old"', fetch_body_hash: "stored-hash" });
+    fetcherResultOverrides[rssUrl] = { etag: '"new"', bodyHash: "hash-new" };
+    for (const it of items) store(src, it);
+
+    const body = await run();
+
+    expect(heavyWork.fingerprints).toBe(0);
+    expect(body.itemsNormalized).toBe(0);
+    expect(body.itemsKnownSkipped).toBe(20);
+    expect(body.knownUrlLookupErrors).toBe(0);
+    expect(body.inserted).toBe(0);
+    expect(articlesUpsertCalls).toHaveLength(0);
+    expect(prefilterLookupCalls).toHaveLength(0);
+    expect(keyLookupCalls).toHaveLength(0);
+    expect(titleVersionInsertCalls).toHaveLength(0);
+    expect(titleEditRpcCalls).toHaveLength(0);
+    // One batched select for the whole feed, naming every url once, in feed order.
+    expect(articlesUrlLookupCalls).toHaveLength(1);
+    expect(articlesUrlLookupCalls[0]?.urls).toEqual(items.map((i) => i.link));
+
+    // No row to lose: the validators commit right away.
+    expect(body.validatorsWithheld).toBe(0);
+    const row = persisted(src.id);
+    expect(row?.fetch_etag).toBe('"new"');
+    expect(row?.fetch_body_hash).toBe("hash-new");
+    expect(row?.fetch_fail_streak).toBe(0);
+  });
+
+  it("looks the feed's urls up in batches of 100, each url once", async () => {
+    const src = mkSource("batches");
+    const items: MockFeedItem[] = Array.from({ length: 250 }, (_, i) => ({
+      title: `Toplu haber başlığı numara ${i}`,
+      link: urlOf(src, i),
+      pubDate: PUB,
+    }));
+    // The same link twice in one feed is looked up once.
+    items.push({ ...items[0]! });
+    seed(src, items);
+    for (const it of items) store(src, it);
+
+    const body = await run();
+
+    expect(articlesUrlLookupCalls.map((c) => c.urls.length).sort((a, b) => b - a)).toEqual([100, 100, 50]);
+    expect(lookedUpUrls().sort()).toEqual(items.slice(0, 250).map((i) => i.link).sort());
+    expect(body.itemsKnownSkipped).toBe(251);
+    expect(body.itemsNormalized).toBe(0);
+    expect(heavyWork.fingerprints).toBe(0);
+  });
+
+  it("a known url with a changed headline still records one title version and one write-back, selected once", async () => {
+    const src = mkSource("changed");
+    const same: MockFeedItem[] = [0, 1].map((i) => ({
+      title: `Aynı kalan haber başlığı ${i}`,
+      link: urlOf(src, i),
+      pubDate: PUB,
+    }));
+    const edited: MockFeedItem = {
+      title: "Yeni başlıkla yeniden yayımlandı",
+      link: urlOf(src, "edited"),
+      pubDate: PUB,
+    };
+    seed(src, [same[0]!, edited, same[1]!]);
+    for (const it of same) store(src, it);
+    store(src, edited, { id: "art-edited", title: "Eski başlıkla ilk yayımlandı" });
+
+    const body = await run();
+
+    expect(body.titleVersions).toBe(1);
+    expect(body.titleWriteBacks).toBe(1);
+    expect(titleVersionInsertCalls).toEqual([
+      [
+        {
+          article_id: "art-edited",
+          source_id: src.id,
+          old_title: "Eski başlıkla ilk yayımlandı",
+          new_title: "Yeni başlıkla yeniden yayımlandı",
+        },
+      ],
+    ]);
+    expect(titleEditRpcCalls).toEqual([
+      [
+        {
+          article_id: "art-edited",
+          old_title: "Eski başlıkla ilk yayımlandı",
+          new_title: "Yeni başlıkla yeniden yayımlandı",
+        },
+      ],
+    ]);
+    // Heavy path, as today: only the changed one is fully normalised and sent.
+    expect(heavyWork.fingerprints).toBe(1);
+    expect(body.itemsNormalized).toBe(1);
+    expect(body.itemsKnownSkipped).toBe(2);
+    expect(upsertedUrls()).toEqual([edited.link]);
+    // The edited url is selected exactly once in the whole cycle: by phase 1.
+    expect(lookedUpUrls().filter((u) => u === edited.link)).toHaveLength(1);
+    expect(articlesUrlLookupCalls).toHaveLength(1);
+  });
+
+  it("a headline that differs only by surrounding whitespace is unchanged; a case change is a change", async () => {
+    const src = mkSource("trim");
+    const spaced: MockFeedItem = { title: "Boşluklu başlık", link: urlOf(src, "spaced"), pubDate: PUB };
+    const cased: MockFeedItem = { title: "Büyük harfli BAŞLIK", link: urlOf(src, "cased"), pubDate: PUB };
+    seed(src, [spaced, cased]);
+    store(src, spaced, { title: "  Boşluklu başlık \n" });
+    store(src, cased, { id: "art-cased", title: "Büyük harfli başlık" });
+
+    const body = await run();
+
+    expect(body.itemsKnownSkipped).toBe(1);
+    expect(body.itemsNormalized).toBe(1);
+    expect(body.titleVersions).toBe(1);
+    expect(upsertedUrls()).toEqual([cased.link]);
+  });
+
+  it("a mixed feed upserts exactly the unknown urls, each row identical to the normaliser's output", async () => {
+    const src = mkSource("mixed");
+    const known: MockFeedItem[] = [0, 1, 2].map((i) => ({
+      title: `Zaten kayıtlı haber ${i}`,
+      link: urlOf(src, `k${i}`),
+      pubDate: PUB,
+      contentSnippet: `<p>Kayıtlı özet ${i}</p>`,
+    }));
+    const fresh: MockFeedItem[] = [0, 1, 2].map((i) => ({
+      title: `Yepyeni haber ${i} &amp; ayrıntılar`,
+      link: urlOf(src, `n${i}`),
+      pubDate: "Sat, 24 Oct 2026 08:3" + i + ":00 +0300",
+      contentSnippet: `<p>Yeni özet ${i}</p><img src="https://x/y.jpg">`,
+    }));
+    seed(src, [known[0]!, fresh[0]!, known[1]!, fresh[1]!, fresh[2]!, known[2]!]);
+    for (const it of known) store(src, it);
+
+    const body = await run();
+
+    expect(heavyWork.fingerprints).toBe(3);
+    expect(body.itemsNormalized).toBe(3);
+    expect(body.itemsKnownSkipped).toBe(3);
+    expect(body.inserted).toBe(3);
+    expect(upsertedUrls().sort()).toEqual(fresh.map((i) => i.link).sort());
+
+    const expected = normalizeArticles(src, fresh, Date.now()).map((row) => ({
+      ...row,
+      canonical_url: canonicalizeUrl(row.url, src.slug),
+      source_article_key: sourceArticleKeyFor(src.slug, row.url),
+    }));
+    const sent = [...upserted].sort((a, b) => String(a.url).localeCompare(String(b.url)));
+    expect(sent).toEqual([...expected].sort((a, b) => a.url.localeCompare(b.url)));
+    // A fresh url is never selected a second time by the title-version path.
+    expect(articlesUrlLookupCalls).toHaveLength(1);
+    expect(articlesUrlLookupCalls[0]?.urls).toHaveLength(6);
+  });
+
+  it("a known url stored under ANOTHER source_id takes the heavy path, as before", async () => {
+    const src = mkSource("othersrc");
+    const item: MockFeedItem = { title: "Başka kaynağın haberi", link: urlOf(src, "x"), pubDate: PUB };
+    seed(src, [item]);
+    store(src, item, { id: "art-other", source_id: "src-somebody-else" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const body = await run();
+
+      expect(body.itemsKnownSkipped).toBe(0);
+      expect(body.itemsNormalized).toBe(1);
+      expect(heavyWork.fingerprints).toBe(1);
+      expect(upsertedUrls()).toEqual([item.link]);
+      // Never attributed to the other outlet's article.
+      expect(titleVersionInsertCalls).toHaveLength(0);
+      expect(titleEditRpcCalls).toHaveLength(0);
+      expect(
+        warn.mock.calls.some((c) => String(c[0]).includes("matched a different source_id")),
+      ).toBe(true);
+      // The cross-source row came from phase 1; the title-version path does not select it again.
+      expect(lookedUpUrls().filter((u) => u === item.link)).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a failing phase-1 lookup fails open: every item takes the heavy path, rows identical to before", async () => {
+    const src = mkSource("lookuperr");
+    const items: MockFeedItem[] = [0, 1, 2].map((i) => ({
+      title: `Arama hatası haberi ${i}`,
+      link: urlOf(src, i),
+      pubDate: PUB,
+    }));
+    seed(src, items);
+    store(src, items[0]!); // would be known if the lookup worked
+    forcedTitleLookupError = "simulated select failure";
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const body = await run();
+
+      expect(body.knownUrlLookupErrors).toBe(1);
+      expect(body.itemsKnownSkipped).toBe(0);
+      expect(body.itemsNormalized).toBe(3);
+      expect(body.inserted).toBe(3);
+      expect(heavyWork.fingerprints).toBe(3);
+      const expected = normalizeArticles(src, items, Date.now()).map((row) => ({
+        ...row,
+        canonical_url: canonicalizeUrl(row.url, src.slug),
+        source_article_key: sourceArticleKeyFor(src.slug, row.url),
+      }));
+      expect(upserted).toEqual(expected);
+      // The log names the source and the message, never a url.
+      const line = err.mock.calls
+        .map((c) => c.map(String).join(" "))
+        .find((l) => l.includes("known-url lookup"));
+      expect(line).toBeDefined();
+      expect(line).toContain(src.slug);
+      expect(line).toContain("simulated select failure");
+      expect(line).not.toContain("known.example");
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("contentless titles are still counted and logged, and their urls are not looked up", async () => {
+    const src = mkSource("contentless");
+    const good: MockFeedItem = { title: "Gerçek bir haber başlığı", link: urlOf(src, "good"), pubDate: PUB };
+    const junk1: MockFeedItem = { title: "&nbsp", link: urlOf(src, "junk1"), pubDate: PUB };
+    const junk2: MockFeedItem = { title: "   ", link: urlOf(src, "junk2"), pubDate: PUB };
+    const known: MockFeedItem = { title: "Kayıtlı başlık", link: urlOf(src, "known"), pubDate: PUB };
+    seed(src, [junk1, good, junk2, known]);
+    store(src, known);
+    // Stored under a headline: a contentless feed title must still be dropped, not skipped as known.
+    store(src, junk1, { title: "Eskiden bir başlığı vardı" });
+
+    const { body, lines } = await runLogged();
+
+    expect(body.contentlessTitlesDropped).toBe(2);
+    expect(lines).toContain(`[ingest] ${src.slug}: 2 item(s) dropped: no headline text`);
+    expect(body.itemsKnownSkipped).toBe(1);
+    expect(body.itemsNormalized).toBe(1);
+    expect(upsertedUrls()).toEqual([good.link]);
+    expect(lookedUpUrls().sort()).toEqual([good.link, known.link].sort());
+  });
+
+  it("an intra-feed twin behind a known item is still dropped as a twin", async () => {
+    const src = { ...mkSource("twin"), slug: "ks-twin", url: "https://twin.known.example" };
+    const URL_OLD = `${src.url}/guncel/eski-slug/haber-1708664`;
+    const URL_NEW = `${src.url}/guncel/yeni-slug/haber-1708664`;
+    const TITLE_OLD = "Bakan Güler'den Mekke ittifakı vurgusu";
+    const TITLE_NEW = "Bakan Güler Mekke ittifakı vurgusu yaptı";
+    const first: MockFeedItem = { title: TITLE_OLD, link: URL_OLD, pubDate: PUB };
+    const twin: MockFeedItem = { title: TITLE_NEW, link: URL_NEW, pubDate: PUB };
+    const other: MockFeedItem = { title: "Tamamen başka bir konu", link: urlOf(src, "other"), pubDate: PUB };
+    seed(src, [first, twin, other]);
+    store(src, first);
+
+    const { body, lines } = await runLogged();
+
+    // The known item is skipped, yet the unknown one with the same article key and a
+    // similar headline is still recognised as its twin and not inserted.
+    expect(body.itemsKnownSkipped).toBe(1);
+    expect(body.twinsDroppedIntraFeed).toBe(1);
+    expect(body.twinsDropped).toBe(1);
+    expect(upsertedUrls()).toEqual([other.link]);
+    expect(lines.filter((l) => l.includes("intra-feed twin"))).toEqual([
+      `[ingest] ${src.slug}: 1 intra-feed twin(s)`,
+    ]);
+  });
+
+  it("a known item behind an unknown one is dropped by the twin registry: same counters as when both were normalised", async () => {
+    const src = { ...mkSource("twin2"), slug: "ks-twin2", url: "https://twin2.known.example" };
+    const URL_A = `${src.url}/guncel/slug-a/haber-1708664`;
+    const URL_B = `${src.url}/guncel/slug-b/haber-1708664`;
+    const a: MockFeedItem = { title: "Bakan Güler'den Mekke ittifakı vurgusu", link: URL_A, pubDate: PUB };
+    const b: MockFeedItem = { title: "Bakan Güler Mekke ittifakı vurgusu yaptı", link: URL_B, pubDate: PUB };
+    seed(src, [a, b]);
+    store(src, b);
+
+    const body = await run();
+
+    // b is known: it is counted as skipped and never completed, but it still goes
+    // through the registry, finds a's headline and is counted as an intra-feed twin.
+    expect(body.itemsKnownSkipped).toBe(1);
+    expect(body.itemsNormalized).toBe(1);
+    expect(body.twinsDroppedIntraFeed).toBe(1);
+    expect(body.twinsDropped).toBe(1);
+    expect(upsertedUrls()).toEqual([URL_A]);
+  });
+
+  it("a skipped item with an unrelated headline still takes its place in the per-id registry", async () => {
+    const src = { ...mkSource("twin3"), slug: "ks-twin3", url: "https://twin3.known.example" };
+    const URL_A = `${src.url}/guncel/slug-a/haber-1708664`;
+    const URL_B = `${src.url}/guncel/slug-b/haber-1708664`;
+    const a: MockFeedItem = { title: "Borsa güne yükselişle başladı", link: URL_A, pubDate: PUB };
+    const b: MockFeedItem = { title: "Deprem sonrası arama kurtarma çalışması", link: URL_B, pubDate: PUB };
+    seed(src, [a, b]);
+    store(src, a);
+
+    const body = await run();
+
+    // Same id, unrelated headlines: the CMS reused the id. The unknown one is kept
+    // (counted in twinsKeptDistinct), exactly as with two fully normalised items.
+    expect(body.itemsKnownSkipped).toBe(1);
+    expect(body.twinsDroppedIntraFeed).toBe(0);
+    expect(body.twinsKeptDistinct).toBe(1);
+    expect(upsertedUrls()).toEqual([URL_B]);
+  });
+
+  it("a bootstrap whose body is the stored one pushes nothing and looks nothing up", async () => {
+    const src = mkSource("bootstrap");
+    const items: MockFeedItem[] = [0, 1].map((i) => ({
+      title: `Bootstrap haberi ${i}`,
+      link: urlOf(src, i),
+      pubDate: PUB,
+    }));
+    const rssUrl = seed(src, items, { fetch_items_count: null, fetch_body_hash: "same-hash" });
+    fetcherResultOverrides[rssUrl] = { bodyHash: "same-hash" };
+
+    const body = await run();
+
+    expect(articlesUrlLookupCalls).toHaveLength(0);
+    expect(heavyWork.fingerprints).toBe(0);
+    expect(body.itemsNormalized).toBe(0);
+    expect(body.itemsKnownSkipped).toBe(0);
+    expect(articlesUpsertCalls).toHaveLength(0);
+  });
+
+  it("keeps the new counters out of the ingest_cycles row", async () => {
+    const src = mkSource("cols");
+    const item: MockFeedItem = { title: "Sütun denemesi haberi", link: urlOf(src, 1), pubDate: PUB };
+    seed(src, [item]);
+    store(src, item);
+
+    await run();
+
+    expect(ingestCycleInserts).toHaveLength(1);
+    const keys = Object.keys(ingestCycleInserts[0] ?? {});
+    for (const k of ["items_known_skipped", "known_url_lookup_errors", "isolate_items_used"]) {
+      expect(keys).not.toContain(k);
+    }
+  });
+});
+
+describe("lookupStoredByUrl [hunt-11 A-ingest-cpu]", () => {
+  async function importLookup(): Promise<LookupStoredByUrlFn> {
+    const mod = (await import("../../supabase/functions/ingest/index.ts")) as unknown as {
+      lookupStoredByUrl: LookupStoredByUrlFn;
+    };
+    return mod.lookupStoredByUrl;
+  }
+
+  function client(
+    answer: (urls: string[]) => unknown | Promise<unknown>,
+  ): { supabase: unknown; selects: string[]; ins: Array<{ column: string; urls: string[] }>; tables: string[] } {
+    const selects: string[] = [];
+    const ins: Array<{ column: string; urls: string[] }> = [];
+    const tables: string[] = [];
+    return {
+      selects,
+      ins,
+      tables,
+      supabase: {
+        from: (table: string) => {
+          tables.push(table);
+          return {
+            select: (columns: string) => {
+              selects.push(columns);
+              return {
+                in: async (column: string, urls: string[]) => {
+                  ins.push({ column, urls: [...urls] });
+                  return await answer(urls);
+                },
+              };
+            },
+          };
+        },
+      },
+    };
+  }
+
+  const manyUrls = (n: number) => Array.from({ length: n }, (_, i) => `https://l.example/a/${i}`);
+
+  it("selects id, url, title, source_id from articles by url in batches of 100, unique urls only", async () => {
+    const lookup = await importLookup();
+    const urls = manyUrls(230);
+    const c = client((batch) => ({
+      data: batch
+        .filter((u) => u.endsWith("/7") || u.endsWith("/229"))
+        .map((u) => ({ id: `id-${u}`, url: u, title: `T ${u}`, source_id: "s1" })),
+      error: null,
+    }));
+
+    const res = await lookup(c.supabase, [...urls, urls[0]!, urls[5]!]);
+
+    expect(res.ok).toBe(true);
+    expect(c.tables.every((t) => t === "articles")).toBe(true);
+    expect(c.selects.every((s) => s === "id, url, title, source_id")).toBe(true);
+    expect(c.ins.every((i) => i.column === "url")).toBe(true);
+    expect(c.ins.map((i) => i.urls.length).sort((a, b) => b - a)).toEqual([100, 100, 30]);
+    expect(c.ins.flatMap((i) => i.urls).sort()).toEqual([...urls].sort());
+    expect([...res.byUrl.keys()].sort()).toEqual(["https://l.example/a/229", "https://l.example/a/7"]);
+    expect(res.byUrl.get("https://l.example/a/7")).toEqual({
+      id: "id-https://l.example/a/7",
+      title: "T https://l.example/a/7",
+      source_id: "s1",
+    });
+  });
+
+  it("makes no call for an empty url list", async () => {
+    const lookup = await importLookup();
+    const c = client(() => ({ data: [], error: null }));
+    const res = await lookup(c.supabase, []);
+    expect(res.ok).toBe(true);
+    expect(res.byUrl.size).toBe(0);
+    expect(c.ins).toHaveLength(0);
+  });
+
+  it("reports ok=false on an error envelope, and never throws", async () => {
+    const lookup = await importLookup();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const c = client(() => ({ data: null, error: { message: "statement timeout" } }));
+      const res = await lookup(c.supabase, manyUrls(150));
+      expect(res.ok).toBe(false);
+      expect(res.byUrl.size).toBe(0);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("reports ok=false when one of several batches fails", async () => {
+    const lookup = await importLookup();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      let n = 0;
+      const c = client((batch) => {
+        n++;
+        return n === 2
+          ? { data: null, error: { message: "boom" } }
+          : { data: [{ id: "x", url: batch[0], title: "t", source_id: "s" }], error: null };
+      });
+      const res = await lookup(c.supabase, manyUrls(250));
+      expect(res.ok).toBe(false);
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("reports ok=false when the client throws or rejects, without leaking a url", async () => {
+    const lookup = await importLookup();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const thrower = client(() => {
+        throw new Error("network down for https://secret.example/x?token=1");
+      });
+      const a = await lookup(thrower.supabase, ["https://secret.example/x"]);
+      expect(a.ok).toBe(false);
+
+      const broken = {
+        from: () => {
+          throw new Error("synchronous failure");
+        },
+      };
+      const b = await lookup(broken, ["https://secret.example/x"]);
+      expect(b.ok).toBe(false);
+
+      const logged = err.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+      expect(logged).not.toContain("secret.example");
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("treats a null data envelope as no rows", async () => {
+    const lookup = await importLookup();
+    const c = client(() => ({ data: null, error: null }));
+    const res = await lookup(c.supabase, manyUrls(3));
+    expect(res.ok).toBe(true);
+    expect(res.byUrl.size).toBe(0);
+  });
+});
+
+describe("recordTitleVersions knownAbsent [hunt-11 A-ingest-cpu]", () => {
+  type Fn = (
+    supabase: unknown,
+    chunk: ReadonlyArray<RecordTitleVersionsChunkRow>,
+    preResolved?: ReadonlyMap<string, { id: string; title: string; source_id: string }>,
+    knownAbsent?: ReadonlySet<string>,
+  ) => Promise<{ titleVersions: number; titleWriteBacks: number }>;
+
+  async function importFn(): Promise<{ fn: Fn; supabase: unknown }> {
+    const { recordTitleVersions, supabase } = await importRecordTitleVersions();
+    return { fn: recordTitleVersions as unknown as Fn, supabase };
+  }
+
+  const row = (n: number, title = "Yeni") => ({
+    url: `https://abs.example/${n}`,
+    title,
+    source_id: "source-1",
+  });
+
+  it("does not select urls the caller already confirmed absent", async () => {
+    const { fn, supabase } = await importFn();
+    storedArticlesByUrl[row(3).url] = { id: "art-3", title: "Eski", source_id: "source-1" };
+
+    const res = await fn(supabase, [row(1), row(2), row(3)], undefined, new Set([row(1).url, row(2).url]));
+
+    expect(articlesUrlLookupCalls).toHaveLength(1);
+    expect(articlesUrlLookupCalls[0]?.urls).toEqual([row(3).url]);
+    expect(res.titleVersions).toBe(1);
+  });
+
+  it("makes no select at all when every url is known absent", async () => {
+    const { fn, supabase } = await importFn();
+
+    const res = await fn(supabase, [row(1), row(2)], undefined, new Set([row(1).url, row(2).url]));
+
+    expect(articlesUrlLookupCalls).toHaveLength(0);
+    expect(res).toEqual({ titleVersions: 0, titleWriteBacks: 0 });
+  });
+
+  it("pre-resolved rows win over the absent set, and are still compared", async () => {
+    const { fn, supabase } = await importFn();
+    const preResolved = new Map([[row(1).url, { id: "art-1", title: "Eski", source_id: "source-1" }]]);
+
+    const res = await fn(supabase, [row(1)], preResolved, new Set([row(1).url]));
+
+    expect(articlesUrlLookupCalls).toHaveLength(0);
+    expect(res.titleVersions).toBe(1);
+    expect(titleVersionInsertCalls[0]).toEqual([
+      { article_id: "art-1", source_id: "source-1", old_title: "Eski", new_title: "Yeni" },
+    ]);
+  });
+
+  it("with two or three arguments (or an empty set) behaves as before: every url is selected", async () => {
+    const { fn, supabase } = await importFn();
+    await fn(supabase, [row(1), row(2)]);
+    await fn(supabase, [row(1), row(2)], new Map());
+    await fn(supabase, [row(1), row(2)], new Map(), new Set());
+    expect(articlesUrlLookupCalls.map((c) => c.urls)).toEqual([
+      [row(1).url, row(2).url],
+      [row(1).url, row(2).url],
+      [row(1).url, row(2).url],
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A-ingest-cpu (hunt-11): the platform's 2 s CPU allowance is cumulative per
+// isolate (reused isolates were shut down with CPUTime on their 2nd request).
+// Ingest keeps an item budget per isolate in module state: a feed whose
+// estimated item count (body bytes / 1500) does not fit what is left is
+// deferred through the existing parse-deferral path.
+// ---------------------------------------------------------------------------
+
+describe("isolate item budget across cycles on one isolate [hunt-11 A-ingest-cpu]", () => {
+  const PUB = "Fri, 23 Oct 2026 10:00:00 GMT";
+  const CYCLE = 180_000;
+  const small = {
+    id: "src-iso-a-small",
+    name: "Iso small",
+    slug: "iso-a-small",
+    url: "https://small.iso.example",
+    rss_url: "https://small.iso.example/rss.xml",
+  };
+  const big = {
+    id: "src-iso-b-big",
+    name: "Iso big",
+    slug: "iso-b-big",
+    url: "https://big.iso.example",
+    rss_url: "https://big.iso.example/rss.xml",
+  };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function seedBoth(extra: Record<string, unknown> = {}) {
+    const row = { active: true, fetch_etag: null, fetch_last_modified: null, fetch_body_hash: null, fetch_fail_streak: 0, ...extra };
+    // small first, big second: with offset 0 the base order is the fetch order.
+    fakeSources.push({ ...small, ...row }, { ...big, ...row });
+    fetcherItems[small.rss_url] = [{ title: "Küçük kaynağın tek haberi", link: `${small.url}/haber/tek`, pubDate: PUB }];
+    fetcherItems[big.rss_url] = Array.from({ length: 45 }, (_, i) => ({
+      title: `Büyük kaynağın haberi numara ${i}`,
+      link: `${big.url}/haber/konu-${i}`,
+      pubDate: PUB,
+    }));
+  }
+
+  async function cycle(): Promise<Record<string, unknown>> {
+    fetchFeedCalls.length = 0;
+    upserted.length = 0;
+    articlesUpsertCalls.length = 0;
+    sourceFetchStateWrites.length = 0;
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  // A rotation offset of 0 for two sources: floor(t / CYCLE) is even.
+  const evenSlot = (() => {
+    const slot = Math.floor(Date.parse("2026-10-27T10:00:00Z") / CYCLE);
+    return slot % 2 === 0 ? slot : slot + 1;
+  })();
+  const at = (cycleIndex: number) => (evenSlot + 2 * cycleIndex) * CYCLE;
+
+  it("defers a feed that no longer fits, restores its validators, puts it first next cycle, and a fresh isolate parses it", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "60";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    seedBoth();
+
+    // --- cycle 1: a fresh isolate. 1 + 45 items fit under 60.
+    vi.setSystemTime(at(0));
+    fetcherResultOverrides[small.rss_url] = { bodyBytes: 1500, etag: '"s1"', bodyHash: "sh1" };
+    fetcherResultOverrides[big.rss_url] = { bodyBytes: 45 * 1500, etag: '"b1"', bodyHash: "bh1" };
+    const c1 = await cycle();
+    expect(fetchFeedCalls.map((c) => c.sourceId)).toEqual([small.id, big.id]);
+    expect(c1.parseDeferred).toBe(0);
+    expect(c1.isolateBudgetDeferred).toBe(0);
+    expect(c1.inserted).toBe(46);
+    expect(c1.isolateItemsUsed).toBe(46);
+    expect(c1.isolateCycles).toBe(1);
+
+    // --- cycle 2: same isolate, the big feed changed. 46 + 45 > 60.
+    vi.setSystemTime(at(1));
+    fetcherResultOverrides[small.rss_url] = { notModified: true, status: 304 };
+    fetcherResultOverrides[big.rss_url] = { bodyBytes: 45 * 1500, etag: '"b2"', bodyHash: "bh2" };
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    let c2: Record<string, unknown>;
+    let lines2: string[];
+    try {
+      c2 = await cycle();
+      lines2 = logSpy.mock.calls.map((a) => a.join(" "));
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(c2.parseDeferred).toBe(1);
+    expect(c2.isolateBudgetDeferred).toBe(1);
+    expect(c2.parseDeferredMaxStreak).toBe(1);
+    expect(c2.fetched).toBe(0);
+    expect(c2.inserted).toBe(0);
+    expect(articlesUpsertCalls).toHaveLength(0);
+    // A feed the isolate budget refused never reached the per-cycle parse budget.
+    expect(c2.parsedBytes).toBe(0);
+    expect(c2.isolateItemsUsed).toBe(46);
+    expect(c2.isolateCycles).toBe(2);
+    // The deferred feed leaves no trace in the fetch-state write.
+    expect(sourceFetchStateWrites.flatMap((w) => w.rows).map((r) => r.id)).not.toContain(big.id);
+    // One count-only line, no url and no headline.
+    const budgetLines = lines2.filter((l) => l.includes("isolate item budget"));
+    expect(budgetLines).toHaveLength(1);
+    expect(budgetLines[0]).toContain("deferred 1 changed feed(s)");
+    expect(budgetLines[0]).not.toContain("iso.example");
+
+    // --- cycle 3: same isolate. The deferred feed is fetched FIRST, with the
+    // validators it had before cycle 2 stamped its own, and is deferred again.
+    vi.setSystemTime(at(2));
+    fetcherResultOverrides[big.rss_url] = { bodyBytes: 45 * 1500, etag: '"b3"', bodyHash: "bh3" };
+    const c3 = await cycle();
+    expect(fetchFeedCalls[0]?.sourceId).toBe(big.id);
+    expect(fetchFeedCalls[0]?.cached).toEqual({ etag: '"b1"' });
+    expect(c3.parseDeferred).toBe(1);
+    expect(c3.isolateBudgetDeferred).toBe(1);
+    expect(c3.parseDeferredMaxStreak).toBe(2);
+    expect(articlesUpsertCalls).toHaveLength(0);
+    expect(c3.isolateItemsUsed).toBe(46);
+    expect(c3.isolateCycles).toBe(3);
+
+    // --- a new isolate: nothing used yet, so the feed is parsed.
+    vi.resetModules();
+    vi.setSystemTime(at(3));
+    fetcherResultOverrides[big.rss_url] = { bodyBytes: 45 * 1500, etag: '"b4"', bodyHash: "bh4" };
+    const c4 = await cycle();
+    expect(c4.parseDeferred).toBe(0);
+    expect(c4.isolateBudgetDeferred).toBe(0);
+    expect(c4.fetched).toBe(1);
+    expect(c4.inserted).toBe(45);
+    expect(upserted).toHaveLength(45);
+    expect(c4.isolateItemsUsed).toBe(45);
+    expect(c4.isolateCycles).toBe(1);
+  });
+
+  it("settles a booking to the real item count: a feed smaller than its estimate gives the difference back", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "60";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at(0));
+    seedBoth();
+    // Both bodies claim 45 items by size, but carry 1 and 45 real ones.
+    fetcherResultOverrides[small.rss_url] = { bodyBytes: 45 * 1500, etag: '"s1"', bodyHash: "sh1" };
+    fetcherResultOverrides[big.rss_url] = { bodyBytes: 10 * 1500, etag: '"b1"', bodyHash: "bh1" };
+
+    const c1 = await cycle();
+
+    // small: est 45, real 1 -> 1. big: 1 + est 10 = 11 fits, real 45 -> 46.
+    expect(c1.parseDeferred).toBe(0);
+    expect(c1.isolateItemsUsed).toBe(46);
+  });
+
+  it("the very first feed of a fresh isolate is admitted whatever its size; the next one must fit", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "5";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at(0));
+    seedBoth();
+    // big goes first this cycle (it is the only feed that changed), then small.
+    fetcherResultOverrides[big.rss_url] = { bodyBytes: 45 * 1500, etag: '"b1"', bodyHash: "bh1" };
+    fetcherResultOverrides[small.rss_url] = { notModified: true, status: 304 };
+
+    const c1 = await cycle();
+    // Estimated 45 items against a limit of 5, yet admitted: nothing was used yet.
+    expect(c1.isolateBudgetDeferred).toBe(0);
+    expect(c1.inserted).toBe(45);
+    expect(c1.isolateItemsUsed).toBe(45);
+
+    // The same isolate, one more changed feed: even a one-item feed no longer fits.
+    vi.setSystemTime(at(1));
+    fetcherResultOverrides[big.rss_url] = { notModified: true, status: 304 };
+    fetcherResultOverrides[small.rss_url] = { bodyBytes: 1500, etag: '"s2"', bodyHash: "sh2" };
+    const c2 = await cycle();
+    expect(c2.isolateBudgetDeferred).toBe(1);
+    expect(c2.parseDeferred).toBe(1);
+    expect(c2.inserted).toBe(0);
+  });
+
+  it("falls back to the default budget for a malformed INGEST_ISOLATE_ITEM_BUDGET", async () => {
+    process.env.INGEST_ISOLATE_ITEM_BUDGET = "0x10";
+    vi.resetModules();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(at(0));
+    seedBoth();
+    fetcherResultOverrides[small.rss_url] = { bodyBytes: 1500, etag: '"s1"', bodyHash: "sh1" };
+    fetcherResultOverrides[big.rss_url] = { bodyBytes: 45 * 1500, etag: '"b1"', bodyHash: "bh1" };
+
+    const c1 = await cycle();
+
+    // 5000 by default: nothing is deferred.
+    expect(c1.isolateBudgetDeferred).toBe(0);
+    expect(c1.inserted).toBe(46);
   });
 });

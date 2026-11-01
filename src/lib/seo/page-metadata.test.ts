@@ -10,6 +10,7 @@ import { alt, contentType, size } from "@/app/opengraph-image";
 
 import {
   SITE_TITLE_SUFFIX,
+  errorShellMetadata,
   noindexPageMetadata,
   sharePageMetadata,
   staticPageMetadata,
@@ -284,5 +285,26 @@ describe("SITE_TITLE_SUFFIX", () => {
   it("equals the root layout's title.template (so og:title matches <title>)", () => {
     const layout = readFileSync(join(__dirname, "../../app/layout.tsx"), "utf8");
     expect(layout).toContain('template: "%s — Tayf"');
+  });
+});
+
+describe("errorShellMetadata", () => {
+  it("returns the title, noindex + nofollow, and a null canonical (the layout's '/' must not leak)", () => {
+    expect(errorShellMetadata("Hisse bulunamadı")).toEqual({
+      title: "Hisse bulunamadı",
+      robots: { index: false, follow: false },
+      alternates: { canonical: null },
+    });
+  });
+
+  it("sets no description, openGraph or twitter: an error shell claims nothing and unfurls as nothing", () => {
+    const m = errorShellMetadata("Hisse sayfası şu anda yüklenemiyor") as Record<string, unknown>;
+    expect(m.description).toBeUndefined();
+    expect(m.openGraph).toBeUndefined();
+    expect(m.twitter).toBeUndefined();
+  });
+
+  it("carries the title through verbatim", () => {
+    expect(errorShellMetadata("X").title).toBe("X");
   });
 });

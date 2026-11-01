@@ -276,3 +276,102 @@ export function prioritizeIds<T extends { id: string }>(
   for (const row of rows) (first.has(row.id) ? head : tail).push(row);
   return [...head, ...tail];
 }
+
+// ---------------------------------------------------------------------------
+// Isolate item budget (hunt-11, A-ingest-cpu)
+// ---------------------------------------------------------------------------
+//
+// The parse budget above is per CYCLE. But the platform's 2 s CPU allowance is
+// cumulative per ISOLATE, and an isolate is reused for several cycles: on
+// 2026-11-01 (10:00-14:00 UTC) 12 isolates served two requests, and 7 of them
+// were shut down (reason CPUTime, 2000-2176 ms) on the second one, always the
+// later request; isolates that served one request were never killed. Nothing
+// carried cost from one invocation to the next, so a cycle that fit its own
+// budget still died on the CPU an earlier cycle of the same isolate had spent.
+//
+// The cost that matters is per ITEM (parse, prepare, lookup, and for the few
+// new items the full normalisation), not per feed or per byte, so this budget
+// counts items. A changed feed's item count is only known after the parse, so
+// it is estimated from the body size beforehand (`estimateItems`) and replaced
+// by the real count afterwards (`settle`). The state lives at module scope: it
+// survives exactly as long as the isolate does and starts again at zero on a
+// cold one. A feed that does not fit is deferred through the parse-deferral
+// path the parse budget already uses (validators restored, first in line next
+// cycle).
+
+/**
+ * Items one isolate may parse in total before it refuses more changed feeds.
+ * Overridable per deployment with INGEST_ISOLATE_ITEM_BUDGET (read once per
+ * cycle in index.ts); see the cost-model comment there for where the number
+ * comes from.
+ */
+export const ISOLATE_ITEM_BUDGET = 5000;
+
+/** Average bytes per feed item the estimate assumes (feed bodies carry about 1.5 kB per item). */
+export const ESTIMATED_BYTES_PER_ITEM = 1500;
+
+export interface IsolateItemState {
+  /** Items booked on this isolate so far (estimates settled to real counts). */
+  used: number;
+  /** Cycles that ran on this isolate (information only). */
+  cycles: number;
+}
+
+/** The module-scope state of THIS isolate. Tests pass their own object instead. */
+export const isolateItems: IsolateItemState = { used: 0, cycles: 0 };
+
+/**
+ * Items a feed body of `bytes` bytes is assumed to hold: `max(1, floor(bytes /
+ * 1500))`. Never below 1, so even an empty-looking body books something; a
+ * non-finite or negative size counts as 1.
+ */
+export function estimateItems(bytes: number): number {
+  if (!Number.isFinite(bytes) || bytes <= 0) return 1;
+  return Math.max(1, Math.floor(bytes / ESTIMATED_BYTES_PER_ITEM));
+}
+
+export interface ItemBudget {
+  /**
+   * True when `n` more items may be parsed on this isolate: either nothing was
+   * booked yet (a fresh isolate admits any one feed, however big, otherwise a
+   * feed bigger than the whole budget would never be parsed), or the booked
+   * items plus `n` stay within the limit. There is no priority exemption: a
+   * feed the previous cycle deferred is first in line, but it still has to
+   * fit. Pure; books nothing.
+   */
+  fits(n: number): boolean;
+  /** Books `n` items (the estimate, before the parse). */
+  book(n: number): void;
+  /**
+   * Replaces a booking of `booked` items with the `actual` count: adjusts
+   * `used` by `actual - booked`, never below zero.
+   */
+  settle(booked: number, actual: number): void;
+  /** Items booked on the shared state so far. */
+  readonly used: number;
+  readonly limit: number;
+}
+
+/**
+ * A view of `state` with a `limit`. Several budgets over one state object add
+ * up, which is how two cycles on one isolate share the allowance; the limit is
+ * per budget, so a changed INGEST_ISOLATE_ITEM_BUDGET applies from the next
+ * cycle.
+ */
+export function createItemBudget(limit: number, state: IsolateItemState): ItemBudget {
+  return {
+    fits(n: number): boolean {
+      return state.used === 0 || state.used + n <= limit;
+    },
+    book(n: number): void {
+      state.used += n;
+    },
+    settle(booked: number, actual: number): void {
+      state.used = Math.max(0, state.used + (actual - booked));
+    },
+    get used() {
+      return state.used;
+    },
+    limit,
+  };
+}
