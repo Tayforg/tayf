@@ -7,6 +7,8 @@
 // years, and percentages. Includes an EN→TR bilingual bridge for a-news /
 // daily-sabah / hurriyet-daily-news / trt-world.
 
+import { ENTITY_AMBIGUOUS, ENTITY_PROPER_NOUNS } from "./constants.ts";
+
 // ---------------------------------------------------------------------------
 // POLITICAL_ENTITIES — curated single-token whitelist (TR-folded lowercase).
 // ---------------------------------------------------------------------------
@@ -88,8 +90,8 @@ export function normalizeToken(raw: unknown): string | null {
   return stripped;
 }
 
-// Split on whitespace + common Turkish punctuation.
-const TOKEN_SPLIT_RE = /[\s.,;:!?()[\]{}"'`’‘“”«»\-–—/\\|…]+/;
+// Words are the runs between whitespace + common Turkish punctuation (see
+// WORD_RE below).
 
 // ---------------------------------------------------------------------------
 // EN_TO_TR_BRIDGE — emit Turkish equivalents from English-titled wires so
@@ -122,20 +124,126 @@ const EN_BRIDGE_PATTERNS: Array<{ re: RegExp; tr: string }> = Object.entries(
   };
 });
 
+// ---------------------------------------------------------------------------
+// Homograph handling (h12-cluster-2)
+// ---------------------------------------------------------------------------
+//
+// "Özel sektör kredileri arttı" must not carry the party leader, "COP31'e 91
+// devlet başkanı gelecek" must not carry the Gelecek Party and "Türk Tıp
+// Dünyası Kurultayı cuma günü" must not carry TİP. The folded-lowercase lookup
+// cannot tell them apart, so an ambiguous token is emitted only when the
+// original text says it is the name:
+//   (a) the next word starts with 'parti' ("İYİ Parti", "Gelecek Partisi");
+//   (b) it is written in capitals (2+ letters) and fewer than 2 of its 4
+//       nearest words are also capitals (a shouted headline is no evidence);
+//   (c) it is also a proper name (ENTITY_PROPER_NOUNS), capitalised, and either
+//       carries an apostrophe suffix ("Özel'den") or is not sentence-initial;
+//   (d) "Özgür Özel" (previous word) and "Adalet Bakanı" (next word).
+const AMBIGUOUS: Set<string> = new Set(ENTITY_AMBIGUOUS);
+const PROPER: Set<string> = new Set(ENTITY_PROPER_NOUNS);
+
+// A word is a run of non-separator characters (whitespace, common Turkish
+// punctuation, quotes and apostrophes separate); runs without a letter or digit (emoji, symbols) are not
+// words, so they neither start a sentence nor count as a neighbour.
+const WORD_RE = /[^\s.,;:!?()[\]{}"'`’‘“”«»\-–—/\\|…]+/g;
+const WORD_CHAR_RE = /[\p{L}\p{N}]/u;
+const LETTER_RE = /\p{L}/u;
+const SENTENCE_BREAK_RE = /[.!?:…\n]/;
+// Stops an "(a)/(d)" neighbour from being read across a clause break.
+const CLAUSE_BREAK_RE = /[.!?:;,…\n]/;
+
+interface Word {
+  raw: string;
+  start: number;
+  end: number;
+}
+
+function wordsOf(text: string): Word[] {
+  const out: Word[] = [];
+  for (const m of text.matchAll(WORD_RE)) {
+    if (!WORD_CHAR_RE.test(m[0])) continue;
+    out.push({ raw: m[0], start: m.index!, end: m.index! + m[0].length });
+  }
+  return out;
+}
+
+function foldWord(raw: string): string {
+  return foldTurkish(raw).replace(/[^a-z0-9]/g, "");
+}
+
+function isAllCaps(raw: string): boolean {
+  let letters = 0;
+  for (const ch of raw) if (LETTER_RE.test(ch)) letters++;
+  return letters >= 2 && raw === raw.toLocaleUpperCase("tr") &&
+    raw !== raw.toLocaleLowerCase("tr");
+}
+
+function isCapitalised(raw: string): boolean {
+  const first = [...raw][0] ?? "";
+  return LETTER_RE.test(first) && first !== first.toLocaleLowerCase("tr");
+}
+
+function isDisambiguated(
+  text: string,
+  words: Word[],
+  i: number,
+  norm: string,
+): boolean {
+  const w = words[i]!;
+  const prev = i > 0 ? words[i - 1]! : null;
+  const next = i + 1 < words.length ? words[i + 1]! : null;
+  const nextAdjacent = next !== null &&
+    !CLAUSE_BREAK_RE.test(text.slice(w.end, next.start));
+  const prevAdjacent = prev !== null &&
+    !CLAUSE_BREAK_RE.test(text.slice(prev.end, w.start));
+
+  // (a) "<token> Parti..."
+  if (nextAdjacent && foldWord(next!.raw).startsWith("parti")) return true;
+
+  // (b) capitals, unless the whole neighbourhood is capitals too.
+  if (isAllCaps(w.raw)) {
+    let capsNeighbours = 0;
+    for (let j = Math.max(0, i - 2); j <= Math.min(words.length - 1, i + 2); j++) {
+      if (j !== i && isAllCaps(words[j]!.raw)) capsNeighbours++;
+    }
+    if (capsNeighbours < 2) return true;
+  }
+
+  // (c) a name that is also a word: capitalised, and either suffixed with an
+  // apostrophe ("Özel'den") or not opening a sentence.
+  if (PROPER.has(norm) && isCapitalised(w.raw)) {
+    const quote = text[w.end];
+    const suffixed = (quote === "'" || quote === "’") &&
+      LETTER_RE.test(text[w.end + 1] ?? "");
+    const sentenceInitial = prev === null ||
+      SENTENCE_BREAK_RE.test(text.slice(prev.end, w.start));
+    if (suffixed || !sentenceInitial) return true;
+  }
+
+  // (d) "Özgür Özel", "Adalet Bakanı".
+  if (norm === "ozel" && prevAdjacent && foldWord(prev!.raw) === "ozgur") return true;
+  if (norm === "adalet" && nextAdjacent && foldWord(next!.raw).startsWith("bakan")) {
+    return true;
+  }
+  return false;
+}
+
 export function extractEntities(text: string | null | undefined): string[] {
   if (!text || typeof text !== "string") return [];
 
   const found = new Set<string>();
 
-  // 1–2. Whitelist matches over normalized single tokens.
-  const rawTokens = text.split(TOKEN_SPLIT_RE);
-  for (const raw of rawTokens) {
-    if (!raw) continue;
-    const norm = normalizeToken(raw);
+  // 1–2. Whitelist matches over normalized single tokens. The eleven
+  // homograph tokens (ENTITY_AMBIGUOUS) are ordinary Turkish words as well as
+  // party names, so they additionally need a disambiguator (see below);
+  // every other token keeps the plain whitelist lookup.
+  const words = wordsOf(text);
+  for (let i = 0; i < words.length; i++) {
+    const norm = normalizeToken(words[i]!.raw);
     if (!norm) continue;
-    if (POLITICAL_ENTITIES.has(norm)) {
-      found.add(norm);
-    }
+    if (!POLITICAL_ENTITIES.has(norm)) continue;
+    if (AMBIGUOUS.has(norm) && !isDisambiguated(text, words, i, norm)) continue;
+    found.add(norm);
   }
 
   // 3. 4-digit years (1950-2099).

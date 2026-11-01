@@ -2,6 +2,7 @@ import { connection, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
+import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
@@ -192,7 +193,9 @@ async function rewriteClusterHeadline(input: {
   };
 }
 
-export const GET = withApiErrors(async (request: Request) => {
+// withCronOutcome is the outermost wrapper: each authenticated run is recorded in
+// public.ops_cron_route_runs (ops_health_report row 15, migration 136).
+export const GET = withCronOutcome("headline", withApiErrors(async (request: Request) => {
   // Next.js 16 with cacheComponents prerenders GET handlers at build time.
   // `await connection()` returns a hanging promise during prerender so
   // `request.headers` below is never touched until an actual request hits.
@@ -587,4 +590,4 @@ export const GET = withApiErrors(async (request: Request) => {
     clusters: perCluster,
     timestamp: new Date().toISOString(),
   });
-});
+}));

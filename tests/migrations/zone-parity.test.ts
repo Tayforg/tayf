@@ -484,6 +484,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "126_blindspot_sibling_veto.sql",
       // 132's legacy_bias_voter_dists() carries a copy of the BIAS_TO_ZONE CASE to re-derive the blindspot rule from the voting members; pinned by the 132 block below and tests/migrations/132-legacy-bias-range-tools.test.ts
       "132_legacy_bias_range_tools.sql",
+      // 136 re-creates ops_health_report() with 122's body verbatim (rows 1-14) plus rows 15 (cron_route_failures_30m) and 16 (db_size_mb), repeating its VALUES-list copy of BIAS_TO_ZONE in row 4; pinned by tests/migrations/136-ops-heartbeat-app-side.test.ts
+      "136_ops_heartbeat_app_side.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

@@ -31,7 +31,9 @@
 
 import { createHash } from "node:crypto";
 import {
+  HEADLINE_ALIASES,
   HEADLINE_GENERIC_PREFIXES,
+  HEADLINE_STEM_MAX_PASSES,
   HEADLINE_TITLE_MAX_CHARS,
   HEADLINE_TOKEN_MIN_LEN,
   MINHASH_SIG_K,
@@ -104,6 +106,20 @@ export function normalizeTurkish(text) {
   return tokens.join(" ");
 }
 
+/**
+ * Diacritic-fold + lower-case only: no punctuation stripping, no stop words.
+ * For callers that need to compare single words of the original text (the
+ * ensemble's subject veto) the way normalizeTurkish folds them.
+ */
+export function foldTurkishWord(text) {
+  if (!text) return "";
+  let out = "";
+  for (const ch of text) {
+    out += DIACRITIC_MAP[ch] ?? ch;
+  }
+  return out.toLowerCase();
+}
+
 // ---------------------------------------------------------------------------
 // Turkish suffix stripping (for TF-IDF only — NOT used by fingerprinting)
 // ---------------------------------------------------------------------------
@@ -154,6 +170,85 @@ export function stemTurkish(token) {
 }
 
 // ---------------------------------------------------------------------------
+// Headline-lane stemmer (headline lane only; TF-IDF keeps stemTurkish)
+// ---------------------------------------------------------------------------
+
+// [suffix, minimum stem length], longest suffix first. The bare locatives
+// da/de/ta/te are handled separately below: stripping them blindly truncated
+// 'gazete' and 'Atlanta'. (The planned -masi / -mesi rule is left out on
+// purpose: stripped whole it turns 'sorusturmasi' into 'sorustur' while the
+// bare 'sorusturma' stays, splitting the very words it should unite; the
+// plain -si rule keeps the 'ma'.)
+const HEADLINE_SUFFIXES = [
+  ["lerden", 3], ["lardan", 3],
+  ["lerde", 3], ["larda", 3], ["lerin", 3], ["larin", 3],
+  ["leri", 3], ["lari", 3], ["lere", 3], ["lara", 3],
+  ["ler", 3], ["lar", 3],
+  ["dan", 3], ["den", 3], ["tan", 3], ["ten", 3],
+  ["nin", 3], ["nun", 3],
+  ["nda", 3], ["nde", 3],
+  ["yla", 3], ["yle", 3],
+  ["si", 4], ["su", 4],
+  ["ne", 4], ["na", 4],
+  ["ya", 4], ["ye", 4], ["yi", 4],
+  ["di", 4], ["ti", 4],
+];
+const LOCATIVE_MIN_STEM = 4;
+const VOICELESS = "cfhkpst";
+const VOICELESS_DE_DA = "fhkpst";
+
+// One pass: every rule at most once, longest first, so a word that carries
+// two suffixes ("belediyesinde") loses both in one sweep.
+function stripHeadlineSuffixes(token) {
+  let cur = token;
+  for (const [suf, minStem] of HEADLINE_SUFFIXES) {
+    if (cur.endsWith(suf) && cur.length - suf.length >= minStem) {
+      cur = cur.slice(0, -suf.length);
+    }
+  }
+  if (cur.length - 2 >= LOCATIVE_MIN_STEM) {
+    const before = cur.charAt(cur.length - 3);
+    // -ta/-te follow a voiceless consonant ('mecliste', 'devlette'); -da/-de
+    // follow anything else ('soruşturmada'). 'gazete' and 'Atlanta' match
+    // neither, so they stay whole.
+    if (
+      (cur.endsWith("ta") || cur.endsWith("te")) && VOICELESS.includes(before)
+    ) {
+      cur = cur.slice(0, -2);
+    } else if (
+      (cur.endsWith("da") || cur.endsWith("de")) &&
+      !VOICELESS_DE_DA.includes(before)
+    ) {
+      cur = cur.slice(0, -2);
+    }
+  }
+  return cur;
+}
+
+/**
+ * Stemmer for the ensemble's headline lane. `stemTurkish` (TF-IDF, candidate
+ * index) is deliberately unchanged; this one drops the blind -da/-de/-ta/-te
+ * rule, adds the possessive / dative / comitative endings that kept
+ * 'belediyesi' and 'Belediyesine' apart, and repeats for up to
+ * HEADLINE_STEM_MAX_PASSES passes. Numerals and tokens of 4 characters or
+ * fewer are returned unchanged.
+ */
+export function stemHeadlineToken(token) {
+  if (!token || token.length <= 4 || /^\d+$/.test(token)) return token;
+  let cur = token;
+  for (let pass = 0; pass < HEADLINE_STEM_MAX_PASSES; pass++) {
+    const next = stripHeadlineSuffixes(cur);
+    if (next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+// Own-property lookup: a title word such as "constructor" must not resolve
+// through Object.prototype.
+const HEADLINE_ALIAS_MAP = new Map(Object.entries(HEADLINE_ALIASES));
+
+// ---------------------------------------------------------------------------
 // Shingling
 // ---------------------------------------------------------------------------
 
@@ -196,16 +291,23 @@ export function titleTokens(title, minLen = 4) {
  * that two similar sentences describe different developments.
  *
  *  - an all-digit token of any length goes into BOTH `numbers` and `tokens`;
- *  - any other token of length >= HEADLINE_TOKEN_MIN_LEN is stemmed, unless
- *    its surface form starts with one of HEADLINE_GENERIC_PREFIXES (the check
- *    runs on the surface form: "erdoganin" stems to "erdoga").
+ *  - any other token of length >= HEADLINE_TOKEN_MIN_LEN is stemmed with
+ *    stemHeadlineToken (after the HEADLINE_ALIASES spelling variants are
+ *    mapped), unless its surface form starts with one of
+ *    HEADLINE_GENERIC_PREFIXES (the check runs on the surface form:
+ *    "erdoganin" stems to "erdoga" under the TF-IDF stemmer).
  *
  * Only the first HEADLINE_TITLE_MAX_CHARS characters of the title are read:
  * titles come from source feeds and are stored unshortened, and a roundup or
  * keyword-stuffed title must neither cost O(length) per comparison nor grow
  * into a many-token needle for the containment variant.
  *
- * @returns {{ tokens: Set<string>, numbers: Set<string> }}
+ * `liveKey` is the normalised (clipped) title when every word of it is
+ * boilerplate and `tokens` is empty -- "CANLI | Cumhurbaskani Erdogan
+ * konusuyor" -- else null. Two equal keys are the same live announcement from
+ * two outlets.
+ *
+ * @returns {{ tokens: Set<string>, numbers: Set<string>, liveKey: string | null }}
  */
 export function headlineTokens(title) {
   const tokens = new Set();
@@ -213,7 +315,7 @@ export function headlineTokens(title) {
   const norm = normalizeTurkish(
     typeof title === "string" ? title.slice(0, HEADLINE_TITLE_MAX_CHARS) : title,
   );
-  if (!norm) return { tokens, numbers };
+  if (!norm) return { tokens, numbers, liveKey: null };
   for (const tok of norm.split(" ")) {
     if (!tok) continue;
     if (/^\d+$/.test(tok)) {
@@ -223,9 +325,9 @@ export function headlineTokens(title) {
     }
     if (tok.length < HEADLINE_TOKEN_MIN_LEN) continue;
     if (HEADLINE_GENERIC_PREFIXES.some((p) => tok.startsWith(p))) continue;
-    tokens.add(stemTurkish(tok));
+    tokens.add(stemHeadlineToken(HEADLINE_ALIAS_MAP.get(tok) ?? tok));
   }
-  return { tokens, numbers };
+  return { tokens, numbers, liveKey: tokens.size === 0 ? norm : null };
 }
 
 export function shingleSet(title, description, n = 4) {

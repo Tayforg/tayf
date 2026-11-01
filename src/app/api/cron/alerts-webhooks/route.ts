@@ -12,6 +12,7 @@ import {
 } from "@/lib/alerts/webhook-deliver";
 import { buildWebhookHeaders, WEBHOOK_EVENT } from "@/lib/alerts/webhook-sign";
 import { requireCronBearer } from "@/lib/api/bearer";
+import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiServerError, withApiErrors } from "@/lib/api/errors";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
@@ -105,7 +106,9 @@ function errorLabel(result: PostResult): string {
   return "status" in result ? `http_${result.status}` : result.error;
 }
 
-export const GET = withApiErrors(async (request: Request) => {
+// withCronOutcome is the outermost wrapper: each authenticated run is recorded in
+// public.ops_cron_route_runs (ops_health_report row 15, migration 136).
+export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (request: Request) => {
   await connection();
 
   const auth = requireCronBearer(request);
@@ -341,4 +344,4 @@ export const GET = withApiErrors(async (request: Request) => {
     `[alerts-webhooks] enqueued=${enqueued} claimed=${claimedAll.length} delivered=${delivered} retried=${retried} failed=${failed}`,
   );
   return NextResponse.json({ ok: true, enqueued, delivered, retried, failed });
-});
+}));

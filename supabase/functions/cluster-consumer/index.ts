@@ -59,9 +59,13 @@ import {
   TOKEN_MIN_LEN,
 } from "../_shared/cluster/constants.ts";
 import {
+  CANDIDATE_SIZE_TIEBREAK_MARGIN,
+  mergeProbeIds,
+  rankCandidates,
   selectContextClusterIds,
   stickyUpperBound,
 } from "../_shared/cluster/context-select.ts";
+import { cleanDescription } from "../_shared/cluster/description-clean.ts";
 import {
   BIAS_KEYS,
   type BiasKey,
@@ -128,6 +132,27 @@ const MAX_INVOCATION_MS = 30_000;           // 30 s wall budget per invocation
 const READ_BUDGET_FLOOR_MS = 5_000;
 const CLUSTER_CONTEXT_TTL_MS = 60_000;      // refresh rolling-window context
 
+// Exact-title probe (h12-cluster-1, migration 135). A story that comes back with
+// the identical headline after the 200-cluster context window has moved on
+// (Yusra Geyik: 269 clusters updated between posta 06:00 and cnn-turk 09:42)
+// never met its own singleton and opened a twin. Once per article the consumer
+// asks the database for the live clusters, updated in the last
+// TITLE_PROBE_WINDOW_HOURS, whose folded seed title equals the article's folded
+// title (public.cluster_title_probe, backed by clusters_title_key_live_idx).
+// CONTEXT_CLUSTER_CAP stays 200: raising it is what trips the 546 CPU limit.
+const TITLE_PROBE_WINDOW_HOURS = 24;
+const TITLE_PROBE_LIMIT = 3;
+// A headline with fewer distinct tokens than this ("CANLI", "SON DAKIKA") is
+// too generic to be an identity key; the probe is skipped.
+const TITLE_PROBE_MIN_TOKENS = 3;
+// Members read for a probe hit; the same bound loadClusterContext's per-chunk
+// reads effectively give a cluster, and far above any real cluster size we load.
+const PROBE_MEMBER_LIMIT = 200;
+// Columns of a cluster member the matcher needs (loadClusterContext and
+// loadProbeCluster read the same shape).
+const MEMBER_ARTICLE_SELECT =
+  "id, source_id, title, description, published_at, fingerprint, entities, category, politics_admitted_at, minhash_sig, minhash_version";
+
 // POLITICS_CATEGORIES / isPoliticsMember / admissionMode / routeMessage /
 // claimArgs / parseAdmitTag now live in
 // ../_shared/cluster/politics-admission.ts (imported above), migration 089
@@ -168,6 +193,10 @@ interface EnrichedArticle extends ArticleRow {
   signature: Uint32Array | null;
   // entities normalised to non-null after enrichment.
   entities: string[];
+  // The description the clustering inputs (fingerprint, entities, tf-idf) are
+  // built from: `description` without a trailing "Son dakika..." ticker block
+  // (cleanDescription, h12-cluster-5). The stored description is untouched.
+  clusteringDescription: string | null;
 }
 
 interface SourceRow {
@@ -299,15 +328,24 @@ function hoursBetween(aIso: string, bIso: string): number {
 // Reuse the persisted MinHash when its version matches; recompute otherwise.
 function attachSignature(art: ClusterMemberArticle): void {
   if (art.signature) return;
+  // Recomputed from the cleaned description, like the incoming article's own
+  // enrichment (a milliyet member's "Son dakika..." ticker is not its text).
+  const description = cleanDescription(art.description) || "";
   const stored = deserializeSignature(art.minhash_sig, art.minhash_version);
   if (stored) {
     art.signature = stored;
-    if (!art.fingerprint) art.fingerprint = strictFingerprint(art.title || "", art.description || "");
+    if (!art.fingerprint) art.fingerprint = strictFingerprint(art.title || "", description);
     return;
   }
-  const fp = fingerprint(art.title || "", art.description || "");
+  const fp = fingerprint(art.title || "", description);
   art.signature = fp.signature;
   if (!art.fingerprint) art.fingerprint = fp.strict;
+}
+
+// The tf-idf document of a cluster member: title plus the cleaned description
+// (the same text the incoming article's query is built from).
+function memberTfidfText(art: { title: string; description: string | null }): string {
+  return `${art.title || ""} ${cleanDescription(art.description) || ""}`;
 }
 
 function buildBiasDistribution(biasLabels: Array<BiasKey | null | undefined>): Record<BiasKey, number> {
@@ -532,7 +570,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
 
   const articleRows = await inChunked<ClusterMemberArticle & { source_id: string | null }>(
     "articles",
-    "id, source_id, title, description, published_at, fingerprint, entities, category, politics_admitted_at, minhash_sig, minhash_version",
+    MEMBER_ARTICLE_SELECT,
     "id",
     allArticleIds,
     100,
@@ -623,10 +661,10 @@ async function loadClusterContext(): Promise<ClusterContext> {
   // message. Seeds first, then latests — same order the old per-message
   // build used.
   for (const seed of seedByCluster.values()) {
-    tfidf.addDoc(seed.id, `${seed.title || ""} ${seed.description || ""}`);
+    tfidf.addDoc(seed.id, memberTfidfText(seed));
   }
   for (const latest of latestByCluster.values()) {
-    tfidf.addDoc(latest.id, `${latest.title || ""} ${latest.description || ""}`);
+    tfidf.addDoc(latest.id, memberTfidfText(latest));
   }
 
   // Member headlines for the scan. Sorting is by publication time and only
@@ -728,12 +766,15 @@ function addMemberToIndices(
     entities: string[] | null;
     signature?: Uint32Array | null;
   },
+  // The context to index into: the module cache by default; loadProbeCluster
+  // passes the context it is extending.
+  target: ClusterContext | null = clusterContextCache,
 ) {
-  if (!clusterContextCache) return;
-  const idx = clusterContextCache.indices;
+  if (!target) return;
+  const idx = target.indices;
   // Member-headline scan list (see ClusterContext.headlinesByCluster). Covers
   // registerNewClusterInCache too, which routes the seed through here.
-  insertHeadlineMember(clusterContextCache.headlinesByCluster, clusterId, {
+  insertHeadlineMember(target.headlinesByCluster, clusterId, {
     id: article.id,
     publishedMs: Date.parse(article.published_at),
     sourceId: article.source_id,
@@ -788,7 +829,7 @@ function registerNewClusterInCache(clusterId: string, seed: ClusterMemberArticle
   clusterContextCache.seedByCluster.set(clusterId, seed);
   // Makes the cluster scorable by the next message dequeued in this same
   // invocation — the old per-message rebuild included it implicitly.
-  clusterContextCache.tfidf.addDoc(seed.id, `${seed.title || ""} ${seed.description || ""}`);
+  clusterContextCache.tfidf.addDoc(seed.id, memberTfidfText(seed));
   addMemberToIndices(clusterId, seed);
   clusterContextCache.sourceIdsByCluster.set(
     clusterId,
@@ -802,6 +843,132 @@ function registerNewClusterInCache(clusterId: string, seed: ClusterMemberArticle
     updated_at: seed.published_at,
     article_count: 1,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Exact-title probe (h12-cluster-1, migration 135)
+// ---------------------------------------------------------------------------
+
+// The probe is best-effort: the first failure in an isolate warns, later ones
+// stay quiet (one log line per cold start, not one per article).
+let titleProbeWarned = false;
+
+function warnTitleProbeOnce(detail: string) {
+  if (titleProbeWarned) return;
+  titleProbeWarned = true;
+  console.warn(
+    `[cluster-consumer] cluster_title_probe failed, continuing without it: ${detail}`,
+  );
+}
+
+// Reads one probe hit's members and registers the cluster in `ctx` the way
+// loadClusterContext would have: seed = earliest member, latest = newest other
+// member, signatures attached, tf-idf docs, source ids, the candidate indices
+// and the member-headline scan list for the newest HEADLINE_MEMBER_SCAN_MAX
+// members. Returns false when the cluster has no politics member to score.
+// Everything that can fail (the two reads) runs before ctx is touched, so a
+// throw leaves the context exactly as it was.
+async function loadProbeCluster(ctx: ClusterContext, row: ClusterRow): Promise<boolean> {
+  const caRes = await supabase
+    .from("cluster_articles")
+    .select("article_id")
+    .eq("cluster_id", row.id)
+    .limit(PROBE_MEMBER_LIMIT);
+  if (caRes.error) throw new Error(`cluster_articles: ${caRes.error.message}`);
+  const articleIds = [
+    ...new Set(((caRes.data ?? []) as Array<{ article_id: string }>).map((r) => r.article_id)),
+  ];
+  if (articleIds.length === 0) return false;
+
+  const articleRows = await inChunked<ClusterMemberArticle>(
+    "articles",
+    MEMBER_ARTICLE_SELECT,
+    "id",
+    articleIds,
+    100,
+  );
+  // Same membership rule as the context loader (isPoliticsMember is not flag-gated).
+  const members = articleRows
+    .filter((a) => isPoliticsMember(a))
+    .map((art) => ({ art, ms: Date.parse(art.published_at) }))
+    .filter((m) => Number.isFinite(m.ms))
+    .sort((a, b) => a.ms - b.ms || (a.art.id < b.art.id ? -1 : 1));
+  const first = members[0];
+  if (!first) return false;
+  const seed = first.art;
+  const latest = members.length > 1 ? members[members.length - 1]!.art : null;
+  attachSignature(seed);
+  if (latest) attachSignature(latest);
+
+  ctx.clusters.push({
+    id: row.id,
+    title_tr: row.title_tr ?? seed.title,
+    title_tr_neutral: row.title_tr_neutral ?? null,
+    first_published: row.first_published ?? seed.published_at,
+    updated_at: row.updated_at ?? seed.published_at,
+    article_count: Number(row.article_count) || members.length,
+  });
+  ctx.seedByCluster.set(row.id, seed);
+  if (latest) ctx.latestByCluster.set(row.id, latest);
+  ctx.sourceIdsByCluster.set(
+    row.id,
+    new Set(members.map((m) => m.art.source_id).filter((x): x is string => Boolean(x))),
+  );
+  ctx.tfidf.addDoc(seed.id, memberTfidfText(seed));
+  if (latest) ctx.tfidf.addDoc(latest.id, memberTfidfText(latest));
+  for (const m of members.slice(-HEADLINE_MEMBER_SCAN_MAX)) {
+    addMemberToIndices(row.id, m.art, ctx);
+  }
+  return true;
+}
+
+// Ids of the live clusters (updated in the last TITLE_PROBE_WINDOW_HOURS)
+// whose folded seed title equals this article's folded title, loaded into
+// `ctx` so the scorer can see them. [] when the headline is too generic, on
+// any failure, or when nothing matches. Never called in a dry run.
+async function probeExactTitleClusters(
+  ctx: ClusterContext,
+  article: EnrichedArticle,
+): Promise<string[]> {
+  if (headlineTokens(article.title).tokens.size < TITLE_PROBE_MIN_TOKENS) return [];
+
+  let rows: ClusterRow[];
+  try {
+    const res = await supabase.rpc("cluster_title_probe", {
+      p_title: article.title,
+      p_since: new Date(Date.now() - TITLE_PROBE_WINDOW_HOURS * 3_600_000).toISOString(),
+      p_limit: TITLE_PROBE_LIMIT,
+    });
+    if (res.error) {
+      warnTitleProbeOnce(res.error.message);
+      return [];
+    }
+    rows = Array.isArray(res.data) ? (res.data as ClusterRow[]) : [];
+  } catch (err) {
+    warnTitleProbeOnce(err instanceof Error ? err.message : String(err));
+    return [];
+  }
+
+  const ids: string[] = [];
+  for (const row of rows.slice(0, TITLE_PROBE_LIMIT)) {
+    if (!row || typeof row.id !== "string") continue;
+    if (ctx.seedByCluster.has(row.id)) {
+      ids.push(row.id);
+      continue;
+    }
+    // In the context but without a scorable seed: loading it again would not help.
+    if (ctx.clusters.some((c) => c.id === row.id)) continue;
+    try {
+      if (await loadProbeCluster(ctx, row)) ids.push(row.id);
+    } catch (err) {
+      console.warn(
+        `[cluster-consumer] title probe: cluster ${row.id} not loaded, skipping it: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
@@ -886,15 +1053,21 @@ function findCandidateClusters(
 // ---------------------------------------------------------------------------
 
 function enrichArticleInMemory(article: ArticleRow): EnrichedArticle {
-  const fp: FingerprintBundle = fingerprint(article.title || "", article.description || "");
+  // Entities, fingerprint and tf-idf are built from the description WITHOUT a
+  // trailing "Son dakika..." ticker block (h12-cluster-5); the stored
+  // description, createCluster's summary and the ingest-side content_hash keep
+  // the original text.
+  const clusteringDescription = cleanDescription(article.description);
+  const fp: FingerprintBundle = fingerprint(article.title || "", clusteringDescription || "");
   const freshEnts = extractEntities(
-    `${article.title || ""} ${article.description || ""}`,
+    `${article.title || ""} ${clusteringDescription || ""}`,
   ) || [];
   return {
     ...article,
     fingerprint: fp.strict,
     entities: freshEnts,
     signature: fp.signature,
+    clusteringDescription,
   };
 }
 
@@ -1154,6 +1327,8 @@ type ProcessResult =
 // plain (non-admitted) message's outcome shape is unaffected.
 interface ProcessOutcome {
   result: ProcessResult;
+  // Why a "skipped" outcome was skipped ("same-source-duplicate").
+  reason?: string;
   clusterId?: string;
   score?: number;
   sourcesBefore?: string[];
@@ -1229,6 +1404,20 @@ async function clusterArticle(
   const sourceLookup = await getSourceLookup();
   const { seedByCluster, latestByCluster, headlinesByCluster, indices } = ctx;
 
+  // h12-cluster-1: remembers the best cluster that matched at MATCH_THRESHOLD
+  // or better but was blocked because it already holds this article's source.
+  // If nothing else takes the article, opening a new cluster would only create
+  // a twin of that cluster, so the article is skipped instead (see the end of
+  // this function). A holder object rather than a `let`, so the narrowing of
+  // the closure-assigned value stays honest for the compiler.
+  const dupBlock: { clusterId: string | null; score: number } = { clusterId: null, score: 0 };
+  const noteDupBlock = (clusterId: string, matchScore: number) => {
+    if (matchScore >= MATCH_THRESHOLD && dupBlock.clusterId === null) {
+      dupBlock.clusterId = clusterId;
+      dupBlock.score = matchScore;
+    }
+  };
+
   // Strict-fingerprint fast-path against any indexed member.
   if (article.fingerprint) {
     const fpHit = indices.byFingerprint.get(article.fingerprint) || [];
@@ -1241,6 +1430,7 @@ async function clusterArticle(
         // branch can issue a DB read.
         if (wouldDuplicate(ctx, clusterId, article)) {
           blocked.add(clusterId);
+          noteDupBlock(clusterId, 1);
           continue;
         }
         return {
@@ -1254,6 +1444,8 @@ async function clusterArticle(
         const result = await addArticleToCluster(sourceLookup, clusterId, article);
         if (result.skipped) {
           blocked.add(clusterId);
+          // An identical item from a source the cluster already holds.
+          if (result.reason === "duplicate-source") noteDupBlock(clusterId, 1);
           continue;
         }
         addMemberToIndices(clusterId, article);
@@ -1275,11 +1467,18 @@ async function clusterArticle(
   // ctx.tfidf (a re-delivered message, or a re-processed existing
   // seed/latest — clusterArticle explicitly supports both), cosineQuery
   // must treat this as a replace, not a second doc in the corpus.
+  //
+  // First the exact-title probe (h12-cluster-1): clusters outside the context
+  // window whose seed headline is identical to this one are loaded into the
+  // context here, before the query vector is built, so the tf-idf corpus is
+  // the one the scorer will compare against. Not in a dry run.
+  const probeIds = dryRun ? [] : await probeExactTitleClusters(ctx, article);
   const tfidfQuery = ctx.tfidf.query(
-    `${article.title || ""} ${article.description || ""}`,
+    `${article.title || ""} ${article.clusteringDescription || ""}`,
     article.id,
   );
-  const candidateIds = findCandidateClusters(article, indices);
+  // Probe hits go in front and are not counted against MAX_CANDIDATE_CLUSTERS.
+  const candidateIds = mergeProbeIds(probeIds, findCandidateClusters(article, indices));
   const articleFp = { strict: article.fingerprint, signature: article.signature };
   const aSourceSlug = article.source_id
     ? sourceLookup.get(article.source_id)?.slug ?? null
@@ -1386,9 +1585,24 @@ async function clusterArticle(
       scored.push({ clusterId, score: bestScore, fallbackScore });
     }
   }
-  scored.sort((a, b) => b.score - a.score);
+  // Best score first, except that among the candidates which all match
+  // (>= MATCH_THRESHOLD) and sit within CANDIDATE_SIZE_TIEBREAK_MARGIN of the
+  // best one, the larger cluster goes first: the 18-article original, not its
+  // 7-article twin (h12-cluster-1). The size is the row's article_count or the
+  // number of member sources loaded for it, whichever is larger.
+  const articleCountById = new Map<string, number>();
+  for (const c of ctx.clusters) articleCountById.set(c.id, Number(c.article_count) || 0);
+  const sizeOf = (clusterId: string): number =>
+    Math.max(
+      articleCountById.get(clusterId) ?? 0,
+      ctx.sourceIdsByCluster.get(clusterId)?.size ?? 0,
+    );
+  const ranked = rankCandidates(scored, sizeOf, {
+    margin: CANDIDATE_SIZE_TIEBREAK_MARGIN,
+    threshold: MATCH_THRESHOLD,
+  });
 
-  const primary = scored[0];
+  const primary = ranked[0];
 
   // ---------------------------------------------------------------------
   // P3 live marginal verification (migration 064, JEV_LIVE_PAIRS flag).
@@ -1549,6 +1763,7 @@ async function clusterArticle(
     // Duplicate-source skip -- record "unchanged" and continue into
     // the existing flow below (which will re-attempt, and re-skip,
     // the same cluster on its own).
+    if (r.reason === "duplicate-source") noteDupBlock(primary.clusterId, primary.score);
     await recordMarginal(
       buildMarginalRow({
         articleId: article.id,
@@ -1575,7 +1790,7 @@ async function clusterArticle(
     blocked.add(marginalRejectedClusterId);
   }
   if (primary && primary.score >= MATCH_THRESHOLD) {
-    for (const cand of scored) {
+    for (const cand of ranked) {
       if (blocked.has(cand.clusterId)) continue;
       // A Jev reject withdraws the "primary is a match" premise, so the
       // fallback may only reach a candidate the ensemble would have joined
@@ -1594,6 +1809,7 @@ async function clusterArticle(
       if (dryRun) {
         if (wouldDuplicate(ctx, cand.clusterId, article)) {
           blocked.add(cand.clusterId);
+          noteDupBlock(cand.clusterId, cand.score);
           continue;
         }
         return {
@@ -1606,11 +1822,26 @@ async function clusterArticle(
       const result = await addArticleToCluster(sourceLookup, cand.clusterId, article);
       if (result.skipped) {
         blocked.add(cand.clusterId);
+        if (result.reason === "duplicate-source") noteDupBlock(cand.clusterId, cand.score);
         continue;
       }
       addMemberToIndices(cand.clusterId, article);
       return { result: "matched", clusterId: cand.clusterId };
     }
+  }
+
+  // Nothing took the article, but a cluster that matched it at MATCH_THRESHOLD
+  // or better already holds its source: the article is that source's own
+  // duplicate of the story. A new cluster would be a permanent twin of that
+  // one (Antalya-Alanya otoyolu: 8ab93bbd [18] and 2c9941bd [7]), so skip the
+  // article; the queue message is still archived and counted in `skipped`.
+  // The weak-match case (best score below MATCH_THRESHOLD) never gets here
+  // with the flag set and still opens a cluster.
+  if (dupBlock.clusterId !== null) {
+    console.log(
+      `[cluster-consumer] same-source-duplicate skip article=${article.id} cluster=${dupBlock.clusterId} matchScore=${dupBlock.score.toFixed(3)}${dryRun ? " dry-run" : ""}`,
+    );
+    return { result: "skipped", reason: "same-source-duplicate", score: primary?.score };
   }
 
   // No viable match. In a dry run, report what would happen without ever

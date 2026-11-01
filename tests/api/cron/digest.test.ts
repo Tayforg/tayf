@@ -33,9 +33,20 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.fake.client,
 }));
 
+// after() throws outside a request scope, so withCronOutcome (h12-ops-1) would log
+// a warning on every authenticated call here. Capture the callbacks instead; the
+// outcome test below runs them.
+const afterCallbacks = vi.hoisted(() => [] as Array<() => unknown>);
+
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
-  return { ...actual, connection: async () => {} };
+  return {
+    ...actual,
+    connection: async () => {},
+    after: (callback: () => unknown) => {
+      afterCallbacks.push(callback);
+    },
+  };
 });
 
 // Digest content: fixed fixtures. What actually renders into HTML is the
@@ -106,6 +117,7 @@ beforeEach(async () => {
   supabaseFake.state.subscribers = [];
   supabaseFake.fake.calls.mutations.length = 0;
   supabaseFake.fake.calls.rpc.length = 0;
+  afterCallbacks.length = 0;
   // vi.resetModules() (afterEach) re-evaluates route.ts but the mocked
   // "@/lib/email/resend" module factory only runs once, so the same
   // vi.fn() instance carries call history across tests without this.
@@ -160,6 +172,28 @@ describe("GET /api/cron/digest", () => {
 
     const wrong = await mod.GET(req("nope"));
     expect(wrong.status).toBe(401);
+  });
+
+  it("records only the authenticated run, as route 'digest' with the response status (withCronOutcome, h12-ops-1)", async () => {
+    process.env.CRON_SECRET = "shhh";
+    const mod = await importRoute();
+
+    expect((await mod.GET(req())).status).toBe(401);
+    expect((await mod.GET(req("nope"))).status).toBe(401);
+    expect(afterCallbacks).toHaveLength(0);
+
+    const res = await mod.GET(req("shhh"));
+    expect(afterCallbacks).toHaveLength(1);
+    expect(supabaseFake.fake.calls.rpc).toHaveLength(0);
+    await afterCallbacks[0]!();
+
+    const recorded = supabaseFake.fake.calls.rpc.filter((c) => c.name === "ops_cron_route_run_record");
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.args).toEqual({
+      p_route: "digest",
+      p_status: res.status,
+      p_duration_ms: expect.any(Number),
+    });
   });
 
   it("sends only to due confirmed subscribers and updates their last_sent_at", async () => {

@@ -1,6 +1,7 @@
 import { connection, NextResponse } from "next/server";
 
 import { requireCronBearer } from "@/lib/api/bearer";
+import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
@@ -285,7 +286,9 @@ async function runChannel(
   return { posted, skipped };
 }
 
-export const GET = withApiErrors(async (request: Request) => {
+// withCronOutcome is the outermost wrapper: each authenticated run is recorded in
+// public.ops_cron_route_runs (ops_health_report row 15, migration 136).
+export const GET = withCronOutcome("social", withApiErrors(async (request: Request) => {
   await connection();
 
   const auth = requireCronBearer(request);
@@ -398,4 +401,4 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   return NextResponse.json({ ok: true, posted, skipped });
-});
+}));

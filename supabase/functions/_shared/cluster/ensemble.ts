@@ -14,6 +14,12 @@
 // behind a strict-fingerprint auto-accept and a 48h time-window decay.
 //
 //   primary = 0.7*tfidf + 0.3*entityRatio
+//   entityRatio numerator: generic whitelist entities (bakan, fidan, abd, ...)
+//     weigh GENERIC_ENTITY_WEIGHT each, with a floor of one when anything is
+//     shared (h12-cluster-2)
+//   subject veto: when the headline lane did not fire and the two headlines'
+//     subjects ("Lavrov," vs "Fidan,") are disjoint, primary and the MinHash
+//     lane are capped at SUBJECT_VETO_CAP (h12-cluster-2)
 //   text floor: if the headline lane did not fire and tfidf < ENTITY_TEXT_FLOOR,
 //     the primary lane is capped just under MATCH_THRESHOLD (entities alone
 //     cannot join a pair that shares no text)
@@ -31,6 +37,8 @@ import {
   ENTITY_FRESHNESS_HOURS,
   ENTITY_TEXT_FLOOR,
   ENTITY_WEIGHT,
+  GENERIC_ENTITIES,
+  GENERIC_ENTITY_WEIGHT,
   HEADLINE_CONTAIN_BLOCK_PREFIXES,
   HEADLINE_CONTAIN_MIN,
   HEADLINE_CONTAIN_MIN_SIZE_RATIO,
@@ -38,14 +46,21 @@ import {
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_LANE_MIN_JACCARD,
   HEADLINE_LANE_MIN_SHARED,
+  HEADLINE_LIVE_TITLE_MAX_HOURS,
+  HEADLINE_SHORT_MIN_TOKENS,
+  HEADLINE_TITLE_MAX_CHARS,
   MATCH_THRESHOLD,
   MIN_SHARED_ENTITIES,
   MINHASH_SOFT_ACCEPT_JACCARD,
+  SUBJECT_SPAN_MAX_WORDS,
+  SUBJECT_STOP_WORDS,
+  SUBJECT_VETO_CAP,
   TFIDF_WEIGHT,
   TIME_WINDOW_HOURS,
 } from "./constants.ts";
 import {
   type FingerprintBundle,
+  foldTurkishWord,
   type HeadlineTokens,
   headlineTokens,
   jaccardFromSignatures,
@@ -80,6 +95,9 @@ export interface ScoreComponents {
   jaccard: number;
   jaccardScore: number;
   sharedEntities?: number;
+  // Entity numerator after weighting generic entities (>= 1 when anything is
+  // shared); sharedEntities stays the raw count.
+  sharedEntitiesWeighted?: number;
   entityRatioRaw?: number;
   entityFreshness?: number;
   entityRatio: number;
@@ -101,6 +119,9 @@ export interface ScoreComponents {
   headlineKind: HeadlineKind | null;
   headlineContainment: number;
   textFloorCapped: boolean;
+  // True when the subject veto capped the pair (different actors, same
+  // template); see subjectVetoFires().
+  subjectVeto: boolean;
 }
 
 export interface ScoreResult {
@@ -157,7 +178,7 @@ function timeDecayFor(hoursDelta: number): number {
 // Headline lane
 // ---------------------------------------------------------------------------
 
-export type HeadlineKind = "jaccard" | "containment";
+export type HeadlineKind = "jaccard" | "containment" | "live-title";
 
 export interface HeadlineLaneResult {
   fired: boolean;
@@ -195,6 +216,33 @@ function hasBlockedExtra(small: Set<string>, large: Set<string>): boolean {
   return false;
 }
 
+// Numeral values with leading zeros stripped ("007" -> "7"; "0" stays "0").
+function numeralValues(nums: Set<string>): Set<string> {
+  const out = new Set<string>();
+  for (const n of nums) out.add(n.replace(/^0+(?=\d)/, ""));
+  return out;
+}
+
+/**
+ * A numeral class shift: both headlines carry numerals, they share no value
+ * and the numerals' digit lengths are disjoint -- {100, 1000} vs {19, 78}
+ * ("100 il 1000 ilce" vs "19 yeni il ve 78 ilce"): two counts of one story,
+ * not one count changing. A changed single slot (39 vs 40, 61 vs 39) keeps its
+ * digit length and stays blocked.
+ */
+function numeralClassShift(a: Set<string>, b: Set<string>): boolean {
+  if (a.size === 0 || b.size === 0) return false;
+  const va = numeralValues(a);
+  const vb = numeralValues(b);
+  const lengthsA = new Set<number>();
+  for (const v of va) {
+    if (vb.has(v)) return false;
+    lengthsA.add(v.length);
+  }
+  for (const v of vb) if (lengthsA.has(v.length)) return false;
+  return true;
+}
+
 /**
  * Headline lane over two pre-tokenised headlines.
  *
@@ -210,11 +258,21 @@ function hasBlockedExtra(small: Set<string>, large: Set<string>): boolean {
  * HEADLINE_CONTAIN_MIN_TOKENS, |S n L| / |S| >= HEADLINE_CONTAIN_MIN,
  * |S| / |L| >= HEADLINE_CONTAIN_MIN_SIZE_RATIO (size guard: a roundup or
  * keyword-stuffed headline must not be "contained" by every unrelated short
- * headline), the numeral sets are equal (both empty is fine), the pair is
- * inside HEADLINE_LANE_MAX_HOURS, and no word of L \ S starts with one of
+ * headline), the numeral sets are equal (both empty is fine) or shifted to
+ * another digit-length class (numeralClassShift), the pair is inside
+ * HEADLINE_LANE_MAX_HOURS, and no word of L \ S starts with one of
  * HEADLINE_CONTAIN_BLOCK_PREFIXES.
  *
- * score = 0.5 + 0.5 * sim for both variants.
+ * Short-identical variant, when neither of the above fired: the two token
+ * sets are identical, have the same size in [HEADLINE_SHORT_MIN_TOKENS,
+ * HEADLINE_LANE_MIN_SHARED), and the pair is inside HEADLINE_LANE_MAX_HOURS
+ * ("Erdogan, Zelenskiy'i kabul etti" twice). Reported as kind 'jaccard'.
+ *
+ * Live-title variant: both headlines reduce to no tokens, carry the same
+ * non-null liveKey (their normalised title) and are at most
+ * HEADLINE_LIVE_TITLE_MAX_HOURS apart.
+ *
+ * score = 0.5 + 0.5 * sim for every variant.
  */
 export function headlineLane(
   ha: HeadlineTokens,
@@ -246,13 +304,31 @@ export function headlineLane(
     containment >= HEADLINE_CONTAIN_MIN &&
     sizeRatio >= HEADLINE_CONTAIN_MIN_SIZE_RATIO &&
     inWindow &&
-    sameSet(ha.numbers, hb.numbers) &&
+    (sameSet(ha.numbers, hb.numbers) ||
+      numeralClassShift(ha.numbers, hb.numbers)) &&
     !hasBlockedExtra(small, large);
 
-  const fired = jaccardFired || containmentFired;
+  const shortFired = !jaccardFired && !containmentFired &&
+    inWindow &&
+    ha.tokens.size >= HEADLINE_SHORT_MIN_TOKENS &&
+    ha.tokens.size < HEADLINE_LANE_MIN_SHARED &&
+    sameSet(ha.tokens, hb.tokens);
+
+  const liveFired = !jaccardFired && !containmentFired && !shortFired &&
+    ha.tokens.size === 0 && hb.tokens.size === 0 &&
+    ha.liveKey != null && ha.liveKey === hb.liveKey &&
+    hoursDelta <= HEADLINE_LIVE_TITLE_MAX_HOURS;
+
+  const fired = jaccardFired || containmentFired || shortFired || liveFired;
   return {
     fired,
-    kind: jaccardFired ? "jaccard" : containmentFired ? "containment" : null,
+    kind: jaccardFired || shortFired
+      ? "jaccard"
+      : containmentFired
+      ? "containment"
+      : liveFired
+      ? "live-title"
+      : null,
     sim,
     shared,
     containment,
@@ -276,6 +352,81 @@ export function headlineOnlyScore(
   if (!lane.fired) return 0;
   return lane.score * timeDecayFor(hoursDelta) *
     sourcePenaltyFor(opts?.aSourceSlug, opts?.bSourceSlug);
+}
+
+// ---------------------------------------------------------------------------
+// Subject veto (h12-cluster-2)
+// ---------------------------------------------------------------------------
+
+const SUBJECT_STOP: ReadonlySet<string> = new Set(SUBJECT_STOP_WORDS);
+const GENERIC_ENTITY_SET: ReadonlySet<string> = new Set(GENERIC_ENTITIES);
+
+interface HeadlineSubject {
+  // Folded, capitalised, non-stop words before the first ',' (only when that
+  // falls within the first SUBJECT_SPAN_MAX_WORDS words).
+  span: Set<string>;
+  // Every folded word of the (clipped) title.
+  words: Set<string>;
+}
+
+// The comma that closes a subject ("Lavrov, Japon mevkidasi ..."): not the
+// decimal comma between two digits ("2,5 saat"). A colon is deliberately NOT a
+// break: "TBMM'de kritik hafta: ..." or "Zelenski: ..." name a venue, an
+// institution or a speaker, and treating them as subjects vetoed same-story
+// pairs ("TBMM'de ..." vs "Meclis'te ...", "MHP'den ..." vs "Bahceli ..."); see
+// the evidence in constants.ts.
+function subjectBreakIndex(word: string): number {
+  for (let i = 0; i < word.length; i++) {
+    if (word[i] !== ",") continue;
+    const digitBefore = i > 0 && /\d/.test(word[i - 1]!);
+    const digitAfter = i + 1 < word.length && /\d/.test(word[i + 1]!);
+    if (digitBefore && digitAfter) continue;
+    return i;
+  }
+  return -1;
+}
+
+function subjectOf(title: string): HeadlineSubject {
+  const clipped = title.slice(0, HEADLINE_TITLE_MAX_CHARS);
+  const words = new Set<string>();
+  for (const w of foldTurkishWord(clipped).split(/[^a-z0-9]+/)) {
+    if (w) words.add(w);
+  }
+  const span = new Set<string>();
+  const raws = clipped.split(/\s+/).filter(Boolean);
+  for (let i = 0; i < raws.length && i < SUBJECT_SPAN_MAX_WORDS; i++) {
+    const raw = raws[i]!;
+    const brk = subjectBreakIndex(raw);
+    // The word the break is attached to still contributes its leading part.
+    const head = brk === -1 ? raw : raw.slice(0, brk);
+    // Strip an apostrophe suffix ("ABD'deki" -> "ABD"), keep capitalised words.
+    const stem = head.split(/['’]/)[0] ?? "";
+    const first = [...stem][0] ?? "";
+    if (/\p{L}/u.test(first) && first !== first.toLocaleLowerCase("tr")) {
+      // Same word boundaries as `words`: "Antalya-Alanya" is two words.
+      for (const piece of foldTurkishWord(stem).split(/[^a-z0-9]+/)) {
+        if (piece && !SUBJECT_STOP.has(piece)) span.add(piece);
+      }
+    }
+    if (brk !== -1) return { span, words };
+  }
+  // No ',' inside the first SUBJECT_SPAN_MAX_WORDS words: no subject.
+  return { span: new Set<string>(), words };
+}
+
+/**
+ * True when the two headlines name different actors for the same template:
+ * both have a non-empty subject span, the spans are disjoint, and no subject
+ * word of either side occurs anywhere in the other headline ("Lavrov, Japon
+ * mevkidasi ..." vs "Fidan, Atlanta'da Japon mevkidasiyla ...").
+ */
+function subjectVetoFires(aTitle: string, bTitle: string): boolean {
+  const a = subjectOf(aTitle);
+  const b = subjectOf(bTitle);
+  if (a.span.size === 0 || b.span.size === 0) return false;
+  for (const w of a.span) if (b.words.has(w)) return false;
+  for (const w of b.span) if (a.words.has(w)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +465,7 @@ export function score(
         headlineKind: null,
         headlineContainment: 0,
         textFloorCapped: false,
+        subjectVeto: false,
       },
     };
   }
@@ -328,15 +480,29 @@ export function score(
     : 0.5 * jaccard;
 
   // 3. Entity ratio — `max` denominator + noise floor of 3. (`min` let a
-  // 3-entity article score 3/3 against a 10-entity seed.)
+  // 3-entity article score 3/3 against a 10-entity seed.) Generic whitelist
+  // entities (bakan, fidan, abd, ...) weigh GENERIC_ENTITY_WEIGHT each, with a
+  // floor of one so a single shared generic entity keeps its old value.
   const aEntities = asSet(aEntitiesIn);
   const bEntities = asSet(bEntitiesIn);
   const sharedCount = setIntersectSize(aEntities, bEntities);
+  let sharedWeight = 0;
+  if (sharedCount > 0) {
+    const [smallE, bigE] = aEntities.size <= bEntities.size
+      ? [aEntities, bEntities]
+      : [bEntities, aEntities];
+    for (const e of smallE) {
+      if (bigE.has(e)) {
+        sharedWeight += GENERIC_ENTITY_SET.has(e) ? GENERIC_ENTITY_WEIGHT : 1;
+      }
+    }
+  }
+  const sharedEffective = Math.max(Math.min(sharedCount, 1), sharedWeight);
   const denom = Math.max(
     ENTITY_DENOM_MIN,
     Math.max(aEntities.size, bEntities.size),
   );
-  const entityRatioRaw = denom === 0 ? 0 : clip01(sharedCount / denom);
+  const entityRatioRaw = denom === 0 ? 0 : clip01(sharedEffective / denom);
 
   // A1 cluster-glue fix: decay entity contribution on a 6h freshness window.
   const entityFreshness = Math.max(
@@ -374,10 +540,19 @@ export function score(
   // limits what it contributes to `raw`.
   const primary = TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
   const textFloorCapped = !headlineFired && tfidfScore < ENTITY_TEXT_FLOOR;
-  const primaryForRaw = textFloorCapped
+  let primaryForRaw = textFloorCapped
     ? Math.min(primary, MATCH_THRESHOLD - 0.01)
     : primary;
-  const raw = clip01(Math.max(jaccardScore, primaryForRaw, headlineScore));
+  // Subject veto: different actors, same template. Never overrides a headline
+  // lane that fired (the headlines already agree).
+  const subjectVeto = !headlineFired && !!aTitle && !!bTitle &&
+    subjectVetoFires(aTitle, bTitle);
+  let jaccardForRaw = jaccardScore;
+  if (subjectVeto) {
+    primaryForRaw = Math.min(primaryForRaw, SUBJECT_VETO_CAP);
+    jaccardForRaw = Math.min(jaccardScore, SUBJECT_VETO_CAP);
+  }
+  const raw = clip01(Math.max(jaccardForRaw, primaryForRaw, headlineScore));
 
   // 7. Time decay.
   const timeDecay = timeDecayFor(hoursDelta);
@@ -390,6 +565,7 @@ export function score(
       jaccard,
       jaccardScore,
       sharedEntities: sharedCount,
+      sharedEntitiesWeighted: sharedEffective,
       entityRatioRaw,
       entityFreshness,
       entityRatio,
@@ -404,6 +580,7 @@ export function score(
       headlineKind,
       headlineContainment,
       textFloorCapped,
+      subjectVeto,
     },
   };
 }

@@ -41,7 +41,13 @@ describe("computeReport — golden fixture", () => {
       max_sources_per_cluster: 10,
       duplicate_source_clusters: 7,
     });
-    expect(report.precision_probe_count).toBe(44);
+    // 44 -> 49 and 592 -> 590 (wave AJ, h12-cluster-2/3): generic whitelist
+    // entities (bakan, disisleri, abd, fidan, ...) weigh GENERIC_ENTITY_WEIGHT
+    // in the entity lane: five more synthetic same-cluster pairs now score under
+    // the weak-pair floor (MATCH_THRESHOLD * 0.6) and two cross-cluster pairs
+    // that cleared MATCH_THRESHOLD on shared generic entities no longer do.
+    // Only these two summary numbers move.
+    expect(report.precision_probe_count).toBe(49);
     // 598 -> 592 (2026-11-01 text floor): six synthetic cross-cluster pairs
     // (Yargitay/Danistay, two AFAD pairs, three Imamoglu/IBB and Izmir/YSK
     // pairs) shared 3 entities with tfidf 0.155-0.189 and sat at 0.404-0.415,
@@ -49,7 +55,7 @@ describe("computeReport — golden fixture", () => {
     // describe different events. With tfidf below ENTITY_TEXT_FLOOR (0.20)
     // they no longer clear MATCH_THRESHOLD. The max entity denominator alone
     // does not move this fixture (verified by disabling the floor).
-    expect(report.recall_probe_count).toBe(592);
+    expect(report.recall_probe_count).toBe(590);
     expect(report.blindspot_flip_rate).toBe(0.4);
   });
 

@@ -12,6 +12,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // feed-health.test.ts: the shared fake's `BuilderState.limit` only records
 // the row-cap argument, not the `{ referencedTable }` options object.
 //
+// Hunt 12 (h12-ops-2): getSourceItemsPerDay reads the set-based RPC
+// public.source_items_7d() (migration 137) instead of the per-source
+// stats:articles(count) embed, which timed out at 8 s about 12 times a day. The
+// fake answers that RPC from `fixture.rpcRows` / `fixture.rpcError`; the legacy
+// embed stays as the fallback for a database without 137 (PostgREST PGRST202),
+// and the `getSourceItemsPerDay` block pins both paths and the contract.
+//
 // 2026-10-24 /sources '—' incident: a failed read used to be cached for the
 // full 1 h `source-directory` life because `cacheLife` ran before the query.
 // The "cache lifetime" block pins the fix for all three readers: a failure
@@ -36,6 +43,9 @@ const fixture = vi.hoisted(() => ({
   retryError: null as { message: string; code?: string } | null,
   // a query that throws (client blew up) instead of answering with an error
   throwOnQuery: false,
+  // migration 137: rows / error of rpc('source_items_7d')
+  rpcRows: [] as unknown,
+  rpcError: null as { message: string; code?: string } | null,
 }));
 
 const tracker = vi.hoisted(() => {
@@ -64,6 +74,14 @@ const tracker = vi.hoisted(() => {
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../../../tests/_helpers/supabase-fake");
   return helper.createSupabaseFake({
+    rpc: {
+      source_items_7d: () => {
+        if (fixture.throwOnQuery) throw new Error("connection reset");
+        if (fixture.rpcError) return { data: null, error: fixture.rpcError };
+        if (fixture.error) return { data: null, error: fixture.error };
+        return { data: fixture.rpcRows, error: null };
+      },
+    },
     tables: {
       sources: (state: unknown) => {
         fixture.lastState = state;
@@ -101,6 +119,7 @@ vi.mock("@supabase/supabase-js", () => ({
 import {
   toFeedStatusRows,
   toItemsPerDayMap,
+  toItemsPerDayMapFromRpc,
   summariseFeedStatus,
   getSourceFeedStatuses,
   getSourceItemsPerDay,
@@ -108,6 +127,7 @@ import {
   type SourceFeedStatusRawRow,
   type SourceFeedStatus,
   type ItemsPerDayRawRow,
+  type ItemsPerDayRpcRow,
 } from "./feed-status";
 import { cacheLife, cacheTag } from "next/cache";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
@@ -126,6 +146,9 @@ beforeEach(() => {
   fixture.failNewColumns = false;
   fixture.retryError = null;
   fixture.throwOnQuery = false;
+  fixture.rpcRows = [];
+  fixture.rpcError = null;
+  supabaseFake.calls.rpc.length = 0;
   tracker.calls.length = 0;
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
@@ -439,6 +462,36 @@ describe("toItemsPerDayMap", () => {
   });
 });
 
+describe("toItemsPerDayMapFromRpc", () => {
+  it("maps rows [{slug, items}] to slug -> items / 7 rounded to one decimal", () => {
+    expect(
+      toItemsPerDayMapFromRpc([
+        { slug: "a", items: 70 },
+        { slug: "b", items: 0 },
+      ]),
+    ).toEqual({ a: 10, b: 0 });
+    expect(toItemsPerDayMapFromRpc([{ slug: "c", items: 5 }])["c"]).toBeCloseTo(0.7, 5);
+    expect(toItemsPerDayMapFromRpc([{ slug: "d", items: 10 }])["d"]).toBe(1.4);
+  });
+
+  it("treats a non-finite, negative or non-numeric items value as 0 and never throws", () => {
+    const rows = [
+      { slug: "nan", items: Number.NaN },
+      { slug: "inf", items: Number.POSITIVE_INFINITY },
+      { slug: "neg", items: -7 },
+      { slug: "nul", items: null },
+      { slug: "str", items: "70" },
+      { slug: "ok", items: 14 },
+    ] as unknown as ItemsPerDayRpcRow[];
+    expect(() => toItemsPerDayMapFromRpc(rows)).not.toThrow();
+    expect(toItemsPerDayMapFromRpc(rows)).toEqual({ nan: 0, inf: 0, neg: 0, nul: 0, str: 0, ok: 2 });
+  });
+
+  it("returns an empty map for no rows", () => {
+    expect(toItemsPerDayMapFromRpc([])).toEqual({});
+  });
+});
+
 describe("summariseFeedStatus", () => {
   function statusRow(overrides: Partial<SourceFeedStatus>): SourceFeedStatus {
     return {
@@ -681,30 +734,100 @@ describe("getSourceFeedStatuses", () => {
 });
 
 describe("getSourceItemsPerDay", () => {
-  it("resolves to a slug -> itemsPerDay map end-to-end through the fake Supabase client", async () => {
-    fixture.data = [{ slug: "ornek-kaynak", stats: [{ count: 7 }] }];
-
-    const map = await getSourceItemsPerDay();
-
-    expect(map).not.toBeNull();
-    expect(map!["ornek-kaynak"]).toBe(1);
-  });
-
-  it("filters on active sources and a 7-day gte on stats.published_at", async () => {
-    fixture.data = [];
+  it("calls rpc('source_items_7d') once with no arguments and never selects stats:articles(count)", async () => {
+    fixture.rpcRows = [{ slug: "ornek-kaynak", items: 7 }];
 
     await getSourceItemsPerDay();
 
-    const state = fixture.lastState as BuilderState;
-    expect(state.table).toBe("sources");
-    expect(state.eq).toContainEqual({ col: "active", val: true });
-    expect(state.gte.find((g) => g.col === "stats.published_at")).toBeDefined();
+    expect(supabaseFake.calls.rpc).toHaveLength(1);
+    expect(supabaseFake.calls.rpc[0]!.name).toBe("source_items_7d");
+    expect(supabaseFake.calls.rpc[0]!.args).toBeUndefined();
+    // the set-based RPC replaces the per-source embed entirely
+    expect(fixture.selects).toEqual([]);
+    expect(fixture.lastState).toBeNull();
   });
 
-  it("returns null (never throws) on a query error", async () => {
-    fixture.error = { message: "canceling statement due to statement timeout" };
+  it("resolves to a slug -> itemsPerDay map end-to-end through the fake Supabase client", async () => {
+    fixture.rpcRows = [
+      { slug: "a", items: 70 },
+      { slug: "b", items: 0 },
+    ];
+
+    await expect(getSourceItemsPerDay()).resolves.toEqual({ a: 10, b: 0 });
+  });
+
+  it("an empty RPC answer (no active source) is an empty map, not null", async () => {
+    fixture.rpcRows = [];
+    await expect(getSourceItemsPerDay()).resolves.toEqual({});
+    fixture.rpcRows = null;
+    await expect(getSourceItemsPerDay()).resolves.toEqual({});
+  });
+
+  it("returns null (never throws) on an RPC error, and does not fall back to the embed", async () => {
+    fixture.rpcError = { message: "canceling statement due to statement timeout", code: "57014" };
 
     await expect(getSourceItemsPerDay()).resolves.toBeNull();
+    expect(supabaseFake.calls.rpc).toHaveLength(1);
+    expect(fixture.selects).toEqual([]);
+  });
+
+  it("returns null on an error without a code, and when the RPC call throws", async () => {
+    fixture.error = { message: "canceling statement due to statement timeout" };
+    await expect(getSourceItemsPerDay()).resolves.toBeNull();
+    expect(fixture.selects).toEqual([]);
+
+    fixture.error = null;
+    fixture.throwOnQuery = true;
+    await expect(getSourceItemsPerDay()).resolves.toBeNull();
+  });
+
+  describe("PGRST202 (migration 137 not applied yet): legacy embed fallback", () => {
+    const missing = {
+      message: "Could not find the function public.source_items_7d without parameters in the schema cache",
+      code: "PGRST202",
+    };
+
+    it("falls back to the stats:articles(count) embed with the 7-day gte and maps its rows", async () => {
+      fixture.rpcError = missing;
+      fixture.data = [{ slug: "ornek-kaynak", stats: [{ count: 7 }] }];
+
+      const map = await getSourceItemsPerDay();
+
+      expect(map).toEqual({ "ornek-kaynak": 1 });
+      expect(supabaseFake.calls.rpc).toHaveLength(1);
+      expect(fixture.selects).toEqual(["slug, stats:articles(count)"]);
+      const state = fixture.lastState as BuilderState;
+      expect(state.table).toBe("sources");
+      expect(state.eq).toContainEqual({ col: "active", val: true });
+      const gte = state.gte.find((g) => g.col === "stats.published_at");
+      expect(gte).toBeDefined();
+      const ageMs = Date.now() - new Date(gte!.val as string).getTime();
+      expect(ageMs).toBeGreaterThanOrEqual(7 * 24 * 60 * 60 * 1000 - 1000);
+      expect(ageMs).toBeLessThanOrEqual(7 * 24 * 60 * 60 * 1000 + 5000);
+    });
+
+    it("an error on the fallback resolves null (never throws) after exactly one embed query", async () => {
+      fixture.rpcError = missing;
+      fixture.error = { message: "canceling statement due to statement timeout" };
+
+      await expect(getSourceItemsPerDay()).resolves.toBeNull();
+      expect(fixture.selects).toEqual(["slug, stats:articles(count)"]);
+      expect(supabaseFake.calls.rpc).toHaveLength(1);
+    });
+
+    it("the fallback is cached for source-directory on success and minutes on failure (one cacheLife each)", async () => {
+      fixture.rpcError = missing;
+      fixture.data = [{ slug: "x", stats: [{ count: 1 }] }];
+      await getSourceItemsPerDay();
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("source-directory");
+
+      vi.mocked(cacheLife).mockClear();
+      fixture.error = { message: "boom" };
+      await getSourceItemsPerDay();
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+    });
   });
 });
 
@@ -766,6 +889,8 @@ describe("getFeedStatusSummary", () => {
 interface ReaderCase {
   name: string;
   call: () => Promise<unknown>;
+  /** Rows of the reader's own read: sources table rows, or rpc rows when `viaRpc`. */
+  viaRpc?: boolean;
   okRows: unknown[];
   okResult: unknown;
   emptyResult: unknown;
@@ -782,7 +907,8 @@ const READERS: ReaderCase[] = [
   {
     name: "getSourceItemsPerDay",
     call: getSourceItemsPerDay,
-    okRows: [{ slug: "ornek-kaynak", stats: [{ count: 7 }] }],
+    viaRpc: true,
+    okRows: [{ slug: "ornek-kaynak", items: 7 }],
     okResult: { "ornek-kaynak": 1 },
     emptyResult: {},
   },
@@ -795,7 +921,12 @@ const READERS: ReaderCase[] = [
   },
 ];
 
-describe.each(READERS)("$name cache lifetime", ({ call, okRows, okResult, emptyResult }) => {
+describe.each(READERS)("$name cache lifetime", ({ call, okRows, okResult, emptyResult, viaRpc }) => {
+  const seed = (rows: unknown[]) => {
+    if (viaRpc) fixture.rpcRows = rows;
+    else fixture.data = rows;
+  };
+
   it("a Supabase error resolves null and is cached for minutes only (exactly one cacheLife)", async () => {
     fixture.error = { message: "canceling statement due to statement timeout" };
 
@@ -838,7 +969,7 @@ describe.each(READERS)("$name cache lifetime", ({ call, okRows, okResult, emptyR
   });
 
   it("success returns the data and is cached for source-directory, once", async () => {
-    fixture.data = okRows;
+    seed(okRows);
 
     await expect(call()).resolves.toEqual(okResult);
 
@@ -849,7 +980,7 @@ describe.each(READERS)("$name cache lifetime", ({ call, okRows, okResult, emptyR
   });
 
   it("an empty successful read returns the empty value (not null) and keeps source-directory", async () => {
-    fixture.data = [];
+    seed([]);
 
     await expect(call()).resolves.toEqual(emptyResult);
 
@@ -858,7 +989,7 @@ describe.each(READERS)("$name cache lifetime", ({ call, okRows, okResult, emptyR
   });
 
   it("tags the entry 'sources' before cacheLife runs (cacheTag precedes cacheLife), on success and failure", async () => {
-    fixture.data = okRows;
+    seed(okRows);
     await call();
     expect(cacheTag).toHaveBeenCalledWith("sources");
     expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
