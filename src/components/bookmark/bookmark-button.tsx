@@ -59,7 +59,7 @@ export function BookmarkButton({
         aria-label={bookmarkStoryLabel(storyTitle)}
         aria-pressed={saved}
         title={tooltip}
-        className={`inline-flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-card/80 backdrop-blur-sm transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+        className={`inline-flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-card/80 backdrop-blur-sm transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:before:absolute max-sm:before:-inset-1 max-sm:before:-m-px max-sm:before:content-[''] ${
           saved ? "text-brand" : "text-muted-foreground hover:text-foreground"
         } ${className}`}
       >
@@ -80,7 +80,7 @@ export function BookmarkButton({
       type="button"
       onClick={handleToggle}
       aria-pressed={saved}
-      className={`inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium transition-colors ${
+      className={`inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium transition-colors max-sm:min-h-11 ${
         saved
           ? "text-brand"
           : "text-muted-foreground hover:text-foreground"

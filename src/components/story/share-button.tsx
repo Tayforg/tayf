@@ -12,7 +12,7 @@ import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
 // original "Paylaş"/"Kartı indir" buttons and the 4 channel chips below) —
 // Tailwind 4 requires literal class strings, no computed class names.
 const CHIP_CLASS =
-  "inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors";
+  "inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center";
 
 const CHANNEL_LABELS: Record<(typeof SHARE_LINK_CHANNELS)[number], string> = {
   whatsapp: "WhatsApp",
@@ -203,7 +203,7 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
       <button
         type="button"
         onClick={handleShare}
-        className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+        className={CHIP_CLASS}
       >
         {copied ? (
           <Check className="h-3 w-3 text-emerald-500" />
@@ -219,7 +219,7 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
         // last segment is "kart" with no extension, so a valueless
         // `download` would save an extensionless file. KART-06.
         download="tayf-kart.png"
-        className="inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+        className={CHIP_CLASS}
       >
         Kartı indir
       </a>

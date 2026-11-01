@@ -14,6 +14,24 @@
 // a cluster that already has a title keeps it. A cluster with no title yet
 // takes the cleaned best candidate instead ({ floor: true }): it beats the
 // raw title_tr.
+//
+// extractive-v3 (hunt 16): the v2 re-pick (#156) replaced about half of the
+// stored titles with vague fragments. Duplicate member titles now count once
+// (the first occurrence stays), so a headline two outlets copied no longer wins
+// on its twin; a title under 45 characters pays 0.008 per missing character
+// (the 28-character "Altın Portakal 'Taş ve Tüy'e" lost to the 82-character
+// title that names the event); and two hard defects join shouting: a '|' or '│'
+// left after cleaning, and a run of three or more shouted words ("İZMİR
+// ELEKTRİK KESİNTİSİ 20 EKİM SALI |GEDİZ UYARDI: ..."). A re-pick is now
+// conservative: with { incumbent } (the stored title) the stored title stays
+// unless it fails the gate or the best member title outscores it by a margin:
+// REPICK_MARGIN (0.05) for a title under 45 characters, REPICK_MARGIN_FULL_LENGTH
+// (0.20) from 45 up. The first version of the rule used 0.05 everywhere and a
+// replay over 150 production clusters still rewrote 38% of the stored titles
+// (two good member titles of one cluster routinely differ by 0.05 to 0.20), so
+// the full-length bar moved to 0.20: the same replay changes 8%, and the swaps
+// it drops at 0.15-0.20 were mostly lateral or a different sub-event. Picking again with the pick as
+// incumbent returns it.
 
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
@@ -21,7 +39,7 @@
 // the last 14 days of older-version titles (neutral_title_repick_candidates,
 // migration 141). Readers must not compare against this constant: use
 // isExtractiveModelId, which recognises every version.
-export const EXTRACTIVE_MODEL_ID = "extractive-v2";
+export const EXTRACTIVE_MODEL_ID = "extractive-v3";
 
 /** True for any extractive pick, whatever rule version wrote it. */
 export function isExtractiveModelId(model: unknown): boolean {
@@ -285,11 +303,39 @@ export interface AcceptOptions {
   generated?: boolean;
 }
 
-// Defects a first-pick floor does not forgive: shouting, a placeholder, an
-// English headline, a feed cut. A question, a leading "İşte" or an odd length
+const SHOUT_RUN = 3;
+const SHOUT_MIN_LETTERS = 3;
+
+// A run of SHOUT_RUN or more consecutive shouted words. A word is shouted when,
+// stripped of edge punctuation and an apostrophe suffix ("TBMM'de" -> "TBMM"),
+// it has at least three letters and equals its tr-locale upper-case form. A
+// short acronym ("AK"), a lowercase word or a bare number ends the run, so
+// "CHP ve AK Parti TBMM'de uzlaştı" and "TBMM CHP grubu toplandı" pass while
+// "İZMİR ELEKTRİK KESİNTİSİ: ..." does not.
+function hasShoutedRun(t: string): boolean {
+  let run = 0;
+  for (const raw of t.split(/\s+/)) {
+    const word = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").replace(/['’ʼ‘].*$/u, "");
+    const letters = word.match(/\p{L}/gu)?.length ?? 0;
+    if (letters >= SHOUT_MIN_LETTERS && word === word.toLocaleUpperCase("tr")) {
+      run++;
+      if (run >= SHOUT_RUN) return true;
+    } else {
+      run = 0;
+    }
+  }
+  return false;
+}
+
+// Defects a first-pick floor does not forgive: shouting (all of it, or a run of
+// shouted words), a residual '|', a placeholder, an English headline, a feed cut. A question, a leading "İşte" or an odd length
 // are only less good than the cleaned text of a title nobody has cleaned yet.
 function hasHardDefect(t: string, memberTitles: readonly string[], opts: AcceptOptions): boolean {
   if (/\p{L}/u.test(t) && t === t.toLocaleUpperCase("tr")) return true;
+  // An outlet prefix that cleanHeadline could not strip (longer than 25
+  // characters) or a separator inside the text: "... SALI |GEDİZ UYARDI: ...".
+  if (/[|│]/.test(t)) return true;
+  if (hasShoutedRun(t)) return true;
   if (isGenericTitle(t)) return true;
   if (looksEnglish(t)) return true;
   if (!opts.generated && looksTruncated(t, memberTitles)) return true;
@@ -353,6 +399,35 @@ function numeralOutliers(nums: Set<string>[]): Set<number> {
   return out.size === nums.length ? new Set<number>() : out;
 }
 
+/**
+ * A title shorter than this pays 0.008 per missing character in scoreTitle,
+ * and a re-pick holds a stored title of at least this length to the wider
+ * REPICK_MARGIN_FULL_LENGTH.
+ */
+export const FULL_LENGTH_TITLE_CHARS = 45;
+
+/**
+ * How far the best member title must outscore a stored title shorter than
+ * FULL_LENGTH_TITLE_CHARS before a re-pick replaces it. Scores are centrality
+ * minus penalties (see scoreTitle), so 0.05 is a few percent of token overlap.
+ * A short stored title is the shape of #156's fragments (the 28-character
+ * "Altın Portakal 'Taş ve Tüy'e" lost to the title that names the event by
+ * 0.119), so it gives way readily.
+ */
+export const REPICK_MARGIN = 0.05;
+
+/**
+ * The same bar for a stored title of FULL_LENGTH_TITLE_CHARS or more. Such a
+ * title already says what happened, and two good member titles of one cluster
+ * differ by 0.05 to 0.20 on ordinary wording, so a smaller bar swaps one good
+ * headline for another (and now and then for a different sub-event). Measured
+ * on a replay of 150 production clusters (src/lib/clusters/neutral-title-
+ * replay.test.ts): 0.05 changes 38% of the stored titles, 0.10 changes 23%,
+ * 0.15 with the 45-character split changes 12.7%, and 0.20 changes 8%; 0.20
+ * keeps five lateral or sub-event swaps the 0.15 bar allowed.
+ */
+export const REPICK_MARGIN_FULL_LENGTH = 0.2;
+
 export interface PickOptions {
   /**
    * First pick of a cluster that has no neutral title yet. When no candidate
@@ -364,6 +439,29 @@ export interface PickOptions {
    * better.
    */
   floor?: boolean;
+  /**
+   * The title the cluster carries now (a re-pick). It is returned exactly as
+   * passed when it passes isAcceptableNeutral and no lead-in survives in it,
+   * unless the best acceptable member title outscores it by REPICK_MARGIN (a
+   * stored title under FULL_LENGTH_TITLE_CHARS) or REPICK_MARGIN_FULL_LENGTH
+   * (a longer one). It is scored like a member that is not itself part of the comparison: its
+   * centrality is the mean similarity to the members whose text differs from
+   * it, so a stored title equal to member k scores like member k. A blank or
+   * missing incumbent changes nothing.
+   */
+  incumbent?: string | null;
+}
+
+// One formula for a member candidate and for the stored title it competes with.
+// The title is the text as written (a member's raw title, the stored title).
+function scoreTitle(title: string, centrality: number): number {
+  return (
+    centrality -
+    0.12 * framingPenalty(title) -
+    0.25 * loadedPenalty(title) -
+    0.002 * Math.max(0, title.length - 90) -
+    0.008 * Math.max(0, FULL_LENGTH_TITLE_CHARS - title.length)
+  );
 }
 
 /**
@@ -373,11 +471,21 @@ export interface PickOptions {
  * rejected; the headline cron then keeps the title the cluster already has).
  * With `{ floor: true }` a rejected-only cluster still gets its cleaned
  * best candidate (see PickOptions); null then means only "nothing usable".
+ * With `{ incumbent }` the stored title wins unless it fails the gate or loses
+ * by REPICK_MARGIN / REPICK_MARGIN_FULL_LENGTH (see PickOptions). Member titles that fold to the same
+ * text count once, the first occurrence standing.
  */
 export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {}): string | null {
+  const seen = new Set<string>();
   const items = members
     .map((m) => ({ ...m, title: (m.title ?? "").trim() }))
-    .filter((m) => m.title.length > 0 && !isGenericTitle(m.title));
+    .filter((m) => m.title.length > 0 && !isGenericTitle(m.title))
+    .filter((m) => {
+      const key = fold(m.title);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   if (items.length === 0) return null;
 
   const toks = items.map((m) => tokens(m.title));
@@ -389,27 +497,50 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
     let sim = 0;
     for (let j = 0; j < items.length; j++) if (j !== i) sim += jaccard(toks[i]!, toks[j]!);
     const centrality = items.length > 1 ? sim / (items.length - 1) : 0;
-    const title = items[i]!.title;
-    const score =
-      centrality -
-      0.12 * framingPenalty(title) -
-      0.25 * loadedPenalty(title) -
-      0.002 * Math.max(0, title.length - 90);
-    scored.push({ index: i, score });
+    scored.push({ index: i, score: scoreTitle(items[i]!.title, centrality) });
   }
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
 
+  let best: { cleaned: string; score: number } | null = null;
   let floorSoft: string | null = null;
   let floorAny: string | null = null;
-  for (const { index } of scored) {
+  for (const { index, score } of scored) {
     const cleaned = cleanHeadline(items[index]!.title);
     // A lead-in that survived cleaning (an odd Unicode case) must not ship.
     if (cleaned === "" || LEAD_IN.test(foldTr(cleaned))) continue;
     const others = items.filter((_, j) => j !== index).map((m) => m.title);
-    if (isAcceptableNeutral(cleaned, others)) return cleaned;
+    if (isAcceptableNeutral(cleaned, others)) {
+      best = { cleaned, score };
+      break;
+    }
     if (!opts.floor) continue;
     floorAny ??= cleaned;
     if (floorSoft === null && !hasHardDefect(cleaned, others, {})) floorSoft = cleaned;
   }
-  return floorSoft ?? floorAny;
+
+  const incumbent = opts.incumbent;
+  const inc = incumbent?.trim() ?? "";
+  if (incumbent && inc !== "") {
+    const memberTitles = items.map((m) => m.title);
+    if (isAcceptableNeutral(inc, memberTitles) && !LEAD_IN.test(foldTr(inc))) {
+      if (best === null || best.cleaned === incumbent || best.cleaned === inc) return incumbent;
+      // Centrality against the members that are not the stored title itself,
+      // raw or cleaned: an incumbent equal to member k scores like member k.
+      const incFold = fold(inc);
+      const incToks = tokens(inc);
+      let sim = 0;
+      let n = 0;
+      for (let j = 0; j < items.length; j++) {
+        const t = items[j]!.title;
+        if (fold(t) === incFold || fold(cleanHeadline(t)) === incFold) continue;
+        sim += jaccard(incToks, toks[j]!);
+        n++;
+      }
+      const incScore = scoreTitle(inc, n > 0 ? sim / n : 0);
+      const margin = inc.length >= FULL_LENGTH_TITLE_CHARS ? REPICK_MARGIN_FULL_LENGTH : REPICK_MARGIN;
+      return best.score - incScore < margin ? incumbent : best.cleaned;
+    }
+  }
+
+  return best?.cleaned ?? floorSoft ?? floorAny;
 }

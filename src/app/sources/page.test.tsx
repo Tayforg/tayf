@@ -718,6 +718,61 @@ describe("SourceDirectory card -- accessible name and target size", () => {
     expect(tokens).toContain("pr-7");
     expect(tokens).not.toContain("pr-5");
   });
+
+  // h16-mobile-2: the 24 px corner arrow is the WCAG 2.5.8 minimum, but on a
+  // phone it is a thumb-sized miss next to the card link. Below sm it becomes
+  // a 44 x 44 box in the card's corner (top-0 right-0); the card link gives up
+  // 28 px of its right edge (card padding 16 + 28 = 44) so the two boxes touch
+  // without overlapping, and the name's own pr-7 reservation is dropped so the
+  // space is not reserved twice. sm and up renders exactly as before.
+  it("(mobile 44 px) the external link is a 44 x 44 corner box below sm and keeps the 24 px box from sm up", () => {
+    const tokens = tokensOf(externalTag);
+    for (const token of [
+      "max-sm:top-0",
+      "max-sm:right-0",
+      "max-sm:min-h-11",
+      "max-sm:min-w-11",
+    ]) {
+      expect(tokens).toContain(token);
+    }
+    for (const token of ["absolute", "top-2", "right-2", "min-h-6", "min-w-6", "inline-flex", "items-center", "justify-center"]) {
+      expect(tokens).toContain(token);
+    }
+  });
+
+  it("(mobile 44 px) the card link ends where the 44 px arrow begins: max-sm:mr-7", () => {
+    const tokens = tokensOf(cardTag);
+    expect(tokens).toContain("block");
+    expect(tokens).toContain("max-sm:mr-7");
+  });
+
+  it("(mobile 44 px) the name keeps pr-7 and releases it below sm with max-sm:pr-0", () => {
+    const namePara = /<p class="([^"]*)">GZT<\/p>/.exec(markup);
+    expect(namePara).not.toBeNull();
+    const tokens = (namePara?.[1] ?? "").split(/\s+/);
+    expect(tokens).toContain("pr-7");
+    expect(tokens).toContain("max-sm:pr-0");
+  });
+
+  it("(mobile 44 px) every mobile addition is max-sm: scoped, so sm and up classes are untouched", () => {
+    expect(tokensOf(cardTag).filter((t) => !t.startsWith("max-sm:"))).toEqual(["block"]);
+    expect(tokensOf(externalTag).filter((t) => !t.startsWith("max-sm:"))).toEqual([
+      "absolute",
+      "top-2",
+      "right-2",
+      "inline-flex",
+      "min-h-6",
+      "min-w-6",
+      "items-center",
+      "justify-center",
+      "rounded",
+      "text-[11px]",
+      "leading-none",
+      "text-muted-foreground",
+      "hover:bg-muted/60",
+      "hover:text-foreground",
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------

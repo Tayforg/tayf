@@ -69,6 +69,11 @@
 //   - Text floor: unless the headline lane fired, a pair with tfidf below
 //     ENTITY_TEXT_FLOOR has its primary lane capped just under
 //     MATCH_THRESHOLD, so entities alone cannot join it.
+//   - Incident veto (h16-precision-1): when the headline lane did not fire,
+//     both headlines carry an incident word (kaza, yangin, deprem, ...) and
+//     name provinces, and the two province sets are disjoint ("Duzce'de ...
+//     kazada" vs "Bolu Dagi'nda ... kaza"), the primary and MinHash lanes are
+//     capped at SUBJECT_VETO_CAP, like the subject veto (see provinces.mjs).
 //
 //     raw = max(jaccardScore, primary (text-floor capped), headlineScore)
 //
@@ -124,6 +129,7 @@ import {
   jaccardFromSignatures,
   fingerprint as buildFingerprint,
 } from "./fingerprint.mjs";
+import { hasIncidentWord, provincesIn } from "./provinces.mjs";
 
 // ---------------------------------------------------------------------------
 // Per-source clustering penalties
@@ -479,6 +485,28 @@ function subjectVetoFires(aTitle, bTitle) {
 }
 
 // ---------------------------------------------------------------------------
+// Incident province veto (h16-precision-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when the two headlines report incidents in different provinces: both
+ * (clipped to HEADLINE_TITLE_MAX_CHARS) carry an incident word, both name at
+ * least one province, and the two province sets are disjoint. A side that
+ * names no province ("Anadolu Otoyolu'nda ... kaza") never vetoes, and a side
+ * that names two provinces vetoes only when neither is the other side's.
+ */
+function incidentVetoFires(aTitle, bTitle) {
+  const a = aTitle.slice(0, HEADLINE_TITLE_MAX_CHARS);
+  const b = bTitle.slice(0, HEADLINE_TITLE_MAX_CHARS);
+  if (!hasIncidentWord(a) || !hasIncidentWord(b)) return false;
+  const pa = provincesIn(a);
+  const pb = provincesIn(b);
+  if (pa.size === 0 || pb.size === 0) return false;
+  for (const p of pa) if (pb.has(p)) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // score()
 // ---------------------------------------------------------------------------
 
@@ -543,6 +571,7 @@ export function score(
         headlineContainment: 0,
         textFloorCapped: false,
         subjectVeto: false,
+        incidentVeto: false,
       },
     };
   }
@@ -647,8 +676,12 @@ export function score(
   // lane that fired (the headlines already agree).
   const subjectVeto =
     !headlineFired && !!aTitle && !!bTitle && subjectVetoFires(aTitle, bTitle);
+  // Incident veto: the same incident template in different provinces. Same
+  // exemption as the subject veto, same cap.
+  const incidentVeto =
+    !headlineFired && !!aTitle && !!bTitle && incidentVetoFires(aTitle, bTitle);
   let jaccardForRaw = jaccardScore;
-  if (subjectVeto) {
+  if (subjectVeto || incidentVeto) {
     primaryForRaw = Math.min(primaryForRaw, SUBJECT_VETO_CAP);
     jaccardForRaw = Math.min(jaccardScore, SUBJECT_VETO_CAP);
   }
@@ -685,6 +718,7 @@ export function score(
       headlineContainment,
       textFloorCapped,
       subjectVeto,
+      incidentVeto,
     },
   };
 }

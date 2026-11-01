@@ -1,11 +1,19 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
-// New module for /trends: buckets by the Europe/Istanbul calendar day of
-// least(published_at, created_at), reading the new voting-kinds-only view
-// (trends_daily_zone_counts_ist, migration 087) instead of the old UTC-day,
-// all-kinds view (trends_daily_bias_counts, migration 023, owned by
-// src/lib/clusters/trends-query.ts -- untouched by this file).
+// Fetcher for /trends: buckets by the Europe/Istanbul calendar day of
+// least(published_at, created_at), voting kinds only (outlet, wire). Since
+// hunt 16 it reads the pre-aggregated rollup TABLE
+// `trends_daily_zone_counts_ist_rollup` (migration 092, refreshed hourly by
+// pg_cron `trends-rollup-refresh` since 109), not the live
+// `trends_daily_zone_counts_ist` view (migration 087): the view's cold-cache
+// group-by hit the 4 s reader timeout. The old UTC-day, all-kinds view
+// (trends_daily_bias_counts, migration 023) is owned by
+// src/lib/clusters/trends-query.ts -- untouched by this file.
 //
 // fetchIstanbulTimeline THROWS inside the cached inner fetcher on error or
 // on an EMPTY result (the harness rule: a "use cache" function must not
@@ -28,7 +36,7 @@ const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../../../tests/_helpers/supabase-fake");
   return helper.createSupabaseFake({
     tables: {
-      trends_daily_zone_counts_ist: (state: unknown) => {
+      trends_daily_zone_counts_ist_rollup: (state: unknown) => {
         fixture.lastState = state;
         return { data: fixture.data, error: fixture.error };
       },
@@ -137,18 +145,30 @@ describe("hourBucketStart", () => {
 });
 
 describe("fetchIstanbulTimeline", () => {
-  it("queries trends_daily_zone_counts_ist with a .gte('day', cutoff)", async () => {
+  it("queries the 092 rollup table with select 'day, zone, count' and a .gte('day', cutoff)", async () => {
     fixture.data = [{ day: "2026-09-29", zone: "iktidar", count: 1 }];
 
-    const buckets = await fetchIstanbulTimeline();
+    // Pin the clock so the cutoff is exact: 2026-11-02T10:00Z (hour bucket)
+    // minus 30 days is 2026-10-03T10:00Z -> Istanbul day 2026-10-03.
+    const dateNowSpy = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.parse("2026-11-02T10:47:31Z"));
+    let buckets: Awaited<ReturnType<typeof fetchIstanbulTimeline>>;
+    try {
+      buckets = await fetchIstanbulTimeline();
+    } finally {
+      dateNowSpy.mockRestore();
+    }
 
     expect(buckets).not.toBeNull();
     const state = fixture.lastState as {
       table: string;
+      selectArgs: unknown[];
       gte: Array<{ col: string; val: unknown }>;
     };
-    expect(state.table).toBe("trends_daily_zone_counts_ist");
-    expect(state.gte.some((g) => g.col === "day")).toBe(true);
+    expect(state.table).toBe("trends_daily_zone_counts_ist_rollup");
+    expect(state.selectArgs[0]).toBe("day, zone, count");
+    expect(state.gte).toEqual([{ col: "day", val: "2026-10-03" }]);
   });
 
   it("reads the wall clock exactly once per fetch, quantized to the hour", async () => {
@@ -246,5 +266,48 @@ describe("fetchIstanbulTimeline cache lifetime", () => {
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("minutes");
     errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Source guard: the live view must never come back as a query target. Comments
+// are blanked first (offsets preserved) because the file header legitimately
+// names the 087 view when explaining why it reads the rollup instead.
+// ---------------------------------------------------------------------------
+describe("daily-zones.ts source", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const raw = readFileSync(resolve(here, "daily-zones.ts"), "utf8");
+
+  /** Blanks // and block comments, keeping offsets (and newlines) intact. */
+  function blankComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(
+        /(^|[^:])\/\/[^\n]*/gm,
+        (m, p1: string) => p1 + " ".repeat(m.length - p1.length),
+      );
+  }
+
+  const code = blankComments(raw);
+
+  it("scans real code (non-vacuous: the rollup name survives comment blanking)", () => {
+    expect(code).toContain("trends_daily_zone_counts_ist_rollup");
+    expect(code).toContain("fetchIstanbulTimeline");
+  });
+
+  it("never references the live view name outside comments", () => {
+    expect(code.match(/trends_daily_zone_counts_ist(?!_rollup)/g)).toBeNull();
+  });
+
+  it("the blanking helper hides comment mentions but not code mentions", () => {
+    const sample = [
+      "// trends_daily_zone_counts_ist in a line comment",
+      "/* trends_daily_zone_counts_ist in a block comment */",
+      'const bad = "trends_daily_zone_counts_ist";',
+    ].join("\n");
+    const hits = blankComments(sample).match(
+      /trends_daily_zone_counts_ist(?!_rollup)/g,
+    );
+    expect(hits).toHaveLength(1);
   });
 });

@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   EXTRACTIVE_MODEL_ID,
+  FULL_LENGTH_TITLE_CHARS,
+  REPICK_MARGIN,
+  REPICK_MARGIN_FULL_LENGTH,
   cleanHeadline,
   framingPenalty,
   isAcceptableNeutral,
@@ -774,18 +777,310 @@ describe("pickNeutralTitle first-pick floor ({ floor: true })", () => {
 });
 
 describe("EXTRACTIVE_MODEL_ID and isExtractiveModelId", () => {
-  it("is extractive-v2", () => {
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v2");
+  it("is extractive-v3", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v3");
   });
 
   it("recognises every extractive-* version and nothing else", () => {
     expect(isExtractiveModelId("extractive-v1")).toBe(true);
     expect(isExtractiveModelId("extractive-v2")).toBe(true);
+    expect(isExtractiveModelId("extractive-v3")).toBe(true);
     expect(isExtractiveModelId(EXTRACTIVE_MODEL_ID)).toBe(true);
     expect(isExtractiveModelId("claude-haiku-4-5-20251001")).toBe(false);
     expect(isExtractiveModelId("extractive")).toBe(false);
     expect(isExtractiveModelId("")).toBe(false);
     expect(isExtractiveModelId(null)).toBe(false);
     expect(isExtractiveModelId(undefined)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hunt 16 (h16-an-1): the #156 re-pick rewrote ~48% of the stored titles with
+// vague fragments. Member titles below are the real prod headlines of the
+// clusters it damaged (read-only replay, 2026-11-01/02), in published order.
+// ---------------------------------------------------------------------------
+
+// 97575687: 'Bedelli askerlikte yeni dönem' is two of the six titles, so each
+// copy used to score jaccard 1.0 against its twin.
+const BEDELLI = [
+  "Bedelli askerlikte yeni dönem",
+  "Bedelli askerlik ve hac için bireysel emeklilik birikimi çekilebilecek",
+  "Bedelli askerlik yapacaklara BES kolaylığı: Birikimden para çekilebilecek",
+  "Bedelli askerliğe de hak tanındı: BES’ten para çekebilecekler",
+  "Bedelli askerlikte yeni dönem",
+  "Bedelli askerlik için BES birikimlerinden kısmi ödeme imkânı geliyor",
+];
+
+// ec900023: 11 members; the 28-character fragment "Altın Portakal 'Taş ve Tüy'e"
+// used to win on shared tokens alone.
+const ALTIN_PORTAKAL = [
+  "63. Altın Portakal Film Festivali'nde En İyi Film ödülünü Taş ve Tüy kazandı",
+  "Altın Portakal'da gecenin kazananı 'Taş ve Tüy' oldu, Mert Fırat ile Mehmet Günsür ödülü paylaştı",
+  "Taş ve Tüy, Altın Portakal’da altı ödül kazandı",
+  "Altın Portakal’da ödüller sahiplerini buldu: 'Taş ve Tüy' 6 ödülle zirvede",
+  "Altın Portakal 'Taş ve Tüy'e",
+  "Altın Portakal’da ödüller sahiplerini buldu: Altın Portakal’da 'Taş ve Tüy' zaferi",
+  "Öykü Karayel'in ödülü alırken yaptığı bu konuşma geceye damga vurdu",
+  "Altın Portakal'a \"Taş ve Tüy\" damgası! İşte tüm ödül kazananlar",
+  "Altın Portakal Film Festivali'nde ödüller sahiplerini buldu!",
+  "Altın Portakal sahiplerini buldu: ‘Taş ve Tüy’e 6 ödül birden",
+  "63. Altın Portakal’da En İyi Film 'Taş ve Tüy' seçildi",
+];
+
+// bbe1ab28: one partly shouted '|' headline and one question.
+const IZMIR_KESINTI = [
+  "İZMİR ELEKTRİK KESİNTİSİ 20 EKİM SALI |GEDİZ UYARDI: İzmir'de 24 ilçede şalterler iniyor",
+  "İzmir elektrik kesintisi listesi: 20 Ekim Salı İzmir'de elektrikler ne zaman gelecek? Gediz Elektrik ilçe ilçe kesinti programı",
+];
+
+// efbb9684: KNOWN RESIDUAL. The scorer still prefers the vague
+// 'Arap Koalisyonu'ndan Yemen açıklaması'; no rule is added for it (the
+// incumbent logic only decides whether a re-pick may replace a stored title).
+const YEMEN = [
+  "Arap ülkeleri son dakika duyurdu! Yemen'e askeri operasyon! Savaşta 'hayati' gelişme",
+  "Arap koalisyonu Husilerin füze ve İHA kapasitesini hedef aldı!",
+  "Arap Koalisyonu'ndan Yemen açıklaması",
+];
+
+// ed61b0cb: two question headlines, nothing acceptable.
+const MASTERCHEF = [
+  "Masterchef kim elendi, kim gitti?",
+  "MasterChef'te kim elendi? 1 Kasım 2026 MasterChef'te kim elendi, kim kazandı? MasterChef'e veda eden isim...",
+];
+
+// The stored titles the clusters carried at different points of the incident.
+const BEDELLI_V1_INCUMBENT = "Bedelli askerlik ve hac için bireysel emeklilik birikimi çekilebilecek";
+const BEDELLI_FRAGMENT = "Bedelli askerlikte yeni dönem";
+const BEDELLI_BEST = "Bedelli askerlik yapacaklara BES kolaylığı: Birikimden para çekilebilecek";
+const ALTIN_V1_INCUMBENT = "Taş ve Tüy, Altın Portakal’da altı ödül kazandı";
+const ALTIN_FRAGMENT = "Altın Portakal 'Taş ve Tüy'e";
+const ALTIN_BEST = "Altın Portakal’da ödüller sahiplerini buldu: Altın Portakal’da 'Taş ve Tüy' zaferi";
+
+describe("pickNeutralTitle (hunt 16): dedupe, short-title penalty", () => {
+  it("97575687: the title that is two of six members no longer wins on its twin", () => {
+    const picked = pickNeutralTitle(asMembers(BEDELLI));
+    expect(picked).not.toBe(BEDELLI_FRAGMENT);
+    expect(picked).toMatch(/BES|birikim/i);
+    expect(picked).toBe(BEDELLI_BEST);
+  });
+
+  it("ec900023: never the 28-character fragment; a >= 40-character 'Taş ve Tüy' title", () => {
+    const picked = pickNeutralTitle(asMembers(ALTIN_PORTAKAL));
+    expect(picked).not.toBe(ALTIN_FRAGMENT);
+    expect(picked).not.toBeNull();
+    expect(picked!.length).toBeGreaterThanOrEqual(40);
+    expect(picked).toContain("Taş ve Tüy");
+    expect(picked).toBe(ALTIN_BEST);
+  });
+
+  it("is independent of the member order (newest-first, as the cron fetches them)", () => {
+    expect(pickNeutralTitle(asMembers([...BEDELLI].reverse()))).toBe(BEDELLI_BEST);
+    expect(pickNeutralTitle(asMembers([...ALTIN_PORTAKAL].reverse()))).toBe(ALTIN_BEST);
+  });
+
+  it("two copies of a title cannot out-vote a distinct one (duplicates count once)", () => {
+    // Both are over the 45-character short-title threshold, so only the dedupe
+    // separates them. Without it the twins (jaccard 1.0 against each other)
+    // win; with it the two distinct titles tie on centrality and the first
+    // listed (the longer one) wins.
+    const longer = "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı, 4 kişi serbest";
+    const twin = "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı";
+    expect(pickNeutralTitle(asMembers([longer, twin, twin]))).toBe(longer);
+    // Folding-equal copies (case, punctuation, diacritics) are copies too.
+    expect(
+      pickNeutralTitle(asMembers([longer, twin, "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı!"])),
+    ).toBe(longer);
+  });
+
+  it("keeps the FIRST occurrence of a duplicated title", () => {
+    const picked = pickNeutralTitle(
+      asMembers([
+        "Meclis'te bütçe görüşmeleri başladı ve tartışmalar sürüyor",
+        "MECLİS'TE BÜTÇE GÖRÜŞMELERİ BAŞLADI ve tartışmalar sürüyor",
+      ]),
+    );
+    expect(picked).toBe("Meclis'te bütçe görüşmeleri başladı ve tartışmalar sürüyor");
+  });
+
+  it("a very short title loses to a longer one at equal centrality", () => {
+    const picked = pickNeutralTitle(
+      asMembers(["Meclis bütçe görüşmeleri başladı", "Meclis bütçe görüşmeleri başladı, muhalefet itiraz etti"]),
+    );
+    expect(picked).toBe("Meclis bütçe görüşmeleri başladı, muhalefet itiraz etti");
+  });
+
+  it("bbe1ab28 and ed61b0cb have no acceptable member: null without the floor", () => {
+    expect(pickNeutralTitle(asMembers(IZMIR_KESINTI))).toBeNull();
+    expect(pickNeutralTitle(asMembers(MASTERCHEF))).toBeNull();
+  });
+});
+
+describe("isAcceptableNeutral (hunt 16): residual pipe and partial shouting", () => {
+  it("rejects the bbe1ab28 partly shouted '|' headline, raw and cleaned", () => {
+    const shout = IZMIR_KESINTI[0]!;
+    expect(isAcceptableNeutral(shout, [])).toBe(false);
+    // cleanHeadline keeps it: the text before the pipe is longer than 25 characters.
+    expect(cleanHeadline(shout)).toContain("|");
+    expect(isAcceptableNeutral(cleanHeadline(shout), IZMIR_KESINTI.slice(1))).toBe(false);
+  });
+
+  it("rejects a residual pipe on its own (no shouting)", () => {
+    const pipeOnly = "İzmir elektrik kesintisi 20 Ekim | Gediz uyardı: 24 ilçede kesinti";
+    expect(isAcceptableNeutral(pipeOnly, [])).toBe(false);
+    expect(isAcceptableNeutral("İzmir elektrik kesintisi 20 Ekim │ Gediz uyardı: 24 ilçede kesinti", [])).toBe(false);
+    expect(isAcceptableNeutral("İzmir elektrik kesintisi 20 Ekim: Gediz uyardı: 24 ilçede kesinti", [])).toBe(true);
+  });
+
+  it("rejects a run of three shouted words on its own (no pipe)", () => {
+    const capsOnly = "İZMİR ELEKTRİK KESİNTİSİ: Gediz uyardı, 24 ilçede şalterler iniyor";
+    expect(isAcceptableNeutral(capsOnly, [])).toBe(false);
+    expect(isAcceptableNeutral("İzmir elektrik kesintisi: Gediz uyardı, 24 ilçede şalterler iniyor", [])).toBe(true);
+  });
+
+  it("the shouted-word run ignores apostrophe suffixes and edge punctuation", () => {
+    expect(isAcceptableNeutral("TBMM, CHP ve AKP'nin teklifi görüşüldü bugün", [])).toBe(true);
+    expect(isAcceptableNeutral("Bugün TBMM, CHP, AKP'nin ortak teklifi görüşüldü", [])).toBe(false);
+    expect(isAcceptableNeutral("Bugün TBMM'de CHP’li AKP'li vekiller kavga etti", [])).toBe(false);
+  });
+
+  it("a short, lowercase or numeric word resets the run", () => {
+    // 'AK' has two letters, 'ABD' three; '2026' has none.
+    expect(isAcceptableNeutral("TBMM CHP AK Parti grubu toplandı bugün", [])).toBe(true);
+    expect(isAcceptableNeutral("TBMM 2026 CHP bütçe görüşmeleri NATO zirvesi", [])).toBe(true);
+    expect(isAcceptableNeutral("TBMM CHP grubu toplandı ve bütçeyi görüştü", [])).toBe(true);
+  });
+
+  it("still accepts headlines with acronyms (a run of one or two)", () => {
+    expect(isAcceptableNeutral("CHP ve AK Parti TBMM'de uzlaştı", [])).toBe(true);
+    expect(isAcceptableNeutral("NATO zirvesi Ankara’da başladı", [])).toBe(true);
+    expect(isAcceptableNeutral("AFAD: Ege'de 4.7 büyüklüğünde deprem", [])).toBe(true);
+    expect(isAcceptableNeutral("TBMM Genel Kurulu'nda bütçe görüşmeleri başladı", [])).toBe(true);
+    expect(isAcceptableNeutral("TBMM CHP grubu toplandı ve bütçeyi görüştü", [])).toBe(true);
+  });
+
+  it("applies to generated (LLM) text too", () => {
+    const opts = { generated: true };
+    expect(isAcceptableNeutral("İzmir elektrik kesintisi 20 Ekim | Gediz uyardı: 24 ilçede kesinti", [], opts)).toBe(false);
+    expect(isAcceptableNeutral("İZMİR ELEKTRİK KESİNTİSİ: Gediz uyardı, 24 ilçede şalterler iniyor", [], opts)).toBe(false);
+    expect(isAcceptableNeutral("CHP ve AK Parti TBMM'de uzlaştı", [], opts)).toBe(true);
+  });
+
+  it("the floor still forgives nothing the hard rules reject: a pipe or shouted run is a hard defect", () => {
+    // Floor picks prefer a soft-defect candidate (a question) to a hard-defect one.
+    const picked = pickNeutralTitle(
+      asMembers([
+        "İZMİR ELEKTRİK KESİNTİSİ 20 EKİM SALI |GEDİZ UYARDI: İzmir'de 24 ilçede şalterler iniyor",
+        "İzmir'de elektrik kesintisi ne zaman bitecek, Gediz Elektrik ne açıkladı?",
+      ]),
+      { floor: true },
+    );
+    expect(picked).toBe("İzmir'de elektrik kesintisi ne zaman bitecek, Gediz Elektrik ne açıkladı?");
+  });
+});
+
+describe("pickNeutralTitle { incumbent }: a re-pick is conservative", () => {
+  it("exports a 0.05 margin for a short stored title and a 0.20 margin from 45 characters up", () => {
+    expect(REPICK_MARGIN).toBe(0.05);
+    expect(REPICK_MARGIN_FULL_LENGTH).toBe(0.2);
+    expect(FULL_LENGTH_TITLE_CHARS).toBe(45);
+    expect(REPICK_MARGIN_FULL_LENGTH).toBeGreaterThan(REPICK_MARGIN);
+  });
+
+  it("97575687: the v1 incumbent is kept, never replaced by the fragment or a near-tie", () => {
+    const picked = pickNeutralTitle(asMembers(BEDELLI), { incumbent: BEDELLI_V1_INCUMBENT });
+    expect(picked).not.toBe(BEDELLI_FRAGMENT);
+    expect(picked).toBe(BEDELLI_V1_INCUMBENT);
+  });
+
+  it("97575687: the #156 fragment is replaced by the BES title", () => {
+    const picked = pickNeutralTitle(asMembers(BEDELLI), { incumbent: BEDELLI_FRAGMENT });
+    expect(picked).toMatch(/BES|birikim/i);
+    expect(picked).not.toBe(BEDELLI_FRAGMENT);
+  });
+
+  it("ec900023: the v1 incumbent is kept unchanged (the best title wins by less than the margin)", () => {
+    expect(pickNeutralTitle(asMembers(ALTIN_PORTAKAL), { incumbent: ALTIN_V1_INCUMBENT })).toBe(ALTIN_V1_INCUMBENT);
+    expect(pickNeutralTitle(asMembers([...ALTIN_PORTAKAL].reverse()), { incumbent: ALTIN_V1_INCUMBENT })).toBe(
+      ALTIN_V1_INCUMBENT,
+    );
+  });
+
+  it("ec900023: the #156 fragment is replaced by a >= 40-character 'Taş ve Tüy' title", () => {
+    const picked = pickNeutralTitle(asMembers(ALTIN_PORTAKAL), { incumbent: ALTIN_FRAGMENT });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(ALTIN_FRAGMENT);
+    expect(picked!.length).toBeGreaterThanOrEqual(40);
+    expect(picked).toContain("Taş ve Tüy");
+  });
+
+  it("returns the incumbent string exactly as passed (no trimming) when it is kept", () => {
+    const padded = `  ${ALTIN_V1_INCUMBENT}  `;
+    expect(pickNeutralTitle(asMembers(ALTIN_PORTAKAL), { incumbent: padded })).toBe(padded);
+  });
+
+  it("an incumbent that fails the gate and no acceptable member: null (the caller keeps the stored title)", () => {
+    const withQuestion = "Bakırköy soruşturmasında kimler tutuklandı, süreç nasıl işleyecek?";
+    expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent: withQuestion })).toBeNull();
+    expect(pickNeutralTitle(asMembers(IZMIR_KESINTI), { incumbent: withQuestion })).toBeNull();
+  });
+
+  it("an acceptable incumbent and no acceptable member: the incumbent", () => {
+    const incumbent = "MasterChef'te elenen isim belli oldu";
+    expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent })).toBe(incumbent);
+  });
+
+  it("a blank incumbent behaves like no incumbent", () => {
+    for (const incumbent of [null, undefined, "", "   "]) {
+      expect(pickNeutralTitle(asMembers(BEDELLI), { incumbent })).toBe(BEDELLI_BEST);
+      expect(pickNeutralTitle(asMembers(MASTERCHEF), { incumbent })).toBeNull();
+    }
+  });
+
+  it("an incumbent that is a generic placeholder is replaced", () => {
+    expect(pickNeutralTitle(asMembers(BEDELLI), { incumbent: "Kısa haberler" })).toBe(BEDELLI_BEST);
+  });
+
+  it("an incumbent with a surviving lead-in is replaced", () => {
+    expect(pickNeutralTitle(asMembers(BEDELLI), { incumbent: "Flaş: Bedelli askerlik düzenlemesi Meclis'te" })).toBe(
+      BEDELLI_BEST,
+    );
+  });
+
+  it("a shouted or piped incumbent is replaced by an acceptable member", () => {
+    expect(pickNeutralTitle(asMembers(BEDELLI), { incumbent: "BEDELLİ ASKERLİK İÇİN YENİ DÖNEM BAŞLADI" })).toBe(
+      BEDELLI_BEST,
+    );
+    expect(pickNeutralTitle(asMembers(BEDELLI), { incumbent: "Bedelli askerlik | BES birikimi çekilebilecek" })).toBe(
+      BEDELLI_BEST,
+    );
+  });
+
+  it("a stored title that is also a member scores like that member and is kept when it is the best", () => {
+    expect(pickNeutralTitle(asMembers(BEDELLI), { incumbent: BEDELLI_BEST })).toBe(BEDELLI_BEST);
+    expect(pickNeutralTitle(asMembers(ALTIN_PORTAKAL), { incumbent: ALTIN_BEST })).toBe(ALTIN_BEST);
+  });
+
+  it("without an incumbent the result is the plain pick", () => {
+    expect(pickNeutralTitle(asMembers(ALTIN_PORTAKAL), {})).toBe(pickNeutralTitle(asMembers(ALTIN_PORTAKAL)));
+  });
+
+  it("is idempotent: re-picking with the pick as incumbent returns it", () => {
+    const sets: Array<[string, readonly string[]]> = [
+      ["BAKIRKOY", BAKIRKOY],
+      ["HAKKARI", HAKKARI],
+      ["IL_100", IL_100],
+      ["SEUL", SEUL],
+      ["RUBIO", RUBIO],
+      ["GOKTAS", GOKTAS],
+      ["COP31", COP31],
+      ["BEDELLI", BEDELLI],
+      ["ALTIN_PORTAKAL", ALTIN_PORTAKAL],
+      ["YEMEN (known residual, but stable)", YEMEN],
+    ];
+    for (const [label, set] of sets) {
+      const p = pickNeutralTitle(asMembers(set));
+      expect(p, label).not.toBeNull();
+      expect(pickNeutralTitle(asMembers(set), { incumbent: p }), label).toBe(p);
+    }
   });
 });

@@ -527,3 +527,67 @@ describe("ShareButton — channel group", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+// h16-mobile-2: the pills were ~28 px tall on a phone. Below sm every control
+// in the share row gets a 44 px minimum height (channel chips also a 44 px
+// minimum width, so "X" is not a 30 px sliver); sm and up is unchanged because
+// every addition is a max-sm: token.
+describe("ShareButton — mobile tap targets (h16-mobile-2)", () => {
+  const UUID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+  const html = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
+
+  const tags = html.match(/<(?:button|a)\b[^>]*>/g) ?? [];
+  const tokensOf = (tag: string | undefined) =>
+    (/\bclass="([^"]*)"/.exec(tag ?? "")?.[1] ?? "").split(/\s+/).filter(Boolean);
+  const desktopTokens = (tag: string | undefined) =>
+    tokensOf(tag).filter((t) => !t.startsWith("max-sm:"));
+
+  it("renders all 3 buttons and 5 anchors for a uuid cluster", () => {
+    expect(tags.filter((t) => t.startsWith("<button"))).toHaveLength(3);
+    expect(tags.filter((t) => t.startsWith("<a"))).toHaveLength(5);
+  });
+
+  it("gives every <button> and <a> max-sm:min-h-11 and max-sm:justify-center", () => {
+    expect(tags).toHaveLength(8);
+    for (const tag of tags) {
+      const tokens = tokensOf(tag);
+      expect(tokens, tag).toContain("max-sm:min-h-11");
+      expect(tokens, tag).toContain("max-sm:justify-center");
+    }
+  });
+
+  it("gives every channel chip max-sm:min-w-11 as well", () => {
+    for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
+      const tag = tags.find((t) => t.includes(`aria-label="${label} ile paylaş"`));
+      expect(tag, label).toBeDefined();
+      expect(tokensOf(tag), label).toContain("max-sm:min-w-11");
+    }
+  });
+
+  it("keeps the Paylaş button and Kartı indir link on the exact shared chip classes (desktop unchanged)", () => {
+    const channel = tags.find((t) => t.includes('aria-label="X ile paylaş"'));
+    const share = tags.find((t) => t.startsWith("<button") && !t.includes("title="));
+    const card = tags.find((t) => t.includes('download="tayf-kart.png"'));
+    expect(share).toBeDefined();
+    expect(card).toBeDefined();
+    expect(tokensOf(share)).toEqual(tokensOf(channel));
+    expect(tokensOf(card)).toEqual(tokensOf(channel));
+    expect(desktopTokens(channel)).toEqual([
+      "inline-flex",
+      "items-center",
+      "gap-1.5",
+      "rounded-full",
+      "border",
+      "border-border/60",
+      "bg-muted/40",
+      "hover:bg-muted/70",
+      "px-3",
+      "py-1.5",
+      "text-[11px]",
+      "font-medium",
+      "text-muted-foreground",
+      "hover:text-foreground",
+      "transition-colors",
+    ]);
+  });
+});

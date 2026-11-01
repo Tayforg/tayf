@@ -21,6 +21,7 @@ import { BalanceChip } from "@/components/story/balance-chip";
 import { ShareButton } from "@/components/story/share-button";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
+import { CompareButton } from "@/components/compare/compare-button";
 import {
   bookmarkChipSuffix,
   bookmarkStoryLabel,
@@ -1011,6 +1012,252 @@ describe("ClusterDetailPage — header age", () => {
 
     expect(parsed.datePublished).toBe("2026-09-06T10:00:00.000Z");
     expect(parsed.dateModified).toBe("2026-09-06T12:00:00.000Z");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h16-mobile-2: the header's meta + action row was one flex-wrap row of ~28 px
+// pills and 11 px links. It is now a wrapper of two display:contents groups:
+// from sm up `contents` makes it the same single flex row as before; below sm
+// each group is its own full-width flex row, so the actions get their own line
+// with 44 px targets and no bullet can end a line.
+// ---------------------------------------------------------------------------
+type TreeElement = {
+  type?: unknown;
+  props: Record<string, unknown> & { children?: ReactNode };
+};
+
+/** Every element of the tree (depth-first, document order) matching `pred`. */
+function findAllElements(
+  node: unknown,
+  pred: (el: TreeElement) => boolean,
+  out: TreeElement[] = [],
+): TreeElement[] {
+  if (Array.isArray(node)) {
+    for (const child of node) findAllElements(child, pred, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as TreeElement;
+    if (el.props && pred(el)) out.push(el);
+    if (el.props?.children !== undefined) findAllElements(el.props.children, pred, out);
+  }
+  return out;
+}
+
+/** The direct children of an element, flattened one level. */
+function childList(el: TreeElement): unknown[] {
+  return ([] as unknown[]).concat(el.props.children ?? []);
+}
+
+const classTokens = (el: { props: Record<string, unknown> } | undefined): string[] =>
+  (typeof el?.props.className === "string" ? el.props.className : "")
+    .split(/\s+/)
+    .filter(Boolean);
+
+describe("ClusterDetailPage — mobile tap targets (h16-mobile-2)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function detail(wireOverrides: Partial<ClusterDetail["wire"]> = {}): ClusterDetail {
+    const distribution = emptyDistribution();
+    distribution.pro_government = 2;
+    distribution.center = 2;
+    distribution.opposition = 2;
+    const s0 = makeSource({ id: "s0", slug: "s0", name: "Kaynak 0" });
+    const s1 = makeSource({ id: "s1", slug: "s1", name: "Kaynak 1" });
+    return {
+      cluster: makeCluster({ bias_distribution: distribution }),
+      members: [
+        makeMember("a0", s0, "2026-09-06T10:00:00.000Z"),
+        makeMember("a1", s1, "2026-09-06T12:00:00.000Z"),
+      ],
+      allSources: [s0, s1],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: 2,
+        memberCount: 2,
+        ...wireOverrides,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  async function renderTree(d: ClusterDetail = detail()) {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime("2026-09-06T12:30:00Z");
+    getClusterDetail.mockResolvedValue(d);
+    return ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+  }
+
+  const actionsOf = (tree: unknown) =>
+    findAllElements(tree, (el) => el.props["data-row"] === "actions");
+
+  it("keeps ShareButton, BookmarkButton, CompareButton and the Düzeltme link out of the meta group", async () => {
+    const tree = await renderTree();
+    const row = findMetaRow(tree);
+    expect(row).not.toBeNull();
+    for (const type of [ShareButton, BookmarkButton, CompareButton]) {
+      expect(hasElementOfType(row!.props.children, type)).toBe(false);
+    }
+    expect(collectHrefs(row!.props.children).some((h) => h.includes("#duzeltme"))).toBe(false);
+    expect(collectText(row!.props.children).join("")).not.toContain("Düzeltme talebi");
+  });
+
+  it("puts the actions in their own data-row=actions group, without the meta text classes", async () => {
+    const tree = await renderTree();
+    const groups = actionsOf(tree);
+    expect(groups).toHaveLength(1);
+    const group = groups[0]!;
+    expect(String(group.props.className)).not.toContain(
+      "text-[12px] font-medium text-muted-foreground",
+    );
+    expect(classTokens(group)).not.toContain("text-[12px]");
+    expect(classTokens(group)).not.toContain("text-muted-foreground");
+
+    expect(hasElementOfType(group.props.children, ShareButton)).toBe(true);
+    expect(hasElementOfType(group.props.children, BookmarkButton)).toBe(true);
+    expect(hasElementOfType(group.props.children, CompareButton)).toBe(true);
+    expect(collectHrefs(group.props.children)).toContain("/metodoloji?cluster=c1#duzeltme");
+    expect(collectText(group.props.children).join("")).toContain("Düzeltme talebi");
+  });
+
+  it("makes both groups display:contents from sm up and their own full-width flex row below sm", async () => {
+    const tree = await renderTree();
+    const row = findMetaRow(tree);
+    const group = actionsOf(tree)[0];
+    expect(row).not.toBeNull();
+    expect(group).toBeDefined();
+    const shared = [
+      "contents",
+      "max-sm:flex",
+      "max-sm:basis-full",
+      "max-sm:flex-wrap",
+      "max-sm:items-center",
+      "max-sm:gap-2",
+      "font-medium",
+    ];
+    for (const token of shared) {
+      expect(classTokens(row!), `meta ${token}`).toContain(token);
+      expect(classTokens(group), `actions ${token}`).toContain(token);
+    }
+    expect(classTokens(row!)).toEqual(
+      expect.arrayContaining(["text-[12px]", "text-muted-foreground"]),
+    );
+  });
+
+  it("nests the two groups as siblings in one flex-wrap gap-2 wrapper (the old single row)", async () => {
+    const tree = await renderTree();
+    const row = findMetaRow(tree);
+    const group = actionsOf(tree)[0];
+    const wrappers = findAllElements(tree, (el) => {
+      const kids = childList(el);
+      return kids.includes(row) && kids.includes(group);
+    });
+    expect(wrappers).toHaveLength(1);
+    expect(classTokens(wrappers[0])).toEqual(["flex", "flex-wrap", "items-center", "gap-2"]);
+    // meta group first, actions second: the order of the old single row.
+    const kids = childList(wrappers[0]!);
+    expect(kids.indexOf(row)).toBeLessThan(kids.indexOf(group));
+  });
+
+  it("renders no standalone • flex child: each bullet lives inside its own span", async () => {
+    const tree = await renderTree();
+    const row = findMetaRow(tree)!;
+    const direct = childList(row as TreeElement).flat(Infinity) as unknown[];
+    const standalone = direct.filter(
+      (c) => c && typeof c === "object" && (c as TreeElement).props?.children === "•",
+    );
+    expect(standalone).toEqual([]);
+
+    const bullets = findAllElements(row, (el) => el.props.children === "•");
+    expect(bullets).toHaveLength(2);
+    for (const bullet of bullets) {
+      expect(bullet.props["aria-hidden"]).toBe("true");
+      expect(bullet.props.className).toBe("mr-2");
+    }
+  });
+
+  it("prefixes the update cue and the kaynak count with their bullet inside one span", async () => {
+    const tree = await renderTree();
+    const row = findMetaRow(tree)!;
+    const spans = findAllElements(row, (el) => el.type === "span").map((el) =>
+      collectText(el.props.children).join(""),
+    );
+    expect(spans).toContain("•Güncellendi: 30 dakika önce");
+    expect(spans).toContain("•2 kaynak");
+    // the whole group reads exactly like the old row did, minus the actions.
+    expect(collectText(row.props.children).join("")).toBe(
+      "2 saat önce•Güncellendi: 30 dakika önce•2 kaynak",
+    );
+  });
+
+  it("omits the update-cue bullet together with the cue", async () => {
+    const d = detail();
+    d.members = [
+      makeMember("a0", d.allSources[0]!, "2026-09-06T10:00:00.000Z"),
+      makeMember("a1", d.allSources[1]!, "2026-09-06T10:10:00.000Z"),
+    ];
+    const tree = await renderTree(d);
+    const row = findMetaRow(tree)!;
+    expect(collectText(row.props.children).join("")).toBe("2 saat önce•2 kaynak");
+    expect(findAllElements(row, (el) => el.props.children === "•")).toHaveLength(1);
+  });
+
+  it("keeps the bağımsız başlık link and the wire chip in the meta group, not the actions", async () => {
+    const tree = await renderTree(
+      detail({
+        isWireRedistribution: true,
+        effectiveArticleCount: 5,
+        memberCount: 5,
+        independentHeadlineCount: 2,
+      }),
+    );
+    const row = findMetaRow(tree)!;
+    const group = actionsOf(tree)[0]!;
+    const metaText = collectText(row.props.children).join("");
+    expect(collectHrefs(row.props.children)).toContain("/metodoloji#tek-kaynak");
+    expect(metaText).toContain("2 bağımsız başlık");
+    expect(metaText).toContain("Tek kaynaktan dağıtıldı");
+    const actionText = collectText(group.props.children).join("");
+    expect(actionText).not.toContain("bağımsız başlık");
+    expect(actionText).not.toContain("Tek kaynaktan dağıtıldı");
+    expect(collectHrefs(group.props.children)).not.toContain("/metodoloji#tek-kaynak");
+  });
+
+  it("lifts the Düzeltme talebi link to a 44 px row below sm without changing its look", async () => {
+    const tree = await renderTree();
+    const link = findAllElements(
+      tree,
+      (el) => el.props.href === "/metodoloji?cluster=c1#duzeltme",
+    );
+    expect(link).toHaveLength(1);
+    expect(classTokens(link[0])).toEqual([
+      "inline-flex",
+      "items-center",
+      "max-sm:min-h-11",
+      "text-[11px]",
+      "text-muted-foreground",
+      "underline",
+      "decoration-dotted",
+      "underline-offset-2",
+      "hover:text-foreground",
+    ]);
+  });
+
+  it("lifts the Denge puanı nedir? link to a 44 px row below sm", async () => {
+    const tree = await renderTree();
+    const link = findAllElements(tree, (el) => el.props.href === "/metodoloji#denge-puani");
+    expect(link).toHaveLength(1);
+    const tokens = classTokens(link[0]);
+    for (const token of ["inline-flex", "items-center", "max-sm:min-h-11"]) {
+      expect(tokens).toContain(token);
+    }
+    for (const token of ["underline", "decoration-dotted", "underline-offset-2", "hover:text-foreground"]) {
+      expect(tokens).toContain(token);
+    }
   });
 });
 
