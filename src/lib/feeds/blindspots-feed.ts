@@ -1,4 +1,5 @@
 import { ZONE_META } from "@/lib/bias/config";
+import { dominantZonePercent } from "@/lib/bias/zone-summary";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
 import {
   buildRssXml,
@@ -30,13 +31,15 @@ export function blindspotRssItem(
     medium: "feed",
     campaign: "kor_nokta",
   });
-  // The exact voting tally dominantZone/dominantPct are derived from, so the
-  // zone line agrees with the "%N" in the prefix; "N kaynak" stays the full
-  // source count, as on the card.
+  // The exact voting tally dominantZone/dominantPct are derived from. Both the
+  // zone line and the "%N" in the prefix come from it, and N is the same
+  // largest-remainder percent the card's bar and chip print (11/1/1 is 84,
+  // not Math.round's 85); "N kaynak" stays the full source count, as on the
+  // card. dominantPct is only the sort key, never copy.
   const zoneLine = formatZoneLine(bundle.votingZoneCounts);
   const n = bundle.sources.length;
   const zoneLabel = ZONE_META[bundle.dominantZone].label;
-  const pct = Math.round(bundle.dominantPct * 100);
+  const pct = dominantZonePercent(bundle.votingZoneCounts, bundle.dominantZone);
   const prefix = `Kör nokta: ağırlıkla ${zoneLabel} kaynakları (%${pct}). `;
 
   return {

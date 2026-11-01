@@ -1,5 +1,5 @@
 import { tallyZones, zoneOf } from "@/lib/bias/config";
-import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import { isOnlyZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
 import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import type { MediaDnaZone } from "@/types";
@@ -95,14 +95,14 @@ export function safeEmbedTitle(raw: string, fallback: string): string {
 function ribbonOf(cluster: ClusterDetail["cluster"]): string | null {
   if (!cluster.is_blindspot) return null;
   // Same rule as buildShareText / the OG card: no recorded side falls back to
-  // the tallied dominant zone, and "sadece" only holds at an exact 100% share
-  // (the DB flag fires from 80%).
+  // the tallied dominant zone, and "sadece" only holds when the other two
+  // zones have no source at all (decided on the counts, not on a rounded 100;
+  // the DB flag fires from 80%).
   const tally = tallyZones(cluster.bias_distribution);
   const zone: MediaDnaZone = cluster.blindspot_side
     ? zoneOf(cluster.blindspot_side)
     : (tally.dominantZone ?? "iktidar");
-  const share = Math.round(tally.dominantShare * 100);
-  return share === 100
+  return isOnlyZone(zoneCountsOf(cluster.bias_distribution), zone)
     ? `Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
     : `Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
 }

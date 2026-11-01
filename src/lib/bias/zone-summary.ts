@@ -39,3 +39,33 @@ export function zonePercents(
   );
   return { iktidar, bagimsiz, muhalefet };
 }
+
+/**
+ * The zone's share of the voting sources as a whole percent, from the SAME
+ * largest-remainder rounding as the bars and tiles (`zonePercents`): 11 of 13
+ * reads 84 here and in the bar, where `Math.round(11 / 13 * 100)` read 85.
+ * Every chip, ribbon, RSS line and digest line that names a zone's share must
+ * come through here (tests/guards/zone-percent-rounding.test.ts) so the number
+ * next to a bar can never disagree with the bar. 0 when nobody voted.
+ */
+export function dominantZonePercent(
+  counts: Record<MediaDnaZone, number>,
+  zone: MediaDnaZone,
+): number {
+  return zonePercents(counts)[zone];
+}
+
+/**
+ * True when `zone` has at least one source and the other two zones have
+ * exactly none: the only honest basis for a "sadece X yazdı" (only X wrote)
+ * claim. It is decided on the COUNTS, never on a rounded percent: 250/1/0
+ * rounds to 100 for the big zone while another zone still has a source.
+ */
+export function isOnlyZone(
+  counts: Record<MediaDnaZone, number>,
+  zone: MediaDnaZone,
+): boolean {
+  return ZONE_ORDER.every((other) =>
+    other === zone ? counts[other] > 0 : counts[other] === 0,
+  );
+}

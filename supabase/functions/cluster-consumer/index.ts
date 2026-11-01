@@ -36,6 +36,7 @@ import {
   MINHASH_VERSION,
   serializeSignature,
   headlineTokens,
+  normalizeTurkish,
   strictFingerprint,
   titleTokens,
   type FingerprintBundle,
@@ -44,7 +45,7 @@ import {
 import { extractEntities } from "../_shared/cluster/entities.ts";
 import { bandKeys, LSH_BANDS } from "../_shared/cluster/lsh.ts";
 import { TfidfIndex } from "../_shared/cluster/tfidf.ts";
-import { headlineOnlyScore, score } from "../_shared/cluster/ensemble.ts";
+import { headlineLane, headlineOnlyScore, score } from "../_shared/cluster/ensemble.ts";
 import {
   CONTEXT_STICKY_HOURS,
   CONTEXT_STICKY_MAX,
@@ -236,6 +237,9 @@ interface HeadlineMember {
   id: string;
   publishedMs: number;
   sourceId: string | null;
+  // The raw title, kept by reference only (no tokenising at context build, CPU
+  // is tight): sameSourceDupEvidence compares folded titles from it.
+  title: string;
   tokens: HeadlineTokens;
 }
 
@@ -688,6 +692,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
         id: art.id,
         publishedMs: ms,
         sourceId: art.source_id,
+        title: art.title,
         tokens: headlineTokens(art.title),
       })),
     );
@@ -778,6 +783,7 @@ function addMemberToIndices(
     id: article.id,
     publishedMs: Date.parse(article.published_at),
     sourceId: article.source_id,
+    title: article.title,
     tokens: headlineTokens(article.title),
   });
   if (article.fingerprint) {
@@ -859,6 +865,41 @@ function warnTitleProbeOnce(detail: string) {
   console.warn(
     `[cluster-consumer] cluster_title_probe failed, continuing without it: ${detail}`,
   );
+}
+
+// h14-cluster-1: every live same-source skip leaves one row in cluster_skip_log
+// (migration 140): the skip is otherwise persisted nowhere (no cluster_articles
+// row, the article row untouched), so a wrong skip could only be found in the
+// function logs. Best-effort like the probe: a failed write warns once per
+// isolate and never fails the message.
+let skipLogWarned = false;
+
+function warnSkipLogOnce(detail: string) {
+  if (skipLogWarned) return;
+  skipLogWarned = true;
+  console.warn(`[cluster-consumer] cluster_skip_log insert failed, continuing: ${detail}`);
+}
+
+async function recordSkip(
+  articleId: string,
+  block: { clusterId: string; score: number; evidence: DupEvidence },
+): Promise<void> {
+  try {
+    const res = await supabase.from("cluster_skip_log").upsert(
+      [
+        {
+          article_id: articleId,
+          cluster_id: block.clusterId,
+          score: block.score,
+          reason: `same-source-duplicate/${block.evidence}`,
+        },
+      ],
+      { onConflict: "article_id", ignoreDuplicates: true },
+    );
+    if (res.error) warnSkipLogOnce(res.error.message);
+  } catch (err) {
+    warnSkipLogOnce(err instanceof Error ? err.message : String(err));
+  }
 }
 
 // Reads one probe hit's members and registers the cluster in `ctx` the way
@@ -1165,6 +1206,69 @@ function wouldDuplicate(
   return existingSources.has(article.source_id);
 }
 
+// What ties an incoming article to a member of the SAME source in a cluster
+// that blocked it as a duplicate-source. The same-source skip (h12-cluster-1)
+// is taken only on one of these; a bare ensemble score is not enough, because
+// a templated MinHash false match scored 0.85 for a different story
+// (h14-cluster-1).
+//   fingerprint   the strict fingerprint equals an indexed member's (clusterArticle's fast path)
+//   exact-title   the folded headline equals a same-source member's, or the
+//                 cluster came from the exact-title probe (its seed headline
+//                 equals this article's)
+//   headline-lane the headline lane fires against a same-source member
+type DupEvidence = "fingerprint" | "exact-title" | "headline-lane";
+
+// Pure and in-memory (no DB read, dry-run safe). Reads the same-source members
+// of the cluster from ctx.headlinesByCluster (the newest HEADLINE_MEMBER_SCAN_MAX)
+// plus the seed and latest rows, and returns the strongest evidence found, or
+// null when nothing ties the article to one of them. Exact-title wins over the
+// lane when different members of the source give both.
+function sameSourceDupEvidence(
+  ctx: ClusterContext,
+  clusterId: string,
+  article: Pick<EnrichedArticle, "id" | "source_id" | "title" | "published_at">,
+  articleHeadline: HeadlineTokens,
+  probeHit: boolean,
+): DupEvidence | null {
+  if (!article.source_id) return null;
+  // A generic headline ("CANLI", "SON DAKIKA") is no identity key: the same
+  // floor the exact-title probe applies.
+  const identifiable = articleHeadline.tokens.size >= TITLE_PROBE_MIN_TOKENS;
+  if (probeHit && identifiable) return "exact-title";
+
+  const members: Array<{ id: string; ms: number; title: string; tokens: HeadlineTokens }> = [];
+  const listed = new Set<string>();
+  for (const m of ctx.headlinesByCluster.get(clusterId) ?? []) {
+    if (m.sourceId !== article.source_id || m.id === article.id) continue;
+    listed.add(m.id);
+    members.push({ id: m.id, ms: m.publishedMs, title: m.title, tokens: m.tokens });
+  }
+  // Seed and latest may fall outside the scan list (older than its newest
+  // HEADLINE_MEMBER_SCAN_MAX); they are the rows the scorer compared against.
+  for (const m of [ctx.seedByCluster.get(clusterId), ctx.latestByCluster.get(clusterId)]) {
+    if (!m || m.source_id !== article.source_id || m.id === article.id || listed.has(m.id)) continue;
+    listed.add(m.id);
+    members.push({ id: m.id, ms: Date.parse(m.published_at), title: m.title, tokens: headlineTokens(m.title) });
+  }
+  if (members.length === 0) return null;
+
+  const articleMs = Date.parse(article.published_at);
+  const articleKey = identifiable ? normalizeTurkish(article.title) : "";
+  let evidence: DupEvidence | null = null;
+  for (const m of members) {
+    if (articleKey !== "" && articleKey === normalizeTurkish(m.title)) return "exact-title";
+    if (
+      evidence === null &&
+      Number.isFinite(articleMs) &&
+      Number.isFinite(m.ms) &&
+      headlineLane(articleHeadline, m.tokens, Math.abs(articleMs - m.ms) / 3_600_000).fired
+    ) {
+      evidence = "headline-lane";
+    }
+  }
+  return evidence;
+}
+
 // The score a scored pair may contribute to the fallback join loop (see the
 // call site). A result below MATCH_THRESHOLD whose entity/tfidf lane was capped
 // by ENTITY_TEXT_FLOOR (components.textFloorCapped) and which that capped lane
@@ -1404,17 +1508,31 @@ async function clusterArticle(
   const sourceLookup = await getSourceLookup();
   const { seedByCluster, latestByCluster, headlinesByCluster, indices } = ctx;
 
-  // h12-cluster-1: remembers the best cluster that matched at MATCH_THRESHOLD
-  // or better but was blocked because it already holds this article's source.
-  // If nothing else takes the article, opening a new cluster would only create
-  // a twin of that cluster, so the article is skipped instead (see the end of
-  // this function). A holder object rather than a `let`, so the narrowing of
-  // the closure-assigned value stays honest for the compiler.
-  const dupBlock: { clusterId: string | null; score: number } = { clusterId: null, score: 0 };
-  const noteDupBlock = (clusterId: string, matchScore: number) => {
+  // h12-cluster-1, narrowed by h14-cluster-1: remembers the first cluster that
+  // matched at MATCH_THRESHOLD or better, was blocked because it already holds
+  // this article's source, AND is tied to that source's own member by strong
+  // evidence (DupEvidence: equal strict fingerprint, equal folded headline, or
+  // the headline lane against that member). If nothing else takes the article,
+  // opening a new cluster would only create a twin of that cluster, so the
+  // article is skipped instead (see the end of this function). A block without
+  // evidence is not recorded: a bare ensemble score is not proof of a
+  // duplicate. #152 skipped on the score alone and dropped two cumhuriyet film
+  // articles ("Muhbir", "Eller Yukarı") as duplicates of the "Suikast Treni"
+  // cluster, matched at 0.85 only through the shared description template; such
+  // an article now falls through to createCluster, as before #152. A holder
+  // object rather than a `let`, so the narrowing of the closure-assigned value
+  // stays honest for the compiler.
+  const dupBlock: { clusterId: string | null; score: number; evidence: DupEvidence | null } = {
+    clusterId: null,
+    score: 0,
+    evidence: null,
+  };
+  const noteDupBlock = (clusterId: string, matchScore: number, evidence: DupEvidence | null) => {
+    if (evidence === null) return;
     if (matchScore >= MATCH_THRESHOLD && dupBlock.clusterId === null) {
       dupBlock.clusterId = clusterId;
       dupBlock.score = matchScore;
+      dupBlock.evidence = evidence;
     }
   };
 
@@ -1430,7 +1548,7 @@ async function clusterArticle(
         // branch can issue a DB read.
         if (wouldDuplicate(ctx, clusterId, article)) {
           blocked.add(clusterId);
-          noteDupBlock(clusterId, 1);
+          noteDupBlock(clusterId, 1, "fingerprint");
           continue;
         }
         return {
@@ -1445,7 +1563,7 @@ async function clusterArticle(
         if (result.skipped) {
           blocked.add(clusterId);
           // An identical item from a source the cluster already holds.
-          if (result.reason === "duplicate-source") noteDupBlock(clusterId, 1);
+          if (result.reason === "duplicate-source") noteDupBlock(clusterId, 1, "fingerprint");
           continue;
         }
         addMemberToIndices(clusterId, article);
@@ -1473,6 +1591,7 @@ async function clusterArticle(
   // context here, before the query vector is built, so the tf-idf corpus is
   // the one the scorer will compare against. Not in a dry run.
   const probeIds = dryRun ? [] : await probeExactTitleClusters(ctx, article);
+  const probeSet = new Set(probeIds);
   const tfidfQuery = ctx.tfidf.query(
     `${article.title || ""} ${article.clusteringDescription || ""}`,
     article.id,
@@ -1763,7 +1882,13 @@ async function clusterArticle(
     // Duplicate-source skip -- record "unchanged" and continue into
     // the existing flow below (which will re-attempt, and re-skip,
     // the same cluster on its own).
-    if (r.reason === "duplicate-source") noteDupBlock(primary.clusterId, primary.score);
+    if (r.reason === "duplicate-source") {
+      noteDupBlock(
+        primary.clusterId,
+        primary.score,
+        sameSourceDupEvidence(ctx, primary.clusterId, article, articleHeadline, probeSet.has(primary.clusterId)),
+      );
+    }
     await recordMarginal(
       buildMarginalRow({
         articleId: article.id,
@@ -1809,7 +1934,11 @@ async function clusterArticle(
       if (dryRun) {
         if (wouldDuplicate(ctx, cand.clusterId, article)) {
           blocked.add(cand.clusterId);
-          noteDupBlock(cand.clusterId, cand.score);
+          noteDupBlock(
+            cand.clusterId,
+            cand.score,
+            sameSourceDupEvidence(ctx, cand.clusterId, article, articleHeadline, probeSet.has(cand.clusterId)),
+          );
           continue;
         }
         return {
@@ -1822,7 +1951,13 @@ async function clusterArticle(
       const result = await addArticleToCluster(sourceLookup, cand.clusterId, article);
       if (result.skipped) {
         blocked.add(cand.clusterId);
-        if (result.reason === "duplicate-source") noteDupBlock(cand.clusterId, cand.score);
+        if (result.reason === "duplicate-source") {
+          noteDupBlock(
+            cand.clusterId,
+            cand.score,
+            sameSourceDupEvidence(ctx, cand.clusterId, article, articleHeadline, probeSet.has(cand.clusterId)),
+          );
+        }
         continue;
       }
       addMemberToIndices(cand.clusterId, article);
@@ -1831,16 +1966,20 @@ async function clusterArticle(
   }
 
   // Nothing took the article, but a cluster that matched it at MATCH_THRESHOLD
-  // or better already holds its source: the article is that source's own
-  // duplicate of the story. A new cluster would be a permanent twin of that
-  // one (Antalya-Alanya otoyolu: 8ab93bbd [18] and 2c9941bd [7]), so skip the
-  // article; the queue message is still archived and counted in `skipped`.
-  // The weak-match case (best score below MATCH_THRESHOLD) never gets here
-  // with the flag set and still opens a cluster.
-  if (dupBlock.clusterId !== null) {
+  // or better already holds its source AND the article is tied to that
+  // source's own member by strong evidence (noteDupBlock above): the article
+  // is that source's own duplicate of the story. A new cluster would be a
+  // permanent twin of that one (Antalya-Alanya otoyolu: 8ab93bbd [18] and
+  // 2c9941bd [7]), so skip the article; the queue message is still archived and
+  // counted in `skipped`, and a live skip is also written to cluster_skip_log.
+  // A source-blocked match without that evidence (a templated MinHash false
+  // match, h14-cluster-1) never sets dupBlock and still opens a cluster, as
+  // does the weak-match case (best score below MATCH_THRESHOLD).
+  if (dupBlock.clusterId !== null && dupBlock.evidence !== null) {
     console.log(
-      `[cluster-consumer] same-source-duplicate skip article=${article.id} cluster=${dupBlock.clusterId} matchScore=${dupBlock.score.toFixed(3)}${dryRun ? " dry-run" : ""}`,
+      `[cluster-consumer] same-source-duplicate skip article=${article.id} cluster=${dupBlock.clusterId} matchScore=${dupBlock.score.toFixed(3)} evidence=${dupBlock.evidence}${dryRun ? " dry-run" : ""}`,
     );
+    if (!dryRun) await recordSkip(article.id, { clusterId: dupBlock.clusterId, score: dupBlock.score, evidence: dupBlock.evidence });
     return { result: "skipped", reason: "same-source-duplicate", score: primary?.score };
   }
 

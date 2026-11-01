@@ -61,6 +61,38 @@ describe("buildShareText", () => {
     );
   });
 
+  it("says 'ağırlıklı', not 'sadece', at 250/1/0 although the share rounds to 100", () => {
+    const text = buildShareText({
+      articleCount: 251,
+      distribution: dist({ pro_government: 250, center: 1 }),
+      isBlindspot: true,
+      blindspotSide: "pro_government",
+    });
+    expect(text).toContain("Kör nokta: iktidar ağırlıklı");
+    expect(text).not.toContain("sadece");
+  });
+
+  it("says 'sadece <zone> yazdı' when the zone is the only one with sources (several categories, one zone)", () => {
+    const text = buildShareText({
+      articleCount: 5,
+      distribution: dist({ pro_government: 3, state_media: 2 }),
+      isBlindspot: true,
+      blindspotSide: "state_media",
+    });
+    expect(text).toContain("Kör nokta: sadece iktidar yazdı");
+  });
+
+  it("does not say 'sadece' when blindspot_side's zone is not the only zone with sources", () => {
+    const text = buildShareText({
+      articleCount: 5,
+      distribution: dist({ pro_government: 5 }),
+      isBlindspot: true,
+      blindspotSide: "opposition",
+    });
+    expect(text).toContain("Kör nokta: muhalefet ağırlıklı");
+    expect(text).not.toContain("sadece");
+  });
+
   it("appends the wire-redistribution suffix when wire.isWireRedistribution is true", () => {
     const text = buildShareText({
       articleCount: 2,

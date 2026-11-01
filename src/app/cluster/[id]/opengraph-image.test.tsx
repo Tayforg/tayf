@@ -207,6 +207,110 @@ describe("cluster opengraph-image", () => {
     expect(text).not.toContain("sadece İktidar yazdı");
   });
 
+  it("prints the zone tile's largest-remainder percent on the ribbon: 11/1/1 reads %84, never Math.round's %85", async () => {
+    // 11/13 = 84.6; the tiles below the title read 84 / 8 / 8.
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail({
+        article_count: 13,
+        bias_distribution: {
+          pro_government: 11,
+          gov_leaning: 0,
+          state_media: 0,
+          center: 1,
+          opposition_leaning: 0,
+          opposition: 1,
+          nationalist: 0,
+          islamist_conservative: 0,
+          pro_kurdish: 0,
+          international: 0,
+        },
+      }),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("KÖR NOKTA — %84 İktidar");
+    expect(text).toContain("%84 · 11");
+    expect(text).not.toContain("%85");
+    expect(text).not.toContain("sadece");
+  });
+
+  it("does not claim 'sadece' at 250/1/0 although the share rounds to 100", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail({
+        article_count: 251,
+        bias_distribution: {
+          pro_government: 250,
+          gov_leaning: 0,
+          state_media: 0,
+          center: 1,
+          opposition_leaning: 0,
+          opposition: 0,
+          nationalist: 0,
+          islamist_conservative: 0,
+          pro_kurdish: 0,
+          international: 0,
+        },
+      }),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("KÖR NOKTA — %100 İktidar");
+    expect(text).not.toContain("sadece");
+  });
+
+  it("uses the ribbon zone's own tile percent when blindspot_side differs from the tally's dominant zone", async () => {
+    // The reported side is muhalefet but iktidar holds 5 of 6 sources. The
+    // ribbon names Muhalefet, so it must carry Muhalefet's tile percent (17),
+    // not the iktidar tally's 83.
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail({
+        article_count: 6,
+        blindspot_side: "opposition",
+        bias_distribution: {
+          pro_government: 5,
+          gov_leaning: 0,
+          state_media: 0,
+          center: 0,
+          opposition_leaning: 0,
+          opposition: 1,
+          nationalist: 0,
+          islamist_conservative: 0,
+          pro_kurdish: 0,
+          international: 0,
+        },
+      }),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("KÖR NOKTA — %17 Muhalefet");
+    expect(text).toContain("%17 · 1");
+    expect(text).not.toContain("%83 Muhalefet");
+    expect(text).not.toContain("sadece");
+  });
+
+  it("says 'sadece <zone> yazdı' for the ribbon zone only when the other two zones have no sources", async () => {
+    // Side muhalefet while the only sources are iktidar: muhalefet is NOT the
+    // only zone, so the 'sadece Muhalefet yazdı' claim would be false.
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail({ blindspot_side: "opposition" }),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).not.toContain("sadece Muhalefet yazdı");
+  });
+
   it("writes the zone tiles in the Turkish prefix form (%80 · 4), never '80% ·'", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail({

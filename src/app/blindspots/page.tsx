@@ -26,6 +26,7 @@ import { getNearBlindspotsSafe } from "@/lib/clusters/near-blindspots-query";
 import { buildSilenceDigest } from "@/lib/clusters/silence-digest";
 import { isMailConfigured } from "@/lib/email/resend";
 import { ZONE_META } from "@/lib/bias/config";
+import { dominantZonePercent, isOnlyZone } from "@/lib/bias/zone-summary";
 import { cardEnterClass } from "@/lib/ui/card-enter";
 import {
   getBlindspotsSafe,
@@ -232,9 +233,14 @@ interface BlindspotCardProps {
 // for free.
 function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
   const meta = ZONE_META[bundle.dominantZone];
-  const pct = Math.round(bundle.dominantPct * 100);
+  // Both read the voting tally the card's bar is drawn from, so the chip and
+  // the bar print the same number (largest remainder: 11/1/1 is 84, not
+  // Math.round's 85). "Sadece" is decided on the counts, not on a rounded
+  // 100: 250/1/0 reads 100 but another zone still has a source.
+  const pct = dominantZonePercent(bundle.votingZoneCounts, bundle.dominantZone);
+  const only = isOnlyZone(bundle.votingZoneCounts, bundle.dominantZone);
   const pctLabel = `%${pct}`;
-  const chipLabel = pct < 100 ? `${pctLabel} ${meta.label}` : `Sadece ${meta.label} yazdı`;
+  const chipLabel = only ? `Sadece ${meta.label} yazdı` : `${pctLabel} ${meta.label}`;
 
   return (
     <div
@@ -248,7 +254,7 @@ function BlindspotCard({ bundle, index, isAging }: BlindspotCardProps) {
             <Eye className="h-3 w-3" aria-hidden="true" />
             {chipLabel}
           </span>
-          {pct === 100 && (
+          {only && (
             <span className="text-[11px] text-muted-foreground">
               <span className="font-mono">{pctLabel}</span> tek tarafta
             </span>

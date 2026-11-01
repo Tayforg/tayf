@@ -189,12 +189,15 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
   }
   const pushable = items.filter((i) => i.type !== "blindspot" || blindspotStillHolds(fresh.get(i.clusterId)));
 
-  // Enqueue.
+  // Enqueue. A webhook only receives alerts that QUALIFIED at or after its
+  // creation (alertAt = the moment the alert became visible, not the
+  // cluster's updated_at, which usually precedes it), so registering a hook
+  // never replays the backlog.
   let enqueued = 0;
   for (const hook of hooks) {
     const createdMs = Date.parse(hook.created_at);
     const rows = pushable
-      .filter((i) => Date.parse(i.updatedAt) >= createdMs)
+      .filter((i) => Date.parse(i.alertAt) >= createdMs)
       .map((i) => {
         const alert = toV1AlertRecord(i);
         return {

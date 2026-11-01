@@ -45,9 +45,10 @@ function bundle(overrides: Record<string, unknown> = {}) {
     ],
     dominantZone: "iktidar",
     dominantPct: 0.8,
-    // The feed's zone line reads the bundle's voting tally (the one
-    // dominantZone / dominantPct come from), not a recount of `sources`.
-    votingZoneCounts: { iktidar: 1, bagimsiz: 1, muhalefet: 0 },
+    // The feed's zone line AND its "%N" read the bundle's voting tally (the
+    // one dominantZone / dominantPct come from), not a recount of `sources`.
+    // Coherent with dominantPct 0.8: 4 of 5 voters are in the iktidar zone.
+    votingZoneCounts: { iktidar: 4, bagimsiz: 1, muhalefet: 0 },
     ...overrides,
   };
 }
@@ -172,7 +173,23 @@ describe("GET /blindspots/rss.xml", () => {
   it("describes each item with the blindspot prefix, source count and zone line", async () => {
     const body = await (await callRoute()).text();
     expect(body).toContain("Kör nokta: ağırlıkla İktidar kaynakları (%80).");
-    expect(body).toContain("2 kaynak · İktidar 1 · Bağımsız 1 · Muhalefet 0");
+    expect(body).toContain("2 kaynak · İktidar 4 · Bağımsız 1 · Muhalefet 0");
+  });
+
+  it("prints the largest-remainder percent (%84), not Math.round's %85, for an 11/1/1 tally", async () => {
+    // 11/13 = 84.6: the card's bar reads "İktidar: 11 kaynak (%84)".
+    mocks.blindspots = {
+      bundles: [
+        bundle({
+          dominantPct: 11 / 13,
+          votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+        }),
+      ],
+    };
+    const body = await (await callRoute()).text();
+    expect(body).toContain("Kör nokta: ağırlıkla İktidar kaynakları (%84).");
+    expect(body).not.toContain("(%85)");
+    expect(body).toContain("İktidar 11 · Bağımsız 1 · Muhalefet 1");
   });
 
   it("tags the item link with utm_campaign=kor_nokta and keeps the guid clean", async () => {

@@ -224,6 +224,22 @@ describe("buildEmbedModel", () => {
       expect(m.ribbon).toBe("Kör nokta: sadece iktidar yazdı");
     });
 
+    it("says '… ağırlıklı', not 'sadece', at 250/1/0 although the share rounds to 100", () => {
+      const m = buildEmbedModel(
+        detail({ isBlindspot: true, blindspotSide: "pro_government", distribution: dist({ pro_government: 250, center: 1 }) }),
+        ORIGIN,
+      );
+      expect(m.ribbon).toBe("Kör nokta: iktidar ağırlıklı");
+    });
+
+    it("does not say 'sadece' when the side's zone is not the only zone with sources", () => {
+      const m = buildEmbedModel(
+        detail({ isBlindspot: true, blindspotSide: "opposition", distribution: dist({ pro_government: 5 }) }),
+        ORIGIN,
+      );
+      expect(m.ribbon).toBe("Kör nokta: muhalefet ağırlıklı");
+    });
+
     it("says '… ağırlıklı' below 100%", () => {
       const m = buildEmbedModel(
         detail({ isBlindspot: true, blindspotSide: "opposition", distribution: dist({ opposition: 9, center: 1 }) }),

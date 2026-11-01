@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 // Real (unmocked) normalizer — used only to pre-compute the exact
 // content_hash a fixture item will get, so the migration-041 F2 test below
 // can seed `existingArticleHashPairs` with a value the SUT will actually
@@ -4580,6 +4582,7 @@ describe("headline-less items are dropped and counted [hunt-10 C-entity-only-tit
 type LookupStoredByUrlFn = (
   supabase: unknown,
   urls: readonly string[],
+  slug?: string,
 ) => Promise<{
   byUrl: Map<string, { id: string; title: string; source_id: string }>;
   ok: boolean;
@@ -5078,14 +5081,17 @@ describe("lookupStoredByUrl [hunt-11 A-ingest-cpu]", () => {
     const lookup = await importLookup();
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      let n = 0;
-      const c = client((batch) => {
-        n++;
-        return n === 2
+      // PERSISTENT failure: every request that carries the marked url fails.
+      // A one-shot failure no longer fails the lookup -- the slice is retried
+      // once as two halves and recovers (see the byte cap block below).
+      const urls = manyUrls(250);
+      const marked = urls[120]!; // lives in the second batch of 100
+      const c = client((batch) =>
+        batch.includes(marked)
           ? { data: null, error: { message: "boom" } }
-          : { data: [{ id: "x", url: batch[0], title: "t", source_id: "s" }], error: null };
-      });
-      const res = await lookup(c.supabase, manyUrls(250));
+          : { data: [{ id: "x", url: batch[0], title: "t", source_id: "s" }], error: null },
+      );
+      const res = await lookup(c.supabase, urls);
       expect(res.ok).toBe(false);
     } finally {
       err.mockRestore();
@@ -5123,6 +5129,332 @@ describe("lookupStoredByUrl [hunt-11 A-ingest-cpu]", () => {
     const res = await lookup(c.supabase, manyUrls(3));
     expect(res.ok).toBe(true);
     expect(res.byUrl.size).toBe(0);
+  });
+});
+
+describe("lookupStoredByUrl byte cap [h14-ingest-1]", () => {
+  // 2026-11-01 prod: a changed evrensel feed (urls average 175 chars, max 235)
+  // sent 100 urls in ONE `url=in.(...)` GET, ~19-20 kB percent-encoded, and the
+  // request died with an http2 stream error on every cycle (9 log lines), so the
+  // known-url skip silently degraded to full normalisation. Slices are now cut
+  // by encoded bytes as well as by count, and a failed slice is retried once as
+  // two halves before the lookup gives up (fail-open, unchanged).
+  type PlanFn = (urls: readonly string[], maxCount?: number, maxBytes?: number) => string[][];
+  type Mod = {
+    lookupStoredByUrl: LookupStoredByUrlFn;
+    planUrlLookupSlices: PlanFn;
+    URL_LOOKUP_MAX_BYTES: number;
+  };
+  async function importMod(): Promise<Mod> {
+    return (await import("../../supabase/functions/ingest/index.ts")) as unknown as Mod;
+  }
+
+  // Same fake as the block above, copied rather than shared so the two blocks
+  // stay independent. `in` is async, so an `answer` that returns a rejected
+  // promise (or throws) surfaces as a rejection from `.in(...)`, which is what
+  // supabase-js does when fetch itself fails.
+  function client(answer: (urls: string[]) => unknown | Promise<unknown>) {
+    const ins: Array<{ column: string; urls: string[] }> = [];
+    return {
+      ins,
+      supabase: {
+        from: () => ({
+          select: () => ({
+            in: async (column: string, urls: string[]) => {
+              ins.push({ column, urls: [...urls] });
+              return await answer(urls);
+            },
+          }),
+        }),
+      },
+    };
+  }
+
+  const rowFor = (u: string) => ({ id: `id-${u}`, url: u, title: `T ${u}`, source_id: "s1" });
+  const allRows = (batch: string[]) => ({ data: batch.map(rowFor), error: null });
+  // The rejecting variant: a fetch-layer failure, as a rejected promise.
+  const reject = (message: string) => Promise.reject(new TypeError(message));
+  const encodedLen = (slice: readonly string[]) => encodeURIComponent(`in.(${slice.join(",")})`).length;
+  const shortUrls = (n: number) => Array.from({ length: n }, (_, i) => `https://l.example/a/${i}`);
+
+  // evrensel-shaped urls: 180-235 chars, Turkish letters in the slug (6 encoded
+  // bytes each), unique by the numeric id.
+  const TR_SLUG = "işçiler-ücret-zammı-için-çalışma-şartları-öğretmenler-görev-ğ-";
+  function evrenselUrls(n: number): string[] {
+    return Array.from({ length: n }, (_, i) => {
+      const head = `https://www.evrensel.net/haber/5${String(i).padStart(5, "0")}/`;
+      const target = 180 + ((i * 37) % 56); // 180..235 inclusive
+      let tail = "";
+      while (head.length + tail.length < target) tail += TR_SLUG;
+      return (head + tail).slice(0, target);
+    });
+  }
+
+  // Independent greedy minimum: extend the open slice while the REAL encoded
+  // query value still fits, cut otherwise. Contiguous order-preserving slices
+  // cannot be fewer than this.
+  function greedyMinimum(urls: readonly string[], maxBytes: number, maxCount = 100): number {
+    let count = 0;
+    let open: string[] = [];
+    for (const u of urls) {
+      if (open.length > 0 && (open.length >= maxCount || encodedLen([...open, u]) > maxBytes)) {
+        count++;
+        open = [];
+      }
+      open.push(u);
+    }
+    return open.length > 0 ? count + 1 : count;
+  }
+
+  it("the fixture really is the failing shape: 100 urls of 180-235 chars with Turkish letters, far over the budget in one request", async () => {
+    const { URL_LOOKUP_MAX_BYTES } = await importMod();
+    const urls = evrenselUrls(100);
+    expect(new Set(urls).size).toBe(100);
+    for (const u of urls) {
+      expect(u.length).toBeGreaterThanOrEqual(180);
+      expect(u.length).toBeLessThanOrEqual(235);
+      expect(u).toMatch(/[çğıöşü]/);
+    }
+    expect(encodedLen(urls)).toBeGreaterThan(URL_LOOKUP_MAX_BYTES * 2);
+  });
+
+  it("(1) cuts 100 long Turkish urls into slices under the byte budget, each url once, in order, with the greedy-minimum slice count", async () => {
+    const { lookupStoredByUrl, URL_LOOKUP_MAX_BYTES } = await importMod();
+    expect(URL_LOOKUP_MAX_BYTES).toBe(6_000);
+    const urls = evrenselUrls(100);
+    const c = client((batch) => allRows(batch));
+
+    const res = await lookupStoredByUrl(c.supabase, urls, "evrensel");
+
+    expect(res.ok).toBe(true);
+    expect(res.byUrl.size).toBe(100);
+    for (const call of c.ins) {
+      expect(call.urls.length).toBeLessThanOrEqual(100);
+      expect(encodedLen(call.urls)).toBeLessThanOrEqual(URL_LOOKUP_MAX_BYTES);
+    }
+    // Every url looked up exactly once.
+    const seen = c.ins.flatMap((i) => i.urls);
+    expect(seen).toHaveLength(100);
+    expect(new Set(seen).size).toBe(100);
+    // Order preserved: the slices are contiguous runs of the input order.
+    const reassembled = [...c.ins]
+      .sort((a, b) => urls.indexOf(a.urls[0]!) - urls.indexOf(b.urls[0]!))
+      .flatMap((i) => i.urls);
+    expect(reassembled).toEqual(urls);
+    // No wasted requests.
+    expect(c.ins).toHaveLength(greedyMinimum(urls, URL_LOOKUP_MAX_BYTES));
+  });
+
+  describe("planUrlLookupSlices", () => {
+    it("gives a url longer than the whole budget its own slice and never drops it", async () => {
+      const { planUrlLookupSlices } = await importMod();
+      const huge = `https://huge.example/${"ü".repeat(2000)}`; // ~12 kB encoded
+      const urls = ["https://a.example/1", "https://a.example/2", huge, "https://a.example/3"];
+      const slices = planUrlLookupSlices(urls);
+      expect(slices).toEqual([[urls[0], urls[1]], [huge], [urls[3]]]);
+      expect(slices.flat()).toEqual(urls);
+    });
+
+    it("a lone surrogate does not throw and is still planned (conservative cost)", async () => {
+      const { planUrlLookupSlices } = await importMod();
+      const bad = "https://a.example/\uD800";
+      expect(() => encodeURIComponent(bad)).toThrow(); // the hazard is real
+      const urls = ["https://a.example/1", bad, "https://a.example/2"];
+      expect(() => planUrlLookupSlices(urls)).not.toThrow();
+      expect(planUrlLookupSlices(urls).flat()).toEqual(urls);
+      // The fallback cost is 9 bytes per UTF-16 unit (>= the 6 an encoded
+      // pair needs per unit), so under a tight budget it is isolated, not
+      // waved through as free.
+      expect(planUrlLookupSlices([bad, "https://a.example/1"], 100, 150)).toEqual([
+        [bad],
+        ["https://a.example/1"],
+      ]);
+    });
+
+    it("returns nothing for nothing, and honours the count cap for short urls", async () => {
+      const { planUrlLookupSlices } = await importMod();
+      expect(planUrlLookupSlices([])).toEqual([]);
+      expect(planUrlLookupSlices(shortUrls(250)).map((s) => s.length)).toEqual([100, 100, 50]);
+      expect(planUrlLookupSlices(shortUrls(5), 2).map((s) => s.length)).toEqual([2, 2, 1]);
+    });
+
+    it("cost is exactly the encoded length of the `in.(...)` value: fits at the limit, splits one byte under", async () => {
+      const { planUrlLookupSlices } = await importMod();
+      const urls = ["https://l.example/a/1", "https://l.example/a/2", "https://l.example/a/3"];
+      const exact = encodedLen(urls);
+      expect(planUrlLookupSlices(urls, 100, exact)).toEqual([urls]);
+      expect(planUrlLookupSlices(urls, 100, exact - 1)).toEqual([[urls[0], urls[1]], [urls[2]]]);
+      // A Turkish url costs its percent-encoded length, not its code-unit length.
+      const tr = ["https://l.example/ş", "https://l.example/ç"];
+      expect(planUrlLookupSlices(tr, 100, encodedLen(tr))).toEqual([tr]);
+      expect(planUrlLookupSlices(tr, 100, encodedLen(tr) - 1)).toEqual([[tr[0]], [tr[1]]]);
+    });
+
+    it("never exceeds the budget with more than one url, never loses or reorders, on a mixed-length feed", async () => {
+      const { planUrlLookupSlices } = await importMod();
+      const mixed = Array.from({ length: 400 }, (_, i) => {
+        const pad = (i * 53) % 380;
+        const slug = i % 3 === 0 ? TR_SLUG : "plain-ascii-slug-";
+        return `https://m.example/${i}/${slug.repeat(Math.ceil(pad / slug.length) || 1).slice(0, pad)}`;
+      });
+      for (const budget of [900, 2_500, 6_000]) {
+        const slices = planUrlLookupSlices(mixed, 100, budget);
+        expect(slices.flat()).toEqual(mixed);
+        for (const s of slices) {
+          expect(s.length).toBeLessThanOrEqual(100);
+          if (s.length > 1) expect(encodedLen(s)).toBeLessThanOrEqual(budget);
+        }
+        expect(slices).toHaveLength(greedyMinimum(mixed, budget));
+      }
+    });
+  });
+
+  it("(3) retries a rejected slice once as two halves; when the halves succeed the lookup is ok with every row and no error line", async () => {
+    const { lookupStoredByUrl, planUrlLookupSlices } = await importMod();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const urls = evrenselUrls(100);
+      const slices = planUrlLookupSlices(urls);
+      const first = slices[0]!;
+      expect(first.length).toBeGreaterThan(1);
+      let failed = false;
+      const c = client((batch) => {
+        if (!failed && batch[0] === first[0]) {
+          failed = true;
+          return reject("http2 error: stream error detected");
+        }
+        return allRows(batch);
+      });
+
+      const res = await lookupStoredByUrl(c.supabase, urls, "evrensel");
+
+      expect(res.ok).toBe(true);
+      expect(res.byUrl.size).toBe(100);
+      expect([...res.byUrl.keys()].sort()).toEqual([...urls].sort());
+      // slices + the failed attempt's two halves (the failed attempt itself is one of `slices`)
+      expect(c.ins).toHaveLength(slices.length + 2);
+      const mid = Math.ceil(first.length / 2);
+      expect(c.ins.map((i) => i.urls)).toEqual(
+        expect.arrayContaining([first.slice(0, mid), first.slice(mid)]),
+      );
+      expect(err).not.toHaveBeenCalled();
+      // One recovery notice: slug only, never a url.
+      expect(warn).toHaveBeenCalledTimes(1);
+      const note = warn.mock.calls[0]!.map(String).join(" ");
+      expect(note).toBe("[ingest] evrensel: known-url lookup recovered after split retry");
+    } finally {
+      err.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("(3b) an error envelope on the first attempt recovers the same way", async () => {
+    const { lookupStoredByUrl } = await importMod();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const urls = shortUrls(100);
+      let calls = 0;
+      const c = client((batch) =>
+        ++calls === 1 ? { data: null, error: { message: "canceling statement due to statement timeout" } } : allRows(batch),
+      );
+      const res = await lookupStoredByUrl(c.supabase, urls, "s");
+      expect(res.ok).toBe(true);
+      expect(res.byUrl.size).toBe(100);
+      expect(c.ins.map((i) => i.urls.length)).toEqual([100, 50, 50]);
+      expect(err).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      err.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("(3c) a one-url slice is retried once as is, recovering or failing on that second try", async () => {
+    const { lookupStoredByUrl } = await importMod();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const url = "https://l.example/only";
+      let calls = 0;
+      const transient = client((batch) => (++calls === 1 ? reject("stream error detected") : allRows(batch)));
+      const ok = await lookupStoredByUrl(transient.supabase, [url], "s");
+      expect(ok.ok).toBe(true);
+      expect(transient.ins.map((i) => i.urls)).toEqual([[url], [url]]);
+
+      const persistent = client(() => reject("stream error detected"));
+      const bad = await lookupStoredByUrl(persistent.supabase, [url], "s");
+      expect(bad.ok).toBe(false);
+      expect(persistent.ins).toHaveLength(2); // once more, not a retry loop
+    } finally {
+      err.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("(4) a persistent failure fails open: ok=false, never throws, ONE error line with the slug and no url", async () => {
+    const { lookupStoredByUrl } = await importMod();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const urls = evrenselUrls(100);
+      const marked = urls[57]!;
+      const c = client((batch) =>
+        batch.includes(marked)
+          ? // fetch errors embed the request url; the log line must not.
+            reject(`error sending request for url (${marked}): stream error detected`)
+          : allRows(batch),
+      );
+
+      const res = await lookupStoredByUrl(c.supabase, urls, "feedslug");
+
+      expect(res.ok).toBe(false);
+      expect(err).toHaveBeenCalledTimes(1);
+      const line = err.mock.calls[0]!.map(String).join(" ");
+      expect(line.startsWith("[ingest] feedslug: known-url lookup failed: ")).toBe(true);
+      for (const forbidden of ["http", "evrensel", "/haber/", "işçiler", "%C5%9F", marked.slice(-30)]) {
+        expect(line).not.toContain(forbidden);
+      }
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      err.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("(4b) when every request fails there is still exactly one error line and the promise resolves", async () => {
+    const { lookupStoredByUrl } = await importMod();
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const urls = evrenselUrls(100);
+      const c = client((batch) => reject(`error sending request for url (${batch[0]}): stream error detected`));
+      await expect(lookupStoredByUrl(c.supabase, urls, "feedslug")).resolves.toMatchObject({ ok: false });
+      expect(err).toHaveBeenCalledTimes(1);
+      expect(err.mock.calls[0]!.map(String).join(" ")).not.toContain("http");
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  it("(5) a short-url feed keeps 100 urls per request: one request, no extra slices", async () => {
+    const { lookupStoredByUrl } = await importMod();
+    const urls = shortUrls(100);
+    const c = client((batch) => allRows(batch));
+    const res = await lookupStoredByUrl(c.supabase, urls, "short");
+    expect(res.ok).toBe(true);
+    expect(c.ins).toHaveLength(1);
+    expect(c.ins[0]!.urls).toEqual(urls);
+  });
+
+  it("builds its slices with planUrlLookupSlices, not a count-only loop", () => {
+    const src = readFileSync(resolvePath(__dirname, "../../supabase/functions/ingest/index.ts"), "utf8");
+    const fn = /export async function lookupStoredByUrl\([\s\S]*?\n\}\n/.exec(src);
+    expect(fn).not.toBeNull();
+    const body = fn![0];
+    expect(body).toContain("planUrlLookupSlices(");
+    expect(body).not.toMatch(/\+=\s*TITLE_LOOKUP_BATCH/);
+    expect(body).not.toMatch(/\.slice\(\s*j\s*,\s*j\s*\+/);
   });
 });
 

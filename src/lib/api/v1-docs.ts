@@ -142,6 +142,17 @@ const SINCE_PARAM: V1ParamDoc = {
   descriptionEn: `Lower bound on updated_at, a full ISO 8601 timestamp (with T and seconds). Default: now−24h. Values older than ${V1_MAX_SINCE_DAYS} days are silently clamped to ${V1_MAX_SINCE_DAYS} days.`,
 };
 
+/**
+ * The alerts endpoint filters on alert_at (the moment the alert qualified),
+ * not on updated_at, so it carries its own `since` description; /clusters
+ * keeps SINCE_PARAM. See alertAtOf in src/lib/alerts/alert-feed.ts.
+ */
+const ALERT_SINCE_PARAM: V1ParamDoc = {
+  ...SINCE_PARAM,
+  descriptionTr: `alert_at için alt sınır: uyarının oluştuğu an (kör noktada updated_at ile first_published + ${BLINDSPOT.feedDelayHours} saatin büyüğü, sessiz bölgede updated_at ile first_published + ${SILENT_MIN_AGE_H} saatin büyüğü). Tam ISO 8601 zaman damgası (T ve saniye ile). Varsayılan: şimdi−24 saat. ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir.`,
+  descriptionEn: `Lower bound on alert_at, the moment the alert qualified (for a blindspot the later of updated_at and first_published + ${BLINDSPOT.feedDelayHours} hours, for a one-zone-silent alert the later of updated_at and first_published + ${SILENT_MIN_AGE_H} hours). A full ISO 8601 timestamp (with T and seconds). Default: now−24h. Values older than ${V1_MAX_SINCE_DAYS} days are silently clamped to ${V1_MAX_SINCE_DAYS} days.`,
+};
+
 const LIMIT_PARAM: V1ParamDoc = {
   name: "limit",
   in: "query",
@@ -230,10 +241,11 @@ const FORMAT_PARAM: V1ParamDoc = {
 
 const ALERT_NOTES_TR: string[] = [
   `İki kural, tek akış. Kör nokta: geri çağırma (recall veto) uygulanmış, en az ${BLINDSPOT.minSources} oy veren kaynak ve tek bölgeden %${Math.round(BLINDSPOT.dominantShare * 100)} veya fazlası, ${BLINDSPOT.feedDelayHours} saat gecikmeli, yayın sağlığı bozuk bölge için bastırılmış; en çok 30 kayıt (sitedeki /blindspots ile aynı).`,
+  `alert_at, uyarının oluştuğu andır: kör noktada updated_at ile first_published + ${BLINDSPOT.feedDelayHours} saatin büyüğü, sessiz bölgede updated_at ile first_published + ${SILENT_MIN_AGE_H} saatin büyüğü; updated_at kümenin kendi son güncellemesi olarak kayıtta kalır. since bu değere uygulanır. Sıralama alert_at'e göre, en yeniden en eskiye. Bir küme uyarı olduktan sonra güncellenirse alert_at ileri kayar ve kayıt yeniden döner; id ile tekilleştirin.`,
   `Sessiz bölge: tam olarak bir bölgede sıfır kaynak, en az ${SILENT_MIN_SOURCES} oy veren kaynak, küme en az ${SILENT_MIN_AGE_H} saat önce başlamış, veto yok, arşivlenmemiş. Sessiz bölgenin yayın akışları bozuksa kayıt düşer; sağlık bilgisi alınamazsa akış açık kalır.`,
   "sessiz = Tayf eşleştiremedi: bir bölgenin sessiz görünmesi o bölgenin haberi yapmamayı seçtiği anlamına gelmez, yalnızca Tayf'ın o bölgeden bu kümeye eşleşen haber bulamadığı anlamına gelir.",
   "RSS: format=rss verilirse veya format yokken Accept başlığı application/rss+xml içerirse RSS 2.0 döner (Content-Type application/rss+xml, Vary Origin, Authorization, Accept). Anahtar yalnızca Authorization başlığıyla gönderilir; adres satırında anahtar parametresi yoktur.",
-  "Webhook (isteğe bağlı, anahtar başına, yönetici tanımlar): her yeni uyarı için imzalı bir POST gönderilir. Gövde JSON: event (tayf.alert), alert (bu uç noktadaki kayıtla aynı), licence, attribution. Başlıklar: X-Tayf-Event, X-Tayf-Delivery (teslimat numarası; yeniden denemelerde aynı kalır), X-Tayf-Timestamp (saniye), X-Tayf-Signature.",
+  "Webhook (isteğe bağlı, anahtar başına, yönetici tanımlar): her yeni uyarı için imzalı bir POST gönderilir. Yalnızca alert_at değeri webhook'un oluşturulma anına eşit ya da ondan sonra olan uyarılar gönderilir. Gövde JSON: event (tayf.alert), alert (bu uç noktadaki kayıtla aynı), licence, attribution. Başlıklar: X-Tayf-Event, X-Tayf-Delivery (teslimat numarası; yeniden denemelerde aynı kalır), X-Tayf-Timestamp (saniye), X-Tayf-Signature.",
   "İmza: zaman damgasının, bir noktanın ve ham gövdenin art arda birleşimi imza anahtarıyla HMAC-SHA256'dan geçirilir; sonuç onaltılık yazılır ve başına sha256= eklenir. Alıcı ham gövde üzerinden yeniden hesaplayıp sabit zamanlı karşılaştırmalı, zaman damgası eskiyse reddetmelidir. İmza anahtarı yalnızca tanımlanırken bir kez gösterilir.",
   "Teslimat kuralları: yalnızca https ve 443 numaralı kapı; yönlendirmeler izlenmez (3xx başarısız sayılır). 2xx başarıdır; 5xx, 408, 429, zaman aşımı ve ağ hataları 1, 5, 15 ve 60 dakika arayla en çok 5 denemeye kadar yeniden denenir; diğer 4xx başarısız sayılır. Art arda 20 başarısızlık webhook'u kapatır. Aynı alert.id bir alıcıya en fazla bir kez teslim edilir; yine de X-Tayf-Delivery veya alert.id ile tekilleştirin.",
 ];
@@ -478,7 +490,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
     summaryTr: "Kör nokta ve sessiz bölge uyarıları",
     summaryEn: "Blindspot and one-zone-silent alerts",
     notesTr: ALERT_NOTES_TR,
-    params: [SINCE_PARAM, ALERT_LIMIT_PARAM, FORMAT_PARAM],
+    params: [ALERT_SINCE_PARAM, ALERT_LIMIT_PARAM, FORMAT_PARAM],
     responses: [
       {
         status: 200,

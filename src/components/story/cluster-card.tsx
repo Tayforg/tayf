@@ -7,9 +7,8 @@ import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { SourceLogo } from "@/components/source/source-logo";
 import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
-import { ZONE_META } from "@/lib/bias/config";
 import { formatTurkishTimeAgo } from "@/lib/time";
-import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
+import type { BiasCategory, BiasDistribution } from "@/types";
 
 // Pure presentational card for a single cluster on /clusters.
 // Extracted from the old inline ClusterCard in app/clusters/page.tsx so the
@@ -150,18 +149,17 @@ export function mobileBannerImageProps(index?: number): {
 // ---------------------------------------------------------------------------
 //
 // Renders the per-card metadata pill row: article count, time-ago, optional
-// "Denge puanı" chip (only when enough classified sources voted), optional
-// dominant-zone pill (only shown when dominantPct ≥ 0.6), and an optional
-// "kör nokta" badge. Was a separate file; only ever consumed here, so it's
-// inlined to keep cluster-card.tsx self-contained.
+// "Denge puanı" chip (only when enough classified sources voted), and an
+// optional "kör nokta" badge. Was a separate file; only ever consumed here,
+// so it's inlined to keep cluster-card.tsx self-contained. (The dominant-zone
+// pill that used to sit here was dead: no caller passed its props. The
+// /blindspots chip is the one place a zone's share is printed beside a card.)
 
 interface ClusterMetaBadgesProps {
   articleCount: number;
   firstPublished: string;
   updatedAt: string;
   isBlindspot: boolean;
-  dominantZone?: MediaDnaZone | null;
-  dominantPct?: number;
   isWireRedistribution?: boolean;
   effectiveArticleCount?: number;
   /**
@@ -177,8 +175,6 @@ function ClusterMetaBadges({
   articleCount,
   firstPublished,
   isBlindspot,
-  dominantZone,
-  dominantPct,
   isWireRedistribution,
   effectiveArticleCount,
   balance,
@@ -212,15 +208,6 @@ function ClusterMetaBadges({
         >
           <Copy className="h-3 w-3" />
           Tek kaynaktan dağıtıldı · {articleCount} kopya
-        </span>
-      )}
-
-      {dominantZone && dominantPct !== undefined && dominantPct >= 0.6 && (
-        <span
-          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium ${ZONE_META[dominantZone].chipBg} ${ZONE_META[dominantZone].chipText} ${ZONE_META[dominantZone].chipBorder}`}
-        >
-          <span className={`h-1.5 w-1.5 rounded-full ${ZONE_META[dominantZone].dot}`} />
-          %{Math.round(dominantPct * 100)} {ZONE_META[dominantZone].label}
         </span>
       )}
 

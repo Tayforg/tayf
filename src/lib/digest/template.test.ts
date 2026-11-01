@@ -44,9 +44,50 @@ describe("buildDigestHtml", () => {
     expect(html).toContain("%90");
   });
 
-  it("renders 'Sadece <zone> yazdı' when the dominant share is 100%", () => {
-    const html = buildDigestHtml({ ...BASE, blindspot: { ...BLINDSPOT, dominantPct: 1 } });
+  it("renders 'Sadece <zone> yazdı' when the other two zones have no sources", () => {
+    const html = buildDigestHtml({
+      ...BASE,
+      blindspot: { ...BLINDSPOT, biasDistribution: dist({ pro_government: 5 }), dominantPct: 1 },
+    });
     expect(html).toContain("Sadece İktidar yazdı");
+  });
+
+  it("prints %84 (largest remainder, as the zone bar's 84/8/8) for an 11/1/1 split, never Math.round's %85", () => {
+    // 11/13 = 84.6. dominantPct is deliberately the rounding-prone share: the
+    // copy must come from the distribution's zone counts, not from this field.
+    const html = buildDigestHtml({
+      ...BASE,
+      blindspot: {
+        ...BLINDSPOT,
+        biasDistribution: dist({ pro_government: 11, center: 1, opposition: 1 }),
+        dominantPct: 11 / 13,
+      },
+    });
+    expect(html).toContain("%84 İktidar");
+    expect(html).not.toContain("%85");
+    expect(html).not.toContain("Sadece İktidar yazdı");
+    expect(html).toContain('width="84%"');
+  });
+
+  it("does not claim 'Sadece' at 250/1/0 although the share rounds to 100", () => {
+    const html = buildDigestHtml({
+      ...BASE,
+      blindspot: {
+        ...BLINDSPOT,
+        biasDistribution: dist({ pro_government: 250, center: 1 }),
+        dominantPct: 250 / 251,
+      },
+    });
+    expect(html).toContain("%100 İktidar");
+    expect(html).not.toContain("Sadece İktidar yazdı");
+  });
+
+  it("ignores a stale dominantPct field: the percent is the zone's share of the distribution", () => {
+    const html = buildDigestHtml({
+      ...BASE,
+      blindspot: { ...BLINDSPOT, dominantPct: 0.5 },
+    });
+    expect(html).toContain("%90 İktidar");
   });
 
   it("omits the blindspot section when there is none", () => {
