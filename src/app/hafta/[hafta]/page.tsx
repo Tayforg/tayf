@@ -80,13 +80,14 @@ export default async function WeekArchivePage({ params }: PageProps) {
   // every line that differs comes from week-copy (see its header).
   const copy = weekCopy(!isCurrentWeek);
 
-  const [rows, health] = await Promise.all([
+  const [read, health] = await Promise.all([
     getWeekArchiveClusters(hafta),
     // Health is only meaningful for the week still in progress — it is
     // not known retroactively for a past, closed week.
     isCurrentWeek ? getZoneFeedHealth() : Promise.resolve(null),
   ]);
 
+  const rows = read?.rows ?? null;
   const summary = rows !== null && rows.length > 0 ? summariseWeek(rows, health) : null;
   const label = weekLabelTr(hafta);
 
@@ -122,7 +123,7 @@ export default async function WeekArchivePage({ params }: PageProps) {
             summary={summary}
             health={isCurrentWeek ? health : null}
             feedStatus={null}
-            truncated={false}
+            truncated={read?.truncated === true}
             archive={!isCurrentWeek}
           />
           <WidestSpectrum summary={summary} archive={!isCurrentWeek} />

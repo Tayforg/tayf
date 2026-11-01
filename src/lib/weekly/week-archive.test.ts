@@ -142,10 +142,19 @@ describe("WEEK_ARCHIVE_CLUSTER_SELECT parity with weekly-query.ts", () => {
 const supabaseState = vi.hoisted(() => ({
   rows: [] as unknown[],
   error: null as { message: string } | null,
+  /** When set, only requests whose range starts at or after this row fail. */
+  errorFromRow: null as number | null,
   calls: {
     gte: [] as Array<{ col: string; val: unknown }>,
     lt: [] as Array<{ col: string; val: unknown }>,
+    lte: [] as Array<{ col: string; val: unknown }>,
   },
+  /** One entry per awaited clusters request (one per page), in order. */
+  requests: [] as Array<{
+    orders: Array<{ col: string; opts: unknown }>;
+    range: { from: number; to: number } | null;
+    limit: number | null;
+  }>,
 }));
 
 // The fetcher must use the capped createReaderClient (4 s fail-fast).
@@ -164,6 +173,7 @@ vi.mock("@/lib/supabase/server", () => ({
 function makeFakeClient() {
   return {
     from: () => {
+      const request: (typeof supabaseState.requests)[number] = { orders: [], range: null, limit: null };
       const builder: Record<string, unknown> = {};
       const chain = (fn?: (...args: unknown[]) => void) =>
         (...args: unknown[]) => {
@@ -174,12 +184,26 @@ function makeFakeClient() {
       builder.eq = chain();
       builder.gte = chain((col, val) => supabaseState.calls.gte.push({ col: col as string, val }));
       builder.lt = chain((col, val) => supabaseState.calls.lt.push({ col: col as string, val }));
-      builder.lte = chain();
-      builder.order = chain();
-      builder.limit = chain();
+      builder.lte = chain((col, val) => supabaseState.calls.lte.push({ col: col as string, val }));
+      builder.order = chain((col, opts) => request.orders.push({ col: col as string, opts }));
+      builder.range = chain((from, to) => {
+        request.range = { from: Number(from), to: Number(to) };
+      });
+      builder.limit = chain((n) => {
+        request.limit = Number(n);
+      });
       builder.returns = chain();
-      builder.then = (resolve: (v: unknown) => void) =>
-        resolve({ data: supabaseState.rows, error: supabaseState.error });
+      builder.then = (resolve: (v: unknown) => void) => {
+        supabaseState.requests.push(request);
+        const failing =
+          supabaseState.error !== null &&
+          (supabaseState.errorFromRow === null || (request.range?.from ?? 0) >= supabaseState.errorFromRow);
+        // Like PostgREST: rows from..to inclusive of the ordered table.
+        const data = request.range
+          ? supabaseState.rows.slice(request.range.from, request.range.to + 1)
+          : supabaseState.rows;
+        resolve(failing ? { data: null, error: supabaseState.error } : { data, error: null });
+      };
       return builder;
     },
   };
@@ -195,8 +219,11 @@ import { cacheLife, cacheTag } from "next/cache";
 beforeEach(() => {
   supabaseState.rows = [];
   supabaseState.error = null;
+  supabaseState.errorFromRow = null;
   supabaseState.calls.gte = [];
   supabaseState.calls.lt = [];
+  supabaseState.calls.lte = [];
+  supabaseState.requests = [];
   clientFactories.createReaderClient.mockReset();
   clientFactories.createReaderClient.mockImplementation(() => makeFakeClient());
   clientFactories.createServerClient.mockReset();
@@ -207,14 +234,22 @@ beforeEach(() => {
   vi.mocked(cacheTag).mockClear();
 });
 
+/** A closed week of `n` rows in query order (article_count desc, id asc). */
+function archiveRows(n: number) {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `c${String(i).padStart(5, "0")}`,
+    article_count: 20 - Math.floor(i / 120),
+  }));
+}
+
 describe("getWeekArchiveClusters", () => {
   it("records the gte/lt window filters for the requested week", async () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
     supabaseState.rows = [{ id: "c1" }];
 
-    const rows = await getWeekArchiveClusters("2026-W40");
+    const read = await getWeekArchiveClusters("2026-W40");
 
-    expect(rows).toEqual([{ id: "c1" }]);
+    expect(read).toEqual({ rows: [{ id: "c1" }], truncated: false });
     const gteCols = supabaseState.calls.gte.map((c) => c.col);
     const ltCols = supabaseState.calls.lt.map((c) => c.col);
     expect(gteCols).toContain("first_published");
@@ -229,18 +264,89 @@ describe("getWeekArchiveClusters", () => {
     expect(firstPublishedLt?.val).toBe("2026-10-04T21:00:00.000Z");
   });
 
+  it("pages the week with the same deterministic order as /hafta: article_count desc, then id asc, via .range()", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+
+    await getWeekArchiveClusters("2026-W40");
+
+    expect(supabaseState.requests).toHaveLength(1);
+    expect(supabaseState.requests[0]!.orders).toEqual([
+      { col: "article_count", opts: { ascending: false } },
+      { col: "id", opts: { ascending: true } },
+    ]);
+    expect(supabaseState.requests[0]!.range).toEqual({ from: 0, to: 999 });
+    // `.limit()` is clamped to 1,000 by PostgREST; paging replaces it.
+    expect(supabaseState.requests[0]!.limit).toBeNull();
+  });
+
+  it("reads every cluster of a 1,991-row week (rows 1001-1991 are no longer lost to the 1,000-row cap)", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    supabaseState.rows = archiveRows(1991);
+
+    const read = await getWeekArchiveClusters("2026-W40");
+
+    expect(read?.truncated).toBe(false);
+    expect(read?.rows).toHaveLength(1991);
+    expect(read?.rows.map((r) => (r as { id: string }).id)).toEqual(
+      (supabaseState.rows as Array<{ id: string }>).map((r) => r.id),
+    );
+    expect(supabaseState.requests.map((r) => r.range)).toEqual([
+      { from: 0, to: 999 },
+      { from: 1000, to: 1999 },
+    ]);
+    for (const r of supabaseState.requests) {
+      expect(r.orders.map((o) => o.col)).toEqual(["article_count", "id"]);
+    }
+    // One clock read, one window: every page carries the same bounds.
+    const upper = supabaseState.calls.lte.filter((c) => c.col === "first_published");
+    expect(new Set(upper.map((c) => c.val)).size).toBe(1);
+    expect(upper).toHaveLength(2);
+    // And a single reader client for the whole paged read.
+    expect(clientFactories.createReaderClient).toHaveBeenCalledTimes(1);
+  });
+
+  it("is truncated only at its own ceiling: five full pages, exactly five requests", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    supabaseState.rows = archiveRows(5000);
+
+    try {
+      const read = await getWeekArchiveClusters("2026-W40");
+      expect(read?.truncated).toBe(true);
+      expect(read?.rows).toHaveLength(5000);
+      expect(supabaseState.requests).toHaveLength(5);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("returns null on a Supabase error", async () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
     supabaseState.error = { message: "boom" };
 
-    const rows = await getWeekArchiveClusters("2026-W40");
-    expect(rows).toBeNull();
+    const read = await getWeekArchiveClusters("2026-W40");
+    expect(read).toBeNull();
+  });
+
+  it("returns null (no partial week) when page 2 errors", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.rows = archiveRows(1991);
+    supabaseState.error = { message: "boom" };
+    supabaseState.errorFromRow = 1000;
+
+    try {
+      await expect(getWeekArchiveClusters("2026-W40")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(supabaseState.requests.map((r) => r.range?.from)).toEqual([0, 1000]);
   });
 
   it("returns null for an unparseable week key", async () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
-    const rows = await getWeekArchiveClusters("nope");
-    expect(rows).toBeNull();
+    const read = await getWeekArchiveClusters("nope");
+    expect(read).toBeNull();
   });
 });
 
@@ -258,7 +364,10 @@ describe("getWeekArchiveClusters read profile + cache lifetime", () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
     supabaseState.rows = [{ id: "c1" }];
 
-    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual([{ id: "c1" }]);
+    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual({
+      rows: [{ id: "c1" }],
+      truncated: false,
+    });
 
     expect(cacheTag).toHaveBeenCalledWith("clusters-politics");
     expect(cacheLife).toHaveBeenCalledTimes(1);
@@ -272,9 +381,37 @@ describe("getWeekArchiveClusters read profile + cache lifetime", () => {
     const { getWeekArchiveClusters } = await import("./week-archive");
     supabaseState.rows = [];
 
-    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual([]);
+    await expect(getWeekArchiveClusters("2026-W40")).resolves.toEqual({ rows: [], truncated: false });
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("hours");
+  });
+
+  it("a multi-page read is still one cacheLife('hours')", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    supabaseState.rows = archiveRows(1991);
+
+    await getWeekArchiveClusters("2026-W40");
+
+    expect(supabaseState.requests).toHaveLength(2);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("hours");
+  });
+
+  it("an error on page 2 is cached for 'minutes' only, exactly one cacheLife", async () => {
+    const { getWeekArchiveClusters } = await import("./week-archive");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    supabaseState.rows = archiveRows(1991);
+    supabaseState.error = { message: TIMEOUT_MESSAGE };
+    supabaseState.errorFromRow = 1000;
+
+    try {
+      await expect(getWeekArchiveClusters("2026-W40")).resolves.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("hours");
   });
 
   it("a timeout resolves null and calls cacheLife('minutes') exactly once", async () => {

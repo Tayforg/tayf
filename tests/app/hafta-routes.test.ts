@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { NextRequest } from "next/server";
 import { middleware, config } from "@/middleware";
 
@@ -82,5 +84,35 @@ describe("middleware config — /hafta matcher", () => {
   it("leaves the rolling /hafta page unmatched and never uses a wildcard", () => {
     expect(config.matcher).not.toContain("/hafta");
     expect(config.matcher).not.toContain("/hafta/:path*");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The archive page used to hardcode `truncated={false}`, so a week that hit the
+// read ceiling still printed a total as if it were the whole week. The flag now
+// comes from the paged read itself. Source-level: no render tests of server
+// components (AGENTS.md).
+// ---------------------------------------------------------------------------
+
+const ROOT = resolve(__dirname, "../..");
+const ARCHIVE_PAGE = readFileSync(resolve(ROOT, "src/app/hafta/[hafta]/page.tsx"), "utf8");
+const LIVE_PAGE = readFileSync(resolve(ROOT, "src/app/hafta/page.tsx"), "utf8");
+
+describe("/hafta/[hafta] page: truncation comes from the read", () => {
+  it("never hardcodes truncated={false}", () => {
+    expect(ARCHIVE_PAGE).not.toMatch(/truncated=\{\s*false\s*\}/);
+  });
+
+  it("passes the archive read's truncated flag to <ZoneShares>", () => {
+    expect(ARCHIVE_PAGE).toMatch(/getWeekArchiveClusters\(/);
+    expect(ARCHIVE_PAGE).toContain("truncated={read?.truncated === true}");
+  });
+});
+
+describe("/hafta page: truncation comes from the read, not a row count", () => {
+  it("passes the weekly read's truncated flag and does not compare lengths against the limit", () => {
+    expect(LIVE_PAGE).toContain("read?.truncated === true");
+    expect(LIVE_PAGE).not.toMatch(/length\s*>=\s*WEEKLY_CLUSTER_LIMIT/);
+    expect(LIVE_PAGE).not.toContain("WEEKLY_CLUSTER_LIMIT");
   });
 });

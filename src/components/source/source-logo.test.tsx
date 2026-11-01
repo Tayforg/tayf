@@ -4,6 +4,8 @@ import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { firstPartyLogoUrl } from "@/lib/images/image-url";
+
 import {
   SourceLogo,
   SourceLogoFallback,
@@ -76,6 +78,63 @@ describe("SourceLogo — URL routing", () => {
     );
     expect(html).toContain('src="https://example.com/logo.png"');
     expect(html).not.toContain("/_next/image");
+  });
+});
+
+// The request width follows the slot: `width ?? (size <= 16 ? 32 : 64)`. A
+// 14 px favicon slot (cluster cards, framing rows) needs 32w for a 2x screen;
+// fetching 64w for ~100 of them per page is wasted bytes (h13-weight-2).
+describe("SourceLogo — request width derives from size", () => {
+  const attr = (url: string | null) => (url ?? "").replace(/&/g, "&amp;");
+  const render = (props: { size?: number; width?: number }) =>
+    renderToStaticMarkup(
+      <SourceLogo
+        logoUrl={S2}
+        name="Gazete"
+        className={IMG_CLASS}
+        fallback="initials"
+        fallbackClassName={INITIALS_CLASS}
+        {...props}
+      />,
+    );
+
+  it("size 14 -> the 32 px optimizer width", () => {
+    const html = render({ size: 14 });
+    expect(html).toContain(`src="${attr(firstPartyLogoUrl(S2, 32))}"`);
+    expect(html).toContain("&amp;w=32&amp;q=75");
+  });
+
+  it.each([
+    [1, 32],
+    [14, 32],
+    [16, 32],
+    [17, 64],
+    [32, 64],
+    [64, 64],
+  ])("size %i -> w=%i", (size, w) => {
+    expect(render({ size })).toContain(`src="${attr(firstPartyLogoUrl(S2, w))}"`);
+  });
+
+  it("no size and no width -> the 64 px optimizer width", () => {
+    const html = render({});
+    expect(html).toContain(`src="${attr(firstPartyLogoUrl(S2, 64))}"`);
+    expect(html).toContain("&amp;w=64&amp;q=75");
+  });
+
+  it("an explicit width wins over the size-derived one", () => {
+    expect(render({ size: 14, width: 128 })).toContain(
+      `src="${attr(firstPartyLogoUrl(S2, 128))}"`,
+    );
+    expect(render({ size: 14, width: 64 })).toContain(
+      `src="${attr(firstPartyLogoUrl(S2, 64))}"`,
+    );
+    expect(render({ width: 96 })).toContain(`src="${attr(firstPartyLogoUrl(S2, 96))}"`);
+  });
+
+  it("every derived width is one /_next/image accepts (a configured imageSizes entry)", () => {
+    for (const size of [undefined, 14, 16, 24]) {
+      expect(render({ size })).toMatch(/&amp;w=(?:32|64)&amp;q=75/);
+    }
   });
 });
 
@@ -395,6 +454,11 @@ describe("source-logo.tsx — source guard", () => {
     );
     expect(refCallback).not.toBeNull();
     expect(refCallback![0]).toContain("isBrokenImage(");
+  });
+
+  it("`width` has no default of its own: the request width derives from `size`", () => {
+    expect(src).not.toMatch(/\bwidth\s*=\s*64\b/);
+    expect(src).toMatch(/width \?\? \(size !== undefined && size <= 16 \? 32 : 64\)/);
   });
 
   it("has no useEffect at all (react-hooks/set-state-in-effect is enforced)", () => {

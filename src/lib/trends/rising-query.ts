@@ -38,7 +38,7 @@ import {
 
 /** Days of history pulled: today (D) back to D-8. */
 const FETCH_DAYS_BACK = 8;
-/** Generous cap; the expected row count is about 560. */
+/** Generous cap; measured 558 rows on 2026-11-01, under PostgREST's 1,000 (tests/guards/postgrest-row-cap.test.ts). */
 const ROW_LIMIT = 2000;
 
 async function fetchRisingRaw(): Promise<RisingResult> {
@@ -50,6 +50,7 @@ async function fetchRisingRaw(): Promise<RisingResult> {
     .from("trends_daily_entity_counts_ist_rollup")
     .select("day, entity, count")
     .gte("day", shiftDayKey(todayKey, -FETCH_DAYS_BACK))
+    // postgrest-cap-ok: ~558 rows (8 days of rollup, measured 2026-11-01)
     .limit(ROW_LIMIT)
     .returns<RollupRow[]>();
 

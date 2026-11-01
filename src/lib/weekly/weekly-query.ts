@@ -1,13 +1,14 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { zoneOf } from "@/lib/bias/config";
-import { zoneCountsOf } from "@/lib/bias/zone-summary";
+import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
 import { resolveCachedOrRetry } from "@/lib/cache-resilience";
 import {
   shouldSuppressBlindspot,
   type ZoneFeedHealth,
 } from "@/lib/clusters/feed-health";
 import { applyRecallVeto } from "@/lib/clusters/recall-veto";
+import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/db/paging";
 import { dedupeByTitle } from "@/lib/weekly/dedupe-titles";
 import { createReaderClient } from "@/lib/supabase/server";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
@@ -18,10 +19,15 @@ import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 //
 // Two bounded reads, both cached, both fail-soft:
 //
-//   * `getWeeklyClusters` — one window query on `clusters` (>=2 members,
-//     not archived, first_published inside the trailing week), hard-capped
-//     at WEEKLY_CLUSTER_LIMIT rows. The window is computed from a single
-//     `Date.now()` so the two bounds can never straddle a tick.
+//   * `getWeeklyClusters` — the window on `clusters` (>=2 members, not
+//     archived, first_published inside the trailing week), read EVERY row in
+//     pages of POSTGREST_MAX_ROWS (PostgREST cuts any response at 1,000 rows
+//     whatever `.limit()` asks for, which used to drop ~21% of the week's
+//     votes silently). The order is deterministic (article_count desc, then
+//     id) so page boundaries never skip or repeat a cluster, and the read is
+//     bounded at WEEKLY_CLUSTER_LIMIT rows: only a read that actually hit
+//     that ceiling is reported `truncated`. The window is computed from a
+//     single `Date.now()` so the bounds can never straddle a tick.
 //   * `getWeeklyLabelChanges` — the last WEEKLY_LABEL_CHANGE_LIMIT rows of
 //     `source_zone_history` inside the same window, inner-joined to an
 //     *active* source so the read mirrors migration 055's public policy
@@ -41,8 +47,15 @@ import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
 export const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** Hard row cap on the weekly cluster window (bounded query, risk note). */
-export const WEEKLY_CLUSTER_LIMIT = 2000;
+/**
+ * Hard row ceiling on the weekly cluster window (bounded query, risk note),
+ * read in pages of POSTGREST_MAX_ROWS. A full week is about 2,000 clusters
+ * today; this is a safety bound, not a sample size.
+ */
+export const WEEKLY_CLUSTER_LIMIT = 5000;
+
+/** Requests the paged cluster read may issue before it reports `truncated`. */
+const WEEKLY_CLUSTER_MAX_PAGES = WEEKLY_CLUSTER_LIMIT / POSTGREST_MAX_ROWS;
 
 /** Hard row cap on the weekly label-change window. */
 export const WEEKLY_LABEL_CHANGE_LIMIT = 50;
@@ -105,6 +118,28 @@ export interface WeeklyBlindspot {
   title: string;
   articleCount: number;
   side: MediaDnaZone;
+  /**
+   * The stored side's share of the row's zone-attributed articles, 0..1; `null`
+   * when the row has no zone evidence at all (a stored side with no
+   * distribution). Exactly 1 is the only value that earns a "sadece" claim.
+   */
+  share: number | null;
+  /**
+   * `share` as the integer the zone bar prints (same largest-remainder
+   * rounding), clamped to 99 while `share` is below 1 so a near-total share
+   * never reads %100. `null` exactly when `share` is.
+   */
+  sharePct: number | null;
+}
+
+/**
+ * One paged read of a week's clusters. `truncated` is true only when the read
+ * stopped at its own page ceiling with a full last page (rows may be missing);
+ * a short last page is the whole window.
+ */
+export interface WeeklyClusterRead {
+  rows: WeeklyClusterRow[];
+  truncated: boolean;
 }
 
 export interface WeeklySummary {
@@ -155,6 +190,26 @@ function dominantZoneOf(
 }
 
 /**
+ * How much of a row's zone-attributed coverage sits on `side`. `sharePct` uses
+ * the bar's own largest-remainder rounding, so the row and the bar never
+ * disagree; it is clamped to 99 while the share is below 1, because a rounded
+ * 100 would read as the unqualified "only this side" claim the data does not
+ * support (199 : 1 is 99.5%, not "sadece").
+ */
+function sideShareOf(
+  counts: Record<MediaDnaZone, number>,
+  side: MediaDnaZone,
+): { share: number | null; sharePct: number | null } {
+  const total = counts.iktidar + counts.bagimsiz + counts.muhalefet;
+  if (total <= 0) return { share: null, sharePct: null };
+
+  const share = counts[side] / total;
+  let sharePct = zonePercents(counts)[side];
+  if (share < 1 && sharePct >= 100) sharePct = 99;
+  return { share, sharePct };
+}
+
+/**
  * Pure weekly aggregation. `health` is the read-path blindspot gate: a zone
  * whose feeds are degraded cannot be said to have *chosen* silence, so
  * `shouldSuppressBlindspot` drops those claims (null health = fail open,
@@ -193,11 +248,14 @@ export function summariseWeek(
       // No stored side and no zone evidence => nothing to claim; skip the
       // row rather than naming a side the data does not support.
       if (side !== null && !shouldSuppressBlindspot(side, health)) {
+        const { share, sharePct } = sideShareOf(counts, side);
         blindspots.push({
           id: row.id,
           title: titleOf(row),
           articleCount: row.article_count,
           side,
+          share,
+          sharePct,
         });
       }
     }
@@ -226,10 +284,11 @@ export function summariseWeek(
 
 /**
  * The trailing-7-day cluster window. `null` = "the week could not be read"
- * (the page renders that as unavailable); `[]` = "the week is genuinely
- * empty".
+ * (the page renders that as unavailable; one failed page discards the rest,
+ * a partial week would be a wrong total shown as the right one); an empty
+ * `rows` = "the week is genuinely empty".
  */
-async function fetchWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
+async function fetchWeeklyClusters(): Promise<WeeklyClusterRead | null> {
   try {
     const supabase = createReaderClient();
     // One clock read: two `Date.now()` calls could straddle a tick and
@@ -238,26 +297,28 @@ async function fetchWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
     const nowIso = new Date(nowMs).toISOString();
     const weekAgoIso = new Date(nowMs - WEEK_MS).toISOString();
 
-    const { data, error } = await supabase
-      .from("clusters")
-      .select(CLUSTER_SELECT)
-      .eq("is_archived", false)
-      .gte("article_count", WEEKLY_MIN_ARTICLES)
-      .gte("first_published", weekAgoIso)
-      // Upper bound: a source-controlled future `published_at` must not
-      // drag a cluster into every week forever (same guard as
-      // src/lib/sources/feed-status.ts's SEC-01 note).
-      .lte("first_published", nowIso)
-      .order("article_count", { ascending: false })
-      .limit(WEEKLY_CLUSTER_LIMIT)
-      .returns<WeeklyClusterRow[]>();
-
-    if (error) {
-      console.error(`[weekly] clusters unavailable: ${error.message}`);
-      return null;
-    }
-
-    return data ?? [];
+    // A throw from readAllPages (a page error or an invalid page size) lands
+    // in the catch below and becomes `null`.
+    return await readAllPages(
+      (from, to) =>
+        supabase
+          .from("clusters")
+          .select(CLUSTER_SELECT)
+          .eq("is_archived", false)
+          .gte("article_count", WEEKLY_MIN_ARTICLES)
+          .gte("first_published", weekAgoIso)
+          // Upper bound: a source-controlled future `published_at` must not
+          // drag a cluster into every week forever (same guard as
+          // src/lib/sources/feed-status.ts's SEC-01 note).
+          .lte("first_published", nowIso)
+          // Unique per row: equal article_count tiers are broken by id, so a
+          // page boundary inside a tier can neither skip nor repeat a cluster.
+          .order("article_count", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to)
+          .returns<WeeklyClusterRow[]>(),
+      { label: "weekly clusters", maxPages: WEEKLY_CLUSTER_MAX_PAGES },
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[weekly] clusters unavailable: ${message}`);
@@ -287,7 +348,7 @@ async function getWeeklyClustersCached() {
     : ({ ok: true, data } as const);
 }
 
-export async function getWeeklyClusters(): Promise<WeeklyClusterRow[] | null> {
+export async function getWeeklyClusters(): Promise<WeeklyClusterRead | null> {
   return resolveCachedOrRetry(
     "weekly-clusters",
     getWeeklyClustersCached,

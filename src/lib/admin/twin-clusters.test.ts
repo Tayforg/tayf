@@ -231,7 +231,10 @@ describe("getTwinClusterPairs rows", () => {
     const hl = statesOf("cluster_articles");
     expect(hl).toHaveLength(1);
     expect(hl[0]!.in[0]!.col).toBe("cluster_id");
-    expect(hl[0]!.limit).toBe(2000);
+    // Paged with .range() (PostgREST cuts a response at 1,000 rows), in a deterministic order.
+    expect(hl[0]!.limit).toBeNull();
+    expect(hl[0]!.range).toEqual({ from: 0, to: 999 });
+    expect(hl[0]!.order.map((o) => o.col)).toEqual(["cluster_id", "article_id"]);
   });
 });
 

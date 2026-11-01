@@ -7,7 +7,6 @@ import {
 } from "@/lib/bias/config";
 import { roundPercents } from "@/lib/bias/round-percents";
 import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
-import { BIAS_BADGE_CONFIG } from "./bias-badge";
 
 // Spectrum segments are derived from the canonical order + color palette in
 // `@/lib/bias/config`. Keeping a local `SEGMENTS` array here lets us pre-bake
@@ -158,6 +157,3 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
     </div>
   );
 }
-
-// Re-exported for components that want just the palette lookup.
-export { BIAS_BADGE_CONFIG };

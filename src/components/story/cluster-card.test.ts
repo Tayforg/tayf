@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getImageProps } from "next/image";
 import { describe, expect, it } from "vitest";
 
 import { MOBILE_BANNER_SIZES, mobileBannerImageProps } from "./cluster-card";
@@ -31,6 +32,20 @@ const src = blankComments(raw);
 
 function count(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
+}
+
+/**
+ * The desktop side thumbnail's `<ClusterCardImage ... />` opening tag: the
+ * first one after the `hidden sm:block` wrapper, up to its closing `/>`.
+ */
+function thumbnailTag(): string {
+  const from = src.indexOf("hidden sm:block");
+  expect(from).toBeGreaterThan(-1);
+  const start = src.indexOf("<ClusterCardImage", from);
+  expect(start).toBeGreaterThan(from);
+  const end = src.indexOf("/>", start);
+  expect(end).toBeGreaterThan(start);
+  return src.slice(start, end + 2);
 }
 
 describe("mobileBannerImageProps (perf-3)", () => {
@@ -128,8 +143,43 @@ describe("cluster-card.tsx image priority wiring (browser-6 / perf-3)", () => {
     expect(count(src, "MOBILE_BANNER_SIZES")).toBeGreaterThanOrEqual(1);
   });
 
-  it('keeps the fixed sizes="160px" slot the next-images config test pins', () => {
-    expect(src).toContain('sizes="160px"');
+  it("the desktop thumbnail renders at width={160} height={112} and passes no sizes prop", () => {
+    const tag = thumbnailTag();
+    expect(tag).toContain("width={160}");
+    expect(tag).toContain("height={112}");
+    // A `sizes` with no vw term makes next/image emit every configured width
+    // (15 candidates); without it the srcset is a 1x/2x pair.
+    expect(tag).not.toMatch(/\bsizes=/);
+    expect(tag).not.toContain("160px");
+  });
+
+  it("only the mobile banner passes a sizes prop", () => {
+    expect(count(src, "sizes=")).toBe(1);
+  });
+});
+
+describe("desktop thumbnail srcset (h13-weight-2)", () => {
+  const URL_ = "https://example.com/photo.jpg";
+
+  it("a 160x112 image without sizes gets at most 2 srcset candidates (1x and 2x)", () => {
+    const { props } = getImageProps({ src: URL_, width: 160, height: 112, alt: "" });
+    const candidates = String(props.srcSet).split(",").map((c) => c.trim());
+    expect(candidates.length).toBeLessThanOrEqual(2);
+    expect(candidates).toHaveLength(2);
+    expect(candidates[0]).toMatch(/ 1x$/);
+    expect(candidates[1]).toMatch(/ 2x$/);
+    expect(props).not.toHaveProperty("sizes");
+  });
+
+  it("the old shape (width 320 + sizes=160px) emitted the full width ladder, so this test is not vacuous", () => {
+    const { props } = getImageProps({
+      src: URL_,
+      width: 320,
+      height: 224,
+      sizes: "160px",
+      alt: "",
+    });
+    expect(String(props.srcSet).split(",").length).toBeGreaterThan(8);
   });
 });
 
@@ -139,12 +189,12 @@ describe("cluster-card.tsx undersized-thumbnail guard (minIntrinsicWidth)", () =
     expect(src).not.toMatch(/minIntrinsicWidth=\{(?!320\})/);
 
     // The prop must sit in the sm:hidden hero, i.e. before the desktop
-    // thumbnail's fixed 160px slot.
+    // thumbnail (anchored on its width={160}).
     const heroStart = src.indexOf("sm:hidden");
     const prop = src.indexOf("minIntrinsicWidth={320}");
     expect(heroStart).toBeGreaterThan(-1);
     expect(prop).toBeGreaterThan(heroStart);
-    expect(prop).toBeLessThan(src.indexOf('sizes="160px"'));
+    expect(prop).toBeLessThan(src.indexOf("width={160}"));
     expect(prop).toBeLessThan(src.indexOf("hidden sm:block"));
   });
 });

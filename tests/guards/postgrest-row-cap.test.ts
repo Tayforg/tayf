@@ -4,16 +4,20 @@ import { fileURLToPath } from "node:url";
 import { resolve, dirname, join, relative } from "node:path";
 
 // ---------------------------------------------------------------------------
-// Permanent CI guard (ekonomi-coverage): PostgREST truncates EVERY response at
-// its `max_rows` (1,000 on Supabase) whatever `.limit(N)` asks for. A
-// `.limit(2000)` therefore reads as "the first 2,000 rows" but silently
-// returns 1,000; /ekonomi/[ticker] computed "KAP ile basın arası" over the
-// first 1,000 of 1,845 coverage rows that way and reported 10 of 18
-// disclosures as covered. Anything that needs more than 1,000 rows must page
-// with `.range()` (see readAllPages in src/lib/finance/paging.ts).
+// Permanent CI guard (ekonomi-coverage, extended by hunt 13): PostgREST
+// truncates EVERY response at its `max_rows` (1,000 on Supabase) whatever
+// `.limit(N)` asks for. A `.limit(2000)` therefore reads as "the first 2,000
+// rows" but silently returns 1,000; /ekonomi/[ticker] computed "KAP ile basın
+// arası" over the first 1,000 of 1,845 coverage rows that way and reported 10
+// of 18 disclosures as covered, and /hafta summed only the 1,000 largest of a
+// week's 1,991 clusters (about 21% of the votes missing) with a truncation
+// caveat that could never fire. Anything that needs more than 1,000 rows must
+// page with `.range()` (see readAllPages in src/lib/db/paging.ts).
 //
-// The guard scans the non-test source files directly under src/lib/finance,
-// the finance read layer, and fails on `.limit(N)` where N is
+// The guard scans the non-test .ts/.tsx source files of the read layers that
+// have been bitten or are exposed: src/lib/finance (flat, as before),
+// src/lib/weekly, src/lib/trends and src/app/api/cron (recursive). It fails on
+// `.limit(N)` where N is
 //   - a numeric literal greater than 1000, or
 //   - an identifier whose same-file `const IDENT = <number>` is greater than
 //     1000 (an identifier imported from another file or a member expression
@@ -27,7 +31,15 @@ const POSTGREST_MAX_ROWS = 1000;
 const MARKER = /postgrest-cap-ok:\s*\S/;
 
 const here = dirname(fileURLToPath(import.meta.url));
-const FINANCE_DIR = resolve(here, "../../src/lib/finance");
+const ROOT = resolve(here, "../..");
+
+/** Scanned read layers. Finance stays flat (its tests and helpers live beside the code). */
+const SCAN_DIRS: ReadonlyArray<{ dir: string; recursive: boolean }> = [
+  { dir: "src/lib/finance", recursive: false },
+  { dir: "src/lib/weekly", recursive: true },
+  { dir: "src/lib/trends", recursive: true },
+  { dir: "src/app/api/cron", recursive: true },
+];
 
 /** Blanks // and block comments, keeping offsets (and newlines) intact. */
 function blankComments(src: string): string {
@@ -77,21 +89,55 @@ function findViolations(src: string, file = "fixture.ts"): string[] {
   return violations;
 }
 
-function financeSources(): string[] {
-  return readdirSync(FINANCE_DIR)
-    .filter((name) => /\.tsx?$/.test(name) && !/\.test\./.test(name))
-    .map((name) => join(FINANCE_DIR, name));
+/** Non-test .ts/.tsx files under `dir` (absolute paths), descending into folders when asked. */
+function sourcesIn(dir: string, recursive: boolean): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) return recursive ? sourcesIn(full, true) : [];
+    return /\.tsx?$/.test(entry.name) && !/\.test\./.test(entry.name) ? [full] : [];
+  });
 }
 
-describe("postgrest row cap: no .limit(N) above 1,000 in src/lib/finance", () => {
+/** Every scanned source file, as a repo-relative path. */
+function scannedSources(): string[] {
+  return SCAN_DIRS.flatMap(({ dir, recursive }) => sourcesIn(resolve(ROOT, dir), recursive))
+    .map((file) => relative(ROOT, file))
+    .sort();
+}
+
+describe("postgrest row cap: no .limit(N) above 1,000 in the scanned read layers", () => {
   it("scans the finance read layer (the guard is not vacuous)", () => {
-    const names = financeSources().map((f) => relative(FINANCE_DIR, f));
-    expect(names).toEqual(expect.arrayContaining(["queries.ts", "ticker-relevance.ts", "kap-pickup-query.ts", "paging.ts"]));
+    expect(scannedSources()).toEqual(
+      expect.arrayContaining([
+        "src/lib/finance/queries.ts",
+        "src/lib/finance/ticker-relevance.ts",
+        "src/lib/finance/kap-pickup-query.ts",
+        "src/lib/finance/paging.ts",
+      ]),
+    );
+  });
+
+  it("scans the weekly, trends and cron read layers, including nested route folders", () => {
+    expect(scannedSources()).toEqual(
+      expect.arrayContaining([
+        "src/lib/weekly/weekly-query.ts",
+        "src/lib/weekly/week-archive.ts",
+        "src/lib/trends/rising-query.ts",
+        "src/app/api/cron/digest/route.ts",
+      ]),
+    );
+  });
+
+  it("skips test files and non-source files", () => {
+    for (const name of scannedSources()) {
+      expect(name).toMatch(/\.tsx?$/);
+      expect(name).not.toMatch(/\.test\./);
+    }
   });
 
   it("has no unmarked .limit(N) over the PostgREST max_rows", () => {
-    const violations = financeSources().flatMap((file) =>
-      findViolations(readFileSync(file, "utf8"), relative(resolve(here, "../.."), file)),
+    const violations = scannedSources().flatMap((file) =>
+      findViolations(readFileSync(resolve(ROOT, file), "utf8"), file),
     );
     expect(violations).toEqual([]);
   });

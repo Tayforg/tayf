@@ -461,7 +461,8 @@ describe("/gundem/[key] body", () => {
     expect(dist.pro_government).toBe(3);
     expect(dist.center).toBe(5);
     expect(dist.opposition).toBe(3);
-    expect(spectrum[0]!.props!.compact).toBeFalsy();
+    // h13-edgeux-1: the entity hub's aggregate bar is the 3-zone compact mode, as on /konu.
+    expect(spectrum[0]!.props!.compact).toBe(true);
 
     const cards = elements(
       tree,

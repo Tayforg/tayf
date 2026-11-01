@@ -5,7 +5,11 @@ import { zonePercents } from "@/lib/bias/zone-summary";
 import { zoneYieldDenominator, type ZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
 import { weekCopy } from "@/lib/weekly/week-copy";
-import { WEEKLY_CLUSTER_LIMIT, type WeeklySummary } from "@/lib/weekly/weekly-query";
+import {
+  WEEKLY_CLUSTER_LIMIT,
+  type WeeklyBlindspot,
+  type WeeklySummary,
+} from "@/lib/weekly/weekly-query";
 import type { MediaDnaZone } from "@/types";
 
 // Moved out of src/app/hafta/page.tsx (Part B, owned-channels): ZoneShares,
@@ -28,7 +32,9 @@ export const linkClass =
   "text-sm font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary";
 export const metaClass = "text-xs text-muted-foreground";
 
-export const TRUNCATED_CAVEAT = `En büyük ${WEEKLY_CLUSTER_LIMIT} küme üzerinden hesaplandı; haftanın tamamı değil.`;
+// Shown only when the paged cluster read stopped at its own ceiling, so the
+// number is the ceiling (5.000), grouped the Turkish way.
+export const TRUNCATED_CAVEAT = `En büyük ${formatCountTr(WEEKLY_CLUSTER_LIMIT)} küme üzerinden hesaplandı; haftanın tamamı değil.`;
 
 const ZONE_ORDER: readonly MediaDnaZone[] = [
   "iktidar",
@@ -170,6 +176,24 @@ export function WidestSpectrum({
   );
 }
 
+/**
+ * The meta line of one blindspot row. "Sadece" is a claim that no other side
+ * covered the story, so it is printed only at an exact 100% share; below that
+ * the row states the share ("%88 İktidar"), and a row with no zone evidence
+ * (a stored side but no distribution) names the side without either claim.
+ * The OG image, the embed and the /blindspots chip already follow this rule.
+ */
+export function blindspotShareText(blindspot: WeeklyBlindspot): string {
+  const zone = ZONE_META[blindspot.side].label;
+  const count = `${formatCountTr(blindspot.articleCount)} haber`;
+
+  if (blindspot.share === 1) return `Sadece ${zone} tarafında · ${count}`;
+  if (blindspot.share === null || blindspot.sharePct === null) {
+    return `${zone} tarafında · ${count}`;
+  }
+  return `${formatPctTr(blindspot.sharePct)} ${zone} · ${count}`;
+}
+
 export function Blindspots({
   summary,
   health,
@@ -195,9 +219,7 @@ export function Blindspots({
               <Link href={`/cluster/${blindspot.id}`} className={linkClass}>
                 {blindspot.title}
               </Link>
-              <span className={metaClass}>
-                {`Sadece ${ZONE_META[blindspot.side].label} tarafında · ${formatCountTr(blindspot.articleCount)} haber`}
-              </span>
+              <span className={metaClass}>{blindspotShareText(blindspot)}</span>
             </li>
           ))}
         </ul>

@@ -26,6 +26,8 @@ const fx = vi.hoisted(() => ({
   predictions: { data: [], error: null } as Res,
   articleClusters: { data: [], error: null } as Res,
   headlines: { data: [], error: null } as Res,
+  /** When set, a headline page that starts at or after this row answers with an error. */
+  headlinesFailFrom: null as number | null,
   clusters: { data: [], error: null } as Res,
   mergeLog: { data: [], error: null } as Res,
 }));
@@ -53,7 +55,15 @@ const fake = await vi.hoisted(async () => {
       },
       cluster_articles: (s) => {
         log.states.push(s);
-        return s.in.some((i) => i.col === "cluster_id") ? fx.headlines : fx.articleClusters;
+        if (!s.in.some((i) => i.col === "cluster_id")) return fx.articleClusters;
+        // The headline read is paged with .range(): hand back only the requested window, like PostgREST.
+        if (s.range && fx.headlinesFailFrom !== null && s.range.from >= fx.headlinesFailFrom) {
+          return { data: null, error: { message: "page two failed" } };
+        }
+        if (s.range && Array.isArray(fx.headlines.data)) {
+          return { data: fx.headlines.data.slice(s.range.from, s.range.to + 1), error: fx.headlines.error };
+        }
+        return fx.headlines;
       },
       cluster_merge_log: (s) => {
         log.states.push(s);
@@ -112,6 +122,7 @@ beforeEach(() => {
   fx.predictions = { data: [], error: null };
   fx.articleClusters = { data: [], error: null };
   fx.headlines = { data: [], error: null };
+  fx.headlinesFailFrom = null;
   fx.clusters = { data: [cluster(A), cluster(B), cluster(C), cluster(D)], error: null };
   fx.mergeLog = { data: [], error: null };
 });
@@ -352,7 +363,66 @@ describe("cluster refs", () => {
     ]);
     expect(rows![0].b.headlines).toEqual([{ title: "b1", sourceName: "S5" }]);
     const h = statesOf("cluster_articles").find((s) => s.in.some((i) => i.col === "cluster_id"))!;
-    expect(h.limit).toBe(2000);
+    // Paged with .range(), never one .limit(): PostgREST cuts any response at 1,000 rows.
+    expect(h.limit).toBeNull();
+    expect(h.range).toEqual({ from: 0, to: 999 });
+    // A deterministic, unique order, so a page boundary can neither skip nor repeat a row.
+    expect(h.order.map((o) => o.col)).toEqual(["cluster_id", "article_id"]);
+  });
+
+  describe("headline paging (PostgREST caps a response at 1,000 rows)", () => {
+    const rowsOf = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        cluster_id: A,
+        article: {
+          title: `başlık ${String(i).padStart(4, "0")}`,
+          published_at: new Date(Date.UTC(2026, 8, 20, 0, 0, 0) + i * 60_000).toISOString(),
+          source: { name: `S${i}` },
+        },
+      }));
+    const headlineStates = () =>
+      statesOf("cluster_articles").filter((s) => s.in.some((i) => i.col === "cluster_id"));
+
+    it("reads rows 1001-1500 of a 1,500-row result: the newest headlines come from page two", async () => {
+      fx.threads = { data: [threadRow(A, B)], error: null };
+      fx.headlines = { data: rowsOf(1500), error: null };
+      const rows = await getMergeQueue();
+      expect(headlineStates().map((s) => s.range)).toEqual([
+        { from: 0, to: 999 },
+        { from: 1000, to: 1999 },
+      ]);
+      // The newest three are rows 1499, 1498, 1497, all beyond the first 1,000.
+      expect(rows![0].a.headlines.map((h) => h.title)).toEqual(["başlık 1499", "başlık 1498", "başlık 1497"]);
+    });
+
+    it("asks for one page when the result is shorter than a page", async () => {
+      fx.threads = { data: [threadRow(A, B)], error: null };
+      fx.headlines = { data: rowsOf(999), error: null };
+      await getMergeQueue();
+      expect(headlineStates()).toHaveLength(1);
+    });
+
+    it("stops at two pages (HEADLINE_ROW_LIMIT 2,000) even when more rows exist, without throwing", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      fx.threads = { data: [threadRow(A, B)], error: null };
+      fx.headlines = { data: rowsOf(2500), error: null };
+      const rows = await getMergeQueue();
+      expect(headlineStates().map((s) => s.range)).toEqual([
+        { from: 0, to: 999 },
+        { from: 1000, to: 1999 },
+      ]);
+      expect(rows).toHaveLength(1);
+      expect(rows![0].a.headlines[0]!.title).toBe("başlık 1999");
+      expect(warn).toHaveBeenCalled();
+    });
+
+    it("an error on page two fails the whole read to null (no half-read headlines)", async () => {
+      fx.threads = { data: [threadRow(A, B)], error: null };
+      fx.headlines = { data: rowsOf(1500), error: null };
+      fx.headlinesFailFrom = 1000;
+      expect(await getMergeQueue()).toBeNull();
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining("page two failed"));
+    });
   });
 
   it("normalizes bias_distribution and falls back from a malformed value to zeros", async () => {

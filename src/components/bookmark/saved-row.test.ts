@@ -82,6 +82,27 @@ describe("toSavedRowView isBlindspot", () => {
   });
 });
 
+// Migration 138 applies the cluster page's recall/sibling veto inside
+// saved_clusters_v2: a vetoed story comes back with is_blindspot = false, so the
+// row view must carry no blindspot flag and /saved shows no "Kör nokta" pill.
+describe("toSavedRowView with a vetoed v2 row (migration 138)", () => {
+  it("gives isBlindspot false for is_blindspot false (a blindspot withdrawn by the veto): no 'Kör nokta' pill", () => {
+    const view = toSavedRowView({
+      bias_distribution: { gov_leaning: 7, pro_government: 1, opposition_leaning: 1 },
+      is_blindspot: false,
+    });
+    expect(view.isBlindspot).toBe(false);
+    // The bar still renders: only the claim is withdrawn, not the coverage.
+    expect(view.distribution).toMatchObject({ gov_leaning: 7, pro_government: 1, opposition_leaning: 1 });
+  });
+
+  it("still gives isBlindspot true for a flagged, unvetoed v2 row", () => {
+    expect(
+      toSavedRowView({ bias_distribution: { gov_leaning: 8, opposition_leaning: 1 }, is_blindspot: true }).isBlindspot,
+    ).toBe(true);
+  });
+});
+
 describe("toSavedRowView happy path", () => {
   it("returns the distribution and the blindspot flag of a v2 row", () => {
     const view = toSavedRowView({

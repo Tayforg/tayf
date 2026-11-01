@@ -92,7 +92,7 @@ export function SourceLogoFallback({
 export function SourceLogo({
   logoUrl,
   name,
-  width = 64,
+  width,
   className,
   fallback,
   fallbackClassName,
@@ -101,7 +101,11 @@ export function SourceLogo({
 }: {
   logoUrl: string | null | undefined;
   name: string;
-  /** Optimizer width; must be one of the configured imageSizes (see firstPartyLogoUrl). */
+  /**
+   * Optimizer width; must be one of the configured imageSizes (see
+   * firstPartyLogoUrl). Omit it and the width follows `size`: a slot of 16 px or
+   * less asks for 32 (a 2x favicon), anything else 64.
+   */
   width?: number;
   /** Classes for the <img>. Include the box size (height and width classes). */
   className: string;
@@ -113,6 +117,7 @@ export function SourceLogo({
   size?: number;
 }) {
   const [failed, setFailed] = useState(false);
+  const requestWidth = width ?? (size !== undefined && size <= 16 ? 32 : 64);
 
   const ref = useCallback((img: HTMLImageElement | null) => {
     if (img && isBrokenImage(img)) setFailed(true);
@@ -132,7 +137,7 @@ export function SourceLogo({
     // eslint-disable-next-line @next/next/no-img-element
     <img
       ref={ref}
-      src={firstPartyLogoUrl(logoUrl, width) ?? logoUrl}
+      src={firstPartyLogoUrl(logoUrl, requestWidth) ?? logoUrl}
       alt=""
       className={className}
       loading={loading}
