@@ -480,6 +480,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "119_feed_freshness.sql",
       // 122 re-creates ops_health_report() with 119's body verbatim plus row 14 (ingest_gaps), repeating its VALUES-list copy of BIAS_TO_ZONE in row 4; pinned by tests/migrations/122-ops-ingest-gaps.test.ts
       "122_ops_ingest_gaps.sql",
+      // 126 re-creates 071's blindspot_recall_veto_refresh() (its VALUES-list copy of BIAS_TO_ZONE verbatim) plus the sibling-headline evidence; pinned by tests/migrations/126-blindspot-sibling-veto.test.ts
+      "126_blindspot_sibling_veto.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

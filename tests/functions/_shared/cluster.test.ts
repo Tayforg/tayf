@@ -57,7 +57,13 @@ interface ClusterSide {
     bEnts: Iterable<string>,
     tfidfCosine: number,
     hoursDelta: number,
+    opts?: { aTitle?: string | null; bTitle?: string | null },
   ): { score: number; components: Record<string, unknown> };
+  titleTokens(title: string | null | undefined, minLen?: number): Set<string>;
+  headlineTokens(title: string | null | undefined): {
+    tokens: Set<string>;
+    numbers: Set<string>;
+  };
   MINHASH_VERSION: number;
   serializeSignature(sig: Uint32Array): number[];
   deserializeSignature(value: unknown, version: unknown): Uint32Array | null;
@@ -185,6 +191,8 @@ beforeAll(async () => {
       fingerprint: legacyFingerprint.fingerprint,
       TfidfIndex: legacyTfidf.TfidfIndex,
       score: legacyEnsemble.score,
+      titleTokens: legacyFingerprint.titleTokens,
+      headlineTokens: legacyFingerprint.headlineTokens,
       MINHASH_VERSION: legacyFingerprint.MINHASH_VERSION,
       serializeSignature: legacyFingerprint.serializeSignature,
       deserializeSignature: legacyFingerprint.deserializeSignature,
@@ -195,6 +203,8 @@ beforeAll(async () => {
       fingerprint: portFingerprint.fingerprint,
       TfidfIndex: portTfidf.TfidfIndex,
       score: portEnsemble.score,
+      titleTokens: portFingerprint.titleTokens,
+      headlineTokens: portFingerprint.headlineTokens,
       MINHASH_VERSION: portFingerprint.MINHASH_VERSION,
       serializeSignature: portFingerprint.serializeSignature,
       deserializeSignature: portFingerprint.deserializeSignature,
@@ -216,6 +226,32 @@ beforeAll(async () => {
     expect(portConstants.TIME_WINDOW_HOURS).toBe(legacyConstants.TIME_WINDOW_HOURS);
     expect(portConstants.MIN_SHARED_ENTITIES).toBe(legacyConstants.MIN_SHARED_ENTITIES);
     expect(portConstants.MINHASH_SIG_K).toBe(legacyConstants.MINHASH_SIG_K);
+    // 2026-11-01 recall wave: headline lane, text floor, sticky context.
+    expect(portConstants.HEADLINE_LANE_MIN_SHARED).toBe(
+      legacyConstants.HEADLINE_LANE_MIN_SHARED,
+    );
+    expect(portConstants.HEADLINE_LANE_MIN_JACCARD).toBe(
+      legacyConstants.HEADLINE_LANE_MIN_JACCARD,
+    );
+    expect(portConstants.HEADLINE_LANE_MAX_HOURS).toBe(
+      legacyConstants.HEADLINE_LANE_MAX_HOURS,
+    );
+    expect(portConstants.HEADLINE_TOKEN_MIN_LEN).toBe(
+      legacyConstants.HEADLINE_TOKEN_MIN_LEN,
+    );
+    expect([...portConstants.HEADLINE_GENERIC_PREFIXES]).toEqual([
+      ...legacyConstants.HEADLINE_GENERIC_PREFIXES,
+    ]);
+    expect(portConstants.ENTITY_TEXT_FLOOR).toBe(legacyConstants.ENTITY_TEXT_FLOOR);
+    expect(portConstants.CONTEXT_STICKY_MIN_ARTICLES).toBe(
+      legacyConstants.CONTEXT_STICKY_MIN_ARTICLES,
+    );
+    expect(portConstants.CONTEXT_STICKY_HOURS).toBe(legacyConstants.CONTEXT_STICKY_HOURS);
+    expect(portConstants.CONTEXT_STICKY_MAX).toBe(legacyConstants.CONTEXT_STICKY_MAX);
+    expect(portConstants.TOKEN_MIN_LEN).toBe(legacyConstants.TOKEN_MIN_LEN);
+    expect(portConstants.TOKEN_CANDIDATE_MIN_SHARED).toBe(
+      legacyConstants.TOKEN_CANDIDATE_MIN_SHARED,
+    );
   } catch (err) {
     loadError = err;
   }
@@ -333,6 +369,7 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
             entsLegacy[j]!,
             tfidfCosine,
             hoursDelta,
+            { aTitle: aArt.title, bTitle: bArt.title },
           );
           const rPort = port.score(
             fpsPort[i],
@@ -341,6 +378,7 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
             entsPort[j]!,
             tfidfCosine,
             hoursDelta,
+            { aTitle: aArt.title, bTitle: bArt.title },
           );
 
           if (rLegacy.score !== rPort.score) {
@@ -371,6 +409,92 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         }
       }
       expect(mismatches).toEqual([]);
+    });
+  });
+
+  describe("headline lane + token helpers (2026-11-01 recall wave)", () => {
+    // Golden headline pairs, including the lane boundary (7/10), a numeral
+    // clash, an out-of-window pair and generic-prefix boilerplate.
+    const titlePairs: Array<{ a: string; b: string; tfidf: number; hours: number }> = [
+      {
+        a: "Son dakika... Mustafa Sarıgül YENİ Parti'den istifa etti",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek",
+        tfidf: 0.25,
+        hours: 0.2,
+      },
+      {
+        a: "Son dakika... Mustafa Sarıgül YENİ Parti'den istifa etti",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek",
+        tfidf: 0.25,
+        hours: 8,
+      },
+      {
+        a: "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı!",
+        b: "Bakırköy Belediyesi'ne yolsuzluk soruşturması: 39 kişi tutuklandı",
+        tfidf: 0.25,
+        hours: 1,
+      },
+      {
+        a: "Bakırköy Belediyesi soruşturmasında 61 kişi tutuklandı",
+        b: "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı",
+        tfidf: 0.25,
+        hours: 1,
+      },
+      {
+        a: "CANLI | Cumhurbaşkanı Erdoğan konuşuyor",
+        b: "Cumhurbaşkanı Erdoğan açıklamalarda bulunuyor",
+        tfidf: 0.3,
+        hours: 0.5,
+      },
+      { a: "", b: "Mustafa Sarıgül istifa etti", tfidf: 0.25, hours: 1 },
+    ];
+
+    it("score() is byte-equivalent for the golden headline pairs", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const noFp = { strict: null, signature: null };
+      const mismatches: string[] = [];
+      for (const [i, p] of titlePairs.entries()) {
+        const opts = { aTitle: p.a, bTitle: p.b };
+        const l = legacy.score(noFp, noFp, [], [], p.tfidf, p.hours, opts);
+        const r = port.score(noFp, noFp, [], [], p.tfidf, p.hours, opts);
+        if (l.score !== r.score) mismatches.push(`pair ${i}: score ${l.score} vs ${r.score}`);
+        const lk = Object.keys(l.components).sort();
+        const rk = Object.keys(r.components).sort();
+        if (lk.join(",") !== rk.join(",")) {
+          mismatches.push(`pair ${i}: keys [${lk}] vs [${rk}]`);
+          continue;
+        }
+        for (const k of lk) {
+          const lv = (l.components as Record<string, unknown>)[k];
+          const rv = (r.components as Record<string, unknown>)[k];
+          if (lv !== rv) mismatches.push(`pair ${i}: ${k} ${String(lv)} vs ${String(rv)}`);
+        }
+      }
+      expect(mismatches).toEqual([]);
+      // The new component keys exist on both sides (also for the lane-less branch).
+      const keys = Object.keys(
+        legacy.score(noFp, noFp, [], [], 0.1, 1).components,
+      );
+      for (const k of ["headlineSim", "headlineShared", "headlineLane", "textFloorCapped"]) {
+        expect(keys).toContain(k);
+      }
+    });
+
+    it("titleTokens / headlineTokens agree on every corpus and golden title", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const titles = [
+        ...articles.map((a) => a.title),
+        ...titlePairs.flatMap((p) => [p.a, p.b]),
+        "2026 bütçesi 1500 kişi",
+        null,
+      ];
+      for (const t of titles) {
+        expect([...port.titleTokens(t, 4)].sort()).toEqual([...legacy.titleTokens(t, 4)].sort());
+        const l = legacy.headlineTokens(t);
+        const r = port.headlineTokens(t);
+        expect([...r.tokens].sort()).toEqual([...l.tokens].sort());
+        expect([...r.numbers].sort()).toEqual([...l.numbers].sort());
+      }
     });
   });
 

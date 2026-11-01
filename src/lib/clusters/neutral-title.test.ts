@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { cleanHeadline, pickNeutralTitle } from "./neutral-title";
+import { cleanHeadline, isGenericTitle, pickNeutralTitle } from "./neutral-title";
 
 // Member titles are real prod headlines from the Sept-2026 replay corpus.
 
@@ -90,5 +90,75 @@ describe("pickNeutralTitle", () => {
       { title: "Yılın ilk karı bugün yağdı" },
     ]);
     expect(picked).toBe("Depremde İlk yardım ekipleri bölgeye ulaştı");
+  });
+});
+
+describe("isGenericTitle", () => {
+  it.each([
+    "Kısa haberler",
+    "Kısa haber",
+    "KISA HABERLER",
+    "Son dakika",
+    "SON DAKİKA",
+    "CANLI | Cumhurbaşkanı Erdoğan konuşuyor",
+    "Canlı: Meclis'te bütçe oturumu",
+    "Gündem özeti",
+    "Cumhurbaşkanı Erdoğan açıklamalarda bulunuyor",
+    "Cumhurbaşkanı Erdoğan",
+    "",
+    "   ",
+  ])("treats %j as a content-free placeholder", (title) => {
+    expect(isGenericTitle(title)).toBe(true);
+  });
+
+  it.each([
+    "İstanbul'da deprem oldu",
+    "SON DAKİKA! Deprem",
+    "Cumhurbaşkanı Erdoğan: Sağlıkta yeni hedef",
+    "Headline A",
+    "Eisenkot'tan Arap partileriyle çoğunluk hamlesi",
+    // "canlı bomba" is Turkish for suicide bomber: a real subject, not a
+    // live-blog lead-in.
+    "Canlı bomba saldırısında 3 kişi öldü",
+  ])("keeps %j, it names a subject", (title) => {
+    expect(isGenericTitle(title)).toBe(false);
+  });
+});
+
+describe("pickNeutralTitle with generic members", () => {
+  it("skips a generic member in favour of a descriptive one", () => {
+    const picked = pickNeutralTitle([
+      { title: "Kısa haberler" },
+      { title: "Eisenkot'tan Arap partileriyle çoğunluk hamlesi" },
+    ]);
+    expect(picked).toBe("Eisenkot'tan Arap partileriyle çoğunluk hamlesi");
+  });
+
+  it("does not let two copies of a generic title out-vote the descriptive one", () => {
+    // Identical copies are each other's nearest neighbour, so without the
+    // filter the repeated placeholder wins on centrality.
+    const picked = pickNeutralTitle([
+      { title: "Cumhurbaşkanı Erdoğan konuşuyor", source: "a" },
+      { title: "Cumhurbaşkanı Erdoğan konuşuyor", source: "b" },
+      { title: "Cumhurbaşkanı Erdoğan: Sağlıkta yeni hedef", source: "c" },
+    ]);
+    expect(picked).toBe("Cumhurbaşkanı Erdoğan: Sağlıkta yeni hedef");
+  });
+
+  it("returns null when every candidate is generic", () => {
+    expect(
+      pickNeutralTitle([
+        { title: "Kısa haberler" },
+        { title: "Son dakika" },
+        { title: "Gündem özeti" },
+      ]),
+    ).toBeNull();
+    expect(pickNeutralTitle([{ title: "Canlı: Meclis'te bütçe oturumu" }])).toBeNull();
+  });
+
+  it("still returns a lone descriptive title unchanged", () => {
+    expect(pickNeutralTitle([{ title: "İstanbul'da deprem oldu" }])).toBe(
+      "İstanbul'da deprem oldu",
+    );
   });
 });

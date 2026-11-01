@@ -242,13 +242,29 @@ function excludeAlt(exclude: string): string {
   return `\\m${words.join("\\s+")}${closed ? "\\M" : ""}`;
 }
 
-function guardPrefix(excludes: readonly string[]): string {
-  return `^(?![\\s\\S]*(?:${excludes.map(excludeAlt).join("|")}))[\\s\\S]*`;
+/**
+ * The guard in front of a non-trusted base: a negative lookahead over the
+ * excludes, then a positive lookahead over the requires (each only when its
+ * list is non-empty), then `[\s\S]*`. A requires phrase follows the same
+ * open/closed rule as an exclude.
+ */
+function guardPrefix(excludes: readonly string[], requires?: readonly string[]): string {
+  const neg =
+    excludes.length > 0 ? `(?![\\s\\S]*(?:${excludes.map(excludeAlt).join("|")}))` : "";
+  const pos =
+    requires !== undefined && requires.length > 0
+      ? `(?=[\\s\\S]*(?:${requires.map(excludeAlt).join("|")}))`
+      : "";
+  return `^${neg}${pos}[\\s\\S]*`;
 }
 
-/** A pattern without its leading exclude guard (the guard holds no "))" inside). */
+/**
+ * A pattern without its leading guard. The guard ends at the first "))[\s\S]*":
+ * no alternative holds a "))", and between the negative and the positive
+ * lookahead the text is "))(?=", never "))[\s\S]*".
+ */
 function stripGuard(pattern: string): string {
-  if (!pattern.startsWith("^(?!")) return pattern;
+  if (!pattern.startsWith("^(?")) return pattern;
   const end = "))[\\s\\S]*";
   return pattern.slice(pattern.indexOf(end) + end.length);
 }
@@ -302,7 +318,7 @@ describe("entityHubPatterns (exact runtime values)", () => {
       "\\mtcmb\\M",
     ],
     meclis: [
-      "^(?![\\s\\S]*(?:\\mtemsilciler\\s+meclisi|\\mknesset|\\misrail|\\miran|\\mlibya|\\mbelediye\\s+meclis|\\mil\\s+genel\\s+meclis|\\milce\\s+meclis|\\mmahalle\\s+meclis|\\mulusal\\s+meclis|\\mrum\\s+meclis|\\mgkry))[\\s\\S]*\\mmeclis",
+      "^(?![\\s\\S]*(?:\\mtemsilciler\\s+meclisi|\\mknesset|\\misrail|\\miran|\\mlibya|\\mbelediye\\s+meclis|\\mil\\s+genel\\s+meclis|\\milce\\s+meclis|\\mmahalle\\s+meclis|\\mulusal\\s+meclis|\\mrum\\s+meclis|\\mgkry|\\mticaret\\s+odas|\\msanayi\\s+odas|\\mito\\M|\\mmto\\M|\\matso|\\mbelediyesi\\s+meclis|\\mbuyuksehir\\s+meclis|\\mmeclis\\s+uyes|\\marnavutluk))(?=[\\s\\S]*(?:\\mtbmm|\\mgenel\\s+kurul|\\mmilletvekil|\\mkanun\\s+teklif|\\myasa\\s+teklif|\\mgrup\\s+toplanti|\\mmeclis\\s+baskan|\\mkurtulmus|\\mkomisyon|\\mbutce\\s+gorusme|\\mchp\\M|\\makp\\M|\\mak\\s+parti|\\mmhp\\M|\\mdem\\s+parti|\\miyi\\s+parti|\\myeniden\\s+refah))[\\s\\S]*\\mmeclis",
       "\\mtbmm",
       "\\mbuyuk\\s+millet\\s+meclisi",
     ],
@@ -395,6 +411,21 @@ describe("entityHubPatterns (exact runtime values)", () => {
       ]);
     });
 
+    it("carries both lookaheads on a non-trusted form and none on a trusted one", () => {
+      const spec: RisingHubSpec = {
+        aliases: ["Büyük Millet Meclisi", "Meclis", "TBMM"],
+        trusted: ["TBMM", "Büyük Millet Meclisi"],
+        excludes: ["israil"],
+        requires: ["genel kurul"],
+        hubMatch: "prefix",
+      };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "\\mbuyuk\\s+millet\\s+meclisi",
+        `${guardPrefix(["israil"], ["genel kurul"])}\\mmeclis`,
+        "\\mtbmm",
+      ]);
+    });
+
     it("keeps a trusted alias bare even when it is not the first form", () => {
       const spec: RisingHubSpec = { aliases: ["TBMM", "Meclis"], trusted: ["TBMM"], excludes: ["israil"] };
       expect(entityHubPatterns(bare, spec)[0]).toBe("\\mtbmm\\M");
@@ -412,6 +443,84 @@ describe("entityHubPatterns (exact runtime values)", () => {
       expect(out).toEqual([
         "^(?![\\s\\S]*(?:\\ma\\s+b|\\mc\\M|\\md\\s+e))[\\s\\S]*\\mxyz\\M",
       ]);
+    });
+  });
+
+  describe("requires", () => {
+    it("wraps a non-trusted form in a positive lookahead over the whole folded text", () => {
+      const spec: RisingHubSpec = { aliases: ["Xyz"], requires: ["tbmm", "genel kurul"] };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "^(?=[\\s\\S]*(?:\\mtbmm|\\mgenel\\s+kurul))[\\s\\S]*\\mxyz\\M",
+      ]);
+    });
+
+    it("puts the negative lookahead (excludes) before the positive one (requires)", () => {
+      const spec: RisingHubSpec = {
+        aliases: ["Xyz"],
+        excludes: ["israil", "ito"],
+        requires: ["tbmm"],
+      };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "^(?![\\s\\S]*(?:\\misrail|\\mito\\M))(?=[\\s\\S]*(?:\\mtbmm))[\\s\\S]*\\mxyz\\M",
+      ]);
+      expect(entityHubPatterns(bare, spec)[0]).toBe(`${guardPrefix(["israil", "ito"], ["tbmm"])}\\mxyz\\M`);
+    });
+
+    it("closes an alternative with \\M only for a single word of 3 letters or fewer", () => {
+      const spec: RisingHubSpec = {
+        aliases: ["Xyz"],
+        requires: ["chp", "akp", "ak parti", "komisyon", "mhp"],
+      };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "^(?=[\\s\\S]*(?:\\mchp\\M|\\makp\\M|\\mak\\s+parti|\\mkomisyon|\\mmhp\\M))[\\s\\S]*\\mxyz\\M",
+      ]);
+    });
+
+    it("keeps a trusted alias bare: it needs no cue", () => {
+      const spec: RisingHubSpec = {
+        aliases: ["TBMM", "Meclis"],
+        trusted: ["TBMM"],
+        requires: ["genel kurul"],
+      };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "\\mtbmm\\M",
+        "^(?=[\\s\\S]*(?:\\mgenel\\s+kurul))[\\s\\S]*\\mmeclis\\M",
+      ]);
+    });
+
+    it("never emits a guard for an empty list, or for entries that fold to nothing", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], requires: [] })).toEqual(["\\mxyz\\M"]);
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], requires: ["", "***"] })).toEqual([
+        "\\mxyz\\M",
+      ]);
+      // An unusable requires list falls back to the excludes guard alone.
+      expect(
+        entityHubPatterns(bare, { aliases: ["Xyz"], excludes: ["israil"], requires: ["***"] }),
+      ).toEqual([`${guardPrefix(["israil"])}\\mxyz\\M`]);
+    });
+
+    it("never lets a metacharacter in a requires entry reach the pattern", () => {
+      const out = entityHubPatterns(bare, { aliases: ["Xyz"], requires: ["a|b", "c.*", "d(e)"] });
+      expect(out).toEqual(["^(?=[\\s\\S]*(?:\\ma\\s+b|\\mc\\M|\\md\\s+e))[\\s\\S]*\\mxyz\\M"]);
+    });
+
+    it("matches only when a cue sits anywhere in the text, before or after the word", () => {
+      const spec: RisingHubSpec = { aliases: ["Xyz"], requires: ["tbmm", "chp"] };
+      const pat = new RegExp(entityHubPatterns(bare, spec)[0]!.replace(/\\[mM]/g, "\\b"));
+      expect(pat.test("xyz")).toBe(false);
+      expect(pat.test("xyz toplandi")).toBe(false);
+      expect(pat.test("tbmm xyz")).toBe(true);
+      expect(pat.test("xyz chp")).toBe(true);
+      expect(pat.test("chp'li xyz yarin")).toBe(true);
+      // 'chp' is a word of 3 letters: closed, so a longer word is not the cue.
+      expect(pat.test("xyz chpx")).toBe(false);
+    });
+
+    it("an exclude still vetoes a story that carries a cue", () => {
+      const spec: RisingHubSpec = { aliases: ["Xyz"], excludes: ["israil"], requires: ["tbmm"] };
+      const pat = new RegExp(entityHubPatterns(bare, spec)[0]!.replace(/\\[mM]/g, "\\b"));
+      expect(pat.test("tbmm xyz")).toBe(true);
+      expect(pat.test("tbmm xyz israil")).toBe(false);
     });
   });
 
@@ -496,6 +605,50 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
     expect(
       hubMatches("meclis", "Büyük Millet Meclisi Başkanı İran Meclis Başkanı ile görüştü"),
     ).toBe(true);
+  });
+
+  it("meclis: a chamber of commerce, municipal or foreign assembly is out, even with the bare word", () => {
+    for (const sample of [
+      "İTO Ekim ayı meclis toplantısı yapıldı",
+      "ATSO meclis toplantısında ekonomi değerlendirildi",
+      "MTO Meclis Başkanı açıklama yaptı",
+      "İstanbul Ticaret Odası Meclisi toplandı",
+      "Bakırköy Belediye Meclisi'nde gerginlik",
+      "CHP'li Milas Belediyesi meclis toplantısında tartışma",
+      "İzmir Büyükşehir Belediye Meclisi bütçeyi onayladı",
+      "Arnavutluk Meclisi yeni hükümeti onayladı",
+      "Meclis üyesi istifa etti",
+    ]) {
+      expect(hubMatches("meclis", sample), sample).toBe(false);
+    }
+  });
+
+  it("meclis: the bare word counts when the same text carries a TBMM or politics cue", () => {
+    for (const sample of [
+      "TBMM Genel Kurulu'nda kanun teklifi kabul edildi",
+      "Meclis Genel Kurulu'nda vergi düzenlemesi kabul edildi",
+      "Kanun teklifi Meclis'e sunuldu",
+      "AK Parti milletvekili Meclis kürsüsünde konuştu",
+      "Meclis Başkanı Kurtulmuş yeni yasama yılını açtı",
+      "Meclis'te bütçe görüşmeleri",
+      "CHP grup toplantısında Meclis'e çağrı",
+    ]) {
+      expect(hubMatches("meclis", sample), sample).toBe(true);
+    }
+  });
+
+  it("meclis: no cue, no hit; the cue may sit before or after the word", () => {
+    expect(hubMatches("meclis", "Meclis toplandı")).toBe(false);
+    expect(hubMatches("meclis", "Meclis'e çağrı yaptı, DEM Parti")).toBe(true);
+    expect(hubMatches("meclis", "Yeniden Refah Partisi Meclis'i terk etti")).toBe(true);
+  });
+
+  it("meclis: an excluded cue beats a politics cue; TBMM and Büyük Millet Meclisi need neither", () => {
+    expect(hubMatches("meclis", "CHP'li belediye meclis üyesi")).toBe(false);
+    expect(hubMatches("meclis", "MHP'li Meclis Başkanı İTO'yu ziyaret etti")).toBe(false);
+    expect(hubMatches("meclis", "TBMM")).toBe(true);
+    expect(hubMatches("meclis", "İTO toplantısı, TBMM Başkanı")).toBe(true);
+    expect(hubMatches("meclis", "Türkiye Büyük Millet Meclisi")).toBe(true);
   });
 
   it("iyi-parti: 'iyi ... parti' apart is out, 'İYİ Parti' and 'İYİ Partili' are in", () => {
@@ -613,14 +766,18 @@ describe("invariants over every curated entity", () => {
   const WORD = "[a-z0-9]+";
   const PLAIN = `${esc("\\m")}${WORD}(?:${esc("\\s")}\\+${WORD})*(?:${esc("\\M")})?`;
   const QUANT = `${esc("\\m")}${esc(QUANTITY_GUARD)}${WORD}(?:${esc("\\M")})?`;
-  const GUARD = `${esc("^(?![\\s\\S]*(?:")}${PLAIN}(?:${esc("|")}${PLAIN})*${esc("))[\\s\\S]*")}`;
+  const ALTS = `${PLAIN}(?:${esc("|")}${PLAIN})*`;
+  const EXCL = `${esc("(?![\\s\\S]*(?:")}${ALTS}${esc("))")}`;
+  const REQ = `${esc("(?=[\\s\\S]*(?:")}${ALTS}${esc("))")}`;
+  // `^`, then the negative lookahead and/or the positive one (in that order), then `[\s\S]*`.
+  const GUARD = `${esc("^")}(?:${EXCL}(?:${REQ})?|${REQ})${esc("[\\s\\S]*")}`;
   const GRAMMAR = new RegExp(`^(?:${PLAIN}|${QUANT}|${GUARD}(?:${PLAIN}|${QUANT}))$`);
 
   it("covers all 62 entities", () => {
     expect(RISING_ENTITIES).toHaveLength(62);
   });
 
-  it("has 1..12 queries and 1..12 patterns, each plain, amount-guarded or exclude-guarded", () => {
+  it("has 1..12 queries and 1..12 patterns, each plain, amount-guarded or lookahead-guarded", () => {
     for (const e of RISING_ENTITIES) {
       const q = entityHubQueries(e);
       const p = entityHubPatterns(e);
@@ -643,6 +800,11 @@ describe("invariants over every curated entity", () => {
       "^(?![\\s\\S]*(?:))[\\s\\S]*\\mdeva\\M",
       "^(?![\\s\\S]*(?:\\mfoo.*))[\\s\\S]*\\mdeva\\M",
       "^(?![\\s\\S]*(?:\\mfoo))\\mdeva\\M",
+      "^(?=[\\s\\S]*(?:))[\\s\\S]*\\mdeva\\M",
+      "^(?=[\\s\\S]*(?:\\mfoo.*))[\\s\\S]*\\mdeva\\M",
+      "^(?=[\\s\\S]*(?:\\mfoo))\\mdeva\\M",
+      "^(?=[\\s\\S]*(?:\\mfoo))(?![\\s\\S]*(?:\\mbar))[\\s\\S]*\\mdeva\\M",
+      "(?=[\\s\\S]*(?:\\mfoo))[\\s\\S]*\\mdeva\\M",
       `\\m${QUANTITY_GUARD}deva\\s+x\\s`,
     ]) {
       expect(bad, bad).not.toMatch(GRAMMAR);
@@ -655,10 +817,17 @@ describe("invariants over every curated entity", () => {
     }
   });
 
-  it("every form, and the label, matches one of the entity's own patterns", () => {
+  it("every form, and the label, matches one of the entity's own patterns (a requires cue added where the spec asks for one)", () => {
     for (const e of RISING_ENTITIES) {
+      const spec = entityHubSpec(e);
+      const requires = spec.requires ?? [];
       for (const form of [...entityHubForms(e), e.label]) {
-        expect(hubMatches(e.key, form), `${e.key}: ${form}`).toBe(true);
+        // A trusted form stands alone; any other form needs one of the spec's cues. The
+        // last cue is not a trusted spelling, so the form's own pattern must accept it.
+        const needsCue = requires.length > 0 && !(spec.trusted ?? []).includes(form);
+        const text = needsCue ? `${form} ${requires[requires.length - 1]}` : form;
+        expect(hubMatches(e.key, text), `${e.key}: ${text}`).toBe(true);
+        if (needsCue) expect(hubMatches(e.key, form), `${e.key}: ${form} alone`).toBe(false);
       }
     }
   });
@@ -735,38 +904,58 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
     }
   });
 
-  it("every exclude alternative follows the closing rule (\\M only on a word of 3 letters or fewer)", () => {
+  it("every requires entry is a folded ASCII phrase, so no metacharacter reaches the RPC", () => {
     for (const [key, spec] of specs) {
-      if (spec.excludes === undefined) continue;
-      const e = entityByKey(key)!;
-      const guarded = entityHubPatterns(e).filter((p) => p.startsWith("^(?!"));
-      expect(guarded.length, key).toBeGreaterThan(0);
-      for (const p of guarded) expect(p.startsWith(guardPrefix(spec.excludes)), key).toBe(true);
+      for (const req of spec.requires ?? []) {
+        expect(req, `${key}: ${req}`).toBe(foldEntityText(req));
+        expect(req, `${key}: ${req}`).toMatch(/^[a-z0-9]+( [a-z0-9]+)*$/);
+      }
     }
   });
 
-  it("every trusted entry is one of the spec's own aliases, and trusted needs excludes", () => {
+  it("every guarded pattern starts with guardPrefix(excludes, requires): the closing rule holds for both lists", () => {
+    for (const [key, spec] of specs) {
+      if (spec.excludes === undefined && spec.requires === undefined) continue;
+      const e = entityByKey(key)!;
+      const guarded = entityHubPatterns(e).filter((p) => p.startsWith("^(?"));
+      expect(guarded.length, key).toBeGreaterThan(0);
+      for (const p of guarded) {
+        expect(p.startsWith(guardPrefix(spec.excludes ?? [], spec.requires)), key).toBe(true);
+      }
+    }
+  });
+
+  it("every trusted entry is one of the spec's own aliases, and trusted needs a guard to be trusted from", () => {
     for (const [key, spec] of specs) {
       for (const t of spec.trusted ?? []) {
         expect(spec.aliases ?? [], `${key}: ${t}`).toContain(t);
       }
       if (spec.trusted !== undefined) {
-        expect((spec.excludes ?? []).length, `${key} has trusted but no excludes`).toBeGreaterThan(0);
+        expect(
+          (spec.excludes ?? []).length + (spec.requires ?? []).length,
+          `${key} has trusted but no excludes or requires`,
+        ).toBeGreaterThan(0);
       }
     }
   });
 
   it("a trusted alias is emitted bare, every other alias carries the guard", () => {
     for (const [key, spec] of specs) {
-      if (spec.excludes === undefined) continue;
+      if (spec.excludes === undefined && spec.requires === undefined) continue;
       const e = entityByKey(key)!;
       const forms = entityHubForms(e);
       const patterns = entityHubPatterns(e);
       expect(patterns.length, key).toBe(forms.length);
       forms.forEach((form, i) => {
-        const guarded = (patterns[i] as string).startsWith("^(?!");
+        const guarded = (patterns[i] as string).startsWith("^(?");
         expect(guarded, `${key}: ${form}`).toBe(!(spec.trusted ?? []).includes(form));
       });
+    }
+  });
+
+  it("keeps the 12-pattern cap with the guards in place", () => {
+    for (const [key] of specs) {
+      expect(entityHubPatterns(entityByKey(key)!).length, key).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
     }
   });
 
@@ -784,6 +973,53 @@ describe("hub spec guards (precision, 2026-11-01)", () => {
         .sort(),
     ).toEqual(["dolar"]);
     expect(RISING_HUB_SPECS.dolar?.quantityGuard).toBe(true);
+  });
+
+  it("requires is curated on exactly meclis", () => {
+    expect(
+      specs
+        .filter(([, s]) => s.requires !== undefined)
+        .map(([k]) => k)
+        .sort(),
+    ).toEqual(["meclis"]);
+  });
+
+  it("the meclis cues: TBMM vocabulary, the parliamentary work, and the party names", () => {
+    expect(RISING_HUB_SPECS.meclis?.requires).toEqual([
+      "tbmm",
+      "genel kurul",
+      "milletvekil",
+      "kanun teklif",
+      "yasa teklif",
+      "grup toplanti",
+      "meclis baskan",
+      "kurtulmus",
+      "komisyon",
+      "butce gorusme",
+      "chp",
+      "akp",
+      "ak parti",
+      "mhp",
+      "dem parti",
+      "iyi parti",
+      "yeniden refah",
+    ]);
+  });
+
+  it("the meclis excludes close the chamber-of-commerce, municipal and foreign residue", () => {
+    expect(RISING_HUB_SPECS.meclis?.excludes).toEqual(
+      expect.arrayContaining([
+        "ticaret odas",
+        "sanayi odas",
+        "ito",
+        "mto",
+        "atso",
+        "belediyesi meclis",
+        "buyuksehir meclis",
+        "meclis uyes",
+        "arnavutluk",
+      ]),
+    );
   });
 
   it("curated trusted sets: AYM, TCMB, and the two unambiguous parliament names", () => {

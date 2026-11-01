@@ -143,6 +143,9 @@ const {
   fakeArticles,
   clusterRows,
   clusterArticleRows,
+  stickyClusterRows,
+  clusterQueries,
+  stickyQuery,
   admissionRows,
   rpcFixtures,
   supabaseFakeClient,
@@ -164,6 +167,13 @@ const {
     // returns the full current array.
     const clusters: Array<Record<string, unknown>> = [];
     const clusterArticles: Array<{ cluster_id: string; article_id: string }> = [];
+    // 2026-11-01 sticky context: loadClusterContext's second `clusters` query
+    // (the one bounded by `.lt("updated_at", ...)`) is answered from
+    // `stickyClusterRows`, or fails when `stickyQuery.error` is set. Every
+    // unfiltered `clusters` list query is recorded in `clusterQueries`.
+    const stickyClusters: Array<Record<string, unknown>> = [];
+    const clusterQueryLog: Array<Record<string, unknown>> = [];
+    const stickyQueryState: { error: { message: string } | null } = { error: null };
     const rpcFixturesState: {
       cluster_link_atomic: { data: unknown; error: { message: string } | null } | null;
       jev_politics_admission_claim:
@@ -212,6 +222,13 @@ const {
           if (eqId !== undefined) {
             const row = clusters.find((c) => c.id === eqId) ?? null;
             return { data: row, error: null, count: row ? 1 : 0 };
+          }
+          clusterQueryLog.push(state as unknown as Record<string, unknown>);
+          if (state.lt.some((p) => p.col === "updated_at")) {
+            if (stickyQueryState.error) {
+              return { data: null, error: stickyQueryState.error };
+            }
+            return { data: stickyClusters, error: null, count: stickyClusters.length };
           }
           return { data: clusters, error: null, count: clusters.length };
         },
@@ -271,6 +288,9 @@ const {
       fakeArticles: articles,
       clusterRows: clusters,
       clusterArticleRows: clusterArticles,
+      stickyClusterRows: stickyClusters,
+      clusterQueries: clusterQueryLog,
+      stickyQuery: stickyQueryState,
       admissionRows,
       rpcFixtures: rpcFixturesState,
       supabaseFakeClient: fake.client,
@@ -310,6 +330,9 @@ beforeEach(() => {
   vi.resetModules();
   clusterRows.length = 0;
   clusterArticleRows.length = 0;
+  stickyClusterRows.length = 0;
+  clusterQueries.length = 0;
+  stickyQuery.error = null;
   resetPgmqState();
   for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
   // Reset the shared Supabase fake's mutation + rpc log so each test
@@ -1327,6 +1350,349 @@ describe("cluster-consumer Edge Function", () => {
       // addArticleToCluster (cluster_link_atomic) must not have been called.
       const linkCalls = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
       expect(linkCalls.length).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 2026-11-01 recall wave: sticky context + headline titles. At peak the
+  // newest-200 window spans ~2 h, so a busy story that went quiet for 3 h used
+  // to drop out of the context. loadClusterContext now runs a second, bounded
+  // query for recent multi-article clusters and passes the titles to score().
+  // -------------------------------------------------------------------------
+  describe("sticky context + headline titles (2026-11-01)", () => {
+    const CAP = 200;
+    const BUSY_ID = "cluster-busy-3h";
+    const BUSY_MEMBER = "member-busy-3h";
+    const FP_BUSY = "fp-busy-3h";
+    const BUSY_TITLE = "Izmir liman genisletme projesi onaylandi";
+    const NEW_TITLE = "Izmir liman genisletme calismasi durduruldu";
+
+    function seedWindow(n: number) {
+      const t0 = Date.now();
+      for (let i = 0; i < n; i++) {
+        clusterRows.push({
+          id: `win-${i}`,
+          title_tr: `Pencere ${i}`,
+          title_tr_neutral: `Pencere ${i}`,
+          first_published: new Date(t0 - i * 10_000).toISOString(),
+          updated_at: new Date(t0 - i * 10_000).toISOString(),
+          article_count: 1,
+        });
+      }
+    }
+
+    function seedBusyCluster() {
+      const updated = new Date(Date.now() - 3 * 3_600_000).toISOString();
+      stickyClusterRows.push({
+        id: BUSY_ID,
+        title_tr: BUSY_TITLE,
+        title_tr_neutral: BUSY_TITLE,
+        first_published: updated,
+        updated_at: updated,
+        article_count: 20,
+        is_archived: false,
+        merged_into: null,
+      });
+      clusterArticleRows.push({ cluster_id: BUSY_ID, article_id: BUSY_MEMBER });
+      fakeArticles[BUSY_MEMBER] = {
+        id: BUSY_MEMBER,
+        source_id: null,
+        title: BUSY_TITLE,
+        description: "Detay",
+        published_at: updated,
+        fingerprint: FP_BUSY,
+        entities: [],
+        category: "politika",
+        minhash_sig: null,
+        minhash_version: null,
+      };
+    }
+
+    function seedIncoming() {
+      pgmqState.pending = [
+        { msg_id: 1100, read_ct: 1, message: { article_id: "art-sticky" } },
+      ];
+      fakeArticles["art-sticky"] = {
+        id: "art-sticky",
+        source_id: null,
+        title: NEW_TITLE,
+        description: "Detay çalışma",
+        url: "https://example.com/art-sticky",
+        category: "politika",
+        published_at: new Date().toISOString(),
+      };
+    }
+
+    async function drain() {
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      return res;
+    }
+
+    it("full window: runs the bounded sticky query and scores the busy cluster, passing both titles", async () => {
+      seedWindow(CAP);
+      seedBusyCluster();
+      seedIncoming();
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await drain();
+
+      const stickyQ = clusterQueries.find((q) =>
+        (q as unknown as { lt: Array<{ col: string }> }).lt.some((p) => p.col === "updated_at")
+      ) as unknown as {
+        gte: Array<{ col: string; val: unknown }>;
+        lt: Array<{ col: string; val: unknown }>;
+        eq: Array<{ col: string; val: unknown }>;
+        is: Array<{ col: string; val: unknown }>;
+        order: Array<{ col: string; opts: { ascending?: boolean } }>;
+        limit: number | null;
+      };
+      expect(stickyQ).toBeDefined();
+      // Exclusive upper bound = updated_at of the 200th newest window cluster.
+      expect(stickyQ.lt).toEqual([{ col: "updated_at", val: clusterRows[CAP - 1]!.updated_at }]);
+      const gteCols = stickyQ.gte.map((p) => p.col).sort();
+      expect(gteCols).toEqual(["article_count", "updated_at"]);
+      expect(stickyQ.gte.find((p) => p.col === "article_count")!.val).toBe(5);
+      const horizon = Date.parse(stickyQ.gte.find((p) => p.col === "updated_at")!.val as string);
+      expect(Math.abs(Date.now() - 12 * 3_600_000 - horizon)).toBeLessThan(60_000);
+      expect(stickyQ.eq).toEqual([{ col: "is_archived", val: false }]);
+      expect(stickyQ.is).toEqual([{ col: "merged_into", val: null }]);
+      expect(stickyQ.order[0]).toMatchObject({ col: "article_count", opts: { ascending: false } });
+      expect(stickyQ.limit).toBe(60);
+
+      // The busy cluster's seed was a scored candidate, and score() got titles.
+      const calls = vi.mocked(scoreMock).mock.calls;
+      const busyCall = calls.find(
+        (c) => (c[1] as { strict?: string | null } | null)?.strict === FP_BUSY,
+      );
+      expect(busyCall).toBeDefined();
+      expect(busyCall![6]).toMatchObject({ aTitle: NEW_TITLE, bTitle: BUSY_TITLE });
+
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[cluster-consumer\] context clusters=201 sticky=1 loadMs=\d+$/),
+      );
+      log.mockRestore();
+    });
+
+    it("window not full: no sticky query is issued", async () => {
+      seedWindow(CAP - 1);
+      seedBusyCluster();
+      seedIncoming();
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      await drain();
+
+      const withLt = clusterQueries.filter((q) =>
+        (q as unknown as { lt: Array<{ col: string }> }).lt.some((p) => p.col === "updated_at")
+      );
+      expect(withLt).toHaveLength(0);
+      const busyCall = vi.mocked(scoreMock).mock.calls.find(
+        (c) => (c[1] as { strict?: string | null } | null)?.strict === FP_BUSY,
+      );
+      expect(busyCall).toBeUndefined();
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[cluster-consumer\] context clusters=199 sticky=0 loadMs=\d+$/),
+      );
+      log.mockRestore();
+    });
+
+    it("sticky query error: warns and still drains without sticky rows", async () => {
+      seedWindow(CAP);
+      seedBusyCluster();
+      seedIncoming();
+      stickyQuery.error = { message: "statement timeout" };
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+      const res = await drain();
+      const body = (await res.json()) as { created: number; matched: number };
+      expect(body.created + body.matched).toBe(1);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("statement timeout"));
+      const busyCall = vi.mocked(scoreMock).mock.calls.find(
+        (c) => (c[1] as { strict?: string | null } | null)?.strict === FP_BUSY,
+      );
+      expect(busyCall).toBeUndefined();
+      expect(log).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[cluster-consumer\] context clusters=200 sticky=0 loadMs=\d+$/),
+      );
+      warn.mockRestore();
+      log.mockRestore();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Text floor vs the fallback join window. ENTITY_TEXT_FLOOR caps the
+  // entity/tfidf lane at MATCH_THRESHOLD - 0.01 (0.39), which sits inside the
+  // fallback window [FALLBACK_FLOOR 0.36, 0.40). When the primary candidate
+  // already holds the incoming article's source (duplicate-source skip), the
+  // fallback loop used to join the next candidate scoring >= 0.36, so a pair
+  // carried by entities alone (tfidf < 0.20) still joined. Such a result must
+  // stay reviewable by Jev's low band but never join as a fallback.
+  // -------------------------------------------------------------------------
+  describe("text-floor-capped candidates never join as a fallback (2026-11-01 review)", () => {
+    const A = {
+      cluster: "cluster-floor-a",
+      member: "member-floor-a",
+      fp: "fp-floor-a",
+      title: "Izmir liman genisletme projesi onaylandi",
+    };
+    const B = {
+      cluster: "cluster-floor-b",
+      seed: "member-floor-b-seed",
+      latest: "member-floor-b-latest",
+      fpSeed: "fp-floor-b-seed",
+      fpLatest: "fp-floor-b-latest",
+      title: "Izmir liman genisletme ihalesi iptal edildi",
+    };
+
+    type Fake = { score: number; components: Record<string, unknown>; isMatch: boolean };
+    const result = (s: number, components: Record<string, unknown> = {}): Fake => ({
+      score: s,
+      components: { cosine: 0.1, entityJaccard: 0, fingerprintMatch: false, ...components },
+      isMatch: s >= 0.4,
+    });
+    // What the real scorer reports for a pair the text floor bound: entities
+    // carried the primary lane, MinHash contributed nothing.
+    const CAPPED = { textFloorCapped: true, raw: 0.39, jaccardScore: 0, primary: 0.45 };
+
+    function seedClusters(opts: { bHasLatest?: boolean } = {}) {
+      const now = new Date().toISOString();
+      const hourAgo = new Date(Date.now() - 3_600_000).toISOString();
+      clusterRows.push(
+        { id: A.cluster, title_tr: A.title, title_tr_neutral: A.title, first_published: now, updated_at: now, article_count: 1 },
+        { id: B.cluster, title_tr: B.title, title_tr_neutral: B.title, first_published: now, updated_at: now, article_count: 1 },
+      );
+      clusterArticleRows.push(
+        { cluster_id: A.cluster, article_id: A.member },
+        { cluster_id: B.cluster, article_id: B.seed },
+      );
+      // Cluster A already holds src-outlet, the incoming article's source.
+      fakeArticles[A.member] = {
+        id: A.member, source_id: "src-outlet", title: A.title, description: "Detay A",
+        published_at: now, fingerprint: A.fp, entities: [], category: "politika",
+        minhash_sig: null, minhash_version: null,
+      };
+      fakeArticles[B.seed] = {
+        id: B.seed, source_id: "src-wire", title: B.title, description: "Detay B",
+        published_at: opts.bHasLatest ? hourAgo : now, fingerprint: B.fpSeed, entities: [],
+        category: "politika", minhash_sig: null, minhash_version: null,
+      };
+      if (opts.bHasLatest) {
+        clusterArticleRows.push({ cluster_id: B.cluster, article_id: B.latest });
+        fakeArticles[B.latest] = {
+          id: B.latest, source_id: "src-agg", title: B.title, description: "Detay B2",
+          published_at: now, fingerprint: B.fpLatest, entities: [], category: "politika",
+          minhash_sig: null, minhash_version: null,
+        };
+      }
+      pgmqState.pending = [{ msg_id: 1300, read_ct: 1, message: { article_id: "art-floor" } }];
+      fakeArticles["art-floor"] = {
+        id: "art-floor", source_id: "src-outlet",
+        title: "Izmir liman genisletme calismasi durduruldu",
+        description: "Detay çalışma", url: "https://example.com/art-floor",
+        category: "politika", published_at: now,
+      };
+    }
+
+    function scoreBy(byFp: Record<string, Fake>) {
+      vi.mocked(scoreMock).mockImplementation((_a: unknown, b: unknown) => {
+        const strict = (b as { strict?: string | null } | null | undefined)?.strict ?? null;
+        return (strict && byFp[strict]) || result(0);
+      });
+    }
+
+    async function drain() {
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      return (await res.json()) as { matched: number; created: number };
+    }
+
+    const linkedClusters = () =>
+      supabaseFakeCalls.rpc
+        .filter((r) => r.name === "cluster_link_atomic")
+        .map((r) => (r.args as { p_cluster_id: string }).p_cluster_id);
+
+    it("primary skipped as duplicate-source + entity-only secondary at 0.39 -> new cluster, no join", async () => {
+      seedClusters();
+      scoreBy({ [A.fp]: result(0.6), [B.fpSeed]: result(0.39, CAPPED) });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(1);
+      expect(linkedClusters()).toEqual([]);
+    });
+
+    it("control: the same secondary without the cap is the ordinary fallback join and still joins", async () => {
+      seedClusters();
+      scoreBy({ [A.fp]: result(0.6), [B.fpSeed]: result(0.39, { textFloorCapped: false }) });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(1);
+      expect(body.created).toBe(0);
+      expect(linkedClusters()).toEqual([B.cluster]);
+    });
+
+    it("a MinHash-carried score keeps joining even though tfidf is below the floor (the cap did not decide it)", async () => {
+      seedClusters();
+      // raw == jaccardScore: the MinHash lane carried the pair (time-decayed to 0.38).
+      scoreBy({
+        [A.fp]: result(0.6),
+        [B.fpSeed]: result(0.38, { textFloorCapped: true, raw: 0.8, jaccardScore: 0.8, primary: 0.2 }),
+      });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(1);
+      expect(linkedClusters()).toEqual([B.cluster]);
+    });
+
+    it("a capped seed result does not hide an ordinary sub-threshold latest result of the same cluster", async () => {
+      seedClusters({ bHasLatest: true });
+      scoreBy({
+        [A.fp]: result(0.6),
+        [B.fpSeed]: result(0.39, CAPPED), // wins on score, but cannot join as a fallback
+        [B.fpLatest]: result(0.37, { textFloorCapped: false }), // ordinary fallback candidate
+      });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(1);
+      expect(linkedClusters()).toEqual([B.cluster]);
+    });
+
+    it("a capped secondary is skipped but a later ordinary candidate is still reached", async () => {
+      seedClusters();
+      // A third cluster C, ordinary 0.37, ranked below the capped 0.39 one.
+      const now = new Date().toISOString();
+      const C = { cluster: "cluster-floor-c", member: "member-floor-c", fp: "fp-floor-c", title: "Izmir liman genisletme ihale sonucu" };
+      clusterRows.push({ id: C.cluster, title_tr: C.title, title_tr_neutral: C.title, first_published: now, updated_at: now, article_count: 1 });
+      clusterArticleRows.push({ cluster_id: C.cluster, article_id: C.member });
+      fakeArticles[C.member] = {
+        id: C.member, source_id: "src-agg", title: C.title, description: "Detay C",
+        published_at: now, fingerprint: C.fp, entities: [], category: "politika",
+        minhash_sig: null, minhash_version: null,
+      };
+      scoreBy({
+        [A.fp]: result(0.6),
+        [B.fpSeed]: result(0.39, CAPPED),
+        [C.fp]: result(0.37, { textFloorCapped: false }),
+      });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(1);
+      expect(linkedClusters()).toEqual([C.cluster]);
     });
   });
 

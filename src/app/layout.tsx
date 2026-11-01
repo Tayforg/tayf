@@ -27,11 +27,15 @@ const sans = Plus_Jakarta_Sans({
   display: "swap",
 });
 
-// Monospace for data labels and badges.
+// Monospace for data labels and badges only. display: swap is on, and
+// preloading it competed with the LCP hero on a cold first visit, so it loads
+// when a label first paints instead. Font preloads go from 6 to 4 (serif and
+// sans stay preloaded). tests/guards/font-preload.test.ts pins the budget.
 const mono = JetBrains_Mono({
   variable: "--font-mono",
   subsets: ["latin", "latin-ext"],
   display: "swap",
+  preload: false,
 });
 
 export const metadata: Metadata = {

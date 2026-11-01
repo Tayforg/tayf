@@ -142,6 +142,15 @@ export default function DeveloperApiPage() {
   const anonIpNote = `Anahtarsız ya da geçersiz anahtarlı istekler tek bir IP adresinden dakikada yaklaşık ${API_V1_ANON_LIMIT.refillPerSecond * 60} istek (anlık en fazla ${API_V1_ANON_LIMIT.capacity}) ile sınırlıdır.`;
   const keyedIpNote = `Geçerli bir anahtarla gelen istekler anahtarın kendi dakikalık sınırına tabidir; tek bir IP adresi yine de dakikada en fazla yaklaşık ${API_V1_KEYED_IP_LIMIT.refillPerSecond * 60} istek (anlık en fazla ${API_V1_KEYED_IP_LIMIT.capacity}) gönderebilir.`;
   const retryAfterNote = "429 yanıtı Retry-After başlığı (saniye) ve details.retryAfterMs taşır.";
+  // Shown while NEXT_PUBLIC_CONTACT_EMAIL is unset: key requests go through the
+  // correction/feedback form on /metodoloji (CorrectionForm -> /api/corrections),
+  // which accepts a reply e-mail. Single template literal for the same
+  // text-node reason as the notes above. The quoted names are the visible
+  // labels of CorrectionForm's fields (WCAG 2.5.3: people, and speech input,
+  // address a field by its visible label); page.test.tsx pins them to the form.
+  // The form marks the e-mail field optional, but the key is only ever sent by
+  // e-mail, so the note says so.
+  const keyRequestNote = `Anahtar talebinizi şimdilik geri bildirim formundan iletebilirsiniz: «Haber veya sayfa adresi» alanına ${base}/gelistirici adresini, «Düzeltme veya itiraz» alanına kurumunuzu, kullanım amacınızı ve günlük istek tahmininizi, «E-posta» alanına da anahtarı gönderebileceğimiz adresi yazın (anahtar yalnızca e-postayla iletilir, bu yüzden e-posta alanını boş bırakmayın).`;
   const getEndpoints = V1_ENDPOINTS.filter((e) => e.method === "GET" && e.path !== "/api/v1/openapi.json");
   const hasAnyPrice = API_PLANS.some((plan) => plan.priceTr !== null);
 
@@ -347,7 +356,12 @@ for (const cluster of data.clusters) {
               Anahtar iste
             </TrackedLink>
           ) : (
-            <p className={noteClass}>İletişim adresi yakında burada yayımlanacak.</p>
+            <>
+              <p className={noteClass}>{keyRequestNote}</p>
+              <a href="/metodoloji#duzeltme" className={brandLink}>
+                Geri bildirim formuna git
+              </a>
+            </>
           )}
         </div>
       </section>

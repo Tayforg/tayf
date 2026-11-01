@@ -30,7 +30,11 @@
 // Pure JS, only depends on node:crypto.
 
 import { createHash } from "node:crypto";
-import { MINHASH_SIG_K } from "./constants.mjs";
+import {
+  HEADLINE_GENERIC_PREFIXES,
+  HEADLINE_TOKEN_MIN_LEN,
+  MINHASH_SIG_K,
+} from "./constants.mjs";
 
 // ---------------------------------------------------------------------------
 // Normalization
@@ -174,10 +178,46 @@ export function stemTurkish(token) {
 export function titleTokens(title, minLen = 4) {
   const out = new Set();
   for (const tok of normalizeTurkish(title).split(" ")) {
-    if (tok.length < minLen || /^d+$/.test(tok)) continue;
+    // Digits are excluded: a bare year or count ("2026", "39") is not a story
+    // key. (This guard used to read /^d+$/ -- the letter d -- so it never
+    // matched and numerals leaked into the candidate index.)
+    if (tok.length < minLen || /^\d+$/.test(tok)) continue;
     out.add(stemTurkish(tok));
   }
   return out;
+}
+
+/**
+ * Tokens for the ensemble's headline lane. Unlike `titleTokens` (candidate
+ * generation: min length 4, digits dropped) this keeps 3-letter tokens and
+ * numerals, because two outlets' headlines for one event usually agree on the
+ * numeral ("39 kisi tutuklandi") and a differing numeral is the best signal
+ * that two similar sentences describe different developments.
+ *
+ *  - an all-digit token of any length goes into BOTH `numbers` and `tokens`;
+ *  - any other token of length >= HEADLINE_TOKEN_MIN_LEN is stemmed, unless
+ *    its surface form starts with one of HEADLINE_GENERIC_PREFIXES (the check
+ *    runs on the surface form: "erdoganin" stems to "erdoga").
+ *
+ * @returns {{ tokens: Set<string>, numbers: Set<string> }}
+ */
+export function headlineTokens(title) {
+  const tokens = new Set();
+  const numbers = new Set();
+  const norm = normalizeTurkish(title);
+  if (!norm) return { tokens, numbers };
+  for (const tok of norm.split(" ")) {
+    if (!tok) continue;
+    if (/^\d+$/.test(tok)) {
+      numbers.add(tok);
+      tokens.add(tok);
+      continue;
+    }
+    if (tok.length < HEADLINE_TOKEN_MIN_LEN) continue;
+    if (HEADLINE_GENERIC_PREFIXES.some((p) => tok.startsWith(p))) continue;
+    tokens.add(stemTurkish(tok));
+  }
+  return { tokens, numbers };
 }
 
 export function shingleSet(title, description, n = 4) {
