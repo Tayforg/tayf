@@ -11,6 +11,7 @@ import {
 } from "@/lib/clusters/politics-query";
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
 import { createReaderClient } from "@/lib/supabase/server";
+import { currentTimeMs } from "@/lib/time";
 import { ENTITY_HUB_LIMIT, entityByKey } from "./entity-hub";
 
 // /gundem/[key] entity hub data. Mirrors src/lib/clusters/search-query.ts: the
@@ -35,6 +36,15 @@ export interface EntityHub {
   bundles: ClusterBundle[];
   /** Full match count in the window (>= bundles.length). */
   total: number;
+  /**
+   * When this result was read (epoch ms). Stamped inside fetchEntityHub, which
+   * only ever runs inside the "use cache" scope or after the request scope on
+   * the live retry, so the clock read is allowed in both. The page renders
+   * relative times against it instead of reading the clock itself: /gundem/[key]
+   * is fully static (generateStaticParams, no searchParams), and a Date.now()
+   * in its render body fails `next build` once the cached read succeeds.
+   */
+  asOfMs: number;
 }
 
 interface EntityIdRow {
@@ -48,11 +58,12 @@ interface EntityIdRow {
 // directive so it can run twice: once (wrapped by `attemptCached`) inside the
 // cache boundary below, and once more, live, as `getEntityHub`'s retry.
 async function fetchEntityHub(key: string): Promise<EntityHub> {
+  const asOfMs = currentTimeMs();
   const entity = entityByKey(key);
-  if (entity === null) return { bundles: [], total: 0 };
+  if (entity === null) return { bundles: [], total: 0, asOfMs };
 
   const variants = turkishQueryVariants(entity.label);
-  if (variants.length === 0) return { bundles: [], total: 0 };
+  if (variants.length === 0) return { bundles: [], total: 0, asOfMs };
 
   const supabase = createReaderClient();
 
@@ -67,7 +78,7 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
 
   const rows = (data ?? []) as EntityIdRow[];
   const ids = rows.map((r) => r.id);
-  if (ids.length === 0) return { bundles: [], total: 0 };
+  if (ids.length === 0) return { bundles: [], total: 0, asOfMs };
 
   // `count(*) over ()` repeats the full match count on every row, so the first
   // row's value is the total. A missing / non-numeric / impossibly small value
@@ -106,7 +117,7 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
     if (members.length === 0) continue;
     bundles.push(buildClusterBundle(row, members, health).bundle);
   }
-  return { bundles, total };
+  return { bundles, total, asOfMs };
 }
 
 // Build-safety: `attemptCached` swallows whatever `fetchEntityHub` throws
