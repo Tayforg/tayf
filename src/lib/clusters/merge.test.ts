@@ -128,6 +128,7 @@ describe("mergeRevalidationTags", () => {
       "clusters",
       "clusters-politics",
       "clusters-search",
+      "clusters-entity",
       "story-threads",
       "cluster-detail:s",
       "cluster-detail:t",

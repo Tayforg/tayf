@@ -66,6 +66,8 @@ import {
   retryDelayMs,
   runJevShadow,
   parseArticlePack,
+  sumStageLedgers,
+  type JevStageBudgets,
 } from "../_shared/jev.ts";
 import { VOTING_SOURCE_KINDS } from "../_shared/cluster/source-kind.ts";
 
@@ -107,6 +109,13 @@ const JEV_ID_CHUNK = 100;
  * once (M5); fetchPendingTickerMatches throws instead if the row count
  * ever comes back exactly at this limit. */
 const JEV_BIST_COMPANIES_LIMIT = 5000;
+
+/** Row cap on stageBudgetsToday's jev_shadow_runs read (jev-budget). A UTC day
+ * holds ~150 shadow runs plus the nightly audit and weekly regression rows, so
+ * this is an order of magnitude of headroom; a read that comes back AT the cap
+ * is treated as untrustworthy (the sum would be short) and throws, which
+ * runJevShadow turns into an uncapped run. */
+const JEV_STAGE_BUDGET_RUN_LIMIT = 2000;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
@@ -846,6 +855,37 @@ function makePorts(apiKey: string, deadlineAt?: number): JevPorts {
         }
       }
       return out;
+    },
+
+    // jev-budget: today's (UTC) spend per ledger key and the daily allowances,
+    // for runJevShadow's hard per-stage cap. service_role already has select on
+    // both tables (061, 088) -- no migration. The current run's own row is still
+    // '{}' here and adds nothing. Throws on any read error; runJevShadow then
+    // runs uncapped (fail-open, the monthly cap is the backstop).
+    async stageBudgetsToday(dayStartIso: string): Promise<JevStageBudgets> {
+      const [runs, budgets] = await Promise.all([
+        supabase
+          .from("jev_shadow_runs")
+          .select("stage_tokens")
+          .gte("started_at", dayStartIso)
+          .limit(JEV_STAGE_BUDGET_RUN_LIMIT),
+        supabase.from("jev_stage_budgets").select("stage, daily_tokens"),
+      ]);
+      if (runs.error) throw new Error(`jev-shadow: stageBudgetsToday runs failed: ${runs.error.message}`);
+      if (budgets.error) throw new Error(`jev-shadow: stageBudgetsToday budgets failed: ${budgets.error.message}`);
+
+      const runRows = (runs.data ?? []) as unknown as Array<{ stage_tokens: unknown }>;
+      if (runRows.length >= JEV_STAGE_BUDGET_RUN_LIMIT) {
+        throw new Error(`jev-shadow: stageBudgetsToday runs hit the ${JEV_STAGE_BUDGET_RUN_LIMIT}-row limit`);
+      }
+      const spent = sumStageLedgers(runRows.map((r) => r.stage_tokens));
+
+      const allowance: Record<string, number> = {};
+      for (const b of (budgets.data ?? []) as unknown as Array<{ stage: string; daily_tokens: number | string }>) {
+        const tokens = Number(b.daily_tokens);
+        if (Number.isFinite(tokens) && tokens > 0) allowance[b.stage] = tokens;
+      }
+      return { spent, allowance };
     },
   };
 }

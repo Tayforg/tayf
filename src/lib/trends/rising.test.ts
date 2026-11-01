@@ -170,8 +170,10 @@ describe("computeRising: thresholds", () => {
       ratioIsLowerBound: false,
       isNew: false,
     });
-    expect(item!.href).toBe(`/?q=${encodeURIComponent("Erdoğan")}`);
-    expect(item!.href).toBe("/?q=Erdo%C4%9Fan");
+    // Each rising entity links to its /gundem hub (roadmap G2), not to the
+    // home-feed search.
+    expect(item!.href).toBe("/gundem/erdogan");
+    expect(item!.href).toBe(`/gundem/${item!.key}`);
   });
 
   it("1 -> 3 is excluded (below the minimum count)", () => {

@@ -112,6 +112,9 @@ export function mergeRevalidationTags(source: string, target: string): string[] 
     "clusters",
     "clusters-politics",
     "clusters-search",
+    // /gundem/<key> hubs (entity-hub-query.ts): without this a merged-away
+    // cluster stays next to its survivor for up to the cluster-feed window.
+    "clusters-entity",
     "story-threads",
     `cluster-detail:${source}`,
     `cluster-detail:${target}`,

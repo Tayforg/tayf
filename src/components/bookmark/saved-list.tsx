@@ -2,10 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Bookmark, Users, X } from "lucide-react";
+import { AlertTriangle, Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
 import { SavedMixCard } from "@/components/bookmark/saved-mix-card";
+import { toSavedRowView } from "@/components/bookmark/saved-row";
 import {
   changeBadgeLabels,
   pruneSnapshots,
@@ -14,11 +15,13 @@ import {
   writeSnapshots,
   type SavedChange,
 } from "@/components/bookmark/bookmark-snapshots";
+import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { formatTurkishTimeAgo } from "@/lib/time";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// saved_clusters (migration 116) truncates its input to 200 ids and returns at
-// most 200 rows, so send the newest 200 bookmarks.
+// saved_clusters_v2 (migration 124; v1 from 116 has the same caps) truncates its
+// input to 200 ids and returns at most 200 rows, so send the newest 200
+// bookmarks.
 const SAVED_RPC_MAX_IDS = 200;
 
 interface SavedRow {
@@ -28,6 +31,8 @@ interface SavedRow {
   article_count: number;
   bias_distribution: unknown;
   updated_at: string;
+  /** Absent on rows from the v1 fallback (migration 124 not applied yet). */
+  is_blindspot?: boolean;
 }
 
 export function SavedList() {
@@ -58,7 +63,15 @@ export function SavedList() {
           return;
         }
         const { createBrowserClient } = await import("@/lib/supabase/browser");
-        const { data, error } = await createBrowserClient().rpc("saved_clusters", { p_ids: ids });
+        const client = createBrowserClient();
+        let res = await client.rpc("saved_clusters_v2", { p_ids: ids });
+        // PGRST202 = the function is not in PostgREST's schema cache, i.e.
+        // migration 124 is not applied yet. Only then fall back to v1 (no
+        // is_blindspot, so no pill); any other error keeps the fail-open path.
+        if (res.error?.code === "PGRST202") {
+          res = await client.rpc("saved_clusters", { p_ids: ids });
+        }
+        const { data, error } = res;
         if (cancelled) return;
         if (error) {
           console.warn("[saved] title lookup error:", error.message);
@@ -146,6 +159,7 @@ export function SavedList() {
     <ul className="space-y-2">
       {rows.map((row, i) => {
         const change = changes[row.id];
+        const view = toSavedRowView(row);
         return (
         <li
           key={row.id}
@@ -158,13 +172,24 @@ export function SavedList() {
             <span className="block font-serif text-sm sm:text-base font-semibold leading-snug text-foreground line-clamp-2">
               {row.title_tr_neutral ?? row.title_tr}
             </span>
-            <span className="mt-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
               <span className="inline-flex items-center gap-1">
                 <Users className="h-3 w-3" />
                 {row.article_count} kaynak
               </span>
               <span>{formatTurkishTimeAgo(row.updated_at)}</span>
+              {view.isBlindspot && (
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-amber-800 dark:text-amber-400 font-medium">
+                  <AlertTriangle className="h-3 w-3" aria-hidden="true" />
+                  Kör nokta
+                </span>
+              )}
             </span>
+            {view.distribution && (
+              <div className="mt-2">
+                <BiasSpectrum distribution={view.distribution} compact />
+              </div>
+            )}
             {change && (
               <span className="mt-2 flex flex-wrap gap-1.5">
                 {changeBadgeLabels(change).map((label) => (

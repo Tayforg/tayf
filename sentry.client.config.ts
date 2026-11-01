@@ -12,11 +12,16 @@
  * If we add an authenticated surface later, opt into Replay + tracing
  * integrations here rather than on the server side.
  *
+ * `dataCollection: SENTRY_DATA_COLLECTION` keeps `infer_ip`, cookies and request
+ * bodies off (@sentry/nextjs 11 collects them by default; see
+ * `src/lib/sentry/data-collection.ts`).
+ *
  * The DSN is read from `NEXT_PUBLIC_SENTRY_DSN` because it must be embedded
  * in the client bundle; `SENTRY_DSN` (server-only) is intentionally NOT read
  * here to avoid leaking a non-public DSN into the browser.
  */
 import * as Sentry from "@sentry/nextjs";
+import { SENTRY_DATA_COLLECTION } from "./src/lib/sentry/data-collection";
 
 const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
 
@@ -33,4 +38,5 @@ Sentry.init({
     process.env.NEXT_PUBLIC_SENTRY_TRACES_SAMPLE_RATE ?? 0.1
   ),
   debug: process.env.NEXT_PUBLIC_SENTRY_DEBUG === "1",
+  dataCollection: SENTRY_DATA_COLLECTION,
 });

@@ -2,6 +2,7 @@ import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server
 
 import { createMergedClusterGate } from "@/lib/seo/merged-cluster-gate";
 import { createSourceSlugGate } from "@/lib/seo/source-slug-gate";
+import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 // Edge middleware — runs before any response commits, so (unlike a
 // notFound()/redirect() thrown from inside a cacheComponents/PPR page or
@@ -64,6 +65,17 @@ import { createSourceSlugGate } from "@/lib/seo/source-slug-gate";
 //     requireAdminSession() call, and each page's own call, stay as
 //     defence in depth; this middleware is not the only check.
 //
+//  6. /gundem/:key — the entity hubs (roadmap G2). The key space is the closed,
+//     curated vocabulary in src/lib/trends/rising-entities.ts (62 slugs), so
+//     the gate is a plain Set membership check (GUNDEM_KEYS): an unknown key
+//     rewrites to the not-found sink below instead of streaming a 200 shell,
+//     for the same PPR reason as /konu/:slug. Unlike /konu this DOES import
+//     the list: rising-entities.ts is a pure data module with no imports of
+//     its own (pinned by tests/app/gundem-routes.test.ts), so it adds no
+//     next/cache or Supabase code to the Edge bundle. The matcher is the
+//     single literal segment '/gundem/:key', never ':path*'; the index page
+//     /gundem is static and stays unmatched.
+//
 // Why /cluster/:id stays shape-only (no existence check), and why the
 // investigation says a page-level fix cannot work: under cacheComponents,
 // runtime `params` must be read inside a Suspense boundary. src/app/
@@ -102,6 +114,7 @@ export const config = {
     "/konu/:slug",
     "/cluster/:id",
     "/source/:slug",
+    "/gundem/:key",
   ],
 };
 
@@ -115,6 +128,9 @@ const TICKER_RE = /^[A-Z0-9]{2,6}$/i;
 // see the header comment above). Pinned against the real export by
 // tests/app/konu-routes.test.ts.
 const KONU_SLUGS = new Set(["dunya", "ekonomi", "spor", "yasam", "teknoloji", "genel"]);
+// The /gundem entity hub keys, taken from the curated vocabulary itself (gate 6
+// above) so the gate and generateStaticParams can never drift apart.
+const GUNDEM_KEYS = new Set(RISING_ENTITIES.map((e) => e.key));
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // No route matches this path — Next renders app/not-found.tsx with a real
 // 404 status and the site's own chrome, instead of a 0-byte response.
@@ -224,6 +240,12 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
     return (await sourceGate.check(slug)) === "missing"
       ? notFoundRewrite(req)
       : NextResponse.next();
+  }
+
+  if (pathname.startsWith("/gundem/")) {
+    const key = pathname.slice("/gundem/".length);
+    // Unknown keys (and any nested path, which includes a "/") get the real 404.
+    return GUNDEM_KEYS.has(key) ? NextResponse.next() : notFoundRewrite(req);
   }
 
   if (pathname === "/admin/login" || pathname.startsWith("/admin/login/")) {

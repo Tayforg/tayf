@@ -16,7 +16,7 @@ Turkish news-bias analyzer: Next.js 16 App Router + Supabase (Postgres, pgmq, pg
 - Tailwind 4: literal class strings only, no computed class names.
 - Shared contracts between Deno and Next live in `supabase/functions/_shared/cluster/` and are re-exported from `src/lib/bias/config.ts`; migrations that mirror them are parity-tested in `tests/migrations/`.
 - Migrations are plain SQL in `supabase/migrations/NNN_name.sql`; SECURITY DEFINER functions set `search_path = ''`, revoke from anon/authenticated/public, grant to service_role.
-- Migrations never grant table or sequence privileges to `anon`/`authenticated` (117 revoked them all and closed the default ACLs). Data the browser or edge middleware needs goes through one of the four allowlisted anon `SECURITY DEFINER` RPCs of migration 116 (`saved_clusters`, `merged_cluster_map`, `source_slugs`, `source_slug_exists`); enforced by `tests/guards/anon-surface.test.ts`.
+- Migrations never grant table or sequence privileges to `anon`/`authenticated` (117 revoked them all and closed the default ACLs). Data the browser or edge middleware needs goes through one of the five allowlisted anon `SECURITY DEFINER` RPCs: the four of migration 116 (`saved_clusters`, `merged_cluster_map`, `source_slugs`, `source_slug_exists`) plus `saved_clusters_v2` of migration 124; enforced by `tests/guards/anon-surface.test.ts`.
 - Edge Functions run with `verify_jwt=false`; always deploy with `--no-verify-jwt` (see `docs/migration-guide.md`).
 - Turkish UI copy. Keep tests small and behaviour-focused; no render tests of server components.
 

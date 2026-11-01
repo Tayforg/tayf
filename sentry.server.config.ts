@@ -13,13 +13,17 @@
  *     legible.
  *   - `tracesSampleRate` defaults to 0.1 in production to keep volume below
  *     the free-tier quota; tweak via env without a redeploy.
- *   - `sendDefaultPii: false` (the default) — tayf is a news aggregator with
- *     no user-PII surface, but explicit-default avoids accidentally shipping
- *     IPs/UAs the day someone adds an auth flow.
+ *   - `dataCollection: SENTRY_DATA_COLLECTION` — @sentry/nextjs 11 removed
+ *     `sendDefaultPii` and now collects the client IP, cookies, request bodies
+ *     (the /admin/login POST carries the plaintext admin password) and DB query
+ *     data unless told otherwise. The shared block in
+ *     `src/lib/sentry/data-collection.ts` switches all of that off, and
+ *     tests/guards/sentry-data-collection.test.ts keeps it off.
  *   - `debug` is wired to an env flag rather than `NODE_ENV` so an operator
  *     can flip it at runtime via Vercel env vars without redeploying.
  */
 import * as Sentry from "@sentry/nextjs";
+import { SENTRY_DATA_COLLECTION } from "./src/lib/sentry/data-collection";
 
 const dsn = process.env.SENTRY_DSN ?? process.env.NEXT_PUBLIC_SENTRY_DSN;
 
@@ -34,6 +38,7 @@ Sentry.init({
   release: process.env.SENTRY_RELEASE ?? process.env.VERCEL_GIT_COMMIT_SHA,
   tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0.1),
   debug: process.env.SENTRY_DEBUG === "1",
+  dataCollection: SENTRY_DATA_COLLECTION,
 
   // The SDK attaches every incoming request header to route-handler
   // events; drop the cron bearer and cookies before they leave the process.

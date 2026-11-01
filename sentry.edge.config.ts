@@ -10,12 +10,17 @@
  * file deliberately minimal. Everything tracing-heavy should go in the Node
  * config instead.
  *
+ * Data collection: `dataCollection: SENTRY_DATA_COLLECTION` keeps IPs, cookies,
+ * request bodies and DB query data off (@sentry/nextjs 11 collects them by
+ * default; see `src/lib/sentry/data-collection.ts`).
+ *
  * Note: tayf's Supabase Edge Functions (under `supabase/functions/`) are a
  * different runtime (Deno) and are NOT covered by this file. Those functions
  * should be instrumented separately if observability there becomes a
  * requirement; for now they emit Supabase Edge Function logs.
  */
 import * as Sentry from "@sentry/nextjs";
+import { SENTRY_DATA_COLLECTION } from "./src/lib/sentry/data-collection";
 
 const dsn = process.env.SENTRY_DSN ?? process.env.NEXT_PUBLIC_SENTRY_DSN;
 
@@ -30,6 +35,7 @@ Sentry.init({
   release: process.env.SENTRY_RELEASE ?? process.env.VERCEL_GIT_COMMIT_SHA,
   tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE ?? 0.1),
   debug: process.env.SENTRY_DEBUG === "1",
+  dataCollection: SENTRY_DATA_COLLECTION,
 
   // The SDK attaches every incoming request header to route-handler
   // events; drop the cron bearer and cookies before they leave the process.

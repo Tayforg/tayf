@@ -306,7 +306,7 @@ Status order (first match wins):
 
 **SSRF.** The endpoint never requests the given `url`. It is only parsed; the extracted UUID is the only thing that reaches the database, through the same cached, 4 s capped reader as the cluster page.
 
-Every response, success or error, is `application/json; charset=utf-8` with `Access-Control-Allow-Origin: *`; `OPTIONS` answers `204` with the same header. Discovery tags (`<link rel="alternate" type="application/json+oembed">`) are not emitted yet; `WordPress`, `Iframely` and `Embedly` are already in the `htmlLimitedBots` list so those consumers will get them in `<head>` when they are added.
+Every response, success or error, is `application/json; charset=utf-8` with `Access-Control-Allow-Origin: *`; `OPTIONS` answers `204` with the same header. Cluster pages emit `<link rel="alternate" type="application/json+oembed">` from `generateMetadata` (`src/app/cluster/[id]/page.tsx`; the href comes from `oembedDiscoveryHref` in `src/lib/embed/embed-snippet.ts`). `WordPress`, `Iframely` and `Embedly` are in the `htmlLimitedBots` list, so they receive it in `<head>`.
 
 ---
 
