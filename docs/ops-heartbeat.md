@@ -57,6 +57,21 @@ the affected row instead of raising — the function always returns exactly
 14 rows. (Row 12 degrades gracefully: with only one of the two present it
 counts that half and treats the other as zero.)
 
+**Stage-budget alerts (`jev_alerts.kind = 'stage_budget'`, counted by row 9).**
+The per-stage daily allowances in `public.jev_stage_budgets` (migration 088) are
+now a hard per-stage daily cap in `jev-shadow`, no longer only an alert
+trigger. Before it dispatches each item, a stage compares the UTC day's spend
+(`jev_shadow_runs.stage_tokens` since 00:00 UTC), plus the run's own spend and a
+reserve for calls still in flight, with its allowance, and stops dispatching
+when the next call would cross it. Later stages keep running and the run still
+closes `ok`; its `note` reads `daily cap: articles=37,title_versions=12` (items
+left undone this run, counted per run; they stay pending and age out of the 24 h
+window). If the budget read fails the run goes on uncapped and the monthly cap
+stays the backstop. Only the founder raises an allowance, by `update
+public.jev_stage_budgets`; no job, migration or agent does. Alerts already open
+from before the cap resolve themselves (`under_allowance`) once a later day
+comes in at or under the allowance and they are still unacknowledged.
+
 ## Susan kaynakların nedeni (migration 119)
 
 Every source row 13 names carries a reason after its count, for example

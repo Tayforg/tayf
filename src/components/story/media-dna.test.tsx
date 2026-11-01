@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { MediaDna, mediaDnaChipClass } from "./media-dna";
+import { MEDIA_DNA_EMPTY_CLASS, MediaDna, mediaDnaChipClass } from "./media-dna";
 import { ZONE_META } from "@/lib/bias/config";
 import { SOURCE_KIND_META } from "@/lib/sources/kind";
 import type { Source } from "@/types";
@@ -156,5 +156,43 @@ describe("MediaDna collapsed render (contrast + zone count)", () => {
     });
     // Count semantics unchanged: members in the current (collapsed) view.
     expect(matches.map((m) => m[2])).toEqual(["1", "2", "1"]);
+  });
+});
+
+// WCAG 1.4.3: the empty-zone label ("Hiç kaynak yok") was 11 px italic
+// text-muted-foreground on a tinted zone card (bg-<hue>-500/10..20 over the
+// card), which measured below 4.5:1 on the zinc zone in dark mode. It now uses
+// the foreground token at 80 %, measured in tests/guards/text-contrast-tokens.
+describe("MEDIA_DNA_EMPTY_CLASS (empty-zone label contrast)", () => {
+  it("drops text-muted-foreground and keeps the italic 11px label", () => {
+    expect(MEDIA_DNA_EMPTY_CLASS).not.toContain("text-muted-foreground");
+    expect(MEDIA_DNA_EMPTY_CLASS).toContain("text-foreground/80");
+    expect(MEDIA_DNA_EMPTY_CLASS).toContain("italic");
+    expect(MEDIA_DNA_EMPTY_CLASS).toContain("text-[11px]");
+  });
+
+  it("renders 'Hiç kaynak yok' in the two zones that have no participating source", () => {
+    const only = source({ id: "m", slug: "only-mid", name: "Only Mid", bias: "center", kind: "outlet" });
+    const html = renderToStaticMarkup(
+      <MediaDna sources={[only]} highlightSlugs={new Set(["only-mid"])} />,
+    );
+    const empties = [...html.matchAll(/<span class="([^"]*)">Hiç kaynak yok<\/span>/g)];
+    // muhalefet + iktidar are empty; bagimsiz holds the one source.
+    expect(empties).toHaveLength(2);
+    for (const [, cls] of empties) expect(cls).toBe(MEDIA_DNA_EMPTY_CLASS);
+  });
+
+  it("renders no empty label when every zone has a participating source", () => {
+    const html = renderToStaticMarkup(
+      <MediaDna
+        sources={[
+          source({ id: "g", slug: "gov", bias: "pro_government" }),
+          source({ id: "c", slug: "mid", bias: "center" }),
+          source({ id: "o", slug: "opp", bias: "opposition" }),
+        ]}
+        highlightSlugs={new Set(["gov", "mid", "opp"])}
+      />,
+    );
+    expect(html).not.toContain("Hiç kaynak yok");
   });
 });

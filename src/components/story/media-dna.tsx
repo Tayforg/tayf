@@ -57,6 +57,16 @@ const ZONE_BAR_FILL: Record<MediaDnaZone, string> = {
 };
 
 /**
+ * Class string for the "Hiç kaynak yok" label of an empty zone card (WCAG
+ * 1.4.3). It sits on the zone's tinted card, where muted-foreground measured
+ * below 4.5:1 (zinc zone, dark mode); foreground at 80 % clears it on every
+ * zone, both themes and both surfaces. The ratios are asserted in
+ * tests/guards/text-contrast-tokens.test.ts. Kept a literal string so
+ * Tailwind 4 can see it.
+ */
+export const MEDIA_DNA_EMPTY_CLASS = "text-[11px] text-foreground/80 italic";
+
+/**
  * Class string for one source chip. Pure and exported so the contrast rules
  * are testable without rendering: no opacity utility ever (full-strength
  * `chipText`), non-voting chips get a dashed border, and expanded-mode
@@ -208,7 +218,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
                   );
                 })}
                 {visibleMembers.length === 0 && (
-                  <span className="text-[11px] text-muted-foreground italic">
+                  <span className={MEDIA_DNA_EMPTY_CLASS}>
                     Hiç kaynak yok
                   </span>
                 )}

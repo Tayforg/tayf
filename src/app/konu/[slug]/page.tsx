@@ -19,6 +19,7 @@ import {
   TOPIC_SLUGS,
   type TopicSlug,
 } from "@/lib/clusters/topic-query";
+import { topicPageRobots } from "@/lib/clusters/topic-page-robots";
 import { serializeJsonLd } from "@/lib/seo/json-ld";
 import { currentTimeMs } from "@/lib/time";
 
@@ -61,8 +62,14 @@ export async function generateMetadata({
     const raw = Array.isArray(sayfa) ? sayfa[0] : sayfa;
     const page = clampTopicPage(parseInt(raw ?? "1", 10));
     const base = topicMetadata(slug, page);
+    // Same "use cache" key as the body below (slug + clamped page), so this
+    // adds no extra round trip. A failed read or a page past the last one is
+    // noindex,follow; an empty page 1 stays indexable (topicPageRobots).
+    const result = await getTopicClusters(slug, page);
+    const robots = topicPageRobots(page, result);
     return {
       ...base,
+      ...(robots ? { robots } : {}),
       alternates: {
         ...base.alternates,
         types: { "application/rss+xml": `/rss/${slug}.xml` },
@@ -190,6 +197,8 @@ export default async function TopicHubPage({
           // exist at all) and must keep Önceki reachable.
           <>
             <div className={unavailableWrapClass}>
+              {/* Past the last page: noindex; see the PLACEMENT CAVEAT on the null branch. */}
+              <meta name="robots" content="noindex" />
               <p className={unavailableTextClass}>{EMPTY_PAGE_COPY}</p>
             </div>
             <TopicPager slug={slug} page={result.page} hasMore={false} />

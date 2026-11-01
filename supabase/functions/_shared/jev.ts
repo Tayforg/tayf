@@ -27,6 +27,7 @@
 import { sha256Hex } from "./archive.ts";
 import { BIAS_TO_ZONE, BIAS_KEYS, ZONE_KEYS, type BiasKey, type MediaDnaZone } from "./cluster/blindspot.ts";
 import { titleTokens } from "./cluster/fingerprint.ts";
+import { titleWordJaccard } from "./rss/title-jaccard.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -59,6 +60,22 @@ export const JEV_PAIR_COUNT = 20;
 export const JEV_PAIRS_PER_CALL = 10;
 export const JEV_KAP_LIMIT = 30;
 export const JEV_TITLE_LIMIT = 30;
+/** jev-budget: a title edit whose old and new headline overlap at or above
+ * this word-Jaccard (titleWordJaccard, the same measure ingest's twin gate
+ * uses) is a casing / spacing / one-word touch-up, not a rewrite. Jev is not
+ * asked about it (titleVersionHasSignal). Measured 2026-10-24..30: 718 of
+ * 4,514 title versions (16%) were low-signal. */
+export const JEV_TITLE_LOW_SIGNAL_JACCARD = 0.8;
+/** jev-budget: how many pending title versions runTitleStage fetches. Low-signal
+ * rows are never answered, so they stay "pending" for the whole 24h window; the
+ * runner therefore fetches 4x what it will process and filters BEFORE it cuts
+ * to JEV_TITLE_LIMIT, or they would crowd real edits out of the head of the
+ * newest-first list. */
+export const JEV_TITLE_FETCH_LIMIT = JEV_TITLE_LIMIT * 4;
+/** jev-budget: per-call token estimate for the daily cap when neither this run
+ * nor the day so far has made a call on the stage yet. Deliberately above the
+ * measured per-call means (articles ~1.2k, title_versions ~0.55k, pairs ~1.6k). */
+export const JEV_STAGE_CAP_DEFAULT_CALL_TOKENS = 2_000;
 /** Raised 3e8 -> 5e8 by migration 063 (~$21/month at the gateway market rate
  * observed 2026-09-20) to cover the nightly audit run and the new
  * ticker_relevance / neutral_pick shadow stages. Hand-duplicated against
@@ -1861,6 +1878,16 @@ export function predictionRow(args: {
 // Ports + algorithm -- the ArchivePorts seam, verbatim discipline.
 // ---------------------------------------------------------------------------
 
+/** jev-budget: what stageBudgetsToday returns -- today's (UTC) spend per ledger
+ * key, summed from jev_shadow_runs.stage_tokens, and the daily allowance per
+ * ledger key from jev_stage_budgets (only finite values above 0). Keys are the
+ * ones stageLedger() emits: the bare stage name in shadow mode, `${mode}:${stage}`
+ * in audit/regression mode. */
+export interface JevStageBudgets {
+  spent: JevStageLedger;
+  allowance: Record<string, number>;
+}
+
 export interface JevPorts {
   now(): number;
   random(): number;
@@ -1987,6 +2014,17 @@ export interface JevPorts {
    * try/catch -- a failure omits deltas.gold.provisional but never nulls the
    * rest of deltas.gold. */
   fetchProvisionalGoldLabels?(articleIds: readonly string[]): Promise<JevProvisionalLabelRow[]>;
+
+  // --- jev-budget: hard per-stage daily cap ---
+
+  /** Optional so cluster-consumer and jev-pending (which build JevPorts-shaped
+   * fakes) keep compiling, and a port without it behaves as before. Reads the
+   * day's spend (every jev_shadow_runs row started at or after `dayStartIso`,
+   * the UTC midnight) and the allowances. The current run's own row is still
+   * '{}' when this is called (its spend is tracked in ctx.ledger), so it adds
+   * nothing. Must THROW on a read error: runJevShadow reports it through
+   * onError('stage_budgets', err) and runs uncapped. */
+  stageBudgetsToday?(dayStartIso: string): Promise<JevStageBudgets>;
 }
 
 export interface JevShadowResult {
@@ -2026,6 +2064,10 @@ interface StageStats {
   /** 088: input tokens spent by this stage, mirrored into ctx.ledger and
    * written out via stageLedger()/JevPorts.recordTokens/finishRun. */
   tokens: number;
+  /** jev-budget: items this stage did NOT dispatch because its daily
+   * allowance (jev_stage_budgets) would have been crossed. Per run: the
+   * next tick starts again from the day's real spend. */
+  capped: number;
 }
 
 interface RunCtx {
@@ -2058,6 +2100,17 @@ interface RunCtx {
    * and written out via stageLedger() at every checkpoint and at close.
    * Invariant: sum of ledger tokens === ctx.runTokens at all times. */
   ledger: Record<StageName, { calls: number; tokens: number }>;
+  /** jev-budget: today's spend + allowances, read once after the monthly-cap
+   * check. null (no port, monthly cap hit, or the read failed) means every
+   * stage runs uncapped and the monthly cap stays the only hard stop. */
+  budget: JevStageBudgets | null;
+  /** jev-budget: evaluate() calls currently awaiting, per stage. The daily
+   * cap reserves room for each of them (stageCapReached) so 8 parallel
+   * workers cannot jointly overshoot the allowance. */
+  inFlight: Record<StageName, number>;
+  /** jev-budget: stages that stopped dispatching because of the daily cap,
+   * in the order they hit it. Feeds the run's `daily cap: ...` note. */
+  cappedStages: StageName[];
   /** Migration 066: non-null only when mode === 'regression' and a
    * regression run row was actually opened (never when the monthly cap was
    * already exceeded). */
@@ -2074,7 +2127,7 @@ interface RunCtx {
 }
 
 function emptyStageStats(): StageStats {
-  return { calls: 0, rows: 0, errors: 0, skipped: 0, tokens: 0 };
+  return { calls: 0, rows: 0, errors: 0, skipped: 0, tokens: 0, capped: 0 };
 }
 
 /** 088: per-stage ledger key -- StageName in shadow mode, `${mode}:${stage}`
@@ -2106,10 +2159,127 @@ export function stageLedger(mode: JevRunMode, ledger: Record<string, { calls: nu
   const out: JevStageLedger = {};
   for (const [stage, stats] of Object.entries(ledger)) {
     if (stats.calls <= 0) continue;
-    const key = mode === "shadow" ? stage : `${mode}:${stage}`;
-    out[key] = { calls: stats.calls, tokens: stats.tokens };
+    out[ledgerKey(mode, stage)] = { calls: stats.calls, tokens: stats.tokens };
   }
   return out;
+}
+
+/** The ledger key of a stage: bare in shadow mode, `${mode}:${stage}` in audit/
+ * regression mode. The one place the rule lives -- stageLedger() writes it and
+ * the daily cap (processStage) reads jev_stage_budgets under the same key. */
+function ledgerKey(mode: JevRunMode, stage: string): string {
+  return mode === "shadow" ? stage : `${mode}:${stage}`;
+}
+
+// ---------------------------------------------------------------------------
+// jev-budget: hard per-stage daily cap + low-signal title filter (pure parts).
+// ---------------------------------------------------------------------------
+
+/** NFC, whitespace runs collapsed to one space, trimmed, lower-cased with the
+ * Turkish rules (İ -> i, I -> ı) so a casing-only edit compares equal. */
+function normalizeTitleForCompare(title: string): string {
+  return title.normalize("NFC").replace(/\s+/g, " ").trim().toLocaleLowerCase("tr");
+}
+
+/**
+ * Whether a title edit is worth a gateway call. False when the normalised
+ * headlines are equal (casing, spacing, NFC form) or when their word-Jaccard is
+ * at least JEV_TITLE_LOW_SIGNAL_JACCARD (one word added to a nine-word
+ * headline is 0.9). True for a real rewrite, and when exactly one side is
+ * empty (a headline appeared or vanished); two empty headlines are equal.
+ */
+export function titleVersionHasSignal(v: Pick<JevTitleRow, "old_title" | "new_title">): boolean {
+  const oldTitle = v.old_title ?? "";
+  const newTitle = v.new_title ?? "";
+  if (normalizeTitleForCompare(oldTitle) === normalizeTitleForCompare(newTitle)) return false;
+  return titleWordJaccard(oldTitle, newTitle) < JEV_TITLE_LOW_SIGNAL_JACCARD;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** ISO timestamp of 00:00:00.000Z of the UTC day containing `ms` -- the day
+ * boundary jev_budget_daily and jev_stage_budget_compute (088) group by. */
+export function utcDayStartIso(ms: number): string {
+  return new Date(Math.floor(ms / DAY_MS) * DAY_MS).toISOString();
+}
+
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function nonNegativeFinite(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/**
+ * Sums jev_shadow_runs.stage_tokens values (each `{ [ledgerKey]: { calls,
+ * tokens } }`) into one ledger. Untrusted JSON: rows that are not objects, and
+ * calls/tokens that are not finite non-negative numbers, are ignored; a key
+ * none of whose values is usable gets no entry. A `__proto__` key from a
+ * JSON.parse'd row becomes an ordinary own key (Object.fromEntries), never a
+ * prototype write.
+ */
+export function sumStageLedgers(rows: readonly unknown[]): JevStageLedger {
+  const sums = new Map<string, { calls: number; tokens: number }>();
+  if (!Array.isArray(rows)) return {};
+  for (const row of rows) {
+    if (!isPlainRecord(row)) continue;
+    for (const [key, entry] of Object.entries(row)) {
+      if (!isPlainRecord(entry)) continue;
+      const calls = nonNegativeFinite(entry.calls);
+      const tokens = nonNegativeFinite(entry.tokens);
+      if (calls === null && tokens === null) continue;
+      const acc = sums.get(key) ?? { calls: 0, tokens: 0 };
+      acc.calls += calls ?? 0;
+      acc.tokens += tokens ?? 0;
+      sums.set(key, acc);
+    }
+  }
+  return Object.fromEntries(sums);
+}
+
+/**
+ * Expected input tokens of the next call on a stage: the ceiling of this run's
+ * mean per call, else of the day's mean (the snapshot read at run start), else
+ * JEV_STAGE_CAP_DEFAULT_CALL_TOKENS. A mean of zero (or any non-finite input)
+ * does not count as an estimate.
+ */
+export function perCallEstimate(input: {
+  runCalls: number;
+  runTokens: number;
+  dayCalls: number;
+  dayTokens: number;
+}): number {
+  const mean = (calls: number, tokens: number): number | null => {
+    if (!Number.isFinite(calls) || !Number.isFinite(tokens) || calls <= 0 || tokens <= 0) return null;
+    return Math.ceil(tokens / calls);
+  };
+  return (
+    mean(input.runCalls, input.runTokens) ??
+    mean(input.dayCalls, input.dayTokens) ??
+    JEV_STAGE_CAP_DEFAULT_CALL_TOKENS
+  );
+}
+
+/**
+ * True when dispatching one more call on a stage could take its UTC day past
+ * the allowance: `spentDay + spentRun + perCallTokens * (inFlight + 1) >
+ * allowance`. The `inFlight` calls have been paid for by the gateway but are
+ * not in the ledger yet; reserving room for them (and for the one being
+ * dispatched) is what keeps the day at or under the allowance with up to
+ * JEV_CONCURRENCY workers racing, so the nightly stage_budget alert stays
+ * quiet. No allowance (null/undefined/non-finite) means no cap.
+ */
+export function stageCapReached(input: {
+  spentDay: number;
+  spentRun: number;
+  inFlight: number;
+  perCallTokens: number;
+  allowance: number | null | undefined;
+}): boolean {
+  const { allowance } = input;
+  if (allowance === null || allowance === undefined || !Number.isFinite(allowance)) return false;
+  return input.spentDay + input.spentRun + input.perCallTokens * (input.inFlight + 1) > allowance;
 }
 
 function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number, cap: number, mode: JevRunMode, articlePack: JevArticlePack = "full"): RunCtx {
@@ -2132,6 +2302,20 @@ function makeCtx(ports: JevPorts, runId: number, t0: number, deadlineMs: number,
     failedStages: [],
     deadlineHit: null,
     regression: null,
+    budget: null,
+    cappedStages: [],
+    inFlight: {
+      articles: 0,
+      clusters: 0,
+      blindspot_recall: 0,
+      pairs: 0,
+      kap: 0,
+      title_versions: 0,
+      tickers: 0,
+      audit_pairs: 0,
+      regression_articles: 0,
+      regression_pairs: 0,
+    },
     stages: {
       articles: emptyStageStats(),
       clusters: emptyStageStats(),
@@ -2293,12 +2477,40 @@ async function callOnce(
   }
 }
 
+/** jev-budget: whether the next call on `stage` would cross its UTC-day
+ * allowance. False without a budget snapshot (no port, or the read failed). */
+function dailyCapReached(ctx: RunCtx, stage: StageName): boolean {
+  const budget = ctx.budget;
+  if (!budget) return false;
+  const key = ledgerKey(ctx.mode, stage);
+  const day = budget.spent[key];
+  const run = ctx.ledger[stage];
+  return stageCapReached({
+    spentDay: day?.tokens ?? 0,
+    spentRun: run.tokens,
+    inFlight: ctx.inFlight[stage],
+    perCallTokens: perCallEstimate({
+      runCalls: run.calls,
+      runTokens: run.tokens,
+      dayCalls: day?.calls ?? 0,
+      dayTokens: day?.tokens ?? 0,
+    }),
+    allowance: budget.allowance[key],
+  });
+}
+
 /**
  * Runs `worker` over `items` with at most JEV_CONCURRENCY in flight. Checks
  * the deadline (via JevDeadlineError, caught immediately -- never escapes
  * this function) and ctx.stopReason before dequeuing each item, so a
  * rate-limit/budget/deadline signal stops further dispatch without
  * cancelling in-flight calls.
+ *
+ * jev-budget: after those checks and before dequeuing, the stage's daily
+ * allowance is enforced (dailyCapReached). Hitting it abandons THIS stage's
+ * remaining items only -- ctx.stopReason is never set, so later stages keep
+ * running and the run still closes 'ok'. Every callOnce site sits inside a
+ * processStage worker, so this is the one gate for all of them.
  */
 async function processStage<T>(
   ctx: RunCtx,
@@ -2323,10 +2535,25 @@ async function processStage<T>(
         }
         throw err;
       }
+      if (dailyCapReached(ctx, stageName)) {
+        // The first worker to see it books the rest of the stage as capped and
+        // closes the queue; the others fall out of their while condition. There
+        // is no await between this check and idx++ below, so no worker can
+        // dequeue past a cap another worker just saw.
+        ctx.stages[stageName].capped += items.length - idx;
+        if (!ctx.cappedStages.includes(stageName)) ctx.cappedStages.push(stageName);
+        idx = items.length;
+        return;
+      }
       const i = idx++;
       const item = items[i];
       if (item === undefined) continue;
-      await worker(item);
+      ctx.inFlight[stageName] += 1;
+      try {
+        await worker(item);
+      } finally {
+        ctx.inFlight[stageName] -= 1;
+      }
     }
   };
 
@@ -3112,7 +3339,21 @@ async function runKapStage(ctx: RunCtx, sinceIso: string): Promise<void> {
 }
 
 async function runTitleStage(ctx: RunCtx, sinceIso: string): Promise<void> {
-  const items = await ctx.ports.fetchPendingTitleVersions(sinceIso, JEV_TITLE_LIMIT);
+  // jev-budget: filter BEFORE the cut. A low-signal edit is never answered, so
+  // it stays "pending" for the whole 24h window; cut first and a handful of
+  // them at the head of the newest-first list would starve the real edits
+  // behind them. `skipped` counts this run's drops, so a row that stays pending
+  // is counted again on every later tick -- it is a per-run signal, not a
+  // distinct-row count.
+  const fetched = await ctx.ports.fetchPendingTitleVersions(sinceIso, JEV_TITLE_FETCH_LIMIT);
+  const withSignal: JevTitleRow[] = [];
+  let lowSignal = 0;
+  for (const v of fetched) {
+    if (titleVersionHasSignal(v)) withSignal.push(v);
+    else lowSignal += 1;
+  }
+  ctx.stages.title_versions.skipped += lowSignal;
+  const items = withSignal.slice(0, JEV_TITLE_LIMIT);
   await processStage(ctx, "title_versions", items, async (v) => {
     const request = buildTitleCall(v);
     const result = await callOnce(ctx, "title_versions", request);
@@ -3462,6 +3703,30 @@ async function closeRunRow(
 }
 
 /**
+ * jev-budget: snapshots today's per-stage spend and the allowances into
+ * ctx.budget. FAIL-OPEN on purpose: a failed read (statement timeout, a
+ * database that predates 088) is reported through onError('stage_budgets') and
+ * the run goes on uncapped -- the monthly cap (JEV_MONTHLY_TOKEN_CAP_DEFAULT)
+ * stays the hard backstop, and a budget-read hiccup must never stall scoring.
+ * No port, no read: fakes and consumers without it behave as before.
+ */
+async function loadStageBudgets(ctx: RunCtx): Promise<void> {
+  const read = ctx.ports.stageBudgetsToday;
+  if (!read) return;
+  try {
+    const snapshot = await read.call(ctx.ports, utcDayStartIso(ctx.ports.now()));
+    ctx.budget = { spent: snapshot?.spent ?? {}, allowance: snapshot?.allowance ?? {} };
+  } catch (err) {
+    ctx.budget = null;
+    try {
+      ctx.ports.onError?.("stage_budgets", err);
+    } catch {
+      // A logging hook must never destabilize the run.
+    }
+  }
+}
+
+/**
  * Runs one jev-shadow invocation end to end. Contract:
  *  - monthTokens(cap) FIRST (before startRun). If exceeded: open a run row,
  *    close it immediately with status 'budget_exceeded', calls 0, note
@@ -3480,6 +3745,10 @@ async function closeRunRow(
  *    the deadline stops cleanly with status 'partial' (never throws out of
  *    this function).
  *  - At most JEV_CONCURRENCY evaluate() calls in flight per stage.
+ *  - Daily cap (jev-budget): when ports.stageBudgetsToday exists, each stage
+ *    stops dispatching once today's spend + this run's + a reserve for calls in
+ *    flight would pass its jev_stage_budgets allowance. Never a stop reason:
+ *    later stages run and the status stays 'ok'; the note says `daily cap: ...`.
  *  - A single call's failure is a per-subject skip (errors++, keep going).
  *    A JevRateLimitError aborts the remaining run with status 'rate_limited'.
  *  - budgetExceeded is re-checked after every successful call; true stops
@@ -3528,6 +3797,7 @@ export async function runJevShadow(
         const regressionRunId = await ports.startRegressionRun(questionSetVersionFor(articlePack));
         ctx.regression = { runId: regressionRunId, items: [], answers: [], pending: [], writeErrors: 0 };
       }
+      await loadStageBudgets(ctx);
       await runStages(ctx, opts.nowIso);
       if (ctx.stopReason) status = ctx.stopReason;
       if (ctx.failedStages.length > 0) {
@@ -3539,6 +3809,12 @@ export async function runJevShadow(
       // wins; this one is plain text -- no URL, no error text.
       if (status === "partial" && note === null && ctx.deadlineHit) {
         note = `deadline: ${ctx.deadlineHit.stage} at ${ctx.deadlineHit.elapsedMs}ms, calls=${ctx.calls}`;
+      }
+      // jev-budget: a stage that hit its daily allowance leaves the status
+      // alone (migration 108 counts 'ok' as a healthy run even with zero
+      // calls) and only says so in the note. Any failure/deadline note wins.
+      if (note === null && ctx.cappedStages.length > 0) {
+        note = `daily cap: ${ctx.cappedStages.map((stage) => `${stage}=${ctx.stages[stage].capped}`).join(",")}`;
       }
     }
   } catch (err) {

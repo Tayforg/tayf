@@ -82,6 +82,12 @@ const BASE_STATIC_ROUTES: ReadonlyArray<{
   // Pack C ("Konu"): /konu index + the six hub slugs (TOPIC_SLUGS).
   // politika is deliberately absent — it 308s to "/" and is not a hub.
   { path: "/konu", changefreq: "daily", priority: 0.6 },
+  // Entity hubs (roadmap G2): the /gundem index only. The 62 /gundem/<key>
+  // hubs are deliberately left out -- a hub with fewer than three clusters is
+  // noindexed (entityHubRobots), and a sitemap must not submit URLs the page
+  // itself asks crawlers to skip. Healthy hubs are reached through the index
+  // and the /trends links.
+  { path: "/gundem", changefreq: "daily", priority: 0.5 },
 ];
 
 export type ParsedSitemapFile =

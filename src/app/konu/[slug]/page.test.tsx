@@ -7,9 +7,10 @@ import type { ReactNode } from "react";
 // src/lib/clusters/topic-query.test.ts) and call the default export as a plain
 // async function -- no React renderer needed for an async Server Component.
 //
-// What this pins: ONLY the failed read (getTopicClusters -> null) emits
-// <meta name="robots" content="noindex">. The ok and empty states must not,
-// or a healthy hub would drop out of the index. The failure is cached for
+// What this pins: the failed read (getTopicClusters -> null) and an empty page
+// PAST the last one emit <meta name="robots" content="noindex"> (mirroring
+// generateMetadata's topicPageRobots). The ok state and an empty page 1 must
+// not, or a healthy hub would drop out of the index. The failure is cached for
 // "minutes" (topic-query.ts), so the prerendered noindex lives about a minute.
 // ---------------------------------------------------------------------------
 
@@ -131,13 +132,17 @@ describe("/konu/[slug] failed state", () => {
     expect(text).not.toContain(UNAVAILABLE_COPY);
   });
 
-  it("does NOT emit a robots meta for an empty page past the last one", async () => {
+  it("emits <meta name=robots content=noindex> for an empty page past the last one", async () => {
     mocks.result = { bundles: [], hasMore: false, page: 3 };
 
     const tree = await render(3);
+    const metas = robotsMetas(tree);
 
-    expect(robotsMetas(tree)).toEqual([]);
-    expect(collectText(tree).join("")).toContain("Bu sayfada küme yok.");
+    expect(metas).toHaveLength(1);
+    expect(metas[0]?.content).toBe("noindex");
+    const text = collectText(tree).join("");
+    expect(text).toContain("Bu sayfada küme yok.");
+    expect(text).not.toContain(UNAVAILABLE_COPY);
   });
 });
 
@@ -156,6 +161,13 @@ function meta(slug: string, sayfa?: string | string[]) {
 }
 
 describe("/konu/[slug] generateMetadata", () => {
+  // generateMetadata now reads the same cached feed as the body (to noindex a
+  // failed read or a page past the last one), so give these identity tests a
+  // healthy, non-empty page. The robots cases live in tests/app/konu-metadata.test.ts.
+  beforeEach(() => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 1 };
+  });
+
   it("page 1: canonical and og:url are /konu/<slug>, and the RSS alternate is advertised", async () => {
     const m = await meta("spor");
 

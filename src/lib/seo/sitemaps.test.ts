@@ -356,6 +356,23 @@ describe("getStaticSitemapXml", () => {
     expect(xml).not.toContain("/konu/politika");
   });
 
+  it("lists the /gundem index right after /konu (daily, 0.5) but none of the /gundem/<key> hubs", async () => {
+    const xml = await getStaticSitemapXml("https://tayf.test");
+    expect(xml).toContain("<loc>https://tayf.test/gundem</loc>");
+    const konu = xml.indexOf("<loc>https://tayf.test/konu</loc>");
+    const gundem = xml.indexOf("<loc>https://tayf.test/gundem</loc>");
+    expect(konu).toBeGreaterThan(-1);
+    expect(gundem).toBeGreaterThan(konu);
+    // the very next <url> after /konu is /gundem
+    expect(xml.indexOf("<loc>", konu + 1)).toBe(gundem);
+    const entry = xml.slice(gundem, xml.indexOf("</url>", gundem));
+    expect(entry).toContain("<changefreq>daily</changefreq>");
+    expect(entry).toContain("<priority>0.5</priority>");
+    // Thin hubs are noindexed, so none of the 62 hubs is submitted.
+    expect(xml).not.toContain("/gundem/");
+    expect(xml.match(/<loc>[^<]*\/gundem[^<]*<\/loc>/g)).toHaveLength(1);
+  });
+
   it("lists /durum (Sistem durumu) right after /kaynaklar/durum, hourly at priority 0.4", async () => {
     const xml = await getStaticSitemapXml("https://tayf.test");
     expect(xml).toContain("<loc>https://tayf.test/durum</loc>");

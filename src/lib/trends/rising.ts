@@ -45,7 +45,7 @@ export type RollupRow = { day: string; entity: string; count: number };
 export type RisingItem = {
   key: string;
   label: string;
-  /** Home search for the entity's label (no /ara page or entity hubs exist). */
+  /** The entity's /gundem hub (src/app/gundem/[key]); the hub page links on to the home search. */
   href: string;
   /** Articles mentioning the entity on the ranked day. */
   count: number;
@@ -158,7 +158,7 @@ function rankDay(
     items.push({
       key,
       label: entity.label,
-      href: `/?q=${encodeURIComponent(entity.label)}`,
+      href: `/gundem/${entity.key}`,
       count,
       baseline,
       ratio,

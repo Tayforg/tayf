@@ -1,8 +1,11 @@
 import type { NextConfig } from "next";
-import { withSentryConfig } from "@sentry/nextjs";
+// @sentry/nextjs 11 moved the build wrapper to the "/config" subpath; the
+// package root no longer exports withSentryConfig (TS2305).
+import { withSentryConfig } from "@sentry/nextjs/config";
 // Relative path on purpose: the config loader cannot resolve the '@/' alias.
 import { HTML_LIMITED_BOTS } from "./src/lib/seo/html-limited-bots";
 import { IMAGE_REMOTE_PATTERNS } from "./src/lib/images/remote-image-hosts";
+import { SITE_REDIRECTS } from "./src/lib/seo/redirects";
 import { buildSecurityHeaders } from "./src/lib/security/headers";
 
 /**
@@ -132,12 +135,18 @@ const nextConfig: NextConfig = {
   async headers() {
     return buildSecurityHeaders(process.env.NODE_ENV);
   },
+  // Permanent (308) site redirects; the list lives in src/lib/seo/redirects.ts.
+  async redirects() {
+    return [...SITE_REDIRECTS];
+  },
 };
 
 /**
- * `withSentryConfig` (B8 / observability) injects the @sentry/nextjs webpack
- * plugin so client-bundle source maps are uploaded at build time and the
- * `instrumentation.ts` server/edge bootstraps are wired into the build graph.
+ * `withSentryConfig` (B8 / observability), imported from `@sentry/nextjs/config`
+ * since @sentry/nextjs 11, injects the build plugin so client-bundle source
+ * maps are uploaded at build time and the `instrumentation.ts` server/edge
+ * bootstraps are wired into the build graph. `redirects()` and `headers()`
+ * above stay inside the wrapped config.
  *
  * Build-time uploads only run when `SENTRY_AUTH_TOKEN` is set, so local `next
  * build` without a token still completes (the plugin no-ops the upload step).
@@ -149,10 +158,11 @@ const nextConfig: NextConfig = {
  *     starts swallowing Sentry events in the wild.
  *   - `sourcemaps.deleteSourcemapsAfterUpload: true` deletes generated .map
  *     files from the build output after upload, keeping them off the public
- *     CDN while still landing them in Sentry. (Sentry 10.x replacement for the
- *     legacy `hideSourceMaps` flag.)
- *   - `disableLogger: true` strips Sentry's verbose client logger from
- *     production bundles.
+ *     CDN while still landing them in Sentry. (Replaces the legacy
+ *     `hideSourceMaps` flag; unchanged in 11.)
+ *   - `bundleSizeOptimizations.excludeDebugStatements: true` strips Sentry's
+ *     verbose debug logger from production bundles. (11 replacement for the
+ *     removed `disableLogger` flag; it also covers Turbopack builds.)
  */
 export default withSentryConfig(nextConfig, {
   org: process.env.SENTRY_ORG,
@@ -163,5 +173,7 @@ export default withSentryConfig(nextConfig, {
   sourcemaps: {
     deleteSourcemapsAfterUpload: true,
   },
-  disableLogger: true,
+  bundleSizeOptimizations: {
+    excludeDebugStatements: true,
+  },
 });

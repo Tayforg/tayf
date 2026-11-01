@@ -42,6 +42,7 @@ const PAGES = [
   "ekonomi",
   "oyun",
   "gelistirici",
+  "gundem",
 ].map((route) => `${route}/page.tsx`);
 
 // Static pages that stay out of the index but get their own og/twitter
@@ -88,9 +89,9 @@ function codeLines(source: string): string[] {
 }
 
 describe("static public pages use staticPageMetadata", () => {
-  it("lists the 14 known pages", () => {
-    expect(PAGES).toHaveLength(14);
-    expect(new Set(PAGES).size).toBe(14);
+  it("lists the 15 known pages", () => {
+    expect(PAGES).toHaveLength(15);
+    expect(new Set(PAGES).size).toBe(15);
   });
 
   describe.each(PAGES)("%s", (rel) => {

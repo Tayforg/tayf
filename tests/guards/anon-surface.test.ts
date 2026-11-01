@@ -14,7 +14,8 @@ import { resolve, dirname, join, relative, sep } from "node:path";
 //       four allowlisted `grant execute on function` lines; no default-
 //       privilege grant; every SECURITY DEFINER function revokes anon;
 //   (2) the browser Supabase client is imported by exactly the two /saved
-//       files, and they use no `.from(` and no RPC but saved_clusters;
+//       files, and they use no `.from(` and no RPC but saved_clusters or
+//       saved_clusters_v2 (124, the same lookup plus is_blindspot);
 //   (3) the anon key is read by exactly browser.ts and the two edge gates,
 //       and the gates only ever call the allowlisted RPCs;
 //   (4) non-vacuity: the scan sees 116 + 117 (+ 118 when present), and the
@@ -35,7 +36,21 @@ const MIGRATIONS = resolve(ROOT, "supabase", "migrations");
 
 const FIRST_GUARDED_MIGRATION = 116;
 
-const ALLOWED_RPCS = ["saved_clusters", "merged_cluster_map", "source_slugs", "source_slug_exists"] as const;
+const ALLOWED_RPCS = [
+  "saved_clusters",
+  "merged_cluster_map",
+  "source_slugs",
+  "source_slug_exists",
+  "saved_clusters_v2",
+] as const;
+// The migration that defines + grants each allowlisted RPC.
+const ALLOWED_RPC_MIGRATION: Record<(typeof ALLOWED_RPCS)[number], number> = {
+  saved_clusters: 116,
+  merged_cluster_map: 116,
+  source_slugs: 116,
+  source_slug_exists: 116,
+  saved_clusters_v2: 124,
+};
 const ALLOWED_GRANT = new RegExp(
   `^grant\\s+execute\\s+on\\s+function\\s+public\\.(${ALLOWED_RPCS.join("|")})\\s*\\([^)]*\\)\\s+to\\s+anon\\s*,\\s*service_role$`,
   "i",
@@ -312,10 +327,12 @@ describe("anon surface: migrations >= 116", () => {
     });
   }
 
-  it("116 grants execute on each allowlisted RPC to anon (the allowlist is real, not dead code)", () => {
-    const m116 = migrations.find((m) => m.num === 116)!;
+  it("each allowlisted RPC is granted execute to anon, service_role by its own migration (the allowlist is real, not dead code)", () => {
     for (const name of ALLOWED_RPCS) {
-      expect(m116.code).toMatch(
+      const num = ALLOWED_RPC_MIGRATION[name];
+      const mig = migrations.find((m) => m.num === num);
+      expect(mig, `migration ${num} (for ${name}) must exist`).toBeDefined();
+      expect(mig!.code, `${name} in ${mig!.file}`).toMatch(
         new RegExp(`grant\\s+execute\\s+on\\s+function\\s+public\\.${name}\\s*\\([^)]*\\)\\s+to\\s+anon\\s*,\\s*service_role\\s*;`, "i"),
       );
     }
@@ -341,13 +358,13 @@ describe("anon surface: browser Supabase client", () => {
   });
 
   for (const f of BROWSER_CLIENT_IMPORTERS) {
-    it(`${f} uses no .from( and no RPC but saved_clusters`, () => {
+    it(`${f} uses no .from( and no RPC but saved_clusters / saved_clusters_v2`, () => {
       const code = blankComments(readFileSync(resolve(ROOT, f), "utf8"));
       // Array.from(...) is not a PostgREST table call.
       expect(code.match(/(?<!Array)\.from\s*\(/g) ?? []).toEqual([]);
       const rpcs = Array.from(code.matchAll(/\.rpc\s*\(\s*([^,)\s]*)/g), (m) => m[1]);
       expect(rpcs.length).toBeGreaterThan(0);
-      for (const arg of rpcs) expect(arg).toMatch(/^["']saved_clusters["']$/);
+      for (const arg of rpcs) expect(arg).toMatch(/^["']saved_clusters(_v2)?["']$/);
       // No other Supabase surface (storage buckets, edge functions, auth) either.
       expect(code).not.toMatch(/\.(?:storage|functions|auth)\s*\./);
     });

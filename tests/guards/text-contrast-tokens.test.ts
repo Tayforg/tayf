@@ -3,6 +3,8 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
+import { ZONE_META } from "@/lib/bias/config";
+
 // ---------------------------------------------------------------------------
 // Permanent CI guard (a11y-2): text must use the full `text-muted-foreground`
 // / `text-brand` tokens. Any opacity-modified form (`/10` .. `/90`) composites
@@ -387,7 +389,7 @@ describe("no bare element opacity in story components (qa-wave-i, WCAG 1.4.3)", 
 // same change that fixes that file's pills, and the guard keeps them fixed.
 // ---------------------------------------------------------------------------
 
-const TINTED_PILL_FILES = ["src/app/kaynaklar/durum/page.tsx"];
+const TINTED_PILL_FILES = ["src/app/kaynaklar/durum/page.tsx", "src/components/bookmark/saved-list.tsx"];
 
 const TINTED_BG = /\bbg-([a-z]+)-500\/15(?![\w-])/;
 
@@ -841,5 +843,91 @@ describe("dark-mode hue text shades (WCAG 1.4.3, wave V)", () => {
       expect(onBackground, `${hue}-400 on background ${onBackground.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
       expect(onWash, `${hue}-400 on bg-${hue}-500/15 ${onWash.toFixed(2)}`).toBeGreaterThanOrEqual(4.5);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fifth guard (wave W, Medya DNA empty-zone label): "Hiç kaynak yok" sits on
+// the zone card, a `bg-<hue>-<shade>/<pct>` wash (ZONE_META.zoneBg) over the
+// page card. It used to be 11 px italic `text-muted-foreground`, which does not
+// reach 4.5:1 on the bagimsiz (zinc, /20) tile in dark mode. It is now
+// `text-foreground/80`: the opacity ban above covers muted-foreground and
+// brand only, because foreground is far brighter, and this block measures
+// that claim for every zone, on the card AND on the page background (the
+// component is also rendered on the background), in both themes.
+// ---------------------------------------------------------------------------
+
+/** A custom property from the light `:root { ... }` block of globals.css. */
+function lightToken(name: string): Rgb {
+  const block = /^:root\s*\{([^}]*)\}/m.exec(GLOBALS_CSS);
+  if (!block) throw new Error(":root block not found in src/app/globals.css");
+  const m = new RegExp(`--${name}:\\s*(oklch\\([^)]*\\))`).exec(block[1]!);
+  if (!m) throw new Error(`--${name} not found in the :root block`);
+  return oklchToSrgb(m[1]!);
+}
+
+/** `bg-<hue>-<shade>/<pct>` -> its parts. */
+function parseZoneBg(zoneBg: string): { hue: string; shade: number; alpha: number } {
+  const m = /^bg-([a-z]+)-(\d+)\/(\d+)$/.exec(zoneBg);
+  if (!m) throw new Error(`zoneBg is not bg-<hue>-<shade>/<pct>: ${zoneBg}`);
+  return { hue: m[1]!, shade: Number(m[2]), alpha: Number(m[3]) / 100 };
+}
+
+describe("Medya DNA empty label (WCAG 1.4.3, wave W)", () => {
+  const mediaDnaSource = readFileSync(join(STORY_DIR, "media-dna.tsx"), "utf8");
+  const zones = Object.entries(ZONE_META) as Array<[string, (typeof ZONE_META)[keyof typeof ZONE_META]]>;
+  const themes = [
+    { theme: "dark", token: darkToken },
+    { theme: "light", token: lightToken },
+  ] as const;
+
+  it("covers all three zones, each with a parseable bg-<hue>-<shade>/<pct> tint", () => {
+    expect(zones.map(([zone]) => zone).sort()).toEqual(["bagimsiz", "iktidar", "muhalefet"]);
+    for (const [, meta] of zones) {
+      const { alpha } = parseZoneBg(meta.zoneBg);
+      expect(alpha).toBeGreaterThan(0);
+      expect(alpha).toBeLessThan(1);
+    }
+  });
+
+  it("parses zoneBg and rejects anything else", () => {
+    expect(parseZoneBg("bg-zinc-500/20")).toEqual({ hue: "zinc", shade: 500, alpha: 0.2 });
+    expect(() => parseZoneBg("bg-zinc-500")).toThrow();
+    expect(() => parseZoneBg("bg-[#fff]/20")).toThrow();
+    expect(() => lightToken("no-such-token")).toThrow();
+  });
+
+  for (const { theme, token } of themes) {
+    for (const surface of ["card", "background"] as const) {
+      it.each(zones)(
+        `text-foreground/80 clears 4.5:1 on the %s zone tile over the ${theme} ${surface}`,
+        (_zone, meta) => {
+          const { hue, shade, alpha } = parseZoneBg(meta.zoneBg);
+          const tile = composite(tailwindColor(hue, shade), token(surface), alpha);
+          const text = composite(token("foreground"), tile, 0.8);
+          const ratio = contrastRatio(text, tile);
+          expect(
+            ratio,
+            `${meta.zoneBg} tile over ${theme} ${surface}: foreground/80 is ${ratio.toFixed(2)}:1`,
+          ).toBeGreaterThanOrEqual(4.5);
+        },
+      );
+    }
+  }
+
+  it("shows why the old pairing was replaced: muted-foreground misses 4.5:1 on a zone tile", () => {
+    const failing = zones.filter(([, meta]) => {
+      const { hue, shade, alpha } = parseZoneBg(meta.zoneBg);
+      return ["card", "background"].some((surface) => {
+        const tile = composite(tailwindColor(hue, shade), darkToken(surface), alpha);
+        return contrastRatio(darkToken("muted-foreground"), tile) < 4.5;
+      });
+    });
+    expect(failing.length).toBeGreaterThan(0);
+  });
+
+  it("media-dna.tsx no longer pairs text-muted-foreground with italic", () => {
+    expect(mediaDnaSource).not.toContain("text-muted-foreground italic");
+    expect(mediaDnaSource).toContain("text-foreground/80 italic");
   });
 });

@@ -42,6 +42,7 @@ const CAPPED_FILES = [
   "src/app/api/v1/kap/pickup/route.ts",
   "src/lib/trends/rising-query.ts",
   "src/lib/sources/registry-query.ts",
+  "src/lib/entities/entity-hub-query.ts",
 ] as const;
 
 /** Blanks // and block comments, keeping offsets (and newlines) intact. */
@@ -57,8 +58,8 @@ const PLAIN_CALL = /\bcreateServerClient\s*\(/;
 const CAPPED_CALL = /\bcreateReaderClient\s*\(/;
 
 describe("public reader files keep the capped client", () => {
-  it("lists exactly the 15 files the wave covers", () => {
-    expect(new Set(CAPPED_FILES).size).toBe(15);
+  it("lists exactly the 16 files the wave covers", () => {
+    expect(new Set(CAPPED_FILES).size).toBe(16);
   });
 
   it.each(CAPPED_FILES)("%s exists (the sweep is not vacuous)", (rel) => {
