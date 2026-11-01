@@ -3,6 +3,7 @@ import { ImageResponse } from "next/og";
 import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { tallyZones, zoneOf } from "@/lib/bias/config";
 import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import { formatPctTr } from "@/lib/format/number-tr";
 import type { MediaDnaZone } from "@/types";
 
 // File-route OG card for /cluster/[id].
@@ -476,7 +477,9 @@ export default async function Image({ params }: ImageProps) {
                         marginTop: 8,
                       }}
                     >
-                      {pct}% · {zones[zone]}
+                      {/* A single string child (not "{pct}% · {n}" fragments)
+                          keeps the tile one text node for Satori. */}
+                      {`${formatPctTr(pct)} · ${zones[zone]}`}
                     </div>
                   </div>
                 );

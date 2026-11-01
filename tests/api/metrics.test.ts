@@ -21,6 +21,23 @@ vi.mock("next/server", async (importOriginal) => {
 });
 
 // ---------------------------------------------------------------------------
+// Admin session mock.
+//
+// `/api/metrics` accepts the CRON_SECRET bearer (cron / smoke callers) OR a
+// valid `admin_session` cookie (the /admin "Canli metrikler" card, which
+// fetches with the browser cookie and cannot hold the secret). The real
+// `hasAdminSession` reads `next/headers` cookies, which do not exist outside a
+// request scope, so the tests drive it through this hoisted mock. Default is
+// "no session" so every pre-existing bearer test exercises the bearer path.
+// ---------------------------------------------------------------------------
+const { hasAdminSessionMock } = vi.hoisted(() => ({
+  hasAdminSessionMock: vi.fn(async () => false),
+}));
+vi.mock("@/lib/admin/session", () => ({
+  hasAdminSession: hasAdminSessionMock,
+}));
+
+// ---------------------------------------------------------------------------
 // Supabase mock plumbing for /api/metrics.
 //
 // The route issues Promise.all over eleven count queries plus one RPC. Each one starts with
@@ -181,6 +198,8 @@ beforeEach(() => {
   selectOpts = [];
   currentRpc = { ...DEFAULT_RPC };
   rpcCalls = [];
+  hasAdminSessionMock.mockReset();
+  hasAdminSessionMock.mockResolvedValue(false);
 });
 
 afterEach(() => {
@@ -478,5 +497,86 @@ describe("GET /api/metrics", () => {
     const { body } = await callGet();
     expect(body.clusters.neutralizedEligible).toBe(10646);
     expect(body.clusters.neutralized).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auth: bearer OR admin session cookie. The bearer is checked first so cron
+// callers never touch cookies; the cookie path exists for the /admin
+// WorkerStats card.
+// ---------------------------------------------------------------------------
+describe("GET /api/metrics auth", () => {
+  const URL_ = "http://localhost/api/metrics";
+
+  it("serves an admin session with no Authorization header", async () => {
+    hasAdminSessionMock.mockResolvedValue(true);
+    const { status, body } = await callGet(new Request(URL_));
+    expect(status).toBe(200);
+    expect(body.articles.total).toBe(100);
+    expect(hasAdminSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns 401 with no header and no admin session", async () => {
+    const { status, body } = await callGet(new Request(URL_));
+    expect(status).toBe(401);
+    expect(body).toEqual({ error: "Unauthorized" });
+    expect(hasAdminSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a valid bearer without ever reading the admin session", async () => {
+    const { status } = await callGet(
+      new Request(URL_, { headers: { Authorization: `Bearer ${TEST_CRON_SECRET}` } }),
+    );
+    expect(status).toBe(200);
+    expect(hasAdminSessionMock).not.toHaveBeenCalled();
+  });
+
+  it("serves an admin session even when CRON_SECRET is unset", async () => {
+    delete process.env.CRON_SECRET;
+    hasAdminSessionMock.mockResolvedValue(true);
+    const { status } = await callGet(new Request(URL_));
+    expect(status).toBe(200);
+  });
+
+  it("keeps the bearer path fail-closed (503) when CRON_SECRET is unset and there is no session", async () => {
+    delete process.env.CRON_SECRET;
+    const { status } = await callGet(
+      new Request(URL_, { headers: { Authorization: "Bearer anything" } }),
+    );
+    expect(status).toBe(503);
+  });
+
+  it("returns 503 with no header, no session and CRON_SECRET unset", async () => {
+    delete process.env.CRON_SECRET;
+    const { status } = await callGet(new Request(URL_));
+    expect(status).toBe(503);
+  });
+
+  it("returns 401 for a wrong bearer when there is no admin session", async () => {
+    const { status, body } = await callGet(
+      new Request(URL_, { headers: { Authorization: "Bearer not-the-secret" } }),
+    );
+    expect(status).toBe(401);
+    expect(body).toEqual({ error: "Unauthorized" });
+  });
+
+  it("lets a wrong bearer through when the caller holds an admin session", async () => {
+    hasAdminSessionMock.mockResolvedValue(true);
+    const { status } = await callGet(
+      new Request(URL_, { headers: { Authorization: "Bearer not-the-secret" } }),
+    );
+    expect(status).toBe(200);
+  });
+
+  it("keeps the response no-store on the cookie path", async () => {
+    hasAdminSessionMock.mockResolvedValue(true);
+    const { res } = await callGet(new Request(URL_));
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("does not run any Supabase query when the caller is rejected", async () => {
+    await callGet(new Request(URL_));
+    expect(rpcCalls).toEqual([]);
+    expect(selectOpts).toEqual([]);
   });
 });

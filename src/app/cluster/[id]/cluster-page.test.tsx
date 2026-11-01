@@ -900,6 +900,113 @@ describe("ClusterDetailPage — honest source count v2 (reader-data)", () => {
   });
 });
 
+/**
+ * The meta row under the title ("2 saat önce • 3 kaynak …"): the first
+ * element whose className carries the row's text-size/weight tokens.
+ */
+function findMetaRow(node: unknown): { props: { children?: ReactNode } } | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findMetaRow(child);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as {
+      props?: { className?: unknown; children?: ReactNode };
+    };
+    if (
+      typeof el.props?.className === "string" &&
+      el.props.className.includes("text-[12px] font-medium text-muted-foreground")
+    ) {
+      return el as { props: { children?: ReactNode } };
+    }
+    if (el.props?.children !== undefined) return findMetaRow(el.props.children);
+  }
+  return null;
+}
+
+describe("ClusterDetailPage — header age", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function detailWithMembers(publishedAts: string[]): ClusterDetail {
+    const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+    const members = publishedAts.map((at, i) =>
+      makeMember(`a${i}`, makeSource({ id: `s${i}`, slug: `s${i}`, name: `Kaynak ${i}` }), at),
+    );
+    return {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [source],
+      wire: {
+        isWireRedistribution: false,
+        effectiveArticleCount: members.length,
+        memberCount: members.length,
+      },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+  }
+
+  it("shows the story age plus a labelled update cue when a member published later", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime("2026-09-06T12:30:00Z");
+    getClusterDetail.mockResolvedValue(
+      detailWithMembers(["2026-09-06T10:00:00.000Z", "2026-09-06T12:00:00.000Z"]),
+    );
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const row = findMetaRow(tree);
+    expect(row).not.toBeNull();
+    const rowText = collectText(row!.props.children).join("");
+
+    // first_published 10:00 → 2.5 h old: the bare age is the story's age.
+    expect(rowText).toContain("2 saat önce");
+    expect(rowText).toContain("Güncellendi: 30 dakika önce");
+    // "30 dakika önce" must never appear without its label (it is NOT the age).
+    expect(rowText.replace("Güncellendi: 30 dakika önce", "")).not.toContain(
+      "30 dakika önce",
+    );
+  });
+
+  it("omits the update cue when every member published within 30 minutes of the first", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime("2026-09-06T12:30:00Z");
+    getClusterDetail.mockResolvedValue(
+      detailWithMembers([
+        "2026-09-06T10:00:00.000Z",
+        "2026-09-06T10:10:00.000Z",
+        "2026-09-06T10:20:00.000Z",
+      ]),
+    );
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const row = findMetaRow(tree);
+    expect(row).not.toBeNull();
+    const rowText = collectText(row!.props.children).join("");
+
+    expect(rowText).toContain("2 saat önce");
+    expect(rowText).not.toContain("Güncellendi");
+  });
+
+  it("keeps JSON-LD datePublished and dateModified on the cluster columns", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime("2026-09-06T12:30:00Z");
+    getClusterDetail.mockResolvedValue(
+      detailWithMembers(["2026-09-06T10:00:00.000Z", "2026-09-06T12:00:00.000Z"]),
+    );
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const parsed = JSON.parse(findJsonLd(tree)!);
+
+    expect(parsed.datePublished).toBe("2026-09-06T10:00:00.000Z");
+    expect(parsed.dateModified).toBe("2026-09-06T12:00:00.000Z");
+  });
+});
+
 describe("generateMetadata — oEmbed discovery", () => {
   it("advertises the oEmbed endpoint for the cluster URL next to the canonical", async () => {
     const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });

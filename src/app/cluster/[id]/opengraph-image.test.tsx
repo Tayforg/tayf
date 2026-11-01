@@ -207,6 +207,35 @@ describe("cluster opengraph-image", () => {
     expect(text).not.toContain("sadece İktidar yazdı");
   });
 
+  it("writes the zone tiles in the Turkish prefix form (%80 · 4), never '80% ·'", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail({
+        article_count: 5,
+        bias_distribution: {
+          pro_government: 4,
+          gov_leaning: 0,
+          state_media: 0,
+          center: 0,
+          opposition_leaning: 0,
+          opposition: 1,
+          nationalist: 0,
+          islamist_conservative: 0,
+          pro_kurdish: 0,
+          international: 0,
+        },
+      }),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("%80 · 4");
+    expect(text).toContain("%20 · 1");
+    expect(text).toContain("%0 · 0");
+    expect(text).not.toMatch(/\d+% ·/);
+  });
+
   it("shows the honest source count and the wire-redistribution pill", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail(

@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Activity, Newspaper, Layers, Image as ImageIcon } from "lucide-react";
+import { AdminLoadError } from "@/components/admin/admin-load-error";
+import { loadAdminJson } from "@/components/admin/load-admin-json";
 
 interface Metrics {
   timestamp: string;
@@ -21,23 +23,45 @@ interface Metrics {
   sources: { total: number; active: number };
 }
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+// Shape gate for /api/metrics: enough to be sure the sections the tiles read
+// from exist. Individual counters are still rendered defensively (StatBox).
+function isMetrics(d: unknown): d is Metrics {
+  return (
+    isObject(d) &&
+    typeof d.timestamp === "string" &&
+    isObject(d.articles) &&
+    isObject(d.clusters) &&
+    isObject(d.sources)
+  );
+}
+
 export function WorkerStats() {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
   const [loading, setLoading] = useState(true);
+  // `status` is null for a connection failure (no HTTP response at all), so
+  // "no error" has to be the outer null, not a null status.
+  const [error, setError] = useState<{ status: number | null } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     async function fetchMetrics() {
-      try {
-        const res = await fetch("/api/metrics", { cache: "no-store" });
-        if (!res.ok) return;
-        const data: Metrics = await res.json();
-        if (!cancelled) setMetrics(data);
-      } catch {
-        // ignore
-      } finally {
-        if (!cancelled) setLoading(false);
+      const result = await loadAdminJson("/api/metrics", isMetrics);
+      if (cancelled) return;
+      if (result.ok) {
+        setMetrics(result.data);
+        setError(null);
+      } else {
+        // Surface the failure instead of an eternal skeleton (401 after the
+        // admin session expires, 5xx while Supabase is down). A previous
+        // good reading is kept in state but not shown: stale numbers must
+        // not pass for live ones.
+        setError({ status: result.status });
       }
+      setLoading(false);
     }
     fetchMetrics();
     // Refresh every 60s. Each tick hits /api/metrics which runs ~10
@@ -51,6 +75,25 @@ export function WorkerStats() {
       clearInterval(interval);
     };
   }, []);
+
+  if (error) {
+    return (
+      <div className="rounded-xl border border-border/60 bg-card/40 p-4 space-y-2">
+        <h3 className="text-sm font-semibold flex items-center gap-1.5">
+          <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+          Canlı metrikler
+        </h3>
+        <AdminLoadError
+          status={error.status}
+          message={
+            error.status === null
+              ? "Metrikler yüklenemedi (bağlantı hatası)."
+              : `Metrikler yüklenemedi (HTTP ${error.status}).`
+          }
+        />
+      </div>
+    );
+  }
 
   if (loading || !metrics) {
     return (
@@ -95,7 +138,7 @@ function StatBox({
 }: {
   icon: React.ElementType;
   label: string;
-  value: number;
+  value: number | undefined;
   tone?: "default" | "emerald" | "amber";
 }) {
   const toneClass =
@@ -111,7 +154,11 @@ function StatBox({
         {label}
       </div>
       <p className={`text-xl font-bold tabular-nums mt-1 ${toneClass}`}>
-        {value.toLocaleString("tr-TR")}
+        {typeof value === "number"
+          ? // "always": some ICU builds skip the dot on four-digit tr-TR numbers
+            // ("1234"), which would also make server and client disagree.
+            value.toLocaleString("tr-TR", { useGrouping: "always" })
+          : "—"}
       </p>
     </div>
   );

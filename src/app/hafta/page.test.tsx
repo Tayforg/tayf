@@ -304,6 +304,25 @@ describe("WeeklyPage — data present", () => {
     expect(text).toContain("%10 (haftanın 10 haberi içinde)");
   });
 
+  it("groups four-digit week counts the Turkish way (1.234, not 1234)", async () => {
+    mocks.summary = {
+      ...FULL_SUMMARY,
+      zoneCounts: { iktidar: 1000, bagimsiz: 200, muhalefet: 34 },
+      topClusters: [{ ...FULL_SUMMARY.topClusters[0]!, articleCount: 1500 }],
+      blindspots: [{ ...FULL_SUMMARY.blindspots[0]!, articleCount: 1200 }],
+    };
+
+    const tree = await WeeklyPage();
+    const text = collectText(tree).join(" ");
+
+    expect(text).toContain("(haftanın 1.234 haberi içinde)");
+    expect(text).toContain("Yüzdeler bu haftanın toplam 1.234 haberi üzerinden hesaplanır");
+    expect(text).toContain("1.000 haber");
+    expect(text).toContain("1.500 haber · 3 bölge");
+    expect(text).toContain("tarafında · 1.200 haber");
+    expect(text).not.toMatch(/\b(1234|1000|1500|1200) haber/);
+  });
+
   it("prints each zone's delivering-source count as its own fact, not a share", async () => {
     const tree = await WeeklyPage();
     const text = collectText(tree).join(" ");

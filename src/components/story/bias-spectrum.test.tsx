@@ -17,14 +17,14 @@ function dist(partial: Partial<BiasDistribution>): BiasDistribution {
 const SEVEN_TO_ONE = dist({ pro_government: 7, opposition: 1 });
 
 describe("BiasSpectrum — percentages sum to 100", () => {
-  it("compact mode shows 88% and 12% (never 13%) for a 7:1 split", () => {
+  it("compact mode shows %88 and %12 (never %13) for a 7:1 split", () => {
     const markup = renderToStaticMarkup(
       <BiasSpectrum distribution={SEVEN_TO_ONE} compact />,
     );
 
-    expect(markup).toContain("88%");
-    expect(markup).toContain("12%");
-    expect(markup).not.toContain("13%");
+    expect(markup).toContain("%88");
+    expect(markup).toContain("%12");
+    expect(markup).not.toContain("%13");
   });
 
   it("compact mode puts the largest-remainder percent in the title text", () => {
@@ -32,8 +32,8 @@ describe("BiasSpectrum — percentages sum to 100", () => {
       <BiasSpectrum distribution={SEVEN_TO_ONE} compact />,
     );
 
-    expect(markup).toContain("7 kaynak (88%)");
-    expect(markup).toContain("1 kaynak (12%)");
+    expect(markup).toContain("7 kaynak (%88)");
+    expect(markup).toContain("1 kaynak (%12)");
   });
 
   it("non-compact mode gives the same 88/12 split", () => {
@@ -41,11 +41,23 @@ describe("BiasSpectrum — percentages sum to 100", () => {
       <BiasSpectrum distribution={SEVEN_TO_ONE} />,
     );
 
-    expect(markup).toContain("88%");
-    expect(markup).toContain("12%");
-    expect(markup).not.toContain("13%");
-    expect(markup).toContain("7 kaynak (88%)");
-    expect(markup).toContain("1 kaynak (12%)");
+    expect(markup).toContain("%88");
+    expect(markup).toContain("%12");
+    expect(markup).not.toContain("%13");
+    expect(markup).toContain("7 kaynak (%88)");
+    expect(markup).toContain("1 kaynak (%12)");
+  });
+
+  it("writes percents in the Turkish prefix form only, in both modes", () => {
+    for (const compact of [true, false]) {
+      const markup = renderToStaticMarkup(
+        <BiasSpectrum distribution={SEVEN_TO_ONE} compact={compact} />,
+      );
+
+      // No suffix-style "88%" / "12%" — but the CSS bar widths stay as-is.
+      expect(markup).not.toContain("88%");
+      expect(markup).not.toMatch(/(?<![\d.])12%/);
+    }
   });
 
   it("keeps the exact fraction for the bar widths", () => {
@@ -65,9 +77,9 @@ describe("BiasSpectrum — percentages sum to 100", () => {
       />,
     );
 
-    expect(markup).toContain("İktidar: 1 kaynak (34%)");
-    expect(markup).toContain("Bağımsız: 1 kaynak (33%)");
-    expect(markup).toContain("Muhalefet: 1 kaynak (33%)");
+    expect(markup).toContain("İktidar: 1 kaynak (%34)");
+    expect(markup).toContain("Bağımsız: 1 kaynak (%33)");
+    expect(markup).toContain("Muhalefet: 1 kaynak (%33)");
   });
 
   it("renders nothing for an empty distribution in both modes", () => {
