@@ -1307,3 +1307,206 @@ describe("normalize.ts prepare / complete split [A-ingest-cpu]", () => {
     expect(split).toEqual(whole);
   });
 });
+
+// ---------------------------------------------------------------------------
+// hunt-15 / A-image-url-hygiene: ingest stores a good image URL. Aksam's feed
+// puts a 404 spelling in the enclosure, Oksijen and BBC ship 150/240 px
+// variants, mfa.gov.tr advertises its logo as the enclosure, and a few CMSs
+// store a host root or a YouTube embed page. The shared normalizeImageUrl does
+// the repair; the extractor only adds the icon/logo filter on enclosure and
+// media candidates. content_hash never sees any of it.
+// ---------------------------------------------------------------------------
+describe("normalize.ts hunt-15 A-image-url-hygiene: stored image_url", () => {
+  const AKSAM_BROKEN = "https://img3.aksam.com.tr/imgsdisk2026/11/01/halk-tercihini-yapti-bulg-592_2.jpg";
+  const AKSAM_GOOD = "https://img3.aksam.com.tr/imgsdisk/2026/11/01/halk-tercihini-yapti-bulg-592_2.jpg";
+
+  it("stores the good aksam spelling when the enclosure is broken and media:content is good", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Halk tercihini yaptı",
+      link: "/ak1",
+      enclosure: { url: AKSAM_BROKEN, type: "image/jpeg" },
+      mediaContent: { $: { url: AKSAM_GOOD } },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBe(AKSAM_GOOD);
+  });
+
+  it("stores the repaired aksam spelling when the broken enclosure is the only candidate", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Halk tercihini yaptı",
+      link: "/ak2",
+      enclosure: { url: AKSAM_BROKEN, type: "image/jpeg" },
+    });
+    expect(row!.image_url).toBe(AKSAM_GOOD);
+  });
+
+  it("drops the aksam stand-in photo in either spelling", () => {
+    for (const url of [
+      "https://img3.aksam.com.tr/imgsdisk2026/01/01/210220191220255418101_2.jpg",
+      "https://img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg",
+    ]) {
+      const row = mod!.normalizeItem(source, {
+        title: "Haber başlığı",
+        link: "/ak3",
+        enclosure: { url, type: "image/jpeg" },
+      });
+      expect(row!.image_url).toBeNull();
+    }
+  });
+
+  it("stores an Oksijen 150/84 media image as 1280/720", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Bulgaristan'da seçim",
+      link: "/ok1",
+      mediaContent: {
+        $: { url: "https://i.gazeteoksijen.com/2/150/84/storage/files/images/2026/11/01/x-b1mn.jpg" },
+      },
+    });
+    expect(row!.image_url).toBe(
+      "https://i.gazeteoksijen.com/2/1280/720/storage/files/images/2026/11/01/x-b1mn.jpg",
+    );
+  });
+
+  it("stores a BBC ws/240 media image as standard/976", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "BBC haberi",
+      link: "/bbc1",
+      mediaThumbnail: {
+        $: { url: "https://ichef.bbci.co.uk/ace/ws/240/cpsprodpb/abcd/live/x.jpg.webp" },
+      },
+    });
+    expect(row!.image_url).toBe(
+      "https://ichef.bbci.co.uk/ace/standard/976/cpsprodpb/abcd/live/x.jpg.webp",
+    );
+  });
+
+  it("upgrades the itemImage and inline <img> fallbacks too (via normalizeImageUrl)", () => {
+    const viaItem = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ok2",
+      itemImage: "https://i.gazeteoksijen.com/2/150/84/storage/a.jpg",
+    });
+    expect(viaItem!.image_url).toBe("https://i.gazeteoksijen.com/2/1280/720/storage/a.jpg");
+    const viaInline = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/ok3",
+      content: '<img src="https://i.gazeteoksijen.com/2/150/84/storage/b.jpg">',
+    });
+    expect(viaInline!.image_url).toBe("https://i.gazeteoksijen.com/2/1280/720/storage/b.jpg");
+  });
+
+  it("keeps upgradeThumbnailUrl exported and delegating (rcman, Oksijen, BBC)", async () => {
+    const m = await import("../../../supabase/functions/_shared/rss/normalize.ts");
+    expect(m.upgradeThumbnailUrl("https://img.x/rcman/Cw150h84q95gc/s/a.jpg")).toBe(
+      "https://img.x/rcman/Cw1280h720q95gc/s/a.jpg",
+    );
+    expect(m.upgradeThumbnailUrl("https://i.gazeteoksijen.com/2/150/84/s/a.jpg")).toBe(
+      "https://i.gazeteoksijen.com/2/1280/720/s/a.jpg",
+    );
+    expect(m.upgradeThumbnailUrl("https://cdn.test/a.jpg")).toBe("https://cdn.test/a.jpg");
+  });
+
+  it("stores the real media:thumbnail when the enclosure is a site logo (mfa.gov.tr)", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Dışişleri açıklaması",
+      link: "/mfa1",
+      enclosure: { url: "https://www.mfa.gov.tr/images/logo.png", type: "image/png" },
+      mediaThumbnail: { $: { url: "https://www.mfa.gov.tr/data/Photos/2026/11/foto-1.jpg" } },
+    });
+    expect(row!.image_url).toBe("https://www.mfa.gov.tr/data/Photos/2026/11/foto-1.jpg");
+  });
+
+  it("stores NULL for a logo enclosure with nothing else", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Dışişleri açıklaması",
+      link: "/mfa2",
+      enclosure: { url: "https://www.mfa.gov.tr/images/logo.png", type: "image/png" },
+    });
+    expect(row).not.toBeNull();
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("skips a favicon / apple-touch-icon / icon_32 media candidate", () => {
+    for (const url of [
+      "https://cdn.test/favicon.ico",
+      "https://cdn.test/apple-touch-icon.png",
+      "https://cdn.test/img/icon_32.png",
+      "https://cdn.test/img/site-logo-2x.png",
+    ]) {
+      const row = mod!.normalizeItem(source, {
+        title: "Haber başlığı",
+        link: "/ic1",
+        mediaContent: { $: { url } },
+      });
+      expect(row!.image_url).toBeNull();
+    }
+  });
+
+  it("does not skip a photo whose name merely contains icon or logo inside a word", () => {
+    for (const url of [
+      "https://cdn.test/2026/11/silicon-vadisi-haberi.jpg",
+      "https://cdn.test/2026/11/teknoloji-zirvesi.jpg",
+      "https://cdn.test/2026/11/erdogan-ekonomi.jpg",
+    ]) {
+      const row = mod!.normalizeItem(source, {
+        title: "Haber başlığı",
+        link: "/ic2",
+        enclosure: { url, type: "image/jpeg" },
+      });
+      expect(row!.image_url).toBe(url);
+    }
+  });
+
+  it("stores a YouTube embed enclosure as the hqdefault thumbnail", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Video haberi",
+      link: "/yt1",
+      enclosure: { url: "https://www.youtube.com/embed/2lKJof-8DeE" },
+    });
+    expect(row!.image_url).toBe("https://img.youtube.com/vi/2lKJof-8DeE/hqdefault.jpg");
+  });
+
+  it("falls through a host-root enclosure to the next candidate", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/root1",
+      enclosure: { url: "https://cdn.istiklal.com.tr/" },
+      mediaThumbnail: { $: { url: "https://cdn.istiklal.com.tr/uploads/2026/11/foto.jpg" } },
+    });
+    expect(row!.image_url).toBe("https://cdn.istiklal.com.tr/uploads/2026/11/foto.jpg");
+  });
+
+  it("stores NULL for a host-root enclosure alone, and for a WordPress emoji", () => {
+    const root = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/root2",
+      enclosure: { url: "https://cdn.istiklal.com.tr/" },
+    });
+    expect(root!.image_url).toBeNull();
+    const emoji = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/emoji1",
+      mediaContent: { $: { url: "https://s.w.org/images/core/emoji/15.0.3/72x72/1f449.png" } },
+    });
+    expect(emoji!.image_url).toBeNull();
+  });
+
+  it("stores NULL for a Sözcü 'son-dakikajpg-<hash>' card", () => {
+    const row = mod!.normalizeItem(source, {
+      title: "Haber başlığı",
+      link: "/soz1",
+      enclosure: {
+        url: "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/10/son-dakikajpg-fGomF2NHS0uGhDDwDPCbMQ.jpg",
+        type: "image/jpeg",
+      },
+    });
+    expect(row!.image_url).toBeNull();
+  });
+
+  it("content_hash does not depend on the image URL", () => {
+    const base = { title: "Aynı başlık", link: "/hash1", contentSnippet: "Aynı açıklama" };
+    const a = mod!.normalizeItem(source, { ...base, enclosure: { url: AKSAM_BROKEN, type: "image/jpeg" } });
+    const b = mod!.normalizeItem(source, { ...base });
+    expect(a!.content_hash).toBe(b!.content_hash);
+  });
+});

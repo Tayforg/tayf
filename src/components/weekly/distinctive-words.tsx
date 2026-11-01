@@ -18,8 +18,10 @@ const metaClass = "text-xs text-muted-foreground";
 const ZONE_ORDER: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
 const UNAVAILABLE_COPY = "Kelime karşılaştırması şu anda hesaplanamıyor.";
-const INSUFFICIENT_COPY = "Bu hafta kelime karşılaştırması için yeterli başlık yok.";
-const EMPTY_ZONE_COPY = "Bu hafta belirgin şekilde öne çıkan kelime yok.";
+// /hafta is a trailing 7-day window, not a calendar week: no "Bu hafta" here
+// (tests/guards/week-archive-copy.test.ts scans this file for it).
+const INSUFFICIENT_COPY = "Son 7 günde kelime karşılaştırması için yeterli başlık yok.";
+const EMPTY_ZONE_COPY = "Son 7 günde belirgin şekilde öne çıkan kelime yok.";
 const Z_TOOLTIP =
   "Belirginlik puanı (z). 1,96 ve üstü istatistiksel olarak anlamlı sayılır.";
 
@@ -70,7 +72,7 @@ function ZoneColumn({
     <div className="space-y-2">
       <h3 className={`text-sm font-semibold ${meta.zoneLabel}`}>{`${meta.label} medyası`}</h3>
       <p className={metaClass}>
-        {`Bu hafta ${meta.label} medyasında belirgin şekilde daha sık geçen kelimeler`}
+        {`Son 7 günde ${meta.label} medyasında belirgin şekilde daha sık geçen kelimeler`}
       </p>
       {terms.length === 0 ? (
         <p className={metaClass}>{EMPTY_ZONE_COPY}</p>

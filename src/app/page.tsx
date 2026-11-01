@@ -26,6 +26,7 @@ import {
 import { searchClusters } from "@/lib/clusters/search-query";
 import { composeSearchView } from "@/lib/clusters/search-view";
 import { formatCountTr } from "@/lib/format/number-tr";
+import { groupByDayBucket } from "@/lib/home/day-buckets";
 import { searchStatusText, searchTitle } from "@/lib/search/search-status";
 import {
   HOME_PAGE_SIZE,
@@ -95,44 +96,6 @@ export async function generateMetadata({
       },
     },
   };
-}
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-const WEEK_MS = 7 * DAY_MS;
-
-type BucketKey = "today" | "thisWeek" | "older";
-
-interface BucketDef {
-  key: BucketKey;
-  label: string;
-  matches: (updatedAt: Date, nowMs: number) => boolean;
-}
-
-// Order matters — each bundle is assigned to the FIRST matching bucket.
-// "older" is a catch-all so every bundle ends up somewhere.
-const BUCKETS: readonly BucketDef[] = [
-  {
-    key: "today",
-    label: "Bugün",
-    matches: (t, now) => now - t.getTime() < DAY_MS,
-  },
-  {
-    key: "thisWeek",
-    label: "Bu hafta",
-    matches: (t, now) => now - t.getTime() < WEEK_MS,
-  },
-  {
-    key: "older",
-    label: "Daha eski",
-    matches: () => true,
-  },
-];
-
-interface BucketWithClusters {
-  key: BucketKey;
-  label: string;
-  count: number;
-  clusters: ClusterBundle[];
 }
 
 // Shared card renderer used by both the "Son Dakika" strip and the
@@ -325,7 +288,7 @@ export async function HomeFeed({
     (b) => b.cluster.first_published
   );
 
-  // Time buckets are computed on the PAGED slice only — each page is
+  // Day buckets are computed on the PAGED slice only — each page is
   // self-contained, so the bucket headings reflect what's actually on
   // screen rather than the full filtered set.
   //
@@ -336,30 +299,22 @@ export async function HomeFeed({
   // article today used to show up under "Bugün" even though the news
   // was stale. Bucketing on `first_published` makes the header labels
   // reflect when the story actually broke.
+  //
+  // The headings follow the Europe/Istanbul calendar day ('Bugün', 'Dün',
+  // 'Son 7 gün', 'Daha eski'; src/lib/home/day-buckets.ts), not "less than
+  // 24 h ago": just after local midnight the old rule filed all of yesterday
+  // under 'Bugün' (h15-tz-1). `nowMs` is read per request: HomeFeed is
+  // dynamic (it awaits searchParams) and runs outside any "use cache" scope,
+  // so this adds no new clock read to a prerendered path. The labels are as
+  // fresh as the response, not as the clock: the CDN can serve a response up
+  // to its age old (STALE, age 579 s ≈ 10 min observed), so a card can stay
+  // under 'Bugün' for about 10 minutes after Istanbul midnight.
   const nowMs = currentTimeMs();
-  const grouped = new Map<BucketKey, ClusterBundle[]>();
-  for (const def of BUCKETS) grouped.set(def.key, []);
-  for (const bundle of paged) {
-    const firstPublished = new Date(bundle.cluster.first_published);
-    for (const def of BUCKETS) {
-      if (def.matches(firstPublished, nowMs)) {
-        grouped.get(def.key)!.push(bundle);
-        break;
-      }
-    }
-  }
-  const bucketsWithClusters: BucketWithClusters[] = BUCKETS.flatMap((def) => {
-    const clusters = grouped.get(def.key) ?? [];
-    if (clusters.length === 0) return [];
-    return [
-      {
-        key: def.key,
-        label: def.label,
-        count: clusters.length,
-        clusters,
-      },
-    ];
-  });
+  const bucketsWithClusters = groupByDayBucket(
+    paged,
+    (b) => Date.parse(b.cluster.first_published),
+    nowMs
+  );
 
   // All in-feed matches (breaking + ranked, across the whole filtered set —
   // not just this page's slice) so the archive section never duplicates a
@@ -468,7 +423,7 @@ export async function HomeFeed({
                     </span>
                   </div>
                   <div className="space-y-4">
-                    {bucket.clusters.map((b) =>
+                    {bucket.items.map((b) =>
                       renderClusterCard(b, renderIndex++, nowMs)
                     )}
                   </div>

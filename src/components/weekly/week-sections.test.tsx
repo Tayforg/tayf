@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ZoneHealth } from "@/lib/clusters/feed-health";
 import type { WeeklyBlindspot, WeeklySummary } from "@/lib/weekly/weekly-query";
 
 vi.mock("next/cache", () => ({
@@ -9,8 +10,10 @@ vi.mock("next/cache", () => ({
 }));
 
 import {
+  BasisNote,
   Blindspots,
   TRUNCATED_CAVEAT,
+  WidestSpectrum,
   ZoneShares,
   blindspotShareText,
 } from "./week-sections";
@@ -27,6 +30,19 @@ function blindspot(overrides: Partial<WeeklyBlindspot> = {}): WeeklyBlindspot {
     share: 1,
     sharePct: 100,
     ...overrides,
+  };
+}
+
+function zoneHealth(delivering: number, total: number, degraded = false): ZoneHealth {
+  return {
+    total,
+    fetchOk: total,
+    fetchOkShare: 1,
+    delivering,
+    deliveringShare: total === 0 ? 0 : delivering / total,
+    healthy: delivering,
+    healthyShare: total === 0 ? 0 : delivering / total,
+    degraded,
   };
 }
 
@@ -116,15 +132,120 @@ describe("<ZoneShares> truncation caveat", () => {
   const props = { summary: summaryWith([]), health: null, feedStatus: null };
 
   it("the caveat names the ceiling with Turkish grouping (5.000, not 5000)", () => {
-    expect(TRUNCATED_CAVEAT).toBe("En büyük 5.000 küme üzerinden hesaplandı; haftanın tamamı değil.");
+    expect(TRUNCATED_CAVEAT).toBe("En büyük 5.000 küme üzerinden hesaplandı; dönemin tamamı değil.");
   });
 
   it("shows the caveat only when the read was truncated", () => {
     const truncated = renderToStaticMarkup(<ZoneShares {...props} truncated />);
     const complete = renderToStaticMarkup(<ZoneShares {...props} truncated={false} />);
 
-    expect(truncated).toContain("En büyük 5.000 küme üzerinden hesaplandı; haftanın tamamı değil.");
+    expect(truncated).toContain("En büyük 5.000 küme üzerinden hesaplandı; dönemin tamamı değil.");
     expect(complete).not.toContain("En büyük");
-    expect(complete).not.toContain("haftanın tamamı değil");
+    expect(complete).not.toContain("dönemin tamamı değil");
+  });
+
+  it("the caveat names no calendar week: it also prints on the rolling /hafta page", () => {
+    expect(TRUNCATED_CAVEAT.toLocaleLowerCase("tr-TR")).not.toMatch(/hafta/);
+    const rolling = renderToStaticMarkup(<ZoneShares {...props} truncated variant="rolling" />);
+    expect(rolling).toContain("dönemin tamamı değil");
+    expect(rolling.toLocaleLowerCase("tr-TR")).not.toContain("haftanın tamamı");
+  });
+});
+
+// /hafta is a trailing 7-day window, not a calendar week: it passes
+// variant="rolling" so no section says "Bu hafta" (h15-tz-1). Without the prop
+// the sections keep the live wording the in-progress ISO week shows.
+describe("variant=\"rolling\" (/hafta)", () => {
+  const props = { summary: summaryWith([]), health: null, feedStatus: null };
+
+  it("<ZoneShares> uses the rolling heading, basis and row total", () => {
+    const html = renderToStaticMarkup(
+      <ZoneShares {...props} truncated={false} variant="rolling" />,
+    );
+
+    expect(html).toContain("Son 7 günde kim neyi öne çıkardı");
+    expect(html).toContain("Yüzdeler son 7 günün toplam 10 haberi üzerinden hesaplanır.");
+    expect(html.match(/\(son 7 günün 10 haberi içinde\)/g) ?? []).toHaveLength(3);
+    expect(html.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
+    expect(html).not.toContain("haftanın 10 haberi");
+  });
+
+  it("<ZoneShares> keeps the live source-health line under rolling", () => {
+    const html = renderToStaticMarkup(
+      <ZoneShares
+        {...props}
+        health={{
+          iktidar: zoneHealth(24, 36),
+          bagimsiz: zoneHealth(33, 57),
+          muhalefet: zoneHealth(15, 20),
+        }}
+        feedStatus={{ delivering: 72, total: 113 }}
+        truncated={false}
+        variant="rolling"
+      />,
+    );
+
+    expect(html).toContain("24 kaynak haber verdi (toplayıcı / niş dahil)");
+    expect(html).toContain("spektruma sayılan kaynaklardan 72 / 113 tanesi haber verdi");
+    expect(html).toContain('href="/kaynaklar/durum"');
+  });
+
+  it("<BasisNote> states the rolling percent basis", () => {
+    const html = renderToStaticMarkup(
+      <BasisNote total={6989} feedStatus={null} variant="rolling" />,
+    );
+
+    expect(html).toContain("Yüzdeler son 7 günün toplam 6.989 haberi üzerinden hesaplanır.");
+    expect(html.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
+  });
+
+  it("<WidestSpectrum> shows the rolling empty text", () => {
+    const html = renderToStaticMarkup(
+      <WidestSpectrum summary={summaryWith([])} variant="rolling" />,
+    );
+
+    expect(html).toContain("Son 7 günde birden fazla bölgenin birlikte gördüğü haber olmadı.");
+    expect(html.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
+  });
+
+  it("<Blindspots> shows the rolling empty text", () => {
+    const html = renderToStaticMarkup(
+      <Blindspots summary={summaryWith([])} health={null} variant="rolling" />,
+    );
+
+    expect(html).toContain("Son 7 günde kör nokta yok.");
+    expect(html.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
+  });
+
+  it("<Blindspots> words the degraded caveat for the last seven days", () => {
+    const degraded = zoneHealth(2, 20, true);
+    const ok = zoneHealth(24, 36);
+    const html = renderToStaticMarkup(
+      <Blindspots
+        summary={summaryWith([])}
+        health={{ iktidar: ok, bagimsiz: ok, muhalefet: degraded }}
+        variant="rolling"
+      />,
+    );
+
+    expect(html).toContain(
+      "Bazı bölgelerde kaynaklara ulaşılamıyor; son 7 günün kör nokta listesi eksik olabilir.",
+    );
+  });
+
+  it("without the prop the sections keep the live wording", () => {
+    const zones = renderToStaticMarkup(<ZoneShares {...props} truncated={false} />);
+    const spots = renderToStaticMarkup(<Blindspots summary={summaryWith([])} health={null} />);
+
+    expect(zones).toContain("Bu hafta kim neyi öne çıkardı");
+    expect(zones).toContain("(haftanın 10 haberi içinde)");
+    expect(spots).toContain("Bu hafta kör nokta yok.");
+  });
+
+  it("archive still selects the closed wording when no variant is given", () => {
+    const zones = renderToStaticMarkup(<ZoneShares {...props} truncated={false} archive />);
+
+    expect(zones).toContain("O hafta kim neyi öne çıkardı");
+    expect(zones).toContain("(haftanın 10 haberi içinde)");
   });
 });

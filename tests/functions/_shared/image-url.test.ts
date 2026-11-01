@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  isIconLikeImageUrl,
   isOptimizableImageUrl,
   isPlaceholderImageUrl,
   normalizeImageUrl,
   PLACEHOLDER_IMAGE_ASSETS,
   repairJoinedImageSegment,
+  upgradeImageVariant,
 } from "../../../supabase/functions/_shared/image-url.ts";
+import { isAllowedRemoteImageUrl } from "../../../src/lib/images/remote-image-hosts";
 
 // ---------------------------------------------------------------------------
 // ingest-hygiene: one shared normaliser for image URLs. haber7 (and a few
@@ -67,8 +70,9 @@ describe("normalizeImageUrl", () => {
     // host / encode characters; the helper must hand back the input as-is.
     const u = "https://CDN.Test/a b/İ.jpg?Q=1";
     expect(normalizeImageUrl(u)).toBe(u);
-    const bare = "https://cdn.test";
-    expect(normalizeImageUrl(bare)).toBe(bare);
+    // A query-only root (resizer shape) is not a host root, see "host root".
+    const resizer = "https://CDN.Test?u=https://o.test/a.jpg";
+    expect(normalizeImageUrl(resizer)).toBe(resizer);
   });
 
   it.each([
@@ -151,8 +155,9 @@ describe("normalizeImageUrl: file:// scheme", () => {
     );
   });
 
-  it("accepts a bare host (nothing after it)", () => {
-    expect(normalizeImageUrl("file://image.hurimg.com")).toBe("https://image.hurimg.com");
+  it("heals a bare host to https, which is then rejected as a host root (no image path)", () => {
+    expect(normalizeImageUrl("file://image.hurimg.com")).toBeNull();
+    expect(normalizeImageUrl("file://image.hurimg.com/")).toBeNull();
   });
 
   it("still repairs a joined ObjectId segment after the rewrite", () => {
@@ -357,7 +362,11 @@ describe("repairJoinedImageSegment / normalizeImageUrl: posta joined ObjectId se
 
   it("never rewrites the authority (host) of a URL", () => {
     const hostLike = `https://${H1}.jpg${H2}.jpg`;
-    expect(normalizeImageUrl(hostLike)).toBe(hostLike);
+    // A bare host is a host root, which is never an image (null, not repaired).
+    expect(normalizeImageUrl(hostLike)).toBeNull();
+    expect(repairJoinedImageSegment(hostLike)).toBe(hostLike);
+    const withPath = `${hostLike}/a.jpg`;
+    expect(normalizeImageUrl(withPath)).toBe(withPath);
   });
 
   it("heals a doubled leading slash AND a joined segment in one call", () => {
@@ -667,6 +676,405 @@ describe("isPlaceholderImageUrl (db-4)", () => {
     ]) {
       expect(isPlaceholderImageUrl(`https://cdn.x/${name}.jpg`)).toBe(false);
     }
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-15 / A-image-url-hygiene. Every defect below was verified on live data
+// on 2026-11-01 and is healed here, in the one shared module, so ingest stores
+// a good URL and the render path (cluster-card-image, optimizedThumbUrl, the
+// query layer's isPlaceholderImageUrl) repairs rows already stored -- no UPDATE.
+// ---------------------------------------------------------------------------
+
+describe("normalizeImageUrl: aksam /imgsdisk2026/ -> /imgsdisk/2026/ (h15-images-1)", () => {
+  // Aksam's RSS <enclosure> reads .../imgsdisk2026/11/01/<slug>_2.jpg (curl:
+  // 404 text/html) while media:content reads .../imgsdisk/2026/11/01/<slug>_2.jpg
+  // (200 image/jpeg). 96.6% of aksam rows (449 of 465 in 48 h) stored the 404.
+  it("repairs the real broken enclosure spelling", () => {
+    expect(normalizeImageUrl("https://img3.aksam.com.tr/imgsdisk2026/11/01/x_2.jpg")).toBe(
+      "https://img3.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg",
+    );
+  });
+
+  it.each(["img", "img1", "img2", "img3"])("repairs on host %s.aksam.com.tr", (sub) => {
+    expect(normalizeImageUrl(`https://${sub}.aksam.com.tr/imgsdisk2026/11/01/x_2.jpg`)).toBe(
+      `https://${sub}.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg`,
+    );
+  });
+
+  it.each([2024, 2025, 2026, 2027, 2028, 2029])("repairs year %i", (year) => {
+    expect(normalizeImageUrl(`https://img3.aksam.com.tr/imgsdisk${year}/05/09/a-b_2.jpg`)).toBe(
+      `https://img3.aksam.com.tr/imgsdisk/${year}/05/09/a-b_2.jpg`,
+    );
+  });
+
+  it("keeps the query and hash byte for byte", () => {
+    expect(
+      normalizeImageUrl("https://img3.aksam.com.tr/imgsdisk2026/11/01/x_2.jpg?v=1&Q=%20z#frag"),
+    ).toBe("https://img3.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg?v=1&Q=%20z#frag");
+  });
+
+  it("matches the host case-insensitively and keeps its case", () => {
+    expect(normalizeImageUrl("HTTPS://IMG3.Aksam.COM.TR/imgsdisk2026/11/01/x_2.jpg")).toBe(
+      "HTTPS://IMG3.Aksam.COM.TR/imgsdisk/2026/11/01/x_2.jpg",
+    );
+  });
+
+  it("heals a doubled leading slash and the spelling in one call", () => {
+    expect(normalizeImageUrl("https://img3.aksam.com.tr//imgsdisk2026/11/01/x_2.jpg")).toBe(
+      "https://img3.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg",
+    );
+  });
+
+  it("returns an already-correct aksam URL === unchanged (idempotent)", () => {
+    const good = "https://img3.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg";
+    expect(normalizeImageUrl(good)).toBe(good);
+    const once = normalizeImageUrl("https://img3.aksam.com.tr/imgsdisk2026/11/01/x_2.jpg");
+    expect(normalizeImageUrl(once)).toBe(once);
+  });
+
+  it.each([
+    ["a non-aksam host", "https://cdn.example.com/imgsdisk2026/x.jpg"],
+    ["a look-alike host", "https://img3.aksam.com.tr.evil.test/imgsdisk2026/11/01/x_2.jpg"],
+    ["imgsdisk2026 that is not the first path segment", "https://img3.aksam.com.tr/a/imgsdisk2026/11/01/x_2.jpg"],
+    ["imgsdisk2026 only in the query", "https://img3.aksam.com.tr/x.jpg?p=/imgsdisk2026/11/01/x_2.jpg"],
+    ["a non-20xx year", "https://img3.aksam.com.tr/imgsdisk1999/11/01/x_2.jpg"],
+    ["a 3-digit year", "https://img3.aksam.com.tr/imgsdisk202/11/01/x_2.jpg"],
+    ["imgsdisk2026 with no trailing slash", "https://img3.aksam.com.tr/imgsdisk2026"],
+  ])("leaves %s untouched", (_label, input) => {
+    expect(normalizeImageUrl(input)).toBe(input);
+  });
+});
+
+describe("isPlaceholderImageUrl: the aksam stand-in in both spellings (h15-images-1)", () => {
+  const BROKEN = "https://img3.aksam.com.tr/imgsdisk2026/01/01/210220191220255418101_2.jpg";
+  const REAL = "https://img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg";
+
+  it("is true for the broken spelling and for the real asset", () => {
+    expect(isPlaceholderImageUrl(BROKEN)).toBe(true);
+    expect(isPlaceholderImageUrl(REAL)).toBe(true);
+  });
+
+  it("is false for a normal aksam photo in either spelling", () => {
+    expect(isPlaceholderImageUrl("https://img3.aksam.com.tr/imgsdisk/2026/11/01/halk-tercihini-yapti-bulg-592_2.jpg")).toBe(false);
+    expect(isPlaceholderImageUrl("https://img3.aksam.com.tr/imgsdisk2026/11/01/halk-tercihini-yapti-bulg-592_2.jpg")).toBe(false);
+  });
+});
+
+describe("PLACEHOLDER_IMAGE_ASSETS keys are in normalised form", () => {
+  // The aksam key was spelled `imgsdisk2026/...`, a form normalisation never
+  // produces once the repair exists, so it could never be matched. Every key
+  // must survive normalisation unchanged.
+  it("every key k satisfies normalizeImageUrl('https://' + k) === 'https://' + k", () => {
+    expect(PLACEHOLDER_IMAGE_ASSETS.size).toBeGreaterThan(0);
+    for (const k of PLACEHOLDER_IMAGE_ASSETS) {
+      expect(normalizeImageUrl("https://" + k)).toBe("https://" + k);
+    }
+  });
+
+  it("holds the aksam asset under its real spelling", () => {
+    expect(
+      PLACEHOLDER_IMAGE_ASSETS.has("img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg"),
+    ).toBe(true);
+  });
+});
+
+describe("isPlaceholderImageUrl: son-dakika cards with a glued extension and CMS defaults (h15-images-3)", () => {
+  // Real rows from the 2026-11-01 sample (33 rows in 48 h across ten sources).
+  it.each([
+    ["sozcu son-dakikajpg", "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/10/son-dakikajpg-fGomF2NHS0uGhDDwDPCbMQ.jpg"],
+    ["sozcu son-dakikajpg with an underscore in the hash", "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/10/son-dakikajpg-L_MyIqrTXE6MR_TakbyVqw.jpg"],
+    ["sondakikajpg", "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/10/sondakikajpg-fGomF2NHS0uGhDDwDPCbMQ.jpg"],
+    ["logojpg", "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/10/logojpg-fGomF2NHS0uGhDDwDPCbMQ.jpg"],
+    ["sondakika880x487uzunjpg", "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/10/sondakika880x487uzunjpg-BNRlohNsQE21_M5RLT2IhA.jpg"],
+    ["a glued png with no hash tail", "https://cdn.x/uploads/son-dakikapng.png"],
+    ["rcman images/default.png", "https://img.yenicaggazetesi.com/rcman/Cw1280h720q95gc/storage/files/images/default.png"],
+    ["aydinlik rcman images/default.png", "https://img.aydinlik.com.tr/rcman/Cw1280h720q95gc/storage/files/images/default.png"],
+    ["ekonomim default.png?v=3", "https://img.ekonomim.com/rcman/Cw1280h720q95gc/assets/web/images/default.png?v=3"],
+    ["muhalif default cover", "https://www.muhalif.com.tr/cropImages/1280x720/uploads/haberler/2026/11/3712-muhalif-default-cover.jpg"],
+    ["a bare x-muhalif-default-cover.jpg", "https://cdn.x/x-muhalif-default-cover.jpg"],
+    ["a bare default-cover.jpg", "https://cdn.x/default-cover.jpg"],
+    ["takvim direct", "https://itkv.tmgrup.com.tr/Defaults/Upload/tkv-default-1754911321840.png"],
+    ["takvim wrapped in the iatkv resizer", "https://iatkv.tmgrup.com.tr/ca4868/1200/675/0/0/1200/675?u=https%3a%2f%2fitkv.tmgrup.com.tr%2fDefaults%2fUpload%2ftkv-default-1754911321840.png"],
+    ["takvim wrapped with an unencoded u=", "https://iatkv.tmgrup.com.tr/ca4868/1200/675/0/0/1200/675?u=https://itkv.tmgrup.com.tr/Defaults/Upload/tkv-default-1754911321840.png"],
+    ["cgtn-turk placeholder.png", "https://www.cgtnturk.com/vendor/te/assets/images/placeholder.png"],
+    ["haberler-com son-dakika_amp", "https://foto.haberler.com/haber/2026/11/01/son-dakika_amp.jpg"],
+  ])("is true for %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(url)).toBe(true);
+  });
+
+  it.each([
+    ["the real haberler-com amp photo", "https://foto.haberler.com/haber/2026/11/01/deprem-sonrasi-aciklama-20384346_amp.jpg"],
+    ["a real Sozcu photo", "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/11/erdogan-konusma-fGomF2NHS0uGhDDwDPCbMQ.jpg"],
+    ["a youtube thumbnail", "https://img.youtube.com/vi/2lKJof-8DeE/hqdefault.jpg"],
+    ["a slug with default mid-name", "https://cdn.x/2026/11/mahkeme-default-karari-aciklandi-18123456.jpg"],
+    ["a slug that starts with default", "https://cdn.x/default-karar-haberi.jpg"],
+    ["a slug that ends with default and short digits", "https://cdn.x/foto-default-123.jpg"],
+    ["a slug that starts with placeholder", "https://cdn.x/placeholder-haber.jpg"],
+    ["a son-dakika slug with a hash-like tail", "https://cdn.x/son-dakika-erdogan-fGomF2NHS0uGhDDwDPCbMQ.jpg"],
+    ["a son-dakika_amp suffix on a real slug", "https://cdn.x/yeni-son-dakika_amp.jpg"],
+    ["a logo slug with words after it", "https://cdn.x/logojpg-degisti-haberi.jpg"],
+    ["a /default/ directory holding a real photo", "https://cdn.x/default/2026/11/foto-123.jpg"],
+    ["a /images/default/ directory", "https://cdn.x/images/default/foto-123.jpg"],
+  ])("is false for %s", (_label, url) => {
+    expect(isPlaceholderImageUrl(url)).toBe(false);
+  });
+
+  it("stays linear on adversarial basenames of the new rules", () => {
+    const started = Date.now();
+    for (const name of [
+      // Over MAX_BASENAME_LENGTH: refused before any pattern runs.
+      `son-dakikajpg-${"a".repeat(20000)}`,
+      `sondakika${"9".repeat(20000)}x`,
+      `logojpg-${"-".repeat(20000)}`,
+      `x-default-${"1".repeat(20000)}x`,
+      `${"-default-".repeat(2000)}1`,
+      `default${"-cover".repeat(5000)}x`,
+      // Within the 200-character budget: the patterns really run.
+      `son-dakikajpg-${"a".repeat(150)}`,
+      `sondakika${"9".repeat(150)}x`,
+      `logojpg-${"-".repeat(150)}`,
+      `x-default-${"1".repeat(150)}x`,
+      `${"-default-".repeat(22)}1`,
+      `default${"-cover".repeat(30)}x`,
+      `${"son-dakika".repeat(19)}!`,
+    ]) {
+      expect(isPlaceholderImageUrl(`https://cdn.x/${name}.jpg`)).toBe(false);
+    }
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("normalizeImageUrl: values that are not an image (h15-images-3)", () => {
+  it.each([
+    ["istiklal host root with a slash", "https://cdn.istiklal.com.tr/"],
+    ["istiklal host root without a slash", "https://cdn.istiklal.com.tr"],
+    ["a host root with only a doubled slash", "https://cdn.istiklal.com.tr//"],
+    ["a protocol-relative host root", "//cdn.istiklal.com.tr/"],
+    ["a trailing-question-mark host root", "https://cdn.istiklal.com.tr/?"],
+    ["a WordPress emoji PNG", "https://s.w.org/images/core/emoji/15.0.3/72x72/1f449.png"],
+    ["a WordPress emoji svg on another version", "https://s.w.org/images/core/emoji/14.0.0/svg/1f525.svg"],
+    ["a WordPress emoji with an upper-case host", "https://S.W.ORG/images/core/emoji/15.0.3/72x72/1f449.png"],
+  ])("returns null for %s", (_label, input) => {
+    expect(normalizeImageUrl(input)).toBeNull();
+  });
+
+  it("does not null a root path that carries a query (resizer shape)", () => {
+    const u = "https://h/?u=https://o.test/a.jpg";
+    expect(normalizeImageUrl(u)).toBe(u);
+    const bareQuery = "https://cdn.test?u=https://o.test/a.jpg";
+    expect(normalizeImageUrl(bareQuery)).toBe(bareQuery);
+  });
+
+  it("does not null a root path that carries only a hash", () => {
+    expect(normalizeImageUrl("https://cdn.test/#a")).toBe("https://cdn.test/#a");
+  });
+
+  it("does not null other s.w.org paths or other hosts with an emoji-like path", () => {
+    const other = "https://s.w.org/plugins/geodirectory/assets/a.png";
+    expect(normalizeImageUrl(other)).toBe(other);
+    const lookalike = "https://cdn.example.com/images/core/emoji/15.0.3/72x72/1f449.png";
+    expect(normalizeImageUrl(lookalike)).toBe(lookalike);
+  });
+
+  it("a root-path URL is not a placeholder, it is simply unusable", () => {
+    expect(isPlaceholderImageUrl("https://cdn.istiklal.com.tr/")).toBe(false);
+  });
+});
+
+describe("normalizeImageUrl: YouTube embeds -> img.youtube.com thumbnail (h15-images-3)", () => {
+  const ID = "2lKJof-8DeE";
+  const THUMB = `https://img.youtube.com/vi/${ID}/hqdefault.jpg`;
+
+  it.each([
+    ["www.youtube.com/embed", `https://www.youtube.com/embed/${ID}`],
+    ["youtube.com/embed with a query", `https://youtube.com/embed/${ID}?si=x`],
+    ["www.youtube-nocookie.com/embed", `https://www.youtube-nocookie.com/embed/${ID}`],
+    ["youtu.be", `https://youtu.be/${ID}`],
+    ["a protocol-relative embed", `//www.youtube.com/embed/${ID}`],
+    ["an embed with a trailing slash", `https://www.youtube.com/embed/${ID}/`],
+    ["an http embed", `http://www.youtube.com/embed/${ID}`],
+  ])("maps %s", (_label, input) => {
+    expect(normalizeImageUrl(input)).toBe(THUMB);
+  });
+
+  it("accepts underscores and hyphens in the 11-char id", () => {
+    expect(normalizeImageUrl("https://www.youtube.com/embed/DKe86Yi_5tU")).toBe(
+      "https://img.youtube.com/vi/DKe86Yi_5tU/hqdefault.jpg",
+    );
+  });
+
+  it("the mapped URL is on the /_next/image allowlist (the embed host is not)", () => {
+    expect(isAllowedRemoteImageUrl(`https://www.youtube.com/embed/${ID}`)).toBe(false);
+    const mapped = normalizeImageUrl(`https://www.youtube.com/embed/${ID}`) as string;
+    expect(isAllowedRemoteImageUrl(mapped)).toBe(true);
+  });
+
+  it("is idempotent and leaves an img.youtube.com thumbnail untouched", () => {
+    expect(normalizeImageUrl(THUMB)).toBe(THUMB);
+    expect(normalizeImageUrl(normalizeImageUrl(`https://youtu.be/${ID}`))).toBe(THUMB);
+  });
+
+  it.each([
+    ["a 10-char id", "https://www.youtube.com/embed/2lKJof-8De"],
+    ["a 12-char id", "https://www.youtube.com/embed/2lKJof-8DeEx"],
+    ["an id with a forbidden character", "https://www.youtube.com/embed/2lKJof.8DeE"],
+    ["an empty id", "https://www.youtube.com/embed/"],
+    ["a youtu.be id that is too short", "https://youtu.be/abc"],
+    ["a non-embed youtube path", `https://www.youtube.com/watch/${ID}`],
+    ["an embed on a look-alike host", `https://www.youtube.com.evil.test/embed/${ID}`],
+    ["a nested embed path", `https://www.youtube.com/embed/${ID}/extra`],
+  ])("leaves %s unchanged", (_label, input) => {
+    expect(normalizeImageUrl(input)).toBe(input);
+  });
+});
+
+describe("upgradeImageVariant (h15-images-4)", () => {
+  it("upgrades an Oksijen 150x84 thumbnail to 1280x720", () => {
+    expect(
+      upgradeImageVariant(
+        "https://i.gazeteoksijen.com/2/150/84/storage/files/images/2026/11/01/x-b1mn.jpg",
+      ),
+    ).toBe("https://i.gazeteoksijen.com/2/1280/720/storage/files/images/2026/11/01/x-b1mn.jpg");
+  });
+
+  it("upgrades a BBC ws/240 variant to standard/976", () => {
+    expect(
+      upgradeImageVariant("https://ichef.bbci.co.uk/ace/ws/240/cpsprodpb/abcd/live/x.jpg.webp"),
+    ).toBe("https://ichef.bbci.co.uk/ace/standard/976/cpsprodpb/abcd/live/x.jpg.webp");
+  });
+
+  it("upgrades the rcman Cw150h84 preset on any host, every occurrence (the pre-existing behaviour, moved)", () => {
+    expect(upgradeImageVariant("https://img.aydinlik.com.tr/rcman/Cw150h84q95gc/storage/x.jpg")).toBe(
+      "https://img.aydinlik.com.tr/rcman/Cw1280h720q95gc/storage/x.jpg",
+    );
+    expect(upgradeImageVariant("https://any.test/rcman/Cw150h84q95gc/a/rcman/Cw150h84q95gc/b.jpg")).toBe(
+      "https://any.test/rcman/Cw1280h720q95gc/a/rcman/Cw1280h720q95gc/b.jpg",
+    );
+  });
+
+  it("keeps the query and hash of an upgraded URL", () => {
+    expect(upgradeImageVariant("https://i.gazeteoksijen.com/2/150/84/storage/x.jpg?v=1#h")).toBe(
+      "https://i.gazeteoksijen.com/2/1280/720/storage/x.jpg?v=1#h",
+    );
+  });
+
+  it("matches the Oksijen and BBC host case-insensitively", () => {
+    expect(upgradeImageVariant("https://I.GazeteOksijen.com/2/150/84/storage/x.jpg")).toBe(
+      "https://I.GazeteOksijen.com/2/1280/720/storage/x.jpg",
+    );
+  });
+
+  it.each([
+    ["an already-large Oksijen variant", "https://i.gazeteoksijen.com/2/1280/720/storage/x.jpg"],
+    ["an already-large BBC variant", "https://ichef.bbci.co.uk/ace/standard/976/cpsprodpb/x.jpg"],
+    ["a BBC ws/480 variant (only 240 is verified)", "https://ichef.bbci.co.uk/ace/ws/480/cpsprodpb/x.jpg"],
+    ["an already-large rcman preset", "https://img.aydinlik.com.tr/rcman/Cw1280h720q95gc/storage/x.jpg"],
+    ["/2/150/84/ on another host", "https://cdn.example.com/2/150/84/storage/x.jpg"],
+    ["/2/150/84/ on a look-alike host", "https://i.gazeteoksijen.com.evil.test/2/150/84/storage/x.jpg"],
+    ["/2/150/84/ that is not the path prefix", "https://i.gazeteoksijen.com/a/2/150/84/storage/x.jpg"],
+    ["/ace/ws/240/ on another host", "https://cdn.example.com/ace/ws/240/cpsprodpb/x.jpg"],
+    ["a plain photo", "https://cdn.test/a.jpg"],
+    ["the empty string", ""],
+  ])("returns %s ===", (_label, input) => {
+    expect(upgradeImageVariant(input)).toBe(input);
+  });
+
+  it("is idempotent", () => {
+    for (const x of [
+      "https://i.gazeteoksijen.com/2/150/84/storage/x.jpg",
+      "https://ichef.bbci.co.uk/ace/ws/240/cpsprodpb/x.jpg",
+      "https://img.test/rcman/Cw150h84q95gc/storage/x.jpg",
+      "https://cdn.test/a.jpg",
+    ]) {
+      const once = upgradeImageVariant(x);
+      expect(upgradeImageVariant(once)).toBe(once);
+    }
+  });
+
+  it("is applied by normalizeImageUrl (render path heals stored rows)", () => {
+    expect(normalizeImageUrl("https://i.gazeteoksijen.com/2/150/84/storage/x.jpg")).toBe(
+      "https://i.gazeteoksijen.com/2/1280/720/storage/x.jpg",
+    );
+    expect(normalizeImageUrl("https://ichef.bbci.co.uk/ace/ws/240/cpsprodpb/x.jpg")).toBe(
+      "https://ichef.bbci.co.uk/ace/standard/976/cpsprodpb/x.jpg",
+    );
+    expect(normalizeImageUrl("https://img.test//rcman/Cw150h84q95gc/storage/x.jpg")).toBe(
+      "https://img.test/rcman/Cw1280h720q95gc/storage/x.jpg",
+    );
+    expect(normalizeImageUrl("//i.gazeteoksijen.com//2/150/84/storage/x.jpg")).toBe(
+      "https://i.gazeteoksijen.com/2/1280/720/storage/x.jpg",
+    );
+  });
+
+  it("normalizeImageUrl stays idempotent over every new repair", () => {
+    for (const x of [
+      "https://img3.aksam.com.tr/imgsdisk2026/11/01/x_2.jpg",
+      "https://i.gazeteoksijen.com/2/150/84/storage/x.jpg",
+      "https://ichef.bbci.co.uk/ace/ws/240/cpsprodpb/x.jpg",
+      "https://www.youtube.com/embed/2lKJof-8DeE",
+      "https://youtu.be/2lKJof-8DeE",
+    ]) {
+      const once = normalizeImageUrl(x);
+      expect(normalizeImageUrl(once)).toBe(once);
+    }
+  });
+
+  it("upgraded Oksijen and BBC hosts are on the /_next/image allowlist", () => {
+    expect(isAllowedRemoteImageUrl("https://i.gazeteoksijen.com/2/1280/720/storage/x.jpg")).toBe(true);
+    expect(isAllowedRemoteImageUrl("https://ichef.bbci.co.uk/ace/standard/976/cpsprodpb/x.jpg")).toBe(true);
+    expect(isAllowedRemoteImageUrl("https://img3.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg")).toBe(true);
+  });
+});
+
+describe("isIconLikeImageUrl (h15-images-3)", () => {
+  it.each([
+    ["logo.png", "https://www.mfa.gov.tr/images/logo.png"],
+    ["favicon.ico", "https://cdn.test/favicon.ico"],
+    ["apple-touch-icon.png", "https://cdn.test/apple-touch-icon.png"],
+    ["site-logo-2x.png", "https://cdn.test/img/site-logo-2x.png"],
+    ["icon_32.png", "https://cdn.test/img/icon_32.png"],
+    ["an upper-case LOGO.PNG", "https://cdn.test/img/LOGO.PNG"],
+    ["a logo with a query", "https://cdn.test/img/logo.png?v=3"],
+    ["a percent-encoded site%2Dlogo", "https://cdn.test/img/site%2Dlogo.png"],
+    ["a resizer wrapping a logo", "https://r.test/c1/1/1?u=https://o.test/images/logo.png"],
+  ])("is true for %s", (_label, url) => {
+    expect(isIconLikeImageUrl(url)).toBe(true);
+  });
+
+  it.each([
+    ["erdogan-ekonomi.jpg", "https://cdn.test/2026/11/erdogan-ekonomi.jpg"],
+    ["silicon-vadisi-haberi.jpg (icon inside a word)", "https://cdn.test/2026/11/silicon-vadisi-haberi.jpg"],
+    ["teknoloji-zirvesi.jpg", "https://cdn.test/2026/11/teknoloji-zirvesi.jpg"],
+    ["a directory called logo", "https://cdn.test/logo/2026/11/foto-123.jpg"],
+    ["a directory called icons", "https://cdn.test/icons/foto-123.jpg"],
+    ["a name that only mentions logo in the query", "https://cdn.test/foto.jpg?name=logo.png"],
+    ["catalogo.jpg (logo inside a word)", "https://cdn.test/catalogo.jpg"],
+    ["a plain photo", "https://cdn.test/photo.jpg"],
+  ])("is false for %s", (_label, url) => {
+    expect(isIconLikeImageUrl(url)).toBe(false);
+  });
+
+  it.each([
+    ["null", null],
+    ["undefined", undefined],
+    ["the empty string", ""],
+    ["a number", 42 as unknown as string],
+    ["a host root", "https://cdn.test/"],
+  ])("is false for %s", (_label, input) => {
+    expect(isIconLikeImageUrl(input)).toBe(false);
+  });
+
+  it("does not throw on malformed percent-encoding", () => {
+    expect(() => isIconLikeImageUrl("https://cdn.test/%E0%A4%A-logo.png")).not.toThrow();
+    expect(isIconLikeImageUrl("https://cdn.test/%ZZ.png")).toBe(false);
+  });
+
+  it("stays linear on a long basename", () => {
+    const started = Date.now();
+    expect(isIconLikeImageUrl(`https://cdn.test/${"logo-".repeat(20000)}x.png`)).toBe(false);
+    expect(isIconLikeImageUrl(`https://cdn.test/${"-".repeat(20000)}.png`)).toBe(false);
     expect(Date.now() - started).toBeLessThan(1000);
   });
 });

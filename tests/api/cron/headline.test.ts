@@ -3,6 +3,7 @@ import {
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
+import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 
 // revalidateTag: mocked so we can assert the post-batch cache invalidation
 // (cluster-detail:<id> per rewrote cluster + clusters-politics once) without
@@ -234,7 +235,9 @@ function installLlmFetchSpy(): void {
       if (url.startsWith(LLM_API_URL)) {
         return new Response(
           JSON.stringify({
-            content: [{ type: "text", text: "Tarafsız başlık" }],
+            // >= 20 characters and not a question/English/shouted/truncated
+            // title: the route runs its acceptance gate on LLM output.
+            content: [{ type: "text", text: "Tarafsız toplu başlık" }],
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -728,7 +731,7 @@ describe("GET /api/cron/headline — extractive mode (no LLM key)", () => {
       title_neutral_prompt_version?: unknown;
     };
     expect(patch.title_tr_neutral).toBe("Atama kararları Resmi Gazete'de yayımlandı");
-    expect(patch.title_neutral_model).toBe("extractive-v1");
+    expect(patch.title_neutral_model).toBe(EXTRACTIVE_MODEL_ID);
     expect(patch.title_neutral_at).toBeUndefined();
     expect(patch.title_neutral_prompt_version).toBeUndefined();
   });

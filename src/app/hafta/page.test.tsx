@@ -300,7 +300,7 @@ describe("WeeklyPage — data present", () => {
     const tree = await WeeklyPage();
     const headings = collectTag(tree, "h2");
 
-    expect(headings).toContain("Bu hafta kim neyi öne çıkardı");
+    expect(headings).toContain("Son 7 günde kim neyi öne çıkardı");
     expect(headings).toContain("En geniş yelpaze");
     expect(headings).toContain("Kör noktalar");
     expect(headings).toContain("Aynı hafta, farklı kelimeler");
@@ -318,9 +318,9 @@ describe("WeeklyPage — data present", () => {
     expect(text).toContain("Muhalefet");
     // 6 / 3 / 1 of 10 => %60 / %30 / %10, each printed with the base it
     // was actually divided by (never the source denominator).
-    expect(text).toContain("%60 (haftanın 10 haberi içinde)");
-    expect(text).toContain("%30 (haftanın 10 haberi içinde)");
-    expect(text).toContain("%10 (haftanın 10 haberi içinde)");
+    expect(text).toContain("%60 (son 7 günün 10 haberi içinde)");
+    expect(text).toContain("%30 (son 7 günün 10 haberi içinde)");
+    expect(text).toContain("%10 (son 7 günün 10 haberi içinde)");
   });
 
   it("groups four-digit week counts the Turkish way (1.234, not 1234)", async () => {
@@ -334,8 +334,8 @@ describe("WeeklyPage — data present", () => {
     const tree = await WeeklyPage();
     const text = collectText(tree).join(" ");
 
-    expect(text).toContain("(haftanın 1.234 haberi içinde)");
-    expect(text).toContain("Yüzdeler bu haftanın toplam 1.234 haberi üzerinden hesaplanır");
+    expect(text).toContain("(son 7 günün 1.234 haberi içinde)");
+    expect(text).toContain("Yüzdeler son 7 günün toplam 1.234 haberi üzerinden hesaplanır");
     expect(text).toContain("1.000 haber");
     expect(text).toContain("1.500 haber · 3 bölge");
     expect(text).toContain("tarafında · 1.200 haber");
@@ -366,7 +366,7 @@ describe("WeeklyPage — data present", () => {
     expect(text).not.toContain("kaynak haber verdi (toplayıcı / niş dahil)");
     expect(text).not.toContain("kaynak üzerinden hesaplanmadı");
     // The three zone rows still render with their own article share.
-    expect(text.match(/\(haftanın 10 haberi içinde\)/g) ?? []).toHaveLength(3);
+    expect(text.match(/\(son 7 günün 10 haberi içinde\)/g) ?? []).toHaveLength(3);
   });
 
   it("never prints a bare share without a denominator or the unknown wording", async () => {
@@ -407,7 +407,7 @@ describe("WeeklyPage — data present", () => {
 
   it("adds the degraded caveat only when a zone's feeds are degraded", async () => {
     const caveat =
-      "Bazı bölgelerde kaynaklara ulaşılamıyor; bu haftanın kör nokta listesi eksik olabilir.";
+      "Bazı bölgelerde kaynaklara ulaşılamıyor; son 7 günün kör nokta listesi eksik olabilir.";
 
     const healthy = collectText(await WeeklyPage()).join(" ");
     expect(healthy).not.toContain(caveat);
@@ -423,7 +423,7 @@ describe("WeeklyPage — data present", () => {
 
   it("captions the size-capped window only when the cluster read reports truncated", async () => {
     const caveat =
-      "En büyük 5.000 küme üzerinden hesaplandı; haftanın tamamı değil.";
+      "En büyük 5.000 küme üzerinden hesaplandı; dönemin tamamı değil.";
 
     const under = collectText(await WeeklyPage()).join(" ");
     expect(under).not.toContain(caveat);
@@ -442,7 +442,7 @@ describe("WeeklyPage — data present", () => {
     const text = collectText(await WeeklyPage()).join(" ");
 
     expect(text).not.toContain("En büyük");
-    expect(text).not.toContain("haftanın tamamı değil");
+    expect(text).not.toContain("dönemin tamamı değil");
   });
 
   it("renders the honest empty copy when there are no blindspots", async () => {
@@ -450,7 +450,7 @@ describe("WeeklyPage — data present", () => {
 
     const text = collectText(await WeeklyPage()).join(" ");
 
-    expect(text).toContain("Bu hafta kör nokta yok.");
+    expect(text).toContain("Son 7 günde kör nokta yok.");
   });
 
   it("derives the silent-source count from the feed status summary", async () => {
@@ -509,7 +509,7 @@ describe("WeeklyPage — week archive nav", () => {
     // has without it.
     const headings = collectTag(await WeeklyPage(), "h2");
     expect(headings).toEqual([
-      "Bu hafta kim neyi öne çıkardı",
+      "Son 7 günde kim neyi öne çıkardı",
       "En geniş yelpaze",
       "Kör noktalar",
       "Aynı hafta, farklı kelimeler",
@@ -559,12 +559,13 @@ describe("WeeklyPage — label changes", () => {
     expect(text).not.toMatch(/undefined/);
   });
 
-  it("renders the empty copy when nothing changed this week", async () => {
+  it("renders the empty copy when nothing changed in the last 7 days", async () => {
     mocks.labelChanges = [];
 
     const text = collectText(await WeeklyPage()).join(" ");
 
-    expect(text).toContain("Bu hafta etiket değişmedi.");
+    expect(text).toContain("Son 7 günde etiket değişmedi.");
+    expect(text).not.toContain("Bu hafta etiket değişmedi.");
   });
 
   it("renders the unreadable copy when the history fetcher returned null", async () => {
@@ -582,7 +583,8 @@ describe("WeeklyPage — empty and unavailable states", () => {
 
     const text = collectText(await WeeklyPage()).join(" ");
 
-    expect(text).toContain("Bu hafta yeterli küme oluşmadı.");
+    expect(text).toContain("Son 7 günde yeterli küme oluşmadı.");
+    expect(text).not.toContain("Bu hafta yeterli küme oluşmadı.");
     expect(text).not.toContain("Asgari ücret görüşmeleri");
   });
 
@@ -627,7 +629,7 @@ describe("WeeklyPage — Aynı hafta, farklı kelimeler", () => {
     const text = collectText(await WeeklyPage()).join(" ");
 
     expect(text).toContain(
-      "Bu hafta İktidar medyasında belirgin şekilde daha sık geçen kelimeler",
+      "Son 7 günde İktidar medyasında belirgin şekilde daha sık geçen kelimeler",
     );
     expect(text).toContain("gözaltı");
     expect(text).toContain("başlık");
@@ -668,7 +670,7 @@ describe("WeeklyPage — Aynı hafta, farklı kelimeler", () => {
   it("renders the empty-zone copy for a zone with no distinctive terms", async () => {
     const text = collectText(await WeeklyPage()).join(" ");
 
-    expect(text).toContain("Bu hafta belirgin şekilde öne çıkan kelime yok.");
+    expect(text).toContain("Son 7 günde belirgin şekilde öne çıkan kelime yok.");
   });
 
   it("renders the unavailable copy when data is null", async () => {
@@ -687,7 +689,8 @@ describe("WeeklyPage — Aynı hafta, farklı kelimeler", () => {
 
     const text = collectText(await WeeklyPage()).join(" ");
 
-    expect(text).toContain("Bu hafta kelime karşılaştırması için yeterli başlık yok.");
+    expect(text).toContain("Son 7 günde kelime karşılaştırması için yeterli başlık yok.");
+    expect(text.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
   });
 
   it("still renders the section when clusters === null", async () => {

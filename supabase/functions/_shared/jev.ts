@@ -100,8 +100,11 @@ export const JEV_AUDIT_PAIRS_PER_CLUSTER = 3;
 export const JEV_AUDIT_CLUSTER_LIMIT = 200;
 /** Negative-pair candidate pool size in audit mode. */
 export const JEV_AUDIT_CANDIDATE_LIMIT = 600;
-/** Must equal EXTRACTIVE_MODEL_ID in src/lib/clusters/neutral-title.ts. */
-export const JEV_NEUTRAL_MODEL_ID = "extractive-v1";
+/** Must equal EXTRACTIVE_MODEL_ID in src/lib/clusters/neutral-title.ts
+ * (tests/migrations/jev-shadow-parity.test.ts). Titles still written under an
+ * older extractive version join the neutral_pick stage as the headline cron
+ * re-picks them (migration 141). */
+export const JEV_NEUTRAL_MODEL_ID = "extractive-v2";
 /** Stamped into every jev_answer as `question_set`. The 2026-09-20 limits
  * test showed instruction paraphrases flip ~30% of borderline titles, so a
  * prediction is only comparable to others made with the SAME question text.
@@ -711,7 +714,7 @@ export interface JevClusterRow {
   title: string; // title_tr_neutral ?? title_tr (unchanged)
   updated_at: string;
   title_tr_neutral: string | null; // raw column, for the neutral_pick baseline
-  title_neutral_model: string | null; // "extractive-v1" | "<llm prompt id>" | null
+  title_neutral_model: string | null; // "extractive-v2" | "<llm prompt id>" | null
 }
 
 export interface JevMemberRow {
@@ -1929,7 +1932,7 @@ export interface JevPorts {
    * jev_shadow_predictions. Backed by index.ts's chunked anti_join()
    * helper (JEV-A5). Used by the cluster stage (JEV-A10) since
    * fetchClusterMembers has no per-task notion of "already asked", and
-   * (063) by the neutral_pick anti-join over extractive-v1 clusters. */
+   * (063) by the neutral_pick anti-join over extractive-v2 clusters. */
   fetchSeenSubjects(task: string, subjectIds: readonly string[]): Promise<Set<string>>;
   fetchPendingArticles(sinceIso: string, limit: number): Promise<JevArticleRow[]>;
   fetchRecentClusters(sinceIso: string, limit: number): Promise<JevClusterRow[]>;
@@ -3079,7 +3082,7 @@ async function runClustersStage(ctx: RunCtx, sinceIso: string): Promise<void> {
   const seen = await ctx.ports.fetchSeenSubjects("cluster_member", candidateSubjectIds);
 
   // (063) neutral_pick anti-join: one pick per cluster, ever -- batched over
-  // every extractive-v1 cluster in this window, alongside the cluster_member
+  // every extractive-v2 cluster in this window, alongside the cluster_member
   // anti-join above.
   const extractiveClusterIds = clusters
     .filter((c) => c.title_neutral_model === JEV_NEUTRAL_MODEL_ID)

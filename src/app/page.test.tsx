@@ -40,6 +40,17 @@ vi.mock("@/lib/clusters/search-view", async (importOriginal) => {
   };
 });
 
+// Pin the request clock so the day-bucket headings are deterministic. Every
+// other export of @/lib/time stays real. `null` = the real clock.
+let nowOverrideMs: number | null = null;
+vi.mock("@/lib/time", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/time")>();
+  return {
+    ...actual,
+    currentTimeMs: () => nowOverrideMs ?? actual.currentTimeMs(),
+  };
+});
+
 import { HomeFeed } from "./page";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 
@@ -106,6 +117,7 @@ beforeEach(() => {
   getPoliticsClusters.mockReset();
   searchClusters.mockReset();
   viewOverride = null;
+  nowOverrideMs = null;
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
@@ -323,5 +335,64 @@ describe("HomeFeed — result count is the same on every page of one search", ()
     expect(statusText(tree)).toBe(
       "“deprem” için en ilgili 38 sonuç gösteriliyor.",
     );
+  });
+});
+
+describe("HomeFeed — day-bucket headings follow the Istanbul calendar day", () => {
+  const bundleAt = (id: string, firstPublished: string) => {
+    const b = bundle(id, `Haber ${id}`);
+    b.cluster.first_published = firstPublished;
+    b.cluster.updated_at = firstPublished;
+    return b;
+  };
+
+  async function bucketHeadings(): Promise<string[]> {
+    const tree = await HomeFeed({ searchParams: Promise.resolve({}) });
+    return collectElements(tree)
+      .filter((el) => el.type === "h2")
+      .map((el) => textOf(el.props?.children));
+  }
+
+  it("shows 'Dün' for last night's story just after midnight (02.11 00:05 TRT)", async () => {
+    // 21:05Z is 00:05 on 02.11 in Istanbul. The 20:30Z story (23:30 on 01.11)
+    // used to sit under 'Bugün' because it is less than 24 h old.
+    nowOverrideMs = Date.parse("2026-11-01T21:05:00Z");
+    getPoliticsClusters.mockResolvedValue(
+      feedOf(
+        bundleAt("t", "2026-11-01T21:02:00.000Z"),
+        bundleAt("y", "2026-11-01T20:30:00.000Z"),
+        bundleAt("w", "2026-10-30T10:00:00.000Z"),
+        bundleAt("o", "2026-10-01T10:00:00.000Z"),
+      ),
+    );
+
+    const headings = await bucketHeadings();
+
+    expect(headings).toEqual(["Bugün", "Dün", "Son 7 gün", "Daha eski"]);
+    expect(headings).not.toContain("Bu hafta");
+  });
+
+  it("keeps the cards in feed order across the buckets", async () => {
+    nowOverrideMs = Date.parse("2026-11-01T21:05:00Z");
+    getPoliticsClusters.mockResolvedValue(
+      feedOf(
+        bundleAt("t", "2026-11-01T21:02:00.000Z"),
+        bundleAt("y", "2026-11-01T20:30:00.000Z"),
+        bundleAt("w", "2026-10-30T10:00:00.000Z"),
+      ),
+    );
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({}) });
+
+    expect(clusterCardIds(tree)).toEqual(["t", "y", "w"]);
+  });
+
+  it("omits a bucket that has no story", async () => {
+    nowOverrideMs = Date.parse("2026-11-01T12:00:00Z");
+    getPoliticsClusters.mockResolvedValue(
+      feedOf(bundleAt("t", "2026-11-01T10:00:00.000Z")),
+    );
+
+    expect(await bucketHeadings()).toEqual(["Bugün"]);
   });
 });

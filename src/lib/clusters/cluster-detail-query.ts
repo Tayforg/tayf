@@ -1,4 +1,4 @@
-import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
+import { isExtractiveModelId } from "@/lib/clusters/neutral-title";
 import { cacheLife, cacheTag } from "next/cache";
 import { cache } from "react";
 
@@ -170,9 +170,10 @@ type ClusterRow = {
    * win as soon as they exist without overwriting the original.
    */
   title_tr_neutral: string | null;
-  /** Provenance for title_tr_neutral (migration 046): an LLM model id, or
-   *  EXTRACTIVE_MODEL_ID when the headline cron picked a member headline
-   *  instead of calling an LLM. NULL when nothing was written. */
+  /** Provenance for title_tr_neutral (migration 046): an LLM model id, or an
+   *  `extractive-*` id (any version; read it with isExtractiveModelId, never
+   *  with ===) when the headline cron picked a member headline instead of
+   *  calling an LLM. NULL when nothing was written. */
   title_neutral_model: string | null;
   summary_tr: string;
   article_count: number;
@@ -496,7 +497,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         // nothing new).
         title_original: headlines.replaced ? headlines.original : null,
         title_method: headlines.replaced
-          ? clusterRow.title_neutral_model === EXTRACTIVE_MODEL_ID
+          ? isExtractiveModelId(clusterRow.title_neutral_model)
             ? "extractive"
             : "llm"
           : null,

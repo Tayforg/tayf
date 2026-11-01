@@ -159,7 +159,15 @@ const supabaseFake = await vi.hoisted(async () => {
         }
         return { data: [], error: null, count: 0 };
       },
-      sources: [],
+      // Source id -> slug rows for the extractor choice. The consumer caches
+      // this map for 30 minutes after the first message, so the fixture is
+      // static: no existing test sets source_id on its article (slug null).
+      sources: [
+        { id: "src-haberler", slug: "haberler-com" },
+        { id: "src-trt", slug: "trt-haber" },
+        { id: "src-aa", slug: "anadolu-ajansi" },
+        { id: "src-plain", slug: "cumhuriyet" },
+      ],
     },
   });
   return { fake, articlesFixture };
@@ -739,5 +747,93 @@ describe("image-consumer db-4 ingest half: placeholder og:image is never stored"
     expect(pgmqState.archived).toContain(304);
     expect(summary.found).toBe(1);
     expect(summary.placeholders).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h15-images-2: the three hero-image slugs read up to 200 KB of heavy pages and
+// are retried hourly by the image-backfill-requeue cron job (migration 142), so
+// their single fetch gets 8 s; every other slug keeps the 5 s og:image fetch.
+// ---------------------------------------------------------------------------
+describe("image-consumer extractor timeout by source slug (h15-images-2)", () => {
+  const COVER = "https://cdn.example.com/cover.jpg";
+
+  async function runWithSource(articleId: string, sourceId: string): Promise<string> {
+    const handler = await importHandler();
+    if (!handler) throw new Error("handler not registered");
+    const url = `https://news.example.com/${articleId}`;
+    fakeArticles[articleId] = {
+      id: articleId,
+      url,
+      source_id: sourceId,
+      image_url: null,
+      image_backfill_attempts: 1,
+    } as unknown as { url: string; image_url?: string | null };
+    htmlResponses[url] =
+      `<html><head><meta property="og:image" content="${COVER}" /></head></html>`;
+    pgmqState.pending = [
+      { msg_id: 501, read_ct: 1, message: { article_id: articleId } },
+    ];
+    const res = await handler(
+      authedRequest("http://localhost/image-consumer", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+    return url;
+  }
+
+  async function extractors() {
+    const og = await import("../../supabase/functions/_shared/og-image.ts");
+    return {
+      hero: og.fetchHeroImage as unknown as ReturnType<typeof vi.fn>,
+      plain: og.fetchOgImage as unknown as ReturnType<typeof vi.fn>,
+    };
+  }
+
+  it.each([
+    ["haberler-com", "src-haberler"],
+    ["trt-haber", "src-trt"],
+    ["anadolu-ajansi", "src-aa"],
+  ])("fetches a %s article with fetchHeroImage and an 8000 ms timeout", async (slug, sourceId) => {
+    const { hero, plain } = await extractors();
+    const url = await runWithSource(`art-hero-${slug}`, sourceId);
+
+    expect(hero).toHaveBeenCalledTimes(1);
+    expect(hero.mock.calls[0]).toEqual([url, slug, { timeoutMs: 8000 }]);
+    expect(plain).not.toHaveBeenCalled();
+    // and the fetched image still lands on the row
+    expect(articleUpdates).toContainEqual({ id: `art-hero-${slug}`, image_url: COVER });
+  });
+
+  it("fetches any other slug with fetchOgImage and a 5000 ms timeout", async () => {
+    const { hero, plain } = await extractors();
+    const url = await runWithSource("art-plain-1", "src-plain");
+
+    expect(plain).toHaveBeenCalledTimes(1);
+    expect(plain.mock.calls[0]).toEqual([url, { timeoutMs: 5000 }]);
+    expect(hero).not.toHaveBeenCalled();
+    expect(articleUpdates).toContainEqual({ id: "art-plain-1", image_url: COVER });
+  });
+
+  it("fetches an article without a source with fetchOgImage and a 5000 ms timeout", async () => {
+    const handler = await importHandler();
+    if (!handler) throw new Error("handler not registered");
+    const { hero, plain } = await extractors();
+    const url = "https://news.example.com/art-nosource-1";
+    fakeArticles["art-nosource-1"] = {
+      id: "art-nosource-1",
+      url,
+      image_url: null,
+      image_backfill_attempts: 1,
+    } as unknown as { url: string; image_url?: string | null };
+    htmlResponses[url] =
+      `<html><head><meta property="og:image" content="${COVER}" /></head></html>`;
+    pgmqState.pending = [
+      { msg_id: 502, read_ct: 1, message: { article_id: "art-nosource-1" } },
+    ];
+    await handler(authedRequest("http://localhost/image-consumer", { method: "POST" }));
+
+    expect(plain).toHaveBeenCalledTimes(1);
+    expect(plain.mock.calls[0]).toEqual([url, { timeoutMs: 5000 }]);
+    expect(hero).not.toHaveBeenCalled();
   });
 });

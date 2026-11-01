@@ -319,7 +319,12 @@ describe("127 constant parity with the route and the prompt module", () => {
 });
 
 describe("127 route-shape parity (fails if the pick changes and the index stops matching)", () => {
-  const PICK = /const \{ data: clustersData, error: pickError \} = await supabase(\.from\("clusters"\).*?\.limit\([^;]*?\));/;
+  // The pick is built in three statements: the base chain (the predicates the
+  // indexes cover), an llm-only residual `.or` (the rejected-rewrite mark), and
+  // the ordered, limited read.
+  const PICK = /let pickQuery = supabase(\.from\("clusters"\).*?\.gte\([^;]*?\));/;
+  const PICK_TAIL = /const \{ data: clustersData, error: pickError \} = await pickQuery(\.order\([^;]*?\.limit\([^;]*?\));/;
+  const PICK_OR = /if \(mode === "llm"\) \{ pickQuery = pickQuery(\.or\([^;]*?\)); \}/;
 
   it("the pick still filters on the mode's null column, is_archived = false and the mode's article_count floor", () => {
     expect(routeFlat).toContain('.is(mode === "llm" ? "title_neutral_at" : "title_tr_neutral", null)');
@@ -338,10 +343,31 @@ describe("127 route-shape parity (fails if the pick changes and the index stops 
     expect(m, "the candidate-pick query chain was not found in route.ts").not.toBeNull();
     const chain = (m as RegExpExecArray)[1] as string;
     const calls = [...chain.matchAll(/\.([A-Za-z_]+)\(/g)].map((x) => x[1]);
-    expect(calls).toEqual(["from", "select", "is", "eq", "gte", "order", "limit"]);
+    expect(calls).toEqual(["from", "select", "is", "eq", "gte"]);
     expect(chain).toContain('.is(mode === "llm" ? "title_neutral_at" : "title_tr_neutral", null)');
     expect(chain).toContain('.eq("is_archived", false)');
-    expect(chain).toContain('.order("updated_at", { ascending: false })');
+
+    const tail = PICK_TAIL.exec(routeFlat);
+    expect(tail, "the ordered, limited pick read was not found in route.ts").not.toBeNull();
+    const tailCalls = [...(tail as RegExpExecArray)[1]!.matchAll(/\.([A-Za-z_]+)\(/g)].map((x) => x[1]);
+    expect(tailCalls).toEqual(["order", "limit"]);
+    expect((tail as RegExpExecArray)[1]).toContain('.order("updated_at", { ascending: false })');
+  });
+
+  it("the only filter beyond the index predicates is llm-only: a residual `.or` that hides a rewrite the gate rejected", () => {
+    // The extractive pick (the 127 extractive index) stays exactly the base
+    // chain. In llm mode the rejected-rewrite mark is a residual filter on a
+    // column the index does not hold: the index is still the access path and
+    // `limit 5` stops at the first five rows that pass it, and a rejected row
+    // is the exception (it is re-sent once per prompt version, not per tick).
+    const m = PICK_OR.exec(routeFlat);
+    expect(m, 'the `if (mode === "llm") { pickQuery = pickQuery.or(...) }` statement was not found in route.ts').not.toBeNull();
+    const or = (m as RegExpExecArray)[1] as string;
+    expect(or).toContain("title_neutral_prompt_version.is.null");
+    expect(or).toContain("title_neutral_prompt_version.neq.");
+    expect(or).toContain("LLM_REJECTED_MARK");
+    // Exactly one such statement.
+    expect(routeFlat.split("pickQuery = pickQuery.").length - 1).toBe(1);
   });
 
   it("sanity: comments are stripped, so a quoting comment cannot satisfy the parity assertions", () => {
@@ -360,6 +386,11 @@ describe("127 route-shape parity (fails if the pick changes and the index stops 
     expect(tampered).not.toBe(routeFlat);
     const chain = (PICK.exec(tampered) as RegExpExecArray)[1] as string;
     expect([...chain.matchAll(/\.([A-Za-z_]+)\(/g)].map((x) => x[1])).toContain("neq");
+    // A second residual filter after the order/limit tail would also be seen.
+    const tail = (PICK_TAIL.exec(routeFlat) as RegExpExecArray)[1] as string;
+    const tamperedTail = routeFlat.replace(tail, tail.replace(".limit(", '.neq("id", "x").limit('));
+    expect(tamperedTail).not.toBe(routeFlat);
+    expect([...(PICK_TAIL.exec(tamperedTail) as RegExpExecArray)[1]!.matchAll(/\.([A-Za-z_]+)\(/g)].map((x) => x[1])).toContain("neq");
   });
 });
 
