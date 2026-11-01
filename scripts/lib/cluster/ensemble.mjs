@@ -49,6 +49,23 @@
 // unconditionally — identical 4-gram shingle sets mean "same wire copy,"
 // which is the one signal we still trust unconditionally.
 //
+// 2026-11-01 recall wave (mirrors supabase/functions/_shared/cluster/ensemble.ts;
+// tests/functions/_shared/cluster.test.ts pins the two byte-identical):
+//
+//   - The entity denominator is now `max(3, max(|A|,|B|))` (was `min`): a
+//     3-entity article scored 3/3 against a 10-entity ceremony seed (prod
+//     cluster dd5535a7). Section B above describes the original W2 design.
+//   - D. Headline lane (ceiling-raiser): when both titles are passed via
+//     opts.aTitle / opts.bTitle, near-identical headlines (>= 4 shared
+//     stemmed tokens, token Jaccard >= 0.7, <= 6 h apart, numerals consistent)
+//     score 0.5 + 0.5 * Jaccard regardless of tfidf / entities. Recovers
+//     cross-outlet pairs whose descriptions differ (Sarigul, Bakirkoy).
+//   - Text floor: unless the headline lane fired, a pair with tfidf below
+//     ENTITY_TEXT_FLOOR has its primary lane capped just under
+//     MATCH_THRESHOLD, so entities alone cannot join it.
+//
+//     raw = max(jaccardScore, primary (text-floor capped), headlineScore)
+//
 // Usage:
 //
 //   import { score } from "./ensemble.mjs";
@@ -78,8 +95,13 @@ import {
   ENTITY_WEIGHT,
   ENTITY_DENOM_MIN,
   ENTITY_FRESHNESS_HOURS,
+  ENTITY_TEXT_FLOOR,
+  HEADLINE_LANE_MAX_HOURS,
+  HEADLINE_LANE_MIN_JACCARD,
+  HEADLINE_LANE_MIN_SHARED,
 } from "./constants.mjs";
 import {
+  headlineTokens,
   jaccardFromSignatures,
   fingerprint as buildFingerprint,
 } from "./fingerprint.mjs";
@@ -187,8 +209,9 @@ function setIntersectSize(a, b) {
  * @param {Iterable<string>|Set<string>} bEntitiesIn  Candidate entity set.
  * @param {number} tfidfCosine  TF-IDF cosine similarity (clipped to [0,1]).
  * @param {number} hoursDelta   |Δt| in hours between publication times.
- * @param {{aSourceSlug?: string, bSourceSlug?: string}} [opts]
- *        Optional per-side `sources.slug` strings. When either side is
+ * @param {{aSourceSlug?: string, bSourceSlug?: string, aTitle?: string, bTitle?: string}} [opts]
+ *        Optional per-side `sources.slug` strings. `aTitle` / `bTitle` feed
+ *        the headline lane (inert unless both are non-empty). When either side is
  *        listed in `SOURCE_PENALTIES`, the smaller multiplier is applied to
  *        the final score (see A8 source-diversity audit, above). Callers
  *        that don't pass this opts bag get the legacy unpenalised behavior,
@@ -204,7 +227,7 @@ export function score(
   hoursDelta,
   opts = {},
 ) {
-  const { aSourceSlug, bSourceSlug } = opts || {};
+  const { aSourceSlug, bSourceSlug, aTitle, bTitle } = opts || {};
   // The smaller of the two configured multipliers wins — if EITHER side is
   // a penalised source, the pair gets downweighted. Default 1 = no penalty.
   const sourcePenalty = Math.min(
@@ -234,6 +257,10 @@ export function score(
         raw: 1,
         timeDecay: 1,
         sourcePenalty,
+        headlineSim: 0,
+        headlineShared: 0,
+        headlineLane: false,
+        textFloorCapped: false,
       },
     };
   }
@@ -255,22 +282,22 @@ export function score(
       : 0.5 * jaccard;
 
   // -----------------------------------------------------------------------
-  // 3. Entity ratio — R2 fix: `min` denominator + noise floor of 3.
+  // 3. Entity ratio — `max` denominator + noise floor of 3.
   // -----------------------------------------------------------------------
+  // `min` let a 3-entity article score 3/3 against a 10-entity seed.
   const aEntities = asSet(aEntitiesIn);
   const bEntities = asSet(bEntitiesIn);
   const sharedCount = setIntersectSize(aEntities, bEntities);
   const denom = Math.max(
     ENTITY_DENOM_MIN,
-    Math.min(aEntities.size, bEntities.size),
+    Math.max(aEntities.size, bEntities.size),
   );
   const entityRatioRaw = denom === 0 ? 0 : clip01(sharedCount / denom);
 
-  // A1 cluster-glue fix: decay the entity contribution on a 4h window so
-  // the same hot entity (Erdoğan, MHP, …) mentioned 6h apart in two
-  // unrelated stories can't carry the pair over threshold on its own. At
-  // |Δt| = 4h the ratio is halved; 8h+ stays at the 0.5 floor. See the
-  // ENTITY_FRESHNESS_HOURS block at the top of this file for rationale.
+  // A1 cluster-glue fix: decay the entity contribution on a 6h window so
+  // the same hot entity (Erdoğan, MHP, …) mentioned hours apart in two
+  // unrelated stories can't carry the pair over threshold on its own. See
+  // the ENTITY_FRESHNESS_HOURS block at the top of this file for rationale.
   const entityFreshness = Math.max(
     0.5,
     1 - Math.max(0, hoursDelta) / ENTITY_FRESHNESS_HOURS,
@@ -283,15 +310,49 @@ export function score(
   const tfidfScore = clip01(tfidfCosine);
 
   // -----------------------------------------------------------------------
-  // 5. Combine.
+  // 5. Headline lane — only when both titles are present. Fires on a high
+  //    stemmed-token Jaccard with enough shared tokens, inside the lane's own
+  //    hour limit, and with consistent numerals (a differing numeral means a
+  //    different development of the story).
   // -----------------------------------------------------------------------
-  // Primary lane is the weighted sum (tfidf light, entity heavy per R3).
-  // The MinHash lane is a parallel ceiling — whichever is larger wins.
-  const primary = TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
-  const raw = clip01(Math.max(jaccardScore, primary));
+  let headlineSim = 0;
+  let headlineShared = 0;
+  let headlineLane = false;
+  if (aTitle && bTitle) {
+    const ha = headlineTokens(aTitle);
+    const hb = headlineTokens(bTitle);
+    headlineShared = setIntersectSize(ha.tokens, hb.tokens);
+    const union = ha.tokens.size + hb.tokens.size - headlineShared;
+    headlineSim = union === 0 ? 0 : headlineShared / union;
+    const numbersOk =
+      ha.numbers.size === 0 ||
+      hb.numbers.size === 0 ||
+      (ha.numbers.size === hb.numbers.size &&
+        setIntersectSize(ha.numbers, hb.numbers) === ha.numbers.size);
+    headlineLane =
+      headlineShared >= HEADLINE_LANE_MIN_SHARED &&
+      headlineSim >= HEADLINE_LANE_MIN_JACCARD &&
+      hoursDelta <= HEADLINE_LANE_MAX_HOURS &&
+      numbersOk;
+  }
+  const headlineScore = headlineLane ? 0.5 + 0.5 * headlineSim : 0;
 
   // -----------------------------------------------------------------------
-  // 6. Time decay.
+  // 6. Combine.
+  // -----------------------------------------------------------------------
+  // Primary lane is the weighted sum (tfidf heavy, entity tiebreaker). The
+  // MinHash and headline lanes are parallel ceilings — whichever is largest
+  // wins. `primary` keeps its computed value; the text floor only limits
+  // what it contributes to `raw`.
+  const primary = TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
+  const textFloorCapped = !headlineLane && tfidfScore < ENTITY_TEXT_FLOOR;
+  const primaryForRaw = textFloorCapped
+    ? Math.min(primary, MATCH_THRESHOLD - 0.01)
+    : primary;
+  const raw = clip01(Math.max(jaccardScore, primaryForRaw, headlineScore));
+
+  // -----------------------------------------------------------------------
+  // 7. Time decay.
   // -----------------------------------------------------------------------
   const timeDecay = Math.max(
     0,
@@ -316,6 +377,10 @@ export function score(
       raw,
       timeDecay,
       sourcePenalty,
+      headlineSim,
+      headlineShared,
+      headlineLane,
+      textFloorCapped,
     },
   };
 }

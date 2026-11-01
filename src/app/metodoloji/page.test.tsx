@@ -29,6 +29,7 @@ import {
 } from "@/lib/bias/balance";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
+import { SIBLING_VETO } from "@/lib/clusters/sibling-veto";
 import {
   NEAR_BLINDSPOT_DISPLAY_LIMIT,
   NEAR_BLINDSPOT_LOOKBACK_DAYS,
@@ -180,6 +181,49 @@ describe("/metodoloji page", () => {
     expect(text).toContain("o kümede kör nokta işareti gösterilmez");
     expect(text).toContain(
       "Kör nokta doğrulaması: karşı taraftan aynı olayı anlatan haber bulunan kümelerde kör nokta işareti artık gösterilmiyor.",
+    );
+  });
+
+  it("explains the sibling-headline veto (migration 126) with the numbers from SIBLING_VETO, right after the Jev paragraph", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const tree = await MethodologyPage();
+    const text = collectText(tree).join("");
+
+    // "en az yarısı" is the word form of minJaccard; pin the number it stands for.
+    expect(SIBLING_VETO.minJaccard).toBe(0.5);
+    const sentences = [
+      "Aynı olay bazen neredeyse aynı başlıkla ikinci bir kümeye düşer.",
+      `Bu yüzden ${SIBLING_VETO.windowHours} saat içindeki diğer kümelerde başlığı büyük ölçüde örtüşen haberler de aranır (kelimelerin en az yarısı ve en az ${SIBLING_VETO.minShared} kelime ortak olmalı).`,
+      "Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.",
+    ];
+    for (const sentence of sentences) expect(text).toContain(sentence);
+    expect(text).toContain(sentences.join(" "));
+
+    // Placement: inside #kor-nokta, after the Jev paragraph, before "Kör noktaya yakın".
+    const section = collectText(
+      findElement(tree, (el) => el.type === "section" && el.props?.["aria-labelledby"] === "kor-nokta"),
+    ).join("");
+    const jev = section.indexOf("o kümede kör nokta işareti gösterilmez.");
+    const sibling = section.indexOf(sentences[0] as string);
+    const near = section.indexOf("Kör noktaya yakın");
+    expect(jev).toBeGreaterThan(0);
+    expect(sibling).toBeGreaterThan(jev);
+    expect(near).toBeGreaterThan(sibling);
+  });
+
+  it("lists the sibling-veto CHANGELOG entry first, dated 2026-11-01, and the footer follows it", async () => {
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    const entry =
+      "Kör nokta doğrulaması genişledi: aynı olayı neredeyse aynı başlıkla veren kardeş bir kümede karşı taraf da varsa kör nokta işareti gösterilmiyor.";
+    expect(text).toContain(entry);
+    const tail = text.slice(text.indexOf("Son güncelleme:"));
+    expect(/Son güncelleme: (\d{4}-\d{2}-\d{2})/.exec(tail)?.[1]).toBe("2026-11-01");
+    // The entry is the first list item: its date directly precedes its text.
+    expect(tail).toContain(`2026-11-01 ${entry}`);
+    expect(tail.indexOf(entry)).toBeLessThan(
+      tail.indexOf("Kör noktaya yakın: kör nokta eşiğinin hemen altında"),
     );
   });
 
@@ -596,7 +640,14 @@ describe("/metodoloji page: changelog order", () => {
     expect(denge).toBeGreaterThan(sources);
 
     const dates = tail.match(/\d{4}-\d{2}-\d{2}/g) ?? [];
-    expect(dates.slice(0, 4)).toEqual(["2026-10-22", "2026-10-22", "2026-10-22", "2026-10-22"]);
+    // footer, then the 2026-11-01 sibling-veto entry (126), then the three 2026-10-22 entries
+    expect(dates.slice(0, 5)).toEqual([
+      "2026-11-01",
+      "2026-11-01",
+      "2026-10-22",
+      "2026-10-22",
+      "2026-10-22",
+    ]);
     expect([...dates].sort().at(-1)).toBe(dates[0]);
   });
 });

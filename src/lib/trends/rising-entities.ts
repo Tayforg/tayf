@@ -80,10 +80,11 @@ export type RisingHubSpec = {
    */
   inflections?: readonly string[];
   /**
-   * Aliases emitted WITHOUT the `excludes` guard: the spelling is unambiguous
-   * on its own ("TCMB", "TBMM"), so a foreign cue elsewhere in the story must
-   * not drop it. Every entry is one of `aliases`, compared as written, and a
-   * spec with `trusted` also has `excludes`.
+   * Aliases emitted WITHOUT the `excludes` and `requires` guards: the spelling
+   * is unambiguous on its own ("TCMB", "TBMM"), so a foreign cue elsewhere in
+   * the story must not drop it and no cue is needed to keep it. Every entry is
+   * one of `aliases`, compared as written, and a spec with `trusted` also has
+   * `excludes` or `requires`.
    */
   trusted?: readonly string[];
   /**
@@ -96,6 +97,18 @@ export type RisingHubSpec = {
    * takes a word boundary ("fed" never hits "federasyon").
    */
   excludes?: readonly string[];
+  /**
+   * Cues a non-trusted alias needs: at least ONE of them must appear anywhere
+   * in the same folded text, or the alias does not count (the bare "Meclis"
+   * needs "tbmm", "genel kurul" or a party name, so an İTO, municipal or
+   * foreign "meclis" story drops out). Same shape as `excludes`: folded
+   * lowercase ASCII phrases, words separated by single spaces, and the same
+   * open/closed word rule (open-ended, except a single word of 3 letters or
+   * fewer, which takes a word boundary: "chp"). entity-hub.ts turns them into a
+   * positive lookahead after the `excludes` lookahead, so an exclude still
+   * vetoes a story that carries a cue.
+   */
+  requires?: readonly string[];
   /**
    * Keeps the entity's single-word forms out of amounts: the word must not
    * follow a digit or a quantity word ("100 dolar", "2,1 milyar dolarlık",
@@ -207,6 +220,35 @@ export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
       "ulusal meclis",
       "rum meclis",
       "gkry",
+      "ticaret odas",
+      "sanayi odas",
+      "ito",
+      "mto",
+      "atso",
+      "belediyesi meclis",
+      "buyuksehir meclis",
+      "meclis uyes",
+      "arnavutluk",
+    ],
+    // The bare "Meclis" counts only beside a TBMM or Turkish-politics cue.
+    requires: [
+      "tbmm",
+      "genel kurul",
+      "milletvekil",
+      "kanun teklif",
+      "yasa teklif",
+      "grup toplanti",
+      "meclis baskan",
+      "kurtulmus",
+      "komisyon",
+      "butce gorusme",
+      "chp",
+      "akp",
+      "ak parti",
+      "mhp",
+      "dem parti",
+      "iyi parti",
+      "yeniden refah",
     ],
   },
   aym: {

@@ -42,7 +42,14 @@ describe("computeReport — golden fixture", () => {
       duplicate_source_clusters: 7,
     });
     expect(report.precision_probe_count).toBe(44);
-    expect(report.recall_probe_count).toBe(598);
+    // 598 -> 592 (2026-11-01 text floor): six synthetic cross-cluster pairs
+    // (Yargitay/Danistay, two AFAD pairs, three Imamoglu/IBB and Izmir/YSK
+    // pairs) shared 3 entities with tfidf 0.155-0.189 and sat at 0.404-0.415,
+    // i.e. were "recalled" by entity overlap alone although the headlines
+    // describe different events. With tfidf below ENTITY_TEXT_FLOOR (0.20)
+    // they no longer clear MATCH_THRESHOLD. The max entity denominator alone
+    // does not move this fixture (verified by disabling the floor).
+    expect(report.recall_probe_count).toBe(592);
     expect(report.blindspot_flip_rate).toBe(0.4);
   });
 
@@ -50,7 +57,9 @@ describe("computeReport — golden fixture", () => {
     expect(report.unassigned_count).toBe(40);
     expect(report.intra_pairs_scored).toBe(306);
     expect(report.cross_pairs_scored).toBe(2159);
-    expect(report.would_merge_component_count).toBe(10);
+    // 10 -> 11: the recall graph only lost edges (the six above, none added),
+    // and removing them disconnects one would-merge component into two.
+    expect(report.would_merge_component_count).toBe(11);
     expect(report.blindspot_eligible_clusters).toBe(5);
     expect(report.blindspot_flip_count).toBe(2);
   });

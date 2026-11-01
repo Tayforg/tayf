@@ -25,6 +25,7 @@ import {
   NEAR_BLINDSPOT_MIN_SHARE,
 } from "@/lib/clusters/near-blindspot-rule";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
+import { SIBLING_VETO } from "@/lib/clusters/sibling-veto";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import {
   KARNE_MIN_CLUSTERS,
@@ -59,6 +60,10 @@ export const metadata: Metadata = staticPageMetadata({
 // "Son güncelleme" footer reads CHANGELOG[0].date, so keep the newest entry
 // on top (pinned by page.test.tsx).
 const CHANGELOG = [
+  {
+    date: "2026-11-01",
+    text: "Kör nokta doğrulaması genişledi: aynı olayı neredeyse aynı başlıkla veren kardeş bir kümede karşı taraf da varsa kör nokta işareti gösterilmiyor.",
+  },
   {
     date: "2026-10-22",
     text: "Kör noktaya yakın: kör nokta eşiğinin hemen altında kalan, tek bölgenin ağırlıkta olduğu haberler Kör Noktalar sayfasında ayrı bir bölümde listeleniyor.",
@@ -329,6 +334,11 @@ export default async function MethodologyPage() {
             {Math.round(RECALL_VETO_MIN_PROB * 100)}). Bulunan kaynaklar
             sayıma eklendiğinde baskınlık eşiği artık tutmuyorsa, o kümede kör
             nokta işareti gösterilmez.
+          </p>
+          <p className={proseClass}>
+            {`Aynı olay bazen neredeyse aynı başlıkla ikinci bir kümeye düşer.`}{" "}
+            {`Bu yüzden ${SIBLING_VETO.windowHours} saat içindeki diğer kümelerde başlığı büyük ölçüde örtüşen haberler de aranır (kelimelerin en az yarısı ve en az ${SIBLING_VETO.minShared} kelime ortak olmalı).`}{" "}
+            {`Bu haberleri veren kaynaklar da sayıma eklenir; baskınlık eşiği artık tutmuyorsa kör nokta işareti yine gösterilmez.`}
           </p>
           <h3
             id="kor-noktaya-yakin"

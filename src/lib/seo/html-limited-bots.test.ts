@@ -29,6 +29,22 @@ const TWITTERBOT = "Twitterbot/1.0";
 const WORDPRESS = "WordPress/6.6.2; https://example.org";
 const IFRAMELY = "Iframely/1.3.1 (+https://iframely.com/docs/about)";
 const EMBEDLY = "Mozilla/5.0 (compatible; Embedly/0.2; +http://support.embed.ly/)";
+// Link unfurlers that only read <head>. Before they were listed they got og:*,
+// twitter:* and description streamed about 46 KB into <body>, so their cards
+// came out empty.
+const BLUESKY = "Mozilla/5.0 (compatible; Bluesky Cardyb/1.1; +mailto:support@bsky.app)";
+const MASTODON = "Mastodon/4.2.0 (http.rb/5.1.1; +https://mastodon.social/)";
+const SIGNAL = "Signal-Desktop/7.0";
+const VIBER = "Viber/23.0";
+const PINTEREST = "Pinterestbot/1.0";
+const LINE_APP = "Line/13.0";
+const KAKAOTALK = "kakaotalk-scrap/1.0";
+// Telegram identifies as Twitterbot, so Next's default already covers it; the
+// case documents that dependency.
+const TELEGRAM = "TelegramBot (like TwitterBot)";
+// 'Offline/' contains 'line/' but is not LINE: the \bLine/ word boundary must
+// keep it out of the bot list.
+const OFFLINE_AGENT = "Offline/1.0";
 
 const CHROME_MAC =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
@@ -68,6 +84,14 @@ describe("HTML_LIMITED_BOTS crawler matching", () => {
     ["WordPress (oEmbed consumer)", WORDPRESS],
     ["Iframely (oEmbed consumer)", IFRAMELY],
     ["Embedly (oEmbed consumer)", EMBEDLY],
+    ["Bluesky Cardyb (link unfurler)", BLUESKY],
+    ["Mastodon (link unfurler)", MASTODON],
+    ["Signal (link unfurler)", SIGNAL],
+    ["Viber (link unfurler)", VIBER],
+    ["Pinterestbot (link unfurler)", PINTEREST],
+    ["Line (link unfurler)", LINE_APP],
+    ["kakaotalk-scrap (link unfurler)", KAKAOTALK],
+    ["TelegramBot (via Twitterbot)", TELEGRAM],
   ])("matches %s", (_name, ua) => {
     expect(re.test(ua)).toBe(true);
   });
@@ -77,6 +101,7 @@ describe("HTML_LIMITED_BOTS crawler matching", () => {
     ["Android Chrome Mobile", CHROME_ANDROID],
     ["iPhone Safari", SAFARI_IPHONE],
     ["Windows Firefox", FIREFOX_WINDOWS],
+    ["'Offline/' (no LINE false positive)", OFFLINE_AGENT],
   ])("does not match %s", (_name, ua) => {
     expect(re.test(ua)).toBe(false);
   });
@@ -103,6 +128,13 @@ describe("Next runtime mirror (shouldServeStreamingMetadata)", () => {
 
   it("serves blocking metadata to the oEmbed consumers", () => {
     for (const ua of [WORDPRESS, IFRAMELY, EMBEDLY]) {
+      expect(shouldServeStreamingMetadata(ua, HTML_LIMITED_BOTS.source)).toBe(false);
+    }
+  });
+
+  it("serves blocking metadata to the link unfurlers (Bluesky and friends)", () => {
+    expect(shouldServeStreamingMetadata(BLUESKY, HTML_LIMITED_BOTS.source)).toBe(false);
+    for (const ua of [MASTODON, SIGNAL, VIBER, PINTEREST, LINE_APP, KAKAOTALK, TELEGRAM]) {
       expect(shouldServeStreamingMetadata(ua, HTML_LIMITED_BOTS.source)).toBe(false);
     }
   });

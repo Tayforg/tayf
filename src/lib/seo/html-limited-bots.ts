@@ -29,6 +29,21 @@ const TAYF_EXTRA_BOTS = [
   "WordPress",
   "Iframely",
   "Embedly",
+  // Link unfurlers that only read <head>: they never see the og:*, twitter:*
+  // and description tags that streaming metadata puts about 46 KB into <body>,
+  // so Bluesky, Signal, Mastodon and friends rendered empty cards. Telegram is
+  // already covered through its "like TwitterBot" token.
+  "Cardyb",
+  "Bluesky",
+  "Mastodon",
+  "Signal",
+  "Viber",
+  "Pinterest",
+  // \b stops "Offline/" (and any other "...line/" token) from matching. The
+  // slash is pre-escaped because RegExp#source always escapes it: a bare "/"
+  // here would make HTML_LIMITED_BOTS.source differ from this string.
+  String.raw`\bLine\/`,
+  "kakaotalk-scrap",
 ] as const;
 
 export const HTML_LIMITED_BOTS_SOURCE = `${NEXT_DEFAULT_HTML_LIMITED_BOTS}|${TAYF_EXTRA_BOTS.join("|")}`;

@@ -2809,3 +2809,37 @@ select total from public.entity_cluster_ids_v2(array['deva'], array['\mdeva\M'],
 Then `curl -s https://www.tayfhaber.com/gundem/deva` and `/gundem/dolar`: the DEVA hub lists only DEVA stories (no "devam"), the Dolar hub has no "domuz" story, and the card ages read newest first.
 
 **Rollback:** `drop function public.entity_cluster_ids_v2(text[], text[], timestamptz, integer);` then `delete from supabase_migrations.schema_migrations where version = '125';`. The hubs fall back to 123 (the old imprecise lists) on their own.
+
+## 126 — blindspot sibling veto (`blindspot_recall_veto_refresh`, `clusters.blindspot_veto_reason`): APPLY 126 only, no deploy-order constraint
+
+**Why:** a public "Kör nokta" badge stayed on clusters whose silent side was covered by a live, near-identical sibling cluster. `112a68bd` showed "Kör nokta: iktidar ağırlıklı" while eight sibling clusters (among them `f4c68960` and `923ec64a`) held the bağımsız and muhalefet coverage of the same Erdoğan–Zelenski meeting. 071's veto only knows what Jev matched. On production (2026-11-01, read-only) 7 of the 19 public blindspots created in the last 48 hours are `blindspot_recall_suspect`; the new rule withdraws 6 of the 19 (16 of 61 over seven days).
+
+**What 126 does** (additive, safe to re-apply, run as four short pieces rather than one transaction; the first starts with `set local lock_timeout = '5s'`): adds `clusters.blindspot_veto_reason` (`jev_recall` or `sibling_headline`; the CHECK is added `not valid` in the same millisecond-long transaction as the column, then validated by a separate `validate constraint` statement that takes only SHARE UPDATE EXCLUSIVE, because `add column` holds ACCESS EXCLUSIVE on `clusters` until its transaction commits and a validation scan of the 398 MB table inside it would block every read for seconds), `create or replace function` on `blindspot_recall_veto_refresh(interval, numeric)` (same signature and defaults, so the `blindspot-recall-veto` cron job at `7-59/10` and the grants carry over; cron is not touched), and runs `blindspot_recall_veto_refresh(interval '7 days')` once, in a `do` block after the transactions, taking the function's advisory lock first (the function returns 0 without working while the 10-minute cron holds it): the block retries for up to 30 seconds and then raises, so the ledger row 126 is only written after a backfill that ran. The rule: after adding the voting (`outlet`, `wire`) sources that are not yet members and that Jev matched at p ≥ 0.85 **or** that published a sibling article (title stems of at least 4 letters cut to 5 characters, at least 3 shared and Jaccard ≥ 0.5, published at most 24 hours apart, in a live cluster created within the last 72 hours), the dominant zone drops below 0.8. The search covers blindspots created in the last `greatest(48 hours, p_since)`; a sibling veto older than that is frozen and only clears when the live contract stops holding. `is_blindspot`, `blindspot_side` and `updated_at` are never written; a second run returns 0. The app never selects the new column, so no app deploy is needed.
+
+**Order:** none. Apply with `supabase db push` (do not wrap the file in an outer transaction: the explicit `commit`s are what release the ACCESS EXCLUSIVE lock early). The backfill takes about 6 to 10 seconds on production (measured as a SELECT) and holds row locks only; reads and writes of `clusters` are never blocked longer than the millisecond-scale `add column` piece. If the backfill raises `stayed locked by another session`, just apply the migration again (every piece is idempotent). The edge functions and the app are untouched.
+
+**Verify** (read-only):
+
+```sql
+-- the new body is live (expect 2904bdbadff34838259ffb901807cc33, 9162, t); before 126 it was ee3a003fa0225da3bbb22a3fbb7da1b0
+select md5(prosrc), length(prosrc), prosecdef
+  from pg_proc where oid = 'public.blindspot_recall_veto_refresh(interval,numeric)'::regprocedure;
+-- the 071 cron job survived (expect 7-59/10)
+select schedule from cron.job where jobname = 'blindspot-recall-veto';
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.blindspot_recall_veto_refresh(interval,numeric)', 'execute'),
+       has_function_privilege('authenticated', 'public.blindspot_recall_veto_refresh(interval,numeric)', 'execute'),
+       has_function_privilege('service_role', 'public.blindspot_recall_veto_refresh(interval,numeric)', 'execute');
+-- every veto has a reason, no reason without a veto (expect 0)
+select count(*) from public.clusters
+ where blindspot_recall_veto is distinct from (blindspot_veto_reason is not null);
+-- the motivating cluster (expect t, sibling_headline)
+select blindspot_recall_veto, blindspot_veto_reason from public.clusters where id = '112a68bd-68d3-4bc8-ab0b-6d12b37762b8';
+-- reasons in use
+select blindspot_veto_reason, count(*) from public.clusters where blindspot_recall_veto group by 1;
+select count(*) from supabase_migrations.schema_migrations where version = '126';  -- 1
+```
+
+The next cron tick (within 10 minutes) must return 0 changes when nothing else moved. Known limit: title overlap cannot tell two events with the same wording, for example "Emine Erdoğan'dan 29 Ekim mesajı" against "Cumhurbaşkanı Erdoğan'dan 29 Ekim mesajı", or two "Tugay'ı kabul etti" meetings with different ministers; those withdraw a genuine badge (never invent one).
+
+**Rollback** (nothing else depends on 126): re-apply the `create or replace function` block of `071_blindspot_recall_veto.sql` (function, comment, revoke, grant; skip its cron and backfill sections), then `select public.blindspot_recall_veto_refresh(interval '7 days');` so sibling vetoes clear (071's function does not write the reason, so stale reasons stay on cleared rows; `update public.clusters set blindspot_veto_reason = null where not blindspot_recall_veto and blindspot_veto_reason is not null;` tidies them, optional because nothing reads the column). The column may stay (nullable, unread). To drop it as well, after the function is back: `alter table public.clusters drop constraint if exists clusters_blindspot_veto_reason_check, drop column if exists blindspot_veto_reason;`. Remove ledger row 126: `delete from supabase_migrations.schema_migrations where version = '126';`.

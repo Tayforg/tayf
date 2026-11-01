@@ -1,9 +1,18 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 
-import { V1_COMMON_NOTES_TR, V1_ENDPOINTS } from "@/lib/api/v1-docs";
+import { API_PLANS, V1_COMMON_NOTES_TR, V1_ENDPOINTS } from "@/lib/api/v1-docs";
 import { API_TIER_LIMITS } from "@/lib/api/keys";
+import { CorrectionForm } from "@/components/story/correction-form";
+
+// The key-request note quotes the correction form's field labels, so the real
+// form is rendered below to read them. CorrectionForm calls useSearchParams(),
+// which needs the App Router context that is absent here.
+vi.mock("next/navigation", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("next/navigation")>()),
+  useSearchParams: () => new URLSearchParams(),
+}));
 
 // The page is a synchronous Server Component (no fetch, no Date), so it
 // can be rendered directly with renderToStaticMarkup instead of going
@@ -95,16 +104,61 @@ describe("/gelistirici page", () => {
     expect(html).not.toContain("₺");
   });
 
-  it("shows a mailto key-request link only when NEXT_PUBLIC_CONTACT_EMAIL is set", async () => {
+  it("without NEXT_PUBLIC_CONTACT_EMAIL, routes key requests to the feedback form instead of a dead end", async () => {
     delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
-    const withoutEmail = await renderPage();
-    expect(withoutEmail).not.toContain("mailto:");
-    expect(withoutEmail).toContain("İletişim adresi yakında burada yayımlanacak.");
+    const html = await renderPage();
+    expect(html).not.toContain("mailto:");
+    expect(html).not.toContain("yakında burada yayımlanacak");
+    expect(html).not.toContain("E-postayla başvurun");
+    expect(html).toContain('href="/metodoloji#duzeltme"');
+    expect(html).toContain("Anahtar talebinizi");
+    expect(html).toContain("Geri bildirim formuna git");
+    // The note tells people exactly what to type into the form's fields.
+    expect(html).toContain("/gelistirici adresini");
+  });
 
+  it("the key-request note quotes the correction form's real field labels (WCAG 2.5.3), so the two cannot drift apart", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const form = renderToStaticMarkup(createElement(CorrectionForm));
+    // Visible label text: whatever precedes the first nested tag, e.g. the
+    // optional-hint <span> inside the e-mail label.
+    const labelOf = (id: string): string => {
+      const m = form.match(new RegExp(`<label[^>]*\\bfor="${id}"[^>]*>([^<]*)`));
+      expect(m, `no <label for="${id}"> in the correction form`).not.toBeNull();
+      return m![1]!.trim();
+    };
+    const urlLabel = labelOf("correction-url");
+    const messageLabel = labelOf("correction-message");
+    const emailLabel = labelOf("correction-email");
+    for (const label of [urlLabel, messageLabel, emailLabel]) expect(label.length).toBeGreaterThan(0);
+
+    const html = await renderPage();
+    expect(html).toContain(`«${urlLabel}» alanına`);
+    expect(html).toContain(`«${messageLabel}» alanına`);
+    expect(html).toContain(`«${emailLabel}» alanına`);
+    // The key is only ever sent by e-mail, and the form marks the field optional.
+    expect(html).toContain("anahtar yalnızca e-postayla iletilir");
+    // Names the old note invented for fields that do not exist under those names.
+    expect(html).not.toContain("bağlantı alanına");
+    expect(html).not.toContain("mesaja kurumunuzu");
+    expect(html).not.toContain("e-posta alanına");
+  });
+
+  it("with NEXT_PUBLIC_CONTACT_EMAIL set, shows the mailto key-request link and no placeholder", async () => {
     process.env.NEXT_PUBLIC_CONTACT_EMAIL = "gelistirici@tayfhaber.com";
-    const withEmail = await renderPage();
-    expect(withEmail).toContain("mailto:gelistirici@tayfhaber.com");
-    expect(withEmail).toContain("Anahtar iste");
+    const html = await renderPage();
+    expect(html).toContain("mailto:gelistirici@tayfhaber.com");
+    expect(html).toContain("Anahtar iste");
+    expect(html).not.toContain("yakında");
+    expect(html).not.toContain("Anahtar talebinizi");
+  });
+
+  it("never tells readers to apply by e-mail in the plan table (API_PLANS is env-independent)", () => {
+    expect(API_PLANS.length).toBeGreaterThan(0);
+    for (const plan of API_PLANS) {
+      expect(plan.howTr).not.toMatch(/e-posta/i);
+      expect(plan.howTr).toContain("Anahtar alma");
+    }
   });
 
   it("never renders a key-shaped string (tayf_ followed by 40 hex chars)", async () => {

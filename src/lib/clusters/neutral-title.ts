@@ -27,15 +27,25 @@ const STOP = new Set([
   "haber", "haberi", "sonra", "once", "iste", "icin",
 ]);
 
-function tokens(title: string): Set<string> {
+// Locale-aware lowercasing matches cleanHeadline's toLocaleUpperCase("tr")
+// below: plain toLowerCase() turns "İ" into "i" + a combining dot-above
+// (U+0307) instead of "i", which the a-z0-9 filter then strips, silently
+// corrupting tokens for any title starting a word with a dotted capital I.
+function asciiLower(title: string): string {
   let s = "";
-  // Locale-aware lowercasing matches cleanHeadline's toLocaleUpperCase("tr")
-  // below: plain toLowerCase() turns "İ" into "i" + a combining dot-above
-  // (U+0307) instead of "i", which the a-z0-9 filter then strips, silently
-  // corrupting tokens for any title starting a word with a dotted capital I.
   for (const ch of title.toLocaleLowerCase("tr")) s += DIACRITICS[ch] ?? ch;
+  return s;
+}
+
+// Lowercased, diacritics folded, every run of non-alphanumerics collapsed to
+// one space: "Canlı: Meclis'te" -> "canli meclis te".
+function fold(title: string): string {
+  return asciiLower(title).replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function tokens(title: string): Set<string> {
   const out = new Set<string>();
-  for (const t of s.replace(/[^a-z0-9]+/g, " ").split(" ")) {
+  for (const t of fold(title).split(" ")) {
     if (t.length >= 3 && !STOP.has(t)) out.add(t);
   }
   return out;
@@ -87,14 +97,52 @@ export function cleanHeadline(title: string): string {
   return t;
 }
 
+// Placeholders outlets publish as a headline ("Kısa haberler", "Son dakika",
+// "CANLI | Cumhurbaşkanı Erdoğan konuşuyor"): they name no event, so a cluster
+// must never be titled with one. Matched on the folded cleanHeadline output.
+const GENERIC_CLEANED: RegExp[] = [
+  /^kisa haberler?$/,
+  /^son dakika$/,
+  /gundem ozeti/,
+  /konusuyor$/,
+  /aciklamalarda bulunuyor$/,
+];
+
+// Matched on the folded RAW title: cleanHeadline strips these lead-ins, which
+// would otherwise hide the live-blog marker from the check above. "canlı
+// bomba" (suicide bomber) is a real subject, not a live-blog lead-in.
+const GENERIC_RAW: RegExp[] = [/^canli\b(?! bomba\b)/, /^son dakika$/];
+
+// A title built only from these says nothing about what happened.
+const FILLER = new Set([
+  "kisa", "haberler", "canli", "gundem", "ozeti", "konusuyor", "cumhurbaskani", "erdogan",
+]);
+
+/**
+ * True for a headline that is a content-free placeholder (a news-bulletin
+ * label, a live-blog lead-in, "<person> konuşuyor") rather than a description
+ * of an event. Deliberately no minimum length or token count: short real
+ * headlines ("İstanbul'da deprem oldu") must stay eligible.
+ */
+export function isGenericTitle(title: string): boolean {
+  const cleaned = fold(cleanHeadline(title));
+  if (cleaned === "" || GENERIC_CLEANED.some((re) => re.test(cleaned))) return true;
+  const raw = fold(title);
+  if (GENERIC_RAW.some((re) => re.test(raw))) return true;
+  for (const t of tokens(title)) if (!FILLER.has(t)) return false;
+  return true;
+}
+
 /**
  * Returns the cleaned headline of the most central, least sensational
- * member, or null when there is nothing to choose from.
+ * member, or null when there is nothing to choose from (no members, or every
+ * member title is a generic placeholder; the headline cron records that as an
+ * errored 'empty rewrite' and the cluster keeps its previous title).
  */
 export function pickNeutralTitle(members: MemberTitle[]): string | null {
   const items = members
     .map((m) => ({ ...m, title: (m.title ?? "").trim() }))
-    .filter((m) => m.title.length > 0);
+    .filter((m) => m.title.length > 0 && !isGenericTitle(m.title));
   if (items.length === 0) return null;
 
   const toks = items.map((m) => tokens(m.title));

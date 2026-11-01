@@ -44,6 +44,9 @@ import { bandKeys, LSH_BANDS } from "../_shared/cluster/lsh.ts";
 import { TfidfIndex } from "../_shared/cluster/tfidf.ts";
 import { score } from "../_shared/cluster/ensemble.ts";
 import {
+  CONTEXT_STICKY_HOURS,
+  CONTEXT_STICKY_MAX,
+  CONTEXT_STICKY_MIN_ARTICLES,
   MATCH_THRESHOLD,
   MAX_CANDIDATE_CLUSTERS,
   MIN_SHARED_ENTITIES,
@@ -51,6 +54,10 @@ import {
   TOKEN_CANDIDATE_MIN_SHARED,
   TOKEN_MIN_LEN,
 } from "../_shared/cluster/constants.ts";
+import {
+  selectContextClusterIds,
+  stickyUpperBound,
+} from "../_shared/cluster/context-select.ts";
 import {
   BIAS_KEYS,
   type BiasKey,
@@ -100,7 +107,10 @@ const BATCH_SIZE = 2;
 // cap 400 exceeds it, ~300 at cap 150 stays under with margin. Signatures
 // are read from articles.minhash_sig (filled lazily by persistEnrichment)
 // and only rows without a valid stored signature are recomputed; raising
-// the cap is a separate follow-up.
+// the cap is a separate follow-up. On top of the cap, loadClusterContext adds
+// up to CONTEXT_STICKY_MAX recent multi-article clusters (see
+// _shared/cluster/context-select.ts) so follow-ups to busy stories stay
+// matchable once the newest-200 window has moved past them.
 const CONTEXT_CLUSTER_CAP = 200;             // was 60; replay showed +7pt recall at 200, and 200 clusters x ~3 members is far under the limit the unbounded load hit
 const VT_SECONDS = 60;                      // visibility timeout per message
 // Poison contract (shared with image-consumer): a message is permanently
@@ -381,19 +391,94 @@ async function loadClusterContext(): Promise<ClusterContext> {
   // coverage is not one a fresh article will join — so capping to the top
   // CONTEXT_CLUSTER_CAP by updated_at keeps clustering quality while making
   // memory deterministic.
-  const clusters: ClusterRow[] = [];
+  const loadStartedAt = Date.now();
+  const clusterSelect = "id, title_tr, title_tr_neutral, first_published, updated_at, article_count";
+  const newestRows: ClusterRow[] = [];
   {
     const res = await supabase
       .from("clusters")
-      .select("id, title_tr, title_tr_neutral, first_published, updated_at, article_count")
+      .select(clusterSelect)
       .gte("updated_at", cutoffIso)
       .order("updated_at", { ascending: false })
       .limit(CONTEXT_CLUSTER_CAP);
     if (res.error) {
       throw new Error(`loadClusterContext clusters: ${res.error.message}`);
     }
-    clusters.push(...((res.data ?? []) as ClusterRow[]));
+    newestRows.push(...((res.data ?? []) as ClusterRow[]));
   }
+
+  // Sticky tail (2026-11-01). At peak the newest-CAP clusters span only ~2 h,
+  // so a busy story that went quiet for a few hours fell out of the context
+  // and its follow-ups opened duplicate clusters. When the window is full,
+  // also load the recent, well-covered clusters just beyond it. This query is
+  // best-effort: any failure leaves the newest-CAP context exactly as before.
+  type StickyRow = ClusterRow & {
+    is_archived?: boolean | null;
+    merged_into?: string | null;
+  };
+  const stickyRows: StickyRow[] = [];
+  const stickyBound = stickyUpperBound(newestRows, CONTEXT_CLUSTER_CAP);
+  if (stickyBound !== null) {
+    try {
+      const stickyCutoffIso = new Date(
+        Date.now() - CONTEXT_STICKY_HOURS * 60 * 60 * 1000,
+      ).toISOString();
+      const res = await supabase
+        .from("clusters")
+        .select(`${clusterSelect}, is_archived, merged_into`)
+        .gte("updated_at", stickyCutoffIso)
+        .lt("updated_at", stickyBound)
+        .gte("article_count", CONTEXT_STICKY_MIN_ARTICLES)
+        .eq("is_archived", false)
+        .is("merged_into", null)
+        .order("article_count", { ascending: false })
+        .limit(CONTEXT_STICKY_MAX);
+      if (res.error) {
+        console.warn(
+          `[cluster-consumer] sticky context query failed, continuing without it: ${res.error.message}`,
+        );
+      } else {
+        stickyRows.push(...((res.data ?? []) as StickyRow[]));
+      }
+    } catch (err) {
+      console.warn(
+        `[cluster-consumer] sticky context query threw, continuing without it: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  const rowsById = new Map<string, StickyRow>();
+  for (const row of [...newestRows, ...stickyRows]) {
+    if (!rowsById.has(row.id)) rowsById.set(row.id, row);
+  }
+  // Keep the ClusterRow shape (drop the sticky-only columns) downstream.
+  const clusters: ClusterRow[] = selectContextClusterIds(
+    [...rowsById.values()],
+    {
+      cap: CONTEXT_CLUSTER_CAP,
+      stickyMinArticles: CONTEXT_STICKY_MIN_ARTICLES,
+      stickyHours: CONTEXT_STICKY_HOURS,
+      stickyMax: CONTEXT_STICKY_MAX,
+      now: Date.now(),
+    },
+  ).map((id) => {
+    const row = rowsById.get(id)!;
+    return {
+      id: row.id,
+      title_tr: row.title_tr,
+      title_tr_neutral: row.title_tr_neutral,
+      first_published: row.first_published,
+      updated_at: row.updated_at,
+      article_count: row.article_count,
+    };
+  });
+  console.log(
+    `[cluster-consumer] context clusters=${clusters.length} sticky=${
+      Math.max(0, clusters.length - Math.min(newestRows.length, CONTEXT_CLUSTER_CAP))
+    } loadMs=${Date.now() - loadStartedAt}`,
+  );
 
   // Constructed once per loadClusterContext call (not once per branch): the
   // empty-path returns below hand back this same untouched instance, and the
@@ -831,6 +916,23 @@ function wouldDuplicate(
   return existingSources.has(article.source_id);
 }
 
+// The score a scored pair may contribute to the fallback join loop (see the
+// call site). A result below MATCH_THRESHOLD whose entity/tfidf lane was capped
+// by ENTITY_TEXT_FLOOR (components.textFloorCapped) and which that capped lane
+// alone produced (raw above the MinHash lane's score; the headline lane never
+// coexists with the cap) is entities-only evidence: it contributes 0. Any other
+// result contributes its own score. Total over partial `components` objects.
+function fallbackEligibleScore(res: {
+  score: number;
+  components?: Partial<{ textFloorCapped: boolean; raw: number; jaccardScore: number }>;
+}): number {
+  const c = res.components;
+  const carriedByCappedLane = c?.textFloorCapped === true &&
+    typeof c.raw === "number" && typeof c.jaccardScore === "number" &&
+    c.raw > c.jaccardScore;
+  return carriedByCappedLane && res.score < MATCH_THRESHOLD ? 0 : res.score;
+}
+
 async function addArticleToCluster(
   sourceLookup: Map<string, SourceRow>,
   clusterId: string,
@@ -1108,7 +1210,10 @@ async function clusterArticle(
     : null;
   const FALLBACK_FLOOR = MATCH_THRESHOLD * 0.9;
 
-  type Scored = { clusterId: string; score: number };
+  // `score` ranks candidates and feeds Jev's bands. `fallbackScore` is what the
+  // fallback loop below may join on: the best result that is NOT carried by the
+  // text-floor-capped entity/tfidf lane (see fallbackEligibleScore).
+  type Scored = { clusterId: string; score: number; fallbackScore: number };
   const scored: Scored[] = [];
 
   for (const clusterId of candidateIds) {
@@ -1129,10 +1234,16 @@ async function clusterArticle(
       seed.entities,
       tfidfCosineSeed,
       hoursDeltaSeed,
-      { aSourceSlug, bSourceSlug: bSourceSlugSeed },
+      {
+        aSourceSlug,
+        bSourceSlug: bSourceSlugSeed,
+        aTitle: article.title,
+        bTitle: seed.title,
+      },
     );
 
     let bestScore = seedRes.score;
+    let fallbackScore = fallbackEligibleScore(seedRes);
     const latest = latestByCluster.get(clusterId);
     if (latest) {
       const hoursDeltaLatest = hoursBetween(article.published_at, latest.published_at);
@@ -1149,14 +1260,20 @@ async function clusterArticle(
           latest.entities,
           tfidfCosineLatest,
           hoursDeltaLatest,
-          { aSourceSlug, bSourceSlug: bSourceSlugLatest },
+          {
+            aSourceSlug,
+            bSourceSlug: bSourceSlugLatest,
+            aTitle: article.title,
+            bTitle: latest.title,
+          },
         );
         if (latestRes.score > bestScore) bestScore = latestRes.score;
+        fallbackScore = Math.max(fallbackScore, fallbackEligibleScore(latestRes));
       }
     }
 
     if (bestScore >= FALLBACK_FLOOR) {
-      scored.push({ clusterId, score: bestScore });
+      scored.push({ clusterId, score: bestScore, fallbackScore });
     }
   }
   scored.sort((a, b) => b.score - a.score);
@@ -1356,7 +1473,14 @@ async function clusterArticle(
       // Without this, a band-high reject (primary in [0.40, 0.44)) could
       // fall through into a genuinely sub-threshold join in [FALLBACK_FLOOR,
       // MATCH_THRESHOLD) -- a join the ensemble alone would never make.
-      if (cand.score < (marginalRejectedClusterId ? MATCH_THRESHOLD : FALLBACK_FLOOR)) break;
+      const fallbackBar = marginalRejectedClusterId ? MATCH_THRESHOLD : FALLBACK_FLOOR;
+      if (cand.score < fallbackBar) break;
+      // The text floor caps the entity/tfidf lane at MATCH_THRESHOLD - 0.01,
+      // inside [FALLBACK_FLOOR, MATCH_THRESHOLD). A candidate whose only
+      // results in that window rest on the capped lane is a pair joined by
+      // entities alone; it may still be reviewed by Jev's low band above, but
+      // must not join here when the primary was skipped as a duplicate-source.
+      if (cand.fallbackScore < fallbackBar) continue;
       if (dryRun) {
         if (wouldDuplicate(ctx, cand.clusterId, article)) {
           blocked.add(cand.clusterId);

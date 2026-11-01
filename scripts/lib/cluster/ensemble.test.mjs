@@ -96,7 +96,7 @@ describe("score — MinHash Jaccard lane", () => {
   });
 });
 
-describe("score — entity ratio (R2 min-denominator + noise floor)", () => {
+describe("score — entity ratio (max denominator + noise floor)", () => {
   it("returns 0 entityRatio for empty entity sets", () => {
     const [fpA, fpB] = mkFpPair(64, 0);
     const r = score(fpA, fpB, [], [], 0, 0);
@@ -105,8 +105,8 @@ describe("score — entity ratio (R2 min-denominator + noise floor)", () => {
     expect(r.components.entityRatio).toBe(0);
   });
 
-  it("uses min(|A|,|B|) with noise floor 3 as denominator", () => {
-    // |A|=3, |B|=3, shared=2. denom = max(3, min(3,3)) = 3. rawRatio = 2/3.
+  it("uses max(|A|,|B|) with noise floor 3 as denominator", () => {
+    // |A|=3, |B|=3, shared=2. denom = max(3, max(3,3)) = 3. rawRatio = 2/3.
     const [fpA, fpB] = mkFpPair(64, 0);
     const r = score(
       fpA,
@@ -130,15 +130,20 @@ describe("score — entity ratio (R2 min-denominator + noise floor)", () => {
     expect(r.components.entityRatioRaw).toBeCloseTo(2 / 3, 10);
   });
 
-  it("rewards tight small-set overlap — shared/min not shared/max (R2 fix)", () => {
-    // |A|=3, |B|=10, shared=3. Old bug: shared/max(A,B) = 3/10 = 0.3 → gets penalized.
-    // R2 fix: shared/max(3, min(3,10)) = 3/3 = 1.0.
+  it("does not reward a small set riding a large one — shared/max, not shared/min", () => {
+    // |A|=3, |B|=10, shared=3. The old min-denominator scored 3/max(3,min(3,10))
+    // = 1.0, so a 3-entity article was a perfect match for any entity-heavy
+    // ceremony seed (prod cluster dd5535a7). The max denominator gives
+    // 3/max(3,max(3,10)) = 0.3.
     const [fpA, fpB] = mkFpPair(64, 0);
     const small = ["mhp", "istanbul", "teskilat"];
     const big = ["mhp", "istanbul", "teskilat", "a", "b", "c", "d", "e", "f", "g"];
     const r = score(fpA, fpB, small, big, 0, 0);
     expect(r.components.sharedEntities).toBe(3);
-    expect(r.components.entityRatioRaw).toBeCloseTo(1.0, 10);
+    expect(r.components.entityRatioRaw).toBeCloseTo(0.3, 10);
+    // Symmetric in its arguments.
+    const r2 = score(fpA, fpB, big, small, 0, 0);
+    expect(r2.components.entityRatioRaw).toBeCloseTo(0.3, 10);
   });
 
   it("accepts Set as entity input (not just array)", () => {

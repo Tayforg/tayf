@@ -546,7 +546,7 @@ export const API_PLANS: ApiPlan[] = [
     perMinute: API_TIER_LIMITS.free.perMinute,
     perDay: API_TIER_LIMITS.free.perDay,
     priceTr: null,
-    howTr: "E-postayla başvurun; anahtar elle verilir.",
+    howTr: "Aşağıdaki Anahtar alma bölümünden isteyin; anahtar elle verilir.",
   },
   {
     tier: "partner",
@@ -554,7 +554,7 @@ export const API_PLANS: ApiPlan[] = [
     perMinute: API_TIER_LIMITS.partner.perMinute,
     perDay: API_TIER_LIMITS.partner.perDay,
     priceTr: null,
-    howTr: "Yüksek hacim ve toplu erişim için yazın.",
+    howTr: "Yüksek hacim ve toplu erişim için Anahtar alma bölümünden yazın.",
   },
 ];
 

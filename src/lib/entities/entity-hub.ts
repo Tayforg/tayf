@@ -79,12 +79,19 @@ export function entityHubNote(total: number, shown: number): string {
 //     Mahkemesi'ni bastı", "Avrupa Merkez Bankası" and "İsrail meclisi" are not
 //     the Turkish institutions. A trusted alias (AYM, TCMB, TBMM, Büyük Millet
 //     Meclisi) stays bare: it names the institution on its own.
+//   * requires (meclis): the same non-trusted form also needs one cue anywhere
+//     in the text, a positive lookahead after the exclude one:
+//     `^(?![\s\S]*(?:<ex>))(?=[\s\S]*(?:<req>))[\s\S]*`. The bare "Meclis"
+//     counts only beside "TBMM", "genel kurul", "milletvekili", a party name and
+//     the like, so an İTO, ATSO or MTO "meclis toplantısı", a municipal council
+//     and a foreign parliament drop out.
 //   * quantityGuard (dolar): `\m` + QUANTITY_GUARD + word, so "100 dolar", "2,1
 //     milyar dolarlık" and "milyarlarca doları" are amounts, not the currency.
 //   * inflections (akp, dem, iyi-parti, asgari-ucret, pkk, borsa): widen the
 //     stemmed prefilter only; the patterns do not change.
-// Postgres AREs support (?!...) and (?<!...) (checked on production). A pattern
-// starts with `^`, never `(?`, which Postgres would read as embedded options.
+// Postgres AREs support (?=...), (?!...) and (?<!...) (checked on production). A
+// pattern starts with `^`, never `(?`, which Postgres would read as embedded
+// options.
 //
 // Measured read-only on production, 2026-11-01, 14-day window, live clusters
 // (not archived, article_count >= 2, merged_into is null). old = rows the
@@ -93,12 +100,14 @@ export function entityHubNote(total: number, shown: number): string {
 // prefilter says (for the inflection keys old and new are prefilter-and-guard
 // counts with and without the inflected queries). All 72 patterns of the 62
 // entities compile (`select 'x' ~ p`), and the 21 behaviour samples of
-// entity-hub.test.ts give the same answer in Postgres and in the JS twin.
+// entity-hub.test.ts, plus the 16 meclis samples of the requires step, give the
+// same answer in Postgres and in the JS twin. entity_cluster_ids_v2 called with
+// the app's exact arrays returns the 255 meclis rows the counts below say.
 //
 //   key           old   new   ceiling   note
 //   aym            40    31       31    9 dropped, all Polonya; 0 Polonya left
 //   tcmb            5     2        2    dropped: Avrupa and İsrail Merkez Bankası, FED
-//   meclis        409   313      317    CUE retention 251/281 = 0.89 (see below)
+//   meclis        409   255      258    409 -> 313 (excludes) -> 255 (requires); see below
 //   dolar          44     2        2    63 literal before; all 42 dropped are amounts
 //   akp           322   331      331    prefilter 'ak partili', 'ak partimize'
 //   dem            30    32       32    'dem partili'
@@ -113,21 +122,41 @@ export function entityHubNote(total: number, shown: number): string {
 // report and one "75 milyon ABD doları" (a qualifier between the quantity word
 // and "doları", the one known hole). 'dolarlık' is deliberately not a form.
 //
-// meclis, retention. CUE = tbmm | büyük millet meclisi | milletvekili | genel
-// kurul | kurtulmuş | chp | akp | ak parti | mhp | dem parti. NEW∩CUE over
-// OLD∩CUE is 0.89, under the 0.97 target, and swapping the bare 'israil' and
-// 'iran' for 'israil meclis' and 'iran meclis' reaches only 0.92 (258/281) while
-// letting 20 more rows in. The loss is not recall: of the 30 CUE rows dropped,
-// 19 are municipal councils ("Üsküdar Belediyesi başkan vekili seçimi", "MHP'li
-// belediye meclis üyesi"), 10 are Israeli or Libyan politics and 1 is
-// Luxembourg's parliament, where a party name or "milletvekili" is the whole
-// CUE. About 3 look like Turkish politics (Mekke Anlaşması, a Libya maritime
-// agreement, a local-government reform); the real retention is near 0.99. The
-// other target, at most 2 foreign or municipal rows among the newest 50 NEW
-// rows without CUE, is NOT met: about 11 remain (an Albanian parliament, an
-// Egyptian approval, Bakırköy, Milas and İzmir municipal stories) plus about
-// 14 chamber-of-commerce "meclis" rows (İTO, MTO, ATSO). A phrase list cannot
-// close that; a Meclis hub that requires a parliamentary cue is the next step.
+// meclis, in two steps. CUE = tbmm | büyük millet meclisi | milletvekili | genel
+// kurul | kurtulmuş | chp | akp | ak parti | mhp | dem parti.
+//   1. Excludes (foreign and municipal cues) took 409 rows to 313. CUE
+//      retention was 0.89 (251/281): of the 30 CUE rows dropped, 19 were
+//      municipal councils, 10 Israeli or Libyan politics and 1 Luxembourg's
+//      parliament, where a party name or "milletvekili" is the whole CUE.
+//      Swapping the bare 'israil' and 'iran' for 'israil meclis' and 'iran
+//      meclis' reached only 0.92 while letting 20 more rows in. A phrase list
+//      could not close the rest: about 11 foreign or municipal rows (an Albanian
+//      parliament, an Egyptian approval, Bakırköy, Milas and İzmir municipal
+//      stories) and about 14 chamber-of-commerce "meclis" rows (İTO, MTO, ATSO)
+//      stayed among the newest 50 rows without CUE.
+//   2. Requires (this step) took 313 rows to 255: the bare "Meclis" now needs
+//      one cue (tbmm, genel kurul, milletvekil, kanun/yasa teklif, grup
+//      toplanti, meclis baskan, kurtulmus, komisyon, butce gorusme or a party
+//      name) in the same folded text, and the excludes gained ticaret/sanayi
+//      odası, ito, mto, atso, belediyesi meclis, büyükşehir meclis, meclis
+//      üyesi and arnavutluk. NEW∩CUE over OLD∩CUE is 242/250 = 0.97 (target
+//      0.95; against the first 409 rows it is 242/279 = 0.87, the same
+//      municipal and foreign rows as in step 1). The 8 CUE rows dropped are all
+//      municipal councils, 7 by 'meclis üyesi' and 1 by 'belediyesi meclis': an
+//      MHP'li council member shot in Kocaeli, CHP council members expelled or
+//      resigning (Tarsus, Kemer, İBB, 86 who joined Yeni Parti), a Kartal
+//      council session and a Sarıyer council decision. One more row, under the
+//      wider "milletvekil" cue, is the Albanian parliament, dropped by
+//      'arnavutluk' as it should be.
+//      Residue: among the newest 50 NEW rows that match only the bare 'Meclis'
+//      pattern (not tbmm, not büyük millet meclisi) there are 7. Five are the
+//      Turkish parliament ("Meclis'te Yeni Yol grubu düştü", Tanrıkulu's
+//      araştırma komisyonu, the Sarıgül fezleke, a soru önergesi) and 2 are
+//      foreign, municipal or chamber rows (target at most 2, met exactly): a
+//      Gaziantep Ticaret Borsası "meclis başkanı" story and the Kadıköy "CHP
+//      meclis grubu" story. Both carry a real cue word, so only a narrower
+//      phrase ('ticaret borsas') could close the first; the second reads the
+//      same as a TBMM group story and is left alone.
 // ---------------------------------------------------------------------------
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {
@@ -210,14 +239,23 @@ function foldedWords(text: string): string[] {
 }
 
 /**
- * One alternative of the exclude guard: `\m` + the words joined by `\s+`. It
- * stays open-ended ("polonya" catches "polonyada", "belediye meclis" catches
- * "belediye meclisinde") except for a single word of 3 letters or fewer, which
- * takes `\M`: "fed" must not hit "federasyon".
+ * One alternative of the exclude and require guards: `\m` + the words joined
+ * by `\s+`. It stays open-ended ("polonya" catches "polonyada", "belediye
+ * meclis" catches "belediye meclisinde") except for a single word of 3 letters
+ * or fewer, which takes `\M`: "fed" must not hit "federasyon", "chp" must not
+ * hit "chpx".
  */
 function excludeAlternative(words: readonly string[]): string {
   const closed = words.length === 1 && (words[0] as string).length <= 3;
   return `\\m${words.join("\\s+")}${closed ? "\\M" : ""}`;
+}
+
+/** The alternatives of a curated phrase list; entries that fold to nothing are dropped. */
+function guardAlternatives(phrases: readonly string[] | undefined): string[] {
+  return (phrases ?? [])
+    .map(foldedWords)
+    .filter((words) => words.length > 0)
+    .map(excludeAlternative);
 }
 
 /**
@@ -232,14 +270,19 @@ function excludeAlternative(words: readonly string[]): string {
  * An apostrophe suffix ("DEVA'nın", "Erdoğan'ın") still meets `\M`, because the
  * apostrophe is not a word character. Forms that fold to nothing are dropped.
  *
- * Two optional guards, both built from curated data only:
+ * Three optional guards, all built from curated data only:
  *   * `quantityGuard`: a single-word base becomes `\m` + QUANTITY_GUARD + word,
  *     so "100 dolar" and "2,1 milyar dolarlık" are not the currency.
  *   * `excludes`: a form that is not `trusted` is prefixed with
  *     `^(?![\s\S]*(?:<alt>|<alt>))[\s\S]*`, a lookahead over the whole text, so
- *     "Polonya'da ... Anayasa Mahkemesi" never matches. The pattern starts with
- *     `^`, never `(?`, which Postgres would read as embedded options. A trusted
- *     form ("TCMB") stays bare.
+ *     "Polonya'da ... Anayasa Mahkemesi" never matches.
+ *   * `requires`: the same form also needs at least one cue anywhere in the
+ *     text, a positive lookahead `(?=[\s\S]*(?:<alt>|<alt>))` placed after the
+ *     exclude one: `^(?![\s\S]*(?:<ex>))(?=[\s\S]*(?:<req>))[\s\S]*`. So the
+ *     bare "Meclis" of an İTO or a municipal story, with no TBMM cue, is out.
+ *   The guard is emitted only when either list holds a usable entry. The
+ *   pattern starts with `^`, never `(?`, which Postgres would read as embedded
+ *   options. A trusted form ("TCMB", "TBMM") stays bare.
  */
 export function entityHubPatterns(
   entity: RisingEntity,
@@ -247,11 +290,14 @@ export function entityHubPatterns(
 ): string[] {
   const prefix = spec.hubMatch === "prefix";
   const trusted = new Set(spec.trusted ?? []);
-  const alternatives = (spec.excludes ?? [])
-    .map(foldedWords)
-    .filter((words) => words.length > 0)
-    .map(excludeAlternative);
-  const guard = alternatives.length > 0 ? `^(?![\\s\\S]*(?:${alternatives.join("|")}))[\\s\\S]*` : "";
+  const excludeAlts = guardAlternatives(spec.excludes);
+  const requireAlts = guardAlternatives(spec.requires);
+  const guard =
+    excludeAlts.length > 0 || requireAlts.length > 0
+      ? `^${excludeAlts.length > 0 ? `(?![\\s\\S]*(?:${excludeAlts.join("|")}))` : ""}${
+          requireAlts.length > 0 ? `(?=[\\s\\S]*(?:${requireAlts.join("|")}))` : ""
+        }[\\s\\S]*`
+      : "";
   const patterns: string[] = [];
   for (const form of entityHubForms(entity, spec)) {
     const words = foldedWords(form);
