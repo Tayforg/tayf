@@ -669,10 +669,13 @@ describe("normalize.ts entity-decode: bad numeric references never throw and nev
   });
 
   it("decodes '&#351;' and '&#x15F;' to 'ş' and '&#x1F600;' to the emoji", () => {
-    const titles = ["&#351;", "&#x15F;", "&#x1F600;"].map(
+    // The emoji sits next to a word: a title that is ONLY an emoji has no
+    // letter or digit and is dropped as headline-less (see the contentless
+    // titles block at the end of this file).
+    const titles = ["&#351;", "&#x15F;", "&#x1F600; gol"].map(
       (t) => mod!.normalizeArticles(source, [{ title: t, link: "/e" }])[0]!.title,
     );
-    expect(titles).toEqual(["ş", "ş", "😀"]);
+    expect(titles).toEqual(["ş", "ş", "😀 gol"]);
   });
 
   it("keeps single-pass decoding: '&amp;lt;' is the literal '&lt;'", () => {
@@ -708,7 +711,7 @@ describe("normalize.ts entity-decode: bad numeric references never throw and nev
       "a &#1114112; b",
       "a &#0; b &#11; c &#xD800; d &#xDFFF; e &#xFFFE; f &#xFFFF;",
       "raw \u0000\u0001\u0008\u000B\u000C\u001F￾￿\uD800 \uDC00 end",
-      "&#x1F600; 😀 \uD83D",
+      "&#x1F600; 😀 gol \uD83D",
     ];
     const items = nasty.map((t, i) => ({
       title: t,
@@ -963,5 +966,176 @@ describe("normalize.ts entity residue: one bounded extra decode pass", () => {
     // 490 x '&amp;quot;' is 5 000 raw characters but 490 after decoding.
     const desc = descOf("&amp;quot;".repeat(490));
     expect(desc).toBe('"'.repeat(490));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Headline-less items (hunt-10 C-entity-only-titles). An item whose title is
+// only entity residue, punctuation or invisible filler ('&nbsp', '&amp;nbsp',
+// '-', '…', U+3164) is not a story: prod rendered one as
+// "<title>&amp;nbsp — Tayf</title>", indexable. normalizeItem drops it BEFORE
+// the legal-notice check and, when the caller passes a counters object, counts
+// it, so the ingest cycle can report how many it threw away.
+// ---------------------------------------------------------------------------
+describe("normalize.ts contentless titles: dropped and counted", () => {
+  const link = "https://example.test/haber/1";
+
+  it.each([
+    ["a double-encoded &amp;nbsp (the prod case)", "&amp;nbsp"],
+    ["a bare &nbsp", "&nbsp"],
+    ["a terminated &nbsp;", "&nbsp;"],
+    ["a numeric nbsp", "&#160;"],
+    ["a hyphen", "-"],
+    ["an ellipsis", "…"],
+    ["three dots", "..."],
+    ["a HANGUL FILLER (benguturk /reklam/)", "\u3164"],
+    ["markup with no text", "<b></b>"],
+  ])("returns null and counts %s", (_label, title) => {
+    const counters = { contentlessTitles: 0 };
+    expect(mod!.normalizeItem(source, { title, link }, 0, counters)).toBeNull();
+    expect(counters.contentlessTitles).toBe(1);
+  });
+
+  it("an emoji-only title has no letter or digit: dropped and counted", () => {
+    const counters = { contentlessTitles: 0 };
+    expect(mod!.normalizeItem(source, { title: "&#x1F600; 😀", link }, 0, counters)).toBeNull();
+    expect(counters.contentlessTitles).toBe(1);
+  });
+
+  it("counts a whitespace-only raw title when the item has a link", () => {
+    const counters = { contentlessTitles: 0 };
+    expect(mod!.normalizeItem(source, { title: "   ", link }, 0, counters)).toBeNull();
+    expect(counters.contentlessTitles).toBe(1);
+  });
+
+  it("counts an empty and a missing raw title when the item has a link", () => {
+    const counters = { contentlessTitles: 0 };
+    expect(mod!.normalizeItem(source, { title: "", link }, 0, counters)).toBeNull();
+    expect(mod!.normalizeItem(source, { link }, 0, counters)).toBeNull();
+    expect(counters.contentlessTitles).toBe(2);
+  });
+
+  it("does not count an item that has no link (nothing to ingest anyway)", () => {
+    const counters = { contentlessTitles: 0 };
+    expect(mod!.normalizeItem(source, { title: "&nbsp" }, 0, counters)).toBeNull();
+    expect(mod!.normalizeItem(source, { title: "Başlık" }, 0, counters)).toBeNull();
+    expect(mod!.normalizeItem(source, { title: "", link: "  " }, 0, counters)).toBeNull();
+    expect(counters.contentlessTitles).toBe(0);
+  });
+
+  it("leaves a normal title unchanged and uncounted", () => {
+    const counters = { contentlessTitles: 0 };
+    const row = mod!.normalizeItem(
+      source,
+      { title: "Merkez Bankası faizi sabit tuttu", link },
+      0,
+      counters,
+    );
+    expect(row).not.toBeNull();
+    expect(row!.title).toBe("Merkez Bankası faizi sabit tuttu");
+    expect(counters.contentlessTitles).toBe(0);
+  });
+
+  it.each(["AT&T hisseleri yükseldi", "R&D yatırımı", "2025", "a", "Gol!", "%50 zam"])(
+    "keeps the short or ampersand-bearing real headline %j",
+    (title) => {
+      const counters = { contentlessTitles: 0 };
+      const row = mod!.normalizeItem(source, { title, link }, 0, counters);
+      expect(row).not.toBeNull();
+      expect(counters.contentlessTitles).toBe(0);
+    },
+  );
+
+  it("a BİK legal notice still returns null but is NOT counted as contentless", () => {
+    const counters = { contentlessTitles: 0 };
+    const row = mod!.normalizeItem(
+      source,
+      { title: "T.C. SAMSUN 2. SULH HUKUK MAHKEMESİNDEN", link: "/ilan-1" },
+      0,
+      counters,
+    );
+    expect(row).toBeNull();
+    expect(counters.contentlessTitles).toBe(0);
+  });
+
+  it("the contentless check runs before the legal-notice check (an /ilan/ url with no headline is contentless)", () => {
+    const counters = { contentlessTitles: 0 };
+    const row = mod!.normalizeItem(
+      source,
+      { title: "&nbsp", link: "https://example.test/ilan/12345" },
+      0,
+      counters,
+    );
+    expect(row).toBeNull();
+    expect(counters.contentlessTitles).toBe(1);
+  });
+
+  it("works without a counters object: the old 2- and 3-argument calls behave as before", () => {
+    expect(mod!.normalizeItem(source, { title: "&amp;nbsp", link })).toBeNull();
+    expect(mod!.normalizeItem(source, { title: "-", link }, 0)).toBeNull();
+    const row = mod!.normalizeItem(source, { title: "Normal başlık", link }, 0);
+    expect(row).not.toBeNull();
+    expect(row!.title).toBe("Normal başlık");
+  });
+
+  it("adds to a counters object that already holds a count", () => {
+    const counters = { contentlessTitles: 5 };
+    mod!.normalizeItem(source, { title: "…", link }, 0, counters);
+    expect(counters.contentlessTitles).toBe(6);
+  });
+
+  describe("normalizeArticles", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    const batch = [
+      { title: "Önce gerçek bir başlık", link: "/1" },
+      { title: "&amp;nbsp", link: "/2" },
+      { title: "-", link: "/3" },
+      { title: "   ", link: "/4" },
+      { title: "T.C. ANKARA 3. İCRA DAİRESİNDEN", link: "/5" },
+      { title: "Sonra başka bir başlık", link: "/6" },
+      { title: "Bağlantısız başlık" }, // no link: dropped, not counted
+    ];
+
+    it("totals the contentless items across the batch and returns only the real rows", () => {
+      const counters = { contentlessTitles: 0 };
+      const rows = mod!.normalizeArticles(source, batch, 0, counters);
+      expect(rows.map((r) => r.title)).toEqual([
+        "Önce gerçek bir başlık",
+        "Sonra başka bir başlık",
+      ]);
+      expect(counters.contentlessTitles).toBe(3);
+    });
+
+    it("the existing 3-argument call returns the same rows and logs nothing extra", () => {
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const rows = mod!.normalizeArticles(source, batch, 0);
+      expect(rows.map((r) => r.title)).toEqual([
+        "Önce gerçek bir başlık",
+        "Sonra başka bir başlık",
+      ]);
+      expect(errSpy).not.toHaveBeenCalled();
+      expect(logSpy).not.toHaveBeenCalled();
+    });
+
+    it("a throwing item is skipped on its own and is not counted as contentless", () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const counters = { contentlessTitles: 0 };
+      const rows = mod!.normalizeArticles(
+        source,
+        [
+          { title: {} as unknown as string, link: "/bad" },
+          { title: "&nbsp", link: "/empty" },
+          { title: "İyi", link: "/ok" },
+        ],
+        0,
+        counters,
+      );
+      expect(rows.map((r) => r.title)).toEqual(["İyi"]);
+      expect(counters.contentlessTitles).toBe(1);
+    });
   });
 });

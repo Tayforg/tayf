@@ -482,6 +482,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "122_ops_ingest_gaps.sql",
       // 126 re-creates 071's blindspot_recall_veto_refresh() (its VALUES-list copy of BIAS_TO_ZONE verbatim) plus the sibling-headline evidence; pinned by tests/migrations/126-blindspot-sibling-veto.test.ts
       "126_blindspot_sibling_veto.sql",
+      // 132's legacy_bias_voter_dists() carries a copy of the BIAS_TO_ZONE CASE to re-derive the blindspot rule from the voting members; pinned by the 132 block below and tests/migrations/132-legacy-bias-range-tools.test.ts
+      "132_legacy_bias_range_tools.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))
@@ -549,6 +551,51 @@ describe("zone-parity: migration 064 (cluster_unlink_article) matches the contra
     for (const candidate of candidates) {
       expect(candidate).toEqual([...ZONE_KEYS]);
     }
+  });
+});
+
+describe("zone-parity: migration 132 (legacy bias range tools) matches the contracts", () => {
+  let code = "";
+  beforeAll(() => {
+    const sql = read("132_legacy_bias_range_tools.sql");
+    expect(sql.length).toBeGreaterThan(0);
+    code = stripSqlComments(sql);
+  });
+
+  it("its zone CASE deep-equals BIAS_TO_ZONE", () => {
+    const parsed = parseZoneCase(code);
+    expect(parsed).toEqual(contractZoneMap);
+  });
+
+  it("the jsonb_build_object key literals equal BIAS_KEYS in order", () => {
+    const keys = parseDistKeys(code);
+    expect(keys).toEqual([...BIAS_KEYS]);
+  });
+
+  it("every `in (...)` list is either the BIAS_KEYS set or the VOTING_SOURCE_KINDS set, with both present", () => {
+    const lists = extractInLists(code);
+    expect(lists.length).toBeGreaterThan(0);
+    let biasLists = 0;
+    let votingLists = 0;
+    for (const list of lists) {
+      const sorted = JSON.stringify([...new Set(list)].sort());
+      if (sorted === JSON.stringify([...new Set(BIAS_KEYS)].sort())) {
+        biasLists += 1;
+      } else if (sorted === JSON.stringify([...new Set(VOTING_SOURCE_KINDS)].sort())) {
+        votingLists += 1;
+      } else {
+        throw new Error(`unexpected in (...) list shape: ${JSON.stringify(list)}`);
+      }
+    }
+    expect(biasLists).toBeGreaterThanOrEqual(1);
+    expect(votingLists).toBeGreaterThanOrEqual(1);
+  });
+
+  it("contains the BLINDSPOT.minSources / dominantShare literals, anchored to the real expressions (not hardcoded here)", () => {
+    expect(code).toMatch(new RegExp(`t\\.total\\s*>=\\s*${BLINDSPOT.minSources}\\b`));
+    expect(code).toMatch(
+      new RegExp(`nullif\\(t\\.total,\\s*0\\)\\s*>=\\s*${BLINDSPOT.dominantShare.toString().replace(".", "\\.")}\\b`),
+    );
   });
 });
 

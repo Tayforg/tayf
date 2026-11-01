@@ -18,6 +18,13 @@ import { FactCheckBox } from "@/components/story/fact-check-box";
 import { ThreadLink } from "@/components/story/thread-link";
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { BalanceChip } from "@/components/story/balance-chip";
+import { ShareButton } from "@/components/story/share-button";
+import { ClusterCardImage } from "@/components/story/cluster-card-image";
+import { BookmarkButton } from "@/components/bookmark/bookmark-button";
+import {
+  bookmarkChipSuffix,
+  bookmarkStoryLabel,
+} from "@/components/bookmark/bookmark-label";
 
 // ---------------------------------------------------------------------------
 // Module mocks
@@ -1919,5 +1926,215 @@ describe("cluster/[id]/page.tsx — contrast sweep", () => {
     expect(pageSource).toContain(
       "rounded-xl border border-dashed border-border/50 bg-card/20 p-4 animate-fade-up stagger-2",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Headline-less clusters (hunt-10 C-entity-only-titles). Prod served
+// /cluster/46467982-... with <title>&amp;nbsp — Tayf</title> and
+// "index, follow": the repaired title_tr is the literal '&nbsp' (the feed
+// dropped the semicolon of a double-encoded "&amp;nbsp;"). Reader side only,
+// no data rewrite: a cluster whose title has no letter or digit after
+// decoding gets the neutral title "Haber" and is noindex, follow. Every other
+// cluster is unchanged.
+// ---------------------------------------------------------------------------
+
+/** Text of the first <h1> in the page tree, or null. */
+function findH1Text(node: unknown): string | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findH1Text(child);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: { children?: ReactNode } };
+    if (el.type === "h1") return collectText(el.props?.children).join("");
+    if (el.props?.children !== undefined) return findH1Text(el.props.children);
+  }
+  return null;
+}
+
+/** Props of the first element of the given component type, or null. */
+function findPropsOfType(
+  node: unknown,
+  type: unknown,
+): Record<string, unknown> | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findPropsOfType(child, type);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: Record<string, unknown> & { children?: ReactNode } };
+    if (el.type === type) return el.props ?? {};
+    if (el.props?.children !== undefined) return findPropsOfType(el.props.children, type);
+  }
+  return null;
+}
+
+function headlessDetail(titleTr: string, isArchived = false): ClusterDetail {
+  const source = makeSource({ id: "s1", slug: "s1", name: "Kaynak" });
+  const cluster = makeCluster({
+    bias_distribution: emptyDistribution(),
+    is_archived: isArchived,
+  });
+  cluster.title_tr = titleTr;
+  // No summary, so the description falls to the "N kaynak." form and the only
+  // place the title could leak into it is `describeForMeta`'s `title` option.
+  cluster.summary_tr = "";
+  return {
+    cluster,
+    members: [makeMember("a1", source)],
+    allSources: [source],
+    wire: { isWireRedistribution: false, effectiveArticleCount: 1, memberCount: 1 },
+    blindspotSuppressed: false,
+    blindspotRecallVetoed: false,
+  };
+}
+
+describe("generateMetadata — headline-less title (hunt-10 C-entity-only-titles)", () => {
+  it.each([
+    ["the prod literal '&nbsp'", "&nbsp"],
+    ["a hyphen", "-"],
+    ["a double-encoded '&amp;nbsp'", "&amp;nbsp"],
+    ["an ellipsis", "…"],
+    ["a HANGUL FILLER", "\u3164"],
+    ["an empty title", ""],
+  ])("%s: neutral title, noindex+follow, no entity in the description", async (_label, titleTr) => {
+    getClusterDetail.mockResolvedValue(headlessDetail(titleTr));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.title).toBe("Haber");
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.openGraph?.title).toBe("Haber");
+    expect(metadata.twitter?.title).toBe("Haber");
+    const types = (metadata.alternates?.types ?? {}) as Record<string, Array<{ title?: string }>>;
+    expect(types["application/json+oembed"]?.[0]?.title).toBe("Haber");
+    // The "N kaynak." form: no "tek haber: <title>" tail built from the junk.
+    expect(metadata.description).toBe("1 kaynak.");
+    expect(String(metadata.description)).not.toContain("nbsp");
+    expect(metadata.openGraph?.description).toBe("1 kaynak.");
+    expect(metadata.twitter?.description).toBe("1 kaynak.");
+    // The canonical is untouched: the page is still reachable and still its own URL.
+    expect(metadata.alternates?.canonical).toBe("/cluster/c1");
+    expect(metadata.openGraph?.url).toBe("/cluster/c1");
+  });
+
+  it("an archived headline-less cluster stays noindex+follow with the neutral title", async () => {
+    getClusterDetail.mockResolvedValue(headlessDetail("&nbsp", true));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.title).toBe("Haber");
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+  });
+
+  it.each([
+    ["an ordinary headline", "Merkez Bankası faizi sabit tuttu"],
+    ["an ampersand headline", "AT&T hisseleri yükseldi"],
+    ["a one-letter headline", "a"],
+    ["a digits-only headline", "2025"],
+  ])("%s: title unchanged, robots left to the root layout", async (_label, titleTr) => {
+    getClusterDetail.mockResolvedValue(headlessDetail(titleTr));
+
+    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(metadata.title).toBe(titleTr);
+    expect(metadata.robots).toBeUndefined();
+    expect(metadata.openGraph?.title).toBe(titleTr);
+    expect(metadata.twitter?.title).toBe(titleTr);
+    const types = (metadata.alternates?.types ?? {}) as Record<string, Array<{ title?: string }>>;
+    expect(types["application/json+oembed"]?.[0]?.title).toBe(titleTr);
+    expect(String(metadata.description)).toContain(titleTr);
+  });
+});
+
+describe("ClusterDetailPage — headline-less title (hunt-10 C-entity-only-titles)", () => {
+  it("renders 'Haber' as the h1 and as the JSON-LD headline for the prod '&nbsp' title", async () => {
+    getClusterDetail.mockResolvedValue(headlessDetail("&nbsp"));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(findH1Text(tree)).toBe("Haber");
+    const html = findJsonLd(tree);
+    expect(html).not.toBeNull();
+    const parsed = JSON.parse(html!);
+    expect(parsed.headline).toBe("Haber");
+    expect(parsed.description).toBe("1 kaynak.");
+    expect(html!).not.toContain("nbsp");
+  });
+
+  it("renders 'Haber' for a hyphen-only title too", async () => {
+    getClusterDetail.mockResolvedValue(headlessDetail("-"));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(findH1Text(tree)).toBe("Haber");
+    expect(JSON.parse(findJsonLd(tree)!).headline).toBe("Haber");
+  });
+
+  it("keeps a normal title as the h1 and the JSON-LD headline", async () => {
+    getClusterDetail.mockResolvedValue(headlessDetail("Merkez Bankası faizi sabit tuttu"));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(findH1Text(tree)).toBe("Merkez Bankası faizi sabit tuttu");
+    const parsed = JSON.parse(findJsonLd(tree)!);
+    expect(parsed.headline).toBe("Merkez Bankası faizi sabit tuttu");
+    expect(parsed.description).toContain("Merkez Bankası faizi sabit tuttu");
+  });
+
+  it.each([
+    ["the prod literal '&nbsp'", "&nbsp"],
+    ["a hyphen", "-"],
+    ["an empty title", ""],
+  ])(
+    "%s: ShareButton gets 'Haber' and BookmarkButton gets no story title (no junk in the share sheet, /saved or the aria name)",
+    async (_label, titleTr) => {
+      getClusterDetail.mockResolvedValue(headlessDetail(titleTr));
+
+      const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+      const share = findPropsOfType(tree, ShareButton);
+      expect(share).not.toBeNull();
+      expect(share!.title).toBe("Haber");
+      expect(share!.clusterId).toBe("c1");
+
+      const bookmark = findPropsOfType(tree, BookmarkButton);
+      expect(bookmark).not.toBeNull();
+      // null (not the 'Haber' label): /saved would store a made-up title, and
+      // the label helpers fall back to the generic "Kaydet" copy on null.
+      expect(bookmark!.storyTitle).toBeNull();
+      expect(bookmark!.clusterId).toBe("c1");
+      expect(bookmarkChipSuffix(bookmark!.storyTitle as string | null)).toBeNull();
+      expect(bookmarkStoryLabel(bookmark!.storyTitle as string | null)).toBe("Hikâyeyi kaydet");
+
+      // Nothing the share/bookmark controls receive carries the entity.
+      expect(JSON.stringify({ share, bookmark })).not.toContain("nbsp");
+    },
+  );
+
+  it("the hero image alt falls back to 'Haber', not the entity, when no member title is available", async () => {
+    getClusterDetail.mockResolvedValue(headlessDetail("&nbsp"));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    const hero = findPropsOfType(tree, ClusterCardImage);
+    expect(hero).not.toBeNull();
+    expect(hero!.alt).toBe("Haber");
+  });
+
+  it("keeps a normal title on ShareButton and BookmarkButton", async () => {
+    getClusterDetail.mockResolvedValue(headlessDetail("Merkez Bankası faizi sabit tuttu"));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(findPropsOfType(tree, ShareButton)!.title).toBe("Merkez Bankası faizi sabit tuttu");
+    expect(findPropsOfType(tree, BookmarkButton)!.storyTitle).toBe("Merkez Bankası faizi sabit tuttu");
   });
 });

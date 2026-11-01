@@ -36,6 +36,7 @@
   --color-destructive: var(--destructive);
   --color-border: var(--border);
   --color-input: var(--input);
+  --color-input-subtle: var(--input-subtle);
   --color-ring: var(--ring);
 
   /* --- Brand accent --- */
@@ -90,7 +91,11 @@
   --accent-foreground: oklch(0.22 0.01 60);
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.90 0.008 80);
-  --input: oklch(0.90 0.008 80);
+  /* Form-control border (WCAG 1.4.11, h10-a11y-3): the lightest 0.01 step
+     that keeps 3:1 on both the white card (3.23) and the page background
+     (3.10); it was 1.35 and 1.29. Fills use --input-subtle, the old value. */
+  --input: oklch(0.65 0.008 80);
+  --input-subtle: oklch(0.90 0.008 80);
   --ring: oklch(0.72 0.06 75);
   --brand: oklch(0.76 0.12 75);
   --brand-foreground: oklch(0.16 0.01 60);
@@ -131,7 +136,13 @@
   --accent-foreground: oklch(0.93 0.01 80);
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 8%);
-  --input: oklch(1 0 0 / 12%);
+  /* Form-control border (WCAG 1.4.11, h10-a11y-3): the darkest 0.01 step that
+     keeps 3:1 on the dark card (3.07) and the page background (3.31); it was
+     1.40 and 1.50. The fills and the outline button border use --input-subtle
+     (the old value, pixel-identical), which keeps the dark placeholder at
+     4.7:1 on the field fill. Do not fill with --input. */
+  --input: oklch(0.50 0.01 60);
+  --input-subtle: oklch(1 0 0 / 12%);
   --ring: oklch(0.72 0.06 75);
   --brand: oklch(0.76 0.12 75);
   --brand-foreground: oklch(0.14 0.008 60);

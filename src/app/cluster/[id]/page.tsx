@@ -62,6 +62,7 @@ import { oembedDiscoveryHref } from "@/lib/embed/embed-snippet";
 import { balanceFromDistribution } from "@/lib/bias/balance";
 import { zoneOf } from "@/lib/bias/config";
 import type { MediaDnaZone } from "@/types";
+import { isContentlessTitle } from "../../../../supabase/functions/_shared/rss/entities";
 
 /**
  * "Kim önce yazdı?" data. Both lookups are skipped below the 3-source floor
@@ -90,6 +91,14 @@ async function loadStoryTimeline(
     timelineMembersFrom(nonVotingMembers),
   );
 }
+
+// A cluster whose stored title has no letter or digit once decoded ('&nbsp',
+// '-', '…') has no headline to show or to index (hunt-10: /cluster/46467982-…
+// was served as "&amp;nbsp — Tayf", indexable). Reader side only, no data
+// rewrite: the page and its metadata fall back to this neutral label and the
+// metadata goes noindex. Module-private: a page file may only export the
+// Next.js route API.
+const NO_HEADLINE_FALLBACK = "Haber";
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise and must be awaited.
@@ -144,6 +153,10 @@ export async function generateMetadata({
   }
 
   const { cluster, members, wire } = detail;
+  // No letter or digit in the stored title (`isContentlessTitle`): show the
+  // neutral label and keep the page out of the index (robots below).
+  const hasHeadline = !isContentlessTitle(cluster.title_tr);
+  const headline = hasHeadline ? cluster.title_tr : NO_HEADLINE_FALLBACK;
   // Postgres resolves a uuid case-insensitively, so a pasted/uppercased link
   // renders this page. Every self-referencing URL below uses the one
   // lowercase form (the form every internal link and the sitemap emit), so
@@ -160,14 +173,15 @@ export async function generateMetadata({
       members,
       wire,
     }),
-    title: cluster.title_tr,
+    // Never build the "tek haber: <title>" fallback sentence from junk.
+    title: hasHeadline ? cluster.title_tr : undefined,
   });
 
   return {
     // Plain title — the root layout's `title.template = "%s — Tayf"` adds
     // the suffix automatically. Returning `${title} — Tayf` here would
     // double-suffix to `title — Tayf — Tayf` (caught by gstack site audit).
-    title: cluster.title_tr,
+    title: headline,
     description,
     // Without an explicit canonical, Next's metadata inheritance propagates
     // the root layout's `canonical: "/"` here — telling crawlers every
@@ -179,7 +193,7 @@ export async function generateMetadata({
       canonical: `/cluster/${canonicalId}`,
       types: {
         "application/json+oembed": [
-          { url: oembedDiscoveryHref(siteUrl(), canonicalId), title: cluster.title_tr },
+          { url: oembedDiscoveryHref(siteUrl(), canonicalId), title: headline },
         ],
       },
     },
@@ -188,11 +202,12 @@ export async function generateMetadata({
     // stop competing for crawl budget / index slots against live clusters.
     // Omitted entirely (undefined) for non-archived clusters so metadata
     // inheritance from the root layout's default robots stays in effect.
-    ...(cluster.is_archived
+    // A headline-less cluster is kept out of the index the same way.
+    ...(cluster.is_archived || !hasHeadline
       ? { robots: { index: false, follow: true } }
       : {}),
     openGraph: {
-      title: cluster.title_tr,
+      title: headline,
       description,
       type: "article",
       url: `/cluster/${canonicalId}`,
@@ -208,7 +223,7 @@ export async function generateMetadata({
     },
     twitter: {
       card: "summary_large_image",
-      title: cluster.title_tr,
+      title: headline,
       description,
       // Same reasoning as `openGraph.images` above — omitted so the
       // `twitter-image.tsx` file convention wires in automatically.
@@ -228,6 +243,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   if (detail.cluster.merged_into) permanentRedirect(`/cluster/${detail.cluster.merged_into}`);
 
   const { cluster, members, allSources, wire, blindspotSuppressed } = detail;
+  // Same fallback as generateMetadata: the h1 and the JSON-LD headline never
+  // show an entity-only title as text.
+  const hasHeadline = !isContentlessTitle(cluster.title_tr);
+  const headline = hasHeadline ? cluster.title_tr : NO_HEADLINE_FALLBACK;
 
   // Toplayıcı / niş kaynaklar are cluster members but never vote — split
   // them out once here so every voting-sensitive computation below reads
@@ -310,7 +329,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     .filter((u): u is string => typeof u === "string" && u.length > 0);
   const heroSrc = heroCandidates[0] ?? null;
   const heroMember = imageEligible.find((m) => !!m.article.image_url) ?? null;
-  const heroAlt = heroMember?.article.title ?? cluster.title_tr;
+  const heroAlt = heroMember?.article.title ?? headline;
 
   // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the exact image
   // URL rather than tied to `heroMember`/`heroSrc` alone, so the credit
@@ -422,13 +441,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "NewsArticle",
-    headline: cluster.title_tr,
+    headline,
     datePublished: cluster.first_published,
     dateModified: cluster.updated_at,
     description: describeForMeta({
       count: wire.effectiveArticleCount,
       attribution: summary,
-      title: cluster.title_tr,
+      title: hasHeadline ? cluster.title_tr : undefined,
     }),
     // Always the generated Medya DNA card from opengraph-image.tsx (already
     // the live og:image for this route) — never the outlet's raw CDN photo.
@@ -537,7 +556,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 </div>
               )}
               <h1 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-[1.05] text-foreground">
-                {cluster.title_tr}
+                {headline}
               </h1>
               {cluster.title_original && (
                 <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
@@ -596,12 +615,18 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     Tek kaynaktan dağıtıldı · {wire.memberCount} kopya
                   </span>
                 )}
+                {/* Same fallback as the h1: the share sheet gets "Haber", and
+                    the bookmark gets no title (null = the generic "Kaydet"
+                    label, and /saved never stores a made-up headline). */}
                 <ShareButton
                   clusterId={id}
-                  title={cluster.title_tr}
+                  title={headline}
                   text={shareText}
                 />
-                <BookmarkButton clusterId={id} storyTitle={cluster.title_tr} />
+                <BookmarkButton
+                  clusterId={id}
+                  storyTitle={hasHeadline ? cluster.title_tr : null}
+                />
                 <CompareButton clusterId={id} />
                 <Link
                   href={`/metodoloji?cluster=${id}#duzeltme`}

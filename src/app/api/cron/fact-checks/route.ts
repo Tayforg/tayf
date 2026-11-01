@@ -58,6 +58,23 @@ interface FeedStatus {
   error?: string;
 }
 
+/**
+ * Surface a failing feed to the logs and Sentry. A broken publisher used to
+ * be recorded only as `{status: "error"}` in the cron response, which nobody
+ * reads, so it went unnoticed. The reason is whitespace-collapsed and capped
+ * at 200 characters so it stays a single log line and groups cleanly in
+ * Sentry; only the publisher key and that reason are reported -- never a
+ * response body, header or URL. The cron runs hourly, so one broken feed is
+ * at most 24 grouped events a day.
+ */
+function reportFeedFailure(publisher: string, error: string | undefined): void {
+  const message = (error ?? "unknown").replace(/\s+/g, " ").trim().slice(0, 200);
+  console.error("[fact-checks-cron] feed failed", publisher, message);
+  captureServerException(new Error(`fact-check feed failed: ${publisher}: ${message}`), {
+    publisher,
+  });
+}
+
 interface FetchedFeedItem {
   row: { publisher: string; url: string; title: string; published_at: string };
   categories: string[];
@@ -191,16 +208,17 @@ export const GET = withApiErrors(async (request: Request) => {
     const p = FACT_CHECK_FEEDS[i]!;
     if (s.status === "fulfilled") {
       feedsStatus[p.key] = s.value.status;
+      if (s.value.status.status === "error") {
+        reportFeedFailure(p.key, s.value.status.error);
+      }
       for (const { row, categories } of s.value.items) {
         rowsToUpsert.push(row);
         categoriesByUrl.set(row.url, categories);
       }
     } else {
-      feedsStatus[p.key] = {
-        status: "error",
-        items: 0,
-        error: s.reason instanceof Error ? s.reason.message : "rejected",
-      };
+      const error = s.reason instanceof Error ? s.reason.message : "rejected";
+      feedsStatus[p.key] = { status: "error", items: 0, error };
+      reportFeedFailure(p.key, error);
     }
   });
 
