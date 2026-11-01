@@ -32,6 +32,7 @@
 import { createHash } from "node:crypto";
 import {
   HEADLINE_GENERIC_PREFIXES,
+  HEADLINE_TITLE_MAX_CHARS,
   HEADLINE_TOKEN_MIN_LEN,
   MINHASH_SIG_K,
 } from "./constants.mjs";
@@ -199,12 +200,19 @@ export function titleTokens(title, minLen = 4) {
  *    its surface form starts with one of HEADLINE_GENERIC_PREFIXES (the check
  *    runs on the surface form: "erdoganin" stems to "erdoga").
  *
+ * Only the first HEADLINE_TITLE_MAX_CHARS characters of the title are read:
+ * titles come from source feeds and are stored unshortened, and a roundup or
+ * keyword-stuffed title must neither cost O(length) per comparison nor grow
+ * into a many-token needle for the containment variant.
+ *
  * @returns {{ tokens: Set<string>, numbers: Set<string> }}
  */
 export function headlineTokens(title) {
   const tokens = new Set();
   const numbers = new Set();
-  const norm = normalizeTurkish(title);
+  const norm = normalizeTurkish(
+    typeof title === "string" ? title.slice(0, HEADLINE_TITLE_MAX_CHARS) : title,
+  );
   if (!norm) return { tokens, numbers };
   for (const tok of norm.split(" ")) {
     if (!tok) continue;

@@ -64,6 +64,24 @@ interface ClusterSide {
     tokens: Set<string>;
     numbers: Set<string>;
   };
+  headlineLane(
+    ha: { tokens: Set<string>; numbers: Set<string> },
+    hb: { tokens: Set<string>; numbers: Set<string> },
+    hoursDelta: number,
+  ): {
+    fired: boolean;
+    kind: "jaccard" | "containment" | null;
+    sim: number;
+    shared: number;
+    containment: number;
+    score: number;
+  };
+  headlineOnlyScore(
+    ha: { tokens: Set<string>; numbers: Set<string> },
+    hb: { tokens: Set<string>; numbers: Set<string> },
+    hoursDelta: number,
+    opts?: { aSourceSlug?: string | null; bSourceSlug?: string | null },
+  ): number;
   MINHASH_VERSION: number;
   serializeSignature(sig: Uint32Array): number[];
   deserializeSignature(value: unknown, version: unknown): Uint32Array | null;
@@ -191,6 +209,8 @@ beforeAll(async () => {
       fingerprint: legacyFingerprint.fingerprint,
       TfidfIndex: legacyTfidf.TfidfIndex,
       score: legacyEnsemble.score,
+      headlineLane: legacyEnsemble.headlineLane,
+      headlineOnlyScore: legacyEnsemble.headlineOnlyScore,
       titleTokens: legacyFingerprint.titleTokens,
       headlineTokens: legacyFingerprint.headlineTokens,
       MINHASH_VERSION: legacyFingerprint.MINHASH_VERSION,
@@ -203,6 +223,8 @@ beforeAll(async () => {
       fingerprint: portFingerprint.fingerprint,
       TfidfIndex: portTfidf.TfidfIndex,
       score: portEnsemble.score,
+      headlineLane: portEnsemble.headlineLane,
+      headlineOnlyScore: portEnsemble.headlineOnlyScore,
       titleTokens: portFingerprint.titleTokens,
       headlineTokens: portFingerprint.headlineTokens,
       MINHASH_VERSION: portFingerprint.MINHASH_VERSION,
@@ -242,6 +264,34 @@ beforeAll(async () => {
     expect([...portConstants.HEADLINE_GENERIC_PREFIXES]).toEqual([
       ...legacyConstants.HEADLINE_GENERIC_PREFIXES,
     ]);
+    // Headline containment (wave AB follow-up).
+    expect(portConstants.HEADLINE_CONTAIN_MIN).toBe(legacyConstants.HEADLINE_CONTAIN_MIN);
+    expect(portConstants.HEADLINE_CONTAIN_MIN_TOKENS).toBe(
+      legacyConstants.HEADLINE_CONTAIN_MIN_TOKENS,
+    );
+    expect([...portConstants.HEADLINE_CONTAIN_BLOCK_PREFIXES]).toEqual([
+      ...legacyConstants.HEADLINE_CONTAIN_BLOCK_PREFIXES,
+    ]);
+    expect(portConstants.HEADLINE_MEMBER_SCAN_MAX).toBe(
+      legacyConstants.HEADLINE_MEMBER_SCAN_MAX,
+    );
+    // Pin the shipped values so "both undefined" can never pass as parity.
+    expect(legacyConstants.HEADLINE_CONTAIN_MIN).toBe(0.85);
+    expect(legacyConstants.HEADLINE_CONTAIN_MIN_TOKENS).toBe(5);
+    expect([...legacyConstants.HEADLINE_CONTAIN_BLOCK_PREFIXES]).toEqual([
+      "yalan",
+      "iddia",
+      "degil",
+      "tekzip",
+    ]);
+    expect(legacyConstants.HEADLINE_MEMBER_SCAN_MAX).toBe(12);
+    // Size guard (review of wave AB).
+    expect(portConstants.HEADLINE_CONTAIN_MIN_SIZE_RATIO).toBe(
+      legacyConstants.HEADLINE_CONTAIN_MIN_SIZE_RATIO,
+    );
+    expect(portConstants.HEADLINE_TITLE_MAX_CHARS).toBe(legacyConstants.HEADLINE_TITLE_MAX_CHARS);
+    expect(legacyConstants.HEADLINE_CONTAIN_MIN_SIZE_RATIO).toBe(0.4);
+    expect(legacyConstants.HEADLINE_TITLE_MAX_CHARS).toBe(300);
     expect(portConstants.ENTITY_TEXT_FLOOR).toBe(legacyConstants.ENTITY_TEXT_FLOOR);
     expect(portConstants.CONTEXT_STICKY_MIN_ARTICLES).toBe(
       legacyConstants.CONTEXT_STICKY_MIN_ARTICLES,
@@ -415,7 +465,13 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
   describe("headline lane + token helpers (2026-11-01 recall wave)", () => {
     // Golden headline pairs, including the lane boundary (7/10), a numeral
     // clash, an out-of-window pair and generic-prefix boilerplate.
-    const titlePairs: Array<{ a: string; b: string; tfidf: number; hours: number }> = [
+    const titlePairs: Array<{
+      a: string;
+      b: string;
+      tfidf: number;
+      hours: number;
+      kind?: "jaccard" | "containment" | null;
+    }> = [
       {
         a: "Son dakika... Mustafa Sarıgül YENİ Parti'den istifa etti",
         b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek",
@@ -447,6 +503,128 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         hours: 0.5,
       },
       { a: "", b: "Mustafa Sarıgül istifa etti", tfidf: 0.25, hours: 1 },
+      // Headline containment (wave AB follow-up). Real prod headlines; the
+      // "kind" column pins the verdict both implementations must reach.
+      // fire: the bare Sarigul headline is fully contained in the long one.
+      {
+        a: "Mustafa Sarıgül Yeni Parti'den istifa etti",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek, partime döneceğim",
+        tfidf: 0.2,
+        hours: 0.1256,
+        kind: "containment",
+      },
+      // fire: SPK appointment, bare vs Resmi Gazete headline.
+      {
+        a: "SPK Başkanlığına Muhsin Atcı atandı",
+        b: "SPK Başkanlığına Muhsin Atcı atandı! Karar Resmi Gazete'de",
+        tfidf: 0.2,
+        hours: 0.5186,
+        kind: "containment",
+      },
+      // fire at the hour limit, no fire a hair past it.
+      {
+        a: "Mustafa Sarıgül Yeni Parti'den istifa etti",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek, partime döneceğim",
+        tfidf: 0.2,
+        hours: 6,
+        kind: "containment",
+      },
+      {
+        a: "Mustafa Sarıgül Yeni Parti'den istifa etti",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek, partime döneceğim",
+        tfidf: 0.2,
+        hours: 7,
+        kind: null,
+      },
+      // no fire: numeral sets {39} vs {39,22}.
+      {
+        a: "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı",
+        b: "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı, 22 kişi adli kontrolle serbest",
+        tfidf: 0.2,
+        hours: 0.5,
+        kind: null,
+      },
+      // no fire: only 4 non-numeral words on the shorter side.
+      {
+        a: "Sarıgül Yeni Parti istifa",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek, partime döneceğim",
+        tfidf: 0.2,
+        hours: 0.1,
+        kind: null,
+      },
+      // no fire: denial prefix in the extra words.
+      {
+        a: "Mustafa Sarıgül Yeni Parti'den istifa etti",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti iddiasına yalanlama: İstifa etmedim, partimin yanındayım",
+        tfidf: 0.2,
+        hours: 0.3,
+        kind: null,
+      },
+      // no fire: same person and verb, different counterpart (real G20 pair).
+      {
+        a: "Bakan Fidan, Endonezya Dışişleri Bakanı Nasir ile görüştü",
+        b: "Dışişleri Bakanı Fidan, ABD Dışişleri Bakanı Rubio ile görüştü",
+        tfidf: 0.2,
+        hours: 4.39,
+        kind: null,
+      },
+      // the Jaccard rule keeps its own kind.
+      {
+        a: "Son dakika... Mustafa Sarıgül YENİ Parti'den istifa etti",
+        b: "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek",
+        tfidf: 0.2,
+        hours: 0.2,
+        kind: "jaccard",
+      },
+      // Size guard (review of wave AB): a roundup headline holding three
+      // unrelated short headlines must not be "contained" by any of them.
+      {
+        a: "Merkez Bankası faiz kararını açıkladı",
+        b: "Merkez Bankası faiz kararını açıkladı; Galatasaray derbide Fenerbahçe'yi üç golle yendi; İstanbul'da sağanak nedeniyle seferler iptal edildi",
+        tfidf: 0.2,
+        hours: 1,
+        kind: null,
+      },
+      {
+        a: "Galatasaray derbide Fenerbahçe'yi üç golle yendi",
+        b: "Merkez Bankası faiz kararını açıkladı; Galatasaray derbide Fenerbahçe'yi üç golle yendi; İstanbul'da sağanak nedeniyle seferler iptal edildi",
+        tfidf: 0.2,
+        hours: 5.9,
+        kind: null,
+      },
+      {
+        a: "İstanbul'da sağanak nedeniyle seferler iptal edildi",
+        b: "Merkez Bankası faiz kararını açıkladı; Galatasaray derbide Fenerbahçe'yi üç golle yendi; İstanbul'da sağanak nedeniyle seferler iptal edildi",
+        tfidf: 0.2,
+        hours: 0.2,
+        kind: null,
+      },
+      // fire: the real Fidan-Rubio pair at ratio 5/11 = 0.45, just over the guard.
+      {
+        a: "Dışişleri Bakanı Fidan, ABD Dışişleri Bakanı Rubio ile görüştü",
+        b: "Dışişleri Bakanı Hakan Fidan, Atlanta'da G20 Dışişleri Bakanları Toplantısı marjında ABD Dışişleri Bakanı Marco Rubio ile görüştü",
+        tfidf: 0.2,
+        hours: 3,
+        kind: "containment",
+      },
+      // no fire (the known recall cost of the guard): a genuine same-story pair
+      // whose long headline is 13 words against 5, ratio 0.38.
+      {
+        a: "Pegasus uçağı kuş sürüsüne çarptı",
+        b: "Pegasus uçağı kuş sürüsüne çarptı: Kanadı hasar alan uçak İstanbul'a acil iniş yaptı",
+        tfidf: 0.2,
+        hours: 0.3,
+        kind: null,
+      },
+      // no fire: a stuffed title cut at HEADLINE_TITLE_MAX_CHARS keeps only
+      // the part inside the cap, so the short headline stays a minority.
+      {
+        a: "Merkez Bankası faiz kararını açıkladı",
+        b: `Merkez Bankası faiz kararını açıkladı ${Array.from({ length: 400 }, (_, i) => `kelime${"abcdefghij"[i % 10]}${"klmnopqrst"[Math.floor(i / 10) % 10]}${"uvwxyzabcd"[Math.floor(i / 100) % 10]}`).join(" ")}`,
+        tfidf: 0.2,
+        hours: 1,
+        kind: null,
+      },
     ];
 
     it("score() is byte-equivalent for the golden headline pairs", () => {
@@ -475,9 +653,61 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
       const keys = Object.keys(
         legacy.score(noFp, noFp, [], [], 0.1, 1).components,
       );
-      for (const k of ["headlineSim", "headlineShared", "headlineLane", "textFloorCapped"]) {
+      for (const k of [
+        "headlineSim",
+        "headlineShared",
+        "headlineLane",
+        "textFloorCapped",
+        "headlineContainment",
+        "headlineKind",
+      ]) {
         expect(keys).toContain(k);
       }
+    });
+
+    it("the golden containment pairs reach the pinned verdict on both implementations", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const noFp = { strict: null, signature: null };
+      const pinned = titlePairs.filter((p) => p.kind !== undefined);
+      // At least three containment fire cases and three no-fire cases.
+      expect(pinned.filter((p) => p.kind === "containment").length).toBeGreaterThanOrEqual(3);
+      expect(pinned.filter((p) => p.kind === null).length).toBeGreaterThanOrEqual(3);
+      const wrong: string[] = [];
+      for (const [i, p] of pinned.entries()) {
+        for (const [name, side] of [["legacy", legacy], ["port", port]] as const) {
+          const r = side.score(noFp, noFp, [], [], p.tfidf, p.hours, { aTitle: p.a, bTitle: p.b });
+          if ((r.components as Record<string, unknown>).headlineKind !== p.kind) {
+            wrong.push(`${name} pair ${i}: kind ${String((r.components as Record<string, unknown>).headlineKind)} !== ${String(p.kind)}`);
+          }
+          if (Boolean((r.components as Record<string, unknown>).headlineLane) !== (p.kind !== null)) {
+            wrong.push(`${name} pair ${i}: headlineLane does not follow kind`);
+          }
+        }
+      }
+      expect(wrong).toEqual([]);
+    });
+
+    it("headlineLane() and headlineOnlyScore() are byte-equivalent for every golden pair", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const mismatches: string[] = [];
+      for (const [i, p] of titlePairs.entries()) {
+        const lh = [legacy.headlineTokens(p.a), legacy.headlineTokens(p.b)] as const;
+        const ph = [port.headlineTokens(p.a), port.headlineTokens(p.b)] as const;
+        const lLane = legacy.headlineLane(lh[0], lh[1], p.hours);
+        const pLane = port.headlineLane(ph[0], ph[1], p.hours);
+        if (JSON.stringify(lLane) !== JSON.stringify(pLane)) {
+          mismatches.push(`pair ${i}: lane ${JSON.stringify(lLane)} vs ${JSON.stringify(pLane)}`);
+        }
+        for (const slugs of [{}, { aSourceSlug: "sozcu", bSourceSlug: "haberler-com" }]) {
+          const lo = legacy.headlineOnlyScore(lh[0], lh[1], p.hours, slugs);
+          const po = port.headlineOnlyScore(ph[0], ph[1], p.hours, slugs);
+          if (lo !== po) mismatches.push(`pair ${i}: headlineOnlyScore ${lo} vs ${po}`);
+          // The member scan relies on this equality to rank a member like a seed.
+          if (lLane.fired && lo <= 0) mismatches.push(`pair ${i}: fired lane scored ${lo}`);
+          if (!lLane.fired && lo !== 0) mismatches.push(`pair ${i}: inert lane scored ${lo}`);
+        }
+      }
+      expect(mismatches).toEqual([]);
     });
 
     it("titleTokens / headlineTokens agree on every corpus and golden title", () => {
@@ -486,6 +716,11 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         ...articles.map((a) => a.title),
         ...titlePairs.flatMap((p) => [p.a, p.b]),
         "2026 bütçesi 1500 kişi",
+        // Over-long titles are clipped identically on both sides, with a
+        // numeral and a word straddling the cap.
+        `Merkez Bankası faiz kararı ${"kelime ".repeat(60)}2026 sonkelimeler`,
+        "a".repeat(299) + " bölünenkelime 2026",
+        "ğ".repeat(500),
         null,
       ];
       for (const t of titles) {

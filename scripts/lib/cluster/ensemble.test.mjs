@@ -1,5 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { score, isMatch, MATCH_THRESHOLD } from "./ensemble.mjs";
+import {
+  score,
+  isMatch,
+  MATCH_THRESHOLD,
+  headlineLane,
+  headlineOnlyScore,
+} from "./ensemble.mjs";
+import { headlineTokens } from "./fingerprint.mjs";
 import {
   TFIDF_WEIGHT,
   ENTITY_WEIGHT,
@@ -7,6 +14,7 @@ import {
   ENTITY_FRESHNESS_HOURS,
   TIME_WINDOW_HOURS,
   MINHASH_SOFT_ACCEPT_JACCARD,
+  HEADLINE_TITLE_MAX_CHARS,
 } from "./constants.mjs";
 
 // Helper: build a synthetic fingerprint bundle with a Uint32Array signature
@@ -377,5 +385,135 @@ describe("isMatch", () => {
     expect(isMatch(undefined)).toBe(false);
     expect(isMatch({})).toBe(false);
     expect(isMatch({ score: "not a number" })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Headline containment (wave AB follow-up). The deno port is covered in
+// tests/functions/_shared/ensemble-recall.test.ts and pinned equal to this
+// file by tests/functions/_shared/cluster.test.ts; these tests keep the .mjs
+// reference honest on its own.
+// ---------------------------------------------------------------------------
+describe("headlineLane — containment variant (.mjs reference)", () => {
+  const SHORT = "Mustafa Sarıgül Yeni Parti'den istifa etti";
+  const LONG =
+    "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek, partime döneceğim";
+  const lane = (a, b, h) => headlineLane(headlineTokens(a), headlineTokens(b), h);
+  const noFp = { strict: null, signature: null };
+
+  it("fires containment for the short Sarigul headline inside the long one (Jaccard 7/12)", () => {
+    const r = lane(SHORT, LONG, 0.13);
+    expect(r.kind).toBe("containment");
+    expect(r.fired).toBe(true);
+    expect(r.containment).toBe(1);
+    expect(r.sim).toBeCloseTo(7 / 12, 12);
+    expect(r.score).toBeCloseTo(0.5 + 0.5 * (7 / 12), 12);
+  });
+
+  it("score() carries the pair on zero entities and tfidf 0.2, and reports the new components", () => {
+    const r = score(noFp, noFp, [], [], 0.2, 0.13, { aTitle: SHORT, bTitle: LONG });
+    expect(r.components.headlineKind).toBe("containment");
+    expect(r.components.headlineContainment).toBe(1);
+    expect(r.components.headlineLane).toBe(true);
+    expect(r.components.textFloorCapped).toBe(false);
+    expect(isMatch(r)).toBe(true);
+    const plain = score(noFp, noFp, [], [], 0.2, 0.13);
+    expect(plain.components.headlineKind).toBeNull();
+    expect(plain.components.headlineContainment).toBe(0);
+  });
+
+  it("does not fire past the hour limit, with differing numerals, with 4 words, or with a denial prefix", () => {
+    expect(lane(SHORT, LONG, 7).kind).toBeNull();
+    expect(
+      lane(
+        "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı",
+        "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı, 22 kişi adli kontrolle serbest",
+        0.5,
+      ).kind,
+    ).toBeNull();
+    expect(lane("Sarıgül Yeni Parti istifa", LONG, 0.1).kind).toBeNull();
+    expect(
+      lane(
+        SHORT,
+        "Mustafa Sarıgül Yeni Parti'den istifa etti iddiasına yalanlama: İstifa etmedim, partimin yanındayım",
+        0.3,
+      ).kind,
+    ).toBeNull();
+  });
+
+  it("keeps the Jaccard rule: kind 'jaccard' wins when both would hold", () => {
+    const r = lane(
+      "Son dakika... Mustafa Sarıgül YENİ Parti'den istifa etti",
+      "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek",
+      0.2,
+    );
+    expect(r.kind).toBe("jaccard");
+  });
+
+  it("size guard: a roundup headline is not 'contained' by the unrelated short headlines inside it", () => {
+    const shorts = [
+      "Merkez Bankası faiz kararını açıkladı",
+      "Galatasaray derbide Fenerbahçe'yi üç golle yendi",
+      "İstanbul'da sağanak nedeniyle seferler iptal edildi",
+    ];
+    const roundup = shorts.join("; ");
+    for (const short of shorts) {
+      for (const hours of [0.2, 1, 5.9]) {
+        for (const [a, b] of [[short, roundup], [roundup, short]]) {
+          const r = lane(a, b, hours);
+          expect(r.containment).toBe(1);
+          expect(r.kind).toBeNull();
+          expect(r.fired).toBe(false);
+          expect(headlineOnlyScore(headlineTokens(a), headlineTokens(b), hours, {})).toBe(0);
+        }
+      }
+      const full = score(noFp, noFp, [], [], 0.15, 1, { aTitle: short, bTitle: roundup });
+      expect(full.components.headlineLane).toBe(false);
+      expect(full.components.textFloorCapped).toBe(true);
+      expect(isMatch(full)).toBe(false);
+    }
+  });
+
+  it("size guard boundary: 10 words in 25 fire (ratio 0.4), 10 in 26 do not", () => {
+    const words = (prefix, n) =>
+      Array.from({ length: n }, (_, i) => `${prefix}${String.fromCharCode(97 + (i % 26))}${String.fromCharCode(97 + Math.floor(i / 26))}x`);
+    const bag = (ws) => ({ tokens: new Set(ws), numbers: new Set() });
+    const s10 = words("ss", 10);
+    expect(headlineLane(bag(s10), bag([...s10, ...words("ll", 15)]), 1).kind).toBe("containment");
+    expect(headlineLane(bag(s10), bag([...s10, ...words("ll", 16)]), 1).kind).toBeNull();
+    // symmetric
+    expect(headlineLane(bag([...s10, ...words("ll", 16)]), bag(s10), 1).kind).toBeNull();
+  });
+
+  it("clips the title at HEADLINE_TITLE_MAX_CHARS before tokenising", () => {
+    const head = "Merkez Bankası faiz kararı ";
+    const filler = "x".repeat(HEADLINE_TITLE_MAX_CHARS - head.length - 1);
+    const t = headlineTokens(`${head}${filler} zebracik 2026`);
+    const toks = [...t.tokens];
+    expect(toks.some((x) => x.startsWith("zebra"))).toBe(false);
+    expect(t.numbers.size).toBe(0);
+    expect(toks.some((x) => x.startsWith("faiz"))).toBe(true);
+    // A title within the cap is unchanged.
+    expect(headlineTokens("Merkez Bankası faiz kararı 2026").numbers.has("2026")).toBe(true);
+    expect(headlineTokens(null).tokens.size).toBe(0);
+    expect(headlineTokens(undefined).tokens.size).toBe(0);
+  });
+
+  it("headlineOnlyScore is lane x decay x penalty and 0 when the lane is inert", () => {
+    const ha = headlineTokens(SHORT);
+    const hb = headlineTokens(LONG);
+    const laneRes = headlineLane(ha, hb, 1);
+    expect(headlineOnlyScore(ha, hb, 1, {})).toBeCloseTo(
+      laneRes.score * (1 - 1 / TIME_WINDOW_HOURS),
+      12,
+    );
+    expect(headlineOnlyScore(ha, hb, 1, { bSourceSlug: "haberler-com" })).toBeCloseTo(
+      laneRes.score * (1 - 1 / TIME_WINDOW_HOURS) * 0.85,
+      12,
+    );
+    expect(headlineOnlyScore(ha, hb, 7, {})).toBe(0);
+    // Pair carried only by the lane: identical to score().
+    const full = score(noFp, noFp, [], [], 0, 1, { aTitle: SHORT, bTitle: LONG });
+    expect(headlineOnlyScore(ha, hb, 1, {})).toBe(full.score);
   });
 });

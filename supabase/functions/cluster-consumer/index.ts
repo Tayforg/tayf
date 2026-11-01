@@ -35,18 +35,22 @@ import {
   fingerprint,
   MINHASH_VERSION,
   serializeSignature,
+  headlineTokens,
   strictFingerprint,
   titleTokens,
   type FingerprintBundle,
+  type HeadlineTokens,
 } from "../_shared/cluster/fingerprint.ts";
 import { extractEntities } from "../_shared/cluster/entities.ts";
 import { bandKeys, LSH_BANDS } from "../_shared/cluster/lsh.ts";
 import { TfidfIndex } from "../_shared/cluster/tfidf.ts";
-import { score } from "../_shared/cluster/ensemble.ts";
+import { headlineOnlyScore, score } from "../_shared/cluster/ensemble.ts";
 import {
   CONTEXT_STICKY_HOURS,
   CONTEXT_STICKY_MAX,
   CONTEXT_STICKY_MIN_ARTICLES,
+  HEADLINE_LANE_MAX_HOURS,
+  HEADLINE_MEMBER_SCAN_MAX,
   MATCH_THRESHOLD,
   MAX_CANDIDATE_CLUSTERS,
   MIN_SHARED_ENTITIES,
@@ -198,12 +202,27 @@ interface ClusterMemberArticle {
   minhash_version?: number | null;
 }
 
+// One member headline held for the ensemble loop's member scan.
+interface HeadlineMember {
+  id: string;
+  publishedMs: number;
+  sourceId: string | null;
+  tokens: HeadlineTokens;
+}
+
 interface ClusterContext {
   fetchedAt: number;
   clusters: ClusterRow[];
   seedByCluster: Map<string, ClusterMemberArticle>;
   latestByCluster: Map<string, ClusterMemberArticle>;
   sourceIdsByCluster: Map<string, Set<string>>;
+  // Recent member headlines per cluster, newest first, at most
+  // HEADLINE_MEMBER_SCAN_MAX. Built from the member rows loadClusterContext
+  // already fetched (no extra query) and extended by addMemberToIndices. An
+  // incoming article is compared with these through the headline lane only,
+  // so a cluster's middle members -- neither seed nor latest -- can still
+  // attract the follow-up headlines they match.
+  headlinesByCluster: Map<string, HeadlineMember[]>;
   indices: {
     byFingerprint: Map<string, string[]>;
     byEntity: Map<string, string[]>;
@@ -490,6 +509,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
     seedByCluster: new Map(),
     latestByCluster: new Map(),
     sourceIdsByCluster: new Map(),
+    headlinesByCluster: new Map(),
     indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map(), byToken: new Map() },
     tfidf,
   };
@@ -609,12 +629,39 @@ async function loadClusterContext(): Promise<ClusterContext> {
     tfidf.addDoc(latest.id, `${latest.title || ""} ${latest.description || ""}`);
   }
 
+  // Member headlines for the scan. Sorting is by publication time and only
+  // the newest HEADLINE_MEMBER_SCAN_MAX members per cluster are tokenised, so
+  // a 50-article story costs 12 tokenisations, not 50.
+  const headlinesByCluster = new Map<string, HeadlineMember[]>();
+  for (const [clusterId, ids] of memberIdsByCluster.entries()) {
+    const members: Array<{ art: ClusterMemberArticle; ms: number }> = [];
+    for (const id of ids) {
+      const art = memberArticles.get(id);
+      if (!art) continue;
+      const ms = Date.parse(art.published_at);
+      if (!Number.isFinite(ms)) continue;
+      members.push({ art, ms });
+    }
+    if (members.length === 0) continue;
+    members.sort((a, b) => b.ms - a.ms || (a.art.id < b.art.id ? -1 : 1));
+    headlinesByCluster.set(
+      clusterId,
+      members.slice(0, HEADLINE_MEMBER_SCAN_MAX).map(({ art, ms }) => ({
+        id: art.id,
+        publishedMs: ms,
+        sourceId: art.source_id,
+        tokens: headlineTokens(art.title),
+      })),
+    );
+  }
+
   return {
     fetchedAt: Date.now(),
     clusters,
     seedByCluster,
     latestByCluster,
     sourceIdsByCluster,
+    headlinesByCluster,
     indices,
     tfidf,
   };
@@ -652,9 +699,30 @@ async function getSourceLookup(): Promise<Map<string, SourceRow>> {
 // waiting for the TTL to expire)
 // ---------------------------------------------------------------------------
 
+// Insert a member headline into a cluster's newest-first scan list, keeping at
+// most HEADLINE_MEMBER_SCAN_MAX entries. Idempotent per article id (a
+// re-delivered message must not add a second copy).
+function insertHeadlineMember(
+  lists: Map<string, HeadlineMember[]>,
+  clusterId: string,
+  member: HeadlineMember,
+) {
+  if (!Number.isFinite(member.publishedMs)) return;
+  const list = lists.get(clusterId) ?? [];
+  if (list.some((m) => m.id === member.id)) return;
+  let at = list.findIndex((m) => m.publishedMs < member.publishedMs);
+  if (at === -1) at = list.length;
+  list.splice(at, 0, member);
+  if (list.length > HEADLINE_MEMBER_SCAN_MAX) list.length = HEADLINE_MEMBER_SCAN_MAX;
+  lists.set(clusterId, list);
+}
+
 function addMemberToIndices(
   clusterId: string,
   article: {
+    id: string;
+    published_at: string;
+    source_id: string | null;
     fingerprint: string | null;
     title: string;
     entities: string[] | null;
@@ -663,6 +731,14 @@ function addMemberToIndices(
 ) {
   if (!clusterContextCache) return;
   const idx = clusterContextCache.indices;
+  // Member-headline scan list (see ClusterContext.headlinesByCluster). Covers
+  // registerNewClusterInCache too, which routes the seed through here.
+  insertHeadlineMember(clusterContextCache.headlinesByCluster, clusterId, {
+    id: article.id,
+    publishedMs: Date.parse(article.published_at),
+    sourceId: article.source_id,
+    tokens: headlineTokens(article.title),
+  });
   if (article.fingerprint) {
     const list = idx.byFingerprint.get(article.fingerprint) || [];
     if (!list.includes(clusterId)) {
@@ -1151,7 +1227,7 @@ async function clusterArticle(
 
   const ctx = await getClusterContext();
   const sourceLookup = await getSourceLookup();
-  const { seedByCluster, latestByCluster, indices } = ctx;
+  const { seedByCluster, latestByCluster, headlinesByCluster, indices } = ctx;
 
   // Strict-fingerprint fast-path against any indexed member.
   if (article.fingerprint) {
@@ -1209,6 +1285,10 @@ async function clusterArticle(
     ? sourceLookup.get(article.source_id)?.slug ?? null
     : null;
   const FALLBACK_FLOOR = MATCH_THRESHOLD * 0.9;
+  // Headline tokens of the incoming article, computed once for the member scan.
+  const articleHeadline = headlineTokens(article.title);
+  const articleMs = Date.parse(article.published_at);
+  const scanWindowMs = HEADLINE_LANE_MAX_HOURS * 3_600_000;
 
   // `score` ranks candidates and feeds Jev's bands. `fallbackScore` is what the
   // fallback loop below may join on: the best result that is NOT carried by the
@@ -1269,6 +1349,36 @@ async function clusterArticle(
         );
         if (latestRes.score > bestScore) bestScore = latestRes.score;
         fallbackScore = Math.max(fallbackScore, fallbackEligibleScore(latestRes));
+      }
+    }
+
+    // Member-headline scan. The cluster's other recent members (newest first;
+    // seed, latest and the article itself are skipped: the full scorer above
+    // already saw seed and latest) are compared through the headline lane
+    // only, within the lane's own hour limit. A headline-lane result is
+    // never the text-floor-capped lane, so it is fallback-eligible as is.
+    // Pure in-memory work: headlinesByCluster came from rows already loaded.
+    const memberHeadlines = Number.isFinite(articleMs)
+      ? headlinesByCluster.get(clusterId)
+      : undefined;
+    if (memberHeadlines) {
+      for (const m of memberHeadlines) {
+        if (m.id === seed.id || m.id === latest?.id || m.id === article.id) continue;
+        // Newest first: members newer than the window are skipped, and the
+        // first one older than it ends the scan.
+        if (m.publishedMs > articleMs + scanWindowMs) continue;
+        if (m.publishedMs < articleMs - scanWindowMs) break;
+        const memberScore = headlineOnlyScore(
+          articleHeadline,
+          m.tokens,
+          Math.abs(articleMs - m.publishedMs) / 3_600_000,
+          {
+            aSourceSlug,
+            bSourceSlug: m.sourceId ? sourceLookup.get(m.sourceId)?.slug ?? null : null,
+          },
+        );
+        if (memberScore > bestScore) bestScore = memberScore;
+        if (memberScore > fallbackScore) fallbackScore = memberScore;
       }
     }
 

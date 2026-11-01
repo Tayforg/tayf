@@ -60,6 +60,12 @@
 //     stemmed tokens, token Jaccard >= 0.7, <= 6 h apart, numerals consistent)
 //     score 0.5 + 0.5 * Jaccard regardless of tfidf / entities. Recovers
 //     cross-outlet pairs whose descriptions differ (Sarigul, Bakirkoy).
+//     Wave AB follow-up: when the Jaccard rule does not fire, a containment
+//     variant fires for a short headline whose words (numerals excluded, >= 5)
+//     are >= 85% contained in a longer one (at most 2.5x its size) with
+//     identical numerals and no denial-prefixed extra word (`headlineLane()`,
+//     kind "containment").
+//     `headlineOnlyScore()` is the lane alone x time decay x source penalty.
 //   - Text floor: unless the headline lane fired, a pair with tfidf below
 //     ENTITY_TEXT_FLOOR has its primary lane capped just under
 //     MATCH_THRESHOLD, so entities alone cannot join it.
@@ -96,6 +102,10 @@ import {
   ENTITY_DENOM_MIN,
   ENTITY_FRESHNESS_HOURS,
   ENTITY_TEXT_FLOOR,
+  HEADLINE_CONTAIN_BLOCK_PREFIXES,
+  HEADLINE_CONTAIN_MIN,
+  HEADLINE_CONTAIN_MIN_SIZE_RATIO,
+  HEADLINE_CONTAIN_MIN_TOKENS,
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_LANE_MIN_JACCARD,
   HEADLINE_LANE_MIN_SHARED,
@@ -194,6 +204,138 @@ function setIntersectSize(a, b) {
   return n;
 }
 
+function sourcePenaltyFor(aSourceSlug, bSourceSlug) {
+  // The smaller of the two configured multipliers wins -- if EITHER side is
+  // a penalised source, the pair gets downweighted. Default 1 = no penalty.
+  return Math.min(
+    SOURCE_PENALTIES[aSourceSlug] ?? 1,
+    SOURCE_PENALTIES[bSourceSlug] ?? 1,
+  );
+}
+
+function timeDecayFor(hoursDelta) {
+  return Math.max(0, 1 - Math.max(0, hoursDelta) / TIME_WINDOW_HOURS);
+}
+
+// ---------------------------------------------------------------------------
+// Headline lane
+// ---------------------------------------------------------------------------
+
+// Tokens minus numerals. Returns the set itself when there are no numerals.
+function wordsOf(h) {
+  if (h.numbers.size === 0) return h.tokens;
+  const out = new Set();
+  for (const t of h.tokens) if (!h.numbers.has(t)) out.add(t);
+  return out;
+}
+
+function sameSet(a, b) {
+  return a.size === b.size && setIntersectSize(a, b) === a.size;
+}
+
+// True when a word that only the larger headline has starts with a denial /
+// claim prefix.
+function hasBlockedExtra(small, large) {
+  for (const t of large) {
+    if (small.has(t)) continue;
+    for (const p of HEADLINE_CONTAIN_BLOCK_PREFIXES) {
+      if (t.startsWith(p)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Headline lane over two pre-tokenised headlines (`headlineTokens()` output).
+ *
+ * Jaccard variant (unchanged since the 2026-11-01 recall wave): at least
+ * HEADLINE_LANE_MIN_SHARED shared tokens, Jaccard >= HEADLINE_LANE_MIN_JACCARD
+ * over the full token sets, within HEADLINE_LANE_MAX_HOURS, and consistent
+ * numerals (either side without numerals, or identical numeral sets).
+ *
+ * Containment variant, evaluated only when the Jaccard variant did not fire:
+ * with numerals removed, S the smaller word set and L the larger (a tie takes
+ * `ha` as S; a tie cannot reach this branch, because 85% containment of equal
+ * sets of >= 5 words already implies Jaccard >= 0.73), it fires iff |S| >=
+ * HEADLINE_CONTAIN_MIN_TOKENS, |S n L| / |S| >= HEADLINE_CONTAIN_MIN,
+ * |S| / |L| >= HEADLINE_CONTAIN_MIN_SIZE_RATIO (size guard: a roundup or
+ * keyword-stuffed headline must not be "contained" by every unrelated short
+ * headline), the numeral sets are equal (both empty is fine), the pair is
+ * inside HEADLINE_LANE_MAX_HOURS, and no word of L \ S starts with one of
+ * HEADLINE_CONTAIN_BLOCK_PREFIXES.
+ *
+ * score = 0.5 + 0.5 * sim for both variants.
+ *
+ * @param {{tokens: Set<string>, numbers: Set<string>}} ha
+ * @param {{tokens: Set<string>, numbers: Set<string>}} hb
+ * @param {number} hoursDelta
+ * @returns {{fired: boolean, kind: "jaccard"|"containment"|null, sim: number,
+ *            shared: number, containment: number, score: number}}
+ */
+export function headlineLane(ha, hb, hoursDelta) {
+  const shared = setIntersectSize(ha.tokens, hb.tokens);
+  const union = ha.tokens.size + hb.tokens.size - shared;
+  const sim = union === 0 ? 0 : shared / union;
+  const inWindow = hoursDelta <= HEADLINE_LANE_MAX_HOURS;
+  const numbersOk =
+    ha.numbers.size === 0 ||
+    hb.numbers.size === 0 ||
+    (ha.numbers.size === hb.numbers.size &&
+      setIntersectSize(ha.numbers, hb.numbers) === ha.numbers.size);
+  const jaccardFired =
+    shared >= HEADLINE_LANE_MIN_SHARED &&
+    sim >= HEADLINE_LANE_MIN_JACCARD &&
+    inWindow &&
+    numbersOk;
+
+  const wa = wordsOf(ha);
+  const wb = wordsOf(hb);
+  const [small, large] = wa.size <= wb.size ? [wa, wb] : [wb, wa];
+  const containment =
+    small.size === 0 ? 0 : setIntersectSize(small, large) / small.size;
+  // large.size >= small.size >= 1 whenever the token minimum below holds.
+  const sizeRatio = large.size === 0 ? 0 : small.size / large.size;
+  const containmentFired =
+    !jaccardFired &&
+    small.size >= HEADLINE_CONTAIN_MIN_TOKENS &&
+    containment >= HEADLINE_CONTAIN_MIN &&
+    sizeRatio >= HEADLINE_CONTAIN_MIN_SIZE_RATIO &&
+    inWindow &&
+    sameSet(ha.numbers, hb.numbers) &&
+    !hasBlockedExtra(small, large);
+
+  const fired = jaccardFired || containmentFired;
+  return {
+    fired,
+    kind: jaccardFired ? "jaccard" : containmentFired ? "containment" : null,
+    sim,
+    shared,
+    containment,
+    score: fired ? 0.5 + 0.5 * sim : 0,
+  };
+}
+
+/**
+ * The score a pair earns from the headline lane alone: the lane's score times
+ * the same time decay and source penalty score() applies, or 0 when the lane
+ * does not fire.
+ *
+ * @param {{tokens: Set<string>, numbers: Set<string>}} ha
+ * @param {{tokens: Set<string>, numbers: Set<string>}} hb
+ * @param {number} hoursDelta
+ * @param {{aSourceSlug?: string|null, bSourceSlug?: string|null}} [opts]
+ * @returns {number}
+ */
+export function headlineOnlyScore(ha, hb, hoursDelta, opts = {}) {
+  const lane = headlineLane(ha, hb, hoursDelta);
+  if (!lane.fired) return 0;
+  return (
+    lane.score *
+    timeDecayFor(hoursDelta) *
+    sourcePenaltyFor(opts?.aSourceSlug, opts?.bSourceSlug)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // score()
 // ---------------------------------------------------------------------------
@@ -228,12 +370,7 @@ export function score(
   opts = {},
 ) {
   const { aSourceSlug, bSourceSlug, aTitle, bTitle } = opts || {};
-  // The smaller of the two configured multipliers wins — if EITHER side is
-  // a penalised source, the pair gets downweighted. Default 1 = no penalty.
-  const sourcePenalty = Math.min(
-    SOURCE_PENALTIES[aSourceSlug] ?? 1,
-    SOURCE_PENALTIES[bSourceSlug] ?? 1,
-  );
+  const sourcePenalty = sourcePenaltyFor(aSourceSlug, bSourceSlug);
 
   // -----------------------------------------------------------------------
   // 1. Strict fingerprint auto-accept.
@@ -260,6 +397,8 @@ export function score(
         headlineSim: 0,
         headlineShared: 0,
         headlineLane: false,
+        headlineKind: null,
+        headlineContainment: 0,
         textFloorCapped: false,
       },
     };
@@ -310,32 +449,28 @@ export function score(
   const tfidfScore = clip01(tfidfCosine);
 
   // -----------------------------------------------------------------------
-  // 5. Headline lane — only when both titles are present. Fires on a high
-  //    stemmed-token Jaccard with enough shared tokens, inside the lane's own
-  //    hour limit, and with consistent numerals (a differing numeral means a
-  //    different development of the story).
+  // 5. Headline lane -- only when both titles are present (see headlineLane()
+  //    for the two variants and their guards).
   // -----------------------------------------------------------------------
   let headlineSim = 0;
   let headlineShared = 0;
-  let headlineLane = false;
+  let headlineContainment = 0;
+  let headlineKind = null;
+  let headlineFired = false;
+  let headlineScore = 0;
   if (aTitle && bTitle) {
-    const ha = headlineTokens(aTitle);
-    const hb = headlineTokens(bTitle);
-    headlineShared = setIntersectSize(ha.tokens, hb.tokens);
-    const union = ha.tokens.size + hb.tokens.size - headlineShared;
-    headlineSim = union === 0 ? 0 : headlineShared / union;
-    const numbersOk =
-      ha.numbers.size === 0 ||
-      hb.numbers.size === 0 ||
-      (ha.numbers.size === hb.numbers.size &&
-        setIntersectSize(ha.numbers, hb.numbers) === ha.numbers.size);
-    headlineLane =
-      headlineShared >= HEADLINE_LANE_MIN_SHARED &&
-      headlineSim >= HEADLINE_LANE_MIN_JACCARD &&
-      hoursDelta <= HEADLINE_LANE_MAX_HOURS &&
-      numbersOk;
+    const lane = headlineLane(
+      headlineTokens(aTitle),
+      headlineTokens(bTitle),
+      hoursDelta,
+    );
+    headlineSim = lane.sim;
+    headlineShared = lane.shared;
+    headlineContainment = lane.containment;
+    headlineKind = lane.kind;
+    headlineFired = lane.fired;
+    headlineScore = lane.score;
   }
-  const headlineScore = headlineLane ? 0.5 + 0.5 * headlineSim : 0;
 
   // -----------------------------------------------------------------------
   // 6. Combine.
@@ -345,7 +480,7 @@ export function score(
   // wins. `primary` keeps its computed value; the text floor only limits
   // what it contributes to `raw`.
   const primary = TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
-  const textFloorCapped = !headlineLane && tfidfScore < ENTITY_TEXT_FLOOR;
+  const textFloorCapped = !headlineFired && tfidfScore < ENTITY_TEXT_FLOOR;
   const primaryForRaw = textFloorCapped
     ? Math.min(primary, MATCH_THRESHOLD - 0.01)
     : primary;
@@ -354,10 +489,7 @@ export function score(
   // -----------------------------------------------------------------------
   // 7. Time decay.
   // -----------------------------------------------------------------------
-  const timeDecay = Math.max(
-    0,
-    1 - Math.max(0, hoursDelta) / TIME_WINDOW_HOURS,
-  );
+  const timeDecay = timeDecayFor(hoursDelta);
   // Apply the per-source penalty (defaults to 1 = no-op when neither side
   // is in SOURCE_PENALTIES, so legacy callers see no change in behavior).
   const finalScore = raw * timeDecay * sourcePenalty;
@@ -379,7 +511,9 @@ export function score(
       sourcePenalty,
       headlineSim,
       headlineShared,
-      headlineLane,
+      headlineLane: headlineFired,
+      headlineKind,
+      headlineContainment,
       textFloorCapped,
     },
   };
