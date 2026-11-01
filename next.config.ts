@@ -117,6 +117,17 @@ const nextConfig: NextConfig = {
       revalidate: 60,
       expire: 180,
     },
+    // /hafta "Ayrışan Kelimeler" (src/lib/weekly/distinctive-words-query.ts).
+    // A trailing-7-day headline comparison barely moves intra-day, while one
+    // fill is 21 slow article reads (mean 1.45 s, max 8 s). Per-instance
+    // `hours` entries refilled ~645 calls/day (~944 DB-s/day, h10-dbhot-3);
+    // read through the shared remote cache with a 6 h revalidate, the target
+    // is <= ~100 calls/day.
+    'weekly-words': {
+      stale: 3600,
+      revalidate: 21600,
+      expire: 86400,
+    },
   },
   images: {
     remotePatterns: IMAGE_REMOTE_PATTERNS,

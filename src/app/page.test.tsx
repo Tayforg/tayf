@@ -118,8 +118,9 @@ describe("HomeFeed — never emits noindex", () => {
     })) as Elementish;
 
     expect(hasNoindexMeta(tree)).toBe(false);
-    // Still the retry state: NewSinceLastVisit + FeedUnavailable.
-    expect(tree.props?.children as Elementish[]).toHaveLength(2);
+    // Still the retry state: SearchStatus (the live region, empty without a
+    // q) + NewSinceLastVisit + FeedUnavailable.
+    expect(tree.props?.children as Elementish[]).toHaveLength(3);
   });
 
   it("does not emit noindex when the feed loads but is empty", async () => {
@@ -239,6 +240,8 @@ describe("HomeFeed — archive heading", () => {
     archiveUnavailable: false,
     emptySearch: false,
     archiveCapped,
+    archiveTotal: 2,
+    archiveCappedTotal: archiveCapped,
   });
 
   async function headings(capped: boolean): Promise<string[]> {
@@ -261,5 +264,64 @@ describe("HomeFeed — archive heading", () => {
     const h = await headings(true);
     expect(h).toContain("Arşivden: en ilgili 2 sonuç");
     expect(h).not.toContain("Arşivden: 2 sonuç");
+  });
+});
+
+describe("HomeFeed — result count is the same on every page of one search", () => {
+  // 16 in-feed matches span two pages (HOME_PAGE_SIZE 15); the archive RPC
+  // returned a full page (24 rows, two of them also in the feed), so 22 rows
+  // are archive-only. Total = 16 + 22 = 38, on page 1 and on page 2.
+  const inFeed = Array.from({ length: 16 }, (_, i) =>
+    bundle(`f${i + 1}`, `Deprem haberi ${i + 1}`),
+  );
+  const archiveOnly = Array.from({ length: 22 }, (_, i) =>
+    bundle(`x${i + 1}`, `Arşiv kaydı ${i + 1}`),
+  );
+
+  function statusText(tree: unknown): string {
+    const el = collectElements(tree).find(
+      (e) =>
+        typeof e.type === "function" &&
+        (e.type as { name?: string }).name === "SearchStatus",
+    );
+    return String(el?.props?.text);
+  }
+
+  async function renderPage(page: string) {
+    getPoliticsClusters.mockResolvedValue(feedOf(...inFeed));
+    searchClusters.mockResolvedValue({
+      ok: true,
+      bundles: [inFeed[0], inFeed[1], ...archiveOnly],
+      capped: true,
+    });
+    return HomeFeed({
+      searchParams: Promise.resolve({ q: "deprem", page }),
+    });
+  }
+
+  it("page 1 lists 15 feed cards plus the archive and reports 38 results", async () => {
+    const tree = await renderPage("1");
+    expect(clusterCardIds(tree)).toHaveLength(15 + 22);
+    expect(textOf(tree)).toContain("“deprem” için 38 sonuç");
+    expect(statusText(tree)).toBe(
+      "“deprem” için en ilgili 38 sonuç gösteriliyor.",
+    );
+  });
+
+  it("page 2 shows the last feed card, no archive rows, and the same 38 results", async () => {
+    const tree = await renderPage("2");
+    expect(clusterCardIds(tree)).toEqual(["f16"]);
+    expect(textOf(tree)).toContain("“deprem” için 38 sonuç");
+    expect(statusText(tree)).toBe(
+      "“deprem” için en ilgili 38 sonuç gösteriliyor.",
+    );
+  });
+
+  it("a page past the end is clamped and still reports the same total", async () => {
+    const tree = await renderPage("99");
+    expect(textOf(tree)).toContain("“deprem” için 38 sonuç");
+    expect(statusText(tree)).toBe(
+      "“deprem” için en ilgili 38 sonuç gösteriliyor.",
+    );
   });
 });

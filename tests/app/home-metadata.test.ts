@@ -34,16 +34,49 @@ describe("home generateMetadata", () => {
     expect(await generateMetadata(sp({ page: "abc" }))).toEqual({});
   });
 
-  it("marks every search noindex,follow and nothing else (canonical stays the layout's)", async () => {
-    const noindex = { robots: { index: false, follow: true } };
-    expect(await generateMetadata(sp({ q: "x" }))).toEqual(noindex);
-    expect(await generateMetadata(sp({ q: ["x", "y"] }))).toEqual(noindex);
-    expect(await generateMetadata(sp({ q: "x", page: "2" }))).toEqual(noindex);
-    expect(await generateMetadata(sp({ q: ["x", "y"], page: ["2"] }))).toEqual(
-      noindex,
+  it("marks every search noindex,follow with its own title and nothing else (canonical stays the layout's)", async () => {
+    const search = (title: string) => ({
+      title,
+      robots: { index: false, follow: true },
+    });
+    expect(await generateMetadata(sp({ q: "x" }))).toEqual(search("“x” araması"));
+    expect(await generateMetadata(sp({ q: ["x", "y"] }))).toEqual(
+      search("“x” araması"),
     );
-    expect(await generateMetadata(sp({ q: "seçim erdoğan" }))).toEqual(noindex);
-    expect(await generateMetadata(sp({ q: [" x "] }))).toEqual(noindex);
+    expect(await generateMetadata(sp({ q: "x", page: "2" }))).toEqual(
+      search("“x” araması"),
+    );
+    expect(await generateMetadata(sp({ q: ["x", "y"], page: ["2"] }))).toEqual(
+      search("“x” araması"),
+    );
+    expect(await generateMetadata(sp({ q: "seçim erdoğan" }))).toEqual(
+      search("“seçim erdoğan” araması"),
+    );
+    // The title uses the trimmed q, same as the page does.
+    expect(await generateMetadata(sp({ q: [" x "] }))).toEqual(
+      search("“x” araması"),
+    );
+    expect(await generateMetadata(sp({ q: "  x  " }))).toEqual(
+      search("“x” araması"),
+    );
+  });
+
+  it("caps a very long q in the title at 60 code points and keeps markup as plain text", async () => {
+    const long = await generateMetadata(sp({ q: "a".repeat(300) }));
+    expect(long.title).toBe(`“${"a".repeat(59)}…” araması`);
+    expect(long.robots).toEqual({ index: false, follow: true });
+
+    const markup = await generateMetadata(sp({ q: "<script>" }));
+    expect(markup.title).toBe("“<script>” araması");
+  });
+
+  it("gives a search no canonical or RSS alternate of its own, and a no-q page no title", async () => {
+    for (const q of ["x", ["x", "y"]]) {
+      const md = await generateMetadata(sp({ q, page: "2" }));
+      expect(md).not.toHaveProperty("alternates");
+    }
+    expect(await generateMetadata(sp({}))).not.toHaveProperty("title");
+    expect(await generateMetadata(sp({ page: "2" }))).not.toHaveProperty("title");
   });
 
   it("does not return alternates for a search, so the layout canonical applies", async () => {

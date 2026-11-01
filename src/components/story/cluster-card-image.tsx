@@ -126,6 +126,14 @@ interface ClusterCardImageProps {
    * `currentSrc` — including every call site that doesn't pass it.
    */
   credits?: Record<string, { href: string; name: string }>;
+  /**
+   * Accessible name of the image. An empty string ("") marks the image
+   * decorative: use it when the headline sits right next to the thumbnail
+   * (ClusterCard), where repeating the headline as an image name would make
+   * the link read it twice. Decorative drops `role="img"` + `aria-label` from
+   * the placeholder / logo wrappers (they become `aria-hidden`) and gives the
+   * <img> `alt=""`. Any other value keeps today's named-image behaviour.
+   */
   alt: string;
   className?: string;
   /** True for above-the-fold cards so the browser preloads the asset. */
@@ -309,6 +317,9 @@ export function ClusterCardImage({
   const currentSrc = candidates[idx];
   const hasLogo =
     typeof logoSrc === "string" && logoSrc.length > 0 && !logoFailed;
+  // alt="" = decorative (see the `alt` prop). The placeholder / logo wrappers
+  // below are <div>s that would otherwise be announced as `role="img"`.
+  const decorative = alt === "";
 
   // ── Tier 3: final gray placeholder ────────────────────────────────
   // All article candidates failed AND either no logo was supplied or
@@ -318,8 +329,9 @@ export function ClusterCardImage({
   if (!currentSrc && !hasLogo) {
     return (
       <div
-        role="img"
-        aria-label={alt}
+        {...(decorative
+          ? { "aria-hidden": "true" as const }
+          : { role: "img", "aria-label": alt })}
         className={`${className ?? ""} relative rounded-lg overflow-hidden ${GRADIENT_CLASSES} flex items-center justify-center`}
       >
         <Newspaper
@@ -343,8 +355,12 @@ export function ClusterCardImage({
   if (!currentSrc && hasLogo && logoSrc) {
     return (
       <div
-        role="img"
-        aria-label={logoAlt ? `${alt} — ${logoAlt}` : alt}
+        {...(decorative
+          ? { "aria-hidden": "true" as const }
+          : {
+              role: "img",
+              "aria-label": logoAlt ? `${alt} — ${logoAlt}` : alt,
+            })}
         className={`${className ?? ""} relative rounded-lg overflow-hidden ${GRADIENT_CLASSES} flex flex-col items-center justify-center gap-2 p-3`}
       >
         {/* Plain <img> (not next/image): the src is built by
@@ -357,7 +373,7 @@ export function ClusterCardImage({
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src={firstPartyLogoUrl(logoSrc) ?? logoSrc}
-          alt={logoAlt ?? alt}
+          alt={decorative ? "" : (logoAlt ?? alt)}
           className="max-h-[50%] max-w-[50%] object-contain opacity-60"
           loading="lazy"
           onError={() => setLogoFailed(true)}

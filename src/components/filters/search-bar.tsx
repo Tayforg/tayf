@@ -5,6 +5,7 @@ import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
 import { track } from "@/lib/track";
 import { searchNavTarget } from "./search-nav";
+import { isSearchShortcut } from "./search-shortcut";
 
 export function SearchBar() {
   const router = useRouter();
@@ -16,13 +17,13 @@ export function SearchBar() {
   // One "search" event per empty→non-empty transition, none on landing with ?q=.
   const searchedRef = useRef(Boolean(searchParams.get("q")));
 
-  // Global `/` shortcut focuses the input
+  // Global `/` shortcut focuses the input (not while typing elsewhere, not
+  // with Ctrl/Cmd/Alt: see isSearchShortcut)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "/" && document.activeElement?.tagName !== "INPUT") {
-        e.preventDefault();
-        inputRef.current?.focus();
-      }
+      if (!isSearchShortcut(e)) return;
+      e.preventDefault();
+      inputRef.current?.focus();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);

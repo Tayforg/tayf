@@ -107,11 +107,13 @@ const FETCH_CONCURRENCY = 16;
 const UPSERT_BATCH = 500;
 // Rows-per-chunk cap for `dropExistingSourceContentHashRows`'s
 // (source_id, content_hash) lookup -- same bound as `TITLE_LOOKUP_BATCH`
-// below, for the same reason: a single `.in(...)` over hundreds of hashes
-// x source ids produces a query string that silently degrades ("drop
-// nothing") once it's long enough to trip a proxy's request-line limit
-// (ingest-fixes / migration 074 evidence: ~25 KB for 500 hashes x 118
-// source ids observed in production).
+// below. It started as a request-line bound (a single `.in(...)` over
+// hundreds of hashes x source ids silently degraded to "drop nothing" once
+// the query string tripped a proxy limit: ~25 KB for 500 hashes x 118 source
+// ids in production, migration 074 evidence). Since migration 130 the lookup
+// is the pairwise `existing_source_content_hash_pairs` RPC, whose arrays are
+// the chunk's own pairs, so the cap now also bounds the RPC payload (the
+// function itself accepts at most 500 pairs per call).
 const PREFILTER_CHUNK = 100;
 // How far back a stored row can make a re-polled item a "twin" (same source,
 // same `source_article_key`, different url). A headline edit shows up in the
@@ -450,6 +452,30 @@ export function dedupeBySourceContentHash<
   return { rows: out, deduped };
 }
 
+type ExistingPair = { source_id: string; content_hash: string };
+
+// Warn once per isolate when migration 130 is missing: every chunk of every
+// cycle would otherwise log the same line.
+let warnedPairsRpcMissing = false;
+
+// The pre-130 probe, verbatim: a source x hash CROSS PRODUCT (every stored
+// pair whose source is in one list AND whose hash is in the other), so the
+// caller still checks exact pairs client-side. Only reached when PostgREST
+// answers PGRST202 (function not found in the schema cache), i.e. between
+// deploying this function and applying migration 130.
+async function legacyExistingPairsProbe(
+  supabase: ReturnType<typeof createServiceClient>,
+  rows: readonly IngestArticleRow[],
+) {
+  const sourceIds = [...new Set(rows.map((r) => r.source_id))];
+  const hashes = [...new Set(rows.map((r) => r.content_hash))];
+  return await supabase
+    .from("articles")
+    .select("source_id, content_hash")
+    .in("source_id", sourceIds)
+    .in("content_hash", hashes);
+}
+
 // `dedupeBySourceContentHash` above only catches a repeat WITHIN the rows
 // this cycle assembled. The 23505 the task describes (`articles_source_
 // content_hash_key`) is a row colliding with an ALREADY-STORED article —
@@ -458,10 +484,16 @@ export function dedupeBySourceContentHash<
 // targets the `url` UNIQUE constraint, not `(source_id, content_hash)`
 // (migration 041 F2). We look the pairs up first and drop any chunk row
 // that already exists so the batched insert never hits that constraint.
-// `.in()` on both columns independently isn't a pairwise match (it's a
-// cross product), so the exact-pair check happens client-side against the
-// returned rows; a lookup failure degrades to "don't drop anything" and
-// lets the pre-existing per-row fallback catch the 23505 as before.
+// The lookup is `existing_source_content_hash_pairs` (migration 130): it
+// takes the chunk's (source_id, content_hash) pairs as two index-aligned
+// arrays and probes the unique index once per PAIR (about 500 buffers for a
+// 100-row chunk). The `.in("source_id").in("content_hash")` query it
+// replaced is a source x hash cross product (7-12k buffers and a mean of
+// 165 ms for the same chunk, with 8 s timeouts), so it survives only as
+// `legacyExistingPairsProbe`, used while migration 130 is not applied. The
+// exact-pair check still runs client-side against the returned rows; a
+// lookup failure degrades to "don't drop anything" and lets the pre-existing
+// per-row fallback catch the 23505 as before.
 // Looks up one PREFILTER_CHUNK-sized slice of `rows`' (source_id,
 // content_hash) pairs against `articles`. A failing lookup degrades ONLY
 // this slice -- its rows are kept (not dropped) and the caller's
@@ -472,21 +504,28 @@ async function dropExistingSourceContentHashRowsChunk(
   rows: readonly IngestArticleRow[],
 ): Promise<{ rows: IngestArticleRow[]; dropped: number; lookupErrors: number }> {
   if (rows.length === 0) return { rows: [], dropped: 0, lookupErrors: 0 };
-  const sourceIds = [...new Set(rows.map((r) => r.source_id))];
-  const hashes = [...new Set(rows.map((r) => r.content_hash))];
 
-  let existingPairs: Array<{ source_id: string; content_hash: string }> = [];
+  let existingPairs: ExistingPair[] = [];
   try {
-    const { data, error } = await supabase
-      .from("articles")
-      .select("source_id, content_hash")
-      .in("source_id", sourceIds)
-      .in("content_hash", hashes);
+    // Per-row, index-aligned arrays: NOT deduped sets (the SQL zips them).
+    let { data, error } = await supabase.rpc("existing_source_content_hash_pairs", {
+      p_source_ids: rows.map((r) => r.source_id),
+      p_hashes: rows.map((r) => r.content_hash),
+    });
+    if (error?.code === "PGRST202") {
+      if (!warnedPairsRpcMissing) {
+        warnedPairsRpcMissing = true;
+        console.warn(
+          "[ingest] existing_source_content_hash_pairs missing (apply migration 130); using legacy probe",
+        );
+      }
+      ({ data, error } = await legacyExistingPairsProbe(supabase, rows));
+    }
     if (error) {
       console.error(`[ingest] existing (source_id, content_hash) lookup failed: ${error.message}`);
       return { rows: [...rows], dropped: 0, lookupErrors: 1 };
     }
-    existingPairs = (data ?? []) as Array<{ source_id: string; content_hash: string }>;
+    existingPairs = (data ?? []) as ExistingPair[];
   } catch (err) {
     console.error("[ingest] existing (source_id, content_hash) lookup threw", err);
     return { rows: [...rows], dropped: 0, lookupErrors: 1 };
@@ -511,8 +550,8 @@ async function dropExistingSourceContentHashRowsChunk(
 // Chunks `rows` by `PREFILTER_CHUNK` (migration 074 §4 -- was previously ONE
 // `.in()` call over the whole batch, up to 500 rows x 118 source ids
 // (~25 KB of query string), which silently degraded to "drop nothing" once
-// a proxy's request-line limit was tripped). Each chunk queries only its own
-// distinct source ids / hashes; a failing chunk degrades only itself.
+// a proxy's request-line limit was tripped). Each chunk looks up only its own
+// (source_id, content_hash) pairs; a failing chunk degrades only itself.
 async function dropExistingSourceContentHashRows(
   supabase: ReturnType<typeof createServiceClient>,
   rows: readonly IngestArticleRow[],
@@ -1537,10 +1576,12 @@ async function runCycleBody(
       const slice = interleaved.slice(i, i + UPSERT_BATCH);
       // Re-group this interleaved slice by source_id BEFORE the pre-filter
       // below: an interleaved chunk can carry up to `slice.length` distinct
-      // source ids (one per row in the worst case), which would otherwise
-      // blow up `dropExistingSourceContentHashRows`'s `.in("source_id", ids)`
-      // query string (the same migration 074 proxy-limit failure mode);
-      // grouped, each PREFILTER_CHUNK-sized slice spans far fewer sources.
+      // source ids (one per row in the worst case). The pairwise lookup
+      // (migration 130) no longer builds a query string out of them, but
+      // grouping keeps each PREFILTER_CHUNK-sized slice on few sources, so
+      // the index probes of one RPC call stay on neighbouring index pages
+      // (and the legacy `.in("source_id", ids)` fallback, which would hit
+      // the migration 074 proxy-limit failure mode, stays short).
       const rawChunk = groupChunkBySource(slice);
       // Drop same-(source_id, content_hash) repeats before they can hit
       // `articles_source_content_hash_key` — covers both the upsert below

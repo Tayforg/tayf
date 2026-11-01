@@ -13,6 +13,7 @@ import {
 } from "@/components/weekly/week-sections";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { sharePageMetadata } from "@/lib/seo/page-metadata";
+import { weekCopy } from "@/lib/weekly/week-copy";
 import {
   getWeekArchiveClusters,
   parseWeekKey,
@@ -37,14 +38,6 @@ import { summariseWeek } from "@/lib/weekly/weekly-query";
 interface PageProps {
   params: Promise<{ hafta: string }>;
 }
-
-const UNAVAILABLE_COPY =
-  "Bu haftanın özeti şu anda hesaplanamıyor. Birkaç dakika içinde tekrar deneyin.";
-const EMPTY_COPY = "Bu hafta yeterli küme oluşmadı.";
-const CURRENT_WEEK_NOTE =
-  "Bu hafta sürüyor; sayılar hafta bitene kadar değişir.";
-const PAST_WEEK_NOTE =
-  "Kör noktalar o haftanın kayıtlı işaretleridir (geri çağırma vetosu uygulanmış); o günkü kaynak sağlığı bilinmediği için ayrıca süzülmedi.";
 
 async function validKeyOrNotFound(rawKey: string): Promise<string> {
   const parsed = parseWeekKey(rawKey);
@@ -83,6 +76,9 @@ export default async function WeekArchivePage({ params }: PageProps) {
   await connection();
   const currentKey = await validKeyOrNotFound(hafta);
   const isCurrentWeek = hafta === currentKey;
+  // A closed week has no live source health and reads as a finished record;
+  // every line that differs comes from week-copy (see its header).
+  const copy = weekCopy(!isCurrentWeek);
 
   const [rows, health] = await Promise.all([
     getWeekArchiveClusters(hafta),
@@ -110,28 +106,31 @@ export default async function WeekArchivePage({ params }: PageProps) {
         subtitle={label}
       />
 
-      <p className={`${proseClass}`}>
-        {isCurrentWeek ? CURRENT_WEEK_NOTE : PAST_WEEK_NOTE}
-      </p>
+      <p className={`${proseClass}`}>{copy.note}</p>
 
       {rows === null ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-          <p className="text-sm text-muted-foreground">{UNAVAILABLE_COPY}</p>
+          <p className="text-sm text-muted-foreground">{copy.unavailable}</p>
         </div>
       ) : summary === null ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-          <p className="text-sm text-muted-foreground">{EMPTY_COPY}</p>
+          <p className="text-sm text-muted-foreground">{copy.empty}</p>
         </div>
       ) : (
         <>
           <ZoneShares
             summary={summary}
-            health={null}
+            health={isCurrentWeek ? health : null}
             feedStatus={null}
             truncated={false}
+            archive={!isCurrentWeek}
           />
-          <WidestSpectrum summary={summary} />
-          <Blindspots summary={summary} health={health} />
+          <WidestSpectrum summary={summary} archive={!isCurrentWeek} />
+          <Blindspots
+            summary={summary}
+            health={health}
+            archive={!isCurrentWeek}
+          />
         </>
       )}
 
@@ -161,7 +160,7 @@ export default async function WeekArchivePage({ params }: PageProps) {
           href="/hafta"
           className="text-sm font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary"
         >
-          Güncel özet: /hafta
+          {copy.latestLinkText}
         </Link>
       </nav>
     </div>

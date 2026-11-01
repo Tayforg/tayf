@@ -4,13 +4,20 @@ import { BIAS_LABELS, ZONE_META } from "@/lib/bias/config";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import { zoneYieldDenominator, type ZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
+import { weekCopy } from "@/lib/weekly/week-copy";
 import { WEEKLY_CLUSTER_LIMIT, type WeeklySummary } from "@/lib/weekly/weekly-query";
 import type { MediaDnaZone } from "@/types";
 
-// Moved verbatim out of src/app/hafta/page.tsx (Part B, owned-channels):
-// ZoneShares, BasisNote, WidestSpectrum, Blindspots, and the class tokens
-// they use, so /hafta/[hafta] can render the identical sections without
-// duplicating markup. /hafta's own output is unchanged.
+// Moved out of src/app/hafta/page.tsx (Part B, owned-channels): ZoneShares,
+// BasisNote, WidestSpectrum, Blindspots, and the class tokens they use, so
+// /hafta/[hafta] can render the same sections without duplicating markup.
+//
+// Every reader-facing line that differs between a live week and a closed one
+// comes from src/lib/weekly/week-copy.ts via the `archive` prop (default
+// false = live, which is what /hafta renders). Closed weeks have no live
+// source health, so they omit the per-zone source counts and the 72 h basis
+// footnote instead of printing placeholders. Do not add week-specific string
+// literals here: tests/guards/week-archive-copy.test.ts forbids them.
 
 export const cardClass = "rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
 export const proseClass = "max-w-[65ch] text-sm text-muted-foreground leading-relaxed";
@@ -21,8 +28,6 @@ export const linkClass =
   "text-sm font-medium text-foreground underline decoration-dotted underline-offset-2 hover:text-primary";
 export const metaClass = "text-xs text-muted-foreground";
 
-export const DEGRADED_CAVEAT =
-  "Bazı bölgelerde kaynaklara ulaşılamıyor; bu haftanın kör nokta listesi eksik olabilir.";
 export const TRUNCATED_CAVEAT = `En büyük ${WEEKLY_CLUSTER_LIMIT} küme üzerinden hesaplandı; haftanın tamamı değil.`;
 
 const ZONE_ORDER: readonly MediaDnaZone[] = [
@@ -36,12 +41,15 @@ export function ZoneShares({
   health,
   feedStatus,
   truncated,
+  archive = false,
 }: {
   summary: WeeklySummary;
   health: ZoneFeedHealth | null;
   feedStatus: { delivering: number; total: number } | null;
   truncated: boolean;
+  archive?: boolean;
 }) {
+  const copy = weekCopy(archive);
   const total = ZONE_ORDER.reduce(
     (sum, zone) => sum + summary.zoneCounts[zone],
     0,
@@ -52,7 +60,7 @@ export function ZoneShares({
 
   return (
     <section className={`${cardClass} space-y-3`}>
-      <h2 className={sectionTitleClass}>Bu hafta kim neyi öne çıkardı</h2>
+      <h2 className={sectionTitleClass}>{copy.zoneHeading}</h2>
       <ul className="space-y-2">
         {ZONE_ORDER.map((zone) => {
           const count = summary.zoneCounts[zone];
@@ -73,17 +81,17 @@ export function ZoneShares({
               <span className={metaClass}>
                 {`(haftanın ${formatCountTr(total)} haberi içinde)`}
               </span>
-              <span className={metaClass}>
-                {delivering === null
-                  ? "payda bilinmiyor"
-                  : `${delivering} kaynak haber verdi (toplayıcı / niş dahil)`}
-              </span>
+              {copy.showSourceCounts && delivering !== null ? (
+                <span className={metaClass}>
+                  {`${delivering} kaynak haber verdi (toplayıcı / niş dahil)`}
+                </span>
+              ) : null}
             </li>
           );
         })}
       </ul>
       {truncated ? <p className={metaClass}>{TRUNCATED_CAVEAT}</p> : null}
-      <BasisNote total={total} feedStatus={feedStatus} />
+      <BasisNote total={total} feedStatus={feedStatus} archive={archive} />
     </section>
   );
 }
@@ -97,40 +105,53 @@ export function ZoneShares({
  * dahil — mixed with the spektruma-sayılan-only feedStatus basis below,
  * which is why both bases are now stated explicitly rather than folded
  * into one ambiguous "kaynak" count — browser-qa-15).
+ *
+ * A closed week states only the percentage basis: the source figures and the
+ * link to the live status page describe the present, not that week.
  */
 export function BasisNote({
   total,
   feedStatus,
+  archive = false,
 }: {
   total: number;
   feedStatus: { delivering: number; total: number } | null;
+  archive?: boolean;
 }) {
-  const known = feedStatus !== null && feedStatus.total > 0;
+  const copy = weekCopy(archive);
+  const sourceBasis = copy.sourceBasis(feedStatus);
 
   return (
     <p className="text-xs text-muted-foreground">
-      {`Yüzdeler bu haftanın toplam ${formatCountTr(total)} haberi üzerinden hesaplanır. Bölge satırlarındaki kaynak sayıları son 72 saatte en az bir haber veren tüm kaynakları (toplayıcı / niş dahil) gösterir`}
-      {known
-        ? `; spektruma sayılan kaynaklardan ${feedStatus.delivering} / ${feedStatus.total} tanesi haber verdi. `
-        : "; spektruma sayılan kaynakların durumu şu anda bilinmiyor. "}
-      <Link
-        href="/kaynaklar/durum"
-        className="underline decoration-dotted underline-offset-2 hover:text-foreground"
-      >
-        Kaynak durumu →
-      </Link>
+      {sourceBasis === null
+        ? copy.percentBasis(total)
+        : `${copy.percentBasis(total)} ${sourceBasis} `}
+      {copy.showStatusLink ? (
+        <Link
+          href="/kaynaklar/durum"
+          className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+        >
+          Kaynak durumu →
+        </Link>
+      ) : null}
     </p>
   );
 }
 
-export function WidestSpectrum({ summary }: { summary: WeeklySummary }) {
+export function WidestSpectrum({
+  summary,
+  archive = false,
+}: {
+  summary: WeeklySummary;
+  archive?: boolean;
+}) {
+  const copy = weekCopy(archive);
+
   return (
     <section className={`${cardClass} space-y-3`}>
       <h2 className={sectionTitleClass}>En geniş yelpaze</h2>
       {summary.topClusters.length === 0 ? (
-        <p className={proseClass}>
-          Bu hafta birden fazla bölgenin birlikte gördüğü haber olmadı.
-        </p>
+        <p className={proseClass}>{copy.noSharedStory}</p>
       ) : (
         <ul className="space-y-2">
           {summary.topClusters.map((cluster) => (
@@ -152,10 +173,13 @@ export function WidestSpectrum({ summary }: { summary: WeeklySummary }) {
 export function Blindspots({
   summary,
   health,
+  archive = false,
 }: {
   summary: WeeklySummary;
   health: ZoneFeedHealth | null;
+  archive?: boolean;
 }) {
+  const copy = weekCopy(archive);
   const degraded =
     health !== null && ZONE_ORDER.some((zone) => health[zone].degraded);
 
@@ -163,7 +187,7 @@ export function Blindspots({
     <section className={`${cardClass} space-y-3`}>
       <h2 className={sectionTitleClass}>Kör noktalar</h2>
       {summary.blindspots.length === 0 ? (
-        <p className={proseClass}>Bu hafta kör nokta yok.</p>
+        <p className={proseClass}>{copy.noBlindspot}</p>
       ) : (
         <ul className="space-y-2">
           {summary.blindspots.map((blindspot) => (
@@ -178,7 +202,9 @@ export function Blindspots({
           ))}
         </ul>
       )}
-      {degraded ? <p className={metaClass}>{DEGRADED_CAVEAT}</p> : null}
+      {degraded && copy.degradedCaveat !== null ? (
+        <p className={metaClass}>{copy.degradedCaveat}</p>
+      ) : null}
     </section>
   );
 }

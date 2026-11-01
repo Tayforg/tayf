@@ -1046,3 +1046,128 @@ describe("ClusterCardImage — unlisted image hosts (api-1)", () => {
     expect(componentSource).not.toMatch(/wildcard\s+`?images\.remotePatterns/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h10-a11y-1: `alt=""` marks the image decorative. ClusterCard passes it for
+// both thumbnails because the headline sits right next to them; repeating it as
+// an image name made the link read the headline twice. Decorative means the
+// placeholder / logo wrappers drop role="img" + aria-label and hide themselves
+// from the accessibility tree instead of announcing "image, <headline>".
+// A non-empty alt (the cluster page hero) keeps today's role="img" naming.
+// ---------------------------------------------------------------------------
+describe("ClusterCardImage — decorative alt=\"\" (h10-a11y-1)", () => {
+  it("tier 3 placeholder: the wrapper is aria-hidden, with no role=\"img\" and no aria-label", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage src={null} alt="" width={640} height={360} className="h-full w-full" />,
+    );
+
+    expect(markup).toMatch(/^<div[^>]*\baria-hidden="true"/);
+    expect(markup).not.toContain('role="img"');
+    expect(markup).not.toContain("aria-label");
+    // The placeholder is still drawn: only its accessibility exposure changed.
+    expect(markup).toContain("bg-gradient-to-br from-muted via-muted/50 to-muted/20");
+    expect(markup).not.toContain("<img");
+  });
+
+  it("tier 2 logo: the wrapper is aria-hidden (no role / aria-label) and the <img> has alt=\"\"", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Outlet Gazete"
+        alt=""
+        width={640}
+        height={360}
+      />,
+    );
+
+    expect(markup).toMatch(/^<div[^>]*\baria-hidden="true"/);
+    expect(markup).not.toContain('role="img"');
+    expect(markup).not.toContain("aria-label");
+    expect(markup).toMatch(/<img[^>]*\balt=""/);
+    // The decorative wrapper must not turn the logo into a named image.
+    expect(markup).not.toContain('alt="Outlet Gazete"');
+  });
+
+  it("tier 2 logo: still shows the source-name caption visually", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Outlet Gazete"
+        alt=""
+        width={640}
+        height={360}
+      />,
+    );
+
+    expect(markup).toContain("Outlet Gazete");
+  });
+
+  it("tier 1 photo: the <img> has alt=\"\" and next/image receives alt=\"\"", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage src={CREDIT_URL} alt="" width={640} height={360} />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.alt).toBe("");
+    expect(markup).toMatch(/<img[^>]*\balt=""/);
+    expect(markup).not.toContain('role="img"');
+    expect(markup).not.toContain("aria-hidden");
+  });
+
+  it("a non-empty alt keeps the named image on tier 3: role=\"img\" + aria-label, not aria-hidden", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage src={null} alt="Test görseli" width={640} height={360} />,
+    );
+
+    expect(markup).toMatch(/^<div[^>]*\brole="img"/);
+    expect(markup).toContain('aria-label="Test görseli"');
+    expect(markup).not.toMatch(/^<div[^>]*\baria-hidden/);
+  });
+
+  it("a non-empty alt keeps the named image on tier 2: aria-label \"alt — source\" and the logo's own alt", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Outlet Gazete"
+        alt="Test görseli"
+        width={640}
+        height={360}
+      />,
+    );
+
+    expect(markup).toMatch(/^<div[^>]*\brole="img"/);
+    expect(markup).toContain('aria-label="Test görseli — Outlet Gazete"');
+    expect(markup).toContain('alt="Outlet Gazete"');
+    expect(markup).not.toMatch(/^<div[^>]*\baria-hidden/);
+  });
+
+  it("a non-empty alt without a logoAlt names the tier 2 logo with the alt", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        alt="Test görseli"
+        width={640}
+        height={360}
+      />,
+    );
+
+    expect(markup).toContain('aria-label="Test görseli"');
+    expect(markup).toContain('alt="Test görseli"');
+  });
+
+  it("source guard: decorative is derived from alt === \"\" and the alt prop documents it", () => {
+    expect(componentSource).toContain('const decorative = alt === "";');
+
+    const at = componentSource.indexOf("  alt: string;");
+    expect(at).toBeGreaterThan(-1);
+    const doc = componentSource.slice(componentSource.lastIndexOf("/**", at), at);
+    // The doc block sits directly above the prop (nothing but whitespace between).
+    expect(doc.trimEnd().endsWith("*/")).toBe(true);
+    expect(doc).toContain("decorative");
+    expect(doc).toContain('""');
+  });
+});

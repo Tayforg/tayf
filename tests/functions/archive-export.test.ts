@@ -14,6 +14,8 @@ import {
   mapArticle,
   objectPrefix,
   previousUtcDay,
+  resolveExportRequest,
+  runArchiveCatchup,
   runArchiveExport,
   sha256Hex,
   summariseLabels,
@@ -28,6 +30,14 @@ import {
   type RawArticleRow,
   type RawLabelRow,
 } from "../../supabase/functions/_shared/archive.ts";
+import {
+  ARCHIVE_CATCHUP_MAX_WINDOW_DAYS,
+  ARCHIVE_CATCHUP_WINDOW_DAYS,
+  ARCHIVE_LABEL_KEEP_DAYS,
+  catchupWindow,
+  missingArchiveDays,
+  pickCatchupDay,
+} from "../../supabase/functions/_shared/archive-window.ts";
 
 // Pure-helper + algorithm contract for the archive-export Edge Function
 // (M-10, Tayf Arşiv). The Supabase wiring in archive-export/index.ts is thin;
@@ -50,6 +60,7 @@ interface UploadCall {
 interface Recorder {
   ports: ArchivePorts;
   hasExportCalls: string[];
+  listCalls: string[];
   clusterCalls: { start: string; end: string; page: number }[];
   articleCalls: { ids: string[]; page: number }[];
   labelCalls: string[][];
@@ -61,6 +72,7 @@ function makePorts(overrides: Partial<ArchivePorts> = {}): Recorder {
   const rec: Recorder = {
     ports: {} as ArchivePorts,
     hasExportCalls: [],
+    listCalls: [],
     clusterCalls: [],
     articleCalls: [],
     labelCalls: [],
@@ -72,6 +84,10 @@ function makePorts(overrides: Partial<ArchivePorts> = {}): Recorder {
     hasExport: async (day) => {
       rec.hasExportCalls.push(day);
       return false;
+    },
+    listExportedDays: async (fromDay) => {
+      rec.listCalls.push(fromDay);
+      return [];
     },
     fetchClusters: async (start, end, page) => {
       rec.clusterCalls.push({ start, end, page });
@@ -846,5 +862,339 @@ describe("runArchiveExport labels", () => {
       .map((l) => JSON.parse(l) as ArchiveArticle);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.labels).toEqual(emptyLabels());
+  });
+});
+
+// --- 3. catch-up window (archive-window.ts, ZERO imports) --------------------
+//
+// 2026-10-12..17 never exported (h10-silent-2): the nightly job only ever
+// exports "yesterday" and nothing retried. The pure window math lives in
+// _shared/archive-window.ts so src/ (the /admin card) and the Edge Function
+// share one definition. The jev-shadow-prune keep window (45 days) is the
+// hard ceiling: a day older than that re-exports WITHOUT labels.
+
+/** Ascending `YYYY-MM-DD` days from `from` to `to`, inclusive. */
+function daysBetween(from: string, to: string): string[] {
+  const out: string[] = [];
+  const end = Date.parse(`${to}T00:00:00Z`);
+  for (let t = Date.parse(`${from}T00:00:00Z`); t <= end; t += 86_400_000) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+/** The live ledger as of 2026-11-04: 09-18..11-03 minus the 10-12..10-17 hole. */
+function ledgerWithHole(): string[] {
+  const hole = new Set(daysBetween("2026-10-12", "2026-10-17"));
+  return daysBetween("2026-09-18", "2026-11-03").filter((d) => !hole.has(d));
+}
+
+const NOW_0512 = new Date("2026-11-05T05:12:00Z");
+
+describe("archive-window constants", () => {
+  it("keeps the catch-up window inside the Jev label keep window", () => {
+    expect(ARCHIVE_LABEL_KEEP_DAYS).toBe(45);
+    expect(ARCHIVE_CATCHUP_MAX_WINDOW_DAYS).toBe(ARCHIVE_LABEL_KEEP_DAYS - 1);
+    expect(ARCHIVE_CATCHUP_MAX_WINDOW_DAYS).toBe(44);
+    expect(ARCHIVE_CATCHUP_WINDOW_DAYS).toBe(40);
+    expect(ARCHIVE_CATCHUP_WINDOW_DAYS).toBeLessThanOrEqual(ARCHIVE_CATCHUP_MAX_WINDOW_DAYS);
+  });
+});
+
+describe("catchupWindow", () => {
+  it("is [today-N, today-2] in UTC", () => {
+    expect(catchupWindow(NOW_0512, 40)).toEqual({ from: "2026-09-26", to: "2026-11-03" });
+  });
+
+  it("crosses month and year boundaries", () => {
+    expect(catchupWindow(new Date("2027-01-01T05:12:00Z"), 40)).toEqual({ from: "2026-11-22", to: "2026-12-30" });
+  });
+
+  it("flips on the UTC midnight, not on the local one", () => {
+    expect(catchupWindow(new Date("2026-11-04T23:59:59.999Z"), 40).to).toBe("2026-11-02");
+    expect(catchupWindow(new Date("2026-11-05T00:00:00.000Z"), 40).to).toBe("2026-11-03");
+    // 01:30 at +03:00 is still 22:30 UTC on the 4th.
+    expect(catchupWindow(new Date("2026-11-05T01:30:00+03:00"), 40).to).toBe("2026-11-02");
+  });
+
+  it("accepts the bounds 2 and 44", () => {
+    expect(catchupWindow(NOW_0512, 2)).toEqual({ from: "2026-11-03", to: "2026-11-03" });
+    expect(catchupWindow(NOW_0512, 44)).toEqual({ from: "2026-09-22", to: "2026-11-03" });
+  });
+
+  it("throws a RangeError above the Jev keep window (45), below 2 and for non-integers", () => {
+    for (const bad of [45, 100, 1, 0, -1, 2.5, 40.0001, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => catchupWindow(NOW_0512, bad), String(bad)).toThrow(RangeError);
+    }
+  });
+
+  it("throws a RangeError for an invalid Date instead of returning NaN days", () => {
+    expect(() => catchupWindow(new Date(Number.NaN), 40)).toThrow(RangeError);
+  });
+});
+
+describe("missingArchiveDays", () => {
+  it("lists the hole, ascending", () => {
+    expect(missingArchiveDays(ledgerWithHole(), NOW_0512, 40)).toEqual([
+      "2026-10-12",
+      "2026-10-13",
+      "2026-10-14",
+      "2026-10-15",
+      "2026-10-16",
+      "2026-10-17",
+    ]);
+  });
+
+  it("returns [] for no input (an empty ledger has no known start)", () => {
+    expect(missingArchiveDays([], NOW_0512, 40)).toEqual([]);
+  });
+
+  it("ignores invalid strings, including impossible calendar days", () => {
+    const noisy = [...ledgerWithHole(), "", "garbage", "2026-02-30", "2026-9-1", "20261012", " 2026-10-12", "2026-10-12T00:00:00Z"];
+    expect(missingArchiveDays(noisy, NOW_0512, 40)).toEqual(missingArchiveDays(ledgerWithHole(), NOW_0512, 40));
+    expect(missingArchiveDays(["garbage", "2026-13-01"], NOW_0512, 40)).toEqual([]);
+  });
+
+  it("clamps the window start to the first ledger day (the archive began there)", () => {
+    // window would start 2026-09-26; the first ever export is 2026-10-30.
+    expect(missingArchiveDays(["2026-10-30", "2026-11-01"], NOW_0512, 40)).toEqual(["2026-10-31", "2026-11-02", "2026-11-03"]);
+    // 40 days before 2026-10-20 reaches back before the archive existed.
+    const early = daysBetween("2026-09-18", "2026-10-18");
+    expect(missingArchiveDays(early, new Date("2026-10-20T05:12:00Z"), 40)).toEqual([]);
+  });
+
+  it("is order- and duplicate-insensitive and does not mutate its input", () => {
+    const input = [...ledgerWithHole()].reverse().concat(["2026-10-30", "2026-10-30"]);
+    const copy = [...input];
+    expect(missingArchiveDays(input, NOW_0512, 40)).toEqual(missingArchiveDays(ledgerWithHole(), NOW_0512, 40));
+    expect(input).toEqual(copy);
+  });
+
+  it("never reports yesterday or today (the 03:40 job owns yesterday), nor days past the window end", () => {
+    const withoutRecent = daysBetween("2026-09-18", "2026-11-02"); // 11-03 and 11-04 absent
+    expect(missingArchiveDays(withoutRecent, NOW_0512, 40)).toEqual(["2026-11-03"]);
+    expect(missingArchiveDays(daysBetween("2026-09-18", "2026-11-03"), NOW_0512, 40)).toEqual([]);
+  });
+
+  it("reports the window's first day (today-40) but not today-41", () => {
+    // days 09-18..11-03 minus 09-26 (= today-40) and minus 09-25 (= today-41)
+    const ledger = daysBetween("2026-09-18", "2026-11-03").filter((d) => d !== "2026-09-26" && d !== "2026-09-25");
+    expect(missingArchiveDays(ledger, NOW_0512, 40)).toEqual(["2026-09-26"]);
+  });
+
+  it("keeps a leading gap visible when the ledger is anchored by its first-ever day", () => {
+    // 2026-11-21 05:12: window = [10-12, 11-19]; the whole hole sits at the window start.
+    const ledger = ["2026-09-18", ...daysBetween("2026-10-18", "2026-11-19")];
+    expect(missingArchiveDays(ledger, new Date("2026-11-21T05:12:00Z"), 40)).toEqual(
+      daysBetween("2026-10-12", "2026-10-17"),
+    );
+  });
+
+  it("propagates the RangeError of a bad window", () => {
+    expect(() => missingArchiveDays(ledgerWithHole(), NOW_0512, 45)).toThrow(RangeError);
+  });
+});
+
+describe("pickCatchupDay", () => {
+  it("picks the OLDEST missing day", () => {
+    expect(pickCatchupDay(ledgerWithHole(), NOW_0512, 40)).toBe("2026-10-12");
+  });
+
+  it("returns null when every day is present", () => {
+    expect(pickCatchupDay(daysBetween("2026-09-18", "2026-11-03"), NOW_0512, 40)).toBeNull();
+    expect(pickCatchupDay([], NOW_0512, 40)).toBeNull();
+  });
+
+  it("returns null when only yesterday is missing", () => {
+    expect(pickCatchupDay(daysBetween("2026-09-18", "2026-11-03"), NOW_0512, 40)).toBeNull();
+  });
+
+  it("does not pick a day at today-41 with a 40 day window", () => {
+    const ledger = daysBetween("2026-09-18", "2026-11-03").filter((d) => d !== "2026-09-25");
+    expect(pickCatchupDay(ledger, NOW_0512, 40)).toBeNull();
+    // ...but a 44 day window still reaches it.
+    expect(pickCatchupDay(ledger, NOW_0512, 44)).toBe("2026-09-25");
+  });
+
+  it("throws for a window of 45 (the first day whose Jev labels are already pruned)", () => {
+    expect(() => pickCatchupDay(ledgerWithHole(), NOW_0512, 45)).toThrow(RangeError);
+  });
+
+  it("is decided at the UTC midnight edge", () => {
+    const ledger = daysBetween("2026-09-18", "2026-11-02"); // 11-03 missing
+    expect(pickCatchupDay(ledger, new Date("2026-11-04T23:59:59Z"), 40)).toBeNull(); // 11-03 is still yesterday
+    expect(pickCatchupDay(ledger, new Date("2026-11-05T00:00:00Z"), 40)).toBe("2026-11-03");
+  });
+
+  it("(deadline) the oldest hole day is still reachable on 2026-11-21 and gone on 2026-11-22", () => {
+    const ledger = ["2026-09-18", ...daysBetween("2026-10-18", "2026-11-19")];
+    expect(pickCatchupDay(ledger, new Date("2026-11-21T05:12:00Z"), 40)).toBe("2026-10-12");
+    expect(pickCatchupDay(ledger, new Date("2026-11-22T05:12:00Z"), 40)).toBe("2026-10-13");
+  });
+});
+
+// --- 4. request routing -----------------------------------------------------
+
+describe("resolveExportRequest", () => {
+  const NOW_0340 = new Date("2026-11-05T03:40:00Z");
+
+  it("an empty body means the previous UTC day", () => {
+    expect(resolveExportRequest({}, NOW_0340)).toEqual({ kind: "day", day: "2026-11-04" });
+  });
+
+  it("an explicit day is passed through", () => {
+    expect(resolveExportRequest({ day: "2026-10-12" }, NOW_0340)).toEqual({ kind: "day", day: "2026-10-12" });
+  });
+
+  it("{catchup:true} selects catch-up mode", () => {
+    expect(resolveExportRequest({ catchup: true }, NOW_0340)).toEqual({ kind: "catchup" });
+  });
+
+  it("catchup:false is the ordinary day mode", () => {
+    expect(resolveExportRequest({ catchup: false }, NOW_0340)).toEqual({ kind: "day", day: "2026-11-04" });
+  });
+
+  it("rejects a non-boolean catchup flag as bad-body", () => {
+    for (const catchup of ["yes", "true", 1, 0, null, {}, []]) {
+      expect(resolveExportRequest({ catchup }, NOW_0340), String(catchup)).toEqual({ kind: "error", error: "bad-body" });
+    }
+  });
+
+  it("rejects catchup together with a day (ambiguous) as bad-body", () => {
+    expect(resolveExportRequest({ catchup: true, day: "2026-10-12" }, NOW_0340)).toEqual({ kind: "error", error: "bad-body" });
+  });
+
+  it("rejects a malformed day as bad-day", () => {
+    for (const day of ["2026-02-30", "2026-9-1", "", 20261012, null, {}, []]) {
+      expect(resolveExportRequest({ day }, NOW_0340), String(day)).toEqual({ kind: "error", error: "bad-day" });
+    }
+  });
+
+  it("rejects a body that is not a plain object as bad-body", () => {
+    for (const body of [null, [], [{ day: "2026-10-12" }], "2026-10-12", 7, true, undefined]) {
+      expect(resolveExportRequest(body, NOW_0340), String(body)).toEqual({ kind: "error", error: "bad-body" });
+    }
+  });
+
+  it("ignores unknown keys", () => {
+    expect(resolveExportRequest({ whatever: 1 }, NOW_0340)).toEqual({ kind: "day", day: "2026-11-04" });
+  });
+});
+
+// --- 5. runArchiveCatchup ---------------------------------------------------
+
+describe("runArchiveCatchup", () => {
+  /** Ports over a stateful in-memory ledger that honours the port contract. */
+  function ledgerPorts(initial: string[], overrides: Partial<ArchivePorts> = {}) {
+    const ledger = new Set(initial);
+    const rec = makePorts({
+      hasExport: async (day) => ledger.has(day),
+      listExportedDays: async (fromDay) => {
+        rec.listCalls.push(fromDay);
+        // contract: days >= fromDay, plus the first-ever day as the clamp anchor
+        const sorted = [...ledger].sort();
+        return sorted.filter((d, i) => d >= fromDay || i === 0);
+      },
+      recordExport: async (row) => {
+        rec.records.push(row);
+        ledger.add(row.day);
+      },
+      fetchClusters: async (start, end, page) => {
+        rec.clusterCalls.push({ start, end, page });
+        return page === 0 ? [cluster({ id: `c-${start.slice(0, 10)}`, first_published: start })] : [];
+      },
+      ...overrides,
+    });
+    return { rec, ledger };
+  }
+
+  it("with no gap: reports no-gap and makes 0 fetch / upload / record calls", async () => {
+    const { rec } = ledgerPorts(daysBetween("2026-09-18", "2026-11-03"));
+
+    const result = await runArchiveCatchup(rec.ports, NOW_0512, 40);
+
+    expect(result).toEqual({ ok: true, catchup: true, day: null, reason: "no-gap" });
+    expect(rec.clusterCalls).toEqual([]);
+    expect(rec.articleCalls).toEqual([]);
+    expect(rec.labelCalls).toEqual([]);
+    expect(rec.uploads).toEqual([]);
+    expect(rec.records).toEqual([]);
+    expect(rec.hasExportCalls).toEqual([]);
+  });
+
+  it("asks the ledger from the window start only", async () => {
+    const { rec } = ledgerPorts(daysBetween("2026-09-18", "2026-11-03"));
+    await runArchiveCatchup(rec.ports, NOW_0512, 40);
+    expect(rec.listCalls).toEqual(["2026-09-26"]);
+  });
+
+  it("with a gap: exports exactly the oldest missing day, once", async () => {
+    const { rec } = ledgerPorts(ledgerWithHole());
+
+    const result = await runArchiveCatchup(rec.ports, NOW_0512, 40);
+
+    expect(result).toMatchObject({ ok: true, catchup: true, skipped: false, day: "2026-10-12" });
+    expect(rec.records).toHaveLength(1);
+    expect(rec.records[0]!.day).toBe("2026-10-12");
+    expect(rec.clusterCalls[0]).toMatchObject({ start: "2026-10-12T00:00:00.000Z", end: "2026-10-13T00:00:00.000Z" });
+    expect(rec.uploads.map((u) => u.path)).toEqual([
+      "2026/10/12/clusters.jsonl",
+      "2026/10/12/articles.jsonl",
+      "2026/10/12/manifest.json",
+    ]);
+  });
+
+  it("when a racing run already exported the day: skipped result with catchup:true and no uploads", async () => {
+    const { rec } = ledgerPorts(ledgerWithHole(), { hasExport: async () => true });
+
+    const result = await runArchiveCatchup(rec.ports, NOW_0512, 40);
+
+    expect(result).toEqual({ ok: true, skipped: true, day: "2026-10-12", catchup: true });
+    expect(rec.uploads).toEqual([]);
+    expect(rec.records).toEqual([]);
+  });
+
+  it("a listExportedDays error throws and nothing is exported", async () => {
+    const { rec } = ledgerPorts(ledgerWithHole(), {
+      listExportedDays: async () => {
+        throw new Error("archive_exports list failed: boom");
+      },
+    });
+
+    await expect(runArchiveCatchup(rec.ports, NOW_0512, 40)).rejects.toThrow("archive_exports list failed: boom");
+    expect(rec.clusterCalls).toEqual([]);
+    expect(rec.uploads).toEqual([]);
+  });
+
+  it("a bad window rejects with a RangeError before touching a port", async () => {
+    const { rec } = ledgerPorts(ledgerWithHole());
+    await expect(runArchiveCatchup(rec.ports, NOW_0512, 45)).rejects.toThrow(RangeError);
+    expect(rec.listCalls).toEqual([]);
+  });
+
+  it("closes the 6 day hole over 6 nights, oldest first, then reports no-gap", async () => {
+    const { rec } = ledgerPorts(ledgerWithHole());
+    const exported: (string | null)[] = [];
+    for (let night = 0; night < 7; night++) {
+      const r = await runArchiveCatchup(rec.ports, NOW_0512, 40);
+      exported.push(r.day);
+    }
+    expect(exported).toEqual([
+      "2026-10-12",
+      "2026-10-13",
+      "2026-10-14",
+      "2026-10-15",
+      "2026-10-16",
+      "2026-10-17",
+      null,
+    ]);
+    expect(rec.records).toHaveLength(6);
+  });
+
+  it("forwards the export options (generatedAt reaches the manifest)", async () => {
+    const { rec } = ledgerPorts(ledgerWithHole());
+    await runArchiveCatchup(rec.ports, NOW_0512, 40, { generatedAt: "2026-11-05T05:12:00.000Z" });
+    const manifest = JSON.parse(rec.uploads.find((u) => u.path.endsWith("manifest.json"))!.body) as { generated_at: string };
+    expect(manifest.generated_at).toBe("2026-11-05T05:12:00.000Z");
   });
 });

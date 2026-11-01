@@ -1,4 +1,4 @@
-# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122)
+# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122, 131)
 
 `public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119 and 122) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
@@ -12,10 +12,32 @@ The 546 baseline, re-measured 2026-10-23 over 24 h: 27×546 against 427×200
 (about 6%, up to 25% an hour at 06-09 UTC, reason `CPUTime`). It is addressed
 by the ingest parse budget (migration 113, see `docs/migration-guide.md`).
 
-The Action runs every 30 minutes, calls the function over PostgREST, and
-`exit 1`s on any `'fail'` row (or an empty/mostly-`'unknown'` report) so
+The Action is scheduled every 30 minutes, calls the function over PostgREST,
+and `exit 1`s on any `'fail'` row (or an empty/mostly-`'unknown'` report) so
 GitHub's default "email the last person who edited the workflow file" flow
 fires.
+
+**GitHub does not keep that schedule.** Measured on 2026-11-01 (`gh run list
+--workflow ops-heartbeat.yml --limit 100`): 100 scheduled runs between
+2026-10-15 02:25 UTC and 2026-11-01 09:26 UTC, out of about 830 expected
+`*/30` ticks (about 12%), with a median gap of 4.1 h and a maximum of 7.75 h
+(10 runs in the last 48 h). Rows 1, 2, 3 and 12 of `ops_health_report()` read
+only the trailing 30 minutes, so most of every day was never evaluated: an
+incident that fell between two runs was invisible. Migration 131 closes that
+without relying on the scheduler: see "Kaçırılan olaylar (131)" below.
+`.github/workflows/cluster-audit.yml` is scheduled the same way and has the same
+drift; do not treat it as a timely signal either.
+
+**Founder action: an external dead-man monitor.** The workflow itself can go
+quiet (the 60-day auto-disable below, a disabled schedule, or simply GitHub
+skipping ticks), and nothing inside GitHub notices that. Set up an external
+uptime or dead-man monitor that pages when the heartbeat stops checking in: the
+monitor expects a periodic "I ran" ping from the workflow and alerts when none
+arrives within a window comfortably longer than GitHub's real cadence (more than
+8 hours at the moment). Any monitoring service with check-in (heartbeat) URLs
+will do. Keep the check-in address in a repository secret like the other
+secrets; it is not in this repo and not in this doc. Adding the ping to the
+workflow needs the new secret, so it is deliberately not part of migration 131.
 
 ## What it checks
 
@@ -52,6 +74,11 @@ migration 114 header, the 24 h window of the migration 115 header, and
 | 13 | `sources_newly_dark` | Active `outlet`/`wire` sources that are **not** in `public.ops_dark_source_baseline`, have at least 50 `articles` (by `created_at`, ingest time) in the 14 days before the last 24 hours, and none in the last 24 hours. `detail` names them with that count and a reason, largest first: `son 24 saatte haber gelmedi (önceki 14 günde en az 50 haber vardı): slug (n) · neden, …` (`neden` is `erişim yok`, `akış donmuş` or `sessiz`, see "Susan kaynakların nedeni" below), cut at 500 characters; `yeni susan kaynak yok` when none. **Warn-only**: never `fail`, so the Action does not exit non-zero and nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors (a missing baseline table included) | warn ≥ 1 (threshold 1) | 2026-10-15 to 10-23: five active sources went dark one after another and no row noticed (`dead_feeds` waits 72 h and warns above 38 sources; the per-zone freshness rows are satisfied by any other outlet in the zone). Three of the five are `opposition_leaning`, so the `muhalefet` zone loses about 9k articles a month. Step 0 (migration 114 header): the predicate runs in about 50 ms on an index-only scan of `idx_articles_created_source`. A 7-day replay at 6-hour steps with the original 12 h window flagged 22 distinct sources; of the 146 flags with a full 24 h of follow-up, 89 saw an article within 24 h (low-volume outlets with an overnight gap over 12 h), while `halk-tv` and `gazete-pencere` never resumed. Window widened from 12 h to 24 h by migration 115: same replay, 73 flags over 8 sources, 13 of 63 complete flags resumed within 24 h (21%), against 173 / 22 / 89 of 146 (61%) at 12 h; the `>= 50` floor, the baseline exclusion and the warn-only status are unchanged. Added by migration 114, window 24 h since migration 115, reason labels since migration 119 (2026-10-24: `haberport`, `korkusuz` and `en-politik` answer HTTP 200 every poll and publish nothing, which row 13 could not tell from a quiet outlet) |
 | 14 | `ingest_gaps` | Gaps over 5 minutes between consecutive `ingest_cycles.started_at` in the last 6 hours. `ingest-drain` runs every 3 minutes (migration 038), so a longer gap is at least one tick that left no row: the platform killed it (pg_net `546 WORKER_RESOURCE_LIMIT`), cron skipped it, or the row write failed. Row 3 cannot see this, because it only counts rows over 30 minutes and reads pass from 8 up. `detail`: `son 6 saatte 5 dakikadan uzun boşluk: n · en uzunu m dk · HH:MI→HH:MI, … (UTC)`, longest first, cut at 500 characters; `son 6 saatte 5 dakikadan uzun boşluk yok · en uzunu m dk` when there is none; `son 6 saatte ingest döngüsü yok` (warn, observed empty) when the window holds no cycle at all. **Warn-only**: never `fail`, nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors | warn at 3 or more gaps, or any gap over 10 minutes (threshold 3) | Added by migration 122 (2026-10-24). Step 0 (migration 122 header): over the retained 21,350 cycles, sliding 6 hour windows from 09-29 to 10-12 (ingest healthy) warned 16 of 625 times (2.6%); over the last 12 days 320 of 577 (55%), the degraded stretch since 10-13 (10-22: 11 gaps in one 6 hour bucket, 5 of them over 10 minutes, longest 33 minutes). 4 gaps or 15 minutes would have warned 40%, 5 gaps or 20 minutes 20%; thresholds kept at 3 and 10 minutes because 55% is a true reading of that stretch. Read at 16:55 UTC on 2026-10-24: 119 cycles, 1 gap of 6 minutes, pass; index scan, 0.13 ms |
 
+The heartbeat script adds two rows of its own to this table and to the step
+summary, on top of the 14: `archive_gap_days` (see "Arşiv boşlukları") and, when
+the snapshot read fails, `snapshot_backstop` (`unknown`). They are not part of
+`ops_health_report()`.
+
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
 14 rows. (Row 12 degrades gracefully: with only one of the two present it
@@ -71,6 +98,83 @@ stays the backstop. Only the founder raises an allowance, by `update
 public.jev_stage_budgets`; no job, migration or agent does. Alerts already open
 from before the cap resolve themselves (`under_allowance`) once a later day
 comes in at or under the allowance and they are still unacknowledged.
+
+## Kaçırılan olaylar (131)
+
+`pg_cron` job `ops-health-snapshot` (`4-59/10 * * * *`, so minutes :04, :14, ...)
+runs `public.ops_health_snapshot()`: it stores every `warn`, `fail` and `unknown`
+row of `ops_health_report()` in `public.ops_health_snapshots` (id, `taken_at`,
+`check_name`, `status`, `observed`, `threshold`, `detail`, `notified_at`) and
+deletes snapshots older than 3 days. `pass` and `skip` rows are never stored, and
+`ops_health_report()` itself is unchanged. The table is service_role only (RLS on,
+no policy, every anon/authenticated privilege revoked); the functions are
+`SECURITY DEFINER` with `service_role` execute only.
+
+Each heartbeat run then does three extra things, after the report:
+
+1. `ops_health_unnotified()` returns the `fail` snapshots with `notified_at` null
+   from the last 24 hours (capped at the 3 day retention, oldest first, at most
+   200). Any such row turns the run red, and the table and the step summary list
+   it as `kaçırılan: <check_name> @ <YYYY-MM-DD HH:MI UTC> · <detail>`. `warn` and
+   `unknown` snapshots never page.
+2. It writes the log table and the step summary.
+3. Only then does it call `ops_health_mark_notified(ids)` once, with the ids it
+   just reported, which stamps `notified_at`. So one incident pages once, and a
+   run that dies between the page and the mark pages again (never loses a page).
+   A failing mark is logged and does not change the exit code.
+
+A persistent failure stores a snapshot every 10 minutes, so the first run after
+it started lists one line per snapshot (up to 200); the live report row keeps it
+red for as long as it lasts.
+
+If migration 131 has not been applied (or the call fails), the heartbeat adds a
+row marked `unknown` (`snapshot_backstop` or `archive_gap_days`, detail
+`... okunamadı (131 uygulanmadı mı?)`). These rows are only informative: they
+never change the exit code and never count toward the "at least half `unknown`"
+rule.
+
+Cost: about 3-4 non-pass rows per tick, so roughly 430-600 rows a day and about
+2k rows kept; `ops_health_report()` took 99-455 ms on 2026-11-01 (mean 218 ms), at
+144 runs a day. Stop it with `select cron.unschedule('ops-health-snapshot');`.
+
+## Arşiv boşlukları
+
+The nightly `archive-export` (060, `40 3 * * *`) only ever exports yesterday and
+never retried. On 2026-10-12..17 it did not run at all (about 9.9k clusters), and
+nothing noticed. Migration 131 and the `archive-export` function now cover it:
+
+- **Catch-up job.** `pg_cron` `archive-export-catchup` (`12 5 * * *`, 05:12 UTC,
+  off jev-shadow's :x0 minutes) posts `{"catchup":true}` to `archive-export`. The
+  function reads the exported days of the last 40 days (a window of
+  `[today - 40, today - 2]` in UTC; yesterday belongs to the 03:40 job) and
+  re-exports the **oldest** missing day, one day per night, or answers
+  `{"ok":true,"catchup":true,"day":null,"reason":"no-gap"}`. A hole of n days
+  closes in n nights. `catchup` cannot be combined with `day`.
+- **Why 40 days.** `jev-shadow-prune` keeps 45 days of Jev predictions, and a day
+  exported after its labels are pruned carries no labels. The window is capped at
+  44 (45 - 1) in `supabase/functions/_shared/archive-window.ts`. A 30 day window
+  would have stopped reaching 2026-10-12 on 2026-11-11; 40 days reaches it until
+  2026-11-21 (its labels go around 2026-11-26).
+- **Deadline.** Apply migration 131 and redeploy the function
+  (`supabase functions deploy archive-export --no-verify-jwt`) by 2026-11-20 so
+  the six missing days re-export with labels.
+- **Rules of the heartbeat row `archive_gap_days`** (`ops_archive_gap_days()`,
+  the same window, the start clamped to the first ledger day): `pass` at 0 missing
+  days; `warn` for 1 to 6 missing days when the oldest is no more than 33 days old
+  (`detail`: `en eski eksik gün: YYYY-MM-DD`); `fail` from 7 missing days, or when
+  the oldest is more than 33 days old (40 - 7: one night per day can no longer
+  close it before it leaves the window). `observed` is the number of missing days,
+  `threshold` is 7.
+- **/admin.** The "Gece arşivi" card now reads the last 41 ledger rows and names
+  the missing days in amber (`Eksik günler: ...`, the first 10, then `(+N gün
+  daha)`); its table still lists the newest 7 nights.
+- **Founder fallback.** The catch-up can be skipped over or done early by hand,
+  in any order, one day per request, with the service-role bearer:
+  `POST <functions base URL>/archive-export` with body `{"day":"2026-10-12"}`
+  (then 10-13 ... 10-17). An already exported day answers `skipped`. After the
+  labels are pruned (about 2026-11-26 for 10-12) a re-export still works but
+  carries no labels. Do not paste the key into a shell line that lands in
+  history (see "Running it locally").
 
 ## Susan kaynakların nedeni (migration 119)
 
@@ -233,8 +337,11 @@ per-push CI notifications.
 
 ## GitHub cron caveats
 
-- Best-effort scheduling: a `*/30` cron can run 5–15 minutes late under
-  platform load. Do not treat this as a tight SLA.
+- Best-effort scheduling: a `*/30` cron can run late under platform load, and
+  GitHub drops ticks outright: measured 2026-10-15 to 11-01, only about 12% of
+  the ticks ran (median gap 4.1 h, max 7.75 h). Do not treat this as an SLA; the
+  10-minute `pg_cron` snapshots of migration 131 are what make a missed run
+  harmless (see "Kaçırılan olaylar (131)").
 - Scheduled workflows only run from the **default branch** — a `cron:`
   trigger on any other branch is silently ignored.
 - On a **public** repository, GitHub auto-disables a scheduled workflow
@@ -244,11 +351,16 @@ per-push CI notifications.
 
 ## Cost
 
-48 runs/day × a couple of minutes each ≈ 1,440 billable Actions minutes a
-month on a **private** repo (uses the account/org's minutes quota). On a
-**public** repo, Actions minutes are free, but every run's logs are
-**public** — the job never logs the key or headers (see the script's
-comments), but keep that in mind before flipping repo visibility.
+In practice the workflow runs about 6 times a day (100 runs in 17 days), not 48:
+a couple of minutes each, so roughly 360 billable Actions minutes a month on a
+**private** repo (uses the account/org's minutes quota); at most about 1,440 if
+GitHub ran every `*/30` tick. On a **public** repo, Actions minutes are free, but
+every run's logs are **public** — the job never logs the key or headers (see the
+script's comments), but keep that in mind before flipping repo visibility.
+
+The database side (migration 131): `ops_health_report()` once every 10 minutes
+for the snapshots (144 a day, about 0.1-0.5 s each), a table of about 2k rows,
+and one tiny `ops_archive_gap_days()` read per heartbeat run.
 
 ## Running it locally
 
@@ -283,7 +395,10 @@ gh workflow disable ops-heartbeat.yml
 ```
 
 No database change needed — this only stops the scheduled poll;
-`public.ops_health_report()` itself is inert until called.
+`public.ops_health_report()` itself is inert until called. The database-side
+backstops are separate: `select cron.unschedule('ops-health-snapshot');` stops
+the snapshots and `select cron.unschedule('archive-export-catchup');` stops the
+nightly archive catch-up (migration 131 re-creates both by name, idempotently).
 
 ## Page latency probe
 

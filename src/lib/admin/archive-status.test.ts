@@ -31,7 +31,18 @@ vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
 }));
 
-import { getRecentArchiveExports, type ArchiveExportRow } from "./archive-status";
+import {
+  ARCHIVE_GAP_WINDOW_DAYS,
+  ARCHIVE_STATUS_LIMIT,
+  archiveGapDays,
+  formatGapDays,
+  getRecentArchiveExports,
+  type ArchiveExportRow,
+} from "./archive-status";
+import {
+  ARCHIVE_CATCHUP_WINDOW_DAYS,
+  missingArchiveDays,
+} from "../../../supabase/functions/_shared/archive-window";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -112,7 +123,7 @@ describe("getRecentArchiveExports", () => {
     errorSpy.mockRestore();
   });
 
-  it("pins the query shape: table, selected columns, day desc order, limit 7", async () => {
+  it("pins the query shape: table, selected columns, day desc order, limit = gap window + 1 (41)", async () => {
     await getRecentArchiveExports();
 
     const state = fixture.lastState as BuilderState;
@@ -125,12 +136,87 @@ describe("getRecentArchiveExports", () => {
     expect(select).not.toContain("*");
 
     expect(state.order).toEqual([{ col: "day", opts: { ascending: false } }]);
-    expect(state.limit).toBe(7);
+    // One row per day of the 40 day gap window, plus yesterday: enough rows
+    // to see a hole anywhere in the window, not only the newest week.
+    expect(state.limit).toBe(ARCHIVE_GAP_WINDOW_DAYS + 1);
+    expect(state.limit).toBe(41);
   });
 
   it("honours an explicit limit", async () => {
     await getRecentArchiveExports(3);
 
     expect((fixture.lastState as BuilderState).limit).toBe(3);
+  });
+});
+
+// --- gap detection (h10-silent-2) -------------------------------------------
+
+function daysBetween(from: string, to: string): string[] {
+  const out: string[] = [];
+  const end = Date.parse(`${to}T00:00:00Z`);
+  for (let t = Date.parse(`${from}T00:00:00Z`); t <= end; t += 86_400_000) {
+    out.push(new Date(t).toISOString().slice(0, 10));
+  }
+  return out;
+}
+
+describe("ARCHIVE_GAP_WINDOW_DAYS / ARCHIVE_STATUS_LIMIT", () => {
+  it("the card looks 40 days back (the nightly catch-up window) but still lists 7 rows", () => {
+    expect(ARCHIVE_GAP_WINDOW_DAYS).toBe(40);
+    expect(ARCHIVE_GAP_WINDOW_DAYS).toBe(ARCHIVE_CATCHUP_WINDOW_DAYS);
+    expect(ARCHIVE_STATUS_LIMIT).toBe(7);
+  });
+});
+
+describe("archiveGapDays", () => {
+  const NOW = Date.parse("2026-11-05T09:00:00Z");
+  const hole = new Set(daysBetween("2026-10-12", "2026-10-17"));
+  // /admin hands the rows over newest first.
+  const rows = daysBetween("2026-09-18", "2026-11-04")
+    .filter((d) => !hole.has(d))
+    .reverse()
+    .map((day) => row({ day }));
+
+  it("lists the missing days of the window, ascending", () => {
+    expect(archiveGapDays(rows, NOW)).toEqual(daysBetween("2026-10-12", "2026-10-17"));
+  });
+
+  it("delegates to missingArchiveDays with the 40 day window", () => {
+    expect(archiveGapDays(rows, NOW)).toEqual(
+      missingArchiveDays(
+        rows.map((r) => r.day),
+        new Date(NOW),
+        40,
+      ),
+    );
+  });
+
+  it("is empty for a complete ledger and for no rows", () => {
+    const complete = daysBetween("2026-09-18", "2026-11-04").reverse().map((day) => row({ day }));
+    expect(archiveGapDays(complete, NOW)).toEqual([]);
+    expect(archiveGapDays([], NOW)).toEqual([]);
+  });
+
+  it("does not call yesterday a gap (the 03:40 job owns it)", () => {
+    const upToTheDayBefore = daysBetween("2026-09-18", "2026-11-03").reverse().map((day) => row({ day }));
+    expect(archiveGapDays(upToTheDayBefore, NOW)).toEqual([]);
+  });
+});
+
+describe("formatGapDays", () => {
+  it("lists up to 10 days, then counts the rest in Turkish", () => {
+    const days = daysBetween("2026-10-01", "2026-10-14"); // 14 days
+    expect(formatGapDays(days)).toBe(
+      "Eksik günler: 2026-10-01, 2026-10-02, 2026-10-03, 2026-10-04, 2026-10-05, 2026-10-06, 2026-10-07, 2026-10-08, 2026-10-09, 2026-10-10 (+4 gün daha)",
+    );
+  });
+
+  it("has no remainder suffix for 10 days or fewer", () => {
+    expect(formatGapDays(["2026-10-12", "2026-10-13"])).toBe("Eksik günler: 2026-10-12, 2026-10-13");
+    expect(formatGapDays(daysBetween("2026-10-01", "2026-10-10"))).not.toContain("daha");
+  });
+
+  it("is empty when there is no gap", () => {
+    expect(formatGapDays([])).toBe("");
   });
 });

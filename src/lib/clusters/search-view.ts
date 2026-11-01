@@ -18,6 +18,17 @@ export interface SearchView {
    * least one archive row left after the in-feed filter.
    */
   archiveCapped: boolean;
+  /**
+   * Archive-only matches for the whole search: every ok-search row that is not
+   * already in the feed. Unlike `archive` (page 1 only), this is the same on
+   * every page, so "N sonuç" does not change when the reader pages through.
+   */
+  archiveTotal: number;
+  /**
+   * `archiveCapped` without the page-1 restriction: the archive search filled
+   * its page and at least one archive-only row is left, on any page.
+   */
+  archiveCappedTotal: boolean;
 }
 
 /**
@@ -41,6 +52,8 @@ export function composeSearchView({
       archiveUnavailable: false,
       emptySearch: false,
       archiveCapped: false,
+      archiveTotal: 0,
+      archiveCappedTotal: false,
     };
   }
 
@@ -50,6 +63,8 @@ export function composeSearchView({
       archiveUnavailable: false,
       emptySearch: inFeedIds.size === 0,
       archiveCapped: false,
+      archiveTotal: 0,
+      archiveCappedTotal: false,
     };
   }
 
@@ -59,18 +74,23 @@ export function composeSearchView({
       archiveUnavailable: true,
       emptySearch: false,
       archiveCapped: false,
+      archiveTotal: 0,
+      archiveCappedTotal: false,
     };
   }
 
-  const archive =
-    page === 1
-      ? search.bundles.filter((b) => !inFeedIds.has(b.cluster.id))
-      : [];
+  const archiveOnly = search.bundles.filter(
+    (b) => !inFeedIds.has(b.cluster.id)
+  );
+  const archive = page === 1 ? archiveOnly : [];
+  const cappedTotal = search.capped === true && archiveOnly.length > 0;
 
   return {
     archive,
     archiveUnavailable: false,
     emptySearch: inFeedIds.size === 0 && archive.length === 0,
-    archiveCapped: page === 1 && search.capped === true && archive.length > 0,
+    archiveCapped: page === 1 && cappedTotal,
+    archiveTotal: archiveOnly.length,
+    archiveCappedTotal: cappedTotal,
   };
 }

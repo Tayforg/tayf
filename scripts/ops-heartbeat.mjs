@@ -5,6 +5,9 @@
 // (migration 077) over PostgREST via scripts/lib/ops-heartbeat.mjs and exits
 // non-zero on any 'fail' row, an empty report, or a mostly-'unknown' report,
 // so .github/workflows/ops-heartbeat.yml's job goes red and GitHub emails.
+// Migration 131 adds two backstops, read after the report: unnotified FAIL
+// snapshots pg_cron took while GitHub's schedule skipped a run (paged once,
+// then marked notified) and the archive-export gap count.
 //
 // Pure Node built-ins only, same as scripts/lib/ops-heartbeat.mjs — the
 // workflow does not run `npm ci`.
@@ -26,6 +29,7 @@ const code = await runHeartbeat({
   env: process.env,
   fetchImpl: fetch,
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  now: () => new Date(),
   log: (line) => console.log(line),
   appendSummary: (markdown) => {
     const summaryPath = process.env.GITHUB_STEP_SUMMARY;
