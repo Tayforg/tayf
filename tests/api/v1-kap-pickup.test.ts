@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+import { parsePickupParams, toV1PickupBody } from "@/lib/api/v1-kap-pickup";
+import type { TickerPickup } from "@/lib/finance/kap-pickup-query";
+
 // ---------------------------------------------------------------------------
 // Contract tests for GET /api/v1/kap/pickup — the keyed mirror of the
 // "Medyada yankı" panel on /ekonomi/[ticker]. Reuses the auth-harness shape
@@ -122,6 +125,8 @@ const TOP_LEVEL_KEYS = [
   "until",
   "relevance_filter",
   "truncated",
+  "capped",
+  "total_disclosures",
   "totals",
   "count",
   "disclosures",
@@ -201,6 +206,23 @@ describe("GET /api/v1/kap/pickup", () => {
     }
   });
 
+  it("carries capped (boolean) and total_disclosures (number or null) on the wire", async () => {
+    const { GET } = await import("@/app/api/v1/kap/pickup/route");
+    const res = await GET(req("?ticker=THYAO", FREE_KEY));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    // One fixture disclosure against the default limit of 50: not capped.
+    expect(body.capped).toBe(false);
+    expect(body.total_disclosures === null || typeof body.total_disclosures === "number").toBe(true);
+  });
+
+  it("400 for a since that is not a calendar date (2026-02-30)", async () => {
+    const { GET } = await import("@/app/api/v1/kap/pickup/route");
+    const res = await GET(req(`?ticker=THYAO&since=${encodeURIComponent("2026-02-30T00:00:00Z")}`, FREE_KEY));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("Invalid since: must be an ISO 8601 timestamp");
+  });
+
   it("never leaks the fixture article's title or URL in the JSON body", async () => {
     const { GET } = await import("@/app/api/v1/kap/pickup/route");
     const res = await GET(req("?ticker=THYAO", FREE_KEY));
@@ -238,5 +260,109 @@ describe("GET /api/v1/kap/pickup", () => {
     const disclosure = body.disclosures[0];
     // Fixture: a1 relevant (kept), a2 scored 0.10 (dropped) -> articles === 1.
     expect(disclosure.articles).toBe(1);
+  });
+});
+
+const EMPTY_ZONES = { iktidar: 0, bagimsiz: 0, muhalefet: 0 };
+
+function tickerPickup(overrides: Partial<TickerPickup> = {}): TickerPickup {
+  return {
+    ticker: "THYAO",
+    since: "2026-10-02T00:00:00.000Z",
+    until: "2026-11-01T00:00:00.000Z",
+    pickups: [],
+    totals: {
+      disclosures: 0,
+      pickedUp: 0,
+      pickupRate: null,
+      medianFirstLagMinutes: null,
+      outlets: 0,
+      zones: { ...EMPTY_ZONES },
+    },
+    relevanceApplied: true,
+    truncated: false,
+    totalDisclosures: 12,
+    capped: false,
+    ...overrides,
+  };
+}
+
+describe("toV1PickupBody: capped and total_disclosures", () => {
+  it("maps capped: true when the disclosure list reached its limit", () => {
+    const body = toV1PickupBody(tickerPickup({ capped: true }));
+    expect(body.capped).toBe(true);
+  });
+
+  it("maps capped: false and keeps it independent of truncated", () => {
+    const body = toV1PickupBody(tickerPickup({ capped: false, truncated: true }));
+    expect(body.capped).toBe(false);
+    expect(body.truncated).toBe(true);
+    const both = toV1PickupBody(tickerPickup({ capped: true, truncated: false }));
+    expect(both.capped).toBe(true);
+    expect(both.truncated).toBe(false);
+  });
+
+  it("maps total_disclosures to the number the query returned", () => {
+    expect(toV1PickupBody(tickerPickup({ totalDisclosures: 102 })).total_disclosures).toBe(102);
+    // Zero is a real count, not "missing".
+    expect(toV1PickupBody(tickerPickup({ totalDisclosures: 0 })).total_disclosures).toBe(0);
+  });
+
+  it("maps total_disclosures to null (not 0, not omitted) when the count failed", () => {
+    const body = toV1PickupBody(tickerPickup({ totalDisclosures: null }));
+    expect(body.total_disclosures).toBeNull();
+    expect(Object.keys(body)).toContain("total_disclosures");
+    expect(JSON.parse(JSON.stringify(body)).total_disclosures).toBeNull();
+  });
+
+  it("places capped and total_disclosures right after truncated", () => {
+    const keys = Object.keys(toV1PickupBody(tickerPickup()));
+    const at = keys.indexOf("truncated");
+    expect(keys.slice(at, at + 3)).toEqual(["truncated", "capped", "total_disclosures"]);
+  });
+});
+
+describe("parsePickupParams: since must be a real calendar instant", () => {
+  const SINCE_ERROR = { error: "Invalid since: must be an ISO 8601 timestamp" };
+  const now = new Date("2026-11-01T12:00:00.000Z");
+  const params = (since: string) => new URLSearchParams({ ticker: "THYAO", since });
+
+  it.each([
+    ["2026-02-30T00:00:00Z", "Feb 30"],
+    ["2026-04-31T00:00:00Z", "Apr 31"],
+    ["2027-02-29T00:00:00Z", "Feb 29 in a non-leap year"],
+    ["2026-13-01T00:00:00Z", "month 13"],
+    ["2026-00-10T00:00:00Z", "month 0"],
+    ["2026-10-00T00:00:00Z", "day 0"],
+    ["2026-10-10T24:00:00Z", "hour 24"],
+    ["2026-10-10T00:60:00Z", "minute 60"],
+    ["2026-10-10T00:00:60Z", "second 60"],
+    ["2026-10-10T00:00:00+24:00", "offset hours 24"],
+    ["2026-10-10T00:00:00+03:60", "offset minutes 60"],
+  ])("rejects %s (%s)", (since) => {
+    expect(parsePickupParams(params(since), now)).toEqual(SINCE_ERROR);
+  });
+
+  it("accepts 2028-02-29T00:00:00Z (a real leap day) when now is 2028-03-01", () => {
+    const result = parsePickupParams(params("2028-02-29T00:00:00Z"), new Date("2028-03-01T00:00:00.000Z"));
+    expect("error" in result).toBe(false);
+    expect(result).toMatchObject({ ticker: "THYAO", sinceMs: Date.parse("2028-02-29T00:00:00Z") });
+  });
+
+  it("keeps the future and 90-day-floor rules", () => {
+    expect(parsePickupParams(params("2026-11-02T00:00:00Z"), now)).toEqual({
+      error: "Invalid since: must not be in the future",
+    });
+    const clamped = parsePickupParams(params("2026-01-01T00:00:00Z"), now);
+    expect("error" in clamped).toBe(false);
+    expect((clamped as { sinceMs: number }).sinceMs).toBe(now.getTime() - 90 * 86_400_000);
+  });
+
+  it("still defaults to 30 days when since is absent or blank", () => {
+    const absent = parsePickupParams(new URLSearchParams({ ticker: "THYAO" }), now);
+    const blank = parsePickupParams(params("  "), now);
+    for (const r of [absent, blank]) {
+      expect((r as { sinceMs: number }).sinceMs).toBe(now.getTime() - 30 * 86_400_000);
+    }
   });
 });

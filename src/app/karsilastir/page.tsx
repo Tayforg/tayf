@@ -161,8 +161,24 @@ function Picker({ anyInvalid }: { anyInvalid: boolean }) {
   );
 }
 
+// Notice sides (missing / invalid / not found / ...) span the same eight grid
+// rows as an ok article (see OK_ARTICLE) but are NOT subgrids, so without
+// `md:self-start` they would stretch to the full height of the other side.
 const NOTICE_BOX =
-  "rounded-xl border border-dashed border-border/60 bg-card/30 p-6 space-y-3";
+  "rounded-xl border border-dashed border-border/60 bg-card/30 p-6 space-y-3 md:row-span-8 md:self-start";
+
+// An ok side is a subgrid of the outer `md:grid-cols-2` grid: it spans EIGHT
+// rows and lays out exactly eight direct children, one per row — title, meta
+// line, spectrum, the three zone rosters, the non-voting note (or a placeholder
+// when there is none) and the remove link. Both columns therefore share row
+// tracks, and the İktidar / Bağımsız / Muhalefet rosters line up at md+ even
+// when one title wraps or one roster is longer (they used to drift by 21-22 px
+// because each column stacked its own rows independently). Below md the article
+// is a plain flex column: the aria-hidden placeholder is display:none there, so
+// it adds no gap, and the row-span / subgrid classes do not apply. Keep the
+// child count at eight whenever you add or remove a block inside the article.
+const OK_ARTICLE =
+  "rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 min-w-0 flex flex-col gap-4 md:grid md:grid-rows-subgrid md:row-span-8";
 
 function SideColumn({
   state,
@@ -232,7 +248,7 @@ function SideColumn({
         ? `${view.sourceCount} kaynak · İlk yayın: ${firstPublished}`
         : `${view.sourceCount} kaynak`;
       return (
-        <article className="rounded-xl border border-border/60 bg-card/40 p-4 sm:p-5 space-y-4 min-w-0">
+        <article className={OK_ARTICLE}>
           <h2 className="font-serif text-xl font-semibold leading-snug text-foreground">
             <Link
               href={`/cluster/${view.id}`}
@@ -252,49 +268,53 @@ function SideColumn({
             )}
           </div>
 
-          <BiasSpectrum distribution={view.distribution} compact />
-
-          <div className="space-y-3">
-            {ZONES.map((zone) => {
-              const names = view.roster[zone];
-              const zoneMeta = ZONE_META[zone];
-              return (
-                <div key={zone} className="space-y-1">
-                  <div className="flex items-center gap-1.5">
-                    <span
-                      className={`h-2 w-2 rounded-full ${zoneMeta.dot}`}
-                      aria-hidden="true"
-                    />
-                    <span
-                      className={`font-serif text-[11px] font-semibold uppercase tracking-wide ${zoneMeta.zoneLabel}`}
-                    >
-                      {zoneMeta.label}
-                    </span>
-                  </div>
-                  {names.length > 0 ? (
-                    <p className="text-[13px] text-foreground/90 leading-relaxed">
-                      {names.join(", ")}
-                    </p>
-                  ) : (
-                    <p className="text-[13px] text-muted-foreground">
-                      Bu bölgeden kaynak yok
-                    </p>
-                  )}
-                </div>
-              );
-            })}
+          {/* BiasSpectrum renders null for an all-zero distribution; the
+              wrapper keeps its grid row (and the eight-child count) either way. */}
+          <div className="min-w-0">
+            <BiasSpectrum distribution={view.distribution} compact />
           </div>
 
-          {view.nonVoting.length > 0 && (
+          {ZONES.map((zone) => {
+            const names = view.roster[zone];
+            const zoneMeta = ZONE_META[zone];
+            return (
+              <div key={zone} className="space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className={`h-2 w-2 rounded-full ${zoneMeta.dot}`}
+                    aria-hidden="true"
+                  />
+                  <span
+                    className={`font-serif text-[11px] font-semibold uppercase tracking-wide ${zoneMeta.zoneLabel}`}
+                  >
+                    {zoneMeta.label}
+                  </span>
+                </div>
+                {names.length > 0 ? (
+                  <p className="text-[13px] text-foreground/90 leading-relaxed">
+                    {names.join(", ")}
+                  </p>
+                ) : (
+                  <p className="text-[13px] text-muted-foreground">
+                    Bu bölgeden kaynak yok
+                  </p>
+                )}
+              </div>
+            );
+          })}
+
+          {view.nonVoting.length > 0 ? (
             <p className="text-[11px] text-muted-foreground">
               {`Toplayıcı / niş (spektruma sayılmaz): ${view.nonVoting.join(", ")}`}
             </p>
+          ) : (
+            <div aria-hidden="true" className="hidden md:block" />
           )}
 
           <Link
             href={compareHref(otherId)}
             aria-label={`Bu tarafı kaldır: ${view.title}`}
-            className="inline-flex min-h-[44px] items-center touch-manipulation text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+            className="inline-flex min-h-[44px] items-center self-start justify-self-start touch-manipulation text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
           >
             Bu tarafı kaldır
           </Link>

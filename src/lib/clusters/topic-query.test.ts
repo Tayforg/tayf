@@ -51,6 +51,8 @@ const fixture = vi.hoisted(() => ({
   // C1-COUNTS-NULL-ZERO's fix (treat null count like the error branch,
   // never `?? 0`) has a regression case.
   countNullSlug: null as string | null,
+  /** Make the head/exact count read throw (the last-page lookup's catch path). */
+  countThrows: false,
   /** The options object each `createClient(url, key, opts)` call received. */
   clientOpts: [] as unknown[],
 }));
@@ -63,6 +65,7 @@ const supabaseFake = await vi.hoisted(async () => {
         const isCountQuery = state.selectArgs[0] === "id";
         if (isCountQuery) {
           fixture.countStates.push(state);
+          if (fixture.countThrows) throw new Error("count boom");
           if (fixture.countError) {
             return { data: null, error: fixture.countError, count: null };
           }
@@ -128,6 +131,7 @@ beforeEach(() => {
   fixture.countsBySlug = {};
   fixture.countError = null;
   fixture.countNullSlug = null;
+  fixture.countThrows = false;
   fixture.clientOpts = [];
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
@@ -283,6 +287,143 @@ describe("getTopicClusters", () => {
     expect(result).not.toBeNull();
     expect(result?.bundles).toEqual([]);
     expect(result?.hasMore).toBe(false);
+  });
+});
+
+// --- past-the-end last page ----------------------------------------------------
+//
+// /konu/<slug>?sayfa=N past the last page used to render an empty state whose
+// only pager link went to N-1 (also empty). The fetcher now answers "where does
+// the list end?" with ONE lean head/exact count, but only when it is needed:
+// zero rows on a page > 1. A page that has rows, and page 1, never pay for it.
+
+describe("getTopicClusters: lastPage on a page past the end", () => {
+  it("page 3 with 0 rows issues exactly one extra head/exact count read with the same four filters as the list read", async () => {
+    fixture.countsBySlug = { dunya: 61 };
+
+    const result = await getTopicClusters("dunya", 3);
+
+    expect(fixture.countStates).toHaveLength(1);
+    const count = fixture.countStates[0] as BuilderState;
+    const list = fixture.clusterState as BuilderState;
+    expect(count.table).toBe("clusters");
+    expect(count.selectArgs).toEqual(["id", { count: "exact", head: true }]);
+    // Same filter chain, value for value (including the one shared updated_at
+    // instant): a drift here would make lastPage disagree with the list.
+    expect(count.eq).toEqual([
+      { col: "is_archived", val: false },
+      { col: "topic7", val: "dunya" },
+    ]);
+    expect(count.eq).toEqual(list.eq);
+    expect(count.gte).toEqual(list.gte);
+    expect(count.gte).toHaveLength(2);
+    expect(count.gte).toContainEqual({ col: "article_count", val: 2 });
+    expect(count.gte.some((g) => g.col === "updated_at")).toBe(true);
+    // A lean count: no ordering, no row window.
+    expect(count.order).toEqual([]);
+    expect(count.range).toBeNull();
+
+    expect(result).toEqual({ bundles: [], hasMore: false, page: 3, lastPage: 3 });
+  });
+
+  it.each([
+    [61, 3],
+    [60, 2],
+    [30, 1],
+    [1, 1],
+    [0, 1],
+    [10_000, TOPIC_MAX_PAGE],
+  ])("count %i gives lastPage %i (ceil(count / page size), floored at 1, capped at TOPIC_MAX_PAGE)", async (count, expected) => {
+    fixture.countsBySlug = { dunya: count };
+
+    const result = await getTopicClusters("dunya", 3);
+
+    expect(result?.lastPage).toBe(expected);
+  });
+
+  it("a clamped ?sayfa=999 (page 20) with 0 rows also resolves lastPage", async () => {
+    fixture.countsBySlug = { dunya: 10_000 };
+
+    const result = await getTopicClusters("dunya", 999);
+
+    expect(fixture.countStates).toHaveLength(1);
+    expect(result).toMatchObject({ page: TOPIC_MAX_PAGE, lastPage: TOPIC_MAX_PAGE });
+
+    fixture.countStates = [];
+    fixture.countsBySlug = { dunya: 61 };
+    const small = await getTopicClusters("dunya", 999);
+    expect(small).toMatchObject({ page: TOPIC_MAX_PAGE, lastPage: 3 });
+  });
+
+  it("a count error gives lastPage null, logs it, and keeps the result non-null and cached for cluster-feed", async () => {
+    fixture.countError = { message: "canceling statement due to statement timeout" };
+
+    const result = await getTopicClusters("dunya", 3);
+
+    expect(result).not.toBeNull();
+    expect(result).toMatchObject({ bundles: [], hasMore: false, page: 3, lastPage: null });
+    expect(console.error).toHaveBeenCalledWith(
+      "[konu] last page unavailable:",
+      expect.anything(),
+    );
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a null count (no total in Content-Range) gives lastPage null, not a guessed page", async () => {
+    fixture.countNullSlug = "dunya";
+
+    const result = await getTopicClusters("dunya", 3);
+
+    expect(result).not.toBeNull();
+    expect(result?.lastPage).toBeNull();
+    expect(console.error).toHaveBeenCalledWith(
+      "[konu] last page unavailable:",
+      expect.anything(),
+    );
+  });
+
+  it("a thrown count read gives lastPage null and never turns the result null", async () => {
+    fixture.countThrows = true;
+
+    const result = await getTopicClusters("dunya", 3);
+
+    expect(result).not.toBeNull();
+    expect(result).toMatchObject({ bundles: [], page: 3, lastPage: null });
+    expect(console.error).toHaveBeenCalledWith(
+      "[konu] last page unavailable:",
+      expect.anything(),
+    );
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("page 1 with 0 rows reads no count and carries no lastPage key", async () => {
+    fixture.countsBySlug = { dunya: 61 };
+
+    const result = await getTopicClusters("dunya", 1);
+
+    expect(fixture.countStates).toHaveLength(0);
+    expect(result).not.toBeNull();
+    expect(result).not.toHaveProperty("lastPage");
+  });
+
+  it("page 2 that has rows reads no count and carries no lastPage key", async () => {
+    fixture.clusters = [mkRow({ id: "c1" }), mkRow({ id: "c2" })];
+    fixture.countsBySlug = { dunya: 61 };
+
+    const result = await getTopicClusters("dunya", 2);
+
+    expect(fixture.countStates).toHaveLength(0);
+    expect(result?.bundles).toHaveLength(2);
+    expect(result).not.toHaveProperty("lastPage");
+  });
+
+  it("a failed list read returns null and never reaches the count", async () => {
+    fixture.clustersError = { message: "relation missing" };
+
+    await expect(getTopicClusters("dunya", 3)).resolves.toBeNull();
+    expect(fixture.countStates).toHaveLength(0);
   });
 });
 

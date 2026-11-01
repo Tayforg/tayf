@@ -138,8 +138,8 @@ const SINCE_PARAM: V1ParamDoc = {
   in: "query",
   required: false,
   schema: { type: "string", format: "date-time" },
-  descriptionTr: `updated_at için alt sınır, tam ISO 8601 zaman damgası (T ve saniye ile). Varsayılan: şimdi−24 saat. ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir.`,
-  descriptionEn: `Lower bound on updated_at, a full ISO 8601 timestamp (with T and seconds). Default: now−24h. Values older than ${V1_MAX_SINCE_DAYS} days are silently clamped to ${V1_MAX_SINCE_DAYS} days.`,
+  descriptionTr: `updated_at için alt sınır, tam ISO 8601 zaman damgası (T ve saniye ile). Varsayılan: şimdi−24 saat. ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir. Takvimde olmayan tarih (ör. 2026-02-30) 400 döner.`,
+  descriptionEn: `Lower bound on updated_at, a full ISO 8601 timestamp (with T and seconds). Default: now−24h. Values older than ${V1_MAX_SINCE_DAYS} days are silently clamped to ${V1_MAX_SINCE_DAYS} days. A date that does not exist on the calendar (e.g. 2026-02-30) returns 400.`,
 };
 
 /**
@@ -149,8 +149,8 @@ const SINCE_PARAM: V1ParamDoc = {
  */
 const ALERT_SINCE_PARAM: V1ParamDoc = {
   ...SINCE_PARAM,
-  descriptionTr: `alert_at için alt sınır: uyarının oluştuğu an (kör noktada updated_at ile first_published + ${BLINDSPOT.feedDelayHours} saatin büyüğü, sessiz bölgede updated_at ile first_published + ${SILENT_MIN_AGE_H} saatin büyüğü). Tam ISO 8601 zaman damgası (T ve saniye ile). Varsayılan: şimdi−24 saat. ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir.`,
-  descriptionEn: `Lower bound on alert_at, the moment the alert qualified (for a blindspot the later of updated_at and first_published + ${BLINDSPOT.feedDelayHours} hours, for a one-zone-silent alert the later of updated_at and first_published + ${SILENT_MIN_AGE_H} hours). A full ISO 8601 timestamp (with T and seconds). Default: now−24h. Values older than ${V1_MAX_SINCE_DAYS} days are silently clamped to ${V1_MAX_SINCE_DAYS} days.`,
+  descriptionTr: `alert_at için alt sınır: uyarının oluştuğu an (kör noktada updated_at ile first_published + ${BLINDSPOT.feedDelayHours} saatin büyüğü, sessiz bölgede updated_at ile first_published + ${SILENT_MIN_AGE_H} saatin büyüğü). Tam ISO 8601 zaman damgası (T ve saniye ile). Varsayılan: şimdi−24 saat. ${V1_MAX_SINCE_DAYS} günden eski değerler sessizce ${V1_MAX_SINCE_DAYS} güne çekilir. Takvimde olmayan tarih (ör. 2026-02-30) 400 döner.`,
+  descriptionEn: `Lower bound on alert_at, the moment the alert qualified (for a blindspot the later of updated_at and first_published + ${BLINDSPOT.feedDelayHours} hours, for a one-zone-silent alert the later of updated_at and first_published + ${SILENT_MIN_AGE_H} hours). A full ISO 8601 timestamp (with T and seconds). Default: now−24h. Values older than ${V1_MAX_SINCE_DAYS} days are silently clamped to ${V1_MAX_SINCE_DAYS} days. A date that does not exist on the calendar (e.g. 2026-02-30) returns 400.`,
 };
 
 const LIMIT_PARAM: V1ParamDoc = {
@@ -212,8 +212,8 @@ const PICKUP_SINCE_PARAM: V1ParamDoc = {
   in: "query",
   required: false,
   schema: { type: "string", format: "date-time" },
-  descriptionTr: `KAP bildirimi için alt sınır, tam ISO 8601 zaman damgası. Varsayılan: ${V1_PICKUP_DEFAULT_DAYS} gün önce. Gelecekteki bir değer reddedilir (400); ${V1_PICKUP_MAX_DAYS} günden eski değerler sessizce ${V1_PICKUP_MAX_DAYS} güne çekilir.`,
-  descriptionEn: `Lower bound on the KAP disclosure timestamp, a full ISO 8601 timestamp. Default: ${V1_PICKUP_DEFAULT_DAYS} days ago. A future value is rejected (400); values older than ${V1_PICKUP_MAX_DAYS} days are silently clamped to ${V1_PICKUP_MAX_DAYS} days.`,
+  descriptionTr: `KAP bildirimi için alt sınır, tam ISO 8601 zaman damgası. Varsayılan: ${V1_PICKUP_DEFAULT_DAYS} gün önce. Gelecekteki bir değer reddedilir (400); ${V1_PICKUP_MAX_DAYS} günden eski değerler sessizce ${V1_PICKUP_MAX_DAYS} güne çekilir. Takvimde olmayan tarih (ör. 2026-02-30) 400 döner.`,
+  descriptionEn: `Lower bound on the KAP disclosure timestamp, a full ISO 8601 timestamp. Default: ${V1_PICKUP_DEFAULT_DAYS} days ago. A future value is rejected (400); values older than ${V1_PICKUP_MAX_DAYS} days are silently clamped to ${V1_PICKUP_MAX_DAYS} days. A date that does not exist on the calendar (e.g. 2026-02-30) returns 400.`,
 };
 
 const PICKUP_LIMIT_PARAM: V1ParamDoc = {
@@ -450,6 +450,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       "Pencere kuralı harfiyendir: her bildirim, kendi [bildirim_zamanı, bildirim_zamanı+48s) penceresinde yayınlanan her haberi sayar; bildirimden önceki bir haber asla yankı sayılmaz. İki bildirim 48 saat içine düşerse aynı haber her ikisine de sayılabilir — bu, her kayıttaki overlapping_disclosures alanıyla görünür kılınır, sessizce tekilleştirilmez.",
       "relevance_filter: Jev'in ticker_relevance gölge modelinin 0.2 altında puanladığı haberler dışlanır (ör. aynı adlı bir siyasi parti-hisse kodu çakışması); puanlanmamış haberler her zaman tutulur. İlgi puanı sorgusu başarısız olursa uç nokta 500 dönmek yerine relevance_filter.applied: false ile açık başarısız olur.",
       "disclosure_coverage görünümü asla sorgulanmaz (üretimde 60 saniyede zaman aşımına uğradı); sorgu her zaman kap_disclosures / article_tickers üzerinden hisse kodu ve zaman sınırlıdır.",
+      "`capped: true`: liste `limit` sınırına ulaştı; penceredeki daha eski bildirimler listede yok. `total_disclosures`: penceredeki tüm bildirimlerin sayısı (sayım başarısız olursa null). `truncated`: haber eşleşmelerinin sayfa sınırına ulaşıldı.",
     ],
     params: [TICKER_PARAM, PICKUP_SINCE_PARAM, PICKUP_LIMIT_PARAM],
     responses: [

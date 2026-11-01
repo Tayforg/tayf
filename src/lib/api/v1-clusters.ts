@@ -89,8 +89,53 @@ export interface V1ClusterRow {
   cluster_articles: V1EmbeddedClusterArticle[] | null;
 }
 
-const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Capture groups: 1 year, 2 month, 3 day, 4 hour, 5 minute, 6 second,
+// 7 fraction, 8 zone designator, 9 offset sign, 10 offset hours, 11 offset minutes.
+const ISO_INSTANT_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|([+-])(\d{2}):(\d{2}))?$/;
+
+/** Last day of `month` (1-12) in `year`, leap years included. */
+function daysInMonth(year: number, month: number): number {
+  // setUTCFullYear, not Date.UTC(year, ...): Date.UTC maps the years 0-99 onto
+  // 1900-1999, which gets year 0000 (a leap year) wrong.
+  const probe = new Date(0);
+  probe.setUTCFullYear(year, month, 0); // day 0 of the NEXT month = last day of `month`
+  return probe.getUTCDate();
+}
+
+/**
+ * Parse a full ISO 8601 timestamp (`2026-10-20T10:00:00Z`, optional fraction,
+ * optional `+03:00` offset) into a Date, or `null` when it is not a real
+ * calendar instant.
+ *
+ * A shape regex plus `new Date(raw)` is not validation: V8 rolls an impossible
+ * day over (`2026-02-30` -> March 2, `2026-04-31` -> May 1) and reads
+ * `T24:00:00` as midnight of the next day, so a mistyped `since` silently
+ * became a different window. Every field is range-checked first, then the
+ * string is handed to `new Date` (a timestamp with no zone designator keeps
+ * being read in the server's local zone, as before).
+ *
+ * This is the one `since` parser of the keyed API: parseSince below and
+ * parsePickupParams (v1-kap-pickup.ts) both use it, and
+ * tests/guards/v1-since-strict.test.ts fails on a second ISO-date regex.
+ */
+export function parseIsoInstant(raw: string): Date | null {
+  const m = ISO_INSTANT_RE.exec(raw);
+  if (!m) return null;
+
+  const [year, month, day, hour, minute, second] = [m[1], m[2], m[3], m[4], m[5], m[6]].map(
+    Number,
+  ) as [number, number, number, number, number, number];
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > daysInMonth(year, month)) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  if (m[10] !== undefined && (Number(m[10]) > 23 || Number(m[11]) > 59)) return null;
+
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
 
 export function parseSince(
   raw: string | null,
@@ -103,11 +148,8 @@ export function parseSince(
     return { since: d.toISOString() };
   }
 
-  if (!ISO_RE.test(raw)) {
-    return { error: "Invalid since: must be an ISO 8601 timestamp" };
-  }
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) {
+  const parsed = parseIsoInstant(raw);
+  if (parsed === null) {
     return { error: "Invalid since: must be an ISO 8601 timestamp" };
   }
 

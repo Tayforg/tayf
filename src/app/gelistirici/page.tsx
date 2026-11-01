@@ -9,6 +9,7 @@ import {
   V1_ENDPOINTS,
   type V1EndpointDoc,
 } from "@/lib/api/v1-docs";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { REGISTRY_LICENCE } from "@/lib/sources/registry";
 import { siteUrl } from "@/lib/site-url";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
@@ -50,6 +51,11 @@ function SectionHeading({ id, title, meta }: { id: string; title: string; meta?:
   );
 }
 
+// The tier name shown next to the free plan's limits in the "Uç noktalar"
+// heading comes from the same table as the "Kullanım sınırları" rows, so the
+// two can never disagree (the heading used to end in a hand-typed English tag).
+const freeLabel = API_PLANS.find((p) => p.tier === "free")?.labelTr ?? "Ücretsiz";
+
 const SECTIONS = [
   { id: "baslangic", short: "Hızlı başlangıç" },
   { id: "kimlik", short: "Kimlik doğrulama" },
@@ -69,6 +75,11 @@ const ERROR_ROWS: Array<{ status: number; message: string; meaning: string }> = 
   { status: 429, message: "Too many requests / Daily limit exceeded", meaning: "Anonim taban, dakikalık veya günlük sınır aşıldı." },
   { status: 500, message: "Internal server error", meaning: "Beklenmeyen sunucu hatası." },
 ];
+
+// "Yer" column: where the parameter goes in the request. The OpenAPI document
+// keeps the raw `query` / `path`; the Turkish page names them in Turkish and
+// falls back to the raw value for any location added later.
+const PARAM_IN_TR: Record<string, string> = { query: "sorgu", path: "yol" };
 
 function EndpointCard({ endpoint }: { endpoint: V1EndpointDoc }) {
   return (
@@ -98,7 +109,9 @@ function EndpointCard({ endpoint }: { endpoint: V1EndpointDoc }) {
                     {param.name}
                     {param.required ? " *" : ""}
                   </td>
-                  <td className="py-2.5 pr-4 text-muted-foreground">{param.in}</td>
+                  <td className="py-2.5 pr-4 text-muted-foreground">
+                    {PARAM_IN_TR[param.in] ?? param.in}
+                  </td>
                   <td className="py-2.5 text-muted-foreground">{param.descriptionTr}</td>
                 </tr>
               ))}
@@ -251,10 +264,10 @@ for (const cluster of data.clusters) {
                   <tr key={plan.tier}>
                     <td className="py-2.5 pr-4 font-medium text-foreground">{plan.labelTr}</td>
                     <td className="py-2.5 pr-4 text-muted-foreground">
-                      {plan.perMinute.toLocaleString("tr-TR")}
+                      {formatCountTr(plan.perMinute)}
                     </td>
                     <td className="py-2.5 pr-4 text-muted-foreground">
-                      {plan.perDay.toLocaleString("tr-TR")}
+                      {formatCountTr(plan.perDay)}
                     </td>
                     {hasAnyPrice ? (
                       <td className="py-2.5 pr-4 text-muted-foreground">{plan.priceTr ?? "—"}</td>
@@ -282,7 +295,7 @@ for (const cluster of data.clusters) {
       </section>
 
       <section aria-labelledby="uc-noktalar" className="scroll-mt-24 space-y-3">
-        <SectionHeading id="uc-noktalar" title="Uç noktalar" meta={`${API_TIER_LIMITS.free.perMinute}/dk · ${API_TIER_LIMITS.free.perDay.toLocaleString("tr-TR")}/gün (free)`} />
+        <SectionHeading id="uc-noktalar" title="Uç noktalar" meta={`${freeLabel} plan: ${API_TIER_LIMITS.free.perMinute}/dk · ${formatCountTr(API_TIER_LIMITS.free.perDay)}/gün`} />
         <div className="space-y-4">
           {getEndpoints.map((endpoint) => (
             <EndpointCard key={`${endpoint.method} ${endpoint.path}`} endpoint={endpoint} />

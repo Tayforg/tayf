@@ -11,7 +11,9 @@ import crypto from "node:crypto";
 //   - Every non-GET/HEAD/OPTIONS method on every route is a JSON 405 with
 //     `Allow` and the CORS headers (instead of Next's empty-body 405).
 //   - Unknown /api/v1/* paths are a JSON 404 from the catch-all (instead of
-//     Next's HTML 404), and its OPTIONS preflight is a 204.
+//     Next's HTML 404), and its OPTIONS preflight is a 204. The bare /api/v1
+//     (which the catch-all does not match) answers the same way via the root
+//     route.ts.
 //   - Every one of those responses lets a browser READ `X-Tayf-Tier` and
 //     `Retry-After` cross-origin (Access-Control-Expose-Headers).
 //
@@ -323,6 +325,55 @@ describe("catch-all /api/v1/[...path]", () => {
       const res = await GET();
       expect(res.status).toBe(404);
     }
+    expect(supabaseFake.calls.rpc.length).toBe(0);
+  });
+});
+
+describe("bare /api/v1", () => {
+  // The catch-all `[...path]` does not match the bare `/api/v1` itself (a
+  // required catch-all needs at least one segment), so Next served its HTML
+  // not-found page there. The root route.ts re-exports the same handlers, so
+  // `/api/v1` answers exactly like `/api/v1/nope`.
+  it("GET, HEAD, POST, PUT, PATCH and DELETE are application/json 404 with CORS and no-store", async () => {
+    const mod = await import("@/app/api/v1/route");
+    for (const method of ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] as const) {
+      const handler = mod[method];
+      expect(handler, `${method} is not exported`).toBeTypeOf("function");
+      // Called bare, like the catch-all's own tests: a 404 needs no request.
+      const res = await handler();
+      expect(res.status, method).toBe(404);
+      expect(res.headers.get("Content-Type"), method).toContain("application/json");
+      expect(res.headers.get("Access-Control-Allow-Origin"), method).toBe("*");
+      expect(res.headers.get("Access-Control-Expose-Headers"), method).toBe(EXPOSE);
+      expect(res.headers.get("Cache-Control"), method).toContain("no-store");
+      // A HEAD response is bodyless on the wire, but the handler itself is the
+      // same JSON 404 as the catch-all's; only read the body for the others.
+      expect(await res.json(), method).toEqual({ error: "Not found" });
+    }
+  });
+
+  it("OPTIONS is a bodyless 204 with the CORS headers", async () => {
+    const { OPTIONS } = await import("@/app/api/v1/route");
+    const res = await OPTIONS();
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Allow-Headers")).toContain("Authorization");
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe(EXPOSE);
+    expect(await res.text()).toBe("");
+  });
+
+  it("answers exactly like the catch-all, without a key, a database call or a rate-limit charge", async () => {
+    const root = await import("@/app/api/v1/route");
+    const catchAll = await import("@/app/api/v1/[...path]/route");
+    for (let i = 0; i < 60; i++) {
+      const res = await root.GET();
+      expect(res.status).toBe(404);
+    }
+    const a = await root.GET();
+    const b = await catchAll.GET();
+    expect(a.status).toBe(b.status);
+    expect(await a.text()).toBe(await b.text());
+    expect([...a.headers].sort()).toEqual([...b.headers].sort());
     expect(supabaseFake.calls.rpc.length).toBe(0);
   });
 });

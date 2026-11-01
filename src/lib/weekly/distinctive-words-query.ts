@@ -29,10 +29,54 @@ import { BIAS_TO_ZONE, isVotingKind } from "@/lib/bias/config";
 export const WEEKLY_WORDS_DAYS = 7;
 export const WEEKLY_WORDS_PER_ZONE_PER_DAY = 300;
 
+/**
+ * Pool size for the 21 article reads (3 zones x 7 days). One read scans one
+ * zone-day through idx_articles_created_source (about 2,700 rows; a top-N sort
+ * by id keeps 300): ~9 ms warm, 0.5 to 1.7 s cold (1,000 to 1,900 heap pages
+ * read). The old `Promise.all(reads)` sent all 21 at once and a cold fill was
+ * seen to pass the 4 s reader cap (h14-perf-1). A bounded pool keeps the
+ * database queue short. It cannot reduce the pages a cold fill has to read, so
+ * a fully cold fill is still I/O bound; this constant is the knob.
+ */
+export const WEEKLY_WORDS_READ_CONCURRENCY = 4;
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 const ZONE_ORDER: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 
 const ARTICLE_SELECT = "id, title, url, source_id, created_at";
+
+/**
+ * Runs `tasks` with at most `limit` in flight and resolves with their results
+ * in task order (so the rows reach the builder in the same order as before).
+ * Tasks start in array order. The first rejection rejects the whole run and no
+ * further task is started; reads already in flight are left to settle on their
+ * own (the capped reader client aborts them at 4 s).
+ */
+async function runWithConcurrency<T>(
+  tasks: ReadonlyArray<() => Promise<T>>,
+  limit: number,
+): Promise<T[]> {
+  const results = new Array<T>(tasks.length);
+  let next = 0;
+  let failed = false;
+
+  async function worker(): Promise<void> {
+    while (!failed) {
+      const index = next++;
+      if (index >= tasks.length) return;
+      try {
+        results[index] = await tasks[index]!();
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(Math.max(limit, 1), tasks.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
 
 /**
  * Uncached raw fetch + pure assembly. Throws on any Supabase error — kept
@@ -73,7 +117,10 @@ export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWo
     idsByZone[zone].push(source.id);
   }
 
-  const reads: Array<Promise<WeeklyWordsArticleRow[]>> = [];
+  // One task per (day, zone), day-major (newest day first, zones in
+  // ZONE_ORDER): the order the rows reach the builder is unchanged. A zone with
+  // no voting source is skipped, so nothing is read for it.
+  const reads: Array<() => Promise<WeeklyWordsArticleRow[]>> = [];
 
   for (let d = 0; d < WEEKLY_WORDS_DAYS; d++) {
     const gte = new Date(nowMs - (d + 1) * DAY_MS).toISOString();
@@ -83,30 +130,28 @@ export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWo
       const ids = idsByZone[zone];
       if (ids.length === 0) continue;
 
-      reads.push(
-        (async () => {
-          const { data, error } = await supabase
-            .from("articles")
-            .select(ARTICLE_SELECT)
-            .in("source_id", ids)
-            .gte("created_at", gte)
-            .lt("created_at", lt)
-            .order("id", { ascending: true })
-            .limit(WEEKLY_WORDS_PER_ZONE_PER_DAY)
-            .returns<WeeklyWordsArticleRow[]>();
+      reads.push(async () => {
+        const { data, error } = await supabase
+          .from("articles")
+          .select(ARTICLE_SELECT)
+          .in("source_id", ids)
+          .gte("created_at", gte)
+          .lt("created_at", lt)
+          .order("id", { ascending: true })
+          .limit(WEEKLY_WORDS_PER_ZONE_PER_DAY)
+          .returns<WeeklyWordsArticleRow[]>();
 
-          if (error) {
-            throw new Error(
-              `[weekly-words] articles query failed (zone=${zone}, day=${d}): ${error.message}`,
-            );
-          }
-          return data ?? [];
-        })(),
-      );
+        if (error) {
+          throw new Error(
+            `[weekly-words] articles query failed (zone=${zone}, day=${d}): ${error.message}`,
+          );
+        }
+        return data ?? [];
+      });
     }
   }
 
-  const results = await Promise.all(reads);
+  const results = await runWithConcurrency(reads, WEEKLY_WORDS_READ_CONCURRENCY);
   const allRows = results.flat();
 
   return buildWeeklyDistinctiveWords(allRows, sources);
@@ -127,7 +172,8 @@ export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWo
 //
 // Cache lifetime follows the outcome (exactly one `cacheLife` call, after the
 // attempt; `cacheTag` first): a failed attempt (e.g. a 4 s reader-cap abort on
-// any of the 22 reads) is memoised for `minutes` only, never for 6 h.
+// any of the 22 reads: the sources read, then the 21 article reads run through
+// a pool of WEEKLY_WORDS_READ_CONCURRENCY) is memoised for `minutes` only, never for 6 h.
 async function getCachedWeeklyDistinctiveWords() {
   "use cache: remote";
   cacheTag("weekly-words");

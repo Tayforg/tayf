@@ -213,14 +213,26 @@ export default async function TopicHubPage({
         ) : (
           // A page past the last one: real clusters still exist on earlier
           // pages, so this must not repeat EMPTY_COPY (which claims none
-          // exist at all) and must keep Önceki reachable.
+          // exist at all), and the reader must never be left on a dead end:
+          // the pager leads back to page 1 and, when the fetcher counted it,
+          // to the last page that has rows. Status stays 200 (the PPR shell
+          // has already flushed one; no other paged route 404s). No body
+          // robots meta either: generateMetadata's topicPageRobots already
+          // emits `noindex, follow` for this same cache key, so the page
+          // carries exactly one.
           <>
             <div className={unavailableWrapClass}>
-              {/* Past the last page: noindex; see the PLACEMENT CAVEAT on the null branch. */}
-              <meta name="robots" content="noindex" />
-              <p className={unavailableTextClass}>{EMPTY_PAGE_COPY}</p>
+              <p className={unavailableTextClass}>
+                {typeof result.lastPage === "number"
+                  ? `${EMPTY_PAGE_COPY} Liste ${result.lastPage}. sayfada bitiyor.`
+                  : EMPTY_PAGE_COPY}
+              </p>
             </div>
-            <TopicPager slug={slug} page={result.page} hasMore={false} />
+            <PastEndPager
+              slug={slug}
+              page={result.page}
+              lastPage={result.lastPage}
+            />
           </>
         )
       ) : (
@@ -262,6 +274,39 @@ export default async function TopicHubPage({
         </>
       )}
     </div>
+  );
+}
+
+// Pager for an empty page past the last one. Never a next link; never a link to
+// page - 1 when the end is known (it is empty too). Order: first page, then the
+// last page that has rows, or, only when the end is unknown, the previous page.
+function PastEndPager({
+  slug,
+  page,
+  lastPage,
+}: {
+  slug: TopicSlug;
+  page: number;
+  lastPage: number | null | undefined;
+}) {
+  const hasKnownEnd = typeof lastPage === "number";
+
+  return (
+    <nav aria-label="Sayfalar" className={pagerClass}>
+      <Link href={`/konu/${slug}`} className={pagerLinkClass}>
+        İlk sayfaya dön
+      </Link>
+      {hasKnownEnd && lastPage > 1 && lastPage < page ? (
+        <Link href={`/konu/${slug}?sayfa=${lastPage}`} className={pagerLinkClass}>
+          Son sayfaya git
+        </Link>
+      ) : null}
+      {!hasKnownEnd && page - 1 > 1 ? (
+        <Link href={`/konu/${slug}?sayfa=${page - 1}`} className={pagerLinkClass}>
+          Önceki
+        </Link>
+      ) : null}
+    </nav>
   );
 }
 

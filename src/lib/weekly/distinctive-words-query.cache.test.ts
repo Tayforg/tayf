@@ -105,6 +105,34 @@ describe("weekly-words cached reader", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h14-perf-1: the 21 article reads (3 zones x 7 days) used to be one
+// Promise.all(reads) fan-out: all 21 scans hit the database at once and a cold
+// fill could pass the 4 s reader cap. They now go through a bounded pool. The
+// pins read the code (comments blanked), so prose can never satisfy them.
+// ---------------------------------------------------------------------------
+describe("weekly-words article read fan-out", () => {
+  it("bounds the pool with WEEKLY_WORDS_READ_CONCURRENCY = 4", () => {
+    expect(code).toMatch(/\bWEEKLY_WORDS_READ_CONCURRENCY\s*=\s*4\b/);
+    expect(code.match(/\bWEEKLY_WORDS_READ_CONCURRENCY\s*=/g) ?? []).toHaveLength(1);
+  });
+
+  it("runs the article reads through runWithConcurrency, never Promise.all(reads)", () => {
+    expect(code).not.toMatch(/Promise\.all\(\s*reads\s*\)/);
+    expect(code).toMatch(/runWithConcurrency\([^)]*WEEKLY_WORDS_READ_CONCURRENCY\s*\)/);
+  });
+
+  it("keeps the cache boundary intact: the pool lives in the uncached fetch, not in the cached body", () => {
+    const body = cachedBody();
+    expect(body).not.toContain("runWithConcurrency");
+    expect(body).not.toContain("WEEKLY_WORDS_READ_CONCURRENCY");
+  });
+
+  it("does not add a dependency for the pool (no p-limit / p-map / async imports)", () => {
+    expect(code).not.toMatch(/from\s+["'](?:p-limit|p-map|p-queue|async|bluebird)["']/);
+  });
+});
+
 describe("next.config.ts cacheLife 'weekly-words' profile", () => {
   function profile(name: string): { stale: number; revalidate: number; expire: number } {
     const m = new RegExp(`['"]${name}['"]\\s*:\\s*\\{([^}]*)\\}`).exec(blankComments(configSrc));
