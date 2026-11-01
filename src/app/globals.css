@@ -329,3 +329,15 @@
   }
   .hover-lift:hover { transform: none; }
 }
+
+/* Forced colors (Windows High Contrast) removes box-shadow, so every
+   `focus-visible:outline-none` + `ring-*` pairing loses its focus indicator.
+   Unlayered on purpose: it beats Tailwind v4's layered `outline-none` without
+   !important, and restores focus for the ring-only components plus ui/button
+   and ui/dialog. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+}

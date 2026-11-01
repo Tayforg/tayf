@@ -423,6 +423,59 @@ describe("getClusterDetail row shaping", () => {
     expect(result!.cluster.title_original).toBeNull();
   });
 
+  it("repairs entity residue in the headline (page, metadata and og:title read cluster.title_tr)", async () => {
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+
+    // 1. the raw seed title carries the residue (49 archived prod rows do)
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          title_tr: "Bakan &quot;T&uuml;rkiye&quot; dedi &amp; &#39;ayrıldı&#39;",
+          title_tr_neutral: null,
+        }),
+        error: null,
+      },
+    };
+    let result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.cluster.title_tr).toBe("Bakan \"Türkiye\" dedi & 'ayrıldı'");
+    expect(result!.cluster.title_original).toBeNull();
+    expect(result!.cluster.title_method).toBeNull();
+
+    // 2. the neutral rewrite is repaired too, and the disclosed original with it
+    callLog = [];
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          title_tr: "Orijinal &quot;ba&scedil;l&imath;k&quot;",
+          title_tr_neutral: "N&ouml;tr ba&scedil;l&imath;k",
+        }),
+        error: null,
+      },
+    };
+    result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.cluster.title_tr).toBe("Nötr başlık");
+    expect(result!.cluster.title_original).toBe('Orijinal "başlık"');
+    expect(result!.cluster.title_method).toBe("llm");
+
+    // 3. a neutral title that only differs by encoding replaced nothing, so
+    // there is nothing to disclose.
+    callLog = [];
+    responses.clusters = {
+      maybeSingle: {
+        data: mkClusterRow({
+          title_tr: "&quot;Aynı&quot;",
+          title_tr_neutral: '"Aynı"',
+        }),
+        error: null,
+      },
+    };
+    result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.cluster.title_tr).toBe('"Aynı"');
+    expect(result!.cluster.title_original).toBeNull();
+    expect(result!.cluster.title_method).toBeNull();
+  });
+
   it("normalizes malformed bias_distribution blobs to the empty shape", async () => {
     // bias_distribution may come back as string / number / wrong keys.
     // normalizeDistribution should return the canonical all-zero shape

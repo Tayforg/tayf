@@ -227,6 +227,93 @@ describe("getSourceProfile found / missing", () => {
   });
 });
 
+describe("getSourceProfile entity residue (read-time repair)", () => {
+  const RESIDUE_ROWS = [
+    {
+      id: "r1",
+      title: "Ali&#39;nin açıklaması",
+      description: "x &quot;y&quot; &amp; z",
+      url: "https://ornek.example/r1",
+      image_url: "https://ornek.example/r1.jpg",
+      published_at: "2026-01-04T00:00:00.000Z",
+    },
+    {
+      id: "r2",
+      title: "Meclis&amp;#8217;te gündem",
+      description: null,
+      url: "https://ornek.example/r2",
+      image_url: null,
+      published_at: "2026-01-03T00:00:00.000Z",
+    },
+    {
+      id: "r3",
+      title: "Temiz başlık",
+      description: "AT&T ve Fenerbahçe",
+      url: "https://ornek.example/r3",
+      image_url: null,
+      published_at: "2026-01-02T00:00:00.000Z",
+    },
+  ];
+
+  it("decodes title and description, keeps a null description null and leaves every other field alone", async () => {
+    fixture.articles = [{ data: RESIDUE_ROWS, error: null }];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles).toEqual([
+      {
+        id: "r1",
+        title: "Ali'nin açıklaması",
+        description: 'x "y" & z',
+        url: "https://ornek.example/r1",
+        image_url: "https://ornek.example/r1.jpg",
+        published_at: "2026-01-04T00:00:00.000Z",
+      },
+      {
+        id: "r2",
+        title: "Meclis\u2019te gündem",
+        description: null,
+        url: "https://ornek.example/r2",
+        image_url: null,
+        published_at: "2026-01-03T00:00:00.000Z",
+      },
+      {
+        id: "r3",
+        title: "Temiz başlık",
+        description: "AT&T ve Fenerbahçe",
+        url: "https://ornek.example/r3",
+        image_url: null,
+        published_at: "2026-01-02T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("an empty articles result still comes back as []", async () => {
+    fixture.articles = [{ data: [], error: null }];
+    expect((await getSourceProfile("ornek-gazete"))?.articles).toEqual([]);
+  });
+
+  it("never turns entity-encoded markup in a title or description into markup", async () => {
+    fixture.articles = [
+      {
+        data: [
+          {
+            ...RESIDUE_ROWS[0],
+            title: "&amp;lt;script&amp;gt;alert(1)",
+            description: "&amp;#60;img src=x&amp;#62;",
+          },
+        ],
+        error: null,
+      },
+    ];
+
+    const [article] = (await getSourceProfile("ornek-gazete"))?.articles ?? [];
+
+    expect(article?.title).not.toMatch(/[<>]/);
+    expect(article?.description).not.toMatch(/[<>]/);
+  });
+});
+
 describe("getSourceProfile reader cap", () => {
   it("builds only capped reader clients", async () => {
     await getSourceProfile("ornek-gazete");

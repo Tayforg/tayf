@@ -293,3 +293,134 @@ describe("resolveSummaryAttribution (BL-13 fail-closed dispatch)", () => {
     ).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Entity residue (read-time repair). clusters.summary_tr is the seed article's
+// description verbatim, and 47 stored descriptions carry a double-encoded
+// '&quot;' / '&#39;' / '&amp;' that ingest only decodes from now on. Every
+// surface (cluster page, meta, JSON-LD, rss.xml, digest) goes through these
+// functions, so they repair the residue and seed detection keeps working.
+// ---------------------------------------------------------------------------
+describe("entity residue repair", () => {
+  const notWire = { isWireRedistribution: false };
+  const RAW = "A &quot;b&quot; c";
+  const CLEAN = 'A "b" c';
+
+  it("summaryAttribution decodes the text and still finds the seed when the member holds the same raw string", () => {
+    const m = member("a", T0, RAW);
+    expect(summaryAttribution({ summary: RAW, members: [m], wire: notWire })).toEqual({
+      text: CLEAN,
+      source: m.source,
+    });
+  });
+
+  it("still finds the seed when the member description is already clean and the summary has residue", () => {
+    const m = member("a", T0, CLEAN);
+    expect(summaryAttribution({ summary: RAW, members: [m], wire: notWire })).toEqual({
+      text: CLEAN,
+      source: m.source,
+    });
+  });
+
+  it("still finds the seed when the summary is clean and the member description has residue", () => {
+    const m = member("a", T0, RAW);
+    expect(summaryAttribution({ summary: CLEAN, members: [m], wire: notWire })).toEqual({
+      text: CLEAN,
+      source: m.source,
+    });
+  });
+
+  it("findSeedMember matches across raw and repaired forms, earliest first", () => {
+    const early = member("a", "2026-09-06T09:59:20.000Z", RAW);
+    const late = member("b", "2026-09-06T10:00:40.000Z", CLEAN);
+    expect(findSeedMember([late, early], RAW)).toBe(early);
+    expect(findSeedMember([late, early], CLEAN)).toBe(early);
+  });
+
+  it("findSeedMember skips a rights-blocked member that only matches after decoding", () => {
+    const blocked = member("blocked", "2026-09-06T09:59:20.000Z", RAW);
+    blocked.source.excerpt_allowed = false;
+    const allowed = member("allowed", "2026-09-06T10:00:40.000Z", CLEAN);
+    expect(findSeedMember([blocked, allowed], RAW)).toBe(allowed);
+  });
+
+  it("BL-13: hides the excerpt when the only match exists after decoding and that source has excerpt_allowed: false", () => {
+    // Raw strings differ, so an exact-equality check would find no match and
+    // publish the blocked outlet's words unattributed.
+    const blockedClean = member("blocked", T0, CLEAN);
+    blockedClean.source.excerpt_allowed = false;
+    expect(
+      summaryAttribution({ summary: RAW, members: [blockedClean], wire: notWire }),
+    ).toBeNull();
+
+    const blockedRaw = member("blocked", T0, RAW);
+    blockedRaw.source.excerpt_allowed = false;
+    expect(
+      summaryAttribution({ summary: CLEAN, members: [blockedRaw], wire: notWire }),
+    ).toBeNull();
+  });
+
+  it("a wire dispatch whose seed only matches after decoding is still hidden on a hash majority", () => {
+    const seed = member("a", T0, RAW, "h1");
+    const members = [seed, member("b", "2026-09-06T10:10:00Z", null, "h1")];
+    expect(
+      summaryAttribution({ summary: CLEAN, members, wire: { isWireRedistribution: true } }),
+    ).toBeNull();
+  });
+
+  it("summaryAttributionWithoutMembers decodes", () => {
+    expect(summaryAttributionWithoutMembers({ summary: ` ${RAW} `, wire: notWire })).toEqual({
+      text: CLEAN,
+      source: null,
+    });
+  });
+
+  it("resolveSummaryAttribution decodes on both the member-aware and the degraded path", () => {
+    const m = member("a", T0, RAW);
+    expect(
+      resolveSummaryAttribution({ summary: RAW, members: [m], lookupFailed: false, wire: notWire }),
+    ).toEqual({ text: CLEAN, source: m.source });
+    expect(
+      resolveSummaryAttribution({
+        summary: RAW,
+        members: undefined,
+        lookupFailed: false,
+        wire: notWire,
+      }),
+    ).toEqual({ text: CLEAN, source: null });
+  });
+
+  it("describeForMeta output contains the quote and not the entity", () => {
+    const attribution = summaryAttribution({ summary: RAW, members: [], wire: notWire });
+    const meta = describeForMeta({ count: 2, attribution });
+    expect(meta).toContain('"');
+    expect(meta).not.toContain("&quot;");
+    expect(meta).toBe(`2 kaynak. Kaynak açıklaması: ${CLEAN}`);
+  });
+
+  it("decodes apostrophes and ampersands too, and repairs a nested level", () => {
+    const a = summaryAttributionWithoutMembers({
+      summary: "Erdoğan&#39;dan &amp;amp; &amp;#8217;",
+      wire: notWire,
+    });
+    expect(a?.text).toBe("Erdoğan'dan & ’");
+  });
+
+  it("never turns entity-encoded markup into markup", () => {
+    const a = summaryAttributionWithoutMembers({
+      summary: "&amp;lt;script&amp;gt;alert(1)&amp;#60;/script&amp;#62;",
+      wire: notWire,
+    });
+    expect(a?.text).not.toContain("<");
+    expect(a?.text).not.toContain(">");
+    expect(a?.text).toBe("&lt;script&gt;alert(1)&#60;/script&#62;");
+  });
+
+  it("leaves clean text and legitimate ampersands untouched", () => {
+    const a = summaryAttributionWithoutMembers({
+      summary: "AT&T ve Fenerbahçe 50% & fazlası",
+      wire: notWire,
+    });
+    expect(a?.text).toBe("AT&T ve Fenerbahçe 50% & fazlası");
+  });
+});

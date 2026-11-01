@@ -16,6 +16,7 @@ import {
 import { applyRecallVeto, logRecallVeto } from "@/lib/clusters/recall-veto";
 import { wireSignalOf, type WireSignal } from "@/lib/clusters/wire";
 import { createReaderClient } from "@/lib/supabase/server";
+import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import type { BiasCategory, BiasDistribution, MediaDnaZone, Source } from "@/types";
 
 // Names the pole zone whose degraded feeds caused a blindspot to be
@@ -452,6 +453,29 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         new Date(a.article.published_at).getTime()
     );
 
+    // Cluster titles were stored before the ingest entity fix, so 49 archived
+    // rows still carry "&quot;" / "&amp;" in `title_tr` (their neutral title is
+    // empty). Repair at the one place the detail is shaped. `repairEntityResidue`
+    // is pure and never throws, so it is safe inside this cached body; the
+    // `typeof` guard keeps a corrupt non-string value (the columns are text, so
+    // this is belt and braces) from becoming a TypeError that would cross the
+    // cache boundary.
+    const repairTitle = (t: string): string =>
+      typeof t === "string" ? repairEntityResidue(t) : "";
+    const originalTitle = repairTitle(clusterRow.title_tr);
+    const neutralTitle = clusterRow.title_tr_neutral
+      ? repairTitle(clusterRow.title_tr_neutral)
+      : "";
+    const headlines = {
+      original: originalTitle,
+      neutral: neutralTitle.trim().length > 0 ? neutralTitle : null,
+      // Compared after repair: a neutral title that differs from the original
+      // only by entity encoding replaced nothing, so it discloses nothing.
+      replaced:
+        neutralTitle.trim().length > 0 &&
+        neutralTitle.trim() !== originalTitle.trim(),
+    };
+
     return {
       cluster: {
         id: clusterRow.id,
@@ -460,29 +484,22 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         // seed-inherited title for clusters that haven't been rewritten yet.
         // Empty strings are coalesced too — an empty neutral title means
         // the rewriter wrote junk and we'd rather show the original.
-        title_tr:
-          clusterRow.title_tr_neutral && clusterRow.title_tr_neutral.trim().length > 0
-            ? clusterRow.title_tr_neutral
-            : clusterRow.title_tr,
+        //
+        // Both titles are entity-repaired once, here (see `headlines`), so
+        // the H1, <title>, og:title, JSON-LD and the fallback meta
+        // description all read clean text.
+        title_tr: headlines.neutral ?? headlines.original,
         // Set only when the neutral rewrite actually replaced the original
         // title, so the page can offer "Özgün başlık" disclosure — null
         // means there's nothing to disclose (no rewrite happened, or the
         // rewrite produced the same text as the original, which discloses
         // nothing new).
-        title_original:
-          clusterRow.title_tr_neutral &&
-          clusterRow.title_tr_neutral.trim().length > 0 &&
-          clusterRow.title_tr_neutral.trim() !== clusterRow.title_tr.trim()
-            ? clusterRow.title_tr
-            : null,
-        title_method:
-          clusterRow.title_tr_neutral &&
-          clusterRow.title_tr_neutral.trim().length > 0 &&
-          clusterRow.title_tr_neutral.trim() !== clusterRow.title_tr.trim()
-            ? clusterRow.title_neutral_model === EXTRACTIVE_MODEL_ID
-              ? "extractive"
-              : "llm"
-            : null,
+        title_original: headlines.replaced ? headlines.original : null,
+        title_method: headlines.replaced
+          ? clusterRow.title_neutral_model === EXTRACTIVE_MODEL_ID
+            ? "extractive"
+            : "llm"
+          : null,
         summary_tr: clusterRow.summary_tr,
         // The DB-stored article_count may be stale between the recluster
         // pass and this page render. Reflect the post-dedupe truth.
