@@ -84,6 +84,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 import { cacheLife, cacheTag } from "next/cache";
+import { connection } from "next/server";
 import SourcesPage from "./page";
 
 /** Every string leaf under an element tree (components are NOT expanded). */
@@ -107,6 +108,7 @@ beforeEach(() => {
   supabaseFixture.builds = 0;
   vi.mocked(cacheLife).mockClear();
   vi.mocked(cacheTag).mockClear();
+  vi.mocked(connection).mockClear();
   // attemptCached / the retry log with console.error; the page with warn.
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -141,6 +143,27 @@ describe("/sources directory cache lifetime", () => {
       vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
     );
     expect(supabaseFixture.builds).toBe(1);
+  });
+
+  it("success: the page never waits for a request (connection() is not called), so `next build` can prerender it", async () => {
+    await SourcesPage();
+
+    // The first hit after a deploy must be a prerender, not a request-time
+    // render: a connection() on the success path postpones the whole body at
+    // build time (the 4.4-5.6 s cold hit). Only the live retry may wait for a
+    // request, and only after the cached attempt failed.
+    expect(connection).not.toHaveBeenCalled();
+  });
+
+  it("failure: only the live retry waits for a request scope, once, before it re-reads", async () => {
+    supabaseFixture.fail = true;
+
+    await SourcesPage();
+
+    // awaitRequestScope() inside resolveCachedOrRetry: in a prerender it never
+    // settles and postpones the body to request time (loading.tsx is the
+    // boundary); at request time it resolves and the retry runs.
+    expect(connection).toHaveBeenCalledTimes(1);
   });
 
   it("a blip on the cached attempt is healed by the live retry: the page renders, the failure stays cached for 'minutes'", async () => {

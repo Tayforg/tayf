@@ -20,7 +20,7 @@ graph TB
 
     subgraph "Supabase Edge Functions (Deno)"
         INGEST[ingest<br/>RSS fan-out + normalize + upsert]
-        CLUSTER[cluster-consumer<br/>3-method ensemble]
+        CLUSTER[cluster-consumer<br/>ensemble scorer]
         IMAGE[image-consumer<br/>og:image backfill, SSRF-safe]
     end
 
@@ -78,7 +78,7 @@ graph TB
 | Ingest trigger | pg_cron `ingest-drain` → `net.http_post` | `*/3 * * * *` | Service-role-bearer-checked invocation of the `ingest` Edge Function, scheduled inside Postgres so the cron registry (`cron.job`) is the single source of truth for the worker stream's cadence |
 | Ingest | Supabase Edge Function `ingest` | per invocation | Fans out across 144 RSS sources with a concurrency-bounded pool, charset-aware decode (CP1254 / iso-8859-9 + UTF-8), unified sha1-of-shingles `content_hash`, idempotent upsert into `articles` |
 | Enqueue | Postgres trigger `AFTER INSERT ON articles` | per row | `pgmq.send('cluster_work', ...)` for politics articles; `pgmq.send('image_backfill', ...)` when `image_url IS NULL` |
-| Cluster drain | Edge Function `cluster-consumer`, scheduled by `pg_cron` | `* * * * *` | `pgmq.read(vt=60, qty=50)` → run 3-method ensemble → upsert into `clusters` + `cluster_articles` → `pgmq.archive` on success, `pgmq.delete` on permanent failure (>3 reads) |
+| Cluster drain | Edge Function `cluster-consumer`, scheduled by `pg_cron` | `* * * * *` | `pgmq.read(vt=60, qty=2)` in a loop bounded by a 30 s wall budget (`VT_SECONDS`, `BATCH_SIZE`, `MAX_INVOCATION_MS`) → run the ensemble scorer ([Clustering](#clustering-cluster-consumer)) → upsert into `clusters` + `cluster_articles` → `pgmq.archive` on success, and `pgmq.archive` (never delete, so the payload survives in `pgmq.a_cluster_work`) on permanent failure (a 4th read, `read_ct > MAX_READS`) |
 | Image drain | Edge Function `image-consumer`, scheduled by `pg_cron` | `*/5 * * * *` | Fetch first 50 KB of article URL, extract `og:image` / `twitter:image`, SSRF guard (RFC1918/169.254/loopback/IPv6 link-local), update `articles.image_url` |
 | Headline | Vercel cron `/api/cron/headline` | `*/5 * * * *` | LLM-generated neutral Turkish title for new clusters lacking `title_tr_neutral` |
 | KAP drain | Edge Function `kap-ingest`, scheduled by `pg_cron` `kap-drain` | `*/10 * * * *` | Pulls the last two Istanbul days of KAP disclosures (`POST /tr/api/disclosure/members/byCriteria`, 2000-row cap, walked one day at a time) into `kap_disclosures`; `{"companies":true}` refreshes `bist_companies` + auto `bist_aliases` from the KAP company list. `scripts/kap-backfill.mjs` walks history. Migration 049. |
@@ -105,6 +105,61 @@ Gated by the `JEV_LIVE_PAIRS=1` Edge secret (plus a non-empty `AI_GATEWAY_API_KE
 ```
 
 With the flag unset, `enabled` is `false` and cluster-consumer's behaviour, DB writes, and JSON output are byte-for-byte identical to before this pack. See migration `supabase/migrations/064_jev_cluster_live.sql` and `docs/migration-guide.md` for the outlier-ejection queue (P5) and blindspot recall check (P4) this same migration adds.
+
+## Clustering (cluster-consumer)
+
+For every queued politics article the `cluster-consumer` Edge Function enriches it (strict fingerprint, whitelist entities, MinHash signature, persisted to `articles` best-effort), scores it against a rolling in-memory context of recent clusters, and either joins the best-scoring cluster or opens a new one. Tunables live in `supabase/functions/_shared/cluster/constants.ts`, the scorer in `ensemble.ts`, the context selector in `context-select.ts`, and candidate search plus the join loop in `supabase/functions/cluster-consumer/index.ts` (`loadClusterContext`, `findCandidateClusters`, `clusterArticle`).
+
+### Rolling context
+
+`loadClusterContext()` builds the set of clusters an article may join:
+
+1. **Newest window.** Clusters whose `updated_at` falls inside the last `TIME_WINDOW_HOURS` (48 h), newest-updated first, at most `CONTEXT_CLUSTER_CAP` (200).
+2. **Sticky tail.** Only when that window is full, busy clusters that just fell out of it are added, so a 20-article story that went quiet for a few hours still attracts its follow-ups instead of getting a duplicate cluster. A sticky cluster is strictly older (by `updated_at`) than the 200th-newest row, was updated within `CONTEXT_STICKY_HOURS` (12 h), has at least `CONTEXT_STICKY_MIN_ARTICLES` (5) articles, and is neither archived nor merged; the largest come first, at most `CONTEXT_STICKY_MAX` (60). The query is best-effort: a failure logs a warning and leaves the newest window untouched. At load time the context is therefore at most 260 clusters. `selectContextClusterIds` (`context-select.ts`) is the pure selector: it de-duplicates ids and orders the tail by article count, then recency.
+3. **Seed and latest.** Only politics members count (category `politika` / `son_dakika`, or a live-admission stamp). A cluster's **seed** is its earliest-published member and its **latest** is the most recently published other member. An incoming article is scored against seed and latest only: the fingerprint, entity and title-token indexes cover every member, while the LSH band index and the TF-IDF index cover seed and latest. For the headline lane the context also keeps each cluster's `HEADLINE_MEMBER_SCAN_MAX` (12) newest member headlines, tokenized once from the member rows the load already fetched (no extra query).
+
+The context is cached in the Edge instance for `CLUSTER_CONTEXT_TTL_MS` (60 s). A cluster created during an invocation is registered into the cache immediately (`registerNewClusterInCache`), so the next message of the same batch can join it.
+
+### Candidate generation
+
+Before scoring, `clusterArticle` tries the **strict-fingerprint fast path**: the article's strict fingerprint (sha1 of the sorted, unique 4-character shingles of title plus description) is looked up against the fingerprints of any member of any context cluster. The first cluster that accepts the article wins and no scoring happens; a cluster that already holds an article from the same source is skipped (one article per source per cluster) and the next hit is tried. A transient error on this path falls through to the ensemble.
+
+Otherwise `findCandidateClusters` unions four routes, each cluster keeping its largest weight:
+
+| Route | Admits a cluster when | Weight |
+|---|---|---|
+| Strict fingerprint | Any member has the identical strict fingerprint | always first |
+| Entities | The article shares at least `MIN_SHARED_ENTITIES` (1) whitelist entity with the cluster's members | shared count |
+| Title tokens | The article's title shares at least `TOKEN_CANDIDATE_MIN_SHARED` (2) normalized, stemmed tokens (length at least `TOKEN_MIN_LEN`, 4; digits excluded) with any member's title | shared count |
+| LSH bands | The article's MinHash signature (`MINHASH_SIG_K`, 64 slots) shares at least one of `LSH_BANDS` (16, four rows each) bands with the cluster's seed or latest | bands shared / 16, deliberately below the entity weight |
+
+The list is sorted by weight and trimmed to `MAX_CANDIDATE_CLUSTERS` (20), so entity and token hits survive a trim before band-only hits do. Candidate generation only widens who is scored; the scorer decides.
+
+### Scoring lanes
+
+Each candidate cluster is scored against its seed and its latest (the latest only when it sits within `TIME_WINDOW_HOURS` of the article; a seed farther than that skips the cluster) and keeps the higher result, which the member-headline scan below can still raise. `score()` in `ensemble.ts` runs these lanes:
+
+| Lane | Rule | Constants |
+|---|---|---|
+| Strict auto-accept | Identical strict fingerprints return 1.0 × source penalty and skip every other lane | n/a |
+| MinHash | Jaccard `J` of the two signatures. `J >= 0.5` gives `0.6 + 0.4·J` (0.8 to 1.0); below that `0.5·J` (below 0.25, never enough alone) | `MINHASH_SOFT_ACCEPT_JACCARD` 0.5 |
+| Primary | `0.7·tfidf + 0.3·entityRatio`. `tfidf` is the cosine against the seed/latest document (title plus description) in the context TF-IDF index. `entityRatio` is shared entities over `max(ENTITY_DENOM_MIN, max(\|A\|, \|B\|))`, times a freshness factor `max(0.5, 1 − hours / 6)` (so it is at 0.5 from 3 h on) | `TFIDF_WEIGHT` 0.70, `ENTITY_WEIGHT` 0.30, `ENTITY_DENOM_MIN` 3, `ENTITY_FRESHNESS_HOURS` 6 |
+| Text floor | When the headline lane did not fire and `tfidf < ENTITY_TEXT_FLOOR`, the primary lane's contribution to `raw` is capped at `MATCH_THRESHOLD − 0.01` (0.39): entities alone can never carry a pair over the threshold. MinHash and the headline lane are unaffected | `ENTITY_TEXT_FLOOR` 0.20 |
+| Headline lane, Jaccard variant | Fires when the two headlines share at least `HEADLINE_LANE_MIN_SHARED` stemmed tokens, their token Jaccard `J` over the full sets is at least `HEADLINE_LANE_MIN_JACCARD`, the articles are at most `HEADLINE_LANE_MAX_HOURS` apart, and numerals agree (either headline has none, or both carry exactly the same set). Score `0.5 + 0.5·J` (0.85 to 1.0, so it clears the threshold even after the haberler-com penalty). Tokens keep a minimum length of `HEADLINE_TOKEN_MIN_LEN` characters, numerals count as tokens, and any token that starts with one of `HEADLINE_GENERIC_PREFIXES` is dropped (`cumhurbaskan`, `erdogan`, `bakan`, `turkiye`, `canli`, `konusuyor`, `aciklama`) | `HEADLINE_LANE_MIN_SHARED` 4, `HEADLINE_LANE_MIN_JACCARD` 0.7, `HEADLINE_LANE_MAX_HOURS` 6, `HEADLINE_TOKEN_MIN_LEN` 3 |
+| Headline lane, containment variant | A second chance for a short wire headline whose words all sit inside a longer headline of the same story (7 of 12 tokens is Jaccard 0.58). Evaluated only when the Jaccard variant did not fire. With numerals removed, the smaller word set must have at least `HEADLINE_CONTAIN_MIN_TOKENS` words, at least `HEADLINE_CONTAIN_MIN` of them must occur in the larger set, the two numeral sets must be identical (both empty is fine; stricter than the Jaccard variant), the pair must be within `HEADLINE_LANE_MAX_HOURS`, the smaller word set must be at least `HEADLINE_CONTAIN_MIN_SIZE_RATIO` of the larger one (the long headline is at most 2.5x the short one, so a roundup or keyword-stuffed title cannot be "contained" by every unrelated short headline), and no word that only the longer headline has may start with one of `HEADLINE_CONTAIN_BLOCK_PREFIXES` (`yalan`, `iddia`, `degil`, `tekzip`: a denial or a claim is a new development, not the same one). Headlines are tokenised from the first `HEADLINE_TITLE_MAX_CHARS` characters only. Score `0.5 + 0.5·J` with `J` the full-set Jaccard, so a containment-only match scores below 0.85 | `HEADLINE_CONTAIN_MIN` 0.85, `HEADLINE_CONTAIN_MIN_TOKENS` 5, `HEADLINE_CONTAIN_MIN_SIZE_RATIO` 0.4, `HEADLINE_TITLE_MAX_CHARS` 300 |
+| Member-headline scan | Besides seed and latest, the incoming headline is compared through the headline lane only (either variant, times the same time decay and source penalty) with the cluster's other recent member headlines that are within `HEADLINE_LANE_MAX_HOURS` of the article, so a middle member can attract the follow-ups it matches. The result can only raise the cluster's score; it is never the text-floor-capped lane, so it is fallback-eligible as is | `HEADLINE_MEMBER_SCAN_MAX` 12 newest members per cluster |
+| Combine | `raw = max(MinHash, primary (after the text floor), headline lane)`; `final = raw × timeDecay × sourcePenalty` | n/a |
+| Time decay | `max(0, 1 − hours / TIME_WINDOW_HOURS)`: linear over 48 h | `TIME_WINDOW_HOURS` 48 |
+| Source penalty | 0.85 when either side is `haberler-com`, an aggregator firehose that otherwise acts as a seed magnet | `SOURCE_PENALTIES` in `ensemble.ts` |
+| Threshold | `final >= MATCH_THRESHOLD` joins. `FALLBACK_FLOOR` (`MATCH_THRESHOLD × 0.9`, 0.36) is the lowest score a candidate keeps in the list | `MATCH_THRESHOLD` 0.40 |
+
+### Join decision
+
+1. Candidates scoring at least `FALLBACK_FLOOR` (0.36) are sorted by score; the best is the **primary**.
+2. If the primary lands in a narrow band around the threshold, TypeSafe Jev may review it live (behind the `JEV_LIVE_PAIRS` flag, off by default). See [Jev live marginal verification](#jev-live-marginal-verification-p3-migration-064).
+3. If the primary scores at least `MATCH_THRESHOLD` (0.40), the consumer walks the candidates best first and joins the first one that accepts the article. A candidate under `FALLBACK_FLOOR` ends the walk (under `MATCH_THRESHOLD` after a Jev reject). A cluster that already contains the article's source is skipped (duplicate-source) and the walk continues, which is how a candidate in `[0.36, 0.40)` can still win.
+4. `fallbackEligibleScore` keeps entities-only evidence out of that walk: a sub-threshold result whose entity/tfidf lane was text-floor capped and which that capped lane alone produced contributes 0 to the fallback join (Jev's low band can still review such a pair).
+5. When nothing joins, `createCluster` opens a new cluster seeded by the article.
 
 ## Data Model
 
@@ -140,6 +195,8 @@ erDiagram
         jsonb bias_distribution
         boolean is_blindspot
         text blindspot_side
+        boolean blindspot_recall_veto
+        text blindspot_veto_reason
         int article_count
         timestamp first_published
         timestamp updated_at
@@ -203,16 +260,97 @@ score = W_ARTICLE_COUNT * log2(effectiveCount + 1)
 
 Where `effectiveCount = min(wireCollapsedCount, sourceFairnessCappedCount)`.
 
-### Blindspot Detection (`blindspots/page.tsx`)
+### Blindspot contract ("Kör nokta")
 
-Clusters qualify as blindspots when:
-1. ≥5 distinct sources (post same-source dedupe)
-2. Dominant Medya DNA zone share ≥80%
-3. ≥60% politics/breaking-news category
-4. First published ≥24h ago (time-lag artifact filter)
-5. ≥50% distinct content hashes (wire filter)
-6. ≤50% dünya category (foreign affairs filter)
-7. No SEO pattern titles (kimdir, kaç yaşında, etc.)
+The contract lives in `supabase/functions/_shared/cluster/blindspot.ts` (`BLINDSPOT`, `BIAS_TO_ZONE`) and `source-kind.ts`; `src/lib/bias/config.ts` re-exports both, and the SQL copies in migrations 032, 071 and 126 are parity-tested against them. It has three layers: the flag the database stores, the public claim readers derive from it, and the extra rules of the `/blindspots` feed.
+
+**Who votes.** Only sources whose `kind` is `outlet` or `wire` (`VOTING_SOURCE_KINDS`) count toward `bias_distribution` and therefore toward every number below. `aggregator` and `niche` sources are still cluster members and still add to `article_count`, but never vote. The ten bias categories fold into three Medya DNA zones: `iktidar` (`pro_government`, `gov_leaning`, `state_media`, `islamist_conservative`, `nationalist`), `bagimsiz` (`center`, `international`, `pro_kurdish`) and `muhalefet` (`opposition_leaning`, `opposition`).
+
+**1. The stored flag.** `detectBlindspot()` sets `clusters.is_blindspot` when the cluster has at least `BLINDSPOT.minSources` (5) voting sources and one zone holds at least `BLINDSPOT.dominantShare` (0.8) of them; `blindspot_side` is the largest bias category inside that zone (ties break in `BIAS_KEYS` order, and it is the side that did cover the story, not the silent one). The consumer writes it on every link, `cluster_link_atomic` (121) recomputes it under the cluster lock, and `recompute_blindspot_flags()` (032) re-derives it for every cluster. The flag is immediate: there is no delay in the database.
+
+**2. The public claim.** Every reader-facing surface treats `is_blindspot AND NOT blindspot_recall_veto` as the claim (`applyRecallVeto` in `src/lib/clusters/recall-veto.ts`; a literal `true` is the only value that vetoes, so `null`, `undefined` and rows fetched before 071 pass through). The veto never rewrites `is_blindspot`, `blindspot_side` or `updated_at`; it only withdraws the claim at read time. Two independent rules set the veto, and both write the same column:
+
+| Veto | `blindspot_veto_reason` | Migration | Idea |
+|---|---|---|---|
+| Jev recall | `jev_recall` | 071 | Jev's `blindspot_recall` stage (064) found the silent side covering the same event |
+| Sibling headline | `sibling_headline` | 126 | A live, near-identically titled sibling cluster carries the silent side |
+
+Both are evaluated by `public.blindspot_recall_veto_refresh(p_since, p_min_prob)` (`SECURITY DEFINER`, `service_role` only), run by the pg_cron job `blindspot-recall-veto` at `7-59/10 * * * *` (seven minutes after each `jev-shadow` tick). A cluster is vetoed only while its live distribution still passes the contract (at least 5 voting sources, dominant share at least 0.8) and the extra voters would pull the dominant share below 0.8. Extra voters are distinct voting (`outlet` / `wire`) sources that are not already members of the cluster.
+
+- **Veto 1, `jev_recall` (071).** Voters come from `jev_shadow_predictions` rows with `task = 'blindspot_recall'` and `jev_prob >= p_min_prob`, which defaults to 0.85 (`RECALL_VETO_MIN_PROB`, the number `/metodoloji#kor-nokta` quotes). Missing predictions never veto.
+- **Veto 2, `sibling_headline` (126).** Voters also come from articles of *other* clusters that read as the same story as a member article. The title rule is `SIBLING_VETO` in `src/lib/clusters/sibling-veto.ts`, hand-copied into the SQL and pinned by `tests/migrations/126-blindspot-sibling-veto.test.ts`:
+  - a title is reduced to stems: fold Turkish letters to ASCII, lower-case, split on anything outside `a-z0-9`, keep words of at least `tokenMinLen` (4) letters and cut each to `stemLen` (5) characters;
+  - two titles match when they share at least `minShared` (3) stems and their stem-set Jaccard index is at least `minJaccard` (0.5);
+  - the two articles were published at most `windowHours` (24) hours apart;
+  - the sibling cluster is live (not archived, not merged) and was created at most 24 hours before the search scope starts;
+  - the search scope is blindspots created within the last `greatest(scopeHours (48) hours, p_since)`;
+  - when both vetoes apply, Jev wins (`jev_recall`);
+  - **frozen afterwards:** once a `sibling_headline` cluster is older than the scope its evidence is no longer recomputed (siblings age out of the candidate window and the cron would flap); the veto stays only while the live contract keeps holding, and clears when it stops (`is_blindspot` false, fewer than 5 voters, or share below 0.8).
+  - Known limit: title overlap cannot tell two events with the same wording, so a genuine blindspot can be hidden; the error direction is "badge hidden", never "badge invented".
+
+Columns on `clusters`: `blindspot_recall_veto` (boolean, default `false`), `blindspot_recall_veto_at` (when the current veto was first set) and `blindspot_veto_reason` (`jev_recall` or `sibling_headline`, a CHECK constraint; `null` exactly when there is no veto). No reader selects `blindspot_veto_reason`, and `anon` / `authenticated` have no grants on any of them.
+
+**Veto-aware readers.** `politics-query.ts`, `cluster-detail-query.ts`, `weekly-query.ts` and `src/lib/api/v1-clusters.ts` apply `applyRecallVeto`; `blindspots-query.ts` and `alert-query.ts` filter `.eq("blindspot_recall_veto", false)` in SQL; the social cron, the alerts-webhooks cron and the `source_karne` aggregation (migration 106) check the column directly.
+
+**Known readers that are not veto-aware** (read-only findings from the 126 header, plus the archive export): `saved_clusters_v2` (124) returns the raw `is_blindspot`, so a vetoed story still shows its "Kör nokta" pill on `/saved`; `GET /api/metrics` counts the raw `is_blindspot` as an internal gauge; `jev-shadow` reads `is_blindspot = true` on purpose (it feeds the recall stage itself); the nightly archive export writes the raw flag.
+
+**3. The `/blindspots` feed** (`blindspots-query.ts`, `blindspot-feed.ts`) adds rules on top of the public claim:
+
+| Step | Rule | Constant |
+|---|---|---|
+| Candidate select (SQL) | `is_blindspot`, `NOT blindspot_recall_veto`, not archived, `article_count >= 3`, newest `updated_at` first, at most 200 candidates | `PREFILTER_MIN_ARTICLE_COUNT` 3, `CANDIDATE_LIMIT` 200 |
+| Delay | `first_published` at least 24 h ago, so the absent side has time to catch up (time-lag artifact filter) | `BLINDSPOT.feedDelayHours` 24 |
+| Same-source dedupe | Earliest article per source, so one prolific outlet cannot inflate its zone | n/a |
+| Source floor | At least 5 distinct sources after dedupe | `BLINDSPOT.minSources` 5 |
+| SEO titles | Title must not match `kimdir`, `kaç yaşında`, `nedir?`, `ne zaman`, `kaç bin`, `kaç tl`, `son dakika …:`, `canlı`, `ne dedi` | `SEO_PATTERN` |
+| Wire filter | Distinct content hashes at least 50 % of the deduped members | `WIRE_UNIQUE_HASH_RATIO` 0.5 |
+| Foreign affairs | `dunya` category share of the deduped members at most 50 % | `DUNYA_CATEGORY_SHARE_LIMIT` 0.5 |
+| Politics floor | At least 60 % of the deduped members are politics members (`politika` / `son_dakika`, or live-admitted) | `POLITICS_CATEGORY_SHARE_MIN` 0.6 |
+| Live re-tally | Voting sources at least 5 and dominant share at least 0.8 on the deduped members, so a stale flag never surfaces | `BLINDSPOT` |
+| Feed health | Dropped when a pole zone other than the dominant one has degraded feeds (`shouldSuppressBlindspot`): "silent" must not mean "we could not fetch that side" | `feed-health.ts` |
+| Output | Most lopsided first, at most 30, embeds fetched in batches of 50 | `DISPLAY_LIMIT` 30, `EMBED_BATCH_SIZE` 50 |
+
+The fetcher is `"use cache: remote"` with tags `clusters` and `clusters-politics`: the `cluster-feed` profile on success, `minutes` after a failed attempt. The public alerts API reuses it unchanged (see `GET /api/v1/alerts/blindspots` in [`api.md`](api.md)).
+
+### Entity hubs (/gundem)
+
+Entity hubs (roadmap G2) give every curated person, party, institution or country a page listing its newest clusters. `/gundem` is a static index of all hubs (it reads nothing from the database); `/gundem/[key]` is one hub.
+
+**Vocabulary.** `RISING_ENTITIES` in `src/lib/trends/rising-entities.ts` is the closed list of 62 `{ key, label, tokens }` entries. It is the same list that drives "Yükselen Konular" on `/trends` (migration 112), so `tokens` is never changed for hub reasons. `generateStaticParams` returns all 62 keys, and `src/middleware.ts` (gate 6) rewrites any other `/gundem/:key` (unknown key, mis-cased path, nested path) to the real 404.
+
+**Hub-only search data.** `RISING_HUB_SPECS` (same file) is keyed by entity key and read only by `src/lib/entities/entity-hub.ts`. Each optional field steers how that entity is searched:
+
+| Field | Effect |
+|---|---|
+| `aliases` | Spellings searched instead of the label (`AK Parti` and `AKP`; four spellings of Zelenski). The label stays the page title |
+| `hubMatch` | `'word'` (default) closes a single-word pattern with `\M` so `deva` never matches `devam`; `'prefix'` leaves it open for words that take suffixes (`dolara`, `borsada`, `meclisin`) |
+| `inflections` | Suffixed spellings added to the stemmed prefilter only, never to the regex patterns |
+| `trusted` | Aliases emitted without the `excludes` / `requires` guards because they name the institution on their own (`TBMM`, `Büyük Millet Meclisi`, `AYM`, `TCMB`) |
+| `excludes` | Foreign or municipal cues that veto a non-trusted alias. The pattern is prefixed with a negative lookahead over the whole folded text (`^(?![\s\S]*(?:cue\|cue))[\s\S]*…`). Used by `meclis`, `aym` and `tcmb` |
+| `requires` | Cues of which at least one must appear anywhere in the text for a non-trusted alias to count (a positive lookahead placed after the exclude one). Used by `meclis` only: the bare "Meclis" needs `tbmm`, `genel kurul`, a party name and the like |
+| `quantityGuard` | Keeps single-word forms out of amounts such as "100 dolar" or "2,1 milyar dolarlık" (`dolar` only) |
+
+Cue phrases are folded lower-case ASCII and open-ended, except a single word of three letters or fewer, which takes a word boundary (`fed` never hits `federasyon`). A trusted alias stays bare, so a foreign cue elsewhere in the story cannot drop it.
+
+**RPCs.** Both are `SECURITY DEFINER` with an empty `search_path`, executable by `service_role` only (the Next.js server calls them through `createReaderClient()`, which aborts after `READER_TIMEOUT_MS`, 4 s; the anon key cannot reach them). They return `(id, total)`, where `total` is `count(*) over ()` evaluated before the `LIMIT`, so it is the full match count in the window. Both window on `clusters.updated_at` (default 14 days, never wider than 30; the app never passes `p_since`, so no clock is read in app code), keep only live clusters (`not is_archived`, `article_count >= 2`, `merged_into is null`) and clamp `p_limit` to 1..50.
+
+| RPC | Migration | Match | Order |
+|---|---|---|---|
+| `entity_cluster_ids(p_variants, p_since, p_limit)` | 123 | Three OR'd stemmed `websearch_to_tsquery` variants of the label against `clusters.search_tsv` (the block of `search_cluster_ids`, 083) | `updated_at desc, id` |
+| `entity_cluster_ids_v2(p_queries, p_patterns, p_since, p_limit)` | 125 | Recall: the stemmed tsquery of `p_queries` (OR'd, first 12) on the same GIN index. Precision, ANDed: the folded title, neutral title and summary must match any of `p_patterns` (first 12, empty strings removed) with the `~` operator | `first_published desc, id` |
+
+123 alone lists every cluster whose *stem* matches, and the Turkish stemmer collapses unrelated words (`devam` under DEVA, `domuz` under Dolar), which is why 125 adds the literal-match guard. v2 orders by `first_published` because the cards print that age. `entity-hub-query.ts` calls v2 first and falls back to 123 only on `PGRST202` (125 not applied yet), so the app can deploy before the migration.
+
+**App constants** (`src/lib/entities/entity-hub.ts`): `ENTITY_HUB_WINDOW_DAYS` 14 (mirrors the SQL default), `ENTITY_HUB_LIMIT` 20 (clusters listed), `ENTITY_HUB_MIN_INDEXABLE` 3 (a hub with fewer clusters is thin and gets `noindex, follow`) and `ENTITY_HUB_MAX_TERMS` 12 (the most queries and patterns sent, mirroring the `[1:12]` slices in 125). The page note reads "Son 14 günde 422 küme · en yeni 20 tanesi listeleniyor".
+
+**Read path and cache.** `getEntityHub(key)` resolves the ids with the RPC, then runs one `.in('id', ids)` embed select and `getZoneFeedHealth()` in parallel, re-sorts into the RPC order and builds the cards with `buildClusterBundle` from `politics-query.ts`. The cached body is a plain `"use cache"` function (not remote; 62 small keys) tagged `clusters-entity` that wraps the fetch in `attemptCached`: the `cluster-feed` profile on success, `minutes` after a failed attempt, with exactly one `cacheLife` call per invocation. A failed cached attempt is retried live once; if that fails too, the hub resolves to `null` and the page renders its honest "unavailable" state with `noindex`. `clusters-entity` is in `CLUSTER_FEED_TAGS` (`src/lib/clusters/merge.ts`), so merges and unlinks revalidate it. The page reads no clock; relative times use the `asOfMs` stamped inside the cache scope.
+
+**Indexing and the sitemap.** A hub is indexable when `entityHubRobots(result) === undefined`, that is, when the read succeeded and returned at least `ENTITY_HUB_MIN_INDEXABLE` clusters; otherwise it is `noindex, follow`. `CollectionPage` and `BreadcrumbList` JSON-LD are emitted only for indexable hubs. The sitemap follows the same rule:
+
+- `/sitemap.xml` is an index that lists `/sitemaps/hubs.xml` next to `static.xml`, `sources.xml`, `news.xml` and the monthly cluster files.
+- `static.xml` carries only the `/gundem` index page.
+- `hubs.xml` is built by `getHubsSitemapXml` (`src/lib/seo/hub-sitemap.ts`). It reads every `RISING_ENTITIES` hub through `getEntityHub` in batches of `HUB_SITEMAP_CONCURRENCY` (8), lists `/gundem/<key>` exactly when the page itself is indexable (so the sitemap never submits a URL the page asks crawlers to skip), and sets `lastmod` to the newest `first_published` among the hub's clusters.
+- A `null` hub read fails the whole build: the route answers `503` with `Retry-After: 600` and `Cache-Control: no-store` instead of publishing a short urlset that would de-index hubs. The builder itself is uncached; the load is carried by the 62 per-key cache entries and the route's `Cache-Control: public, s-maxage=3600, stale-while-revalidate=86400`.
 
 ## Caching Strategy
 

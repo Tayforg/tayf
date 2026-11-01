@@ -64,6 +64,12 @@ vi.mock("@/lib/sources/feed-status", async (importOriginal) => {
 });
 
 function makeFakeClient() {
+  // `latest` is the embed the directory read selects (newest article in the
+  // 7-day window). Empty unless a test sets `supabaseFixture.latestBySlug`.
+  const latestOf = (slug: string) => {
+    const publishedAt = supabaseFixture.latestBySlug[slug];
+    return publishedAt ? [{ published_at: publishedAt }] : [];
+  };
   const sourceRows = [
     {
       id: "s-outlet",
@@ -76,7 +82,7 @@ function makeFakeClient() {
       active: true,
       kind: "outlet",
       stats: [{ count: 2 }],
-      latest: [],
+      latest: latestOf("s-outlet"),
     },
     {
       id: "s-aggregator",
@@ -89,7 +95,7 @@ function makeFakeClient() {
       active: true,
       kind: "aggregator",
       stats: [{ count: 2 }],
-      latest: [],
+      latest: latestOf("s-aggregator"),
     },
     {
       id: "s-wire",
@@ -102,7 +108,7 @@ function makeFakeClient() {
       active: true,
       kind: "wire",
       stats: [{ count: 2 }],
-      latest: [],
+      latest: latestOf("s-wire"),
     },
   ];
   return createSupabaseFake({ tables: { sources: sourceRows } }).client;
@@ -113,6 +119,8 @@ function makeFakeClient() {
 // (the "Kaynak listesi şu an yüklenemedi" fallback) can be exercised.
 const supabaseFixture = vi.hoisted(() => ({
   fail: false,
+  /** slug -> ISO published_at of the source's newest article in the window. */
+  latestBySlug: {} as Record<string, string>,
   // Order of the reads the page starts: "directory" is pushed by the
   // directory read's createServerClient() call, "counts" by a stubbed
   // getSourceItemsPerDay (see the overlap test below).
@@ -128,13 +136,19 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 // Import AFTER mocks are declared.
-import SourcesPage, { SourceDirectory, SourceDirectoryWithCounts } from "./page";
+import SourcesPage, {
+  SourceDirectory,
+  SourceDirectoryWithCounts,
+  deriveDirectoryStats,
+} from "./page";
 import { SOURCE_SKELETON_CARDS, SourceDirectorySkeleton } from "./source-directory-skeleton";
 import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
 import { BIAS_LABELS } from "@/lib/bias/config";
+import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
+import { formatTurkishTimeAgo } from "@/lib/time";
 
 /**
  * Collects every string/number leaf under a React element tree. Expands
@@ -221,6 +235,7 @@ async function collectHrefs(node: unknown, out: string[] = []): Promise<string[]
 // whole file instead of inside the one describe that happened to need it.
 beforeEach(() => {
   supabaseFixture.fail = false;
+  supabaseFixture.latestBySlug = {};
   supabaseFixture.calls.length = 0;
   clickbaitFixture.public = false;
   clickbaitFixture.karne = null;
@@ -624,6 +639,7 @@ const GZT = {
   trustee_since: null,
   trustee_note: null,
   lastPublishedAt: null,
+  lastSeenLabel: null,
 };
 
 describe("SourceDirectory card -- accessible name and target size", () => {
@@ -693,5 +709,277 @@ describe("SourceDirectory card -- accessible name and target size", () => {
     const tokens = (namePara?.[1] ?? "").split(/\s+/);
     expect(tokens).toContain("pr-7");
     expect(tokens).not.toContain("pr-5");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sources-cold-hit: the first request to /sources after a deploy took 4.4-5.6 s
+// in production (x-vercel-cache PRERENDER; warm requests 0.5 s). The page body
+// began with `await connection()`, so `next build` postponed the whole body: the
+// prerender held only the loading skeleton (0 /source/ links), no "use cache"
+// entry was filled at build, and the first reader paid the function cold path
+// plus the uncached directory read and the weekly-count aggregate (a cold
+// buffer-cache read on the articles index, mean ~2 s in pg_stat_statements).
+// The page is now prerenderable: every clock-dependent value is stamped inside
+// the cached read, at fill time.
+// ---------------------------------------------------------------------------
+
+const NOW_MS = Date.parse("2026-11-01T12:00:00.000Z");
+const hoursAgoIso = (hours: number) => new Date(NOW_MS - hours * 3_600_000).toISOString();
+
+type StatsRow = GroupedSources[keyof GroupedSources][number];
+
+function statsRow(slug: string, kind: string, lastPublishedAt: string | null): StatsRow {
+  return { ...GZT, id: slug, slug, kind, lastPublishedAt } as unknown as StatsRow;
+}
+
+describe("deriveDirectoryStats -- the yield denominator, from fill-time rows", () => {
+  const grouped = (rows: Partial<Record<string, StatsRow[]>>) =>
+    rows as unknown as Parameters<typeof deriveDirectoryStats>[0];
+
+  it("counts only voting sources (outlet, wire) that delivered inside FEED_YIELD_WINDOW_MS", () => {
+    const stats = deriveDirectoryStats(
+      grouped({
+        pro_government: [
+          statsRow("outlet-fresh", "outlet", hoursAgoIso(1)),
+          statsRow("outlet-stale", "outlet", hoursAgoIso(100)),
+          statsRow("outlet-never", "outlet", null),
+        ],
+        center: [
+          statsRow("agg-fresh", "aggregator", hoursAgoIso(1)),
+          statsRow("niche-fresh", "niche", hoursAgoIso(1)),
+        ],
+        state_media: [statsRow("wire-fresh", "wire", hoursAgoIso(2))],
+      }),
+      NOW_MS,
+    );
+
+    // Voting: outlet x3 + wire x1 = 4. Delivering: outlet-fresh + wire-fresh.
+    expect(stats).toEqual({ votingSources: 4, votingDelivering: 2 });
+  });
+
+  it("the window edge is inclusive, one millisecond past it is not", () => {
+    const edge = new Date(NOW_MS - FEED_YIELD_WINDOW_MS).toISOString();
+    const past = new Date(NOW_MS - FEED_YIELD_WINDOW_MS - 1).toISOString();
+    const stats = deriveDirectoryStats(
+      grouped({
+        center: [statsRow("edge", "outlet", edge), statsRow("past", "outlet", past)],
+      }),
+      NOW_MS,
+    );
+
+    expect(stats.votingDelivering).toBe(1);
+    expect(stats.votingSources).toBe(2);
+  });
+
+  it("a future-dated row is never delivering (SEC-01: a source-controlled pubDate)", () => {
+    const stats = deriveDirectoryStats(
+      grouped({
+        center: [
+          statsRow("future-1h", "outlet", new Date(NOW_MS + 3_600_000).toISOString()),
+          statsRow("future-1ms", "wire", new Date(NOW_MS + 1).toISOString()),
+          statsRow("now", "outlet", new Date(NOW_MS).toISOString()),
+        ],
+      }),
+      NOW_MS,
+    );
+
+    expect(stats).toEqual({ votingSources: 3, votingDelivering: 1 });
+  });
+
+  it("an unparseable timestamp is not delivering, and missing buckets read as empty", () => {
+    expect(
+      deriveDirectoryStats(
+        grouped({ center: [statsRow("junk", "outlet", "not-a-date")] }),
+        NOW_MS,
+      ),
+    ).toEqual({ votingSources: 1, votingDelivering: 0 });
+    expect(deriveDirectoryStats(grouped({}), NOW_MS)).toEqual({
+      votingSources: 0,
+      votingDelivering: 0,
+    });
+  });
+
+  it("depends on the nowMs it is given, not on the wall clock", () => {
+    const rows = grouped({ center: [statsRow("a", "outlet", hoursAgoIso(1))] });
+
+    expect(deriveDirectoryStats(rows, NOW_MS).votingDelivering).toBe(1);
+    expect(deriveDirectoryStats(rows, NOW_MS + FEED_YIELD_WINDOW_MS).votingDelivering).toBe(0);
+  });
+});
+
+/** Source of `async function <name>(...) { ... }`, matched by brace depth. */
+function functionSource(code: string, name: string): string {
+  const start = code.search(new RegExp(`function\\s+${name}\\b`));
+  if (start === -1) return "";
+  const open = code.indexOf("{", code.indexOf(")", start));
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === "{") depth++;
+    else if (code[i] === "}" && --depth === 0) return code.slice(start, i + 1);
+  }
+  return "";
+}
+
+describe("/sources page source -- the first hit after a deploy must be a prerender", () => {
+  // WHY: `await connection()` at the top of the page postponed the entire body
+  // at build time, so the deployed prerender was an empty skeleton and the first
+  // reader after every deploy paid the uncached reads plus the function cold
+  // path (4.4-5.6 s). A cached read stamps the clock at fill time instead, so
+  // the build fills the cache and ships the finished page. A clock read in the
+  // page body, or in any component below it, would fail the build once the read
+  // succeeds (tests/guards/static-page-clock.test.ts describes the same trap).
+  const code = stripComments(PAGE_SOURCE);
+  const reader = functionSource(code, "readSourcesDirectory");
+  const outsideReader = code.replace(reader, "");
+  const CLOCK_READ = /\bDate\.now\s*\(|\bnew Date\s*\(\s*\)|\bformatTurkishTimeAgo\s*\(/;
+
+  it("never awaits or calls connection(), and no longer imports it", () => {
+    expect(code).not.toMatch(/\bconnection\s*\(/);
+    expect(code).not.toMatch(/import\s*\{[^}]*\bconnection\b[^}]*\}\s*from/);
+  });
+
+  it("finds the cached reader (so the clock guard below is not vacuous)", () => {
+    expect(reader).toContain("createServerClient()");
+    expect(reader).toMatch(/\bDate\.now\s*\(\s*\)/);
+  });
+
+  it("reads the clock only inside the cached reader", () => {
+    expect(outsideReader).not.toMatch(CLOCK_READ);
+  });
+
+  it("the reader hands formatTurkishTimeAgo its own fill-time `now`", () => {
+    expect(reader).toMatch(/formatTurkishTimeAgo\([^)]*\bnow:/);
+  });
+
+  it("functionSource and the clock pattern tolerate nested braces and flag stray reads", () => {
+    const sample = "function a() { const x = { y: `${1}` }; return Date.now(); }\nfunction b() { return 1; }";
+    expect(functionSource(sample, "a")).toContain("Date.now()");
+    expect(functionSource(sample, "a")).not.toContain("function b");
+    expect(sample.replace(functionSource(sample, "a"), "")).not.toMatch(CLOCK_READ);
+    expect("const t = new Date();").toMatch(CLOCK_READ);
+    expect("formatTurkishTimeAgo(x)").toMatch(CLOCK_READ);
+    expect("new Date(x).toISOString()").not.toMatch(CLOCK_READ);
+    expect(functionSource(sample, "missing")).toBe("");
+  });
+});
+
+describe("/sources page -- clock values are stamped when the directory is read", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW_MS);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** The <script type="application/ld+json"> payload under the page fragment. */
+  function jsonLdOf(tree: unknown): Record<string, unknown> {
+    const children = (tree as { props: { children: unknown[] } }).props.children;
+    const script = children.find(
+      (c) => (c as { type?: unknown } | null)?.type === "script",
+    ) as { props: { dangerouslySetInnerHTML: { __html: string } } };
+    return JSON.parse(script.props.dangerouslySetInnerHTML.__html) as Record<string, unknown>;
+  }
+
+  function findByType(node: unknown, type: unknown): TreeElement | null {
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const hit = findByType(child, type);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (node && typeof node === "object") {
+      const el = node as TreeElement;
+      if (el.type === type) return el;
+      if (el.props?.children !== undefined) return findByType(el.props.children, type);
+    }
+    return null;
+  }
+
+  it("dateModified in the dataset JSON-LD is the instant the directory was read", async () => {
+    vi.setSystemTime(Date.parse("2026-11-01T09:30:00.000Z"));
+
+    const dataset = jsonLdOf(await SourcesPage());
+
+    expect(dataset.dateModified).toBe("2026-11-01T09:30:00.000Z");
+  });
+
+  it("the DenominatorNote pair comes from the fill-time clock: fresh voting sources deliver, aggregators and stale ones do not", async () => {
+    supabaseFixture.latestBySlug = {
+      "s-outlet": hoursAgoIso(1),
+      "s-aggregator": hoursAgoIso(1),
+      "s-wire": hoursAgoIso(100),
+    };
+
+    const note = findByType(await SourcesPage(), DenominatorNote);
+
+    expect(note?.props).toMatchObject({ delivering: 1, total: 2 });
+  });
+
+  it("every row carries a lastSeenLabel computed at fill time, and a quiet source carries none", async () => {
+    supabaseFixture.latestBySlug = {
+      "s-outlet": hoursAgoIso(3),
+      "s-wire": hoursAgoIso(100),
+    };
+
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    const grouped = child.props?.grouped as Record<
+      string,
+      Array<{ slug: string; lastSeenLabel: string | null }>
+    >;
+    const label = (bias: string, slug: string) =>
+      grouped[bias]?.find((r) => r.slug === slug)?.lastSeenLabel;
+
+    expect(label("pro_government", "s-outlet")).toBe("3 saat önce");
+    // Older than 48 h the helper switches to an absolute date; it is stamped too.
+    expect(label("state_media", "s-wire")).toBe(
+      formatTurkishTimeAgo(hoursAgoIso(100), { now: NOW_MS }),
+    );
+    expect(label("state_media", "s-wire")).not.toMatch(/önce$/);
+    expect(label("center", "s-aggregator")).toBeNull();
+  });
+
+  it("the label does not drift while the cached directory is served: rendering ten hours later shows the fill-time text", async () => {
+    supabaseFixture.latestBySlug = { "s-outlet": hoursAgoIso(3) };
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    const props = child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+
+    vi.setSystemTime(NOW_MS + 10 * 3_600_000);
+    const markup = renderToStaticMarkup(
+      createElement(SourceDirectory, { grouped: props.grouped, countLabel: "0 haber" }),
+    );
+
+    const timeLine = /<p class="text-\[10px\] text-muted-foreground">([^<]*)<\/p>/.exec(markup);
+    expect(timeLine?.[1]).toBe("3 saat önce");
+  });
+});
+
+describe("SourceDirectory -- renders lastSeenLabel", () => {
+  const render = (lastSeenLabel: string | null) =>
+    renderToStaticMarkup(
+      createElement(SourceDirectory, {
+        grouped: {
+          pro_government: [
+            { ...GZT, lastPublishedAt: "2026-10-31T08:00:00.000Z", lastSeenLabel },
+          ],
+        } as unknown as GroupedSources,
+        countLabel: "12 haber",
+      }),
+    );
+  const TIME_LINE = /<p class="text-\[10px\] text-muted-foreground">([^<]*)<\/p>/;
+
+  it("shows the given label under the card, verbatim, instead of deriving one from the clock", () => {
+    const markup = render("3 saat önce");
+
+    expect(TIME_LINE.exec(markup)?.[1]).toBe("3 saat önce");
+    expect(markup.match(/önce/g)).toHaveLength(1);
+  });
+
+  it("renders no time line when the source has no label", () => {
+    expect(TIME_LINE.test(render(null))).toBe(false);
   });
 });

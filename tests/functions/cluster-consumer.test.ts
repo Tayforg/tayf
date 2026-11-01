@@ -7,6 +7,12 @@ import { resolve } from "node:path";
 // classification depends on the ensemble score, and the real ensemble
 // scorer is not exercised at all under this file's mocks.
 import { score as scoreMock } from "../../supabase/functions/_shared/cluster/ensemble.ts";
+import {
+  HEADLINE_LANE_MAX_HOURS,
+  HEADLINE_MEMBER_SCAN_MAX,
+  HEADLINE_TITLE_MAX_CHARS,
+} from "../../supabase/functions/_shared/cluster/constants.ts";
+import { headlineTokens } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the cluster-consumer Edge Function.
@@ -303,20 +309,29 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
   createServiceClient: () => supabaseFakeClient,
 }));
 
-// Stub the ensemble — the consumer just needs a scoring result back. The
+// Stub the ensemble -- the consumer just needs a scoring result back. The
 // real module exports `score`; we mirror that name so the SUT's named
-// import resolves to this stub.
-vi.mock("../../supabase/functions/_shared/cluster/ensemble.ts", () => ({
-  score: vi.fn((_a: unknown, _b: unknown) => ({
-    score: 0.82,
-    components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
-    isMatch: true,
-  })),
-  isMatch: (s: number | { score: number } | null | undefined): boolean => {
-    if (s == null) return false;
-    return typeof s === "number" ? s >= 0.5 : s.score >= 0.5;
-  },
-}));
+// import resolves to this stub. Everything else stays real: the member-
+// headline scan (wave AB follow-up) calls the pure `headlineOnlyScore`, which
+// must run against real headline tokens or the V2 tests below would prove
+// nothing.
+vi.mock("../../supabase/functions/_shared/cluster/ensemble.ts", async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import("../../supabase/functions/_shared/cluster/ensemble.ts")
+  >();
+  return {
+    ...actual,
+    score: vi.fn((_a: unknown, _b: unknown) => ({
+      score: 0.82,
+      components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
+      isMatch: true,
+    })),
+    isMatch: (s: number | { score: number } | null | undefined): boolean => {
+      if (s == null) return false;
+      return typeof s === "number" ? s >= 0.5 : s.score >= 0.5;
+    },
+  };
+});
 
 beforeEach(() => {
   // Order independence (vitest --sequence.shuffle): the SUT keeps module-level
@@ -1693,6 +1708,462 @@ describe("cluster-consumer Edge Function", () => {
 
       expect(body.matched).toBe(1);
       expect(linkedClusters()).toEqual([C.cluster]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Wave AB follow-up (V2): an incoming article is also compared with the
+  // headlines of a candidate cluster's recent members, not only with its seed
+  // and latest. The member headlines are held in ClusterContext.headlinesByCluster
+  // (newest first, capped at HEADLINE_MEMBER_SCAN_MAX), built from the member
+  // rows loadClusterContext already fetched -- the scan must add no DB reads.
+  // `score` is stubbed to 0 for every seed/latest pair here so that only the
+  // member scan (real headlineOnlyScore) can carry a join.
+  // -------------------------------------------------------------------------
+  describe("member-headline scan (wave AB follow-up)", () => {
+    const H = 3_600_000;
+    const iso = (hoursAgo: number) => new Date(Date.now() - hoursAgo * H).toISOString();
+    const CL = "cluster-hl";
+
+    type Fake = { score: number; components: Record<string, unknown>; isMatch: boolean };
+    const result = (s: number): Fake => ({
+      score: s,
+      components: { cosine: 0.1, entityJaccard: 0, fingerprintMatch: false },
+      isMatch: s >= 0.4,
+    });
+    const defaultScoreImpl = () => ({
+      score: 0.82,
+      components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
+      isMatch: true,
+    });
+
+    afterEach(() => {
+      vi.mocked(scoreMock).mockImplementation(defaultScoreImpl);
+    });
+
+    // Scores a pair 0 unless the (incoming title, member title) pair is listed.
+    function scoreOnly(pairs: Array<{ a: string; b: string; s: number }> = []) {
+      vi.mocked(scoreMock).mockImplementation(
+        (_a: unknown, _b: unknown, _ae: unknown, _be: unknown, _c: unknown, _h: unknown, opts?: unknown) => {
+          const o = (opts ?? {}) as { aTitle?: string; bTitle?: string };
+          const hit = pairs.find((p) => p.a === o.aTitle && p.b === o.bTitle);
+          return result(hit ? hit.s : 0);
+        },
+      );
+    }
+
+    function addMember(
+      clusterId: string,
+      id: string,
+      title: string,
+      hoursAgo: number,
+      sourceId: string | null = null,
+    ) {
+      clusterArticleRows.push({ cluster_id: clusterId, article_id: id });
+      fakeArticles[id] = {
+        id,
+        source_id: sourceId,
+        title,
+        description: "Detay",
+        published_at: iso(hoursAgo),
+        fingerprint: `fp-${id}`,
+        entities: [],
+        category: "politika",
+        minhash_sig: null,
+        minhash_version: null,
+      };
+    }
+
+    function addCluster(id: string, articleCount: number) {
+      const now = new Date().toISOString();
+      clusterRows.push({
+        id,
+        title_tr: "Küme",
+        title_tr_neutral: "Küme",
+        first_published: now,
+        updated_at: now,
+        article_count: articleCount,
+      });
+    }
+
+    function queueIncoming(
+      msgId: number,
+      id: string,
+      title: string,
+      hoursAgo = 0,
+      sourceId: string | null = "src-agg",
+    ) {
+      pgmqState.pending.push({ msg_id: msgId, read_ct: 1, message: { article_id: id } });
+      fakeArticles[id] = {
+        id,
+        source_id: sourceId,
+        title,
+        description: "Detay haber",
+        url: `https://example.com/${id}`,
+        category: "politika",
+        published_at: iso(hoursAgo),
+      };
+    }
+
+    async function drain() {
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(
+        authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      return (await res.json()) as { matched: number; created: number; failedTransient: number };
+    }
+
+    const linkedClusters = () =>
+      supabaseFakeCalls.rpc
+        .filter((r) => r.name === "cluster_link_atomic")
+        .map((r) => (r.args as { p_cluster_id: string }).p_cluster_id);
+
+    // seed (oldest) / middle / latest (newest). Only the middle headline is
+    // about the incoming story.
+    const SEED_TITLE = "Sarıgül ailesine kara para soruşturmasında yeni operasyon";
+    const MID_TITLE = "Mustafa Sarıgül Yeni Parti'den istifa etti";
+    const LATEST_TITLE = "Meclis tatile girdi, yeni dönem ekimde başlayacak";
+    const LONG_TITLE =
+      "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek, partime döneceğim";
+
+    function seedThreeMembers(midHoursAgo: number) {
+      addCluster(CL, 3);
+      addMember(CL, "hl-seed", SEED_TITLE, midHoursAgo + 2);
+      addMember(CL, "hl-mid", MID_TITLE, midHoursAgo);
+      addMember(CL, "hl-latest", LATEST_TITLE, Math.max(0.1, midHoursAgo - 0.5));
+    }
+
+    it("an article whose headline matches only a middle member (not seed, not latest) within 6 h joins that cluster", async () => {
+      seedThreeMembers(1);
+      queueIncoming(2001, "art-hl", LONG_TITLE);
+      scoreOnly();
+
+      const body = await drain();
+
+      expect(body.matched).toBe(1);
+      expect(body.created).toBe(0);
+      expect(linkedClusters()).toEqual([CL]);
+      // Seed and latest were scored (and scored 0); the middle member was not
+      // sent through score() at all -- it joined on the headline scan alone.
+      const comparedWith = vi.mocked(scoreMock).mock.calls.map(
+        (c) => (c[6] as { bTitle?: string }).bTitle,
+      );
+      expect(comparedWith).toContain(SEED_TITLE);
+      expect(comparedWith).toContain(LATEST_TITLE);
+      expect(comparedWith).not.toContain(MID_TITLE);
+    });
+
+    it("the same article with the middle member 7 h away creates a new cluster", async () => {
+      expect(HEADLINE_LANE_MAX_HOURS).toBe(6);
+      seedThreeMembers(7);
+      queueIncoming(2002, "art-hl", LONG_TITLE);
+      scoreOnly();
+
+      const body = await drain();
+
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(1);
+      expect(linkedClusters()).toEqual([]);
+      expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+    });
+
+    it("a member exactly at the lane limit still joins, one past it does not", async () => {
+      seedThreeMembers(HEADLINE_LANE_MAX_HOURS - 0.05);
+      queueIncoming(2003, "art-hl", LONG_TITLE);
+      scoreOnly();
+      const inside = await drain();
+      expect(inside.matched).toBe(1);
+
+      // Fresh world for the second half (module state, fixtures, logs).
+      vi.resetModules();
+      clusterRows.length = 0;
+      clusterArticleRows.length = 0;
+      for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
+      supabaseFakeCalls.mutations.length = 0;
+      supabaseFakeCalls.rpc.length = 0;
+      resetPgmqState();
+      seedThreeMembers(HEADLINE_LANE_MAX_HOURS + 0.05);
+      queueIncoming(2004, "art-hl", LONG_TITLE);
+      const outside = await drain();
+      expect(outside.matched).toBe(0);
+      expect(outside.created).toBe(1);
+    });
+
+    it("a member headline that is unrelated never joins (control: no false positive from the scan)", async () => {
+      seedThreeMembers(1);
+      queueIncoming(2005, "art-hl", "Mustafa Sarıgül Yeni Parti'den istifa edecek mi? Kulis iddiaları");
+      scoreOnly();
+
+      const body = await drain();
+
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(1);
+    });
+
+    // Size guard (review of wave AB). Every title is source-controlled and
+    // stored unshortened, so ONE roundup / keyword-stuffed member headline of a
+    // cluster must not attract the unrelated short headlines it happens to
+    // contain: before the guard each of them was "contained" in it, scored
+    // 0.5-0.7 on the headline lane alone and joined the cluster through this
+    // scan, skewing the cluster's bias distribution and 'Kör nokta' flags.
+    describe("size guard: a stuffed member headline does not attract unrelated short headlines", () => {
+      const BANK = "Merkez Bankası faiz kararını açıkladı";
+      const DERBY = "Galatasaray derbide Fenerbahçe'yi üç golle yendi";
+      const RAIN = "İstanbul'da sağanak nedeniyle seferler iptal edildi";
+      const ROUNDUP = `${BANK}; ${DERBY}; ${RAIN}`;
+      // seed and latest share >= 2 title tokens with the incoming headline so
+      // the cluster IS a candidate; their score() is stubbed to 0.
+      const CASES = [
+        {
+          name: "central bank rate decision",
+          incoming: BANK,
+          seed: "Merkez Bankası faiz toplantısı yarın başlıyor",
+          latest: "Merkez Bankası başkanı soruları yanıtladı",
+          control: `${BANK}: Politika faizi sabit tutuldu`,
+        },
+        {
+          name: "derby result",
+          incoming: DERBY,
+          seed: "Galatasaray Fenerbahçe maçı öncesi son durum",
+          latest: "Galatasaray Fenerbahçe karşılaşması sonrası açıklamalar",
+          control: `${DERBY}: Sarı kırmızılılar liderliğe yükseldi`,
+        },
+        {
+          name: "Istanbul rain cancellations",
+          incoming: RAIN,
+          seed: "İstanbul'da sağanak uyarısı: valilikten açıklama geldi",
+          latest: "İstanbul sağanak sonrası hayat normale döndü",
+          control: `${RAIN}: Vapur seferleri aksadı`,
+        },
+      ];
+
+      function seedClusterWith(midTitle: string, seed: string, latest: string) {
+        addCluster(CL, 3);
+        addMember(CL, "hl-seed", seed, 3);
+        addMember(CL, "hl-mid", midTitle, 1);
+        addMember(CL, "hl-latest", latest, 0.5);
+      }
+
+      it.each(CASES)("$name: the roundup member does not pull the short headline in (created, not matched)", async ({ incoming, seed, latest }) => {
+        seedClusterWith(ROUNDUP, seed, latest);
+        queueIncoming(2401, "art-short", incoming);
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([]);
+        // The roundup was not sent through score() (it is neither seed nor
+        // latest): it was reachable only through the scan, which now rejects it.
+        const comparedWith = vi.mocked(scoreMock).mock.calls.map(
+          (c) => (c[6] as { bTitle?: string }).bTitle,
+        );
+        expect(comparedWith).toContain(seed);
+        expect(comparedWith).toContain(latest);
+        expect(comparedWith).not.toContain(ROUNDUP);
+      });
+
+      it.each(CASES)("$name: control -- the same cluster with a proportionate long headline as the middle member does join", async ({ incoming, seed, latest, control }) => {
+        seedClusterWith(control, seed, latest);
+        queueIncoming(2402, "art-short", incoming);
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual([CL]);
+      });
+
+      it("a keyword-stuffed member headline (dozens of extra words) attracts nothing", async () => {
+        const alphaAt = (i: number) =>
+          "w" + [Math.floor(i / 676) % 26, Math.floor(i / 26) % 26, i % 26]
+            .map((c) => String.fromCharCode(97 + c))
+            .join("");
+        const stuffed = `${BANK} ${Array.from({ length: 80 }, (_, i) => alphaAt(i)).join(" ")}`;
+        seedClusterWith(stuffed, CASES[0]!.seed, CASES[0]!.latest);
+        queueIncoming(2403, "art-short", BANK);
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+      });
+
+      it("a member headline longer than the title cap is clipped, not matched on its tail", async () => {
+        // The short headline sits AFTER the 300-character cap, so the member's
+        // tokens cannot contain it at all.
+        const pad = "x".repeat(HEADLINE_TITLE_MAX_CHARS);
+        seedClusterWith(`${pad} ${BANK}`, CASES[0]!.seed, CASES[0]!.latest);
+        queueIncoming(2404, "art-short", BANK);
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(0);
+        expect(body.created).toBe(1);
+      });
+    });
+
+    it("joining via a member issues the same number and kind of DB calls as joining via the seed (no new reads)", async () => {
+      type Profile = {
+        reads: string[];
+        mutations: string[];
+        rpcs: string[];
+        linked: string[];
+      };
+      async function profileOf(title: string, pairs: Array<{ a: string; b: string; s: number }>): Promise<Profile> {
+        vi.resetModules();
+        clusterRows.length = 0;
+        clusterArticleRows.length = 0;
+        stickyClusterRows.length = 0;
+        for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
+        supabaseFakeCalls.mutations.length = 0;
+        supabaseFakeCalls.rpc.length = 0;
+        resetPgmqState();
+        seedThreeMembers(1);
+        queueIncoming(2006, "art-hl", title);
+        scoreOnly(pairs);
+        const client = supabaseFakeClient as unknown as { from: (t: string) => unknown };
+        const spy = vi.spyOn(client, "from");
+        try {
+          const body = await drain();
+          expect(body.matched).toBe(1);
+          expect(body.created).toBe(0);
+          return {
+            reads: spy.mock.calls.map((c) => String(c[0])),
+            mutations: supabaseFakeCalls.mutations.map((m) => `${m.table}:${m.op}`),
+            rpcs: supabaseFakeCalls.rpc.map((r) => r.name),
+            linked: linkedClusters(),
+          };
+        } finally {
+          spy.mockRestore();
+        }
+      }
+
+      // Seed join: the (stubbed) scorer prefers the seed, the headline is the seed's.
+      const seedTitleLong = `${SEED_TITLE}: gözaltı sayısı yükseldi`;
+      const viaSeed = await profileOf(seedTitleLong, [{ a: seedTitleLong, b: SEED_TITLE, s: 0.82 }]);
+      // Member join: only the middle headline matches.
+      const viaMember = await profileOf(LONG_TITLE, []);
+
+      expect(viaSeed.linked).toEqual([CL]);
+      expect(viaMember.linked).toEqual([CL]);
+      // Guard against a vacuous comparison.
+      expect(viaSeed.reads.length).toBeGreaterThan(3);
+      expect(viaSeed.mutations.length).toBeGreaterThan(0);
+      expect(viaMember.reads).toEqual(viaSeed.reads);
+      expect(viaMember.mutations).toEqual(viaSeed.mutations);
+      expect(viaMember.rpcs).toEqual(viaSeed.rpcs);
+    });
+
+    describe("headlinesByCluster cap and order", () => {
+      const N = HEADLINE_MEMBER_SCAN_MAX + 3;
+      // Member k (1 = newest) and its disjoint five-word headline.
+      const WORDS = ["kalem", "sepet", "ceylan", "tavan", "bozkurt"];
+      const LETTERS = "bcdfghjklmnprst";
+      const titleOf = (k: number) => WORDS.map((w) => `${LETTERS[k - 1]}${w}`).join(" ");
+      const hoursAgoOf = (k: number) => 0.5 + 0.2 * (k - 1); // 0.5 h .. 3.3 h, all inside the 6 h lane
+
+      function seedFifteenMembers() {
+        addCluster(CL, N);
+        // Insert in a scrambled order: the cap must follow publication time,
+        // not row order.
+        const order = [
+          ...Array.from({ length: N }, (_, i) => i + 1).filter((k) => k % 2 === 0),
+          ...Array.from({ length: N }, (_, i) => i + 1).filter((k) => k % 2 === 1),
+        ];
+        for (const k of order) addMember(CL, `hl-m${k}`, titleOf(k), hoursAgoOf(k));
+      }
+
+      it("fixtures are disjoint five-word headlines", () => {
+        const seen = new Set<string>();
+        for (let k = 1; k <= N; k++) {
+          const t = headlineTokens(titleOf(k)).tokens;
+          expect(t.size).toBe(5);
+          for (const tok of t) {
+            expect(seen.has(tok)).toBe(false);
+            seen.add(tok);
+          }
+        }
+      });
+
+      it.each([
+        { label: "the second newest member", k: 2, matched: 1 },
+        { label: "the 12th newest member (the last one kept)", k: HEADLINE_MEMBER_SCAN_MAX, matched: 1 },
+        { label: "the 13th newest member (the first one evicted)", k: HEADLINE_MEMBER_SCAN_MAX + 1, matched: 0 },
+        { label: "the 14th newest member", k: HEADLINE_MEMBER_SCAN_MAX + 2, matched: 0 },
+      ])("an article repeating the headline of $label -> matched=$matched", async ({ k, matched }) => {
+        seedFifteenMembers();
+        queueIncoming(2100 + k, "art-hl", titleOf(k));
+        scoreOnly();
+
+        const body = await drain();
+
+        expect(body.matched).toBe(matched);
+        expect(body.created).toBe(1 - matched);
+        expect(linkedClusters()).toEqual(matched ? [CL] : []);
+      });
+
+      it("the seed (oldest, outside the cap) and the latest (newest) are still compared through score()", async () => {
+        seedFifteenMembers();
+        queueIncoming(2200, "art-hl", titleOf(N));
+        scoreOnly([{ a: titleOf(N), b: titleOf(N), s: 0.82 }]);
+
+        const body = await drain();
+
+        // The seed is member N (oldest); it is not in the scan list but score() sees it.
+        expect(body.matched).toBe(1);
+        expect(linkedClusters()).toEqual([CL]);
+        const comparedWith = vi.mocked(scoreMock).mock.calls.map(
+          (c) => (c[6] as { bTitle?: string }).bTitle,
+        );
+        expect(comparedWith).toContain(titleOf(N));
+        expect(comparedWith).toContain(titleOf(1));
+      });
+    });
+
+    it("a member that joined earlier in the same drain is scanned by the next article (addMemberToIndices)", async () => {
+      addCluster(CL, 2);
+      addMember(CL, "hl-seed", SEED_TITLE, 5);
+      addMember(CL, "hl-latest", LATEST_TITLE, 4);
+      const FIRST = "Mustafa Sarıgül Yeni Parti'den istifa etti";
+      // First article joins on the stubbed seed score; the second one matches
+      // only the first article's headline, which is neither the cached seed
+      // nor the cached latest.
+      queueIncoming(2301, "art-first", FIRST, 0.5, "src-outlet");
+      queueIncoming(2302, "art-second", LONG_TITLE, 0.1, "src-agg");
+      scoreOnly([{ a: FIRST, b: SEED_TITLE, s: 0.82 }]);
+
+      const body = await drain();
+
+      expect(body.matched).toBe(2);
+      expect(body.created).toBe(0);
+      expect(linkedClusters()).toEqual([CL, CL]);
+    });
+
+    it("a cluster created earlier in the same drain accepts a later member, and that member is then scanned (registerNewClusterInCache + addMemberToIndices)", async () => {
+      const A1 = "Mustafa Sarıgül'ün eski eşi ve oğulları tutuklandı";
+      const A2 = "Mustafa Sarıgül Yeni Parti'den istifa etti";
+      const A3 = LONG_TITLE;
+      queueIncoming(2401, "art-a1", A1, 0.6, "src-outlet");
+      queueIncoming(2402, "art-a2", A2, 0.3, "src-agg");
+      queueIncoming(2403, "art-a3", A3, 0.0, "src-wire");
+      // A2 joins A1's fresh cluster via the stubbed scorer; A3 matches only A2.
+      scoreOnly([{ a: A2, b: A1, s: 0.82 }]);
+
+      const body = await drain();
+
+      expect(body.created).toBe(1);
+      expect(body.matched).toBe(2);
+      const linked = linkedClusters();
+      expect(linked).toHaveLength(2);
+      expect(linked[0]).toBeTruthy();
+      expect(linked[1]).toBe(linked[0]);
     });
   });
 

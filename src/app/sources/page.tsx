@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Suspense } from "react";
 import { cacheLife, cacheTag } from "next/cache";
-import { connection } from "next/server";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 import { SourceDirectorySkeleton } from "./source-directory-skeleton";
@@ -52,10 +51,21 @@ import type { BiasCategory, Source } from "@/types";
 // at 1000 rows, so at ~45k articles/week it silently counted only the
 // newest 1000 and reported "0 haber" for most sources.
 //
-// Cached at the data layer with `unstable_cache` for 5 minutes — the source
-// directory shifts on the order of weeks, and the recent-activity counter
-// only needs to feel "fresh", not real-time. The route segment `revalidate`
-// below layers ISR on top so cold renders are also bounded.
+// Prerendered, not request-time (sources-cold-hit). The page used to begin
+// with `await connection()`: `next build` then postponed the whole body, the
+// deployed prerender held only the loading skeleton (no source link), and the
+// first request after every deploy ran the function cold path plus the
+// uncached directory read and weekly-count aggregate itself (4.4-5.6 s total
+// against 0.5 s warm). Now the body has no clock and no request API: every
+// clock-dependent value (the JSON-LD `dateModified`, the "N/M kaynak"
+// delivering figure, each card's "3 saat önce" label) is stamped INSIDE the
+// cached read, at fill time, so the build fills the cache and ships the
+// finished page. A label can therefore be as old as the cache window (5 min
+// revalidate) — the same freshness the weekly counts already had.
+//
+// Cached for 5 minutes (`source-directory`) — the source directory shifts on
+// the order of weeks, and the recent-activity counter only needs to feel
+// "fresh", not real-time.
 //
 // Each row also carries `kind` (outlet/aggregator/wire/niche — migration
 // 034). Only "outlet" and "wire" vote in bias_distribution / blindspot /
@@ -70,9 +80,26 @@ import type { BiasCategory, Source } from "@/types";
 
 interface SourceRow extends Source {
   lastPublishedAt: string | null;
+  /**
+   * "3 saat önce", formatted when the directory was read (cache fill time), so
+   * rendering it never touches the clock. Null when the source published
+   * nothing in the read's 7-day window.
+   */
+  lastSeenLabel: string | null;
 }
 
 type GroupedSources = Record<BiasCategory, SourceRow[]>;
+
+/** What one directory read returns: the rows plus every value derived from the clock. */
+interface SourcesDirectory {
+  grouped: GroupedSources;
+  /** ISO instant the read completed — the dataset JSON-LD's `dateModified`. */
+  fetchedAtIso: string;
+  /** Voting-kind sources (outlet, wire): the denominator of every share. */
+  votingSources: number;
+  /** Of those, how many delivered inside FEED_YIELD_WINDOW_MS at `fetchedAtIso`. */
+  votingDelivering: number;
+}
 
 function emptyGrouped(): GroupedSources {
   return {
@@ -87,6 +114,42 @@ function emptyGrouped(): GroupedSources {
     opposition: [],
     nationalist: [],
   };
+}
+
+/**
+ * PERF-01 / A-H1: the DenominatorNote footnote's pair, derived for free from
+ * the rows the directory read already fetched — NOT a second full-directory
+ * query. `lastPublishedAt` on each row carries the real timestamp within the
+ * read's 7-day window, so "delivering" (inside the shorter 72 h yield window)
+ * is derivable locally. Counts the VOTING-kind intersection (A-H1), not every
+ * active source, since that is the real denominator every share on this page
+ * divides by. `nowMs` is a parameter so the result is pure, and so a future-
+ * dated `lastPublishedAt` (SEC-01 — a source-controlled pubDate) is never
+ * counted as "just delivered". An unparseable timestamp is not delivering.
+ */
+export function deriveDirectoryStats(
+  grouped: Partial<GroupedSources>,
+  nowMs: number,
+): { votingSources: number; votingDelivering: number } {
+  let votingSources = 0;
+  let votingDelivering = 0;
+  for (const bias of BIAS_ORDER) {
+    for (const source of grouped[bias] ?? []) {
+      if (!isVotingSource(source)) continue;
+      votingSources += 1;
+      const lastMs = source.lastPublishedAt
+        ? new Date(source.lastPublishedAt).getTime()
+        : null;
+      if (
+        lastMs !== null &&
+        lastMs <= nowMs &&
+        nowMs - lastMs <= FEED_YIELD_WINDOW_MS
+      ) {
+        votingDelivering += 1;
+      }
+    }
+  }
+  return { votingSources, votingDelivering };
 }
 
 // reader-queries G2: `stats:articles(count)` (the PERF-01 aggregate,
@@ -106,12 +169,19 @@ function emptyGrouped(): GroupedSources {
 // tests/guards/cache-life-after-attempt.test.ts). `getSourcesSafe` then reads
 // the cache, retries live once on a failed attempt, and only a still-failing
 // retry renders the error state.
-async function readSourcesDirectory(): Promise<GroupedSources> {
+//
+// This is the ONLY place the page reads the clock. It runs inside the "use
+// cache" body (cache fill: at build, or on a revalidation) and, after a failed
+// attempt, as the live retry — which `resolveCachedOrRetry` only reaches once
+// `awaitRequestScope()` has resolved, i.e. never during a prerender. The body
+// of the page and the components below it must stay clock-free: a Date.now()
+// there fails `next build` as soon as this read succeeds (see
+// tests/guards/static-page-clock.test.ts for the same trap).
+async function readSourcesDirectory(): Promise<SourcesDirectory> {
   const supabase = createServerClient();
 
-  // Window: last 7 days, anchored to "now" at cache-fill time (and at a live
-  // retry, which sits behind awaitRequestScope; the page also awaits
-  // connection()) — only used for the cheap `latest` existence probe now.
+  // Window: last 7 days, anchored to "now" at cache-fill time — only used for
+  // the cheap `latest` existence probe now.
   const sevenDaysAgo = new Date(
     Date.now() - 7 * 24 * 60 * 60 * 1000,
   ).toISOString();
@@ -136,6 +206,10 @@ async function readSourcesDirectory(): Promise<GroupedSources> {
   };
   const sourceRows = (data ?? []) as unknown as Row[];
 
+  // "Now" is read AFTER the rows are in hand: an article ingested while a slow
+  // read was in flight must not look future-dated against an earlier clock.
+  const nowMs = Date.now();
+
   // Group sources by bias. Unknown bias values (shouldn't happen — DB has
   // a CHECK constraint — but we narrow defensively) are dropped silently.
   const grouped = emptyGrouped();
@@ -143,13 +217,21 @@ async function readSourcesDirectory(): Promise<GroupedSources> {
     const bias = source.bias as BiasCategory;
     if (!(bias in grouped)) continue;
     const { latest, ...rest } = source;
+    const lastPublishedAt = latest[0]?.published_at ?? null;
     grouped[bias].push({
       ...rest,
-      lastPublishedAt: latest[0]?.published_at ?? null,
+      lastPublishedAt,
+      lastSeenLabel: lastPublishedAt
+        ? formatTurkishTimeAgo(lastPublishedAt, { now: nowMs })
+        : null,
     });
   }
 
-  return grouped;
+  return {
+    grouped,
+    fetchedAtIso: new Date(nowMs).toISOString(),
+    ...deriveDirectoryStats(grouped, nowMs),
+  };
 }
 
 async function getSourcesCached() {
@@ -163,7 +245,7 @@ async function getSourcesCached() {
 }
 
 export type SourcesResult =
-  | { ok: true; grouped: GroupedSources }
+  | { ok: true; directory: SourcesDirectory }
   | { ok: false };
 
 /**
@@ -172,21 +254,24 @@ export type SourcesResult =
  * never memoised as "no sources" for the cache window.
  */
 async function getSourcesSafe(): Promise<SourcesResult> {
-  const grouped = await resolveCachedOrRetry<GroupedSources | null>(
+  const directory = await resolveCachedOrRetry<SourcesDirectory | null>(
     "sources",
     getSourcesCached,
     readSourcesDirectory,
     null,
   );
-  if (grouped === null) {
+  if (directory === null) {
     console.warn("[sources] unavailable: the directory could not be read");
     return { ok: false };
   }
-  return { ok: true, grouped };
+  return { ok: true, directory };
 }
 
 export default async function SourcesPage() {
-  await connection();
+  // No `await connection()` here, on purpose: the first request after a deploy
+  // must be served from a prerender. See the header comment, and
+  // page.test.tsx ("the first hit after a deploy must be a prerender").
+  //
   // Start the weekly-count read NOW, before the directory read is awaited, and
   // hand the promise to the streamed child below. A <Suspense> child only
   // starts rendering after this body returns, so a read begun inside it would
@@ -201,11 +286,12 @@ export default async function SourcesPage() {
   if (!result.ok) {
     return (
       <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
-        {/* An error state must not be indexed as the /sources page. This
-            route is request-time (connection()) and streams behind
-            loading.tsx, so the tag most likely lands in <body>, not <head>
-            (same unproven-for-crawlers caveat as "/" and /blindspots; see
-            the placement note in src/app/page.tsx). */}
+        {/* An error state must not be indexed as the /sources page. It is only
+            ever rendered at request time (a failed read postpones the page
+            until the live retry), so it streams behind loading.tsx and the
+            tag most likely lands in <body>, not <head> (same unproven-for-
+            crawlers caveat as "/" and /blindspots; see the placement note in
+            src/app/page.tsx). */}
         <meta name="robots" content="noindex" />
         <PageHero
           kicker="Türkiye medya haritası"
@@ -221,46 +307,18 @@ export default async function SourcesPage() {
     );
   }
 
-  const { grouped } = result;
+  const { grouped, fetchedAtIso, votingSources, votingDelivering } =
+    result.directory;
 
   const totalSources = BIAS_ORDER.reduce(
     (acc, bias) => acc + (grouped[bias]?.length ?? 0),
     0,
   );
   // How many of the active directory actually feed bias_distribution /
-  // blindspot / trends — aggregator and niche sources are listed below but
-  // never counted (migration 034 / src/lib/sources/kind.ts).
-  const votingSources = BIAS_ORDER.reduce(
-    (acc, bias) => acc + (grouped[bias] ?? []).filter(isVotingSource).length,
-    0,
-  );
-
-  // PERF-01 / A-H1: the DenominatorNote footnote's pair, derived for free
-  // from the `grouped` rows readSourcesDirectory() already fetched — NOT a
-  // second full-directory query (do not touch the directory read itself; it
-  // doesn't need to change). `lastPublishedAt` on each row already carries
-  // the real timestamp within the read's 7-day window, so "delivering"
-  // (within the shorter 72h yield window) is derivable locally. Must be
-  // the VOTING-kind intersection (A-H1) — not every active source — since
-  // that's the real denominator every share on this page divides by.
-  // `nowMs` guards against a future-dated `lastPublishedAt` (SEC-01 — a
-  // source-controlled pubDate must never count as "just delivered").
-  // eslint-disable-next-line react-hooks/purity
-  const nowMs = Date.now();
-  let votingDelivering = 0;
-  for (const bias of BIAS_ORDER) {
-    for (const source of grouped[bias] ?? []) {
-      if (!isVotingSource(source)) continue;
-      const lastMs = source.lastPublishedAt
-        ? new Date(source.lastPublishedAt).getTime()
-        : null;
-      const delivering =
-        lastMs !== null &&
-        lastMs <= nowMs &&
-        nowMs - lastMs <= FEED_YIELD_WINDOW_MS;
-      if (delivering) votingDelivering += 1;
-    }
-  }
+  // blindspot / trends (aggregator and niche sources are listed below but
+  // never counted — migration 034 / src/lib/sources/kind.ts), and how many of
+  // those delivered in the last 72 h. Both were derived at fill time by
+  // deriveDirectoryStats() from the rows the read already fetched.
 
   const allSlugs = BIAS_ORDER.flatMap(
     (bias) => (grouped[bias] ?? []).map((source) => source.slug),
@@ -272,11 +330,11 @@ export default async function SourcesPage() {
   // the gate is already open, so a closed gate costs nothing extra here.
   const karne = isClickbaitPublic() ? await getClickbaitKarne() : null;
 
-  // S-17: Dataset JSON-LD describing the source registry this page
-  // renders. `dateModified` reuses `nowMs` (already computed above for the
-  // yield-denominator footnote) rather than a second clock read.
+  // S-17: Dataset JSON-LD describing the source registry this page renders.
+  // `dateModified` is the instant the directory was read (stamped in the
+  // cached read), not a clock read of this body.
   const registryDataset = buildRegistryDataset({
-    dateModified: new Date(nowMs).toISOString(),
+    dateModified: fetchedAtIso,
   });
 
   return (
@@ -451,9 +509,9 @@ export function SourceDirectory({
                         <p className="text-muted-foreground">
                           <span className="font-mono text-[10px]">{label}</span>
                         </p>
-                        {source.lastPublishedAt && (
+                        {source.lastSeenLabel && (
                           <p className="text-[10px] text-muted-foreground">
-                            {formatTurkishTimeAgo(source.lastPublishedAt)}
+                            {source.lastSeenLabel}
                           </p>
                         )}
                       </div>

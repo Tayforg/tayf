@@ -7,7 +7,10 @@
 //   B. Entity ratio with `max(|A|,|B|)` denominator + noise floor of 3
 //   C. TF-IDF cosine lane
 //   D. Headline lane (ceiling-raiser): near-identical headlines from
-//      different outlets, consistent numerals, within 6 h
+//      different outlets, consistent numerals, within 6 h. Two variants:
+//      Jaccard over the full token sets, and (when Jaccard does not fire)
+//      containment of a short headline's words in a longer one (at most 2.5x
+//      its size, so a roundup headline cannot swallow unrelated short ones)
 // behind a strict-fingerprint auto-accept and a 48h time-window decay.
 //
 //   primary = 0.7*tfidf + 0.3*entityRatio
@@ -28,6 +31,10 @@ import {
   ENTITY_FRESHNESS_HOURS,
   ENTITY_TEXT_FLOOR,
   ENTITY_WEIGHT,
+  HEADLINE_CONTAIN_BLOCK_PREFIXES,
+  HEADLINE_CONTAIN_MIN,
+  HEADLINE_CONTAIN_MIN_SIZE_RATIO,
+  HEADLINE_CONTAIN_MIN_TOKENS,
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_LANE_MIN_JACCARD,
   HEADLINE_LANE_MIN_SHARED,
@@ -39,6 +46,7 @@ import {
 } from "./constants.ts";
 import {
   type FingerprintBundle,
+  type HeadlineTokens,
   headlineTokens,
   jaccardFromSignatures,
 } from "./fingerprint.ts";
@@ -86,6 +94,12 @@ export interface ScoreComponents {
   headlineSim: number;
   headlineShared: number;
   headlineLane: boolean;
+  // Which variant fired the headline lane (null when it did not), and the
+  // share of the smaller headline's words (numerals excluded) that occur in
+  // the larger one (0 without titles). Reported even when the lane did not
+  // fire, so a near miss is visible in the components.
+  headlineKind: HeadlineKind | null;
+  headlineContainment: number;
   textFloorCapped: boolean;
 }
 
@@ -125,6 +139,145 @@ function setIntersectSize(a: Set<string>, b: Set<string>): number {
   return n;
 }
 
+function sourcePenaltyFor(
+  aSourceSlug: string | null | undefined,
+  bSourceSlug: string | null | undefined,
+): number {
+  return Math.min(
+    aSourceSlug ? SOURCE_PENALTIES[aSourceSlug] ?? 1 : 1,
+    bSourceSlug ? SOURCE_PENALTIES[bSourceSlug] ?? 1 : 1,
+  );
+}
+
+function timeDecayFor(hoursDelta: number): number {
+  return Math.max(0, 1 - Math.max(0, hoursDelta) / TIME_WINDOW_HOURS);
+}
+
+// ---------------------------------------------------------------------------
+// Headline lane
+// ---------------------------------------------------------------------------
+
+export type HeadlineKind = "jaccard" | "containment";
+
+export interface HeadlineLaneResult {
+  fired: boolean;
+  kind: HeadlineKind | null;
+  // Jaccard and intersection size over the FULL token sets (numerals included).
+  sim: number;
+  shared: number;
+  // |S n L| / |S| over the word sets (numerals removed), S the smaller set.
+  containment: number;
+  // 0.5 + 0.5 * sim when fired, else 0.
+  score: number;
+}
+
+// Tokens minus numerals. Returns the set itself when there are no numerals.
+function wordsOf(h: HeadlineTokens): Set<string> {
+  if (h.numbers.size === 0) return h.tokens;
+  const out = new Set<string>();
+  for (const t of h.tokens) if (!h.numbers.has(t)) out.add(t);
+  return out;
+}
+
+function sameSet(a: Set<string>, b: Set<string>): boolean {
+  return a.size === b.size && setIntersectSize(a, b) === a.size;
+}
+
+// True when a word that only the larger headline has starts with a denial /
+// claim prefix.
+function hasBlockedExtra(small: Set<string>, large: Set<string>): boolean {
+  for (const t of large) {
+    if (small.has(t)) continue;
+    for (const p of HEADLINE_CONTAIN_BLOCK_PREFIXES) {
+      if (t.startsWith(p)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Headline lane over two pre-tokenised headlines.
+ *
+ * Jaccard variant (unchanged since the 2026-11-01 recall wave): at least
+ * HEADLINE_LANE_MIN_SHARED shared tokens, Jaccard >= HEADLINE_LANE_MIN_JACCARD
+ * over the full token sets, within HEADLINE_LANE_MAX_HOURS, and consistent
+ * numerals (either side without numerals, or identical numeral sets).
+ *
+ * Containment variant, evaluated only when the Jaccard variant did not fire:
+ * with numerals removed, S the smaller word set and L the larger (a tie takes
+ * `ha` as S; a tie cannot reach this branch, because 85% containment of equal
+ * sets of >= 5 words already implies Jaccard >= 0.73), it fires iff |S| >=
+ * HEADLINE_CONTAIN_MIN_TOKENS, |S n L| / |S| >= HEADLINE_CONTAIN_MIN,
+ * |S| / |L| >= HEADLINE_CONTAIN_MIN_SIZE_RATIO (size guard: a roundup or
+ * keyword-stuffed headline must not be "contained" by every unrelated short
+ * headline), the numeral sets are equal (both empty is fine), the pair is
+ * inside HEADLINE_LANE_MAX_HOURS, and no word of L \ S starts with one of
+ * HEADLINE_CONTAIN_BLOCK_PREFIXES.
+ *
+ * score = 0.5 + 0.5 * sim for both variants.
+ */
+export function headlineLane(
+  ha: HeadlineTokens,
+  hb: HeadlineTokens,
+  hoursDelta: number,
+): HeadlineLaneResult {
+  const shared = setIntersectSize(ha.tokens, hb.tokens);
+  const union = ha.tokens.size + hb.tokens.size - shared;
+  const sim = union === 0 ? 0 : shared / union;
+  const inWindow = hoursDelta <= HEADLINE_LANE_MAX_HOURS;
+  const numbersOk = ha.numbers.size === 0 || hb.numbers.size === 0 ||
+    (ha.numbers.size === hb.numbers.size &&
+      setIntersectSize(ha.numbers, hb.numbers) === ha.numbers.size);
+  const jaccardFired = shared >= HEADLINE_LANE_MIN_SHARED &&
+    sim >= HEADLINE_LANE_MIN_JACCARD &&
+    inWindow &&
+    numbersOk;
+
+  const wa = wordsOf(ha);
+  const wb = wordsOf(hb);
+  const [small, large] = wa.size <= wb.size ? [wa, wb] : [wb, wa];
+  const containment = small.size === 0
+    ? 0
+    : setIntersectSize(small, large) / small.size;
+  // large.size >= small.size >= 1 whenever the token minimum below holds.
+  const sizeRatio = large.size === 0 ? 0 : small.size / large.size;
+  const containmentFired = !jaccardFired &&
+    small.size >= HEADLINE_CONTAIN_MIN_TOKENS &&
+    containment >= HEADLINE_CONTAIN_MIN &&
+    sizeRatio >= HEADLINE_CONTAIN_MIN_SIZE_RATIO &&
+    inWindow &&
+    sameSet(ha.numbers, hb.numbers) &&
+    !hasBlockedExtra(small, large);
+
+  const fired = jaccardFired || containmentFired;
+  return {
+    fired,
+    kind: jaccardFired ? "jaccard" : containmentFired ? "containment" : null,
+    sim,
+    shared,
+    containment,
+    score: fired ? 0.5 + 0.5 * sim : 0,
+  };
+}
+
+/**
+ * The score a pair earns from the headline lane alone: the lane's score times
+ * the same time decay and source penalty score() applies, or 0 when the lane
+ * does not fire. Used to compare an incoming article with member headlines
+ * that carry no fingerprint / entity / tfidf data in the consumer's context.
+ */
+export function headlineOnlyScore(
+  ha: HeadlineTokens,
+  hb: HeadlineTokens,
+  hoursDelta: number,
+  opts: { aSourceSlug?: string | null; bSourceSlug?: string | null } = {},
+): number {
+  const lane = headlineLane(ha, hb, hoursDelta);
+  if (!lane.fired) return 0;
+  return lane.score * timeDecayFor(hoursDelta) *
+    sourcePenaltyFor(opts?.aSourceSlug, opts?.bSourceSlug);
+}
+
 // ---------------------------------------------------------------------------
 // score()
 // ---------------------------------------------------------------------------
@@ -139,10 +292,7 @@ export function score(
   opts: ScoreOpts = {},
 ): ScoreResult {
   const { aSourceSlug, bSourceSlug, aTitle, bTitle } = opts || {};
-  const sourcePenalty = Math.min(
-    aSourceSlug ? SOURCE_PENALTIES[aSourceSlug] ?? 1 : 1,
-    bSourceSlug ? SOURCE_PENALTIES[bSourceSlug] ?? 1 : 1,
-  );
+  const sourcePenalty = sourcePenaltyFor(aSourceSlug, bSourceSlug);
 
   // 1. Strict fingerprint auto-accept.
   if (a && b && a.strict && b.strict && a.strict === b.strict) {
@@ -161,6 +311,8 @@ export function score(
         headlineSim: 0,
         headlineShared: 0,
         headlineLane: false,
+        headlineKind: null,
+        headlineContainment: 0,
         textFloorCapped: false,
       },
     };
@@ -196,43 +348,39 @@ export function score(
   // 4. TF-IDF lane — clipped.
   const tfidfScore = clip01(tfidfCosine);
 
-  // 5. Headline lane — only when both titles are present. Fires on a high
-  // stemmed-token Jaccard with enough shared tokens, inside the lane's own
-  // hour limit, and with consistent numerals (a differing numeral means a
-  // different development of the story).
+  // 5. Headline lane -- only when both titles are present (see headlineLane()
+  // for the two variants and their guards).
   let headlineSim = 0;
   let headlineShared = 0;
-  let headlineLane = false;
+  let headlineContainment = 0;
+  let headlineKind: HeadlineKind | null = null;
+  let headlineFired = false;
+  let headlineScore = 0;
   if (aTitle && bTitle) {
-    const ha = headlineTokens(aTitle);
-    const hb = headlineTokens(bTitle);
-    headlineShared = setIntersectSize(ha.tokens, hb.tokens);
-    const union = ha.tokens.size + hb.tokens.size - headlineShared;
-    headlineSim = union === 0 ? 0 : headlineShared / union;
-    const numbersOk = ha.numbers.size === 0 || hb.numbers.size === 0 ||
-      (ha.numbers.size === hb.numbers.size &&
-        setIntersectSize(ha.numbers, hb.numbers) === ha.numbers.size);
-    headlineLane = headlineShared >= HEADLINE_LANE_MIN_SHARED &&
-      headlineSim >= HEADLINE_LANE_MIN_JACCARD &&
-      hoursDelta <= HEADLINE_LANE_MAX_HOURS &&
-      numbersOk;
+    const lane = headlineLane(
+      headlineTokens(aTitle),
+      headlineTokens(bTitle),
+      hoursDelta,
+    );
+    headlineSim = lane.sim;
+    headlineShared = lane.shared;
+    headlineContainment = lane.containment;
+    headlineKind = lane.kind;
+    headlineFired = lane.fired;
+    headlineScore = lane.score;
   }
-  const headlineScore = headlineLane ? 0.5 + 0.5 * headlineSim : 0;
 
   // 6. Combine. `primary` keeps its computed value; the text floor only
   // limits what it contributes to `raw`.
   const primary = TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
-  const textFloorCapped = !headlineLane && tfidfScore < ENTITY_TEXT_FLOOR;
+  const textFloorCapped = !headlineFired && tfidfScore < ENTITY_TEXT_FLOOR;
   const primaryForRaw = textFloorCapped
     ? Math.min(primary, MATCH_THRESHOLD - 0.01)
     : primary;
   const raw = clip01(Math.max(jaccardScore, primaryForRaw, headlineScore));
 
   // 7. Time decay.
-  const timeDecay = Math.max(
-    0,
-    1 - Math.max(0, hoursDelta) / TIME_WINDOW_HOURS,
-  );
+  const timeDecay = timeDecayFor(hoursDelta);
   const finalScore = raw * timeDecay * sourcePenalty;
 
   return {
@@ -252,7 +400,9 @@ export function score(
       sourcePenalty,
       headlineSim,
       headlineShared,
-      headlineLane,
+      headlineLane: headlineFired,
+      headlineKind,
+      headlineContainment,
       textFloorCapped,
     },
   };

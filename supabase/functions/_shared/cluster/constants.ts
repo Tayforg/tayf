@@ -103,6 +103,93 @@ export const HEADLINE_GENERIC_PREFIXES: readonly string[] = [
   "aciklama",
 ];
 
+// (1b) Headline containment (wave AB follow-up). The Jaccard rule needs 0.7
+//     over the FULL token sets, so a bare wire headline never joined the long
+//     headline of the same story: Sarigul "Mustafa Sarigul Yeni Parti'den
+//     istifa etti" (7 tokens) vs "... : Adalet tecelli edecek, partime
+//     donecegim" (12 tokens) is Jaccard 7/12 = 0.58 although every token of
+//     the short one occurs in the long one. Containment is the second chance
+//     for exactly that shape, evaluated only when the Jaccard rule did not
+//     fire: with the numeral tokens removed, the smaller token set must have
+//     at least HEADLINE_CONTAIN_MIN_TOKENS words, at least HEADLINE_CONTAIN_MIN
+//     of them must occur in the larger set, the numeral sets of the two titles
+//     must be IDENTICAL (both empty is fine; stricter than the Jaccard rule,
+//     which tolerates one empty side), the pair must be inside
+//     HEADLINE_LANE_MAX_HOURS, and no word that only the longer headline has
+//     may start with one of HEADLINE_CONTAIN_BLOCK_PREFIXES (a denial, a
+//     "claim" or a rebuttal: "... istifa etti" vs "... istifa etti iddiasina
+//     yalanlama" are two developments, not one). The score is the lane's usual
+//     0.5 + 0.5 * Jaccard, so Sarigul lands at 0.79 before decay and the 0.85
+//     haberler-com penalty, clearly over MATCH_THRESHOLD.
+//     Evidence (offline replay of the 4,641 politics articles of 2026-10-30..31,
+//     newest-200 + sticky context, vs the scorer before this change): clusters
+//     2,851 -> 2,821, articles in multi-source clusters 49.86% -> 50.31%, merge
+//     events 1,790 -> 1,820, and the 33-case pairwise replay (seed/latest/
+//     member score >= MATCH_THRESHOLD) 23 -> 25 with containment alone and 30
+//     with the member scan below. Mining: of 3.28M article pairs within 6 h the
+//     Jaccard rule fires on 1,486; containment adds 657 pairs (477 distinct
+//     title pairs). Hand-judged: 40 of the 227 merges only the new code makes
+//     -> 0 wrong; every one of the 51 of them that containment itself carries
+//     was read -> 1 wrong, 1 unclear; 40 of the 197 merges it stops making ->
+//     0 wrong. Known residual: a live-blog headline whose words are only an
+//     event name ("CANLI | Erdogan, TDT Zirvesi'nde konusuyor", 5 words after
+//     the generic prefixes go) is contained in every headline of that summit
+//     (one Tokayev item joined it); MIN_TOKENS = 6 would drop exactly that
+//     class at the price of the 5-word SPK/Bakirkoy positives. "degil" alone is
+//     a normalizer stop word, so the "degil" prefix only catches its
+//     inflections ("degildir", "degildi").
+//
+//     Size guard (review of this wave). Containment lifts the text floor and
+//     scores >= 0.5 on its own, and a source controls its titles (they are
+//     stored unshortened), so without a bound on the size difference ONE
+//     roundup or keyword-stuffed headline is "contained" by every unrelated
+//     short headline of the same 6 h: a roundup of three unrelated 5-6 word
+//     headlines (central bank rate decision, a derby result, Istanbul rain
+//     cancellations) fired containment for all three (full-set Jaccard 0.16-0.38
+//     over the review probe and the regression fixtures) and scored 0.5-0.7
+//     through score() and headlineOnlyScore(), over MATCH_THRESHOLD at 1 h and
+//     at 5.9 h.
+//     The member scan made it worse: any of a cluster's 12 newest members
+//     could be that headline. HEADLINE_CONTAIN_MIN_SIZE_RATIO therefore
+//     requires |S| / |L| >= 0.4 over the word sets (numerals excluded), i.e.
+//     the long headline is at most 2.5x the short one. Any ratio above 1/3
+//     keeps a long headline from holding three disjoint short headlines, and
+//     0.4 costs far less recall than 0.5: of the 657 mined containment pairs
+//     (516 distinct title pairs, see above) the ratio drops 15 (14 distinct),
+//     13 of them genuine same-story pairs whose long headline is a 13-22 word
+//     lede quote ("MSB acı haberi duyurdu: Hakkari'de hudut geçiş olayına
+//     müdahale ederken ... asker şehit oldu" vs the 5-word wire line) and one
+//     the known Tokayev residual, which it now also removes; 0.5 would drop 59
+//     (47 distinct), 0.3 only 1. The Sarigul positive is 7/12 = 0.58, SPK 5/8 = 0.63.
+//     Replay with the guard (same corpus and harness as above, member scan on):
+//     clusters 2,821, merge events 1,820, articles in multi-source clusters
+//     50.33% (50.31% without the guard); the 33-case pairwise replay is
+//     unchanged at 23 -> 25 -> 30.
+//     The ratio is a bound on structure, not a tuned score threshold; it is
+//     applied only to the containment variant, never to the Jaccard rule.
+//     HEADLINE_TITLE_MAX_CHARS clips the title handed to headlineTokens() so a
+//     megabyte-long title cannot cost O(length) tokenisation per comparison
+//     nor become a many-token needle; the longest title of the 4,641-article
+//     replay corpus is 300 characters, so nothing real is cut.
+export const HEADLINE_CONTAIN_MIN = 0.85;
+export const HEADLINE_CONTAIN_MIN_TOKENS = 5;
+export const HEADLINE_CONTAIN_MIN_SIZE_RATIO = 0.4;
+export const HEADLINE_TITLE_MAX_CHARS = 300;
+export const HEADLINE_CONTAIN_BLOCK_PREFIXES: readonly string[] = [
+  "yalan",
+  "iddia",
+  "degil",
+  "tekzip",
+];
+// Member-headline scan. An incoming article is compared with the seed and the
+// latest of a candidate cluster by the full scorer and, headline lane only,
+// with the HEADLINE_MEMBER_SCAN_MAX newest member headlines the consumer
+// already holds from the member rows its context load fetches. The cap bounds
+// memory and per-article CPU (<= 20 candidates x 12 lane evaluations); the
+// replay is insensitive to it (clusters: cap 4 -> 2,818, 12 -> 2,821, 24 ->
+// 2,820, unbounded -> 2,820), so it is not a tuned value.
+export const HEADLINE_MEMBER_SCAN_MAX = 12;
+
 // (2) Entity-driven false joins. Cluster dd5535a7 was seeded by an entity-
 //     heavy ceremony story (10 entities); an unrelated 3-entity article
 //     shared 3 of them, scored 3 / max(3, min(3, 10)) = 1.0 on the entity
