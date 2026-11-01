@@ -1,6 +1,8 @@
+import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { MEDIA_DNA_EMPTY_CLASS, MediaDna, mediaDnaChipClass } from "./media-dna";
+import { toMediaDnaSources, type MediaDnaSource } from "./media-dna-sources";
 import { ZONE_META } from "@/lib/bias/config";
 import { SOURCE_KIND_META } from "@/lib/sources/kind";
 import type { Source } from "@/types";
@@ -194,5 +196,29 @@ describe("MEDIA_DNA_EMPTY_CLASS (empty-zone label contrast)", () => {
       />,
     );
     expect(html).not.toContain("Hiç kaynak yok");
+  });
+});
+
+// The cluster page projects the directory with toMediaDnaSources, so the client
+// component only ever receives these five fields. This file is .tsx, so tsc
+// checks the type-level assertion (the .test.ts files are excluded from it).
+describe("MediaDna narrowed sources", () => {
+  it("accepts exactly the MediaDnaSource projection", () => {
+    expectTypeOf<ComponentProps<typeof MediaDna>["sources"]>().toEqualTypeOf<MediaDnaSource[]>();
+  });
+
+  it("renders the same chips from the projection as from the full rows", () => {
+    const rows = [
+      source({ id: "g", slug: "gov", name: "Gov Outlet", bias: "pro_government", kind: "outlet" }),
+      source({ id: "c", slug: "mid", name: "Mid Outlet", bias: "center", kind: "aggregator" }),
+      source({ id: "o", slug: "opp", name: "Opp Outlet", bias: "opposition" }),
+    ];
+    const highlight = new Set(["gov", "mid"]);
+    const full = renderToStaticMarkup(<MediaDna sources={rows} highlightSlugs={highlight} />);
+    const narrow = renderToStaticMarkup(
+      <MediaDna sources={toMediaDnaSources(rows)} highlightSlugs={highlight} />,
+    );
+    expect(narrow).toBe(full);
+    expect(narrow).toContain("Tüm 3 kaynağı göster");
   });
 });

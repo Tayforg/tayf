@@ -5,6 +5,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import { SourceDirectorySkeleton } from "./source-directory-skeleton";
 
 // Own metadata so the page doesn't inherit the root layout's title and
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
@@ -186,6 +187,15 @@ async function getSourcesSafe(): Promise<SourcesResult> {
 
 export default async function SourcesPage() {
   await connection();
+  // Start the weekly-count read NOW, before the directory read is awaited, and
+  // hand the promise to the streamed child below. A <Suspense> child only
+  // starts rendering after this body returns, so a read begun inside it would
+  // queue behind getSourcesSafe() and getClickbaitKarne(): on a cache miss
+  // (cold instance, or an hour of idle) readers would wait directory + counts
+  // on the skeleton instead of max() of the two. getSourceItemsPerDay never
+  // throws (it resolves null on failure), so the promise is safe to leave
+  // unawaited on the error branch below.
+  const perDayPromise = getSourceItemsPerDay();
   const result = await getSourcesSafe();
 
   if (!result.ok) {
@@ -309,15 +319,8 @@ export default async function SourcesPage() {
         konumundan bağımsız bir bilgidir.
       </p>
 
-      <Suspense
-        fallback={
-          <SourceDirectory
-            grouped={sortGroupedByActivity(grouped, null)}
-            countLabel={PENDING_COUNT_LABEL}
-          />
-        }
-      >
-        <SourceDirectoryWithCounts grouped={grouped} />
+      <Suspense fallback={<SourceDirectorySkeleton />}>
+        <SourceDirectoryWithCounts grouped={grouped} perDay={perDayPromise} />
       </Suspense>
       {karne ? (
         <ClickbaitKarneSection karne={karne} check={CLICKBAIT_PRECISION_CHECK} />
@@ -330,14 +333,14 @@ export default async function SourcesPage() {
 // ---------------------------------------------------------------------------
 // reader-queries G2: the weekly-activity count streams in separately from
 // the directory shell above (which paints as soon as getSourcesSafe()
-// resolves). PENDING_COUNT_LABEL renders in the <Suspense> fallback (the
-// aggregate hasn't been asked for yet); `null` counts (the aggregate
-// resolved but the query failed) render as an em dash; a resolved counts
-// map renders the real number for every source (missing from the map ==
-// zero articles in the window, per getSourceItemsPerDay's contract).
+// resolves). The <Suspense> fallback is <SourceDirectorySkeleton> — a light,
+// link-free placeholder, never a second copy of the directory (sources-weight:
+// that doubled the HTML to ~1.29 MB and 236 /source/ links). `null` counts
+// (the aggregate resolved but the query failed) render as an em dash; a
+// resolved counts map renders the real number for every source (missing from
+// the map == zero articles in the window, per getSourceItemsPerDay's
+// contract).
 // ---------------------------------------------------------------------------
-
-const PENDING_COUNT_LABEL = "son 7 günde … haber";
 
 function countLabelFromCounts(
   counts: Record<string, number> | null,
@@ -352,10 +355,14 @@ function countLabelFromCounts(
 // Suspense-aware renderer — see page.test.tsx.
 export async function SourceDirectoryWithCounts({
   grouped,
+  perDay: perDayPromise,
 }: {
   grouped: GroupedSources;
+  // Started by SourcesPage before the directory read (see the note there);
+  // awaited here so the read overlaps instead of queueing behind the page body.
+  perDay: ReturnType<typeof getSourceItemsPerDay>;
 }) {
-  const perDay = await getSourceItemsPerDay();
+  const perDay = await perDayPromise;
   const weekly =
     perDay === null
       ? null

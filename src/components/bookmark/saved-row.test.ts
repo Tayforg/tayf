@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { BIAS_ORDER } from "@/lib/bias/config";
 
-import { toSavedRowView } from "./saved-row";
+import { savedUpdatedLabel, toSavedRowView } from "./saved-row";
 
 const ZEROS = Object.fromEntries(BIAS_ORDER.map((k) => [k, 0]));
 
@@ -91,5 +91,35 @@ describe("toSavedRowView happy path", () => {
     expect(view.isBlindspot).toBe(true);
     expect(view.distribution).toMatchObject({ pro_government: 1, center: 2, opposition: 3 });
     expect(view.distribution?.nationalist).toBe(0);
+  });
+});
+
+// /saved shows saved_clusters_v2.updated_at (the RPC does not return
+// first_published), so the age must say that it is the last update time rather
+// than read like a publication date.
+describe("savedUpdatedLabel", () => {
+  const now = Date.parse("2026-11-01T08:00:00.000Z");
+
+  it("labels a recent update as the last update, relative to the given clock", () => {
+    expect(savedUpdatedLabel("2026-11-01T00:00:00.000Z", now)).toBe("Son güncelleme: 8 saat önce");
+  });
+
+  it("labels an older update with the absolute date once the age switches to one", () => {
+    expect(savedUpdatedLabel("2026-10-12T09:00:00.000Z", now)).toBe("Son güncelleme: 12 Ekim 2026");
+  });
+
+  it("says 'az önce' for an update inside the last minute", () => {
+    expect(savedUpdatedLabel("2026-11-01T07:59:30.000Z", now)).toBe("Son güncelleme: az önce");
+  });
+
+  it("returns an empty string for an invalid or empty ISO string (so no label is shown)", () => {
+    expect(savedUpdatedLabel("not-a-date", now)).toBe("");
+    expect(savedUpdatedLabel("", now)).toBe("");
+    expect(savedUpdatedLabel("not-a-date")).toBe("");
+  });
+
+  it("falls back to the real clock when no 'now' is given", () => {
+    const justNow = new Date(Date.now() - 5_000).toISOString();
+    expect(savedUpdatedLabel(justNow)).toBe("Son güncelleme: az önce");
   });
 });

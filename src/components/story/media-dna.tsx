@@ -2,7 +2,8 @@
 
 import { useState } from "react";
 
-import type { Source, MediaDnaZone } from "@/types";
+import type { MediaDnaZone } from "@/types";
+import type { MediaDnaSource } from "@/components/story/media-dna-sources";
 import { zoneOf, ZONE_META, BIAS_LABELS } from "@/lib/bias/config";
 import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
 
@@ -37,8 +38,12 @@ import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/ki
  */
 
 interface MediaDnaProps {
-  /** The full source directory (all 144 outlets). */
-  sources: Source[];
+  /**
+   * The full source directory (all 144 outlets), narrowed to the fields this
+   * chart reads. The server page builds it with `toMediaDnaSources` so the
+   * RSC payload does not carry url / rss_url / logo_url / active.
+   */
+  sources: MediaDnaSource[];
   /** Slugs of sources that covered this cluster. Undefined → highlight all. */
   highlightSlugs?: Set<string>;
 }
@@ -90,7 +95,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
   // Bucket every source into its zone. Done at render time — with 144
   // sources this is cheap and we want both views (collapsed + expanded) to
   // share the same totals for the top bar and the per-zone counts.
-  const byZone: Record<MediaDnaZone, Source[]> = {
+  const byZone: Record<MediaDnaZone, MediaDnaSource[]> = {
     muhalefet: [],
     bagimsiz: [],
     iktidar: [],

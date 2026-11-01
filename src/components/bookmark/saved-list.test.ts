@@ -202,3 +202,33 @@ describe("saved-list.tsx blindspot pill and spectrum bar", () => {
     expect(markup).not.toMatch(/\b(href|onclick|tabindex)=/i);
   });
 });
+
+describe("saved-list.tsx accessible names and update-time label", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+  const code = src.replace(/\/\/[^\n]*/g, "");
+
+  it("names the remove button after the story it removes (WCAG 2.5.3 / 4.1.2)", () => {
+    expect(code).toContain("aria-label={savedRemoveLabel(row.title_tr_neutral ?? row.title_tr)}");
+    expect(src).toMatch(/import\s*\{[^}]*savedRemoveLabel[^}]*\}\s*from\s*["']@\/components\/bookmark\/bookmark-label["']/);
+  });
+
+  it("has no literal generic aria-label left on the remove button", () => {
+    expect(src).not.toContain('aria-label="Kaydedilenlerden çıkar"');
+  });
+
+  it("keeps the generic tooltip", () => {
+    expect(src).toContain('title="Kaydedilenlerden çıkar"');
+  });
+
+  it("renders the age as the update time inside <time>, only when the label is non-empty", () => {
+    expect(src).toMatch(/import\s*\{[^}]*savedUpdatedLabel[^}]*\}\s*from\s*["']@\/components\/bookmark\/saved-row["']/);
+    expect(code).toContain("savedUpdatedLabel(row.updated_at)");
+    expect(code).toContain("<time dateTime={row.updated_at}>");
+    expect(code).toMatch(/\{updatedLabel && \(\s*<time dateTime=\{row\.updated_at\}>\{updatedLabel\}<\/time>\s*\)\}/);
+  });
+
+  it("no longer prints a bare relative age that reads like a publication date", () => {
+    expect(code).not.toContain("{formatTurkishTimeAgo(row.updated_at)}");
+    expect(code).not.toContain("formatTurkishTimeAgo");
+  });
+});

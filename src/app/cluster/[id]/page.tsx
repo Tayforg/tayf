@@ -8,6 +8,7 @@ import { BalanceChip } from "@/components/story/balance-chip";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { MediaDna } from "@/components/story/media-dna";
+import { toMediaDnaSources } from "@/components/story/media-dna-sources";
 import { FramingComparison } from "@/components/story/framing-comparison";
 import { FramingReceiptCard } from "@/components/story/framing-receipt";
 import { CrossSpectrumCaption } from "@/components/story/cross-spectrum-caption";
@@ -582,7 +583,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   title={cluster.title_tr}
                   text={shareText}
                 />
-                <BookmarkButton clusterId={id} />
+                <BookmarkButton clusterId={id} storyTitle={cluster.title_tr} />
                 <CompareButton clusterId={id} />
                 <Link
                   href={`/metodoloji?cluster=${id}#duzeltme`}
@@ -786,7 +787,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
       {/* Chart — Medya DNA'sı (all 144 sources, this cluster's highlighted).
           Now last in the page order; collapsed-by-default thanks to U4. */}
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 hover-lift animate-fade-up stagger-2">
-        <MediaDna sources={allSources} highlightSlugs={highlightSlugs} />
+        <MediaDna sources={toMediaDnaSources(allSources)} highlightSlugs={highlightSlugs} />
       </div>
       </div>
     </>

@@ -205,3 +205,11 @@ describe("cluster-card.tsx aging treatment (contrast sweep)", () => {
     expect(src).toContain("[&_img]:grayscale");
   });
 });
+
+describe("cluster-card.tsx bookmark accessible name (WCAG 2.5.3)", () => {
+  it("passes the h2 story title to the overlay bookmark button, so each card's control has its own name", () => {
+    expect(count(src, "<BookmarkButton")).toBe(1);
+    expect(src).toMatch(/<BookmarkButton[^>]*\bstoryTitle=\{cluster\.title_tr\}/);
+    expect(src).toMatch(/<BookmarkButton[^>]*\bvariant="overlay"/);
+  });
+});

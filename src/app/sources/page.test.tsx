@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { ReactNode } from "react";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Suspense, createElement, type ReactNode } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { createSupabaseFake } from "../../../tests/_helpers/supabase-fake";
 
@@ -44,6 +48,18 @@ vi.mock("@/lib/sources/clickbait", async (importOriginal) => {
     ...actual,
     isClickbaitPublic: vi.fn(() => clickbaitFixture.public),
     getClickbaitKarne: vi.fn(async () => clickbaitFixture.karne),
+  };
+});
+
+// sources-weight: the weekly-count aggregate is the one dependency the tests
+// below need to steer (a `null` failure, a resolved map). The mock delegates to
+// the real implementation by default, so every other test still reads the fake
+// Supabase client; only `mockResolvedValueOnce` overrides a single call.
+vi.mock("@/lib/sources/feed-status", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/sources/feed-status")>();
+  return {
+    ...actual,
+    getSourceItemsPerDay: vi.fn(actual.getSourceItemsPerDay),
   };
 });
 
@@ -95,10 +111,17 @@ function makeFakeClient() {
 // ingest-hygiene (handed over from seo-error-states): flips the mocked
 // client factory into a throwing one so SourcesPage's `!result.ok` branch
 // (the "Kaynak listesi şu an yüklenemedi" fallback) can be exercised.
-const supabaseFixture = vi.hoisted(() => ({ fail: false }));
+const supabaseFixture = vi.hoisted(() => ({
+  fail: false,
+  // Order of the reads the page starts: "directory" is pushed by the
+  // directory read's createServerClient() call, "counts" by a stubbed
+  // getSourceItemsPerDay (see the overlap test below).
+  calls: [] as string[],
+}));
 
 vi.mock("@/lib/supabase/server", () => ({
   createServerClient: () => {
+    supabaseFixture.calls.push("directory");
     if (supabaseFixture.fail) throw new Error("supabase unavailable");
     return makeFakeClient();
   },
@@ -106,6 +129,8 @@ vi.mock("@/lib/supabase/server", () => ({
 
 // Import AFTER mocks are declared.
 import SourcesPage, { SourceDirectory, SourceDirectoryWithCounts } from "./page";
+import { SOURCE_SKELETON_CARDS, SourceDirectorySkeleton } from "./source-directory-skeleton";
+import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
@@ -195,6 +220,7 @@ async function collectHrefs(node: unknown, out: string[] = []): Promise<string[]
 // whole file instead of inside the one describe that happened to need it.
 beforeEach(() => {
   supabaseFixture.fail = false;
+  supabaseFixture.calls.length = 0;
   clickbaitFixture.public = false;
   clickbaitFixture.karne = null;
   vi.mocked(isClickbaitPublic).mockClear();
@@ -326,5 +352,249 @@ describe("/sources page — noindex on the error state (seo-error-states)", () =
     supabaseFixture.fail = false;
     const tree = await SourcesPage();
     expect(findElementProps(tree, "meta")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sources-weight: the Suspense fallback used to be a full <SourceDirectory>
+// (PENDING_COUNT_LABEL), so the 118-card directory shipped twice in the HTML
+// (1.29 MB, 236 /source/ links on 2026-11-01). The fallback is now a light,
+// link-free skeleton; the resolved UI, the sort, the count labels and the em
+// dash failure path are unchanged.
+// ---------------------------------------------------------------------------
+
+type TreeElement = {
+  type?: unknown;
+  props?: { children?: ReactNode; fallback?: unknown; [k: string]: unknown };
+};
+
+/** Every <Suspense> reachable through `props.children` and arrays. */
+function findSuspenses(node: unknown, out: TreeElement[] = []): TreeElement[] {
+  if (Array.isArray(node)) {
+    for (const child of node) findSuspenses(child, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as TreeElement;
+    if (el.type === Suspense) out.push(el);
+    if (el.props?.children !== undefined) findSuspenses(el.props.children, out);
+  }
+  return out;
+}
+
+/** Drops block and line comments so prose cannot satisfy (or trip) a guard. */
+function stripComments(source: string): string {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+}
+
+const here = dirname(fileURLToPath(import.meta.url));
+const PAGE_SOURCE = readFileSync(resolve(here, "page.tsx"), "utf8");
+const DIRECTORY_GRID_CLASSES =
+  "grid grid-cols-1 min-[480px]:grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3";
+
+describe("/sources page — Suspense fallback is a light skeleton", () => {
+  it("has exactly one Suspense; its fallback is the skeleton and its child still streams the counted directory", async () => {
+    const tree = await SourcesPage();
+    const suspenses = findSuspenses(tree);
+
+    expect(suspenses).toHaveLength(1);
+    const suspense = suspenses[0]!;
+
+    const fallback = suspense.props?.fallback as TreeElement | undefined;
+    expect(fallback?.type).toBe(SourceDirectorySkeleton);
+
+    const child = suspense.props?.children as TreeElement | undefined;
+    expect(child?.type).toBe(SourceDirectoryWithCounts);
+    const grouped = child?.props?.grouped as Record<string, Array<{ slug: string }>>;
+    expect(grouped.pro_government?.map((s) => s.slug)).toEqual(["s-outlet"]);
+  });
+
+  it("the page tree still reaches every source profile link through the resolved directory", async () => {
+    const hrefs = await collectHrefs(await SourcesPage());
+
+    expect(hrefs).toContain("/source/s-outlet");
+    expect(hrefs).toContain("/source/s-aggregator");
+    expect(hrefs).toContain("/source/s-wire");
+    // One profile link per source: the fallback adds none.
+    expect(hrefs.filter((h) => h.startsWith("/source/"))).toHaveLength(3);
+  });
+});
+
+describe("SourceDirectorySkeleton", () => {
+  const markup = renderToStaticMarkup(createElement(SourceDirectorySkeleton));
+
+  it("carries no links, images or count copy (nothing a crawler or the HTML weight can count twice)", () => {
+    expect(markup).not.toContain("href=");
+    expect(markup).not.toContain("<a");
+    expect(markup).not.toContain("<img");
+    expect(markup).not.toContain("son 7 günde");
+  });
+
+  it("renders SOURCE_SKELETON_CARDS (8) placeholder cards", () => {
+    expect(SOURCE_SKELETON_CARDS).toBe(8);
+    expect(markup.split("data-skeleton-card").length - 1).toBe(8);
+  });
+
+  it("announces loading once through a polite sr-only status, outside the aria-hidden placeholder", () => {
+    const status = /<p(?=[^>]*role="status")(?=[^>]*class="[^"]*\bsr-only\b)[^>]*>Kaynak listesi yükleniyor…<\/p>/.exec(
+      markup,
+    );
+    expect(status).not.toBeNull();
+
+    const hidden = /<section(?=[^>]*aria-hidden="true")[^>]*>/.exec(markup);
+    expect(hidden).not.toBeNull();
+    expect(status!.index).toBeLessThan(hidden!.index);
+    // Every card sits inside the hidden placeholder, none before it.
+    expect(markup.indexOf("data-skeleton-card")).toBeGreaterThan(hidden!.index);
+    expect(markup.match(/aria-hidden="true"/g)).toHaveLength(1);
+  });
+
+  it("reuses the directory grid classes and reserves height so the footer does not jump", () => {
+    expect(markup).toContain(DIRECTORY_GRID_CLASSES);
+    expect(markup).toContain("min-h-[60vh]");
+  });
+
+  it("only pulses when the reader allows motion", () => {
+    expect(markup).toContain("motion-safe:animate-pulse");
+    expect(markup).not.toMatch(/(?<!motion-safe:)animate-pulse/);
+  });
+
+  it("stays light: well under 4 kB of markup", () => {
+    expect(markup.length).toBeLessThan(4000);
+  });
+});
+
+describe("/sources page source — the directory is not rendered twice", () => {
+  const code = stripComments(PAGE_SOURCE);
+  // `\b` after the name: <SourceDirectorySkeleton> and <SourceDirectoryWithCounts>
+  // are different components and must not trip the guard.
+  const FULL_DIRECTORY_FALLBACK = /fallback\s*=\s*\{\s*<\s*SourceDirectory\b/;
+
+  it("never uses a full <SourceDirectory> as the Suspense fallback", () => {
+    expect(code).not.toMatch(FULL_DIRECTORY_FALLBACK);
+  });
+
+  it("the fallback pattern tolerates JSX line breaks but does not flag the skeleton", () => {
+    expect("fallback={\n  <SourceDirectory\n    grouped={x}").toMatch(FULL_DIRECTORY_FALLBACK);
+    expect("fallback={<SourceDirectory grouped={x} />}").toMatch(FULL_DIRECTORY_FALLBACK);
+    expect("fallback={<SourceDirectorySkeleton />}").not.toMatch(FULL_DIRECTORY_FALLBACK);
+    expect("fallback={<SourceDirectoryWithCounts />}").not.toMatch(FULL_DIRECTORY_FALLBACK);
+  });
+
+  it("has dropped PENDING_COUNT_LABEL", () => {
+    expect(code).not.toContain("PENDING_COUNT_LABEL");
+  });
+
+  it("still streams <SourceDirectoryWithCounts> behind the one Suspense, handing it the counts promise", () => {
+    expect(code).toContain(
+      "<SourceDirectoryWithCounts grouped={grouped} perDay={perDayPromise} />",
+    );
+  });
+
+  it("starts the weekly-count read before awaiting the directory read, and only there", () => {
+    const start = code.indexOf("const perDayPromise = getSourceItemsPerDay()");
+    const directory = code.indexOf("await getSourcesSafe()");
+    expect(start).toBeGreaterThan(-1);
+    expect(directory).toBeGreaterThan(-1);
+    expect(start).toBeLessThan(directory);
+    // The streamed child awaits the promise it is given; a second call there
+    // would put the counts read back behind the directory read.
+    expect(code.match(/getSourceItemsPerDay\(\)/g)).toHaveLength(1);
+  });
+
+  it("stripComments removes prose so a comment cannot satisfy or trip the guards", () => {
+    const stripped = stripComments(
+      'const a = "https://x.y"; // fallback={<SourceDirectory\n/* PENDING_COUNT_LABEL */ const b = 1;',
+    );
+    expect(stripped).toContain('"https://x.y"');
+    expect(stripped).not.toContain("fallback=");
+    expect(stripped).not.toContain("PENDING_COUNT_LABEL");
+  });
+});
+
+describe("SourceDirectoryWithCounts — count labels (unchanged contract)", () => {
+  // The page starts the counts read itself (before the directory read), so the
+  // stub must be queued BEFORE SourcesPage() runs, not before the child renders.
+  async function renderedText(
+    perDay: Record<string, number> | null,
+  ): Promise<string> {
+    vi.mocked(getSourceItemsPerDay).mockResolvedValueOnce(perDay);
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    const props = child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+    return (await collectText(await SourceDirectoryWithCounts(props))).join(" ");
+  }
+
+  it("a failed aggregate (null) renders the em dash for every source, never a fabricated 0", async () => {
+    const text = await renderedText(null);
+
+    expect(text).toContain("son 7 günde — haber");
+    expect(text).not.toMatch(/son 7 günde \d+ haber/);
+    expect(text).not.toContain("…");
+  });
+
+  it("a resolved map renders weekly numbers; a source missing from the map reads as 0", async () => {
+    const text = await renderedText({ "s-outlet": 1 });
+
+    expect(text).toContain("son 7 günde 7 haber");
+    expect(text).toContain("son 7 günde 0 haber");
+    expect(text).not.toContain("son 7 günde — haber");
+  });
+});
+
+describe("/sources page — the weekly counts overlap the directory read (cold path)", () => {
+  it("starts the counts read before the directory read, so a cache miss costs max(), not the sum", async () => {
+    vi.mocked(getSourceItemsPerDay).mockImplementationOnce(async () => {
+      supabaseFixture.calls.push("counts");
+      return null;
+    });
+
+    await SourcesPage();
+
+    expect(supabaseFixture.calls[0]).toBe("counts");
+    expect(supabaseFixture.calls).toContain("directory");
+  });
+
+  it("reads the counts exactly once: the streamed child awaits the page's promise instead of asking again", async () => {
+    vi.mocked(getSourceItemsPerDay).mockClear();
+    vi.mocked(getSourceItemsPerDay).mockResolvedValueOnce({ "s-outlet": 2 });
+
+    const tree = await SourcesPage();
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    const props = child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+    const text = (await collectText(await SourceDirectoryWithCounts(props))).join(" ");
+
+    expect(getSourceItemsPerDay).toHaveBeenCalledTimes(1);
+    expect(text).toContain("son 7 günde 14 haber");
+  });
+
+  it("the child shows the directory as soon as the page's promise settles, even when the read is slow", async () => {
+    let release!: (v: Record<string, number>) => void;
+    vi.mocked(getSourceItemsPerDay).mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    const tree = await SourcesPage(); // the page itself never waits for the counts
+    const child = findSuspenses(tree)[0]?.props?.children as TreeElement;
+    const props = child.props as unknown as Parameters<typeof SourceDirectoryWithCounts>[0];
+    const rendering = SourceDirectoryWithCounts(props);
+    release({ "s-wire": 3 });
+
+    const text = (await collectText(await rendering)).join(" ");
+    expect(text).toContain("son 7 günde 21 haber");
+  });
+
+  it("an unused counts promise (error state) is harmless: it resolves null and nothing is thrown", async () => {
+    supabaseFixture.fail = true;
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(SourcesPage()).resolves.toBeDefined();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

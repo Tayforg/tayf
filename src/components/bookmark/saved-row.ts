@@ -10,6 +10,7 @@
 // `is_blindspot` is absent on rows from the v1 fallback (saved_clusters, used
 // while migration 124 is not applied yet); absent means "not flagged".
 import { BIAS_ORDER } from "@/lib/bias/config";
+import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasDistribution } from "@/types";
 
 export interface SavedRowView {
@@ -24,6 +25,20 @@ export function toSavedRowView(row: { bias_distribution: unknown; is_blindspot?:
     distribution: toDistribution(row.bias_distribution),
     isBlindspot: row.is_blindspot === true,
   };
+}
+
+/**
+ * The age shown on a /saved row, labelled as what it is. saved_clusters_v2
+ * returns `updated_at` (the last update of the cluster), not `first_published`
+ * (it has no such column), so a bare "8 saat önce" read like a publication
+ * time. Yields "Son güncelleme: 8 saat önce", or "Son güncelleme: 12 Ekim 2026"
+ * once the age is old enough that formatTurkishTimeAgo switches to a date.
+ * `now` is only for tests; the real clock is used when it is omitted. An
+ * unparseable timestamp gives "" so the caller can hide the label.
+ */
+export function savedUpdatedLabel(iso: string, now?: number): string {
+  const when = formatTurkishTimeAgo(iso, now === undefined ? undefined : { now });
+  return when === "" ? "" : `Son güncelleme: ${when}`;
 }
 
 function toDistribution(value: unknown): BiasDistribution | null {

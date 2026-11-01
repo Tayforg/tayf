@@ -35,6 +35,16 @@ vi.mock("@/lib/sources/clickbait", async (importOriginal) => {
   };
 });
 
+// SourcesPage starts the weekly-count read (getSourceItemsPerDay, its own "use
+// cache" with its own cacheLife and client build) before it awaits the
+// directory. This suite counts the DIRECTORY read's cacheLife calls and client
+// builds, so the counts read is stubbed out; its own lifetime rule is covered
+// in src/lib/sources/feed-status.test.ts.
+vi.mock("@/lib/sources/feed-status", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/sources/feed-status")>();
+  return { ...actual, getSourceItemsPerDay: vi.fn(async () => null) };
+});
+
 const supabaseFixture = vi.hoisted(() => ({
   /** Every client build throws. */
   fail: false,
