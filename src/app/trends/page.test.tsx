@@ -1,5 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -404,5 +406,110 @@ describe("/trends page — Yükselen Konular section", () => {
 
   it("the page description mentions today's rising topics", () => {
     expect(String(metadata.description)).toContain("bugün yükselen konular");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Nice-number y-axis (h14-polish-5): the gridlines sit on round tick values
+// from niceScale(), the labels use the tr-TR grouping, and the bars are scaled
+// to the same axis maximum so a bar never overshoots its own gridline.
+// ---------------------------------------------------------------------------
+
+/** One busiest day of 8791 articles (5000 + 2000 + 1791) among quiet days. */
+function busiestDayBuckets(): Bucket[] {
+  const buckets = zeroBuckets();
+  const quiet = buckets[buckets.length - 2]!;
+  quiet.counts.iktidar = 1000;
+  quiet.counts.bagimsiz = 500;
+  quiet.counts.muhalefet = 698;
+  quiet.total = 2198;
+  const busiest = buckets[buckets.length - 1]!;
+  busiest.counts.iktidar = 5000;
+  busiest.counts.bagimsiz = 2000;
+  busiest.counts.muhalefet = 1791;
+  busiest.total = 8791;
+  return buckets;
+}
+
+async function chartMarkup(buckets: Bucket[]): Promise<string> {
+  mockBuckets = buckets;
+  const tree = await TrendsPage();
+  const svg = collectElements(tree).find((el) => el.type === "svg");
+  expect(svg).toBeDefined();
+  return renderToStaticMarkup(svg as unknown as React.ReactElement);
+}
+
+function attr(tag: string, name: string): number {
+  const m = tag.match(new RegExp(`\\s${name}="([^"]+)"`));
+  expect(m, `${name} in ${tag}`).not.toBeNull();
+  return Number(m![1]);
+}
+
+/** Texts of the y-axis labels (text-anchor="end"); x labels are "middle". */
+function yLabels(markup: string): string[] {
+  return [...markup.matchAll(/<text[^>]*text-anchor="end"[^>]*>([^<]*)<\/text>/g)].map(
+    (m) => m[1]!,
+  );
+}
+
+describe("/trends page — nice-number y-axis", () => {
+  it("labels the axis 0 / 2.500 / 5.000 / 7.500 / 10.000 for a busiest day of 8791", async () => {
+    const markup = await chartMarkup(busiestDayBuckets());
+
+    expect(yLabels(markup)).toEqual(["0", "2.500", "5.000", "7.500", "10.000"]);
+  });
+
+  it("never prints the raw quarter-of-the-maximum values (8791, 2198, 4396, 6593)", async () => {
+    const labels = yLabels(await chartMarkup(busiestDayBuckets()));
+
+    for (const raw of ["8791", "8.791", "2198", "2.198", "4396", "6593"]) {
+      expect(labels).not.toContain(raw);
+    }
+  });
+
+  it("draws one gridline per tick, evenly spaced from the baseline to the top", async () => {
+    const markup = await chartMarkup(busiestDayBuckets());
+
+    const ys = [...markup.matchAll(/<line\b[^>]*>/g)].map((m) => attr(m[0], "y1"));
+    expect(ys).toHaveLength(5);
+    // First tick (0) is the lowest line (largest y); last tick (max) the highest.
+    const sorted = [...ys].sort((a, b) => b - a);
+    const gaps = sorted.slice(1).map((y, i) => sorted[i]! - y);
+    for (const gap of gaps) expect(gap).toBeCloseTo(gaps[0]!, 6);
+    expect(gaps[0]).toBeGreaterThan(0);
+  });
+
+  it("scales the bars to the axis maximum: the tallest bar fills 0.8791 of the gridline span", async () => {
+    const markup = await chartMarkup(busiestDayBuckets());
+
+    const ys = [...markup.matchAll(/<line\b[^>]*>/g)].map((m) => attr(m[0], "y1"));
+    const span = Math.max(...ys) - Math.min(...ys);
+
+    // Sum the stacked rect heights per bar (same x).
+    const heightByX = new Map<number, number>();
+    for (const m of markup.matchAll(/<rect\b[^>]*>/g)) {
+      const x = attr(m[0], "x");
+      heightByX.set(x, (heightByX.get(x) ?? 0) + attr(m[0], "height"));
+    }
+    const tallest = Math.max(...heightByX.values());
+
+    expect(tallest).toBeCloseTo(0.8791 * span, 4);
+    // The tallest bar must stay below the top gridline.
+    expect(tallest).toBeLessThan(span);
+  });
+
+  it("keeps a sane 0 / 1 axis for an empty month", async () => {
+    const markup = await chartMarkup(zeroBuckets());
+
+    expect(yLabels(markup)).toEqual(["0", "1"]);
+  });
+
+  it("uses the shared tr-TR formatter and the niceScale ticks in the source", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+
+    expect(src).toContain("niceScale(yMax)");
+    expect(src).toContain("formatCountTr(t)");
+    expect(src).not.toContain("gridSteps");
+    expect(src).not.toContain("Math.round(yMax * step)");
   });
 });

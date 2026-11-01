@@ -17,6 +17,7 @@ export const metadata: Metadata = staticPageMetadata({
 });
 import { ZONE_META } from "@/lib/bias/config";
 import { formatCountTr } from "@/lib/format/number-tr";
+import { niceScale } from "@/lib/format/nice-scale";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { getRisingEntities } from "@/lib/trends/rising-query";
 import type { MediaDnaZone } from "@/types";
@@ -132,10 +133,12 @@ export default async function TrendsPage() {
 
   const barWidth = (PLOT_W - BAR_GAP * (WINDOW_DAYS - 1)) / WINDOW_DAYS;
 
-  // Pre-compute four reference y values (0, 25%, 50%, 75%, 100%) so the
-  // chart has horizontal gridlines + axis labels without a ton of inline
-  // arithmetic in the JSX below.
-  const gridSteps = [0, 0.25, 0.5, 0.75, 1] as const;
+  // Gridlines and axis labels sit on round numbers: niceScale() picks a
+  // 1 / 2 / 2.5 / 5 x 10^k step and rounds the axis maximum up to a whole
+  // number of steps (8791 -> 0, 2.500, 5.000, 7.500, 10.000), instead of the
+  // old quarters of the busiest day (2198, 4396, 6593, 8791). The bars below
+  // are scaled to the same `scale.max`, so a bar never overshoots a gridline.
+  const scale = niceScale(yMax);
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-6">
@@ -193,11 +196,11 @@ export default async function TrendsPage() {
               strokeOpacity={0.15}
               strokeWidth={1}
             >
-              {gridSteps.map((step) => {
-                const y = PAD_TOP + PLOT_H * (1 - step);
+              {scale.ticks.map((t) => {
+                const y = PAD_TOP + PLOT_H * (1 - t / scale.max);
                 return (
                   <line
-                    key={`grid-${step}`}
+                    key={`grid-${t}`}
                     x1={PAD_LEFT}
                     x2={CHART_W - PAD_RIGHT}
                     y1={y}
@@ -211,17 +214,16 @@ export default async function TrendsPage() {
               fill="currentColor"
               fontSize={10}
             >
-              {gridSteps.map((step) => {
-                const y = PAD_TOP + PLOT_H * (1 - step);
-                const value = Math.round(yMax * step);
+              {scale.ticks.map((t) => {
+                const y = PAD_TOP + PLOT_H * (1 - t / scale.max);
                 return (
                   <text
-                    key={`ylabel-${step}`}
+                    key={`ylabel-${t}`}
                     x={PAD_LEFT - 6}
                     y={y + 3}
                     textAnchor="end"
                   >
-                    {value}
+                    {formatCountTr(t)}
                   </text>
                 );
               })}
@@ -237,7 +239,7 @@ export default async function TrendsPage() {
                 const segments = ZONES.map((zone) => {
                   const count = bucket.counts[zone];
                   if (count === 0) return null;
-                  const segHeight = (count / yMax) * PLOT_H;
+                  const segHeight = (count / scale.max) * PLOT_H;
                   cursorY -= segHeight;
                   return (
                     <rect

@@ -176,6 +176,50 @@ describe("NavLinks — accessible names", () => {
   });
 });
 
+describe("NavLinks — 44 px touch targets on phones (h14-polish-5)", () => {
+  // Below `sm` the labels are sr-only, so each link is a 14 px icon inside
+  // px-2.5 / py-1.5: 34 x 26 px. WCAG 2.5.8 only asks for 24 px, but the rest
+  // of the site uses 44 px; `max-sm:` lifts the floor without touching the
+  // sm+ look (the header row is h-14, so its height does not change).
+  const MOBILE_TOKENS = ["max-sm:min-h-11", "max-sm:min-w-11", "max-sm:justify-center"];
+  const tokensOf = (el: Elementish | undefined) =>
+    String(el?.props?.className).split(/\s+/).filter(Boolean);
+
+  it.each(["/", "/blindspots", "/ekonomi", "/saved", "/admin"])(
+    "%s link carries the three max-sm tokens and no unprefixed min-h-11 / min-w-11",
+    (href) => {
+      const link = findByHref(NavLinks({ showAdmin: true }), href);
+      expect(link, `${href} link`).toBeDefined();
+
+      const tokens = tokensOf(link);
+      for (const token of MOBILE_TOKENS) expect(tokens).toContain(token);
+      // The sm+ size must not change: no unprefixed (or sm:-leaking) floor.
+      expect(tokens).not.toContain("min-h-11");
+      expect(tokens).not.toContain("min-w-11");
+      expect(tokens).not.toContain("justify-center");
+    },
+  );
+
+  it.each(["/", "/blindspots", "/ekonomi", "/saved", "/admin"])(
+    "%s link keeps its horizontal padding and focus ring",
+    (href) => {
+      const link = findByHref(NavLinks({ showAdmin: true }), href);
+      const tokens = tokensOf(link);
+
+      expect(tokens.some((t) => t === "px-2.5" || t === "px-2")).toBe(true);
+      expect(tokens).toContain("focus-visible:ring-2");
+    },
+  );
+
+  it("the hook-free static-shell fallback (pathname: null) has the same targets", () => {
+    const tree = NavLinksView({ pathname: null, showAdmin: true });
+    for (const href of ["/", "/blindspots", "/ekonomi", "/saved", "/admin"]) {
+      const tokens = tokensOf(findByHref(tree, href));
+      for (const token of MOBILE_TOKENS) expect(tokens, href).toContain(token);
+    }
+  });
+});
+
 describe("SearchBar — labelled search input (best effort)", () => {
   it("renders role=search and a label wired to the input via id/htmlFor", async () => {
     const { SearchBar } = await import("@/components/filters/search-bar");

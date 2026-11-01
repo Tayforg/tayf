@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { cacheLife, cacheTag } from "next/cache";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   buildClusterBundle,
@@ -80,6 +81,13 @@ export interface TopicClustersPage {
    *  module never claims a total it did not count. */
   hasMore: boolean;
   page: number;
+  /** The last page that has rows. Present ONLY on an empty page past the end
+   *  (`page > 1`, zero rows), where the reader needs a way back: a number is
+   *  `min(TOPIC_MAX_PAGE, max(1, ceil(count / TOPIC_PAGE_SIZE)))`, `null` means
+   *  the count could not be read (the page then falls back to a plain
+   *  "Önceki"). Absent on page 1 and on any page that has rows, so those paths
+   *  never pay for the extra count. */
+  lastPage?: number | null;
 }
 
 /** Exported: page.tsx clamps BEFORE calling the cached fetcher so the
@@ -88,6 +96,79 @@ export interface TopicClustersPage {
 export function clampTopicPage(page: number): number {
   const truncated = Number.isFinite(page) ? Math.trunc(page) : 1;
   return Math.min(TOPIC_MAX_PAGE, Math.max(1, truncated || 1));
+}
+
+/** The hub's filter chain: one definition shared by the page read and the
+ *  last-page count, so the two can never drift (a count over a wider set than
+ *  the list would send the reader to a page that is empty). */
+interface TopicFilterChain {
+  eq(column: string, value: boolean | string): TopicFilterChain;
+  gte(column: string, value: number | string): TopicFilterChain;
+}
+
+// The builder is typed loosely on purpose: PostgREST's filter builder carries
+// the parsed CLUSTER_EMBED_SELECT in its type, and asking TS to prove it
+// satisfies even a structural eq/gte interface overflows its instantiation
+// depth (TS2589). The helper only chains filters, so the builder comes back as
+// the type it went in as.
+function applyTopicFilters<Q>(
+  query: Q,
+  slug: TopicSlug,
+  sinceIso: string,
+): Q {
+  return (
+    (query as unknown as TopicFilterChain)
+      .eq("is_archived", false)
+      .eq("topic7", slug)
+      .gte("updated_at", sinceIso)
+      // The site's own cluster definition: a story needs at least two
+      // articles (same rule as /clusters and the timeline). Without it a hub
+      // listed single-article rows the rest of the site hides.
+      .gte("article_count", 2) as unknown as Q
+  );
+}
+
+/** Where does the list end? One lean head/exact count with the page read's
+ *  filters. Only called for an empty page past page 1. Never throws and never
+ *  fails the page: any trouble is `null` ("end unknown"). */
+async function fetchTopicLastPage(
+  supabase: SupabaseClient,
+  slug: TopicSlug,
+  sinceIso: string,
+): Promise<number | null> {
+  try {
+    const { count, error } = await applyTopicFilters(
+      supabase.from("clusters").select("id", { count: "exact", head: true }),
+      slug,
+      sinceIso,
+    );
+
+    if (error) {
+      console.error("[konu] last page unavailable:", {
+        message: error.message,
+        code: error.code,
+        details: error.details,
+        hint: error.hint,
+      });
+      return null;
+    }
+    // A successful response can still carry count: null (no total in
+    // Content-Range); a guessed page would be a lie.
+    if (count === null) {
+      console.error("[konu] last page unavailable:", "null count");
+      return null;
+    }
+    return Math.min(
+      TOPIC_MAX_PAGE,
+      Math.max(1, Math.ceil(count / TOPIC_PAGE_SIZE)),
+    );
+  } catch (err) {
+    console.error(
+      "[konu] last page unavailable:",
+      err instanceof Error ? err.message : String(err),
+    );
+    return null;
+  }
 }
 
 async function fetchTopicClusters(
@@ -108,16 +189,11 @@ async function fetchTopicClusters(
     // same feed-health gate, fetched once per page build.
     const health = await getZoneFeedHealth();
 
-    const { data, error } = await supabase
-      .from("clusters")
-      .select(CLUSTER_EMBED_SELECT)
-      .eq("is_archived", false)
-      .eq("topic7", slug)
-      .gte("updated_at", sinceIso)
-      // The site's own cluster definition: a story needs at least two
-      // articles (same rule as /clusters and the timeline). Without it a hub
-      // listed single-article rows the rest of the site hides.
-      .gte("article_count", 2)
+    const { data, error } = await applyTopicFilters(
+      supabase.from("clusters").select(CLUSTER_EMBED_SELECT),
+      slug,
+      sinceIso,
+    )
       .order("updated_at", { ascending: false })
       // Tiebreaker: clusters.updated_at is stamped now() by cluster_link_atomic
       // (migration 027), so members linked in one transaction can share a
@@ -148,6 +224,13 @@ async function fetchTopicClusters(
       const members = flattenClusterMembers(row);
       if (members.length === 0) continue;
       bundles.push(buildClusterBundle(row, members, health).bundle);
+    }
+
+    // Past the end (a page > 1 with no rows at all): tell the page where the
+    // list really stops, so it can link there instead of to an empty N-1.
+    if (rows.length === 0 && clampedPage > 1) {
+      const lastPage = await fetchTopicLastPage(supabase, slug, sinceIso);
+      return { bundles, hasMore, page: clampedPage, lastPage };
     }
 
     return { bundles, hasMore, page: clampedPage };

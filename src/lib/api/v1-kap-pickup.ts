@@ -1,4 +1,4 @@
-import { parseLimit } from "@/lib/api/v1-clusters";
+import { parseIsoInstant, parseLimit } from "@/lib/api/v1-clusters";
 import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
 import type { TickerPickup } from "@/lib/finance/kap-pickup-query";
 
@@ -17,8 +17,6 @@ export const V1_PICKUP_MAX_DAYS = 90;
 const DAY_MS = 86_400_000;
 
 export const PICKUP_TICKER_RE = /^[A-Z0-9]{2,6}$/;
-
-const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/;
 
 export interface PickupParams {
   ticker: string;
@@ -48,11 +46,8 @@ export function parsePickupParams(
   if (rawSince === null || rawSince.trim() === "") {
     sinceMs = nowMs - V1_PICKUP_DEFAULT_DAYS * DAY_MS;
   } else {
-    if (!ISO_RE.test(rawSince)) {
-      return { error: "Invalid since: must be an ISO 8601 timestamp" };
-    }
-    const parsed = new Date(rawSince);
-    if (Number.isNaN(parsed.getTime())) {
+    const parsed = parseIsoInstant(rawSince);
+    if (parsed === null) {
       return { error: "Invalid since: must be an ISO 8601 timestamp" };
     }
     if (parsed.getTime() > nowMs) {
@@ -91,6 +86,10 @@ export interface V1PickupBody {
   until: string;
   relevance_filter: { task: string; min_prob: number; applied: boolean };
   truncated: boolean;
+  /** The disclosure list reached `limit`: older disclosures in the window are not in `disclosures`. */
+  capped: boolean;
+  /** Every disclosure of the ticker in the window (uncapped); null when the count failed. */
+  total_disclosures: number | null;
   totals: {
     disclosures: number;
     picked_up: number;
@@ -111,6 +110,8 @@ export function toV1PickupBody(r: TickerPickup): V1PickupBody {
     until: r.until,
     relevance_filter: { task: "ticker_relevance", min_prob: 0.2, applied: r.relevanceApplied },
     truncated: r.truncated,
+    capped: r.capped,
+    total_disclosures: r.totalDisclosures,
     totals: {
       disclosures: r.totals.disclosures,
       picked_up: r.totals.pickedUp,

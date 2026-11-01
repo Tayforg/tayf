@@ -1,9 +1,12 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { API_PLANS, V1_COMMON_NOTES_TR, V1_ENDPOINTS } from "@/lib/api/v1-docs";
 import { API_TIER_LIMITS } from "@/lib/api/keys";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { CorrectionForm } from "@/components/story/correction-form";
 
 // The key-request note quotes the correction form's field labels, so the real
@@ -42,8 +45,8 @@ describe("/gelistirici page", () => {
       expect(html).toContain(endpoint.path);
     }
     expect(html).toContain("Authorization: Bearer");
-    expect(html).toContain(API_TIER_LIMITS.free.perDay.toLocaleString("tr-TR"));
-    expect(html).toContain(API_TIER_LIMITS.partner.perDay.toLocaleString("tr-TR"));
+    expect(html).toContain(formatCountTr(API_TIER_LIMITS.free.perDay));
+    expect(html).toContain(formatCountTr(API_TIER_LIMITS.partner.perDay));
     expect(html).toContain("/api/v1/openapi.json");
     expect(html).toContain("SLA");
     expect(html).toContain(
@@ -159,6 +162,60 @@ describe("/gelistirici page", () => {
       expect(plan.howTr).not.toMatch(/e-posta/i);
       expect(plan.howTr).toContain("Anahtar alma");
     }
+  });
+
+  it("labels the free tier in Turkish in the endpoints heading: 'Ücretsiz plan: 60/dk · 2.000/gün'", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    const free = API_PLANS.find((p) => p.tier === "free");
+    expect(free?.labelTr).toBe("Ücretsiz");
+
+    expect(html).toContain("Ücretsiz plan:");
+    expect(html).toContain("2.000/gün");
+    expect(html).toContain(
+      `${free!.labelTr} plan: ${API_TIER_LIMITS.free.perMinute}/dk · ${formatCountTr(API_TIER_LIMITS.free.perDay)}/gün`,
+    );
+    // the same figure as the tier table, not an English afterthought
+    expect(html).toContain("Ücretsiz plan: 60/dk · 2.000/gün");
+    expect(html).not.toContain("(free)");
+    expect(html).not.toMatch(/\bfree\b/i);
+  });
+
+  it("names the parameter location in Turkish (sorgu / yol), not the raw OpenAPI 'query' / 'path'", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+
+    // the "Yer" column cells of the params tables
+    expect(html).toContain('<td class="py-2.5 pr-4 text-muted-foreground">sorgu</td>');
+    expect(html).toContain('<td class="py-2.5 pr-4 text-muted-foreground">yol</td>');
+    expect(html).not.toContain('text-muted-foreground">query</td>');
+    expect(html).not.toContain('text-muted-foreground">path</td>');
+  });
+
+  it("keeps the quoted API wire messages and the JSON field name verbatim", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+
+    // literal response bodies / field names, not translatable copy
+    for (const wire of [
+      "Missing or invalid API key",
+      "API key revoked",
+      "Cluster not found",
+      "Internal server error",
+    ]) {
+      expect(html).toContain(wire);
+    }
+    expect(html).toContain(">error<");
+  });
+
+  it("page.tsx has no '(free)' literal and groups the heading count with the shared tr-TR formatter", () => {
+    const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+    expect(src).not.toContain("(free)");
+    expect(src).toContain("API_PLANS.find((p) => p.tier === \"free\")?.labelTr");
+    expect(src).toContain("formatCountTr(API_TIER_LIMITS.free.perDay)");
+    expect(src).toContain('from "@/lib/format/number-tr"');
+    // formatCountTr pins useGrouping, so the server and the browser agree
+    expect(src).not.toContain("toLocaleString");
   });
 
   it("never renders a key-shaped string (tayf_ followed by 40 hex chars)", async () => {

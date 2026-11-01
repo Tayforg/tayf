@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import Link from "next/link";
 import type { ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
@@ -7,11 +8,16 @@ import type { ReactNode } from "react";
 // src/lib/clusters/topic-query.test.ts) and call the default export as a plain
 // async function -- no React renderer needed for an async Server Component.
 //
-// What this pins: the failed read (getTopicClusters -> null) and an empty page
-// PAST the last one emit <meta name="robots" content="noindex"> (mirroring
-// generateMetadata's topicPageRobots). The ok state and an empty page 1 must
-// not, or a healthy hub would drop out of the index. The failure is cached for
-// "minutes" (topic-query.ts), so the prerendered noindex lives about a minute.
+// What this pins: the failed read (getTopicClusters -> null) emits one body
+// <meta name="robots" content="noindex">. An empty page PAST the last one emits
+// NO body meta: generateMetadata's topicPageRobots already puts
+// `noindex, follow` in <head> from the same cache key, so the page carries ONE
+// robots meta, not two. The ok state and an empty page 1 emit none, or a
+// healthy hub would drop out of the index. The failure is cached for "minutes"
+// (topic-query.ts), so the prerendered noindex lives about a minute.
+//
+// Past the last page the reader is never left on a dead end: the pager offers
+// the first page, the last page when it is known, and never a "Sonraki".
 // ---------------------------------------------------------------------------
 
 const mocks = vi.hoisted(() => ({
@@ -78,6 +84,41 @@ function collectText(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
+const LOCAL_PAGERS = new Set(["TopicPager", "PastEndPager"]);
+
+/** Expands the page's own (unexported) pager components so their links are
+ *  visible to walk(); every other custom component stays unexpanded. */
+function expandLocalPagers(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(expandLocalPagers);
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: Record<string, unknown> };
+    if (typeof el.type === "function" && LOCAL_PAGERS.has(el.type.name)) {
+      return expandLocalPagers((el.type as (p: unknown) => unknown)(el.props));
+    }
+    if (el.props?.children !== undefined) {
+      return { ...el, props: { ...el.props, children: expandLocalPagers(el.props.children) } };
+    }
+  }
+  return node;
+}
+
+/** The <nav aria-label="Sayfalar"> links, in document order. */
+function pagerLinks(tree: unknown): Array<{ href: string; label: string }> {
+  const out: Array<{ href: string; label: string }> = [];
+  const navs: unknown[] = [];
+  walk(expandLocalPagers(tree), (el) => {
+    if (el.type === "nav" && el.props?.["aria-label"] === "Sayfalar") navs.push(el);
+  });
+  for (const nav of navs) {
+    walk(nav, (el) => {
+      if (el.type === Link) {
+        out.push({ href: String(el.props?.href), label: collectText(el).join("") });
+      }
+    });
+  }
+  return out;
+}
+
 async function render(page = 1) {
   return TopicHubPage({
     params: Promise.resolve({ slug: "dunya" }),
@@ -136,17 +177,180 @@ describe("/konu/[slug] failed state", () => {
     expect(text).not.toContain(UNAVAILABLE_COPY);
   });
 
-  it("emits <meta name=robots content=noindex> for an empty page past the last one", async () => {
+  it("emits NO body robots meta for an empty page past the last one (generateMetadata owns the single noindex)", async () => {
     mocks.result = { bundles: [], hasMore: false, page: 3 };
 
     const tree = await render(3);
-    const metas = robotsMetas(tree);
 
-    expect(metas).toHaveLength(1);
-    expect(metas[0]?.content).toBe("noindex");
+    expect(robotsMetas(tree)).toEqual([]);
     const text = collectText(tree).join("");
     expect(text).toContain("Bu sayfada küme yok.");
     expect(text).not.toContain(UNAVAILABLE_COPY);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Past the last page: never a dead end. Prod today: ?sayfa=16 shows "Bu sayfada
+// küme yok." with a single link to ?sayfa=15 (also empty); ?sayfa=999 clamps to
+// 20 with a single link to ?sayfa=19; nothing leads back to page 1. The status
+// stays 200 plus the empty state (the PPR shell has flushed already; no other
+// paged route 404s) and the page stays noindex.
+// ---------------------------------------------------------------------------
+
+describe("/konu/[slug] past the last page", () => {
+  it("page 16, last page 13: says where the list ends and links to the first and the last page only", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 16, lastPage: 13 };
+
+    const tree = await render(16);
+    const text = collectText(tree).join("");
+
+    expect(text).toContain("Bu sayfada küme yok.");
+    expect(text).toContain("Liste 13. sayfada bitiyor.");
+    expect(text).not.toContain(UNAVAILABLE_COPY);
+    expect(pagerLinks(tree)).toEqual([
+      { href: "/konu/dunya", label: "İlk sayfaya dön" },
+      { href: "/konu/dunya?sayfa=13", label: "Son sayfaya git" },
+    ]);
+  });
+
+  it("never links to the empty neighbours (page - 1, page + 1) or says Sonraki", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 16, lastPage: 13 };
+
+    const tree = await render(16);
+    const hrefs = pagerLinks(tree).map((l) => l.href);
+    const labels = pagerLinks(tree).map((l) => l.label);
+
+    expect(hrefs).not.toContain("/konu/dunya?sayfa=15");
+    expect(hrefs).not.toContain("/konu/dunya?sayfa=17");
+    expect(labels).not.toContain("Sonraki");
+    expect(labels).not.toContain("Önceki");
+  });
+
+  it("emits zero body robots metas, and generateMetadata supplies the single noindex,follow for the same result", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 16, lastPage: 13 };
+
+    const tree = await render(16);
+    const m = await meta("dunya", "16");
+
+    expect(robotsMetas(tree)).toHaveLength(0);
+    expect(m.robots).toEqual({ index: false, follow: true });
+    expect(m.alternates?.canonical).toBe("/konu/dunya?sayfa=16");
+  });
+
+  it("?sayfa=999 (clamped to 20), last page 13: the same two links, nothing toward page 19", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 20, lastPage: 13 };
+
+    const tree = await render(999);
+
+    expect(pagerLinks(tree)).toEqual([
+      { href: "/konu/dunya", label: "İlk sayfaya dön" },
+      { href: "/konu/dunya?sayfa=13", label: "Son sayfaya git" },
+    ]);
+    expect(collectText(tree).join("")).toContain("Liste 13. sayfada bitiyor.");
+  });
+
+  it("lastPage null (count unavailable): first page plus Önceki to page - 1, no end claim, no next", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 16, lastPage: null };
+
+    const tree = await render(16);
+    const text = collectText(tree).join("");
+
+    expect(text).toContain("Bu sayfada küme yok.");
+    expect(text).not.toContain("sayfada bitiyor");
+    expect(pagerLinks(tree)).toEqual([
+      { href: "/konu/dunya", label: "İlk sayfaya dön" },
+      { href: "/konu/dunya?sayfa=15", label: "Önceki" },
+    ]);
+    expect(robotsMetas(tree)).toHaveLength(0);
+  });
+
+  it("lastPage absent (older cache entry) behaves like null", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 4 };
+
+    const tree = await render(4);
+
+    expect(pagerLinks(tree)).toEqual([
+      { href: "/konu/dunya", label: "İlk sayfaya dön" },
+      { href: "/konu/dunya?sayfa=3", label: "Önceki" },
+    ]);
+    expect(collectText(tree).join("")).not.toContain("sayfada bitiyor");
+  });
+
+  it("lastPage null on page 2: Önceki would equal the first page, so only İlk sayfaya dön", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 2, lastPage: null };
+
+    const tree = await render(2);
+
+    expect(pagerLinks(tree)).toEqual([{ href: "/konu/dunya", label: "İlk sayfaya dön" }]);
+  });
+
+  it("lastPage 1 on page 3: only İlk sayfaya dön (no Son sayfaya git to the same page)", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 3, lastPage: 1 };
+
+    const tree = await render(3);
+
+    expect(pagerLinks(tree)).toEqual([{ href: "/konu/dunya", label: "İlk sayfaya dön" }]);
+    expect(collectText(tree).join("")).toContain("Liste 1. sayfada bitiyor.");
+  });
+
+  it("a lastPage that is not before the current page never produces a Son sayfaya git link", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 3, lastPage: 3 };
+
+    const tree = await render(3);
+
+    expect(pagerLinks(tree).map((l) => l.label)).toEqual(["İlk sayfaya dön"]);
+  });
+
+  it("uses the slug of the requested hub in every link", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 9, lastPage: 4 };
+
+    const tree = await TopicHubPage({
+      params: Promise.resolve({ slug: "spor" }),
+      searchParams: Promise.resolve({ sayfa: "9" }),
+    });
+
+    expect(pagerLinks(tree)).toEqual([
+      { href: "/konu/spor", label: "İlk sayfaya dön" },
+      { href: "/konu/spor?sayfa=4", label: "Son sayfaya git" },
+    ]);
+  });
+
+  it("an empty page 1 shows no pager at all", async () => {
+    mocks.result = { bundles: [], hasMore: false, page: 1 };
+
+    expect(pagerLinks(await render())).toEqual([]);
+  });
+
+  it("the failed read (null) still shows no pager", async () => {
+    mocks.result = null;
+
+    expect(pagerLinks(await render(16))).toEqual([]);
+  });
+});
+
+// The normal pager is unchanged: next only while hasMore and below the ceiling.
+describe("/konu/[slug] pager on a page with clusters", () => {
+  it("page 3 with more: Önceki to page 2 and Sonraki to page 4", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: true, page: 3 };
+
+    expect(pagerLinks(await render(3))).toEqual([
+      { href: "/konu/dunya?sayfa=2", label: "Önceki" },
+      { href: "/konu/dunya?sayfa=4", label: "Sonraki" },
+    ]);
+  });
+
+  it("page 2 Önceki goes to the bare hub URL", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 2 };
+
+    expect(pagerLinks(await render(2))).toEqual([{ href: "/konu/dunya", label: "Önceki" }]);
+  });
+
+  it("the last allowed page (20) never offers Sonraki even when hasMore is true", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: true, page: 20 };
+
+    expect(pagerLinks(await render(20))).toEqual([
+      { href: "/konu/dunya?sayfa=19", label: "Önceki" },
+    ]);
   });
 });
 

@@ -15,7 +15,9 @@ vi.mock("@/lib/clusters/cluster-detail-query", () => ({
 }));
 
 import KarsilastirPage, { CompareBody, metadata } from "./page";
+import { renderToStaticMarkup } from "react-dom/server";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
+import { ZONE_META } from "@/lib/bias/config";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 
@@ -76,15 +78,26 @@ function makeMember(source: Source): ClusterDetailMember {
 function makeDetail(
   id: string,
   title: string,
-  extra: { merged_into?: string | null; is_blindspot?: boolean } = {},
+  extra: {
+    merged_into?: string | null;
+    is_blindspot?: boolean;
+    /** false drops the non-voting aggregator member (default: kept). */
+    aggregator?: boolean;
+    /** true leaves bias_distribution all zero (BiasSpectrum then renders null). */
+    zeroDistribution?: boolean;
+  } = {},
 ): ClusterDetail {
   const distribution = emptyDistribution();
-  distribution.pro_government = 1;
-  distribution.opposition = 1;
+  if (!extra.zeroDistribution) {
+    distribution.pro_government = 1;
+    distribution.opposition = 1;
+  }
   const members = [
     makeMember(makeSource(`gov-${id}`, "Hükümet Gazetesi", "pro_government")),
     makeMember(makeSource(`opp-${id}`, "Muhalif Gazete", "opposition")),
-    makeMember(makeSource(`agg-${id}`, "Haber Toplayıcı", "center", "aggregator")),
+    ...(extra.aggregator === false
+      ? []
+      : [makeMember(makeSource(`agg-${id}`, "Haber Toplayıcı", "center", "aggregator"))]),
   ];
   return {
     cluster: {
@@ -423,6 +436,198 @@ describe("CompareBody — fetching", () => {
       }
     }
     expect(hrefs).toContain(`/cluster/${A}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h14-polish-5: the two ok columns share grid rows at md+ (subgrid), so the
+// İktidar / Bağımsız / Muhalefet rosters line up across the columns instead of
+// drifting by the height difference of the title, the meta line or a roster.
+// Every ok <article> therefore has the SAME eight direct children in the same
+// order; a missing optional one is replaced by an aria-hidden placeholder so
+// the row count never differs between the sides.
+// ---------------------------------------------------------------------------
+
+describe("CompareBody — zone rows aligned across the two columns", () => {
+  const ZONE_ORDER = ["iktidar", "bagimsiz", "muhalefet"] as const;
+
+  /** Direct children of an element: arrays flattened, null / false dropped. */
+  function childrenOf(el: Elementish | undefined): Elementish[] {
+    const out: Elementish[] = [];
+    const walk = (node: unknown) => {
+      if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === "object") out.push(node as Elementish);
+    };
+    walk(el?.props?.children);
+    return out;
+  }
+
+  const textOf = (node: unknown) => collectText(node).join("");
+  const tokensOf = (el: Elementish | undefined) =>
+    String(el?.props?.className).split(/\s+/).filter(Boolean);
+
+  async function renderOkPair() {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      id === A
+        ? makeDetail(id, "Birinci hikâye", { is_blindspot: true }) // has a non-voting source
+        : makeDetail(id, "İkinci hikâye", { aggregator: false }), // none
+    );
+    const tree = await render({ a: A, b: B });
+    const articles = collectElements(tree).filter((el) => el.type === "article");
+    expect(articles).toHaveLength(2);
+    return { tree, withNonVoting: articles[0]!, without: articles[1]! };
+  }
+
+  it("keeps the outer two-column grid and makes each article a subgrid spanning eight rows", async () => {
+    const { tree, withNonVoting, without } = await renderOkPair();
+
+    const grid = collectElements(tree).find(
+      (el) => el.type === "div" && el.props?.className === "grid gap-4 md:grid-cols-2",
+    );
+    expect(grid).toBeDefined();
+
+    for (const article of [withNonVoting, without]) {
+      const tokens = tokensOf(article);
+      expect(tokens).toContain("md:grid");
+      expect(tokens).toContain("md:grid-rows-subgrid");
+      expect(tokens).toContain("md:row-span-8");
+      // Stacked (flex column) below md, with the same 1rem rhythm as before.
+      expect(tokens).toContain("flex");
+      expect(tokens).toContain("flex-col");
+      expect(tokens).toContain("gap-4");
+      expect(tokens).toContain("min-w-0");
+      // The old vertical stack would fight the subgrid rows.
+      expect(tokens.some((t) => t.startsWith("space-y-"))).toBe(false);
+    }
+  });
+
+  it("gives both articles exactly eight direct element children", async () => {
+    const { withNonVoting, without } = await renderOkPair();
+
+    expect(childrenOf(withNonVoting)).toHaveLength(8);
+    expect(childrenOf(without)).toHaveLength(8);
+  });
+
+  it("orders the children: title, meta, spectrum, three zone rows, non-voting slot, remove link", async () => {
+    const { withNonVoting, without } = await renderOkPair();
+
+    for (const article of [withNonVoting, without]) {
+      const kids = childrenOf(article);
+      expect(kids[0]!.type).toBe("h2");
+      expect(kids[1]!.type).toBe("div");
+      expect(textOf(kids[1])).toContain("kaynak");
+      expect(collectElements(kids[2]).some((el) => el.type === BiasSpectrum)).toBe(true);
+      expect(textOf(kids[7])).toBe("Bu tarafı kaldır");
+    }
+  });
+
+  it("puts one roster per zone in rows 4-6, in ZONES order, as direct children (no wrapper)", async () => {
+    const { withNonVoting, without } = await renderOkPair();
+
+    for (const article of [withNonVoting, without]) {
+      const kids = childrenOf(article);
+      ZONE_ORDER.forEach((zone, i) => {
+        const row = kids[3 + i]!;
+        expect(row.type, zone).toBe("div");
+        expect(textOf(row), zone).toContain(ZONE_META[zone].label);
+        for (const other of ZONE_ORDER.filter((z) => z !== zone)) {
+          expect(textOf(row), `${zone} row must not hold ${other}`).not.toContain(
+            ZONE_META[other].label,
+          );
+        }
+      });
+    }
+  });
+
+  it("row 7 is the non-voting note when there is one, otherwise an aria-hidden md-only placeholder", async () => {
+    const { withNonVoting, without } = await renderOkPair();
+
+    const note = childrenOf(withNonVoting)[6]!;
+    expect(note.type).toBe("p");
+    expect(textOf(note)).toBe("Toplayıcı / niş (spektruma sayılmaz): Haber Toplayıcı");
+
+    const placeholder = childrenOf(without)[6]!;
+    expect(placeholder.type).toBe("div");
+    expect(placeholder.props?.["aria-hidden"]).toBe("true");
+    expect(placeholder.props?.className).toBe("hidden md:block");
+    expect(placeholder.props?.children).toBeUndefined();
+    // It must not leak any text into the page.
+    expect(textOf(placeholder)).toBe("");
+  });
+
+  it("keeps the remove link as wide as its text (a flex / grid item would stretch it full width)", async () => {
+    const { withNonVoting, without } = await renderOkPair();
+
+    for (const article of [withNonVoting, without]) {
+      const link = childrenOf(article)[7]!;
+      const tokens = tokensOf(link);
+      // align-self: flex-start in the flex column (<md), justify-self: start in the grid (md+)
+      expect(tokens).toContain("self-start");
+      expect(tokens).toContain("justify-self-start");
+      // and it is still a 44 px target
+      expect(tokens).toContain("min-h-[44px]");
+    }
+  });
+
+  it("still holds eight children when the spectrum renders nothing (all-zero distribution)", async () => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) =>
+      makeDetail(id, id, { zeroDistribution: true }),
+    );
+    const tree = await render({ a: A, b: B });
+    const [first] = collectElements(tree).filter((el) => el.type === "article");
+
+    expect(childrenOf(first)).toHaveLength(8);
+    // BiasSpectrum returns null for an all-zero distribution. Its slot is a real
+    // wrapper element, so the DOM keeps eight grid items and the zone rows below
+    // do not slide up one row relative to the other column.
+    const { bias_distribution } = makeDetail(A, "x", { zeroDistribution: true }).cluster;
+    expect(BiasSpectrum({ distribution: bias_distribution, compact: true })).toBeNull();
+    const slot = childrenOf(first)[2]!;
+    expect(slot.type).toBe("div");
+    const html = renderToStaticMarkup(slot as unknown as React.ReactElement);
+    expect(html).toMatch(/^<div[^>]*><\/div>$/);
+  });
+
+  it.each([
+    ["missing", { a: A }, 1],
+    ["unavailable", { a: A, b: B }, 1],
+  ] as const)("the %s side spans all eight rows without stretching row 1", async (name, sp, noticeCount) => {
+    getClusterDetailOrThrow.mockImplementation(async (id: string) => {
+      if (name === "unavailable" && id === B) throw new Error("reader timeout");
+      return makeDetail(id, "Sağlam hikâye");
+    });
+    const tree = await render(sp);
+
+    const notices = collectElements(tree).filter(
+      (el) => el.type === "div" && tokensOf(el).includes("border-dashed"),
+    );
+    expect(notices).toHaveLength(noticeCount);
+    for (const notice of notices) {
+      const tokens = tokensOf(notice);
+      expect(tokens).toContain("md:row-span-8");
+      expect(tokens).toContain("md:self-start");
+    }
+    // The ok side next to it is still a full subgrid.
+    const [article] = collectElements(tree).filter((el) => el.type === "article");
+    expect(tokensOf(article)).toContain("md:grid-rows-subgrid");
+  });
+
+  it("gives every kind of notice box the row-span (they all share NOTICE_BOX)", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    const box = src.match(/const NOTICE_BOX =\s*"([^"]+)"/);
+    expect(box).not.toBeNull();
+    const tokens = box![1]!.split(/\s+/);
+    expect(tokens).toContain("md:row-span-8");
+    expect(tokens).toContain("md:self-start");
+    // every notice case renders NOTICE_BOX rather than its own class string
+    expect(src.match(/<div className=\{NOTICE_BOX\}>/g)).toHaveLength(6);
+  });
+
+  it("leaves the loading skeleton unchanged", () => {
+    const src = readFileSync(resolve(__dirname, "page.tsx"), "utf8");
+    const skeletonSrc = src.slice(src.indexOf("function CompareSkeleton"), src.indexOf("async function loadSide"));
+    expect(skeletonSrc).not.toContain("subgrid");
+    expect(skeletonSrc).toContain('className="grid gap-4 md:grid-cols-2"');
   });
 });
 

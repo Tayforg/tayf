@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ReactNode } from "react";
+import { Suspense, type ReactNode } from "react";
 
 // ---------------------------------------------------------------------------
 // A-M4: no test file existed for /kaynaklar/durum before. Covers the
@@ -52,6 +52,8 @@ import KaynakDurumPage, {
   KaynakDurumBody,
   ItemsPerDayCell,
 } from "./page";
+import { SOURCE_KIND_META } from "@/lib/sources/kind";
+import { ZONE_META } from "@/lib/bias/config";
 import {
   toFeedStatusRows,
   type SourceFeedStatusRawRow,
@@ -531,6 +533,166 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
       expect(src).not.toContain("text-rose-700");
       expect(src).not.toContain("dark:text-rose-500");
       expect(src).toContain("sticky left-0 z-10 bg-card");
+    });
+  });
+
+  // h14-polish-5: on a 375 px phone the table is ~721 px wide inside a ~311 px
+  // scroller. "Sessiz" used to be the 7th of 7 columns (x = 670-753), so the
+  // label the page copy points at was off-screen with no hint that the table
+  // scrolls. It now sits right after the sticky Kaynak column, and a cue tells
+  // phone readers the other columns are one swipe away.
+  describe("Sessiz column order and scroll cue (h14-polish-5)", () => {
+    const classOf = (el: El | undefined): string => String(el?.props?.className);
+    const tokens = (cls: string) => cls.split(/\s+/);
+    const CUE_ID = "durum-kaydir";
+
+    const cellsOf = (tree: unknown, slug: string) =>
+      elements(rowOf(tree, slug)).filter((e) => e.type === "td");
+
+    const quarantinedSilent = () =>
+      cellsOf(
+        body([
+          rawRow({
+            slug: "karantina",
+            name: "Karantina Haber",
+            latest: stale,
+            fetch_fail_streak: 21,
+            fetch_quarantined_until: new Date(NOW + 6 * HOUR).toISOString(),
+          }),
+        ]),
+        "karantina",
+      );
+
+    /** The children array that directly contains `target`, if any. */
+    function siblingsOf(node: unknown, target: unknown): unknown[] | null {
+      if (Array.isArray(node)) {
+        if (node.includes(target)) return node;
+        for (const child of node) {
+          const found = siblingsOf(child, target);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (node && typeof node === "object") {
+        const children = (node as El).props?.children;
+        return children === undefined ? null : siblingsOf(children, target);
+      }
+      return null;
+    }
+
+    it("orders the columns Kaynak, Sessiz, Tür, Bölge, Son haber, Son HTTP durumu, 7 günlük gün başına haber", () => {
+      const heads = elements(body(fixtures()))
+        .filter((e) => e.type === "th")
+        .map((th) => textOf(th));
+      expect(heads).toEqual([
+        "Kaynak",
+        "Sessiz",
+        "Tür",
+        "Bölge",
+        "Son haber",
+        "Son HTTP durumu",
+        "7 günlük gün başına haber",
+      ]);
+    });
+
+    it("every row has seven cells and keeps the name first", () => {
+      const tree = body(fixtures());
+      for (const slug of ["donmus", "engelli", "sakin", "aktif"]) {
+        const cells = cellsOf(tree, slug);
+        expect(cells, slug).toHaveLength(7);
+        expect(textOf(cells[0]), slug).toContain("Haber");
+      }
+    });
+
+    it("td[1] holds the silence badge, or a dash for a delivering source", () => {
+      const tree = body(fixtures());
+      expect(textOf(cellsOf(tree, "donmus")[1])).toBe("akış donmuş");
+      expect(textOf(cellsOf(tree, "engelli")[1])).toBe("erişim yok");
+      expect(textOf(cellsOf(tree, "sakin")[1])).toBe("sessiz");
+      expect(textOf(cellsOf(tree, "aktif")[1])).toBe("—");
+    });
+
+    it("td[1] also carries the karantinada badge next to the reason", () => {
+      const cell = quarantinedSilent()[1];
+      expect(textOf(cell)).toBe("erişim yokkarantinada");
+    });
+
+    it("the other cells moved one place right: kind, zone, last item, HTTP status, items per day", () => {
+      const cells = cellsOf(body(fixtures()), "aktif");
+      expect(textOf(cells[2])).toBe(SOURCE_KIND_META.outlet.label);
+      expect(textOf(cells[3])).toBe(ZONE_META.bagimsiz.label);
+      // "Son haber": a relative time or date (depends on the clock), never the dash
+      expect(textOf(cells[4])).not.toBe("");
+      expect(textOf(cells[4])).not.toBe("—");
+      expect(textOf(cells[5])).toBe("200");
+      // the streamed 7-day rate stays behind its own Suspense in the last cell
+      expect(elements(cells[6]).some((e) => e.type === Suspense)).toBe(true);
+    });
+
+    it("Sessiz th and td carry pr-4; the new last column drops it", () => {
+      const tree = body(fixtures());
+      const heads = elements(tree).filter((e) => e.type === "th");
+      expect(tokens(classOf(heads[1]))).toContain("pr-4");
+      expect(tokens(classOf(heads[6]))).not.toContain("pr-4");
+      for (const slug of ["donmus", "aktif"]) {
+        const cells = cellsOf(tree, slug);
+        expect(tokens(classOf(cells[1])), `${slug} Sessiz td`).toContain("pr-4");
+        expect(tokens(classOf(cells[6])), `${slug} last td`).not.toContain("pr-4");
+      }
+    });
+
+    it("Kaynak stays the only sticky column", () => {
+      const tree = body(fixtures());
+      const heads = elements(tree).filter((e) => e.type === "th");
+      expect(heads.filter((h) => classOf(h).includes("sticky"))).toHaveLength(1);
+      expect(textOf(heads[0])).toBe("Kaynak");
+      const cells = cellsOf(tree, "donmus");
+      expect(cells.filter((c) => classOf(c).includes("sticky"))).toHaveLength(1);
+      expect(classOf(cells[0])).toContain("sticky left-0 z-10 bg-card");
+    });
+
+    it("shows a swipe cue for phones right above the scroll region", () => {
+      const tree = body(fixtures());
+      const all = elements(tree);
+      const cue = all.find((e) => e.props?.id === CUE_ID);
+      expect(cue, "scroll cue").toBeDefined();
+      expect(cue!.type).toBe("p");
+      expect(classOf(cue)).toBe("text-[11px] text-muted-foreground md:hidden");
+      expect(textOf(cue)).toBe("Diğer sütunlar için tabloyu yana kaydırın.");
+
+      // The cue is outside the scroller, immediately before it (siblings).
+      const region = all.find((e) => e.props?.role === "region")!;
+      expect(elements(region).includes(cue!)).toBe(false);
+      const siblings = siblingsOf(tree, cue)!;
+      expect(siblings).not.toBeNull();
+      expect(siblings[siblings.indexOf(cue) + 1]).toBe(region);
+    });
+
+    it("describes the region by the cue and keeps its role, name and focusability", () => {
+      const region = elements(body(fixtures())).find((e) => e.props?.role === "region")!;
+      expect(region.props?.["aria-describedby"]).toBe(CUE_ID);
+      expect(region.props?.["aria-labelledby"]).toBe("durum-tablo");
+      expect(region.props?.tabIndex).toBe(0);
+      expect(classOf(region)).toContain("overflow-x-auto");
+    });
+
+    it("the describedby target exists exactly once", () => {
+      const tree = body(fixtures());
+      expect(elements(tree).filter((e) => e.props?.id === CUE_ID)).toHaveLength(1);
+    });
+
+    it("renders no cue (and no dangling describedby) for an empty list", () => {
+      const tree = KaynakDurumBody({ rows: [], itemsPerDayPromise: Promise.resolve({}) });
+      expect(elements(tree).filter((e) => e.props?.id === CUE_ID)).toHaveLength(0);
+      expect(elements(tree).filter((e) => e.props?.["aria-describedby"] !== undefined)).toHaveLength(0);
+    });
+
+    it("pins the cue, its md:hidden class and the describedby in the page source", () => {
+      const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+      expect(src).toContain('id="durum-kaydir"');
+      expect(src).toContain('className="text-[11px] text-muted-foreground md:hidden"');
+      expect(src).toContain('aria-describedby="durum-kaydir"');
+      expect(src).toContain("Diğer sütunlar için tabloyu yana kaydırın.");
     });
   });
 });

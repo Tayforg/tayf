@@ -15,6 +15,8 @@ import { API_TIER_LIMITS } from "@/lib/api/keys";
 import { toRegistryRecord, type RegistrySourceRow } from "@/lib/sources/registry";
 import { toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
 import { toV1SourceProfile } from "@/lib/api/v1-source-profile";
+import { toV1PickupBody } from "@/lib/api/v1-kap-pickup";
+import type { TickerPickup } from "@/lib/finance/kap-pickup-query";
 import {
   V1_PROFILE_MIN_CLUSTERS,
   V1_PROFILE_MIN_MULTI,
@@ -73,11 +75,31 @@ const REFUSAL_EXPORT_RE =
   /export\s+const\s+(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s*=\s*methodNotAllowed\s*;/g;
 
 // The catch-all 404 lives in a `[...path]` directory. It answers every
-// unmatched path, so it is not a (method, path) pair and has no doc entry.
+// unmatched path, so it is not a (method, path) pair and has no doc entry. The
+// bare `/api/v1` (a required catch-all does not match zero segments) is the
+// root `route.ts`, which re-exports the catch-all's handlers and is therefore
+// a catch-all for this contract too.
 const CATCH_ALL_DIR = "[...path]";
+const ROOT_ROUTE_FILE = "route.ts";
 
 function isCatchAllRoute(filePath: string): boolean {
-  return path.relative(V1_ROOT, filePath).split(path.sep).includes(CATCH_ALL_DIR);
+  const rel = path.relative(V1_ROOT, filePath);
+  return rel === ROOT_ROUTE_FILE || rel.split(path.sep).includes(CATCH_ALL_DIR);
+}
+
+// `export { GET, HEAD } from "./[...path]/route";` -- the root route.ts re-exports
+// the catch-all's handlers instead of redefining them.
+const REEXPORT_LIST_RE = /export\s*\{([^}]*)\}\s*from\s*["'][^"']+["']/g;
+
+function collectReexportedMethods(source: string): string[] {
+  const methods = new Set<string>();
+  for (const match of source.matchAll(REEXPORT_LIST_RE)) {
+    for (const name of match[1]!.split(",")) {
+      const exported = name.trim().split(/\s+as\s+/).pop() ?? "";
+      if (/^(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)$/.test(exported)) methods.add(exported);
+    }
+  }
+  return [...methods];
 }
 
 function collectRefusalMethods(source: string): Set<string> {
@@ -465,6 +487,69 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
       expect(methods, `catch-all must export ${method}`).toContain(method);
     }
     expect(source).toContain("v1NotFound");
+  });
+
+  it("the bare-root route exists and exports GET and OPTIONS", () => {
+    const file = path.join(V1_ROOT, ROOT_ROUTE_FILE);
+    const source = readFileSync(file, "utf8");
+    // Either re-exported from the catch-all or defined like it (the fallback
+    // if Next's route type check ever rejects the re-export).
+    const methods = [...collectExportedMethods(source), ...collectReexportedMethods(source)];
+    expect(methods).toEqual(expect.arrayContaining(["GET", "OPTIONS"]));
+    for (const method of ["HEAD", "POST", "PUT", "PATCH", "DELETE"]) {
+      expect(methods, `root route must export ${method}`).toContain(method);
+    }
+    if (collectReexportedMethods(source).length > 0) {
+      expect(source).toMatch(/from\s*["']\.\/\[\.\.\.path\]\/route["']/);
+    } else {
+      expect(source).toContain("v1NotFound");
+    }
+    expect(isCatchAllRoute(file)).toBe(true);
+    // Not part of the documented (method, path) pairs.
+    expect(handlers.some((h) => h.routePath === "/api/v1/")).toBe(false);
+  });
+
+  it("KapPickupResponse schema keys equal Object.keys(toV1PickupBody(fixture)) and each has a property schema", () => {
+    const fixture: TickerPickup = {
+      ticker: "THYAO",
+      since: "2026-10-02T00:00:00.000Z",
+      until: "2026-11-01T00:00:00.000Z",
+      pickups: [],
+      totals: {
+        disclosures: 0,
+        pickedUp: 0,
+        pickupRate: null,
+        medianFirstLagMinutes: null,
+        outlets: 0,
+        zones: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
+      },
+      relevanceApplied: true,
+      truncated: false,
+      totalDisclosures: 102,
+      capped: true,
+    };
+    const body = toV1PickupBody(fixture);
+    const schema = doc.components.schemas.KapPickupResponse as {
+      allOf: Array<{
+        $ref?: string;
+        required?: string[];
+        properties?: Record<string, { type?: unknown }>;
+      }>;
+    };
+    // allOf = [Envelope $ref, the body object]; the envelope keys are added by
+    // registryEnvelope() and are not part of toV1PickupBody.
+    const part = schema.allOf.find((p) => p.required);
+    expect(part).toBeDefined();
+    const required = [...(part!.required ?? [])];
+    const properties = part!.properties ?? {};
+
+    expect([...required].sort()).toEqual(Object.keys(body).sort());
+    for (const key of Object.keys(body)) {
+      expect(properties[key], `no property schema for ${key}`).toBeDefined();
+    }
+    expect(Object.keys(properties).sort()).toEqual(Object.keys(body).sort());
+    expect(properties.capped).toEqual(expect.objectContaining({ type: "boolean" }));
+    expect(properties.total_disclosures?.type).toEqual(["integer", "null"]);
   });
 
   it("documents the 405 on every GET endpoint (and only GET endpoints)", () => {

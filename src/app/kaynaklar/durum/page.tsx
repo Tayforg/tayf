@@ -191,106 +191,115 @@ export function KaynakDurumBody({
             Şu anda listelenecek aktif kaynak yok.
           </p>
         ) : (
-          <div
-            className="overflow-x-auto"
-            role="region"
-            aria-labelledby="durum-tablo"
-            tabIndex={0}
-          >
-            <table className="w-full border-collapse text-left text-sm">
-              <thead>
-                <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
-                  <th
-                    scope="col"
-                    className="sticky left-0 z-10 bg-card py-2 pr-4 font-medium"
-                  >
-                    Kaynak
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Tür
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Bölge
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Son haber
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    Son HTTP durumu
-                  </th>
-                  <th scope="col" className="py-2 pr-4 font-medium">
-                    7 günlük gün başına haber
-                  </th>
-                  <th scope="col" className="py-2 font-medium">
-                    Sessiz
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/30">
-                {sortedRows.map((row) => (
-                  <tr key={row.slug}>
-                    <td className="sticky left-0 z-10 bg-card py-2.5 pr-4 font-medium text-foreground whitespace-nowrap">
-                      <Link
-                        href={`/source/${row.slug}`}
-                        className="hover:underline"
-                      >
-                        {row.name}
-                      </Link>
-                    </td>
-                    <td className="py-2.5 pr-4 whitespace-nowrap text-muted-foreground">
-                      {SOURCE_KIND_META[row.kind].label}
-                    </td>
-                    <td className="py-2.5 pr-4 whitespace-nowrap">
-                      <span className="inline-flex items-center gap-2 text-muted-foreground">
-                        <span
-                          className={`h-2 w-2 rounded-full ${ZONE_META[row.zone].dot}`}
-                          aria-hidden="true"
-                        />
-                        {ZONE_META[row.zone].label}
-                      </span>
-                    </td>
-                    <td className="py-2.5 pr-4 whitespace-nowrap text-muted-foreground">
-                      {row.lastItemAt ? formatTurkishTimeAgo(row.lastItemAt) : "—"}
-                    </td>
-                    <td className="py-2.5 pr-4 whitespace-nowrap font-mono text-muted-foreground">
-                      {row.lastHttpStatus ?? "—"}
-                    </td>
-                    <td className="py-2.5 pr-4 whitespace-nowrap font-mono text-muted-foreground">
-                      <Suspense fallback={<span className="text-muted-foreground">…</span>}>
-                        <ItemsPerDayCell
-                          slug={row.slug}
-                          itemsPerDayPromise={itemsPerDayPromise}
-                        />
-                      </Suspense>
-                    </td>
-                    <td className="py-2.5">
-                      <span className="flex flex-wrap items-center gap-1.5">
-                        {row.silent ? (
-                          <span
-                            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ${
-                              SILENCE_BADGE_CLASS[row.silenceReason ?? "sessiz"]
-                            }`}
-                          >
-                            {SILENCE_REASON_LABEL[row.silenceReason ?? "sessiz"]}
-                          </span>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                        {row.quarantined ? (
-                          <span
-                            title={`Art arda ${row.failStreak} başarısız çekim — besleme geçici olarak atlanıyor`}
-                            className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-800 dark:text-rose-300 font-medium whitespace-nowrap"
-                          >
-                            karantinada
-                          </span>
-                        ) : null}
-                      </span>
-                    </td>
+          <>
+            {/* Phone cue: the table is wider than the card below md, and the
+                horizontal scroll is otherwise invisible. Hidden from md up,
+                where the card is wide enough for the first columns anyway. */}
+            <p id="durum-kaydir" className="text-[11px] text-muted-foreground md:hidden">
+              Diğer sütunlar için tabloyu yana kaydırın.
+            </p>
+            <div
+              className="overflow-x-auto"
+              role="region"
+              aria-labelledby="durum-tablo"
+              aria-describedby="durum-kaydir"
+              tabIndex={0}
+            >
+              <table className="w-full border-collapse text-left text-sm">
+                <thead>
+                  <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
+                    <th
+                      scope="col"
+                      className="sticky left-0 z-10 bg-card py-2 pr-4 font-medium"
+                    >
+                      Kaynak
+                    </th>
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Sessiz
+                    </th>
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Tür
+                    </th>
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Bölge
+                    </th>
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Son haber
+                    </th>
+                    <th scope="col" className="py-2 pr-4 font-medium">
+                      Son HTTP durumu
+                    </th>
+                    <th scope="col" className="py-2 font-medium">
+                      7 günlük gün başına haber
+                    </th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-border/30">
+                  {sortedRows.map((row) => (
+                    <tr key={row.slug}>
+                      <td className="sticky left-0 z-10 bg-card py-2.5 pr-4 font-medium text-foreground whitespace-nowrap">
+                        <Link
+                          href={`/source/${row.slug}`}
+                          className="hover:underline"
+                        >
+                          {row.name}
+                        </Link>
+                      </td>
+                      <td className="py-2.5 pr-4">
+                        <span className="flex flex-wrap items-center gap-1.5">
+                          {row.silent ? (
+                            <span
+                              className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium whitespace-nowrap ${
+                                SILENCE_BADGE_CLASS[row.silenceReason ?? "sessiz"]
+                              }`}
+                            >
+                              {SILENCE_REASON_LABEL[row.silenceReason ?? "sessiz"]}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                          {row.quarantined ? (
+                            <span
+                              title={`Art arda ${row.failStreak} başarısız çekim — besleme geçici olarak atlanıyor`}
+                              className="inline-flex items-center gap-1 rounded-full bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] text-rose-800 dark:text-rose-300 font-medium whitespace-nowrap"
+                            >
+                              karantinada
+                            </span>
+                          ) : null}
+                        </span>
+                      </td>
+                      <td className="py-2.5 pr-4 whitespace-nowrap text-muted-foreground">
+                        {SOURCE_KIND_META[row.kind].label}
+                      </td>
+                      <td className="py-2.5 pr-4 whitespace-nowrap">
+                        <span className="inline-flex items-center gap-2 text-muted-foreground">
+                          <span
+                            className={`h-2 w-2 rounded-full ${ZONE_META[row.zone].dot}`}
+                            aria-hidden="true"
+                          />
+                          {ZONE_META[row.zone].label}
+                        </span>
+                      </td>
+                      <td className="py-2.5 pr-4 whitespace-nowrap text-muted-foreground">
+                        {row.lastItemAt ? formatTurkishTimeAgo(row.lastItemAt) : "—"}
+                      </td>
+                      <td className="py-2.5 pr-4 whitespace-nowrap font-mono text-muted-foreground">
+                        {row.lastHttpStatus ?? "—"}
+                      </td>
+                      <td className="py-2.5 whitespace-nowrap font-mono text-muted-foreground">
+                        <Suspense fallback={<span className="text-muted-foreground">…</span>}>
+                          <ItemsPerDayCell
+                            slug={row.slug}
+                            itemsPerDayPromise={itemsPerDayPromise}
+                          />
+                        </Suspense>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
     </>

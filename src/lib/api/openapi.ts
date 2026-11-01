@@ -277,6 +277,8 @@ function buildSchemas(): Record<string, unknown> {
           "until",
           "relevance_filter",
           "truncated",
+          "capped",
+          "total_disclosures",
           "totals",
           "count",
           "disclosures",
@@ -295,7 +297,14 @@ function buildSchemas(): Record<string, unknown> {
               applied: { type: "boolean" },
             },
           },
+          // The news-mention paging bound was reached, so the counts may be low.
           truncated: { type: "boolean" },
+          // The disclosure list reached `limit`: older disclosures in the
+          // window are not in `disclosures`.
+          capped: { type: "boolean" },
+          // Every disclosure of the ticker in the window (uncapped), or null
+          // when that count failed.
+          total_disclosures: { type: ["integer", "null"] },
           totals: {
             type: "object",
             required: [

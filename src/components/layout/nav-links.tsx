@@ -4,8 +4,12 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Telescope, Eye, Bookmark, Settings, TrendingUp } from "lucide-react";
 
+// Below `sm` the labels are sr-only and each link is a 14 px icon, so the
+// `max-sm:` floor lifts the touch target to 44 px (the size used elsewhere on
+// the site; WCAG 2.5.8 only requires 24). sm+ is unchanged, and the h-14 header
+// row is taller than 44 px, so the header height does not move.
 const baseLink =
-  "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "flex items-center gap-1.5 rounded-md px-2.5 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center";
 const inactive =
   "text-foreground/80 hover:text-foreground hover:bg-muted/50";
 const active = "bg-foreground/10 text-foreground font-medium";
@@ -111,7 +115,7 @@ export function NavLinksView({
           <Link
             href="/admin"
             aria-current={isAdmin ? "page" : undefined}
-            className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+            className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring max-sm:min-h-11 max-sm:min-w-11 max-sm:justify-center ${
               isAdmin
                 ? active
                 : "text-muted-foreground hover:text-foreground hover:bg-muted/50"

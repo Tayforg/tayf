@@ -519,7 +519,10 @@ non-2xx):
 - `404`: (`GET /api/v1/clusters/[id]`, `.../sources/{slug}/profile`) unknown
   id/slug — and **any unknown `/api/v1/*` path** (JSON `{"error":"Not found"}`
   with CORS headers, from the `src/app/api/v1/[...path]/route.ts` catch-all;
-  keyless, no database call, no rate-limit charge). It applies to every method.
+  keyless, no database call, no rate-limit charge). It applies to every method
+  and includes the bare `/api/v1` itself, which `src/app/api/v1/route.ts`
+  answers with the same handlers (a required catch-all does not match the
+  root).
 - `405`: any method other than `GET`, `HEAD` and `OPTIONS` on a real route
   (`{"error":"Method not allowed"}`) with `Allow: GET, HEAD, OPTIONS` and the
   CORS headers. No key is needed and nothing is charged.
@@ -587,7 +590,8 @@ endpoint's own payload keys.
 ### `GET /api/v1/clusters`
 
 **Query params**: `since` (ISO 8601 timestamp, default 24h ago, clamped to
-at most 7 days ago), `limit` (integer 1–100, default 50), `before` (optional
+at most 7 days ago; a date that does not exist on the calendar, e.g.
+`2026-02-30`, returns `400`), `limit` (integer 1–100, default 50), `before` (optional
 pagination cursor: the `next_cursor` of the previous response, sent unchanged;
 see *Paging* below).
 
@@ -651,7 +655,8 @@ so a page can hold **fewer than `limit`** clusters and still carry a
 list is finished. The cursor is opaque (base64url, at most 200 characters) and
 carries the last row's `updated_at` verbatim, microseconds included.
 
-**Response** `400`: invalid `since` (not ISO 8601) or `limit` (outside
+**Response** `400`: invalid `since` (not ISO 8601, or a date that does not
+exist such as `2026-02-30`) or `limit` (outside
 1–100), or a `before` that is not a cursor this API issued (`{"error":
 "Invalid cursor"}`). A blank `before=` is treated as absent.
 
@@ -748,7 +753,8 @@ production) — this endpoint is always ticker- and time-bounded on
   on input, normalized to upper). Invalid/missing -> `400`.
 - `since` (optional ISO 8601 timestamp): default 30 days ago. A future
   timestamp is rejected (`400`); a timestamp older than 90 days ago is
-  silently clamped to 90 days ago.
+  silently clamped to 90 days ago. A date that does not exist on the
+  calendar (e.g. `2026-02-30`) returns `400`.
 - `limit` (optional integer, 1–100, default 50): caps the number of
   disclosures returned (most recent first).
 
@@ -761,6 +767,7 @@ production) — this endpoint is always ticker- and time-bounded on
   "since": "…", "until": "…",
   "relevance_filter": { "task": "ticker_relevance", "min_prob": 0.2, "applied": true },
   "truncated": false,
+  "capped": false, "total_disclosures": 12,
   "totals": {
     "disclosures": 12, "picked_up": 9, "pickup_rate": 0.75,
     "median_first_lag_minutes": 184, "outlets": 14,
@@ -793,6 +800,15 @@ Notes:
   political-party story matching a same-named ticker). Unscored mentions
   are always kept. If the relevance lookup itself fails, the endpoint fails
   open (`relevance_filter.applied: false`) rather than 500ing.
+- **`truncated`**: the news-mention read hit its page bound (5 pages of 1,000
+  rows), so `articles`, `outlets` and `zones` may undercount.
+- **`capped`**: the disclosure list reached `limit`, so older disclosures in
+  the window are not in `disclosures` (the `totals` cover only the listed
+  ones). Raise `limit` (up to 100) or narrow `since` to see them.
+- **`total_disclosures`**: the number of the ticker's disclosures in the whole
+  window, however many `disclosures` lists. `null` when that count failed (the
+  endpoint still answers rather than 500ing); compare it with `count` to see
+  how many are missing.
 - **`outlets` vs `articles`**: `articles` counts every matching mention,
   including aggregator/KAP-bot republication; `outlets` and `zones` count
   only distinct, classified, voting-eligible news sources — that is the
@@ -802,8 +818,9 @@ Notes:
 - Both `free` and `partner` tiers may call this endpoint; responses are
   uncached (`private, no-store`).
 
-**Response** `400`: invalid/missing `ticker`, invalid `since` (not ISO 8601
-or in the future), or `limit` outside 1–100.
+**Response** `400`: invalid/missing `ticker`, invalid `since` (not ISO 8601,
+a date that does not exist such as `2026-02-30`, or in the future), or `limit`
+outside 1–100.
 
 ### `GET /api/v1/alerts/blindspots`
 
@@ -813,7 +830,8 @@ and per-day metering as every other `/api/v1` route.
 
 **Query params**:
 - `since` (optional ISO 8601): a lower bound on `alert_at` (not `updated_at`),
-  the moment the alert qualified. Default now minus 24h, clamped to 7 days.
+  the moment the alert qualified. Default now minus 24h, clamped to 7 days. A
+  date that does not exist on the calendar (e.g. `2026-02-30`) returns `400`.
   `alert_at` is:
   - `blindspot`: `max(updated_at, first_published + 24h)`, because a blindspot
     is only listed 24h after the cluster began (`BLINDSPOT.feedDelayHours`);
