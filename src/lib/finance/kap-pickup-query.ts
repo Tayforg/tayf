@@ -15,6 +15,7 @@ import {
   type PickupTotals,
 } from "@/lib/finance/kap-pickup";
 import { attemptCached } from "@/lib/cache-resilience";
+import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
 import { readAllPages } from "@/lib/finance/paging";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 
@@ -29,6 +30,16 @@ import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/ser
  * `.limit(5000)` silently stopped at 1,000 and the "exactly 5000 means
  * truncated" check could never fire. MENTION_MAX_PAGES x MENTION_PAGE_SIZE
  * rows is the bound; reaching it with a full last page sets `truncated`.
+ *
+ * h11-finance-1: the disclosure list matches `stock_codes` OR `related_stocks`
+ * through the shared one-string or() (./disclosure-filter.ts), so halts and
+ * other related-only notices are part of the ticker's disclosures here too.
+ *
+ * h11-finance-3: `totalDisclosures` is a head:true count of the same filter and
+ * window, so the panel can say "son 60 bildirim (30 günde 102)" instead of
+ * "son 30 gün" over a list cut at its limit. It is the one read here besides the
+ * relevance lookup that fails OPEN (warn + null): a label losing its suffix must
+ * not take the panel or the API response down.
  */
 
 const DISCLOSURE_SELECT = "disclosure_index,published_at,subject,disclosure_class";
@@ -45,6 +56,10 @@ export interface TickerPickup {
   totals: PickupTotals;
   relevanceApplied: boolean;
   truncated: boolean;
+  /** The ticker's disclosures in the window (breakers excluded), uncapped; null when the count failed. */
+  totalDisclosures: number | null;
+  /** The disclosure list reached `opts.limit`, so older disclosures in the window are not in `pickups`. */
+  capped: boolean;
 }
 
 interface DisclosureRow {
@@ -79,7 +94,7 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
   return out;
 }
 
-function emptyResult(ticker: string, sinceIso: string, untilIso: string): TickerPickup {
+function emptyResult(ticker: string, sinceIso: string, untilIso: string, totalDisclosures: number | null): TickerPickup {
   return {
     ticker,
     since: sinceIso,
@@ -88,16 +103,47 @@ function emptyResult(ticker: string, sinceIso: string, untilIso: string): Ticker
     totals: summarizePickups([]),
     relevanceApplied: true,
     truncated: false,
+    totalDisclosures,
+    capped: false,
   };
+}
+
+/** Head-only count of the ticker's disclosures in the window; null (warn) on any failure. Never rejects. */
+async function countDisclosures(
+  supabase: SupabaseClient,
+  ticker: string,
+  orFilter: string,
+  sinceIso: string,
+  untilIso: string,
+): Promise<number | null> {
+  try {
+    const { count, error } = await supabase
+      .from("kap_disclosures")
+      .select("disclosure_index", { count: "exact", head: true })
+      .or(orFilter)
+      .gte("published_at", sinceIso)
+      .lte("published_at", untilIso);
+    if (error) {
+      console.warn(`[finance] fetchTickerPickup disclosure count ${ticker} unavailable: ${error.message}`);
+      return null;
+    }
+    return typeof count === "number" ? count : null;
+  } catch (err) {
+    console.warn(
+      `[finance] fetchTickerPickup disclosure count ${ticker} unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
 }
 
 /**
  * Core fetch. Throws on a disclosure, mention, or source query error — the
  * caller (a route handler, or the "use cache" wrapper below) decides
  * whether that becomes a 500 or a caught, logged null. Fails OPEN on a
- * relevance-lookup error only: keeps every mention, sets
- * `relevanceApplied: false`, and warns — a broken Jev table must never
- * take the whole panel/endpoint down.
+ * relevance-lookup error: keeps every mention, sets `relevanceApplied: false`,
+ * and warns — a broken Jev table must never take the whole panel/endpoint
+ * down. The 30-day disclosure count (`totalDisclosures`) fails open as well:
+ * null and a warning.
  */
 export async function fetchTickerPickup(
   supabase: SupabaseClient,
@@ -109,15 +155,19 @@ export async function fetchTickerPickup(
   const sinceIso = new Date(sinceMs).toISOString();
   const nowIso = new Date(nowMs).toISOString();
 
-  const { data: disclosureData, error: disclosureError } = await supabase
-    .from("kap_disclosures")
-    .select(DISCLOSURE_SELECT)
-    .contains("stock_codes", [ticker])
-    .or("subject.is.null,subject.not.ilike.*Devre Kesici*")
-    .gte("published_at", sinceIso)
-    .lte("published_at", nowIso)
-    .order("published_at", { ascending: false })
-    .limit(opts.limit);
+  // stock_codes OR related_stocks, circuit-breaker notices excluded: ONE or().
+  const disclosureOr = tickerDisclosureOr(ticker);
+  const [{ data: disclosureData, error: disclosureError }, totalDisclosures] = await Promise.all([
+    supabase
+      .from("kap_disclosures")
+      .select(DISCLOSURE_SELECT)
+      .or(disclosureOr)
+      .gte("published_at", sinceIso)
+      .lte("published_at", nowIso)
+      .order("published_at", { ascending: false })
+      .limit(opts.limit),
+    countDisclosures(supabase, ticker, disclosureOr, sinceIso, nowIso),
+  ]);
   if (disclosureError) {
     throw new Error(`[finance] fetchTickerPickup disclosures: ${disclosureError.message}`);
   }
@@ -130,7 +180,7 @@ export async function fetchTickerPickup(
   }));
 
   if (disclosures.length === 0) {
-    return emptyResult(ticker, sinceIso, nowIso);
+    return emptyResult(ticker, sinceIso, nowIso, totalDisclosures);
   }
 
   const disclosureMs = disclosures.map((d) => new Date(d.publishedAt).getTime());
@@ -219,11 +269,14 @@ export async function fetchTickerPickup(
     totals,
     relevanceApplied,
     truncated,
+    totalDisclosures,
+    capped: disclosures.length >= opts.limit,
   };
 }
 
 const PICKUP_LOOKBACK_MS = 30 * 86_400_000;
-const PICKUP_LIMIT = 60;
+/** How many disclosures the "Medyada yankı" panel reads (and so where its window label turns into "son N bildirim"). */
+export const PICKUP_LIMIT = 60;
 
 /**
  * Cached attempt. `nowMs` is read INSIDE the cache scope (same precedent as

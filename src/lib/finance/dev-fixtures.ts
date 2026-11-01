@@ -10,7 +10,7 @@
 // but a runtime env check. Below is a small, purpose-built fake instead —
 // it only implements the handful of
 // PostgREST methods the fetchers in queries.ts actually chain
-// (select / eq / gte / contains / in / not / ilike / order / limit) and it
+// (select / eq / gte / contains / in / not / ilike / or / order / limit) and it
 // never leaves this file.
 
 const H = 3600 * 1000;
@@ -58,6 +58,19 @@ const BASE: Record<string, { prev: number; rvol: number }> = {
   ISCTR: { prev: 13.93, rvol: 1.2 },
 };
 
+interface DisclosureSeed {
+  i: number;
+  ago: number;
+  codes: string[];
+  /** Tickers a notice names without being filed by them (KAP's related_stocks). */
+  related?: string[];
+  /** The filer, when it is not the company in `codes` (Borsa Istanbul for a halt). */
+  title?: string;
+  subject: string;
+  summary: string;
+  cls: string;
+}
+
 // --- inlined minimal chainable Supabase fake --------------------------------
 
 interface FakeState {
@@ -66,18 +79,22 @@ interface FakeState {
   lt: Array<{ col: string; val: unknown }>;
   contains: Array<{ col: string; val: unknown }>;
   in: Array<{ col: string; vals: unknown[] }>;
+  /** Raw `.or(filters)` strings. */
+  or: string[];
   order: Array<{ col: string; opts: unknown }>;
   limit: number | null;
+  /** `.select(cols, { head: true })`: a count-only read (no rows, ignores limit). */
+  head: boolean;
 }
 
 export type BuilderState = FakeState;
 
-type PgResult<T = unknown> = { data: T[]; error: null };
+type PgResult<T = unknown> = { data: T[] | null; error: null; count?: number };
 type TableResolver = (state: FakeState) => PgResult;
 type TableFixture = unknown[] | TableResolver;
 
 function freshState(): FakeState {
-  return { eq: [], gte: [], lt: [], contains: [], in: [], order: [], limit: null };
+  return { eq: [], gte: [], lt: [], contains: [], in: [], or: [], order: [], limit: null, head: false };
 }
 
 // Predicate methods that record onto `state` and keep the chain going. Any
@@ -89,6 +106,10 @@ const RECORD: Record<string, (state: FakeState, args: unknown[]) => void> = {
   lt: (s, [col, val]) => s.lt.push({ col: String(col), val }),
   contains: (s, [col, val]) => s.contains.push({ col: String(col), val }),
   in: (s, [col, vals]) => s.in.push({ col: String(col), vals: (vals as unknown[]) ?? [] }),
+  or: (s, [filters]) => s.or.push(String(filters)),
+  select: (s, [, opts]) => {
+    if ((opts as { head?: boolean } | undefined)?.head === true) s.head = true;
+  },
   order: (s, [col, opts]) => s.order.push({ col: String(col), opts }),
   limit: (s, [n]) => {
     s.limit = Number(n);
@@ -125,6 +146,8 @@ function makeBuilder(resolver: TableResolver): unknown {
 function resolveTable(fixture: TableFixture | undefined, state: FakeState): PgResult {
   const result = typeof fixture === "function" ? fixture(state) : { data: fixture ?? [], error: null as null };
   const rows = result.data ?? [];
+  // A head:true read is a count: no rows, and the count ignores any limit.
+  if (state.head) return { data: null, error: null, count: rows.length };
   return { data: state.limit != null ? rows.slice(0, state.limit) : rows, error: null };
 }
 
@@ -233,6 +256,7 @@ export function createFinanceFakeClient(): unknown {
     { i: 1662301, ago: 0.5 * H, codes: ["THYAO"], subject: "Özel Durum Açıklaması (Genel)", summary: "Eylül 2026 trafik sonuçları hk.", cls: "ODA" },
     { i: 1662298, ago: 1.1 * H, codes: ["ASELS"], subject: "Yeni İş İlişkisi", summary: "Yurt dışı müşteri ile sözleşme imzalanması hk.", cls: "ODA" },
     { i: 1662290, ago: 1.6 * H, codes: ["EREGL"], subject: "Sermaye Artırımı - Azaltımı İşlemlerine İlişkin Bildirim", summary: "Bedelsiz sermaye artırımı başvurusu", cls: "DG" },
+    { i: 1662286, ago: 2.0 * H, codes: [], related: ["SASA"], title: "BORSA İSTANBUL A.Ş.", subject: "Pay İşlem Sırası Kapatma / Açma", summary: "Pay Sırasının İşleme Kapatılması", cls: "ODA" },
     { i: 1662284, ago: 2.2 * H, codes: ["SASA"], subject: "Pay Bazında Devre Kesici Bildirimi", summary: "SASA payında devre kesici uygulanmıştır.", cls: "DKB" },
     { i: 1662281, ago: 2.9 * H, codes: ["KONTR"], subject: "Pay Bazında Devre Kesici Bildirimi", summary: "KONTR payında devre kesici uygulanmıştır.", cls: "DKB" },
     { i: 1662270, ago: 3.4 * H, codes: ["KONTR"], subject: "Yeni İş İlişkisi", summary: "Kazakistan enerji depolama projesi", cls: "ODA" },
@@ -244,11 +268,13 @@ export function createFinanceFakeClient(): unknown {
     { i: 1662150, ago: 27 * H, codes: ["VESTL"], subject: "Finansal Rapor", summary: "2026 Yılı 2. Çeyrek Finansal Rapor", cls: "FR" },
     { i: 1662101, ago: 40 * H, codes: ["THYAO", "ASELS"], subject: "Özel Durum Açıklaması (Genel)", summary: "Bakım ortaklığı ön protokolü", cls: "ODA" },
     { i: 1661980, ago: 3 * D, codes: ["ODAS"], subject: "Kredi Derecelendirmesi", summary: "JCR Eurasia derecelendirme", cls: "ODA" },
-  ].map((d) => ({
+  ].map((d: DisclosureSeed) => ({
     disclosure_index: d.i,
     published_at: iso(d.ago),
-    kap_title: COMPANIES.find((c) => c.tickers[0] === d.codes[0])?.title ?? null,
+    kap_title: d.title ?? COMPANIES.find((c) => c.tickers[0] === d.codes[0])?.title ?? null,
     stock_codes: d.codes,
+    // h11-finance-1: notices KAP tags only in related_stocks (here a halt notice) have no stock_codes.
+    related_stocks: d.related ?? [],
     subject: d.subject,
     summary: d.summary,
     disclosure_class: d.cls,
@@ -371,18 +397,22 @@ export function createFinanceFakeClient(): unknown {
         return { data: COMPANIES.filter((r) => !c || c.some((x) => r.tickers.includes(x))), error: null };
       },
       kap_disclosures: (state) => {
-        const c = containsVal(state, "stock_codes");
+        // The per-ticker readers send ONE combined or() (see
+        // disclosure-filter.ts): `and(or(stock_codes.cs.{T},related_stocks.cs.{T}),or(<not a breaker>))`.
+        // The ticker is read back out of that string; a raw `.contains()` still works.
+        const fromOr = /stock_codes\.cs\.\{([A-Z0-9]+)\}/.exec(state.or.join(" "))?.[1];
+        const c = fromOr ? [fromOr] : containsVal(state, "stock_codes");
         const since = gteVal(state, "published_at") ?? "0000";
-        // The fake records neither ilike nor not(); approximate the two
-        // callers by their select target: circuit breakers use a today
-        // cut-off, the main stream uses none.
+        // The fake records neither ilike nor not(); approximate the callers
+        // by their shape: circuit breakers use a today cut-off and no ticker,
+        // the main stream and every per-ticker list exclude breakers.
         const wantsBreakers = since > "2000" && !c;
         return {
           data: DISCLOSURES.filter((r) => {
             const isBreaker = /devre kesici/i.test(r.subject);
-            if (c && !c.some((x) => r.stock_codes.includes(x))) return false;
+            if (c && !c.some((x) => r.stock_codes.includes(x) || r.related_stocks.includes(x))) return false;
             if (r.published_at < since) return false;
-            return wantsBreakers ? isBreaker : !isBreaker || Boolean(c);
+            return wantsBreakers ? isBreaker : !isBreaker;
           }),
           error: null,
         };

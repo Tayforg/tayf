@@ -397,11 +397,17 @@ export interface ParseDateOptions {
  *   4. Clamp: the result is never later than `nowMs` -- `published_at`
  *      must never outrun ingest time.
  */
+// The "unparseable -> nowMs" value. Built only on the paths that return it:
+// a well-formed date (nearly every item) never needs it, and `toISOString` is
+// not free per item (hunt-11, A-ingest-cpu).
+function fallbackIso(nowMs: number): string {
+  return new Date(nowMs).toISOString();
+}
+
 export function parseDate(raw: string | undefined, opts: ParseDateOptions): string {
   const { nowMs, sourceSlug } = opts;
-  const fallback = new Date(nowMs).toISOString();
   const trimmed = raw?.trim();
-  if (!trimmed) return fallback;
+  if (!trimmed) return fallbackIso(nowMs);
 
   let normalized = trimmed;
   const hasDesignator = ZONE_DESIGNATOR_RE.test(trimmed);
@@ -416,12 +422,12 @@ export function parseDate(raw: string | undefined, opts: ParseDateOptions): stri
     } else if (RFC822_NO_ZONE_RE.test(trimmed)) {
       normalized = `${trimmed} +0300`;
     } else {
-      return fallback;
+      return fallbackIso(nowMs);
     }
   }
 
   const date = new Date(normalized);
-  if (Number.isNaN(date.getTime())) return fallback;
+  if (Number.isNaN(date.getTime())) return fallbackIso(nowMs);
 
   let ms = date.getTime();
 
@@ -525,25 +531,32 @@ function absolutiseUrl(rawLink: string, source: RssSource): string {
 }
 
 /**
- * Normalise a single raw RSS item into the row shape expected by the
- * `articles` table. `content_hash` is computed via `strictFingerprint`
- * exclusively. Returns `null` if the item lacks a link, has no headline text
- * (see below), or is a BİK legal notice (`isLegalNotice`).
- *
- * "No headline text" = the raw title is empty or whitespace-only, or the
- * decoded title holds no letter or digit (`isContentlessTitle`: '&nbsp',
- * '&amp;nbsp', '-', '…'). Such an item used to be stored and surfaced as an
- * indexable story titled '&amp;nbsp — Tayf'. When the item has a link and the
- * caller passes `counters`, `counters.contentlessTitles` is incremented; an item
- * without a link is dropped silently, as before. The check runs BEFORE the
- * legal-notice check, so a notice is never counted as contentless.
+ * A raw item after the cheap half of normalisation: the cleaned title and the
+ * absolute url, i.e. everything needed to ask the database whether the item is
+ * already stored. `item` is the raw feed item, untouched, for `completeItem`.
  */
-export function normalizeItem(
+export interface PreparedItem {
+  item: RawFeedItem;
+  title: string;
+  url: string;
+}
+
+/**
+ * The cheap half of `normalizeItem`, in the order it always ran: no link ->
+ * null (silent); blank title -> counted, null; decode / strip the title, then
+ * `isContentlessTitle` -> counted, null; otherwise the cleaned title and the
+ * absolute url. It does NOT decide the legal-notice drop (that stays in
+ * `completeItem`, as a legal notice is never counted as contentless).
+ *
+ * Ingest runs this for every parsed item, looks up which urls are already
+ * stored, and calls `completeItem` only for the rest: 99% of the items of a
+ * poll are already stored and used to pay for the full normalisation anyway.
+ */
+export function prepareItem(
   source: RssSource,
   item: RawFeedItem,
-  nowMs: number = Date.now(),
   counters?: NormalizeCounters,
-): NormalizedArticle | null {
+): PreparedItem | null {
   const rawTitle = item.title?.trim() ?? "";
   const rawLink = item.link?.trim() ?? "";
   if (!rawLink) return null;
@@ -565,7 +578,21 @@ export function normalizeItem(
     if (counters) counters.contentlessTitles++;
     return null;
   }
-  const absoluteUrl = absolutiseUrl(rawLink, source);
+  return { item, title, url: absolutiseUrl(rawLink, source) };
+}
+
+/**
+ * The heavy half of `normalizeItem`: legal notice, canonical url, description,
+ * image, date, content hash, category. Returns `null` for a BİK legal notice
+ * (`isLegalNotice`). `nowMs` is the clock `parseDate` falls back to and clamps
+ * against.
+ */
+export function completeItem(
+  source: RssSource,
+  prepared: PreparedItem,
+  nowMs: number = Date.now(),
+): NormalizedArticle | null {
+  const { item, title, url: absoluteUrl } = prepared;
 
   // ingest-hygiene: BİK court / official notices are not news.
   if (isLegalNotice(title, absoluteUrl)) return null;
@@ -606,6 +633,48 @@ export function normalizeItem(
 }
 
 /**
+ * Normalise a single raw RSS item into the row shape expected by the
+ * `articles` table. `content_hash` is computed via `strictFingerprint`
+ * exclusively. Returns `null` if the item lacks a link, has no headline text
+ * (see below), or is a BİK legal notice (`isLegalNotice`).
+ *
+ * "No headline text" = the raw title is empty or whitespace-only, or the
+ * decoded title holds no letter or digit (`isContentlessTitle`: '&nbsp',
+ * '&amp;nbsp', '-', '…'). Such an item used to be stored and surfaced as an
+ * indexable story titled '&amp;nbsp — Tayf'. When the item has a link and the
+ * caller passes `counters`, `counters.contentlessTitles` is incremented; an item
+ * without a link is dropped silently, as before. The check runs BEFORE the
+ * legal-notice check, so a notice is never counted as contentless.
+ *
+ * It is `prepareItem` followed by `completeItem`, nothing more.
+ */
+export function normalizeItem(
+  source: RssSource,
+  item: RawFeedItem,
+  nowMs: number = Date.now(),
+  counters?: NormalizeCounters,
+): NormalizedArticle | null {
+  const prepared = prepareItem(source, item, counters);
+  return prepared ? completeItem(source, prepared, nowMs) : null;
+}
+
+// The log line of the *Articles helpers below: the first error message with
+// every URL redacted and clamped to 200 characters, never a title.
+function describeThrown(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err))
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>")
+    .slice(0, 200);
+}
+
+function logSkippedItems(slug: string, skipped: number, firstMessage: string): void {
+  if (skipped > 0) {
+    console.error(
+      `[normalize] ${slug}: skipped ${skipped} item(s) that threw: ${firstMessage}`,
+    );
+  }
+}
+
+/**
  * Normalise an array of raw items, dropping any that fail the title/link
  * filter. Order preserved. `counters`, when given, is forwarded to every
  * `normalizeItem` call and totals the headline-less items of the batch
@@ -631,18 +700,67 @@ export function normalizeArticles(
       const row = normalizeItem(source, item, nowMs, counters);
       if (row) out.push(row);
     } catch (err) {
-      if (skipped === 0) {
-        firstMessage = (err instanceof Error ? err.message : String(err))
-          .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>")
-          .slice(0, 200);
-      }
+      if (skipped === 0) firstMessage = describeThrown(err);
       skipped++;
     }
   }
-  if (skipped > 0) {
-    console.error(
-      `[normalize] ${source.slug}: skipped ${skipped} item(s) that threw: ${firstMessage}`,
-    );
+  logSkippedItems(source.slug, skipped, firstMessage);
+  return out;
+}
+
+/**
+ * `prepareItem` over an array. Items that are dropped (no link, contentless)
+ * are absent from the result; the others keep their order. Same per-item
+ * isolation as `normalizeArticles`: an item that throws is skipped on its own
+ * and ONE `[normalize] <slug>: skipped N item(s) that threw` line is logged per
+ * call (first message only, URLs redacted, never a title).
+ */
+export function prepareArticles(
+  source: RssSource,
+  items: readonly RawFeedItem[],
+  counters?: NormalizeCounters,
+): PreparedItem[] {
+  const out: PreparedItem[] = [];
+  let skipped = 0;
+  let firstMessage = "";
+  for (const item of items) {
+    try {
+      const prepared = prepareItem(source, item, counters);
+      if (prepared) out.push(prepared);
+    } catch (err) {
+      if (skipped === 0) firstMessage = describeThrown(err);
+      skipped++;
+    }
   }
+  logSkippedItems(source.slug, skipped, firstMessage);
+  return out;
+}
+
+/**
+ * `completeItem` over an array of prepared items. The result is ALIGNED with
+ * the input: `out[i]` is the row of `prepared[i]`, or `null` when that item is a
+ * legal notice or threw. Alignment is what lets ingest walk the feed in its
+ * original order while some of its items were never completed. One item that
+ * throws is isolated and ONE `[normalize] <slug>: skipped N item(s) that
+ * threw` line is logged per call, like `normalizeArticles`.
+ */
+export function completeArticles(
+  source: RssSource,
+  prepared: readonly PreparedItem[],
+  nowMs: number = Date.now(),
+): Array<NormalizedArticle | null> {
+  const out: Array<NormalizedArticle | null> = [];
+  let skipped = 0;
+  let firstMessage = "";
+  for (const p of prepared) {
+    try {
+      out.push(completeItem(source, p, nowMs));
+    } catch (err) {
+      if (skipped === 0) firstMessage = describeThrown(err);
+      skipped++;
+      out.push(null);
+    }
+  }
+  logSkippedItems(source.slug, skipped, firstMessage);
   return out;
 }

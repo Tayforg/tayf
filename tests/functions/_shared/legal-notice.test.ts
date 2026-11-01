@@ -7,6 +7,7 @@ import {
   isLegalNotice,
 } from "../../../supabase/functions/_shared/rss/legal-notice.ts";
 import { LEGAL_NOTICE_CASES } from "../../fixtures/legal-notice-cases";
+import corpusJson from "../../fixtures/ingest-corpus.json";
 
 // ---------------------------------------------------------------------------
 // ingest-hygiene: BİK (Basın İlan Kurumu) court / official notices ride the
@@ -140,5 +141,99 @@ describe("legal-notice exported rule constants (mirrored by SQL migration 107)",
   it("keeps STARTS_WITH_ILAN free of regex escapes so its source is valid in a Postgres ARE", () => {
     expect(LEGAL_NOTICE_PATTERNS.STARTS_WITH_ILAN.source).toBe("^[İI]LAN([\\s:.–-]|$)");
     expect(LEGAL_NOTICE_PATTERNS.STARTS_WITH_ILAN.source).not.toContain("\\-");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A-ingest-cpu (hunt-11): isLegalNotice used to run isMostlyUppercase (one
+// toLocaleLowerCase("tr") per letter) BEFORE the three anchored regexes, so
+// every ordinary mixed-case headline paid for a per-letter scan that the
+// regexes would have rejected for free. The regexes now run first. The two
+// orders must agree on every input: this is the old AND order, copied inline.
+// ---------------------------------------------------------------------------
+
+const { ENDS_WITH_INSTITUTION, CONTAINS_ABLATIVE, TC_COURT, STARTS_WITH_ILAN, ILAN_PATH } =
+  LEGAL_NOTICE_PATTERNS;
+
+function mostlyUppercaseOld(s: string, minLetters: number): boolean {
+  const letters = s.match(/\p{L}/gu);
+  if (!letters || letters.length < minLetters) return false;
+  let upper = 0;
+  for (const ch of letters) {
+    if (ch !== ch.toLocaleLowerCase("tr")) upper++;
+  }
+  return upper / letters.length >= LEGAL_NOTICE_MIN_UPPER_RATIO;
+}
+
+function isLegalNoticeUppercaseFirst(title: string, url?: string | null): boolean {
+  if (typeof title === "string" && title) {
+    const t = title.normalize("NFC").trim();
+    if (
+      mostlyUppercaseOld(t, LEGAL_NOTICE_MIN_LETTERS) &&
+      (ENDS_WITH_INSTITUTION.test(t) || CONTAINS_ABLATIVE.test(t) || TC_COURT.test(t))
+    ) {
+      return true;
+    }
+    if (STARTS_WITH_ILAN.test(t) && mostlyUppercaseOld(t, 3)) return true;
+  }
+  if (url) {
+    try {
+      if (ILAN_PATH.test(new URL(url).pathname)) return true;
+    } catch {
+      // Unparseable / relative URL: no signal from B.
+    }
+  }
+  return false;
+}
+
+describe("isLegalNotice: regex-first ordering is equivalent to the old uppercase-first AND [A-ingest-cpu]", () => {
+  const corpus = corpusJson as unknown as {
+    rows: Array<{ item: { title?: string; link?: string } }>;
+  };
+
+  it("agrees on every shared-fixture case", () => {
+    for (const c of LEGAL_NOTICE_CASES) {
+      expect(isLegalNotice(c.title, c.url)).toBe(isLegalNoticeUppercaseFirst(c.title, c.url));
+      expect(isLegalNotice(c.title, c.url)).toBe(c.expected);
+    }
+  });
+
+  it("agrees on every corpus title and url, alone and together", () => {
+    expect(corpus.rows.length).toBeGreaterThanOrEqual(200);
+    const mismatches: string[] = [];
+    for (const [i, { item }] of corpus.rows.entries()) {
+      const title = item.title ?? "";
+      const link = item.link ?? "";
+      for (const [t, u] of [
+        [title, null],
+        [title, link],
+        ["", link],
+        [title.toUpperCase(), null],
+        [title.toLocaleUpperCase("tr"), link],
+        [`${title.toLocaleUpperCase("tr")} MAHKEMESİ`, null],
+        [`T.C. ${title.toLocaleUpperCase("tr")} MAHKEMESİNDEN`, null],
+        [`İLAN ${title.toLocaleUpperCase("tr")}`, null],
+      ] as Array<[string, string | null]>) {
+        if (isLegalNotice(t, u) !== isLegalNoticeUppercaseFirst(t, u)) mismatches.push(`#${i} ${JSON.stringify([t, u])}`);
+      }
+    }
+    expect(mismatches).toEqual([]);
+  });
+
+  it("agrees on non-string and nullish titles", () => {
+    for (const t of [undefined, null, 0, {}] as unknown as string[]) {
+      expect(isLegalNotice(t, "https://example.com/ilan/x")).toBe(
+        isLegalNoticeUppercaseFirst(t, "https://example.com/ilan/x"),
+      );
+      expect(isLegalNotice(t)).toBe(isLegalNoticeUppercaseFirst(t));
+    }
+  });
+
+  it("still gates an institution suffix on the uppercase ratio", () => {
+    // Regex hits, ratio fails: mixed case must pass. Ratio holds, regex
+    // misses: plain all-caps news must pass.
+    expect(isLegalNotice("Bartın 2. Asliye Hukuk Mahkemesi")).toBe(false);
+    expect(isLegalNotice("BORSA GÜNÜ YÜKSELİŞLE KAPATTI")).toBe(false);
+    expect(isLegalNotice("BARTIN 2. ASLİYE HUKUK MAHKEMESİ")).toBe(true);
   });
 });

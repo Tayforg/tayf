@@ -5,8 +5,14 @@
 //
 //   POST {"mode":"daily"}     the 80 stalest traded tickers (never-fetched
 //                             first): 1y of daily bars when empty, else 1mo.
-//                             Runs every 3 min after the close until every
-//                             ticker has the session's bar.
+//                             Runs every 3 min after the close. Stalest means
+//                             oldest newest-bar day first, then least recently
+//                             fetched (bist_bars_daily.fetched_at, migration
+//                             134), so after every ticker holds the session's
+//                             bar the runs keep rotating through all of them:
+//                             each ticker is read again once the closing
+//                             auction has settled instead of keeping the
+//                             pre-auction pass (h11-finance-2).
 //   POST {"mode":"intraday"}  every ticker named in the news in the last
 //                             7 days: today's 5-minute bars (5d when the
 //                             ticker has none yet). Every 5 min in session.
@@ -78,14 +84,46 @@ async function pool<T>(items: T[], worker: (item: T) => Promise<void>): Promise<
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, run));
 }
 
+// PostgREST answers PGRST204 when a payload names a column its schema cache
+// does not have.
+const PGRST_COLUMN_MISSING = "PGRST204";
+
+// Deploy-order safety for migration 134: if this function is deployed before
+// 134 adds bist_bars_daily.fetched_at, the daily upsert is retried without the
+// column so the bars still land (target rotation just falls back to the 052
+// order until 134 is applied). Warned once per isolate, not once per cycle.
+let warnedFetchedAtMissing = false;
+
+function withoutFetchedAt(rows: unknown[]): unknown[] {
+  return rows.map((row) => {
+    const { fetched_at: _fetchedAt, ...rest } = row as Record<string, unknown>;
+    return rest;
+  });
+}
+
 async function upsertBars(
   supabase: ReturnType<typeof createServiceClient>,
   table: "bist_bars_daily" | "bist_bars_5m",
   rows: unknown[],
   onConflict: string,
 ): Promise<void> {
+  // Only the daily table has fetched_at; once one batch of this call learned
+  // the column is missing, the later batches skip it instead of failing first.
+  let columnMissing = false;
   for (let i = 0; i < rows.length; i += UPSERT_BATCH) {
-    const { error } = await supabase.from(table).upsert(rows.slice(i, i + UPSERT_BATCH), { onConflict });
+    const batch = rows.slice(i, i + UPSERT_BATCH);
+    let { error } = await supabase.from(table).upsert(columnMissing ? withoutFetchedAt(batch) : batch, { onConflict });
+    if (error && table === "bist_bars_daily" && !columnMissing && error.code === PGRST_COLUMN_MISSING) {
+      columnMissing = true;
+      if (!warnedFetchedAtMissing) {
+        warnedFetchedAtMissing = true;
+        console.warn(
+          "[quotes-ingest] bist_bars_daily.fetched_at is missing (migration 134 not applied yet); " +
+            "upserting daily bars without it. Apply 134 to restore target rotation.",
+        );
+      }
+      ({ error } = await supabase.from(table).upsert(withoutFetchedAt(batch), { onConflict }));
+    }
     if (error) throw new Error(`[quotes-ingest] ${table} upsert: ${error.message}`);
   }
 }
@@ -116,6 +154,10 @@ async function triggerRevalidation(tags: string[]): Promise<void> {
 export async function runCycle(body: Body): Promise<Stats> {
   const startedAt = Date.now();
   const deadline = startedAt + CYCLE_DEADLINE_MS;
+  // One stamp for the whole run, taken before any Yahoo read, so it never
+  // claims a fresher read than the one made. bist_daily_targets() (134) rotates
+  // on it. Daily rows only: bist_bars_5m has no such column.
+  const fetchedAt = new Date(startedAt).toISOString();
   const mode = body.mode === "intraday" ? "intraday" : "daily";
   const stats: Stats = { mode, tickers: 0, fetched: 0, bars: 0, failed: [], durationMs: 0, ok: true };
   const supabase = createServiceClient();
@@ -156,7 +198,7 @@ export async function runCycle(body: Body): Promise<Stats> {
     }
   }
 
-  const daily: DailyBar[] = [];
+  const daily: Array<DailyBar & { fetched_at: string }> = [];
   const intraday: IntradayBar[] = [];
   await pool(targets, async (t) => {
     if (Date.now() > deadline) {
@@ -171,7 +213,7 @@ export async function runCycle(body: Body): Promise<Stats> {
         // instead of a timestamp — a ticker with no last_day (never
         // fetched) keeps the full 1y/1mo warmup, unfiltered.
         const fresh = t.last_day ? rows.filter((r) => r.day >= t.last_day!) : rows;
-        daily.push(...fresh);
+        for (const row of fresh) daily.push({ ...row, fetched_at: fetchedAt });
         stats.bars += fresh.length;
       } else {
         const last = lastIntradayTs.get(t.ticker);

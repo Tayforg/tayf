@@ -417,7 +417,10 @@ describe("ingest silent-feeds (validators follow row durability)", () => {
 
     const again = await cycle();
     expect(again.inserted).toBe(0);
-    expect(again.dedupedInBatch).toBe(expected);
+    // Rows whose url is already stored under the same headline are skipped
+    // before the batch dedupe, so they surface as known-skipped, not deduped.
+    expect(again.itemsKnownSkipped).toBe(expected);
+    expect(again.dedupedInBatch).toBe(0);
     expect(again.validatorsWithheld).toBe(0);
     expect(storedFor(slug)).toHaveLength(expected);
     expect(row(slug).fetch_body_hash).toBe(sha);

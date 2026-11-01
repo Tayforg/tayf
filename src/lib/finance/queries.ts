@@ -15,6 +15,11 @@ import {
   type AttentionRow,
 } from "@/lib/finance/ticker-relevance";
 import { readAllPages } from "@/lib/finance/paging";
+import {
+  CIRCUIT_BREAKER_TEXT,
+  NOT_CIRCUIT_BREAKER_OR,
+  tickerDisclosureOr,
+} from "@/lib/finance/disclosure-filter";
 
 // Read side of the finance substrate (migrations 049-051) for the
 // /ekonomi pages and /admin/ekonomi. Every fetcher still THROWS on a Supabase
@@ -67,6 +72,18 @@ import { readAllPages } from "@/lib/finance/paging";
 // fails on a `.limit(N)` above 1,000 in this directory. The coverage section
 // is computed over the same disclosures the page lists: circuit-breaker
 // notices are excluded here exactly as in `fetchRecentDisclosures`.
+//
+// h11-finance-1: a per-ticker disclosure read matches `stock_codes` OR
+// `related_stocks` through ONE `.or()` string (./disclosure-filter.ts), never
+// `.contains("stock_codes", ...)`; 6.9 % of disclosures (trading halts, SPK
+// bans, insider trades) are tagged only in related_stocks.
+//
+// h11-finance-3: the one more deliberate exception to "every fetcher throws" is
+// `totalDisclosures30d` in fetchTickerPage -- a head:true count of the ticker's
+// 30-day disclosures, behind the "son 60 bildirim (30 günde N)" label. It fails
+// open (warn + null): a label that loses its "(30 günde N)" suffix is a far
+// smaller problem than a ticker page that errors because a count timed out. The
+// disclosure LIST itself still throws.
 
 export interface FeedSource {
   name: string;
@@ -96,6 +113,7 @@ export interface Disclosure {
   disclosureIndex: number;
   publishedAt: string;
   kapTitle: string | null;
+  /** The notice's tickers: `stock_codes`, or `related_stocks` when the notice is tagged only there. */
   stockCodes: string[];
   subject: string | null;
   summary: string | null;
@@ -117,9 +135,17 @@ export interface AttentionDay {
 }
 
 export interface CoverageStats {
+  /**
+   * The ticker's OWN filings among the listed ones (the 60 newest of the last 30 days):
+   * notices that name it only in related_stocks are listed but not counted here.
+   */
   disclosures: number;
+  /** Events: filings within 24 h of an event's first filing are one event. */
+  events: number;
+  /** Events with at least one article at or after the event's first filing. */
   covered: number;
   medianLagMinutes: number | null;
+  /** Events with abnormal press attention in the 24 h before. */
   pressAhead: number;
 }
 
@@ -127,7 +153,11 @@ export interface TickerPage {
   company: Company | null;
   attention: AttentionDay[];
   articles: FeedItem[];
+  /** True when ticker_articles returned its full page, so older articles exist. */
+  articlesTruncated: boolean;
   disclosures: Disclosure[];
+  /** All of the ticker's disclosures in the last 30 days (breakers excluded); null when the count failed. */
+  totalDisclosures30d: number | null;
   coverage: CoverageStats;
 }
 
@@ -278,10 +308,21 @@ function istDate(offsetDays = 0): string {
 }
 
 /**
+ * h11-finance-4: a `ratio` ("ilgi 6,0x") is a rate over a rate. With two
+ * recent articles against one old one it is arithmetic noise ("BOYNR 2 haber,
+ * ilgi 6,0x"), so it needs a real count on BOTH sides.
+ */
+export const RATIO_MIN_RECENT_ARTICLES = 3;
+export const RATIO_MIN_BASELINE_ARTICLES = 3;
+
+/**
  * Rank tickers by mentions on/after `splitDay`; the days before it form
- * the baseline for `ratio` (recent daily rate / baseline daily rate).
+ * the baseline for `ratio` (recent daily rate / baseline daily rate), which is
+ * null unless both sides have at least RATIO_MIN_* articles.
  * `sources` is the number of DISTINCT sources across all of a ticker's recent
  * days (the union of each day's `sourceIds`), not the busiest single day.
+ * Only tickers in `traded` (companies with shares_traded = true) are ranked:
+ * passive and delisted codes have no price and nothing to trade on the tape.
  */
 export function rankAttention(
   rows: readonly AttentionRow[],
@@ -290,10 +331,12 @@ export function rankAttention(
   splitDay: string,
   recentDays: number,
   baselineDays: number,
+  traded: ReadonlySet<string>,
 ): TickerAttention[] {
   const acc = new Map<string, TickerAttention & { baseline: number }>();
   const recentSources = new Map<string, Set<string>>();
   for (const r of rows) {
+    if (!traded.has(r.ticker)) continue;
     const cur = acc.get(r.ticker) ?? { ticker: r.ticker, title: titles.get(r.ticker) ?? null, articles: 0, sources: 0, ratio: null, baseline: 0 };
     if (r.day >= splitDay) {
       cur.articles += Number(r.articles);
@@ -310,7 +353,10 @@ export function rankAttention(
     .filter((t) => t.articles > 0)
     .map(({ baseline, ...t }) => ({
       ...t,
-      ratio: baseline > 0 ? (t.articles / recentDays) / (baseline / baselineDays) : null,
+      ratio:
+        t.articles >= RATIO_MIN_RECENT_ARTICLES && baseline >= RATIO_MIN_BASELINE_ARTICLES
+          ? (t.articles / recentDays) / (baseline / baselineDays)
+          : null,
     }))
     .sort((a, b) => b.articles - a.articles || a.ticker.localeCompare(b.ticker))
     .slice(0, limit);
@@ -379,17 +425,24 @@ async function readTopTickers(days: number, limit: number): Promise<TickerAttent
   const rows = aggregateAttention(raw, scores, legalIds);
   const tickers = [...new Set(rows.map((r) => r.ticker))];
   const titles = new Map<string, string>();
+  // h11-finance-4: the tape ranks companies that trade. A ticker with no company
+  // row, or only a shares_traded = false one (kap_state P: BOYNR, KILER, DENIZ ...),
+  // is not in this set and rankAttention drops it.
+  const traded = new Set<string>();
   if (tickers.length > 0) {
     const { data: comps, error: cErr } = await supabase
       .from("bist_companies")
-      .select("tickers,title")
+      .select("tickers,title,shares_traded")
       .overlaps("tickers", tickers);
     if (cErr) throw new Error(`[finance] fetchTopTickers companies: ${cErr.message}`);
-    for (const c of (comps ?? []) as Array<{ tickers: string[]; title: string }>) {
-      for (const t of c.tickers) titles.set(t, c.title);
+    for (const c of (comps ?? []) as Array<{ tickers: string[]; title: string; shares_traded: boolean | null }>) {
+      for (const t of c.tickers) {
+        titles.set(t, c.title);
+        if (c.shares_traded === true) traded.add(t);
+      }
     }
   }
-  return rankAttention(rows, titles, limit, splitDay, days, BASELINE_DAYS);
+  return rankAttention(rows, titles, limit, splitDay, days, BASELINE_DAYS, traded);
 }
 
 async function fetchTopTickersCached(days: number, limit: number) {
@@ -413,50 +466,101 @@ interface DisclosureRow {
   disclosure_index: number;
   published_at: string;
   kap_title: string | null;
-  stock_codes: string[];
+  stock_codes: string[] | null;
+  /** Tickers a notice names without being filed by them (halts, bans, insider trades). */
+  related_stocks?: string[] | null;
   subject: string | null;
   summary: string | null;
   disclosure_class: string | null;
 }
 
 function toDisclosure(r: DisclosureRow): Disclosure {
+  const codes = r.stock_codes ?? [];
   return {
     disclosureIndex: r.disclosure_index,
     publishedAt: r.published_at,
     kapTitle: r.kap_title,
-    stockCodes: r.stock_codes ?? [],
+    // h11-finance-1: a notice tagged only in related_stocks shows those as its chips.
+    stockCodes: codes.length > 0 ? codes : (r.related_stocks ?? []),
     subject: r.subject,
     summary: r.summary,
     disclosureClass: r.disclosure_class,
   };
 }
 
-const DISCLOSURE_SELECT = "disclosure_index,published_at,kap_title,stock_codes,subject,summary,disclosure_class";
-const CIRCUIT_BREAKER_TEXT = "Devre Kesici";
+/**
+ * h11-finance-1: the disclosures whose ISSUER is `ticker` (stock_codes has it).
+ * The disclosure_coverage view joins on `d.stock_codes @> array[t.ticker]`, so
+ * a notice that names the ticker only in related_stocks (a halt, a ban, an
+ * insider trade, or another company's filing) can never get an article row
+ * there. Counting such a notice in the coverage section would show an
+ * uncovered event even when articles about it exist, so the coverage read and
+ * coverageStats take this set and nothing else. The page still LISTS the others.
+ */
+function issuerDisclosureIndexes(rows: readonly DisclosureRow[], ticker: string): number[] {
+  return rows.filter((r) => (r.stock_codes ?? []).includes(ticker)).map((r) => r.disclosure_index);
+}
+
+const DISCLOSURE_SELECT = "disclosure_index,published_at,kap_title,stock_codes,related_stocks,subject,summary,disclosure_class";
 /** `.ilike()` pattern (the builder method takes `%`). */
 const CIRCUIT_BREAKER = `%${CIRCUIT_BREAKER_TEXT}%`;
+
+const lowerTr = (s: string | null | undefined): string => (s ?? "").toLocaleLowerCase("tr-TR");
+
 /**
- * TS-06: `.not('subject','ilike',CIRCUIT_BREAKER)` compiles to
- * `subject NOT ILIKE ...`, which is NULL (not TRUE) for a NULL subject --
- * PostgREST drops those rows even though they plainly aren't circuit breaker
- * notices. subject is nullable; explicitly keep NULLs. Note the `.or()` filter
- * DSL uses `*` for a wildcard, not the `%` the `.ilike()` builder method takes.
- * Shared by every reader that lists a ticker's disclosures so the page, the
- * feed and the coverage stats all mean the same set.
+ * h11-finance-1: the ticker's trading halt, when it is still in force as far as
+ * the disclosures say. Borsa Istanbul files the same subject for both ends,
+ * "Pay İşlem Sırası Kapatma / Açma"; only the summary tells them apart --
+ *   "Pay Sırasının İşleme Kapatılması"                 closing (also the plural
+ *   "Pay Sıralarının ..." and "... Geçici Olarak İşleme Kapatılması")
+ *   "Pay Sırasının İşleme Açılması"                    reopening
+ *   "Pay Sırasının İşleme Kapatılması ve Açılması"     both in one filing: not a halt.
+ * Takes the NEWEST notice with that subject (by publishedAt, whatever the
+ * list order) and returns it only when it is a closing. The match is on Turkish
+ * lower case, so "İŞLEM SIRASI" and "İşlem Sırası" both count.
  */
-const NOT_CIRCUIT_BREAKER_OR = `subject.is.null,subject.not.ilike.*${CIRCUIT_BREAKER_TEXT}*`;
+export function latestTradingHalt(disclosures: readonly Disclosure[]): Disclosure | null {
+  let newest: Disclosure | null = null;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const d of disclosures) {
+    if (!lowerTr(d.subject).includes("işlem sırası")) continue;
+    const ms = Date.parse(d.publishedAt);
+    if (!Number.isFinite(ms)) continue;
+    if (ms > newestMs) {
+      newest = d;
+      newestMs = ms;
+    }
+  }
+  if (!newest) return null;
+  const summary = lowerTr(newest.summary);
+  return summary.includes("kapatılması") && !summary.includes("açılması") ? newest : null;
+}
+
+/**
+ * The halt notice worth showing beside the price: `halt` only while it is newer
+ * than the quote's last trade (or there is no quote), because a trade after the
+ * notice means the share is trading again. An unreadable `quoteAsOf` cannot
+ * prove a later trade, so it keeps the notice.
+ */
+export function haltNoticeToShow(halt: Disclosure | null, quoteAsOf: string | null | undefined): Disclosure | null {
+  if (!halt) return null;
+  if (!quoteAsOf) return halt;
+  const tradeMs = Date.parse(quoteAsOf);
+  const haltMs = Date.parse(halt.publishedAt);
+  return Number.isFinite(tradeMs) && tradeMs >= haltMs ? null : halt;
+}
 
 async function readRecentDisclosures(limit: number, ticker: string | undefined): Promise<Disclosure[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   // TS-06: NULL subjects are kept explicitly -- see NOT_CIRCUIT_BREAKER_OR.
-  let q = supabase
+  // h11-finance-1: with a ticker, ONE combined or() (stock_codes OR related_stocks,
+  // and not a breaker) replaces `.or(NOT_CIRCUIT_BREAKER_OR)` + `.contains(...)`.
+  const { data, error } = await supabase
     .from("kap_disclosures")
     .select(DISCLOSURE_SELECT)
-    .or(NOT_CIRCUIT_BREAKER_OR)
+    .or(ticker ? tickerDisclosureOr(ticker) : NOT_CIRCUIT_BREAKER_OR)
     .order("published_at", { ascending: false })
     .limit(limit);
-  if (ticker) q = q.contains("stock_codes", [ticker]);
-  const { data, error } = await q;
   if (error) throw new Error(`[finance] fetchRecentDisclosures: ${error.message}`);
   return ((data ?? []) as DisclosureRow[]).map(toDisclosure);
 }
@@ -647,47 +751,89 @@ function median(nums: number[]): number | null {
   return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
+const EVENT_WINDOW_MS = 24 * 3_600_000;
+
 /**
- * Coverage of a ticker's disclosures.
- *   covered          disclosures with at least one article AT OR AFTER the filing
- *   medianLagMinutes median of the first such article's lag
- *   pressAhead       disclosures with abnormal attention in the 24 h before:
- *                    >= 2 articles and >= 3x the ticker's usual daily rate.
+ * Coverage of a ticker's disclosures, counted per EVENT.
+ *
+ * h11-finance-3: the disclosure_coverage view joins every disclosure to every
+ * article within [-2 d, +5 d], so one pair of articles was counted again for
+ * each same-day warrant or market-maker filing ("ISMEN: 60 bildirim, 55 basında
+ * yer bulan, 14 olağandışı ön ilgi" from 13 articles in a month). Filings of one
+ * ticker are therefore grouped into events: sorted oldest first, a filing more
+ * than 24 h after the CURRENT event's first filing starts a new event. Each
+ * article is measured against the event's first filing,
+ *     lag_e = lag_minutes + (publishedAt - eventStart) / 60000
+ * (lag_minutes is relative to the filing the view joined it to), and an article
+ * seen under several filings of the event is one article.
+ *   events           event count (<= disclosures).
+ *   covered          events with at least one article at or after the event
+ *                    start (lag_e >= 0); so `covered <= events` always.
+ *   medianLagMinutes median, over covered events, of the first such article's lag_e.
+ *   pressAhead       events with abnormal attention in the 24 h before:
+ *                    >= 2 DISTINCT articles with lag_e in [-1440, 0) and >= 3x
+ *                    the ticker's usual daily rate (floored at 0.5 a day).
  * A mention before the filing is not leakage by itself; a ticker that is in
  * the news every day always has one.
  *
- * `includeIndexes` (optional) is an ALLOWLIST of the disclosure indexes that
- * count: rows of any other disclosure are skipped. fetchTickerPage passes the
- * indexes of the disclosures it lists, which are already free of circuit-breaker
- * notices, so the section agrees with "Medyada yankı" and /ekonomi and
- * `covered <= disclosures` always holds. An allowlist rather than an
- * exclude-list of breaker indexes because the coverage table does not know a
- * disclosure's subject: removing breakers by index would need a second read,
- * while the listed disclosures are already at hand. Omitted, every row counts.
+ * `disclosures` is the list the page shows (fetchTickerPage passes the
+ * disclosures it lists, which are already free of circuit-breaker notices, so
+ * the section agrees with "Medyada yankı" and /ekonomi). Rows of any other
+ * disclosure are skipped: an allowlist, because the coverage table does not
+ * know a disclosure's subject. A disclosure whose date cannot be read counts in
+ * `disclosures` but cannot anchor or join an event.
  */
 export function coverageStats(
-  rows: ReadonlyArray<{ disclosure_index: number; lag_minutes: number }>,
-  disclosures: number,
+  rows: ReadonlyArray<{ disclosure_index: number; lag_minutes: number; article_id: string }>,
+  disclosures: ReadonlyArray<{ disclosureIndex: number; publishedAt: string }>,
   baselineDaily: number,
-  includeIndexes?: ReadonlySet<number>,
 ): CoverageStats {
-  const byDisclosure = new Map<number, number[]>();
-  for (const r of rows) {
-    if (includeIndexes && !includeIndexes.has(r.disclosure_index)) continue;
-    const arr = byDisclosure.get(r.disclosure_index) ?? [];
-    arr.push(Number(r.lag_minutes));
-    byDisclosure.set(r.disclosure_index, arr);
+  const dated = disclosures
+    .map((d) => ({ index: d.disclosureIndex, ms: Date.parse(d.publishedAt) }))
+    .filter((d) => Number.isFinite(d.ms))
+    .sort((a, b) => a.ms - b.ms || a.index - b.index);
+
+  const events: Array<{ startMs: number; indexes: Map<number, number> }> = [];
+  for (const d of dated) {
+    const current = events[events.length - 1];
+    if (current && d.ms - current.startMs <= EVENT_WINDOW_MS) {
+      current.indexes.set(d.index, d.ms);
+    } else {
+      events.push({ startMs: d.ms, indexes: new Map([[d.index, d.ms]]) });
+    }
   }
+
+  const eventOf = new Map<number, number>();
+  events.forEach((e, k) => {
+    for (const index of e.indexes.keys()) eventOf.set(index, k);
+  });
+
+  // Per event: article id -> its lag from the event's first filing.
+  const lagByArticle: Array<Map<string, number>> = events.map(() => new Map());
+  for (const r of rows) {
+    const k = eventOf.get(r.disclosure_index);
+    if (k === undefined) continue;
+    const e = events[k]!;
+    const lagE = Number(r.lag_minutes) + (e.indexes.get(r.disclosure_index)! - e.startMs) / 60_000;
+    if (!Number.isFinite(lagE)) continue;
+    lagByArticle[k]!.set(r.article_id, lagE);
+  }
+
   const firstAfter: number[] = [];
   let pressAhead = 0;
-  for (const lags of byDisclosure.values()) {
-    const after = lags.filter((l) => l >= 0);
-    if (after.length) firstAfter.push(Math.min(...after));
-    const pre24 = lags.filter((l) => l >= -1440 && l < 0).length;
+  for (const lags of lagByArticle) {
+    let first = Number.POSITIVE_INFINITY;
+    let pre24 = 0;
+    for (const lag of lags.values()) {
+      if (lag >= 0) first = Math.min(first, lag);
+      else if (lag >= -1440) pre24++;
+    }
+    if (first !== Number.POSITIVE_INFINITY) firstAfter.push(first);
     if (pre24 >= 2 && pre24 >= 3 * Math.max(baselineDaily, 0.5)) pressAhead++;
   }
   return {
-    disclosures,
+    disclosures: disclosures.length,
+    events: events.length,
     covered: firstAfter.length,
     medianLagMinutes: median(firstAfter),
     pressAhead,
@@ -698,8 +844,48 @@ export function coverageStats(
 const TICKER_PAGE_MAX_PAGES = 10;
 
 /** The coverage read's result when there is nothing to read (no listed disclosure, or the list failed). */
-function noCoverage(): { rows: Array<{ disclosure_index: number; lag_minutes: number }>; truncated: boolean } {
+function noCoverage(): { rows: CoverageRow[]; truncated: boolean } {
   return { rows: [], truncated: false };
+}
+
+interface CoverageRow {
+  disclosure_index: number;
+  lag_minutes: number;
+  article_id: string;
+}
+
+/** ticker_articles' page size; a full page means older articles exist. */
+const TICKER_ARTICLES_LIMIT = 60;
+/** Display cap of the per-ticker disclosure list (and of the "Medyada yankı" panel). */
+const TICKER_DISCLOSURES_LIMIT = 60;
+
+/**
+ * The ticker's disclosures in the last 30 days (breakers excluded), counted in
+ * the database with the SAME or() and cut-off as the list. Fails OPEN to null
+ * (warn): see the header note on totalDisclosures30d. Never rejects.
+ */
+async function readDisclosureCount(
+  supabase: Awaited<ReturnType<typeof createFinanceServerClient>>,
+  ticker: string,
+  sinceIso: string,
+): Promise<number | null> {
+  try {
+    const { count, error } = await supabase
+      .from("kap_disclosures")
+      .select("disclosure_index", { count: "exact", head: true })
+      .or(tickerDisclosureOr(ticker))
+      .gte("published_at", sinceIso);
+    if (error) {
+      console.warn(`[finance] fetchTickerPage disclosure count ${ticker} unavailable: ${error.message}`);
+      return null;
+    }
+    return typeof count === "number" ? count : null;
+  } catch (err) {
+    console.warn(
+      `[finance] fetchTickerPage disclosure count ${ticker} unavailable: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
 }
 
 async function readTickerPage(ticker: string): Promise<TickerPage> {
@@ -709,7 +895,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
   // The attention window is 30 Istanbul days; the notice-id lookup covers the same span.
   const attentionSinceIso = `${istDate(-29)}T00:00:00+03:00`;
 
-  const [companyRes, attentionRes, articlesRes, { disclosuresRes, coverageRes }, legalIds] = await Promise.all([
+  const [companyRes, attentionRes, articlesRes, { disclosuresRes, coverageRes, totalDisclosures30d }, legalIds] = await Promise.all([
     supabase.from("bist_companies").select("kap_member_oid,tickers,title,city,shares_traded").contains("tickers", [ticker]).limit(1),
     // reader-data (§4b): reads article_tickers directly (the
     // ticker_attention_daily materialized view stays unfiltered for its
@@ -732,22 +918,26 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
     ),
     // Starts from the indexed article_tickers side (migration 054); the
     // embedded-filter form timed out in production.
-    supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: 60 }),
+    supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: TICKER_ARTICLES_LIMIT }),
     // The disclosure list, then the coverage of exactly those disclosures. The
     // two are chained inside ONE branch so the other reads above still run in
-    // parallel with them.
+    // parallel with them. The 30-day total (fail-open) runs in parallel with
+    // the list.
     (async () => {
+      const countPromise = readDisclosureCount(supabase, ticker, since30);
+      // h11-finance-1: stock_codes OR related_stocks, breakers excluded, as ONE or().
       const disclosuresRes = await supabase
         .from("kap_disclosures")
         .select(DISCLOSURE_SELECT)
-        .contains("stock_codes", [ticker])
-        .or(NOT_CIRCUIT_BREAKER_OR)
+        .or(tickerDisclosureOr(ticker))
         .gte("published_at", since30)
         .order("published_at", { ascending: false })
-        .limit(60);
+        .limit(TICKER_DISCLOSURES_LIMIT);
+      const totalDisclosures30d = await countPromise;
       // The caller throws on a disclosure error; do not spend the coverage read.
-      if (disclosuresRes.error) return { disclosuresRes, coverageRes: noCoverage() };
-      const indexes = ((disclosuresRes.data ?? []) as DisclosureRow[]).map((d) => d.disclosure_index);
+      if (disclosuresRes.error) return { disclosuresRes, coverageRes: noCoverage(), totalDisclosures30d };
+      // Only the issuer's own filings: see issuerDisclosureIndexes.
+      const indexes = issuerDisclosureIndexes((disclosuresRes.data ?? []) as DisclosureRow[], ticker);
       // ekonomi-coverage: the coverage rows of the LISTED disclosures only, paged.
       // disclosure_coverage is a join view (kap_disclosures x article_tickers x
       // articles): an unrestricted read of a busy ticker pays the whole join and
@@ -756,15 +946,16 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
       // the database, so the rows that transfer are the rows that count, and
       // it usually fits one page. A single `.limit(2000)` is not an option:
       // PostgREST clamps one response at 1,000 rows. (disclosure_index,
-      // lag_minutes, article_id) is a total order for one ticker.
+      // lag_minutes, article_id) is a total order for one ticker. article_id is
+      // selected too: coverageStats counts one article once per event.
       const coverageRes =
         indexes.length === 0
           ? noCoverage()
-          : await readAllPages<{ disclosure_index: number; lag_minutes: number }>(
+          : await readAllPages<CoverageRow>(
               (from, to) =>
                 supabase
                   .from("disclosure_coverage")
-                  .select("disclosure_index,lag_minutes")
+                  .select("disclosure_index,lag_minutes,article_id")
                   .eq("ticker", ticker)
                   .in("disclosure_index", indexes)
                   .gte("disclosed_at", since30)
@@ -774,7 +965,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
                   .range(from, to),
               { label: `fetchTickerPage coverage ${ticker}`, maxPages: TICKER_PAGE_MAX_PAGES },
             );
-      return { disclosuresRes, coverageRes };
+      return { disclosuresRes, coverageRes, totalDisclosures30d };
     })(),
     // ticker-legal-notices (107): fail-open, so it stays out of the throwing loop below.
     fetchLegalNoticeIdsSince(supabase, attentionSinceIso),
@@ -785,7 +976,9 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
   }
 
   const c = (companyRes.data ?? [])[0] as { kap_member_oid: string; tickers: string[]; title: string; city: string | null; shares_traded: boolean } | undefined;
-  const disclosures = ((disclosuresRes.data ?? []) as DisclosureRow[]).map(toDisclosure);
+  const disclosureRows = (disclosuresRes.data ?? []) as DisclosureRow[];
+  const disclosures = disclosureRows.map(toDisclosure);
+  const issuerIndexes = new Set(issuerDisclosureIndexes(disclosureRows, ticker));
   const attentionRaw = attentionRes.rows.map((r) => ({
     ticker,
     article_id: r.article_id,
@@ -820,12 +1013,13 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
         source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
         tickers: [ticker],
       })),
+    articlesTruncated: articleRows.length >= TICKER_ARTICLES_LIMIT,
     disclosures,
+    totalDisclosures30d,
     coverage: coverageStats(
       coverageRes.rows,
-      disclosures.length,
+      disclosures.filter((d) => issuerIndexes.has(d.disclosureIndex)),
       baselineDaily,
-      new Set(disclosures.map((d) => d.disclosureIndex)),
     ),
   };
 }

@@ -22,6 +22,11 @@ import { YelpazeReportView } from "@/components/admin/yelpaze-report";
 export const metadata: Metadata = {
   title: "Tayf Yelpaze Raporu",
   robots: { index: false, follow: false },
+  // src/app/layout.tsx sets a site-wide canonical '/', inherited by any page
+  // that does not set its own `alternates`: without this the noindex report
+  // advertised the homepage as its canonical. null drops the link; a URL would
+  // put the token into it (see tests/guards/static-page-metadata.test.ts).
+  alternates: { canonical: null },
 };
 
 interface PageProps {

@@ -56,9 +56,15 @@ export const MAX_PAGES = 50;
 // Verified at implementation time (2026-09-28) by reading each page's own
 // `metadata`/`generateMetadata`: none of these three set `robots: noindex`,
 // so all three are eligible for the static sitemap. /oyun and
-// /ekonomi/[ticker] are deliberately EXCLUDED regardless of their metadata
-// — the ticker page sets `robots: { index: false, follow: false }`, and
-// /oyun is a game surface that never belongs in crawl discovery. If any of
+// /ekonomi/[ticker] are deliberately EXCLUDED, by choice and not because they
+// are noindex: the ticker pages of traded companies are indexable (they carry
+// a self canonical and og tags, and crawlers reach them through the chips on
+// /ekonomi and the headlines), they are just not listed here, because 600+
+// near-identical price pages would crowd out the news URLs. Only the thin ones
+// (no company row, shares_traded false, a code under 4 characters, KTEST — see
+// isThinTicker in lib/finance/ticker-index.ts) are `robots: noindex, follow`,
+// and the not-found / unknown shells are noindex with no canonical. /oyun is a
+// game surface that never belongs in crawl discovery. If any of
 // these five pages' robots metadata changes, re-check this list by hand;
 // it is intentionally not derived at build/runtime to keep this file
 // DB-free and import-side-effect-free (the candidate pages pull in

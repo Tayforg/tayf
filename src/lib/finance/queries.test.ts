@@ -16,6 +16,14 @@ const fixture = vi.hoisted(() => ({
   kapDisclosures: [] as unknown[],
   // When set, the kap_disclosures read resolves this error envelope.
   kapError: null as string | null,
+  // h11-finance-3: the head:true / count:'exact' read of kap_disclosures (the
+  // 30-day total behind the "son 60 bildirim (30 günde N)" label). `kapCount`
+  // is its `count`; `kapCountError` makes it fail; `lastKapCountState` and
+  // `kapStates` record the builder state of the count read / of every read.
+  kapCount: null as number | null,
+  kapCountError: null as string | null,
+  lastKapCountState: null as unknown,
+  kapStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
   bars5m: [] as Array<{ ts: string; close: number; volume: number }>,
   econFeedRows: [] as unknown[],
   lastKapState: null as unknown,
@@ -39,7 +47,10 @@ const fixture = vi.hoisted(() => ({
   coverageStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
   coverageError: null as string | null,
   jevRows: [] as Array<{ subject_id: string; jev_prob: number; created_at: string }>,
-  bistCompanies: [] as Array<{ tickers: string[]; title: string }>,
+  bistCompanies: [] as Array<{ tickers: string[]; title: string; shares_traded?: boolean }>,
+  // Builder state of every bist_companies read, and an error switch for it.
+  companyStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
+  companyError: null as string | null,
   tickerArticlesRows: [] as unknown[],
   tickerArticlesError: null as string | null,
   // migration 107: ids of BİK court / official notices. The ticker readers
@@ -67,7 +78,16 @@ const supabaseFake = await vi.hoisted(async () => {
   return helper.createSupabaseFake({
     tables: {
       kap_disclosures: (state: unknown) => {
-        fixture.lastKapState = state;
+        const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
+        fixture.kapStates.push(s);
+        const selectOpts = s.selectArgs[1] as { head?: boolean } | undefined;
+        if (selectOpts?.head === true) {
+          // The count read: no rows, just `count`.
+          fixture.lastKapCountState = s;
+          if (fixture.kapCountError) return { data: null, error: { message: fixture.kapCountError } };
+          return { data: null, error: null, count: fixture.kapCount };
+        }
+        fixture.lastKapState = s;
         if (fixture.kapError) return { data: null, error: { message: fixture.kapError } };
         return { data: fixture.kapDisclosures, error: null };
       },
@@ -146,7 +166,11 @@ const supabaseFake = await vi.hoisted(async () => {
         }
         return { data: [], error: null };
       },
-      bist_companies: () => ({ data: fixture.bistCompanies, error: null }),
+      bist_companies: (state: unknown) => {
+        fixture.companyStates.push(state as import("../../../tests/_helpers/supabase-fake").BuilderState);
+        if (fixture.companyError) return { data: null, error: { message: fixture.companyError } };
+        return { data: fixture.bistCompanies, error: null };
+      },
       legal_notice_articles: (state: unknown) => {
         const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
         fixture.lastLegalState = s;
@@ -203,9 +227,13 @@ import {
   fetchSignals,
   fetchTickerPage,
   fetchTopTickers,
+  haltNoticeToShow,
+  latestTradingHalt,
   rankAttention,
   toFeedItem,
+  type Disclosure,
 } from "./queries";
+import { tickerDisclosureOr } from "./disclosure-filter";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -215,6 +243,10 @@ beforeEach(() => {
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.kapDisclosures = [];
   fixture.kapError = null;
+  fixture.kapCount = null;
+  fixture.kapCountError = null;
+  fixture.lastKapCountState = null;
+  fixture.kapStates = [];
   fixture.bars5m = [];
   fixture.econFeedRows = [];
   fixture.lastKapState = null;
@@ -226,6 +258,8 @@ beforeEach(() => {
   fixture.coverageError = null;
   fixture.jevRows = [];
   fixture.bistCompanies = [];
+  fixture.companyStates = [];
+  fixture.companyError = null;
   fixture.tickerArticlesRows = [];
   fixture.tickerArticlesError = null;
   fixture.legalNotices = [];
@@ -280,6 +314,7 @@ describe("finance query transforms", () => {
       "2026-09-12",
       2,
       6,
+      new Set(["THYAO", "VESTL", "OLD"]),
     );
     expect(ranked.map((r) => r.ticker)).toEqual(["THYAO", "VESTL"]);
     // 7 articles over 2 days vs 3 over the 6 baseline days: 3.5 / 0.5 = 7x
@@ -296,6 +331,7 @@ describe("finance query transforms", () => {
         "2026-09-12",
         2,
         6,
+        new Set(["AAA"]),
       );
 
     it("two recent days with different sources add up to 2, not max(1, 1)", () => {
@@ -323,54 +359,310 @@ describe("finance query transforms", () => {
     });
   });
 
-  it("coverageStats drops rows of disclosures outside includeIndexes (circuit breakers, strangers)", () => {
+  describe("rankAttention: only traded tickers, and a ratio only with enough articles (h11-finance-4)", () => {
     const rows = [
-      { disclosure_index: 1, lag_minutes: 30 },
-      { disclosure_index: 2, lag_minutes: -2000 },
-      { disclosure_index: 3, lag_minutes: 90 },
-      // 9 is not a listed disclosure: covered AND abnormal pre-filing attention if it were counted.
-      { disclosure_index: 9, lag_minutes: -300 },
-      { disclosure_index: 9, lag_minutes: -200 },
-      { disclosure_index: 9, lag_minutes: -100 },
-      { disclosure_index: 9, lag_minutes: -20 },
-      { disclosure_index: 9, lag_minutes: 5 },
+      { ticker: "BOYNR", day: "2026-09-13", articles: 2, sources: 2, sourceIds: ["a", "b"] },
+      { ticker: "BOYNR", day: "2026-09-08", articles: 1, sources: 1, sourceIds: ["a"] },
+      { ticker: "KILER", day: "2026-09-13", articles: 1, sources: 1, sourceIds: ["a"] },
+      { ticker: "THYAO", day: "2026-09-13", articles: 4, sources: 3, sourceIds: ["a", "b", "c"] },
+      { ticker: "THYAO", day: "2026-09-08", articles: 3, sources: 2, sourceIds: ["a", "b"] },
     ];
-    expect(coverageStats(rows, 3, 0.2, new Set([1, 2, 3]))).toEqual({
-      disclosures: 3,
-      covered: 2,
-      medianLagMinutes: 60,
-      pressAhead: 0,
+    const rank = (traded: ReadonlySet<string>) => rankAttention(rows, new Map(), 10, "2026-09-12", 2, 6, traded);
+
+    it("drops tickers that are not in the traded set (passive or delisted companies)", () => {
+      expect(rank(new Set(["THYAO"])).map((r) => r.ticker)).toEqual(["THYAO"]);
+      expect(rank(new Set(["THYAO", "BOYNR"])).map((r) => r.ticker)).toEqual(["THYAO", "BOYNR"]);
     });
-    // Without the allowlist the stranger leaks in: 3 covered, one pressAhead, median 30.
-    expect(coverageStats(rows, 3, 0.2)).toEqual({ disclosures: 3, covered: 3, medianLagMinutes: 30, pressAhead: 1 });
-    // An empty allowlist keeps nothing.
-    expect(coverageStats(rows, 0, 0.2, new Set())).toEqual({
-      disclosures: 0,
-      covered: 0,
-      medianLagMinutes: null,
-      pressAhead: 0,
+
+    it("an empty traded set ranks nothing", () => {
+      expect(rank(new Set())).toEqual([]);
+    });
+
+    it("the limit applies after the traded filter, so non-traded rows do not eat the slots", () => {
+      const out = rankAttention(rows, new Map(), 1, "2026-09-12", 2, 6, new Set(["THYAO"]));
+      expect(out.map((r) => r.ticker)).toEqual(["THYAO"]);
+    });
+
+    it("a ratio needs >= 3 recent AND >= 3 baseline articles; below that it is null", () => {
+      const out = Object.fromEntries(rank(new Set(["THYAO", "BOYNR"])).map((r) => [r.ticker, r.ratio]));
+      // BOYNR: 2 recent, 1 baseline -> the "ilgi 6,0x" spike of two articles is not a signal.
+      expect(out.BOYNR).toBeNull();
+      // THYAO: 4 recent over 2 days vs 3 baseline over 6 days = 2 / 0.5 = 4x.
+      expect(out.THYAO).toBe(4);
+    });
+
+    it("pins each side of the floor", () => {
+      const one = (recent: number, baseline: number) =>
+        rankAttention(
+          [
+            { ticker: "AAA", day: "2026-09-13", articles: recent, sources: 1, sourceIds: ["s"] },
+            { ticker: "AAA", day: "2026-09-08", articles: baseline, sources: 1, sourceIds: ["s"] },
+          ],
+          new Map(),
+          5,
+          "2026-09-12",
+          2,
+          6,
+          new Set(["AAA"]),
+        )[0]!.ratio;
+      expect(one(2, 9)).toBeNull(); // recent just under
+      expect(one(9, 2)).toBeNull(); // baseline just under
+      expect(one(3, 3)).not.toBeNull(); // both at the floor
+      expect(one(3, 3)).toBe(3);
     });
   });
 
-  it("measures first coverage after the filing and flags only abnormal pre-filing attention", () => {
-    const rows = [
-      // 1: one routine mention before, first real coverage 30 min after
-      { disclosure_index: 1, lag_minutes: -600 },
-      { disclosure_index: 1, lag_minutes: 30 },
-      { disclosure_index: 1, lag_minutes: 400 },
-      // 2: only a mention two days before, never covered afterwards
-      { disclosure_index: 2, lag_minutes: -2000 },
-      // 3: four articles in the 24 h before, coverage 90 min after
-      { disclosure_index: 3, lag_minutes: -1200 },
-      { disclosure_index: 3, lag_minutes: -300 },
-      { disclosure_index: 3, lag_minutes: -200 },
-      { disclosure_index: 3, lag_minutes: -20 },
-      { disclosure_index: 3, lag_minutes: 90 },
-    ];
-    // quiet ticker: 4 articles in a day is abnormal
-    expect(coverageStats(rows, 5, 0.2)).toEqual({ disclosures: 5, covered: 2, medianLagMinutes: 60, pressAhead: 1 });
-    // busy ticker (3 a day): the same 4 articles are just Tuesday
-    expect(coverageStats(rows, 5, 3).pressAhead).toBe(0);
+  describe("coverageStats: events, not disclosures (h11-finance-3)", () => {
+    const T0 = Date.parse("2026-09-10T08:00:00Z");
+    const HOUR = 3_600_000;
+    const disc = (disclosureIndex: number, hoursAfterT0: number) => ({
+      disclosureIndex,
+      publishedAt: new Date(T0 + hoursAfterT0 * HOUR).toISOString(),
+    });
+    const row = (disclosure_index: number, lag_minutes: number, article_id: string) => ({
+      disclosure_index,
+      lag_minutes,
+      article_id,
+    });
+
+    /** Five same-morning filings (a warrant, a market-maker notice, ...) at +0..+4 h. */
+    const fiveSameDay = [disc(1, 0), disc(2, 1), disc(3, 2), disc(4, 3), disc(5, 4)];
+
+    it("5 same-day disclosures that share 2 pre-filing articles are ONE event with ONE ön ilgi, not 5", () => {
+      // The two articles came out 300 and 200 minutes before the first filing; each later filing sees
+      // them at a longer lag, exactly as the disclosure_coverage view reports them.
+      const rows = fiveSameDay.flatMap((d, k) => [row(d.disclosureIndex, -300 - 60 * k, "p1"), row(d.disclosureIndex, -200 - 60 * k, "p2")]);
+      expect(coverageStats(rows, fiveSameDay, 0.2)).toEqual({
+        disclosures: 5,
+        events: 1,
+        covered: 0,
+        medianLagMinutes: null,
+        pressAhead: 1,
+      });
+    });
+
+    it("5 same-day disclosures that share 1 later article are 1 covered event with that article's lag", () => {
+      // One article 90 minutes after the first filing: lag 90, 30, -30, -90, -150 from the five filings.
+      const rows = fiveSameDay.map((d, k) => row(d.disclosureIndex, 90 - 60 * k, "post"));
+      expect(coverageStats(rows, fiveSameDay, 0.2)).toEqual({
+        disclosures: 5,
+        events: 1,
+        covered: 1,
+        medianLagMinutes: 90,
+        pressAhead: 0,
+      });
+    });
+
+    it("measures the lag from the first filing of the event, not from the filing the view joined it to", () => {
+      // 30 minutes after the 2nd filing = 90 minutes after the 1st.
+      const out = coverageStats([row(2, 30, "x")], [disc(1, 0), disc(2, 1)], 0.2);
+      expect(out.medianLagMinutes).toBe(90);
+    });
+
+    it("two disclosures three days apart are two events", () => {
+      const out = coverageStats(
+        [row(1, 20, "a"), row(2, 40, "b")],
+        [disc(1, 0), disc(2, 72)],
+        0.2,
+      );
+      expect(out).toEqual({ disclosures: 2, events: 2, covered: 2, medianLagMinutes: 30, pressAhead: 0 });
+    });
+
+    it("a filing exactly 24 h after the event's start joins it; one minute later starts a new event", () => {
+      expect(coverageStats([], [disc(1, 0), disc(2, 24)], 0.2).events).toBe(1);
+      const late = { disclosureIndex: 2, publishedAt: new Date(T0 + 24 * HOUR + 60_000).toISOString() };
+      expect(coverageStats([], [disc(1, 0), late], 0.2).events).toBe(2);
+    });
+
+    it("an event is anchored at its FIRST filing: a chain of filings 20 h apart does not stay one event forever", () => {
+      // +0, +20 (same event), +40 is 40 h after the start -> new event.
+      expect(coverageStats([], [disc(1, 0), disc(2, 20), disc(3, 40)], 0.2).events).toBe(2);
+    });
+
+    it("sorts the filings itself: the page lists them newest first", () => {
+      const rows = [row(1, 30, "a")];
+      const asc = coverageStats(rows, [disc(1, 0), disc(2, 1)], 0.2);
+      const desc = coverageStats(rows, [disc(2, 1), disc(1, 0)], 0.2);
+      expect(desc).toEqual(asc);
+      expect(asc.events).toBe(1);
+    });
+
+    it("an article that sits in the view under several filings counts once for ön ilgi", () => {
+      // ONE distinct pre-filing article seen by five filings is 1 article, below the floor of 2.
+      const rows = fiveSameDay.map((d, k) => row(d.disclosureIndex, -300 - 60 * k, "only"));
+      expect(coverageStats(rows, fiveSameDay, 0.2).pressAhead).toBe(0);
+    });
+
+    it("pre-filing means [-24 h, 0) from the event start: -1440 counts, -1441 and 0 do not", () => {
+      const at = (lags: number[]) => coverageStats(lags.map((l, i) => row(1, l, `a${i}`)), [disc(1, 0)], 0.2);
+      expect(at([-1440, -1440]).pressAhead).toBe(1);
+      expect(at([-1441, -1441]).pressAhead).toBe(0);
+      expect(at([0, 0])).toMatchObject({ pressAhead: 0, covered: 1 });
+    });
+
+    it("a busy ticker (3 articles a day) does not read 4 pre-filing articles as abnormal", () => {
+      const rows = [-300, -200, -100, -20].map((l, i) => row(1, l, `a${i}`));
+      expect(coverageStats(rows, [disc(1, 0)], 0.2).pressAhead).toBe(1);
+      expect(coverageStats(rows, [disc(1, 0)], 3).pressAhead).toBe(0);
+    });
+
+    it("the median is over covered events only", () => {
+      const out = coverageStats(
+        [row(1, 30, "a"), row(2, 90, "b"), row(3, -5000, "c")],
+        [disc(1, 0), disc(2, 72), disc(3, 144)],
+        0.2,
+      );
+      expect(out).toMatchObject({ events: 3, covered: 2, medianLagMinutes: 60 });
+    });
+
+    it("rows of a disclosure that is not listed (a circuit breaker, a stranger) are ignored", () => {
+      const rows = [
+        row(1, 30, "a"),
+        // 9 is not a listed disclosure: covered AND abnormal pre-filing attention if it were counted.
+        row(9, -300, "s1"),
+        row(9, -200, "s2"),
+        row(9, 5, "s3"),
+      ];
+      expect(coverageStats(rows, [disc(1, 0)], 0.2)).toEqual({
+        disclosures: 1,
+        events: 1,
+        covered: 1,
+        medianLagMinutes: 30,
+        pressAhead: 0,
+      });
+    });
+
+    it("no disclosures -> all zeros and a null median", () => {
+      expect(coverageStats([row(1, 10, "a")], [], 0.2)).toEqual({
+        disclosures: 0,
+        events: 0,
+        covered: 0,
+        medianLagMinutes: null,
+        pressAhead: 0,
+      });
+    });
+
+    it("a disclosure with an unreadable date is counted but cannot anchor an event", () => {
+      const out = coverageStats([row(1, 10, "a")], [{ disclosureIndex: 1, publishedAt: "not a date" }, disc(2, 0)], 0.2);
+      expect(out.disclosures).toBe(2);
+      expect(out.events).toBe(1);
+      expect(out.covered).toBe(0);
+    });
+
+    it("covered <= events <= disclosures for any mix of filings and coverage rows", () => {
+      let seed = 12345;
+      const rnd = () => {
+        seed = (seed * 1103515245 + 12345) % 2147483648;
+        return seed / 2147483648;
+      };
+      for (let run = 0; run < 300; run++) {
+        const n = 1 + Math.floor(rnd() * 12);
+        const ds = Array.from({ length: n }, (_, i) => disc(i + 1, Math.floor(rnd() * 24 * 6)));
+        const rows = Array.from({ length: Math.floor(rnd() * 40) }, (_, i) =>
+          row(1 + Math.floor(rnd() * (n + 2)), Math.floor(rnd() * 6000) - 3000, `a${i % 9}`),
+        );
+        const out = coverageStats(rows, ds, rnd() * 3);
+        expect(out.covered).toBeLessThanOrEqual(out.events);
+        expect(out.events).toBeLessThanOrEqual(out.disclosures);
+        expect(out.pressAhead).toBeLessThanOrEqual(out.events);
+      }
+    });
+  });
+
+  describe("latestTradingHalt (h11-finance-1)", () => {
+    const notice = (index: number, publishedAt: string, summary: string | null, subject: string | null = "Pay İşlem Sırası Kapatma / Açma"): Disclosure => ({
+      disclosureIndex: index,
+      publishedAt,
+      kapTitle: "BORSA İSTANBUL A.Ş.",
+      stockCodes: ["TRHOL"],
+      subject,
+      summary,
+      disclosureClass: null,
+    });
+    const closing = notice(1688666, "2026-10-28T06:38:59Z", "Pay Sırasının İşleme Kapatılması");
+    const reopening = notice(1688700, "2026-10-28T13:00:00Z", "Pay Sırasının İşleme Açılması");
+    const other = notice(1, "2026-10-29T08:00:00Z", "Genel Kurul", "Özel Durum Açıklaması (Genel)");
+
+    it("returns a closing notice that is newer than the reopening one", () => {
+      const olderReopening = notice(1688000, "2026-10-20T06:00:00Z", "Pay Sırasının İşleme Açılması");
+      expect(latestTradingHalt([closing, olderReopening])?.disclosureIndex).toBe(1688666);
+    });
+
+    it("returns null when the newest halt notice is the reopening", () => {
+      expect(latestTradingHalt([reopening, closing])).toBeNull();
+      expect(latestTradingHalt([closing, reopening])).toBeNull();
+    });
+
+    it("returns null when there is no halt notice at all", () => {
+      expect(latestTradingHalt([])).toBeNull();
+      expect(latestTradingHalt([other])).toBeNull();
+    });
+
+    it("ignores other disclosures, even newer ones", () => {
+      expect(latestTradingHalt([other, closing])?.disclosureIndex).toBe(1688666);
+    });
+
+    it("does not rely on the list order: it takes the newest by publishedAt", () => {
+      expect(latestTradingHalt([reopening, closing, other])).toBeNull();
+      expect(latestTradingHalt([closing, other, reopening])).toBeNull();
+    });
+
+    it("matches the subject in Turkish lower case (İŞLEM SIRASI, İşlem Sırası, işlem sırası)", () => {
+      expect(latestTradingHalt([notice(2, "2026-10-28T06:00:00Z", "Pay Sırasının İşleme Kapatılması", "PAY İŞLEM SIRASI KAPATMA / AÇMA")])?.disclosureIndex).toBe(2);
+      expect(latestTradingHalt([notice(3, "2026-10-28T06:00:00Z", "pay sırasının işleme kapatılması", "pay işlem sırası kapatma / açma")])?.disclosureIndex).toBe(3);
+    });
+
+    it("recognises the plural and 'geçici olarak' wordings of a closing", () => {
+      expect(latestTradingHalt([notice(4, "2026-03-12T06:20:22Z", "Pay Sıralarının İşleme Kapatılması")])?.disclosureIndex).toBe(4);
+      expect(latestTradingHalt([notice(5, "2025-08-14T16:11:21Z", "Pay Sırasının Geçici Olarak İşleme Kapatılması")])?.disclosureIndex).toBe(5);
+    });
+
+    it("a notice that both closes and reopens the share in one filing is not a halt", () => {
+      expect(latestTradingHalt([notice(6, "2024-12-26T06:55:45Z", "Pay Sırasının İşleme Kapatılması ve Açılması")])).toBeNull();
+    });
+
+    it("a halt subject with no summary cannot be told from a reopening, so it is not shown", () => {
+      expect(latestTradingHalt([notice(7, "2026-10-28T06:00:00Z", null)])).toBeNull();
+    });
+
+    it("tolerates a disclosure with a null subject", () => {
+      expect(latestTradingHalt([notice(8, "2026-10-28T06:00:00Z", "x", null), closing])?.disclosureIndex).toBe(1688666);
+    });
+  });
+
+  describe("haltNoticeToShow: the halt is shown only while it explains the price", () => {
+    const halt: Disclosure = {
+      disclosureIndex: 1688666,
+      publishedAt: "2026-10-28T06:38:59Z",
+      kapTitle: "BORSA İSTANBUL A.Ş.",
+      stockCodes: ["TRHOL"],
+      subject: "Pay İşlem Sırası Kapatma / Açma",
+      summary: "Pay Sırasının İşleme Kapatılması",
+      disclosureClass: null,
+    };
+
+    it("is shown when the last trade is older than the notice (TRHOL: last trade 27.10, halt 28.10)", () => {
+      expect(haltNoticeToShow(halt, "2026-10-27T15:00:00.000Z")).toBe(halt);
+    });
+
+    it("is shown when there is no quote at all", () => {
+      expect(haltNoticeToShow(halt, null)).toBe(halt);
+      expect(haltNoticeToShow(halt, undefined)).toBe(halt);
+    });
+
+    it("is hidden when the stock traded after the notice (the halt is over or was a partial one)", () => {
+      expect(haltNoticeToShow(halt, "2026-10-29T15:00:00.000Z")).toBeNull();
+      expect(haltNoticeToShow(halt, "2026-10-28T06:38:59Z")).toBeNull();
+    });
+
+    it("an unreadable quote date cannot prove a later trade, so the notice stays", () => {
+      expect(haltNoticeToShow(halt, "not a date")).toBe(halt);
+    });
+
+    it("is null without a halt", () => {
+      expect(haltNoticeToShow(null, "2026-10-27T15:00:00.000Z")).toBeNull();
+      expect(haltNoticeToShow(null, null)).toBeNull();
+    });
   });
 
   it("buckets lags into the fixed histogram", () => {
@@ -602,6 +894,8 @@ describe("reader-data (§4b): Jev ticker-relevance gate", () => {
       // a2:AAA is unscored — fail-open, counts.
     ];
 
+    fixture.bistCompanies = [{ tickers: ["AAA"], title: "AAA A.Ş.", shares_traded: true }];
+
     const result = await fetchTopTickers(2, 10);
     const aaa = result.find((r) => r.ticker === "AAA");
     expect(aaa).toBeDefined();
@@ -652,6 +946,11 @@ describe("reader-data (§4b): Jev ticker-relevance gate", () => {
 
 describe("ticker-legal-notices (migration 107): BİK notices do not count as ticker attention", () => {
   const NOW = "2026-09-13T12:00:00Z";
+
+  // h11-finance-4: the tape only ranks traded companies, so GARAN needs a traded row.
+  beforeEach(() => {
+    fixture.bistCompanies = [{ tickers: ["GARAN"], title: "TÜRKİYE GARANTİ BANKASI A.Ş.", shares_traded: true }];
+  });
 
   function warnSpy() {
     return vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -843,12 +1142,17 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
   const NOW = "2026-09-13T12:00:00Z";
   const NO_BREAKER_FILTER = "subject.is.null,subject.not.ilike.*Devre Kesici*";
 
+  // h11-finance-3: coverage is counted per EVENT (filings within 24 h of the event's first one are
+  // one event). The fixtures below are spaced 25 h apart so every listed disclosure is its own event
+  // and `covered` still reads as "disclosures with coverage"; the same-day dedupe has its own tests.
+  const EVENT_GAP_MS = 25 * 3_600_000;
   function disclosureRow(index: number, subject: string | null = "Özel Durum Açıklaması (Genel)") {
     return {
       disclosure_index: index,
-      published_at: new Date(Date.parse("2026-09-01T08:00:00Z") + index * 60_000).toISOString(),
+      published_at: new Date(Date.parse("2026-08-01T08:00:00Z") + (index % 24) * EVENT_GAP_MS).toISOString(),
       kap_title: "TÜRKİYE SİGORTA A.Ş.",
       stock_codes: ["TURSG"],
+      related_stocks: [] as string[],
       subject,
       summary: null,
       disclosure_class: "ODA",
@@ -885,6 +1189,7 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
     const page = await fetchTickerPage("TURSG");
 
     expect(page.coverage.disclosures).toBe(18);
+    expect(page.coverage.events).toBe(18);
     expect(page.coverage.covered).toBe(18);
     // First lag >= 0 per disclosure is 10 + k (k = 0..17): median of 10..27 = 18.5.
     expect(page.coverage.medianLagMinutes).toBe(18.5);
@@ -923,7 +1228,7 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
     const page = await fetchTickerPage("TURSG");
 
     expect(fixture.coverageStates).toHaveLength(1);
-    expect(page.coverage).toMatchObject({ disclosures: 1, covered: 1 });
+    expect(page.coverage).toMatchObject({ disclosures: 1, events: 1, covered: 1 });
   });
 
   it("restricts the coverage read to the listed disclosures in the database (.in on disclosure_index), so breaker notices never transfer", async () => {
@@ -945,7 +1250,7 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
     expect(inFilters).toHaveLength(1);
     expect(inFilters[0]?.col).toBe("disclosure_index");
     expect([...(inFilters[0]?.vals as number[])].sort((a, b) => a - b)).toEqual([5, 6, 7]);
-    expect(page.coverage).toMatchObject({ disclosures: 3, covered: 3 });
+    expect(page.coverage).toMatchObject({ disclosures: 3, events: 3, covered: 3 });
   });
 
   it("makes no coverage request at all when the ticker has no disclosure in the window", async () => {
@@ -956,7 +1261,48 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
     const page = await fetchTickerPage("TURSG");
 
     expect(fixture.coverageStates).toHaveLength(0);
-    expect(page.coverage).toEqual({ disclosures: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 });
+    expect(page.coverage).toEqual({ disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 });
+  });
+
+  it("lists related_stocks-only notices but leaves them out of the coverage read and the coverage numbers", async () => {
+    freeze();
+    // 1: the issuer's own filing. 2: a halt that names TURSG only in related_stocks. 3: a filing by ASELS
+    // that names TURSG in related_stocks. The disclosure_coverage view joins on stock_codes alone, so it
+    // can never credit an article to 2 or 3; counting them would show an uncovered event for a halt that
+    // has press (h11-finance-1 follow-up).
+    fixture.kapDisclosures = [
+      disclosureRow(1),
+      { ...disclosureRow(2), stock_codes: [] as string[], related_stocks: ["TURSG"], subject: "Pay İşlem Sırası Kapatma / Açma" },
+      { ...disclosureRow(3), stock_codes: ["ASELS"], related_stocks: ["TURSG"] },
+    ];
+    fixture.coverageRows = [
+      ...coverageFor(1, 0, 2),
+      // Rows the real view would never return for 2 and 3; the fake returns them if asked for them.
+      ...coverageFor(2, 1, 2),
+      ...coverageFor(3, 2, 2),
+    ];
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(page.disclosures.map((d) => d.disclosureIndex).sort((a, b) => a - b)).toEqual([1, 2, 3]);
+    expect(fixture.coverageStates).toHaveLength(1);
+    expect(fixture.coverageStates[0]!.in).toEqual([{ col: "disclosure_index", vals: [1] }]);
+    expect(page.coverage).toMatchObject({ disclosures: 1, events: 1, covered: 1 });
+  });
+
+  it("makes no coverage request when every listed disclosure is a related_stocks-only notice", async () => {
+    freeze();
+    fixture.kapDisclosures = [
+      { ...disclosureRow(1), stock_codes: [] as string[], related_stocks: ["TURSG"], subject: "Pay İşlem Sırası Kapatma / Açma" },
+      { ...disclosureRow(2), stock_codes: null as unknown as string[], related_stocks: ["TURSG"] },
+    ];
+    fixture.coverageRows = [...coverageFor(1, 0, 3), ...coverageFor(2, 1, 3)];
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(page.disclosures).toHaveLength(2);
+    expect(fixture.coverageStates).toHaveLength(0);
+    expect(page.coverage).toEqual({ disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 });
   });
 
   it("a failing disclosure read throws on its own error and never issues the coverage request", async () => {
@@ -972,21 +1318,82 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
     expect(fixture.coverageStates).toHaveLength(0);
   });
 
-  it("reads the disclosure list with the circuit-breaker or() filter and keeps its 60-row limit", async () => {
+  it("reads the disclosure list with ONE or() that matches stock_codes OR related_stocks and skips breakers, and keeps its 60-row limit", async () => {
     freeze();
     fixture.kapDisclosures = [disclosureRow(1)];
 
     await fetchTickerPage("TURSG");
 
     const state = fixture.lastKapState as BuilderState;
-    expect(state.or).toEqual([NO_BREAKER_FILTER]);
-    expect(state.contains).toEqual([{ col: "stock_codes", val: ["TURSG"] }]);
+    expect(state.or).toEqual([tickerDisclosureOr("TURSG")]);
+    expect(state.or).toEqual([
+      "and(or(stock_codes.cs.{TURSG},related_stocks.cs.{TURSG}),or(subject.is.null,subject.not.ilike.*Devre Kesici*))",
+    ]);
+    // The old `.contains("stock_codes", [T])` never saw related_stocks-only notices.
+    expect(state.contains).toEqual([]);
     expect(state.limit).toBe(60);
+    expect(state.selectArgs[0]).toContain("related_stocks");
+    expect(state.gte).toEqual([{ col: "published_at", val: new Date(Date.parse(NOW) - 30 * 86400_000).toISOString() }]);
   });
 
-  it("fetchRecentDisclosures uses the very same or() filter (one definition for both)", async () => {
+  it("fetchRecentDisclosures without a ticker keeps the plain breaker or() (one definition for the feed)", async () => {
     await fetchRecentDisclosures(10);
-    expect((fixture.lastKapState as BuilderState).or).toEqual([NO_BREAKER_FILTER]);
+    const state = fixture.lastKapState as BuilderState;
+    expect(state.or).toEqual([NO_BREAKER_FILTER]);
+    expect(state.contains).toEqual([]);
+  });
+
+  it("fetchRecentDisclosures(40, ticker) sends the combined or() once and no contains filter", async () => {
+    await fetchRecentDisclosures(40, "TRHOL");
+    const state = fixture.lastKapState as BuilderState;
+    expect(state.or).toEqual([tickerDisclosureOr("TRHOL")]);
+    expect(state.contains).toEqual([]);
+    expect(state.limit).toBe(40);
+    expect(state.selectArgs[0]).toContain("related_stocks");
+  });
+
+  it("fetchRecentDisclosures rejects a ticker that could inject filter clauses, without querying", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(fetchRecentDisclosures(10, "A},subject.is.null,x.cs.{B")).rejects.toThrow(/invalid ticker/);
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(fixture.kapStates).toHaveLength(0);
+  });
+
+  it("a notice tagged only in related_stocks is listed, with its chip taken from related_stocks", async () => {
+    fixture.kapDisclosures = [
+      {
+        disclosure_index: 1688666,
+        published_at: "2026-10-28T06:38:59Z",
+        kap_title: "BORSA İSTANBUL A.Ş.",
+        stock_codes: [],
+        related_stocks: ["TRHOL"],
+        subject: "Pay İşlem Sırası Kapatma / Açma",
+        summary: "Pay Sırasının İşleme Kapatılması",
+        disclosure_class: null,
+      },
+    ];
+    const [d] = await fetchRecentDisclosures(10, "TRHOL");
+    expect(d?.stockCodes).toEqual(["TRHOL"]);
+    expect(d?.disclosureIndex).toBe(1688666);
+  });
+
+  it("stock_codes still wins for the chips when it is set", async () => {
+    fixture.kapDisclosures = [
+      { ...disclosureRow(1), stock_codes: ["TURSG"], related_stocks: ["ASELS"] },
+      { ...disclosureRow(2), stock_codes: ["TURSG", "ASELS"], related_stocks: [] },
+      { ...disclosureRow(3), stock_codes: [], related_stocks: [] },
+      { ...disclosureRow(4), stock_codes: null, related_stocks: null },
+    ];
+    const rows = await fetchRecentDisclosures(10);
+    expect(rows.map((r) => r.stockCodes)).toEqual([["TURSG"], ["TURSG", "ASELS"], [], []]);
+  });
+
+  it("DISCLOSURE_SELECT carries related_stocks on the circuit-breaker strip's read too", async () => {
+    await fetchCircuitBreakers(5);
+    expect((fixture.lastKapState as BuilderState).selectArgs[0]).toContain("related_stocks");
   });
 
   it("ignores coverage rows whose disclosure is not in the returned list (a circuit breaker)", async () => {
@@ -1001,7 +1408,7 @@ describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips c
 
     const page = await fetchTickerPage("TURSG");
 
-    expect(page.coverage).toEqual({ disclosures: 1, covered: 1, medianLagMinutes: 30, pressAhead: 0 });
+    expect(page.coverage).toEqual({ disclosures: 1, events: 1, covered: 1, medianLagMinutes: 30, pressAhead: 0 });
   });
 
   it("covered can never exceed disclosures, whatever else the table holds for the ticker", async () => {
@@ -1114,6 +1521,219 @@ function expectTagsBeforeLife(tags: string[]) {
     vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
   );
 }
+
+describe("h11-finance-4: the tape ranks traded tickers only", () => {
+  const NOW = "2026-09-13T12:00:00Z";
+  const at = (ticker: string, id: string, hour: number, day = "2026-09-13") => ({
+    ticker,
+    article_id: id,
+    published_at: `${day}T${String(hour).padStart(2, "0")}:00:00Z`,
+    source_id: "s1",
+  });
+
+  function seed() {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = [
+      // BOYNR and KILER are passive (kap_state P, shares_traded false); DNZ has no company row at all.
+      at("BOYNR", "b1", 8),
+      at("BOYNR", "b2", 9),
+      at("KILER", "k1", 8),
+      at("DNZ", "d1", 8),
+      at("THYAO", "t1", 8),
+      at("THYAO", "t2", 9),
+      at("THYAO", "t3", 10),
+    ];
+    fixture.bistCompanies = [
+      { tickers: ["BOYNR"], title: "BOYNER BÜYÜK MAĞAZACILIK A.Ş.", shares_traded: false },
+      { tickers: ["KILER"], title: "KİLER ALIŞVERİŞ A.Ş.", shares_traded: false },
+      { tickers: ["THYAO"], title: "TÜRK HAVA YOLLARI A.O.", shares_traded: true },
+    ];
+  }
+
+  it("excludes a ticker whose company is shares_traded = false and one with no company row", async () => {
+    seed();
+    const out = await fetchTopTickers(2, 10);
+    expect(out.map((r) => r.ticker)).toEqual(["THYAO"]);
+    expect(out[0]?.title).toBe("TÜRK HAVA YOLLARI A.O.");
+  });
+
+  it("keeps every share-class ticker of a traded company", async () => {
+    seed();
+    fixture.articleTickers.push(at("GARAN", "g1", 8), at("TGB", "g2", 9));
+    fixture.bistCompanies.push({ tickers: ["GARAN", "TGB"], title: "TÜRKİYE GARANTİ BANKASI A.Ş.", shares_traded: true });
+    const out = await fetchTopTickers(2, 10);
+    expect(out.map((r) => r.ticker).sort()).toEqual(["GARAN", "TGB", "THYAO"]);
+  });
+
+  it("asks bist_companies for shares_traded alongside tickers and title", async () => {
+    seed();
+    await fetchTopTickers(2, 10);
+    expect(fixture.companyStates.at(-1)?.selectArgs[0]).toBe("tickers,title,shares_traded");
+  });
+
+  it("a ticker on a traded and a non-traded company row is traded", async () => {
+    seed();
+    fixture.bistCompanies.push({ tickers: ["BOYNR"], title: "BOYNER (yeniden listeli)", shares_traded: true });
+    const out = await fetchTopTickers(2, 10);
+    expect(out.map((r) => r.ticker)).toContain("BOYNR");
+  });
+
+  it("a company read error still throws (page content, not a fail-open lookup)", async () => {
+    seed();
+    fixture.companyError = "companies boom";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(fetchTopTickers(2, 10)).rejects.toThrow(/fetchTopTickers companies: companies boom/);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+describe("h11-finance-3: fetchTickerPage reports honest windows", () => {
+  const NOW = "2026-09-13T12:00:00Z";
+  const freeze = () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+  };
+  const disclosure = (index: number) => ({
+    disclosure_index: index,
+    published_at: new Date(Date.parse("2026-09-12T08:00:00Z") - index * 25 * 3_600_000).toISOString(),
+    kap_title: "İŞ YATIRIM MENKUL DEĞERLER A.Ş.",
+    stock_codes: ["ISMEN"],
+    related_stocks: [] as string[],
+    subject: "Özel Durum Açıklaması (Genel)",
+    summary: null,
+    disclosure_class: "ODA",
+  });
+  const articleRow = (i: number) => ({
+    id: `art-${i}`,
+    title: `ISMEN haberi ${i}`,
+    url: `https://x/${i}`,
+    published_at: `2026-09-12T${String(i % 24).padStart(2, "0")}:00:00Z`,
+    category: "ekonomi",
+    source_name: "Dünya",
+    source_slug: "dunya",
+    matched_on: "alias",
+  });
+
+  it("totalDisclosures30d comes from a head:true count read with the same or() and the same 30-day cut", async () => {
+    freeze();
+    fixture.kapDisclosures = Array.from({ length: 60 }, (_, i) => disclosure(i + 1));
+    fixture.kapCount = 102;
+
+    const page = await fetchTickerPage("ISMEN");
+
+    expect(page.totalDisclosures30d).toBe(102);
+    const count = fixture.lastKapCountState as BuilderState;
+    expect(count.selectArgs).toEqual(["disclosure_index", { count: "exact", head: true }]);
+    expect(count.or).toEqual([tickerDisclosureOr("ISMEN")]);
+    expect(count.contains).toEqual([]);
+    expect(count.gte).toEqual([{ col: "published_at", val: new Date(Date.parse(NOW) - 30 * 86400_000).toISOString() }]);
+    // The count is not the list: no row limit, no ordering.
+    expect(count.limit).toBeNull();
+    // Both reads were made (list + count) and nothing else touched the table.
+    expect(fixture.kapStates).toHaveLength(2);
+  });
+
+  it("totalDisclosures30d is null (with a warning) when the count read fails; the page still renders", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosure(1)];
+    fixture.kapCountError = "canceling statement due to statement timeout";
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const page = await fetchTickerPage("ISMEN");
+      expect(page.totalDisclosures30d).toBeNull();
+      expect(page.disclosures).toHaveLength(1);
+      expect(spy.mock.calls.some((c) => String(c[0]).includes("fetchTickerPage disclosure count ISMEN"))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("totalDisclosures30d is null when the count comes back without a number", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosure(1)];
+    fixture.kapCount = null;
+    const page = await fetchTickerPage("ISMEN");
+    expect(page.totalDisclosures30d).toBeNull();
+  });
+
+  it("a failing LIST read still throws even when the count would have worked", async () => {
+    freeze();
+    fixture.kapError = "kap boom";
+    fixture.kapCount = 5;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(fetchTickerPage("ISMEN")).rejects.toThrow(/fetchTickerPage disclosures: kap boom/);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("articlesTruncated is true exactly when ticker_articles returned its full 60 rows", async () => {
+    freeze();
+    fixture.tickerArticlesRows = Array.from({ length: 60 }, (_, i) => articleRow(i));
+    expect((await fetchTickerPage("ISMEN")).articlesTruncated).toBe(true);
+    fixture.tickerArticlesRows = Array.from({ length: 59 }, (_, i) => articleRow(i));
+    expect((await fetchTickerPage("ISMEN")).articlesTruncated).toBe(false);
+    fixture.tickerArticlesRows = [];
+    expect((await fetchTickerPage("ISMEN")).articlesTruncated).toBe(false);
+  });
+
+  it("asks ticker_articles for exactly 60 rows", async () => {
+    freeze();
+    await fetchTickerPage("ISMEN");
+    const call = supabaseFake.calls.rpc.find((c) => c.name === "ticker_articles");
+    expect(call?.args).toEqual({ p_ticker: "ISMEN", p_limit: 60 });
+  });
+
+  it("the coverage read selects article_id, so the same article is counted once per event", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosure(1)];
+    fixture.coverageRows = [{ ticker: "ISMEN", disclosure_index: 1, lag_minutes: 30, article_id: "a1" }];
+    await fetchTickerPage("ISMEN");
+    expect(fixture.coverageStates[0]?.selectArgs[0]).toBe("disclosure_index,lag_minutes,article_id");
+  });
+
+  it("five same-morning filings with shared coverage are one event with one ön ilgi (the ISMEN warrant case)", async () => {
+    freeze();
+    const base = Date.parse("2026-09-10T08:00:00Z");
+    fixture.kapDisclosures = [1, 2, 3, 4, 5].map((i) => ({
+      ...disclosure(i),
+      published_at: new Date(base + (i - 1) * 3_600_000).toISOString(),
+    }));
+    // Two press articles 300 and 200 minutes before the first filing, seen by all five.
+    fixture.coverageRows = [1, 2, 3, 4, 5].flatMap((i) => [
+      { ticker: "ISMEN", disclosure_index: i, lag_minutes: -300 - 60 * (i - 1), article_id: "pre-1" },
+      { ticker: "ISMEN", disclosure_index: i, lag_minutes: -200 - 60 * (i - 1), article_id: "pre-2" },
+    ]);
+
+    const page = await fetchTickerPage("ISMEN");
+
+    expect(page.coverage).toEqual({ disclosures: 5, events: 1, covered: 0, medianLagMinutes: null, pressAhead: 1 });
+  });
+
+  it("a related_stocks-only halt notice reaches the page and latestTradingHalt finds it", async () => {
+    freeze();
+    fixture.kapDisclosures = [
+      {
+        disclosure_index: 1688666,
+        published_at: "2026-09-12T06:38:59Z",
+        kap_title: "BORSA İSTANBUL A.Ş.",
+        stock_codes: [],
+        related_stocks: ["TRHOL"],
+        subject: "Pay İşlem Sırası Kapatma / Açma",
+        summary: "Pay Sırasının İşleme Kapatılması",
+        disclosure_class: null,
+      },
+    ];
+    const page = await fetchTickerPage("TRHOL");
+    expect(page.disclosures.map((d) => d.disclosureIndex)).toEqual([1688666]);
+    expect(latestTradingHalt(page.disclosures)?.disclosureIndex).toBe(1688666);
+  });
+});
 
 describe("cached-failure-sweep: cacheLife follows the outcome of each finance fetcher", () => {
   let errorSpy: ReturnType<typeof vi.spyOn>;

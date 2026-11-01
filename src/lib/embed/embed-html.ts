@@ -4,6 +4,7 @@ import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import type { MediaDnaZone } from "@/types";
 
+import { isContentlessTitle } from "../../../supabase/functions/_shared/rss/entities";
 import { escapeHtml } from "./embed-snippet";
 
 // Renderer for the framed /embed/cluster/[id] document. A plain string
@@ -55,18 +56,37 @@ export interface EmbedModel {
 }
 
 /**
+ * Title shown for a cluster whose stored title holds no letter or digit
+ * ('&nbsp', '-', '…'). The cluster page shows its own neutral heading for these
+ * (isContentlessTitle); the OG card and the embed use this one.
+ */
+export const NO_HEADLINE_TITLE = "Haber";
+
+/**
+ * The stored cluster title, or NO_HEADLINE_TITLE when it is contentless.
+ * Returns a real headline untouched (no trim, no cut): callers do their own
+ * layout clamping and, where it applies, the private-individual filter.
+ */
+export function displayHeadline(raw: string): string {
+  return isContentlessTitle(raw) ? NO_HEADLINE_TITLE : raw;
+}
+
+/**
  * A cluster title that is safe to show on a third-party page.
  *
  * The neutral cluster title may pass a member headline through verbatim, so
  * the same KVKK private-individual rule the kart route applies is applied
- * here (the rozet badge shows no titles at all). A rejected or empty title
- * becomes `fallback`; an accepted one is trimmed and cut BY CODE POINT (never
- * through a surrogate pair) to EMBED_TITLE_MAX characters including the
- * ellipsis.
+ * here (the rozet badge shows no titles at all). An empty title or one the
+ * filter rejects becomes `fallback`; a title with no letter or digit
+ * ('&nbsp', '-') becomes NO_HEADLINE_TITLE rather than an empty heading; an
+ * accepted one is trimmed and cut BY CODE POINT (never through a surrogate
+ * pair) to EMBED_TITLE_MAX characters including the ellipsis.
  */
 export function safeEmbedTitle(raw: string, fallback: string): string {
   const trimmed = raw.trim();
-  if (trimmed === "" || !isGameEligibleTitle(trimmed)) return fallback;
+  if (trimmed === "") return fallback;
+  if (isContentlessTitle(trimmed)) return NO_HEADLINE_TITLE;
+  if (!isGameEligibleTitle(trimmed)) return fallback;
   const points = Array.from(trimmed);
   if (points.length <= EMBED_TITLE_MAX) return trimmed;
   return `${points.slice(0, EMBED_TITLE_MAX - 1).join("").trimEnd()}…`;

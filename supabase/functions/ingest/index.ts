@@ -12,8 +12,10 @@
 //      migration 041) plus a body-hash fallback for feeds that reissue
 //      identical XML without changing those headers, and aborts on a 10 s
 //      timeout.
-//   3. Normalises each item via `normalizeItem`, which produces the canonical
-//      sha1-of-shingles `content_hash` (audit T7 P1-21 fix).
+//   3. Normalises each item in two phases (`prepareArticles`, then
+//      `completeArticles` for the items whose url is not already stored under
+//      the same headline), which produce the canonical sha1-of-shingles
+//      `content_hash` (audit T7 P1-21 fix).
 //   4. Upserts every produced row in batches of 500 with
 //      `on_conflict=url&ignore_duplicates=true`, after dropping rows that
 //      repeat a (source_id, content_hash) pair already seen this chunk or
@@ -50,12 +52,17 @@
 //      once: no conditional request, no body-hash short-circuit, one parse (a
 //      frozen feed with a byte-identical body is otherwise never parsed again).
 //
-// CPU budget: the platform kills an invocation that burns too much CPU (HTTP
-// 546, reason CPUTime) and a killed cycle loses everything it fetched. The CPU
-// of a cycle is the decode + XML parse + normalise of the feeds that CHANGED,
-// so a cycle parses at most MAX_PARSES_PER_CYCLE of them and
-// PARSE_BUDGET_BYTES of body (see the constants below); the rest are
-// deferred -- no rows, no fetch-state write -- and go first in the next cycle.
+// CPU budget: the platform kills an isolate that burns more than 2 s of CPU IN
+// TOTAL (HTTP 546, reason CPUTime) -- the allowance is spent across the cycles a
+// reused isolate serves -- and a killed cycle loses everything it fetched. The
+// CPU of a cycle is the decode + XML parse + normalise of the feeds that
+// CHANGED, so a cycle parses at most MAX_PARSES_PER_CYCLE of them and
+// PARSE_BUDGET_BYTES of body, and an isolate parses at most
+// ISOLATE_ITEM_BUDGET items over its life (see the cost model below); the
+// rest are deferred -- no rows, no fetch-state write -- and go first in the
+// next cycle. Per-item work is also cut at the source: the items of a feed
+// whose url is already stored for the source under the same headline (99% of
+// them) skip the full normalisation (`lookupStoredByUrl`).
 //
 // Wall-clock budget: 60 s (the Edge Functions hard ceiling is 400 s). We
 // stay well under because the 16-way pool keeps the slowest tail fetch
@@ -68,8 +75,12 @@ import { fetchFeed } from "../_shared/rss/fetcher.ts";
 import type { RssSource } from "../_shared/rss/fetcher.ts";
 import { computeFeedFreshness, storableItemDate } from "../_shared/rss/feed-freshness.ts";
 import type { FeedFreshness } from "../_shared/rss/feed-freshness.ts";
-import type { NormalizedArticle } from "../_shared/rss/normalize.ts";
-import { canonicalizeUrl, normalizeArticles } from "../_shared/rss/normalize.ts";
+import type { NormalizedArticle, PreparedItem } from "../_shared/rss/normalize.ts";
+import {
+  canonicalizeUrl,
+  completeArticles,
+  prepareArticles,
+} from "../_shared/rss/normalize.ts";
 import { sourceArticleKeyFor } from "../_shared/rss/article-key.ts";
 import {
   TITLE_TWIN_MIN_JACCARD,
@@ -82,9 +93,13 @@ import {
   QUARANTINE_AFTER_FAILURES,
 } from "../_shared/rss/quarantine.ts";
 import {
+  ISOLATE_ITEM_BUDGET,
+  createItemBudget,
   createParseBudget,
+  estimateItems,
   groupChunkBySource,
   interleaveBySource,
+  isolateItems,
   prioritizeIds,
   rotateForCycle,
   upsertWithBisect,
@@ -149,27 +164,81 @@ const CYCLE_DEADLINE_MS = 50_000;
 const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
 
 // ---------------------------------------------------------------------------
-// Parse budget (CPUTime kills)
+// CPU cost model (CPUTime kills, HTTP 546)
 // ---------------------------------------------------------------------------
 //
-// Measured with a scratch Deno script (not committed) on a synthetic
+// The 2 s CPU allowance is CUMULATIVE PER ISOLATE, not per invocation, and an
+// isolate serves several cycles. Evidence, function logs of 2026-11-01 (10:00
+// to 14:00 UTC): 56 isolates served one request and none was killed; 12 served
+// two and 7 of those answered 546 on the LATER request (one isolate: 200 at
+// 10:03:16, 546 at 10:06:03); all 7 shutdowns of that window with reason
+// CPUTime had used 2000 to 2176 ms (60 more were EarlyDrop at 792 to 1970 ms,
+// which is not a CPU kill). Lost 3-minute ticks per day since 10-26: 30, 34,
+// 11, 35, 24, 19, 18. A cycle that fits its own budget therefore still dies on
+// the CPU an earlier cycle of the same isolate spent, and a killed invocation
+// writes nothing.
+//
+// What the CPU is spent on: items, not feeds or bytes. The same window shows
+// 252,949 items normalised in 73 cycles (up to 4,464 in one) against 1,860
+// inserted (0.74%): the rest were already stored and were normalised and
+// fingerprinted in full just to be dropped by the upsert. Per-item costs,
+// measured with a scratch Deno bench (not committed) over the 522-item corpus
+// of tests/fixtures/ingest-corpus.json (460 real headlines, 62 synthetic
+// variants), Apple M5 Pro, Deno 2.9.2, microseconds per item, mean of two runs:
+//
+//   stage                                      before    after
+//   normalizeTurkish                              7.8      5.5
+//   strictFingerprint                            45.9     35.3
+//   isLegalNotice                                 6.8      0.5
+//   normalizeItem (everything)                   64.9     46.7
+//   one poll, 90% of its urls already stored     64.0      6.3
+//
+// The last row is what matters: `normalizeArticles` over every item versus the
+// two-phase loop (prepare every item, look the urls up, complete the 10% that
+// are not stored). The first four rows are the same code made cheaper (one
+// normalisation per fingerprint, one regex replace for the diacritic fold, the
+// anchored regexes before the per-letter uppercase scan); outputs are
+// byte-identical, pinned by tests/functions/_shared/ingest-corpus-equality.test.ts.
+//
+// Parse costs, measured earlier with a scratch Deno script on a synthetic
 // 300-item feed of about 2.6 to 2.8 MB, median of 8 warm runs on the dev
-// machine; the per-MB cost depends on the feed's shape:
+// machine of the time (a slower one than the bench above); they depend on the
+// feed's shape:
 //
 //   stage                      CDATA-heavy   entity-escaped   many small elements
 //   decodeRssBody                1.3 ms/MB       1.3 ms/MB          1.0 ms/MB
 //   fast-xml-parser (fetcher)    1.9 ms/MB      11.1 ms/MB         36.4 ms/MB
 //   item mapping + cleanFeedDate 0.3 ms/MB       0.2 ms/MB          0.3 ms/MB
-//   normalizeArticles (300)     13.8 ms/MB      13.0 ms/MB         10.5 ms/MB
-//   total per feed              17.3 ms/MB      25.7 ms/MB         48.1 ms/MB
 //
 // interleaveBySource over 5,000 rows takes 1.4 to 1.8 ms once per cycle, so it
-// is not a hot loop. Parse + normalise is where the CPU goes. The worst shape
-// (48 ms/MB) puts about 800 ms of CPU at 16.6 MB; the byte budget is the
+// is not a hot loop. The worst shape (48 ms/MB in all, with the old
+// normalisation) put about 800 ms of CPU at 16.6 MB; the byte budget is the
 // smaller of that, rounded down to 0.5 MB, and the 8 MB feed-size cap
-// (DEFAULT_MAX_BYTES in the fetcher), i.e. 8_000_000. The Edge runtime is
-// slower than the dev machine; the parse-count cap below is the tighter bound
-// for the many-small-feeds case that dominates in production.
+// (DEFAULT_MAX_BYTES in the fetcher), i.e. 8_000_000.
+//
+// Three caps, from the finest to the coarsest:
+//
+//  1. ISOLATE_ITEM_BUDGET (5,000 items, INGEST_ISOLATE_ITEM_BUDGET): items
+//     parsed over the life of one isolate, carried in module state. A changed
+//     feed is admitted when nothing was booked yet on the isolate (any one feed
+//     fits a fresh one) or when its estimated items (body bytes / 1500) fit
+//     what is left; there is no priority exemption. The estimate is replaced by
+//     the real item count after the parse. The h11 analysis fitted the cost of
+//     the old pipeline at about 280 ms fixed plus 0.256 ms per item on the
+//     Edge runtime; 280 + 0.256 x 5,000 is about 1.56 s, which leaves 0.4 s of
+//     the 2 s. The known-url skip makes a poll about 90% cheaper per item
+//     (64.0 to 6.3 us above), so the number now has more margin than it was
+//     chosen with: watch `isolateBudgetDeferred` and the CPUTime shutdowns,
+//     and raise INGEST_ISOLATE_ITEM_BUDGET (no deploy) while the shutdowns
+//     stay at zero and feeds are still being deferred. Note the consequence of
+//     a cumulative count: once an isolate has used its items, every later
+//     cycle on it defers its changed feeds until the platform recycles it
+//     (such a cycle costs almost nothing, which is the point), so a limit far
+//     below what a normal isolate parses in two cycles trades 546s for
+//     deferral.
+//  2. MAX_PARSES_PER_CYCLE (55) and PARSE_BUDGET_BYTES: changed feeds and body
+//     bytes parsed in one cycle; the coarse per-cycle cap below.
+//  3. The cycle deadline (CYCLE_DEADLINE_MS), for wall clock.
 //
 // Why 55 parses (a data-derived number, not a round one). `ingest_cycles`, the
 // 3 days to 2026-10-23, 1,328 finished cycles; `fetched` there is the number
@@ -190,7 +259,8 @@ const FETCH_DEADLINE_MS = CYCLE_DEADLINE_MS - 10_000;
 // first (`parseDeferredMaxStreak` shows a feed that waits longer). Tune without a
 // deploy with INGEST_MAX_PARSES_PER_CYCLE: lower it if 546s persist, raise it
 // if deferral stays high while 546s are gone.
-// Both limits can be overridden per deployment without a code change.
+// The item, parse-count and byte limits can all be overridden per deployment
+// without a code change.
 export const MAX_PARSES_PER_CYCLE = 55;
 export const PARSE_BUDGET_BYTES = 8_000_000;
 
@@ -408,6 +478,23 @@ interface CycleStats {
   // fetch_items_count was still NULL (the one-time bootstrap). Summary line and
   // HTTP JSON only: there is no `ingest_cycles` column for it.
   freshnessBootstraps: number;
+  // Per-item work spent on items that are never inserted (hunt-11,
+  // A-ingest-cpu). Ingest looks up which of a feed's urls are already stored
+  // BEFORE the full normalisation; `itemsNormalized` counts the rows that got
+  // it, `itemsKnownSkipped` the items it was skipped for (stored for this
+  // source under the same headline). Summary line and HTTP JSON only: there is
+  // no `ingest_cycles` column for any of the counters below.
+  itemsKnownSkipped: number;
+  // Feeds whose stored-url lookup failed (any batch): every item of such a feed
+  // takes the full path, exactly as before the lookup existed (fail-open).
+  knownUrlLookupErrors: number;
+  // Isolate item budget (hunt-11, A-ingest-cpu): items booked on this isolate
+  // so far, cycles it has served, and changed feeds this cycle refused because
+  // they did not fit what is left of the isolate's allowance (each also counts
+  // in `parseDeferred`).
+  isolateItemsUsed: number;
+  isolateCycles: number;
+  isolateBudgetDeferred: number;
   durationMs: number;
 }
 
@@ -779,6 +866,105 @@ export async function dropExistingSourceArticleKeyRows<
 // the end stays bounded to this chunk's urls either way.
 const TITLE_LOOKUP_BATCH = 100;
 
+// ---------------------------------------------------------------------------
+// Stored-url lookup before the heavy normalisation (hunt-11, A-ingest-cpu)
+// ---------------------------------------------------------------------------
+//
+// 99% of the items a poll returns are already stored (2026-11-01: 252,949
+// items fully normalised against 1,860 inserted), and they used to be
+// normalised and fingerprinted in full only to be dropped at the upsert. The
+// feed loop now runs the cheap half of normalisation first (`prepareArticles`),
+// asks this function which of the resulting urls are stored, and completes only
+// the items that are not "known". An item is KNOWN when its url is stored for
+// the SAME source under the same headline (`stored.title.trim() ===
+// title.trim()`, the comparison `recordTitleVersions` makes): the upsert would
+// ignore it anyway. A changed headline or a url stored under another source
+// still takes the full path, so the title-version / write-back machinery sees
+// exactly what it saw before.
+//
+// Same shape and bounds as the select in `recordTitleVersions`
+// (`id, url, title, source_id`, `.in("url", slice)`, TITLE_LOOKUP_BATCH urls per
+// request, served by the unique url index). Batches run a few at a time, since
+// they are independent.
+const URL_LOOKUP_PARALLEL = 4;
+
+export interface StoredArticleRef {
+  id: string;
+  title: string;
+  source_id: string;
+}
+
+// An error message made safe for a log line: urls redacted, clamped. Titles and
+// urls of a feed never reach the logs (see the discipline in `normalizeArticles`).
+function safeErrorMessage(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err))
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>")
+    .slice(0, 200);
+}
+
+/**
+ * Looks up which of `urls` are stored in `articles`. Duplicates are looked up
+ * once. Returns the stored rows by url and `ok`: false when ANY batch failed
+ * (an error envelope, a rejection or a synchronous throw), in which case the
+ * caller must treat the answer as unknown and take the full path for every
+ * item (fail-open) -- `byUrl` may then hold a partial answer and must not be
+ * used to conclude that a url is absent. Never throws. On failure ONE line is
+ * logged with `slug` and the message only, never a url.
+ */
+export async function lookupStoredByUrl(
+  supabase: ReturnType<typeof createServiceClient>,
+  urls: readonly string[],
+  slug = "?",
+): Promise<{ byUrl: Map<string, StoredArticleRef>; ok: boolean }> {
+  const byUrl = new Map<string, StoredArticleRef>();
+  // An object, not a `let`: the lanes below assign it from inside closures.
+  const failure: { message: string | null } = { message: null };
+  try {
+    const unique = [...new Set(urls)];
+    const slices: string[][] = [];
+    for (let j = 0; j < unique.length; j += TITLE_LOOKUP_BATCH) {
+      slices.push(unique.slice(j, j + TITLE_LOOKUP_BATCH));
+    }
+    let cursor = 0;
+    const lane = async (): Promise<void> => {
+      for (;;) {
+        const slice = slices[cursor++];
+        if (slice === undefined) return;
+        try {
+          const { data, error } = await supabase
+            .from("articles")
+            .select("id, url, title, source_id")
+            .in("url", slice);
+          if (error) {
+            failure.message ??= safeErrorMessage(error.message);
+            continue;
+          }
+          for (const row of (data ?? []) as Array<{
+            id: string;
+            url: string;
+            title: string;
+            source_id: string;
+          }>) {
+            byUrl.set(row.url, { id: row.id, title: row.title, source_id: row.source_id });
+          }
+        } catch (err) {
+          failure.message ??= safeErrorMessage(err);
+        }
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(URL_LOOKUP_PARALLEL, slices.length) }, lane),
+    );
+  } catch (err) {
+    failure.message ??= safeErrorMessage(err);
+  }
+  if (failure.message !== null) {
+    console.error(`[ingest] ${slug}: known-url lookup failed: ${failure.message}`);
+    return { byUrl, ok: false };
+  }
+  return { byUrl, ok: true };
+}
+
 export interface RecordTitleVersionsResult {
   titleVersions: number;
   // Outlet headline write-backs applied this chunk via the
@@ -820,13 +1006,20 @@ async function applyHeadlineWriteBack(
 
 // `preResolved` (migration 113): rows already matched to their stored article
 // without a url lookup -- the twins `dropExistingSourceArticleKeyRows` found,
-// keyed by the twin's NEW url. They seed `stored`, and only the urls not in it
-// are selected, so a twin-only chunk makes no url query at all. Called with
-// two arguments the behaviour is unchanged.
+// keyed by the twin's NEW url, and (hunt-11) the stored rows the feed loop's
+// `lookupStoredByUrl` already found for urls whose headline changed or that
+// belong to another source. They seed `stored`, and only the urls not in it
+// are selected, so a twin-only chunk makes no url query at all.
+//
+// `knownAbsent` (hunt-11): urls the feed loop's lookup already confirmed are
+// NOT stored. They cannot match a stored row, so they are not selected again.
+// A url in both sets is resolved (preResolved wins). Called with two or three
+// arguments the behaviour is unchanged.
 export async function recordTitleVersions(
   supabase: ReturnType<typeof createServiceClient>,
   chunk: readonly Pick<IngestArticleRow, "url" | "title" | "source_id">[],
   preResolved?: ReadonlyMap<string, { id: string; title: string; source_id: string }>,
+  knownAbsent?: ReadonlySet<string>,
 ): Promise<RecordTitleVersionsResult> {
   const empty: RecordTitleVersionsResult = { titleVersions: 0, titleWriteBacks: 0 };
   try {
@@ -836,7 +1029,9 @@ export async function recordTitleVersions(
       string,
       { id: string; title: string; source_id: string }
     >(preResolved ?? []);
-    const urls = chunk.map((row) => row.url).filter((url) => !stored.has(url));
+    const urls = chunk
+      .map((row) => row.url)
+      .filter((url) => !stored.has(url) && !knownAbsent?.has(url));
     for (let j = 0; j < urls.length; j += TITLE_LOOKUP_BATCH) {
       const { data, error } = await supabase
         .from("articles")
@@ -1155,6 +1350,11 @@ async function runCycle(): Promise<CycleStats> {
     parseDeferredMaxStreak: 0,
     parsedBytes: 0,
     freshnessBootstraps: 0,
+    itemsKnownSkipped: 0,
+    knownUrlLookupErrors: 0,
+    isolateItemsUsed: 0,
+    isolateCycles: 0,
+    isolateBudgetDeferred: 0,
     durationMs: 0,
   };
   // Populated per attempted source during the fetch pool below; persisted
@@ -1245,6 +1445,15 @@ async function runCycleBody(
     positiveIntEnv(Deno.env.get("INGEST_MAX_PARSES_PER_CYCLE"), MAX_PARSES_PER_CYCLE),
     positiveIntEnv(Deno.env.get("INGEST_PARSE_BUDGET_BYTES"), PARSE_BUDGET_BYTES),
   );
+  // The isolate-wide item budget (hunt-11): module-scope state, so it carries
+  // from one cycle to the next on a reused isolate and starts at zero on a cold
+  // one. The limit is read per cycle like the two above.
+  const isolateLimit = positiveIntEnv(
+    Deno.env.get("INGEST_ISOLATE_ITEM_BUDGET"),
+    ISOLATE_ITEM_BUDGET,
+  );
+  isolateItems.cycles++;
+  const itemBudget = createItemBudget(isolateLimit, isolateItems);
 
   // Hydrate the module-scope conditionalCache from what we persisted last
   // cycle so the first fetch after a cold start (empty Map) still sends
@@ -1301,6 +1510,14 @@ async function runCycleBody(
   // Sources with a row that failed in isolation (possibly poison): withheld
   // only for a bounded number of consecutive cycles.
   const rowFailed = new Set<string>();
+  // The feed loop's stored-url lookups (`lookupStoredByUrl`), kept for the
+  // upsert phase so `recordTitleVersions` does not select the same urls again:
+  // the stored rows of items that were fully normalised after all (headline
+  // changed, or stored under another source), and the urls confirmed absent.
+  // Only successful lookups contribute; a failed one leaves its urls to
+  // `recordTitleVersions`' own select, as before the lookup existed.
+  const storedByUrl = new Map<string, StoredArticleRef>();
+  const absentUrls = new Set<string>();
 
   await runPool(
     toFetch,
@@ -1317,12 +1534,28 @@ async function runCycleBody(
       // and a deferred source must get its previous validators back.
       const cacheBefore = conditionalCache.get(source.id);
       const cacheBeforeCopy = cacheBefore ? { ...cacheBefore } : undefined;
+      // Items this feed booked on the isolate budget (0 = nothing booked).
+      let booked = 0;
       const result = await fetchFeed(source, {
         conditionalCache,
         timeoutMs: FETCH_TIMEOUT_MS,
         knownBodyHash: bootstrap ? undefined : (source.fetch_body_hash ?? undefined),
         // Asked only when a changed body is about to be decoded and parsed.
-        admitParse: (bodyBytes) => budget.admit(bodyBytes, priorityIds.has(source.id)),
+        // The isolate's item budget is asked first (a pure check that books
+        // nothing), then the per-cycle parse budget, which books when it says
+        // yes; only then are the estimated items booked on the isolate. Either
+        // refusal flows through `result.parseDeferred` below.
+        admitParse: (bodyBytes) => {
+          const estimated = estimateItems(bodyBytes);
+          if (!itemBudget.fits(estimated)) {
+            stats.isolateBudgetDeferred++;
+            return false;
+          }
+          if (!budget.admit(bodyBytes, priorityIds.has(source.id))) return false;
+          itemBudget.book(estimated);
+          booked = estimated;
+          return true;
+        },
       });
 
       // Parse budget: checked FIRST. The fetcher refused to decode and parse
@@ -1412,6 +1645,9 @@ async function runCycleBody(
       };
 
       stats.fetched++;
+      // The estimate booked in `admitParse` becomes the real item count. A parse
+      // that ends in an error (above) keeps its estimate: the CPU was spent.
+      if (booked > 0) itemBudget.settle(booked, result.items.length);
       // ingest-health: items whose date fetcher.ts couldn't clean into
       // something parseable -- fetch time is still used as the fallback
       // (unchanged), but flagged here once per source per cycle rather than
@@ -1439,10 +1675,11 @@ async function runCycleBody(
         bootstrap && !!result.bodyHash && result.bodyHash === source.fetch_body_hash;
       // Per source, so the log line below names the feed that sent the junk.
       const normalizeCounters = { contentlessTitles: 0 };
-      const normalized = bootstrapUnchanged
+      // Phase 1 (hunt-11): the cheap half of the normalisation for every item.
+      // A bootstrap whose body is the stored one prepares nothing.
+      const prepared = bootstrapUnchanged
         ? []
-        : normalizeArticles(source, result.items, sourceNowMs, normalizeCounters);
-      stats.itemsNormalized += normalized.length;
+        : prepareArticles(source, result.items, normalizeCounters);
       if (normalizeCounters.contentlessTitles > 0) {
         stats.contentlessTitlesDropped += normalizeCounters.contentlessTitles;
         // Slug and count only: never a url or a headline.
@@ -1451,25 +1688,83 @@ async function runCycleBody(
         );
       }
 
+      // One batched lookup of which of those urls are already stored. An item
+      // is KNOWN when its url is stored for this source under the same
+      // headline (the comparison `recordTitleVersions` makes): the upsert
+      // would ignore it, so it skips the heavy phase altogether. Fail-open:
+      // when the lookup failed nothing is known, nothing is confirmed absent,
+      // and every item takes the full path.
+      const lookup =
+        prepared.length > 0
+          ? await lookupStoredByUrl(
+              supabase,
+              prepared.map((p) => p.url),
+              source.slug,
+            )
+          : { byUrl: new Map<string, StoredArticleRef>(), ok: true };
+      if (!lookup.ok) stats.knownUrlLookupErrors++;
+      const isKnown: boolean[] = [];
+      const toComplete: PreparedItem[] = [];
+      for (const p of prepared) {
+        const stored = lookup.ok ? lookup.byUrl.get(p.url) : undefined;
+        if (stored !== undefined && stored.source_id === source.id && stored.title.trim() === p.title.trim()) {
+          isKnown.push(true);
+          continue;
+        }
+        isKnown.push(false);
+        toComplete.push(p);
+        // Kept for the upsert phase (see `storedByUrl` above).
+        if (lookup.ok) {
+          if (stored !== undefined) storedByUrl.set(p.url, stored);
+          else absentUrls.add(p.url);
+        }
+      }
+      // Phase 2: the heavy half, only for the items that are not known. The
+      // result is aligned with `toComplete` (null: legal notice, or threw).
+      const completed = completeArticles(source, toComplete, sourceNowMs);
+
       let pushed = 0;
       let intraFeedTwins = 0;
       let intraFeedKeptDistinct = 0;
       let intraFeedKeyCapped = 0;
-      for (const row of normalized) {
-        const key = `${row.source_id}\x1f${row.content_hash}`;
-        if (seenIntraCycle.has(key)) continue;
-        seenIntraCycle.add(key);
+      let completedAt = 0;
+      for (let pi = 0; pi < prepared.length; pi++) {
+        const p = prepared[pi] as PreparedItem;
+        const known = isKnown[pi] === true;
+        let row: NormalizedArticle | null = null;
+        if (known) {
+          stats.itemsKnownSkipped++;
+        } else {
+          row = completed[completedAt++] ?? null;
+          if (row === null) continue;
+          stats.itemsNormalized++;
+          const key = `${row.source_id}\x1f${row.content_hash}`;
+          if (seenIntraCycle.has(key)) continue;
+          seenIntraCycle.add(key);
+        }
+        // A known item never enters `seenIntraCycle` (the one accepted
+        // divergence from fully normalising it): a LATER unknown item of the
+        // cycle whose hash equals the known item's is no longer caught as an
+        // intra-cycle repeat here. It is caught by the stored
+        // (source_id, content_hash) pre-filter instead, because the known
+        // item's row is stored with that hash whenever its text is unchanged;
+        // if its description changed since, the later item is a different
+        // article under another url and is now stored rather than dropped.
+        //
         // Twin-articles (migration 113): the outlet's numeric article id from
         // the url. A second row of this feed with the same key is the same
         // article under an edited headline (new slug): skip it, the first one
         // stands -- unless its headline shares no words with ANY kept one, in
         // which case the CMS reused the id for another story and the item is
         // kept too. Null (no id in the url, or an excluded slug) is never
-        // tracked, so it can never merge two rows.
-        const articleKey = sourceArticleKeyFor(source.slug, row.url);
+        // tracked, so it can never merge two rows. A known item takes part like
+        // any other (same url, same cleaned title, same counters), so the
+        // items after it see the registry exactly as if it had been completed;
+        // it is just never pushed.
+        const articleKey = sourceArticleKeyFor(source.slug, p.url);
         if (articleKey !== null) {
-          const twinKey = `${row.source_id}\x1fk\x1f${articleKey}`;
-          const rowTokens = titleTokens(row.title);
+          const twinKey = `${source.id}\x1fk\x1f${articleKey}`;
+          const rowTokens = titleTokens(p.title);
           const keptTitles = keptTitlesByKey.get(twinKey);
           if (keptTitles === undefined) {
             keptTitlesByKey.set(twinKey, [rowTokens]);
@@ -1490,6 +1785,7 @@ async function runCycleBody(
             intraFeedKeyCapped++;
           }
         }
+        if (row === null) continue;
         // Additive: canonicalizeUrl never throws (it catches internally and
         // falls back to the raw URL), so this is always a string in
         // practice — the column stays nullable for any future producer
@@ -1545,6 +1841,15 @@ async function runCycleBody(
     // Count only: never a url or a headline.
     console.log(
       `[ingest] parse budget: deferred ${stats.parseDeferred} changed feed(s) to the next cycle (parsed ${budget.parses}, ${budget.bytes} bytes, longest deferral streak ${stats.parseDeferredMaxStreak})`,
+    );
+  }
+  stats.isolateItemsUsed = isolateItems.used;
+  stats.isolateCycles = isolateItems.cycles;
+  if (stats.isolateBudgetDeferred > 0) {
+    // Count only: never a url or a headline. These feeds are also in
+    // `parseDeferred` above (the same deferral path); this line says why.
+    console.log(
+      `[ingest] isolate item budget: deferred ${stats.isolateBudgetDeferred} changed feed(s) (${isolateItems.used} of ${isolateLimit} items used on this isolate, cycle ${isolateItems.cycles} on it)`,
     );
   }
 
@@ -1659,12 +1964,21 @@ async function runCycleBody(
       // resolved by the key lookup; hand them to `recordTitleVersions` so the
       // edited headline is recorded without another url select.
       const twinRows = twins.map((t) => t.row);
-      const preResolved = new Map(
-        twins.map((t) => [
-          t.row.url,
-          { id: t.existing.id, title: t.existing.title, source_id: t.existing.source_id },
-        ]),
-      );
+      // Also resolved without a url select (hunt-11): the stored rows the feed
+      // loop's lookup found for this chunk's urls (headline changed, or stored
+      // under another source). Twins go last: they win a clash.
+      const preResolved = new Map<string, StoredArticleRef>();
+      for (const row of [...chunk, ...twinRows]) {
+        const found = storedByUrl.get(row.url);
+        if (found !== undefined) preResolved.set(row.url, found);
+      }
+      for (const t of twins) {
+        preResolved.set(t.row.url, {
+          id: t.existing.id,
+          title: t.existing.title,
+          source_id: t.existing.source_id,
+        });
+      }
       // ingest-health: bisecting fallback replaces the old
       // batched-upsert-then-per-row-retry -- a single poisoned row now costs
       // at most `1 + 2*ceil(log2(chunk.length))` upsert calls instead of up to
@@ -1712,7 +2026,7 @@ async function runCycleBody(
       // changes go uncollected.
       const [{ titleVersions, titleWriteBacks }, bisectResult] = await Promise.all([
         Date.now() <= deadline
-          ? recordTitleVersions(supabase, [...chunk, ...twinRows], preResolved)
+          ? recordTitleVersions(supabase, [...chunk, ...twinRows], preResolved, absentUrls)
           : Promise.resolve({ titleVersions: 0, titleWriteBacks: 0 }),
         upsertChunk(),
       ]);

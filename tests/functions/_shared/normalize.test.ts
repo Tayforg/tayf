@@ -37,6 +37,18 @@ interface NormalizeModule {
   normalizeArticles: typeof import(
     "../../../supabase/functions/_shared/rss/normalize.ts"
   )["normalizeArticles"];
+  prepareItem: typeof import(
+    "../../../supabase/functions/_shared/rss/normalize.ts"
+  )["prepareItem"];
+  completeItem: typeof import(
+    "../../../supabase/functions/_shared/rss/normalize.ts"
+  )["completeItem"];
+  prepareArticles: typeof import(
+    "../../../supabase/functions/_shared/rss/normalize.ts"
+  )["prepareArticles"];
+  completeArticles: typeof import(
+    "../../../supabase/functions/_shared/rss/normalize.ts"
+  )["completeArticles"];
 }
 
 let mod: NormalizeModule | null = null;
@@ -51,6 +63,10 @@ beforeAll(async () => {
       normalizeItem: m.normalizeItem,
       isVideoUrl: m.isVideoUrl,
       normalizeArticles: m.normalizeArticles,
+      prepareItem: m.prepareItem,
+      completeItem: m.completeItem,
+      prepareArticles: m.prepareArticles,
+      completeArticles: m.completeArticles,
     };
   } catch (err) {
     loadError = err;
@@ -1137,5 +1153,157 @@ describe("normalize.ts contentless titles: dropped and counted", () => {
       expect(rows.map((r) => r.title)).toEqual(["İyi"]);
       expect(counters.contentlessTitles).toBe(1);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A-ingest-cpu (hunt-11): the normaliser is split into a cheap prepare phase
+// (link, title cleanup, contentless check, absolute url) and a heavy complete
+// phase (legal notice, canonical url, description, image, date, hash,
+// category). Ingest runs the first, looks up which urls are already stored,
+// and completes only the rest. normalizeItem / normalizeArticles are the same
+// two phases back to back and must behave exactly as before.
+// ---------------------------------------------------------------------------
+
+describe("normalize.ts prepare / complete split [A-ingest-cpu]", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const NOW = Date.parse("2026-10-26T07:33:20Z");
+
+  it("prepareItem derives the cleaned title and the absolute url, and keeps the raw item", () => {
+    const item = { title: "  Bir &amp; <b>iki</b> &#305;  ", link: " /haber/1 ", contentSnippet: "x" };
+    const prepared = mod!.prepareItem(source, item);
+    expect(prepared).not.toBeNull();
+    expect(prepared!.title).toBe("Bir & iki ı");
+    expect(prepared!.url).toBe("https://example.test/haber/1");
+    expect(prepared!.item).toBe(item);
+    // The same strings the full normaliser stores.
+    const full = mod!.normalizeItem(source, item, NOW)!;
+    expect(prepared!.title).toBe(full.title);
+    expect(prepared!.url).toBe(full.url);
+  });
+
+  it("prepareItem does NOT decide the legal-notice drop: that is the heavy phase", () => {
+    const item = { title: "T.C. ANKARA 3. SULH HUKUK MAHKEMESİNDEN", link: "https://example.test/x" };
+    const prepared = mod!.prepareItem(source, item);
+    expect(prepared).not.toBeNull();
+    expect(mod!.completeItem(source, prepared!, NOW)).toBeNull();
+    expect(mod!.normalizeItem(source, item, NOW)).toBeNull();
+  });
+
+  it("a legal notice is not counted as contentless in either phase", () => {
+    const counters = { contentlessTitles: 0 };
+    const prepared = mod!.prepareItem(
+      source,
+      { title: "İLAN", link: "https://example.test/x" },
+      counters,
+    );
+    expect(prepared).not.toBeNull();
+    mod!.completeItem(source, prepared!, NOW);
+    expect(counters.contentlessTitles).toBe(0);
+  });
+
+  it("prepareArticles: drops link-less items silently, counts contentless titles, keeps order", () => {
+    const counters = { contentlessTitles: 0 };
+    const prepared = mod!.prepareArticles(
+      source,
+      [
+        { title: "Bir", link: "/1" },
+        { title: "Link yok", link: "" },
+        { title: "&nbsp", link: "/2" },
+        { title: "   ", link: "/3" },
+        { title: "Üç", link: "https://example.test/3" },
+      ],
+      counters,
+    );
+    expect(prepared.map((p) => p.title)).toEqual(["Bir", "Üç"]);
+    expect(prepared.map((p) => p.url)).toEqual(["https://example.test/1", "https://example.test/3"]);
+    expect(counters.contentlessTitles).toBe(2);
+  });
+
+  it("prepareArticles: a throwing item is skipped alone, logged once with no title or url", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const throwing = {
+      get title(): string {
+        throw new Error(`boom https://secret.example/path?token=1 ${"x".repeat(500)}`);
+      },
+      link: "https://secret.example/article",
+    } as unknown as { title: string; link: string };
+    const prepared = mod!.prepareArticles(source, [
+      { title: "Gizli başlık", link: "https://secret.example/ok" },
+      throwing,
+      { title: {} as unknown as string, link: "/bad" },
+      { title: "Sonra", link: "/last" },
+    ]);
+    expect(prepared.map((p) => p.title)).toEqual(["Gizli başlık", "Sonra"]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const line = String(spy.mock.calls[0]![0]);
+    expect(line).toContain(`[normalize] ${source.slug}: skipped 2 item(s) that threw`);
+    expect(line).not.toContain("Gizli başlık");
+    expect(line).not.toContain("secret.example");
+    expect(line.split("that threw: ")[1]!.length).toBeLessThanOrEqual(200);
+  });
+
+  it("prepareArticles logs nothing when nothing threw", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mod!.prepareArticles(source, [{ title: "İyi", link: "/ok" }, { title: "", link: "/no-title" }]);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("completeArticles: one result per prepared item, null for a legal notice, order kept", () => {
+    const prepared = mod!.prepareArticles(source, [
+      { title: "Önce", link: "/first" },
+      { title: "BARTIN 2. ASLİYE HUKUK MAHKEMESİ", link: "/notice" },
+      { title: "Sonra", link: "/last", contentSnippet: "<p>Özet</p>" },
+    ]);
+    expect(prepared).toHaveLength(3);
+    const rows = mod!.completeArticles(source, prepared, NOW);
+    expect(rows).toHaveLength(3);
+    expect(rows[0]?.title).toBe("Önce");
+    expect(rows[1]).toBeNull();
+    expect(rows[2]).toMatchObject({ title: "Sonra", description: "Özet", url: "https://example.test/last" });
+  });
+
+  it("completeArticles: a throwing item becomes null alone and is logged once without a title or url", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const prepared = mod!.prepareArticles(source, [
+      { title: "Önce", link: "/first" },
+      {
+        title: "Gizli başlık",
+        link: "https://secret.example/article",
+        get contentSnippet(): string {
+          throw new Error("boom https://secret.example/path?token=1");
+        },
+      } as unknown as { title: string; link: string },
+      { title: "Sonra", link: "/last" },
+    ]);
+    expect(prepared).toHaveLength(3);
+    const rows = mod!.completeArticles(source, prepared, NOW);
+    expect(rows.map((r) => r?.title ?? null)).toEqual(["Önce", null, "Sonra"]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const line = String(spy.mock.calls[0]![0]);
+    expect(line).toContain(`[normalize] ${source.slug}: skipped 1 item(s) that threw`);
+    expect(line).not.toContain("secret.example");
+    expect(line).not.toContain("Gizli başlık");
+  });
+
+  it("prepareArticles + completeArticles produce exactly normalizeArticles' rows", () => {
+    const items = [
+      { title: "Bir", link: "/1", contentSnippet: "<p>a &amp; b</p>", pubDate: "Mon, 26 Oct 2026 08:30:00 +0300" },
+      { title: "İLAN", link: "/2" },
+      { title: "", link: "/3" },
+      { title: "Üç", link: "" },
+      { title: "Dört", link: "https://example.test/4?utm_source=x", pubDate: "garbage" },
+    ];
+    const whole = { contentlessTitles: 0 };
+    const expected = mod!.normalizeArticles(source, items, NOW, whole);
+    const split = { contentlessTitles: 0 };
+    const rows = mod!
+      .completeArticles(source, mod!.prepareArticles(source, items, split), NOW)
+      .filter((r): r is NonNullable<typeof r> => r !== null);
+    expect(rows).toEqual(expected);
+    expect(split).toEqual(whole);
   });
 });

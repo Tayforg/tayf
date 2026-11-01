@@ -84,11 +84,16 @@ export function isLegalNotice(title: string, url?: string | null): boolean {
     // NFC first: "İ" can arrive decomposed (I + U+0307), which would defeat
     // every [İ] class below.
     const t = title.normalize("NFC").trim();
+    // The three anchored regexes run FIRST: they reject an ordinary mixed-case
+    // headline outright, whereas isMostlyUppercase lower-cases every letter of
+    // the title (toLocaleLowerCase("tr") per letter). Both must hold, so the
+    // order changes cost, not the result (hunt-11, A-ingest-cpu; the old order
+    // is pinned in tests/functions/_shared/legal-notice.test.ts).
     if (
-      isMostlyUppercase(t, LEGAL_NOTICE_MIN_LETTERS) &&
       (ENDS_WITH_INSTITUTION.test(t) ||
         CONTAINS_ABLATIVE.test(t) ||
-        TC_COURT.test(t))
+        TC_COURT.test(t)) &&
+      isMostlyUppercase(t, LEGAL_NOTICE_MIN_LETTERS)
     ) {
       return true;
     }

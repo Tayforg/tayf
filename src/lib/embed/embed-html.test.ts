@@ -1,11 +1,15 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import type { ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import type { BiasCategory, BiasDistribution } from "@/types";
 import {
   EMBED_GENERIC_TITLE,
   EMBED_TITLE_MAX,
+  NO_HEADLINE_TITLE,
   buildEmbedModel,
+  displayHeadline,
   renderEmbedHtml,
   renderEmbedMessageHtml,
   safeEmbedTitle,
@@ -85,6 +89,100 @@ describe("safeEmbedTitle", () => {
   it("leaves a title of exactly EMBED_TITLE_MAX code points untouched", () => {
     const title = "b".repeat(EMBED_TITLE_MAX);
     expect(safeEmbedTitle(title, "yedek")).toBe(title);
+  });
+
+  // A stored title with no letter or digit ('&nbsp', '-') used to pass every
+  // check above and reach a third-party page as an empty heading. It is now
+  // shown as the neutral "Haber"; only an EMPTY title keeps the caller's fallback.
+  it.each(["&nbsp", "&nbsp;", "&amp;nbsp", "&#160;", "-", "—", "…", "...", "«»", "ㅤ", " &nbsp; "])(
+    "shows %j as the neutral 'Haber' instead of an empty heading",
+    (raw) => {
+      expect(safeEmbedTitle(raw, "yedek")).toBe("Haber");
+    },
+  );
+
+  it("still uses the caller's fallback for an empty title", () => {
+    expect(safeEmbedTitle("", "yedek")).toBe("yedek");
+    expect(safeEmbedTitle(" \n\t ", "yedek")).toBe("yedek");
+  });
+
+  it("still uses the caller's fallback when the PII filter rejects a real headline", () => {
+    expect(safeEmbedTitle("17 yaşındaki genç tutuklandı", "yedek")).toBe("yedek");
+  });
+
+  it.each(["a", "2025", "Gol!", "R&D"])("keeps the short real headline %j", (raw) => {
+    expect(safeEmbedTitle(raw, "yedek")).toBe(raw);
+  });
+});
+
+describe("displayHeadline / NO_HEADLINE_TITLE", () => {
+  it("names the neutral title 'Haber'", () => {
+    expect(NO_HEADLINE_TITLE).toBe("Haber");
+  });
+
+  it.each(["", "   ", "&nbsp", "&nbsp;", "&amp;nbsp;", "&#160;", "-", "—", "…", "ㅤ"])(
+    "returns 'Haber' for the contentless title %j",
+    (raw) => {
+      expect(displayHeadline(raw)).toBe("Haber");
+    },
+  );
+
+  it("returns a real headline unchanged (no trim, no cut)", () => {
+    expect(displayHeadline("Merkez Bankası faizi sabit tuttu")).toBe("Merkez Bankası faizi sabit tuttu");
+    expect(displayHeadline("  Başlık  ")).toBe("  Başlık  ");
+    const long = "u".repeat(500);
+    expect(displayHeadline(long)).toBe(long);
+  });
+
+  it.each(["a", "2025", "Gol!", "R&D"])("returns the short real headline %j unchanged", (raw) => {
+    expect(displayHeadline(raw)).toBe(raw);
+  });
+
+  it("does not run the private-individual filter (that stays in safeEmbedTitle)", () => {
+    expect(displayHeadline("17 yaşındaki genç tutuklandı")).toBe("17 yaşındaki genç tutuklandı");
+  });
+});
+
+describe("buildEmbedModel with a contentless cluster title", () => {
+  it("shows 'Haber' in the widget heading and the document <title>", () => {
+    const m = buildEmbedModel(detail({ title: "&nbsp" }), ORIGIN);
+    expect(m.title).toBe("Haber");
+    const html = renderEmbedHtml(m);
+    expect(html).toContain("<h1>Haber</h1>");
+    expect(html).toContain("<title>Haber · Tayf</title>");
+  });
+});
+
+describe("cluster OG image headline (source scan)", () => {
+  // opengraph-image.tsx is an async-data route (no render test of its own for
+  // this): pin the wiring so the contentless-title swap cannot be dropped or
+  // moved after the length clamp (which would cut an unswapped title).
+  const ogSource = readFileSync(resolve(__dirname, "../../app/cluster/[id]/opengraph-image.tsx"), "utf8");
+  const code = ogSource
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+    .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p1: string) => p1 + " ".repeat(m.length - p1.length));
+
+  it("imports displayHeadline from the embed-html module", () => {
+    expect(code).toMatch(/import\s*{[^}]*\bdisplayHeadline\b[^}]*}\s*from\s*["']@\/lib\/embed\/embed-html["']/);
+  });
+
+  it("applies it to the stored title before the length clamp", () => {
+    const applied = code.indexOf("displayHeadline(cluster.title_tr)");
+    expect(applied).toBeGreaterThan(-1);
+    expect(code).toMatch(/const display\s*=\s*displayHeadline\(cluster\.title_tr\)/);
+    const clamp = code.indexOf("display.length > titleMaxChars");
+    expect(clamp).toBeGreaterThan(applied);
+  });
+
+  it("clamps the swapped headline, never the raw stored title", () => {
+    expect(code).not.toContain("cluster.title_tr.length");
+    expect(code).not.toContain("cluster.title_tr.slice");
+    expect(code).toContain("display.slice(0, titleMaxChars - 3)");
+  });
+
+  it("re-exports nothing new from the route file", () => {
+    expect(code).not.toMatch(/export\s*{[^}]*\b(displayHeadline|NO_HEADLINE_TITLE)\b/);
+    expect(code).not.toMatch(/export\s+(const|function)\s+(displayHeadline|NO_HEADLINE_TITLE)\b/);
   });
 });
 

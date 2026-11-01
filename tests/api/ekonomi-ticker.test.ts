@@ -28,6 +28,14 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Error so src/app/ekonomi/error.tsx renders ("Tekrar dene") and the metadata
 // is noindex without claiming "Hisse bulunamadı".
 //
+// h11 (finance 1/3/4): the probe's company read now also selects shares_traded
+// (a thin ticker -- no company row, shares_traded false, a code under 4
+// characters, KTEST -- is noindex,follow), its kap_disclosures fallback uses
+// the combined stock_codes-OR-related_stocks or() string, the not-found and
+// unknown shells carry `alternates: { canonical: null }`, and the page shows
+// the ticker's latest trading-halt notice beside the price. Those are pinned at
+// the bottom of this file.
+//
 // next/navigation.notFound() normally throws (a special Next digest error)
 // to unwind the render; the fake here throws too so a test that forgets to
 // account for the early-return would fail loudly instead of quietly
@@ -56,6 +64,7 @@ const {
   articlesProbeMock,
   disclosuresProbeMock,
   probeState,
+  probeLog,
   createFinanceClientMock,
 } = vi.hoisted(() => ({
   notFoundMock: vi.fn(() => {
@@ -79,6 +88,8 @@ const {
     articles: { data: [] as unknown[] | null, error: null as { message: string } | null },
     disclosures: { data: [] as unknown[] | null, error: null as { message: string } | null },
   },
+  // What the probes were asked: the company select list and the kap_disclosures or() strings.
+  probeLog: { companySelect: [] as string[], disclosureOr: [] as string[], disclosureContains: 0 },
   // createFinanceServerClient(opts) — async, resolves to the fake below.
   createFinanceClientMock: vi.fn(),
 }));
@@ -129,9 +140,10 @@ const fakeClient = {
   from: (table: string) => {
     if (table === "bist_companies") {
       return {
-        select: (_cols: string) => ({
-          contains: (_col: string, _val: unknown[]) => ({ limit: companyProbeMock }),
-        }),
+        select: (cols: string) => {
+          probeLog.companySelect.push(cols);
+          return { contains: (_col: string, _val: unknown[]) => ({ limit: companyProbeMock }) };
+        },
       };
     }
     if (table === "article_tickers") {
@@ -141,10 +153,18 @@ const fakeClient = {
         }),
       };
     }
-    // kap_disclosures
+    // kap_disclosures: the probe sends ONE combined or() (stock_codes OR related_stocks);
+    // a leftover .contains("stock_codes", ...) would count here.
     return {
       select: (_cols: string) => ({
-        contains: (_col: string, _val: unknown[]) => ({ limit: disclosuresProbeMock }),
+        or: (filters: string) => {
+          probeLog.disclosureOr.push(filters);
+          return { limit: disclosuresProbeMock };
+        },
+        contains: (_col: string, _val: unknown[]) => {
+          probeLog.disclosureContains += 1;
+          return { limit: disclosuresProbeMock };
+        },
       }),
     };
   },
@@ -170,6 +190,9 @@ beforeEach(() => {
   probeState.company = { data: [], error: null };
   probeState.articles = { data: [], error: null };
   probeState.disclosures = { data: [], error: null };
+  probeLog.companySelect = [];
+  probeLog.disclosureOr = [];
+  probeLog.disclosureContains = 0;
   createFinanceClientMock.mockReset();
   createFinanceClientMock.mockImplementation(async () => fakeClient);
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -211,8 +234,10 @@ describe("/ekonomi/[ticker] — existence-gated notFound() call order", () => {
       company: { kapMemberOid: "kap-1", tickers: ["ASELS"], title: "ASELSAN", city: "Ankara", sharesTraded: true },
       attention: [],
       articles: [],
+      articlesTruncated: false,
       disclosures: [],
-      coverage: { disclosures: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+      totalDisclosures30d: 0,
+      coverage: { disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
     });
     fetchQuoteStatsMock.mockResolvedValue({});
     fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
@@ -238,8 +263,10 @@ describe("/ekonomi/[ticker] — existence-gated notFound() call order", () => {
       company: null,
       attention: [],
       articles: [],
+      articlesTruncated: false,
       disclosures: [],
-      coverage: { disclosures: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+      totalDisclosures30d: 0,
+      coverage: { disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
     });
     fetchQuoteStatsMock.mockResolvedValue({});
     fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
@@ -260,8 +287,10 @@ describe("/ekonomi/[ticker] — existence-gated notFound() call order", () => {
       company: null,
       attention: [],
       articles: [],
+      articlesTruncated: false,
       disclosures: [],
-      coverage: { disclosures: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+      totalDisclosures30d: 0,
+      coverage: { disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
     });
     fetchQuoteStatsMock.mockResolvedValue({});
     fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
@@ -294,7 +323,7 @@ describe("generateMetadata — neutral title for a ticker with no coverage", () 
   });
 
   it("returns the real ticker title once the company row is confirmed", async () => {
-    probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
     const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "asels" }) });
     expect(metadata.title).toBe("ASELS — hisse haberleri ve KAP bildirimleri");
   });
@@ -302,7 +331,7 @@ describe("generateMetadata — neutral title for a ticker with no coverage", () 
   // Share identity: without its own openGraph/twitter, a shared
   // /ekonomi/LYDHO link unfurled with the homepage's og:url '/' and title.
   it("gives a confirmed ticker its own og:url, og:title and twitter card (not the homepage's)", async () => {
-    probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
     const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "lydho" }) });
 
     const title = "LYDHO — hisse haberleri ve KAP bildirimleri";
@@ -320,7 +349,7 @@ describe("generateMetadata — neutral title for a ticker with no coverage", () 
   });
 
   it("keeps the root share images on a confirmed ticker", async () => {
-    probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
     const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "LYDHO" }) });
     const og = metadata.openGraph as { images?: { url: string }[] } | null | undefined;
     const tw = metadata.twitter as { images?: { url: string }[] } | null | undefined;
@@ -355,8 +384,10 @@ function stubRenderableTickerPage() {
     company: null,
     attention: [],
     articles: [],
+    articlesTruncated: false,
     disclosures: [],
-    coverage: { disclosures: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+    totalDisclosures30d: 0,
+    coverage: { disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
   });
   fetchQuoteStatsMock.mockResolvedValue({});
   fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
@@ -496,7 +527,8 @@ describe("generateMetadata — a timeout is not 'Hisse bulunamadı'", () => {
     expect(metadata.title).toBe("Hisse sayfası şu anda yüklenemiyor");
     expect(metadata.title).not.toBe("Hisse bulunamadı");
     expect(metadata.robots).toEqual({ index: false, follow: false });
-    expect(metadata.alternates).toBeUndefined();
+    // Not undefined: the layout's site-wide canonical '/' would leak into the shell otherwise.
+    expect(metadata.alternates).toEqual({ canonical: null });
   });
 
   it("an unknown probe in the fallback tier is also not reported as missing", async () => {
@@ -512,5 +544,294 @@ describe("generateMetadata — a timeout is not 'Hisse bulunamadı'", () => {
   it("still returns the missing-ticker metadata only when every probe answered empty", async () => {
     const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
     expect(metadata.title).toBe("Hisse bulunamadı");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h11 (finance 1/3/4)
+// ---------------------------------------------------------------------------
+
+import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
+
+describe("probe filters (h11-finance-1)", () => {
+  it("the company probe selects kap_member_oid,shares_traded", async () => {
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+    await generateMetadata({ params: Promise.resolve({ ticker: "THYAO" }) });
+    expect(probeLog.companySelect).toEqual(["kap_member_oid,shares_traded"]);
+  });
+
+  it("the kap_disclosures fallback probe sends the combined stock_codes OR related_stocks or(), never contains()", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: [], error: null };
+    probeState.disclosures = { data: [{ disclosure_index: 1688666 }], error: null };
+    stubRenderableTickerPage();
+
+    // TRHOL halt notices are tagged only in related_stocks: they alone must keep the page alive.
+    await TickerPage({ params: Promise.resolve({ ticker: "TRHOL" }) });
+
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(probeLog.disclosureOr).toEqual([tickerDisclosureOr("TRHOL")]);
+    expect(probeLog.disclosureContains).toBe(0);
+  });
+});
+
+describe("generateMetadata — error shells and thin tickers (h11-finance-4)", () => {
+  it("the not-found shell has no canonical (alternates.canonical is null, not undefined)", async () => {
+    const malformed = await generateMetadata({ params: Promise.resolve({ ticker: "<b>" }) });
+    expect(malformed.alternates).toEqual({ canonical: null });
+    expect(malformed.robots).toEqual({ index: false, follow: false });
+
+    const missing = await generateMetadata({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+    expect(missing.title).toBe("Hisse bulunamadı");
+    expect(missing.alternates).toEqual({ canonical: null });
+    expect(missing.robots).toEqual({ index: false, follow: false });
+  });
+
+  it("a traded 4+ character ticker stays indexable: no robots, self canonical", async () => {
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+    const m = await generateMetadata({ params: Promise.resolve({ ticker: "THYAO" }) });
+    expect(m.robots).toBeUndefined();
+    expect(m.alternates?.canonical).toBe("/ekonomi/THYAO");
+  });
+
+  it.each([
+    ["KTEST (KAP's test company, shares_traded true)", "KTEST", { kap_member_oid: "k", shares_traded: true }],
+    ["TGB (3 characters)", "TGB", { kap_member_oid: "k", shares_traded: true }],
+    ["BOYNR (shares_traded false)", "BOYNR", { kap_member_oid: "k", shares_traded: false }],
+    ["a company row without the flag", "ASELS", { kap_member_oid: "k" }],
+  ])("%s is noindex,follow with its normal share metadata", async (_label, ticker, row) => {
+    probeState.company = { data: [row], error: null };
+    const m = await generateMetadata({ params: Promise.resolve({ ticker }) });
+    expect(m.robots).toEqual({ index: false, follow: true });
+    expect(m.title).toBe(`${ticker} — hisse haberleri ve KAP bildirimleri`);
+    expect(m.alternates?.canonical).toBe(`/ekonomi/${ticker}`);
+    expect(m.openGraph).toMatchObject({ url: `/ekonomi/${ticker}` });
+  });
+
+  it("KOZAL (no company row, only article coverage) is noindex,follow", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: [{ ticker: "KOZAL" }], error: null };
+    const m = await generateMetadata({ params: Promise.resolve({ ticker: "KOZAL" }) });
+    expect(m.robots).toEqual({ index: false, follow: true });
+  });
+});
+
+// --- what the page renders --------------------------------------------------
+
+type El = { type: unknown; props: Record<string, unknown> };
+
+function collectEls(node: unknown, out: El[] = []): El[] {
+  if (node == null || typeof node !== "object") return out;
+  if (Array.isArray(node)) {
+    for (const n of node) collectEls(n, out);
+    return out;
+  }
+  const el = node as { type?: unknown; props?: Record<string, unknown> };
+  if (el.props !== undefined) {
+    out.push({ type: el.type, props: el.props });
+    collectEls(el.props.children, out);
+  }
+  return out;
+}
+
+function textOfNode(node: unknown): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOfNode).join("");
+  return textOfNode((node as { props?: { children?: unknown } }).props?.children);
+}
+
+const panelMeta = (els: El[], title: string) => els.find((e) => e.props.title === title)?.props.meta;
+
+const HALT_LINK = "https://www.kap.org.tr/tr/Bildirim/1688666";
+const haltNotice = (over: Record<string, unknown> = {}) => ({
+  disclosureIndex: 1688666,
+  publishedAt: "2026-10-28T06:38:59Z",
+  kapTitle: "BORSA İSTANBUL A.Ş.",
+  stockCodes: ["TRHOL"],
+  subject: "Pay İşlem Sırası Kapatma / Açma",
+  summary: "Pay Sırasının İşleme Kapatılması",
+  disclosureClass: null,
+  ...over,
+});
+const trholQuote = (asOf: string) => ({
+  TRHOL: { ticker: "TRHOL", price: 192, prevClose: 192, changePct: 0, hasBaseline: true, closes: [192, 192], currency: "TRY", asOf },
+});
+
+async function renderTicker(ticker: string, page: Record<string, unknown>, quotes: Record<string, unknown> = {}) {
+  probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+  fetchTickerPageMock.mockResolvedValue({
+    company: { kapMemberOid: "kap-1", tickers: [ticker], title: "X A.Ş.", city: "İstanbul", sharesTraded: true },
+    attention: [],
+    articles: [],
+    articlesTruncated: false,
+    disclosures: [],
+    totalDisclosures30d: 0,
+    coverage: { disclosures: 0, events: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 },
+    ...page,
+  });
+  fetchQuoteStatsMock.mockResolvedValue({});
+  fetchIntradayMock.mockResolvedValue({ day: null, bars: [] });
+  getQuotesMock.mockResolvedValue(quotes);
+  return collectEls(await TickerPage({ params: Promise.resolve({ ticker }) }));
+}
+
+describe("the trading-halt line (h11-finance-1)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T10:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const haltAnchor = (els: El[]) => els.find((e) => e.type === "a" && e.props.href === HALT_LINK && String(e.props.className ?? "").includes("text-amber-400"));
+
+  it("shows a closing notice newer than the last trade under the 'son işlem' line, as a KAP link", async () => {
+    const els = await renderTicker("TRHOL", { disclosures: [haltNotice()] }, trholQuote("2026-10-27T15:00:00.000Z"));
+
+    expect(els.some((e) => textOfNode(e.props.children).includes("son işlem 27.10.2026"))).toBe(true);
+    const a = haltAnchor(els);
+    expect(a).toBeDefined();
+    expect(textOfNode(a!.props.children)).toBe("İşlem sırası kapatıldı · KAP 28.10 09:38");
+    expect(a!.props.target).toBe("_blank");
+    expect(a!.props.rel).toBe("noopener noreferrer");
+    expect(String(a!.props.className)).toContain("text-[11px]");
+    expect(String(a!.props.className)).toContain("text-amber-400");
+  });
+
+  it("shows it under the empty-price label when there is no quote", async () => {
+    const els = await renderTicker("TRHOL", { disclosures: [haltNotice()] }, {});
+    expect(els.some((e) => textOfNode(e.props.children) === "fiyat alınamadı")).toBe(true);
+    expect(haltAnchor(els)).toBeDefined();
+  });
+
+  it("is not shown when the stock traded after the notice", async () => {
+    const els = await renderTicker("TRHOL", { disclosures: [haltNotice()] }, trholQuote("2026-10-30T15:00:00.000Z"));
+    expect(haltAnchor(els)).toBeUndefined();
+  });
+
+  it("is not shown when the newest halt notice is the reopening", async () => {
+    const reopening = haltNotice({ disclosureIndex: 1688700, publishedAt: "2026-10-28T13:00:00Z", summary: "Pay Sırasının İşleme Açılması" });
+    const els = await renderTicker("TRHOL", { disclosures: [reopening, haltNotice()] }, trholQuote("2026-10-27T15:00:00.000Z"));
+    expect(els.some((e) => e.type === "a" && String(e.props.href).includes("1688666") && String(e.props.className ?? "").includes("text-amber-400"))).toBe(false);
+  });
+
+  it("is not shown when there is no halt notice at all", async () => {
+    const els = await renderTicker("TRHOL", { disclosures: [] }, trholQuote("2026-10-27T15:00:00.000Z"));
+    expect(els.some((e) => textOfNode(e.props.children).includes("İşlem sırası kapatıldı"))).toBe(false);
+  });
+});
+
+describe("the limit tag on the header price is tick-aware (h11-finance-4)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-11-01T10:00:00Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const infoQuote = (prevClose: number, price: number) => ({
+    INFO: {
+      ticker: "INFO",
+      price,
+      prevClose,
+      changePct: ((price - prevClose) / prevClose) * 100,
+      hasBaseline: true,
+      closes: [prevClose, price],
+      currency: "TRY",
+      asOf: "2026-10-30T15:00:00.000Z",
+    },
+  });
+  const tagText = (els: El[]) => els.filter((e) => e.type === "span" && String(e.props.className ?? "").includes("bg-brand/20")).map((e) => textOfNode(e.props.children));
+
+  it("INFO 0.66 -> 0.60 (-9.09 %) is tagged taban", async () => {
+    expect(tagText(await renderTicker("INFO", {}, infoQuote(0.66, 0.6)))).toEqual(["taban"]);
+  });
+
+  it("6.98 -> 6.30 (-9.74 %) is not tagged", async () => {
+    expect(tagText(await renderTicker("INFO", {}, infoQuote(6.98, 6.3)))).toEqual([]);
+  });
+});
+
+describe("honest window labels (h11-finance-3)", () => {
+  const disclosures = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      disclosureIndex: 1000 + i,
+      publishedAt: new Date(Date.parse("2026-10-30T10:00:00Z") - i * 3_600_000).toISOString(),
+      kapTitle: "İŞ YATIRIM A.Ş.",
+      stockCodes: ["ISMEN"],
+      subject: "Özel Durum Açıklaması (Genel)",
+      summary: null,
+      disclosureClass: "ODA",
+    }));
+
+  it("a list cut at 60 says 'son 60 bildirim (30 günde 102)' in both panels", async () => {
+    const els = await renderTicker("ISMEN", {
+      disclosures: disclosures(60),
+      totalDisclosures30d: 102,
+      coverage: { disclosures: 60, events: 9, covered: 8, medianLagMinutes: 1932, pressAhead: 2 },
+    });
+    expect(panelMeta(els, "KAP ile basın arası")).toBe("son 60 bildirim (30 günde 102)");
+    expect(panelMeta(els, "KAP bildirimleri")).toBe("son 60 bildirim (30 günde 102)");
+  });
+
+  it("a short list keeps 'son 30 gün'", async () => {
+    const els = await renderTicker("ISMEN", { disclosures: disclosures(12), totalDisclosures30d: 12 });
+    expect(panelMeta(els, "KAP ile basın arası")).toBe("son 30 gün");
+    expect(panelMeta(els, "KAP bildirimleri")).toBe("son 30 gün");
+  });
+
+  it("a cut list whose count failed (null) still names the cap and no total", async () => {
+    const els = await renderTicker("ISMEN", { disclosures: disclosures(60), totalDisclosures30d: null });
+    expect(panelMeta(els, "KAP bildirimleri")).toBe("son 60 bildirim");
+  });
+
+  it("the coverage panel has an 'olay' cell, five columns and the event footnote", async () => {
+    const els = await renderTicker("ISMEN", {
+      disclosures: disclosures(60),
+      totalDisclosures30d: 102,
+      coverage: { disclosures: 60, events: 9, covered: 8, medianLagMinutes: 1932, pressAhead: 2 },
+    });
+    const dl = els.find((e) => e.type === "dl" && String(e.props.className ?? "").includes("sm:grid-cols-"));
+    expect(String(dl?.props.className)).toContain("sm:grid-cols-5");
+    const labels = collectEls(dl).filter((e) => e.type === "dt").map((e) => textOfNode(e.props.children));
+    expect(labels).toEqual(["bildirim", "olay", "basında yer bulan", "ilk haber, medyan", "olağandışı ön ilgi"]);
+    const values = collectEls(dl).filter((e) => e.type === "dd").map((e) => textOfNode(e.props.children));
+    expect(values.slice(0, 3)).toEqual(["60", "9", "8"]);
+
+    const footnote = els.find((e) => e.type === "p" && textOfNode(e.props.children).startsWith("Aynı 24 saat"));
+    expect(textOfNode(footnote?.props.children)).toBe(
+      "Aynı 24 saat içindeki bildirimler tek olay sayılır; bir haber her olayda bir kez sayılır. İlk haber, olaydaki ilk bildirimden sonra çıkan ilk habere göre ölçülür. Ön ilgi: olaydan önceki 24 saatte en az 2 haber ve hissenin olağan günlük haber sayısının en az 3 katı. Bu bölüm yalnızca şirketin kendi bildirimleri üzerinden hesaplanır.",
+    );
+  });
+
+  it("the coverage footnote names the listed notices the section does not count (halts, bans, insider trades)", async () => {
+    const els = await renderTicker("ISMEN", {
+      disclosures: disclosures(60),
+      totalDisclosures30d: 102,
+      coverage: { disclosures: 55, events: 9, covered: 8, medianLagMinutes: 1932, pressAhead: 2 },
+    });
+    const footnote = els.find((e) => e.type === "p" && textOfNode(e.props.children).startsWith("Aynı 24 saat"));
+    const text = textOfNode(footnote?.props.children);
+    expect(text).toContain("Hisseyi yalnızca anan 5 bildirim");
+    expect(text).toContain("sayılmaz");
+  });
+
+  it("the Haberler panel says 'son 60 haber' when ticker_articles was full and '13 haber' otherwise", async () => {
+    const article = (i: number) => ({
+      id: `a${i}`,
+      title: `Haber ${i}`,
+      url: `https://x/${i}`,
+      publishedAt: "2026-10-30T10:00:00Z",
+      category: "ekonomi",
+      source: { name: "Dünya", slug: "dunya" },
+      tickers: ["ISMEN"],
+    });
+    const full = await renderTicker("ISMEN", { articles: Array.from({ length: 60 }, (_, i) => article(i)), articlesTruncated: true });
+    expect(panelMeta(full, "Haberler")).toBe("son 60 haber");
+    const some = await renderTicker("ISMEN", { articles: Array.from({ length: 13 }, (_, i) => article(i)), articlesTruncated: false });
+    expect(panelMeta(some, "Haberler")).toBe("13 haber");
   });
 });

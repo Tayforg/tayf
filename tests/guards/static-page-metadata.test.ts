@@ -28,7 +28,16 @@ import { resolve, dirname, join, relative, sep } from "node:path";
 // Token pages (capability URLs such as rapor/[token]) are exempt from both
 // helpers on purpose: their path carries a credential, which must never reach
 // og:url or the canonical. They hand-write `robots: { index: false }` and
-// nothing else, and are pinned in TOKEN_PAGES.
+// `alternates: { canonical: null }` and nothing else, and are pinned in
+// TOKEN_PAGES. The null canonical is deliberate (h11-finance-4): src/app/layout.tsx
+// sets a site-wide canonical '/', which every page inherits unless it sets its
+// own `alternates`, so a bare noindex page used to advertise the homepage as
+// its canonical. `canonical: null` is not "a canonical": the checks below
+// ignore it where they look for noindex-plus-canonical.
+//
+// Error shells (the not-found and "could not load" metadata of a dynamic page
+// that streams a 200 shell) are built by errorShellMetadata() for the same
+// reason; they are pinned in ERROR_SHELL_PAGES.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -75,6 +84,15 @@ const SHARE_PAGES: Record<string, string> = {
 // Capability-URL pages: the path carries a credential, so neither helper may
 // be used (it would put the token into og:url and the canonical).
 const TOKEN_PAGES = ["rapor/[token]/page.tsx"];
+
+// Dynamic pages whose generateMetadata can answer "not found" / "unknown" for a
+// segment: those shells must come from errorShellMetadata() (noindex + a null
+// canonical), not a hand-written { title, robots } that inherits the homepage
+// canonical from the root layout.
+const ERROR_SHELL_PAGES = ["ekonomi/[ticker]/page.tsx"];
+
+/** A canonical that is a real URL or path; `canonical: null` (the opt-out) is not one. */
+const REAL_CANONICAL = /\bcanonical:(?!\s*null\b)/;
 
 const EXPECTED_NOINDEX = [
   "diyetim/page.tsx",
@@ -218,10 +236,33 @@ describe("static public pages use staticPageMetadata", () => {
       expect(block).not.toMatch(/canonical:\s*["'`]/);
     });
 
+    it("opts out of the layout's site-wide canonical '/' with alternates: { canonical: null }", () => {
+      expect(block).toMatch(/canonical:\s*null/);
+      expect(block).toMatch(/alternates:\s*\{\s*canonical:\s*null\s*\}/);
+    });
+
     it("calls none of staticPageMetadata, noindexPageMetadata and sharePageMetadata", () => {
       expect(code.join("\n")).not.toMatch(
         /\b(staticPageMetadata|noindexPageMetadata|sharePageMetadata)\b/,
       );
+    });
+  });
+
+  describe.each(ERROR_SHELL_PAGES)("%s (error shells)", (rel) => {
+    const source = readFileSync(join(APP, rel), "utf8");
+    const code = codeLines(source).join("\n");
+
+    it("builds its not-found / unknown shells with errorShellMetadata()", () => {
+      expect(code).toMatch(/\berrorShellMetadata\(/);
+      expect(source).toMatch(/from "@\/lib\/seo\/page-metadata"/);
+    });
+
+    it("no longer hand-writes a { title, robots: { index: false, follow: false } } shell", () => {
+      expect(code).not.toMatch(/robots:\s*\{\s*index:\s*false,\s*follow:\s*false\s*\}/);
+    });
+
+    it("hand-writes no alternates block (the helper owns it)", () => {
+      expect(code).not.toMatch(/\balternates:/);
     });
   });
 
@@ -276,11 +317,19 @@ describe("static public pages use staticPageMetadata", () => {
         .filter(
           ({ code }) =>
             handWritesNoindex(code) &&
-            /\bcanonical:/.test(code) &&
+            REAL_CANONICAL.test(code) &&
             !(/\bopenGraph:/.test(code) && /\btwitter:/.test(code)),
         )
         .map(({ rel }) => rel);
       expect(offenders).toEqual([]);
+    });
+
+    it("the noindex-plus-canonical check ignores `canonical: null` and still catches a real one (scanner sanity check)", () => {
+      expect(REAL_CANONICAL.test("alternates: { canonical: null }")).toBe(false);
+      expect(REAL_CANONICAL.test("alternates:{canonical:null}")).toBe(false);
+      expect(REAL_CANONICAL.test("alternates: { canonical: `/rapor/${token}` }")).toBe(true);
+      expect(REAL_CANONICAL.test('alternates: { canonical: "/x" }')).toBe(true);
+      expect(REAL_CANONICAL.test("canonical: nullable")).toBe(true);
     });
 
     it("finds exactly the 6 known noindex pages (scanner sanity check)", () => {
