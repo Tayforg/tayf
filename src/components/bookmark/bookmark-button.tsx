@@ -3,6 +3,10 @@
 import { Bookmark } from "lucide-react";
 import { track } from "@/lib/track";
 
+import {
+  bookmarkChipSuffix,
+  bookmarkStoryLabel,
+} from "@/components/bookmark/bookmark-label";
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
 
 interface BookmarkButtonProps {
@@ -16,12 +20,20 @@ interface BookmarkButtonProps {
    */
   variant?: "chip" | "overlay";
   className?: string;
+  /**
+   * Title of the story this button saves. Puts the story into the accessible
+   * name (WCAG 2.5.3 / 4.1.2), so a feed full of bookmark buttons is not a
+   * list of identical "Hikâyeyi kaydet". Without it the name falls back to the
+   * generic copy.
+   */
+  storyTitle?: string | null;
 }
 
 export function BookmarkButton({
   clusterId,
   variant = "chip",
   className = "",
+  storyTitle = null,
 }: BookmarkButtonProps) {
   const { has, toggle } = useBookmarks();
   // Server snapshot is always empty, so SSR/first paint renders "not
@@ -34,16 +46,19 @@ export function BookmarkButton({
     toggle(clusterId);
   }
 
-  const label = saved ? "Kaydedilenlerden çıkar" : "Hikâyeyi kaydet";
+  // Tooltip only; it follows the state. The accessible name does not.
+  const tooltip = saved ? "Kaydedilenlerden çıkar" : "Hikâyeyi kaydet";
 
   if (variant === "overlay") {
+    // Icon-only, so the name is explicit and stays the same in both states;
+    // aria-pressed carries whether the story is saved (APG toggle button).
     return (
       <button
         type="button"
         onClick={handleToggle}
-        aria-label={label}
+        aria-label={bookmarkStoryLabel(storyTitle)}
         aria-pressed={saved}
-        title={label}
+        title={tooltip}
         className={`inline-flex h-9 w-9 items-center justify-center rounded-full border border-border/60 bg-card/80 backdrop-blur-sm transition-colors hover:bg-card focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
           saved ? "text-brand" : "text-muted-foreground hover:text-foreground"
         } ${className}`}
@@ -56,11 +71,14 @@ export function BookmarkButton({
     );
   }
 
+  // Chip: no explicit label. The name is the visible text plus an sr-only
+  // story suffix, so it starts with what sighted users read (WCAG 2.5.3).
+  const suffix = bookmarkChipSuffix(storyTitle);
+
   return (
     <button
       type="button"
       onClick={handleToggle}
-      aria-label={label}
       aria-pressed={saved}
       className={`inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-muted/40 hover:bg-muted/70 px-3 py-1.5 text-[11px] font-medium transition-colors ${
         saved
@@ -70,6 +88,7 @@ export function BookmarkButton({
     >
       <Bookmark className="h-3 w-3" fill={saved ? "currentColor" : "none"} />
       <span>{saved ? "Kaydedildi" : "Kaydet"}</span>
+      {suffix !== null && <span className="sr-only">{suffix}</span>}
     </button>
   );
 }

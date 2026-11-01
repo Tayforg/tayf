@@ -35,6 +35,13 @@
 // list as `emap(token, entity)` and the two fold strings as the translate()
 // literals. tests/migrations/112-trends-entity-rollup.test.ts fails the build
 // if the migration drifts from this file, in either direction.
+//
+// Hub-only data (/gundem/[key], migration 125): RISING_HUB_SPECS, below the
+// list. It is hub-only, never read by /trends or migration 112, and `tokens`
+// never changes because of it: it steers ONLY how src/lib/entities/entity-hub.ts
+// searches a hub. It lives beside the list, not on the entries, so a
+// RisingEntity stays exactly { key, label, tokens } for the rollup, the
+// middleware and the tests that pin that shape.
 
 export type RisingEntity = {
   /** Stable slug stored in the rollup table (`^[a-z0-9-]+$`). */
@@ -43,6 +50,35 @@ export type RisingEntity = {
   label: string;
   /** Folded lowercase tokens; a bigram has a single space. */
   tokens: readonly string[];
+};
+
+/**
+ * How a hub (/gundem/[key], migration 125) searches one entity. Hub-only, never
+ * read by /trends or migration 112; every field is optional.
+ */
+export type RisingHubSpec = {
+  /**
+   * Turkish display spellings the hub searches INSTEAD of the label (the label
+   * stays the page title and the fallback). Each one becomes a stemmed
+   * prefilter query and a folded regex pattern, so "AKP" and "AK Parti", or
+   * "Zelenski" and "Zelenskiy", all find the story.
+   */
+  aliases?: readonly string[];
+  /**
+   * 'word' (default) closes a single-word pattern with a word boundary, so
+   * "deva" never matches "devam". 'prefix' leaves it open for words that take
+   * Turkish suffixes without an apostrophe ("dolara", "borsada", "faizi",
+   * "meclisin").
+   */
+  hubMatch?: "word" | "prefix";
+  /**
+   * Suffixed spellings added to the stemmed PREFILTER only, never to the regex
+   * patterns. The Turkish stemmer reduces a bare word and its inflected forms
+   * to different stems ("borsa" -> bor, "borsada" -> borsa, "borsası" ->
+   * borsas), so the bare word alone misses most real mentions; the regex guard
+   * keeps the extra recall precise.
+   */
+  inflections?: readonly string[];
 };
 
 /** Turkish letters (and circumflexed vowels) that fold to ASCII. */
@@ -123,6 +159,20 @@ export const RISING_ENTITIES: readonly RisingEntity[] = [
   { key: "borsa", label: "Borsa İstanbul", tokens: ["borsa", "bist"] },
   { key: "asgari-ucret", label: "Asgari ücret", tokens: ["asgari ucret"] },
 ];
+
+/** Hub-only search data, keyed by RisingEntity.key. An entity without an entry is searched by its label, as a whole word. */
+export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
+  akp: { aliases: ["AK Parti", "AKP"] },
+  yrp: { aliases: ["Yeniden Refah", "YRP"] },
+  meclis: { aliases: ["Meclis", "TBMM"], hubMatch: "prefix" },
+  aym: { aliases: ["Anayasa Mahkemesi", "AYM"] },
+  tcmb: { aliases: ["Merkez Bankası", "TCMB"] },
+  zelenski: { aliases: ["Zelenski", "Zelenskiy", "Zelensky", "Zelenskyy"] },
+  enflasyon: { hubMatch: "prefix" },
+  faiz: { hubMatch: "prefix" },
+  dolar: { hubMatch: "prefix" },
+  borsa: { aliases: ["Borsa", "BIST"], hubMatch: "prefix", inflections: ["Borsada", "Borsası"] },
+};
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {
   const from = [...RISING_FOLD_FROM];

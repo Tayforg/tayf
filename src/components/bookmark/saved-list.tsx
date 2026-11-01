@@ -6,7 +6,8 @@ import { AlertTriangle, Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
 import { SavedMixCard } from "@/components/bookmark/saved-mix-card";
-import { toSavedRowView } from "@/components/bookmark/saved-row";
+import { savedUpdatedLabel, toSavedRowView } from "@/components/bookmark/saved-row";
+import { savedRemoveLabel } from "@/components/bookmark/bookmark-label";
 import {
   changeBadgeLabels,
   pruneSnapshots,
@@ -16,7 +17,6 @@ import {
   type SavedChange,
 } from "@/components/bookmark/bookmark-snapshots";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
-import { formatTurkishTimeAgo } from "@/lib/time";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // saved_clusters_v2 (migration 124; v1 from 116 has the same caps) truncates its
@@ -160,6 +160,8 @@ export function SavedList() {
       {rows.map((row, i) => {
         const change = changes[row.id];
         const view = toSavedRowView(row);
+        // "Son güncelleme: …": the RPC returns updated_at, not first_published.
+        const updatedLabel = savedUpdatedLabel(row.updated_at);
         return (
         <li
           key={row.id}
@@ -177,7 +179,9 @@ export function SavedList() {
                 <Users className="h-3 w-3" />
                 {row.article_count} kaynak
               </span>
-              <span>{formatTurkishTimeAgo(row.updated_at)}</span>
+              {updatedLabel && (
+                <time dateTime={row.updated_at}>{updatedLabel}</time>
+              )}
               {view.isBlindspot && (
                 <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-amber-800 dark:text-amber-400 font-medium">
                   <AlertTriangle className="h-3 w-3" aria-hidden="true" />
@@ -208,7 +212,7 @@ export function SavedList() {
           <button
             type="button"
             onClick={() => toggle(row.id)}
-            aria-label="Kaydedilenlerden çıkar"
+            aria-label={savedRemoveLabel(row.title_tr_neutral ?? row.title_tr)}
             title="Kaydedilenlerden çıkar"
             className="absolute right-3 top-1/2 -translate-y-1/2 inline-flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >

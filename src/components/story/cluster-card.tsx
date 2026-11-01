@@ -306,6 +306,7 @@ export function ClusterCard({
     <div className="relative">
       <BookmarkButton
         clusterId={cluster.id}
+        storyTitle={cluster.title_tr}
         variant="overlay"
         className="absolute right-3 top-3 z-10"
       />

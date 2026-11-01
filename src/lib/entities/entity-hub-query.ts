@@ -12,25 +12,45 @@ import {
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
 import { createReaderClient } from "@/lib/supabase/server";
 import { currentTimeMs } from "@/lib/time";
-import { ENTITY_HUB_LIMIT, entityByKey } from "./entity-hub";
+import {
+  ENTITY_HUB_LIMIT,
+  entityByKey,
+  entityHubPatterns,
+  entityHubQueries,
+} from "./entity-hub";
 
 // /gundem/[key] entity hub data. Mirrors src/lib/clusters/search-query.ts: the
-// entity's label is turned into up to 3 Turkish lexeme spellings
-// (turkishQueryVariants) and resolved to ids by migration 123's
-// `entity_cluster_ids` RPC, then ONE `.in('id', ids)` embed select renders just
-// those ids (see 083's header for why ids-first beats an embedded select).
+// entity's curated spellings are resolved to ids by migration 125's
+// `entity_cluster_ids_v2` RPC, then ONE `.in('id', ids)` embed select renders
+// just those ids (see 083's header for why ids-first beats an embedded select).
+//
+// Precision: a stemmed tsquery alone lists "devam" under DEVA and "domuz" under
+// Dolar (the Turkish stemmer collapses them), so v2 takes two inputs.
+// `p_queries` (entityHubQueries) are the Turkish lexeme spellings of EVERY
+// curated form ("AK Parti" and "AKP", four spellings of Zelenski) and give
+// recall on the GIN index; `p_patterns` (entityHubPatterns) are word-boundary
+// regexes the RPC runs on folded title and summary text, so only stories that
+// literally name the entity stay. Both lists are built from rising-entities.ts,
+// never from request input.
+//
+// Until 125 is applied PostgREST answers PGRST202 ("function not in the schema
+// cache"): only then the read falls back to migration 123's v1
+// `entity_cluster_ids` (label variants, stemmed only), so deploying the app
+// before the migration cannot break a hub, it just keeps the old imprecise list.
 //
 // Unlike the archive search this is a RECENCY list: the RPC windows on
-// updated_at (SQL default 14 days, never wider than 30), orders newest first
-// and returns the full match count next to every id, so the page can say
+// updated_at (SQL default 14 days, never wider than 30) and orders by
+// first_published, newest first, because the cards print the first_published
+// age: ordering by updated_at made those ages read 9, 3, 4, 4, 11 hours. It
+// returns the full match count next to every id, so the page can say
 // "Son 14 günde 422 küme · en yeni 20 tanesi listeleniyor".
 //
 // The app never passes `p_since`: the window lives in SQL, so no clock is read
 // here and the page prerenders under cacheComponents.
 //
 // The route key reaches this module only after `entityByKey` accepts it, so
-// the text that goes into the RPC is always one of the curated labels in
-// rising-entities.ts, never request-controlled.
+// the text that goes into the RPC is always one of the curated labels or
+// aliases in rising-entities.ts, never request-controlled.
 
 export interface EntityHub {
   bundles: ClusterBundle[];
@@ -62,15 +82,30 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
   const entity = entityByKey(key);
   if (entity === null) return { bundles: [], total: 0, asOfMs };
 
-  const variants = turkishQueryVariants(entity.label);
-  if (variants.length === 0) return { bundles: [], total: 0, asOfMs };
+  const queries = entityHubQueries(entity);
+  const patterns = entityHubPatterns(entity);
+  if (queries.length === 0 || patterns.length === 0) {
+    return { bundles: [], total: 0, asOfMs };
+  }
 
   const supabase = createReaderClient();
 
-  const { data, error } = await supabase.rpc("entity_cluster_ids", {
-    p_variants: variants,
+  let res = await supabase.rpc("entity_cluster_ids_v2", {
+    p_queries: queries,
+    p_patterns: patterns,
     p_limit: ENTITY_HUB_LIMIT,
   });
+  // PGRST202 = the function is not in PostgREST's schema cache, i.e. migration
+  // 125 is not applied yet. Only then fall back to v1 (label variants, no
+  // precision guard); any other error keeps the throw-and-retry path below.
+  if (res.error?.code === "PGRST202") {
+    const variants = turkishQueryVariants(entity.label);
+    res = await supabase.rpc("entity_cluster_ids", {
+      p_variants: variants,
+      p_limit: ENTITY_HUB_LIMIT,
+    });
+  }
+  const { data, error } = res;
 
   if (error) {
     throw new Error(`[clusters] entity-hub error: ${error.message}`);
@@ -105,7 +140,7 @@ async function fetchEntityHub(key: string): Promise<EntityHub> {
   }
 
   // `.in('id', ids)` does not preserve the IN-list order — re-sort into the
-  // RPC's newest-first order before building bundles.
+  // RPC's order (first_published desc on v2) before building bundles.
   const order = new Map(ids.map((id, i) => [id, i]));
   const sorted = [...(embedRes.data ?? [])].sort(
     (a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0),

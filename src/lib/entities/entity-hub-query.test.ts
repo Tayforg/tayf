@@ -4,8 +4,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // Same harness as src/lib/clusters/search-query.test.ts: the shared proxy-based
 // Supabase fake (tests/_helpers/supabase-fake.ts), a mocked next/cache, and a
 // stubbed getZoneFeedHealth. entity-hub-query.ts resolves ids (plus the total
-// match count) via migration 123's `entity_cluster_ids` RPC, then embeds just
-// those ids with `.in('id', ids)`.
+// match count) via migration 125's `entity_cluster_ids_v2` RPC (precise hubs),
+// falling back to migration 123's `entity_cluster_ids` only on PGRST202, then
+// embeds just those ids with `.in('id', ids)`.
 // ---------------------------------------------------------------------------
 
 vi.mock("next/cache", () => ({
@@ -31,12 +32,16 @@ const fixture = vi.hoisted(() => ({
   throwOnQuery: false,
   lastState: null as unknown,
   embedCalls: 0,
+  // entity_cluster_ids_v2 (migration 125).
   rpcRows: [] as Array<{ id: string; total: unknown }>,
-  rpcError: null as { message: string } | null,
+  rpcError: null as { message: string; code?: string } | null,
   rpcThrows: false,
-  // Number of leading rpc calls that fail before the rpc recovers.
+  // Number of leading v2 calls that fail before the rpc recovers.
   rpcFailFirst: 0,
   rpcCalls: [] as unknown[],
+  // entity_cluster_ids (migration 123), the PGRST202 fallback.
+  v1Calls: [] as unknown[],
+  v1Rows: [] as Array<{ id: string; total: unknown }>,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -51,14 +56,21 @@ const supabaseFake = await vi.hoisted(async () => {
       },
     },
     rpc: {
-      entity_cluster_ids: (args: unknown) => {
+      entity_cluster_ids_v2: (args: unknown) => {
         fixture.rpcCalls.push(args);
         if (fixture.rpcThrows) throw new Error("rpc connection reset");
         if (fixture.rpcFailFirst > 0 && fixture.rpcCalls.length <= fixture.rpcFailFirst) {
           return { data: null, error: { message: "statement timeout" } };
         }
-        if (fixture.rpcError) return { data: null, error: fixture.rpcError };
+        // PgResult.error is typed { message }; the PostgREST code rides along.
+        if (fixture.rpcError) {
+          return { data: null, error: fixture.rpcError as { message: string } };
+        }
         return { data: fixture.rpcRows, error: null };
+      },
+      entity_cluster_ids: (args: unknown) => {
+        fixture.v1Calls.push(args);
+        return { data: fixture.v1Rows, error: null };
       },
     },
   });
@@ -70,8 +82,15 @@ vi.mock("@supabase/supabase-js", () => ({
 
 import { cacheLife, cacheTag } from "next/cache";
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
+import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
-import { ENTITY_HUB_LIMIT } from "./entity-hub";
+import {
+  ENTITY_HUB_LIMIT,
+  ENTITY_HUB_MAX_TERMS,
+  entityByKey,
+  entityHubPatterns,
+  entityHubQueries,
+} from "./entity-hub";
 import { getEntityHub } from "./entity-hub-query";
 
 const ORIGINAL_ENV = { ...process.env };
@@ -89,6 +108,8 @@ beforeEach(() => {
   fixture.rpcThrows = false;
   fixture.rpcFailFirst = 0;
   fixture.rpcCalls = [];
+  fixture.v1Calls = [];
+  fixture.v1Rows = [];
   feedHealth.getZoneFeedHealth.mockReset();
   feedHealth.getZoneFeedHealth.mockResolvedValue(null);
   vi.mocked(cacheLife).mockClear();
@@ -149,21 +170,61 @@ const one = (id: string, sourceId = "s1") =>
   mkRow({ id, members: [{ id: `a-${id}`, sourceId }] });
 
 describe("getEntityHub query shape", () => {
-  it("calls the RPC with the Turkish-aware variants and p_limit only (never p_since)", async () => {
+  it("calls v2 with the curated queries, the regex patterns and p_limit only (never p_since)", async () => {
     await getEntityHub("erdogan");
 
     expect(fixture.rpcCalls).toEqual([
-      { p_variants: turkishQueryVariants("Erdoğan"), p_limit: ENTITY_HUB_LIMIT },
+      {
+        p_queries: entityHubQueries(entityByKey("erdogan")!),
+        p_patterns: ["\\merdogan\\M"],
+        p_limit: ENTITY_HUB_LIMIT,
+      },
     ]);
     expect(fixture.rpcCalls[0]).not.toHaveProperty("p_since");
+    expect(fixture.v1Calls).toEqual([]);
     expect(ENTITY_HUB_LIMIT).toBe(20);
   });
 
-  it("derives the variants from the entity label, not the key", async () => {
+  it("derives queries and patterns from the entity's forms, not the key", async () => {
     await getEntityHub("iyi-parti");
-    const args = fixture.rpcCalls[0] as { p_variants: string[] };
-    expect(args.p_variants).toEqual(turkishQueryVariants("İYİ Parti"));
-    expect(args.p_variants.length).toBeGreaterThan(0);
+    const args = fixture.rpcCalls[0] as { p_queries: string[]; p_patterns: string[] };
+    expect(args.p_queries).toEqual(turkishQueryVariants("İYİ Parti"));
+    expect(args.p_patterns).toEqual(["\\miyi\\s+parti"]);
+  });
+
+  it("sends non-empty p_queries and p_patterns, each at most 12, for all 62 hubs", async () => {
+    expect(RISING_ENTITIES).toHaveLength(62);
+    for (const e of RISING_ENTITIES) {
+      fixture.rpcCalls = [];
+      await getEntityHub(e.key);
+      expect(fixture.rpcCalls, e.key).toHaveLength(1);
+      const args = fixture.rpcCalls[0] as { p_queries: string[]; p_patterns: string[] };
+      expect(args.p_queries.length, e.key).toBeGreaterThan(0);
+      expect(args.p_queries.length, e.key).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
+      expect(args.p_patterns.length, e.key).toBeGreaterThan(0);
+      expect(args.p_patterns.length, e.key).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
+      expect(args.p_patterns, e.key).toEqual(entityHubPatterns(e));
+    }
+  });
+
+  it("searches every curated spelling: akp, zelenski and borsa carry their aliases", async () => {
+    await getEntityHub("akp");
+    await getEntityHub("zelenski");
+    await getEntityHub("borsa");
+    const [akp, zelenski, borsa] = fixture.rpcCalls as Array<{
+      p_queries: string[];
+      p_patterns: string[];
+    }>;
+    expect(akp!.p_queries).toEqual(expect.arrayContaining(["ak parti", "akp"]));
+    expect(akp!.p_patterns).toEqual(["\\mak\\s+parti", "\\makp\\M"]);
+    expect(zelenski!.p_queries).toEqual(
+      expect.arrayContaining(["zelenski", "zelenskiy", "zelensky", "zelenskyy"]),
+    );
+    expect(zelenski!.p_patterns).toHaveLength(4);
+    expect(borsa!.p_queries).toEqual(
+      expect.arrayContaining(["borsa", "bist", "borsada", "borsası"]),
+    );
+    expect(borsa!.p_patterns).toEqual(["\\mborsa", "\\mbist"]);
   });
 
   it("embeds exactly the returned ids with .in('id', ids)", async () => {
@@ -183,7 +244,7 @@ describe("getEntityHub query shape", () => {
 });
 
 describe("getEntityHub result", () => {
-  it("keeps the RPC's (newest-first) order even when the embed returns rows shuffled", async () => {
+  it("keeps the RPC's (first_published desc) order even when the embed returns rows shuffled", async () => {
     fixture.rpcRows = [
       { id: "c2", total: 3 },
       { id: "c1", total: 3 },
@@ -329,12 +390,72 @@ describe("getEntityHub result", () => {
   });
 });
 
+describe("getEntityHub v1 fallback (migration 125 not applied yet)", () => {
+  it("falls back to v1 exactly once on PGRST202 and builds the bundles from the v1 rows", async () => {
+    fixture.rpcError = { message: "Could not find the function", code: "PGRST202" };
+    fixture.v1Rows = [
+      { id: "c2", total: "4" },
+      { id: "c1", total: "4" },
+    ];
+    fixture.data = [one("c1"), one("c2", "s2")];
+
+    const result = await getEntityHub("erdogan");
+
+    expect(fixture.rpcCalls).toHaveLength(1);
+    expect(fixture.v1Calls).toEqual([
+      { p_variants: turkishQueryVariants("Erdoğan"), p_limit: ENTITY_HUB_LIMIT },
+    ]);
+    expect(fixture.v1Calls[0]).not.toHaveProperty("p_since");
+    expect(result?.total).toBe(4);
+    expect(result?.bundles.map((b) => b.cluster.id)).toEqual(["c2", "c1"]);
+    const state = fixture.lastState as BuilderState;
+    expect(state.in).toEqual([{ col: "id", vals: ["c2", "c1"] }]);
+  });
+
+  it("derives the v1 variants from the label, never from the aliases", async () => {
+    fixture.rpcError = { message: "missing", code: "PGRST202" };
+    await getEntityHub("akp");
+    expect(fixture.v1Calls).toEqual([
+      { p_variants: turkishQueryVariants("AK Parti"), p_limit: ENTITY_HUB_LIMIT },
+    ]);
+  });
+
+  it("an empty v1 fallback result is an empty hub, not an error", async () => {
+    fixture.rpcError = { message: "missing", code: "PGRST202" };
+    fixture.v1Rows = [];
+    const result = await getEntityHub("ysk");
+    expect(result).toEqual({ bundles: [], total: 0, asOfMs: expect.any(Number) });
+    expect(fixture.embedCalls).toBe(0);
+  });
+
+  it("any other error code never calls v1: live retry, then null (2 v2 calls)", async () => {
+    fixture.rpcError = { message: "boom", code: "42883" };
+    await expect(getEntityHub("erdogan")).resolves.toBeNull();
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(fixture.v1Calls).toEqual([]);
+  });
+
+  it("an error without a code never calls v1 either", async () => {
+    fixture.rpcError = { message: "db down" };
+    await expect(getEntityHub("erdogan")).resolves.toBeNull();
+    expect(fixture.rpcCalls).toHaveLength(2);
+    expect(fixture.v1Calls).toEqual([]);
+  });
+
+  it("a thrown v2 call (no code) never falls back to v1", async () => {
+    fixture.rpcThrows = true;
+    await expect(getEntityHub("erdogan")).resolves.toBeNull();
+    expect(fixture.v1Calls).toEqual([]);
+  });
+});
+
 describe("getEntityHub unknown key", () => {
   it("returns null without touching Supabase or the cache", async () => {
     for (const key of ["bilinmeyen", "ERDOGAN", "", "__proto__"]) {
       await expect(getEntityHub(key)).resolves.toBeNull();
     }
     expect(fixture.rpcCalls).toEqual([]);
+    expect(fixture.v1Calls).toEqual([]);
     expect(fixture.embedCalls).toBe(0);
     expect(cacheLife).not.toHaveBeenCalled();
     expect(cacheTag).not.toHaveBeenCalled();

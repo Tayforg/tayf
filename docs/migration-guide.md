@@ -2787,3 +2787,25 @@ select has_function_privilege('anon', 'public.saved_clusters_v2(uuid[])', 'execu
 ```
 
 **Rollback:** `drop function public.saved_clusters_v2(uuid[]);` then `delete from supabase_migrations.schema_migrations where version = '124';`. `/saved` falls back to v1 rows on its own.
+
+## 125 — precise entity hubs (`entity_cluster_ids_v2`): APPLY 125, THEN DEPLOY the app
+
+**Why:** the `/gundem/<key>` hubs from 123 matched the entity label through the Turkish stemmer alone, so unrelated words that stem alike crept in: 234 "DEVA" clusters of which 11 name the party ("devam" stems to "deva"), 7 "domuz" stories in the Dolar top 20, 70 İYİ Parti clusters of which 36 are real, and only 8 Zelenski and 8 Borsa clusters where 24 and 34 exist (one of four spellings, "Borsa İstanbul" needing both words). The hub card ages also read out of order (9, 3, 4, 4, 11 saat) because 123 sorts by `updated_at` while the card prints `first_published`.
+
+**What 125 does** (additive, one transaction, safe to re-apply): creates `public.entity_cluster_ids_v2(p_queries text[], p_patterns text[], p_since timestamptz, p_limit integer)`, `SECURITY DEFINER`, `search_path = ''`, read-only. The stemmed tsquery over `p_queries` (every curated spelling, for example `AK Parti` and `AKP`) is the recall prefilter on the existing GIN index; a regex guard over `p_patterns`, run on the folded title and summary exactly like migration 112, is ANDed for precision, so only stories that literally name the entity remain. Same live predicates and window as 123 (14 days on `updated_at`, never wider than 30), but ordered by `first_published desc, id`. `p_limit` is clamped to 1..50; empty or null `p_patterns` return no rows. Execute is revoked from public/anon/authenticated and granted to `service_role` only. 123 is not touched: it stays the fallback.
+
+**Order:** apply 125 before deploying the app. An early app deploy is safe too: until 125 is applied PostgREST answers `PGRST202` for v2, the app falls back to 123 for that read, and the old imprecise lists keep working, so nothing breaks. After applying 125 the hubs switch to the precise lists as their `clusters-entity` cache entries expire (the `cluster-feed` window).
+
+**Verify** (read-only):
+
+```sql
+-- service_role only (expect f, f)
+select has_function_privilege('anon', 'public.entity_cluster_ids_v2(text[],text[],timestamptz,integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.entity_cluster_ids_v2(text[],text[],timestamptz,integer)', 'execute');
+-- about the literal count: 11 for DEVA on 2026-11-01 (123 said 234)
+select total from public.entity_cluster_ids_v2(array['deva'], array['\mdeva\M'], null, 20) limit 1;
+```
+
+Then `curl -s https://www.tayfhaber.com/gundem/deva` and `/gundem/dolar`: the DEVA hub lists only DEVA stories (no "devam"), the Dolar hub has no "domuz" story, and the card ages read newest first.
+
+**Rollback:** `drop function public.entity_cluster_ids_v2(text[], text[], timestamptz, integer);` then `delete from supabase_migrations.schema_migrations where version = '125';`. The hubs fall back to 123 (the old imprecise lists) on their own.
