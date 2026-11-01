@@ -193,6 +193,9 @@ describe("131: functions", () => {
     { name: "ops_archive_gap_days", args: "integer" },
   ] as const;
 
+  // Full RegExp escape (backslash included) for the literal argument list.
+  const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
   for (const f of FUNCS) {
     describe(f.name, () => {
       it("is SECURITY DEFINER with an empty search_path", () => {
@@ -202,7 +205,7 @@ describe("131: functions", () => {
       });
 
       it("is revoked from public, anon and authenticated and granted to service_role only", () => {
-        const sig = `public\\.${f.name}\\s*\\(\\s*${f.args.replace(/[[\]]/g, "\\$&")}\\s*\\)`;
+        const sig = `public\\.${f.name}\\s*\\(\\s*${escapeRegExp(f.args)}\\s*\\)`;
         expect(code).toMatch(new RegExp(`revoke\\s+all\\s+on\\s+function\\s+${sig}\\s+from\\s+public\\s*,\\s*anon\\s*,\\s*authenticated\\s*;`, "i"));
         expect(code).toMatch(new RegExp(`grant\\s+execute\\s+on\\s+function\\s+${sig}\\s+to\\s+service_role\\s*;`, "i"));
       });
