@@ -12,6 +12,7 @@ import {
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
+import { CLUSTER_FEED_TAGS, clusterMembershipTags } from "@/lib/clusters/merge";
 import {
   isBiasCategory,
   isSourceKindValue,
@@ -33,6 +34,9 @@ const adminPostLimit = createRateLimiter("admin-post", {
   capacity: 20,
   refillPerSecond: 0.2,
 });
+
+// A source id is a uuid; anything else never reaches the delete_source RPC.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export const GET = withApiErrors(async () => {
   // Real auth boundary for admin data. The /admin page also calls
@@ -121,6 +125,8 @@ export const POST = withApiErrors(async (request: Request) => {
         .update({ active })
         .eq("slug", slug);
       if (error) return apiServerError(error);
+      // The source lists, /source/[slug] and /api/sources are tagged "sources".
+      revalidateTag("sources", "max");
       return NextResponse.json({ success: true, message: `${slug} is now ${active ? "active" : "disabled"}` });
     }
 
@@ -153,6 +159,7 @@ export const POST = withApiErrors(async (request: Request) => {
 
       const { error } = await supabase.from("sources").insert(insertPayload);
       if (error) return apiServerError(error);
+      revalidateTag("sources", "max");
       return NextResponse.json({ success: true, message: `${name} added` });
     }
 
@@ -203,6 +210,7 @@ export const POST = withApiErrors(async (request: Request) => {
       if (Object.keys(updates).length === 0) return apiBadRequest("No fields to update");
       const { error } = await supabase.from("sources").update(updates).eq("id", id);
       if (error) return apiServerError(error);
+      revalidateTag("sources", "max");
       return NextResponse.json({ success: true, message: `${name || "Source"} updated` });
     }
 
@@ -241,6 +249,14 @@ export const POST = withApiErrors(async (request: Request) => {
         .maybeSingle();
       if (error) return apiServerError(error);
       if (!data) return apiNotFound("Source not found");
+
+      // The rights flags are read inside the cached cluster-detail page and
+      // the cluster feeds (politics, blindspots, RSS summaries) as well as the
+      // source profile, so a flipped flag must reach all of them, not just the
+      // "sources" tag. The feed tags come from CLUSTER_FEED_TAGS, never as
+      // literals (tests/guards/cluster-membership-tags.test.ts).
+      revalidateTag("sources", "max");
+      for (const tag of CLUSTER_FEED_TAGS) revalidateTag(tag, "max");
 
       return NextResponse.json({
         slug: data.slug,
@@ -405,12 +421,43 @@ export const POST = withApiErrors(async (request: Request) => {
       return NextResponse.json({ success: true, message: "KAP devre kesici temizlendi" });
     }
 
+    // Deleting a source cascades its articles out of every cluster they sat
+    // in (articles -> cluster_articles), so the delete goes through the
+    // delete_source RPC (migration 128), which deletes the source and then
+    // recomputes each affected cluster in the same transaction. NEVER a bare
+    // `.from("sources").delete()` (tests/guards/admin-source-revalidate.test.ts).
+    // The RPC returns the recomputed cluster ids (null: no such source), which
+    // drive the cache revalidation below.
     case "delete_source": {
       const { id } = body;
-      if (!id) return apiBadRequest("Source id is required");
-      const { error } = await supabase.from("sources").delete().eq("id", id);
-      if (error) return apiServerError(error);
-      return NextResponse.json({ success: true, message: "Source deleted" });
+      if (typeof id !== "string" || !UUID_RE.test(id)) {
+        return apiBadRequest("Source id is required");
+      }
+      const { data, error } = await supabase.rpc("delete_source", { p_source_id: id });
+      if (error) {
+        switch (error.code) {
+          case "23503":
+            return apiError(409, "Source is still referenced by other rows");
+          case "54000":
+            return apiError(409, "Too many clusters affected; deactivate the source instead");
+          default:
+            return apiServerError(error);
+        }
+      }
+      if (data === null) return apiNotFound("Source not found");
+      if (!Array.isArray(data)) {
+        return apiServerError(new Error("delete_source: unexpected result"));
+      }
+
+      const clusterIds = data.filter((v): v is string => typeof v === "string");
+      for (const tag of clusterMembershipTags(...clusterIds)) revalidateTag(tag, "max");
+      revalidateTag("sources", "max");
+
+      return NextResponse.json({
+        success: true,
+        message: "Source deleted",
+        clusters_recomputed: clusterIds.length,
+      });
     }
 
     default:

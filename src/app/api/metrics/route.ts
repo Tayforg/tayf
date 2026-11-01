@@ -2,6 +2,7 @@ import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
 import { apiError, withApiErrors } from "@/lib/api/errors";
+import { hasAdminSession } from "@/lib/admin/session";
 
 /**
  * Operational metrics endpoint.
@@ -14,12 +15,23 @@ import { apiError, withApiErrors } from "@/lib/api/errors";
  *
  * AUTH
  * ----
- * Gated behind `Authorization: Bearer ${CRON_SECRET}`. The data exposed
- * (queue depths, article-age, blindspot counts) is operational
- * reconnaissance — useful to anyone running the dashboards, dangerous in
- * an attacker's hands when timing pressure on the pipeline. The bearer
- * gate is the shared `requireCronBearer` helper (`src/lib/api/bearer.ts`):
- * constant-time compare, FAIL-CLOSED 503 when `CRON_SECRET` is unset.
+ * Gated behind `Authorization: Bearer ${CRON_SECRET}` OR a valid
+ * `admin_session` cookie. The data exposed (queue depths, article-age,
+ * blindspot counts) is operational reconnaissance — useful to anyone
+ * running the dashboards, dangerous in an attacker's hands when timing
+ * pressure on the pipeline. The bearer gate is the shared
+ * `requireCronBearer` helper (`src/lib/api/bearer.ts`): constant-time
+ * compare, FAIL-CLOSED 503 when `CRON_SECRET` is unset.
+ *
+ * The cookie path exists for the /admin "Canlı metrikler" card
+ * (`WorkerStats`): it fetches from the browser, which holds the signed
+ * admin cookie but can never hold the cron secret, so before this the card
+ * 401'd for every logged-in admin. The bearer is checked FIRST, so cron and
+ * smoke callers never read cookies; only a request that fails the bearer
+ * gate falls through to `hasAdminSession()`. If neither passes, the bearer
+ * helper's own response is returned (401, or 503 when the secret is
+ * unset), so the bearer path stays fail-closed. Every response, including
+ * the cookie path, is `Cache-Control: no-store`.
  *
  * Wrapped in `withApiErrors` so an unexpected throw (Supabase RPC quirk,
  * row-count overflow, etc.) returns the canonical JSON-500 envelope and
@@ -115,10 +127,12 @@ export const GET = withApiErrors(async (request: Request) => {
   // FAIL-CLOSED bearer gate (shared helper): a missing or empty CRON_SECRET
   // means we cannot enforce bearer auth, so we refuse the request with 503
   // rather than serving operational data anonymously; 401 on a missing or
-  // mismatched token. Same gate as `/api/cron/headline`.
-  const auth = requireCronBearer(request);
-  if (!auth.ok) {
-    return auth.response;
+  // mismatched token. Same gate as `/api/cron/headline`. An admin session
+  // cookie is the only alternative credential (see AUTH above); it is read
+  // lazily so a valid bearer never touches cookies.
+  const bearer = requireCronBearer(request);
+  if (!bearer.ok && !(await hasAdminSession())) {
+    return bearer.response;
   }
 
   const supabase = createServerClient();

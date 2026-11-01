@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
+import { CLUSTER_FEED_TAGS, clusterMembershipTags } from "@/lib/clusters/merge";
+
 // ---------------------------------------------------------------------------
 // Supabase mock plumbing for /api/admin.
 //
@@ -891,6 +893,240 @@ describe("POST /api/admin", () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toBe("a bias change requires a 10..500 char reason");
+    });
+  });
+
+  // h8-admin-1: deleting a source cascades its articles out of every cluster
+  // they sat in. The route now goes through the delete_source RPC (migration
+  // 128), which recomputes those clusters and returns their ids, and
+  // revalidates the cluster-list tags, each cluster-detail tag and "sources".
+  describe("delete_source", () => {
+    const SOURCE_ID = "5b1f6c3e-8d2a-4c7b-9e41-0a3d7f2b6c18";
+
+    const remove = (id: unknown = SOURCE_ID) => postAdmin({ action: "delete_source", id });
+
+    const revalidated = () => revalidateTagMock.mock.calls.map((c) => c[0] as string);
+
+    it("401s without a session, with no rpc call", async () => {
+      __adminAuthed = false;
+      const res = await remove();
+      expect(res.status).toBe(401);
+      expect(rpcCalls.length).toBe(0);
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it("calls the delete_source RPC and never deletes from sources directly", async () => {
+      setRpcResponse("delete_source", { data: ["c1", "c2"], error: null });
+      const res = await remove();
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        success: true,
+        message: "Source deleted",
+        clusters_recomputed: 2,
+      });
+      expect(rpcCalls).toEqual([{ name: "delete_source", args: { p_source_id: SOURCE_ID } }]);
+      expect(writes.some((w) => w.table === "sources" && w.op === "delete")).toBe(false);
+      expect(writes.length).toBe(0);
+    });
+
+    it("revalidates every cluster-list tag, each affected cluster-detail tag and 'sources'", async () => {
+      setRpcResponse("delete_source", { data: ["c1", "c2"], error: null });
+      const res = await remove();
+      expect(res.status).toBe(200);
+      const expected = clusterMembershipTags("c1", "c2");
+      for (const tag of expected) {
+        expect(revalidateTagMock).toHaveBeenCalledWith(tag, "max");
+      }
+      expect(revalidateTagMock).toHaveBeenCalledWith("sources", "max");
+      expect(revalidateTagMock).toHaveBeenCalledTimes(expected.length + 1);
+      expect(revalidated()).toEqual(expect.arrayContaining(["cluster-detail:c1", "cluster-detail:c2"]));
+      expect(revalidated()).toEqual(expect.arrayContaining([...CLUSTER_FEED_TAGS]));
+    });
+
+    it("a source that sat in no cluster still revalidates the feeds and 'sources', and reports 0", async () => {
+      setRpcResponse("delete_source", { data: [], error: null });
+      const res = await remove();
+      expect(res.status).toBe(200);
+      expect((await res.json()).clusters_recomputed).toBe(0);
+      expect(revalidateTagMock).toHaveBeenCalledWith("sources", "max");
+      expect(revalidated().filter((t) => t.startsWith("cluster-detail:"))).toEqual([]);
+    });
+
+    it("404s a source the RPC reports as missing (null), with no revalidate", async () => {
+      setRpcResponse("delete_source", { data: null, error: null });
+      const res = await remove();
+      expect(res.status).toBe(404);
+      expect((await res.json()).error).toBe("Source not found");
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it("500s an unexpected database error (XX000), with no revalidate and no message leak", async () => {
+      setRpcResponse("delete_source", {
+        data: null,
+        error: { message: "internal boom on articles_source_id_fkey", code: "XX000" },
+      });
+      const res = await remove();
+      expect(res.status).toBe(500);
+      expect(JSON.stringify(await res.json())).not.toContain("articles_source_id_fkey");
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it("409s a foreign-key violation (23503) with a clear message, with no revalidate", async () => {
+      setRpcResponse("delete_source", {
+        data: null,
+        error: { message: "violates foreign key constraint", code: "23503" },
+      });
+      const res = await remove();
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("Source is still referenced by other rows");
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it("409s the 2000-cluster cap (54000) and points at deactivating the source, with no revalidate", async () => {
+      setRpcResponse("delete_source", {
+        data: null,
+        error: { message: "128 delete_source: 2001 clusters affected (cap 2000)", code: "54000" },
+      });
+      const res = await remove();
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toBe("Too many clusters affected; deactivate the source instead");
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it("500s an RPC result that is neither null nor an array, with no revalidate", async () => {
+      for (const data of ["oops", 3, { a: 1 }, true]) {
+        revalidateTagMock.mockClear();
+        setRpcResponse("delete_source", { data, error: null });
+        const res = await remove();
+        expect(res.status).toBe(500);
+        expect(revalidateTagMock).not.toHaveBeenCalled();
+      }
+    });
+
+    it("400s a missing id, with no rpc call", async () => {
+      const res = await postAdmin({ action: "delete_source" });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Source id is required");
+      expect(rpcCalls.length).toBe(0);
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["a short non-uuid id", "s1"],
+      ["an empty string", ""],
+      ["a uuid with a trailing character", `${SOURCE_ID}x`],
+      ["a uuid wrapped in whitespace", ` ${SOURCE_ID} `],
+      ["a PostgREST filter-shaped string", "eq.1,or=(id.gt.0)"],
+      ["a number", 12345],
+      ["null", null],
+      ["an object", { id: SOURCE_ID }],
+      ["an array holding a valid uuid", [SOURCE_ID]],
+    ])("400s %s, with no rpc call", async (_label, id) => {
+      const res = await remove(id);
+      expect(res.status).toBe(400);
+      expect(rpcCalls.length).toBe(0);
+      expect(writes.length).toBe(0);
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it("accepts an upper-case uuid", async () => {
+      setRpcResponse("delete_source", { data: [], error: null });
+      const res = await remove(SOURCE_ID.toUpperCase());
+      expect(res.status).toBe(200);
+      expect(rpcCalls[0]?.args).toEqual({ p_source_id: SOURCE_ID.toUpperCase() });
+    });
+  });
+
+  // Every source mutation must leave the "sources"-tagged caches (the
+  // /source/[slug] profile, the /api/sources registry, the source lists)
+  // fresh. toggle_source, add_source and update_source used to skip it.
+  describe("source cache revalidation", () => {
+    const validToggle = { action: "toggle_source", slug: "test-source", active: false };
+    const validUpdate = { action: "update_source", id: "s1", name: "New name" };
+
+    it.each([
+      ["toggle_source", validToggle],
+      ["add_source", validAddSource],
+      ["update_source", validUpdate],
+    ])("%s success revalidates 'sources'", async (_action, payload) => {
+      const res = await postAdmin(payload);
+      expect(res.status).toBe(200);
+      expect(revalidateTagMock).toHaveBeenCalledWith("sources", "max");
+      expect(revalidateTagMock).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      ["toggle_source with a bad slug", { action: "toggle_source", slug: "Not A Slug!", active: true }],
+      ["toggle_source with a non-boolean state", { action: "toggle_source", slug: "test-source", active: "yes" }],
+      ["add_source with missing fields", { action: "add_source", name: "Only a name" }],
+      ["add_source with an SSRF-shaped rss_url", { ...validAddSource, rss_url: "http://169.254.169.254/x" }],
+      ["update_source without an id", { action: "update_source", name: "New name" }],
+      ["update_source with nothing to update", { action: "update_source", id: "s1" }],
+    ])("%s returns 400 with no revalidate", async (_label, payload) => {
+      const res = await postAdmin(payload);
+      expect(res.status).toBe(400);
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["toggle_source", validToggle],
+      ["add_source", validAddSource],
+      ["update_source", validUpdate],
+    ])("%s with a database error returns 500 with no revalidate", async (_action, payload) => {
+      setTableResponse("sources", { error: { message: "boom" } });
+      const res = await postAdmin(payload);
+      expect(res.status).toBe(500);
+      expect(revalidateTagMock).not.toHaveBeenCalled();
+    });
+
+    describe("set_source_rights", () => {
+      const rightsRow = { slug: "test-source", image_allowed: false, excerpt_allowed: true };
+
+      it("success revalidates 'sources' and every cluster-feed tag (the flags are read inside cluster-detail and the feeds)", async () => {
+        setTableResponse("sources", { data: rightsRow, error: null });
+        const res = await postAdmin({
+          action: "set_source_rights",
+          slug: "test-source",
+          image_allowed: false,
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual(rightsRow);
+        expect(revalidateTagMock).toHaveBeenCalledWith("sources", "max");
+        for (const tag of CLUSTER_FEED_TAGS) {
+          expect(revalidateTagMock).toHaveBeenCalledWith(tag, "max");
+        }
+        expect(CLUSTER_FEED_TAGS).toContain("clusters");
+        expect(CLUSTER_FEED_TAGS).toContain("clusters-politics");
+        expect(revalidateTagMock).toHaveBeenCalledTimes(CLUSTER_FEED_TAGS.length + 1);
+      });
+
+      it("404 for an unknown slug revalidates nothing", async () => {
+        setTableResponse("sources", { data: null, error: null });
+        const res = await postAdmin({
+          action: "set_source_rights",
+          slug: "does-not-exist",
+          image_allowed: false,
+        });
+        expect(res.status).toBe(404);
+        expect(revalidateTagMock).not.toHaveBeenCalled();
+      });
+
+      it("a database error revalidates nothing", async () => {
+        setTableResponse("sources", { error: { message: "boom" } });
+        const res = await postAdmin({
+          action: "set_source_rights",
+          slug: "test-source",
+          image_allowed: false,
+        });
+        expect(res.status).toBe(500);
+        expect(revalidateTagMock).not.toHaveBeenCalled();
+      });
+
+      it("a validation failure revalidates nothing", async () => {
+        const res = await postAdmin({ action: "set_source_rights", slug: "test-source" });
+        expect(res.status).toBe(400);
+        expect(revalidateTagMock).not.toHaveBeenCalled();
+      });
     });
   });
 

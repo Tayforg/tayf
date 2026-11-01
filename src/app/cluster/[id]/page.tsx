@@ -39,6 +39,7 @@ import {
 } from "@/lib/clusters/framing-receipt";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { buildShareText } from "@/lib/clusters/share";
+import { clusterUpdateCue } from "@/lib/clusters/update-cue";
 import {
   buildStoryTimeline,
   missingZones,
@@ -407,6 +408,17 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // headline/date/image triple. Authors are listed as the source
   // outlets (capped at 5) since a cluster is the union of multiple
   // independent stories — there's no single byline.
+  // Header age: the bare time-ago is the story's age (first_published). A
+  // separate "Güncellendi" cue appears only when a member published
+  // meaningfully later — `updated_at` alone moves on every recompute and used
+  // to make a 2-hour-old story read "30 dakika önce". Pure over the row
+  // values (no clock read in this file); JSON-LD dates below are unchanged.
+  const updateCue = clusterUpdateCue(
+    cluster.first_published,
+    cluster.updated_at,
+    members.map((m) => m.article.published_at),
+  );
+
   const jsonLd = {
     "@context": "https://schema.org",
     "@type": "NewsArticle",
@@ -546,7 +558,13 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 </div>
               )}
               <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
-                <span>{formatTurkishTimeAgo(cluster.updated_at)}</span>
+                <span>{formatTurkishTimeAgo(cluster.first_published)}</span>
+                {updateCue && (
+                  <>
+                    <span aria-hidden="true" className="text-muted-foreground">•</span>
+                    <span>Güncellendi: {formatTurkishTimeAgo(updateCue)}</span>
+                  </>
+                )}
                 <span aria-hidden="true" className="text-muted-foreground">•</span>
                 <span>{wire.effectiveArticleCount} kaynak</span>
                 {/* Honest source count v2 (reader-data): when several of

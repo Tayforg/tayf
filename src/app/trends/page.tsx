@@ -16,6 +16,7 @@ export const metadata: Metadata = staticPageMetadata({
   path: "/trends",
 });
 import { ZONE_META } from "@/lib/bias/config";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { getRisingEntities } from "@/lib/trends/rising-query";
 import type { MediaDnaZone } from "@/types";
@@ -149,7 +150,7 @@ export default async function TrendsPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="text-xs text-muted-foreground space-y-0.5">
             <div>
-              Toplam <span className="font-mono">{totalArticles.toLocaleString("tr-TR")}</span> haber, son{" "}
+              Toplam <span className="font-mono">{formatCountTr(totalArticles)}</span> haber, son{" "}
               {WINDOW_DAYS} gün
             </div>
             <div>
@@ -180,7 +181,7 @@ export default async function TrendsPage() {
           <svg
             viewBox={`0 0 ${CHART_W} ${CHART_H}`}
             role="img"
-            aria-label={`Son ${WINDOW_DAYS} gün boyunca günlük haber sayısı, Medya DNA bölgesine göre yığılmış sütun grafiği. Toplam ${totalArticles} haber.`}
+            aria-label={`Son ${WINDOW_DAYS} gün boyunca günlük haber sayısı, Medya DNA bölgesine göre yığılmış sütun grafiği. Toplam ${formatCountTr(totalArticles)} haber.`}
             className="w-full h-auto min-w-[640px]"
           >
             {/* Horizontal gridlines + y-axis labels. Stroke uses

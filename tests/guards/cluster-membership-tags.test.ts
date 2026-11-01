@@ -28,8 +28,9 @@ import { CLUSTER_FEED_TAGS } from "@/lib/clusters/merge";
 //   (b) no src/app/api/admin/** file hand-writes `revalidateTag("clusters...")`
 //       (that is how a tag gets forgotten: go through the helper);
 //   (c) every src/app/api/admin/** file that mutates membership
-//       (`unlinkClusterArticle(` / `mergeClusters(`) also calls one of the two
-//       tag helpers.
+//       (`unlinkClusterArticle(` / `mergeClusters(` / the `delete_source` RPC,
+//       whose cascade drops a source's articles out of every cluster) also
+//       calls one of the two tag helpers.
 //
 // Comments are blanked first, so prose that mentions a call does not trip a
 // sweep and a comment cannot satisfy one.
@@ -77,7 +78,8 @@ const read = (p: string) => blankComments(readFileSync(resolve(ROOT, p), "utf8")
 
 const CACHE_TAG_CALL = /(?<![\w$.])(?:unstable_)?cacheTag\s*\(/g;
 const REVALIDATE_TAG_CLUSTERS_LITERAL = /(?<![\w$])revalidateTag\s*\(\s*(["'`])clusters/;
-const MEMBERSHIP_MUTATION = /(?<![\w$])(?:unlinkClusterArticle|mergeClusters)\s*\(/;
+const MEMBERSHIP_MUTATION =
+  /(?<![\w$])(?:unlinkClusterArticle|mergeClusters)\s*\(|\.rpc\(\s*["']delete_source["']/;
 const TAG_HELPER_CALL = /(?<![\w$])(?:clusterMembershipTags|mergeRevalidationTags)\s*\(/;
 
 /** True for the cluster-LIST tag family: "clusters" and "clusters-<anything>".
@@ -203,9 +205,10 @@ describe("(b) admin routes never hand-write a clusters* revalidateTag", () => {
 describe("(c) membership-changing admin routes use a tag helper", () => {
   const mutators = ADMIN_API_FILES.filter((p) => MEMBERSHIP_MUTATION.test(read(p)));
 
-  it("is not vacuous: jev-unlink and cluster-merge are both found", () => {
+  it("is not vacuous: jev-unlink, cluster-merge and the source-deleting admin route are all found", () => {
     expect(mutators).toContain("src/app/api/admin/jev-unlink/route.ts");
     expect(mutators).toContain("src/app/api/admin/cluster-merge/route.ts");
+    expect(mutators).toContain("src/app/api/admin/route.ts");
   });
 
   it("every such route also calls clusterMembershipTags() or mergeRevalidationTags()", () => {
@@ -293,6 +296,12 @@ describe("(d) the sweep's own matchers", () => {
     expect(MEMBERSHIP_MUTATION.test("import { keepClusterArticle, unlinkClusterArticle } from 'x';")).toBe(false);
     expect(MEMBERSHIP_MUTATION.test("keepClusterArticle(id)")).toBe(false);
     expect(MEMBERSHIP_MUTATION.test("await dryRunMergeClusters(x)")).toBe(false);
+    // the delete_source RPC drops the source's articles out of every cluster (cascade)
+    expect(MEMBERSHIP_MUTATION.test('const { data } = await supabase.rpc("delete_source", { p_source_id: id });')).toBe(true);
+    expect(MEMBERSHIP_MUTATION.test("supabase\n  .rpc(\n    'delete_source',\n    { p_source_id: id })")).toBe(true);
+    expect(MEMBERSHIP_MUTATION.test('supabase.rpc("set_source_bias", { p_slug: slug })')).toBe(false);
+    expect(MEMBERSHIP_MUTATION.test('supabase.rpc("delete_source_x", {})')).toBe(false);
+    expect(MEMBERSHIP_MUTATION.test(blankComments('// supabase.rpc("delete_source", {})\nreturn;'))).toBe(false);
     expect(TAG_HELPER_CALL.test("for (const t of clusterMembershipTags(id)) {}")).toBe(true);
     expect(TAG_HELPER_CALL.test("mergeRevalidationTags(source, target)")).toBe(true);
     expect(TAG_HELPER_CALL.test("import { mergeRevalidationTags } from 'x';")).toBe(false);

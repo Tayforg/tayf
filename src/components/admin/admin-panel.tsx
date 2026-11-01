@@ -5,6 +5,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { StatsGrid } from "@/components/admin/stats-grid";
 import { WorkerStats } from "@/components/admin/worker-stats";
+import { AdminLoadError } from "@/components/admin/admin-load-error";
+import { loadAdminJson } from "@/components/admin/load-admin-json";
 import { QuickActionsCard } from "@/components/admin/quick-actions-card";
 import { SourceRow, type SourceItem } from "@/components/admin/source-row";
 import { SourceDialog } from "@/components/admin/source-dialog";
@@ -22,6 +24,43 @@ interface Stats {
   sourcesList: SourceItem[];
 }
 
+interface StatsError {
+  status: number | null;
+  message: string;
+}
+
+// Shape gate for GET /api/admin. Without it a 401/5xx body (`{ error }`) was
+// stored as stats and the render crashed on `stats.sourcesList.map`.
+function isStats(d: unknown): d is Stats {
+  if (typeof d !== "object" || d === null) return false;
+  const s = d as Record<string, unknown>;
+  return (
+    Array.isArray(s.sourcesList) &&
+    typeof s.articles === "number" &&
+    typeof s.sources === "number" &&
+    typeof s.clusters === "number" &&
+    typeof s.missingImages === "number"
+  );
+}
+
+// Error text for a POST /api/admin that came back !ok. The route answers
+// `{ error: string }`; an HTML 502 or an empty body has no usable text.
+function failureText(data: unknown, status: number): string {
+  if (typeof data === "object" && data !== null) {
+    const error = (data as { error?: unknown }).error;
+    if (typeof error === "string" && error.length > 0) return error;
+  }
+  return `İşlem başarısız (HTTP ${status}).`;
+}
+
+// A 2xx reply is only trusted when it parsed to a JSON object.
+function successResult(data: unknown): ActionResult {
+  if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+    return data as ActionResult;
+  }
+  return { error: "Beklenmeyen yanıt alındı." };
+}
+
 const EMPTY_SOURCE: SourceItem = {
   id: "",
   name: "",
@@ -34,6 +73,7 @@ const EMPTY_SOURCE: SourceItem = {
 
 export function AdminPanel() {
   const [stats, setStats] = useState<Stats | null>(null);
+  const [statsError, setStatsError] = useState<StatsError | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<ActionResult | null>(null);
@@ -53,12 +93,19 @@ export function AdminPanel() {
   // https://react.dev/learn/you-might-not-need-an-effect#fetching-data)
   // without changing resolution order, error handling, or the
   // `Promise<void>` return type `await fetchStats()` callers below rely on.
+  //
+  // loadAdminJson never rejects (401 / 5xx / non-JSON / offline all come back
+  // as a result value), so no `.catch` is needed. A failed refresh keeps the
+  // previous `stats` on screen and only sets `statsError`.
   const fetchStats = useCallback(() => {
-    return fetch("/api/admin")
-      .then((res) => res.json())
-      .then((data) => setStats(data))
-      .catch(() => {
-        // ignore
+    return loadAdminJson("/api/admin", isStats)
+      .then((result) => {
+        if (result.ok) {
+          setStats(result.data);
+          setStatsError(null);
+        } else {
+          setStatsError({ status: result.status, message: result.message });
+        }
       })
       .finally(() => setLoading(false));
   }, []);
@@ -79,8 +126,14 @@ export function AdminPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, ...extraBody }),
       });
-      const data = await res.json();
-      setLastResult(data);
+      const data: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        setLastResult({ error: failureText(data, res.status) });
+      } else {
+        setLastResult(successResult(data));
+      }
+      // Re-read either way: after a 401 this flips the panel to the login
+      // error instead of leaving stale numbers next to a failed action.
       await fetchStats();
     } catch (e: unknown) {
       setLastResult({
@@ -134,11 +187,18 @@ export function AdminPanel() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, ...editSource, slug }),
       });
-      const data = await res.json();
-      setLastResult(data);
-      if (data.success) {
-        setDialogOpen(false);
+      const data: unknown = await res.json().catch(() => null);
+      if (!res.ok) {
+        // Keep the dialog open so the operator's input is not lost.
+        setLastResult({ error: failureText(data, res.status) });
         await fetchStats();
+      } else {
+        const result = successResult(data);
+        setLastResult(result);
+        if (result.success) {
+          setDialogOpen(false);
+          await fetchStats();
+        }
       }
     } catch (e: unknown) {
       setLastResult({
@@ -171,6 +231,26 @@ export function AdminPanel() {
     );
   }
 
+  // Nothing to show yet and the first read failed (expired session, 5xx,
+  // offline). Render only the error and a retry: no WorkerStats, which would
+  // fire its own doomed requests, and no zeroed tiles.
+  if (!stats && statsError) {
+    return (
+      <div className="space-y-4">
+        <AdminLoadError status={statsError.status} message={statsError.message} />
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={fetchStats}
+          className="h-9 text-xs sm:h-7"
+        >
+          <RefreshCw className="h-3 w-3 mr-1.5" />
+          Yenile
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-end">
@@ -186,6 +266,10 @@ export function AdminPanel() {
       </div>
 
       <WorkerStats />
+
+      {statsError && (
+        <AdminLoadError status={statsError.status} message={statsError.message} />
+      )}
 
       <StatsGrid
         articles={stats?.articles ?? 0}
@@ -211,7 +295,7 @@ export function AdminPanel() {
         </CardHeader>
         <CardContent>
           <div className="space-y-1">
-            {stats?.sourcesList.map((source) => (
+            {stats?.sourcesList?.map((source) => (
               <SourceRow
                 key={source.id}
                 source={source}

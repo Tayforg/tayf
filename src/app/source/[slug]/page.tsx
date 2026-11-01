@@ -7,6 +7,8 @@ import { BiasBadge } from "@/components/story/bias-badge";
 import { BIAS_LABELS } from "@/lib/bias/config";
 import { SourceLogo } from "@/components/source/source-logo";
 import { formatTurkishTimeAgo } from "@/lib/time";
+import { formatCountTr } from "@/lib/format/number-tr";
+import { isBoilerplateDescription } from "@/lib/articles/description-boilerplate";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
 import { optimizedThumbSrcSet } from "@/lib/images/image-url";
 import { LabelCard } from "@/components/source/label-card";
@@ -86,7 +88,7 @@ export async function generateMetadata({
 
   const { source, articleCount7d } = profile;
   const biasLabel = BIAS_LABELS[source.bias];
-  const description = `${source.name} (${biasLabel}) — son 7 günde ${articleCount7d} haber. Tayf üzerinden bu Türk haber kaynağının son haberlerini ve siyasi duruşunu görün.`;
+  const description = `${source.name} (${biasLabel}) — son 7 günde ${formatCountTr(articleCount7d)} haber. Tayf üzerinden bu Türk haber kaynağının son haberlerini ve siyasi duruşunu görün.`;
 
   return {
     // Plain title — root layout's `title.template = "%s — Tayf"` adds suffix.
@@ -198,7 +200,7 @@ export default async function SourceProfilePage({ params }: PageProps) {
             <div className="flex flex-wrap items-center gap-3">
               <BiasBadge bias={source.bias} />
               <span className="font-mono text-[11px] text-brand">
-                son 7 günde {articleCount7d} haber
+                son 7 günde {formatCountTr(articleCount7d)} haber
               </span>
             </div>
             <a
@@ -303,7 +305,10 @@ export default async function SourceProfilePage({ params }: PageProps) {
                       <p className="text-sm font-semibold leading-snug line-clamp-2 group-hover:text-foreground">
                         {article.title}
                       </p>
-                      {articleExcerptEligible(article, source) ? (
+                      {/* RSS call-to-action stubs ("Click to continue",
+                          "Devamını oku") are not summaries: hide them. */}
+                      {articleExcerptEligible(article, source) &&
+                      !isBoilerplateDescription(article.description) ? (
                         <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
                           {article.description}
                         </p>

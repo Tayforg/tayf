@@ -3,6 +3,7 @@ import Link from "next/link";
 import { BIAS_LABELS, ZONE_META } from "@/lib/bias/config";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import { zoneYieldDenominator, type ZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
 import { WEEKLY_CLUSTER_LIMIT, type WeeklySummary } from "@/lib/weekly/weekly-query";
 import type { MediaDnaZone } from "@/types";
 
@@ -65,12 +66,12 @@ export function ZoneShares({
               <span className={`text-sm font-semibold ${ZONE_META[zone].zoneLabel}`}>
                 {ZONE_META[zone].label}
               </span>
-              <span className="text-sm text-foreground/90">{`${count} haber`}</span>
+              <span className="text-sm text-foreground/90">{`${formatCountTr(count)} haber`}</span>
               <span className="font-mono text-sm text-foreground">
-                {`%${percents[zone]}`}
+                {formatPctTr(percents[zone])}
               </span>
               <span className={metaClass}>
-                {`(haftanın ${total} haberi içinde)`}
+                {`(haftanın ${formatCountTr(total)} haberi içinde)`}
               </span>
               <span className={metaClass}>
                 {delivering === null
@@ -108,7 +109,7 @@ export function BasisNote({
 
   return (
     <p className="text-xs text-muted-foreground">
-      {`Yüzdeler bu haftanın toplam ${total} haberi üzerinden hesaplanır. Bölge satırlarındaki kaynak sayıları son 72 saatte en az bir haber veren tüm kaynakları (toplayıcı / niş dahil) gösterir`}
+      {`Yüzdeler bu haftanın toplam ${formatCountTr(total)} haberi üzerinden hesaplanır. Bölge satırlarındaki kaynak sayıları son 72 saatte en az bir haber veren tüm kaynakları (toplayıcı / niş dahil) gösterir`}
       {known
         ? `; spektruma sayılan kaynaklardan ${feedStatus.delivering} / ${feedStatus.total} tanesi haber verdi. `
         : "; spektruma sayılan kaynakların durumu şu anda bilinmiyor. "}
@@ -138,7 +139,7 @@ export function WidestSpectrum({ summary }: { summary: WeeklySummary }) {
                 {cluster.title}
               </Link>
               <span className={metaClass}>
-                {`${cluster.articleCount} haber · ${cluster.zonesCovered} bölge`}
+                {`${formatCountTr(cluster.articleCount)} haber · ${cluster.zonesCovered} bölge`}
               </span>
             </li>
           ))}
@@ -171,7 +172,7 @@ export function Blindspots({
                 {blindspot.title}
               </Link>
               <span className={metaClass}>
-                {`Sadece ${ZONE_META[blindspot.side].label} tarafında · ${blindspot.articleCount} haber`}
+                {`Sadece ${ZONE_META[blindspot.side].label} tarafında · ${formatCountTr(blindspot.articleCount)} haber`}
               </span>
             </li>
           ))}

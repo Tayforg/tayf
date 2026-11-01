@@ -51,6 +51,12 @@ describe("SourceKarneCard", () => {
     expect(t).toContain("Son 30 gün · 30.08.2026–29.09.2026 · n = 120 haber kümesi");
   });
 
+  it("groups a four-digit n the Turkish way (1.200, not 1200)", () => {
+    const t = text(karne({ nClusters: 1200 }));
+    expect(t).toContain("n = 1.200 haber kümesi");
+    expect(t).not.toContain("n = 1200");
+  });
+
   it("a fresh row keeps the window subtitle and has no stale banner", () => {
     const h = html(karne());
     expect(h).toContain("Son 30 gün ·");

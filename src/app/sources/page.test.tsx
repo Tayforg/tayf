@@ -558,6 +558,14 @@ describe("SourceDirectoryWithCounts — count labels (unchanged contract)", () =
     expect(text).toContain("son 7 günde 0 haber");
     expect(text).not.toContain("son 7 günde — haber");
   });
+
+  it("groups a four-digit weekly count the Turkish way (1.689, not 1689)", async () => {
+    // The map is per-day keyed by source id; the page multiplies by 7.
+    const text = await renderedText({ "s-outlet": 1689 / 7 });
+
+    expect(text).toContain("son 7 günde 1.689 haber");
+    expect(text).not.toContain("son 7 günde 1689 haber");
+  });
 });
 
 describe("/sources page — the weekly counts overlap the directory read (cold path)", () => {

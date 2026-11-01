@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { ZONE_META } from "@/lib/bias/config";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { buildKarneView, type SourceKarneRead } from "@/lib/sources/karne";
 
 // "Kapsama karnesi" card on /source/[slug], under the Etiket kartı.
@@ -20,7 +21,7 @@ export function SourceKarneCard({ karne, slug }: SourceKarneCardProps) {
   if (!karne) return null;
 
   const view = buildKarneView(karne);
-  const subtitle = `Son ${karne.windowDays} gün · ${formatDdMmYyyy(karne.windowStart)}–${formatDdMmYyyy(karne.windowEnd)} · n = ${karne.nClusters} haber kümesi`;
+  const subtitle = `Son ${karne.windowDays} gün · ${formatDdMmYyyy(karne.windowStart)}–${formatDdMmYyyy(karne.windowEnd)} · n = ${formatCountTr(karne.nClusters)} haber kümesi`;
 
   return (
     <section className="space-y-4 rounded-xl border border-border/60 bg-card/40 p-5 sm:p-6">
@@ -39,7 +40,7 @@ export function SourceKarneCard({ karne, slug }: SourceKarneCardProps) {
 
       {view.state === "insufficient" ? (
         <p className="rounded-lg border border-dashed border-border/60 bg-card/40 p-4 text-center text-sm text-muted-foreground">
-          {`Son ${karne.windowDays} günde karne için yeterli haber yok (n = ${view.n}, en az 20 gerekir).`}
+          {`Son ${karne.windowDays} günde karne için yeterli haber yok (n = ${formatCountTr(view.n)}, en az 20 gerekir).`}
         </p>
       ) : (
         <>

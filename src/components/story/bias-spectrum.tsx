@@ -6,6 +6,7 @@ import {
   zoneOf,
 } from "@/lib/bias/config";
 import { roundPercents } from "@/lib/bias/round-percents";
+import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
 import { BIAS_BADGE_CONFIG } from "./bias-badge";
 
 // Spectrum segments are derived from the canonical order + color palette in
@@ -81,7 +82,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
             return (
               <div
                 key={segment.key}
-                title={`${segment.label}: ${zones[segment.key]} kaynak (${pct}%)`}
+                title={`${segment.label}: ${formatCountTr(zones[segment.key])} kaynak (${formatPctTr(pct)})`}
                 className={`${segment.color} transition-all duration-500`}
                 style={{ width: `${(zones[segment.key] / zoneTotal) * 100}%` }}
               />
@@ -96,12 +97,12 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
             return (
               <span
                 key={segment.key}
-                title={`${segment.label}: ${zones[segment.key]} kaynak (${pct}%)`}
+                title={`${segment.label}: ${formatCountTr(zones[segment.key])} kaynak (${formatPctTr(pct)})`}
                 className="flex items-center gap-1 text-[11px] text-muted-foreground"
               >
                 <span className={`inline-block h-2 w-2 rounded-full forced-color-adjust-none ${segment.dot}`} />
                 {segment.label}
-                <span className="tabular-nums text-muted-foreground">{pct}%</span>
+                <span className="tabular-nums text-muted-foreground">{formatPctTr(pct)}</span>
               </span>
             );
           })}
@@ -129,7 +130,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
           return (
             <div
               key={segment.key}
-              title={`${segment.label}: ${distribution[segment.key]} kaynak (${pct}%)`}
+              title={`${segment.label}: ${formatCountTr(distribution[segment.key])} kaynak (${formatPctTr(pct)})`}
               className={`${segment.color} transition-all duration-500`}
               style={{ width: `${(distribution[segment.key] / total) * 100}%` }}
             />
@@ -144,12 +145,12 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
           return (
             <span
               key={segment.key}
-              title={`${segment.label}: ${distribution[segment.key]} kaynak (${pct}%)`}
+              title={`${segment.label}: ${formatCountTr(distribution[segment.key])} kaynak (${formatPctTr(pct)})`}
               className="flex items-center gap-1 text-[11px] text-muted-foreground"
             >
               <span className={`inline-block h-2 w-2 rounded-full forced-color-adjust-none ${segment.dot}`} />
               {segment.label}
-              <span className="tabular-nums text-muted-foreground">{pct}%</span>
+              <span className="tabular-nums text-muted-foreground">{formatPctTr(pct)}</span>
             </span>
           );
         })}

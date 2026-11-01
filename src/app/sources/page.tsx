@@ -30,6 +30,7 @@ import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
 import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
 import { weeklyCountFromPerDay, sortGroupedByActivity } from "@/lib/sources/directory";
 import { formatTurkishTimeAgo } from "@/lib/time";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { createServerClient } from "@/lib/supabase/server";
 import { buildRegistryDataset, serializeJsonLd } from "@/lib/seo/json-ld";
 import {
@@ -405,7 +406,7 @@ function countLabelFromCounts(
   slug: string,
 ): string {
   if (counts === null) return "son 7 günde — haber";
-  return `son 7 günde ${counts[slug] ?? 0} haber`;
+  return `son 7 günde ${formatCountTr(counts[slug] ?? 0)} haber`;
 }
 
 // Exported (in addition to the default page export) so tests can render
