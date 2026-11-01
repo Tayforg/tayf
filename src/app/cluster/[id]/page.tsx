@@ -518,7 +518,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   title (mirrors U1's home-card pattern) so the brand feature
                   reads as the dominant affordance instead of meta filler. */}
               {cluster.is_blindspot && (
-                <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-800 dark:text-amber-400">
                   <AlertTriangle className="h-3.5 w-3.5" strokeWidth={2.5} />
                   Kör nokta
                 </div>
@@ -570,7 +570,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     collapse into one visual cue. */}
                 {wire.isWireRedistribution && (
                   <span
-                    className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-700 dark:text-violet-400 font-medium"
+                    className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-800 dark:text-violet-400 font-medium"
                     title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
                   >
                     <Copy className="h-3 w-3" />

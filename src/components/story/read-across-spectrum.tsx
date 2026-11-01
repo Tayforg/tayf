@@ -49,9 +49,9 @@ interface ReadAcrossSpectrumProps {
 // `HOVER_DECORATION` in framing-comparison.tsx).
 const POLE_STYLE: Record<"iktidar" | "muhalefet", string> = {
   iktidar:
-    "border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-400 hover:bg-red-500/20",
+    "border-red-500/40 bg-red-500/10 text-red-800 dark:text-red-400 hover:bg-red-500/20",
   muhalefet:
-    "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/20",
+    "border-emerald-500/40 bg-emerald-500/10 text-emerald-800 dark:text-emerald-400 hover:bg-emerald-500/20",
 };
 
 export function ReadAcrossSpectrum({

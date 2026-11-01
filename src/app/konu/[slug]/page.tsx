@@ -3,8 +3,13 @@ import Link from "next/link";
 import { notFound, permanentRedirect } from "next/navigation";
 
 import { FollowButton } from "@/components/follow/follow-button";
+import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { PageHero } from "@/components/ui/page-hero";
+import {
+  distributionTotal,
+  sumDistributions,
+} from "@/lib/bias/sum-distributions";
 import {
   buildTopicCollectionPage,
   clampTopicPage,
@@ -86,6 +91,10 @@ const unavailableWrapClass =
   "rounded-xl border border-border/60 bg-card/40 p-8 text-center";
 const unavailableTextClass = "text-sm text-muted-foreground";
 const listClass = "space-y-4";
+// Same tokens as /gundem/[key]: legend text-muted-foreground on bg-card/60.
+const spectrumWrapClass =
+  "space-y-3 rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
+const spectrumHeadingClass = "text-sm font-semibold text-foreground";
 const pagerClass =
   "flex items-center justify-between gap-3 pt-2 text-sm";
 const pagerLinkClass =
@@ -96,6 +105,8 @@ const UNAVAILABLE_COPY =
   "Konu listesi şu anda yüklenemiyor. Birkaç dakika içinde tekrar deneyin.";
 const EMPTY_COPY = "Bu konuda son 7 günde küme oluşmadı.";
 const EMPTY_PAGE_COPY = "Bu sayfada küme yok.";
+const SPECTRUM_HEADING = "Listelenen haberlerin kaynak dağılımı";
+const SPECTRUM_EMPTY_COPY = "Listelenen haberlerde dağılıma sayılan kaynak yok.";
 
 export default async function TopicHubPage({
   params,
@@ -125,6 +136,14 @@ export default async function TopicHubPage({
   // Next 16 forbids Date.now() in a render body — one clock read via
   // currentTimeMs(), same rule the home feed follows.
   const nowMs = currentTimeMs();
+
+  // Aggregate source mix of THIS page's bundles (page N sums page N, hence
+  // "Listelenen"). Reads the bias_distribution each bundle already carries: no
+  // new query, no cache change. That column is written by cluster-consumer from
+  // VOTING_SOURCE_KINDS (outlet, wire) only, so the sum already follows the
+  // zone-line rule and needs no filter here.
+  const distribution = sumDistributions(result?.bundles ?? []);
+  const spectrumTotal = distributionTotal(distribution);
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-8">
@@ -206,6 +225,20 @@ export default async function TopicHubPage({
         )
       ) : (
         <>
+          <section
+            aria-labelledby="topic-spectrum-heading"
+            className={spectrumWrapClass}
+          >
+            <h2 id="topic-spectrum-heading" className={spectrumHeadingClass}>
+              {SPECTRUM_HEADING}
+            </h2>
+            {spectrumTotal > 0 ? (
+              <BiasSpectrum distribution={distribution} compact />
+            ) : (
+              <p className={noteClass}>{SPECTRUM_EMPTY_COPY}</p>
+            )}
+          </section>
+
           <div className={listClass}>
             {result.bundles.map((b, i) => {
               const hoursAgo =

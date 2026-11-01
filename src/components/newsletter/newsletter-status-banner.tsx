@@ -12,10 +12,10 @@ import {
 // class name to appear verbatim in source, not assembled from a template.
 const TONE_CLASSES: Record<NewsletterStatusTone, string> = {
   success:
-    "flex items-center justify-between gap-3 border-t border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-900",
-  info: "flex items-center justify-between gap-3 border-t border-zinc-500/40 bg-zinc-500/10 px-4 py-2 text-sm text-zinc-900",
+    "flex items-center justify-between gap-3 border-t border-emerald-500/40 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-900 dark:text-emerald-300",
+  info: "flex items-center justify-between gap-3 border-t border-zinc-500/40 bg-zinc-500/10 px-4 py-2 text-sm text-zinc-900 dark:text-zinc-200",
   warning:
-    "flex items-center justify-between gap-3 border-t border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-900",
+    "flex items-center justify-between gap-3 border-t border-amber-500/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-900 dark:text-amber-300",
 };
 
 /**

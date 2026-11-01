@@ -44,7 +44,7 @@ export function FactCheckBox({ items }: { items: ClusterFactCheck[] }) {
               className="flex items-start gap-1.5 text-sm text-foreground hover:underline"
             >
               <span className="min-w-0 flex-1 space-y-0.5">
-                <span className="block font-mono text-[10px] uppercase text-sky-700 dark:text-sky-400">
+                <span className="block font-mono text-[10px] uppercase text-sky-800 dark:text-sky-400">
                   {item.publisherLabel}
                 </span>
                 <span className="block leading-snug">{item.title}</span>

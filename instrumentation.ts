@@ -4,9 +4,10 @@
  * The `register` function is invoked exactly once per runtime when the server
  * boots — Vercel calls it for both the Node serverless runtime and the Edge
  * runtime. It is the documented place to wire up the @sentry/nextjs SDK for
- * server-side bootstrapping (the client-side init lives in
- * `sentry.client.config.ts` and is wired up by `withSentryConfig` in
- * `next.config.ts`).
+ * server-side bootstrapping. The client-side init lives in
+ * `instrumentation-client.ts`, which Next loads natively (not through
+ * `withSentryConfig`: the legacy `sentry.client.config.ts` is ignored under
+ * Turbopack).
  *
  * We branch on `process.env.NEXT_RUNTIME` because the Node and Edge SDKs
  * resolve to different bundles — the Edge build is intentionally trimmed and

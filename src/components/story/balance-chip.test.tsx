@@ -46,7 +46,7 @@ describe("BalanceChip — compact", () => {
     expect(markup).toContain('aria-label="Denge puanı 72/100: Dengeli kapsama"');
     expect(markup).toContain('title="Denge puanı 72/100: Dengeli kapsama"');
     expect(markup).toContain("Denge 72");
-    expect(markup).toContain("text-sky-700");
+    expect(markup).toContain("text-sky-800");
   });
 
   it("uses the card's pill base classes", () => {
@@ -97,7 +97,7 @@ describe("BalanceChip — full", () => {
 describe("BalanceChip — tier styling", () => {
   it("gives each tier its own literal class string", () => {
     expect(render(DENGELI, "full")).toContain(
-      "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+      "border-sky-500/30 bg-sky-500/10 text-sky-800 dark:text-sky-300",
     );
     expect(render(YAKIN, "full")).toContain(
       "border-border/40 bg-muted/50 text-muted-foreground",

@@ -207,7 +207,7 @@ function ClusterMetaBadges({
           distinct. */}
       {isWireRedistribution && (
         <span
-          className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-700 dark:text-violet-400 font-medium"
+          className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-800 dark:text-violet-400 font-medium"
           title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
         >
           <Copy className="h-3 w-3" />
@@ -225,7 +225,7 @@ function ClusterMetaBadges({
       )}
 
       {isBlindspot && (
-        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-amber-700 dark:text-amber-400 font-medium">
+        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-amber-800 dark:text-amber-400 font-medium">
           <AlertTriangle className="h-3 w-3" />
           Kör nokta
         </span>

@@ -71,6 +71,17 @@ import { buildSecurityHeaders } from "./src/lib/security/headers";
  * conversion) instead of falling back to `unoptimized: true`.
  */
 const nextConfig: NextConfig = {
+  // Browser Sentry is opt-in per build: instrumentation-client.ts dynamically
+  // imports src/lib/sentry/browser-init.ts only when NEXT_PUBLIC_SENTRY_DSN is
+  // non-empty. Next only inlines a NEXT_PUBLIC_* variable that exists at build
+  // time; an unset one stays a runtime `process.env` read the bundler cannot
+  // fold, so it would still emit the ~54 KB gzipped SDK chunk (never fetched,
+  // but shipped to the CDN). Pinning it to "" when unset makes the gate a
+  // build-time constant: the branch is dropped, and with it the whole chunk.
+  // When the DSN is set, its value is inlined exactly as before.
+  env: {
+    NEXT_PUBLIC_SENTRY_DSN: process.env.NEXT_PUBLIC_SENTRY_DSN ?? "",
+  },
   cacheComponents: true,
   // Under cacheComponents, generateMetadata output streams into <body> for
   // humans, which lets Google ignore the canonical and the noindex-on-error

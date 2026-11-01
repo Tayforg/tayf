@@ -13,8 +13,12 @@
  * "unlink" removes the article from its cluster via the SECURITY DEFINER
  * RPC public.cluster_unlink_article (src/lib/admin/jev-cluster.ts owns
  * every Supabase call this route makes) and revalidates every cached
- * surface that can show cluster membership: "clusters",
- * "clusters-politics" and `cluster-detail:<clusterId>`. "keep" only marks
+ * surface that can show cluster membership through clusterMembershipTags()
+ * (src/lib/clusters/merge.ts): every cluster-list tag ("clusters",
+ * "clusters-politics", "clusters-search", "clusters-entity") and
+ * `cluster-detail:<clusterId>`. The list lives in one place so a new
+ * cluster-list cache cannot be missed here
+ * (tests/guards/cluster-membership-tags.test.ts). "keep" only marks
  * the candidate row decided and revalidates nothing — nothing reader-
  * facing changed. Admin routes run in-process and revalidate directly via
  * next/cache; they never POST /api/revalidate, which exists for the Deno
@@ -33,6 +37,7 @@ import {
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { keepClusterArticle, unlinkClusterArticle } from "@/lib/admin/jev-cluster";
+import { clusterMembershipTags } from "@/lib/clusters/merge";
 
 // Same shape as the other mutating admin routes (src/app/api/admin/
 // corrections/[id]/route.ts, src/app/api/admin/jev-shadow/review/route.ts):
@@ -87,10 +92,11 @@ export const POST = withApiErrors(async (request: Request) => {
       return apiServerError(new Error("jev-unlink: cluster_unlink_article failed"));
     }
 
-    // Every cached surface that can show this cluster's membership.
-    revalidateTag("clusters", "max");
-    revalidateTag("clusters-politics", "max");
-    revalidateTag(`cluster-detail:${result.clusterId}`, "max");
+    // Every cached surface that can show this cluster's membership: all the
+    // cluster-list tags (CLUSTER_FEED_TAGS) plus this cluster's detail tag.
+    for (const tag of clusterMembershipTags(result.clusterId)) {
+      revalidateTag(tag, "max");
+    }
 
     return NextResponse.json(
       { ok: true, article_count: result.articleCount },

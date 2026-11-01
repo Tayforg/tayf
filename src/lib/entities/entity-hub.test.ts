@@ -176,13 +176,13 @@ describe("entityHubNote", () => {
 });
 
 describe("purity", () => {
-  it("imports only rising-entities, @/types and the bias config", () => {
+  it("imports only rising-entities and the shared sum-distributions", () => {
     const src = readFileSync(resolve(__dirname, "entity-hub.ts"), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/(^|[^:])\/\/[^\n]*/gm, "$1");
     const specs = [...src.matchAll(/\bfrom\s+["']([^"']+)["']/g)].map((m) => m[1]);
     expect(specs.sort()).toEqual(
-      ["@/lib/bias/config", "@/lib/trends/rising-entities", "@/types"].sort(),
+      ["@/lib/bias/sum-distributions", "@/lib/trends/rising-entities"].sort(),
     );
     expect(src).not.toMatch(/\bDate\.now\s*\(|\bnew Date\b|next\/cache|supabase/);
   });

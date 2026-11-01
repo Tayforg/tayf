@@ -24,7 +24,13 @@ vi.mock("@/lib/supabase/server", () => ({
   },
 }));
 
-import { MERGE_ERROR_CODES, mergeClusters, mergeRevalidationTags } from "./merge";
+import {
+  CLUSTER_FEED_TAGS,
+  MERGE_ERROR_CODES,
+  clusterMembershipTags,
+  mergeClusters,
+  mergeRevalidationTags,
+} from "./merge";
 
 const okData = {
   log_id: 7,
@@ -135,5 +141,54 @@ describe("mergeRevalidationTags", () => {
       "fact-checks:s",
       "fact-checks:t",
     ]);
+  });
+
+  it("starts with the shared cluster-feed tags", () => {
+    expect(mergeRevalidationTags("s", "t").slice(0, CLUSTER_FEED_TAGS.length)).toEqual([
+      ...CLUSTER_FEED_TAGS,
+    ]);
+  });
+});
+
+describe("CLUSTER_FEED_TAGS", () => {
+  it("names every cluster-list cacheTag exactly once", () => {
+    expect([...CLUSTER_FEED_TAGS]).toEqual([
+      "clusters",
+      "clusters-politics",
+      "clusters-search",
+      "clusters-entity",
+    ]);
+    expect(new Set(CLUSTER_FEED_TAGS).size).toBe(CLUSTER_FEED_TAGS.length);
+  });
+});
+
+describe("clusterMembershipTags", () => {
+  it("returns the feed tags plus the cluster-detail tag for one cluster", () => {
+    expect(clusterMembershipTags("c3")).toEqual([
+      "clusters",
+      "clusters-politics",
+      "clusters-search",
+      "clusters-entity",
+      "cluster-detail:c3",
+    ]);
+  });
+
+  it("adds one cluster-detail tag per id, in order", () => {
+    expect(clusterMembershipTags("a", "b", "c")).toEqual([
+      ...CLUSTER_FEED_TAGS,
+      "cluster-detail:a",
+      "cluster-detail:b",
+      "cluster-detail:c",
+    ]);
+  });
+
+  it("returns only the feed tags when no id is given", () => {
+    expect(clusterMembershipTags()).toEqual([...CLUSTER_FEED_TAGS]);
+  });
+
+  it("returns a fresh array each call (callers may mutate it)", () => {
+    const first = clusterMembershipTags("x");
+    first.push("junk");
+    expect(clusterMembershipTags("x")).toHaveLength(CLUSTER_FEED_TAGS.length + 1);
   });
 });

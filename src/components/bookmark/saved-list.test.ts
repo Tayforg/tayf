@@ -147,16 +147,15 @@ describe("saved-list.tsx blindspot pill and spectrum bar", () => {
     expect(src).toMatch(/import\s*\{[^}]*BiasSpectrum[^}]*\}\s*from\s*["']@\/components\/story\/bias-spectrum["']/);
   });
 
-  it("uses the Kör nokta pill class string of cluster-card.tsx, with the AA light-mode text shade (so the two cannot drift)", () => {
+  it("uses the Kör nokta pill class string of cluster-card.tsx verbatim (so the two cannot drift)", () => {
     const cls = cardPillClass();
     expect(cls).toContain("bg-amber-500/15");
-    // cluster-card.tsx still carries text-amber-700, which measures 4.42:1 on
-    // the 15 % amber wash (below the 4.5:1 AA floor for 11 px text, WCAG 1.4.3).
-    // This list is already AA-fixed, so it matches the card everywhere except
-    // that one shade; tests/guards/text-contrast-tokens.test.ts pins it.
-    const aaCls = cls.replace("text-amber-700", "text-amber-800");
-    expect(aaCls).toContain("text-amber-800");
-    expect(src).toContain(`className="${aaCls}"`);
+    // Both files carry the AA light-mode shade: text-amber-800 clears 4.5:1 on
+    // the 15 % amber wash (WCAG 1.4.3), which the site-wide tinted-text guard in
+    // tests/guards/text-contrast-tokens.test.ts measures. The string must stay
+    // identical in both places, so no per-file patching is needed here.
+    expect(cls).toContain("text-amber-800");
+    expect(src).toContain(`className="${cls}"`);
     expect(src).not.toContain("text-amber-700");
   });
 

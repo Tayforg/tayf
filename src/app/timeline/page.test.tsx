@@ -26,6 +26,7 @@ vi.mock("@/lib/clusters/timeline-query", () => ({
   getRecentClusters: () => Promise.resolve(mocks.result),
 }));
 
+import { NewClustersPill } from "@/components/timeline/new-clusters-pill";
 import { PageHero } from "@/components/ui/page-hero";
 import TimelinePage from "./page";
 
@@ -77,6 +78,25 @@ function hasRobotsMeta(tree: unknown): boolean {
     if (el.type === "meta" && el.props?.name === "robots") found = true;
   });
   return found;
+}
+
+function findPills(tree: unknown): El[] {
+  const hits: El[] = [];
+  walk(tree, (el) => {
+    if (el.type === NewClustersPill) hits.push(el);
+  });
+  return hits;
+}
+
+/** The element whose direct children include `target`. */
+function parentOf(tree: unknown, target: El): El | null {
+  let parent: El | null = null;
+  walk(tree, (el) => {
+    const kids = el.props?.children;
+    const list = Array.isArray(kids) ? kids : [kids];
+    if (list.includes(target)) parent = el;
+  });
+  return parent;
 }
 
 function findParagraph(tree: unknown, text: string): El | null {
@@ -197,5 +217,72 @@ describe("/timeline", () => {
     );
     expect(hasRobotsMeta(tree)).toBe(false);
     expect(collectText(tree).join("")).not.toContain(UNAVAILABLE_COPY);
+  });
+
+  // -------------------------------------------------------------------------
+  // The "N yeni küme · Yenile" pill. The page hands it the newest first_published
+  // it renders and the ids of the first TIMELINE_HEAD_LIMIT rows (the same 50
+  // the head endpoint returns), so the client can tell which head rows are new.
+  // -------------------------------------------------------------------------
+
+  it("with rows: the pill gets the newest first_published and the first 50 ids", async () => {
+    const rows = mkRows(200);
+    mocks.result = { rows, total: 234 };
+
+    const tree = await TimelinePage();
+
+    const pills = findPills(tree);
+    expect(pills).toHaveLength(1);
+    expect(pills[0]?.props?.newestPublished).toBe(rows[0]?.first_published);
+    const knownIds = pills[0]?.props?.knownIds as string[];
+    expect(knownIds).toHaveLength(50);
+    expect(knownIds).toEqual(rows.slice(0, 50).map((r) => r.id));
+  });
+
+  it("with fewer than 50 rows: knownIds is every row id", async () => {
+    const rows = mkRows(3);
+    mocks.result = { rows, total: 3 };
+
+    const tree = await TimelinePage();
+
+    const pills = findPills(tree);
+    expect(pills).toHaveLength(1);
+    expect(pills[0]?.props?.knownIds).toEqual(["c0", "c1", "c2"]);
+    expect(pills[0]?.props?.newestPublished).toBe(rows[0]?.first_published);
+  });
+
+  it("with rows []: newestPublished is null and knownIds is empty", async () => {
+    mocks.result = { rows: [], total: 0 };
+
+    const tree = await TimelinePage();
+
+    const pills = findPills(tree);
+    expect(pills).toHaveLength(1);
+    expect(pills[0]?.props?.newestPublished).toBeNull();
+    expect(pills[0]?.props?.knownIds).toEqual([]);
+  });
+
+  it("with null (read failed): no pill", async () => {
+    mocks.result = null;
+
+    const tree = await TimelinePage();
+
+    expect(findPills(tree)).toHaveLength(0);
+  });
+
+  it("the pill sits beside PageHero in one wrapper, so an empty pill adds no space-y gap", async () => {
+    mocks.result = { rows: mkRows(3), total: 3 };
+
+    const tree = await TimelinePage();
+
+    const pill = findPills(tree)[0];
+    expect(pill).toBeDefined();
+    const wrapper = parentOf(tree, pill as El);
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.type).toBe("div");
+    const siblings = (wrapper?.props?.children as El[]).map((c) => c.type);
+    expect(siblings).toContain(PageHero);
+    // The wrapper is a plain div: no spacing utilities that would gap an empty pill.
+    expect(wrapper?.props?.className).toBeUndefined();
   });
 });

@@ -56,6 +56,8 @@ supabase/.temp/
 bash.exe.stackdump
 .tsc-baseline.log
 .vitest-baseline.log
+# vitest --reporter=json --outputFile=.vitest/json/output.json artifacts
+.vitest/
 2026-*-from-my-github*
 qa/
 

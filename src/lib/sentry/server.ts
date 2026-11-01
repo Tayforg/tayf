@@ -8,7 +8,7 @@
  *
  * Importing this module from a client component is a TypeScript error because
  * `@sentry/nextjs`'s server entry pulls in `@sentry/node`, which references
- * `node:http` etc. Client code should use `src/lib/sentry/client.ts`.
+ * `node:http` etc. Browser code gets the SDK only through the DSN-gated `instrumentation-client.ts` (see `browser-init.ts`); never import `@sentry/*` in client components.
  */
 import * as Sentry from "@sentry/nextjs";
 

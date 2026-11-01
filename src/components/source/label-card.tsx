@@ -156,7 +156,7 @@ export function LabelCard({
           value never renders an undated "Kayyum yönetiminde — " claim. */}
       {trusteeDate !== "" ? (
         <div className="space-y-1 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3">
-          <p className="text-xs font-semibold text-amber-700 dark:text-amber-400">
+          <p className="text-xs font-semibold text-amber-800 dark:text-amber-400">
             {`Kayyum yönetiminde — ${trusteeDate}`}
           </p>
           {trusteeNote ? (

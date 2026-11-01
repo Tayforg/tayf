@@ -89,7 +89,7 @@ export function ApiWebhooksActions({ rows, now }: { rows: ApiWebhookRow[]; now: 
     <div className="space-y-4">
       {issued && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm">
-          <p className="text-amber-600 dark:text-amber-400">
+          <p className="text-amber-800 dark:text-amber-400">
             Bu imza anahtarı yalnızca bir kez gösterilir. Şimdi kopyalayın.
           </p>
           <p className="mt-1 break-all font-mono text-xs text-foreground">{issued.secret}</p>

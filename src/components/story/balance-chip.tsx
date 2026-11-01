@@ -24,7 +24,7 @@ const PILL =
   "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-medium";
 
 const TIER_CLASS: Record<BalanceTier, string> = {
-  dengeli: "border-sky-500/30 bg-sky-500/10 text-sky-700 dark:text-sky-300",
+  dengeli: "border-sky-500/30 bg-sky-500/10 text-sky-800 dark:text-sky-300",
   yakin: "border-border/40 bg-muted/50 text-muted-foreground",
   tek: "border-border/60 bg-muted/50 text-foreground",
 };

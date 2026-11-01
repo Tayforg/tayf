@@ -112,7 +112,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
         role="status"
         aria-live="polite"
         tabIndex={-1}
-        className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-700 dark:text-emerald-400"
+        className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-800 dark:text-emerald-400"
       >
         Teşekkürler, bildiriminiz alındı. En kısa sürede inceleyeceğiz.
       </p>

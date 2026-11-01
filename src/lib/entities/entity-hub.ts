@@ -1,6 +1,4 @@
-import { BIAS_ORDER } from "@/lib/bias/config";
 import { RISING_ENTITIES, type RisingEntity } from "@/lib/trends/rising-entities";
-import type { BiasDistribution } from "@/types";
 
 // Pure helpers behind the /gundem/[key] entity hubs. No I/O, no clock and no
 // Next import, so the page, its metadata and the tests share one definition
@@ -29,41 +27,9 @@ export function isEntityKey(key: string): boolean {
   return typeof key === "string" && ENTITY_BY_KEY.has(key);
 }
 
-function addBucket(
-  total: BiasDistribution,
-  distribution: unknown,
-): void {
-  if (
-    distribution === null ||
-    typeof distribution !== "object" ||
-    Array.isArray(distribution)
-  ) {
-    return;
-  }
-  for (const key of BIAS_ORDER) {
-    if (!Object.prototype.hasOwnProperty.call(distribution, key)) continue;
-    const n = (distribution as Record<string, unknown>)[key];
-    if (typeof n === "number" && Number.isFinite(n) && n >= 0) total[key] += n;
-  }
-}
-
-/**
- * Sum the per-cluster `bias_distribution` jsonb of the listed bundles into one
- * spectrum. Every BIAS_ORDER key is present (0 when nothing contributes); only
- * finite numbers >= 0 are added, and anything else (null, arrays, strings,
- * unknown keys, a malformed bundle) is ignored rather than thrown on.
- */
-export function sumDistributions(
-  bundles: ReadonlyArray<{ cluster: { bias_distribution: unknown } }>,
-): BiasDistribution {
-  const total = Object.fromEntries(
-    BIAS_ORDER.map((key) => [key, 0]),
-  ) as BiasDistribution;
-  for (const bundle of bundles) {
-    addBucket(total, bundle?.cluster?.bias_distribution);
-  }
-  return total;
-}
+// Moved to @/lib/bias/sum-distributions (shared with /konu/[slug]); re-exported
+// so the /gundem/[key] page and its tests keep importing it from here.
+export { sumDistributions } from "@/lib/bias/sum-distributions";
 
 /**
  * Robots override for a hub: noindex (but follow) when the read failed or the
