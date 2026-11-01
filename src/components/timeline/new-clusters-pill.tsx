@@ -20,6 +20,13 @@ import {
 // announced without moving focus (WCAG 4.1.3). The button carries no aria-label:
 // its visible text IS its name (2.5.3). min-h-8 keeps the target >= 24 px (2.5.8).
 //
+// Layout (CLS 0): the region is always mounted and sits ABSOLUTELY in the
+// parent's 32 px space-y-8 gap, directly below the hero (top-full, inset-x-0,
+// h-8). It is out of flow, so neither the pill, the "Yenileniyor…" label nor the
+// "Liste güncellendi" confirmation can move the list under it. The parent must
+// be `relative` (the /timeline hero wrapper is). Its className is ONE static
+// literal and no child carries a margin, so no state changes the box.
+//
 // Focus: the button is never `disabled` while the refresh runs (a disabled
 // element drops keyboard focus); it is aria-disabled and ignores the click
 // instead. When the refresh settles the count is 0 and the button unmounts, so
@@ -121,7 +128,7 @@ export function NewClustersPill({
       role="status"
       aria-live="polite"
       tabIndex={-1}
-      className="flex justify-center focus-visible:outline-none"
+      className="absolute inset-x-0 top-full flex h-8 items-center justify-center focus-visible:outline-none"
     >
       {count > 0 || pending ? (
         <button
@@ -134,12 +141,12 @@ export function NewClustersPill({
               router.refresh();
             });
           }}
-          className="mt-4 inline-flex min-h-8 items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:opacity-60"
+          className="inline-flex min-h-8 items-center gap-1.5 rounded-full bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:opacity-60"
         >
           {pending ? "Yenileniyor…" : `${newClustersLabel(count)} · Yenile`}
         </button>
       ) : updated ? (
-        <p className="mt-4 text-xs text-muted-foreground">Liste güncellendi</p>
+        <p className="text-xs text-muted-foreground">Liste güncellendi</p>
       ) : null}
     </div>
   );

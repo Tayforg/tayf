@@ -188,7 +188,11 @@ describe("getEntityHub query shape", () => {
   it("derives queries and patterns from the entity's forms, not the key", async () => {
     await getEntityHub("iyi-parti");
     const args = fixture.rpcCalls[0] as { p_queries: string[]; p_patterns: string[] };
-    expect(args.p_queries).toEqual(turkishQueryVariants("İYİ Parti"));
+    // The form first, then its curated inflection ("İYİ Partili"), which widens the prefilter only.
+    expect(args.p_queries).toEqual([
+      ...turkishQueryVariants("İYİ Parti"),
+      ...turkishQueryVariants("İYİ Partili"),
+    ]);
     expect(args.p_patterns).toEqual(["\\miyi\\s+parti"]);
   });
 

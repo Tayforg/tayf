@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { ReactNode } from "react";
 import { NextRequest } from "next/server";
 
 import { middleware, config } from "@/middleware";
+import { siteUrl } from "@/lib/site-url";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 // ---------------------------------------------------------------------------
@@ -146,6 +147,15 @@ describe("/gundem/[key] page source", () => {
     expect(code).toContain("path: `/gundem/${key}`");
   });
 
+  it("emits JSON-LD only for an indexable hub, built from the shared builders and no clock", () => {
+    expect(code).toContain('type="application/ld+json"');
+    expect(code).toContain("serializeJsonLd(");
+    expect(code).toContain("buildClusterCollectionPage(");
+    expect(code).toContain("buildBreadcrumbs(");
+    // the same predicate generateMetadata uses for robots decides indexability
+    expect(code).toContain("result !== null && entityHubRobots(result) === undefined");
+  });
+
   it("links to the plain-anchor archive search and the index", () => {
     expect(code).toContain("`/?q=${encodeURIComponent(");
     expect(code).toMatch(/<a\s+href=\{`\/\?q=\$\{encodeURIComponent\(/);
@@ -166,6 +176,13 @@ describe("/gundem index page source", () => {
     expect(code).not.toContain('"use cache"');
   });
 
+  it("emits CollectionPage + BreadcrumbList JSON-LD from the static vocabulary", () => {
+    expect(code).toContain('type="application/ld+json"');
+    expect(code).toContain("buildClusterCollectionPage(");
+    expect(code).toContain("buildBreadcrumbs(");
+    expect(code).toContain("serializeJsonLd(");
+  });
+
   it("uses staticPageMetadata with the /gundem path", () => {
     expect(code).toContain("staticPageMetadata(");
     expect(code).toContain('path: "/gundem"');
@@ -182,11 +199,36 @@ describe("/gundem index page source", () => {
 });
 
 describe("sitemap", () => {
-  it("lists /gundem but none of the 62 hubs (thin hubs are noindexed)", () => {
-    const code = blankComments(read("src/lib/seo/sitemaps.ts"));
-    expect(code).toContain('{ path: "/gundem", changefreq: "daily", priority: 0.5 }');
-    expect(code).not.toContain("/gundem/");
-    expect(code).not.toMatch(/RISING_ENTITIES/);
+  const sitemaps = blankComments(read("src/lib/seo/sitemaps.ts"));
+  const hubSitemap = blankComments(read("src/lib/seo/hub-sitemap.ts"));
+
+  it("lists /gundem and points at /sitemaps/hubs.xml, with no hub or entity code of its own", () => {
+    expect(sitemaps).toContain('{ path: "/gundem", changefreq: "daily", priority: 0.5 }');
+    expect(sitemaps).toContain("/sitemaps/hubs.xml");
+    // The 62 hubs are listed by hub-sitemap.ts, never hard-wired here.
+    expect(sitemaps).not.toContain("/gundem/");
+    expect(sitemaps).not.toMatch(/RISING_ENTITIES|getEntityHub|entityHubRobots|entity-hub/);
+  });
+
+  it("hub-sitemap.ts reads each hub and filters by the page's own robots predicate, uncached", () => {
+    expect(hubSitemap).toContain("getEntityHub(");
+    expect(hubSitemap).toContain("entityHubRobots(");
+    // getEntityHub is a resolveCachedOrRetry getter: it must never run inside a
+    // "use cache" body (tests/guards/cache-retry-prerender.test.ts).
+    expect(hubSitemap).not.toContain("use cache");
+  });
+
+  it("no other seo module (non-test) touches getEntityHub", () => {
+    const dir = resolve(ROOT, "src/lib/seo");
+    const others = readdirSync(dir).filter(
+      (f) => f.endsWith(".ts") && !f.endsWith(".test.ts") && f !== "hub-sitemap.ts",
+    );
+    expect(others.length).toBeGreaterThan(0);
+    for (const f of others) {
+      const code = blankComments(read(`src/lib/seo/${f}`));
+      expect(code, f).not.toMatch(/\bgetEntityHub\b/);
+      expect(code, f).not.toContain("entity-hub-query");
+    }
   });
 });
 
@@ -290,6 +332,8 @@ function bundle(id: string, dist: unknown = { center: 1 }) {
   return {
     cluster: {
       id,
+      title_tr: `Başlık ${id}`,
+      first_published: "2026-10-30T08:00:00.000Z",
       updated_at: "2026-10-30T10:00:00.000Z",
       bias_distribution: dist,
     },
@@ -467,6 +511,91 @@ describe("/gundem/[key] body", () => {
   });
 });
 
+describe("/gundem/[key] structured data", () => {
+  const ldScripts = (tree: unknown) =>
+    elements(tree, (el) => el.type === "script" && el.props?.type === "application/ld+json");
+  const ldJson = (el: El): unknown =>
+    JSON.parse(
+      (el.props!.dangerouslySetInnerHTML as { __html: string }).__html,
+    );
+
+  it("an indexable hub (3 bundles) renders exactly one JSON-LD script: CollectionPage + BreadcrumbList", async () => {
+    mocks.result = { bundles: [bundle("c1"), bundle("c2"), bundle("c3")], total: 9, asOfMs: 0 };
+    const tree = await renderHub("erdogan");
+
+    const scripts = ldScripts(tree);
+    expect(scripts).toHaveLength(1);
+    const base = siteUrl();
+    expect(ldJson(scripts[0]!)).toEqual([
+      {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        name: "Erdoğan haberleri",
+        url: `${base}/gundem/erdogan`,
+        isPartOf: { "@type": "WebSite", name: "Tayf", url: base },
+        mainEntity: {
+          "@type": "ItemList",
+          numberOfItems: 3,
+          itemListElement: [
+            { "@type": "ListItem", position: 1, name: "Başlık c1", url: `${base}/cluster/c1` },
+            { "@type": "ListItem", position: 2, name: "Başlık c2", url: `${base}/cluster/c2` },
+            { "@type": "ListItem", position: 3, name: "Başlık c3", url: `${base}/cluster/c3` },
+          ],
+        },
+      },
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "Anasayfa", item: `${base}/` },
+          { "@type": "ListItem", position: 2, name: "Gündem", item: `${base}/gundem` },
+          { "@type": "ListItem", position: 3, name: "Erdoğan", item: `${base}/gundem/erdogan` },
+        ],
+      },
+    ]);
+  });
+
+  it("the script is the first child of the page container, ahead of the hero", async () => {
+    mocks.result = { bundles: [bundle("c1"), bundle("c2"), bundle("c3")], total: 3, asOfMs: 0 };
+    const tree = (await renderHub("chp")) as { props: { children: unknown[] } };
+
+    const first = tree.props.children[0] as El;
+    expect(first.type).toBe("script");
+    expect(first.props?.type).toBe("application/ld+json");
+  });
+
+  it("the boundary is the indexability rule: 3 bundles emit, 2 do not", async () => {
+    mocks.result = { bundles: [bundle("a"), bundle("b")], total: 2, asOfMs: 0 };
+    expect(ldScripts(await renderHub("ysk"))).toHaveLength(0);
+
+    mocks.result = { bundles: [bundle("a"), bundle("b"), bundle("c")], total: 3, asOfMs: 0 };
+    expect(ldScripts(await renderHub("ysk"))).toHaveLength(1);
+  });
+
+  it("thin (1 bundle), empty and unavailable (null) hubs render no JSON-LD", async () => {
+    for (const result of [
+      { bundles: [bundle("a")], total: 1, asOfMs: 0 },
+      { bundles: [], total: 0, asOfMs: 0 },
+      null,
+    ]) {
+      mocks.result = result;
+      expect(ldScripts(await renderHub("ysk"))).toHaveLength(0);
+    }
+  });
+
+  it("a hostile cluster title cannot close the script element", async () => {
+    const evil = bundle("c1");
+    evil.cluster.title_tr = "x </script><img src=x onerror=alert(1)>";
+    mocks.result = { bundles: [evil, bundle("c2"), bundle("c3")], total: 3, asOfMs: 0 };
+
+    const scripts = ldScripts(await renderHub("erdogan"));
+    const html = (scripts[0]!.props!.dangerouslySetInnerHTML as { __html: string }).__html;
+
+    expect(html).not.toContain("<");
+    expect(JSON.stringify(ldJson(scripts[0]!))).toContain("</script>");
+  });
+});
+
 describe("/gundem index body", () => {
   it("has the static metadata", () => {
     expect(indexMetadata.title).toBe("Gündem");
@@ -499,5 +628,46 @@ describe("/gundem index body", () => {
     for (const c of chips) {
       expect(String(c.props!.className)).toContain("min-h-8");
     }
+  });
+
+  it("renders one JSON-LD script: CollectionPage of all hubs in vocabulary order + BreadcrumbList", () => {
+    const scripts = elements(
+      GundemIndexPage(),
+      (el) => el.type === "script" && el.props?.type === "application/ld+json",
+    );
+    expect(scripts).toHaveLength(1);
+
+    const base = siteUrl();
+    const data = JSON.parse(
+      (scripts[0]!.props!.dangerouslySetInnerHTML as { __html: string }).__html,
+    ) as unknown[];
+    expect(data).toEqual([
+      {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        name: "Gündemdeki adlar",
+        url: `${base}/gundem`,
+        isPartOf: { "@type": "WebSite", name: "Tayf", url: base },
+        mainEntity: {
+          "@type": "ItemList",
+          numberOfItems: RISING_ENTITIES.length,
+          itemListElement: RISING_ENTITIES.map((e, i) => ({
+            "@type": "ListItem",
+            position: i + 1,
+            name: e.label,
+            url: `${base}/gundem/${e.key}`,
+          })),
+        },
+      },
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "Anasayfa", item: `${base}/` },
+          { "@type": "ListItem", position: 2, name: "Gündem", item: `${base}/gundem` },
+        ],
+      },
+    ]);
+    expect(RISING_ENTITIES.length).toBe(62);
   });
 });

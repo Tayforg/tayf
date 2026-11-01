@@ -79,6 +79,30 @@ export type RisingHubSpec = {
    * keeps the extra recall precise.
    */
   inflections?: readonly string[];
+  /**
+   * Aliases emitted WITHOUT the `excludes` guard: the spelling is unambiguous
+   * on its own ("TCMB", "TBMM"), so a foreign cue elsewhere in the story must
+   * not drop it. Every entry is one of `aliases`, compared as written, and a
+   * spec with `trusted` also has `excludes`.
+   */
+  trusted?: readonly string[];
+  /**
+   * Foreign or municipal cues that veto a non-trusted alias: folded lowercase
+   * ASCII phrases, words separated by single spaces ("polonya", "federal
+   * anayasa", "belediye meclis"). entity-hub.ts turns them into a negative
+   * lookahead over the whole folded text, so "Polonya'da ... Anayasa
+   * Mahkemesi" is not the Turkish court. A phrase is open-ended (it also
+   * catches "polonyada"), except a single word of 3 letters or fewer, which
+   * takes a word boundary ("fed" never hits "federasyon").
+   */
+  excludes?: readonly string[];
+  /**
+   * Keeps the entity's single-word forms out of amounts: the word must not
+   * follow a digit or a quantity word ("100 dolar", "2,1 milyar dolarlık",
+   * "milyarlarca doları"). Only for entities whose bare name is also a unit,
+   * where the story is about the sum and not the thing ("dolar").
+   */
+  quantityGuard?: true;
 };
 
 /** Turkish letters (and circumflexed vowels) that fold to ASCII. */
@@ -162,16 +186,57 @@ export const RISING_ENTITIES: readonly RisingEntity[] = [
 
 /** Hub-only search data, keyed by RisingEntity.key. An entity without an entry is searched by its label, as a whole word. */
 export const RISING_HUB_SPECS: Readonly<Record<string, RisingHubSpec>> = {
-  akp: { aliases: ["AK Parti", "AKP"] },
+  akp: { aliases: ["AK Parti", "AKP"], inflections: ["AK Partili", "AK Partimize"] },
+  dem: { inflections: ["DEM Partili"] },
+  "iyi-parti": { inflections: ["İYİ Partili"] },
   yrp: { aliases: ["Yeniden Refah", "YRP"] },
-  meclis: { aliases: ["Meclis", "TBMM"], hubMatch: "prefix" },
-  aym: { aliases: ["Anayasa Mahkemesi", "AYM"] },
-  tcmb: { aliases: ["Merkez Bankası", "TCMB"] },
+  meclis: {
+    aliases: ["Meclis", "TBMM", "Büyük Millet Meclisi"],
+    hubMatch: "prefix",
+    trusted: ["TBMM", "Büyük Millet Meclisi"],
+    excludes: [
+      "temsilciler meclisi",
+      "knesset",
+      "israil",
+      "iran",
+      "libya",
+      "belediye meclis",
+      "il genel meclis",
+      "ilce meclis",
+      "mahalle meclis",
+      "ulusal meclis",
+      "rum meclis",
+      "gkry",
+    ],
+  },
+  aym: {
+    aliases: ["Anayasa Mahkemesi", "AYM"],
+    trusted: ["AYM"],
+    excludes: ["polonya", "federal anayasa", "kktc anayasa"],
+  },
+  tcmb: {
+    aliases: ["Merkez Bankası", "TCMB"],
+    trusted: ["TCMB"],
+    excludes: [
+      "avrupa merkez",
+      "ecb",
+      "fed",
+      "abd merkez",
+      "amerikan merkez",
+      "israil merkez",
+      "ingiltere merkez",
+      "japonya merkez",
+      "rusya merkez",
+      "cin merkez",
+    ],
+  },
   zelenski: { aliases: ["Zelenski", "Zelenskiy", "Zelensky", "Zelenskyy"] },
   enflasyon: { hubMatch: "prefix" },
   faiz: { hubMatch: "prefix" },
-  dolar: { hubMatch: "prefix" },
+  dolar: { hubMatch: "prefix", quantityGuard: true },
   borsa: { aliases: ["Borsa", "BIST"], hubMatch: "prefix", inflections: ["Borsada", "Borsası"] },
+  pkk: { inflections: ["PKK/KCK"] },
+  "asgari-ucret": { inflections: ["asgari ücretli", "asgari ücretlilerin"] },
 };
 
 const FOLD_MAP: ReadonlyMap<string, string> = (() => {

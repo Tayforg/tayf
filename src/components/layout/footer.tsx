@@ -13,6 +13,7 @@ const NAV_LINKS = [
   { href: "/trends", label: "Trendler" },
   { href: "/hafta", label: "Haftanın yelpazesi" },
   { href: "/konu", label: "Konular" },
+  { href: "/gundem", label: "Gündem" },
   { href: "/oyun", label: "Tarafı Tahmin Et" },
   { href: "/metodoloji", label: "Metodoloji" },
   { href: "/durum", label: "Sistem durumu" },

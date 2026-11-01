@@ -1,3 +1,4 @@
+import { getHubsSitemapXml } from "@/lib/seo/hub-sitemap";
 import {
   getClustersMonthXml,
   getCurrentSitemapMonth,
@@ -9,9 +10,14 @@ import {
 import { siteUrl } from "@/lib/site-url";
 
 // /sitemaps/[file] — the leaf sitemaps the /sitemap.xml index points at:
-// static.xml, sources.xml, news.xml, and clusters-YYYY-MM.xml. `file` is
-// parsed by `parseSitemapFile`, which is also the path-traversal guard
-// (fully anchored regex — no `/` or extra `.` survives it).
+// static.xml, sources.xml, hubs.xml, news.xml, and clusters-YYYY-MM.xml.
+// `file` is parsed by `parseSitemapFile`, which is also the path-traversal
+// guard (fully anchored regex — no `/` or extra `.` survives it).
+//
+// hubs.xml (the indexable /gundem/<key> hubs) is assembled per request from the
+// 62 per-key getEntityHub cache entries; the CDN header below, not a cache of
+// its own, keeps that from repeating. A failed hub read throws and the catch
+// answers 503 instead of publishing a short urlset.
 //
 // No `Date.now()`/`new Date()` in this handler body: every date read
 // (the current UTC month, the 48h news window, the month's UTC bounds)
@@ -59,6 +65,12 @@ export async function GET(_req: Request, { params }: RouteContext): Promise<Resp
       cacheHeaders = DEFAULT_CACHE_HEADERS;
     } else if (parsed === "sources") {
       xml = await getSourcesSitemapXml(baseUrl);
+      cacheHeaders = DEFAULT_CACHE_HEADERS;
+    } else if (parsed === "hubs") {
+      // Throws as soon as a batch of hub reads has a failure (later batches are
+      // not started); the catch below turns that into a 503 rather than a short
+      // urlset that would de-index hubs.
+      xml = await getHubsSitemapXml(baseUrl);
       cacheHeaders = DEFAULT_CACHE_HEADERS;
     } else if (parsed === "news") {
       xml = await getNewsSitemapXml(baseUrl);

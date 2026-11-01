@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { buildTayfOrganization, buildSiteJsonLd } from "./json-ld";
+import {
+  buildClusterCollectionPage,
+  buildSiteJsonLd,
+  buildTayfOrganization,
+  serializeJsonLd,
+} from "./json-ld";
 
 const ORIGINAL_SITE_URL_ENV = process.env.NEXT_PUBLIC_SITE_URL;
 
@@ -43,5 +48,117 @@ describe("buildSiteJsonLd", () => {
         publisher: { "@id": "https://tayf.test/#organization" },
       },
     ]);
+  });
+});
+
+describe("buildClusterCollectionPage", () => {
+  it("builds a CollectionPage with an absolute url, the WebSite it belongs to and an ItemList", () => {
+    process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+
+    expect(
+      buildClusterCollectionPage({
+        name: "Erdoğan haberleri",
+        path: "/gundem/erdogan",
+        items: [
+          { name: "Birinci küme", path: "/cluster/c1" },
+          { name: "İkinci küme", path: "/cluster/c2" },
+          { name: "Üçüncü küme", path: "/cluster/c3" },
+        ],
+      }),
+    ).toEqual({
+      "@context": "https://schema.org",
+      "@type": "CollectionPage",
+      name: "Erdoğan haberleri",
+      url: "https://tayf.test/gundem/erdogan",
+      isPartOf: { "@type": "WebSite", name: "Tayf", url: "https://tayf.test" },
+      mainEntity: {
+        "@type": "ItemList",
+        numberOfItems: 3,
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "Birinci küme", url: "https://tayf.test/cluster/c1" },
+          { "@type": "ListItem", position: 2, name: "İkinci küme", url: "https://tayf.test/cluster/c2" },
+          { "@type": "ListItem", position: 3, name: "Üçüncü küme", url: "https://tayf.test/cluster/c3" },
+        ],
+      },
+    });
+  });
+
+  it("follows NEXT_PUBLIC_SITE_URL (every url is absolute against siteUrl())", () => {
+    process.env.NEXT_PUBLIC_SITE_URL = "https://other.example";
+    const page = buildClusterCollectionPage({
+      name: "Gündemdeki adlar",
+      path: "/gundem",
+      items: [{ name: "CHP", path: "/gundem/chp" }],
+    }) as {
+      url: string;
+      isPartOf: { url: string };
+      mainEntity: { itemListElement: Array<{ url: string }> };
+    };
+
+    expect(page.url).toBe("https://other.example/gundem");
+    expect(page.isPartOf.url).toBe("https://other.example");
+    expect(page.mainEntity.itemListElement.map((i) => i.url)).toEqual([
+      "https://other.example/gundem/chp",
+    ]);
+  });
+
+  it("numbers positions 1..n in the given order and counts numberOfItems", () => {
+    process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+    const items = Array.from({ length: 62 }, (_, i) => ({
+      name: `Ad ${i}`,
+      path: `/gundem/k${i}`,
+    }));
+    const page = buildClusterCollectionPage({ name: "x", path: "/gundem", items }) as {
+      mainEntity: {
+        numberOfItems: number;
+        itemListElement: Array<{ position: number; name: string }>;
+      };
+    };
+
+    expect(page.mainEntity.numberOfItems).toBe(62);
+    expect(page.mainEntity.itemListElement.map((i) => i.position)).toEqual(
+      Array.from({ length: 62 }, (_, i) => i + 1),
+    );
+    expect(page.mainEntity.itemListElement.map((i) => i.name)).toEqual(items.map((i) => i.name));
+  });
+
+  it("an empty item list is numberOfItems 0 with no ListItems", () => {
+    process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+    const page = buildClusterCollectionPage({ name: "Boş", path: "/gundem/ysk", items: [] }) as {
+      mainEntity: { numberOfItems: number; itemListElement: unknown[] };
+    };
+
+    expect(page.mainEntity.numberOfItems).toBe(0);
+    expect(page.mainEntity.itemListElement).toEqual([]);
+  });
+
+  it("does not mutate its input", () => {
+    process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+    const items = [{ name: "A", path: "/cluster/a" }];
+    const snapshot = JSON.stringify(items);
+    buildClusterCollectionPage({ name: "x", path: "/gundem", items });
+
+    expect(JSON.stringify(items)).toBe(snapshot);
+  });
+
+  it("a name containing '</script' cannot close the script element once serialized", () => {
+    process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+    const evil = "Başlık </script><script>alert(1)</script>";
+    const page = buildClusterCollectionPage({
+      name: evil,
+      path: "/gundem/x",
+      items: [{ name: evil, path: "/cluster/c1" }],
+    });
+
+    const json = serializeJsonLd(page);
+
+    expect(json.toLowerCase()).not.toContain("</script");
+    expect(json).not.toContain("<");
+    const parsed = JSON.parse(json) as {
+      name: string;
+      mainEntity: { itemListElement: Array<{ name: string }> };
+    };
+    expect(parsed.name).toBe(evil);
+    expect(parsed.mainEntity.itemListElement[0]!.name).toBe(evil);
   });
 });

@@ -11,7 +11,9 @@ import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
 // /sitemaps/clusters-YYYY-MM.xml per calendar month, a /sitemaps/news.xml
 // (Google News sitemap: article_count >= 3, published within the last
 // 48h), and /sitemaps/sources.xml for the ~118 active /source/<slug>
-// pages, none of which were reachable from any sitemap before.
+// pages, none of which were reachable from any sitemap before, and
+// /sitemaps/hubs.xml for the indexable entity hubs (built in hub-sitemap.ts,
+// which this file deliberately does not import).
 //
 // Every DB-backed builder below THROWS on a Supabase error instead of
 // returning an empty result — an empty-but-cached sitemap would silently
@@ -82,11 +84,10 @@ const BASE_STATIC_ROUTES: ReadonlyArray<{
   // Pack C ("Konu"): /konu index + the six hub slugs (TOPIC_SLUGS).
   // politika is deliberately absent — it 308s to "/" and is not a hub.
   { path: "/konu", changefreq: "daily", priority: 0.6 },
-  // Entity hubs (roadmap G2): the /gundem index only. The 62 /gundem/<key>
-  // hubs are deliberately left out -- a hub with fewer than three clusters is
-  // noindexed (entityHubRobots), and a sitemap must not submit URLs the page
-  // itself asks crawlers to skip. Healthy hubs are reached through the index
-  // and the /trends links.
+  // Entity hubs (roadmap G2): the /gundem index only. The indexable
+  // /gundem/<key> hubs are listed in /sitemaps/hubs.xml (hub-sitemap.ts), which
+  // applies the page's own thin-hub rule so a sitemap never submits a URL the
+  // page itself asks crawlers to skip. This file keeps no entity code.
   { path: "/gundem", changefreq: "daily", priority: 0.5 },
 ];
 
@@ -94,6 +95,7 @@ export type ParsedSitemapFile =
   | "static"
   | "sources"
   | "news"
+  | "hubs"
   | { month: string };
 
 export interface SitemapUrlEntry {
@@ -197,6 +199,7 @@ export function parseSitemapFile(file: string): ParsedSitemapFile | null {
   if (file === "static.xml") return "static";
   if (file === "sources.xml") return "sources";
   if (file === "news.xml") return "news";
+  if (file === "hubs.xml") return "hubs";
 
   const match = MONTH_FILE_RE.exec(file);
   if (!match) return null;
@@ -247,7 +250,7 @@ export async function getCurrentSitemapMonth(): Promise<string> {
   return utcMonthKey(Date.now());
 }
 
-/** No DB. Lists the 3 fixed files plus one clusters-YYYY-MM.xml per month
+/** No DB. Lists the 4 fixed files plus one clusters-YYYY-MM.xml per month
  *  from SITEMAP_FIRST_MONTH through the current UTC month. The index route
  *  awaits `connection()` first, so this runs per request (not frozen at
  *  build) and a new month appears within the hour its cache entry lives. */
@@ -261,6 +264,7 @@ export async function getSitemapIndexXml(baseUrl: string): Promise<string> {
   const locs = [
     `${baseUrl}/sitemaps/static.xml`,
     `${baseUrl}/sitemaps/sources.xml`,
+    `${baseUrl}/sitemaps/hubs.xml`,
     `${baseUrl}/sitemaps/news.xml`,
     ...months.map((month) => `${baseUrl}/sitemaps/clusters-${month}.xml`),
   ];

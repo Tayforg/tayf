@@ -4,13 +4,18 @@ import { resolve } from "node:path";
 
 import { BIAS_ORDER } from "@/lib/bias/config";
 import { turkishQueryVariants } from "@/lib/clusters/turkish-query";
-import { RISING_ENTITIES, RISING_HUB_SPECS } from "@/lib/trends/rising-entities";
+import {
+  RISING_ENTITIES,
+  RISING_HUB_SPECS,
+  type RisingHubSpec,
+} from "@/lib/trends/rising-entities";
 
 import {
   ENTITY_HUB_LIMIT,
   ENTITY_HUB_MAX_TERMS,
   ENTITY_HUB_MIN_INDEXABLE,
   ENTITY_HUB_WINDOW_DAYS,
+  QUANTITY_GUARD,
   entityByKey,
   entityHubForms,
   entityHubNote,
@@ -225,6 +230,31 @@ function dedupe(items: readonly string[]): string[] {
   return [...new Set(items)];
 }
 
+/**
+ * Test-side restatement of the exclude rule, deliberately not imported: an
+ * alternative is `\m` + the words joined by `\s+`, closed with `\M` only for a
+ * single word of 3 letters or fewer ('ecb', 'fed'), so `\mfed\M` never hits
+ * "federasyon" while 'polonya' still catches "polonyada".
+ */
+function excludeAlt(exclude: string): string {
+  const words = exclude.split(" ");
+  const closed = words.length === 1 && (words[0] as string).length <= 3;
+  return `\\m${words.join("\\s+")}${closed ? "\\M" : ""}`;
+}
+
+function guardPrefix(excludes: readonly string[]): string {
+  return `^(?![\\s\\S]*(?:${excludes.map(excludeAlt).join("|")}))[\\s\\S]*`;
+}
+
+/** A pattern without its leading exclude guard (the guard holds no "))" inside). */
+function stripGuard(pattern: string): string {
+  if (!pattern.startsWith("^(?!")) return pattern;
+  const end = "))[\\s\\S]*";
+  return pattern.slice(pattern.indexOf(end) + end.length);
+}
+
+const bare = { key: "x", label: "Xyz", tokens: [] as string[] };
+
 describe("foldEntityText", () => {
   it("folds Turkish letters to ASCII, then lowercases (translate before lower, as in SQL)", () => {
     expect(foldEntityText("İYİ Parti'nin ZELENSKİY Çin")).toBe("iyi parti'nin zelenskiy cin");
@@ -251,7 +281,9 @@ describe("entityHubPatterns (exact runtime values)", () => {
   const expected: Record<string, string[]> = {
     deva: ["\\mdeva\\M"],
     "iyi-parti": ["\\miyi\\s+parti"],
-    dolar: ["\\mdolar"],
+    dolar: [
+      "\\m(?<![0-9]\\s)(?<![0-9])(?<!bin\\s)(?<!milyon\\s)(?<!milyar\\s)(?<!trilyon\\s)(?<!milyonlarca\\s)(?<!milyarlarca\\s)dolar",
+    ],
     akp: ["\\mak\\s+parti", "\\makp\\M"],
     zelenski: ["\\mzelenski\\M", "\\mzelenskiy\\M", "\\mzelensky\\M", "\\mzelenskyy\\M"],
     borsa: ["\\mborsa", "\\mbist"],
@@ -259,6 +291,21 @@ describe("entityHubPatterns (exact runtime values)", () => {
     chp: ["\\mchp\\M"],
     cin: ["\\mcin\\M"],
     "asgari-ucret": ["\\masgari\\s+ucret"],
+    dem: ["\\mdem\\s+parti"],
+    pkk: ["\\mpkk\\M"],
+    aym: [
+      "^(?![\\s\\S]*(?:\\mpolonya|\\mfederal\\s+anayasa|\\mkktc\\s+anayasa))[\\s\\S]*\\manayasa\\s+mahkemesi",
+      "\\maym\\M",
+    ],
+    tcmb: [
+      "^(?![\\s\\S]*(?:\\mavrupa\\s+merkez|\\mecb\\M|\\mfed\\M|\\mabd\\s+merkez|\\mamerikan\\s+merkez|\\misrail\\s+merkez|\\mingiltere\\s+merkez|\\mjaponya\\s+merkez|\\mrusya\\s+merkez|\\mcin\\s+merkez))[\\s\\S]*\\mmerkez\\s+bankasi",
+      "\\mtcmb\\M",
+    ],
+    meclis: [
+      "^(?![\\s\\S]*(?:\\mtemsilciler\\s+meclisi|\\mknesset|\\misrail|\\miran|\\mlibya|\\mbelediye\\s+meclis|\\mil\\s+genel\\s+meclis|\\milce\\s+meclis|\\mmahalle\\s+meclis|\\mulusal\\s+meclis|\\mrum\\s+meclis|\\mgkry))[\\s\\S]*\\mmeclis",
+      "\\mtbmm",
+      "\\mbuyuk\\s+millet\\s+meclisi",
+    ],
   };
 
   for (const [key, patterns] of Object.entries(expected)) {
@@ -300,6 +347,96 @@ describe("entityHubPatterns (exact runtime values)", () => {
     expect(entityHubPatterns(e, { aliases: many })).toHaveLength(ENTITY_HUB_MAX_TERMS);
     expect(entityHubQueries(e, { aliases: many })).toHaveLength(ENTITY_HUB_MAX_TERMS);
   });
+
+  it("exports the amount lookbehind block that guards a quantityGuard word", () => {
+    expect(QUANTITY_GUARD).toBe(
+      "(?<![0-9]\\s)(?<![0-9])(?<!bin\\s)(?<!milyon\\s)(?<!milyar\\s)(?<!trilyon\\s)(?<!milyonlarca\\s)(?<!milyarlarca\\s)",
+    );
+  });
+
+  describe("excludes", () => {
+    it("wraps a non-trusted form in a lookahead over the whole folded text", () => {
+      const spec: RisingHubSpec = { aliases: ["Xyz"], excludes: ["polonya", "federal anayasa"] };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "^(?![\\s\\S]*(?:\\mpolonya|\\mfederal\\s+anayasa))[\\s\\S]*\\mxyz\\M",
+      ]);
+    });
+
+    it("closes an alternative with \\M only for a single word of 3 letters or fewer", () => {
+      const spec: RisingHubSpec = {
+        aliases: ["Xyz"],
+        excludes: ["ecb", "fed", "ab", "abcd", "israil", "belediye meclis", "a b"],
+      };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "^(?![\\s\\S]*(?:\\mecb\\M|\\mfed\\M|\\mab\\M|\\mabcd|\\misrail|\\mbelediye\\s+meclis|\\ma\\s+b))[\\s\\S]*\\mxyz\\M",
+      ]);
+    });
+
+    it("'fed' does not exclude 'federasyon', 'polonya' does exclude 'polonyada'", () => {
+      const spec: RisingHubSpec = { aliases: ["Merkez Bankası"], excludes: ["fed", "polonya"] };
+      const pat = new RegExp(entityHubPatterns(bare, spec)[0]!.replace(/\\[mM]/g, "\\b"));
+      expect(pat.test("federasyon merkez bankasi")).toBe(true);
+      expect(pat.test("fed merkez bankasi")).toBe(false);
+      expect(pat.test("polonyada merkez bankasi")).toBe(false);
+      expect(pat.test("merkez bankasi polonyada")).toBe(false);
+    });
+
+    it("every non-trusted form of a spec carries the guard, every trusted one stays bare", () => {
+      const spec: RisingHubSpec = {
+        aliases: ["Büyük Millet Meclisi", "Meclis", "TBMM"],
+        trusted: ["TBMM", "Büyük Millet Meclisi"],
+        excludes: ["israil"],
+        hubMatch: "prefix",
+      };
+      expect(entityHubPatterns(bare, spec)).toEqual([
+        "\\mbuyuk\\s+millet\\s+meclisi",
+        `${guardPrefix(["israil"])}\\mmeclis`,
+        "\\mtbmm",
+      ]);
+    });
+
+    it("keeps a trusted alias bare even when it is not the first form", () => {
+      const spec: RisingHubSpec = { aliases: ["TBMM", "Meclis"], trusted: ["TBMM"], excludes: ["israil"] };
+      expect(entityHubPatterns(bare, spec)[0]).toBe("\\mtbmm\\M");
+    });
+
+    it("never emits a guard for an empty list, or for entries that fold to nothing", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], excludes: [] })).toEqual(["\\mxyz\\M"]);
+      expect(entityHubPatterns(bare, { aliases: ["Xyz"], excludes: ["", "***"] })).toEqual([
+        "\\mxyz\\M",
+      ]);
+    });
+
+    it("never lets a metacharacter in an exclude reach the pattern", () => {
+      const out = entityHubPatterns(bare, { aliases: ["Xyz"], excludes: ["a|b", "c.*", "d(e)"] });
+      expect(out).toEqual([
+        "^(?![\\s\\S]*(?:\\ma\\s+b|\\mc\\M|\\md\\s+e))[\\s\\S]*\\mxyz\\M",
+      ]);
+    });
+  });
+
+  describe("quantityGuard", () => {
+    it("guards a single word and closes it with \\M unless the entity is a prefix hub", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Dolar"], quantityGuard: true })).toEqual([
+        `\\m${QUANTITY_GUARD}dolar\\M`,
+      ]);
+      expect(
+        entityHubPatterns(bare, { aliases: ["Dolar"], hubMatch: "prefix", quantityGuard: true }),
+      ).toEqual([`\\m${QUANTITY_GUARD}dolar`]);
+    });
+
+    it("leaves a multi-word form alone", () => {
+      expect(entityHubPatterns(bare, { aliases: ["Abd Doları"], quantityGuard: true })).toEqual([
+        "\\mabd\\s+dolari",
+      ]);
+    });
+
+    it("composes with excludes: the guard wraps the amount-guarded base", () => {
+      expect(
+        entityHubPatterns(bare, { aliases: ["Dolar"], quantityGuard: true, excludes: ["kanada"] }),
+      ).toEqual([`${guardPrefix(["kanada"])}\\m${QUANTITY_GUARD}dolar\\M`]);
+    });
+  });
 });
 
 describe("hub matching behaviour (the SQL guard, in JS)", () => {
@@ -313,6 +450,52 @@ describe("hub matching behaviour (the SQL guard, in JS)", () => {
     expect(hubMatches("dolar", "Domuz eti ithalatı")).toBe(false);
     expect(hubMatches("dolar", "Dolara talep arttı")).toBe(true);
     expect(hubMatches("dolar", "Dolar/TL rekor")).toBe(true);
+    expect(hubMatches("dolar", "Dolar 49,57 liradan")).toBe(true);
+  });
+
+  it("dolar: an amount ('2,1 milyar dolarlık', '12 milyon doları', '100 dolar') is out", () => {
+    expect(hubMatches("dolar", "2,1 milyar dolarlık Patriot")).toBe(false);
+    expect(hubMatches("dolar", "12 milyon doları")).toBe(false);
+    expect(hubMatches("dolar", "Milyarlarca doları buldu")).toBe(false);
+    expect(hubMatches("dolar", "100 dolar")).toBe(false);
+    expect(hubMatches("dolar", "3 bin dolar")).toBe(false);
+    expect(hubMatches("dolar", "5 trilyon dolar")).toBe(false);
+    expect(hubMatches("dolar", "250 bin doları")).toBe(false);
+  });
+
+  it("aym: Poland's court is out, the Turkish court and 'AYM' are in", () => {
+    expect(hubMatches("aym", "Polonya'da polis Anayasa Mahkemesi'ni bastı")).toBe(false);
+    expect(hubMatches("aym", "Anayasa Mahkemesi iptal kararı verdi")).toBe(true);
+    expect(hubMatches("aym", "AYM başvuruyu reddetti")).toBe(true);
+  });
+
+  it("aym: federal and KKTC courts are out wherever the cue sits in the text", () => {
+    expect(hubMatches("aym", "Federal Anayasa Mahkemesi kararı")).toBe(false);
+    expect(hubMatches("aym", "Anayasa Mahkemesi kararı, KKTC Anayasa Mahkemesi")).toBe(false);
+  });
+
+  it("tcmb: foreign central banks are out, the Turkish one and its abbreviation are in", () => {
+    expect(hubMatches("tcmb", "Avrupa Merkez Bankası Başkanı Lagarde istifa etti")).toBe(false);
+    expect(hubMatches("tcmb", "FED faiz kararını açıkladı, ABD Merkez Bankası")).toBe(false);
+    expect(hubMatches("tcmb", "ECB faizi sabit tuttu, Merkez Bankası")).toBe(false);
+    expect(hubMatches("tcmb", "Merkez Bankası faizi sabit tuttu")).toBe(true);
+    expect(hubMatches("tcmb", "TCMB rezervleri")).toBe(true);
+    expect(hubMatches("tcmb", "Federasyon başkanı Merkez Bankası'nı ziyaret etti")).toBe(true);
+  });
+
+  it("tcmb: 'TCMB' is trusted, so a foreign cue in the same story does not drop it", () => {
+    expect(hubMatches("tcmb", "TCMB ve FED faiz kararı")).toBe(true);
+  });
+
+  it("meclis: foreign and municipal assemblies are out, the Turkish parliament is in", () => {
+    expect(hubMatches("meclis", "İsrail meclisi Knesset'te güven oylaması")).toBe(false);
+    expect(hubMatches("meclis", "Belediye meclisi toplandı")).toBe(false);
+    expect(hubMatches("meclis", "Temsilciler Meclisi'nde oylama")).toBe(false);
+    expect(hubMatches("meclis", "Meclis'te bütçe görüşmeleri")).toBe(true);
+    expect(hubMatches("meclis", "TBMM Genel Kurulu'nda İsrail'e kınama")).toBe(true);
+    expect(
+      hubMatches("meclis", "Büyük Millet Meclisi Başkanı İran Meclis Başkanı ile görüştü"),
+    ).toBe(true);
   });
 
   it("iyi-parti: 'iyi ... parti' apart is out, 'İYİ Parti' and 'İYİ Partili' are in", () => {
@@ -380,6 +563,29 @@ describe("entityHubQueries", () => {
     expect(q.indexOf("bist")).toBeLessThan(q.indexOf("borsada"));
   });
 
+  it("a suffixed party or labour form widens the prefilter and leaves the patterns alone", () => {
+    const cases: Array<[string, string[]]> = [
+      ["akp", ["AK Partili", "AK Partimize"]],
+      ["dem", ["DEM Partili"]],
+      ["iyi-parti", ["İYİ Partili"]],
+      ["asgari-ucret", ["asgari ücretli", "asgari ücretlilerin"]],
+      ["pkk", ["PKK/KCK"]],
+    ];
+    for (const [key, inflections] of cases) {
+      const e = entityByKey(key)!;
+      const spec = entityHubSpec(e);
+      expect(spec.inflections, key).toEqual(inflections);
+      const queries = entityHubQueries(e);
+      expect(queries.length, key).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
+      for (const infl of inflections) {
+        for (const v of turkishQueryVariants(infl)) expect(queries, `${key}: ${v}`).toContain(v);
+      }
+      const withoutInflections: RisingHubSpec = { ...spec };
+      delete withoutInflections.inflections;
+      expect(entityHubPatterns(e), key).toEqual(entityHubPatterns(e, withoutInflections));
+    }
+  });
+
   it("equals the deduped Turkish variants of every form plus its inflections, for every entity", () => {
     for (const e of RISING_ENTITIES) {
       expect(entityHubQueries(e), e.key).toEqual(
@@ -401,13 +607,20 @@ describe("entityHubQueries", () => {
 });
 
 describe("invariants over every curated entity", () => {
-  const SHAPE = /^\\m[a-z0-9]+(?:\\s\+[a-z0-9]+)*(?:\\M)?$/;
+  // The grammar is built from escaped literal pieces, so a backslash in a
+  // pattern is compared as a backslash and a metacharacter never passes as one.
+  const esc = (literal: string) => literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const WORD = "[a-z0-9]+";
+  const PLAIN = `${esc("\\m")}${WORD}(?:${esc("\\s")}\\+${WORD})*(?:${esc("\\M")})?`;
+  const QUANT = `${esc("\\m")}${esc(QUANTITY_GUARD)}${WORD}(?:${esc("\\M")})?`;
+  const GUARD = `${esc("^(?![\\s\\S]*(?:")}${PLAIN}(?:${esc("|")}${PLAIN})*${esc("))[\\s\\S]*")}`;
+  const GRAMMAR = new RegExp(`^(?:${PLAIN}|${QUANT}|${GUARD}(?:${PLAIN}|${QUANT}))$`);
 
   it("covers all 62 entities", () => {
     expect(RISING_ENTITIES).toHaveLength(62);
   });
 
-  it("has 1..12 queries and 1..12 well-shaped patterns", () => {
+  it("has 1..12 queries and 1..12 patterns, each plain, amount-guarded or exclude-guarded", () => {
     for (const e of RISING_ENTITIES) {
       const q = entityHubQueries(e);
       const p = entityHubPatterns(e);
@@ -415,7 +628,30 @@ describe("invariants over every curated entity", () => {
       expect(q.length, `${e.key} queries`).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
       expect(p.length, `${e.key} patterns`).toBeGreaterThanOrEqual(1);
       expect(p.length, `${e.key} patterns`).toBeLessThanOrEqual(ENTITY_HUB_MAX_TERMS);
-      for (const pat of p) expect(pat, `${e.key} pattern ${pat}`).toMatch(SHAPE);
+      for (const pat of p) expect(pat, `${e.key} pattern ${pat}`).toMatch(GRAMMAR);
+    }
+  });
+
+  it("the grammar rejects what must never reach the RPC", () => {
+    for (const bad of [
+      "",
+      "\\mdeva\\M|\\mdevam",
+      "\\mdeva.*",
+      "\\m(?i)deva",
+      "(?i)\\mdeva\\M",
+      "\\mdeva\\M\\M",
+      "^(?![\\s\\S]*(?:))[\\s\\S]*\\mdeva\\M",
+      "^(?![\\s\\S]*(?:\\mfoo.*))[\\s\\S]*\\mdeva\\M",
+      "^(?![\\s\\S]*(?:\\mfoo))\\mdeva\\M",
+      `\\m${QUANTITY_GUARD}deva\\s+x\\s`,
+    ]) {
+      expect(bad, bad).not.toMatch(GRAMMAR);
+    }
+  });
+
+  it("no pattern starts with '(?': Postgres reads that as embedded options", () => {
+    for (const e of RISING_ENTITIES) {
+      for (const p of entityHubPatterns(e)) expect(p.startsWith("(?"), `${e.key} ${p}`).toBe(false);
     }
   });
 
@@ -434,10 +670,12 @@ describe("invariants over every curated entity", () => {
         .sort(),
     ).toEqual(["borsa", "dolar", "enflasyon", "faiz", "meclis"]);
     // A prefix hub has no closing \M on single words; every other single word has one.
+    // The base is what is left once the exclude guard is stripped.
     for (const e of RISING_ENTITIES) {
       for (const p of entityHubPatterns(e)) {
-        if (p.includes("\\s+")) continue;
-        expect(p.endsWith("\\M"), `${e.key} ${p}`).toBe(entityHubSpec(e).hubMatch !== "prefix");
+        const base = stripGuard(p);
+        if (base.includes("\\s+")) continue;
+        expect(base.endsWith("\\M"), `${e.key} ${p}`).toBe(entityHubSpec(e).hubMatch !== "prefix");
       }
     }
   });
@@ -461,7 +699,14 @@ describe("invariants over every curated entity", () => {
 
   it("every inflection is a spelling the entity's own patterns accept (the prefilter never promises what the guard rejects)", () => {
     const withInflections = RISING_ENTITIES.filter((e) => entityHubSpec(e).inflections !== undefined);
-    expect(withInflections.map((e) => e.key)).toEqual(["borsa"]);
+    expect(withInflections.map((e) => e.key).sort()).toEqual([
+      "akp",
+      "asgari-ucret",
+      "borsa",
+      "dem",
+      "iyi-parti",
+      "pkk",
+    ]);
     for (const e of withInflections) {
       for (const f of entityHubSpec(e).inflections!) {
         expect(hubMatches(e.key, f), `${e.key}: ${f}`).toBe(true);
@@ -475,5 +720,75 @@ describe("invariants over every curated entity", () => {
         .map((e) => e.key)
         .sort(),
     ).toEqual(["akp", "aym", "borsa", "meclis", "tcmb", "yrp", "zelenski"]);
+  });
+});
+
+describe("hub spec guards (precision, 2026-11-01)", () => {
+  const specs = Object.entries(RISING_HUB_SPECS);
+
+  it("every exclude is a folded ASCII phrase, so no metacharacter reaches the RPC", () => {
+    for (const [key, spec] of specs) {
+      for (const ex of spec.excludes ?? []) {
+        expect(ex, `${key}: ${ex}`).toBe(foldEntityText(ex));
+        expect(ex, `${key}: ${ex}`).toMatch(/^[a-z0-9]+( [a-z0-9]+)*$/);
+      }
+    }
+  });
+
+  it("every exclude alternative follows the closing rule (\\M only on a word of 3 letters or fewer)", () => {
+    for (const [key, spec] of specs) {
+      if (spec.excludes === undefined) continue;
+      const e = entityByKey(key)!;
+      const guarded = entityHubPatterns(e).filter((p) => p.startsWith("^(?!"));
+      expect(guarded.length, key).toBeGreaterThan(0);
+      for (const p of guarded) expect(p.startsWith(guardPrefix(spec.excludes)), key).toBe(true);
+    }
+  });
+
+  it("every trusted entry is one of the spec's own aliases, and trusted needs excludes", () => {
+    for (const [key, spec] of specs) {
+      for (const t of spec.trusted ?? []) {
+        expect(spec.aliases ?? [], `${key}: ${t}`).toContain(t);
+      }
+      if (spec.trusted !== undefined) {
+        expect((spec.excludes ?? []).length, `${key} has trusted but no excludes`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("a trusted alias is emitted bare, every other alias carries the guard", () => {
+    for (const [key, spec] of specs) {
+      if (spec.excludes === undefined) continue;
+      const e = entityByKey(key)!;
+      const forms = entityHubForms(e);
+      const patterns = entityHubPatterns(e);
+      expect(patterns.length, key).toBe(forms.length);
+      forms.forEach((form, i) => {
+        const guarded = (patterns[i] as string).startsWith("^(?!");
+        expect(guarded, `${key}: ${form}`).toBe(!(spec.trusted ?? []).includes(form));
+      });
+    }
+  });
+
+  it("excludes is curated on exactly aym, tcmb and meclis; quantityGuard on dolar only", () => {
+    expect(
+      specs
+        .filter(([, s]) => s.excludes !== undefined)
+        .map(([k]) => k)
+        .sort(),
+    ).toEqual(["aym", "meclis", "tcmb"]);
+    expect(
+      specs
+        .filter(([, s]) => s.quantityGuard !== undefined)
+        .map(([k]) => k)
+        .sort(),
+    ).toEqual(["dolar"]);
+    expect(RISING_HUB_SPECS.dolar?.quantityGuard).toBe(true);
+  });
+
+  it("curated trusted sets: AYM, TCMB, and the two unambiguous parliament names", () => {
+    expect(RISING_HUB_SPECS.aym?.trusted).toEqual(["AYM"]);
+    expect(RISING_HUB_SPECS.tcmb?.trusted).toEqual(["TCMB"]);
+    expect(RISING_HUB_SPECS.meclis?.trusted).toEqual(["TBMM", "Büyük Millet Meclisi"]);
   });
 });

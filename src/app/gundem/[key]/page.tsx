@@ -15,6 +15,11 @@ import {
   sumDistributions,
 } from "@/lib/entities/entity-hub";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
+import {
+  buildBreadcrumbs,
+  buildClusterCollectionPage,
+  serializeJsonLd,
+} from "@/lib/seo/json-ld";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
@@ -28,6 +33,13 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 //
 // Unknown keys never get here: src/middleware.ts rewrites them to the real 404
 // (gate 6). The notFound() below is defence in depth.
+//
+// Structured data (CollectionPage + BreadcrumbList) is emitted only for a hub
+// that is indexable (entityHubRobots(result) === undefined, the same predicate
+// generateMetadata uses for robots): a thin, empty or unavailable hub is
+// noindexed, and describing it to crawlers would contradict that. The hub is
+// also listed in /sitemaps/hubs.xml (src/lib/seo/hub-sitemap.ts) on that same
+// rule.
 
 interface PageProps {
   // Next.js 16: dynamic-route `params` is a Promise and must be awaited.
@@ -97,6 +109,29 @@ export default async function EntityHubPage({ params }: PageProps) {
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-8">
+      {result !== null && entityHubRobots(result) === undefined ? (
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: serializeJsonLd([
+              buildClusterCollectionPage({
+                name: `${label} haberleri`,
+                path: `/gundem/${key}`,
+                items: result.bundles.map((b) => ({
+                  name: b.cluster.title_tr,
+                  path: `/cluster/${b.cluster.id}`,
+                })),
+              }),
+              buildBreadcrumbs([
+                { name: "Anasayfa", path: "/" },
+                { name: "Gündem", path: "/gundem" },
+                { name: label, path: `/gundem/${key}` },
+              ]),
+            ]),
+          }}
+        />
+      ) : null}
+
       <PageHero
         kicker="Gündem"
         title={label}

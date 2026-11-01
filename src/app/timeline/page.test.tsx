@@ -270,7 +270,7 @@ describe("/timeline", () => {
     expect(findPills(tree)).toHaveLength(0);
   });
 
-  it("the pill sits beside PageHero in one wrapper, so an empty pill adds no space-y gap", async () => {
+  it("the pill sits beside PageHero in one `relative` wrapper: a positioning context, no spacing, so it never moves the list", async () => {
     mocks.result = { rows: mkRows(3), total: 3 };
 
     const tree = await TimelinePage();
@@ -282,7 +282,9 @@ describe("/timeline", () => {
     expect(wrapper?.type).toBe("div");
     const siblings = (wrapper?.props?.children as El[]).map((c) => c.type);
     expect(siblings).toContain(PageHero);
-    // The wrapper is a plain div: no spacing utilities that would gap an empty pill.
-    expect(wrapper?.props?.className).toBeUndefined();
+    // The pill is absolutely placed (top-full) in the 32 px space-y-8 gap below
+    // this wrapper; `relative` is its containing block and nothing else: no
+    // margin, padding, gap or space utility that would gap an empty pill.
+    expect(wrapper?.props?.className).toBe("relative");
   });
 });

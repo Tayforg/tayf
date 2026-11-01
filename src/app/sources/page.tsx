@@ -423,7 +423,6 @@ export function SourceDirectory({
                   <Link
                     href={`/source/${source.slug}`}
                     className="block"
-                    aria-label={`${source.name} profili`}
                   >
                     <div className="flex items-start gap-3">
                       <SourceLogo
@@ -434,7 +433,7 @@ export function SourceDirectory({
                         fallbackClassName="h-8 w-8 rounded shrink-0 bg-muted/60 ring-1 ring-border/30"
                       />
                       <div className="min-w-0 flex-1 space-y-1">
-                        <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-5">
+                        <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-7">
                           {source.name}
                         </p>
                         <div className="flex flex-wrap items-center gap-1 min-w-0">
@@ -465,9 +464,9 @@ export function SourceDirectory({
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label={`${source.name} sitesini yeni sekmede aç`}
-                    className="absolute top-3 right-3 text-[11px] text-muted-foreground hover:text-foreground leading-none px-1.5 py-0.5 rounded hover:bg-muted/60"
+                    className="absolute top-2 right-2 inline-flex min-h-6 min-w-6 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                   >
-                    ↗
+                    <span aria-hidden="true">↗</span>
                   </a>
                 </div>
                 );

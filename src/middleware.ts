@@ -63,7 +63,14 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 //  5. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
 //     requireAdminSession() call, and each page's own call, stay as
-//     defence in depth; this middleware is not the only check.
+//     defence in depth; this middleware is not the only check. Only /admin
+//     and /admin/* (any case) reach the session check. Any other path that
+//     falls through the public gates above (a mis-cased prefix such as
+//     /Konu/dunya or /GUNDEM/erdogan, or a dot-segment URL like
+//     /gundem/%2e%2e that the URL parser normalises to "/") gets
+//     notFoundRewrite — never NextResponse.next() and never the login
+//     redirect. The matcher is case-insensitive, which is why these paths
+//     reach this function at all.
 //
 //  6. /gundem/:key — the entity hubs (roadmap G2). The key space is the closed,
 //     curated vocabulary in src/lib/trends/rising-entities.ts (62 slugs), so
@@ -247,6 +254,14 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
     // Unknown keys (and any nested path, which includes a "/") get the real 404.
     return GUNDEM_KEYS.has(key) ? NextResponse.next() : notFoundRewrite(req);
   }
+
+  // Admin scope: only /admin and /admin/* (any case) may reach the session
+  // check below. Everything else that fell through the public gates (mis-cased
+  // /Konu/..., /GUNDEM/..., or a dot-segment URL normalised to "/") gets the
+  // real 404 instead of a 307 to the login page. Mis-cased admin paths stay in
+  // scope on purpose: they end at the session check, which fails closed.
+  const lower = pathname.toLowerCase();
+  if (lower !== "/admin" && !lower.startsWith("/admin/")) return notFoundRewrite(req);
 
   if (pathname === "/admin/login" || pathname.startsWith("/admin/login/")) {
     return NextResponse.next();
