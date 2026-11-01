@@ -408,6 +408,11 @@ describe("feed failure reporting (h10-silent-3)", () => {
     }
   }
 
+  /** Exact host or a subdomain of it (a bare suffix check would also match "evilteyit.org"). */
+  function isHostOf(host: string, domain: string): boolean {
+    return host === domain || host.endsWith(`.${domain}`);
+  }
+
   /** Route each feed through `behaviour`; unlisted publishers answer with an empty, valid feed. */
   function routeFeeds(
     behaviour: Partial<Record<"teyit" | "dogrulukpayi" | "malumatfurus", (url: string) => Response | Promise<Response>>>,
@@ -415,11 +420,11 @@ describe("feed failure reporting (h10-silent-3)", () => {
     fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
       const url = urlOf(input);
       const host = hostOf(url);
-      const key = host.endsWith("teyit.org")
+      const key = isHostOf(host, "teyit.org")
         ? "teyit"
-        : host.endsWith("dogrulukpayi.com")
+        : isHostOf(host, "dogrulukpayi.com")
           ? "dogrulukpayi"
-          : host.endsWith("malumatfurus.org")
+          : isHostOf(host, "malumatfurus.org")
             ? "malumatfurus"
             : null;
       const handler = key ? behaviour[key] : undefined;
