@@ -191,6 +191,13 @@ export function monthsBetween(first: string, last: string): string[] {
 
 const MONTH_FILE_RE = /^clusters-(\d{4})-(\d{2})\.xml$/;
 
+/** Last calendar year a month file is accepted for. The route handler maps a
+ *  parse failure to 404 but a valid month to a DB read, so without a ceiling
+ *  /sitemaps/clusters-9999-12.xml is "valid", reads nothing and (when the
+ *  read hiccups) answers 503. 2100 stays far beyond any real month while
+ *  keeping the parser pure (no clock): 2099-01 and 2100-12 still parse. */
+export const SITEMAP_LAST_YEAR = 2100;
+
 /** Parses a `/sitemaps/[file]` path segment. Returns `null` for anything
  *  that is not exactly one of the fixed files or a valid month file — this
  *  is also the path-traversal guard, since the regex is fully anchored and
@@ -207,10 +214,11 @@ export function parseSitemapFile(file: string): ParsedSitemapFile | null {
   const [, yearStr, monthStr] = match;
   const monthNum = Number(monthStr);
   if (monthNum < 1 || monthNum > 12) return null;
+  if (Number(yearStr) > SITEMAP_LAST_YEAR) return null;
 
   const month = `${yearStr}-${monthStr}`;
-  // No upper bound: a future month renders an empty urlset (keeps Date
-  // out of this pure, synchronous parser).
+  // No clock-based upper bound: a future month up to SITEMAP_LAST_YEAR renders
+  // an empty urlset (keeps Date out of this pure, synchronous parser).
   if (month < SITEMAP_FIRST_MONTH) return null;
 
   return { month };

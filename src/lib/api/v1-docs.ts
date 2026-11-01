@@ -333,7 +333,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
     summaryTr: "CORS ön-uçuş isteği",
     summaryEn: "CORS preflight request",
     notesTr: [],
-    params: [],
+    params: [ID_PARAM],
     responses: [
       {
         status: 204,
@@ -418,7 +418,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
     summaryTr: "CORS ön-uçuş isteği",
     summaryEn: "CORS preflight request",
     notesTr: [],
-    params: [],
+    params: [SLUG_PARAM],
     responses: [
       {
         status: 204,

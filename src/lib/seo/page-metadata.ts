@@ -2,7 +2,9 @@ import type { Metadata } from "next";
 
 // Metadata for static pages: the public, indexable ones (/durum, /metodoloji,
 // ...) via staticPageMetadata(), and the ones that stay out of the index
-// (/karsilastir, /takip, /saved, /diyetim) via noindexPageMetadata().
+// (/karsilastir, /takip, /saved, /diyetim) via noindexPageMetadata(). Dynamic
+// pages whose segment the page validates itself (/hafta/2026-W43,
+// /ekonomi/LYDHO) use sharePageMetadata().
 //
 // Why this sets openGraph / twitter / images explicitly: Next replaces the
 // parent's whole resolved `openGraph` and `twitter` objects when a page
@@ -39,16 +41,23 @@ type AlternateTypes = NonNullable<NonNullable<Metadata["alternates"]>["types"]>;
 // literals, so this only ever fails a test or the build.
 const PATH_RE = /^\/[a-z0-9/-]*$/;
 
-export function staticPageMetadata(input: {
+// The dynamic-page alphabet: PATH_RE plus upper case, for a segment such as
+// the ticker in "/ekonomi/LYDHO" or the ISO week in "/hafta/2026-W43". Still
+// no query, no fragment, no scheme, no dot, no percent-escape and no trailing
+// slash, so a path that passes is safe to put into og:url and the canonical.
+const SHARE_PATH_RE = /^\/[A-Za-z0-9/-]*$/;
+
+function hasTrailingSlash(path: string): boolean {
+  return path !== "/" && path.endsWith("/");
+}
+
+function buildShareMetadata(input: {
   title: string;
   description: string;
   path: string;
   alternateTypes?: AlternateTypes;
 }): Metadata {
   const { title, description, path, alternateTypes } = input;
-  if (!PATH_RE.test(path) || (path !== "/" && path.endsWith("/"))) {
-    throw new Error(`staticPageMetadata: invalid path ${path}`);
-  }
   const fullTitle = `${title}${SITE_TITLE_SUFFIX}`;
   return {
     title,
@@ -72,6 +81,45 @@ export function staticPageMetadata(input: {
       images: [{ url: "/twitter-image", ...ROOT_SHARE_IMAGE }],
     },
   };
+}
+
+export function staticPageMetadata(input: {
+  title: string;
+  description: string;
+  path: string;
+  alternateTypes?: AlternateTypes;
+}): Metadata {
+  if (!PATH_RE.test(input.path) || hasTrailingSlash(input.path)) {
+    throw new Error(`staticPageMetadata: invalid path ${input.path}`);
+  }
+  return buildShareMetadata(input);
+}
+
+/**
+ * Same output as staticPageMetadata() for a page whose path has a dynamic
+ * segment ("/hafta/2026-W43", "/ekonomi/LYDHO"): its own og:url, canonical,
+ * og/twitter title and the root share images, so a shared link unfurls as
+ * that page rather than as the homepage. Sets no robots.
+ *
+ * The caller must validate the dynamic segment BEFORE building the path (a
+ * parsed week key, a ticker shape check plus an existence probe) and return
+ * its own noindex metadata for anything else: the regex here only keeps the
+ * path structurally safe, it does not decide that the page exists.
+ *
+ * Never use it for a capability-URL page such as rapor/[token], whose path
+ * carries a credential: the token would land in og:url and the canonical.
+ * Those pages hand-write a bare `robots: { index: false }` instead; a guard
+ * test (tests/guards/static-page-metadata.test.ts) pins both rules.
+ */
+export function sharePageMetadata(input: {
+  title: string;
+  description: string;
+  path: string;
+}): Metadata {
+  if (!SHARE_PATH_RE.test(input.path) || hasTrailingSlash(input.path)) {
+    throw new Error(`sharePageMetadata: invalid path ${input.path}`);
+  }
+  return buildShareMetadata(input);
 }
 
 /**

@@ -18,6 +18,13 @@ import { resolve, dirname, join, relative, sep } from "node:path";
 // plus `robots: { index: false, follow }`, which keeps the og:url equal to the
 // canonical.
 //
+// Dynamic pages whose path segment is validated by the page itself (a parsed
+// ISO week key, a ticker shape) use sharePageMetadata() from the same file:
+// the same output as staticPageMetadata() but a path alphabet that allows
+// upper-case, so /ekonomi/LYDHO gets its own og:url instead of the homepage's.
+// They are pinned in SHARE_PAGES, and a completeness walk fails any other page
+// that writes a canonical without one of the helpers (or its own openGraph).
+//
 // Token pages (capability URLs such as rapor/[token]) are exempt from both
 // helpers on purpose: their path carries a credential, which must never reach
 // og:url or the canonical. They hand-write `robots: { index: false }` and
@@ -54,6 +61,15 @@ const NOINDEX_PAGES: Record<string, boolean> = {
   "offline/page.tsx": false,
   "saved/page.tsx": false,
   "takip/page.tsx": false,
+};
+
+// Dynamic-segment pages: generateMetadata validates the segment first, then
+// hands the path to sharePageMetadata(). The page must not hand-write the
+// openGraph / twitter blocks (or alternates) the helper owns. Value = the path
+// template the page must pass, derived from the file location.
+const SHARE_PAGES: Record<string, string> = {
+  "hafta/[hafta]/page.tsx": "/hafta/${hafta}",
+  "ekonomi/[ticker]/page.tsx": "/ekonomi/${ticker}",
 };
 
 // Capability-URL pages: the path carries a credential, so neither helper may
@@ -157,6 +173,31 @@ describe("static public pages use staticPageMetadata", () => {
     });
   });
 
+  describe.each(Object.entries(SHARE_PAGES))("%s (share page)", (rel, pathTemplate) => {
+    const source = readFileSync(join(APP, rel), "utf8");
+    const code = codeLines(source);
+
+    it("builds its metadata with sharePageMetadata()", () => {
+      expect(code.join("\n")).toMatch(/\bsharePageMetadata\(/);
+      expect(source).toMatch(/from "@\/lib\/seo\/page-metadata"/);
+    });
+
+    it("hand-writes no alternates / openGraph / twitter block", () => {
+      const offenders = code.filter((line) => /\b(alternates|openGraph|twitter):/.test(line));
+      expect(offenders).toEqual([]);
+    });
+
+    it("passes the route template derived from the file location as the path", () => {
+      expect(code.join("\n")).toContain(`path: \`${pathTemplate}\``);
+    });
+
+    it("exports generateMetadata (the segment is dynamic, so there is no static metadata)", () => {
+      expect(
+        code.some((line) => /export\s+(async\s+)?function\s+generateMetadata\b/.test(line)),
+      ).toBe(true);
+    });
+  });
+
   // A token must never reach og:url or the canonical: the capability URL is the
   // credential, so these pages hand-write a bare noindex block and stay off
   // both helpers.
@@ -177,8 +218,10 @@ describe("static public pages use staticPageMetadata", () => {
       expect(block).not.toMatch(/canonical:\s*["'`]/);
     });
 
-    it("calls neither staticPageMetadata nor noindexPageMetadata", () => {
-      expect(code.join("\n")).not.toMatch(/\b(staticPageMetadata|noindexPageMetadata)\b/);
+    it("calls none of staticPageMetadata, noindexPageMetadata and sharePageMetadata", () => {
+      expect(code.join("\n")).not.toMatch(
+        /\b(staticPageMetadata|noindexPageMetadata|sharePageMetadata)\b/,
+      );
     });
   });
 
@@ -259,6 +302,53 @@ describe("static public pages use staticPageMetadata", () => {
       const found = new Set(pages.map(({ rel }) => rel));
       const listed = [...PAGES, ...Object.keys(NOINDEX_PAGES), ...TOKEN_PAGES];
       expect(listed.filter((rel) => !found.has(rel))).toEqual([]);
+    });
+  });
+
+  // Every page.tsx under src/app (admin excluded), not only those exporting a
+  // static `metadata` const: a generateMetadata page that hand-writes a
+  // canonical without openGraph / twitter unfurls as the homepage.
+  describe("canonical completeness walk (generateMetadata pages included)", () => {
+    const allPages = walkPages(APP)
+      .map((file) => ({
+        rel: appRel(file),
+        code: codeLines(readFileSync(file, "utf8")).join("\n"),
+      }))
+      .filter(({ rel }) => !rel.startsWith("admin/"));
+
+    const writesCanonical = (code: string) => /\bcanonical:\s*[`"']/.test(code);
+    const usesHelper = (code: string) =>
+      /\b(staticPageMetadata|noindexPageMetadata|sharePageMetadata)\(/.test(code);
+    const handWritesOpenGraph = (code: string) => /\bopenGraph:/.test(code);
+
+    it("every page that writes a canonical also builds its own og/twitter identity", () => {
+      const offenders = allPages
+        .filter(
+          ({ code }) => writesCanonical(code) && !usesHelper(code) && !handWritesOpenGraph(code),
+        )
+        .map(({ rel }) => rel);
+      expect(
+        offenders,
+        `a page-level canonical without staticPageMetadata / noindexPageMetadata / sharePageMetadata (or its own openGraph) unfurls as the homepage: ${offenders.join(", ")}`,
+      ).toEqual([]);
+    });
+
+    it("every page using sharePageMetadata is a key of SHARE_PAGES", () => {
+      const unlisted = allPages
+        .filter(({ code }) => /\bsharePageMetadata\(/.test(code))
+        .map(({ rel }) => rel)
+        .filter((rel) => !(rel in SHARE_PAGES));
+      expect(unlisted, `new share page: add it to SHARE_PAGES (${unlisted.join(", ")})`).toEqual([]);
+    });
+
+    it("finds every SHARE_PAGES entry (the walk and the list agree)", () => {
+      const found = new Set(allPages.map(({ rel }) => rel));
+      expect(Object.keys(SHARE_PAGES).filter((rel) => !found.has(rel))).toEqual([]);
+    });
+
+    it("scanner sanity check: the walk sees the helper pages and the known canonical writers", () => {
+      expect(allPages.filter(({ code }) => writesCanonical(code)).length).toBeGreaterThan(0);
+      expect(allPages.filter(({ code }) => usesHelper(code)).length).toBeGreaterThanOrEqual(20);
     });
   });
 });

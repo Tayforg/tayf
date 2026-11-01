@@ -17,6 +17,11 @@ import {
   type ClusterBundle,
   type PoliticsClustersResult,
 } from "@/lib/clusters/politics-query";
+import {
+  archiveHeading,
+  searchTokens,
+  titleMatchesTokens,
+} from "@/lib/clusters/in-feed-match";
 import { searchClusters } from "@/lib/clusters/search-query";
 import { composeSearchView } from "@/lib/clusters/search-view";
 import {
@@ -38,26 +43,41 @@ import {
 // `searchClusters()` both degrade to a retry affordance instead of
 // throwing (see FeedUnavailable / SearchUnavailable below).
 
-// Self-canonical for /?page=N (N > 1, clamped to the last page). Without
-// this, the layout's canonical "/" told crawlers page 2 duplicates page 1.
-// Metadata merges shallowly, so `types` (the layout's RSS alternate) is
-// repeated or it would be dropped. Any failure returns {} (inherit "/") —
-// metadata must never throw into the error boundary.
+// Next supplies string[] for a repeated ?q= / ?page=, not just string. The
+// page reads the first value, trimmed; blank means "no search". Shared by
+// generateMetadata and HomeFeed so the two can never disagree about whether a
+// request is a search.
+function firstQuery(raw: string | string[] | undefined): string | undefined {
+  const first = Array.isArray(raw) ? raw[0] : raw;
+  return first?.trim() || undefined;
+}
+
+// A search results page ("/?q=...") is noindex,follow: the URL space is
+// unbounded and the content is a filtered view of the feed, not a page of its
+// own. Nothing else is returned, so the canonical stays the layout's "/" (the
+// robots object replaces the layout's wholesale: metadata merges shallowly).
+// Otherwise: self-canonical for /?page=N (N > 1, clamped to the last page).
+// Without this, the layout's canonical "/" told crawlers page 2 duplicates
+// page 1. `types` (the layout's RSS alternate) is repeated or it would be
+// dropped. Any failure returns {} (inherit "/") — metadata must never throw
+// into the error boundary.
 export async function generateMetadata({
   searchParams,
 }: {
   searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
 }): Promise<Metadata> {
-  const { q, page: pageRaw } = await searchParams;
+  const { q: qRaw, page: pageRaw } = await searchParams;
+  const q = firstQuery(qRaw);
+  if (q) return { robots: { index: false, follow: true } };
   const page = parseHomePage(pageRaw);
-  if (page <= 1 || (Array.isArray(q) ? q[0] : q)?.trim()) return {};
+  if (page <= 1) return {};
   let rankedCount: number | null = null;
   try {
     rankedCount = rankedCountOf(await getPoliticsClusters());
   } catch {
     rankedCount = null;
   }
-  const canonical = homeCanonicalPath({ q, page, rankedCount });
+  const canonical = homeCanonicalPath({ page, rankedCount });
   if (!canonical) return {};
   return {
     alternates: {
@@ -142,7 +162,7 @@ function renderClusterCard(
 export default function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; page?: string }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
 }) {
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
@@ -217,10 +237,10 @@ async function loadFeed(): Promise<PoliticsClustersResult | null> {
 export async function HomeFeed({
   searchParams,
 }: {
-  searchParams: Promise<{ q?: string; page?: string }>;
+  searchParams: Promise<{ q?: string | string[]; page?: string | string[] }>;
 }) {
   const { q: qRaw, page: pageRaw } = await searchParams;
-  const q = qRaw?.trim() || undefined;
+  const q = firstQuery(qRaw);
   const page = parseHomePage(pageRaw);
 
   // Neither fetch depends on the other — run them in parallel. `search` is
@@ -249,15 +269,17 @@ export async function HomeFeed({
 
   const { bundles, breakingBundles } = feed;
 
-  // Filter by Turkish-lowercased substring of the cluster title. We use
-  // toLocaleLowerCase("tr") so dotted/dotless I are folded the way a
-  // Turkish reader expects ("İstanbul" matches "istanbul").
-  const needle = q?.toLocaleLowerCase("tr");
-  const matchesNeedle = (b: ClusterBundle) =>
-    !needle || b.cluster.title_tr.toLocaleLowerCase("tr").includes(needle);
+  // Filter by word-start tokens of the cluster title (in-feed-match.ts):
+  // every query word must start a word of the title, in any order, with
+  // Turkish casing and dotted/dotless I folded ("ISTANBUL" matches
+  // "İstanbul'da", "ak" matches "AK Parti" but not "dakikaya"). Quotes,
+  // `or` and -negations are ignored; the archive RPC interprets those.
+  const tokens = q ? searchTokens(q.slice(0, 200)) : null;
+  const matchesQuery = (b: ClusterBundle) =>
+    tokens === null || titleMatchesTokens(b.cluster.title_tr, tokens);
 
-  const filteredBreaking = breakingBundles.filter(matchesNeedle);
-  const filtered = bundles.filter(matchesNeedle);
+  const filteredBreaking = breakingBundles.filter(matchesQuery);
+  const filtered = bundles.filter(matchesQuery);
 
   // Dedupe: a cluster that's both "breaking" (< 2h) AND in the top-30
   // ranked set would otherwise render twice. The Son Dakika strip wins
@@ -430,7 +452,7 @@ export async function HomeFeed({
             <section className="space-y-3">
               <div className="flex items-center gap-3">
                 <h2 className="font-serif text-sm font-semibold uppercase tracking-wider text-muted-foreground">
-                  Arşivden: {view.archive.length} sonuç
+                  {archiveHeading(view.archive.length, view.archiveCapped)}
                 </h2>
                 <div className="h-px flex-1 bg-gradient-to-r from-brand/30 to-transparent" />
               </div>

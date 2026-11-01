@@ -44,13 +44,19 @@ describe("composeSearchView", () => {
       archive: [],
       archiveUnavailable: false,
       emptySearch: false,
+      archiveCapped: false,
     });
   });
 
   it("search null (query too short): archive [], archiveUnavailable false, emptySearch = inFeedIds.size === 0", () => {
     expect(
       composeSearchView({ q: "a", page: 1, inFeedIds: new Set(), search: null }),
-    ).toEqual({ archive: [], archiveUnavailable: false, emptySearch: true });
+    ).toEqual({
+      archive: [],
+      archiveUnavailable: false,
+      emptySearch: true,
+      archiveCapped: false,
+    });
 
     expect(
       composeSearchView({
@@ -59,7 +65,12 @@ describe("composeSearchView", () => {
         inFeedIds: new Set(["x"]),
         search: null,
       }),
-    ).toEqual({ archive: [], archiveUnavailable: false, emptySearch: false });
+    ).toEqual({
+      archive: [],
+      archiveUnavailable: false,
+      emptySearch: false,
+      archiveCapped: false,
+    });
   });
 
   it("search.ok false: archive [], archiveUnavailable true, emptySearch false", () => {
@@ -70,7 +81,12 @@ describe("composeSearchView", () => {
         inFeedIds: new Set(),
         search: { ok: false },
       }),
-    ).toEqual({ archive: [], archiveUnavailable: true, emptySearch: false });
+    ).toEqual({
+      archive: [],
+      archiveUnavailable: true,
+      emptySearch: false,
+      archiveCapped: false,
+    });
   });
 
   it("ok + page 1: archive filters out in-feed ids", () => {
@@ -114,5 +130,80 @@ describe("composeSearchView", () => {
     });
     expect(view.emptySearch).toBe(false);
     expect(view.archive).toHaveLength(1);
+  });
+
+  it("ok + page 1 + capped + non-empty archive: archiveCapped true", () => {
+    const view = composeSearchView({
+      q: "deprem",
+      page: 1,
+      inFeedIds: new Set(),
+      search: { ok: true, bundles: [mkBundle("a")], capped: true },
+    });
+    expect(view).toEqual({
+      archive: [expect.objectContaining({ cluster: expect.objectContaining({ id: "a" }) })],
+      archiveUnavailable: false,
+      emptySearch: false,
+      archiveCapped: true,
+    });
+  });
+
+  it("ok + page 1 + capped, in-feed ids filtered but some archive left: archiveCapped true", () => {
+    const view = composeSearchView({
+      q: "deprem",
+      page: 1,
+      inFeedIds: new Set(["a"]),
+      search: { ok: true, bundles: [mkBundle("a"), mkBundle("b")], capped: true },
+    });
+    expect(view.archive.map((b) => b.cluster.id)).toEqual(["b"]);
+    expect(view.archiveCapped).toBe(true);
+  });
+
+  it("ok + page 2: archiveCapped false even when capped", () => {
+    const view = composeSearchView({
+      q: "deprem",
+      page: 2,
+      inFeedIds: new Set(),
+      search: { ok: true, bundles: [mkBundle("a")], capped: true },
+    });
+    expect(view.archive).toEqual([]);
+    expect(view.archiveCapped).toBe(false);
+  });
+
+  it("capped but the archive is empty (all in feed, or none): archiveCapped false", () => {
+    expect(
+      composeSearchView({
+        q: "deprem",
+        page: 1,
+        inFeedIds: new Set(["a"]),
+        search: { ok: true, bundles: [mkBundle("a")], capped: true },
+      }).archiveCapped,
+    ).toBe(false);
+    expect(
+      composeSearchView({
+        q: "deprem",
+        page: 1,
+        inFeedIds: new Set(),
+        search: { ok: true, bundles: [], capped: true },
+      }).archiveCapped,
+    ).toBe(false);
+  });
+
+  it("not capped, or capped missing: archiveCapped false", () => {
+    expect(
+      composeSearchView({
+        q: "deprem",
+        page: 1,
+        inFeedIds: new Set(),
+        search: { ok: true, bundles: [mkBundle("a")], capped: false },
+      }).archiveCapped,
+    ).toBe(false);
+    expect(
+      composeSearchView({
+        q: "deprem",
+        page: 1,
+        inFeedIds: new Set(),
+        search: { ok: true, bundles: [mkBundle("a")] },
+      }).archiveCapped,
+    ).toBe(false);
   });
 });

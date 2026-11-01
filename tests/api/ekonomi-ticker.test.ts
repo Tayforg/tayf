@@ -298,6 +298,46 @@ describe("generateMetadata — neutral title for a ticker with no coverage", () 
     const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "asels" }) });
     expect(metadata.title).toBe("ASELS — hisse haberleri ve KAP bildirimleri");
   });
+
+  // Share identity: without its own openGraph/twitter, a shared
+  // /ekonomi/LYDHO link unfurled with the homepage's og:url '/' and title.
+  it("gives a confirmed ticker its own og:url, og:title and twitter card (not the homepage's)", async () => {
+    probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "lydho" }) });
+
+    const title = "LYDHO — hisse haberleri ve KAP bildirimleri";
+    expect(metadata.alternates?.canonical).toBe("/ekonomi/LYDHO");
+    expect(metadata.openGraph).toMatchObject({
+      url: "/ekonomi/LYDHO",
+      title: `${title} — Tayf`,
+    });
+    expect(metadata.twitter).toMatchObject({
+      card: "summary_large_image",
+      title: `${title} — Tayf`,
+    });
+    expect(metadata.openGraph?.description).toBe(metadata.description);
+    expect(metadata.robots).toBeUndefined();
+  });
+
+  it("keeps the root share images on a confirmed ticker", async () => {
+    probeState.company = { data: [{ kap_member_oid: "kap-1" }], error: null };
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "LYDHO" }) });
+    const og = metadata.openGraph as { images?: { url: string }[] } | null | undefined;
+    const tw = metadata.twitter as { images?: { url: string }[] } | null | undefined;
+    expect(og?.images?.[0]?.url).toBe("/opengraph-image");
+    expect(tw?.images?.[0]?.url).toBe("/twitter-image");
+  });
+
+  it("does not give the not-found or unknown shells an og:url (they stay noindex and unshared)", async () => {
+    const missing = await generateMetadata({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+    expect(missing.openGraph).toBeUndefined();
+    expect(missing.twitter).toBeUndefined();
+
+    probeState.company = { data: null, error: TIMEOUT };
+    const unknown = await generateMetadata({ params: Promise.resolve({ ticker: "ASELS" }) });
+    expect(unknown.openGraph).toBeUndefined();
+    expect(unknown.twitter).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

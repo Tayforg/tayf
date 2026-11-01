@@ -1,8 +1,10 @@
 import { NextResponse, type NextFetchEvent, type NextRequest } from "next/server";
 
+import { API_V1_ERROR_HEADERS } from "@/lib/api/v1-cors";
 import { createMergedClusterGate } from "@/lib/seo/merged-cluster-gate";
 import { createSourceSlugGate } from "@/lib/seo/source-slug-gate";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
+import { isServableWeekKey } from "@/lib/weekly/week-key";
 
 // Edge middleware — runs before any response commits, so (unlike a
 // notFound()/redirect() thrown from inside a cacheComponents/PPR page or
@@ -83,6 +85,34 @@ import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 //     single literal segment '/gundem/:key', never ':path*'; the index page
 //     /gundem is static and stays unmatched.
 //
+//  7. /hafta/:hafta — the ISO-week archive. A key that is not 'YYYY-Www', is
+//     before WEEK_ARCHIVE_FIRST ('2026-W38') or is after the current Istanbul
+//     week (/hafta/garbage, /hafta/2026-W4, /hafta/2026-w44, /hafta/2099-W01)
+//     rewrites to the not-found sink instead of streaming a 200 shell, for the
+//     same PPR reason as /konu/:slug. isServableWeekKey comes from
+//     src/lib/weekly/week-key.ts, a pure module with no imports (pinned by its
+//     test), so it adds no next/cache or Supabase code to the Edge bundle. The
+//     page's own notFound() stays as defence in depth. The rolling /hafta page
+//     is static and stays unmatched; the matcher is the single literal segment
+//     '/hafta/:hafta', never ':path*'.
+//
+//  8. Malformed percent-encoding — /api/v1/clusters/:id, /api/v1/sources/:slug/
+//     profile, /api/sources/:slug, /embed/cluster/:id and /rss/:topic. A
+//     segment such as %ff makes decodeURIComponent throw a URIError inside the
+//     route handler, which used to surface as a 500. Here the same decode is
+//     tried once and a failure answers 400 (a JSON body on the two API
+//     surfaces, text/plain on /embed and /rss; /api/v1 carries the CORS +
+//     cache headers of apiV1Headers minus X-Tayf-Tier, see
+//     src/lib/api/v1-cors.ts). A well-formed path returns NextResponse.next()
+//     and does no other work: no auth, no rate limit, no I/O. The /embed frame
+//     headers come from next.config (buildSecurityHeaders) and are untouched.
+//     tests/guards/middleware-matcher.test.ts pins that every matcher entry has
+//     its pathname.startsWith() branch above the admin-scope check, so a new
+//     matcher can never silently 404 a whole surface.
+//
+// The only clock read is Date.now() in gate 7. It runs per request in the Edge
+// middleware, never during prerender, and nothing here does any I/O.
+//
 // Why /cluster/:id stays shape-only (no existence check), and why the
 // investigation says a page-level fix cannot work: under cacheComponents,
 // runtime `params` must be read inside a Suspense boundary. src/app/
@@ -122,6 +152,12 @@ export const config = {
     "/cluster/:id",
     "/source/:slug",
     "/gundem/:key",
+    "/hafta/:hafta",
+    "/api/v1/clusters/:id",
+    "/api/v1/sources/:slug/profile",
+    "/api/sources/:slug",
+    "/embed/cluster/:id",
+    "/rss/:topic",
   ],
 };
 
@@ -146,6 +182,33 @@ const ADMIN_COOKIE_NAME = "admin_session";
 
 function notFoundRewrite(req: NextRequest): NextResponse {
   return NextResponse.rewrite(new URL(NOT_FOUND_REWRITE_PATH, req.url));
+}
+
+const BAD_ENCODING_MESSAGE = "Bad request: malformed URL encoding";
+const BAD_ENCODING_JSON = JSON.stringify({ error: BAD_ENCODING_MESSAGE });
+
+/** "v1": /api/v1 JSON with the apiV1 CORS set; "json": /api/sources JSON;
+ * "text": /embed and /rss plain text. All are 400 and uncacheable. */
+type BadEncodingKind = "v1" | "json" | "text";
+
+function badEncoding(kind: BadEncodingKind): NextResponse {
+  if (kind === "v1") {
+    return new NextResponse(BAD_ENCODING_JSON, { status: 400, headers: { ...API_V1_ERROR_HEADERS } });
+  }
+  if (kind === "json") {
+    return new NextResponse(BAD_ENCODING_JSON, {
+      status: 400,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+    });
+  }
+  return new NextResponse(BAD_ENCODING_MESSAGE, {
+    status: 400,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Robots-Tag": "noindex",
+    },
+  });
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -253,6 +316,33 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
     const key = pathname.slice("/gundem/".length);
     // Unknown keys (and any nested path, which includes a "/") get the real 404.
     return GUNDEM_KEYS.has(key) ? NextResponse.next() : notFoundRewrite(req);
+  }
+
+  if (pathname.startsWith("/hafta/")) {
+    const key = pathname.slice("/hafta/".length);
+    // Bad shape, before launch, future week and any nested path (a "/" never
+    // parses) get the real 404; the page keeps its own notFound() as a backstop.
+    return isServableWeekKey(key, Date.now()) ? NextResponse.next() : notFoundRewrite(req);
+  }
+
+  if (
+    pathname.startsWith("/api/v1/clusters/") ||
+    pathname.startsWith("/api/v1/sources/") ||
+    pathname.startsWith("/api/sources/") ||
+    pathname.startsWith("/embed/cluster/") ||
+    pathname.startsWith("/rss/")
+  ) {
+    try {
+      decodeURIComponent(pathname);
+    } catch {
+      const kind: BadEncodingKind = pathname.startsWith("/api/v1/")
+        ? "v1"
+        : pathname.startsWith("/api/")
+          ? "json"
+          : "text";
+      return badEncoding(kind);
+    }
+    return NextResponse.next();
   }
 
   // Admin scope: only /admin and /admin/* (any case) may reach the session

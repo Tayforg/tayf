@@ -32,7 +32,41 @@ describe("home generateMetadata", () => {
     expect(await generateMetadata(sp({}))).toEqual({});
     expect(await generateMetadata(sp({ page: "1" }))).toEqual({});
     expect(await generateMetadata(sp({ page: "abc" }))).toEqual({});
-    expect(await generateMetadata(sp({ q: "x", page: "2" }))).toEqual({});
+  });
+
+  it("marks every search noindex,follow and nothing else (canonical stays the layout's)", async () => {
+    const noindex = { robots: { index: false, follow: true } };
+    expect(await generateMetadata(sp({ q: "x" }))).toEqual(noindex);
+    expect(await generateMetadata(sp({ q: ["x", "y"] }))).toEqual(noindex);
+    expect(await generateMetadata(sp({ q: "x", page: "2" }))).toEqual(noindex);
+    expect(await generateMetadata(sp({ q: ["x", "y"], page: ["2"] }))).toEqual(
+      noindex,
+    );
+    expect(await generateMetadata(sp({ q: "seçim erdoğan" }))).toEqual(noindex);
+    expect(await generateMetadata(sp({ q: [" x "] }))).toEqual(noindex);
+  });
+
+  it("does not return alternates for a search, so the layout canonical applies", async () => {
+    const md = await generateMetadata(sp({ q: "x", page: "2" }));
+    expect(md.alternates).toBeUndefined();
+  });
+
+  it("treats a blank q as no search: page 2 still gets its self-canonical", async () => {
+    const blanks: (string | string[])[] = ["  ", [""], ["  "], []];
+    for (const q of blanks) {
+      const md = await generateMetadata(sp({ q, page: "2" }));
+      expect(md.robots).toBeUndefined();
+      expect(md.alternates?.canonical).toBe("/?page=2");
+    }
+  });
+
+  it("does not make a blank q noindex on page 1", async () => {
+    expect(await generateMetadata(sp({ q: "   " }))).toEqual({});
+    expect(await generateMetadata(sp({ q: [] }))).toEqual({});
+  });
+
+  it("uses the first q of an array: a blank first value is not a search", async () => {
+    expect(await generateMetadata(sp({ q: ["", "x"] }))).toEqual({});
   });
 
   it("is self-canonical for page 2 with 20 ranked bundles and keeps the RSS alternate", async () => {
@@ -72,6 +106,7 @@ describe("home generateMetadata", () => {
   it("does not hit the feed for page 1 or a search", async () => {
     await generateMetadata(sp({}));
     await generateMetadata(sp({ q: "x", page: "2" }));
+    await generateMetadata(sp({ q: ["x", "y"], page: "2" }));
     expect(getPoliticsClusters).not.toHaveBeenCalled();
   });
 });

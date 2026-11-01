@@ -222,8 +222,17 @@ describe("parseSitemapFile", () => {
     expect(parseSitemapFile("hubsxml")).toBeNull();
   });
 
-  it("does not upper-bound a future month", () => {
+  it("does not upper-bound a future month within the year cap", () => {
     expect(parseSitemapFile("clusters-2099-01.xml")).toEqual({ month: "2099-01" });
+  });
+
+  it("caps the year at 2100 so an absurd year is a 404, not a 503 from a pointless DB read", () => {
+    expect(parseSitemapFile("clusters-2100-12.xml")).toEqual({ month: "2100-12" });
+    expect(parseSitemapFile("clusters-2100-01.xml")).toEqual({ month: "2100-01" });
+    expect(parseSitemapFile("clusters-2101-01.xml")).toBeNull();
+    expect(parseSitemapFile("clusters-9999-12.xml")).toBeNull();
+    // The regex admits exactly four year digits, so five is not a month file.
+    expect(parseSitemapFile("clusters-10000-01.xml")).toBeNull();
   });
 });
 

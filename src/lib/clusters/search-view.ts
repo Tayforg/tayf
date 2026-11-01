@@ -12,6 +12,12 @@ export interface SearchView {
   archive: ClusterBundle[];
   archiveUnavailable: boolean;
   emptySearch: boolean;
+  /**
+   * The archive search filled its page (SEARCH_LIMIT), so more matches may
+   * exist than are listed. True only on page 1 of an ok search that has at
+   * least one archive row left after the in-feed filter.
+   */
+  archiveCapped: boolean;
 }
 
 /**
@@ -30,7 +36,12 @@ export function composeSearchView({
   search,
 }: ComposeSearchViewArgs): SearchView {
   if (!q) {
-    return { archive: [], archiveUnavailable: false, emptySearch: false };
+    return {
+      archive: [],
+      archiveUnavailable: false,
+      emptySearch: false,
+      archiveCapped: false,
+    };
   }
 
   if (search === null) {
@@ -38,11 +49,17 @@ export function composeSearchView({
       archive: [],
       archiveUnavailable: false,
       emptySearch: inFeedIds.size === 0,
+      archiveCapped: false,
     };
   }
 
   if (!search.ok) {
-    return { archive: [], archiveUnavailable: true, emptySearch: false };
+    return {
+      archive: [],
+      archiveUnavailable: true,
+      emptySearch: false,
+      archiveCapped: false,
+    };
   }
 
   const archive =
@@ -54,5 +71,6 @@ export function composeSearchView({
     archive,
     archiveUnavailable: false,
     emptySearch: inFeedIds.size === 0 && archive.length === 0,
+    archiveCapped: page === 1 && search.capped === true && archive.length > 0,
   };
 }

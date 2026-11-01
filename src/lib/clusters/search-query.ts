@@ -2,7 +2,11 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
 import { createReaderClient } from "@/lib/supabase/server";
-import { turkishQueryVariants } from "./turkish-query";
+import {
+  foldTr,
+  normaliseSearchQuery,
+  turkishQueryVariants,
+} from "./turkish-query";
 import { getZoneFeedHealth } from "./feed-health";
 import {
   buildClusterBundle,
@@ -13,32 +17,55 @@ import {
 } from "./politics-query";
 
 // Full-text archive search over ALL clusters (migration 035's `search_tsv`
-// generated tsvector column). Reader-typed queries are Turkish-aware: the
-// query text is turned into up to 3 candidate lexeme spellings
-// (turkish-query.ts) and resolved against the GIN index through the 083
-// migration's `search_cluster_ids` RPC, which returns matching ids ONLY —
-// no per-candidate lateral embed runs before the sort/limit (see 083's
-// header for why an ids-first two-step beats the single embedded-select
-// shape the audit measured at up to 11s).
+// generated tsvector column plus migration 129's folded GIN index). The
+// reader-typed query is cleaned first (`normaliseSearchQuery`: control
+// characters out, an apostrophe suffix like Erdoğan'ın dropped), then sent to
+// the `search_cluster_ids` RPC twice over:
+//   - `p_variants`: up to 3 Turkish-aware lexeme spellings (turkish-query.ts)
+//     matched against `search_tsv`, the spellings the en_US lower() can store;
+//   - `p_folded`: the ASCII-folded query (`foldTr`, the twin of 129's
+//     `tayf_search_fold`) matched against the folded index, so 'sisli' finds
+//     Şişli and 'cumhurbaskani' finds Cumhurbaşkanı.
+// The RPC returns matching ids ONLY — no per-candidate lateral embed runs
+// before the sort/limit (see 083's header for why an ids-first two-step beats
+// the single embedded-select shape the audit measured at up to 11s).
 //
-// Deliberately no R1 importance ranking here (no scoring, no politics-
-// majority gate) — a plain "most-corroborated, most-recent" ordering
-// (delegated to the RPC's ORDER BY) is enough for an archive search. Rows
-// are turned into bundles via politics-query's shared `buildClusterBundle`
-// so ClusterCard renders them identically to the main feed.
-const SEARCH_LIMIT = 12;
+// The archive is ranked, not "most-corroborated": clusters whose folded title
+// contains the query as a word-start literal come first, then relevance plus
+// recency; article_count is only a tie-break (129's header has the weights).
+// The cost of one call is bounded in the database (129's header, BOUNDED WORK):
+// the folded match carries no phrase operator, and only the 1000 most recently
+// updated matches are scored, so an anonymous reader cannot make a broad or
+// quoted query expensive.
+// There is still no R1 importance ranking here (no politics-majority gate).
+// Rows are turned into bundles via politics-query's shared
+// `buildClusterBundle` so ClusterCard renders them identically to the main
+// feed.
+//
+// Deploy order: if the app ships before migration 129, PostgREST answers
+// PGRST202 for the 3-arg call and `fetchSearchClusters` falls back once to
+// 083's 2-arg function (no folding, no ranking), so there is no outage.
+export const SEARCH_LIMIT = 24;
 const MIN_QUERY_LENGTH = 2;
 // Bounds the cache key: a per-query cache entry compounds with
 // search-as-you-type prefixes, so an unbounded query string would let a
 // pathological/malicious input balloon the cache-key space.
 const MAX_QUERY_LENGTH = 200;
 
+// `capped` = the RPC filled its page (SEARCH_LIMIT ids), so the archive may
+// hold more matches than were returned. Optional so callers and mocks that
+// predate it still compile; `composeSearchView` reads it as `=== true`.
 export type SearchResult =
-  | { ok: true; bundles: ClusterBundle[] }
+  | { ok: true; bundles: ClusterBundle[]; capped?: boolean }
   | { ok: false };
 
 interface SearchIdRow {
   id: string;
+}
+
+interface SearchFetch {
+  bundles: ClusterBundle[];
+  capped: boolean;
 }
 
 // Internal, UNCACHED implementation. THROWS on a Supabase error/exception
@@ -46,17 +73,30 @@ interface SearchIdRow {
 // "use cache" directive so it can be called twice: once (wrapped by
 // `attemptCached`) inside the cache boundary below, and once more, live,
 // as `searchClusters`' retry on a cache-attempt failure. `trimmed` is
-// already length-checked by `searchClusters` before this is ever called.
-async function fetchSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
+// already normalised and length-checked by `searchClusters` before this is
+// ever called.
+async function fetchSearchClusters(trimmed: string): Promise<SearchFetch> {
   const variants = turkishQueryVariants(trimmed);
-  if (variants.length === 0) return [];
+  if (variants.length === 0) return { bundles: [], capped: false };
 
   const supabase = createReaderClient();
 
-  const { data, error } = await supabase.rpc("search_cluster_ids", {
+  let res = await supabase.rpc("search_cluster_ids", {
     p_variants: variants,
+    p_folded: foldTr(trimmed),
     p_limit: SEARCH_LIMIT,
   });
+  // PGRST202 = the 3-arg function is not in PostgREST's schema cache, i.e.
+  // migration 129 is not applied yet. Only then fall back, once, to 083's
+  // 2-arg function (same pattern as entity-hub-query.ts); any other error
+  // keeps the throw-and-retry path below.
+  if (res.error?.code === "PGRST202") {
+    res = await supabase.rpc("search_cluster_ids", {
+      p_variants: variants,
+      p_limit: SEARCH_LIMIT,
+    });
+  }
+  const { data, error } = res;
 
   if (error) {
     throw new Error(`[clusters] search-query error: ${error.message}`);
@@ -64,7 +104,8 @@ async function fetchSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
 
   const idRows = (data ?? []) as SearchIdRow[];
   const ids = idRows.map((r) => r.id);
-  if (ids.length === 0) return [];
+  if (ids.length === 0) return { bundles: [], capped: false };
+  const capped = ids.length >= SEARCH_LIMIT;
 
   // Same feed-health gate as politics-query.ts's fetchPoliticsClusters,
   // fetched once per search — so search-result cards (which render the
@@ -98,7 +139,7 @@ async function fetchSearchClusters(trimmed: string): Promise<ClusterBundle[]> {
     if (members.length === 0) continue;
     bundles.push(buildClusterBundle(row, members, health).bundle);
   }
-  return bundles;
+  return { bundles, capped };
 }
 
 // Build-safety: `attemptCached` swallows whatever `fetchSearchClusters`
@@ -132,27 +173,37 @@ async function cachedSearchClusters(trimmed: string) {
   return r;
 }
 
-// Public entry point. `q` becomes part of the cached function's key
-// automatically, so each distinct search term gets its own cache entry
-// under the same `cluster-feed` TTL as the main feed. On a cache-attempt
-// failure this retries the query live once (bypassing the cache boundary
-// entirely, never memoising a failure) before giving up — distinguishing
-// "no results" (`{ ok: true, bundles: [] }`) from "still failing"
-// (`{ ok: false }`, never logging `q` itself — it's reader-typed input) so
-// HomeFeed only shows a retry affordance on a genuine, still-failing
-// outage. Never throws.
+// Public entry point. The normalised query becomes part of the cached
+// function's key automatically, so each distinct search term gets its own cache
+// entry under the same `cluster-feed` TTL as the main feed (and "Erdoğan'ın"
+// and "Erdoğan" share one). A query that is only control characters, or shorter
+// than MIN_QUERY_LENGTH after normalising, is "too short": { ok: true,
+// bundles: [] } with no RPC call — never { ok: false }, which HomeFeed shows as
+// a false "zaman aşımı". On a cache-attempt failure this retries the query live
+// once (bypassing the cache boundary entirely, never memoising a failure)
+// before giving up — distinguishing "no results" (`{ ok: true, bundles: [] }`)
+// from "still failing" (`{ ok: false }`, never logging `q` itself — it's
+// reader-typed input) so HomeFeed only shows a retry affordance on a genuine,
+// still-failing outage. Never throws.
 export async function searchClusters(q: string): Promise<SearchResult> {
-  const trimmed = q.trim().slice(0, MAX_QUERY_LENGTH);
-  if (trimmed.length < MIN_QUERY_LENGTH) {
+  const normalised = normaliseSearchQuery(q)
+    .slice(0, MAX_QUERY_LENGTH)
+    // The cap can land between the halves of a surrogate pair; a lone high
+    // surrogate would not survive the JSON body to Postgres.
+    .replace(/[\ud800-\udbff]$/, "")
+    .trim();
+  if (normalised.length < MIN_QUERY_LENGTH) {
     return { ok: true, bundles: [] };
   }
 
-  const attempt = await cachedSearchClusters(trimmed);
-  if (attempt.ok) return { ok: true, bundles: attempt.data };
+  const attempt = await cachedSearchClusters(normalised);
+  if (attempt.ok) {
+    return { ok: true, bundles: attempt.data.bundles, capped: attempt.data.capped };
+  }
 
   try {
-    const bundles = await fetchSearchClusters(trimmed);
-    return { ok: true, bundles };
+    const { bundles, capped } = await fetchSearchClusters(normalised);
+    return { ok: true, bundles, capped };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(`[clusters] search-query failed: ${message}`);

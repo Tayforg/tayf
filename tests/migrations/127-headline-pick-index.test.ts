@@ -251,8 +251,11 @@ describe("127 index definitions", () => {
   });
 
   it("does not duplicate or shadow an index from an earlier migration", () => {
+    // Only migrations that really are earlier: the zero-padded file names sort
+    // lexicographically, and a later migration (129 builds its own clusters
+    // index over title_tr_neutral) must not be read as prior art for 127.
     const earlier = readdirSync(MIGRATIONS_DIR)
-      .filter((f) => f.endsWith(".sql") && f !== MIGRATION_127_FILE)
+      .filter((f) => f.endsWith(".sql") && f < MIGRATION_127_FILE)
       .sort();
     expect(earlier.length).toBeGreaterThan(100);
     const clustersIndexes: { file: string; name: string; stmt: string }[] = [];

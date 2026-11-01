@@ -39,7 +39,11 @@ const fixture = vi.hoisted(() => ({
   throwOnQuery: false,
   lastState: null as unknown,
   rpcIds: [] as string[],
-  rpcError: null as { message: string } | null,
+  rpcError: null as { message: string; code?: string } | null,
+  // Error returned ONLY to the 3-arg call (the one carrying p_folded), so a
+  // test can model "migration 129 not applied yet" without failing the
+  // 2-arg fallback.
+  rpcErrorThreeArg: null as { message: string; code?: string } | null,
   rpcThrows: false,
   rpcCalls: [] as unknown[],
 }));
@@ -58,6 +62,9 @@ const supabaseFake = await vi.hoisted(async () => {
       search_cluster_ids: (args: unknown) => {
         fixture.rpcCalls.push(args);
         if (fixture.rpcThrows) throw new Error("rpc connection reset");
+        if (fixture.rpcErrorThreeArg && "p_folded" in (args as object)) {
+          return { data: null, error: fixture.rpcErrorThreeArg };
+        }
         if (fixture.rpcError) return { data: null, error: fixture.rpcError };
         return {
           data: fixture.rpcIds.map((id) => ({ id })),
@@ -73,7 +80,8 @@ vi.mock("@supabase/supabase-js", () => ({
 }));
 
 import { cacheLife, cacheTag } from "next/cache";
-import { searchClusters } from "./search-query";
+import { SEARCH_LIMIT, searchClusters } from "./search-query";
+import { foldTr, normaliseSearchQuery, turkishQueryVariants } from "./turkish-query";
 import type { ZoneFeedHealth } from "./feed-health";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -88,6 +96,7 @@ beforeEach(() => {
   fixture.lastState = null;
   fixture.rpcIds = [];
   fixture.rpcError = null;
+  fixture.rpcErrorThreeArg = null;
   fixture.rpcThrows = false;
   fixture.rpcCalls = [];
   feedHealth.getZoneFeedHealth.mockReset();
@@ -155,12 +164,60 @@ function mkRow(opts: {
 // ---------------------------------------------------------------------------
 
 describe("searchClusters query shape", () => {
-  it("calls the RPC with the Turkish-aware variants and p_limit", async () => {
+  it("SEARCH_LIMIT is 24", () => {
+    expect(SEARCH_LIMIT).toBe(24);
+  });
+
+  it("calls the RPC with the Turkish-aware variants, the folded query and p_limit", async () => {
     fixture.rpcIds = [];
     await searchClusters("IŞIK");
 
     expect(fixture.rpcCalls).toEqual([
-      { p_variants: ["ışık", "işik", "işık"], p_limit: 12 },
+      {
+        p_variants: ["ışık", "işik", "işık"],
+        p_folded: "isik",
+        p_limit: 24,
+      },
+    ]);
+  });
+
+  it("the RPC args are exactly { p_variants, p_folded: foldTr(normalised), p_limit: 24 }", async () => {
+    const q = "Özel'den  Şişli";
+    const normalised = normaliseSearchQuery(q);
+    expect(normalised).toBe("Özel Şişli");
+    await searchClusters(q);
+
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_variants: turkishQueryVariants(normalised),
+        p_folded: foldTr(normalised),
+        p_limit: 24,
+      },
+    ]);
+    expect(Object.keys(fixture.rpcCalls[0] as object).sort()).toEqual([
+      "p_folded",
+      "p_limit",
+      "p_variants",
+    ]);
+  });
+
+  it("ASCII typing reaches the RPC as the folded Turkish form's key (sisli, cumhurbaskani)", async () => {
+    await searchClusters("sisli");
+    await searchClusters("Cumhurbaşkanı");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["sisli"], p_folded: "sisli", p_limit: 24 },
+      {
+        p_variants: turkishQueryVariants("Cumhurbaşkanı"),
+        p_folded: "cumhurbaskani",
+        p_limit: 24,
+      },
+    ]);
+  });
+
+  it("drops an apostrophe suffix before building the variants and the folded query", async () => {
+    await searchClusters("Erdoğan’ın");
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["erdoğan"], p_folded: "erdogan", p_limit: 24 },
     ]);
   });
 
@@ -179,7 +236,166 @@ describe("searchClusters query shape", () => {
   it("trims and caps the query before building variants", async () => {
     fixture.rpcIds = [];
     await searchClusters("  seçim  ");
-    expect(fixture.rpcCalls[0]).toEqual({ p_variants: ["seçim"], p_limit: 12 });
+    expect(fixture.rpcCalls[0]).toEqual({
+      p_variants: ["seçim"],
+      p_folded: "secim",
+      p_limit: 24,
+    });
+  });
+
+  it("caps an over-long query at 200 characters", async () => {
+    await searchClusters("a".repeat(500));
+    const args = fixture.rpcCalls[0] as { p_folded: string };
+    expect(args.p_folded).toHaveLength(200);
+  });
+
+  it("never sends half a surrogate pair when the cap lands inside an emoji", async () => {
+    await searchClusters("a".repeat(199) + "\u{1F600}");
+    const args = fixture.rpcCalls[0] as { p_folded: string; p_variants: string[] };
+    expect(args.p_folded).toBe("a".repeat(199));
+    expect(args.p_variants[0]).toBe("a".repeat(199));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Control characters never reach Postgres (a NUL makes the whole RPC fail,
+// which used to surface as a false "zaman aşımı").
+// ---------------------------------------------------------------------------
+
+describe("searchClusters control characters", () => {
+  it("'a\u0000b' is searched as 'a b' and returns ok", async () => {
+    fixture.rpcIds = [];
+    const result = await searchClusters("a\u0000b");
+    expect(result).toEqual({ ok: true, bundles: [], capped: false });
+    expect(fixture.rpcCalls).toEqual([
+      {
+        p_variants: turkishQueryVariants("a b"),
+        p_folded: "a b",
+        p_limit: 24,
+      },
+    ]);
+  });
+
+  it("no RPC argument ever contains a C0/C1 control character", async () => {
+    await searchClusters("x\u0000y\u0008z\u0085w\u007f");
+    const serialised = JSON.stringify(fixture.rpcCalls);
+    expect(serialised).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    expect(serialised).not.toMatch(/\\u00(0|1|7f|8|9)/i);
+  });
+
+  it("a query of control characters only is 'too short': ok, no bundles, no RPC call", async () => {
+    const result = await searchClusters("\u0000\u0000");
+    expect(result).toEqual({ ok: true, bundles: [] });
+    expect(fixture.rpcCalls).toEqual([]);
+    expect(fixture.lastState).toBeNull();
+    expect(cacheLife).not.toHaveBeenCalled();
+  });
+
+  it("a control-only query never becomes { ok: false }, even when the RPC would fail", async () => {
+    fixture.rpcError = { message: "invalid byte sequence" };
+    await expect(searchClusters("\u0000\u0001")).resolves.toEqual({
+      ok: true,
+      bundles: [],
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deploy order: the app may ship before migration 129. PostgREST answers
+// PGRST202 (function not in the schema cache) for the 3-arg call; the app
+// then falls back ONCE to the 083 two-arg function.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters 2-arg fallback (PGRST202)", () => {
+  it("falls back to exactly one 2-arg call and uses its ids", async () => {
+    fixture.rpcErrorThreeArg = {
+      message: "Could not find the function public.search_cluster_ids",
+      code: "PGRST202",
+    };
+    fixture.rpcIds = ["c1"];
+    fixture.data = [mkRow({ id: "c1", members: [{ id: "a1", sourceId: "s1" }] })];
+
+    const result = await searchClusters("deprem");
+
+    expect(fixture.rpcCalls).toEqual([
+      { p_variants: ["deprem"], p_folded: "deprem", p_limit: 24 },
+      { p_variants: ["deprem"], p_limit: 24 },
+    ]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.bundles.map((b) => b.cluster.id)).toEqual(["c1"]);
+  });
+
+  it("does not call a third time when the fallback succeeds with no rows", async () => {
+    fixture.rpcErrorThreeArg = { message: "missing", code: "PGRST202" };
+    fixture.rpcIds = [];
+    await expect(searchClusters("deprem")).resolves.toEqual({
+      ok: true,
+      bundles: [],
+      capped: false,
+    });
+    expect(fixture.rpcCalls).toHaveLength(2);
+  });
+
+  it("falls back only once: a PGRST202 on the 2-arg call too is { ok: false }", async () => {
+    fixture.rpcError = { message: "missing", code: "PGRST202" };
+    await expect(searchClusters("deprem")).resolves.toEqual({ ok: false });
+    // cached attempt (3-arg + 2-arg) and the live retry (3-arg + 2-arg).
+    expect(fixture.rpcCalls).toHaveLength(4);
+  });
+
+  it("any other error code stays { ok: false } with no 2-arg fallback", async () => {
+    fixture.rpcErrorThreeArg = { message: "statement timeout", code: "57014" };
+    await expect(searchClusters("deprem")).resolves.toEqual({ ok: false });
+    for (const call of fixture.rpcCalls) {
+      expect(call).toHaveProperty("p_folded");
+    }
+  });
+
+  it("an error without a code stays { ok: false } with no fallback", async () => {
+    fixture.rpcErrorThreeArg = { message: "db down" };
+    await expect(searchClusters("deprem")).resolves.toEqual({ ok: false });
+    for (const call of fixture.rpcCalls) {
+      expect(call).toHaveProperty("p_folded");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `capped`: the RPC filled its page, so there may be more archive matches.
+// ---------------------------------------------------------------------------
+
+describe("searchClusters capped flag", () => {
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `c${i}`);
+
+  it("is true when the RPC returns exactly SEARCH_LIMIT (24) ids", async () => {
+    fixture.rpcIds = ids(24);
+    const result = await searchClusters("deprem");
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.capped).toBe(true);
+  });
+
+  it("is false for fewer ids", async () => {
+    fixture.rpcIds = ids(23);
+    const result = await searchClusters("deprem");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.capped).toBe(false);
+  });
+
+  it("is false for an empty result", async () => {
+    fixture.rpcIds = [];
+    const result = await searchClusters("deprem");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.capped).toBe(false);
+  });
+
+  it("is reported from the 2-arg fallback too", async () => {
+    fixture.rpcErrorThreeArg = { message: "missing", code: "PGRST202" };
+    fixture.rpcIds = ids(24);
+    const result = await searchClusters("deprem");
+    if (!result.ok) throw new Error("expected ok");
+    expect(result.capped).toBe(true);
   });
 });
 
@@ -204,7 +420,7 @@ describe("short query guard", () => {
   it("calls the RPC once the trimmed length reaches 2 characters", async () => {
     fixture.rpcIds = [];
     const result = await searchClusters(" ab ");
-    expect(result).toEqual({ ok: true, bundles: [] });
+    expect(result).toEqual({ ok: true, bundles: [], capped: false });
     expect(fixture.rpcCalls).toHaveLength(1);
   });
 });
@@ -233,7 +449,7 @@ describe("searchClusters error handling", () => {
   it("returns { ok: true, bundles: [] } when the rpc result is empty, with no clusters query", async () => {
     fixture.rpcIds = [];
     const result = await searchClusters("hiçbirşey");
-    expect(result).toEqual({ ok: true, bundles: [] });
+    expect(result).toEqual({ ok: true, bundles: [], capped: false });
     expect(fixture.lastState).toBeNull();
   });
 });

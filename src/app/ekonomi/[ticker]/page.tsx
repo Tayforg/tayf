@@ -20,6 +20,7 @@ import {
   quoteFreshness,
   rvolLabel,
 } from "@/lib/finance/session";
+import { sharePageMetadata } from "@/lib/seo/page-metadata";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
 import { currentTimeMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -144,11 +145,11 @@ export async function generateMetadata({ params }: { params: Promise<{ ticker: s
       robots: { index: false, follow: false },
     };
   }
-  return {
+  return sharePageMetadata({
     title: `${ticker} — hisse haberleri ve KAP bildirimleri`,
     description: `${ticker} hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.`,
-    alternates: { canonical: `/ekonomi/${ticker}` },
-  };
+    path: `/ekonomi/${ticker}`,
+  });
 }
 
 function lagLabel(minutes: number | null): string {
