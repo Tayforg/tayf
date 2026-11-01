@@ -49,6 +49,30 @@ function tight(sql: string): string {
   return norm(sql).replace(/\(\s+/g, "(").replace(/\s+\)/g, ")");
 }
 
+/**
+ * Contents of the adjacent string literals (Postgres concatenates them) that follow
+ * `start`, up to the next `;` outside a literal. A character scan, not a regex, so a
+ * long run of '' escapes cannot backtrack.
+ */
+function literalsAfter(sql: string, start: string): string {
+  const at = sql.indexOf(start);
+  if (at < 0) return "";
+  let out = "";
+  let inString = false;
+  for (let i = at + start.length; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inString) {
+      if (ch !== "'") out += ch;
+      else if (sql[i + 1] === "'") {
+        out += "''";
+        i++;
+      } else inString = false;
+    } else if (ch === "'") inString = true;
+    else if (ch === ";") break;
+  }
+  return out;
+}
+
 const sql = readFileSync(MIGRATION_142, "utf8");
 const code = stripSqlComments(sql);
 const n = norm(sql);
@@ -121,8 +145,7 @@ describe("142 image_backfill_retry: function signature", () => {
   it("documents the function and names the migration", () => {
     expect(n).toMatch(/comment on function public\.image_backfill_requeue\(integer\) is '/);
     // adjacent string constants are concatenated by Postgres: join them before looking for phrases
-    const literals = /comment on function public\.image_backfill_requeue\(integer\) is\s*((?:\s*'(?:[^']|'')*')+)\s*;/.exec(code)?.[1] ?? "";
-    const doc = [...literals.matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1]).join("");
+    const doc = literalsAfter(code, "comment on function public.image_backfill_requeue(integer) is");
     expect(doc).toContain("migration 142");
     expect(doc).toContain("service_role only");
     expect(doc).toContain("p_limit");
