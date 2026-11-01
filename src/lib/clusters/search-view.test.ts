@@ -45,6 +45,8 @@ describe("composeSearchView", () => {
       archiveUnavailable: false,
       emptySearch: false,
       archiveCapped: false,
+      archiveTotal: 0,
+      archiveCappedTotal: false,
     });
   });
 
@@ -56,6 +58,8 @@ describe("composeSearchView", () => {
       archiveUnavailable: false,
       emptySearch: true,
       archiveCapped: false,
+      archiveTotal: 0,
+      archiveCappedTotal: false,
     });
 
     expect(
@@ -70,6 +74,8 @@ describe("composeSearchView", () => {
       archiveUnavailable: false,
       emptySearch: false,
       archiveCapped: false,
+      archiveTotal: 0,
+      archiveCappedTotal: false,
     });
   });
 
@@ -86,6 +92,8 @@ describe("composeSearchView", () => {
       archiveUnavailable: true,
       emptySearch: false,
       archiveCapped: false,
+      archiveTotal: 0,
+      archiveCappedTotal: false,
     });
   });
 
@@ -144,6 +152,8 @@ describe("composeSearchView", () => {
       archiveUnavailable: false,
       emptySearch: false,
       archiveCapped: true,
+      archiveTotal: 1,
+      archiveCappedTotal: true,
     });
   });
 
@@ -205,5 +215,80 @@ describe("composeSearchView", () => {
         search: { ok: true, bundles: [mkBundle("a")] },
       }).archiveCapped,
     ).toBe(false);
+  });
+
+  describe("page-independent totals (archiveTotal / archiveCappedTotal)", () => {
+    const bundles = [mkBundle("a"), mkBundle("b"), mkBundle("c")];
+
+    it("page 1 and page 2 of one search report the same archive total and cap", () => {
+      const args = {
+        q: "deprem",
+        inFeedIds: new Set(["a"]),
+        search: { ok: true as const, bundles, capped: true },
+      };
+      const p1 = composeSearchView({ ...args, page: 1 });
+      const p2 = composeSearchView({ ...args, page: 2 });
+      expect(p1.archive.map((b) => b.cluster.id)).toEqual(["b", "c"]);
+      expect(p2.archive).toEqual([]);
+      expect(p1.archiveTotal).toBe(2);
+      expect(p2.archiveTotal).toBe(2);
+      expect(p1.archiveCappedTotal).toBe(true);
+      expect(p2.archiveCappedTotal).toBe(true);
+    });
+
+    it("the visible archive list and cap flag stay page 1 only", () => {
+      const view = composeSearchView({
+        q: "deprem",
+        page: 2,
+        inFeedIds: new Set(),
+        search: { ok: true, bundles, capped: true },
+      });
+      expect(view.archive).toEqual([]);
+      expect(view.archiveCapped).toBe(false);
+      expect(view.archiveTotal).toBe(3);
+    });
+
+    it("counts only rows that are not already in the feed", () => {
+      const view = composeSearchView({
+        q: "deprem",
+        page: 3,
+        inFeedIds: new Set(["a", "b", "c", "zzz"]),
+        search: { ok: true, bundles },
+      });
+      expect(view.archiveTotal).toBe(0);
+      expect(view.archiveCappedTotal).toBe(false);
+    });
+
+    it("is not capped when the RPC did not fill its page, or when nothing is left after the in-feed filter", () => {
+      expect(
+        composeSearchView({
+          q: "deprem",
+          page: 2,
+          inFeedIds: new Set(),
+          search: { ok: true, bundles, capped: false },
+        }).archiveCappedTotal,
+      ).toBe(false);
+      expect(
+        composeSearchView({
+          q: "deprem",
+          page: 2,
+          inFeedIds: new Set(["a", "b", "c"]),
+          search: { ok: true, bundles, capped: true },
+        }).archiveCappedTotal,
+      ).toBe(false);
+    });
+
+    it("is 0 and not capped when there is no query, no search or a failed search", () => {
+      for (const search of [null, { ok: false as const }]) {
+        const view = composeSearchView({
+          q: "deprem",
+          page: 2,
+          inFeedIds: new Set(["a"]),
+          search,
+        });
+        expect(view.archiveTotal).toBe(0);
+        expect(view.archiveCappedTotal).toBe(false);
+      }
+    });
   });
 });

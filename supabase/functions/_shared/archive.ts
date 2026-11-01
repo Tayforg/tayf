@@ -13,6 +13,19 @@
 // URLs only (see migration 060 for the retention/legal note).
 
 import { BIAS_TO_ZONE, type BiasKey, type MediaDnaZone } from "./cluster/blindspot.ts";
+import { ARCHIVE_CATCHUP_WINDOW_DAYS, catchupWindow, pickCatchupDay } from "./archive-window.ts";
+
+// The catch-up window arithmetic (migration 131) lives in archive-window.ts,
+// a file with zero imports so src/ can share it. Re-exported here so Edge
+// callers and tests have one entry point.
+export {
+  ARCHIVE_CATCHUP_MAX_WINDOW_DAYS,
+  ARCHIVE_CATCHUP_WINDOW_DAYS,
+  ARCHIVE_LABEL_KEEP_DAYS,
+  catchupWindow,
+  missingArchiveDays,
+  pickCatchupDay,
+} from "./archive-window.ts";
 
 export const ARCHIVE_BUCKET = "tayf-archive";
 export const ARCHIVE_SCHEMA = "tayf-archive/1";
@@ -308,6 +321,15 @@ export function labelsFromRows(rows: readonly RawLabelRow[]): Map<string, Archiv
 /** The I/O the export needs; archive-export/index.ts binds it to Supabase. */
 export interface ArchivePorts {
   hasExport(day: string): Promise<boolean>;
+  /**
+   * Ledger days (`archive_exports.day`, `YYYY-MM-DD`) on or after `fromDay`,
+   * PLUS the earliest ledger day overall when it is older. That first-ever day
+   * is the clamp anchor of missingArchiveDays: without it a hole touching the
+   * window start would look like "the archive began later" and never be
+   * caught up. Order does not matter. A read error must throw: a silently
+   * empty list reads as "no gap" and the catch-up would stop for good.
+   */
+  listExportedDays(fromDay: string): Promise<string[]>;
   /** Clusters first_published in [start, end), page `page` (0-based) of ARCHIVE_PAGE_SIZE. */
   fetchClusters(start: string, end: string, page: number): Promise<ArchiveCluster[]>;
   /**
@@ -478,4 +500,61 @@ export async function runArchiveExport(
     sha256: manifestSha,
     duration_ms: ports.now() - t0,
   };
+}
+
+// --- request routing and catch-up (migration 131) -----------------------------
+
+export type ExportRequest =
+  | { kind: "day"; day: string }
+  | { kind: "catchup" }
+  | { kind: "error"; error: "bad-body" | "bad-day" };
+
+/**
+ * Maps the parsed POST body to what the function should do:
+ *   {}                      -> the previous UTC day (the 03:40 job)
+ *   {day: 'YYYY-MM-DD'}     -> that day (operator backfill)
+ *   {catchup: true}         -> the oldest missing day in the window (05:12 job)
+ * Anything ambiguous or malformed is an error the caller turns into a 400:
+ * a body that is not a plain object, a non-boolean `catchup`, `catchup`
+ * together with `day`, or a `day` that is not a real calendar day.
+ */
+export function resolveExportRequest(body: unknown, now: Date): ExportRequest {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { kind: "error", error: "bad-body" };
+  }
+  const { catchup, day } = body as { catchup?: unknown; day?: unknown };
+  if (catchup !== undefined && typeof catchup !== "boolean") {
+    return { kind: "error", error: "bad-body" };
+  }
+  if (catchup === true) {
+    return day === undefined ? { kind: "catchup" } : { kind: "error", error: "bad-body" };
+  }
+  if (day === undefined) return { kind: "day", day: previousUtcDay(now) };
+  return isValidDay(day) ? { kind: "day", day } : { kind: "error", error: "bad-day" };
+}
+
+export type ArchiveCatchupResult =
+  | (ArchiveResult & { catchup: true })
+  | { ok: true; catchup: true; day: null; reason: "no-gap" };
+
+/**
+ * One catch-up step: exports the OLDEST missing day of the window, or reports
+ * `no-gap` without touching a single fetch/upload port. One day per call keeps
+ * the run deadline-safe; the nightly job closes a hole of n days in n nights,
+ * oldest first (the oldest day is the one whose Jev labels are pruned first).
+ * Throws when the ledger cannot be read or the window is out of range.
+ */
+export async function runArchiveCatchup(
+  ports: ArchivePorts,
+  now: Date,
+  windowDays: number = ARCHIVE_CATCHUP_WINDOW_DAYS,
+  opts: { deadlineMs?: number; generatedAt?: string } = {},
+): Promise<ArchiveCatchupResult> {
+  // Validates windowDays (RangeError) before the ledger is read.
+  const { from } = catchupWindow(now, windowDays);
+  const existing = await ports.listExportedDays(from);
+  const day = pickCatchupDay(existing, now, windowDays);
+  if (day === null) return { ok: true, catchup: true, day: null, reason: "no-gap" };
+  const result = await runArchiveExport(ports, day, opts);
+  return { ...result, catchup: true };
 }

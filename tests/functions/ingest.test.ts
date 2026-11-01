@@ -128,8 +128,9 @@ const sourceFetchStateWrites: Array<{
 // Simulates rows that already exist in `articles` from a previous cycle —
 // seeded by the migration-041 F2 test to reproduce the production 23505:
 // a row sharing (source_id, content_hash) with an ALREADY-STORED article
-// under a different url. `.from("articles").select(...).in(...).in(...)`
-// (dropExistingSourceContentHashRows) reads this; `.from("articles").upsert(...)`
+// under a different url. The pre-filter lookup
+// (the pairwise `existing_source_content_hash_pairs` RPC, or its legacy
+// `.in().in()` fallback) reads this; `.from("articles").upsert(...)`
 // simulates the real UNIQUE-constraint failure when a call's payload still
 // contains a colliding pair, so the test can prove the fix drops the row
 // BEFORE that call rather than relying on (and retrying through) the
@@ -210,16 +211,28 @@ let forcedTitleEditRpcError: string | null = null;
 // try/catch absorbs a telemetry-write failure instead of failing the cycle.
 let forcedIngestCyclesInsertError: string | null = null;
 
-// One entry per `.from("articles").select("source_id, content_hash").in(...)
-// .in(...)` call this test made -- the chunked (source_id, content_hash)
+// One entry per `.rpc("existing_source_content_hash_pairs", { p_source_ids,
+// p_hashes })` call this test made -- the chunked (source_id, content_hash)
 // pre-filter lookup (`dropExistingSourceContentHashRowsChunk`, migration
-// 074 §4). Lets the tests assert both the number of chunks (rows-per-chunk
+// 074 §4, made pairwise by migration 130). `sourceIds` and `hashes` are the
+// RPC's two arrays exactly as sent (index-aligned per-row pairs, NOT deduped
+// sets). Lets the tests assert both the number of chunks (rows-per-chunk
 // = PREFILTER_CHUNK = 100) and, via `forcedPrefilterErrorOnCall`, that a
 // single failing chunk degrades only itself.
 const prefilterLookupCalls: Array<{ sourceIds: string[]; hashes: string[] }> = [];
 // 1-indexed call number (into `prefilterLookupCalls`) that should fail --
 // null means never fail.
 let forcedPrefilterErrorOnCall: number | null = null;
+// Migration 130 not applied yet: PostgREST answers the RPC with PGRST202
+// (function not in the schema cache) and ingest must fall back to the legacy
+// `.in("source_id", ...).in("content_hash", ...)` probe.
+let forcedPrefilterRpcMissing = false;
+// The RPC call itself rejects (network down, not a PostgREST error object).
+let forcedPrefilterRpcThrow = false;
+// One entry per legacy cross-product probe (`.from("articles").select(
+// "source_id, content_hash").in("source_id", ...).in("content_hash", ...)`),
+// reached only through the PGRST202 fallback (`legacyExistingPairsProbe`).
+const legacyPrefilterLookupCalls: Array<{ sourceIds: string[]; hashes: string[] }> = [];
 
 // Twin-articles (migration 113): rows "stored" in `articles` that carry a
 // source_article_key, read by `dropExistingSourceArticleKeyRows`'s
@@ -360,21 +373,24 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
           }
           // Only reached by a plain `.select(...)` read (the batched/
           // per-row `.upsert(...)` calls below return their own thenable
-          // and never hit this `settle()`) — i.e.
-          // `dropExistingSourceContentHashRows`'s existing-pair lookup.
+          // and never hit this `settle()`). Since migration 130 the
+          // existing-pair lookup goes through the pairwise RPC; this
+          // `.in("source_id", ...).in("content_hash", ...)` branch answers
+          // only the legacy fallback (`legacyExistingPairsProbe`, reached on
+          // PGRST202). Like PostgREST it is a CROSS PRODUCT: every stored
+          // pair whose source is in one list and whose hash is in the other.
           const sourceIdIn = inCalls.find((c) => c.column === "source_id");
           const hashIn = inCalls.find((c) => c.column === "content_hash");
           if (sourceIdIn && hashIn) {
-            prefilterLookupCalls.push({
-              sourceIds: [...(sourceIdIn.values as string[])],
-              hashes: [...(hashIn.values as string[])],
-            });
-            if (forcedPrefilterErrorOnCall === prefilterLookupCalls.length) {
-              return {
-                data: null,
-                error: { message: "simulated prefilter chunk lookup failure" },
-              };
-            }
+            const sourceIds = [...(sourceIdIn.values as string[])];
+            const hashes = [...(hashIn.values as string[])];
+            legacyPrefilterLookupCalls.push({ sourceIds, hashes });
+            return {
+              data: existingArticleHashPairs.filter(
+                (p) => sourceIds.includes(p.source_id) && hashes.includes(p.content_hash),
+              ),
+              error: null,
+            };
           }
           return { data: [...existingArticleHashPairs], error: null };
         }
@@ -559,6 +575,34 @@ vi.mock("../../supabase/functions/_shared/supabase.ts", () => ({
       return chain;
     },
     rpc: vi.fn(async (fn: string, args?: Record<string, unknown>) => {
+      if (fn === "existing_source_content_hash_pairs") {
+        const sourceIds = [...((args?.p_source_ids ?? []) as string[])];
+        const hashes = [...((args?.p_hashes ?? []) as string[])];
+        prefilterLookupCalls.push({ sourceIds, hashes });
+        if (forcedPrefilterRpcThrow) throw new Error("simulated rpc transport failure");
+        if (forcedPrefilterErrorOnCall === prefilterLookupCalls.length) {
+          return {
+            data: null,
+            error: { code: "57014", message: "simulated prefilter chunk lookup failure" },
+          };
+        }
+        if (forcedPrefilterRpcMissing) {
+          return {
+            data: null,
+            error: { code: "PGRST202", message: "Could not find the function" },
+          };
+        }
+        // Like the SQL function: zip the two arrays and return the stored
+        // pairs that match PAIRWISE (an existing (s1,h2) never matches the
+        // pairs (s1,h1) and (s2,h2) just because s1 and h2 were both asked for).
+        const asked = new Set(sourceIds.map((sid, i) => `${sid}\x1f${hashes[i]}`));
+        return {
+          data: existingArticleHashPairs.filter((p) =>
+            asked.has(`${p.source_id}\x1f${p.content_hash}`),
+          ),
+          error: null,
+        };
+      }
       if (fn === "ingest_set_source_fetch_state") {
         sourceFetchStateWrites.push({
           fn,
@@ -731,7 +775,10 @@ beforeEach(() => {
   titleEditRpcCalls.length = 0;
   forcedTitleEditRpcError = null;
   prefilterLookupCalls.length = 0;
+  legacyPrefilterLookupCalls.length = 0;
   forcedPrefilterErrorOnCall = null;
+  forcedPrefilterRpcMissing = false;
+  forcedPrefilterRpcThrow = false;
   storedArticlesByKey = [];
   forcedKeyLookupError = null;
   forcedKeyLookupThrow = false;
@@ -2113,12 +2160,15 @@ describe("ingest cycle + recordTitleVersions integration [migration 056]", () =>
 
 // ---------------------------------------------------------------------------
 // Chunked pre-filter (migration 074 §4) -- `dropExistingSourceContentHashRows`
-// now chunks ROWS by PREFILTER_CHUNK (100), one `.in(...).in(...)` lookup per
-// chunk instead of a single call over the whole batch.
+// chunks ROWS by PREFILTER_CHUNK (100), one lookup per chunk instead of a
+// single call over the whole batch. Since migration 130 each lookup is the
+// pairwise `existing_source_content_hash_pairs(p_source_ids, p_hashes)` RPC
+// (index-aligned per-row arrays) instead of a source x hash `.in().in()`
+// cross product; PGRST202 (130 not applied yet) falls back to the old probe.
 // ---------------------------------------------------------------------------
 
 describe("chunked (source_id, content_hash) pre-filter [migration 074]", () => {
-  it("splits 250 rows into 3 lookups of at most 100 each, dropping existing pairs in every chunk", async () => {
+  it("splits 250 rows into 3 pairwise RPC lookups of at most 100 pairs each, dropping existing pairs in every chunk", async () => {
     const handler = await importIngestHandler();
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
@@ -2154,11 +2204,19 @@ describe("chunked (source_id, content_hash) pre-filter [migration 074]", () => {
 
     expect(prefilterLookupCalls).toHaveLength(3);
     for (const call of prefilterLookupCalls) {
+      // The two RPC arrays are index-aligned pairs: always the same length.
+      expect(call.sourceIds.length).toBe(call.hashes.length);
       expect(call.hashes.length).toBeLessThanOrEqual(100);
     }
     expect(
       prefilterLookupCalls.reduce((sum, c) => sum + c.hashes.length, 0),
     ).toBe(250);
+    expect(
+      prefilterLookupCalls.reduce((sum, c) => sum + c.sourceIds.length, 0),
+    ).toBe(250);
+    // Migration 130 is "applied" in this mock: the legacy cross-product
+    // probe is never touched.
+    expect(legacyPrefilterLookupCalls).toHaveLength(0);
     // One dropped row per chunk -- 3 total.
     expect(body.dedupedInBatch).toBe(3);
     expect(upserted.length).toBe(247);
@@ -2200,6 +2258,259 @@ describe("chunked (source_id, content_hash) pre-filter [migration 074]", () => {
     expect(
       (ingestCycleInserts[0] as { prefilter_errors?: number }).prefilter_errors,
     ).toBe(1);
+    // Any error other than PGRST202 (here a statement timeout) is fail-open,
+    // NOT a reason to run the expensive legacy cross-product probe.
+    expect(legacyPrefilterLookupCalls).toHaveLength(0);
+  });
+
+  it("sends the per-row pairs, index-aligned with the chunk rows: repeated source ids, not deduped sets", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const srcA = {
+      id: "src-130-pairs-a",
+      name: "Pairs A",
+      slug: "pairs-a",
+      url: "https://a.example.com",
+      rss_url: "https://a.example.com/pairs.rss",
+    };
+    const srcB = {
+      id: "src-130-pairs-b",
+      name: "Pairs B",
+      slug: "pairs-b",
+      url: "https://b.example.com",
+      rss_url: "https://b.example.com/pairs.rss",
+    };
+    const itemsA = [1, 2, 3].map((n) => ({
+      title: `Pairs A story ${n}`,
+      link: `https://a.example.com/pairs/${n}`,
+    }));
+    const itemsB = [1, 2].map((n) => ({
+      title: `Pairs B story ${n}`,
+      link: `https://b.example.com/pairs/${n}`,
+    }));
+    const expectedPairs = [
+      ...normalizeArticles(srcA, itemsA),
+      ...normalizeArticles(srcB, itemsB),
+    ].map((r) => ({ source_id: r.source_id, content_hash: r.content_hash }));
+    expect(expectedPairs).toHaveLength(5);
+
+    fakeSources.push({ ...srcA, active: true }, { ...srcB, active: true });
+    fetcherItems[srcA.rss_url] = itemsA;
+    fetcherItems[srcB.rss_url] = itemsB;
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    expect(res.status).toBe(200);
+
+    // 5 rows fit one chunk: ONE call carrying FIVE source ids (two distinct,
+    // so repeated) and FIVE hashes -- the rows' pairs, not {A,B} x 5 hashes.
+    expect(prefilterLookupCalls).toHaveLength(1);
+    const call = prefilterLookupCalls[0]!;
+    expect(call.sourceIds).toHaveLength(5);
+    expect(call.hashes).toHaveLength(5);
+    expect(new Set(call.sourceIds).size).toBe(2);
+    const zipped = call.sourceIds.map((sid, i) => ({
+      source_id: sid,
+      content_hash: call.hashes[i]!,
+    }));
+    const key = (p: { source_id: string; content_hash: string }) =>
+      `${p.source_id}\x1f${p.content_hash}`;
+    expect(zipped.map(key).sort()).toEqual(expectedPairs.map(key).sort());
+    // Rows were grouped by source before the lookup: each source's pairs are contiguous.
+    expect(call.sourceIds).toEqual([
+      srcA.id,
+      srcA.id,
+      srcA.id,
+      srcB.id,
+      srcB.id,
+    ]);
+    expect(upserted.length).toBe(5);
+  });
+
+  it("an existing (s1,h2) drops nothing when the chunk holds (s1,h1) and (s2,h2): the match is pairwise", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const s1 = {
+      id: "src-130-cross-s1",
+      name: "Cross S1",
+      slug: "cross-s1",
+      url: "https://s1.example.com",
+      rss_url: "https://s1.example.com/cross.rss",
+    };
+    const s2 = {
+      id: "src-130-cross-s2",
+      name: "Cross S2",
+      slug: "cross-s2",
+      url: "https://s2.example.com",
+      rss_url: "https://s2.example.com/cross.rss",
+    };
+    const item1 = { title: "Cross one", link: "https://s1.example.com/cross/1" };
+    const item2 = { title: "Cross two", link: "https://s2.example.com/cross/2" };
+    const h2 = normalizeArticles(s2, [item2])[0]!.content_hash;
+    // s1 stores h2, but s1's own row in this chunk has h1, and h2 belongs to s2.
+    existingArticleHashPairs.push({ source_id: s1.id, content_hash: h2 });
+
+    fakeSources.push({ ...s1, active: true }, { ...s2, active: true });
+    fetcherItems[s1.rss_url] = [item1];
+    fetcherItems[s2.rss_url] = [item2];
+
+    const res = await handler(
+      authedRequest("http://localhost/ingest", { method: "POST" }),
+    );
+    const body = (await res.json()) as { dedupedInBatch?: number };
+
+    expect(res.status).toBe(200);
+    expect(prefilterLookupCalls).toHaveLength(1);
+    expect(body.dedupedInBatch ?? 0).toBe(0);
+    expect(upserted.length).toBe(2);
+  });
+
+  it("falls back to the legacy probe on PGRST202, still drops the existing pair and warns once across chunks", async () => {
+    // The warn-once flag is module state: take a fresh copy of the module so
+    // this test does not depend on which test ran before it.
+    vi.resetModules();
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const rssSource = {
+      id: "src-130-fallback",
+      name: "Fallback Fixture",
+      slug: "fallback-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/fallback.rss",
+    };
+    const items = Array.from({ length: 150 }, (_, n) => ({
+      title: `Fallback item ${n}`,
+      link: `https://example.com/fallback/${n}`,
+    }));
+    const normalized = normalizeArticles(rssSource, items);
+    existingArticleHashPairs.push({
+      source_id: rssSource.id,
+      content_hash: normalized[0]!.content_hash,
+    });
+
+    fakeSources.push({ ...rssSource, active: true });
+    fetcherItems["https://example.com/fallback.rss"] = items;
+    forcedPrefilterRpcMissing = true;
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await handler(
+        authedRequest("http://localhost/ingest", { method: "POST" }),
+      );
+      const body = (await res.json()) as { dedupedInBatch?: number };
+      expect(res.status).toBe(200);
+
+      // Two chunks (100 + 50): each tries the RPC first (so the function is
+      // picked up the moment 130 is applied), then runs the legacy probe.
+      expect(prefilterLookupCalls).toHaveLength(2);
+      expect(legacyPrefilterLookupCalls).toHaveLength(2);
+      expect(legacyPrefilterLookupCalls[0]!.hashes.length).toBeLessThanOrEqual(100);
+
+      // The existing pair is still dropped and nothing else is.
+      expect(body.dedupedInBatch).toBe(1);
+      expect(upserted.length).toBe(149);
+      expect(
+        (ingestCycleInserts[0] as { prefilter_errors?: number }).prefilter_errors,
+      ).toBe(0);
+
+      // One warning per isolate, not one per chunk.
+      const missing = warn.mock.calls.filter((c) =>
+        String(c[0]).includes("existing_source_content_hash_pairs missing"),
+      );
+      expect(missing).toHaveLength(1);
+      expect(String(missing[0]![0])).toContain("apply migration 130");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the legacy cross-product fallback still compares exact pairs: an existing (s1,h2) drops nothing", async () => {
+    vi.resetModules();
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const s1 = {
+      id: "src-130-legacy-s1",
+      name: "Legacy S1",
+      slug: "legacy-s1",
+      url: "https://s1.example.com",
+      rss_url: "https://s1.example.com/legacy.rss",
+    };
+    const s2 = {
+      id: "src-130-legacy-s2",
+      name: "Legacy S2",
+      slug: "legacy-s2",
+      url: "https://s2.example.com",
+      rss_url: "https://s2.example.com/legacy.rss",
+    };
+    const item1 = { title: "Legacy one", link: "https://s1.example.com/legacy/1" };
+    const item2 = { title: "Legacy two", link: "https://s2.example.com/legacy/2" };
+    const h2 = normalizeArticles(s2, [item2])[0]!.content_hash;
+    existingArticleHashPairs.push({ source_id: s1.id, content_hash: h2 });
+
+    fakeSources.push({ ...s1, active: true }, { ...s2, active: true });
+    fetcherItems[s1.rss_url] = [item1];
+    fetcherItems[s2.rss_url] = [item2];
+    forcedPrefilterRpcMissing = true;
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const res = await handler(
+        authedRequest("http://localhost/ingest", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+      // The legacy probe DID return (s1,h2) -- a cross product -- yet nothing is dropped.
+      expect(legacyPrefilterLookupCalls).toHaveLength(1);
+      expect(upserted.length).toBe(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("an RPC that throws keeps every row and counts one prefilter error, with no legacy fallback", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    const rssSource = {
+      id: "src-130-rpc-throw",
+      name: "RPC Throw Fixture",
+      slug: "rpc-throw-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/rpc-throw.rss",
+    };
+    const items = Array.from({ length: 40 }, (_, n) => ({
+      title: `Rpc throw item ${n}`,
+      link: `https://example.com/rpc-throw/${n}`,
+    }));
+    fakeSources.push({ ...rssSource, active: true });
+    fetcherItems["https://example.com/rpc-throw.rss"] = items;
+    forcedPrefilterRpcThrow = true;
+
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const res = await handler(
+        authedRequest("http://localhost/ingest", { method: "POST" }),
+      );
+      expect(res.status).toBe(200);
+
+      expect(prefilterLookupCalls).toHaveLength(1);
+      expect(legacyPrefilterLookupCalls).toHaveLength(0);
+      expect(upserted.length).toBe(40);
+      expect(
+        (ingestCycleInserts[0] as { prefilter_errors?: number }).prefilter_errors,
+      ).toBe(1);
+      // One console.error per failing chunk.
+      const lookupErrors = err.mock.calls.filter((c) =>
+        String(c[0]).includes("existing (source_id, content_hash) lookup"),
+      );
+      expect(lookupErrors).toHaveLength(1);
+    } finally {
+      err.mockRestore();
+    }
   });
 });
 

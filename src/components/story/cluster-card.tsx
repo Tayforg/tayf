@@ -286,11 +286,14 @@ export function ClusterCard({
   const heroCandidates = resolved
     .map((a) => a.image_url)
     .filter((u): u is string => typeof u === "string" && u.length > 0);
-  const heroArticle = resolved.find((a) => !!a.image_url) ?? null;
   const heroSrc = heroCandidates[0] ?? null;
   const heroFallbacks = heroCandidates.slice(1);
-  const heroAlt = heroArticle?.title ?? cluster.title_tr;
   const banner = mobileBannerImageProps(index);
+
+  // The card link is named by its own visible headline: the Link points at
+  // the h2 through aria-labelledby (see the comment below). Per cluster, so the
+  // ids stay unique across a feed.
+  const headingId = `kart-baslik-${cluster.id}`;
 
   // Approach A (b-8): the entire card is a single <Link> to /cluster/{id}.
   // We deliberately convert the previously-linked article list items into
@@ -302,8 +305,20 @@ export function ClusterCard({
   // The bookmark control is a positioned SIBLING of the Link (inside a
   // relative wrapper) for the same reason — a <button> inside an <a> is
   // invalid interactive nesting.
+  //
+  // The wrapper is the <article> (the link plus the bookmark are one story),
+  // NOT an element inside the Link: Chrome never builds a link's accessible
+  // name from an <article> descendant (name-from-content skips the role), so
+  // the old <a><article>…</article></a> was a nameless link for voice control,
+  // the links list and UIA clients (h10-a11y-1). The name instead comes from
+  // the h2 via aria-labelledby={headingId}. If the same cluster renders twice
+  // on one page the id repeats, but both h2s read the same headline text, so
+  // the resolved name is identical and harmless. The thumbnails are decorative
+  // (alt="": the headline is right beside them) and the member rows carry a
+  // screen-reader-only ": " so a source and its title do not run together.
+  // tests/guards/card-link-name.test.ts keeps an <article> out of any link.
   return (
-    <div className="relative">
+    <article className="relative">
       <BookmarkButton
         clusterId={cluster.id}
         storyTitle={cluster.title_tr}
@@ -312,6 +327,7 @@ export function ClusterCard({
       />
       <Link
       href={`/cluster/${cluster.id}`}
+      aria-labelledby={headingId}
       className={`hover-lift group block min-h-[44px] touch-manipulation rounded-xl ring-1 ${
         cluster.is_blindspot
           ? "ring-amber-500/40 hover:ring-amber-500/60"
@@ -320,7 +336,7 @@ export function ClusterCard({
         isAging ? " [&_img]:grayscale" : ""
       }`}
     >
-      <article>
+      <div>
         {/* Mobile-only banner image (above content). On sm+ we hide this and
             show the side thumbnail inside the flex row below. Rendered
             unconditionally: ClusterCardImage falls back to a muted
@@ -331,7 +347,7 @@ export function ClusterCard({
             srcs={heroFallbacks}
             logoSrc={resolved[0]?.source_logo_url ?? null}
             logoAlt={resolved[0]?.source_name ?? "Kaynak"}
-            alt={heroAlt}
+            alt=""
             width={640}
             height={360}
             sizes={banner.sizes}
@@ -358,7 +374,7 @@ export function ClusterCard({
                   </span>
                 </div>
               )}
-              <h2 className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
+              <h2 id={headingId} className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
                 {cluster.title_tr}
               </h2>
               <ClusterMetaBadges
@@ -393,7 +409,7 @@ export function ClusterCard({
                 srcs={heroFallbacks}
                 logoSrc={resolved[0]?.source_logo_url ?? null}
                 logoAlt={resolved[0]?.source_name ?? "Kaynak"}
-                alt={heroAlt}
+                alt=""
                 width={320}
                 height={224}
                 sizes="160px"
@@ -426,6 +442,7 @@ export function ClusterCard({
                     <span className="text-foreground font-mono font-medium text-[10px] mr-1.5">
                       {a.source_name}
                     </span>
+                    <span className="sr-only">: </span>
                     <span className="text-muted-foreground text-xs">
                       {a.title}
                     </span>
@@ -440,8 +457,8 @@ export function ClusterCard({
             </ul>
           )}
         </div>
-      </article>
+      </div>
       </Link>
-    </div>
+    </article>
   );
 }

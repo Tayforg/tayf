@@ -24,6 +24,8 @@ import {
 } from "@/lib/clusters/in-feed-match";
 import { searchClusters } from "@/lib/clusters/search-query";
 import { composeSearchView } from "@/lib/clusters/search-view";
+import { formatCountTr } from "@/lib/format/number-tr";
+import { searchStatusText, searchTitle } from "@/lib/search/search-status";
 import {
   HOME_PAGE_SIZE,
   homeCanonicalPath,
@@ -54,7 +56,10 @@ function firstQuery(raw: string | string[] | undefined): string | undefined {
 
 // A search results page ("/?q=...") is noindex,follow: the URL space is
 // unbounded and the content is a filtered view of the feed, not a page of its
-// own. Nothing else is returned, so the canonical stays the layout's "/" (the
+// own. It does get its own title ("“q” araması", the layout template adds
+// " — Tayf") so the tab, history and a screen reader's page announcement say
+// what was searched instead of repeating the generic home title (WCAG 2.4.2).
+// Nothing else is returned, so the canonical stays the layout's "/" (the
 // robots object replaces the layout's wholesale: metadata merges shallowly).
 // Otherwise: self-canonical for /?page=N (N > 1, clamped to the last page).
 // Without this, the layout's canonical "/" told crawlers page 2 duplicates
@@ -68,7 +73,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { q: qRaw, page: pageRaw } = await searchParams;
   const q = firstQuery(qRaw);
-  if (q) return { robots: { index: false, follow: true } };
+  if (q) return { title: searchTitle(q), robots: { index: false, follow: true } };
   const page = parseHomePage(pageRaw);
   if (page <= 1) return {};
   let rankedCount: number | null = null;
@@ -261,6 +266,14 @@ export async function HomeFeed({
     // noindexed URLs. Route-level error boundaries still carry noindex.
     return (
       <>
+        <SearchStatus
+          text={searchStatusText({
+            q,
+            count: 0,
+            capped: false,
+            unavailable: true,
+          })}
+        />
         <NewSinceLastVisit timestamps={[]} />
         <FeedUnavailable />
       </>
@@ -356,6 +369,12 @@ export async function HomeFeed({
 
   const hasInFeedMatches = filtered.length > 0 || filteredBreaking.length > 0;
 
+  // Results for this search: every in-feed match (across pages, not just this
+  // slice) plus every archive-only match. `archiveTotal`, not `archive`: the
+  // list is page 1 only, and the count must not change on ?page=2. One number
+  // for the visible "N sonuç" line and the screen-reader announcement.
+  const resultCount = inFeedIds.size + view.archiveTotal;
+
   // We track a global render index across buckets so the first ~3
   // ClusterCards (above the fold) still get the priority hint, even
   // though they're now nested inside <section> wrappers.
@@ -377,11 +396,26 @@ export async function HomeFeed({
 
   return (
     <>
+      {/* First child at a fixed position, mounted for every state of the
+          page (results, empty, unavailable): React updates its text when the
+          debounced router.replace swaps the feed, which is what makes a
+          screen reader announce it. */}
+      <SearchStatus
+        text={searchStatusText({
+          q,
+          count: resultCount,
+          capped: view.archiveCappedTotal,
+          unavailable: view.archiveUnavailable,
+        })}
+      />
+
       <NewSinceLastVisit timestamps={renderedTimestamps} />
 
       {q && q.length >= 2 && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-muted-foreground">“{q}” için sonuçlar</p>
+          <p className="text-xs text-muted-foreground">
+            “{q}” için {formatCountTr(resultCount)} sonuç
+          </p>
           <FollowButton kind="q" value={q} />
         </div>
       )}
@@ -478,6 +512,28 @@ export async function HomeFeed({
         </>
       )}
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Search announcement
+// ---------------------------------------------------------------------------
+
+// The page's one live region (WCAG 4.1.3). It renders for EVERY state so the
+// node is already in the accessibility tree when its text changes; an empty
+// string (no search) leaves it silent. The empty and error cards below carry
+// no role of their own, so nothing is announced twice. `text` is a plain
+// string rendered as a child, never HTML.
+function SearchStatus({ text }: { text: string }) {
+  return (
+    <p
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      className="sr-only"
+    >
+      {text}
+    </p>
   );
 }
 

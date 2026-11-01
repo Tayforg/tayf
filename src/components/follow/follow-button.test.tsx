@@ -557,7 +557,7 @@ describe("entry points", () => {
   it("home search with q >= 2 chars offers a keyword follow next to the result note", async () => {
     const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "  seçim " }) });
     expect(followButtonProps(tree)).toEqual([{ kind: "q", value: "seçim" }]);
-    expect(textOf(tree)).toContain("“seçim” için sonuçlar");
+    expect(textOf(tree)).toContain("“seçim” için 0 sonuç");
   });
 
   it("passes a hostile q through as plain data (React escapes it; nothing is injected as HTML)", async () => {

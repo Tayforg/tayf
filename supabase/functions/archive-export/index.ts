@@ -7,23 +7,33 @@
 // PRIVATE `tayf-archive` bucket and one archive_exports ledger row.
 // Idempotent per day. The algorithm lives in _shared/archive.ts; this file
 // only binds it to the service-role client and the HTTP envelope.
+//
+// Catch-up mode (migration 131): pg_cron `archive-export-catchup` posts
+// {"catchup":true} at 05:12 UTC. The function reads the exported days of the
+// last ARCHIVE_CATCHUP_WINDOW_DAYS (40) days and re-exports the OLDEST missing
+// one, a single day per call (deadline-safe), or answers
+// {ok:true, catchup:true, day:null, reason:"no-gap"} when there is nothing to
+// do. Yesterday is left to the 03:40 job. The window stays under the 45 day
+// jev-shadow-prune keep window so a re-export still carries its Jev labels.
+// `catchup` cannot be combined with `day`.
 
 import { requireServiceRoleBearer } from "../_shared/auth.ts";
 import { captureException, initSentry, withSentry } from "../_shared/sentry.ts";
 import { createServiceClient } from "../_shared/supabase.ts";
 import {
   ARCHIVE_BUCKET,
+  ARCHIVE_CATCHUP_WINDOW_DAYS,
   ARCHIVE_DEADLINE_MS,
   ARCHIVE_LABEL_TASKS,
   ARCHIVE_PAGE_SIZE,
   type ArchiveCluster,
   ArchiveDeadlineError,
   type ArchivePorts,
-  isValidDay,
   labelsFromRows,
-  previousUtcDay,
   type RawArticleRow,
   type RawLabelRow,
+  resolveExportRequest,
+  runArchiveCatchup,
   runArchiveExport,
 } from "../_shared/archive.ts";
 
@@ -54,10 +64,6 @@ interface MemberRow {
     | null;
 }
 
-interface Body {
-  day?: unknown;
-}
-
 function makePorts(): ArchivePorts {
   const supabase = createServiceClient();
   const range = (page: number) => [page * ARCHIVE_PAGE_SIZE, page * ARCHIVE_PAGE_SIZE + ARCHIVE_PAGE_SIZE - 1] as const;
@@ -66,6 +72,28 @@ function makePorts(): ArchivePorts {
       const { data, error } = await supabase.from("archive_exports").select("id").eq("day", day).maybeSingle();
       if (error) throw new Error(`archive_exports lookup failed: ${error.message}`);
       return data !== null;
+    },
+    async listExportedDays(fromDay) {
+      // The window since `fromDay`, plus the first-ever day as the clamp
+      // anchor (see ArchivePorts.listExportedDays): a hole that touches the
+      // window start must not read as "the archive began later". 40 days at
+      // most one row per day, so the limit is a bound, not a page.
+      const { data, error } = await supabase
+        .from("archive_exports")
+        .select("day")
+        .gte("day", fromDay)
+        .order("day", { ascending: true })
+        .limit(60);
+      if (error) throw new Error(`archive_exports list failed: ${error.message}`);
+      const days = (data ?? []).map((r) => (r as { day: string }).day);
+      const { data: first, error: firstError } = await supabase
+        .from("archive_exports")
+        .select("day")
+        .order("day", { ascending: true })
+        .limit(1);
+      if (firstError) throw new Error(`archive_exports first-day lookup failed: ${firstError.message}`);
+      for (const r of first ?? []) days.push((r as { day: string }).day);
+      return days;
     },
     async fetchClusters(start, end, page) {
       const [from, to] = range(page);
@@ -147,56 +175,63 @@ function makePorts(): ArchivePorts {
   };
 }
 
+function json(status: number, payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/** One error envelope for both modes: 504 on the run deadline, 500 otherwise. */
+function failure(err: unknown, target: string): Response {
+  const request_id = crypto.randomUUID();
+  captureException("archive-export", err);
+  console.error(`[archive-export] ${request_id} ${target === "catchup" ? "catchup" : `day=${target}`}`, err);
+  const deadline = err instanceof ArchiveDeadlineError;
+  return json(deadline ? 504 : 500, {
+    ok: false,
+    error: deadline ? "deadline" : "internal-error",
+    request_id,
+    ...(target === "catchup" ? { catchup: true } : { day: target }),
+  });
+}
+
 Deno.serve(withSentry("archive-export", async (req: Request) => {
   const denied = requireServiceRoleBearer(req);
   if (denied) return denied;
 
   if (req.method === "GET") {
-    return new Response(JSON.stringify({ ok: true, ready: true }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    return json(200, { ok: true, ready: true });
   }
   if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
 
-  let body: Body = {};
+  let body: unknown = {};
   try {
     const text = await req.text();
-    if (text.trim()) body = JSON.parse(text) as Body;
+    if (text.trim()) body = JSON.parse(text);
   } catch {
-    return new Response(JSON.stringify({ ok: false, error: "bad-json" }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
+    return json(400, { ok: false, error: "bad-json" });
   }
 
-  let day: string;
-  if (body.day === undefined) {
-    day = previousUtcDay(new Date());
-  } else if (isValidDay(body.day)) {
-    day = body.day;
-  } else {
-    return new Response(JSON.stringify({ ok: false, error: "bad-day" }), {
-      status: 400,
-      headers: { "content-type": "application/json" },
-    });
+  const request = resolveExportRequest(body, new Date());
+  if (request.kind === "error") return json(400, { ok: false, error: request.error });
+
+  if (request.kind === "catchup") {
+    try {
+      const result = await runArchiveCatchup(makePorts(), new Date(), ARCHIVE_CATCHUP_WINDOW_DAYS);
+      console.log(`[archive-export] catchup ${result.day ?? "none"}`, JSON.stringify(result));
+      return json(200, result);
+    } catch (err) {
+      return failure(err, "catchup");
+    }
   }
 
+  const day = request.day;
   try {
     const result = await runArchiveExport(makePorts(), day, { deadlineMs: ARCHIVE_DEADLINE_MS });
     console.log(`[archive-export] ${day}`, JSON.stringify(result));
-    return new Response(JSON.stringify(result), {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    });
+    return json(200, result);
   } catch (err) {
-    const request_id = crypto.randomUUID();
-    captureException("archive-export", err);
-    console.error(`[archive-export] ${request_id} day=${day}`, err);
-    const status = err instanceof ArchiveDeadlineError ? 504 : 500;
-    return new Response(JSON.stringify({ ok: false, error: err instanceof ArchiveDeadlineError ? "deadline" : "internal-error", request_id, day }), {
-      status,
-      headers: { "content-type": "application/json" },
-    });
+    return failure(err, day);
   }
 }));

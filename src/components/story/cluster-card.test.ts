@@ -213,3 +213,115 @@ describe("cluster-card.tsx bookmark accessible name (WCAG 2.5.3)", () => {
     expect(src).toMatch(/<BookmarkButton[^>]*\bvariant="overlay"/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// h10-a11y-1: Chrome never builds a link's accessible name from an <article>
+// descendant (name-from-content skips the article role), so the card link,
+// which used to wrap an <article>, was a nameless link on /, /blindspots and
+// /konu/*. The article is now the OUTER wrapper (link + bookmark), the link
+// names itself from the h2 through aria-labelledby, the thumbnails are
+// decorative (the headline is adjacent) and the member rows read as
+// "Kaynak: Başlık". Visual output is unchanged: no class string moved.
+// ---------------------------------------------------------------------------
+
+/**
+ * Opening tag of the first `needle` occurrence: the scan walks to the first
+ * `>` outside braces and string/template literals, so `className={`...`}` or
+ * an arrow function in a prop cannot end the tag early.
+ */
+function openingTagAt(source: string, needle: string, from = 0): string {
+  const start = source.indexOf(needle, from);
+  if (start === -1) return "";
+  let depth = 0;
+  let quote: string | null = null;
+  let i = start + needle.length;
+  for (; i < source.length; i++) {
+    const c = source[i]!;
+    if (quote) {
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || (c === "`" && depth > 0)) quote = c;
+    else if (c === "{") depth++;
+    else if (c === "}") depth--;
+    else if (c === ">" && depth === 0) break;
+  }
+  return source.slice(start, i + 1);
+}
+
+/** Every opening tag that starts with `needle`, in source order. */
+function openingTagsOf(source: string, needle: string): string[] {
+  const tags: string[] = [];
+  let from = 0;
+  for (;;) {
+    const at = source.indexOf(needle, from);
+    if (at === -1) return tags;
+    tags.push(openingTagAt(source, needle, at));
+    from = at + needle.length;
+  }
+}
+
+describe("card link accessible name (h10-a11y-1)", () => {
+  const linkOpen = src.indexOf("<Link");
+  const linkClose = src.indexOf("</Link>");
+  const articleOpen = src.indexOf("<article");
+  const articleClose = src.indexOf("</article>");
+
+  it("makes the OUTER wrapper the only <article>: returned JSX starts with <article className=\"relative\">", () => {
+    expect(src).toMatch(/return \(\s*<article className="relative">/);
+    expect(count(src, "<article")).toBe(1);
+    expect(count(src, "</article>")).toBe(1);
+    expect(count(src, "<Link")).toBe(1);
+    expect(count(src, "</Link>")).toBe(1);
+  });
+
+  it("closes the <article> after the </Link>, so it wraps the link plus the bookmark", () => {
+    const bookmark = src.indexOf("<BookmarkButton");
+    expect(articleOpen).toBeGreaterThan(-1);
+    expect(bookmark).toBeGreaterThan(articleOpen);
+    expect(linkOpen).toBeGreaterThan(bookmark);
+    expect(linkClose).toBeGreaterThan(linkOpen);
+    expect(articleClose).toBeGreaterThan(linkClose);
+  });
+
+  it("puts no <article> between <Link and </Link> (Chrome excludes it from the link's name)", () => {
+    const linkBody = src.slice(linkOpen, linkClose);
+    expect(linkBody).not.toContain("<article");
+    expect(linkBody).not.toContain("</article>");
+    expect(linkBody).not.toContain("<section");
+  });
+
+  it("names the link from the visible h2 via aria-labelledby", () => {
+    expect(src).toContain("const headingId = `kart-baslik-${cluster.id}`");
+
+    const linkTags = openingTagsOf(src, "<Link");
+    expect(linkTags).toHaveLength(1);
+    expect(linkTags[0]).toContain("aria-labelledby={headingId}");
+
+    const h2Tags = openingTagsOf(src, "<h2");
+    expect(h2Tags).toHaveLength(1);
+    expect(h2Tags[0]).toContain("id={headingId}");
+
+    // The id sits on the card's own headline, inside the link it names.
+    const h2At = src.indexOf("<h2");
+    expect(h2At).toBeGreaterThan(linkOpen);
+    expect(h2At).toBeLessThan(linkClose);
+  });
+
+  it("gives both thumbnails alt=\"\" (the headline is adjacent) and drops heroAlt", () => {
+    const imageTags = openingTagsOf(src, "<ClusterCardImage");
+    expect(imageTags).toHaveLength(2);
+    for (const tag of imageTags) {
+      expect(tag).toContain('alt=""');
+      expect(tag).not.toMatch(/\balt=\{/);
+    }
+    expect(raw).not.toContain("heroAlt");
+  });
+
+  it("separates the source name from the title with a screen-reader-only \": \" in the member row", () => {
+    expect(src).toMatch(
+      /\{a\.source_name\}\s*<\/span>\s*<span className="sr-only">: <\/span>\s*<span[^>]*>\s*\{a\.title\}/,
+    );
+    expect(count(src, '<span className="sr-only">: </span>')).toBe(1);
+  });
+});

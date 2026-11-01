@@ -117,15 +117,23 @@ export async function fetchWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWo
 // `{ ok: false }` instead, so a throw never crosses this `"use cache"`
 // boundary during `next build`'s prerender.
 //
+// Shared remote cache (`"use cache: remote"`), not the per-instance default:
+// the plain directive made every serverless instance pay its own fill of the
+// 21 slow article reads (mean 1.45 s, some hit the 8 s statement timeout),
+// ~645 calls/day (h10-dbhot-3). The words are a trailing-7-day comparison and
+// barely move intra-day, so a successful result keeps the 6 h `weekly-words`
+// profile (next.config.ts). Nothing calls revalidateTag('weekly-words'); the
+// tag is only there for manual invalidation.
+//
 // Cache lifetime follows the outcome (exactly one `cacheLife` call, after the
-// attempt; `cacheTag` first): a result keeps `hours`, a failed attempt (e.g. a
-// 4 s reader-cap abort on any of the 22 reads) is memoised for `minutes` only.
+// attempt; `cacheTag` first): a failed attempt (e.g. a 4 s reader-cap abort on
+// any of the 22 reads) is memoised for `minutes` only, never for 6 h.
 async function getCachedWeeklyDistinctiveWords() {
-  "use cache";
+  "use cache: remote";
   cacheTag("weekly-words");
   const r = await attemptCached("weekly-words", fetchWeeklyDistinctiveWords);
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
-  if (r.ok) cacheLife("hours");
+  if (r.ok) cacheLife("weekly-words");
   else cacheLife("minutes");
   return r;
 }
@@ -136,7 +144,8 @@ async function getCachedWeeklyDistinctiveWords() {
  * karşılaştırması şu anda hesaplanamıyor" without failing the rest of
  * /hafta. On a cache-attempt failure this retries the query live once (so
  * a transient Supabase blip is not pinned as "the week" for the whole
- * `hours` cacheLife window) before falling back to `null`. Never throws.
+ * `weekly-words` cacheLife window) before falling back to `null`. Never
+ * throws.
  */
 export async function getWeeklyDistinctiveWords(): Promise<WeeklyDistinctiveWords | null> {
   return resolveCachedOrRetry(

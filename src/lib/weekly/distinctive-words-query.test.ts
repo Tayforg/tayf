@@ -177,12 +177,13 @@ describe("weekly distinctive words: capped client + cache lifetime", () => {
     expect(fixture.clientOpts.every(isCappedClientOpts)).toBe(true);
   });
 
-  it("success: exactly one cacheLife('hours'), tagged before the fetch", async () => {
+  it("success: exactly one cacheLife('weekly-words'), tagged before the fetch", async () => {
     await getWeeklyDistinctiveWords();
 
     expect(cacheTag).toHaveBeenCalledWith("weekly-words");
     expect(cacheLife).toHaveBeenCalledTimes(1);
-    expect(cacheLife).toHaveBeenCalledWith("hours");
+    expect(cacheLife).toHaveBeenCalledWith("weekly-words");
+    expect(cacheLife).not.toHaveBeenCalledWith("hours");
     expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
       vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
     );
@@ -197,7 +198,7 @@ describe("weekly distinctive words: capped client + cache lifetime", () => {
     // cached attempt (cacheLife) + live retry (uncached, no cacheLife)
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("minutes");
-    expect(cacheLife).not.toHaveBeenCalledWith("hours");
+    expect(cacheLife).not.toHaveBeenCalledWith("weekly-words");
   });
 
   it("an articles-read timeout is a failure too, cached for minutes", async () => {
@@ -207,5 +208,6 @@ describe("weekly distinctive words: capped client + cache lifetime", () => {
     await expect(getWeeklyDistinctiveWords()).resolves.toBeNull();
     expect(cacheLife).toHaveBeenCalledTimes(1);
     expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("weekly-words");
   });
 });

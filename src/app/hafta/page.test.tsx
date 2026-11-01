@@ -337,14 +337,17 @@ describe("WeeklyPage — data present", () => {
     expect(text).not.toContain("1 / 15 kaynak");
   });
 
-  it('falls back to "payda bilinmiyor" for every zone when health is unknown', async () => {
+  it('omits the per-zone source count when health is unknown (never "payda bilinmiyor")', async () => {
     mocks.health = null;
 
     const tree = await WeeklyPage();
     const text = collectText(tree).join(" ");
 
-    expect(text.match(/payda bilinmiyor/g) ?? []).toHaveLength(3);
+    expect(text.match(/payda bilinmiyor/g) ?? []).toHaveLength(0);
+    expect(text).not.toContain("kaynak haber verdi (toplayıcı / niş dahil)");
     expect(text).not.toContain("kaynak üzerinden hesaplanmadı");
+    // The three zone rows still render with their own article share.
+    expect(text.match(/\(haftanın 10 haberi içinde\)/g) ?? []).toHaveLength(3);
   });
 
   it("never prints a bare share without a denominator or the unknown wording", async () => {

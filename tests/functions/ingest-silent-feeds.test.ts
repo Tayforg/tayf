@@ -185,6 +185,19 @@ function buildClient() {
         return { data: null, error: null };
       },
       apply_article_title_edits: () => ({ data: 0, error: null }),
+      // Migration 130's pairwise pre-filter lookup: zip the two arrays and
+      // answer with the stored rows that match PAIRWISE (the real function).
+      existing_source_content_hash_pairs: (args) => {
+        const { p_source_ids = [], p_hashes = [] } = args as {
+          p_source_ids?: string[];
+          p_hashes?: string[];
+        };
+        const asked = new Set(p_source_ids.map((sid, i) => `${sid}\x1f${p_hashes[i]}`));
+        const rows = [...articlesStore.values()]
+          .filter((r) => asked.has(`${r.source_id}\x1f${r.content_hash}`))
+          .map((r) => ({ source_id: r.source_id, content_hash: r.content_hash }));
+        return { data: rows, error: null };
+      },
     },
   });
   const baseFrom = client.from;
