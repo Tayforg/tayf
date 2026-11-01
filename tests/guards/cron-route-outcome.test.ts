@@ -38,13 +38,16 @@ function cronRoutes(): Array<{ folder: string; file: string }> {
     .filter((r) => existsSync(r.file));
 }
 
+/** Escapes every RegExp metacharacter so a literal string can be embedded in a pattern. */
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /** Violations of the contract for one route source; empty means compliant. */
 function violations(folder: string, source: string): string[] {
   const code = blankComments(source);
   const out: string[] = [];
 
   const importRe = new RegExp(
-    `import\\s*\\{[^}]*\\bwithCronOutcome\\b[^}]*\\}\\s*from\\s*["']${WRAPPER_MODULE.replace(/[/@]/g, "\\$&")}["']`,
+    `import\\s*\\{[^}]*\\bwithCronOutcome\\b[^}]*\\}\\s*from\\s*["']${escapeRegExp(WRAPPER_MODULE)}["']`,
   );
   if (!importRe.test(code)) out.push(`does not import withCronOutcome from ${WRAPPER_MODULE}`);
 
