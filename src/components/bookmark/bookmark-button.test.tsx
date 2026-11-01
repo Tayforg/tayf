@@ -26,9 +26,9 @@ function render(props: { storyTitle?: string | null; variant?: "chip" | "overlay
   return renderToStaticMarkup(<BookmarkButton clusterId="c1" {...props} />);
 }
 
-/** Visible-and-announced text of the markup: tags stripped. */
+/** Visible-and-announced text of the markup: the text nodes between tags. */
 function textOf(html: string): string {
-  return html.replace(/<[^>]*>/g, "");
+  return (html.match(/>[^<]+</g) ?? []).map((run) => run.slice(1, -1)).join("");
 }
 
 beforeEach(() => {
