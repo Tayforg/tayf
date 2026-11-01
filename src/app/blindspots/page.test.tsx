@@ -557,6 +557,18 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
   }
 
   /** Renders the BlindspotCard for one bundle: its chip, "tek tarafta" span and bar. */
+  /** Text outside tags, by a single character scan (no regex tag stripping). */
+  function visibleText(markup: string): string {
+    let out = "";
+    let inTag = false;
+    for (const ch of markup) {
+      if (ch === "<") inTag = true;
+      else if (ch === ">") inTag = false;
+      else if (!inTag) out += ch;
+    }
+    return out;
+  }
+
   async function renderCard(bundle: ReturnType<typeof cardBundle>) {
     getBlindspots.mockResolvedValueOnce({ ok: true, bundles: [bundle] });
     const tree = await BlindspotsFeed();
@@ -567,7 +579,7 @@ describe("/blindspots page — chip agrees with the bar (zone percent consistenc
     const card = cards[0] as { type: React.FunctionComponent; props: object };
     const html = renderToStaticMarkup(createElement(card.type, card.props));
     // Visible text only: attributes (the bar's title="...") live in `html`.
-    return { html, text: html.replace(/<[^>]*>/g, "") };
+    return { html, text: visibleText(html) };
   }
 
   it("prints %84 on the chip for 11/1/1, matching the bar title, never %85", async () => {
