@@ -250,6 +250,56 @@ describe("optimizedThumbUrl", () => {
   });
 });
 
+// hunt-15 / A-image-url-hygiene: the render path heals rows already stored with
+// a bad URL, with no change here, because optimizedThumbUrl (and the card's
+// candidate map, and the query layer's placeholder filter) all go through the
+// shared normalizeImageUrl.
+describe("render path heals stored hunt-15 image URLs (no backfill)", () => {
+  const enc = (u: string) => encodeURIComponent(u);
+
+  it("optimizedThumbUrl serves aksam's broken /imgsdisk2026/ spelling from the real path", () => {
+    expect(optimizedThumbUrl("https://img3.aksam.com.tr/imgsdisk2026/11/01/x_2.jpg", 256)).toBe(
+      `/_next/image?url=${enc("https://img3.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg")}&w=256&q=75`,
+    );
+  });
+
+  it("optimizedThumbUrl serves an Oksijen 150x84 and a BBC ws/240 row at the large variant", () => {
+    expect(optimizedThumbUrl("https://i.gazeteoksijen.com/2/150/84/storage/a.jpg", 160)).toBe(
+      `/_next/image?url=${enc("https://i.gazeteoksijen.com/2/1280/720/storage/a.jpg")}&w=160&q=75`,
+    );
+    expect(optimizedThumbUrl("https://ichef.bbci.co.uk/ace/ws/240/cpsprodpb/a.jpg", 160)).toBe(
+      `/_next/image?url=${enc("https://ichef.bbci.co.uk/ace/standard/976/cpsprodpb/a.jpg")}&w=160&q=75`,
+    );
+  });
+
+  it("optimizedThumbUrl turns a stored YouTube embed into its allowlisted poster", () => {
+    expect(optimizedThumbUrl("https://www.youtube.com/embed/2lKJof-8DeE", 128)).toBe(
+      `/_next/image?url=${enc("https://img.youtube.com/vi/2lKJof-8DeE/hqdefault.jpg")}&w=128&q=75`,
+    );
+  });
+
+  it("optimizedThumbUrl refuses a host root and a WordPress emoji (they are not images)", () => {
+    expect(optimizedThumbUrl("https://cdn.istiklal.com.tr/", 128)).toBeNull();
+    expect(optimizedThumbUrl("https://s.w.org/images/core/emoji/15.0.3/72x72/1f449.png", 128)).toBeNull();
+  });
+
+  it("optimizedThumbUrl refuses the new placeholder shapes", () => {
+    for (const u of [
+      "https://img3.aksam.com.tr/imgsdisk2026/01/01/210220191220255418101_2.jpg",
+      "https://img3.aksam.com.tr/imgsdisk/2026/01/01/210220191220255418101_2.jpg",
+      "https://sozcu01.sozcucdn.com/sozcu/production/uploads/images/2026/10/son-dakikajpg-fGomF2NHS0uGhDDwDPCbMQ.jpg",
+      "https://img.yenicaggazetesi.com/rcman/Cw1280h720q95gc/storage/files/images/default.png",
+    ]) {
+      expect(optimizedThumbUrl(u, 128)).toBeNull();
+    }
+  });
+
+  it("the re-exported isPlaceholderImageUrl sees both aksam spellings", () => {
+    expect(isPlaceholderImageUrl("https://img3.aksam.com.tr/imgsdisk2026/01/01/210220191220255418101_2.jpg")).toBe(true);
+    expect(isPlaceholderImageUrl("https://img3.aksam.com.tr/imgsdisk/2026/11/01/x_2.jpg")).toBe(false);
+  });
+});
+
 describe("optimizedThumbSrcSet", () => {
   it("returns the 128 src and the 128w/160w/256w srcSet", () => {
     const enc = "https%3A%2F%2Fimg.piri.net%2Fa.jpg";

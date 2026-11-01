@@ -140,6 +140,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 
 // Import AFTER mocks are declared.
 import { cacheLife, cacheTag } from "next/cache";
+import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 import {
   getClusterDetail,
   getClusterDetailOrThrow,
@@ -384,6 +385,41 @@ describe("getClusterDetail row shaping", () => {
     expect(result!.cluster.title_tr).toBe("picked version");
     expect(result!.cluster.title_original).toBe("orig");
     expect(result!.cluster.title_method).toBe("extractive");
+
+    // 1c. every extractive version is labelled extractive, so a title written
+    // under an older rule version (still waiting for the cron's re-pick) is
+    // not mislabelled "llm" when EXTRACTIVE_MODEL_ID moves on.
+    for (const model of ["extractive-v1", "extractive-v2", EXTRACTIVE_MODEL_ID]) {
+      callLog = [];
+      responses.clusters = {
+        maybeSingle: {
+          data: mkClusterRow({
+            title_tr: "orig",
+            title_tr_neutral: "picked version",
+            title_neutral_model: model,
+          }),
+          error: null,
+        },
+      };
+      result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+      expect(result!.cluster.title_method, model).toBe("extractive");
+    }
+    // An LLM model id, or no model at all, is not extractive.
+    for (const model of ["claude-haiku-4-5-20251001", null]) {
+      callLog = [];
+      responses.clusters = {
+        maybeSingle: {
+          data: mkClusterRow({
+            title_tr: "orig",
+            title_tr_neutral: "picked version",
+            title_neutral_model: model,
+          }),
+          error: null,
+        },
+      };
+      result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+      expect(result!.cluster.title_method, String(model)).toBe("llm");
+    }
 
     // 2. neutral present but whitespace-only → falls back
     callLog = [];

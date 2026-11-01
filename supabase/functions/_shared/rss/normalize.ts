@@ -26,9 +26,11 @@ import {
   stripInvalidXmlChars,
 } from "./entities.ts";
 import {
+  isIconLikeImageUrl,
   isOptimizableImageUrl,
   isPlaceholderImageUrl,
   normalizeImageUrl,
+  upgradeImageVariant,
 } from "../image-url.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 import { isLegalNotice } from "./legal-notice.ts";
@@ -191,15 +193,12 @@ export function isVideoUrl(u: string): boolean {
 // the 084 migration header for the exact sample), so the larger crop is a
 // safe drop-in upgrade for any URL still carrying the small preset.
 //
-// TODO(db-platform): haberet's '/150/84/' thumbnail shape is NOT upgraded
-// here -- unlike rcman it carries no discoverable larger-variant path
-// convention, and the audit found no verified bigger crop to swap in. Leave
-// as-is until a haberet-specific larger variant is confirmed.
-const RCMAN_SMALL = "/rcman/Cw150h84q95gc/";
-const RCMAN_LARGE = "/rcman/Cw1280h720q95gc/";
-
+// hunt-15: the rule now lives in the shared `upgradeImageVariant`
+// (_shared/image-url.ts) next to the Gazete Oksijen `/2/150/84/` and BBC Turkce
+// `/ace/ws/240/` rules, and `normalizeImageUrl` applies it, so the render path
+// upgrades stored rows too. This export stays for existing callers.
 export function upgradeThumbnailUrl(u: string): string {
-  return u.includes(RCMAN_SMALL) ? u.split(RCMAN_SMALL).join(RCMAN_LARGE) : u;
+  return upgradeImageVariant(u);
 }
 
 function firstNonVideoCandidate(candidates: ReadonlyArray<string | null | undefined>): string | null {
@@ -212,12 +211,16 @@ function firstNonVideoCandidate(candidates: ReadonlyArray<string | null | undefi
     // stand-in) is skipped the same way, so a real media:thumbnail behind it
     // can win and an item with only placeholders stores NULL -- the NULL is
     // what queues the og:image backfill (articles_image_enqueue trigger).
+    //
+    // hunt-15: a site icon / logo advertised as the enclosure (mfa.gov.tr
+    // `/images/logo.png`) is skipped too, by whole-token basename match.
     const normalized = normalizeImageUrl(c);
     if (
       normalized &&
       !isVideoUrl(normalized) &&
       isOptimizableImageUrl(normalized) &&
-      !isPlaceholderImageUrl(normalized)
+      !isPlaceholderImageUrl(normalized) &&
+      !isIconLikeImageUrl(normalized)
     ) {
       return upgradeThumbnailUrl(normalized);
     }

@@ -4,7 +4,7 @@ import { BIAS_LABELS, ZONE_META } from "@/lib/bias/config";
 import { zonePercents } from "@/lib/bias/zone-summary";
 import { zoneYieldDenominator, type ZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatCountTr, formatPctTr } from "@/lib/format/number-tr";
-import { weekCopy } from "@/lib/weekly/week-copy";
+import { weekCopy, weekCopyFor } from "@/lib/weekly/week-copy";
 import {
   WEEKLY_CLUSTER_LIMIT,
   type WeeklyBlindspot,
@@ -16,12 +16,17 @@ import type { MediaDnaZone } from "@/types";
 // BasisNote, WidestSpectrum, Blindspots, and the class tokens they use, so
 // /hafta/[hafta] can render the same sections without duplicating markup.
 //
-// Every reader-facing line that differs between a live week and a closed one
-// comes from src/lib/weekly/week-copy.ts via the `archive` prop (default
-// false = live, which is what /hafta renders). Closed weeks have no live
+// Every reader-facing line that differs between a live week, a closed one and
+// the rolling window comes from src/lib/weekly/week-copy.ts: via the
+// `archive` prop (default false = the in-progress ISO week, true = a finished
+// one) or `variant="rolling"` (/hafta, a trailing 7-day window that must not
+// say "bu hafta"; `variant` wins over `archive`). Closed weeks have no live
 // source health, so they omit the per-zone source counts and the 72 h basis
 // footnote instead of printing placeholders. Do not add week-specific string
 // literals here: tests/guards/week-archive-copy.test.ts forbids them.
+
+/** `"rolling"` selects the /hafta wording; absent = `archive` decides. */
+export type WeekSectionVariant = "rolling";
 
 export const cardClass = "rounded-xl ring-1 ring-border/60 bg-card/60 p-4 sm:p-6";
 export const proseClass = "max-w-[65ch] text-sm text-muted-foreground leading-relaxed";
@@ -33,8 +38,10 @@ export const linkClass =
 export const metaClass = "text-xs text-muted-foreground";
 
 // Shown only when the paged cluster read stopped at its own ceiling, so the
-// number is the ceiling (5.000), grouped the Turkish way.
-export const TRUNCATED_CAVEAT = `En büyük ${formatCountTr(WEEKLY_CLUSTER_LIMIT)} küme üzerinden hesaplandı; haftanın tamamı değil.`;
+// number is the ceiling (5.000), grouped the Turkish way. It prints on /hafta
+// (a rolling 7-day window) and on /hafta/<week> alike, so it names "the
+// period", never "the week".
+export const TRUNCATED_CAVEAT = `En büyük ${formatCountTr(WEEKLY_CLUSTER_LIMIT)} küme üzerinden hesaplandı; dönemin tamamı değil.`;
 
 const ZONE_ORDER: readonly MediaDnaZone[] = [
   "iktidar",
@@ -48,14 +55,16 @@ export function ZoneShares({
   feedStatus,
   truncated,
   archive = false,
+  variant,
 }: {
   summary: WeeklySummary;
   health: ZoneFeedHealth | null;
   feedStatus: { delivering: number; total: number } | null;
   truncated: boolean;
   archive?: boolean;
+  variant?: WeekSectionVariant;
 }) {
-  const copy = weekCopy(archive);
+  const copy = variant === "rolling" ? weekCopyFor("rolling") : weekCopy(archive);
   const total = ZONE_ORDER.reduce(
     (sum, zone) => sum + summary.zoneCounts[zone],
     0,
@@ -84,9 +93,7 @@ export function ZoneShares({
               <span className="font-mono text-sm text-foreground">
                 {formatPctTr(percents[zone])}
               </span>
-              <span className={metaClass}>
-                {`(haftanın ${formatCountTr(total)} haberi içinde)`}
-              </span>
+              <span className={metaClass}>{copy.zoneRowTotal(total)}</span>
               {copy.showSourceCounts && delivering !== null ? (
                 <span className={metaClass}>
                   {`${delivering} kaynak haber verdi (toplayıcı / niş dahil)`}
@@ -97,7 +104,12 @@ export function ZoneShares({
         })}
       </ul>
       {truncated ? <p className={metaClass}>{TRUNCATED_CAVEAT}</p> : null}
-      <BasisNote total={total} feedStatus={feedStatus} archive={archive} />
+      <BasisNote
+        total={total}
+        feedStatus={feedStatus}
+        archive={archive}
+        variant={variant}
+      />
     </section>
   );
 }
@@ -119,12 +131,14 @@ export function BasisNote({
   total,
   feedStatus,
   archive = false,
+  variant,
 }: {
   total: number;
   feedStatus: { delivering: number; total: number } | null;
   archive?: boolean;
+  variant?: WeekSectionVariant;
 }) {
-  const copy = weekCopy(archive);
+  const copy = variant === "rolling" ? weekCopyFor("rolling") : weekCopy(archive);
   const sourceBasis = copy.sourceBasis(feedStatus);
 
   return (
@@ -147,11 +161,13 @@ export function BasisNote({
 export function WidestSpectrum({
   summary,
   archive = false,
+  variant,
 }: {
   summary: WeeklySummary;
   archive?: boolean;
+  variant?: WeekSectionVariant;
 }) {
-  const copy = weekCopy(archive);
+  const copy = variant === "rolling" ? weekCopyFor("rolling") : weekCopy(archive);
 
   return (
     <section className={`${cardClass} space-y-3`}>
@@ -198,12 +214,14 @@ export function Blindspots({
   summary,
   health,
   archive = false,
+  variant,
 }: {
   summary: WeeklySummary;
   health: ZoneFeedHealth | null;
   archive?: boolean;
+  variant?: WeekSectionVariant;
 }) {
-  const copy = weekCopy(archive);
+  const copy = variant === "rolling" ? weekCopyFor("rolling") : weekCopy(archive);
   const degraded =
     health !== null && ZONE_ORDER.some((zone) => health[zone].degraded);
 

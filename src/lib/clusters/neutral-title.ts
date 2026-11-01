@@ -6,11 +6,27 @@
 // configured. It never invents text, so it can't hallucinate — the price is
 // that it is one outlet's wording with the framing sanded off, not a
 // synthesis. The LLM path overwrites it when enabled.
+//
+// extractive-v2 (hunt 15): Turkish casing no longer defeats the lead-in and
+// framing matchers ("SON DAKİKA", "FLAŞ", "ŞOK"); a minority numeral loses to
+// the number most members agree on; loaded wording costs points; and a pick
+// must pass isAcceptableNeutral (no question, English, shouting, feed cut) or
+// a cluster that already has a title keeps it. A cluster with no title yet
+// takes the cleaned best candidate instead ({ floor: true }): it beats the
+// raw title_tr.
 
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
-// rules change in a way that alters output.
-export const EXTRACTIVE_MODEL_ID = "extractive-v1";
+// rules change in a way that alters output; the headline cron then re-picks
+// the last 14 days of older-version titles (neutral_title_repick_candidates,
+// migration 141). Readers must not compare against this constant: use
+// isExtractiveModelId, which recognises every version.
+export const EXTRACTIVE_MODEL_ID = "extractive-v2";
+
+/** True for any extractive pick, whatever rule version wrote it. */
+export function isExtractiveModelId(model: unknown): boolean {
+  return typeof model === "string" && model.startsWith("extractive-");
+}
 
 export interface MemberTitle {
   title: string;
@@ -26,6 +42,16 @@ const STOP = new Set([
   "daha", "cok", "olan", "olarak", "var", "yok", "oldu", "dedi", "son", "dakika",
   "haber", "haberi", "sonra", "once", "iste", "icin",
 ]);
+
+// Turkish-locale lowercasing: "İ" -> "i", "I" -> "ı", so "SON DAKİKA" folds to
+// "son dakika" (plain toLowerCase() would give "i" + U+0307). The lead-in
+// matcher slices the original by the length of a match on the folded text, so
+// the two must have the same length; if a runtime ever changes it, fall back
+// to the locale-free mapping (cleanHeadline then refuses to slice).
+function foldTr(s: string): string {
+  const t = s.toLocaleLowerCase("tr");
+  return t.length === s.length ? t : s.toLowerCase();
+}
 
 // Locale-aware lowercasing matches cleanHeadline's toLocaleUpperCase("tr")
 // below: plain toLowerCase() turns "İ" into "i" + a combining dot-above
@@ -58,34 +84,96 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return inter / (a.size + b.size - inter);
 }
 
-// Each hit is one unit of "this outlet is selling, not reporting".
-const FRAMING: RegExp[] = [
+// Unicode-aware word edges. `\b` is ASCII-only without the `u` flag and not
+// Turkish-aware with it, so "Flaş gelişme" never matched `\bflaş\b`.
+const L = String.raw`(?<![\p{L}\p{N}])`;
+const R = String.raw`(?![\p{L}\p{N}])`;
+
+// Tested on the raw text: they depend on case or on punctuation that folding
+// would not change anyway.
+const FRAMING_RAW: RegExp[] = [
   /!/,
   /\?/,
-  /son\s*dakika/i,
-  /\b(flaş|flas|canlı|canli)\b/i,
-  /\b(bomba|şok|sok|skandal|rezalet|çarpıcı|carpici|olay|dev|kritik|müjde|mujde)\b/i,
-  /dikkat çeken|dikkat ceken|işte o|iste o|işte detaylar|iste detaylar|bakın|bakin/i,
-  /\bbaşkan erdoğan\b/i, // A Haber / Sabah house style for the president
   /\b[A-ZÇĞİÖŞÜ]{4,}\b/, // shouted words
   /\|/, // "Outlet | headline" prefixes
   /\.\.\.$/,
 ];
 
-function framingPenalty(title: string): number {
+// Tested on the Turkish-lowercased text. Each hit is one unit of "this outlet
+// is selling, not reporting". [iı] because an ASCII-capital "SON DAKIKA"
+// lowercases to "dakıka" in the tr locale.
+const FRAMING_FOLDED: RegExp[] = [
+  /son\s*dak[iı]ka/u,
+  new RegExp(`${L}(?:flaş|flas|canlı|canli)${R}`, "u"),
+  new RegExp(
+    `${L}(?:bomba|şok|sok|skandal|rezalet|çarp[iı]c[iı]|olay|dev|kritik|müjde|mujde)${R}`,
+    "u",
+  ),
+  /dikkat çeken|dikkat ceken|işte o|iste o|işte detaylar|iste detaylar|bakın|bakin/u,
+  // A Haber / Sabah house style for the president.
+  new RegExp(`${L}başkan erdoğan${R}`, "u"),
+];
+
+// Wording that editorialises rather than reports. Costs more than framing:
+// the hunt found 'Netanyahu Trump'a yalvardı' standing in for a hedged
+// "... talep ettiği iddiası" in 8 of 500 sampled clusters.
+const LOADED_FOLDED: RegExp[] = [
+  new RegExp(`${L}yalvard[iı]${R}`, "u"),
+  new RegExp(`${L}şaşt[iı]\\s+kald[iı]${R}`, "u"),
+  new RegExp(`${L}korkunç${R}`, "u"),
+  new RegExp(`${L}sert\\s+çıktı${R}`, "u"),
+  new RegExp(`${L}vahşet${R}`, "u"),
+  new RegExp(`${L}dev\\s+operasyon${R}`, "u"),
+  new RegExp(`${L}işte${R}`, "u"),
+];
+
+export function framingPenalty(title: string): number {
+  const folded = foldTr(title);
   let n = 0;
-  for (const re of FRAMING) if (re.test(title)) n++;
+  for (const re of FRAMING_RAW) if (re.test(title)) n++;
+  for (const re of FRAMING_FOLDED) if (re.test(folded)) n++;
   return n;
+}
+
+function loadedPenalty(title: string): number {
+  const folded = foldTr(title);
+  let n = 0;
+  for (const re of LOADED_FOLDED) if (re.test(folded)) n++;
+  return n;
+}
+
+// Bulletin lead-ins. "son dakika" / "flaş" are lead-ins wherever they start the
+// title; "canlı" / "şok" only before a separator, because "Canlı bomba
+// saldırısında 3 kişi öldü" (suicide bomber) and "Şok geçiren hasta" are
+// sentences. Matched on foldTr(title), sliced from the original by length.
+const LEAD_IN =
+  /^(?:(?:son\s*dak[iı]ka|flaş|flas)(?![\p{L}\p{N}])\s*[!:.…|│\-–—]*|(?:canlı|canli|şok|sok)\s*[!:|│\-–—]+)\s*/u;
+const LEAD_IN_PASSES = 4;
+
+function stripLeadIns(title: string): string {
+  let t = title;
+  for (let pass = 0; pass < LEAD_IN_PASSES; pass++) {
+    const folded = foldTr(t);
+    if (folded.length !== t.length) break; // cannot slice safely
+    const m = LEAD_IN.exec(folded);
+    if (!m || m[0].length === 0) break;
+    t = t.slice(m[0].length);
+  }
+  return t;
 }
 
 export function cleanHeadline(title: string): string {
   let t = title.trim();
-  // Outlet prefixes and "Son dakika" lead-ins.
+  // Outlet prefixes ("Halk TV | ...") and "Son dakika" lead-ins, repeatedly:
+  // "SON DAKİKA | FLAŞ! x" is "x".
   t = t.replace(/^[^|│]{0,25}[|│]\s*/, "");
-  t = t.replace(/^(son\s*dakika|flaş|flas|canlı|canli)\s*[!:.…|│\-–—]*\s*/i, "");
-  t = t.replace(/^(son\s*dakika|flaş|flas)\s*[!:.…|│\-–—]*\s*/i, "");
-  // House style.
-  t = t.replace(/\bBaşkan Erdoğan\b/g, "Cumhurbaşkanı Erdoğan");
+  t = stripLeadIns(t);
+  // House style. Not before a capitalised name: "Başkan Erdoğan Tosun" is a
+  // different person than the president.
+  t = t.replace(
+    /(?<![\p{L}\p{N}])Başkan Erdoğan(?![\p{L}\p{N}])(?!\s+\p{Lu})/gu,
+    "Cumhurbaşkanı Erdoğan",
+  );
   // Exclamation marks: sentence break inside, dropped at the end.
   t = t.replace(/!+\s+/g, ". ").replace(/!+$/g, "");
   // Trailing ellipsis / colon / dash.
@@ -133,35 +221,195 @@ export function isGenericTitle(title: string): boolean {
   return true;
 }
 
+const ACCEPT_MIN_LEN = 20;
+const ACCEPT_MAX_LEN = 110;
+
+const ENGLISH_STOPWORDS = new Set([
+  "the", "a", "an", "and", "of", "to", "in", "at", "on", "for", "with", "from",
+  "by", "after", "over", "says", "is", "are", "was", "were", "will", "has", "have",
+]);
+const TURKISH_LETTER = /[çğıöşüÇĞİÖŞÜ]/;
+
+// "Erdoğan hails unity ... in Ankar": two or more English function words and
+// at most one token with a Turkish-only letter. "On yıl sonra at yarışında
+// rekor" has two stopword homographs ("on", "at") but two Turkish-letter
+// tokens, so it stays Turkish.
+function looksEnglish(title: string): boolean {
+  const words = title.split(/[^\p{L}]+/u).filter((w) => w.length > 0);
+  let hits = 0;
+  let turkish = 0;
+  for (const w of words) {
+    if (ENGLISH_STOPWORDS.has(w.toLowerCase())) hits++;
+    if (TURKISH_LETTER.test(w)) turkish++;
+  }
+  return hits >= 2 && turkish <= 1;
+}
+
+// A feed cut: another member's title continues this one's exact text, and the
+// continuation finishes this title's last word with one or two letters
+// ("...için Ankar" against "...için Ankara'ya geliyor"). Only a strict prefix
+// counts. Comparing last words alone flagged ordinary Turkish suffixes (-ı,
+// -na, -si, -ız are as long as the cut): 'protestoda 139 gözaltı' against '139
+// kişi gözaltına alındı' is two outlets' wording, not a truncation. The short
+// word appearing whole in any other member also clears the title. The title
+// itself (an exact folded match) is never evidence about itself.
+const CUT_COMPLETION = /^[a-z0-9]{1,2}(?: |$)/;
+
+function looksTruncated(title: string, memberTitles: readonly string[]): boolean {
+  const own = fold(title);
+  const last = own.split(" ").pop() ?? "";
+  if (last.length < 2) return false;
+  let continuedByAnother = false;
+  for (const m of memberTitles) {
+    const raw = fold(m);
+    const cleaned = fold(cleanHeadline(m));
+    if (raw === own || cleaned === own) continue;
+    for (const t of raw.split(" ")) if (t === last) return false;
+    // The cleaned form too: this title was cleaned, the member's lead-in
+    // ("SON DAKİKA | ...") was not.
+    for (const f of [raw, cleaned]) {
+      if (f.length > own.length && f.startsWith(own) && CUT_COMPLETION.test(f.slice(own.length))) {
+        continuedByAnother = true;
+      }
+    }
+  }
+  return continuedByAnother;
+}
+
+export interface AcceptOptions {
+  /**
+   * The text was written by a model, not copied from a feed: skip the
+   * feed-cut heuristic (a model does not truncate mid-word) and keep every
+   * other rule.
+   */
+  generated?: boolean;
+}
+
+// Defects a first-pick floor does not forgive: shouting, a placeholder, an
+// English headline, a feed cut. A question, a leading "İşte" or an odd length
+// are only less good than the cleaned text of a title nobody has cleaned yet.
+function hasHardDefect(t: string, memberTitles: readonly string[], opts: AcceptOptions): boolean {
+  if (/\p{L}/u.test(t) && t === t.toLocaleUpperCase("tr")) return true;
+  if (isGenericTitle(t)) return true;
+  if (looksEnglish(t)) return true;
+  if (!opts.generated && looksTruncated(t, memberTitles)) return true;
+  return false;
+}
+
+/**
+ * Whether a candidate neutral headline may be shown. Rejects a question, a
+ * leading "İşte", shouting, a title that is too short or too long, a generic
+ * placeholder, an English headline and (copied text only) a truncated one.
+ * `memberTitles` are the cluster's other member headlines (the title itself,
+ * if present, is ignored). Pure; the headline cron also runs it on LLM output
+ * with `{ generated: true }`.
+ */
+export function isAcceptableNeutral(
+  title: string,
+  memberTitles: readonly string[],
+  opts: AcceptOptions = {},
+): boolean {
+  const t = (title ?? "").trim();
+  if (t.length < ACCEPT_MIN_LEN || t.length > ACCEPT_MAX_LEN) return false;
+  if (t.includes("?")) return false;
+  if (/^işte(?![\p{L}\p{N}])/u.test(foldTr(t))) return false;
+  if (hasHardDefect(t, memberTitles, opts)) return false;
+  return true;
+}
+
+const NUMBER = /\d+(?:[.,]\d+)?/g;
+
+// "91,1" and "91.1" are one number.
+function numsOf(title: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of title.match(NUMBER) ?? []) out.add(m.replace(",", "."));
+  return out;
+}
+
+/**
+ * Candidates to leave out: one that carries a number no other member has,
+ * while two or more other members agree on a different number it lacks
+ * ("40 kişi tutuklandı" against six members that say 39). Indices into
+ * `nums`. Empty when every candidate would be excluded (the rule is then
+ * moot, not a verdict).
+ */
+function numeralOutliers(nums: Set<string>[]): Set<number> {
+  const holders = new Map<string, number>();
+  for (const s of nums) for (const n of s) holders.set(n, (holders.get(n) ?? 0) + 1);
+
+  const out = new Set<number>();
+  nums.forEach((mine, i) => {
+    let unique = false;
+    for (const n of mine) if (holders.get(n) === 1) unique = true;
+    if (!unique) return;
+    for (const [m, count] of holders) {
+      // `count` includes i itself when i has m; others = count - (mine.has(m) ? 1 : 0).
+      if (!mine.has(m) && count >= 2) {
+        out.add(i);
+        return;
+      }
+    }
+  });
+  return out.size === nums.length ? new Set<number>() : out;
+}
+
+export interface PickOptions {
+  /**
+   * First pick of a cluster that has no neutral title yet. When no candidate
+   * passes isAcceptableNeutral, return the cleaned best-scored candidate that
+   * has no hard defect (shouting, placeholder, English, feed cut), else the
+   * cleaned best-scored one, instead of null: the alternative is the raw
+   * `title_tr` with its lead-ins and '!' on every surface. A re-pick leaves
+   * this off: it already has a title and keeps it unless the new one is
+   * better.
+   */
+  floor?: boolean;
+}
+
 /**
  * Returns the cleaned headline of the most central, least sensational
- * member, or null when there is nothing to choose from (no members, or every
- * member title is a generic placeholder; the headline cron records that as an
- * errored 'empty rewrite' and the cluster keeps its previous title).
+ * member that passes isAcceptableNeutral, or null when there is nothing to
+ * choose from (no members, every member title generic, or every candidate
+ * rejected; the headline cron then keeps the title the cluster already has).
+ * With `{ floor: true }` a rejected-only cluster still gets its cleaned
+ * best candidate (see PickOptions); null then means only "nothing usable".
  */
-export function pickNeutralTitle(members: MemberTitle[]): string | null {
+export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {}): string | null {
   const items = members
     .map((m) => ({ ...m, title: (m.title ?? "").trim() }))
     .filter((m) => m.title.length > 0 && !isGenericTitle(m.title));
   if (items.length === 0) return null;
 
   const toks = items.map((m) => tokens(m.title));
-  let best = -Infinity;
-  let bestIdx = 0;
+  const outliers = numeralOutliers(items.map((m) => numsOf(m.title)));
+
+  const scored: Array<{ index: number; score: number }> = [];
   for (let i = 0; i < items.length; i++) {
+    if (outliers.has(i)) continue;
     let sim = 0;
     for (let j = 0; j < items.length; j++) if (j !== i) sim += jaccard(toks[i]!, toks[j]!);
     const centrality = items.length > 1 ? sim / (items.length - 1) : 0;
-    const len = items[i]!.title.length;
+    const title = items[i]!.title;
     const score =
-      centrality - 0.12 * framingPenalty(items[i]!.title) - 0.002 * Math.max(0, len - 90);
-    if (score > best) {
-      best = score;
-      bestIdx = i;
-    }
+      centrality -
+      0.12 * framingPenalty(title) -
+      0.25 * loadedPenalty(title) -
+      0.002 * Math.max(0, title.length - 90);
+    scored.push({ index: i, score });
   }
+  scored.sort((a, b) => b.score - a.score || a.index - b.index);
 
-  const cleaned = cleanHeadline(items[bestIdx]!.title);
-  // A headline that lost most of itself to cleaning wasn't a headline.
-  return cleaned.length >= 20 ? cleaned : items[bestIdx]!.title;
+  let floorSoft: string | null = null;
+  let floorAny: string | null = null;
+  for (const { index } of scored) {
+    const cleaned = cleanHeadline(items[index]!.title);
+    // A lead-in that survived cleaning (an odd Unicode case) must not ship.
+    if (cleaned === "" || LEAD_IN.test(foldTr(cleaned))) continue;
+    const others = items.filter((_, j) => j !== index).map((m) => m.title);
+    if (isAcceptableNeutral(cleaned, others)) return cleaned;
+    if (!opts.floor) continue;
+    floorAny ??= cleaned;
+    if (floorSoft === null && !hasHardDefect(cleaned, others, {})) floorSoft = cleaned;
+  }
+  return floorSoft ?? floorAny;
 }

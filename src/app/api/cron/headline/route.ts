@@ -1,3 +1,4 @@
+import type { PostgrestError, SupabaseClient } from "@supabase/supabase-js";
 import { connection, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
@@ -10,7 +11,11 @@ import {
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_VERSION,
 } from "@/lib/headline/prompt";
-import { EXTRACTIVE_MODEL_ID, pickNeutralTitle } from "@/lib/clusters/neutral-title";
+import {
+  EXTRACTIVE_MODEL_ID,
+  isAcceptableNeutral,
+  pickNeutralTitle,
+} from "@/lib/clusters/neutral-title";
 import { captureServerException } from "@/lib/sentry/server";
 import { fetchHeadlineEligibility } from "@/lib/headline/eligibility";
 import {
@@ -66,11 +71,41 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * central, least sensational member headline and strips the outlet's
  * framing from it (`src/lib/clusters/neutral-title.ts`). That costs
  * nothing, so it covers 2+ source clusters in a bigger batch. It fills
- * `title_tr_neutral` and stamps `title_neutral_model = "extractive-v1"`
- * but leaves `title_neutral_at` NULL — so nothing that counts "AI
- * neutralized" (rss.xml, /metodoloji, /api/metrics) counts these, and
- * enabling the LLM later re-titles the same clusters. The extractive title
- * is a floor, not a verdict.
+ * `title_tr_neutral`, stamps `title_neutral_model = EXTRACTIVE_MODEL_ID`
+ * (`extractive-v2`) and `title_neutral_member_count` (the cluster's
+ * article_count at pick time) but leaves `title_neutral_at` NULL — so nothing
+ * that counts "AI neutralized" (rss.xml, /metodoloji, /api/metrics) counts
+ * these, and enabling the LLM later re-titles the same clusters. The
+ * extractive title is a floor, not a verdict. A first pick never comes back
+ * empty because every member fails the acceptance gate: `{ floor: true }`
+ * returns the cleaned best candidate instead of leaving the raw `title_tr`
+ * on every surface (and the row in the IS NULL pick for good).
+ *
+ * LLM MODE REJECTIONS
+ * -------------------
+ * An LLM rewrite that fails isAcceptableNeutral (`generated`: no feed-cut
+ * check) is not written. The call is already metered, so the cluster gets
+ * `title_neutral_prompt_version = '<HEADLINE_PROMPT_VERSION>:rejected'` (plus
+ * the floor pick when it had no title) and the LLM pick skips that mark: the
+ * gate is deterministic, so without it the same cluster would be re-sent and
+ * re-billed every tick. A prompt version bump retries those clusters.
+ *
+ * RE-PICK (extractive mode only)
+ * ------------------------------
+ * An extractive title is picked when a cluster first reaches 2 members, so it
+ * goes stale as the cluster grows and whenever the picker's rules change
+ * (EXTRACTIVE_MODEL_ID bump). After the IS NULL pass, with what is left of
+ * the 50-write budget (at most REPICK_BATCH = 20) and only while the run is
+ * under 40 s old, the route asks `neutral_title_repick_candidates` (migration
+ * 141) for active clusters of the last 14 days whose pick came from another
+ * model, was never stamped, or has been outgrown, and re-picks them from all
+ * fetched members. It writes `title_tr_neutral` only when the pick changed,
+ * always stamps the model and the article_count, only touches rows whose
+ * `title_neutral_at` IS NULL, and NEVER writes `clusters.updated_at` (it
+ * orders the home feed: a healed title must not make an old story look new).
+ * There is no backfill UPDATE anywhere: existing rows heal through this
+ * loop at ~20 per run, newest first. An rpc failure is logged and the run
+ * still answers 200.
  *
  * AUTH
  * ----
@@ -107,14 +142,31 @@ const LLM_BATCH = 5;
 const EXTRACTIVE_MIN_ARTICLE_COUNT = 2;
 const EXTRACTIVE_BATCH = 50;
 
-// Same `MEMBER_TITLES_CAP` as the tmux worker. The rewriter slices to 8
-// internally; we ask for a couple extra so the slice is meaningful even
-// after dedupe / nulls.
-const MEMBER_TITLES_CAP = 16;
+// Members fetched per cluster. The LLM prompt slices to the newest 8
+// itself (src/lib/headline/prompt.ts); the extractive picker scores every
+// fetched title, so a big story is judged on all of its outlets, not on the
+// arbitrary 16 the old unordered fetch returned.
+const MEMBER_FETCH_CAP = 200;
+
+// clusters.title_neutral_member_count is a smallint.
+const MEMBER_COUNT_MAX = 32767;
+
+// Extractive re-pick (migration 141): rows per run, and the age of the run
+// after which the pass is skipped (maxDuration is 60 s).
+const REPICK_BATCH = 20;
+const REPICK_DEADLINE_MS = 40_000;
 
 // Re-exported from src/lib/headline/prompt.ts so /metodoloji can state the
 // threshold without hardcoding a literal that could drift from this gate.
 const MIN_ARTICLE_COUNT = HEADLINE_MIN_ARTICLE_COUNT;
+
+// Stamped into clusters.title_neutral_prompt_version when the acceptance gate
+// rejects an LLM rewrite (a paid call already metered). The LLM pick excludes
+// it, so a rejected cluster is not re-sent every tick; a new
+// HEADLINE_PROMPT_VERSION changes the mark and retries those clusters. A
+// rejected rewrite never gets title_neutral_at, so nothing counts it as an AI
+// neutralization.
+const LLM_REJECTED_MARK = `${HEADLINE_PROMPT_VERSION}:rejected`;
 
 // Vendor URL + model id default to the current upstream provider, but operators
 // can swap providers without a code change by setting LLM_API_URL / LLM_MODEL
@@ -193,6 +245,83 @@ async function rewriteClusterHeadline(input: {
   };
 }
 
+interface MemberItem {
+  title: string;
+  published_at: string | null;
+}
+
+/**
+ * The titles of a cluster's articles, newest first, capped at
+ * MEMBER_FETCH_CAP. Both passes use it. Ties on `published_at` break on the
+ * title, so equal timestamps order the same on every run and the picker's
+ * stable tie-break is deterministic.
+ */
+async function fetchMemberItems(
+  supabase: SupabaseClient,
+  clusterId: string,
+): Promise<{ items: MemberItem[]; error: PostgrestError | null }> {
+  const { data: memberRows, error } = await supabase
+    .from("cluster_articles")
+    .select("articles ( title, published_at )")
+    .eq("cluster_id", clusterId)
+    .limit(MEMBER_FETCH_CAP);
+  if (error) return { items: [], error };
+
+  const items: MemberItem[] = [];
+  for (const r of (memberRows ?? []) as unknown as ClusterArticleRow[]) {
+    const a = Array.isArray(r.articles) ? r.articles[0] : r.articles;
+    if (!a || !a.title) continue;
+    items.push({ title: a.title, published_at: a.published_at });
+  }
+  // Newest-first so the LLM sees the freshest framings of the story.
+  items.sort((a, b) => {
+    const ta = a.published_at ? new Date(a.published_at).getTime() : 0;
+    const tb = b.published_at ? new Date(b.published_at).getTime() : 0;
+    if (tb !== ta) return tb - ta;
+    return a.title < b.title ? -1 : a.title > b.title ? 1 : 0;
+  });
+  return { items, error: null };
+}
+
+/** What a stamp writes: the cluster's article_count, not the number of titles the picker saw. */
+function memberCountStamp(articleCount: number): number {
+  return Math.min(articleCount, MEMBER_COUNT_MAX);
+}
+
+/**
+ * Writes an extractive title/stamp to one cluster. Never carries `updated_at`
+ * (it orders the home feed). With `onlyIfNoLlmTitle` the update also requires
+ * `title_neutral_at IS NULL`, so a re-pick can never overwrite an LLM title.
+ * PGRST204 means PostgREST does not know `title_neutral_member_count` (the
+ * schema cache predates migration 141): the write is retried once without it,
+ * so the IS NULL pick keeps working until 141 is applied.
+ */
+async function writeExtractive(
+  supabase: SupabaseClient,
+  id: string,
+  patch: Record<string, unknown>,
+  opts: { onlyIfNoLlmTitle?: boolean } = {},
+): Promise<PostgrestError | null> {
+  const attempt = async (body: Record<string, unknown>) => {
+    const q = supabase.from("clusters").update(body).eq("id", id);
+    const { error } = await (opts.onlyIfNoLlmTitle ? q.is("title_neutral_at", null) : q);
+    return error;
+  };
+  let error = await attempt(patch);
+  if (error?.code === "PGRST204" && "title_neutral_member_count" in patch) {
+    const { title_neutral_member_count: _stamp, ...withoutStamp } = patch;
+    error = await attempt(withoutStamp);
+  }
+  return error;
+}
+
+interface RepickRow {
+  id: string;
+  title_tr_neutral: string | null;
+  article_count: number;
+  title_neutral_member_count: number | null;
+}
+
 // withCronOutcome is the outermost wrapper: each authenticated run is recorded in
 // public.ops_cron_route_runs (ops_health_report row 15, migration 136).
 export const GET = withCronOutcome("headline", withApiErrors(async (request: Request) => {
@@ -240,6 +369,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
     : "extractive";
 
   const supabase = createServerClient();
+  const startedAt = Date.now();
 
   // 1. Pick the next batch of clusters needing a neutral title.
   // `.eq("is_archived", false)` mirrors the filter every reader-facing
@@ -249,7 +379,13 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
   // article_count DESC so today's stories get rewritten before an old,
   // large historical pile. `.gte("article_count", MIN_ARTICLE_COUNT)` is
   // unchanged so migration 019's partial index still applies.
-  const { data: clustersData, error: pickError } = await supabase
+  //
+  // LLM mode also skips a cluster whose rewrite the acceptance gate already
+  // rejected under this prompt version (LLM_REJECTED_MARK, written below):
+  // nothing else leaves `title_neutral_at IS NULL`, so without the mark the
+  // same cluster would be re-sent, and re-billed, on every tick. The mark is
+  // version-scoped, so a prompt bump gives those clusters a fresh try.
+  let pickQuery = supabase
     .from("clusters")
     .select("id, title_tr, title_tr_neutral, summary_tr, article_count")
     .is(mode === "llm" ? "title_neutral_at" : "title_tr_neutral", null)
@@ -257,7 +393,13 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
     .gte(
       "article_count",
       mode === "llm" ? MIN_ARTICLE_COUNT : EXTRACTIVE_MIN_ARTICLE_COUNT,
-    )
+    );
+  if (mode === "llm") {
+    pickQuery = pickQuery.or(
+      `title_neutral_prompt_version.is.null,title_neutral_prompt_version.neq."${LLM_REJECTED_MARK}"`,
+    );
+  }
+  const { data: clustersData, error: pickError } = await pickQuery
     .order("updated_at", { ascending: false })
     .limit(mode === "llm" ? LLM_BATCH : EXTRACTIVE_BATCH);
 
@@ -267,13 +409,10 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
 
   const clusters = (clustersData ?? []) as ClusterCandidate[];
 
-  if (clusters.length === 0) {
-    if (mode === "llm") {
-      // Gate counters are per CYCLE, not per candidate — a zero-candidate
-      // cycle still records that the gate ran (both counts 0).
-      await addHeadlineGateCounts(supabase, { day: utcDay(), eligible: 0, ineligible: 0 });
-    }
-    return NextResponse.json({
+  // The body of a run with nothing to do. Extractive mode only returns it
+  // after the re-pick pass has also come up empty (below).
+  const noCandidates = () =>
+    NextResponse.json({
       success: true,
       mode,
       rewrote: 0,
@@ -285,6 +424,12 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
       reason: "no candidates",
       timestamp: new Date().toISOString(),
     });
+
+  if (clusters.length === 0 && mode === "llm") {
+    // Gate counters are per CYCLE, not per candidate — a zero-candidate
+    // cycle still records that the gate ran (both counts 0).
+    await addHeadlineGateCounts(supabase, { day: utcDay(), eligible: 0, ineligible: 0 });
+    return noCandidates();
   }
 
   let rewrote = 0;
@@ -296,6 +441,11 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
   const perCluster: Record<string, { status: string; error?: string }> = {};
   // Ids actually rewrote this cycle — drives the revalidateTag calls below.
   const rewroteIds: string[] = [];
+  // Extractive writes issued by the IS NULL pass; the re-pick gets what is
+  // left of EXTRACTIVE_BATCH, so one run never writes more than 50 rows.
+  let writesThisRun = 0;
+  let repicked = 0;
+  let repickKept = 0;
 
   // B7 (migration 069): the LLM eligibility pre-gate + daily USD budget.
   // Computed once before the loop, only in LLM mode — extractive mode
@@ -323,12 +473,8 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
   // wants serialised retries; one bad cluster shouldn't blow the whole
   // batch and we want predictable wall time inside the 60s ceiling.
   for (const c of clusters) {
-    // Fetch member titles for this cluster.
-    const { data: memberRows, error: memberErr } = await supabase
-      .from("cluster_articles")
-      .select("articles ( title, published_at )")
-      .eq("cluster_id", c.id)
-      .limit(MEMBER_TITLES_CAP);
+    // Fetch member titles for this cluster (newest first, deterministic).
+    const { items, error: memberErr } = await fetchMemberItems(supabase, c.id);
 
     if (memberErr) {
       // Keep raw Supabase error out of the response body — it can embed
@@ -341,18 +487,6 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
       continue;
     }
 
-    const items: Array<{ title: string; published_at: string | null }> = [];
-    for (const r of (memberRows ?? []) as unknown as ClusterArticleRow[]) {
-      const a = Array.isArray(r.articles) ? r.articles[0] : r.articles;
-      if (!a || !a.title) continue;
-      items.push({ title: a.title, published_at: a.published_at });
-    }
-    // Newest-first so the LLM sees the freshest framings of the story.
-    items.sort((a, b) => {
-      const ta = a.published_at ? new Date(a.published_at).getTime() : 0;
-      const tb = b.published_at ? new Date(b.published_at).getTime() : 0;
-      return tb - ta;
-    });
     const memberTitles = items.map((i) => i.title);
 
     if (memberTitles.length === 0) {
@@ -379,7 +513,8 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
           // `title_neutral_at IS NULL`), looping the same rows forever.
           let neutral: string | null;
           try {
-            neutral = pickNeutralTitle(items);
+            // First pick: the floor, never the raw title_tr.
+            neutral = pickNeutralTitle(items, { floor: true });
           } catch (err) {
             console.error("[headline-cron] extractive pick failed", c.id, err);
             captureServerException(err, { clusterId: c.id, mode });
@@ -393,15 +528,13 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
             continue;
           }
 
-          const { error: writeErr } = await supabase
-            .from("clusters")
-            .update({
-              // No title_neutral_at: an extractive pick is not an AI
-              // neutralization and must not be counted as one.
-              title_tr_neutral: neutral,
-              title_neutral_model: EXTRACTIVE_MODEL_ID,
-            })
-            .eq("id", c.id);
+          const writeErr = await writeExtractive(supabase, c.id, {
+            // No title_neutral_at: an extractive pick is not an AI
+            // neutralization and must not be counted as one.
+            title_tr_neutral: neutral,
+            title_neutral_model: EXTRACTIVE_MODEL_ID,
+            title_neutral_member_count: memberCountStamp(c.article_count),
+          });
 
           if (writeErr) {
             console.error("[headline-cron] write", c.id, writeErr);
@@ -479,6 +612,59 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
         continue;
       }
 
+      // The same acceptance gate the extractive picker applies, minus the
+      // feed-cut heuristic (`generated`: a model does not truncate): a
+      // question, an English or shouted headline is never shown. The spend is
+      // already metered above. A cluster with no neutral title yet gets the
+      // free extractive pick instead; one that has a title keeps it. The
+      // rejected text is never written, but the rejection is: the mark keeps
+      // the cluster out of the next LLM pick (see the pick query), because the
+      // gate is deterministic and would reject, and bill, the same cluster
+      // again on every tick.
+      if (!isAcceptableNeutral(result.text, memberTitles, { generated: true })) {
+        let fallback: string | null = null;
+        if (c.title_tr_neutral === null) {
+          try {
+            fallback = pickNeutralTitle(items, { floor: true });
+          } catch (err) {
+            console.error("[headline-cron] extractive pick failed", c.id, err);
+            captureServerException(err, { clusterId: c.id, mode });
+          }
+        }
+
+        // Never title_neutral_at: this is not an AI neutralization.
+        const rejectErr = await writeExtractive(
+          supabase,
+          c.id,
+          {
+            title_neutral_prompt_version: LLM_REJECTED_MARK,
+            ...(fallback === null
+              ? {}
+              : {
+                  title_tr_neutral: fallback,
+                  title_neutral_model: EXTRACTIVE_MODEL_ID,
+                  title_neutral_member_count: memberCountStamp(c.article_count),
+                }),
+          },
+          { onlyIfNoLlmTitle: true },
+        );
+        if (rejectErr) {
+          console.error("[headline-cron] write", c.id, rejectErr);
+          captureServerException(rejectErr, { clusterId: c.id, mode });
+          perCluster[c.id] = { status: "errored", error: "write-failed" };
+          errored++;
+          continue;
+        }
+        if (fallback === null) {
+          perCluster[c.id] = { status: "errored", error: "rejected rewrite" };
+          errored++;
+          continue;
+        }
+        perCluster[c.id] = { status: "extractive" };
+        rewroteIds.push(c.id);
+        continue;
+      }
+
       const { error: writeErr } = await supabase
         .from("clusters")
         .update({
@@ -510,7 +696,11 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
     // picks and cleans a member headline, zero cost, no eligibility gate.
     let neutral: string | null;
     try {
-      neutral = pickNeutralTitle(items);
+      // First pick (title_tr_neutral IS NULL): the floor. A cluster whose
+      // every member fails the acceptance gate (SEO questions, a long
+      // headline) would otherwise stay NULL: every surface shows the raw
+      // title_tr with its lead-ins, and the row is fetched again each tick.
+      neutral = pickNeutralTitle(items, { floor: true });
     } catch (err) {
       console.error("[headline-cron] extractive pick failed", c.id, err);
       captureServerException(err, { clusterId: c.id, mode });
@@ -525,15 +715,14 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
       continue;
     }
 
-    const { error: writeErr } = await supabase
-      .from("clusters")
-      .update({
-        // No title_neutral_at: an extractive pick is not an AI
-        // neutralization and must not be counted as one.
-        title_tr_neutral: neutral,
-        title_neutral_model: EXTRACTIVE_MODEL_ID,
-      })
-      .eq("id", c.id);
+    writesThisRun++;
+    const writeErr = await writeExtractive(supabase, c.id, {
+      // No title_neutral_at: an extractive pick is not an AI
+      // neutralization and must not be counted as one.
+      title_tr_neutral: neutral,
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: memberCountStamp(c.article_count),
+    });
 
     if (writeErr) {
       console.error("[headline-cron] write", c.id, writeErr);
@@ -546,6 +735,93 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
     perCluster[c.id] = { status: "rewrote" };
     rewrote++;
     rewroteIds.push(c.id);
+  }
+
+  // 2. Extractive re-pick (migration 141). Only in extractive mode, only
+  // after the IS NULL pass, only while the run is young, and only with what is
+  // left of the per-run write budget. The function returns active clusters of
+  // the last 14 days (no LLM title) whose pick came from another model, was
+  // never stamped, or has been outgrown by the cluster. An rpc failure is
+  // logged and the run stays 200: the IS NULL writes above are already done.
+  let repickSeen = 0;
+  const repickedIds: string[] = [];
+  if (mode === "extractive" && Date.now() - startedAt < REPICK_DEADLINE_MS) {
+    const budget = Math.min(REPICK_BATCH, EXTRACTIVE_BATCH - writesThisRun);
+    if (budget > 0) {
+      const { data: repickData, error: repickErr } = await supabase.rpc(
+        "neutral_title_repick_candidates",
+        { p_model: EXTRACTIVE_MODEL_ID, p_limit: budget },
+      );
+
+      if (repickErr) {
+        console.error("[headline-cron] repick-candidates", repickErr);
+        captureServerException(repickErr, { mode });
+      } else {
+        // The function already caps the batch; slicing keeps the write budget
+        // a property of this route, not of the database function.
+        const rows = ((repickData ?? []) as RepickRow[]).slice(0, budget);
+        repickSeen = rows.length;
+
+        for (const r of rows) {
+          if (Date.now() - startedAt >= REPICK_DEADLINE_MS) break;
+
+          const { items, error: memberErr } = await fetchMemberItems(supabase, r.id);
+          if (memberErr) {
+            // Transient: no stamp, so the row is offered again next run.
+            console.error("[headline-cron] repick member-fetch", r.id, memberErr);
+            captureServerException(memberErr, { clusterId: r.id, mode });
+            perCluster[r.id] = { status: "errored", error: "member-fetch-failed" };
+            errored++;
+            continue;
+          }
+
+          // A pick that throws is treated like one that finds nothing: stamp
+          // and keep the stored title. Not stamping would offer the same
+          // newest rows every run and starve the rest of the set.
+          let next: string | null = null;
+          try {
+            next = pickNeutralTitle(items);
+          } catch (err) {
+            console.error("[headline-cron] repick pick failed", r.id, err);
+            captureServerException(err, { clusterId: r.id, mode });
+          }
+
+          const changed = next !== null && next !== r.title_tr_neutral;
+          const patch: Record<string, unknown> = {
+            title_neutral_model: EXTRACTIVE_MODEL_ID,
+            // The cluster's article_count, changed title or not: stamping the
+            // number of titles used would re-pick a 40-member cluster forever.
+            title_neutral_member_count: memberCountStamp(r.article_count),
+          };
+          if (changed) patch.title_tr_neutral = next;
+
+          const writeErr = await writeExtractive(supabase, r.id, patch, {
+            onlyIfNoLlmTitle: true,
+          });
+          if (writeErr) {
+            console.error("[headline-cron] repick write", r.id, writeErr);
+            captureServerException(writeErr, { clusterId: r.id, mode });
+            perCluster[r.id] = { status: "errored", error: "write-failed" };
+            errored++;
+            continue;
+          }
+
+          if (changed) {
+            perCluster[r.id] = { status: "repicked" };
+            repicked++;
+            repickedIds.push(r.id);
+          } else {
+            perCluster[r.id] = { status: "repick-kept" };
+            repickKept++;
+          }
+        }
+      }
+    }
+  }
+
+  // Extractive mode: nothing from the IS NULL pick and nothing to re-pick.
+  if (clusters.length === 0 && repickSeen === 0) {
+    return noCandidates();
   }
 
   // B7: best-effort gate-outcome write, once per cycle, including cycles
@@ -567,10 +843,10 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
   // cacheLife window. Best-effort: a throw here must not undo the DB writes
   // above or turn a successful cron cycle into a 500.
   try {
-    for (const id of rewroteIds) {
+    for (const id of [...rewroteIds, ...repickedIds]) {
       revalidateTag(`cluster-detail:${id}`, "max");
     }
-    if (rewroteIds.length > 0) {
+    if (rewroteIds.length > 0 || repickedIds.length > 0) {
       revalidateTag("clusters-politics", "max");
     }
   } catch (err) {
@@ -583,6 +859,8 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
     rewrote,
     skipped,
     errored,
+    repicked,
+    repickKept,
     eligible: eligibleCount,
     ineligible: ineligibleCount,
     budgetedOut,

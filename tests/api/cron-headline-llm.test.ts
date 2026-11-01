@@ -31,6 +31,7 @@ interface ClusterRow {
   title_tr_neutral: string | null;
   summary_tr: string;
   article_count: number;
+  title_neutral_prompt_version?: string | null;
 }
 
 interface MemberTitle {
@@ -52,6 +53,9 @@ const dbState = vi.hoisted(() => ({
   // resolve as a PostgREST error (the `.select()` picker query never
   // filters by `id`, so this only ever hits the write path).
   forceClusterUpdateErrorFor: null as string | null,
+  // The `.or(...)` filter strings of every pick query (the select that never
+  // filters by id), in call order.
+  pickOrFilters: [] as string[][],
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -63,7 +67,15 @@ const supabaseFake = await vi.hoisted(async () => {
         if (idEq && dbState.forceClusterUpdateErrorFor === idEq.val) {
           return { data: null, error: { message: "update failed" } };
         }
-        return { data: dbState.clusters, error: null };
+        // The pick query. Emulate the one filter the route sends that matters
+        // here: `title_neutral_prompt_version.neq."<mark>"` (or null) hides a
+        // cluster the gate already rejected under this prompt version.
+        dbState.pickOrFilters.push([...state.or]);
+        const excluded = /title_neutral_prompt_version\.neq\."([^"]+)"/.exec(state.or.join(","));
+        const rows = dbState.clusters.filter(
+          (c) => !(excluded && c.title_neutral_prompt_version === excluded[1]),
+        );
+        return { data: rows, error: null };
       },
       cluster_articles: (state) => {
         const clusterIdEq = state.eq.find((e) => e.col === "cluster_id");
@@ -121,6 +133,9 @@ vi.mock("next/server", async (importOriginal) => {
   return { ...actual, connection: async () => {} };
 });
 
+// What the route stamps into title_neutral_prompt_version when the gate rejects a rewrite.
+const REJECTED_MARK = `${HEADLINE_PROMPT_VERSION}:rejected`;
+
 const LLM_API_URL = "https://api.anthropic.com/v1/messages";
 const originalFetch = globalThis.fetch;
 let llmFetchSpy: ReturnType<typeof vi.spyOn> | null = null;
@@ -157,6 +172,7 @@ beforeEach(() => {
   dbState.budgetAddReturns = 0.001;
   dbState.llmBudgetDailyRow = null;
   dbState.forceClusterUpdateErrorFor = null;
+  dbState.pickOrFilters = [];
 
   llmUsage = { input_tokens: 400, output_tokens: 20 };
   llmText = "Tarafsız toplu başlık";
@@ -457,7 +473,7 @@ describe("GET /api/cron/headline — llm mode (B7 eligibility + budget gate)", (
   it("an eligibility rpc failure makes every cluster take the extractive path and never 500s", async () => {
     dbState.forceEligibilityError = true;
     dbState.clusters = [cluster("c1", { title_tr_neutral: null })];
-    members("c1", ["Başlık A", "Başlık B"]);
+    members("c1", ["Meclis'te bütçe görüşmeleri başladı", "Meclis'te bütçe görüşmelerinin ilk günü tamamlandı"]);
 
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const GET = await getHandler();
@@ -470,6 +486,236 @@ describe("GET /api/cron/headline — llm mode (B7 eligibility + budget gate)", (
       supabaseFake.calls.rpc.filter((c) => c.name === "llm_budget_add"),
     ).toHaveLength(0);
     errorSpy.mockRestore();
+  });
+});
+
+describe("GET /api/cron/headline — llm mode, acceptance gate on the rewrite", () => {
+  const MEMBERS = [
+    "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı",
+    "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+    "Bakırköy Belediyesine yönelik soruşturmada 39 şüpheli tutuklandı",
+  ];
+
+  const REJECTED: Array<[string, string]> = [
+    ["a question", "Bakırköy soruşturması neden başladı, kim tutuklandı?"],
+    ["shouting", "BAKIRKÖY BELEDİYESİ SORUŞTURMASINDA 39 TUTUKLAMA"],
+    ["English", "Bakirkoy municipality probe ends with 39 arrests in the city"],
+    ["too short", "Bakırköy tutuklama"],
+    ["a leading 'İşte'", "İşte Bakırköy soruşturmasında tutuklanan 39 kişi"],
+    ["a placeholder", "Cumhurbaşkanı Erdoğan konuşuyor"],
+  ];
+
+  it.each(REJECTED)("rejects %s: errored 'rejected rewrite', still metered, the text is never written", async (_label, text) => {
+    llmText = text;
+    dbState.clusters = [cluster("c1", { title_tr_neutral: "Zaten var olan başlık" })];
+    members("c1", MEMBERS);
+    eligible("c1");
+
+    const GET = await getHandler();
+    const res = await GET(req("203.0.113.31"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      rewrote: number;
+      errored: number;
+      clusters: Record<string, { status: string; error?: string }>;
+    };
+    expect(body.clusters.c1).toEqual({ status: "errored", error: "rejected rewrite" });
+    expect(body.rewrote).toBe(0);
+    expect(body.errored).toBe(1);
+
+    // The vendor call was billed: the budget is metered exactly once.
+    expect(supabaseFake.calls.rpc.filter((c) => c.name === "llm_budget_add")).toHaveLength(1);
+    // The text is never written and the cluster keeps its title; the only
+    // write is the mark that keeps it out of the next LLM pick.
+    const updates = supabaseFake.calls.update("clusters");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.patch).toEqual({ title_neutral_prompt_version: REJECTED_MARK });
+    expect(updates[0]!.state.is).toContainEqual({ col: "title_neutral_at", val: null });
+    expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
+  it("a rejected rewrite for a cluster with NO neutral title writes the extractive pick instead (status 'extractive')", async () => {
+    llmText = "Bakırköy soruşturması neden başladı, kim tutuklandı?";
+    dbState.clusters = [cluster("c1", { title_tr_neutral: null, article_count: 3 })];
+    members("c1", MEMBERS);
+    eligible("c1");
+
+    const GET = await getHandler();
+    const res = await GET(req("203.0.113.32"));
+    const body = (await res.json()) as {
+      rewrote: number;
+      errored: number;
+      clusters: Record<string, { status: string }>;
+    };
+    expect(body.clusters.c1!.status).toBe("extractive");
+    expect(body.rewrote).toBe(0);
+    expect(body.errored).toBe(0);
+    expect(llmFetchSpy).toHaveBeenCalledTimes(1);
+    expect(supabaseFake.calls.rpc.filter((c) => c.name === "llm_budget_add")).toHaveLength(1);
+
+    const updates = supabaseFake.calls.update("clusters");
+    expect(updates).toHaveLength(1);
+    const patch = updates[0]!.patch as Record<string, unknown>;
+    expect(patch).toEqual({
+      title_tr_neutral: "Bakırköy Belediyesi soruşturmasında 39 şüpheli tutuklandı",
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: 3,
+      title_neutral_prompt_version: REJECTED_MARK,
+    });
+    expect(JSON.stringify(supabaseFake.calls.mutations)).not.toContain("kim tutuklandı");
+    // Not an AI neutralization: no title_neutral_at.
+    expect("title_neutral_at" in patch).toBe(false);
+    expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:c1", "max");
+  });
+
+  it("a rejected rewrite with no neutral title and only placeholder members is errored 'rejected rewrite', mark only", async () => {
+    llmText = "Bakırköy soruşturması neden başladı, kim tutuklandı?";
+    dbState.clusters = [cluster("c1", { title_tr_neutral: null })];
+    members("c1", ["Kısa haberler", "Son dakika"]);
+    eligible("c1");
+
+    const GET = await getHandler();
+    const res = await GET(req("203.0.113.33"));
+    const body = (await res.json()) as { clusters: Record<string, { status: string; error?: string }> };
+    expect(body.clusters.c1).toEqual({ status: "errored", error: "rejected rewrite" });
+    const updates = supabaseFake.calls.update("clusters");
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.patch).toEqual({ title_neutral_prompt_version: REJECTED_MARK });
+  });
+
+  it("a rejected rewrite with no neutral title and only question members gets the cleaned floor pick (never the raw title)", async () => {
+    llmText = "Bakırköy soruşturması neden başladı, kim tutuklandı?";
+    dbState.clusters = [cluster("c1", { title_tr_neutral: null })];
+    members("c1", ["Son dakika depremler! Deprem mi oldu? 1 Kasım 2026 nerede, ne zaman deprem oldu?", "Kısa haberler"]);
+    eligible("c1");
+
+    const GET = await getHandler();
+    const res = await GET(req("203.0.113.37"));
+    const body = (await res.json()) as { clusters: Record<string, { status: string }> };
+    expect(body.clusters.c1!.status).toBe("extractive");
+    const patch = supabaseFake.calls.update("clusters")[0]!.patch as Record<string, unknown>;
+    expect(patch.title_tr_neutral).toBe("Depremler. Deprem mi oldu? 1 Kasım 2026 nerede, ne zaman deprem oldu?");
+    expect(patch.title_neutral_prompt_version).toBe(REJECTED_MARK);
+  });
+
+  it("the ineligible extractive fallback of a question-only cluster writes the cleaned floor pick", async () => {
+    dbState.clusters = [cluster("c1", { title_tr_neutral: null, article_count: 2 })];
+    members("c1", ["Son dakika depremler! Deprem mi oldu? 1 Kasım 2026 nerede, ne zaman deprem oldu?"]);
+    ineligible("c1");
+
+    const GET = await getHandler();
+    const res = await GET(req("203.0.113.38"));
+    const body = (await res.json()) as { clusters: Record<string, { status: string }> };
+    expect(body.clusters.c1!.status).toBe("extractive");
+    const patch = supabaseFake.calls.update("clusters")[0]!.patch as Record<string, unknown>;
+    expect(patch.title_tr_neutral).toBe("Depremler. Deprem mi oldu? 1 Kasım 2026 nerede, ne zaman deprem oldu?");
+  });
+
+  it("does not judge model output by the feed-cut heuristic: a title ending in a short word is written", async () => {
+    // 'Ankar' is a prefix of 'Ankara' in another member, which the gate treats
+    // as a feed cut in COPIED text; a model did not truncate anything.
+    llmText = "Erdoğan, Türk Devletleri Teşkilatı zirvesi için Ankar";
+    dbState.clusters = [cluster("c1")];
+    members("c1", [
+      "Erdoğan, Türk Devletleri Teşkilatı zirvesi için Ankara'ya geliyor",
+      "Türk Devletleri Teşkilatı zirvesi Ankara'da toplanıyor",
+    ]);
+    eligible("c1");
+
+    const GET = await getHandler();
+    const res = await GET(req("203.0.113.39"));
+    const body = (await res.json()) as { rewrote: number; clusters: Record<string, { status: string }> };
+    expect(body.clusters.c1!.status).toBe("rewrote");
+    expect(body.rewrote).toBe(1);
+  });
+
+  it("a rejected cluster is not sent to the LLM again on the next run, and is not billed twice", async () => {
+    llmText = "Bakırköy soruşturması neden başladı, kim tutuklandı?";
+    dbState.clusters = [cluster("c1", { title_tr_neutral: "Zaten var olan başlık" })];
+    members("c1", MEMBERS);
+    eligible("c1");
+
+    const GET = await getHandler();
+    await GET(req("203.0.113.42"));
+    expect(llmFetchSpy).toHaveBeenCalledTimes(1);
+    expect(supabaseFake.calls.rpc.filter((c) => c.name === "llm_budget_add")).toHaveLength(1);
+
+    // The database now holds what the route wrote.
+    const patch = supabaseFake.calls.update("clusters")[0]!.patch as { title_neutral_prompt_version: string };
+    dbState.clusters[0]!.title_neutral_prompt_version = patch.title_neutral_prompt_version;
+
+    const second = await GET(req("203.0.113.43"));
+    expect(second.status).toBe(200);
+    expect(llmFetchSpy).toHaveBeenCalledTimes(1);
+    expect(supabaseFake.calls.rpc.filter((c) => c.name === "llm_budget_add")).toHaveLength(1);
+  });
+
+  it("the pick query excludes a cluster rejected under the CURRENT prompt version only, and keeps null versions", async () => {
+    dbState.clusters = [];
+    const GET = await getHandler();
+    await GET(req("203.0.113.44"));
+    expect(dbState.pickOrFilters).toHaveLength(1);
+    const filter = dbState.pickOrFilters[0]!.join(",");
+    // NULL must stay in the set: `col <> 'x'` alone drops it in SQL.
+    expect(filter).toContain("title_neutral_prompt_version.is.null");
+    expect(filter).toContain(`title_neutral_prompt_version.neq."${HEADLINE_PROMPT_VERSION}:rejected"`);
+  });
+
+  it("an older prompt version's rejection mark does not hide the cluster", async () => {
+    llmText = "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı";
+    dbState.clusters = [cluster("c1", { title_neutral_prompt_version: "2020-01-01.1:rejected" })];
+    members("c1", MEMBERS);
+    eligible("c1");
+
+    const GET = await getHandler();
+    await GET(req("203.0.113.45"));
+    expect(llmFetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("an acceptable rewrite is still written as before (no stamp, title_neutral_at set)", async () => {
+    llmText = "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı";
+    dbState.clusters = [cluster("c1")];
+    members("c1", MEMBERS);
+    eligible("c1");
+
+    const GET = await getHandler();
+    const res = await GET(req("203.0.113.34"));
+    const body = (await res.json()) as { rewrote: number; clusters: Record<string, { status: string }> };
+    expect(body.rewrote).toBe(1);
+    expect(body.clusters.c1!.status).toBe("rewrote");
+    const patch = supabaseFake.calls.update("clusters")[0]!.patch as Record<string, unknown>;
+    expect(patch.title_tr_neutral).toBe(llmText);
+    expect(typeof patch.title_neutral_at).toBe("string");
+    expect("title_neutral_member_count" in patch).toBe(false);
+  });
+
+  it("the extractive fallback of an ineligible cluster stamps title_neutral_member_count with its article_count", async () => {
+    dbState.clusters = [cluster("c1", { title_tr_neutral: null, article_count: 40 })];
+    members("c1", MEMBERS);
+    ineligible("c1");
+
+    const GET = await getHandler();
+    await GET(req("203.0.113.35"));
+    const patch = supabaseFake.calls.update("clusters")[0]!.patch as Record<string, unknown>;
+    expect(patch.title_neutral_member_count).toBe(40);
+    expect(patch.title_neutral_model).toBe(EXTRACTIVE_MODEL_ID);
+  });
+
+  it("no update payload in llm mode contains updated_at", async () => {
+    dbState.clusters = [cluster("c1"), cluster("c2"), cluster("c3", { title_tr_neutral: null })];
+    members("c1", MEMBERS);
+    members("c2", MEMBERS);
+    members("c3", MEMBERS);
+    eligible("c1");
+    eligible("c2");
+    ineligible("c3");
+    llmText = "Bakırköy soruşturması neden başladı, kim tutuklandı?";
+
+    const GET = await getHandler();
+    await GET(req("203.0.113.36"));
+    const updates = supabaseFake.calls.update("clusters");
+    expect(updates.length).toBeGreaterThan(0);
+    for (const u of updates) expect(Object.keys(u.patch as object)).not.toContain("updated_at");
   });
 });
 

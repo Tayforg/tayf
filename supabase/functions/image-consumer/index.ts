@@ -19,8 +19,11 @@
 //         slugs, fetchOgImage otherwise).
 //      d. On success: update articles.image_url + reset attempts, archive.
 //      e. On not-found / errored: bump image_backfill_attempts +
-//         attempted_at, archive. We do NOT requeue — the AFTER UPDATE
-//         trigger and the safety-net resweep handle re-discovery.
+//         attempted_at, archive. No requeue here: the hourly pg_cron job
+//         'image-backfill-requeue' (migration 142, public.image_backfill_requeue)
+//         re-sends articles at attempts 1-4 whose last try is over 2 h old and
+//         that are under 7 days old. The 5th failure parks the row
+//         (attempted_at pushed 7 days ahead), which takes it out of that pool.
 //      f. On a placeholder og:image (publisher logo card / 'son dakika'
 //         stand-in, db-4): never stored. Treated like (e) — attempt bumped
 //         (parked after 5), archived — and counted separately.
@@ -75,6 +78,11 @@ const WALL_BUDGET_MS = 30_000;
 const READ_BUDGET_FLOOR_MS = 5_000;
 // Per-fetch HTTP timeout — matches scripts/image-worker.mjs's tuned-down 5s.
 const REQUEST_TIMEOUT_MS = 5000;
+// The hero-image slugs read up to 200 KB of heavy pages (haberler.com first
+// among them) and are the ones the requeue (migration 142) retries most, so
+// they get og-image.ts's stock 8s instead. Used only in the fetchHeroImage
+// call; the plain og:image path stays at REQUEST_TIMEOUT_MS.
+const HERO_REQUEST_TIMEOUT_MS = 8000;
 // Slugs that get the extended-window hero-image extractor (audit IMG1).
 const HERO_IMAGE_SLUGS = new Set([
   "haberler-com",
@@ -226,7 +234,7 @@ async function processMessage(
   let ogImage: string | null = null;
   try {
     ogImage = useHero
-      ? await fetchHeroImage(article.url, slug, { timeoutMs: REQUEST_TIMEOUT_MS })
+      ? await fetchHeroImage(article.url, slug, { timeoutMs: HERO_REQUEST_TIMEOUT_MS })
       : await fetchOgImage(article.url, { timeoutMs: REQUEST_TIMEOUT_MS });
   } catch (err) {
     // fetchOgImage / fetchHeroImage are contracted not to throw; this is

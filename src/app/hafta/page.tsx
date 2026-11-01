@@ -19,6 +19,7 @@ import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { getFeedStatusSummary } from "@/lib/sources/feed-status";
 import { getWeeklyDistinctiveWords } from "@/lib/weekly/distinctive-words-query";
 import { getRecentWeekKeys } from "@/lib/weekly/week-archive";
+import { weekCopyFor } from "@/lib/weekly/week-copy";
 import {
   getWeeklyClusters,
   getWeeklyLabelChanges,
@@ -44,6 +45,12 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 // two over the trailing 7 days (Fightin' Words), sourced independently of
 // the cluster read above so it still renders when clusters === null.
 //
+// This page is a trailing 7-day window, not a calendar week, so its wording
+// is weekCopyFor("rolling") ("Son 7 günde ...", never "Bu hafta ..."; that
+// belongs to /hafta/<current ISO week>). Every line that names the window
+// comes from src/lib/weekly/week-copy.ts; tests/guards/week-archive-copy.test.ts
+// forbids a "bu hafta" literal in this file.
+//
 // No `export const dynamic` / `revalidate`: under cacheComponents every
 // fetcher is a "use cache" function that resolves to null on error, so this
 // page prerenders into its honest unavailable state rather than failing the
@@ -59,9 +66,9 @@ export const metadata: Metadata = staticPageMetadata({
 
 const UNAVAILABLE_COPY =
   "Haftalık özet şu anda hesaplanamıyor. Birkaç dakika içinde tekrar deneyin.";
-const EMPTY_COPY = "Bu hafta yeterli küme oluşmadı.";
 
 export default async function WeeklyPage() {
+  const copy = weekCopyFor("rolling");
   const [read, health, feedStatus, labelChanges, words, recentWeeks] =
     await Promise.all([
       getWeeklyClusters(),
@@ -100,7 +107,7 @@ export default async function WeeklyPage() {
         </div>
       ) : summary === null ? (
         <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-          <p className="text-sm text-muted-foreground">{EMPTY_COPY}</p>
+          <p className="text-sm text-muted-foreground">{copy.empty}</p>
         </div>
       ) : (
         <>
@@ -109,16 +116,17 @@ export default async function WeeklyPage() {
             health={health}
             feedStatus={feedStatus}
             truncated={truncated}
+            variant="rolling"
           />
-          <WidestSpectrum summary={summary} />
-          <Blindspots summary={summary} health={health} />
+          <WidestSpectrum summary={summary} variant="rolling" />
+          <Blindspots summary={summary} health={health} variant="rolling" />
         </>
       )}
 
       <DistinctiveWords data={words} />
 
       <SilentSources feedStatus={feedStatus} />
-      <LabelChanges changes={labelChanges} />
+      <LabelChanges changes={labelChanges} unchangedText={copy.labelUnchanged} />
       <WeekArchiveNav previous={recentWeeks.previous} />
     </div>
   );
@@ -154,14 +162,20 @@ function SilentSources({
   );
 }
 
-function LabelChanges({ changes }: { changes: WeeklyLabelChange[] | null }) {
+function LabelChanges({
+  changes,
+  unchangedText,
+}: {
+  changes: WeeklyLabelChange[] | null;
+  unchangedText: string;
+}) {
   return (
     <section className={`${cardClass} space-y-3`}>
       <h2 className={sectionTitleClass}>Etiket değişiklikleri</h2>
       {changes === null ? (
         <p className={proseClass}>Etiket geçmişi okunamadı.</p>
       ) : changes.length === 0 ? (
-        <p className={proseClass}>Bu hafta etiket değişmedi.</p>
+        <p className={proseClass}>{unchangedText}</p>
       ) : (
         <ul className="space-y-2">
           {changes.map((change) => {
