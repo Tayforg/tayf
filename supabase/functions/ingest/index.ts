@@ -882,11 +882,79 @@ const TITLE_LOOKUP_BATCH = 100;
 // still takes the full path, so the title-version / write-back machinery sees
 // exactly what it saw before.
 //
-// Same shape and bounds as the select in `recordTitleVersions`
-// (`id, url, title, source_id`, `.in("url", slice)`, TITLE_LOOKUP_BATCH urls per
-// request, served by the unique url index). Batches run a few at a time, since
-// they are independent.
+// Same shape as the select in `recordTitleVersions` (`id, url, title,
+// source_id`, `.in("url", slice)`, served by the unique url index), bounded by
+// TITLE_LOOKUP_BATCH urls AND by URL_LOOKUP_MAX_BYTES of encoded query string
+// per request (a count alone does not bound the bytes: see below). Batches run a
+// few at a time, since they are independent.
 const URL_LOOKUP_PARALLEL = 4;
+
+// Byte budget of ONE `url=in.(...)` request: the percent-encoded length of the
+// query value, which is what travels in the request line. Measured 2026-11-01
+// (hunt-14): evrensel urls average 175 chars (max 235), so 100 of them are
+// ~19-20 kB and the request died with an http2 stream error on every changed
+// feed (9 log lines), failing the whole lookup open; sputnik-turkce (~14 kB per
+// 100) is close to that line and cumhuriyet (~13 kB per 100) still works. 6 kB
+// sits far under every size seen failing. With URL_LOOKUP_PARALLEL = 4 the extra
+// slices of a 115-130 char feed (two or three instead of one) run concurrently,
+// so the wall-clock of a lookup is unchanged; feeds of short urls (about 55 chars
+// or fewer on average) still send all 100 in one request.
+export const URL_LOOKUP_MAX_BYTES = 6_000;
+
+// Encoded bytes `encodeURIComponent` adds around the urls of one slice: `in.(`
+// and `)` (neither parenthesis is escaped) ...
+const URL_LOOKUP_ENVELOPE_BYTES = 5;
+// ... and per separator, the comma that becomes `%2C`.
+const URL_LOOKUP_SEPARATOR_BYTES = 3;
+
+// Encoded size of one url inside `in.(...)`. A lone surrogate makes
+// `encodeURIComponent` throw; such a url is costed at 9 bytes per UTF-16 unit
+// (a lone surrogate is sent as U+FFFD, 9 encoded bytes), which over-counts
+// rather than lets it through as free. Never throws.
+function encodedUrlBytes(url: string): number {
+  try {
+    return encodeURIComponent(url).length;
+  } catch {
+    return url.length * 9;
+  }
+}
+
+/**
+ * Cuts `urls` into the consecutive slices `lookupStoredByUrl` sends as one
+ * `url=in.(...)` request each: greedy and order-preserving, a new slice starting
+ * when one more url would take the open slice past `maxCount` urls or `maxBytes`
+ * of encoded query value. A slice's cost is 5 (`in.()`) + the encoded length of
+ * each url + 3 per separator, which is exactly
+ * `encodeURIComponent(`in.(${slice.join(",")})`).length`. (postgrest-js also
+ * double-quotes a value that contains `,` `(` or `)`, at most 6 more encoded
+ * bytes for such a url; the margin under the real failure line absorbs it.) A
+ * url that alone exceeds `maxBytes` gets a slice of its own: it is never
+ * dropped. Pure; never throws.
+ */
+export function planUrlLookupSlices(
+  urls: readonly string[],
+  maxCount = TITLE_LOOKUP_BATCH,
+  maxBytes = URL_LOOKUP_MAX_BYTES,
+): string[][] {
+  const slices: string[][] = [];
+  let open: string[] = [];
+  let openBytes = URL_LOOKUP_ENVELOPE_BYTES;
+  for (const url of urls) {
+    const cost = encodedUrlBytes(url);
+    if (
+      open.length > 0 &&
+      (open.length >= maxCount || openBytes + URL_LOOKUP_SEPARATOR_BYTES + cost > maxBytes)
+    ) {
+      slices.push(open);
+      open = [];
+      openBytes = URL_LOOKUP_ENVELOPE_BYTES;
+    }
+    openBytes += (open.length > 0 ? URL_LOOKUP_SEPARATOR_BYTES : 0) + cost;
+    open.push(url);
+  }
+  if (open.length > 0) slices.push(open);
+  return slices;
+}
 
 export interface StoredArticleRef {
   id: string;
@@ -904,12 +972,18 @@ function safeErrorMessage(err: unknown): string {
 
 /**
  * Looks up which of `urls` are stored in `articles`. Duplicates are looked up
- * once. Returns the stored rows by url and `ok`: false when ANY batch failed
- * (an error envelope, a rejection or a synchronous throw), in which case the
- * caller must treat the answer as unknown and take the full path for every
- * item (fail-open) -- `byUrl` may then hold a partial answer and must not be
- * used to conclude that a url is absent. Never throws. On failure ONE line is
- * logged with `slug` and the message only, never a url.
+ * once. The urls go out in slices of at most TITLE_LOOKUP_BATCH urls AND at most
+ * URL_LOOKUP_MAX_BYTES of encoded query string (`planUrlLookupSlices`), so a
+ * feed of long urls cannot build the ~20 kB request that fails. A slice whose
+ * request fails (an error envelope or a rejection) is retried ONCE, split in
+ * half (a one-url slice is retried as is); only a failed retry fails the
+ * lookup. Returns the stored rows by url and `ok`: false when ANY slice still
+ * failed (or on a synchronous throw), in which case the caller must treat the
+ * answer as unknown and take the full path for every item (fail-open) -- `byUrl`
+ * may then hold a partial answer and must not be used to conclude that a url is
+ * absent. Never throws. On failure ONE line is logged with `slug` and the
+ * message only, never a url; when every failed slice recovered through the retry
+ * ONE warning with the slug only says so.
  */
 export async function lookupStoredByUrl(
   supabase: ReturnType<typeof createServiceClient>,
@@ -917,38 +991,53 @@ export async function lookupStoredByUrl(
   slug = "?",
 ): Promise<{ byUrl: Map<string, StoredArticleRef>; ok: boolean }> {
   const byUrl = new Map<string, StoredArticleRef>();
-  // An object, not a `let`: the lanes below assign it from inside closures.
+  // Objects, not `let`s: the lanes below assign them from inside closures.
   const failure: { message: string | null } = { message: null };
+  const retries = { slices: 0 };
   try {
     const unique = [...new Set(urls)];
-    const slices: string[][] = [];
-    for (let j = 0; j < unique.length; j += TITLE_LOOKUP_BATCH) {
-      slices.push(unique.slice(j, j + TITLE_LOOKUP_BATCH));
-    }
+    const slices = planUrlLookupSlices(unique);
+    // One request: error envelope and rejection both come back as ok:false.
+    const fetchSlice = async (
+      slice: string[],
+    ): Promise<{ ok: true } | { ok: false; message: string }> => {
+      try {
+        const { data, error } = await supabase
+          .from("articles")
+          .select("id, url, title, source_id")
+          .in("url", slice);
+        if (error) return { ok: false, message: safeErrorMessage(error.message) };
+        for (const row of (data ?? []) as Array<{
+          id: string;
+          url: string;
+          title: string;
+          source_id: string;
+        }>) {
+          byUrl.set(row.url, { id: row.id, title: row.title, source_id: row.source_id });
+        }
+        return { ok: true };
+      } catch (err) {
+        return { ok: false, message: safeErrorMessage(err) };
+      }
+    };
     let cursor = 0;
     const lane = async (): Promise<void> => {
       for (;;) {
         const slice = slices[cursor++];
         if (slice === undefined) return;
-        try {
-          const { data, error } = await supabase
-            .from("articles")
-            .select("id, url, title, source_id")
-            .in("url", slice);
-          if (error) {
-            failure.message ??= safeErrorMessage(error.message);
-            continue;
+        const attempt = await fetchSlice(slice);
+        if (attempt.ok) continue;
+        // One retry, split in half, the halves one after the other in this
+        // lane (the other lanes keep working). A failed half fails the lookup.
+        retries.slices++;
+        const mid = Math.ceil(slice.length / 2);
+        const halves = slice.length > 1 ? [slice.slice(0, mid), slice.slice(mid)] : [slice];
+        for (const half of halves) {
+          const retry = await fetchSlice(half);
+          if (!retry.ok) {
+            failure.message ??= retry.message;
+            break;
           }
-          for (const row of (data ?? []) as Array<{
-            id: string;
-            url: string;
-            title: string;
-            source_id: string;
-          }>) {
-            byUrl.set(row.url, { id: row.id, title: row.title, source_id: row.source_id });
-          }
-        } catch (err) {
-          failure.message ??= safeErrorMessage(err);
         }
       }
     };
@@ -961,6 +1050,9 @@ export async function lookupStoredByUrl(
   if (failure.message !== null) {
     console.error(`[ingest] ${slug}: known-url lookup failed: ${failure.message}`);
     return { byUrl, ok: false };
+  }
+  if (retries.slices > 0) {
+    console.warn(`[ingest] ${slug}: known-url lookup recovered after split retry`);
   }
   return { byUrl, ok: true };
 }

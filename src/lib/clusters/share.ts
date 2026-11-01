@@ -1,5 +1,5 @@
 import { tallyZones, zoneOf } from "@/lib/bias/config";
-import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import { isOnlyZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
 // Lowercase Turkish zone labels for share text. `ZONE_META` labels
@@ -43,14 +43,15 @@ export function buildShareText(input: {
 
   if (isBlindspot) {
     // Same "no reported side → fall back to the tallied dominant zone"
-    // rule as the OG card's ribbon (opengraph-image.tsx). The DB flag now
-    // fires at >= BLINDSPOT.dominantShare (80%), so "sadece {zone} yazdı"
-    // only holds at an exact 100% share.
+    // rule as the OG card's ribbon (opengraph-image.tsx). The DB flag fires
+    // at >= BLINDSPOT.dominantShare (80%), so "sadece {zone} yazdı" holds
+    // only when the other two zones have no source at all: decided on the
+    // counts, not on a rounded 100 (250/1/0 rounds to 100, another zone
+    // still has a source).
     const tally = tallyZones(distribution);
     const zone = blindspotSide ? zoneOf(blindspotSide) : (tally.dominantZone ?? "iktidar");
-    const share = Math.round(tally.dominantShare * 100);
     text +=
-      share === 100
+      isOnlyZone(counts, zone)
         ? ` · Kör nokta: sadece ${ZONE_LABEL_LOWER[zone]} yazdı`
         : ` · Kör nokta: ${ZONE_LABEL_LOWER[zone]} ağırlıklı`;
   }

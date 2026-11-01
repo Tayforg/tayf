@@ -410,6 +410,7 @@ function buildSchemas(): Record<string, unknown> {
       "url",
       "first_published",
       "updated_at",
+      "alert_at",
       "source_count",
       "zone_counts",
       "dominant_zone",
@@ -423,6 +424,7 @@ function buildSchemas(): Record<string, unknown> {
       url: { type: "string" },
       first_published: { type: "string", format: "date-time" },
       updated_at: { type: "string", format: "date-time" },
+      alert_at: { type: "string", format: "date-time" },
       source_count: { type: "integer" },
       zone_counts: {
         type: "object",

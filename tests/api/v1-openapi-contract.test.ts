@@ -266,6 +266,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
       title: "Başlık",
       firstPublished: "2026-09-20T10:00:00.000Z",
       updatedAt: "2026-09-21T09:00:00.000Z",
+      alertAt: "2026-09-21T09:00:00.000Z",
       sourceCount: 5,
       zoneCounts: { iktidar: 3, bagimsiz: 2, muhalefet: 0 },
       dominantZone: null,
@@ -274,6 +275,35 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     const record = toV1AlertRecord(fixture);
     const schema = doc.components.schemas.V1Alert as { properties: Record<string, unknown> };
     expect(Object.keys(schema.properties).sort()).toEqual(Object.keys(record).sort());
+  });
+
+  it("V1Alert schema lists alert_at as a required date-time and the alerts since param is defined on alert_at", () => {
+    const schema = doc.components.schemas.V1Alert as {
+      required: string[];
+      properties: Record<string, { type?: string; format?: string }>;
+    };
+    expect(schema.required).toContain("alert_at");
+    expect(schema.properties.alert_at).toEqual({ type: "string", format: "date-time" });
+    // updated_at stays: the cluster's own last update.
+    expect(schema.required).toContain("updated_at");
+
+    const alerts = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/alerts/blindspots");
+    const since = alerts?.params.find((p) => p.name === "since");
+    expect(since?.descriptionTr).toContain("alert_at");
+    expect(since?.descriptionEn).toContain("alert_at");
+    expect(since?.descriptionTr).not.toMatch(/updated_at için alt sınır, tam/);
+    const clusters = V1_ENDPOINTS.find((e) => e.method === "GET" && e.path === "/api/v1/clusters");
+    // /clusters keeps its own updated_at semantics.
+    expect(clusters?.params.find((p) => p.name === "since")?.descriptionTr).toContain("updated_at");
+    const specSince = doc.paths["/api/v1/alerts/blindspots"]?.get?.parameters?.find((p) => p.name === "since") as {
+      description?: string;
+    };
+    expect(specSince?.description).toContain("alert_at");
+
+    const notes = (alerts?.notesTr ?? []).join(" ");
+    expect(notes).toContain("alert_at");
+    expect(notes).toContain("Sıralama alert_at'e göre");
+    expect(notes).toContain("Yalnızca alert_at değeri webhook'un oluşturulma anına eşit ya da ondan sonra olan uyarılar gönderilir.");
   });
 
   it("documents the alerts endpoint: format enum, RSS media type, the webhook contract", () => {

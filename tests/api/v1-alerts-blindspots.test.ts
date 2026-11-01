@@ -64,6 +64,18 @@ const supabaseFake = await vi.hoisted(async () => {
         for (const g of state.gte) {
           if (g.col === "updated_at") rows = rows.filter((r) => r.updated_at >= String(g.val));
         }
+        // PostgREST `.or("col.gte.X,col2.gte.Y")`: keep a row when ANY branch holds.
+        for (const expr of state.or) {
+          const branches = expr.split(",").map((b) => /^([a-z_]+)\.(gte|lte)\.(.+)$/.exec(b));
+          if (branches.some((m) => m === null)) throw new Error(`unsupported .or() branch in "${expr}"`);
+          rows = rows.filter((r) =>
+            branches.some((m) => {
+              const [, col, op, val] = m!;
+              const cell = String((r as unknown as Record<string, unknown>)[col!]);
+              return op === "gte" ? cell >= val! : cell <= val!;
+            }),
+          );
+        }
         return { data: rows, error: null };
       },
       api_keys: () => ({ data: [], error: null }),
@@ -122,14 +134,14 @@ function req(qs = "", opts: { key?: string | null; accept?: string } = {}): Requ
   return new Request(`http://example.com/api/v1/alerts/blindspots${qs}`, { headers });
 }
 
-function bundle(id: string, updatedAgo = 2 * H) {
+function bundle(id: string, updatedAgo = 2 * H, firstPublishedAgo = 30 * H) {
   return {
     cluster: {
       id,
       title_tr: `Kör nokta ${id}`,
       title_tr_neutral: null,
       bias_distribution: { pro_government: 5, center: 1 },
-      first_published: iso(30 * H),
+      first_published: iso(firstPublishedAgo),
       updated_at: iso(updatedAgo),
     },
     dominantZone: "iktidar",
@@ -165,10 +177,12 @@ describe("GET /api/v1/alerts/blindspots", () => {
     const silent = body.alerts.find((a: { type: string }) => a.type === "one_zone_silent");
     expect(Object.keys(silent).sort()).toEqual(
       [
-        "id", "type", "cluster_id", "title", "url", "first_published", "updated_at",
+        "id", "type", "cluster_id", "title", "url", "first_published", "updated_at", "alert_at",
         "source_count", "zone_counts", "dominant_zone", "silent_zones",
       ].sort(),
     );
+    // mk(): first_published 10 h ago, updated 1 h ago -> qualified at the later moment.
+    expect(silent.alert_at).toBe(silent.updated_at);
     expect(silent).toMatchObject({
       cluster_id: "s1",
       source_count: 5,
@@ -237,6 +251,50 @@ describe("GET /api/v1/alerts/blindspots", () => {
     expect(st.lte[0]!.col).toBe("first_published");
     const cutoff = Date.parse(st.lte[0]!.val);
     expect(Math.abs(cutoff - (Date.now() - 6 * H))).toBeLessThan(60_000);
+  });
+
+  it("since filters on alert_at: a blindspot that became visible 30 min ago is returned although updated_at is 24.4 h old", async () => {
+    db.bundles = [
+      bundle("fresh", 24.4 * H, 24.5 * H),
+      bundle("stale", 29 * H, 30 * H),
+    ];
+    const since = iso(1 * H);
+    const body = await (await get(req(`?since=${encodeURIComponent(since)}`))).json();
+    expect(body.alerts.map((a: { cluster_id: string }) => a.cluster_id)).toEqual(["fresh"]);
+    const rec = body.alerts[0];
+    expect(rec.alert_at).toBe(new Date(NOW - 24.5 * H + 24 * H).toISOString());
+    expect(rec.updated_at).toBe(iso(24.4 * H));
+  });
+
+  it("the default pull (since = now-24h) returns every blindspot whose alert_at is inside the window", async () => {
+    db.bundles = [
+      bundle("just-in", 24.4 * H, 24.5 * H), // alert_at 30 min ago
+      bundle("a-day", 40 * H, 47 * H), // alert_at 23 h ago, updated_at long before since
+      bundle("too-old", 60 * H, 70 * H), // alert_at 46 h ago
+    ];
+    const body = await (await get(req())).json();
+    expect(body.alerts.map((a: { cluster_id: string }) => a.cluster_id).sort()).toEqual(["a-day", "just-in"]);
+  });
+
+  it("a silent cluster that turned 6 h old inside the window is returned through the .or filter; an older one is not", async () => {
+    db.rows = [
+      mk("crossed", { first_published: iso(6.5 * H), updated_at: iso(6.4 * H) }),
+      mk("stale", { first_published: iso(10 * H), updated_at: iso(9 * H) }),
+    ];
+    const since = iso(1 * H);
+    const body = await (await get(req(`?since=${encodeURIComponent(since)}`))).json();
+    expect(body.alerts.map((a: { cluster_id: string }) => a.cluster_id)).toEqual(["crossed"]);
+    expect(body.alerts[0].alert_at).toBe(new Date(NOW - 6.5 * H + 6 * H).toISOString());
+    const st = db.lastState as { or: string[]; gte: Array<{ col: string }> };
+    expect(st.or).toHaveLength(1);
+    expect(st.or[0]).toMatch(/^updated_at\.gte\..+,first_published\.gte\..+$/);
+    expect(st.gte.some((g) => g.col === "updated_at")).toBe(false);
+  });
+
+  it("RSS pubDate is the alert_at moment", async () => {
+    db.bundles = [bundle("fresh", 24.4 * H, 24.5 * H)];
+    const xml = await (await get(req(`?format=rss&since=${encodeURIComponent(iso(1 * H))}`))).text();
+    expect(xml).toContain(`<pubDate>${new Date(NOW - 0.5 * H).toUTCString()}</pubDate>`);
   });
 
   it("never contains accusatory silence wording in JSON or RSS", async () => {

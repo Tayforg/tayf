@@ -1,4 +1,9 @@
-import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import {
+  dominantZonePercent,
+  isOnlyZone,
+  zoneCountsOf,
+  zonePercents,
+} from "@/lib/bias/zone-summary";
 import type { BiasDistribution, MediaDnaZone } from "@/types";
 
 // Pure HTML renderer for the weekly digest email (GET /api/cron/digest).
@@ -20,6 +25,12 @@ export interface DigestBlindspotItem {
   summary: string;
   biasDistribution: BiasDistribution;
   dominantZone: MediaDnaZone;
+  /**
+   * The tally's raw dominant share (0-1). NOT used for display any more: the
+   * copy is computed from `biasDistribution` (the same counts as the zone bar
+   * above it) so the number can never disagree with the bar. Kept because the
+   * digest route still sets it.
+   */
   dominantPct: number;
 }
 
@@ -96,7 +107,14 @@ function storyBlock(item: DigestClusterItem, siteUrl: string): string {
 function blindspotBlock(item: DigestBlindspotItem, siteUrl: string): string {
   const link = `${siteUrl}/cluster/${encodeURIComponent(item.id)}`;
   const zoneLabel = ZONE_LABELS[item.dominantZone];
-  const pct = Math.round(item.dominantPct * 100);
+  // Same counts as this block's zone bar, so the line below it agrees with
+  // the bar (11/1/1 is 84, not Math.round's 85); "Sadece" only when the other
+  // two zones have no source at all (250/1/0 is %100 but not "only").
+  const counts = zoneCountsOf(item.biasDistribution);
+  const pct = dominantZonePercent(counts, item.dominantZone);
+  const zoneCopy = isOnlyZone(counts, item.dominantZone)
+    ? `Sadece ${zoneLabel} yazdı`
+    : `%${pct} ${zoneLabel}`;
   return `
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;margin:24px 0;background:#fafafa;border-radius:8px;">
     <tr>
@@ -116,7 +134,7 @@ function blindspotBlock(item: DigestBlindspotItem, siteUrl: string): string {
         }
         ${zoneBar(item.biasDistribution)}
         <p style="margin:2px 0 0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
-          ${pct < 100 ? `%${pct} ${zoneLabel}` : `Sadece ${zoneLabel} yazdı`}
+          ${zoneCopy}
         </p>
       </td>
     </tr>

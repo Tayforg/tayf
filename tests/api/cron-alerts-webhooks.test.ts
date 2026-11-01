@@ -125,13 +125,19 @@ const ID3 = "11111111-2222-3333-4444-555555555553";
 const ID4 = "11111111-2222-3333-4444-555555555554";
 const IDS = "11111111-2222-3333-4444-555555555555";
 
-function item(type: "blindspot" | "one_zone_silent", id: string, updatedMsAgo = 1 * H) {
+function item(
+  type: "blindspot" | "one_zone_silent",
+  id: string,
+  updatedMsAgo = 1 * H,
+  alertMsAgo: number = updatedMsAgo,
+) {
   return {
     type,
     clusterId: id,
     title: "Başlık",
     firstPublished: iso(30 * H),
     updatedAt: iso(updatedMsAgo),
+    alertAt: iso(alertMsAgo),
     sourceCount: 6,
     zoneCounts: { iktidar: 5, bagimsiz: 1, muhalefet: 0 },
     dominantZone: type === "blindspot" ? "iktidar" : null,
@@ -323,9 +329,43 @@ describe("GET /api/cron/alerts-webhooks", () => {
     expect(rows.map((r) => r.alert_id)).toEqual([`one_zone_silent:${IDS}`]);
   });
 
-  it("only enqueues items updated at or after the webhook was created", async () => {
+  it("only enqueues items whose alertAt is at or after the webhook was created", async () => {
     fx.webhooks = [webhook({ created_at: iso(3 * H) })];
     fx.items = [item("one_zone_silent", IDS, 1 * H), item("one_zone_silent", ID2, 10 * H)];
+    await run();
+    const rows = supabaseFake.calls.upsert("api_key_webhook_deliveries")[0]!.patch as Array<{ alert_id: string }>;
+    expect(rows.map((r) => r.alert_id)).toEqual([`one_zone_silent:${IDS}`]);
+  });
+
+  it("compares hook.created_at with alertAt: an item updated BEFORE the hook but qualified AFTER it is enqueued", async () => {
+    // hook created 3 h ago; the cluster was last updated 5 h ago but only
+    // qualified (first_published + 24 h) 1 h ago.
+    fx.webhooks = [webhook({ created_at: iso(3 * H) })];
+    fx.items = [item("blindspot", ID1, 5 * H, 1 * H)];
+    fx.fresh = [freshOk(ID1)];
+    const body = await (await run()).json();
+    const rows = supabaseFake.calls.upsert("api_key_webhook_deliveries")[0]!.patch as Array<{
+      alert_id: string;
+      payload: { alert: { alert_at: string; updated_at: string } };
+    }>;
+    expect(rows.map((r) => r.alert_id)).toEqual([`blindspot:${ID1}`]);
+    expect(rows[0]!.payload.alert.alert_at).toBe(iso(1 * H));
+    expect(rows[0]!.payload.alert.updated_at).toBe(iso(5 * H));
+    expect(body.enqueued).toBe(1);
+  });
+
+  it("does not enqueue an item whose alertAt is before the hook was created, even if updatedAt is after it", async () => {
+    // Cannot happen with the real alertAt (it is max(updated_at, ...)); the
+    // fixture pins that the route reads alertAt and ignores updatedAt.
+    fx.webhooks = [webhook({ created_at: iso(3 * H) })];
+    fx.items = [item("one_zone_silent", IDS, 1 * H, 4 * H)];
+    await run();
+    expect(supabaseFake.calls.upsert("api_key_webhook_deliveries")).toHaveLength(0);
+  });
+
+  it("treats an item whose alertAt equals the hook creation moment as enqueueable", async () => {
+    fx.webhooks = [webhook({ created_at: iso(3 * H) })];
+    fx.items = [item("one_zone_silent", IDS, 3 * H, 3 * H)];
     await run();
     const rows = supabaseFake.calls.upsert("api_key_webhook_deliveries")[0]!.patch as Array<{ alert_id: string }>;
     expect(rows.map((r) => r.alert_id)).toEqual([`one_zone_silent:${IDS}`]);

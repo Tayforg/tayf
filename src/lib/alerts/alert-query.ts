@@ -1,6 +1,7 @@
 import {
   SILENT_MIN_AGE_H,
   SILENT_MIN_SOURCES,
+  alertAtOf,
   normalizeDistribution,
   oneZoneSilentOf,
   type AlertItem,
@@ -14,7 +15,15 @@ import type { MediaDnaZone } from "@/types";
 /**
  * Item source for the alert feed and the webhook cron.
  *
- * Two rules, merged newest-first:
+ * `alertAt` is the moment an alert qualified (see `alertAtOf`):
+ *   blindspot        max(updated_at, first_published + BLINDSPOT.feedDelayHours h)
+ *   one_zone_silent  max(updated_at, first_published + SILENT_MIN_AGE_H h)
+ * `since`, the merged sort order and the webhook `created_at` rule all use
+ * it. A blindspot is only listed 24 h after first_published, while its
+ * updated_at is typically ~2 h after first_published, so filtering `since` on
+ * updated_at hid almost every qualifying blindspot (2 of 111 on 2026-11-01).
+ *
+ * Two rules, merged by alertAt newest-first (clusterId ascending on a tie):
  *   - blindspot: `getBlindspots()` as-is. It already carries the recall veto
  *     (`.eq('blindspot_recall_veto', false)`), the live contract (>=5 voting
  *     sources, >=80% in one zone), the 24h delay and feed-health
@@ -22,7 +31,10 @@ import type { MediaDnaZone } from "@/types";
  *   - one_zone_silent: ONE lean query, then the pure `oneZoneSilentOf`.
  *     "Silent" means Tayf could not match a story from that zone, not that
  *     the zone stayed quiet, so a zone whose feeds are degraded is dropped.
- *     With `health` null the pull fails open, as the site does.
+ *     With `health` null the pull fails open, as the site does. The query
+ *     admits `updated_at >= since OR first_published >= since - 6 h` (bounded
+ *     by `first_published <= now - 6 h` and the candidate limit), so a cluster
+ *     that merely turned 6 h old inside the window is a candidate too.
  */
 
 const SILENT_SELECT =
@@ -61,16 +73,24 @@ function isTitle(v: string | null | undefined): v is string {
   return typeof v === "string" && v.trim().length > 0;
 }
 
+function byAlertAtDescThenId(a: AlertItem, b: AlertItem): number {
+  const d = Date.parse(b.alertAt) - Date.parse(a.alertAt);
+  if (d !== 0) return d;
+  return a.clusterId < b.clusterId ? -1 : a.clusterId > b.clusterId ? 1 : 0;
+}
+
 export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]> {
   const { sinceIso, limit, health, profile = "reader" } = input;
   const nowMs = input.nowMs ?? Date.now();
   const sinceMs = Date.parse(sinceIso);
+  if (!Number.isFinite(sinceMs)) throw new Error("[alerts] sinceIso is not a valid timestamp");
 
   const items: AlertItem[] = [];
 
   const { bundles } = await getBlindspots({ profile });
   for (const b of bundles.slice(0, BLINDSPOT_CAP)) {
-    if (Date.parse(b.cluster.updated_at) < sinceMs) continue;
+    const alertAt = alertAtOf("blindspot", b.cluster.first_published, b.cluster.updated_at);
+    if (alertAt === null || Date.parse(alertAt) < sinceMs) continue;
     const tally = tallyZones(normalizeDistribution(b.cluster.bias_distribution));
     items.push({
       type: "blindspot",
@@ -78,6 +98,7 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
       title: isTitle(b.cluster.title_tr) ? b.cluster.title_tr : "",
       firstPublished: b.cluster.first_published,
       updatedAt: b.cluster.updated_at,
+      alertAt,
       sourceCount: tally.total,
       zoneCounts: { ...tally.counts },
       dominantZone: b.dominantZone,
@@ -86,6 +107,11 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
   }
 
   const olderThanIso = new Date(nowMs - SILENT_MIN_AGE_H * 3600 * 1000).toISOString();
+  // alertAt >= since  <=>  updated_at >= since  OR  first_published + 6 h >= since.
+  // Both bounds are re-serialised from the parsed instant: the `.or()` string
+  // is a PostgREST logic tree, so nothing but a canonical ISO value goes in.
+  const sinceBoundIso = new Date(sinceMs).toISOString();
+  const silentFloorIso = new Date(sinceMs - SILENT_MIN_AGE_H * 3600 * 1000).toISOString();
   const supabase = createServerClient();
   const { data, error } = await supabase
     .from("clusters")
@@ -94,7 +120,7 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
     .eq("is_blindspot", false)
     .eq("blindspot_recall_veto", false)
     .gte("article_count", SILENT_MIN_SOURCES)
-    .gte("updated_at", sinceIso)
+    .or(`updated_at.gte.${sinceBoundIso},first_published.gte.${silentFloorIso}`)
     .lte("first_published", olderThanIso)
     .order("updated_at", { ascending: false })
     .limit(SILENT_CANDIDATE_LIMIT)
@@ -102,6 +128,8 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
   if (error) throw new Error(`[alerts] silent candidate select error: ${error.message}`);
 
   for (const row of data ?? []) {
+    const alertAt = alertAtOf("one_zone_silent", row.first_published, row.updated_at);
+    if (alertAt === null || Date.parse(alertAt) < sinceMs) continue;
     const silent = oneZoneSilentOf(row.bias_distribution);
     if (!silent) continue;
     if (health?.[silent.silentZone]?.degraded) continue;
@@ -111,6 +139,7 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
       title: isTitle(row.title_tr_neutral) ? row.title_tr_neutral : row.title_tr,
       firstPublished: row.first_published,
       updatedAt: row.updated_at,
+      alertAt,
       sourceCount: silent.total,
       zoneCounts: silent.counts,
       dominantZone: null,
@@ -118,6 +147,6 @@ export async function getAlertItems(input: AlertQueryInput): Promise<AlertItem[]
     });
   }
 
-  items.sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+  items.sort(byAlertAtDescThenId);
   return items.slice(0, limit);
 }

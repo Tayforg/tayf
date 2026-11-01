@@ -812,15 +812,27 @@ Keyed alert feed (newsroom-alerts, b2b-5), JSON or RSS. Bearer auth only
 and per-day metering as every other `/api/v1` route.
 
 **Query params**:
-- `since` (optional ISO 8601): default now minus 24h, clamped to 7 days.
-- `limit` (optional integer, 1-100, default 50).
+- `since` (optional ISO 8601): a lower bound on `alert_at` (not `updated_at`),
+  the moment the alert qualified. Default now minus 24h, clamped to 7 days.
+  `alert_at` is:
+  - `blindspot`: `max(updated_at, first_published + 24h)`, because a blindspot
+    is only listed 24h after the cluster began (`BLINDSPOT.feedDelayHours`);
+  - `one_zone_silent`: `max(updated_at, first_published + 6h)`, because a
+    cluster must be 6h old before a zone may be called silent
+    (`SILENT_MIN_AGE_H`).
+  A cluster's `updated_at` usually precedes the moment its alert first
+  appears, so `since` on `updated_at` alone would miss it.
+- `limit` (optional integer, 1-100, default 50). Blindspots are capped at 30
+  before the merge, the same cap as `/blindspots`, so the list holds at most
+  30 `blindspot` alerts however large `limit` is.
 - `format` (optional): `json` or `rss`. Anything else -> `400 Invalid format`.
   When absent, RSS is served if `Accept` includes `application/rss+xml`,
   otherwise JSON. RSS responses carry
   `Content-Type: application/rss+xml; charset=utf-8` and
   `Vary: Origin, Authorization, Accept`.
 
-**Two alert types**, merged newest first (`updated_at` descending):
+**Two alert types**, merged newest first (`alert_at` descending, ties by
+`cluster_id` ascending):
 - `blindspot`: exactly the `/blindspots` page rule: the public claim
   `is_blindspot AND NOT blindspot_recall_veto` (both vetoes applied: a Jev
   `blindspot_recall` match at p >= 0.85 that pulls the dominant share under
@@ -848,7 +860,7 @@ the zone chose not to cover it. The copy avoids accusatory wording.
     "cluster_id": "<cluster uuid>",
     "title": "...",
     "url": "https://.../cluster/<cluster uuid>",
-    "first_published": "...", "updated_at": "...",
+    "first_published": "...", "updated_at": "...", "alert_at": "...",
     "source_count": 5,
     "zone_counts": { "iktidar": 3, "bagimsiz": 2, "muhalefet": 0 },
     "dominant_zone": null,
@@ -856,8 +868,15 @@ the zone chose not to cover it. The copy avoids accusatory wording.
   }]
 }
 ```
-`dominant_zone` is set for `blindspot` only. For RSS, item `guid` is the bare
-cluster URL and `link` carries `utm_source=api&utm_medium=alerts&utm_campaign=alerts`.
+`dominant_zone` is set for `blindspot` only. `updated_at` is the cluster's own
+last update; `alert_at` is the moment the alert qualified (formulas above) and
+is what `since` and the ordering use. If a cluster is updated after it became
+an alert, its `alert_at` moves forward and the record is returned again by a
+later `since`, so de-duplicate on `id`. A poller that sends `since` = the time
+of its last poll sees each alert once when it becomes eligible, and again only
+when the cluster changes. For RSS, item `guid` is the bare cluster URL, the
+item `pubDate` is `alert_at`, and `link` carries
+`utm_source=api&utm_medium=alerts&utm_campaign=alerts`.
 
 #### Signed webhooks (optional, per key)
 
@@ -865,7 +884,7 @@ An operator registers one https address per API key at `/admin/api-webhooks`
 (`POST /api/admin/api-keys/webhook`, below). The secret is shown once. Every
 new alert is then POSTed as JSON `{ "event": "tayf.alert", "alert": {...},
 "licence": "...", "attribution": "..." }` (`alert` is the same record as the
-feed). Only alerts whose `updated_at` is at or after the webhook's creation
+feed). Only alerts whose `alert_at` is at or after the webhook's creation
 are sent, and each `alert.id` at most once per key.
 
 Headers: `X-Tayf-Event`, `X-Tayf-Delivery` (delivery id, identical on every

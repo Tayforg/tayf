@@ -22,17 +22,21 @@ function bundle(
       updated_at: "2026-09-20T10:00:00.000Z",
     },
     articles: [],
-    // Coherent fixture: s3 is an aggregator, so it is listed (and counted in
-    // "N kaynak") but never votes. votingZoneCounts matches the voting
-    // sources (s1, s2) only.
+    // Coherent fixture: s5 is an outlet, s6 an aggregator, so s6 is listed
+    // (and counted in "N kaynak") but never votes. votingZoneCounts matches
+    // the voting sources (s1-s5) only: 4 iktidar + 1 bağımsız, which is the
+    // 80% dominantPct below.
     sources: [
       { id: "s1", name: "A", bias: "pro_government", kind: "outlet" },
-      { id: "s2", name: "B", bias: "center", kind: "outlet" },
-      { id: "s3", name: "C", bias: "center", kind: "aggregator" },
+      { id: "s2", name: "B", bias: "pro_government", kind: "outlet" },
+      { id: "s3", name: "C", bias: "state_media", kind: "outlet" },
+      { id: "s4", name: "D", bias: "gov_leaning", kind: "outlet" },
+      { id: "s5", name: "E", bias: "center", kind: "outlet" },
+      { id: "s6", name: "F", bias: "center", kind: "aggregator" },
     ],
     dominantZone: "iktidar",
     dominantPct: 0.8,
-    votingZoneCounts: { iktidar: 1, bagimsiz: 1, muhalefet: 0 },
+    votingZoneCounts: { iktidar: 4, bagimsiz: 1, muhalefet: 0 },
     isWireRedistribution: false,
     effectiveArticleCount: 5,
     ...overrides,
@@ -62,17 +66,46 @@ describe("blindspotRssItem", () => {
     expect(url.searchParams.get("utm_campaign")).toBe("kor_nokta");
   });
 
-  it("builds the description from the zone label, rounded percentage, source count and zone line", () => {
+  it("builds the description from the zone label, largest-remainder percentage, source count and zone line", () => {
     const item = blindspotRssItem(
       BASE,
-      bundle("c1", { dominantZone: "muhalefet", dominantPct: 0.666 }),
+      bundle("c1", {
+        dominantZone: "muhalefet",
+        dominantPct: 2 / 3,
+        votingZoneCounts: { iktidar: 1, bagimsiz: 0, muhalefet: 2 },
+      }),
     );
-    // "3 kaynak" is sources.length (the card's count, aggregator included);
+    // "6 kaynak" is sources.length (the card's count, aggregator included);
     // the zone line is the voting tally, so the aggregator's Bağımsız vote
-    // is not there (a raw recount would read Bağımsız 2).
+    // is not there (a raw recount of `sources` would read Bağımsız 2).
     expect(item.description).toBe(
-      "Kör nokta: ağırlıkla Muhalefet kaynakları (%67). 3 kaynak · İktidar 1 · Bağımsız 1 · Muhalefet 0",
+      "Kör nokta: ağırlıkla Muhalefet kaynakları (%67). 6 kaynak · İktidar 1 · Bağımsız 0 · Muhalefet 2",
     );
+  });
+
+  it("prints %84 (the bar's largest-remainder figure), not Math.round's %85, for an 11/1/1 tally", () => {
+    const item = blindspotRssItem(
+      BASE,
+      bundle("c3", {
+        dominantPct: 11 / 13,
+        votingZoneCounts: { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+      }),
+    );
+    expect(item.description).toContain("(%84).");
+    expect(item.description).not.toContain("%85");
+    expect(item.description).toContain("İktidar 11 · Bağımsız 1 · Muhalefet 1");
+  });
+
+  it("derives the percent from votingZoneCounts, never from dominantPct", () => {
+    // dominantPct is only the sort key; a stale value must not reach the copy.
+    const item = blindspotRssItem(
+      BASE,
+      bundle("c4", {
+        dominantPct: 0.5,
+        votingZoneCounts: { iktidar: 4, bagimsiz: 1, muhalefet: 0 },
+      }),
+    );
+    expect(item.description).toContain("(%80).");
   });
 
   it("takes the zone line from bundle.votingZoneCounts, not from a recount of bundle.sources", () => {
@@ -83,7 +116,7 @@ describe("blindspotRssItem", () => {
       }),
     );
     expect(item.description).toContain("İktidar 7 · Bağımsız 0 · Muhalefet 2");
-    expect(item.description).toContain("3 kaynak");
+    expect(item.description).toContain("6 kaynak");
   });
 });
 

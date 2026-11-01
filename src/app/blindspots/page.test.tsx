@@ -48,7 +48,8 @@ vi.mock("@/lib/clusters/near-blindspots-query", () => ({
 }));
 
 import BlindspotsPage, { BlindspotsFeed, NearBlindspotsSection } from "./page";
-import { Suspense } from "react";
+import { createElement, Suspense } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
@@ -500,5 +501,112 @@ describe("/blindspots page — Kör noktaya yakın section", () => {
 
     expect(collectText(feed).join(" ")).toContain("belirgin bir kör nokta yok");
     expect(near.props?.items).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Zone percent consistency (hunt-14 polish-1): the chip above a card and the
+// card's own BiasSpectrum bar must print the SAME number. Math.round(11/13)
+// gave "%85 İktidar" over a bar reading "İktidar: 11 kaynak (%84)"; the chip
+// now takes zonePercents (largest remainder) from the voting tally, and the
+// "Sadece X yazdı" claim is decided on the counts, not on a rounded 100.
+// ---------------------------------------------------------------------------
+describe("/blindspots page — chip agrees with the bar (zone percent consistency)", () => {
+  function distOf(partial: Record<string, number>) {
+    return {
+      pro_government: 0,
+      gov_leaning: 0,
+      state_media: 0,
+      center: 0,
+      opposition_leaning: 0,
+      opposition: 0,
+      nationalist: 0,
+      islamist_conservative: 0,
+      pro_kurdish: 0,
+      international: 0,
+      ...partial,
+    };
+  }
+
+  function cardBundle(
+    counts: { iktidar: number; bagimsiz: number; muhalefet: number },
+    distribution: Record<string, number>,
+  ) {
+    const total = counts.iktidar + counts.bagimsiz + counts.muhalefet;
+    return {
+      cluster: {
+        id: "zp1",
+        title_tr: "Yüzde tutarlılığı",
+        summary_tr: "",
+        bias_distribution: distOf(distribution),
+        is_blindspot: true,
+        blindspot_side: "pro_government",
+        article_count: total,
+        first_published: "2026-10-22T09:00:00.000Z",
+        updated_at: "2026-10-22T11:00:00.000Z",
+      },
+      articles: [],
+      sources: [],
+      dominantZone: "iktidar",
+      // Deliberately the Math.round-prone share: the page must not read it.
+      dominantPct: counts.iktidar / total,
+      votingZoneCounts: counts,
+      isWireRedistribution: false,
+      effectiveArticleCount: total,
+    };
+  }
+
+  /** Renders the BlindspotCard for one bundle: its chip, "tek tarafta" span and bar. */
+  async function renderCard(bundle: ReturnType<typeof cardBundle>) {
+    getBlindspots.mockResolvedValueOnce({ ok: true, bundles: [bundle] });
+    const tree = await BlindspotsFeed();
+    const cards = collectElements(tree).filter(
+      (el) => typeof el.type === "function" && el.props?.bundle === bundle,
+    );
+    expect(cards).toHaveLength(1);
+    const card = cards[0] as { type: React.FunctionComponent; props: object };
+    const html = renderToStaticMarkup(createElement(card.type, card.props));
+    // Visible text only: attributes (the bar's title="...") live in `html`.
+    return { html, text: html.replace(/<[^>]*>/g, "") };
+  }
+
+  it("prints %84 on the chip for 11/1/1, matching the bar title, never %85", async () => {
+    const { html, text } = await renderCard(
+      cardBundle(
+        { iktidar: 11, bagimsiz: 1, muhalefet: 1 },
+        { pro_government: 11, center: 1, opposition: 1 },
+      ),
+    );
+
+    expect(text).toContain("%84 İktidar");
+    expect(html).toContain("İktidar: 11 kaynak (%84)");
+    expect(html).not.toContain("%85");
+    expect(text).not.toContain("Sadece");
+    expect(text).not.toContain("tek tarafta");
+  });
+
+  it("says 'Sadece İktidar yazdı' and '%100 tek tarafta' when the other two zones have no sources", async () => {
+    const { text } = await renderCard(
+      cardBundle(
+        { iktidar: 5, bagimsiz: 0, muhalefet: 0 },
+        { pro_government: 5 },
+      ),
+    );
+
+    expect(text).toContain("Sadece İktidar yazdı");
+    expect(text).toContain("%100 tek tarafta");
+  });
+
+  it("does not claim 'only one side' at 250/1/0 although the share rounds to 100", async () => {
+    const { text } = await renderCard(
+      cardBundle(
+        { iktidar: 250, bagimsiz: 1, muhalefet: 0 },
+        { pro_government: 250, center: 1 },
+      ),
+    );
+
+    expect(text).toContain("%100 İktidar");
+    expect(text).not.toContain("Sadece");
+    expect(text).not.toContain("tek tarafta");
   });
 });

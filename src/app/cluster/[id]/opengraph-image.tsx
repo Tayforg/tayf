@@ -2,7 +2,12 @@ import { ImageResponse } from "next/og";
 
 import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { tallyZones, zoneOf } from "@/lib/bias/config";
-import { zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import {
+  dominantZonePercent,
+  isOnlyZone,
+  zoneCountsOf,
+  zonePercents,
+} from "@/lib/bias/zone-summary";
 import { displayHeadline } from "@/lib/embed/embed-html";
 import { formatPctTr } from "@/lib/format/number-tr";
 import type { MediaDnaZone } from "@/types";
@@ -184,16 +189,18 @@ export default async function Image({ params }: ImageProps) {
   // Blindspot ribbon zone + share: prefer the reported `blindspot_side`; a
   // freshly-flagged row without one yet falls back to whichever zone
   // covered the story the most (same rule `buildShareText` uses). The DB
-  // flag now fires at >= BLINDSPOT.dominantShare (80%), so the ribbon says
-  // "sadece {Zone} yazdı" only at an exact 100% share and "%{share} {Zone}"
-  // otherwise.
-  const tally = tallyZones(cluster.bias_distribution);
+  // flag fires at >= BLINDSPOT.dominantShare (80%). The ribbon's percent is
+  // that zone's own tile percent (largest remainder, the number printed in
+  // the tile below: 11/1/1 reads 84, not Math.round's 85), and it says
+  // "sadece {Zone} yazdı" only when the other two zones have no source at
+  // all (decided on the counts: 250/1/0 reads 100 but is not "only").
   const ribbonZone: MediaDnaZone | null = cluster.is_blindspot
     ? cluster.blindspot_side
       ? zoneOf(cluster.blindspot_side)
-      : (tally.dominantZone ?? "iktidar")
+      : (tallyZones(cluster.bias_distribution).dominantZone ?? "iktidar")
     : null;
-  const ribbonShare = Math.round(tally.dominantShare * 100);
+  const ribbonShare = ribbonZone ? dominantZonePercent(zones, ribbonZone) : 0;
+  const ribbonOnly = ribbonZone ? isOnlyZone(zones, ribbonZone) : false;
 
   // Trim very long Turkish headlines so they fit in the title box.
   // Roughly 110 characters before Satori starts pushing things
@@ -331,7 +338,7 @@ export default async function Image({ params }: ImageProps) {
               letterSpacing: "0.04em",
             }}
           >
-            {ribbonShare === 100
+            {ribbonOnly
               ? `KÖR NOKTA — sadece ${ZONE_STYLE[ribbonZone].label} yazdı`
               : `KÖR NOKTA — %${ribbonShare} ${ZONE_STYLE[ribbonZone].label}`}
           </div>

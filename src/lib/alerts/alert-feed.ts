@@ -40,6 +40,12 @@ export interface AlertItem {
   title: string;
   firstPublished: string;
   updatedAt: string;
+  /**
+   * ISO 8601: the moment the alert qualified, see `alertAtOf`. `since`, the
+   * sort order and the webhook rule are all defined on this, not on
+   * `updatedAt`.
+   */
+  alertAt: string;
   /** Voting-source total (bias_distribution sum). */
   sourceCount: number;
   zoneCounts: ZoneCounts;
@@ -56,6 +62,8 @@ export interface V1AlertRecord {
   url: string;
   first_published: string;
   updated_at: string;
+  /** The moment the alert qualified; `since`, ordering and webhooks use it. */
+  alert_at: string;
   source_count: number;
   zone_counts: ZoneCounts;
   dominant_zone: MediaDnaZone | null;
@@ -93,6 +101,31 @@ export function oneZoneSilentOf(dist: unknown): OneZoneSilent | null {
   return { silentZone: silent[0]!, total: tally.total, counts: { ...tally.counts } };
 }
 
+/**
+ * The moment an alert qualified (became visible under its rule):
+ *   blindspot        max(updated_at, first_published + BLINDSPOT.feedDelayHours h)
+ *   one_zone_silent  max(updated_at, first_published + SILENT_MIN_AGE_H h)
+ * A blindspot is listed on /blindspots only once its cluster is
+ * `feedDelayHours` old, and a silent zone only after SILENT_MIN_AGE_H, so
+ * `updated_at` alone is usually EARLIER than the moment a consumer could first
+ * have seen the alert; a later update moves it forward again.
+ *
+ * Pure (no clock). An unparsable timestamp is ignored in favour of the other;
+ * null when neither parses. Always a UTC ISO string.
+ */
+export function alertAtOf(type: AlertType, firstPublished: string, updatedAt: string): string | null {
+  const delayH = type === "blindspot" ? BLINDSPOT.feedDelayHours : SILENT_MIN_AGE_H;
+  const qualifiedMs = Date.parse(firstPublished) + delayH * 3600 * 1000;
+  const updatedMs = Date.parse(updatedAt);
+  const ms = Math.max(
+    Number.isFinite(qualifiedMs) ? qualifiedMs : -Infinity,
+    Number.isFinite(updatedMs) ? updatedMs : -Infinity,
+  );
+  // Out-of-range sums (a year-275760 first_published) yield an Invalid Date.
+  const out = new Date(ms);
+  return Number.isNaN(out.getTime()) ? null : out.toISOString();
+}
+
 export function toV1AlertRecord(item: AlertItem): V1AlertRecord {
   return {
     id: `${item.type}:${item.clusterId}`,
@@ -102,6 +135,7 @@ export function toV1AlertRecord(item: AlertItem): V1AlertRecord {
     url: `${siteUrl()}/cluster/${item.clusterId}`,
     first_published: item.firstPublished,
     updated_at: item.updatedAt,
+    alert_at: item.alertAt,
     source_count: item.sourceCount,
     zone_counts: { ...item.zoneCounts },
     dominant_zone: item.dominantZone,
@@ -127,7 +161,7 @@ function rssItemFor(alert: V1AlertRecord) {
     title,
     link: withUtm(alert.url, { source: "api", medium: "alerts", campaign: "alerts" }),
     guid: alert.url,
-    pubDate: alert.updated_at,
+    pubDate: alert.alert_at,
     description,
   };
 }

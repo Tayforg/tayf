@@ -6,13 +6,17 @@ import { resolve } from "node:path";
 // via `vi.mocked(scoreMock).mockImplementation(...)` -- band-low/band-high
 // classification depends on the ensemble score, and the real ensemble
 // scorer is not exercised at all under this file's mocks.
-import { score as scoreMock } from "../../supabase/functions/_shared/cluster/ensemble.ts";
+import { headlineLane, score as scoreMock } from "../../supabase/functions/_shared/cluster/ensemble.ts";
 import {
   HEADLINE_LANE_MAX_HOURS,
   HEADLINE_MEMBER_SCAN_MAX,
   HEADLINE_TITLE_MAX_CHARS,
 } from "../../supabase/functions/_shared/cluster/constants.ts";
-import { headlineTokens, strictFingerprint } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
+import {
+  headlineTokens,
+  normalizeTurkish,
+  strictFingerprint,
+} from "../../supabase/functions/_shared/cluster/fingerprint.ts";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the cluster-consumer Edge Function.
@@ -155,6 +159,7 @@ const {
   admissionRows,
   rpcFixtures,
   clusterArticlesFailure,
+  skipLogFake,
   supabaseFakeClient,
   supabaseFakeCalls,
 } = await vi.hoisted(
@@ -204,6 +209,14 @@ const {
     // loadProbeCluster) fail for one cluster id.
     const clusterArticlesFailureState: { clusterId: string | null } = { clusterId: null };
     const admissionRows: Array<Record<string, unknown>> = [];
+    // h14-cluster-1: the cluster_skip_log audit table. Its writes land in the
+    // fake's mutation log like every other table; `mode` makes the write fail
+    // with an error envelope or a throw, and `upsertOptions` keeps the second
+    // argument of each upsert (the shared fake only records the patch).
+    const skipLogFakeState: {
+      mode: "ok" | "error" | "throw";
+      upsertOptions: unknown[];
+    } = { mode: "ok", upsertOptions: [] };
     const fake = helper.createSupabaseFake({
       tables: {
         articles: (state) => {
@@ -275,6 +288,13 @@ const {
           { id: "src-posta", bias: "pro_government", name: "Posta", slug: "posta", kind: "outlet" },
           { id: "src-cnn-turk", bias: "center", name: "CNN Turk", slug: "cnn-turk", kind: "outlet" },
         ],
+        cluster_skip_log: () => {
+          if (skipLogFakeState.mode === "throw") throw new Error("skip log unreachable");
+          if (skipLogFakeState.mode === "error") {
+            return { data: null, error: { message: "skip log down" } };
+          }
+          return { data: [], error: null };
+        },
         jev_politics_admissions: (state) => {
           const eqCluster = state.eq.find((p) => p.col === "cluster_id")?.val as
             | string
@@ -320,7 +340,25 @@ const {
       admissionRows,
       rpcFixtures: rpcFixturesState,
       clusterArticlesFailure: clusterArticlesFailureState,
-      supabaseFakeClient: fake.client,
+      skipLogFake: skipLogFakeState,
+      supabaseFakeClient: {
+        ...fake.client,
+        from: (table: string) => {
+          const builder = fake.client.from(table) as Record<string, unknown>;
+          if (table !== "cluster_skip_log") return builder;
+          return new Proxy(builder, {
+            get(target, prop, receiver) {
+              if (prop === "upsert") {
+                return (patch: unknown, options?: unknown) => {
+                  skipLogFakeState.upsertOptions.push(options);
+                  return (target.upsert as (p: unknown) => unknown)(patch);
+                };
+              }
+              return Reflect.get(target, prop, receiver);
+            },
+          });
+        },
+      },
       supabaseFakeCalls: fake.calls,
     };
   },
@@ -383,6 +421,8 @@ beforeEach(() => {
   rpcFixtures.jev_politics_admission_record = null;
   rpcFixtures.cluster_title_probe = null;
   clusterArticlesFailure.clusterId = null;
+  skipLogFake.mode = "ok";
+  skipLogFake.upsertOptions.length = 0;
   admissionRows.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
@@ -1661,6 +1701,10 @@ describe("cluster-consumer Edge Function", () => {
 
     it("primary skipped as duplicate-source + entity-only secondary at 0.39 -> no join (h12-cluster-1: the same-source duplicate is skipped, no twin is opened)", async () => {
       seedClusters();
+      // h14-cluster-1: the skip needs strong evidence, so the incoming article is
+      // src-outlet's re-publication of A's headline (an exact folded-title match),
+      // not just a similar one.
+      (fakeArticles["art-floor"] as { title: string }).title = A.title;
       scoreBy({ [A.fp]: result(0.6), [B.fpSeed]: result(0.39, CAPPED) });
 
       const body = await drain();
@@ -1672,6 +1716,19 @@ describe("cluster-consumer Edge Function", () => {
       expect(body.skipped).toBe(1);
       expect(linkedClusters()).toEqual([]);
       expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+    });
+
+    it("h14-cluster-1: the same match without evidence (a different headline, 3 shared stems) is not a duplicate: no join, the article opens its own cluster", async () => {
+      seedClusters();
+      scoreBy({ [A.fp]: result(0.6), [B.fpSeed]: result(0.39, CAPPED) });
+
+      const body = await drain();
+
+      expect(body.matched).toBe(0);
+      expect(body.skipped).toBe(0);
+      expect(body.created).toBe(1);
+      expect(linkedClusters()).toEqual([]);
+      expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
     });
 
     it("control: the same secondary without the cap is the ordinary fallback join and still joins", async () => {
@@ -3175,6 +3232,400 @@ describe("cluster-consumer Edge Function", () => {
 
         expect(seen).toContain(strictFingerprint(TITLE, CLEAN));
         expect(seen).not.toContain(strictFingerprint(TITLE, RAW));
+      });
+    });
+
+    // ---- h14-cluster-1: the same-source skip needs strong evidence -------------
+    //
+    // #152 skipped ANY article that matched a cluster at MATCH_THRESHOLD or better
+    // when that cluster already held the article's source. A templated MinHash
+    // false match (cumhuriyet's "<film> filmi televizyon ekranlarında ..." blurb)
+    // therefore dropped "Muhbir" and "Eller Yukarı" as duplicates of the "Suikast
+    // Treni" cluster (2026-11-01 17:46 and 18:22, scores 0.849 / 0.833). The skip
+    // is now taken only on strong evidence: an equal strict fingerprint, an
+    // identical folded headline, or the headline lane firing against the SAME
+    // source's member. Everything else falls through to createCluster, exactly as
+    // before #152. The titles and descriptions below are the public article text
+    // read from production on 2026-11-01.
+    describe("h14-cluster-1: same-source skip needs strong evidence", () => {
+      const MIN = 60_000;
+      // cnn-turk member of the Suikast Treni cluster 609bdf18 (published 15:52).
+      const SUIKAST_CNN_TITLE = "Suikast Treni filminin konusu nedir? Suikast Treni filminin oyuncuları kimler?";
+      const SUIKAST_CNN_DESC =
+        "Aksiyon ve komedi türündeki Suikast Treni filminin başrolünde dünyaca ünlü oyuncu Brad Pitt yer alıyor. 2022 yapımı aksiyon filmi olan Suikast Treni'nin yönetmenliğini David Leitch üstlendi. Çekimler Kasım 2020'de Los Angeles'ta başladı ve Mart 2021'de tamamlandı. 90 milyon dolarlık bütçe ile çekilen film 239,3 milyon dolar hasılat elde etti. Peki Suikast Treni filminin konusu nedir? Suikast Treni filminin oyuncuları kimler? İşte detaylar...";
+      // cumhuriyet member of the same cluster (published 17:19).
+      const SUIKAST_CUM_TITLE = "Suikast Treni filminin konusu ne? Suikast Treni filminin oyuncuları kim?";
+      const SUIKAST_CUM_DESC =
+        "Suikast Treni (Bullet Train) filmi televizyon ekranlarında izleyicisiyle buluşmaya hazırlanıyor. Suikast Treni filminin konusu ve oyuncularının kimler olduğu merak ediliyor. Peki, Suikast Treni filminin konusu ne? Suikast Treni filminin oyuncuları kim? İşte ayrıntılar...";
+      // The two cumhuriyet articles #152 dropped (312bce42, f4b82ef9).
+      const MUHBIR_TITLE = "Muhbir filminin konusu ne? Muhbir filminin oyuncuları kim?";
+      const MUHBIR_DESC =
+        "Muhbir (The Informer) filmi televizyon ekranlarında izleyicisiyle buluşmaya hazırlanıyor. Muhbir filminin konusu ve oyuncularının kimler olduğu merak ediliyor. Peki, Muhbir filminin konusu ne? Muhbir filminin oyuncuları kim? İşte ayrıntılar...";
+      const ELLER_TITLE = "Eller Yukarı filminin konusu ne? Eller Yukarı filminin oyuncuları kim?";
+      const ELLER_DESC =
+        "Eller Yukarı (Guns Up) filmi televizyon ekranlarında izleyicisiyle buluşmaya hazırlanıyor. Eller Yukarı filminin konusu ve oyuncularının kimler olduğu merak ediliyor. Peki, Eller Yukarı filminin konusu ne? Eller Yukarı filminin oyuncuları kim? İşte ayrıntılar...";
+      // The third logged skip: aksam 11862382 (18:15) against the 38-article Seul cluster e952ca96.
+      const SEUL_NEW_TITLE = "Güney Kore'de dostluk diplomasisi: Başkan Erdoğan Seul'e doğru yola çıktı";
+      const SEUL_NEW_DESC =
+        "Başkan Recep Tayyip Erdoğan, Güney Kore Devlet Başkanı Lee Jae Myung'un davetine icabetle Seul'e doğru yola çıktı.";
+      const SEUL_AKSAM_TITLE = "Seul'den davet: Başkan Erdoğan, Güney Kore'ye gidecek";
+      // Same story as HEADLINE in different words: 11 shared stems, Jaccard 0.73 (the lane fires), not an equal title.
+      const HEADLINE_VARIANT =
+        "Antalya Alanya ulaşımı 36 dakikaya inecek, yıllık 23,9 milyar lira tasarruf sağlanacak";
+
+      /** c-suikast: cnn-turk seed (100 min ago) and the cumhuriyet member (22 min ago) the new article collides with. */
+      function seedSuikast() {
+        seedCluster(
+          "c-suikast",
+          2,
+          [
+            { id: "m-cnn", sourceId: "src-cnn-turk", fp: "fp-cnn", ageMs: 100 * MIN, title: SUIKAST_CNN_TITLE, description: SUIKAST_CNN_DESC },
+            { id: "m-cum", sourceId: "src-outlet", fp: "fp-cum", ageMs: 22 * MIN, title: SUIKAST_CUM_TITLE, description: SUIKAST_CUM_DESC },
+          ],
+          { title: SUIKAST_CNN_TITLE },
+        );
+      }
+
+      const skipLogWrites = () => supabaseFakeCalls.forTable("cluster_skip_log");
+      const skipLogRows = () =>
+        supabaseFakeCalls
+          .upsert("cluster_skip_log")
+          .flatMap((m) => m.patch as Array<Record<string, unknown>>);
+      const skipLogWarnings = () =>
+        warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("cluster_skip_log"));
+      const scoredAgainst = () =>
+        vi.mocked(scoreMock).mock.calls.map((c) => (c[1] as { strict?: string | null } | null | undefined)?.strict);
+
+      describe("(1) templated pair: a MinHash-only match is no duplicate", () => {
+        for (const c of [
+          { name: "Muhbir", title: MUHBIR_TITLE, desc: MUHBIR_DESC, id: "312bce42", score: 0.856 },
+          { name: "Eller Yukarı", title: ELLER_TITLE, desc: ELLER_DESC, id: "f4b82ef9", score: 0.85 },
+        ]) {
+          it(`${c.name} (cumhuriyet, ${c.score}) against the Suikast Treni cluster that holds a cumhuriyet member -> created, not skipped`, async () => {
+            // Premise: the headline lane does NOT fire for this pair, so nothing but the MinHash score links them.
+            const hoursApart = 22 / 60;
+            expect(headlineLane(headlineTokens(c.title), headlineTokens(SUIKAST_CUM_TITLE), hoursApart).fired).toBe(false);
+            expect(normalizeTurkish(c.title)).not.toBe(normalizeTurkish(SUIKAST_CUM_TITLE));
+
+            seedSuikast();
+            queueIncoming({ id: c.id, sourceId: "src-outlet", title: c.title, description: c.desc, msgId: 4301 });
+            scoreBy({ "fp-cum": c.score, "fp-cnn": 0.3 });
+
+            const body = await drain();
+
+            // Non-vacuous: the cluster really was a scored, source-blocked candidate at >= MATCH_THRESHOLD.
+            expect(scoredAgainst()).toContain("fp-cum");
+            expect(body.created).toBe(1);
+            expect(body.skipped).toBe(0);
+            expect(body.matched).toBe(0);
+            expect(body.failedTransient).toBe(0);
+            expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+            expect(linkedClusters()).toEqual([]);
+            expect(pgmqState.archived).toContain(4301);
+            expect(skipLogs()).toHaveLength(0);
+            expect(skipLogWrites()).toHaveLength(0);
+          });
+        }
+      });
+
+      describe("(2) genuine same-source duplicates are still skipped, with the reason recorded", () => {
+        it("(a) strict-fingerprint fast path -> same-source-duplicate/fingerprint", async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: strictFingerprint(HEADLINE, "Detay") }]);
+          queueIncoming({ sourceId: "src-outlet", msgId: 4311 });
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(linkedClusters()).toEqual([]);
+          expect(pgmqState.archived).toContain(4311);
+          expect(skipLogs()).toHaveLength(1);
+          expect(String(skipLogs()[0]?.[0])).toContain("evidence=fingerprint");
+          expect(skipLogRows()).toEqual([
+            { article_id: "art-twin", cluster_id: "c1", score: 1, reason: "same-source-duplicate/fingerprint" },
+          ]);
+        });
+
+        it("(b) different wording from the same source that fires the headline lane against that source's member (0.87) -> same-source-duplicate/headline-lane", async () => {
+          // Premise: the lane fires, the folded titles differ, the strict fingerprints differ.
+          expect(headlineLane(headlineTokens(HEADLINE_VARIANT), headlineTokens(HEADLINE), 0.5).fired).toBe(true);
+          expect(normalizeTurkish(HEADLINE_VARIANT)).not.toBe(normalizeTurkish(HEADLINE));
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ sourceId: "src-outlet", title: HEADLINE_VARIANT, msgId: 4312 });
+          scoreBy({ "fp-c1": 0.87 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(linkedClusters()).toEqual([]);
+          expect(pgmqState.archived).toContain(4312);
+          expect(String(skipLogs()[0]?.[0])).toContain("evidence=headline-lane");
+          const rows = skipLogRows();
+          expect(rows).toHaveLength(1);
+          expect(rows[0]).toMatchObject({ article_id: "art-twin", cluster_id: "c1", reason: "same-source-duplicate/headline-lane" });
+          expect(rows[0]?.score as number).toBeCloseTo(0.87, 5);
+        });
+
+        it("(b2) the same-source member that fires the lane may be a middle member, neither seed nor latest", async () => {
+          seedCluster("c1", 3, [
+            { id: "c1-seed", sourceId: "src-wire", fp: "fp-c1s", ageMs: 90 * MIN, title: "Alakasız bir başka konu" },
+            { id: "c1-mid", sourceId: "src-outlet", fp: "fp-c1m", ageMs: 60 * MIN },
+            { id: "c1-late", sourceId: "src-posta", fp: "fp-c1l", ageMs: 30 * MIN, title: "Alakasız bir başka konu daha" },
+          ]);
+          queueIncoming({ sourceId: "src-outlet", title: HEADLINE_VARIANT, msgId: 4313 });
+          scoreBy({ "fp-c1s": 0.5, "fp-c1l": 0.87 });
+
+          const body = await drain();
+
+          expect(scoredAgainst()).toContain("fp-c1l");
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(skipLogRows()[0]).toMatchObject({ cluster_id: "c1", reason: "same-source-duplicate/headline-lane" });
+        });
+
+        it("(c) identical headline from the same source (0.87) -> same-source-duplicate/exact-title", async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ sourceId: "src-outlet", msgId: 4314 });
+          scoreBy({ "fp-c1": 0.87 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(String(skipLogs()[0]?.[0])).toContain("evidence=exact-title");
+          expect(skipLogRows()).toMatchObject([
+            { article_id: "art-twin", cluster_id: "c1", reason: "same-source-duplicate/exact-title" },
+          ]);
+        });
+
+        it("(d) exact-title probe hit: the cluster holds the source through a member with another headline -> exact-title", async () => {
+          const SINGLETON = "cl-yusra-probe";
+          const YUSRA_TITLE = "Yüsra Geyik takside beklerken, Nehir Erdoğan arka kapıdan kaçtı";
+          seedCluster(
+            SINGLETON,
+            2,
+            [
+              { id: "yusra-posta", sourceId: "src-posta", fp: "fp-yusra-posta", ageMs: 200 * MIN, title: YUSRA_TITLE },
+              // The cnn-turk member's own headline is unrelated: only the probe ties this cluster to the incoming title.
+              { id: "yusra-cnn-old", sourceId: "src-cnn-turk", fp: "fp-yusra-cnn", ageMs: 150 * MIN, title: "Alakasız bir başka konu" },
+            ],
+            { title: YUSRA_TITLE, inContext: false },
+          );
+          rpcFixtures.cluster_title_probe = () => ({
+            data: [
+              {
+                id: SINGLETON,
+                title_tr: YUSRA_TITLE,
+                title_tr_neutral: null,
+                first_published: ago(200 * MIN),
+                updated_at: ago(150 * MIN),
+                article_count: 2,
+              },
+            ],
+            error: null,
+          });
+          queueIncoming({ id: "yusra-cnn-new", sourceId: "src-cnn-turk", title: YUSRA_TITLE, msgId: 4315 });
+          scoreBy({ "fp-yusra-posta": 0.9, "fp-yusra-cnn": 0.5 });
+
+          const body = await drain();
+
+          expect(probeCalls()).toHaveLength(1);
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(skipLogRows()).toMatchObject([
+            { article_id: "yusra-cnn-new", cluster_id: SINGLETON, reason: "same-source-duplicate/exact-title" },
+          ]);
+        });
+      });
+
+      describe("(3) a low score (0.41, just over MATCH_THRESHOLD) needs the same evidence", () => {
+        // Both tests share one shape: a wire seed whose headline makes c1 a candidate and carries the 0.41,
+        // plus a src-outlet member (the one that blocks the join). Only that member's headline differs.
+        it("lane fired against the same source's member -> skipped", async () => {
+          seedCluster("c1", 2, [
+            { id: "c1-seed", sourceId: "src-wire", fp: "fp-c1s", ageMs: 90 * MIN },
+            { id: "c1-outlet", sourceId: "src-outlet", fp: "fp-c1o", ageMs: 60 * MIN },
+          ]);
+          queueIncoming({ sourceId: "src-outlet", title: HEADLINE_VARIANT });
+          scoreBy({ "fp-c1s": 0.41, "fp-c1o": 0.1 });
+
+          const body = await drain();
+
+          expect(scoredAgainst()).toContain("fp-c1s");
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(skipLogRows()).toMatchObject([{ cluster_id: "c1", reason: "same-source-duplicate/headline-lane" }]);
+          expect(skipLogRows()[0]?.score as number).toBeCloseTo(0.41, 5);
+        });
+
+        it("the same 0.41 with an unrelated same-source member headline -> created", async () => {
+          seedCluster("c1", 2, [
+            { id: "c1-seed", sourceId: "src-wire", fp: "fp-c1s", ageMs: 90 * MIN },
+            { id: "c1-outlet", sourceId: "src-outlet", fp: "fp-c1o", ageMs: 60 * MIN, title: "Alakasız bir başka konu" },
+          ]);
+          queueIncoming({ sourceId: "src-outlet", title: HEADLINE_VARIANT });
+          scoreBy({ "fp-c1s": 0.41, "fp-c1o": 0.1 });
+
+          const body = await drain();
+
+          expect(scoredAgainst()).toContain("fp-c1s");
+          expect(body.created).toBe(1);
+          expect(body.skipped).toBe(0);
+          expect(skipLogWrites()).toHaveLength(0);
+        });
+
+        it("the real aksam Seul pair (0.406) does not fire the lane (Jaccard 0.33, 7.25 h apart, lane window 6 h) -> created, as before #152", async () => {
+          // What production did on 2026-11-01 18:19: the pair scored 0.406 and the article was skipped. The
+          // headlines share 4 stems of 12 and sit 7.25 h apart, so neither the lane nor an equal title ties them:
+          // the article now opens its own cluster again. Skipping it would have needed a weaker rule than the
+          // evidence gate (which is what dropped Muhbir and Eller Yukarı).
+          expect(headlineLane(headlineTokens(SEUL_NEW_TITLE), headlineTokens(SEUL_AKSAM_TITLE), 7.25).fired).toBe(false);
+          seedCluster(
+            "c-seul",
+            2,
+            [
+              { id: "seul-ekonomim", sourceId: "src-wire", fp: "fp-seul-a", ageMs: 8 * 60 * MIN, title: "Cumhurbaşkanı Erdoğan, 8 yıl aranın ardından Güney Kore'ye gidecek" },
+              { id: "seul-aksam", sourceId: "src-outlet", fp: "fp-seul-b", ageMs: 7.25 * 60 * MIN, title: SEUL_AKSAM_TITLE },
+            ],
+            { title: SEUL_AKSAM_TITLE },
+          );
+          queueIncoming({ id: "seul-aksam-2", sourceId: "src-outlet", title: SEUL_NEW_TITLE, description: SEUL_NEW_DESC });
+          scoreBy({ "fp-seul-a": 0.3, "fp-seul-b": 0.406 });
+
+          const body = await drain();
+
+          expect(scoredAgainst()).toContain("fp-seul-b");
+          expect(body.created).toBe(1);
+          expect(body.skipped).toBe(0);
+          expect(skipLogWrites()).toHaveLength(0);
+        });
+      });
+
+      describe("(4) dry-run parity (admission shadow)", () => {
+        it("templated pair -> would_create, not skipped, nothing written", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          seedSuikast();
+          queueIncoming({ sourceId: "src-outlet", title: MUHBIR_TITLE, description: MUHBIR_DESC, category: "ekonomi", admit: "shadow" });
+          scoreBy({ "fp-cum": 0.856, "fp-cnn": 0.3 });
+
+          const body = await drain();
+
+          expect(scoredAgainst()).toContain("fp-cum");
+          expect(body.admission.would_create).toBe(1);
+          expect(body.skipped).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(linkedClusters()).toEqual([]);
+          expect(skipLogWrites()).toHaveLength(0);
+        });
+
+        it("headline-lane pair -> skipped, not would_create, and no skip-log write", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ sourceId: "src-outlet", title: HEADLINE_VARIANT, category: "ekonomi", admit: "shadow" });
+          scoreBy({ "fp-c1": 0.87 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.admission.would_create).toBe(0);
+          expect(body.admission.would_match).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(skipLogs()).toHaveLength(1);
+          expect(String(skipLogs()[0]?.[0])).toContain("dry-run");
+          expect(skipLogWrites()).toHaveLength(0);
+        });
+
+        it("identical headline in a dry run -> skipped, and no skip-log write", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: strictFingerprint(HEADLINE, "Detay") }]);
+          queueIncoming({ sourceId: "src-outlet", category: "ekonomi", admit: "shadow" });
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.admission.would_create).toBe(0);
+          expect(skipLogWrites()).toHaveLength(0);
+        });
+      });
+
+      describe("(5) the skip log", () => {
+        it("each live skip writes exactly one cluster_skip_log row, via upsert onConflict article_id / ignoreDuplicates", async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ id: "art-twin-1", msgId: 4331, sourceId: "src-outlet" });
+          queueIncoming({ id: "art-twin-2", msgId: 4332, sourceId: "src-outlet" });
+          scoreBy({ "fp-c1": 0.87 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(2);
+          const writes = skipLogWrites();
+          expect(writes).toHaveLength(2);
+          expect(writes.every((w) => w.op === "upsert")).toBe(true);
+          const rows = skipLogRows();
+          expect(rows.map((r) => r.article_id)).toEqual(["art-twin-1", "art-twin-2"]);
+          for (const r of rows) {
+            expect(Object.keys(r).sort()).toEqual(["article_id", "cluster_id", "reason", "score"]);
+            expect(r.cluster_id).toBe("c1");
+            expect(r.reason).toBe("same-source-duplicate/exact-title");
+            expect(r.score as number).toBeCloseTo(0.87, 5);
+          }
+          expect(skipLogFake.upsertOptions).toEqual([
+            { onConflict: "article_id", ignoreDuplicates: true },
+            { onConflict: "article_id", ignoreDuplicates: true },
+          ]);
+          expect(skipLogWarnings()).toHaveLength(0);
+        });
+
+        it("a failing log table: both messages are still skipped and archived, nothing fails, exactly one warning", async () => {
+          skipLogFake.mode = "error";
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ id: "art-twin-1", msgId: 4341, sourceId: "src-outlet" });
+          queueIncoming({ id: "art-twin-2", msgId: 4342, sourceId: "src-outlet" });
+          scoreBy({ "fp-c1": 0.87 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(2);
+          expect(body.failedTransient).toBe(0);
+          expect(body.created).toBe(0);
+          expect(pgmqState.archived).toEqual(expect.arrayContaining([4341, 4342]));
+          expect(skipLogWrites()).toHaveLength(2);
+          const warnings = skipLogWarnings();
+          expect(warnings).toHaveLength(1);
+          expect(String(warnings[0]?.[0])).toContain("skip log down");
+        });
+
+        it("a log table that throws behaves the same: skipped, archived, one warning", async () => {
+          skipLogFake.mode = "throw";
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ id: "art-twin-1", msgId: 4351, sourceId: "src-outlet" });
+          queueIncoming({ id: "art-twin-2", msgId: 4352, sourceId: "src-outlet" });
+          scoreBy({ "fp-c1": 0.87 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(2);
+          expect(body.failedTransient).toBe(0);
+          expect(pgmqState.archived).toEqual(expect.arrayContaining([4351, 4352]));
+          expect(skipLogWarnings()).toHaveLength(1);
+          expect(String(skipLogWarnings()[0]?.[0])).toContain("skip log unreachable");
+        });
+
+        it("a created article writes nothing to the log", async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ sourceId: "src-wire" });
+          scoreBy({ "fp-c1": 0.2 });
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(skipLogWrites()).toHaveLength(0);
+        });
       });
     });
   });
