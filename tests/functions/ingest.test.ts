@@ -4385,3 +4385,146 @@ describe("parse budget constants and env parsing [parse budget]", () => {
     expect(mod.positiveIntEnv("99999999999999999999", 40)).toBe(40);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Headline-less items (hunt-10 C-entity-only-titles). A feed item whose title
+// is only entity residue / punctuation ('&amp;nbsp', '-', '…') used to be
+// stored as a story: /cluster/46467982-... rendered "&amp;nbsp — Tayf" and was
+// indexable. normalizeItem now drops it; the cycle reports how many in the
+// summary line and the HTTP JSON (`contentlessTitlesDropped`) and logs one
+// count-only line per source. No ingest_cycles column.
+// ---------------------------------------------------------------------------
+describe("headline-less items are dropped and counted [hunt-10 C-entity-only-titles]", () => {
+  const SRC = {
+    id: "src-contentless",
+    name: "Boş Başlık Gazetesi",
+    slug: "bos-baslik",
+    url: "https://bos-baslik.example",
+    rss_url: "https://bos-baslik.example/rss.xml",
+  };
+  const REAL_URL = "https://bos-baslik.example/haber/gercek-1";
+  const JUNK_URL = "https://bos-baslik.example/advertorial/junk-1";
+  const REAL_TITLE = "Gerçek bir başlık";
+
+  function seed(feed: MockFeedItem[]): void {
+    fakeSources.push({
+      ...SRC,
+      active: true,
+      fetch_etag: null,
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 0,
+    });
+    fetcherItems[SRC.rss_url] = feed;
+  }
+
+  async function runLogged() {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Record<string, unknown>;
+      return { body, calls: logSpy.mock.calls.slice(), lines: logSpy.mock.calls.map((a) => a.join(" ")) };
+    } finally {
+      logSpy.mockRestore();
+    }
+  }
+
+  const upsertedUrls = () => articlesUpsertCalls.flat().map((r) => r.url);
+
+  it("drops the entity-only item, upserts only the real row, and reports contentlessTitlesDropped 1", async () => {
+    seed([
+      { title: "&amp;nbsp", link: JUNK_URL, pubDate: "Sun, 01 Nov 2026 09:00:00 GMT" },
+      { title: REAL_TITLE, link: REAL_URL, pubDate: "Sun, 01 Nov 2026 09:05:00 GMT" },
+    ]);
+
+    const { body } = await runLogged();
+
+    expect(body.contentlessTitlesDropped).toBe(1);
+    expect(body.itemsNormalized).toBe(1);
+    expect(upsertedUrls()).toEqual([REAL_URL]);
+    expect(articlesUpsertCalls.flat().map((r) => r.title)).toEqual([REAL_TITLE]);
+  });
+
+  it("totals the junk items of a feed: '&nbsp', '-', '…' and a whitespace-only title", async () => {
+    seed([
+      { title: "&nbsp", link: "https://bos-baslik.example/a", pubDate: "Sun, 01 Nov 2026 09:00:00 GMT" },
+      { title: "-", link: "https://bos-baslik.example/b", pubDate: "Sun, 01 Nov 2026 09:01:00 GMT" },
+      { title: "…", link: "https://bos-baslik.example/c", pubDate: "Sun, 01 Nov 2026 09:02:00 GMT" },
+      { title: "   ", link: "https://bos-baslik.example/d", pubDate: "Sun, 01 Nov 2026 09:03:00 GMT" },
+      { title: REAL_TITLE, link: REAL_URL, pubDate: "Sun, 01 Nov 2026 09:05:00 GMT" },
+    ]);
+
+    const { body } = await runLogged();
+
+    expect(body.contentlessTitlesDropped).toBe(4);
+    expect(upsertedUrls()).toEqual([REAL_URL]);
+  });
+
+  it("logs one count-only line for the source: slug and count, never a title or a url", async () => {
+    seed([
+      { title: "&amp;nbsp", link: JUNK_URL, pubDate: "Sun, 01 Nov 2026 09:00:00 GMT" },
+      { title: "-", link: "https://bos-baslik.example/advertorial/junk-2", pubDate: "Sun, 01 Nov 2026 09:01:00 GMT" },
+      { title: REAL_TITLE, link: REAL_URL, pubDate: "Sun, 01 Nov 2026 09:05:00 GMT" },
+    ]);
+
+    const { lines } = await runLogged();
+
+    expect(lines.filter((l) => l === "[ingest] bos-baslik: 2 item(s) dropped: no headline text")).toHaveLength(1);
+    expect(lines.filter((l) => l.includes("no headline text"))).toHaveLength(1);
+    for (const l of lines) {
+      expect(l).not.toContain("advertorial");
+      expect(l).not.toContain("junk-");
+      expect(l).not.toContain("&nbsp");
+      expect(l).not.toContain(REAL_TITLE);
+    }
+  });
+
+  it("puts the count in the '[ingest] cycle' summary line and not in an ingest_cycles column", async () => {
+    seed([
+      { title: "&amp;nbsp", link: JUNK_URL, pubDate: "Sun, 01 Nov 2026 09:00:00 GMT" },
+      { title: REAL_TITLE, link: REAL_URL, pubDate: "Sun, 01 Nov 2026 09:05:00 GMT" },
+    ]);
+
+    const { calls } = await runLogged();
+
+    const cycleCall = calls.find((args) => args[0] === "[ingest] cycle") as
+      | [string, string]
+      | undefined;
+    expect(cycleCall).toBeDefined();
+    const summary = JSON.parse(cycleCall?.[1] ?? "{}") as { contentlessTitlesDropped?: number };
+    expect(summary.contentlessTitlesDropped).toBe(1);
+    expect(ingestCycleInserts).toHaveLength(1);
+    const json = JSON.stringify(ingestCycleInserts);
+    expect(json).not.toContain("contentless");
+    expect(Object.keys(ingestCycleInserts[0] ?? {})).not.toContain("contentless_titles_dropped");
+  });
+
+  it("a normal feed reports 0 and logs no 'no headline text' line", async () => {
+    seed([
+      { title: REAL_TITLE, link: REAL_URL, pubDate: "Sun, 01 Nov 2026 09:05:00 GMT" },
+      { title: "AT&T hisseleri yükseldi", link: "https://bos-baslik.example/haber/att", pubDate: "Sun, 01 Nov 2026 09:06:00 GMT" },
+    ]);
+
+    const { body, lines } = await runLogged();
+
+    expect(body.contentlessTitlesDropped).toBe(0);
+    expect(upsertedUrls()).toHaveLength(2);
+    expect(lines.filter((l) => l.includes("no headline text"))).toEqual([]);
+  });
+
+  it("counts per cycle: a second cycle over the same junk feed reports its own count, not a running total", async () => {
+    seed([
+      { title: "&nbsp", link: JUNK_URL, pubDate: "Sun, 01 Nov 2026 09:00:00 GMT" },
+      { title: REAL_TITLE, link: REAL_URL, pubDate: "Sun, 01 Nov 2026 09:05:00 GMT" },
+    ]);
+
+    const first = await runLogged();
+    const second = await runLogged();
+
+    expect(first.body.contentlessTitlesDropped).toBe(1);
+    expect(second.body.contentlessTitlesDropped).toBe(1);
+  });
+});

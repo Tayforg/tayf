@@ -387,6 +387,11 @@ interface CycleStats {
   // costs a bounded amount of CPU (see MAX_KEPT_TITLES_PER_KEY). Not counted in
   // `twinsKeptDistinct`. Normally 0. Summary line and HTTP JSON only.
   twinsKeyCapped: number;
+  // `contentlessTitlesDropped`: items without headline text after decoding
+  // ('&nbsp', '&amp;nbsp', '-', '…', a blank title) that normalizeItem threw
+  // away instead of storing them as stories. Summary line and HTTP JSON only,
+  // no `ingest_cycles` column, like the twins counters. Normally 0.
+  contentlessTitlesDropped: number;
   // Parse budget: changed feeds this cycle refused a parse because the cycle
   // already used its MAX_PARSES_PER_CYCLE / PARSE_BUDGET_BYTES. Not failures:
   // they are retried first next cycle. Summary line and HTTP JSON only.
@@ -1145,6 +1150,7 @@ async function runCycle(): Promise<CycleStats> {
     twinsDropped: 0,
     twinsKeptDistinct: 0,
     twinsKeyCapped: 0,
+    contentlessTitlesDropped: 0,
     parseDeferred: 0,
     parseDeferredMaxStreak: 0,
     parsedBytes: 0,
@@ -1431,10 +1437,19 @@ async function runCycleBody(
       // push none. Only the freshness is new.
       const bootstrapUnchanged =
         bootstrap && !!result.bodyHash && result.bodyHash === source.fetch_body_hash;
+      // Per source, so the log line below names the feed that sent the junk.
+      const normalizeCounters = { contentlessTitles: 0 };
       const normalized = bootstrapUnchanged
         ? []
-        : normalizeArticles(source, result.items, sourceNowMs);
+        : normalizeArticles(source, result.items, sourceNowMs, normalizeCounters);
       stats.itemsNormalized += normalized.length;
+      if (normalizeCounters.contentlessTitles > 0) {
+        stats.contentlessTitlesDropped += normalizeCounters.contentlessTitles;
+        // Slug and count only: never a url or a headline.
+        console.log(
+          `[ingest] ${source.slug}: ${normalizeCounters.contentlessTitles} item(s) dropped: no headline text`,
+        );
+      }
 
       let pushed = 0;
       let intraFeedTwins = 0;

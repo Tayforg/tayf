@@ -158,7 +158,7 @@ describe("src/app/page.tsx: the search result live region", () => {
   });
 
   it("gives /?q= its own title from searchTitle and keeps the noindex,follow robots", () => {
-    expect(page).toMatch(/if \(q\) return \{ title: searchTitle\(q\), robots: \{ index: false, follow: true \} \};/);
+    expect(page).toMatch(/if \(q\) return \{ title: \{ absolute: `\$\{searchTitle\(q\)\} — Tayf` \}, robots: \{ index: false, follow: true \} \};/);
   });
 });
 

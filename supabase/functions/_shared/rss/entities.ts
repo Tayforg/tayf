@@ -220,3 +220,46 @@ export function repairEntityResidue(text: string): string {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// Headline-less text
+//
+// Prod served /cluster/46467982-... with <title>&amp;nbsp — Tayf</title>,
+// indexable: the feed double-encoded a non-breaking space AND dropped the
+// semicolon ("&amp;nbsp"), so after the ingest decode the stored title was the
+// literal '&nbsp'. `decodeResidualEntities` only decodes `&name;`, so that
+// residue survives every pass, and the predicate below has to recognise it
+// itself.
+// ---------------------------------------------------------------------------
+
+// A reference with or without its closing semicolon: `&name`, `&name;`, `&#N`,
+// `&#N;`, `&#xH`, `&#xH;`. Names and digit runs are length-bounded, so a hostile
+// 10k-character "&amp;&amp;..." cannot make the scan super-linear. The `g` flag
+// is for String#replace only (stateless); never call `.test` on this.
+const ENTITY_RESIDUE_RE =
+  /&(?:[a-zA-Z][a-zA-Z0-9]{1,31}|#\d{1,8}|#[xX][0-9a-fA-F]{1,6});?/g;
+
+// Hangul filler code points. They are Unicode LETTERS (category Lo), so the
+// letter test below would accept them, yet they render as blank: benguturk.com
+// /reklam/ items arrive with U+3164 as their whole title (14 rows in 45 days).
+const BLANK_FILLER_RE = /[\u115F\u1160\u3164\uFFA0]/g;
+
+/**
+ * True when `text` is not a headline: it is not a string, or it holds no letter
+ * or digit once entities are decoded. Covers the empty string, whitespace,
+ * `&nbsp` / `&nbsp;` / `&amp;nbsp` / `&#160;` in any nesting (with or without
+ * the semicolon), lone punctuation ('-', '—', '…', '...', '«»') and the blank
+ * Hangul fillers. A short real headline ('a', '2025', 'Gol!', 'R&D') is NOT
+ * contentless.
+ *
+ * A leftover `&name` with no semicolon is dropped before the test, so the
+ * "text" of '&Foo' is empty; that only matters when the whole title is such a
+ * token, which is never a real headline. Pure, never throws.
+ */
+export function isContentlessTitle(text: unknown): boolean {
+  if (typeof text !== "string") return true;
+  const rest = repairEntityResidue(text)
+    .replace(ENTITY_RESIDUE_RE, "")
+    .replace(BLANK_FILLER_RE, "");
+  return !/[\p{L}\p{N}]/u.test(rest);
+}

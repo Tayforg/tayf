@@ -73,7 +73,9 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { q: qRaw, page: pageRaw } = await searchParams;
   const q = firstQuery(qRaw);
-  if (q) return { title: searchTitle(q), robots: { index: false, follow: true } };
+  // title.absolute: the root layout's "%s — Tayf" template only applies to
+  // CHILD segments, never to this page in the layout's own segment.
+  if (q) return { title: { absolute: `${searchTitle(q)} — Tayf` }, robots: { index: false, follow: true } };
   const page = parseHomePage(pageRaw);
   if (page <= 1) return {};
   let rankedCount: number | null = null;

@@ -35,8 +35,10 @@ describe("home generateMetadata", () => {
   });
 
   it("marks every search noindex,follow with its own title and nothing else (canonical stays the layout's)", async () => {
+    // The root page sits in the root layout's own segment, so the layout's
+    // "%s — Tayf" template does not apply to it: the suffix is spelled out.
     const search = (title: string) => ({
-      title,
+      title: { absolute: `${title} — Tayf` },
       robots: { index: false, follow: true },
     });
     expect(await generateMetadata(sp({ q: "x" }))).toEqual(search("“x” araması"));
@@ -63,11 +65,11 @@ describe("home generateMetadata", () => {
 
   it("caps a very long q in the title at 60 code points and keeps markup as plain text", async () => {
     const long = await generateMetadata(sp({ q: "a".repeat(300) }));
-    expect(long.title).toBe(`“${"a".repeat(59)}…” araması`);
+    expect(long.title).toEqual({ absolute: `“${"a".repeat(59)}…” araması — Tayf` });
     expect(long.robots).toEqual({ index: false, follow: true });
 
     const markup = await generateMetadata(sp({ q: "<script>" }));
-    expect(markup.title).toBe("“<script>” araması");
+    expect(markup.title).toEqual({ absolute: "“<script>” araması — Tayf" });
   });
 
   it("gives a search no canonical or RSS alternate of its own, and a no-q page no title", async () => {

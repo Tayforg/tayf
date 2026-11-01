@@ -22,6 +22,7 @@ import { sha1, strictFingerprint } from "../cluster/fingerprint.ts";
 import {
   codePointToString,
   decodeResidualEntities,
+  isContentlessTitle,
   stripInvalidXmlChars,
 } from "./entities.ts";
 import {
@@ -41,6 +42,17 @@ export type NewsCategory =
   | "teknoloji"
   | "yasam"
   | "genel";
+
+/**
+ * Optional tally the caller passes to `normalizeItem` / `normalizeArticles`.
+ * `contentlessTitles` counts the items dropped because their title has no
+ * letter or digit after decoding (`isContentlessTitle`: '&nbsp', '&amp;nbsp',
+ * '-', '…', an empty or whitespace-only title). A BİK legal notice or an item
+ * with no link is dropped too but is NOT counted here.
+ */
+export interface NormalizeCounters {
+  contentlessTitles: number;
+}
 
 export interface NormalizedArticle {
   source_id: string;
@@ -515,17 +527,30 @@ function absolutiseUrl(rawLink: string, source: RssSource): string {
 /**
  * Normalise a single raw RSS item into the row shape expected by the
  * `articles` table. `content_hash` is computed via `strictFingerprint`
- * exclusively. Returns `null` if the item lacks a title or a link, or if it
- * is a BİK legal notice (`isLegalNotice`).
+ * exclusively. Returns `null` if the item lacks a link, has no headline text
+ * (see below), or is a BİK legal notice (`isLegalNotice`).
+ *
+ * "No headline text" = the raw title is empty or whitespace-only, or the
+ * decoded title holds no letter or digit (`isContentlessTitle`: '&nbsp',
+ * '&amp;nbsp', '-', '…'). Such an item used to be stored and surfaced as an
+ * indexable story titled '&amp;nbsp — Tayf'. When the item has a link and the
+ * caller passes `counters`, `counters.contentlessTitles` is incremented; an item
+ * without a link is dropped silently, as before. The check runs BEFORE the
+ * legal-notice check, so a notice is never counted as contentless.
  */
 export function normalizeItem(
   source: RssSource,
   item: RawFeedItem,
   nowMs: number = Date.now(),
+  counters?: NormalizeCounters,
 ): NormalizedArticle | null {
   const rawTitle = item.title?.trim() ?? "";
   const rawLink = item.link?.trim() ?? "";
-  if (!rawTitle || !rawLink) return null;
+  if (!rawLink) return null;
+  if (!rawTitle) {
+    if (counters) counters.contentlessTitles++;
+    return null;
+  }
 
   // Titles are short plain text; decode entities then strip any (possibly
   // reintroduced or nested) markup to a fixpoint, then one bounded residue
@@ -534,6 +559,12 @@ export function normalizeItem(
   const title = stripInvalidXmlChars(
     decodeResidualEntities(stripTags(decodeEntities(rawTitle))),
   ).trim();
+  // A title that decodes to nothing readable ('&nbsp', '-', '…') is not a
+  // headline. Before the legal-notice check: a notice is not counted here.
+  if (isContentlessTitle(title)) {
+    if (counters) counters.contentlessTitles++;
+    return null;
+  }
   const absoluteUrl = absolutiseUrl(rawLink, source);
 
   // ingest-hygiene: BİK court / official notices are not news.
@@ -576,7 +607,9 @@ export function normalizeItem(
 
 /**
  * Normalise an array of raw items, dropping any that fail the title/link
- * filter. Order preserved.
+ * filter. Order preserved. `counters`, when given, is forwarded to every
+ * `normalizeItem` call and totals the headline-less items of the batch
+ * (`contentlessTitles`); omitting it behaves exactly as before.
  *
  * One item that throws (a malformed field the decoders did not anticipate)
  * must not take the rest of the source's items down with it: it is skipped on
@@ -588,13 +621,14 @@ export function normalizeArticles(
   source: RssSource,
   items: RawFeedItem[],
   nowMs: number = Date.now(),
+  counters?: NormalizeCounters,
 ): NormalizedArticle[] {
   const out: NormalizedArticle[] = [];
   let skipped = 0;
   let firstMessage = "";
   for (const item of items) {
     try {
-      const row = normalizeItem(source, item, nowMs);
+      const row = normalizeItem(source, item, nowMs, counters);
       if (row) out.push(row);
     } catch (err) {
       if (skipped === 0) {

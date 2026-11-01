@@ -374,3 +374,256 @@ describe("GET /api/cron/fact-checks", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// h10-silent-3: a failing feed used to be recorded as {status: "error"} in the
+// response and nowhere else, so a broken publisher went unnoticed. Every
+// failing feed now logs ONE console.error line with a stable prefix and one
+// Sentry event (grouped by message), carrying only the publisher key and a
+// short single-line reason. Bodies, headers and URLs never reach either sink.
+// The response shape is unchanged.
+// ---------------------------------------------------------------------------
+describe("feed failure reporting (h10-silent-3)", () => {
+  const PREFIX = "[fact-checks-cron] feed failed";
+  const SECRET = "SECRET-BODY-MARKER";
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  function urlOf(input: RequestInfo | URL): string {
+    return typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  }
+
+  function hostOf(url: string): string {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return "";
+    }
+  }
+
+  /** Route each feed through `behaviour`; unlisted publishers answer with an empty, valid feed. */
+  function routeFeeds(
+    behaviour: Partial<Record<"teyit" | "dogrulukpayi" | "malumatfurus", (url: string) => Response | Promise<Response>>>,
+  ) {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = urlOf(input);
+      const host = hostOf(url);
+      const key = host.endsWith("teyit.org")
+        ? "teyit"
+        : host.endsWith("dogrulukpayi.com")
+          ? "dogrulukpayi"
+          : host.endsWith("malumatfurus.org")
+            ? "malumatfurus"
+            : null;
+      const handler = key ? behaviour[key] : undefined;
+      return handler ? handler(url) : xmlResponse(EMPTY_TEYIT_XML, { url });
+    });
+  }
+
+  async function runCron() {
+    const { GET } = await importRoute();
+    const res = await GET(
+      new Request("http://example.com/api/cron/fact-checks", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    return { res, body: await res.json() };
+  }
+
+  const feedFailedCalls = () => errorSpy.mock.calls.filter((c) => c[0] === PREFIX);
+
+  it("a feed answering 500 logs once with the publisher key and 'http 500', and reports it to Sentry", async () => {
+    routeFeeds({ teyit: (url) => xmlResponse(SECRET, { status: 500, url }) });
+
+    const { res, body } = await runCron();
+
+    expect(res.status).toBe(200);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(PREFIX, "teyit", "http 500");
+
+    expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+    const [captured, context] = captureServerExceptionMock.mock.calls[0]!;
+    expect(captured).toBeInstanceOf(Error);
+    expect((captured as Error).message).toContain("teyit");
+    expect((captured as Error).message).toContain("http 500");
+    expect(context).toEqual({ publisher: "teyit" });
+
+    // The body is never logged or reported.
+    const sinks = JSON.stringify([
+      errorSpy.mock.calls.map((c) => c.map(String)),
+      captureServerExceptionMock.mock.calls.map(([e, c]) => [String(e), (e as Error).message, (e as Error).stack, c]),
+    ]);
+    expect(sinks).not.toContain(SECRET);
+
+    // The response keeps its shape.
+    expect(body.success).toBe(true);
+    expect(body.feeds.teyit).toEqual({ status: "error", items: 0, error: "http 500" });
+    expect(body.feeds.dogrulukpayi).toEqual({ status: "ok", items: 0 });
+    expect(body.feeds.malumatfurus).toEqual({ status: "ok", items: 0 });
+    expect(Object.keys(body).sort()).toEqual(
+      ["feeds", "matched", "published", "shadow", "success", "timestamp", "upserted"].sort(),
+    );
+    expect(body.upserted).toBe(0);
+  });
+
+  it("a rejecting fetch with a long multi-line message logs a single line of at most 200 characters", async () => {
+    const head = "line one\n\tline two\r\n";
+    const original = head + "x".repeat(500 - head.length);
+    expect(original).toHaveLength(500);
+    routeFeeds({
+      teyit: () => {
+        throw new Error(original);
+      },
+    });
+
+    const { body } = await runCron();
+
+    expect(feedFailedCalls()).toHaveLength(1);
+    const [, key, message] = feedFailedCalls()[0]! as [string, string, string];
+    expect(key).toBe("teyit");
+    expect(message).not.toMatch(/[\r\n\t]/);
+    expect(message.length).toBeLessThanOrEqual(200);
+    expect(message.startsWith("line one line two xxx")).toBe(true);
+
+    const [captured] = captureServerExceptionMock.mock.calls[0]!;
+    expect((captured as Error).message).not.toMatch(/[\r\n\t]/);
+    expect((captured as Error).message).toContain("teyit");
+    // fact-check feed failed: teyit: <= 200 chars of reason
+    expect((captured as Error).message.length).toBeLessThanOrEqual("fact-check feed failed: teyit: ".length + 200);
+
+    // The response is untouched: it still carries the full, original reason.
+    expect(body.feeds.teyit).toEqual({ status: "error", items: 0, error: original });
+  });
+
+  it("a redirect to a foreign host logs once", async () => {
+    routeFeeds({ teyit: () => xmlResponse(EMPTY_TEYIT_XML, { url: "https://evil.example.com/feed" }) });
+
+    const { body } = await runCron();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(PREFIX, "teyit", "host mismatch after redirect");
+    expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+    expect(captureServerExceptionMock.mock.calls[0]![1]).toEqual({ publisher: "teyit" });
+    // The foreign URL is not logged.
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain("evil.example.com");
+    expect(body.feeds.teyit).toEqual({ status: "error", items: 0, error: "host mismatch after redirect" });
+  });
+
+  it("an oversized response logs once and never logs the payload", async () => {
+    routeFeeds({ dogrulukpayi: (url) => xmlResponse(`${SECRET}${"x".repeat(2_000_001)}`, { url }) });
+
+    const { body } = await runCron();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith(PREFIX, "dogrulukpayi", "response too large");
+    expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+    expect(captureServerExceptionMock.mock.calls[0]![1]).toEqual({ publisher: "dogrulukpayi" });
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(SECRET);
+    expect(body.feeds.dogrulukpayi).toEqual({ status: "error", items: 0, error: "response too large" });
+  });
+
+  it("an unparseable feed logs once without echoing its body", async () => {
+    routeFeeds({ malumatfurus: (url) => xmlResponse(`${SECRET} <not-xml`, { url }) });
+
+    const { body } = await runCron();
+
+    expect(feedFailedCalls()).toHaveLength(1);
+    expect(feedFailedCalls()[0]![1]).toBe("malumatfurus");
+    expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+    expect(captureServerExceptionMock.mock.calls[0]![1]).toEqual({ publisher: "malumatfurus" });
+    expect(body.feeds.malumatfurus.status).toBe("error");
+    expect(body.success).toBe(true);
+  });
+
+  it("reports once per failing feed per run (three failing feeds, three reports)", async () => {
+    routeFeeds({
+      teyit: (url) => xmlResponse("", { status: 503, url }),
+      dogrulukpayi: (url) => xmlResponse("", { status: 404, url }),
+      malumatfurus: (url) => xmlResponse("", { status: 500, url }),
+    });
+
+    const { body } = await runCron();
+
+    expect(feedFailedCalls().map((c) => [c[1], c[2]])).toEqual([
+      ["teyit", "http 503"],
+      ["dogrulukpayi", "http 404"],
+      ["malumatfurus", "http 500"],
+    ]);
+    expect(captureServerExceptionMock.mock.calls.map((c) => c[1])).toEqual([
+      { publisher: "teyit" },
+      { publisher: "dogrulukpayi" },
+      { publisher: "malumatfurus" },
+    ]);
+    expect(Object.values(body.feeds).every((f) => (f as { status: string }).status === "error")).toBe(true);
+  });
+
+  it("when every feed is fine nothing is logged and nothing is captured", async () => {
+    const { body } = await runCron();
+
+    expect(body.success).toBe(true);
+    expect(Object.values(body.feeds).every((f) => (f as { status: string }).status === "ok")).toBe(true);
+    expect(feedFailedCalls()).toHaveLength(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(captureServerExceptionMock).not.toHaveBeenCalled();
+  });
+
+  describe("rejected branch (fetchFeed itself throws)", () => {
+    // fetchFeed catches its own errors, so the `rejected` branch of the
+    // settled loop is only reachable if its catch handler throws. A publisher
+    // whose `key` getter throws on the first read does exactly that (the read
+    // in the catch), then behaves from the second read on (the settled loop).
+    async function runWithThrowingKey(thrown: unknown) {
+      let reads = 0;
+      const publisher = {
+        get key() {
+          reads++;
+          if (reads === 1) throw thrown;
+          return "teyit" as const;
+        },
+        label: "Teyit",
+        hosts: ["teyit.org"],
+        feedUrl: "https://teyit.org/feed",
+      };
+      vi.doMock("@/lib/fact-checks/feeds", async (importOriginal) => ({
+        ...(await importOriginal<typeof import("@/lib/fact-checks/feeds")>()),
+        FACT_CHECK_FEEDS: [publisher],
+      }));
+      // The first read (inside the catch) happens only after the fetch failed.
+      fetchMock.mockImplementation(async () => {
+        throw new Error("network down");
+      });
+      try {
+        return await runCron();
+      } finally {
+        vi.doUnmock("@/lib/fact-checks/feeds");
+      }
+    }
+
+    it("logs and captures a rejection that is an Error, with its single-line message", async () => {
+      const { res, body } = await runWithThrowingKey(new Error("boom\nsecond line"));
+
+      expect(res.status).toBe(200);
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith(PREFIX, "teyit", "boom second line");
+      expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+      expect(captureServerExceptionMock.mock.calls[0]![1]).toEqual({ publisher: "teyit" });
+      expect(body.feeds.teyit).toEqual({ status: "error", items: 0, error: "boom\nsecond line" });
+    });
+
+    it("logs the fallback reason for a non-Error rejection", async () => {
+      const { body } = await runWithThrowingKey("plain string");
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith(PREFIX, "teyit", "rejected");
+      expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
+      expect(body.feeds.teyit).toEqual({ status: "error", items: 0, error: "rejected" });
+    });
+  });
+});

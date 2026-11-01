@@ -97,10 +97,12 @@ describe("BookmarkButton usages", () => {
     expect(missing).toEqual([]);
   });
 
-  it("feeds the cluster page chip the h1 title", () => {
+  it("feeds the cluster page chip the h1 title, and null (generic label) for a headline-less cluster", () => {
     const page = usages.find((u) => u.file.endsWith("cluster/[id]/page.tsx"));
     expect(page).toBeDefined();
-    expect(page!.tag).toContain("storyTitle={cluster.title_tr}");
+    // Gated on the same `hasHeadline` as the h1 (hunt-10): a stored title with
+    // no letter or digit ('&nbsp') must never reach the accessible name or /saved.
+    expect(page!.tag).toMatch(/storyTitle=\{\s*hasHeadline \? cluster\.title_tr : null\s*\}/);
   });
 });
 

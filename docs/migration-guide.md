@@ -2843,3 +2843,74 @@ select count(*) from supabase_migrations.schema_migrations where version = '126'
 The next cron tick (within 10 minutes) must return 0 changes when nothing else moved. Known limit: title overlap cannot tell two events with the same wording, for example "Emine Erdoğan'dan 29 Ekim mesajı" against "Cumhurbaşkanı Erdoğan'dan 29 Ekim mesajı", or two "Tugay'ı kabul etti" meetings with different ministers; those withdraw a genuine badge (never invent one).
 
 **Rollback** (nothing else depends on 126): re-apply the `create or replace function` block of `071_blindspot_recall_veto.sql` (function, comment, revoke, grant; skip its cron and backfill sections), then `select public.blindspot_recall_veto_refresh(interval '7 days');` so sibling vetoes clear (071's function does not write the reason, so stale reasons stay on cleared rows; `update public.clusters set blindspot_veto_reason = null where not blindspot_recall_veto and blindspot_veto_reason is not null;` tidies them, optional because nothing reads the column). The column may stay (nullable, unread). To drop it as well, after the function is back: `alter table public.clusters drop constraint if exists clusters_blindspot_veto_reason_check, drop column if exists blindspot_veto_reason;`. Remove ledger row 126: `delete from supabase_migrations.schema_migrations where version = '126';`.
+
+## 132 — Eski kör nokta bayrakları (legacy bias range tools): APPLY 132 only, no deploy; operator runs the script, dry run first
+
+**Why:** 034 re-derived `clusters.bias_distribution` for the last 48 hours only, so every older cluster still counts aggregator and niche votes, and 032 derived the public "Kör nokta" flag from that. Cluster pages contradict themselves ("Spektrum 5 kaynaktan oluşturuldu" next to "spektruma sayılmaz"; e.g. `/cluster/861b4249-f553-41b7-be98-45544008b1bc`). Measured read-only on 2026-11-01 for `updated_at < 2026-09-05`: 182,778 clusters, 66,494 store a distribution that differs from their voting members' (57,278 of them go to all zeros; 9,368 have `article_count >= 2`), 444 are flagged, 330 of those store a wrong distribution and **215 fail the rule** (at least 5 voting articles, dominant zone at least 0.8). A plain `recompute_blindspot_flags()` would also newly flag 153 older clusters that were never recall-checked, so the tools only ever *clear*.
+
+**What 132 does** (additive, safe to re-apply, one transaction, starts with `set local lock_timeout = '5s'`): three `service_role`-only functions, no table, no index, no cron, **no backfill** (applying the file writes nothing but the ledger row):
+
+- `legacy_bias_voter_dists(p_from, p_to)` read-only: stored vs voter-derived distribution and whether it passes the rule, per cluster with `updated_at` in `[p_from, least(p_to, p_from + 31 days))`.
+- `recompute_bias_distribution_range(p_from, p_to, p_dry_run default true)` returns `(scanned, would_change, changed)`; with `p_dry_run => false` it sets `bias_distribution` where it differs.
+- `clear_false_blindspots_range(p_from, p_to, p_dry_run default true)` returns `(would_clear, would_newly_flag, cleared)`; with `p_dry_run => false` it sets `is_blindspot = false, blindspot_side = null` where the flag is set and the rule fails.
+
+They never write `updated_at` (home feed order, `/api/health`), never set a flag and never touch the recall-veto columns. A NULL or inverted window raises `22023`; a second 132 call at the same time gets `55P03`.
+
+**Order:** apply 132 (`supabase db push`, or run the file), no deploy. Nothing changes until the operator runs the script. Needs `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env.local` or the shell (https only; the key is never printed).
+
+**Run (operator):**
+
+1. **Dry run** (the default; every request sends `p_dry_run: true`). `min(updated_at)` of `clusters` is 2009-01-08 because of 183 stray rows older than 2026-04-01 (22 would change, none would clear); the script allows at most 200 windows, so start where the live range starts:
+
+   ```bash
+   node scripts/recompute-legacy-bias.mjs --from 2026-04-01 --to 2026-09-05
+   ```
+
+   It prints `DRY RUN: nothing is written. Re-run with --apply to write.`, one line per 7-day window and a `TOTAL` line. Compare the total with the 132 header (STEP 0 d)): as of 2026-11-01 `scanned=182595 would_change=66472 changed=0 | would_clear=215 would_newly_flag=153 cleared=0` (the header's totals include the 183 stray rows; a later merge or link re-stamps `updated_at` and moves a cluster out of the range, so the numbers can only fall). The first pass reads cold pages (3 to 5 s for the busiest windows, 0.5 s warm), so expect a few minutes. If a window stops with `57014` (the 8 s PostgREST limit), the script prints the command to resume with `--days 1`; with `55P03` wait a minute and rerun. Every window is idempotent.
+
+2. **Snapshot the rows that will change**, per month, with a read-only `\copy` (psql against the database, not the SQL editor). Windows are 31 days at most, so April to August are one month each:
+
+   ```sql
+   \copy (select c.id, c.bias_distribution, c.is_blindspot, c.blindspot_side, c.updated_at from public.legacy_bias_voter_dists('2026-04-01', '2026-05-01') d join public.clusters c on c.id = d.cluster_id where c.bias_distribution is distinct from d.dist or (c.is_blindspot and not d.rule_ok)) to 'legacy-bias-2026-04.csv' csv header
+   ```
+
+   Repeat for `2026-05-01..2026-06-01`, `06-01..07-01`, `07-01..08-01`, `08-01..09-01` and `09-01..09-05` (change the dates and the file name). Keep the CSVs.
+
+3. **Apply**, in a quiet window (after the dry run, which warmed the pages):
+
+   ```bash
+   node scripts/recompute-legacy-bias.mjs --from 2026-04-01 --to 2026-09-05 --apply
+   ```
+
+   Per window it recomputes first, then clears. The line shows `changed=` and `cleared=` equal to `would_change=` and `would_clear=` (lower by a few only if the live consumer re-stamped a cluster during the call; the recheck skips such a row, which is the point).
+
+4. **Verify** by re-running the dry run of step 1: every `would_change` and `would_clear` must be 0 (`would_newly_flag` stays 153: they are not repaired). Then a dry run over the live range, `node scripts/recompute-legacy-bias.mjs --from 2026-09-05 --to <tomorrow, YYYY-MM-DD>`: `would_clear` 0 and `would_change` 0 (2 of 42,605 clusters from October differed by one late vote on 2026-11-01, unrelated to this tool; investigate if it grows). Read-only spot check of the motivating cluster:
+
+   ```sql
+   select is_blindspot, blindspot_side, bias_distribution from public.clusters where id = '861b4249-f553-41b7-be98-45544008b1bc';  -- expect f, null, the voters only
+   ```
+
+5. **The 153 clusters that would newly flag** are for the founder to decide, never flagged by the tools (they were never recall-checked by 071/126). Read-only list, per month as in step 2:
+
+   ```sql
+   select c.id, c.title_tr, c.updated_at, c.article_count, c.blindspot_recall_veto, c.blindspot_veto_reason, d.dist
+     from public.legacy_bias_voter_dists('2026-04-01', '2026-05-01') d
+     join public.clusters c on c.id = d.cluster_id
+    where not d.is_blindspot and d.rule_ok
+    order by c.updated_at desc;
+   ```
+
+   Flagging one is a founder action (`update public.clusters set is_blindspot = true, blindspot_side = ...`) after `blindspot_recall_veto_refresh` has looked at it; this runbook does not do it.
+
+**Expected effects:** the "Kör nokta" badge goes from 215 old clusters; the bias bars of about 66k old clusters stop counting aggregator and niche votes (the 9,368 with `article_count >= 2` are the visible ones); closed `/hafta` weeks for April to September shift slightly; cached pages refresh on their normal `cacheLife` (the tools revalidate nothing). Known limit: `blindspot_side` of a flag that stays is not recomputed (about 21 of the 229 surviving flags store a side that is not the top category of the voters).
+
+**Rollback:** the functions: `drop function if exists public.recompute_bias_distribution_range(timestamptz, timestamptz, boolean); drop function if exists public.clear_false_blindspots_range(timestamptz, timestamptz, boolean); drop function if exists public.legacy_bias_voter_dists(timestamptz, timestamptz); delete from supabase_migrations.schema_migrations where version = '132';`. The **data** written by `--apply` is restored only from the CSV snapshots of step 2, per file, and only for clusters nobody re-stamped since:
+
+```sql
+create temp table snap (id uuid, bias_distribution jsonb, is_blindspot boolean, blindspot_side text, updated_at timestamptz);
+\copy snap from 'legacy-bias-2026-04.csv' csv header
+update public.clusters c
+   set bias_distribution = s.bias_distribution, is_blindspot = s.is_blindspot, blindspot_side = s.blindspot_side
+  from snap s
+ where c.id = s.id and c.updated_at = s.updated_at;
+```

@@ -1268,3 +1268,249 @@ describe("site-wide tinted text keeps AA contrast (WCAG 1.4.3, wave X)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Seventh guard (h10-a11y-3, WCAG 1.4.11 form-control boundary): the border of
+// a text field, select or outline button is a user-interface component
+// boundary and needs 3:1 against the surface it sits on. `--input` was
+// oklch(1 0 0 / 12%) in dark mode (about 1.4:1 on the dark card) and
+// oklch(0.90 0.008 80) in light mode (about 1.3:1 on the white card): both
+// failed, so the correction and newsletter fields were nearly invisible.
+//
+// TRAP, and why there are two tokens now: `--input` is ALSO the FILL token
+// (`dark:bg-input/30`, `dark:hover:bg-input/50`, `dark:disabled:bg-input/80`,
+// `disabled:bg-input/50`) and the outline button's `dark:border-input`.
+// Raising `--input` alone would lighten every fill and drop the dark
+// `placeholder:text-muted-foreground` (oklch(0.62 0.01 70)) below 4.5:1 on the
+// field fill (4.7 today). So `--input-subtle` keeps the OLD values and is what
+// every fill, plus the outline-button border, uses (pixel-identical to
+// before); `--input` is the 3:1 border and nothing else. The tests below pin
+// all of that: the border ratio, the frozen subtle values, the Tailwind
+// utility, the absence of any `bg-input` fill under src/, and the placeholder
+// margin on the unchanged fill.
+// ---------------------------------------------------------------------------
+
+type Theme = "light" | "dark";
+
+/**
+ * Raw value of `--name` in the `:root` (light) or `.dark` block of `css`.
+ * The lookbehind keeps `--input` from matching inside `--input-subtle` (the
+ * trailing colon already does) or `--color-input`; the value runs to the `;`.
+ */
+function rawToken(css: string, theme: Theme, name: string): string {
+  const block = (theme === "dark" ? /^\.dark\s*\{([^}]*)\}/m : /^:root\s*\{([^}]*)\}/m).exec(css);
+  if (!block) throw new Error(`${theme === "dark" ? ".dark" : ":root"} block not found in src/app/globals.css`);
+  const m = new RegExp(`(?<![\\w-])--${name}:\\s*([^;]+);`).exec(block[1]!);
+  if (!m) throw new Error(`--${name} not found in the ${theme === "dark" ? ".dark" : ":root"} block`);
+  return m[1]!.trim();
+}
+
+/**
+ * `oklch(L C H)` or `oklch(L C H / A)` (A as a percentage or 0..1) composited
+ * over `background`, in gamma-encoded sRGB like the browser. An opaque value
+ * comes back exactly as oklchToSrgb returns it. Anything else throws.
+ */
+function oklchOver(value: string, background: Rgb): Rgb {
+  const m = /^oklch\(\s*([\d.]+)(%?)\s+([\d.]+|none)\s+([\d.]+|none)(?:\s*\/\s*([\d.]+)(%?))?\s*\)$/.exec(value.trim());
+  if (!m) throw new Error(`not an oklch() colour: ${value}`);
+  const alpha = m[5] === undefined ? 1 : Number(m[5]) / (m[6] === "%" ? 100 : 1);
+  if (!(alpha >= 0 && alpha <= 1)) throw new Error(`alpha out of range in: ${value}`);
+  const colour = oklchToSrgb(`oklch(${m[1]}${m[2]} ${m[3]} ${m[4]})`);
+  return alpha === 1 ? colour : composite(colour, background, alpha);
+}
+
+/** Custom property `name` of `theme`, alpha-aware, composited over that theme's `surface` token. */
+function tokenOver(theme: Theme, name: string, surface: "card" | "background"): Rgb {
+  const surfaceColour = theme === "dark" ? darkToken(surface) : lightToken(surface);
+  return oklchOver(rawToken(GLOBALS_CSS, theme, name), surfaceColour);
+}
+
+describe("form-control boundary contrast (WCAG 1.4.11, h10-a11y-3)", () => {
+  const sourceFiles = walkSource(SRC_DIR).sort();
+  const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
+  const themes: readonly Theme[] = ["light", "dark"];
+  const surfaces = ["card", "background"] as const;
+
+  // Any `bg-input` fill, with or without variants or an opacity suffix.
+  // `bg-input-subtle` is the fill token; the lookahead rejects it.
+  const BG_INPUT = /(?<![\w-])(?:[a-z0-9-]+:)*bg-input(?:\/\d+)?(?![\w-])/g;
+
+  describe("alpha-aware token reader", () => {
+    it("composites oklch(L C H / A%) over a background (12 % white over black is 0.12 grey)", () => {
+      const out = oklchOver("oklch(1 0 0 / 12%)", BLACK);
+      for (const channel of out) expect(channel).toBeCloseTo(0.12, 3);
+    });
+
+    it("reads the alpha as a fraction as well as a percentage", () => {
+      expect(oklchOver("oklch(1 0 0 / 0.12)", BLACK)).toEqual(oklchOver("oklch(1 0 0 / 12%)", BLACK));
+      expect(oklchOver("oklch(0.5 0.01 60/50%)", WHITE)).toEqual(oklchOver("oklch(0.5 0.01 60 / 0.5)", WHITE));
+    });
+
+    it("returns an opaque value exactly as oklchToSrgb does, whatever sits behind it", () => {
+      expect(oklchOver("oklch(0.9 0.008 80)", BLACK)).toEqual(oklchToSrgb("oklch(0.9 0.008 80)"));
+      expect(oklchOver("oklch(0.9 0.008 80)", WHITE)).toEqual(oklchToSrgb("oklch(0.9 0.008 80)"));
+      expect(oklchOver("oklch(0.9 0.008 80 / 100%)", BLACK)).toEqual(oklchToSrgb("oklch(0.9 0.008 80)"));
+    });
+
+    it("throws on a malformed or non-oklch value", () => {
+      for (const bad of ["#fff", "oklch(1 0)", "oklch(1 0 0 /)", "oklch(1 0 0 / 150%)", "oklch(abc 0 0)", "var(--x)", ""]) {
+        expect(() => oklchOver(bad, BLACK), bad).toThrow();
+      }
+    });
+
+    it("does not let --input match inside --input-subtle (either order) or --color-input", () => {
+      const subtleFirst = ".dark {\n  --input-subtle: oklch(1 0 0 / 12%);\n  --input: oklch(0.5 0.01 60);\n}";
+      const subtleLast = ".dark {\n  --input: oklch(0.5 0.01 60);\n  --input-subtle: oklch(1 0 0 / 12%);\n}";
+      expect(rawToken(subtleFirst, "dark", "input")).toBe("oklch(0.5 0.01 60)");
+      expect(rawToken(subtleLast, "dark", "input")).toBe("oklch(0.5 0.01 60)");
+      expect(rawToken(subtleFirst, "dark", "input-subtle")).toBe("oklch(1 0 0 / 12%)");
+      expect(() => rawToken(".dark {\n  --input-subtle: oklch(1 0 0 / 12%);\n}", "dark", "input")).toThrow();
+      expect(() => rawToken(":root {\n  --color-input: oklch(1 0 0);\n}", "light", "input")).toThrow();
+    });
+
+    it("reads each theme from its own block", () => {
+      const css = ":root {\n  --input: oklch(0.65 0.008 80);\n}\n.dark {\n  --input: oklch(0.5 0.01 60);\n}";
+      expect(rawToken(css, "light", "input")).toBe("oklch(0.65 0.008 80)");
+      expect(rawToken(css, "dark", "input")).toBe("oklch(0.5 0.01 60)");
+      expect(() => rawToken("a { color: red; }", "dark", "input")).toThrow();
+      expect(() => rawToken("a { color: red; }", "light", "input")).toThrow();
+    });
+
+    it("reads the real tokens over the card and the background", () => {
+      expect(tokenOver("dark", "card", "card")).toEqual(darkToken("card"));
+      expect(tokenOver("light", "background", "background")).toEqual(lightToken("background"));
+      expect(() => tokenOver("dark", "no-such-token", "card")).toThrow();
+    });
+  });
+
+  describe("--input is a 3:1 boundary (the border token)", () => {
+    for (const theme of themes) {
+      for (const surface of surfaces) {
+        it(`${theme} --input on the ${theme} ${surface} is at least 3:1`, () => {
+          const surfaceColour = theme === "dark" ? darkToken(surface) : lightToken(surface);
+          const ratio = contrastRatio(tokenOver(theme, "input", surface), surfaceColour);
+          expect(
+            ratio,
+            `${theme} --input over the ${theme} ${surface} is ${ratio.toFixed(2)}:1; form-control borders need 3:1 (WCAG 1.4.11)`,
+          ).toBeGreaterThanOrEqual(3);
+        });
+      }
+    }
+  });
+
+  describe("--input-subtle keeps the pre-fix values (fills and the outline button border)", () => {
+    const globals = GLOBALS_CSS;
+
+    it("pins light to oklch(0.90 0.008 80) and dark to oklch(1 0 0 / 12%)", () => {
+      expect(rawToken(globals, "light", "input-subtle")).toBe("oklch(0.90 0.008 80)");
+      expect(rawToken(globals, "dark", "input-subtle")).toBe("oklch(1 0 0 / 12%)");
+    });
+
+    it("is exposed to Tailwind as --color-input-subtle in the @theme block", () => {
+      const theme = /^@theme inline\s*\{([^}]*)\}/m.exec(globals);
+      expect(theme, "@theme inline block not found").not.toBeNull();
+      expect(theme![1]).toContain("--color-input-subtle: var(--input-subtle);");
+      expect(theme![1]).toContain("--color-input: var(--input);");
+    });
+  });
+
+  describe("no component fills a field with the border token", () => {
+    it("scans the ui primitives (not vacuous)", () => {
+      const rel = sourceFiles.map(repoPath);
+      for (const file of ["src/components/ui/input.tsx", "src/components/ui/select.tsx", "src/components/ui/button.tsx"]) {
+        expect(rel).toContain(file);
+      }
+    });
+
+    it("finds no bg-input fill (any variant, any opacity) in non-test .ts/.tsx under src/", () => {
+      const offenders = sourceFiles.flatMap((file) =>
+        blankComments(readFileSync(file, "utf8"))
+          .split("\n")
+          .flatMap((line, i) => [...line.matchAll(BG_INPUT)].map((m) => `${repoPath(file)}:${i + 1}  ${m[0]}`)),
+      );
+      expect(
+        offenders,
+        `bg-input is the 3:1 border colour now; fill with bg-input-subtle (same value as before):\n${offenders.join("\n")}`,
+      ).toEqual([]);
+    });
+
+    it("flags the fill forms and lets the subtle token and border utilities through", () => {
+      for (const bad of [
+        "bg-input",
+        "bg-input/30",
+        "dark:bg-input/30",
+        "dark:hover:bg-input/50",
+        "dark:disabled:bg-input/80",
+        "disabled:bg-input/50",
+        'className="x bg-input"',
+      ]) {
+        expect(bad.match(BG_INPUT), bad).not.toBeNull();
+      }
+      for (const ok of [
+        "bg-input-subtle",
+        "bg-input-subtle/30",
+        "dark:hover:bg-input-subtle/50",
+        "border-input",
+        "dark:border-input",
+        "bg-inputs",
+        "xbg-input",
+        "text-bg-input",
+      ]) {
+        expect(ok.match(BG_INPUT), ok).toBeNull();
+      }
+    });
+
+    it("uses bg-input-subtle/30 for the dark fill of input, select and the outline button", () => {
+      for (const file of ["src/components/ui/input.tsx", "src/components/ui/select.tsx", "src/components/ui/button.tsx"]) {
+        expect(read(file), file).toContain("dark:bg-input-subtle/30");
+      }
+    });
+
+    it("keeps the other fill states on the subtle token too", () => {
+      expect(read("src/components/ui/input.tsx")).toContain("disabled:bg-input-subtle/50");
+      expect(read("src/components/ui/input.tsx")).toContain("dark:disabled:bg-input-subtle/80");
+      expect(read("src/components/ui/select.tsx")).toContain("dark:hover:bg-input-subtle/50");
+      expect(read("src/components/ui/button.tsx")).toContain("dark:hover:bg-input-subtle/50");
+    });
+
+    it("gives the outline button the old (subtle) border, not the new 3:1 one", () => {
+      const button = read("src/components/ui/button.tsx");
+      expect(button).toContain("dark:border-input-subtle");
+      expect(button).not.toMatch(/dark:border-input(?![\w-])/);
+    });
+
+    it("keeps the 3:1 border token on the field boxes", () => {
+      for (const file of [
+        "src/components/ui/input.tsx",
+        "src/components/ui/select.tsx",
+        "src/components/story/correction-form.tsx",
+        "src/components/newsletter/newsletter-form.tsx",
+      ]) {
+        expect(read(file), file).toMatch(/(?<![\w:-])border-input(?![\w-])/);
+      }
+    });
+  });
+
+  describe("dark placeholder keeps 4.5:1 on the (unchanged) field fill", () => {
+    const placeholder = (): Rgb => darkToken("muted-foreground");
+
+    it("muted-foreground clears 4.5:1 on bg-input-subtle/30 over the dark card", () => {
+      // 12 % white token at 30 % utility opacity = 3.6 % white over the card.
+      const fill = composite(WHITE, darkToken("card"), 0.12 * 0.3);
+      const ratio = contrastRatio(placeholder(), fill);
+      expect(ratio, `placeholder on the field fill is ${ratio.toFixed(2)}:1`).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it("the fill the code really paints is the pinned subtle token (no drift from the formula above)", () => {
+      const subtle = oklchOver(rawToken(GLOBALS_CSS, "dark", "input-subtle"), darkToken("card"));
+      const expected = composite(WHITE, darkToken("card"), 0.12);
+      subtle.forEach((channel, i) => expect(channel).toBeCloseTo(expected[i]!, 2));
+    });
+
+    it("shows why the border token cannot be the fill: muted-foreground drops below 4.5:1 on it", () => {
+      const fill = composite(tokenOver("dark", "input", "card"), darkToken("card"), 0.3);
+      const ratio = contrastRatio(placeholder(), fill);
+      expect(ratio, `placeholder on a bg-input/30 fill would be ${ratio.toFixed(2)}:1`).toBeLessThan(4.5);
+    });
+  });
+});
