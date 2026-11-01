@@ -8,17 +8,18 @@ import {
 
 // In-feed filter for the home search: every query token must occur at a word
 // start in the cluster title. The matching is order-free, ignores quotes and
-// websearch operators, and is insensitive to Turkish casing and dotted/dotless
-// i. Diacritic folding (ASCII "erdogan" for "Erdoğan") is NOT done here; the
-// archive RPC covers ASCII input meanwhile.
+// websearch operators, and is insensitive to Turkish casing, dotted/dotless i
+// and diacritics: keys are folded like the archive RPC's tayf_search_fold
+// (migration 129), so ASCII "erdogan" finds "Erdoğan" in the feed too and the
+// in-feed and archive sections agree on what a query means.
 
 const matches = (q: string, title: string) =>
   titleMatchesTokens(title, searchTokens(q));
 
 describe("searchTokens", () => {
   it("splits on whitespace and lowercases the Turkish way", () => {
-    expect(searchTokens("Seçim ISTANBUL")).toEqual(["seçim", "istanbul"]);
-    expect(searchTokens("  seçim \t erdoğan\n")).toEqual(["seçim", "erdoğan"]);
+    expect(searchTokens("Seçim ISTANBUL")).toEqual(["secim", "istanbul"]);
+    expect(searchTokens("  seçim \t erdoğan\n")).toEqual(["secim", "erdogan"]);
   });
 
   it("folds dotted and dotless i to the same key", () => {
@@ -27,18 +28,35 @@ describe("searchTokens", () => {
     expect(searchTokens("ıstanbul")).toEqual(["istanbul"]);
   });
 
+  it("folds Turkish diacritics to ASCII (ğ ş ç ö ü ı İ -> g s c o u i i)", () => {
+    expect(searchTokens("Erdoğan")).toEqual(["erdogan"]);
+    expect(searchTokens("ÇİĞDEM ŞÖYLE ÜZÜM")).toEqual(["cigdem", "soyle", "uzum"]);
+    expect(searchTokens("cumhurbaşkanı")).toEqual(["cumhurbaskani"]);
+  });
+
+  it("folds the circumflex vowels like the archive fold (imkân -> imkan)", () => {
+    expect(searchTokens("imkânı")).toEqual(["imkani"]);
+    expect(searchTokens("hükûmet")).toEqual(["hukumet"]);
+  });
+
+  it("dedupes after folding (diacritic and ASCII spellings are one key)", () => {
+    expect(searchTokens("Erdoğan erdogan")).toEqual(["erdogan"]);
+    expect(searchTokens("ERDOĞAN Erdogan ERDOGAN")).toEqual(["erdogan"]);
+    expect(searchTokens("seçim secim SEÇİM")).toEqual(["secim"]);
+  });
+
   it("strips double quotes", () => {
-    // Keys are fold-normalised: dotless ı becomes i.
+    // Keys are fold-normalised: dotless ı becomes i, diacritics go ASCII.
     expect(searchTokens('"Cumhurbaşkanı Erdoğan"')).toEqual([
-      "cumhurbaşkani",
-      "erdoğan",
+      "cumhurbaskani",
+      "erdogan",
     ]);
-    expect(searchTokens('"seçim"')).toEqual(["seçim"]);
+    expect(searchTokens('"seçim"')).toEqual(["secim"]);
   });
 
   it("drops a standalone or / OR operator", () => {
-    expect(searchTokens("seçim or erdoğan")).toEqual(["seçim", "erdoğan"]);
-    expect(searchTokens("seçim OR erdoğan")).toEqual(["seçim", "erdoğan"]);
+    expect(searchTokens("seçim or erdoğan")).toEqual(["secim", "erdogan"]);
+    expect(searchTokens("seçim OR erdoğan")).toEqual(["secim", "erdogan"]);
   });
 
   it("keeps words that merely contain or", () => {
@@ -46,30 +64,30 @@ describe("searchTokens", () => {
   });
 
   it("drops -negated tokens", () => {
-    expect(searchTokens("erdoğan -bahçeli")).toEqual(["erdoğan"]);
+    expect(searchTokens("erdoğan -bahçeli")).toEqual(["erdogan"]);
     expect(searchTokens("-bahçeli -özel")).toEqual([]);
-    expect(searchTokens('seçim -"bahçeli"')).toEqual(["seçim"]);
+    expect(searchTokens('seçim -"bahçeli"')).toEqual(["secim"]);
   });
 
   it("strips an apostrophe suffix of any apostrophe variant", () => {
-    expect(searchTokens("Erdoğan'ın")).toEqual(["erdoğan"]);
-    expect(searchTokens("Erdoğan’ın")).toEqual(["erdoğan"]);
-    expect(searchTokens("Erdoğanʼın")).toEqual(["erdoğan"]);
-    expect(searchTokens("Erdoğan‘ın")).toEqual(["erdoğan"]);
+    expect(searchTokens("Erdoğan'ın")).toEqual(["erdogan"]);
+    expect(searchTokens("Erdoğan’ın")).toEqual(["erdogan"]);
+    expect(searchTokens("Erdoğanʼın")).toEqual(["erdogan"]);
+    expect(searchTokens("Erdoğan‘ın")).toEqual(["erdogan"]);
     expect(searchTokens("İstanbul'da")).toEqual(["istanbul"]);
-    expect(searchTokens("Erdoğan'")).toEqual(["erdoğan"]);
+    expect(searchTokens("Erdoğan'")).toEqual(["erdogan"]);
   });
 
   it("trims leading and trailing non-letter/digit characters", () => {
-    expect(searchTokens("(seçim), erdoğan!")).toEqual(["seçim", "erdoğan"]);
-    expect(searchTokens("...seçim...")).toEqual(["seçim"]);
+    expect(searchTokens("(seçim), erdoğan!")).toEqual(["secim", "erdogan"]);
+    expect(searchTokens("...seçim...")).toEqual(["secim"]);
     expect(searchTokens("2024!")).toEqual(["2024"]);
   });
 
   it("drops keys shorter than 2 characters and dedupes", () => {
     expect(searchTokens("a")).toEqual([]);
     expect(searchTokens("a b ak")).toEqual(["ak"]);
-    expect(searchTokens("seçim Seçim SEÇİM seçim")).toEqual(["seçim"]);
+    expect(searchTokens("seçim Seçim SEÇİM seçim")).toEqual(["secim"]);
     expect(searchTokens("ISTANBUL İstanbul ıstanbul")).toEqual(["istanbul"]);
   });
 
@@ -81,7 +99,7 @@ describe("searchTokens", () => {
   });
 
   it("keeps emoji and other non-letter symbols out of the keys", () => {
-    expect(searchTokens("seçim 🗳️ erdoğan")).toEqual(["seçim", "erdoğan"]);
+    expect(searchTokens("seçim 🗳️ erdoğan")).toEqual(["secim", "erdogan"]);
   });
 });
 
@@ -114,6 +132,52 @@ describe("titleMatchesTokens", () => {
     expect(matches("istanbul", "İSTANBUL'DA yağış")).toBe(true);
     expect(matches("İstanbul", "ISTANBUL'da yağış")).toBe(true);
     expect(matches("ıspanak", "İspanak fiyatları")).toBe(true);
+  });
+
+  it("finds diacritic titles from ASCII queries (and the reverse)", () => {
+    expect(matches("erdogan", "Cumhurbaşkanı Erdoğan Güney Kore'ye gitti")).toBe(
+      true,
+    );
+    expect(
+      matches("cumhurbaskani ozel", "Özel ile Cumhurbaşkanı Erdoğan görüştü"),
+    ).toBe(true);
+    expect(matches("Erdoğan", "ERDOGAN SEUL YOLUNDA")).toBe(true);
+    expect(matches("ERDOĞAN", "erdogan seul yolunda")).toBe(true);
+    expect(matches("guney kore", "Güney Kore'ye gitti")).toBe(true);
+    expect(matches("sampiyon", "Şampiyon Galatasaray")).toBe(true);
+  });
+
+  it("returns the same in-feed cards for 'erdogan' as for 'Erdoğan'", () => {
+    const titles = [
+      "Cumhurbaşkanı Erdoğan Güney Kore'ye gitti",
+      "ERDOGAN SEUL YOLUNDA",
+      "Erdoğan'ın açıklaması sonrası borsa yükseldi",
+      "Bahçeli: seçim tarihi belli oldu",
+      "Başbakan açıklama yaptı",
+    ];
+    const ascii = titles.filter((t) => matches("erdogan", t));
+    const diacritic = titles.filter((t) => matches("Erdoğan", t));
+    expect(ascii).toEqual(diacritic);
+    expect(ascii).toHaveLength(3);
+  });
+
+  it("keeps ISTANBUL and istanbul matching 'İstanbul'", () => {
+    expect(matches("ISTANBUL", "İstanbul'da deprem")).toBe(true);
+    expect(matches("istanbul", "İstanbul'da deprem")).toBe(true);
+  });
+
+  it("folds circumflex vowels in the title (imkan finds imkânı)", () => {
+    expect(matches("imkan", "BES birikimlerinden kısmi ödeme imkânı geliyor")).toBe(
+      true,
+    );
+  });
+
+  it("keeps the word-start rule after folding", () => {
+    expect(matches("ak", "Akşener açıklama yaptı")).toBe(true);
+    expect(matches("ak", "Başbakan açıklama yaptı")).toBe(false);
+    // Folding must not create a mid-word hit: 'gan' sits inside Erdoğan.
+    expect(matches("gan", "Erdoğan konuştu")).toBe(false);
+    expect(matches("dogan", "Erdoğan konuştu")).toBe(false);
   });
 
   it("treats decomposed (NFD) text the same as precomposed text", () => {

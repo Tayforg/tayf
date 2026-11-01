@@ -342,6 +342,29 @@ export const ENTITY_PROPER_NOUNS: readonly string[] = [
   "rum",
 ];
 
+//     (4d) Incident province veto (h16-precision-1). Cluster 1e1c5eb0 held two
+//     different crashes: the Duzce / Anadolu Otoyolu pile-up (3 yaralı) and a
+//     separate Bolu Dagi viaduct crash (2 yaralı, own cluster e43afc1d). Both
+//     headlines are 'zincirleme kaza' + an injured count with no subject
+//     comma, so (4b) could not fire; the pair scored 0.377 (MinHash 0.38, tfidf
+//     0.58 on template tokens, 0 shared entities, headline Jaccard 0.20), Jev
+//     returned p=0.70 in the low band and decideMarginal joined it, and the
+//     weak joiner then pulled in two more Bolu articles as 'latest'. Jev's own
+//     cluster_member shadow task disagreed on all three (p 0.34 / 0.10 / 0.20).
+//     Over the last 72 h pair_marginal logged 200 low-band joins, 37 of them at
+//     p in [0.70, 0.80). The veto: when the headline lane did not fire, both
+//     headlines (clipped to HEADLINE_TITLE_MAX_CHARS) carry an incident word
+//     (kaza, yangin, deprem, patlama, cinayet, saldiri, carpisti, devrildi,
+//     facia, yarali; see provinces.ts) and each names at least one province
+//     (a capitalised word, up to its first apostrophe, equal to one of the 81
+//     folded il names), and the two province sets are disjoint, the primary
+//     and MinHash lanes are capped at SUBJECT_VETO_CAP -- under the 0.36
+//     fallback / Jev floor, so the pair is neither joined nor sent to Jev. A
+//     highway ('Anadolu Otoyolu') is not a province, so a side without a
+//     province never vetoes; 'Bolu-Duzce' names both and overlaps 'Duzce'.
+//     Collateral measured on the 96 h corpus: 0 of 12,380 pairs scoring
+//     >= 0.40 are vetoed. No new constant: the cap is SUBJECT_VETO_CAP.
+
 // (5) h12-cluster-3: the headline lane missed same-story pairs. Measured on
 //     main fffeff1 with the real headlineLane() (scratchpad ana/pairs.mjs):
 //     Bahceli '100 il 1000 ilce ...' vs '19 yeni il ve 78 ilce onerisi'

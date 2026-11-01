@@ -4,10 +4,11 @@ import { attemptCached } from "@/lib/cache-resilience";
 import { createReaderClient } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
 
-// Fetcher for /trends, Istanbul-day edition — reads the new
-// `trends_daily_zone_counts_ist` view (migration 087) instead of the old
-// UTC-day, all-kinds `trends_daily_bias_counts` view (migration 023, still
-// owned by src/lib/clusters/trends-query.ts, untouched by this file).
+// Fetcher for /trends, Istanbul-day edition — reads the voting-kinds-only
+// Istanbul-day counts (view of migration 087, served from its rollup table,
+// see "Source table" below) instead of the old UTC-day, all-kinds
+// `trends_daily_bias_counts` view (migration 023, still owned by
+// src/lib/clusters/trends-query.ts, untouched by this file).
 //
 // Two differences from the old view/module:
 //   * day bucketing is the Europe/Istanbul calendar day of
@@ -17,20 +18,19 @@ import type { MediaDnaZone } from "@/types";
 //     counted toward bias_distribution or blindspot detection, and now
 //     never counted here either (src/lib/sources/kind.ts's contract).
 //
-// Deferred follow-up (NOT done in this change): migration 092 adds
-// `trends_daily_zone_counts_ist_rollup`, a pre-aggregated table meant to
-// replace the live `trends_daily_zone_counts_ist` view this file still
-// reads — the view's cold-cache group-by is the root cause of the
-// 2026-09-28 /trends build-timeout incident this branch otherwise makes
-// non-fatal (via `attemptCached` below), but does not make faster or less
-// likely to time out on a cold cache. 092's own header requires a strict
-// deploy order (apply migration → run the 32-day backfill → THEN ship the
-// code repoint below) that this branch has not executed against
-// production, so repointing this fetcher now would query a table that may
-// not exist yet in every environment. Track the repoint
-// (`.from("trends_daily_zone_counts_ist_rollup")` instead of the view,
-// same `AggregateRow` shape) as an explicit follow-up PR once 092 is
-// applied and backfilled in production.
+// Source table: this file reads `trends_daily_zone_counts_ist_rollup`
+// (migration 092), a pre-aggregated table with the same columns as the 087
+// view (day, zone, count). The live view's cold-cache group-by was the root
+// cause of the 2026-09-28 /trends build-timeout incident and of the 4 s
+// reader timeouts hunt 16 found, so it is no longer queried from here.
+//
+// Freshness: pg_cron job `trends-rollup-refresh` (since 109) recomputes the
+// rollup for the last 2 Istanbul days at :25 every hour. The current Istanbul
+// day's bar is therefore partial and can lag by up to about 1 h behind the
+// articles, plus up to 1 h of this fetcher's hourly cache. That is the same
+// order as the existing hourly revalidate, and the previous days are
+// complete. The live view stays the source of truth for the refresh function
+// only.
 
 export const WINDOW_DAYS = 30;
 export const TRENDS_TIME_ZONE = "Europe/Istanbul";
@@ -44,7 +44,7 @@ export type DayBucket = {
   total: number;
 };
 
-/** One row per (day, zone) from the `trends_daily_zone_counts_ist` view. */
+/** One row per (day, zone) from the `trends_daily_zone_counts_ist_rollup` table. */
 type AggregateRow = {
   day: string; // "YYYY-MM-DD" (date → ISO string via PostgREST)
   zone: MediaDnaZone;
@@ -170,7 +170,7 @@ async function fetchIstanbulTimelineRaw(): Promise<DayBucket[]> {
   const cutoffKey = istanbulDayKey(nowMs - WINDOW_DAYS * DAY_MS);
 
   const { data, error } = await supabase
-    .from("trends_daily_zone_counts_ist")
+    .from("trends_daily_zone_counts_ist_rollup")
     .select("day, zone, count")
     .gte("day", cutoffKey)
     .returns<AggregateRow[]>();
@@ -180,11 +180,11 @@ async function fetchIstanbulTimelineRaw(): Promise<DayBucket[]> {
   }
 
   if (!data || data.length === 0) {
-    // Empty is indistinguishable here from "the view doesn't exist yet"
-    // (local dev before 087 is applied) or a genuine outage — never present
-    // either as a real "no news this month" answer; the caller turns it
-    // into the `{ ok: false }` sentinel, cached only for the short
-    // `minutes` lifetime.
+    // Empty is indistinguishable here from "the rollup table doesn't exist
+    // yet or was never backfilled" (local dev before 092 is applied) or a
+    // genuine outage — never present either as a real "no news this month"
+    // answer; the caller turns it into the `{ ok: false }` sentinel, cached
+    // only for the short `minutes` lifetime.
     throw new Error("[trends] fetchIstanbulTimeline error: empty result");
   }
 

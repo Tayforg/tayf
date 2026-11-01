@@ -72,7 +72,7 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * framing from it (`src/lib/clusters/neutral-title.ts`). That costs
  * nothing, so it covers 2+ source clusters in a bigger batch. It fills
  * `title_tr_neutral`, stamps `title_neutral_model = EXTRACTIVE_MODEL_ID`
- * (`extractive-v2`) and `title_neutral_member_count` (the cluster's
+ * (`extractive-v3`) and `title_neutral_member_count` (the cluster's
  * article_count at pick time) but leaves `title_neutral_at` NULL — so nothing
  * that counts "AI neutralized" (rss.xml, /metodoloji, /api/metrics) counts
  * these, and enabling the LLM later re-titles the same clusters. The
@@ -99,10 +99,17 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * under 40 s old, the route asks `neutral_title_repick_candidates` (migration
  * 141) for active clusters of the last 14 days whose pick came from another
  * model, was never stamped, or has been outgrown, and re-picks them from all
- * fetched members. It writes `title_tr_neutral` only when the pick changed,
- * always stamps the model and the article_count, only touches rows whose
- * `title_neutral_at` IS NULL, and NEVER writes `clusters.updated_at` (it
- * orders the home feed: a healed title must not make an old story look new).
+ * fetched members. The re-pick is conservative (hunt 16: #156 replaced about
+ * half of the good stored titles with fragments): the stored title goes to
+ * `pickNeutralTitle` as the incumbent and stays unless it fails the acceptance
+ * gate or the best member title outscores it by REPICK_MARGIN (0.05, a stored
+ * title under 45 characters) or REPICK_MARGIN_FULL_LENGTH (0.20, a longer one;
+ * a replay over 150 good titles changes 12.7% of them, not 38%). It writes
+ * `title_tr_neutral` only when the pick changed (a kept title writes the model
+ * and the count alone), always stamps the model and the article_count, only
+ * touches rows whose `title_neutral_at` IS NULL, and NEVER writes
+ * `clusters.updated_at` (it orders the home feed: a healed title must not make
+ * an old story look new).
  * There is no backfill UPDATE anywhere: existing rows heal through this
  * loop at ~20 per run, newest first. An rpc failure is logged and the run
  * still answers 200.
@@ -780,7 +787,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
           // newest rows every run and starve the rest of the set.
           let next: string | null = null;
           try {
-            next = pickNeutralTitle(items);
+            next = pickNeutralTitle(items, { incumbent: r.title_tr_neutral });
           } catch (err) {
             console.error("[headline-cron] repick pick failed", r.id, err);
             captureServerException(err, { clusterId: r.id, mode });

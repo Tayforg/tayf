@@ -481,7 +481,7 @@ export function SourceDirectory({
                   <div key={source.id} className={cardClassName}>
                   <Link
                     href={`/source/${source.slug}`}
-                    className="block"
+                    className="block max-sm:mr-7"
                   >
                     <div className="flex items-start gap-3">
                       <SourceLogo
@@ -492,7 +492,7 @@ export function SourceDirectory({
                         fallbackClassName="h-8 w-8 rounded shrink-0 bg-muted/60 ring-1 ring-border/30"
                       />
                       <div className="min-w-0 flex-1 space-y-1">
-                        <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-7">
+                        <p className="text-sm font-sans font-semibold truncate group-hover:text-foreground pr-7 max-sm:pr-0">
                           {source.name}
                         </p>
                         <div className="flex flex-wrap items-center gap-1 min-w-0">
@@ -523,7 +523,7 @@ export function SourceDirectory({
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label={`${source.name} sitesini yeni sekmede aç`}
-                    className="absolute top-2 right-2 inline-flex min-h-6 min-w-6 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                    className="absolute top-2 right-2 max-sm:top-0 max-sm:right-0 inline-flex min-h-6 min-w-6 max-sm:min-h-11 max-sm:min-w-11 items-center justify-center rounded text-[11px] leading-none text-muted-foreground hover:bg-muted/60 hover:text-foreground"
                   >
                     <span aria-hidden="true">↗</span>
                   </a>

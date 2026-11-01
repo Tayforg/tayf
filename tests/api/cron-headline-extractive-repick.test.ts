@@ -9,7 +9,12 @@ import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 //     the run is younger than 40 s, and only with what is left of the
 //     50-write budget (at most 20),
 //   * stamps title_neutral_member_count with the cluster's article_count,
-//   * writes title_tr_neutral only when the new pick differs,
+//   * writes title_tr_neutral only when the new pick differs, and the pick is
+//     conservative (hunt 16, extractive-v3): the stored title is passed as the
+//     incumbent and is kept unless it fails the acceptance gate or the best
+//     member title beats it by REPICK_MARGIN (under 45 characters) or
+//     REPICK_MARGIN_FULL_LENGTH (45 and up). A kept title stamps the model and
+//     the member count only,
 //   * never writes updated_at (it orders the home feed) and never touches a
 //     row whose title_neutral_at is set (an LLM title).
 // ---------------------------------------------------------------------------
@@ -235,7 +240,7 @@ describe("extractive re-pick: the rpc call", () => {
     expect(res.status).toBe(200);
     expect(repickCalls()).toHaveLength(1);
     expect(repickCalls()[0]!.args).toEqual({ p_model: EXTRACTIVE_MODEL_ID, p_limit: 20 });
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v2");
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v3");
   });
 
   it("never calls it in llm mode", async () => {
@@ -480,6 +485,123 @@ describe("extractive re-pick: what is written", () => {
     expect(body.repicked).toBe(1);
     expect(body.errored).toBe(1);
     expect(revalidateTagMock).not.toHaveBeenCalledWith("cluster-detail:r1", "max");
+  });
+});
+
+// Hunt 16 (h16-an-1): the #156 re-pick replaced ~48% of the stored titles with
+// vague fragments. The member titles are the real prod headlines of two of the
+// damaged clusters, in published order.
+const BEDELLI = [
+  "Bedelli askerlikte yeni dönem",
+  "Bedelli askerlik ve hac için bireysel emeklilik birikimi çekilebilecek",
+  "Bedelli askerlik yapacaklara BES kolaylığı: Birikimden para çekilebilecek",
+  "Bedelli askerliğe de hak tanındı: BES’ten para çekebilecekler",
+  "Bedelli askerlikte yeni dönem",
+  "Bedelli askerlik için BES birikimlerinden kısmi ödeme imkânı geliyor",
+];
+
+const ALTIN_PORTAKAL = [
+  "63. Altın Portakal Film Festivali'nde En İyi Film ödülünü Taş ve Tüy kazandı",
+  "Altın Portakal'da gecenin kazananı 'Taş ve Tüy' oldu, Mert Fırat ile Mehmet Günsür ödülü paylaştı",
+  "Taş ve Tüy, Altın Portakal’da altı ödül kazandı",
+  "Altın Portakal’da ödüller sahiplerini buldu: 'Taş ve Tüy' 6 ödülle zirvede",
+  "Altın Portakal 'Taş ve Tüy'e",
+  "Altın Portakal’da ödüller sahiplerini buldu: Altın Portakal’da 'Taş ve Tüy' zaferi",
+  "Öykü Karayel'in ödülü alırken yaptığı bu konuşma geceye damga vurdu",
+  "Altın Portakal'a \"Taş ve Tüy\" damgası! İşte tüm ödül kazananlar",
+  "Altın Portakal Film Festivali'nde ödüller sahiplerini buldu!",
+  "Altın Portakal sahiplerini buldu: ‘Taş ve Tüy’e 6 ödül birden",
+  "63. Altın Portakal’da En İyi Film 'Taş ve Tüy' seçildi",
+];
+
+const BEDELLI_FRAGMENT = "Bedelli askerlikte yeni dönem";
+const ALTIN_V1_INCUMBENT = "Taş ve Tüy, Altın Portakal’da altı ödül kazandı";
+const ALTIN_FRAGMENT = "Altın Portakal 'Taş ve Tüy'e";
+
+describe("extractive re-pick (hunt 16): the stored title is the incumbent", () => {
+  it("keeps a good v1 title: only the model and the stamp are written, nothing is revalidated", async () => {
+    dbState.repickRows = [repickRow("ec900023", { title_tr_neutral: ALTIN_V1_INCUMBENT, article_count: 11 })];
+    members("ec900023", ALTIN_PORTAKAL);
+
+    const { res, body } = await run("203.0.113.91");
+    expect(res.status).toBe(200);
+    expect(body.clusters!.ec900023!.status).toBe("repick-kept");
+    expect(body.repicked).toBe(0);
+    expect(body.repickKept).toBe(1);
+
+    const patch = patchOf(updateFor("ec900023")!);
+    expect(patch).toEqual({ title_neutral_model: EXTRACTIVE_MODEL_ID, title_neutral_member_count: 11 });
+    expect("title_tr_neutral" in patch).toBe(false);
+    expect(revalidateTagMock).not.toHaveBeenCalled();
+  });
+
+  it("replaces the #156 fragment 'Bedelli askerlikte yeni dönem' with the BES title", async () => {
+    dbState.repickRows = [repickRow("97575687", { title_tr_neutral: BEDELLI_FRAGMENT, article_count: 6 })];
+    members("97575687", BEDELLI);
+
+    const { body } = await run("203.0.113.92");
+    expect(body.clusters!["97575687"]!.status).toBe("repicked");
+    const patch = patchOf(updateFor("97575687")!);
+    expect(patch.title_tr_neutral).toMatch(/BES|birikim/i);
+    expect(patch.title_tr_neutral).not.toBe(BEDELLI_FRAGMENT);
+    expect(patch.title_neutral_model).toBe("extractive-v3");
+    expect(patch.title_neutral_member_count).toBe(6);
+    expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:97575687", "max");
+    expect(revalidateTagMock).toHaveBeenCalledWith("clusters-politics", "max");
+  });
+
+  it("replaces the #156 fragment \"Altın Portakal 'Taş ve Tüy'e\" with a >= 40-character title", async () => {
+    dbState.repickRows = [repickRow("ec900023", { title_tr_neutral: ALTIN_FRAGMENT, article_count: 11 })];
+    members("ec900023", ALTIN_PORTAKAL);
+
+    const { body } = await run("203.0.113.93");
+    expect(body.clusters!.ec900023!.status).toBe("repicked");
+    const title = patchOf(updateFor("ec900023")!).title_tr_neutral as string;
+    expect(title.length).toBeGreaterThanOrEqual(40);
+    expect(title).toContain("Taş ve Tüy");
+    expect(title).not.toBe(ALTIN_FRAGMENT);
+  });
+
+  it("writes no updated_at in any of these runs", async () => {
+    dbState.repickRows = [
+      repickRow("97575687", { title_tr_neutral: BEDELLI_FRAGMENT, article_count: 6 }),
+      repickRow("ec900023", { title_tr_neutral: ALTIN_V1_INCUMBENT, article_count: 11 }),
+      repickRow("ec900024", { title_tr_neutral: ALTIN_FRAGMENT, article_count: 11 }),
+    ];
+    members("97575687", BEDELLI);
+    members("ec900023", ALTIN_PORTAKAL);
+    members("ec900024", ALTIN_PORTAKAL);
+
+    const { body } = await run("203.0.113.94");
+    expect(body.repicked).toBe(2);
+    expect(body.repickKept).toBe(1);
+    const updates = clusterUpdates();
+    expect(updates).toHaveLength(3);
+    for (const u of updates) {
+      expect(Object.keys(patchOf(u)), JSON.stringify(u.patch)).not.toContain("updated_at");
+    }
+  });
+
+  it("keeps the stored title when its members are all unacceptable and the title itself passes the gate", async () => {
+    dbState.repickRows = [repickRow("r1", { title_tr_neutral: "Eski başlık burada duruyor", article_count: 2 })];
+    members("r1", ["Masterchef kim elendi, kim gitti?", "MasterChef'te kim elendi? Kim kazandı, kim gitti?"]);
+
+    const { body } = await run("203.0.113.95");
+    expect(body.clusters!.r1).toEqual({ status: "repick-kept" });
+    expect("title_tr_neutral" in patchOf(updateFor("r1")!)).toBe(false);
+  });
+
+  it("the first pick passes no incumbent: an IS NULL cluster takes the best member title", async () => {
+    dbState.clusters = [cluster("c1", { article_count: 6 })];
+    members("c1", BEDELLI);
+
+    const { body } = await run("203.0.113.96");
+    expect(body.clusters!.c1).toEqual({ status: "rewrote" });
+    expect(patchOf(updateFor("c1")!)).toEqual({
+      title_tr_neutral: "Bedelli askerlik yapacaklara BES kolaylığı: Birikimden para çekilebilecek",
+      title_neutral_model: EXTRACTIVE_MODEL_ID,
+      title_neutral_member_count: 6,
+    });
   });
 });
 

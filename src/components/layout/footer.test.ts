@@ -72,3 +72,55 @@ describe("footer.tsx Gündem link", () => {
     expect(nav).toContain(`${KONU}\n  ${GUNDEM}`);
   });
 });
+
+// h16-mobile-2: every footer link was ~13 px tall on a phone (text-[11px] with
+// no padding). Below sm each link is lifted to a 44 px row; sm and up keeps the
+// exact current classes, so the desktop footer does not move.
+describe("footer.tsx mobile tap targets (h16-mobile-2)", () => {
+  const src = readFileSync(join(__dirname, "footer.tsx"), "utf8");
+  const MOBILE = ["max-sm:inline-flex", "max-sm:min-h-11", "max-sm:items-center"];
+
+  const classOf = (tag: string | undefined) =>
+    (/\bclassName="([^"]*)"/.exec(tag ?? "")?.[1] ?? "").split(/\s+/).filter(Boolean);
+  const navLinkTag = /<Link\b[^>]*>/.exec(src)?.[0];
+  const rssTag = /<a\b[^>]*href="\/rss\.xml"[^>]*>/.exec(src)?.[0];
+
+  it("finds the NAV_LINKS <Link> and the RSS <a>", () => {
+    expect(navLinkTag).toBeDefined();
+    expect(rssTag).toBeDefined();
+  });
+
+  it("gives every NAV_LINKS <Link> the three max-sm tap-target tokens", () => {
+    const tokens = classOf(navLinkTag);
+    for (const token of MOBILE) expect(tokens).toContain(token);
+  });
+
+  it("gives the RSS <a> the three max-sm tap-target tokens", () => {
+    const tokens = classOf(rssTag);
+    for (const token of MOBILE) expect(tokens).toContain(token);
+  });
+
+  it("keeps the current desktop classes of both links unchanged", () => {
+    expect(classOf(navLinkTag).filter((t) => !t.startsWith("max-sm:"))).toEqual([
+      "text-[11px]",
+      "text-muted-foreground",
+      "hover:text-foreground",
+      "transition-colors",
+    ]);
+    expect(classOf(rssTag).filter((t) => !t.startsWith("max-sm:"))).toEqual([
+      "text-[11px]",
+      "text-muted-foreground",
+      "hover:text-brand",
+      "transition-colors",
+    ]);
+  });
+
+  it("drops the nav's row gap on mobile (the 44 px rows already separate) and keeps it from sm up", () => {
+    const navLine = src.split("\n").find((line) => line.includes('<nav aria-label="Alt menü"'));
+    expect(navLine).toBeDefined();
+    const tokens = classOf(navLine);
+    for (const token of ["flex", "flex-wrap", "gap-x-5", "gap-y-2", "max-sm:gap-y-0"]) {
+      expect(tokens).toContain(token);
+    }
+  });
+});

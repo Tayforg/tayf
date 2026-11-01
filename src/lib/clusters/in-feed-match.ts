@@ -1,5 +1,6 @@
-// In-feed filter for the home search box. Pure and import-free so it can be
-// unit-tested (and reused) without pulling Supabase or React in.
+// In-feed filter for the home search box. Pure (its only import, turkish-query,
+// has no imports itself) so it can be unit-tested (and reused) without pulling
+// Supabase or React in.
 //
 // Rule: every query token must occur at a WORD START in the cluster title.
 //   - order-free:   "Erdoğan Cumhurbaşkanı" finds "Cumhurbaşkanı Erdoğan ..."
@@ -10,21 +11,28 @@
 //                   (the archive RPC interprets them; this filter only has to
 //                   show what is already on the page), and an apostrophe
 //                   suffix typed by the reader is dropped ("Erdoğan'ın" ->
-//                   "erdoğan").
+//                   "erdogan" after folding).
 //
-// Not done here: diacritic folding (ASCII "erdogan" for "Erdoğan"). The
-// archive search covers ASCII input meanwhile; folding the in-feed filter
-// too (search-query's foldTr) is a follow-up.
+// Diacritics are folded the same way as the archive RPC's tayf_search_fold
+// (migration 129; foldTr is its TypeScript twin), so ASCII "erdogan" finds
+// "Erdoğan" in the feed and the in-feed cards agree with the archive section
+// below them about what a query means. Folding is applied to the query tokens
+// and to the title alike; the word-start rule is unchanged.
+
+import { foldTr } from "./turkish-query";
 
 const MIN_TOKEN_LENGTH = 2;
 
-/** Turkish-aware comparison key: NFC, tr-lowercase, dotless ı -> i, no U+0307. */
+/**
+ * Turkish-aware comparison key: NFC, tr-lowercase, then the archive fold
+ * (foldTr: ğ ş ç ö ü ı İ â î û -> ASCII, U+0307 dropped). The explicit U+0307
+ * removal stays for clarity; foldTr already deletes it.
+ */
 function matchKey(s: string): string {
-  return s
-    .normalize("NFC")
-    .toLocaleLowerCase("tr")
-    .replace(/ı/g, "i")
-    .replace(/̇/g, "");
+  return foldTr(s.normalize("NFC").toLocaleLowerCase("tr")).replace(
+    /\u0307/g,
+    "",
+  );
 }
 
 const APOSTROPHE_SUFFIX = /['’ʼ‘]\p{L}*$/u;

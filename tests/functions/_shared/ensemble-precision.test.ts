@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import {
   headlineLane,
   isMatch,
@@ -10,11 +10,18 @@ import {
   fingerprint,
   headlineTokens,
 } from "../../../supabase/functions/_shared/cluster/fingerprint.ts";
+import {
+  hasIncidentWord,
+  IL_NAMES,
+  INCIDENT_PATTERNS,
+  provincesIn,
+} from "../../../supabase/functions/_shared/cluster/provinces.ts";
 import { TfidfIndex } from "../../../supabase/functions/_shared/cluster/tfidf.ts";
 import {
   ENTITY_WEIGHT,
   GENERIC_ENTITIES,
   GENERIC_ENTITY_WEIGHT,
+  HEADLINE_TITLE_MAX_CHARS,
   MATCH_THRESHOLD,
   SUBJECT_SPAN_MAX_WORDS,
   SUBJECT_STOP_WORDS,
@@ -337,6 +344,334 @@ describe("ensemble precision: subject veto mechanism", () => {
     expect(run(A, "").components.subjectVeto).toBe(false);
     // headlineLane itself is unchanged by the veto.
     expect(headlineLane(headlineTokens(A), headlineTokens(B), 1).fired).toBe(false);
+  });
+});
+
+// h16-precision-1: cluster 1e1c5eb0 joined the Bolu Dagi viaduct crash to the
+// Duzce / Anadolu Otoyolu crash on a Jev low-band p=0.70 (ensemble 0.377). Both
+// headlines are 'zincirleme kaza' + injured count, neither has a subject comma,
+// so the subject veto stayed silent. The province veto fires when both titles
+// carry an incident word and name provinces that do not overlap.
+describe("ensemble precision: incident province-conflict veto (h16-precision-1)", () => {
+  const noFp = { strict: null, signature: null };
+  const DUZCE = "Düzce'de TIR ve iki aracın karıştığı zincirleme kazada 3 kişi yaralandı";
+  const BOLU_DAGI = "Bolu Dağı'nda zincirleme kaza: Yaralılar var";
+  const BOLU_VIYADUK = "Bolu Dağı viyadüklerinde üç araçlı zincirleme kaza: iki yaralı";
+  const ANADOLU = "Anadolu Otoyolu'nda üç aracın karıştığı zincirleme kaza: 3 yaralı";
+  const BOLU_SAME_TEMPLATE = "Bolu'da TIR ve iki aracın karıştığı zincirleme kazada 3 kişi yaralandı";
+  const SHARED_BODY =
+    "Zincirleme kazaya TIR ve iki araç karıştı, ekipler olay yerine sevk edildi, " +
+    "yaralılar hastaneye kaldırıldı, yol bir süre trafiğe kapandı, jandarma ekipleri " +
+    "kaza yerinde inceleme başlattı, sürücüler ifade vermek üzere karakola götürüldü";
+
+  const run = (
+    a: string | null,
+    b: string | null,
+    tfidf = 0.58,
+    hours = 6,
+    ea: string[] = [],
+    eb: string[] = [],
+  ) => score(noFp, noFp, ea, eb, tfidf, hours, { aTitle: a, bTitle: b });
+
+  describe("IL_NAMES", () => {
+    it("holds the 81 provinces, folded ASCII, no duplicates", () => {
+      expect(IL_NAMES).toHaveLength(81);
+      expect(new Set(IL_NAMES).size).toBe(81);
+      for (const il of IL_NAMES) expect(il, il).toMatch(/^[a-z]+$/);
+      for (const il of ["bolu", "duzce", "istanbul", "izmir", "igdir", "sanliurfa", "kahramanmaras"]) {
+        expect(IL_NAMES).toContain(il);
+      }
+    });
+  });
+
+  describe("provincesIn", () => {
+    const set = (title: string) => [...provincesIn(title)].sort();
+
+    it("takes the province from a locative-suffixed name", () => {
+      expect(set(DUZCE)).toEqual(["duzce"]);
+      expect(set(BOLU_DAGI)).toEqual(["bolu"]);
+    });
+
+    it("splits a hyphenated pair into two provinces", () => {
+      expect(set("Bolu-Düzce sınırında kaza")).toEqual(["bolu", "duzce"]);
+    });
+
+    it("does not read a highway or a lowercase word as a province", () => {
+      expect(set(ANADOLU)).toEqual([]);
+      expect(set("İsrail ordusu saldırı düzenledi")).toEqual([]);
+      expect(set("Ali tokat attı")).toEqual([]);
+    });
+
+    it("keeps a capitalised province with a suffix, including all-caps Turkish dotted I", () => {
+      expect(set("Ordu'da kaza")).toEqual(["ordu"]);
+      expect(set("İZMİR'DE DEPREM")).toEqual(["izmir"]);
+      expect(set("Iğdır’da yangın")).toEqual(["igdir"]);
+      expect(set("Şanlıurfa'da cinayet")).toEqual(["sanliurfa"]);
+    });
+
+    it("returns an empty set for empty and punctuation-only input", () => {
+      expect(provincesIn("").size).toBe(0);
+      expect(provincesIn("  ...  ").size).toBe(0);
+      expect(provincesIn("🔥 3 - 2").size).toBe(0);
+    });
+
+    it("is not fooled by an emoji prefix", () => {
+      expect(set("🚨 Düzce'de yangın")).toEqual(["duzce"]);
+    });
+  });
+
+  describe("hasIncidentWord", () => {
+    it("is true for incident vocabulary in several inflections", () => {
+      for (const t of [
+        "Düzce'de kazada 3 kişi yaralandı",
+        "Fabrikada yangında büyük hasar",
+        "Tır devrildi",
+        "İki araç çarpıştı",
+        "Yaralılar var",
+        "İzmir'de deprem",
+        "Ankara'da patlama",
+        "Mersin'de cinayet",
+        "Saldırı sonrası açıklama",
+      ]) {
+        expect(hasIncidentWord(t), t).toBe(true);
+      }
+    });
+
+    it("is false for look-alikes and for ordinary sentences", () => {
+      expect(hasIncidentWord("Taş ve Tüy, Altın Portakal’da altı ödül kazandı")).toBe(false);
+      expect(hasIncidentWord("Kazakistan ile anlaşma")).toBe(false);
+      expect(hasIncidentWord("Göreme'de peribacası çöktü")).toBe(false);
+      expect(hasIncidentWord("")).toBe(false);
+    });
+
+    it("keeps 'öldü' out: it folds to 'oldu' (happened)", () => {
+      expect(hasIncidentWord("Toplantı sonrası karar oldu")).toBe(false);
+      expect(INCIDENT_PATTERNS.some((p) => p.test("oldu"))).toBe(false);
+    });
+  });
+
+  describe("fires for different provinces with the same incident template", () => {
+    for (const [name, other] of [
+      ["Bolu Dağı'nda zincirleme kaza", BOLU_DAGI],
+      ["Bolu Dağı viyadüklerinde zincirleme kaza", BOLU_VIYADUK],
+    ] as const) {
+      it(`${name} vs the Düzce crash is capped under the fallback floor`, () => {
+        const r = run(other, DUZCE);
+        expect(r.components.incidentVeto).toBe(true);
+        expect(r.components.headlineLane).toBe(false);
+        expect(r.components.subjectVeto).toBe(false);
+        expect(r.score).toBeLessThan(0.36);
+        expect(r.score).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+        // Non-vacuous: the uncapped primary lane was above the cap, and the
+        // capped raw sits exactly on it.
+        expect(r.components.primary).toBeGreaterThan(SUBJECT_VETO_CAP);
+        expect(r.components.raw).toBeCloseTo(SUBJECT_VETO_CAP, 12);
+      });
+    }
+
+    it("is symmetric", () => {
+      const x = run(BOLU_DAGI, DUZCE);
+      const y = run(DUZCE, BOLU_DAGI);
+      expect(y.components.incidentVeto).toBe(x.components.incidentVeto);
+      expect(y.score).toBe(x.score);
+    });
+
+    it("also caps a pair that was above MATCH_THRESHOLD (strong text overlap)", () => {
+      const r = run(BOLU_DAGI, DUZCE, 0.9, 1);
+      expect(r.components.incidentVeto).toBe(true);
+      expect(r.components.primary).toBeGreaterThan(MATCH_THRESHOLD);
+      expect(r.score).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+      expect(isMatch(r)).toBe(false);
+    });
+
+    it("caps the MinHash lane too (identical template bodies cannot bypass the veto)", () => {
+      const fa = fingerprint(BOLU_DAGI, SHARED_BODY);
+      const fb = fingerprint(DUZCE, SHARED_BODY);
+      const r = score(fa, fb, [], [], 0.58, 0.5, { aTitle: BOLU_DAGI, bTitle: DUZCE });
+      expect(r.components.jaccard).toBeGreaterThan(0.5);
+      expect(r.components.jaccardScore).toBeGreaterThan(SUBJECT_VETO_CAP);
+      expect(r.components.incidentVeto).toBe(true);
+      expect(r.score).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+    });
+
+    it("clips both titles to HEADLINE_TITLE_MAX_CHARS before reading provinces", () => {
+      // The Bolu mention sits past the clip, so the long title names no province.
+      const longTitle = `Zincirleme kaza ${"x".repeat(HEADLINE_TITLE_MAX_CHARS)} Bolu'da`;
+      expect(provincesIn(longTitle).has("bolu")).toBe(true);
+      const r = run(longTitle, "Düzce'de zincirleme kaza");
+      expect(r.components.incidentVeto).toBe(false);
+    });
+  });
+
+  describe("does not fire", () => {
+    it("when one side names no province (a highway is not a province)", () => {
+      const r = run(DUZCE, ANADOLU);
+      expect(r.components.incidentVeto).toBe(false);
+      // Control for the cases above: the same template and tfidf stay uncapped.
+      expect(r.components.raw).toBeCloseTo(r.components.primary, 12);
+      expect(r.components.raw).toBeGreaterThan(SUBJECT_VETO_CAP);
+    });
+
+    it("when neither title is an incident (Goreme vs Kapadokya)", () => {
+      const r = run("Göreme'de peribacası çöktü", "Kapadokya'da peribacası çöktü");
+      expect(r.components.incidentVeto).toBe(false);
+    });
+
+    it("when only one side has an incident word", () => {
+      const r = run("Bolu'da zincirleme kaza: Yaralılar var", "Düzce'de belediye meclisi toplandı");
+      expect(r.components.incidentVeto).toBe(false);
+    });
+
+    it("when the provinces overlap (Izmir earthquake anniversary vs Izmir statement)", () => {
+      const r = run("İzmir depreminin 6. yılında Bayraklı'da anma", "İzmir Depremi açıklaması");
+      expect(r.components.incidentVeto).toBe(false);
+    });
+
+    it("when one side names two provinces including the other's", () => {
+      const r = run("Bolu-Düzce sınırında kaza", "Düzce'de kaza");
+      expect(r.components.incidentVeto).toBe(false);
+    });
+
+    it("when the headline lane fired, even if the provinces differ", () => {
+      // A cross-outlet title pair that differs only in the province word: the
+      // lane fires, and the veto must stay out of its way.
+      expect(provincesIn(DUZCE).has("duzce")).toBe(true);
+      expect(provincesIn(BOLU_SAME_TEMPLATE).has("bolu")).toBe(true);
+      const r = run(DUZCE, BOLU_SAME_TEMPLATE, 0.58, 0.5);
+      expect(r.components.headlineLane).toBe(true);
+      expect(r.components.incidentVeto).toBe(false);
+    });
+
+    it("when a title is missing or empty", () => {
+      expect(run(null, DUZCE).components.incidentVeto).toBe(false);
+      expect(run(BOLU_DAGI, null).components.incidentVeto).toBe(false);
+      expect(run("", DUZCE).components.incidentVeto).toBe(false);
+      expect(run(BOLU_DAGI, "").components.incidentVeto).toBe(false);
+      expect(score(noFp, noFp, [], [], 0.58, 6).components.incidentVeto).toBe(false);
+    });
+
+    it("on the strict-fingerprint auto-accept", () => {
+      const same = { strict: "b".repeat(40), signature: null };
+      const r = score(same, same, [], [], 0.1, 6, { aTitle: BOLU_DAGI, bTitle: DUZCE });
+      expect(r.components.autoAccept).toBe(true);
+      expect(r.components.incidentVeto).toBe(false);
+      expect(r.score).toBe(1);
+    });
+  });
+
+  describe("parity with scripts/lib/cluster (.mjs twin)", () => {
+    interface MjsSide {
+      score: (
+        a: unknown,
+        b: unknown,
+        ea: Iterable<string>,
+        eb: Iterable<string>,
+        tfidf: number,
+        hours: number,
+        opts?: { aTitle?: string | null; bTitle?: string | null },
+      ) => { score: number; components: Record<string, unknown> };
+      fingerprint: (t: string, d: string) => unknown;
+    }
+    interface MjsProvinces {
+      IL_NAMES: readonly string[];
+      INCIDENT_PATTERNS: readonly RegExp[];
+      provincesIn: (title: string) => Set<string>;
+      hasIncidentWord: (title: string) => boolean;
+    }
+    let legacy: MjsSide;
+    let legacyProvinces: MjsProvinces;
+
+    beforeAll(async () => {
+      const [ens, fp, prov] = await Promise.all([
+        import("../../../scripts/lib/cluster/ensemble.mjs"),
+        import("../../../scripts/lib/cluster/fingerprint.mjs"),
+        import("../../../scripts/lib/cluster/provinces.mjs"),
+      ]);
+      legacy = { score: ens.score, fingerprint: fp.fingerprint } as unknown as MjsSide;
+      legacyProvinces = prov as unknown as MjsProvinces;
+    });
+
+    interface Case {
+      name: string;
+      a: string | null;
+      b: string | null;
+      tfidf?: number;
+      hours?: number;
+      body?: string;
+      strict?: boolean;
+    }
+    const CASES: Case[] = [
+      { name: "Duzce vs Bolu Dagi", a: DUZCE, b: BOLU_DAGI },
+      { name: "Duzce vs Bolu viaduct", a: DUZCE, b: BOLU_VIYADUK },
+      { name: "Bolu Dagi vs Duzce (swapped)", a: BOLU_DAGI, b: DUZCE },
+      { name: "Duzce vs Bolu Dagi, MinHash body", a: DUZCE, b: BOLU_DAGI, body: SHARED_BODY, hours: 0.5 },
+      { name: "Duzce vs Bolu Dagi, strong text", a: DUZCE, b: BOLU_DAGI, tfidf: 0.9, hours: 1 },
+      { name: "Duzce vs Anadolu", a: DUZCE, b: ANADOLU },
+      { name: "Goreme vs Kapadokya", a: "Göreme'de peribacası çöktü", b: "Kapadokya'da peribacası çöktü" },
+      { name: "Izmir anniversary vs Izmir", a: "İzmir depreminin 6. yılında Bayraklı'da anma", b: "İzmir Depremi açıklaması" },
+      { name: "Bolu-Duzce vs Duzce", a: "Bolu-Düzce sınırında kaza", b: "Düzce'de kaza" },
+      { name: "headline lane fired", a: DUZCE, b: BOLU_SAME_TEMPLATE, hours: 0.5 },
+      { name: "missing a", a: null, b: DUZCE },
+      { name: "missing b", a: BOLU_DAGI, b: null },
+      { name: "empty both", a: "", b: "" },
+      { name: "strict auto-accept", a: BOLU_DAGI, b: DUZCE, strict: true },
+    ];
+
+    it("scores and every component are identical (===) for every fixture pair", () => {
+      for (const c of CASES) {
+        const hours = c.hours ?? 6;
+        const tfidf = c.tfidf ?? 0.58;
+        let fa: unknown = noFp;
+        let fb: unknown = noFp;
+        let la: unknown = noFp;
+        let lb: unknown = noFp;
+        if (c.body !== undefined) {
+          fa = fingerprint(c.a ?? "", c.body);
+          fb = fingerprint(c.b ?? "", c.body);
+          la = legacy.fingerprint(c.a ?? "", c.body);
+          lb = legacy.fingerprint(c.b ?? "", c.body);
+        }
+        if (c.strict) {
+          const same = { strict: "c".repeat(40), signature: null };
+          fa = fb = la = lb = same;
+        }
+        const port = score(fa as never, fb as never, [], [], tfidf, hours, { aTitle: c.a, bTitle: c.b });
+        const old = legacy.score(la, lb, [], [], tfidf, hours, { aTitle: c.a, bTitle: c.b });
+        expect(port.score, `${c.name}: score`).toBe(old.score);
+        const portKeys = Object.keys(port.components).sort();
+        expect(portKeys, `${c.name}: component keys`).toEqual(Object.keys(old.components).sort());
+        expect(portKeys).toContain("incidentVeto");
+        for (const k of portKeys) {
+          expect((port.components as Record<string, unknown>)[k], `${c.name}: ${k}`).toBe(old.components[k]);
+        }
+      }
+    });
+
+    it("the fixtures exercise both outcomes (a veto and a non-veto)", () => {
+      const fired = CASES.filter((c) => {
+        const r = score(noFp, noFp, [], [], c.tfidf ?? 0.58, c.hours ?? 6, { aTitle: c.a, bTitle: c.b });
+        return r.components.incidentVeto;
+      });
+      expect(fired.length).toBeGreaterThanOrEqual(3);
+      expect(fired.length).toBeLessThan(CASES.length);
+    });
+
+    it("IL_NAMES, INCIDENT_PATTERNS, provincesIn and hasIncidentWord match the twin", () => {
+      expect([...legacyProvinces.IL_NAMES]).toEqual([...IL_NAMES]);
+      expect(legacyProvinces.INCIDENT_PATTERNS.map((p) => [p.source, p.flags])).toEqual(
+        INCIDENT_PATTERNS.map((p) => [p.source, p.flags]),
+      );
+      const titles = [
+        DUZCE, BOLU_DAGI, BOLU_VIYADUK, ANADOLU, BOLU_SAME_TEMPLATE,
+        "Bolu-Düzce sınırında kaza", "Ordu'da kaza", "İZMİR'DE DEPREM", "İsrail ordusu saldırı düzenledi",
+        "Taş ve Tüy, Altın Portakal’da altı ödül kazandı", "Kazakistan ile anlaşma", "Iğdır’da yangın",
+        "Göreme'de peribacası çöktü", "", "🔥 Şanlıurfa'da cinayet", "Ali tokat attı",
+      ];
+      for (const t of titles) {
+        expect([...legacyProvinces.provincesIn(t)].sort(), t).toEqual([...provincesIn(t)].sort());
+        expect(legacyProvinces.hasIncidentWord(t), t).toBe(hasIncidentWord(t));
+      }
+    });
   });
 });
 

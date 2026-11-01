@@ -576,64 +576,80 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   </details>
                 </div>
               )}
-              <div className="flex flex-wrap items-center gap-2 text-[12px] font-medium text-muted-foreground">
-                <span>{formatTurkishTimeAgo(cluster.first_published)}</span>
-                {updateCue && (
-                  <>
-                    <span aria-hidden="true" className="text-muted-foreground">•</span>
-                    <span>Güncellendi: {formatTurkishTimeAgo(updateCue)}</span>
-                  </>
-                )}
-                <span aria-hidden="true" className="text-muted-foreground">•</span>
-                <span>{wire.effectiveArticleCount} kaynak</span>
-                {/* Honest source count v2 (reader-data): when several of
-                    the shown sources used the exact same headline (folded
-                    for case/punctuation/quotes), say so without calling it
-                    "kopya" — a short factual headline can coincide
-                    naturally, so the "N kaynak" number itself is untouched. */}
-                {wire.memberCount >= 3 &&
-                  typeof wire.independentHeadlineCount === "number" &&
-                  wire.independentHeadlineCount < wire.effectiveArticleCount && (
-                    <Link
-                      href="/metodoloji#tek-kaynak"
-                      title="Aynı başlığı kullanan kaynaklar tek başlık sayılır."
-                      className="underline decoration-dotted underline-offset-2 hover:text-foreground"
-                    >
-                      · {wire.independentHeadlineCount} bağımsız başlık
-                    </Link>
+              {/* Mobile tap targets (h16-mobile-2): one wrapper, two
+                  display:contents groups. From sm up `contents` makes the
+                  children flex items of this row, exactly the old single
+                  row; below sm each group is its own full-width row, so the
+                  44 px actions never share a line with the meta text. The
+                  bullets live inside their span (mr-2 = the old gap-2), so
+                  no • can be a lone flex child that wraps to a line end. */}
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="contents max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-center max-sm:gap-2 text-[12px] font-medium text-muted-foreground">
+                  <span>{formatTurkishTimeAgo(cluster.first_published)}</span>
+                  {updateCue && (
+                    <span>
+                      <span aria-hidden="true" className="mr-2">•</span>
+                      Güncellendi: {formatTurkishTimeAgo(updateCue)}
+                    </span>
                   )}
-                {/* wire-redistribution: violet, not amber — amber above is
-                    reserved for the Kör nokta ribbon so the two claims
-                    (single-source dispatch vs. one-sided coverage) don't
-                    collapse into one visual cue. */}
-                {wire.isWireRedistribution && (
-                  <span
-                    className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-800 dark:text-violet-400 font-medium"
-                    title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
-                  >
-                    <Copy className="h-3 w-3" />
-                    Tek kaynaktan dağıtıldı · {wire.memberCount} kopya
+                  <span>
+                    <span aria-hidden="true" className="mr-2">•</span>
+                    {wire.effectiveArticleCount} kaynak
                   </span>
-                )}
-                {/* Same fallback as the h1: the share sheet gets "Haber", and
-                    the bookmark gets no title (null = the generic "Kaydet"
-                    label, and /saved never stores a made-up headline). */}
-                <ShareButton
-                  clusterId={id}
-                  title={headline}
-                  text={shareText}
-                />
-                <BookmarkButton
-                  clusterId={id}
-                  storyTitle={hasHeadline ? cluster.title_tr : null}
-                />
-                <CompareButton clusterId={id} />
-                <Link
-                  href={`/metodoloji?cluster=${id}#duzeltme`}
-                  className="text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+                  {/* Honest source count v2 (reader-data): when several of
+                      the shown sources used the exact same headline (folded
+                      for case/punctuation/quotes), say so without calling it
+                      "kopya" — a short factual headline can coincide
+                      naturally, so the "N kaynak" number itself is untouched. */}
+                  {wire.memberCount >= 3 &&
+                    typeof wire.independentHeadlineCount === "number" &&
+                    wire.independentHeadlineCount < wire.effectiveArticleCount && (
+                      <Link
+                        href="/metodoloji#tek-kaynak"
+                        title="Aynı başlığı kullanan kaynaklar tek başlık sayılır."
+                        className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                      >
+                        · {wire.independentHeadlineCount} bağımsız başlık
+                      </Link>
+                    )}
+                  {/* wire-redistribution: violet, not amber — amber above is
+                      reserved for the Kör nokta ribbon so the two claims
+                      (single-source dispatch vs. one-sided coverage) don't
+                      collapse into one visual cue. */}
+                  {wire.isWireRedistribution && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-800 dark:text-violet-400 font-medium"
+                      title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
+                    >
+                      <Copy className="h-3 w-3" />
+                      Tek kaynaktan dağıtıldı · {wire.memberCount} kopya
+                    </span>
+                  )}
+                </div>
+                <div
+                  data-row="actions"
+                  className="contents max-sm:flex max-sm:basis-full max-sm:flex-wrap max-sm:items-center max-sm:gap-2 font-medium"
                 >
-                  Düzeltme talebi
-                </Link>
+                  {/* Same fallback as the h1: the share sheet gets "Haber", and
+                      the bookmark gets no title (null = the generic "Kaydet"
+                      label, and /saved never stores a made-up headline). */}
+                  <ShareButton
+                    clusterId={id}
+                    title={headline}
+                    text={shareText}
+                  />
+                  <BookmarkButton
+                    clusterId={id}
+                    storyTitle={hasHeadline ? cluster.title_tr : null}
+                  />
+                  <CompareButton clusterId={id} />
+                  <Link
+                    href={`/metodoloji?cluster=${id}#duzeltme`}
+                    className="inline-flex items-center max-sm:min-h-11 text-[11px] text-muted-foreground underline decoration-dotted underline-offset-2 hover:text-foreground"
+                  >
+                    Düzeltme talebi
+                  </Link>
+                </div>
               </div>
             </div>
 
@@ -660,7 +676,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   <BalanceChip balance={balance} variant="full" />
                   <Link
                     href="/metodoloji#denge-puani"
-                    className="underline decoration-dotted underline-offset-2 hover:text-foreground"
+                    className="inline-flex items-center max-sm:min-h-11 underline decoration-dotted underline-offset-2 hover:text-foreground"
                   >
                     Denge puanı nedir?
                   </Link>

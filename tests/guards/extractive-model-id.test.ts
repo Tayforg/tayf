@@ -106,6 +106,22 @@ describe("EXTRACTIVE_MODEL_ID: readers must use isExtractiveModelId", () => {
   });
 });
 
+describe("JEV_NEUTRAL_MODEL_ID follows EXTRACTIVE_MODEL_ID (the Deno copy cannot be imported)", () => {
+  it("supabase/functions/_shared/jev.ts holds the same extractive-v<N> literal as neutral-title.ts", () => {
+    // The edge function cannot import from src/, so it keeps its own copy of
+    // the id. A bump that forgets it leaves the jev-shadow neutral_pick stage
+    // looking for rows nothing writes any more. Comments are blanked first, so
+    // prose that quotes an id cannot satisfy or trip the check.
+    const jev = blankComments(readFileSync(resolve(ROOT, "supabase/functions/_shared/jev.ts"), "utf8"));
+    const owner = files.find((f) => f.file === OWNER)!;
+    const jevLiteral = /export const JEV_NEUTRAL_MODEL_ID = ["'](extractive-v\d+)["']/.exec(jev);
+    const srcLiteral = /export const EXTRACTIVE_MODEL_ID = ["'](extractive-v\d+)["']/.exec(owner.code);
+    expect(jevLiteral, "JEV_NEUTRAL_MODEL_ID literal not found in jev.ts").not.toBeNull();
+    expect(srcLiteral, "EXTRACTIVE_MODEL_ID literal not found in neutral-title.ts").not.toBeNull();
+    expect(jevLiteral![1]).toBe(srcLiteral![1]);
+  });
+});
+
 describe("EXTRACTIVE_MODEL_ID guard: the finders really catch violations (mutation tests)", () => {
   const code = (src: string) => blankComments(src);
 

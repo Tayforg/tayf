@@ -199,3 +199,69 @@ describe("label builders", () => {
     expect(savedRemoveLabel(long)).toBe(`«${cut}» hikâyesini kaydedilenlerden çıkar`);
   });
 });
+
+// h16-mobile-2: the overlay is a 36 px circle and the chip ~28 px tall. The
+// overlay keeps its look (h-9 w-9) and grows an invisible 44 px hit area below
+// sm through a ::before pseudo-element (34 px padding box + 2 * 4 inset + 2 * 1
+// margin = 44); the chip gets a 44 px
+// minimum height below sm. Every addition is a max-sm: token, so sm and up is
+// unchanged.
+describe("BookmarkButton mobile tap targets (h16-mobile-2)", () => {
+  // renderToStaticMarkup HTML-escapes the quotes inside content-['']; decode
+  // them so the tokens read like the source.
+  const classTokens = (html: string) =>
+    (/<button\b[^>]*\bclass="([^"]*)"/.exec(html)?.[1] ?? "")
+      .replace(/&#x27;/g, "'")
+      .split(/\s+/)
+      .filter(Boolean);
+
+  it("overlay keeps the 36 px circle and adds a 44 px ::before hit area below sm", () => {
+    const tokens = classTokens(render({ variant: "overlay", storyTitle: TITLE }));
+    for (const token of [
+      "h-9",
+      "w-9",
+      "max-sm:before:absolute",
+      "max-sm:before:-inset-1",
+      "max-sm:before:content-['']",
+    ]) {
+      expect(tokens).toContain(token);
+    }
+    // An absolute ::before is sized from the button's PADDING box, which sits
+    // inside the 1 px border: -inset-1 alone measured 42 px in Chrome at
+    // 375 px. A -1 px margin on the pseudo-element grows it back to 44 px.
+    expect(tokens).toContain("max-sm:before:-m-px");
+    expect(tokens).not.toContain("h-11");
+    expect(tokens).not.toContain("w-11");
+  });
+
+  it("overlay does not add relative: the caller's absolute stays the containing block", () => {
+    const html = renderToStaticMarkup(
+      <BookmarkButton clusterId="c1" variant="overlay" className="absolute right-2 top-2" />,
+    );
+    const tokens = classTokens(html);
+    expect(tokens).toContain("absolute");
+    expect(tokens).not.toContain("relative");
+    expect(tokens).toContain("max-sm:before:-inset-1");
+  });
+
+  it("overlay hit area is identical in the saved state", () => {
+    state.saved = true;
+    const tokens = classTokens(render({ variant: "overlay" }));
+    expect(tokens).toContain("max-sm:before:absolute");
+    expect(tokens).toContain("max-sm:before:-inset-1");
+    expect(tokens).toContain("text-brand");
+  });
+
+  it("chip gets max-sm:min-h-11 and keeps its pill look", () => {
+    const tokens = classTokens(render({ variant: "chip", storyTitle: TITLE }));
+    expect(tokens).toContain("max-sm:min-h-11");
+    for (const token of ["rounded-full", "px-3", "py-1.5", "text-[11px]"]) {
+      expect(tokens).toContain(token);
+    }
+  });
+
+  it("chip adds no overlay-only pseudo-element tokens", () => {
+    const tokens = classTokens(render({ variant: "chip" }));
+    expect(tokens.some((t) => t.includes("before:"))).toBe(false);
+  });
+});

@@ -20,6 +20,11 @@
 //   subject veto: when the headline lane did not fire and the two headlines'
 //     subjects ("Lavrov," vs "Fidan,") are disjoint, primary and the MinHash
 //     lane are capped at SUBJECT_VETO_CAP (h12-cluster-2)
+//   incident veto: when the headline lane did not fire, both headlines carry an
+//     incident word (kaza, yangin, deprem, ...) and name provinces, and the two
+//     province sets are disjoint ("Duzce'de ... kazada" vs "Bolu Dagi'nda ...
+//     kaza"), the same two lanes are capped at SUBJECT_VETO_CAP
+//     (h16-precision-1; see provinces.ts)
 //   text floor: if the headline lane did not fire and tfidf < ENTITY_TEXT_FLOOR,
 //     the primary lane is capped just under MATCH_THRESHOLD (entities alone
 //     cannot join a pair that shares no text)
@@ -65,6 +70,7 @@ import {
   headlineTokens,
   jaccardFromSignatures,
 } from "./fingerprint.ts";
+import { hasIncidentWord, provincesIn } from "./provinces.ts";
 
 // ---------------------------------------------------------------------------
 // Per-source clustering penalties.
@@ -122,6 +128,9 @@ export interface ScoreComponents {
   // True when the subject veto capped the pair (different actors, same
   // template); see subjectVetoFires().
   subjectVeto: boolean;
+  // True when the incident province-conflict veto capped the pair (same
+  // incident template, different provinces); see incidentVetoFires().
+  incidentVeto: boolean;
 }
 
 export interface ScoreResult {
@@ -430,6 +439,28 @@ function subjectVetoFires(aTitle: string, bTitle: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Incident province veto (h16-precision-1)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when the two headlines report incidents in different provinces: both
+ * (clipped to HEADLINE_TITLE_MAX_CHARS) carry an incident word, both name at
+ * least one province, and the two province sets are disjoint. A side that
+ * names no province ("Anadolu Otoyolu'nda ... kaza") never vetoes, and a side
+ * that names two provinces vetoes only when neither is the other side's.
+ */
+function incidentVetoFires(aTitle: string, bTitle: string): boolean {
+  const a = aTitle.slice(0, HEADLINE_TITLE_MAX_CHARS);
+  const b = bTitle.slice(0, HEADLINE_TITLE_MAX_CHARS);
+  if (!hasIncidentWord(a) || !hasIncidentWord(b)) return false;
+  const pa = provincesIn(a);
+  const pb = provincesIn(b);
+  if (pa.size === 0 || pb.size === 0) return false;
+  for (const p of pa) if (pb.has(p)) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // score()
 // ---------------------------------------------------------------------------
 
@@ -466,6 +497,7 @@ export function score(
         headlineContainment: 0,
         textFloorCapped: false,
         subjectVeto: false,
+        incidentVeto: false,
       },
     };
   }
@@ -547,8 +579,12 @@ export function score(
   // lane that fired (the headlines already agree).
   const subjectVeto = !headlineFired && !!aTitle && !!bTitle &&
     subjectVetoFires(aTitle, bTitle);
+  // Incident veto: the same incident template in different provinces. Same
+  // exemption as the subject veto, same cap.
+  const incidentVeto = !headlineFired && !!aTitle && !!bTitle &&
+    incidentVetoFires(aTitle, bTitle);
   let jaccardForRaw = jaccardScore;
-  if (subjectVeto) {
+  if (subjectVeto || incidentVeto) {
     primaryForRaw = Math.min(primaryForRaw, SUBJECT_VETO_CAP);
     jaccardForRaw = Math.min(jaccardScore, SUBJECT_VETO_CAP);
   }
@@ -581,6 +617,7 @@ export function score(
       headlineContainment,
       textFloorCapped,
       subjectVeto,
+      incidentVeto,
     },
   };
 }

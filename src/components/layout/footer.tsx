@@ -63,12 +63,12 @@ export function Footer() {
           </div>
 
           {/* Navigation */}
-          <nav aria-label="Alt menü" className="flex flex-wrap gap-x-5 gap-y-2">
+          <nav aria-label="Alt menü" className="flex flex-wrap gap-x-5 gap-y-2 max-sm:gap-y-0">
             {NAV_LINKS.map((link) => (
               <Link
                 key={link.href}
                 href={link.href}
-                className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                className="text-[11px] text-muted-foreground hover:text-foreground transition-colors max-sm:inline-flex max-sm:min-h-11 max-sm:items-center"
               >
                 {link.label}
               </Link>
@@ -78,7 +78,7 @@ export function Footer() {
             <a
               href="/rss.xml"
               type="application/rss+xml"
-              className="text-[11px] text-muted-foreground hover:text-brand transition-colors"
+              className="text-[11px] text-muted-foreground hover:text-brand transition-colors max-sm:inline-flex max-sm:min-h-11 max-sm:items-center"
             >
               RSS
             </a>
