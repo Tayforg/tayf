@@ -19,6 +19,14 @@ vi.mock("next/server", async (importOriginal) => {
   return { ...actual, connection: vi.fn(async () => {}) };
 });
 
+// hubs.xml is built by src/lib/seo/hub-sitemap.ts (62 getEntityHub reads);
+// its own behaviour is covered in src/lib/seo/hub-sitemap.test.ts. Here only
+// the route's mapping of its outcome to a response is under test.
+const hubs = vi.hoisted(() => ({ getHubsSitemapXml: vi.fn() }));
+vi.mock("@/lib/seo/hub-sitemap", () => ({
+  getHubsSitemapXml: hubs.getHubsSitemapXml,
+}));
+
 const fixture = vi.hoisted(() => ({
   clusters: [] as Array<Record<string, unknown>>,
   sources: [] as Array<Record<string, unknown>>,
@@ -71,6 +79,7 @@ function callFile(file: string) {
 
 beforeEach(() => {
   vi.mocked(connection).mockClear();
+  hubs.getHubsSitemapXml.mockReset();
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
@@ -103,6 +112,7 @@ describe("GET /sitemap.xml", () => {
     expect(body).toContain("https://tayf.test/sitemaps/news.xml");
     expect(body).toContain("https://tayf.test/sitemaps/static.xml");
     expect(body).toContain("https://tayf.test/sitemaps/sources.xml");
+    expect(body).toContain("https://tayf.test/sitemaps/hubs.xml");
   });
 
   it("runs per request: awaits connection() and picks up a new UTC month the hour it starts", async () => {
@@ -226,6 +236,45 @@ describe("GET /sitemaps/[file]", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("https://tayf.test/source/kaynak-a");
+  });
+
+  it("hubs.xml → 200 with the default cache header, built for the site's base URL", async () => {
+    const xml =
+      '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>https://tayf.test/gundem/erdogan</loc></url></urlset>';
+    hubs.getHubsSitemapXml.mockResolvedValue(xml);
+
+    const res = await callFile("hubs.xml");
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/xml; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe(
+      "public, s-maxage=3600, stale-while-revalidate=86400",
+    );
+    expect(await res.text()).toBe(xml);
+    expect(hubs.getHubsSitemapXml).toHaveBeenCalledTimes(1);
+    expect(hubs.getHubsSitemapXml).toHaveBeenCalledWith("https://tayf.test");
+  });
+
+  it("hubs.xml with a failed hub read → 503 no-store with Retry-After 600, never a 200", async () => {
+    hubs.getHubsSitemapXml.mockRejectedValue(
+      new Error("hubs sitemap: hub read failed (1 of 8 in the batch at 0)"),
+    );
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await callFile("hubs.xml");
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("retry-after")).toBe("600");
+    errSpy.mockRestore();
+  });
+
+  it("near-miss hub files never reach the hubs builder", async () => {
+    for (const file of ["hubs.xml.gz", "hubsxml", "hubs"]) {
+      const res = await callFile(file);
+      expect(res.status, file).toBe(404);
+    }
+    expect(hubs.getHubsSitemapXml).not.toHaveBeenCalled();
   });
 
   it("bogus.xml → 404", async () => {

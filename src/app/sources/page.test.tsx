@@ -134,6 +134,7 @@ import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
 import { DenominatorNote } from "@/components/source/denominator-note";
 import { ClickbaitKarneSection } from "@/components/source/clickbait-karne";
 import { getClickbaitKarne, isClickbaitPublic } from "@/lib/sources/clickbait";
+import { BIAS_LABELS } from "@/lib/bias/config";
 
 /**
  * Collects every string/number leaf under a React element tree. Expands
@@ -596,5 +597,101 @@ describe("/sources page — the weekly counts overlap the directory read (cold p
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Card a11y (WCAG 2.5.3 label in name, 2.5.8 target size). The card link used to
+// carry aria-label="<name> profili", which replaced the whole visible text (bias
+// label, count, time) in the accessible name. It now has no aria-label, so its
+// name is its visible text. The external "↗" link is a 24 x 24 target.
+// ---------------------------------------------------------------------------
+
+type GroupedSources = Parameters<typeof SourceDirectory>[0]["grouped"];
+
+const GZT = {
+  id: "gzt",
+  name: "GZT",
+  slug: "gzt",
+  url: "https://example.com/gzt",
+  rss_url: "https://example.com/gzt/rss",
+  bias: "pro_government",
+  logo_url: "https://example.com/gzt.png",
+  active: true,
+  kind: "outlet",
+  image_allowed: true,
+  excerpt_allowed: true,
+  trustee_since: null,
+  trustee_note: null,
+  lastPublishedAt: null,
+};
+
+describe("SourceDirectory card -- accessible name and target size", () => {
+  const markup = renderToStaticMarkup(
+    createElement(SourceDirectory, {
+      grouped: { pro_government: [GZT] } as unknown as GroupedSources,
+      countLabel: "12 haber",
+    }),
+  );
+
+  const cardOpen = /<a\b[^>]*\bhref="\/source\/gzt"[^>]*>/.exec(markup);
+  const cardStart = cardOpen?.index ?? -1;
+  const cardEnd = markup.indexOf("</a>", cardStart);
+  const cardTag = cardOpen?.[0] ?? "";
+  const cardInner = markup.slice(cardStart + cardTag.length, cardEnd);
+
+  const externalOpen = /<a\b[^>]*\bhref="https:\/\/example\.com\/gzt"[^>]*>/.exec(markup);
+  const externalTag = externalOpen?.[0] ?? "";
+  const externalInner = externalOpen
+    ? markup.slice(
+        externalOpen.index + externalTag.length,
+        markup.indexOf("</a>", externalOpen.index),
+      )
+    : "";
+
+  const tokensOf = (tag: string) =>
+    (/\bclass="([^"]*)"/.exec(tag)?.[1] ?? "").split(/\s+/).filter(Boolean);
+
+  it("finds the card link and the external link", () => {
+    expect(cardOpen).not.toBeNull();
+    expect(cardEnd).toBeGreaterThan(cardStart);
+    expect(externalOpen).not.toBeNull();
+  });
+
+  it("(2.5.3) the card link has no aria-label, so its name is its visible text", () => {
+    expect(cardTag).not.toContain("aria-label");
+    expect(markup).not.toContain("profili");
+  });
+
+  it("(2.5.3) the card link's text holds the name, the bias label and the count", () => {
+    const text = cardInner.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ");
+    expect(text).toContain("GZT");
+    expect(text).toContain(BIAS_LABELS.pro_government);
+    expect(text).toContain("12 haber");
+  });
+
+  it("the logo inside the card link is decorative: every alt is empty", () => {
+    const alts = [...cardInner.matchAll(/\balt=("[^"]*")/g)].map((m) => m[1]);
+    expect(alts.length).toBeGreaterThan(0);
+    for (const alt of alts) expect(alt).toBe('""');
+  });
+
+  it("(2.5.8) the external link is a 24 x 24 target in the corner, named for what it opens", () => {
+    expect(externalTag).toContain('aria-label="GZT sitesini yeni sekmede aç"');
+    expect(externalTag).toContain('target="_blank"');
+    expect(externalTag).toContain('rel="noopener noreferrer"');
+    const tokens = tokensOf(externalTag);
+    for (const token of ["inline-flex", "min-h-6", "min-w-6", "top-2", "right-2"]) {
+      expect(tokens).toContain(token);
+    }
+    expect(externalInner).toBe('<span aria-hidden="true">↗</span>');
+  });
+
+  it("(e) the name leaves room for the 24 px corner link: pr-7, not pr-5", () => {
+    const namePara = /<p class="([^"]*)">GZT<\/p>/.exec(markup);
+    expect(namePara).not.toBeNull();
+    const tokens = (namePara?.[1] ?? "").split(/\s+/);
+    expect(tokens).toContain("pr-7");
+    expect(tokens).not.toContain("pr-5");
   });
 });

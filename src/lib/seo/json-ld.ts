@@ -135,3 +135,49 @@ export function buildBreadcrumbs(items: BreadcrumbItem[]) {
     })),
   };
 }
+
+export interface CollectionItem {
+  /** Visible item name (a cluster title or an entity label). */
+  name: string;
+  /** Site-relative path (e.g. "/cluster/<id>", "/gundem/<key>") -- resolved
+   *  to an absolute URL via `siteUrl()`. */
+  path: string;
+}
+
+/**
+ * Pure. schema.org CollectionPage whose mainEntity is an ItemList of absolute
+ * URLs. Generic and path-based: the /gundem/[key] hubs list clusters, the
+ * /gundem index lists the hubs themselves. (/konu/[slug] has its own
+ * bundle-based twin in topic-query.ts.) The caller embeds the result via
+ * `serializeJsonLd`, which escapes a "</script" hiding in a name.
+ */
+export function buildClusterCollectionPage(args: {
+  name: string;
+  path: string;
+  items: readonly CollectionItem[];
+}): Record<string, unknown> {
+  const { name, path, items } = args;
+  const base = siteUrl();
+
+  return {
+    "@context": "https://schema.org",
+    "@type": "CollectionPage",
+    name,
+    url: `${base}${path}`,
+    isPartOf: {
+      "@type": "WebSite",
+      name: "Tayf",
+      url: base,
+    },
+    mainEntity: {
+      "@type": "ItemList",
+      numberOfItems: items.length,
+      itemListElement: items.map((item, i) => ({
+        "@type": "ListItem",
+        position: i + 1,
+        name: item.name,
+        url: `${base}${item.path}`,
+      })),
+    },
+  };
+}

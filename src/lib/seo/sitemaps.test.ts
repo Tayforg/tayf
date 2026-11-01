@@ -190,6 +190,10 @@ describe("parseSitemapFile", () => {
     expect(parseSitemapFile("news.xml")).toBe("news");
   });
 
+  it("accepts hubs.xml, the sitemap of indexable /gundem/<key> hubs", () => {
+    expect(parseSitemapFile("hubs.xml")).toBe("hubs");
+  });
+
   it("accepts a valid month file at or after SITEMAP_FIRST_MONTH", () => {
     expect(parseSitemapFile("clusters-2026-09.xml")).toEqual({ month: "2026-09" });
     expect(parseSitemapFile(`clusters-${SITEMAP_FIRST_MONTH}.xml`)).toEqual({
@@ -214,6 +218,8 @@ describe("parseSitemapFile", () => {
   it("rejects a near-miss extension", () => {
     expect(parseSitemapFile("news.xml.gz")).toBeNull();
     expect(parseSitemapFile("newsxml")).toBeNull();
+    expect(parseSitemapFile("hubs.xml.gz")).toBeNull();
+    expect(parseSitemapFile("hubsxml")).toBeNull();
   });
 
   it("does not upper-bound a future month", () => {
@@ -313,7 +319,7 @@ describe("getCurrentSitemapMonth", () => {
 });
 
 describe("getSitemapIndexXml", () => {
-  it("lists the 3 fixed files plus every month through the current one", () => {
+  it("lists the 4 fixed files plus every month through the current one", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-28T12:00:00.000Z"));
     try {
@@ -321,6 +327,7 @@ describe("getSitemapIndexXml", () => {
         expect(xml).toContain("https://tayf.test/sitemaps/static.xml");
         expect(xml).toContain("https://tayf.test/sitemaps/sources.xml");
         expect(xml).toContain("https://tayf.test/sitemaps/news.xml");
+        expect(xml).toContain("https://tayf.test/sitemaps/hubs.xml");
         for (const m of ["2026-04", "2026-05", "2026-06", "2026-07", "2026-08", "2026-09"]) {
           expect(xml).toContain(`https://tayf.test/sitemaps/clusters-${m}.xml`);
         }

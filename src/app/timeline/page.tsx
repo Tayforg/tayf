@@ -41,7 +41,8 @@ export const metadata: Metadata = staticPageMetadata({
 // hands the pill the newest first_published and the ids of the first
 // TIMELINE_HEAD_LIMIT rows (the head's own window) to diff against. It is not
 // rendered when the read failed (rows === null). The hero and the pill share a
-// plain wrapper so an empty pill adds no space-y gap.
+// `relative` wrapper (a positioning context, no spacing): the pill is absolutely
+// placed in the 32 px space-y-8 gap below it, so it never moves the list (CLS 0).
 
 interface HourBucket {
   // ISO of the top-of-hour the rows in this bucket belong to. Used as the
@@ -129,7 +130,7 @@ export default async function TimelinePage() {
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-8">
-      <div>
+      <div className="relative">
         <PageHero
           kicker="Son 24 saat"
           title="Zaman çizelgesi"

@@ -2,12 +2,20 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 import { PageHero } from "@/components/ui/page-hero";
+import {
+  buildBreadcrumbs,
+  buildClusterCollectionPage,
+  serializeJsonLd,
+} from "@/lib/seo/json-ld";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 // /gundem — index of the entity hubs (/gundem/[key]). Pure vocabulary: it reads
 // nothing from the database, so it prerenders fully static and can never show
 // an unavailable state. The per-hub cluster counts live on the hubs themselves.
+// The CollectionPage JSON-LD lists all 62 hubs from the same static vocabulary
+// (including ones that are noindexed today for being thin); the index itself is
+// always indexable.
 
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
@@ -25,6 +33,26 @@ const chipClass =
 export default function GundemIndexPage() {
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-6">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: serializeJsonLd([
+            buildClusterCollectionPage({
+              name: "Gündemdeki adlar",
+              path: "/gundem",
+              items: RISING_ENTITIES.map((e) => ({
+                name: e.label,
+                path: `/gundem/${e.key}`,
+              })),
+            }),
+            buildBreadcrumbs([
+              { name: "Anasayfa", path: "/" },
+              { name: "Gündem", path: "/gundem" },
+            ]),
+          ]),
+        }}
+      />
+
       <PageHero
         kicker="Gündem"
         title="Gündemdeki adlar"

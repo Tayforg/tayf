@@ -47,6 +47,27 @@ describe("NewClustersPill -- server render", () => {
     expect(empty).toContain('role="status"');
     expect(empty).not.toContain("<button");
   });
+
+  // CLS 0: the region is positioned in the parent's 32 px space-y-8 gap, out of
+  // flow, with a fixed 32 px box. The pill and the "Liste güncellendi" text
+  // appear inside that box, so nothing below it can move.
+  it("reserves its own box out of flow: absolute, full width, 32 px tall, centred", () => {
+    const tag = /<[a-z]+\b[^>]*\brole="status"[^>]*>/.exec(markup)?.[0];
+    expect(tag).toBeDefined();
+    const classes = /\bclass="([^"]*)"/.exec(tag ?? "")?.[1] ?? "";
+    const tokens = classes.split(/\s+/).filter(Boolean);
+    for (const token of [
+      "absolute",
+      "inset-x-0",
+      "top-full",
+      "h-8",
+      "flex",
+      "items-center",
+      "justify-center",
+    ]) {
+      expect(tokens).toContain(token);
+    }
+  });
 });
 
 describe("NewClustersPill -- source guard", () => {
@@ -113,5 +134,32 @@ describe("NewClustersPill -- source guard", () => {
 
   it("confirms the refresh in the live region (WCAG 4.1.3)", () => {
     expect(code).toContain("Liste güncellendi");
+  });
+
+  // CLS 0: no state may change the region's box. Its className is one static
+  // literal (no template, no expression) placed right after tabIndex={-1}, so
+  // neither `count`, `pending` nor `updated` can resize or move it.
+  it("the region's className is ONE static literal right after tabIndex={-1}", () => {
+    const literal = /tabIndex=\{-1\}\s+className="([^"{}$`]*)"\s*>/.exec(code);
+    expect(literal).not.toBeNull();
+    const tokens = (literal?.[1] ?? "").split(/\s+/).filter(Boolean);
+    expect(tokens).toEqual(
+      expect.arrayContaining(["absolute", "inset-x-0", "top-full", "h-8"]),
+    );
+    // The only className on the region element itself.
+    const regionTag = /<div\b[^>]*\brole="status"[^>]*>/.exec(code)?.[0] ?? "";
+    expect(regionTag.match(/className\s*=/g)).toHaveLength(1);
+  });
+
+  it("no className literal carries an mt- margin (a margin would push the list)", () => {
+    expect(code).not.toMatch(/className="[^"]*(?<![\w-])mt-/);
+  });
+
+  it("the margin guard really matches an mt- token and ignores look-alikes", () => {
+    const margin = /className="[^"]*(?<![\w-])mt-/;
+    expect('className="mt-4 flex"').toMatch(margin);
+    expect('className="flex mt-4"').toMatch(margin);
+    expect('className="flex min-h-8 text-xs"').not.toMatch(margin);
+    expect('className="flex smt-4"').not.toMatch(margin);
   });
 });

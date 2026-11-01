@@ -53,3 +53,22 @@ describe("footer.tsx Sistem durumu link", () => {
     expect(src.split('href: "/durum"')).toHaveLength(2);
   });
 });
+
+// /gundem hubs discoverability: the 62 /gundem/<key> hubs were only reachable
+// through /trends links. The footer is the only site-wide nav, so the /gundem
+// index sits there, right after the /konu topic index it parallels.
+describe("footer.tsx Gündem link", () => {
+  const src = readFileSync(join(__dirname, "footer.tsx"), "utf8");
+  const nav = src.slice(src.indexOf("const NAV_LINKS"), src.indexOf("] as const"));
+  const KONU = '{ href: "/konu", label: "Konular" },';
+  const GUNDEM = '{ href: "/gundem", label: "Gündem" },';
+
+  it("lists /gundem with the label Gündem exactly once", () => {
+    expect(nav.split(GUNDEM)).toHaveLength(2);
+    expect(src.split('href: "/gundem"')).toHaveLength(2);
+  });
+
+  it("sits immediately after the Konular entry", () => {
+    expect(nav).toContain(`${KONU}\n  ${GUNDEM}`);
+  });
+});
