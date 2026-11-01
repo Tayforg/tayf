@@ -63,22 +63,24 @@ interface ClusterSide {
   headlineTokens(title: string | null | undefined): {
     tokens: Set<string>;
     numbers: Set<string>;
+    liveKey?: string | null;
   };
+  stemHeadlineToken(token: string): string;
   headlineLane(
-    ha: { tokens: Set<string>; numbers: Set<string> },
-    hb: { tokens: Set<string>; numbers: Set<string> },
+    ha: { tokens: Set<string>; numbers: Set<string>; liveKey?: string | null },
+    hb: { tokens: Set<string>; numbers: Set<string>; liveKey?: string | null },
     hoursDelta: number,
   ): {
     fired: boolean;
-    kind: "jaccard" | "containment" | null;
+    kind: "jaccard" | "containment" | "live-title" | null;
     sim: number;
     shared: number;
     containment: number;
     score: number;
   };
   headlineOnlyScore(
-    ha: { tokens: Set<string>; numbers: Set<string> },
-    hb: { tokens: Set<string>; numbers: Set<string> },
+    ha: { tokens: Set<string>; numbers: Set<string>; liveKey?: string | null },
+    hb: { tokens: Set<string>; numbers: Set<string>; liveKey?: string | null },
     hoursDelta: number,
     opts?: { aSourceSlug?: string | null; bSourceSlug?: string | null },
   ): number;
@@ -213,6 +215,7 @@ beforeAll(async () => {
       headlineOnlyScore: legacyEnsemble.headlineOnlyScore,
       titleTokens: legacyFingerprint.titleTokens,
       headlineTokens: legacyFingerprint.headlineTokens,
+      stemHeadlineToken: legacyFingerprint.stemHeadlineToken,
       MINHASH_VERSION: legacyFingerprint.MINHASH_VERSION,
       serializeSignature: legacyFingerprint.serializeSignature,
       deserializeSignature: legacyFingerprint.deserializeSignature,
@@ -227,6 +230,7 @@ beforeAll(async () => {
       headlineOnlyScore: portEnsemble.headlineOnlyScore,
       titleTokens: portFingerprint.titleTokens,
       headlineTokens: portFingerprint.headlineTokens,
+      stemHeadlineToken: portFingerprint.stemHeadlineToken,
       MINHASH_VERSION: portFingerprint.MINHASH_VERSION,
       serializeSignature: portFingerprint.serializeSignature,
       deserializeSignature: portFingerprint.deserializeSignature,
@@ -302,6 +306,40 @@ beforeAll(async () => {
     expect(portConstants.TOKEN_CANDIDATE_MIN_SHARED).toBe(
       legacyConstants.TOKEN_CANDIDATE_MIN_SHARED,
     );
+    // Wave AJ (h12-cluster-2 / h12-cluster-3): entity homographs, generic
+    // entity weight, subject veto, headline aliases / short / live titles.
+    expect([...portConstants.ENTITY_AMBIGUOUS]).toEqual([...legacyConstants.ENTITY_AMBIGUOUS]);
+    expect([...portConstants.ENTITY_PROPER_NOUNS]).toEqual([...legacyConstants.ENTITY_PROPER_NOUNS]);
+    expect([...portConstants.GENERIC_ENTITIES]).toEqual([...legacyConstants.GENERIC_ENTITIES]);
+    expect(portConstants.GENERIC_ENTITY_WEIGHT).toBe(legacyConstants.GENERIC_ENTITY_WEIGHT);
+    expect(portConstants.SUBJECT_SPAN_MAX_WORDS).toBe(legacyConstants.SUBJECT_SPAN_MAX_WORDS);
+    expect([...portConstants.SUBJECT_STOP_WORDS]).toEqual([...legacyConstants.SUBJECT_STOP_WORDS]);
+    expect(portConstants.SUBJECT_VETO_CAP).toBe(legacyConstants.SUBJECT_VETO_CAP);
+    expect(portConstants.HEADLINE_SHORT_MIN_TOKENS).toBe(legacyConstants.HEADLINE_SHORT_MIN_TOKENS);
+    expect(portConstants.HEADLINE_LIVE_TITLE_MAX_HOURS).toBe(
+      legacyConstants.HEADLINE_LIVE_TITLE_MAX_HOURS,
+    );
+    expect({ ...portConstants.HEADLINE_ALIASES }).toEqual({ ...legacyConstants.HEADLINE_ALIASES });
+    // Pin the shipped values so "both undefined" can never pass as parity.
+    expect([...legacyConstants.ENTITY_AMBIGUOUS]).toEqual([
+      "ozel", "iyi", "gelecek", "tip", "dem", "adalet", "cuma", "spor", "saadet", "vatan", "rum",
+    ]);
+    expect([...legacyConstants.ENTITY_PROPER_NOUNS]).toEqual([
+      "ozel", "adalet", "cuma", "spor", "saadet", "vatan", "rum",
+    ]);
+    expect([...legacyConstants.GENERIC_ENTITIES]).toEqual([
+      "bakan", "disisleri", "abd", "turkiye", "erdogan", "fidan", "istanbul",
+    ]);
+    expect(legacyConstants.GENERIC_ENTITY_WEIGHT).toBe(0.6);
+    expect(legacyConstants.SUBJECT_SPAN_MAX_WORDS).toBe(6);
+    expect(legacyConstants.SUBJECT_VETO_CAP).toBe(legacyConstants.MATCH_THRESHOLD * 0.9 - 0.01);
+    expect(legacyConstants.HEADLINE_SHORT_MIN_TOKENS).toBe(2);
+    expect(legacyConstants.HEADLINE_LIVE_TITLE_MAX_HOURS).toBe(10 / 60);
+    expect({ ...legacyConstants.HEADLINE_ALIASES }).toEqual({
+      zelensky: "zelenski",
+      zelenskiy: "zelenski",
+      zelenskyy: "zelenski",
+    });
   } catch (err) {
     loadError = err;
   }
@@ -338,6 +376,41 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         const a = [...legacy.extractEntities(entityText(article))].sort();
         const b = [...port.extractEntities(entityText(article))].sort();
         expect(b).toEqual(a);
+      });
+    }
+  });
+
+  describe("extractEntities: homograph strings (h12-cluster-2)", () => {
+    const homographs = [
+      "Özel sektör kredileri arttı",
+      "özel sektör",
+      "Adıyaman Kahta'da para tartışmasında iyi bir işçi…",
+      "iyi bir",
+      "COP31'e 91 devlet başkanı gelecek",
+      "gelecek yıl",
+      "Türk Tıp Dünyası Kurultayı cuma günü",
+      "cuma günü",
+      "ÖZEL SEKTÖR KREDİLERİ ARTTI",
+      "Özgür Özel",
+      "CHP lideri Özel açıklama yaptı",
+      "Özel'den sert tepki",
+      "Özel’den sert tepki",
+      "İYİ Parti",
+      "İyi Parti'nin adayı",
+      "Gelecek Partisi",
+      "TİP milletvekili konuştu",
+      "DEM Parti",
+      "Adalet Bakanı Tunç",
+      "Adalet Bakanlığı açıklama yaptı",
+      "Toplantı sona erdi. Özel sektör temsilcileri de katıldı",
+      "🔴 Özel sektör kredileri",
+      "Saadet ve DEM heyetleri Vatan Partisi ile Spor Bakanlığı'nı ziyaret etti",
+      "",
+    ];
+    for (const text of homographs) {
+      it(`matches for ${JSON.stringify(text)}`, () => {
+        if (!legacy || !port) expect.fail("cluster libs not loaded");
+        expect([...port.extractEntities(text)].sort()).toEqual([...legacy.extractEntities(text)].sort());
       });
     }
   });
@@ -470,7 +543,7 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
       b: string;
       tfidf: number;
       hours: number;
-      kind?: "jaccard" | "containment" | null;
+      kind?: "jaccard" | "containment" | "live-title" | null;
     }> = [
       {
         a: "Son dakika... Mustafa Sarıgül YENİ Parti'den istifa etti",
@@ -625,6 +698,63 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         hours: 1,
         kind: null,
       },
+      // Wave AJ (h12-cluster-3): real prod pairs of 2026-10-30..11-01.
+      // fire: numeral class shift {100,1000} vs {19,78}, containment 7/8.
+      {
+        a: "Bahçeli'den 100 il 1000 ilçe çıkışı! Türkiye'nin idari haritası değişebilir",
+        b: "Türkiye'nin idari haritası değişebilir! Bahçeli'den 19 yeni il ve 78 ilçe önerisi",
+        tfidf: 0.2,
+        hours: 1,
+        kind: "containment",
+      },
+      // fire: two outlets' identical live titles inside 10 minutes.
+      {
+        a: "CANLI | Cumhurbaşkanı Erdoğan konuşuyor",
+        b: "CANLI | Cumhurbaşkanı Erdoğan konuşuyor",
+        tfidf: 0.1,
+        hours: 0.1,
+        kind: "live-title",
+      },
+      // no fire: the same live titles half an hour apart.
+      {
+        a: "CANLI | Cumhurbaşkanı Erdoğan konuşuyor",
+        b: "CANLI | Cumhurbaşkanı Erdoğan konuşuyor",
+        tfidf: 0.1,
+        hours: 0.5,
+        kind: null,
+      },
+      // fire: three identical stems ("Zelenskiy'i" / "Zelenski'yi" alias).
+      {
+        a: "Erdoğan, Zelenskiy'i kabul etti",
+        b: "Erdoğan Zelenski'yi kabul etti",
+        tfidf: 0.2,
+        hours: 1,
+        kind: "jaccard",
+      },
+      // no fire: same slot, 40 vs 39.
+      {
+        a: "Bakırköy Belediyesi soruşturmasında 40 tutuklama talebi",
+        b: "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+        tfidf: 0.2,
+        hours: 1,
+        kind: null,
+      },
+      // no fire (and subject veto on the full scorer): Lavrov vs Fidan.
+      {
+        a: "Lavrov, Japon mevkidaşı Motegi ile görüştü",
+        b: "Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü",
+        tfidf: 0.3,
+        hours: 1.25,
+        kind: null,
+      },
+      // fire: Bakırköy 39b, belediyesi / Belediyesine share a headline stem.
+      {
+        a: "Bakırköy Belediyesi'ne soruşturmada 39 kişiye tutuklama",
+        b: "Bakırköy Belediyesine yönelik soruşturmada 39 tutuklama",
+        tfidf: 0.25,
+        hours: 1,
+        kind: "jaccard",
+      },
     ];
 
     it("score() is byte-equivalent for the golden headline pairs", () => {
@@ -722,6 +852,11 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         "a".repeat(299) + " bölünenkelime 2026",
         "ğ".repeat(500),
         null,
+        // Wave AJ: live titles, aliases and locatives.
+        "CANLI | Cumhurbaşkanı Erdoğan konuşuyor",
+        "Son dakika...",
+        "Karar Resmi Gazete'de atandı Atlanta",
+        "Zelensky, Zelenskiy ve Zelenskyy Mecliste devlette belediyesine mevkidaşıyla",
       ];
       for (const t of titles) {
         expect([...port.titleTokens(t, 4)].sort()).toEqual([...legacy.titleTokens(t, 4)].sort());
@@ -729,6 +864,20 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         const r = port.headlineTokens(t);
         expect([...r.tokens].sort()).toEqual([...l.tokens].sort());
         expect([...r.numbers].sort()).toEqual([...l.numbers].sort());
+        expect(r.liveKey ?? null).toBe(l.liveKey ?? null);
+      }
+    });
+
+    it("stemHeadlineToken agrees on a word list covering every rule", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const words = [
+        "mecliste", "devlette", "soruşturmada", "soruşturmasında", "belediyesine", "mevkidaşıyla",
+        "gazete", "atlanta", "atandı", "toplantılarından", "bakanlıklarda", "yapılması", "okulda",
+        "zelensky", "zelenskiy", "zelenskyy", "zelenski", "2026", "etti", "ali", "", "lerdenlerden",
+        "ğ".repeat(40),
+      ].map((w) => w.toLocaleLowerCase("tr"));
+      for (const w of words) {
+        expect(port.stemHeadlineToken(w), w).toBe(legacy.stemHeadlineToken(w));
       }
     });
   });

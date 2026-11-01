@@ -1,6 +1,6 @@
-# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122, 131)
+# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122, 131, 136)
 
-`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119 and 122) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119, 122 and 136) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
@@ -41,14 +41,14 @@ workflow needs the new secret, so it is deliberately not part of migration 131.
 
 ## What it checks
 
-14 fixed-order rows (the first ten from migration 077, the eleventh added by
-migration 100, the twelfth by migration 103, the thirteenth by migration 114 and
-the fourteenth by migration 122;
+16 fixed-order rows (the first ten from migration 077, the eleventh added by
+migration 100, the twelfth by migration 103, the thirteenth by migration 114,
+the fourteenth by migration 122 and the fifteenth and sixteenth by migration 136;
 rows 7, 9 and 12 were reworked by migration 108, and row 13 by migration 115,
 which widened its silence window from 12 h to 24 h, and by migration 119, which
 added a reason label to every source it names), `status` one of
 `pass | warn | fail | unknown | skip`. `threshold` is the fail limit (or the
-warn limit, for warn-only checks such as rows 9, 13 and 14). The thresholds for rows 1-10 were
+warn limit, for warn-only checks such as rows 9, 13 and 14, and for the size row 16). The thresholds for rows 1-10 were
 tuned from a 2026-09-28 read-only survey of the live project (see the
 migration 077 header for the exact queries and observed numbers); row 11
 comes from the 2026-10-21 incident (see the migration 100 header); row 12
@@ -57,7 +57,9 @@ the 108 rework closes the 2026-10-22 stall that still read green (see the
 migration 108 header); row 13 names the outlet/wire sources that went silent
 between 2026-10-15 and 10-23 without any other row noticing (see the
 migration 114 header, the 24 h window of the migration 115 header, and
-"Susan kaynaklar (baseline)" below).
+"Susan kaynaklar (baseline)" below); rows 15 and 16 close the app-side blind spot
+and the disk headroom gap of 2026-10-31/11-01 (see "Cron rotası sonuçları ve
+veritabanı boyutu (migration 136)" below).
 
 | # | check_name | What it measures | Threshold | Where the number came from |
 |---|---|---|---|---|
@@ -73,15 +75,17 @@ migration 114 header, the 24 h window of the migration 115 header, and
 | 12 | `jev_shadow_cron_failures_30m` | Sum of three counts over the last 30 min: (a) `'failed'` pg_cron runs of the Jev jobs `jev-shadow`, `jev-cluster-audit` and `jev-regression-weekly` (same runid window as row 1); (b) `net._http_response` rows with `status_code >= 500` whose body contains `"fn":"jev-shadow"`, the marker every error response from `jev-shadow` carries (504 `deadline`, 503 `db-unavailable`, 500 `internal-error`); (c) `jev_shadow_runs` rows started in the window that closed `partial` or `error` with `calls = 0` (migration 108). `timed_out` pg_net rows (status NULL, no body, cannot be attributed to a function) are counted separately in the `detail` (`zaman aşımı (fonksiyon bilinmiyor)`): they raise `pass` to `warn` but never count toward `fail`. `detail` = `cron hatası · HTTP 5xx · sıfır çağrılı koşu · zaman aşımı (son 30 dk)`, with ` · pg_cron ve pg_net yok` appended when both extensions are missing. `'unknown'` only when the query itself errors | fail ≥ 2; warn = 1, or any `timed_out` request | Finding 1(a) (migration 103): a database timeout in `jev-shadow`'s first calls used to return an unretried 500 with no `jev_shadow_runs` row, and `pg_cron` records `'succeeded'` for the http poke regardless. The function now retries those steps once, then answers a stable 503 `db-unavailable`, and this row counts it. No `jev_alerts` row is written (its `kind` CHECK, migration 088, allows only `source_drift`, `kap_class_canary`, `stage_budget`). 2026-10-22 stall (migration 108): pg_net rows 329690 and 329711 had `timed_out = true` and status NULL, and zero-call partial runs 3622 and 3623 closed cleanly, so neither half of 103 saw anything; (c) and the timeout note close that gap. The same release gives a deadline stop a note on the run row (`deadline: <stage> at <ms>ms, calls=<n>`) and reschedules the cron with a 120 s pg_net timeout and an `enqueued_at` body field; redeploy `jev-shadow` with `--no-verify-jwt` after applying 108. Added by migration 103, extended by 108 |
 | 13 | `sources_newly_dark` | Active `outlet`/`wire` sources that are **not** in `public.ops_dark_source_baseline`, have at least 50 `articles` (by `created_at`, ingest time) in the 14 days before the last 24 hours, and none in the last 24 hours. `detail` names them with that count and a reason, largest first: `son 24 saatte haber gelmedi (önceki 14 günde en az 50 haber vardı): slug (n) · neden, …` (`neden` is `erişim yok`, `akış donmuş` or `sessiz`, see "Susan kaynakların nedeni" below), cut at 500 characters; `yeni susan kaynak yok` when none. **Warn-only**: never `fail`, so the Action does not exit non-zero and nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors (a missing baseline table included) | warn ≥ 1 (threshold 1) | 2026-10-15 to 10-23: five active sources went dark one after another and no row noticed (`dead_feeds` waits 72 h and warns above 38 sources; the per-zone freshness rows are satisfied by any other outlet in the zone). Three of the five are `opposition_leaning`, so the `muhalefet` zone loses about 9k articles a month. Step 0 (migration 114 header): the predicate runs in about 50 ms on an index-only scan of `idx_articles_created_source`. A 7-day replay at 6-hour steps with the original 12 h window flagged 22 distinct sources; of the 146 flags with a full 24 h of follow-up, 89 saw an article within 24 h (low-volume outlets with an overnight gap over 12 h), while `halk-tv` and `gazete-pencere` never resumed. Window widened from 12 h to 24 h by migration 115: same replay, 73 flags over 8 sources, 13 of 63 complete flags resumed within 24 h (21%), against 173 / 22 / 89 of 146 (61%) at 12 h; the `>= 50` floor, the baseline exclusion and the warn-only status are unchanged. Added by migration 114, window 24 h since migration 115, reason labels since migration 119 (2026-10-24: `haberport`, `korkusuz` and `en-politik` answer HTTP 200 every poll and publish nothing, which row 13 could not tell from a quiet outlet) |
 | 14 | `ingest_gaps` | Gaps over 5 minutes between consecutive `ingest_cycles.started_at` in the last 6 hours. `ingest-drain` runs every 3 minutes (migration 038), so a longer gap is at least one tick that left no row: the platform killed it (pg_net `546 WORKER_RESOURCE_LIMIT`), cron skipped it, or the row write failed. Row 3 cannot see this, because it only counts rows over 30 minutes and reads pass from 8 up. `detail`: `son 6 saatte 5 dakikadan uzun boşluk: n · en uzunu m dk · HH:MI→HH:MI, … (UTC)`, longest first, cut at 500 characters; `son 6 saatte 5 dakikadan uzun boşluk yok · en uzunu m dk` when there is none; `son 6 saatte ingest döngüsü yok` (warn, observed empty) when the window holds no cycle at all. **Warn-only**: never `fail`, nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors | warn at 3 or more gaps, or any gap over 10 minutes (threshold 3) | Added by migration 122 (2026-10-24). Step 0 (migration 122 header): over the retained 21,350 cycles, sliding 6 hour windows from 09-29 to 10-12 (ingest healthy) warned 16 of 625 times (2.6%); over the last 12 days 320 of 577 (55%), the degraded stretch since 10-13 (10-22: 11 gaps in one 6 hour bucket, 5 of them over 10 minutes, longest 33 minutes). 4 gaps or 15 minutes would have warned 40%, 5 gaps or 20 minutes 20%; thresholds kept at 3 and 10 minutes because 55% is a true reading of that stretch. Read at 16:55 UTC on 2026-10-24: 119 cycles, 1 gap of 6 minutes, pass; index scan, 0.13 ms |
+| 15 | `cron_route_failures_30m` | Outcomes of the Vercel cron routes (`headline`, `digest`, `fact-checks`, `social`, `alerts-webhooks`) recorded in `public.ops_cron_route_runs` over the last 30 min. Each **authenticated** run writes one row (route, HTTP status, duration) through `ops_cron_route_run_record` from `withCronOutcome` (`src/lib/ops/cron-route-outcome.ts`, scheduled with `after()`). `observed` is the number of runs with status >= 500 plus the number of silent routes (below). **Fail** when one route has at least 2 failures that are at least half of its runs in the window, or when `headline` / `alerts-webhooks` has been silent beyond its fail gap; **warn** on any other failure or silence; **warn** with `observed` empty and `son 30 dakikada cron rotası kaydı yok` when the window holds no run and no listed route is silent (the app is not recording, or every cron is stuck); pass reads `son 30 dakikada n çalışma, başarısız yok`. **Silence:** a run that Vercel kills at `maxDuration` writes no row, so the two sub-hourly routes are also compared with a gap on their newest row: `headline` (every 5 min) warn above 15 min, fail above 30 min; `alerts-webhooks` (every 10 min) warn above 25 min, fail above 60 min; only for a route that has a row within the 7 day retention. `detail` on warn/fail: `son 30 dakikada başarısız: headline 6/6, social 1/2` (route, failures/runs, worst first), then ` · kayıt gelmiyor: headline 31 dk` for each silent route (whole minutes since its newest row, longest first), cut at 500 characters. `'unknown'` with `ops_cron_route_runs yok` if the table is missing, or with the error text if the query fails | fail: a route with >= 2 failures and >= 50% of its runs; warn: any failure (threshold 1) | 2026-10-31 16:10 UTC to 2026-11-01 10:30 UTC: 189 `canceling statement due to statement timeout` from the headline pick query, each one a 500 from `/api/cron/headline` (`apiServerError`), and all 14 rows read green. The root cause is fixed (migration 127, #147), but nothing app-side was watched. The "at least 2" keeps one blip in a daily route (`digest`, `social`) at warn; the headline outage reads 6/6 and fails inside a single window. Added by migration 136 |
+| 16 | `db_size_mb` | `pg_database_size(current_database())` in whole MB against the two limits of `public.ops_db_size_limits()` (default **warn 7000, fail 7600**). `threshold` is the warn limit. `detail`: `veritabanı n MB · uyarı w MB · kritik f MB · en büyük: rel mb MB, …` (the three biggest relations in `public`, by `pg_total_relation_size`). `'unknown'` with the error text if the read fails | warn >= `warn_mb`; fail >= `fail_mb` (7000 / 7600) | 2026-11-01: 6252 MB (`jev_shadow_predictions` 3142 MB, `articles` 2016 MB, `clusters` about 533 MB) and no check on it anywhere. The defaults are for the 8 GB Pro allowance; set them to 70% / 85% of the disk you actually provisioned (see "Cron rotası sonuçları ve veritabanı boyutu"). The top-three read costs about 14 ms on 68 public relations. Added by migration 136 |
 
 The heartbeat script adds two rows of its own to this table and to the step
-summary, on top of the 14: `archive_gap_days` (see "Arşiv boşlukları") and, when
+summary, on top of the 16: `archive_gap_days` (see "Arşiv boşlukları") and, when
 the snapshot read fails, `snapshot_backstop` (`unknown`). They are not part of
 `ops_health_report()`.
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
-14 rows. (Row 12 degrades gracefully: with only one of the two present it
+16 rows. (Row 12 degrades gracefully: with only one of the two present it
 counts that half and treats the other as zero.)
 
 **Stage-budget alerts (`jev_alerts.kind = 'stage_budget'`, counted by row 9).**
@@ -261,6 +265,93 @@ not page.
   stays noisy once the ticks are fixed, tune it in a new migration (see
   "Tuning a threshold"), not here.
 
+## Cron rotası sonuçları ve veritabanı boyutu (migration 136, rows 15 and 16)
+
+Rows 1-14 read only the database. A Vercel cron route that fails leaves no trace
+in `pg_cron`, `pg_net` or `ingest_cycles`: on 2026-10-31/11-01 `/api/cron/headline`
+answered 500 for 18+ hours (189 statement timeouts) while every row stayed green.
+Migration 136 makes the app report its own outcome.
+
+**Row 15, `cron_route_failures_30m`.**
+
+- **Where the numbers come from.** The five routes under `src/app/api/cron/` are
+  exported as `withCronOutcome("<folder>", withApiErrors(...))`
+  (`tests/guards/cron-route-outcome.test.ts` fails the build if a new cron route
+  is not). After the response the wrapper calls the service-role RPC
+  `ops_cron_route_run_record(route, status, duration_ms)` on a client capped at
+  2 s. `public.ops_cron_route_runs` keeps the rows for 7 days
+  (`ops-cron-route-runs-prune`, 04:17 UTC daily).
+- **Only authenticated runs are recorded.** `CRON_SECRET` must be set and the
+  request must carry the matching bearer. A public hit (401) or a deployment
+  without the secret (503) writes nothing, so nobody outside can fill the table or
+  fake a failure. The write goes through `after()`, so it cannot delay or break a
+  response; if it fails (RPC missing, database down) the wrapper logs one
+  `[cron-outcome]` warning per instance and carries on. Outside a request scope
+  (scripts, unit tests) `after()` is unavailable and the wrapper records nothing.
+- **Reading it.** `headline 6/6` means six runs in the window and all six failed;
+  `social 1/2` is one failure in two runs. fail needs a route with >= 2 failures
+  that are at least half of its runs. A single failure warns and does not page.
+  `son 30 dakikada cron rotası kaydı yok` (warn) means no authenticated run was
+  recorded in 30 minutes and no listed route has an older row to blame: right
+  after migration 136 and before the app deploy that carries the wrapper, or when
+  the crons themselves stopped (look at the Vercel cron logs and at `CRON_SECRET`).
+- **Silence.** The row is written when the handler returns or throws, so a run
+  that Vercel kills at `maxDuration` (60 s, 504 `FUNCTION_INVOCATION_TIMEOUT`)
+  never reaches the wrapper and leaves no row, and a route whose schedule stops
+  firing leaves none either. The failure count cannot see that, and another
+  route's healthy rows would keep it green. So `headline` and `alerts-webhooks`
+  carry a gap on their newest row: `kayıt gelmiyor: headline 31 dk` means 31
+  minutes since headline last recorded anything (warn above 15 min, fail above 30;
+  `alerts-webhooks` warns above 25 and fails above 60). The gaps are in the
+  `values` list of the row in migration 136 (and in whichever later migration
+  re-creates the function); `tests/guards/ops-health-checks.test.ts` fails if a
+  gap drops below two ticks (warn) or six ticks (fail) of the route's schedule in
+  `vercel.ts`. `fact-checks` (hourly), `social` (daytime only) and `digest`
+  (weekly) are not listed: a gap rule would warn every night or week. To stop a
+  listed route on purpose (pause the Vercel cron, retire the route), remove it from
+  the list with a `create or replace` of the function; until then its silence
+  stays flagged for the 7 day retention of the table.
+- **What it cannot see.** A route that has never recorded anything has nothing to
+  be compared with, so it is not flagged: after the first deploy, the VERIFY query
+  of migration 136 (one row per route with its newest `ran_at`) should show both
+  `headline` and `alerts-webhooks`. A request that never reaches the route (a
+  failed deploy, a routing error) while the schedule keeps firing is a silence
+  too, but only once the route has recorded at least once.
+- **What to do on FAIL.** The route name is in the detail. Read that route's
+  Vercel function logs for the `[api]` line (its `request_id` is also in the 500
+  body), then the Supabase `postgres_logs` for statement timeouts at the same
+  minutes. Read-only, in the SQL editor:
+
+  ```sql
+  select route, status, duration_ms, ran_at
+    from public.ops_cron_route_runs
+   where ran_at >= now() - interval '2 hours' and status >= 500
+   order by ran_at desc;
+  ```
+
+**Row 16, `db_size_mb`.**
+
+- **Limits.** `public.ops_db_size_limits()` returns `(warn_mb, fail_mb)`, by
+  default `7000` and `7600` (the 8 GB Pro allowance). They are a function, not a
+  table, so there is nothing to grant. To change them, run a
+  `create or replace function public.ops_db_size_limits()` with the same
+  `returns table (warn_mb numeric, fail_mb numeric)`, `language sql immutable
+  security definer set search_path = ''` and the new numbers, then
+  `revoke all on function public.ops_db_size_limits() from public, anon,
+  authenticated; grant execute on function public.ops_db_size_limits() to
+  service_role;` (a `create or replace` keeps the grants, re-running them is
+  harmless). The intended policy is **70% warn / 85% fail of the disk actually
+  provisioned**: look the size up in the Supabase dashboard (Database, Settings,
+  Disk size) before setting it. Note that 7000 / 7600 MB are about 85% / 93% of
+  8192 MB, deliberately looser than 70% / 85% so today's 6252 MB reads `pass`;
+  tighten them once the disk size is confirmed.
+- **What to do on FAIL.** The `en büyük` part of the detail names the three
+  biggest relations. On 2026-11-01 these were `jev_shadow_predictions` (3142 MB)
+  and `articles` (2016 MB): shrink retention (the Jev prune, `jev-shadow-prune`,
+  keeps 45 days), or raise the disk, before the database goes read-only at the
+  provisioned size. Autovacuum does not give space back to the operating system;
+  only a rewrite does.
+
 ## Susan kaynaklar (baseline)
 
 Row 13 (`sources_newly_dark`, migration 114; silence window 24 h since
@@ -362,6 +453,13 @@ The database side (migration 131): `ops_health_report()` once every 10 minutes
 for the snapshots (144 a day, about 0.1-0.5 s each), a table of about 2k rows,
 and one tiny `ops_archive_gap_days()` read per heartbeat run.
 
+Migration 136 adds one tiny RPC write per authenticated cron run (`vercel.ts`:
+headline every 5 minutes, alerts-webhooks every 10, social every 20 minutes from
+05:00 to 20:59 UTC, fact-checks hourly, digest weekly: about 500 rows a day, so
+about 3.5k rows with the 7 day retention), and row 16 costs about 14 ms in
+`ops_health_report()` (a catalogue scan and `pg_total_relation_size` over 68
+public relations).
+
 ## Running it locally
 
 Never paste the service-role key inline. Use the `$SR` convention from
@@ -402,7 +500,7 @@ nightly archive catch-up (migration 131 re-creates both by name, idempotently).
 
 ## Page latency probe
 
-The heartbeat watches only the database. On 2026-10-21 public pages took 8-22 s (cold reads stuck at the 8.1 s `statement_timeout`) while every cron and every heartbeat row read green, so nothing paged. `.github/workflows/page-latency.yml` measures the other side: how long a visitor waits.
+The heartbeat's database rows do not see how long a visitor waits. On 2026-10-21 public pages took 8-22 s (cold reads stuck at the 8.1 s `statement_timeout`) while every cron and every heartbeat row read green, so nothing paged. Since migration 136 the Vercel cron routes record their own outcomes (`after()`, see "Cron rotası sonuçları ve veritabanı boyutu"): a failing cron route now reaches row 15; unauthenticated hits are never recorded, and the rows are kept for 7 days. Public page latency is **still manual**: nothing records what a visitor sees. `.github/workflows/page-latency.yml` measures the other side: how long a visitor waits.
 
 - **Routes (9):** `/`, `/blindspots`, `/sources`, `/trends`, `/ekonomi`, `/hafta`, `/kalite`, `/rss.xml` and `/sitemap.xml`. Each gets N sequential GETs (default 3, at most 5), one at a time, with a 25 s timeout per request.
 - **Thresholds, per sample:** pass under 4000 ms; warn from 4000 to 8000 ms or on a 4xx; fail above 8000 ms, on a 5xx, or on a timeout or network error. A route takes its worst sample and the run takes its worst route. It exits 1 only on a fail, so a warn shows in the table and the step summary without paging.

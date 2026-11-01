@@ -119,8 +119,8 @@ describe("score — entity ratio (max denominator + noise floor)", () => {
     const r = score(
       fpA,
       fpB,
-      ["mhp", "istanbul", "teskilat"],
-      ["mhp", "istanbul", "semih"],
+      ["mhp", "tbmm", "teskilat"],
+      ["mhp", "tbmm", "semih"],
       0,
       0,
     );
@@ -144,8 +144,8 @@ describe("score — entity ratio (max denominator + noise floor)", () => {
     // ceremony seed (prod cluster dd5535a7). The max denominator gives
     // 3/max(3,max(3,10)) = 0.3.
     const [fpA, fpB] = mkFpPair(64, 0);
-    const small = ["mhp", "istanbul", "teskilat"];
-    const big = ["mhp", "istanbul", "teskilat", "a", "b", "c", "d", "e", "f", "g"];
+    const small = ["mhp", "tbmm", "teskilat"];
+    const big = ["mhp", "tbmm", "teskilat", "a", "b", "c", "d", "e", "f", "g"];
     const r = score(fpA, fpB, small, big, 0, 0);
     expect(r.components.sharedEntities).toBe(3);
     expect(r.components.entityRatioRaw).toBeCloseTo(0.3, 10);

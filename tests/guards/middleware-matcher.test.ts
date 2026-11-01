@@ -2,9 +2,10 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { NextRequest } from "next/server";
 import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
 
-import { config } from "@/middleware";
+import { config, middleware } from "@/middleware";
 
 // ---------------------------------------------------------------------------
 // Permanent CI guard. src/middleware.ts is one function behind one matcher
@@ -16,8 +17,12 @@ import { config } from "@/middleware";
 // embed widget). This guard fails the build instead.
 //
 // Rules pinned here:
-//   1. every entry is a literal path whose params are single-segment; the only
-//      wildcard (`:path*`) is the admin scope;
+//   1. every entry is a literal path whose params are single-segment; a
+//      wildcard (`:path*`) is allowed only for the admin scope and the two
+//      catch-all route directories that the middleware answers decode-only
+//      (DECODE_ONLY_WILDCARDS: /api/v1/[...path] and /embed/[...rest]). A
+//      wildcard must never be added for a route that has a gate (/cluster/:id,
+//      /source/:slug): that would run the gate on its sub-routes;
 //   2. every non-admin entry has its static prefix handled in middleware.ts as
 //      pathname.startsWith("<prefix>"), BEFORE the admin-scope line;
 //   3. the matcher strings behave as intended under Next's own matcher.
@@ -25,6 +30,13 @@ import { config } from "@/middleware";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const MIDDLEWARE_SRC = readFileSync(resolve(here, "../../src/middleware.ts"), "utf8");
+
+/**
+ * The only matcher entries that may end in `:path*`. The admin scope is handled
+ * by the final block; the other two sit in the decode-only branch (a malformed
+ * percent-encoding answers 400, anything else is NextResponse.next()).
+ */
+const DECODE_ONLY_WILDCARDS = ["/admin/:path*", "/api/v1/:path*", "/embed/:path*"];
 
 /** The one line every public gate must sit above (see middleware-routing.test.ts). */
 const ADMIN_SCOPE_NEEDLE = 'lower.startsWith("/admin/")';
@@ -59,13 +71,18 @@ function matcherViolations(matcher: readonly string[], source: string): string[]
     if (/[()?+{}]/.test(entry.replace(":path*", ""))) {
       out.push(`${entry}: uses regexp/modifier syntax`);
     }
-    if (entry.includes(":path*")) {
-      if (entry !== "/admin/:path*") out.push(`${entry}: only /admin/:path* may be a wildcard`);
-      continue;
+    const wildcard = entry.includes(":path*");
+    if (wildcard) {
+      if (!DECODE_ONLY_WILDCARDS.includes(entry)) {
+        out.push(`${entry}: only ${DECODE_ONLY_WILDCARDS.join(", ")} may be a wildcard`);
+        continue;
+      }
+    } else if (entry.includes("*")) {
+      out.push(`${entry}: wildcard`);
     }
-    if (entry.includes("*")) out.push(`${entry}: wildcard`);
     // Params must be whole, single segments (":id" between slashes or at the end).
     for (const segment of entry.split("/")) {
+      if (wildcard && segment === ":path*") continue;
       if (segment.includes(":") && !/^:[A-Za-z][A-Za-z0-9_]*$/.test(segment)) {
         out.push(`${entry}: param segment "${segment}" is not a plain single-segment param`);
       }
@@ -90,9 +107,9 @@ describe("middleware matcher — every entry has a gate", () => {
     expect(matcherViolations(config.matcher, MIDDLEWARE_SRC)).toEqual([]);
   });
 
-  it("every entry is a literal path with single-segment params; the only :path* is /admin/:path*", () => {
+  it("every entry is a literal path with single-segment params; :path* only in DECODE_ONLY_WILDCARDS", () => {
     const wildcards = config.matcher.filter((m) => m.includes("*"));
-    expect(wildcards).toEqual(["/admin/:path*"]);
+    expect([...wildcards].sort()).toEqual([...DECODE_ONLY_WILDCARDS].sort());
     for (const m of config.matcher) {
       expect(m.startsWith("/"), m).toBe(true);
       expect(m, m).not.toMatch(/[()?+{}]/);
@@ -112,8 +129,25 @@ describe("middleware matcher — every entry has a gate", () => {
       "/api/sources/:slug",
       "/embed/cluster/:id",
       "/rss/:topic",
+      // hunt 12 (h12-security-1): the surfaces #148 missed, decode-only
+      "/cluster/:id/:sub",
+      "/source/:slug/:sub",
+      "/rozet/:file",
+      "/sitemaps/:file",
+      "/rapor/:token",
+      "/rapor/:token/:sub",
+      "/hikaye/:slug",
+      "/api/admin/corrections/:id",
+      "/api/v1/:path*",
+      "/embed/:path*",
     ]) {
       expect(config.matcher, m).toContain(m);
+    }
+  });
+
+  it("never widens the gated routes to their sub-routes", () => {
+    for (const m of ["/cluster/:path*", "/source/:path*", "/rapor/:path*", "/ekonomi/:path*", "/gundem/:path*"]) {
+      expect(config.matcher, m).not.toContain(m);
     }
   });
 });
@@ -148,19 +182,53 @@ describe("middleware matcher — behaviour under Next's own matcher (getPathMatc
 
   it("the real matcher list leaves the bare list/index routes alone", () => {
     const hit = (path: string) => config.matcher.some((m) => matches(m, path));
-    for (const path of [
-      "/hafta",
-      "/api/sources",
-      "/api/v1/clusters",
-      "/api/v1/sources",
-      "/embed/anything",
-      "/rss",
-    ]) {
+    for (const path of ["/hafta", "/api/sources", "/rss", "/rozet", "/sitemaps", "/rapor", "/hikaye"]) {
       expect(hit(path), path).toBe(false);
     }
-    for (const path of ["/hafta/2026-W43", "/api/sources/x", "/rss/dunya.xml", "/embed/cluster/x"]) {
+    for (const path of [
+      "/hafta/2026-W43",
+      "/api/sources/x",
+      "/rss/dunya.xml",
+      "/embed/cluster/x",
+      "/rozet/x.svg",
+      "/rapor/tok/markdown",
+      "/cluster/x/kart",
+      "/source/x/opengraph-image",
+    ]) {
       expect(hit(path), path).toBe(true);
     }
+  });
+
+  it("the catch-all route dirs are matched, and pass through when the URL is well-formed", async () => {
+    // /api/v1/:path* and /embed/:path* also match the bare list routes and the
+    // root of each catch-all; the middleware must not 404 or gate any of them.
+    for (const path of [
+      "/api/v1/clusters",
+      "/api/v1/sources",
+      "/api/v1/clusters/6ea8b39a",
+      "/api/v1",
+      "/embed/anything",
+      "/embed",
+    ]) {
+      expect(
+        config.matcher.some((m) => matches(m, path)),
+        path,
+      ).toBe(true);
+      const res = await middleware(new NextRequest(`https://www.tayfhaber.com${path}`));
+      expect(res.headers.get("x-middleware-next"), path).toBe("1");
+      expect(res.headers.get("x-middleware-rewrite"), path).toBeNull();
+    }
+  });
+
+  it("the new wildcards match their root and every depth; the single-segment entries do not", () => {
+    expect(matches("/api/v1/:path*", "/api/v1/a/b/c")).toBe(true);
+    expect(matches("/embed/:path*", "/embed/a/b")).toBe(true);
+    expect(matches("/cluster/:id/:sub", "/cluster/x/kart")).toBe(true);
+    expect(matches("/cluster/:id/:sub", "/cluster/x")).toBe(false);
+    expect(matches("/cluster/:id/:sub", "/cluster/x/y/z")).toBe(false);
+    expect(matches("/source/:slug/:sub", "/source/x/opengraph-image")).toBe(true);
+    expect(matches("/rapor/:token", "/rapor/tok/markdown")).toBe(false);
+    expect(matches("/rapor/:token/:sub", "/rapor/tok/markdown")).toBe(true);
   });
 });
 
@@ -212,7 +280,7 @@ describe("middleware matcher guard — the finder itself (mutation tests)", () =
 
   it("flags a stray :path* wildcard, a regexp modifier and a multi-segment-looking param", () => {
     expect(matcherViolations(["/admin/:path*", "/foo/:path*"], SYNTHETIC).join("|")).toContain(
-      "only /admin/:path* may be a wildcard",
+      "may be a wildcard",
     );
     expect(matcherViolations(["/admin/:path*", "/foo/:id(.*)"], SYNTHETIC).join("|")).toContain(
       "regexp/modifier syntax",
@@ -220,6 +288,19 @@ describe("middleware matcher guard — the finder itself (mutation tests)", () =
     expect(matcherViolations(["/admin/:path*", "/foo/x:id"], SYNTHETIC).join("|")).toContain(
       "not a plain single-segment param",
     );
+  });
+
+  it("an allowed decode-only wildcard still needs its startsWith branch above the admin-scope line", () => {
+    const v = matcherViolations(["/admin/:path*", "/embed/:path*"], SYNTHETIC);
+    expect(v).toHaveLength(1);
+    expect(v[0]).toContain('pathname.startsWith("/embed/")');
+    const withBranch = SYNTHETIC.replace("/foo/", "/embed/");
+    expect(matcherViolations(["/admin/:path*", "/embed/:path*"], withBranch)).toEqual([]);
+  });
+
+  it("a wildcard outside DECODE_ONLY_WILDCARDS is flagged even when its branch exists", () => {
+    expect(matcherViolations(["/admin/:path*", "/foo/:path*"], SYNTHETIC)).toHaveLength(1);
+    expect(matcherViolations(["/admin/:path*", "/cluster/:path*"], SYNTHETIC.replace("/foo/", "/cluster/"))).toHaveLength(1);
   });
 
   it("flags a source with no admin-scope line", () => {

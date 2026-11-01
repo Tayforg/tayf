@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
+  CANDIDATE_SIZE_TIEBREAK_MARGIN,
+  MAX_TITLE_PROBE_CLUSTERS,
+  mergeProbeIds,
+  rankCandidates,
   selectContextClusterIds,
   stickyUpperBound,
   type ContextClusterRow,
@@ -147,5 +151,141 @@ describe("stickyUpperBound", () => {
     expect(stickyUpperBound(rows, 200)).toBe(rows[199]!.updated_at);
     const more = singletons(250);
     expect(stickyUpperBound(more, 200)).toBe(more[199]!.updated_at);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h12-cluster-1: twin clusters. Two pure helpers keep the consumer's candidate
+// ordering and the exact-title probe testable without the Edge Function.
+// ---------------------------------------------------------------------------
+
+describe("CANDIDATE_SIZE_TIEBREAK_MARGIN", () => {
+  it("is 0.10 (the Antalya sozcu pair: 0.87 vs 0.83 must pick the 18-article cluster)", () => {
+    expect(CANDIDATE_SIZE_TIEBREAK_MARGIN).toBe(0.1);
+  });
+});
+
+describe("rankCandidates", () => {
+  const OPTS_RANK = { margin: CANDIDATE_SIZE_TIEBREAK_MARGIN, threshold: 0.4 };
+  const cand = (clusterId: string, score: number) => ({ clusterId, score });
+  const sizes = (m: Record<string, number>) => (id: string) => m[id] ?? 0;
+  const ids = (rows: { clusterId: string }[]) => rows.map((r) => r.clusterId);
+
+  it("returns an empty list for no candidates", () => {
+    expect(rankCandidates([], sizes({}), OPTS_RANK)).toEqual([]);
+  });
+
+  it("top below the threshold: plain score sort, size is ignored", () => {
+    const scored = [cand("big", 0.37), cand("small", 0.39), cand("mid", 0.38)];
+    expect(ids(rankCandidates(scored, sizes({ big: 50, mid: 9, small: 1 }), OPTS_RANK))).toEqual([
+      "small",
+      "mid",
+      "big",
+    ]);
+  });
+
+  it("within the margin the larger cluster wins even with the lower score (0.83 [18] beats 0.87 [7])", () => {
+    const scored = [cand("c2", 0.87), cand("c1", 0.83)];
+    expect(ids(rankCandidates(scored, sizes({ c1: 18, c2: 7 }), OPTS_RANK))).toEqual(["c1", "c2"]);
+  });
+
+  it("outside the margin the higher score wins (0.76 [18] vs 0.87 [7])", () => {
+    const scored = [cand("c1", 0.76), cand("c2", 0.87)];
+    expect(ids(rankCandidates(scored, sizes({ c1: 18, c2: 7 }), OPTS_RANK))).toEqual(["c2", "c1"]);
+  });
+
+  it("the margin is inclusive: exactly top - 0.10 is still in the group (0.77 vs 0.87)", () => {
+    const scored = [cand("c2", 0.87), cand("c1", 0.77)];
+    expect(ids(rankCandidates(scored, sizes({ c1: 18, c2: 7 }), OPTS_RANK))[0]).toBe("c1");
+  });
+
+  it("a larger candidate below the threshold never outranks a smaller one above it (0.38 [20] vs 0.41 [2])", () => {
+    const scored = [cand("c2", 0.41), cand("c1", 0.38)];
+    expect(ids(rankCandidates(scored, sizes({ c1: 20, c2: 2 }), OPTS_RANK))).toEqual(["c2", "c1"]);
+  });
+
+  it("group order is size desc, then score desc, then id asc; the rest follows by score desc", () => {
+    const scored = [
+      cand("d", 0.9),
+      cand("b", 0.85),
+      cand("a", 0.85),
+      cand("c", 0.88),
+      cand("low1", 0.5),
+      cand("low2", 0.6),
+    ];
+    const out = rankCandidates(scored, sizes({ a: 5, b: 5, c: 5, d: 2 }), OPTS_RANK);
+    // group = score >= 0.40 and >= 0.80: d, c, b, a. Sizes 5,5,5 then 2 -> c(0.88) before a/b(0.85);
+    // a and b tie on size and score -> id asc. d (size 2) closes the group.
+    // low1/low2 are above the threshold but outside the margin: they follow by score desc.
+    expect(ids(out)).toEqual(["c", "a", "b", "d", "low2", "low1"]);
+  });
+
+  it("equal size and equal score keeps a deterministic id order, independent of the input order", () => {
+    const a = rankCandidates([cand("z", 0.8), cand("m", 0.8)], sizes({ z: 4, m: 4 }), OPTS_RANK);
+    const b = rankCandidates([cand("m", 0.8), cand("z", 0.8)], sizes({ z: 4, m: 4 }), OPTS_RANK);
+    expect(ids(a)).toEqual(["m", "z"]);
+    expect(ids(b)).toEqual(["m", "z"]);
+  });
+
+  it("is stable below the threshold: equal scores keep their input order", () => {
+    const scored = [cand("x", 0.37), cand("y", 0.37), cand("z", 0.37)];
+    expect(ids(rankCandidates(scored, sizes({ x: 1, y: 9, z: 5 }), OPTS_RANK))).toEqual(["x", "y", "z"]);
+  });
+
+  it("does not mutate its input and keeps extra fields on the rows", () => {
+    const scored = [
+      { clusterId: "a", score: 0.5, fallbackScore: 0.1 },
+      { clusterId: "b", score: 0.6, fallbackScore: 0.2 },
+    ];
+    const copy = scored.map((r) => ({ ...r }));
+    const out = rankCandidates(scored, sizes({}), OPTS_RANK);
+    expect(scored).toEqual(copy);
+    expect(out[0]).toEqual({ clusterId: "b", score: 0.6, fallbackScore: 0.2 });
+  });
+
+  it("treats a missing / non-finite size as 0", () => {
+    const scored = [cand("a", 0.8), cand("b", 0.79)];
+    const out = rankCandidates(scored, (id) => (id === "a" ? Number.NaN : 3), OPTS_RANK);
+    expect(ids(out)).toEqual(["b", "a"]);
+  });
+
+  it("a one-element list is returned as is", () => {
+    expect(ids(rankCandidates([cand("only", 0.2)], sizes({}), OPTS_RANK))).toEqual(["only"]);
+  });
+});
+
+describe("mergeProbeIds", () => {
+  it("puts the probe ids first, then the candidates, in order", () => {
+    expect(mergeProbeIds(["p1", "p2"], ["c1", "c2", "c3"])).toEqual(["p1", "p2", "c1", "c2", "c3"]);
+  });
+
+  it("de-duplicates: a probe id that is also a candidate appears once, in the probe position", () => {
+    expect(mergeProbeIds(["p1", "c2"], ["c1", "c2", "c3"])).toEqual(["p1", "c2", "c1", "c3"]);
+  });
+
+  it("keeps at most three probe ids, in the order given", () => {
+    expect(MAX_TITLE_PROBE_CLUSTERS).toBe(3);
+    expect(mergeProbeIds(["p1", "p2", "p3", "p4", "p5"], ["c1"])).toEqual(["p1", "p2", "p3", "c1"]);
+  });
+
+  it("a probe id beyond the first three that is also a candidate stays in the candidate list", () => {
+    expect(mergeProbeIds(["p1", "p2", "p3", "c1"], ["c1", "c2"])).toEqual(["p1", "p2", "p3", "c1", "c2"]);
+  });
+
+  it("duplicate probe ids count once toward the limit of three", () => {
+    expect(mergeProbeIds(["p1", "p1", "p2", "p3", "p4"], [])).toEqual(["p1", "p2", "p3"]);
+  });
+
+  it("handles empty inputs", () => {
+    expect(mergeProbeIds([], [])).toEqual([]);
+    expect(mergeProbeIds([], ["c1"])).toEqual(["c1"]);
+    expect(mergeProbeIds(["p1"], [])).toEqual(["p1"]);
+  });
+
+  it("does not cap the candidate list (probe ids bypass MAX_CANDIDATE_CLUSTERS)", () => {
+    const candidates = Array.from({ length: 80 }, (_, i) => `c${i}`);
+    const out = mergeProbeIds(["p1"], candidates);
+    expect(out).toHaveLength(81);
+    expect(out[0]).toBe("p1");
   });
 });

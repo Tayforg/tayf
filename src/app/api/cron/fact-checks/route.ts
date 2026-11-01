@@ -4,6 +4,7 @@ import Parser from "rss-parser";
 
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
+import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { captureServerException } from "@/lib/sentry/server";
@@ -178,7 +179,9 @@ interface ExistingLinkRow {
   decided_by: string;
 }
 
-export const GET = withApiErrors(async (request: Request) => {
+// withCronOutcome is the outermost wrapper: each authenticated run is recorded in
+// public.ops_cron_route_runs (ops_health_report row 15, migration 136).
+export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: Request) => {
   // Next.js 16 cacheComponents: `await connection()` before touching
   // `request.headers` so a build-time prerender never reads a real
   // request. See src/app/api/cron/headline/route.ts.
@@ -443,4 +446,4 @@ export const GET = withApiErrors(async (request: Request) => {
     shadow,
     timestamp: new Date().toISOString(),
   });
-});
+}));

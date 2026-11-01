@@ -31,10 +31,21 @@ import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 //     122 ms measured) because it's a single ordered, limited index range
 //     scan (idx_articles_source_published, migration 044), not a
 //     per-source aggregate.
-//   * `getSourceItemsPerDay()` — the ONLY place `stats:articles(count)`
-//     still runs, isolated so /kaynaklar/durum can stream just its "7
-//     günlük gün başına haber" column behind a nested <Suspense> instead of
-//     blocking the whole table.
+//   * `getSourceItemsPerDay()` — the 7-day items/day column, isolated so
+//     /kaynaklar/durum can stream just that column behind a nested
+//     <Suspense> instead of blocking the whole table. Hunt 12 (h12-ops-2):
+//     it reads `public.source_items_7d()` (migration 137), ONE set-based
+//     query (an index-only lookup per active source on
+//     idx_articles_source_published_inc_id), not the per-source
+//     `stats:articles(count)` embed. That embed was a LATERAL json_agg per
+//     source and hit the 8 s PostgREST timeout about 12 times a day
+//     (pg_stat_statements: mean 2515 ms, max 7937 ms), which left the column
+//     as "—" for the 'minutes' lifetime of a failed attempt. A database
+//     without 137 answers the RPC with PostgREST PGRST202 ("function not in
+//     the schema cache"); the read then runs the old embed once
+//     (`fetchSourceItemsPerDayLegacy`), so deploying the app before applying
+//     the migration only costs the old speed, never the column. Any other
+//     error throws, the unchanged contract below.
 //   * `getFeedStatusSummary()` — a cheap existence-probe (`recent:
 //     articles(id)` + `limit(1, ...)`, same shape as
 //     src/lib/sources/active-count.ts and src/lib/clusters/feed-health.ts)
@@ -359,16 +370,22 @@ export async function getSourceFeedStatuses(): Promise<SourceFeedStatus[] | null
   return r.ok ? r.data : null;
 }
 
-/** Raw shape of one row from the `getSourceItemsPerDay` select below. */
+/** Raw shape of one row from the legacy `getSourceItemsPerDay` embed below. */
 export interface ItemsPerDayRawRow {
   slug: string;
   stats?: Array<{ count: number }>;
 }
 
+/** One row of `public.source_items_7d()` (migration 137): the 7-day article count of an active source. */
+export interface ItemsPerDayRpcRow {
+  slug: string;
+  items: number;
+}
+
 /**
- * Pure shaper for the items/day map — unit-testable without Supabase, same
- * spirit as `toFeedStatusRows`. Never throws: a row missing `stats`
- * entirely degrades to 0 items/day.
+ * Pure shaper for the legacy embed's items/day map — unit-testable without
+ * Supabase, same spirit as `toFeedStatusRows`. Never throws: a row missing
+ * `stats` entirely degrades to 0 items/day.
  */
 export function toItemsPerDayMap(
   rows: readonly ItemsPerDayRawRow[],
@@ -381,8 +398,29 @@ export function toItemsPerDayMap(
   return out;
 }
 
-// Raw read: THROWS on a Supabase error (see `fetchSourceFeedStatuses`).
-async function fetchSourceItemsPerDay(): Promise<Record<string, number>> {
+/**
+ * Pure shaper for `source_items_7d()` rows: items / 7, one decimal. Never
+ * throws: a count that is not a finite, non-negative number reads as 0, so a
+ * malformed row cannot poison the column with NaN or a negative rate.
+ */
+export function toItemsPerDayMapFromRpc(
+  rows: readonly ItemsPerDayRpcRow[],
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const row of rows) {
+    const items =
+      typeof row.items === "number" && Number.isFinite(row.items) && row.items > 0
+        ? row.items
+        : 0;
+    out[row.slug] = Math.round((items / 7) * 10) / 10;
+  }
+  return out;
+}
+
+// The pre-137 read, moved as-is: one embed, a LATERAL json_agg per source. Only
+// reached while migration 137 is not applied (PGRST202). THROWS on a Supabase
+// error (see `fetchSourceFeedStatuses`).
+async function fetchSourceItemsPerDayLegacy(): Promise<Record<string, number>> {
   const supabase = createServerClient();
   const sevenDaysAgoIso = new Date(
     Date.now() - 7 * 24 * 60 * 60 * 1000,
@@ -402,6 +440,24 @@ async function fetchSourceItemsPerDay(): Promise<Record<string, number>> {
   return toItemsPerDayMap(rows);
 }
 
+// Raw read: THROWS on a Supabase error (see `fetchSourceFeedStatuses`).
+async function fetchSourceItemsPerDay(): Promise<Record<string, number>> {
+  const supabase = createServerClient();
+
+  const { data, error } = await supabase.rpc("source_items_7d");
+
+  // Migration 137 is not applied (or PostgREST has not reloaded its schema cache
+  // yet): one fall back to the old embed. Never a loop; its error is thrown.
+  if (error?.code === "PGRST202") return fetchSourceItemsPerDayLegacy();
+
+  if (error) {
+    throw new Error(`source items/day query failed: ${error.message}`);
+  }
+
+  const rows = (data ?? []) as unknown as ItemsPerDayRpcRow[];
+  return toItemsPerDayMapFromRpc(rows);
+}
+
 // Same shape as `getSourceFeedStatusesCached`: tag, attempt, then one lifetime.
 async function getSourceItemsPerDayCached() {
   "use cache";
@@ -413,13 +469,14 @@ async function getSourceItemsPerDayCached() {
 }
 
 /**
- * slug -> 7-day items/day (rounded to one decimal). The ONLY remaining
- * caller of the `stats:articles(count)` aggregate PERF-01 measured bimodal
- * (177-4639 ms) — isolated here so /kaynaklar/durum's table shell can paint
- * from the cheap `getSourceFeedStatuses()` core while this streams in
- * behind its own nested <Suspense> for just the "7 günlük gün başına
- * haber" column. `null` means "unknown" (a Supabase error); callers should
- * render a neutral placeholder ("—"), not fabricate 0. Never throws.
+ * slug -> 7-day items/day (rounded to one decimal) for every active source,
+ * from `public.source_items_7d()` (migration 137). Isolated so
+ * /kaynaklar/durum's table shell can paint from the cheap
+ * `getSourceFeedStatuses()` core while this streams in behind its own nested
+ * <Suspense> for just the "7 günlük gün başına haber" column. Before 137 is
+ * applied it runs the legacy `stats:articles(count)` embed instead (PGRST202).
+ * `null` means "unknown" (a Supabase error); callers should render a neutral
+ * placeholder ("—"), not fabricate 0. Never throws.
  */
 export async function getSourceItemsPerDay(): Promise<Record<string, number> | null> {
   const r = await getSourceItemsPerDayCached();

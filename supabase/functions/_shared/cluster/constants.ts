@@ -218,3 +218,179 @@ export const ENTITY_TEXT_FLOOR = 0.20;
 export const CONTEXT_STICKY_MIN_ARTICLES = 5;
 export const CONTEXT_STICKY_HOURS = 12;
 export const CONTEXT_STICKY_MAX = 60;
+
+// --- 2026-11-01 hunt 12, wave AJ: precision and recall of the scorer ---------
+//
+// (4) h12-cluster-2: chain-drift joins. Cluster 30c752a7 ("Fidan, Atlanta'da
+//     Japon mevkidasiyla ...", 14 articles, live, indexable) held a Sputnik
+//     Lavrov item ("Lavrov, Japon mevkidasi Motegi ile gorustu"), three
+//     Fidan-Rubio items (aksam, dirilis-postasi, haber-global; Fidan-Rubio has
+//     its own cluster 791a9867) and two Fidan-Wadephul items (star, muhalif).
+//     Each joined an earlier member on whitelist entities that EVERY Fidan
+//     story shares (bakan, disisleri, abd, fidan) plus template tf-idf: the
+//     entity lane scored 3-4 shared of 4 = 0.75-1.0.
+//
+//     (4a) Generic entities weigh GENERIC_ENTITY_WEIGHT each in the entity
+//     ratio. The numerator is max(min(shared, 1), sum of weights): one shared
+//     generic entity keeps its old value (the 'istanbul' tfidf 0.51 positive
+//     of ensemble-recall.test.ts stays a match; without the floor of one it
+//     would fall to 0.37), four shared generic entities are worth
+//     4 * GENERIC_ENTITY_WEIGHT. The denominator is unchanged. Only the entity
+//     lane moves, so a pair with real text overlap is untouched.
+//     The weight is the precision/recall dial of this mechanism, so it was
+//     measured instead of guessed (offline replay of the 12 prod story groups,
+//     509 article decisions; agreement with the prod cluster, 403 before the
+//     wave): weight 1.0 (off, veto and homograph entities on) 395, 0.75 390, 0.6 386, 0.5 381, 0.4 375,
+//     0.25 363. The chain this item exists for is ONE bridge: yenicag ("Bakan
+//     Fidan, Japon mevkidasi Motegi ile bir araya geldi") scores 0.444 against
+//     aksam ("Bakan Fidan, ABD Disisleri Bakani Rubio ile bir araya geldi") on
+//     tf-idf over the shared template and four generic entities, which is how
+//     the Rubio and Wadephul items entered 30c752a7. At 0.75 that pair is
+//     0.397 (no margin), at 0.6 it is 0.369, at 0.25 below 0.35 -- the
+//     bridge is already cut at 0.6, while 0.25 costs another 23 agreements and
+//     takes the Fidan-Motegi pairs themselves under the threshold (2 of the
+//     7 that join at weight 1.0 survive, against 4 at 0.6). Hence 0.6.
+export const GENERIC_ENTITIES: readonly string[] = [
+  "bakan",
+  "disisleri",
+  "abd",
+  "turkiye",
+  "erdogan",
+  "fidan",
+  "istanbul",
+];
+export const GENERIC_ENTITY_WEIGHT = 0.6;
+
+//     (4b) Subject veto. "Lavrov, Japon ..." and "Fidan, Atlanta'da Japon ..."
+//     are different events with the same template. The subject of a headline
+//     is the run of words before its first ',' when that comes within the
+//     first SUBJECT_SPAN_MAX_WORDS words (a decimal comma such as "2,5" does
+//     not count); only capitalised words count and SUBJECT_STOP_WORDS (titles,
+//     roles, wire boilerplate) are dropped. When both headlines have a
+//     subject, the subjects are disjoint and no subject word of either side
+//     occurs anywhere in the other headline, the pair is a different actor
+//     doing the same thing, and the primary and MinHash lanes are capped at
+//     SUBJECT_VETO_CAP. The cap sits under the consumer's fallback floor
+//     (MATCH_THRESHOLD * 0.9 = 0.36), so a vetoed pair is neither a join nor a
+//     fallback join nor a Jev band candidate. A headline lane that fired is
+//     never vetoed: the headlines already agree.
+//     A colon is NOT a subject break. Measured over every pair of the 458
+//     distinct replay articles within 48 h (about 100k): with ',' and ':' the veto
+//     removed 51 pairs that scored >= 0.40, nearly all of them one story
+//     ("TBMM'de kritik hafta: ..." vs "Meclis'te bu hafta: ...", "MHP'den
+//     gundem degistirme salvosu: ..." vs "Bahceli, 100 il ..." , "Istanbul'da
+//     kritik gorusme: ..." vs "Dolmabahce'de kritik zirve: ..."); with ','
+//     alone it removes exactly 5, all Lavrov vs Fidan.
+export const SUBJECT_SPAN_MAX_WORDS = 6;
+export const SUBJECT_STOP_WORDS: readonly string[] = [
+  "bakan",
+  "bakani",
+  "baskan",
+  "baskani",
+  "cumhurbaskani",
+  "disisleri",
+  "icisleri",
+  "genel",
+  "sozcusu",
+  "lideri",
+  "eski",
+  "yardimcisi",
+  "milletvekili",
+  "valisi",
+  "son",
+  "dakika",
+  "canli",
+  "flas",
+  "haber",
+];
+export const SUBJECT_VETO_CAP = MATCH_THRESHOLD * 0.9 - 0.01;
+
+//     (4c) Entity homographs. Eleven whitelist tokens are also ordinary
+//     Turkish words: 'Ozel sektor kredileri artti' -> [ozel], 'Adiyaman
+//     Kahta'da para tartismasinda iyi bir isci' -> [iyi], 'COP31'e 91 devlet
+//     baskani gelecek' -> [gelecek], 'Turk Tip Dunyasi Kurultayi cuma gunu'
+//     -> [tip, cuma] (the 20800ac6 / b04edded kurultay clusters of 2026-10-31
+//     shared 'tip' on the MoU and the congress speech). With
+//     MIN_SHARED_ENTITIES = 1 every such word is a phantom party overlap.
+//     ENTITY_AMBIGUOUS tokens are only emitted next to a disambiguator (see
+//     entities.ts); ENTITY_PROPER_NOUNS are the ones that are also names, so a
+//     capitalised mid-sentence occurrence or an apostrophe suffix ("Ozel'den")
+//     is enough. Replay (kurultay group): with the homographs fixed the six
+//     congress items that prod had put into the MoU cluster 20800ac6
+//     (yeni-safak, haber7, sabah, bir-gazete, haberport, posta) no longer join
+//     it; 'tip' from "Turk Tip Dunyasi Kurultayi" was the shared entity.
+export const ENTITY_AMBIGUOUS: readonly string[] = [
+  "ozel",
+  "iyi",
+  "gelecek",
+  "tip",
+  "dem",
+  "adalet",
+  "cuma",
+  "spor",
+  "saadet",
+  "vatan",
+  "rum",
+];
+export const ENTITY_PROPER_NOUNS: readonly string[] = [
+  "ozel",
+  "adalet",
+  "cuma",
+  "spor",
+  "saadet",
+  "vatan",
+  "rum",
+];
+
+// (5) h12-cluster-3: the headline lane missed same-story pairs. Measured on
+//     main fffeff1 with the real headlineLane() (scratchpad ana/pairs.mjs):
+//     Bahceli '100 il 1000 ilce ...' vs '19 yeni il ve 78 ilce onerisi'
+//     (containment 0.88, blocked by the numeral sets {100,1000} vs {19,78}),
+//     Bakirkoy 39b (Jaccard 0.50: belediyesi / Belediyesine, sorusturmada),
+//     'Erdogan, Zelenskiy'i kabul etti' vs 'Erdogan Zelenski'yi kabul etti'
+//     (3 identical stems, below HEADLINE_LANE_MIN_SHARED) and the live splits
+//     f4c68960 / 112a68bd (24 min apart), 71800f1c / 4e57766e,
+//     144cfc04 / c5627cb9. 'CANLI | Cumhurbaskani Erdogan konusuyor' reduces
+//     to no token at all, so identical live titles of different outlets could
+//     never meet.
+//
+//     Measured on the 458 distinct replay articles (every pair within 48 h,
+//     about 100k): the headline-lane changes (headline stemmer, numeral class
+//     shift, short identical sets, live title) bring 64 pairs over 0.40 and
+//     take none away. 30 of the 64 sit inside one prod cluster, 34 bridge two
+//     prod clusters of the same story (the twin splits this item is about).
+//     By story: Bakirkoy 39 x24, Zelenski arrival x23, Korea x9, Bulgaria x5,
+//     three others. Hand-judged: 63 are the same story; the one doubtful pair
+//     is two identical generic titles "Cumhurbaskani Erdogan'dan onemli
+//     aciklamalar" 4.6 h apart, a 2-token set once the apostrophe fragment
+//     'dan' counts (fragments are kept on purpose: the Sarigul pair needs
+//     'den').
+//
+//     A bare identical set is evidence only when it has a few words: two
+//     identical headlines of HEADLINE_SHORT_MIN_TOKENS..HEADLINE_LANE_MIN_SHARED-1
+//     tokens join inside the lane window. One identical token never does.
+export const HEADLINE_SHORT_MIN_TOKENS = 2;
+//     A headline whose every word is boilerplate carries a key (its
+//     normalised title); two equal keys within HEADLINE_LIVE_TITLE_MAX_HOURS
+//     are the same live broadcast announced by two outlets. Half an hour is a
+//     different broadcast with the same name, so the window is tight.
+export const HEADLINE_LIVE_TITLE_MAX_HOURS = 10 / 60;
+//     Spelling variants of one name, applied to the folded headline token
+//     after the generic-prefix check and before stemming.
+export const HEADLINE_ALIASES: Readonly<Record<string, string>> = {
+  zelensky: "zelenski",
+  zelenskiy: "zelenski",
+  zelenskyy: "zelenski",
+};
+
+//     The headline lane has its own stemmer (stemHeadlineToken in
+//     fingerprint.ts): stemTurkish feeds the persisted TF-IDF and the
+//     candidate-token index and must not move, but its locative rule turned
+//     'Gazete'de' into 'gaze' and 'Atlanta' into 'atlan' and missed -si / -ne /
+//     -ye / -yla (belediyesi / Belediyesine / belediye, mevkidasiyla / mevkidasi).
+//     One pass strips each matching suffix at most once, longest first, so
+//     "belediyesinde" loses -nde, -si, -ye and -di in one sweep and meets
+//     "belediye" and "Belediyesine" at 'bele'. Up to HEADLINE_STEM_MAX_PASSES
+//     passes run until nothing changes (a sweep can expose a suffix that sits
+//     earlier in the list: toplantilarindan -> toplantilarin -> toplan).
+export const HEADLINE_STEM_MAX_PASSES = 3;

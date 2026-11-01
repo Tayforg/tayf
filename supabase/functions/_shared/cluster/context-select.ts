@@ -108,3 +108,93 @@ export function stickyUpperBound(
   if (cap < 1 || newestRows.length < cap) return null;
   return newestRows[cap - 1]!.updated_at;
 }
+
+// ---------------------------------------------------------------------------
+// h12-cluster-1 (hunt 12): twin clusters. Two more pure helpers for the
+// consumer's candidate handling.
+// ---------------------------------------------------------------------------
+
+/**
+ * Candidates within this score distance of the best one are ordered by
+ * cluster size before score (see rankCandidates). Antalya-Alanya otoyolu:
+ * sozcu scored 0.87 against the 7-article twin and 0.83 against the
+ * 18-article original, and joined the twin.
+ */
+export const CANDIDATE_SIZE_TIEBREAK_MARGIN = 0.10;
+
+/** Most exact-title probe hits that are put in front of the candidate list. */
+export const MAX_TITLE_PROBE_CLUSTERS = 3;
+
+// 0.87 - 0.10 is 0.7699999999999999 in binary floating point; the margin is
+// inclusive, so compare with a little slack.
+const SCORE_EPSILON = 1e-9;
+
+/**
+ * Orders scored candidates for the consumer's join loop.
+ *
+ *   - best score below `threshold`: plain score order (a larger cluster never
+ *     outranks a better candidate that is itself not a match);
+ *   - otherwise G = { score >= threshold and score >= best - margin } goes
+ *     first, ordered size desc, score desc, clusterId asc; every other
+ *     candidate follows by score desc.
+ *
+ * Stable and non-mutating; extra fields on the rows are carried through.
+ * `sizeOf` returning a non-finite value counts as 0.
+ */
+export function rankCandidates<T extends { clusterId: string; score: number }>(
+  scored: readonly T[],
+  sizeOf: (clusterId: string) => number,
+  opts: { margin: number; threshold: number },
+): T[] {
+  // Array.prototype.sort is stable, so equal scores keep input order.
+  const byScore = [...scored].sort((a, b) => b.score - a.score);
+  const top = byScore[0];
+  if (top === undefined || top.score < opts.threshold) return byScore;
+
+  const floor = Math.max(opts.threshold, top.score - opts.margin - SCORE_EPSILON);
+  const size = new Map<string, number>();
+  const group: T[] = [];
+  const rest: T[] = [];
+  for (const c of byScore) {
+    if (c.score >= floor) {
+      const n = sizeOf(c.clusterId);
+      size.set(c.clusterId, Number.isFinite(n) ? n : 0);
+      group.push(c);
+    } else {
+      rest.push(c);
+    }
+  }
+  group.sort(
+    (a, b) =>
+      (size.get(b.clusterId) ?? 0) - (size.get(a.clusterId) ?? 0) ||
+      b.score - a.score ||
+      (a.clusterId < b.clusterId ? -1 : a.clusterId > b.clusterId ? 1 : 0),
+  );
+  return [...group, ...rest];
+}
+
+/**
+ * Candidate ids for the scorer: the exact-title probe hits first (at most
+ * MAX_TITLE_PROBE_CLUSTERS, order kept), then the index candidates, each id
+ * once. The probe ids are added on top of the candidate list, so they are not
+ * counted against MAX_CANDIDATE_CLUSTERS.
+ */
+export function mergeProbeIds(
+  probeIds: readonly string[],
+  candidateIds: readonly string[],
+): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const id of probeIds) {
+    if (out.length >= MAX_TITLE_PROBE_CLUSTERS) break;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  for (const id of candidateIds) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}

@@ -48,9 +48,12 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     is a set of merged ids, not a per-request probe: lookup() is a
 //     synchronous Map read, so it adds zero latency. A cold isolate or a merge
 //     older than the 1000-row window falls back to the page's own
-//     permanentRedirect(). The matcher is the single literal segment '/cluster/:id',
-//     never a ':path*' — that would also catch /cluster/<id>/kart and the
-//     per-cluster /opengraph-image route, which must stay unmatched.
+//     permanentRedirect(). The gate's matcher is the single literal segment
+//     '/cluster/:id', never a ':path*' — that would run the UUID check and the
+//     merged-cluster lookup on /cluster/<id>/kart and the per-cluster
+//     /opengraph-image route too. Those nested routes are matched by
+//     '/cluster/:id/:sub' instead and only get the decode-only answer of gate 8:
+//     the UUID/merge logic below stays single-segment.
 //
 //  4. /source/:slug — a real 404 for a slug that is not in `sources`. The
 //     key space is small (tens of rows), so src/lib/seo/source-slug-gate.ts
@@ -58,9 +61,10 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     confirms an absent slug with one targeted lookup (so a source just
 //     added via /admin never 404s off a stale set) and negative-caches
 //     misses for 60 s. Any lookup failure ("unknown") fails open to the
-//     page's own soft 404 with noindex. The matcher is the literal segment
-//     "/source/:slug" — never ":path*" — so /source/<slug>/opengraph-image
-//     and /twitter-image stay unmatched.
+//     page's own soft 404 with noindex. The gate's matcher is the literal
+//     segment "/source/:slug" — never ":path*" — so /source/<slug>/
+//     opengraph-image and /twitter-image never reach the slug check; they are
+//     matched by '/source/:slug/:sub' and only get gate 8's decode-only answer.
 //
 //  5. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
@@ -96,16 +100,30 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     is static and stays unmatched; the matcher is the single literal segment
 //     '/hafta/:hafta', never ':path*'.
 //
-//  8. Malformed percent-encoding — /api/v1/clusters/:id, /api/v1/sources/:slug/
-//     profile, /api/sources/:slug, /embed/cluster/:id and /rss/:topic. A
-//     segment such as %ff makes decodeURIComponent throw a URIError inside the
-//     route handler, which used to surface as a 500. Here the same decode is
+//  8. Malformed percent-encoding — every dynamic route. A segment such as %ff
+//     makes decodeURIComponent throw a URIError inside the route handler, which
+//     used to surface as a 500 (and a Sentry event). Here the same decode is
 //     tried once and a failure answers 400 (a JSON body on the two API
-//     surfaces, text/plain on /embed and /rss; /api/v1 carries the CORS +
-//     cache headers of apiV1Headers minus X-Tayf-Tier, see
-//     src/lib/api/v1-cors.ts). A well-formed path returns NextResponse.next()
-//     and does no other work: no auth, no rate limit, no I/O. The /embed frame
-//     headers come from next.config (buildSecurityHeaders) and are untouched.
+//     surfaces, text/plain elsewhere; /api/v1 carries the CORS + cache headers
+//     of apiV1Headers minus X-Tayf-Tier, see src/lib/api/v1-cors.ts). A
+//     well-formed path returns NextResponse.next() and does no other work: no
+//     auth, no rate limit, no I/O. The /embed frame headers come from
+//     next.config (buildSecurityHeaders) and are untouched.
+//
+//     #148 listed five surfaces (/api/v1/clusters/:id, /api/v1/sources/:slug/
+//     profile, /api/sources/:slug, /embed/cluster/:id, /rss/:topic) and left
+//     the rest on a 500. Hunt 12 (h12-security-1, incomplete coverage of #148)
+//     closed it: the nested /cluster/:id/:sub and /source/:slug/:sub routes,
+//     /rozet, /sitemaps, /rapor (+ /markdown), /hikaye, /api/admin/corrections/
+//     :id and the two catch-all route directories /api/v1/[...path] and
+//     /embed/[...rest] (the only two matcher wildcards besides /admin; both
+//     are decode-only, so a wildcard here never gates anything). The nested
+//     /cluster and /source paths are decoded in their own branches above, so
+//     the UUID, merge and slug gates keep their single-segment contract.
+//     /admin/rapor/:clusterId is covered by the /admin scope: an anonymous
+//     request is redirected to the login, only an authenticated admin reaches
+//     the route. tests/guards/middleware-bad-encoding.test.ts walks src/app
+//     and fails when a dynamic route is neither matched nor answered here.
 //     tests/guards/middleware-matcher.test.ts pins that every matcher entry has
 //     its pathname.startsWith() branch above the admin-scope check, so a new
 //     matcher can never silently 404 a whole surface.
@@ -158,6 +176,19 @@ export const config = {
     "/api/sources/:slug",
     "/embed/cluster/:id",
     "/rss/:topic",
+    // Hunt 12 (h12-security-1): decode-only, see gate 8. The two wildcards exist
+    // only for the catch-all route dirs /api/v1/[...path] and /embed/[...rest];
+    // they also match the bare /api/v1 and /embed, which pass straight through.
+    "/cluster/:id/:sub",
+    "/source/:slug/:sub",
+    "/rozet/:file",
+    "/sitemaps/:file",
+    "/rapor/:token",
+    "/rapor/:token/:sub",
+    "/hikaye/:slug",
+    "/api/admin/corrections/:id",
+    "/api/v1/:path*",
+    "/embed/:path*",
   ],
 };
 
@@ -209,6 +240,19 @@ function badEncoding(kind: BadEncodingKind): NextResponse {
       "X-Robots-Tag": "noindex",
     },
   });
+}
+
+/**
+ * Gate 8 for a route that has no other edge gate: the path decodes (and passes
+ * through untouched) or it answers 400. No I/O, no auth, no other work.
+ */
+function decodeOnly(pathname: string, kind: BadEncodingKind): NextResponse {
+  try {
+    decodeURIComponent(pathname);
+  } catch {
+    return badEncoding(kind);
+  }
+  return NextResponse.next();
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -282,12 +326,11 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
 
   if (pathname.startsWith("/cluster/")) {
     const segment = pathname.slice("/cluster/".length);
-    // A nested path (e.g. /cluster/<id>/kart, /cluster/<id>/opengraph-image)
-    // never reaches here in production (the matcher is the single literal
-    // segment '/cluster/:id'), but the function must still fall through
-    // safely if somehow invoked with one, rather than 404 or fall into the
-    // admin branch below.
-    if (segment.includes("/")) return NextResponse.next();
+    // A nested path (/cluster/<id>/kart, /cluster/<id>/opengraph-image) reaches
+    // here through '/cluster/:id/:sub'. It is decode-only: no UUID check and no
+    // merged-cluster lookup (those stay single-segment), and it must neither 404
+    // nor fall into the admin branch below.
+    if (segment.includes("/")) return decodeOnly(pathname, "text");
     if (!UUID_RE.test(segment)) return notFoundRewrite(req);
 
     // Merged clusters (migration 099): background refresh, synchronous lookup.
@@ -305,7 +348,8 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
 
   if (pathname.startsWith("/source/")) {
     const slug = pathname.slice("/source/".length);
-    if (slug.includes("/")) return NextResponse.next();
+    // /source/<slug>/opengraph-image and /twitter-image: decode-only, no slug lookup.
+    if (slug.includes("/")) return decodeOnly(pathname, "text");
     // Fail open: "unknown" falls through to the page's own soft 404.
     return (await sourceGate.check(slug)) === "missing"
       ? notFoundRewrite(req)
@@ -325,24 +369,42 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
     return isServableWeekKey(key, Date.now()) ? NextResponse.next() : notFoundRewrite(req);
   }
 
+  // Gate 8, decode-only surfaces with no other edge gate (hunt 12).
+  if (
+    pathname.startsWith("/rozet/") ||
+    pathname.startsWith("/sitemaps/") ||
+    pathname.startsWith("/rapor/") ||
+    pathname.startsWith("/hikaye/")
+  ) {
+    return decodeOnly(pathname, "text");
+  }
+
+  if (pathname.startsWith("/api/admin/corrections/")) {
+    return decodeOnly(pathname, "json");
+  }
+
+  // The bare roots of the two catch-all route dirs ('/api/v1/:path*' and
+  // '/embed/:path*' also match them) have nothing to decode: straight through.
+  if (pathname === "/api/v1" || pathname === "/embed") return NextResponse.next();
+
+  // The five #148 prefixes stay listed one by one (the matcher guard pins a
+  // startsWith branch per matcher entry); /api/v1/ and /embed/ now also take the
+  // catch-all route dirs.
   if (
     pathname.startsWith("/api/v1/clusters/") ||
     pathname.startsWith("/api/v1/sources/") ||
+    pathname.startsWith("/api/v1/") ||
     pathname.startsWith("/api/sources/") ||
     pathname.startsWith("/embed/cluster/") ||
+    pathname.startsWith("/embed/") ||
     pathname.startsWith("/rss/")
   ) {
-    try {
-      decodeURIComponent(pathname);
-    } catch {
-      const kind: BadEncodingKind = pathname.startsWith("/api/v1/")
-        ? "v1"
-        : pathname.startsWith("/api/")
-          ? "json"
-          : "text";
-      return badEncoding(kind);
-    }
-    return NextResponse.next();
+    const kind: BadEncodingKind = pathname.startsWith("/api/v1/")
+      ? "v1"
+      : pathname.startsWith("/api/")
+        ? "json"
+        : "text";
+    return decodeOnly(pathname, kind);
   }
 
   // Admin scope: only /admin and /admin/* (any case) may reach the session

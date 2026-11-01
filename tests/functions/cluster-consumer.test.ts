@@ -12,7 +12,7 @@ import {
   HEADLINE_MEMBER_SCAN_MAX,
   HEADLINE_TITLE_MAX_CHARS,
 } from "../../supabase/functions/_shared/cluster/constants.ts";
-import { headlineTokens } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
+import { headlineTokens, strictFingerprint } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the cluster-consumer Edge Function.
@@ -154,6 +154,7 @@ const {
   stickyQuery,
   admissionRows,
   rpcFixtures,
+  clusterArticlesFailure,
   supabaseFakeClient,
   supabaseFakeCalls,
 } = await vi.hoisted(
@@ -188,11 +189,20 @@ const {
       jev_politics_admission_record:
         | { data: unknown; error: { message: string; code?: string } | null }
         | null;
+      // h12-cluster-1: the exact-title probe. A function so a test can also
+      // make the call throw; null = no cluster has that title (empty rows).
+      cluster_title_probe:
+        | (() => { data: unknown; error: { message: string } | null })
+        | null;
     } = {
       cluster_link_atomic: null,
       jev_politics_admission_claim: null,
       jev_politics_admission_record: null,
+      cluster_title_probe: null,
     };
+    // h12-cluster-1: makes the per-cluster member read (the probe's
+    // loadProbeCluster) fail for one cluster id.
+    const clusterArticlesFailureState: { clusterId: string | null } = { clusterId: null };
     const admissionRows: Array<Record<string, unknown>> = [];
     const fake = helper.createSupabaseFake({
       tables: {
@@ -243,6 +253,9 @@ const {
             | string
             | undefined;
           if (eqClusterId !== undefined) {
+            if (clusterArticlesFailureState.clusterId === eqClusterId) {
+              return { data: null, error: { message: "cluster_articles read failed" } };
+            }
             const rows = clusterArticles.filter((r) => r.cluster_id === eqClusterId);
             return { data: rows, error: null, count: rows.length };
           }
@@ -259,6 +272,8 @@ const {
           { id: "src-outlet", bias: "pro_government", name: "Outlet", slug: "outlet", kind: "outlet" },
           { id: "src-agg", bias: "center", name: "Aggregator", slug: "agg", kind: "aggregator" },
           { id: "src-wire", bias: "state_media", name: "Wire", slug: "wire", kind: "wire" },
+          { id: "src-posta", bias: "pro_government", name: "Posta", slug: "posta", kind: "outlet" },
+          { id: "src-cnn-turk", bias: "center", name: "CNN Turk", slug: "cnn-turk", kind: "outlet" },
         ],
         jev_politics_admissions: (state) => {
           const eqCluster = state.eq.find((p) => p.col === "cluster_id")?.val as
@@ -288,6 +303,11 @@ const {
           }),
         jev_politics_admission_record: () =>
           rpcFixturesState.jev_politics_admission_record ?? { data: true, error: null },
+        // h12-cluster-1: default = no live cluster carries the article's title.
+        cluster_title_probe: () =>
+          rpcFixturesState.cluster_title_probe
+            ? rpcFixturesState.cluster_title_probe()
+            : { data: [], error: null },
       },
     });
     return {
@@ -299,6 +319,7 @@ const {
       stickyQuery: stickyQueryState,
       admissionRows,
       rpcFixtures: rpcFixturesState,
+      clusterArticlesFailure: clusterArticlesFailureState,
       supabaseFakeClient: fake.client,
       supabaseFakeCalls: fake.calls,
     };
@@ -360,6 +381,8 @@ beforeEach(() => {
   rpcFixtures.cluster_link_atomic = null;
   rpcFixtures.jev_politics_admission_claim = null;
   rpcFixtures.jev_politics_admission_record = null;
+  rpcFixtures.cluster_title_probe = null;
+  clusterArticlesFailure.clusterId = null;
   admissionRows.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
@@ -1628,7 +1651,7 @@ describe("cluster-consumer Edge Function", () => {
         authedRequest("http://localhost/cluster-consumer", { method: "POST" }),
       );
       expect(res.status).toBe(200);
-      return (await res.json()) as { matched: number; created: number };
+      return (await res.json()) as { matched: number; created: number; skipped: number };
     }
 
     const linkedClusters = () =>
@@ -1636,15 +1659,19 @@ describe("cluster-consumer Edge Function", () => {
         .filter((r) => r.name === "cluster_link_atomic")
         .map((r) => (r.args as { p_cluster_id: string }).p_cluster_id);
 
-    it("primary skipped as duplicate-source + entity-only secondary at 0.39 -> new cluster, no join", async () => {
+    it("primary skipped as duplicate-source + entity-only secondary at 0.39 -> no join (h12-cluster-1: the same-source duplicate is skipped, no twin is opened)", async () => {
       seedClusters();
       scoreBy({ [A.fp]: result(0.6), [B.fpSeed]: result(0.39, CAPPED) });
 
       const body = await drain();
 
       expect(body.matched).toBe(0);
-      expect(body.created).toBe(1);
+      // Before hunt 12 this opened a new cluster; A matched at 0.6 and already
+      // holds the article's source, so that cluster would be A's twin.
+      expect(body.created).toBe(0);
+      expect(body.skipped).toBe(1);
       expect(linkedClusters()).toEqual([]);
+      expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
     });
 
     it("control: the same secondary without the cap is the ordinary fallback join and still joins", async () => {
@@ -2439,6 +2466,14 @@ describe("cluster-consumer Edge Function", () => {
 
     it("regression: a plain politika message is byte-identical (mutations + rpc log) across off/shadow/live", async () => {
       const runOnce = async (mode: string | undefined) => {
+        // Each run is a cold start of its own: a warm isolate would still hold
+        // the cluster the previous run created, and since hunt 12 the same
+        // article re-delivered to its own source's cluster is skipped (it used
+        // to open a twin), which would make the runs differ for a reason that
+        // has nothing to do with the admission mode.
+        vi.resetModules();
+        clusterRows.length = 0;
+        clusterArticleRows.length = 0;
         resetPgmqState();
         for (const k of Object.keys(fakeArticles)) delete fakeArticles[k];
         supabaseFakeCalls.mutations.length = 0;
@@ -2478,6 +2513,669 @@ describe("cluster-consumer Edge Function", () => {
       expect(shadow).toEqual(off);
       expect(live).toEqual(off);
       expect(off.recordCalls).toBe(0);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Hunt 12 (2026-11-01).
+  //
+  // h12-cluster-1: twin clusters. (a) The best match is a cluster that already
+  // holds the incoming article's source (duplicate-source): the fallback loop
+  // used to run dry and createCluster opened a twin -- Antalya-Alanya otoyolu,
+  // 8ab93bbd (18 articles) next to 2c9941bd (7). (b) The best match is a
+  // singleton outside the 200-cluster context -- Yusra Geyik, posta 53d92ca1 at
+  // 06:00 and cnn-turk 217069e3 at 09:42, 269 clusters updated in between. The
+  // consumer now skips a same-source duplicate instead of opening a twin,
+  // prefers the larger of two near-equal matches, and asks the database for the
+  // live clusters whose folded seed title equals the incoming title
+  // (rpc cluster_title_probe, migration 135).
+  //
+  // h12-cluster-5: milliyet descriptions end with a "Son dakika..." ticker of
+  // an unrelated story; entities, fingerprint and tf-idf are now built from the
+  // cleaned description (the stored description and rss/normalize.ts are not
+  // touched).
+  // -------------------------------------------------------------------------
+  describe("twin clusters + Son dakika ticker (hunt 12: h12-cluster-1, h12-cluster-5)", () => {
+    const H = 3_600_000;
+    const HEADLINE = "Antalya'dan Alanya'ya ulaşım 36 dakikaya inecek, yıllık tasarruf 23,9 milyar lira";
+    const YUSRA = "Yüsra Geyik takside beklerken, Nehir Erdoğan arka kapıdan kaçtı";
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+    const defaultScoreImpl = () => ({
+      score: 0.82,
+      components: { cosine: 0.8, entityJaccard: 0.7, fingerprintMatch: true },
+      isMatch: true,
+    });
+
+    type Fake = { score: number; components: Record<string, unknown>; isMatch: boolean };
+    const result = (s: number): Fake => ({
+      score: s,
+      components: { cosine: 0.1, entityJaccard: 0, fingerprintMatch: false },
+      isMatch: s >= 0.4,
+    });
+    /** Score by the fingerprint of the cluster side of the pair; everything else scores 0. */
+    function scoreBy(byFp: Record<string, number>) {
+      vi.mocked(scoreMock).mockImplementation((_a: unknown, b: unknown) => {
+        const strict = (b as { strict?: string | null } | null | undefined)?.strict ?? null;
+        const s = strict !== null ? byFp[strict] : undefined;
+        return result(s ?? 0);
+      });
+    }
+
+    let logSpy: ReturnType<typeof vi.spyOn>;
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      logSpy.mockRestore();
+      warnSpy.mockRestore();
+      vi.mocked(scoreMock).mockImplementation(defaultScoreImpl);
+    });
+
+    interface SeedMember {
+      id: string;
+      sourceId: string;
+      fp: string;
+      ageMs?: number;
+      title?: string;
+      description?: string;
+      category?: string;
+    }
+    /** A cluster row plus its members, in the context fixtures (clusters, cluster_articles, articles). */
+    function seedCluster(
+      id: string,
+      articleCount: number,
+      members: SeedMember[],
+      opts: { title?: string; updatedAgoMs?: number; inContext?: boolean } = {},
+    ) {
+      const updated = ago(opts.updatedAgoMs ?? 60_000);
+      const title = opts.title ?? HEADLINE;
+      if (opts.inContext !== false) {
+        clusterRows.push({
+          id,
+          title_tr: title,
+          title_tr_neutral: title,
+          first_published: updated,
+          updated_at: updated,
+          article_count: articleCount,
+        });
+      }
+      for (const m of members) {
+        clusterArticleRows.push({ cluster_id: id, article_id: m.id });
+        fakeArticles[m.id] = {
+          id: m.id,
+          source_id: m.sourceId,
+          title: m.title ?? title,
+          description: m.description ?? "Detay",
+          published_at: ago(m.ageMs ?? 30 * 60_000),
+          fingerprint: m.fp,
+          entities: [],
+          category: m.category ?? "politika",
+          minhash_sig: null,
+          minhash_version: null,
+        };
+      }
+    }
+
+    function queueIncoming(opts: {
+      id?: string;
+      msgId?: number;
+      sourceId: string;
+      title?: string;
+      description?: string;
+      category?: string;
+      admit?: "shadow" | "live";
+    }) {
+      const id = opts.id ?? "art-twin";
+      const message: { article_id: string; admit?: string } = { article_id: id };
+      if (opts.admit) message.admit = opts.admit;
+      (pgmqState.pending as unknown as Array<{ msg_id: number; read_ct: number; message: unknown }>).push({
+        msg_id: opts.msgId ?? 4000 + pgmqState.pending.length,
+        read_ct: 1,
+        message,
+      });
+      fakeArticles[id] = {
+        id,
+        source_id: opts.sourceId,
+        title: opts.title ?? HEADLINE,
+        description: opts.description ?? "Detay",
+        url: `https://example.com/${id}`,
+        category: opts.category ?? "politika",
+        published_at: new Date().toISOString(),
+      };
+      return id;
+    }
+
+    interface DrainBody {
+      matched: number;
+      created: number;
+      skipped: number;
+      failedTransient: number;
+      admission: { would_create: number; would_match: number };
+    }
+    async function drain(): Promise<DrainBody> {
+      const handler = await importHandler();
+      if (!handler) throw new Error("unreachable");
+      const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+      expect(res.status).toBe(200);
+      return (await res.json()) as DrainBody;
+    }
+
+    const linkedClusters = () =>
+      supabaseFakeCalls.rpc
+        .filter((r) => r.name === "cluster_link_atomic")
+        .map((r) => (r.args as { p_cluster_id: string }).p_cluster_id);
+    const probeCalls = () => supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_title_probe");
+    const probeWarnings = () =>
+      warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("cluster_title_probe"));
+    const skipLogs = () =>
+      logSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("same-source-duplicate"));
+
+    // ---- T1: same-source duplicate is a skip, not a twin ---------------------
+
+    describe("T1 same-source duplicate: skip instead of opening a twin", () => {
+      it("the only candidate (18 articles, 0.87) already holds the article's source -> skipped, no cluster, no link, message archived", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+        queueIncoming({ sourceId: "src-outlet", msgId: 4101 });
+        scoreBy({ "fp-c1": 0.87 });
+
+        const body = await drain();
+
+        expect(body.skipped).toBe(1);
+        expect(body.created).toBe(0);
+        expect(body.matched).toBe(0);
+        expect(body.failedTransient).toBe(0);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+        expect(supabaseFakeCalls.insert("cluster_articles")).toHaveLength(0);
+        expect(linkedClusters()).toEqual([]);
+        expect(pgmqState.archived).toContain(4101);
+        // outcome {result: "skipped", reason: "same-source-duplicate"}, logged with the article and the cluster id
+        const logs = skipLogs();
+        expect(logs).toHaveLength(1);
+        expect(String(logs[0]?.[0])).toContain("art-twin");
+        expect(String(logs[0]?.[0])).toContain("c1");
+      });
+
+      it("T1b: with a second candidate from other sources at 0.83 the article joins that one", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+        seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.87, "fp-c2": 0.83 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(body.skipped).toBe(0);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual(["c2"]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+        expect(skipLogs()).toHaveLength(0);
+      });
+
+      it("strict-fingerprint fast path: an identical item from the same source in a cluster, nothing else to join -> skipped", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: strictFingerprint(HEADLINE, "Detay") }]);
+        queueIncoming({ sourceId: "src-outlet", msgId: 4102 });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.skipped).toBe(1);
+        expect(body.created).toBe(0);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+        expect(linkedClusters()).toEqual([]);
+        expect(pgmqState.archived).toContain(4102);
+      });
+
+      it("dry-run (admission shadow): a duplicate-source match at 0.87 is skipped, not reported as would_create", async () => {
+        process.env.JEV_POLITICS_ADMISSION = "shadow";
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+        queueIncoming({ sourceId: "src-outlet", category: "ekonomi", admit: "shadow", msgId: 4103 });
+        scoreBy({ "fp-c1": 0.87 });
+
+        const body = await drain();
+
+        expect(body.skipped).toBe(1);
+        expect(body.admission.would_create).toBe(0);
+        expect(body.admission.would_match).toBe(0);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+        expect(linkedClusters()).toEqual([]);
+        expect(pgmqState.archived).toContain(4103);
+      });
+
+      it("dry-run control: the same match from a source the cluster does not hold is would_match", async () => {
+        process.env.JEV_POLITICS_ADMISSION = "shadow";
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-wire", fp: "fp-c1" }]);
+        queueIncoming({ sourceId: "src-outlet", category: "ekonomi", admit: "shadow" });
+        scoreBy({ "fp-c1": 0.87 });
+
+        const body = await drain();
+
+        expect(body.admission.would_match).toBe(1);
+        expect(body.skipped).toBe(0);
+      });
+    });
+
+    // ---- T2: larger cluster wins inside the margin ---------------------------
+
+    describe("T2 tie-break: the larger cluster wins inside the 0.10 margin", () => {
+      const CASES = [
+        { name: "C1 (18 articles, 0.83) vs C2 (7, 0.87): inside the margin -> C1", s1: 0.83, s2: 0.87, winner: "c1" },
+        { name: "C1 (18, 0.76) vs C2 (7, 0.87): outside the margin -> C2", s1: 0.76, s2: 0.87, winner: "c2" },
+        { name: "C1 (18, 0.38, below the threshold) vs C2 (7, 0.41) -> C2", s1: 0.38, s2: 0.41, winner: "c2" },
+      ];
+      for (const c of CASES) {
+        it(c.name, async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-agg", fp: "fp-c1" }]);
+          seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+          queueIncoming({ sourceId: "src-outlet" });
+          scoreBy({ "fp-c1": c.s1, "fp-c2": c.s2 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(body.created).toBe(0);
+          expect(linkedClusters()).toEqual([c.winner]);
+        });
+      }
+
+      it("the exact boundary (0.77 vs 0.87) still prefers the larger cluster", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-agg", fp: "fp-c1" }]);
+        seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.77, "fp-c2": 0.87 });
+
+        await drain();
+
+        expect(linkedClusters()).toEqual(["c1"]);
+      });
+
+      it("size is the larger of article_count and the sources loaded for the cluster (a stale row count does not hide a big cluster)", async () => {
+        seedCluster("c1", 1, [
+          { id: "c1-a", sourceId: "src-agg", fp: "fp-c1", ageMs: 50 * 60_000 },
+          // The middle member is only reached by the headline scan: keep its title unrelated.
+          { id: "c1-b", sourceId: "src-wire", fp: "fp-c1b", ageMs: 40 * 60_000, title: "Alakasız bir başka konu" },
+          { id: "c1-c", sourceId: "src-posta", fp: "fp-c1c", ageMs: 30 * 60_000 },
+        ]);
+        seedCluster("c2", 2, [{ id: "c2-m", sourceId: "src-cnn-turk", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.8, "fp-c1c": 0.8, "fp-c2": 0.85 });
+
+        await drain();
+
+        expect(linkedClusters()).toEqual(["c1"]);
+      });
+    });
+
+    // ---- T3: negative control ------------------------------------------------
+
+    describe("T3 negative control: a weak same-source match still creates a cluster", () => {
+      for (const s of [0.3, 0.38]) {
+        it(`the only candidate holds the source but scores ${s} (< MATCH_THRESHOLD) -> createCluster runs`, async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ sourceId: "src-outlet" });
+          scoreBy({ "fp-c1": s });
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(body.skipped).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+          expect(skipLogs()).toHaveLength(0);
+        });
+      }
+
+      it("a source-blocked 0.87 cluster does not stop a lower fallback candidate in [0.36, 0.40) from taking the article (existing fallback bar unchanged)", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+        seedCluster("c2", 3, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.87, "fp-c2": 0.38 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(linkedClusters()).toEqual(["c2"]);
+      });
+    });
+
+    // ---- T4: exact-title probe (Yusra) ---------------------------------------
+
+    describe("T4 Yusra: a singleton outside the 200-cluster context is found by the exact-title probe", () => {
+      const SINGLETON = "cl-yusra-posta";
+
+      function seedBusyContext(n = 250) {
+        const t0 = Date.now();
+        for (let i = 0; i < n; i++) {
+          const id = `ctx-${i}`;
+          const at = new Date(t0 - i * 10_000).toISOString();
+          clusterRows.push({
+            id,
+            title_tr: `Bağlam kümesi ${i} alakasız konu`,
+            title_tr_neutral: `Bağlam kümesi ${i} alakasız konu`,
+            first_published: at,
+            updated_at: at,
+            article_count: 1,
+          });
+          clusterArticleRows.push({ cluster_id: id, article_id: `ctx-m-${i}` });
+          fakeArticles[`ctx-m-${i}`] = {
+            id: `ctx-m-${i}`,
+            source_id: "src-agg",
+            title: `Bağlam kümesi ${i} alakasız konu`,
+            description: "Alakasız",
+            published_at: at,
+            fingerprint: `fp-ctx-${i}`,
+            entities: [],
+            category: "politika",
+            minhash_sig: null,
+            minhash_version: null,
+          };
+        }
+      }
+
+      /** The posta singleton: NOT among the context fixtures, only reachable through the probe. */
+      function seedSingleton(sourceId = "src-posta") {
+        seedCluster(SINGLETON, 1, [{ id: "yusra-posta", sourceId, fp: "fp-yusra-posta", ageMs: 3.7 * H, title: YUSRA }], {
+          title: YUSRA,
+          updatedAgoMs: 3.7 * H,
+          inContext: false,
+        });
+        rpcFixtures.cluster_title_probe = () => ({
+          data: [
+            {
+              id: SINGLETON,
+              title_tr: YUSRA,
+              title_tr_neutral: null,
+              first_published: ago(3.7 * H),
+              updated_at: ago(3.7 * H),
+              article_count: 1,
+            },
+          ],
+          error: null,
+        });
+      }
+
+      it("control (before the fix): without the probe the cnn-turk article opens a twin", async () => {
+        seedBusyContext();
+        seedSingleton();
+        rpcFixtures.cluster_title_probe = () => ({ data: [], error: null });
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([]);
+      });
+
+      it("the identical cnn-turk title joins the out-of-context singleton, and the probe args are (title, ~24 h ago, 3)", async () => {
+        seedBusyContext();
+        seedSingleton();
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual([SINGLETON]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+
+        const calls = probeCalls();
+        expect(calls).toHaveLength(1);
+        const args = calls[0]?.args as { p_title: string; p_since: string; p_limit: number };
+        expect(args.p_title).toBe(YUSRA);
+        expect(args.p_limit).toBe(3);
+        expect(Math.abs(Date.parse(args.p_since) - (Date.now() - 24 * H))).toBeLessThan(5 * 60_000);
+      });
+
+      it("the loaded cluster stays in the context: a second identical headline in the same drain joins it too", async () => {
+        seedBusyContext();
+        seedSingleton();
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA });
+        queueIncoming({ id: "yusra-wire", sourceId: "src-wire", title: YUSRA });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(2);
+        expect(linkedClusters()).toEqual([SINGLETON, SINGLETON]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+      });
+
+      it("a probe hit that is already in the context is scored as usual (no duplicate cluster entry, still joins)", async () => {
+        seedBusyContext(10);
+        seedCluster(SINGLETON, 1, [{ id: "yusra-posta", sourceId: "src-posta", fp: "fp-yusra-posta", title: YUSRA }], {
+          title: YUSRA,
+        });
+        rpcFixtures.cluster_title_probe = () => ({
+          data: [
+            { id: SINGLETON, title_tr: YUSRA, title_tr_neutral: null, first_published: ago(H), updated_at: ago(H), article_count: 1 },
+          ],
+          error: null,
+        });
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        await drain();
+
+        expect(linkedClusters()).toEqual([SINGLETON]);
+      });
+
+      it("no probe in a dry-run (admission shadow)", async () => {
+        process.env.JEV_POLITICS_ADMISSION = "shadow";
+        seedBusyContext(10);
+        seedSingleton();
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA, category: "ekonomi", admit: "shadow" });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        const body = await drain();
+
+        expect(probeCalls()).toHaveLength(0);
+        expect(body.admission.would_create).toBe(1);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+      });
+
+      it("no probe when the headline has fewer than 3 tokens (a CANLI title)", async () => {
+        const title = "CANLI";
+        expect(headlineTokens(title).tokens.size).toBeLessThan(3);
+        expect(headlineTokens(YUSRA).tokens.size).toBeGreaterThanOrEqual(3);
+        seedBusyContext(10);
+        queueIncoming({ id: "canli", sourceId: "src-cnn-turk", title });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(probeCalls()).toHaveLength(0);
+        expect(body.created).toBe(1);
+      });
+
+      it("a probe rpc error warns once and the article is still processed", async () => {
+        seedBusyContext(10);
+        rpcFixtures.cluster_title_probe = () => ({ data: null, error: { message: "canceling statement due to statement timeout" } });
+        queueIncoming({ id: "yusra-a", sourceId: "src-cnn-turk", title: YUSRA });
+        queueIncoming({ id: "other-b", sourceId: "src-posta", title: "Bakanlar Kurulu toplantısı sona erdi, kararlar açıklandı" });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(probeCalls()).toHaveLength(2);
+        expect(probeWarnings()).toHaveLength(1);
+        expect(body.created).toBe(2);
+        expect(body.failedTransient).toBe(0);
+      });
+
+      it("a probe rpc that throws warns once and the article is still processed", async () => {
+        seedBusyContext(10);
+        rpcFixtures.cluster_title_probe = () => {
+          throw new Error("network down");
+        };
+        queueIncoming({ id: "yusra-a", sourceId: "src-cnn-turk", title: YUSRA });
+        queueIncoming({ id: "other-b", sourceId: "src-posta", title: "Bakanlar Kurulu toplantısı sona erdi, kararlar açıklandı" });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(probeCalls()).toHaveLength(2);
+        expect(probeWarnings()).toHaveLength(1);
+        expect(body.created).toBe(2);
+        expect(body.failedTransient).toBe(0);
+      });
+
+      it("a probe hit whose members cannot be read warns and is skipped; the article still gets a cluster", async () => {
+        seedBusyContext(10);
+        seedSingleton();
+        clusterArticlesFailure.clusterId = SINGLETON;
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(body.failedTransient).toBe(0);
+        expect(linkedClusters()).toEqual([]);
+        expect(
+          warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes(SINGLETON)),
+        ).toHaveLength(1);
+      });
+
+      it("a probe hit with no politics members is ignored (nothing to score)", async () => {
+        seedBusyContext(10);
+        seedCluster(SINGLETON, 1, [{ id: "yusra-posta", sourceId: "src-posta", fp: "fp-yusra-posta", title: YUSRA, category: "ekonomi" }], {
+          title: YUSRA,
+          inContext: false,
+        });
+        rpcFixtures.cluster_title_probe = () => ({
+          data: [
+            { id: SINGLETON, title_tr: YUSRA, title_tr_neutral: null, first_published: ago(H), updated_at: ago(H), article_count: 1 },
+          ],
+          error: null,
+        });
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(linkedClusters()).toEqual([]);
+      });
+
+      it("a same-source probe hit is skipped, not twinned (the posta re-delivery case)", async () => {
+        seedBusyContext(10);
+        seedSingleton("src-posta");
+        queueIncoming({ id: "yusra-posta-2", sourceId: "src-posta", title: YUSRA });
+        scoreBy({ "fp-yusra-posta": 0.9 });
+
+        const body = await drain();
+
+        expect(body.skipped).toBe(1);
+        expect(body.created).toBe(0);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+      });
+
+      it("a null / non-array probe payload is treated as no hit", async () => {
+        seedBusyContext(10);
+        rpcFixtures.cluster_title_probe = () => ({ data: null, error: null });
+        queueIncoming({ id: "yusra-cnn", sourceId: "src-cnn-turk", title: YUSRA });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(probeWarnings()).toHaveLength(0);
+      });
+    });
+
+    // ---- T5: the milliyet ticker ---------------------------------------------
+
+    describe("T5 milliyet 'Son dakika' ticker is cleaned before entities / fingerprint", () => {
+      // Real row 942d7061 (milliyet, 2026-11-01 09:47).
+      const TITLE = "Sosyal medyada yaş doğrulama tuzağı! Tek bir kodla hesaplarınızı ele geçirebilirler";
+      const CLEAN =
+        "Türkiye'de 15 yaşını doldurmamış çocuklara yönelik sosyal medya düzenlemesinin yürürlüğe girmesiyle birlikte gözler yaş doğrulama sürecine çevrildi. Ancak kullanıcıları bekleyen tehlike yalnızca yeni kurallar değil. Dolandırıcılar, \"Hesabınız kapatılacak\" ve \"Yaşınızı doğrulayın\" mesajlarıyla vatandaşların dijital bilgilerini ele geçirmek için harekete geçebilir.";
+      const RAW = `${CLEAN}\nSon dakika... MHP lideri Bahçeli'den 100 il 1000 ilçe açıklaması! Türkiye'de 19 yeni il, 78 yeni ilçe önerisi\nE-Devlet veya sosyal ...`;
+
+      const persisted = () =>
+        supabaseFakeCalls.update("articles").map(
+          (c) => c.patch as { fingerprint: string; entities: string[] },
+        );
+
+      it("persisted entities hold no mhp / bahceli and the fingerprint equals strictFingerprint(title, cleaned)", async () => {
+        queueIncoming({ id: "mil-942d7061", sourceId: "src-outlet", title: TITLE, description: RAW });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        const patches = persisted();
+        expect(patches).toHaveLength(1);
+        expect(patches[0]?.entities).not.toContain("mhp");
+        expect(patches[0]?.entities).not.toContain("bahceli");
+        expect(patches[0]?.fingerprint).toBe(strictFingerprint(TITLE, CLEAN));
+        expect(patches[0]?.fingerprint).not.toBe(strictFingerprint(TITLE, RAW));
+      });
+
+      it("the cluster summary keeps the stored description, ticker included (only clustering inputs are cleaned)", async () => {
+        queueIncoming({ id: "mil-942d7061", sourceId: "src-outlet", title: TITLE, description: RAW });
+        scoreBy({});
+
+        await drain();
+
+        const inserts = supabaseFakeCalls.insert("clusters");
+        expect(inserts).toHaveLength(1);
+        const patch = inserts[0]?.patch as { summary_tr: string; summary_en: string; title_tr: string };
+        expect(patch.summary_tr).toBe(RAW);
+        expect(patch.summary_en).toBe(RAW);
+        expect(patch.title_tr).toBe(TITLE);
+      });
+
+      it("control: a description without a ticker is fingerprinted as is", async () => {
+        queueIncoming({ id: "plain-1", sourceId: "src-outlet", title: TITLE, description: CLEAN });
+        scoreBy({});
+
+        await drain();
+
+        expect(persisted()[0]?.fingerprint).toBe(strictFingerprint(TITLE, CLEAN));
+      });
+
+      it("control: the ticker really feeds the entities when it is not cleaned (the stored row had [turkiye, mhp, bahceli])", async () => {
+        // A first-line 'Son dakika...' is not a ticker block and stays: entities see it.
+        queueIncoming({
+          id: "mil-first-line",
+          sourceId: "src-outlet",
+          title: TITLE,
+          description: "Son dakika... MHP lideri Bahçeli'den 100 il 1000 ilçe açıklaması!",
+        });
+        scoreBy({});
+
+        await drain();
+
+        expect(persisted()[0]?.entities).toEqual(expect.arrayContaining(["mhp", "bahceli"]));
+      });
+
+      it("a stored cluster member with the ticker and no stored signature is re-fingerprinted from the cleaned description", async () => {
+        seedCluster(
+          "mil-cluster",
+          1,
+          [{ id: "mil-seed", sourceId: "src-wire", fp: "", title: TITLE, description: RAW }],
+          { title: TITLE },
+        );
+        // fp "" -> falsy -> attachSignature recomputes both the signature and the strict fingerprint.
+        (fakeArticles["mil-seed"] as { fingerprint: string | null }).fingerprint = null;
+        // A different description: an identical cleaned text would be a strict-fingerprint
+        // fast-path join and never reach the scorer.
+        queueIncoming({ id: "mil-follow", sourceId: "src-outlet", title: TITLE, description: "Farklı bir açıklama metni." });
+        const seen: Array<string | null | undefined> = [];
+        vi.mocked(scoreMock).mockImplementation((_a: unknown, b: unknown) => {
+          seen.push((b as { strict?: string | null } | null | undefined)?.strict);
+          return result(0.2);
+        });
+
+        await drain();
+
+        expect(seen).toContain(strictFingerprint(TITLE, CLEAN));
+        expect(seen).not.toContain(strictFingerprint(TITLE, RAW));
+      });
     });
   });
 });

@@ -1,6 +1,7 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
+import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isMailConfigured, sendBatch } from "@/lib/email/resend";
@@ -150,7 +151,9 @@ function resolveSummary(
   return attribution?.text ?? "";
 }
 
-export const GET = withApiErrors(async (request: Request) => {
+// withCronOutcome is the outermost wrapper: each authenticated run is recorded in
+// public.ops_cron_route_runs (ops_health_report row 15, migration 136).
+export const GET = withCronOutcome("digest", withApiErrors(async (request: Request) => {
   // Next.js 16 cacheComponents prerenders GET handlers at build time;
   // `await connection()` defers `request.headers` access until an actual
   // request lands. See src/app/api/cron/headline/route.ts for the same
@@ -331,4 +334,4 @@ export const GET = withApiErrors(async (request: Request) => {
   }
 
   return NextResponse.json({ sent, skipped });
-});
+}));
