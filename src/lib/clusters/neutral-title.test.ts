@@ -927,14 +927,14 @@ describe("isAcceptableNeutral (hunt 16): residual pipe and partial shouting", ()
   it("rejects a residual pipe on its own (no shouting)", () => {
     const pipeOnly = "İzmir elektrik kesintisi 20 Ekim | Gediz uyardı: 24 ilçede kesinti";
     expect(isAcceptableNeutral(pipeOnly, [])).toBe(false);
-    expect(isAcceptableNeutral(pipeOnly.replace("|", "│"), [])).toBe(false);
-    expect(isAcceptableNeutral(pipeOnly.replace(" | ", ": "), [])).toBe(true);
+    expect(isAcceptableNeutral("İzmir elektrik kesintisi 20 Ekim │ Gediz uyardı: 24 ilçede kesinti", [])).toBe(false);
+    expect(isAcceptableNeutral("İzmir elektrik kesintisi 20 Ekim: Gediz uyardı: 24 ilçede kesinti", [])).toBe(true);
   });
 
   it("rejects a run of three shouted words on its own (no pipe)", () => {
     const capsOnly = "İZMİR ELEKTRİK KESİNTİSİ: Gediz uyardı, 24 ilçede şalterler iniyor";
     expect(isAcceptableNeutral(capsOnly, [])).toBe(false);
-    expect(isAcceptableNeutral(capsOnly.replace("İZMİR ELEKTRİK KESİNTİSİ", "İzmir elektrik kesintisi"), [])).toBe(true);
+    expect(isAcceptableNeutral("İzmir elektrik kesintisi: Gediz uyardı, 24 ilçede şalterler iniyor", [])).toBe(true);
   });
 
   it("the shouted-word run ignores apostrophe suffixes and edge punctuation", () => {
