@@ -237,6 +237,28 @@ RSS 2.0 feed of the top 30 politics clusters. Cached 5 minutes.
 
 ---
 
+### Topic and blindspot RSS feeds
+
+Three more RSS 2.0 feeds, all `GET`, unkeyed, `Content-Type: application/rss+xml; charset=utf-8`:
+
+| URL | Content |
+| --- | --- |
+| `/rss/{topic}.xml` | the first page of the `/konu/{topic}` hub. `{topic}` is one of `dunya`, `ekonomi`, `spor`, `yasam`, `teknoloji`, `genel`. Clusters of that topic updated in the last 7 days with at least two articles, newest first. Item `link`s carry `utm_source=rss&utm_medium=feed&utm_campaign=konu_{topic}`. |
+| `/rss/kor-noktalar.xml` | the blindspots feed (the `/blindspots` page). Item `link`s carry `utm_campaign=kor_nokta`; each description starts with `Kör nokta: ağırlıkla {zone} kaynakları (%N).` |
+| `/blindspots/rss.xml` | the same feed as `/rss/kor-noktalar.xml`, produced by the same code; only the `atom:link rel="self"` URL differs. |
+
+Every item has the headline as `title`, the cluster page as `link` (with the UTM parameters above), the plain `/cluster/{id}` URL as `guid`, the cluster's `first_published` as `pubDate`, and a description such as `7 kaynak · İktidar 4, Bağımsız 2, Muhalefet 1`. The UTM parameters are never part of the `guid`, so a feed reader does not see old items as new.
+
+- **Item cap**: 30 per feed.
+- **Cache**: `Cache-Control: public, max-age=300, s-maxage=300` on a `200` (5 minutes; unlike `/rss.xml` there is no `stale-while-revalidate`).
+- **`503`**: the read failed (database error or timeout). The body is the plain text `Service unavailable` with `Retry-After: 300` and `Cache-Control: no-store`, never a `200` with an empty feed that a reader would take as "the publisher deleted everything". `/rss.xml` answers a read failure the same way. A read that succeeded but found no matching cluster is a normal `200` feed with no items.
+- **`404`**: `/rss/{topic}.xml` with a topic that is not listed above (including `politika`, which the site redirects but has no feed of its own: use `/rss.xml`), or a name that does not end in `.xml`. Plain text `Not found` (`Content-Type: text/plain; charset=utf-8`); the handler sets no `Cache-Control`.
+- **`400`**: a malformed percent-encoding in the topic segment (`/rss/%ff.xml`). The edge middleware answers it before the route runs: plain text `Bad request: malformed URL encoding`, `Content-Type: text/plain; charset=utf-8`, `Cache-Control: no-store`, `X-Robots-Tag: noindex`. `/blindspots/rss.xml` has no dynamic segment, so it has no such case.
+
+The feeds are never prerendered at build time, so a build-time outage cannot be baked into them.
+
+---
+
 ### `GET /embed/cluster/{id}`
 
 The live "Yelpaze kutusu": a self-contained, **script-less** HTML document (no JavaScript, no external resource, no cookie) that shows how media zones covered one cluster -- a "TAYF" brand line, an optional "Kör nokta" ribbon, the headline (two lines max), a three-segment İktidar / Bağımsız / Muhalefet bar with a percent legend and the source count, and a "tayfhaber.com'da oku" link (`target=_blank rel=noopener`, UTM-tagged `utm_source=embed&utm_medium=iframe`). It is designed to be put in someone else's `<iframe>` at 560 x 200 (down to 320 wide) in light and dark colour schemes.
@@ -249,7 +271,8 @@ It is a **route handler**, not a page: `app/layout.tsx` always renders the site 
 | --- | --- | --- |
 | `200` | the widget | `public, s-maxage=300, stale-while-revalidate=600` |
 | `308` | the cluster was merged; `Location: /embed/cluster/{survivor}` (relative) | `public, s-maxage=300` |
-| `404` | malformed id or unknown cluster; tiny noindex HTML ("Haber bulunamadı") | `public, s-maxage=300` |
+| `400` | malformed percent-encoding in the id (`/embed/cluster/%ff`), answered by the edge middleware before the route runs: `text/plain; charset=utf-8` body `Bad request: malformed URL encoding`, `X-Robots-Tag: noindex` | `no-store` |
+| `404` | malformed id (not a UUID) or unknown cluster; tiny noindex HTML ("Haber bulunamadı") | `public, s-maxage=300` |
 | `503` | the read failed (sustained outage); noindex HTML ("Şu anda yüklenemiyor"), `Retry-After: 60` | `no-store` |
 
 A read failure is a `503`, never a cacheable `404`, so an outage cannot unpublish a real story from every embedding page. Every response carries `X-Robots-Tag: noindex` and the document has `<meta name="robots" content="noindex,nofollow">`; `/robots.txt` disallows `/embed/` in every group.
@@ -312,6 +335,98 @@ Status order (first match wins):
 **SSRF.** The endpoint never requests the given `url`. It is only parsed; the extracted UUID is the only thing that reaches the database, through the same cached, 4 s capped reader as the cluster page.
 
 Every response, success or error, is `application/json; charset=utf-8` with `Access-Control-Allow-Origin: *`; `OPTIONS` answers `204` with the same header. Cluster pages emit `<link rel="alternate" type="application/json+oembed">` from `generateMetadata` (`src/app/cluster/[id]/page.tsx`; the href comes from `oembedDiscoveryHref` in `src/lib/embed/embed-snippet.ts`). `WordPress`, `Iframely` and `Embedly` are in the `htmlLimitedBots` list, so they receive it in `<head>`.
+
+---
+
+### `GET /api/sources`
+
+The public, unkeyed source registry: every **active** source, ordered by name, as JSON. This is the surface `/llms.txt` points crawlers at, and the shape `GET /api/v1/sources` reuses.
+
+**Response** `200`:
+
+```json
+{
+  "licence": "CC BY-SA 4.0 — Tayf'a göre",
+  "attribution": "https://tayfhaber.com/metodoloji",
+  "methodology": "https://tayfhaber.com/metodoloji",
+  "generated_at": "2026-11-01T09:00:00.000Z",
+  "count": 118,
+  "sources": [
+    {
+      "slug": "ornek-gazete",
+      "name": "Örnek Gazete",
+      "url": "https://ornek-gazete.example",
+      "bias": "opposition_leaning",
+      "bias_label": "Muhalefete Meyilli",
+      "zone": "muhalefet",
+      "zone_label": "Muhalefet",
+      "kind": "outlet",
+      "owner_group": null,
+      "owner_group_label": null,
+      "factuality": null,
+      "trustee_since": null,
+      "trustee_note": null,
+      "rationale": null,
+      "rationale_at": null,
+      "active": true
+    }
+  ]
+}
+```
+
+(The record above is illustrative.) Every field is present on every record. Data that has not been entered is an explicit `null`, never omitted and never filled in by a model: `owner_group` / `owner_group_label` / `factuality` (hand-tagged, so most sources have none), `trustee_since` (ISO `yyyy-mm-dd`) / `trustee_note` (the dated public source for it), `rationale` / `rationale_at` (the operator's written reason for the bias label). `bias` is one of the ten bias categories, `zone` one of `iktidar`, `bagimsiz`, `muhalefet`, `kind` one of `outlet`, `aggregator`, `wire`, `niche`. The feed URL (`rss_url`) is never exposed.
+
+| Status | Meaning | `Cache-Control` |
+| --- | --- | --- |
+| `200` | the registry | `public, s-maxage=3600, stale-while-revalidate=86400` |
+| `429` | the per-client limiter is empty: `{"error":"Too many requests","details":{"retryAfterMs":...}}` with `Retry-After` (whole seconds, at least 1) | `no-store` |
+| `500` | the registry could not be read: `{"error":"Internal server error","details":{"request_id":"..."}}`. A sustained read failure is a `500`, never a `200` with an empty `sources` list that a CDN would then hold for an hour | not set |
+
+Rate limit: a 60-token bucket per client, refilling one token per second (about 60 requests per minute sustained; in-memory, so per server instance); the bucket is shared with `GET /api/sources/{slug}`. The query string is never read, so a cache-busting `?cb=<random>` neither mints a cache entry nor costs a database read. The response is not CORS-enabled for browsers by this route; use the keyed `/api/v1/sources` for that.
+
+---
+
+### `GET /api/sources/{slug}`
+
+One source's registry record, its bias-change history and the aggregate reader agreement from `/oyun`.
+
+`{slug}` must match `^[a-z0-9][a-z0-9-]{0,63}$` (lowercase letters, digits and hyphens, at most 64 characters), the `slug` of a record in `GET /api/sources`.
+
+**Response** `200`:
+
+```json
+{
+  "licence": "CC BY-SA 4.0 — Tayf'a göre",
+  "attribution": "https://tayfhaber.com/metodoloji",
+  "methodology": "https://tayfhaber.com/metodoloji",
+  "generated_at": "2026-11-01T09:00:00.000Z",
+  "source": { "slug": "ornek-gazete", "...": "RegistryRecord, as above" },
+  "zone_history": [
+    {
+      "old_bias": "center",
+      "new_bias": "opposition_leaning",
+      "reason": null,
+      "rater": null,
+      "changed_at": "2026-05-14T08:30:00.000Z"
+    }
+  ],
+  "reader_agreement": { "n": 214, "share": 0.633 }
+}
+```
+
+- `zone_history` is newest first, capped at the 50 most recent changes. `old_bias` is `null` for the first recorded label; `reason` and `rater` are `null` for a change made outside the `set_source_bias` function.
+- `reader_agreement` is how often readers of `/oyun` guessed the zone Tayf assigned ("okur tahmini": agreement with Tayf, not accuracy). `share` is rounded to three decimals. It is `null` below 100 guesses, and also when the count could not be read.
+
+| Status | Meaning | `Cache-Control` |
+| --- | --- | --- |
+| `200` | the record | `public, s-maxage=3600, stale-while-revalidate=300` |
+| `400` | `{"error":"Invalid slug"}`: the slug does not match the pattern | not set |
+| `400` | `{"error":"Bad request: malformed URL encoding"}`: a malformed percent-encoding in the slug (`/api/sources/%ff`). Answered by the edge middleware before the route runs, so it neither touches the registry nor spends a rate-limit token. `Content-Type: application/json; charset=utf-8` | `no-store` |
+| `404` | `{"error":"Source not found"}`: no active source has that slug (an unknown slug and a deactivated one look the same) | `public, s-maxage=300` |
+| `429` | same limiter and body as `GET /api/sources`; `Retry-After`, `no-store` | `no-store` |
+| `500` | the registry or the history could not be read | not set |
+
+The `stale-while-revalidate` window is only 300 s, much shorter than the list's, so a retracted rationale or corrected bias cannot be served from a stale CDN copy for a day. The handler checks the rate limit first, then the slug shape, then the registry, so an `Invalid slug` request also costs one token. The query string is never read.
 
 ---
 
@@ -380,6 +495,21 @@ host.
 non-2xx):
 - `301`: (`GET /api/v1/clusters/[id]` only) the cluster was merged into
   another; `Location` points to the surviving cluster.
+- `400`: a request that is malformed in one of two ways.
+  - A parameter failed validation (for example `Invalid since`,
+    `Invalid limit`, `Invalid cursor`, `Invalid cluster id`, `Invalid slug`,
+    `Invalid format`; the endpoint sections below say which). The key was
+    already resolved, so the response carries `X-Tayf-Tier`.
+  - A **malformed percent-encoding** in the path segment of
+    `/api/v1/clusters/{id}` or `/api/v1/sources/{slug}/profile` (for example
+    `/api/v1/clusters/%ff`) is rejected by the edge middleware, before any key
+    check and before the route runs:
+    `{"error":"Bad request: malformed URL encoding"}`. No key is read and
+    nothing is charged (neither an IP limiter nor the daily quota). It carries
+    the CORS and `Cache-Control: private, no-store` headers below but no
+    `X-Tayf-Tier`, because no key was resolved. The same string is the `400`
+    body of `GET /api/sources/{slug}`, and a `text/plain` `400` for
+    `/embed/cluster/{id}` and `/rss/{topic}.xml`.
 - `401`: missing/malformed `Authorization` header, or a well-formed key
   whose hash is not on file. Carries `WWW-Authenticate`:
   `Bearer realm="tayf-api"` when **no** `Authorization` header was sent, and
@@ -406,11 +536,16 @@ non-2xx):
   `X-Tayf-Tier` is present on `key_minute` / `key_day` (the key was resolved)
   and absent on `ip_floor` (the caller may be unidentified).
 - `500`: unexpected server error (never echoes a raw Supabase error).
+  `X-Tayf-Tier` is present when the failure happened after the key was
+  resolved (a route's own query) and absent when it happened while resolving
+  the key (the key lookup or the usage count failed).
 
-**Headers on every response (2xx and non-2xx alike)**:
+**Headers on every `/api/v1` response** (success, error and refusal alike;
+the one exception is the `200` of `GET /api/v1/openapi.json`, which is public
+and sends its own, shorter set shown in its section):
 ```
-X-Tayf-Tier: free | partner
 Cache-Control: private, no-store
+Content-Type: application/json; charset=utf-8
 Access-Control-Allow-Origin: *
 Access-Control-Allow-Methods: GET, OPTIONS
 Access-Control-Allow-Headers: Authorization, Content-Type
@@ -419,9 +554,23 @@ Access-Control-Expose-Headers: X-Tayf-Tier, Retry-After
 Vary: Origin, Authorization
 ```
 `Access-Control-Expose-Headers` is what lets browser code read `X-Tayf-Tier`
-and `Retry-After` cross-origin; without it `fetch()` hides both. It is also
-sent on `GET /api/v1/openapi.json`. Per-response extras: `Retry-After` on
-every `429`, `WWW-Authenticate` on every `401`, `Allow` on every `405`.
+and `Retry-After` cross-origin; without it `fetch()` hides both. Per-response
+extras: `Retry-After` on every `429`, `WWW-Authenticate` on every `401`,
+`Allow` on every `405`.
+
+**`X-Tayf-Tier: free | partner`** is the one header that is not on every
+response, because the tier is only known once the key has been resolved:
+
+| `X-Tayf-Tier` | Responses |
+|---|---|
+| present (the key's tier) | every `2xx`; every `301` / `400` / `404` / `500` a route returns after the key was resolved; the `429`s with `code` `key_minute` and `key_day` |
+| absent | `401`; `403`; `429` `ip_floor`; a `500` raised while resolving the key; `405`; the unknown-path `404` from the catch-all; the edge-middleware `400` for a malformed URL encoding |
+| fixed `free` | the `OPTIONS` preflight `204`: no key is read, so the value says nothing about the caller |
+
+`GET /api/v1/openapi.json` is keyless and carries no `X-Tayf-Tier`. An
+exception that escapes a handler altogether is answered by the shared error
+wrapper as a bare `500` envelope without any of the headers above; the routes
+catch their expected failures first, so that is the exception.
 
 CORS is GET-from-anywhere (this is a read-only public API — any origin may
 call it from the browser as long as it presents a valid key). Every
@@ -511,7 +660,9 @@ carries the last row's `updated_at` verbatim, microseconds included.
 ### `GET /api/v1/clusters/[id]`
 
 **Response** `200`: `{ ...envelope, "cluster": <same shape as above> }`.
-**Response** `400`: `id` is not a UUID.
+**Response** `400`: `id` is not a UUID (`Invalid cluster id`), or the id has a
+malformed percent-encoding (the edge-middleware `400` described under
+*Response codes*).
 **Response** `301`: the cluster was merged into another one. `Location` is
 `/api/v1/clusters/<surviving id>` and the body is `{ "error": "Cluster merged",
 "details": { "merged_into": "<surviving id>" } }`.
@@ -576,7 +727,9 @@ Null and threshold rules (same as the site):
 The numbers are recomputed once a day; `computed_at` is the time of the
 last refresh.
 
-**Response** `400`: slug is malformed (no database query is made).
+**Response** `400`: slug is malformed (`Invalid slug`, no database query is
+made), or it has a malformed percent-encoding (the edge-middleware `400`
+described under *Response codes*).
 **Response** `404`: unknown or inactive source.
 
 ---
@@ -755,7 +908,8 @@ here, or if this document describes an operation with no real handler.
 ```
 **Headers**: `Content-Type: application/json; charset=utf-8`,
 `Cache-Control: public, max-age=3600, s-maxage=86400`,
-`Access-Control-Allow-Origin: *`.
+`Access-Control-Allow-Origin: *`,
+`Access-Control-Expose-Headers: X-Tayf-Tier, Retry-After`.
 
 Human-readable developer docs (quick-start code samples, the plan table,
 error reference) live at [`/gelistirici`](/gelistirici) — both are driven

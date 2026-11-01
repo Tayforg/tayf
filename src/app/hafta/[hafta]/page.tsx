@@ -12,6 +12,7 @@ import {
   ZoneShares,
 } from "@/components/weekly/week-sections";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { sharePageMetadata } from "@/lib/seo/page-metadata";
 import {
   getWeekArchiveClusters,
   parseWeekKey,
@@ -67,11 +68,11 @@ export async function generateMetadata({
   if (!parsed) return {};
 
   const label = weekLabelTr(hafta);
-  return {
+  return sharePageMetadata({
     title: `Haftanın yelpazesi — ${label}`,
-    description: `${label} haftasında hangi taraf neyi öne çıkardı: bölge payları, en geniş yelpazeli haberler ve kör noktalar.`,
-    alternates: { canonical: `/hafta/${hafta}` },
-  };
+    description: `${label}: hangi taraf neyi öne çıkardı? Bölge payları, en geniş yelpazeli haberler ve kör noktalar.`,
+    path: `/hafta/${hafta}`,
+  });
 }
 
 // No generateStaticParams: the archive grows every week and a stale

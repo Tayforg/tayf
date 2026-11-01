@@ -11,6 +11,7 @@ import { alt, contentType, size } from "@/app/opengraph-image";
 import {
   SITE_TITLE_SUFFIX,
   noindexPageMetadata,
+  sharePageMetadata,
   staticPageMetadata,
 } from "./page-metadata";
 
@@ -197,6 +198,82 @@ describe("noindexPageMetadata", () => {
       expect(() => buildNoindex({ path })).toThrow(/invalid path/);
     },
   );
+});
+
+describe("sharePageMetadata", () => {
+  const week = {
+    title: "Haftanın yelpazesi — 2026, 43. hafta · 19–25 Ekim",
+    description: "D",
+    path: "/hafta/2026-W43",
+  };
+
+  function buildShare(
+    overrides: Partial<Parameters<typeof sharePageMetadata>[0]> = {},
+  ): Shape {
+    return sharePageMetadata({ ...week, ...overrides }) as unknown as Shape;
+  }
+
+  it("accepts a dynamic week path and gives it its own og:url, canonical and titles", () => {
+    const m = buildShare();
+    expect(m.title).toBe(week.title);
+    expect(m.description).toBe("D");
+    expect(m.alternates).toEqual({ canonical: "/hafta/2026-W43" });
+    expect(m.openGraph.url).toBe("/hafta/2026-W43");
+    expect(m.openGraph.title).toBe(`${week.title}${SITE_TITLE_SUFFIX}`);
+    expect(m.twitter.title).toBe(`${week.title}${SITE_TITLE_SUFFIX}`);
+    expect(m.twitter.card).toBe("summary_large_image");
+  });
+
+  it("accepts an upper-case ticker path (the one thing staticPageMetadata rejects)", () => {
+    const m = buildShare({ path: "/ekonomi/LYDHO" });
+    expect(m.openGraph.url).toBe("/ekonomi/LYDHO");
+    expect(m.alternates.canonical).toBe("/ekonomi/LYDHO");
+  });
+
+  it("keeps og:url identical to the canonical", () => {
+    const m = buildShare({ path: "/ekonomi/LYDHO" });
+    expect(m.openGraph.url).toBe(m.alternates.canonical);
+  });
+
+  it("points og:image / twitter:image at the root card routes with the pinned descriptors", () => {
+    const m = buildShare();
+    expect(m.openGraph.images).toHaveLength(1);
+    expect(m.twitter.images).toHaveLength(1);
+    expect(m.openGraph.images[0]?.url).toBe("/opengraph-image");
+    expect(m.twitter.images[0]?.url).toBe("/twitter-image");
+    for (const img of [m.openGraph.images[0], m.twitter.images[0]]) {
+      expect(img?.width).toBe(size.width);
+      expect(img?.height).toBe(size.height);
+      expect(img?.alt).toBe(alt);
+      expect(img?.type).toBe(contentType);
+    }
+  });
+
+  it("sets no robots and no metadataBase (the root layout's still apply)", () => {
+    const m = buildShare();
+    expect("robots" in m).toBe(false);
+    expect("metadataBase" in m).toBe(false);
+  });
+
+  it("builds the same shape staticPageMetadata builds for the same path", () => {
+    const input = { title: "Sistem durumu", description: "D", path: "/durum" };
+    expect(sharePageMetadata(input)).toEqual(staticPageMetadata(input));
+  });
+
+  it.each(["/x?y", "/x#y", "/x/", "x", "", "https://x.com/x", "/x y", "/x//y/ ", "/x\n"])(
+    "throws for the invalid path %j",
+    (path) => {
+      expect(() => buildShare({ path })).toThrow(/sharePageMetadata: invalid path/);
+    },
+  );
+
+  it("accepts the root path '/'", () => {
+    expect(buildShare({ path: "/" }).openGraph.url).toBe("/");
+  });
+
+  it("does not loosen staticPageMetadata: it still throws on an upper-case path", () => {
+    expect(() => build({ path: "/Upper" })).toThrow(/staticPageMetadata: invalid path/);
+  });
 });
 
 describe("SITE_TITLE_SUFFIX", () => {

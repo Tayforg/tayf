@@ -381,6 +381,44 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
     }
   });
 
+  // OpenAPI 3.1 section "Path Templating": every `{name}` in a path template
+  // must be declared as a required `in: path` parameter on the operation or on
+  // the Path Item, and a path parameter that is not in the template is invalid
+  // too. A validator rejects the whole document on either mismatch.
+  it("every path template variable is a required in:path parameter of each operation, and vice versa", () => {
+    type Param = { name?: string; in?: string; required?: boolean };
+    const problems: string[] = [];
+    let operationsChecked = 0;
+
+    for (const [routePath, pathItem] of Object.entries(doc.paths)) {
+      const item = pathItem as unknown as Record<string, unknown>;
+      const itemParams = (Array.isArray(item.parameters) ? item.parameters : []) as Param[];
+      const templateVars = [...routePath.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]!);
+
+      for (const [key, value] of Object.entries(item)) {
+        if (key === "parameters") continue;
+        operationsChecked += 1;
+        const label = `${key.toUpperCase()} ${routePath}`;
+        const opParams = ((value as { parameters?: Param[] }).parameters ?? []) as Param[];
+        const declared = [...itemParams, ...opParams].filter((p) => p.in === "path");
+
+        for (const name of templateVars) {
+          const match = declared.find((p) => p.name === name);
+          if (!match) problems.push(`${label}: {${name}} is not declared as an in:path parameter`);
+          else if (match.required !== true) problems.push(`${label}: {${name}} is not required: true`);
+        }
+        for (const p of declared) {
+          if (!templateVars.includes(p.name ?? "")) {
+            problems.push(`${label}: in:path parameter "${p.name}" is not in the path template`);
+          }
+        }
+      }
+    }
+
+    expect(operationsChecked).toBe(13);
+    expect(problems).toEqual([]);
+  });
+
   it("the refusal bindings are not counted as documented handlers", () => {
     for (const { method } of handlers) {
       expect(["GET", "OPTIONS"]).toContain(method);
