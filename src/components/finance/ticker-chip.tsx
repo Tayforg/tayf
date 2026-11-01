@@ -10,19 +10,44 @@ import { cn } from "@/lib/utils";
 // the code itself is brand amber because it is the link. A price at the
 // BIST limit gets a "tavan"/"taban" tag: for a retail reader that single
 // word matters more than the number.
+//
+// A move is only shown when it is known: a quote without a baseline
+// (hasBaseline === false, so changePct is a 0 placeholder) or one the page
+// flagged stale renders an em dash instead of "+0,00%" and never a limit
+// tag. The dash is hidden from assistive tech and followed by a sr-only
+// "değişim bilinmiyor", because a bare "—" is read as nothing or as "dash".
+// `hasBaseline` undefined (a cache entry from before the field existed)
+// counts as known.
+
+/** The "move unknown" marker: visible dash plus its screen-reader text. */
+function unknownMove() {
+  return (
+    <>
+      <span aria-hidden="true" className="whitespace-nowrap text-muted-foreground">
+        —
+      </span>
+      <span className="sr-only">değişim bilinmiyor</span>
+    </>
+  );
+}
+
 export function TickerChip({
   ticker,
   quote,
   sinceNews,
+  stale,
   className,
 }: {
   ticker: string;
   quote?: Quote;
   /** Percent move from the price at headline time to now; null when unknown. */
   sinceNews?: number | null;
+  /** The quote's last trade is too old to call a "move"; show "—" for it. */
+  stale?: boolean;
   className?: string;
 }) {
-  const limit = quote ? limitFlag(quote.changePct) : null;
+  const knownMove = quote != null && quote.hasBaseline !== false && !stale;
+  const limit = quote && knownMove ? limitFlag(quote.changePct) : null;
   return (
     <Link
       href={`/ekonomi/${ticker}`}
@@ -35,7 +60,11 @@ export function TickerChip({
       {quote ? (
         <>
           <span className="whitespace-nowrap tabular-nums text-foreground/90">{fmtPrice(quote.price)}</span>
-          <span className={cn("whitespace-nowrap tabular-nums", moveClass(quote.changePct))}>{fmtPct(quote.changePct)}</span>
+          {knownMove ? (
+            <span className={cn("whitespace-nowrap tabular-nums", moveClass(quote.changePct))}>{fmtPct(quote.changePct)}</span>
+          ) : (
+            unknownMove()
+          )}
           {limit ? <span className="whitespace-nowrap bg-brand/20 px-1 text-[10px] text-brand">{limit}</span> : null}
           {sinceNews != null ? (
             <span className={cn("whitespace-nowrap border-l border-border/80 pl-1.5 tabular-nums", moveClass(sinceNews))}>
@@ -51,14 +80,21 @@ export function TickerChip({
 // The masthead strip: the most-mentioned tickers with move, relative
 // volume and how unusual today's attention is. One horizontal band that
 // scrolls sideways on narrow screens instead of wrapping.
+//
+// `staleTickers` are the tickers whose last trade is too old to call a move
+// (the page's isStale). Like the chip, the tape then keeps the price but shows
+// "—" for the move and drops the limit tag and the relative volume, which
+// describe the old session, not today.
 export function TickerTape({
   items,
   quotes,
   stats,
+  staleTickers,
 }: {
   items: TickerAttention[];
   quotes: Record<string, Quote>;
   stats: Record<string, QuoteStat>;
+  staleTickers?: ReadonlySet<string>;
 }) {
   if (items.length === 0) return null;
   return (
@@ -66,7 +102,9 @@ export function TickerTape({
       {items.map((t) => {
         const q = quotes[t.ticker];
         const s = stats[t.ticker];
-        const limit = q ? limitFlag(q.changePct) : null;
+        const stale = staleTickers?.has(t.ticker) ?? false;
+        const knownMove = q != null && q.hasBaseline !== false && !stale;
+        const limit = q && knownMove ? limitFlag(q.changePct) : null;
         return (
           <Link
             key={t.ticker}
@@ -79,10 +117,16 @@ export function TickerTape({
               {limit ? <span className="bg-brand/20 px-1 text-[10px] text-brand">{limit}</span> : null}
             </span>
             <span className="flex items-baseline gap-2 text-muted-foreground">
-              {q ? <span className={cn("tabular-nums", moveClass(q.changePct))}>{fmtPct(q.changePct)}</span> : null}
+              {q ? (
+                knownMove ? (
+                  <span className={cn("tabular-nums", moveClass(q.changePct))}>{fmtPct(q.changePct)}</span>
+                ) : (
+                  unknownMove()
+                )
+              ) : null}
               <span className="tabular-nums">{t.articles} haber</span>
               {t.ratio != null && t.ratio >= 2 ? <span className="tabular-nums text-amber-400">ilgi {fmtX(t.ratio)}</span> : null}
-              {s?.rvol != null ? (
+              {s?.rvol != null && !stale ? (
                 <span className={cn("tabular-nums", s.rvol >= 2 ? "text-amber-400" : "")}>hacim {fmtX(s.rvol)}</span>
               ) : null}
             </span>

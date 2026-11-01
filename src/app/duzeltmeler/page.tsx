@@ -6,6 +6,7 @@ import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import {
   getPublicCorrections,
   type PublicCorrection,
+  type PublicSubject,
 } from "@/lib/corrections/public-log";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
@@ -17,9 +18,12 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 // e-mail are never fetched (see src/lib/corrections/public-log.ts) and so can
 // never leak into this tree — a reader reporting an error is not publishing
 // an accusation, and an unreviewed or dismissed report is not a correction.
-// Only status = 'reviewed' rows are listed, with the cluster, the report date
-// and the review date. This file only decides how to render null / [] / rows;
-// the query's never-throw, null-on-error contract is unit tested next to it.
+// Only status = 'reviewed' rows are listed, with what the report was about
+// (a cluster, a source label, or "general"), the report date and the review
+// date. The address the reader submitted from is never published: the fetcher
+// derives a subject from it server-side and drops it. This file only decides
+// how to render null / [] / rows; the query's never-throw, null-on-error
+// contract is unit tested next to it.
 //
 // Completeness: `purge_reader_data()` (migration 042, scheduled nightly at
 // 04:40 by 043) deletes corrections rows older than `correction_months`
@@ -45,19 +49,35 @@ function formatDate(iso: string | null): string {
   return iso ? formatDdMmYyyy(iso) : "—";
 }
 
-function CorrectionItem({ row }: { row: PublicCorrection }) {
-  const title = row.clusterTitle ?? "Küme kaldırılmış";
+function CorrectionSubject({ subject }: { subject: PublicSubject }) {
+  switch (subject.kind) {
+    case "cluster":
+      return (
+        <Link href={`/cluster/${subject.clusterId}`} className="brand-underline">
+          {subject.title}
+        </Link>
+      );
+    case "source":
+      return (
+        <span>
+          Kaynak etiketi itirazı:{" "}
+          <Link href={`/source/${subject.slug}`} className="brand-underline">
+            {subject.name}
+          </Link>
+        </span>
+      );
+    case "cluster_gone":
+      return <span>Küme kaldırılmış</span>;
+    case "general":
+      return <span>Genel düzeltme bildirimi</span>;
+  }
+}
 
+function CorrectionItem({ row }: { row: PublicCorrection }) {
   return (
     <li className={itemClass}>
       <p className="text-sm text-foreground/90 leading-relaxed">
-        {row.clusterId ? (
-          <Link href={`/cluster/${row.clusterId}`} className="brand-underline">
-            {title}
-          </Link>
-        ) : (
-          <span>{title}</span>
-        )}
+        <CorrectionSubject subject={row.subject} />
       </p>
       <p className="text-sm text-muted-foreground">Düzeltme incelendi.</p>
       <p className={metaClass}>
@@ -94,7 +114,7 @@ export default async function CorrectionsPage() {
       <PageHero
         kicker="Şeffaflık"
         title="Düzeltmeler"
-        subtitle="Her küme sayfasındaki düzeltme formundan gelen bildirimler editör tarafından incelenir. Burada yalnızca incelenmiş olanlar, bildirim ve inceleme tarihleriyle listelenir; okurun yazdığı mesaj ve e-posta adresi hiçbir zaman yayımlanmaz."
+        subtitle="Küme ve kaynak sayfalarındaki düzeltme formundan gelen bildirimler editör tarafından incelenir. Burada yalnızca incelenmiş olanlar, bildirim ve inceleme tarihleriyle listelenir; okurun yazdığı mesaj ve e-posta adresi hiçbir zaman yayımlanmaz."
       />
 
       {corrections === null ? (

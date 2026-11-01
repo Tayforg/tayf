@@ -88,12 +88,29 @@ export const POST = withApiErrors(async (request: Request) => {
   }
 
   const supabase = createServerClient();
-  const { error } = await supabase.from("corrections").insert({
-    url,
-    message,
-    email: emailRaw.length > 0 ? emailRaw : null,
-    cluster_id: clusterIdRaw.length > 0 ? clusterIdRaw : null,
-  });
+  const email = emailRaw.length > 0 ? emailRaw : null;
+  const insertRow = (clusterId: string | null) =>
+    supabase.from("corrections").insert({
+      url,
+      message,
+      email,
+      cluster_id: clusterId,
+    });
+
+  const clusterId = clusterIdRaw.length > 0 ? clusterIdRaw : null;
+  let { error } = await insertRow(clusterId);
+
+  // A well-formed but unknown `?cluster=` id (a cluster deleted or merged
+  // away, or one that never existed) violates corrections.cluster_id's
+  // foreign key (SQLSTATE 23503). The reader's report is still worth keeping,
+  // so retry exactly once without the cluster link instead of turning every
+  // such submission into a 500. The log line is fixed text: nothing from the
+  // submission (message, email, url, id) goes into it. The throttle above
+  // already ran once; the retry does not spend a second token.
+  if (error?.code === "23503" && clusterId !== null) {
+    console.warn("[corrections] unknown clusterId; stored without a cluster link");
+    ({ error } = await insertRow(null));
+  }
 
   if (error) {
     return apiServerError(error);

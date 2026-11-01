@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
+import { checkDbThrottle, THROTTLE_POLICY } from "@/lib/api/db-throttle";
 import {
   apiError,
   apiServerError,
@@ -35,6 +36,13 @@ import { mintSignedSession, readSignedSessionCookie } from "@/lib/game/framing-s
  * (`hashSessionId`) is sent to `framing_next_headline`, so the one
  * identifier this route ever hands the RPC is a hash, never an IP, never
  * a raw cookie.
+ *
+ * MINT THROTTLE: a request that would mint a NEW session first spends one
+ * `cerceve:mint` hit (migration 118's api_throttle, 20/h per client, fail
+ * open). A throttled client is NEVER refused a draw: it gets its headline
+ * with an ephemeral, unpersisted session id (so `framing_next_headline` still
+ * has a hash to exclude on) and no cookie, so its next vote is simply not
+ * counted. Withholding the cookie is what caps session farming.
  */
 const cerceveNextLimit = createRateLimiter("oyun-cerceve-next", {
   capacity: 60,
@@ -100,9 +108,15 @@ export const GET = withApiErrors(async (request: Request) => {
   let sessionId = await readSignedSessionCookie(request);
   let freshCookieValue: string | null = null;
   if (sessionId === null) {
+    const mint = await checkDbThrottle({ ...THROTTLE_POLICY.cerceveMint, clientKey: key });
     const fresh = await mintSignedSession();
     sessionId = fresh.id;
-    freshCookieValue = fresh.cookieValue;
+    if (mint.allowed) {
+      freshCookieValue = fresh.cookieValue;
+    } else {
+      // No ids, hashes or IPs in the log line.
+      console.warn("[oyun/cerceve] session not minted: throttled");
+    }
   }
   const sessionHash = await hashSessionId(sessionId);
 

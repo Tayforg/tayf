@@ -14,6 +14,8 @@ vi.mock("next/cache", () => ({ cacheLife: vi.fn(), cacheTag: vi.fn() }));
 
 const fixture = vi.hoisted(() => ({
   kapDisclosures: [] as unknown[],
+  // When set, the kap_disclosures read resolves this error envelope.
+  kapError: null as string | null,
   bars5m: [] as Array<{ ts: string; close: number; volume: number }>,
   econFeedRows: [] as unknown[],
   lastKapState: null as unknown,
@@ -29,6 +31,13 @@ const fixture = vi.hoisted(() => ({
   // rows both the `.in('subject_id', …)` (fetchRelevanceScores) and
   // `.lt('jev_prob', …)` (fetchLowRelevanceSince) call shapes read from.
   articleTickers: [] as Array<{ ticker: string; article_id: string; published_at: string; source_id: string }>,
+  // Builder state of every article_tickers read (paging assertions).
+  articleTickerStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
+  // disclosure_coverage rows for fetchTickerPage / fetchLagHistogram, the
+  // builder state of EVERY read (one per page), and an error switch.
+  coverageRows: [] as Array<{ ticker: string; disclosure_index: number; lag_minutes: number; article_id: string }>,
+  coverageStates: [] as Array<import("../../../tests/_helpers/supabase-fake").BuilderState>,
+  coverageError: null as string | null,
   jevRows: [] as Array<{ subject_id: string; jev_prob: number; created_at: string }>,
   bistCompanies: [] as Array<{ tickers: string[]; title: string }>,
   tickerArticlesRows: [] as unknown[],
@@ -59,6 +68,7 @@ const supabaseFake = await vi.hoisted(async () => {
     tables: {
       kap_disclosures: (state: unknown) => {
         fixture.lastKapState = state;
+        if (fixture.kapError) return { data: null, error: { message: fixture.kapError } };
         return { data: fixture.kapDisclosures, error: null };
       },
       bist_bars_5m: (state: unknown) => {
@@ -81,13 +91,41 @@ const supabaseFake = await vi.hoisted(async () => {
       },
       article_tickers: (state: unknown) => {
         const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
+        fixture.articleTickerStates.push(s);
         const ticker = s.eq.find((e) => e.col === "ticker")?.val as string | undefined;
         const since = s.gte.find((g) => g.col === "published_at")?.val as string | undefined;
-        let rows = fixture.articleTickers.filter(
-          (r) => (!ticker || r.ticker === ticker) && (!since || r.published_at >= since),
-        );
-        if (s.range) rows = rows.slice(s.range.from, s.range.to + 1);
-        return { data: rows, error: null };
+        const rows = fixture.articleTickers
+          .filter((r) => (!ticker || r.ticker === ticker) && (!since || r.published_at >= since))
+          .sort(
+            (a, b) =>
+              a.published_at.localeCompare(b.published_at) ||
+              a.article_id.localeCompare(b.article_id) ||
+              a.ticker.localeCompare(b.ticker),
+          );
+        // Like PostgREST: a response never exceeds max_rows (1,000), whatever limit/range asks.
+        const from = s.range ? s.range.from : 0;
+        const asked = s.range ? s.range.to - s.range.from + 1 : (s.limit ?? rows.length);
+        return { data: rows.slice(from, from + Math.min(asked, 1000)), error: null };
+      },
+      disclosure_coverage: (state: unknown) => {
+        const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
+        fixture.coverageStates.push(s);
+        if (fixture.coverageError) return { data: null, error: { message: fixture.coverageError } };
+        const ticker = s.eq.find((e) => e.col === "ticker")?.val as string | undefined;
+        const indexes = s.in.find((e) => e.col === "disclosure_index")?.vals;
+        const rows = fixture.coverageRows
+          .filter((r) => !ticker || r.ticker === ticker)
+          .filter((r) => !indexes || indexes.includes(r.disclosure_index))
+          .sort(
+            (a, b) =>
+              a.disclosure_index - b.disclosure_index ||
+              a.lag_minutes - b.lag_minutes ||
+              a.article_id.localeCompare(b.article_id),
+          );
+        // Like PostgREST: a response never exceeds max_rows (1,000), whatever limit/range asks.
+        const from = s.range ? s.range.from : 0;
+        const asked = s.range ? s.range.to - s.range.from + 1 : (s.limit ?? rows.length);
+        return { data: rows.slice(from, from + Math.min(asked, 1000)), error: null };
       },
       jev_shadow_predictions: (state: unknown) => {
         const s = state as import("../../../tests/_helpers/supabase-fake").BuilderState;
@@ -176,11 +214,16 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.kapDisclosures = [];
+  fixture.kapError = null;
   fixture.bars5m = [];
   fixture.econFeedRows = [];
   fixture.lastKapState = null;
   fixture.kapFetchStateRow = undefined;
   fixture.articleTickers = [];
+  fixture.articleTickerStates = [];
+  fixture.coverageRows = [];
+  fixture.coverageStates = [];
+  fixture.coverageError = null;
   fixture.jevRows = [];
   fixture.bistCompanies = [];
   fixture.tickerArticlesRows = [];
@@ -225,12 +268,12 @@ describe("finance query transforms", () => {
   it("ranks attention on the recent window and rates it against the baseline", () => {
     const ranked = rankAttention(
       [
-        { ticker: "THYAO", day: "2026-09-06", articles: 1, sources: 1 },
-        { ticker: "THYAO", day: "2026-09-09", articles: 2, sources: 1 },
-        { ticker: "THYAO", day: "2026-09-12", articles: 2, sources: 2 },
-        { ticker: "THYAO", day: "2026-09-13", articles: 5, sources: 4 },
-        { ticker: "VESTL", day: "2026-09-13", articles: 6, sources: 1 },
-        { ticker: "OLD", day: "2026-09-08", articles: 9, sources: 3 },
+        { ticker: "THYAO", day: "2026-09-06", articles: 1, sources: 1, sourceIds: ["s1"] },
+        { ticker: "THYAO", day: "2026-09-09", articles: 2, sources: 1, sourceIds: ["s1"] },
+        { ticker: "THYAO", day: "2026-09-12", articles: 2, sources: 2, sourceIds: ["s1", "s2"] },
+        { ticker: "THYAO", day: "2026-09-13", articles: 5, sources: 4, sourceIds: ["s1", "s2", "s3", "s4"] },
+        { ticker: "VESTL", day: "2026-09-13", articles: 6, sources: 1, sourceIds: ["s1"] },
+        { ticker: "OLD", day: "2026-09-08", articles: 9, sources: 3, sourceIds: ["s1", "s2", "s3"] },
       ],
       new Map([["THYAO", "TÜRK HAVA YOLLARI A.O."]]),
       10,
@@ -242,6 +285,71 @@ describe("finance query transforms", () => {
     // 7 articles over 2 days vs 3 over the 6 baseline days: 3.5 / 0.5 = 7x
     expect(ranked[0]).toMatchObject({ articles: 7, sources: 4, title: "TÜRK HAVA YOLLARI A.O.", ratio: 7 });
     expect(ranked[1]).toMatchObject({ title: null, ratio: null });
+  });
+
+  describe("rankAttention: sources are distinct across the recent window", () => {
+    const rank = (rows: Array<{ day: string; articles: number; sources: number; sourceIds: string[] }>) =>
+      rankAttention(
+        rows.map((r) => ({ ticker: "AAA", ...r })),
+        new Map(),
+        10,
+        "2026-09-12",
+        2,
+        6,
+      );
+
+    it("two recent days with different sources add up to 2, not max(1, 1)", () => {
+      const [aaa] = rank([
+        { day: "2026-09-12", articles: 1, sources: 1, sourceIds: ["a"] },
+        { day: "2026-09-13", articles: 1, sources: 1, sourceIds: ["b"] },
+      ]);
+      expect(aaa).toMatchObject({ articles: 2, sources: 2 });
+    });
+
+    it("two recent days with the same source count it once", () => {
+      const [aaa] = rank([
+        { day: "2026-09-12", articles: 1, sources: 1, sourceIds: ["a"] },
+        { day: "2026-09-13", articles: 1, sources: 1, sourceIds: ["a"] },
+      ]);
+      expect(aaa).toMatchObject({ articles: 2, sources: 1 });
+    });
+
+    it("baseline-day sources never leak into the recent count", () => {
+      const [aaa] = rank([
+        { day: "2026-09-08", articles: 3, sources: 3, sourceIds: ["x", "y", "z"] },
+        { day: "2026-09-13", articles: 1, sources: 1, sourceIds: ["a"] },
+      ]);
+      expect(aaa).toMatchObject({ articles: 1, sources: 1 });
+    });
+  });
+
+  it("coverageStats drops rows of disclosures outside includeIndexes (circuit breakers, strangers)", () => {
+    const rows = [
+      { disclosure_index: 1, lag_minutes: 30 },
+      { disclosure_index: 2, lag_minutes: -2000 },
+      { disclosure_index: 3, lag_minutes: 90 },
+      // 9 is not a listed disclosure: covered AND abnormal pre-filing attention if it were counted.
+      { disclosure_index: 9, lag_minutes: -300 },
+      { disclosure_index: 9, lag_minutes: -200 },
+      { disclosure_index: 9, lag_minutes: -100 },
+      { disclosure_index: 9, lag_minutes: -20 },
+      { disclosure_index: 9, lag_minutes: 5 },
+    ];
+    expect(coverageStats(rows, 3, 0.2, new Set([1, 2, 3]))).toEqual({
+      disclosures: 3,
+      covered: 2,
+      medianLagMinutes: 60,
+      pressAhead: 0,
+    });
+    // Without the allowlist the stranger leaks in: 3 covered, one pressAhead, median 30.
+    expect(coverageStats(rows, 3, 0.2)).toEqual({ disclosures: 3, covered: 3, medianLagMinutes: 30, pressAhead: 1 });
+    // An empty allowlist keeps nothing.
+    expect(coverageStats(rows, 0, 0.2, new Set())).toEqual({
+      disclosures: 0,
+      covered: 0,
+      medianLagMinutes: null,
+      pressAhead: 0,
+    });
   });
 
   it("measures first coverage after the filing and flags only abnormal pre-filing attention", () => {
@@ -720,6 +828,242 @@ describe("ticker-legal-notices (migration 107): BİK notices do not count as tic
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ekonomi-coverage: /ekonomi/[ticker] "KAP ile basın arası" is computed over
+// ALL disclosure_coverage rows (PostgREST clamps one response at 1,000 rows, so
+// the old `.limit(2000)` silently dropped the later disclosures), and over the
+// same disclosures the page lists -- circuit-breaker notices excluded, exactly
+// like "Medyada yankı" and /ekonomi.
+// ---------------------------------------------------------------------------
+
+describe("ekonomi-coverage: fetchTickerPage reads every coverage row and skips circuit breakers", () => {
+  const NOW = "2026-09-13T12:00:00Z";
+  const NO_BREAKER_FILTER = "subject.is.null,subject.not.ilike.*Devre Kesici*";
+
+  function disclosureRow(index: number, subject: string | null = "Özel Durum Açıklaması (Genel)") {
+    return {
+      disclosure_index: index,
+      published_at: new Date(Date.parse("2026-09-01T08:00:00Z") + index * 60_000).toISOString(),
+      kap_title: "TÜRKİYE SİGORTA A.Ş.",
+      stock_codes: ["TURSG"],
+      subject,
+      summary: null,
+      disclosure_class: "ODA",
+    };
+  }
+
+  /** `perDisclosure` rows for each index: one pre-filing mention, then coverage from 10 + k minutes. */
+  function coverageFor(index: number, k: number, perDisclosure: number, ticker = "TURSG") {
+    return Array.from({ length: perDisclosure }, (_, j) => ({
+      ticker,
+      disclosure_index: index,
+      lag_minutes: j === 0 ? -30 - k : (j + 9) * 1 + k,
+      article_id: `a-${index}-${String(j).padStart(3, "0")}`,
+    }));
+  }
+
+  function freeze() {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+  }
+
+  it("reaches disclosures beyond the first 1,000 coverage rows: 18 of 18 covered, median over all 18", async () => {
+    freeze();
+    const indexes = Array.from({ length: 18 }, (_, k) => 1001 + k);
+    fixture.kapDisclosures = indexes.map((i) => disclosureRow(i));
+    fixture.coverageRows = [
+      // 18 x 100 = 1,800 rows of the page's own disclosures ...
+      ...indexes.flatMap((i, k) => coverageFor(i, k, 100)),
+      // ... plus 45 rows of a circuit-breaker notice that sorts FIRST (index 999).
+      ...coverageFor(999, 0, 45),
+    ];
+    expect(fixture.coverageRows).toHaveLength(1845);
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(page.coverage.disclosures).toBe(18);
+    expect(page.coverage.covered).toBe(18);
+    // First lag >= 0 per disclosure is 10 + k (k = 0..17): median of 10..27 = 18.5.
+    expect(page.coverage.medianLagMinutes).toBe(18.5);
+    expect(page.coverage.pressAhead).toBe(0);
+  });
+
+  it("pages disclosure_coverage with .range(), in a deterministic order, for the right ticker and window", async () => {
+    freeze();
+    const indexes = Array.from({ length: 18 }, (_, k) => 1001 + k);
+    fixture.kapDisclosures = indexes.map((i) => disclosureRow(i));
+    fixture.coverageRows = [...indexes.flatMap((i, k) => coverageFor(i, k, 100)), ...coverageFor(999, 0, 45)];
+
+    await fetchTickerPage("TURSG");
+
+    expect(fixture.coverageStates.map((s) => s.range)).toEqual([
+      { from: 0, to: 999 },
+      { from: 1000, to: 1999 },
+    ]);
+    for (const s of fixture.coverageStates) {
+      expect(s.table).toBe("disclosure_coverage");
+      expect(s.order.map((o) => o.col)).toEqual(["disclosure_index", "lag_minutes", "article_id"]);
+      expect(s.eq).toEqual([{ col: "ticker", val: "TURSG" }]);
+      expect(s.in).toEqual([{ col: "disclosure_index", vals: expect.arrayContaining(indexes) }]);
+      expect(s.in[0]?.vals).toHaveLength(indexes.length);
+      expect(s.gte).toEqual([{ col: "disclosed_at", val: new Date(Date.parse(NOW) - 30 * 86400_000).toISOString() }]);
+      // A bare .limit() is what PostgREST clamps at 1,000 -- never again.
+      expect(s.limit).toBeNull();
+    }
+  });
+
+  it("a single short page makes a single coverage request", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(1)];
+    fixture.coverageRows = coverageFor(1, 0, 40);
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(fixture.coverageStates).toHaveLength(1);
+    expect(page.coverage).toMatchObject({ disclosures: 1, covered: 1 });
+  });
+
+  it("restricts the coverage read to the listed disclosures in the database (.in on disclosure_index), so breaker notices never transfer", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(5), disclosureRow(6), disclosureRow(7)];
+    // 1,200 rows of a circuit-breaker notice (index 999) and strangers must stay in the table.
+    fixture.coverageRows = [
+      ...coverageFor(5, 0, 3),
+      ...coverageFor(6, 1, 3),
+      ...coverageFor(7, 2, 3),
+      ...coverageFor(999, 0, 1200),
+    ];
+
+    const page = await fetchTickerPage("TURSG");
+
+    // One request: the 9 allowed rows fit a single page (without the filter it would be 2 pages).
+    expect(fixture.coverageStates).toHaveLength(1);
+    const inFilters = fixture.coverageStates[0]!.in;
+    expect(inFilters).toHaveLength(1);
+    expect(inFilters[0]?.col).toBe("disclosure_index");
+    expect([...(inFilters[0]?.vals as number[])].sort((a, b) => a - b)).toEqual([5, 6, 7]);
+    expect(page.coverage).toMatchObject({ disclosures: 3, covered: 3 });
+  });
+
+  it("makes no coverage request at all when the ticker has no disclosure in the window", async () => {
+    freeze();
+    fixture.kapDisclosures = [];
+    fixture.coverageRows = coverageFor(1, 0, 5);
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(fixture.coverageStates).toHaveLength(0);
+    expect(page.coverage).toEqual({ disclosures: 0, covered: 0, medianLagMinutes: null, pressAhead: 0 });
+  });
+
+  it("a failing disclosure read throws on its own error and never issues the coverage request", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(1)];
+    fixture.kapError = "kap boom";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(fetchTickerPage("TURSG")).rejects.toThrow(/fetchTickerPage disclosures: kap boom/);
+    } finally {
+      errorSpy.mockRestore();
+    }
+    expect(fixture.coverageStates).toHaveLength(0);
+  });
+
+  it("reads the disclosure list with the circuit-breaker or() filter and keeps its 60-row limit", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(1)];
+
+    await fetchTickerPage("TURSG");
+
+    const state = fixture.lastKapState as BuilderState;
+    expect(state.or).toEqual([NO_BREAKER_FILTER]);
+    expect(state.contains).toEqual([{ col: "stock_codes", val: ["TURSG"] }]);
+    expect(state.limit).toBe(60);
+  });
+
+  it("fetchRecentDisclosures uses the very same or() filter (one definition for both)", async () => {
+    await fetchRecentDisclosures(10);
+    expect((fixture.lastKapState as BuilderState).or).toEqual([NO_BREAKER_FILTER]);
+  });
+
+  it("ignores coverage rows whose disclosure is not in the returned list (a circuit breaker)", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(1)];
+    fixture.coverageRows = [
+      { ticker: "TURSG", disclosure_index: 1, lag_minutes: 30, article_id: "a1" },
+      // Index 999 is a breaker notice (filtered out of the list): quick coverage, must not count.
+      { ticker: "TURSG", disclosure_index: 999, lag_minutes: 5, article_id: "a2" },
+      { ticker: "TURSG", disclosure_index: 998, lag_minutes: 6, article_id: "a3" },
+    ];
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(page.coverage).toEqual({ disclosures: 1, covered: 1, medianLagMinutes: 30, pressAhead: 0 });
+  });
+
+  it("covered can never exceed disclosures, whatever else the table holds for the ticker", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(1), disclosureRow(2)];
+    fixture.coverageRows = Array.from({ length: 7 }, (_, i) => ({
+      ticker: "TURSG",
+      disclosure_index: 100 + i,
+      lag_minutes: 10,
+      article_id: `x${i}`,
+    }));
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(page.coverage.disclosures).toBe(2);
+    expect(page.coverage.covered).toBe(0);
+    expect(page.coverage.medianLagMinutes).toBeNull();
+  });
+
+  it("other tickers' coverage rows never leak in", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(1)];
+    fixture.coverageRows = [
+      { ticker: "OTHER", disclosure_index: 1, lag_minutes: 1, article_id: "o1" },
+      { ticker: "TURSG", disclosure_index: 1, lag_minutes: 44, article_id: "t1" },
+    ];
+
+    const page = await fetchTickerPage("TURSG");
+
+    expect(page.coverage.medianLagMinutes).toBe(44);
+  });
+
+  it("a failing coverage page throws (not a silent empty section), naming the ticker", async () => {
+    freeze();
+    fixture.kapDisclosures = [disclosureRow(1)];
+    fixture.coverageError = "canceling statement due to statement timeout";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(fetchTickerPage("TURSG")).rejects.toThrow(/fetchTickerPage coverage TURSG: canceling statement/);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("pages the attention read past 1,000 rows, ordered, and keeps sourceIds out of the cached page", async () => {
+    freeze();
+    fixture.articleTickers = Array.from({ length: 1200 }, (_, i) => ({
+      ticker: "CCC",
+      article_id: `a${String(i).padStart(4, "0")}`,
+      published_at: new Date(Date.parse("2026-09-13T06:00:00Z") + i * 1000).toISOString(),
+      source_id: `s${i % 3}`,
+    }));
+
+    const page = await fetchTickerPage("CCC");
+
+    expect(page.attention).toEqual([{ day: "2026-09-13", articles: 1200, sources: 3 }]);
+    const reads = fixture.articleTickerStates.filter((s) => s.eq.some((e) => e.col === "ticker" && e.val === "CCC"));
+    expect(reads.map((s) => s.range)).toEqual([
+      { from: 0, to: 999 },
+      { from: 1000, to: 1999 },
+    ]);
+    for (const s of reads) expect(s.order.map((o) => o.col)).toEqual(["published_at", "article_id"]);
   });
 });
 

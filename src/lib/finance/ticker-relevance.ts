@@ -151,6 +151,7 @@ export async function fetchLowRelevanceSince(
     .eq("task", "ticker_relevance")
     .lt("jev_prob", TICKER_ATTENTION_MIN)
     .gte("created_at", sinceIso)
+    // postgrest-cap-ok: fail-open sampler; rows past 1,000 count as relevant (documented above)
     .limit(5000);
   if (error) {
     console.warn(`[finance] ticker relevance unavailable: ${error.message}`);
@@ -194,6 +195,7 @@ export async function fetchLegalNoticeIdsSince(
         .order("article_id");
       const { data, error } =
         read === 0
+          // postgrest-cap-ok: continues with .range() below
           ? await base.limit(LEGAL_NOTICE_LOOKUP_LIMIT)
           : await base.range(read, Math.min(read + POSTGREST_MAX_ROWS, LEGAL_NOTICE_LOOKUP_LIMIT) - 1);
       if (error) {
@@ -268,6 +270,12 @@ export interface AttentionRow {
   day: string;
   articles: number;
   sources: number;
+  /**
+   * The distinct source ids behind `sources` (sorted), so a caller that merges
+   * several days can count distinct sources across them instead of taking the
+   * largest single day.
+   */
+  sourceIds: string[];
 }
 
 /**
@@ -301,5 +309,11 @@ export function aggregateAttention(
   }
   return [...groups.values()]
     .filter((g) => g.articles > 0)
-    .map((g) => ({ ticker: g.ticker, day: g.day, articles: g.articles, sources: g.sourceIds.size }));
+    .map((g) => ({
+      ticker: g.ticker,
+      day: g.day,
+      articles: g.articles,
+      sources: g.sourceIds.size,
+      sourceIds: [...g.sourceIds].sort(),
+    }));
 }

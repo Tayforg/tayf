@@ -11,6 +11,20 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // without needing a second fake instance / module reset.
 const dbState = vi.hoisted(() => ({
   forceInsertError: false,
+  // Foreign-key violation (SQLSTATE 23503) on any insert that carries a
+  // non-null cluster_id — a stale `?cluster=` id the reader's page never
+  // validated. The same row with cluster_id null inserts fine.
+  fkFail: false,
+  // Fails EVERY insert with this error, whatever cluster_id it carries.
+  insertError: null as null | { code?: string; message: string },
+  // Fails only inserts WITHOUT a cluster_id (the retry after an FK violation).
+  nullClusterError: null as null | { code?: string; message: string },
+  // Wired to the fake's call log right after it is built (below). The shared
+  // fake clears `state.mutation` before it asks a fixture for its result, so
+  // a fixture cannot branch on `state.mutation.patch`; the mutation is
+  // committed to the call log first, so the fixture reads the latest insert
+  // from there instead.
+  lastInsertPatch: (() => null) as () => Record<string, unknown> | null,
   // Drives the `api_throttle` RPC fixture (migration 118): allow, deny (the
   // per-client hourly bucket is full -> 120 s retry), or error (the RPC
   // itself fails; the route must fail OPEN).
@@ -21,10 +35,22 @@ const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
   return helper.createSupabaseFake({
     tables: {
-      corrections: () =>
-        dbState.forceInsertError
-          ? { data: null, error: { message: "boom" } }
-          : { data: [], error: null },
+      corrections: () => {
+        if (dbState.forceInsertError) {
+          return { data: null, error: { message: "boom" } };
+        }
+        if (dbState.insertError) {
+          return { data: null, error: dbState.insertError };
+        }
+        const patch = dbState.lastInsertPatch();
+        if (dbState.fkFail && patch?.cluster_id != null) {
+          return { data: null, error: { code: "23503", message: "fk" } };
+        }
+        if (dbState.nullClusterError && patch?.cluster_id == null) {
+          return { data: null, error: dbState.nullClusterError };
+        }
+        return { data: [], error: null };
+      },
     },
     rpc: {
       api_throttle: () => {
@@ -38,6 +64,12 @@ const supabaseFake = await vi.hoisted(async () => {
     },
   });
 });
+
+dbState.lastInsertPatch = () =>
+  (supabaseFake.calls.insert("corrections").at(-1)?.patch ?? null) as Record<
+    string,
+    unknown
+  > | null;
 
 vi.mock("@supabase/supabase-js", () => ({
   createClient: () => supabaseFake.client,
@@ -62,8 +94,14 @@ beforeEach(() => {
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
   dbState.forceInsertError = false;
+  dbState.fkFail = false;
+  dbState.insertError = null;
+  dbState.nullClusterError = null;
   dbState.throttle = "allow";
   vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  vi.spyOn(console, "info").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -383,5 +421,171 @@ describe("POST /api/corrections DB throttle (migration 118)", () => {
     const mod = await import("@/app/api/corrections/route");
     const res = await mod.POST(makeRequest(VALID_BODY, "198.51.100.61"));
     expect(res.status).toBe(500);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A stale `?cluster=<uuid>` (a cluster that was deleted or merged away, or one
+// that never existed) used to turn every submission into a 500: the insert
+// violates corrections.cluster_id's foreign key (SQLSTATE 23503). The reader's
+// correction is still worth keeping, so the route retries ONCE without the
+// cluster link, logs a PII-free warning, and answers 201. Any other error, a
+// 23503 without a cluster id, and a failing retry all stay 500.
+// ---------------------------------------------------------------------------
+
+const CLUSTER_ID = "11111111-2222-3333-4444-555555555555";
+const FK_WARNING = "[corrections] unknown clusterId; stored without a cluster link";
+
+/** Every console line the route wrote, flattened to text. */
+function loggedText(): string {
+  const all = [
+    ...vi.mocked(console.warn).mock.calls,
+    ...vi.mocked(console.error).mock.calls,
+    ...vi.mocked(console.log).mock.calls,
+    ...vi.mocked(console.info).mock.calls,
+  ];
+  return all
+    .flat()
+    .map((a) => (typeof a === "string" ? a : a instanceof Error ? a.message : JSON.stringify(a)))
+    .join("\n");
+}
+
+describe("POST /api/corrections unknown clusterId (FK violation 23503)", () => {
+  const withCluster = {
+    ...VALID_BODY,
+    email: "okur@example.com",
+    clusterId: CLUSTER_ID,
+  };
+
+  it("retries once with cluster_id null (same url/message/email) and answers 201", async () => {
+    dbState.fkFail = true;
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(withCluster, "198.51.100.70"));
+
+    expect(res.status).toBe(201);
+    expect(await res.json()).toEqual({ ok: true });
+
+    const inserts = supabaseFake.calls.insert("corrections");
+    expect(inserts).toHaveLength(2);
+    expect(inserts[0]?.patch).toEqual({
+      url: VALID_BODY.url,
+      message: VALID_BODY.message,
+      email: "okur@example.com",
+      cluster_id: CLUSTER_ID,
+    });
+    expect(inserts[1]?.patch).toEqual({
+      url: VALID_BODY.url,
+      message: VALID_BODY.message,
+      email: "okur@example.com",
+      cluster_id: null,
+    });
+  });
+
+  it("warns once with the fixed, PII-free message", async () => {
+    dbState.fkFail = true;
+    const mod = await import("@/app/api/corrections/route");
+    await mod.POST(makeRequest(withCluster, "198.51.100.71"));
+
+    expect(console.warn).toHaveBeenCalledWith(FK_WARNING);
+    expect(
+      vi.mocked(console.warn).mock.calls.filter((c) => c[0] === FK_WARNING),
+    ).toHaveLength(1);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("checks the DB throttle exactly once, before the first insert (the retry does not spend a second token)", async () => {
+    dbState.fkFail = true;
+    const mod = await import("@/app/api/corrections/route");
+    await mod.POST(makeRequest(withCluster, "198.51.100.72"));
+
+    expect(throttleCalls()).toHaveLength(1);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(2);
+  });
+
+  it("a valid clusterId that exists inserts once and does not warn", async () => {
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(withCluster, "198.51.100.73"));
+
+    expect(res.status).toBe(201);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(1);
+    expect(console.warn).not.toHaveBeenCalledWith(FK_WARNING);
+  });
+
+  it("23503 without a clusterId is not retried: 1 insert, 500", async () => {
+    dbState.insertError = { code: "23503", message: "fk" };
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(VALID_BODY, "198.51.100.74"));
+
+    expect(res.status).toBe(500);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(1);
+    expect(console.warn).not.toHaveBeenCalledWith(FK_WARNING);
+  });
+
+  it("any other error with a clusterId is not retried: 1 insert, 500", async () => {
+    dbState.forceInsertError = true;
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(withCluster, "198.51.100.75"));
+
+    expect(res.status).toBe(500);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(1);
+    expect(console.warn).not.toHaveBeenCalledWith(FK_WARNING);
+  });
+
+  it("a different SQLSTATE with a clusterId (e.g. 23505) is not retried either", async () => {
+    dbState.insertError = { code: "23505", message: "duplicate" };
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(withCluster, "198.51.100.76"));
+
+    expect(res.status).toBe(500);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(1);
+  });
+
+  it("retries only once: if the null-cluster retry also fails, the answer is 500 after exactly 2 inserts", async () => {
+    dbState.insertError = { code: "23503", message: "fk" };
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(withCluster, "198.51.100.77"));
+
+    expect(res.status).toBe(500);
+    const inserts = supabaseFake.calls.insert("corrections");
+    expect(inserts).toHaveLength(2);
+    expect((inserts[1]?.patch as { cluster_id: unknown }).cluster_id).toBeNull();
+  });
+
+  it("a non-FK failure of the retry is a 500 as well", async () => {
+    // First insert: FK violation; second (null cluster) insert: a plain error.
+    dbState.fkFail = true;
+    dbState.nullClusterError = { message: "boom" };
+    const mod = await import("@/app/api/corrections/route");
+    const res = await mod.POST(makeRequest(withCluster, "198.51.100.78"));
+
+    expect(res.status).toBe(500);
+    expect(supabaseFake.calls.insert("corrections")).toHaveLength(2);
+  });
+
+  it("no log line carries the reader's email or message, on the retry path or any failure path", async () => {
+    const cases: Array<() => void> = [
+      () => {
+        dbState.fkFail = true;
+      },
+      () => {
+        dbState.forceInsertError = true;
+      },
+      () => {
+        dbState.insertError = { code: "23503", message: "fk" };
+      },
+    ];
+    const mod = await import("@/app/api/corrections/route");
+    for (const [i, arrange] of cases.entries()) {
+      dbState.fkFail = false;
+      dbState.forceInsertError = false;
+      dbState.insertError = null;
+      arrange();
+      await mod.POST(makeRequest(withCluster, `198.51.100.${80 + i}`));
+    }
+
+    const text = loggedText();
+    expect(text).not.toContain("okur@example.com");
+    expect(text).not.toContain(VALID_BODY.message);
+    expect(text).not.toContain(VALID_BODY.url);
   });
 });

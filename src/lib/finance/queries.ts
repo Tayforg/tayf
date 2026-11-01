@@ -12,7 +12,9 @@ import {
   isLegalNotice,
   relevanceKey,
   type AttentionRawRow,
+  type AttentionRow,
 } from "@/lib/finance/ticker-relevance";
+import { readAllPages } from "@/lib/finance/paging";
 
 // Read side of the finance substrate (migrations 049-051) for the
 // /ekonomi pages and /admin/ekonomi. Every fetcher still THROWS on a Supabase
@@ -57,6 +59,14 @@ import {
 // and drop those rows before aggregating. The /ekonomi feed and the
 // per-ticker article list keep their `isLegalNotice` title filter as well; the
 // per-ticker list additionally drops the id set.
+//
+// ekonomi-coverage: PostgREST truncates EVERY response at 1,000 rows whatever
+// `.limit()` asks for, so any read here that can exceed that pages through
+// `readAllPages` (./paging.ts) with a deterministic order -- the per-ticker
+// coverage and attention reads do. tests/guards/postgrest-row-cap.test.ts
+// fails on a `.limit(N)` above 1,000 in this directory. The coverage section
+// is computed over the same disclosures the page lists: circuit-breaker
+// notices are excluded here exactly as in `fetchRecentDisclosures`.
 
 export interface FeedSource {
   name: string;
@@ -267,19 +277,14 @@ function istDate(offsetDays = 0): string {
   return new Date(Date.now() + (3 * 3600 + offsetDays * 86400) * 1000).toISOString().slice(0, 10);
 }
 
-interface AttentionRow {
-  ticker: string;
-  day: string;
-  articles: number;
-  sources: number;
-}
-
 /**
  * Rank tickers by mentions on/after `splitDay`; the days before it form
  * the baseline for `ratio` (recent daily rate / baseline daily rate).
+ * `sources` is the number of DISTINCT sources across all of a ticker's recent
+ * days (the union of each day's `sourceIds`), not the busiest single day.
  */
 export function rankAttention(
-  rows: AttentionRow[],
+  rows: readonly AttentionRow[],
   titles: Map<string, string>,
   limit: number,
   splitDay: string,
@@ -287,11 +292,15 @@ export function rankAttention(
   baselineDays: number,
 ): TickerAttention[] {
   const acc = new Map<string, TickerAttention & { baseline: number }>();
+  const recentSources = new Map<string, Set<string>>();
   for (const r of rows) {
     const cur = acc.get(r.ticker) ?? { ticker: r.ticker, title: titles.get(r.ticker) ?? null, articles: 0, sources: 0, ratio: null, baseline: 0 };
     if (r.day >= splitDay) {
       cur.articles += Number(r.articles);
-      cur.sources = Math.max(cur.sources, Number(r.sources));
+      const seen = recentSources.get(r.ticker) ?? new Set<string>();
+      for (const id of r.sourceIds) seen.add(id);
+      recentSources.set(r.ticker, seen);
+      cur.sources = seen.size;
     } else {
       cur.baseline += Number(r.articles);
     }
@@ -423,20 +432,27 @@ function toDisclosure(r: DisclosureRow): Disclosure {
 }
 
 const DISCLOSURE_SELECT = "disclosure_index,published_at,kap_title,stock_codes,subject,summary,disclosure_class";
-const CIRCUIT_BREAKER = "%Devre Kesici%";
+const CIRCUIT_BREAKER_TEXT = "Devre Kesici";
+/** `.ilike()` pattern (the builder method takes `%`). */
+const CIRCUIT_BREAKER = `%${CIRCUIT_BREAKER_TEXT}%`;
+/**
+ * TS-06: `.not('subject','ilike',CIRCUIT_BREAKER)` compiles to
+ * `subject NOT ILIKE ...`, which is NULL (not TRUE) for a NULL subject --
+ * PostgREST drops those rows even though they plainly aren't circuit breaker
+ * notices. subject is nullable; explicitly keep NULLs. Note the `.or()` filter
+ * DSL uses `*` for a wildcard, not the `%` the `.ilike()` builder method takes.
+ * Shared by every reader that lists a ticker's disclosures so the page, the
+ * feed and the coverage stats all mean the same set.
+ */
+const NOT_CIRCUIT_BREAKER_OR = `subject.is.null,subject.not.ilike.*${CIRCUIT_BREAKER_TEXT}*`;
 
 async function readRecentDisclosures(limit: number, ticker: string | undefined): Promise<Disclosure[]> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
-  // TS-06: `.not('subject','ilike',CIRCUIT_BREAKER)` compiles to
-  // `subject NOT ILIKE ...`, which is NULL (not TRUE) for a NULL subject —
-  // PostgREST drops those rows even though they plainly aren't circuit
-  // breaker notices. subject is nullable; explicitly keep NULLs. Note the
-  // `.or()` filter DSL uses `*` for a wildcard, not the `%` the `.ilike()`
-  // builder method takes.
+  // TS-06: NULL subjects are kept explicitly -- see NOT_CIRCUIT_BREAKER_OR.
   let q = supabase
     .from("kap_disclosures")
     .select(DISCLOSURE_SELECT)
-    .or("subject.is.null,subject.not.ilike.*Devre Kesici*")
+    .or(NOT_CIRCUIT_BREAKER_OR)
     .order("published_at", { ascending: false })
     .limit(limit);
   if (ticker) q = q.contains("stock_codes", [ticker]);
@@ -639,14 +655,25 @@ function median(nums: number[]): number | null {
  *                    >= 2 articles and >= 3x the ticker's usual daily rate.
  * A mention before the filing is not leakage by itself; a ticker that is in
  * the news every day always has one.
+ *
+ * `includeIndexes` (optional) is an ALLOWLIST of the disclosure indexes that
+ * count: rows of any other disclosure are skipped. fetchTickerPage passes the
+ * indexes of the disclosures it lists, which are already free of circuit-breaker
+ * notices, so the section agrees with "Medyada yankı" and /ekonomi and
+ * `covered <= disclosures` always holds. An allowlist rather than an
+ * exclude-list of breaker indexes because the coverage table does not know a
+ * disclosure's subject: removing breakers by index would need a second read,
+ * while the listed disclosures are already at hand. Omitted, every row counts.
  */
 export function coverageStats(
-  rows: Array<{ disclosure_index: number; lag_minutes: number }>,
+  rows: ReadonlyArray<{ disclosure_index: number; lag_minutes: number }>,
   disclosures: number,
   baselineDaily: number,
+  includeIndexes?: ReadonlySet<number>,
 ): CoverageStats {
   const byDisclosure = new Map<number, number[]>();
   for (const r of rows) {
+    if (includeIndexes && !includeIndexes.has(r.disclosure_index)) continue;
     const arr = byDisclosure.get(r.disclosure_index) ?? [];
     arr.push(Number(r.lag_minutes));
     byDisclosure.set(r.disclosure_index, arr);
@@ -667,6 +694,14 @@ export function coverageStats(
   };
 }
 
+/** 10 pages x 1,000 rows: far above any real ticker's 30 days, and bounded under the 4 s reader cap. */
+const TICKER_PAGE_MAX_PAGES = 10;
+
+/** The coverage read's result when there is nothing to read (no listed disclosure, or the list failed). */
+function noCoverage(): { rows: Array<{ disclosure_index: number; lag_minutes: number }>; truncated: boolean } {
+  return { rows: [], truncated: false };
+}
+
 async function readTickerPage(ticker: string): Promise<TickerPage> {
   const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
   const since30 = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
@@ -674,28 +709,84 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
   // The attention window is 30 Istanbul days; the notice-id lookup covers the same span.
   const attentionSinceIso = `${istDate(-29)}T00:00:00+03:00`;
 
-  const [companyRes, attentionRes, articlesRes, disclosuresRes, coverageRes, legalIds] = await Promise.all([
+  const [companyRes, attentionRes, articlesRes, { disclosuresRes, coverageRes }, legalIds] = await Promise.all([
     supabase.from("bist_companies").select("kap_member_oid,tickers,title,city,shares_traded").contains("tickers", [ticker]).limit(1),
     // reader-data (§4b): reads article_tickers directly (the
     // ticker_attention_daily materialized view stays unfiltered for its
     // other SQL consumers — see the header note above) so the relevance
     // gate can be applied at query time without a migration.
-    supabase.from("article_tickers").select("article_id,published_at,source_id").eq("ticker", ticker).gte("published_at", attentionSinceIso).limit(1000),
+    // ekonomi-coverage: paged -- a busy ticker has more than the 1,000 rows a
+    // single response can hold in 30 days. (article_id, ticker) is unique, so
+    // (published_at, article_id) is a total order for one ticker.
+    readAllPages<{ article_id: string; published_at: string; source_id: string }>(
+      (from, to) =>
+        supabase
+          .from("article_tickers")
+          .select("article_id,published_at,source_id")
+          .eq("ticker", ticker)
+          .gte("published_at", attentionSinceIso)
+          .order("published_at")
+          .order("article_id")
+          .range(from, to),
+      { label: `fetchTickerPage attention ${ticker}`, maxPages: TICKER_PAGE_MAX_PAGES },
+    ),
     // Starts from the indexed article_tickers side (migration 054); the
     // embedded-filter form timed out in production.
     supabase.rpc("ticker_articles", { p_ticker: ticker, p_limit: 60 }),
-    supabase.from("kap_disclosures").select(DISCLOSURE_SELECT).contains("stock_codes", [ticker]).gte("published_at", since30).order("published_at", { ascending: false }).limit(60),
-    supabase.from("disclosure_coverage").select("disclosure_index,lag_minutes").eq("ticker", ticker).gte("disclosed_at", since30).limit(2000),
+    // The disclosure list, then the coverage of exactly those disclosures. The
+    // two are chained inside ONE branch so the other reads above still run in
+    // parallel with them.
+    (async () => {
+      const disclosuresRes = await supabase
+        .from("kap_disclosures")
+        .select(DISCLOSURE_SELECT)
+        .contains("stock_codes", [ticker])
+        .or(NOT_CIRCUIT_BREAKER_OR)
+        .gte("published_at", since30)
+        .order("published_at", { ascending: false })
+        .limit(60);
+      // The caller throws on a disclosure error; do not spend the coverage read.
+      if (disclosuresRes.error) return { disclosuresRes, coverageRes: noCoverage() };
+      const indexes = ((disclosuresRes.data ?? []) as DisclosureRow[]).map((d) => d.disclosure_index);
+      // ekonomi-coverage: the coverage rows of the LISTED disclosures only, paged.
+      // disclosure_coverage is a join view (kap_disclosures x article_tickers x
+      // articles): an unrestricted read of a busy ticker pays the whole join and
+      // sort once per OFFSET page and sat next to the 4 s reader timeout. The
+      // `.in` pushes the allowlist (circuit-breaker notices are not listed) into
+      // the database, so the rows that transfer are the rows that count, and
+      // it usually fits one page. A single `.limit(2000)` is not an option:
+      // PostgREST clamps one response at 1,000 rows. (disclosure_index,
+      // lag_minutes, article_id) is a total order for one ticker.
+      const coverageRes =
+        indexes.length === 0
+          ? noCoverage()
+          : await readAllPages<{ disclosure_index: number; lag_minutes: number }>(
+              (from, to) =>
+                supabase
+                  .from("disclosure_coverage")
+                  .select("disclosure_index,lag_minutes")
+                  .eq("ticker", ticker)
+                  .in("disclosure_index", indexes)
+                  .gte("disclosed_at", since30)
+                  .order("disclosure_index")
+                  .order("lag_minutes")
+                  .order("article_id")
+                  .range(from, to),
+              { label: `fetchTickerPage coverage ${ticker}`, maxPages: TICKER_PAGE_MAX_PAGES },
+            );
+      return { disclosuresRes, coverageRes };
+    })(),
     // ticker-legal-notices (107): fail-open, so it stays out of the throwing loop below.
     fetchLegalNoticeIdsSince(supabase, attentionSinceIso),
   ]);
-  for (const [name, res] of [["company", companyRes], ["attention", attentionRes], ["articles", articlesRes], ["disclosures", disclosuresRes], ["coverage", coverageRes]] as const) {
+  // attention and coverage are paged through readAllPages, which throws by itself.
+  for (const [name, res] of [["company", companyRes], ["articles", articlesRes], ["disclosures", disclosuresRes]] as const) {
     if (res.error) throw new Error(`[finance] fetchTickerPage ${name}: ${res.error.message}`);
   }
 
   const c = (companyRes.data ?? [])[0] as { kap_member_oid: string; tickers: string[]; title: string; city: string | null; shares_traded: boolean } | undefined;
   const disclosures = ((disclosuresRes.data ?? []) as DisclosureRow[]).map(toDisclosure);
-  const attentionRaw = ((attentionRes.data ?? []) as Array<{ article_id: string; published_at: string; source_id: string }>).map((r) => ({
+  const attentionRaw = attentionRes.rows.map((r) => ({
     ticker,
     article_id: r.article_id,
     published_at: r.published_at,
@@ -730,7 +821,12 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
         tickers: [ticker],
       })),
     disclosures,
-    coverage: coverageStats((coverageRes.data ?? []) as Array<{ disclosure_index: number; lag_minutes: number }>, disclosures.length, baselineDaily),
+    coverage: coverageStats(
+      coverageRes.rows,
+      disclosures.length,
+      baselineDaily,
+      new Set(disclosures.map((d) => d.disclosureIndex)),
+    ),
   };
 }
 
@@ -884,6 +980,7 @@ async function readLagHistogram(days: number): Promise<LagBucket[]> {
     .from("disclosure_coverage")
     .select("lag_minutes")
     .gte("disclosed_at", new Date(Date.now() - days * 86400 * 1000).toISOString())
+    // postgrest-cap-ok: admin histogram, clamped to 1,000 rows; follow-up
     .limit(5000);
   if (error) throw new Error(`[finance] fetchLagHistogram: ${error.message}`);
   return bucketLags(((data ?? []) as Array<{ lag_minutes: number }>).map((r) => Number(r.lag_minutes)));

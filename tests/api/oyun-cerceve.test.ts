@@ -45,6 +45,14 @@ const cerceveState = vi.hoisted(() => ({
   // Set to a Postgres error code (e.g. "23503") to make the upsert fail
   // with that specific code instead of the generic "upsert boom" message.
   forceUpsertErrorCode: null as string | null,
+  // Drives the `api_throttle` RPC fixture (migration 118), mirroring
+  // tests/api/corrections.test.ts: allow, deny (the bucket is full -> 120 s
+  // retry), or error (the RPC itself fails; the routes must fail OPEN).
+  // `denyBucket` narrows a deny to ONE bucket (or, for "cerceve:art", to the
+  // per-headline family `cerceve:art:<uuid>`) so the Çerçeve buckets can be
+  // exercised independently.
+  throttle: "allow" as "allow" | "deny" | "error",
+  denyBucket: undefined as "cerceve:vote" | "cerceve:mint" | "cerceve:art" | undefined,
 }));
 
 const supabaseFake = await vi.hoisted(async () => {
@@ -77,6 +85,20 @@ const supabaseFake = await vi.hoisted(async () => {
         return cerceveState.nextDefault;
       },
       framing_vote_totals: () => ({ data: [TOTALS_ROW], error: null }),
+      api_throttle: (args: unknown) => {
+        if (cerceveState.throttle === "error") {
+          return { data: null, error: { code: "57014", message: "statement timeout" } };
+        }
+        const bucket = (args as { p_bucket?: string } | undefined)?.p_bucket;
+        const denied =
+          cerceveState.throttle === "deny" &&
+          (cerceveState.denyBucket === undefined ||
+            cerceveState.denyBucket === bucket ||
+            (bucket ?? "").startsWith(`${cerceveState.denyBucket}:`));
+        return denied
+          ? { data: [{ allowed: false, retry_after_seconds: 120 }], error: null }
+          : { data: [{ allowed: true, retry_after_seconds: 0 }], error: null };
+      },
     },
   });
 });
@@ -101,6 +123,8 @@ beforeEach(() => {
   cerceveState.nextThrow = null;
   cerceveState.forceUpsertError = false;
   cerceveState.forceUpsertErrorCode = null;
+  cerceveState.throttle = "allow";
+  cerceveState.denyBucket = undefined;
 });
 
 afterEach(() => {
@@ -680,6 +704,391 @@ describe("POST /api/oyun/cerceve", () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toBe("Invalid article_id");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fleet-wide DB throttles (migration 118's api_throttle, no new migration):
+// `cerceve:vote` (200/h) and `cerceve:art:<article uuid>` (2/day, per headline)
+// on a counted vote, and `cerceve:mint` (20/h) on every request that would
+// mint a NEW session, so a client that discards its cookie cannot farm a fresh
+// unique (article_id, session_hash) slot per vote. All run AFTER validation and
+// FAIL OPEN. A full VOTE bucket never answers 429 (that would tell a script
+// when to rotate IPs and drop honest votes of everyone behind a shared
+// address): the vote is skipped and the tally is still revealed, 200 ok:false.
+// ---------------------------------------------------------------------------
+
+function throttleCalls() {
+  return supabaseFake.calls.rpc.filter((c) => c.name === "api_throttle");
+}
+
+function throttleArgs(call: { args: unknown } | undefined): Record<string, unknown> {
+  return (call?.args ?? {}) as Record<string, unknown>;
+}
+
+describe("Çerçeve DB throttles (migration 118 api_throttle)", () => {
+  const RAW_ID = "abcdef0123456789abcdef0123456789";
+
+  beforeEach(() => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  describe("POST /api/oyun/cerceve with a verified cookie: cerceve:vote", () => {
+    it("checks 'cerceve:vote' at 200 per hour, sending only a 64-hex HMAC digest, never the IP", async () => {
+      const ip = "203.0.113.77";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, ip, await signedCookie(RAW_ID)));
+      expect(res.status).toBe(200);
+
+      const calls = throttleCalls();
+      expect(calls).toHaveLength(2);
+      const args = throttleArgs(calls[0]);
+      expect(args).toMatchObject({
+        p_bucket: "cerceve:vote",
+        p_limit: 200,
+        p_window_seconds: 3600,
+      });
+      expect(args.p_key_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(args.p_key_hash).not.toBe(ip);
+      expect(JSON.stringify(calls.map((c) => c.args))).not.toContain(ip);
+    });
+
+    it("then checks the per-headline bucket 'cerceve:art:<article uuid>' at 2 per day, with the same digest", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      await mod.POST(makePostRequest(VALID_VOTE_BODY, "203.0.113.70", await signedCookie(RAW_ID)));
+
+      const [vote, art] = throttleCalls().map(throttleArgs);
+      expect(art).toMatchObject({
+        p_bucket: `cerceve:art:${ELIGIBLE_ROW.article_id}`,
+        p_limit: 2,
+        p_window_seconds: 86_400,
+      });
+      expect(art?.p_key_hash).toBe(vote?.p_key_hash);
+      expect(String(art?.p_bucket)).toMatch(/^[a-z0-9:_-]{1,80}$/);
+    });
+
+    it("lower-cases an upper-case article uuid in the per-headline bucket name", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      await mod.POST(
+        makePostRequest(
+          { ...VALID_VOTE_BODY, article_id: ELIGIBLE_ROW.article_id.replace(/1/g, "A").toUpperCase() },
+          "203.0.113.71",
+          await signedCookie(RAW_ID),
+        ),
+      );
+      const art = throttleArgs(throttleCalls()[1]);
+      expect(art.p_bucket).toBe(`cerceve:art:${"a".repeat(8)}-${"a".repeat(4)}-${"a".repeat(4)}-${"a".repeat(4)}-${"a".repeat(12)}`);
+    });
+
+    it("vote bucket full -> 200 {ok:false, totals}: no write, no 429, no Retry-After, the tally is still revealed", async () => {
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:vote";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(
+        makePostRequest(VALID_VOTE_BODY, "198.51.100.80", await signedCookie(RAW_ID)),
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("retry-after")).toBeNull();
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.json()).toEqual({
+        ok: false,
+        totals: { n: 10, iktidar: 5, muhalefet: 3, none: 2 },
+      });
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(0);
+      expect(supabaseFake.calls.rpc.filter((c) => c.name === "framing_vote_totals")).toHaveLength(1);
+    });
+
+    it("vote bucket full -> the per-headline bucket is NOT spent (sequential, like /api/oyun)", async () => {
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:vote";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.79", await signedCookie(RAW_ID)));
+      expect(throttleCalls().map((c) => throttleArgs(c).p_bucket)).toEqual(["cerceve:vote"]);
+    });
+
+    it("per-headline bucket full -> the same 200 {ok:false, totals}, no write, no 429", async () => {
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:art";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(
+        makePostRequest(VALID_VOTE_BODY, "198.51.100.78", await signedCookie(RAW_ID)),
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("retry-after")).toBeNull();
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.json()).toEqual({
+        ok: false,
+        totals: { n: 10, iktidar: 5, muhalefet: 3, none: 2 },
+      });
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(0);
+    });
+
+    it("a throttled vote and an ordinary uncounted one answer with the same body shape and headers (a script learns nothing extra)", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const uncounted = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.81"));
+
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:vote";
+      const throttled = await mod.POST(
+        makePostRequest(VALID_VOTE_BODY, "198.51.100.82", await signedCookie(RAW_ID)),
+      );
+
+      expect(throttled.status).toBe(uncounted.status);
+      const a = await uncounted.json();
+      const b = await throttled.json();
+      expect(Object.keys(a).sort()).toEqual(Object.keys(b).sort());
+      expect(a).toEqual(b);
+      expect(throttled.headers.get("cache-control")).toBe(uncounted.headers.get("cache-control"));
+    });
+
+    it("the throttled skip warns with the bucket PREFIX only, never the IP, the digest or the article id", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:art";
+      const ip = "198.51.100.77";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      await mod.POST(makePostRequest(VALID_VOTE_BODY, ip, await signedCookie(RAW_ID)));
+
+      expect(warn).toHaveBeenCalledWith("[oyun/cerceve] vote not recorded: throttled", {
+        bucket: "cerceve:art",
+      });
+      const logged = JSON.stringify(warn.mock.calls);
+      expect(logged).not.toContain(ip);
+      expect(logged).not.toContain(ELIGIBLE_ROW.article_id);
+    });
+
+    it("allowed -> upserts exactly as before and reports ok:true", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(
+        makePostRequest(VALID_VOTE_BODY, "198.51.100.83", await signedCookie(RAW_ID)),
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()).ok).toBe(true);
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(1);
+    });
+
+    it("does not consult the mint bucket", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.84", await signedCookie(RAW_ID)));
+      expect(throttleCalls().map((c) => throttleArgs(c).p_bucket)).toEqual([
+        "cerceve:vote",
+        `cerceve:art:${ELIGIBLE_ROW.article_id}`,
+      ]);
+    });
+
+    it("a denied MINT bucket does not stop a verified vote", async () => {
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:mint";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(
+        makePostRequest(VALID_VOTE_BODY, "198.51.100.85", await signedCookie(RAW_ID)),
+      );
+      expect(res.status).toBe(200);
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(1);
+    });
+
+    it("honest play fits the budget: 30 verified votes on 30 different headlines from one client are all counted", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const cookie = await signedCookie(RAW_ID);
+      for (let i = 0; i < 30; i++) {
+        const articleId = `11111111-1111-1111-1111-${String(i).padStart(12, "0")}`;
+        const res = await mod.POST(
+          makePostRequest({ article_id: articleId, vote: "iktidar" }, "198.51.100.76", cookie),
+        );
+        expect(res.status).toBe(200);
+        expect((await res.json()).ok).toBe(true);
+      }
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(30);
+    });
+
+    it("fails OPEN: an RPC error still counts the vote", async () => {
+      cerceveState.throttle = "error";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(
+        makePostRequest(VALID_VOTE_BODY, "198.51.100.86", await signedCookie(RAW_ID)),
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()).ok).toBe(true);
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(1);
+    });
+  });
+
+  describe("POST /api/oyun/cerceve without a verified cookie: cerceve:mint", () => {
+    it("checks 'cerceve:mint' at 20 per hour with a 64-hex digest, never the IP", async () => {
+      const ip = "203.0.113.78";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, ip));
+      expect(res.status).toBe(200);
+
+      const calls = throttleCalls();
+      expect(calls).toHaveLength(1);
+      const args = throttleArgs(calls[0]);
+      expect(args).toMatchObject({
+        p_bucket: "cerceve:mint",
+        p_limit: 20,
+        p_window_seconds: 3600,
+      });
+      expect(args.p_key_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.stringify(args)).not.toContain(ip);
+    });
+
+    it("allowed -> mints the cookie as today (ok:false, vote not counted)", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.87"));
+      expect(res.status).toBe(200);
+      expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
+      expect((await res.json()).ok).toBe(false);
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(0);
+    });
+
+    it("denied -> still 200 {ok:false, totals}, but NO cookie and no upsert", async () => {
+      cerceveState.throttle = "deny";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.88"));
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.json()).toEqual({
+        ok: false,
+        totals: { n: 10, iktidar: 5, muhalefet: 3, none: 2 },
+      });
+      expect(supabaseFake.calls.upsert("framing_votes")).toHaveLength(0);
+    });
+
+    it("a forged/unsigned cookie is throttled as a mint, not as a vote", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.89", RAW_ID));
+      expect(throttleCalls().map((c) => throttleArgs(c).p_bucket)).toEqual(["cerceve:mint"]);
+    });
+
+    it("a denied VOTE bucket does not stop a first-visit mint", async () => {
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:vote";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.90"));
+      expect(res.status).toBe(200);
+      expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
+    });
+
+    it("fails OPEN: an RPC error still mints the cookie", async () => {
+      cerceveState.throttle = "error";
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const res = await mod.POST(makePostRequest(VALID_VOTE_BODY, "198.51.100.91"));
+      expect(res.status).toBe(200);
+      expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
+      expect((await res.json()).ok).toBe(false);
+    });
+  });
+
+  describe("GET /api/oyun/cerceve/next without a verified cookie: cerceve:mint", () => {
+    it("checks 'cerceve:mint' at 20 per hour BEFORE drawing, with a 64-hex digest, never the IP", async () => {
+      const ip = "203.0.113.79";
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest(ip));
+      expect(res.status).toBe(200);
+
+      const names = supabaseFake.calls.rpc.map((c) => c.name);
+      expect(names).toEqual(["api_throttle", "framing_next_headline"]);
+      const args = throttleArgs(throttleCalls()[0]);
+      expect(args).toMatchObject({
+        p_bucket: "cerceve:mint",
+        p_limit: 20,
+        p_window_seconds: 3600,
+      });
+      expect(args.p_key_hash).toMatch(/^[0-9a-f]{64}$/);
+      expect(JSON.stringify(args)).not.toContain(ip);
+    });
+
+    it("allowed -> draws and mints the cookie as today", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.92"));
+      expect(res.status).toBe(200);
+      expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
+    });
+
+    it("denied -> NEVER a 429: still draws (headline body), sets no cookie, hashes an ephemeral id", async () => {
+      cerceveState.throttle = "deny";
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const ip = "198.51.100.93";
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest(ip));
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("set-cookie")).toBeNull();
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(await res.json()).toEqual({
+        article_id: ELIGIBLE_ROW.article_id,
+        title: ELIGIBLE_ROW.title,
+      });
+
+      const draws = supabaseFake.calls.rpc.filter((c) => c.name === "framing_next_headline");
+      expect(draws).toHaveLength(1);
+      expect(throttleArgs(draws[0]).p_session_hash).toMatch(/^[0-9a-f]{64}$/);
+
+      expect(warn).toHaveBeenCalledWith("[oyun/cerceve] session not minted: throttled");
+      const logged = JSON.stringify(warn.mock.calls);
+      expect(logged).not.toContain(ip);
+      expect(logged).not.toContain(String(throttleArgs(draws[0]).p_session_hash));
+    });
+
+    it("denied -> an unmintable client gets a different ephemeral id on every draw", async () => {
+      cerceveState.throttle = "deny";
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      await mod.GET(makeGetRequest("198.51.100.94"));
+      await mod.GET(makeGetRequest("198.51.100.94"));
+      const hashes = supabaseFake.calls.rpc
+        .filter((c) => c.name === "framing_next_headline")
+        .map((c) => throttleArgs(c).p_session_hash);
+      expect(hashes).toHaveLength(2);
+      expect(hashes[0]).not.toBe(hashes[1]);
+    });
+
+    it("a request with a signed cookie makes no throttle call at all", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.95", await signedCookie(RAW_ID)));
+      expect(res.status).toBe(200);
+      expect(throttleCalls()).toHaveLength(0);
+    });
+
+    it("a denied VOTE bucket does not stop a first-visit mint", async () => {
+      cerceveState.throttle = "deny";
+      cerceveState.denyBucket = "cerceve:vote";
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.96"));
+      expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
+    });
+
+    it("fails OPEN: an RPC error still draws and mints the cookie", async () => {
+      cerceveState.throttle = "error";
+      const mod = await import("@/app/api/oyun/cerceve/next/route");
+      const res = await mod.GET(makeGetRequest("198.51.100.97"));
+      expect(res.status).toBe(200);
+      expect(setCookieValue(res)).toMatch(SIGNED_COOKIE_RE);
+      expect(await res.json()).toEqual({
+        article_id: ELIGIBLE_ROW.article_id,
+        title: ELIGIBLE_ROW.title,
+      });
+    });
+  });
+
+  describe("validation runs before any throttle", () => {
+    it("a 400 (bad vote / bad article_id / bad JSON) makes no api_throttle call", async () => {
+      const mod = await import("@/app/api/oyun/cerceve/route");
+      const bodies: unknown[] = [
+        { article_id: ELIGIBLE_ROW.article_id, vote: "tarafsiz" },
+        { article_id: "not-a-uuid", vote: "iktidar" },
+        "{not json",
+      ];
+      for (const [i, body] of bodies.entries()) {
+        const res = await mod.POST(makePostRequest(body, `198.51.100.${100 + i}`));
+        expect(res.status).toBe(400);
+      }
+      expect(throttleCalls()).toHaveLength(0);
+    });
   });
 });
 

@@ -16,7 +16,9 @@ import {
   refKey,
 } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
+import { marketCueText, quoteFreshness } from "@/lib/finance/session";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
+import { currentTimeMs } from "@/lib/time";
 
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
@@ -41,6 +43,9 @@ export default async function EkonomiPage() {
   // Row times are formatted against Date.now(); connection() tells PPR this
   // body runs at request time (loading.tsx is the Suspense boundary).
   await connection();
+  // Taken after connection(): never read the clock in a prerender path.
+  // currentTimeMs() is the repo's Date.now() wrapper (react-hooks/purity).
+  const nowMs = currentTimeMs();
   const [feed, top, disclosures, breakers] = await Promise.all([
     fetchEconFeed(80),
     fetchTopTickers(2, 24),
@@ -59,18 +64,43 @@ export default async function EkonomiPage() {
     fetchReferencePrices(feed.map((f) => f.id).sort()),
   ]);
 
+  // Market cue: when the freshest quote on screen is not from a live session,
+  // say so once instead of letting every chip look like today's move. "Piyasa
+  // kapalı" is claimed only when the clock says the market is closed: quotes are
+  // cached for minutes, so at the open they still carry yesterday's date while
+  // BIST trades (marketCueText words that case neutrally).
+  let newestAsOf: string | null = null;
+  let newestAsOfMs = Number.NEGATIVE_INFINITY;
+  for (const q of Object.values(quotes)) {
+    const ms = Date.parse(q.asOf);
+    if (Number.isFinite(ms) && ms > newestAsOfMs) {
+      newestAsOfMs = ms;
+      newestAsOf = q.asOf;
+    }
+  }
+  const marketCue = marketCueText(newestAsOf, nowMs);
+  // A quote whose last trade is days old has no "move" to show on its chip.
+  const isStale = (ticker: string): boolean => {
+    const q = quotes[ticker];
+    return q ? quoteFreshness(q.asOf, nowMs).kind === "halted" : false;
+  };
+  const staleTickers = new Set(Object.keys(quotes).filter(isStale));
+
   return (
     <div className="mx-auto w-full max-w-[1600px] px-4 py-6 space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 font-mono text-[12px]">
         <h1 className="font-mono text-[12px] font-normal text-foreground">
           Tayf <span className="text-brand">Ekonomi</span>
         </h1>
-        <p className="text-muted-foreground">
-          Haberde adı geçen hisseler, son fiyat, gün içi değişim ve haberden bu yana hareket. Fiyatlar 15 dk gecikmeli olabilir. Yatırım tavsiyesi değildir.
-        </p>
+        <div className="space-y-0.5">
+          <p className="text-muted-foreground">
+            Haberde adı geçen hisseler, son fiyat, gün içi değişim ve haberden bu yana hareket. Fiyatlar 15 dk gecikmeli olabilir. Yatırım tavsiyesi değildir.
+          </p>
+          {marketCue ? <p className="text-muted-foreground">{marketCue}</p> : null}
+        </div>
       </div>
 
-      <TickerTape items={top} quotes={quotes} stats={stats} />
+      <TickerTape items={top} quotes={quotes} stats={stats} staleTickers={staleTickers} />
 
       {breakers.length > 0 ? (
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border border-border bg-black/25 px-3 py-1.5 font-mono text-[11px]">
@@ -120,11 +150,15 @@ export default async function EkonomiPage() {
                     <div className="flex min-w-0 flex-wrap gap-1">
                       {item.tickers.map((t) => {
                         const q = quotes[t];
-                        const since = pctChange(refs[refKey(item.id, t)], q?.price);
+                        // No trade since the headline (a weekend, or a headline newer
+                        // than the last quote): the move since it is not measurable,
+                        // and would read as a flat "+0,00% haberden".
+                        const noTradeSince = q != null && Date.parse(item.publishedAt) > Date.parse(q.asOf);
+                        const since = noTradeSince ? null : pctChange(refs[refKey(item.id, t)], q?.price);
                         // A headline from before the open references the previous
                         // close, which makes "since" the day move again. Say it once.
                         const redundant = since != null && q != null && Math.abs(since - q.changePct) < 0.02;
-                        return <TickerChip key={t} ticker={t} quote={q} sinceNews={redundant ? null : since} />;
+                        return <TickerChip key={t} ticker={t} quote={q} sinceNews={redundant ? null : since} stale={isStale(t)} />;
                       })}
                       {item.source ? <span className="font-mono text-[11px] text-muted-foreground sm:hidden">{item.source.name}</span> : null}
                     </div>
@@ -144,7 +178,7 @@ export default async function EkonomiPage() {
                 <li key={t.ticker} className="grid grid-cols-[1.5rem_minmax(0,1fr)_auto] items-baseline gap-2 px-3 py-1.5 font-mono text-[11px]">
                   <span className="tabular-nums text-muted-foreground">{i + 1}</span>
                   <span className="min-w-0">
-                    <TickerChip ticker={t.ticker} quote={quotes[t.ticker]} />
+                    <TickerChip ticker={t.ticker} quote={quotes[t.ticker]} stale={isStale(t.ticker)} />
                     {t.title ? <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{t.title}</span> : null}
                   </span>
                   <span className="tabular-nums text-muted-foreground">

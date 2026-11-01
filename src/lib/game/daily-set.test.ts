@@ -4,6 +4,7 @@ import {
   DAILY_GAME_EPOCH,
   DAILY_GAME_SIZE,
   DAILY_MAX_PER_ZONE,
+  DAILY_POLITICS_GATE_FROM,
   DAILY_TITLE_MAX,
   ISTANBUL_OFFSET_MS,
   addDays,
@@ -53,6 +54,8 @@ function candidate(overrides: Partial<DailyCandidate> = {}): DailyCandidate {
     publishedAt: WINDOW.startIso,
     createdAt: WINDOW.startIso,
     clusterId: "cluster-1",
+    category: "politika",
+    politicsAdmittedAt: null,
     source: source(),
     ...overrides,
   };
@@ -242,6 +245,63 @@ describe("isDailyEligible", () => {
   it("accepts an otherwise-clean candidate", () => {
     expect(isDailyEligible(candidate(), WINDOW)).toBe(true);
   });
+
+  describe("politics gate (opts.politicsGate)", () => {
+    const GATED = { politicsGate: true } as const;
+
+    it("rejects an ekonomi article that was never admitted to politics", () => {
+      expect(
+        isDailyEligible(candidate({ category: "ekonomi", politicsAdmittedAt: null }), WINDOW, GATED),
+      ).toBe(false);
+    });
+
+    it("accepts a politika article", () => {
+      expect(isDailyEligible(candidate({ category: "politika" }), WINDOW, GATED)).toBe(true);
+    });
+
+    it("accepts a son_dakika article", () => {
+      expect(isDailyEligible(candidate({ category: "son_dakika" }), WINDOW, GATED)).toBe(true);
+    });
+
+    it("accepts an ekonomi article that carries a politics_admitted_at stamp", () => {
+      expect(
+        isDailyEligible(
+          candidate({ category: "ekonomi", politicsAdmittedAt: "2026-11-05T08:00:00Z" }),
+          WINDOW,
+          GATED,
+        ),
+      ).toBe(true);
+    });
+
+    it("rejects a null category with no admission stamp", () => {
+      expect(
+        isDailyEligible(candidate({ category: null, politicsAdmittedAt: null }), WINDOW, GATED),
+      ).toBe(false);
+    });
+
+    it("still applies every other rule when the gate is on", () => {
+      expect(
+        isDailyEligible(candidate({ source: source({ active: false }) }), WINDOW, GATED),
+      ).toBe(false);
+    });
+
+    it("without opts (or with the gate off) an ekonomi article stays eligible", () => {
+      const ekonomi = candidate({ category: "ekonomi", politicsAdmittedAt: null });
+      expect(isDailyEligible(ekonomi, WINDOW)).toBe(true);
+      expect(isDailyEligible(ekonomi, WINDOW, {})).toBe(true);
+      expect(isDailyEligible(ekonomi, WINDOW, { politicsGate: false })).toBe(true);
+    });
+  });
+});
+
+describe("DAILY_POLITICS_GATE_FROM", () => {
+  it("is a valid date key", () => {
+    expect(isDateKey(DAILY_POLITICS_GATE_FROM)).toBe(true);
+  });
+
+  it("is not earlier than the first puzzle date after the gate was designed (2026-11-02)", () => {
+    expect(DAILY_POLITICS_GATE_FROM >= "2026-11-02").toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -398,6 +458,58 @@ describe("pickDailySet", () => {
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
     expect(a!.map((h) => h.articleId)).not.toEqual(b!.map((h) => h.articleId));
+  });
+});
+
+describe("pickDailySet — politics gate", () => {
+  // pool(key, 60) with every 2nd candidate (the odd indices) re-categorised
+  // as ekonomi. Zones cycle i % 3, so politika (even i) still spans all three.
+  function mixedPool(key: string): DailyCandidate[] {
+    return pool(key, 60).map((c, i) =>
+      i % 2 === 1 ? { ...c, category: "ekonomi" } : c,
+    );
+  }
+  const allPolitika = (cs: readonly DailyCandidate[]): DailyCandidate[] =>
+    cs.map((c) => ({ ...c, category: "politika" }));
+  const ekonomiIds = (cs: readonly DailyCandidate[]): Set<string> =>
+    new Set(cs.filter((c) => c.category === "ekonomi").map((c) => c.articleId));
+
+  const PRE_GATE_KEYS = Array.from({ length: 7 }, (_, i) =>
+    addDays(DAILY_POLITICS_GATE_FROM, -(i + 1)),
+  );
+
+  it("past puzzles are byte-identical to the ungated pick (cold-cache recompute is stable)", () => {
+    for (const key of PRE_GATE_KEYS) {
+      const mixed = mixedPool(key);
+      expect(pickDailySet(key, mixed)).toEqual(pickDailySet(key, allPolitika(mixed)));
+    }
+  });
+
+  it("the pre-gate byte-stability check is not vacuous: a past set still contains an ekonomi article", () => {
+    const hits = PRE_GATE_KEYS.filter((key) => {
+      const mixed = mixedPool(key);
+      const result = pickDailySet(key, mixed);
+      const ids = ekonomiIds(mixed);
+      return result !== null && result.some((h) => ids.has(h.articleId));
+    });
+    expect(hits.length).toBeGreaterThan(0);
+  });
+
+  it.each([0, 1, 3])("from the gate date onward (+%i days) no ekonomi candidate is picked", (offset) => {
+    const key = addDays(DAILY_POLITICS_GATE_FROM, offset);
+    const mixed = mixedPool(key);
+    const result = pickDailySet(key, mixed);
+    expect(result).not.toBeNull();
+    expect(result).toHaveLength(DAILY_GAME_SIZE);
+    const ids = ekonomiIds(mixed);
+    expect(result!.some((h) => ids.has(h.articleId))).toBe(false);
+  });
+
+  it("a gated day is not affected by ekonomi rows being present at all (same set as an ekonomi-free pool)", () => {
+    const key = DAILY_POLITICS_GATE_FROM;
+    const mixed = mixedPool(key);
+    const politikaOnly = mixed.filter((c) => c.category === "politika");
+    expect(pickDailySet(key, mixed)).toEqual(pickDailySet(key, politikaOnly));
   });
 });
 

@@ -57,7 +57,7 @@ vi.mock("@supabase/supabase-js", () => ({
 import { cacheLife } from "next/cache";
 
 const { fetchDailyPuzzleCached, getDailyPuzzle } = await import("./daily-query");
-const { dailyHash, puzzleWindow } = await import("./daily-set");
+const { DAILY_POLITICS_GATE_FROM, dailyHash, puzzleWindow } = await import("./daily-set");
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const DATE_KEY = "2026-10-05";
@@ -86,6 +86,8 @@ function articleRow(i: number, zone: keyof typeof ZONE_BIAS, overrides: Record<s
       active: true,
     },
     cluster_articles: [{ cluster_id: `cluster-${i}` }],
+    category: "politika",
+    politics_admitted_at: null,
     ...overrides,
   };
 }
@@ -198,6 +200,88 @@ describe("daily puzzle — edited-title exclusion", () => {
     if (!attempt.ok) return;
     expect(attempt.data.headlines).toHaveLength(5);
     expect(attempt.data.headlines.some((h) => h.articleId === "article-0")).toBe(false);
+  });
+});
+
+describe("daily puzzle — politics gate", () => {
+  const ZONES: Array<keyof typeof ZONE_BIAS> = [
+    "iktidar",
+    "bagimsiz",
+    "muhalefet",
+    "iktidar",
+    "bagimsiz",
+    "muhalefet",
+    "iktidar",
+  ];
+  const IDS = ZONES.map((_, i) => `article-${i}`);
+
+  /** 7 rows inside `key`'s window; the dailyHash-first one is re-categorised. */
+  function rowsWithHashFirstAs(key: string, category: string) {
+    const window = puzzleWindow(key);
+    const hashFirst = [...IDS].sort((a, b) => dailyHash(key, a) - dailyHash(key, b))[0]!;
+    const rows = ZONES.map((zone, i) =>
+      articleRow(i, zone, {
+        published_at: window.startIso,
+        created_at: window.startIso,
+        ...(IDS[i] === hashFirst ? { category } : {}),
+      }),
+    );
+    return { rows, hashFirst };
+  }
+
+  it("selects category and politics_admitted_at from articles", async () => {
+    fixture.predictionRows = sixPredictionRows();
+    fixture.articleRows = sixEligibleRows();
+
+    await getDailyPuzzle(DATE_KEY);
+
+    const state = fixture.articleCalls[0] as BuilderState;
+    const selected = String(state.selectArgs[0]);
+    expect(selected).toContain("category");
+    expect(selected).toContain("politics_admitted_at");
+  });
+
+  it("from the gate date, an ekonomi article is left out (proves toCandidate copies both fields)", async () => {
+    const key = DAILY_POLITICS_GATE_FROM;
+    const { rows, hashFirst } = rowsWithHashFirstAs(key, "ekonomi");
+    fixture.predictionRows = IDS.map((article_id) => ({ article_id }));
+    fixture.articleRows = rows;
+
+    const attempt = await fetchDailyPuzzleCached(key);
+
+    expect(attempt.ok).toBe(true);
+    if (!attempt.ok) return;
+    expect(attempt.data.headlines).toHaveLength(5);
+    expect(attempt.data.headlines.some((h) => h.articleId === hashFirst)).toBe(false);
+  });
+
+  it("from the gate date, an ekonomi article stamped politics_admitted_at stays eligible", async () => {
+    const key = DAILY_POLITICS_GATE_FROM;
+    const { rows, hashFirst } = rowsWithHashFirstAs(key, "ekonomi");
+    const stamped = rows.map((r) =>
+      r.id === hashFirst ? { ...r, politics_admitted_at: "2026-11-05T08:00:00Z" } : r,
+    );
+    fixture.predictionRows = IDS.map((article_id) => ({ article_id }));
+    fixture.articleRows = stamped;
+
+    const attempt = await fetchDailyPuzzleCached(key);
+
+    expect(attempt.ok).toBe(true);
+    if (!attempt.ok) return;
+    expect(attempt.data.headlines.some((h) => h.articleId === hashFirst)).toBe(true);
+  });
+
+  it("before the gate date the same ekonomi article is still picked (past puzzles stay byte-identical)", async () => {
+    expect(DATE_KEY < DAILY_POLITICS_GATE_FROM).toBe(true);
+    const { rows, hashFirst } = rowsWithHashFirstAs(DATE_KEY, "ekonomi");
+    fixture.predictionRows = IDS.map((article_id) => ({ article_id }));
+    fixture.articleRows = rows;
+
+    const attempt = await fetchDailyPuzzleCached(DATE_KEY);
+
+    expect(attempt.ok).toBe(true);
+    if (!attempt.ok) return;
+    expect(attempt.data.headlines.some((h) => h.articleId === hashFirst)).toBe(true);
   });
 });
 

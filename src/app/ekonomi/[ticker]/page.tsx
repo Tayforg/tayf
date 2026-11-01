@@ -12,7 +12,16 @@ import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
 import { fmtPct, fmtPrice, fmtWhen, fmtX, istToday, limitFlag, moveClass } from "@/lib/finance/format";
 import { fetchIntraday, fetchQuoteStats, fetchTickerPage } from "@/lib/finance/queries";
 import { getQuotes } from "@/lib/finance/quotes";
+import {
+  chartBaseline,
+  companyMetaLine,
+  intradayEmptyCopy,
+  priceEmptyLabel,
+  quoteFreshness,
+  rvolLabel,
+} from "@/lib/finance/session";
 import { createFinanceServerClient, READER_TIMEOUT_MS } from "@/lib/supabase/server";
+import { currentTimeMs } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 // /ekonomi/[ticker] — one company: last price and five-session line, the
@@ -169,6 +178,10 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
     throw new Error(`[ekonomi] ticker existence unknown: ${ticker}`);
   }
   await connection();
+  // The clock is read only after connection(), never in a prerender path;
+  // it drives the "bugün" / "son seans" wording below. currentTimeMs() is the
+  // repo's Date.now() wrapper (react-hooks/purity forbids the direct call).
+  const nowMs = currentTimeMs();
 
   // tickerExistence() confirms the ticker has SOME coverage (a bist_companies
   // row, or at least one article/disclosure), not specifically a company
@@ -184,7 +197,15 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   ]);
   const quote = quotes[ticker];
   const stat = stats[ticker];
-  const limit = quote ? limitFlag(quote.changePct) : null;
+  // A quote is "halted" when its last trade is days old: no move, limit tag or
+  // volume is shown for it. A quote without a baseline (hasBaseline false) has
+  // a placeholder 0 move, which is unknown, not flat.
+  const fresh = quote ? quoteFreshness(quote.asOf, nowMs) : null;
+  const halted = fresh?.kind === "halted";
+  const knownMove = quote != null && quote.hasBaseline !== false && !halted;
+  const limit = quote && knownMove ? limitFlag(quote.changePct) : null;
+  const volume = halted ? null : rvolLabel(stat, intraday.day);
+  const metaLine = companyMetaLine(page.company);
   const sessionDay = intraday.day;
   const markers = sessionDay
     ? [
@@ -207,33 +228,44 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         <div className="min-w-0 space-y-1">
           <h1 className="font-mono text-3xl leading-none text-brand">{ticker}</h1>
           <p className="truncate text-[13px] text-foreground/90">{page.company?.title ?? "Şirket kaydı bulunamadı"}</p>
-          <p className="font-mono text-[11px] text-muted-foreground">
-            {page.company?.city ? `${page.company.city} ` : ""}
-            {page.company && !page.company.sharesTraded ? "işlem görmüyor" : ""}
-            {page.company && page.company.tickers.length > 1 ? `paylar: ${page.company.tickers.join(" ")}` : ""}
-          </p>
+          {metaLine ? <p className="font-mono text-[11px] text-muted-foreground">{metaLine}</p> : null}
         </div>
         <div className="flex items-end gap-4 font-mono">
-          {quote ? (
+          {quote && fresh ? (
             <>
               <div className="text-right">
                 <div className="flex items-baseline justify-end gap-2">
                   {limit ? <span className="bg-brand/20 px-1.5 py-0.5 text-[11px] text-brand">{limit}</span> : null}
                   <span className="text-3xl leading-none tabular-nums">{fmtPrice(quote.price)}</span>
                 </div>
-                <div className={cn("mt-1 text-[12px] tabular-nums", moveClass(quote.changePct))}>
-                  {fmtPct(quote.changePct)} <span className="text-muted-foreground">bugün</span>
-                </div>
-                {stat?.rvol != null ? (
-                  <div className={cn("mt-0.5 text-[11px] tabular-nums", stat.rvol >= 2 ? "text-amber-400" : "text-muted-foreground")}>
-                    hacim {fmtX(stat.rvol)} <span className="text-muted-foreground">20 günlük ortalamanın</span>
+                {halted ? (
+                  <div className="mt-1 text-[12px] tabular-nums text-muted-foreground">{fresh.label}</div>
+                ) : (
+                  <div className={cn("mt-1 text-[12px] tabular-nums", knownMove ? moveClass(quote.changePct) : "text-muted-foreground")}>
+                    {knownMove ? (
+                      fmtPct(quote.changePct)
+                    ) : (
+                      <>
+                        <span aria-hidden="true">—</span>
+                        <span className="sr-only">değişim bilinmiyor</span>
+                      </>
+                    )}{" "}
+                    <span className="text-muted-foreground">{fresh.label}</span>
+                  </div>
+                )}
+                {volume ? (
+                  <div className={cn("mt-0.5 text-[11px] tabular-nums", volume.rvol >= 2 ? "text-amber-400" : "text-muted-foreground")}>
+                    hacim {fmtX(volume.rvol)}{" "}
+                    <span className="text-muted-foreground">
+                      20 günlük ortalamanın{volume.dayLabel ? ` · ${volume.dayLabel} seansı` : ""}
+                    </span>
                   </div>
                 ) : null}
               </div>
-              <Sparkline values={quote.closes} className={moveClass(quote.changePct)} width={140} height={40} />
+              <Sparkline values={quote.closes} className={knownMove ? moveClass(quote.changePct) : "text-muted-foreground"} width={140} height={40} />
             </>
           ) : (
-            <span className="text-[12px] text-muted-foreground">fiyat alınamadı</span>
+            <span className="text-[12px] text-muted-foreground">{priceEmptyLabel(page.company)}</span>
           )}
         </div>
       </header>
@@ -243,9 +275,17 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
         meta={sessionDay ? `${sessionDay.split("-").reverse().join(".")}, 5 dakikalık kapanışlar, haberler işaretli` : "5 dakikalık veri henüz yok"}
       >
         {intraday.bars.length < 2 ? (
-          <PanelEmpty>Bu hisse için seans içi veri henüz toplanmadı. Haberde geçen hisseler seans boyunca 5 dakikada bir kaydedilir.</PanelEmpty>
+          <PanelEmpty>{intradayEmptyCopy(page.company)}</PanelEmpty>
         ) : (
-          <IntradayChart bars={intraday.bars} markers={markers} prevClose={stat?.prevClose ?? quote?.prevClose ?? null} />
+          <IntradayChart
+            bars={intraday.bars}
+            markers={markers}
+            prevClose={chartBaseline({
+              stat,
+              intradayDay: intraday.day,
+              quotePrevClose: quote && quote.hasBaseline !== false ? quote.prevClose : null,
+            })}
+          />
         )}
       </Panel>
 

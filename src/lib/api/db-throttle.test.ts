@@ -82,6 +82,33 @@ describe("db-throttle", () => {
         limit: 5,
         windowSeconds: 3600,
       });
+      expect(THROTTLE_POLICY.cerceveVote).toEqual({
+        bucket: "cerceve:vote",
+        limit: 200,
+        windowSeconds: 3600,
+      });
+      expect(THROTTLE_POLICY.cerceveArticlePrefix).toBe("cerceve:art:");
+      expect(THROTTLE_POLICY.cerceveArticleLimit).toBe(2);
+      expect(THROTTLE_POLICY.cerceveArticleWindowSeconds).toBe(86_400);
+      expect(THROTTLE_POLICY.cerceveMint).toEqual({
+        bucket: "cerceve:mint",
+        limit: 20,
+        windowSeconds: 3600,
+      });
+    });
+
+    it("every policy bucket satisfies the table's CHECK (^[a-z0-9:_-]{1,80}$), so no migration is needed", () => {
+      for (const p of [
+        THROTTLE_POLICY.oyunAll,
+        THROTTLE_POLICY.corrections,
+        THROTTLE_POLICY.cerceveVote,
+        THROTTLE_POLICY.cerceveMint,
+      ]) {
+        expect(p.bucket).toMatch(/^[a-z0-9:_-]{1,80}$/);
+      }
+      // The per-headline bucket is built per request: prefix + a (lower-cased) uuid.
+      const uuid = "11111111-1111-1111-1111-111111111111";
+      expect(`${THROTTLE_POLICY.cerceveArticlePrefix}${uuid}`).toMatch(/^[a-z0-9:_-]{1,80}$/);
     });
   });
 

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { TickerChip } from "./ticker-chip";
+import { TickerChip, TickerTape } from "./ticker-chip";
 import type { Quote } from "@/lib/finance/quotes";
+import type { QuoteStat, TickerAttention } from "@/lib/finance/queries";
 
 // Walks the element tree the way label-card.test.tsx and framing-game.test.tsx
 // do, since vitest runs in a plain node environment (no jsdom/RTL).
-function collect(node: unknown, out: { type: unknown; props: Record<string, unknown> }[] = []) {
+type Node = { type: unknown; props: Record<string, unknown> };
+
+function collect(node: unknown, out: Node[] = []) {
   if (node == null || typeof node !== "object") return out;
   if (Array.isArray(node)) {
     for (const n of node) collect(n, out);
@@ -18,14 +21,27 @@ function collect(node: unknown, out: { type: unknown; props: Record<string, unkn
   return out;
 }
 
+/** Plain text of a subtree (strings and numbers only), concatenated. */
+function textOf(node: unknown): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  const el = node as { props?: { children?: unknown } };
+  return textOf(el.props?.children);
+}
+
+const spans = (nodes: Node[]) => nodes.filter((n) => n.type === "span");
+const classOf = (n: Node) => String(n.props.className ?? "");
+
 const quote: Quote = {
   ticker: "OZATD",
   price: 1935,
   prevClose: 2150,
   changePct: -10,
+  hasBaseline: true,
   closes: [2150, 1935],
   currency: "TRY",
-  asOf: new Date().toISOString(),
+  asOf: "2026-10-30T15:00:00.000Z",
 };
 
 describe("TickerChip", () => {
@@ -51,5 +67,140 @@ describe("TickerChip", () => {
     const haberdenClass = String(haberdenSpan!.props.className ?? "");
     expect(haberdenClass).toContain("hidden");
     expect(haberdenClass).toContain("sm:inline");
+  });
+
+  it("renders the signed move and the taban flag for a known move", () => {
+    const text = textOf(TickerChip({ ticker: "OZATD", quote }));
+    expect(text).toContain("-10,00%");
+    expect(text).toContain("taban");
+    expect(text).not.toContain("—");
+  });
+
+  it("renders '—' with no percent and no limit flag when hasBaseline is false", () => {
+    const el = TickerChip({ ticker: "OZATD", quote: { ...quote, hasBaseline: false } });
+    const text = textOf(el);
+    expect(text).toContain("—");
+    expect(text).not.toContain("%");
+    expect(text).not.toContain("taban");
+    expect(text).not.toContain("tavan");
+    // The price is still shown: only the move is unknown.
+    expect(text).toContain("1.935,00");
+  });
+
+  it("renders '—' with no percent and no limit flag when the quote is stale", () => {
+    const el = TickerChip({ ticker: "OZATD", quote, stale: true });
+    const text = textOf(el);
+    expect(text).toContain("—");
+    expect(text).not.toContain("%");
+    expect(text).not.toContain("taban");
+  });
+
+  it("the '—' is aria-hidden and followed by a sr-only 'değişim bilinmiyor'", () => {
+    const el = TickerChip({ ticker: "OZATD", quote: { ...quote, hasBaseline: false } });
+    const all = spans(collect(el));
+    const dashIdx = all.findIndex((n) => n.props.children === "—");
+    expect(dashIdx).toBeGreaterThanOrEqual(0);
+    const dash = all[dashIdx]!;
+    expect(dash.props["aria-hidden"]).toBe("true");
+    expect(classOf(dash)).toContain("text-muted-foreground");
+    const next = all[dashIdx + 1]!;
+    expect(next.props.children).toBe("değişim bilinmiyor");
+    expect(classOf(next)).toContain("sr-only");
+  });
+
+  it("treats a stale cache entry without hasBaseline as a known move", () => {
+    const { hasBaseline: _drop, ...legacy } = quote;
+    void _drop;
+    const text = textOf(TickerChip({ ticker: "OZATD", quote: legacy as Quote }));
+    expect(text).toContain("-10,00%");
+    expect(text).not.toContain("—");
+  });
+
+  it("omitting sinceNews renders no 'haberden' span", () => {
+    expect(textOf(TickerChip({ ticker: "OZATD", quote }))).not.toContain("haberden");
+    expect(textOf(TickerChip({ ticker: "OZATD", quote, sinceNews: null }))).not.toContain("haberden");
+  });
+
+  it("renders just the ticker when there is no quote", () => {
+    const text = textOf(TickerChip({ ticker: "OZATD" }));
+    expect(text).toBe("OZATD");
+  });
+});
+
+describe("TickerTape", () => {
+  const items: TickerAttention[] = [{ ticker: "OZATD", articles: 3, sources: 2, ratio: null, title: "Özata" } as TickerAttention];
+  const stats: Record<string, QuoteStat> = {};
+
+  it("renders the percentage for a known move", () => {
+    const el = TickerTape({ items, quotes: { OZATD: quote }, stats });
+    const text = textOf(el);
+    expect(text).toContain("-10,00%");
+    expect(text).toContain("taban");
+  });
+
+  it("renders '—' instead of a percentage, and no limit flag, when hasBaseline is false", () => {
+    const el = TickerTape({ items, quotes: { OZATD: { ...quote, hasBaseline: false } }, stats });
+    const text = textOf(el);
+    expect(text).toContain("—");
+    expect(text).not.toContain("%");
+    expect(text).not.toContain("taban");
+    const all = spans(collect(el));
+    const dashIdx = all.findIndex((n) => n.props.children === "—");
+    expect(dashIdx).toBeGreaterThanOrEqual(0);
+    expect(all[dashIdx]!.props["aria-hidden"]).toBe("true");
+    expect(all[dashIdx + 1]!.props.children).toBe("değişim bilinmiyor");
+    expect(classOf(all[dashIdx + 1]!)).toContain("sr-only");
+  });
+
+  describe("stale quotes (TERA: last bar days old)", () => {
+    const staleTickers = new Set(["OZATD"]);
+    const rvolStats: Record<string, QuoteStat> = {
+      OZATD: { ticker: "OZATD", lastDay: "2026-10-27", lastClose: 1935, prevClose: 2150, lastVolume: 9000, avgVolume20: 3000, rvol: 3 },
+    };
+
+    it("renders '—' (aria-hidden, with sr-only text), no percentage, no limit tag and no rvol for a stale quote", () => {
+      const el = TickerTape({ items, quotes: { OZATD: quote }, stats: rvolStats, staleTickers });
+      const text = textOf(el);
+      expect(text).toContain("—");
+      expect(text).not.toContain("%");
+      expect(text).not.toContain("taban");
+      expect(text).not.toContain("tavan");
+      expect(text).not.toContain("hacim");
+      const all = spans(collect(el));
+      const dashIdx = all.findIndex((n) => n.props.children === "—");
+      expect(dashIdx).toBeGreaterThanOrEqual(0);
+      expect(all[dashIdx]!.props["aria-hidden"]).toBe("true");
+      expect(all[dashIdx + 1]!.props.children).toBe("değişim bilinmiyor");
+      expect(classOf(all[dashIdx + 1]!)).toContain("sr-only");
+    });
+
+    it("still shows the price of a stale quote (only the move is unknown), as the chip does", () => {
+      const el = TickerTape({ items, quotes: { OZATD: quote }, stats: rvolStats, staleTickers });
+      expect(textOf(el)).toContain("1.935");
+    });
+
+    it("another ticker that is not stale keeps its move, limit tag and rvol", () => {
+      const other: TickerAttention[] = [
+        { ticker: "OZATD", articles: 3, sources: 2, ratio: null, title: "Özata" } as TickerAttention,
+        { ticker: "TURSG", articles: 2, sources: 2, ratio: null, title: "Sigorta" } as TickerAttention,
+      ];
+      const el = TickerTape({
+        items: other,
+        quotes: { OZATD: quote, TURSG: { ...quote, ticker: "TURSG", price: 100, changePct: 10, prevClose: 90.9 } },
+        stats: { ...rvolStats, TURSG: { ...rvolStats.OZATD!, ticker: "TURSG", lastDay: "2026-10-30", rvol: 2.5 } },
+        staleTickers,
+      });
+      const text = textOf(el);
+      expect(text).toContain("+10,00%");
+      expect(text).toContain("tavan");
+      expect(text).toContain("hacim");
+      expect(text).not.toContain("-10,00%");
+    });
+
+    it("without staleTickers nothing is stale (existing behaviour)", () => {
+      const text = textOf(TickerTape({ items, quotes: { OZATD: quote }, stats: rvolStats }));
+      expect(text).toContain("-10,00%");
+      expect(text).toContain("hacim");
+    });
   });
 });

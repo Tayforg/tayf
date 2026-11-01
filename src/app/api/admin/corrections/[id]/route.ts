@@ -139,6 +139,10 @@ export const DELETE = withApiErrors(
       return apiNotFound("Correction not found");
     }
 
+    // An erased report must leave /duzeltmeler at once, not when the cached
+    // log expires (same tag and signature as the PATCH above).
+    revalidateTag("corrections", "max");
+
     return NextResponse.json({ ok: true }, { status: 200 });
   },
 );
