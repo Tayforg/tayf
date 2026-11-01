@@ -93,6 +93,13 @@ interface ClusterCardProps {
   isWireRedistribution?: boolean;
   /** Honest source count (distinct dispatches) when `isWireRedistribution`. */
   effectiveArticleCount?: number;
+  /**
+   * "Now" for the time-ago badge (epoch ms). A fully static page
+   * (generateStaticParams, e.g. /gundem/[key]) MUST pass it: without it the
+   * badge reads the clock, which fails `next build` there. Dynamic pages may
+   * omit it.
+   */
+  nowMs?: number;
 }
 
 const MAX_VISIBLE_ARTICLES = 4;
@@ -162,6 +169,8 @@ interface ClusterMetaBadgesProps {
    * `null`/omitted (too few classified sources) renders no chip.
    */
   balance?: BalanceScore | null;
+  /** See ClusterCardProps.nowMs. */
+  nowMs?: number;
 }
 
 function ClusterMetaBadges({
@@ -173,6 +182,7 @@ function ClusterMetaBadges({
   isWireRedistribution,
   effectiveArticleCount,
   balance,
+  nowMs,
 }: ClusterMetaBadgesProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -183,7 +193,7 @@ function ClusterMetaBadges({
 
       <span className="inline-flex items-center gap-1 rounded-full bg-muted/50 border border-border/40 px-2 py-0.5 text-muted-foreground">
         <Clock className="h-3 w-3" />
-        {formatTurkishTimeAgo(firstPublished)}
+        {formatTurkishTimeAgo(firstPublished, { now: nowMs })}
       </span>
 
       {balance && (
@@ -232,6 +242,7 @@ export function ClusterCard({
   isAging = false,
   isWireRedistribution,
   effectiveArticleCount,
+  nowMs,
 }: ClusterCardProps) {
   const sourceById = new Map(sources.map((s) => [s.id, s]));
 
@@ -357,6 +368,7 @@ export function ClusterCard({
                 isWireRedistribution={isWireRedistribution}
                 effectiveArticleCount={effectiveArticleCount}
                 balance={balanceFromDistribution(cluster.bias_distribution)}
+                nowMs={nowMs}
               />
             </div>
 

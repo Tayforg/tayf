@@ -128,11 +128,14 @@ describe("/gundem/[key] page source", () => {
     expect(code).toMatch(/RISING_ENTITIES\.map\(\s*\(\s*e\s*\)\s*=>\s*\(\s*\{\s*key:\s*e\.key\s*\}\s*\)\s*\)/);
   });
 
-  it("404s unknown keys via notFound() and reads the clock only through currentTimeMs()", () => {
+  it("404s unknown keys via notFound() and never reads the clock (fully static page)", () => {
     expect(code).toContain("!isEntityKey(key)");
     expect(code).toContain("notFound()");
     expect(code).not.toMatch(/\bDate\.now\s*\(/);
-    expect(code).toContain("currentTimeMs()");
+    expect(code).not.toMatch(/\bcurrentTimeMs\s*\(/);
+    // "now" comes from the cached read, and every card gets it
+    expect(code).toContain("result?.asOfMs");
+    expect(code).toContain("nowMs={nowMs}");
   });
 
   it("generateMetadata shares getEntityHub with the body and only adds robots when needed", () => {
@@ -322,7 +325,7 @@ describe("generateMetadata", () => {
   });
 
   it("builds the title, description and canonical from the entity label", async () => {
-    mocks.result = { bundles: [bundle("a"), bundle("b"), bundle("c")], total: 3 };
+    mocks.result = { bundles: [bundle("a"), bundle("b"), bundle("c")], total: 3, asOfMs: 0 };
     const m = await meta("erdogan");
     expect(m.title).toBe("Erdoğan haberleri");
     expect(m.description).toBe(
@@ -333,13 +336,13 @@ describe("generateMetadata", () => {
   });
 
   it("leaves a healthy hub (>= 3 clusters) indexable: no robots key at all", async () => {
-    mocks.result = { bundles: [bundle("a"), bundle("b"), bundle("c")], total: 9 };
+    mocks.result = { bundles: [bundle("a"), bundle("b"), bundle("c")], total: 9, asOfMs: 0 };
     const m = await meta("chp");
     expect("robots" in m).toBe(false);
   });
 
   it("noindexes a thin hub (< 3 clusters)", async () => {
-    mocks.result = { bundles: [bundle("a")], total: 1 };
+    mocks.result = { bundles: [bundle("a")], total: 1, asOfMs: 0 };
     const m = await meta("ysk");
     expect(m.robots).toEqual({ index: false, follow: true });
   });
@@ -372,7 +375,7 @@ describe("/gundem/[key] body", () => {
   });
 
   it("empty: says there are no clusters and emits no robots meta", async () => {
-    mocks.result = { bundles: [], total: 0 };
+    mocks.result = { bundles: [], total: 0, asOfMs: 0 };
     const tree = await renderHub("ysk");
     const text = pageText(tree);
     expect(text).toContain("Son 14 günde bu konuda küme yok.");
@@ -388,6 +391,7 @@ describe("/gundem/[key] body", () => {
         bundle("c3", { center: 4 }),
       ],
       total: 422,
+      asOfMs: 0,
     };
     const tree = await renderHub("erdogan");
     const text = pageText(tree);
@@ -429,14 +433,14 @@ describe("/gundem/[key] body", () => {
   });
 
   it("ok: does not claim a truncation when everything is listed", async () => {
-    mocks.result = { bundles: [bundle("c1"), bundle("c2"), bundle("c3")], total: 3 };
+    mocks.result = { bundles: [bundle("c1"), bundle("c2"), bundle("c3")], total: 3, asOfMs: 0 };
     const text = pageText(await renderHub("chp"));
     expect(text).toContain("Son 14 günde 3 küme");
     expect(text).not.toContain("tanesi listeleniyor");
   });
 
   it("offers a follow button for the label as a query, in every state", async () => {
-    for (const result of [null, { bundles: [], total: 0 }, { bundles: [bundle("a")], total: 1 }]) {
+    for (const result of [null, { bundles: [], total: 0, asOfMs: 0 }, { bundles: [bundle("a")], total: 1, asOfMs: 0 }]) {
       mocks.result = result;
       const tree = await renderHub("ozgur-ozel");
       const follow = elements(
@@ -449,7 +453,7 @@ describe("/gundem/[key] body", () => {
   });
 
   it("footer: plain-anchor archive search with the encoded label, and the index link", async () => {
-    mocks.result = { bundles: [bundle("a")], total: 1 };
+    mocks.result = { bundles: [bundle("a")], total: 1, asOfMs: 0 };
     const tree = await renderHub("erdogan");
 
     const anchors = elements(tree, (el) => el.type === "a");

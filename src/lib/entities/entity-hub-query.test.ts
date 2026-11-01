@@ -241,7 +241,7 @@ describe("getEntityHub result", () => {
 
     const result = await getEntityHub("ysk");
 
-    expect(result).toEqual({ bundles: [], total: 0 });
+    expect(result).toEqual({ bundles: [], total: 0, asOfMs: expect.any(Number) });
     expect(fixture.embedCalls).toBe(0);
     expect(fixture.lastState).toBeNull();
     expect(feedHealth.getZoneFeedHealth).not.toHaveBeenCalled();

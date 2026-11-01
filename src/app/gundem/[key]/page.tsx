@@ -16,7 +16,6 @@ import {
 } from "@/lib/entities/entity-hub";
 import { getEntityHub } from "@/lib/entities/entity-hub-query";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
-import { currentTimeMs } from "@/lib/time";
 import { RISING_ENTITIES } from "@/lib/trends/rising-entities";
 
 // /gundem/[key] — entity hub (roadmap G2): the newest clusters that mention one
@@ -89,9 +88,12 @@ export default async function EntityHubPage({ params }: PageProps) {
 
   const { label } = entity;
   const result = await getEntityHub(key);
-  // Next 16 forbids Date.now() in a render body — one clock read via
-  // currentTimeMs(), same rule the home feed and /konu follow.
-  const nowMs = currentTimeMs();
+  // No clock read here: this page is fully static (generateStaticParams, no
+  // searchParams), so a Date.now() in the render body fails `next build` once
+  // the cached read succeeds. Relative times use the read's own timestamp,
+  // stamped inside the cache scope (entity-hub-query.ts). Guarded by
+  // tests/guards/static-page-clock.test.ts.
+  const nowMs = result?.asOfMs ?? 0;
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-8">
@@ -154,6 +156,7 @@ export default async function EntityHubPage({ params }: PageProps) {
                   isAging={hoursAgo > 48}
                   isWireRedistribution={b.isWireRedistribution}
                   effectiveArticleCount={b.effectiveArticleCount}
+                  nowMs={nowMs}
                 />
               );
             })}
