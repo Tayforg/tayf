@@ -37,6 +37,12 @@ import { SENTRY_DATA_COLLECTION } from "../../src/lib/sentry/data-collection";
 // `beforeSendSpan` (a plain StreamedSpanJSON -> StreamedSpanJSON function) is
 // the effective hook; `beforeSendTransaction` stays wired for
 // traceLifecycle "static". The browser init used to have no beforeSend at all.
+//
+// Third guard (last block): `withSentryConfig` injects a `_sentryRouteManifest`
+// of every app route into the main client chunk when a DSN is set, so the
+// /admin route inventory must be excluded from it. Not an access control (the
+// middleware gates /admin); it only keeps the internal tool list out of every
+// visitor's JS.
 // ---------------------------------------------------------------------------
 
 const sentry = vi.hoisted(() => ({
@@ -44,6 +50,12 @@ const sentry = vi.hoisted(() => ({
   captureRouterTransitionStart: vi.fn(),
 }));
 vi.mock("@sentry/nextjs", () => sentry);
+// next.config.ts imports the build wrapper from the "/config" subpath. Stub it
+// to hand back its arguments, so the route-manifest block at the bottom can read
+// the options object next.config.ts passes without running the real plugin.
+vi.mock("@sentry/nextjs/config", () => ({
+  withSentryConfig: (config: unknown, options: unknown) => ({ config, options }),
+}));
 
 type Hook = (payload: Record<string, unknown>, hint?: unknown) => unknown;
 
@@ -559,4 +571,151 @@ describe("Sentry config sources", () => {
       expect(src).not.toMatch(/sendDefaultPii\s*:/);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// Route manifest: /admin stays out of the client bundle.
+//
+// @sentry/nextjs scans src/app at build time and inlines every page route into
+// the main client chunk as `_sentryRouteManifest` (used to group dynamic
+// routes into one transaction name). Left alone, that ships the whole /admin
+// inventory (birlestir, jev-altin, tik-tuzagi, api-webhooks, ...) to every
+// visitor. `routeManifestInjection.exclude` filters it; the public
+// parameterized routes (/cluster/:id, /gundem/:key, ...) must stay.
+//
+// The SDK matches a STRING entry with `route.includes(pattern)`, so '/admin'
+// would also swallow '/administrasyon'. Only RegExp entries are allowed here.
+// ---------------------------------------------------------------------------
+
+describe("withSentryConfig route manifest keeps /admin out of the client bundle", () => {
+  const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const APP_DIR = join(ROOT, "src", "app");
+  const ADMIN_DIR = join(APP_DIR, "admin");
+  const PAGE_FILE = /^page\.(?:tsx|ts|jsx|js)$/;
+
+  type ExcludeOption = Array<string | RegExp> | ((route: string) => boolean);
+  type WrappedConfig = {
+    options: { routeManifestInjection?: false | { exclude?: ExcludeOption } };
+  };
+
+  let injection: unknown;
+  let patterns: RegExp[];
+
+  /** True when the SDK would drop this route from the manifest. */
+  const excluded = (route: string): boolean => patterns.some((re) => re.test(route));
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const { default: wrapped } = (await import("../../next.config")) as unknown as {
+      default: WrappedConfig;
+    };
+    injection = wrapped.options.routeManifestInjection;
+    const exclude = (injection as { exclude?: unknown } | undefined)?.exclude;
+    // Not a RegExp array -> no patterns, so every discovery test fails on its
+    // own assertion instead of throwing inside the helper.
+    patterns = Array.isArray(exclude) ? exclude.filter((e): e is RegExp => e instanceof RegExp) : [];
+  });
+
+  /** One directory name -> the SDK's route segment, or null when it adds none. */
+  function routeSegment(name: string): string | null {
+    if (/^\(.*\)$/.test(name) || name.startsWith("@")) return null; // route group, parallel slot
+    if (name.startsWith("[[...") && name.endsWith("]]")) return `:${name.slice(5, -2)}*?`;
+    if (name.startsWith("[...") && name.endsWith("]")) return `:${name.slice(4, -1)}*`;
+    if (name.startsWith("[") && name.endsWith("]")) return `:${name.slice(1, -1)}`;
+    return name;
+  }
+
+  /** Every page.(tsx|ts|jsx|js) under `dir`, as the route path @sentry/nextjs would record. */
+  function pageRoutes(dir: string, segments: string[] = []): Array<{ route: string; dir: string }> {
+    const found: Array<{ route: string; dir: string }> = [];
+    const entries = readdirSync(dir, { withFileTypes: true });
+    if (entries.some((e) => e.isFile() && PAGE_FILE.test(e.name))) {
+      found.push({ route: `/${segments.join("/")}`, dir });
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const segment = routeSegment(entry.name);
+      found.push(...pageRoutes(join(dir, entry.name), segment ? [...segments, segment] : segments));
+    }
+    return found;
+  }
+
+  it("self-check: route discovery maps app-router folders the way the SDK does", () => {
+    expect(routeSegment("(protected)")).toBeNull();
+    expect(routeSegment("@modal")).toBeNull();
+    expect(routeSegment("[clusterId]")).toBe(":clusterId");
+    expect(routeSegment("[...path]")).toBe(":path*");
+    expect(routeSegment("[[...path]]")).toBe(":path*?");
+    expect(routeSegment("birlestir")).toBe("birlestir");
+
+    const routes = pageRoutes(ADMIN_DIR, ["admin"]).map((r) => r.route);
+    expect(routes).toContain("/admin/rapor/:clusterId"); // src/app/admin/(protected)/rapor/[clusterId]/page.tsx
+    expect(routes).toContain("/admin"); // src/app/admin/(protected)/page.tsx
+    expect(routes).toContain("/admin/login");
+  });
+
+  it("keeps route manifest injection on (public parameterized routes must stay), with an exclude list", () => {
+    expect(injection, "routeManifestInjection: false would drop /cluster/:id and the rest").not.toBe(false);
+    expect(injection).toEqual(expect.any(Object));
+    const exclude = (injection as { exclude?: unknown }).exclude;
+    expect(Array.isArray(exclude), "exclude must be an array of RegExp").toBe(true);
+    expect((exclude as unknown[]).length).toBeGreaterThan(0);
+  });
+
+  it("uses RegExp entries only, never a string (SDK substring semantics) and never a global/sticky flag", () => {
+    const exclude = (injection as { exclude?: unknown[] } | undefined)?.exclude ?? [];
+    expect(exclude.length).toBeGreaterThan(0);
+    for (const entry of exclude) {
+      expect(entry, `exclude entry ${String(entry)} must be a RegExp, a string matches by substring`).toBeInstanceOf(
+        RegExp,
+      );
+      const re = entry as RegExp;
+      // A /g or /y regex keeps lastIndex between .test() calls and would skip
+      // every other route the SDK checks.
+      expect(re.global, `${String(re)} must not use the g flag`).toBe(false);
+      expect(re.sticky, `${String(re)} must not use the y flag`).toBe(false);
+    }
+  });
+
+  it.each([
+    "/admin",
+    "/admin/login",
+    "/admin/rapor/:clusterId",
+    "/admin/birlestir",
+    "/admin/jev-altin",
+    "/admin/tik-tuzagi",
+    "/admin/api-webhooks",
+    "/admin/ekonomi",
+    "/admin/hikayeler",
+  ])("excludes the admin route %s", (route) => {
+    expect(excluded(route)).toBe(true);
+  });
+
+  it.each([
+    "/",
+    "/cluster/:id",
+    "/gundem/:key",
+    "/administrasyon",
+    "/rapor/:token",
+    "/source/:slug",
+    "/blindspots",
+    "/admin-notlari",
+  ])("keeps the public route %s", (route) => {
+    expect(excluded(route)).toBe(false);
+  });
+
+  it("excludes every page found under src/app/admin, now and in future", () => {
+    const routes = pageRoutes(ADMIN_DIR, ["admin"]);
+    expect(routes.length, "route discovery found too few admin pages to mean anything").toBeGreaterThanOrEqual(8);
+    const leaked = routes.filter(({ route }) => !excluded(route)).map(({ route }) => route);
+    expect(leaked, "admin routes that would still ship in _sentryRouteManifest").toEqual([]);
+  });
+
+  it("excludes no page outside src/app/admin", () => {
+    const outside = pageRoutes(APP_DIR).filter(({ dir }) => dir !== ADMIN_DIR && !dir.startsWith(`${ADMIN_DIR}/`));
+    expect(outside.length, "route discovery found too few public pages to mean anything").toBeGreaterThanOrEqual(10);
+    expect(outside.map(({ route }) => route)).toContain("/cluster/:id");
+    const swallowed = outside.filter(({ route }) => excluded(route)).map(({ route }) => route);
+    expect(swallowed, "public routes the exclude list would drop from transaction grouping").toEqual([]);
+  });
 });

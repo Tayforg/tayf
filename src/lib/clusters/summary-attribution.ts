@@ -1,3 +1,4 @@
+import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import type { WireSignal } from "./wire";
 import type { BiasCategory } from "@/types";
 
@@ -7,6 +8,14 @@ import type { BiasCategory } from "@/types";
 // The seed is found by matching the stored text against member
 // descriptions; first_published is min(published_at) over all members and
 // moves when an older article joins late, so it is not used for attribution.
+//
+// Read-time repair for double-encoded feed residue: some stored descriptions
+// (and so summary_tr, which copies them) carry a literal "&quot;", "&#39;" or
+// "&amp;" that the single-pass ingest decoder left behind. Every function here
+// runs the summary through `repairEntityResidue`, and seed detection repairs
+// the member description the same way, so the comparison still holds whether
+// the stored text is raw, already clean, or one of each. The repair is
+// idempotent and can never create '<' or '>'.
 
 // Structural subset of ClusterDetailMember (cluster-detail-query.ts): the
 // cluster page's members satisfy this shape as-is, and lighter callers
@@ -32,8 +41,9 @@ export interface SummaryMember {
 }
 
 /**
- * Members whose article description exactly equals the summary text,
- * sorted earliest-first (ties broken by publish time). Internal helper —
+ * Members whose article description equals the summary text after both have
+ * been through `repairEntityResidue` (`text` is expected to be repaired
+ * already), sorted earliest-first (ties broken by publish time). Internal helper —
  * both `findSeedMember` (rights-eligible pick) and `summaryAttribution`
  * (rights-blocked-entirely detection) need the full matching set.
  */
@@ -42,7 +52,9 @@ function matchingCandidates(
   text: string,
 ): SummaryMember[] {
   return members
-    .filter((m) => (m.article.description ?? "").trim() === text)
+    .filter(
+      (m) => repairEntityResidue(m.article.description ?? "").trim() === text,
+    )
     .sort(
       (a, b) =>
         new Date(a.article.published_at).getTime() -
@@ -63,7 +75,7 @@ export function findSeedMember(
   members: SummaryMember[],
   summary: string,
 ): SummaryMember | null {
-  const text = summary.trim();
+  const text = repairEntityResidue(summary).trim();
   if (text.length === 0) return null;
   const candidates = matchingCandidates(members, text);
   return candidates.find((m) => m.source.excerpt_allowed !== false) ?? null;
@@ -95,7 +107,7 @@ export function summaryAttribution({
   members: SummaryMember[];
   wire: Pick<WireSignal, "isWireRedistribution">;
 }): SummaryAttribution | null {
-  const text = summary.trim();
+  const text = repairEntityResidue(summary).trim();
   if (text.length === 0) return null;
 
   // BL-13 rights gate: every member whose description literally matches
@@ -235,7 +247,7 @@ export function summaryAttributionWithoutMembers({
   members?: never;
   wire: Pick<WireSignal, "isWireRedistribution">;
 }): SummaryAttribution | null {
-  const text = summary.trim();
+  const text = repairEntityResidue(summary).trim();
   if (text.length === 0) return null;
   if (wire.isWireRedistribution) return null;
   return { text, source: null };

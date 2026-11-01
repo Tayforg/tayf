@@ -490,3 +490,40 @@ describe("ShareButton — clipboard failure fallback", () => {
     });
   });
 });
+
+// The channel chips sit in a wrapper that carries the group name. An
+// `aria-label` on a role-less <span> is a prohibited ARIA attribute (axe
+// aria-allowed-attr / WCAG 4.1.2), so the wrapper needs role="group".
+describe("ShareButton — channel group", () => {
+  const UUID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+  const html = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
+
+  // Opening <span ...> tags, attribute-order independent.
+  const spanTags = html.match(/<span\b[^>]*>/g) ?? [];
+
+  it("names the channel chips with a role=group wrapper labelled 'Kanal ile paylaş'", () => {
+    const groupTags = spanTags.filter(
+      (tag) => /\brole="group"/.test(tag) && /\baria-label="Kanal ile paylaş"/.test(tag),
+    );
+    expect(groupTags).toHaveLength(1);
+
+    const start = html.indexOf(groupTags[0]!);
+    const end = html.indexOf("</span>", start);
+    expect(end).toBeGreaterThan(start);
+    const group = html.slice(start, end);
+
+    // The channel anchors contain no spans, so the first </span> closes the group.
+    const anchors = group.match(/<a\s/g) ?? [];
+    expect(anchors).toHaveLength(4);
+    for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
+      expect(group).toContain(`aria-label="${label} ile paylaş"`);
+    }
+  });
+
+  it("never renders a <span> with aria-label but no role (prohibited ARIA attribute)", () => {
+    const offenders = spanTags.filter(
+      (tag) => /\baria-label=/.test(tag) && !/\brole=/.test(tag),
+    );
+    expect(offenders).toEqual([]);
+  });
+});

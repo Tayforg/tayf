@@ -243,7 +243,7 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
           {iframeCopied ? "Kod kopyalandı" : iframeFailed ? "Kopyalanamadı" : "Gömme kodu"}
         </button>
       )}
-      <span className="inline-flex items-center gap-1" aria-label="Kanal ile paylaş">
+      <span className="inline-flex items-center gap-1" role="group" aria-label="Kanal ile paylaş">
         {SHARE_LINK_CHANNELS.map((channel) => {
           const label = CHANNEL_LABELS[channel];
           return (

@@ -106,11 +106,12 @@ describe("normalize.ts sanitisation (CodeQL js/double-escaping + js/incomplete-m
       contentSnippet: "Y&#252;zde 50 art&#305;&#351;",
     });
     expect(row).not.toBeNull();
-    // & decoded once, decimal #231 -> ç, hex #x131 -> ı; unknown named entity
-    // (&ccedil;) is left untouched rather than mangled.
+    // & decoded once, decimal #231 -> ç, hex #x131 -> ı. The named &ccedil; is
+    // a plain-text residue entity (entities.ts RESIDUAL_NAMED_ENTITIES), so it
+    // decodes to ç as well instead of reaching readers as literal "&ccedil;".
     expect(row!.title).toContain("Galatasaray & Fenerbahçe");
-    expect(row!.title).toContain("&ccedil;");
-    expect(row!.title).toContain("ı");
+    expect(row!.title).toContain("maçı");
+    expect(row!.title).not.toContain("&ccedil;");
     // Decimal references decode: #252 -> ü, #305 -> ı, #351 -> ş.
     expect(row!.description).toContain("Yüzde 50 artış");
   });
@@ -800,5 +801,167 @@ describe("normalize.ts normalizeArticles: one throwing item is skipped on its ow
       source_id: "src-1",
       url: "https://example.test/1",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Entity residue (double-encoded feeds). `decodeEntities` is single-pass by
+// design, so "&amp;quot;" used to be stored as the literal text "&quot;" and
+// readers saw it. One bounded extra pass (decodeResidualEntities) now runs
+// AFTER stripTags, so it fixes one extra level of encoding but can never
+// reintroduce markup: it never emits '<' or '>'.
+// ---------------------------------------------------------------------------
+describe("normalize.ts entity residue: one bounded extra decode pass", () => {
+  function descOf(contentSnippet: string) {
+    const row = mod!.normalizeItem(source, {
+      title: "Başlık",
+      link: "/a",
+      contentSnippet,
+    });
+    expect(row).not.toBeNull();
+    return row!.description;
+  }
+
+  function titled(title: string) {
+    const row = mod!.normalizeItem(source, { title, link: "/a" });
+    expect(row).not.toBeNull();
+    return row!.title;
+  }
+
+  it("decodes a double-encoded quote pair in the description", () => {
+    expect(
+      descOf("Bakan, &amp;quot;kimden gelirse gelsin&amp;quot; dedi"),
+    ).toBe('Bakan, "kimden gelirse gelsin" dedi');
+  });
+
+  it.each([
+    ["&amp;#39;", "'"],
+    ["&amp;#8217;", "’"],
+    ["&amp;amp;", "&"],
+  ])("decodes the double-encoded %j in the description to %j", (raw, expected) => {
+    expect(descOf(`a ${raw} b`)).toBe(`a ${expected} b`);
+  });
+
+  it("decodes a double-encoded apostrophe in the title", () => {
+    expect(titled("Erdoğan&amp;#39;dan açıklama")).toBe("Erdoğan'dan açıklama");
+  });
+
+  it("decodes a double-encoded quote in the title", () => {
+    expect(titled("&amp;quot;Son dakika&amp;quot; iddiası")).toBe(
+      '"Son dakika" iddiası',
+    );
+  });
+
+  it("leaves a single-encoded quote exactly as before (decoded once, not twice)", () => {
+    expect(descOf("&quot;tek&quot; seviye")).toBe('"tek" seviye');
+    expect(titled("&#39;tek&#39; seviye")).toBe("'tek' seviye");
+  });
+
+  it("decodes a double-encoded named entity: '&amp;nbsp;', '&amp;uuml;', '&amp;hellip;'", () => {
+    expect(descOf("a&amp;nbsp;b")).toBe("a b");
+    expect(descOf("T&amp;uuml;rkiye bekliyor&amp;hellip;")).toBe(
+      "Türkiye bekliyor…",
+    );
+    expect(titled("Bakan&amp;rsquo;dan &amp;ldquo;a&amp;rdquo;")).toBe(
+      "Bakan’dan “a”",
+    );
+  });
+
+  it("decodes single-encoded named entities the first pass does not know", () => {
+    expect(descOf("T&uuml;rkiye &Ccedil;ok bekliyor&hellip;")).toBe(
+      "Türkiye Çok bekliyor…",
+    );
+    expect(titled("Bakan&rsquo;dan")).toBe("Bakan’dan");
+  });
+
+  it("leaves an unknown named entity, including an Object.prototype name, untouched", () => {
+    expect(titled("a &Foo; b")).toBe("a &Foo; b");
+    expect(titled("a &constructor; b")).toBe("a &constructor; b");
+    expect(descOf("a &toString; b")).toBe("a &toString; b");
+  });
+
+  it("is bounded: '&amp;amp;quot;' decodes exactly one extra level, to '&quot;'", () => {
+    expect(descOf("&amp;amp;quot;")).toBe("&quot;");
+    expect(titled("&amp;amp;quot; x")).toBe("&quot; x");
+  });
+
+  describe("safety: the extra pass never reintroduces markup", () => {
+    it("'&amp;amp;lt;script&amp;amp;gt;alert(1)' stays inert text in description and title", () => {
+      const raw = "&amp;amp;lt;script&amp;amp;gt;alert(1)";
+      const desc = descOf(raw);
+      const title = titled(raw);
+      expect(desc).toBe("&lt;script&gt;alert(1)");
+      expect(title).toBe("&lt;script&gt;alert(1)");
+      for (const out of [desc!, title]) {
+        expect(out).not.toContain("<");
+        expect(out).not.toContain(">");
+      }
+    });
+
+    it("'&amp;lt;script&amp;gt;' keeps the entity form and has no angle bracket", () => {
+      const desc = descOf("&amp;lt;script&amp;gt;");
+      const title = titled("&amp;lt;script&amp;gt;");
+      for (const out of [desc!, title]) {
+        expect(out).toContain("&lt;script&gt;");
+        expect(out).not.toContain("<");
+        expect(out).not.toContain(">");
+      }
+    });
+
+    it("'&amp;#60;b&amp;#62;' has no angle bracket", () => {
+      const desc = descOf("&amp;#60;b&amp;#62;");
+      const title = titled("&amp;#60;b&amp;#62;");
+      for (const out of [desc!, title]) {
+        expect(out).not.toContain("<");
+        expect(out).not.toContain(">");
+      }
+    });
+
+    it("hex and zero-padded angle-bracket references stay inert once double-encoded or deeper", () => {
+      // A SINGLE-encoded "&#x3C;" already decodes to a lone '<' in the
+      // pre-existing first pass; the extra pass must add nothing to that.
+      for (const ref of ["#x3C;", "#X3e;", "#0060;", "#62;"]) {
+        for (const prefix of ["&amp;", "&amp;amp;", "&amp;amp;amp;"]) {
+          const raw = `a ${prefix}${ref} b`;
+          for (const out of [descOf(raw)!, titled(raw)]) {
+            expect(out, raw).not.toContain("<");
+            expect(out, raw).not.toContain(">");
+          }
+        }
+      }
+    });
+
+    it("decodes a single-encoded named letter and still keeps '&lt;script>' inert", () => {
+      expect(titled("ma&ccedil;")).toBe("maç");
+      expect(titled("&amp;lt;script&gt; x")).toContain("&lt;script>");
+    });
+
+    it("never turns '&amp;lt;' next to a decodable named entity into a bracket", () => {
+      for (const out of [
+        descOf("&amp;lt;b&amp;gt;T&uuml;rkiye&amp;lt;/b&amp;gt;"),
+        titled("&amp;lt;b&amp;gt;T&uuml;rkiye&amp;lt;/b&amp;gt;"),
+      ]) {
+        expect(out).toBe("&lt;b&gt;Türkiye&lt;/b&gt;");
+      }
+    });
+
+    it("an illegal numeric reference revealed by the extra pass is dropped, not thrown", () => {
+      expect(() => descOf("a &amp;#1114112; b &amp;#0; c")).not.toThrow();
+      expect(descOf("a &amp;#1114112; b &amp;#0; c")).toBe("a  b  c");
+    });
+  });
+
+  it("clamps to 500 characters AFTER the extra pass", () => {
+    const desc = descOf("&amp;quot;" + "x".repeat(600));
+    expect(desc).not.toBeNull();
+    expect(desc!.length).toBe(500);
+    expect(desc!.endsWith("...")).toBe(true);
+    expect(desc!.startsWith('"')).toBe(true);
+  });
+
+  it("does not shift the clamp by the encoded length: 490 residue-quotes fit untruncated", () => {
+    // 490 x '&amp;quot;' is 5 000 raw characters but 490 after decoding.
+    const desc = descOf("&amp;quot;".repeat(490));
+    expect(desc).toBe('"'.repeat(490));
   });
 });

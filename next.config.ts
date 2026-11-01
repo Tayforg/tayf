@@ -174,6 +174,13 @@ const nextConfig: NextConfig = {
  *   - `bundleSizeOptimizations.excludeDebugStatements: true` strips Sentry's
  *     verbose debug logger from production bundles. (11 replacement for the
  *     removed `disableLogger` flag; it also covers Turbopack builds.)
+ *   - `routeManifestInjection.exclude` keeps the admin route names out of the
+ *     `_sentryRouteManifest` that the SDK inlines into the main client chunk
+ *     (internal tool inventory, shipped to every visitor otherwise). Public
+ *     parameterized routes stay in it for transaction grouping. RegExp only: the
+ *     SDK matches a string entry by substring, so '/admin' would also drop
+ *     '/administrasyon'. Not an access control; middleware gates /admin.
+ *     Guarded by tests/guards/sentry-data-collection.test.ts.
  */
 export default withSentryConfig(nextConfig, {
   org: process.env.SENTRY_ORG,
@@ -186,5 +193,8 @@ export default withSentryConfig(nextConfig, {
   },
   bundleSizeOptimizations: {
     excludeDebugStatements: true,
+  },
+  routeManifestInjection: {
+    exclude: [/^\/admin(\/|$)/],
   },
 });

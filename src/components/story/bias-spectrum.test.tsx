@@ -93,3 +93,44 @@ describe("BiasSpectrum — text contrast", () => {
     expect(full).not.toContain("text-muted-foreground/");
   });
 });
+
+// Forced colors (Windows High Contrast) repaints backgrounds with system
+// colours, collapsing every zone/category segment to one flat colour. The bar
+// and the legend dots opt out so the zone colours survive (WCAG 1.4.11).
+// `forced-color-adjust` is inherited, so the wrapper covers its segments.
+describe("BiasSpectrum — forced colors", () => {
+  const FCA = "forced-color-adjust-none";
+  const BAR = /<div class="[^"]*\bh-2 w-full\b[^"]*"/g;
+  const DOT = /<span class="inline-block h-2 w-2 rounded-full[^"]*"/g;
+
+  for (const [mode, compact] of [
+    ["compact", true],
+    ["full", false],
+  ] as const) {
+    describe(mode, () => {
+      const markup = renderToStaticMarkup(
+        <BiasSpectrum distribution={SEVEN_TO_ONE} compact={compact} />,
+      );
+
+      it("opts the bar wrapper out of forced-color adjustment", () => {
+        const bars = markup.match(BAR) ?? [];
+        expect(bars).toHaveLength(1);
+        expect(bars[0]).toContain(FCA);
+      });
+
+      it("opts every legend dot out of forced-color adjustment", () => {
+        const dots = markup.match(DOT) ?? [];
+        expect(dots.length).toBeGreaterThan(0);
+        for (const dot of dots) expect(dot).toContain(FCA);
+      });
+
+      it("uses the opt-out exactly once for the bar plus once per active segment", () => {
+        const dots = markup.match(DOT) ?? [];
+        expect(dots).toHaveLength(2);
+        // SEVEN_TO_ONE has 2 active segments in both modes: 1 bar + 2 dots.
+        expect(markup.split(FCA).length - 1).toBe(3);
+        expect(markup.split(FCA).length - 1).toBe(1 + dots.length);
+      });
+    });
+  }
+});

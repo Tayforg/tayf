@@ -5,6 +5,7 @@ import { connection } from "next/server";
 import type { ZoneHistoryEntry } from "@/components/source/label-card";
 import { attemptCached } from "@/lib/cache-resilience";
 import { createReaderClient } from "@/lib/supabase/server";
+import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
 import { isValidSourceSlug } from "@/lib/validation/source-input";
 import type { BiasCategory, Source } from "@/types";
 
@@ -141,7 +142,17 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
   return {
     source,
     articleCount7d: countResult.count ?? 0,
-    articles: (articlesResult.data ?? []) as ArticleRow[],
+    // Read-time repair of double-encoded feed residue ("&quot;", "&#39;"):
+    // rows stored before the ingest fix still carry it. Pure and non-throwing,
+    // so it is safe inside the "use cache" body.
+    articles: ((articlesResult.data ?? []) as ArticleRow[]).map((a) => ({
+      ...a,
+      title: repairEntityResidue(a.title),
+      description:
+        typeof a.description === "string"
+          ? repairEntityResidue(a.description)
+          : null,
+    })),
     zoneHistory,
   };
 }

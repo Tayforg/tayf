@@ -75,7 +75,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
     return (
       <div className="space-y-2">
         {/* Bar */}
-        <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted">
+        <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted forced-color-adjust-none">
           {activeZones.map((segment) => {
             const pct = pctByZone.get(segment.key) ?? 0;
             return (
@@ -99,7 +99,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
                 title={`${segment.label}: ${zones[segment.key]} kaynak (${pct}%)`}
                 className="flex items-center gap-1 text-[11px] text-muted-foreground"
               >
-                <span className={`inline-block h-2 w-2 rounded-full ${segment.dot}`} />
+                <span className={`inline-block h-2 w-2 rounded-full forced-color-adjust-none ${segment.dot}`} />
                 {segment.label}
                 <span className="tabular-nums text-muted-foreground">{pct}%</span>
               </span>
@@ -123,7 +123,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
   return (
     <div className="space-y-2">
       {/* Bar */}
-      <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted">
+      <div className="flex h-2 w-full gap-px overflow-hidden rounded-full bg-muted forced-color-adjust-none">
         {active.map((segment) => {
           const pct = pctBySegment.get(segment.key) ?? 0;
           return (
@@ -147,7 +147,7 @@ export function BiasSpectrum({ distribution, compact = false }: BiasSpectrumProp
               title={`${segment.label}: ${distribution[segment.key]} kaynak (${pct}%)`}
               className="flex items-center gap-1 text-[11px] text-muted-foreground"
             >
-              <span className={`inline-block h-2 w-2 rounded-full ${segment.dot}`} />
+              <span className={`inline-block h-2 w-2 rounded-full forced-color-adjust-none ${segment.dot}`} />
               {segment.label}
               <span className="tabular-nums text-muted-foreground">{pct}%</span>
             </span>

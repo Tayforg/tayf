@@ -19,7 +19,11 @@
 // the image extractor are ported verbatim — they are dialect, not algorithm.
 
 import { sha1, strictFingerprint } from "../cluster/fingerprint.ts";
-import { codePointToString, stripInvalidXmlChars } from "./entities.ts";
+import {
+  codePointToString,
+  decodeResidualEntities,
+  stripInvalidXmlChars,
+} from "./entities.ts";
 import {
   isOptimizableImageUrl,
   isPlaceholderImageUrl,
@@ -281,6 +285,15 @@ function decodeEntities(text: string): string {
   );
 }
 
+// The first pass above is single-pass on purpose, so a feed that double-encodes
+// ("&amp;quot;") used to leave a literal "&quot;" in the stored text. The
+// callers below therefore run ONE bounded extra pass, `decodeResidualEntities`
+// (./entities.ts), AFTER `stripTags`. Running it after the strip is what keeps
+// the anti-markup guarantee: that pass never emits '<' or '>' ("&lt;" / "&gt;"
+// and numeric references to them are left as they are), so it cannot
+// reintroduce a tag the strip already removed. It is one level, not a loop:
+// "&amp;amp;quot;" ends up as "&quot;".
+
 // Strip HTML tags repeatedly until the string stops changing. A single
 // `/<[^>]*>/` pass can leave a tag behind for crafted input like
 // "<<script>script>", so loop to a fixpoint.
@@ -299,10 +312,16 @@ function cleanDescription(raw?: string | null): string | null {
   // Decode FIRST so entity-encoded markup becomes real angle brackets, then
   // strip tags to a fixpoint so reintroduced or nested markup can't survive.
   //
+  // Then ONE extra residue pass (double-encoded feeds), after the strip so it
+  // cannot bring markup back; see the note above `stripTags`.
+  //
   // Raw characters XML 1.0 forbids (C0 controls, U+FFFE / U+FFFF, lone
-  // surrogates) are removed AFTER the tag strip and BEFORE the trim and the
-  // 500-character clamp, so they can neither survive nor shift the clamp.
-  const text = stripInvalidXmlChars(stripTags(decodeEntities(raw))).trim();
+  // surrogates) are removed AFTER the residue pass and BEFORE the trim and the
+  // 500-character clamp, so they can neither survive (the pass can reveal one,
+  // e.g. "&amp;#11;") nor shift the clamp, which counts decoded text.
+  const text = stripInvalidXmlChars(
+    decodeResidualEntities(stripTags(decodeEntities(raw))),
+  ).trim();
   if (!text) return null;
   if (text.length <= 500) return text;
   // Clamp to 497 UTF-16 units + "...", but never cut an astral character (an
@@ -509,9 +528,12 @@ export function normalizeItem(
   if (!rawTitle || !rawLink) return null;
 
   // Titles are short plain text; decode entities then strip any (possibly
-  // reintroduced or nested) markup to a fixpoint, same discipline as
+  // reintroduced or nested) markup to a fixpoint, then one bounded residue
+  // pass for double-encoded feeds. Same discipline and order as
   // `cleanDescription`.
-  const title = stripInvalidXmlChars(stripTags(decodeEntities(rawTitle))).trim();
+  const title = stripInvalidXmlChars(
+    decodeResidualEntities(stripTags(decodeEntities(rawTitle))),
+  ).trim();
   const absoluteUrl = absolutiseUrl(rawLink, source);
 
   // ingest-hygiene: BİK court / official notices are not news.
