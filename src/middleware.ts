@@ -100,7 +100,8 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     is static and stays unmatched; the matcher is the single literal segment
 //     '/hafta/:hafta', never ':path*'.
 //
-//  8. Malformed percent-encoding — every dynamic route. A segment such as %ff
+//  8. Malformed percent-encoding — every dynamic route (and, via gate 9, every
+//     static route handler followed by an escape). A segment such as %ff
 //     makes decodeURIComponent throw a URIError inside the route handler, which
 //     used to surface as a 500 (and a Sentry event). Here the same decode is
 //     tried once and a failure answers 400 (a JSON body on the two API
@@ -125,8 +126,29 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     the route. tests/guards/middleware-bad-encoding.test.ts walks src/app
 //     and fails when a dynamic route is neither matched nor answered here.
 //     tests/guards/middleware-matcher.test.ts pins that every matcher entry has
-//     its pathname.startsWith() branch above the admin-scope check, so a new
-//     matcher can never silently 404 a whole surface.
+//     its pathname.startsWith() branch above the admin-scope check (or, for the
+//     '<base>%:suffix' entries of gate 9, the one staticHandlerBase() call), so a
+//     new matcher can never silently 404 a whole surface.
+//
+//  9. Static route handlers with an encoded '/' or backslash after the path
+//     (/rss.xml%2F, /api/health%5C, ...). Next finds no static route for the
+//     path, falls back to a pages-router require of '<base>%2F.js' and answers an
+//     HTML 500 with MODULE_NOT_FOUND (h17-contracts-1; only probe paths hit it).
+//     STATIC_HANDLER_BASES lists every route.ts / route.tsx under src/app that
+//     has no dynamic segment (the /api/v1/<child> routes are answered by the
+//     '/api/v1/:path*' wildcard and the v1 catch-all instead); each has the
+//     matcher entry '<base>%:suffix', which is path-to-regexp for '<base>', a
+//     literal '%' and at least one character that is not '/'. So the bare path,
+//     '<base>/x' and '<base>x' are never matched and never pay for the
+//     middleware: only an escape continuation is. (The literal '%' matters: a
+//     plain '<base>:suffix' would match '/api/admin/jev-gold/label' + 'er', the
+//     real handler /api/admin/jev-gold/labeler.) A remainder with '%2f' or '%5c'
+//     (any case) answers the same not-found sink as the gates above; any other
+//     remainder is gate 8's decode-only answer (400 on a malformed escape, else
+//     next). The branch is plain string comparison after the /hafta gate, so the
+//     hot gates above never pay for it. tests/guards/middleware-matcher.test.ts
+//     walks src/app and fails when a static handler is not listed, and proves the
+//     compiled matcher with Next's own unstable_doesMiddlewareMatch.
 //
 // The only clock read is Date.now() in gate 7. It runs per request in the Edge
 // middleware, never during prerender, and nothing here does any I/O.
@@ -189,8 +211,140 @@ export const config = {
     "/api/admin/corrections/:id",
     "/api/v1/:path*",
     "/embed/:path*",
+    // h17-contracts-1, gate 9: one '<base>%:suffix' per static route handler (a
+    // route.ts / route.tsx with no dynamic segment). Path-to-regexp reads it as
+    // '<base>' + '%' + at least one character that is not '/', so only the
+    // percent-escape probes ('<base>%2F', '<base>%5C', '<base>%ff') reach the
+    // middleware: never the bare handler, '<base>/x' or '<base>x'. The literal '%'
+    // is what keeps '/api/admin/jev-gold/label' from matching the real handler
+    // '/api/admin/jev-gold/labeler' (a plain '<base>:suffix' would). Literal
+    // strings on purpose: Next analyses this config statically. Keep in step with
+    // STATIC_HANDLER_BASES below; the matcher guard fails when a static route is
+    // missing here.
+    "/api/admin%:suffix",
+    "/api/admin/api-keys%:suffix",
+    "/api/admin/api-keys/revoke%:suffix",
+    "/api/admin/api-keys/webhook%:suffix",
+    "/api/admin/cluster-merge%:suffix",
+    "/api/admin/jev-admission/review%:suffix",
+    "/api/admin/jev-alerts/ack%:suffix",
+    "/api/admin/jev-gold/label%:suffix",
+    "/api/admin/jev-gold/labeler%:suffix",
+    "/api/admin/jev-gold/seed%:suffix",
+    "/api/admin/jev-regression/freeze%:suffix",
+    "/api/admin/jev-regression/run%:suffix",
+    "/api/admin/jev-shadow/review%:suffix",
+    "/api/admin/jev-unlink%:suffix",
+    "/api/admin/jev-unlink/bulk%:suffix",
+    "/api/admin/rapor/revoke%:suffix",
+    "/api/admin/rapor/share%:suffix",
+    "/api/admin/story-threads/candidates%:suffix",
+    "/api/admin/story-threads/thread%:suffix",
+    "/api/corrections%:suffix",
+    "/api/cron/alerts-webhooks%:suffix",
+    "/api/cron/digest%:suffix",
+    "/api/cron/fact-checks%:suffix",
+    "/api/cron/headline%:suffix",
+    "/api/cron/social%:suffix",
+    "/api/health%:suffix",
+    "/api/metrics%:suffix",
+    "/api/newsletter%:suffix",
+    "/api/newsletter/confirm%:suffix",
+    "/api/newsletter/unsubscribe%:suffix",
+    "/api/oembed%:suffix",
+    "/api/oyun%:suffix",
+    "/api/oyun/cerceve%:suffix",
+    "/api/oyun/cerceve/next%:suffix",
+    "/api/revalidate%:suffix",
+    "/api/sources%:suffix",
+    "/api/takip%:suffix",
+    "/api/timeline/head%:suffix",
+    "/api/v1%:suffix",
+    "/blindspots/rss.xml%:suffix",
+    "/indexnow-key.txt%:suffix",
+    "/llms.txt%:suffix",
+    "/robots.txt%:suffix",
+    "/rss.xml%:suffix",
+    "/sitemap.xml%:suffix",
+    "/sw.js%:suffix",
   ],
 };
+
+// Gate 9: the static route handlers, one per '<base>%:suffix' matcher entry above
+// (/api/v1 included: its children belong to the wildcard, the bare root to the
+// catch-all). Inline literals, no imports, like KONU_SLUGS.
+const STATIC_HANDLER_BASES: readonly string[] = [
+  "/api/admin",
+  "/api/admin/api-keys",
+  "/api/admin/api-keys/revoke",
+  "/api/admin/api-keys/webhook",
+  "/api/admin/cluster-merge",
+  "/api/admin/jev-admission/review",
+  "/api/admin/jev-alerts/ack",
+  "/api/admin/jev-gold/label",
+  "/api/admin/jev-gold/labeler",
+  "/api/admin/jev-gold/seed",
+  "/api/admin/jev-regression/freeze",
+  "/api/admin/jev-regression/run",
+  "/api/admin/jev-shadow/review",
+  "/api/admin/jev-unlink",
+  "/api/admin/jev-unlink/bulk",
+  "/api/admin/rapor/revoke",
+  "/api/admin/rapor/share",
+  "/api/admin/story-threads/candidates",
+  "/api/admin/story-threads/thread",
+  "/api/corrections",
+  "/api/cron/alerts-webhooks",
+  "/api/cron/digest",
+  "/api/cron/fact-checks",
+  "/api/cron/headline",
+  "/api/cron/social",
+  "/api/health",
+  "/api/metrics",
+  "/api/newsletter",
+  "/api/newsletter/confirm",
+  "/api/newsletter/unsubscribe",
+  "/api/oembed",
+  "/api/oyun",
+  "/api/oyun/cerceve",
+  "/api/oyun/cerceve/next",
+  "/api/revalidate",
+  "/api/sources",
+  "/api/takip",
+  "/api/timeline/head",
+  "/api/v1",
+  "/blindspots/rss.xml",
+  "/indexnow-key.txt",
+  "/llms.txt",
+  "/robots.txt",
+  "/rss.xml",
+  "/sitemap.xml",
+  "/sw.js",
+];
+
+/**
+ * The static handler whose path `pathname` continues without a '/' ('<base>x',
+ * '<base>%2F'), or null. The bare path and '<base>/x' are null. Plain
+ * string comparison; a base can be a prefix of another ('/api/admin' of
+ * '/api/admin/api-keys'), so every base is tried rather than the first prefix hit.
+ */
+function staticHandlerBase(pathname: string): string | null {
+  // Longest match wins: '/api/admin/jev-gold/label' is a prefix of the real
+  // handler '/api/admin/jev-gold/labeler', so first-match would file a
+  // '/api/admin/jev-gold/labeler%..' request under the shorter base.
+  let found: string | null = null;
+  for (const base of STATIC_HANDLER_BASES) {
+    if (
+      pathname.startsWith(base) &&
+      pathname.length > base.length &&
+      pathname[base.length] !== "/" &&
+      (found === null || base.length > found.length)
+    ) {
+      found = base;
+    }
+  }
+  return found;
+}
 
 // Module-level so the slug Set and negative cache persist across requests
 // within an isolate.
@@ -367,6 +521,16 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
     // Bad shape, before launch, future week and any nested path (a "/" never
     // parses) get the real 404; the page keeps its own notFound() as a backstop.
     return isServableWeekKey(key, Date.now()) ? NextResponse.next() : notFoundRewrite(req);
+  }
+
+  // Gate 9: a static route handler followed by an escape ('<base>%:suffix'). An
+  // encoded '/' or backslash is the not-found sink (Next would answer a 500); any
+  // other remainder is decode-only. The matcher never sends the bare handler here.
+  const base = staticHandlerBase(pathname);
+  if (base !== null) {
+    const rest = pathname.slice(base.length).toLowerCase();
+    if (rest.indexOf("%2f") !== -1 || rest.indexOf("%5c") !== -1) return notFoundRewrite(req);
+    return decodeOnly(pathname, base === "/api/v1" ? "v1" : base.startsWith("/api/") ? "json" : "text");
   }
 
   // Gate 8, decode-only surfaces with no other edge gate (hunt 12).

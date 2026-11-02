@@ -3,7 +3,13 @@ import { describe, it, expect, vi } from "vitest";
 // errors.ts imports the Sentry capture helper; nothing here exercises it.
 vi.mock("@/lib/sentry/server", () => ({ captureServerException: vi.fn() }));
 
-import { apiError, apiTooManyRequests } from "./errors";
+import {
+  ALLOW_GET_ONLY,
+  apiError,
+  apiMethodNotAllowed,
+  apiOptionsAllow,
+  apiTooManyRequests,
+} from "./errors";
 
 describe("apiTooManyRequests", () => {
   it("answers 429 with whole-second Retry-After, no-store and the canonical body", async () => {
@@ -85,5 +91,91 @@ describe("apiError headers passthrough", () => {
     expect(res.headers.get("Retry-After")).toBeNull();
     expect(res.headers.get("Cache-Control")).toBeNull();
     expect(await res.json()).toEqual({ error: "bad", details: { field: "a" } });
+  });
+
+  it("always carries the charset-qualified JSON content type, with or without init", () => {
+    const plain = apiError(400, "bad");
+    expect(plain.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+    const withHeaders = apiError(503, "down", {}, { headers: { "Retry-After": "60", "Cache-Control": "no-store" } });
+    expect(withHeaders.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+    expect(withHeaders.headers.get("Retry-After")).toBe("60");
+    expect(withHeaders.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("keeps a caller-supplied Content-Type and accepts every HeadersInit shape", () => {
+    const own = apiError(400, "bad", {}, { headers: { "content-type": "application/problem+json" } });
+    expect(own.headers.get("Content-Type")).toBe("application/problem+json");
+
+    const fromTuples = apiError(400, "bad", {}, { headers: [["Retry-After", "5"]] });
+    expect(fromTuples.headers.get("Retry-After")).toBe("5");
+    expect(fromTuples.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+
+    const fromHeaders = apiError(400, "bad", {}, { headers: new Headers({ "Retry-After": "7" }) });
+    expect(fromHeaders.headers.get("Retry-After")).toBe("7");
+    expect(fromHeaders.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+  });
+
+  it("does not mutate the caller's headers object", () => {
+    const headers = { "Retry-After": "9" };
+    apiError(429, "slow", {}, { headers });
+    expect(headers).toEqual({ "Retry-After": "9" });
+  });
+
+  it("the 429 helper inherits the content type and keeps Retry-After and Cache-Control", () => {
+    const res = apiTooManyRequests(2500);
+    expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+    expect(res.headers.get("Retry-After")).toBe("3");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+});
+
+describe("apiMethodNotAllowed", () => {
+  it("exports the read-only Allow list", () => {
+    expect(ALLOW_GET_ONLY).toBe("GET, HEAD, OPTIONS");
+  });
+
+  it("answers a JSON 405 with Allow, no-store and the canonical body, and no CORS", async () => {
+    const res = apiMethodNotAllowed("GET, HEAD, OPTIONS");
+    expect(res.status).toBe(405);
+    expect(res.headers.get("Allow")).toBe("GET, HEAD, OPTIONS");
+    expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(await res.text()).toBe('{"error":"Method not allowed"}');
+  });
+
+  it("adds Access-Control-Allow-Origin: * only when cors is requested", () => {
+    const open = apiMethodNotAllowed("GET, HEAD, OPTIONS", { cors: true });
+    expect(open.status).toBe(405);
+    expect(open.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(open.headers.get("Allow")).toBe("GET, HEAD, OPTIONS");
+    expect(open.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+    expect(open.headers.get("Cache-Control")).toBe("no-store");
+
+    expect(apiMethodNotAllowed("GET", { cors: false }).headers.get("Access-Control-Allow-Origin")).toBeNull();
+    expect(apiMethodNotAllowed("GET", {}).headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("echoes whatever Allow list the caller passes", () => {
+    expect(apiMethodNotAllowed("POST, OPTIONS").headers.get("Allow")).toBe("POST, OPTIONS");
+  });
+});
+
+describe("apiOptionsAllow", () => {
+  it("answers a bodyless 204 with the Allow header and no CORS", async () => {
+    const res = apiOptionsAllow("GET, HEAD, OPTIONS");
+    expect(res.status).toBe(204);
+    expect(res.body).toBeNull();
+    expect(await res.text()).toBe("");
+    expect(res.headers.get("Allow")).toBe("GET, HEAD, OPTIONS");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("adds Access-Control-Allow-Origin: * when cors is requested", () => {
+    const res = apiOptionsAllow("GET, HEAD, OPTIONS", { cors: true });
+    expect(res.status).toBe(204);
+    expect(res.body).toBeNull();
+    expect(res.headers.get("Allow")).toBe("GET, HEAD, OPTIONS");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
   });
 });

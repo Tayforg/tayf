@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -51,7 +52,8 @@ vi.mock("@/lib/time", async (importOriginal) => {
   };
 });
 
-import { HomeFeed } from "./page";
+import HomePage, { HomeFeed, generateMetadata } from "./page";
+import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 
 type Elementish = { type?: unknown; props?: Record<string, unknown> };
@@ -394,5 +396,201 @@ describe("HomeFeed — day-bucket headings follow the Istanbul calendar day", ()
     );
 
     expect(await bucketHeadings()).toEqual(["Bugün"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h17-a11y-4: the home pager. /?page=N gets its own title (Next's route
+// announcer reads a title change), the current-page indicator is announced as
+// the current page, and after a client-side page change focus moves to the
+// feed container instead of falling to <body>.
+// ---------------------------------------------------------------------------
+
+/** n distinct bundles; 31 ranked bundles = 3 pages of 15. */
+function manyBundles(n: number) {
+  return Array.from({ length: n }, (_, i) =>
+    bundle(`b${i + 1}`, `Haber ${i + 1}`),
+  );
+}
+
+const RSS_TYPES = {
+  "application/rss+xml": [{ url: "/rss.xml", title: "Tayf — Haberler RSS" }],
+};
+
+describe("generateMetadata — /?page=N titles", () => {
+  const meta = (sp: { q?: string | string[]; page?: string | string[] }) =>
+    generateMetadata({ searchParams: Promise.resolve(sp) });
+
+  beforeEach(() => {
+    getPoliticsClusters.mockResolvedValue(feedOf(...manyBundles(31)));
+  });
+
+  it("gives page 2 of 3 its own absolute title next to the self-canonical", async () => {
+    expect(await meta({ page: "2" })).toEqual({
+      title: { absolute: "Haberler — sayfa 2 / 3 — Tayf" },
+      alternates: { canonical: "/?page=2", types: RSS_TYPES },
+    });
+  });
+
+  it("clamps a page past the end in both the title and the canonical", async () => {
+    expect(await meta({ page: "9" })).toEqual({
+      title: { absolute: "Haberler — sayfa 3 / 3 — Tayf" },
+      alternates: { canonical: "/?page=3", types: RSS_TYPES },
+    });
+  });
+
+  it("reads the first value of a repeated ?page=", async () => {
+    expect(await meta({ page: ["2", "3"] })).toEqual({
+      title: { absolute: "Haberler — sayfa 2 / 3 — Tayf" },
+      alternates: { canonical: "/?page=2", types: RSS_TYPES },
+    });
+  });
+
+  it("inherits everything on page 1 and without a page", async () => {
+    expect(await meta({})).toEqual({});
+    expect(await meta({ page: "1" })).toEqual({});
+    expect(await meta({ page: "0" })).toEqual({});
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+  });
+
+  it("keeps a title without the total (and no canonical) when the feed fails", async () => {
+    getPoliticsClusters.mockRejectedValue(new Error("db down"));
+    const result = await meta({ page: "2" });
+    expect(result).toEqual({ title: { absolute: "Haberler — sayfa 2 — Tayf" } });
+    expect(result.alternates).toBeUndefined();
+  });
+
+  it("inherits everything when the clamped page is 1", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(...manyBundles(10)));
+    expect(await meta({ page: "2" })).toEqual({});
+  });
+
+  it("keeps today's search result for a q, with or without a page", async () => {
+    const searchResult = {
+      title: { absolute: "“seçim” araması — Tayf" },
+      robots: { index: false, follow: true },
+    };
+    expect(await meta({ q: "seçim" })).toEqual(searchResult);
+    expect(await meta({ q: "seçim", page: "2" })).toEqual(searchResult);
+    expect(getPoliticsClusters).not.toHaveBeenCalled();
+  });
+});
+
+describe("HomeFeed — page 2 of 3", () => {
+  async function pageTwoTree() {
+    getPoliticsClusters.mockResolvedValue(feedOf(...manyBundles(31)));
+    return (await HomeFeed({
+      searchParams: Promise.resolve({ page: "2" }),
+    })) as Elementish;
+  }
+
+  function paginationTree(tree: unknown): Elementish {
+    const el = collectElements(tree).find(
+      (e) =>
+        typeof e.type === "function" &&
+        (e.type as { name?: string }).name === "Pagination",
+    );
+    expect(el, "a Pagination element").toBeDefined();
+    return (el!.type as (props: unknown) => Elementish)(el!.props);
+  }
+
+  it("announces the indicator as the current page, with a spoken 'Sayfa ' prefix", async () => {
+    const nav = paginationTree(await pageTwoTree());
+    const current = collectElements(nav).filter(
+      (el) => el.props?.["aria-current"] === "page",
+    );
+    expect(current).toHaveLength(1);
+    const indicator = current[0]!;
+    expect(textOf(indicator)).toBe("Sayfa 2 / 3");
+    const hidden = collectElements(indicator).filter(
+      (el) => el.type === "span" && el.props?.className === "sr-only",
+    );
+    expect(hidden).toHaveLength(1);
+    expect(textOf(hidden[0])).toBe("Sayfa ");
+  });
+
+  it("still links to the previous and next page", async () => {
+    const nav = paginationTree(await pageTwoTree());
+    const links = collectElements(nav)
+      .filter((el) => typeof el.props?.href === "string")
+      .map((el) => [textOf(el), el.props?.href]);
+    expect(links).toEqual([
+      ["Önceki", "/"],
+      ["Sonraki", "/?page=3"],
+    ]);
+  });
+
+  it("mounts FocusFeedOnPageChange for the feed container, after the two status nodes", async () => {
+    const tree = await pageTwoTree();
+    const focusEls = collectElements(tree).filter(
+      (el) => el.type === FocusFeedOnPageChange,
+    );
+    expect(focusEls).toHaveLength(1);
+    expect(focusEls[0]!.props).toEqual({
+      page: 2,
+      query: "",
+      targetId: "haber-akisi",
+    });
+    const names = (tree.props?.children as Elementish[])
+      .filter((c) => c && typeof c === "object" && typeof c.type === "function")
+      .map((c) => (c.type as { name?: string }).name);
+    expect(names.slice(0, 3)).toEqual([
+      "SearchStatus",
+      "NewSinceLastVisit",
+      "FocusFeedOnPageChange",
+    ]);
+  });
+
+  it("passes the clamped page and the search query to the island", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(...manyBundles(31)));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    const tree = await HomeFeed({
+      searchParams: Promise.resolve({ q: "haber", page: "99" }),
+    });
+    const focusEl = collectElements(tree).find(
+      (el) => el.type === FocusFeedOnPageChange,
+    );
+    expect(focusEl?.props).toEqual({
+      page: 3,
+      query: "haber",
+      targetId: "haber-akisi",
+    });
+  });
+});
+
+describe("HomePage — the feed container", () => {
+  it("stays a plain, non-async Server Component", () => {
+    expect(HomePage.constructor.name).toBe("Function");
+  });
+
+  it("wraps the feed Suspense in a focusable, labelled #haber-akisi section", () => {
+    const tree = HomePage({ searchParams: Promise.resolve({}) });
+    const sections = collectElements(tree).filter(
+      (el) => el.type === "section" && el.props?.id === "haber-akisi",
+    );
+    expect(sections).toHaveLength(1);
+    const section = sections[0]!;
+    expect(section.props?.tabIndex).toBe(-1);
+    expect(section.props?.["aria-label"]).toBe("Haber akışı");
+    expect(String(section.props?.className)).toContain("focus:outline-none");
+    const inner = section.props?.children as Elementish;
+    expect(inner.type).toBe(Suspense);
+    expect((inner.props?.children as Elementish).type).toBe(HomeFeed);
+  });
+
+  it("keeps the search bar outside the focus target", () => {
+    const tree = HomePage({ searchParams: Promise.resolve({}) });
+    const section = collectElements(tree).find(
+      (el) => el.type === "section" && el.props?.id === "haber-akisi",
+    )!;
+    const inside = collectElements(section).map((el) => el.type);
+    expect(inside).not.toContain("input");
+    expect(
+      collectElements(section).some(
+        (el) =>
+          typeof el.type === "function" &&
+          (el.type as { name?: string }).name === "SearchBar",
+      ),
+    ).toBe(false);
   });
 });

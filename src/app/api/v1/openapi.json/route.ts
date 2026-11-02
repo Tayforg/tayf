@@ -1,4 +1,4 @@
-import { methodNotAllowed } from "@/lib/api/keys";
+import { apiV1Headers, methodNotAllowed } from "@/lib/api/keys";
 import { buildOpenApiDocument } from "@/lib/api/openapi";
 import { siteUrl } from "@/lib/site-url";
 
@@ -16,7 +16,10 @@ import { siteUrl } from "@/lib/site-url";
  *
  * Every non-GET/HEAD/OPTIONS method is bound to the shared JSON-405
  * `methodNotAllowed` like every other /api/v1 route (it reads no request
- * state either, so it does not affect the static GET).
+ * state either, so it does not affect the static GET). OPTIONS is explicit too:
+ * Next's automatic one advertised POST, PUT, PATCH and DELETE and sent no CORS
+ * headers, so a browser preflight for the contract file failed. It answers like
+ * the catch-all and every other v1 preflight (see apiV1Headers).
  */
 export function GET(): Response {
   const body = JSON.stringify(buildOpenApiDocument(siteUrl()), null, 2);
@@ -37,3 +40,7 @@ export const POST = methodNotAllowed;
 export const PUT = methodNotAllowed;
 export const PATCH = methodNotAllowed;
 export const DELETE = methodNotAllowed;
+
+export function OPTIONS(): Response {
+  return new Response(null, { status: 204, headers: apiV1Headers("free") });
+}

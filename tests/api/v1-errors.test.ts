@@ -433,6 +433,36 @@ describe("Access-Control-Expose-Headers: X-Tayf-Tier, Retry-After", () => {
   });
 });
 
+describe("OPTIONS /api/v1/openapi.json (h17-contracts-1)", () => {
+  // Next's auto-OPTIONS advertised POST, PUT, PATCH and DELETE here and sent no
+  // CORS headers, so a browser preflight for the contract file failed. The route
+  // now answers like the catch-all and every other v1 preflight.
+  it("is a bodyless 204 carrying the whole apiV1Headers('free') set", async () => {
+    const { apiV1Headers } = await import("@/lib/api/keys");
+    const { OPTIONS } = await import("@/app/api/v1/openapi.json/route");
+    const res = OPTIONS();
+    expect(res.status).toBe(204);
+    expect(res.body).toBeNull();
+    expect(await res.text()).toBe("");
+    const expected = apiV1Headers("free");
+    expect(Object.keys(expected).length).toBeGreaterThanOrEqual(8);
+    for (const [name, value] of Object.entries(expected)) {
+      expect(res.headers.get(name), name).toBe(value);
+    }
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe(EXPOSE);
+  });
+
+  it("makes no database call and the GET stays the static 200", async () => {
+    const mod = await import("@/app/api/v1/openapi.json/route");
+    mod.OPTIONS();
+    const doc = mod.GET();
+    expect(doc.status).toBe(200);
+    expect(doc.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(supabaseFake.calls.rpc.length).toBe(0);
+  });
+});
+
 describe("429 carries Retry-After, a code and the envelope", () => {
   it("per-minute 429 (61st request on a free key from distinct IPs): key_minute, Retry-After == ceil(retryAfterMs / 1000)", async () => {
     const { GET } = await import("@/app/api/v1/sources/route");

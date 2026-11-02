@@ -17,9 +17,10 @@ export interface ApiError {
 }
 
 /**
- * Build a consistent error response. `init.headers` is passed straight to
- * `NextResponse.json` for the few errors that carry headers (`Retry-After`,
- * `Cache-Control: no-store`); omit it and the response is unchanged.
+ * Build a consistent error response. `init.headers` carries the few errors
+ * that set headers (`Retry-After`, `Cache-Control: no-store`, `Allow`); the
+ * caller's headers are kept as given. The content type is always
+ * `application/json; charset=utf-8` unless the caller sets its own.
  */
 export function apiError(
   status: number,
@@ -27,10 +28,49 @@ export function apiError(
   opts: Omit<ApiError, "error"> = {},
   init?: { headers?: HeadersInit }
 ) {
-  return NextResponse.json<ApiError>(
-    { error: message, ...opts },
-    init?.headers ? { status, headers: init.headers } : { status }
-  );
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json; charset=utf-8");
+  }
+  return NextResponse.json<ApiError>({ error: message, ...opts }, { status, headers });
+}
+
+/** The method list of a read-only public endpoint (HEAD is derived from GET by Next). */
+export const ALLOW_GET_ONLY = "GET, HEAD, OPTIONS";
+
+/**
+ * 405 for the public, non-v1 endpoints that only serve GET. Next's own answer
+ * to an unexported method is a bodyless 405 with no `Allow` header, which RFC
+ * 9110 15.5.6 forbids and which breaks a JSON client; this one is the canonical
+ * `ApiError` envelope with `Allow`, and `Cache-Control: no-store` so a CDN never
+ * pins a refusal. `cors` adds `Access-Control-Allow-Origin: *` for the routes a
+ * browser may call cross-origin (oEmbed). Not the keyed /api/v1 refusal, which
+ * is `methodNotAllowed` in ./keys and carries the whole apiV1 header set.
+ */
+export function apiMethodNotAllowed(
+  allow: string,
+  opts: { cors?: boolean } = {}
+): Response {
+  const headers: Record<string, string> = {
+    Allow: allow,
+    "Cache-Control": "no-store",
+  };
+  if (opts.cors) headers["Access-Control-Allow-Origin"] = "*";
+  return apiError(405, "Method not allowed", {}, { headers });
+}
+
+/**
+ * 204 for an explicit OPTIONS export on a read-only endpoint. Without it Next
+ * answers OPTIONS itself and advertises every method the file exports, which
+ * would list the POST/PUT/PATCH/DELETE refusals as if they were supported.
+ */
+export function apiOptionsAllow(
+  allow: string,
+  opts: { cors?: boolean } = {}
+): Response {
+  const headers = new Headers({ Allow: allow });
+  if (opts.cors) headers.set("Access-Control-Allow-Origin", "*");
+  return new Response(null, { status: 204, headers });
 }
 
 // A named constant, not a literal: tests/guards/rate-limit-429.test.ts bans

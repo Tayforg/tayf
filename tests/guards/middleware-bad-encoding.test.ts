@@ -24,6 +24,11 @@ import { config, middleware } from "@/middleware";
 // A new dynamic route that is not covered fails here, with its URL in the
 // message. A second block pins that WELL-FORMED URLs of the same routes are
 // still passed through with no I/O (the decode-only branches must not gate).
+//
+// h17-contracts-1 adds the static route handlers (rss.xml, sitemap.xml,
+// /api/health, ...): `<base>%2F` / `%5C` made Next fall back to a pages-router
+// require and answer an HTML 500, so the middleware answers the not-found sink
+// for them, and a malformed `%ff` suffix the same 400 as every other surface.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -96,6 +101,28 @@ function dynamicRoutes(): DynamicRoute[] {
     routes.push({ template, url });
   }
   return routes.sort((a, b) => a.template.localeCompare(b.template));
+}
+
+/**
+ * Every route.ts / route.tsx under src/app with no dynamic segment, as its URL
+ * path (same group, slot and private-folder handling as dynamicRoutes). The
+ * /api/v1/<child> routes are left out: the '/api/v1/:path*' wildcard and the v1
+ * catch-all already answer them with a JSON 404. The bare /api/v1 root stays in.
+ */
+function staticHandlerBases(): string[] {
+  const bases: string[] = [];
+  for (const file of walk(APP_DIR)) {
+    const parts = relative(APP_DIR, file).split(sep);
+    const name = parts.pop() as string;
+    if (name !== "route.ts" && name !== "route.tsx") continue;
+    if (parts.some((s) => s.startsWith("_"))) continue;
+    const segments = parts.filter((s) => !/^\(.*\)$/.test(s) && !s.startsWith("@"));
+    if (segments.some((s) => DYNAMIC_SEGMENT.test(s))) continue;
+    const base = "/" + segments.join("/");
+    if (base.startsWith("/api/v1/")) continue;
+    bases.push(base);
+  }
+  return bases.sort();
 }
 
 const matches = (source: string, path: string) => getPathMatch(source)(path) !== false;
@@ -281,6 +308,75 @@ describe("middleware bad-encoding parity: well-formed URLs pass through untouche
     expect(res.headers.get("x-middleware-next")).toBe("1");
     const res2 = await middleware(request("/source/Bad_Slug!/opengraph-image"));
     expect(res2.headers.get("x-middleware-next")).toBe("1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("middleware bad-encoding parity: static handlers", () => {
+  const bases = staticHandlerBases();
+  /** The four spellings of an encoded '/' or backslash. */
+  const encodings = ["%2F", "%2f", "%5C", "%5c"];
+
+  it("finds a non-vacuous set of static handlers", () => {
+    expect(bases.length).toBeGreaterThanOrEqual(40);
+    for (const must of ["/rss.xml", "/sitemap.xml", "/api/sources", "/api/health", "/api/oembed", "/api/v1"]) {
+      expect(bases, must).toContain(must);
+    }
+    expect(bases.filter((b) => b.startsWith("/api/v1/"))).toEqual([]);
+  });
+
+  for (const base of bases) {
+    it(`${base}: an encoded '/' or backslash suffix is the not-found sink, a plain suffix passes, %ff is a 400`, async () => {
+      for (const enc of encodings) {
+        const res = await middleware(request(base + enc));
+        expect(classify(res), base + enc).toBe("not-found-rewrite");
+      }
+      expect(classify(await middleware(request(base + "%2Fextra"))), base + "%2Fextra").toBe("not-found-rewrite");
+      expect(classify(await middleware(request(base + "%5Cextra"))), base + "%5Cextra").toBe("not-found-rewrite");
+      expect(classify(await middleware(request(base + "x"))), base + "x").toBe("next");
+
+      const bad = await middleware(request(base + "%ff"));
+      const expected: Outcome = base === "/api/v1" ? "v1-400" : base.startsWith("/api/") ? "json-400" : "text-400";
+      expect(classify(bad), base + "%ff").toBe(expected);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it(`${base}: is matched for the encoded suffix by config.matcher, never for the bare path`, () => {
+      const hit = (path: string) => config.matcher.some((m) => matches(m, path));
+      for (const enc of encodings) expect(hit(base + enc), base + enc).toBe(true);
+      // /api/v1 is also matched bare, by '/api/v1/:path*'; the rest are not.
+      expect(hit(base), base).toBe(base === "/api/v1");
+    });
+  }
+
+  it("mixed-case and mid-path encodings are covered too", async () => {
+    for (const path of ["/rss.xml%2f%2F", "/api/health%5c%2f", "/api/oyun/cerceve/next%2Fx", "/blindspots/rss.xml%2F"]) {
+      expect(classify(await middleware(request(path))), path).toBe("not-found-rewrite");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("the longest-prefix bases are resolved correctly (a shorter base never shadows a longer one)", async () => {
+    // '/api/admin' is a prefix of '/api/admin/api-keys'; '/api/oyun' of '/api/oyun/cerceve/next'.
+    for (const path of ["/api/admin/api-keys%2F", "/api/oyun/cerceve%2F", "/api/oyun/cerceve/next%5C"]) {
+      expect(classify(await middleware(request(path))), path).toBe("not-found-rewrite");
+    }
+    // A nested path under a static handler is not matched by its suffix entry at all.
+    const hit = (path: string) => config.matcher.some((m) => matches(m, path));
+    for (const path of ["/api/health/x", "/rss.xml/x", "/api/admin/api-keys/x"]) {
+      expect(hit(path), path).toBe(false);
+    }
+  });
+
+  it("a bare static handler is never gated (the matcher skips it, and the bare /api/v1 passes through)", async () => {
+    expect(classify(await middleware(request("/api/v1")))).toBe("next");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("answers without any I/O, auth or cookie read", async () => {
+    const res = await middleware(request("/rss.xml%2F"));
+    expect(classify(res)).toBe("not-found-rewrite");
+    expect(res.headers.get("set-cookie")).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

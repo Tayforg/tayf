@@ -51,6 +51,7 @@ const OPERATION_IDS: Record<string, string> = {
   "OPTIONS /api/v1/sources/{slug}/profile": "optionsSourceProfile",
   "OPTIONS /api/v1/kap/pickup": "optionsKapPickup",
   "OPTIONS /api/v1/alerts/blindspots": "optionsBlindspotAlerts",
+  "OPTIONS /api/v1/openapi.json": "optionsOpenApi",
 };
 
 const ZONE_ENUM = ["iktidar", "bagimsiz", "muhalefet"];

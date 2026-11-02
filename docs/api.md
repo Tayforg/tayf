@@ -2,6 +2,12 @@
 
 ## HTTP Endpoints
 
+**Host.** Call `https://www.tayfhaber.com`. The apex host `tayfhaber.com` redirects to it (a `307` today, planned to become a `308`), and HTTP clients drop the `Authorization` header when a redirect crosses hosts, so a keyed `/api/v1` call sent to the apex comes back `401`. Every example below uses the `www.` host.
+
+**Unsupported methods.** The public read-only JSON endpoints (`/api/sources`, `/api/sources/{slug}`, `/api/timeline/head`, `/api/oembed`) answer `POST`, `PUT`, `PATCH` and `DELETE` with a JSON `405` (`{"error":"Method not allowed"}`, `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`) and `Allow: GET, HEAD, OPTIONS`. `OPTIONS` on them is a bodyless `204` with the same `Allow` header; `/api/oembed` also sends `Access-Control-Allow-Origin: *` on both. The keyed `/api/v1` routes keep their own `405` and `OPTIONS` shape described in that section.
+
+**Encoded slashes.** A static endpoint followed by an encoded `/` or `\` (`/rss.xml%2F`, `/api/health%5C`) is answered `404` by the edge middleware (the not-found page) instead of a server error; the bare path is untouched.
+
 ### `GET /api/health`
 
 Health check. Returns subsystem status for database, the homepage read path, environment, ingestion freshness, clustering freshness, and queue depth.
@@ -99,7 +105,7 @@ Admin actions. Rate limited: 20-token bucket, 0.2 tokens/sec refill.
 `set_source_rights` (BL-13): operator toggle for outlets that have asked Tayf not to use their photos or excerpted text. At least one of `image_allowed` / `excerpt_allowed` is required, both must be booleans when present, and only those two columns on `sources` are ever written. `404` when `slug` does not match an existing source. These flags are read-side gates consumed elsewhere (hero/card image selection, summary attribution) — this action only writes them.
 
 ```bash
-curl -sS -X POST https://tayfhaber.com/api/admin \
+curl -sS -X POST https://www.tayfhaber.com/api/admin \
   -H "Cookie: admin_session=<admin session cookie value>" \
   -H "Content-Type: application/json" \
   -d '{"action":"set_source_rights","slug":"example-outlet","image_allowed":false}'
@@ -290,7 +296,7 @@ There is no `script-src`, so nothing can execute even if the markup were ever in
 Snippet (the "Gömme kodu" chip on the cluster page copies this; the older "Sitene ekle" chip still copies the static `<a><img>` rozet badge):
 
 ```html
-<iframe src="https://tayfhaber.com/embed/cluster/{id}" width="560" height="200" title="Tayf yelpazesi: bu haberi hangi medya bölgeleri yazdı" loading="lazy" style="border:0;max-width:100%" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>
+<iframe src="https://www.tayfhaber.com/embed/cluster/{id}" width="560" height="200" title="Tayf yelpazesi: bu haberi hangi medya bölgeleri yazdı" loading="lazy" style="border:0;max-width:100%" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>
 ```
 
 ---
@@ -301,7 +307,7 @@ Snippet (the "Gömme kodu" chip on the cluster page copies this; the older "Site
 
 | Parameter | Meaning |
 | --- | --- |
-| `url` | **required.** `https://tayfhaber.com/cluster/{uuid}` (or the `www.` host, or the site's own host when `NEXT_PUBLIC_SITE_URL` is https). A query string, hash and one trailing slash are ignored. |
+| `url` | **required.** `https://www.tayfhaber.com/cluster/{uuid}` (or the apex host `tayfhaber.com`, or the site's own host when `NEXT_PUBLIC_SITE_URL` is https). A query string, hash and one trailing slash are ignored. |
 | `format` | optional. Only `json` is supported; anything else (including `xml`) is `501`. |
 | `maxwidth` | optional integer, clamped to 120-560 (default 560). Anything that is not 1-5 plain digits falls back to the default. |
 | `maxheight` | optional integer, clamped to 120-240 (default 200), same parsing. |
@@ -313,9 +319,9 @@ Snippet (the "Gömme kodu" chip on the cluster page copies this; the older "Site
   "version": "1.0",
   "type": "rich",
   "provider_name": "Tayf",
-  "provider_url": "https://tayfhaber.com",
+  "provider_url": "https://www.tayfhaber.com",
   "title": "...",
-  "html": "<iframe src=\"https://tayfhaber.com/embed/cluster/{id}\" width=\"560\" height=\"200\" ... sandbox=\"allow-popups allow-popups-to-escape-sandbox\"></iframe>",
+  "html": "<iframe src=\"https://www.tayfhaber.com/embed/cluster/{id}\" width=\"560\" height=\"200\" ... sandbox=\"allow-popups allow-popups-to-escape-sandbox\"></iframe>",
   "width": 560,
   "height": 200,
   "cache_age": 3600
@@ -347,8 +353,8 @@ The public, unkeyed source registry: every **active** source, ordered by name, a
 ```json
 {
   "licence": "CC BY-SA 4.0 — Tayf'a göre",
-  "attribution": "https://tayfhaber.com/metodoloji",
-  "methodology": "https://tayfhaber.com/metodoloji",
+  "attribution": "https://www.tayfhaber.com/metodoloji",
+  "methodology": "https://www.tayfhaber.com/metodoloji",
   "generated_at": "2026-11-01T09:00:00.000Z",
   "count": 118,
   "sources": [
@@ -397,8 +403,8 @@ One source's registry record, its bias-change history and the aggregate reader a
 ```json
 {
   "licence": "CC BY-SA 4.0 — Tayf'a göre",
-  "attribution": "https://tayfhaber.com/metodoloji",
-  "methodology": "https://tayfhaber.com/metodoloji",
+  "attribution": "https://www.tayfhaber.com/metodoloji",
+  "methodology": "https://www.tayfhaber.com/metodoloji",
   "generated_at": "2026-11-01T09:00:00.000Z",
   "source": { "slug": "ornek-gazete", "...": "RegistryRecord, as above" },
   "zone_history": [
@@ -609,7 +615,7 @@ see *Paging* below).
     {
       "id": "...",
       "title": "...",
-      "url": "https://tayfhaber.com/cluster/...",
+      "url": "https://www.tayfhaber.com/cluster/...",
       "first_published": "...",
       "updated_at": "...",
       "article_count": 6,
@@ -939,7 +945,7 @@ here, or if this document describes an operation with no real handler.
 {
   "openapi": "3.1.0",
   "info": { "title": "Tayf API", "version": "1", "license": { "name": "CC BY-SA 4.0 — Tayf'a göre" } },
-  "servers": [{ "url": "https://tayfhaber.com" }],
+  "servers": [{ "url": "https://www.tayfhaber.com" }],
   "paths": { "/api/v1/clusters": { "get": { "...": "..." } } }
 }
 ```
@@ -947,6 +953,12 @@ here, or if this document describes an operation with no real handler.
 `Cache-Control: public, max-age=3600, s-maxage=86400`,
 `Access-Control-Allow-Origin: *`,
 `Access-Control-Expose-Headers: X-Tayf-Tier, Retry-After`.
+
+`OPTIONS /api/v1/openapi.json` is the same keyless preflight as every other
+`/api/v1` route: a bodyless `204` carrying the full CORS set of the shared
+headers above with `X-Tayf-Tier: free`, so a browser can fetch the contract
+file cross-origin. (Next's automatic `OPTIONS` used to advertise `POST`, `PUT`,
+`PATCH` and `DELETE` here and sent no CORS headers.)
 
 Human-readable developer docs (quick-start code samples, the plan table,
 error reference) live at [`/gelistirici`](/gelistirici) — both are driven

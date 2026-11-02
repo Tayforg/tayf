@@ -72,13 +72,19 @@ describe("home generateMetadata", () => {
     expect(markup.title).toEqual({ absolute: "“<script>” araması — Tayf" });
   });
 
-  it("gives a search no canonical or RSS alternate of its own, and a no-q page no title", async () => {
+  it("gives a search no canonical or RSS alternate of its own, and page 1 no title", async () => {
     for (const q of ["x", ["x", "y"]]) {
       const md = await generateMetadata(sp({ q, page: "2" }));
       expect(md).not.toHaveProperty("alternates");
     }
     expect(await generateMetadata(sp({}))).not.toHaveProperty("title");
-    expect(await generateMetadata(sp({ page: "2" }))).not.toHaveProperty("title");
+    expect(await generateMetadata(sp({ page: "1" }))).not.toHaveProperty("title");
+  });
+
+  it("titles page 2 of 2 itself, next to its self-canonical (h17-a11y-4)", async () => {
+    const md = await generateMetadata(sp({ page: "2" }));
+    expect(md.title).toEqual({ absolute: "Haberler — sayfa 2 / 2 — Tayf" });
+    expect(md.alternates?.canonical).toBe("/?page=2");
   });
 
   it("does not return alternates for a search, so the layout canonical applies", async () => {
@@ -133,9 +139,11 @@ describe("home generateMetadata", () => {
     expect(await generateMetadata(sp({ page: "2" }))).toEqual({});
   });
 
-  it("returns {} instead of throwing when the feed rejects", async () => {
+  it("does not throw when the feed rejects: a title without the total, no canonical", async () => {
     getPoliticsClusters.mockRejectedValue(new Error("db down"));
-    expect(await generateMetadata(sp({ page: "2" }))).toEqual({});
+    expect(await generateMetadata(sp({ page: "2" }))).toEqual({
+      title: { absolute: "Haberler — sayfa 2 — Tayf" },
+    });
   });
 
   it("does not hit the feed for page 1 or a search", async () => {

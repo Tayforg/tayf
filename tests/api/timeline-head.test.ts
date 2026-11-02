@@ -190,6 +190,50 @@ describe("GET /api/timeline/head -- cache key", () => {
   });
 });
 
+describe("unsupported methods on /api/timeline/head (h17-contracts-1)", () => {
+  it.each(["POST", "PUT", "PATCH", "DELETE"] as const)(
+    "%s is a JSON 405 with Allow: GET, HEAD, OPTIONS, no-store and no CORS",
+    async (method) => {
+      const mod = await import("@/app/api/timeline/head/route");
+      const handler = mod[method] as ((req?: Request) => Promise<Response> | Response) | undefined;
+      expect(handler, `${method} is not exported`).toBeTypeOf("function");
+      const res = await handler!(
+        new Request("http://example.com/api/timeline/head", { method, headers: { "x-forwarded-for": freshIp() } }),
+      );
+      expect(res.status).toBe(405);
+      expect(res.headers.get("Allow")).toBe("GET, HEAD, OPTIONS");
+      expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+      expect(res.headers.get("Cache-Control")).toBe("no-store");
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+      expect(await res.text()).toBe('{"error":"Method not allowed"}');
+    },
+  );
+
+  it("OPTIONS is a bodyless 204 advertising GET, HEAD, OPTIONS", async () => {
+    const { OPTIONS } = await import("@/app/api/timeline/head/route");
+    const res = OPTIONS();
+    expect(res.status).toBe(204);
+    expect(res.body).toBeNull();
+    expect(res.headers.get("Allow")).toBe("GET, HEAD, OPTIONS");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("a refusal never reads the cluster cache nor spends a rate-limit token", async () => {
+    const { POST, GET } = await import("@/app/api/timeline/head/route");
+    const ip = freshIp();
+    // 30 is the bucket capacity: 100 refusals from one IP must leave it untouched.
+    for (let i = 0; i < 100; i++) {
+      const res = await POST(
+        new Request("http://example.com/api/timeline/head", { method: "POST", headers: { "x-forwarded-for": ip } }),
+      );
+      expect(res.status).toBe(405);
+    }
+    expect(query.getRecentClusters).not.toHaveBeenCalled();
+    const ok = await GET(headRequest("", ip));
+    expect(ok.status).toBe(200);
+  });
+});
+
 describe("timeline-head route source", () => {
   const src = readFileSync(
     resolve(ROOT, "src/app/api/timeline/head/route.ts"),

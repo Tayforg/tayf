@@ -40,3 +40,21 @@ export function homeCanonicalPath(o: {
   if (clamped <= 1) return null;
   return `/?page=${clamped}`;
 }
+
+/**
+ * Document title for /?page=N (N > 1), or null for page 1 (the layout's
+ * default title applies). `totalPages` null means the count is unknown (the
+ * feed failed to load), so the title names the page without a total. The page
+ * is clamped to the last page like homeCanonicalPath, so a page past the end
+ * is titled and canonicalised as the page that is actually rendered.
+ */
+export function homePageTitle(
+  page: number,
+  totalPages: number | null,
+): string | null {
+  if (page <= 1) return null;
+  if (totalPages === null) return `Haberler — sayfa ${page} — Tayf`;
+  const clamped = Math.min(page, totalPages);
+  if (clamped <= 1) return null;
+  return `Haberler — sayfa ${clamped} / ${totalPages} — Tayf`;
+}
