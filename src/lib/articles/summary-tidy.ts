@@ -22,7 +22,8 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 //   - a text the ingest clamp cut mid-word (500 characters ending "...") or an
 //     outlet's own feed cap cut mid-word (Haberport 202/203, Sözcü 123, Daily
 //     Sabah 183 characters ending "...")
-//   - a repaired cut that would end inside an open quotation
+//   - a repaired cut that would end inside an open quotation, and a text a feed
+//     cut inside a quotation before its trailing "[…]" (h29-regress-1)
 //   - a sub-heading glued onto the body ("odaklı ziyaretİçişleri Bakanı",
 //     "ziyaretin önemi:Cumhurbaşkanı Erdoğan")
 //   - a leading "Son dakika |" / "Son dakika haberi:" / "Son dakika haberine
@@ -477,6 +478,56 @@ function repairClamp(raw: string): string | null {
   return SENTENCE_MARKS.has(cut.charAt(cut.length - 1)) ? cut : cut + "…";
 }
 
+/**
+ * `text` cut so that it no longer ends inside an open quotation (h29-regress-1),
+ * or null when no cut is long enough. A text that leaves no quotation open (the
+ * straight quote an even number of times, no more “ « ‘ than ” » ’; see
+ * {@link quoteBalance}) is returned as it is, the same string. Otherwise the
+ * opener is the end of the largest prefix that leaves nothing open, and there are
+ * two candidates:
+ *   - A, the text up to the last sentence end that leaves nothing open, with no
+ *     ellipsis (the sentence is complete);
+ *   - B, the text up to the opener, with dangling ", ; : – — -" and blanks gone,
+ *     plus one "…" unless it already ends in a sentence mark.
+ * A cut is valid when it ends after `floor` (default 0: not empty) and keeps at
+ * least `minShare` (default 0) of `text`. A wins when it is valid and keeps at
+ * least {@link CLAMP_MIN_KEPT_SHARE} of what B keeps (the clamp repair's bar for a
+ * sentence-end cut); otherwise B, then A, whichever is valid; null when neither
+ * is. Linear: one pass for the balances, one for the opener, one for the sentence
+ * end. Unlike {@link repairClamp} (which stays as it is) this also serves texts
+ * that are not clamps: the excerpt marker of step 1b of {@link tidySummaryText}
+ * and the word cut of describeForMeta (summary-attribution.ts).
+ */
+export function backOffOpenQuote(
+  text: string,
+  opts: { floor?: number; minShare?: number } = {},
+): string | null {
+  const balanced = quoteBalance(text);
+  if (balanced(text.length)) return text;
+
+  const floor = Math.max(0, opts.floor ?? 0);
+  const minKept = (opts.minShare ?? 0) * text.length;
+
+  // The opener: the largest prefix that leaves nothing open ends right in front of it.
+  let at = text.length;
+  while (at > 0 && !balanced(at)) at--;
+
+  const sentenceEnd = lastSentenceEnd(text, [], balanced);
+  const sentenceCutValid = sentenceEnd > floor && sentenceEnd >= minKept;
+  const sentenceCut = sentenceCutValid ? text.slice(0, sentenceEnd).trimEnd() : null;
+
+  const openerEnd = trimDanglingEnd(text, at);
+  const openerCutValid = openerEnd > floor && openerEnd >= minKept;
+  const openerCut = openerCutValid
+    ? SENTENCE_MARKS.has(text.charAt(openerEnd - 1))
+      ? text.slice(0, openerEnd)
+      : text.slice(0, openerEnd) + "…"
+    : null;
+
+  if (sentenceCut !== null && sentenceEnd >= CLAMP_MIN_KEPT_SHARE * openerEnd) return sentenceCut;
+  return openerCut ?? sentenceCut;
+}
+
 // ---------------------------------------------------------------------------
 // Leading noise (h22-editorial-2, h23-live-1, h24): a ticker ("Son dakika | X",
 // "Son dakika! X", "Son dakika... X", "SON DAKİKA: X", "Son dakika haberi: X",
@@ -711,7 +762,12 @@ function splitGluedHeadings(s: string): string {
  *      ("<headline> Medyascope" as the last line) with {@link stripFeedWrappers},
  *      the same function the cluster consumer applies to the clustering text.
  *      It runs here, while the newlines are still present, because a footer
- *      starts at a line boundary;
+ *      starts at a line boundary. When that turned a trailing excerpt marker
+ *      into "…" and the text is cut inside a quotation ("…videoda “ABD Senatosu
+ *      için…"), it ends at the last sentence end in front of the opener, or at
+ *      the word in front of it, when that keeps at least half of the text
+ *      ({@link backOffOpenQuote}); an opener in the first half leaves the text as
+ *      it is;
  *   1c. cut an appended ticker and the related-news lines in front of it with
  *      {@link cutAppendedTicker} (Milliyet: "...hazırız\nSon dakika... Rusya
  *      için 3 fırsat!"), also while the newlines are present. A cut that would
@@ -782,7 +838,17 @@ export function tidySummaryText(s: string): string {
 
   // 1b. Diken / Serbestiyet feed wrappers (h19-ingest-2). The text still holds
   //     its newlines here: the footers are found by them.
-  out = stripFeedWrappers(out);
+  //     The excerpt marker " […]" becomes "…" (stripFeedWrappers), and a feed
+  //     that cut the excerpt inside a quotation leaves "…videoda “ABD Senatosu
+  //     için…" (h29-regress-1, 49cb984b): the "…" is then backed off to the last
+  //     sentence end or to the word in front of the opener, when that keeps at
+  //     least half of the text (backOffOpenQuote). A clamp (`repaired`) was
+  //     already cut with the same care, and the author's own "…" is not ours.
+  const unwrapped = stripFeedWrappers(out);
+  out =
+    repaired === null && unwrapped !== out && unwrapped.endsWith("…")
+      ? (backOffOpenQuote(unwrapped, { minShare: CLAMP_QUOTE_MIN_KEPT_SHARE }) ?? unwrapped)
+      : unwrapped;
 
   // 1c. A different story's headline appended after the body (Milliyet's
   //     related-news line and "Son dakika..." ticker; h23-live-2). Never cut

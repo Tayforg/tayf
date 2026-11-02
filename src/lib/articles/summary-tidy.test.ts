@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import h26Fixtures from "../../../tests/fixtures/summary-tidy-h26.json";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
-import { tidySummaryText, WIDGET_HEADINGS } from "./summary-tidy";
+import { backOffOpenQuote, tidySummaryText, WIDGET_HEADINGS } from "./summary-tidy";
 
 // [input, expected] — every row is an exact `toBe`.
 const CHANGES: ReadonlyArray<readonly [string, string]> = [
@@ -3058,6 +3058,274 @@ describe("tidySummaryText clamp repair: abbreviation dots, glued final sentence,
       ["'aB' x 50000", () => "aB".repeat(50_000)],
       ["a 500-character clamp of 'x.Y' repeats", () => clamp("x.Y".repeat(170))],
     ])("%s finishes in under 100 ms", (_name, make) => {
+      const input = make();
+      const start = performance.now();
+      tidySummaryText(input);
+      expect(performance.now() - start).toBeLessThan(100);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// An excerpt marker after an open quotation (h29-regress-1). Feeds that end a
+// description with " […]" cut it wherever their excerpt limit fell, often inside
+// a quotation: stripFeedWrappers turns the marker into "…", and the visible
+// summary ended "…videoda “ABD Senatosu için…" (49cb984b), one opening “ and no
+// closing ”. A cut is balanced when it leaves no quotation open (the same test
+// the clamp repair uses): the straight quote an even number of times, no more
+// “ « ‘ than ” » ’.
+// ---------------------------------------------------------------------------
+
+/** True when `s` leaves no quotation open. Counts only, written for the assertions. */
+function leavesNothingOpen(s: string): boolean {
+  return (
+    countChar(s, '"') % 2 === 0 &&
+    countChar(s, "“") <= countChar(s, "”") &&
+    countChar(s, "«") <= countChar(s, "»") &&
+    countChar(s, "‘") <= countChar(s, "’")
+  );
+}
+
+const H29_49CB_HEAD =
+  "ABD’de Cumhuriyetçiler seçimlere iki gün kala çoğu siyasi stratejistin yalnızca hayalini kurabileceği bir hediye aldı. Michigan’daki Demokrat temsilci Haley Stevens partisinin adayına karşı kaybettiği ön seçimin ardından eyaletin çekişmeli Senato yarışında Cumhuriyetçi aday Mike Rogers’ı desteklediğini açıkladı. Ağustos ayındaki ön seçimde el-Sayed, Stevens’ı küçük bir farkla yenmişti.";
+// clusters.summary_tr of 49cb984b-87c1-487f-9d56-bc3419416cfe, verbatim.
+const H29_49CB_RAW = `${H29_49CB_HEAD} Haley Stevens internette yayınladığı videoda “ABD Senatosu için […]`;
+const H29_SYNTHETIC_RAW =
+  "Ağustos ayındaki ön seçimde el-Sayed, Stevens’ı küçük bir farkla yenmişti. Haley Stevens internette yayınladığı videoda “ABD Senatosu için […]";
+const H29_SYNTHETIC_OUT = "Ağustos ayındaki ön seçimde el-Sayed, Stevens’ı küçük bir farkla yenmişti.";
+const H29_WORDS = "kelimeler ".repeat(30);
+
+describe("tidySummaryText excerpt marker after an open quotation (h29-regress-1)", () => {
+  it("49cb984b: the summary ends at the last sentence end in front of the open quotation", () => {
+    const out = tidySummaryText(H29_49CB_RAW);
+    expect(out).toBe(H29_49CB_HEAD);
+    expect(out.endsWith("yenmişti.")).toBe(true);
+    expect(leavesNothingOpen(out)).toBe(true);
+    expect(out).not.toContain("ABD Senatosu");
+  });
+
+  it("the synthetic tail of 49cb984b ends at '…yenmişti.'", () => {
+    expect(tidySummaryText(H29_SYNTHETIC_RAW)).toBe(H29_SYNTHETIC_OUT);
+  });
+
+  it.each([
+    ["curly double", "“"],
+    ["angle", "«"],
+    ["curly single", "‘"],
+    ["straight", '"'],
+  ])("%s quotation: a long text with no sentence end is cut in front of the opener", (_label, open) => {
+    const out = tidySummaryText(`${H29_WORDS}Bakan ${open}Biz […]`);
+    expect(out).toBe(`${H29_WORDS}Bakan…`);
+    expect(leavesNothingOpen(out)).toBe(true);
+  });
+
+  it("the other excerpt markers behave like '[…]'", () => {
+    expect(tidySummaryText(`${H29_WORDS}Bakan “Biz [...]`)).toBe(`${H29_WORDS}Bakan…`);
+    expect(tidySummaryText(`${H29_WORDS}Bakan “Biz [&hellip;]`)).toBe(`${H29_WORDS}Bakan…`);
+  });
+
+  it("a comma or a colon in front of the opener goes with it", () => {
+    expect(tidySummaryText(`${H29_WORDS}Bakan şunları söyledi: “Biz […]`)).toBe(`${H29_WORDS}Bakan şunları söyledi…`);
+    expect(tidySummaryText(`${H29_WORDS}Bakan şunları söyledi, “Biz […]`)).toBe(`${H29_WORDS}Bakan şunları söyledi…`);
+  });
+
+  it("keeps the sentence end when it is at least 60% of what a cut in front of the opener keeps", () => {
+    // 32 of 45 characters: the sentence end wins.
+    expect(tidySummaryText("Uzun bir ilk cümle burada bitti. Bakan Yılmaz “Biz […]")).toBe(
+      "Uzun bir ilk cümle burada bitti.",
+    );
+  });
+
+  it("cuts in front of the opener when the sentence end would drop more than 40% of that cut", () => {
+    // The sentence end keeps 25 of 49 characters (valid), but 25 < 0.6 * 43.
+    expect(tidySummaryText("Birinci cümle tamamlandı. Sonra uzun kelime “Biz […]")).toBe(
+      "Birinci cümle tamamlandı. Sonra uzun kelime…",
+    );
+  });
+
+  it("an opener in the first half of the text leaves the output as it is today", () => {
+    const expected = `Bakan “Biz ${H29_WORDS.trimEnd()}…`;
+    expect(tidySummaryText(`Bakan “Biz ${H29_WORDS.trimEnd()} […]`)).toBe(expected);
+    // A short first sentence does not change that.
+    const withSentence = `Kısa cümle. Bakan “Biz ${H29_WORDS.trimEnd()}…`;
+    expect(tidySummaryText(`Kısa cümle. Bakan “Biz ${H29_WORDS.trimEnd()} […]`)).toBe(withSentence);
+  });
+
+  it("a balanced text keeps its quotation and its '…'", () => {
+    expect(tidySummaryText("Bakan “Biz hazırız” dedi ve toplantıdan çıktı [...]")).toBe(
+      "Bakan “Biz hazırız” dedi ve toplantıdan çıktı…",
+    );
+    expect(tidySummaryText('Bakan "Biz hazırız" dedi ve toplantıdan [&hellip;]')).toBe(
+      'Bakan "Biz hazırız" dedi ve toplantıdan…',
+    );
+  });
+
+  it("only the rewrite of a wrapper is backed off: the author's own ellipsis stays", () => {
+    expect(tidySummaryText("Bakan “Biz devam ediyor…")).toBe("Bakan “Biz devam ediyor…");
+  });
+
+  it("is idempotent on every new fixture", () => {
+    const inputs = [
+      H29_49CB_RAW,
+      H29_SYNTHETIC_RAW,
+      `${H29_WORDS}Bakan “Biz […]`,
+      `${H29_WORDS}Bakan «Biz […]`,
+      `${H29_WORDS}Bakan ‘Biz […]`,
+      `${H29_WORDS}Bakan "Biz […]`,
+      `${H29_WORDS}Bakan şunları söyledi: “Biz […]`,
+      "Uzun bir ilk cümle burada bitti. Bakan Yılmaz “Biz […]",
+      "Birinci cümle tamamlandı. Sonra uzun kelime “Biz […]",
+      `Bakan “Biz ${H29_WORDS.trimEnd()} […]`,
+      `Kısa cümle. Bakan “Biz ${H29_WORDS.trimEnd()} […]`,
+      "Bakan “Biz hazırız” dedi ve toplantıdan çıktı [...]",
+    ];
+    for (const raw of inputs) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once), once.slice(-40)).toBe(once);
+    }
+  });
+});
+
+describe("backOffOpenQuote (h29-regress-1)", () => {
+  it.each([
+    "",
+    "   ",
+    "Tırnaksız bir cümle",
+    'Dedi ki "merhaba" ve gitti.',
+    "Dedi ki “merhaba” ve gitti.",
+    "Dedi ki «merhaba» ve gitti.",
+    "Dedi ki ‘merhaba’ ve gitti.",
+    "Stevens’ı yendi, Rogers’ı destekledi.",
+    "Bir “iç içe ‘tırnak’ örneği” ve devamı",
+  ])("a balanced input comes back as the same string: %j", (input) => {
+    expect(backOffOpenQuote(input)).toBe(input);
+    expect(backOffOpenQuote(input, { floor: 5, minShare: 0.9 })).toBe(input);
+  });
+
+  it.each([
+    ["straight", '"'],
+    ["curly double", "“"],
+    ["angle", "«"],
+    ["curly single", "‘"],
+  ])("%s quotation: ends at the sentence end in front of the opener, without an ellipsis", (_label, open) => {
+    expect(backOffOpenQuote(`Bu bir cümle. Bakan ${open}Biz`)).toBe("Bu bir cümle.");
+  });
+
+  it.each([
+    ["straight", '"'],
+    ["curly double", "“"],
+    ["angle", "«"],
+    ["curly single", "‘"],
+  ])("%s quotation: ends in front of the opener with an ellipsis when the sentence end keeps too little", (_label, open) => {
+    expect(backOffOpenQuote(`Evet. Bakan Yılmaz bugün kentte açıklamada ${open}Biz`)).toBe(
+      "Evet. Bakan Yılmaz bugün kentte açıklamada…",
+    );
+  });
+
+  it("drops dangling ', ; : – — -' and blanks in front of the opener", () => {
+    expect(backOffOpenQuote('Bakan Yılmaz bugün şunları söyledi , : "Biz')).toBe("Bakan Yılmaz bugün şunları söyledi…");
+    expect(backOffOpenQuote("Bakan Yılmaz şunları söyledi - “Biz")).toBe("Bakan Yılmaz şunları söyledi…");
+    expect(backOffOpenQuote("Bakan Yılmaz şunları söyledi; «Biz")).toBe("Bakan Yılmaz şunları söyledi…");
+  });
+
+  it("adds no ellipsis when the cut already ends in a sentence mark", () => {
+    // "Dr." is an abbreviation, not a sentence end, so the sentence-end cut is
+    // not available; the cut in front of the opener ends in the dot.
+    expect(backOffOpenQuote('Dr. "Biz')).toBe("Dr.");
+  });
+
+  it("keeps a closed quotation and cuts in front of the one that is open", () => {
+    expect(backOffOpenQuote('Dedi ki “merhaba” ve "Biz')).toBe("Dedi ki “merhaba” ve…");
+    // The sentence end may sit inside the closing quote.
+    expect(backOffOpenQuote('Dedi ki “tamam.” Sonra "Biz')).toBe("Dedi ki “tamam.”");
+  });
+
+  it("is not confused by an apostrophe", () => {
+    expect(backOffOpenQuote("O’nun sözü. Bakan “Biz")).toBe("O’nun sözü.");
+  });
+
+  it("returns a balanced string that is not longer than the input and is a fixed point", () => {
+    const inputs = [
+      'Bu bir cümle. Bakan "Biz',
+      "Evet. Bakan Yılmaz bugün kentte açıklamada “Biz",
+      'Bakan Yılmaz bugün şunları söyledi , : "Biz',
+      'Dedi ki “merhaba” ve "Biz',
+      `${H29_WORDS}Bakan «Biz`,
+    ];
+    for (const input of inputs) {
+      const out = backOffOpenQuote(input);
+      expect(out, input).not.toBeNull();
+      if (out === null) continue;
+      expect(leavesNothingOpen(out), input).toBe(true);
+      expect(out.length, input).toBeLessThanOrEqual(input.length);
+      expect(backOffOpenQuote(out), input).toBe(out);
+    }
+  });
+
+  describe("floor", () => {
+    const text = 'Bu bir cümle. Bakan "Biz'; // sentence end at 13, cut in front of the opener at 19
+
+    it("a cut must end after the floor", () => {
+      expect(backOffOpenQuote(text, { floor: 12 })).toBe("Bu bir cümle.");
+      // The sentence end is AT the floor: not after it. The opener cut is.
+      expect(backOffOpenQuote(text, { floor: 13 })).toBe("Bu bir cümle. Bakan…");
+      expect(backOffOpenQuote(text, { floor: 18 })).toBe("Bu bir cümle. Bakan…");
+    });
+
+    it("returns null when no cut ends after the floor", () => {
+      expect(backOffOpenQuote(text, { floor: 19 })).toBeNull();
+      expect(backOffOpenQuote(text, { floor: 100 })).toBeNull();
+    });
+  });
+
+  describe("minShare", () => {
+    const early = `Bakan “Biz ${"kelimeler ".repeat(20).trimEnd()}`; // opener at 6 of 210
+
+    it("defaults to no minimum", () => {
+      expect(backOffOpenQuote(early)).toBe("Bakan…");
+      expect(backOffOpenQuote(early, { minShare: 0 })).toBe("Bakan…");
+    });
+
+    it("rejects a cut that keeps less than the share of the text", () => {
+      expect(backOffOpenQuote(early, { minShare: 0.5 })).toBeNull();
+    });
+
+    it("accepts a cut that keeps exactly the share", () => {
+      expect(backOffOpenQuote("abcde “fgh", { minShare: 0.5 })).toBe("abcde…");
+      expect(backOffOpenQuote("abcde “fgh", { minShare: 0.51 })).toBeNull();
+    });
+
+    it("the opener cut wins over a sentence end that is below the share", () => {
+      const input = `Evet. ${"kelimeler ".repeat(20)}“Biz`;
+      expect(backOffOpenQuote(input, { minShare: 0.5 })).toBe(`Evet. ${"kelimeler ".repeat(20).trimEnd()}…`);
+    });
+  });
+
+  it("returns null when no valid cut exists", () => {
+    expect(backOffOpenQuote('"Biz')).toBeNull();
+    expect(backOffOpenQuote("“Biz devam ediyor")).toBeNull();
+    expect(backOffOpenQuote(" «Biz")).toBeNull();
+    expect(backOffOpenQuote("“".repeat(50))).toBeNull();
+  });
+
+  describe("linear time on 100k characters", () => {
+    it.each([
+      ["'“' x 100000 + '…'", () => "“".repeat(100_000) + "…"],
+      ["'\"a. ' x 30000 + '…' (balanced)", () => '"a. '.repeat(30_000) + "…"],
+      ["'\"a. ' x 30001 + '…' (one quote open)", () => '"a. '.repeat(30_001) + "…"],
+      ["'Aa. ' x 25000 + ' “Biz…'", () => "Aa. ".repeat(25_000) + " “Biz…"],
+    ])("%s finishes in under 100 ms", (_name, make) => {
+      const input = make();
+      const start = performance.now();
+      backOffOpenQuote(input);
+      expect(performance.now() - start).toBeLessThan(100);
+    });
+
+    it.each([
+      ["'“' x 100000 + ' […]'", () => "“".repeat(100_000) + " […]"],
+      ["'\"a. ' x 30000 + ' […]'", () => '"a. '.repeat(30_000) + " […]"],
+      ["'\"a. ' x 30001 + ' […]'", () => '"a. '.repeat(30_001) + " […]"],
+    ])("tidySummaryText of %s finishes in under 100 ms", (_name, make) => {
       const input = make();
       const start = performance.now();
       tidySummaryText(input);

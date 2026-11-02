@@ -626,3 +626,226 @@ describe("feed residue tidy", () => {
     ).toEqual({ text: "Temiz bir özet.", source: m.source });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Meta / OG / JSON-LD descriptions never end inside an open quotation
+// (h29-regress-1). truncateWords cut at the last space of the window, so the
+// description of 3ee2895b read `4 kaynak. Anadolu Ajansı: Yılmaz, "İsrail'in …
+// baskısına…` with one straight quote and no closing one. A cut is balanced
+// when it leaves no quotation open: the straight quote an even number of times,
+// no more “ « ‘ than ” » ’ (the test the clamp repair of summary-tidy.ts uses).
+// ---------------------------------------------------------------------------
+function occurrences(s: string, ch: string): number {
+  return s.split(ch).length - 1;
+}
+
+/** True when `s` leaves no quotation open. Counts only, written for the assertions. */
+function leavesNothingOpen(s: string): boolean {
+  return (
+    occurrences(s, '"') % 2 === 0 &&
+    occurrences(s, "“") === occurrences(s, "”") &&
+    occurrences(s, "«") === occurrences(s, "»") &&
+    occurrences(s, "‘") <= occurrences(s, "’")
+  );
+}
+
+/** What truncateWords did before h29: cut at the last space of the window, whatever it left open. */
+function legacyTruncate(full: string, max: number): string {
+  if (full.length <= max) return full;
+  const truncated = full.slice(0, Math.max(0, max - 1));
+  const lastSpace = truncated.lastIndexOf(" ");
+  const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
+  return cut.trimEnd() + "…";
+}
+
+describe("describeForMeta never ends inside an open quotation (h29-regress-1)", () => {
+  const AA = src("Anadolu Ajansı");
+  const LONG = "enerji güvenliği ".repeat(15);
+  // clusters.summary_tr of 3ee2895b-b0ae-48f6-9d8a-3f695953cee3, verbatim.
+  const YILMAZ_3EE2 =
+    "Yılmaz, \"İsrail'in kışkırtmalarıyla başlayan savaşlar neticesinde, dünya enerji fiyatlarının ekonomiler üzerindeki baskısına şahitlik ediyoruz. Bu durum, enerji güvenliğinin sağlanmasında işbirliğinin önemini bir kez daha ortaya koymuştur.\" dedi.";
+  // The fix_spec's synthetic: a curly apostrophe, the quotation closes after the window.
+  const YILMAZ_SYNTHETIC =
+    "Yılmaz, \"İsrail’in kışkırtmalarıyla başlayan savaşlar neticesinde, dünya enerji fiyatlarının ekonomiler üzerindeki baskısına şahitlik ediyoruz\" dedi. Bu durum…";
+
+  it.each([
+    ["3ee2895b, verbatim", YILMAZ_3EE2],
+    ["the fix_spec's synthetic", YILMAZ_SYNTHETIC],
+  ])("%s: the description ends in front of the opener", (_label, text) => {
+    const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
+    expect(out.length).toBeLessThanOrEqual(160);
+    expect(out.endsWith("…")).toBe(true);
+    expect(occurrences(out, '"') % 2).toBe(0);
+    expect(occurrences(out, "“")).toBe(occurrences(out, "”"));
+    expect(occurrences(out, "«")).toBe(occurrences(out, "»"));
+    expect(occurrences(out, "‘")).toBeLessThanOrEqual(occurrences(out, "’"));
+    expect(out).toBe("4 kaynak. Anadolu Ajansı: Yılmaz…");
+  });
+
+  it("the generic label gets the same cut", () => {
+    const out = describeForMeta({ count: 4, attribution: { text: YILMAZ_3EE2, source: null } });
+    expect(out).toBe("4 kaynak. Kaynak açıklaması: Yılmaz…");
+  });
+
+  it("holds for every limit: balanced, within the limit, and the text is not cut inside a quotation", () => {
+    for (const source of [AA, null]) {
+      for (let max = 12; max <= 330; max++) {
+        const out = describeForMeta({ count: 4, attribution: { text: YILMAZ_3EE2, source } }, max);
+        expect(leavesNothingOpen(out), `max=${max}: ${out}`).toBe(true);
+        expect(out.length, `max=${max}`).toBeLessThanOrEqual(max);
+      }
+    }
+  });
+
+  describe("an opener in the first 40 characters of the text", () => {
+    it.each([
+      ["curly double", "“", "”"],
+      ["angle", "«", "»"],
+      ["curly single", "‘", "’"],
+    ])("%s quotation: ends right before the opener, with the colon and the blank gone", (_label, open, close) => {
+      const text = `Bakan Yılmaz: ${open}${LONG}önemlidir${close} dedi.`;
+      const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
+      expect(out).toBe("4 kaynak. Anadolu Ajansı: Bakan Yılmaz…");
+      expect(leavesNothingOpen(out)).toBe(true);
+    });
+
+    it.each([
+      ["curly double", "“", "”"],
+      ["angle", "«", "»"],
+      ["curly single", "‘", "’"],
+    ])("%s quotation: a comma in front of the opener goes with it", (_label, open, close) => {
+      const text = `Bakan Yılmaz, ${open}${LONG}önemlidir${close} dedi.`;
+      expect(describeForMeta({ count: 4, attribution: { text, source: AA } })).toBe(
+        "4 kaynak. Anadolu Ajansı: Bakan Yılmaz…",
+      );
+    });
+
+    it("a straight quotation too", () => {
+      const text = `Bakan Yılmaz , : "${LONG}önemlidir" dedi.`;
+      expect(describeForMeta({ count: 4, attribution: { text, source: AA } })).toBe(
+        "4 kaynak. Anadolu Ajansı: Bakan Yılmaz…",
+      );
+    });
+  });
+
+  describe("a sentence end in front of a late opener", () => {
+    it.each([
+      ["curly double", "“", "”"],
+      ["angle", "«", "»"],
+      ["curly single", "‘", "’"],
+      ["straight", '"', '"'],
+    ])("%s quotation: the description ends at the sentence end, in the same shape as a cut after a period", (_label, open, close) => {
+      const text = `İlk cümle burada bitti. Bakan ${open}${LONG}önemlidir${close} dedi.`;
+      const out = describeForMeta({ count: 4, attribution: { text, source: AA } });
+      expect(out).toBe("4 kaynak. Anadolu Ajansı: İlk cümle burada bitti.…");
+      expect(leavesNothingOpen(out)).toBe(true);
+    });
+  });
+
+  describe("the opener is the first character of the text", () => {
+    const text = `“${LONG}önemlidir” dedi.`;
+    const title = "Enerji güvenliği için işbirliği çağrısı";
+
+    it("with a title: the same description as without an attribution", () => {
+      const noAttribution = describeForMeta({ count: 4, attribution: null, title });
+      expect(noAttribution).toBe("4 kaynak, tek haber: Enerji güvenliği için işbirliği çağrısı");
+      expect(describeForMeta({ count: 4, attribution: { text, source: AA }, title })).toBe(noAttribution);
+      expect(describeForMeta({ count: 4, attribution: { text, source: null }, title })).toBe(noAttribution);
+    });
+
+    it("without a title: the bare '4 kaynak.'", () => {
+      expect(describeForMeta({ count: 4, attribution: null })).toBe("4 kaynak.");
+      expect(describeForMeta({ count: 4, attribution: { text, source: AA } })).toBe("4 kaynak.");
+      expect(describeForMeta({ count: 4, attribution: { text, source: null } })).toBe("4 kaynak.");
+    });
+
+    it.each([
+      ["«", "»"],
+      ["‘", "’"],
+      ['"', '"'],
+    ])("%s: the same, whatever the quotation mark", (open, close) => {
+      const t = `${open}${LONG}önemlidir${close} dedi.`;
+      expect(describeForMeta({ count: 4, attribution: { text: t, source: AA } })).toBe("4 kaynak.");
+    });
+
+    it("with a base: the base, as without an attribution", () => {
+      expect(
+        describeForMeta({ count: 3, attribution: { text, source: AA }, base: "3 kaynaktan haberler. Tek kaynaktan 5 kopya." }),
+      ).toBe("3 kaynaktan haberler. Tek kaynaktan 5 kopya.");
+    });
+  });
+
+  describe("the title fallback", () => {
+    it("ends in front of an open quotation in the title", () => {
+      const title = `Bakan Yılmaz: “${LONG}önemlidir”`;
+      const out = describeForMeta({ count: 4, attribution: null, title });
+      expect(out).toBe("4 kaynak, tek haber: Bakan Yılmaz…");
+      expect(leavesNothingOpen(out)).toBe(true);
+    });
+
+    it("gives the bare '4 kaynak.' when the title opens with the quotation", () => {
+      const title = `“${LONG}önemlidir”`;
+      expect(describeForMeta({ count: 4, attribution: null, title })).toBe("4 kaynak.");
+    });
+  });
+
+  describe("the rss.xml base path", () => {
+    const base = "3 kaynaktan haberler.";
+
+    it("a quoted attribution comes out balanced", () => {
+      const text = `Bakan Yılmaz, "${"enerji güvenliği ".repeat(40)}önemlidir" dedi.`;
+      const out = describeForMeta({ count: 3, attribution: { text, source: AA }, base }, 400);
+      expect(out).toBe("3 kaynaktan haberler. Anadolu Ajansı: Bakan Yılmaz…");
+      expect(leavesNothingOpen(out)).toBe(true);
+      expect(out.length).toBeLessThanOrEqual(400);
+    });
+
+    it("keeps the wire note of the base and the sentence end in front of the opener", () => {
+      const wireBase = "3 kaynaktan haberler. Tek kaynaktan 5 kopya.";
+      const text = `Birinci cümle tamamlandı. Bakan Yılmaz “${"enerji güvenliği ".repeat(40)}önemlidir” dedi.`;
+      const out = describeForMeta({ count: 3, attribution: { text, source: null }, base: wireBase }, 400);
+      expect(out).toBe("3 kaynaktan haberler. Tek kaynaktan 5 kopya. Kaynak açıklaması: Birinci cümle tamamlandı.…");
+      expect(leavesNothingOpen(out)).toBe(true);
+    });
+  });
+
+  describe("balanced inputs are byte-identical to the old cut", () => {
+    const prefix = "2 kaynak. Kaynak açıklaması: ";
+
+    it("a text without a quotation: every limit gives the old output", () => {
+      const text = "Bekleniyor… ardından açıklama geldi. Bakan Yılmaz toplantıdan çıktı, sonra basına konuştu.";
+      for (let max = prefix.length + 2; max <= prefix.length + text.length + 2; max++) {
+        const out = describeForMeta({ count: 2, attribution: { text, source: null } }, max);
+        expect(out, `max=${max}`).toBe(legacyTruncate(prefix + text, max));
+      }
+    });
+
+    it("a cut that ends in '…' keeps the old doubled ellipsis", () => {
+      const text = "Bekleniyor… ardından açıklama geldi.";
+      const max = prefix.length + "Bekleniyor… ".length + 1;
+      expect(describeForMeta({ count: 2, attribution: { text, source: null } }, max)).toBe(`${prefix}Bekleniyor……`);
+    });
+
+    it("a text with closed quotations: a balanced cut gives the old output, any other cut is balanced", () => {
+      const text =
+        'Yılmaz "enerji güvenliği" için, “işbirliği” ve «dayanışma» ile ‘birlik’ çağrısı yaptı. Sonra "ikinci söz" dedi.';
+      let balancedCuts = 0;
+      let backedOff = 0;
+      for (let max = prefix.length + 2; max <= prefix.length + text.length + 2; max++) {
+        const out = describeForMeta({ count: 2, attribution: { text, source: null } }, max);
+        const legacy = legacyTruncate(prefix + text, max);
+        expect(out.length, `max=${max}`).toBeLessThanOrEqual(max);
+        if (leavesNothingOpen(legacy)) {
+          expect(out, `max=${max}`).toBe(legacy);
+          balancedCuts++;
+        } else {
+          expect(leavesNothingOpen(out), `max=${max}: ${out}`).toBe(true);
+          backedOff++;
+        }
+      }
+      // Both branches ran.
+      expect(balancedCuts).toBeGreaterThan(10);
+      expect(backedOff).toBeGreaterThan(10);
+    });
+  });
+});

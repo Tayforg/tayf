@@ -86,6 +86,7 @@ import {
   MERGE_RECALL_WINDOW_DAYS,
   MERGE_THREAD_MAX_HOURS,
   MERGE_THREAD_MIN_CONFIDENCE,
+  pickDefaultTarget,
 } from "./merge-queue";
 
 function cluster(id: string, over: Record<string, unknown> = {}) {
@@ -543,5 +544,85 @@ describe("getRecentMerges", () => {
     };
     fx.clusters = { data: null, error: { message: "x" } };
     expect(await getRecentMerges()).toBeNull();
+  });
+});
+
+// pickDefaultTarget chooses the surviving cluster of an admin merge. The pair
+// arrives in either order (pairKey sorts by id, so the order is arbitrary), so
+// every rule must give the same answer for (a, b) and (b, a).
+describe("pickDefaultTarget", () => {
+  type Side = { id: string; articleCount: number; firstPublished: string | null };
+  const side = (id: string, articleCount: number, firstPublished: string | null): Side => ({
+    id,
+    articleCount,
+    firstPublished,
+  });
+
+  const EARLY = "2026-09-20T10:00:00Z";
+  const LATE = "2026-09-21T10:00:00Z";
+
+  const cases: Array<{ name: string; a: Side; b: Side; winner: string }> = [
+    {
+      name: "the higher articleCount wins even against an earlier date",
+      a: side(A, 9, LATE),
+      b: side(B, 3, EARLY),
+      winner: A,
+    },
+    {
+      name: "the higher articleCount wins even against a smaller id",
+      a: side(B, 4, EARLY),
+      b: side(A, 3, EARLY),
+      winner: B,
+    },
+    {
+      name: "equal counts: the earlier firstPublished wins",
+      a: side(B, 5, EARLY),
+      b: side(A, 5, LATE),
+      winner: B,
+    },
+    {
+      name: "equal counts: a null date loses to a real date",
+      a: side(A, 5, null),
+      b: side(B, 5, LATE),
+      winner: B,
+    },
+    {
+      name: "equal counts: an unparseable date loses to a real date",
+      a: side(A, 5, "not-a-date"),
+      b: side(B, 5, LATE),
+      winner: B,
+    },
+    {
+      name: "equal counts, both dates null: the smaller id wins",
+      a: side(B, 5, null),
+      b: side(A, 5, null),
+      winner: A,
+    },
+    {
+      name: "equal counts, one null and one unparseable date: the smaller id wins",
+      a: side(B, 5, null),
+      b: side(A, 5, "not-a-date"),
+      winner: A,
+    },
+    {
+      name: "equal counts, equal dates: the smaller id wins",
+      a: side(B, 5, EARLY),
+      b: side(A, 5, EARLY),
+      winner: A,
+    },
+    {
+      name: "equal counts, same instant in different spellings: the smaller id wins",
+      a: side(B, 5, "2026-09-20T10:00:00Z"),
+      b: side(A, 5, "2026-09-20T13:00:00+03:00"),
+      winner: A,
+    },
+  ];
+
+  it.each(cases)("$name", ({ a, b, winner }) => {
+    expect(pickDefaultTarget(a, b)).toBe(winner);
+  });
+
+  it.each(cases)("is symmetric: $name", ({ a, b }) => {
+    expect(pickDefaultTarget(a, b)).toBe(pickDefaultTarget(b, a));
   });
 });
