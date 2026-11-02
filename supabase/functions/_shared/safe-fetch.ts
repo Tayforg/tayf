@@ -52,24 +52,52 @@
 // Each entry is parsed once at module load and matched against every record
 // returned by Deno.resolveDns.
 //
+// This table is the Edge twin of the Node webhook guard's V4/V6 tables in
+// src/lib/alerts/webhook-url.ts. The two must refuse the same ranges;
+// tests/guards/ssrf-blocklist-parity.test.ts compares them (behaviour on every
+// block edge, and the CIDR sets themselves) and fails if one drifts.
+//
 // IPv4 blocks (RFC-numbered):
+//   0.0.0.0/8         — "this network", current network
 //   10.0.0.0/8        — RFC 1918 private
-//   172.16.0.0/12     — RFC 1918 private
-//   192.168.0.0/16    — RFC 1918 private
+//   100.64.0.0/10     — RFC 6598 CGNAT shared address space
 //   127.0.0.0/8       — loopback
 //   169.254.0.0/16    — link-local (covers AWS/GCP/Azure metadata 169.254.169.254)
-//   0.0.0.0/8         — "this network", current network
-//   100.64.0.0/10     — RFC 6598 CGNAT shared address space
+//   172.16.0.0/12     — RFC 1918 private
+//   192.0.0.0/24      — IETF protocol assignments
+//   192.0.2.0/24      — TEST-NET-1 documentation
+//   192.88.99.0/24    — deprecated 6to4 relay anycast (RFC 7526)
+//   192.168.0.0/16    — RFC 1918 private
+//   198.18.0.0/15     — RFC 2544 benchmarking
+//   198.51.100.0/24   — TEST-NET-2 documentation
+//   203.0.113.0/24    — TEST-NET-3 documentation
+//   224.0.0.0/4       — multicast
+//   240.0.0.0/4       — reserved / future use (includes 255.255.255.255, limited broadcast)
 //
 // IPv6 blocks:
+//   ::/128            — unspecified address
 //   ::1/128           — loopback (single host)
 //   fc00::/7          — RFC 4193 unique local addresses (ULA)
 //   fe80::/10         — link-local
+//   fec0::/10         — deprecated site-local (RFC 3879)
 //   2001:db8::/32     — RFC 3849 documentation prefix
+//   ff00::/8          — multicast
+//   64:ff9b::/96      — NAT64 well-known prefix (RFC 6052)
+//   2002::/16         — 6to4 (RFC 3056)
 //
-// Note: we DO NOT block public-but-suspicious ranges like multicast or
-// reserved/unassigned — those are not in the audit requirement, and a
-// global allowlist would be too strict for legitimate news CDNs.
+// NAT64 and 6to4 embed an IPv4 address, but the whole range is refused; the
+// embedded address is deliberately NOT unwrapped and re-tested, exactly like
+// the Node guard, so a "public" embedded address never makes either range
+// reachable.
+//
+// IPv4-mapped (::ffff:0:0/96) and IPv4-compatible (::/96) literals are not
+// table rows: ipv4MappedToV4 unwraps them and re-tests the embedded IPv4
+// against the IPv4 rows above, and a mapped literal that embeds a public IPv4
+// is refused as well. The Node guard spells those two ranges out as rows.
+//
+// Anything not listed is routable public space. A string that is not an IP
+// literal at all returns null from isPrivateAddress and goes on to DNS
+// resolution (see its contract below).
 // ---------------------------------------------------------------------------
 
 interface IPv4Block {
@@ -207,6 +235,7 @@ const BLOCKED_BLOCKS: readonly IPBlock[] = [
   parseIPv4Block("192.0.2.0/24", "TEST-NET-1 192.0.2.0/24"),
   parseIPv4Block("198.51.100.0/24", "TEST-NET-2 198.51.100.0/24"),
   parseIPv4Block("203.0.113.0/24", "TEST-NET-3 203.0.113.0/24"),
+  parseIPv4Block("192.88.99.0/24", "6to4 relay anycast 192.88.99.0/24"),
   parseIPv4Block("224.0.0.0/4", "multicast 224.0.0.0/4"),
   // future-use 240.0.0.0/4 covers 255.255.255.255 (limited broadcast),
   // so no separate /32 entry is needed for the broadcast literal.
@@ -218,6 +247,12 @@ const BLOCKED_BLOCKS: readonly IPBlock[] = [
   parseIPv6Block("fe80::/10", "IPv6 link-local fe80::/10"),
   parseIPv6Block("2001:db8::/32", "IPv6 doc 2001:db8::/32"),
   parseIPv6Block("ff00::/8", "IPv6 multicast ff00::/8"),
+  // h29-security-1: site-local, NAT64 and 6to4 were treated as public here
+  // while the Node webhook guard refused them. The whole ranges are blocked
+  // (the embedded IPv4 of NAT64 / 6to4 is not unwrapped), as Node does.
+  parseIPv6Block("fec0::/10", "IPv6 site-local fec0::/10"),
+  parseIPv6Block("64:ff9b::/96", "NAT64 64:ff9b::/96"),
+  parseIPv6Block("2002::/16", "6to4 2002::/16"),
 ];
 
 function matchIPv4Block(addr: number, block: IPv4Block): boolean {

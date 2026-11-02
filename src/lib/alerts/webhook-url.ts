@@ -47,12 +47,17 @@ export function validateWebhookUrlSyntax(raw: string): WebhookUrlCheck {
   if (net.isIP(bare) !== 0) return { ok: false, reason: "ip_literal" };
 
   const host = bare.endsWith(".") ? bare.slice(0, -1) : bare;
-  if (!host.includes(".")) return { ok: false, reason: "no_dot" };
+  // Before no_dot: "localhost" has no dot, so checked the other way round this
+  // branch could never fire and every bare localhost was reported as no_dot.
   if (host === "localhost") return { ok: false, reason: "localhost" };
+  if (!host.includes(".")) return { ok: false, reason: "no_dot" };
   if (BLOCKED_HOST_SUFFIXES.some((s) => host.endsWith(s))) {
     return { ok: false, reason: "internal_suffix" };
   }
   // A trailing all-numeric label ("1.2.3.4" spelled oddly) is never a real TLD.
+  // Defence in depth: today the WHATWG parser already rejects such a host
+  // ("a.123" makes `new URL` throw, which surfaces as "unparseable" above), so
+  // this branch is unreachable; it stays so a parser change cannot let one by.
   if (/^\d+$/.test(host.slice(host.lastIndexOf(".") + 1))) {
     return { ok: false, reason: "numeric_tld" };
   }

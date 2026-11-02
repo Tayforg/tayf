@@ -292,6 +292,26 @@ describe("/trends page — SVG <title> is a single string", () => {
     ]);
   });
 
+  it("groups a count of 1000 or more with the tr-TR dot, as a single string", async () => {
+    const { buckets, lastDay } = seededBuckets();
+    const last = buckets[buckets.length - 1]!;
+    last.counts.iktidar = 3830;
+    last.counts.muhalefet = 1146;
+    last.total = 3830 + 1146;
+    mockBuckets = buckets;
+
+    const tree = await TrendsPage();
+
+    const titles = collectElements(tree).filter((el) => el.type === "title");
+    expect(titles.map((t) => t.props?.children)).toEqual([
+      `${lastDay} · ${ZONE_META.iktidar.label}: 3.830`,
+      `${lastDay} · ${ZONE_META.muhalefet.label}: 1.146`,
+    ]);
+    for (const title of titles) {
+      expect(typeof title.props?.children).toBe("string");
+    }
+  });
+
   it("serialises to non-empty <title> markup (no '<title></title>')", async () => {
     const { buckets, lastDay } = seededBuckets();
     mockBuckets = buckets;

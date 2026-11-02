@@ -18,6 +18,7 @@ export const metadata: Metadata = staticPageMetadata({
 import { ZONE_META } from "@/lib/bias/config";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { niceScale } from "@/lib/format/nice-scale";
+import { trendBarTitle } from "@/lib/trends/bar-title";
 import { chartTableRows } from "@/lib/trends/chart-table";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { getRisingEntities } from "@/lib/trends/rising-query";
@@ -257,7 +258,7 @@ export default async function TrendsPage() {
                       {/* A single string child: React 19 renders a <title>
                           with multiple children (day, label, count as
                           separate JSX expressions) as an empty <title></title>. */}
-                      <title>{`${bucket.day} · ${ZONE_META[zone].label}: ${count}`}</title>
+                      <title>{trendBarTitle(bucket.day, ZONE_META[zone].label, count)}</title>
                     </rect>
                   );
                 });

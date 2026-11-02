@@ -62,6 +62,12 @@ describe("isBlockedAddress", () => {
   );
 });
 
+describe("isBlockedAddress with non-string input", () => {
+  it.each([undefined, 42, null])("fails closed for %s", (value) => {
+    expect(isBlockedAddress(value as unknown as string)).toBe(true);
+  });
+});
+
 describe("validateWebhookUrlSyntax", () => {
   it("accepts a plain https url and reports the host", () => {
     const r = validateWebhookUrlSyntax("https://hooks.example.com/tayf?x=1");
@@ -103,6 +109,20 @@ describe("validateWebhookUrlSyntax", () => {
   it("rejects non-strings", () => {
     expect(validateWebhookUrlSyntax(undefined as unknown as string).ok).toBe(false);
     expect(validateWebhookUrlSyntax(42 as unknown as string).ok).toBe(false);
+  });
+
+  // The localhost check used to sit after the no_dot check, so it could never
+  // fire: every bare "localhost" was reported as no_dot.
+  it.each(["https://localhost/x", "https://LOCALHOST./x"])("names %s as localhost", (raw) => {
+    expect(validateWebhookUrlSyntax(raw)).toEqual({ ok: false, reason: "localhost" });
+  });
+
+  it("names a dotless intranet host as no_dot", () => {
+    expect(validateWebhookUrlSyntax("https://intranet/x")).toEqual({ ok: false, reason: "no_dot" });
+  });
+
+  it("rejects a numeric trailing label (the WHATWG parser already refuses it)", () => {
+    expect(validateWebhookUrlSyntax("https://a.123/x").ok).toBe(false);
   });
 });
 

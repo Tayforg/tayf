@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertHostnameIsPublic,
   isPrivateAddress,
+  resolveAndPin,
   safeFetch,
   SafeFetchError,
   safeResponse,
@@ -519,5 +520,270 @@ describe("safeResponse", () => {
     const [, init] = fetchStub.mock.calls[0];
     const headers = new Headers((init as RequestInit).headers);
     expect(headers.get("if-none-match")).toBe('"abc"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h29 parity: the Node webhook guard (src/lib/alerts/webhook-url.ts) refuses
+// NAT64 64:ff9b::/96, 6to4 2002::/16, site-local fec0::/10 and 192.88.99.0/24;
+// the Edge guard must refuse the same whole ranges (no unwrapping of the
+// embedded IPv4). tests/guards/ssrf-blocklist-parity.test.ts keeps the two
+// lists in step; this table pins the Edge side directly.
+// ---------------------------------------------------------------------------
+
+describe("isPrivateAddress h29 parity", () => {
+  it.each([
+    // NAT64 64:ff9b::/96, embedded 127.0.0.1 / 169.254.169.254 / 8.8.8.8
+    "64:ff9b::7f00:1",
+    "64:ff9b::a9fe:a9fe",
+    "64:ff9b::808:808",
+    // 6to4 2002::/16, the bare prefix and embedded loopback / metadata
+    "2002::",
+    "2002:7f00:1::",
+    "2002:a9fe:a9fe::",
+    // site-local fec0::/10, first and last /16 of the range
+    "fec0::1",
+    "feff::1",
+    // 6to4 relay anycast 192.88.99.0/24, first / middle / last
+    "192.88.99.0",
+    "192.88.99.1",
+    "192.88.99.255",
+  ])("blocks %s", (ip) => {
+    expect(isPrivateAddress(ip), ip).not.toBeNull();
+  });
+
+  it.each([
+    "1.1.1.1",
+    // just outside 192.88.99.0/24
+    "192.88.98.255",
+    "192.88.100.0",
+    "2606:4700:4700::1111",
+    "2a00:1450:4001::64",
+    // NAT64's local-use prefix 64:ff9b:1::/48 is NOT the well-known /96
+    "64:ff9b:1::1",
+    // neighbours of fe80::/10 + fec0::/10 + ff00::/8
+    "fe00::1",
+    // Teredo 2001::/32 and the /16 after 6to4
+    "2001::1",
+    "2003::1",
+  ])("does not block %s", (ip) => {
+    expect(isPrivateAddress(ip), ip).toBeNull();
+  });
+});
+
+describe("h29 ranges are refused through every entry point", () => {
+  it.each([
+    "http://[64:ff9b::7f00:1]/",
+    "http://[64:ff9b::169.254.169.254]/latest/meta-data",
+    "http://[2002:a9fe:a9fe::]/",
+    "http://[fec0::1]/",
+    "http://192.88.99.1/",
+  ])("safeFetch(%s) throws SafeFetchError without dialling", async (url) => {
+    const fetchStub = queueFetchResponses([new Response("never served", { status: 200 })]);
+    await expect(safeFetch(url)).rejects.toBeInstanceOf(SafeFetchError);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+  });
+
+  it.each([
+    ["NAT64", "64:ff9b::a9fe:a9fe"],
+    ["6to4", "2002:7f00:1::"],
+    ["site-local", "fec0::1"],
+  ])("rejects a hostname whose AAAA record is %s (%s), even beside a public A", async (_label, aaaa) => {
+    stubResolveDns(["93.184.216.34"], [aaaa]);
+    const reason = await assertHostnameIsPublic("sneaky.example");
+    expect(reason).toMatch(/blocked range/);
+    expect(reason).toContain(aaaa);
+  });
+
+  it("rejects a redirect hop into a NAT64-wrapped metadata address", async () => {
+    stubResolveDns(["93.184.216.34"]);
+    const fetchStub = queueFetchResponses([
+      new Response(null, {
+        status: 302,
+        headers: { Location: "http://[64:ff9b::a9fe:a9fe]/latest/meta-data" },
+      }),
+      new Response("never served", { status: 200 }),
+    ]);
+    await expect(safeFetch("https://public.example/start")).rejects.toBeInstanceOf(SafeFetchError);
+    // Only the first hop was dialled.
+    expect(fetchStub).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    "64:FF9B::7F00:1",
+    "0064:ff9b:0000:0000:0000:0000:7f00:0001",
+    "2002:A9FE:A9FE::",
+    "FEC0::1",
+    "fec0::1%eth0",
+  ])("is case, zero-padding and zone-id insensitive: %s", (ip) => {
+    expect(isPrivateAddress(ip), ip).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fail-closed branches: DNS failure, empty answers, malformed hostnames, the
+// resolveAndPin rebinding re-check, the http pin rejection, and the bounded
+// body reader. Per-record-type call counters prove which lookups ran; fetch is
+// always a stub, so nothing here touches the network.
+// ---------------------------------------------------------------------------
+
+interface DnsHandlers {
+  /** Called with the 1-based count of lookups of that record type so far. */
+  A: (callNo: number) => Promise<string[]>;
+  AAAA: (callNo: number) => Promise<string[]>;
+}
+
+function stubDnsPerType(handlers: DnsHandlers): {
+  calls: { A: number; AAAA: number };
+  resolveDns: ReturnType<typeof vi.fn>;
+} {
+  const calls = { A: 0, AAAA: 0 };
+  const resolveDns = vi.fn(async (_host: string, recordType: string) => {
+    if (recordType !== "A" && recordType !== "AAAA") {
+      throw new Error(`unexpected record type ${recordType}`);
+    }
+    calls[recordType] += 1;
+    return handlers[recordType](calls[recordType]);
+  });
+  vi.stubGlobal("Deno", { resolveDns, serve: vi.fn() });
+  return { calls, resolveDns };
+}
+
+const rejectLookup = (): Promise<string[]> => Promise.reject(new Error("NotFound"));
+const answer = (...ips: string[]) => (): Promise<string[]> => Promise.resolve(ips);
+
+/** A byte stream that hands out one chunk per pull and records pulls / cancel. */
+function chunkedStream(chunks: string[]): {
+  stream: ReadableStream<Uint8Array>;
+  state: { pulls: number; cancelled: boolean };
+} {
+  const encoder = new TextEncoder();
+  const state = { pulls: 0, cancelled: false };
+  let next = 0;
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      pull(controller) {
+        state.pulls += 1;
+        const chunk = chunks[next];
+        next += 1;
+        if (chunk === undefined) controller.close();
+        else controller.enqueue(encoder.encode(chunk));
+      },
+      cancel() {
+        state.cancelled = true;
+      },
+    },
+    // highWaterMark 0: the stream never reads ahead, so pulls == chunks the
+    // consumer actually asked for.
+    { highWaterMark: 0 },
+  );
+  return { stream, state };
+}
+
+describe("assertHostnameIsPublic fail-closed branches", () => {
+  it("fails closed with 'DNS resolution failed' when both resolvers reject", async () => {
+    const dns = stubDnsPerType({ A: rejectLookup, AAAA: rejectLookup });
+    expect(await assertHostnameIsPublic("down.example")).toBe("DNS resolution failed");
+    expect(dns.calls).toEqual({ A: 1, AAAA: 1 });
+  });
+
+  it("fails closed when both resolvers answer with empty lists", async () => {
+    const dns = stubDnsPerType({ A: answer(), AAAA: answer() });
+    expect(await assertHostnameIsPublic("empty.example")).toBe(
+      "hostname has no A or AAAA records",
+    );
+    expect(dns.calls).toEqual({ A: 1, AAAA: 1 });
+  });
+
+  it("rejects a hostname with an underscore before any DNS lookup", async () => {
+    const dns = stubDnsPerType({ A: answer("8.8.8.8"), AAAA: answer("2606:4700::1111") });
+    expect(await assertHostnameIsPublic("a_b.example")).toMatch(/invalid characters/);
+    expect(dns.resolveDns).not.toHaveBeenCalled();
+  });
+
+  it("rejects a 254-character hostname before any DNS lookup", async () => {
+    const dns = stubDnsPerType({ A: answer("8.8.8.8"), AAAA: answer("2606:4700::1111") });
+    expect(await assertHostnameIsPublic("a".repeat(254))).toBe("invalid hostname length");
+    expect(dns.resolveDns).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveAndPin", () => {
+  it("rejects a hostname whose second A lookup flips to a private address", async () => {
+    const dns = stubDnsPerType({
+      A: (n) => Promise.resolve(n === 1 ? ["93.184.216.34"] : ["10.0.0.5"]),
+      AAAA: rejectLookup,
+    });
+    const pinned = await resolveAndPin("rebind.example");
+    expect(typeof pinned).toBe("string");
+    expect(pinned as string).toContain("rebinding attempt rejected");
+    // One validation pass plus the pin pass: two A lookups.
+    expect(dns.calls.A).toBe(2);
+  });
+
+  it("pins the first public AAAA record when only IPv6 resolves", async () => {
+    stubDnsPerType({ A: rejectLookup, AAAA: answer("2606:4700::1111") });
+    expect(await resolveAndPin("v6only.example")).toEqual({
+      pinIp: "2606:4700::1111",
+      ipFamily: "v6",
+    });
+  });
+
+  it("pins a literal IPv4 without any DNS lookup", async () => {
+    const dns = stubDnsPerType({ A: rejectLookup, AAAA: rejectLookup });
+    expect(await resolveAndPin("93.184.216.34")).toEqual({
+      pinIp: "93.184.216.34",
+      ipFamily: "v4",
+    });
+    expect(dns.resolveDns).not.toHaveBeenCalled();
+  });
+});
+
+describe("safeFetch fail-closed branches", () => {
+  it("rejects an http hop whose pin lookup flips to the metadata address, without fetching", async () => {
+    stubDnsPerType({
+      A: (n) => Promise.resolve(n === 1 ? ["93.184.216.34"] : ["169.254.169.254"]),
+      AAAA: rejectLookup,
+    });
+    const fetchStub = queueFetchResponses([new Response("never served", { status: 200 })]);
+
+    const error = await safeFetch("http://flip.example/").catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(SafeFetchError);
+    expect((error as SafeFetchError).message).toMatch(/pin rejected/);
+    expect(fetchStub).toHaveBeenCalledTimes(0);
+  });
+
+  it("cuts the body at maxBytes, slicing inside the chunk that crosses the ceiling", async () => {
+    stubDnsPerType({ A: answer("93.184.216.34"), AAAA: rejectLookup });
+    const { stream, state } = chunkedStream(["aaaa", "bbbb", "cccc"]);
+    queueFetchResponses([new Response(stream, { status: 200 })]);
+
+    const result = await safeFetch("https://example.com/big", { maxBytes: 6 });
+    expect(result.body).toBe("aaaabb");
+    // Chunk three was never requested and the socket was released.
+    expect(state.pulls).toBe(2);
+    expect(state.cancelled).toBe(true);
+  });
+
+  it("stops reading as soon as shouldStopReading says so", async () => {
+    stubDnsPerType({ A: answer("93.184.216.34"), AAAA: rejectLookup });
+    const { stream, state } = chunkedStream(["aaaa", "bbbb", "cccc"]);
+    queueFetchResponses([new Response(stream, { status: 200 })]);
+
+    const result = await safeFetch("https://example.com/head", {
+      shouldStopReading: (accumulated) => accumulated.includes("aaaa"),
+    });
+    expect(result.body).toBe("aaaa");
+    expect(state.pulls).toBe(1);
+    expect(state.cancelled).toBe(true);
+  });
+
+  it("returns an empty body for a bodyless 204", async () => {
+    stubDnsPerType({ A: answer("93.184.216.34"), AAAA: rejectLookup });
+    queueFetchResponses([new Response(null, { status: 204 })]);
+
+    const result = await safeFetch("https://example.com/none");
+    expect(result.status).toBe(204);
+    expect(result.body).toBe("");
   });
 });

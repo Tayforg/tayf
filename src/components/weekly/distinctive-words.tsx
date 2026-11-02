@@ -1,5 +1,6 @@
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { ZONE_META } from "@/lib/bias/config";
+import { formatCountTr } from "@/lib/format/number-tr";
 import type { DistinctiveTerm, WeeklyDistinctiveWords } from "@/lib/weekly/distinctive-words";
 import { ZONE_MEDIA_HEADING, ZONE_MEDIA_LOCATIVE } from "@/lib/weekly/zone-media-label";
 import type { MediaDnaZone } from "@/types";
@@ -84,9 +85,9 @@ function ZoneColumn({
           {terms.map((term) => (
             <li key={term.term} className="text-sm text-foreground/90">
               <span className="font-medium">{term.display}</span>
-              <span aria-hidden="true">{` · ${term.count} başlık · z ${formatZ(term.z)}`}</span>
+              <span aria-hidden="true">{` · ${formatCountTr(term.count)} başlık · z ${formatZ(term.z)}`}</span>
               <span className="sr-only">
-                {`, ${term.count} başlık, belirginlik puanı ${formatZ(term.z)}`}
+                {`, ${formatCountTr(term.count)} başlık, belirginlik puanı ${formatZ(term.z)}`}
               </span>
               {term.example ? (
                 <div className={metaClass}>
@@ -119,7 +120,7 @@ function ZoneColumn({
 function Footnote({ sample }: { sample: Record<MediaDnaZone, number> }) {
   return (
     <p className={metaClass}>
-      {`Her bölgeden son 7 günün başlıklarından günde en fazla 300 başlık (id sırasına göre) alındı (İktidar ${sample.iktidar}, Bağımsız ${sample.bagimsiz}, Muhalefet ${sample.muhalefet} başlık); aynı başlığın kopyaları bir kez sayıldı. Bir kelime o bölgede en az 5 başlıkta ve en az 3 farklı kaynakta geçmeli, belirginlik puanı (z) en az 1,96 olmalı. Yöntem: bilgilendirici Dirichlet önselli log-odds oranı (Monroe, Colaresi ve Quinn, 2008).`}
+      {`Her bölgeden son 7 günün başlıklarından günde en fazla 300 başlık (id sırasına göre) alındı (İktidar ${formatCountTr(sample.iktidar)}, Bağımsız ${formatCountTr(sample.bagimsiz)}, Muhalefet ${formatCountTr(sample.muhalefet)} başlık); aynı başlığın kopyaları bir kez sayıldı. Bir kelime o bölgede en az 5 başlıkta ve en az 3 farklı kaynakta geçmeli, belirginlik puanı (z) en az 1,96 olmalı. Yöntem: bilgilendirici Dirichlet önselli log-odds oranı (Monroe, Colaresi ve Quinn, 2008).`}
     </p>
   );
 }

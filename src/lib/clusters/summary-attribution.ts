@@ -1,5 +1,5 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
-import { tidySummaryText } from "@/lib/articles/summary-tidy";
+import { backOffOpenQuote, tidySummaryText } from "@/lib/articles/summary-tidy";
 import type { WireSignal } from "./wire";
 import type { BiasCategory } from "@/types";
 
@@ -156,15 +156,27 @@ export function summaryAttribution({
 
 const ELLIPSIS = "…";
 
-/** Word-boundary truncation shared by every `describeForMeta` branch. */
-function truncateWords(full: string, max: number): string {
+/**
+ * Word-boundary truncation shared by every `describeForMeta` branch. A cut that
+ * would end inside an open quotation (`Yılmaz, "İsrail'in … baskısına…`,
+ * h29-regress-1) is backed off by {@link backOffOpenQuote}: to the last sentence
+ * end or to the word in front of the opener, never to a cut that ends at or
+ * before `floor` (the length of the leading sentence and the attribution label,
+ * which are not the text). Null when no such cut exists; the caller then falls
+ * back to the description without the text. A balanced cut is cut exactly as it
+ * always was.
+ */
+function truncateWords(full: string, max: number, floor = 0): string | null {
   if (full.length <= max) return full;
   const truncated = full.slice(0, Math.max(0, max - 1));
   const lastSpace = truncated.lastIndexOf(" ");
   const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
+  const kept = backOffOpenQuote(cut, { floor });
+  if (kept === null) return null;
   // A double space at the boundary would leave one blank in front of the
   // ellipsis ("geçirilecek. …").
-  return cut.trimEnd() + ELLIPSIS;
+  if (kept === cut) return cut.trimEnd() + ELLIPSIS;
+  return kept.endsWith(ELLIPSIS) ? kept : kept.trimEnd() + ELLIPSIS;
 }
 
 /**
@@ -182,6 +194,11 @@ function truncateWords(full: string, max: number): string {
  * used instead to build a per-cluster fallback sentence. `base`-supplying
  * callers (rss.xml) are unaffected: the fallback only fires when `base` is
  * absent, so their own composed prefix always wins.
+ *
+ * h29-regress-1: the word cut never ends inside an open quotation (see
+ * `truncateWords`). An attribution text that opens with the quotation has no
+ * cut that does not, so the description is the one without an attribution (the
+ * title sentence, else `head`).
  */
 export function describeForMeta(
   {
@@ -198,17 +215,22 @@ export function describeForMeta(
   max = 160,
 ): string {
   const head = base ?? `${count} kaynak.`;
-  if (!attribution) {
+  // The description without an attribution: the title sentence, else the head.
+  // An attribution whose text cannot be cut without ending inside a quotation
+  // (it opens with the quotation) falls back to it.
+  const withoutAttribution = (): string => {
     if (base === undefined && title && title.trim().length > 0) {
-      return truncateWords(`${count} kaynak, tek haber: ${title.trim()}`, max);
+      const lead = `${count} kaynak, tek haber: `;
+      return truncateWords(lead + title.trim(), max, lead.length) ?? head;
     }
     return head;
-  }
+  };
+  if (!attribution) return withoutAttribution();
 
   const prefix = attribution.source
     ? `${head} ${attribution.source.name}: `
     : `${head} Kaynak açıklaması: `;
-  return truncateWords(prefix + attribution.text, max);
+  return truncateWords(prefix + attribution.text, max, prefix.length) ?? withoutAttribution();
 }
 
 /**

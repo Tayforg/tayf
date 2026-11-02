@@ -129,8 +129,16 @@ export async function send(
   if (error) {
     throw new Error(`pgmq.send(${queue}): ${error.message}`);
   }
-  // pgmq.send returns a single bigint (the msg_id).
-  if (Array.isArray(data) && data.length > 0) return Number(data[0]);
-  if (typeof data === "number") return data;
-  return Number(data);
+  // pgmq.send returns a single bigint (the msg_id). PostgREST hands it back as
+  // a JSON number; a one-element array and a numeric string are tolerated too.
+  // Anything else (null, undefined, [], "abc", ...) is NOT a message id: fail
+  // loudly rather than return 0 or NaN for a send that may not have happened.
+  const id: unknown = Array.isArray(data) ? data[0] : data;
+  let msgId = Number.NaN;
+  if (typeof id === "number") msgId = id;
+  else if (typeof id === "string" && id.trim() !== "") msgId = Number(id);
+  if (!Number.isFinite(msgId)) {
+    throw new Error(`pgmq.send(${queue}): no msg_id returned`);
+  }
+  return msgId;
 }

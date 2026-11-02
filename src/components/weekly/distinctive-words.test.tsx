@@ -155,3 +155,35 @@ describe("DistinctiveWords zone headings (h19-copy-1)", () => {
     }
   });
 });
+
+describe("DistinctiveWords tr-TR counts (h29-regress-2)", () => {
+  // /hafta printed the sample sizes raw ("İktidar 1789"), next to numbers the
+  // rest of the page groups with a dot.
+  it("groups the footnote sample counts with the tr-TR dot", () => {
+    const data = { ...okData(), sample: { iktidar: 1789, bagimsiz: 1828, muhalefet: 1809 } };
+    const markup = renderToStaticMarkup(<DistinctiveWords data={data} />);
+
+    expect(markup).toContain("İktidar 1.789, Bağımsız 1.828, Muhalefet 1.809 başlık");
+    expect(markup).not.toContain("İktidar 1789");
+    // The per-day cap is under 1000 and stays a bare number.
+    expect(markup).toContain("günde en fazla 300 başlık");
+  });
+
+  it("leaves sample counts under 1000 as they are", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+
+    expect(markup).toContain("İktidar 300, Bağımsız 280, Muhalefet 260 başlık");
+  });
+
+  it("groups a term count of 1000 or more in the visible row and in the screen-reader twin", () => {
+    const data = okData();
+    const first = data.status === "ok" ? data.zones.iktidar[0] : undefined;
+    expect(first).toBeDefined();
+    if (first) first.count = 1234;
+    const markup = renderToStaticMarkup(<DistinctiveWords data={data} />);
+
+    expect(markup).toContain('<span aria-hidden="true"> · 1.234 başlık · z 5,6</span>');
+    expect(markup).toContain('<span class="sr-only">, 1.234 başlık, belirginlik puanı 5,6</span>');
+    expect(markup).not.toContain("1234");
+  });
+});

@@ -27,6 +27,7 @@ const ROOT = resolve(__dirname, "..", "..");
 const MIGRATIONS_DIR = resolve(ROOT, "supabase", "migrations");
 const FILE = "142_image_backfill_retry.sql";
 const MIGRATION_142 = resolve(MIGRATIONS_DIR, FILE);
+const MIGRATION_154 = resolve(MIGRATIONS_DIR, "154_image_requeue_stagger.sql");
 const CONSUMER = resolve(ROOT, "supabase", "functions", "image-consumer", "index.ts");
 const ARCHITECTURE = resolve(ROOT, "docs", "architecture.md");
 
@@ -90,6 +91,12 @@ const body = tight(fnBodyMatch?.[3] ?? "");
 const cronBlock = /do \$cron\$([\s\S]*?)\$cron\$;/i.exec(code)?.[1] ?? "";
 const cron = norm(cronBlock);
 const SCHEDULED_N = Number(/select public\.image_backfill_requeue\((\d+)\);/.exec(cron)?.[1]);
+
+// The schedule the database really ends up with is 154's (it replaced the job and the function of 142),
+// so the docs row is checked against the comment-free text of 154, not against 142 and not against a literal.
+const code154 = stripSqlComments(readFileSync(MIGRATION_154, "utf8"));
+const CRON_EXPR_154 = /perform cron\.schedule\('image-backfill-requeue',\s*'([^']+)'/.exec(code154)?.[1] ?? "";
+const REQUEUE_N_154 = Number(/select public\.image_backfill_requeue\((\d+)\);/.exec(code154)?.[1]);
 
 const consumer = readFileSync(CONSUMER, "utf8");
 const consumerHeader = consumer.slice(0, consumer.indexOf("\nimport "));
@@ -379,9 +386,19 @@ describe("142 image_backfill_retry: comments no longer promise a resweep that do
     const requeue = rows.find((l) => l.startsWith("| Image requeue |"));
     expect(requeue).toBeDefined();
     expect(requeue).toContain("image-backfill-requeue");
-    expect(requeue).toContain("`17 * * * *`");
-    expect(requeue).toContain(`image_backfill_requeue(${SCHEDULED_N})`);
-    expect(requeue).toMatch(/migration 142/i);
+    // 154 (not 142) leaves the schedule and the requeue size behind; the row must carry them.
+    expect(CRON_EXPR_154.split(" ")).toHaveLength(5);
+    expect(Number.isInteger(REQUEUE_N_154)).toBe(true);
+    expect(REQUEUE_N_154).toBeGreaterThanOrEqual(1);
+    expect(REQUEUE_N_154).toBeLessThanOrEqual(300);
+    expect(requeue).toContain(`\`${CRON_EXPR_154}\``);
+    expect(requeue).toContain(`image_backfill_requeue(${REQUEUE_N_154})`);
+    expect(requeue).toMatch(/migrations?/i);
+    expect(requeue).toMatch(/\b142\b/);
+    expect(requeue).toMatch(/\b154\b/);
+    // 154 keeps 142's windows: re-sends only articles last tried over 2 hours ago and created within 7 days.
+    expect(code154).toContain("interval '2 hours'");
+    expect(code154).toContain("interval '7 days'");
     expect(requeue).toMatch(/2 h/);
     expect(requeue).toMatch(/7 d/);
     expect(requeue).toMatch(/park/i);

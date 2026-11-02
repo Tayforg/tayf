@@ -22,15 +22,27 @@ and how to prove the new value works while the old one is dead.
 
 | Secret | Lives in | Set today? | Rotation forces re-auth of |
 | --- | --- | --- | --- |
-| `SUPABASE_SERVICE_ROLE_KEY` | Vercel env, GitHub Actions secret, Supabase Vault secret `service_role_key` | Yes | Everything — DB bypass, all Edge Functions, all pg_cron drains |
+| `SUPABASE_SERVICE_ROLE_KEY` | Vercel env, GitHub Actions secret, Supabase Vault secret `service_role_key` | Yes | Everything — DB bypass, all Edge Functions, the 12 pg_cron jobs that read the Vault secret |
 | `CRON_SECRET` | Vercel env, Supabase Edge Function secret (`cluster-consumer` only) | Yes | Vercel cron routes, `/api/revalidate` caller |
 | `REVALIDATE_URL` | Supabase Edge Function secret (`cluster-consumer` only) | Yes | Nothing (not a credential; a destination URL) |
 | `ADMIN_SESSION_SECRET` | Vercel env | Yes | Every logged-in admin browser |
 | `ADMIN_PASSWORD` | Vercel env | Yes | Every logged-in admin browser (the session cookie is bound to it) |
 | `RESEND_API_KEY` | Vercel env | **No** | Outbound mail (feature is fail-closed while unset) |
 | `ANTHROPIC_API_KEY` | Vercel env, GitHub Actions secret | **No** | Headline-neutralization cron + audit's neutral-title check (both soft no-op while unset) |
+| `AI_GATEWAY_API_KEY` | Supabase Edge Function secret (read by `jev-shadow` and `cluster-consumer`); also read from the operator's shell by `scripts/topic7-v2-gate.mjs` | founder to fill | Every Jev call. While unset Jev no-ops: `jev-shadow` answers `skipped: no-api-key` without calling the gateway, and the `cluster-consumer` live-pairs step stays off |
+| `TELEGRAM_BOT_TOKEN` | Vercel env (`src/lib/social/config.ts`; see [`owned-channels.md`](owned-channels.md)) | founder to fill | Telegram posting of `/api/cron/social` (that channel is skipped while the token or `TELEGRAM_CHANNEL_ID` is unset) |
+| `BLUESKY_APP_PASSWORD` | Vercel env (`src/lib/social/config.ts`; see [`owned-channels.md`](owned-channels.md)) | founder to fill | Bluesky posting of `/api/cron/social` (that channel is skipped while the app password or `BLUESKY_HANDLE` is unset) |
 | `SENTRY_AUTH_TOKEN` | Vercel env (build-time only) | Optional | Sourcemap upload on the next build only |
 | Supabase management access token | Operator laptop only — never deployed anywhere | Operator-held | The operator's own CLI/API sessions |
+
+The three rows marked `founder to fill` (`AI_GATEWAY_API_KEY`,
+`TELEGRAM_BOT_TOKEN`, `BLUESKY_APP_PASSWORD`) are inventory entries: this file
+has no rotation section for them yet, and only their names are written here.
+Rotate them the same way as the secrets below: `supabase secrets set NAME="$NEW" --project-ref "$PROJECT_REF"`
+for the Edge Function secret (read on the function's next cold start; redeploy
+`jev-shadow` and `cluster-consumer` to force it), and `vercel env rm` /
+`vercel env add` plus `vercel --prod` for the two Vercel ones. The founder
+records in the `Set today?` column whether each one is set in production.
 
 ---
 
@@ -46,18 +58,40 @@ platform manages automatically:**
    `workflow_dispatch`) and `.github/workflows/ops-heartbeat.yml` (`*/30`
    ops heartbeat + `workflow_dispatch`; see `ops-heartbeat.md`).
 3. **Supabase Vault secret named `service_role_key`** — read at *run time*
-   (not deploy time) by three of the six pg_cron jobs migration 038/043/045
-   installed: `ingest-drain`, `cluster-drain`, and `image-drain`. Each job's
-   SQL body does
+   (not deploy time) by **12 of the 42 pg_cron jobs** on production
+   (counted 2026-11-02). Each job's SQL body does
    `Authorization: Bearer (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key')`
-   to call its Edge Function over `net.http_post` (`supabase/migrations/038_cron_schedules.sql`).
-   **Correction to a claim you may see elsewhere:** `prune-nightly` (038),
-   `reader-data-purge` (043), and `articles-vacuum` (045) do **not** read
-   this secret — all three run as plain `select public.<fn>();` / `vacuum`
-   entirely inside Postgres, with no outbound HTTP call and no Vault read.
-   Only the three drains above consume it.
-4. **Edge Function runtime (`ingest`, `cluster-consumer`, `image-consumer`)**
-   — `supabase/functions/_shared/supabase.ts` reads
+   to call its Edge Function over `net.http_post` (for example
+   `supabase/migrations/038_cron_schedules.sql`). The 12 jobs and the function
+   each one calls:
+
+   | Edge Function | pg_cron jobs |
+   | --- | --- |
+   | `ingest` | `ingest-drain` |
+   | `cluster-consumer` | `cluster-drain` |
+   | `image-consumer` | `image-drain` |
+   | `kap-ingest` | `kap-drain`, `kap-corrections-daily` |
+   | `quotes-ingest` | `quotes-daily`, `quotes-intraday` |
+   | `archive-export` | `archive-export`, `archive-export-catchup` |
+   | `jev-shadow` | `jev-shadow`, `jev-cluster-audit`, `jev-regression-weekly` |
+
+   Re-derive the list (read-only, never select `cron.job.command` itself) with
+   ```sql
+   select jobname from cron.job where command ilike '%service_role_key%' order by 1;
+   ```
+   It returns exactly these 12 rows today; a longer result means a job was added
+   after this list was written, and it is covered by the Vault update in step 2
+   below. **Correction to a claim you may see elsewhere:** the other 30 jobs
+   (`prune-nightly` (038), `reader-data-purge` (043), `articles-vacuum` (045),
+   the refresh and prune jobs, ...) do **not** read this secret — they run as
+   plain `select public.<fn>();` / `vacuum` entirely inside Postgres, with no
+   outbound HTTP call and no Vault read.
+4. **Edge Function runtime** — the 7 functions that gate their inbound bearer
+   through `supabase/functions/_shared/auth.ts` (`archive-export`,
+   `cluster-consumer`, `image-consumer`, `ingest`, `jev-shadow`, `kap-ingest`,
+   `quotes-ingest`; re-derive with
+   `grep -l '_shared/auth' supabase/functions/*/index.ts`).
+   `supabase/functions/_shared/supabase.ts` reads
    `SUPABASE_SERVICE_ROLE_KEY` from `Deno.env`, but this copy is
    **auto-injected by the Supabase platform into every invocation** and is
    not something you push with `supabase secrets set`. It updates itself the
@@ -88,8 +122,9 @@ is seconds, not minutes):**
 
 1. Regenerate the key in the Supabase Dashboard. Copy the new value into
    `$SR_NEW` immediately (reveal-once).
-2. **Update the Vault secret first** — this is the path the three drains
-   hit every 1–3 minutes, so it is the most time-sensitive:
+2. **Update the Vault secret first** — this is the path the 12 Vault-key
+   jobs hit (the four drains every 1–5 minutes), so it is the most
+   time-sensitive:
    ```sql
    select vault.update_secret(
      (select id from vault.secrets where name = 'service_role_key'),
@@ -139,15 +174,31 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
 ```
 
 ```sql
--- The three Vault-dependent drains recovered (run a few minutes after
--- step 2 above):
-select jobname, status, start_time
-from cron.job_run_details
-where jobname in ('ingest-drain', 'cluster-drain', 'image-drain')
-order by start_time desc
-limit 10;
--- Expect: status = 'succeeded' for runs after the Vault update landed.
+-- The Vault-key jobs recovered: no 401 for 10 minutes. Run it 10 minutes
+-- after step 2 above (cluster-drain alone answers every minute).
+select count(*) filter (where status_code = 401) as unauthorized, count(*) as responses
+  from net._http_response
+  where created > now() - interval '10 minutes';
+-- Expect: unauthorized = 0 and responses > 0.
+
+-- If unauthorized is not 0, see which ticks were refused (match the minute
+-- against the schedule of the 12 jobs above):
+select created, status_code, left(content, 200) as body
+  from net._http_response
+  where created > now() - interval '10 minutes' and status_code = 401
+  order by created desc limit 20;
 ```
+
+Do **not** use `cron.job_run_details` for this check. The jobs call the Edge
+Functions with `net.http_post`, which returns as soon as the request is queued,
+so a run is `succeeded` even when the function answers 401; only
+`net._http_response` holds the HTTP outcome (see `migration-guide.md`,
+Troubleshooting, "`/api/health` reports `clustering` stale"). Within 10 minutes
+the always-on jobs (`cluster-drain`, `ingest-drain`, `image-drain`, `kap-drain`,
+`jev-shadow`) prove the secret; the daily, weekday and weekly jobs
+(`archive-export*`, `kap-corrections-daily`, `jev-cluster-audit`,
+`jev-regression-weekly`, `quotes-*`) read the same Vault value, and the next day
+the same query shows their ticks.
 
 ```bash
 # GitHub Actions secret took: trigger the workflow by hand rather than
@@ -163,8 +214,8 @@ gh workflow run ops-heartbeat.yml --repo <org>/<repo>
 bypasses every RLS policy — full read/write on every table, including
 `newsletter_subscribers` (reader emails) and `corrections` (submitter
 contact info), the ability to invoke every Edge Function's privileged
-operations, and (via the Vault copy) the same access the pg_cron drains
-themselves have. Treat a leak of any one of the three managed copies as a
+operations, and (via the Vault copy) the same access the 12 Vault-key
+pg_cron jobs themselves have. Treat a leak of any one of the three managed copies as a
 leak of all of them and rotate immediately.
 
 ---

@@ -244,10 +244,14 @@ select jobname, schedule, active from cron.job
 
 -- After ~3 minutes, this should show recent runs with `status = 'succeeded'`
 -- for the three drains; prune-nightly won't have a run until 04:10 UTC.
-select jobname, status, return_message, start_time
-  from cron.job_run_details
-  where jobname in ('cluster-drain', 'image-drain', 'ingest-drain', 'prune-nightly')
-  order by start_time desc limit 10;
+-- cron.job_run_details has no jobname column (join cron.job on jobid), and a
+-- drain stays 'succeeded' once its HTTP request is queued: the HTTP outcome
+-- is in net._http_response (Troubleshooting, "clustering stale").
+select j.jobname, d.status, d.return_message, d.start_time
+  from cron.job_run_details d join cron.job j using (jobid)
+  where j.jobname in ('cluster-drain', 'image-drain', 'ingest-drain', 'prune-nightly')
+    and d.runid > (select max(runid) - 20000 from cron.job_run_details)
+  order by d.runid desc limit 10;
 ```
 
 If you ever need to remove a schedule by hand rather than re-applying 038 (for example while debugging):
@@ -435,14 +439,30 @@ If any step lags, jump to the next section.
 1. Is the pg_cron job running?
 
    ```sql
-   select status, return_message, start_time
-     from cron.job_run_details where jobname = 'cluster-drain'
-     order by start_time desc limit 5;
+   select j.jobname, d.status, d.return_message, d.start_time
+     from cron.job_run_details d join cron.job j using (jobid)
+     where j.jobname in ('cluster-drain')
+       and d.runid > (select max(runid) - 20000 from cron.job_run_details)
+     order by d.runid desc limit 5;
    ```
 
-   - `status = 'failed'` with `return_message` showing an HTTP 401 → the `service_role_key` Vault secret is empty or wrong. Update it (`select vault.update_secret(id, '<key>') from vault.secrets where name = 'service_role_key'`) and re-apply 038.
-   - `status = 'failed'` with a 404 → the `functions_base_url` Vault secret is wrong; it must end in `/functions/v1`.
-   - `status = 'failed'` with HTTP 500 → bug in the consumer. Check Edge Function logs in the Supabase Dashboard.
+   This only proves that pg_cron ran the command. `cluster-drain` calls the Edge Function with `net.http_post`, which returns as soon as the request is queued, so the run stays `status = 'succeeded'` whatever the function answers: a 401, a 404 and a 500 all look healthy here. `status = 'failed'` appears only when the SQL itself errors inside Postgres. Read the HTTP outcome from `net._http_response`:
+
+   ```sql
+   select created, status_code, timed_out, error_msg, left(content, 200) as body
+     from net._http_response
+     where created > now() - interval '30 minutes'
+       and (status_code >= 400 or timed_out or error_msg is not null)
+     order by created desc limit 50;
+   ```
+
+   Match the `created` minute against the schedule of the job you are chasing (`cluster-drain` `* * * * *`, `ingest-drain` `*/3 * * * *`, `image-drain` `*/5 * * * *`, `kap-drain` `*/2 * * * *`):
+
+   - `status_code = 401` → the `service_role_key` Vault secret is empty or wrong. Update it (`select vault.update_secret(id, '<key>') from vault.secrets where name = 'service_role_key'`) and re-apply 038.
+   - `status_code = 404` → the `functions_base_url` Vault secret is wrong; it must end in `/functions/v1`.
+   - `status_code >= 500` (including `546`, the platform killing the function at its resource limit) → the function failed. Check Edge Function logs in the Supabase Dashboard.
+
+   The heartbeat row `edge_http_errors_30m` counts these same rows, so it can fail on an upstream outage that is not our bug: while KAP answers 500, `kap-ingest` answers 502 to every `kap-drain` tick (on 2026-11-02 all 15 error rows of one 30 minute window were `kap-ingest` 502). Read `left(content, 200)` before chasing a consumer.
 
 2. Is `cluster_work` accumulating without being drained?
 
@@ -457,10 +477,31 @@ If any step lags, jump to the next section.
 The most common cause is SSRF blocks consuming the visibility timeout without making progress. Check:
 
 ```sql
-select * from pgmq.read('image_backfill', 60, 5);
--- Inspect the messages' read_ct. Anything with read_ct > 3 is poison
--- and the consumer should be deleting it — if it's not, that's a bug
--- in image-consumer.
+-- The messages most often read first (read-only: a plain select of the queue table).
+select msg_id, read_ct, enqueued_at, vt
+  from pgmq.q_image_backfill
+  order by read_ct desc, enqueued_at limit 10;
+
+-- What the consumer finished with in the last 24 hours, by number of reads.
+select read_ct, count(*) as archived_24h
+  from pgmq.a_image_backfill
+  where archived_at > now() - interval '24 hours'
+  group by read_ct order by read_ct;
+```
+
+A message is archived (never deleted) once `read_ct > 3`, so its payload stays in `pgmq.a_image_backfill`. A live message with `read_ct` 3 has used its last attempt (the next read archives it); one that stays in `pgmq.q_image_backfill` with a higher `read_ct` across several drain ticks means the consumer is not archiving it, which is a bug in image-consumer. Never call `pgmq.read` from the SQL editor: it hides the messages for the visibility timeout and bumps `read_ct`, and a healthy message read three times by hand is archived as poison on its next real read.
+
+The same check for `cluster_work` (the consumer archives it at `read_ct > 3` too):
+
+```sql
+select msg_id, read_ct, enqueued_at, vt
+  from pgmq.q_cluster_work
+  order by read_ct desc, enqueued_at limit 10;
+
+select read_ct, count(*) as archived_24h
+  from pgmq.a_cluster_work
+  where archived_at > now() - interval '24 hours'
+  group by read_ct order by read_ct;
 ```
 
 ### `/api/cron/headline` returns 503 `CRON_SECRET is not configured`
@@ -1094,7 +1135,11 @@ This stops both signal writers and changes nothing else -- the archive labels an
 A SQL-only cron failure surfaces **only** in `cron.job_run_details`, never in Sentry (which is wired into the Deno Edge Functions, not into Postgres):
 
 ```sql
-select jobname, status, return_message, start_time from cron.job_run_details where jobname = 'jev-signals-nightly' order by start_time desc limit 5;
+select j.jobname, d.status, d.return_message, d.start_time
+  from cron.job_run_details d join cron.job j using (jobid)
+  where j.jobname in ('jev-signals-nightly')
+    and d.runid > (select max(runid) - 20000 from cron.job_run_details)
+  order by d.runid desc limit 5;
 ```
 
 **POST-DEPLOY WATCH.** Also check that the alert count does not explode on day one:
@@ -1889,8 +1934,8 @@ drop index concurrently if exists public.idx_articles_body_excerpt_backfill;
 084's own `drop index if exists` then becomes a no-op.
 
 **Right after applying**, run the manual vacuum by hand once (084 also
-schedules this nightly at 06:35 UTC via pg_cron, guarded — it no-ops with a
-`raise notice` if pg_cron isn't installed):
+schedules this every 6 hours at :35 (`35 */6 * * *`) via pg_cron, guarded — it
+no-ops with a `raise notice` if pg_cron isn't installed):
 ```sql
 vacuum (analyze) public.clusters;
 ```
@@ -2758,7 +2803,9 @@ select status, observed, threshold, detail from public.ops_health_report() where
 select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
        has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
        has_function_privilege('service_role', 'public.ops_health_report()', 'execute');
--- md5(prosrc) should be f6548a98c236a3b998fedf8c192e6b7c (19,091 characters)
+-- md5(prosrc) was f6548a98c236a3b998fedf8c192e6b7c (19,091 characters) right after 122 (historical:
+-- 136, 145 and 150 replace the function). Current value: 2445cd7d15a23d4af88d42ddf79ac2ff, 38,876
+-- characters (migration 150, verified on production 2026-11-02).
 select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;
 ```
 
@@ -3021,7 +3068,9 @@ select check_name, status, observed, threshold, detail from public.ops_health_re
 select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
        has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
        has_function_privilege('service_role', 'public.ops_health_report()', 'execute');
--- md5(prosrc) should be fa5581a2e5edd98ce214b9621ecef7a4 (30,774 characters)
+-- md5(prosrc) was fa5581a2e5edd98ce214b9621ecef7a4 (30,774 characters) right after 145 (historical:
+-- 150 replaces the function). Current value: 2445cd7d15a23d4af88d42ddf79ac2ff, 38,876 characters
+-- (migration 150, verified on production 2026-11-02).
 select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;
 ```
 
@@ -3106,6 +3155,42 @@ select s.slug, count(*) filter (where a.source_article_key is not null) keyed, c
 
 **Rollback** (the TS rules ship with the ingest function, this only restores the SQL twin): redeploy the previous ingest function if the TypeScript rules must go too; re-run ONLY 113's `source_article_key` section (the `create or replace function public.source_article_key(p_url text)` block, its comment, revoke and grant; not the column, index or backfill pieces), which restores the body with md5 `dbbba7e0e939036ef5c4298b593b7474`; then remove ledger row 149: `delete from supabase_migrations.schema_migrations where version = '149';`.
 
+## 150 — queue_lag + cron_jobs_stalled (`ops_health_report` rows 18 and 19, table `ops_cron_expected`): APPLY 150 only, no deploy
+
+**Why:** nothing watched clustering. The deployed report never mentioned pgmq, `cluster_work` or `image_backfill`, and row 1 counts only runs with `status = 'failed'`, so an unscheduled or deactivated job (`cluster-drain`, `image-drain`, `prune-nightly`, `ops-health-snapshot` itself) produced no row and read `pass`. The failure mode is the core product (home and cluster pages) freezing while the ingest rows stay green. 150 makes the report notice both (hunt 24, h24-ops-1).
+
+**What 150 does** (additive, one transaction, safe to re-apply):
+
+- adds `public.ops_cron_expected` (`jobname` primary key, `max_gap interval`, `note`): RLS on, no policy, readable by `service_role` only, nothing granted to `anon` or `authenticated`. It is seeded with the 20 jobs that tick all day (the note is the schedule; weekday-only and weekly jobs are not listed);
+- re-creates `ops_health_report()` with 145's text verbatim through row 17 and appends row 18 `queue_lag` (depth and age of the oldest visible message of `cluster_work` and `image_backfill`, plus messages archived in the last 24 hours with `read_ct >= 3`; warn at 300 s / 1800 s, fail at 900 s / 3600 s) and row 19 `cron_jobs_stalled` (every job in `ops_cron_expected` is scheduled, active and has started a run within its `max_gap`). The function returns 19 rows; the detail carries counts and job names only, never `cron.job.command`, a run's `return_message` or a message body;
+- adds, changes and unschedules no pg_cron job.
+
+**Order:** none. Apply 150 only (`supabase db push`). There is no Edge Function deploy and no app deploy; the next heartbeat run (30 minutes), or the next 10 minute snapshot (131), shows rows 18 and 19.
+
+**Standing rule: every new pg_cron job also goes into `public.ops_cron_expected`.** Row 19 watches only the jobs listed there, so a job added by a later migration without its row can stop for days unnoticed. Put the `insert into public.ops_cron_expected (jobname, max_gap, note) values (...) on conflict (jobname) do nothing` next to the `cron.schedule` call (guarded with `to_regclass('public.ops_cron_expected') is not null`, as 154 does for its note), and keep the note equal to the schedule; `docs/ops-heartbeat.md`, "Kuyruk ve cron canlılığı", has the `max_gap` rule and how to tune or retire a row.
+
+**Verify** (read-only):
+
+```sql
+select count(*) from public.ops_health_report();   -- 19
+select check_name, status, observed, threshold, detail
+  from public.ops_health_report()
+  where check_name in ('queue_lag', 'cron_jobs_stalled');
+-- cron_jobs_stalled: pass / 0 / 1 / "20 iş izleniyor". queue_lag: pass, or warn while the detail says
+-- "zehirli (24 sa): N" with N > 0 (messages archived with read_ct >= 3 in the last 24 hours; production
+-- read warn with N = 3 on 2026-11-02). Look at the a_image_backfill / a_cluster_work counts by read_ct in
+-- Troubleshooting, "image_backfill queue is stuck".
+select count(*) from public.ops_cron_expected;      -- 20
+-- md5(prosrc) 2445cd7d15a23d4af88d42ddf79ac2ff, 38,876 characters (verified on production 2026-11-02)
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('service_role', 'public.ops_health_report()', 'execute');
+```
+
+**Rollback** (nothing else depends on 150): re-run ONLY 145's `ops_health_report()` section, the text of `145_ops_anon_surface_check.sql` from `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;` (it returns the report to 17 rows, md5 `fa5581a2e5edd98ce214b9621ecef7a4`), then remove the table `public.ops_cron_expected`, run `notify pgrst, 'reload schema';` and remove ledger row 150 (`delete from supabase_migrations.schema_migrations where version = '150';`).
+
 ## 151 — attach-only admission, SHADOW (`cluster_attach` queue, `cluster_attach_shadow`, trigger `articles_cluster_attach_probe`): APPLY 151, THEN DEPLOY cluster-consumer, REVIEW 48 H, THEN DECIDE `CLUSTER_ATTACH_MODE`
 
 **Why:** the politics gate is decided per article. On 2026-11-02 the "32 ilde FETÖ operasyonu" story had 13 clustered rows (18 now) in `304a47ce`, and nine rows with the same or a near-identical headline sat unclustered in `genel` next to it (hurriyet `2f93603f` is character-identical to aksam `26ede371`). `enqueue_cluster_work` (025) only enqueues `politika` / `son_dakika`, so those articles never reach the clusterer and the cluster's bias bar misses TRT Haber, CNN Türk, Hürriyet, Karar and BirGün (hunt 25, h25-clusters-3). 148's sibling veto only hides the false-blindspot symptom.
@@ -3174,6 +3259,7 @@ Also read the function logs: the drain summary line carries `attach {mode, read,
 **Rollback** (nothing else depends on 151):
 
 ```sql
+-- MUTATES QUEUE STATE: this rollback drops the cluster_attach queue.
 -- first: supabase secrets set CLUSTER_ATTACH_MODE=off  (the consumer stops reading the queue)
 drop trigger if exists articles_cluster_attach_probe on public.articles;
 drop function if exists public.enqueue_cluster_attach_probe();
