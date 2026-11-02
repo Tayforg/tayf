@@ -7,7 +7,7 @@ import { ZoneGuessGame } from "@/components/game/zone-guess-game";
 import { FramingGame } from "@/components/game/framing-game";
 import { DailyGame } from "@/components/game/daily-game";
 import type { GameHeadline } from "@/lib/game/headline-pool";
-import type { DailyPuzzle } from "@/lib/game/daily-set";
+import type { DailyPuzzle, PuzzleDateFallback } from "@/lib/game/daily-set";
 
 type OyunMode = "bolge" | "cerceve" | "gunluk";
 
@@ -17,6 +17,9 @@ interface OyunModesProps {
   headlines: readonly GameHeadline[] | null;
   daily: DailyPuzzle | null;
   todayKey: string;
+  /** Why `?gun=` did not give the puzzle it named; forwarded to DailyGame,
+   * which shows a one-line notice for an expired or future link. */
+  dailyFellBack?: PuzzleDateFallback | null;
   /** Which tab is active on first render — "bolge" unless the URL carries
    * `?mod=gunluk` or `?gun=` (see oyun/page.tsx). */
   initialMode?: OyunMode;
@@ -36,7 +39,13 @@ const INACTIVE_TAB_CLASS =
  * Çerçeve, Günün Tayf'ı — Bölge stays the default unless `initialMode`
  * says otherwise (driven by the URL, one level up in oyun/page.tsx).
  */
-export function OyunModes({ headlines, daily, todayKey, initialMode = "bolge" }: OyunModesProps) {
+export function OyunModes({
+  headlines,
+  daily,
+  todayKey,
+  dailyFellBack,
+  initialMode = "bolge",
+}: OyunModesProps) {
   const [mode, setMode] = useState<OyunMode>(initialMode);
 
   return (
@@ -86,7 +95,7 @@ export function OyunModes({ headlines, daily, todayKey, initialMode = "bolge" }:
       ) : mode === "cerceve" ? (
         <FramingGame />
       ) : (
-        <DailyGame puzzle={daily} todayKey={todayKey} />
+        <DailyGame puzzle={daily} todayKey={todayKey} fellBack={dailyFellBack} />
       )}
     </div>
   );

@@ -37,7 +37,13 @@ export interface WeekCopy {
   unavailable: string;
   /** Page-level note under the hero (archive page only). */
   note: string;
-  /** What the zone percentages are divided by. */
+  /**
+   * What the zone percentages are divided by: the sum of `bias_distribution`
+   * over the multi-source clusters, i.e. voting-source entries ("kaynak
+   * kaydı"). It is neither an article count nor every article of the period
+   * (/trends and /kaynaklar count those), so the copy never says "haber" or
+   * "toplam" (h18-numbers-1).
+   */
   percentBasis(total: number): string;
   /**
    * What the per-zone source counts measure; `null` when the page does not
@@ -54,7 +60,10 @@ export interface WeekCopy {
   latestLinkText: string;
   /** Empty state of "Etiket değişiklikleri" (no source changed its label). */
   labelUnchanged: string;
-  /** Per-zone-row suffix naming the total the row's share is part of. */
+  /**
+   * Per-zone-row suffix naming the total the row's share is part of; the same
+   * unit as `percentBasis` ("kaynak kaydı").
+   */
   zoneRowTotal(total: number): string;
 }
 
@@ -81,7 +90,7 @@ const ROLLING: WeekCopy = Object.freeze<WeekCopy>({
   unavailable: UNAVAILABLE,
   note: "Son 7 günün özeti; sayılar yeni haberlerle değişir.",
   percentBasis: (total) =>
-    `Yüzdeler son 7 günün toplam ${formatCountTr(total)} haberi üzerinden hesaplanır.`,
+    `Yüzdeler son 7 günün çok kaynaklı kümelerindeki ${formatCountTr(total)} kaynak kaydı üzerinden hesaplanır.`,
   sourceBasis: LIVE_SOURCE_BASIS,
   degradedCaveat:
     "Bazı bölgelerde kaynaklara ulaşılamıyor; son 7 günün kör nokta listesi eksik olabilir.",
@@ -89,7 +98,7 @@ const ROLLING: WeekCopy = Object.freeze<WeekCopy>({
   showStatusLink: true,
   latestLinkText: LATEST_LINK_TEXT,
   labelUnchanged: "Son 7 günde etiket değişmedi.",
-  zoneRowTotal: (total) => `(son 7 günün ${formatCountTr(total)} haberi içinde)`,
+  zoneRowTotal: (total) => `(son 7 günün ${formatCountTr(total)} kaynak kaydı içinde)`,
 });
 
 const LIVE: WeekCopy = Object.freeze<WeekCopy>({
@@ -100,7 +109,7 @@ const LIVE: WeekCopy = Object.freeze<WeekCopy>({
   unavailable: UNAVAILABLE,
   note: "Bu hafta sürüyor; sayılar hafta bitene kadar değişir.",
   percentBasis: (total) =>
-    `Yüzdeler bu haftanın toplam ${formatCountTr(total)} haberi üzerinden hesaplanır.`,
+    `Yüzdeler bu haftanın çok kaynaklı kümelerindeki ${formatCountTr(total)} kaynak kaydı üzerinden hesaplanır.`,
   // Two bases, stated explicitly (browser-qa-15): the rows count every source
   // that delivered in the last 72 h (toplayıcı / niş dahil), the spektruma
   // sayılan figure counts voting sources only.
@@ -111,7 +120,7 @@ const LIVE: WeekCopy = Object.freeze<WeekCopy>({
   showStatusLink: true,
   latestLinkText: LATEST_LINK_TEXT,
   labelUnchanged: "Bu hafta etiket değişmedi.",
-  zoneRowTotal: (total) => `(haftanın ${formatCountTr(total)} haberi içinde)`,
+  zoneRowTotal: (total) => `(haftanın ${formatCountTr(total)} kaynak kaydı içinde)`,
 });
 
 const CLOSED: WeekCopy = Object.freeze<WeekCopy>({
@@ -122,14 +131,14 @@ const CLOSED: WeekCopy = Object.freeze<WeekCopy>({
   unavailable: UNAVAILABLE,
   note: "Kör noktalar o hafta işaretlenen haberlerdir; sonradan geri alınan işaretler listede yer almaz.",
   percentBasis: (total) =>
-    `Yüzdeler o haftanın toplam ${formatCountTr(total)} haberi üzerinden hesaplanır.`,
+    `Yüzdeler o haftanın çok kaynaklı kümelerindeki ${formatCountTr(total)} kaynak kaydı üzerinden hesaplanır.`,
   sourceBasis: () => null,
   degradedCaveat: null,
   showSourceCounts: false,
   showStatusLink: false,
   latestLinkText: LATEST_LINK_TEXT,
   labelUnchanged: "O hafta etiket değişmedi.",
-  zoneRowTotal: (total) => `(haftanın ${formatCountTr(total)} haberi içinde)`,
+  zoneRowTotal: (total) => `(haftanın ${formatCountTr(total)} kaynak kaydı içinde)`,
 });
 
 const BY_VARIANT: Readonly<Record<WeekCopyVariant, WeekCopy>> = Object.freeze({

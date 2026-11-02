@@ -4,6 +4,9 @@ import {
   countIndependentHeadlines,
   detectWireRedistribution,
   headlineKey,
+  wireBadgeLabel,
+  wireBadgeShort,
+  wireBadgeTitle,
   wireSignalOf,
   SAME_HEADLINE_MIN_CHARS,
   SAME_HEADLINE_MIN_TOKENS,
@@ -84,6 +87,17 @@ describe("wireSignalOf", () => {
     expect(signal.isWireRedistribution).toBe(false);
     expect(signal.effectiveArticleCount).toBe(2);
     expect(signal.memberCount).toBe(2);
+  });
+
+  it("a multi-dispatch wire cluster (6 members, hashes A A A A B C) keeps 3 distinct texts, equal to detectWireRedistribution's uniqueHashes", () => {
+    const six = members(["A", "A", "A", "A", "B", "C"]);
+    const signal = wireSignalOf(six);
+    expect(signal.isWireRedistribution).toBe(true);
+    expect(signal.memberCount).toBe(6);
+    expect(signal.effectiveArticleCount).toBe(3);
+    // The badge helpers take effectiveArticleCount as "distinct texts": it
+    // must stay the hash count for a wire cluster (h18-numbers-2).
+    expect(signal.effectiveArticleCount).toBe(detectWireRedistribution(six).uniqueHashes);
   });
 
   it("adds independentHeadlineCount without disturbing effectiveArticleCount/isWireRedistribution", () => {
@@ -210,5 +224,73 @@ describe("countIndependentHeadlines", () => {
       { id: "b", content_hash: null, title: "deprem" },
     ]);
     expect(result).toBe(2);
+  });
+});
+
+// h18-numbers-2: a wire cluster can hold several distinct dispatches (6
+// members, 3 unique hashes). "Tek kaynaktan dağıtıldı" is true only when ONE
+// text is behind every member; otherwise the badge states both numbers.
+describe("wireBadgeLabel", () => {
+  it("one distinct text: says single source and counts copies", () => {
+    expect(wireBadgeLabel(7, 1)).toBe("Tek kaynaktan dağıtıldı · 7 kopya");
+  });
+
+  it("treats 0 and NaN distinct texts like one (never the multi-text claim)", () => {
+    expect(wireBadgeLabel(7, 0)).toBe("Tek kaynaktan dağıtıldı · 7 kopya");
+    expect(wireBadgeLabel(7, Number.NaN)).toBe("Tek kaynaktan dağıtıldı · 7 kopya");
+  });
+
+  it("several distinct texts: states members and distinct texts, never 'tek kaynak'", () => {
+    const label = wireBadgeLabel(6, 3);
+    expect(label).toBe("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+    expect(label).not.toContain("Tek kaynak");
+    expect(label).not.toContain("tek kaynak");
+  });
+});
+
+describe("wireBadgeShort", () => {
+  it("one distinct text: byte-identical to the OG pill shipped before", () => {
+    expect(wireBadgeShort(7, 1)).toBe("7 kopya · tek kaynak");
+    expect(wireBadgeShort(7, 0)).toBe("7 kopya · tek kaynak");
+    expect(wireBadgeShort(7, Number.NaN)).toBe("7 kopya · tek kaynak");
+  });
+
+  it("several distinct texts: states members and distinct texts, never 'tek kaynak'", () => {
+    const short = wireBadgeShort(6, 3);
+    expect(short).toBe("6 haber · 3 farklı metin");
+    expect(short).not.toContain("Tek kaynak");
+    expect(short).not.toContain("tek kaynak");
+  });
+});
+
+describe("wireBadgeTitle", () => {
+  it("one distinct text: every member is a copy of the same agency text", () => {
+    expect(wireBadgeTitle(1)).toBe(
+      "Bu kümedeki haberlerin tamamı aynı ajans metninin kopyası",
+    );
+    expect(wireBadgeTitle(0)).toBe(
+      "Bu kümedeki haberlerin tamamı aynı ajans metninin kopyası",
+    );
+  });
+
+  it("several distinct texts: true by construction of the 0.5 ratio, and never 'tek'", () => {
+    const title = wireBadgeTitle(3);
+    expect(title).toBe(
+      "Bu kümedeki haberlerin en az yarısı başka bir haberin birebir kopyası",
+    );
+    expect(title.toLocaleLowerCase("tr-TR")).not.toContain("tek");
+  });
+
+  it("the multi-text claim holds for every wire cluster: copies >= members / 2", () => {
+    // unique / members <= WIRE_UNIQUE_HASH_RATIO  <=>  members - unique >= members / 2
+    for (let n = 3; n <= 12; n++) {
+      for (let unique = 1; unique <= n; unique++) {
+        const hashes = Array.from({ length: n }, (_, i) => `h${i < unique ? i : 0}`);
+        const r = detectWireRedistribution(members(hashes));
+        if (r.isWire && r.uniqueHashes > 1) {
+          expect(n - r.uniqueHashes).toBeGreaterThanOrEqual(n / 2);
+        }
+      }
+    }
   });
 });

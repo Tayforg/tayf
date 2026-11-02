@@ -40,6 +40,7 @@ import {
 } from "@/lib/clusters/framing-receipt";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { buildShareText } from "@/lib/clusters/share";
+import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import { clusterUpdateCue } from "@/lib/clusters/update-cue";
 import {
   buildStoryTimeline,
@@ -620,10 +621,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   {wire.isWireRedistribution && (
                     <span
                       className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-800 dark:text-violet-400 font-medium"
-                      title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
+                      title={wireBadgeTitle(wire.effectiveArticleCount)}
                     >
                       <Copy className="h-3 w-3" />
-                      Tek kaynaktan dağıtıldı · {wire.memberCount} kopya
+                      {wireBadgeLabel(wire.memberCount, wire.effectiveArticleCount)}
                     </span>
                   )}
                 </div>

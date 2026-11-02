@@ -7,6 +7,7 @@ import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { SourceLogo } from "@/components/source/source-logo";
 import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
+import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import { sourceLang } from "@/lib/sources/source-language";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution } from "@/types";
@@ -117,15 +118,20 @@ const MAX_VISIBLE_ARTICLES = 4;
 // split the phone's bandwidth between them. So index 0 alone is eager,
 // preloaded and ranked high; every other card stays lazy.
 //
-// `sizes` describes the banner's real slot: the viewport minus the page's
+// `sizes` starts from the banner's real slot: the viewport minus the page's
 // 1rem gutters on each side below the sm breakpoint, and nothing on desktop,
 // where the banner is display:none and only the smallest candidate is wanted.
-// The old `100vw` over-fetched a width the box never has. `quality` 50 is
-// already allowed by `images.qualities` in next.config.ts: the banner is a
-// small, heavily downscaled photo with a gradient scrim over its lower part.
+// The old `100vw` over-fetched a width the box never has. It then asks for 77%
+// of that slot's device pixels (h18-perf-1): `quality` 50 (already allowed by
+// `images.qualities` in next.config.ts) on a heavily downscaled photo under a
+// gradient scrim hides a ~1.3x upscale, and the factor moves a 390 px phone
+// from the 1080w candidate to 828w at DPR3 (640w at DPR2), about 8 KB less on
+// the home hero and 28 KB less on the /blindspots LCP hero. The 640 and 828
+// entries of `deviceSizes` in next.config.ts must stay for that pick.
 
 /** next/image `sizes` for the `sm:hidden` mobile banner. */
-export const MOBILE_BANNER_SIZES = "(max-width: 640px) calc(100vw - 2rem), 0px";
+export const MOBILE_BANNER_SIZES =
+  "(max-width: 640px) calc((100vw - 2rem) * 0.77), 0px";
 
 /**
  * Loading hints for a card's mobile banner. Pure so the rule is unit-testable
@@ -207,10 +213,10 @@ function ClusterMetaBadges({
       {isWireRedistribution && (
         <span
           className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 border border-violet-500/30 px-2 py-0.5 text-violet-800 dark:text-violet-400 font-medium"
-          title="Bu kümedeki haberlerin çoğu aynı ajans metninin kopyası"
+          title={wireBadgeTitle(effectiveArticleCount ?? articleCount)}
         >
           <Copy className="h-3 w-3" />
-          Tek kaynaktan dağıtıldı · {articleCount} kopya
+          {wireBadgeLabel(articleCount, effectiveArticleCount ?? articleCount)}
         </span>
       )}
 

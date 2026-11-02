@@ -6,7 +6,7 @@ import { PageHero } from "@/components/ui/page-hero";
 import { OyunModes } from "@/components/game/oyun-modes";
 import { loadGameHeadlines, sampleHeadlines } from "@/lib/game/headline-pool";
 import { getDailyPuzzle } from "@/lib/game/daily-query";
-import { istanbulDateKey, resolvePuzzleDate } from "@/lib/game/daily-set";
+import { istanbulDateKey, resolvePuzzleDateWithReason } from "@/lib/game/daily-set";
 import { currentTimeMs } from "@/lib/time";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
@@ -73,7 +73,7 @@ export default async function OyunPage({
   // date it touches is derived from `dateKey`, computed here, once, from
   // this one request-time read.
   const todayKey = istanbulDateKey(currentTimeMs());
-  const dateKey = resolvePuzzleDate(sp.gun, todayKey);
+  const { dateKey, fellBack } = resolvePuzzleDateWithReason(sp.gun, todayKey);
   const initialMode = sp.mod === "gunluk" || sp.gun ? "gunluk" : "bolge";
 
   const [headlines, daily] = await Promise.all([
@@ -126,6 +126,7 @@ export default async function OyunPage({
         headlines={headlines}
         daily={daily}
         todayKey={todayKey}
+        dailyFellBack={fellBack}
         initialMode={initialMode}
       />
     </div>

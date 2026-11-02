@@ -101,8 +101,24 @@ describe("buildShareText", () => {
       blindspotSide: null,
       wire: { isWireRedistribution: true, memberCount: 7 },
     });
+    // articleCount is the honest source count (the page passes
+    // wire.effectiveArticleCount): 2 distinct texts behind 7 members.
     expect(text).toBe(
-      "2 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet · tek kaynaktan 7 kopya",
+      "2 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet · 7 haber · 2 farklı metin",
+    );
+    expect(text).not.toContain("tek kaynak");
+  });
+
+  it("keeps the single-source wording only when one text is behind every member (articleCount 1)", () => {
+    const text = buildShareText({
+      articleCount: 1,
+      distribution: dist({ pro_government: 1 }),
+      isBlindspot: false,
+      blindspotSide: null,
+      wire: { isWireRedistribution: true, memberCount: 7 },
+    });
+    expect(text).toBe(
+      "1 kaynak · %100 iktidar · %0 bağımsız · %0 muhalefet · 7 kopya · tek kaynak",
     );
   });
 

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { DailyGame, resolveDailyPhase, resolveFinalMarks, type Phase } from "./daily-game";
+import { OyunModes } from "./oyun-modes";
 import type { DailyHeadline, DailyPuzzle } from "@/lib/game/daily-set";
 
 // ---------------------------------------------------------------------------
@@ -123,19 +124,93 @@ describe("DailyGame — source guard: outbound links", () => {
   });
 });
 
+/**
+ * Every `useEffect(...)` call in `src`, as its full source text: found by
+ * scanning for the parenthesis that closes the call (a character scan, not a
+ * regex), so a body containing braces, template literals or nested calls
+ * cannot truncate it.
+ */
+function useEffectCalls(src: string): string[] {
+  const calls: string[] = [];
+  let from = 0;
+  for (;;) {
+    const at = src.indexOf("useEffect(", from);
+    if (at === -1) return calls;
+    const open = at + "useEffect".length;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close === -1) return calls;
+    calls.push(src.slice(at, close + 1));
+    from = close + 1;
+  }
+}
+
 describe("DailyGame — source guard: focus management on phase transition", () => {
   // Mirrors zone-guess-game.tsx's pattern: each phase swaps in a different
   // button group, and the browser resets focus to <body> when the
   // previously-focused button unmounts, so keyboard/screen-reader users
   // must be moved onto the new phase's control programmatically.
+  const focusEffect = useEffectCalls(source).find((call) => call.includes("firstZoneRef"));
+
   it("moves focus to firstZoneRef when entering \"playing\" and nextRef when entering \"revealed\"", () => {
-    const effectMatch = source.match(/useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?\},\s*\[phase(?:,\s*index)?\]\s*\)/);
-    expect(effectMatch, "expected a useEffect keyed on [phase] that moves focus").toBeTruthy();
-    const effectBody = effectMatch![0];
-    expect(effectBody).toMatch(/phase === "playing"/);
-    expect(effectBody).toMatch(/firstZoneRef\.current\?\.focus\(\)/);
-    expect(effectBody).toMatch(/phase === "revealed"/);
-    expect(effectBody).toMatch(/nextRef\.current\?\.focus\(\)/);
+    expect(focusEffect, "expected a useEffect that moves focus").toBeTruthy();
+    expect(focusEffect).toMatch(/phase === "playing"/);
+    expect(focusEffect).toMatch(/firstZoneRef\.current\?\.focus\(\)/);
+    expect(focusEffect).toMatch(/phase === "revealed"/);
+    expect(focusEffect).toMatch(/nextRef\.current\?\.focus\(\)/);
+  });
+
+  it("is keyed on [phase, index, playedThisSession]", () => {
+    expect(focusEffect).toContain("[phase, index, playedThisSession]");
+  });
+
+  it("moves focus to Paylaş when THIS session finishes the round (the final Sonraki unmounts the focused button)", () => {
+    expect(focusEffect).toContain('phase === "finished" && playedThisSession');
+    expect(focusEffect).toContain("shareRef.current?.focus()");
+  });
+
+  it("never moves focus on the stored-result path: the only finished-phase focus call sits behind playedThisSession", () => {
+    // A visitor who opens the page with a result already in localStorage
+    // lands on "finished" without playing; stealing focus there would pull
+    // them away from the page they just loaded.
+    const body = focusEffect ?? "";
+    expect(body.split("shareRef.current?.focus()")).toHaveLength(2);
+    const finishedBranchAt = body.indexOf('phase === "finished"');
+    expect(finishedBranchAt).toBeGreaterThan(-1);
+    // Every `phase === "finished"` test in the effect carries the guard.
+    expect(body.split('phase === "finished"')).toHaveLength(2);
+    expect(body.slice(finishedBranchAt, finishedBranchAt + 60)).toContain(
+      'phase === "finished" && playedThisSession',
+    );
+    // And no other ref is focused for the finished phase.
+    expect(body).not.toContain("finishedRef");
+  });
+
+  it("puts shareRef on the Paylaş button", () => {
+    const shareButtonAt = source.indexOf("ref={shareRef}");
+    expect(shareButtonAt).toBeGreaterThan(-1);
+    expect(source.split("ref={shareRef}")).toHaveLength(2);
+    const buttonTag = source.slice(source.lastIndexOf("<button", shareButtonAt), shareButtonAt + 200);
+    expect(buttonTag).toContain("onClick={handleShare}");
+  });
+
+  it("useEffectCalls finds every effect and only effects", () => {
+    const sample = "a(); useEffect(() => { if (x) { y(`${z}`); } }, [x]); b(); useEffect(() => {}, []);";
+    expect(useEffectCalls(sample)).toEqual([
+      "useEffect(() => { if (x) { y(`${z}`); } }, [x])",
+      "useEffect(() => {}, [])",
+    ]);
   });
 });
 
@@ -252,5 +327,235 @@ describe("DailyGame — source guard: derive the phase, never seed it from the h
 
   it("guesses are only accepted while the derived phase is \"playing\"", () => {
     expect(source).toMatch(/if \(!current \|\| phase !== "playing"\) return;/);
+  });
+});
+
+describe("DailyGame — static render: intro copy says what is counted", () => {
+  it("today's puzzle (before the politics gate) says 'Dünün (...) 5 manşeti.' and never 'siyasi'", () => {
+    const html = renderToStaticMarkup(<DailyGame puzzle={fixturePuzzle} todayKey="2026-09-28" />);
+    expect(html).toContain("Dünün (27 Eylül 2026) 5 manşeti.");
+    expect(html).toContain("Günün Tayf\u2019ı #1.");
+    expect(html).not.toContain("siyasi");
+  });
+
+  it("a replayed pre-gate puzzle names its own window instead of claiming it is yesterday's", () => {
+    const html = renderToStaticMarkup(<DailyGame puzzle={fixturePuzzle} todayKey="2026-10-02" />);
+    expect(html).toContain("Günün Tayf\u2019ı #1 · 27 Eylül 2026 tarihli 5 manşet.");
+    expect(html).not.toContain("Dünün");
+    expect(html).not.toContain("siyasi");
+  });
+
+  it("a puzzle from the politics gate onward says 'siyasi'", () => {
+    const html = renderToStaticMarkup(
+      <DailyGame
+        puzzle={{ ...fixturePuzzle, dateKey: "2026-11-04", number: 38, windowLabel: "3 Kasım 2026" }}
+        todayKey="2026-11-04"
+      />,
+    );
+    expect(html).toContain("Dünün (3 Kasım 2026) 5 siyasi manşeti.");
+  });
+
+  it("builds the idle copy through dailyIntroText, not inline JSX", () => {
+    expect(source).toContain("dailyIntroText(");
+    expect(source).not.toContain("5 siyasi manşeti");
+  });
+});
+
+describe("DailyGame — static render: link fallback notice", () => {
+  const NOTICE_EXPIRED = "Bu bağlantıdaki bulmaca artık oynanamıyor; bugünkü bulmaca gösteriliyor.";
+  const NOTICE_FUTURE = "Bu bağlantıdaki bulmaca henüz yayımlanmadı; bugünkü bulmaca gösteriliyor.";
+  const NOTICE_TAG = '<p class="text-[11px] text-muted-foreground text-center">';
+
+  it("fellBack='expired' renders the expired notice as one small centred line", () => {
+    const html = renderToStaticMarkup(
+      <DailyGame puzzle={fixturePuzzle} todayKey="2026-09-28" fellBack="expired" />,
+    );
+    expect(html).toContain(`${NOTICE_TAG}${NOTICE_EXPIRED}</p>`);
+    expect(html.split(NOTICE_EXPIRED)).toHaveLength(2);
+  });
+
+  it("fellBack='future' renders the not-yet-published notice", () => {
+    const html = renderToStaticMarkup(
+      <DailyGame puzzle={fixturePuzzle} todayKey="2026-09-28" fellBack="future" />,
+    );
+    expect(html).toContain(NOTICE_FUTURE);
+  });
+
+  it("fellBack='invalid' renders no notice", () => {
+    const html = renderToStaticMarkup(
+      <DailyGame puzzle={fixturePuzzle} todayKey="2026-09-28" fellBack="invalid" />,
+    );
+    expect(html).not.toContain("Bu bağlantıdaki");
+    expect(html).not.toContain(NOTICE_TAG);
+  });
+
+  it("no fellBack prop, or null, renders no notice", () => {
+    const withoutProp = renderToStaticMarkup(<DailyGame puzzle={fixturePuzzle} todayKey="2026-09-28" />);
+    const withNull = renderToStaticMarkup(
+      <DailyGame puzzle={fixturePuzzle} todayKey="2026-09-28" fellBack={null} />,
+    );
+    for (const html of [withoutProp, withNull]) {
+      expect(html).not.toContain("Bu bağlantıdaki");
+      expect(html).not.toContain(NOTICE_TAG);
+    }
+  });
+
+  it("the notice sits above the content (after the live region, before the card)", () => {
+    const html = renderToStaticMarkup(
+      <DailyGame puzzle={fixturePuzzle} todayKey="2026-09-28" fellBack="expired" />,
+    );
+    const noticeAt = html.indexOf(NOTICE_EXPIRED);
+    expect(noticeAt).toBeGreaterThan(html.indexOf('role="status"'));
+    expect(noticeAt).toBeLessThan(html.indexOf("Başla"));
+  });
+
+  it("renders the notice even when there is no puzzle to show", () => {
+    const html = renderToStaticMarkup(
+      <DailyGame puzzle={null} todayKey="2026-09-28" fellBack="expired" />,
+    );
+    expect(html).toContain(NOTICE_EXPIRED);
+    expect(html).toContain("Bugünün 5 manşeti hazırlanamadı");
+  });
+
+  it("renders the notice from the return block, outside the per-phase content switch", () => {
+    expect(source.split("puzzleFallbackNotice(fellBack)")).toHaveLength(2);
+    const switchAt = source.indexOf("let content: ReactNode;");
+    const callAt = source.indexOf("puzzleFallbackNotice(fellBack)");
+    const returnAt = source.lastIndexOf("return (");
+    expect(callAt).toBeGreaterThan(switchAt);
+    // Nothing between the switch start and the notice mentions it, so no phase branch can skip it.
+    const declAt = source.lastIndexOf("const fallbackNotice", callAt);
+    expect(declAt).toBeGreaterThan(switchAt);
+    expect(source.slice(switchAt, declAt)).not.toContain("fallbackNotice");
+    const renderAt = source.indexOf("{fallbackNotice && (", returnAt);
+    expect(renderAt).toBeGreaterThan(returnAt);
+    expect(renderAt).toBeLessThan(source.indexOf("{content}", returnAt));
+    expect(source).toContain(
+      '<p className="text-[11px] text-muted-foreground text-center">{fallbackNotice}</p>',
+    );
+  });
+});
+
+describe("DailyGame — source guard: the streak shown is the live one", () => {
+  it("prints liveStreak(store, todayKey), never the raw stored streak", () => {
+    expect(source).toContain("liveStreak(store, todayKey)");
+    expect(source).not.toContain("{store.streak}");
+    expect(source).toContain("{store.best}");
+  });
+});
+
+describe("DailyGame — source guard: a dismissed share sheet leaves the clipboard alone", () => {
+  const handleShareAt = source.indexOf("const handleShare = useCallback(");
+  const handleShareEnd = source.indexOf("const announcementRegion");
+  const body = source.slice(handleShareAt, handleShareEnd);
+
+  it("isShareAbort( is checked inside the navigator.share .catch, before the clipboard fallback", () => {
+    expect(handleShareAt).toBeGreaterThan(-1);
+    expect(handleShareEnd).toBeGreaterThan(handleShareAt);
+    const catchAt = body.indexOf(".catch((err)");
+    expect(catchAt).toBeGreaterThan(-1);
+    const abortAt = body.indexOf("isShareAbort(", catchAt);
+    expect(abortAt).toBeGreaterThan(catchAt);
+    const fallbackAt = body.indexOf("copyToClipboard(text)", catchAt);
+    expect(fallbackAt).toBeGreaterThan(abortAt);
+    expect(body.slice(abortAt, fallbackAt)).toContain("return;");
+  });
+
+  it("still falls back to the clipboard when navigator.share is missing", () => {
+    // One call in the share rejection path, one after the `if (shareFn)` block.
+    expect(body.split("copyToClipboard(text)")).toHaveLength(3);
+  });
+});
+
+describe("DailyGame — source guard: new headlines are announced from handlers", () => {
+  const handlerBody = (name: string, nextMarker: string): string => {
+    const start = source.indexOf(`const ${name} = useCallback(`);
+    const end = source.indexOf(nextMarker, start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return source.slice(start, end);
+  };
+
+  it("handleStart announces headline 1 of the round instead of clearing the region", () => {
+    const body = handlerBody("handleStart", "const handleGuess = useCallback(");
+    expect(body).toContain("headlineAnnouncement(1, headlines.length, headlines[0]?.title)");
+    expect(body).toContain("setAnnouncement(headlineAnnouncement(");
+    expect(body).not.toContain('setAnnouncement("")');
+  });
+
+  it("handleNext announces the next headline right after moving the index", () => {
+    const body = handlerBody("handleNext", "const copyToClipboard = useCallback(");
+    const setIndexAt = body.indexOf("setIndex(nextIndex);");
+    const announceAt = body.indexOf(
+      "headlineAnnouncement(nextIndex + 1, headlines.length, headlines[nextIndex]?.title)",
+    );
+    expect(setIndexAt).toBeGreaterThan(-1);
+    expect(announceAt).toBeGreaterThan(setIndexAt);
+    expect(body.slice(setIndexAt, announceAt)).toContain("setAnnouncement(");
+  });
+
+  it("the handlers depend on `headlines` itself (they read its items), not just its length", () => {
+    for (const [name, marker] of [
+      ["handleStart", "const handleGuess = useCallback("],
+      ["handleNext", "const copyToClipboard = useCallback("],
+    ] as const) {
+      const body = handlerBody(name, marker);
+      const deps = body.slice(body.lastIndexOf("}, ["));
+      expect(deps, name).toContain("headlines");
+      expect(deps, name).not.toContain("headlines.length");
+    }
+  });
+
+  it("no useEffect body announces a headline (set-state-in-effect is a lint error here)", () => {
+    for (const call of useEffectCalls(source)) {
+      expect(call).not.toContain("setAnnouncement(headlineAnnouncement");
+    }
+  });
+
+  it("describes the guess group by the headline", () => {
+    expect(source.split("aria-describedby={headlineId}")).toHaveLength(2);
+    expect(source.split("id={headlineId}")).toHaveLength(2);
+    expect(source).toContain("const headlineId = useId();");
+    expect(source).toContain('aria-label="Taraf tahmini"');
+  });
+
+  it("keeps the live region permanently mounted", () => {
+    expect(source).toContain('<div className="sr-only" role="status" aria-live="polite">');
+    expect(source).toMatch(/\{announcementRegion\}/);
+  });
+});
+
+describe("OyunModes and /oyun page — the fallback reason reaches DailyGame", () => {
+  const NOTICE_EXPIRED = "Bu bağlantıdaki bulmaca artık oynanamıyor; bugünkü bulmaca gösteriliyor.";
+
+  it("OyunModes forwards dailyFellBack to DailyGame as fellBack", () => {
+    const html = renderToStaticMarkup(
+      <OyunModes
+        headlines={[]}
+        daily={fixturePuzzle}
+        todayKey="2026-09-28"
+        dailyFellBack="expired"
+        initialMode="gunluk"
+      />,
+    );
+    expect(html).toContain(NOTICE_EXPIRED);
+    expect(html).toContain("Dünün (27 Eylül 2026) 5 manşeti.");
+  });
+
+  it("OyunModes without dailyFellBack shows no notice", () => {
+    const html = renderToStaticMarkup(
+      <OyunModes headlines={[]} daily={fixturePuzzle} todayKey="2026-09-28" initialMode="gunluk" />,
+    );
+    expect(html).not.toContain("Bu bağlantıdaki");
+  });
+
+  it("the page resolves ?gun= with its reason and passes it on, leaving the searchParams type alone", () => {
+    const pageSource = readFileSync(resolve(__dirname, "../../app/oyun/page.tsx"), "utf8");
+    expect(pageSource).toContain(
+      "const { dateKey, fellBack } = resolvePuzzleDateWithReason(sp.gun, todayKey);",
+    );
+    expect(pageSource).toContain("dailyFellBack={fellBack}");
+    // tests/guards/search-params-array.test.ts pins this exact declaration.
+    expect(pageSource).toContain("searchParams: Promise<{ mod?: string; gun?: string | string[] }>;");
   });
 });

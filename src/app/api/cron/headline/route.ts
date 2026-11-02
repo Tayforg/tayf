@@ -3,7 +3,7 @@ import { connection, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
+import { CRON_SUBSTEP_ERRORS_HEADER, withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import {
@@ -112,7 +112,26 @@ if (process.env.NODE_ENV === "production" && !process.env.ANTHROPIC_API_KEY) {
  * an old story look new).
  * There is no backfill UPDATE anywhere: existing rows heal through this
  * loop at ~20 per run, newest first. An rpc failure is logged and the run
- * still answers 200.
+ * still answers 200 to Vercel, but it is recorded as 599 (see SUB-STEP
+ * FAILURES below).
+ *
+ * SUB-STEP FAILURES
+ * -----------------
+ * A database read or write that failed and was swallowed (the re-pick rpc, a
+ * member-title fetch, a title write) does not fail the run: the other clusters
+ * still get their titles. But a run that logged one is not healthy either. On
+ * 2026-11-01 23:15-23:55 UTC `neutral_title_repick_candidates` answered 42501
+ * (permission denied for function) on 9 ticks in a row, each tick
+ * took the no-candidates path in ~100 ms, and every tick was recorded as 200, so
+ * `ops_health_report()` row 15 stayed green. The route now counts those failures
+ * in `substepErrors` and sends them in the internal header
+ * `x-cron-substep-errors`; `withCronOutcome` records 599 for the run and strips
+ * the header, so row 15 warns on the first bad tick and fails on the third (the
+ * fourth when the window holds 7 runs: it needs >= 2 failures and at least half
+ * of the route's runs in 30 minutes) while Vercel still sees a 200. Not counted:
+ * LLM vendor failures, empty or rejected rewrites, a pick that throws,
+ * revalidateTag, and the budget helpers (they swallow their own errors in
+ * `src/lib/headline/budget.ts`).
  *
  * AUTH
  * ----
@@ -416,21 +435,35 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
 
   const clusters = (clustersData ?? []) as ClusterCandidate[];
 
+  // Database reads and writes that failed and were swallowed so the run could
+  // finish (the pick query above is not one: it is a 500). Sent as an internal
+  // response header; withCronOutcome records 599 for a run with a positive count
+  // and strips the header (see SUB-STEP FAILURES above).
+  let substepErrors = 0;
+  const substepInit = (): ResponseInit | undefined =>
+    substepErrors > 0
+      ? { headers: { [CRON_SUBSTEP_ERRORS_HEADER]: String(substepErrors) } }
+      : undefined;
+
   // The body of a run with nothing to do. Extractive mode only returns it
-  // after the re-pick pass has also come up empty (below).
+  // after the re-pick pass has also come up empty (below). The 2026-11-01
+  // re-pick outage took this path on every tick.
   const noCandidates = () =>
-    NextResponse.json({
-      success: true,
-      mode,
-      rewrote: 0,
-      skipped: 0,
-      errored: 0,
-      eligible: 0,
-      ineligible: 0,
-      budgetedOut: 0,
-      reason: "no candidates",
-      timestamp: new Date().toISOString(),
-    });
+    NextResponse.json(
+      {
+        success: true,
+        mode,
+        rewrote: 0,
+        skipped: 0,
+        errored: 0,
+        eligible: 0,
+        ineligible: 0,
+        budgetedOut: 0,
+        reason: "no candidates",
+        timestamp: new Date().toISOString(),
+      },
+      substepInit(),
+    );
 
   if (clusters.length === 0 && mode === "llm") {
     // Gate counters are per CYCLE, not per candidate — a zero-candidate
@@ -491,6 +524,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
       captureServerException(memberErr, { clusterId: c.id, mode });
       perCluster[c.id] = { status: "errored", error: "member-fetch-failed" };
       errored++;
+      substepErrors++;
       continue;
     }
 
@@ -548,6 +582,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
             captureServerException(writeErr, { clusterId: c.id, mode });
             perCluster[c.id] = { status: "errored", error: "write-failed" };
             errored++;
+            substepErrors++;
             continue;
           }
 
@@ -660,6 +695,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
           captureServerException(rejectErr, { clusterId: c.id, mode });
           perCluster[c.id] = { status: "errored", error: "write-failed" };
           errored++;
+          substepErrors++;
           continue;
         }
         if (fallback === null) {
@@ -690,6 +726,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
         captureServerException(writeErr, { clusterId: c.id, mode });
         perCluster[c.id] = { status: "errored", error: "write-failed" };
         errored++;
+        substepErrors++;
         continue;
       }
 
@@ -736,6 +773,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
       captureServerException(writeErr, { clusterId: c.id, mode });
       perCluster[c.id] = { status: "errored", error: "write-failed" };
       errored++;
+      substepErrors++;
       continue;
     }
 
@@ -749,7 +787,9 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
   // left of the per-run write budget. The function returns active clusters of
   // the last 14 days (no LLM title) whose pick came from another model, was
   // never stamped, or has been outgrown by the cluster. An rpc failure is
-  // logged and the run stays 200: the IS NULL writes above are already done.
+  // logged and the run stays 200 to Vercel: the IS NULL writes above are already
+  // done. It is recorded as 599 (substepErrors), so ops_health_report row 15
+  // sees it; 9 failed ticks in a row once read as 200 (2026-11-01, 42501).
   let repickSeen = 0;
   const repickedIds: string[] = [];
   if (mode === "extractive" && Date.now() - startedAt < REPICK_DEADLINE_MS) {
@@ -763,6 +803,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
       if (repickErr) {
         console.error("[headline-cron] repick-candidates", repickErr);
         captureServerException(repickErr, { mode });
+        substepErrors++;
       } else {
         // The function already caps the batch; slicing keeps the write budget
         // a property of this route, not of the database function.
@@ -779,6 +820,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
             captureServerException(memberErr, { clusterId: r.id, mode });
             perCluster[r.id] = { status: "errored", error: "member-fetch-failed" };
             errored++;
+            substepErrors++;
             continue;
           }
 
@@ -810,6 +852,7 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
             captureServerException(writeErr, { clusterId: r.id, mode });
             perCluster[r.id] = { status: "errored", error: "write-failed" };
             errored++;
+            substepErrors++;
             continue;
           }
 
@@ -860,19 +903,22 @@ export const GET = withCronOutcome("headline", withApiErrors(async (request: Req
     console.error("[headline-cron] revalidateTag failed", err);
   }
 
-  return NextResponse.json({
-    success: true,
-    mode,
-    rewrote,
-    skipped,
-    errored,
-    repicked,
-    repickKept,
-    eligible: eligibleCount,
-    ineligible: ineligibleCount,
-    budgetedOut,
-    ...(mode === "llm" ? { budget: { day, usd: spentUsd, cap: capUsd } } : {}),
-    clusters: perCluster,
-    timestamp: new Date().toISOString(),
-  });
+  return NextResponse.json(
+    {
+      success: true,
+      mode,
+      rewrote,
+      skipped,
+      errored,
+      repicked,
+      repickKept,
+      eligible: eligibleCount,
+      ineligible: ineligibleCount,
+      budgetedOut,
+      ...(mode === "llm" ? { budget: { day, usd: spentUsd, cap: capUsd } } : {}),
+      clusters: perCluster,
+      timestamp: new Date().toISOString(),
+    },
+    substepInit(),
+  );
 }));

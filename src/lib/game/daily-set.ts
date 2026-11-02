@@ -164,26 +164,94 @@ export function puzzleNumber(key: string): number {
   return daysBetweenKeys(DAILY_GAME_EPOCH, key) + 1;
 }
 
+/** Why a `?gun=` value did not give the puzzle it named. */
+export type PuzzleDateFallback = "expired" | "future" | "invalid";
+
 /**
- * Resolves the `?gun=` query param into a playable date key.
+ * Resolves the `?gun=` query param into a playable date key and says why it
+ * fell back to `todayKey`, when it did.
  *
- * Falls back to `todayKey` for: a missing/array-with-no-string value, a
- * syntactically invalid date, a future date, a date before
- * `DAILY_GAME_EPOCH`, or a date more than `DAILY_REPLAY_DAYS` (7) days in
- * the past (i.e. only today and the 6 days before it replay; day 7 back
- * and beyond fall back to today).
+ * Checked in this order (the first match wins):
+ *   1. absent (undefined, or an array holding no string) -> today, `null`
+ *      (nobody asked for a specific puzzle, so there is nothing to explain);
+ *   2. not a valid `YYYY-MM-DD` key (including `''`)      -> today, 'invalid';
+ *   3. after today                                        -> today, 'future';
+ *   4. before `DAILY_GAME_EPOCH`                          -> today, 'invalid'
+ *      (there never was a puzzle that day, so it reads as a bad link);
+ *   5. `DAILY_REPLAY_DAYS` (7) or more days back          -> today, 'expired'
+ *      (only today and the 6 days before it replay);
+ *   6. otherwise the key itself, `null`.
+ */
+export function resolvePuzzleDateWithReason(
+  raw: string | string[] | undefined,
+  todayKey: string,
+): { dateKey: string; fellBack: PuzzleDateFallback | null } {
+  const candidate = Array.isArray(raw) ? raw[0] : raw;
+  if (candidate === undefined) return { dateKey: todayKey, fellBack: null };
+  if (!isDateKey(candidate)) return { dateKey: todayKey, fellBack: "invalid" };
+  if (candidate > todayKey) return { dateKey: todayKey, fellBack: "future" };
+  if (candidate < DAILY_GAME_EPOCH) return { dateKey: todayKey, fellBack: "invalid" };
+  if (daysBetweenKeys(candidate, todayKey) >= DAILY_REPLAY_DAYS) {
+    return { dateKey: todayKey, fellBack: "expired" };
+  }
+  return { dateKey: candidate, fellBack: null };
+}
+
+/**
+ * Resolves the `?gun=` query param into a playable date key. The same rules
+ * as `resolvePuzzleDateWithReason`, minus the reason: every unusable value
+ * (absent, invalid, future, before the epoch, 7+ days old) gives `todayKey`.
  */
 export function resolvePuzzleDate(
   raw: string | string[] | undefined,
   todayKey: string,
 ): string {
-  const candidate = Array.isArray(raw) ? raw[0] : raw;
-  if (!isDateKey(candidate)) return todayKey;
-  if (candidate > todayKey) return todayKey;
-  if (candidate < DAILY_GAME_EPOCH) return todayKey;
-  const ageDays = daysBetweenKeys(candidate, todayKey);
-  if (ageDays >= DAILY_REPLAY_DAYS) return todayKey;
-  return candidate;
+  return resolvePuzzleDateWithReason(raw, todayKey).dateKey;
+}
+
+/**
+ * The one-line notice shown when a `?gun=` link named a puzzle that cannot be
+ * played and today's puzzle is shown instead. A malformed link (or no
+ * fallback at all) needs no explanation: `null`.
+ */
+export function puzzleFallbackNotice(
+  fellBack: PuzzleDateFallback | null | undefined,
+): string | null {
+  if (fellBack === "expired") {
+    return "Bu bağlantıdaki bulmaca artık oynanamıyor; bugünkü bulmaca gösteriliyor.";
+  }
+  if (fellBack === "future") {
+    return "Bu bağlantıdaki bulmaca henüz yayımlanmadı; bugünkü bulmaca gösteriliyor.";
+  }
+  return null;
+}
+
+/**
+ * The idle-screen intro of "Günün Tayf’ı", saying exactly what is counted.
+ *
+ * "Dünün (...) 5 manşeti" is only true for TODAY's puzzle, whose window is
+ * yesterday; a replayed puzzle (`dateKey` before `todayKey`) names its own
+ * window instead. The word "siyasi" is only true from
+ * `DAILY_POLITICS_GATE_FROM` on: earlier puzzles were drawn under the
+ * pre-gate rules and include non-political items (the gate is never moved,
+ * so replays stay byte-identical).
+ */
+export function dailyIntroText({
+  dateKey,
+  todayKey,
+  number,
+  windowLabel,
+}: {
+  dateKey: string;
+  todayKey: string;
+  number: number;
+  windowLabel: string;
+}): string {
+  const pol = dateKey >= DAILY_POLITICS_GATE_FROM ? "siyasi " : "";
+  if (dateKey === todayKey) {
+    return `Dünün (${windowLabel}) 5 ${pol}manşeti. Her biri hangi bölgedeki bir kaynaktan? Herkes aynı 5 manşeti görür. Günün Tayf\u2019ı #${number}.`;
+  }
+  return `Günün Tayf\u2019ı #${number} · ${windowLabel} tarihli 5 ${pol}manşet. Her biri hangi bölgedeki bir kaynaktan? Herkes aynı 5 manşeti görür.`;
 }
 
 /**

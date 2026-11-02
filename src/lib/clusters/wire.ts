@@ -184,3 +184,46 @@ export function wireSignalOf(
     independentHeadlineCount: countIndependentHeadlines(members),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Wire badge copy (h18-numbers-2)
+// ---------------------------------------------------------------------------
+//
+// A wire cluster is any cluster whose distinct-text ratio is <= 0.5, which
+// includes several different dispatches (6 members, 3 texts), not only one
+// text reprinted N times. "Tek kaynaktan dağıtıldı" is true only for the
+// latter, so every surface that prints the badge takes its words from here.
+// `uniqueTexts` is the cluster's `effectiveArticleCount` (equal to the
+// distinct content-hash count for a wire cluster); `memberCount` is the
+// post-dedupe member count. `uniqueTexts <= 1` (and 0 / NaN, which carry no
+// evidence of several texts) keeps the single-source wording.
+
+/** True when more than one distinct text is behind the cluster's members. */
+function hasSeveralTexts(uniqueTexts: number): boolean {
+  return uniqueTexts > 1;
+}
+
+/** The violet badge on the cluster page, card and RSS description. */
+export function wireBadgeLabel(memberCount: number, uniqueTexts: number): string {
+  return hasSeveralTexts(uniqueTexts)
+    ? `Ajans ağırlıklı · ${memberCount} haber, ${uniqueTexts} farklı metin`
+    : `Tek kaynaktan dağıtıldı · ${memberCount} kopya`;
+}
+
+/** The short form for the OG image pill and the share text. */
+export function wireBadgeShort(memberCount: number, uniqueTexts: number): string {
+  return hasSeveralTexts(uniqueTexts)
+    ? `${memberCount} haber · ${uniqueTexts} farklı metin`
+    : `${memberCount} kopya · tek kaynak`;
+}
+
+/**
+ * The badge's `title` tooltip. The multi-text claim holds by construction: a
+ * wire cluster has `uniqueTexts / members <= WIRE_UNIQUE_HASH_RATIO` (0.5), so
+ * at least half of the members repeat another member's text.
+ */
+export function wireBadgeTitle(uniqueTexts: number): string {
+  return hasSeveralTexts(uniqueTexts)
+    ? "Bu kümedeki haberlerin en az yarısı başka bir haberin birebir kopyası"
+    : "Bu kümedeki haberlerin tamamı aynı ajans metninin kopyası";
+}

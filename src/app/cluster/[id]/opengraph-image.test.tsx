@@ -356,6 +356,24 @@ describe("cluster opengraph-image", () => {
     expect(text).toContain("7 kopya · tek kaynak");
   });
 
+  it("does not claim a single source when a wire cluster holds several distinct texts (6 members, 3 texts)", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail(
+        { article_count: 6, is_blindspot: false, blindspot_side: null },
+        { isWireRedistribution: true, effectiveArticleCount: 3, memberCount: 6 },
+      ),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("3 kaynak");
+    expect(text).toContain("6 haber · 3 farklı metin");
+    expect(text).not.toContain("tek kaynak");
+    expect(text).not.toContain("kopya");
+  });
+
   it("omits the wire pill when the cluster is not a wire redistribution", async () => {
     getClusterDetailOrThrow.mockResolvedValueOnce(
       mkDetail(

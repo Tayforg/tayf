@@ -309,7 +309,7 @@ describe("WeeklyPage — data present", () => {
     expect(headings).toHaveLength(6);
   });
 
-  it("states each zone's percentage against the week's article total", async () => {
+  it("states each zone's percentage against the window's source-record total", async () => {
     const tree = await WeeklyPage();
     const text = collectText(tree).join(" ");
 
@@ -318,9 +318,9 @@ describe("WeeklyPage — data present", () => {
     expect(text).toContain("Muhalefet");
     // 6 / 3 / 1 of 10 => %60 / %30 / %10, each printed with the base it
     // was actually divided by (never the source denominator).
-    expect(text).toContain("%60 (son 7 günün 10 haberi içinde)");
-    expect(text).toContain("%30 (son 7 günün 10 haberi içinde)");
-    expect(text).toContain("%10 (son 7 günün 10 haberi içinde)");
+    expect(text).toContain("%60 (son 7 günün 10 kaynak kaydı içinde)");
+    expect(text).toContain("%30 (son 7 günün 10 kaynak kaydı içinde)");
+    expect(text).toContain("%10 (son 7 günün 10 kaynak kaydı içinde)");
   });
 
   it("groups four-digit week counts the Turkish way (1.234, not 1234)", async () => {
@@ -334,12 +334,12 @@ describe("WeeklyPage — data present", () => {
     const tree = await WeeklyPage();
     const text = collectText(tree).join(" ");
 
-    expect(text).toContain("(son 7 günün 1.234 haberi içinde)");
-    expect(text).toContain("Yüzdeler son 7 günün toplam 1.234 haberi üzerinden hesaplanır");
-    expect(text).toContain("1.000 haber");
-    expect(text).toContain("1.500 haber · 3 bölge");
-    expect(text).toContain("tarafında · 1.200 haber");
-    expect(text).not.toMatch(/\b(1234|1000|1500|1200) haber/);
+    expect(text).toContain("(son 7 günün 1.234 kaynak kaydı içinde)");
+    expect(text).toContain("Yüzdeler son 7 günün çok kaynaklı kümelerindeki 1.234 kaynak kaydı üzerinden hesaplanır");
+    expect(text).toContain("1.000 kaynak kaydı");
+    expect(text).toContain("1.500 kaynak · 3 bölge");
+    expect(text).toContain("tarafında · 1.200 kaynak");
+    expect(text).not.toMatch(/\b(1234|1000|1500|1200) (haber|kaynak)\b/);
   });
 
   it("prints each zone's delivering-source count as its own fact, not a share", async () => {
@@ -366,7 +366,7 @@ describe("WeeklyPage — data present", () => {
     expect(text).not.toContain("kaynak haber verdi (toplayıcı / niş dahil)");
     expect(text).not.toContain("kaynak üzerinden hesaplanmadı");
     // The three zone rows still render with their own article share.
-    expect(text.match(/\(son 7 günün 10 haberi içinde\)/g) ?? []).toHaveLength(3);
+    expect(text.match(/\(son 7 günün 10 kaynak kaydı içinde\)/g) ?? []).toHaveLength(3);
   });
 
   it("never prints a bare share without a denominator or the unknown wording", async () => {
@@ -382,8 +382,8 @@ describe("WeeklyPage — data present", () => {
     const hrefs = collectHrefs(tree);
 
     expect(text).toContain("Asgari ücret görüşmeleri");
-    expect(text).toContain("9 haber · 3 bölge");
-    expect(text).toContain("5 haber · 2 bölge");
+    expect(text).toContain("9 kaynak · 3 bölge");
+    expect(text).toContain("5 kaynak · 2 bölge");
     expect(hrefs).toContain("/cluster/cl-1");
     expect(hrefs).toContain("/cluster/cl-2");
   });
@@ -393,14 +393,14 @@ describe("WeeklyPage — data present", () => {
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("İhale iptali");
-    expect(text).toContain("Sadece Muhalefet tarafında · 4 haber");
+    expect(text).toContain("Sadece Muhalefet tarafında · 4 kaynak");
   });
 
   it("says 'Sadece' only for a 100% blindspot and states the share below that (15 / 1 / 1 -> %88)", async () => {
     const text = collectText(await WeeklyPage()).join(" ");
 
     expect(text).toContain("Kısmi kör nokta haberi");
-    expect(text).toContain("%88 İktidar · 20 haber");
+    expect(text).toContain("%88 İktidar · 20 kaynak");
     expect(text).not.toContain("Sadece İktidar");
     expect(text.match(/Sadece/g) ?? []).toHaveLength(1);
   });

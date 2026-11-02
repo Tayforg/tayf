@@ -13,6 +13,24 @@ import type { NearBlindspotItem } from "@/lib/clusters/near-blindspots-query";
 //
 // Strings that mix text and numbers are built as ONE template literal so the
 // server markup keeps them contiguous (JSX would split them with comment nodes).
+
+/**
+ * The row's source count. The cluster page prints every member ("27 kaynak"),
+ * while the share chip is computed over the voting sources only (aggregators
+ * and niche sources never vote), so when the two differ the row names both
+ * instead of printing the smaller number as if it were the whole count. A
+ * member count below the voting total cannot happen (voters are members), but
+ * it must not print a number smaller than what was counted.
+ */
+export function nearBlindspotCountLabel(
+  memberCount: number,
+  votingTotal: number,
+): string {
+  return memberCount > votingTotal
+    ? `${memberCount} kaynak · ${votingTotal} sayıldı`
+    : `${votingTotal} kaynak`;
+}
+
 export function NearBlindspotList({ items }: { items: NearBlindspotItem[] | null }) {
   if (items === null || items.length === 0) return null;
 
@@ -50,8 +68,11 @@ export function NearBlindspotList({ items }: { items: NearBlindspotItem[] | null
                   {`%${nearSharePercent(item.dominantShare)} ${meta.label}`}
                 </span>
                 <BalanceChip balance={item.balance} variant="compact" />
-                <span className="text-muted-foreground">
-                  {`${item.votingTotal} kaynak`}
+                <span
+                  className="text-muted-foreground"
+                  title="Toplayıcı ve niş kaynaklar spektruma sayılmaz."
+                >
+                  {nearBlindspotCountLabel(item.memberCount, item.votingTotal)}
                 </span>
               </div>
             </li>

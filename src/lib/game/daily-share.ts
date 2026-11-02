@@ -74,6 +74,33 @@ export function parseDailyStore(raw: string | null | undefined): DailyStore {
   return { v: 1, lastPlayed, streak: Math.max(0, streak), best: Math.max(0, best), results };
 }
 
+/**
+ * The streak to SHOW: `store.streak` only while it is still alive, i.e. the
+ * last play was today or yesterday (the streak can still be extended today).
+ * A longer gap means the stored number is a dead streak that
+ * `applyDailyResult` would reset to 1 on the next play, so showing it would
+ * claim a run the reader no longer has. Never changes the store.
+ */
+export function liveStreak(store: DailyStore, todayKey: string): number {
+  const { lastPlayed } = store;
+  if (lastPlayed === todayKey || lastPlayed === addDays(todayKey, -1)) return store.streak;
+  return 0;
+}
+
+/**
+ * True when a `navigator.share()` rejection is the reader dismissing the
+ * share sheet (an `AbortError`). That is a decision, not a failure: the
+ * clipboard must stay untouched. Any other rejection (unsupported, blocked)
+ * still falls back to copying.
+ */
+export function isShareAbort(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { name?: unknown }).name === "AbortError"
+  );
+}
+
 export interface ApplyDailyResultInput {
   dateKey: string;
   todayKey: string;

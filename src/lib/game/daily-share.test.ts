@@ -4,6 +4,8 @@ import {
   STREAK_STORAGE_KEY,
   applyDailyResult,
   buildShareText,
+  isShareAbort,
+  liveStreak,
   parseDailyStore,
   type DailyStore,
 } from "./daily-share";
@@ -236,5 +238,83 @@ describe("applyDailyResult — streak rules", () => {
     expect(store.results["2026-09-01"]).toBeUndefined();
     expect(store.results["2026-09-02"]).toBeUndefined();
     expect(store.results["2026-09-16"]).toBeDefined();
+  });
+});
+
+describe("liveStreak", () => {
+  const today = "2026-11-02";
+
+  function storeWith(lastPlayed: string | null, streak: number): DailyStore {
+    return { v: 1, lastPlayed, streak, best: Math.max(streak, 7), results: {} };
+  }
+
+  it("shows the streak when the last play was today", () => {
+    expect(liveStreak(storeWith(today, 5), today)).toBe(5);
+  });
+
+  it("shows the streak when the last play was yesterday (still alive until today is played)", () => {
+    expect(liveStreak(storeWith("2026-11-01", 5), today)).toBe(5);
+  });
+
+  it("is 0 when the last play was 2 days ago (the streak is already broken)", () => {
+    expect(liveStreak(storeWith("2026-10-31", 5), today)).toBe(0);
+  });
+
+  it("is 0 when the last play was 3 days ago", () => {
+    expect(liveStreak(storeWith("2026-10-30", 5), today)).toBe(0);
+  });
+
+  it("is 0 when nothing was ever played (lastPlayed null)", () => {
+    expect(liveStreak(storeWith(null, 0), today)).toBe(0);
+    expect(liveStreak(storeWith(null, 5), today)).toBe(0);
+  });
+
+  it("is 0 for a lastPlayed in the future (clock skew or a hand-edited store)", () => {
+    expect(liveStreak(storeWith("2026-11-09", 5), today)).toBe(0);
+  });
+
+  it("works across a month boundary", () => {
+    expect(liveStreak(storeWith("2026-10-31", 4), "2026-11-01")).toBe(4);
+  });
+
+  it("an empty parsed store has no live streak", () => {
+    expect(liveStreak(parseDailyStore(null), today)).toBe(0);
+  });
+
+  it("does not touch best", () => {
+    const store = storeWith("2026-10-20", 5);
+    expect(liveStreak(store, today)).toBe(0);
+    expect(store.best).toBe(7);
+  });
+});
+
+describe("isShareAbort", () => {
+  it("is true for the DOMException navigator.share rejects with when the sheet is dismissed", () => {
+    expect(isShareAbort(new DOMException("x", "AbortError"))).toBe(true);
+  });
+
+  it("is true for any object whose name is 'AbortError'", () => {
+    expect(isShareAbort({ name: "AbortError" })).toBe(true);
+  });
+
+  it("is false for a plain Error", () => {
+    expect(isShareAbort(new Error("x"))).toBe(false);
+  });
+
+  it("is false for NotAllowedError (share unsupported or blocked: fall back to the clipboard)", () => {
+    expect(isShareAbort(new DOMException("x", "NotAllowedError"))).toBe(false);
+    expect(isShareAbort({ name: "NotAllowedError" })).toBe(false);
+  });
+
+  it("is false for undefined, null and primitives", () => {
+    expect(isShareAbort(undefined)).toBe(false);
+    expect(isShareAbort(null)).toBe(false);
+    expect(isShareAbort("AbortError")).toBe(false);
+    expect(isShareAbort(0)).toBe(false);
+  });
+
+  it("is false for an object with no name or a non-string name", () => {
+    expect(isShareAbort({})).toBe(false);
+    expect(isShareAbort({ name: 1 })).toBe(false);
   });
 });

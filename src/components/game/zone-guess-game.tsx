@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   useSyncExternalStore,
@@ -10,6 +11,7 @@ import {
 } from "react";
 
 import { ZONE_META } from "@/lib/bias/config";
+import { headlineAnnouncement } from "@/lib/game/headline-announcement";
 import type { GameHeadline } from "@/lib/game/headline-pool";
 import type { MediaDnaZone } from "@/types";
 
@@ -123,6 +125,10 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
   // round.
   const announcedThresholdsRef = useRef<Set<number>>(new Set());
 
+  // Ties the headline <p> to the guess group (aria-describedby), so a screen
+  // reader reads the headline together with the choices.
+  const headlineId = useId();
+
   const firstZoneRef = useRef<HTMLButtonElement | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
   const replayRef = useRef<HTMLButtonElement | null>(null);
@@ -189,9 +195,11 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
     announcedThresholdsRef.current = new Set();
     setSecondsLeft(GAME_SECONDS);
     setGuessedZone(null);
-    setAnnouncement("");
+    // The headline <p> sits outside the live region, so say it here: a screen
+    // reader user would otherwise only hear the zone buttons.
+    setAnnouncement(headlineAnnouncement(1, headlines.length, headlines[0]?.title));
     setPhase("playing");
-  }, []);
+  }, [headlines]);
 
   const handleGuess = useCallback(
     (zone: MediaDnaZone) => {
@@ -232,8 +240,11 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
       return;
     }
     setIndex(nextIndex);
+    setAnnouncement(
+      headlineAnnouncement(nextIndex + 1, headlines.length, headlines[nextIndex]?.title),
+    );
     setPhase("playing");
-  }, [index, headlines.length, finishRound, score]);
+  }, [index, headlines, finishRound, score]);
 
   // Always mounted regardless of phase, matching share-button.tsx's
   // permanently-mounted live region: an empty string renders nothing
@@ -306,12 +317,15 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
           <span aria-label={`${score} doğru tahmin`}>{score} doğru</span>
         </div>
 
-        <p className="font-serif text-lg sm:text-xl leading-snug">{current.title}</p>
+        <p id={headlineId} className="font-serif text-lg sm:text-xl leading-snug">
+          {current.title}
+        </p>
 
         {phase === "playing" && (
           <div
             role="group"
             aria-label="Taraf tahmini"
+            aria-describedby={headlineId}
             className="grid grid-cols-1 sm:grid-cols-3 gap-2"
           >
             {ZONES.map((zone, zoneIndex) => {

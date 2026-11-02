@@ -1,6 +1,7 @@
 import { ImageResponse } from "next/og";
 
 import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
+import { wireBadgeShort } from "@/lib/clusters/wire";
 import { tallyZones, zoneOf } from "@/lib/bias/config";
 import {
   dominantZonePercent,
@@ -310,7 +311,7 @@ export default async function Image({ params }: ImageProps) {
                   color: "#c4b5fd",
                 }}
               >
-                {wire.memberCount} kopya · tek kaynak
+                {wireBadgeShort(wire.memberCount, wire.effectiveArticleCount)}
               </div>
             )}
           </div>

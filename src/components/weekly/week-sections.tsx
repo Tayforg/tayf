@@ -79,9 +79,10 @@ export function ZoneShares({
       <ul className="space-y-2">
         {ZONE_ORDER.map((zone) => {
           const count = summary.zoneCounts[zone];
-          // A source count, not a share: article counts and source counts
-          // are different populations and must never be divided into each
-          // other.
+          // A source count, not a share: the zone count above (voting-source
+          // records of multi-source clusters) and this count (sources that
+          // delivered in the last 72 h) are different populations and must
+          // never be divided into each other.
           const delivering = zoneYieldDenominator(health, zone);
 
           return (
@@ -89,7 +90,7 @@ export function ZoneShares({
               <span className={`text-sm font-semibold ${ZONE_META[zone].zoneLabel}`}>
                 {ZONE_META[zone].label}
               </span>
-              <span className="text-sm text-foreground/90">{`${formatCountTr(count)} haber`}</span>
+              <span className="text-sm text-foreground/90">{`${formatCountTr(count)} kaynak kaydı`}</span>
               <span className="font-mono text-sm text-foreground">
                 {formatPctTr(percents[zone])}
               </span>
@@ -118,7 +119,8 @@ export function ZoneShares({
  * The basis line for this section. The shared `DenominatorNote` states that
  * *shares* are computed over delivering sources, which is not how either
  * figure in the rows above is computed, so /hafta states its own two bases:
- * the percentage's denominator (the week's article total) and what the
+ * the percentage's denominator (the period's source-record total: voting-
+ * source entries of the multi-source clusters, not articles) and what the
  * per-zone source figure counts (72 h delivering sources, toplayıcı / niş
  * dahil — mixed with the spektruma-sayılan-only feedStatus basis below,
  * which is why both bases are now stated explicitly rather than folded
@@ -182,7 +184,7 @@ export function WidestSpectrum({
                 {cluster.title}
               </Link>
               <span className={metaClass}>
-                {`${formatCountTr(cluster.articleCount)} haber · ${cluster.zonesCovered} bölge`}
+                {`${formatCountTr(cluster.articleCount)} kaynak · ${cluster.zonesCovered} bölge`}
               </span>
             </li>
           ))}
@@ -201,7 +203,7 @@ export function WidestSpectrum({
  */
 export function blindspotShareText(blindspot: WeeklyBlindspot): string {
   const zone = ZONE_META[blindspot.side].label;
-  const count = `${formatCountTr(blindspot.articleCount)} haber`;
+  const count = `${formatCountTr(blindspot.articleCount)} kaynak`;
 
   if (blindspot.share === 1) return `Sadece ${zone} tarafında · ${count}`;
   if (blindspot.share === null || blindspot.sharePct === null) {

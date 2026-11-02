@@ -336,6 +336,9 @@ describe("getNearBlindspotsSafe voting basis", () => {
     expect(items).toHaveLength(1);
     expect(items[0]?.dominantShare).toBe(0.7);
     expect(items[0]?.votingTotal).toBe(10);
+    // The aggregators do not vote, but they are members of the cluster: the
+    // row's member count (what the cluster page prints) keeps them.
+    expect(items[0]?.memberCount).toBe(13);
   });
 
   it("does not let 2 iktidar aggregators raise the share: 6 iktidar + 4 muhalefet outlets + 2 aggregators -> 0.6, excluded", async () => {
@@ -362,6 +365,7 @@ describe("getNearBlindspotsSafe voting basis", () => {
     const items = (await getNearBlindspotsSafe()) ?? [];
     expect(items).toHaveLength(1);
     expect(items[0]?.votingTotal).toBe(10);
+    expect(items[0]?.memberCount).toBe(14);
   });
 });
 
@@ -407,6 +411,9 @@ describe("getNearBlindspotsSafe same-source dedupe", () => {
     expect(items).toHaveLength(1);
     expect(items[0]?.votingTotal).toBe(10);
     expect(items[0]?.dominantShare).toBe(0.7);
+    // Members are deduped by source first, so the 3 extra articles of one
+    // source are not members: 7 + 3 distinct sources = 10.
+    expect(items[0]?.memberCount).toBe(10);
   });
 });
 

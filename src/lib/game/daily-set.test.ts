@@ -9,12 +9,15 @@ import {
   ISTANBUL_OFFSET_MS,
   addDays,
   dailyHash,
+  dailyIntroText,
   isDailyEligible,
   isDateKey,
   pickDailySet,
+  puzzleFallbackNotice,
   puzzleNumber,
   puzzleWindow,
   resolvePuzzleDate,
+  resolvePuzzleDateWithReason,
   titleLeaksOutlet,
   type DailyCandidate,
   type PuzzleWindow,
@@ -122,6 +125,206 @@ describe("resolvePuzzleDate", () => {
   it("a valid 3-day-old key is kept", () => {
     const threeDaysAgo = addDays(today, -3);
     expect(resolvePuzzleDate(threeDaysAgo, today)).toBe(threeDaysAgo);
+  });
+});
+
+describe("resolvePuzzleDateWithReason", () => {
+  const today = "2026-11-02";
+
+  it("an expired key (7 days back) falls back to today and says 'expired'", () => {
+    expect(resolvePuzzleDateWithReason("2026-10-26", today)).toEqual({
+      dateKey: "2026-11-02",
+      fellBack: "expired",
+    });
+  });
+
+  it("the oldest replayable key (6 days back) is kept with no reason", () => {
+    expect(resolvePuzzleDateWithReason("2026-10-27", today)).toEqual({
+      dateKey: "2026-10-27",
+      fellBack: null,
+    });
+  });
+
+  it("today itself is kept with no reason", () => {
+    expect(resolvePuzzleDateWithReason(today, today)).toEqual({ dateKey: today, fellBack: null });
+  });
+
+  it("a future key falls back to today and says 'future'", () => {
+    expect(resolvePuzzleDateWithReason("2026-11-03", today)).toEqual({
+      dateKey: today,
+      fellBack: "future",
+    });
+  });
+
+  it("a non-date string falls back to today and says 'invalid'", () => {
+    expect(resolvePuzzleDateWithReason("abc", today)).toEqual({
+      dateKey: today,
+      fellBack: "invalid",
+    });
+  });
+
+  it("a calendrically impossible key says 'invalid'", () => {
+    expect(resolvePuzzleDateWithReason("2026-02-30", today)).toEqual({
+      dateKey: today,
+      fellBack: "invalid",
+    });
+  });
+
+  it("an empty string is a present-but-invalid value, not an absent one", () => {
+    expect(resolvePuzzleDateWithReason("", today)).toEqual({ dateKey: today, fellBack: "invalid" });
+  });
+
+  it("a key before the epoch says 'invalid' (there was never a puzzle that day)", () => {
+    expect(resolvePuzzleDateWithReason("2026-09-01", today)).toEqual({
+      dateKey: today,
+      fellBack: "invalid",
+    });
+  });
+
+  it("an absent value (undefined) falls back to today with no reason", () => {
+    expect(resolvePuzzleDateWithReason(undefined, today)).toEqual({
+      dateKey: today,
+      fellBack: null,
+    });
+  });
+
+  it("an empty array has no string, so it is absent: today, no reason", () => {
+    expect(resolvePuzzleDateWithReason([], today)).toEqual({ dateKey: today, fellBack: null });
+  });
+
+  it("an array takes its first element", () => {
+    expect(resolvePuzzleDateWithReason(["2026-10-30", "2026-10-31"], today)).toEqual({
+      dateKey: "2026-10-30",
+      fellBack: null,
+    });
+    expect(resolvePuzzleDateWithReason(["2026-11-09", "2026-10-31"], today)).toEqual({
+      dateKey: today,
+      fellBack: "future",
+    });
+  });
+
+  it("checks the future before the epoch and the epoch before expiry (rule order)", () => {
+    // Before the epoch AND old: 'invalid', never 'expired'.
+    expect(resolvePuzzleDateWithReason("2020-01-01", today).fellBack).toBe("invalid");
+    // Exactly at the epoch but long expired: 'expired'.
+    expect(resolvePuzzleDateWithReason(DAILY_GAME_EPOCH, today).fellBack).toBe("expired");
+  });
+
+  it("agrees with resolvePuzzleDate on every input (wrapper contract)", () => {
+    const inputs: (string | string[] | undefined)[] = [
+      undefined,
+      [],
+      "",
+      "abc",
+      "2026-09-01",
+      "2026-10-26",
+      "2026-10-27",
+      "2026-11-02",
+      "2026-11-03",
+      ["2026-10-30", "x"],
+    ];
+    for (const raw of inputs) {
+      expect(resolvePuzzleDate(raw, today)).toBe(resolvePuzzleDateWithReason(raw, today).dateKey);
+    }
+  });
+});
+
+describe("puzzleFallbackNotice", () => {
+  it("explains an expired link in natural Turkish", () => {
+    expect(puzzleFallbackNotice("expired")).toBe(
+      "Bu bağlantıdaki bulmaca artık oynanamıyor; bugünkü bulmaca gösteriliyor.",
+    );
+  });
+
+  it("explains a future link in natural Turkish", () => {
+    expect(puzzleFallbackNotice("future")).toBe(
+      "Bu bağlantıdaki bulmaca henüz yayımlanmadı; bugünkü bulmaca gösteriliyor.",
+    );
+  });
+
+  it("stays silent for a malformed link and for no fallback at all", () => {
+    expect(puzzleFallbackNotice("invalid")).toBeNull();
+    expect(puzzleFallbackNotice(null)).toBeNull();
+    expect(puzzleFallbackNotice(undefined)).toBeNull();
+  });
+});
+
+describe("dailyIntroText", () => {
+  it("DAILY_POLITICS_GATE_FROM has not moved (replay byte-identity contract)", () => {
+    expect(DAILY_POLITICS_GATE_FROM).toBe("2026-11-04");
+  });
+
+  it("today before the gate: 'Dünün (...) 5 manşeti.' with no 'siyasi'", () => {
+    const text = dailyIntroText({
+      dateKey: "2026-11-02",
+      todayKey: "2026-11-02",
+      number: 36,
+      windowLabel: "1 Kasım 2026",
+    });
+    expect(text).toBe(
+      "Dünün (1 Kasım 2026) 5 manşeti. Her biri hangi bölgedeki bir kaynaktan? Herkes aynı 5 manşeti görür. Günün Tayf’ı #36.",
+    );
+    expect(text).not.toContain("siyasi");
+  });
+
+  it("today after the gate: names the headlines 'siyasi'", () => {
+    const text = dailyIntroText({
+      dateKey: "2026-11-05",
+      todayKey: "2026-11-05",
+      number: 39,
+      windowLabel: "4 Kasım 2026",
+    });
+    expect(text).toBe(
+      "Dünün (4 Kasım 2026) 5 siyasi manşeti. Her biri hangi bölgedeki bir kaynaktan? Herkes aynı 5 manşeti görür. Günün Tayf’ı #39.",
+    );
+  });
+
+  it("today exactly on the gate date is already 'siyasi' (>= the gate)", () => {
+    const text = dailyIntroText({
+      dateKey: DAILY_POLITICS_GATE_FROM,
+      todayKey: DAILY_POLITICS_GATE_FROM,
+      number: 38,
+      windowLabel: "3 Kasım 2026",
+    });
+    expect(text).toContain("5 siyasi manşeti");
+  });
+
+  it("a pre-gate replay never says 'Dünün' (the window is not yesterday) and never says 'siyasi'", () => {
+    const text = dailyIntroText({
+      dateKey: "2026-10-27",
+      todayKey: "2026-11-02",
+      number: 30,
+      windowLabel: "26 Ekim 2026",
+    });
+    expect(text).toBe(
+      "Günün Tayf’ı #30 · 26 Ekim 2026 tarihli 5 manşet. Her biri hangi bölgedeki bir kaynaktan? Herkes aynı 5 manşeti görür.",
+    );
+    expect(text).not.toContain("Dünün");
+    expect(text).not.toContain("siyasi");
+  });
+
+  it("a replay on or after the gate says 'siyasi'", () => {
+    const text = dailyIntroText({
+      dateKey: "2026-11-04",
+      todayKey: "2026-11-06",
+      number: 38,
+      windowLabel: "3 Kasım 2026",
+    });
+    expect(text).toBe(
+      "Günün Tayf’ı #38 · 3 Kasım 2026 tarihli 5 siyasi manşet. Her biri hangi bölgedeki bir kaynaktan? Herkes aynı 5 manşeti görür.",
+    );
+    expect(text).not.toContain("Dünün");
+  });
+
+  it("uses the typographic apostrophe U+2019 (what the old JSX &rsquo; rendered), never a straight one", () => {
+    const text = dailyIntroText({
+      dateKey: "2026-11-02",
+      todayKey: "2026-11-02",
+      number: 1,
+      windowLabel: "x",
+    });
+    expect(text).toContain("Tayf\u2019ı");
+    expect(text).not.toContain("'");
   });
 });
 

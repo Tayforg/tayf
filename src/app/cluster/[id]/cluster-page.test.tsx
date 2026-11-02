@@ -1209,11 +1209,13 @@ describe("ClusterDetailPage — mobile tap targets (h16-mobile-2)", () => {
   });
 
   it("keeps the bağımsız başlık link and the wire chip in the meta group, not the actions", async () => {
+    // 6 members, 3 distinct dispatches (a202cbe0): the chip must say so
+    // instead of claiming a single source.
     const tree = await renderTree(
       detail({
         isWireRedistribution: true,
-        effectiveArticleCount: 5,
-        memberCount: 5,
+        effectiveArticleCount: 3,
+        memberCount: 6,
         independentHeadlineCount: 2,
       }),
     );
@@ -1222,11 +1224,49 @@ describe("ClusterDetailPage — mobile tap targets (h16-mobile-2)", () => {
     const metaText = collectText(row.props.children).join("");
     expect(collectHrefs(row.props.children)).toContain("/metodoloji#tek-kaynak");
     expect(metaText).toContain("2 bağımsız başlık");
-    expect(metaText).toContain("Tek kaynaktan dağıtıldı");
+    expect(metaText).toContain("Ajans ağırlıklı · 6 haber, 3 farklı metin");
+    expect(metaText).not.toContain("Tek kaynaktan");
     const actionText = collectText(group.props.children).join("");
     expect(actionText).not.toContain("bağımsız başlık");
-    expect(actionText).not.toContain("Tek kaynaktan dağıtıldı");
+    expect(actionText).not.toContain("Ajans ağırlıklı");
     expect(collectHrefs(group.props.children)).not.toContain("/metodoloji#tek-kaynak");
+  });
+
+  it("says 'Tek kaynaktan dağıtıldı' only when every member is a copy of one text", async () => {
+    const tree = await renderTree(
+      detail({
+        isWireRedistribution: true,
+        effectiveArticleCount: 1,
+        memberCount: 5,
+      }),
+    );
+    const row = findMetaRow(tree)!;
+    const metaText = collectText(row.props.children).join("");
+    expect(metaText).toContain("Tek kaynaktan dağıtıldı · 5 kopya");
+    expect(metaText).not.toContain("Ajans ağırlıklı");
+  });
+
+  it("titles the wire chip by what is true: all copies of one text vs at least half copies", async () => {
+    const single = await renderTree(
+      detail({ isWireRedistribution: true, effectiveArticleCount: 1, memberCount: 5 }),
+    );
+    const multi = await renderTree(
+      detail({ isWireRedistribution: true, effectiveArticleCount: 3, memberCount: 6 }),
+    );
+    const chipTitles = (tree: unknown) =>
+      findAllElements(
+        tree,
+        (el) =>
+          typeof el.props.title === "string" &&
+          el.props.title.startsWith("Bu kümedeki haberlerin"),
+      ).map((el) => el.props.title);
+
+    expect(chipTitles(single)).toEqual([
+      "Bu kümedeki haberlerin tamamı aynı ajans metninin kopyası",
+    ]);
+    expect(chipTitles(multi)).toEqual([
+      "Bu kümedeki haberlerin en az yarısı başka bir haberin birebir kopyası",
+    ]);
   });
 
   it("lifts the Düzeltme talebi link to a 44 px row below sm without changing its look", async () => {

@@ -27,6 +27,24 @@ import { createServerClient } from "@/lib/supabase/server";
  *    error code only: never a header, a token or an error message.
  *  - `await connection()` comes first, so no clock is read while Next prerenders
  *    the route (cacheComponents).
+ *  - A run that answers below 500 but swallowed a failed sub-step is recorded as
+ *    599 (h18-jobs-1, below).
+ *
+ * 599 = "200 with a failed sub-step". A route can log a failed database call and
+ * still answer 200 on purpose (the headline route's re-pick must not undo the
+ * writes it already made). On 2026-11-01 23:15-23:55 UTC the re-pick RPC failed
+ * with 42501 on 9 ticks in a row, each tick was recorded as 200, and row 15 of
+ * `ops_health_report()` (`status >= 500`) stayed green. Such a route now counts its
+ * swallowed database failures and sets the internal response header
+ * `x-cron-substep-errors: <n>`. When n > 0 and the response is below 500, the
+ * wrapper records `CRON_SUBSTEP_FAILURE_STATUS` (599) instead of the real status;
+ * row 15 counts it as a failure: the first one makes the row warn, and it fails
+ * once the failures are at least 2 and at least half of the route's runs in the
+ * 30 minute window (for a 5 minute cron that is the 3rd consecutive bad tick, or
+ * the 4th when the window holds 7 runs). The caller (Vercel cron) still gets the real status, normally 200: the
+ * header is stripped from every response that carries it, whether or not the run
+ * is recorded, so it never leaves the server. A real 5xx keeps its own status.
+ * The table accepts 100-599 (migration 136), so no schema change is needed.
  *
  * Wrap OUTSIDE `withApiErrors`: that turns a thrown error into a 500 response,
  * which is the status this records. Every `/api/cron/<name>/route.ts` must do
@@ -36,6 +54,15 @@ import { createServerClient } from "@/lib/supabase/server";
 
 /** Per-request cap of the outcome write; the work after the response must stay short. */
 export const CRON_OUTCOME_TIMEOUT_MS = 2000;
+
+/**
+ * Internal response header: how many database calls a cron route swallowed on a
+ * run it answered below 500. Read and stripped by `withCronOutcome`.
+ */
+export const CRON_SUBSTEP_ERRORS_HEADER = "x-cron-substep-errors";
+
+/** The status recorded for a below-500 run that carried a positive sub-step error count. */
+export const CRON_SUBSTEP_FAILURE_STATUS = 599;
 
 /** Same shape as the CHECK on `ops_cron_route_runs.route` (migration 136). */
 const ROUTE_PATTERN = /^[a-z0-9-]{1,40}$/;
@@ -58,6 +85,28 @@ function errorCode(error: unknown): string {
 /** The class name of a thrown value (`TypeError`, `AbortError`), or a fixed word. */
 function errorName(error: unknown): string {
   return error instanceof Error && /^[A-Za-z0-9_]{1,40}$/.test(error.name) ? error.name : "unknown";
+}
+
+/**
+ * The sub-step error count a route set on its response: 1 to 6 plain digits and
+ * more than zero, else 0 (a missing, empty, signed, fractional or non-numeric
+ * header counts as no failure).
+ */
+export function substepErrorCount(response: Response): number {
+  const value = response.headers.get(CRON_SUBSTEP_ERRORS_HEADER);
+  return value !== null && /^\d{1,6}$/.test(value) ? Number(value) : 0;
+}
+
+/** The same response without the internal header; a response that never had it is returned as is. */
+function withoutSubstepHeader(response: Response): Response {
+  if (!response.headers.has(CRON_SUBSTEP_ERRORS_HEADER)) return response;
+  const headers = new Headers(response.headers);
+  headers.delete(CRON_SUBSTEP_ERRORS_HEADER);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
 }
 
 function authorizationOf(request: unknown): string | null {
@@ -112,8 +161,10 @@ export function withCronOutcome<T extends (...args: any[]) => Promise<Response>>
     let status = 500;
     try {
       const response = await handler(...args);
-      status = response.status;
-      return response;
+      const substeps = substepErrorCount(response);
+      status =
+        substeps > 0 && response.status < 500 ? CRON_SUBSTEP_FAILURE_STATUS : response.status;
+      return withoutSubstepHeader(response);
     } finally {
       schedule(route, args[0], status, startedAt);
     }

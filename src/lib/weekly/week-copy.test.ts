@@ -54,12 +54,12 @@ describe("weekCopy(false) — live wording is unchanged", () => {
     expect(live.note).toBe("Bu hafta sürüyor; sayılar hafta bitene kadar değişir.");
   });
 
-  it("keeps the percent basis sentence, grouped the Turkish way", () => {
+  it("states the percent basis as source records of multi-source clusters, grouped the Turkish way", () => {
     expect(live.percentBasis(3005)).toBe(
-      "Yüzdeler bu haftanın toplam 3.005 haberi üzerinden hesaplanır.",
+      "Yüzdeler bu haftanın çok kaynaklı kümelerindeki 3.005 kaynak kaydı üzerinden hesaplanır.",
     );
     expect(live.percentBasis(10)).toBe(
-      "Yüzdeler bu haftanın toplam 10 haberi üzerinden hesaplanır.",
+      "Yüzdeler bu haftanın çok kaynaklı kümelerindeki 10 kaynak kaydı üzerinden hesaplanır.",
     );
   });
 
@@ -86,10 +86,10 @@ describe("weekCopy(false) — live wording is unchanged", () => {
     expect(live.latestLinkText).toBe("Güncel haftalık özet");
   });
 
-  it("says 'Bu hafta etiket değişmedi.' and keeps the row total wording", () => {
+  it("says 'Bu hafta etiket değişmedi.' and counts the row total in source records", () => {
     expect(live.labelUnchanged).toBe("Bu hafta etiket değişmedi.");
-    expect(live.zoneRowTotal(10)).toBe("(haftanın 10 haberi içinde)");
-    expect(live.zoneRowTotal(1234)).toBe("(haftanın 1.234 haberi içinde)");
+    expect(live.zoneRowTotal(10)).toBe("(haftanın 10 kaynak kaydı içinde)");
+    expect(live.zoneRowTotal(1234)).toBe("(haftanın 1.234 kaynak kaydı içinde)");
   });
 });
 
@@ -104,7 +104,7 @@ describe("weekCopy(true) — closed week reads as a finished record", () => {
     expect(closed.noBlindspot).toBe("O hafta kör nokta çıkmadı.");
     expect(closed.empty).toBe("O hafta yeterli küme oluşmadı.");
     expect(closed.percentBasis(3005)).toBe(
-      "Yüzdeler o haftanın toplam 3.005 haberi üzerinden hesaplanır.",
+      "Yüzdeler o haftanın çok kaynaklı kümelerindeki 3.005 kaynak kaydı üzerinden hesaplanır.",
     );
   });
 
@@ -130,10 +130,10 @@ describe("weekCopy(true) — closed week reads as a finished record", () => {
     expect(closed.latestLinkText).toBe("Güncel haftalık özet");
   });
 
-  it("says 'O hafta etiket değişmedi.' and keeps the row total wording", () => {
+  it("says 'O hafta etiket değişmedi.' and counts the row total in source records", () => {
     expect(closed.labelUnchanged).toBe("O hafta etiket değişmedi.");
-    expect(closed.zoneRowTotal(10)).toBe("(haftanın 10 haberi içinde)");
-    expect(closed.zoneRowTotal(1234)).toBe("(haftanın 1.234 haberi içinde)");
+    expect(closed.zoneRowTotal(10)).toBe("(haftanın 10 kaynak kaydı içinde)");
+    expect(closed.zoneRowTotal(1234)).toBe("(haftanın 1.234 kaynak kaydı içinde)");
   });
 
   it("contains no developer jargon, present tense or live-health term in any string", () => {
@@ -181,16 +181,16 @@ describe('weekCopyFor("rolling") — /hafta is a trailing 7-day window', () => {
 
   it("states the percent basis over the last seven days, grouped the Turkish way", () => {
     expect(rolling.percentBasis(6989)).toBe(
-      "Yüzdeler son 7 günün toplam 6.989 haberi üzerinden hesaplanır.",
+      "Yüzdeler son 7 günün çok kaynaklı kümelerindeki 6.989 kaynak kaydı üzerinden hesaplanır.",
     );
     expect(rolling.percentBasis(10)).toBe(
-      "Yüzdeler son 7 günün toplam 10 haberi üzerinden hesaplanır.",
+      "Yüzdeler son 7 günün çok kaynaklı kümelerindeki 10 kaynak kaydı üzerinden hesaplanır.",
     );
   });
 
   it("prints the per-zone total against the last seven days", () => {
-    expect(rolling.zoneRowTotal(1234)).toBe("(son 7 günün 1.234 haberi içinde)");
-    expect(rolling.zoneRowTotal(10)).toBe("(son 7 günün 10 haberi içinde)");
+    expect(rolling.zoneRowTotal(1234)).toBe("(son 7 günün 1.234 kaynak kaydı içinde)");
+    expect(rolling.zoneRowTotal(10)).toBe("(son 7 günün 10 kaynak kaydı içinde)");
   });
 
   it("keeps the degraded caveat, but about the last seven days", () => {
@@ -226,10 +226,27 @@ describe('weekCopyFor("rolling") — /hafta is a trailing 7-day window', () => {
 
   it("formats non-finite totals as 0 instead of NaN", () => {
     expect(rolling.percentBasis(Number.NaN)).toBe(
-      "Yüzdeler son 7 günün toplam 0 haberi üzerinden hesaplanır.",
+      "Yüzdeler son 7 günün çok kaynaklı kümelerindeki 0 kaynak kaydı üzerinden hesaplanır.",
     );
-    expect(rolling.zoneRowTotal(Number.NaN)).toBe("(son 7 günün 0 haberi içinde)");
+    expect(rolling.zoneRowTotal(Number.NaN)).toBe("(son 7 günün 0 kaynak kaydı içinde)");
   });
+});
+
+describe("count labels say what they count (h18-numbers-1)", () => {
+  // The /hafta percentages are taken over the voting-source entries of the
+  // multi-source clusters: source records, not articles and not a grand total.
+  it.each(["rolling", "live", "closed"] as const)(
+    "%s: percentBasis and zoneRowTotal call the unit 'kaynak kaydı' and never 'toplam' or 'haberi'",
+    (variant) => {
+      const copy = weekCopyFor(variant);
+      for (const s of [copy.percentBasis(6973), copy.zoneRowTotal(6973)]) {
+        expect(s).toContain("6.973");
+        expect(s).toContain("kaynak kaydı");
+        expect(s).not.toContain("toplam");
+        expect(s).not.toContain("haberi");
+      }
+    },
+  );
 });
 
 describe("weekCopyFor dispatch", () => {
@@ -285,7 +302,7 @@ describe("weekCopy shape", () => {
 
   it("formats non-finite totals as 0 instead of NaN", () => {
     expect(weekCopy(false).percentBasis(Number.NaN)).toBe(
-      "Yüzdeler bu haftanın toplam 0 haberi üzerinden hesaplanır.",
+      "Yüzdeler bu haftanın çok kaynaklı kümelerindeki 0 kaynak kaydı üzerinden hesaplanır.",
     );
   });
 });

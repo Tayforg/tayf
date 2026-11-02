@@ -49,10 +49,39 @@ function thumbnailTag(): string {
 }
 
 describe("mobileBannerImageProps (perf-3)", () => {
-  const SIZES = "(max-width: 640px) calc(100vw - 2rem), 0px";
+  const SIZES = "(max-width: 640px) calc((100vw - 2rem) * 0.77), 0px";
 
-  it("exports the banner sizes: the viewport minus the 1rem page gutters on mobile, nothing on desktop", () => {
+  it("exports the banner sizes: 77% of the viewport minus the 1rem page gutters on mobile, nothing on desktop", () => {
     expect(MOBILE_BANNER_SIZES).toBe(SIZES);
+  });
+
+  // h18-perf-1 (c): the banner is a quality-50 photo under a scrim, so the
+  // browser may upscale it a little. A 390 px phone has a 358 px slot; 77% of
+  // it asks for 276 CSS px, which lands the DPR3 pick on the 828w candidate
+  // (it was 1080w) and the DPR2 pick on 640w.
+  it("a 390 px phone picks the 828w candidate at DPR3 and 640w at DPR2", () => {
+    const factorText = /\) \* ([0-9.]+)\)/.exec(MOBILE_BANNER_SIZES)?.[1];
+    expect(factorText).toBe("0.77");
+    const slot = (390 - 32) * Number(factorText);
+
+    expect(slot * 3).toBeLessThanOrEqual(828);
+    expect(slot * 3).toBeGreaterThan(750);
+    expect(slot * 2).toBeLessThanOrEqual(640);
+    expect(slot * 2).toBeGreaterThan(384);
+  });
+
+  it("next.config.ts keeps the 640 and 828 device sizes that pick relies on", () => {
+    const start = nextConfigSource.indexOf("deviceSizes:");
+    expect(start).toBeGreaterThan(-1);
+    const open = nextConfigSource.indexOf("[", start);
+    const close = nextConfigSource.indexOf("]", open);
+    const sizes = nextConfigSource
+      .slice(open + 1, close)
+      .split(",")
+      .map((n) => Number(n.trim()));
+
+    expect(sizes).toContain(640);
+    expect(sizes).toContain(828);
   });
 
   it("preloads at high priority for the first card only (index 0)", () => {
@@ -241,6 +270,30 @@ describe("cluster-card.tsx balance chip (Denge puanı)", () => {
     expect(src).toContain(
       "<BiasSpectrum distribution={cluster.bias_distribution} compact />",
     );
+  });
+});
+
+// h18-numbers-2: the wire badge printed "Tek kaynaktan dağıtıldı · N kopya"
+// for clusters with several distinct dispatches (6 members, 3 texts). The text
+// now comes from the shared helpers in wire.ts, fed the post-dedupe member
+// count (articleCount) and the distinct-text count (effectiveArticleCount).
+describe("cluster-card.tsx wire badge (h18-numbers-2)", () => {
+  it("builds the label and the title from the wire helpers", () => {
+    expect(src).toMatch(/from\s+"@\/lib\/clusters\/wire"/);
+    expect(src).toContain(
+      "wireBadgeLabel(articleCount, effectiveArticleCount ?? articleCount)",
+    );
+    expect(src).toContain("wireBadgeTitle(effectiveArticleCount ?? articleCount)");
+  });
+
+  it("keeps the badge behind {isWireRedistribution && (", () => {
+    expect(count(src, "{isWireRedistribution && (")).toBe(1);
+  });
+
+  it("holds no hardcoded single-source literal (comments blanked)", () => {
+    expect(src).not.toContain("Tek kaynaktan dağıtıldı");
+    expect(src).not.toContain("tek kaynaktan");
+    expect(src).not.toContain("aynı ajans metninin kopyası");
   });
 });
 
