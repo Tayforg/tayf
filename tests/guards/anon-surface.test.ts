@@ -258,23 +258,367 @@ function findDefaultPrivilegeGrants(sqlCode: string): string[] {
   return bad;
 }
 
-/** SECURITY DEFINER functions in public with no `revoke ... on function public.X ... from ... anon`. */
+// -- SECURITY DEFINER identities ----------------------------------------------
+//
+// findUnrevokedDefiners used to match a definer to its revoke by NAME, so an
+// unrevoked overload beside a revoked sibling (`f(text)` revoked, `f(text, boolean)`
+// created without a revoke) passed, although PUBLIC gets EXECUTE on every new
+// function (117). It now compares IDENTITIES, `name(type,type)`, with the types
+// spelled the way pg's oidvectortypes prints them (the spelling ALLOWED_RPC_ARGS
+// uses). The scan is a character scanner that tracks quotes, parens and brackets;
+// no regex runs over the SQL text beyond single-character class tests.
+
+/** Aliases (lower-case, modifiers already stripped) -> the spelling oidvectortypes prints. */
+const TYPE_ALIASES: Readonly<Record<string, string>> = {
+  int: "integer",
+  int4: "integer",
+  int8: "bigint",
+  int2: "smallint",
+  bool: "boolean",
+  timestamptz: "timestamp with time zone",
+  timestamp: "timestamp without time zone",
+  timetz: "time with time zone",
+  time: "time without time zone",
+  varchar: "character varying",
+  "char varying": "character varying",
+  char: "character",
+  bpchar: "character",
+  float8: "double precision",
+  float: "double precision",
+  float4: "real",
+  decimal: "numeric",
+};
+
+const isWordChar = (ch: string): boolean => /[A-Za-z0-9_$\u0080-￿]/.test(ch);
+const isSpace = (ch: string): boolean => /\s/.test(ch);
+
+/** Index of the quote that closes the quoted run opening at `open` (a doubled quote escapes). */
+function skipQuoted(s: string, open: number): number {
+  const q = s[open];
+  let j = open + 1;
+  while (j < s.length) {
+    if (s[j] === q) {
+      if (s[j + 1] === q) {
+        j += 2;
+        continue;
+      }
+      return j;
+    }
+    j++;
+  }
+  return s.length - 1;
+}
+
+/** Index of the `)` closing the `(` at `open`, or -1. Quoted runs are skipped, parens nest. */
+function matchParen(s: string, open: number): number {
+  let depth = 0;
+  for (let i = open; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === "'" || ch === '"') i = skipQuoted(s, i);
+    else if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/** Splits on `sep` where parens and brackets are balanced and no quote is open. */
+function splitTop(s: string, sep: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === "'" || ch === '"') i = skipQuoted(s, i);
+    else if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    else if (ch === sep && depth === 0) {
+      parts.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
+/** The bare words of `s` at paren depth 0 outside quotes, lower-cased, with their offsets. */
+function topLevelWords(s: string): Array<{ word: string; start: number; end: number }> {
+  const out: Array<{ word: string; start: number; end: number }> = [];
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === "'" || ch === '"') i = skipQuoted(s, i);
+    else if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    else if (depth === 0 && isWordChar(ch)) {
+      let j = i;
+      while (j < s.length && isWordChar(s[j]!)) j++;
+      out.push({ word: s.slice(i, j).toLowerCase(), start: i, end: j });
+      i = j - 1;
+    }
+  }
+  return out;
+}
+
+/** End offset of `word` (a whole word, any case) at or after `pos` past whitespace, or -1. */
+function eatWord(s: string, pos: number, word: string): number {
+  let i = pos;
+  while (i < s.length && isSpace(s[i]!)) i++;
+  if (s.slice(i, i + word.length).toLowerCase() !== word) return -1;
+  const end = i + word.length;
+  return end < s.length && isWordChar(s[end]!) ? -1 : end;
+}
+
+/** A function as written in SQL: the name and, when an argument list is given, its raw arguments. */
+interface FunctionRef {
+  name: string;
+  args: string[] | null;
+}
+
+/**
+ * Reads `[public.]name [( args )]` at `pos`. Null for another schema, a malformed name or
+ * unbalanced parens. A bare name is lower-cased, a quoted one is kept verbatim.
+ */
+function readFunctionRef(s: string, pos: number): FunctionRef | null {
+  let i = pos;
+  const readIdent = (): string | null => {
+    while (i < s.length && isSpace(s[i]!)) i++;
+    if (s[i] === '"') {
+      const close = skipQuoted(s, i);
+      const text = s.slice(i + 1, close).split('""').join('"');
+      i = close + 1;
+      return text;
+    }
+    let j = i;
+    while (j < s.length && isWordChar(s[j]!)) j++;
+    if (j === i) return null;
+    const text = s.slice(i, j).toLowerCase();
+    i = j;
+    return text;
+  };
+  let name = readIdent();
+  if (name === null) return null;
+  while (i < s.length && isSpace(s[i]!)) i++;
+  if (s[i] === ".") {
+    i++;
+    if (name !== "public") return null;
+    name = readIdent();
+    if (name === null) return null;
+  }
+  while (i < s.length && isSpace(s[i]!)) i++;
+  if (s[i] !== "(") return { name, args: null };
+  const close = matchParen(s, i);
+  if (close === -1) return null;
+  const inner = s.slice(i + 1, close);
+  return { name, args: inner.trim() === "" ? [] : splitTop(inner, ",") };
+}
+
+/** Cuts an argument at its top-level `default` keyword or `=`. */
+function stripArgDefault(arg: string): string {
+  let depth = 0;
+  for (let i = 0; i < arg.length; i++) {
+    const ch = arg[i]!;
+    if (ch === "'" || ch === '"') i = skipQuoted(arg, i);
+    else if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
+    else if (depth === 0 && ch === "=") return arg.slice(0, i);
+    else if (
+      depth === 0 &&
+      (ch === "d" || ch === "D") &&
+      arg.slice(i, i + 7).toLowerCase() === "default" &&
+      (i === 0 || !isWordChar(arg[i - 1]!)) &&
+      !isWordChar(arg[i + 7] ?? " ")
+    ) {
+      return arg.slice(0, i);
+    }
+  }
+  return arg;
+}
+
+/** Words of an argument: type modifiers `(10,2)` dropped, `[ ]` dimensions glued to their word as `[]`. */
+function argWords(arg: string): string[] {
+  const words: string[] = [];
+  let cur = "";
+  const flush = () => {
+    if (cur) words.push(cur);
+    cur = "";
+  };
+  for (let i = 0; i < arg.length; i++) {
+    const ch = arg[i]!;
+    if (ch === '"') {
+      const close = skipQuoted(arg, i);
+      cur += arg.slice(i + 1, close).split('""').join('"');
+      i = close;
+    } else if (ch === "(") {
+      const close = matchParen(arg, i);
+      i = close === -1 ? arg.length : close;
+    } else if (ch === "[") {
+      const close = arg.indexOf("]", i);
+      i = close === -1 ? arg.length : close;
+      if (cur) cur += "[]";
+      else if (words.length > 0) words[words.length - 1] += "[]";
+    } else if (isSpace(ch)) flush();
+    else cur += ch.toLowerCase();
+  }
+  flush();
+  return words;
+}
+
+/** True when the words begin with a type spelled in several words (so no argument name precedes it). */
+function startsWithMultiWordType(words: readonly string[]): boolean {
+  const [a, b, c] = words;
+  if (a === "double" && b === "precision") return true;
+  if ((a === "character" || a === "char" || a === "bit") && b === "varying") return true;
+  return (a === "timestamp" || a === "time") && (b === "with" || b === "without") && c === "time";
+}
+
+/**
+ * The identity type of one argument, or null for an OUT argument (it is not part of the
+ * identity). Drops the mode, the argument name, the default and the type modifiers,
+ * removes the pg_catalog. / public. qualifier and maps aliases to oidvectortypes' spelling.
+ */
+function argIdentityType(rawArg: string): string | null {
+  const words = argWords(stripArgDefault(rawArg));
+  const last = words[words.length - 1];
+  if (words.length > 1 && (last === "array" || last === "array[]")) {
+    words.pop();
+    words[words.length - 1] += "[]";
+  }
+  if (words.length > 1 && ["in", "out", "inout", "variadic"].includes(words[0]!)) {
+    if (words.shift() === "out") return null;
+  }
+  if (words.length > 1 && !startsWithMultiWordType(words)) words.shift(); // the argument name
+  if (words.length === 0) return null;
+  let type = words.join(" ");
+  for (const qualifier of ["pg_catalog.", "public."]) {
+    if (type.startsWith(qualifier)) type = type.slice(qualifier.length);
+  }
+  const dims = type.indexOf("[");
+  const base = dims === -1 ? type : type.slice(0, dims);
+  return (TYPE_ALIASES[base] ?? base) + (dims === -1 ? "" : type.slice(dims));
+}
+
+/** `name(type,type)` of a function reference that carries an argument list. */
+function identityOf(ref: FunctionRef): string | null {
+  if (ref.args === null) return null;
+  const types: string[] = [];
+  for (const arg of ref.args) {
+    const type = argIdentityType(arg);
+    if (type !== null) types.push(type);
+  }
+  return `${ref.name}(${types.join(",")})`;
+}
+
+interface DefinerFunction {
+  name: string;
+  identity: string;
+  /** Index (in topLevelStatements order) of the last statement that creates it. */
+  at: number;
+}
+
+/**
+ * Every SECURITY DEFINER function in public that the (comment-free) SQL creates, as identity + name,
+ * in order of first creation. `at` is the LAST creating statement: a redefinition (or a drop + create)
+ * can reset the ACL, so only a revoke after it counts.
+ */
+function definerFunctions(sqlCode: string): DefinerFunction[] {
+  const out = new Map<string, DefinerFunction>();
+  for (const [at, raw] of topLevelStatements(sqlCode).entries()) {
+    const s = raw.replace(/\s+/g, " ");
+    if (!/\bsecurity definer\b/i.test(s)) continue;
+    let pos = eatWord(s, 0, "create");
+    if (pos === -1) continue;
+    const orReplace = eatWord(s, pos, "or");
+    if (orReplace !== -1) {
+      pos = eatWord(s, orReplace, "replace");
+      if (pos === -1) continue;
+    }
+    pos = eatWord(s, pos, "function");
+    if (pos === -1) continue;
+    const ref = readFunctionRef(s, pos);
+    const identity = ref ? identityOf(ref) : null;
+    if (ref && identity !== null) out.set(identity, { name: ref.name, identity, at });
+  }
+  return [...out.values()];
+}
+
+/** The identities (`name(type,type)`) of the SECURITY DEFINER functions in public that the SQL creates. */
+function definerIdentities(sqlCode: string): string[] {
+  return definerFunctions(sqlCode).map((f) => f.identity);
+}
+
+interface FunctionRevoke {
+  roles: string[];
+  /** `on all functions in schema public` */
+  allInPublic: boolean;
+  refs: FunctionRef[];
+}
+
+/** A `revoke ... on function a(...), b(...) from roles` or `on all functions in schema ...` statement. */
+function readFunctionRevoke(statement: string): FunctionRevoke | null {
+  const words = topLevelWords(statement);
+  if (words[0]?.word !== "revoke") return null;
+  const on = words.findIndex((w) => w.word === "on");
+  if (on === -1) return null;
+  const from = words.findIndex((w, k) => k > on && w.word === "from");
+  if (from === -1) return null;
+  const roles = statement.slice(words[from]!.end).toLowerCase().split(/[^a-z0-9_]+/).filter(Boolean);
+  const target = words[on + 1];
+  if (!target) return null;
+  if (target.word === "all") {
+    const kind = words[on + 2]?.word;
+    if (kind !== "functions" && kind !== "routines") return null;
+    const schemas = statement.slice(words[on + 2]!.end, words[from]!.start).toLowerCase().split(/[^a-z0-9_]+/);
+    return { roles, allInPublic: schemas.includes("public"), refs: [] };
+  }
+  if (target.word !== "function" && target.word !== "routine") return null;
+  const refs: FunctionRef[] = [];
+  for (const part of splitTop(statement.slice(target.end, words[from]!.start), ",")) {
+    const ref = readFunctionRef(part, 0);
+    if (ref) refs.push(ref);
+  }
+  return { roles, allInPublic: false, refs };
+}
+
+/**
+ * Identities (`name(type,type)`) of the SECURITY DEFINER functions in public with no
+ * `revoke ... on function public.name(types) ... from public, anon` for that exact signature
+ * (or an argument-less `on function public.name`, or `on all functions in schema public`)
+ * AFTER the statement that creates the function.
+ *
+ * Both parts of the rule come from how PostgreSQL grants EXECUTE:
+ * - every new function carries EXECUTE for PUBLIC (117 only closed the anon/authenticated
+ *   default ACLs), so a revoke from anon alone leaves anon able to call it through PUBLIC;
+ * - a revoke only changes the ACL of functions that exist when it runs (`on all functions`
+ *   touches the existing ones only), and a drop + create starts from the default ACL again,
+ *   so a revoke that precedes the create does not protect it.
+ */
 function findUnrevokedDefiners(sqlCode: string): string[] {
-  const statements = topLevelStatements(sqlCode).map((s) => s.replace(/\s+/g, " "));
-  const definers: string[] = [];
-  for (const s of statements) {
-    const m = /^create (?:or replace )?function (?:public\.)?"?([a-z0-9_]+)"? ?\(/i.exec(s);
-    if (m && /\bsecurity definer\b/i.test(s)) definers.push(m[1]!.toLowerCase());
+  const definers = definerFunctions(sqlCode);
+  if (definers.length === 0) return [];
+  const revokes: Array<{ at: number; allInPublic: boolean; identities: Set<string>; names: Set<string> }> = [];
+  for (const [at, raw] of topLevelStatements(sqlCode).entries()) {
+    const revoke = readFunctionRevoke(raw.replace(/\s+/g, " "));
+    if (!revoke || !revoke.roles.includes("anon") || !revoke.roles.includes("public")) continue;
+    const identities = new Set<string>();
+    const names = new Set<string>();
+    for (const ref of revoke.refs) {
+      const identity = identityOf(ref);
+      if (identity === null) names.add(ref.name);
+      else identities.add(identity);
+    }
+    revokes.push({ at, allInPublic: revoke.allInPublic, identities, names });
   }
-  const missing: string[] = [];
-  for (const name of definers) {
-    const revoke = new RegExp(
-      `^revoke\\b[\\s\\S]*?\\bon function (?:public\\.)?"?${name}"? ?\\([^)]*\\)[\\s\\S]*?\\bfrom\\b[\\s\\S]*\\banon\\b`,
-      "i",
-    );
-    if (!statements.some((s) => revoke.test(s))) missing.push(name);
-  }
-  return missing;
+  return definers
+    .filter(
+      (f) =>
+        !revokes.some(
+          (r) => r.at > f.at && (r.allInPublic || r.identities.has(f.identity) || r.names.has(f.name)),
+        ),
+    )
+    .map((f) => f.identity);
 }
 
 interface GuardedMigration {
@@ -469,7 +813,7 @@ describe("anon surface: the guard fails on a bad migration", () => {
     const fn = (attrs: string) =>
       `create or replace function public.leak() returns int language sql ${attrs} as $fn$ select 1; $fn$;`;
     const f = (s: string) => findUnrevokedDefiners(stripSqlComments(s));
-    expect(f(fn("security definer set search_path = ''"))).toEqual(["leak"]);
+    expect(f(fn("security definer set search_path = ''"))).toEqual(["leak()"]);
     expect(f(fn("stable"))).toEqual([]);
     expect(
       f(fn("security definer") + "\nrevoke all on function public.leak() from public, anon, authenticated;"),
@@ -477,6 +821,276 @@ describe("anon surface: the guard fails on a bad migration", () => {
     // Attributes after the body are still seen.
     expect(
       f("create function public.late() returns int as $b$ select 1; select 2; $b$ language sql security definer;"),
-    ).toEqual(["late"]);
+    ).toEqual(["late()"]);
   });
 });
+
+// -- (5) definer revokes are matched by identity, not by name -----------------
+
+describe("anon surface: SECURITY DEFINER revokes are identity-exact", () => {
+  const strip = stripSqlComments;
+  const unrevoked = (sql: string) => findUnrevokedDefiners(strip(sql));
+  const defined = (sql: string) => definerIdentities(strip(sql));
+  const def = (name: string, args: string, attrs = "security definer set search_path = ''") =>
+    `create or replace function ${name}(${args}) returns int language sql ${attrs} as $fn$ select 1; $fn$;\n`;
+  const revoke = (list: string, roles = "public, anon, authenticated") =>
+    `revoke all on function ${list} from ${roles};\n`;
+
+  it("an unrevoked overload beside a revoked sibling is reported by its identity", () => {
+    const sql = def("public.f", "text") + def("public.f", "text, boolean") + revoke("public.f(text)");
+    expect(unrevoked(sql)).toEqual(["f(text,boolean)"]);
+    // and the other way round
+    expect(unrevoked(def("public.f", "text") + def("public.f", "text, boolean") + revoke("public.f(text, boolean)"))).toEqual([
+      "f(text)",
+    ]);
+  });
+
+  it("is empty once every overload is revoked, whatever the spacing and the schema qualifier", () => {
+    const sql = def("public.f", "text") + def("f", "text, boolean") + revoke("public.f(text)") + revoke("f ( text ,boolean )");
+    expect(unrevoked(sql)).toEqual([]);
+  });
+
+  it("a revoke for another name or without anon revokes nothing", () => {
+    expect(unrevoked(def("public.f", "text") + revoke("public.g(text)"))).toEqual(["f(text)"]);
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", "public, authenticated"))).toEqual(["f(text)"]);
+    expect(unrevoked(def("public.f", "text") + "revoke all on public.f from anon;")).toEqual(["f(text)"]);
+    // a quoted role name is still the role
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", '"public", "anon"'))).toEqual([]);
+  });
+
+  it("a revoke from anon without PUBLIC leaves the definer executable (PUBLIC EXECUTE is the default on every new function)", () => {
+    // revoking from anon alone does not remove the PUBLIC grant anon inherits (117 closed only the anon/authenticated default ACLs)
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", "anon"))).toEqual(["f(text)"]);
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", '"anon"'))).toEqual(["f(text)"]);
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", "anon, authenticated"))).toEqual(["f(text)"]);
+    // a same-name function without an argument list is the same gap
+    expect(unrevoked(def("public.f", "text") + "revoke all on function public.f from anon;")).toEqual(["f(text)"]);
+    // PUBLIC and anon together revoke it, with or without authenticated
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", "public, anon"))).toEqual([]);
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", "anon, public"))).toEqual([]);
+    // PUBLIC without anon is not enough either
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)", "public"))).toEqual(["f(text)"]);
+  });
+
+  it("canonicalises the type aliases the way pg oidvectortypes prints them", () => {
+    const cases: Array<[string, string]> = [
+      ["int", "integer"],
+      ["int4", "integer"],
+      ["int8", "bigint"],
+      ["int2", "smallint"],
+      ["bool", "boolean"],
+      ["timestamptz", "timestamp with time zone"],
+      ["timestamp", "timestamp without time zone"],
+      ["varchar", "character varying"],
+      ["varchar(10)", "character varying"],
+      ["float8", "double precision"],
+      ["float4", "real"],
+      ["decimal(12, 4)", "numeric"],
+      ["timetz", "time with time zone"],
+      ["time", "time without time zone"],
+      ["int[]", "integer[]"],
+      ["timestamptz []", "timestamp with time zone[]"],
+      ["pg_catalog.int4", "integer"],
+      ["public.citext", "citext"],
+    ];
+    for (const [alias, canonical] of cases) {
+      expect(defined(def("public.a", alias)), alias).toEqual([`a(${canonical})`]);
+      expect(unrevoked(def("public.a", alias) + revoke(`public.a(${canonical})`)), `${alias} vs ${canonical}`).toEqual([]);
+      expect(unrevoked(def("public.a", canonical) + revoke(`public.a(${alias})`)), `${canonical} vs ${alias}`).toEqual([]);
+    }
+    // the two spellings the task calls out, in one statement each
+    expect(unrevoked(def("public.a", "p_n int, p_at timestamptz") + revoke("public.a(integer, timestamp with time zone)"))).toEqual([]);
+    expect(unrevoked(def("public.a", "integer, timestamp with time zone") + revoke("public.a(int, timestamptz)"))).toEqual([]);
+  });
+
+  it("different types are different identities (integer is not bigint, text[] is not text)", () => {
+    expect(unrevoked(def("public.a", "int") + revoke("public.a(bigint)"))).toEqual(["a(integer)"]);
+    expect(unrevoked(def("public.a", "text[]") + revoke("public.a(text)"))).toEqual(["a(text[])"]);
+    expect(unrevoked(def("public.a", "uuid[]") + revoke("public.a(uuid)"))).toEqual(["a(uuid[])"]);
+    expect(unrevoked(def("public.a", "") + revoke("public.a(text)"))).toEqual(["a()"]);
+  });
+
+  it("reads multi-word types, with and without an argument name", () => {
+    expect(defined(def("public.m", "double precision"))).toEqual(["m(double precision)"]);
+    expect(defined(def("public.m", "p_x double precision, p_y character varying(20)"))).toEqual([
+      "m(double precision,character varying)",
+    ]);
+    expect(defined(def("public.m", "timestamp with time zone, timestamp without time zone"))).toEqual([
+      "m(timestamp with time zone,timestamp without time zone)",
+    ]);
+    expect(defined(def("public.m", "p_t time with time zone, p_u time(3) without time zone"))).toEqual([
+      "m(time with time zone,time without time zone)",
+    ]);
+    expect(defined(def("public.m", "p_b bit varying(8), char varying"))).toEqual(["m(bit varying,character varying)"]);
+    expect(defined(def("public.m", "p_name character"))).toEqual(["m(character)"]);
+  });
+
+  it("a multi-function revoke list covers each function it names, and only those", () => {
+    const sql = def("public.a", "") + def("public.b", "text") + def("public.c", "uuid[]");
+    expect(unrevoked(sql + revoke("public.a(), public.b(text), public.c(uuid[])"))).toEqual([]);
+    expect(unrevoked(sql + revoke("public.a(),\n  public.b(text)"))).toEqual(["c(uuid[])"]);
+    expect(unrevoked(sql + revoke("public.a(), public.b(text, text), public.c(uuid[])"))).toEqual(["b(text)"]);
+    // two statements work as well as one list
+    expect(unrevoked(sql + revoke("public.a()") + revoke("public.b(text), public.c(uuid[])", "public, anon"))).toEqual([]);
+  });
+
+  it("copes with nested parens, type modifiers and defaults that hold commas, parens and quotes", () => {
+    const args =
+      "p_amt numeric(10,2) default 0, p_tags text[] default '{}'::text[], p_cfg jsonb default '{\"a\": (1, 2)}', " +
+      "p_note text = 'it''s, (fine)', p_at timestamp(3) with time zone default now()";
+    expect(defined(def("public.g", args))).toEqual(["g(numeric,text[],jsonb,text,timestamp with time zone)"]);
+    expect(
+      unrevoked(def("public.g", args) + revoke("public.g(numeric, text[], jsonb, text, timestamptz)")),
+    ).toEqual([]);
+    // a default can use an array constructor and a cast with brackets
+    expect(defined(def("public.g", "p_ids uuid[] default array[]::uuid[], p_n int default (1 + 2)"))).toEqual([
+      "g(uuid[],integer)",
+    ]);
+  });
+
+  it("ignores OUT arguments, keeps IN / INOUT / VARIADIC ones, and strips argument names", () => {
+    const args = "IN p_a text, OUT o_b int, INOUT p_c boolean, VARIADIC p_d text[], out o_e uuid";
+    expect(defined(def("public.h", args))).toEqual(["h(text,boolean,text[])"]);
+    expect(unrevoked(def("public.h", args) + revoke("public.h(text, boolean, text[])"))).toEqual([]);
+    // returns table (...) columns are not arguments
+    expect(
+      defined(
+        "create function public.t(p_a text) returns table (x int, y text) language sql security definer as $f$ select 1, 'a' $f$;",
+      ),
+    ).toEqual(["t(text)"]);
+    // an argument list of OUT parameters only is the empty identity
+    expect(defined(def("public.o", "OUT a int, OUT b text"))).toEqual(["o()"]);
+  });
+
+  it("handles quoted function and argument names", () => {
+    expect(defined(def('public."leak"', '"p arg" text, "Other" int'))).toEqual(["leak(text,integer)"]);
+    expect(unrevoked(def('public."leak"', "text") + revoke("public.leak(text)"))).toEqual([]);
+    expect(unrevoked(def("public.leak", "text") + revoke('public."leak"(text)'))).toEqual([]);
+    expect(unrevoked(def('public."leak"', "text"))).toEqual(["leak(text)"]);
+    // a ',' or ')' inside a quoted argument name does not split the list
+    expect(defined(def("public.q", '"a,b)" text, c int'))).toEqual(["q(text,integer)"]);
+  });
+
+  it("`revoke ... on all functions in schema public` covers the functions created before it, another schema does not", () => {
+    const sql = def("public.a", "") + def("public.b", "text, boolean");
+    expect(unrevoked(sql + "revoke all on all functions in schema public from public, anon, authenticated;")).toEqual([]);
+    expect(unrevoked(sql + "revoke execute on all functions in schema public, extensions from public, anon;")).toEqual([]);
+    expect(unrevoked(sql + "revoke all on all functions in schema extensions from public, anon;")).toEqual(["a()", "b(text,boolean)"]);
+    expect(unrevoked(sql + "revoke all on all functions in schema public from authenticated;")).toEqual(["a()", "b(text,boolean)"]);
+    expect(unrevoked(sql + "grant execute on all functions in schema public to anon;")).toEqual(["a()", "b(text,boolean)"]);
+    // the blanket form needs PUBLIC as well as anon, like the per-function form
+    expect(unrevoked(sql + "revoke all on all functions in schema public from anon;")).toEqual(["a()", "b(text,boolean)"]);
+    expect(unrevoked(sql + "revoke all on all functions in schema public from public;")).toEqual(["a()", "b(text,boolean)"]);
+  });
+
+  it("an all-functions revoke does not cover a definer created after it (it only touches functions that exist when it runs)", () => {
+    const blanket = "revoke all on all functions in schema public from public, anon, authenticated;\n";
+    // the leak: the blanket revoke runs first, the definer is created afterwards and gets the default PUBLIC EXECUTE
+    expect(unrevoked(blanket + def("public.leak", ""))).toEqual(["leak()"]);
+    const plain =
+      "create function public.leak(p_a text) returns int language sql security definer set search_path = '' as $fn$ select 1; $fn$;\n";
+    expect(unrevoked(blanket + plain)).toEqual(["leak(text)"]);
+    // functions before the revoke are covered, the one after it is not
+    expect(unrevoked(def("public.a", "") + blanket + def("public.b", "text"))).toEqual(["b(text)"]);
+    // a second blanket revoke after the last create covers everything
+    expect(unrevoked(def("public.a", "") + blanket + def("public.b", "text") + blanket)).toEqual([]);
+    // the same statement without the earlier blanket revoke is the unrevoked case
+    expect(unrevoked(def("public.leak", ""))).toEqual(["leak()"]);
+  });
+
+  it("a per-function revoke only covers the definer when it comes after the statement that creates it", () => {
+    // a revoke that precedes the create (the function would not exist yet) does not protect the new function
+    expect(unrevoked(revoke("public.f(text)") + def("public.f", "text"))).toEqual(["f(text)"]);
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)"))).toEqual([]);
+    // drop + create after an earlier revoke resets the ACL: the earlier revoke no longer counts
+    const recreated =
+      def("public.f", "text") + revoke("public.f(text)") + "drop function public.f(text);\n" + def("public.f", "text");
+    expect(unrevoked(recreated)).toEqual(["f(text)"]);
+    expect(unrevoked(recreated + revoke("public.f(text)"))).toEqual([]);
+    // a redefinition after the revoke needs a fresh revoke; the guard is conservative here
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)") + def("public.f", "text"))).toEqual(["f(text)"]);
+    // an argument-less revoke is positional too
+    expect(unrevoked("revoke all on function public.f from public, anon;\n" + def("public.f", "text"))).toEqual(["f(text)"]);
+    expect(unrevoked(def("public.f", "text") + "revoke all on function public.f from public, anon;\n")).toEqual([]);
+    // one overload revoked before and one created after: only the later one is open
+    expect(unrevoked(def("public.f", "text") + revoke("public.f(text)") + def("public.f", "text, boolean"))).toEqual([
+      "f(text,boolean)",
+    ]);
+  });
+
+  it("a revoke that names a function without an argument list covers that name (valid SQL only for a unique name)", () => {
+    expect(unrevoked(def("public.f", "text") + "revoke all on function public.f from public, anon;")).toEqual([]);
+    expect(unrevoked(def("public.f", "text") + "revoke all on function public.g from anon;")).toEqual(["f(text)"]);
+  });
+
+  it("only functions in public count; a function in another schema is not a public definer", () => {
+    expect(unrevoked(def("app_private.x", "text"))).toEqual([]);
+    expect(unrevoked(def("public.x", "text") + revoke("app_private.x(text)"))).toEqual(["x(text)"]);
+  });
+
+  it("a revoke buried in a function body is not a revoke of the migration; attributes after the body are still seen", () => {
+    // z revokes itself only when it runs (dynamic SQL in its body): the migration never revokes it
+    const buried =
+      "create function public.z(p_a text default 'x') returns int as $b$ begin\n" +
+      "  execute 'revoke all on function public.z(text) from anon'; return 1; end $b$ language plpgsql security definer;\n";
+    expect(defined(buried)).toEqual(["z(text)"]);
+    expect(unrevoked(buried)).toEqual(["z(text)"]);
+    // the words 'security definer' in a comment of the body make nothing a definer (comments are stripped first)
+    const commented =
+      "create function public.w(p_a text) returns int as $b$ begin -- security definer? no\n return 1; end $b$ language plpgsql stable;\n";
+    expect(defined(commented)).toEqual([]);
+    // v carries the attribute after the body and is revoked at the top level
+    const after =
+      "create function public.v(p_a text) returns int as $b$ select 1 $b$ language sql security definer set search_path = '';\n" +
+      revoke("public.v(text)");
+    expect(defined(after)).toEqual(["v(text)"]);
+    expect(unrevoked(after)).toEqual([]);
+  });
+
+  it("reports an identity once even when the migration redefines it", () => {
+    const sql = def("public.f", "text") + def("public.f", "text");
+    expect(defined(sql)).toEqual(["f(text)"]);
+    expect(unrevoked(sql)).toEqual(["f(text)"]);
+  });
+
+  it("ignores non-function statements and invoker functions", () => {
+    expect(unrevoked("create table public.t(a int); create index on public.t(a);")).toEqual([]);
+    expect(unrevoked(def("public.inv", "text", "stable"))).toEqual([]);
+    expect(unrevoked(def("public.inv", "text", "security invoker"))).toEqual([]);
+  });
+});
+
+describe("anon surface: the identity parser agrees with the real migrations", () => {
+  const migrations = guardedMigrations();
+  // 37 identities in migrations 116-145 on 2026-11-02; the history only grows
+  const MIN_REAL_DEFINERS = 30;
+
+  it("reads every allowlisted RPC exactly as ALLOWED_RPC_IDENTITIES spells it, in the migration that defines it", () => {
+    for (const name of ALLOWED_RPCS) {
+      const mig = migrations.find((m) => m.num === ALLOWED_RPC_MIGRATION[name]);
+      expect(mig, name).toBeDefined();
+      expect(definerIdentities(mig!.code), `${name} in ${mig!.file}`).toContain(`${name}(${ALLOWED_RPC_ARGS[name]})`);
+    }
+  });
+
+  it("catches an unrevoked overload appended to a real migration, beside the revoked sibling (mutation test)", () => {
+    const m116 = migrations.find((m) => m.num === 116);
+    expect(m116).toBeDefined();
+    expect(findUnrevokedDefiners(m116!.code)).toEqual([]);
+    const overload =
+      "\ncreate or replace function public.source_slug_exists(p_slug text, p_strict boolean) returns boolean " +
+      "language sql security definer set search_path = '' as $f$ select true $f$;\n";
+    expect(findUnrevokedDefiners(m116!.code + overload)).toEqual(["source_slug_exists(text,boolean)"]);
+    // the same overload with its own revoke is fine
+    const revoked = overload + "revoke all on function public.source_slug_exists(text, boolean) from public, anon, authenticated;\n";
+    expect(findUnrevokedDefiners(m116!.code + revoked)).toEqual([]);
+  });
+
+  it("sees a non-trivial number of SECURITY DEFINER identities in the real history, all revoked (non-vacuity)", () => {
+    const all = migrations.flatMap((m) => definerIdentities(m.code));
+    expect(all.length).toBeGreaterThanOrEqual(MIN_REAL_DEFINERS);
+    expect(all).toContain("ops_health_report()");
+    for (const m of migrations) expect(findUnrevokedDefiners(m.code), m.file).toEqual([]);
+  });
+});
+

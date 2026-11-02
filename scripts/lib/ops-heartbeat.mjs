@@ -213,9 +213,74 @@ function fmtUtc(value) {
   return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
+// ---------------------------------------------------------------------------
+// Detail redaction (wave AW). The step log and $GITHUB_STEP_SUMMARY of this
+// PUBLIC repository are not an operator channel: the anon_surface row (migration
+// 145) is built to carry counts only, and this is the second lock. Whatever the
+// row's detail says, only the counts line, the pointer to the runbook and the
+// auth.users count can reach stdout; an object name never can.
+// ---------------------------------------------------------------------------
+
+const ANON_SURFACE_ROW = "anon_surface";
+const ANON_POINTER = "adlar için: docs/ops-heartbeat.md (Anon yüzeyi)";
+const ANON_HIDDEN = `ayrıntı gizlendi · ${ANON_POINTER}`;
+const ANON_ROLE_MISSING = "anon/authenticated rolü yok";
+const DETAIL_SEPARATOR = " · ";
+// The counts line of 145_ops_anon_surface_check.sql (detail := ...). Linear: no
+// nested quantifier, every `\d+` is delimited by literal text.
+const ANON_COUNTS_RE =
+  /^anon\/authenticated yetkisi (?:yok|var): tablo\/dizi \d+, definer fonksiyon \d+, invoker fonksiyon \d+ \(\d+ izinli RPC hariç\)/;
+
+/** True for a non-empty run of ASCII digits (string scan: no regex needed). */
+function isDigits(text) {
+  if (text.length === 0) return false;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (code < 48 || code > 57) return false;
+  }
+  return true;
+}
+
+/** `auth.users <digits>` or `auth.users okunamadı`: the only data segment allowed. */
+function isAuthUsersSegment(segment) {
+  const prefix = "auth.users ";
+  if (!segment.startsWith(prefix)) return false;
+  const tail = segment.slice(prefix.length);
+  return tail === "okunamadı" || isDigits(tail);
+}
+
+/**
+ * The detail text that may be printed for check `checkName`.
+ *   - any other check, or a null / undefined detail: returned unchanged;
+ *   - anon_surface: the counts line of migration 145 followed only by the
+ *     runbook pointer and the auth.users count passes unchanged; the skip text
+ *     ('anon/authenticated rolü yok') passes; a counts line with any other
+ *     segment (an object name) keeps the counts and the pointer only; anything
+ *     else (an 'unknown' sqlerrm, a non-string) becomes
+ *     'ayrıntı gizlendi · adlar için: docs/ops-heartbeat.md (Anon yüzeyi)'.
+ */
+export function redactDetail(checkName, detail) {
+  if (checkName !== ANON_SURFACE_ROW || detail === null || detail === undefined) return detail;
+  if (typeof detail !== "string") return ANON_HIDDEN;
+  if (detail === ANON_ROLE_MISSING) return detail;
+
+  const counts = ANON_COUNTS_RE.exec(detail);
+  if (counts === null) return ANON_HIDDEN;
+
+  const prefix = counts[0];
+  const rest = detail.slice(prefix.length);
+  if (rest === "") return detail;
+  if (!rest.startsWith(DETAIL_SEPARATOR)) return `${prefix}${DETAIL_SEPARATOR}${ANON_POINTER}`;
+
+  const segments = rest.slice(DETAIL_SEPARATOR.length).split(DETAIL_SEPARATOR);
+  const allowed = segments.every((segment) => segment === ANON_POINTER || isAuthUsersSegment(segment));
+  return allowed ? detail : `${prefix}${DETAIL_SEPARATOR}${ANON_POINTER}`;
+}
+
 /** One line per snapshot the schedule skipped over. */
 function missedLine(m) {
-  const detail = m.detail === null || m.detail === undefined ? "" : String(m.detail).replace(/\s+/g, " ").trim();
+  const flat = m.detail === null || m.detail === undefined ? "" : String(m.detail).replace(/\s+/g, " ").trim();
+  const detail = flat === "" ? "" : redactDetail(m.check_name, flat);
   return `kaçırılan: ${m.check_name} @ ${fmtUtc(m.taken_at)}${detail ? ` · ${detail}` : ""}`;
 }
 
@@ -230,7 +295,7 @@ export function formatTable(rows, missed = []) {
     cell(r.status).toUpperCase(),
     cell(r.observed),
     cell(r.threshold),
-    cell(r.detail),
+    cell(redactDetail(r.check_name, r.detail)),
   ]);
   const widths = headers.map((h, i) => Math.max(h.length, ...data.map((d) => d[i].length)));
   const line = (cols) => cols.map((c, i) => (c ?? "").padEnd(widths[i])).join("  ").trimEnd();
@@ -249,7 +314,7 @@ export function formatMarkdown(rows, verdict, missed = []) {
   const body = rows
     .map(
       (r) =>
-        `| ${md(r.check_name)} | ${md(r.status)} | ${md(r.observed)} | ${md(r.threshold)} | ${md(r.detail)} |`,
+        `| ${md(r.check_name)} | ${md(r.status)} | ${md(r.observed)} | ${md(r.threshold)} | ${md(redactDetail(r.check_name, r.detail))} |`,
     )
     .join("\n");
   const base = `## Ops heartbeat: ${verdict}\n\n${header}\n${sep}\n${body}\n`;

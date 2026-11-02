@@ -8,6 +8,7 @@ import {
   evaluate,
   formatTable,
   formatMarkdown,
+  redactDetail,
   runHeartbeat,
 } from "./ops-heartbeat.mjs";
 
@@ -749,5 +750,315 @@ describe("runHeartbeat backstops", () => {
     // the point of this test is that omitting `now` does not throw.
     const code = await runHeartbeat({ env: goodEnv, fetchImpl: h.fetchImpl, sleep: vi.fn(), log: vi.fn(), appendSummary: vi.fn() });
     expect([0, 1]).toContain(code);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wave AW (W4-av-followups): the Actions log of this PUBLIC repository is not
+// an operator channel. Migration 145's anon_surface detail is counts only, but
+// a later edit (or a hostile row in ops_health_snapshots) must not be able to
+// put an object name on stdout or into the step summary: the heartbeat itself
+// redacts that row's detail down to a counts-only allowlist. Every expected
+// string below is a literal.
+// ---------------------------------------------------------------------------
+
+describe("redactDetail and the anon_surface detail", () => {
+  const PASS_DETAIL =
+    "anon/authenticated yetkisi yok: tablo/dizi 0, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · auth.users 0";
+  // What migration 145 really prints on a fail: counts, the pointer, auth.users.
+  const FAIL_COUNTS_ONLY =
+    "anon/authenticated yetkisi var: tablo/dizi 1, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · adlar için: docs/ops-heartbeat.md (Anon yüzeyi) · auth.users 0";
+  const FAIL_TABLE_NAME =
+    "anon/authenticated yetkisi var: tablo/dizi 1, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · tablo/dizi: public.secret_table · auth.users 0";
+  const FAIL_FUNCTION_NAME =
+    "anon/authenticated yetkisi var: tablo/dizi 0, definer fonksiyon 1, invoker fonksiyon 0 (5 izinli RPC hariç) · fonksiyon: public.leak(text) · auth.users 0";
+  const REDACTED_TABLE =
+    "anon/authenticated yetkisi var: tablo/dizi 1, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · adlar için: docs/ops-heartbeat.md (Anon yüzeyi)";
+  const REDACTED_FUNCTION =
+    "anon/authenticated yetkisi var: tablo/dizi 0, definer fonksiyon 1, invoker fonksiyon 0 (5 izinli RPC hariç) · adlar için: docs/ops-heartbeat.md (Anon yüzeyi)";
+  const HIDDEN = "ayrıntı gizlendi · adlar için: docs/ops-heartbeat.md (Anon yüzeyi)";
+
+  const anonRow = (detail, status = "fail") => ({
+    check_name: "anon_surface",
+    status,
+    observed: 1,
+    threshold: 1,
+    detail,
+  });
+
+  describe("redactDetail", () => {
+    it("leaves every other check's detail unchanged, whatever it says", () => {
+      expect(redactDetail("edge_http_errors_30m", "3 / 70 yanıt")).toBe("3 / 70 yanıt");
+      expect(redactDetail("dead_feeds", "tablo/dizi: public.secret_table")).toBe("tablo/dizi: public.secret_table");
+    });
+
+    it("passes null and undefined through, for any check", () => {
+      expect(redactDetail("anon_surface", null)).toBeNull();
+      expect(redactDetail("anon_surface", undefined)).toBeUndefined();
+      expect(redactDetail("dead_feeds", null)).toBeNull();
+      expect(redactDetail("dead_feeds", undefined)).toBeUndefined();
+    });
+
+    it("keeps the pass detail verbatim", () => {
+      expect(redactDetail("anon_surface", PASS_DETAIL)).toBe(PASS_DETAIL);
+    });
+
+    it("keeps a counts-only fail detail verbatim (the pointer and auth.users segments are allowed)", () => {
+      expect(redactDetail("anon_surface", FAIL_COUNTS_ONLY)).toBe(FAIL_COUNTS_ONLY);
+    });
+
+    it("keeps the warn detail with an unreadable auth.users and the bare counts", () => {
+      const unreadable =
+        "anon/authenticated yetkisi yok: tablo/dizi 0, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · auth.users okunamadı";
+      const bare = "anon/authenticated yetkisi yok: tablo/dizi 0, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç)";
+      expect(redactDetail("anon_surface", unreadable)).toBe(unreadable);
+      expect(redactDetail("anon_surface", bare)).toBe(bare);
+    });
+
+    it("keeps the skip text for a missing role", () => {
+      expect(redactDetail("anon_surface", "anon/authenticated rolü yok")).toBe("anon/authenticated rolü yok");
+    });
+
+    it("cuts a table name segment down to the counts plus the pointer", () => {
+      expect(redactDetail("anon_surface", FAIL_TABLE_NAME)).toBe(REDACTED_TABLE);
+    });
+
+    it("cuts a function name segment down to the counts plus the pointer", () => {
+      expect(redactDetail("anon_surface", FAIL_FUNCTION_NAME)).toBe(REDACTED_FUNCTION);
+    });
+
+    it("cuts every segment that is not allowed, however many names follow", () => {
+      const many =
+        "anon/authenticated yetkisi var: tablo/dizi 2, definer fonksiyon 1, invoker fonksiyon 0 (5 izinli RPC hariç) · tablo/dizi: public.a, public.b · fonksiyon: public.f(text) · auth.users 0";
+      expect(redactDetail("anon_surface", many)).toBe(
+        "anon/authenticated yetkisi var: tablo/dizi 2, definer fonksiyon 1, invoker fonksiyon 0 (5 izinli RPC hariç) · adlar için: docs/ops-heartbeat.md (Anon yüzeyi)",
+      );
+    });
+
+    it("does not let a name ride on an allowed segment", () => {
+      const onAuth =
+        "anon/authenticated yetkisi var: tablo/dizi 1, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · auth.users 3 public.secret_table";
+      const onPointer =
+        "anon/authenticated yetkisi var: tablo/dizi 1, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · adlar için: docs/ops-heartbeat.md (Anon yüzeyi) public.secret_table";
+      const noSeparator =
+        "anon/authenticated yetkisi var: tablo/dizi 1, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç)public.secret_table";
+      for (const detail of [onAuth, onPointer, noSeparator]) {
+        const out = redactDetail("anon_surface", detail);
+        expect(out).not.toContain("secret_table");
+        expect(out).toBe(REDACTED_TABLE);
+      }
+    });
+
+    it("hides an unknown sqlerrm: only the pointer survives", () => {
+      expect(redactDetail("anon_surface", "permission denied for table secret_x")).toBe(HIDDEN);
+      expect(redactDetail("anon_surface", 'relation "public.secret_x" does not exist')).toBe(HIDDEN);
+    });
+
+    it("hides a detail that is not a string, an empty one, and a counts line with a missing number", () => {
+      expect(redactDetail("anon_surface", { name: "public.secret_x" })).toBe(HIDDEN);
+      expect(redactDetail("anon_surface", "")).toBe(HIDDEN);
+      expect(
+        redactDetail(
+          "anon_surface",
+          "anon/authenticated yetkisi var: tablo/dizi , definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç)",
+        ),
+      ).toBe(HIDDEN);
+    });
+
+    it("matches the check name exactly", () => {
+      expect(redactDetail("Anon_Surface", "permission denied for table secret_x")).toBe(
+        "permission denied for table secret_x",
+      );
+      expect(redactDetail("anon_surface_extra", "permission denied for table secret_x")).toBe(
+        "permission denied for table secret_x",
+      );
+    });
+
+    it("stays linear on a hostile detail (no catastrophic backtracking)", () => {
+      const hostile = `anon/authenticated yetkisi var: tablo/dizi ${"9".repeat(100_000)}x`;
+      const started = Date.now();
+      expect(redactDetail("anon_surface", hostile)).toBe(HIDDEN);
+      expect(redactDetail("anon_surface", ` · ${"a".repeat(200_000)}`)).toBe(HIDDEN);
+      expect(Date.now() - started).toBeLessThan(500);
+    });
+  });
+
+  describe("formatTable and formatMarkdown", () => {
+    it("print a pass counts-only detail verbatim", () => {
+      const rows = [...HEALTHY_ROWS, anonRow(PASS_DETAIL, "pass")];
+      expect(formatTable(rows)).toContain(PASS_DETAIL);
+      expect(formatMarkdown(rows, "OK")).toContain(PASS_DETAIL);
+    });
+
+    it("print the counts but never the table name of a fail detail", () => {
+      const rows = [...HEALTHY_ROWS, anonRow(FAIL_TABLE_NAME)];
+      const table = formatTable(rows);
+      const md = formatMarkdown(rows, "ALERT");
+      expect(table).not.toContain("secret_table");
+      expect(md).not.toContain("secret_table");
+      expect(table).toContain(REDACTED_TABLE);
+      expect(md).toContain(REDACTED_TABLE);
+    });
+
+    it("print the counts but never the function name of a fail detail", () => {
+      const rows = [...HEALTHY_ROWS, anonRow(FAIL_FUNCTION_NAME)];
+      const table = formatTable(rows);
+      const md = formatMarkdown(rows, "ALERT");
+      expect(table).not.toContain("leak");
+      expect(md).not.toContain("leak");
+      expect(table).toContain(REDACTED_FUNCTION);
+      expect(md).toContain(REDACTED_FUNCTION);
+    });
+
+    it("hide an unknown sqlerrm detail", () => {
+      const rows = [...HEALTHY_ROWS, anonRow("permission denied for table secret_x", "unknown")];
+      const table = formatTable(rows);
+      const md = formatMarkdown(rows, "OK");
+      expect(table).not.toContain("secret_x");
+      expect(md).not.toContain("secret_x");
+      expect(table).toContain(HIDDEN);
+      expect(md).toContain(HIDDEN);
+    });
+
+    it("leave the details of every other check untouched", () => {
+      const rows = [...HEALTHY_ROWS, anonRow(FAIL_TABLE_NAME)];
+      expect(formatTable(rows)).toContain("3 / 70 yanıt");
+      expect(formatMarkdown(rows, "ALERT")).toContain("| edge_http_errors_30m | warn | 3 | 5 | 3 / 70 yanıt |");
+    });
+
+    it("do not mutate the rows they are given", () => {
+      const row = anonRow(FAIL_TABLE_NAME);
+      formatTable([row]);
+      formatMarkdown([row], "ALERT");
+      expect(row.detail).toBe(FAIL_TABLE_NAME);
+    });
+  });
+
+  describe("missed snapshots", () => {
+    const MISSED_ANON = {
+      id: 31,
+      taken_at: "2026-10-31T14:24:03+00:00",
+      check_name: "anon_surface",
+      status: "fail",
+      observed: 1,
+      threshold: 1,
+      detail: FAIL_TABLE_NAME,
+    };
+    const REDACTED_LINE = `kaçırılan: anon_surface @ 2026-10-31 14:24 UTC · ${REDACTED_TABLE}`;
+
+    it("a missed anon_surface snapshot prints no name in the table's missed lines", () => {
+      const table = formatTable(HEALTHY_ROWS, [MISSED_ANON]);
+      expect(table).not.toContain("secret_table");
+      expect(table).toContain(REDACTED_LINE);
+    });
+
+    it("a missed anon_surface snapshot prints no name in the markdown 'Kaçırılan olaylar' section", () => {
+      const md = formatMarkdown(HEALTHY_ROWS, "ALERT", [MISSED_ANON]);
+      expect(md).toContain("### Kaçırılan olaylar");
+      expect(md).not.toContain("secret_table");
+      expect(md).toContain(`- ${REDACTED_LINE}`);
+    });
+
+    it("a multi-line missed detail is normalised first and still redacted", () => {
+      const spread = {
+        ...MISSED_ANON,
+        detail:
+          "anon/authenticated yetkisi var: tablo/dizi 0, definer fonksiyon 1, invoker fonksiyon 0 (5 izinli RPC hariç)\n · fonksiyon: public.leak(text) · auth.users 0",
+      };
+      const table = formatTable(HEALTHY_ROWS, [spread]);
+      expect(table).not.toContain("leak");
+      expect(table).toContain(
+        `kaçırılan: anon_surface @ 2026-10-31 14:24 UTC · ${REDACTED_FUNCTION}`,
+      );
+    });
+
+    it("a missed snapshot with a null detail still prints no separator", () => {
+      const table = formatTable(HEALTHY_ROWS, [{ ...MISSED_ANON, detail: null }]);
+      expect(table).toContain("kaçırılan: anon_surface @ 2026-10-31 14:24 UTC");
+      expect(table).not.toContain("14:24 UTC ·");
+    });
+
+    it("a missed snapshot of another check keeps its detail", () => {
+      const other = { ...MISSED_ANON, check_name: "dead_feeds", detail: "tablo/dizi: public.not_a_secret" };
+      expect(formatTable(HEALTHY_ROWS, [other])).toContain(
+        "kaçırılan: dead_feeds @ 2026-10-31 14:24 UTC · tablo/dizi: public.not_a_secret",
+      );
+    });
+  });
+
+  describe("runHeartbeat end to end", () => {
+    const goodEnv = { SUPABASE_URL: "https://proj.supabase.co", SUPABASE_SERVICE_ROLE_KEY: SECRET_KEY };
+
+    it("neither the log lines nor the step summary contain a leaked name", async () => {
+      const report = [...HEALTHY_ROWS, anonRow(FAIL_TABLE_NAME)];
+      const snapshots = [
+        {
+          id: 41,
+          taken_at: "2026-10-31T14:24:03+00:00",
+          check_name: "anon_surface",
+          status: "fail",
+          observed: 1,
+          threshold: 1,
+          detail: FAIL_FUNCTION_NAME,
+        },
+      ];
+      const handlers = {
+        ops_health_report: () => jsonResponse(200, report),
+        ops_health_unnotified: () => jsonResponse(200, snapshots),
+        ops_archive_gap_days: () => jsonResponse(200, [{ missing_days: 0, oldest_missing: null }]),
+        ops_health_mark_notified: () => jsonResponse(200, 1),
+      };
+      const calls = [];
+      const fetchImpl = vi.fn(async (url, init) => {
+        const fn = String(url).split("/rpc/")[1];
+        calls.push({ fn, body: init.body });
+        return handlers[fn]();
+      });
+      const logged = [];
+      const summaries = [];
+      const code = await runHeartbeat({
+        env: goodEnv,
+        fetchImpl,
+        sleep: vi.fn().mockResolvedValue(undefined),
+        now: () => new Date("2026-11-01T12:00:00Z"),
+        log: (line) => logged.push(String(line)),
+        appendSummary: (md) => summaries.push(String(md)),
+      });
+
+      expect(code).toBe(1);
+      const everything = [...logged, ...summaries].join("\n");
+      expect(everything).not.toContain("secret_table");
+      expect(everything).not.toContain("public.leak");
+      expect(everything).not.toContain("leak(text)");
+      // The counts survive in both channels.
+      expect(logged.join("\n")).toContain(REDACTED_TABLE);
+      expect(summaries.join("\n")).toContain(REDACTED_TABLE);
+      expect(summaries.join("\n")).toContain(`- kaçırılan: anon_surface @ 2026-10-31 14:24 UTC · ${REDACTED_FUNCTION}`);
+      // Redaction is presentation only: the paged snapshot is still marked notified.
+      expect(calls.filter((c) => c.fn === "ops_health_mark_notified").map((c) => c.body)).toEqual(['{"p_ids":[41]}']);
+    });
+
+    it("a failing anon_surface report row with an unknown sqlerrm is hidden in both channels", async () => {
+      const report = [...HEALTHY_ROWS, anonRow("permission denied for table secret_x", "unknown")];
+      const fetchImpl = vi.fn(async (url) => {
+        const fn = String(url).split("/rpc/")[1];
+        if (fn === "ops_health_report") return jsonResponse(200, report);
+        if (fn === "ops_health_unnotified") return jsonResponse(200, []);
+        return jsonResponse(200, [{ missing_days: 0, oldest_missing: null }]);
+      });
+      const logged = [];
+      const summaries = [];
+      await runHeartbeat({
+        env: goodEnv,
+        fetchImpl,
+        sleep: vi.fn().mockResolvedValue(undefined),
+        now: () => new Date("2026-11-01T12:00:00Z"),
+        log: (line) => logged.push(String(line)),
+        appendSummary: (md) => summaries.push(String(md)),
+      });
+      expect([...logged, ...summaries].join("\n")).not.toContain("secret_x");
+      expect(logged.join("\n")).toContain(HIDDEN);
+      expect(summaries.join("\n")).toContain(HIDDEN);
+    });
   });
 });

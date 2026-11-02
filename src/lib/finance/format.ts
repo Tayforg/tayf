@@ -3,8 +3,9 @@
 // 2016), so dates are shifted by hand instead of going through Intl, whose
 // tr-TR day/month pattern without a year comes out as "12/09".
 
+import { signedPercentTr } from "@/lib/format/number-tr";
+
 const PRICE = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const PCT = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 2, maximumFractionDigits: 2, signDisplay: "always" });
 const X = new Intl.NumberFormat("tr-TR", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 
 const IST_OFFSET_MS = 3 * 3600 * 1000;
@@ -19,8 +20,9 @@ export function fmtPrice(n: number): string {
   return PRICE.format(n);
 }
 
+/** Signed change in the Turkish prefix form: -4.73 -> "-%4,73", 0 -> "%0,00". */
 export function fmtPct(n: number): string {
-  return `${PCT.format(n)}%`;
+  return signedPercentTr(n, 2);
 }
 
 /** Ratio like relative volume: 2.4 -> "2,4x". */

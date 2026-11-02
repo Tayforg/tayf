@@ -29,9 +29,9 @@ export function LeastReadNudge({ lists }: LeastReadNudgeProps) {
   return (
     <section className="space-y-3 rounded-xl border border-border/60 bg-card/40 p-4">
       <div>
-        <h2 className="text-sm font-semibold">Bu hafta en az okuduğun taraftan 3 güncel başlık</h2>
+        <h2 className="text-sm font-semibold">Bu hafta en az okuduğunuz taraftan 3 güncel başlık</h2>
         <p className="text-sm text-muted-foreground">
-          En az okuduğun taraf: {label} ({clickCount} tıklama). {label} kaynaklarının ağırlıkta
+          En az okuduğunuz taraf: {label} ({clickCount} tıklama). {label} kaynaklarının ağırlıkta
           olduğu, birden çok kaynağın yazdığı güncel hikâyeler; sayfada diğer tarafların
           başlıkları da yan yana.
         </p>

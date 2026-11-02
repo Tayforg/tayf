@@ -19,11 +19,11 @@ export default function OfflinePage() {
   return (
     <div className="container mx-auto px-4 py-8 max-w-3xl">
       <h1 className="font-serif text-2xl sm:text-3xl font-bold tracking-tight mb-2">
-        Çevrimdışısın
+        Çevrimdışısınız
       </h1>
       <p className="text-sm text-muted-foreground mb-4">
-        Şu an internete bağlı değilsin ya da bağlantın çok yavaş. Bağlantı geri geldiğinde sayfayı
-        yenileyebilirsin.
+        Şu an internete bağlı değilsiniz ya da bağlantınız çok yavaş. Bağlantı geri geldiğinde sayfayı
+        yenileyebilirsiniz.
       </p>
       <OfflineSavedList />
     </div>

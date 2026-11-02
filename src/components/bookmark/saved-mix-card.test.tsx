@@ -27,18 +27,18 @@ function html(rows: Row[]): string {
 describe("SavedMixCard hint states", () => {
   it("renders the exact hint for 2 rows", () => {
     expect(html(OK_ROWS.slice(0, 2))).toBe(
-      '<p class="mb-3 text-xs text-muted-foreground">En az 3 hikâye kaydedince okuma diyetin burada görünür.</p>',
+      '<p class="mb-3 text-xs text-muted-foreground">En az 3 hikâye kaydedince okuma diyetiniz burada görünür.</p>',
     );
   });
 
   it("renders the hint for 0 rows", () => {
-    expect(html([])).toContain("En az 3 hikâye kaydedince okuma diyetin burada görünür.");
+    expect(html([])).toContain("En az 3 hikâye kaydedince okuma diyetiniz burada görünür.");
   });
 
   it("renders the no-votes message for 3 rows without classified sources", () => {
     const out = html([{ bias_distribution: {} }, { bias_distribution: null }, { bias_distribution: "x" }]);
     expect(out).toBe(
-      '<p class="mb-3 text-xs text-muted-foreground">Kaydettiğin hikâyelerde henüz sınıflandırılmış kaynak yok; okuma diyetin hesaplanamıyor.</p>',
+      '<p class="mb-3 text-xs text-muted-foreground">Kaydettiğiniz hikâyelerde henüz sınıflandırılmış kaynak yok; okuma diyetiniz hesaplanamıyor.</p>',
     );
   });
 });
@@ -47,12 +47,12 @@ describe("SavedMixCard ok state", () => {
   const out = html(OK_ROWS);
 
   it("renders the labelled section and heading", () => {
-    expect(out).toContain('aria-labelledby="okuma-diyetin"');
-    expect(out).toContain('<h2 id="okuma-diyetin" class="font-serif text-sm font-semibold">Okuma diyetin</h2>');
+    expect(out).toContain('aria-labelledby="okuma-diyetiniz"');
+    expect(out).toContain('<h2 id="okuma-diyetiniz" class="font-serif text-sm font-semibold">Okuma diyetiniz</h2>');
   });
 
   it("renders the subtitle with the story and source numbers", () => {
-    expect(out).toContain("Kaydettiğin 3 hikâyeyi yazan 7 sınıflandırılmış kaynağın dağılımı");
+    expect(out).toContain("Kaydettiğiniz 3 hikâyeyi yazan 7 sınıflandırılmış kaynağın dağılımı");
   });
 
   it("renders the legend with all three zones in spectrum order", () => {
@@ -89,7 +89,7 @@ describe("SavedMixCard ok state", () => {
       { bias_distribution: { center: 1 } },
       { bias_distribution: { opposition: 1 } },
     ]);
-    expect(four).toContain("Kaydettiğin 3 hikâyeyi yazan 4 sınıflandırılmış kaynağın dağılımı");
+    expect(four).toContain("Kaydettiğiniz 3 hikâyeyi yazan 4 sınıflandırılmış kaynağın dağılımı");
     expect(four).not.toContain("Denge puanı");
   });
 

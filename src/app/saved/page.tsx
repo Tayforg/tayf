@@ -22,7 +22,7 @@ export default function SavedPage() {
         Kaydedilenler
       </h1>
       <p className="-mt-2 mb-4 text-[12px] text-muted-foreground">
-        Hangi taraftan ne kadar okuduğunu görmek için:{" "}
+        Hangi taraftan ne kadar okuduğunuzu görmek için:{" "}
         <Link
           href="/diyetim"
           className="underline decoration-dotted underline-offset-2 hover:text-foreground"

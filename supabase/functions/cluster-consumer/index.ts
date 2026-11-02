@@ -44,7 +44,7 @@ import {
 } from "../_shared/cluster/fingerprint.ts";
 import { extractEntities } from "../_shared/cluster/entities.ts";
 import { bandKeys, LSH_BANDS } from "../_shared/cluster/lsh.ts";
-import { TfidfIndex } from "../_shared/cluster/tfidf.ts";
+import { TfidfIndex, type TfidfQuery } from "../_shared/cluster/tfidf.ts";
 import { headlineLane, headlineOnlyScore, score } from "../_shared/cluster/ensemble.ts";
 import {
   CONTEXT_STICKY_HOURS,
@@ -153,6 +153,29 @@ const TITLE_PROBE_MIN_TOKENS = 3;
 // Members read for a probe hit; the same bound loadClusterContext's per-chunk
 // reads effectively give a cluster, and far above any real cluster size we load.
 const PROBE_MEMBER_LIMIT = 200;
+
+// Stem-overlap probe (h19-recall-2, migration 146). The exact-title probe above
+// keys on the folded title INCLUDING its punctuation, so 'X' and 'X!' (or a
+// quoted title) never meet: 27% of the measured splits had their older cluster
+// outside the 200-cluster context. When no candidate reached FALLBACK_FLOOR, the
+// consumer sends the headline stems ([...headlineTokens(title).tokens]) to
+// public.cluster_stem_probe, which returns up to TITLE_PROBE_LIMIT live clusters
+// of the last TITLE_PROBE_WINDOW_HOURS whose folded seed title shares at least
+// least(4, n) of them. The hits are loaded and scored like any candidate; the
+// MATCH_THRESHOLD bar is unchanged, so the probe only widens the funnel.
+
+// Twin-bridge evidence (h19-recall-3, migration 147). When two or more candidates
+// of one article score at least TWIN_BRIDGE_MIN_SCORE, the pairs are written to
+// cluster_twin_bridges as shadow evidence for a later merge decision (no merge
+// happens here). Keep TWIN_BRIDGE_MIN_SCORE equal to TWIN_MERGE_MIN_BRIDGE_SCORE
+// in _shared/cluster/twin-merge.ts: that file's decision reads these rows, and a
+// higher bar here would silently starve it. (Not imported: the two live in
+// different modules on purpose, and a test pins their equality.)
+const TWIN_BRIDGE_MIN_SCORE = 0.55;
+// Pairs are built from the best TWIN_BRIDGE_MAX_CANDIDATES candidates only: at
+// most 3 rows per article.
+const TWIN_BRIDGE_MAX_CANDIDATES = 3;
+
 // Columns of a cluster member the matcher needs (loadClusterContext and
 // loadProbeCluster read the same shape).
 const MEMBER_ARTICLE_SELECT =
@@ -913,6 +936,87 @@ async function recordSkip(
   }
 }
 
+// Stem-overlap probe (migration 146): best-effort like the title probe, one
+// warning per isolate.
+let stemProbeWarned = false;
+
+function warnStemProbeOnce(detail: string) {
+  if (stemProbeWarned) return;
+  stemProbeWarned = true;
+  console.warn(
+    `[cluster-consumer] cluster_stem_probe failed, continuing without it: ${detail}`,
+  );
+}
+
+// Twin-bridge evidence (migration 147): best-effort, one warning per isolate.
+let twinBridgeWarned = false;
+
+function warnTwinBridgeOnce(detail: string) {
+  if (twinBridgeWarned) return;
+  twinBridgeWarned = true;
+  console.warn(`[cluster-consumer] cluster_twin_bridges upsert failed, continuing: ${detail}`);
+}
+
+// The bridge rows of one article: every pair of its best TWIN_BRIDGE_MAX_CANDIDATES
+// candidates that score at least TWIN_BRIDGE_MIN_SCORE, as
+// {article_id, cluster_a, cluster_b, score}. Ids are lower-cased and ordered by
+// plain string comparison (cluster_a < cluster_b, which is also the order of
+// Postgres uuids), so the pair has one canonical form; the pair's score is the
+// lower of the two. [] with fewer than two such candidates. Pure.
+function twinBridgeRows(
+  articleId: string,
+  ranked: ReadonlyArray<{ clusterId: string; score: number }>,
+): Array<{ article_id: string; cluster_a: string; cluster_b: string; score: number }> {
+  const best = ranked
+    .filter((c) => c.score >= TWIN_BRIDGE_MIN_SCORE)
+    .map((c) => ({ id: c.clusterId.toLowerCase(), score: c.score }))
+    .sort((x, y) => y.score - x.score || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+  const top: Array<{ id: string; score: number }> = [];
+  for (const c of best) {
+    if (top.length >= TWIN_BRIDGE_MAX_CANDIDATES) break;
+    if (top.some((t) => t.id === c.id)) continue;
+    top.push(c);
+  }
+  const rows: Array<{ article_id: string; cluster_a: string; cluster_b: string; score: number }> = [];
+  for (let i = 0; i < top.length; i++) {
+    for (let j = i + 1; j < top.length; j++) {
+      const a = top[i]!;
+      const b = top[j]!;
+      const [lo, hi] = a.id < b.id ? [a, b] : [b, a];
+      rows.push({
+        article_id: articleId,
+        cluster_a: lo.id,
+        cluster_b: hi.id,
+        score: Math.min(a.score, b.score),
+      });
+    }
+  }
+  return rows;
+}
+
+// h19-recall-3: writes the bridge rows of one article. It is AWAITED, not left as
+// a floating promise: a write that is still in flight when the isolate returns
+// can be dropped, and an un-awaited write would make the mutation log of the
+// test fake racy. It is best-effort like recordSkip: a failure (error envelope or
+// throw) warns once per isolate and never touches the decision, so the caller
+// ignores the result. Insert-or-ignore on the primary key keeps a re-delivered
+// message from rewriting the first record.
+async function recordTwinBridges(
+  articleId: string,
+  ranked: ReadonlyArray<{ clusterId: string; score: number }>,
+): Promise<void> {
+  const rows = twinBridgeRows(articleId, ranked);
+  if (rows.length === 0) return;
+  try {
+    const res = await supabase
+      .from("cluster_twin_bridges")
+      .upsert(rows, { onConflict: "article_id,cluster_a,cluster_b", ignoreDuplicates: true });
+    if (res.error) warnTwinBridgeOnce(res.error.message);
+  } catch (err) {
+    warnTwinBridgeOnce(err instanceof Error ? err.message : String(err));
+  }
+}
+
 // Reads one probe hit's members and registers the cluster in `ctx` the way
 // loadClusterContext would have: seed = earliest member, latest = newest other
 // member, signatures attached, tf-idf docs, source ids, the candidate indices
@@ -1015,6 +1119,54 @@ async function probeExactTitleClusters(
     } catch (err) {
       console.warn(
         `[cluster-consumer] title probe: cluster ${row.id} not loaded, skipping it: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return ids;
+}
+
+// Ids of the live clusters (updated in the last TITLE_PROBE_WINDOW_HOURS) whose
+// folded seed title shares enough headline stems with this article
+// (public.cluster_stem_probe, migration 146), loaded into `ctx` so the scorer can
+// see them, in the order the database ranked them. [] when the headline is too
+// generic, on any failure, or when nothing matches. Rows that are already in
+// ctx.clusters are skipped: the first scoring pass had them. Never called in a
+// dry run.
+async function probeStemClusters(
+  ctx: ClusterContext,
+  article: EnrichedArticle,
+): Promise<string[]> {
+  const stems = [...headlineTokens(article.title).tokens];
+  if (stems.length < TITLE_PROBE_MIN_TOKENS) return [];
+
+  let rows: ClusterRow[];
+  try {
+    const res = await supabase.rpc("cluster_stem_probe", {
+      p_stems: stems,
+      p_since: new Date(Date.now() - TITLE_PROBE_WINDOW_HOURS * 3_600_000).toISOString(),
+      p_limit: TITLE_PROBE_LIMIT,
+    });
+    if (res.error) {
+      warnStemProbeOnce(res.error.message);
+      return [];
+    }
+    rows = Array.isArray(res.data) ? (res.data as ClusterRow[]) : [];
+  } catch (err) {
+    warnStemProbeOnce(err instanceof Error ? err.message : String(err));
+    return [];
+  }
+
+  const ids: string[] = [];
+  for (const row of rows.slice(0, TITLE_PROBE_LIMIT)) {
+    if (!row || typeof row.id !== "string") continue;
+    if (ctx.clusters.some((c) => c.id === row.id)) continue;
+    try {
+      if (await loadProbeCluster(ctx, row)) ids.push(row.id);
+    } catch (err) {
+      console.warn(
+        `[cluster-consumer] stem probe: cluster ${row.id} not loaded, skipping it: ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -1573,6 +1725,20 @@ async function clusterArticle(
       dupBlock.evidence = evidence;
     }
   };
+  // The same-source skip, taken at two places: after the context candidates were
+  // tried, and after the stem-probe hits were. Returns the "skipped" outcome (and,
+  // live, writes the cluster_skip_log row) when dupBlock holds a cluster with
+  // evidence, else null. `outcomeScore` is only reported in the outcome.
+  const takeSameSourceSkip = async (outcomeScore: number | undefined): Promise<ProcessOutcome | null> => {
+    if (dupBlock.clusterId !== null && dupBlock.evidence !== null) {
+      console.log(
+        `[cluster-consumer] same-source-duplicate skip article=${article.id} cluster=${dupBlock.clusterId} matchScore=${dupBlock.score.toFixed(3)} evidence=${dupBlock.evidence}${dryRun ? " dry-run" : ""}`,
+      );
+      if (!dryRun) await recordSkip(article.id, { clusterId: dupBlock.clusterId, score: dupBlock.score, evidence: dupBlock.evidence });
+      return { result: "skipped", reason: "same-source-duplicate", score: outcomeScore };
+    }
+    return null;
+  };
 
   // Strict-fingerprint fast-path against any indexed member.
   if (article.fingerprint) {
@@ -1652,14 +1818,21 @@ async function clusterArticle(
   type Scored = { clusterId: string; score: number; fallbackScore: number };
   const scored: Scored[] = [];
 
-  for (const clusterId of candidateIds) {
+  // Scores one candidate cluster against the incoming article: the full
+  // ensemble against the cluster's seed and latest member, then the headline
+  // lane against its other recent members. null when the cluster has no seed
+  // in the context or the seed is outside TIME_WINDOW_HOURS. The caller decides
+  // what to do with a low score (the main loop keeps the ones at FALLBACK_FLOOR
+  // or better). `query` is passed in because the stem probe rebuilds it after
+  // loading clusters into the corpus.
+  const scoreCandidate = (clusterId: string, query: TfidfQuery): Scored | null => {
     const seed = seedByCluster.get(clusterId);
-    if (!seed) continue;
+    if (!seed) return null;
     const hoursDeltaSeed = hoursBetween(article.published_at, seed.published_at);
-    if (hoursDeltaSeed > TIME_WINDOW_HOURS) continue;
+    if (hoursDeltaSeed > TIME_WINDOW_HOURS) return null;
 
     const seedFp = { strict: seed.fingerprint, signature: seed.signature ?? null };
-    const tfidfCosineSeed = ctx.tfidf.cosineQuery(tfidfQuery, seed.id);
+    const tfidfCosineSeed = ctx.tfidf.cosineQuery(query, seed.id);
     const bSourceSlugSeed = seed.source_id
       ? sourceLookup.get(seed.source_id)?.slug ?? null
       : null;
@@ -1685,7 +1858,7 @@ async function clusterArticle(
       const hoursDeltaLatest = hoursBetween(article.published_at, latest.published_at);
       if (hoursDeltaLatest <= TIME_WINDOW_HOURS) {
         const latestFp = { strict: latest.fingerprint, signature: latest.signature ?? null };
-        const tfidfCosineLatest = ctx.tfidf.cosineQuery(tfidfQuery, latest.id);
+        const tfidfCosineLatest = ctx.tfidf.cosineQuery(query, latest.id);
         const bSourceSlugLatest = latest.source_id
           ? sourceLookup.get(latest.source_id)?.slug ?? null
           : null;
@@ -1738,26 +1911,37 @@ async function clusterArticle(
       }
     }
 
-    if (bestScore >= FALLBACK_FLOOR) {
-      scored.push({ clusterId, score: bestScore, fallbackScore });
-    }
+    return { clusterId, score: bestScore, fallbackScore };
+  };
+
+  for (const clusterId of candidateIds) {
+    const s = scoreCandidate(clusterId, tfidfQuery);
+    if (s && s.score >= FALLBACK_FLOOR) scored.push(s);
   }
   // Best score first, except that among the candidates which all match
   // (>= MATCH_THRESHOLD) and sit within CANDIDATE_SIZE_TIEBREAK_MARGIN of the
   // best one, the larger cluster goes first: the 18-article original, not its
   // 7-article twin (h12-cluster-1). The size is the row's article_count or the
   // number of member sources loaded for it, whichever is larger.
-  const articleCountById = new Map<string, number>();
-  for (const c of ctx.clusters) articleCountById.set(c.id, Number(c.article_count) || 0);
-  const sizeOf = (clusterId: string): number =>
-    Math.max(
-      articleCountById.get(clusterId) ?? 0,
-      ctx.sourceIdsByCluster.get(clusterId)?.size ?? 0,
-    );
-  const ranked = rankCandidates(scored, sizeOf, {
+  // Rebuilt from ctx.clusters on every call of makeSizeOf: clusters the stem
+  // probe loads after the first ranking must be sized by their own row, not
+  // read as 0 from a map built before they were there.
+  const makeSizeOf = (): ((clusterId: string) => number) => {
+    const articleCountById = new Map<string, number>();
+    for (const c of ctx.clusters) articleCountById.set(c.id, Number(c.article_count) || 0);
+    return (clusterId: string): number =>
+      Math.max(
+        articleCountById.get(clusterId) ?? 0,
+        ctx.sourceIdsByCluster.get(clusterId)?.size ?? 0,
+      );
+  };
+  const ranked = rankCandidates(scored, makeSizeOf(), {
     margin: CANDIDATE_SIZE_TIEBREAK_MARGIN,
     threshold: MATCH_THRESHOLD,
   });
+  // h19-recall-3: shadow evidence for twin clusters. Written before the decision
+  // below is acted on, awaited and best-effort; it never changes the decision.
+  if (!dryRun) await recordTwinBridges(article.id, ranked);
 
   const primary = ranked[0];
 
@@ -1943,32 +2127,28 @@ async function clusterArticle(
     );
   }
 
-  const blocked = new Set<string>();
-  if (marginalRejectedClusterId) {
-    // Block the primary candidate BEFORE the fallback loop below -- the
-    // loop's own `primary.score >= MATCH_THRESHOLD` entry condition and
-    // per-candidate logic are otherwise untouched, so the next candidate
-    // (or createCluster) wins exactly as it already does for any other
-    // blocked cluster.
-    blocked.add(marginalRejectedClusterId);
-  }
-  if (primary && primary.score >= MATCH_THRESHOLD) {
-    for (const cand of ranked) {
+  // The join loop, shared by the context candidates below and by the stem-probe
+  // hits further down: walks `cands` in ranking order and hands the article to
+  // the first cluster that takes it. A candidate below `bar` ends the walk; one
+  // whose fallbackScore is below `bar` is passed over. In a dry run it reports
+  // "would_match" instead of writing. Clusters that already hold the article's
+  // source are added to `blocked` (and, with evidence, to dupBlock via
+  // noteDupBlock). Returns the outcome of the join, or null when nothing took the
+  // article.
+  const joinFirstAvailable = async (
+    cands: readonly Scored[],
+    bar: number,
+    blocked: Set<string>,
+  ): Promise<ProcessOutcome | null> => {
+    for (const cand of cands) {
       if (blocked.has(cand.clusterId)) continue;
-      // A Jev reject withdraws the "primary is a match" premise, so the
-      // fallback may only reach a candidate the ensemble would have joined
-      // on its own (score >= MATCH_THRESHOLD); otherwise createCluster.
-      // Without this, a band-high reject (primary in [0.40, 0.44)) could
-      // fall through into a genuinely sub-threshold join in [FALLBACK_FLOOR,
-      // MATCH_THRESHOLD) -- a join the ensemble alone would never make.
-      const fallbackBar = marginalRejectedClusterId ? MATCH_THRESHOLD : FALLBACK_FLOOR;
-      if (cand.score < fallbackBar) break;
+      if (cand.score < bar) break;
       // The text floor caps the entity/tfidf lane at MATCH_THRESHOLD - 0.01,
       // inside [FALLBACK_FLOOR, MATCH_THRESHOLD). A candidate whose only
       // results in that window rest on the capped lane is a pair joined by
       // entities alone; it may still be reviewed by Jev's low band above, but
       // must not join here when the primary was skipped as a duplicate-source.
-      if (cand.fallbackScore < fallbackBar) continue;
+      if (cand.fallbackScore < bar) continue;
       if (dryRun) {
         if (wouldDuplicate(ctx, cand.clusterId, article)) {
           blocked.add(cand.clusterId);
@@ -1990,6 +2170,8 @@ async function clusterArticle(
       if (result.skipped) {
         blocked.add(cand.clusterId);
         if (result.reason === "duplicate-source") {
+          // probeSet holds only exact-title probe hits; a stem-probe hit is never
+          // in it (its id was not in ctx.clusters yet), so it gets probeHit false.
           noteDupBlock(
             cand.clusterId,
             cand.score,
@@ -2001,6 +2183,28 @@ async function clusterArticle(
       addMemberToIndices(cand.clusterId, article);
       return { result: "matched", clusterId: cand.clusterId };
     }
+    return null;
+  };
+
+  const blocked = new Set<string>();
+  if (marginalRejectedClusterId) {
+    // Block the primary candidate BEFORE the fallback loop below -- the
+    // loop's own `primary.score >= MATCH_THRESHOLD` entry condition and
+    // per-candidate logic are otherwise untouched, so the next candidate
+    // (or createCluster) wins exactly as it already does for any other
+    // blocked cluster.
+    blocked.add(marginalRejectedClusterId);
+  }
+  if (primary && primary.score >= MATCH_THRESHOLD) {
+    // A Jev reject withdraws the "primary is a match" premise, so the
+    // fallback may only reach a candidate the ensemble would have joined
+    // on its own (score >= MATCH_THRESHOLD); otherwise createCluster.
+    // Without this, a band-high reject (primary in [0.40, 0.44)) could
+    // fall through into a genuinely sub-threshold join in [FALLBACK_FLOOR,
+    // MATCH_THRESHOLD) -- a join the ensemble alone would never make.
+    const fallbackBar = marginalRejectedClusterId ? MATCH_THRESHOLD : FALLBACK_FLOOR;
+    const joined = await joinFirstAvailable(ranked, fallbackBar, blocked);
+    if (joined) return joined;
   }
 
   // Nothing took the article, but a cluster that matched it at MATCH_THRESHOLD
@@ -2013,18 +2217,53 @@ async function clusterArticle(
   // A source-blocked match without that evidence (a templated MinHash false
   // match, h14-cluster-1) never sets dupBlock and still opens a cluster, as
   // does the weak-match case (best score below MATCH_THRESHOLD).
-  if (dupBlock.clusterId !== null && dupBlock.evidence !== null) {
-    console.log(
-      `[cluster-consumer] same-source-duplicate skip article=${article.id} cluster=${dupBlock.clusterId} matchScore=${dupBlock.score.toFixed(3)} evidence=${dupBlock.evidence}${dryRun ? " dry-run" : ""}`,
-    );
-    if (!dryRun) await recordSkip(article.id, { clusterId: dupBlock.clusterId, score: dupBlock.score, evidence: dupBlock.evidence });
-    return { result: "skipped", reason: "same-source-duplicate", score: primary?.score };
-  }
+  const dupSkip = await takeSameSourceSkip(primary?.score);
+  if (dupSkip) return dupSkip;
 
   // No viable match. In a dry run, report what would happen without ever
   // calling createCluster/registerNewClusterInCache/addMemberToIndices.
   if (dryRun) {
     return { result: "would_create", score: primary?.score, sourcesBefore: [] };
+  }
+
+  // h19-recall-2: no candidate of the context reached FALLBACK_FLOOR, so the
+  // story may sit in a cluster older than the 200-cluster window that the
+  // exact-title probe missed over punctuation ('X' against 'X!', a quoted
+  // title). Ask the database once for live clusters that share the headline
+  // stems, load them, and score them like any candidate. The bar is
+  // MATCH_THRESHOLD, exactly as above: no sub-threshold fallback here. After the
+  // dry-run return, so a dry run never asks.
+  if (!primary) {
+    const stemIds = await probeStemClusters(ctx, article);
+    if (stemIds.length > 0) {
+      // The corpus changed (the hits' docs were added), so the query vector is
+      // rebuilt from the same text.
+      const stemQuery = ctx.tfidf.query(
+        `${article.title || ""} ${article.clusteringDescription || ""}`,
+        article.id,
+      );
+      const stemScored: Scored[] = [];
+      for (const clusterId of stemIds) {
+        const s = scoreCandidate(clusterId, stemQuery);
+        if (s) stemScored.push(s);
+      }
+      const stemRanked = rankCandidates(stemScored, makeSizeOf(), {
+        margin: CANDIDATE_SIZE_TIEBREAK_MARGIN,
+        threshold: MATCH_THRESHOLD,
+      });
+      const stemJoined = await joinFirstAvailable(stemRanked, MATCH_THRESHOLD, new Set<string>());
+      if (stemJoined) {
+        const joinedScore = stemRanked.find((c) => c.clusterId === stemJoined.clusterId)?.score ?? 0;
+        console.log(
+          `[cluster-consumer] stem-probe join article=${article.id} cluster=${stemJoined.clusterId} score=${joinedScore.toFixed(3)}`,
+        );
+        return stemJoined;
+      }
+      // Nothing joined; a hit that holds the article's source with strong
+      // evidence still makes the article that source's own duplicate.
+      const stemSkip = await takeSameSourceSkip(stemRanked[0]?.score);
+      if (stemSkip) return stemSkip;
+    }
   }
 
   // → spawn a new cluster. registerNewClusterInCache makes sure subsequent

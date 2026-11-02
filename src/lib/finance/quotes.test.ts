@@ -128,9 +128,9 @@ describe("parseYahooChart", () => {
   });
 });
 
-// hasBaseline separates a real 0,00% from "no baseline known": the TS-13
+// hasBaseline separates a real %0,00 from "no baseline known": the TS-13
 // fallback keeps changePct 0 / prevClose = price so nothing non-finite leaks,
-// but readers must show '—' for that move, never '+0,00%'.
+// but readers must show '—' for that move, never '%0,00'.
 describe("parseYahooChart hasBaseline", () => {
   type Json = { chart: { result: Array<{ meta: Record<string, unknown>; indicators: { quote: Array<{ close: unknown[] }> } }> } };
 
@@ -138,7 +138,7 @@ describe("parseYahooChart hasBaseline", () => {
     expect(parseYahooChart("THYAO", SAMPLE)!.hasBaseline).toBe(true);
   });
 
-  it("is true for a genuine 0,00% move reported by Yahoo", () => {
+  it("is true for a genuine %0,00 move reported by Yahoo", () => {
     const json = structuredClone(SAMPLE) as unknown as Json;
     json.chart.result[0]!.meta.regularMarketChangePercent = 0;
     const q = parseYahooChart("THYAO", json)!;
@@ -307,8 +307,8 @@ describe("getQuotes cache lifetime", () => {
 
 describe("format", () => {
   it("formats signed percent in Turkish", () => {
-    expect(fmtPct(1.5)).toBe("+1,50%");
-    expect(fmtPct(-0.25)).toBe("-0,25%");
+    expect(fmtPct(1.5)).toBe("+%1,50");
+    expect(fmtPct(-0.25)).toBe("-%0,25");
   });
 
   it("colours moves and treats noise as flat", () => {

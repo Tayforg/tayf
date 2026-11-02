@@ -1,4 +1,4 @@
-// "Okuma diyetin": the zone mix of the stories saved on THIS device, computed
+// "Okuma diyetiniz": the zone mix of the stories saved on THIS device, computed
 // from the rows /saved already fetched. Pure and client-safe: no network, no
 // storage, no analytics -- saved-mix-privacy.test.ts keeps it that way.
 //

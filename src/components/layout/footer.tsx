@@ -8,17 +8,17 @@ import { ShortcutsHelpButton } from "./shortcuts-help-button";
 
 const NAV_LINKS = [
   { href: "/", label: "Haberler" },
-  { href: "/blindspots", label: "Kör Noktalar" },
+  { href: "/blindspots", label: "Kör noktalar" },
   { href: "/sources", label: "Kaynaklar" },
-  { href: "/timeline", label: "Zaman Akışı" },
+  { href: "/timeline", label: "Zaman çizelgesi" },
   { href: "/trends", label: "Trendler" },
   { href: "/hafta", label: "Haftanın yelpazesi" },
   { href: "/konu", label: "Konular" },
   { href: "/gundem", label: "Gündem" },
-  { href: "/oyun", label: "Tarafı Tahmin Et" },
+  { href: "/oyun", label: "Tarafı tahmin et" },
   { href: "/metodoloji", label: "Metodoloji" },
   { href: "/durum", label: "Sistem durumu" },
-  { href: "/metodoloji#duzeltme", label: "İletişim" },
+  { href: "/metodoloji#duzeltme", label: "Düzeltme ve iletişim" },
 ] as const;
 
 async function ActiveSourceCount() {

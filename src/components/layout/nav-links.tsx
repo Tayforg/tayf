@@ -74,8 +74,8 @@ export function NavLinksView({
         className={`${baseLink} ${isBlindspots ? active : inactive}`}
       >
         <Eye className="h-3.5 w-3.5" />
-        <span className="sr-only sm:hidden">Kör Noktalar</span>
-        <span className="hidden sm:inline">Kör Noktalar</span>
+        <span className="sr-only sm:hidden">Kör noktalar</span>
+        <span className="hidden sm:inline">Kör noktalar</span>
       </Link>
       <span
         role="separator"

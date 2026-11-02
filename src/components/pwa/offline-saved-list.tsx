@@ -68,8 +68,8 @@ export function OfflineSavedList() {
           </p>
         ) : items.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            Bu cihazda çevrimdışı okunabilecek kayıtlı hikâye yok. Bir hikâyeyi kaydettiğinde,
-            bağlantın varken bu cihaza indirilir ve burada listelenir.
+            Bu cihazda çevrimdışı okunabilecek kayıtlı hikâye yok. Bir hikâyeyi kaydettiğinizde,
+            bağlantınız varken bu cihaza indirilir ve burada listelenir.
           </p>
         ) : (
           <ul className="space-y-2">

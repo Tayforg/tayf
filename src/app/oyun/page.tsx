@@ -92,6 +92,8 @@ export default async function OyunPage({
         subtitle="10 manşet, 3 seçenek: İktidar, Bağımsız, Muhalefet. Hangi kaynağın hangi tarafta yazdığını tahmin et."
       />
 
+      {/* Register exception (h19-copy-2): /oyun keeps the informal sen register
+          on purpose; the game talks to the player. The rest of the site uses siz. */}
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 text-[13px] text-muted-foreground leading-relaxed space-y-2">
         <p>
           Bir tahmin bir hüküm değildir. Burada doğru bilme oranın, bir

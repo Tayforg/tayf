@@ -838,6 +838,837 @@ describe("politika", () => {
 });
 
 // ---------------------------------------------------------------------------
+// wave AW (W4-av-followups): politika gaps the wave-AV review left open.
+//
+// The reviewer's candidates were measured against 48 h of production rows
+// (2026-10-31 06:00Z .. 2026-11-02 06:00Z, 15 014 articles) with HEAD's
+// classifier (the AV one) against the new one; a keyword stays only when the
+// rows it newly moves into politika are at least 90% political on a manual
+// title review. Decisions:
+//
+//   * 'siyasi', 'siyasal', 'ibb baskan', 'parlamento', 'referandum', 'senato',
+//     'arap partil', 'sol partil' are read in the TITLE only. As text stems they
+//     fail the 90% rule because descriptions mention them in passing
+//     ('siyasi' in 31 rows, 6 of them headlines; the rest are a Halloween essay,
+//     a credit-rating note, a film about Aytmatov, 'İBB Başkan Vekili' quoted
+//     in a car-park opening). As title words 'siyasi' is political in every one
+//     of the 48 h rows and in about 93% of 111 title rows over the 24 days
+//     before.
+//   * 'koalisyon' alone is the Saudi-led 'Arap Koalisyonu' war ticker (9 of 11
+//     rows): it counts only together with a party (Berlin coalition talks).
+//   * 'grup baskanvekil' / 'grup baskan vekil' (TBMM group deputy chairs) are
+//     specific enough for the whole text. A bare 'baskan vekil' is NOT added:
+//     'Galatasaray Sportif A.Ş. Başkanvekili' and 'Fenerbahçe Başkan Vekili'
+//     are sports and politika runs first.
+//   * 'ibb': the title query `title ~ '(^|[^[:alpha:]])İBB'` over 48 h gave
+//     politika 7, genel 2, ekonomi 1, son_dakika 1 = 11 titles; 8 are political
+//     (the İBB trial x3, 'İBB Başkan Vekili', the CHP/Yeni Parti calls, the
+//     Sayıştay vurgun, a BTP visit) and 3 are not (two car-park openings, a
+//     Kuyumcu Han restoration): 73% < 80%, so 'ibb' is NOT a politika word. It
+//     is a body of the compound rule (İBB plus soruşturma / gözaltı / tutukla /
+//     operasyon) and 'ibb baskan' covers the deputy mayor.
+//   * 'devlet baskan' is dropped: 90 rows as text (about two thirds political:
+//     war, energy and disaster items), 7 as title words of which 6 are political
+//     (86%: a Bolivian El Niño emergency decree is not politics).
+//   * a bare 'partiler' is dropped: 6 rows in 48 h, all Halloween / student /
+//     baby-shower parties. Only 'arap partil' and 'sol partil' stay (the
+//     Israeli-politics headlines the reviewer named).
+//
+// Every row below is a real article (title, description, url exactly as
+// stored). `stored` is the category production gave it (the pre-AV code),
+// `atHead` what the AV classifier says, `expected` what the new one must say.
+// Rows older than 2026-10-31 are marked by `published`: the 48 h window holds
+// none for referandum, parlamento, senato and 'grup baskan vekil' written
+// apart, so those come from the 24 days before (read-only SELECTs).
+// ---------------------------------------------------------------------------
+
+interface GapRow {
+  id: string;
+  keyword: string;
+  kind: "catch" | "near-miss";
+  source: string;
+  published: string;
+  title: string;
+  description: string | null;
+  url: string;
+  stored: NewsCategory;
+  expected: NewsCategory;
+  atHead: NewsCategory;
+}
+
+const GAP_GOLDEN: GapRow[] = [
+  {
+    id: "siyasi-somali-ekonomim",
+    keyword: "siyasi",
+    kind: "catch",
+    source: "ekonomim",
+    published: "2026-10-31",
+    title: "Birleşmiş Milletler Somali'deki siyasi faaliyetlerini bitirdi",
+    description: "Birleşmiş Milletler (BM), Somali'de 30 yılı aşkın süredir yürüttüğü siyasi misyonlarını 31 Ekim 2026 itibarıyla sonlandırdı. BM Somali Geçiş Dönemi Yardım Misyonu'nun (UNTMIS) görev süresinin tamamlanmasıyla sorumluluklar Somali'nin ulusal kurumlarına ve ülkedeki BM kuruluşlarına devredildi.",
+    url: "https://www.ekonomim.com/dunya/birlesmis-milletler-somalideki-siyasi-faaliyetlerini-bitirdi-haberi-928203",
+    stored: "dunya",
+    expected: "politika",
+    atHead: "dunya",
+  },
+  {
+    id: "siyasi-novi-sad",
+    keyword: "siyasi",
+    kind: "catch",
+    source: "haberport",
+    published: "2026-11-01",
+    title: "Novi Sad anmasına hüzün ve siyasi değişim damga vurdu",
+    description: "Anma töreninde on binlerce kişi bir araya geldi:Sırbistan’ın Novi Sad kentinde 1 Kasım 2024’te beton sundurmanın çökmesi sonucu hayatını kaybeden 16 kişi için düzenlenen anma törenlerine on binlerce k...",
+    url: "https://www.haberport.com/haber/novi-sad-anmasina-huzun-ve-siyasi-degisim-damga-vurdu/60241",
+    stored: "dunya",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "siyasi-bildirici",
+    keyword: "siyasi",
+    kind: "catch",
+    source: "diken",
+    published: "2026-11-02",
+    title: "Faruk Bildirici: Gazetecilik siyasi hesaplaşmaların tarafı haline gelince böyle oluyor işte",
+    description: "Faruk Bildirici: Gazetecilik siyasi hesaplaşmaların tarafı haline gelince böyle oluyor işte 02.11.2026 DikenArka planda neler oldu, Abdülkadir Selvi ve Ahmet Hakan neden onca ağır söze yanıt veremedi, o tarafını bilmiyoruz.\nThe post Faruk Bildirici: Gazetecilik siyasi hesaplaşmaların tarafı haline gelince böyle oluyor işte appeared first on #site_linkat 02.11.2026 .",
+    url: "https://www.diken.com.tr/faruk-bildirici-gazetecilik-siyasi-hesaplasmalarin-tarafi-haline-gelince-boyle-oluyor-iste/?utm_source=rss&#038;utm_medium=rss&#038;utm_campaign=faruk-bildirici-gazetecilik-siyasi-hesaplasmalarin-tarafi-haline-gelince-boyle-oluyor-iste",
+    stored: "politika",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "siyasi-desc-cadilar",
+    keyword: "siyasi",
+    kind: "near-miss",
+    source: "haber-global",
+    published: "2026-11-01",
+    title: "Cadı kazanına dönmüş dünyada Cadılar Bayramı özentisi: Türk dünyasında kültürel yabancılaşma ve kimlik meselesi",
+    description: "Prof. Dr. Aygün Attar, Türk dünyasında yaygınlaşan Cadılar Bayramı kutlamalarının kültürel yabancılaşma ve kimlik aşınmasına yol açtığına dikkat çekti. Nevruz ve Dede Korkut gibi ortak değerler tanınmadan küresel popüler kültür sembollerinin benimsenmesini kültürel özgüven eksikliği olarak nitelendiren Attar, siyasi bağımsızlığın ancak güçlü bir kültürel egemenlikle korunabileceğini vurguladı.",
+    url: "https://haberglobal.com/gundem/cadi-kazanina-donmus-dunyada-cadilar-bayrami-ozentisi-turk-dunyasinda-kulturel-yabancilasma-ve-kimlik-meselesi-551380",
+    stored: "dunya",
+    expected: "dunya",
+    atHead: "dunya",
+  },
+  {
+    id: "siyasi-desc-halet",
+    keyword: "siyasi",
+    kind: "near-miss",
+    source: "odatv",
+    published: "2026-11-01",
+    title: "Osmanlı'da servet ve iktidarın şifresi: Halet Efendi örneği... Padişahın yakınından idam sehpasına",
+    description: "Mehmet Sait Hâlet Efendi’nin yükselişi ve tasfiyesi, Osmanlı’da siyasi güç ve ekonomik servet ilişkisini gözler önüne seriyor. Çalışma, kişisel nüfuz ağlarının devlet yönetimindeki etkisini inceliyor. Prof. Dr. Mahmut Özer yazdı.",
+    url: "https://www.odatv.com/guncel/osmanlida-servet-ve-iktidarin-sifresi-halet-efendi-ornegi-padisahin-yakinindan-idam-sehpasina-120168962",
+    stored: "ekonomi",
+    expected: "ekonomi",
+    atHead: "ekonomi",
+  },
+  {
+    id: "siyasi-desc-pasaport",
+    keyword: "siyasi",
+    kind: "near-miss",
+    source: "sozcu",
+    published: "2026-11-02",
+    title: "Dünyanın en güçlü pasaportlarından biriydi: Binlerce kişi gönüllü olarak vatandaşlıktan vazgeçiyor",
+    description: "ABD Federal Sicili'nin yayımladığı son resmi veriler, küresel vergi mevzuatı ve siyasi kararların etkisiyle vatandaşlık ...",
+    url: "https://www.sozcu.com.tr/dunyanin-en-guclu-pasaportlarindan-biriydi-binlerce-kisi-gonullu-olarak-vatandasliktan-vazgeciyor-p375010",
+    stored: "dunya",
+    expected: "dunya",
+    atHead: "dunya",
+  },
+  {
+    id: "siyasi-desc-denizcilik",
+    keyword: "siyasi",
+    kind: "near-miss",
+    source: "posta",
+    published: "2026-11-01",
+    title: "Küresel denizcilikte maliyet mücadelesi",
+    description: "“Dünyada ticaretin kuralları değişiyor” diyen Can, Türkiye’nin bu değişimi seyretmekle yetinemeyeceğini vurguladı. Sektörde çok zorlu günlerin ve krizlerin yaşandığını belirten Can, “Karadeniz’de savaş var, Hürmüz’de gerilim var, Kızıldeniz’de güvenlik sorunu var. Dünya petrol ticaretinin çok önemli bir bölümü Hürmüz’den geçiyor. İran bu coğrafi konumunu siyasi ve askerî baskı aracı olarak kullanmaya çalıştığında bunun faturası Türkiye’deki sanayiciye de çıkıyor, nakliyeciye de çıkıyor, vatan...",
+    url: "https://www.posta.com.tr/ekonomi/kuresel-denizcilikte-maliyet-mucadelesi-3059220",
+    stored: "ekonomi",
+    expected: "ekonomi",
+    atHead: "ekonomi",
+  },
+  {
+    id: "siyasal-yuksekdag",
+    keyword: "siyasal",
+    kind: "catch",
+    source: "ilke-tv",
+    published: "2026-11-01",
+    title: "Figen Yüksekdağ: ‘Kadınların ortaklaşması tüm sosyal ve siyasal dinamikleri birleştiren bir köprü olabilir’",
+    description: "Türkiye'nin iç siyasal atmosferine ve savaş sarmalına karşı kadın iradesinin önemine vurgu yapan Figen Yüksekdağ, konferansa gönderdiği mesajda ortak mücadele çağrısında bulundu.",
+    url: "https://ilketv.com.tr/figen-yuksekdag-kadinlarin-ortaklasmasi-tum-sosyal-ve-siyasal-dinamikleri-birlestiren-bir-kopru-olabilir/",
+    stored: "genel",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "siyasal-desc-sureya",
+    keyword: "siyasal",
+    kind: "near-miss",
+    source: "odatv",
+    published: "2026-10-31",
+    title: "Şairden bile saymadı: Cemal Süreya, Tevfik Fikret'i neden sevmezdi",
+    description: "Cemal Süreya'ya göre Tevfik Fikret'in ünü siyasal duruşundan geliyordu. 1968'de Papirüs dergisinde yayımladığı yazıda Fikret'i dilinden Batı edebiyatıyla ilişkisine, özgürlük anlayışından şiirlerinin kalıcılığına kadar eleştirdi. Üstelik oldukça ağır ifadelerle...",
+    url: "https://www.odatv.com/ozel/cemal-sureya-tevfik-fikreti-neden-sevmezdi-1968deki-elestirisi-120169021",
+    stored: "teknoloji",
+    expected: "genel",
+    atHead: "genel",
+  },
+  {
+    id: "koalisyon-berlin-birgun",
+    keyword: "koalisyon",
+    kind: "catch",
+    source: "birgun",
+    published: "2026-10-31",
+    title: "Berlin'de Sol Parti, Yeşiller ve SPD ile koalisyon görüşmelerine başlamayı onayladı",
+    description: "Ön görüşmelerde üç partinin yöneticileri koalisyon görüşmelerine başlanması konusunda anlaşmaya vardı. Bunun ardından Sol Parti Berlin eyalet teşkilatı, söz konusu anlaşmayı başkent Berlin'de düzenlenen kongrede oylamaya sundu. Berlin'de Sol Parti, Yeşiller ve Sosyal Demokrat Parti ile koalisyon görüşmelerine başlamayı onayladı.",
+    url: "https://www.birgun.net/haber/berlin-de-sol-parti-yesiller-ve-spd-ile-koalisyon-gorusmelerine-baslamayi-onayladi-743725",
+    stored: "politika",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "koalisyon-berlin-cgtn",
+    keyword: "koalisyon",
+    kind: "catch",
+    source: "cgtn-turk",
+    published: "2026-10-31",
+    title: "Berlin'de Sol Parti'den Yeşiller ve SPD ile koalisyon görüşmelerine onay",
+    description: "Almanya'nın başkenti Berlin'de Sol Parti, Yeşiller ve Sosyal Demokrat Parti (SPD) ile koalisyon görüşmelerine başlamayı onayladı.",
+    url: "https://www.cgtnturk.com/berlinde-sol-partiden-yesiller-ve-spd-ile-koalisyon-gorusmelerine-onay",
+    stored: "dunya",
+    expected: "politika",
+    atHead: "dunya",
+  },
+  {
+    id: "koalisyon-arap-isci",
+    keyword: "koalisyon",
+    kind: "near-miss",
+    source: "isci-haber",
+    published: "2026-10-31",
+    title: "Arap Koalisyonu'ndan Açıklama: Suudi Arabistan'a Yönelik İHA Saldırıları Engellendi",
+    description: "Arap Koalisyonu, Yemen'deki İran destekli Husiler tarafından Suudi Arabistan topraklarına gönderilen 3 insansız hava aracının başarıyla imha edildiğini açıkladı. Yapılan resmi açıklamada, saldırıların doğu bölgesi, güney kesimler ve başkent Riyad'ı hedef aldığı bildirildi.",
+    url: "https://www.iscihaber.net/dunya/arap-koalisyonundan-aciklama-suudi-arabistana-yonelik-iha-saldirilari-engellendi/276907",
+    stored: "dunya",
+    expected: "dunya",
+    atHead: "dunya",
+  },
+  {
+    id: "koalisyon-arap-birgun",
+    keyword: "koalisyon",
+    kind: "near-miss",
+    source: "birgun",
+    published: "2026-11-01",
+    title: "Arap Koalisyonu'ndan Husilere yönelik saldırıyla ilgili açıklama: Hayati kaynakları hedef aldık",
+    description: "Suudi Arabistan öncülüğündeki Arap koalisyonu, Husilerin balistik füze ve insansız hava aracı (İHA) kapasitesini artırmak için kullandığı \"hayati kaynaklarını\" hedef alan askeri operasyon düzenlediklerini duyurdu.",
+    url: "https://www.birgun.net/haber/arap-koalisyonu-ndan-husilere-yonelik-saldiriyla-ilgili-aciklama-hayati-kaynaklari-hedef-aldik-743884",
+    stored: "dunya",
+    expected: "genel",
+    atHead: "genel",
+  },
+  {
+    id: "grup-bulent-kaya",
+    keyword: "grup başkanvekili",
+    kind: "catch",
+    source: "haberler-com",
+    published: "2026-10-31",
+    title: "Bülent Kaya, 25 milyar dolarlık fon vurgununun organize bir düzen olduğunu söyledi",
+    description: "Yeni Yol Grup Başkanvekili Bülent Kaya, fon krizinin doğrudan etkisinin 25 milyar dolar, yaklaşık 800 milyar TL olduğunu söyledi. Kaya, iktidar mensupları, bürokratlar ve iş adamlarının milleti soymak için organize bir düzen kurduğunu savundu.",
+    url: "https://www.haberler.com/yerel/bulent-kaya-25-milyar-dolarlik-fon-vurgununun-20383746-haberi/",
+    stored: "politika",
+    expected: "politika",
+    atHead: "ekonomi",
+  },
+  {
+    id: "grup-galatasaray-kavukcu",
+    keyword: "grup başkanvekili",
+    kind: "near-miss",
+    source: "kisa-dalga",
+    published: "2026-11-02",
+    title: "Galatasaray Sportif A.Ş. Başkanvekili Abdullah Kavukcu, Yönetim Kurulu üyeliğinden istifa etti",
+    description: "Galatasaray Sportif A.Ş. Başkanvekili Abdullah Kavukcu, Metin Öztürk ile yaşadığı sözlü tartışma sonrası, Yönetim Kurulu üyeliğinden istifa ettiğini duyurdu.",
+    url: "https://kisadalga.net/haber/spor/galatasaray-sportif-a-s-baskanvekili-abdullah-kavukcu-yonetim-kurulu-uyeliginden-istifa-etti-141337",
+    stored: "spor",
+    expected: "spor",
+    atHead: "spor",
+  },
+  {
+    id: "ibb-baskan-aslan",
+    keyword: "ibb başkan",
+    kind: "catch",
+    source: "cumhuriyet",
+    published: "2026-10-31",
+    title: "İBB Başkan Vekili Nuri Aslan: 'Her şart ve koşulda İstanbul'a hizmete devam edeceğiz'",
+    description: "İBB Başkan Vekili Nuri Aslan, \"Her şart ve koşulda, önümüzdeki 2,5 yıl boyunca İstanbul'a hizmet etmeye devam edeceğimizi ve hizmetlerimizi artırarak devam edeceğimizi buradan belirtmek istiyorum\" dedi.",
+    url: "https://www.cumhuriyet.com.tr/yerel-gundem/ibb-baskan-vekili-nuri-aslan-her-sart-ve-kosulda-istanbul-a-hizmete-devam-edecegiz-2551997",
+    stored: "politika",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "ibb-otopark-haberturk",
+    keyword: "ibb başkan",
+    kind: "near-miss",
+    source: "haberturk",
+    published: "2026-10-31",
+    title: "İBB, 4 yeni zemin altı otoparkı açtı",
+    description: "İstanbul Büyükşehir Belediyesi (İBB) iştiraki İSPARK, 4 yeni zemin altı otoparkı hizmete açtı. Törende konuşan İBB Başkan Vekili Nuri Aslan, otoparkların hepsinin metro istasyonlarına yakın veya bağlı olduğunu belirterek, bugün açtıkları 4 otoparkın toplam 1465 kapasiteli olduğunu söyledi",
+    url: "https://www.haberturk.com/gundem/ibb-4-yeni-zemin-alti-otoparki-hizmete-acti-3923960",
+    stored: "politika",
+    expected: "genel",
+    atHead: "genel",
+  },
+  {
+    id: "ibb-otopark-yenicag",
+    keyword: "ibb başkan",
+    kind: "near-miss",
+    source: "yenicag",
+    published: "2026-10-31",
+    title: "İBB, İstanbul'da 4 yeni zemin altı otoparkı hizmete açtı",
+    description: "İBB, Maltepe Altıntepe’de düzenlediği törenle Anadolu Yakası’nda 1.500 araç kapasiteli 4 yeni zemin altı otoparkı hizmete açtı. Metroya entegre olarak hayata geçirilen tesisler, bölge trafiğini rahatlatmayı ve toplu taşımaya erişimi kolaylaştırmayı hedefliyor.",
+    url: "https://www.yenicaggazetesi.com/ibb-istanbulda-4-yeni-zemin-alti-otoparki-hizmete-acti-1086773h.htm",
+    stored: "politika",
+    expected: "genel",
+    atHead: "genel",
+  },
+  {
+    id: "ibb-ispark-karar",
+    keyword: "ibb",
+    kind: "near-miss",
+    source: "karar",
+    published: "2026-10-31",
+    title: "İSPARK'tan İstanbul'un 4 ilçesine 4 yeni otopark: 1.465 araçlık kapasite",
+    description: "İBB, kentin otopark sorununa çözüm üretmek amacıyla dört zemin altı otoparkının toplu açılışını gerçekleştirdi. Bostancı Sahil, Giyimkent-Tekstilkent Metro, Yenimahalle Metro ve Yeşilpınar Metro otoparklarıyla İstanbul'a toplam 1.465 araçlık park kapasitesi kazandırıldı. İBB Başkanvekili Nuri Aslan, 60 milyon euroluk yatırımla hayata geçirilen tesislerin 24 saat hizmet vereceğini açıkladı.",
+    url: "https://www.karar.com/guncel-haberler/isparktan-istanbulun-4-ilcesine-4-yeni-otopark-1-465-araclik-kapasite-2081644",
+    stored: "politika",
+    expected: "ekonomi",
+    atHead: "ekonomi",
+  },
+  {
+    id: "ibb-maraton-onhaber",
+    keyword: "ibb",
+    kind: "near-miss",
+    source: "on-haber",
+    published: "2026-10-31",
+    title: "48. İstanbul Maratonu yarın koşulacak",
+    description: "İstanbul Büyükşehir Belediyesi (İBB) Gençlik ve Spor Hizmetleri Dairesi Başkanlığı ile İBB Spor İstanbul tarafından düzenlenecek maraton, 42 kilometre, 15,5 kilometre, kurumsal koşu, halk koşusu ve tekerlekli sandalye yarışı olmak üzere 5 kategoride yapılacak. Dünyanın kıtalar arasında koşulan tek maratonu olma özelliğini taşıyan organizasyona 42 kilometrede 8 bin 427, 15,5 kilometrede 14 bin 781, kurumsal […]",
+    url: "https://10haber.net/gundem/48-istanbul-maratonu-yarin-kosulacak-750705/",
+    stored: "dunya",
+    expected: "dunya",
+    atHead: "dunya",
+  },
+  {
+    id: "ibb-kuyumcu-han",
+    keyword: "ibb",
+    kind: "near-miss",
+    source: "demokrat-haber",
+    published: "2026-11-01",
+    title: "Kuyumcu Han’ın hikâyesi: İBB Miras restorasyonuyla yeniden hayata döndü",
+    description: "İstanbul Beyoğlu Perşembe Pazarı’ndaki 19. yüzyıl yapısı Kuyumcu Han, yaklaşık 61,3 milyon liralık restorasyonun ardından Şehir Araştırmaları Merkezi olarak açıldı.",
+    url: "https://www.demokrathaber.org/kuyumcu-hanin-hikayesi-ibb-miras-restorasyonuyla-yeniden-hayata-dondu",
+    stored: "genel",
+    expected: "genel",
+    atHead: "genel",
+  },
+  {
+    id: "ibb-pehlivan-evrensel",
+    keyword: "ibb",
+    kind: "catch",
+    source: "evrensel",
+    published: "2026-10-31",
+    title: "Avukat Mehmet Pehlivan'dan ağabeyinin tutuklanmasına tepki: \"Onu tutukladınız, kimsemiz kalmadı\"",
+    description: "İBB davası kapsamında tutuklu bulunan avukat Mehmet Pehlivan, ağabeyi Abdülhamit Pehlivan'ın tutuklanmasına tepki gösterdi. Pehlivan, “Onu tutukladınız. Kimsemiz kalmadı” ifadelerini kullandı.",
+    url: "https://www.evrensel.net/haber/6007429/avukat-mehmet-pehlivandan-agabeyinin-tutuklanmasina-tepki-onu-tutukladiniz-kimsemiz-kalmadi?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+    stored: "dunya",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "parlamento-desc-ukrayna",
+    keyword: "parlamento",
+    kind: "near-miss",
+    source: "ekonomim",
+    published: "2026-10-31",
+    title: "Ukrayna'da rekor savunma bütçesi sonrası 52 milyar dolarlık finansman ihtiyacı",
+    description: "Ukrayna Parlamentosu, 2027 bütçe taslağını ilk okumada kabul etti. Savunma ve güvenliğe 107,5 milyar dolarlık rekor kaynak ayrılırken, bütçenin %66,8'i ve GSYH'nin %43,8'i orduya gidecek. Kiev'in 52 milyar doları aşan dış finansman ihtiyacı ise dondurulmuş Rus varlıkları planını yeniden gündeme getirdi.",
+    url: "https://www.ekonomim.com/sektorler/savunma-sanayi/ukraynada-rekor-savunma-butcesi-sonrasi-52-milyar-dolarlik-finansman-ihtiyaci-s1-haberi-928202",
+    stored: "dunya",
+    expected: "dunya",
+    atHead: "dunya",
+  },
+  {
+    id: "referans-dogalgaz",
+    keyword: "referandum",
+    kind: "near-miss",
+    source: "haberler-com",
+    published: "2026-11-01",
+    title: "Spot doğal gazda referans fiyat 1000 metreküp için 21 bin 50 lira oldu",
+    description: "EPİAŞ verilerine göre, spot doğal gaz piyasasında dün 1000 metreküpün referans fiyatı 21 bin 50 lira oldu. Piyasada işlem hacmi 4 milyon 146 bin 850 lira, gaz ticaret miktarı ise 197 bin metreküp oldu.",
+    url: "https://www.haberler.com/ekonomi/spot-dogal-gazda-referans-fiyat-1000-metrekup-icin-20385308-haberi/",
+    stored: "ekonomi",
+    expected: "ekonomi",
+    atHead: "ekonomi",
+  },
+  {
+    id: "senato-murphy",
+    keyword: "senato",
+    kind: "catch",
+    source: "odatv",
+    published: "2026-11-01",
+    title: "Demokrat Senatör Chris Murphy savaş karşıtı senatör felç oldu",
+    description: "ABD'li Demokrat Senatör Chris Murphy, İran'a yönelik savaş planını “tam bir delilik” sözleriyle eleştirdikten kısa süre sonra felç geçirdi. 53 yaşındaki senatör, oğlunun hokey maçını izlerken rahatsızlanarak hastaneye kaldırıldı.",
+    url: "https://www.odatv.com/guncel/demokrat-senator-chris-murphy-savas-karsiti-senator-felc-oldu-120169237",
+    stored: "spor",
+    expected: "politika",
+    atHead: "spor",
+  },
+  {
+    id: "senaryo-deprem",
+    keyword: "senato",
+    kind: "near-miss",
+    source: "yenicag",
+    published: "2026-10-31",
+    title: "28 saniyelik senaryosu bile yetti: Üç ili harekete geçirdi",
+    description: "İzmir depreminin 6’ncı yıl dönümünde, Ege Bölgesi dev bir tatbikata sahne oldu. İzmir, Manisa ve Aydın'daki 43 ilçeyi kapsayan ve 28 saniye süren 6,7 büyüklüğündeki deprem senaryosunda, arama kurtarma ekipleri olası bir afete karşı reflekslerini üç ilde başarıyla sınadı.",
+    url: "https://www.yenicaggazetesi.com/28-saniyelik-senaryosu-bile-yetti-uc-ili-harekete-gecirdi-1086709h.htm",
+    stored: "ekonomi",
+    expected: "yasam",
+    atHead: "yasam",
+  },
+  {
+    id: "arap-partileri-birgun",
+    keyword: "partiler",
+    kind: "catch",
+    source: "birgun",
+    published: "2026-10-31",
+    title: "Arap partileriyle işbirliği masada",
+    description: null,
+    url: "https://www.birgun.net/haber/arap-partileriyle-isbirligi-masada-743608",
+    stored: "genel",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "parti-halloween-milliyet",
+    keyword: "partiler",
+    kind: "near-miss",
+    source: "milliyet",
+    published: "2026-11-02",
+    title: "Cadılar Bayramı çılgınlığı",
+    description: "Başta ABD, İngiltere, Kanada ve İrlanda olmak üzere Kuzey Amerika ve Avrupa genelinde geçit törenleri ve sokak partileri düzenlendi. Japonya’dan Avustralya’ya kadar geniş bir coğrafyada da binlerce kişi fantastik kılıklara bürünerek kutlamalara katıldı.\nAntik gelenek\nCadılar Bayramı (Halloween), kökeni antik Kelt geleneklerine dayanan ve her yıl 31 Ekim gecesi kutlanan geleneksel bir festivaldir. Günümüzde insanların farklı kostümler giydiği, evlerin dekore edildiği ve çocukların kapı kapı ge...",
+    url: "https://www.milliyet.com.tr/dunya/cadilar-bayrami-cilginligi-7692262",
+    stored: "dunya",
+    expected: "dunya",
+    atHead: "dunya",
+  },
+  {
+    id: "siyah-beyaz-milat",
+    keyword: "siyasi",
+    kind: "near-miss",
+    source: "milat",
+    published: "2026-10-31",
+    title: "Siyah-Beyazlılar, Kasımpaşa deplasmanında 3 puan peşinde",
+    description: "Kasımpaşa, Trendyol Süper Lig'in 10. haftasında yarın Beşiktaş'ı ağırlayacak.",
+    url: "https://www.milatgazetesi.com/siyah-beyazlilar-kasimpasa-deplasmaninda-galibiyet-ariyor",
+    stored: "spor",
+    expected: "spor",
+    atHead: "spor",
+  },
+  {
+    id: "devlet-baskani-zelenski",
+    keyword: "devlet başkanı",
+    kind: "near-miss",
+    source: "sozcu",
+    published: "2026-10-31",
+    title: "Ukrayna Devlet Başkanı Zelenski İstanbul'a geldi",
+    description: "Ukrayna Devlet Başkanı Volodimir Zelenski, çalışma ziyareti kapsamında İstanbul'a geldi. Zelenski'yi havalimanında Milli...",
+    url: "https://www.sozcu.com.tr/ukrayna-devlet-baskani-zelenski-istanbula-geldi-p374612",
+    stored: "dunya",
+    expected: "dunya",
+    atHead: "dunya",
+  },
+  {
+    id: "grup-comez-iyip",
+    keyword: "grup başkanvekili",
+    kind: "catch",
+    source: "evrensel",
+    published: "2026-10-20",
+    title: "İYİP Grup Başkan Vekili Çömez'den Arnavutluk'taki TOMA görüntülerine tepki: 'Gösterileri bastırma tecrübeniz sınırları aştı'",
+    description: "İYİP Grup Başkan Vekili Turhan Çömez, Arnavutluk'a iki TOMA gönderildiğini söyleyerek tepki gösterdi.",
+    url: "https://www.evrensel.net/haber/6005739/iyip-grup-baskan-vekili-comezden-arnavutluktaki-toma-goruntulerine-tepki-gosterileri-bastirma-tecrubeniz-sinirlari-asti?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+    stored: "politika",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "grup-fenerbahce-goktürk",
+    keyword: "grup başkanvekili",
+    kind: "near-miss",
+    source: "haberler-com",
+    published: "2026-09-27",
+    title: "Fenerbahçe Başkan Vekili Göktürk, borcun 592 milyon avroya çıktığını 'korkunç' buldu",
+    description: "Fenerbahçe Başkan Vekili Barış Göktürk, genel kurulda borcun 'korkunç' arttığını, 21 Eylül 2025'te 592 milyon avroya çıktığını söyledi. Göktürk, 457 milyon avro gelire rağmen 1 yılda 611 milyon avro harcandığını ve 180 milyon avro civarında açık olduğunu belirtti.",
+    url: "https://www.haberler.com/spor/fenerbahce-baskan-vekili-gokturk-borcun-592-milyon-20275259-haberi/",
+    stored: "spor",
+    expected: "spor",
+    atHead: "spor",
+  },
+  {
+    id: "referandum-alberta-oylama",
+    keyword: "referandum",
+    kind: "catch",
+    source: "haberler-com",
+    published: "2026-10-19",
+    title: "Alberta'nın Kanada'dan ayrılık sürecini başlatabilecek referandumda oylama başladı",
+    description: "Kanada'nın Alberta eyaletinde eyaletin ülkeden ayrılmasına yönelik süreci başlatabilecek referandumda oylama başladı. 10 sorunun sonuncusunda Alberta'nın Kanada'da kalması ya da hukuken bağlayıcı ikinci referandum için hazırlıklara başlanması seçenekleri yer alıyor.",
+    url: "https://www.haberler.com/guncel/alberta-da-kanada-dan-ayrilik-surecini-20346461-haberi/",
+    stored: "politika",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "referandum-alberta-kaybetti",
+    keyword: "referandum",
+    kind: "catch",
+    source: "ilke-tv",
+    published: "2026-10-20",
+    title: "Kanada’nın Alberta eyaletinde bağımsızlık referandumunu ayrılıkçılar kaybetti",
+    description: "Kanada’nın petrol ve doğal gaz üretiminde öne çıkan Alberta eyaletinde düzenlenen referandumda, seçmenlerin büyük çoğunluğu ülkeden ayrılık sürecinin başlatılmasına karşı çıktı.",
+    url: "https://ilketv.com.tr/kanadanin-alberta-eyaletinde-bagimsizlik-referandumunu-ayrilikcilar-kaybetti/",
+    stored: "genel",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "parlamento-libya",
+    keyword: "parlamento",
+    kind: "catch",
+    source: "yenicag",
+    published: "2026-10-20",
+    title: "Libya Parlamentosu Türkiye ile deniz yetki alanları anlaşmasını onayladı",
+    description: "Libya Parlamentosu, Türkiye ile 2019 senesinde imzalanan deniz yetki alanlarının sınırlandırılması ile ilgili anlaşmayı onayladı.",
+    url: "https://www.yenicaggazetesi.com/libya-parlamentosu-turkiye-ile-deniz-yetki-alanlari-anlasmasini-onayladi-1083512h.htm",
+    stored: "genel",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "parlamento-ermenistan",
+    keyword: "parlamento",
+    kind: "catch",
+    source: "haberler-com",
+    published: "2026-10-28",
+    title: "Ermenistan Parlamentosu, ABD ile TRIPP anlaşmasını 63 kabul oyuyla onayladı",
+    description: "Ermenistan Parlamentosu, ABD ile imzalanan TRIPP çerçeve anlaşmasını 63 kabul ve 32 ret oyuyla onayladı. Anlaşma, proje altyapısının Ermenistan'ın egemenliği altında faaliyet göstermesini ve bölgesel ulaşım bağlantılarının açılmasını öngörüyor.",
+    url: "https://www.haberler.com/guncel/ermenistan-parlamentosu-abd-ile-tripp-anlasmasini-20374016-haberi/",
+    stored: "politika",
+    expected: "politika",
+    atHead: "dunya",
+  },
+  {
+    id: "parlak-folyo",
+    keyword: "parlamento",
+    kind: "near-miss",
+    source: "korkusuz",
+    published: "2026-10-28",
+    title: "Alüminyum folyonun parlak ve mat yüzü neden farklı?",
+    description: "Alüminyum folyonun parlak ve mat yüzü neden farklı?",
+    url: "https://www.korkusuz.com.tr/aluminyum-folyonun-parlak-ve-mat-yuzu-neden-farkli-p56644",
+    stored: "genel",
+    expected: "genel",
+    atHead: "genel",
+  },
+  {
+    id: "senato-fransa",
+    keyword: "senato",
+    kind: "catch",
+    source: "haberler-com",
+    published: "2026-10-28",
+    title: "Fransa Senatosunda sosyal medyada şiddet ve yağma çağrısına dair tasarı kabul edildi",
+    description: "Fransa Senatosu, sosyal medyada şiddet ve yağma çağrısı içeren içeriklerin kaldırılmasını öngören tasarıyı 229 evet, 105 hayır oyuyla kabul etti. Tasarı, yerel makamların talebiyle platformlara bu içerikleri kaldırması için 24 saat süre tanıyor.",
+    url: "https://www.haberler.com/guncel/fransa-senatosunda-sosyal-medyada-siddet-ve-yagma-20373852-haberi/",
+    stored: "politika",
+    expected: "politika",
+    atHead: "dunya",
+  },
+  {
+    id: "senato-universite-aicu",
+    keyword: "senato",
+    kind: "near-miss",
+    source: "bha",
+    published: "2026-10-26",
+    title: "AİÇÜ Senatosu YÖKAK'ın 2025 raporundaki iyileştirme adımlarını karara bağladı",
+    description: "AİÇÜ Senatosu, YÖKAK'ın 2025 Kurumsal Akreditasyon Raporu'ndaki gelişmeye açık yönleri ve kurumsal iyileştirme çalışmalarını ele aldı. İyileştirmelerin ilgili birimlerce planlanması, Kalite Koordinatörlüğünce izlenmesi ve somut kanıtlarla raporlanması kararlaştırıldı.",
+    url: "https://www.bha.net.tr/egitim-agri/aicu-senatosu-yokakin-2025-raporundaki-iyilestirme-adimlarini-karara-bagladi/467883",
+    stored: "yasam",
+    expected: "yasam",
+    atHead: "yasam",
+  },
+  {
+    id: "senato-universite-agu",
+    keyword: "senato",
+    kind: "near-miss",
+    source: "haberler-com",
+    published: "2026-10-15",
+    title: "Abdullah Gül Üniversitesi Senatosu yapay zeka için acil devletlerüstü denetim istedi",
+    description: "Abdullah Gül Üniversitesi Senatosu, yapay zeka risklerine karşı devletlerüstü denetim yapısının acilen kurulmasını istedi. Bildiride, denetimsiz teknolojilerin robotikle birleşince ciddi riskler doğurduğu, mahremiyetin aşındığı ve kırılgan çalışanlara yük bindirdiği belirtildi.",
+    url: "https://www.haberler.com/guncel/abdullah-gul-universitesi-senatosu-yapay-zeka-icin-20333397-haberi/",
+    stored: "son_dakika",
+    expected: "teknoloji",
+    atHead: "teknoloji",
+  },
+  {
+    id: "arap-partileri-netanyahu",
+    keyword: "partiler",
+    kind: "catch",
+    source: "dirilis-postasi",
+    published: "2026-10-30",
+    title: "Yair Netanyahu Arap partilerini tehdit olarak nitelendirdi",
+    description: "Yair Netanyahu, sosyal medya paylaşımında Arap partilerini İsrail'in bekası için İran'ın nükleer programı kadar büyük tehdit olarak gösterdi.",
+    url: "https://www.dirilispostasi.com/yair-netanyahu-arap-partilerini-tehdit-olarak-nitelendirdi",
+    stored: "dunya",
+    expected: "politika",
+    atHead: "dunya",
+  },
+  {
+    id: "sol-partiler-29-ekim",
+    keyword: "partiler",
+    kind: "catch",
+    source: "cumhuriyet",
+    published: "2026-10-29",
+    title: "Sol partiler ve demokratik kitle örgütlerinden 29 Ekim açıklaması",
+    description: "Cumhuriyet’in 103. kuruluş yıl dönümünde SOL Parti, TKP, TİP, EMEP ve KESK açıklamalarında demokrasi, laiklik, emek mücadelesi ve eşitlik vurgusu yaptı. Açıklamalarda mevcut siyasi ve ekonomik düzene yönelik eleştiriler öne çıkarken, partiler Cumhuriyet’in geleceğine ilişkin farklı değerlendirmelerini paylaştı.",
+    url: "https://www.cumhuriyet.com.tr/turkiye/sol-partilerden-ve-demokratik-kitle-orgutlerinden-29-ekim-aciklamasi-2551445",
+    stored: "ekonomi",
+    expected: "politika",
+    atHead: "ekonomi",
+  },
+  {
+    id: "parti-halloween-haberler",
+    keyword: "partiler",
+    kind: "near-miss",
+    source: "haberler-com",
+    published: "2026-10-30",
+    title: "İstanbul Cadılar Bayramı (Halloween) etkinlikleri ve partileri 2026: İstanbul'da Halloween etkinlikleri nerede, ne zaman, biletler nereden alınır?",
+    description: "Cadılar Bayramı (Halloween) için geri sayım sürerken İstanbul'da düzenlenecek etkinlikler ve partiler merak konusu oldu. 31 Ekim 2026 Cumartesi günü kutlanacak Halloween kapsamında kentin farklı noktalarında kostüm partileri, DJ performansları ve temalı organizasyonlar gerçekleştirilecek. Peki, İstanbul'da Halloween etkinlikleri nerede, ne zaman düzenlenecek? Cadılar Bayramı partilerinin bilet fiyatları ne kadar? Detaylar haberimizde.",
+    url: "https://www.haberler.com/haber/istanbul-cadilar-bayrami-halloween-etkinlikleri-20379949-haberi/",
+    stored: "dunya",
+    expected: "genel",
+    atHead: "genel",
+  },
+  {
+    id: "siyasi-aym-26-parti",
+    keyword: "siyasi",
+    kind: "catch",
+    source: "evrensel",
+    published: "2026-10-15",
+    title: "AYM'den 26 siyasi parti hakkında suç duyurusu kararı",
+    description: "AYM, 26 siyasi partiyi kapsayan 30 mali denetim incelemesini tamamladı. Eksik belgeler, hesap tutarsızlıkları ve kayıt dışı gelir gider işlemleri nedeniyle bazı dosyalar için suç duyurusunda bulunulmasına karar verildi.",
+    url: "https://www.evrensel.net/haber/6004996/aymden-26-siyasi-parti-hakkinda-suc-duyurusu-karari?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+    stored: "dunya",
+    expected: "politika",
+    atHead: "genel",
+  },
+  {
+    id: "siyasi-siyasiler-29-ekim",
+    keyword: "siyasi",
+    kind: "catch",
+    source: "anadolu-ajansi",
+    published: "2026-10-28",
+    title: "Siyasilerden 29 Ekim Cumhuriyet Bayramı mesajları",
+    description: "Siyasiler, 29 Ekim Cumhuriyet Bayramı'nın 103. yıl dönümü dolayısıyla mesaj yayımladı.",
+    url: "https://www.aa.com.tr/tr/gundem/siyasilerden-29-ekim-cumhuriyet-bayrami-mesajlari/4104420",
+    stored: "genel",
+    expected: "politika",
+    atHead: "genel",
+  },
+];
+
+const GAP_KEYWORDS = [
+  "siyasi",
+  "siyasal",
+  "koalisyon",
+  "grup başkanvekili",
+  "ibb başkan",
+  "ibb",
+  "parlamento",
+  "referandum",
+  "senato",
+  "partiler",
+];
+
+describe("politika gaps (wave AW): golden rows of real articles", () => {
+  it.each(GAP_GOLDEN)("$keyword / $kind: $id -> $expected", (row) => {
+    expect(classifyCategory(row.title, row.description, row.url)).toBe(row.expected);
+  });
+
+  it("a catch changes the answer of the AV classifier to politika; a near-miss keeps it", () => {
+    for (const row of GAP_GOLDEN) {
+      if (row.kind === "catch") {
+        expect(row.expected, row.id).toBe("politika");
+        expect(row.atHead, row.id).not.toBe("politika");
+      } else {
+        expect(row.expected, row.id).toBe(row.atHead);
+      }
+    }
+  });
+
+  it("every added keyword has a catch and a near-miss", () => {
+    for (const keyword of GAP_KEYWORDS) {
+      const rows = GAP_GOLDEN.filter((r) => r.keyword === keyword);
+      expect(rows.some((r) => r.kind === "catch"), `${keyword} catch`).toBe(true);
+      expect(rows.some((r) => r.kind === "near-miss"), `${keyword} near-miss`).toBe(true);
+    }
+  });
+
+  it("has unique ids and dates inside the measured period", () => {
+    expect(new Set(GAP_GOLDEN.map((r) => r.id)).size).toBe(GAP_GOLDEN.length);
+    for (const row of GAP_GOLDEN) {
+      expect(row.published >= "2026-09-27" && row.published <= "2026-11-02", row.id).toBe(true);
+    }
+    expect(GAP_GOLDEN.filter((r) => r.published >= "2026-10-31").length).toBeGreaterThanOrEqual(25);
+  });
+});
+
+describe("politika gaps (wave AW): words read in the headline only", () => {
+  it.each([
+    ["Siyasi partilerden ortak açıklama"],
+    ["SİYASİ PARTİLERDEN ORTAK AÇIKLAMA"],
+    ["Siyasilerden tepki yağdı"],
+    ["Siyasal İslamcılığın yozlaşması"],
+    ["Referandum sonuçları açıklandı"],
+    ["REFERANDUMDA EVET ÇIKTI"],
+    ["Parlamento kararı onayladı"],
+    ["Avrupa Parlamentosu'nda oylama"],
+    ["ABD Senatosu tasarıyı onayladı"],
+    ["Senatör Murphy tepki gösterdi"],
+    ["Arap partileriyle işbirliği masada"],
+    ["Sol partiler ortak açıklama yaptı"],
+  ])("%s", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  it("the same words in a description alone do not decide the category", () => {
+    expect(cls("Yeni dizi geliyor", "Dizide siyasi bir gerilim işleniyor")).toBe("yasam");
+    expect(cls("Yeni dizi geliyor", "Siyasal bir hicivle başlıyor")).toBe("yasam");
+    expect(cls("Otopark açıldı", "Törende parlamento üyeleri de vardı")).toBe("genel");
+    expect(cls("Anket sonuçları", "Referandum konusu da soruldu")).toBe("genel");
+    expect(cls("Üniversite kampüsü açıldı", "Senato toplantısı yapıldı")).toBe("yasam");
+    expect(cls("Festival başladı", "Katılımcılar arasında Arap partileri yoktu")).toBe("genel");
+  });
+
+  it("they are word-start stems: 'siyah', 'parlak', 'referans' and 'senaryo' are not them", () => {
+    expect(cls("Siyah-beyaz fotoğraf sergisi açıldı")).toBe("genel");
+    expect(cls("Parlak bir gelecek bizi bekliyor")).toBe("genel");
+    expect(cls("Referans fiyat açıklandı")).toBe("genel");
+    expect(cls("Yeni film senaryosu yazıldı")).toBe("genel");
+    expect(cls("Koala yavrusu doğdu")).toBe("genel");
+    expect(cls("Siyasetçi", null)).toBe("politika");
+  });
+
+  it("a university senate is not a state senate, whatever the headline", () => {
+    expect(cls("Üniversite Senatosu toplandı")).toBe("yasam");
+    expect(cls("EBYÜ Rektörü Senato Salonu'nda öğrencileri dinledi", "Rektör öğrenci temsilcileriyle görüştü")).toBe("genel");
+    expect(cls("AİÇÜ Senatosu raporu onayladı", "Ağrı İbrahim Çeçen Üniversitesi Senatosu toplandı")).toBe("yasam");
+    expect(cls("Fransa Senatosu tasarıyı kabul etti")).toBe("politika");
+  });
+
+  it("they do not shadow son_dakika, which still wins on the title", () => {
+    expect(cls("SON DAKİKA: Siyasi parti kapatma davası")).toBe("son_dakika");
+  });
+
+  it("they outrank spor, dunya, ekonomi and a section URL, like the other politika words", () => {
+    expect(cls("Siyasi kriz borsayı vurdu")).toBe("politika");
+    expect(cls("Referandum kararı Kanada'yı karıştırdı", null, "https://x.test/dunya/a")).toBe("politika");
+    expect(cls("Parlamento maçı erteledi", null, "https://x.test/spor/a")).toBe("politika");
+  });
+});
+
+describe("politika gaps (wave AW): TBMM group deputy chairs", () => {
+  it.each([
+    ["Grup Başkanvekili açıklama yaptı"],
+    ["Grup Başkan Vekili açıklama yaptı"],
+    ["GRUP BAŞKANVEKİLİ ZENGİN"],
+    ["GRUP BAŞKAN VEKİLİ ÇÖMEZ"],
+    ["Yeni Yol Grup Başkanvekili konuştu"],
+  ])("%s", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  it("counts in the description too (an MP's statement under a plain headline)", () => {
+    expect(cls("Fon vurgunu açıklaması", "Yeni Yol Grup Başkanvekili Bülent Kaya konuştu")).toBe("politika");
+  });
+
+  it("a bare Başkan Vekili / Başkanvekili is not politics: clubs and federations have them", () => {
+    expect(cls("Başkan Vekili açıklama yaptı")).toBe("genel");
+    expect(cls("Başkanvekili istifa etti")).toBe("genel");
+    expect(cls("Fenerbahçe Başkan Vekili borcu açıkladı")).toBe("spor");
+    expect(cls("Galatasaray Başkanvekili istifa etti")).toBe("spor");
+    expect(cls("TFF Başkan Vekili hakkında iddianame")).toBe("spor");
+  });
+});
+
+describe("politika gaps (wave AW): İBB", () => {
+  it.each([
+    ["İBB Başkan Vekili Nuri Aslan açıklama yaptı"],
+    ["İBB Başkanvekili Nuri Aslan açıklama yaptı"],
+    ["İBB BAŞKAN VEKİLİ NURİ ASLAN"],
+    ["Ibb Baskan Vekili konustu"],
+  ])("%s", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  it("'İBB Başkan Vekili' quoted in a description does not make a service notice politics", () => {
+    expect(cls("Otoparklar hizmete açıldı", "Törende İBB Başkan Vekili Nuri Aslan konuştu")).toBe("genel");
+  });
+
+  it("İBB plus an enforcement action counts, in any of the words", () => {
+    expect(cls("İBB'ye yeni operasyon")).toBe("politika");
+    expect(cls("İBB soruşturmasında yeni gözaltılar")).toBe("politika");
+    expect(cls("İBB davasında tutuklama kararı")).toBe("politika");
+    expect(cls("Avukat tepki gösterdi", "İBB davası kapsamında avukat Pehlivan'ın ağabeyi tutuklandı")).toBe("politika");
+  });
+
+  it("a bare İBB is a body of the compound rule, not a politika word", () => {
+    expect(cls("İBB duyurdu: metro seferleri uzatıldı")).toBe("genel");
+    expect(cls("İBB yeni otoparkını açtı")).toBe("genel");
+    expect(cls("İBB iştiraki maraton düzenliyor", "İBB Spor İstanbul organize etti")).toBe("genel");
+    expect(cls("İBB Miras restorasyonu tamamlandı")).toBe("genel");
+  });
+
+  it("İBB is a whole word: 'kibbutz' is not it", () => {
+    expect(cls("Kibbutz soruşturması")).toBe("genel");
+    expect(cls("Kibbutzda gözaltı")).toBe("genel");
+  });
+});
+
+describe("politika gaps (wave AW): coalition and party plurals", () => {
+  it("a coalition counts together with a party", () => {
+    expect(cls("Berlin'de koalisyon görüşmeleri", "Sol Parti ve Yeşiller masaya oturdu")).toBe("politika");
+    expect(cls("Koalisyon krizi", "Parti yönetimleri toplandı")).toBe("politika");
+  });
+
+  it("a military coalition is not politics", () => {
+    expect(cls("Arap Koalisyonu İHA'ları düşürdü")).not.toBe("politika");
+    expect(cls("Koalisyon güçleri hedefleri vurdu")).not.toBe("politika");
+    expect(cls("Koalisyon sözcüsü açıklama yaptı", "Husilerin İHA saldırısı engellendi")).not.toBe("politika");
+  });
+
+  it("'partiler' alone stays out: parties are also celebrations", () => {
+    expect(cls("Cadılar Bayramı partileri başladı")).toBe("genel");
+    expect(cls("Üniversitede öğrenci partileri iptal edildi")).toBe("yasam");
+    expect(cls("Baby shower partilerine tepki")).toBe("genel");
+  });
+});
+
+describe("politika gaps (wave AW): candidates that were measured and dropped", () => {
+  it("a foreign head of state is not politika by title alone (86% political, two thirds as text)", () => {
+    expect(cls("Ukrayna Devlet Başkanı Zelenski İstanbul'a geldi")).toBe("dunya");
+    expect(cls("Bolivya Devlet Başkanı El Nino için acil durum ilan etti")).toBe("genel");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // token boundaries: the substrings that used to leak
 // ---------------------------------------------------------------------------
 

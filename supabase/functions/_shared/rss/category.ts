@@ -31,7 +31,9 @@
 //      before its ticker block. The URL is never part of it: it is read only by
 //      `detectCategoryFromUrl`, and only its path.
 //   3. Order: son_dakika (TITLE only), politika, the URL section, spor, dunya,
-//      ekonomi, teknoloji, yasam, genel.
+//      ekonomi, teknoloji, yasam, genel. Within politika most words are read in
+//      the title and the description; a few are read in the TITLE only (see
+//      POLITIKA_TITLE_RE) and two small compound rules need two words each.
 //   4. Tokens of three letters or fewer match as whole words; longer stems are
 //      anchored at a word start and may carry any suffix.
 //   5. Three words whose fold collides with another word (gol / göl,
@@ -130,6 +132,10 @@ const POLITIKA_RE = compile(
     "hukumet", "milletvekil", "siyaset", "anayasa", "meclis", "tbmm",
     "ak parti", "dem parti", "yeni parti", "iyi parti",
     "parti genel", "genel baskan", "il baskan", "belediye baskan",
+    // TBMM group deputy chairs. A bare 'baskan vekil' is NOT a stem: clubs and
+    // federations have deputy chairs too ('Galatasaray Sportif A.Ş.
+    // Başkanvekili') and politika runs before spor.
+    "grup baskanvekil", "grup baskan vekil",
     "icisleri", "disisleri", "kabine",
     "ozgur ozel", "imamoglu", "mansur yavas", "kilicdaroglu",
     "sarigul", "davutoglu", "dervisoglu", "bakirhan",
@@ -140,11 +146,52 @@ const POLITIKA_RE = compile(
   ],
 );
 
+// Words that make a HEADLINE politics but only decorate a description, so they
+// are matched against the TITLE alone (wave AW, measured on 48 h of production
+// rows; the rows each one newly moves into politika were reviewed by hand):
+//   * 'siyasi' / 'siyasal': 'siyasi' appears in 31 rows as text but only 6 as a
+//     title word, and those 6 are all political ('BM Somali'deki siyasi
+//     misyonunu bitirdi'); the other 25 are a Halloween essay, a credit-rating
+//     note, a film about Aytmatov, ...
+//   * 'ibb baskan' ('İBB Başkan Vekili', also one word): in a description it is
+//     a car-park opening that quotes the deputy mayor.
+//   * 'parlamento' / 'referandum' / 'senato': decisions of a foreign parliament
+//     or electorate are politics; a mention inside a story is not.
+//   * 'arap partil' / 'sol partil': the foreign-party headlines the reviewer
+//     named. A bare 'partiler' is NOT here: 6 of 6 rows in 48 h were Halloween,
+//     student and baby-shower parties.
+const POLITIKA_TITLE_RE = compile(
+  [],
+  [
+    "siyasi", "siyasal", "ibb baskan", "parlamento", "referandum",
+    "arap partil", "sol partil",
+  ],
+);
+
+// 'senato' is a title word too, except for a university senate (4 of 22 rows
+// in the 24 days measured: 'AİÇÜ Senatosu YÖKAK raporunu karara bağladı').
+const SENATO_RE = /\bsenato/;
+const UNIVERSITY_RE = /\b(?:universite|rektor|fakulte|yokak)/;
+
 // A local body together with an enforcement action, anywhere in the text
 // ('Bakırköy Belediyesi'ne yönelik soruşturma'). Bare judicial words are
 // NEVER politics on their own: that would admit ordinary crime news.
-const COMPOUND_BODY_RE = /\b(?:belediye|bakanlik|parti)/;
+//
+// 'ibb' is a body of this rule and NOT a politika word. Decision data (read
+// only, 2026-11-02): the 48 h titles matching `(^|[^[:alpha:]])İBB` were
+// politika 7, genel 2, ekonomi 1, son_dakika 1 = 11, of which 8 political (the
+// İBB trial x3, 'İBB Başkan Vekili', the CHP / Yeni Parti calls, the Sayıştay
+// vurgun, a BTP visit) and 3 not (two car-park openings, a restoration). 73% is
+// under the 80% bar, and as a text word it also moved 17 rows (a marathon, a
+// car park, Kuyumcu Han). The deputy mayor is covered by 'ibb baskan' above.
+const COMPOUND_BODY_RE = /\b(?:belediye|bakanlik|parti)|\bibb\b/;
 const COMPOUND_ACTION_RE = /\b(?:sorusturma|gozalti|tutukla|operasyon)/;
+
+// 'koalisyon' alone is the Saudi-led 'Arap Koalisyonu' war ticker (9 of the 11
+// rows in 48 h), so it counts together with a party ('Berlin'de Sol Parti ...
+// ile koalisyon görüşmeleri').
+const COALITION_RE = /\bkoalisyon/;
+const PARTY_RE = /\bparti/;
 
 const SPOR_RE = compile(
   ["tff"],
@@ -265,13 +312,17 @@ export function classifyCategory(
   const ticker = TICKER_RE.exec(descLower);
   if (ticker) descLower = descLower.slice(0, ticker.index);
 
-  if (SON_DAKIKA_RE.test(foldForCategory(titleLower))) return "son_dakika";
+  const titleHay = foldForCategory(titleLower);
+  if (SON_DAKIKA_RE.test(titleHay)) return "son_dakika";
 
   const lower = `${titleLower}\n${descLower}`;
   const hay = foldForCategory(lower);
   if (
     POLITIKA_RE.test(hay) ||
-    (COMPOUND_BODY_RE.test(hay) && COMPOUND_ACTION_RE.test(hay))
+    POLITIKA_TITLE_RE.test(titleHay) ||
+    (SENATO_RE.test(titleHay) && !UNIVERSITY_RE.test(hay)) ||
+    (COMPOUND_BODY_RE.test(hay) && COMPOUND_ACTION_RE.test(hay)) ||
+    (COALITION_RE.test(hay) && PARTY_RE.test(hay))
   ) {
     return "politika";
   }
