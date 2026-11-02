@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 
+import { SavedEmptyState, SavedFrame, SavedList } from "./saved-list";
 import { toSavedRowView } from "./saved-row";
 
 // Source guard (same approach as framing-game.test.tsx): saved-list.tsx must
@@ -230,5 +231,190 @@ describe("saved-list.tsx accessible names and update-time label", () => {
   it("no longer prints a bare relative age that reads like a publication date", () => {
     expect(code).not.toContain("{formatTurkishTimeAgo(row.updated_at)}");
     expect(code).not.toContain("formatTurkishTimeAgo");
+  });
+});
+
+describe("SavedFrame / live region", () => {
+  it("renders one polite status region before its children", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SavedFrame, { announcement: "" }, createElement("i", null, "child")),
+    );
+    expect(markup).toBe('<div><p role="status" aria-live="polite" class="sr-only"></p><i>child</i></div>');
+  });
+
+  it("carries the announcement text in the region", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SavedFrame, { announcement: "Çıkarıldı." }, createElement("i", null, "child")),
+    );
+    expect(markup).toMatch(/<p role="status" aria-live="polite" class="sr-only">Çıkarıldı\.<\/p>/);
+  });
+
+  it("escapes the announcement as text (a story title is never markup)", () => {
+    const markup = renderToStaticMarkup(
+      createElement(SavedFrame, { announcement: "<b>x</b>" }, null),
+    );
+    expect(markup).toContain("&lt;b&gt;x&lt;/b&gt;");
+    expect(markup).not.toContain("<b>");
+  });
+});
+
+describe("SavedEmptyState", () => {
+  it("renders the heading as a script-focusable target (tabindex -1)", () => {
+    const markup = renderToStaticMarkup(createElement(SavedEmptyState, {}));
+    expect(markup).toMatch(/<h2 tabindex="-1"[^>]*>Henüz kaydettiğiniz bir hikâye yok<\/h2>/);
+  });
+
+  it("keeps a visible focus ring on the heading", () => {
+    const markup = renderToStaticMarkup(createElement(SavedEmptyState, {}));
+    expect(markup).toContain("focus-visible:ring-2");
+    expect(markup).toContain("focus-visible:ring-ring");
+    expect(markup).toContain("outline-none");
+  });
+
+  it("contains no link or button (the remove button must stay the first one after the first link)", () => {
+    const markup = renderToStaticMarkup(createElement(SavedEmptyState, {}));
+    expect(markup).not.toMatch(/<(a|button)[\s>]/i);
+  });
+});
+
+describe("SavedList markup before hydration", () => {
+  // The server snapshot of useBookmarks has no ids, so the first paint is the
+  // empty state. The live region has to be there already: a region inserted
+  // together with its text is usually not announced.
+  const markup = renderToStaticMarkup(createElement(SavedList));
+
+  it("mounts the polite status region in the empty branch", () => {
+    expect(markup).toContain('<p role="status" aria-live="polite" class="sr-only"></p>');
+  });
+
+  it("renders the empty-state heading with tabindex -1", () => {
+    expect(markup).toContain('tabindex="-1"');
+    expect(markup).toContain("Henüz kaydettiğiniz bir hikâye yok");
+  });
+});
+
+describe("saved-list.tsx focus handoff and announcements", () => {
+  const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+  const code = src.replace(/\/\/[^\n]*/g, "");
+  const listAt = code.indexOf("export function SavedList");
+  const component = code.slice(listAt);
+
+  it("reuses focusTargetAfterRemove from the follows module", () => {
+    expect(src).toMatch(/import\s*\{[^}]*focusTargetAfterRemove[^}]*\}\s*from\s*["']@\/lib\/follows\/follows["']/);
+  });
+
+  it("builds the removal announcement with savedRemovalAnnouncement", () => {
+    expect(src).toMatch(/import\s*\{[^}]*savedRemovalAnnouncement[^}]*\}\s*from\s*["']@\/components\/bookmark\/bookmark-label["']/);
+    expect(component).toContain("setAnnouncement(");
+    expect(component).toContain("savedRemovalAnnouncement(");
+  });
+
+  it("the remove button calls handleRemove", () => {
+    expect(component).toContain("onClick={() => handleRemove(row)}");
+    expect(component).not.toContain("onClick={() => toggle(row.id)}");
+  });
+
+  it("handleRemove records the focus target before it toggles the bookmark", () => {
+    const from = component.indexOf("function handleRemove");
+    expect(from).toBeGreaterThan(-1);
+    const body = component.slice(from, component.indexOf("\n  }\n", from));
+    const pendingAt = body.indexOf("pendingFocus.current = focusTargetAfterRemove(");
+    const announceAt = body.indexOf("setAnnouncement(");
+    const toggleAt = body.indexOf("toggle(row.id)");
+    expect(pendingAt).toBeGreaterThan(-1);
+    expect(announceAt).toBeGreaterThan(-1);
+    expect(toggleAt).toBeGreaterThan(pendingAt);
+    expect(toggleAt).toBeGreaterThan(announceAt);
+    // The row leaves the list at once, so focus does not wait for the RPC.
+    expect(body).toContain("setRows(");
+  });
+
+  it("toggle( is called nowhere else", () => {
+    expect(component.match(/\btoggle\(/g)).toHaveLength(1);
+  });
+
+  it("every return path of SavedList is wrapped in SavedFrame, so the live region never remounts", () => {
+    const lines = component.split("\n");
+    // JSX returns of the component itself (indent <= 4: top level or one if-block
+    // deep). The row callback's own return sits deeper, and `return;` / the
+    // effect cleanup are not JSX.
+    const jsxReturns: number[] = [];
+    lines.forEach((line, i) => {
+      const indent = line.length - line.trimStart().length;
+      const t = line.trim();
+      if (indent <= 4 && (t === "return (" || t.startsWith("return <"))) jsxReturns.push(i);
+    });
+    // empty, loading, failed and list
+    expect(jsxReturns).toHaveLength(4);
+    for (const i of jsxReturns) {
+      expect(`${lines[i]}\n${lines[i + 1]}`).toContain("<SavedFrame announcement={announcement}>");
+    }
+    expect(component.match(/<SavedFrame/g)).toHaveLength(4);
+    expect(component).not.toMatch(/return null/);
+  });
+
+  it("has exactly one live region (inside SavedFrame)", () => {
+    expect(code.match(/role="status"/g)).toHaveLength(1);
+  });
+
+  it("declares every hook above the first early return", () => {
+    const firstReturn = component.indexOf("\n  if (");
+    expect(firstReturn).toBeGreaterThan(-1);
+    const before = component.slice(0, firstReturn);
+    for (const hook of ["useState(", "useRef(", "useEffect(", "useMemo(", "useBookmarks("]) {
+      expect(component.lastIndexOf(hook), hook).toBeLessThan(firstReturn);
+    }
+    expect(before).toContain("pendingFocus");
+    expect(before).toContain("linkRefs");
+    expect(before).toContain("emptyHeadingRef");
+  });
+
+  it("treats a drained list as the empty state too, so focus always has a target", () => {
+    expect(component).toMatch(/const emptyNow\s*=\s*count === 0 \|\| \(rows !== null && !failed && rows\.length === 0\);/);
+    expect(component).toContain("<SavedEmptyState headingRef={emptyHeadingRef} />");
+  });
+
+  it("a useEffect keyed on the rendered-id signature moves focus", () => {
+    const keyedAt = component.indexOf("}, [shownSig]);");
+    expect(keyedAt).toBeGreaterThan(-1);
+    const effectAt = component.lastIndexOf("useEffect(", keyedAt);
+    expect(effectAt).toBeGreaterThan(-1);
+    const effect = component.slice(effectAt, keyedAt);
+    expect(effect).toContain("pendingFocus.current");
+    expect(effect).toContain("linkRefs.current.get(");
+    expect(effect).toContain("emptyHeadingRef.current");
+    expect(effect).toContain(".focus()");
+    // The pending target is consumed before it is used, so it fires once.
+    expect(effect.indexOf("pendingFocus.current = undefined")).toBeGreaterThan(-1);
+    expect(effect.indexOf("pendingFocus.current = undefined")).toBeLessThan(effect.indexOf(".focus()"));
+  });
+
+  it("derives the signature from the shown ids, a loading marker and the empty state", () => {
+    expect(component).toContain(
+      'const shownSig = emptyNow ? "" : rows === null ? "\\u0000loading" : rows.map((r) => r.id).join("\\n");',
+    );
+  });
+
+  it("registers each row link in the ref map with a callback ref", () => {
+    expect(component).toMatch(/ref=\{\(el\) => \{\s*if \(el\) linkRefs\.current\.set\(row\.id, el\);\s*else linkRefs\.current\.delete\(row\.id\);\s*\}\}/);
+  });
+
+  it("the empty heading takes the ref and is script-focusable", () => {
+    const emptyAt = code.indexOf("export function SavedEmptyState");
+    const emptyEnd = code.indexOf("export function SavedList");
+    const emptyState = code.slice(emptyAt, emptyEnd);
+    expect(emptyState).toContain("ref={headingRef}");
+    expect(emptyState).toContain("tabIndex={-1}");
+    expect(emptyState).not.toContain("<Link");
+    expect(emptyState).not.toContain("<button");
+  });
+
+  it("SavedFrame holds no link or button either", () => {
+    const frameAt = code.indexOf("export function SavedFrame");
+    const frameEnd = code.indexOf("export function SavedEmptyState");
+    const frame = code.slice(frameAt, frameEnd);
+    expect(frameAt).toBeGreaterThan(-1);
+    expect(frame).not.toContain("<Link");
+    expect(frame).not.toContain("<button");
   });
 });

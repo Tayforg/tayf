@@ -74,6 +74,14 @@ const FILES: readonly Entry[] = [
     required: ["sitenize"],
     phrases: ['"Sitenize ekle"'],
   },
+  {
+    // h23-a11y-3: #166 missed the clear-data control on /diyetim. The guard reads
+    // comments too, so no comment in that file may use the sen forms either.
+    path: "src/components/diet/clear-diet-button.tsx",
+    banned: ["misin", "verilerin"],
+    required: ["misiniz", "verileriniz"],
+    phrases: ["Emin misiniz?", "Haber diyeti verileriniz bu cihazdan silindi."],
+  },
 ];
 
 function isLetter(ch: string): boolean {

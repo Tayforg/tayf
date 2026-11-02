@@ -15,6 +15,11 @@
  * The call-to-action phrases, each lower-case and trimmed. Exported so
  * `summary-tidy.ts` can strip the same phrases as a TAIL of a longer summary;
  * this module keeps using them for the exact whole-string check below.
+ *
+ * "ayrıntılar birazdan" is the placeholder some feeds ship instead of a
+ * description ("Ayrıntılar birazdan...", hunt 23, 3a46fc27): as a whole text it
+ * is hidden here, and a capitalised "Ayrıntılar birazdan" at the end of a longer
+ * text is a tail like the others.
  */
 export const BOILERPLATE_PHRASES: ReadonlySet<string> = new Set([
   "click to continue",
@@ -25,21 +30,29 @@ export const BOILERPLATE_PHRASES: ReadonlySet<string> = new Set([
   "devamı için tıklayın",
   "devamı için tıklayınız",
   "haberin devamı için tıklayın",
+  "ayrıntılar birazdan",
 ]);
 
 /**
  * Sentence-style call-to-action tails ("Peki, neden? Detaylar haberimizde...",
- * "... paylaşım geldi. İşte ayrıntılar..."): the outlet's own teaser for the
- * article behind the description (hunt 22, f097fa3e and a65f404a). Same shape as
- * BOILERPLATE_PHRASES (tr-TR lower case, trimmed, single spaces) and kept in a
- * separate set so the older one, and the tests that pin its size, stay as they
- * were. `isBoilerplateDescription` checks both sets; `summary-tidy.ts` strips
- * the union as a TAIL of a longer summary.
+ * "... paylaşım geldi. İşte ayrıntılar...", "... sevk edildi. İşte merak edilen
+ * tüm detaylar..."): the outlet's own teaser for the article behind the
+ * description (hunt 22, f097fa3e and a65f404a; hunt 23, da55a291 and af529f2a).
+ * Same shape as BOILERPLATE_PHRASES (tr-TR lower case, trimmed, single spaces)
+ * and kept in a separate set so the older one, and the tests that pin its size,
+ * stay as they were. `isBoilerplateDescription` checks both sets;
+ * `summary-tidy.ts` strips the union as a TAIL of a longer summary. Only these
+ * sentence-style phrases may also end a short LOWER-CASE last sentence ("...
+ * başvurularına dair detaylar haberimizde."), which summary-tidy then drops
+ * whole; the phrases of BOILERPLATE_PHRASES never do.
  */
 export const TRAILING_CTA_PHRASES: ReadonlySet<string> = new Set([
   "detaylar haberimizde",
   "işte ayrıntılar",
   "işte detaylar",
+  "işte merak edilen tüm detaylar",
+  "işte tüm detaylar",
+  "işte merak edilenler",
 ]);
 
 // Characters a CTA may be followed by without being part of a longer text.

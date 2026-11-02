@@ -28,6 +28,13 @@
 // 174 of 177 descriptions in 48 h, "... Bu çalışmaların ardından […]"). A TRAILING
 // marker is not text: stripFeedWrappers() turns it into one "…" (or drops it after
 // a sentence mark). A marker anywhere else is left alone.
+//
+// Milliyet also puts a "related news" headline on the line right before the ticker
+// ("...her gayrete hazırız\nSon dakika... Rusya için 3 fırsat!", hunt 23,
+// h23-live-2). cutAppendedTicker() is the pure cut the READ side uses
+// (src/lib/articles/summary-tidy.ts): it cuts at the ticker line like
+// cleanDescription() does and also drops up to two short, unpunctuated lines in
+// front of it. cleanDescription()'s own output is deliberately unchanged.
 
 // A ticker line: "Son dakika", "SON DAKİKA" or "Son Dakika" at the start of a
 // line (leading blanks allowed), followed by 1-3 dots, an ellipsis, a colon or
@@ -165,6 +172,20 @@ export function stripFeedWrappers(text: string): string {
   return out;
 }
 
+/** Index of the "\n" that starts the first ticker line after line 0, or -1. */
+function findTickerBreak(text: string): number {
+  // The first line can never be a ticker block: the ticker is appended to an
+  // article, so a "Son dakika..." opening is the article's own text.
+  let at = text.indexOf("\n");
+  while (at !== -1) {
+    const next = text.indexOf("\n", at + 1);
+    const line = text.slice(at + 1, next === -1 ? text.length : next);
+    if (TICKER_LINE.test(line)) return at;
+    at = next;
+  }
+  return -1;
+}
+
 export function cleanDescription(d: string): string;
 export function cleanDescription(d: string | null): string | null;
 export function cleanDescription(d: string | undefined): string | undefined;
@@ -174,16 +195,64 @@ export function cleanDescription(d: string | null | undefined): string | null | 
   // Feed wrappers first (Diken / Serbestiyet footers, the trailing […] excerpt
   // marker), then the ticker cut.
   const text = stripFeedWrappers(d);
-  // The first line can never be a ticker block: the ticker is appended to an
-  // article, so a "Son dakika..." opening is the article's own text.
-  let at = text.indexOf("\n");
-  while (at !== -1) {
-    const next = text.indexOf("\n", at + 1);
-    const line = text.slice(at + 1, next === -1 ? text.length : next);
-    if (TICKER_LINE.test(line)) return text.slice(0, at).trimEnd();
-    at = next;
+  const at = findTickerBreak(text);
+  return at === -1 ? text : text.slice(0, at).trimEnd();
+}
+
+// ---------------------------------------------------------------------------
+// Appended ticker, related-news lines included (h23-live-2, hunt 23).
+// ---------------------------------------------------------------------------
+
+/** A "related news" line is at most this many characters long (trimmed). */
+const RELATED_LINE_MAX_LENGTH = 120;
+/** At most this many related-news lines are dropped in front of a ticker. */
+const MAX_RELATED_LINES = 2;
+/** Quotes and brackets that may close a sentence right after its mark. */
+const LINE_CLOSERS = new Set(['"', "”", "»", "’", "'", ")", "]"]);
+const LINE_SENTENCE_MARKS = new Set([".", "!", "?", "…"]);
+
+/**
+ * True for the shape of a headline pasted in as its own line: after trimming it
+ * is 1 to 120 characters long and, once any closing quotes or brackets are
+ * stripped, it does not end in . ! ? or …. A line that ends in a sentence mark
+ * is a sentence of the article itself. Character scan, no regex.
+ */
+export function isUnpunctuatedShortLine(line: string): boolean {
+  const t = line.trim();
+  if (t.length === 0 || t.length > RELATED_LINE_MAX_LENGTH) return false;
+  let end = t.length;
+  while (end > 0 && LINE_CLOSERS.has(t.charAt(end - 1))) end--;
+  return end === 0 || !LINE_SENTENCE_MARKS.has(t.charAt(end - 1));
+}
+
+/**
+ * Cut an appended ticker and the related-news lines in front of it: everything
+ * from the first ticker line after line 0 on goes (the same line shape as
+ * cleanDescription), and so do up to two directly preceding lines that are
+ * short and unpunctuated ({@link isUnpunctuatedShortLine}). Blank lines are
+ * skipped on the way back and do not count. The first line is never dropped. The
+ * SAME string is returned when there is no ticker line after line 0; otherwise
+ * the kept text with its end trimmed. Pure, linear, idempotent.
+ */
+export function cutAppendedTicker(text: string): string {
+  const tickerBreak = findTickerBreak(text);
+  if (tickerBreak === -1) return text;
+  let cutAt = tickerBreak;
+  let end = tickerBreak; // exclusive end of the line under inspection
+  let dropped = 0;
+  while (dropped < MAX_RELATED_LINES && end > 0) {
+    const lineBreak = text.lastIndexOf("\n", end - 1);
+    if (lineBreak === -1) break; // line 0 is never dropped
+    if (text.slice(lineBreak + 1, end).trim() === "") {
+      end = lineBreak; // a blank line: skipped, not counted
+      continue;
+    }
+    if (!isUnpunctuatedShortLine(text.slice(lineBreak + 1, end))) break;
+    cutAt = lineBreak;
+    end = lineBreak;
+    dropped++;
   }
-  return text;
+  return text.slice(0, cutAt).trimEnd();
 }
 
 // ---------------------------------------------------------------------------

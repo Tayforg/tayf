@@ -7,6 +7,8 @@
 // buttons, and a screen-reader user listing the page's buttons hears
 // "Hikâyeyi kaydet" twenty times. The name carries the story title instead.
 
+import { formatCountTr } from "@/lib/format/number-tr";
+
 /** Longest story title, in code points, that goes into an accessible name. */
 export const BOOKMARK_LABEL_TITLE_MAX = 80;
 
@@ -55,4 +57,22 @@ export function bookmarkChipSuffix(title: string | null | undefined): string | n
 export function savedRemoveLabel(title: string | null | undefined): string {
   const t = labelTitle(title);
   return t === null ? GENERIC_REMOVE : `«${t}» hikâyesini kaydedilenlerden çıkar`;
+}
+
+/**
+ * What the /saved polite live region says once a story has been removed
+ * (WCAG 4.1.3): the story, then how many are left. The title goes through
+ * labelTitle, so it is trimmed, collapsed and capped like every other name; a
+ * missing title falls back to "Hikâye". A negative, NaN or infinite
+ * `remaining` counts as none left. The count uses the shared tr-TR formatter.
+ */
+export function savedRemovalAnnouncement(
+  title: string | null | undefined,
+  remaining: number,
+): string {
+  const t = labelTitle(title);
+  const subject = t === null ? "Hikâye" : `«${t}»`;
+  const left = Number.isFinite(remaining) && remaining > 0 ? Math.floor(remaining) : 0;
+  const tail = left === 0 ? "Kaydedilen hikâye kalmadı." : `${formatCountTr(left)} hikâye kaldı.`;
+  return `${subject} kaydedilenlerden çıkarıldı. ${tail}`;
 }

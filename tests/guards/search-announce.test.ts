@@ -162,6 +162,71 @@ describe("src/app/page.tsx: the search result live region", () => {
   });
 });
 
+describe("search echo and the minimum query (h23-a11y-4, WCAG 1.4.10 + honest status)", () => {
+  const page = blankComments(read("src/app/page.tsx"));
+  const homeFeed = functionSource(page, "HomeFeed");
+  const emptySearch = functionSource(page, "EmptySearch");
+
+  it("HomeFeed renders <SearchEcho in the result count line", () => {
+    expect(homeFeed).not.toBe("");
+    expect(count(homeFeed, "<SearchEcho")).toBe(1);
+    const echoAt = homeFeed.indexOf("<SearchEcho");
+    const countAt = homeFeed.indexOf("için {formatCountTr(resultCount)} sonuç");
+    expect(countAt).toBeGreaterThan(echoAt);
+    // ...inside the <p> that can shrink and wrap.
+    const pAt = homeFeed.lastIndexOf("<p", echoAt);
+    expect(pAt).toBeGreaterThan(-1);
+    const tag = openingTagFrom(homeFeed, pAt);
+    expect(tag).toContain("min-w-0");
+    expect(tag).toContain("break-words");
+    expect(tag).toContain("[overflow-wrap:anywhere]");
+  });
+
+  it("EmptySearch renders <SearchEcho too, and has a too-short branch", () => {
+    expect(emptySearch).not.toBe("");
+    expect(emptySearch).toContain("<SearchEcho");
+    expect(emptySearch).toContain("tooShort");
+    expect(emptySearch).toContain("MIN_QUERY_LENGTH");
+  });
+
+  it("never prints the raw query as a visible child", () => {
+    expect(page).not.toContain("“{q}”");
+    expect(page).not.toContain("&ldquo;{query}&rdquo;");
+    expect(page).not.toContain("&ldquo;{q}&rdquo;");
+  });
+
+  it("uses isTooShortQuery, not a raw q.length floor, to decide whether a search ran", () => {
+    expect(page).toMatch(/import \{[^}]*\bMIN_QUERY_LENGTH\b[^}]*\} from "@\/lib\/search\/search-status";/);
+    expect(page).toMatch(/import \{[^}]*\bisTooShortQuery\b[^}]*\} from "@\/lib\/search\/search-status";/);
+    expect(homeFeed).toContain("isTooShortQuery(q)");
+    expect(page).not.toContain("q.length >= 2");
+    expect(page).not.toContain("q.length < 2");
+  });
+
+  it("renders the too-short card without the 'no results' claim", () => {
+    const at = emptySearch.indexOf("tooShort");
+    expect(at).toBeGreaterThan(-1);
+    expect(emptySearch).toContain("Aramak için biraz daha yazın");
+    expect(emptySearch).toContain("karakter yazın.");
+  });
+
+  it("SearchEcho is a server-safe component with the break classes", () => {
+    const echo = blankComments(read("src/components/search/search-echo.tsx"));
+    expect(echo).not.toMatch(/^\s*["']use client["']/m);
+    expect(echo).toContain("break-words");
+    expect(echo).toContain("[overflow-wrap:anywhere]");
+    expect(echo).toContain("displayQuery(");
+    expect(echo).not.toContain("dangerouslySetInnerHTML");
+  });
+
+  it("search-bar.tsx caps the input at 200 characters (the search's own MAX_QUERY_LENGTH)", () => {
+    const bar = blankComments(read("src/components/filters/search-bar.tsx"));
+    expect(bar).toContain("maxLength={200}");
+    const search = blankComments(read("src/lib/clusters/search-query.ts"));
+    expect(search).toContain("const MAX_QUERY_LENGTH = 200;");
+  });
+});
+
 describe("src/components/home/new-since-last-visit.tsx: the status container stays mounted", () => {
   const code = blankComments(read("src/components/home/new-since-last-visit.tsx"));
 

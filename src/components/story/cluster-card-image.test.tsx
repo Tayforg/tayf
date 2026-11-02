@@ -1171,3 +1171,76 @@ describe("ClusterCardImage — decorative alt=\"\" (h10-a11y-1)", () => {
     expect(doc).toContain('""');
   });
 });
+
+// ---------------------------------------------------------------------------
+// h23-a11y-1 (WCAG 3.1.2 Language of Parts): the optional `lang` prop marks the
+// language of the accessible name. An English headline used as the hero alt
+// would otherwise be read with Turkish phonetics inside <html lang="tr">.
+// Omitted by default, so every other call site renders byte-identically.
+// ---------------------------------------------------------------------------
+describe("ClusterCardImage — lang of the accessible name (h23-a11y-1)", () => {
+  const ENGLISH_ALT = "Erdoğan visits Seoul with $15 billion trade goal";
+
+  it("tier 1 photo: forwards lang to next/image and the <img>", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage src={CREDIT_URL} alt={ENGLISH_ALT} lang="en" width={640} height={360} />,
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.lang).toBe("en");
+    expect(markup).toMatch(/<img[^>]*\blang="en"/);
+    expect(markup).toContain(`alt="${ENGLISH_ALT}"`);
+  });
+
+  it("tier 2 logo: the role=\"img\" wrapper carries lang, so its aria-label and the logo alt are English", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Daily Sabah"
+        alt={ENGLISH_ALT}
+        lang="en"
+        width={640}
+        height={360}
+      />,
+    );
+
+    expect(markup).toMatch(/^<div[^>]*\blang="en"/);
+    expect(markup).toMatch(/^<div[^>]*\brole="img"/);
+    expect(markup).toContain(`aria-label="${ENGLISH_ALT} — Daily Sabah"`);
+  });
+
+  it("tier 3 placeholder: the role=\"img\" wrapper carries lang", () => {
+    const markup = renderToStaticMarkup(
+      <ClusterCardImage src={null} alt={ENGLISH_ALT} lang="en" width={640} height={360} />,
+    );
+
+    expect(markup).toMatch(/^<div[^>]*\blang="en"/);
+    expect(markup).toMatch(/^<div[^>]*\brole="img"/);
+    expect(markup).toContain(`aria-label="${ENGLISH_ALT}"`);
+  });
+
+  it("emits no lang attribute anywhere when the prop is omitted (existing call sites unchanged)", () => {
+    const photo = renderToStaticMarkup(
+      <ClusterCardImage src={CREDIT_URL} alt="Test görseli" width={640} height={360} />,
+    );
+    const logo = renderToStaticMarkup(
+      <ClusterCardImage
+        src={null}
+        logoSrc="https://example.com/logo.png"
+        logoAlt="Outlet Gazete"
+        alt="Test görseli"
+        width={640}
+        height={360}
+      />,
+    );
+    const placeholder = renderToStaticMarkup(
+      <ClusterCardImage src={null} alt="Test görseli" width={640} height={360} />,
+    );
+
+    expect(calls[0]!.lang).toBeUndefined();
+    for (const markup of [photo, logo, placeholder]) {
+      expect(markup).not.toContain("lang=");
+    }
+  });
+});

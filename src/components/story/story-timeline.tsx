@@ -1,5 +1,6 @@
 import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
+import { sourceLang } from "@/lib/sources/source-language";
 import type { StoryTimeline as StoryTimelineData } from "@/lib/clusters/story-timeline";
 import type { MediaDnaZone } from "@/types";
 
@@ -100,40 +101,47 @@ export function StoryTimeline({ timeline }: { timeline: StoryTimelineData }) {
           Tüm sıra ({points.length} kaynak)
         </summary>
         <ol className="space-y-0.5 border-l border-border/60 pl-3">
-          {points.map((p) => (
-            <li key={`${p.sourceName}-${p.t}`}>
-              <TrackedLink
-                event="outbound"
-                data={{ zone: p.zone, kind: "timeline" }}
-                href={p.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex min-h-[32px] items-center gap-2 rounded-sm text-[12px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-                <span className={`${clockWidth} shrink-0 font-mono text-[10px] tabular-nums`}>
-                  {p.clock}
-                </span>
-                {p.voting ? (
+          {points.map((p) => {
+            // WCAG 3.1.2: points carry no slug, so the display name decides.
+            const lang = sourceLang({ name: p.sourceName });
+            return (
+              <li key={`${p.sourceName}-${p.t}`}>
+                <TrackedLink
+                  event="outbound"
+                  data={{ zone: p.zone, kind: "timeline" }}
+                  href={p.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex min-h-[32px] items-center gap-2 rounded-sm text-[12px] text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  <span className={`${clockWidth} shrink-0 font-mono text-[10px] tabular-nums`}>
+                    {p.clock}
+                  </span>
+                  {p.voting ? (
+                    <span
+                      aria-hidden="true"
+                      className={`h-1.5 w-1.5 shrink-0 rounded-full ${ZONE_META[p.zone].dot}`}
+                    />
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      className={`h-2 w-2 shrink-0 rounded-full border-2 bg-background ${HOLLOW_BORDER[p.zone]}`}
+                    />
+                  )}
+                  {/* The dot above is color-only; name the zone for screen readers. */}
+                  <span className="sr-only">{ZONE_META[p.zone].label}</span>
                   <span
-                    aria-hidden="true"
-                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${ZONE_META[p.zone].dot}`}
-                  />
-                ) : (
-                  <span
-                    aria-hidden="true"
-                    className={`h-2 w-2 shrink-0 rounded-full border-2 bg-background ${HOLLOW_BORDER[p.zone]}`}
-                  />
-                )}
-                {/* The dot above is color-only; name the zone for screen readers. */}
-                <span className="sr-only">{ZONE_META[p.zone].label}</span>
-                <span className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-foreground/80">
-                  {p.sourceName}
-                </span>
-                {!p.voting && <span className="shrink-0 whitespace-nowrap text-[10px]">(toplayıcı / niş)</span>}
-                <span className="min-w-0 truncate">{p.title}</span>
-              </TrackedLink>
-            </li>
-          ))}
+                    lang={lang}
+                    className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-foreground/80"
+                  >
+                    {p.sourceName}
+                  </span>
+                  {!p.voting && <span className="shrink-0 whitespace-nowrap text-[10px]">(toplayıcı / niş)</span>}
+                  <span lang={lang} className="min-w-0 truncate">{p.title}</span>
+                </TrackedLink>
+              </li>
+            );
+          })}
         </ol>
       </details>
 

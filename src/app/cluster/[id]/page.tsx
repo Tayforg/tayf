@@ -63,6 +63,7 @@ import {
 import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { partitionByVote, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/kind";
+import { clusterTextLang, sourceLang } from "@/lib/sources/source-language";
 import { buildTayfOrganization, serializeJsonLd } from "@/lib/seo/json-ld";
 import { siteUrl } from "@/lib/site-url";
 import { oembedDiscoveryHref } from "@/lib/embed/embed-snippet";
@@ -261,6 +262,15 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   const hasHeadline = !isContentlessTitle(cluster.title_tr);
   const headline = hasHeadline ? cluster.title_tr : NO_HEADLINE_FALLBACK;
 
+  // WCAG 3.1.2 (h23-a11y-1): 'en' only when EVERY member (voting or not) is an
+  // English outlet; one Turkish member could be the one whose title was picked,
+  // so a mixed cluster claims nothing. The h1 is skipped for the neutral LLM
+  // rewrite (title_method 'llm' is Turkish) and for the Turkish "Haber"
+  // fallback; the original-title disclosure is always the member's own text.
+  const textLang = clusterTextLang(members.map((m) => m.source));
+  const headlineLang =
+    cluster.title_method === "llm" || !hasHeadline ? undefined : textLang;
+
   // Toplayıcı / niş kaynaklar are cluster members but never vote — split
   // them out once here so every voting-sensitive computation below reads
   // from `votingMembers` while member-count/listing computations keep
@@ -342,7 +352,12 @@ export default async function ClusterDetailPage({ params }: PageProps) {
     .filter((u): u is string => typeof u === "string" && u.length > 0);
   const heroSrc = heroCandidates[0] ?? null;
   const heroMember = imageEligible.find((m) => !!m.article.image_url) ?? null;
-  const heroAlt = heroMember?.article.title ?? headline;
+  // The cluster headline, not the hero member's own article title: for a
+  // mixed cluster that is the Turkish headline, and for an all-English one the
+  // alt is exactly the <h1> text, so it takes the <h1>'s `headlineLang` (the
+  // `lang` prop on the hero below; WCAG 3.1.2, h23-a11y-1). The credit line
+  // still names the photo's outlet.
+  const heroAlt = headline;
 
   // Per-candidate-URL photo credit (R1-F1 fix). Keyed by the exact image
   // URL rather than tied to `heroMember`/`heroSrc` alone, so the credit
@@ -547,6 +562,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               }
               credits={heroCredits}
               alt={heroAlt}
+              lang={headlineLang}
               width={768}
               height={576}
               sizes={CLUSTER_HERO_SIZES}
@@ -569,7 +585,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   Kör nokta
                 </div>
               )}
-              <h1 className="font-serif text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-[1.05] text-foreground">
+              <h1
+                lang={headlineLang}
+                className="font-serif text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight leading-[1.05] text-foreground"
+              >
                 {headline}
               </h1>
               {cluster.title_original && (
@@ -586,7 +605,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     <summary className="inline cursor-pointer list-none underline decoration-dotted underline-offset-2 hover:text-foreground">
                       Özgün başlık
                     </summary>
-                    <span className="block mt-1">{cluster.title_original}</span>
+                    <span lang={textLang} className="block mt-1">
+                      {cluster.title_original}
+                    </span>
                   </details>
                 </div>
               )}
@@ -734,7 +755,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     <BiasBadge bias={summary.source.bias} size="sm" />
                   )}
                 </div>
-                <p className="text-sm sm:text-base text-muted-foreground leading-relaxed">
+                <p
+                  lang={summary.source ? sourceLang({ name: summary.source.name }) : undefined}
+                  className="text-sm sm:text-base text-muted-foreground leading-relaxed"
+                >
                   {summary.text}
                 </p>
               </div>

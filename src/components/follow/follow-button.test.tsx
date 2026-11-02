@@ -8,6 +8,7 @@ import { FollowButton, FollowButtonView } from "./follow-button";
 import { FOLLOWS_CHANGE_EVENT, FOLLOWS_KEY, MAX_FOLLOWS } from "@/lib/follows/follows";
 import { HomeFeed } from "@/app/page";
 import TopicHubPage from "@/app/konu/[slug]/page";
+import { SearchEcho } from "@/components/search/search-echo";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 
 // Entry-point wiring (home search + /konu/[slug]) is checked against the page
@@ -531,7 +532,16 @@ function textOf(tree: unknown): string {
     if (typeof node === "string") parts.push(node);
     else if (Array.isArray(node)) node.forEach(visit);
     else if (node && typeof node === "object") {
-      visit((node as El).props?.children);
+      const el = node as El;
+      // The tree is the unrendered element tree, so a function component's
+      // text is not in `props.children`. SearchEcho (the quoted query on the
+      // result count line) is the one such component these assertions read:
+      // it is a pure, hook-free function, so call it to get the span it renders.
+      if (el.type === SearchEcho) {
+        visit(SearchEcho(el.props as ComponentProps<typeof SearchEcho>));
+        return;
+      }
+      visit(el.props?.children);
     }
   };
   visit(tree);

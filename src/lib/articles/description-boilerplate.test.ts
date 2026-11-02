@@ -10,7 +10,8 @@ describe("BOILERPLATE_PHRASES", () => {
   it("is exported and holds the known call-to-action phrases", () => {
     expect(BOILERPLATE_PHRASES.has("devamı için tıklayınız")).toBe(true);
     expect(BOILERPLATE_PHRASES.has("read more")).toBe(true);
-    expect(BOILERPLATE_PHRASES.size).toBe(8);
+    expect(BOILERPLATE_PHRASES.has("ayrıntılar birazdan")).toBe(true);
+    expect(BOILERPLATE_PHRASES.size).toBe(9);
   });
 
   it("stores every entry lower-case and trimmed (the matchers fold the input, not the Set)", () => {
@@ -23,14 +24,17 @@ describe("BOILERPLATE_PHRASES", () => {
   });
 });
 
-describe("TRAILING_CTA_PHRASES (h22-editorial-2)", () => {
-  it("holds the three sentence-style tails and leaves BOILERPLATE_PHRASES alone", () => {
+describe("TRAILING_CTA_PHRASES (h22-editorial-2, h23-live-1)", () => {
+  it("holds the six sentence-style tails and leaves the rest of BOILERPLATE_PHRASES alone", () => {
     expect([...TRAILING_CTA_PHRASES].sort()).toEqual([
       "detaylar haberimizde",
       "işte ayrıntılar",
       "işte detaylar",
+      "işte merak edilen tüm detaylar",
+      "işte merak edilenler",
+      "işte tüm detaylar",
     ]);
-    expect(BOILERPLATE_PHRASES.size).toBe(8);
+    expect(BOILERPLATE_PHRASES.size).toBe(9);
     for (const phrase of TRAILING_CTA_PHRASES) expect(BOILERPLATE_PHRASES.has(phrase), phrase).toBe(false);
   });
 
@@ -71,6 +75,39 @@ describe("isBoilerplateDescription", () => {
     "  işte   detaylar \n",
   ])("flags the sentence-style tail %j as boilerplate", (s) => {
     expect(isBoilerplateDescription(s)).toBe(true);
+  });
+
+  it.each([
+    "İşte merak edilen tüm detaylar...",
+    "İşte merak edilen tüm detaylar",
+    "İŞTE MERAK EDİLEN TÜM DETAYLAR!",
+    "İşte tüm detaylar!",
+    "işte  tüm   detaylar",
+    "İşte merak edilenler",
+    "İşte merak edilenler…",
+  ])("flags the h23 sentence-style tail %j as boilerplate", (s) => {
+    expect(isBoilerplateDescription(s)).toBe(true);
+  });
+
+  it.each([
+    "Ayrıntılar birazdan...",
+    "Ayrıntılar birazdan",
+    "AYRINTILAR BİRAZDAN",
+    "  ayrıntılar   birazdan…  ",
+  ])("flags the placeholder %j as boilerplate", (s) => {
+    expect(isBoilerplateDescription(s)).toBe(true);
+  });
+
+  it.each([
+    "Ayrıntılar birazdan açıklanacak",
+    "Ayrıntılar birazdan sonra",
+    "Tüm ayrıntılar birazdan",
+    "İşte tüm detaylar ve rakamlar",
+    "İşte merak edilenleri açıkladı",
+    "İşte merak edilen tüm detaylarıyla",
+    "Bakan açıkladı: İşte tüm detaylar",
+  ])("does not flag %j (exact match only)", (s) => {
+    expect(isBoilerplateDescription(s)).toBe(false);
   });
 
   it.each([

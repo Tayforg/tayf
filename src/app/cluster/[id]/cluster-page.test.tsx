@@ -2554,3 +2554,352 @@ describe("ClusterDetailPage — headline-less title (hunt-10 C-entity-only-title
     expect(findPropsOfType(tree, BookmarkButton)!.storyTitle).toBe("Merkez Bankası faizi sabit tuttu");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h23-a11y-1 (WCAG 3.1.2 Language of Parts): English-outlet text inside
+// <html lang="tr">. Prod cluster fbb078b4-91cb-4534-8bf7-831ea1660e2a is
+// all-English ('Erdoğan visits Seoul with $15 billion trade goal'): its member
+// sources, read-only from prod on 2026-11-02, are a-news, daily-sabah,
+// hurriyet-daily-news and trt-world. The h1 gets lang="en" only when EVERY
+// member is an English outlet AND the headline is not the Turkish LLM rewrite.
+// ---------------------------------------------------------------------------
+
+/** The first element (depth-first, document order) matching `pred`, or null. */
+function findElement(
+  node: unknown,
+  pred: (el: { type?: unknown; props: Record<string, unknown> }) => boolean,
+): { type?: unknown; props: Record<string, unknown> } | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findElement(child, pred);
+      if (found !== null) return found;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: Record<string, unknown> };
+    if (el.props && pred({ type: el.type, props: el.props })) {
+      return { type: el.type, props: el.props };
+    }
+    if (el.props?.children !== undefined) return findElement(el.props.children, pred);
+  }
+  return null;
+}
+
+// Real slugs and display names of fbb078b4's four member sources. The bias
+// categories are illustrative (they do not influence lang).
+const FBB078B4_SOURCES: Array<{ slug: string; name: string; bias: Source["bias"] }> = [
+  { slug: "a-news", name: "A News", bias: "pro_government" },
+  { slug: "daily-sabah", name: "Daily Sabah", bias: "pro_government" },
+  { slug: "hurriyet-daily-news", name: "Hürriyet Daily News", bias: "center" },
+  { slug: "trt-world", name: "TRT World", bias: "state_media" },
+];
+
+function langDetail(opts: {
+  sources: Array<{ slug: string; name: string; bias: Source["bias"]; kind?: Source["kind"] }>;
+  titleMethod?: ClusterDetail["cluster"]["title_method"];
+  titleOriginal?: string | null;
+  summary?: string;
+  /** Index of the member whose article description IS the summary (the seed). */
+  seedIndex?: number;
+  imageUrlOnFirst?: string | null;
+}): ClusterDetail {
+  const sources = opts.sources.map((s) =>
+    makeSource({ id: `id-${s.slug}`, slug: s.slug, name: s.name, bias: s.bias, kind: s.kind }),
+  );
+  const members = sources.map((source, i) => {
+    const member = makeMember(
+      `a-${source.slug}`,
+      source,
+      `2026-09-06T${String(12 - i).padStart(2, "0")}:00:00.000Z`,
+      i === 0 ? (opts.imageUrlOnFirst ?? null) : null,
+    );
+    if (opts.seedIndex === i && opts.summary !== undefined) {
+      member.article.description = opts.summary;
+    }
+    return member;
+  });
+  const cluster = makeCluster({
+    bias_distribution: emptyDistribution(),
+    title_original: opts.titleOriginal ?? null,
+    title_method: opts.titleMethod ?? null,
+  });
+  cluster.title_tr = "Erdoğan Seul'de 15 milyar dolarlık ticaret hedefi açıkladı";
+  if (opts.summary !== undefined) cluster.summary_tr = opts.summary;
+  return {
+    cluster,
+    members,
+    allSources: sources,
+    wire: {
+      isWireRedistribution: false,
+      effectiveArticleCount: members.length,
+      memberCount: members.length,
+    },
+    blindspotSuppressed: false,
+    blindspotRecallVetoed: false,
+  };
+}
+
+async function renderTree(detail: ClusterDetail) {
+  getClusterDetail.mockResolvedValue(detail);
+  return ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+}
+
+const h1Of = (tree: unknown) => findElement(tree, (el) => el.type === "h1");
+
+describe("ClusterDetailPage — h1 lang for an all-English cluster (h23-a11y-1)", () => {
+  it("(a) puts lang=en on the h1 when every member is English and title_method is null", async () => {
+    const tree = await renderTree(langDetail({ sources: FBB078B4_SOURCES, titleMethod: null }));
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("(a) puts lang=en on the h1 when every member is English and title_method is 'extractive'", async () => {
+    const tree = await renderTree(
+      langDetail({
+        sources: FBB078B4_SOURCES,
+        titleMethod: "extractive",
+        titleOriginal: "Erdoğan visits Seoul with $15 billion trade goal",
+      }),
+    );
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("(a) a single English member is enough for an all-English cluster", async () => {
+    const tree = await renderTree(langDetail({ sources: [FBB078B4_SOURCES[1]!] }));
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("(b) leaves the h1 untagged when one member is Turkish", async () => {
+    const tree = await renderTree(
+      langDetail({
+        sources: [...FBB078B4_SOURCES, { slug: "sozcu", name: "Sözcü", bias: "opposition" }],
+        titleMethod: "extractive",
+        titleOriginal: "Erdoğan visits Seoul with $15 billion trade goal",
+      }),
+    );
+    expect(h1Of(tree)).not.toBeNull();
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("(b) counts a non-voting (aggregator) Turkish member too: textLang spans ALL members", async () => {
+    const tree = await renderTree(
+      langDetail({
+        sources: [
+          ...FBB078B4_SOURCES,
+          { slug: "haberler-com", name: "Haberler.com", bias: "center", kind: "aggregator" },
+        ],
+      }),
+    );
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("(b) a Turkish-only cluster has no lang on the h1", async () => {
+    const tree = await renderTree(
+      langDetail({ sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }] }),
+    );
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("(c) leaves the h1 untagged for an all-English cluster whose title_method is 'llm' (the rewrite is Turkish)", async () => {
+    const tree = await renderTree(
+      langDetail({
+        sources: FBB078B4_SOURCES,
+        titleMethod: "llm",
+        titleOriginal: "Erdoğan visits Seoul with $15 billion trade goal",
+      }),
+    );
+    expect(h1Of(tree)).not.toBeNull();
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+
+  it("(c) tags the 'Özgün başlık' disclosure span lang=en in that same llm case", async () => {
+    const original = "Erdoğan visits Seoul with $15 billion trade goal";
+    const tree = await renderTree(
+      langDetail({ sources: FBB078B4_SOURCES, titleMethod: "llm", titleOriginal: original }),
+    );
+    const span = findElement(tree, (el) => el.type === "span" && el.props.children === original);
+    expect(span).not.toBeNull();
+    expect(span?.props.lang).toBe("en");
+  });
+
+  it("(c) tags the 'Özgün başlık' span lang=en for an all-English extractive cluster too", async () => {
+    const original = "Erdoğan visits Seoul with $15 billion trade goal";
+    const tree = await renderTree(
+      langDetail({ sources: FBB078B4_SOURCES, titleMethod: "extractive", titleOriginal: original }),
+    );
+    const span = findElement(tree, (el) => el.type === "span" && el.props.children === original);
+    expect(span?.props.lang).toBe("en");
+  });
+
+  it("(c) leaves the 'Özgün başlık' span untagged when the cluster is mixed", async () => {
+    const original = "Erdoğan visits Seoul with $15 billion trade goal";
+    const tree = await renderTree(
+      langDetail({
+        sources: [...FBB078B4_SOURCES, { slug: "sozcu", name: "Sözcü", bias: "opposition" }],
+        titleMethod: "llm",
+        titleOriginal: original,
+      }),
+    );
+    const span = findElement(tree, (el) => el.type === "span" && el.props.children === original);
+    expect(span).not.toBeNull();
+    expect(span?.props.lang).toBeUndefined();
+  });
+
+  it("does not tag the neutral Turkish fallback 'Haber' as English on a headline-less English cluster", async () => {
+    const detail = langDetail({ sources: FBB078B4_SOURCES });
+    detail.cluster.title_tr = "&nbsp";
+    const tree = await renderTree(detail);
+    expect(findH1Text(tree)).toBe("Haber");
+    expect(h1Of(tree)?.props.lang).toBeUndefined();
+  });
+});
+
+describe("ClusterDetailPage — hero image alt is the cluster headline (h23-a11y-1)", () => {
+  it("(d) uses the Turkish cluster headline, not a member's English article title", async () => {
+    const detail = langDetail({
+      sources: FBB078B4_SOURCES,
+      imageUrlOnFirst: "https://img.example/hero.jpg",
+    });
+    const tree = await renderTree(detail);
+    const hero = findPropsOfType(tree, ClusterCardImage);
+    expect(hero).not.toBeNull();
+    expect(hero!.src).toBe("https://img.example/hero.jpg");
+    expect(hero!.alt).toBe(detail.cluster.title_tr);
+    expect(hero!.alt).not.toBe(detail.members[0]!.article.title);
+  });
+
+  it("(d) the alt is the headline for a Turkish cluster with an image as well", async () => {
+    const detail = langDetail({
+      sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }],
+      imageUrlOnFirst: "https://img.example/hero.jpg",
+    });
+    const tree = await renderTree(detail);
+    expect(findPropsOfType(tree, ClusterCardImage)!.alt).toBe(detail.cluster.title_tr);
+  });
+
+  it("(f) tags the hero image lang=en for an all-English extractive cluster with a hero photo (fbb078b4)", async () => {
+    const detail = langDetail({
+      sources: FBB078B4_SOURCES,
+      titleMethod: "extractive",
+      titleOriginal: "Erdoğan visits Seoul with $15 billion trade goal",
+      imageUrlOnFirst: "https://img.example/hero.jpg",
+    });
+    detail.cluster.title_tr = "Erdoğan visits Seoul with $15 billion trade goal";
+    const tree = await renderTree(detail);
+    const hero = findPropsOfType(tree, ClusterCardImage);
+    expect(hero).not.toBeNull();
+    expect(hero!.alt).toBe("Erdoğan visits Seoul with $15 billion trade goal");
+    expect(hero!.lang).toBe("en");
+    // The image shares the <h1>'s language: both carry the same English text.
+    expect(h1Of(tree)?.props.lang).toBe("en");
+  });
+
+  it("(f) tags the hero image lang=en with no photo too (the logo / placeholder tiers name the image)", async () => {
+    const detail = langDetail({ sources: FBB078B4_SOURCES, titleMethod: "extractive" });
+    const tree = await renderTree(detail);
+    const hero = findPropsOfType(tree, ClusterCardImage);
+    expect(hero).not.toBeNull();
+    expect(hero!.lang).toBe("en");
+  });
+
+  it("(f) leaves the hero image untagged in a mixed cluster", async () => {
+    const detail = langDetail({
+      sources: [...FBB078B4_SOURCES, { slug: "sozcu", name: "Sözcü", bias: "opposition" }],
+      titleMethod: "extractive",
+      imageUrlOnFirst: "https://img.example/hero.jpg",
+    });
+    const tree = await renderTree(detail);
+    expect(findPropsOfType(tree, ClusterCardImage)!.lang).toBeUndefined();
+  });
+
+  it("(f) leaves the hero image untagged when the all-English cluster's headline is the Turkish LLM rewrite", async () => {
+    const detail = langDetail({
+      sources: FBB078B4_SOURCES,
+      titleMethod: "llm",
+      imageUrlOnFirst: "https://img.example/hero.jpg",
+    });
+    const tree = await renderTree(detail);
+    expect(findPropsOfType(tree, ClusterCardImage)!.lang).toBeUndefined();
+  });
+
+  it("(f) leaves the hero image untagged for the Turkish 'Haber' fallback on an all-English cluster", async () => {
+    const detail = langDetail({
+      sources: FBB078B4_SOURCES,
+      imageUrlOnFirst: "https://img.example/hero.jpg",
+    });
+    detail.cluster.title_tr = "&nbsp";
+    const tree = await renderTree(detail);
+    const hero = findPropsOfType(tree, ClusterCardImage);
+    expect(hero!.alt).toBe("Haber");
+    expect(hero!.lang).toBeUndefined();
+  });
+
+  it("(d) still falls back to 'Haber' for a headline-less cluster that has an image", async () => {
+    const detail = langDetail({
+      sources: FBB078B4_SOURCES,
+      imageUrlOnFirst: "https://img.example/hero.jpg",
+    });
+    detail.cluster.title_tr = "&nbsp";
+    const tree = await renderTree(detail);
+    expect(findPropsOfType(tree, ClusterCardImage)!.alt).toBe("Haber");
+  });
+});
+
+describe("ClusterDetailPage — summary paragraph lang follows the seed outlet (h23-a11y-1)", () => {
+  const SUMMARY = "Turkish President Erdoğan arrived in Seoul on Monday for a three-day state visit.";
+
+  const summaryParagraph = (tree: unknown, text: string) =>
+    findElement(
+      tree,
+      (el) => el.type === "p" && collectText(el.props.children).join("") === text,
+    );
+
+  it("(e) tags the summary <p> lang=en when a Daily Sabah member seeded it", async () => {
+    const tree = await renderTree(
+      langDetail({
+        sources: [FBB078B4_SOURCES[1]!, { slug: "sozcu", name: "Sözcü", bias: "opposition" }],
+        summary: SUMMARY,
+        seedIndex: 0,
+      }),
+    );
+    const p = summaryParagraph(tree, SUMMARY);
+    expect(p).not.toBeNull();
+    expect(p?.props.lang).toBe("en");
+    expect(collectText(tree).join("")).toContain("Özet — Daily Sabah");
+  });
+
+  it("(e) tags the summary lang=en even in a mixed cluster, because the seed decides, not the roster", async () => {
+    const tree = await renderTree(
+      langDetail({
+        sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }, FBB078B4_SOURCES[1]!],
+        summary: SUMMARY,
+        seedIndex: 1,
+      }),
+    );
+    expect(summaryParagraph(tree, SUMMARY)?.props.lang).toBe("en");
+  });
+
+  it("(e) leaves the summary <p> untagged when a Turkish member seeded it", async () => {
+    const turkish = "Cumhurbaşkanı Erdoğan pazartesi günü üç günlük resmi ziyaret için Seul'e geldi.";
+    const tree = await renderTree(
+      langDetail({
+        sources: [{ slug: "sozcu", name: "Sözcü", bias: "opposition" }, FBB078B4_SOURCES[1]!],
+        summary: turkish,
+        seedIndex: 0,
+      }),
+    );
+    const p = summaryParagraph(tree, turkish);
+    expect(p).not.toBeNull();
+    expect(p?.props.lang).toBeUndefined();
+  });
+
+  it("(e) leaves the summary untagged when no member matches the seed ('Kaynak açıklaması')", async () => {
+    const tree = await renderTree(
+      langDetail({ sources: FBB078B4_SOURCES, summary: SUMMARY }),
+    );
+    const p = summaryParagraph(tree, SUMMARY);
+    expect(p).not.toBeNull();
+    expect(p?.props.lang).toBeUndefined();
+    expect(collectText(tree).join("")).toContain("Kaynak açıklaması");
+  });
+});

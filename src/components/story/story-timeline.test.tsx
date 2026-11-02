@@ -323,3 +323,109 @@ describe("StoryTimeline — contrast guard", () => {
     }
   });
 });
+
+// h23-a11y-1 (WCAG 3.1.2): the English outlets' names and headlines in the
+// 'Tüm sıra' list sit inside <html lang="tr">, and the source name is rendered
+// with CSS `uppercase` ('Daily Sabah' -> 'DAİLY SABAH' under lang=tr). Points
+// carry no slug, only `sourceName`, so the name fallback of sourceLang() decides.
+describe("StoryTimeline — lang on English outlet text (h23-a11y-1)", () => {
+  /** The first <span> in `row` whose opening tag contains `classToken`, by character scan. */
+  function spanWithClass(row: string, classToken: string): { openTag: string; text: string } {
+    let from = 0;
+    for (;;) {
+      const open = row.indexOf("<span", from);
+      if (open === -1) throw new Error(`no <span> with class token ${classToken}`);
+      const openEnd = row.indexOf(">", open);
+      const openTag = row.slice(open, openEnd + 1);
+      if (openTag.includes(classToken)) {
+        const close = row.indexOf("</span>", openEnd);
+        return { openTag, text: row.slice(openEnd + 1, close) };
+      }
+      from = openEnd + 1;
+    }
+  }
+  const nameSpan = (row: string) => spanWithClass(row, "uppercase");
+  const titleSpan = (row: string) => spanWithClass(row, "truncate");
+
+  const ENGLISH = point("Daily Sabah", "iktidar", 1_000, 0);
+  const TURKISH = point("Sabah", "iktidar", 2_000, 50);
+  const withEnglish: StoryTimelineData = {
+    ...TIMELINE,
+    points: [ENGLISH, TURKISH, POINT_C],
+  };
+
+  it("puts lang=en on the name span and the title span of a 'Daily Sabah' row", () => {
+    const rows = fullListRows(render(withEnglish));
+    expect(rows).toHaveLength(3);
+    const row = rows[0] ?? "";
+
+    const name = nameSpan(row);
+    expect(name.openTag).toContain('lang="en"');
+    expect(name.openTag).toContain("uppercase");
+    expect(name.text).toBe("Daily Sabah");
+
+    const title = titleSpan(row);
+    expect(title.openTag).toContain('lang="en"');
+    expect(title.text).toBe("Daily Sabah başlığı");
+  });
+
+  it("puts no lang on a 'Sabah' row: the Turkish daily is not a prefix match", () => {
+    const row = fullListRows(render(withEnglish))[1] ?? "";
+    expect(nameSpan(row).text).toBe("Sabah");
+    expect(nameSpan(row).openTag).not.toContain("lang=");
+    expect(titleSpan(row).openTag).not.toContain("lang=");
+    expect(row).not.toContain("lang=");
+  });
+
+  it("leaves an ordinary Turkish row (Kaynak C) without any lang", () => {
+    const row = fullListRows(render(withEnglish))[2] ?? "";
+    expect(row).not.toContain("lang=");
+  });
+
+  it.each([
+    "A News",
+    "Hürriyet Daily News",
+    "TRT World",
+    "Türkiye Today",
+  ])("tags the production name %s as English", (sourceName) => {
+    const html = render({ ...TIMELINE, points: [point(sourceName, "bagimsiz", 1_000, 0), POINT_B, POINT_C] });
+    const row = fullListRows(html)[0] ?? "";
+    expect(nameSpan(row).openTag).toContain('lang="en"');
+    expect(titleSpan(row).openTag).toContain('lang="en"');
+  });
+
+  it("does not tag the Turkish 'Hürriyet' (only 'Hürriyet Daily News' is English)", () => {
+    const html = render({ ...TIMELINE, points: [point("Hürriyet", "bagimsiz", 1_000, 0), POINT_B, POINT_C] });
+    const row = fullListRows(html)[0] ?? "";
+    expect(row).not.toContain("lang=");
+  });
+
+  it("tags only the name and title: the zone sr-only label and the '(toplayıcı / niş)' tag stay Turkish", () => {
+    const nonVotingEnglish = point("Daily Sabah", "bagimsiz", 500, 10, false);
+    const html = render({ ...TIMELINE, points: [nonVotingEnglish, ...POINTS] });
+    const row = fullListRows(html)[0] ?? "";
+    expect(row.split("lang=").length - 1).toBe(2);
+    expect(spanWithClass(row, "sr-only").openTag).not.toContain("lang=");
+    expect(spanWithClass(row, "whitespace-nowrap").openTag).not.toContain("lang=");
+  });
+
+  it("never puts lang on the outbound anchor", () => {
+    const row = fullListRows(render(withEnglish))[0] ?? "";
+    const anchorOpen = row.slice(row.indexOf("<a "), row.indexOf(">", row.indexOf("<a ")) + 1);
+    expect(anchorOpen.startsWith("<a ")).toBe(true);
+    expect(anchorOpen).not.toContain("lang=");
+  });
+
+  it("leaves the axis-marker tooltips (title=) and the summary sentence untouched", () => {
+    const html = render(withEnglish);
+    expect(html).toContain(
+      `title="Daily Sabah · ${ZONE_META.iktidar.label} · 09:12 · Daily Sabah başlığı"`,
+    );
+    const axisAndSummary = html.slice(0, html.indexOf("<details"));
+    expect(axisAndSummary).not.toContain("lang=");
+  });
+
+  it("emits no lang at all for an all-Turkish timeline", () => {
+    expect(render(TIMELINE)).not.toContain("lang=");
+  });
+});
