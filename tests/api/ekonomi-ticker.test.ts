@@ -554,10 +554,10 @@ describe("generateMetadata — a timeout is not 'Hisse bulunamadı'", () => {
 import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
 
 describe("probe filters (h11-finance-1)", () => {
-  it("the company probe selects kap_member_oid,shares_traded", async () => {
-    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true }], error: null };
+  it("the company probe selects kap_member_oid,shares_traded,title", async () => {
+    probeState.company = { data: [{ kap_member_oid: "kap-1", shares_traded: true, title: "TÜRK HAVA YOLLARI A.O." }], error: null };
     await generateMetadata({ params: Promise.resolve({ ticker: "THYAO" }) });
-    expect(probeLog.companySelect).toEqual(["kap_member_oid,shares_traded"]);
+    expect(probeLog.companySelect).toEqual(["kap_member_oid,shares_traded,title"]);
   });
 
   it("the kap_disclosures fallback probe sends the combined stock_codes OR related_stocks or(), never contains()", async () => {
@@ -613,6 +613,77 @@ describe("generateMetadata — error shells and thin tickers (h11-finance-4)", (
     probeState.articles = { data: [{ ticker: "KOZAL" }], error: null };
     const m = await generateMetadata({ params: Promise.resolve({ ticker: "KOZAL" }) });
     expect(m.robots).toEqual({ index: false, follow: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-17: the title, the description and the H1 name the company.
+// ---------------------------------------------------------------------------
+
+describe("generateMetadata — names the company (hunt-17)", () => {
+  it("puts the short company name in the title, the description and the share cards", async () => {
+    probeState.company = { data: [{ kap_member_oid: "k", shares_traded: true, title: "ARÇELİK A.Ş." }], error: null };
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "arclk" }) });
+
+    const title = "Arçelik (ARCLK) hisse haberleri ve KAP bildirimleri";
+    expect(metadata.title).toBe(title);
+    expect(metadata.description).toBe(
+      "Arçelik (ARCLK) hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.",
+    );
+    expect(metadata.openGraph).toMatchObject({ url: "/ekonomi/ARCLK", title: `${title} — Tayf` });
+    expect(metadata.twitter).toMatchObject({ title: `${title} — Tayf` });
+    expect(metadata.openGraph?.description).toBe(metadata.description);
+    expect(metadata.alternates?.canonical).toBe("/ekonomi/ARCLK");
+    expect(metadata.robots).toBeUndefined();
+  });
+
+  it("keeps an acronym and the Turkish capitals in the name (BİM Birleşik Mağazalar)", async () => {
+    probeState.company = { data: [{ kap_member_oid: "k", shares_traded: true, title: "BİM BİRLEŞİK MAĞAZALAR A.Ş." }], error: null };
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "BIMAS" }) });
+    expect(String(metadata.title).startsWith("BİM Birleşik Mağazalar (BIMAS)")).toBe(true);
+    expect(metadata.title).toBe("BİM Birleşik Mağazalar (BIMAS) hisse haberleri ve KAP bildirimleri");
+  });
+
+  it("names the company on a thin (noindex) page too, and keeps its robots", async () => {
+    probeState.company = { data: [{ kap_member_oid: "k", shares_traded: true, title: "KAP TEST A.Ş." }], error: null };
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "KTEST" }) });
+    expect(metadata.title).toBe("KAP Test (KTEST) hisse haberleri ve KAP bildirimleri");
+    expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.alternates?.canonical).toBe("/ekonomi/KTEST");
+  });
+
+  it.each([
+    ["a row without a title", { kap_member_oid: "k", shares_traded: true }],
+    ["a null title", { kap_member_oid: "k", shares_traded: true, title: null }],
+    ["a non-string title", { kap_member_oid: "k", shares_traded: true, title: 7 }],
+    ["a title that is only a legal form", { kap_member_oid: "k", shares_traded: true, title: "A.Ş." }],
+    ["a blank title", { kap_member_oid: "k", shares_traded: true, title: "   " }],
+  ])("falls back to the ticker-only strings for %s", async (_label, row) => {
+    probeState.company = { data: [row], error: null };
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "ASELS" }) });
+    expect(metadata.title).toBe("ASELS — hisse haberleri ve KAP bildirimleri");
+    expect(metadata.description).toBe("ASELS hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.");
+    expect(metadata.robots).toBeUndefined();
+  });
+
+  it("falls back to the ticker-only strings for a ticker that has no company row", async () => {
+    probeState.company = { data: [], error: null };
+    probeState.articles = { data: [{ ticker: "ZZZZZZ" }], error: null };
+    const metadata = await generateMetadata({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+    expect(metadata.title).toBe("ZZZZZZ — hisse haberleri ve KAP bildirimleri");
+    expect(metadata.description).toBe("ZZZZZZ hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.");
+  });
+
+  it("never puts the company name into the not-found or unknown shells", async () => {
+    probeState.company = { data: [], error: null };
+    const missing = await generateMetadata({ params: Promise.resolve({ ticker: "ZZZZZZ" }) });
+    expect(missing.title).toBe("Hisse bulunamadı");
+    expect(missing.description).toBeUndefined();
+
+    probeState.company = { data: null, error: TIMEOUT };
+    const unknown = await generateMetadata({ params: Promise.resolve({ ticker: "ARCLK" }) });
+    expect(unknown.title).toBe("Hisse sayfası şu anda yüklenemiyor");
+    expect(unknown.description).toBeUndefined();
   });
 });
 
@@ -833,5 +904,57 @@ describe("honest window labels (h11-finance-3)", () => {
     expect(panelMeta(full, "Haberler")).toBe("son 60 haber");
     const some = await renderTicker("ISMEN", { articles: Array.from({ length: 13 }, (_, i) => article(i)), articlesTruncated: false });
     expect(panelMeta(some, "Haberler")).toBe("13 haber");
+  });
+});
+
+describe("the H1 names the company (hunt-17)", () => {
+  const h1Of = (els: El[]) => els.find((e) => e.type === "h1");
+  const company = (title: string, ticker: string) => ({
+    kapMemberOid: "kap-1",
+    tickers: [ticker],
+    title,
+    city: "İstanbul",
+    sharesTraded: true,
+  });
+
+  it("reads 'Arçelik ARCLK' with the ticker in a mono span, and keeps the full legal title below", async () => {
+    const els = await renderTicker("ARCLK", { company: company("ARÇELİK A.Ş.", "ARCLK") });
+
+    const h1 = h1Of(els);
+    expect(h1).toBeDefined();
+    expect(textOfNode(h1)).toBe("Arçelik ARCLK");
+    const tickerSpan = collectEls(h1).find(
+      (e) => e.type === "span" && String(e.props.className ?? "").includes("font-mono"),
+    );
+    expect(tickerSpan).toBeDefined();
+    expect(textOfNode(tickerSpan!.props.children)).toBe("ARCLK");
+    expect(String(h1!.props.className)).toContain("text-3xl");
+
+    // The legal name stays in the subtitle paragraph.
+    const subtitle = els.find((e) => e.type === "p" && textOfNode(e.props.children) === "ARÇELİK A.Ş.");
+    expect(subtitle).toBeDefined();
+  });
+
+  it("falls back to the old ticker-only H1 when the company title yields no name", async () => {
+    const els = await renderTicker("KTEST", { company: company("X A.Ş.", "KTEST") });
+    const h1 = h1Of(els);
+    expect(textOfNode(h1)).toBe("KTEST");
+    expect(String(h1!.props.className)).toContain("font-mono");
+    expect(String(h1!.props.className)).toContain("text-brand");
+  });
+
+  it("is exactly the ticker (the old markup) when there is no company row", async () => {
+    const els = await renderTicker("ZZZZZZ", { company: null });
+    const h1 = h1Of(els);
+    expect(textOfNode(h1)).toBe("ZZZZZZ");
+    expect(String(h1!.props.className)).toContain("font-mono");
+    expect(String(h1!.props.className)).toContain("text-brand");
+    expect(els.some((e) => e.type === "p" && textOfNode(e.props.children) === "Şirket kaydı bulunamadı")).toBe(true);
+  });
+
+  it("keeps the breadcrumb on the bare ticker", async () => {
+    const els = await renderTicker("ARCLK", { company: company("ARÇELİK A.Ş.", "ARCLK") });
+    const nav = els.find((e) => e.type === "nav");
+    expect(textOfNode(nav!.props.children)).toBe("Ekonomi/ARCLK");
   });
 });

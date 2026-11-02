@@ -22,8 +22,9 @@ const UNAVAILABLE_COPY = "Kelime karşılaştırması şu anda hesaplanamıyor."
 // (tests/guards/week-archive-copy.test.ts scans this file for it).
 const INSUFFICIENT_COPY = "Son 7 günde kelime karşılaştırması için yeterli başlık yok.";
 const EMPTY_ZONE_COPY = "Son 7 günde belirgin şekilde öne çıkan kelime yok.";
-const Z_TOOLTIP =
-  "Belirginlik puanı (z). 1,96 ve üstü istatistiksel olarak anlamlı sayılır.";
+// Visible legend (not a hover-only title) so keyboard, touch and screen-reader
+// users get the meaning of the "z 5,6" figure on every row.
+const Z_LEGEND = "z: belirginlik puanı; 1,96 ve üstü istatistiksel olarak anlamlı sayılır.";
 
 const HTTP_URL_RE = /^https?:\/\//i;
 
@@ -47,6 +48,7 @@ export function DistinctiveWords({ data }: { data: WeeklyDistinctiveWords | null
         <p className={metaClass}>{INSUFFICIENT_COPY}</p>
       ) : (
         <>
+          <p className={metaClass}>{Z_LEGEND}</p>
           <div className="grid gap-4 sm:grid-cols-3">
             {ZONE_ORDER.map((zone) => (
               <ZoneColumn key={zone} zone={zone} terms={data.zones[zone]} />
@@ -80,9 +82,10 @@ function ZoneColumn({
         <ol className="space-y-2 list-decimal list-inside">
           {terms.map((term) => (
             <li key={term.term} className="text-sm text-foreground/90">
-              <span title={Z_TOOLTIP}>
-                <span className="font-medium">{term.display}</span>
-                {` · ${term.count} başlık · z ${formatZ(term.z)}`}
+              <span className="font-medium">{term.display}</span>
+              <span aria-hidden="true">{` · ${term.count} başlık · z ${formatZ(term.z)}`}</span>
+              <span className="sr-only">
+                {`, ${term.count} başlık, belirginlik puanı ${formatZ(term.z)}`}
               </span>
               {term.example ? (
                 <div className={metaClass}>

@@ -1,6 +1,7 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   buildClusterCollectionPage,
+  buildRegistryDataset,
   buildSiteJsonLd,
   buildTayfOrganization,
   serializeJsonLd,
@@ -160,5 +161,70 @@ describe("buildClusterCollectionPage", () => {
     };
     expect(parsed.name).toBe(evil);
     expect(parsed.mainEntity.itemListElement[0]!.name).toBe(evil);
+  });
+});
+
+describe("buildRegistryDataset", () => {
+  it("passes a supplied dateModified through untouched", () => {
+    const ds = buildRegistryDataset({ dateModified: "2026-10-20T08:00:00.000Z" });
+
+    expect(ds.dateModified).toBe("2026-10-20T08:00:00.000Z");
+  });
+
+  it("omits the dateModified key when the change time is null", () => {
+    const ds = buildRegistryDataset({ dateModified: null });
+
+    expect("dateModified" in ds).toBe(false);
+  });
+
+  it("omits the dateModified key when none is given", () => {
+    const ds = buildRegistryDataset({});
+
+    expect("dateModified" in ds).toBe(false);
+  });
+
+  it("omits the dateModified key for an empty string rather than emitting a blank date", () => {
+    const ds = buildRegistryDataset({ dateModified: "" });
+
+    expect("dateModified" in ds).toBe(false);
+  });
+
+  it("keeps the rest of the Dataset shape whether or not a date is known", () => {
+    process.env.NEXT_PUBLIC_SITE_URL = "https://tayf.test";
+    for (const options of [{ dateModified: "2026-10-20T08:00:00.000Z" }, {}]) {
+      const ds = buildRegistryDataset(options);
+
+      expect(ds["@context"]).toBe("https://schema.org");
+      expect(ds["@type"]).toBe("Dataset");
+      expect(ds.name).toBe("Tayf Kaynak Kaydı");
+      expect(ds.license).toBe("https://creativecommons.org/licenses/by-sa/4.0/");
+      expect(ds.distribution["@type"]).toBe("DataDownload");
+      expect(ds.distribution.encodingFormat).toBe("application/json");
+      expect(ds.distribution.contentUrl).toBe("https://tayf.test/api/sources");
+      expect(ds.distribution.contentUrl.endsWith("/api/sources")).toBe(true);
+    }
+  });
+
+  it("never reads the clock: the output is identical under two different system times", () => {
+    vi.useFakeTimers();
+    try {
+      const options = { dateModified: "2026-10-20T08:00:00.000Z" };
+      vi.setSystemTime(Date.parse("2026-11-01T09:30:00.000Z"));
+      const first = JSON.stringify(buildRegistryDataset(options));
+      vi.setSystemTime(Date.parse("2027-03-05T17:45:00.000Z"));
+      const second = JSON.stringify(buildRegistryDataset(options));
+
+      expect(second).toBe(first);
+
+      vi.setSystemTime(Date.parse("2026-11-01T09:30:00.000Z"));
+      const unknownFirst = JSON.stringify(buildRegistryDataset({ dateModified: null }));
+      vi.setSystemTime(Date.parse("2027-03-05T17:45:00.000Z"));
+      const unknownSecond = JSON.stringify(buildRegistryDataset({ dateModified: null }));
+
+      expect(unknownSecond).toBe(unknownFirst);
+      expect(unknownFirst).not.toContain("2026-11-01");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

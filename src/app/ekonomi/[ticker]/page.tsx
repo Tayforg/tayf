@@ -9,6 +9,7 @@ import { IntradayChart } from "@/components/finance/intraday-chart";
 import { KapPickupPanel } from "@/components/finance/kap-pickup-panel";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { AttentionBars, Sparkline } from "@/components/finance/sparkline";
+import { companyDisplayName } from "@/lib/finance/company-display-name";
 import { tickerDisclosureOr } from "@/lib/finance/disclosure-filter";
 import {
   articleCountLabel,
@@ -104,6 +105,9 @@ const NOT_FOUND_METADATA: Metadata = errorShellMetadata("Hisse bulunamadı");
  * h11-finance-4: the company read also selects `shares_traded`, returned as
  * `company` so generateMetadata can keep thin tickers (no company row, not
  * traded, under 4 characters, KTEST) out of the index; see isThinTicker.
+ * hunt-17: it also selects `title` (the KAP legal name) so generateMetadata can
+ * name the company in the <title> and the description. The probe is cache()d
+ * and shared with the body, so this adds a column, not a round trip.
  * h11-finance-1: the kap_disclosures fallback uses the same stock_codes OR
  * related_stocks filter as the readers, so a ticker whose only trace is a
  * related_stocks-only notice (a halt, a ban) still exists. That OR is only
@@ -115,8 +119,11 @@ type TickerExistence = "exists" | "missing" | "unknown";
 
 interface TickerProbe {
   existence: TickerExistence;
-  /** The company row's trade flag; null when the ticker has no company row. */
-  company: { sharesTraded: boolean } | null;
+  /**
+   * The company row's trade flag and KAP legal title; null when the ticker has
+   * no company row. `title` is null when the row carries none.
+   */
+  company: { sharesTraded: boolean; title: string | null } | null;
 }
 
 const tickerExistence = cache(async (ticker: string): Promise<TickerProbe> => {
@@ -124,15 +131,23 @@ const tickerExistence = cache(async (ticker: string): Promise<TickerProbe> => {
     const supabase = await createFinanceServerClient({ timeoutMs: READER_TIMEOUT_MS });
     const { data: companyRows, error: companyError } = await supabase
       .from("bist_companies")
-      .select("kap_member_oid,shares_traded")
+      .select("kap_member_oid,shares_traded,title")
       .contains("tickers", [ticker])
       .limit(1);
     if (companyError) {
       console.error(`[ekonomi] tickerExistence: bist_companies probe failed: ${companyError.message}`);
       return { existence: "unknown", company: null };
     }
-    const companyRow = ((companyRows ?? []) as Array<{ shares_traded?: boolean | null }>)[0];
-    if (companyRow) return { existence: "exists", company: { sharesTraded: companyRow.shares_traded === true } };
+    const companyRow = ((companyRows ?? []) as Array<{ shares_traded?: boolean | null; title?: unknown }>)[0];
+    if (companyRow) {
+      return {
+        existence: "exists",
+        company: {
+          sharesTraded: companyRow.shares_traded === true,
+          title: typeof companyRow.title === "string" ? companyRow.title : null,
+        },
+      };
+    }
 
     const [articlesRes, disclosuresRes] = await Promise.all([
       supabase.from("article_tickers").select("ticker").eq("ticker", ticker).limit(1),
@@ -177,9 +192,16 @@ export async function generateMetadata({ params }: { params: Promise<{ ticker: s
     // the index. The page body throws, so the error boundary renders.
     return errorShellMetadata("Hisse sayfası şu anda yüklenemiyor");
   }
+  // hunt-17: name the company when the probe row has a usable title; the
+  // ticker-only strings stay for a ticker with no company row or no title.
+  const name = companyDisplayName(company?.title);
   const metadata = sharePageMetadata({
-    title: `${ticker} — hisse haberleri ve KAP bildirimleri`,
-    description: `${ticker} hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.`,
+    title: name
+      ? `${name} (${ticker}) hisse haberleri ve KAP bildirimleri`
+      : `${ticker} — hisse haberleri ve KAP bildirimleri`,
+    description: name
+      ? `${name} (${ticker}) hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.`
+      : `${ticker} hissesini anan haberler, son fiyat, 30 günlük basın ilgisi ve KAP bildirimleri.`,
     path: `/ekonomi/${ticker}`,
   });
   // A page for a code that does not trade (KTEST, TGB, KOZAL, passive
@@ -257,6 +279,8 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
   ) : null;
   const volume = halted ? null : rvolLabel(stat, intraday.day);
   const metaLine = companyMetaLine(page.company);
+  // hunt-17: the H1 names the company when the KAP title yields a short name.
+  const displayName = companyDisplayName(page.company?.title);
   // h11-finance-3: the list is cut at DISCLOSURE_CAP, so "son 30 gün" is only
   // true while it is not full.
   const windowLabel = disclosureWindowLabel(page.disclosures.length, page.totalDisclosures30d, DISCLOSURE_CAP);
@@ -280,7 +304,14 @@ export default async function TickerPage({ params }: { params: Promise<{ ticker:
 
       <header className="grid gap-4 border border-border bg-black/25 px-4 py-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
         <div className="min-w-0 space-y-1">
-          <h1 className="font-mono text-3xl leading-none text-brand">{ticker}</h1>
+          {displayName ? (
+            <h1 className="text-3xl leading-none text-foreground">
+              {displayName}{" "}
+              <span className="font-mono text-brand">{ticker}</span>
+            </h1>
+          ) : (
+            <h1 className="font-mono text-3xl leading-none text-brand">{ticker}</h1>
+          )}
           <p className="truncate text-[13px] text-foreground/90">{page.company?.title ?? "Şirket kaydı bulunamadı"}</p>
           {metaLine ? <p className="font-mono text-[11px] text-muted-foreground">{metaLine}</p> : null}
         </div>

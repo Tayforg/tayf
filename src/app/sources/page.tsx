@@ -58,11 +58,14 @@ import type { BiasCategory, Source } from "@/types";
 // first request after every deploy ran the function cold path plus the
 // uncached directory read and weekly-count aggregate itself (4.4-5.6 s total
 // against 0.5 s warm). Now the body has no clock and no request API: every
-// clock-dependent value (the JSON-LD `dateModified`, the "N/M kaynak"
-// delivering figure, each card's "3 saat önce" label) is stamped INSIDE the
-// cached read, at fill time, so the build fills the cache and ships the
-// finished page. A label can therefore be as old as the cache window (5 min
-// revalidate) — the same freshness the weekly counts already had.
+// clock-dependent value (the "N/M kaynak" delivering figure, each card's
+// "3 saat önce" label) is stamped INSIDE the cached read, at fill time, so the
+// build fills the cache and ships the finished page. A label can therefore be
+// as old as the cache window (5 min revalidate) — the same freshness the
+// weekly counts already had. The JSON-LD `dateModified` is the exception: it
+// is NOT clock-derived. It is the registry's last change time, read from the
+// database (registryModifiedAt), so it stays put across cache fills and is
+// left out when it cannot be known.
 //
 // Cached for 5 minutes (`source-directory`) — the source directory shifts on
 // the order of weeks, and the recent-activity counter only needs to feel
@@ -94,11 +97,16 @@ type GroupedSources = Record<BiasCategory, SourceRow[]>;
 /** What one directory read returns: the rows plus every value derived from the clock. */
 interface SourcesDirectory {
   grouped: GroupedSources;
-  /** ISO instant the read completed — the dataset JSON-LD's `dateModified`. */
-  fetchedAtIso: string;
+  /**
+   * When the registry last changed, as an ISO instant: the dataset JSON-LD's
+   * `dateModified`. Derived from the database (see registryModifiedAt), never
+   * from the clock; null when it cannot be known, in which case the key is
+   * left out of the JSON-LD.
+   */
+  registryModifiedIso: string | null;
   /** Voting-kind sources (outlet, wire): the denominator of every share. */
   votingSources: number;
-  /** Of those, how many delivered inside FEED_YIELD_WINDOW_MS at `fetchedAtIso`. */
+  /** Of those, how many delivered inside FEED_YIELD_WINDOW_MS at the fill-time clock. */
   votingDelivering: number;
 }
 
@@ -115,6 +123,29 @@ function emptyGrouped(): GroupedSources {
     opposition: [],
     nationalist: [],
   };
+}
+
+/**
+ * When the source registry last changed: the latest of the given timestamps,
+ * as an ISO string. Callers pass every active source's `created_at` and
+ * `zone_rationale_at` plus the newest `source_zone_history.changed_at` (that
+ * table is append-only, one origin row per source plus one per bias change —
+ * migration 055 — so it is what captures a changed label; `sources` itself has
+ * no updated_at). Null, undefined and unparseable values are skipped; null
+ * when nothing usable is left. Pure: it never reads the clock, so the same
+ * rows give the same answer however often the cache is refilled.
+ */
+export function registryModifiedAt(
+  values: ReadonlyArray<string | null | undefined>,
+): string | null {
+  let latestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (!value) continue;
+    const ms = Date.parse(value);
+    if (Number.isNaN(ms)) continue;
+    if (ms > latestMs) latestMs = ms;
+  }
+  return Number.isFinite(latestMs) ? new Date(latestMs).toISOString() : null;
 }
 
 /**
@@ -187,25 +218,52 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
     Date.now() - 7 * 24 * 60 * 60 * 1000,
   ).toISOString();
 
-  const { data, error } = await supabase
-    .from("sources")
-    .select(
-      "id, name, slug, url, rss_url, bias, logo_url, active, kind, latest:articles(published_at)",
-    )
-    .eq("active", true)
-    .gte("latest.published_at", sevenDaysAgo)
-    .order("published_at", { referencedTable: "latest", ascending: false })
-    .limit(1, { referencedTable: "latest" })
-    .order("name", { ascending: true });
+  // The newest zone-history row rides along in parallel: one row of a tiny
+  // append-only table, so it adds no round-trip of its own.
+  const [{ data, error }, history] = await Promise.all([
+    supabase
+      .from("sources")
+      .select(
+        "id, name, slug, url, rss_url, bias, logo_url, active, kind, created_at, zone_rationale_at, latest:articles(published_at)",
+      )
+      .eq("active", true)
+      .gte("latest.published_at", sevenDaysAgo)
+      .order("published_at", { referencedTable: "latest", ascending: false })
+      .limit(1, { referencedTable: "latest" })
+      .order("name", { ascending: true }),
+    supabase
+      .from("source_zone_history")
+      .select("changed_at")
+      .order("changed_at", { ascending: false })
+      .limit(1),
+  ]);
 
   if (error) {
     throw new Error(`sources query failed: ${error.message}`);
   }
 
   type Row = Source & {
+    created_at: string | null;
+    zone_rationale_at: string | null;
     latest: Array<{ published_at: string }>;
   };
   const sourceRows = (data ?? []) as unknown as Row[];
+
+  // dateModified: the latest of every active row's created_at and
+  // zone_rationale_at and the newest zone-history change. An unreadable history
+  // is NOT fatal (the directory is still worth rendering) but it does void the
+  // value: a max over the rows alone would understate the change time, and a
+  // too-early date is worse than none.
+  let registryModifiedIso: string | null = null;
+  if (history.error) {
+    console.warn(`[sources] zone history unreadable: ${history.error.message}`);
+  } else {
+    registryModifiedIso = registryModifiedAt([
+      ...sourceRows.map((row) => row.created_at),
+      ...sourceRows.map((row) => row.zone_rationale_at),
+      (history.data as Array<{ changed_at: string | null }> | null)?.[0]?.changed_at,
+    ]);
+  }
 
   // "Now" is read AFTER the rows are in hand: an article ingested while a slow
   // read was in flight must not look future-dated against an earlier clock.
@@ -217,7 +275,14 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
   for (const source of sourceRows) {
     const bias = source.bias as BiasCategory;
     if (!(bias in grouped)) continue;
-    const { latest, ...rest } = source;
+    // created_at / zone_rationale_at only feed registryModifiedIso above; they
+    // are dropped here so SourceRow keeps the shape it always had.
+    const {
+      latest,
+      created_at: _createdAt,
+      zone_rationale_at: _rationaleAt,
+      ...rest
+    } = source;
     const lastPublishedAt = latest[0]?.published_at ?? null;
     grouped[bias].push({
       ...rest,
@@ -230,7 +295,7 @@ async function readSourcesDirectory(): Promise<SourcesDirectory> {
 
   return {
     grouped,
-    fetchedAtIso: new Date(nowMs).toISOString(),
+    registryModifiedIso,
     ...deriveDirectoryStats(grouped, nowMs),
   };
 }
@@ -308,7 +373,7 @@ export default async function SourcesPage() {
     );
   }
 
-  const { grouped, fetchedAtIso, votingSources, votingDelivering } =
+  const { grouped, registryModifiedIso, votingSources, votingDelivering } =
     result.directory;
 
   const totalSources = BIAS_ORDER.reduce(
@@ -332,10 +397,11 @@ export default async function SourcesPage() {
   const karne = isClickbaitPublic() ? await getClickbaitKarne() : null;
 
   // S-17: Dataset JSON-LD describing the source registry this page renders.
-  // `dateModified` is the instant the directory was read (stamped in the
-  // cached read), not a clock read of this body.
+  // `dateModified` is when the registry last changed, derived from the
+  // database in the cached read (registryModifiedAt), not a clock read: it does
+  // not move when the cache refills, and the key is omitted when unknown.
   const registryDataset = buildRegistryDataset({
-    dateModified: fetchedAtIso,
+    dateModified: registryModifiedIso,
   });
 
   return (

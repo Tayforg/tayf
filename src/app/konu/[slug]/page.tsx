@@ -25,7 +25,7 @@ import {
   type TopicSlug,
 } from "@/lib/clusters/topic-query";
 import { topicPageRobots } from "@/lib/clusters/topic-page-robots";
-import { serializeJsonLd } from "@/lib/seo/json-ld";
+import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
 import { currentTimeMs } from "@/lib/time";
 
 // /konu/[slug] — Pack C ("Konu") hub. Six static params (TOPIC_SLUGS);
@@ -150,14 +150,21 @@ export default async function TopicHubPage({
       {/* Shared contract (pack.md:217) places this CollectionPage script on
           /konu/[slug] unconditionally. Deliberate divergence: it is only
           rendered once there is at least one bundle to list — an ItemList
-          with numberOfItems: 0 adds nothing for the null/empty states. */}
+          with numberOfItems: 0 adds nothing for the null/empty states. One
+          script, two nodes: the CollectionPage and the BreadcrumbList
+          (Anasayfa > Konular > label), the same pair /gundem/[key] ships. */}
       {result !== null && result.bundles.length > 0 ? (
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{
-            __html: serializeJsonLd(
+            __html: serializeJsonLd([
               buildTopicCollectionPage({ slug, bundles: result.bundles }),
-            ),
+              buildBreadcrumbs([
+                { name: "Anasayfa", path: "/" },
+                { name: "Konular", path: "/konu" },
+                { name: label, path: `/konu/${slug}` },
+              ]),
+            ]),
           }}
         />
       ) : null}
