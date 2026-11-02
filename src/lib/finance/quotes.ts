@@ -45,37 +45,90 @@ interface YahooChart {
         currency?: string;
         regularMarketTime?: number;
       };
+      /** Epoch seconds, index-aligned with `indicators.quote[0].close`. */
+      timestamp?: Array<number | null>;
       indicators?: { quote?: Array<{ close?: Array<number | null> }> };
     }> | null;
     error?: unknown;
   };
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * Istanbul calendar day number for an epoch-millisecond instant. Istanbul has
+ * been fixed at UTC+3 (no DST) since 2016, so a constant offset is exact.
+ * Local on purpose: session.ts keeps its own `istDay` private.
+ */
+function istanbulDay(ms: number): number {
+  return Math.floor((ms + 3 * 3_600_000) / DAY_MS);
+}
+
+/**
+ * Close of the latest bar that belongs to an Istanbul day earlier than the
+ * quote's own session day (`regularMarketTime`), or null when that cannot be
+ * derived. `rawCloses` must be the unfiltered array: the timestamp array is
+ * index-aligned with it, and dropping the null bars first would shift every
+ * index. Requires `timestamps` to be an array of the same length.
+ */
+function previousSessionClose(
+  rawCloses: ReadonlyArray<number | null>,
+  timestamps: ReadonlyArray<number | null> | undefined,
+  regularMarketTime: number | undefined,
+): number | null {
+  if (!Array.isArray(timestamps) || timestamps.length !== rawCloses.length) return null;
+  if (typeof regularMarketTime !== "number" || !Number.isFinite(regularMarketTime)) return null;
+  const sessionDay = istanbulDay(regularMarketTime * 1000);
+  for (let i = rawCloses.length - 1; i >= 0; i--) {
+    const close = rawCloses[i];
+    const ts = timestamps[i];
+    if (typeof close !== "number" || !Number.isFinite(close) || close <= 0) continue;
+    if (typeof ts !== "number" || !Number.isFinite(ts)) continue;
+    if (istanbulDay(ts * 1000) < sessionDay) return close;
+  }
+  return null;
+}
+
 export function parseYahooChart(ticker: string, json: unknown): Quote | null {
   const r = (json as YahooChart)?.chart?.result?.[0];
   const meta = r?.meta;
   if (!meta || typeof meta.regularMarketPrice !== "number") return null;
-  const closes = (r.indicators?.quote?.[0]?.close ?? []).filter(
+  const rawCloses = r.indicators?.quote?.[0]?.close ?? [];
+  const closes = rawCloses.filter(
     (c): c is number => typeof c === "number" && Number.isFinite(c),
   );
   const price = meta.regularMarketPrice;
 
-  // Ordered fallback chain for the previous-session baseline (TS-09):
-  //   1. regularMarketChangePercent (already in percent units, e.g.
-  //      0.334 = +0.33%), back-solved for prevClose. Preferred: this is
-  //      Yahoo's own live reference against the actual previous session.
-  //   2. The last two daily closes. NOTE: chartPreviousClose on a
+  // Ordered fallback chain for the previous-session baseline (TS-09, h20):
+  //   1. The last close of an Istanbul day earlier than the quote's own
+  //      session day (regularMarketTime), read off the timestamp array. This
+  //      wins over Yahoo's percent because before the first trade of the day
+  //      Yahoo reports regularMarketChangePercent = 0.0 as a placeholder:
+  //      trusting it showed a fake '%0,00' on every chip and hid Friday's real
+  //      move (and the tavan/taban tag, since prevClose collapsed to price).
+  //      Once today's bar has traded the previous-day close is the same base
+  //      Yahoo's own percent uses, so the open-session number is unchanged.
+  //      Unavailable when the timestamp array is missing or misaligned,
+  //      regularMarketTime is missing, or no earlier-day close exists.
+  //   2. regularMarketChangePercent (already in percent units, e.g.
+  //      0.334 = +0.33%), back-solved for prevClose. This is Yahoo's own live
+  //      reference against the actual previous session.
+  //   3. The last two daily closes. NOTE: chartPreviousClose on a
   //      range=5d request is the close from *before the whole 5-day
   //      window*, not yesterday's close — using it here would badly
   //      misstate "bugün" for names that have moved over the window. This
   //      fallback can also show yesterday's move (close[-2] to close[-1])
   //      before today's bar exists, e.g. pre-market with no trades yet.
-  //   3. chartPreviousClose, but only for a genuine 1-day chart (at most
+  //   4. chartPreviousClose, but only for a genuine 1-day chart (at most
   //      one close), where it *is* the prior session's close.
   let changePct = NaN;
   let prevClose = NaN;
   let hasBaseline = true;
-  if (typeof meta.regularMarketChangePercent === "number" && Number.isFinite(meta.regularMarketChangePercent)) {
+  const sessionBaseline = previousSessionClose(rawCloses, r.timestamp, meta.regularMarketTime);
+  if (sessionBaseline !== null) {
+    prevClose = sessionBaseline;
+    changePct = ((price - prevClose) / prevClose) * 100;
+  } else if (typeof meta.regularMarketChangePercent === "number" && Number.isFinite(meta.regularMarketChangePercent)) {
     changePct = meta.regularMarketChangePercent;
     prevClose = price / (1 + changePct / 100);
   } else if (closes.length >= 2) {

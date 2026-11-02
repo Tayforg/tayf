@@ -97,7 +97,10 @@ describe("SavedMixCard ok state", () => {
     const scored = html(SCORED_ROWS);
     expect(out).toContain("Denge puanı");
     expect(scored).toContain("Denge puanı 63/100");
-    expect(scored).toContain("Tek tarafa yakın");
+    // INTENDED FLIP (hunt-20 numbers-2): SCORED_ROWS is 3 iktidar / 3 bağımsız,
+    // an even two-zone split, so it is no longer "Tek tarafa yakın".
+    expect(scored).toContain("İki tarafa dengeli");
+    expect(scored).not.toContain("Tek tarafa yakın");
     expect(scored).toContain('href="/metodoloji#denge-puani"');
     expect(scored).toContain("Denge puanı nedir?");
   });

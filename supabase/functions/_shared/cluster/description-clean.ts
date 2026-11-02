@@ -23,6 +23,11 @@
 // removes that furniture. cleanDescription() applies it first, then the ticker
 // cut, and src/lib/articles/summary-tidy.ts imports the same function to tidy
 // the summary at read time, so the clustering text and the shown text agree.
+//
+// WordPress also ends an excerpt with " [&hellip;]" (hunt 20, h20-live-4: on-haber
+// 174 of 177 descriptions in 48 h, "... Bu çalışmaların ardından […]"). A TRAILING
+// marker is not text: stripFeedWrappers() turns it into one "…" (or drops it after
+// a sentence mark). A marker anywhere else is left alone.
 
 // A ticker line: "Son dakika", "SON DAKİKA" or "Son Dakika" at the start of a
 // line (leading blanks allowed), followed by 1-3 dots, an ellipsis, a colon or
@@ -55,7 +60,11 @@ const DIKEN_HEADER = / \d{2}\.\d{2}\.\d{4} Diken(?!\p{Ll})/u;
 const DIKEN_HEADER_WINDOW = 340;
 const DIKEN_HEADER_MAX_INDEX = 300;
 
-/** Upper bound on how many times the three rules are re-applied (a doubled footer). */
+// WordPress excerpt marker, in the four spellings feeds ship it in: the literal
+// ellipsis, three dots, and the two HTML entities for the ellipsis.
+const EXCERPT_MARKERS = ["[…]", "[...]", "[&#8230;]", "[&hellip;]"] as const;
+
+/** Upper bound on how many times the four rules are re-applied (a doubled footer). */
 const MAX_WRAPPER_PASSES = 3;
 
 function isBlank(code: number): boolean {
@@ -116,9 +125,32 @@ function stripDikenHeader(text: string): string {
 }
 
 /**
- * Remove the Diken header and the WordPress / Yoast footers that two feeds wrap
- * around a description. The footers go first, then the header. Returns the SAME
- * string when nothing matches, '' when the text was only a footer, and is
+ * A WordPress excerpt marker ("[…]", "[...]", "[&#8230;]", "[&hellip;]") at the
+ * very end, blanks and newlines after it allowed: it stands for "the text goes
+ * on", so it becomes one "…" glued to the last word. After a sentence mark (. ! ?
+ * or …) the sentence is already closed and the marker is just dropped, and a text
+ * that was only the marker gives ''. A marker anywhere but the end is ordinary
+ * text; the SAME string is returned when there is no trailing marker.
+ */
+function stripExcerptMarker(text: string): string {
+  const t = text.trimEnd();
+  for (const marker of EXCERPT_MARKERS) {
+    if (!t.endsWith(marker)) continue;
+    const head = t.slice(0, t.length - marker.length).trimEnd();
+    if (head === "") return "";
+    const last = head.charAt(head.length - 1);
+    if (last === "." || last === "!" || last === "?" || last === "…") return head;
+    return head + "…";
+  }
+  return text;
+}
+
+/**
+ * Remove the Diken header, the WordPress / Yoast footers and the trailing
+ * WordPress excerpt marker ("[…]") that feeds wrap around a description. The
+ * footers go first, then the header, then the marker (a marker that sat in front
+ * of a footer is trailing once the footer is gone). Returns the SAME string when
+ * nothing matches, '' when the text was only a footer or a marker, and is
  * idempotent (the rules are re-applied until nothing changes, at most
  * {@link MAX_WRAPPER_PASSES} times).
  */
@@ -126,7 +158,7 @@ export function stripFeedWrappers(text: string): string {
   if (!text) return text;
   let out = text;
   for (let pass = 0; pass < MAX_WRAPPER_PASSES; pass++) {
-    const next = stripDikenHeader(stripYoastFooter(stripWordPressFooter(out)));
+    const next = stripExcerptMarker(stripDikenHeader(stripYoastFooter(stripWordPressFooter(out))));
     if (next === out) break;
     out = next;
   }
@@ -139,7 +171,8 @@ export function cleanDescription(d: string | undefined): string | undefined;
 export function cleanDescription(d: string | null | undefined): string | null | undefined;
 export function cleanDescription(d: string | null | undefined): string | null | undefined {
   if (!d) return d;
-  // Feed wrappers first (Diken / Serbestiyet), then the ticker cut.
+  // Feed wrappers first (Diken / Serbestiyet footers, the trailing […] excerpt
+  // marker), then the ticker cut.
   const text = stripFeedWrappers(d);
   // The first line can never be a ticker block: the ticker is appended to an
   // article, so a "Son dakika..." opening is the article's own text.

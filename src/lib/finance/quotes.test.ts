@@ -9,6 +9,7 @@ vi.mock("next/cache", () => ({ cacheLife: vi.fn() }));
 import { cacheLife } from "next/cache";
 import { fmtPct, fmtWhen, fmtX, limitFlag, moveClass, pctChange } from "./format";
 import { getQuotes, parseYahooChart, YahooQuoteSource } from "./quotes";
+import { chartBaseline, marketCueText } from "./session";
 
 // Shape captured from query1.finance.yahoo.com on 2026-09-13 for THYAO.IS.
 const SAMPLE = {
@@ -181,6 +182,257 @@ describe("parseYahooChart hasBaseline", () => {
     expect(q.hasBaseline).toBe(false);
     expect(q.changePct).toBe(0);
     expect(q.prevClose).toBe(300.25);
+  });
+});
+
+// h20-numbers-1: before the first BIST trade of the day Yahoo reports
+// regularMarketChangePercent = 0 as a placeholder, which used to render a fake
+// '%0,00' and suppress the tavan/taban tag. The baseline is now the last close
+// of an earlier Istanbul day than the quote's own session (timestamp array),
+// and only falls back to Yahoo's percent when that cannot be derived.
+describe("parseYahooChart pre-open baseline", () => {
+  const epoch = (y: number, m: number, d: number, h: number, min: number, s = 0): number =>
+    Date.UTC(y, m - 1, d, h, min, s) / 1000;
+
+  // 26, 27, 28 and 30 Oct 2026 plus the (pre-open, null-close) 2 Nov bar.
+  // 29 Oct is a holiday, so there is no bar for it.
+  const FIVE_DAYS = [
+    epoch(2026, 10, 26, 6, 30),
+    epoch(2026, 10, 27, 6, 30),
+    epoch(2026, 10, 28, 6, 30),
+    epoch(2026, 10, 30, 6, 30),
+    epoch(2026, 11, 2, 6, 30),
+  ];
+  const LAST_SESSION = epoch(2026, 10, 30, 15, 9, 57);
+  const OPEN_SESSION = epoch(2026, 11, 2, 7, 14);
+
+  interface ChartInput {
+    price: number;
+    pct?: number;
+    time?: number;
+    chartPreviousClose?: number;
+    closes: Array<number | null>;
+    timestamp?: Array<number | null>;
+  }
+  const chart = (i: ChartInput) => ({
+    chart: {
+      result: [
+        {
+          meta: {
+            currency: "TRY",
+            regularMarketPrice: i.price,
+            ...(i.pct === undefined ? {} : { regularMarketChangePercent: i.pct }),
+            ...(i.time === undefined ? {} : { regularMarketTime: i.time }),
+            ...(i.chartPreviousClose === undefined ? {} : { chartPreviousClose: i.chartPreviousClose }),
+          },
+          ...(i.timestamp === undefined ? {} : { timestamp: i.timestamp }),
+          indicators: { quote: [{ close: i.closes }] },
+        },
+      ],
+      error: null,
+    },
+  });
+
+  const bimasPreOpen = (over: Partial<ChartInput> = {}): ChartInput => ({
+    price: 347.5,
+    pct: 0,
+    time: LAST_SESSION,
+    chartPreviousClose: 380,
+    closes: [374.5, 363, 364.75, 347.5, null],
+    timestamp: FIVE_DAYS,
+    ...over,
+  });
+
+  it("BIMAS pre-open: Yahoo's 0 placeholder is replaced by the real last-session move", () => {
+    const q = parseYahooChart("BIMAS", chart(bimasPreOpen()))!;
+    expect(q.changePct).toBeCloseTo(-4.729, 2);
+    expect(q.prevClose).toBe(364.75);
+    expect(q.hasBaseline).toBe(true);
+    expect(limitFlag(q.changePct, q.prevClose, q.price)).toBeNull();
+    expect(q.closes).toEqual([374.5, 363, 364.75, 347.5]);
+    expect(q.currency).toBe("TRY");
+  });
+
+  it("DOAS pre-open: the +9.95 percent limit-up is back and tagged tavan", () => {
+    const q = parseYahooChart(
+      "DOAS",
+      chart(bimasPreOpen({ price: 149.2, closes: [128.4, 134.3, 135.7, 149.2, null] })),
+    )!;
+    expect(q.changePct).toBeCloseTo(9.948, 2);
+    expect(q.prevClose).toBe(135.7);
+    expect(q.hasBaseline).toBe(true);
+    expect(limitFlag(q.changePct, q.prevClose, q.price)).toBe("tavan");
+    expect(q.closes).toEqual([128.4, 134.3, 135.7, 149.2]);
+  });
+
+  it("open session: today's bar is on the session day, so the baseline is the previous close and Yahoo's 0.647 is reproduced", () => {
+    const q = parseYahooChart(
+      "BIMAS",
+      chart({
+        price: 349.75,
+        pct: 0.647,
+        time: OPEN_SESSION,
+        chartPreviousClose: 380,
+        closes: [374.5, 363, 364.75, 347.5, 349.75],
+        timestamp: FIVE_DAYS,
+      }),
+    )!;
+    expect(q.changePct).toBeCloseTo(0.647, 2);
+    expect(q.prevClose).toBe(347.5);
+    expect(q.hasBaseline).toBe(true);
+    expect(q.closes).toEqual([374.5, 363, 364.75, 347.5, 349.75]);
+  });
+
+  it("a genuine flat day (today's bar equals yesterday's close) stays a measured 0 with a baseline", () => {
+    const q = parseYahooChart(
+      "BIMAS",
+      chart({
+        price: 347.5,
+        pct: 0,
+        time: epoch(2026, 11, 2, 8, 0),
+        closes: [374.5, 363, 364.75, 347.5, 347.5],
+        timestamp: FIVE_DAYS,
+      }),
+    )!;
+    expect(q.changePct).toBe(0);
+    expect(q.prevClose).toBe(347.5);
+    expect(q.hasBaseline).toBe(true);
+  });
+
+  it("asOf stays the quote's own regularMarketTime", () => {
+    const q = parseYahooChart("BIMAS", chart(bimasPreOpen()))!;
+    expect(q.asOf).toBe("2026-10-30T15:09:57.000Z");
+  });
+
+  it("callers: the freshness label still reads the unchanged asOf, and the quote's prevClose is the right dashed baseline for the last session", () => {
+    const q = parseYahooChart("BIMAS", chart(bimasPreOpen()))!;
+    // Pre-open (09:51 Istanbul) and mid-morning before today's quote refresh (10:08).
+    expect(marketCueText(q.asOf, Date.parse("2026-11-02T06:51:00Z"))).toBe("Piyasa kapalı · son seans 30.10");
+    expect(marketCueText(q.asOf, Date.parse("2026-11-02T07:08:00Z"))).toBe("Veriler gecikmeli · son seans 30.10");
+    // No daily stat row: the chart falls back to the quote's prevClose, which is
+    // now 28 Oct's close (the base of the 30 Oct move) rather than 347.5.
+    expect(chartBaseline({ stat: null, intradayDay: "2026-10-30", quotePrevClose: q.prevClose })).toBe(364.75);
+  });
+
+  it("measures the session day in Istanbul (UTC+3), not UTC", () => {
+    // 1 Nov 21:30Z is already 2 Nov 00:30 in Istanbul: it belongs to the
+    // session day of a 2 Nov quote and must not be taken as the baseline.
+    const q = parseYahooChart(
+      "BIMAS",
+      chart({
+        price: 349.75,
+        pct: 0,
+        time: OPEN_SESSION,
+        closes: [363, 364.75, 347.5, 349.75],
+        timestamp: [epoch(2026, 10, 27, 6, 30), epoch(2026, 10, 28, 6, 30), epoch(2026, 10, 30, 6, 30), epoch(2026, 11, 1, 21, 30)],
+      }),
+    )!;
+    expect(q.prevClose).toBe(347.5);
+    expect(q.changePct).toBeCloseTo(0.647, 2);
+  });
+
+  it("skips bars that are null, non-positive or have no usable timestamp when scanning back", () => {
+    const q = parseYahooChart(
+      "BIMAS",
+      chart({
+        price: 349.75,
+        pct: 0,
+        time: OPEN_SESSION,
+        closes: [374.5, 363, 364.75, 0, 349.75],
+        timestamp: FIVE_DAYS,
+      }),
+    )!;
+    expect(q.prevClose).toBe(364.75);
+
+    const nullTs = parseYahooChart(
+      "BIMAS",
+      chart({
+        price: 349.75,
+        pct: 0,
+        time: OPEN_SESSION,
+        closes: [374.5, 363, 364.75, 347.5, 349.75],
+        timestamp: [FIVE_DAYS[0]!, FIVE_DAYS[1]!, FIVE_DAYS[2]!, null, FIVE_DAYS[4]!],
+      }),
+    )!;
+    expect(nullTs.prevClose).toBe(364.75);
+    expect(nullTs.changePct).toBeCloseTo(((349.75 - 364.75) / 364.75) * 100, 6);
+  });
+
+  describe("falls back to the old chain (regularMarketChangePercent first)", () => {
+    it("BIMAS with the timestamp array removed keeps Yahoo's 0", () => {
+      const q = parseYahooChart("BIMAS", chart(bimasPreOpen({ timestamp: undefined })))!;
+      expect(q.changePct).toBe(0);
+      expect(q.prevClose).toBe(347.5);
+      expect(q.hasBaseline).toBe(true);
+    });
+
+    it("timestamp length differs from the close length", () => {
+      const q = parseYahooChart("BIMAS", chart(bimasPreOpen({ timestamp: FIVE_DAYS.slice(0, 4) })))!;
+      expect(q.changePct).toBe(0);
+      expect(q.prevClose).toBe(347.5);
+    });
+
+    it("regularMarketTime is missing", () => {
+      const q = parseYahooChart("BIMAS", chart(bimasPreOpen({ time: undefined })))!;
+      expect(q.changePct).toBe(0);
+      expect(q.prevClose).toBe(347.5);
+    });
+
+    it("no earlier-day non-null close exists (all bars on the session day)", () => {
+      const day = epoch(2026, 11, 2, 6, 30);
+      const q = parseYahooChart(
+        "BIMAS",
+        chart({
+          price: 349.75,
+          pct: 0.647,
+          time: OPEN_SESSION,
+          closes: [null, 349.75],
+          timestamp: [day, day + 60],
+        }),
+      )!;
+      expect(q.changePct).toBeCloseTo(0.647, 6);
+      expect(q.prevClose).toBeCloseTo(349.75 / (1 + 0.647 / 100), 6);
+    });
+
+    it("earlier-day bars exist but every close is null", () => {
+      const q = parseYahooChart(
+        "BIMAS",
+        chart(bimasPreOpen({ closes: [null, null, null, null, null], pct: 0.647 })),
+      )!;
+      expect(q.changePct).toBeCloseTo(0.647, 6);
+    });
+
+    it("no timestamps and no Yahoo percent still uses the last two closes", () => {
+      const q = parseYahooChart(
+        "BIMAS",
+        chart(bimasPreOpen({ pct: undefined, timestamp: undefined, closes: [374.5, 363, 364.75, 347.5] })),
+      )!;
+      expect(q.prevClose).toBe(364.75);
+      expect(q.changePct).toBeCloseTo(-4.729, 2);
+    });
+  });
+
+  describe("TS-13 guard still applies", () => {
+    it("pct -100 with no usable timestamps gives hasBaseline false and changePct 0", () => {
+      for (const timestamp of [undefined, FIVE_DAYS.slice(0, 2)]) {
+        const q = parseYahooChart("BIMAS", chart(bimasPreOpen({ pct: -100, timestamp, chartPreviousClose: undefined })))!;
+        expect(q.hasBaseline).toBe(false);
+        expect(q.changePct).toBe(0);
+        expect(q.prevClose).toBe(347.5);
+        expect(Number.isFinite(q.prevClose)).toBe(true);
+      }
+    });
+
+    it("pct -100 with timestamps but no earlier-day close gives hasBaseline false", () => {
+      const day = epoch(2026, 11, 2, 6, 30);
+      const q = parseYahooChart(
+        "BIMAS",
+        chart({ price: 349.75, pct: -100, time: OPEN_SESSION, closes: [349.75], timestamp: [day] }),
+      )!;
+      expect(q.hasBaseline).toBe(false);
+      expect(q.changePct).toBe(0);
+      expect(q.prevClose).toBe(349.75);
+    });
   });
 });
 

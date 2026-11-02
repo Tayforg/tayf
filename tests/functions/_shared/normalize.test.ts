@@ -1564,3 +1564,78 @@ describe("normalize.ts category wiring [hunt-19]", () => {
     expect(row!.category).toBe("genel");
   });
 });
+
+// ---------------------------------------------------------------------------
+// hunt-20 (2026-11-02): the politics gate. Smoke tests of the wiring only; the
+// rule tables live in classify-category.test.ts.
+// ---------------------------------------------------------------------------
+
+describe("normalize.ts category wiring [hunt-20]", () => {
+  const NOW = Date.parse("2026-11-02T06:00:00Z");
+  const PUB = "Mon, 02 Nov 2026 05:00:00 GMT";
+
+  it("a generic office word that only the description carries no longer makes a story politika", () => {
+    const row = mod!.normalizeItem(
+      { ...source, slug: "milliyet", url: "https://www.milliyet.com.tr" },
+      {
+        title: "11 ilde sahte kanser ilacı operasyonu! 22 gözaltı",
+        link: "https://www.milliyet.com.tr/gundem/11-ilde-sahte-kanser-ilaci-operasyonu-22-gozalti-7692400",
+        contentSnippet: "Bakan Gürlek operasyona dair şu detayları paylaştı.",
+        pubDate: PUB,
+      },
+      NOW,
+    );
+    expect(row).not.toBeNull();
+    expect(row!.category).not.toBe("politika");
+    expect(row!.category).not.toBe("son_dakika");
+  });
+
+  it("the same word in the headline still makes it politika", () => {
+    const item = {
+      title: "Bakan Gürlek operasyonu duyurdu",
+      link: "https://www.milliyet.com.tr/gundem/bakan-gurlek-operasyonu-duyurdu-1",
+      contentSnippet: "22 gözaltı.",
+      pubDate: PUB,
+    };
+    const withBakan = mod!.normalizeItem({ ...source, slug: "milliyet" }, item, NOW);
+    expect(withBakan!.category).toBe("politika");
+    const without = mod!.normalizeItem({ ...source, slug: "milliyet" }, { ...item, title: "Gürlek operasyonu duyurdu" }, NOW);
+    expect(without!.category).not.toBe("politika");
+  });
+
+  it("a 'son dakika' SEO suffix is not son_dakika, a leading 'SON DAKİKA' with a political remainder is", () => {
+    const seo = mod!.normalizeItem(
+      { ...source, slug: "haberler-com", url: "https://www.haberler.com" },
+      {
+        title: "İstanbul'da deprem mi oldu? SON DAKİKA! 2 Kasım İstanbul'da az önce nerede deprem oldu?",
+        link: "https://www.haberler.com/haber/istanbulda-deprem-mi-oldu-son-dakika-2-kasim-20386514-haberi/",
+        pubDate: PUB,
+      },
+      NOW,
+    );
+    expect(seo!.category).toBe("yasam");
+    const breaking = mod!.normalizeItem(
+      { ...source, slug: "cnn-turk", url: "https://www.cnnturk.com" },
+      {
+        title: "SON DAKİKA! Bakan Gürlek duyurdu: 22 şüpheli gözaltına alındı",
+        link: "https://www.cnnturk.com/turkiye/son-dakika-bakan-gurlek-duyurdu-1",
+        pubDate: PUB,
+      },
+      NOW,
+    );
+    expect(breaking!.category).toBe("son_dakika");
+  });
+
+  it("the Öcalan process is politika from the headline alone", () => {
+    const row = mod!.normalizeItem(
+      source,
+      {
+        title: "Buldan, Öcalan’ın yeni çalışma alanına ilişkin konuştu",
+        link: "https://dokuz8haber.net/buldan-ocalanin-yeni-calisma-alanina-iliskin-konustu",
+        pubDate: PUB,
+      },
+      NOW,
+    );
+    expect(row!.category).toBe("politika");
+  });
+});

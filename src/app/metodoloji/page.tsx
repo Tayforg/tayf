@@ -10,6 +10,7 @@ import {
   BALANCE_LABELS,
   BALANCE_MIN_SOURCES,
   BALANCE_ONE_SIDED_MAX,
+  BALANCE_TWO_ZONE_MIN_SHARE,
 } from "@/lib/bias/balance";
 import {
   BIAS_LABELS,
@@ -399,7 +400,8 @@ export default async function MethodologyPage() {
             çubuğunda olduğu gibi, hesaba katılmaz. Puan, üç bölgenin
             paylarının normalleştirilmiş Shannon entropisidir: tek bölgeden
             gelen kapsama 0, üç bölgeye eşit dağılan kapsama 100 alır; iki
-            bölgeye eşit bölünen bir küme yaklaşık 63 alır.
+            bölgeye eşit bölünen bir küme yaklaşık 63 alır ve “
+            {BALANCE_LABELS.iki}” olarak etiketlenir.
           </p>
           <p className="max-w-[65ch] rounded-lg ring-1 ring-border/50 bg-muted/20 px-3 py-2 font-mono text-xs text-foreground leading-relaxed">
             Formül: puan = 100 × (−Σ pᵢ · ln pᵢ) / ln 3 — pᵢ, bir bölgenin oy
@@ -411,9 +413,19 @@ export default async function MethodologyPage() {
               <dd className={ruleDef}>Puan ≥ {BALANCE_BALANCED_MIN}</dd>
             </div>
             <div className={ruleCard}>
+              <dt className={ruleTerm}>{BALANCE_LABELS.iki}</dt>
+              <dd className={ruleDef}>
+                Puan {BALANCE_ONE_SIDED_MAX + 1}–{BALANCE_BALANCED_MIN - 1};
+                kaynaklar yalnızca iki bölgede ve küçük bölgenin payı en az %
+                {Math.round(BALANCE_TWO_ZONE_MIN_SHARE * 100)}. Kapsama iki
+                bölgeye dengeli bölünmüş; üçüncü bölge yok.
+              </dd>
+            </div>
+            <div className={ruleCard}>
               <dt className={ruleTerm}>{BALANCE_LABELS.yakin}</dt>
               <dd className={ruleDef}>
-                {BALANCE_ONE_SIDED_MAX + 1}–{BALANCE_BALANCED_MIN - 1}
+                {BALANCE_ONE_SIDED_MAX + 1}–{BALANCE_BALANCED_MIN - 1} (iki
+                bölgeye dengeli bölünme hariç)
               </dd>
             </div>
             <div className={ruleCard}>

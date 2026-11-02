@@ -22,6 +22,16 @@ import type { BiasDistribution, MediaDnaZone } from "@/types";
 // description of breadth, not a quality grade, and it never feeds a sort
 // order (home / blindspots / konu ordering is unchanged).
 //
+// Tier words. The score is a breadth number, so on its own it cannot tell an
+// even split between TWO camps (İktidar 4 / Muhalefet 4: score 63) from a
+// lopsided one (7 / 1 / 0: score 34), and both used to read "Tek tarafa
+// yakın". `balanceFromZoneCounts` therefore adds the tier "iki"
+// ("İki tarafa dengeli"): the score sits in the middle band (34-66), exactly
+// two zones have sources, and the smaller of the two holds at least
+// BALANCE_TWO_ZONE_MIN_SHARE of the voters. It only changes the WORD: scores,
+// sort orders and `balanceTier(score)` (which sees the score alone) are
+// unchanged.
+//
 // Below BALANCE_MIN_SOURCES voting sources no score is computed: with four
 // votes "one side ignored it" and "nobody has picked it up yet" cannot be told
 // apart -- the same floor the blindspot rule uses.
@@ -32,11 +42,17 @@ export const BALANCE_BALANCED_MIN = 67;
 export const BALANCE_ONE_SIDED_MAX = 33;
 /** Fewer voting sources than this and no score is computed. */
 export const BALANCE_MIN_SOURCES = BLINDSPOT.minSources;
+/**
+ * Share of the voters the smaller of exactly two non-empty zones needs for the
+ * coverage to read "İki tarafa dengeli" rather than "Tek tarafa yakın".
+ */
+export const BALANCE_TWO_ZONE_MIN_SHARE = 0.4;
 
-export type BalanceTier = "dengeli" | "yakin" | "tek";
+export type BalanceTier = "dengeli" | "iki" | "yakin" | "tek";
 
 export const BALANCE_LABELS: Record<BalanceTier, string> = {
   dengeli: "Dengeli kapsama",
+  iki: "İki tarafa dengeli",
   yakin: "Tek tarafa yakın",
   tek: "Tek tarafta",
 };
@@ -57,6 +73,10 @@ export interface BalanceScore {
 const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 const LN_3 = Math.log(3);
 
+/**
+ * Tier from the score alone. Never returns "iki": that tier needs the zone
+ * counts, see `balanceFromZoneCounts`.
+ */
 export function balanceTier(score: number): BalanceTier {
   if (score >= BALANCE_BALANCED_MIN) return "dengeli";
   if (score <= BALANCE_ONE_SIDED_MAX) return "tek";
@@ -88,7 +108,14 @@ export function balanceFromZoneCounts(
 
   // Math.max(0, ...) also normalises -0 (single-zone coverage: -(1 * ln 1)).
   const score = Math.min(100, Math.max(0, Math.round((100 * entropy) / LN_3)));
-  const tier = balanceTier(score);
+  const nonZero = clean.filter((c) => c > 0);
+  const tier: BalanceTier =
+    score > BALANCE_ONE_SIDED_MAX &&
+    score < BALANCE_BALANCED_MIN &&
+    nonZero.length === 2 &&
+    Math.min(...nonZero) / total >= BALANCE_TWO_ZONE_MIN_SHARE
+      ? "iki"
+      : balanceTier(score);
   return { score, tier, label: BALANCE_LABELS[tier], total };
 }
 

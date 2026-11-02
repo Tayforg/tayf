@@ -30,13 +30,30 @@
 //   2. The haystack is `title + "\n" + description`, with the description cut
 //      before its ticker block. The URL is never part of it: it is read only by
 //      `detectCategoryFromUrl`, and only its path.
-//   3. Order: son_dakika (TITLE only), politika, the URL section, spor, dunya,
-//      ekonomi, teknoloji, yasam, genel. Within politika most words are read in
-//      the title and the description; a few are read in the TITLE only (see
-//      POLITIKA_TITLE_RE) and two small compound rules need two words each.
-//   4. Tokens of three letters or fewer match as whole words; longer stems are
+//   3. `son_dakika` is a PREFIX of the title (SON_DAKIKA_PREFIX_RE: 'son dakika',
+//      'flaş haber', 'breaking', 'acil'), never a word inside it. When it
+//      matches, the REMAINDER of the title is classified through the chain
+//      below with the description; the answer is `son_dakika` only when the
+//      remainder is politika or genel, otherwise the remainder's own category
+//      ('Son dakika | Galatasaray'da ...' is spor). A mid-title 'son dakika'
+//      never counts: it is the SEO suffix of gold prices, 'deprem mi oldu?' and
+//      'X öldü mü?' templates.
+//   4. Order: politika, the URL section, spor, dunya, ekonomi, teknoloji, yasam,
+//      genel. Politika has two kinds of evidence (classifyBody):
+//        * title hit: POLITIKA_RE (unambiguous names and bodies), POLITIKA_TITLE_RE
+//          (generic office and process words: bakan, seçim, hükümet, genel
+//          başkan, İçişleri, ...), a state senate, and the footballer
+//          'Dervişoğlu' unless the title is sport. It beats sport.
+//        * text hit: POLITIKA_RE in the DESCRIPTION, a body (belediye / parti /
+//          İBB) together with an enforcement action, a coalition together with
+//          a party. It does NOT beat a sports title (SPOR_RE, a goal, or a
+//          /spor/ URL section).
+//      The generic words are title-only because in a description they decorate
+//      crime, weather, price and sports stories ('Bakan Gürlek', 'İçişleri
+//      Bakanlığı bildirdi', 'doğru kestane seçiminden').
+//   5. Tokens of three letters or fewer match as whole words; longer stems are
 //      anchored at a word start and may carry any suffix.
-//   5. Three words whose fold collides with another word (gol / göl,
+//   6. Three words whose fold collides with another word (gol / göl,
 //      çin / cin, irak / ırak) are matched on the unfolded lowercase view with
 //      letter boundaries.
 //
@@ -119,30 +136,46 @@ function compile(
   return new RegExp([...parts, ...raw].join("|"));
 }
 
-const SON_DAKIKA_RE =
-  /\bson\s+dakika(?![a-z])|\bflas\s+haber\b|\bbreaking\b(?!\s+bad)|^\s*acil\b/;
+// The breaking-news flag, read at the START of the folded title and swallowing
+// the separator that follows it ('Son dakika | ', 'SON DAKİKA! ', 'Flaş haber: ').
+// 'son dakikada' / 'son dakikalar' and the series 'Breaking Bad' are not it.
+const SON_DAKIKA_PREFIX_RE =
+  /^\s*(?:son\s+dakika(?![a-z])|flas\s+haber(?![a-z])|breaking(?!\s+bad)(?![a-z])|acil(?![a-z]))[\s|:!.…-]*/;
 
+// Unambiguous names and bodies, matched in the title AND the description. The
+// generic office and process words (bakan, seçim, hükümet, genel başkan, ...)
+// are NOT here: see POLITIKA_TITLE_RE.
 const POLITIKA_RE = compile(
   // 'kurtulmus' / 'babacan' are surnames, which take an apostrophe
   // ("Kurtulmuş'tan"): whole words, so the participle 'kurtulmuştu' is not them.
-  ["oy", "chp", "akp", "mhp", "hdp", "kurtulmus", "babacan"],
+  // 'ozdag' is a whole word too ('gozdagi' is a threat); 'pkk' is a token.
+  ["oy", "chp", "akp", "mhp", "hdp", "kurtulmus", "babacan", "pkk", "ozdag"],
   [
-    // 'basbakan' keeps the prime ministers the old substring `bakan` caught
-    "erdogan", "cumhurbaskan", "basbakan", "bakan", "secim", "muhalefet",
-    "hukumet", "milletvekil", "siyaset", "anayasa", "meclis", "tbmm",
-    "ak parti", "dem parti", "yeni parti", "iyi parti",
-    "parti genel", "genel baskan", "il baskan", "belediye baskan",
+    "muhalefet", "milletvekil", "siyaset", "anayasa", "meclis", "tbmm",
+    "ak parti", "dem parti", "yeni parti", "iyi parti", "parti genel",
     // TBMM group deputy chairs. A bare 'baskan vekil' is NOT a stem: clubs and
     // federations have deputy chairs too ('Galatasaray Sportif A.Ş.
     // Başkanvekili') and politika runs before spor.
     "grup baskanvekil", "grup baskan vekil",
-    "icisleri", "disisleri", "kabine",
-    "ozgur ozel", "imamoglu", "mansur yavas", "kilicdaroglu",
-    "sarigul", "davutoglu", "dervisoglu", "bakirhan",
+    "ozgur ozel", "imamoglu", "mansur yavas", "kilicdaroglu", "davutoglu",
+    "bakirhan",
+    // The Öcalan / İmralı process (hunt-20). A bare 'imrali' is NOT a stem: it
+    // is also a place and a prison; 'buldan' and 'sancar' only as the full names
+    // ('Buldan' is a town and a cloth, Aziz Sancar a Nobel laureate).
+    "ocalan", "imrali heyet", "pervin buldan", "mithat sancar", "hatimogullari",
+    "terorsuz turkiye", "surec komisyon",
+    // Parties outside the big five (hunt-20 replay over 48 h of rows: 11 rows
+    // hit 'zafer parti', all of them the party; no victory-party collision).
+    // 'isci parti' also matches a foreign Workers' / Labour party ('Kore İşçi
+    // Partisi'): 1 of the 22 rows the stems added in 48 h.
+    "zafer parti", "saadet parti", "yeniden refah", "deva parti",
+    "gelecek parti", "memleket parti", "buyuk birlik parti", "isci parti",
   ],
   [
     // 'Bahcelievler' is a neighbourhood, not the MHP leader
     "\\bbahceli(?!ev)",
+    // 'Recep Tayyip Erdoğan Stadyumu' / 'Erdoğan Üniversitesi' are venues
+    "\\berdogan(?!\\s+(?:stad|univ))",
   ],
 );
 
@@ -160,13 +193,27 @@ const POLITIKA_RE = compile(
 //   * 'arap partil' / 'sol partil': the foreign-party headlines the reviewer
 //     named. A bare 'partiler' is NOT here: 6 of 6 rows in 48 h were Halloween,
 //     student and baby-shower parties.
+//   * the generic office and process words (hunt-20): 'bakan' (also Bakanlık),
+//     'başbakan', 'cumhurbaşkan', 'seçim', 'hükümet', 'genel / il / belediye
+//     başkan', 'İçişleri', 'Dışişleri', 'kabine', 'Sarıgül'. In a description
+//     they are decoration: 91 of 188 rows that entered the gate in one hour
+//     were admitted by them alone ('Bakan Gürlek' on a cancer-drug raid,
+//     'İçişleri Bakanlığı' on a rain warning, 'ABD seçimleri' on a gold wrap,
+//     'doğru kestane seçiminden' on a recipe).
 const POLITIKA_TITLE_RE = compile(
   [],
   [
     "siyasi", "siyasal", "ibb baskan", "parlamento", "referandum",
     "arap partil", "sol partil",
+    "bakan", "basbakan", "cumhurbaskan", "secim", "hukumet", "genel baskan",
+    "il baskan", "belediye baskan", "icisleri", "disisleri", "kabine",
+    "sarigul",
   ],
 );
+
+// A title word too, unless the title is sport: the footballer 'Halil
+// Dervişoğlu' (the Trabzonspor match report) shares the name of a party leader.
+const TITLE_UNLESS_SPORT_RE = compile([], ["dervisoglu"]);
 
 // 'senato' is a title word too, except for a university senate (4 of 22 rows
 // in the 24 days measured: 'AİÇÜ Senatosu YÖKAK raporunu karara bağladı').
@@ -184,7 +231,11 @@ const UNIVERSITY_RE = /\b(?:universite|rektor|fakulte|yokak)/;
 // vurgun, a BTP visit) and 3 not (two car-park openings, a restoration). 73% is
 // under the 80% bar, and as a text word it also moved 17 rows (a marathon, a
 // car park, Kuyumcu Han). The deputy mayor is covered by 'ibb baskan' above.
-const COMPOUND_BODY_RE = /\b(?:belediye|bakanlik|parti)|\bibb\b/;
+//
+// 'bakanlik' is NOT a body (hunt-20): a ministry together with an operation is
+// crime news ('Bakan Gürlek' announcing a cancer-drug raid). A ministry in the
+// HEADLINE is still politics through POLITIKA_TITLE_RE.
+const COMPOUND_BODY_RE = /\b(?:belediye|parti)|\bibb\b/;
 const COMPOUND_ACTION_RE = /\b(?:sorusturma|gozalti|tutukla|operasyon)/;
 
 // 'koalisyon' alone is the Saudi-led 'Arap Koalisyonu' war ticker (9 of the 11
@@ -297,10 +348,54 @@ export function detectCategoryFromUrl(url: string): NewsCategory | null {
 // Classifier
 // ---------------------------------------------------------------------------
 
+// The chain after the breaking-news prefix: politika, the URL section, spor,
+// dunya, ekonomi, teknoloji, yasam, genel. `titleLower` / `descLower` are the
+// unfolded lowercase views (see lowerView).
+function classifyBody(
+  titleLower: string,
+  descLower: string,
+  url: string,
+): NewsCategory {
+  const titleHay = foldForCategory(titleLower);
+  const descHay = foldForCategory(descLower);
+  const hay = `${titleHay}\n${descHay}`;
+  const lower = `${titleLower}\n${descLower}`;
+  const section = detectCategoryFromUrl(url);
+
+  // A sports headline: a club, a match, a goal, or a /spor/ section.
+  const titleSport =
+    SPOR_RE.test(titleHay) || GOL_RE.test(titleLower) || section === "spor";
+
+  // Evidence in the headline beats sport; evidence only in the text does not.
+  const titleHit =
+    POLITIKA_RE.test(titleHay) ||
+    POLITIKA_TITLE_RE.test(titleHay) ||
+    (SENATO_RE.test(titleHay) && !UNIVERSITY_RE.test(hay)) ||
+    (!titleSport && TITLE_UNLESS_SPORT_RE.test(titleHay));
+  const textHit =
+    POLITIKA_RE.test(descHay) ||
+    (COMPOUND_BODY_RE.test(hay) && COMPOUND_ACTION_RE.test(hay)) ||
+    (COALITION_RE.test(hay) && PARTY_RE.test(hay));
+  if (titleHit || (textHit && !titleSport)) return "politika";
+
+  if (section) return section;
+
+  if (SPOR_RE.test(hay) || GOL_RE.test(lower)) return "spor";
+  if (DUNYA_RE.test(hay) || CIN_RE.test(lower) || IRAK_RE.test(lower)) return "dunya";
+  if (EKONOMI_RE.test(hay)) return "ekonomi";
+  if (TEKNOLOJI_RE.test(hay)) return "teknoloji";
+  if (YASAM_RE.test(hay)) return "yasam";
+  return "genel";
+}
+
 /**
- * Classify an article. `son_dakika` comes from the title alone; then
- * `politika`; then the URL section; then the keyword categories in the order
- * spor, dunya, ekonomi, teknoloji, yasam; else `genel`.
+ * Classify an article. A breaking-news PREFIX of the title ('Son dakika',
+ * 'Flaş haber', 'Breaking', 'Acil') is cut off and the rest of the title is
+ * classified: `son_dakika` when that is politika or genel (so breaking
+ * political news stays in the gate), otherwise the remainder's own category.
+ * Without the prefix: politika; then the URL section; then the keyword
+ * categories in the order spor, dunya, ekonomi, teknoloji, yasam; else
+ * `genel`.
  */
 export function classifyCategory(
   title: string,
@@ -312,28 +407,16 @@ export function classifyCategory(
   const ticker = TICKER_RE.exec(descLower);
   if (ticker) descLower = descLower.slice(0, ticker.index);
 
-  const titleHay = foldForCategory(titleLower);
-  if (SON_DAKIKA_RE.test(titleHay)) return "son_dakika";
+  const prefix = SON_DAKIKA_PREFIX_RE.exec(foldForCategory(titleLower));
+  if (!prefix) return classifyBody(titleLower, descLower, url);
 
-  const lower = `${titleLower}\n${descLower}`;
-  const hay = foldForCategory(lower);
-  if (
-    POLITIKA_RE.test(hay) ||
-    POLITIKA_TITLE_RE.test(titleHay) ||
-    (SENATO_RE.test(titleHay) && !UNIVERSITY_RE.test(hay)) ||
-    (COMPOUND_BODY_RE.test(hay) && COMPOUND_ACTION_RE.test(hay)) ||
-    (COALITION_RE.test(hay) && PARTY_RE.test(hay))
-  ) {
-    return "politika";
-  }
-
-  const section = detectCategoryFromUrl(url);
-  if (section) return section;
-
-  if (SPOR_RE.test(hay) || GOL_RE.test(lower)) return "spor";
-  if (DUNYA_RE.test(hay) || CIN_RE.test(lower) || IRAK_RE.test(lower)) return "dunya";
-  if (EKONOMI_RE.test(hay)) return "ekonomi";
-  if (TEKNOLOJI_RE.test(hay)) return "teknoloji";
-  if (YASAM_RE.test(hay)) return "yasam";
-  return "genel";
+  // The fold is one character for one character after lowerView, so the prefix
+  // length indexes the unfolded view too. If it ever were not, classify the
+  // whole title: the prefix words carry no keyword of their own.
+  const remainder =
+    foldForCategory(titleLower).length === titleLower.length
+      ? titleLower.slice(prefix[0].length)
+      : titleLower;
+  const category = classifyBody(remainder, descLower, url);
+  return category === "politika" || category === "genel" ? "son_dakika" : category;
 }

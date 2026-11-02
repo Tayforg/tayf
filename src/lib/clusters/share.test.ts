@@ -15,14 +15,17 @@ function dist(partial: Partial<BiasDistribution>): BiasDistribution {
 
 describe("buildShareText", () => {
   it("formats article count and zone percents, sign-first", () => {
+    // Fixture fix (hunt-20 numbers-3): this used articleCount 12 over a
+    // distribution of 10 votes, which is now (correctly) a "10 sınıflandırılmış"
+    // head. Equal totals keep the plain format, so the count is 10.
     const text = buildShareText({
-      articleCount: 12,
+      articleCount: 10,
       distribution: dist({ pro_government: 7, center: 2, opposition: 1 }),
       isBlindspot: false,
       blindspotSide: null,
     });
     expect(text).toBe(
-      "12 kaynak · %70 iktidar · %20 bağımsız · %10 muhalefet",
+      "10 kaynak · %70 iktidar · %20 bağımsız · %10 muhalefet",
     );
   });
 
@@ -133,6 +136,8 @@ describe("buildShareText", () => {
     expect(text).not.toContain("kopya");
   });
 
+  // INTENDED FLIP (hunt-20 numbers-3): with nobody classified there is nothing to
+  // take a percent of, so the text says so instead of printing three "%0"s.
   it("handles a zero distribution without throwing", () => {
     const text = buildShareText({
       articleCount: 0,
@@ -140,7 +145,137 @@ describe("buildShareText", () => {
       isBlindspot: false,
       blindspotSide: null,
     });
-    expect(text).toBe("0 kaynak · %0 iktidar · %0 bağımsız · %0 muhalefet");
+    expect(text).toBe("0 kaynak · sınıflandırılmış kaynak yok");
+  });
+
+  describe("classified total vs member count (hunt-20 numbers-3)", () => {
+    it("names the classified total when it is smaller than articleCount", () => {
+      // 14 sources, 3 of them aggregator / niche: the percents are 6/11, 1/11, 4/11.
+      const text = buildShareText({
+        articleCount: 14,
+        distribution: dist({ pro_government: 6, center: 1, opposition: 4 }),
+        isBlindspot: false,
+        blindspotSide: null,
+      });
+      expect(text).toBe(
+        "14 kaynak · 11 sınıflandırılmış: %55 iktidar · %9 bağımsız · %36 muhalefet",
+      );
+    });
+
+    it("says there are no classified sources when the distribution is empty", () => {
+      const text = buildShareText({
+        articleCount: 2,
+        distribution: emptyBiasDistribution(),
+        isBlindspot: false,
+        blindspotSide: null,
+      });
+      expect(text).toBe("2 kaynak · sınıflandırılmış kaynak yok");
+      expect(text).not.toContain("%");
+    });
+
+    it("leaves the text unchanged when the classified total equals articleCount", () => {
+      const text = buildShareText({
+        articleCount: 20,
+        distribution: dist({ pro_government: 12, center: 5, opposition: 3 }),
+        isBlindspot: false,
+        blindspotSide: null,
+      });
+      expect(text).toBe("20 kaynak · %60 iktidar · %25 bağımsız · %15 muhalefet");
+      expect(text).not.toContain("sınıflandırılmış");
+    });
+
+    it("sums several categories of one zone into the classified total", () => {
+      // 3 + 2 iktidar categories + 1 opposition = 6 classified of 9.
+      const text = buildShareText({
+        articleCount: 9,
+        distribution: dist({ pro_government: 3, state_media: 2, opposition: 1 }),
+        isBlindspot: false,
+        blindspotSide: null,
+      });
+      expect(text).toBe(
+        "9 kaynak · 6 sınıflandırılmış: %83 iktidar · %0 bağımsız · %17 muhalefet",
+      );
+    });
+
+    it("appends the blindspot suffix after the new head", () => {
+      const text = buildShareText({
+        articleCount: 5,
+        distribution: dist({ pro_government: 4 }),
+        isBlindspot: true,
+        blindspotSide: "pro_government",
+      });
+      expect(text).toBe(
+        "5 kaynak · 4 sınıflandırılmış: %100 iktidar · %0 bağımsız · %0 muhalefet · Kör nokta: sadece iktidar yazdı",
+      );
+    });
+
+    it("appends the wire suffix after the new head", () => {
+      const text = buildShareText({
+        articleCount: 4,
+        distribution: dist({ pro_government: 2, opposition: 1 }),
+        isBlindspot: false,
+        blindspotSide: null,
+        wire: { isWireRedistribution: true, memberCount: 9 },
+      });
+      expect(text).toBe(
+        "4 kaynak · 3 sınıflandırılmış: %67 iktidar · %0 bağımsız · %33 muhalefet · 9 haber · 4 farklı metin",
+      );
+    });
+
+    it("appends the wire suffix after the no-classified-sources head", () => {
+      const text = buildShareText({
+        articleCount: 2,
+        distribution: emptyBiasDistribution(),
+        isBlindspot: false,
+        blindspotSide: null,
+        wire: { isWireRedistribution: true, memberCount: 7 },
+      });
+      expect(text).toBe(
+        "2 kaynak · sınıflandırılmış kaynak yok · 7 haber · 2 farklı metin",
+      );
+    });
+
+    // Wire clusters: the page passes the distinct-text count as `articleCount`,
+    // so the votes (one per classified member) can outnumber it. The head must
+    // then name the voting total, or %80/%20 would sit next to "2 kaynak".
+    it("names the voting total when classified exceeds articleCount (wire case)", () => {
+      const text = buildShareText({
+        articleCount: 2,
+        distribution: dist({ pro_government: 4, opposition: 1 }),
+        isBlindspot: false,
+        blindspotSide: null,
+        wire: { isWireRedistribution: true, memberCount: 7 },
+      });
+      expect(text).toBe(
+        "2 kaynak · 5 sınıflandırılmış haber: %80 iktidar · %0 bağımsız · %20 muhalefet · 7 haber · 2 farklı metin",
+      );
+    });
+
+    it("names the voting total for a single-text wire with mixed outlets", () => {
+      const text = buildShareText({
+        articleCount: 1,
+        distribution: dist({ pro_government: 4, opposition: 4 }),
+        isBlindspot: false,
+        blindspotSide: null,
+        wire: { isWireRedistribution: true, memberCount: 8 },
+      });
+      expect(text).toBe(
+        "1 kaynak · 8 sınıflandırılmış haber: %50 iktidar · %0 bağımsız · %50 muhalefet · 8 kopya · tek kaynak",
+      );
+    });
+
+    it("keeps the plain head when a wire cluster's votes equal articleCount", () => {
+      const text = buildShareText({
+        articleCount: 5,
+        distribution: dist({ pro_government: 4, opposition: 1 }),
+        isBlindspot: false,
+        blindspotSide: null,
+        wire: { isWireRedistribution: true, memberCount: 9 },
+      });
+      expect(text).toBe(
+        "5 kaynak · %80 iktidar · %0 bağımsız · %20 muhalefet · 9 haber · 5 farklı metin",
+      );
+    });
   });
 });
 
