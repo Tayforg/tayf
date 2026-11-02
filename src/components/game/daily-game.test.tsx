@@ -77,6 +77,36 @@ describe("DailyGame — source guard: guess fetch is fire-and-forget", () => {
   });
 });
 
+describe("DailyGame — source guard: a guess is POSTed only the first time a headline is answered", () => {
+  const start = source.indexOf("const handleGuess = useCallback(");
+  const end = source.indexOf("const finishRound = useCallback(");
+  const body = source.slice(start, end);
+
+  it("handleGuess gates the fetch with markAnswered(current.articleId)", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const gateAt = body.indexOf("if (markAnswered(current.articleId)) {");
+    const fetchAt = body.indexOf('fetch("/api/oyun"');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(fetchAt).toBeGreaterThan(gateAt);
+    expect(body.slice(fetchAt)).toContain("}).catch(() => {});");
+  });
+
+  it("the mark, the reveal and the announcement still run for an already answered headline", () => {
+    const gateAt = body.indexOf("if (markAnswered(current.articleId)) {");
+    for (const call of ["setGuessedZone(zone)", "setMarks(", 'setLocalPhase("revealed")', "setAnnouncement("]) {
+      const at = body.indexOf(call);
+      expect(at, call).toBeGreaterThan(-1);
+      expect(at, call).toBeLessThan(gateAt);
+    }
+  });
+
+  it("the only /api/oyun call in the file sits behind the gate, and markAnswered comes from answered-headlines", () => {
+    expect(source.split('fetch("/api/oyun"')).toHaveLength(2);
+    expect(source).toContain('from "@/lib/game/answered-headlines"');
+  });
+});
+
 describe("DailyGame — source guard: localStorage", () => {
   it("every localStorage call is wrapped in try/catch", () => {
     expect(source).toContain("window.localStorage");

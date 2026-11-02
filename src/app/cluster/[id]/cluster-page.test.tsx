@@ -44,10 +44,10 @@ import {
 // read-across.ts, ownership-line.tsx, etc.) are erased at compile time, so
 // mocking the runtime export here doesn't touch them.
 //
-// next/navigation: `notFound()` is imported by the page but never invoked
-// in these fixtures (every fixture resolves to a non-null detail) — mocked
-// anyway per the worker brief so importing it never depends on a live
-// Next.js request context.
+// next/navigation: `notFound()` is a spy that does nothing by default (every
+// fixture resolves to a non-null detail); the 404 tests make it throw
+// 'NEXT_NOT_FOUND' the way Next's real one does. Mocked so importing it never
+// depends on a live Next.js request context.
 const getClusterDetail = vi.fn();
 // Records that the page/metadata went through the THROWING variant.
 const getClusterDetailOrThrowSpy = vi.fn();
@@ -1416,6 +1416,9 @@ describe("generateMetadata — seo-3 archived noindex", () => {
 
     const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
     expect(metadata.robots).toEqual({ index: false, follow: true });
+    // An archived cluster keeps its real headline and is never a 404.
+    expect(metadata.title).toBe("Test kümesi");
+    expect(notFound).not.toHaveBeenCalled();
   });
 
   it("leaves robots unset (inherits the root layout) when the cluster is not archived", async () => {
@@ -1817,19 +1820,43 @@ describe("ClusterDetailPage — Bu hikayenin devamı (story thread link)", () =>
 });
 
 // ---------------------------------------------------------------------------
-// A4 — missing-row generateMetadata hygiene: a soft-404 must not carry
-// index,follow or a homepage canonical, even though the page body itself
-// still streams 200 until the DB-backed check (notFound()) runs.
+// A4 — a missing cluster hands its head to not-found.tsx. generateMetadata
+// used to answer the null read with a bespoke noindex "Sayfa bulunamadı"
+// shell. It now calls notFound() itself, so the head carries the not-found.tsx
+// metadata (its own title and description, noindex, no canonical) instead of an
+// inherited homepage description. What this does NOT do is change the wire
+// status: measured on a production build (see the comment above
+// generateMetadata in page.tsx), an unknown valid uuid still answers 200 to
+// Googlebot, bingbot, GPTBot and Chrome alike, because the Suspense shell has
+// already flushed by the time the DB-backed check resolves. There is no SEO
+// regression (noindex stays), but the soft-404 status is NOT fixed here; a wire
+// 404 needs an existence check before streaming (an allowlisted anon RPC plus a
+// src/middleware.ts edit) and stays an open operator decision. Only the null
+// read calls notFound(): a rejected read stays the noindex "yüklenemiyor" shell
+// (see "timeout is not a 404" below).
 // ---------------------------------------------------------------------------
-describe("generateMetadata — missing cluster (A4)", () => {
-  it("returns noindex and no canonical when getClusterDetail resolves null", async () => {
+describe("generateMetadata — missing cluster hands the head to not-found.tsx (A4)", () => {
+  it("calls notFound() once on a null read, and generateMetadata rejects with NEXT_NOT_FOUND", async () => {
     getClusterDetail.mockResolvedValue(null);
+    notFound.mockImplementation(() => {
+      throw new Error("NEXT_NOT_FOUND");
+    });
 
-    const metadata = await generateMetadata({ params: Promise.resolve({ id: "missing" }) });
+    await expect(
+      generateMetadata({ params: Promise.resolve({ id: "a202cbe0-0000-0000-0000-000000000000" }) }),
+    ).rejects.toThrow("NEXT_NOT_FOUND");
+    expect(notFound).toHaveBeenCalledTimes(1);
+  });
 
-    expect(metadata.title).toBe("Sayfa bulunamadı");
-    expect(metadata.robots).toEqual({ index: false, follow: true });
-    expect(metadata.alternates).toEqual({ canonical: null });
+  it("no longer builds the bespoke 'Sayfa bulunamadı' metadata in generateMetadata", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const source = readFileSync(join(here, "page.tsx"), "utf8");
+    const start = source.indexOf("export async function generateMetadata");
+    const end = source.indexOf("export default async function ClusterDetailPage");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+
+    expect(source.slice(start, end)).not.toContain("Sayfa bulunamadı");
   });
 });
 
@@ -2142,8 +2169,10 @@ describe("merged cluster (migration 099)", () => {
   it("returns noindex,follow metadata canonicalised to the survivor", async () => {
     const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
     expect(metadata.robots).toEqual({ index: false, follow: true });
+    expect(metadata.title).toBe("Haber taşındı");
     expect(metadata.alternates?.canonical).toBe(`/cluster/${TARGET}`);
     expect(permanentRedirect).not.toHaveBeenCalled();
+    expect(notFound).not.toHaveBeenCalled();
   });
 
   it("does not redirect a live cluster", async () => {
@@ -2172,7 +2201,9 @@ describe("ClusterDetailPage — timeout is not a 404", () => {
       throw new Error("NEXT_NOT_FOUND");
     });
 
-    await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
+    await expect(
+      generateMetadata({ params: Promise.resolve({ id: "c1" }) }),
+    ).rejects.toThrow("NEXT_NOT_FOUND");
     expect(getClusterDetailOrThrowSpy).toHaveBeenCalledTimes(1);
     expect(getClusterDetailOrThrowSpy).toHaveBeenLastCalledWith("c1");
 
@@ -2201,8 +2232,8 @@ describe("ClusterDetailPage — timeout is not a 404", () => {
       robots: { index: false, follow: true },
       alternates: { canonical: null },
     });
-    // Distinct from the soft-404 shell: this is "try again", not "gone".
-    expect(metadata.title).not.toBe("Sayfa bulunamadı");
+    // "try again", not "gone": a transient read failure must never become a 404.
+    expect(notFound).not.toHaveBeenCalled();
   });
 
   it("still calls notFound() for a genuinely missing cluster (null)", async () => {
@@ -2215,13 +2246,6 @@ describe("ClusterDetailPage — timeout is not a 404", () => {
       ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) }),
     ).rejects.toThrow("NEXT_NOT_FOUND");
     expect(notFound).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the soft-404 metadata for a genuinely missing cluster", async () => {
-    getClusterDetail.mockResolvedValue(null);
-
-    const metadata = await generateMetadata({ params: Promise.resolve({ id: "c1" }) });
-    expect(metadata.title).toBe("Sayfa bulunamadı");
   });
 });
 

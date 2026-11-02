@@ -29,6 +29,16 @@ import { describe, expect, it } from "vitest";
 // edges into those directories: a public client module that imports an admin
 // component or a ui primitive inherits its weight.
 //
+//   R3  For every 'use client' module, the transitive src import closure reaches
+//       no module that imports next/cache, next/headers, server-only or
+//       @/lib/supabase/server, nor any module that declares a "use cache"
+//       directive. Such a module in the client graph does not slow the page, it
+//       FAILS `next build` (Turbopack: "inline use cache in Client Components",
+//       "cacheLife only available in Server Components"). tsc, eslint and
+//       vitest cannot see that boundary, so this is the only CI check for it.
+//       A constant a client component needs (GAME_ROUND_SIZE) therefore lives
+//       in a plain module (src/lib/game/round-size.ts), never in a fetcher.
+//
 // Type-only imports (`import type ...`, `export type ... from`) are erased at
 // build time and do not count.
 //
@@ -47,6 +57,9 @@ const UTILS = "src/lib/utils.ts";
 const UI_SEPARATOR = "src/components/ui/separator.tsx";
 const UI_BADGE = "src/components/ui/badge.tsx";
 const BANNED_MODULES = new Set([UTILS, UI_SEPARATOR, UI_BADGE]);
+// R3: server-only edges. A client module must not reach any of these.
+const SUPABASE_SERVER = "src/lib/supabase/server.ts";
+const SERVER_ONLY_PACKAGES = [/^next\/cache$/, /^next\/headers$/, /^server-only$/];
 const BANNED_PACKAGES = [
   /^tailwind-merge$/,
   /^class-variance-authority$/,
@@ -107,6 +120,24 @@ function importSpecifiers(src: string): string[] {
   return out;
 }
 
+/**
+ * True when a line of the module is a `"use cache"` / `'use cache'` /
+ * `"use cache: remote"` directive. A character scan (no regex over the whole
+ * source): the directive may open the file or sit inside a function body.
+ */
+function hasUseCacheDirective(src: string): boolean {
+  const marker = "use cache";
+  for (const line of blankComments(src).split("\n")) {
+    const t = line.trim();
+    const quote = t[0];
+    if (quote !== '"' && quote !== "'") continue;
+    if (!t.startsWith(marker, 1)) continue;
+    const after = t[1 + marker.length];
+    if (after === quote || after === ":") return true;
+  }
+  return false;
+}
+
 /** `@/x` and relative specifiers -> a file in the map; anything else -> null. */
 function resolveSpecifier(
   from: string,
@@ -144,23 +175,32 @@ interface Analysis {
   r1: string[];
   /** R2 violations: `root -> ... -> offender (reason)`; key is `root -> offender`. */
   r2: Array<{ key: string; message: string }>;
+  /** R3 violations: a client root reaches a server-only module; key is `root -> offender`. */
+  r3: Array<{ key: string; message: string }>;
 }
 
 function analyze(files: Files): Analysis {
   const scanned = [...files.keys()].filter(isScanned).sort();
-  const imports = new Map<string, { internal: string[]; packages: string[] }>();
+  const imports = new Map<
+    string,
+    { internal: string[]; packages: string[]; serverPackages: string[] }
+  >();
 
   const importsOf = (path: string) => {
     let entry = imports.get(path);
     if (!entry) {
       const internal: string[] = [];
       const packages: string[] = [];
+      const serverPackages: string[] = [];
       for (const spec of importSpecifiers(files.get(path) ?? "")) {
         const hit = resolveSpecifier(path, spec, files);
         if (hit) internal.push(hit);
         else if (BANNED_PACKAGES.some((re) => re.test(spec))) packages.push(spec);
+        else if (SERVER_ONLY_PACKAGES.some((re) => re.test(spec))) {
+          serverPackages.push(spec);
+        }
       }
-      entry = { internal, packages };
+      entry = { internal, packages, serverPackages };
       imports.set(path, entry);
     }
     return entry;
@@ -214,7 +254,47 @@ function analyze(files: Files): Analysis {
     }
   }
 
-  return { scanned, clientRoots, r1, r2 };
+  // R3: BFS again from each client root; the first server-only module on a
+  // path is the offender (its own imports are the same finding, so the walk
+  // stops there).
+  const r3: Array<{ key: string; message: string }> = [];
+  for (const root of clientRoots) {
+    const parent = new Map<string, string | null>([[root, null]]);
+    const queue = [root];
+    const chainTo = (node: string): string[] => {
+      const chain: string[] = [];
+      for (let cur: string | null | undefined = node; cur; cur = parent.get(cur)) {
+        chain.unshift(cur);
+      }
+      return chain;
+    };
+    while (queue.length > 0) {
+      const node = queue.shift()!;
+      const reasons: string[] = [];
+      if (node === SUPABASE_SERVER) reasons.push("is the server Supabase client");
+      for (const pkg of importsOf(node).serverPackages) {
+        reasons.push(`imports ${pkg}`);
+      }
+      if (hasUseCacheDirective(files.get(node) ?? "")) {
+        reasons.push('declares a "use cache" function');
+      }
+      if (reasons.length > 0) {
+        r3.push({
+          key: `${root} -> ${node}`,
+          message: `${chainTo(node).join(" -> ")} (${reasons.join(", ")})`,
+        });
+        continue;
+      }
+      for (const dep of importsOf(node).internal) {
+        if (!parent.has(dep)) {
+          parent.set(dep, node);
+          queue.push(dep);
+        }
+      }
+    }
+  }
+
+  return { scanned, clientRoots, r1, r2, r3 };
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +337,15 @@ describe("public client weight (h13-weight-2)", () => {
       offenders.map((v) => v.message),
       "a 'use client' module pulls the class-merging stack into the public bundle; " +
         "use literal classes (see nav-links.tsx separators, bias-badge.tsx)",
+    ).toEqual([]);
+  });
+
+  it("R3: no 'use client' module reaches next/cache, next/headers, server-only, supabase/server or a \"use cache\" function", () => {
+    expect(
+      analysis.r3.map((v) => v.message),
+      "a 'use client' module (transitively) value-imports a server-only module; " +
+        "`next build` fails on it although tsc / eslint / vitest pass. Move what the " +
+        "client needs (a constant, a pure helper) into a plain module, or use `import type`.",
     ).toEqual([]);
   });
 
@@ -398,6 +487,103 @@ describe("mutation: the guard bites", () => {
       }),
     );
     expect(a.r2.map((v) => v.key)).toEqual(["src/components/foo/uses.tsx -> src/lib/utils.ts"]);
+  });
+
+  describe("R3: server-only modules stay out of the client graph", () => {
+    const POOL_SRC = `import { cacheLife } from "next/cache"\nexport const GAME_ROUND_SIZE = 10\nexport async function load() {\n  "use cache"\n  cacheLife("minutes")\n}\n`;
+
+    it("a client file value-importing a next/cache module fails R3 (the h18 zone-guess-game shape)", () => {
+      const a = analyze(
+        tree({
+          "src/components/game/zone.tsx": `"use client"\nimport { GAME_ROUND_SIZE, type GameHeadline } from "@/lib/game/pool"\nexport const Z = GAME_ROUND_SIZE\n`,
+          "src/lib/game/pool.ts": POOL_SRC,
+        }),
+      );
+      expect(a.r3.map((v) => v.key)).toEqual([
+        "src/components/game/zone.tsx -> src/lib/game/pool.ts",
+      ]);
+      expect(a.r3[0]!.message).toBe(
+        'src/components/game/zone.tsx -> src/lib/game/pool.ts (imports next/cache, declares a "use cache" function)',
+      );
+    });
+
+    it("the same client file passes once the constant lives in a plain module and the pool is type-only", () => {
+      const a = analyze(
+        tree({
+          "src/components/game/zone.tsx": `"use client"\nimport type { GameHeadline } from "@/lib/game/pool"\nimport { GAME_ROUND_SIZE } from "@/lib/game/round-size"\nexport const Z = GAME_ROUND_SIZE\n`,
+          "src/lib/game/pool.ts": POOL_SRC,
+          "src/lib/game/round-size.ts": `export const GAME_ROUND_SIZE = 10\n`,
+        }),
+      );
+      expect(a.r3).toEqual([]);
+    });
+
+    it("a transitive chain to supabase/server fails R3 and reports the chain", () => {
+      const a = analyze(
+        tree({
+          "src/lib/supabase/server.ts": `export function createReaderClient() { return null }\n`,
+          "src/lib/q.ts": `import { createReaderClient } from "@/lib/supabase/server"\nexport const q = createReaderClient\n`,
+          "src/lib/mid.ts": `export { q } from "./q"\n`,
+          "src/components/foo/c.tsx": `"use client"\nimport { q } from "@/lib/mid"\nexport const C = q\n`,
+        }),
+      );
+      expect(a.r3.map((v) => v.key)).toEqual([
+        "src/components/foo/c.tsx -> src/lib/supabase/server.ts",
+      ]);
+      expect(a.r3[0]!.message).toBe(
+        "src/components/foo/c.tsx -> src/lib/mid.ts -> src/lib/q.ts -> src/lib/supabase/server.ts (is the server Supabase client)",
+      );
+    });
+
+    it("next/headers, server-only and a file-level 'use cache' (with a profile) each fail R3", () => {
+      const a = analyze(
+        tree({
+          "src/lib/h.ts": `import { cookies } from "next/headers"\nexport const h = cookies\n`,
+          "src/lib/so.ts": `import "server-only"\nexport const so = 1\n`,
+          "src/lib/uc.ts": `'use cache: remote'\nexport const uc = 1\n`,
+          "src/components/foo/a.tsx": `"use client"\nimport { h } from "@/lib/h"\nexport const A = h\n`,
+          "src/components/foo/b.tsx": `"use client"\nimport { so } from "@/lib/so"\nexport const B = so\n`,
+          "src/components/foo/c.tsx": `"use client"\nimport { uc } from "@/lib/uc"\nexport const C = uc\n`,
+        }),
+      );
+      expect(a.r3.map((v) => v.key).sort()).toEqual([
+        "src/components/foo/a.tsx -> src/lib/h.ts",
+        "src/components/foo/b.tsx -> src/lib/so.ts",
+        "src/components/foo/c.tsx -> src/lib/uc.ts",
+      ]);
+    });
+
+    it("a server file importing next/cache is fine when no client module reaches it", () => {
+      const a = analyze(
+        tree({
+          "src/lib/game/pool.ts": POOL_SRC,
+          "src/app/oyun/page.tsx": `import { load } from "@/lib/game/pool"\nexport default load\n`,
+          "src/components/foo/c.tsx": `"use client"\nexport const C = () => null\n`,
+        }),
+      );
+      expect(a.r3).toEqual([]);
+    });
+
+    it("type-only imports, comments and prose strings do not trip R3", () => {
+      const a = analyze(
+        tree({
+          "src/lib/game/pool.ts": POOL_SRC,
+          "src/components/foo/t.tsx": `"use client"\nimport type { load } from "@/lib/game/pool"\n// import { cacheLife } from "next/cache"\nexport const T = 'say "use cache" here'.length\n`,
+          "src/lib/note.ts": `// "use cache"\n/* "use cache" */\nexport const note = 1\n`,
+          "src/components/foo/n.tsx": `"use client"\nimport { note } from "@/lib/note"\nexport const N = note\n`,
+        }),
+      );
+      expect(a.r3).toEqual([]);
+    });
+
+    it("hasUseCacheDirective matches directives only, not look-alikes", () => {
+      expect(hasUseCacheDirective(`"use cache"\nexport const a = 1`)).toBe(true);
+      expect(hasUseCacheDirective(`export async function f() {\n  "use cache";\n}`)).toBe(true);
+      expect(hasUseCacheDirective(`'use cache: private'\n`)).toBe(true);
+      expect(hasUseCacheDirective(`const s = "use cache"`)).toBe(false);
+      expect(hasUseCacheDirective(`"use cached"\n`)).toBe(false);
+      expect(hasUseCacheDirective(`// "use cache"\n`)).toBe(false);
+    });
   });
 
   describe("negative controls (no false positives)", () => {

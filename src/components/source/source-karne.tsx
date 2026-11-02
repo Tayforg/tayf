@@ -3,7 +3,11 @@ import Link from "next/link";
 import { ZONE_META } from "@/lib/bias/config";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
 import { formatCountTr } from "@/lib/format/number-tr";
-import { buildKarneView, type SourceKarneRead } from "@/lib/sources/karne";
+import {
+  buildKarneView,
+  clusterCountLine,
+  type SourceKarneRead,
+} from "@/lib/sources/karne";
 
 // "Kapsama karnesi" card on /source/[slug], under the Etiket kartı.
 // Server Component, plain props, no Supabase. Neutral wording only: never
@@ -21,7 +25,11 @@ export function SourceKarneCard({ karne, slug }: SourceKarneCardProps) {
   if (!karne) return null;
 
   const view = buildKarneView(karne);
-  const subtitle = `Son ${karne.windowDays} gün · ${formatDdMmYyyy(karne.windowStart)}–${formatDdMmYyyy(karne.windowEnd)} · n = ${formatCountTr(karne.nClusters)} haber kümesi`;
+  const subtitle = clusterCountLine(
+    karne.windowDays,
+    karne.windowEnd,
+    karne.nClusters,
+  );
 
   return (
     <section className="space-y-4 rounded-xl border border-border/60 bg-card/40 p-5 sm:p-6">

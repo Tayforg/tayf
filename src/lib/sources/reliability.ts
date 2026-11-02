@@ -3,10 +3,13 @@ import { cacheLife, cacheTag } from "next/cache";
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 import { BALANCE_MIN_SOURCES, balanceFromZoneCounts } from "@/lib/bias/balance";
 import { createReaderClient } from "@/lib/supabase/server";
+import { formatCountTr } from "@/lib/format/number-tr";
 import {
   KARNE_MIN_CLUSTERS,
   KARNE_MIN_MULTI_FOR_ZONES,
   KARNE_WINDOW_DAYS,
+  clusterCountLine,
+  formatAsOfTr,
   karneFreshness,
   pct,
   type SourceKarne,
@@ -174,6 +177,17 @@ export interface ReliabilityRow {
   note: string | null;
   /** "Nasıl hesaplanır?" disclosure text. */
   how: string;
+  /**
+   * Where the denominator comes from when it is NOT this card's own row
+   * (only the blindspot share, which divides by the karne's count); null
+   * everywhere else.
+   */
+  basis: string | null;
+}
+
+/** The card's subtitle: window, as-of instant and what the count means. */
+export function reliabilityCountLine(rel: SourceReliability): string {
+  return clusterCountLine(rel.windowDays, rel.windowEnd, rel.nClusters);
 }
 
 const RATE_FORMAT = new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 1 });
@@ -196,6 +210,15 @@ function cadenceValue(rel: SourceReliability): string {
   return `${rate} haber/gün · ${days}/${rel.windowDays} gün yayın`;
 }
 
+// One full sentence that names the role of the number (the share's
+// denominator) and whose count is the karne's, not the card subtitle's. Without
+// a usable instant the "itibarıyla" segment is dropped rather than printed empty.
+function karneBasis(karne: SourceKarne): string {
+  const asOf = formatAsOfTr(karne.windowEnd);
+  const when = asOf === "" ? "" : ` ${asOf} itibarıyla`;
+  return `Oran, Kapsama karnesinin${when} saydığı ${formatCountTr(karne.nClusters)} haber kümesi üzerinden hesaplanır.`;
+}
+
 export function buildReliabilityView(
   rel: SourceReliability,
   karne: SourceKarne | null,
@@ -206,6 +229,7 @@ export function buildReliabilityView(
     value: cadenceValue(rel),
     note: null,
     how: `Son ${rel.windowDays} günün haber sayısı ${rel.windowDays}’a bölünür; etkin gün, en az bir haber yayımlanan gündür (Türkiye saati).`,
+    basis: null,
   };
 
   const wireOpen = rel.nClusters >= RELIABILITY_MIN_CLUSTERS;
@@ -215,6 +239,7 @@ export function buildReliabilityView(
     value: wireOpen ? share(rel.nWireCopy, rel.nClusters) : null,
     note: wireOpen ? null : insufficient(rel.nClusters, RELIABILITY_MIN_CLUSTERS),
     how: "Ajans dağıtımı sayılan kümelerde başlığı ve özeti başka bir kaynakla aynı olan haberlerin payı (haber gövdesi karşılaştırılmaz); yön belirtmez.",
+    basis: null,
   };
 
   let blindspotValue: string | null = null;
@@ -232,6 +257,9 @@ export function buildReliabilityView(
     value: blindspotValue,
     note: blindspotNote,
     how: "Kaynağın yer aldığı haber kümelerinden kör nokta olarak işaretlenenlerin payı (Kapsama karnesiyle aynı sayım).",
+    // The share divides by the karne's own count and instant, which can differ
+    // from the card's subtitle (the two rows are refreshed independently).
+    basis: karne === null ? null : karneBasis(karne),
   };
 
   const diversity = diversityFromZoneMix(rel.zoneMix);
@@ -249,6 +277,7 @@ export function buildReliabilityView(
       ? null
       : insufficient(diversityN, RELIABILITY_MIN_DIVERSITY_CLUSTERS),
     how: `En az ${BALANCE_MIN_SOURCES} oy veren kaynağı olan kümelerin Denge puanı ortalaması (0 tek bölge, 100 üç bölgeye eşit).`,
+    basis: null,
   };
 
   return [cadence, wire, blindspot, diversityRow];

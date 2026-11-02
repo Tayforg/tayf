@@ -114,9 +114,25 @@ interface PageProps {
 // per request), so it's effectively free on warm hits.
 //
 // A timeout is NOT a 404: `getClusterDetailOrThrow` rejects on a sustained
-// read failure and resolves null only for a genuinely missing cluster. The
-// catch below answers a failure with a noindex "unavailable" shell instead
-// of the "Sayfa bulunamadı" soft-404 shell.
+// read failure and resolves null only for a malformed id or a genuinely
+// missing row. The catch below answers a failure with a noindex "unavailable"
+// shell; only the null read calls notFound(), after the catch, so a transient
+// error can never turn into a 404.
+//
+// A4: a missing cluster calls notFound() here instead of returning a bespoke
+// "Sayfa bulunamadı" shell, so the head carries the not-found.tsx metadata
+// (its own title and description, noindex) rather than an inherited homepage
+// description. Measured 2026-11-02 on a production build (`next build` +
+// `next start`, unknown valid uuid): the wire status is still 200 for
+// Googlebot, bingbot, GPTBot and a Chrome UA alike. htmlLimitedBots does make
+// the crawlers block on metadata (the title lands in <head>), but the status
+// is already fixed: Cache Components needs the Suspense boundary of
+// src/app/loading.tsx above any runtime `params` read, so the shell flushes a
+// 200 before this DB-backed check resolves and notFound() only swaps the
+// streamed content. A malformed id is the only wire 404, from the shape gate
+// in src/middleware.ts. A real 404 for an unknown valid id needs a check
+// before streaming (middleware), which that file's header explains and
+// declines for clusters.
 export async function generateMetadata({
   params,
 }: PageProps): Promise<Metadata> {
@@ -132,17 +148,7 @@ export async function generateMetadata({
     };
   }
 
-  if (!detail) {
-    // A4: a missing cluster (bad id, or genuinely deleted) still streams a
-    // 200 shell here — the DB-backed notFound() check runs later in the
-    // page body, after PPR has already flushed — so this soft-404 must at
-    // least carry honest metadata: no homepage canonical, no index,follow.
-    return {
-      title: "Sayfa bulunamadı",
-      robots: { index: false, follow: true },
-      alternates: { canonical: null },
-    };
-  }
+  if (!detail) notFound();
 
   if (detail.cluster.merged_into) {
     // Migration 099: merged clusters are archived; keep them out of the index

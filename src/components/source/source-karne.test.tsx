@@ -31,10 +31,26 @@ function html(k: SourceKarneRead | null, slug = "sozcu"): string {
   return renderToStaticMarkup(createElement(SourceKarneCard, { karne: k, slug }));
 }
 
+// Character scan (not a tag regex): every tag becomes one space.
+function stripTags(markup: string): string {
+  let out = "";
+  let inTag = false;
+  for (const ch of markup) {
+    if (ch === "<") {
+      inTag = true;
+      out += " ";
+    } else if (ch === ">" && inTag) {
+      inTag = false;
+    } else if (!inTag) {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 // renderToStaticMarkup HTML-escapes apostrophes; compare on decoded text.
 function text(k: SourceKarneRead | null, slug = "sozcu"): string {
-  return html(k, slug)
-    .replace(/<[^>]+>/g, " ")
+  return stripTags(html(k, slug))
     .replace(/&#x27;/g, "'")
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ");
@@ -45,16 +61,21 @@ describe("SourceKarneCard", () => {
     expect(html(null)).toBe("");
   });
 
-  it("renders title, subtitle with window and n", () => {
+  it("renders title and a subtitle that says what is counted and as of when", () => {
     const t = text(karne());
     expect(t).toContain("Kapsama karnesi");
-    expect(t).toContain("Son 30 gün · 30.08.2026–29.09.2026 · n = 120 haber kümesi");
+    // window_end 2026-09-29T12:00:00Z is 15:00 in Istanbul.
+    expect(t).toContain(
+      "Son 30 gün · 29.09.2026 15:00 itibarıyla · bu kaynağın en az bir haberinin bulunduğu 120 haber kümesi",
+    );
+    expect(t).not.toContain("n = 120 haber kümesi");
+    expect(t).not.toContain("30.08.2026–29.09.2026");
   });
 
-  it("groups a four-digit n the Turkish way (1.200, not 1200)", () => {
+  it("groups a four-digit count the Turkish way (1.200, not 1200)", () => {
     const t = text(karne({ nClusters: 1200 }));
-    expect(t).toContain("n = 1.200 haber kümesi");
-    expect(t).not.toContain("n = 1200");
+    expect(t).toContain("bulunduğu 1.200 haber kümesi");
+    expect(t).not.toContain("bulunduğu 1200 ");
   });
 
   it("a fresh row keeps the window subtitle and has no stale banner", () => {

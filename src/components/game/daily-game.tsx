@@ -13,6 +13,7 @@ import {
 import Link from "next/link";
 
 import { ZONE_META } from "@/lib/bias/config";
+import { markAnswered } from "@/lib/game/answered-headlines";
 import {
   STREAK_STORAGE_KEY,
   applyDailyResult,
@@ -243,16 +244,20 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
       // Fire-and-forget, exactly like zone-guess-game.tsx's handleGuess:
       // not awaited, no `.then`, response never read (correct is
       // recomputed and stored server-side; a 429 or network failure must
-      // never interrupt play).
-      fetch("/api/oyun", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          articleId: current.articleId,
-          sourceId: current.sourceId,
-          guessedZone: zone,
-        }),
-      }).catch(() => {});
+      // never interrupt play). Only the first time this headline is answered
+      // blind in the tab session: the same headline may also be in Bölge's
+      // list, and a restarted puzzle shows answers it already revealed.
+      if (markAnswered(current.articleId)) {
+        fetch("/api/oyun", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            articleId: current.articleId,
+            sourceId: current.sourceId,
+            guessedZone: zone,
+          }),
+        }).catch(() => {});
+      }
     },
     [current, phase],
   );
