@@ -325,7 +325,7 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
         <button
           type="button"
           onClick={handleStart}
-          className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+          className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
         >
           Başla
         </button>
@@ -353,7 +353,7 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
             ref={replayRef}
             type="button"
             onClick={handleStart}
-            className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
           >
             Yeniden Oyna
           </button>
@@ -366,7 +366,7 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
               ref={replayRef}
               type="button"
               onClick={handleFreshSample}
-              className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
             >
               Yeni manşetlerle oyna
             </button>
@@ -411,7 +411,7 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
                   ref={zoneIndex === 0 ? firstZoneRef : undefined}
                   type="button"
                   onClick={() => handleGuess(zone)}
-                  className={`min-h-[44px] rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${meta.chipBg} ${meta.chipHover} ${meta.chipText} ${meta.chipBorder} focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50`}
+                  className={`min-h-[44px] rounded-lg border px-4 py-2 text-sm font-medium transition-colors ${meta.chipBg} ${meta.chipHover} ${meta.chipText} ${meta.chipBorder} focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring`}
                 >
                   {meta.label}
                 </button>
@@ -434,7 +434,7 @@ export function ZoneGuessGame({ headlines }: ZoneGuessGameProps) {
               ref={nextRef}
               type="button"
               onClick={handleNext}
-              className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
             >
               Sonraki
             </button>

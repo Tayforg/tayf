@@ -758,7 +758,6 @@ describe("politika", () => {
     ["İYİ Parti'de istifa"],
     ["Yeni Parti kuruluş dilekçesini verdi"],
     ["Parti genel başkanı kürsüde"],
-    ["İstanbul İl Başkanı değişti"],
     ["Belediye başkanı görevden alındı"],
     ["Muhalefet Meclis'te toplandı"],
     ["TBMM'de gergin saatler"],
@@ -2410,14 +2409,12 @@ describe("wave AX: generic office and process words admit from the title only", 
     ["Bakan açıkladı", "Bakan açıkladı", "bakan"],
     ["Seçim tarihi belli oldu", "Seçim tarihi belli oldu", "seçim"],
     ["Hükümet karar aldı", "Hükümet karar aldı", "hükümet"],
-    ["Genel Başkanı konuştu", "Genel Başkanı konuştu", "genel başkan"],
     ["İçişleri duyurdu", "İçişleri duyurdu", "içişleri"],
     ["Cumhurbaşkanı açıkladı", "Cumhurbaşkanı açıkladı", "cumhurbaşkanı"],
     ["Başbakan açıkladı", "Başbakan açıkladı", "başbakan"],
     ["Dışişleri duyurdu", "Dışişleri duyurdu", "dışişleri"],
     ["Kabine toplandı", "Kabine toplandı", "kabine"],
     ["Belediye Başkanı açıkladı", "Belediye Başkanı açıkladı", "belediye başkan"],
-    ["İl Başkanı açıkladı", "İl Başkanı açıkladı", "il başkan"],
   ];
 
   it.each(GENERIC)("'%s' in the description alone does not admit (neutral title)", (_t, description) => {
@@ -2482,6 +2479,241 @@ describe("wave AX: unambiguous names and bodies still admit from the description
     expect(cls("Yeni gelişme", "İçişleri Bakanlığı operasyon açıkladı")).toBe("genel");
     // the title still admits: a ministry in the headline is a headline about the state
     expect(cls("Bakanlık soruşturma başlattı")).toBe("politika");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wave AY (hunt-21): 'genel başkan' / 'il başkan' of a NON-party body
+// ---------------------------------------------------------------------------
+//
+// hunt-20 made 'genel başkan' and 'il başkan' title words. They are also the
+// office of every association, federation, chamber and union ('Tüketici
+// Hakları Derneği Genel Başkanı Kılıç uyardı' was politika twice in one hour),
+// so the pair is now a PARTY OFFICE: it admits a headline only together with a
+// party marker in the title or description ('parti', BBP, YRP, BTP). A leader
+// or an acronym that POLITIKA_RE already knows (CHP Genel Başkanı Özel, BTP
+// lideri) admits on its own.
+
+describe("wave AY: 'genel başkan' / 'il başkan' need a party marker", () => {
+  it.each([
+    [
+      "Tüketici Birliği Federasyonu Genel Başkanı Deniz yanıtladı: 'Zam yok, fiyatlar sabit'",
+      "Akaryakıt fiyatlarına ilişkin soruları yanıtlayan Deniz, sektörün durumunu anlattı.",
+    ],
+    ["Tüketici Hakları Derneği Genel Başkanı Kılıç uyardı", null],
+    ["Genel Başkanı konuştu", null],
+    ["Genel Başkanı konuştu", "Genel Başkanı konuştu"],
+    ["İl Başkanı açıkladı", null],
+    ["İl Başkanı açıkladı", "İl Başkanı açıkladı"],
+    ["İstanbul İl Başkanı değişti", null],
+    // 'Partizan' is a football club, not a party
+    ["Kulüp Genel Başkanı konuştu", "Partizan ile oynanan karşılaşma sonrası açıklama yaptı."],
+  ] as Array<[string, string | null]>)(
+    "a non-party body's office is not politika: %s",
+    (title, description) => {
+      expect(cls(title, description)).not.toBe("politika");
+      expect(cls(title, description)).not.toBe("son_dakika");
+    },
+  );
+
+  it("the bare cases stay genel", () => {
+    expect(cls("Genel Başkanı konuştu")).toBe("genel");
+    expect(cls("İl Başkanı açıkladı")).toBe("genel");
+    expect(cls("Tüketici Hakları Derneği Genel Başkanı Kılıç uyardı")).toBe("genel");
+  });
+
+  it.each([
+    ["AK Parti Genel Başkanvekili Ala açıklama yaptı", null],
+    ["CHP Genel Başkanı Özel: 'Seçime hazırız'", null],
+    ["MHP Genel Başkanı Bahçeli'den çağrı", null],
+    // the marker may sit in the description
+    ["Genel Başkan Yardımcısı açıkladı", "Saadet Partisi Genel Başkan Yardımcısı basın toplantısı düzenledi."],
+    ["Genel Başkan Yardımcısı açıkladı", "Anavatan Partisi Genel Başkan Yardımcısı basın toplantısı düzenledi."],
+    ["İl Başkanı açıkladı", "İYİ Parti İl Başkanı kongre tarihini duyurdu."],
+    ["İl Başkanı açıkladı", "Vatan Partisi İl Başkanı kongre tarihini duyurdu."],
+    ["Genel Başkan seçildi", "Büyük Birlik Partisi'nin yeni genel başkanı belli oldu."],
+    // an acronym marker
+    ["Genel Başkan Yardımcısı açıkladı", "BBP kurultayı sona erdi."],
+    ["İl Başkanı açıkladı", "YRP İl Başkanı kongre tarihini duyurdu."],
+    ["İl Başkanı açıkladı", "BTP il teşkilatı toplandı."],
+  ] as Array<[string, string | null]>)(
+    "a party's office is politika: %s | %s",
+    (title, description) => {
+      expect(cls(title, description)).toBe("politika");
+    },
+  );
+
+  it("'Partizan' is not a party marker, 'partili' and 'partisi' are", () => {
+    expect(cls("Genel Başkan açıkladı", "Partizan Belgrad ile oynanan karşılaşma")).not.toBe("politika");
+    expect(cls("Genel Başkan açıkladı", "Partili belediye başkanı konuştu")).toBe("politika");
+    expect(cls("Genel Başkan açıkladı", "Hür Dava Partisi toplantı yaptı")).toBe("politika");
+  });
+
+  it("'belediye başkan' stays a title word and needs no party marker", () => {
+    expect(cls("Belediye Başkanı açıkladı")).toBe("politika");
+    expect(cls("Belediye başkanı görevden alındı")).toBe("politika");
+    expect(cls("Yeni düzenleme", "Belediye Başkanı açıkladı")).toBe("genel");
+  });
+
+  it("the gate reads the title for the office and the whole text for the marker", () => {
+    // the office only in the description: still a description word, not admitted
+    expect(cls("Yeni düzenleme", "Genel Başkanı Kılıç uyardı")).toBe("genel");
+    expect(cls("Yeni düzenleme", "Saadet'in Genel Başkanı Kılıç uyardı")).toBe("genel");
+  });
+});
+
+describe("wave AY: party acronyms that never say 'parti' still carry their office", () => {
+  // Real titles of the 30-day replay. Their texts do not contain 'parti' or any
+  // POLITIKA_RE word, so a first cut that gated on 'parti' alone dropped them.
+  it.each([
+    ["EMEP Genel Başkanı Aslan, Halk TV'ye kayyım atanmasına tepki gösterdi"],
+    ["EMEP Ordu İl Başkanı Yasin Uzun: Hastanede yatak sayısı azaltılamaz"],
+    ["DSP Genel Başkanı Aksakal, Cumhuriyet'in 103. yıl dönümünü kutladı"],
+    ["DP Genel Başkanı Gültekin Uysal: Fon soruşturmasında 19 Ağustos tarihi ayrıca incelensin"],
+    ["HKP kurucu genel başkanı Nurullah Efe'ye ev hapsi cezası!"],
+    ["CTP Genel Başkanı İncirli, AB yetkilisi Sobral ile görüştü, mali yardım uyarısı yaptı"],
+    ["UBP Genel Başkanı Üstel açıklama yaptı"],
+    ["HÜDA PAR İl Başkanı Sevinik, Şırnak'ta gazetecilerle bir araya geldi"],
+    ["TİP Ankara İl Başkanı Fırat Çoban: Nehir de Nevin de bu ülkenin yüz akı iki gençtir"],
+  ])("%s", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  it("the acronyms are whole words", () => {
+    expect(cls("Adsp Genel Başkanı konuştu")).not.toBe("politika");
+    expect(cls("Kulüp Genel Başkanı Hkpx ile görüştü")).not.toBe("politika");
+  });
+
+  it("'TİP' is read on the unfolded view: the medical 'tıp' is not the party", () => {
+    expect(cls("Tıp Fakültesi Mezunları Derneği Genel Başkanı konuştu")).not.toBe("politika");
+    expect(cls("Türk Tıp Öğrencileri Derneği İl Başkanı açıkladı")).not.toBe("politika");
+    expect(cls("TİP Genel Başkanı açıkladı")).toBe("politika");
+    expect(cls("Tip Genel Başkanı açıkladı")).toBe("politika");
+  });
+
+  // Real titles of the same replay that are NOT a party: 96 of 1,264 rows left
+  // the gate, every one a union, confederation, association, foundation,
+  // Kızılay or the stock exchange.
+  it.each([
+    ["DİSK Genel Başkanı Arzu Çerkezoğlu: Yoksulluk kuşaklara yayıldı"],
+    ["HAK-İŞ Genel Başkanı Arslan, gelir vergisi yükünün çalışanlarda olduğunu söyledi"],
+    ["TESK Genel Başkanı Yiğiner esnafın prim gününün 7 bin 200'e düşürülmesini istedi"],
+    ["SANKON Genel Başkanı Cevahiroğlu'ndan Türk Devletleri Teşkilatı 13. Zirvesi'ne ilişkin mesaj"],
+    ["Türk Kızılay Genel Başkanı Yılmaz, Çubuk'taki kan plazma tesisini ziyaret etti"],
+    ["İHD Eş Genel Başkanları Oya Ersoy ve Cihan Aydın Kars'ta"],
+    ["Hak-İş il başkanı Mehmet Aküzüm'den gazetecilere takdir ve kutlama"],
+    ["TEMAD Eskişehir İl Başkanlığı üyeleri 29 Ekim geçit töreninde yürüdü"],
+  ])("a union, chamber or association is not politika: %s", (title) => {
+    expect(cls(title)).not.toBe("politika");
+    expect(cls(title)).not.toBe("son_dakika");
+  });
+
+  it("the five YOL-İŞ rows of the replay (a union congress) all leave the gate", () => {
+    const rows: Array<[string, string]> = [
+      ["YOL-İŞ Genel Başkanı Ramazan Ağar güven tazeledi", "Türkiye YOL-İŞ Sendikası 13. Olağan Genel Kurulu'nda tek aday olan Ramazan Ağar yeniden genel başkanlığa seçildi."],
+      ["Ramazan Ağar yeniden YOL-İŞ Genel Başkanı seçildi", "Türkiye YOL-İŞ Sendikasının Ankara'da düzenlenen 13. Olağan Genel Kurulu'nda Ramazan Ağar, tek aday olarak girdiği seçimde yeniden genel başkanlığa seçildi."],
+      ["YOL-İŞ Sendikası Genel Başkanlığına Ramazan Ağar tekrar seçildi", "YOL-İŞ Sendikası 13. Olağan Genel Kurulu gerçekleştirildi. Kurula tek aday olarak giren Genel Başkan Ramazan Ağar tekrar seçildi."],
+    ];
+    for (const [title, description] of rows) {
+      expect(cls(title, description)).not.toBe("politika");
+      expect(cls(title, description)).not.toBe("son_dakika");
+    }
+  });
+});
+
+describe("wave AY: Bağımsız Türkiye Partisi (BTP)", () => {
+  it.each([
+    ["Bağımsız Türkiye Partisi'nden açıklama"],
+    ["Bağımsız Türkiye Partisi Genel Başkan Yardımcıları Manisa'da"],
+    ["BTP Genel Başkanı Hüseyin Baş İstanbul Barosu seçiminde oy kullandı"],
+    ["BTP lideri Baş, İstanbul'un kurtuluşunu kutladı"],
+    ["BTP Kilis İl Başkanlığı'ndan Muhtarlar Derneği'ne ziyaret"],
+    ["BTP Sözcüsü Önder açıklama yaptı"],
+    ["BTP'li Kayacı ve Terzi'den Samsun'a ziyaret"],
+    ["Merzifon BTP'ye yeni üye katılımı"],
+  ])("the title names the party: %s", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  // Real rows of the 48 h replay (yenimesaj). The first was spor under the old
+  // code through the 'başakşehir' club stem; the second was genel.
+  it("a BTP district branch named after Başakşehir is the party, not the football club", () => {
+    expect(
+      cls(
+        "BTP Başakşehir’den Güvercintepe çıkarması: Esnafın gündemi dinlendi, çözümler anlatıldı",
+        "Bağımsız Türkiye Partisi (BTP) Başakşehir İlçe Teşkilatı, Güvercintepe Mahallesi'nde gerçekleştirdiği esnaf ziyaretleriyle sahada yoğun bir mesai harcadı",
+      ),
+    ).toBe("politika");
+    expect(
+      cls(
+        "Merzifon BTP’ye yeni üye katılımı",
+        "Bağımsız Türkiye Partisi (BTP) Merzifon teşkilatı, ilçe teşkilatının yürüttüğü çalışmalar neticesinde partiye katılan yeni üyelerle bir araya geldi.",
+      ),
+    ).toBe("politika");
+  });
+
+  it("a description naming the party counts, since the name is unambiguous", () => {
+    expect(cls("Yeni üye katılımı", "Bağımsız Türkiye Partisi (BTP) Samsun İl Başkanlığı toplandı")).toBe("politika");
+    expect(cls("Yeni düzenleme", "BTP il teşkilatı toplandı")).toBe("politika");
+  });
+
+  it("'btp' is a whole word", () => {
+    expect(cls("Kabtpark açıldı")).not.toBe("politika");
+    expect(cls("Ebtp1 modeli tanıtıldı")).not.toBe("politika");
+  });
+
+  it("a sports headline still beats a description-only BTP", () => {
+    expect(cls("Galatasaray maçı sonrası açıklama", "BTP il teşkilatı toplandı")).toBe("spor");
+  });
+});
+
+describe("wave AY: 'İşçi Partisi' of another country is not the Turkish party", () => {
+  it.each([
+    ["Kuzey Kore İşçi Partisi kongresi toplandı"],
+    ["Kore İşçi Partisi'nden açıklama"],
+    ["Kore'nin İşçi Partisi lideri Kim Jong Un konuştu"],
+    ["KORE İŞÇİ PARTİSİ kongresi"],
+    ["Kore   İşçi Partisi kongresi"],
+    ["Kore İşçi Partisi kongresi"],
+  ])("a Korean Workers' Party headline is not politika: %s", (title) => {
+    expect(cls(title)).not.toBe("politika");
+    expect(cls(title)).not.toBe("son_dakika");
+  });
+
+  it("nor is it politika from a description", () => {
+    expect(cls("Yeni düzenleme", "Kore İşçi Partisi Merkez Askeri Komisyonu toplandı")).not.toBe("politika");
+  });
+
+  it.each([
+    ["Türkiye İşçi Partisi'nden açıklama"],
+    ["İşçi Partisi'nden bildiri"],
+    ["Erkan Baş duyurdu: Türkiye İşçi Partisi kapı kapı dolaşacak"],
+    ["TİP'li iki öğrenci tutuklandı: Türkiye İşçi Partili öğrenciler açıklama yaptı"],
+    // another country's labour party is still a party headline (only Kore is cut)
+    ["Brezilya'da İşçi Partisi adayı Lula kazandı"],
+  ])("the Turkish party, and other labour parties, stay politika: %s", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  it("'Kore' later in the sentence does not hide a labour party", () => {
+    expect(cls("Güney Kore'de fırtına, İşçi Partisi açıklama yaptı")).toBe("politika");
+    expect(cls("Kore'den döndü. İşçi Partisi açıklama yaptı")).toBe("politika");
+  });
+
+  // Real row from the 2026-11-01 hunt-20 replay: milliyet, /dunya/ section, the
+  // only mention is the description's 'Kore İşçi Partisi (WPK) Merkez Askeri
+  // Komisyonu Üyesi'. The base classifier made it politika through the
+  // 'isci parti' description stem; stored `dunya` was the pre-#165 code's answer.
+  const KORE_ROW = {
+    id: "23a941cb",
+    title: "Kuzey Kore'den dünyaya gözdağı! 'Küle çevirebilir'",
+    description:
+      "Kuzey Kore'den nükleer silah ve balistik füze programı nedeniyle uluslararası toplumun eleştirilerine hedef olurken, dikkat çeken bir savunma hamlesi daha yaptı.\n'KÜLE ÇEVİREBİLİR'\nPyongyang yönetiminden yapılan açıklamada, taktik balistik füzelere entegre edilmek üzere geliştirilen \"Standart Tip 2\" isimli misket bombalı savaş başlığının dün test edildiği bildirildi. Kore İşçi Partisi (WPK) Merkez Askeri Komisyonu Üyesi Orgeneral Kim Jong Sik'in denetiminde test edilen savaş başlığının 120 bi...",
+    url: "https://www.milliyet.com.tr/dunya/son-dakika-kuzey-koreden-dunyaya-gozdagi-kule-cevirebilir-7691882",
+  };
+
+  it("the real milliyet North Korea warhead row (23a941cb) is dunya, not politika", () => {
+    expect(cls(KORE_ROW.title, KORE_ROW.description, KORE_ROW.url)).toBe("dunya");
   });
 });
 
@@ -2759,6 +2991,13 @@ describe("robustness", () => {
       ["100k dotted capitals", "İ".repeat(100_000)],
       ["100k apostrophes", "'’‘ʼ".repeat(25_000)],
       ["100k near-misses", "so dakika sonn dakika kaz gol- çi ira ".repeat(2_700).slice(0, 100_000)],
+      // wave AY: the Korea lookbehind and the party-office gate
+      ["100k blanks", " ".repeat(100_000)],
+      ["100k blanks before an işçi parti", " ".repeat(99_980) + "isci parti"],
+      ["100k kore işçi", "Kore İşçi ".repeat(10_000)],
+      ["100k kore blanks", "kore" + " ".repeat(99_980) + "işçi parti"],
+      ["100k genel başkan", "Genel Başkan ".repeat(7_700).slice(0, 100_000)],
+      ["100k il başkan with a near-miss marker", "il başkan partizan ".repeat(5_300).slice(0, 100_000)],
     ];
 
     it.each(inputs)("%s classifies in under 50 ms", (_name, text) => {

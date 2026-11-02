@@ -64,6 +64,41 @@ function emptyCoverage(): StoryCardZoneCoverage {
 }
 
 /**
+ * True when the cluster has at least one VOTING member (outlet / wire), i.e.
+ * when `selectStoryCard` can build a card at all. The cluster page and the
+ * /kart route both decide on this one rule, so the page never offers a card
+ * the route would answer with a 404.
+ */
+export function hasStoryCardCoverage(members: ClusterDetailMember[]): boolean {
+  return partitionByVote(members).voting.length > 0;
+}
+
+/**
+ * True when the cluster TITLE may be rasterised into the card's largest text.
+ * The title is the neutral `title_tr`, which can pass a member headline through
+ * verbatim, so it gets the same KVKK private-individual filter (G-PRIV-1) the
+ * per-zone headlines get. A missing title is not eligible.
+ */
+export function isStoryCardTitleEligible(title: string | null | undefined): boolean {
+  return typeof title === "string" && isGameEligibleTitle(title);
+}
+
+/**
+ * The "Kartı indir" href for a cluster, or `null` when the /kart route would
+ * 404 for it (no voting coverage, or an ineligible title). Pure: the cluster
+ * page computes it and hands ShareButton (a 'use client' component) the plain
+ * string, so that component never imports this module.
+ */
+export function storyCardHref(
+  clusterId: string,
+  title: string | null | undefined,
+  hasCard: boolean,
+): string | null {
+  if (!hasCard || !isStoryCardTitleEligible(title)) return null;
+  return `/cluster/${clusterId}/kart`;
+}
+
+/**
  * Select the per-zone headline + coverage data the share card renders.
  *
  * Only voting-kind members ("outlet" / "wire" — see `partitionByVote` in
@@ -81,8 +116,8 @@ export function selectStoryCard(
   members: ClusterDetailMember[],
   health: ZoneFeedHealth | null,
 ): StoryCard | null {
+  if (!hasStoryCardCoverage(members)) return null;
   const { voting, nonVoting } = partitionByVote(members);
-  if (voting.length === 0) return null;
 
   const nonVotingCount = new Set(nonVoting.map((m) => m.source.slug)).size;
 

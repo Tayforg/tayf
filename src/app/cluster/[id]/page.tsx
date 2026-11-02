@@ -7,6 +7,10 @@ import { BiasBadge } from "@/components/story/bias-badge";
 import { BalanceChip } from "@/components/story/balance-chip";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
+import {
+  CLUSTER_HERO_QUALITY,
+  CLUSTER_HERO_SIZES,
+} from "@/components/story/cluster-card";
 import { MediaDna } from "@/components/story/media-dna";
 import { toMediaDnaSources } from "@/components/story/media-dna-sources";
 import { FramingComparison } from "@/components/story/framing-comparison";
@@ -39,6 +43,7 @@ import {
   shouldShowPublicFramingReceipt,
 } from "@/lib/clusters/framing-receipt";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
+import { hasStoryCardCoverage, storyCardHref } from "@/lib/cards/story-card";
 import { buildShareText } from "@/lib/clusters/share";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
 import { clusterUpdateCue } from "@/lib/clusters/update-cue";
@@ -544,7 +549,8 @@ export default async function ClusterDetailPage({ params }: PageProps) {
               alt={heroAlt}
               width={768}
               height={576}
-              sizes="(min-width: 640px) 384px, 100vw"
+              sizes={CLUSTER_HERO_SIZES}
+              quality={CLUSTER_HERO_QUALITY}
               minIntrinsicWidth={320}
               priority
               fetchPriority="high"
@@ -645,6 +651,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                     clusterId={id}
                     title={headline}
                     text={shareText}
+                    cardHref={storyCardHref(id, cluster.title_tr, hasStoryCardCoverage(members))}
                   />
                   <BookmarkButton
                     clusterId={id}

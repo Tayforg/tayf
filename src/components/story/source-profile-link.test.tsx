@@ -63,11 +63,13 @@ describe("SourceProfileLink — valid slug", () => {
     expect(html).not.toContain("title=");
   });
 
-  it("carries the focus ring and the 44px mobile target classes", () => {
+  it("carries the focus ring and the 24px (desktop) / 44px (mobile) target classes", () => {
     const tokens = classTokensOf(html);
     for (const token of [
       "inline-flex",
       "items-center",
+      // WCAG 2.5.8: a 10 px text line is not a 24 px target (h21-a11y-2).
+      "min-h-6",
       "max-sm:min-h-11",
       "focus-visible:outline-none",
       "focus-visible:ring-2",

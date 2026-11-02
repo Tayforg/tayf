@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ReactElement } from "react";
+
+import { storyCardHref } from "@/lib/cards/story-card";
 
 import type {
   ClusterDetail,
@@ -416,6 +420,57 @@ describe("GET /cluster/[id]/kart", () => {
     // wording cannot reach a rasterised, redistributable image.
     expect(captured).toBeNull();
     expect(capturedOptions).toBeNull();
+  });
+
+  // h21-journeys-1: the cluster page hides "Kartı indir" through
+  // storyCardHref(); the route must answer 404 for exactly the titles that
+  // helper rejects, so a link is never offered that cannot work.
+  it.each([
+    ["a crime-operation title", "32 ilde FETÖ operasyonu: 41 şüpheli tutuklandı"],
+    ["a minister announcing detentions", "İçişleri Bakanı 22 şüphelinin gözaltına alındığını açıkladı"],
+    ["a diacritic-folded detention title", "22 supheli gozaltina alindi"],
+    ["a neutral title", "Cumhurbaşkanı Erdoğan, Güney Kore'ye geldi"],
+  ])("agrees with storyCardHref on %s", async (_label, title) => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, GOV_TITLE)], { title_tr: title }),
+    );
+
+    const res = await callGET(ID);
+
+    const offered = storyCardHref(ID, title, true) !== null;
+    expect(res.status).toBe(offered ? 200 : 404);
+    expect(storyCardHref(ID, title, true)).toBe(offered ? `/cluster/${ID}/kart` : null);
+    // The ineligible titles are the 404s, the neutral one the 200.
+    expect(offered).toBe(title === "Cumhurbaşkanı Erdoğan, Güney Kore'ye geldi");
+  });
+
+  it("answers 404 (not a throw) when the cluster title is missing", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail([mkMember("a1", GOV, GOV_TITLE)], {
+        title_tr: null as unknown as string,
+      }),
+    );
+
+    const res = await callGET(ID);
+
+    expect(res.status).toBe(404);
+    expect(captured).toBeNull();
+  });
+
+  // The route and the cluster page must call the same helpers instead of each
+  // carrying a copy of the rule, so they cannot drift apart again.
+  it("shares one eligibility predicate with the cluster page", () => {
+    const root = process.cwd();
+    const routeSrc = readFileSync(resolve(root, "src/app/cluster/[id]/kart/route.tsx"), "utf8");
+    const pageSrc = readFileSync(resolve(root, "src/app/cluster/[id]/page.tsx"), "utf8");
+
+    expect(routeSrc).toContain("isStoryCardTitleEligible(title)");
+    expect(routeSrc).not.toContain("pii-filter");
+    expect(routeSrc).not.toContain("isGameEligibleTitle(");
+
+    expect(pageSrc).toContain(
+      "cardHref={storyCardHref(id, cluster.title_tr, hasStoryCardCoverage(members))}",
+    );
   });
 
   it("refuses to print an impossible fraction when the count exceeds the yield denominator", async () => {

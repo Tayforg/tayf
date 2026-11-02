@@ -740,12 +740,65 @@ describe("topicMetadata", () => {
     expect(meta.openGraph?.url).toBe("/konu/spor?sayfa=3");
   });
 
-  it("a page > 1 keeps the rest of the share metadata (title, image, twitter) intact", () => {
+  it("a page > 1 keeps the rest of the share metadata (image, twitter) intact and names the page in the og title", () => {
     const meta = topicMetadata("spor", 2);
-    expect(meta.openGraph?.title).toBe("Spor haberleri — Tayf");
+    expect(meta.openGraph?.title).toBe("Spor haberleri — Sayfa 2 — Tayf");
     expect(firstImageUrl(meta.openGraph?.images)).toBe("/opengraph-image");
     expect(firstImageUrl(meta.twitter?.images)).toBe("/twitter-image");
     expect(meta.robots).toBeUndefined();
+  });
+
+  // h21: pages 2+ shared page 1's title, so a results page listed the same
+  // headline for every ?sayfa=N of a hub. The page number is part of the title
+  // (and of the og:/twitter: titles, which add the brand suffix themselves).
+  describe("paged titles", () => {
+    it("page 3 carries 'Sayfa 3' in the title, og:title and twitter:title", () => {
+      const meta = topicMetadata("spor", 3);
+      expect(meta.title).toBe("Spor haberleri — Sayfa 3");
+      expect(meta.openGraph?.title).toBe("Spor haberleri — Sayfa 3 — Tayf");
+      expect(meta.twitter?.title).toBe("Spor haberleri — Sayfa 3 — Tayf");
+    });
+
+    it("page 2 is 'Sayfa 2'", () => {
+      expect(topicMetadata("spor", 2).title).toBe("Spor haberleri — Sayfa 2");
+    });
+
+    it("page 1, an omitted page and an out-of-range page clamped to 1 keep page 1's title exactly", () => {
+      for (const meta of [
+        topicMetadata("spor"),
+        topicMetadata("spor", 1),
+        topicMetadata("spor", 0),
+        topicMetadata("spor", -4),
+        topicMetadata("spor", Number.NaN),
+      ]) {
+        expect(meta.title).toBe("Spor haberleri");
+        expect(meta.openGraph?.title).toBe("Spor haberleri — Tayf");
+        expect(meta.twitter?.title).toBe("Spor haberleri — Tayf");
+        expect(meta.alternates?.canonical).toBe("/konu/spor");
+        expect(meta.openGraph?.url).toBe("/konu/spor");
+      }
+    });
+
+    it("the title names the clamped page, so a hand-built huge page never mints a number past the cap", () => {
+      const meta = topicMetadata("spor", 9999);
+      expect(meta.title).toBe(`Spor haberleri — Sayfa ${TOPIC_MAX_PAGE}`);
+      expect(meta.alternates?.canonical).toBe(`/konu/spor?sayfa=${TOPIC_MAX_PAGE}`);
+    });
+
+    it("canonical and og:url still use ?sayfa=N, and the description is page 1's", () => {
+      const first = topicMetadata("spor");
+      const meta = topicMetadata("spor", 3);
+      expect(meta.alternates?.canonical).toBe("/konu/spor?sayfa=3");
+      expect(meta.openGraph?.url).toBe("/konu/spor?sayfa=3");
+      expect(meta.description).toBe(first.description);
+    });
+
+    it("every hub gets a distinct title on each of its pages", () => {
+      const titles = TOPIC_SLUGS.flatMap((slug) =>
+        [1, 2, 3].map((page) => String(topicMetadata(slug, page).title)),
+      );
+      expect(new Set(titles).size).toBe(TOPIC_SLUGS.length * 3);
+    });
   });
 });
 

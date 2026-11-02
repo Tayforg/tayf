@@ -13,6 +13,7 @@ import {
 } from "@/components/weekly/week-sections";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { sharePageMetadata } from "@/lib/seo/page-metadata";
+import { getFeedStatusSummary } from "@/lib/sources/feed-status";
 import { weekCopy } from "@/lib/weekly/week-copy";
 import {
   getWeekArchiveClusters,
@@ -80,11 +81,16 @@ export default async function WeekArchivePage({ params }: PageProps) {
   // every line that differs comes from week-copy (see its header).
   const copy = weekCopy(!isCurrentWeek);
 
-  const [read, health] = await Promise.all([
+  const [read, health, feedStatus] = await Promise.all([
     getWeekArchiveClusters(hafta),
     // Health is only meaningful for the week still in progress — it is
     // not known retroactively for a past, closed week.
     isCurrentWeek ? getZoneFeedHealth() : Promise.resolve(null),
+    // The same 72 h spektruma-sayılan count the rolling /hafta page prints
+    // ("71 / 96"). Without it the in-progress week always read "durumu şu
+    // anda bilinmiyor", which looks like an outage. Never rejects (null on a
+    // failed read); a closed week has no live status and never reads it.
+    isCurrentWeek ? getFeedStatusSummary() : Promise.resolve(null),
   ]);
 
   const rows = read?.rows ?? null;
@@ -122,7 +128,7 @@ export default async function WeekArchivePage({ params }: PageProps) {
           <ZoneShares
             summary={summary}
             health={isCurrentWeek ? health : null}
-            feedStatus={null}
+            feedStatus={isCurrentWeek ? feedStatus : null}
             truncated={read?.truncated === true}
             archive={!isCurrentWeek}
           />

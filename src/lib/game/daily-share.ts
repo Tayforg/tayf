@@ -87,19 +87,10 @@ export function liveStreak(store: DailyStore, todayKey: string): number {
   return 0;
 }
 
-/**
- * True when a `navigator.share()` rejection is the reader dismissing the
- * share sheet (an `AbortError`). That is a decision, not a failure: the
- * clipboard must stay untouched. Any other rejection (unsupported, blocked)
- * still falls back to copying.
- */
-export function isShareAbort(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    (err as { name?: unknown }).name === "AbortError"
-  );
-}
+// The share-sheet dismissal rule now lives in the shared helper so the story
+// share chip uses the very same function; re-exported so daily-game.tsx and
+// its tests keep importing it from here.
+export { isShareAbort } from "@/lib/share/native-share";
 
 export interface ApplyDailyResultInput {
   dateKey: string;

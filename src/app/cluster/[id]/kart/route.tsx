@@ -1,11 +1,14 @@
 import { ImageResponse } from "next/og";
 
 import { apiTooManyRequests } from "@/lib/api/errors";
-import { selectStoryCard, type StoryCard } from "@/lib/cards/story-card";
+import {
+  isStoryCardTitleEligible,
+  selectStoryCard,
+  type StoryCard,
+} from "@/lib/cards/story-card";
 import { getClusterDetailOrThrow } from "@/lib/clusters/cluster-detail-query";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { formatDdMmYyyy } from "@/lib/format/date-tr";
-import { isGameEligibleTitle } from "@/lib/game/pii-filter";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import type { MediaDnaZone } from "@/types";
 
@@ -23,8 +26,10 @@ import type { MediaDnaZone } from "@/types";
 //     (the KVKK private-individual filter) in story-card.ts. The cluster
 //     TITLE has not: `cluster.title_tr` is the neutral title, which
 //     `pickNeutralTitle` may pass through verbatim from a member headline
-//     — so this route applies `isGameEligibleTitle` to it below (G-PRIV-1)
-//     and 404s rather than rasterising a name into the card's largest text.
+//     — so this route applies `isStoryCardTitleEligible` (the KVKK filter,
+//     shared with the cluster page's "Kartı indir" link) to it below
+//     (G-PRIV-1) and 404s rather than rasterising a name into the card's
+//     largest text.
 //   * a zone with no printable headline says which of the two reasons
 //     applies — genuinely nobody wrote, or somebody wrote and the headline
 //     is not shareable — because the coverage counter beside it would
@@ -329,7 +334,7 @@ export async function GET(
   // title names a private individual, the same answer `selectStoryCard`
   // gives for an empty cluster.
   const title = detail.cluster.title_tr;
-  if (!isGameEligibleTitle(title)) return new Response(null, { status: 404 });
+  if (!isStoryCardTitleEligible(title)) return new Response(null, { status: 404 });
 
   return new ImageResponse(
     renderCard({

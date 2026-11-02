@@ -108,7 +108,7 @@ export default async function EkonomiPage() {
           {breakers.map((b) => (
             <span key={b.disclosureIndex} className="flex items-baseline gap-1.5">
               {b.stockCodes.slice(0, 1).map((c) => (
-                <Link key={c} href={`/ekonomi/${c}`} className="text-brand hover:underline">
+                <Link key={c} href={`/ekonomi/${c}`} className="inline-flex min-h-6 items-center text-brand hover:underline">
                   {c}
                 </Link>
               ))}
@@ -203,7 +203,7 @@ export default async function EkonomiPage() {
                   <div className="min-w-0">
                     <div className="flex flex-wrap items-baseline gap-x-2">
                       {d.stockCodes.slice(0, 3).map((c) => (
-                        <Link key={c} href={`/ekonomi/${c}`} className="text-brand hover:underline">
+                        <Link key={c} href={`/ekonomi/${c}`} className="inline-flex min-h-6 items-center text-brand hover:underline">
                           {c}
                         </Link>
                       ))}

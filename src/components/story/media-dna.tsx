@@ -248,7 +248,7 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
           <button
             type="button"
             onClick={() => setShowAll((v) => !v)}
-            className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+            className="inline-flex min-h-6 items-center max-sm:min-h-11 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
           >
             {showAll
               ? "Sadece bu haberdekileri göster"
