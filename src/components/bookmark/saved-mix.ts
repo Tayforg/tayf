@@ -18,6 +18,7 @@ export const SAVED_MIX_MIN_STORIES = 3;
 /** Short tier labels for the card (the cluster chip uses the longer ones). */
 export const SAVED_MIX_LABELS: Record<BalanceTier, string> = {
   dengeli: "Dengeli",
+  iki: "İki tarafa dengeli",
   yakin: "Tek tarafa yakın",
   tek: "Tek tarafta",
 };

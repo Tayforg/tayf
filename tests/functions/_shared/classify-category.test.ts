@@ -325,7 +325,8 @@ const GOLDEN: GoldenRow[] = [
     description: "Son dakika haber: Galatsaray'da Sportif A.Ş Başkan Vekili Abdullah Kavukcu, görevinden istifa ettiğini açıkladı.",
     url: "https://www.gzt.com/spor/abdullah-kavukcu-neden-istifa-etti-abdullah-kavukcu-istifa-haberleri-4274649",
     stored: "son_dakika",
-    expected: "son_dakika",
+    expected: "spor",
+    note: "wave AX: the flag is a prefix, the remainder is classified: a sports section URL makes it spor; old: son_dakika",
   },
   {
     id: "cnn-sd-gs",
@@ -334,8 +335,8 @@ const GOLDEN: GoldenRow[] = [
     description: "Abdullah Kavukcu, Galatasaray Yönetim Kurulu’ndaki görevini bıraktığını duyurdu.",
     url: "https://www.cnnturk.com/spor/futbol/son-dakika-galatasarayda-abdullah-kavukcu-da-istifa-etti-3487536",
     stored: "spor",
-    expected: "son_dakika",
-    note: "all-caps 'SON DAKİKA'; old: spor, because toLowerCase() turns İ into i + U+0307 and 'son dakika' no longer matched",
+    expected: "spor",
+    note: "all-caps 'SON DAKİKA' folds correctly (old: spor, because toLowerCase() turns İ into i + U+0307); wave AX classifies the remainder 'Galatasaray'da ...' as spor",
   },
   {
     id: "milliyet-sd-jet",
@@ -344,7 +345,8 @@ const GOLDEN: GoldenRow[] = [
     description: "ABD'nin Florida eyaletinde 10 kişiye kadar yolcu taşıyabilen Learjet 60 (N722BD) uçağı düştü.",
     url: "https://www.milliyet.com.tr/dunya/son-dakika-abdnin-florida-kentinde-ozel-jet-sehrin-ortasina-dustu-7692234",
     stored: "son_dakika",
-    expected: "son_dakika",
+    expected: "dunya",
+    note: "wave AX: the remainder 'ABD'nin Florida kentinde özel jet ...' is dunya (a /dunya/ section); old: son_dakika",
   },
   {
     id: "sabah-sd-chp",
@@ -551,7 +553,7 @@ const SYNTHETIC: SyntheticRow[] = [
   { id: "son-dakika-colon", title: "Son dakika: yeni açıklama geldi", expected: "son_dakika", why: "son dakika flag" },
   { id: "son-dakika-caps", title: "SON DAKİKA | Önemli gelişme", expected: "son_dakika", why: "İ must fold" },
   { id: "son-dakika-ascii-caps", title: "SON DAKIKA haberi geldi", expected: "son_dakika", why: "ASCII I" },
-  { id: "breaking", title: "Breaking: Tokyo'da deprem", expected: "son_dakika", why: "english flag" },
+  { id: "breaking", title: "Breaking: Tokyo'da deprem", expected: "yasam", why: "english flag; wave AX classifies the remainder (deprem)" },
   { id: "acil-leading", title: "ACİL durum toplantısı yapıldı", expected: "son_dakika", why: "title starts with acil" },
 ];
 
@@ -690,10 +692,10 @@ describe("son_dakika is decided by the title alone", () => {
     expect(cls("Breaking news: bir olay")).toBe("son_dakika");
   });
 
-  it("son_dakika wins over a party, a leader and a section URL", () => {
+  it("a party or leader keeps son_dakika; a non-political remainder takes its own category", () => {
     expect(cls("Son dakika: Erdoğan açıklama yaptı")).toBe("son_dakika");
     expect(cls("SON DAKİKA CHP'den flaş karar")).toBe("son_dakika");
-    expect(cls("Son dakika | Maç sonucu", null, "https://x.test/spor/futbol/a")).toBe("son_dakika");
+    expect(cls("Son dakika | Maç sonucu", null, "https://x.test/spor/futbol/a")).toBe("spor");
   });
 });
 
@@ -1665,6 +1667,877 @@ describe("politika gaps (wave AW): candidates that were measured and dropped", (
   it("a foreign head of state is not politika by title alone (86% political, two thirds as text)", () => {
     expect(cls("Ukrayna Devlet Başkanı Zelenski İstanbul'a geldi")).toBe("dunya");
     expect(cls("Bolivya Devlet Başkanı El Nino için acil durum ilan etti")).toBe("genel");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// wave AX (W1-gate-precision-recall, hunt-20 2026-11-02): the politics gate
+// admitted non-political stories through generic office / process words that
+// appeared only in the DESCRIPTION (bakan, bakanlık, seçim, hükümet, genel
+// başkan, İçişleri, the Erdoğan stadium, the footballer Dervişoğlu): 91 of the
+// 188 rows that entered the gate in one hour (48%) were admitted by the
+// description alone. The same pass found three more things:
+//
+//   * 'son dakika' anywhere in a title skipped every other rule, so SEO titles
+//     ('Altın fiyatlarında son dakika!', 'deprem mi oldu? SON DAKİKA!') entered
+//     the gate; the flag now counts only at the START of a title, and the rest
+//     of the title is classified;
+//   * the Öcalan / İmralı process had no keyword at all (10 headlines outside
+//     the gate), and neither had the minor parties;
+//   * a sports title must beat a description-only politics word.
+//
+// The rows below are REAL rows read from `articles` (read-only SELECTs,
+// 2026-11-02): title and url as stored, the description cut at a word boundary
+// near 300 characters (kept whole where the cut changed the old answer).
+// `stored` is the category the row carries in production.
+// ---------------------------------------------------------------------------
+
+interface GateRow {
+  id: string;
+  source: string;
+  title: string;
+  description: string | null;
+  url: string;
+  stored: NewsCategory;
+}
+
+interface ResidualRow extends GateRow {
+  pinned: NewsCategory;
+  note: string;
+}
+
+const MUST_LEAVE_GATE: GateRow[] = [
+  {
+    id: "cb9d63df",
+    source: "haberturk",
+    title: "4 kente kuvvetli sağanak uyarısı",
+    description: "İçişleri Bakanlığı, 1 Kasım Pazar günü Muğla ve Antalya’nın bazı ilçeleri ile İzmir ve Aydın’ın batı kesimlerinde yerel olarak kuvvetli sağanak beklendiğini bildirdi. Muğla’nın Ula, Ortaca, Marmaris, Dalaman ve Köyceğiz ilçelerinde yağışların akşam saatlerinden sonra yer yer şiddetli olacağı tahmin",
+    url: "https://haberturk.com/gundem/4-kente-kuvvetli-saganak-uyarisi-3924033",
+    stored: "politika",
+  },
+  {
+    id: "5d29733b",
+    source: "odatv",
+    title: "Sokak kestanecilerini aratmayan ipek gibi yumuşacık kestane pişirme yöntemi | Mirabelle Onar yazdı",
+    description: "Sokak lezzetini ev konforuna taşıyan fırında kestane tarifinin tüm inceliklerini, doğru kestane seçiminden 1 saatlik ıslatma sırrını, fırın derecesinden sıcakken soyma taktiklerine kadar aradığınız her şeyi Mirabelle Onar yazdı.",
+    url: "https://odatv.com/gastroda/firinda-kestane-pisirme-120169259",
+    stored: "politika",
+  },
+  {
+    id: "2056098d",
+    source: "haberler-com",
+    title: "Galatasaray'da kriz! İşte küfürlü kavganın perde arkası",
+    description: "Galatasaray yönetiminde 2. Başkan Metin Öztürk ile Abdullah Kavukcu arasında yaşanan ve iki ismin de istifasıyla sonuçlanan kavganın perde arkasına ilişkin dikkat çeken detaylar ortaya çıktı. Sarı-kırmızılı yönetimde disiplin kuruluna sevk konusunda başlayan fikir ayrılığının sert tartışmaya dönüştüğü öne sürüldü. Başkan Dursun Özbek'in tarafları barıştırma girişiminin de sonuçsuz kaldığı belirtilirken, yaşanan gelişmelerin ardından erken seçim çağrıları gündeme geldi. İşte detaylar...",
+    url: "https://haberler.com/spor/galatasarayda-kriz-iste-kufurlu-kavganin-perde-20386440-haberi",
+    stored: "politika",
+  },
+  {
+    id: "5db0af31",
+    source: "haberler-com",
+    title: "Florida'da düşen jet 9 kişinin ölümüne yol açtı, altyapıda ciddi hasar var",
+    description: "ABD Ulaştırma Bakanı Sean Duffy, Florida'nın Palm Beach bölgesinde düşen ve 9 kişiyi taşıyan özel jetteki yolcuların tamamının yaşamını yitirdiğini bildirdi. Florida Valisi Ron DeSantis, kazanın yerel altyapıda hasara yol açtığını, bazı yolların kapalı kalabileceğini belirtti.",
+    url: "https://haberler.com/guncel/florida-da-dusen-jet-9-kisinin-olumune-yol-acti-20386469-haberi",
+    stored: "politika",
+  },
+  {
+    id: "56461a1d",
+    source: "aksam",
+    title: "Florida'da ölüm uçuşu! Özel jetteki 9 yolcu hayatını kaybetti",
+    description: "ABD Ulaştırma Bakanı Sean Duffy, Florida eyaletindeki yerleşim yerine düşen 9 kişiyi taşıyan özel jetteki yolcuların tamamının yaşamını yitirdiğini bildirdi.",
+    url: "https://aksam.com.tr/dunya/floridada-olum-ucusu-ozel-jetteki-9-yolcu-hayatini-kaybetti/haber-1711066",
+    stored: "politika",
+  },
+  {
+    id: "b60200eb",
+    source: "haberler-com",
+    title: "17 yılın en sert düşüşünü yaşamıştı! Altında işler değişti",
+    description: "Son 3 haftadır satış baskısı altında kalan ons altın, cuma günü 3.870 dolarla son 1 yılın en düşük seviyesini gördükten sonra yeni haftaya tepki alımlarıyla başladı. Petrol fiyatlarındaki sert düşüş ve tahvil getirilerindeki gerilemeyle ons altın 3.900 doların üzerine çıkarken, gram altın 6.275 lira seviyesinde işlem gördü. Piyasaların gözü salı günkü ABD ara seçimleri ile cuma açıklanacak tarım dışı istihdam verisine çevrildi.",
+    url: "https://haberler.com/haberler/17-yilin-en-sert-dususunu-yasamisti-altinda-isler-20386462-haberi",
+    stored: "politika",
+  },
+  {
+    id: "7e37d0a5",
+    source: "cumhuriyet",
+    title: "Altın fiyatlarında yeni hafta hareketliliği: Gram, çeyrek ve cumhuriyet altını ne kadar oldu?",
+    description: "Haftaya yükselişle başlayan gram altın 6 bin 289 liradan işlem görüyor. Piyasaların gözü ABD seçim sonuçları, Ortadoğu'daki müzakereler ve Fed'in olası faiz kararında. İşte güncel altın fiyatları...",
+    url: "https://cumhuriyet.com.tr/ekonomi/altin-fiyatlarinda-yeni-hafta-hareketliligi-gram-ceyrek-ve-cumhuriyet-altini-ne-kadar-oldu-2552382",
+    stored: "politika",
+  },
+  {
+    id: "c3e6f185",
+    source: "anadolu-ajansi",
+    title: "Küresel piyasalar önemli gelişmelerin izleneceği haftaya temkinli başladı",
+    description: "Küresel piyasalar, ABD'deki ara seçimler başta olmak üzere siyasi, jeopolitik ve ekonomik gelişmelerin yoğunlaşacağı haftaya temkinli iyimserlikle başladı.",
+    url: "https://aa.com.tr/tr/ekonomi/kuresel-piyasalar-onemli-gelismelerin-izlenecegi-haftaya-temkinli-basladi/4108294",
+    stored: "politika",
+  },
+  {
+    id: "b2f202d2",
+    source: "a-haber",
+    title: "Sosyal medyada yaş doğrularken dikkat! Tuzağa böyle düşürüyorlar",
+    description: "Tüketici Hakları Derneği Genel Başkanı Kılıç, \"Sosyal medyada yaş doğrulama düzenlemesi sadece 'turkiye.gov.tr' adresinden, resmi e-Devlet üzerinden 'Yaş Doğrulama Belirteci' aracılığıyla yapılacak.\"...Devamı için tıklayınız",
+    url: "https://ahaber.com.tr/gundem/2026/11/02/sosyal-medyada-yas-dogrularken-dikkat-tuzaga-boyle-dusuruyorlar",
+    stored: "politika",
+  },
+  {
+    id: "140cc3aa",
+    source: "isci-haber",
+    title: "Sosyal Medyada Yaş Doğrulama Tuzaklarına Karşı Uyarı",
+    description: "Sosyal medyada yürürlüğe giren yeni yaş doğrulama uygulamasını fırsat bilen dolandırıcılar, sahte mesaj ve e-postalarla kullanıcıları hedef alıyor. Tüketici Hakları Derneği Genel Başkanı Ergün Kılıç, işlemlerin sadece resmi e-Devlet üzerinden yapıldığını belirterek vatandaşları uyardı.",
+    url: "https://iscihaber.net/gundem/sosyal-medyada-yas-dogrulama-tuzaklarina-karsi-uyari/277599",
+    stored: "politika",
+  },
+  {
+    id: "de413f7c",
+    source: "haberler-com",
+    title: "KYK burs ve kredi SONUÇLARI: 2026 KYK burs sonuçları açıklandı mı, ne zaman açıklanacak?",
+    description: "2026-2027 eğitim öğretim yılı KYK burs ve öğrenim kredisi başvuru sonuçları için öğrencilerin bekleyişi sürüyor. Gençlik ve Spor Bakanlığı tarafından başvuru sürecinin tamamlanmasının ardından gözler sonuçların açıklanacağı tarihe çevrildi. Peki, 2026 KYK burs sonuçları açıklandı mı, ne zaman",
+    url: "https://haberler.com/haber/kyk-burs-ve-kredi-sonuclari-2026-kyk-burs-20386461-haberi",
+    stored: "politika",
+  },
+  {
+    id: "f3ba0ee4",
+    source: "isci-haber",
+    title: "Dallıkavak Tüneli Hizmete Girdi: Ulaşım Süresi 5 Dakikaya Düştü",
+    description: "Ulaştırma ve Altyapı Bakanı Abdulkadir Uraloğlu, Erzurum ile Rize arasındaki ulaşımı büyük ölçüde rahatlatan Dallıkavak Tüneli ve Bağlantı Yolları'nın hizmete girdiğini açıkladı. Proje sayesinde 20 dakikalık zorlu yolculuk süresi 5 dakikaya inerken, ülke ekonomisine yılda 103,7 milyon lira tasarruf",
+    url: "https://iscihaber.net/erzurum/dallikavak-tuneli-hizmete-girdi-ulasim-suresi-5-dakikaya-dustu/277618",
+    stored: "politika",
+  },
+  {
+    id: "d6a04205",
+    source: "aksam",
+    title: "Doğu Karadeniz'i Anadolu'ya bağlayan dev tünel! Yılda 103 milyon lira tasarruf sağlayacak",
+    description: "Ulaştırma ve Altyapı Bakan Abdulkadir Uraloğlu, hizmete açılan Dallıkavak Tüneli ve Bağlantı Yolları ile Erzurum'u Rize'ye bağlayan güzergahta mevcut yolu 4,6 kilometre kısalttığını ifade etti.",
+    url: "https://aksam.com.tr/trend/dogu-karadenizi-anadoluya-baglayan-dev-tunel-yilda-103-milyon-lira-tasarruf-saglayacak/haber-1711057",
+    stored: "politika",
+  },
+  {
+    id: "cfadc015",
+    source: "star",
+    title: "Sekiz keskin viraj geride kaldı! 20 dakikalık yolculuk 5 dakikaya düştü",
+    description: "Ulaştırma ve Altyapı Bakanı Abdulkadir Uraloğlu, hizmete açılan Dallıkavak Tüneli ile 2 bin 349 metre rakımdaki geçidin sekiz keskin virajının geride kaldığını belirtti. Erzurum-Rize güzergâhında seyahat süresini 20 dakikadan 5 dakikaya düşüren tünel sayesinde yol 4,6 kilometre kısalırken yılda",
+    url: "https://star.com.tr/ekonomi/sekiz-keskin-viraj-geride-kaldi-20-dakikalik-yolculuk-5-dakikaya-dustu-haber-2050614",
+    stored: "politika",
+  },
+  {
+    id: "04d7804b",
+    source: "ekonomim",
+    title: "Şiddetli yağışlar hayatı durdurdu, Ekvador'da olağanüstü hal kararı alındı",
+    description: "Ekvador'un turizm merkezi Galapagos Adaları, günlerdir etkisini sürdüren şiddetli yağışlar ve sel felaketiyle sarsılıyor. Bölgede hayat durma noktasına gelirken hükümet acil koduyla harekete geçti.",
+    url: "https://ekonomim.com/dunya/siddetli-yagislar-hayati-durdurdu-ekvadorda-olaganustu-hal-karari-alindi-haberi-928473",
+    stored: "politika",
+  },
+  {
+    id: "675a9796",
+    source: "haberport",
+    title: "Elazığ borsasında yeni döneme genç ve şeffaf bir vizyon",
+    description: "şenol arslan seçim çalışmasını yoğunlaştırdı:\nŞenol Arslan, Elazığ Ticaret Borsası Başkan Adayı ve Elazığ Hayvan Ürünleri Organize Sanayi Bölgesi Başkanı olarak 14 Kasım 2026 tarihinde yapılacak seçim...",
+    url: "https://haberport.com/haber/elazig-borsasinda-yeni-doneme-genc-ve-seffaf-bir-vizyon/60376",
+    stored: "politika",
+  },
+  {
+    id: "9cfd9b6d",
+    source: "isci-haber",
+    title: "'Sepette yüzde 80 indirim' reklamı nedeniyle firmaya 1 milyon 83 bin lira ceza",
+    description: "Ticaret Bakanlığı, bir internet alışveriş platformunda yayımlanan indirim reklamlarının tüketicileri yanılttığını tespit etti. Reklam Kurulu kararı doğrultusunda ilgili firmaya 1 milyon 83 bin 706 lira idari para cezası uygulanırken reklamların durdurulmasına karar verildi.",
+    url: "https://iscihaber.net/ekonomi/sepette-yuzde-80-indirim-reklami-nedeniyle-firmaya-1-milyon-83-bin-lira-ceza/277598",
+    stored: "politika",
+  },
+  {
+    id: "d9d5db90",
+    source: "birgun",
+    title: "Alışveriş platformunda fiyat oyunu: Sahte indirim reklamına milyonluk ceza",
+    description: "Ticaret Bakanlığı Reklam Kurulu, bir internet alışveriş platformunda gerçekte uygulanmayan indirimler üzerinden fiyat avantajı algısı oluşturulduğunu tespit etti. “Sepette yüzde 80 indirim” ve “14 günün en düşük fiyatı” ifadeleriyle tüketicileri yanıltan firmaya 1 milyon 83 bin 706 TL para cezası",
+    url: "https://birgun.net/haber/alisveris-platformunda-fiyat-oyunu-sahte-indirim-reklamina-milyonluk-ceza-743946",
+    stored: "politika",
+  },
+  {
+    id: "733e3359",
+    source: "takvim",
+    title: "Yurt dışından kıyafet getirenler dikkat! O sınır kişisel kıyafetlerde geçerli değil",
+    description: "Ticaret Bakanlığı Basın ve Halkla İlişkiler Müşaviri Bekir Kaplan, yurt dışından Türkiye'ye gelen yolcuların kendi kullanımlarına mahsus kıyafetlerinde 430 avro muafiyet sınırının uygulanmadığını, bu limitin yalnızca hediyelik ve ticari nitelik taşımayan diğer eşyalar için geçerli olduğunu duyurdu.",
+    url: "https://takvim.com.tr/ekonomi/2026/11/02/yurt-disindan-kiyafet-getirenler-dikkat",
+    stored: "politika",
+  },
+  {
+    id: "5ca73da1",
+    source: "gzt",
+    title: "TOKİ kiralık konut kura çekimi ne zaman? 2026 İstanbul TOKİ kiralık konut sonuçları ve isim listesi e-Devlet ekranında açıklandı mı?",
+    description: "TOKİ İstanbul kiralık konut kura sonuçları için beklenen açıklama henüz gelmedi. 14-25 Eylül 2026 tarihleri arasında başvurularını tamamlayan binlerce vatandaş, 1.071 kiralık sosyal konutun hak sahiplerini belirleyecek kura tarihini araştırıyor. Ekim ayında yapılması planlanan kura çekiminin ertelenmesinin ardından gözler kasım ayının sonuna çevrildi. Bakan Murat Kurum'un son açıklamalarına ilişkin basına yansıyan bilgiler, kura ve anahtar teslim sürecinde COP31 sonrasını işaret ediyor. Peki,...",
+    url: "https://gzt.com/gundem/toki-kiralik-konut-sonuclari-ne-zaman-aciklanacak-2026-istanbul-kura-tarihi-icin-gozler-kasim-ayinda-4274758",
+    stored: "politika",
+  },
+  {
+    id: "f0677290",
+    source: "milliyet",
+    title: "11 ilde sahte kanser ilacı operasyonu! 22 gözaltı",
+    description: "Bakırköy Cumhuriyet Başsavcılığı tarafından yürütülen soruşturma kapsamında, son kullanma tarihi geçmiş kanser ilaçlarının ambalaj ve kutularının değiştirilerek yeniden piyasaya sürülmesi, yurt içi ve yurt dışında satışa sunulmasına yönelik faaliyetler incelendi.\nBakan Gürlek operasyona dair şu",
+    url: "https://milliyet.com.tr/gundem/11-ilde-sahte-kanser-ilaci-operasyonu-22-gozalti-7692400",
+    stored: "politika",
+  },
+  {
+    id: "75be4ca5",
+    source: "sozcu",
+    title: "Tarihi geçmiş kanser ilaçlarını piyasaya süren çeteye operasyon! Çok sayıda gözaltı var",
+    description: "Adalet Bakanı Akın Gürlek, son kullanma tarihi geçmiş kanser ilaçlarının ambalaj ve kutularının değiştirilerek yeniden p...",
+    url: "https://sozcu.com.tr/tarihi-gecmis-kanser-ilaclarini-piyasaya-suren-ceteye-operasyon-cok-sayida-gozalti-var-p375087",
+    stored: "politika",
+  },
+  {
+    id: "a5c72393",
+    source: "trt-haber",
+    title: "Son kullanma tarihi geçmiş kanser ilaçlarını piyasaya süren 22 şüpheli gözaltında",
+    description: "Adalet Bakanı Akın Gürlek, son kullanma tarihi geçmiş kanser ilaçlarının ambalajları değiştirilerek yeniden piyasaya sürülmesine ilişkin soruşturma kapsamında 22 şüphelinin gözaltına alındığını, 2 şüpheli hakkında yakalama çalışmalarının sürdüğünü bildirdi.",
+    url: "https://trthaber.com/haber/gundem/son-kullanma-tarihi-gecmis-kanser-ilaclarini-piyasaya-suren-22-supheli-gozaltinda-961922.html",
+    stored: "politika",
+  },
+  {
+    id: "d0170639",
+    source: "karar",
+    title: "Hakan Safi: Aziz başkanın etrafında kenetlenmeliyiz",
+    description: "Fenerbahçe'de geçen yaz yapılan başkanlık seçimini Aziz Yıldırım'a kaybeden Hakan Safi, sarı-lacivertli camianın birleşmesi gerektiğini vurgulayarak \"Aziz başkanın etrafında kenetlenmeliyiz. Kimin hesabı varsa sene sonuna saklamalıdır.\" dedi.",
+    url: "https://karar.com/spor-haberleri/hakan-safi-aziz-baskanin-etrafinda-kenetlenmeliyiz-2081831",
+    stored: "politika",
+  },
+  {
+    id: "df57937f",
+    source: "yenicag",
+    title: "Beşiktaş deplasmanda Kasımpaşa ile 2-2 berabere kaldı",
+    description: "Trendyol Süper Lig’in 10. haftasında Beşiktaş Kasımpaşa’ya konuk oluyor. Recep Tayyip Erdoğan Stadyumu’nda saat 19.00’da başlayacak karşılaşma öncesi Kasımpaşa ve Beşiktaş’ın ilk 11’leri belli oldu.",
+    url: "https://yenicaggazetesi.com/kasimpasa-besiktas-macinin-ilk-11leri-aciklandi-1087166h.htm",
+    stored: "spor",
+  },
+  {
+    id: "5d16068c",
+    source: "haberler-com",
+    title: "Trabzonspor, Trendyol Süper Lig'in 10. haftasında Gaziantep FK'yi 2-0 mağlup etti",
+    description: "Trabzonspor, Trendyol Süper Lig'in 10. haftasında Gaziantep FK'yi 2-0 mağlup etti. Savic'in 45+2 ve Muçi'nin 61. dakikada attığı gollerle Trabzonspor galip gelirken, Gaziantep FK, Halil Dervişoğlu ve Maxim ile girdiği pozisyonlarda Onana'yı geçemedi.",
+    url: "https://haberler.com/spor/trabzonspor-trendyol-super-lig-in-10-haftasinda-20385762-haberi",
+    stored: "spor",
+  },
+];
+
+const MUST_STAY_POLITIKA: GateRow[] = [
+  {
+    id: "ec0cdc17",
+    source: "haberturk",
+    title: "25 yıllık siyasi yolculuk ele alınacak",
+    description: "AK Parti’nin kuruluşunun 25’inci, iktidara gelişinin 24’üncü yılı dolayısıyla 3 Kasım Salı günü partinin genel merkezinde panel düzenlenecek. Hüseyin Yayman’ın moderatörlüğünü üstleneceği panele, AK Parti Genel Başkanvekilleri Efkan Ala ve Mustafa Elitaş ile Ömer Çelik, Ahmet Büyükgümüş ve Hazine ve",
+    url: "https://haberturk.com/gundem/son-dakika-haberler-ak-parti-nin-siyasi-yolculugu-kurulusunun-25-iktidara-gelisinin-24-yilinda-ak-parti-panelinde-ele-alinacak-3924227",
+    stored: "politika",
+  },
+  {
+    id: "8f96dc5a",
+    source: "sozcu",
+    title: "Ekim ayı anketinde sürpriz sonuçlar",
+    description: "Veri analisti ve anketçi Murat Kızılboğa’nın paylaştığı “Türkiye’nin Veri Haritası” Ekim 2026 araştırmasında YENİ Parti ...",
+    url: "https://sozcu.com.tr/ekim-ayi-anketinde-surpriz-sonuclar-p375083",
+    stored: "politika",
+  },
+  {
+    id: "4ea8d41a",
+    source: "haber7",
+    title: "Kutuplaştırmayı kim yapıyor, kim besleniyor gördünüz mü",
+    description: "Haber7 yazarı Hasan Öztürk yazdı: Cumhur İttifakı “kutuplaşma”dan kurtulmak için adım adıyor. O adıma, İyi Parti jest ile karşılık veriyor… Buna mukabil Yeni Parti ve CHP arasındaki ithamlar havada ucuşuyor.",
+    url: "https://haber7.com/guncel/haber/3673405-kutuplastirmayi-kim-yapiyor-kim-besleniyor-gordunuz-mu",
+    stored: "politika",
+  },
+  {
+    id: "88909cc5",
+    source: "ilke-tv",
+    title: "Hatimoğulları: ‘Silahsızlanma komisyonunun İmralı’da görüşmeler yapması lazım’",
+    description: "İmralı'daki yeni konutun siyasi bir anlamı olması gerektiğinin altını çizen DEM Parti Eş Genel Başkanı Tülay Hatimoğulları, silahsızlanma alt komisyonunu kimlerin oluşturacağının netleştiğini ama sürecin ilerletilmediğini söyledi. Alt komisyon üyelerinin hızla İmralı'ya gitmesi gerektiğini belirten",
+    url: "https://ilketv.com.tr/hatimogullarindan-surec-degerlendirmesi-silahsizlanma-komisyonunun-imralida-gorusmeler-yapmasi-lazim",
+    stored: "politika",
+  },
+  {
+    id: "3807dee7",
+    source: "karar",
+    title: "EYT'yi bir günle kaçıranlara yeni emeklilik teklifi: Yaş şartı kaldırılacak mı?",
+    description: "EYT'den yararlanamayan milyonlarca çalışanın beklediği yeni emeklilik düzenlemesi TBMM gündemine taşındı. DEM Parti'nin sunduğu üç maddelik teklif, 8 Eylül 1999 sonrası sigortalı olup prim gününü tamamladığı hâlde yaş şartına takılanlara emeklilik yolunu açmayı hedefliyor. SGK uzmanı İsa Karakaş,",
+    url: "https://karar.com/ekonomi-haberleri/eytyi-bir-gunle-kaciranlara-yeni-emeklilik-teklifi-yas-sarti-2081834",
+    stored: "politika",
+  },
+  {
+    id: "ab2986e9",
+    source: "yenicag",
+    title: "Memur emeklilerinden AYM'ye seyyanen zam çağrısı: 6 Kasım'da basın açıklaması yapılacak",
+    description: "Anayasa Mahkemesi’nin seyyanen zam davasında henüz karar açıklamamasına tepki gösteren Seyyanen Zam Mağdurları Platformu, 42 aydır süren mağduriyetin sona ermesi için meydanlara iniyor. Platform Sözcüsü Av. Ali Erdem Gündoğan, \"6 Kasım 2026 saat 15.00’te düzenlenecek\" dedi.",
+    url: "https://yenicaggazetesi.com/memur-emeklilerinden-aymye-seyyanen-zam-cagrisi-6-kasimda-basin-aciklamasi-yapilacak-1087291h.htm",
+    stored: "politika",
+  },
+  {
+    id: "cc883b1e",
+    source: "muhalif",
+    title: "Fuat Oktay başkanlığındaki heyet Berlin'de gurbetçilerle buluştu",
+    description: "Almanya temaslarını sürdüren TBMM Dışişleri Komisyonu heyeti, Berlin'de yaşayan Türk vatandaşlarının talep ve beklentilerini dinleyerek çözüm yolları üzerine...",
+    url: "https://muhalif.com.tr/dunya/fuat-oktay-baskanligindaki-heyet-berlinde-gurbetcilerle-bulustu/747345",
+    stored: "politika",
+  },
+  {
+    id: "d9bfd70f",
+    source: "haberler-com",
+    title: "Fuat Oktay Berlin'de AB'ye stratejik körlükten kurtulma çağrısı yaptı",
+    description: "TBMM Dışişleri Komisyonu Başkanı Fuat Oktay, Berlin'de Türk STK temsilcileriyle görüşen heyetin ardından AB'ye stratejik körlükten kurtulma çağrısı yaptı. Oktay, AB'nin Yunanistan ve Güney Kıbrıs Rum Yönetimi'nin dış politikasına hapsolduğunu söyledi.",
+    url: "https://haberler.com/guncel/fuat-oktay-berlin-de-ab-ye-stratejik-korlukten-20386511-haberi",
+    stored: "politika",
+  },
+  {
+    id: "66923e14",
+    source: "medyascope",
+    title: "Bakırköy Belediyesi dosyasında damacana su, hırdavat, antivirüs ihaleleri suç sayıldı",
+    description: "Bakırköy Belediyesi’ne yönelik soruşturmada 39 kişi tutuklandı. Tutuklananlar arasında Abdülhamit Pehlivan ve Ali Rıza Akyüz de var.\nBakırköy Belediyesi dosyasında damacana su, hırdavat, antivirüs ihaleleri suç sayıldı Medyascope",
+    url: "https://medyascope.tv/2026/11/02/bakirkoy-belediyesi-dosyasinda-damacana-su-hirdavat-antivirus-ihaleleri-suc-sayildi",
+    stored: "politika",
+  },
+];
+
+const RECALL_ROWS: GateRow[] = [
+  {
+    id: "936fe3d5",
+    source: "kisa-dalga",
+    title: "Öcalan İmralı’daki yeni mekâna geçti: Buldan’dan “Yeri değişti, statüsü değişmedi” açıklaması",
+    description: "Mithat Sancar, Abdullah Öcalan’ın İmralı’da hazırlanan yeni yere geçtiğini açıkladı. Pervin Buldan ise mekânın cezaevinin bir parçası olduğunu belirterek, Öcalan’ın süreci koordine etmesine ilişkin statünün henüz resmileştirilmediğini söyledi. İki isim de süreçte yaşanan duraklamaya dikkat çekti.",
+    url: "https://kisadalga.net/haber/gundem/ocalan-imralidaki-yeni-mekana-gecti-buldandan-yeri-degisti-statusu-degismedi-aciklamasi-141331",
+    stored: "dunya",
+  },
+  {
+    id: "e6c75412",
+    source: "dokuz8-haber",
+    title: "Buldan, Öcalan’ın yeni çalışma alanına ilişkin konuştu",
+    description: "Pervin Buldan, Abdullah Öcalan’ın İmralı Cezaevi içinde çalışma koşullarının düzenlendiği yeni bir bölüme geçtiğini belirtti. Buldan, bu değişikliğin tek başına statü değişikliği anlamına gelmediğini vurgulayarak Öcalan’ın toplumun farklı kesimleriyle görüşme talebinin iki yıldır karşılanmadığını söyledi.",
+    url: "https://dokuz8haber.net/buldan-ocalanin-yeni-calisma-alanina-iliskin-konustu",
+    stored: "dunya",
+  },
+  {
+    id: "57fcba2d",
+    source: "isci-haber",
+    title: "Pervin Buldan, Abdullah Öcalan'ın İmralı'daki Yer Değişikliğini Açıkladı mı?",
+    description: "Pervin Buldan, Abdullah Öcalan'ın İmralı Cezaevi'nde farklı bir bölüme geçtiğini doğruladı, ancak bu durumun statü değişikliği anlamına gelmediğini belirtti.",
+    url: "https://iscihaber.net/gundem/pervin-buldan-abdullah-ocalanin-imralidaki-yer-degisikligini-acikladi-mi/277417",
+    stored: "dunya",
+  },
+  {
+    id: "28c9a78d",
+    source: "yenicag",
+    title: "“Hudut geçiş olayı” ve Öcalan’ın villaya geçişi",
+    description: "YENİÇAĞ yazarı Arslan BULUT, Görüş'te \"Hudut geçiş olayı ve Öcalan’ın villaya geçişi\" başlığıyla dikkat çeken bir yazı kaleme aldı.",
+    url: "https://yenicaggazetesi.com/hudut-gecis-olayi-ve-ocalanin-villaya-gecisi-1087117h.htm",
+    stored: "genel",
+  },
+  {
+    id: "cbe294ac",
+    source: "yenicag",
+    title: "“Hudut geçiş olayı” ve Öcalan’ın villaya geçişi",
+    description: "Arslan BULUT yazdı: “Hudut geçiş olayı” ve Öcalan’ın villaya geçişi",
+    url: "https://yenicaggazetesi.com/yenicag-yazari-arslan-bulut-yazdi-hudut-gecis-olayi-ve-ocalanin-villaya-gecisi-1087205h.htm",
+    stored: "genel",
+  },
+  {
+    id: "69887cc0",
+    source: "son-dakika",
+    title: "Ümit Özdağ: Öcalan artık mahkum değil, kendisi için yapılan villaya geçecek",
+    description: "Zafer Partisi lideri Ümit Özdağ, sosyal medyadan paylaştığı mesajda terör örgütü PKK lideri Abdullah Öcalan'ın bir komisyona üye olarak atanmasıyla mahkumluğunun bittiğini ileri sürdü. Özdağ, Öcalan'ın artık hapishanede değil kendisi için yaptırılan villada kalacağını iddia etti. Açıklama, Mithat Sancar'ın Öcalan'ın İmralı'da yeni bir yere taşındığını söylemesinin ardından geldi.",
+    url: "https://sondakika.com/guncel/haber-ozdag-ocalan-in-komisyon-uyeligiyle-serbest-kaldig-20386024",
+    stored: "son_dakika",
+  },
+  {
+    id: "4c0eed63",
+    source: "sozcu",
+    title: "Kahraman Mehmetçiğimize hain saldırı için Ümit Özdağ sordu: Mehmetçiğimizi kim şehit etti?",
+    description: "Sınır bölgesinden açılan ateş sonucu şehit düşen Yusuf Sait Ünlü için MSB’den yeterli açıklama yapılmamasına Zafer Parti...",
+    url: "https://sozcu.com.tr/kahraman-mehmetcigimize-hain-saldiri-icin-umit-ozdag-sordu-mehmetcigimizi-kim-sehit-etti-p374720",
+    stored: "dunya",
+  },
+  {
+    id: "29f3be97",
+    source: "korkusuz",
+    title: "Teröristbaşı Apo İmralı’daki dubleks villasına yerleşmiş",
+    description: "Teröristbaşı Apo İmralı’daki dubleks villasına yerleşmiş",
+    url: "https://korkusuz.com.tr/teroristbasi-apo-imrali-daki-dubleks-villasina-yerlesmis-p56820",
+    stored: "genel",
+  },
+  {
+    id: "d5053326",
+    source: "hurriyet-daily-news",
+    title: "Öcalan relocated to new part of island prison: DEM Party’s Sancar",
+    description: "Authorities have moved jailed PKK leader Abdullah Öcalan to a newly built part of an island prison where he has been incarcerated since 1999, a senior Peoples’ Equality and Democracy Party (DEM Party) official said on Oct. 31.",
+    url: "https://hurriyetdailynews.com/ocalan-relocated-to-new-part-of-island-prison-dem-partys-sancar-228888",
+    stored: "dunya",
+  },
+  {
+    id: "65a12abb",
+    source: "odatv",
+    title: "Öcalan Alevileri ikna edemedi... Konu: Yavuz-İdris Bitlisi ittifakı",
+    description: "Alevi aydınları, Ankara'da düzenlenen çalıştayın sonuç bildirgesinde terör örgütü lideri Abdullah Öcalan'ın Yavuz Sultan Selim-İdris-i Bitlisi ittifakına ilişkin çıkışına tepki göstererek, tarihsel olayların siyasi amaçlarla kullanılmasına karşı çıktı.",
+    url: "https://odatv.com/guncel/ocalan-alevileri-ikna-edemedi-konu-yavuz-idris-bitlisi-ittifaki-120169143",
+    stored: "spor",
+  },
+];
+
+const SON_DAKIKA_ROWS: GateRow[] = [
+  {
+    id: "c5553811",
+    source: "cumhuriyet",
+    title: "Son dakika depremler! Deprem mi oldu? 2 Kasım 2026 nerede, ne zaman deprem oldu?",
+    description: "AFAD, Kandilli son deprem verileri açıklandı. Sarsıntı hisseden yurttaşlar, 2 Kasım 2026 Pazartesi günü son depremlerin nerede ve kaç büyüklüğünde olduğunu merak ediyor. Peki, son dakika depremler! Deprem mi oldu? 2 Kasım 2026 nerede, ne zaman deprem oldu?",
+    url: "https://cumhuriyet.com.tr/turkiye/son-dakika-depremler-deprem-mi-oldu-2-kasim-2026-nerede-ne-zaman-deprem-oldu-2552367",
+    stored: "son_dakika",
+  },
+  {
+    id: "a0d28f96",
+    source: "haberler-com",
+    title: "İstanbul'da deprem mi oldu? SON DAKİKA! 2 Kasım İstanbul'da az önce nerede deprem oldu?",
+    description: "İstanbul'da yaşayan vatandaşlar, 2 Kasım 2026 Pazartesi günü deprem meydana gelip gelmediğini merak ediyor. İstanbul ve çevresinde hissedildiği öne sürülen sarsıntıların ardından “İstanbul'da az önce deprem mi oldu?”, “İstanbul'da deprem kaç büyüklüğünde?” ve “Deprem nerede oldu?” soruları",
+    url: "https://haberler.com/haber/istanbulda-deprem-mi-oldu-son-dakika-2-kasim-20386514-haberi",
+    stored: "son_dakika",
+  },
+  {
+    id: "f09a092f",
+    source: "kamudanhaber",
+    title: "Altın Fiyatlarında Son Dakika! 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti",
+    description: "Altın fiyatları haftaya yükselişle başladı. Geçtiğimiz cuma günü son bir yılın en düşük seviyesine gerileyen ons altın, yeni haftada toparlanma sinyali verdi. Gram altın 6 bin 289 TL'ye yükselirken çeyrek ve Cumhuriyet altınında da hareketlilik yaşandı.",
+    url: "https://kamudanhaber.net/altin-fiyatlarinda-son-dakika-1-yilin-dibini-gordu-yeniden-yukselise-gecti",
+    stored: "son_dakika",
+  },
+  {
+    id: "34986d72",
+    source: "cnn-turk",
+    title: "SON DAKİKA DEPREM 2 KASIM! Bugün deprem mi oldu, nerede, kaç şiddetinde? 2 Kasım 2026 AFAD ve Kandilli Rasathanesi son depremler listesi",
+    description: "Son dakika deprem haberleri araştırılıyor. Deprem haberleri ile ilgili araştırmalar 2 Kasım Pazartesi günü yoğunluk kazandı. Bulundukları bölgede sarsıntı hisseden çok sayıda vatandaş \"2 Kasım Pazartesi deprem mi oldu? Nerede, kaç şiddetinde? İstanbul'da deprem mi oldu? İstanbul'da deprem mi oldu?,",
+    url: "https://cnnturk.com/turkiye/son-dakika-deprem-2-kasim-bugun-deprem-mi-oldu-nerede-kac-siddetinde-2-kasim-2026-afad-ve-kandilli-rasathanesi-son-depremler-listesi-3487670",
+    stored: "son_dakika",
+  },
+  {
+    id: "c242304e",
+    source: "haberler-com",
+    title: "Ahmet Mekin öldü mü, yaşıyor mu? SON DAKİKA! Ahmet Mekin'in sağlık durumu nasıl?",
+    description: "Yeşilçam'ın usta oyuncularından Ahmet Mekin hakkında ortaya atılan vefat iddiaları sevenlerini endişelendirdi. Sosyal medyada yayılan paylaşımların ardından sanatçının son sağlık durumu ve hayatına ilişkin gelişmeler merak konusu oldu. eki, Ahmet Mekin öldü mü, yaşıyor mu? Ahmet Mekin'in sağlık",
+    url: "https://haberler.com/haber/ahmet-mekin-oldu-mu-yasiyor-mu-son-dakika-ahmet-20386655-haberi",
+    stored: "son_dakika",
+  },
+  {
+    id: "0b3d0f21",
+    source: "karar",
+    title: "Selvi Boylum Al Yazmalım'ın Cemşit'i Ahmet Mekin yaşıyor mu, öldü mü? Torunundan son dakika açıklama geldi",
+    description: "Sosyal medyada hızla yayılan asılsız vefat iddialarının ardından, Türk sinemasının usta ismi Ahmet Mekin'in hayatta olduğu ve sağlık durumunun iyi olduğu ailesi tarafından resmi olarak açıklandı.",
+    url: "https://karar.com/guncel-haberler/selvi-boylum-al-yazmalimin-cemsiti-ahmet-mekin-yasiyor-mu-oldu-mu-2081847",
+    stored: "son_dakika",
+  },
+  {
+    id: "f9476b99",
+    source: "haberler-com",
+    title: "2 Kasım gram gümüş ne kadar oldu, daha düşecek mi? SON DAKİKA! Gümüş fiyatları yükseldi mi, düştü mü? Güncel gümüş fiyatları!",
+    description: "2 Kasım 2026 Pazartesi günü gümüş fiyatlarında yaşanan hareketlilik, yatırımcıların yakın takibinde bulunuyor. Yeni haftanın ilk gününde gram gümüşün alış ve satış fiyatlarını öğrenmek isteyenler, ons gümüşteki güncel seviyeleri de araştırıyor. Piyasalardaki değişimler merak edilirken “2 Kasım gram",
+    url: "https://haberler.com/haber/2-kasim-gram-gumus-ne-kadar-oldu-daha-dusecek-mi-20386701-haberi",
+    stored: "son_dakika",
+  },
+  {
+    id: "66a6edee",
+    source: "haberler-com",
+    title: "2 Kasım altın ne kadar oldu, daha düşecek mi? SON DAKİKA! Altın fiyatları yükseldi mi, düştü mü? Güncel altın fiyatları!",
+    description: "2 Kasım 2026 Pazartesi günü altın piyasasında yaşanan gelişmeler, yatırımcılar ve altın alım satımı yapmayı planlayan vatandaşlar tarafından yakından izleniyor. Yeni haftanın ilk işlem gününde gram altın, çeyrek altın ve ons altının güncel fiyatları merak konusu oluyor. Altın piyasasındaki son",
+    url: "https://haberler.com/haber/2-kasim-altin-ne-kadar-oldu-daha-dusecek-mi-son-20386737-haberi",
+    stored: "son_dakika",
+  },
+];
+
+// Rows that stay outside the gate for a reason no description or title rule
+// can fix without a bare, ambiguous keyword. Each is pinned to today's answer
+// so a later fix shows up as a red test to update, not as silent drift.
+const KNOWN_RESIDUAL: ResidualRow[] = [
+  {
+    id: "29f3be97",
+    source: "korkusuz",
+    title: "Teröristbaşı Apo İmralı’daki dubleks villasına yerleşmiş",
+    description: "Teröristbaşı Apo İmralı’daki dubleks villasına yerleşmiş",
+    url: "https://www.korkusuz.com.tr/teroristbasi-apo-imrali-daki-dubleks-villasina-yerlesmis-p56820",
+    stored: "genel",
+    pinned: "genel",
+    note: "recall residual: the headline names the island and a nickname ('Apo') but no party, leader or process term; a bare 'imrali' is not a stem on purpose (the island is also a place and a prison)",
+  },
+];
+
+// The two rows that were sports headlines (and stored as spor before #165 moved
+// politika ahead of spor) must come out as spor; every other row just leaves.
+const LEAVE_AS_SPOR: readonly string[] = ["df57937f", "5d16068c"];
+
+const GATE: ReadonlySet<NewsCategory> = new Set<NewsCategory>(["politika", "son_dakika"]);
+
+function classifyRow(row: GateRow): NewsCategory {
+  return classifyCategory(row.title, row.description, row.url);
+}
+
+describe("wave AX: rows admitted only through the description leave the gate", () => {
+  it.each(MUST_LEAVE_GATE)("$id ($source) is neither politika nor son_dakika", (row) => {
+    const got = classifyRow(row);
+    expect(got).not.toBe("politika");
+    expect(got).not.toBe("son_dakika");
+    if (LEAVE_AS_SPOR.includes(row.id)) expect(got).toBe("spor");
+  });
+
+  it("is not vacuous: 24 of the rows were in the gate in production, and the two sports rows were spor", () => {
+    expect(MUST_LEAVE_GATE).toHaveLength(26);
+    expect(new Set(MUST_LEAVE_GATE.map((r) => r.id)).size).toBe(26);
+    expect(MUST_LEAVE_GATE.filter((r) => GATE.has(r.stored))).toHaveLength(24);
+    for (const id of LEAVE_AS_SPOR) {
+      expect(MUST_LEAVE_GATE.find((r) => r.id === id)?.stored, id).toBe("spor");
+    }
+  });
+});
+
+describe("wave AX: genuinely political rows stay in the gate", () => {
+  it.each(MUST_STAY_POLITIKA)("$id ($source) is politika", (row) => {
+    expect(classifyRow(row)).toBe("politika");
+  });
+
+  it("they were politika in production and a party, TBMM, Meclis, Anayasa or an enforcement action on a municipality carries them", () => {
+    expect(MUST_STAY_POLITIKA).toHaveLength(9);
+    expect(MUST_STAY_POLITIKA.every((r) => r.stored === "politika")).toBe(true);
+    // None of them needs a generic office word: strip the description of the
+    // political marker and the headline alone is not enough for most of them.
+    const bare = MUST_STAY_POLITIKA.filter((r) => classifyCategory(r.title, null, r.url) !== "politika");
+    expect(bare.length).toBeGreaterThanOrEqual(6);
+  });
+});
+
+describe("wave AX: known residual rows", () => {
+  it.each(KNOWN_RESIDUAL)("$id is pinned at $pinned ($note)", (row) => {
+    expect(classifyRow(row)).toBe(row.pinned);
+    expect(classifyCategory(row.title, null, row.url)).toBe(row.pinned);
+  });
+
+  it("an İmralı headline without a name is not made politika by a bare 'imralı'", () => {
+    expect(cls("İmralı Adası nerede, nereye, hangi ile bağlı?")).not.toBe("son_dakika");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Recall: the Öcalan / İmralı process and the minor parties
+// ---------------------------------------------------------------------------
+
+describe("wave AX: the Öcalan / İmralı process and the minor parties are politics", () => {
+  const NAMED = RECALL_ROWS.filter((r) => r.id !== "29f3be97");
+
+  it("covers the 10 headlines that were outside the gate: 9 name a person, a party or the process, 1 does not", () => {
+    expect(RECALL_ROWS).toHaveLength(10);
+    expect(NAMED).toHaveLength(9);
+    expect(KNOWN_RESIDUAL.map((r) => r.id)).toContain("29f3be97");
+  });
+
+  it.each(NAMED)("$id ($source): the title alone is politika (description empty)", (row) => {
+    expect(classifyCategory(row.title, null, row.url)).toBe("politika");
+  });
+
+  it.each(NAMED)("$id ($source): and still politika with the real description", (row) => {
+    expect(classifyRow(row)).toBe("politika");
+  });
+
+  it("is not vacuous: of the 9 rows only one was in the gate in production (son_dakika, by a host rule that no longer exists)", () => {
+    expect(NAMED.filter((r) => GATE.has(r.stored)).map((r) => r.id)).toEqual(["69887cc0"]);
+  });
+
+  it.each([
+    ["Mithat Sancar: Öcalan İmralı'da yeni yere geçti"],
+    ["Pervin Buldan: Öcalan farklı kesimlerle görüşmek istiyor"],
+    ["Ümit Özdağ'dan yeni açıklama"],
+    ["Hatimoğulları süreç için çağrı yaptı"],
+    ["PKK silah bırakma töreni düzenlendi"],
+    ["Zafer Partisi kongre kararını açıkladı"],
+    ["Saadet Partisi'nden yeni açıklama"],
+    ["Yeniden Refah kararını duyurdu"],
+    ["DEVA Partisi heyeti toplandı"],
+    ["Gelecek Partisi'nden basın toplantısı"],
+    ["Memleket Partisi'nden yeni hamle"],
+    ["Büyük Birlik Partisi'nde kongre günü"],
+    ["İşçi Partisi'nden bildiri"],
+    ["Terörsüz Türkiye hedefi için yeni adım"],
+    ["Süreç komisyonu yarın toplanıyor"],
+    ["İmralı heyeti Ankara'ya döndü"],
+    ["Öcalan'ın avukatları görüşme talep etti"],
+  ])("a synthetic headline naming a new stem is politika: %s", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  it("the new names count in a description too, since they are unambiguous", () => {
+    expect(cls("Yeni düzenleme", "DEVA Partisi Genel Merkezi'nde toplantı yapıldı")).toBe("politika");
+    expect(cls("Yeni düzenleme", "Terörsüz Türkiye sürecine ilişkin açıklama")).toBe("politika");
+    expect(cls("Yeni düzenleme", "Abdullah Öcalan'ın avukatları")).toBe("politika");
+  });
+
+  it("'özdağ' is a whole word: 'gözdağı' (a threat) is not it", () => {
+    expect(cls("İran'dan Avrupa'ya gözdağı: füze menzili açıklandı")).toBe("dunya");
+    expect(cls("Gözdağı verdiler")).toBe("genel");
+    expect(cls("Ümit Özdağ konuştu")).toBe("politika");
+  });
+
+  it("a bare surname or a bare name is not enough: Buldan the town, Sancar the Nobel laureate", () => {
+    expect(cls("Buldan bezi festivali başladı")).not.toBe("politika");
+    expect(cls("Aziz Sancar ödül aldı")).not.toBe("politika");
+    expect(cls("Denizli'nin Buldan ilçesinde sel")).not.toBe("politika");
+  });
+
+  it("'İmralı Adası nerede, nereye, hangi ile bağlı?' is not son_dakika (a bare 'imralı' is not a stem)", () => {
+    expect(cls("İmralı Adası nerede, nereye, hangi ile bağlı?")).not.toBe("son_dakika");
+  });
+
+  it("the stems are word starts: 'zafer' or 'refah' alone, a victory party and a 'gelecek' (future) are not parties", () => {
+    expect(cls("Zafer sevinci sokaklara taştı")).not.toBe("politika");
+    expect(cls("Refah düzeyi yükseldi")).not.toBe("politika");
+    expect(cls("Gelecek hafta hava durumu")).not.toBe("politika");
+    expect(cls("Süreç yönetimi eğitimi başladı")).not.toBe("politika");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// son_dakika is a prefix of the title, not a word anywhere in it
+// ---------------------------------------------------------------------------
+
+describe("wave AX: son_dakika counts only at the start of the title", () => {
+  it.each(SON_DAKIKA_ROWS)("$id ($source) is no longer son_dakika", (row) => {
+    expect(row.stored).toBe("son_dakika");
+    expect(classifyRow(row)).not.toBe("son_dakika");
+    expect(classifyRow(row)).not.toBe("politika");
+  });
+
+  // The exact category, where the real row supplies it. 'title' means the
+  // headline carries the keyword (so the description is not needed); 'description'
+  // means only the stored description supplies it.
+  const EXACT: Array<[string, NewsCategory, "title" | "description"]> = [
+    ["c5553811", "yasam", "title"],
+    ["a0d28f96", "yasam", "title"],
+    ["34986d72", "yasam", "title"],
+    ["c242304e", "yasam", "title"],
+    ["f09a092f", "ekonomi", "description"],
+    ["66a6edee", "ekonomi", "description"],
+    ["f9476b99", "ekonomi", "description"],
+    ["0b3d0f21", "yasam", "description"],
+  ];
+
+  it.each(EXACT)("%s -> %s (supplied by the %s)", (id, expected, from) => {
+    const row = SON_DAKIKA_ROWS.find((r) => r.id === id)!;
+    expect(classifyRow(row)).toBe(expected);
+    if (from === "title") {
+      expect(classifyCategory(row.title, null, row.url)).toBe(expected);
+    } else {
+      // without the description the headline alone is simply outside the gate
+      expect(GATE.has(classifyCategory(row.title, null, row.url))).toBe(false);
+    }
+  });
+
+  it("the SEO templates named in the report are not in the gate, with and without a description", () => {
+    const titles = [
+      "İstanbul'da deprem mi oldu? SON DAKİKA! 2 Kasım İstanbul'da az önce nerede deprem oldu?",
+      "Altın Fiyatlarında Son Dakika! 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti",
+      "2 Kasım altın ne kadar oldu, daha düşecek mi? SON DAKİKA! Altın fiyatları yükseldi mi, düştü mü?",
+      "İnegöl Kafkas Spor'da son dakika sevinci",
+      "Selvi Boylum Al Yazmalım'ın Cemşit'i Ahmet Mekin yaşıyor mu, öldü mü? Torunundan son dakika açıklama geldi",
+    ];
+    for (const title of titles) {
+      expect(GATE.has(cls(title)), title).toBe(false);
+    }
+    expect(cls(titles[0])).toBe("yasam");
+  });
+
+  it("the prefix is classified by what follows it", () => {
+    expect(cls("Son dakika | Galatasaray'da Abdullah Kavukcu istifa etti")).toBe("spor");
+    expect(cls("SON DAKİKA DEPREM 2 KASIM! Bugün deprem mi oldu, nerede, kaç şiddetinde?")).toBe("yasam");
+    expect(cls("Son dakika: Dolar rekor kırdı")).toBe("ekonomi");
+    expect(cls("FLAŞ HABER: Ukrayna ve Rusya heyetleri görüşecek")).toBe("dunya");
+    expect(cls("Breaking: Tokyo'da deprem")).toBe("yasam");
+    expect(cls("Acil: Okullar tatil edildi", null, "https://x.test/yasam/a")).toBe("yasam");
+  });
+
+  it("a mid-title 'son dakika' never counts, not even for a political headline", () => {
+    expect(cls("Bahçeli'den son dakika açıklaması")).toBe("politika");
+    expect(cls("Yeni kararı son dakika duyurdular")).toBe("genel");
+    expect(cls("Maçta son dakika golü", null, NEUTRAL_URL)).toBe("spor");
+    expect(cls("Haberin devamı: SON DAKİKA bilgisi")).toBe("genel");
+    expect(cls("Alışverişte SON DAKİKA fırsatı")).toBe("genel");
+  });
+
+  it("a prefix with a genel remainder stays son_dakika (the gate is unchanged for breaking news)", () => {
+    expect(cls("Son dakika: yeni açıklama geldi")).toBe("son_dakika");
+    expect(cls("SON DAKİKA")).toBe("son_dakika");
+    expect(cls("Son dakika!")).toBe("son_dakika");
+    expect(cls("  son   dakika ...")).toBe("son_dakika");
+    expect(cls("FLAŞ HABER")).toBe("son_dakika");
+    expect(cls("ACİL")).toBe("son_dakika");
+  });
+
+  it("a prefix with a politika remainder stays in the gate as son_dakika", () => {
+    expect(cls("SON DAKİKA! Bakan Gürlek duyurdu: 22 şüpheli gözaltına alındı")).toBe("son_dakika");
+    expect(cls("Son dakika | Özgür Özel'den flaş açıklama")).toBe("son_dakika");
+    expect(cls("SON DAKİKA! Öcalan İmralı'da yeni yere geçti")).toBe("son_dakika");
+    expect(cls("Son dakika: yeni açıklama geldi", "CHP Genel Merkezi'nde toplantı")).toBe("son_dakika");
+  });
+
+  it("a description-only generic word does not turn the remainder into politics", () => {
+    expect(cls("Son dakika: yeni açıklama geldi", "Bakan açıkladı")).toBe("son_dakika");
+    expect(cls("Son dakika | Maç sonucu", "Bakan açıkladı")).toBe("spor");
+  });
+
+  it("the remainder is cut at the right character: dotted İ and typographic apostrophes keep the slice aligned", () => {
+    // 'SON DAKİKA' lowercases to 11 code units with the combining dot; the slice
+    // must be taken on the view without it, or the first letter of the remainder
+    // is lost (and 'deprem', 'fenerbahce', 'abd' would stop matching).
+    expect(cls("SON DAKİKA | DEPREM İSTANBUL’DA hissedildi")).toBe("yasam");
+    expect(cls("SON DAKİKA | FENERBAHÇE’NİN kafilesi İstanbul’a döndü")).toBe("spor");
+    expect(cls("SON DAKİKA | ABD’DEN YENİ HAMLE")).toBe("dunya");
+    expect(cls("SON DAKİKA! İMAMOĞLU’NUN duruşması ertelendi")).toBe("son_dakika");
+    expect(cls("SON DAKİKA… DOLAR’DA rekor")).toBe("ekonomi");
+    // the same with plain ASCII capitals
+    expect(cls("SON DAKIKA | DEPREM ISTANBUL’DA hissedildi")).toBe("yasam");
+    expect(cls("FLAŞ HABER | ÇİN’DEN yeni adım")).toBe("dunya");
+  });
+
+  it("'son dakikada', 'son dakikalar' and 'breaking bad' are not the prefix", () => {
+    expect(cls("Son dakikada gelen golle üç puan")).toBe("spor");
+    expect(cls("Son dakikalar yaşandı")).not.toBe("son_dakika");
+    expect(cls("Breaking Bad efsaneleri yıllar sonra bir arada")).not.toBe("son_dakika");
+    expect(cls("Acilen toplanıyor")).toBe("genel");
+    expect(cls("Flaşör fiyatları")).toBe("genel");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rule units
+// ---------------------------------------------------------------------------
+
+describe("wave AX: generic office and process words admit from the title only", () => {
+  const GENERIC: Array<[string, string, string]> = [
+    // [title with the word, description with the word, word]
+    ["Bakan açıkladı", "Bakan açıkladı", "bakan"],
+    ["Seçim tarihi belli oldu", "Seçim tarihi belli oldu", "seçim"],
+    ["Hükümet karar aldı", "Hükümet karar aldı", "hükümet"],
+    ["Genel Başkanı konuştu", "Genel Başkanı konuştu", "genel başkan"],
+    ["İçişleri duyurdu", "İçişleri duyurdu", "içişleri"],
+    ["Cumhurbaşkanı açıkladı", "Cumhurbaşkanı açıkladı", "cumhurbaşkanı"],
+    ["Başbakan açıkladı", "Başbakan açıkladı", "başbakan"],
+    ["Dışişleri duyurdu", "Dışişleri duyurdu", "dışişleri"],
+    ["Kabine toplandı", "Kabine toplandı", "kabine"],
+    ["Belediye Başkanı açıkladı", "Belediye Başkanı açıkladı", "belediye başkan"],
+    ["İl Başkanı açıkladı", "İl Başkanı açıkladı", "il başkan"],
+  ];
+
+  it.each(GENERIC)("'%s' in the description alone does not admit (neutral title)", (_t, description) => {
+    expect(cls("Yeni düzenleme", description)).toBe("genel");
+  });
+
+  it.each(GENERIC)("'%s' in the title still admits", (title) => {
+    expect(cls(title)).toBe("politika");
+  });
+
+  it("the specific example: a bakan, a seçim, a hükümet in the description", () => {
+    expect(cls("Yeni düzenleme", "Bakan açıkladı")).toBe("genel");
+    expect(cls("Yeni düzenleme", "Seçim sonuçları bekleniyor")).toBe("genel");
+    expect(cls("Yeni düzenleme", "Hükümet yetkilileri bilgi verdi")).toBe("genel");
+    expect(cls("Yeni düzenleme", "Genel Başkanı Kılıç uyardı")).toBe("genel");
+    expect(cls("Yeni düzenleme", "İçişleri Bakanlığı açıkladı")).toBe("genel");
+    expect(cls("Yeni düzenleme", "Cumhurbaşkanı Yardımcısı duyurdu")).toBe("genel");
+  });
+});
+
+describe("wave AX: unambiguous names and bodies still admit from the description", () => {
+  it.each([
+    ["CHP lideri açıkladı"],
+    ["AKP kaynakları bilgi verdi"],
+    ["MHP Genel Merkezi"],
+    ["HDP geçmişi"],
+    ["DEM Parti'nin teklifi"],
+    ["AK Parti'nin kuruluş yıldönümü"],
+    ["İYİ Parti'den açıklama"],
+    ["Yeni Parti kuruluş dilekçesi"],
+    ["Özgür Özel konuştu"],
+    ["İmamoğlu davası"],
+    ["Mansur Yavaş açıkladı"],
+    ["Kılıçdaroğlu'nun mesajı"],
+    ["Davutoğlu ve Babacan bir araya geldi"],
+    ["Bakırhan'ın açıklaması"],
+    ["Bahçeli'nin çağrısı"],
+    ["Erdoğan'ın mesajı"],
+    ["Kurtulmuş'un ziyareti"],
+    ["TBMM Genel Kurulu'nda görüşüldü"],
+    ["Meclis gündemi yoğun"],
+    ["Milletvekili sayısı arttı"],
+    ["Muhalefet partileri toplandı"],
+    ["Anayasa Mahkemesi karar verdi"],
+    ["Siyaset kulislerinde hareketlilik"],
+    ["Oy sayımı sürüyor"],
+    ["TBMM grup başkanvekili açıkladı"],
+  ])("a description with '%s' admits", (description) => {
+    expect(cls("Yeni düzenleme", description)).toBe("politika");
+  });
+
+  it("belediye, parti and İBB together with an action admit from the description", () => {
+    expect(cls("Yeni gelişme", "Belediyeye yönelik soruşturmada 5 gözaltı kararı")).toBe("politika");
+    expect(cls("Yeni gelişme", "Parti binasına operasyon düzenlendi")).toBe("politika");
+    expect(cls("Yeni gelişme", "İBB'ye yönelik soruşturma genişledi")).toBe("politika");
+    expect(cls("Yeni gelişme", "Belediye çalışanları tutuklandı")).toBe("politika");
+  });
+
+  it("a ministry and an operation in the description alone are crime news, not politics", () => {
+    expect(cls("Sahte ilaç operasyonu", "Sağlık Bakanlığı koordinesinde operasyon düzenlendi")).not.toBe("politika");
+    expect(cls("Yeni gelişme", "Bakanlık soruşturma başlattı, 3 gözaltı")).toBe("genel");
+    expect(cls("Yeni gelişme", "İçişleri Bakanlığı operasyon açıkladı")).toBe("genel");
+    // the title still admits: a ministry in the headline is a headline about the state
+    expect(cls("Bakanlık soruşturma başlattı")).toBe("politika");
+  });
+});
+
+describe("wave AX: the Erdoğan venue guard", () => {
+  it("'Recep Tayyip Erdoğan Stadyumu' and 'Erdoğan Üniversitesi' are venues, not the president", () => {
+    expect(cls("Recep Tayyip Erdoğan Stadyumu'nda bilet krizi")).not.toBe("politika");
+    expect(cls("Recep Tayyip Erdoğan Üniversitesi'nde yeni dönem")).not.toBe("politika");
+    expect(cls("Yeni düzenleme", "Recep Tayyip Erdoğan Stadyumu'nda oynanacak")).not.toBe("politika");
+    expect(cls("Yeni düzenleme", "Erdoğan Üniversitesi rektörü açıkladı")).not.toBe("politika");
+    expect(cls("Recep Tayyip Erdoğan Stadyumu'nda bilet krizi")).toBe("spor");
+    expect(cls("Recep Tayyip Erdoğan Üniversitesi'nde yeni dönem")).toBe("yasam");
+  });
+
+  it("the president still counts, also next to a venue", () => {
+    expect(cls("Erdoğan Güney Kore'ye gitti")).toBe("politika");
+    expect(cls("Recep Tayyip Erdoğan Stadyumu'nu açan Erdoğan konuştu")).toBe("politika");
+    expect(cls("Yeni düzenleme", "Cumhurbaşkanı Erdoğan'ın mesajı")).toBe("politika");
+    expect(cls("Yeni düzenleme", "Erdoğan Stadyumu'nda Erdoğan konuştu")).toBe("politika");
+    expect(cls("Erdoğan'ın üniversite ziyareti")).toBe("politika");
+  });
+});
+
+describe("wave AX: a sports headline beats a description-only politics hit", () => {
+  it("a sports title wins over a party, a leader or an enforcement body in the description", () => {
+    expect(cls("Galatasaray Samsunspor'u mağlup etti", "CHP'li belediye başkanı tribündeydi")).toBe("spor");
+    expect(cls("Beşiktaş deplasmanda kazandı", "Bahçeli de maçı izledi")).toBe("spor");
+    expect(cls("Kasımpaşa maçı sonrası açıklama", "Belediye soruşturma başlattı")).toBe("spor");
+    expect(cls("Trabzonspor'da kriz", "Meclis üyesi yönetime seslendi")).toBe("spor");
+  });
+
+  it("a goal word in the title or a /spor/ URL section counts as a sports title", () => {
+    expect(cls("Golle başladı", "CHP milletvekili stadyumdaydı")).toBe("spor");
+    expect(cls("Yeni düzenleme", "CHP lideri açıkladı", "https://x.test/spor/futbol/a")).toBe("spor");
+    expect(cls("Yeni düzenleme", "TBMM'de görüşülen teklif", "https://x.test/spor/a")).toBe("spor");
+  });
+
+  it("a title-level politics hit still beats sport", () => {
+    expect(cls("Özgür Özel Galatasaray maçına gitti")).toBe("politika");
+    expect(cls("Erdoğan Fenerbahçe kafilesini kabul etti")).toBe("politika");
+    expect(cls("Bahçeli maç izledi", null, "https://x.test/spor/a")).toBe("politika");
+    expect(cls("Bakan Bak: Süper Lig'de yeni dönem")).toBe("politika");
+    expect(cls("Yeni düzenleme", "CHP lideri açıkladı", NEUTRAL_URL)).toBe("politika");
+  });
+
+  it("the footballer Dervişoğlu is a title word only unless the title is sport", () => {
+    expect(cls("Trabzonspor'da Dervişoğlu golle döndü")).toBe("spor");
+    expect(cls("Dervişoğlu golle döndü")).toBe("spor");
+    expect(cls("Dervişoğlu: 'Hükümet ne yapıyor?'")).toBe("politika");
+    expect(cls("Dervişoğlu açıklama yaptı")).toBe("politika");
+    expect(cls("Yeni düzenleme", "Dervişoğlu açıkladı")).toBe("genel");
+    expect(cls("Davutoğlu, Babacan ve Dervişoğlu bir arada")).toBe("politika");
+  });
+
+  it("Sarıgül is a title word: in a description alone it is a surname", () => {
+    expect(cls("Sarıgül'ün ifadesi ortaya çıktı")).toBe("politika");
+    expect(cls("Yeni düzenleme", "Eski belediye başkanı Sarıgül konuştu")).toBe("genel");
   });
 });
 

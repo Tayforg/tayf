@@ -525,3 +525,87 @@ describe("tidySummaryText feed wrappers (h19-ingest-2)", () => {
     });
   });
 });
+
+// h20-live-4 (hunt 20, 2026-11-02): WordPress ends an excerpt with " [&hellip;]".
+// on-haber had it on 174 of 177 descriptions in 48 h; cluster c2a97d0a showed
+// "... Bu çalışmaların ardından […]". stripFeedWrappers() (step 1b) now turns a
+// trailing marker into one "…".
+describe("tidySummaryText trailing WordPress excerpt marker (h20-live-4)", () => {
+  const C2A9_BODY =
+    "... Bakan Uraloğlu, ilk olarak mevcut demiryolu hattının elektrikli ve sinyalli hale getirileceğini açıkladı. Bu çalışmaların ardından";
+  // Real on-haber description (article 49a6d622, read-only SELECT on 2026-11-02).
+  const ON_HABER_BODY =
+    "HBO’nun en güzel dönem dizilerinden birinin dördüncü sezonu bugün gösterime giriyor. “The Gilded Age” adlı dizi, adındaki gibi Amerikan kapitalizminin ve özellikle New York’un “Yaldızlı Çağ”ını anlatıyor. Geçen salı günü iki saatimi geçirdiğim binanın üzerinde, işte o dizide anlatılan dönemin en önemli isimlerinden biri yazıyor: “J.P. Morgan…” Bankanın kurucusu… Dizide doğrudan adı geçmiyor. Ama Amerika’da";
+  const MARKERS = ["[…]", "[...]", "[&#8230;]", "[&hellip;]"] as const;
+
+  it("the c2a97d0a sample ends with 'ardından…' and never with '[…]'", () => {
+    const out = tidySummaryText(`${C2A9_BODY} […]`);
+    expect(out).toBe(`${C2A9_BODY}…`);
+    expect(out.endsWith("ardından…")).toBe(true);
+    expect(out.endsWith("[…]")).toBe(false);
+    expect(out).not.toContain("[…]");
+  });
+
+  it("the real on-haber sample ends with '…' and never with '[…]'", () => {
+    const out = tidySummaryText(`${ON_HABER_BODY} […]`);
+    expect(out).toBe(`${ON_HABER_BODY}…`);
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.endsWith("[…]")).toBe(false);
+  });
+
+  it.each(MARKERS)("'%s' at the end of a summary becomes '…'", (marker) => {
+    expect(tidySummaryText(`${C2A9_BODY} ${marker}`)).toBe(`${C2A9_BODY}…`);
+    expect(tidySummaryText(`${C2A9_BODY}${marker}`)).toBe(`${C2A9_BODY}…`);
+    expect(tidySummaryText(`${C2A9_BODY} ${marker}\n`)).toBe(`${C2A9_BODY}…`);
+  });
+
+  it("after a sentence mark the marker is dropped without a doubled mark", () => {
+    expect(tidySummaryText("Toplantı bitti. […]")).toBe("Toplantı bitti.");
+    expect(tidySummaryText("Toplantı bitti. [&hellip;]")).toBe("Toplantı bitti.");
+  });
+
+  it("a summary that is only the marker gives '' (the caller hides it)", () => {
+    for (const marker of MARKERS) expect(tidySummaryText(marker)).toBe("");
+  });
+
+  it("a marker in the middle of a summary is left alone", () => {
+    expect(tidySummaryText("Birinci […] ikinci cümle.")).toBe("Birinci […] ikinci cümle.");
+  });
+
+  it("composes with the other steps: widget line, newline collapse, footer and marker in one call", () => {
+    expect(
+      tidySummaryText(
+        "Maç bitti.Takım kutladı, ardından […]\nİlginizi Çekebilir\nThe post Başlık appeared first on Site Adı.",
+      ),
+    ).toBe("Maç bitti. Takım kutladı, ardından…");
+  });
+
+  it("is idempotent on the new inputs and their results", () => {
+    for (const marker of MARKERS) {
+      for (const x of [
+        `${C2A9_BODY} ${marker}`,
+        `${ON_HABER_BODY} ${marker}`,
+        `Toplantı bitti. ${marker}`,
+        marker,
+        `a ${marker} b`,
+      ]) {
+        const once = tidySummaryText(x);
+        expect(tidySummaryText(once), JSON.stringify(x)).toBe(once);
+      }
+    }
+  });
+
+  it("a 100k-character input with a trailing marker finishes in under 100 ms", () => {
+    const inputs = [
+      `${"a. ".repeat(33_000)} […]`,
+      `${" ".repeat(100_000)} […]`,
+      `[…]${" ".repeat(100_000)}`,
+      "[…] ".repeat(25_000),
+    ];
+    for (const s of inputs) {
+      const start = performance.now();
+      tidySummaryText(s);
+      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(100);
+    }
+  });
+});

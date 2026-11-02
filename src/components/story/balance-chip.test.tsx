@@ -18,6 +18,12 @@ const DENGELI: BalanceScore = {
   label: BALANCE_LABELS.dengeli,
   total: 8,
 };
+const IKI: BalanceScore = {
+  score: 63,
+  tier: "iki",
+  label: BALANCE_LABELS.iki,
+  total: 8,
+};
 const YAKIN: BalanceScore = {
   score: 50,
   tier: "yakin",
@@ -79,6 +85,19 @@ describe("BalanceChip — full", () => {
     expect(markup).toContain('aria-label="Denge puanı 30/100: Tek tarafta"');
   });
 
+  it("shows the İki tarafa dengeli label with the score and an accessible name", () => {
+    const markup = render(IKI, "full");
+    expect(markup).toContain("Denge puanı 63/100 · İki tarafa dengeli");
+    expect(markup).toContain('aria-label="Denge puanı 63/100: İki tarafa dengeli"');
+    expect(markup).toContain('title="Denge puanı 63/100: İki tarafa dengeli"');
+    expect(markup).not.toContain("Tek tarafa yakın");
+  });
+
+  it("round-trips an even İktidar 4 / Muhalefet 4 split (4/0/4 -> 63, iki)", () => {
+    const balance = balanceFromZoneCounts({ iktidar: 4, bagimsiz: 0, muhalefet: 4 });
+    expect(render(balance, "full")).toContain("Denge puanı 63/100 · İki tarafa dengeli");
+  });
+
   it("explains the missing score when there are too few sources", () => {
     const markup = render(null, "full");
     expect(markup).toContain("Denge puanı yok · Az kaynak");
@@ -99,6 +118,9 @@ describe("BalanceChip — tier styling", () => {
     expect(render(DENGELI, "full")).toContain(
       "border-sky-500/30 bg-sky-500/10 text-sky-800 dark:text-sky-300",
     );
+    expect(render(IKI, "full")).toContain(
+      "border-sky-500/30 bg-muted/50 text-foreground",
+    );
     expect(render(YAKIN, "full")).toContain(
       "border-border/40 bg-muted/50 text-muted-foreground",
     );
@@ -114,6 +136,8 @@ describe("BalanceChip — tier styling", () => {
     const markups = [
       render(DENGELI, "compact"),
       render(DENGELI, "full"),
+      render(IKI, "compact"),
+      render(IKI, "full"),
       render(YAKIN, "compact"),
       render(YAKIN, "full"),
       render(TEK, "compact"),

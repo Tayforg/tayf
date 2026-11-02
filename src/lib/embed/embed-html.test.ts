@@ -169,15 +169,19 @@ describe("cluster OG image headline (source scan)", () => {
   it("applies it to the stored title before the length clamp", () => {
     const applied = code.indexOf("displayHeadline(cluster.title_tr)");
     expect(applied).toBeGreaterThan(-1);
-    expect(code).toMatch(/const display\s*=\s*displayHeadline\(cluster\.title_tr\)/);
-    const clamp = code.indexOf("display.length > titleMaxChars");
-    expect(clamp).toBeGreaterThan(applied);
+    // The swapped headline is the argument of the clamp (h20-contracts-1:
+    // clampOgTitle replaced the inline slice), so the swap always runs first.
+    expect(code).toMatch(/clampOgTitle\(\s*displayHeadline\(cluster\.title_tr\)/);
+    expect(code.indexOf("clampOgTitle(")).toBeLessThan(applied);
   });
 
   it("clamps the swapped headline, never the raw stored title", () => {
     expect(code).not.toContain("cluster.title_tr.length");
     expect(code).not.toContain("cluster.title_tr.slice");
-    expect(code).toContain("display.slice(0, titleMaxChars - 3)");
+    expect(code).not.toMatch(/clampOgTitle\(\s*cluster\.title_tr/);
+    // The inline mid-word cut is gone; clampOgTitle owns the cut.
+    expect(code).not.toContain("titleMaxChars");
+    expect(code).toMatch(/import\s*{[^}]*\bclampOgTitle\b[^}]*}\s*from\s*["']@\/lib\/seo\/og-title["']/);
   });
 
   it("re-exports nothing new from the route file", () => {

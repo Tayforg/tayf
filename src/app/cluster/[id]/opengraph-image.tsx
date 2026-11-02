@@ -11,6 +11,11 @@ import {
 } from "@/lib/bias/zone-summary";
 import { displayHeadline } from "@/lib/embed/embed-html";
 import { formatPctTr } from "@/lib/format/number-tr";
+import {
+  OG_TITLE_LINE_HEIGHT,
+  OG_TITLE_MAX_LINES,
+  clampOgTitle,
+} from "@/lib/seo/og-title";
 import type { MediaDnaZone } from "@/types";
 
 // File-route OG card for /cluster/[id].
@@ -203,20 +208,18 @@ export default async function Image({ params }: ImageProps) {
   const ribbonShare = ribbonZone ? dominantZonePercent(zones, ribbonZone) : 0;
   const ribbonOnly = ribbonZone ? isOnlyZone(zones, ribbonZone) : false;
 
-  // Trim very long Turkish headlines so they fit in the title box.
-  // Roughly 110 characters before Satori starts pushing things
-  // off-canvas at fontSize 64 — tighter once the blindspot ribbon shrinks
-  // the title to fontSize 56, since the ribbon and top row also compete
-  // for vertical space in the column.
-  const titleFontSize = ribbonZone ? 56 : 64;
-  const titleMaxChars = ribbonZone ? 95 : 110;
-  // A stored title with no letter or digit ('&nbsp', '-') would render as a
-  // blank headline; show the neutral "Haber" instead, then clamp.
-  const display = displayHeadline(cluster.title_tr);
-  const title =
-    display.length > titleMaxChars
-      ? display.slice(0, titleMaxChars - 3) + "…"
-      : display;
+  // Clamp the headline to the title box (h20-contracts-1). clampOgTitle cuts a
+  // long Turkish headline at a word boundary (never "...Töreni'ne kat…") to 130
+  // characters (95 under the blindspot ribbon, which also takes vertical space)
+  // and steps the font size down as the text grows (64/56 -> 52 -> 44 px), so
+  // the longest allowed headline still wraps to at most 3 lines instead of 4,
+  // which pushed the legend row off the canvas. A stored title with no letter or
+  // digit ('&nbsp', '-') would render as a blank headline; displayHeadline shows
+  // the neutral "Haber" instead, then the clamp runs.
+  const { text: title, fontSize: titleFontSize } = clampOgTitle(
+    displayHeadline(cluster.title_tr),
+    { ribbon: ribbonZone !== null },
+  );
 
   return new ImageResponse(
     (
@@ -360,11 +363,16 @@ export default async function Image({ params }: ImageProps) {
               display: "flex",
               fontSize: titleFontSize,
               fontWeight: 800,
-              lineHeight: 1.1,
+              lineHeight: OG_TITLE_LINE_HEIGHT,
               letterSpacing: "-0.025em",
               color: "#fafafa",
+              // Never taller than OG_TITLE_MAX_LINES lines at this size: a
+              // line more than that is clipped, it cannot push the legend.
+              maxHeight: Math.ceil(
+                OG_TITLE_MAX_LINES * titleFontSize * OG_TITLE_LINE_HEIGHT,
+              ),
               overflow: "hidden",
-              lineClamp: 3,
+              lineClamp: OG_TITLE_MAX_LINES,
             }}
           >
             {title}

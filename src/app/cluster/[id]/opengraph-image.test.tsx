@@ -179,6 +179,23 @@ describe("cluster opengraph-image", () => {
     expect(titleMatch![0].length).toBeLessThanOrEqual(95);
   });
 
+  it("cuts the 594667c9 ribbon title at a word, never as '...Töreni'ne kat…' (h20-contracts-1)", async () => {
+    getClusterDetailOrThrow.mockResolvedValueOnce(
+      mkDetail({
+        title_tr:
+          "İlim Yayma Vakfı Mütevelli Heyeti Başkanı Bilal Erdoğan, HKÜ'de 'Akademik Ödül Töreni'ne katıldı",
+      }),
+    );
+    const { default: Image } = await import("./opengraph-image");
+
+    await Image({ params: Promise.resolve({ id: VALID_ID }) });
+
+    const text = collectText(captured).join("");
+    expect(text).toContain("KÖR NOKTA — sadece İktidar yazdı");
+    expect(text).not.toContain("kat…");
+    expect(text).toContain("Akademik Ödül Töreni'ne…");
+  });
+
   it("shows the %share form (not 'sadece') when the DB flag fires below 100%", async () => {
     // 4-of-5 = 80% share, the contract's minimum flagging threshold.
     getClusterDetailOrThrow.mockResolvedValueOnce(

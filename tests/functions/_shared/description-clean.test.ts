@@ -1018,6 +1018,191 @@ describe("cleanDescription with feed wrappers (h19-ingest-2)", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h20-live-4 (hunt 20, 2026-11-02): WordPress ends an excerpt with " [&hellip;]"
+// (on-haber: 174 of 177 descriptions in 48 h; ilke-tv too). The marker survived
+// into 24 live cluster summaries ("... Bu çalışmaların ardından [...]") and into
+// the clustering text. stripFeedWrappers() now turns a TRAILING marker into a
+// single "…" (or drops it after a sentence mark). A marker anywhere else is
+// ordinary text. rss/normalize.ts is untouched: content_hash stays byte-identical.
+//
+// The on-haber sample is a real row (read-only SELECT on 2026-11-02, article
+// 49a6d622); the c2a97d0a sample is the summary shown on that cluster page.
+// ---------------------------------------------------------------------------
+
+const EXCERPT_MARKERS = ["[…]", "[...]", "[&#8230;]", "[&hellip;]"] as const;
+
+const C2A9_BODY =
+  "... Bakan Uraloğlu, ilk olarak mevcut demiryolu hattının elektrikli ve sinyalli hale getirileceğini açıkladı. Bu çalışmaların ardından";
+
+const ON_HABER_BODY =
+  "HBO’nun en güzel dönem dizilerinden birinin dördüncü sezonu bugün gösterime giriyor. “The Gilded Age” adlı dizi, adındaki gibi Amerikan kapitalizminin ve özellikle New York’un “Yaldızlı Çağ”ını anlatıyor. Geçen salı günü iki saatimi geçirdiğim binanın üzerinde, işte o dizide anlatılan dönemin en önemli isimlerinden biri yazıyor: “J.P. Morgan…” Bankanın kurucusu… Dizide doğrudan adı geçmiyor. Ama Amerika’da";
+
+describe("stripFeedWrappers: trailing WordPress excerpt marker (h20-live-4)", () => {
+  it.each(EXCERPT_MARKERS)("'%s' after a word becomes one '…'", (marker) => {
+    expect(stripFeedWrappers(`${C2A9_BODY} ${marker}`)).toBe(`${C2A9_BODY}…`);
+  });
+
+  it("the four literal cases from the finding", () => {
+    expect(stripFeedWrappers("... Bu çalışmaların ardından […]")).toBe("... Bu çalışmaların ardından…");
+    expect(stripFeedWrappers("... Bu çalışmaların ardından [...]")).toBe("... Bu çalışmaların ardından…");
+    expect(stripFeedWrappers("... Bu çalışmaların ardından [&#8230;]")).toBe("... Bu çalışmaların ardından…");
+    expect(stripFeedWrappers("... Bu çalışmaların ardından [&hellip;]")).toBe("... Bu çalışmaların ardından…");
+  });
+
+  it.each(EXCERPT_MARKERS)("'%s' glued to the word (no space before it) gives the same result", (marker) => {
+    expect(stripFeedWrappers(`ardından${marker}`)).toBe("ardından…");
+  });
+
+  it.each(EXCERPT_MARKERS)("'%s' followed by blanks or a newline is still trailing", (marker) => {
+    for (const tail of ["  ", " ", "\n", " \n", "\r\n", "\t \n\n", "\u00a0"]) {
+      expect(stripFeedWrappers(`ardından ${marker}${tail}`), JSON.stringify(tail)).toBe("ardından…");
+    }
+  });
+
+  it.each(EXCERPT_MARKERS)("'%s' after a sentence mark is dropped without a doubled mark", (marker) => {
+    expect(stripFeedWrappers(`bitti. ${marker}`)).toBe("bitti.");
+    expect(stripFeedWrappers(`oldu! ${marker}`)).toBe("oldu!");
+    expect(stripFeedWrappers(`mi? ${marker}`)).toBe("mi?");
+    expect(stripFeedWrappers(`devam… ${marker}`)).toBe("devam…");
+    expect(stripFeedWrappers(`bitti.${marker}`)).toBe("bitti.");
+  });
+
+  it("a closing quote or bracket is not a sentence mark: the ellipsis is added after it", () => {
+    expect(stripFeedWrappers("dedi.” […]")).toBe("dedi.”…");
+    expect(stripFeedWrappers("(ayrıntılar) […]")).toBe("(ayrıntılar)…");
+    expect(stripFeedWrappers("fiyat 3,5 […]")).toBe("fiyat 3,5…");
+  });
+
+  it.each(EXCERPT_MARKERS)("a text that is only '%s' gives ''", (marker) => {
+    expect(stripFeedWrappers(marker)).toBe("");
+    expect(stripFeedWrappers(`  ${marker}  `)).toBe("");
+    expect(stripFeedWrappers(`${marker}\n`)).toBe("");
+  });
+
+  it("a marker in the middle of the text is untouched and the SAME string comes back", () => {
+    for (const marker of EXCERPT_MARKERS) {
+      for (const input of [
+        `a ${marker} b`,
+        `${marker} başlangıç`,
+        `Metin ${marker} devam ediyor. Son cümle.`,
+        `Metin ${marker}\nikinci satır`,
+        `Metin ${marker}.`,
+        `Metin ${marker}x`,
+      ]) {
+        expect(stripFeedWrappers(input) === input, JSON.stringify(input)).toBe(true);
+      }
+    }
+  });
+
+  it("near-misses are not markers", () => {
+    for (const input of ["ardından [..]", "ardından [ … ]", "ardından […", "ardından …]", "ardından (…)", "ardından [....]", "ardından [&#8230]"]) {
+      expect(stripFeedWrappers(input) === input, input).toBe(true);
+    }
+  });
+
+  it("a marker followed by a WordPress 'The post ... appeared first on ...' footer: both go in one call", () => {
+    expect(
+      stripFeedWrappers("... Bu çalışmaların ardından […]\nThe post Başlık appeared first on On Haber."),
+    ).toBe("... Bu çalışmaların ardından…");
+    expect(
+      stripFeedWrappers("... Bu çalışmaların ardından [&#8230;]\n\nThe post Başlık appeared first on #site_linkat 02.11.2026 ."),
+    ).toBe("... Bu çalışmaların ardından…");
+    expect(stripFeedWrappers("Gövde. […]\nThe post Başlık appeared first on Site Adı.")).toBe("Gövde.");
+  });
+
+  it("a marker followed by a Serbestiyet footer, or after a Diken header: all go in one call", () => {
+    expect(
+      stripFeedWrappers("Gövde metni ardından […]\nBaşlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır."),
+    ).toBe("Gövde metni ardından…");
+    expect(stripFeedWrappers("Başlık 02.11.2026 DikenGövde ardından […]")).toBe("Gövde ardından…");
+  });
+
+  it("a footer-only text with a marker in front gives ''", () => {
+    expect(stripFeedWrappers("[…]\nThe post Başlık appeared first on Site Adı.")).toBe("");
+  });
+
+  it("is idempotent on every input above and on its result", () => {
+    const inputs: string[] = [];
+    for (const marker of EXCERPT_MARKERS) {
+      inputs.push(
+        `${C2A9_BODY} ${marker}`,
+        `ardından${marker}`,
+        `ardından ${marker} \n`,
+        `bitti. ${marker}`,
+        `devam… ${marker}`,
+        marker,
+        `a ${marker} b`,
+        `${marker} ${marker}`,
+        `${marker}${marker}`,
+        `a ${marker} ${marker}`,
+        `Gövde ${marker}\nThe post T appeared first on S.`,
+      );
+    }
+    for (const x of inputs) {
+      const once = stripFeedWrappers(x);
+      expect(stripFeedWrappers(once), JSON.stringify(x)).toBe(once);
+    }
+  });
+
+  it("peels only the LAST marker of a doubled one and then stops", () => {
+    expect(stripFeedWrappers("a […] […]")).toBe("a […]…");
+    expect(stripFeedWrappers("[…] […]")).toBe("[…]…");
+  });
+
+  it("the real on-haber sample (article 49a6d622) ends with '…' and never with '[…]'", () => {
+    const input = `${ON_HABER_BODY} […]`;
+    const out = stripFeedWrappers(input);
+    expect(out).toBe(`${ON_HABER_BODY}…`);
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.endsWith("[…]")).toBe(false);
+    // The mid-text ellipses of the sample are not markers and stay.
+    expect(out).toContain("“J.P. Morgan…” Bankanın kurucusu… Dizide");
+  });
+
+  it("is linear: 100k blanks then 'x', 100k '[' and other long inputs finish in under 50 ms", () => {
+    const inputs = [
+      `${" ".repeat(100_000)}x`,
+      `x${" ".repeat(100_000)}`,
+      "[".repeat(100_000),
+      `${"[".repeat(100_000)}…]`,
+      `[…]${" ".repeat(100_000)}`,
+      `${" ".repeat(100_000)}[…]`,
+      "[…]".repeat(33_000),
+      "[…] ".repeat(25_000),
+      `${"a".repeat(100_000)} [&hellip;]`,
+      `${"[&#8230".repeat(14_000)}`,
+    ];
+    for (const s of inputs) {
+      const start = performance.now();
+      stripFeedWrappers(s);
+      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(50);
+    }
+  });
+});
+
+describe("cleanDescription inherits the excerpt-marker rule (h20-live-4)", () => {
+  it.each(EXCERPT_MARKERS)("'%s' at the end becomes '…'", (marker) => {
+    expect(cleanDescription(`${C2A9_BODY} ${marker}`)).toBe(`${C2A9_BODY}…`);
+  });
+
+  it("the real on-haber sample ends with '…'", () => {
+    expect(cleanDescription(`${ON_HABER_BODY} […]`)).toBe(`${ON_HABER_BODY}…`);
+  });
+
+  it("a marker in the middle stays and the ticker cut still works around it", () => {
+    expect(cleanDescription("a […] b")).toBe("a […] b");
+    expect(cleanDescription("Birinci […] satır.\nSon dakika... Başka haber")).toBe("Birinci […] satır.");
+  });
+
+  it("is idempotent", () => {
+    for (const marker of EXCERPT_MARKERS) {
+      const once = cleanDescription(`${C2A9_BODY} ${marker}`);
+      expect(cleanDescription(once)).toBe(once);
+    }
+  });
+});
+
 describe("stripFeedWrappers has one implementation", () => {
   const read = (...parts: string[]) => readFileSync(resolve(__dirname, "..", "..", "..", ...parts), "utf8");
 

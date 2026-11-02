@@ -22,6 +22,7 @@ describe("savedMix constants", () => {
   it("labels the three balance tiers", () => {
     expect(SAVED_MIX_LABELS).toEqual({
       dengeli: "Dengeli",
+      iki: "İki tarafa dengeli",
       yakin: "Tek tarafa yakın",
       tek: "Tek tarafta",
     });
@@ -126,9 +127,16 @@ describe("savedMix balance", () => {
     expect(r.balance).toEqual({ score: 100, label: "Dengeli" });
   });
 
-  it("labels {3,3,0} as Tek tarafa yakın with score 63", () => {
+  // INTENDED FLIP (hunt-20 numbers-2): {3,3,0} is an even two-zone split, so it
+  // is "İki tarafa dengeli" now, not "Tek tarafa yakın". Score unchanged.
+  it("labels {3,3,0} as İki tarafa dengeli with score 63", () => {
     const r = ok(savedMix(rows({ pro_government: 3 }, { center: 3 }, {})));
-    expect(r.balance).toEqual({ score: 63, label: "Tek tarafa yakın" });
+    expect(r.balance).toEqual({ score: 63, label: "İki tarafa dengeli" });
+  });
+
+  it("keeps a lopsided {7,1,0} as Tek tarafa yakın with score 34", () => {
+    const r = ok(savedMix(rows({ pro_government: 4 }, { pro_government: 3 }, { center: 1 })));
+    expect(r.balance).toEqual({ score: 34, label: "Tek tarafa yakın" });
   });
 
   it("returns balance null below 5 classified sources (total 4)", () => {

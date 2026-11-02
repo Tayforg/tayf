@@ -25,6 +25,7 @@ const PILL =
 
 const TIER_CLASS: Record<BalanceTier, string> = {
   dengeli: "border-sky-500/30 bg-sky-500/10 text-sky-800 dark:text-sky-300",
+  iki: "border-sky-500/30 bg-muted/50 text-foreground",
   yakin: "border-border/40 bg-muted/50 text-muted-foreground",
   tek: "border-border/60 bg-muted/50 text-foreground",
 };

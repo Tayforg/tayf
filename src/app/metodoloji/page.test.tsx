@@ -26,6 +26,7 @@ import {
   BALANCE_LABELS,
   BALANCE_MIN_SOURCES,
   BALANCE_ONE_SIDED_MAX,
+  BALANCE_TWO_ZONE_MIN_SHARE,
 } from "@/lib/bias/balance";
 import { WIRE_UNIQUE_HASH_RATIO } from "@/lib/clusters/wire";
 import { RECALL_VETO_MIN_PROB } from "@/lib/clusters/recall-veto";
@@ -338,7 +339,7 @@ describe("/metodoloji page", () => {
       expect(text).toContain("Yalnızca sınıflandırılmış (oy veren) kaynaklar sayılır; toplayıcı ve niş kaynaklar, spektrum çubuğunda olduğu gibi, hesaba katılmaz.");
       expect(text).toContain("Shannon entropisi");
       expect(text).toContain(
-        "tek bölgeden gelen kapsama 0, üç bölgeye eşit dağılan kapsama 100 alır; iki bölgeye eşit bölünen bir küme yaklaşık 63 alır.",
+        `tek bölgeden gelen kapsama 0, üç bölgeye eşit dağılan kapsama 100 alır; iki bölgeye eşit bölünen bir küme yaklaşık 63 alır ve “${BALANCE_LABELS.iki}” olarak etiketlenir.`,
       );
       expect(text).toContain(
         "Formül: puan = 100 × (−Σ pᵢ · ln pᵢ) / ln 3 — pᵢ, bir bölgenin oy veren kaynaklar içindeki payıdır.",
@@ -357,6 +358,28 @@ describe("/metodoloji page", () => {
       for (const label of Object.values(BALANCE_LABELS)) {
         expect(text).toContain(label);
       }
+    });
+
+    it("defines the İki tarafa dengeli tier with the share threshold from the shared constant", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain(BALANCE_LABELS.iki);
+      expect(text).toContain("İki tarafa dengeli");
+      expect(text).toContain("Kapsama iki bölgeye dengeli bölünmüş; üçüncü bölge yok.");
+      expect(text).toContain(`en az %${BALANCE_TWO_ZONE_MIN_SHARE * 100}`);
+      expect(text).toContain(
+        `Puan ${BALANCE_ONE_SIDED_MAX + 1}–${BALANCE_BALANCED_MIN - 1}; kaynaklar yalnızca iki bölgede`,
+      );
+    });
+
+    it("keeps the Tek tarafa yakın range and says the even two-zone split is excluded from it", async () => {
+      const { default: MethodologyPage } = await import("./page");
+      const text = collectText(await MethodologyPage()).join("");
+
+      expect(text).toContain(
+        `${BALANCE_ONE_SIDED_MAX + 1}–${BALANCE_BALANCED_MIN - 1} (iki bölgeye dengeli bölünme hariç)`,
+      );
     });
 
     it("states the source floor from the shared constant", async () => {

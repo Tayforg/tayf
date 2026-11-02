@@ -21,8 +21,20 @@ const ZONE_LABEL_LOWER: Record<MediaDnaZone, string> = {
  * ("%70"), so this is plain string interpolation, not
  * `Intl.NumberFormat`.
  *
- * e.g. "12 kaynak · %70 iktidar · %20 bağımsız · %10 muhalefet", plus
+ * e.g. "10 kaynak · %70 iktidar · %20 bağımsız · %10 muhalefet", plus
  * " · Kör nokta: sadece iktidar yazdı" when the cluster is a blindspot.
+ *
+ * The percents are over the CLASSIFIED (voting) sources, while `articleCount`
+ * also counts aggregator / niche members. When fewer sources voted than
+ * `articleCount`, the head names the voting total so the text never sets one
+ * denominator next to percents of another:
+ * "14 kaynak · 11 sınıflandırılmış: %55 iktidar · %9 bağımsız · %36 muhalefet".
+ * With nobody classified there is no percent to print:
+ * "2 kaynak · sınıflandırılmış kaynak yok". When the votes outnumber
+ * `articleCount` -- the wire case, where the page passes the distinct-text
+ * count -- the head names the voting total in news items:
+ * "2 kaynak · 5 sınıflandırılmış haber: %80 iktidar · %0 bağımsız · %20 muhalefet".
+ * Only when the two counts are equal does the head stay plain.
  */
 export function buildShareText(input: {
   articleCount: number;
@@ -35,12 +47,28 @@ export function buildShareText(input: {
   const counts = zoneCountsOf(distribution);
   const percents = zonePercents(counts);
 
-  let text = [
-    `${articleCount} kaynak`,
-    `%${percents.iktidar} iktidar`,
-    `%${percents.bagimsiz} bağımsız`,
-    `%${percents.muhalefet} muhalefet`,
-  ].join(" · ");
+  const classified = counts.iktidar + counts.bagimsiz + counts.muhalefet;
+
+  let text: string;
+  if (!(classified > 0)) {
+    text = `${articleCount} kaynak · sınıflandırılmış kaynak yok`;
+  } else {
+    const pcts = [
+      `%${percents.iktidar} iktidar`,
+      `%${percents.bagimsiz} bağımsız`,
+      `%${percents.muhalefet} muhalefet`,
+    ].join(" · ");
+    if (classified < articleCount) {
+      text = `${articleCount} kaynak · ${classified} sınıflandırılmış: ${pcts}`;
+    } else if (classified > articleCount) {
+      // Only a wire cluster gets here (the page passes the distinct-text
+      // count as `articleCount`, while every classified member votes), so the
+      // votes are news items, not sources.
+      text = `${articleCount} kaynak · ${classified} sınıflandırılmış haber: ${pcts}`;
+    } else {
+      text = `${articleCount} kaynak · ${pcts}`;
+    }
+  }
 
   if (isBlindspot) {
     // Same "no reported side → fall back to the tallied dominant zone"
