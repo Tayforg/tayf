@@ -161,3 +161,41 @@ dividers are wanted, add `w-px self-stretch` to those two class strings.
   can pin it. Dropping them would save roughly 330 bytes per badge.
 - The mobile banner still emits the full 15-candidate srcset; its `sizes` has a
   `vw` term, so this is how next/image behaves, and the banner is the LCP image.
+
+## Rejected: inlined CSS and no font preloads (hunt 18, 2026-11-02)
+
+Idea `h18-perf-1` parts (a) `experimental.inlineCss: true` and (b)
+`preload: false` on the serif and sans `next/font` families. Part (c), the
+mobile hero `sizes` cap (DPR3 phones fetch 828w instead of 1080w), shipped in
+#162.
+
+Measured A/B on local production builds of `dda3f78` against prod data, cold
+loads in a fresh browser context, 390x844 at DPR 3, 4x CPU throttle, Slow 4G
+(1.44 Mbps, 562.5 ms RTT), 5 alternating runs per cell, through a brotli proxy
+that approximates Vercel. Run-to-run spread was 24 ms (FCP) and 85 ms (LCP) at
+most.
+
+| Route | FCP before → after | LCP before → after | LCP element |
+| --- | --- | --- | --- |
+| `/` | 1747 → 724 ms | 2076 → 2899 ms | hero `img` |
+| `/hafta` | 1721 → 734 ms | 2036 → 1068 ms | text `p` |
+| `/blindspots` | 1755 → 735 ms | 2711 → 3535 ms | hero `img` |
+
+Why it was dropped:
+
+- **LCP regresses about 0.8 s on image-led pages.** With the CSS inline, the six
+  font files (134 KB) are discovered at first render and fetched at top
+  priority from about 0.7 s, sharing the link with the hero image; the image
+  finishes about 0.95 s later.
+- **The CSS is shipped three times.** With `cacheComponents` on, Next puts the
+  127 KB stylesheet in the `<style>` tag and twice more in the RSC payload: raw
+  HTML for `/` goes from 432 KB to 832 KB, the first `<img>` moves from byte
+  57 K to 457 K, and the wire cost is about +26 KB brotli (+68 KB gzip) per page,
+  paid again on every page because the stylesheet is no longer cached on its own.
+- **Neither part passes alone.** Inline CSS alone: `/blindspots` LCP +493 ms.
+  Font preloads off alone: FCP only -155 to -219 ms, and the late webfont swap
+  reflows paragraphs (CLS 0.0003 → 0.0279 on `/blindspots`).
+
+Revisit only if Next stops duplicating inlined CSS into the RSC payload, and
+then measure on a Vercel preview with the same gate: FCP at least 300 ms better
+on 2 of 3 pages, LCP no more than 50 ms worse anywhere, CLS below 0.05.
