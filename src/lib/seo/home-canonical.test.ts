@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   HOME_PAGE_SIZE,
   homeCanonicalPath,
+  homePageTitle,
   homeTotalPages,
   parseHomePage,
   rankedCountOf,
@@ -73,3 +74,27 @@ describe("homeCanonicalPath", () => {
   });
 });
 
+describe("homePageTitle", () => {
+  it("returns null for page 1 (the layout's default title applies)", () => {
+    expect(homePageTitle(1, 3)).toBeNull();
+    expect(homePageTitle(1, null)).toBeNull();
+    expect(homePageTitle(0, 3)).toBeNull();
+    expect(homePageTitle(-4, null)).toBeNull();
+  });
+  it("names the page and the total when the total is known", () => {
+    expect(homePageTitle(2, 3)).toBe("Haberler — sayfa 2 / 3 — Tayf");
+    expect(homePageTitle(3, 3)).toBe("Haberler — sayfa 3 / 3 — Tayf");
+  });
+  it("drops the total when it is unknown", () => {
+    expect(homePageTitle(2, null)).toBe("Haberler — sayfa 2 — Tayf");
+    expect(homePageTitle(40, null)).toBe("Haberler — sayfa 40 — Tayf");
+  });
+  it("clamps a page past the end like homeCanonicalPath does", () => {
+    expect(homePageTitle(9, 3)).toBe("Haberler — sayfa 3 / 3 — Tayf");
+    expect(homeCanonicalPath({ page: 9, rankedCount: 31 })).toBe("/?page=3");
+  });
+  it("returns null when the clamped page is 1", () => {
+    expect(homePageTitle(2, 1)).toBeNull();
+    expect(homePageTitle(9, 1)).toBeNull();
+  });
+});

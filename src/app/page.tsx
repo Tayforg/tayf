@@ -10,6 +10,7 @@ import { DailyGameTeaser } from "@/components/game/daily-game-teaser";
 import { dailyTeaserSlot } from "@/lib/game/daily-teaser";
 import { ClusterCard } from "@/components/story/cluster-card";
 import { FollowButton } from "@/components/follow/follow-button";
+import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
@@ -31,6 +32,7 @@ import { searchStatusText, searchTitle } from "@/lib/search/search-status";
 import {
   HOME_PAGE_SIZE,
   homeCanonicalPath,
+  homePageTitle,
   homeTotalPages,
   parseHomePage,
   rankedCountOf,
@@ -63,11 +65,18 @@ function firstQuery(raw: string | string[] | undefined): string | undefined {
 // what was searched instead of repeating the generic home title (WCAG 2.4.2).
 // Nothing else is returned, so the canonical stays the layout's "/" (the
 // robots object replaces the layout's wholesale: metadata merges shallowly).
-// Otherwise: self-canonical for /?page=N (N > 1, clamped to the last page).
-// Without this, the layout's canonical "/" told crawlers page 2 duplicates
-// page 1. `types` (the layout's RSS alternate) is repeated or it would be
-// dropped. Any failure returns {} (inherit "/") — metadata must never throw
-// into the error boundary.
+// Otherwise, for /?page=N (N > 1, clamped to the last page): a title of its
+// own ("Haberler — sayfa N / M — Tayf") and a self-canonical. Without the
+// canonical, the layout's "/" told crawlers page 2 duplicates page 1; without
+// the title, the tab, history and Next's route announcer kept saying the
+// generic home title after "Sonraki", so a screen-reader user heard nothing
+// change (WCAG 2.4.2, h17-a11y-4). `title.absolute` for the same reason as the
+// search title below: the layout's "%s — Tayf" template does not apply to the
+// root page (#150). `types` (the layout's RSS alternate) is repeated or it
+// would be dropped. When the feed fails the total is unknown: the title names
+// the page without it and the canonical stays the layout's "/". Any failure
+// returns what is known, never throws — metadata must not reach the error
+// boundary.
 export async function generateMetadata({
   searchParams,
 }: {
@@ -86,15 +95,22 @@ export async function generateMetadata({
   } catch {
     rankedCount = null;
   }
+  const totalPages = rankedCount === null ? null : homeTotalPages(rankedCount);
+  const title = homePageTitle(page, totalPages);
   const canonical = homeCanonicalPath({ page, rankedCount });
-  if (!canonical) return {};
+  if (!title && !canonical) return {};
   return {
-    alternates: {
-      canonical,
-      types: {
-        "application/rss+xml": [{ url: "/rss.xml", title: "Tayf — Haberler RSS" }],
-      },
-    },
+    ...(title ? { title: { absolute: title } } : {}),
+    ...(canonical
+      ? {
+          alternates: {
+            canonical,
+            types: {
+              "application/rss+xml": [{ url: "/rss.xml", title: "Tayf — Haberler RSS" }],
+            },
+          },
+        }
+      : {}),
   };
 }
 
@@ -130,6 +146,10 @@ function renderClusterCard(
   );
 }
 
+// The feed's focus target (FocusFeedOnPageChange moves focus here after a
+// pager navigation). A plain string so server and client agree on it.
+const HOME_FEED_ID = "haber-akisi";
+
 export default function HomePage({
   searchParams,
 }: {
@@ -147,9 +167,19 @@ export default function HomePage({
         <SearchBar />
       </Suspense>
 
-      <Suspense fallback={<FeedSkeleton />}>
-        <HomeFeed searchParams={searchParams} />
-      </Suspense>
+      {/* tabIndex -1: focusable from script (the pager hands focus here after
+          a page change), never a tab stop. No outline: it is not an
+          interactive control, and the list itself is the focus indicator. */}
+      <section
+        id={HOME_FEED_ID}
+        aria-label="Haber akışı"
+        tabIndex={-1}
+        className="space-y-5 focus:outline-none"
+      >
+        <Suspense fallback={<FeedSkeleton />}>
+          <HomeFeed searchParams={searchParams} />
+        </Suspense>
+      </section>
     </div>
   );
 }
@@ -368,6 +398,12 @@ export async function HomeFeed({
       />
 
       <NewSinceLastVisit timestamps={renderedTimestamps} />
+
+      <FocusFeedOnPageChange
+        page={safePage}
+        query={q ?? ""}
+        targetId={HOME_FEED_ID}
+      />
 
       {q && q.length >= 2 && (
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -621,7 +657,11 @@ function Pagination({ currentPage, totalPages, query }: PaginationProps) {
           Önceki
         </Link>
       ) : null}
-      <span className="text-[11px] text-muted-foreground">
+      <span
+        aria-current="page"
+        className="text-[11px] text-muted-foreground"
+      >
+        <span className="sr-only">Sayfa </span>
         {currentPage} / {totalPages}
       </span>
       {currentPage < totalPages ? (

@@ -4,15 +4,18 @@ import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { escapeXml } from "@/lib/feeds/rss-builder";
 import { createReaderClient } from "@/lib/supabase/server";
 import { TOPIC_SLUGS } from "@/lib/clusters/topic-query";
+import { THIN_SOURCE_MIN, THIN_SOURCE_WINDOW_DAYS, isThinSource } from "@/lib/seo/thin-source";
+import { WEEK_ARCHIVE_MAX_WEEKS, shiftWeek, weekRange } from "@/lib/weekly/week-archive";
+import { WEEK_ARCHIVE_FIRST, weekKeyFromMs } from "@/lib/weekly/week-key";
 
 // seo-share — sitemap index + monthly cluster sitemaps + Google News
 // sitemap. Replaces the single-file `src/app/sitemap.ts` (CLUSTER_LIMIT =
 // 1000, ~5 days of coverage) with a sitemap index fanning out to one
 // /sitemaps/clusters-YYYY-MM.xml per calendar month, a /sitemaps/news.xml
 // (Google News sitemap: article_count >= 3, published within the last
-// 48h), and /sitemaps/sources.xml for the ~118 active /source/<slug>
-// pages, none of which were reachable from any sitemap before, and
-// /sitemaps/hubs.xml for the indexable entity hubs (built in hub-sitemap.ts,
+// 48h), and /sitemaps/sources.xml for the active /source/<slug> pages that
+// delivered an article in the last 7 days (silent ones are `noindex` and are
+// left out, see thin-source.ts), and /sitemaps/hubs.xml for the indexable entity hubs (built in hub-sitemap.ts,
 // which this file deliberately does not import).
 //
 // Every DB-backed builder below THROWS on a Supabase error instead of
@@ -55,7 +58,10 @@ export const MAX_PAGES = 50;
 
 // Verified at implementation time (2026-09-28) by reading each page's own
 // `metadata`/`generateMetadata`: none of these three set `robots: noindex`,
-// so all three are eligible for the static sitemap. /oyun and
+// so all three are eligible for the static sitemap. Re-verified 2026-11-02 for
+// the two additions in BASE_STATIC_ROUTES/getStaticSitemapXml: /gelistirici and
+// every /hafta/<week> from WEEK_ARCHIVE_FIRST are `index, follow` with a self
+// canonical (the current week is not listed: it is the rolling /hafta page). /oyun and
 // /ekonomi/[ticker] are deliberately EXCLUDED, by choice and not because they
 // are noindex: the ticker pages of traded companies are indexable (they carry
 // a self canonical and og tags, and crawlers reach them through the chips on
@@ -84,6 +90,7 @@ const BASE_STATIC_ROUTES: ReadonlyArray<{
   { path: "/kaynaklar/durum", changefreq: "hourly", priority: 0.6 },
   { path: "/durum", changefreq: "hourly", priority: 0.4 },
   { path: "/metodoloji", changefreq: "monthly", priority: 0.5 },
+  { path: "/gelistirici", changefreq: "monthly", priority: 0.4 },
   { path: "/kalite", changefreq: "daily", priority: 0.5 },
   { path: "/duzeltmeler", changefreq: "daily", priority: 0.4 },
   { path: "/hafta", changefreq: "daily", priority: 0.6 },
@@ -286,8 +293,33 @@ export async function getSitemapIndexXml(baseUrl: string): Promise<string> {
   return renderSitemapIndex(locs);
 }
 
-/** Today's static routes + the six /konu hubs + the eligible optional pages.
- *  No DB access. */
+/** How many completed past weeks static.xml lists. The /hafta nav links the
+ *  same four, so a crawler finds each archive week from both places. */
+export const SITEMAP_ARCHIVE_WEEKS = 4;
+
+/** The completed ISO weeks static.xml submits at `nowMs`, newest first, each
+ *  with the week's end as `lastmod` (a week never changes after it closes).
+ *  A pure mirror of the loop in `getRecentWeekKeys` (week-archive.ts) so this
+ *  file does not call that "use cache" function, which carries its own
+ *  cacheLife; sitemaps.test.ts pins the two against each other. The current
+ *  week is excluded: it is the rolling /hafta page and still changing. */
+export function sitemapArchiveWeeks(nowMs: number): Array<{ key: string; lastmod: string }> {
+  const out: Array<{ key: string; lastmod: string }> = [];
+  let cursor = weekKeyFromMs(nowMs);
+  for (let i = 0; i < WEEK_ARCHIVE_MAX_WEEKS && out.length < SITEMAP_ARCHIVE_WEEKS; i += 1) {
+    const prev = shiftWeek(cursor, -1);
+    if (!prev || prev < WEEK_ARCHIVE_FIRST) break;
+    const range = weekRange(prev);
+    if (!range) break;
+    out.push({ key: prev, lastmod: range.endIso });
+    cursor = prev;
+  }
+  return out;
+}
+
+/** Today's static routes + the six /konu hubs + the eligible optional pages +
+ *  the past weekly archive. No DB access; the clock read (the archive weeks)
+ *  is legal inside this cache body, as in getSitemapIndexXml. */
 export async function getStaticSitemapXml(baseUrl: string): Promise<string> {
   "use cache";
   cacheLife({ revalidate: 3600 });
@@ -304,32 +336,58 @@ export async function getStaticSitemapXml(baseUrl: string): Promise<string> {
       priority: 0.6,
     })),
     ...STATIC_OPTIONAL_ROUTES.map((path) => ({ loc: `${baseUrl}${path}` })),
+    ...sitemapArchiveWeeks(Date.now()).map((week) => ({
+      loc: `${baseUrl}/hafta/${week.key}`,
+      lastmod: week.lastmod,
+    })),
   ];
 
   return renderUrlset(entries);
 }
 
-interface SourceRow {
+/** One `sources` row of the existence probe. `recent` is the aliased
+ *  `articles` embed: at most THIN_SOURCE_MIN rows, empty for a silent source. */
+export interface SourceSitemapRow {
   slug: string;
+  recent?: Array<{ id: string }> | null;
 }
 
+/** The /source/<slug> entries for sources.xml: every row with an article in the
+ *  window. A silent source's page is `noindex` (thin-source.ts), so it is not
+ *  submitted. Pure. */
+export function sourcesSitemapEntries(
+  rows: ReadonlyArray<SourceSitemapRow>,
+  baseUrl: string,
+): SitemapUrlEntry[] {
+  return rows
+    .filter((row) => !isThinSource(row.recent?.length ?? 0))
+    .map((row) => ({ loc: `${baseUrl}/source/${row.slug}` }));
+}
+
+// Existence probe, the pattern of src/lib/sources/active-count.ts:
+// `recent:articles(id)` with the embed filtered to the window and capped at
+// THIN_SOURCE_MIN rows. The embed filter keeps every active parent and yields
+// `recent: []` for a silent one, so one cheap index range scan per source
+// (idx_articles_source_published) replaces a per-source count. The clock read
+// is legal here: this runs inside the "use cache" body, or after the request
+// scope was awaited on the live retry (like readNewsSitemapXml).
 async function readSourcesSitemapXml(baseUrl: string): Promise<string> {
+  const sinceIso = new Date(Date.now() - THIN_SOURCE_WINDOW_DAYS * 86_400_000).toISOString();
+
   const supabase = createReaderClient();
   const { data, error } = await supabase
     .from("sources")
-    .select("slug")
+    .select("slug, recent:articles(id)")
     .eq("active", true)
-    .returns<SourceRow[]>();
+    .gte("recent.published_at", sinceIso)
+    .limit(THIN_SOURCE_MIN, { referencedTable: "recent" })
+    .returns<SourceSitemapRow[]>();
 
   if (error) {
     throw new Error(`sources sitemap query failed: ${error.message}`);
   }
 
-  const entries: SitemapUrlEntry[] = (data ?? []).map((row) => ({
-    loc: `${baseUrl}/source/${row.slug}`,
-  }));
-
-  return renderUrlset(entries);
+  return renderUrlset(sourcesSitemapEntries(data ?? [], baseUrl));
 }
 
 async function getSourcesSitemapXmlCached(baseUrl: string) {

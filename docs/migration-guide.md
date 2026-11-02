@@ -2824,7 +2824,7 @@ Then `curl -s https://www.tayfhaber.com/gundem/deva` and `/gundem/dolar`: the DE
 -- the new body is live (expect 2904bdbadff34838259ffb901807cc33, 9162, t); before 126 it was ee3a003fa0225da3bbb22a3fbb7da1b0
 select md5(prosrc), length(prosrc), prosecdef
   from pg_proc where oid = 'public.blindspot_recall_veto_refresh(interval,numeric)'::regprocedure;
--- the 071 cron job survived (expect 7-59/10)
+-- the 071 cron job survived (expect 7-59/10; 7-59/20 once 144 is applied)
 select schedule from cron.job where jobname = 'blindspot-recall-veto';
 -- service_role only (expect f, f, t)
 select has_function_privilege('anon', 'public.blindspot_recall_veto_refresh(interval,numeric)', 'execute'),
@@ -2940,3 +2940,38 @@ then clear the cache: `POST /api/revalidate` with `Authorization: Bearer $CRON_S
 **Verify:** `select jobname, schedule from cron.job where jobname = 'weekly-words-sample';` (one row), `select day, zone, count(*) from public.weekly_words_sample group by 1, 2 order by 1 desc, 2;` (300 per cell for past days), `select pg_size_pretty(pg_total_relation_size('public.weekly_words_sample'));` (never above about 12 MB).
 
 **Rollback** (nothing else depends on 143): `select cron.unschedule('weekly-words-sample'); drop function public.weekly_words_sample_refresh(integer); drop table public.weekly_words_sample; delete from supabase_migrations.schema_migrations where version = '143';`. The reader tolerates the missing table (one warning per fill, then the article reads).
+
+## 144 — blindspot-recall-veto cadence (`7-59/10` -> `7-59/20`): APPLY 144 only, no deploy
+
+**Why:** since 126 every 10-minute run of the `blindspot-recall-veto` cron starts cold (a Micro instance with 256 MB `shared_buffers` against a 5.2 GB database; 126's "warm because it runs every 10 minutes" claim did not hold). The mean run went from 2.1 s to 5.2 s: 144 runs, 750 DB-seconds and 0 failures in the last 24 h before 144, worst run 13.70 s. The cost is database time only; no page got slower.
+
+**What 144 does** (additive, safe to re-apply, one transaction): a guarded `cron.alter_job` that moves the job, found by name, to `7-59/20 * * * *` (minutes :07, :27 and :47; 72 runs a day instead of 144, about 375 s a day). It keeps the `:x7` slot of 109's minute map, so it still never shares a minute with `jev-shadow` (`:x0`), `cluster-topics-refresh` (`:x3`) or `ops-health-snapshot` (`:x4`). The command, the function and the grants are untouched, and no data is written. A missing pg_cron or a missing job raises a notice and skips. The dry-run records are in the file header.
+
+**Order:** none. The app and the edge functions are untouched. Apply 144 with `supabase db push`.
+
+**Verify:**
+
+```sql
+-- the job moved (expect 7-59/20 * * * *)
+select schedule from cron.job where jobname = 'blindspot-recall-veto';
+-- after 24 h: expect about 72 runs, about 375 s, 0 failed
+select count(*) as runs,
+       round(avg(extract(epoch from (d.end_time - d.start_time)))::numeric, 2) as avg_s,
+       round(sum(extract(epoch from (d.end_time - d.start_time)))::numeric) as total_s,
+       count(*) filter (where d.status = 'failed') as failed
+  from cron.job_run_details d
+  join cron.job j on j.jobid = d.jobid
+ where j.jobname = 'blindspot-recall-veto'
+   and d.start_time > now() - interval '24 hours';
+```
+
+`blindspot_veto_cron_min` in `ops_health_report()` (the only check that watches this job) must stay `pass`.
+
+**Margin and trade-offs:** the check fails when the last succeeded run is more than 30 minutes old. The steady-state worst case is 20 min plus the worst observed run (13.7 s), about 20.2 min, so about 9.8 min of margin; the 10-minute `ops_health_snapshot` tick (`:x4`) sees at most about 17 min. `cron_failed_runs_30m` is unaffected. Two costs: one failed run now trips `blindspot_veto_cron_min` (the next success is about 40 min after the previous one, where before three consecutive misses were needed), and a vetoed "Kör nokta" badge (or a veto that should clear) can stay up to 10 minutes longer. `tests/migrations/144-blindspot-veto-cadence.test.ts` reads the 30-minute threshold out of the newest `ops_health_report()` definition, so a later threshold edit breaks it.
+
+**Rollback** (nothing else depends on 144):
+
+```sql
+select cron.alter_job((select jobid from cron.job where jobname = 'blindspot-recall-veto'), schedule := '7-59/10 * * * *');
+delete from supabase_migrations.schema_migrations where version = '144';
+```

@@ -141,11 +141,12 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
   const handlers = discoverHandlers();
   const doc = buildOpenApiDocument("https://x.test");
 
-  // 13 today: clusters (GET+OPTIONS), clusters/{id} (GET+OPTIONS), sources
+  // 14 today: clusters (GET+OPTIONS), clusters/{id} (GET+OPTIONS), sources
   // (GET+OPTIONS), sources/{slug}/profile (GET+OPTIONS), kap/pickup
-  // (GET+OPTIONS), alerts/blindspots (GET+OPTIONS) and openapi.json (GET only).
-  it("finds exactly 13 (method, path) handler pairs today", () => {
-    expect(handlers).toHaveLength(13);
+  // (GET+OPTIONS), alerts/blindspots (GET+OPTIONS) and openapi.json
+  // (GET+OPTIONS: the preflight carries the apiV1Headers('free') CORS set).
+  it("finds exactly 14 (method, path) handler pairs today", () => {
+    expect(handlers).toHaveLength(14);
   });
 
   it("every handler pair exists in V1_ENDPOINTS and in the OpenAPI document's paths", () => {
@@ -467,7 +468,7 @@ describe("v1 route <-> OpenAPI doc <-> V1_ENDPOINTS contract", () => {
       }
     }
 
-    expect(operationsChecked).toBe(13);
+    expect(operationsChecked).toBe(14);
     expect(problems).toEqual([]);
   });
 

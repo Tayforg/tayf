@@ -92,10 +92,14 @@ import {
   getSourcesSitemapXml,
   getNewsSitemapXml,
   getClustersMonthXml,
+  sourcesSitemapEntries,
+  sitemapArchiveWeeks,
+  SITEMAP_ARCHIVE_WEEKS,
   SITEMAP_FIRST_MONTH,
   NEWS_LIMIT,
 } from "./sitemaps";
 import { cacheLife } from "next/cache";
+import { getRecentWeekKeys, weekRange } from "@/lib/weekly/week-archive";
 import { escapeXml as rssBuilderEscapeXml } from "@/lib/feeds/rss-builder";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
@@ -404,13 +408,120 @@ describe("getStaticSitemapXml", () => {
     // listed exactly once
     expect(xml.split("<loc>https://tayf.test/durum</loc>")).toHaveLength(2);
   });
+
+  describe("seo-1: /gelistirici and the past weekly archive", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("lists /gelistirici exactly once, right after /metodoloji (monthly, 0.4)", async () => {
+      const xml = await getStaticSitemapXml("https://tayf.test");
+      expect(xml.split("<loc>https://tayf.test/gelistirici</loc>")).toHaveLength(2);
+      const metodoloji = xml.indexOf("<loc>https://tayf.test/metodoloji</loc>");
+      const dev = xml.indexOf("<loc>https://tayf.test/gelistirici</loc>");
+      expect(metodoloji).toBeGreaterThan(-1);
+      expect(xml.indexOf("<loc>", metodoloji + 1)).toBe(dev);
+      const entry = xml.slice(dev, xml.indexOf("</url>", dev));
+      expect(entry).toContain("<changefreq>monthly</changefreq>");
+      expect(entry).toContain("<priority>0.4</priority>");
+    });
+
+    it("lists the four past weeks with the week's end as lastmod, never the current week", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-02T00:30:00.000Z"));
+
+      const xml = await getStaticSitemapXml("https://tayf.test");
+
+      for (const key of ["2026-W44", "2026-W43", "2026-W42", "2026-W41"]) {
+        const loc = `<loc>https://tayf.test/hafta/${key}</loc>`;
+        expect(xml.split(loc)).toHaveLength(2);
+        const endIso = weekRange(key)!.endIso;
+        const at = xml.indexOf(loc);
+        const entry = xml.slice(at, xml.indexOf("</url>", at));
+        expect(entry).toContain(`<lastmod>${endIso}</lastmod>`);
+      }
+      // 2026-W44 ends Sunday 2026-11-01 24:00 Istanbul = 21:00Z.
+      expect(xml).toContain("<lastmod>2026-11-01T21:00:00.000Z</lastmod>");
+      // The current week is the rolling /hafta page; W40 is past the window.
+      expect(xml).not.toContain("/hafta/2026-W45");
+      expect(xml).not.toContain("/hafta/2026-W40");
+      // The rolling page itself is unchanged.
+      expect(xml).toContain("<loc>https://tayf.test/hafta</loc>");
+    });
+
+    it("stays far under the 50,000 <url> cap", async () => {
+      const xml = await getStaticSitemapXml("https://tayf.test");
+      expect((xml.match(/<url>/g) ?? []).length).toBeLessThan(50_000);
+    });
+  });
+});
+
+describe("sitemapArchiveWeeks (seo-1)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("lists SITEMAP_ARCHIVE_WEEKS weeks", () => {
+    expect(SITEMAP_ARCHIVE_WEEKS).toBe(4);
+    expect(sitemapArchiveWeeks(Date.parse("2026-11-02T00:30:00.000Z"))).toHaveLength(4);
+  });
+
+  it("carries each week's end (next Monday 00:00 Istanbul) as lastmod", () => {
+    expect(sitemapArchiveWeeks(Date.parse("2026-11-02T00:30:00.000Z"))[0]).toEqual({
+      key: "2026-W44",
+      lastmod: "2026-11-01T21:00:00.000Z",
+    });
+  });
+
+  // The hand-copied loop must not drift from the /hafta archive nav: the
+  // sitemap lists exactly the weeks the nav links to (until the nav is longer).
+  it.each([
+    ["2026-11-02T00:30:00.000Z", ["2026-W44", "2026-W43", "2026-W42", "2026-W41"]],
+    ["2026-09-22T00:00:00.000Z", ["2026-W38"]],
+    ["2026-09-15T00:00:00.000Z", []],
+    // The Istanbul Monday rollover: 21:00Z Sunday is already Monday 00:00 +03.
+    ["2026-11-08T21:00:00.000Z", ["2026-W45", "2026-W44", "2026-W43", "2026-W42"]],
+  ])("matches getRecentWeekKeys().previous at %s", async (iso, expected) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(iso));
+
+    const keys = sitemapArchiveWeeks(Date.now()).map((w) => w.key);
+    const nav = (await getRecentWeekKeys()).previous.slice(0, SITEMAP_ARCHIVE_WEEKS);
+
+    expect(keys).toEqual(expected);
+    expect(keys).toEqual(nav);
+  });
+
+  it("never lists a week before the archive's first servable week", () => {
+    const keys = sitemapArchiveWeeks(Date.parse("2026-09-29T00:00:00.000Z")).map((w) => w.key);
+    expect(keys).toEqual(["2026-W39", "2026-W38"]);
+  });
+});
+
+describe("sourcesSitemapEntries (seo-1)", () => {
+  it("keeps only sources with an article in the window", () => {
+    expect(
+      sourcesSitemapEntries(
+        [{ slug: "a", recent: [{ id: "x" }] }, { slug: "b", recent: [] }, { slug: "c" }],
+        "https://tayf.test",
+      ),
+    ).toEqual([{ loc: "https://tayf.test/source/a" }]);
+  });
+
+  it("treats a null embed like an empty one", () => {
+    expect(sourcesSitemapEntries([{ slug: "n", recent: null }], "https://tayf.test")).toEqual([]);
+  });
+
+  it("returns nothing for no rows", () => {
+    expect(sourcesSitemapEntries([], "https://tayf.test")).toEqual([]);
+  });
 });
 
 describe("getSourcesSitemapXml", () => {
   it("emits one /source/<slug> per active source, filtered by active=true", async () => {
     fixture.sources = [
-      { slug: "kaynak-a", active: true },
-      { slug: "kaynak-b", active: true },
+      { slug: "kaynak-a", active: true, recent: [{ id: "a1" }] },
+      { slug: "kaynak-b", active: true, recent: [{ id: "b1" }] },
     ];
     const xml = await getSourcesSitemapXml("https://tayf.test");
     expect(xml).toContain("<loc>https://tayf.test/source/kaynak-a</loc>");
@@ -418,6 +529,41 @@ describe("getSourcesSitemapXml", () => {
 
     const state = fixture.lastSourcesState as BuilderState;
     expect(state.eq).toEqual([{ col: "active", val: true }]);
+  });
+
+  describe("seo-1: empty source pages are not submitted", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("probes for one article in the last 7 days per source and drops the silent ones", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-11-02T00:30:00.000Z"));
+      fixture.sources = [
+        { slug: "a", active: true, recent: [{ id: "x" }] },
+        { slug: "b", active: true, recent: [] },
+      ];
+
+      const xml = await getSourcesSitemapXml("https://tayf.test");
+
+      const state = fixture.lastSourcesState as BuilderState;
+      expect(state.selectArgs[0]).toBe("slug, recent:articles(id)");
+      expect(state.eq).toEqual([{ col: "active", val: true }]);
+      expect(state.gte).toContainEqual({
+        col: "recent.published_at",
+        val: "2026-10-26T00:30:00.000Z",
+      });
+      expect(state.limit).toBe(1);
+      expect(xml).toContain("<loc>https://tayf.test/source/a</loc>");
+      expect(xml).not.toContain("/source/b");
+    });
+
+    it("an all-silent registry is a legitimate empty urlset, not an error", async () => {
+      fixture.sources = [{ slug: "b", active: true, recent: [] }];
+      const xml = await getSourcesSitemapXml("https://tayf.test");
+      expect(xml).toContain("<urlset");
+      expect(xml).not.toContain("<url>");
+    });
   });
 
   it("throws on a Supabase error instead of caching an empty sitemap", async () => {
@@ -535,7 +681,7 @@ describe("cached-failure-sweep: DB sitemap builders", () => {
       },
       blip: () => {
         fixture.sourcesBlips = 1;
-        fixture.sources = [{ slug: "kaynak-a", active: true }];
+        fixture.sources = [{ slug: "kaynak-a", active: true, recent: [{ id: "a1" }] }];
       },
       healed: "<loc>https://tayf.test/source/kaynak-a</loc>",
     },

@@ -662,3 +662,69 @@ describe("GET /api/sources/[slug]", () => {
     expect(JSON.stringify(body)).not.toContain("guessed_zone");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h17-contracts-1: every non-GET method is a JSON 405 with `Allow`, and OPTIONS
+// advertises the same read-only list. Next's own default is a bodyless 405
+// without Allow, and its auto-OPTIONS would advertise POST and the others.
+// ---------------------------------------------------------------------------
+describe("unsupported methods on /api/sources and /api/sources/[slug]", () => {
+  const REFUSED = ["POST", "PUT", "PATCH", "DELETE"] as const;
+  const loaders = {
+    "/api/sources": () => import("@/app/api/sources/route"),
+    "/api/sources/[slug]": () => import("@/app/api/sources/[slug]/route"),
+  } as const;
+
+  for (const [name, load] of Object.entries(loaders)) {
+    it(`${name}: POST, PUT, PATCH and DELETE are a JSON 405 with Allow and no CORS`, async () => {
+      const mod = (await load()) as Record<string, unknown>;
+      for (const method of REFUSED) {
+        const handler = mod[method] as ((req?: Request, ctx?: unknown) => Promise<Response> | Response) | undefined;
+        expect(handler, `${method} ${name} is not exported`).toBeTypeOf("function");
+        const res = await handler!(
+          new Request("http://example.com/api/sources", { method, headers: { "x-forwarded-for": "203.0.113.77" } }),
+          paramsFor("haberturk"),
+        );
+        expect(res.status, `${method} ${name}`).toBe(405);
+        expect(res.headers.get("Allow"), method).toBe("GET, HEAD, OPTIONS");
+        expect(res.headers.get("Content-Type"), method).toBe("application/json; charset=utf-8");
+        expect(res.headers.get("Cache-Control"), method).toBe("no-store");
+        expect(res.headers.get("Access-Control-Allow-Origin"), method).toBeNull();
+        expect(await res.text(), method).toBe('{"error":"Method not allowed"}');
+      }
+    });
+
+    it(`${name}: OPTIONS is a bodyless 204 advertising GET, HEAD, OPTIONS`, async () => {
+      const mod = (await load()) as Record<string, unknown>;
+      const options = mod.OPTIONS as (() => Response) | undefined;
+      expect(options, `OPTIONS ${name} is not exported`).toBeTypeOf("function");
+      const res = options!();
+      expect(res.status).toBe(204);
+      expect(res.body).toBeNull();
+      expect(res.headers.get("Allow")).toBe("GET, HEAD, OPTIONS");
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    });
+  }
+
+  it("a refusal reads no registry, no rate-limit bucket and no database", async () => {
+    const { POST } = await import("@/app/api/sources/route");
+    const before = dbState.lastSourcesSelectArgs;
+    // 200 refusals from one IP would exhaust the 60-token bucket if they were charged.
+    for (let i = 0; i < 200; i++) {
+      const res = await POST(
+        new Request("http://example.com/api/sources", { method: "POST", headers: { "x-forwarded-for": "203.0.113.78" } }),
+      );
+      expect(res.status).toBe(405);
+    }
+    expect(dbState.lastSourcesSelectArgs).toBe(before);
+    const list = await (await import("@/app/api/sources/route")).GET(listRequest("203.0.113.78"));
+    expect(list.status).toBe(200);
+  });
+
+  it("GET is untouched: 200 JSON from the list route", async () => {
+    const { GET } = await import("@/app/api/sources/route");
+    const res = await GET(listRequest("203.0.113.79"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Allow")).toBeNull();
+  });
+});

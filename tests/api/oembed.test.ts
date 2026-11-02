@@ -17,7 +17,7 @@ vi.mock("@/lib/game/pii-filter", () => ({
   isGameEligibleTitle: (title: string) => eligibleMock(title),
 }));
 
-import { GET, OPTIONS } from "@/app/api/oembed/route";
+import { DELETE, GET, OPTIONS, PATCH, POST, PUT } from "@/app/api/oembed/route";
 import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
 
 const ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
@@ -307,5 +307,38 @@ describe("GET /api/oembed — CORS on every status", () => {
     expect(res.status).toBe(204);
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
     expect(res.headers.get("access-control-allow-methods")).toContain("GET");
+  });
+});
+
+describe("unsupported methods on /api/oembed (h17-contracts-1)", () => {
+  it.each([
+    ["POST", POST],
+    ["PUT", PUT],
+    ["PATCH", PATCH],
+    ["DELETE", DELETE],
+  ] as const)("%s is a JSON 405 with Allow, no-store and ACAO *", async (_method, handler) => {
+    const res = await handler();
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET, HEAD, OPTIONS");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.text()).toBe('{"error":"Method not allowed"}');
+  });
+
+  it("OPTIONS keeps its CORS headers and adds Allow", async () => {
+    const res = OPTIONS();
+    expect(res.status).toBe(204);
+    expect(res.body).toBeNull();
+    expect(res.headers.get("allow")).toBe("GET, HEAD, OPTIONS");
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-methods")).toBe("GET, OPTIONS");
+    expect(res.headers.get("access-control-max-age")).toBe("86400");
+  });
+
+  it("a refusal never reaches the reader", async () => {
+    await POST();
+    await DELETE();
+    expect(getClusterDetailMock).not.toHaveBeenCalled();
   });
 });

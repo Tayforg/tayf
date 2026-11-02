@@ -541,6 +541,22 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_405,
     ],
   },
+  {
+    method: "OPTIONS",
+    path: "/api/v1/openapi.json",
+    auth: "none",
+    summaryTr: "CORS ön-uçuş isteği",
+    summaryEn: "CORS preflight request",
+    notesTr: [],
+    params: [],
+    responses: [
+      {
+        status: 204,
+        descriptionTr: "Anahtarsız ön-uçuş yanıtı, gövde yok.",
+        descriptionEn: "Keyless preflight response, no body.",
+      },
+    ],
+  },
 ];
 
 export interface ApiPlan {

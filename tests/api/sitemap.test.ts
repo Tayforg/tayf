@@ -231,11 +231,16 @@ describe("GET /sitemaps/[file]", () => {
   });
 
   it("sources.xml → 200", async () => {
-    fixture.sources = [{ slug: "kaynak-a", active: true }];
+    fixture.sources = [
+      { slug: "kaynak-a", active: true, recent: [{ id: "a1" }] },
+      // active, but silent for 7 days: its page is noindex, so it is not submitted.
+      { slug: "kaynak-b", active: true, recent: [] },
+    ];
     const res = await callFile("sources.xml");
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body).toContain("https://tayf.test/source/kaynak-a");
+    expect(body).not.toContain("kaynak-b");
   });
 
   it("hubs.xml → 200 with the default cache header, built for the site's base URL", async () => {

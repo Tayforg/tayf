@@ -21,6 +21,7 @@ import { getSourceReliability } from "@/lib/sources/reliability";
 import { getSourceProfile } from "@/lib/sources/source-profile-query";
 import { getSourceAgreement } from "@/lib/game/agreement";
 import { buildBreadcrumbs, serializeJsonLd } from "@/lib/seo/json-ld";
+import { isThinSource } from "@/lib/seo/thin-source";
 import {
   CLICKBAIT_PRECISION_CHECK,
   getClickbaitKarne,
@@ -89,12 +90,19 @@ export async function generateMetadata({
 
   const { source, articleCount7d } = profile;
   const biasLabel = BIAS_LABELS[source.bias];
-  const description = `${source.name} (${biasLabel}) — son 7 günde ${formatCountTr(articleCount7d)} haber. Tayf üzerinden bu Türk haber kaynağının son haberlerini ve siyasi duruşunu görün.`;
+  // A source with no article in the last 7 days is thin: the page says nothing
+  // a searcher wants, so it is `noindex, follow` and drops the "0 haber" count
+  // from the snippet. sources.xml skips the same slugs (src/lib/seo/thin-source.ts).
+  const thin = isThinSource(articleCount7d);
+  const description = thin
+    ? `${source.name} (${biasLabel}) kaynağının Tayf profili: siyasi duruşu ve geçmiş haberleri.`
+    : `${source.name} (${biasLabel}) — son 7 günde ${formatCountTr(articleCount7d)} haber. Tayf üzerinden bu Türk haber kaynağının son haberlerini ve siyasi duruşunu görün.`;
 
   return {
     // Plain title — root layout's `title.template = "%s — Tayf"` adds suffix.
     title: source.name,
     description,
+    ...(thin ? { robots: { index: false, follow: true } } : {}),
     // seo-9: no own `images` key on openGraph/twitter — the logo_url used to
     // be pointed at here is typically a 64px Google favicon (s2/favicons),
     // a low-res, blurry, un-branded social card. Omitting `images` entirely

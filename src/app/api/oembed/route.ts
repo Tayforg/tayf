@@ -1,3 +1,4 @@
+import { ALLOW_GET_ONLY, apiMethodNotAllowed } from "@/lib/api/errors";
 import { getClusterDetailOrThrow, type ClusterDetail } from "@/lib/clusters/cluster-detail-query";
 import { safeEmbedTitle } from "@/lib/embed/embed-html";
 import {
@@ -21,7 +22,7 @@ import { siteUrl } from "@/lib/site-url";
 // the response is derived from it except that uuid. The uuid reaches the DB
 // through the same cached, 4 s capped reader as the cluster page.
 //
-// Every response -- including errors -- is JSON with
+// Every response -- including errors and the 405 refusals -- is JSON with
 // `Access-Control-Allow-Origin: *` so a browser-side consumer can read the
 // failure too. Status order: 501 (format) -> 400 (url missing) -> 404 (url
 // not ours) -> 503 (read failed) -> 404 (no such cluster) -> 200.
@@ -47,12 +48,22 @@ export function OPTIONS(): Response {
   return new Response(null, {
     status: 204,
     headers: {
+      allow: ALLOW_GET_ONLY,
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET, OPTIONS",
       "access-control-max-age": "86400",
     },
   });
 }
+
+// Every other method is the JSON 405 with `Allow` and the same wide-open CORS as
+// the rest of this route (a browser consumer can read the refusal), instead of
+// Next's bodyless 405 without `Allow`. HEAD is derived from GET by Next.
+const refuse = async () => apiMethodNotAllowed(ALLOW_GET_ONLY, { cors: true });
+export const POST = refuse;
+export const PUT = refuse;
+export const PATCH = refuse;
+export const DELETE = refuse;
 
 export async function GET(req: Request): Promise<Response> {
   const params = new URL(req.url).searchParams;
