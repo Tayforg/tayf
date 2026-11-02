@@ -42,7 +42,17 @@ function labelInner(html: string): string {
   return m[1] ?? "";
 }
 
-const stripTags = (html: string) => html.replace(/<[^>]*>/g, "");
+/** Text outside tags, by a single character scan (no regex tag stripping). */
+function stripTags(html: string): string {
+  let out = "";
+  let inTag = false;
+  for (const ch of html) {
+    if (ch === "<") inTag = true;
+    else if (ch === ">") inTag = false;
+    else if (!inTag) out += ch;
+  }
+  return out;
+}
 
 describe("ShortcutsHelpPanel", () => {
   it("renders the title as an <h2> carrying the id the dialog points at", () => {
