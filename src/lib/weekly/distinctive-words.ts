@@ -1,3 +1,4 @@
+import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { fightinWords, type FwDoc } from "@/lib/text/fightin-words";
 import { headlineKey, headlineTerms, tokenizeHeadline } from "@/lib/text/tokenize-tr";
 import { BIAS_TO_ZONE, isVotingKind } from "@/lib/bias/config";
@@ -260,7 +261,7 @@ export function buildWeeklyDistinctiveWords(
         if (surface === undefined) continue;
         surfaceCounts.set(surface, (surfaceCounts.get(surface) ?? 0) + 1);
         if (example === null) {
-          const url = doc.row.url && HTTP_URL_RE.test(doc.row.url) ? doc.row.url : null;
+          const url = doc.row.url && HTTP_URL_RE.test(doc.row.url) ? cleanOutboundUrl(doc.row.url) : null;
           example = { title: doc.row.title!, url, sourceName: doc.sourceName };
         }
       }

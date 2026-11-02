@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 
 import {
   DAILY_GAME_EPOCH,
+  DAILY_ENGLISH_GATE_FROM,
   DAILY_GAME_SIZE,
   DAILY_MAX_PER_ZONE,
   DAILY_POLITICS_GATE_FROM,
@@ -22,6 +23,7 @@ import {
   type DailyCandidate,
   type PuzzleWindow,
 } from "./daily-set";
+import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";
 import type { BiasCategory } from "@/types";
 
 // A title long enough to satisfy DAILY_TITLE_MIN (25) but under
@@ -495,6 +497,40 @@ describe("isDailyEligible", () => {
       expect(isDailyEligible(ekonomi, WINDOW, { politicsGate: false })).toBe(true);
     });
   });
+
+  describe("english gate (opts.englishGate)", () => {
+    const GATED = { englishGate: true } as const;
+    const english = (slug: string) =>
+      candidate({ source: source({ slug, name: "Örnek Yayın" }) });
+
+    it("rejects an outlet with slug 'hurriyet-daily-news' when the gate is on", () => {
+      expect(isDailyEligible(english("hurriyet-daily-news"), WINDOW, GATED)).toBe(false);
+    });
+
+    it("accepts the same outlet when the gate is off (past puzzles keep their rules)", () => {
+      expect(isDailyEligible(english("hurriyet-daily-news"), WINDOW)).toBe(true);
+      expect(isDailyEligible(english("hurriyet-daily-news"), WINDOW, {})).toBe(true);
+      expect(isDailyEligible(english("hurriyet-daily-news"), WINDOW, { englishGate: false })).toBe(
+        true,
+      );
+    });
+
+    it.each([...ENGLISH_SOURCE_SLUGS])("rejects the English-language outlet %s when the gate is on", (slug) => {
+      expect(isDailyEligible(english(slug), WINDOW, GATED)).toBe(false);
+    });
+
+    it("accepts a Turkish outlet when the gate is on", () => {
+      expect(isDailyEligible(candidate(), WINDOW, GATED)).toBe(true);
+      expect(isDailyEligible(english("sozcu"), WINDOW, GATED)).toBe(true);
+    });
+
+    it("composes with the politics gate: both rules apply together", () => {
+      const both = { politicsGate: true, englishGate: true } as const;
+      expect(isDailyEligible(english("daily-sabah"), WINDOW, both)).toBe(false);
+      expect(isDailyEligible(candidate({ category: "ekonomi" }), WINDOW, both)).toBe(false);
+      expect(isDailyEligible(candidate({ category: "politika" }), WINDOW, both)).toBe(true);
+    });
+  });
 });
 
 describe("DAILY_POLITICS_GATE_FROM", () => {
@@ -504,6 +540,19 @@ describe("DAILY_POLITICS_GATE_FROM", () => {
 
   it("is not earlier than the first puzzle date after the gate was designed (2026-11-02)", () => {
     expect(DAILY_POLITICS_GATE_FROM >= "2026-11-02").toBe(true);
+  });
+});
+
+describe("DAILY_ENGLISH_GATE_FROM", () => {
+  it("is a valid date key", () => {
+    expect(isDateKey(DAILY_ENGLISH_GATE_FROM)).toBe(true);
+  });
+
+  // It must be a puzzle key no player has seen when this deploys: every key up
+  // to today is replayable and recomputes from a cold cache, so a gate on or
+  // before today would silently rewrite a puzzle that was already played.
+  it("is not earlier than 2026-11-05, a key nobody has seen at deploy time", () => {
+    expect(DAILY_ENGLISH_GATE_FROM >= "2026-11-05").toBe(true);
   });
 });
 
@@ -713,6 +762,97 @@ describe("pickDailySet — politics gate", () => {
     const mixed = mixedPool(key);
     const politikaOnly = mixed.filter((c) => c.category === "politika");
     expect(pickDailySet(key, mixed)).toEqual(pickDailySet(key, politikaOnly));
+  });
+});
+
+describe("pickDailySet -- english gate", () => {
+  const ENGLISH_SLUGS = [...ENGLISH_SOURCE_SLUGS];
+  const ZONE_CYCLE = ["pro_government", "center", "opposition"] as const;
+
+  // 30 politika candidates; every even index is an English-language outlet
+  // (cycling through the five registered slugs), every odd index a Turkish one.
+  // Zones cycle i % 3, so the Turkish half alone still covers all three zones.
+  function mixedLanguagePool(key: string): DailyCandidate[] {
+    const w = puzzleWindow(key);
+    return Array.from({ length: 30 }, (_, i) =>
+      candidate({
+        articleId: `aaaaaaaa-aaaa-aaaa-aaaa-${String(i).padStart(12, "0")}`,
+        title: title(`Siyasi gündemde bugün ${i}. önemli bir gelişme yaşandı`),
+        publishedAt: w.startIso,
+        createdAt: w.startIso,
+        clusterId: `cluster-${i}`,
+        source: source({
+          id: `source-${i}`,
+          name: `Kaynak ${i}`,
+          slug: i % 2 === 0 ? (ENGLISH_SLUGS[(i / 2) % ENGLISH_SLUGS.length] as string) : `kaynak-${i}`,
+          bias: ZONE_CYCLE[i % 3] as BiasCategory,
+        }),
+      }),
+    );
+  }
+
+  const idOf = (i: number): string => `aaaaaaaa-aaaa-aaaa-aaaa-${String(i).padStart(12, "0")}`;
+
+  // Snapshotted from the code as it was BEFORE the English rule existed
+  // (display order matters). These keys are all earlier than
+  // DAILY_ENGLISH_GATE_FROM, so the sets players already saw must not move,
+  // even though each contains English-language outlets.
+  const PRE_GATE_SNAPSHOT: ReadonlyArray<readonly [string, readonly number[]]> = [
+    ["2026-10-30", [9, 8, 13, 18, 19]],
+    ["2026-11-03", [19, 18, 11, 10, 12]],
+    // After the politics gate, before the English gate.
+    ["2026-11-04", [20, 25, 24, 27, 26]],
+  ];
+
+  it.each(PRE_GATE_SNAPSHOT)(
+    "key %s (before DAILY_ENGLISH_GATE_FROM) returns exactly the pre-change set, English outlets included",
+    (key, indexes) => {
+      expect(key < DAILY_ENGLISH_GATE_FROM).toBe(true);
+      const result = pickDailySet(key, mixedLanguagePool(key));
+
+      expect(result).not.toBeNull();
+      expect(result!.map((h) => h.articleId)).toEqual(indexes.map(idOf));
+      // Not vacuous: each snapshot really does contain an English outlet.
+      expect(result!.some((h) => ENGLISH_SOURCE_SLUGS.has(h.sourceSlug))).toBe(true);
+    },
+  );
+
+  it.each([0, 1, 2, 10])(
+    "from the gate date onward (+%i days) no English-language outlet is ever picked",
+    (offset) => {
+      const key = addDays(DAILY_ENGLISH_GATE_FROM, offset);
+      const result = pickDailySet(key, mixedLanguagePool(key));
+
+      expect(result).not.toBeNull();
+      expect(result).toHaveLength(DAILY_GAME_SIZE);
+      for (const headline of result!) {
+        expect(ENGLISH_SOURCE_SLUGS.has(headline.sourceSlug)).toBe(false);
+      }
+    },
+  );
+
+  it("a gated day equals the pick from the Turkish-only half of the pool", () => {
+    const key = DAILY_ENGLISH_GATE_FROM;
+    const mixed = mixedLanguagePool(key);
+    const turkishOnly = mixed.filter((c) => !ENGLISH_SOURCE_SLUGS.has(c.source.slug));
+
+    expect(turkishOnly).toHaveLength(15);
+    expect(pickDailySet(key, mixed)).toEqual(pickDailySet(key, turkishOnly));
+  });
+
+  it("returns null on a gated day when only English outlets cover a zone", () => {
+    const key = DAILY_ENGLISH_GATE_FROM;
+    const noTurkishOpposition = mixedLanguagePool(key).filter(
+      (c) => c.source.bias !== "opposition" || ENGLISH_SOURCE_SLUGS.has(c.source.slug),
+    );
+
+    expect(pickDailySet(key, noTurkishOpposition)).toBeNull();
+    // The same pool is still playable on a pre-gate day: the rule is gated on the key.
+    const preKey = addDays(DAILY_ENGLISH_GATE_FROM, -1);
+    const preFiltered = mixedLanguagePool(preKey).filter(
+      (c) => c.source.bias !== "opposition" || ENGLISH_SOURCE_SLUGS.has(c.source.slug),
+    );
+    expect(pickDailySet(preKey, preFiltered)).not.toBeNull();
   });
 });
 

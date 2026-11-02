@@ -7,6 +7,7 @@ import {
   KEY_MAX_DIGITS,
   KEY_MIN_DIGITS,
   KEY_ROUND_RE,
+  PARENT_SEGMENT_KEY_RES,
   URL_PATH_RE,
   sourceArticleKey,
   sourceArticleKeyFor,
@@ -55,13 +56,18 @@ describe("sourceArticleKey: behaviour", () => {
 
   it("collides only for the intended twin pairs among the real sample URLs", () => {
     const real = SOURCE_ARTICLE_KEY_CASES.filter(
-      (c) => c.key !== null && /aksam\.com|aa\.com\.tr|cnnturk|yenisafak|dunya\.com/.test(c.url),
+      (c) =>
+        c.key !== null &&
+        /aksam\.com|aa\.com\.tr|cnnturk|yenisafak|dunya\.com|evrensel\.net|indyturk\.com/.test(c.url),
     );
     const byKey = new Map<string, number>();
     for (const c of real) byKey.set(c.key as string, (byKey.get(c.key as string) ?? 0) + 1);
     const collisions = [...byKey.entries()].filter(([, n]) => n > 1).map(([k]) => k).sort();
-    // The aksam incident pair and the dunya headline-edit pair, nothing else.
-    expect(collisions).toEqual(["1708664", "845066"]);
+    // The aksam incident pair, the dunya headline-edit pair, and the re-titled
+    // evrensel / indyturk pairs of migration 149 (6007631 and 784651 are the
+    // incident pairs; 6006697 and 784495 are the second pair of each source).
+    // Nothing else: the different articles of each source keep different keys.
+    expect(collisions).toEqual(["1708664", "6006697", "6007631", "784495", "784651", "845066"]);
   });
 
   it("never throws, whatever it is given", () => {
@@ -113,6 +119,101 @@ describe("sourceArticleKey: behaviour", () => {
     expect(sourceArticleKey("https://x.test/" + "9".repeat(100_000))).toBeNull();
     expect(Date.now() - started).toBeLessThan(500);
   });
+
+  it("handles a very long digit run in a host-anchored parent segment (linear time)", () => {
+    const started = Date.now();
+    expect(sourceArticleKey("https://www.evrensel.net/haber/" + "9".repeat(100_000))).toBeNull();
+    expect(sourceArticleKey("https://www.indyturk.com/node/" + "9".repeat(100_000) + "/x")).toBeNull();
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+});
+
+describe("sourceArticleKey: host-anchored parent-segment ids (149)", () => {
+  const A = "https://www.evrensel.net/haber/6007631/akaryakita-zam-ustune-zam-otogaza-9-tl-zam-bekleniyor-litresi-50-tlyi-asacak?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication";
+  const B = "https://www.evrensel.net/haber/6007631/akaryakita-zam-ustune-zam-otogaza-9-tl-zam-bekleniyor-litresi-50-tl-yi-asacak?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication";
+  const C = "https://www.indyturk.com/node/784651/heatin-83-ya%C5%9F%C4%B1ndaki-usta-y%C3%B6netmeni-kazara-kendini-vurdu";
+  const D = "https://www.indyturk.com/node/784651/k%C3%BClt%C3%BCr/heatin-83-ya%C5%9F%C4%B1ndaki-usta-y%C3%B6netmeni-kazara-kendini-vurdu";
+
+  it("gives a re-titled evrensel article (new slug, same /haber/<id>/) the same key", () => {
+    expect(A).not.toBe(B);
+    expect(sourceArticleKey(A)).toBe("6007631");
+    expect(sourceArticleKey(B)).toBe("6007631");
+  });
+
+  it("gives a re-titled indyturk article (new path, same /node/<id>/) the same key", () => {
+    expect(C).not.toBe(D);
+    expect(sourceArticleKey(C)).toBe("784651");
+    expect(sourceArticleKey(D)).toBe("784651");
+  });
+
+  it("gives two different evrensel ids different keys", () => {
+    const a = sourceArticleKey("https://www.evrensel.net/haber/6006702/fon-vurgunu-sorusturmasi");
+    const b = sourceArticleKey("https://www.evrensel.net/haber/6006706/super-lig-9uncu-hafta-maci");
+    expect(a).toBe("6006702");
+    expect(b).toBe("6006706");
+    expect(a).not.toBe(b);
+  });
+
+  it("gives two different indyturk ids different keys", () => {
+    const a = sourceArticleKey("https://www.indyturk.com/node/784377/haber/x");
+    const b = sourceArticleKey("https://www.indyturk.com/node/784544/haber/y");
+    expect(a).toBe("784377");
+    expect(b).toBe("784544");
+    expect(a).not.toBe(b);
+  });
+
+  it("does not apply the rule to another host or another path (host and path anchoring)", () => {
+    expect(sourceArticleKey("https://evil.test/haber/6007631/x")).toBeNull();
+    expect(sourceArticleKey("https://www.evrensel.net.evil.test/haber/6007631/x")).toBeNull();
+    expect(sourceArticleKey("https://notevrensel.net/haber/6007631/x")).toBeNull();
+    expect(sourceArticleKey("https://www.indyturk.com.evil.test/node/784651/x")).toBeNull();
+    expect(sourceArticleKey("https://www.evrensel.net/node/6007631/x")).toBeNull();
+    expect(sourceArticleKey("https://www.indyturk.com/haber/784651/x")).toBeNull();
+    // A user-info or port trick does not move the host either.
+    expect(sourceArticleKey("https://www.evrensel.net@evil.test/haber/6007631/x")).toBeNull();
+  });
+
+  it("still keeps /kategori/123456/slug (any other host) unkeyed", () => {
+    expect(sourceArticleKey("https://x.test/kategori/123456/slug")).toBeNull();
+    expect(sourceArticleKey("https://www.evrensel.net/kategori/123456/slug")).toBeNull();
+  });
+
+  it("applies the date-shape and round guards to the captured id, then falls back to the last segment", () => {
+    expect(sourceArticleKey("https://www.evrensel.net/haber/20261023/slug")).toBeNull();
+    expect(sourceArticleKey("https://www.evrensel.net/haber/100000/slug")).toBeNull();
+    expect(sourceArticleKey("https://www.evrensel.net/haber/20261023/slug-7654321")).toBe("7654321");
+    expect(sourceArticleKey("https://www.evrensel.net/haber/100000/slug-7654321")).toBe("7654321");
+    // Date-shaped means 8/10/12/14 digits: a 9-digit run is kept.
+    expect(sourceArticleKey("https://www.evrensel.net/haber/202610231/slug")).toBe("202610231");
+  });
+
+  it("honours the 6..20 digit bounds on the captured id", () => {
+    expect(sourceArticleKey("https://www.evrensel.net/haber/12345/slug")).toBeNull();
+    expect(sourceArticleKey("https://www.evrensel.net/haber/123456/slug")).toBe("123456");
+    expect(sourceArticleKey("https://www.evrensel.net/haber/12345678901234567890/slug")).toBe("12345678901234567890");
+    expect(sourceArticleKey("https://www.evrensel.net/haber/123456789012345678901/slug")).toBeNull();
+  });
+
+  it("matches scheme, www and host case-insensitively, and accepts the id as the whole path tail", () => {
+    expect(sourceArticleKey("http://evrensel.net/haber/6007631/x")).toBe("6007631");
+    expect(sourceArticleKey("https://WWW.EVRENSEL.NET/haber/6007631/x")).toBe("6007631");
+    expect(sourceArticleKey("HTTPS://www.indyturk.com/NODE/784651/x")).toBe("784651");
+    expect(sourceArticleKey("https://www.evrensel.net/haber/6007631")).toBe("6007631");
+    expect(sourceArticleKey("https://www.evrensel.net/haber/6007631/")).toBe("6007631");
+  });
+
+  it("prefers the parent id over a run in the slug, and keeps the old rule for every other host", () => {
+    expect(sourceArticleKey("https://www.evrensel.net/haber/6007631/slug-7654321")).toBe("6007631");
+    expect(sourceArticleKey("https://www.aksam.com.tr/spor/x/haber-1708701")).toBe("1708701");
+    expect(sourceArticleKey("https://x.test/kategori/123456/slug-7654321")).toBe("7654321");
+  });
+
+  it("is not stateful: repeated calls on both hosts agree (no lastIndex leak)", () => {
+    for (let i = 0; i < 5; i++) {
+      expect(sourceArticleKey(A)).toBe("6007631");
+      expect(sourceArticleKey(D)).toBe("784651");
+    }
+  });
 });
 
 describe("article-key constants", () => {
@@ -129,8 +230,29 @@ describe("article-key constants", () => {
   });
 
   it("none of the regexes carries the g or y flag (no lastIndex state)", () => {
-    for (const re of [URL_PATH_RE, KEY_FILE_EXT_RE, KEY_DATE_PREFIX_RE, KEY_ROUND_RE]) {
+    for (const re of [URL_PATH_RE, KEY_FILE_EXT_RE, KEY_DATE_PREFIX_RE, KEY_ROUND_RE, ...PARENT_SEGMENT_KEY_RES]) {
       expect(re.flags).not.toMatch(/[gy]/);
+    }
+  });
+
+  it("PARENT_SEGMENT_KEY_RES has exactly the two host-anchored regexes, in order, flag i", () => {
+    expect(PARENT_SEGMENT_KEY_RES).toHaveLength(2);
+    expect(PARENT_SEGMENT_KEY_RES[0]!.source).toBe(
+      "^https?:\\/\\/(?:www\\.)?evrensel\\.net\\/haber\\/([0-9]{6,20})(?:\\/|$)",
+    );
+    expect(PARENT_SEGMENT_KEY_RES[1]!.source).toBe(
+      "^https?:\\/\\/(?:www\\.)?indyturk\\.com\\/node\\/([0-9]{6,20})(?:\\/|$)",
+    );
+    for (const re of PARENT_SEGMENT_KEY_RES) expect(re.flags).toBe("i");
+  });
+
+  it("each parent regex is anchored at the start and has exactly one capture group", () => {
+    for (const re of PARENT_SEGMENT_KEY_RES) {
+      expect(re.source.startsWith("^")).toBe(true);
+      // `<re>|` also matches the empty string, so exec("") reports the groups.
+      const groups = new RegExp(re.source + "|").exec("");
+      expect(groups).not.toBeNull();
+      expect(groups!.length - 1).toBe(1);
     }
   });
 });

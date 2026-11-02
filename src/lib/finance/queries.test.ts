@@ -299,6 +299,32 @@ describe("finance query transforms", () => {
     expect(item.tickers).toEqual(["ASELS", "VESTL"]);
   });
 
+  // h24-feeds-3: outbound hrefs are cleaned (Diken '&#038;', utm_*); the
+  // stored articles.url is the ingest upsert key and is never rewritten.
+  it("toFeedItem hands the reader a cleaned url (Diken '&#038;' and Evrensel utm_*)", () => {
+    const row = {
+      id: "a1",
+      title: "t",
+      published_at: "2026-09-13T08:00:00Z",
+      category: "ekonomi",
+      source: null,
+      article_tickers: [],
+    };
+    expect(
+      toFeedItem({
+        ...row,
+        url: "https://www.diken.com.tr/avro/?utm_source=rss&#038;utm_medium=rss&#038;utm_campaign=avro",
+      }).url,
+    ).toBe("https://www.diken.com.tr/avro/");
+    expect(
+      toFeedItem({
+        ...row,
+        url: "https://www.evrensel.net/haber/1/x?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+      }).url,
+    ).toBe("https://www.evrensel.net/haber/1/x");
+    expect(toFeedItem({ ...row, url: "https://x/1" }).url).toBe("https://x/1");
+  });
+
   it("ranks attention on the recent window and rates it against the baseline", () => {
     const ranked = rankAttention(
       [
@@ -748,6 +774,34 @@ describe("finance query fetchers (live Supabase shape)", () => {
     expect(supabaseFake.calls.rpc.at(-1)).toEqual({ name: "econ_feed", args: { p_limit: 13 } });
   });
 
+  it("fetchEconFeed cleans the outbound url (Diken '&#038;', Evrensel utm_*)", async () => {
+    const base = {
+      title: "Haber",
+      published_at: "2026-09-13T08:00:00Z",
+      category: "ekonomi",
+      source_name: "Diken",
+      source_slug: "diken",
+      tickers: ["VESTL"],
+    };
+    fixture.econFeedRows = [
+      {
+        ...base,
+        id: "d1",
+        url: "https://www.diken.com.tr/avro/?utm_source=rss&#038;utm_medium=rss&#038;utm_campaign=avro",
+      },
+      {
+        ...base,
+        id: "e1",
+        url: "https://www.evrensel.net/haber/1/x?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+      },
+    ];
+    const items = await fetchEconFeed(10);
+    expect(items.map((i) => [i.id, i.url])).toEqual([
+      ["d1", "https://www.diken.com.tr/avro/"],
+      ["e1", "https://www.evrensel.net/haber/1/x"],
+    ]);
+  });
+
   // SEC-07 follow-up: fetchKapBreakerState is a deliberate exception to
   // this file's "every fetcher throws" rule (see header comment) — no
   // "use cache" (the admin badge wants the live row) and it returns null
@@ -1068,6 +1122,33 @@ describe("ticker-legal-notices (migration 107): BİK notices do not count as tic
       },
     ];
   }
+
+  it("fetchTickerPage cleans the outbound url of each article (Diken '&#038;', Evrensel utm_*)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    fixture.articleTickers = topTickerRows();
+    const [first, second] = tickerPageArticles();
+    fixture.tickerArticlesRows = [
+      {
+        ...first!,
+        id: "d1",
+        title: "Garanti BBVA yeni kampanya duyurdu",
+        url: "https://www.diken.com.tr/garanti/?utm_source=rss&#038;utm_medium=rss&#038;utm_campaign=garanti",
+      },
+      {
+        ...second!,
+        id: "e1",
+        url: "https://www.evrensel.net/haber/1/garanti?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+      },
+    ];
+
+    const page = await fetchTickerPage("GARAN");
+
+    expect(page.articles.map((a) => [a.id, a.url])).toEqual([
+      ["d1", "https://www.diken.com.tr/garanti/"],
+      ["e1", "https://www.evrensel.net/haber/1/garanti"],
+    ]);
+  });
 
   it("fetchTickerPage's attention series and article list both exclude the notice id", async () => {
     vi.useFakeTimers();

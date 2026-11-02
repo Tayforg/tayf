@@ -314,6 +314,71 @@ describe("getSourceProfile entity residue (read-time repair)", () => {
   });
 });
 
+describe("getSourceProfile outbound article url (h24-feeds-3)", () => {
+  it("cleans each article url for the href (utm tags and a literal '&#038;' gone) and leaves every other field alone", async () => {
+    fixture.articles = [
+      {
+        data: [
+          {
+            id: "d1",
+            title: "Diken haberi",
+            description: null,
+            url: "https://www.diken.com.tr/avro-56-lira-sinirini-gecti/?utm_source=rss&#038;utm_medium=rss&#038;utm_campaign=avro-56-lira-sinirini-gecti",
+            image_url: null,
+            published_at: "2026-01-04T00:00:00.000Z",
+          },
+          {
+            id: "e1",
+            title: "Evrensel haberi",
+            description: "özet",
+            url: "https://www.evrensel.net/haber/6007631/akaryakita-zam?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+            image_url: "https://www.evrensel.net/img.jpg",
+            published_at: "2026-01-03T00:00:00.000Z",
+          },
+          {
+            id: "p1",
+            title: "Temiz url",
+            description: null,
+            url: "https://ornek.example/p1?id=5#yorumlar",
+            image_url: null,
+            published_at: "2026-01-02T00:00:00.000Z",
+          },
+        ],
+        error: null,
+      },
+    ];
+
+    const profile = await getSourceProfile("ornek-gazete");
+
+    expect(profile?.articles).toEqual([
+      {
+        id: "d1",
+        title: "Diken haberi",
+        description: null,
+        url: "https://www.diken.com.tr/avro-56-lira-sinirini-gecti/",
+        image_url: null,
+        published_at: "2026-01-04T00:00:00.000Z",
+      },
+      {
+        id: "e1",
+        title: "Evrensel haberi",
+        description: "özet",
+        url: "https://www.evrensel.net/haber/6007631/akaryakita-zam",
+        image_url: "https://www.evrensel.net/img.jpg",
+        published_at: "2026-01-03T00:00:00.000Z",
+      },
+      {
+        id: "p1",
+        title: "Temiz url",
+        description: null,
+        url: "https://ornek.example/p1?id=5#yorumlar",
+        image_url: null,
+        published_at: "2026-01-02T00:00:00.000Z",
+      },
+    ]);
+  });
+});
+
 describe("getSourceProfile reader cap", () => {
   it("builds only capped reader clients", async () => {
     await getSourceProfile("ornek-gazete");

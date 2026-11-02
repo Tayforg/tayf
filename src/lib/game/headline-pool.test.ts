@@ -23,6 +23,7 @@ function makeRow(overrides: {
   articleCount?: number;
   publishedAt?: string;
   sourceId?: string;
+  sourceSlug?: string;
   sourceKind?: "outlet" | "aggregator" | "wire" | "niche" | null;
   sourceActive?: boolean;
   bias?: BiasCategory;
@@ -47,7 +48,7 @@ function makeRow(overrides: {
           sources: {
             id: sourceId,
             name: `Kaynak ${sourceSeq}`,
-            slug: `kaynak-${sourceSeq}`,
+            slug: overrides.sourceSlug ?? `kaynak-${sourceSeq}`,
             bias: overrides.bias ?? "center",
             kind: overrides.sourceKind === undefined ? "outlet" : overrides.sourceKind,
             active: overrides.sourceActive ?? true,
@@ -183,6 +184,120 @@ describe("selectGameHeadlines", () => {
     };
 
     expect(selectGameHeadlines([row])).toEqual([]);
+  });
+});
+
+// /oyun asks "which camp is this outlet in?". That is only a fair question for
+// a Turkish-language outlet whose zone is a real editorial call: an aggregator
+// or niche source carries a placeholder zone, a wire source republishes, and an
+// English-language outlet gives the answer away through its language alone
+// (h24-pages-2). The daily mode already applied the kind rule; the practice
+// pool now applies the same two rules.
+describe("selectGameHeadlines -- outlet-only, Turkish-language pool", () => {
+  it.each(["aggregator", "niche", "wire"] as const)(
+    "drops a %s source",
+    (sourceKind) => {
+      const outlet = makeRow({ sourceKind: "outlet" });
+      const dropped = makeRow({ sourceKind });
+
+      const result = selectGameHeadlines([outlet, dropped]);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]?.articleId).toBe(outlet.cluster_articles![0]!.articles!.id);
+    },
+  );
+
+  it("normalizes a null (legacy) kind to outlet and keeps it", () => {
+    const legacy = makeRow({ sourceKind: null });
+
+    const result = selectGameHeadlines([legacy]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.articleId).toBe(legacy.cluster_articles![0]!.articles!.id);
+  });
+
+  it("keeps a row whose kind is absent from the embedded source", () => {
+    const row = makeRow();
+    delete row.cluster_articles![0]!.articles!.sources!.kind;
+
+    expect(selectGameHeadlines([row])).toHaveLength(1);
+  });
+
+  it.each(["a-news", "hurriyet-daily-news", "daily-sabah", "trt-world", "turkiye-today"])(
+    "drops the English-language outlet %s even though its kind is outlet",
+    (sourceSlug) => {
+      const turkish = makeRow({ sourceSlug: "sozcu" });
+      const english = makeRow({ sourceSlug, sourceKind: "outlet" });
+
+      const result = selectGameHeadlines([turkish, english]);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]?.sourceSlug).toBe("sozcu");
+    },
+  );
+
+  it("keeps a normal Turkish outlet", () => {
+    const row = makeRow({ sourceSlug: "sozcu", sourceKind: "outlet" });
+
+    const result = selectGameHeadlines([row]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.sourceSlug).toBe("sozcu");
+  });
+
+  it("does not drop an outlet whose slug merely resembles an English one", () => {
+    const result = selectGameHeadlines([
+      makeRow({ sourceSlug: "a-haber" }),
+      makeRow({ sourceSlug: "hurriyet" }),
+      makeRow({ sourceSlug: "daily-sabah-tr" }),
+    ]);
+
+    expect(result.map((h) => h.sourceSlug)).toEqual(["a-haber", "hurriyet", "daily-sabah-tr"]);
+  });
+
+  it("an English or aggregator source does not use up its cluster: the cluster's Turkish outlets stay", () => {
+    const cluster: GameClusterRow = {
+      id: "cluster-mixed",
+      article_count: 4,
+      cluster_articles: [
+        makeRow({ clusterId: "cluster-mixed", sourceSlug: "a-news" }),
+        makeRow({ clusterId: "cluster-mixed", sourceKind: "aggregator" }),
+        makeRow({ clusterId: "cluster-mixed", sourceSlug: "sabah" }),
+        makeRow({ clusterId: "cluster-mixed", sourceSlug: "sozcu" }),
+      ].flatMap((row) => row.cluster_articles ?? []),
+    };
+
+    const result = selectGameHeadlines([cluster]);
+
+    expect(result.map((h) => h.sourceSlug)).toEqual(["sabah", "sozcu"]);
+  });
+
+  // The two new rules shrink the pool, so pin that a fixture with enough
+  // eligible clusters still fills a full round: the page minimum is not lowered.
+  it("sampleHeadlines still returns GAME_ROUND_SIZE headlines from 12 eligible clusters mixed with ineligible ones", () => {
+    const eligible = Array.from({ length: 12 }, (_, i) =>
+      makeRow({ clusterId: `eligible-${i}`, sourceSlug: `gazete-${i}` }),
+    );
+    const ineligible = [
+      makeRow({ clusterId: "bad-aggregator", sourceKind: "aggregator" }),
+      makeRow({ clusterId: "bad-niche", sourceKind: "niche" }),
+      makeRow({ clusterId: "bad-wire", sourceKind: "wire" }),
+      makeRow({ clusterId: "bad-a-news", sourceSlug: "a-news" }),
+      makeRow({ clusterId: "bad-hdn", sourceSlug: "hurriyet-daily-news" }),
+    ];
+
+    const pool = selectGameHeadlines([...ineligible, ...eligible]);
+    expect(pool).toHaveLength(12);
+
+    for (let run = 0; run < 25; run++) {
+      const drawn = sampleHeadlines(pool);
+
+      expect(drawn).toHaveLength(GAME_ROUND_SIZE);
+      expect(new Set(drawn.map((h) => h.clusterId)).size).toBe(GAME_ROUND_SIZE);
+      for (const headline of drawn) {
+        expect(headline.clusterId.startsWith("eligible-")).toBe(true);
+      }
+    }
   });
 });
 
@@ -380,6 +495,21 @@ describe("headline-pool source guard", () => {
     expect(source.slice(selectAt + ".select(".length, openTick).trim()).toBe("");
     const body = source.slice(openTick + 1, source.indexOf("`", openTick + 1));
     expect(body.startsWith("id, article_count")).toBe(true);
+  });
+
+  it("applies the outlet-only and English-source rules from the shared modules", () => {
+    expect(source).toContain('import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";');
+    expect(source).toContain('if (sourceKindOf({ kind: source.kind ?? undefined }) !== "outlet") continue;');
+    expect(source).toContain("if (ENGLISH_SOURCE_SLUGS.has(source.slug)) continue;");
+    // The old wire-only rule must not linger next to the new one.
+    expect(source).not.toContain('=== "wire") continue;');
+  });
+
+  it("source-language.ts has no imports at all (it is safe for this module to depend on)", () => {
+    const language = readFileSync(resolve(__dirname, "../sources/source-language.ts"), "utf8");
+    for (const line of language.split("\n")) {
+      expect(line.trimStart().startsWith("import "), line).toBe(false);
+    }
   });
 
   it("the round size is the default sample limit, imported from the plain round-size module", () => {

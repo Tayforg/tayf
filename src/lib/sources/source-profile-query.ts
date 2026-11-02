@@ -3,6 +3,7 @@ import { cacheLife, cacheTag } from "next/cache";
 import { connection } from "next/server";
 
 import type { ZoneHistoryEntry } from "@/components/source/label-card";
+import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { attemptCached } from "@/lib/cache-resilience";
 import { createReaderClient } from "@/lib/supabase/server";
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
@@ -145,8 +146,12 @@ async function fetchSourceProfile(slug: string): Promise<SourceProfile | null> {
     // Read-time repair of double-encoded feed residue ("&quot;", "&#39;"):
     // rows stored before the ingest fix still carry it. Pure and non-throwing,
     // so it is safe inside the "use cache" body.
+    // h24-feeds-3: the href gets the cleaned url (a literal '&#038;' decoded,
+    // utm_*/fbclid/gclid dropped); the stored url is the upsert key and is
+    // not touched.
     articles: ((articlesResult.data ?? []) as ArticleRow[]).map((a) => ({
       ...a,
+      url: cleanOutboundUrl(a.url),
       title: repairEntityResidue(a.title),
       description:
         typeof a.description === "string"

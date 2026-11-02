@@ -118,3 +118,55 @@ describe("DailyGame without a stored result", () => {
     expect(html).not.toContain("Bugünün oyununu oynadın");
   });
 });
+
+// h24-feeds-3: the stored articles.url is the ingest upsert key and keeps the
+// feed's tags (Diken: a literal '&#038;' between utm params; Evrensel: utm_*
+// on every link). The result screen's "Habere git" link must hand the reader
+// the cleaned url, while the cached puzzle payload stays untouched.
+describe("DailyGame result screen: outbound links are cleaned at render", () => {
+  const DIKEN_STORED =
+    "https://www.diken.com.tr/avro-56-lira-sinirini-gecti/?utm_source=rss&#038;utm_medium=rss&#038;utm_campaign=avro-56-lira-sinirini-gecti";
+  const EVRENSEL_STORED =
+    "https://www.evrensel.net/haber/6007631/akaryakita-zam?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication";
+  const PLAIN = "https://ornek.com/plain-article";
+
+  const taggedPuzzle: DailyPuzzle = {
+    ...puzzle,
+    headlines: [DIKEN_STORED, EVRENSEL_STORED, PLAIN, PLAIN, PLAIN].map((url, i) => ({
+      ...puzzle.headlines[i]!,
+      url,
+    })),
+  };
+
+  function outboundHrefs(html: string): string[] {
+    const hrefs: string[] = [];
+    for (const tag of html.match(/<a\b[^>]*>/g) ?? []) {
+      if (!tag.includes('target="_blank"')) continue;
+      const m = /href="([^"]*)"/.exec(tag);
+      if (m) hrefs.push(m[1]!);
+    }
+    return hrefs;
+  }
+
+  it("renders the bare article url for a Diken ('&#038;') and an Evrensel (utm_*) headline", () => {
+    mode.value = "seeded";
+    const html = renderToStaticMarkup(<DailyGame puzzle={taggedPuzzle} todayKey={taggedPuzzle.dateKey} />);
+    const hrefs = outboundHrefs(html);
+    expect(hrefs).toEqual([
+      "https://www.diken.com.tr/avro-56-lira-sinirini-gecti/",
+      "https://www.evrensel.net/haber/6007631/akaryakita-zam",
+      PLAIN,
+      PLAIN,
+      PLAIN,
+    ]);
+    expect(html).not.toContain("utm_");
+    expect(html).not.toContain("038");
+  });
+
+  it("does not mutate the puzzle payload (the cached daily set keeps the stored url)", () => {
+    mode.value = "seeded";
+    renderToStaticMarkup(<DailyGame puzzle={taggedPuzzle} todayKey={taggedPuzzle.dateKey} />);
+    expect(taggedPuzzle.headlines[0]!.url).toBe(DIKEN_STORED);
+    expect(taggedPuzzle.headlines[1]!.url).toBe(EVRENSEL_STORED);
+  });
+});

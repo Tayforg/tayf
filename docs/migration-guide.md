@@ -3061,3 +3061,47 @@ The cron run after the apply should change about one row (`07f6d2d0`), then retu
 **FOUNDER NOTE (production write, not part of 148):** `bdbf9948` is still inside the 48-hour creation scope (created 2026-10-31 12:25 UTC, scope ends 2026-11-02 12:25 UTC) but outside the cron's `win` set (updated 2026-10-31 13:13, recall-checked 2026-11-01 00:00, both older than 26 hours), so 148 alone will not withdraw its badge. A one-off `select public.blindspot_recall_veto_refresh(interval '72 hours');` after applying 148 would newly veto `07f6d2d0`, `bdbf9948` and `7b66bbcf` (read-only simulation: 3.2 s wall; 126 at 72 hours vetoes none of the three; all three hand-checked as the same event). The other solid cases from the hunt (`31b0354f`, `5dda5833`) were created on 2026-10-26 (updated and recall-checked on 10-26 and 10-27, still public, not vetoed), so they need a window of about 7 days; 126's own backfill used `interval '7 days'` and took 5.8 s, and the unclustered arm makes a 7-day run heavier, so measure the SELECT variant first (it was not measured here). 148 never re-scores outside the cron's own scope.
 
 **Rollback** (nothing else depends on 148): re-apply piece (c) of `126_blindspot_sibling_veto.sql` (the `create or replace function` block, its comment, revoke and grant; skip the column, constraint, backfill and ledger pieces), put the cron command back (`select cron.alter_job((select jobid from cron.job where jobname = 'blindspot-recall-veto'), command := 'select public.blindspot_recall_veto_refresh();');`), then remove ledger row 148 (`delete from supabase_migrations.schema_migrations where version = '148';`). Vetoes found through unclustered siblings keep their stored `sibling_headline` reason until the next run inside the 48-hour scope recomputes them (they clear once the evidence is gone); older ones stay frozen like any 126 veto.
+
+## 149 — source_article_key parent-segment ids (evrensel /haber/<id>/, indyturk /node/<id>/): APPLY 149 + REDEPLOY ingest, any order
+
+**Why:** evrensel keeps its CMS id in `/haber/<id>/<slug>` and indyturk in `/node/<id>/[<section>/]<slug>`, a PARENT segment followed by a slug that changes with every headline edit. 113's key reads only the last path segment (so that `/kategori/123456/slug` section ids never merge stories), which gave these two outlets no key at all: of 1,103 evrensel and 295 indyturk rows in 7 days, 1 and 0 carried a `source_article_key`, so the "same id, new url" drop in ingest never fired. 76 evrensel ids and 7 indyturk ids have two or more rows (183 + 14 rows, in 64 + 11 different clusters): evrensel `6007631` (b3a2b8e4 09:18Z and 829e55e4 09:33Z, slugs `...50-tlyi-asacak` and `...50-tl-yi-asacak`, identical title) and indyturk `784651` (6cf47ad9 09:48Z and 5e0c2aa6 10:30Z, the url gained a `/kültür/` segment, identical title) (hunt 24, h24-feeds-1).
+
+**What 149 does** (ONE short transaction, additive, safe to re-apply): `create or replace function public.source_article_key(text)` with 113's body verbatim plus two host-anchored regexes tried first (`foreach v_re in array`), the SQL twin of `PARENT_SEGMENT_KEY_RES` in `supabase/functions/_shared/rss/article-key.ts`: `^https?://(?:www\.)?evrensel\.net/haber/([0-9]{6,20})(?:/|$)` and the `indyturk\.com/node/` twin, matched case-insensitively on the whole url, the capture still passing the date-shape and round-number guards (a rejected capture falls through to the last-segment rule). `evil.test/haber/...`, `evrensel.net.evil.test` and `notevrensel.net` do not match; any other `/kategori/123456/slug` still gives no key. Same security definer, `search_path = ''`, `revoke ... from public, anon, authenticated`, `grant execute ... to service_role` as 113. **No backfill, no article update, no index change, no table touched.** `tests/migrations/149-source-article-key-parent-segment.test.ts` checks the regexes verbatim against the TS module, that the body without the new block equals 113's, and that 149 is the newest definition; `tests/migrations/sql/149-source-article-key-parent-segment-dryrun.sql` (PG15, applied twice on two fresh clusters, `DRYRUN 149 OK`) records the md5 gate (production's `source_article_key` body is `dbbba7e0e939036ef5c4298b593b7474`, 1397 characters, equal to 113's; 149's is `7beb33a72d1009004ef74e82f3fb0f28`, 2498).
+
+**Order:** none. Ingest computes the key in TypeScript (`sourceArticleKeyFor`), so the forward fix is the **ingest redeploy** (`npx supabase functions deploy ingest --no-verify-jwt`); the SQL function is called only by the operator backfill `articles_source_key_backfill`, so applying 149 changes no behaviour by itself and applying it before, after or without the redeploy is harmless. Apply with `supabase db push`.
+
+**Only re-titles of articles ingested AFTER the deploy are deduped.** Rows stored before the deploy keep a NULL key (no backfill), so a re-title of an item that is already stored and still in the feed on deploy day can insert one more row; that row is the first keyed one and later re-titles drop against it. The roughly 250 existing duplicate rows stay as they are. A backfill of the two sources and a decision on merging those rows is a separate, optional operator step (not in this wave).
+
+**What to expect** (7-day replay, read-only, before the deploy): the twin drop would have dropped 94 of the 107 extra evrensel rows and 6 of the 7 extra indyturk rows. The other 13 + 1 groups share an id but fail the title gate (`TITLE_TWIN_MIN_JACCARD` 0.2): live updates whose headline moved on (works accident -> the worker's death, derby line-ups -> first half, editors detained -> released). They stay separate rows, as before, so the gate never merges two different stories. Hand-judged: no different stories share an id in either source. Corpus: `tests/fixtures/ingest-corpus.json` keys change for 7 urls (6 evrensel, 1 indyturk), all null -> id; `content_hash` is untouched.
+
+**Verify** (read-only, as service_role; anon and authenticated cannot call it):
+
+```sql
+-- the new body is live (expect 7beb33a72d1009004ef74e82f3fb0f28, 2498, i, t)
+select md5(prosrc), length(prosrc), provolatile, prosecdef
+  from pg_proc where oid = 'public.source_article_key(text)'::regprocedure;
+-- both incident pairs now share a key (expect 6007631, 6007631, 784651, 784651)
+select public.source_article_key('https://www.evrensel.net/haber/6007631/akaryakita-zam-ustune-zam-otogaza-9-tl-zam-bekleniyor-litresi-50-tlyi-asacak?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication'),
+       public.source_article_key('https://www.evrensel.net/haber/6007631/akaryakita-zam-ustune-zam-otogaza-9-tl-zam-bekleniyor-litresi-50-tl-yi-asacak?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication'),
+       public.source_article_key('https://www.indyturk.com/node/784651/heatin-83-ya%C5%9F%C4%B1ndaki-usta-y%C3%B6netmeni-kazara-kendini-vurdu'),
+       public.source_article_key('https://www.indyturk.com/node/784651/k%C3%BClt%C3%BCr/heatin-83-ya%C5%9F%C4%B1ndaki-usta-y%C3%B6netmeni-kazara-kendini-vurdu');
+-- host anchoring and section ids stay unkeyed (expect null, null, null)
+select public.source_article_key('https://evil.test/haber/6007631/x'),
+       public.source_article_key('https://www.evrensel.net.evil.test/haber/6007631/x'),
+       public.source_article_key('https://x.test/kategori/123456/slug');
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.source_article_key(text)', 'execute'),
+       has_function_privilege('authenticated', 'public.source_article_key(text)', 'execute'),
+       has_function_privilege('service_role', 'public.source_article_key(text)', 'execute');
+select count(*) from supabase_migrations.schema_migrations where version = '149';  -- 1
+```
+
+After the ingest redeploy (replace `<deploy>` with the deploy time), new rows carry keys and re-titles stop piling up (expect keyed > 0 within two cycles, then a handful of groups at most, each one failing the title gate):
+
+```sql
+select s.slug, count(*) filter (where a.source_article_key is not null) keyed, count(*) total
+  from public.articles a join public.sources s on s.id = a.source_id
+ where s.slug in ('evrensel', 'indyturk') and a.created_at > timestamptz '<deploy>' group by 1;
+```
+
+**Rollback** (the TS rules ship with the ingest function, this only restores the SQL twin): redeploy the previous ingest function if the TypeScript rules must go too; re-run ONLY 113's `source_article_key` section (the `create or replace function public.source_article_key(p_url text)` block, its comment, revoke and grant; not the column, index or backfill pieces), which restores the body with md5 `dbbba7e0e939036ef5c4298b593b7474`; then remove ledger row 149: `delete from supabase_migrations.schema_migrations where version = '149';`.

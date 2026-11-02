@@ -2,6 +2,8 @@ import { cacheLife, cacheTag } from "next/cache";
 
 import { zoneOf } from "@/lib/bias/config";
 import { sourceKindOf } from "@/lib/sources/kind";
+// No server imports in source-language.ts, so this stays client-bundle safe.
+import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";
 import { createReaderClient } from "@/lib/supabase/server";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 import { isGameEligibleTitle } from "./pii-filter";
@@ -15,13 +17,22 @@ import { GAME_ROUND_SIZE } from "./round-size";
 // cluster_articles → articles → sources in one round-trip) rather than
 // inventing a different query shape for this one surface.
 //
-// All FIVE filter rules (48h window, article_count >= 3, one headline per
-// outlet, wire-source exclusion, PII filter) live in the pure
-// `selectGameHeadlines` below — same "fetch broad, filter in JS" split
+// All SIX filter rules (48h window, article_count >= 3, one headline per
+// outlet, outlet-only sources, Turkish-language sources, PII filter) live in
+// the pure `selectGameHeadlines` below — same "fetch broad, filter in JS" split
 // blindspots-query.ts uses, so this is unit-testable without Supabase and
 // the async wrapper stays a thin fetch + delegate.
 //
-// A SIXTH rule lives in `sampleHeadlines`, not here: a drawn list holds at
+// Two of those rules are what make the question fair. /oyun asks "which camp
+// is this outlet in?", which is only a real question for an outlet whose zone
+// is an editorial call: an aggregator or niche source carries a placeholder
+// zone and a wire source republishes someone else's copy, so only
+// `kind === "outlet"` passes (the same rule the daily mode applies). And an
+// English-language outlet gives its zone away through its language alone, so
+// the slugs in ENGLISH_SOURCE_SLUGS are dropped too. Both rules shrink the
+// pool; GAME_ROUND_SIZE is deliberately NOT lowered to compensate.
+//
+// A SEVENTH rule lives in `sampleHeadlines`, not here: a drawn list holds at
 // most one headline per cluster (per story). It is a per-draw rule on
 // purpose: the cached pool keeps every outlet's headline, and each request
 // picks which outlet represents a cluster at random.
@@ -75,8 +86,10 @@ const CANDIDATE_LIMIT = 200;
 
 /**
  * PURE. Applies every /oyun eligibility rule — 48h window, article_count >=
- * 3, source.active, wire-kind exclusion, one headline per outlet, and the
- * PII filter (per pii-filter.ts's "before sampling" ordering rule) — and
+ * 3, source.active, outlet-only kind (aggregator, niche and wire are
+ * excluded), Turkish-language sources only (ENGLISH_SOURCE_SLUGS are
+ * excluded), one headline per outlet, and the PII filter (per pii-filter.ts's
+ * "before sampling" ordering rule) — and
  * returns the FULL eligible candidate list, unshuffled and uncapped. No
  * Supabase dependency, so it's unit-testable with plain fixtures.
  *
@@ -103,10 +116,14 @@ export function selectGameHeadlines(
       const source = article.sources;
       if (!source) continue;
       if (!source.active) continue;
-      // Uses the shared normalization helper (never a raw `=== "wire"` on
-      // the un-normalized column) so legacy/null `kind` values fall back
-      // to "outlet" the same way every other reader consistently does.
-      if (sourceKindOf({ kind: source.kind ?? undefined }) === "wire") continue;
+      // Uses the shared normalization helper (never a raw comparison on the
+      // un-normalized column) so legacy/null `kind` values fall back to
+      // "outlet" the same way every other reader consistently does. Only an
+      // outlet's zone is a guessable fact: an aggregator's or niche source's
+      // is a placeholder and a wire republishes (same rule as the daily mode).
+      if (sourceKindOf({ kind: source.kind ?? undefined }) !== "outlet") continue;
+      // An English-language outlet gives the answer away through its language.
+      if (ENGLISH_SOURCE_SLUGS.has(source.slug)) continue;
 
       const publishedMs = new Date(article.published_at).getTime();
       if (!Number.isFinite(publishedMs) || publishedMs < cutoffMs) continue;

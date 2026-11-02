@@ -5,6 +5,7 @@ import { cache } from "react";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
+import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
 import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
@@ -401,7 +402,12 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         article: {
           id: article.id,
           title: article.title,
-          url: article.url,
+          // h24-feeds-3: the stored url is the upsert key and stays as the
+          // feed gave it; the page gets the href with Diken's literal
+          // '&#038;' decoded and utm_*/fbclid/gclid tags dropped. Every
+          // consumer (hrefs, JSON-LD isBasedOn, timeline, framing, embed)
+          // reads this field.
+          url: cleanOutboundUrl(article.url),
           published_at: article.published_at,
           // gif-filter (http-1): an animated GIF is nulled at the query
           // boundary (22 MB haber7 / elips-haber placeholder that
