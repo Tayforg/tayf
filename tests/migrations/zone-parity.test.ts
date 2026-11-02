@@ -490,6 +490,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "143_weekly_words_sample.sql",
       // 145 re-creates ops_health_report() with 136's text verbatim (rows 1-16, including row 4's VALUES-list copy of BIAS_TO_ZONE) plus row 17 (anon_surface); pinned by tests/migrations/145-ops-anon-surface.test.ts
       "145_ops_anon_surface_check.sql",
+      // 148 repeats 126's function body verbatim (its VALUES-list copy of BIAS_TO_ZONE in zmap) plus the unclustered-sibling arm; pinned by tests/migrations/148-blindspot-unclustered-siblings.test.ts
+      "148_blindspot_unclustered_siblings.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

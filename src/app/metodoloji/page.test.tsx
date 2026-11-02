@@ -531,7 +531,9 @@ describe("/metodoloji page: Kör noktaya yakın", () => {
     );
     expect(heading).not.toBeNull();
     expect(collectText(heading).join("")).toBe("Kör noktaya yakın");
-    expect(String(heading?.props?.className)).toContain("scroll-mt-24");
+    // The global html scroll-padding-top already clears the sticky header; a
+    // per-heading scroll-mt would stack on top of it (tests/styles/anchor-offset).
+    expect(String(heading?.props?.className ?? "")).not.toContain("scroll-mt");
   });
 
   it("adds its changelog entry as the newest line, dated 2026-10-22", async () => {

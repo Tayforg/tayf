@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { describe, expect, it } from "vitest";
 import { TickerChip, TickerTape } from "./ticker-chip";
 import type { Quote } from "@/lib/finance/quotes";
@@ -172,6 +173,30 @@ describe("TickerChip", () => {
 describe("TickerTape", () => {
   const items: TickerAttention[] = [{ ticker: "OZATD", articles: 3, sources: 2, ratio: null, title: "Özata" } as TickerAttention];
   const stats: Record<string, QuoteStat> = {};
+
+  // The strip scrolls inside overflow-x-auto, which clips anything drawn
+  // outside a link's box: an outside focus ring is cut off at the top, bottom
+  // and ends. An inset ring is drawn inside the link, where it is not clipped.
+  it("every strip link draws its focus ring inset so overflow-x-auto cannot clip it", () => {
+    const two: TickerAttention[] = [
+      { ticker: "OZATD", articles: 3, sources: 2, ratio: null, title: "Özata" } as TickerAttention,
+      { ticker: "TURSG", articles: 2, sources: 2, ratio: null, title: "Sigorta" } as TickerAttention,
+    ];
+    const links = collect(TickerTape({ items: two, quotes: { OZATD: quote }, stats })).filter((n) => n.type === Link);
+    expect(links).toHaveLength(2);
+    for (const link of links) {
+      const cls = classOf(link);
+      expect(cls).toContain("focus-visible:ring-inset");
+      // Still a visible ring, not an outline.
+      expect(cls).toContain("focus-visible:ring-2");
+      expect(cls).toContain("focus-visible:ring-ring");
+    }
+  });
+
+  it("the standalone chip keeps its outside ring (nothing clips it)", () => {
+    const root = collect(TickerChip({ ticker: "OZATD", quote }))[0]!;
+    expect(classOf(root)).not.toContain("ring-inset");
+  });
 
   it("renders the percentage for a known move", () => {
     const el = TickerTape({ items, quotes: { OZATD: quote }, stats });

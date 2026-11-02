@@ -10,6 +10,13 @@
 // headlines. The SQL carries hand-written copies of every number below;
 // tests/migrations/126-blindspot-sibling-veto.test.ts pins them to this file.
 //
+// Candidates are voting-source (outlet/wire) articles, either in a live cluster
+// (126) or unclustered and outside the gate categories politika/son_dakika
+// (148): the clusterer admits only those two categories, so a story the silent
+// side filed under dunya, genel or yasam sits in no cluster at all.
+// tests/migrations/148-blindspot-unclustered-siblings.test.ts pins the 148 copy
+// (the arm, its filters and the bdbf9948 headlines) to this file.
+//
 // Pure: no I/O, no clock, nothing to mock.
 
 import { RISING_FOLD_FROM, RISING_FOLD_TO } from "@/lib/trends/rising-entities";

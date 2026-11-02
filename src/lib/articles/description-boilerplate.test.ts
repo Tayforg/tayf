@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   BOILERPLATE_PHRASES,
   isBoilerplateDescription,
+  TRAILING_CTA_PHRASES,
 } from "./description-boilerplate";
 
 describe("BOILERPLATE_PHRASES", () => {
@@ -18,6 +19,26 @@ describe("BOILERPLATE_PHRASES", () => {
       expect(phrase, phrase).toBe(phrase.toLowerCase());
       expect(phrase, phrase).toBe(phrase.toLocaleLowerCase("tr-TR"));
       expect(phrase.length, phrase).toBeGreaterThan(0);
+    }
+  });
+});
+
+describe("TRAILING_CTA_PHRASES (h22-editorial-2)", () => {
+  it("holds the three sentence-style tails and leaves BOILERPLATE_PHRASES alone", () => {
+    expect([...TRAILING_CTA_PHRASES].sort()).toEqual([
+      "detaylar haberimizde",
+      "işte ayrıntılar",
+      "işte detaylar",
+    ]);
+    expect(BOILERPLATE_PHRASES.size).toBe(8);
+    for (const phrase of TRAILING_CTA_PHRASES) expect(BOILERPLATE_PHRASES.has(phrase), phrase).toBe(false);
+  });
+
+  it("stores every entry tr-TR lower-case and trimmed", () => {
+    for (const phrase of TRAILING_CTA_PHRASES) {
+      expect(phrase, phrase).toBe(phrase.trim());
+      expect(phrase, phrase).toBe(phrase.toLocaleLowerCase("tr-TR"));
+      expect(phrase, phrase).not.toMatch(/\s{2,}/);
     }
   });
 });
@@ -39,6 +60,34 @@ describe("isBoilerplateDescription", () => {
     "Haberin devamı için tıklayın",
   ])("flags %j as boilerplate", (s) => {
     expect(isBoilerplateDescription(s)).toBe(true);
+  });
+
+  it.each([
+    "İşte detaylar...",
+    "İşte ayrıntılar",
+    "İŞTE AYRINTILAR!",
+    "Detaylar haberimizde…",
+    "DETAYLAR HABERİMİZDE",
+    "  işte   detaylar \n",
+  ])("flags the sentence-style tail %j as boilerplate", (s) => {
+    expect(isBoilerplateDescription(s)).toBe(true);
+  });
+
+  it.each([
+    "İşte detaylarıyla yeni düzenleme",
+    "İşte detaylar ve yeni kurallar",
+    "Detaylar haberimizde yer alıyor",
+    "Yeni kurallar: İşte detaylar",
+  ])("does not flag %j (the phrase is not the whole text)", (s) => {
+    expect(isBoilerplateDescription(s)).toBe(false);
+  });
+
+  it("strips a very long trailing punctuation run in linear time", () => {
+    const start = performance.now();
+    expect(isBoilerplateDescription("Read more" + "!".repeat(200_000))).toBe(true);
+    expect(isBoilerplateDescription(".".repeat(200_000) + "a")).toBe(false);
+    expect(isBoilerplateDescription("a" + ".".repeat(200_000) + "b")).toBe(false);
+    expect(performance.now() - start).toBeLessThan(500);
   });
 
   it("flags the Turkish uppercase form (dotted capital İ)", () => {

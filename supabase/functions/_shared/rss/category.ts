@@ -41,13 +41,17 @@
 //   4. Order: politika, the URL section, spor, dunya, ekonomi, teknoloji, yasam,
 //      genel. Politika has two kinds of evidence (classifyBody):
 //        * title hit: POLITIKA_RE (unambiguous names and bodies), POLITIKA_TITLE_RE
-//          (generic office and process words: bakan, seçim, hükümet, İçişleri,
-//          ...), a party office ('genel başkan' / 'il başkan') together with a
-//          party marker, a state senate, and the footballer 'Dervişoğlu' unless
-//          the title is sport. It beats sport.
-//        * text hit: POLITIKA_RE in the DESCRIPTION, a body (belediye / parti /
-//          İBB) together with an enforcement action, a coalition together with
-//          a party. It does NOT beat a sports title (SPOR_RE, a goal, or a
+//          (generic office and process words: bakan, hükümet, İçişleri, ...),
+//          a state election ('seçim' or 'oy' that names no chamber, club or
+//          other non-state electorate, in a title that is not sport), the
+//          presidency ('cumhurbaşkan' unless a sporting-event noun follows),
+//          a party office ('genel başkan' / 'il başkan') together with a party
+//          marker, a state senate, and the footballer 'Dervişoğlu' unless the
+//          title is sport. It beats sport.
+//        * text hit: POLITIKA_DESC_RE in the DESCRIPTION, a body (belediye /
+//          İBB, a Turkish party acronym, a party office with a party word)
+//          together with an enforcement action, a coalition together with a
+//          party. It does NOT beat a sports title (SPOR_RE, a goal, or a
 //          /spor/ URL section).
 //      The generic words are title-only because in a description they decorate
 //      crime, weather, price and sports stories ('Bakan Gürlek', 'İçişleri
@@ -61,6 +65,45 @@
 //   6. Four words whose fold collides with another word (gol / göl,
 //      çin / cin, irak / ırak, TİP / tıp) are matched on the unfolded lowercase
 //      view with letter boundaries.
+//
+// hunt-22 (2026-11-02) replay, read-only: base ec94980 against this module over
+// 16,028 stored rows of 48 h (2026-10-31 10:30Z .. 2026-11-02 10:30Z). The gate
+// (politika | son_dakika) goes from 2,778 rows (17.3%) to 2,738 (17.1%): 0 rows
+// enter, 40 leave, and the other 15,988 rows keep their category (no change
+// inside the gate or outside it). All 40 leavers were labelled by hand and none
+// is political:
+//   * 12 members of the Şanlıurfa Ticaret ve Sanayi Odası (ŞUTSO) election
+//     cluster (a poll worker's heart attack), 5 more chamber elections (Van TSO
+//     x2, Erzincan TSO x2, Gebze Ticaret Odası), 4 Fenerbahçe candidate remarks,
+//     the Galatasaray 'Seçim fırtınası', a federation general assembly
+//     ('oy birliğiyle');
+//   * 5 'Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları' rows and 4 horse-race
+//     rows ('Cumhurbaşkanlığı Koşusu' / 'Kupası');
+//   * 3 'Cadılar Bayramı partisi' brawls (bare 'parti' + 'gözaltı'), the oil
+//     story with the US 'Cumhuriyetçi Parti' and 'İran'a yönelik operasyonlar';
+//   * 'hava muhalefeti' (a power cut), 'Recep Tayyip Erdoğan Millet Bahçesi' (a
+//     Kayseri cycling event), 'şair, yazar ve siyasetçi Yahya Kemal Beyatlı',
+//     'doğru ürün seçimiyle' (a cleaning-paper maker).
+// The first cuts of four rules were measured and changed: the whole-text
+// variant of every electorate word dropped two political rows (see
+// SECIM_TITLE_RE), a blanket `siyaset(?!ci)` in the description dropped five
+// (two political, see POLITIKA_DESC_RE), reading 'Tip' as the party TİP let a
+// North Korean cluster-bomb row IN, and dropping the bare 'parti' without a
+// party-office form dropped a detained party leader (see COMPOUND_PARTY_RE).
+// Review replay (7 days, 71,162 rows, published 2026-10-26 .. 2026-11-02): the
+// gate goes from 13,210 to 13,120 rows (109 leave, 19 enter). The first cut of
+// the same replay had 131 leavers: 22 of them were political (bar elections and
+// the Kanadoğlu investigation, an Israeli election vetoed by 'Tel Aviv
+// Borsası', TİP students, party-leader stories) and are back in. The 19 that
+// enter are the TİP students / Bakan Tekin banner story (17 rows, scattered over
+// spor, yasam and genel at base because the text says "TİP'li") and two EMEP
+// rows. The 109 leavers were read by hand: chamber and club elections, the
+// regatta, horse races, 'hava muhalefeti', Erdoğan venues, Halloween brawls,
+// the oil story, a hurricane death, Yahya Kemal Beyatlı, 'ürün seçimi'.
+// Known residuals: a poll worker's death whose text names no chamber at all
+// (haberturk, the 13th ŞUTSO member), 'İSİG Meclisi' (an NGO, 'meclis'), an AK
+// Parti deputy congratulating Eskişehirspor (the title says 'milletvekili'),
+// and 'siyaset' in a list of local stakeholders (Kızılay Balıkesir).
 //
 // Forward-only: it changes the category of NEW rows. `content_hash` does not
 // depend on the category, and nothing is re-enqueued.
@@ -150,51 +193,89 @@ const SON_DAKIKA_PREFIX_RE =
 // Unambiguous names and bodies, matched in the title AND the description. The
 // generic office and process words (bakan, seçim, hükümet, genel başkan, ...)
 // are NOT here: see POLITIKA_TITLE_RE.
-const POLITIKA_RE = compile(
-  // 'kurtulmus' / 'babacan' are surnames, which take an apostrophe
-  // ("Kurtulmuş'tan"): whole words, so the participle 'kurtulmuştu' is not them.
-  // 'ozdag' is a whole word too ('gozdagi' is a threat); 'pkk' is a token;
-  // 'btp' is the Bağımsız Türkiye Partisi (hunt-21: 162 titles over 30 days
-  // matched it as a word, every one the party, no other expansion).
-  ["oy", "chp", "akp", "mhp", "hdp", "kurtulmus", "babacan", "pkk", "ozdag", "btp"],
-  [
-    "muhalefet", "milletvekil", "siyaset", "anayasa", "meclis", "tbmm",
-    "ak parti", "dem parti", "yeni parti", "iyi parti", "parti genel",
-    // TBMM group deputy chairs. A bare 'baskan vekil' is NOT a stem: clubs and
-    // federations have deputy chairs too ('Galatasaray Sportif A.Ş.
-    // Başkanvekili') and politika runs before spor.
-    "grup baskanvekil", "grup baskan vekil",
-    "ozgur ozel", "imamoglu", "mansur yavas", "kilicdaroglu", "davutoglu",
-    "bakirhan",
-    // The Öcalan / İmralı process (hunt-20). A bare 'imrali' is NOT a stem: it
-    // is also a place and a prison; 'buldan' and 'sancar' only as the full names
-    // ('Buldan' is a town and a cloth, Aziz Sancar a Nobel laureate).
-    "ocalan", "imrali heyet", "pervin buldan", "mithat sancar", "hatimogullari",
-    "terorsuz turkiye", "surec komisyon",
-    // Parties outside the big five (hunt-20 replay over 48 h of rows: 11 rows
-    // hit 'zafer parti', all of them the party; no victory-party collision).
-    // 'İşçi Partisi' is a raw pattern below, because the Korean Workers' Party
-    // is not it. 'Bağımsız Türkiye Partisi' (hunt-21): 161 rows over 30 days
-    // name it in the title or the description, every one the party (BTP).
-    "zafer parti", "saadet parti", "yeniden refah", "deva parti",
-    "gelecek parti", "memleket parti", "buyuk birlik parti",
-    "bagimsiz turkiye parti",
-  ],
-  [
-    // 'Bahcelievler' is a neighbourhood, not the MHP leader
-    "\\bbahceli(?!ev)",
-    // 'Recep Tayyip Erdoğan Stadyumu' / 'Erdoğan Üniversitesi' are venues
-    "\\berdogan(?!\\s+(?:stad|univ))",
-    // 'İşçi Partisi' (the Turkish TİP, Brazil's PT, the British Labour Party),
-    // but not the Korean Workers' Party ('Kore İşçi Partisi', 'Kuzey Kore İşçi
-    // Partisi', 'Kore'nin İşçi Partisi'): the hunt-20 replay's one false hit
-    // was a North Korean warhead test (milliyet, /dunya/) admitted by the
-    // description. Other countries' labour parties stay: they are party news
-    // like the 'arap partil' / 'sol partil' headlines. The lookbehind is
-    // variable-length but linear: its scan is bounded by one run of white space
-    // and runs only where 'işçi parti' is already about to match.
-    "(?<!\\bkore(?:'[a-z]+)?\\s+)\\bisci\\s+parti",
-  ],
+//
+// The tables are shared by two compiled patterns: POLITIKA_RE (the title) and
+// POLITIKA_DESC_RE (the description), which differ in ONE stem. 'siyaset' is a
+// politics word in both ('siyaset kulisleri'), but 'siyasetçi' is also an
+// OCCUPATION, and in a description it decorates a biography ('şair, yazar ve
+// siyasetçi Yahya Kemal Beyatlı'). The description pattern therefore skips a
+// 'siyasetçi' that follows 've' (an occupation list); the title keeps every
+// form (hunt-22). A blanket `siyaset(?!ci)` in the description moved five rows
+// out of the 48 h replay, and two of them were political (a Serbian student
+// list that won the parliamentary election, a column on harassment claims
+// against politicians), so only the biography shape is cut.
+//
+// 'kurtulmus' / 'babacan' are surnames, which take an apostrophe
+// ("Kurtulmuş'tan"): whole words, so the participle 'kurtulmuştu' is not them.
+// 'ozdag' is a whole word too ('gozdagi' is a threat); 'pkk' is a token;
+// 'btp' is the Bağımsız Türkiye Partisi (hunt-21: 162 titles over 30 days
+// matched it as a word, every one the party, no other expansion).
+//
+// 'oy' (the vote) is NOT in the table: it is VOTE_RE, below, because a vote in
+// a chamber or club election ('oy verme işlemi sırasında' in the Şanlıurfa
+// Ticaret ve Sanayi Odası cluster) is no more politics than the 'seçim' it
+// belongs to.
+const POLITIKA_WHOLE = [
+  "chp", "akp", "mhp", "hdp", "kurtulmus", "babacan", "pkk", "ozdag", "btp",
+];
+const POLITIKA_STEMS = [
+  // 'muhalefet' is a raw pattern below: 'hava muhalefeti' is the weather
+  "milletvekil", "anayasa", "meclis", "tbmm",
+  "ak parti", "dem parti", "yeni parti", "iyi parti", "parti genel",
+  // TBMM group deputy chairs. A bare 'baskan vekil' is NOT a stem: clubs and
+  // federations have deputy chairs too ('Galatasaray Sportif A.Ş.
+  // Başkanvekili') and politika runs before spor.
+  "grup baskanvekil", "grup baskan vekil",
+  "ozgur ozel", "imamoglu", "mansur yavas", "kilicdaroglu", "davutoglu",
+  "bakirhan",
+  // The Öcalan / İmralı process (hunt-20). A bare 'imrali' is NOT a stem: it
+  // is also a place and a prison; 'buldan' and 'sancar' only as the full names
+  // ('Buldan' is a town and a cloth, Aziz Sancar a Nobel laureate).
+  "ocalan", "imrali heyet", "pervin buldan", "mithat sancar", "hatimogullari",
+  "terorsuz turkiye", "surec komisyon",
+  // Parties outside the big five (hunt-20 replay over 48 h of rows: 11 rows
+  // hit 'zafer parti', all of them the party; no victory-party collision).
+  // 'İşçi Partisi' is a raw pattern below, because the Korean Workers' Party
+  // is not it. 'Bağımsız Türkiye Partisi' (hunt-21): 161 rows over 30 days
+  // name it in the title or the description, every one the party (BTP).
+  "zafer parti", "saadet parti", "yeniden refah", "deva parti",
+  "gelecek parti", "memleket parti", "buyuk birlik parti",
+  "bagimsiz turkiye parti",
+];
+const POLITIKA_RAW = [
+  // 'Bahcelievler' is a neighbourhood, not the MHP leader
+  "\\bbahceli(?!ev)",
+  // 'Recep Tayyip Erdoğan Stadyumu' / 'Erdoğan Üniversitesi' are venues, and so
+  // is every other place that carries the president's name (hunt-22: 'Recep
+  // Tayyip Erdoğan Millet Bahçesi' admitted a Kayseri cycling event). Only the
+  // NAMED-venue forms are listed: 'Erdoğan camiden çıkışta', 'Erdoğan kongrede'
+  // and 'Erdoğan parkta' are still the president ('camii' is the mosque,
+  // 'parki' the possessive of 'park'). Every alternative starts with a letter
+  // and the optional group sits between two literals, so the lookahead is
+  // linear.
+  "\\berdogan(?!\\s+(?:stad|univ|millet\\s+bahce|parki|bulvari|caddesi|kongre\\s+(?:ve\\s+kultur\\s+)?merkez|kultur\\s+merkez|hastanesi|camii|kulliyesi|spor\\s+salon|lisesi))",
+  // 'hava muhalefeti' (adverse weather, the excuse of a power cut) is not the
+  // opposition. The same lookbehind shape as the 'kore' guard below: variable
+  // length but linear, its scan is bounded by one run of white space.
+  "(?<!\\bhava\\s+)\\bmuhalefet",
+  // 'İşçi Partisi' (the Turkish TİP, Brazil's PT, the British Labour Party),
+  // but not the Korean Workers' Party ('Kore İşçi Partisi', 'Kuzey Kore İşçi
+  // Partisi', 'Kore'nin İşçi Partisi'): the hunt-20 replay's one false hit
+  // was a North Korean warhead test (milliyet, /dunya/) admitted by the
+  // description. Other countries' labour parties stay: they are party news
+  // like the 'arap partil' / 'sol partil' headlines. The lookbehind is
+  // variable-length but linear: its scan is bounded by one run of white space
+  // and runs only where 'işçi parti' is already about to match.
+  "(?<!\\bkore(?:'[a-z]+)?\\s+)\\bisci\\s+parti",
+];
+const POLITIKA_RE = compile(POLITIKA_WHOLE, [...POLITIKA_STEMS, "siyaset"], POLITIKA_RAW);
+const POLITIKA_DESC_RE = compile(
+  POLITIKA_WHOLE,
+  POLITIKA_STEMS,
+  // 'siyaset' and every form of 'siyasetçi' except the occupation in a list of
+  // occupations ('şair, yazar ve siyasetçi Yahya Kemal Beyatlı'); the lookbehind
+  // is bounded by one run of white space, like the 'hava' guard.
+  [...POLITIKA_RAW, "\\bsiyaset(?!ci)", "(?<!\\bve\\s+)\\bsiyasetci"],
 );
 
 // Words that make a HEADLINE politics but only decorate a description, so they
@@ -224,11 +305,67 @@ const POLITIKA_TITLE_RE = compile(
   [
     "siyasi", "siyasal", "ibb baskan", "parlamento", "referandum",
     "arap partil", "sol partil",
-    "bakan", "basbakan", "cumhurbaskan", "secim", "hukumet",
+    "bakan", "basbakan", "hukumet",
     "belediye baskan", "icisleri", "disisleri", "kabine",
     "sarigul",
   ],
 );
+
+// 'secim' and 'cumhurbaskan' left the list above in hunt-22 because each is
+// also the vocabulary of a non-political story, and a title hit beats sport:
+//   * 'secim' is a CLUB board election ('Galatasaray bir anda karıştı! Seçim
+//     fırtınası esiyor'), a CHAMBER election (the Şanlıurfa Ticaret ve Sanayi
+//     Odası cluster: 'ŞUTSO seçimlerinde kalp krizi geçiren sandık görevlisi',
+//     13 rows) or a CHOICE ('doğru ürün seçimiyle'). SECIM_TITLE_RE counts only
+//     when the title is not sport, names no non-state electorate
+//     (NON_STATE_ELECTORATE_RE) and is not the choice sense (CHOICE_SECIM_RE).
+//     Three of the 13 chamber rows name the chamber only in the description
+//     ('Seçimde acı olay! Sandık görevlisi hayatını kaybetti'), so the
+//     UNAMBIGUOUS organisations (ORG_ELECTORATE_RE: oda, TSO, TOBB, kulüp) are
+//     read in the whole text; a Fenerbahçe candidate's
+//     election remark names the club only in the description. The other words
+//     are read in the title alone: the whole-text variant of all of them
+//     dropped two political rows of the 48 h replay (a Bulgarian presidential
+//     vote cast 'dernekte' in Sakarya, a Brazilian election essay with
+//     'sendikal örgütlenme').
+//     See secimInTitle and voteIn.
+//   * 'cumhurbaskan' is the name of a regatta ('Cumhurbaşkanlığı 7.
+//     Uluslararası Yat Yarışları'), a horse race, a cycling tour and a cup. It
+//     counts unless a sporting-event noun FOLLOWS it in the title
+//     (SPORT_EVENT_AFTER_RE): a noun before it ('Kupa töreninde Cumhurbaşkanı
+//     konuştu') does not drop it, and 'cumhurbaşkanlığı yarışı' (singular, an
+//     election race) and 'yatırım' are not in the list. See cumhurbaskanInTitle.
+const SECIM_TITLE_RE = /\bsecim/;
+// A chamber (oda / odasi / odalar, TSO and its prefixed forms ŞUTSO / İTSO,
+// TOBB) or a club (kulüp / kulübü). Word starts only: 'odatv' and 'odak' are not
+// them; the prefix of 'tso' is at most five letters, so the scan is bounded.
+//
+// NOT a bar (baro) and NOT a stock exchange (borsa). The first cut listed both
+// and a 7-day replay (71,162 rows) showed what they cost: bar elections are
+// contested along political lines (the İstanbul and İzmir Bar elections won by
+// nationalist-secularist slates; the prosecutor's investigation of a candidate
+// over his speech at the İstanbul Bar general assembly; a column on the Brazil,
+// Serbia and İstanbul Bar elections), and 'Tel Aviv Borsası' alone vetoed an
+// Israeli general election story. A stock exchange is not an electorate at all
+// (TOBB already covers the commodity exchanges that hold chamber elections).
+const ORG_ELECTORATE_RE =
+  /\boda(?:s|lar|\b)|\b[a-z]{0,5}tso\b|\btobb\b|\bkulub|\bkulup/;
+// A federation (but not 'Rusya Federasyonu', the state), an association, a
+// union, a student council.
+const OTHER_ELECTORATE_RE =
+  /(?<!\brusya\s+)\bfederasyon|\bdernek|\bsendika|\bogrenci\s+meclis/;
+const NON_STATE_ELECTORATE_RE = new RegExp(
+  `${ORG_ELECTORATE_RE.source}|${OTHER_ELECTORATE_RE.source}`,
+);
+// 'doğru ürün seçimiyle', 'renk seçimi', 'okul seçimi'
+const CHOICE_SECIM_RE = /\b(?:urun|renk|malzeme|kiyafet|menu|meslek|okul)\s+secim/;
+// 'oy' as a whole word ('oy kullandı', 'oy sayımı'): politics unless the text
+// names a non-state electorate. A party, a leader or the Meclis in the same
+// text admits through POLITIKA_RE on its own.
+const VOTE_RE = /\boy\b/;
+const CUMHURBASKAN_TITLE_RE = /\bcumhurbaskan/;
+const SPORT_EVENT_AFTER_RE =
+  /\b(?:yat\s+yaris|yelken|kupa|turnuva|bisiklet|maraton|ralli|kosusu|golf|satranc|atletizm)/;
 
 // 'genel başkan' / 'il başkan' are the office of every association, federation,
 // chamber and union ('Tüketici Hakları Derneği Genel Başkanı' was politika
@@ -285,7 +422,58 @@ const UNIVERSITY_RE = /\b(?:universite|rektor|fakulte|yokak)/;
 // 'bakanlik' is NOT a body (hunt-20): a ministry together with an operation is
 // crime news ('Bakan Gürlek' announcing a cancer-drug raid). A ministry in the
 // HEADLINE is still politics through POLITIKA_TITLE_RE.
-const COMPOUND_BODY_RE = /\b(?:belediye|parti)|\bibb\b/;
+const COMPOUND_BODY_RE = /\bbelediye|\bibb\b/;
+// A party counts as a body when the text NAMES it, not when it merely says
+// 'parti'. A bare 'parti' no longer is (hunt-22: the US 'Cumhuriyetçi Parti' next
+// to 'ABD ve İsrail'in İran'a yönelik operasyonları' in an oil-price story, and
+// three 'Cadılar Bayramı partisi' brawls with 'gözaltı'). What does count:
+//   * the named parties and acronyms that never say 'parti' (the named ones are
+//     POLITIKA_RE hits already), 'DP' but not 'DP World' (a port operator);
+//   * a party with its organisation noun after it ('Parti yöneticileri',
+//     'Raam Partisi liderlerinin', 'Emek Partisi üyelerine'), or 'partili': an
+//     event party has none ('Cadılar Bayramı partisi', 'doğum günü partisi');
+//   * 'parti bina' (the office of a domestic party, two hunt-19 tests pin it);
+//   * a party office in the text together with a party word ('Cumhuriyetçi
+//     Vatanseverler Partisi Genel Başkanı Serkan Öz gözaltına alındı':
+//     PARTY_OFFICE_TITLE_RE and PARTY_MARKER_RE, also read on the whole text).
+// TİP is read separately (TIP_MEMBER_RE): 'tip' (type) is a word, and 'Standart
+// Tip 2 misket bombası ... operasyonel' (a North Korean test) entered the gate
+// through it in the 48 h replay.
+//
+// The first cut of hunt-22 kept only the acronyms and dropped, in the 7-day
+// replay, the TİP students jailed over a banner against the education minister
+// (their text says "TİP'li" and 'Parti yöneticileri'), an Israeli Arab-party
+// leaders story and the Indian CPI(M) voter-roll story; hand probes dropped
+// 'Emek Partisi üyelerine operasyon', 'SOL Parti üyelerine gözaltı' and 'TKP
+// üyesi 5 kişi gözaltına alındı'. Those are the opposition stories the
+// blindspot feature exists for.
+const COMPOUND_PARTY_RE = new RegExp(
+  [
+    // Turkish parties that never say 'parti' (TKP joins the acronyms of
+    // PARTY_MARKER_RE: 'TKP üyesi 5 kişi gözaltına alındı').
+    String.raw`\b(?:bbp|yrp|btp|dsp|emep|hkp|ctp|ubp|tkp)\b`,
+    String.raw`\bdp\b(?!\s+world)`,
+    String.raw`\bhuda\s+par\b`,
+    // Named parties outside the tables: 'Emek Partisi', 'SOL Parti', and a
+    // communist party (the Indian CPI(M) is 'Hindistan Komünist Partisi').
+    String.raw`\b(?:emek|sol|komunist)\s+parti`,
+    String.raw`\bparti\s+bina`,
+    // A party named by its ORGANISATION, whatever its name: members, officials,
+    // leaders, spokespeople, deputies, provincial chairs ('Parti yöneticileri',
+    // 'Raam Partisi liderlerinin', 'partisinin yöneticileri'), or 'partili' (a
+    // party member). An event party never has these nouns after it ('Cadılar
+    // Bayramı partisi', 'uyuşturucu partisi', 'doğum günü partisi'). Each start
+    // is a word start and the \w* / \s+ runs are disjoint, so the scan is
+    // linear.
+    String.raw`\bparti\w*\s+(?:uye|yonetici|lider|temsilci|sozcu|milletvekil|mensup|il\s+baskan|ilce\s+baskan)`,
+    String.raw`\bpartili`,
+  ].join("|"),
+);
+// 'TİP' is read on the unfolded view (it folds to the same 'tip' as 'tıp',
+// medicine, and 'Standart Tip 2' is a missile warhead), so only its member
+// forms count: "TİP'li", 'TİP üyesi', 'TİP il başkanı'.
+const TIP_MEMBER_RE =
+  /(?<!\p{L})tip(?:['’ʼ]l[iı](?!\p{L})|\s+(?:[üu]ye|il\s+başkan|ilçe|milletvekil|gençlik))/u;
 const COMPOUND_ACTION_RE = /\b(?:sorusturma|gozalti|tutukla|operasyon)/;
 
 // 'koalisyon' alone is the Saudi-led 'Arap Koalisyonu' war ticker (9 of the 11
@@ -398,6 +586,36 @@ export function detectCategoryFromUrl(url: string): NewsCategory | null {
 // Classifier
 // ---------------------------------------------------------------------------
 
+// A non-state electorate: any of the words in the title, or a chamber / club
+// anywhere in the text (see the note above SECIM_TITLE_RE).
+function nonStateElectorate(titleHay: string, hay: string): boolean {
+  return NON_STATE_ELECTORATE_RE.test(titleHay) || ORG_ELECTORATE_RE.test(hay);
+}
+
+// 'oy' in the given text is a state vote unless the text names a non-state
+// electorate (see VOTE_RE).
+function voteIn(text: string, titleHay: string, hay: string): boolean {
+  return VOTE_RE.test(text) && !nonStateElectorate(titleHay, hay);
+}
+
+// 'seçim' in the title is a state election unless the title is sport, the text
+// names a non-state electorate, or it is the choice sense (see SECIM_TITLE_RE).
+function secimInTitle(titleHay: string, hay: string, titleSport: boolean): boolean {
+  return (
+    !titleSport &&
+    SECIM_TITLE_RE.test(titleHay) &&
+    !nonStateElectorate(titleHay, hay) &&
+    !CHOICE_SECIM_RE.test(titleHay)
+  );
+}
+
+// 'cumhurbaşkan' in the title is the presidency unless a sporting-event noun
+// follows it in the title (see CUMHURBASKAN_TITLE_RE).
+function cumhurbaskanInTitle(titleHay: string): boolean {
+  const m = CUMHURBASKAN_TITLE_RE.exec(titleHay);
+  return m !== null && !SPORT_EVENT_AFTER_RE.test(titleHay.slice(m.index + m[0].length));
+}
+
 // The chain after the breaking-news prefix: politika, the URL section, spor,
 // dunya, ekonomi, teknoloji, yasam, genel. `titleLower` / `descLower` are the
 // unfolded lowercase views (see lowerView).
@@ -420,13 +638,21 @@ function classifyBody(
   const titleHit =
     POLITIKA_RE.test(titleHay) ||
     POLITIKA_TITLE_RE.test(titleHay) ||
+    voteIn(titleHay, titleHay, hay) ||
+    secimInTitle(titleHay, hay, titleSport) ||
+    cumhurbaskanInTitle(titleHay) ||
     (PARTY_OFFICE_TITLE_RE.test(titleHay) &&
       (PARTY_MARKER_RE.test(hay) || TIP_ACRONYM_RE.test(lower))) ||
     (SENATO_RE.test(titleHay) && !UNIVERSITY_RE.test(hay)) ||
     (!titleSport && TITLE_UNLESS_SPORT_RE.test(titleHay));
   const textHit =
-    POLITIKA_RE.test(descHay) ||
-    (COMPOUND_BODY_RE.test(hay) && COMPOUND_ACTION_RE.test(hay)) ||
+    POLITIKA_DESC_RE.test(descHay) ||
+    voteIn(descHay, titleHay, hay) ||
+    ((COMPOUND_BODY_RE.test(hay) ||
+      COMPOUND_PARTY_RE.test(hay) ||
+      TIP_MEMBER_RE.test(lower) ||
+      (PARTY_OFFICE_TITLE_RE.test(hay) && PARTY_MARKER_RE.test(hay))) &&
+      COMPOUND_ACTION_RE.test(hay)) ||
     (COALITION_RE.test(hay) && PARTY_RE.test(hay));
   if (titleHit || (textHit && !titleSport)) return "politika";
 

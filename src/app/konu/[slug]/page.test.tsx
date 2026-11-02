@@ -558,6 +558,52 @@ describe("/konu/[slug] structured data", () => {
     expect(items[1]?.item.endsWith("/konu")).toBe(true);
   });
 
+  // Page N of a hub is its own canonical URL (generateMetadata), so its
+  // structured data must describe page N, not page 1.
+  it("page 2: the CollectionPage names the paged url and the breadcrumb leaf is 'Dünya — Sayfa 2'", async () => {
+    mocks.result = { bundles: [bundle("c31"), bundle("c32")], hasMore: false, page: 2 };
+
+    const tree = await render(2);
+    const payload = ldJsonPayload(ldJsonScripts(tree)[0]) as Array<{
+      "@type": string;
+      name?: string;
+      url?: string;
+      mainEntity?: { itemListElement?: Array<{ position: number }> };
+      itemListElement?: Array<{ name: string; item: string; position: number }>;
+    }>;
+
+    expect(payload[0]?.["@type"]).toBe("CollectionPage");
+    expect(String(payload[0]?.url).endsWith("/konu/dunya?sayfa=2")).toBe(true);
+    expect(payload[0]?.name).toBe("Dünya haberleri — Sayfa 2");
+    expect(payload[0]?.mainEntity?.itemListElement?.map((i) => i.position)).toEqual([31, 32]);
+
+    const items = payload[1]?.itemListElement ?? [];
+    expect(items.map((i) => i.name)).toEqual(["Anasayfa", "Konular", "Dünya — Sayfa 2"]);
+    expect(items.map((i) => i.position)).toEqual([1, 2, 3]);
+    expect(items[2]?.item.endsWith("/konu/dunya?sayfa=2")).toBe(true);
+    // The parent crumbs are untouched.
+    expect(items[1]?.item.endsWith("/konu")).toBe(true);
+  });
+
+  it("page 1 explicitly requested as ?sayfa=1 is still the plain hub", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 1 };
+
+    const tree = await TopicHubPage({
+      params: Promise.resolve({ slug: "dunya" }),
+      searchParams: Promise.resolve({ sayfa: "1" }),
+    });
+    const payload = ldJsonPayload(ldJsonScripts(tree)[0]) as Array<{
+      name?: string;
+      url?: string;
+      itemListElement?: Array<{ name: string; item: string }>;
+    }>;
+
+    expect(String(payload[0]?.url).endsWith("/konu/dunya")).toBe(true);
+    expect(payload[0]?.name).toBe("Dünya haberleri");
+    expect(payload[1]?.itemListElement?.[2]).toMatchObject({ name: "Dünya" });
+    expect(payload[1]?.itemListElement?.[2]?.item.endsWith("/konu/dunya")).toBe(true);
+  });
+
   it.each([
     ["no bundles on page 1", { bundles: [], hasMore: false, page: 1 }],
     ["no bundles past the last page", { bundles: [], hasMore: false, page: 3 }],
