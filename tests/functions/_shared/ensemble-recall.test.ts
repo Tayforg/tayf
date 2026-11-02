@@ -5,11 +5,14 @@ import {
   isMatch,
   score,
 } from "../../../supabase/functions/_shared/cluster/ensemble.ts";
+import { extractEntities } from "../../../supabase/functions/_shared/cluster/entities.ts";
 import {
+  fingerprint,
   headlineTokens,
   type HeadlineTokens,
 } from "../../../supabase/functions/_shared/cluster/fingerprint.ts";
 import {
+  ENTITY_SPARSE_TEXT_FACTOR,
   HEADLINE_CONTAIN_BLOCK_PREFIXES,
   HEADLINE_CONTAIN_MIN,
   HEADLINE_CONTAIN_MIN_SIZE_RATIO,
@@ -18,6 +21,7 @@ import {
   HEADLINE_LANE_MIN_JACCARD,
   HEADLINE_TITLE_MAX_CHARS,
   MATCH_THRESHOLD,
+  TFIDF_WEIGHT,
   TIME_WINDOW_HOURS,
 } from "../../../supabase/functions/_shared/cluster/constants.ts";
 
@@ -907,4 +911,167 @@ describe("headline lane: containment", () => {
       expect(oneSided.components.headlineKind).toBeNull();
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// h19-recall-1: entity-sparse same-event pairs (hunt 19, 2026-11-02).
+//
+// A pair where either article carries no whitelist entity used to be scored
+// 0.7*tfidf + 0.3*0 -- at most 0.70 of its text similarity -- so a paraphrase
+// needed tfidf >= 0.571 before decay to reach MATCH_THRESHOLD. Such pairs are
+// the main source of twin clusters (16.7% of live clusters of the 24 h replay).
+// With either side entity-less the pair is now scored on text alone, at
+// tfidf * ENTITY_SPARSE_TEXT_FACTOR.
+//
+// Fixture provenance: the four rows are read-only prod rows (title, published_at,
+// source slug) of the hunt-19 24 h replay (2026-11-02). Each description is the
+// output of the CURRENT cleanDescription() at the time of writing, pasted as a
+// literal (identical to the stored text for all four rows); this file must not
+// import description-clean, which a parallel wave edits. tfidf is the replay's
+// own TfidfIndex.cosine over the 1,550-article 24 h corpus, passed as the
+// override; entities are the real extractEntities(title + ' ' + description).
+// Hours come from published_at; the slugs and titles go to the scorer as the
+// consumer passes them.
+// ---------------------------------------------------------------------------
+
+interface SparseSide {
+  title: string;
+  description: string;
+  slug: string;
+  publishedAt: string;
+}
+
+interface SparseFixture {
+  label: string;
+  aId: string;
+  bId: string;
+  a: SparseSide;
+  b: SparseSide;
+  tfidf: number;
+  replayScoreBefore: number;
+}
+
+const SPARSE_FIXTURES: readonly SparseFixture[] = [
+  {
+    label: "Bolivya El Nino: yenicag vs evrensel",
+    // Twin clusters d957ab67 / d40993ab, created 9 min apart.
+    aId: "0d2d8da3",
+    bId: "38c66e27",
+    a: {
+      title: "Bolivya'da El Nino kaynaklı kuraklık ve sel riskine karşı ulusal acil durum kararnamesi imzalandı",
+      description: "Bolivya Devlet Başkanı Rodrigo Paz, El Nino hava olayının ülkede şiddetli kuraklığa ve sellere yol açabileceği yönündeki tahminler üzerine ulusal acil durum kararnamesini imzaladığını açıkladı.",
+      slug: "yenicag",
+      publishedAt: "2026-11-01T10:36:04Z",
+    },
+    b: {
+      title: "Bolivya'da El Nino nedeniyle ulusal acil durum ilan edildi",
+      description: "Bolivya Devlet Başkanı Rodrigo Paz, El Nino iklim olayının yol açtığı kuraklıkla mücadele etmek ve gelecek aylarda yaşanabilecek olası sel baskınlarına karşı hazırlık yapmak amacıyla ülke genelinde ulusal acil durum ilan eden kararnameyi imzaladı.",
+      slug: "evrensel",
+      publishedAt: "2026-11-01T10:43:00Z",
+    },
+    // Replay tf-idf (artpairs.json comp.tfidf), passed as the override.
+    tfidf: 0.568691843667328,
+    // Replay score before the change (artpairs.json score).
+    replayScoreBefore: 0.3971259394972457,
+  },
+  {
+    label: "Trakya cifte vatandaslar: haberler-com vs anadolu-ajansi",
+    // Twin clusters 75bf668a / d6f5ba87; haberler-com carries the 0.85 source penalty.
+    aId: "2d95f57c",
+    bId: "db167c9c",
+    a: {
+      title: "Trakya'daki çifte vatandaşlar Bulgaristan seçiminin 2. turunda 15 sandıkta oy veriyor",
+      description: "Bulgaristan'da cumhurbaşkanı ve cumhurbaşkanı yardımcısı seçiminin ikinci turunda Edirne, Kırklareli ve Tekirdağ'daki çifte vatandaşlar oy kullanmaya başladı. Seçim için 15'i Trakya'da olmak üzere Türkiye'de 78 sandık kuruldu; Edirne'de oy verme işlemi Başkonsoloslukta sürüyor.",
+      slug: "haberler-com",
+      publishedAt: "2026-11-01T06:11:37Z",
+    },
+    b: {
+      title: "Trakya'daki çifte vatandaşlar Bulgaristan'daki cumhurbaşkanı seçiminin ikinci turu için sandık başına gitti",
+      description: "Edirne, Kırklareli ve Tekirdağ'da yaşayan çifte vatandaşlar, Bulgaristan'daki cumhurbaşkanı ve cumhurbaşkanı yardımcısı seçiminin ikinci turu için sandık başına gitti.",
+      slug: "anadolu-ajansi",
+      publishedAt: "2026-11-01T06:14:11Z",
+    },
+    // Replay tf-idf (artpairs.json comp.tfidf), passed as the override.
+    tfidf: 0.6579567037103748,
+    // Replay score before the change (artpairs.json score).
+    replayScoreBefore: 0.3911353465041951,
+  },
+];
+
+// Same clamp as the scorer's clip01 (non-finite -> 0), written out here so the
+// expected value is an independent computation.
+function clip01Local(x: number): number {
+  if (!Number.isFinite(x)) return 0;
+  return Math.min(1, Math.max(0, x));
+}
+
+function scoreSparseFixture(f: SparseFixture) {
+  const entitiesA = extractEntities(`${f.a.title} ${f.a.description}`);
+  const entitiesB = extractEntities(`${f.b.title} ${f.b.description}`);
+  const hours = Math.abs(Date.parse(f.a.publishedAt) - Date.parse(f.b.publishedAt)) / 3_600_000;
+  const result = score(
+    fingerprint(f.a.title, f.a.description),
+    fingerprint(f.b.title, f.b.description),
+    entitiesA,
+    entitiesB,
+    f.tfidf,
+    hours,
+    { aSourceSlug: f.a.slug, bSourceSlug: f.b.slug, aTitle: f.a.title, bTitle: f.b.title },
+  );
+  return { entitiesA, entitiesB, hours, result };
+}
+
+describe("h19-recall-1 entity-sparse same-event pairs", () => {
+  it("exposes the text factor at 0.90", () => {
+    expect(ENTITY_SPARSE_TEXT_FACTOR).toBe(0.9);
+  });
+
+  for (const f of SPARSE_FIXTURES) {
+    describe(f.label, () => {
+      it("has one side without any whitelist entity (the fixture is entity-sparse)", () => {
+        const { entitiesA, entitiesB } = scoreSparseFixture(f);
+        // Observed at write time: Bolivya [] / [] (the stored 'gelecek' of the
+        // evrensel row is a homograph the h12 entity fix no longer emits),
+        // Trakya ['secim', 'turkiye'] / [].
+        expect(Math.min(entitiesA.length, entitiesB.length)).toBe(0);
+      });
+
+      it("scores at or above MATCH_THRESHOLD", () => {
+        const { result } = scoreSparseFixture(f);
+        expect(result.score).toBeGreaterThanOrEqual(MATCH_THRESHOLD);
+        expect(isMatch(result)).toBe(true);
+        // Neither veto nor the headline lane carries the pair: the text does.
+        expect(result.components.headlineLane).toBe(false);
+        expect(result.components.subjectVeto).toBe(false);
+        expect(result.components.incidentVeto).toBe(false);
+        expect(result.components.raw).toBe(result.components.primary);
+      });
+
+      it("uses the text-only primary, clip01(tfidf * ENTITY_SPARSE_TEXT_FACTOR)", () => {
+        const { result } = scoreSparseFixture(f);
+        expect(result.components.tfidfScore).toBe(f.tfidf);
+        expect(result.components.entityRatio).toBe(0);
+        expect(result.components.primary).toBe(clip01Local(f.tfidf * ENTITY_SPARSE_TEXT_FACTOR));
+      });
+
+      it("fell short before the change: old primary x timeDecay x sourcePenalty < MATCH_THRESHOLD", () => {
+        const { result } = scoreSparseFixture(f);
+        const c = result.components;
+        const oldPrimary = TFIDF_WEIGHT * f.tfidf;
+        expect(oldPrimary * c.timeDecay * c.sourcePenalty).toBeLessThan(MATCH_THRESHOLD);
+        // The old end-to-end score (MinHash lane included) reproduces the
+        // replay's recorded value, so the fixture really is the pair that missed.
+        const oldScore = Math.max(c.jaccardScore, oldPrimary) * c.timeDecay * c.sourcePenalty;
+        expect(oldScore).toBeCloseTo(f.replayScoreBefore, 12);
+        expect(oldScore).toBeLessThan(MATCH_THRESHOLD);
+      });
+
+      it("is symmetric in the two sides", () => {
+        const { result } = scoreSparseFixture(f);
+        const swapped = scoreSparseFixture({ ...f, a: f.b, b: f.a });
+        expect(swapped.result.score).toBe(result.score);
+        expect(swapped.result.components.primary).toBe(result.components.primary);
+      });
+    });
+  }
 });

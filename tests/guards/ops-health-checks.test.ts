@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136).
+// 115, 119, 122, 136, 145).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -23,7 +23,10 @@ import { fileURLToPath } from "node:url";
 // 136 (h12-ops-1) appended rows 15 (`cron_route_failures_30m`, the app-side
 // outcomes of the Vercel cron routes in public.ops_cron_route_runs) and 16
 // (`db_size_mb`, pg_database_size against public.ops_db_size_limits()): the
-// newest version carries them in that order, after ingest_gaps, as the LAST rows.
+// newest version carries them in that order, after ingest_gaps.
+// 145 (h19-security-1) appended row 17 (`anon_surface`, a runtime check of what anon and
+// authenticated can do, read from the catalogue; tests/guards/anon-surface.test.ts only reads
+// migration text): the newest version carries it as the LAST row, after db_size_mb.
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -36,7 +39,8 @@ const MIGRATIONS_DIR = resolve(here, "..", "..", "supabase", "migrations");
 const NEWEST_CHECK = "sources_newly_dark";
 const GAPS_CHECK = "ingest_gaps";
 const ROUTE_CHECK = "cron_route_failures_30m";
-const LAST_CHECK = "db_size_mb";
+const SIZE_CHECK = "db_size_mb";
+const LAST_CHECK = "anon_surface";
 
 function stripSqlComments(sql: string): string {
   return sql.replace(/--[^\n]*/g, "");
@@ -78,10 +82,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(9);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(10);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -161,13 +165,14 @@ describe("ops_health_report(): the newest version", () => {
     expect(after).toMatch(/\|\|\s*v\.reason/);
   });
 
-  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${LAST_CHECK} (migration 136) in that order, ${LAST_CHECK} LAST`, () => {
-    expect(newest.num).toBeGreaterThanOrEqual(136);
-    for (const name of [GAPS_CHECK, ROUTE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
+  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136) and ${LAST_CHECK} (migration 145) in that order, ${LAST_CHECK} LAST`, () => {
+    expect(newest.num).toBeGreaterThanOrEqual(145);
+    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
     expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
     expect(newest.names.indexOf(GAPS_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
     expect(newest.names.indexOf(ROUTE_CHECK)).toBeGreaterThan(newest.names.indexOf(GAPS_CHECK));
-    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(ROUTE_CHECK));
+    expect(newest.names.indexOf(SIZE_CHECK)).toBeGreaterThan(newest.names.indexOf(ROUTE_CHECK));
+    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(SIZE_CHECK));
   });
 
   /** The text of one check: from its `check_name :=` up to the next one (or the end of the body). */
@@ -256,11 +261,29 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("db_size_mb reads pg_database_size against public.ops_db_size_limits() and can fail", () => {
-    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    const seg = slice(SIZE_CHECK).replace(/\s+/g, " ");
     expect(seg).toContain("pg_database_size");
     expect(seg).toContain("public.ops_db_size_limits()");
     expect(seg).toMatch(/then 'fail'/i);
     expect(seg).toMatch(/then 'warn'/i);
+  });
+
+  it("anon_surface reads the catalogue for anon/authenticated privileges and can fail (a dashboard grant must page), warn and skip", () => {
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    for (const fn of ["has_table_privilege", "has_sequence_privilege", "has_function_privilege", "aclexplode"]) {
+      expect(seg, fn).toContain(fn);
+    }
+    expect(seg).toContain("to_regrole('anon')");
+    expect(seg).toContain("to_regrole('authenticated')");
+    expect(seg).toMatch(/status\s*:=\s*case when v_n \+ v_total >= 1 then 'fail'/i);
+    expect(seg).toMatch(/then 'warn'/i);
+    expect(seg).toMatch(/status\s*:=\s*'skip'/i);
+    // it only reads: no write keyword outside the privilege-name literals
+    const outsideLiterals = seg
+      .split("'")
+      .filter((_, i) => i % 2 === 0)
+      .join(" ");
+    expect(outsideLiterals).not.toMatch(/\b(insert|update|delete|truncate)\b/i);
   });
 
   it("revokes from public, anon and authenticated, and grants execute only to service_role", () => {

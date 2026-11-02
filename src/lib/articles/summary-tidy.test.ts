@@ -289,3 +289,239 @@ describe("tidySummaryText", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// h19-ingest-2 (hunt 19, 2026-11-02): Diken and Serbestiyet feed wrappers.
+//
+// Diken ships "<title> dd.mm.yyyy Diken<body>\nThe post <title> appeared first
+// on #site_linkat dd.mm.yyyy ." and Serbestiyet ships "<body>\n<title> yazısı
+// ilk önce Serbestiyet adresinde yayınlanmıştır.". Both were shown as the story
+// summary. tidySummaryText strips them at read time (step 1b, the shared
+// stripFeedWrappers); the stored description is untouched.
+//
+// The fixtures below are real rows (read-only SELECT on 2026-11-02): a3be851f
+// and dab0eb01 (Diken), a6a2f0bd and 9cab88ae (Serbestiyet).
+// ---------------------------------------------------------------------------
+
+const DIKEN_A3BE =
+  "ABD'de özel bir jet otoyola düştü 02.11.2026 DikenABD'nin Florida eyaletinde dokuz kişiyi taşıyan özel jet otoyola düştü.\nThe post ABD'de özel bir jet otoyola düştü appeared first on #site_linkat 02.11.2026 .";
+const DIKEN_A3BE_BODY = "ABD'nin Florida eyaletinde dokuz kişiyi taşıyan özel jet otoyola düştü.";
+
+const DIKEN_DAB0 =
+  "Üç il için şiddetli yağış uyarısı 31.10.2026 Dikenİzmir, Aydın ve Muğla'da şiddetli yağış bekleniyor.\nThe post Üç il için şiddetli yağış uyarısı appeared first on #site_linkat 31.10.2026 .";
+const DIKEN_DAB0_BODY = "İzmir, Aydın ve Muğla'da şiddetli yağış bekleniyor.";
+
+// The footer sits on its own line, after a trailing blank on the body line.
+const SERBESTIYET_A6A2 =
+  "Fon soruşturmasında şüpheli sıfatıyla ifade veren Takasbank Genel Müdürü Yunus Arıncı, yurt dışına çıkış yasağı ve adli kontrol şartıyla serbest bırakıldıktan sonra görevinden istifa etti. \nTakasbank Genel Müdürü, fon soruşturmasında şüpheli olarak ifade verip istifa etti: Meclis’te Tera’ya finansmanı savunmuştu yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.";
+const SERBESTIYET_A6A2_BODY =
+  "Fon soruşturmasında şüpheli sıfatıyla ifade veren Takasbank Genel Müdürü Yunus Arıncı, yurt dışına çıkış yasağı ve adli kontrol şartıyla serbest bırakıldıktan sonra görevinden istifa etti.";
+
+// The title carries a colon and curly quotes.
+const SERBESTIYET_9CAB =
+  "DEM Parti İmralı Heyeti Üyesi Pervin Buldan, Abdullah Öcalan’ın İmralı Cezaevi'ndeki yeni bir bölüme kalıcı olarak geçtiğini açıkladı\nPervin Buldan: “Öcalan yeni yerine taşındı ama bu ona statü kazandırmıyor, süreçte tıkanma var” yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.";
+const SERBESTIYET_9CAB_BODY =
+  "DEM Parti İmralı Heyeti Üyesi Pervin Buldan, Abdullah Öcalan’ın İmralı Cezaevi'ndeki yeni bir bölüme kalıcı olarak geçtiğini açıkladı";
+
+const WRAPPER_CHANGES: ReadonlyArray<readonly [string, string, string]> = [
+  ["Diken a3be851f (header + footer)", DIKEN_A3BE, DIKEN_A3BE_BODY],
+  ["Diken dab0eb01 (header + footer)", DIKEN_DAB0, DIKEN_DAB0_BODY],
+  ["Serbestiyet a6a2f0bd", SERBESTIYET_A6A2, SERBESTIYET_A6A2_BODY],
+  ["Serbestiyet 9cab88ae", SERBESTIYET_9CAB, SERBESTIYET_9CAB_BODY],
+  [
+    "Serbestiyet footer after a sentence mark, no newline",
+    "Gövde metni. Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.",
+    "Gövde metni.",
+  ],
+  [
+    "Serbestiyet footer without the final dot",
+    "Gövde metni.\nBaşlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır",
+    "Gövde metni.",
+  ],
+  [
+    "Serbestiyet footer with trailing blanks",
+    "Gövde metni.\nBaşlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.  \n ",
+    "Gövde metni.",
+  ],
+  [
+    "Serbestiyet footer after an exclamation mark and an ellipsis",
+    "Gövde metni! İkinci cümle… Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.",
+    "Gövde metni! İkinci cümle…",
+  ],
+  [
+    "WordPress footer only (header-less)",
+    "Gövde metni.\nThe post Başlık appeared first on Site Adı.",
+    "Gövde metni.",
+  ],
+  [
+    "WordPress footer glued to the body (tags were stripped to nothing)",
+    "Gövde metni.The post Başlık appeared first on Site Adı.",
+    "Gövde metni.",
+  ],
+  [
+    "Diken header only (footer missing)",
+    "Başlık metni 31.10.2026 DikenGövde metni burada.",
+    "Gövde metni burada.",
+  ],
+  [
+    "Diken header, body starts with a capital Turkish letter (İ, Ü)",
+    "Başlık 01.11.2026 DikenÜlke genelinde yağış var.",
+    "Ülke genelinde yağış var.",
+  ],
+  [
+    "Diken header, a space after the word Diken",
+    "Başlık 01.11.2026 Diken Gövde metni.",
+    "Gövde metni.",
+  ],
+  [
+    "footer and then a stacked CTA tail on the body",
+    "Gövde metni. Devamını oku\nThe post Başlık appeared first on Site Adı.",
+    "Gövde metni.",
+  ],
+];
+
+// Wrapper-shaped text that must NOT be stripped. The expected value is what the
+// older tidy steps make of it (a newline becomes one space), nothing more.
+const WRAPPER_UNCHANGED: ReadonlyArray<readonly [string, string, string]> = [
+  [
+    "'The post-election' (a hyphen, not a space)",
+    "The post-election period was long",
+    "The post-election period was long",
+  ],
+  [
+    "a mid-text 'ilk önce'",
+    "Gazete ilk önce haberi duyurdu, sonra yalanladı.",
+    "Gazete ilk önce haberi duyurdu, sonra yalanladı.",
+  ],
+  [
+    "'yazısı ilk önce' mid-text, no 'adresinde yayınlanmıştır' tail",
+    "Kitabın yazısı ilk önce Meclis'te okundu, sonra basıldı.",
+    "Kitabın yazısı ilk önce Meclis'te okundu, sonra basıldı.",
+  ],
+  [
+    "a Serbestiyet footer followed by more text",
+    "Gövde.\nBaşlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır. Devamı burada.",
+    "Gövde. Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır. Devamı burada.",
+  ],
+  [
+    "a truncated Serbestiyet footer (the feed cut the description)",
+    "Gövde metni.\nÇakma Japon kuruluş fon vurguncularına nasıl bol keseden not dağıttı? yazısı ilk önce Serbestiyet ad...",
+    "Gövde metni. Çakma Japon kuruluş fon vurguncularına nasıl bol keseden not dağıttı? yazısı ilk önce Serbestiyet ad...",
+  ],
+  [
+    "'Dikenli' is not 'Diken'",
+    "Sınırda tel örgü 02.11.2026 Dikenli teller çekildi.",
+    "Sınırda tel örgü 02.11.2026 Dikenli teller çekildi.",
+  ],
+  [
+    "a date and 'Diken' at the very start (no header title)",
+    "02.11.2026 DikenGövde metni.",
+    "02.11.2026 DikenGövde metni.",
+  ],
+  [
+    "a date followed by 'Diken' deep in a long text",
+    `${"Uzun gövde metni burada. ".repeat(20)}Başlık 02.11.2026 DikenGövde metni.`,
+    `${"Uzun gövde metni burada. ".repeat(20)}Başlık 02.11.2026 DikenGövde metni.`,
+  ],
+  [
+    "a long title before the footer and no boundary within 300 characters",
+    `${"x".repeat(400)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
+    `${"x".repeat(400)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
+  ],
+];
+
+describe("tidySummaryText feed wrappers (h19-ingest-2)", () => {
+  it("a3be851f: the exact stored Diken text gives only the body", () => {
+    expect(tidySummaryText(DIKEN_A3BE)).toBe(
+      "ABD'nin Florida eyaletinde dokuz kişiyi taşıyan özel jet otoyola düştü.",
+    );
+  });
+
+  it.each(WRAPPER_CHANGES)("strips the wrappers: %s", (_label, input, expected) => {
+    expect(tidySummaryText(input)).toBe(expected);
+  });
+
+  it("the stripped result carries none of the wrapper tokens", () => {
+    for (const input of [DIKEN_A3BE, DIKEN_DAB0, SERBESTIYET_A6A2, SERBESTIYET_9CAB]) {
+      const out = tidySummaryText(input);
+      for (const token of ["The post", "appeared", "#site_link", " Diken", "ilk önce", "yayınlanmıştır"]) {
+        expect(out.includes(token), `${token} in ${JSON.stringify(out)}`).toBe(false);
+      }
+    }
+  });
+
+  it.each(WRAPPER_UNCHANGED)("leaves %s alone", (_label, input, expected) => {
+    expect(tidySummaryText(input)).toBe(expected);
+  });
+
+  it("a header-shaped text on a later line is not a header (the first line owns the header)", () => {
+    // Not in the idempotence list on purpose: the newline collapse turns this
+    // into a one-line text, and a second tidy would then treat it as a header.
+    expect(tidySummaryText("Birinci satır.\nBaşlık 02.11.2026 DikenGövde metni.")).toBe(
+      "Birinci satır. Başlık 02.11.2026 DikenGövde metni.",
+    );
+  });
+
+  it("a text that is only a footer gives an empty string (the caller hides the summary)", () => {
+    expect(tidySummaryText("Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.")).toBe("");
+    expect(tidySummaryText("The post Başlık appeared first on #site_linkat 02.11.2026 .")).toBe("");
+    expect(tidySummaryText("\nThe post Başlık appeared first on Site Adı.")).toBe("");
+  });
+
+  it("is idempotent on every wrapper fixture and on its result", () => {
+    const all = [
+      ...WRAPPER_CHANGES.map(([, input]) => input),
+      ...WRAPPER_CHANGES.map(([, , expected]) => expected),
+      ...WRAPPER_UNCHANGED.map(([, input]) => input),
+      ...WRAPPER_UNCHANGED.map(([, , expected]) => expected),
+    ];
+    for (const x of all) {
+      const once = tidySummaryText(x);
+      expect(tidySummaryText(once), JSON.stringify(x)).toBe(once);
+    }
+  });
+
+  it("does not change what the tidy steps did before: the widget and glue rules still apply around a footer", () => {
+    expect(
+      tidySummaryText("Maç bitti.Takım kutladı.\nİlginizi Çekebilir\nSon düdük.\nThe post Başlık appeared first on Site Adı."),
+    ).toBe("Maç bitti. Takım kutladı. Son düdük.");
+  });
+
+  describe("robustness", () => {
+    const BUDGET_MS = 100;
+
+    it("a 100k-character 'The post ' input with space runs finishes in under 100 ms", () => {
+      const inputs = [
+        "The post ".repeat(11_200),
+        `${"The post ".repeat(5_000)}${" ".repeat(55_000)}appeared first on`,
+        `${"The post x".repeat(5_000)} appeared first on ${" ".repeat(50_000)}`,
+        `The post ${" ".repeat(100_000)} appeared first on x`,
+        `${" ".repeat(50_000)}The post ${" ".repeat(50_000)}`,
+      ];
+      for (const s of inputs) {
+        const start = performance.now();
+        tidySummaryText(s);
+        const elapsed = performance.now() - start;
+        expect(elapsed, `${s.length} chars`).toBeLessThan(BUDGET_MS);
+      }
+    });
+
+    it("100k characters of the Serbestiyet and Diken markers finish in under 100 ms", () => {
+      const inputs = [
+        " yazısı ilk önce ".repeat(6_000),
+        `${" yazısı ilk önce x adresinde yayınlanmıştır".repeat(2_500)}`,
+        `x yazısı ilk önce ${" ".repeat(100_000)} adresinde yayınlanmıştır.`,
+        "01.01.2026 Diken ".repeat(6_000),
+        `${" ".repeat(100_000)}01.01.2026 Diken`,
+        `\n${"a".repeat(100_000)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
+        `${"a. ".repeat(33_000)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
+      ];
+      for (const s of inputs) {
+        const start = performance.now();
+        tidySummaryText(s);
+        const elapsed = performance.now() - start;
+        expect(elapsed, `${s.length} chars`).toBeLessThan(BUDGET_MS);
+      }
+    });
+  });
+});

@@ -1,6 +1,6 @@
-# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122, 131, 136)
+# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122, 131, 136, 145)
 
-`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119, 122 and 136) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119, 122, 136 and 145) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
@@ -41,9 +41,10 @@ workflow needs the new secret, so it is deliberately not part of migration 131.
 
 ## What it checks
 
-16 fixed-order rows (the first ten from migration 077, the eleventh added by
+17 fixed-order rows (the first ten from migration 077, the eleventh added by
 migration 100, the twelfth by migration 103, the thirteenth by migration 114,
-the fourteenth by migration 122 and the fifteenth and sixteenth by migration 136;
+the fourteenth by migration 122, the fifteenth and sixteenth by migration 136
+and the seventeenth by migration 145;
 rows 7, 9 and 12 were reworked by migration 108, and row 13 by migration 115,
 which widened its silence window from 12 h to 24 h, and by migration 119, which
 added a reason label to every source it names), `status` one of
@@ -59,7 +60,9 @@ between 2026-10-15 and 10-23 without any other row noticing (see the
 migration 114 header, the 24 h window of the migration 115 header, and
 "Susan kaynaklar (baseline)" below); rows 15 and 16 close the app-side blind spot
 and the disk headroom gap of 2026-10-31/11-01 (see "Cron rotası sonuçları ve
-veritabanı boyutu (migration 136)" below).
+veritabanı boyutu (migration 136)" below); row 17 is the runtime check of the
+anon surface that the migration-text guard cannot give (see "Anon yüzeyi
+(migration 145, row 17)" below).
 
 | # | check_name | What it measures | Threshold | Where the number came from |
 |---|---|---|---|---|
@@ -77,15 +80,16 @@ veritabanı boyutu (migration 136)" below).
 | 14 | `ingest_gaps` | Gaps over 5 minutes between consecutive `ingest_cycles.started_at` in the last 6 hours. `ingest-drain` runs every 3 minutes (migration 038), so a longer gap is at least one tick that left no row: the platform killed it (pg_net `546 WORKER_RESOURCE_LIMIT`), cron skipped it, or the row write failed. Row 3 cannot see this, because it only counts rows over 30 minutes and reads pass from 8 up. `detail`: `son 6 saatte 5 dakikadan uzun boşluk: n · en uzunu m dk · HH:MI→HH:MI, … (UTC)`, longest first, cut at 500 characters; `son 6 saatte 5 dakikadan uzun boşluk yok · en uzunu m dk` when there is none; `son 6 saatte ingest döngüsü yok` (warn, observed empty) when the window holds no cycle at all. **Warn-only**: never `fail`, nobody is paged; the warning shows in the step summary and in `select * from public.ops_health_report()`. `'unknown'` if the query errors | warn at 3 or more gaps, or any gap over 10 minutes (threshold 3) | Added by migration 122 (2026-10-24). Step 0 (migration 122 header): over the retained 21,350 cycles, sliding 6 hour windows from 09-29 to 10-12 (ingest healthy) warned 16 of 625 times (2.6%); over the last 12 days 320 of 577 (55%), the degraded stretch since 10-13 (10-22: 11 gaps in one 6 hour bucket, 5 of them over 10 minutes, longest 33 minutes). 4 gaps or 15 minutes would have warned 40%, 5 gaps or 20 minutes 20%; thresholds kept at 3 and 10 minutes because 55% is a true reading of that stretch. Read at 16:55 UTC on 2026-10-24: 119 cycles, 1 gap of 6 minutes, pass; index scan, 0.13 ms |
 | 15 | `cron_route_failures_30m` | Outcomes of the Vercel cron routes (`headline`, `digest`, `fact-checks`, `social`, `alerts-webhooks`) recorded in `public.ops_cron_route_runs` over the last 30 min. Each **authenticated** run writes one row (route, HTTP status, duration) through `ops_cron_route_run_record` from `withCronOutcome` (`src/lib/ops/cron-route-outcome.ts`, scheduled with `after()`). `observed` is the number of runs with status >= 500 (599 included: a 200 with a failed sub-step, see the Row 15 section) plus the number of silent routes (below). **Fail** when one route has at least 2 failures that are at least half of its runs in the window, or when `headline` / `alerts-webhooks` has been silent beyond its fail gap; **warn** on any other failure or silence; **warn** with `observed` empty and `son 30 dakikada cron rotası kaydı yok` when the window holds no run and no listed route is silent (the app is not recording, or every cron is stuck); pass reads `son 30 dakikada n çalışma, başarısız yok`. **Silence:** a run that Vercel kills at `maxDuration` writes no row, so the two sub-hourly routes are also compared with a gap on their newest row: `headline` (every 5 min) warn above 15 min, fail above 30 min; `alerts-webhooks` (every 10 min) warn above 25 min, fail above 60 min; only for a route that has a row within the 7 day retention. `detail` on warn/fail: `son 30 dakikada başarısız: headline 6/6, social 1/2` (route, failures/runs, worst first), then ` · kayıt gelmiyor: headline 31 dk` for each silent route (whole minutes since its newest row, longest first), cut at 500 characters. `'unknown'` with `ops_cron_route_runs yok` if the table is missing, or with the error text if the query fails | fail: a route with >= 2 failures and >= 50% of its runs; warn: any failure (threshold 1) | 2026-10-31 16:10 UTC to 2026-11-01 10:30 UTC: 189 `canceling statement due to statement timeout` from the headline pick query, each one a 500 from `/api/cron/headline` (`apiServerError`), and all 14 rows read green. The root cause is fixed (migration 127, #147), but nothing app-side was watched. The "at least 2" keeps one blip in a daily route (`digest`, `social`) at warn; the headline outage reads 6/6 and fails inside a single window. Added by migration 136 |
 | 16 | `db_size_mb` | `pg_database_size(current_database())` in whole MB against the two limits of `public.ops_db_size_limits()` (default **warn 7000, fail 7600**). `threshold` is the warn limit. `detail`: `veritabanı n MB · uyarı w MB · kritik f MB · en büyük: rel mb MB, …` (the three biggest relations in `public`, by `pg_total_relation_size`). `'unknown'` with the error text if the read fails | warn >= `warn_mb`; fail >= `fail_mb` (7000 / 7600) | 2026-11-01: 6252 MB (`jev_shadow_predictions` 3142 MB, `articles` 2016 MB, `clusters` about 533 MB) and no check on it anywhere. The defaults are for the 8 GB Pro allowance; set them to 70% / 85% of the disk you actually provisioned (see "Cron rotası sonuçları ve veritabanı boyutu"). The top-three read costs about 14 ms on 68 public relations. Added by migration 136 |
+| 17 | `anon_surface` | What the roles `anon` and `authenticated` can actually do in schema `public`, read from the catalogue at run time (`has_table_privilege`, `has_sequence_privilege`, `has_function_privilege` and the relation ACLs), not from migration text. `observed` is the number of exposed tables/views/sequences plus the SECURITY DEFINER functions and the invoker functions that either role can execute (the five allowlisted RPCs `saved_clusters`, `merged_cluster_map`, `source_slugs`, `source_slug_exists` and `saved_clusters_v2`, each exempt by its full signature, name and argument types, so an overload of one of those names is counted; trigger functions and extension members are not counted). **Fail** when any table, view, materialized view, foreign table, partitioned table or sequence carries a privilege for either role (an ACL entry counts too, which catches PG17 `MAINTAIN`), or either role can execute a SECURITY DEFINER function outside the allowlist; **warn** when either role can execute an invoker function (a `PUBLIC` execute is enough), or `auth.users` holds a row (someone signed up); **skip** (`anon/authenticated rolü yok`) when a role is missing; `'unknown'` with the error text if the query fails. `detail` (Turkish, counts only, never an object name or user data, cut at 500 characters): `anon/authenticated yetkisi yok: tablo/dizi 0, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · auth.users 0` on pass; otherwise the same counts (`yetkisi var:`), then ` · adlar için: docs/ops-heartbeat.md (Anon yüzeyi)` when a relation, sequence or function was found, and ` · auth.users n`. The heartbeat output is public, so the names are not in it: list them with the service-role query in "Anon yüzeyi" below, then revoke | fail >= 1 exposed relation/sequence or definer function; warn >= 1 invoker function or >= 1 `auth.users` row (threshold 1) | Added by migration 145 (2026-11-02, h19-security-1). Step 0 (migration 145 header, production, read-only): 0 of 102 relations and 0 of 137 functions exposed, `auth.users` 0 rows, so the expected status is `pass`; the query runs in 6-9 ms (`explain (analyze)`, three runs). `tests/guards/anon-surface.test.ts` scans migration text only, so a dashboard grant or a `supabase_admin` default-ACL privilege reached nothing before this row |
 
 The heartbeat script adds two rows of its own to this table and to the step
-summary, on top of the 16: `archive_gap_days` (see "Arşiv boşlukları") and, when
+summary, on top of the 17: `archive_gap_days` (see "Arşiv boşlukları") and, when
 the snapshot read fails, `snapshot_backstop` (`unknown`). They are not part of
 `ops_health_report()`.
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
-16 rows. (Row 12 degrades gracefully: with only one of the two present it
+17 rows. (Row 12 degrades gracefully: with only one of the two present it
 counts that half and treats the other as zero.)
 
 **Stage-budget alerts (`jev_alerts.kind = 'stage_budget'`, counted by row 9).**
@@ -374,6 +378,147 @@ Migration 136 makes the app report its own outcome.
   keeps 45 days), or raise the disk, before the database goes read-only at the
   provisioned size. Autovacuum does not give space back to the operating system;
   only a rewrite does.
+
+## Anon yüzeyi (migration 145, row 17 `anon_surface`)
+
+Migration 116/117 closed the public anon surface (every `anon` read goes through
+the five allowlisted RPCs, no table or sequence privilege for `anon` or
+`authenticated`), and `tests/guards/anon-surface.test.ts` keeps new migrations
+from reopening it. That guard reads migration **text**. A privilege added in the
+Supabase dashboard, or one that arrives through the platform's default ACL of the
+owner `supabase_admin` (tables `arwdDxtm`, sequences `rwU`, functions `X` for
+`anon` and `authenticated`; `postgres` cannot alter it), never appears in a
+migration, so CI cannot see it. Row 17 reads the catalogue every time the report
+runs (every 30 minutes by the Action, every 10 minutes by the snapshot of
+migration 131) and turns such a privilege into a `fail`.
+
+- **Why it matters.** Supabase Auth signup was open on 2026-11-02 (`disable_signup`
+  false, email provider on) although the app never uses Supabase Auth, `auth.users`
+  held 0 rows, and 13 dormant `USING (true)` SELECT policies exist on `public`
+  (RLS would not stop a role that has the table privilege). Today nothing is
+  exposed; the row exists so that the first stray privilege is noticed within
+  minutes instead of never.
+- **Statuses.** `pass`: no exposed relation or sequence, no definer or invoker
+  function outside the allowlist, `auth.users` empty. `fail`: a table, view,
+  materialized view, foreign table, partitioned table or sequence of `public` carries
+  a privilege for `anon` or `authenticated` (also through `PUBLIC` or a group role
+  they belong to), or either role can execute a SECURITY DEFINER function there that
+  is not one of the five allowlisted RPCs. `warn`: either role can execute an invoker
+  function (a function created without `revoke ... from public` is executable by
+  everyone; trigger functions and extension members are not counted), or `auth.users`
+  holds a row. `skip`: the roles do not exist (local databases). `unknown`: the
+  query errored. A `warn` does not page (the Action exits 1 only on `fail`, an empty
+  report or mostly `unknown`); the 10 minute snapshot (131) stores one `warn` row
+  every 10 minutes until it is fixed.
+- **Why the detail has counts only.** `scripts/ops-heartbeat.mjs` prints every
+  row's `detail` to the job's stdout and appends it to `$GITHUB_STEP_SUMMARY`, and a
+  `fail` snapshot that migration 131 recorded is printed with its detail too. The
+  repository `Tayforg/tayf` is public, so any signed-in GitHub user can read those
+  run logs and summaries. A table, sequence or function name there would tell anyone
+  which endpoint to call with the public anon key, and it would be republished every
+  30 minutes until the privilege is fixed. Row 17 therefore reports counts only (the
+  `auth.users` figure is a count too) plus a pointer to this section; keep it that way
+  if you change the row. The names are read on demand, by the operator, over a
+  `service_role` connection or in the SQL editor of the Dashboard, never in CI:
+
+  ```sql
+  -- 1. tables, views, materialized views, foreign and partitioned tables, sequences
+  select c.relname, c.relkind, c.relacl
+    from pg_catalog.pg_class c
+    join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public'
+     and c.relkind in ('r', 'p', 'v', 'm', 'f', 'S')
+     and (case when c.relkind = 'S'
+               then has_sequence_privilege('anon', c.oid, 'USAGE,SELECT,UPDATE')
+                 or has_sequence_privilege('authenticated', c.oid, 'USAGE,SELECT,UPDATE')
+               else has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                 or has_table_privilege('authenticated', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          end
+          or exists (select 1 from aclexplode(c.relacl) a
+                      where a.grantee in ('anon'::regrole::oid, 'authenticated'::regrole::oid)))
+   order by c.relname;
+  
+  -- 2. functions and procedures (definer first); the five allowlisted RPCs are skipped by full signature
+  select p.proname || '(' || oidvectortypes(p.proargtypes) || ')' as identity,
+         case when p.prosecdef then 'definer' else 'invoker' end as kind
+    from pg_catalog.pg_proc p
+    join pg_catalog.pg_namespace n on n.oid = p.pronamespace
+   where n.nspname = 'public'
+     and p.prokind in ('f', 'p')
+     and p.prorettype not in ('trigger'::regtype, 'event_trigger'::regtype)
+     and not exists (select 1 from pg_depend d
+                      where d.classid = 'pg_proc'::regclass and d.objid = p.oid and d.deptype = 'e')
+     and p.proname || '(' || oidvectortypes(p.proargtypes) || ')'
+         <> all (array['saved_clusters(uuid[])', 'merged_cluster_map()', 'source_slugs()',
+                       'source_slug_exists(text)', 'saved_clusters_v2(uuid[])'])
+     and (has_function_privilege('anon', p.oid, 'EXECUTE')
+          or has_function_privilege('authenticated', p.oid, 'EXECUTE'))
+   order by p.prosecdef desc, 1;
+  ```
+
+  Both queries are read-only. The first lists tables, views and sequences with their
+  ACL (the `relacl` column shows `anon=r/postgres`-style entries; a `PUBLIC` entry has
+  an empty grantee before the `=`); the second lists functions as `name(argument types)`,
+  which is exactly what the `revoke ... on function` below needs, definer functions
+  first.
+- **How to fix a FAIL or a WARN.** Find what is exposed with the two queries above
+  (the report only counts), then revoke, one object at a time:
+
+  ```sql
+  -- what does one object carry? (relkind: r table, v view, m matview, p partitioned, f foreign, S sequence)
+  select c.relname, c.relkind, c.relacl
+    from pg_class c join pg_namespace n on n.oid = c.relnamespace
+   where n.nspname = 'public' and c.relname = '<name from the diagnostic>';
+
+  -- a table, view or materialized view
+  revoke all on public.<name> from anon, authenticated, public;
+  -- a sequence
+  revoke all on sequence public.<name> from anon, authenticated, public;
+  -- PG17 only, when the ACL entry is MAINTAIN
+  revoke maintain on public.<name> from anon, authenticated;
+  -- a function: copy the argument types shown by the diagnostic
+  revoke all on function public.<name>(<argument types>) from public, anon, authenticated;
+  ```
+
+  If the privilege was added in the dashboard, undo it there too or it comes back.
+  An object that `supabase_admin` creates starts out exposed again through the
+  platform default ACL: revoke it object by object (`postgres` cannot change that
+  default); this row is the tripwire for exactly that case. Commit the revoke as
+  a migration if the object comes from one.
+- **A WARN on `auth.users`.** Someone signed up. The app has no sign-up flow, so
+  treat it as abuse: check that signup is closed (Supabase Dashboard, Authentication,
+  Sign In / Providers: `Allow new users to sign up` off, Email provider off), verify
+  with `curl -s "$SUPABASE_URL/auth/v1/settings" -H "apikey: $SUPABASE_ANON_KEY"`
+  (expect `"disable_signup":true`; never paste the key anywhere), then look at who
+  it is (`select id, created_at from auth.users order by created_at desc limit 5;`
+  in the SQL editor; the addresses are in the dashboard's Users list, do not copy
+  them out) and delete the rows if they are not yours. The row only counts the rows (capped at 1000) and reads no
+  column.
+- **What stays as it is.** The 13 `USING (true)` policies and the `supabase_admin`
+  default ACL are not changed by 145: re-targeting the policies to `service_role` is a
+  separate decision for the founder, and the default ACL is platform-owned. This row
+  is the tripwire for their effect.
+- **The allowlist.** Row 17 exempts the five RPCs by full identity, name plus
+  argument types as `oidvectortypes` prints them (`saved_clusters(uuid[])`,
+  `merged_cluster_map()`, `source_slugs()`, `source_slug_exists(text)`,
+  `saved_clusters_v2(uuid[])`), not by bare name: each has exactly one signature, and
+  `PUBLIC` still gets EXECUTE on every new function (migration 117), so an overload such
+  as `source_slug_exists(text, boolean)` created in the Dashboard is counted (a
+  definer overload is a `fail`, an invoker overload a `warn`). The list is
+  `ALLOWED_RPC_IDENTITIES` in `tests/_helpers/anon-rpc-allowlist.ts`, next to
+  `ALLOWED_RPCS` and `ALLOWED_RPC_ARGS` (the constants `tests/guards/anon-surface.test.ts`
+  uses, whose grant pattern also demands the exact argument list);
+  `tests/migrations/145-ops-anon-surface.test.ts` compares the array literal in the
+  migration with it. Adding a sixth anon RPC means the helper (name, argument types,
+  migration), and a `create or replace` of `ops_health_report()` that carries the new
+  identity in row 17 (copy the newest definition, change the array and the
+  `(5 izinli RPC hariç)` count).
+- **Known limit.** A privilege on a single column (a column-level select grant) is
+  neither a table privilege nor a relation ACL entry, so the row does not see it
+  (0 column ACLs exist in `public` today). Check with
+  `select attrelid::regclass, attname, attacl from pg_attribute where attacl is not null and attrelid in (select oid from pg_class where relnamespace = 'public'::regnamespace);`.
+- **Cost.** About 5-11 ms per report (two catalogue scans), measured on production
+  on 2026-11-02.
 
 ## Susan kaynaklar (baseline)
 

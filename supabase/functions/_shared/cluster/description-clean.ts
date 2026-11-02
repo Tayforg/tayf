@@ -15,6 +15,14 @@
 // deliberately not wired into rss/normalize.ts: strictFingerprint, content_hash
 // and normalizeItem output stay byte-identical (tests/functions/_shared/
 // ingest-corpus-equality.test.ts), and the stored description is untouched.
+//
+// Two publishers also wrap every description in feed furniture (hunt 19,
+// h19-ingest-2): Diken ("<title> dd.mm.yyyy Diken<body>\nThe post <title>
+// appeared first on #site_linkat dd.mm.yyyy .") and Serbestiyet ("<body>\n<title>
+// yazısı ilk önce Serbestiyet adresinde yayınlanmıştır."). stripFeedWrappers()
+// removes that furniture. cleanDescription() applies it first, then the ticker
+// cut, and src/lib/articles/summary-tidy.ts imports the same function to tidy
+// the summary at read time, so the clustering text and the shown text agree.
 
 // A ticker line: "Son dakika", "SON DAKİKA" or "Son Dakika" at the start of a
 // line (leading blanks allowed), followed by 1-3 dots, an ellipsis, a colon or
@@ -22,22 +30,127 @@
 // "son dakika" mid-sentence are not tickers.
 const TICKER_LINE = /^\s*(?:Son dakika|SON DAKİKA|Son Dakika)\s*(?:\.{1,3}|…|:|!)/u;
 
+// ---------------------------------------------------------------------------
+// Feed wrappers (h19-ingest-2, hunt 19). Only indexOf / lastIndexOf, character
+// scans and bounded, anchored regexes: every rule is linear in the input and
+// looks at no more than a few hundred characters around its anchor.
+// ---------------------------------------------------------------------------
+
+// WordPress default footer: "The post <title> appeared first on <site>."
+const WP_FOOTER_LEAD = "The post ";
+const WP_FOOTER_MID = " appeared first on ";
+/** Longest "<title>" between the two markers. */
+const WP_FOOTER_MAX_TITLE = 300;
+/** Longest "<site>" after the second marker ("#site_linkat 02.11.2026 ." is 25). */
+const WP_FOOTER_MAX_TAIL = 80;
+
+// Yoast footer (Turkish): "<title> yazısı ilk önce <site> adresinde yayınlanmıştır."
+const YOAST_FOOTER_MARK = " yazısı ilk önce ";
+const YOAST_FOOTER_TAIL = /^ yazısı ilk önce .{1,40}? adresinde yayınlanmıştır\.?\s*$/u;
+/** The footer's "<title>" sits within this many characters before the marker. */
+const YOAST_FOOTER_MAX_TITLE = 300;
+
+// Diken header: "<title> dd.mm.yyyy Diken<body>" ("Dikenli" is not the site name).
+const DIKEN_HEADER = / \d{2}\.\d{2}\.\d{4} Diken(?!\p{Ll})/u;
+const DIKEN_HEADER_WINDOW = 340;
+const DIKEN_HEADER_MAX_INDEX = 300;
+
+/** Upper bound on how many times the three rules are re-applied (a doubled footer). */
+const MAX_WRAPPER_PASSES = 3;
+
+function isBlank(code: number): boolean {
+  return code === 32 || code === 9 || code === 160;
+}
+
+/** "The post X appeared first on Y" at the very end: cut from "The post ". */
+function stripWordPressFooter(text: string): string {
+  const i = text.lastIndexOf(WP_FOOTER_LEAD);
+  if (i === -1) return text;
+  const j = text.indexOf(WP_FOOTER_MID, i);
+  if (j === -1 || j - i > WP_FOOTER_MAX_TITLE) return text;
+  const tailStart = j + WP_FOOTER_MID.length;
+  if (text.length - tailStart > WP_FOOTER_MAX_TAIL) return text;
+  if (text.indexOf("\n", tailStart) !== -1) return text;
+  return text.slice(0, i).trimEnd();
+}
+
+/**
+ * "<title> yazısı ilk önce <site> adresinde yayınlanmıştır." at the very end.
+ * The title is the last line before the marker or, on a one-line text, the
+ * words after the last sentence mark. A footer whose start cannot be found
+ * within 300 characters is left alone, except when the marker itself is that
+ * close to the start of the text (the text is then the footer and nothing else).
+ */
+function stripYoastFooter(text: string): string {
+  const k = text.lastIndexOf(YOAST_FOOTER_MARK);
+  if (k === -1) return text;
+  if (!YOAST_FOOTER_TAIL.test(text.slice(k))) return text;
+  const lowest = Math.max(0, k - YOAST_FOOTER_MAX_TITLE);
+  let start = -1;
+  for (let p = k - 1; p >= lowest; p--) {
+    if (text.charCodeAt(p) === 10) {
+      start = p;
+      break;
+    }
+  }
+  if (start === -1) {
+    for (let p = k - 1; p >= lowest; p--) {
+      const c = text.charAt(p);
+      if ((c === "." || c === "!" || c === "?" || c === "…") && isBlank(text.charCodeAt(p + 1))) {
+        start = p + 2;
+        break;
+      }
+    }
+  }
+  if (start === -1) return k <= YOAST_FOOTER_MAX_TITLE ? "" : text;
+  return text.slice(0, start).trimEnd();
+}
+
+/** "<title> dd.mm.yyyy Diken<body>": drop everything through "Diken". */
+function stripDikenHeader(text: string): string {
+  const head = text.slice(0, DIKEN_HEADER_WINDOW);
+  const m = DIKEN_HEADER.exec(head);
+  if (!m || m.index < 1 || m.index > DIKEN_HEADER_MAX_INDEX) return text;
+  if (head.lastIndexOf("\n", m.index) !== -1) return text;
+  return text.slice(m.index + m[0].length).trimStart();
+}
+
+/**
+ * Remove the Diken header and the WordPress / Yoast footers that two feeds wrap
+ * around a description. The footers go first, then the header. Returns the SAME
+ * string when nothing matches, '' when the text was only a footer, and is
+ * idempotent (the rules are re-applied until nothing changes, at most
+ * {@link MAX_WRAPPER_PASSES} times).
+ */
+export function stripFeedWrappers(text: string): string {
+  if (!text) return text;
+  let out = text;
+  for (let pass = 0; pass < MAX_WRAPPER_PASSES; pass++) {
+    const next = stripDikenHeader(stripYoastFooter(stripWordPressFooter(out)));
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 export function cleanDescription(d: string): string;
 export function cleanDescription(d: string | null): string | null;
 export function cleanDescription(d: string | undefined): string | undefined;
 export function cleanDescription(d: string | null | undefined): string | null | undefined;
 export function cleanDescription(d: string | null | undefined): string | null | undefined {
   if (!d) return d;
+  // Feed wrappers first (Diken / Serbestiyet), then the ticker cut.
+  const text = stripFeedWrappers(d);
   // The first line can never be a ticker block: the ticker is appended to an
   // article, so a "Son dakika..." opening is the article's own text.
-  let at = d.indexOf("\n");
+  let at = text.indexOf("\n");
   while (at !== -1) {
-    const next = d.indexOf("\n", at + 1);
-    const line = d.slice(at + 1, next === -1 ? d.length : next);
-    if (TICKER_LINE.test(line)) return d.slice(0, at).trimEnd();
+    const next = text.indexOf("\n", at + 1);
+    const line = text.slice(at + 1, next === -1 ? text.length : next);
+    if (TICKER_LINE.test(line)) return text.slice(0, at).trimEnd();
     at = next;
   }
-  return d;
+  return text;
 }
 
 // ---------------------------------------------------------------------------

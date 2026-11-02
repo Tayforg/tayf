@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve, dirname, join, relative, sep } from "node:path";
+import { ALLOWED_RPCS, ALLOWED_RPC_ARGS, ALLOWED_RPC_IDENTITIES, ALLOWED_RPC_MIGRATION } from "../_helpers/anon-rpc-allowlist";
 
 // ---------------------------------------------------------------------------
 // Permanent CI guard (db-1, anon surface): the public anon key reaches data
@@ -36,23 +37,17 @@ const MIGRATIONS = resolve(ROOT, "supabase", "migrations");
 
 const FIRST_GUARDED_MIGRATION = 116;
 
-const ALLOWED_RPCS = [
-  "saved_clusters",
-  "merged_cluster_map",
-  "source_slugs",
-  "source_slug_exists",
-  "saved_clusters_v2",
-] as const;
-// The migration that defines + grants each allowlisted RPC.
-const ALLOWED_RPC_MIGRATION: Record<(typeof ALLOWED_RPCS)[number], number> = {
-  saved_clusters: 116,
-  merged_cluster_map: 116,
-  source_slugs: 116,
-  source_slug_exists: 116,
-  saved_clusters_v2: 124,
-};
+const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** `name ( argument types )` of one allowlisted RPC: the exact signature, never just the name. */
+function allowedSignature(name: (typeof ALLOWED_RPCS)[number]): string {
+  return `${name}\\s*\\(\\s*${escapeRegExp(ALLOWED_RPC_ARGS[name])}\\s*\\)`;
+}
+
+// The allowlist is by full identity: an overload of an allowlisted name (another argument list)
+// is a different function, and PUBLIC still gets EXECUTE on every new function (117).
 const ALLOWED_GRANT = new RegExp(
-  `^grant\\s+execute\\s+on\\s+function\\s+public\\.(${ALLOWED_RPCS.join("|")})\\s*\\([^)]*\\)\\s+to\\s+anon\\s*,\\s*service_role$`,
+  `^grant\\s+execute\\s+on\\s+function\\s+public\\.(?:${ALLOWED_RPCS.map(allowedSignature).join("|")})\\s+to\\s+anon\\s*,\\s*service_role$`,
   "i",
 );
 
@@ -333,7 +328,7 @@ describe("anon surface: migrations >= 116", () => {
       const mig = migrations.find((m) => m.num === num);
       expect(mig, `migration ${num} (for ${name}) must exist`).toBeDefined();
       expect(mig!.code, `${name} in ${mig!.file}`).toMatch(
-        new RegExp(`grant\\s+execute\\s+on\\s+function\\s+public\\.${name}\\s*\\([^)]*\\)\\s+to\\s+anon\\s*,\\s*service_role\\s*;`, "i"),
+        new RegExp(`grant\\s+execute\\s+on\\s+function\\s+public\\.${allowedSignature(name)}\\s+to\\s+anon\\s*,\\s*service_role\\s*;`, "i"),
       );
     }
   });
@@ -422,6 +417,31 @@ describe("anon surface: the guard fails on a bad migration", () => {
     expect(bad('grant execute on function public.foo() to "anon";')).toHaveLength(1);
     expect(bad("grant execute on function public.saved_clusters(uuid[]) to anon, authenticated, service_role;")).toHaveLength(1);
     expect(bad("grant execute on function public.other_fn() to anon, service_role;")).toHaveLength(1);
+  });
+
+  it("flags a grant on an overload of an allowlisted name: the allowlist is by full signature", () => {
+    expect(bad("grant execute on function public.source_slug_exists(text, boolean) to anon, service_role;")).toHaveLength(1);
+    expect(bad("grant execute on function public.saved_clusters(text) to anon, service_role;")).toHaveLength(1);
+    expect(bad("grant execute on function public.saved_clusters(uuid[], boolean) to anon, service_role;")).toHaveLength(1);
+    expect(bad("grant execute on function public.saved_clusters_v2(text[]) to anon, service_role;")).toHaveLength(1);
+    expect(bad("grant execute on function public.merged_cluster_map(integer) to anon, service_role;")).toHaveLength(1);
+    expect(bad("grant execute on function public.source_slugs(text) to anon, service_role;")).toHaveLength(1);
+    // an argument list that merely starts like the allowlisted one is not it
+    expect(bad("grant execute on function public.source_slug_exists(text, text) to anon, service_role;")).toHaveLength(1);
+  });
+
+  it("accepts every allowlisted identity exactly (the helper spells the signatures the migrations use)", () => {
+    expect(ALLOWED_RPC_IDENTITIES).toEqual([
+      "saved_clusters(uuid[])",
+      "merged_cluster_map()",
+      "source_slugs()",
+      "source_slug_exists(text)",
+      "saved_clusters_v2(uuid[])",
+    ]);
+    for (const identity of ALLOWED_RPC_IDENTITIES) {
+      expect(bad(`grant execute on function public.${identity} to anon, service_role;`), identity).toEqual([]);
+    }
+    expect(bad("grant execute on function public.saved_clusters ( uuid[] ) to anon , service_role;")).toEqual([]);
   });
 
   it("flags dynamic SQL and a grant hidden behind a '--' inside a string literal", () => {

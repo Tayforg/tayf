@@ -417,3 +417,34 @@ export const HEADLINE_ALIASES: Readonly<Record<string, string>> = {
 //     passes run until nothing changes (a sweep can expose a suffix that sits
 //     earlier in the list: toplantilarindan -> toplantilarin -> toplan).
 export const HEADLINE_STEM_MAX_PASSES = 3;
+
+// (6) h19-recall-1: same-event pairs with no whitelist entity on a side. A
+//     pair where either article carries no entity used to be scored
+//     0.7*tfidf + 0.3*0, i.e. capped at 0.70 of its text similarity, so a
+//     paraphrase needed tfidf >= 0.571 (before decay) to reach MATCH_THRESHOLD.
+//     Those are the twin clusters: 16.7% of the live clusters of a 24 h replay
+//     (2026-11-02) were redundant twins of another live cluster. The Bolivya
+//     El Nino pair (yenicag 0d2d8da3, entities [], vs evrensel 38c66e27; twin
+//     clusters created 9 min apart; tfidf 0.5687) scored 0.3995 per the hunt
+//     finding (0.3971 in the replay below), a hair under the threshold, and
+//     the Trakya dual-citizen pair (haberler-com 2d95f57c vs anadolu-ajansi
+//     db167c9c, tfidf 0.658) 0.3911. When either side has no whitelist entity
+//     the pair is now scored on text alone: primary = clip01(tfidf *
+//     ENTITY_SPARSE_TEXT_FACTOR). With entities on both sides nothing changes
+//     (primary = TFIDF_WEIGHT * tfidf + ENTITY_WEIGHT * entityRatio). The
+//     factor is applied BEFORE the text floor and the subject / incident veto
+//     caps, so those still win; auto-accept, MinHash, the headline lane, time
+//     decay and the source penalties are untouched.
+//     Replay (the 252 hand-labelled cross-cluster pairs of the 24 h window,
+//     6,882 scored article pairs, the repo's real scorer, tfidf over the same
+//     corpus; S = same story, A = ambiguous, N = different story):
+//       seed decisions (does the incoming article join the seed's cluster):
+//         S 35 -> 70 of 184, A 10 -> 13 of 48, N 2 -> 3 of 20;
+//       cluster pairs (best article pair >= MATCH_THRESHOLD): +45 S, +5 A,
+//         +1 N -- the extra N is two different statements by Yayman -- and 0
+//         unlabelled pairs newly crossing the threshold.
+//     Alternatives measured on the same replay: factor 0.85 gives +36 S and
+//     0 N (the zero-wrong-joins dial: pick it if the one extra N is
+//     unacceptable); lowering MATCH_THRESHOLD to 0.36 instead gives +28 S with
+//     more N, and also moves every pair that has entities.
+export const ENTITY_SPARSE_TEXT_FACTOR = 0.90;

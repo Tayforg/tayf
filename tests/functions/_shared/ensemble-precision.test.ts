@@ -18,6 +18,8 @@ import {
 } from "../../../supabase/functions/_shared/cluster/provinces.ts";
 import { TfidfIndex } from "../../../supabase/functions/_shared/cluster/tfidf.ts";
 import {
+  ENTITY_SPARSE_TEXT_FACTOR,
+  ENTITY_TEXT_FLOOR,
   ENTITY_WEIGHT,
   GENERIC_ENTITIES,
   GENERIC_ENTITY_WEIGHT,
@@ -26,6 +28,8 @@ import {
   SUBJECT_SPAN_MAX_WORDS,
   SUBJECT_STOP_WORDS,
   SUBJECT_VETO_CAP,
+  TFIDF_WEIGHT,
+  TIME_WINDOW_HOURS,
 } from "../../../supabase/functions/_shared/cluster/constants.ts";
 
 // h12-cluster-2: chain-drift joins. Cluster 30c752a7 ("Fidan, Atlanta'da Japon
@@ -731,5 +735,360 @@ describe("ensemble precision: generic whitelist entities carry less weight", () 
 
   it("entity weight constant is untouched", () => {
     expect(ENTITY_WEIGHT).toBe(0.30);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h19-recall-1: precision unchanged by the entity-sparse text factor.
+//
+// The change is recall-only and local: when either side has no whitelist entity
+// the primary lane is clip01(tfidf * ENTITY_SPARSE_TEXT_FACTOR) instead of
+// 0.7*tfidf + 0.3*entityRatio. These tests pin everything it must NOT touch:
+// (a) a frozen table of 40 seeded cases with entities on both sides, written
+// against the scorer BEFORE the change and required to stay bit-identical,
+// (b) a property test of the primary formula of each branch over 2,000 seeded
+// cases, (c) the text floor, the subject veto and the incident veto still win
+// over the new factor, (d) the auto-accept, MinHash and headline lanes.
+// ---------------------------------------------------------------------------
+
+describe("h19-recall-1 precision unchanged", () => {
+  const noFp = { strict: null, signature: null };
+
+  // Seeded LCG (Numerical Recipes constants). No Math.random anywhere: every run
+  // sees the same cases.
+  function lcg(seed: number): () => number {
+    let x = seed >>> 0;
+    return () => {
+      x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
+      return x / 4294967296;
+    };
+  }
+
+  // Whitelist-style tokens: the first seven are GENERIC_ENTITIES, the rest
+  // specific ones. The scorer only compares them as strings.
+  const ENTITY_POOL: readonly string[] = [
+    "bakan", "disisleri", "abd", "turkiye", "erdogan", "fidan", "istanbul",
+    "chp", "akp", "mhp", "tbmm", "secim", "ekonomi", "nato", "ukrayna", "israil",
+  ];
+
+  const LAVROV_TITLE = "Lavrov, Japon mevkidaşı Motegi ile görüştü";
+  const FIDAN_TITLE = "Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü";
+  const DUZCE_TITLE = "Düzce'de TIR ve iki aracın karıştığı zincirleme kazada 3 kişi yaralandı";
+  const BOLU_DAGI_TITLE = "Bolu Dağı'nda zincirleme kaza: Yaralılar var";
+
+  type Titles = readonly [string | null, string | null];
+  type Slugs = readonly [string | null, string | null];
+
+  const TITLE_PAIRS: readonly Titles[] = [
+    [null, null],
+    // subject veto
+    [LAVROV_TITLE, FIDAN_TITLE],
+    // incident veto
+    [DUZCE_TITLE, BOLU_DAGI_TITLE],
+    // headline lane (Jaccard 7/10)
+    [
+      "Son dakika... Mustafa Sarıgül YENİ Parti'den istifa etti",
+      "Mustafa Sarıgül Yeni Parti'den istifa etti: Adalet tecelli edecek",
+    ],
+    // headline lane (Bakirkoy 39)
+    [
+      "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı!",
+      "Bakırköy Belediyesi'ne yolsuzluk soruşturması: 39 kişi tutuklandı",
+    ],
+    // unrelated
+    ["Merkez Bankası faiz kararını açıkladı", "Galatasaray derbiyi 3-1 kazandı"],
+    // numeral clash (40 vs 39): the lane stays shut
+    [
+      "Bakırköy Belediyesi soruşturmasında 40 tutuklama talebi",
+      "Bakırköy Belediyesi soruşturması: 39 kişi tutuklandı",
+    ],
+    // short identical token sets
+    ["Erdoğan, Zelenskiy'i kabul etti", "Erdoğan Zelenski'yi kabul etti"],
+  ];
+
+  const SLUG_PAIRS: readonly Slugs[] = [
+    [null, null],
+    ["sabah", "sozcu"],
+    ["haberler-com", "sozcu"],
+    ["anadolu-ajansi", "haberler-com"],
+  ];
+
+  // tf-idf values outside [0, 1] and on its boundaries, injected into the
+  // property grid to exercise the scorer's clamp.
+  const SPECIAL_TFIDF: readonly number[] = [
+    0, 0.2, 1, 1.7, -0.3, Number.NaN, Number.POSITIVE_INFINITY,
+  ];
+
+  interface GridCase {
+    aEntities: string[];
+    bEntities: string[];
+    tfidf: number;
+    hours: number;
+    titles: Titles;
+    slugs: Slugs;
+  }
+
+  function sampleEntities(rand: () => number, n: number): string[] {
+    const left = [...ENTITY_POOL];
+    const out: string[] = [];
+    for (let k = 0; k < n; k++) {
+      out.push(left.splice(Math.floor(rand() * left.length), 1)[0]!);
+    }
+    return out;
+  }
+
+  // Entity sets of minEntities..5 per side; every 4th case lands inside the
+  // headline lane window (< 6 h), the others anywhere in the 48 h window.
+  function gridCase(rand: () => number, minEntities: number, i: number, special: boolean): GridCase {
+    const aEntities = sampleEntities(rand, minEntities + Math.floor(rand() * (6 - minEntities)));
+    const bEntities = sampleEntities(rand, minEntities + Math.floor(rand() * (6 - minEntities)));
+    const t = rand();
+    const tfidf = special && i % 25 === 0 ? SPECIAL_TFIDF[(i / 25) % SPECIAL_TFIDF.length]! : t;
+    const h = rand();
+    const hours = i % 4 === 0 ? h * 6 : h * 48;
+    const titles = TITLE_PAIRS[Math.floor(rand() * TITLE_PAIRS.length)]!;
+    const slugs = SLUG_PAIRS[Math.floor(rand() * SLUG_PAIRS.length)]!;
+    return { aEntities, bEntities, tfidf, hours, titles, slugs };
+  }
+
+  function scoreCase(c: GridCase): ScoreResult {
+    return score(noFp, noFp, c.aEntities, c.bEntities, c.tfidf, c.hours, {
+      aSourceSlug: c.slugs[0],
+      bSourceSlug: c.slugs[1],
+      aTitle: c.titles[0],
+      bTitle: c.titles[1],
+    });
+  }
+
+  // Same clamp as the scorer's clip01 (non-finite -> 0), written out here so the
+  // expected values are an independent computation.
+  function clip01(x: number): number {
+    if (!Number.isFinite(x)) return 0;
+    return Math.min(1, Math.max(0, x));
+  }
+
+  // Recorded from the scorer at HEAD before the change (both entity sets
+  // non-empty, so the entity-sparse branch cannot apply). Full double precision.
+  const FROZEN_SCORES: readonly number[] = [
+    0.23085344120313397,
+    0.019502694131495562,
+    0.051860253518253276,
+    0.2968874357343706,
+    0.33072631840041145,
+    0.0022739382589076857,
+    0.1937056451064701,
+    0.04207705743178265,
+    0.6912728964492999,
+    0.08870577409578767,
+    0.1517410122934208,
+    0.42176692358104684,
+    0.2770685849078668,
+    0.007524939243150794,
+    0.11002133859030437,
+    0.17241755666268965,
+    0.2847350360583369,
+    0.01249868953600526,
+    0.05753579218871892,
+    0.06670718640089035,
+    0.9260401810752228,
+    0.021102643537869073,
+    0.12415190862800252,
+    0.01621130854260909,
+    0.909884364285972,
+    0.24516519056633118,
+    0.17283762563682772,
+    0.16315806594138288,
+    0.8204489202631521,
+    0.013544853736705014,
+    0.3469416095583209,
+    0.8739082679385319,
+    0.25282551574709644,
+    0.07812362224459782,
+    0.2865966026596075,
+    0.8090046467841603,
+    0.19453903270079664,
+    0.26465483782689814,
+    0.08991582388590967,
+    0.012694641123881875
+  ];
+
+  it("(a) the frozen table: 40 seeded cases with entities on both sides score exactly as before", () => {
+    const rand = lcg(190_001);
+    const cases = Array.from({ length: FROZEN_SCORES.length }, (_, i) => gridCase(rand, 1, i, false));
+    expect(cases).toHaveLength(40);
+    const results = cases.map(scoreCase);
+    for (const [i, c] of cases.entries()) {
+      expect(c.aEntities.length, `case ${i} a entities`).toBeGreaterThan(0);
+      expect(c.bEntities.length, `case ${i} b entities`).toBeGreaterThan(0);
+      expect(results[i]!.score, `case ${i}`).toBe(FROZEN_SCORES[i]);
+    }
+    // The table is not vacuous: it contains every branch the change must leave alone.
+    const k = results.map((r) => r.components);
+    expect(k.some((x) => x.subjectVeto)).toBe(true);
+    expect(k.some((x) => x.incidentVeto)).toBe(true);
+    expect(k.some((x) => x.headlineLane)).toBe(true);
+    expect(k.some((x) => x.textFloorCapped)).toBe(true);
+    expect(k.some((x) => x.sourcePenalty < 1)).toBe(true);
+    expect(k.some((x) => (x.sharedEntities ?? 0) > 0)).toBe(true);
+    expect(results.some((r) => r.score >= MATCH_THRESHOLD)).toBe(true);
+    expect(results.some((r) => r.score < MATCH_THRESHOLD)).toBe(true);
+    // Mixed generic and specific entities, shared and unshared.
+    const generic = new Set<string>(GENERIC_ENTITIES);
+    expect(ENTITY_POOL.some((e) => generic.has(e))).toBe(true);
+    expect(ENTITY_POOL.some((e) => !generic.has(e))).toBe(true);
+    const sharedOf = (c: (typeof cases)[number]) => c.aEntities.filter((e) => c.bEntities.includes(e));
+    expect(cases.some((c) => sharedOf(c).some((e) => generic.has(e)))).toBe(true);
+    expect(cases.some((c) => sharedOf(c).some((e) => !generic.has(e)))).toBe(true);
+  });
+
+  it("(a) the title list holds the Lavrov/Fidan subject-veto pair and the Düzce/Bolu incident-veto pair", () => {
+    expect(TITLE_PAIRS).toContainEqual([LAVROV_TITLE, FIDAN_TITLE]);
+    expect(TITLE_PAIRS).toContainEqual([DUZCE_TITLE, BOLU_DAGI_TITLE]);
+  });
+
+  it("(b) property: primary follows the formula of its branch over 2,000 seeded cases", () => {
+    const rand = lcg(190_002);
+    const violations: string[] = [];
+    let bothPresent = 0;
+    let oneEmpty = 0;
+    let bothEmpty = 0;
+    for (let i = 0; i < 2000; i++) {
+      const c = gridCase(rand, 0, i, true);
+      const r = scoreCase(c);
+      const k = r.components;
+      const sparse = Math.min(c.aEntities.length, c.bEntities.length) === 0;
+      if (sparse) {
+        if (c.aEntities.length === 0 && c.bEntities.length === 0) bothEmpty++;
+        else oneEmpty++;
+        if (k.primary !== clip01(k.tfidfScore * ENTITY_SPARSE_TEXT_FACTOR)) {
+          violations.push(`case ${i}: sparse primary ${k.primary}`);
+        }
+        // Nothing can be shared with an empty side, and the factor only ever
+        // helps: the new primary is never below the old 0.7*tfidf.
+        if (k.sharedEntities !== 0 || k.entityRatio !== 0) violations.push(`case ${i}: entities on an empty side`);
+        if (k.primary < TFIDF_WEIGHT * k.tfidfScore) violations.push(`case ${i}: sparse primary below the old one`);
+      } else {
+        bothPresent++;
+        if (k.primary !== TFIDF_WEIGHT * k.tfidfScore + ENTITY_WEIGHT * k.entityRatio) {
+          violations.push(`case ${i}: weighted primary ${k.primary}`);
+        }
+      }
+      if (!(r.score >= 0 && r.score <= 1)) violations.push(`case ${i}: score ${r.score} outside [0, 1]`);
+    }
+    expect(violations).toEqual([]);
+    // Both branches are exercised in volume.
+    expect(bothPresent).toBeGreaterThan(1000);
+    expect(oneEmpty).toBeGreaterThan(300);
+    expect(bothEmpty).toBeGreaterThan(20);
+  });
+
+  describe("(c) the caps still win over the entity-sparse text factor", () => {
+    const SIDES: ReadonlyArray<readonly [string, string[], string[]]> = [
+      ["a side empty", [], ["abd", "disisleri"]],
+      ["b side empty", ["abd", "disisleri"], []],
+      ["both sides empty", [], []],
+    ];
+
+    it("the text floor: tfidf below ENTITY_TEXT_FLOOR stays under MATCH_THRESHOLD", () => {
+      for (const tfidf of [0, 0.05, 0.1, 0.19, ENTITY_TEXT_FLOOR - 1e-9]) {
+        for (const [name, ea, eb] of SIDES) {
+          const r = score(noFp, noFp, ea, eb, tfidf, 0.5);
+          expect(r.components.textFloorCapped, `${name} tfidf ${tfidf}`).toBe(true);
+          expect(r.components.primary, `${name} tfidf ${tfidf}`).toBe(clip01(tfidf * ENTITY_SPARSE_TEXT_FACTOR));
+          expect(r.score, `${name} tfidf ${tfidf}`).toBeLessThan(MATCH_THRESHOLD);
+        }
+      }
+    });
+
+    it("the text floor limits what the primary lane adds to raw even at the cap's edge", () => {
+      // tfidf exactly at the floor is not capped, one hair under is.
+      const at = score(noFp, noFp, [], [], ENTITY_TEXT_FLOOR, 0.5);
+      const under = score(noFp, noFp, [], [], ENTITY_TEXT_FLOOR - 1e-9, 0.5);
+      expect(at.components.textFloorCapped).toBe(false);
+      expect(under.components.textFloorCapped).toBe(true);
+      expect(under.components.raw).toBeLessThanOrEqual(MATCH_THRESHOLD - 0.01);
+    });
+
+    for (const [name, ea, eb] of SIDES) {
+      it(`the subject veto (Lavrov vs Fidan) caps an entity-sparse pair at tfidf 0.9, ${name}`, () => {
+        const r = score(noFp, noFp, ea, eb, 0.9, 1, { aTitle: LAVROV_TITLE, bTitle: FIDAN_TITLE });
+        expect(r.components.subjectVeto).toBe(true);
+        expect(r.components.headlineLane).toBe(false);
+        // The primary component keeps its uncapped value; only raw is capped.
+        expect(r.components.primary).toBe(clip01(0.9 * ENTITY_SPARSE_TEXT_FACTOR));
+        expect(r.components.primary).toBeGreaterThan(SUBJECT_VETO_CAP);
+        expect(r.components.raw).toBe(SUBJECT_VETO_CAP);
+        expect(r.score).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+        expect(isMatch(r)).toBe(false);
+      });
+
+      it(`the incident veto (Düzce vs Bolu Dağı) caps an entity-sparse pair at tfidf 0.9, ${name}`, () => {
+        const r = score(noFp, noFp, ea, eb, 0.9, 1, { aTitle: DUZCE_TITLE, bTitle: BOLU_DAGI_TITLE });
+        expect(r.components.incidentVeto).toBe(true);
+        expect(r.components.headlineLane).toBe(false);
+        expect(r.components.primary).toBe(clip01(0.9 * ENTITY_SPARSE_TEXT_FACTOR));
+        expect(r.components.primary).toBeGreaterThan(SUBJECT_VETO_CAP);
+        expect(r.components.raw).toBe(SUBJECT_VETO_CAP);
+        expect(r.score).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+        expect(isMatch(r)).toBe(false);
+      });
+    }
+
+    it("the vetoes also cap the MinHash lane of an entity-sparse pair", () => {
+      const body = "Dışişleri Bakanları Toplantısı marjında Japonya ile iki ülke arasındaki yatırımlar ele alındı";
+      const fa = fingerprint(LAVROV_TITLE, body);
+      const fb = fingerprint(FIDAN_TITLE, body);
+      const r = score(fa, fb, [], [], 0.9, 0.5, { aTitle: LAVROV_TITLE, bTitle: FIDAN_TITLE });
+      expect(r.components.jaccardScore).toBeGreaterThan(SUBJECT_VETO_CAP);
+      expect(r.components.subjectVeto).toBe(true);
+      expect(r.score).toBeLessThanOrEqual(SUBJECT_VETO_CAP);
+    });
+  });
+
+  describe("(d) the other lanes are untouched on entity-sparse pairs", () => {
+    it("the strict-fingerprint auto-accept still returns 1 x sourcePenalty", () => {
+      const same = { strict: "same", signature: null };
+      const r = score(same, same, [], ["tbmm"], 0.1, 20, { aSourceSlug: "haberler-com", bSourceSlug: "sozcu" });
+      expect(r.components.autoAccept).toBe(true);
+      expect(r.components.primary).toBe(1);
+      expect(r.score).toBe(0.85);
+    });
+
+    it("the headline lane still carries a pair whose text-only primary is low", () => {
+      const [a, b] = TITLE_PAIRS[3]!;
+      const r = score(noFp, noFp, [], [], 0.25, 0.2, { aTitle: a, bTitle: b });
+      expect(r.components.headlineLane).toBe(true);
+      expect(r.components.primary).toBe(clip01(0.25 * ENTITY_SPARSE_TEXT_FACTOR));
+      expect(r.components.raw).toBeGreaterThan(r.components.primary);
+      expect(r.components.raw).toBe(0.5 + 0.5 * r.components.headlineSim);
+    });
+
+    it("the MinHash lane still wins when it beats the text-only primary", () => {
+      const body = "Zincirleme kazaya TIR ve iki araç karıştı, ekipler olay yerine sevk edildi, yaralılar hastaneye kaldırıldı";
+      const fa = fingerprint("Ankara'da zincirleme kaza", body);
+      const fb = fingerprint("Ankara'da TIR ve iki araç çarpıştı", body);
+      const r = score(fa, fb, [], [], 0.1, 0.5);
+      expect(r.components.jaccardScore).toBeGreaterThan(r.components.primary);
+      expect(r.components.raw).toBe(r.components.jaccardScore);
+    });
+
+    it("time decay and the source penalty still multiply the text-only primary", () => {
+      const r = score(noFp, noFp, [], [], 0.8, 12, { aSourceSlug: "haberler-com", bSourceSlug: "sozcu" });
+      expect(r.components.primary).toBe(clip01(0.8 * ENTITY_SPARSE_TEXT_FACTOR));
+      expect(r.score).toBe(r.components.raw * (1 - 12 / TIME_WINDOW_HOURS) * 0.85);
+    });
+
+    it("the factor is a strict boost over the weighted formula only when an entity side is empty", () => {
+      expect(ENTITY_SPARSE_TEXT_FACTOR).toBe(0.9);
+      expect(ENTITY_SPARSE_TEXT_FACTOR).toBeGreaterThan(TFIDF_WEIGHT);
+      expect(ENTITY_SPARSE_TEXT_FACTOR).toBeLessThan(1);
+      // One entity on each side (shared or not) keeps the weighted formula.
+      const shared = score(noFp, noFp, ["tbmm"], ["tbmm"], 0.6, 1);
+      const apart = score(noFp, noFp, ["tbmm"], ["chp"], 0.6, 1);
+      expect(apart.components.primary).toBe(TFIDF_WEIGHT * 0.6 + ENTITY_WEIGHT * 0);
+      expect(shared.components.primary).toBe(
+        TFIDF_WEIGHT * 0.6 + ENTITY_WEIGHT * shared.components.entityRatio,
+      );
+    });
   });
 });

@@ -15,8 +15,11 @@
 //      can pre-compute it once per item without depending on the legacy
 //      worker module.
 //
-// Sports-source tagging, the keyword classifier, the entity decoder, and
-// the image extractor are ported verbatim — they are dialect, not algorithm.
+// Sports-source tagging, the entity decoder, and the image extractor are
+// ported verbatim — they are dialect, not algorithm. The keyword classifier is
+// NOT: it lives in `./category.ts` (hunt-19: folded ASCII keywords with word
+// boundaries, title + description only, the URL read for its section alone) and
+// is imported here. `content_hash` does not depend on the category.
 
 import { sha1, strictFingerprint } from "../cluster/fingerprint.ts";
 import {
@@ -34,16 +37,10 @@ import {
 } from "../image-url.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 import { isLegalNotice } from "./legal-notice.ts";
+import { classifyCategory } from "./category.ts";
+import type { NewsCategory } from "./category.ts";
 
-export type NewsCategory =
-  | "son_dakika"
-  | "politika"
-  | "dunya"
-  | "ekonomi"
-  | "spor"
-  | "teknoloji"
-  | "yasam"
-  | "genel";
+export type { NewsCategory } from "./category.ts";
 
 /**
  * Optional tally the caller passes to `normalizeItem` / `normalizeArticles`.
@@ -68,9 +65,10 @@ export interface NormalizedArticle {
 }
 
 // ---------------------------------------------------------------------------
-// Category classifier
+// Category: sports-source override (the keyword classifier is ./category.ts)
 // ---------------------------------------------------------------------------
 
+// A feed that is only sport is tagged spor whatever its headlines say.
 const SPORTS_SOURCE_SLUGS: ReadonlySet<string> = new Set([
   "fotomac",
   "fotospor",
@@ -79,71 +77,6 @@ const SPORTS_SOURCE_SLUGS: ReadonlySet<string> = new Set([
   "kontraspor",
   "ajansspor",
 ]);
-
-const CATEGORY_RULES: ReadonlyArray<{ category: NewsCategory; keywords: RegExp }> = [
-  {
-    category: "son_dakika",
-    keywords: /son\s*dakika|flaş\s*haber|breaking|acil|sondakika/i,
-  },
-  {
-    category: "spor",
-    keywords:
-      /futbol|süper\s*lig|galatasaray|fenerbahçe|beşiktaş|trabzonspor|basketbol|voleybol|şampiyonlar\s*ligi|milli\s*takım|gol|maç|transfer|teknik\s*direktör|stadyum|olimpiyat|uefa|fifa|tff/i,
-  },
-  {
-    category: "politika",
-    keywords:
-      /erdoğan|chp|akp|ak\s*parti|mhp|hdp|tbmm|meclis|cumhurbaşkan|bakan(lık)?|seçim|oy|muhalefet|hükümet|vekil|siyaset|anayasa|parti\s*genel|içişleri|dışişleri/i,
-  },
-  {
-    category: "dunya",
-    keywords:
-      /abd|amerika|rusya|ukrayna|çin|avrupa|nato|bm|birleşmiş\s*milletler|eu|ingiltere|almanya|fransa|iran|israil|filistin|suriye|irak|dünya|uluslararası|küresel/i,
-  },
-  {
-    category: "ekonomi",
-    keywords:
-      /dolar|euro|tl|enflasyon|faiz|borsa|merkez\s*bankası|bist|ekonomi|ihracat|ithalat|büyüme|gsyih|vergi|maaş|asgari\s*ücret|zam|piyasa|kur/i,
-  },
-  {
-    category: "teknoloji",
-    keywords:
-      /yapay\s*zeka|ai|iphone|samsung|google|microsoft|apple|siber|yazılım|uygulama|robot|teknoloji|dijital|startup|kripto|bitcoin|blockchain/i,
-  },
-  {
-    category: "yasam",
-    keywords:
-      /sağlık|eğitim|üniversite|deprem|hava\s*durumu|trafik|kaza|yangın|sel|çevre|kültür|sanat|müzik|sinema|dizi|magazin|yaşam/i,
-  },
-];
-
-function detectCategoryFromUrl(url: string): NewsCategory | null {
-  const path = url.toLowerCase();
-  if (/\/spor\/|\/sport/.test(path)) return "spor";
-  if (/\/siyaset\/|\/politika\/|\/politi/.test(path)) return "politika";
-  if (/\/ekonomi\/|\/finans\/|\/economy/.test(path)) return "ekonomi";
-  if (/\/teknoloji\/|\/tech/.test(path)) return "teknoloji";
-  if (/\/dunya\/|\/world\/|\/global/.test(path)) return "dunya";
-  if (/\/yasam\/|\/life\/|\/saglik\/|\/egitim/.test(path)) return "yasam";
-  return null;
-}
-
-function classifyCategory(
-  title: string,
-  description: string | null,
-  url: string,
-): NewsCategory {
-  const text = `${title} ${description ?? ""} ${url}`.toLowerCase();
-  const first = CATEGORY_RULES[0];
-  if (first && first.keywords.test(text)) return first.category;
-  const urlCategory = detectCategoryFromUrl(url);
-  if (urlCategory) return urlCategory;
-  for (let i = 1; i < CATEGORY_RULES.length; i++) {
-    const rule = CATEGORY_RULES[i];
-    if (rule && rule.keywords.test(text)) return rule.category;
-  }
-  return "genel";
-}
 
 // ---------------------------------------------------------------------------
 // Image extraction
