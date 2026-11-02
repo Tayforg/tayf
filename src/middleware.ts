@@ -379,6 +379,18 @@ function notFoundRewrite(req: NextRequest): NextResponse {
   return NextResponse.rewrite(new URL(NOT_FOUND_REWRITE_PATH, req.url));
 }
 
+// The admin shell is session-gated, never shared content. Without a header Next
+// serves it (and the 307 to the login page) as `public, max-age=0,
+// must-revalidate`, which lets a shared cache hold the login page and the
+// redirect. Every response of the admin branch below carries this instead; the
+// /api/admin handlers do the same through withAdminNoStore.
+const ADMIN_PAGE_CACHE_CONTROL = "private, no-store";
+
+function adminNoStore<T extends Response>(res: T): T {
+  res.headers.set("Cache-Control", ADMIN_PAGE_CACHE_CONTROL);
+  return res;
+}
+
 const BAD_ENCODING_MESSAGE = "Bad request: malformed URL encoding";
 const BAD_ENCODING_JSON = JSON.stringify({ error: BAD_ENCODING_MESSAGE });
 
@@ -674,7 +686,7 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
   if (lower !== "/admin" && !lower.startsWith("/admin/")) return notFoundRewrite(req);
 
   if (pathname === "/admin/login" || pathname.startsWith("/admin/login/")) {
-    return NextResponse.next();
+    return adminNoStore(NextResponse.next());
   }
 
   const secret = process.env.ADMIN_SESSION_SECRET;
@@ -683,7 +695,7 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
   const authenticated =
     secret && password ? await verifyAdminToken(token, secret, password) : false;
   if (!authenticated) {
-    return NextResponse.redirect(new URL("/admin/login", req.url), 307);
+    return adminNoStore(NextResponse.redirect(new URL("/admin/login", req.url), 307));
   }
-  return NextResponse.next();
+  return adminNoStore(NextResponse.next());
 }

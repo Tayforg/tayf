@@ -16,7 +16,10 @@
 //
 // Wired call sites (WCAG 3.1.2, h17-a11y-2 and h23-a11y-1):
 //   - /source/[slug]: title and excerpt, by slug.
-//   - Home story cards: by display name (no slug in their projection).
+//   - Home story cards: by display name (no slug in their projection). The
+//     card's <h2> headline is the cluster headline, so it takes headlineLang:
+//     'en' only when an English member's title IS the headline (an
+//     unneutralised extractive one) and no Turkish member carries it too.
 //   - Cluster page (src/app/cluster/[id]/page.tsx): the <h1> and the "Özgün
 //     başlık" disclosure when EVERY member is English (clusterTextLang; the
 //     <h1> is skipped when title_method is 'llm', because that neutral rewrite
@@ -129,4 +132,42 @@ export function clusterTextLang(
     if (sourceLang(src) !== "en") return undefined;
   }
   return "en";
+}
+
+/** Trims and collapses whitespace runs; anything that is not a string is "". */
+function normaliseTitle(title: unknown): string {
+  return typeof title === "string" ? title.replace(/\s+/g, " ").trim() : "";
+}
+
+/**
+ * `'en'` when a story card's headline can be traced to an English outlet's own
+ * article title, otherwise `undefined` (React renders no `lang` attribute for
+ * `undefined`, so the Turkish card chrome keeps the inherited `tr`).
+ *
+ * An extractive cluster headline IS one member's title; an LLM-neutralised one
+ * is Turkish and matches none. So the headline is English only if at least one
+ * English-language member (`lang: 'en'`) has the same title once both sides are
+ * trimmed and whitespace-collapsed, AND no Turkish member (`lang: undefined`)
+ * has that same title: a title both a Turkish and an English outlet published
+ * verbatim cannot be claimed as English. Matching is exact otherwise (case
+ * included); a headline whose source article is not among `members` stays
+ * `undefined`, the same as before. An empty headline or an empty list says
+ * nothing and gives `undefined`. Never throws, whatever it is handed.
+ */
+export function headlineLang(
+  headline: string,
+  members: readonly { title: string; lang: "en" | undefined }[],
+): "en" | undefined {
+  const target = normaliseTitle(headline);
+  if (target === "" || !Array.isArray(members) || members.length === 0) {
+    return undefined;
+  }
+  let english = false;
+  for (const member of members) {
+    if (!member || normaliseTitle(member.title) !== target) continue;
+    // A Turkish member with the same title vetoes the claim outright.
+    if (member.lang !== "en") return undefined;
+    english = true;
+  }
+  return english ? "en" : undefined;
 }

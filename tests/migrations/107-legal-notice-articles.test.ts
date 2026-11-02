@@ -9,6 +9,7 @@ import {
   LEGAL_NOTICE_PATTERNS,
 } from "../../supabase/functions/_shared/rss/legal-notice";
 import { LEGAL_NOTICE_CASES } from "../fixtures/legal-notice-cases";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // Static SQL-contract test for migration 107 (BİK court / official notices are
 // excluded from the ticker attention counts): a service-role-only table of
@@ -372,6 +373,8 @@ describe("migration 107_legal_notice_articles.sql (SQL contract)", () => {
 describe.runIf(Boolean(process.env.TAYF_PSQL))(
   "migration 107: public.is_legal_notice() agrees with isLegalNotice() on the shared fixtures (live Postgres)",
   () => {
+    assertLiveReady("107", { ledger: ["107"], functions: ["public.is_legal_notice(text,text)"] });
+
     function lit(tag: string, value: string): string {
       // Unique dollar-quote tag per literal; never occurs inside the value.
       expect(value).not.toContain(`$${tag}$`);

@@ -1,6 +1,12 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
-import { apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
+import {
+  ALLOW_GET_POST,
+  apiMethodNotAllowed,
+  apiOptionsAllow,
+  apiTooManyRequests,
+  withApiErrors,
+} from "@/lib/api/errors";
 import { INTERSTITIAL_HEADERS, interstitialPage } from "@/lib/newsletter/interstitial";
 import { siteUrl } from "@/lib/site-url";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
@@ -151,3 +157,16 @@ export const POST = withApiErrors(async (request: Request) => {
     (existing as { confirmed_at: string | null } | null)?.confirmed_at != null;
   return redirectTo(alreadyConfirmed ? "onaylandi" : "gecersiz", 303);
 });
+
+// PUT, PATCH and DELETE get the JSON 405 with `Allow` (RFC 9110 15.5.6) instead of
+// Next's bodyless default, and OPTIONS is explicit: without it Next's automatic
+// OPTIONS would list only what this file exports. GET (the interstitial) and POST
+// (the confirmation) are served above; HEAD derives from GET.
+const refuse = async () => apiMethodNotAllowed(ALLOW_GET_POST);
+export const PUT = refuse;
+export const PATCH = refuse;
+export const DELETE = refuse;
+
+export function OPTIONS(): Response {
+  return apiOptionsAllow(ALLOW_GET_POST);
+}

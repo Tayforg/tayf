@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 135 ("cluster-title-key-idx").
@@ -397,6 +398,8 @@ describe("135 header: documentation sections", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("135 against a live Postgres", () => {
+  assertLiveReady("135", {});
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 import { BIAS_TO_ZONE, ZONE_KEYS } from "../../supabase/functions/_shared/cluster/blindspot";
 import { VOTING_SOURCE_KINDS } from "../../supabase/functions/_shared/cluster/source-kind";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 114 ("sources-newly-dark").
@@ -601,6 +602,8 @@ describe("114 secrets", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("114 sources_newly_dark against fixtures (live Postgres)", () => {
+  assertLiveReady("114", { ledger: ["114"], relations: ["public.ops_dark_source_baseline"], functions: ["public.ops_health_report()"] });
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

@@ -4,6 +4,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { applyRecallVeto } from "@/lib/clusters/recall-veto";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 138 ("saved-clusters-veto").
@@ -321,6 +322,8 @@ describe("migration 138: SQL predicate parity with applyRecallVeto", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("migration 138: public.saved_clusters_v2() (live Postgres)", () => {
+  assertLiveReady("138", { ledger: ["124", "138"], functions: ["public.saved_clusters_v2(uuid[])"] });
+
   const FIXTURES: ReadonlyArray<{
     id: string;
     isBlindspot: boolean;

@@ -17,15 +17,16 @@
 --
 -- Run twice, each on a fresh data dir (from the repo root):
 --   PGBIN=/opt/homebrew/opt/postgresql@15/bin
---   D=/private/tmp/claude-501/-Users-fatihhekimoglu/1acb1ff4-979e-4aaa-8131-2db2e1d46641/scratchpad/pg-w1-chain   # remove and re-initdb for the second run
+--   D=$(mktemp -d)   # a fresh data dir for each of the two runs
 --   $PGBIN/initdb -D $D -U postgres -A trust >/dev/null
 --   $PGBIN/pg_ctl -D $D -o "-p 55153 -c listen_addresses=127.0.0.1 -c unix_socket_directories=" -l $D/log -w start
 --   $PGBIN/psql -h 127.0.0.1 -p 55153 -U postgres -X -v ON_ERROR_STOP=1 \
---     -f /Users/fatihhekimoglu/.claude/jobs/c644d1b7/tmp/jevtest/qa/stub.sql -f tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql
+--     -f tests/migrations/sql/stub.sql -f tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql
 --   (the same scenarios as live vitest cases, on the server this leaves behind:
 --    TAYF_PSQL=$PGBIN/psql TAYF_SHAPE=chain PGHOST=127.0.0.1 PGPORT=55153 PGUSER=postgres PGDATABASE=postgres \
 --      npx vitest run tests/migrations/152-schema-parity)
 --   $PGBIN/pg_ctl -D $D -m immediate stop     # always stop the server after
+-- or: bash tests/migrations/sql/run-live.sh
 --   (the NOTICE of the skipped alignment check is on stderr: add 2>&1 and grep "152:")
 --
 -- (\ir paths below are relative to this file.) Every check is a DO block or a pg_temp

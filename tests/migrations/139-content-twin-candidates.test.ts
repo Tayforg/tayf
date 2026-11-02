@@ -13,6 +13,7 @@ vi.mock("@/lib/supabase/server", () => ({
 }));
 
 import { CONTENT_TWIN, CONTENT_TWIN_GENERIC_STEMS, isContentTwinCandidate, stemOverlap } from "@/lib/admin/content-twins";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Migration 139 ("content-twin-candidates"): public.admin_content_twin_pairs(),
@@ -233,6 +234,8 @@ describe("migration 139_content_twin_candidates.sql (SQL contract)", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("139 admin_content_twin_pairs against fixtures (live Postgres)", () => {
+  assertLiveReady("139", { ledger: ["139"], functions: ["public.admin_content_twin_pairs(integer,integer)", "public.tayf_search_fold(text)"] });
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

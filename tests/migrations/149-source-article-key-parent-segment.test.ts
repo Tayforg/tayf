@@ -13,6 +13,7 @@ import {
   sourceArticleKey,
 } from "../../supabase/functions/_shared/rss/article-key";
 import { SOURCE_ARTICLE_KEY_CASES } from "../fixtures/source-article-key-cases";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // Static SQL-contract test for migration 149: public.source_article_key(text)
 // re-created with the two host-anchored parent-segment rules of
@@ -402,6 +403,8 @@ describe("migration 149_source_article_key_parent_segment.sql (SQL contract)", (
 describe.runIf(Boolean(process.env.TAYF_PSQL))(
   "migration 149: public.source_article_key() (live Postgres)",
   () => {
+    assertLiveReady("149", { ledger: ["113", "149"], functions: ["public.source_article_key(text)"] });
+
     function lit(tag: string, value: string): string {
       // Unique dollar-quote tag per literal; never occurs inside the value.
       expect(value).not.toContain(`$${tag}$`);

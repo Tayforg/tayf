@@ -571,6 +571,61 @@ npm test
 
 ---
 
+## Running the live migration tests
+
+Most files in `tests/migrations/` have a static tier (reads the SQL, always runs) and some also a live tier: a `describe.runIf(Boolean(process.env.TAYF_PSQL))` block that runs the migration and its fixtures on a real Postgres. Without a database that tier skips and `npm test` stays database-free. `tests/migrations/sql/run-live.sh` builds the databases and runs the live tier for real:
+
+```bash
+PATH="$HOME/.local/share/node-24/bin:$PATH" bash tests/migrations/sql/run-live.sh
+```
+
+It takes about half a minute and needs only a local PostgreSQL 15 (Homebrew `postgresql@15` is found by default). It does two things:
+
+1. **Phase A.** Every `tests/migrations/sql/*-dryrun.sql` runs on its own fresh database (stub loaded first) and must exit 0 and print its `DRYRUN ... OK` line.
+2. **Phase B.** Every `run` line of `tests/migrations/sql/live-manifest.txt` gets a fresh database: `tests/migrations/sql/stub.sql`, then the entry's setup files, then vitest on that one test file with `TAYF_PSQL` and `PGDATABASE` set. Each live block expects its own database state (`140 applied`, `122 and 136 applied`, "the state the dry-run leaves behind"), which is why no database is shared.
+
+It ends with a table (file, env, passed, failed, skipped), the totals and every `pending` entry with its reason, and exits 1 on a setup error, a failed test, a file with no passing test, or more skipped tests than the entry allows.
+
+The server is a private, throwaway PostgreSQL on a unix socket (no TCP port, so concurrent runs never collide) that is stopped and deleted on exit. The stub (`tests/migrations/sql/stub.sql`) is tracked in the repo, holds no secrets, and ends with a deliberately pessimistic Supabase-like prelude (`service_role` with `BYPASSRLS`, permissive default privileges), so every migration's revokes are really exercised.
+
+| Knob | Effect |
+| --- | --- |
+| `PGBIN` | Directory with `initdb`, `pg_ctl`, `psql`. Default: Homebrew `postgresql@15`, else the directory of `initdb` on `PATH`. |
+| `TAYF_PSQL` | The `psql` binary the tests use. Default: `$PGBIN/psql` (or `psql` on `PATH` in external mode). |
+| `TAYF_LIVE_ONLY` | Run only the dry-run scripts and manifest entries whose file name contains this text, e.g. `TAYF_LIVE_ONLY=140`. |
+| `TAYF_LIVE_KEEP` | `1`: keep the data directory, the socket directory and the logs for inspection (the server is still stopped). |
+| `TAYF_PG_EXTERNAL` | `1`: do not start a server; use the caller's `PGHOST`, `PGPORT`, `PGUSER` (the CI service container). |
+
+### The manifest
+
+`tests/migrations/sql/live-manifest.txt` has one entry per test file that has a live block (`#` starts a comment, fields are separated by ` | `):
+
+- `run | <test file> | <setup files, or -> | <TAYF_* KEY=VAL env, or -> | <allowed skips>`: the file gets a fresh database, the stub, the setup files in order (raw migrations, or a dry-run script that leaves the state behind), and runs. Allowed skips is normally `0`, so a live test that quietly skips fails the run.
+- `pending | <test file> | <reason>`: a live suite that cannot run in the harness yet. The reason (at least 20 characters) is the first real error seen or what it needs. Pending entries are listed at the end of every run so they stay visible. Today: `128` (the stub's foreign keys lack `ON DELETE CASCADE`, which that block expects) and the three suites that need a full local Supabase stack (`SUPABASE_LOCAL_URL`: `024-028`, `058`, `081`).
+
+### Adding a live test
+
+1. In the test file call `assertLiveReady("<NNN>", { ledger: [...], relations: [...], functions: [...] })` as the FIRST statement inside the `describe.runIf(Boolean(process.env.TAYF_PSQL))` body (import it from `tests/_helpers/live-db.ts`). It first refuses a database that is, or looks like, production (see below), then checks that the stub and the named ledger versions, relations and function signatures exist, and THROWS from `beforeAll` otherwise, so a wrongly built database fails the file instead of failing in the middle with a confusing SQL error. Pass `{}` when the block applies its own migration.
+2. Add a `run` line to the manifest (or a `pending` line with the reason).
+
+`tests/migrations/live-harness.test.ts` runs in plain `npm test` and enforces both: every test file that mentions the live gates must be in the manifest, every manifest file and setup file must exist, and every live describe must start with `assertLiveReady(`. It also keeps machine-local paths out of `tests/migrations`.
+
+### Never point it at production
+
+Three independent layers, because the live blocks apply migrations twice outside any transaction and write fixtures, and production has every ledger row, relation and function a block looks for:
+
+1. **The runner vets where it connects.** `run-live.sh` creates and drops databases (`tayf_live_*`). In the default mode it only talks to its own private server. With `TAYF_PG_EXTERNAL=1` it REFUSES to run unless `PGHOST` is `localhost`, `127.0.0.1`, `::1` or an absolute socket directory (and `PGHOSTADDR` / `PGSERVICE` are unset). It also vets the manifest before it starts anything: the env field of a `run` line may set only `TAYF_*` test knobs (today `TAYF_SHAPE`). `PGHOST`, `PGHOSTADDR`, `PGSERVICE`, `PGPORT`, `PGOPTIONS`, `NODE_OPTIONS`, and the runner's own `TAYF_PSQL`, `TAYF_PG_EXTERNAL` and `TAYF_LIVE_*` are refused with exit 2, because those pairs would reach vitest after the host check. `live-harness.test.ts` enforces the same rule on the manifest in plain `npm test`.
+2. **Every live block vets the database it is connected to.** `assertLiveReady` (first statement of each live `describe`) asks the database itself, before looking for any object, and THROWS (the file fails, it never skips) when `inet_server_addr()` is not null (unix socket), loopback or a private-network address, or when a schema only a Supabase project has (`auth`, `storage`, `supabase_functions`) exists. This also catches what the `PGHOST` check cannot: ambient `PG*` variables or `~/.pgpass` in the shell that runs `npx vitest run tests/migrations`, and an SSH tunnel to a Supabase project on localhost. Private ranges are allowed on purpose: a published Docker port reaches the CI service container on its own `172.x` address, never on `127.0.0.1`. The schema check is the one that identifies a Supabase project; the address check is a second line. The database name is not checked: production is called `postgres`, and the dry-run headers use `postgres` and other names on local servers.
+3. **The stub refuses too.** `tests/migrations/sql/stub.sql` starts with `\set ON_ERROR_STOP on` and a guard that raises before anything is created or altered when `public.sources` already exists (it loads only into a fresh database), when `auth`, `storage`, `supabase_functions` or `cron` exists, or when the server address is not local or private. Without it, a mistaken `psql -f tests/migrations/sql/stub.sql` against a Supabase project would exit 0, skip the `create table`s that fail, and still run the closing `alter default privileges ... grant all ... to anon, authenticated, service_role`, silently undoing migration 117's default revoke for every future table. `tests/migrations/stub-guard.test.ts` proves it on scratch databases (it is a manifest entry like any other live file).
+
+Do not work around any of these: nothing here applies a migration to a Supabase project, and the stub is not a copy of production. Never give the stub, the dry-run scripts or `TAYF_PSQL` a remote connection string.
+
+### CI
+
+The `live-db` job in `.github/workflows/ci.yml` runs the same script against a `postgres:15` service container (`TAYF_PG_EXTERNAL=1`, `PGHOST=localhost`, trust authentication on a container that exists only for the job). It installs with `npm ci --ignore-scripts` and holds no repository credential, so a live block that breaks shows up as a red check, not as `skipped`.
+
+---
+
 ## Roll-back
 
 Fastest path first: if the breakage is in the Vercel deploy, `vercel rollback <prior-prod-deployment-url>` (or Dashboard → Deployments → ⋯ → Promote to Production) restores the previous production deployment instantly, no rebuild. The git-revert path below is the durable fix once the fire is out.

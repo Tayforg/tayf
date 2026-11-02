@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 import { BIAS_TO_ZONE, ZONE_KEYS } from "../../supabase/functions/_shared/cluster/blindspot";
 import { VOTING_SOURCE_KINDS } from "../../supabase/functions/_shared/cluster/source-kind";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 143 ("weekly_words_sample"), h14-perf-1.
@@ -681,12 +682,14 @@ describe("143 weekly_words_sample: parity with src/lib/weekly/distinctive-words-
 // ---------------------------------------------------------------------------
 // Live block (opt-in). TAYF_PSQL is the psql binary and PGHOST/PGPORT/PGUSER/
 // PGDATABASE point at a THROWAWAY database with the shared stub schema
-// (jevtest/qa/stub.sql: the three roles, public.sources, public.articles with
+// (tests/migrations/sql/stub.sql: the three roles, public.sources, public.articles with
 // title, url and created_at, supabase_migrations), service_role created with
 // BYPASSRLS as Supabase has it, and 143 applied. Every check runs inside a
 // transaction that is rolled back.
 // ---------------------------------------------------------------------------
 describe.runIf(Boolean(process.env.TAYF_PSQL))("143 against a live Postgres (143 applied)", () => {
+  assertLiveReady("143", { ledger: ["143"], relations: ["public.weekly_words_sample"], functions: ["public.weekly_words_sample_refresh(integer)"] });
+
   function psqlArgs(): string[] {
     return ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"];
   }

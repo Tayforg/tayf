@@ -3,15 +3,16 @@
 -- Run twice, each on a fresh data dir (from the repo root). The servers listen on 127.0.0.1 only (no
 -- unix socket: the scratchpad path is longer than a socket path may be):
 --   PGBIN=/opt/homebrew/opt/postgresql@15/bin
---   D=/private/tmp/claude-501/-Users-fatihhekimoglu/1acb1ff4-979e-4aaa-8131-2db2e1d46641/scratchpad/pg-bh-w3-a   # pg-bh-w3-b and port 55732 for the second run
+--   D=$(mktemp -d)   # a fresh data dir for each of the two runs
 --   $PGBIN/initdb -D $D -U postgres -A trust >/dev/null
 --   $PGBIN/pg_ctl -D $D -o "-p 55731 -c listen_addresses=127.0.0.1 -c unix_socket_directories=" -l $D/log -w start
 --   $PGBIN/psql -h 127.0.0.1 -p 55731 -U postgres -X -v ON_ERROR_STOP=1 \
---     -f /Users/fatihhekimoglu/.claude/jobs/c644d1b7/tmp/jevtest/qa/stub.sql -f tests/migrations/sql/153-worker-metrics-named-queues-dryrun.sql
+--     -f tests/migrations/sql/stub.sql -f tests/migrations/sql/153-worker-metrics-named-queues-dryrun.sql
 --   (the same scenarios as live vitest cases, on the server this leaves behind:
 --    TAYF_PSQL=$PGBIN/psql PGHOST=127.0.0.1 PGPORT=55731 PGUSER=postgres PGDATABASE=postgres \
 --      npx vitest run tests/migrations/153-worker-metrics-named-queues)
 --   $PGBIN/pg_ctl -D $D -m immediate stop     # always stop the server after
+-- or: bash tests/migrations/sql/run-live.sh
 --
 -- (\ir paths below are relative to this file.) Every check is a DO block that raises on mismatch, so a
 -- clean run ending in "DRYRUN 153 OK" is the pass. Every scenario that writes sits inside begin ... rollback.

@@ -4,6 +4,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { foldTr } from "../../src/lib/clusters/turkish-query";
 import { headlineTokens } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 146 ("cluster-stem-probe"), hunt 19
@@ -597,6 +598,8 @@ describe("146 parity model: the edges of the rule", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("146 against a live Postgres", () => {
+  assertLiveReady("146", {});
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

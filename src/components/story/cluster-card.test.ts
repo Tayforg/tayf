@@ -518,7 +518,32 @@ describe("cluster-card.tsx English headline language (h17-a11y-2, WCAG 3.1.2)", 
     );
   });
 
-  it("no other lang= appears in the file (source name and chrome stay Turkish)", () => {
-    expect(src.match(/\blang=/g)).toHaveLength(1);
+  it("imports headlineLang from @/lib/sources/source-language", () => {
+    expect(src).toMatch(
+      /import\s*\{[^}]*\bheadlineLang\b[^}]*\}\s*from\s*["']@\/lib\/sources\/source-language["']/,
+    );
+  });
+
+  it("derives headlineLangAttr from the cluster headline and the resolved articles' titles and langs", () => {
+    expect(count(src, "const headlineLangAttr = headlineLang(")).toBe(1);
+    expect(src).toMatch(
+      /const headlineLangAttr = headlineLang\(\s*cluster\.title_tr,\s*resolved\.map\(\(a\) => \(\{ title: a\.title, lang: a\.title_lang \}\)\),?\s*\);/,
+    );
+    // Declared once `resolved` exists.
+    expect(src.indexOf("const headlineLangAttr")).toBeGreaterThan(src.indexOf("const resolved = articles"));
+  });
+
+  it("the card's h2 carries lang={headlineLangAttr} next to id={headingId}", () => {
+    const h2Tags = openingTagsOf(src, "<h2");
+    expect(h2Tags).toHaveLength(1);
+    expect(h2Tags[0]).toContain("lang={headlineLangAttr}");
+    expect(h2Tags[0]).toContain("id={headingId}");
+    expect(count(src, "lang={headlineLangAttr}")).toBe(1);
+    // The h2 still renders the cluster headline.
+    expect(src).toMatch(/<h2\b[^>]*>\s*\{cluster\.title_tr\}\s*<\/h2>/);
+  });
+
+  it("no other lang= appears in the file: the article title span and the h2 only (source name and chrome stay Turkish)", () => {
+    expect(src.match(/\blang=/g)).toHaveLength(2);
   });
 });

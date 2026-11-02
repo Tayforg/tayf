@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 147 ("cluster_twin_bridges"), the
@@ -238,12 +239,14 @@ describe("147 cluster_twin_bridges: operator header", () => {
 // ---------------------------------------------------------------------------
 // Live block (opt-in). TAYF_PSQL is the psql binary and PGHOST/PGPORT/PGUSER/
 // PGDATABASE point at a THROWAWAY database with the shared stub schema
-// (jevtest/qa/stub.sql: the three roles, public.articles, supabase_migrations),
+// (tests/migrations/sql/stub.sql: the three roles, public.articles, supabase_migrations),
 // default privileges that mimic Supabase's, service_role created with BYPASSRLS as
 // Supabase has it, and 147 applied. Every check runs inside a transaction that is
 // rolled back.
 // ---------------------------------------------------------------------------
 describe.runIf(Boolean(process.env.TAYF_PSQL))("147 against a live Postgres (147 applied)", () => {
+  assertLiveReady("147", { ledger: ["147"], relations: ["public.cluster_twin_bridges"] });
+
   const ART = "aaaaaaaa-0000-4000-8000-00000000a001";
   const CA = "2c9941bd-b6b4-417d-a225-ba45f77e2158";
   const CB = "8ab93bbd-0433-49df-b333-4b358c03897c";

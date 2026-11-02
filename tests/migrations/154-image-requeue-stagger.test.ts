@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test, FIFO simulation and (opt-in) live checks for migration
@@ -680,11 +681,13 @@ describe("154 image_requeue_stagger: dry-run script", () => {
 // ---------------------------------------------------------------------------
 // Live block (opt-in). TAYF_PSQL is the psql binary and PGHOST/PGPORT/PGUSER/
 // PGDATABASE point at the THROWAWAY database the dry-run script leaves behind
-// (jevtest/qa/stub.sql, the pgmq stub and fixtures of the dry-run script, 142 and
+// (tests/migrations/sql/stub.sql, the pgmq stub and fixtures of the dry-run script, 142 and
 // 154 applied). Every check that writes runs inside a transaction that is rolled
 // back. Never point this at production.
 // ---------------------------------------------------------------------------
 describe.runIf(Boolean(process.env.TAYF_PSQL))("154 against a live Postgres (154 applied)", () => {
+  assertLiveReady("154", { ledger: ["142", "154"], functions: ["public.image_backfill_requeue(integer)"] });
+
   const psqlArgs = ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"];
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, psqlArgs, {

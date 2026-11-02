@@ -8,7 +8,7 @@ import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { SourceLogo } from "@/components/source/source-logo";
 import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
 import { wireBadgeLabel, wireBadgeTitle } from "@/lib/clusters/wire";
-import { sourceLang } from "@/lib/sources/source-language";
+import { headlineLang, sourceLang } from "@/lib/sources/source-language";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution } from "@/types";
 
@@ -283,6 +283,16 @@ export function ClusterCard({
       } => a !== null
     );
 
+  // WCAG 3.1.2: an unneutralised cluster headline is one member's own title, so
+  // when that member is an English outlet's article the h2 reads English inside
+  // lang="tr". headlineLang answers 'en' only for an exact match with an English
+  // member and no Turkish one; a neutral (Turkish) headline, or one whose source
+  // article is not among this card's articles, gets no attribute.
+  const headlineLangAttr = headlineLang(
+    cluster.title_tr,
+    resolved.map((a) => ({ title: a.title, lang: a.title_lang })),
+  );
+
   // Aging dim: clusters whose latest update is older than 48h are still
   // valid but visually de-emphasised so fresher stories pop. Only the images
   // are desaturated ([&_img]:grayscale); the text keeps full contrast, since
@@ -395,7 +405,7 @@ export function ClusterCard({
                   </span>
                 </div>
               )}
-              <h2 id={headingId} className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
+              <h2 id={headingId} lang={headlineLangAttr} className="font-serif text-lg sm:text-xl lg:text-2xl font-bold leading-tight tracking-tight text-foreground line-clamp-3">
                 {cluster.title_tr}
               </h2>
               <ClusterMetaBadges

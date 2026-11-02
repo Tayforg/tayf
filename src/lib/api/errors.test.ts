@@ -7,6 +7,8 @@ vi.mock("@/lib/sentry/server", () => ({ captureServerException }));
 
 import {
   ALLOW_GET_ONLY,
+  ALLOW_GET_POST,
+  ALLOW_POST_ONLY,
   apiError,
   apiMethodNotAllowed,
   apiOptionsAllow,
@@ -138,6 +140,22 @@ describe("apiError headers passthrough", () => {
 describe("apiMethodNotAllowed", () => {
   it("exports the read-only Allow list", () => {
     expect(ALLOW_GET_ONLY).toBe("GET, HEAD, OPTIONS");
+  });
+
+  it("exports the write-route Allow lists (POST-only, and GET+POST for the token links)", () => {
+    expect(ALLOW_POST_ONLY).toBe("POST, OPTIONS");
+    expect(ALLOW_GET_POST).toBe("GET, HEAD, POST, OPTIONS");
+  });
+
+  it("carries the write-route Allow lists through the 405 and the OPTIONS 204 unchanged", () => {
+    for (const allow of [ALLOW_POST_ONLY, ALLOW_GET_POST]) {
+      const refusal = apiMethodNotAllowed(allow);
+      expect(refusal.status).toBe(405);
+      expect(refusal.headers.get("Allow")).toBe(allow);
+      const options = apiOptionsAllow(allow);
+      expect(options.status).toBe(204);
+      expect(options.headers.get("Allow")).toBe(allow);
+    }
   });
 
   it("answers a JSON 405 with Allow, no-store and the canonical body, and no CORS", async () => {

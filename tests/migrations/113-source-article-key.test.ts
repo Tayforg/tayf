@@ -14,6 +14,7 @@ import {
   sourceArticleKey,
 } from "../../supabase/functions/_shared/rss/article-key";
 import { SOURCE_ARTICLE_KEY_CASES } from "../fixtures/source-article-key-cases";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // Static SQL-contract test for migration 113 (articles.source_article_key): a
 // nullable text column, a partial index on (source_id, source_article_key),
@@ -445,6 +446,8 @@ describe("migration 113_source_article_key.sql (SQL contract)", () => {
 describe.runIf(Boolean(process.env.TAYF_PSQL))(
   "migration 113 + 149 (newest source_article_key): public.source_article_key() / articles_source_key_backfill() (live Postgres)",
   () => {
+    assertLiveReady("113", { ledger: ["113", "149"], functions: ["public.source_article_key(text)", "public.articles_source_key_backfill(timestamptz,timestamptz)"] });
+
     function lit(tag: string, value: string): string {
       // Unique dollar-quote tag per literal; never occurs inside the value.
       expect(value).not.toContain(`$${tag}$`);

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 122 ("ops-ingest-gaps").
@@ -466,6 +467,8 @@ describe("122 relies on the ingest-drain schedule of 038", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("122 ingest_gaps against fixtures (live Postgres)", () => {
+  assertLiveReady("122", {});
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,
