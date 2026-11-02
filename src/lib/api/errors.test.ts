@@ -228,6 +228,10 @@ describe("isUpstreamUnavailable", () => {
       "a postgrest-js fetch-failed transport error",
       { message: "TypeError: fetch failed", details: "", hint: "", code: "" },
     ],
+    [
+      "a postgrest-js body-phase timeout (AbortSignal.timeout rejecting res.text(), status 0)",
+      { message: "TimeoutError: The operation was aborted due to timeout", code: "", status: 0 },
+    ],
   ])("is true for %s", (_label, err) => {
     expect(isUpstreamUnavailable(err)).toBe(true);
   });
@@ -237,6 +241,15 @@ describe("isUpstreamUnavailable", () => {
     expect(isUpstreamUnavailable(chain(1, new DOMException("a", "AbortError")))).toBe(true);
     expect(
       isUpstreamUnavailable(chain(1, { message: "TypeError: fetch failed", code: "" })),
+    ).toBe(true);
+    expect(
+      isUpstreamUnavailable(
+        chain(1, {
+          message: "TimeoutError: The operation was aborted due to timeout",
+          code: "",
+          status: 0,
+        }),
+      ),
     ).toBe(true);
   });
 
@@ -263,6 +276,8 @@ describe("isUpstreamUnavailable", () => {
     ["status 429 (rate limited, not an outage)", { status: 429, message: "slow down" }],
     ["status 525 (a TLS handshake fault is not retried)", { status: 525, message: "ssl" }],
     ["a message that only contains the transport text", { message: "wrapped: TypeError: fetch failed" }],
+    ["a message that merely starts with the word TimeoutError", { message: "TimeoutError is a word", code: "XX000" }],
+    ["a message that only contains the timeout text", { message: "wrapped: TimeoutError: it timed out", code: "" }],
     ["a bare string", "AbortError"],
     ["null", null],
     ["undefined", undefined],
@@ -308,6 +323,19 @@ describe("apiServerError classification", () => {
     expect(body.code).toBe("upstream_unavailable");
     expect(errSpy).toHaveBeenCalledTimes(1);
     expect(errSpy).toHaveBeenCalledWith("[api]", body.details.request_id, raw);
+  });
+
+  it("answers the 503 for a body-phase TimeoutError (status 0, empty code), not a 500", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = apiServerError({
+      message: "TimeoutError: The operation was aborted due to timeout",
+      code: "",
+      status: 0,
+    });
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect((await res.json()).code).toBe("upstream_unavailable");
   });
 
   it("never serialises err.message", async () => {

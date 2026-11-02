@@ -19,6 +19,9 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = resolve(__dirname, "..", "..");
 const EKONOMI_PAGE = readFileSync(join(ROOT, "src/app/ekonomi/page.tsx"), "utf8");
+// The devre kesici strip moved out of the page into its own component
+// (h28-journey-3); its chips and its '+N daha' summary are scanned here.
+const BREAKER_STRIP = readFileSync(join(ROOT, "src/components/finance/breaker-strip.tsx"), "utf8");
 const MEDIA_DNA = readFileSync(join(ROOT, "src/components/story/media-dna.tsx"), "utf8");
 
 // --------------------------------------------------------------------------
@@ -178,13 +181,21 @@ describe("JSX tag slicer self-check", () => {
 });
 
 describe("WCAG 2.5.8 target size: /ekonomi stock-code links", () => {
-  const ekonomiLinks = tagsNamed(EKONOMI_PAGE, "Link").filter((tag) => {
+  const ekonomiLinks = [...tagsNamed(EKONOMI_PAGE, "Link"), ...tagsNamed(BREAKER_STRIP, "Link")].filter((tag) => {
     const href = attrValue(tag, "href");
     return href !== null && href.startsWith("`/ekonomi/");
   });
 
   it("finds the devre-kesici and KAP stock-code links (not a vacuous scan)", () => {
+    expect(tagsNamed(EKONOMI_PAGE, "Link").filter((tag) => (attrValue(tag, "href") ?? "").startsWith("`/ekonomi/"))).toHaveLength(1);
+    expect(tagsNamed(BREAKER_STRIP, "Link").filter((tag) => (attrValue(tag, "href") ?? "").startsWith("`/ekonomi/"))).toHaveLength(1);
     expect(ekonomiLinks.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("gives the strip's '+N daha' summary min-h-6 too", () => {
+    const summaries = tagsNamed(BREAKER_STRIP, "summary");
+    expect(summaries).toHaveLength(1);
+    expect(classTokens(summaries[0]!)).toEqual(expect.arrayContaining(["inline-flex", "items-center", "min-h-6"]));
   });
 
   it("gives each one inline-flex items-center min-h-6", () => {

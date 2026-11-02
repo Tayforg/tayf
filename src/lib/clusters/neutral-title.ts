@@ -69,10 +69,26 @@
 // candidate that still has a lower-case word starting with such a name
 // ('berlinden', which cannot be recased without guessing the stem) is not eligible
 // while another acceptable candidate exists (lowercaseLeak); with { floor: true }
-// it can still ship when nothing else is usable. Both apply only to the odd one
-// out on capitalisation (isOddOneOut): the first version applied the sibling forms
-// to every candidate and turned 'ilk olağan kurultayı' into 'ilk olağan Kurultayı'
-// (a sibling capitalises part of an event name) in 2 of 150 replayed clusters.
+// it can still ship when nothing else is usable. Both apply only to a candidate the
+// outlet wrote in lower case (isOddOneOut): the first version applied the sibling
+// forms to every candidate and turned 'ilk olağan kurultayı' into 'ilk olağan
+// Kurultayı' (a sibling capitalises part of an event name) in 2 of 150 replayed
+// clusters.
+
+// extractive-v4 (hunt 28, h28-live-2; still extractive-v4, NO model bump: new picks
+// only, no backfill): the h27 rule also recased a title that opens with a capital
+// when two or more of its words disagreed (the old second branch of isOddOneOut),
+// which capitalised common nouns on neutral titles: "Net Mesaj" (sibling
+// "Erdoğan'dan Net Mesaj!"), "Kadın ... Aile" (sibling "TDT Aile ve Kadın Konseyi"),
+// "Soyut Resim" (a sibling's quoted exhibition name), "Acil Sağlık". For 85deda69 the
+// recasing made the candidate odd, so the leak guard threw it out for a more
+// sensational member. The rule is now: only a lowerCaseSourced title is recased,
+// i.e. one that opens in lower case or is a speaker label ("Bilal Erdoğan:")
+// followed by a lower-case body. A title that opens with a capital already
+// capitalises its own names; its lower-case words are the outlet's choice. And a
+// sibling's capital is no evidence of a name when it sits inside a quoted span, in a
+// run of capitalised words bridged by 've' / 'ile' / 'için' / 'veya' ("TDT Aile ve
+// Kadın Konseyi") or in a run that ends with '!' ("Net Mesaj!"); see caseEvidence.
 
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
@@ -853,6 +869,20 @@ const LEAK_MAX_NAME_CHARS = 40;
 
 const SENTENCE_END_CHARS = new Set([".", ":", "!", "?", "…"]);
 const OPENING_QUOTES = new Set(['"', "“", "‘", "«", "'"]);
+const CLOSING_QUOTES = new Set(['"', "”", "»", "’", "'"]);
+/** Punctuation that may follow a closing quote ('..." dedi,' / '...".'). */
+const QUOTE_TRAILING_PUNCT = new Set([",", ".", "!", "?", ":", ";"]);
+/**
+ * A capitalised run ends at a token that carries one of these. ':' is not one:
+ * a speaker label ("Bilal Erdoğan:") runs on into what follows it.
+ */
+const RUN_END_CHARS = new Set([",", ";", ".", "!", "?", "…"]);
+/** The lower-case words that join two names or nouns ("Aile ve Kadın", "Türkiye ile Japonya"). */
+const RUN_BRIDGES = new Set(["ve", "ile", "için", "veya"]);
+/** A speaker label is the text before the first ':' and is at most this many characters ... */
+const LABEL_MAX_CHARS = 40;
+/** ... and this many words. */
+const LABEL_MAX_WORDS = 3;
 // Hyphens, dashes and the slash join two words ("Türkiye-Japonya"). One
 // character class under +, so the split is linear.
 const WORD_JOINERS = /[\s\-–—/]+/u;
@@ -875,6 +905,79 @@ function startsUpper(word: string): boolean {
   return first !== first.toLocaleLowerCase("tr");
 }
 
+/** The word of a token: its core between the edge punctuation, up to an apostrophe ("Türkiye'yi" -> "Türkiye"). "" when there is none. */
+function stemOf(token: string): string {
+  const [a, b] = coreRange(token);
+  if (a >= b) return "";
+  return splitSuffix(token.slice(a, b))[0];
+}
+
+/** True for a token whose last character, past trailing , . ! ? : ;, closes a quote. A mid-token apostrophe does not. */
+function closesQuote(token: string): boolean {
+  let end = token.length;
+  while (end > 0 && QUOTE_TRAILING_PUNCT.has(token.charAt(end - 1))) end--;
+  return end > 0 && CLOSING_QUOTES.has(token.charAt(end - 1));
+}
+
+/**
+ * Per token: whether it sits inside a quoted span. A span opens at a token whose
+ * first character is an opening quote and closes at the first token (the opening
+ * one included) that closesQuote; one that never closes runs to the end.
+ */
+function quotedFlags(tokens: readonly string[]): boolean[] {
+  const flags: boolean[] = [];
+  let open = false;
+  for (const token of tokens) {
+    if (!open && OPENING_QUOTES.has(token.charAt(0))) open = true;
+    flags.push(open);
+    if (open && closesQuote(token)) open = false;
+  }
+  return flags;
+}
+
+/**
+ * Per token: whether it is a capitalised word of a run that capitalises common
+ * nouns, so its capital says nothing about the word. A run is consecutive
+ * capitalised tokens, the title's first word included, that may bridge one
+ * lower-case connector between two of them; it ends at a token that carries one
+ * of RUN_END_CHARS. Its words are flagged when the run bridges a connector ("TDT
+ * Aile ve Kadın Konseyi") or has at least two tokens and ends with '!'
+ * ("Erdoğan'dan Net Mesaj!"). One pass over the tokens, so the cost is linear.
+ */
+function commonNounRunFlags(
+  tokens: readonly string[],
+  capital: readonly boolean[],
+  connector: readonly boolean[],
+): boolean[] {
+  const flags = tokens.map(() => false);
+  let i = 0;
+  while (i < tokens.length) {
+    if (!capital[i]) {
+      i++;
+      continue;
+    }
+    const members = [i];
+    let bridged = false;
+    let last = i;
+    while (!RUN_END_CHARS.has(tokens[last]!.charAt(tokens[last]!.length - 1))) {
+      if (capital[last + 1]) {
+        last += 1;
+      } else if (connector[last + 1] && capital[last + 2]) {
+        bridged = true;
+        last += 2;
+      } else {
+        break;
+      }
+      members.push(last);
+    }
+    if (bridged || (members.length >= 2 && tokens[last]!.endsWith("!"))) {
+      for (const m of members) flags[m] = true;
+    }
+    i = last + 1;
+  }
+  return flags;
+}
+
 /**
  * Reads one sibling title. The evidence skips the title's first word and any
  * word right after '.', ':', '!', '?', '…' or an opening quote (a capital
@@ -885,6 +988,11 @@ function startsUpper(word: string): boolean {
  * TITLE_CASE_SHARE of its words of TITLE_CASE_MIN_LETTERS or more letters start
  * with a capital, over at least TITLE_CASE_MIN_WORDS of them) capitalises
  * common nouns too, so it adds no capital evidence; its lower-case words still count.
+ * So does a part of a title that is capitalised for another reason (h28): a word
+ * inside a quoted span (an exhibition or film name: "Hikayenin En Güzel Yeri:
+ * Türkiye'de Soyut Resim"), and the words of a run bridged by 've' / 'ile' /
+ * 'için' / 'veya' ("TDT Aile ve Kadın Konseyi") or ending with '!' ("Net Mesaj!").
+ * They add no capital evidence either; their lower-case words still count.
  */
 function caseEvidence(title: string): CaseEvidence {
   const evidence: CaseEvidence = { spellings: new Map(), lower: new Set() };
@@ -892,13 +1000,18 @@ function caseEvidence(title: string): CaseEvidence {
   if (text === "" || isAllCaps(text) || hasShoutedRun(text)) return evidence;
 
   const tokens = text.split(WORD_JOINERS).filter((t) => t !== "").slice(0, EVIDENCE_MAX_TOKENS);
+  const quoted = quotedFlags(tokens);
+  const stems = tokens.map(stemOf);
+  const runFlags = commonNounRunFlags(
+    tokens,
+    stems.map((stem, i) => !quoted[i] && stem !== "" && startsUpper(stem)),
+    stems.map((stem, i) => !quoted[i] && RUN_BRIDGES.has(stem)),
+  );
   let long = 0;
   let longCapitalised = 0;
-  const words: string[] = [];
+  const words: Array<{ stem: string; capitalEvidence: boolean }> = [];
   tokens.forEach((token, i) => {
-    const [a, b] = coreRange(token);
-    if (a >= b) return;
-    const [stem] = splitSuffix(token.slice(a, b));
+    const stem = stems[i]!;
     if (stem === "" || hasDigit(stem)) return;
     const letters = letterCount(stem);
     if (letters >= TITLE_CASE_MIN_LETTERS) {
@@ -908,17 +1021,17 @@ function caseEvidence(title: string): CaseEvidence {
     const prev = i > 0 ? tokens[i - 1]! : "";
     const skipped =
       i === 0 || SENTENCE_END_CHARS.has(prev.charAt(prev.length - 1)) || OPENING_QUOTES.has(token.charAt(0));
-    if (!skipped && letters >= 2) words.push(stem);
+    if (!skipped && letters >= 2) words.push({ stem, capitalEvidence: !quoted[i] && !runFlags[i] });
   });
   const titleCase = long >= TITLE_CASE_MIN_WORDS && longCapitalised / long >= TITLE_CASE_SHARE;
 
-  for (const stem of words) {
+  for (const { stem, capitalEvidence } of words) {
     const lowered = stem.toLocaleLowerCase("tr");
     if (stem === lowered) {
       evidence.lower.add(lowered);
       continue;
     }
-    if (titleCase) continue;
+    if (titleCase || !capitalEvidence) continue;
     if (stem === stem.toLocaleUpperCase("tr")) {
       // A shouted cue ("ŞOK", "SON") is the outlet's emphasis, not an acronym.
       if (STOP.has(asciiLower(stem)) || framingPenalty(lowered) > 0) continue;
@@ -1072,15 +1185,13 @@ export function lowercaseLeak(text: string, others: readonly string[]): boolean 
 }
 
 /**
- * How a candidate's words after the first stand against the sibling forms:
- *   - `disagree`: lower-case words the siblings capitalise, or lower-case words
- *     that start with a name they capitalise (the words recaseWith restores and
- *     leaksWith reports), each word once;
- *   - `agree`: words the candidate itself capitalises exactly as the siblings do.
+ * How many of a candidate's words after the first disagree with the sibling
+ * forms: lower-case words the siblings capitalise, or lower-case words that start
+ * with a name they capitalise (the words recaseWith restores and leaksWith
+ * reports), each word once.
  */
-function caseAgreement(forms: ReadonlyMap<string, string>, text: string): { agree: number; disagree: number } {
+function disagreements(forms: ReadonlyMap<string, string>, text: string): number {
   const names = leakNames(forms);
-  let agree = 0;
   let disagree = 0;
   let seenWord = false;
   for (const token of candidateTokens(text)) {
@@ -1091,15 +1202,10 @@ function caseAgreement(forms: ReadonlyMap<string, string>, text: string): { agre
       continue;
     }
     const [stem] = splitSuffix(token.slice(a, b));
-    if (letterCount(stem) === 0) continue;
-    const lowered = stem.toLocaleLowerCase("tr");
-    if (stem === lowered) {
-      if (forms.has(stem) || startsWithName(stem, names)) disagree++;
-    } else if (forms.get(lowered) === stem) {
-      agree++;
-    }
+    if (letterCount(stem) === 0 || stem !== stem.toLocaleLowerCase("tr")) continue;
+    if (forms.has(stem) || startsWithName(stem, names)) disagree++;
   }
-  return { agree, disagree };
+  return disagree;
 }
 
 /**
@@ -1112,20 +1218,38 @@ function startsLowerCase(title: string): boolean {
 }
 
 /**
- * Whether the candidate is the odd one out on capitalisation, i.e. the sibling
- * forms should be applied to it. A title the outlet wrote in lower case (it
- * opens with a lower-case letter) takes them as soon as one word disagrees. A
- * title that opens with a capital already capitalises its own names, so its
- * remaining lower-case words are the outlet's choice ("kurultayı" in "Yeni
- * Parti’nin ilk olağan kurultayı ..." against a sibling's "Olağan Kurultayı'na",
- * "savunma ittifakına" against "Mekke Ortak Savunma Anlaşması"): it takes them
- * only when at least two words disagree and more disagree than agree, as in
- * "Bilal Erdoğan: türkiye ile japonya ..." (two against one).
+ * True when the outlet wrote the title in lower case, so its names are the ones
+ * that lost their capitals: it opens with a lower-case letter, or it is a speaker
+ * label followed by a lower-case body ("Bilal Erdoğan: türkiye ile japonya ...").
+ * A label is the text before the first ':' when that sits at index 1 to
+ * LABEL_MAX_CHARS, with 1 to LABEL_MAX_WORDS words that all start with a capital
+ * ("SON DAKİKA: türkiye ..." counts; "İddia: Vali ..." and "Vali yardımcısının
+ * ölümünde yeni iddia: başsavcı ..." do not). A title that opens with a capital
+ * and has no such label capitalises its own names (h28).
+ */
+export function lowerCaseSourced(rawTitle: string): boolean {
+  const title = rawTitle.trim().slice(0, EVIDENCE_MAX_CHARS);
+  if (startsLowerCase(title)) return true;
+  const colon = title.indexOf(":");
+  if (colon < 1 || colon > LABEL_MAX_CHARS) return false;
+  const label = title.slice(0, colon).split(WORD_JOINERS).filter((w) => w !== "");
+  if (label.length < 1 || label.length > LABEL_MAX_WORDS || !label.every(startsUpper)) return false;
+  return startsLowerCase(title.slice(colon + 1));
+}
+
+/**
+ * Whether the sibling forms should be applied to the candidate. Only a title the
+ * outlet wrote in lower case (lowerCaseSourced) takes them, and only once at least
+ * one word disagrees. A title that opens with a capital already capitalises its
+ * own names, so its remaining lower-case words are the outlet's choice ("kurultayı"
+ * in "Yeni Parti’nin ilk olağan kurultayı ..." against a sibling's "Olağan
+ * Kurultayı'na", "savunma ittifakına" against "Mekke Ortak Savunma Anlaşması"): it
+ * is never odd, however many words disagree, and so never reaches the leak guard
+ * either. h27 also let such a title in when two words disagreed and more
+ * disagreed than agreed; that capitalised common nouns (h28-live-2).
  */
 function isOddOneOut(forms: ReadonlyMap<string, string>, rawTitle: string, cleaned: string): boolean {
-  const { agree, disagree } = caseAgreement(forms, cleaned);
-  if (startsLowerCase(rawTitle.trim())) return disagree >= 1;
-  return disagree >= 2 && disagree > agree;
+  return lowerCaseSourced(rawTitle) && disagreements(forms, cleaned) >= 1;
 }
 
 export interface PickOptions {

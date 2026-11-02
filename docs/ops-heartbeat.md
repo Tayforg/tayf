@@ -592,8 +592,11 @@ way). Migration 150 adds two rows and one table, `public.ops_cron_expected`.
 Baselines over 48 h to 2026-11-02 (the archives, `archived_at - enqueued_at`):
 `cluster_work` wait p95 60 s, max 86.5 s; `image_backfill` wait p95 721 s, max 803 s
 (re-measured 2026-11-02 13:00 UTC: 59.9 / 86.5 s over 3,792 messages and 729.5 / 1024.4 s
-over 5,203). `image_backfill` is slow by design (the hourly `image-backfill-requeue`, the
-5 minute `image-drain`), hence 1800 / 3600 s there and 300 / 900 s for `cluster_work`.
+over 5,203, measured while the requeue still sent its 150 messages at once). `image_backfill`
+is slow by design (`image-backfill-requeue` runs four times an hour, 40 messages staggered 20 s
+since migration 154, and `image-drain` every 5 minutes), hence 1800 / 3600 s there and 300 / 900 s
+for `cluster_work`. The largest delay of a staggered message is 780 s and `pgmq.metrics` counts
+invisible messages, so the queue age stays far below those limits.
 The `max_gap` values follow the schedule of each job: at least 3 ticks and at least 10
 minutes for a sub-hourly job, 3 h for an hourly one, tick + 1 h for an every-few-hours
 one, 26 h for a daily one. Weekday-only (`quotes-*`) and weekly jobs are not listed.

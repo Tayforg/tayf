@@ -92,6 +92,14 @@ export default async function OyunPage({
         subtitle="10 manşet, 3 seçenek: İktidar, Bağımsız, Muhalefet. Hangi kaynağın hangi tarafta yazdığını tahmin et."
       />
 
+      <OyunModes
+        headlines={headlines}
+        daily={daily}
+        todayKey={todayKey}
+        dailyFellBack={fellBack}
+        initialMode={initialMode}
+      />
+
       {/* Register exception (h19-copy-2): /oyun keeps the informal sen register
           on purpose; the game talks to the player. The rest of the site uses siz. */}
       <div className="rounded-xl border border-border/60 bg-card/40 p-4 text-[13px] text-muted-foreground leading-relaxed space-y-2">
@@ -114,24 +122,7 @@ export default async function OyunPage({
           </Link>{" "}
           okuyabilirsin.
         </p>
-        <p>
-          Çerçeve modunda ise kaynağı değil, başlığın kendisini
-          değerlendiriyorsun: bu başlık kimin lehine yazılmış?
-        </p>
-        <p>
-          Günün Tayf&rsquo;ı modunda ise herkes aynı 5 manşeti görür: dünün
-          kapanmış penceresinden seçilen, günün başında herkes için sabit bir
-          bulmaca.
-        </p>
       </div>
-
-      <OyunModes
-        headlines={headlines}
-        daily={daily}
-        todayKey={todayKey}
-        dailyFellBack={fellBack}
-        initialMode={initialMode}
-      />
     </div>
   );
 }

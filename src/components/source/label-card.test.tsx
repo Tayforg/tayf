@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { LabelCard, type ZoneHistoryEntry } from "./label-card";
 import type { ReaderAgreement } from "@/lib/game/agreement";
+import { BIAS_LABELS, ZONE_META, zoneOf } from "@/lib/bias/config";
+import { getSourceMetadata } from "@/lib/sources/factuality";
 
 // LabelCard is a synchronous Server Component (plain-data props, no
 // Supabase, no hooks) so — same approach as source-chips.test.ts — it can
@@ -125,6 +127,57 @@ describe("LabelCard — zone + bias reconciliation", () => {
     expect(text).toContain("Muhalefet");
     expect(text).toContain("Muhalefete Meyilli");
   });
+
+  // h28-journey-5: bias "opposition" is labelled "Muhalefet" and sits in the
+  // Muhalefet zone, so the card used to print the same chip twice.
+  it("renders the label once when the bias label equals the zone label", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, bias: "opposition" }));
+
+    expect(texts.filter((t) => t === "Muhalefet")).toHaveLength(1);
+    expect(texts.join(" ")).not.toContain("Ayrıntılı etiket");
+  });
+
+  it("renders both chips, the second with a screen-reader caption, when the labels differ", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, bias: "pro_government" }));
+
+    expect(texts).toContain("İktidar");
+    expect(texts).toContain("Hükümete Yakın");
+    expect(texts).toContain("Ayrıntılı etiket: ");
+    // The caption comes right before the five-value label it describes.
+    expect(texts.indexOf("Ayrıntılı etiket: ")).toBe(texts.indexOf("Hükümete Yakın") - 1);
+  });
+
+  it("hides the caption from sighted readers with sr-only", () => {
+    const [caption] = findAll(
+      LabelCard({ ...BASE_PROPS, bias: "pro_government" }),
+      (n) => n.props?.children === "Ayrıntılı etiket: ",
+    );
+
+    expect(caption?.props?.className).toBe("sr-only");
+  });
+
+  it("collapses the chip for every bias whose label equals its zone label, and only those", () => {
+    const biases = [
+      "pro_government",
+      "gov_leaning",
+      "state_media",
+      "islamist_conservative",
+      "center",
+      "international",
+      "pro_kurdish",
+      "opposition_leaning",
+      "opposition",
+      "nationalist",
+    ] as const;
+
+    for (const bias of biases) {
+      const texts = collectText(LabelCard({ ...BASE_PROPS, bias }));
+      const hasCaption = texts.includes("Ayrıntılı etiket: ");
+      const zoneLabel = ZONE_META[zoneOf(bias)].label;
+      expect(hasCaption, bias).toBe(BIAS_LABELS[bias] !== zoneLabel);
+      expect(texts.filter((t) => t === zoneLabel), bias).toHaveLength(1);
+    }
+  });
 });
 
 describe("LabelCard — trustee badge", () => {
@@ -247,6 +300,37 @@ describe("LabelCard — owner group", () => {
     const texts = collectText(el);
     const occurrences = texts.filter((t) => t.includes("Demirören Medya")).length;
     expect(occurrences).toBe(1);
+  });
+
+  // h28-journey-5: a bare "Bağımsız" owner line read like the centre zone.
+  it("prefixes an independent owner line with 'Sahiplik: ' so it cannot read as the centre zone", () => {
+    // Precondition: if evrensel is ever re-tagged, pick another independent slug.
+    expect(getSourceMetadata("evrensel")?.ownerGroup).toBe("independent");
+
+    const texts = collectText(LabelCard({ ...BASE_PROPS, slug: "evrensel", bias: "opposition" }));
+
+    expect(texts).toContain("Sahiplik: Bağımsız");
+    expect(texts).not.toContain("Bağımsız");
+  });
+
+  it("prefixes other owner groups too and keeps the secondary part unchanged", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, slug: "haberturk" }));
+
+    const owner = texts.find((t) => t.startsWith("Sahiplik: "));
+    expect(owner).toBeDefined();
+    expect(owner).toContain("Ciner Medya");
+    expect(owner).not.toContain("Sahiplik: Sahiplik: ");
+    // One string per primary part: the prefix is not a separate text node.
+    expect(texts).not.toContain("Sahiplik: ");
+  });
+
+  it("keeps the ' · ' secondary part unchanged after the prefixed primary (trt-haber)", () => {
+    const texts = collectText(LabelCard({ ...BASE_PROPS, slug: "trt-haber" }));
+    const primaryAt = texts.indexOf("Sahiplik: Devlet medyası (TRT/AA)");
+
+    expect(primaryAt).toBeGreaterThanOrEqual(0);
+    expect(texts.slice(primaryAt + 1, primaryAt + 3)).toEqual([" · ", "Devlet (TRT)"]);
+    expect(texts.filter((t) => t.startsWith("Sahiplik: "))).toHaveLength(1);
   });
 
   it("never repeats 'kayyum' twice when the trustee badge is shown (haberturk/can-holding)", () => {

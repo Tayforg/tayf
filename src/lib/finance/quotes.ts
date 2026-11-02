@@ -3,12 +3,15 @@ import { cacheLife } from "next/cache";
 import { attemptCached } from "@/lib/cache-resilience";
 
 // Quote boundary for the Ekonomi pages. Business code only sees
-// `QuoteSource`; the Yahoo implementation is constructed at the edge in
-// `getQuotes()` so a test can hand in a fake without touching the network.
+// `QuoteSource`; the Yahoo implementation is constructed in
+// `defaultQuoteSource()` so a test can hand in a fake fetch without touching
+// the network.
 //
 // Yahoo's chart endpoint is unauthenticated and covers BIST as `<CODE>.IS`.
 // It is a convenience, not a contract: when it breaks, implement
-// `QuoteSource` over a paid feed and swap it in `defaultQuoteSource()`.
+// `QuoteSource` (both `getQuotes` and `lookup`) over a paid feed and swap it in
+// `defaultQuoteSource()`; `getQuote`, the cache boundary, reaches its source
+// only through that function.
 
 export interface Quote {
   ticker: string;
@@ -31,8 +34,29 @@ export interface Quote {
   asOf: string;
 }
 
+/**
+ * What one lookup concluded, so the cache boundary can pick a lifetime
+ * from the outcome (see `getQuote`):
+ *   - `quote`: a parsed quote;
+ *   - `unlisted`: the source does not list the symbol (Yahoo answers 404). That
+ *     is a stable fact about the ticker, not a blip;
+ *   - `unavailable`: anything else that produced no quote (a 5xx or other
+ *     non-ok status, a timeout or rejected fetch, a payload that does not
+ *     parse). Worth asking again soon.
+ */
+export type QuoteLookup =
+  | { kind: "quote"; quote: Quote }
+  | { kind: "unlisted" }
+  | { kind: "unavailable" };
+
 export interface QuoteSource {
   getQuotes(tickers: readonly string[]): Promise<Quote[]>;
+  /**
+   * One ticker's outcome; must never reject. `getQuote` picks the cache
+   * lifetime from it, so a replacement feed reports `unlisted` for a symbol it
+   * will never carry and `unavailable` for a blip.
+   */
+  lookup(ticker: string): Promise<QuoteLookup>;
 }
 
 interface YahooChart {
@@ -170,15 +194,16 @@ export class YahooQuoteSource implements QuoteSource {
     const queue = [...tickers];
     const worker = async () => {
       for (let t = queue.shift(); t !== undefined; t = queue.shift()) {
-        const q = await this.one(t);
-        if (q) out.push(q);
+        const outcome = await this.lookup(t);
+        if (outcome.kind === "quote") out.push(outcome.quote);
       }
     };
     await Promise.all(Array.from({ length: Math.min(YAHOO_CONCURRENCY, queue.length) }, worker));
     return out;
   }
 
-  private async one(ticker: string): Promise<Quote | null> {
+  /** One ticker's outcome; never rejects. See `QuoteLookup`. */
+  async lookup(ticker: string): Promise<QuoteLookup> {
     try {
       const res = await this.fetchImpl(
         `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}.IS?range=5d&interval=1d`,
@@ -192,17 +217,25 @@ export class YahooQuoteSource implements QuoteSource {
           signal: AbortSignal.timeout(YAHOO_TIMEOUT_MS),
         },
       );
+      if (res.status === 404) {
+        // Yahoo does not list this symbol (a delisted or renamed BIST code).
+        // Permanent as far as a chip is concerned: info level, not a warning,
+        // and getQuote caches it for hours instead of minutes.
+        console.info("[quotes] yahoo 404 for " + ticker + " (unlisted, cached 6 h)");
+        return { kind: "unlisted" };
+      }
       if (!res.ok) {
         // SEC-05: capture the status so a total feed outage (every ticker
         // failing) is visible in logs instead of silently rendering blank
         // chips. One dead symbol must still not blank the page.
         console.warn("[quotes] yahoo " + res.status + " for " + ticker);
-        return null;
+        return { kind: "unavailable" };
       }
-      return parseYahooChart(ticker, await res.json());
+      const quote = parseYahooChart(ticker, await res.json());
+      return quote ? { kind: "quote", quote } : { kind: "unavailable" };
     } catch (err) {
       console.warn(`[quotes] fetch failed for ${ticker}: ${err instanceof Error ? err.name + ": " + err.message : String(err)}`);
-      return null;
+      return { kind: "unavailable" };
     }
   }
 }
@@ -216,21 +249,27 @@ export function defaultQuoteSource(): QuoteSource {
  * under its own Next cache key, so the key never depends on which other
  * tickers happened to be requested alongside it in a given call.
  *
- * The lifetime follows the outcome: a real quote keeps the 5-minute window,
- * while "no quote" -- a Yahoo non-200, a rejected fetch, an unknown symbol
- * (YahooQuoteSource turns every one of them into an empty list) or a throw
- * that attemptCached absorbs -- is memoised for `minutes` only, so a blip
- * cannot blank a ticker's chip for 5-15 minutes. Exactly one `cacheLife` per
- * invocation, after the attempt.
+ * The lifetime follows the outcome of the lookup (`QuoteLookup`):
+ *   - a real quote keeps the 5-minute window;
+ *   - `unlisted` (Yahoo answered 404 for the symbol) is memoised for 6 hours
+ *     (stale 1 h, revalidate 6 h, expire 24 h): the symbol is not coming back
+ *     within the hour, and re-asking every minute only buried real warnings
+ *     and spent outbound calls (h28-errors-3);
+ *   - anything else, "no quote" because of a Yahoo 5xx or other non-ok status,
+ *     a rejected fetch, a payload that does not parse, or a throw that
+ *     attemptCached absorbs, is memoised for `minutes` only, so a blip cannot
+ *     blank a ticker's chip for 5-15 minutes.
+ * Exactly one `cacheLife` per invocation, after the attempt.
  */
 async function getQuote(ticker: string): Promise<Quote | null> {
   "use cache: remote";
-  const r = await attemptCached("quote", () => defaultQuoteSource().getQuotes([ticker]));
-  const quote = r.ok ? (r.data[0] ?? null) : null;
+  const r = await attemptCached("quote", () => defaultQuoteSource().lookup(ticker));
+  const o: QuoteLookup = r.ok ? r.data : { kind: "unavailable" };
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
-  if (quote) cacheLife({ stale: 60, revalidate: 300, expire: 900 });
+  if (o.kind === "quote") cacheLife({ stale: 60, revalidate: 300, expire: 900 });
+  else if (o.kind === "unlisted") cacheLife({ stale: 3600, revalidate: 21600, expire: 86400 });
   else cacheLife("minutes");
-  return quote;
+  return o.kind === "quote" ? o.quote : null;
 }
 
 /** Quotes keyed by ticker, fanned out over the per-ticker cache boundary above. */
@@ -245,13 +284,13 @@ export async function getQuotes(tickers: readonly string[]): Promise<Record<stri
       if (q) out[t] = q;
     }
   };
-  // Each worker's getQuote() call fans out to YahooQuoteSource.getQuotes()
-  // with a single ticker, so that source's own concurrency limiter
-  // collapses to min(YAHOO_CONCURRENCY, 1) = 1 and no longer bounds
-  // anything against query1.finance.yahoo.com — this call site is the only
-  // thing that can. Bound it to the same YAHOO_CONCURRENCY the source
-  // declares (was 40, quintupling outbound concurrency to an
-  // unauthenticated third party with no retry/backoff on this path).
+  // Each worker's getQuote() call makes a single-ticker lookup() on the
+  // default source, so the source's own getQuotes() concurrency limiter never
+  // engages and no longer bounds anything against
+  // query1.finance.yahoo.com — this call site is the only thing that can. Bound
+  // it to the same YAHOO_CONCURRENCY the source declares (was 40, quintupling
+  // outbound concurrency to an unauthenticated third party with no
+  // retry/backoff on this path).
   await Promise.all(Array.from({ length: Math.min(YAHOO_CONCURRENCY, queue.length) }, worker));
   return out;
 }

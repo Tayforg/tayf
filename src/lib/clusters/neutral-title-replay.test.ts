@@ -354,3 +354,65 @@ describe("re-pick replay: the hunt-27 lower-case-sourced rule", () => {
     for (const c of LIVE) expect(repick(c), c.cid).toBe(c.stored);
   });
 });
+
+// Hunt 28 (h28-live-2, 2026-11-02): #176 recased common nouns on first picks.
+// Six clusters whose candidate opens with a capital (never lower-case-sourced)
+// shipped 'Net Mesaj', 'Kadın ... Aile', 'Soyut Resim', 'Acil Sağlık', and for
+// 85deda69 the recasing made the candidate odd, so the leak guard swapped in
+// 'İddia: Vali yardımcısının intihar sebebi yasak aşk'. Member titles are read
+// from cluster_articles x articles in the cron's order (newest first, ties on
+// the title). `expected` is what the pre-#176 picker returned, `bad` what #176
+// returned. They live in their own fixture because the 150-cluster file is pinned.
+interface H28Cluster extends ReplayCluster {
+  expected: string;
+  bad: string;
+}
+
+const H28: H28Cluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "../../../tests/fixtures/neutral-title-h28-recase.json"), "utf8"),
+) as H28Cluster[];
+
+describe("hunt-28: a title that opens with a capital is never recased", () => {
+  const members = (c: ReplayCluster) => c.titles.map((title) => ({ title }));
+
+  it("the fixture is intact (6 clusters, none in the 150 corpus, CLUSTERS stays 150)", () => {
+    expect(H28.map((c) => c.cid)).toEqual(["f972e6c1", "ee5b26b1", "0cd5d8fd", "44411a81", "a84aecfc", "85deda69"]);
+    expect(H28).toHaveLength(6);
+    for (const c of H28) {
+      expect(CLUSTERS.some((x) => x.cid === c.cid), c.cid).toBe(false);
+      expect(c.titles.length, c.cid).toBeGreaterThanOrEqual(2);
+      expect(c.cid, c.cid).toHaveLength(8);
+      expect(c.bad, c.cid).not.toBe(c.expected);
+      // The expected pick is a member's cleaned title, as written.
+      expect(
+        c.titles.some((t) => cleanHeadline(t) === c.expected),
+        `${c.cid}: ${c.expected}`,
+      ).toBe(true);
+    }
+    expect(CLUSTERS).toHaveLength(150);
+  });
+
+  it.each(H28.map((c) => [c.cid, c] as const))("%s: a first pick (floor) is the pre-#176 title", (_cid, c) => {
+    expect(pickNeutralTitle(members(c), { floor: true })).toBe(c.expected);
+  });
+
+  it.each(H28.map((c) => [c.cid, c] as const))("%s: a normal pick gives the same title", (_cid, c) => {
+    expect(pickNeutralTitle(members(c), {})).toBe(c.expected);
+  });
+
+  it.each(H28.map((c) => [c.cid, c] as const))("%s: the #176 output is gone", (_cid, c) => {
+    expect(pickNeutralTitle(members(c), { floor: true })).not.toBe(c.bad);
+    expect(pickNeutralTitle(members(c), {})).not.toBe(c.bad);
+  });
+
+  it("85deda69 keeps the plain title instead of the more sensational member", () => {
+    const c = H28.find((x) => x.cid === "85deda69")!;
+    expect(pickNeutralTitle(members(c), { floor: true })).toBe(
+      "Vali yardımcısının ölümünde yeni iddia: Başsavcı vekili açığa alındı",
+    );
+  });
+
+  it("a re-pick leaves the stored rows alone (no backfill)", () => {
+    for (const c of H28) expect(pickNeutralTitle(members(c), { incumbent: c.stored }), c.cid).toBe(c.stored);
+  });
+});

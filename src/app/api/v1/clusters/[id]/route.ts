@@ -60,11 +60,13 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
   if (!data) {
     // Miss path only (the hot path above is one query): an archived cluster
     // may have been merged into another (migration 099). A lookup error, e.g.
-    // the column not existing yet, stays a plain 404 -- EXCEPT an outage (the
-    // 4 s reader cap aborts with an `AbortError: ...` message, or the gateway
-    // answers 502/503/504/520-524): that says nothing about whether the
-    // cluster exists, so it is the 503 (500 if it were not classified), never
-    // a 404 a client would cache or act on.
+    // the column not existing yet, stays a plain 404 -- EXCEPT an outage, which
+    // `isUpstreamUnavailable` recognises (the 4 s reader cap: an
+    // `AbortError: ...` message from the header phase, or a `TimeoutError: ...`
+    // one from the body phase, both with status 0; a gateway answer 502/503/
+    // 504/520-524; a PGRST000-003 / 57014 code): that says nothing about
+    // whether the cluster exists, so it is the 503, never a 404 a client would
+    // cache or act on.
     const {
       data: mergedRow,
       error: mergedError,
@@ -76,7 +78,7 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
       .maybeSingle<{ merged_into: string | null }>();
     if (mergedError) {
       const mergedFailure = { ...mergedError, status: mergedStatus };
-      if (mergedError.message.startsWith("AbortError") || isUpstreamUnavailable(mergedFailure)) {
+      if (isUpstreamUnavailable(mergedFailure)) {
         return withApiV1Headers(apiServerError(mergedFailure), auth.tier);
       }
     }

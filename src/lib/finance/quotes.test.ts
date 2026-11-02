@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // `getQuote`/`getQuotes` are wrapped in "use cache"; next/cache's real
@@ -8,7 +10,7 @@ vi.mock("next/cache", () => ({ cacheLife: vi.fn() }));
 
 import { cacheLife } from "next/cache";
 import { fmtPct, fmtWhen, fmtX, limitFlag, moveClass, pctChange } from "./format";
-import { getQuotes, parseYahooChart, YahooQuoteSource } from "./quotes";
+import { defaultQuoteSource, getQuotes, parseYahooChart, YahooQuoteSource } from "./quotes";
 import { chartBaseline, marketCueText } from "./session";
 
 // Shape captured from query1.finance.yahoo.com on 2026-09-13 for THYAO.IS.
@@ -438,12 +440,104 @@ describe("parseYahooChart pre-open baseline", () => {
 
 describe("YahooQuoteSource", () => {
   it("skips symbols that fail and keeps the rest", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
     const fetchImpl = (async (url: string | URL | Request) => {
       const u = String(url);
       if (u.includes("DEAD.IS")) return new Response("nope", { status: 404 });
       return new Response(JSON.stringify(SAMPLE), { status: 200 });
     }) as typeof fetch;
     const quotes = await new YahooQuoteSource(fetchImpl).getQuotes(["THYAO", "DEAD", "ASELS"]);
+    expect(quotes.map((q) => q.ticker).sort()).toEqual(["ASELS", "THYAO"]);
+    vi.mocked(console.info).mockRestore();
+  });
+});
+
+// h28-errors-3: a Yahoo 404 is a permanent "this symbol is not listed" answer,
+// a different outcome from a 5xx / timeout / unparseable payload ("try again
+// soon"). lookup() keeps the three apart; getQuotes() still returns quotes only.
+describe("YahooQuoteSource.lookup", () => {
+  let info: ReturnType<typeof vi.spyOn>;
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    info = vi.spyOn(console, "info").mockImplementation(() => {});
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    info.mockRestore();
+    warn.mockRestore();
+  });
+
+  const respond = (status: number, body: string = "nope") =>
+    (async () => new Response(body, { status })) as typeof fetch;
+
+  it("a 404 is 'unlisted' and is logged at info level with the status and the ticker, never as a warning", async () => {
+    const outcome = await new YahooQuoteSource(respond(404)).lookup("DEAD");
+
+    expect(outcome).toEqual({ kind: "unlisted" });
+    expect(info).toHaveBeenCalledTimes(1);
+    const line = String(info.mock.calls[0]?.[0]);
+    expect(line).toContain("404");
+    expect(line).toContain("DEAD");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("a 503 is 'unavailable' and keeps the warning", async () => {
+    const outcome = await new YahooQuoteSource(respond(503)).lookup("DEAD");
+
+    expect(outcome).toEqual({ kind: "unavailable" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("503");
+    expect(String(warn.mock.calls[0]?.[0])).toContain("DEAD");
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it.each([400, 401, 403, 429, 500, 502])("a %i is 'unavailable', not 'unlisted'", async (status) => {
+    expect(await new YahooQuoteSource(respond(status)).lookup("DEAD")).toEqual({ kind: "unavailable" });
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("a rejecting fetch is 'unavailable' and warns", async () => {
+    const outcome = await new YahooQuoteSource((async () => {
+      throw new TypeError("fetch failed");
+    }) as typeof fetch).lookup("DEAD");
+
+    expect(outcome).toEqual({ kind: "unavailable" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("DEAD");
+  });
+
+  it("a 200 whose chart has no result is 'unavailable'", async () => {
+    const outcome = await new YahooQuoteSource(
+      respond(200, JSON.stringify({ chart: { result: null, error: { code: "Not Found" } } })),
+    ).lookup("XXXX");
+
+    expect(outcome).toEqual({ kind: "unavailable" });
+  });
+
+  it("a 200 with a body that is not JSON is 'unavailable' (the json() throw is caught)", async () => {
+    expect(await new YahooQuoteSource(respond(200, "<html>")).lookup("XXXX")).toEqual({ kind: "unavailable" });
+  });
+
+  it("a good payload is a 'quote' carrying the parsed Quote", async () => {
+    const outcome = await new YahooQuoteSource(respond(200, JSON.stringify(SAMPLE))).lookup("THYAO");
+
+    expect(outcome.kind).toBe("quote");
+    if (outcome.kind !== "quote") throw new Error("unreachable");
+    expect(outcome.quote).toEqual(parseYahooChart("THYAO", SAMPLE));
+  });
+
+  it("getQuotes keeps its Quote[] signature and collects only the 'quote' outcomes", async () => {
+    const fetchImpl = (async (url: string | URL | Request) => {
+      const u = String(url);
+      if (u.includes("GONE.IS")) return new Response("nope", { status: 404 });
+      if (u.includes("DOWN.IS")) return new Response("nope", { status: 503 });
+      return new Response(JSON.stringify(SAMPLE), { status: 200 });
+    }) as typeof fetch;
+
+    const quotes = await new YahooQuoteSource(fetchImpl).getQuotes(["THYAO", "GONE", "DOWN", "ASELS"]);
+
     expect(quotes.map((q) => q.ticker).sort()).toEqual(["ASELS", "THYAO"]);
   });
 });
@@ -471,6 +565,39 @@ describe("getQuotes", () => {
   });
 });
 
+// The documented swap point: quotes.ts tells maintainers to implement
+// `QuoteSource` over a paid feed and return it from `defaultQuoteSource()`.
+// That only works if `getQuote` (the cache boundary behind /ekonomi) reaches
+// its source through `defaultQuoteSource()` and the interface carries the
+// `lookup()` outcome, 'unlisted' included.
+describe("defaultQuoteSource (the swap point)", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("hands back a QuoteSource that reports lookup outcomes", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    vi.stubGlobal("fetch", (async () => new Response("Not Found", { status: 404 })) as typeof fetch);
+
+    const source: Pick<ReturnType<typeof defaultQuoteSource>, "lookup"> = defaultQuoteSource();
+
+    await expect(source.lookup("DEAD")).resolves.toEqual({ kind: "unlisted" });
+  });
+
+  it("getQuote reaches its source through defaultQuoteSource().lookup, not a hard-wired Yahoo class", () => {
+    const src = readFileSync(join(resolve(__dirname, "..", "..", ".."), "src/lib/finance/quotes.ts"), "utf8");
+    const start = src.indexOf("async function getQuote(");
+    const end = src.indexOf("\n}\n", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+
+    expect(body).toContain("defaultQuoteSource().lookup(ticker)");
+    expect(body).not.toContain("new YahooQuoteSource");
+  });
+});
+
 // ---------------------------------------------------------------------------
 // cached-failure-sweep: getQuote's lifetime follows the outcome. A real quote
 // keeps the 5-minute window; a Yahoo non-200, a reject, or an unknown symbol
@@ -480,14 +607,18 @@ describe("getQuotes", () => {
 
 describe("getQuotes cache lifetime", () => {
   const QUOTE_PROFILE = { stale: 60, revalidate: 300, expire: 900 };
+  // h28-errors-3: a Yahoo 404 (a symbol Yahoo does not list) is cached for 6 h.
+  const UNLISTED_PROFILE = { stale: 3600, revalidate: 21600, expire: 86400 };
 
   beforeEach(() => {
     vi.mocked(cacheLife).mockClear();
     vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
   });
 
   afterEach(() => {
     vi.mocked(console.warn).mockRestore();
+    vi.mocked(console.info).mockRestore();
     vi.unstubAllGlobals();
   });
 
@@ -536,6 +667,32 @@ describe("getQuotes cache lifetime", () => {
     expect(cacheLife).toHaveBeenCalledWith("minutes");
   });
 
+  it("a Yahoo 404 (an unlisted symbol): no quote, exactly one cacheLife with the 6 h profile, an info line and no warning", async () => {
+    vi.stubGlobal("fetch", (async () => new Response("Not Found", { status: 404 })) as typeof fetch);
+
+    await expect(getQuotes(["DEAD"])).resolves.toEqual({});
+
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith(UNLISTED_PROFILE);
+    expect(console.warn).not.toHaveBeenCalled();
+    expect(console.info).toHaveBeenCalledTimes(1);
+    const line = String(vi.mocked(console.info).mock.calls[0]?.[0]);
+    expect(line).toContain("404");
+    expect(line).toContain("DEAD");
+  });
+
+  it("only a 404 gets the long profile: other 4xx statuses keep 'minutes'", async () => {
+    for (const status of [400, 403, 429]) {
+      vi.mocked(cacheLife).mockClear();
+      vi.stubGlobal("fetch", (async () => new Response("nope", { status })) as typeof fetch);
+
+      await expect(getQuotes(["THYAO"])).resolves.toEqual({});
+
+      expect(cacheLife).toHaveBeenCalledTimes(1);
+      expect(cacheLife).toHaveBeenCalledWith("minutes");
+    }
+  });
+
   it("each ticker picks its own lifetime: one live quote and one dead symbol", async () => {
     vi.stubGlobal("fetch", (async (url: string | URL | Request) => {
       if (String(url).includes("DEAD.IS")) return new Response("nope", { status: 404 });
@@ -544,11 +701,15 @@ describe("getQuotes cache lifetime", () => {
 
     const quotes = await getQuotes(["THYAO", "DEAD"]);
 
-    expect(Object.keys(quotes)).toEqual(["THYAO"]);
+    expect(quotes).toEqual({
+      THYAO: expect.objectContaining({ ticker: "THYAO", price: expect.any(Number) }),
+    });
+    expect("DEAD" in quotes).toBe(false);
     expect(cacheLife).toHaveBeenCalledTimes(2);
     const profiles = vi.mocked(cacheLife).mock.calls.map((c) => c[0]);
     expect(profiles).toContainEqual(QUOTE_PROFILE);
-    expect(profiles).toContain("minutes");
+    expect(profiles).toContainEqual(UNLISTED_PROFILE);
+    expect(profiles).not.toContain("minutes");
   });
 
   it("the empty list short-circuits before any cache entry: no cacheLife at all", async () => {

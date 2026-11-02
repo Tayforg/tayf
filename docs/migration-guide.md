@@ -3231,3 +3231,69 @@ delete from supabase_migrations.schema_migrations where version = '152';
 ```
 
 On a branch database that already holds a legacy-key `sources` row, 152 skips `sources_alignment_check` with `NOTICE: 152: sources_alignment_check skipped, N existing sources row(s) ...` (a NOT VALID check would fail every later UPDATE of that row, such as ingest fetch-state writes); the chain's ten-key `sources_bias_check` is never dropped. Dry runs: `tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql` and `...-chain-shape-dryrun.sql` (local PostgreSQL 15 only, never production).
+
+## 153 — `worker_metrics` names its two queues (fixes `/api/health` stuck on `degraded`): APPLY 153, THEN 154
+
+**Why:** `/api/health` answered `{"status":"degraded"}` on 2026-11-02 and had since 151. `public.worker_metrics` (024) read `FROM pgmq.metrics_all() WHERE queue_name IN ('cluster_work','image_backfill')`. `metrics_all()` is SECURITY INVOKER and loops over every row of `pgmq.meta` before the `WHERE` runs, so it also called `pgmq.metrics()` for the `cluster_attach` queue that 151 created and deliberately did not grant to `service_role`. The queue probe failed with `42501 permission denied for sequence q_cluster_attach_msg_id_seq` (Supabase postgres logs, four times between 20:14 and 20:24Z), `checks.queues.ok` was false and the whole verdict was `degraded`: the queue depth and age alarm was blind (hunt 28, h28-live-1). `ops_health_report()` row 18 reads pgmq through a definer and was not affected.
+
+**What 153 does** (additive, ONE short transaction, safe to re-apply): `create or replace view public.worker_metrics` over `pgmq.metrics('cluster_work') union all pgmq.metrics('image_backfill')`, the same six columns in the same order and types, no `WITH` options; a new comment; the same `revoke all ... from public, anon, authenticated` and `grant select ... to service_role` as 024; the ledger row. `pgmq.metrics(text)` touches only the queue it is given, so a queue nobody granted can never break the view. **Nothing is granted on any pgmq object**: `cluster_attach` stays locked to `service_role` on purpose (151's invariant, the 024-028 tripwire). The price is that a new queue is not in the view until someone adds it; `tests/migrations/153-worker-metrics-named-queues.test.ts` fails on any `pgmq.create('<q>')` that is neither named in the view nor in its `EXCLUDED` set with a reason, and on any later migration that goes back to `metrics_all`. No app change: `route.ts` already reads the view.
+
+**Step 0 note:** production's ACL on the view is `{postgres=arwdDxtm/postgres,service_role=arwdDxtm/postgres}` (service_role holds every privilege, a Supabase default 024 never revoked), not select only. 153 leaves it as it is; the view is not updatable, so the surplus cannot do anything. The fix was also run read-only on production as `service_role` before this PR (`set local role service_role; select ... from pgmq.metrics('cluster_work') union all ... pgmq.metrics('image_backfill')` returned 2 rows; the old `pgmq.metrics_all()` returned the 42501).
+
+**Order:** apply 153 (`supabase db push`), then 154. They are independent, but 154's cadence is chosen so that the `oldest_msg_age_sec` this view reports stays far below the route's 1800 s bound, and that only matters once the probe works again.
+
+**Verify** (read-only; production expects 2 rows, no 42501, `f`, `f`, `f`, `1`):
+
+```sql
+begin; set local role service_role;
+select queue_name, queue_length, oldest_msg_age_sec from public.worker_metrics;          -- 2 rows
+rollback;
+select pg_get_viewdef('public.worker_metrics'::regclass);                                -- two pgmq.metrics(...) calls, no metrics_all
+select has_table_privilege('service_role', 'pgmq.q_cluster_attach', 'select');           -- f (still locked)
+select has_table_privilege('anon', 'public.worker_metrics', 'select'),
+       has_table_privilege('authenticated', 'public.worker_metrics', 'select');          -- f, f
+select count(*) from supabase_migrations.schema_migrations where version = '153';        -- 1
+```
+
+Then `GET /api/health`: `"status":"healthy"` (or `degraded` only for a real reason; `checks.queues.error` no longer says `permission denied for sequence`).
+
+**Rollback** (nothing else depends on 153): re-create 024's view (`create or replace view public.worker_metrics as select queue_name, queue_length, newest_msg_age_sec, oldest_msg_age_sec, total_messages, scrape_time from pgmq.metrics_all() where queue_name in ('cluster_work', 'image_backfill');`), `notify pgrst, 'reload schema';` and `delete from supabase_migrations.schema_migrations where version = '153';`. That brings `/api/health` back to `degraded` for as long as `cluster_attach` exists. Dry runs: `tests/migrations/sql/153-worker-metrics-named-queues-dryrun.sql` (local PostgreSQL 15 only, never production).
+
+## 154 — image requeue stagger (`image_backfill_requeue` attempts 1-2, 20 s stagger, 4 x 40 an hour): APPLY 154 after 153, no deploy
+
+**Why:** 142's `image-backfill-requeue` sent 150 un-delayed messages at minute 17 of every hour. The image-consumer takes at most 40 messages per `image-drain` tick (every 5 minutes), FIFO, so the burst kept it busy for about 15 minutes and every fresh article enqueued behind it waited: fresh-message queue wait p95 **1026 s** in minutes 0-9 after `:17` (n=295), 311 s in minutes 10-19, 301 s in the rest of the hour (24 h of `pgmq.a_image_backfill`). Only 333 of 3,000 requeued messages (enqueued 2-24 h ago) are for articles that now have an image, and 1,669 are for articles still image-less after 5 attempts, so the later tries (attempts 3 and 4) are mostly waste (hunt 28, h28-freshness-2).
+
+**What 154 does** (additive: one function replaced, one cron job rescheduled by name, one note updated; ONE short transaction; safe to re-apply): `public.image_backfill_requeue(p_limit integer default 300)` keeps its signature, attributes and grants (`service_role` only) and 142's body except for two changes: it selects `image_backfill_attempts between 1 and 2` (the second and third try, where the yield is), and every send is `pgmq.send('image_backfill', {article_id}, least(v_sent * 20, 900))`, so a batch becomes visible one message per 20 s (the first has delay 0). The cron job moves from `17 * * * *` / `image_backfill_requeue(150)` to **`2,17,32,47 * * * *` / `image_backfill_requeue(40)`**: 160 messages an hour of capacity (at least the old 150), largest delay 39 x 20 = 780 s. `ops_cron_expected.note` for the job follows the schedule; `max_gap` stays 3 hours. No other cron job is touched.
+
+**Why not hourly 150 with the same stagger:** that holds the last message 2,980 s invisible. `pgmq.metrics`' `oldest_msg_age_sec` counts invisible messages, so `/api/health` (1800 s bound, working again after 153) would be `degraded` from about `:47` to `:70` of every hour, and `ops_health_report()` row 18 (`queue_lag`, which ages the oldest visible message from `enqueued_at`) would warn above 1800 s. The simulation in `tests/migrations/154-image-requeue-stagger.test.ts` (FIFO, 40 per 5 minutes, a fresh message every 45 s) gives: old design fresh p95 1065 s; new design 285 s with max queue age 779 s; brief-literal design 285 s but max queue age 3179 s.
+
+**Order:** apply 153, then 154 (`supabase db push`). The first new tick is the next minute 2, 17, 32 or 47. No Edge Function and no app deploy: the delay is applied by `pgmq.send`, and the image-consumer only reads visible messages. `docs/architecture.md` still describes 142's cadence in its "Image requeue" row (tests/migrations/142 pins that row against 142's file); it is updated together with that test in a follow-up.
+
+**Verify** (read-only):
+
+```sql
+select jobname, schedule, command from cron.job where jobname = 'image-backfill-requeue';
+   -- one row: 2,17,32,47 * * * *, select public.image_backfill_requeue(40)
+select has_function_privilege('anon', 'public.image_backfill_requeue(integer)', 'execute'),
+       has_function_privilege('authenticated', 'public.image_backfill_requeue(integer)', 'execute'),
+       has_function_privilege('service_role', 'public.image_backfill_requeue(integer)', 'execute');   -- f, f, t
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.image_backfill_requeue(integer)'::regprocedure;
+   -- 2c3e427b0c98801b873b335544ab7699, 866
+select note, max_gap from public.ops_cron_expected where jobname = 'image-backfill-requeue';   -- 2,17,32,47 * * * *, 03:00:00
+select queue_length, oldest_msg_age_sec from pgmq.metrics('image_backfill');   -- oldest stays under about 800 s
+select count(*) from supabase_migrations.schema_migrations where version = '154';             -- 1
+```
+
+Next day, the fresh-wait buckets (bounded by `archived_at`):
+
+```sql
+select (extract(epoch from q.enqueued_at)::bigint % 3600) / 600 as bucket_of_10_min, count(*),
+       percentile_cont(0.95) within group (order by extract(epoch from (q.archived_at - q.enqueued_at))) as p95_wait_s
+  from pgmq.a_image_backfill q join public.articles a on a.id = (q.message ->> 'article_id')::uuid
+ where q.archived_at > now() - interval '24 hours' and q.enqueued_at < a.created_at + interval '30 seconds'
+ group by 1 order by 1;                                  -- p95 under 320 s in every bucket
+```
+
+Acceptance: p95 under 320 s in every bucket and `image-consumer` averaging under 8 s at `:20`, `:25` and `:30`.
+
+**Rollback** (nothing else depends on 154): re-run only 142's function section (`create or replace function public.image_backfill_requeue(` through its `grant execute`; `md5(prosrc)` is `917624baf55f5021fe458e8f0664b6d1` again), then `select cron.unschedule('image-backfill-requeue');`, `select cron.schedule('image-backfill-requeue', '17 * * * *', $$ set statement_timeout = '60s'; select public.image_backfill_requeue(150); $$);`, `update public.ops_cron_expected set note = '17 * * * *' where jobname = 'image-backfill-requeue';` and `delete from supabase_migrations.schema_migrations where version = '154';`. Messages already on the queue are ordinary `image_backfill` messages. Dry runs: `tests/migrations/sql/154-image-requeue-stagger-dryrun.sql` (local PostgreSQL 15 only, never production).

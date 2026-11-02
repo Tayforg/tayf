@@ -102,7 +102,10 @@ export function LabelCard({
 
       {/* 1. Zone chip + five-value bias label, side by side — the public
           three-zone view and the underlying 10-category call reconciled in
-          the open, not hidden behind one or the other. */}
+          the open, not hidden behind one or the other. The second chip is
+          skipped when it would repeat the zone chip word for word (bias
+          "opposition" is labelled "Muhalefet" in the Muhalefet zone); when it
+          is shown, the sr-only caption says what it is. */}
       <div className="flex flex-wrap items-center gap-2">
         <span
           className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${zoneMeta.chipBg} ${zoneMeta.chipText} ${zoneMeta.chipBorder}`}
@@ -110,9 +113,12 @@ export function LabelCard({
           <span className={`h-1.5 w-1.5 rounded-full ${zoneMeta.dot}`} aria-hidden="true" />
           {zoneMeta.label}
         </span>
-        <span className="inline-flex items-center rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 text-xs font-medium text-foreground">
-          {BIAS_LABELS[bias]}
-        </span>
+        {BIAS_LABELS[bias] !== zoneMeta.label ? (
+          <span className="inline-flex items-center rounded-full border border-border/60 bg-muted/40 px-2.5 py-1 text-xs font-medium text-foreground">
+            <span className="sr-only">Ayrıntılı etiket: </span>
+            {BIAS_LABELS[bias]}
+          </span>
+        ) : null}
       </div>
 
       {/* 2. Rationale — operator text verbatim, or the honest empty state.
@@ -134,7 +140,10 @@ export function LabelCard({
 
       {/* 3. Owner group — only for tagged slugs (~21/144 today). Render
           nothing (not 'bilinmiyor'/'sınıflandırılmamış') for the rest, same
-          rule /sources and <SourceChips> already apply. */}
+          rule /sources and <SourceChips> already apply. The "Sahiplik: "
+          prefix keeps the independent group's bare "Bağımsız" from reading
+          like the centre zone chip above (the label itself is shared with
+          /metodoloji, so the card captions it instead of renaming it). */}
       {ownerGroup
         ? (() => {
             const parts = ownerLineParts({
@@ -144,7 +153,7 @@ export function LabelCard({
             });
             return (
               <div className="text-xs text-muted-foreground">
-                <span className="font-medium text-foreground">{parts.primary}</span>
+                <span className="font-medium text-foreground">{`Sahiplik: ${parts.primary}`}</span>
                 {parts.secondary ? <span> · {parts.secondary}</span> : null}
               </div>
             );

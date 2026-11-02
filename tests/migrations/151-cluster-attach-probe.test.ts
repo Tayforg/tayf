@@ -118,7 +118,7 @@ describe("151 cluster_attach_probe: the queue", () => {
     expect(n).toMatch(/revoke all on sequence pgmq\.q_cluster_attach_msg_id_seq from public, anon, authenticated/);
   });
 
-  it("grants nothing on the pgmq schema (024 and 029 already give service_role its access)", () => {
+  it("grants nothing on the pgmq schema (cluster_attach stays locked to service_role on purpose; worker_metrics names its two queues since 153)", () => {
     for (const m of code.matchAll(/\bgrant\b[^;]*;/gi)) {
       expect(norm(m[0])).not.toMatch(/pgmq/i);
     }
