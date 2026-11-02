@@ -207,7 +207,12 @@ function SingletonRateChart({ snapshots }: { snapshots: QualitySnapshot[] }) {
       <h2 className="text-[11px] uppercase tracking-[0.1em] text-muted-foreground">
         Tekil küme oranı — son {n} gece
       </h2>
-      <div className="w-full overflow-x-auto">
+      <div
+        className="w-full overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        role="region"
+        aria-label="Tekil küme oranı grafiği"
+        tabIndex={0}
+      >
         <svg
           viewBox={`0 0 ${CHART_W} ${CHART_H}`}
           role="img"
@@ -264,7 +269,7 @@ function SnapshotsTable({ snapshots }: { snapshots: QualitySnapshot[] }) {
         Gece gece kalite ölçümleri
       </h2>
       <div
-        className="overflow-x-auto"
+        className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         role="region"
         aria-labelledby="kalite-tablo"
         tabIndex={0}

@@ -10,7 +10,7 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
-  title: "Medya DNA Trendi",
+  title: "Medya DNA trendi",
   description:
     "Son 30 günde iktidara yakın, bağımsız ve muhalefete yakın kaynakların günlük haber üretimi ve bugün yükselen konular.",
   path: "/trends",
@@ -106,7 +106,7 @@ export default async function TrendsPage() {
       <div className="container mx-auto px-4 py-8 max-w-5xl space-y-6">
         <PageHero
           kicker="Son 30 gün"
-          title="Medya DNA Trendi"
+          title="Medya DNA trendi"
           subtitle="Her gün hangi taraf ne kadar haber üretti? Kırmızı iktidara yakın, gri bağımsız, yeşil muhalefete yakın kaynaklardır."
         />
         <RisingTopics data={rising} />
@@ -145,7 +145,7 @@ export default async function TrendsPage() {
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-6">
       <PageHero
         kicker="Son 30 gün"
-        title="Medya DNA Trendi"
+        title="Medya DNA trendi"
         subtitle="Her gün hangi taraf ne kadar haber üretti? Kırmızı iktidara yakın, gri bağımsız, yeşil muhalefete yakın kaynaklardır."
       />
       <RisingTopics data={rising} />

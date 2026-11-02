@@ -22,6 +22,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { mergeClusters, mergeRevalidationTags } from "@/lib/clusters/merge";
@@ -39,7 +40,7 @@ function isUuid(v: unknown): v is string {
   return typeof v === "string" && UUID_RE.test(v);
 }
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -120,4 +121,4 @@ export const POST = withApiErrors(async (request: Request) => {
     return apiServerError(error);
   }
   return NextResponse.json({ ok: true }, { status: 200 });
-});
+}));

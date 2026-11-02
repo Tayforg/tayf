@@ -34,6 +34,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { keepClusterArticle, unlinkClusterArticle } from "@/lib/admin/jev-cluster";
@@ -53,7 +54,7 @@ function isJevUnlinkDecision(value: unknown): value is JevUnlinkDecision {
   return value === "unlink" || value === "keep";
 }
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -113,4 +114,4 @@ export const POST = withApiErrors(async (request: Request) => {
   }
 
   return NextResponse.json({ ok: true }, { status: 200 });
-});
+}));

@@ -11,6 +11,7 @@ import {
   getSourceItemsPerDay,
   summariseFeedStatus,
 } from "@/lib/sources/feed-status";
+import { httpStatusLabel } from "@/lib/sources/http-status-label";
 import { SOURCE_KIND_META } from "@/lib/sources/kind";
 import { SILENCE_REASON_LABEL, type SilenceReason } from "@/lib/sources/silence-reason";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
@@ -40,7 +41,7 @@ import type { MediaDnaZone } from "@/types";
 // `canonical: "/"` (which would mark it a duplicate of the homepage).
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
-  title: "Kaynak Durumu",
+  title: "Kaynak durumu",
   description:
     "Tayf'ın izlediği her aktif kaynağın son haber zamanı, son HTTP durumu ve 7 günlük yayın sıklığı — yanlılık ve kör nokta paylarının hesaplandığı payda burada.",
   path: "/kaynaklar/durum",
@@ -78,7 +79,7 @@ export default async function KaynakDurumPage() {
     <div className="container mx-auto px-4 py-8 max-w-6xl space-y-6">
       <PageHero
         kicker="Kapsam düzeltmesi"
-        title="Kaynak Durumu"
+        title="Kaynak durumu"
         subtitle="Tayf'taki her pay — yanlılık dağılımı, kör nokta — yalnızca son 72 saatte en az bir haber veren kaynaklar üzerinden hesaplanır; toplam aktif kaynak sayısı üzerinden değil. Bu sayfa o paydayı kaynak kaynak açar."
       />
 
@@ -199,7 +200,7 @@ export function KaynakDurumBody({
               Diğer sütunlar için tabloyu yana kaydırın.
             </p>
             <div
-              className="overflow-x-auto"
+              className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               role="region"
               aria-labelledby="durum-tablo"
               aria-describedby="durum-kaydir"
@@ -284,7 +285,7 @@ export function KaynakDurumBody({
                         {row.lastItemAt ? formatTurkishTimeAgo(row.lastItemAt) : "—"}
                       </td>
                       <td className="py-2.5 pr-4 whitespace-nowrap font-mono text-muted-foreground">
-                        {row.lastHttpStatus ?? "—"}
+                        {httpStatusLabel(row.lastHttpStatus)}
                       </td>
                       <td className="py-2.5 whitespace-nowrap font-mono text-muted-foreground">
                         <Suspense fallback={<span className="text-muted-foreground">…</span>}>

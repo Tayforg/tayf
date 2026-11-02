@@ -33,11 +33,11 @@ export interface NewsletterStatusCopy {
 export const NEWSLETTER_STATUS_COPY: Record<NewsletterStatus, NewsletterStatusCopy> = {
   onaylandi: {
     tone: "success",
-    text: "Bülten kaydın onaylandı. Haftalık bülten cumartesi sabahları gelen kutunda olacak.",
+    text: "Bülten kaydınız onaylandı. Haftalık bülten cumartesi sabahları gelen kutunuzda olacak.",
   },
   ayrildi: {
     tone: "info",
-    text: "Bültenden ayrıldın. Sana artık bülten göndermeyeceğiz.",
+    text: "Bültenden ayrıldınız. Size artık bülten göndermeyeceğiz.",
   },
   gecersiz: {
     tone: "warning",

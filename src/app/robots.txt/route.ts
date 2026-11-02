@@ -22,12 +22,12 @@
 // a `#`-prefixed comment below and in llms.txt itself, never as a bare
 // directive line a strict parser could choke on.
 
-// Bots that get the ALLOW-WITH-TERMS + /api/sources carve-out. The
-// carve-out exists because pack B (M-04) publishes the machine-readable
-// source registry at /api/sources and /api/sources/{slug}; the whole
-// point is that answer engines can fetch and cite it. Until pack B merges,
-// requests to that path 404 — harmless, and worth a Disallow-free crawl
-// slot regardless.
+// Bots that get the ALLOW-WITH-TERMS + /api/sources carve-out (plus the
+// /api/v1/openapi.json one, see group()). The /api/sources carve-out exists
+// because pack B (M-04) publishes the machine-readable source registry at
+// /api/sources and /api/sources/{slug}; the whole point is that answer
+// engines can fetch and cite it. Until pack B merges, requests to that path
+// 404 — harmless, and worth a Disallow-free crawl slot regardless.
 //
 // The same carve-out is extended to Googlebot, Bingbot and the default
 // `User-agent: *` group below (via the shared `group()` helper) — without
@@ -64,11 +64,19 @@ const AI_BOT_USER_AGENTS = [
 // group-wide rule — can't drift between them. Under RFC 9309
 // longest-match-wins, the 12-character `Allow: /api/sources` correctly
 // beats the 5-character `Disallow: /api/` for that path.
+//
+// `Allow: /api/v1/openapi.json` is the same kind of carve-out for the one
+// keyless, static, public /api/v1 file: /llms.txt links crawlers to it, so
+// it must not sit under `Disallow: /api/`. It is an exact file path, so the
+// keyed endpoints (/api/v1/clusters, ...) and the rest of /api/ stay
+// disallowed. tests/api/llms-txt.test.ts checks every llms.txt link against
+// these rules.
 function group(userAgent: string): string {
   return [
     `User-agent: ${userAgent}`,
     "Allow: /",
     "Allow: /api/sources",
+    "Allow: /api/v1/openapi.json",
     "Disallow: /admin",
     "Disallow: /api/",
     // The script-less iframe widget (src/app/embed): a frame target for other
@@ -109,6 +117,8 @@ ${group("*")}
 # --- AI / answer-engine bots: allow-with-terms, never block. -------------
 # Allow: /api/sources is a carve-out for the M-04 source registry (pack B).
 # It may 404 until that pack ships; that is expected and harmless.
+# The OpenAPI file under /api/v1 is carved out too: it is the keyless contract
+# that /llms.txt links to; the keyed /api/v1 endpoints themselves stay disallowed.
 ${AI_BOT_USER_AGENTS.map(group).join("\n\n")}
 
 ${group("Googlebot")}

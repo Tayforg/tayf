@@ -1469,3 +1469,222 @@ describe("cutAppendedTicker (h23-live-2)", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// h24-feeds-2 (hunt 24, 2026-11-02): the Medyascope site-name footer.
+//
+// 428 of the 430 Medyascope articles of the last 14 days end their description
+// with an echo of their own headline and the site name: "<body>\n<headline>
+// Medyascope" (separator: one blank, an NBSP, or NBSP + blank). 5 clusters
+// updated in the last 7 days carried it in summary_tr (6e2ecaea, eaaa529c,
+// eae25e62, f481725d, 08bfd151) and so did the live /rss.xml item of 6e2ecaea.
+// stripFeedWrappers() now has a fifth rule, stripSiteNameFooter(): cut the last
+// line when the text ends in blank + "Medyascope" and that line is not line 0.
+// The fixtures below are the stored texts, read-only, 2026-11-02.
+// ---------------------------------------------------------------------------
+
+const MEDYA_BODY_6E2E =
+  "TİP Genel Başkanı Erkan Baş, Kurtuluş Bildirgesi’nin tanıtımında muhalefetin yalnızca mitinglere ve seçimlere odaklanmasını eleştirdi.";
+const MEDYA_6E2E = `${MEDYA_BODY_6E2E}\nErkan Baş: “’Seçimlere kadar sabredelim anlayışı’ doğru değil”  Medyascope`;
+
+const MEDYA_9F87 =
+  "2027'de trafik cezaları, pasaport ve ehliyet harçları ile IMEI kayıt ücretine yüzde 27,89 zam bekleniyor. İşte yeni tarifeler.\n2027’de yeni zamlı tarifeler: Trafik cezaları, pasaport ve telefon harcı ne kadar olacak? Medyascope";
+
+const MEDYA_ROWS: ReadonlyArray<readonly [string, string, string]> = [
+  [
+    "6e2ecaea (NBSP + blank before the name, quotes and a colon in the headline)",
+    MEDYA_6E2E,
+    MEDYA_BODY_6E2E,
+  ],
+  [
+    "9f8702b9 (a question mark in the headline)",
+    MEDYA_9F87,
+    "2027'de trafik cezaları, pasaport ve ehliyet harçları ile IMEI kayıt ücretine yüzde 27,89 zam bekleniyor. İşte yeni tarifeler.",
+  ],
+  [
+    "eaaa529c (a number before the name)",
+    "Mete Kaan Kaynar, Türkiye’deki seçimlerin tarihlerini ve erken seçim örneklerini inceleyerek 2028 için olası seçim takvimini değerlendirdi.\nMete Kaan Kaynar yazdı: Erken seçim ne zaman? – 2 Medyascope",
+    "Mete Kaan Kaynar, Türkiye’deki seçimlerin tarihlerini ve erken seçim örneklerini inceleyerek 2028 için olası seçim takvimini değerlendirdi.",
+  ],
+  [
+    "eae25e62",
+    "Bakırköy Belediyesi’ne yönelik soruşturmada 39 kişi tutuklandı. Tutuklananlar arasında Abdülhamit Pehlivan ve Ali Rıza Akyüz de var.\nBakırköy Belediyesi dosyasında damacana su, hırdavat, antivirüs ihaleleri suç sayıldı Medyascope",
+    "Bakırköy Belediyesi’ne yönelik soruşturmada 39 kişi tutuklandı. Tutuklananlar arasında Abdülhamit Pehlivan ve Ali Rıza Akyüz de var.",
+  ],
+  [
+    "f481725d",
+    "Savcı Sayan şişenin kapağını açtı: Fon soruşturmasıyla birlikte AKP içindeki kavgalar ve hesaplaşma yeniden gündeme geldi.\nRuşen Çakır yorumladı: Savcı Sayan şişenin kapağını açtı, iktidar içindeki kavgaları kızıştırdı Medyascope",
+    "Savcı Sayan şişenin kapağını açtı: Fon soruşturmasıyla birlikte AKP içindeki kavgalar ve hesaplaşma yeniden gündeme geldi.",
+  ],
+  [
+    "08bfd151 (abbreviation dots in the body)",
+    "İsrail uzmanı Doç. Dr. Ferit Belder değerlendirdi: Netanyahu iktidarda kalabilir mi, aşırı sağ geriledi mi, Filistinliler için ne değişecek?\nİsrail uzmanı Doç. Dr. Ferit Belder ile söyleşi: İsrail’de seçim bitti, şimdi ne olacak? Medyascope",
+    "İsrail uzmanı Doç. Dr. Ferit Belder değerlendirdi: Netanyahu iktidarda kalabilir mi, aşırı sağ geriledi mi, Filistinliler için ne değişecek?",
+  ],
+  [
+    "7650f772 (the body line ends in an NBSP of its own)",
+    "Işıl Öz’ün Cemal Tunçdemir ile söyleşisi: Trump seçim sonuçlarına müdahale edebilir mi? ABD yeni bir seçim dramının eşiğinde mi? \nIşıl Öz’ün Cemal Tunçdemir ile söyleşisi: Trump seçim sonuçlarına müdahale edebilir mi? ABD yeni bir seçim dramının eşiğinde mi?  Medyascope",
+    "Işıl Öz’ün Cemal Tunçdemir ile söyleşisi: Trump seçim sonuçlarına müdahale edebilir mi? ABD yeni bir seçim dramının eşiğinde mi?",
+  ],
+];
+
+const FOOT_BODY = "Gövde cümlesi burada biter.";
+const FOOT_HEAD = "Başlık: gövdenin tekrarı";
+
+/** Same-string cases: the site name is there, but this is not a footer. */
+const SITE_NAME_SAME: ReadonlyArray<readonly [string, string]> = [
+  ["the name in the middle of the text", "Medyascope'a konuşan uzman şunları söyledi: “Seçim yakın.”\nİkinci satır devam ediyor."],
+  ["the name at the start of line 2", `${FOOT_BODY}\nMedyascope muhabiri sahadaydı ve sorular sordu.`],
+  ["a one-line headline + name (line 0 is never a footer)", "Erken seçim ne zaman? Medyascope"],
+  ["the name alone", "Medyascope"],
+  ["the name alone on line 2 of an empty first line", "\nMedyascope"],
+  ["blank lines in front of the name alone", "\n\nMedyascope"],
+  ["blank first line, then a headline + name", " \nBaşlık Medyascope"],
+  ["glued to the previous word (XMedyascope)", `${FOOT_BODY}\nBaşlıkMedyascope`],
+  ["a capital X glued to the name", `${FOOT_BODY}\n${FOOT_HEAD} XMedyascope`],
+  ["lower-case medyascope", `${FOOT_BODY}\n${FOOT_HEAD} medyascope`],
+  ["upper-case MEDYASCOPE", `${FOOT_BODY}\n${FOOT_HEAD} MEDYASCOPE`],
+  ["a dot after the name", `${FOOT_BODY}\n${FOOT_HEAD} Medyascope.`],
+  ["a different suffix on the name", `${FOOT_BODY}\n${FOOT_HEAD} Medyascope'a`],
+  ["a last line over 300 characters", `${FOOT_BODY}\n${"a".repeat(301)} Medyascope`],
+  ["a different site name", `${FOOT_BODY}\n${FOOT_HEAD} BirGün`],
+  ["no text at all before the footer line", "\n\n   \nBaşlık Medyascope"],
+];
+
+describe("stripFeedWrappers: site-name footer (h24-feeds-2)", () => {
+  it.each(MEDYA_ROWS)("strips the stored text %s", (_label, input, expected) => {
+    expect(stripFeedWrappers(input)).toBe(expected);
+  });
+
+  it("6e2ecaea: the text ends exactly with the first line", () => {
+    const out = stripFeedWrappers(MEDYA_6E2E);
+    expect(out).toBe(
+      "TİP Genel Başkanı Erkan Baş, Kurtuluş Bildirgesi’nin tanıtımında muhalefetin yalnızca mitinglere ve seçimlere odaklanmasını eleştirdi.",
+    );
+    expect(out.endsWith("odaklanmasını eleştirdi.")).toBe(true);
+    expect(out).not.toContain("Medyascope");
+  });
+
+  it("9f8702b9: 'İşte yeni tarifeler.' is where the text now ends", () => {
+    expect(stripFeedWrappers(MEDYA_9F87).endsWith("İşte yeni tarifeler.")).toBe(true);
+  });
+
+  it.each([" ", "\t", "  ", " ", "  ", "  ", "\t\t"])(
+    "separator %j between the headline and the name",
+    (sep) => {
+      expect(stripFeedWrappers(`${FOOT_BODY}\n${FOOT_HEAD}${sep}Medyascope`)).toBe(FOOT_BODY);
+    },
+  );
+
+  it.each(["", " ", "  \t", " ", "\n", "\n\n", " \n ", "\r\n"])(
+    "trailing blanks or newlines %j after the name",
+    (tail) => {
+      expect(stripFeedWrappers(`${FOOT_BODY}\n${FOOT_HEAD} Medyascope${tail}`)).toBe(FOOT_BODY);
+    },
+  );
+
+  it("the name alone on the last line goes (with nothing echoed)", () => {
+    expect(stripFeedWrappers(`${FOOT_BODY}\nMedyascope`)).toBe(FOOT_BODY);
+    expect(stripFeedWrappers(`${FOOT_BODY}\n  Medyascope  `)).toBe(FOOT_BODY);
+    expect(stripFeedWrappers(`${FOOT_BODY}\nMedyascope\n`)).toBe(FOOT_BODY);
+    expect(stripFeedWrappers(`${FOOT_BODY}\n Medyascope`)).toBe(FOOT_BODY);
+  });
+
+  it("a multi-line body keeps all of its lines; only the last line goes", () => {
+    expect(stripFeedWrappers(`Birinci satır.\nİkinci satır.\n${FOOT_HEAD} Medyascope`)).toBe(
+      "Birinci satır.\nİkinci satır.",
+    );
+  });
+
+  it("the blanks in front of the footer line go with it", () => {
+    expect(stripFeedWrappers(`${FOOT_BODY}  \n\n${FOOT_HEAD} Medyascope`)).toBe(FOOT_BODY);
+    expect(stripFeedWrappers(`${FOOT_BODY} \n${FOOT_HEAD} Medyascope`)).toBe(FOOT_BODY);
+  });
+
+  it("a last line of exactly 300 characters goes, 301 stays", () => {
+    expect(stripFeedWrappers(`${FOOT_BODY}\n${"a".repeat(300)} Medyascope`)).toBe(FOOT_BODY);
+    const long = `${FOOT_BODY}\n${"a".repeat(301)} Medyascope`;
+    expect(stripFeedWrappers(long) === long).toBe(true);
+  });
+
+  it.each(SITE_NAME_SAME)("returns the SAME string for %s", (_label, input) => {
+    expect(stripFeedWrappers(input)).toBe(input);
+    expect(stripFeedWrappers(input) === input).toBe(true);
+  });
+
+  it("combined with the excerpt marker: 'Gövde metni […]\\n<title> Medyascope' -> 'Gövde metni…'", () => {
+    expect(stripFeedWrappers("Gövde metni […]\nErken seçim ne zaman? – 2 Medyascope")).toBe("Gövde metni…");
+    expect(stripFeedWrappers("Gövde metni bitti.[…]\nErken seçim ne zaman? Medyascope")).toBe("Gövde metni bitti.");
+  });
+
+  it("combined with a WordPress footer in front of the site-name footer", () => {
+    expect(
+      stripFeedWrappers("Gövde.\nThe post Başlık appeared first on Site Adı\nBaşlık Medyascope"),
+    ).toBe("Gövde.");
+  });
+
+  it("is idempotent on every fixture, its result, and a doubled footer", () => {
+    const doubled = `${FOOT_BODY}\n${FOOT_HEAD} Medyascope\n${FOOT_HEAD} Medyascope`;
+    const all = [
+      ...MEDYA_ROWS.map(([, input]) => input),
+      ...MEDYA_ROWS.map(([, , expected]) => expected),
+      ...SITE_NAME_SAME.map(([, input]) => input),
+      doubled,
+    ];
+    for (const x of all) {
+      const once = stripFeedWrappers(x);
+      expect(stripFeedWrappers(once), JSON.stringify(x)).toBe(once);
+    }
+    expect(stripFeedWrappers(doubled)).toBe(FOOT_BODY);
+  });
+
+  it("never empties a text", () => {
+    for (const [, input] of [...MEDYA_ROWS, ...SITE_NAME_SAME.map(([l, i]) => [l, i, ""] as const)]) {
+      expect(stripFeedWrappers(input).trim(), JSON.stringify(input)).not.toBe("");
+    }
+  });
+
+  it("linear time: adversarial inputs of 100k to 200k characters finish in under 100 ms", () => {
+    const inputs = [
+      "\n" + "a ".repeat(100_000) + " Medyascope",
+      "x\n" + "a ".repeat(100_000) + " Medyascope",
+      "x\n" + " ".repeat(200_000) + "Medyascope",
+      "\n".repeat(100_000) + "x Medyascope",
+      "x\n".repeat(50_000) + "Medyascope",
+      "Medyascope ".repeat(18_000),
+      "\nMedyascope".repeat(18_000),
+      "x\n" + "a".repeat(200_000) + " Medyascope",
+      FOOT_BODY + "\n" + " ".repeat(150_000) + "Medyascope",
+    ];
+    for (const s of inputs) {
+      const start = performance.now();
+      stripFeedWrappers(s);
+      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(100);
+    }
+  });
+});
+
+describe("cleanDescription inherits the site-name footer rule (h24-feeds-2)", () => {
+  it("6e2ecaea: the cleaned text has no 'Medyascope' and is the first line", () => {
+    const cleaned = cleanDescription(MEDYA_6E2E);
+    expect(cleaned).not.toContain("Medyascope");
+    expect(cleaned).toBe(MEDYA_BODY_6E2E);
+  });
+
+  it.each(MEDYA_ROWS)("%s: cleanDescription gives the stripped text", (_label, input, expected) => {
+    expect(cleanDescription(input)).toBe(expected);
+  });
+
+  it("texts that are not footers are returned byte-identical", () => {
+    for (const [, input] of SITE_NAME_SAME) {
+      expect(cleanDescription(input), JSON.stringify(input)).toBe(input);
+    }
+  });
+
+  it("is idempotent", () => {
+    for (const [, input] of MEDYA_ROWS) {
+      const once = cleanDescription(input);
+      expect(cleanDescription(once)).toBe(once);
+    }
+  });
+});

@@ -7,9 +7,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // no socket is ever opened.
 // ---------------------------------------------------------------------------
 
+// withCronOutcome schedules its outcome row with after(); outside a request scope it throws.
+// Capture the callbacks instead, so a test can run them and read the recorded status.
+const afterCallbacks = vi.hoisted(() => [] as Array<() => unknown>);
+
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
-  return { ...actual, connection: async () => {} };
+  return {
+    ...actual,
+    connection: async () => {},
+    after: (callback: () => unknown) => {
+      afterCallbacks.push(callback);
+    },
+  };
 });
 
 const SECRET_A = "whsec_" + "1a".repeat(32);
@@ -33,6 +43,14 @@ const fx = vi.hoisted(() => ({
   postResults: [] as unknown[],
   postCalls: [] as Array<{ url: string; body: string; headers: Record<string, string> }>,
   webhookQuery: null as import("../_helpers/supabase-fake").BuilderState | null,
+  // One error slot per swallowed database step (W3).
+  upsertError: null as { message: string } | null,
+  exhaustedError: null as { message: string } | null,
+  deliveryUpdateError: null as { message: string } | null,
+  extraError: null as { message: string } | null,
+  hookUpdateError: null as { message: string } | null,
+  /** The fake's mutation log, so a fixture can tell the exhausted update from the outcome update. */
+  calls: null as null | { mutations: Array<{ table: string; op: string; patch: unknown }> },
 }));
 
 // getZoneFeedHealth is a vi.fn so the cron's read profile can be asserted.
@@ -42,21 +60,32 @@ const healthMock = vi.hoisted(() =>
 
 const supabaseFake = await vi.hoisted(async () => {
   const helper = await import("../_helpers/supabase-fake");
-  return helper.createSupabaseFake({
+  const fake = helper.createSupabaseFake({
     tables: {
+      // A read always calls select(); the update of the webhook health never does.
+      // (The helper clears `state.mutation` before it resolves a fixture.)
       api_key_webhooks: (st) => {
-        if (st.mutation) return { data: null, error: null };
-        if (st.in.some((i) => i.col === "key_id")) return { data: fx.unknownStreakRows, error: null };
+        if (st.selectArgs.length === 0) return { data: null, error: fx.hookUpdateError };
+        if (st.in.some((i) => i.col === "key_id")) return { data: fx.unknownStreakRows, error: fx.extraError };
         fx.webhookQuery = st;
         return { data: fx.webhooks, error: null };
       },
       clusters: () => ({ data: fx.fresh, error: fx.freshError }),
-      api_key_webhook_deliveries: () => ({ data: null, error: null }),
+      // Only the two updates reach this fixture without select(); the enqueue upsert
+      // chains select("id") and the helper answers it itself (see upsertError below).
+      api_key_webhook_deliveries: (st) => {
+        if (st.selectArgs.length > 0) return { data: null, error: null };
+        const patch = fx.calls?.mutations.at(-1)?.patch as { last_error?: unknown } | undefined;
+        const exhausted = patch?.last_error === "attempts_exceeded";
+        return { data: null, error: exhausted ? fx.exhaustedError : fx.deliveryUpdateError };
+      },
     },
     rpc: {
       api_webhook_claim: () => ({ data: fx.claimRows, error: fx.claimError }),
     },
   });
+  fx.calls = fake.calls;
+  return fake;
 });
 
 vi.mock("@supabase/supabase-js", () => ({
@@ -69,6 +98,10 @@ vi.mock("@supabase/supabase-js", () => ({
           if (prop === "upsert") {
             return (patch: unknown, opts: unknown) => {
               fx.upsertOpts.push({ table, opts });
+              // The shared fake answers upsert(...).select() itself and cannot fail it.
+              if (fx.upsertError) {
+                return { select: async () => ({ data: null, error: fx.upsertError }) };
+              }
               return (target.upsert as (p: unknown, o: unknown) => unknown)(patch, opts);
             };
           }
@@ -197,6 +230,12 @@ beforeEach(() => {
   fx.postResults = [];
   fx.postCalls = [];
   fx.webhookQuery = null;
+  fx.upsertError = null;
+  fx.exhaustedError = null;
+  fx.deliveryUpdateError = null;
+  fx.extraError = null;
+  fx.hookUpdateError = null;
+  afterCallbacks.length = 0;
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
   spies = (["log", "info", "warn", "error", "debug"] as const).map((m) =>
@@ -551,5 +590,150 @@ describe("GET /api/cron/alerts-webhooks", () => {
     expect(logged).not.toContain(SECRET_A);
     expect(logged).not.toContain("secret-path-token");
     expect(logged).not.toContain("tayf.alert");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3: a database step that fails after the claim is logged and skipped, and the run
+// answered 200 with `ok: true`, so a tick that lost its delivery records looked
+// healthy. The route now counts each swallowed Supabase failure (freshError,
+// upsertError, exhaustedError, extraError, updateError, hookUpdateError) in
+// `substepErrors`, answers the same 200 with `ok: substepErrors === 0` and the count
+// in the body, and sets the internal header; withCronOutcome records 599 and strips
+// it. The claim rpc error is still a real 500, and a webhook POST that fails (the
+// subscriber's endpoint, a vendor failure) is not counted.
+// ---------------------------------------------------------------------------
+describe("sub-step failures are recorded as 599, answered as 200 (W3)", () => {
+  const SUBSTEP_HEADER = "x-cron-substep-errors";
+
+  /** Runs the after() callbacks, the way Next does once the response is on its way. */
+  const flush = () => Promise.all(afterCallbacks.map((cb) => cb()));
+  /** Every `ops_cron_route_run_record` call (withCronOutcome's row for ops_health_report row 15). */
+  const outcomeCalls = () => supabaseFake.calls.rpc.filter((c) => c.name === "ops_cron_route_run_record");
+
+  async function runRecorded() {
+    const res = await run();
+    const body = await res.clone().json();
+    await flush();
+    return { res, body };
+  }
+
+  it("a clean delivery run records 200, reports substepErrors 0 and ok true", async () => {
+    fx.items = [item("one_zone_silent", IDS)];
+    fx.claimRows = [claimRow()];
+    fx.postResults = [{ status: 204 }];
+    const { res, body } = await runRecorded();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(body).toMatchObject({ ok: true, delivered: 1, substepErrors: 0 });
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "alerts-webhooks", p_status: 200 });
+  });
+
+  const failing: Array<{ name: string; arrange: () => void }> = [
+    {
+      name: "the fresh blindspot re-read (freshError)",
+      arrange: () => {
+        fx.items = [item("blindspot", ID1), item("one_zone_silent", IDS)];
+        fx.freshError = { message: "fresh boom" };
+      },
+    },
+    {
+      name: "the enqueue upsert (upsertError)",
+      arrange: () => {
+        fx.items = [item("one_zone_silent", IDS)];
+        fx.upsertError = { message: "enqueue boom" };
+      },
+    },
+    {
+      name: "the exhausted-delivery update (exhaustedError)",
+      arrange: () => {
+        fx.claimRows = [claimRow({ attempts: 6 })];
+        fx.exhaustedError = { message: "exhausted boom" };
+      },
+    },
+    {
+      name: "the unknown-keys read (extraError)",
+      arrange: () => {
+        // key 99 is not among the enabled webhooks that were loaded
+        fx.claimRows = [claimRow({ key_id: 99 })];
+        fx.postResults = [{ status: 204 }];
+        fx.extraError = { message: "extra boom" };
+      },
+    },
+    {
+      name: "the delivery-outcome update (updateError)",
+      arrange: () => {
+        fx.claimRows = [claimRow()];
+        fx.postResults = [{ status: 204 }];
+        fx.deliveryUpdateError = { message: "update boom" };
+      },
+    },
+    {
+      name: "the webhook-health update (hookUpdateError)",
+      arrange: () => {
+        fx.claimRows = [claimRow()];
+        fx.postResults = [{ status: 204 }];
+        fx.hookUpdateError = { message: "hook boom" };
+      },
+    },
+  ];
+
+  it.each(failing)("$name failing records 599, answers 200 without the header and reports ok false", async ({ arrange }) => {
+    arrange();
+    const { res, body } = await runRecorded();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(body.substepErrors).toBeGreaterThanOrEqual(1);
+    expect(body.ok).toBe(false);
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "alerts-webhooks", p_status: 599 });
+  });
+
+  it("counts one failure for each delivery whose outcome could not be recorded", async () => {
+    fx.claimRows = [claimRow({ id: 501 }), claimRow({ id: 502, alert_id: `blindspot:${ID2}` })];
+    fx.postResults = [{ status: 204 }, { status: 204 }];
+    fx.deliveryUpdateError = { message: "update boom" };
+    const { body } = await runRecorded();
+    expect(body.substepErrors).toBe(2);
+    expect(body.delivered).toBe(2);
+  });
+
+  it("a fresh re-read failure still passes the silent alert and still drops the blindspot", async () => {
+    fx.items = [item("blindspot", ID1), item("one_zone_silent", IDS)];
+    fx.freshError = { message: "fresh boom" };
+    const { body } = await runRecorded();
+    const rows = supabaseFake.calls.upsert("api_key_webhook_deliveries")[0]!.patch as Array<{ alert_id: string }>;
+    expect(rows.map((r) => r.alert_id)).toEqual([`one_zone_silent:${IDS}`]);
+    expect(body.enqueued).toBe(1);
+    expect(body.substepErrors).toBe(1);
+  });
+
+  it("a webhook POST that fails (the subscriber's endpoint) is not counted: 200 recorded, ok true", async () => {
+    fx.claimRows = [claimRow({ attempts: 1 })];
+    fx.postResults = [{ status: 500 }];
+    const { res, body } = await runRecorded();
+
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, delivered: 0, retried: 1, substepErrors: 0 });
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "alerts-webhooks", p_status: 200 });
+  });
+
+  it("the claim rpc error is still a real 500, recorded as 500 (not 599)", async () => {
+    fx.claimError = { message: "rpc down" };
+    const res = await run();
+    await flush();
+    expect(res.status).toBe(500);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "alerts-webhooks", p_status: 500 });
+  });
+
+  it("the early skips carry no sub-step count (nothing ran yet): 'no webhooks' records 200", async () => {
+    fx.webhooks = [];
+    const { body } = await runRecorded();
+    expect(body).toEqual({ skipped: "no webhooks" });
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "alerts-webhooks", p_status: 200 });
   });
 });

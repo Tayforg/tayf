@@ -182,7 +182,7 @@ export function buildDigestHtml(input: BuildDigestHtmlInput): string {
             <tr>
               <td style="padding:20px 28px 28px;border-top:1px solid #e5e5e5;">
                 <p style="margin:0;color:#a1a1aa;font-size:12px;font-family:Arial,Helvetica,sans-serif;">
-                  Bu e-postayı Tayf bültenine kaydolduğun için alıyorsun.
+                  Bu e-postayı Tayf bültenine kaydolduğunuz için alıyorsunuz.
                   <a href="${unsubscribeUrl}" style="color:#71717a;">Bültenden çık</a>
                 </p>
               </td>

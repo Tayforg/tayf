@@ -4,7 +4,7 @@ import Parser from "rss-parser";
 
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
+import { substepErrorsInit, withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { captureServerException } from "@/lib/sentry/server";
@@ -38,6 +38,14 @@ import {
  *
  * AUTH: same `requireCronBearer` contract as `/api/cron/headline` --
  * FAIL-CLOSED 503 on a missing `CRON_SECRET`, 401 on a bad/missing bearer.
+ *
+ * SUB-STEP FAILURES (W3): the per-item loop logs, captures and skips a failed
+ * Supabase call (cluster search, member titles, existing links, promote update,
+ * new-links upsert) and still answers 200. Each such swallowed database failure
+ * is counted in `substepErrors`; the body carries the count, `success` is
+ * `substepErrors === 0`, and the internal `x-cron-substep-errors` header makes
+ * withCronOutcome record 599 (src/lib/ops/cron-route-outcome.ts). A publisher
+ * feed that fails to fetch is a vendor failure and is NOT counted.
  */
 export const maxDuration = 60;
 
@@ -198,6 +206,8 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
   }
 
   const supabase = createServerClient();
+  // Swallowed database failures of this run (see SUB-STEP FAILURES above).
+  let substepErrors = 0;
 
   // 1. Fetch every verified feed in parallel. A failing feed is recorded
   // in the response and never fails the run.
@@ -290,6 +300,7 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
     if (clusterErr) {
       console.error("[fact-checks-cron] cluster search failed", item.id, clusterErr);
       captureServerException(clusterErr, { factCheckId: item.id });
+      substepErrors++;
       continue;
     }
 
@@ -306,6 +317,7 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
     if (memberErr) {
       console.error("[fact-checks-cron] member fetch failed", item.id, memberErr);
       captureServerException(memberErr, { factCheckId: item.id });
+      substepErrors++;
       continue;
     }
 
@@ -339,6 +351,7 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
     if (existingErr) {
       console.error("[fact-checks-cron] existing links fetch failed", item.id, existingErr);
       captureServerException(existingErr, { factCheckId: item.id });
+      substepErrors++;
       continue;
     }
 
@@ -404,6 +417,7 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
             factCheckId: item.id,
             clusterId: r.clusterId,
           });
+          substepErrors++;
         } else {
           published++;
           publishedClusterIds.add(r.clusterId);
@@ -422,6 +436,7 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
       if (insertErr) {
         console.error("[fact-checks-cron] insert links failed", item.id, insertErr);
         captureServerException(insertErr, { factCheckId: item.id });
+        substepErrors++;
       }
     }
   }
@@ -437,13 +452,17 @@ export const GET = withCronOutcome("fact-checks", withApiErrors(async (request: 
     console.error("[fact-checks-cron] revalidateTag failed", err);
   }
 
-  return NextResponse.json({
-    success: true,
-    feeds: feedsStatus,
-    upserted,
-    matched,
-    published,
-    shadow,
-    timestamp: new Date().toISOString(),
-  });
+  return NextResponse.json(
+    {
+      success: substepErrors === 0,
+      feeds: feedsStatus,
+      upserted,
+      matched,
+      published,
+      shadow,
+      substepErrors,
+      timestamp: new Date().toISOString(),
+    },
+    substepErrorsInit(substepErrors),
+  );
 }));

@@ -1,7 +1,7 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
+import { substepErrorsInit, withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiTooManyRequests, apiServerError, withApiErrors } from "@/lib/api/errors";
 import { POSTGREST_MAX_ROWS, readAllPages } from "@/lib/db/paging";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
@@ -53,6 +53,15 @@ if (process.env.NODE_ENV === "production" && !isMailConfigured()) {
  *
  * AUTH: gated by `requireCronBearer` — same fail-closed 503 / 401 contract
  * as `/api/cron/headline`.
+ *
+ * SUB-STEP FAILURES (W3): two Supabase failures are swallowed and leave the run at
+ * 200: the `last_sent_at` write after a successful send (the subscriber would be
+ * mailed again next tick) and a failed rights-gated summary member lookup (the
+ * summaries are hidden, fail closed, but the mail goes out degraded). Each is
+ * counted in `substepErrors`; the final body carries the count and the internal
+ * `x-cron-substep-errors` header makes withCronOutcome record 599
+ * (src/lib/ops/cron-route-outcome.ts). A Resend send that fails is a vendor
+ * failure and is NOT counted.
  */
 
 export const maxDuration = 60;
@@ -245,6 +254,14 @@ export const GET = withCronOutcome("digest", withApiErrors(async (request: Reque
   }
   const { members: membersByCluster, lookupFailed: memberLookupFailed } =
     await getRssSummaryMembers(attributionClusterIds, { profile: "batch" });
+  // Swallowed database failures of this run (see SUB-STEP FAILURES above).
+  let substepErrors = 0;
+  if (memberLookupFailed) {
+    // Fail closed: resolveSummary hides every excerpt, so the mail goes out without
+    // summaries. That is a degraded run to report, not a reason to stop the send.
+    console.warn("[digest-cron] summary member lookup failed; summaries are hidden");
+    substepErrors++;
+  }
 
   const topClusters = topClusterBundles.map((bundle) =>
     toClusterItem(bundle, resolveSummary(bundle, membersByCluster, memberLookupFailed)),
@@ -315,6 +332,7 @@ export const GET = withCronOutcome("digest", withApiErrors(async (request: Reque
             new Error(redactEmails(updateError.message).slice(0, 300)),
             { subscriberId: row.id, code: updateError.code },
           );
+          substepErrors++;
         }
       } else {
         // Missing API key (`skipped: true`) or a failed send (`ok: false`)
@@ -346,5 +364,8 @@ export const GET = withCronOutcome("digest", withApiErrors(async (request: Reque
     console.warn("[digest-cron] send failures", { sent, skipped });
   }
 
-  return NextResponse.json({ sent, skipped });
+  return NextResponse.json(
+    { sent, skipped, substepErrors },
+    substepErrorsInit(substepErrors),
+  );
 }));

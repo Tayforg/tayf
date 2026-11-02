@@ -543,6 +543,96 @@ describe("withCronOutcome: sub-step failures", () => {
       expect(await response.text()).toBe("body");
     });
   });
+
+  // The four routes besides headline (fact-checks, alerts-webhooks, social, digest)
+  // count their swallowed database failures and build the response init with this
+  // helper, so a positive count becomes the internal header and zero stays invisible.
+  describe("substepErrorsInit", () => {
+    it.each([0, Number.NaN, -1])("adds no header for the count %s and returns the init as given", async (count) => {
+      const { substepErrorsInit } = await load();
+      expect(substepErrorsInit(count)).toBeUndefined();
+      const init = { status: 202, headers: { "x-keep": "yes" } };
+      expect(substepErrorsInit(count, init)).toBe(init);
+    });
+
+    it.each([1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0.4])(
+      "adds no header for the non-integer or infinite count %s",
+      async (count) => {
+        const { substepErrorsInit } = await load();
+        expect(substepErrorsInit(count)).toBeUndefined();
+      },
+    );
+
+    it("sets the header to '3' for the count 3", async () => {
+      const { substepErrorsInit, CRON_SUBSTEP_ERRORS_HEADER } = await load();
+      const init = substepErrorsInit(3);
+      expect(init).toBeDefined();
+      expect(new Headers(init?.headers).get(CRON_SUBSTEP_ERRORS_HEADER)).toBe("3");
+      expect(new Headers(init?.headers).get("x-cron-substep-errors")).toBe("3");
+    });
+
+    it("keeps the existing init headers and the other init fields", async () => {
+      const { substepErrorsInit } = await load();
+      const init = substepErrorsInit(2, { status: 202, statusText: "Accepted", headers: { "x-keep": "yes", "cache-control": "no-store" } });
+      expect(init?.status).toBe(202);
+      expect(init?.statusText).toBe("Accepted");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("x-keep")).toBe("yes");
+      expect(headers.get("cache-control")).toBe("no-store");
+      expect(headers.get("x-cron-substep-errors")).toBe("2");
+    });
+
+    it("accepts a Headers instance and a tuple list as the existing headers", async () => {
+      const { substepErrorsInit } = await load();
+      const fromInstance = substepErrorsInit(1, { headers: new Headers({ "x-a": "1" }) });
+      expect(new Headers(fromInstance?.headers).get("x-a")).toBe("1");
+      expect(new Headers(fromInstance?.headers).get("x-cron-substep-errors")).toBe("1");
+      const fromTuples = substepErrorsInit(1, { headers: [["x-b", "2"]] });
+      expect(new Headers(fromTuples?.headers).get("x-b")).toBe("2");
+      expect(new Headers(fromTuples?.headers).get("x-cron-substep-errors")).toBe("1");
+    });
+
+    it("does not mutate the init the caller passed in", async () => {
+      const { substepErrorsInit } = await load();
+      const original = new Headers({ "x-keep": "yes" });
+      const init = { status: 200, headers: original };
+      substepErrorsInit(4, init);
+      expect(original.has("x-cron-substep-errors")).toBe(false);
+      expect(init.headers).toBe(original);
+    });
+
+    it("clamps a huge count to 999999, the largest the wrapper reads", async () => {
+      const { substepErrorsInit, substepErrorCount } = await load();
+      const init = substepErrorsInit(5_000_000);
+      expect(new Headers(init?.headers).get("x-cron-substep-errors")).toBe("999999");
+      expect(substepErrorCount(new Response(null, init))).toBe(999999);
+    });
+
+    it("round-trips through substepErrorCount", async () => {
+      const { substepErrorsInit, substepErrorCount } = await load();
+      expect(substepErrorCount(new Response(null, substepErrorsInit(2)))).toBe(2);
+      expect(substepErrorCount(new Response(null, substepErrorsInit(0)))).toBe(0);
+    });
+
+    it("a NextResponse.json built with it is recorded as 599 and answered as the real 200 without the header", async () => {
+      const { NextResponse } = await import("next/server");
+      const { substepErrorsInit, withCronOutcome } = await load();
+      const wrapped = withCronOutcome("digest", async (_r: Request) =>
+        NextResponse.json({ sent: 1, substepErrors: 2 }, substepErrorsInit(2)),
+      );
+      const out = await wrapped(req(`Bearer ${SECRET}`));
+      await flushAfter();
+
+      expect(rpc).toHaveBeenCalledWith("ops_cron_route_run_record", {
+        p_route: "digest",
+        p_status: 599,
+        p_duration_ms: expect.any(Number),
+      });
+      expect(out.status).toBe(200);
+      expect(out.headers.has("x-cron-substep-errors")).toBe(false);
+      expect(await out.json()).toEqual({ sent: 1, substepErrors: 2 });
+    });
+  });
 });
 
 describe("withCronOutcome: client and route validation", () => {

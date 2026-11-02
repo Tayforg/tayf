@@ -218,6 +218,46 @@ describe("/gelistirici page", () => {
     expect(src).not.toContain("toLocaleString");
   });
 
+  it("makes every horizontally scrolling block a keyboard-reachable named region with a visible focus ring (WCAG 2.1.1)", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+
+    // Opening tag around each overflow-x-auto, found by scanning for the
+    // enclosing '<' and the next '>' (attribute values are escaped, so a '>'
+    // never occurs inside one).
+    const tags: string[] = [];
+    for (let at = html.indexOf("overflow-x-auto"); at !== -1; at = html.indexOf("overflow-x-auto", at + 1)) {
+      tags.push(html.slice(html.lastIndexOf("<", at), html.indexOf(">", at) + 1));
+    }
+
+    const documented = V1_ENDPOINTS.filter(
+      (e) => e.method === "GET" && e.path !== "/api/v1/openapi.json" && e.params.length > 0,
+    );
+    expect(documented.length).toBeGreaterThan(0);
+    // 3 code samples + one params table per documented endpoint + limits + errors tables
+    expect(tags).toHaveLength(3 + documented.length + 2);
+
+    for (const tag of tags) {
+      expect(tag, tag).toContain('tabindex="0"');
+      expect(tag, tag).toContain('role="region"');
+      expect(tag, tag).toContain("aria-label=");
+      expect(tag, tag).toContain("focus-visible:ring-2");
+      expect(tag, tag).toContain("focus-visible:ring-ring");
+    }
+    for (const label of [
+      "curl örneği",
+      "Python örneği",
+      "JavaScript örneği",
+      "Kullanım sınırları tablosu",
+      "Hata kodları tablosu",
+      ...documented.map((e) => `${e.method} ${e.path} parametreleri`),
+    ]) {
+      expect(html).toContain(`aria-label="${label}"`);
+    }
+    // the code samples stay <pre> blocks
+    expect(tags.filter((t) => t.startsWith("<pre "))).toHaveLength(3);
+  });
+
   it("never renders a key-shaped string (tayf_ followed by 40 hex chars)", async () => {
     delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
     const html = await renderPage();

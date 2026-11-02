@@ -8,7 +8,7 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
-  title: "Kör Noktalar",
+  title: "Kör noktalar",
   description:
     "Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Türk medyasındaki kör noktaları tek ekranda görün.",
   path: "/blindspots",
@@ -34,7 +34,7 @@ import {
 } from "@/lib/clusters/blindspots-query";
 import { getFeedStatusSummary } from "@/lib/sources/feed-status";
 
-// /blindspots — Tayf's "Kör Noktalar" feed. The fetch/filter/tally logic
+// /blindspots — Tayf's "Kör noktalar" feed. The fetch/filter/tally logic
 // lives in blindspots-query.ts (see that file for the BLINDSPOT contract,
 // dedupe, and quality-filter rationale) so it can be unit-tested and reused
 // (e.g. by the weekly digest cron) without rendering JSX.
@@ -54,7 +54,7 @@ export default function BlindspotsPage() {
     <div className="container mx-auto px-4 py-8 max-w-5xl space-y-5">
       <PageHero
         kicker="Sadece bir tarafın gördüğü"
-        title="Kör Noktalar"
+        title="Kör noktalar"
         subtitle="Bir tarafın haberi verdiği, diğerlerinin görmezden geldiği hikâyeler. Diğer kaynaklar neden susuyor?"
       />
 

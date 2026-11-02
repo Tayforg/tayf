@@ -37,8 +37,13 @@ const brandLink =
   "text-brand underline decoration-dotted underline-offset-2 hover:decoration-solid";
 const tocPill =
   "inline-flex items-center rounded-full border border-border/60 bg-muted/40 px-3 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-brand/40 hover:bg-muted hover:text-brand";
+// Every overflow-x-auto element on this page (the code samples and the three
+// kinds of table) is a focus stop so a keyboard can scroll it (WCAG 2.1.1): it
+// carries tabIndex={0}, role="region", a Turkish aria-label and the visible
+// focus ring, written out as literal classes (Tailwind 4 reads source text).
+// Guarded by tests/guards/scroll-region-focus.test.ts.
 const codeBlockClass =
-  "overflow-x-auto rounded-lg bg-muted/30 ring-1 ring-border/40 px-3 py-3 font-mono text-[11px] leading-relaxed text-foreground/90";
+  "overflow-x-auto rounded-lg bg-muted/30 ring-1 ring-border/40 px-3 py-3 font-mono text-[11px] leading-relaxed text-foreground/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 function SectionHeading({ id, title, meta }: { id: string; title: string; meta?: string }) {
   return (
@@ -93,7 +98,12 @@ function EndpointCard({ endpoint }: { endpoint: V1EndpointDoc }) {
       <p className={proseClass}>{endpoint.summaryTr}</p>
 
       {endpoint.params.length > 0 ? (
-        <div className="overflow-x-auto">
+        <div
+          className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          role="region"
+          aria-label={`${endpoint.method} ${endpoint.path} parametreleri`}
+          tabIndex={0}
+        >
           <table className="w-full border-collapse text-left text-sm">
             <thead>
               <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -215,9 +225,15 @@ for (const cluster of data.clusters) {
           Her istek bir <code className="font-mono text-xs">Authorization: Bearer $TAYF_API_KEY</code>{" "}
           başlığı taşır. Anahtarınızı ortam değişkeni olarak saklayın, koda gömmeyin.
         </p>
-        <pre className={codeBlockClass}>{curlSample}</pre>
-        <pre className={codeBlockClass}>{pythonSample}</pre>
-        <pre className={codeBlockClass}>{jsSample}</pre>
+        <pre className={codeBlockClass} tabIndex={0} role="region" aria-label="curl örneği">
+          {curlSample}
+        </pre>
+        <pre className={codeBlockClass} tabIndex={0} role="region" aria-label="Python örneği">
+          {pythonSample}
+        </pre>
+        <pre className={codeBlockClass} tabIndex={0} role="region" aria-label="JavaScript örneği">
+          {jsSample}
+        </pre>
       </section>
 
       <section aria-labelledby="kimlik" className="scroll-mt-24 space-y-3">
@@ -248,7 +264,12 @@ for (const cluster of data.clusters) {
       <section aria-labelledby="limitler" className="scroll-mt-24 space-y-3">
         <SectionHeading id="limitler" title="Kullanım sınırları" />
         <div className={cardClass + " space-y-3"}>
-          <div className="overflow-x-auto">
+          <div
+            className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            role="region"
+            aria-label="Kullanım sınırları tablosu"
+            tabIndex={0}
+          >
             <table className="w-full border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -311,7 +332,12 @@ for (const cluster of data.clusters) {
             Her 2xx dışı yanıt <code className="font-mono text-xs">{"{error, code?, details?}"}</code>{" "}
             biçimindedir.
           </p>
-          <div className="overflow-x-auto">
+          <div
+            className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            role="region"
+            aria-label="Hata kodları tablosu"
+            tabIndex={0}
+          >
             <table className="w-full border-collapse text-left text-sm">
               <thead>
                 <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">

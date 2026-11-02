@@ -16,6 +16,7 @@
  */
 import { NextResponse } from "next/server";
 import { apiBadRequest, apiTooManyRequests, apiServerError, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { keepClusterArticles } from "@/lib/admin/jev-cluster";
@@ -28,7 +29,7 @@ const adminJevUnlinkBulkLimit = createRateLimiter("admin-jev-unlink-bulk", {
   refillPerSecond: 0.1,
 });
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -68,4 +69,4 @@ export const POST = withApiErrors(async (request: Request) => {
     { ok: true, kept: result.kept, skipped: result.skipped },
     { status: 200 },
   );
-});
+}));

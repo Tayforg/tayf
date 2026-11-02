@@ -228,7 +228,7 @@ describe("POST /api/newsletter", () => {
       html: string;
     };
     expect(emailArgs.to).toBe("reader@example.com");
-    expect(emailArgs.subject).toBe("Tayf bültenine kaydını onayla");
+    expect(emailArgs.subject).toBe("Tayf bültenine kaydınızı onaylayın");
     expect(emailArgs.html).toContain(
       `https://tayfhaber.com/api/newsletter/confirm?token=${patch.confirm_token}`,
     );
@@ -416,10 +416,10 @@ describe("GET /api/newsletter/confirm — interstitial", () => {
     expect(html).toContain(
       `<input type="hidden" name="token" value="${dbState.confirmGoodToken}">`,
     );
-    expect(html).toContain("<title>Bülten aboneliğini onayla — Tayf</title>");
-    expect(html).toContain("<h1>Tayf bültenine aboneliğini onaylıyor musun?</h1>");
+    expect(html).toContain("<title>Bülten aboneliğinizi onaylayın — Tayf</title>");
+    expect(html).toContain("<h1>Tayf bültenine aboneliğinizi onaylıyor musunuz?</h1>");
     expect(html).toContain(
-      "<p>Onayladığında haftalık bülteni bu adrese göndermeye başlayacağız.</p>",
+      "<p>Onayladığınızda haftalık bülteni bu adrese göndermeye başlayacağız.</p>",
     );
     expect(html).toContain("Evet, aboneliğimi onayla");
     expect(html).toContain("Vazgeç, Tayf'a dön");
@@ -767,6 +767,11 @@ describe("GET /api/newsletter/unsubscribe", () => {
     expect(html).toContain('<form method="post" action="/api/newsletter/unsubscribe">');
     expect(html).toContain(
       `<input type="hidden" name="token" value="${dbState.unsubGoodToken}">`,
+    );
+    expect(html).toContain("<title>Bültenden ayrıl — Tayf</title>");
+    expect(html).toContain("<h1>Tayf bülteninden ayrılmak istiyor musunuz?</h1>");
+    expect(html).toContain(
+      "<p>Onayladığınızda haftalık bülteni bu adrese bir daha göndermeyiz.</p>",
     );
     expect(html).toContain("Evet, bültenden ayrıl");
 

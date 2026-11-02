@@ -47,10 +47,11 @@ vi.mock("@/lib/clusters/near-blindspots-query", () => ({
   getNearBlindspotsSafe: () => getNearBlindspots(),
 }));
 
-import BlindspotsPage, { BlindspotsFeed, NearBlindspotsSection } from "./page";
+import BlindspotsPage, { BlindspotsFeed, NearBlindspotsSection, metadata } from "./page";
 import { createElement, Suspense } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { DenominatorNote } from "@/components/source/denominator-note";
+import { PageHero } from "@/components/ui/page-hero";
 import { NearBlindspotList } from "@/components/blindspots/near-blindspot-section";
 import { SilenceDigestBand } from "@/components/blindspots/silence-digest-band";
 import type { SilenceDigest } from "@/lib/clusters/silence-digest";
@@ -195,6 +196,20 @@ function collectElements(node: unknown, out: Elementish[] = []): Elementish[] {
   }
   return out;
 }
+
+describe("/blindspots page — sentence-case title (h24-pages-3)", () => {
+  it("the <title>, og:title and twitter:title all read 'Kör noktalar'", () => {
+    expect(metadata.title).toBe("Kör noktalar");
+    expect(metadata.openGraph?.title).toBe("Kör noktalar — Tayf");
+    expect(metadata.twitter?.title).toBe("Kör noktalar — Tayf");
+  });
+
+  it("the H1 (PageHero title) agrees with the <title>", () => {
+    const heroes = collectElements(BlindspotsPage()).filter((el) => el.type === PageHero);
+    expect(heroes).toHaveLength(1);
+    expect(heroes[0]?.props?.title).toBe("Kör noktalar");
+  });
+});
 
 function noindexMetas(tree: unknown): Elementish[] {
   return collectElements(tree).filter(

@@ -12,6 +12,7 @@
 import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { apiBadRequest, apiTooManyRequests, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { isJevLabeler, JEV_LABELER_COOKIE, JEV_LABELER_COOKIE_MAX_AGE } from "@/lib/admin/jev-gold";
@@ -24,7 +25,7 @@ const jevGoldLabelerLimit = createRateLimiter("admin-jev-gold-labeler", {
   refillPerSecond: 0.2,
 });
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -59,4 +60,4 @@ export const POST = withApiErrors(async (request: Request) => {
   });
 
   return NextResponse.json({ ok: true, labeler }, { status: 200 });
-});
+}));

@@ -22,6 +22,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 
@@ -44,7 +45,7 @@ function isJevReviewVerdict(value: unknown): value is JevReviewVerdict {
 
 const NOTE_MAX_LENGTH = 500;
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -105,4 +106,4 @@ export const POST = withApiErrors(async (request: Request) => {
   }
 
   return NextResponse.json({ ok: true }, { status: 200 });
-});
+}));

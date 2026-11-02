@@ -14,13 +14,15 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 //   - an outlet CTA tail     "... Sistemi (ILS)...Devamı için tıklayınız"
 //   - widget heading lines   "belirtti.\nİlginizi Çekebilir\nToplantıya"
 //   - feed wrappers          "<title> 02.11.2026 Diken<body>\nThe post <title>
-//                            appeared first on #site_linkat 02.11.2026 ." (Diken)
-//                            and "<body>\n<title> yazısı ilk önce Serbestiyet
-//                            adresinde yayınlanmıştır." (Serbestiyet)
+//                            appeared first on #site_linkat 02.11.2026 ." (Diken),
+//                            "<body>\n<title> yazısı ilk önce Serbestiyet
+//                            adresinde yayınlanmıştır." (Serbestiyet) and
+//                            "<body>\n<headline> Medyascope" (Medyascope)
 //   - raw newlines
 //   - a text the ingest clamp cut mid-word (500 characters ending "...")
-//   - a leading "Son dakika |" / "Son dakika haberi:" ticker and a leading
-//     list marker ("- ", "• ", "▪️ ")
+//   - a leading "Son dakika |" / "Son dakika haberi:" / "Son dakika haberine
+//     göre," / "Son dakika gelişmesi..." ticker and a leading list marker
+//     ("- ", "• ", "▪️ ")
 //   - a trailing "Detaylar haberimizde..." / "İşte ayrıntılar..." sentence
 //   - another story's headline appended after the body (Milliyet: a "related
 //     news" line and its "Son dakika..." ticker)
@@ -280,8 +282,13 @@ function lastSentenceEnd(body: string, skip: readonly SkipRange[] = []): number 
  * repair is that cut, whatever share it keeps and with no "…". Otherwise keep up
  * to the last sentence end when that keeps at least {@link CLAMP_MIN_KEPT_SHARE}
  * of the text, else cut at the last word boundary, drop dangling ", ; : – — -"
- * and add one "…". Returns null when the text is not a clamp or nothing can be
- * cut (a single long word).
+ * and add one "…". When the word cut still leaves part of a paragraph that the
+ * clamp cut (the text after its last line break), the cut moves back to that
+ * line break if it keeps at least {@link CLAMP_MIN_KEPT_SHARE} of the text and
+ * the line it then ends on is not a short unpunctuated one (a heading, a label,
+ * a related headline): the few words of the next paragraph are not a sentence.
+ * Returns null when the text is not a clamp or nothing can be cut (a single long
+ * word).
  */
 function repairClamp(raw: string): string | null {
   if (!CLAMP_LENGTHS.includes(raw.length) || !raw.endsWith(CLAMP_SUFFIX)) return null;
@@ -304,6 +311,25 @@ function repairClamp(raw: string): string | null {
     if (at <= 0) return null;
     cut = body.slice(0, at);
   }
+  // 4ca344b8 (h24): "...Vefa: Ahmed-i Hânî\n\nTrump ..." kept "Trump", the first word
+  // of the next paragraph. When what the word cut kept still ends in a paragraph
+  // the clamp cut (nothing dropped after `cut` was a line break, otherwise that
+  // paragraph is complete), end at the last line break instead, provided that
+  // keeps the bar. A paragraph before an earlier break is never touched. The line
+  // the cut would end on must be a paragraph: a short unpunctuated line there is a
+  // heading, a "Name:" label or a pasted-in related headline (e345d54d, 9c4dc3ea,
+  // 3da4c962, 307cf42b: the cut would have ended on "...Yollar göle döndü"), so
+  // the word cut stays.
+  const lastBreak = cut.lastIndexOf("\n");
+  if (lastBreak > 0 && !body.slice(cut.length).includes("\n")) {
+    const kept = cut.slice(0, lastBreak).trimEnd();
+    if (
+      kept.length >= CLAMP_MIN_KEPT_SHARE * body.length &&
+      !isUnpunctuatedShortLine(kept.slice(kept.lastIndexOf("\n") + 1))
+    ) {
+      cut = kept;
+    }
+  }
   let stop = cut.length;
   while (stop > 0 && (CLAMP_DANGLING.has(cut.charAt(stop - 1)) || isBlankChar(cut.charAt(stop - 1)))) stop--;
   cut = cut.slice(0, stop);
@@ -312,19 +338,32 @@ function repairClamp(raw: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Leading noise (h22-editorial-2, h23-live-1): a ticker ("Son dakika | X", "Son
-// dakika! X", "Son dakika... X", "SON DAKİKA: X", "Son dakika haberi: X", "Son
-// dakika haberine göre; X") and a list marker ("- X", "• X", "▪️ X"). The ticker
-// is matched on the tr-TR fold (so "SON DAKİKA" folds to "son dakika") and cut
-// from the original by the match length, which is only valid while the fold kept
-// the length. A separator is required: "Son dakika golüyle ...", "Son dakikada
-// ..." and "Son dakika haberi olarak duyuruldu" are sentences. Same shape as
-// TICKER_LINE in _shared/cluster/description-clean.ts, anchored at the start.
-// A marker needs blanks after it: "-5 derece" and "•madde" are text.
+// Leading noise (h22-editorial-2, h23-live-1, h24): a ticker ("Son dakika | X",
+// "Son dakika! X", "Son dakika... X", "SON DAKİKA: X", "Son dakika haberi: X",
+// "Son dakika gelişmesi... X", "Son dakika haberine göre; X", "Son dakika
+// haberine göre, X") and a list marker ("- X", "• X", "▪️ X"). The ticker is
+// matched on the tr-TR fold (so "SON DAKİKA" folds to "son dakika") and cut from
+// the original by the match length, which is only valid while the fold kept the
+// length. A separator is required: "Son dakika golüyle ...", "Son dakikada ...",
+// "Son dakika haberi olarak duyuruldu", "Son dakika gelişmesi olarak ..." and
+// "Son dakika haberine göre kentte ..." are sentences. A comma is a separator
+// after "haberine göre" only ("Son dakika, X" and "Son dakika haberi, X" are
+// text). Same shape as TICKER_LINE in _shared/cluster/description-clean.ts,
+// anchored at the start. A marker needs blanks after it: "-5 derece" and
+// "•madde" are text.
+//
+// A ticker leaves a sentence that began after a comma or a colon, so its first
+// word may be lower case ("Son dakika haberine göre, kentte yangın" -> "kentte
+// yangın"): after a stripped ticker the first letter is upper-cased with the
+// tr-TR rules (i -> İ, ı -> I); see {@link capitalizeFirstWord}.
 // ---------------------------------------------------------------------------
 
 const LEADING_TICKER =
-  /^son\s+dak[iı]ka(?:\s+haber(?:i|ine\s+g[öo]re))?(?![\p{L}\p{N}])\s*(?:\||!+|:|;|[.…]+)\s*/u;
+  /^son\s+dak[iı]ka(?:\s+haberine\s+g[öo]re(?![\p{L}\p{N}])\s*(?:\||!+|:|;|,|[.…]+)|(?:\s+(?:haberi|geli[şs]mesi))?(?![\p{L}\p{N}])\s*(?:\||!+|:|;|[.…]+))\s*/u;
+const ANY_LETTER = /^\p{L}$/u;
+const LOWER_LETTER = /^\p{Ll}$/u;
+/** What glues a word to the next one: "e-devlet", "tayfhaber.com", "iphone17", a combining mark. */
+const GLUED_TO_WORD = /^[\p{N}\p{M}\-./_@]/u;
 const LEADING_LIST_MARKER = /^(?:[-–•*]|\u25AA\uFE0F?)\s+/u;
 /** At most this many tickers, and at most this many markers, are peeled in total. */
 const MAX_TICKER_PASSES = 2;
@@ -343,9 +382,36 @@ function stripOneListMarker(s: string): string {
 }
 
 /**
+ * `s` with its first letter upper-cased (tr-TR: "i" -> "İ", "ı" -> "I") when the
+ * first word is entirely lower case: the run of letters at the start (a scan up
+ * to the first non-letter) has no upper-case, title-case or caseless letter, is
+ * not glued to a digit, a combining mark or one of "- . / _ @" ("e-devlet",
+ * "tayfhaber.com"), and the upper-cased letter is a single code point (the
+ * German "ß" would become "SS"). "iPhone", "ABD", "5 kişi", '"deprem"' and
+ * "Kentte" are returned as they are. Character scan of the first word only.
+ */
+function capitalizeFirstWord(s: string): string {
+  let end = 0;
+  let firstLength = 0; // UTF-16 length of the first code point
+  for (const ch of s) {
+    if (!ANY_LETTER.test(ch)) break;
+    if (!LOWER_LETTER.test(ch)) return s;
+    if (end === 0) firstLength = ch.length;
+    end += ch.length;
+  }
+  if (end === 0) return s;
+  if (GLUED_TO_WORD.test(s.slice(end, end + 2))) return s;
+  const upper = s.slice(0, firstLength).toLocaleUpperCase("tr-TR");
+  if ([...upper].length !== 1) return s;
+  return upper + s.slice(firstLength);
+}
+
+/**
  * Peel leading tickers and list markers, in whatever order they come ("Son
  * dakika | - X", "- Son dakika: X"), to a fixed point bounded by
- * {@link MAX_TICKER_PASSES} tickers and {@link MAX_MARKER_PASSES} markers.
+ * {@link MAX_TICKER_PASSES} tickers and {@link MAX_MARKER_PASSES} markers. When
+ * at least one ticker went, the first word of what is left starts upper-case
+ * ({@link capitalizeFirstWord}); a list marker alone changes no case.
  */
 function stripLeadingNoise(s: string): string {
   let out = s;
@@ -371,7 +437,7 @@ function stripLeadingNoise(s: string): string {
     }
     if (!changed) break;
   }
-  return out;
+  return tickers > 0 ? capitalizeFirstWord(out) : out;
 }
 
 /** `s` without a trailing ":" (and the blanks around it), left by a stripped CTA. */
@@ -386,9 +452,10 @@ function dropDanglingColon(s: string): string {
  *   0. repair a text the ingest clamp cut ({@link repairClamp}); keyed on the
  *      raw input, so it runs before anything changes the length;
  *   1. drop whole lines that are a widget heading ("İlginizi Çekebilir");
- *   1b. strip the Diken header ("<title> dd.mm.yyyy Diken") and the WordPress /
+ *   1b. strip the Diken header ("<title> dd.mm.yyyy Diken"), the WordPress /
  *      Yoast footers ("The post ... appeared first on ...", "... yazısı ilk
- *      önce ... adresinde yayınlanmıştır.") with {@link stripFeedWrappers},
+ *      önce ... adresinde yayınlanmıştır.") and the Medyascope site-name footer
+ *      ("<headline> Medyascope" as the last line) with {@link stripFeedWrappers},
  *      the same function the cluster consumer applies to the clustering text.
  *      It runs here, while the newlines are still present, because a footer
  *      starts at a line boundary;
@@ -399,9 +466,11 @@ function dropDanglingColon(s: string): string {
  *      still shows its X;
  *   2. collapse every whitespace run that contains a newline to one space;
  *   2b. peel leading noise: a "Son dakika |" / "Son dakika haberi:" / "Son dakika
- *      haberine göre;" ticker (at most {@link MAX_TICKER_PASSES} in total) and a
- *      list marker "- " / "• " / "▪️ " (at most {@link MAX_MARKER_PASSES} in
- *      total), in either order;
+ *      gelişmesi..." / "Son dakika haberine göre;" (or "göre,") ticker (at most
+ *      {@link MAX_TICKER_PASSES} in total) and a list marker "- " / "• " / "▪️ "
+ *      (at most {@link MAX_MARKER_PASSES} in total), in either order; after a
+ *      stripped ticker a lower-case first word is capitalised
+ *      ({@link capitalizeFirstWord});
  *   3. strip a trailing "Devamı için tıklayınız" / "Read more »" /
  *      "Detaylar haberimizde" / "İşte ayrıntılar" / "İşte merak edilen tüm
  *      detaylar" / "Ayrıntılar birazdan" style CTA, repeatedly (at most
@@ -418,7 +487,8 @@ function dropDanglingColon(s: string): string {
  *
  * Step 0 repairs a clamp with {@link cutAppendedTicker} first: foreign text is
  * never kept, so a clamped text that holds a ticker line ends where the ticker
- * block starts, with no "…".
+ * block starts, with no "…". A clamp that holds a line break late in the text
+ * ends there when no sentence end does (see {@link repairClamp}).
  *
  * Returns "" when nothing but residue was there (a footer-only text included);
  * the caller then hides the summary. Idempotent for any input with at most

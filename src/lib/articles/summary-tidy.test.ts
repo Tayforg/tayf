@@ -1127,13 +1127,14 @@ describe("tidySummaryText appended ticker (h23-live-2)", () => {
       const raw = clamp(`\nSon dakika... ${"kelimeler ".repeat(60)}`);
       expect(raw).toHaveLength(500);
       const out = tidySummaryText(raw);
-      expect(out).toBe("kelimeler ".repeat(48).trimEnd() + "…");
+      // h24: the first word is capitalised once the ticker line has gone.
+      expect(out).toBe("Kelimeler" + " kelimeler".repeat(47) + "…");
     });
 
     it("a ticker on the first line only is not cut by the ticker rule", () => {
       const raw = clamp(`Son dakika... ${"kelimeler ".repeat(60)}`);
       const out = tidySummaryText(raw);
-      expect(out).toBe("kelimeler ".repeat(48).trimEnd() + "…");
+      expect(out).toBe("Kelimeler" + " kelimeler".repeat(47) + "…");
     });
   });
 
@@ -1209,11 +1210,13 @@ describe("tidySummaryText ordinals and title abbreviations at a clamp (h23-live-
     expect(out.endsWith("liderler Türkiye'ye geldi.")).toBe(true);
   });
 
-  it("4ca344b8: does not end on 'Prof. Dr.' or 'Dr.'", () => {
+  it("4ca344b8: does not end on 'Prof. Dr.' or 'Dr.', nor on the first word of the next paragraph", () => {
     const out = tidySummaryText(RAW_4CA3);
     expect(out.endsWith("Dr.")).toBe(false);
     expect(out.endsWith("Prof. Dr.")).toBe(false);
-    expect(out).toBe("Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪\uFE0F Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî Trump…");
+    expect(out).toBe("Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪\uFE0F Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî…");
+    // h24: the first word of the next paragraph ("Trump") no longer survives the cut.
+    expect(out).not.toContain("Trump");
   });
 
   describe("synthetic clamps", () => {
@@ -1622,6 +1625,392 @@ describe("tidySummaryText h23 idempotence and robustness", () => {
       "1.\n".repeat(166) + "ab...",
     ]) {
       expect(() => tidySummaryText(s)).not.toThrow();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h24 follow-ups (hunt 24, 2026-11-02): the Medyascope site-name footer
+// (h24-feeds-2), the leading "Son dakika haberine göre," / "Son dakika
+// gelişmesi" openers, and the clamp cut that kept the first word of the next
+// paragraph. The summaries below are the stored clusters.summary_tr texts
+// (read-only SELECT, 2026-11-02), copied verbatim.
+// ---------------------------------------------------------------------------
+
+// 6e2ecaea: an NBSP and a blank in front of the site name.
+const H24_6E2E =
+  "TİP Genel Başkanı Erkan Baş, Kurtuluş Bildirgesi’nin tanıtımında muhalefetin yalnızca mitinglere ve seçimlere odaklanmasını eleştirdi.\nErkan Baş: “’Seçimlere kadar sabredelim anlayışı’ doğru değil”  Medyascope";
+const H24_EAAA =
+  "Mete Kaan Kaynar, Türkiye’deki seçimlerin tarihlerini ve erken seçim örneklerini inceleyerek 2028 için olası seçim takvimini değerlendirdi.\nMete Kaan Kaynar yazdı: Erken seçim ne zaman? – 2 Medyascope";
+const H24_EAE2 =
+  "Bakırköy Belediyesi’ne yönelik soruşturmada 39 kişi tutuklandı. Tutuklananlar arasında Abdülhamit Pehlivan ve Ali Rıza Akyüz de var.\nBakırköy Belediyesi dosyasında damacana su, hırdavat, antivirüs ihaleleri suç sayıldı Medyascope";
+const H24_F481 =
+  "Savcı Sayan şişenin kapağını açtı: Fon soruşturmasıyla birlikte AKP içindeki kavgalar ve hesaplaşma yeniden gündeme geldi.\nRuşen Çakır yorumladı: Savcı Sayan şişenin kapağını açtı, iktidar içindeki kavgaları kızıştırdı Medyascope";
+const H24_08BF =
+  "İsrail uzmanı Doç. Dr. Ferit Belder değerlendirdi: Netanyahu iktidarda kalabilir mi, aşırı sağ geriledi mi, Filistinliler için ne değişecek?\nİsrail uzmanı Doç. Dr. Ferit Belder ile söyleşi: İsrail’de seçim bitti, şimdi ne olacak? Medyascope";
+// 3de687a6 and f567ccc7: the two openers.
+const H24_3DE6 =
+  "Son dakika haberine göre, tasfiyesine karar verilen bazı yatırım fonları hakkında kanun, Resmi Gazete'de yayımlanarak yürürlüğe girdi.";
+const H24_F567 =
+  "Son dakika gelişmesi... Avukat Akın Atalay, Üsküdar Belediye Başkanı Sinem Dedetaş'ın tahliye başvurusunun kabul edildiğini duyurdu. Atalay, Dedetaş'ın ev hapsi şeklindeki adli kontrol tedbiri uygulanarak cezaevinden tahliyesine karar verildiğini açıkladı.";
+
+const H24_MEDYA_ROWS: ReadonlyArray<readonly [string, string, string]> = [
+  [
+    "6e2ecaea",
+    H24_6E2E,
+    "TİP Genel Başkanı Erkan Baş, Kurtuluş Bildirgesi’nin tanıtımında muhalefetin yalnızca mitinglere ve seçimlere odaklanmasını eleştirdi.",
+  ],
+  [
+    "eaaa529c",
+    H24_EAAA,
+    "Mete Kaan Kaynar, Türkiye’deki seçimlerin tarihlerini ve erken seçim örneklerini inceleyerek 2028 için olası seçim takvimini değerlendirdi.",
+  ],
+  [
+    "eae25e62",
+    H24_EAE2,
+    "Bakırköy Belediyesi’ne yönelik soruşturmada 39 kişi tutuklandı. Tutuklananlar arasında Abdülhamit Pehlivan ve Ali Rıza Akyüz de var.",
+  ],
+  [
+    "f481725d",
+    H24_F481,
+    "Savcı Sayan şişenin kapağını açtı: Fon soruşturmasıyla birlikte AKP içindeki kavgalar ve hesaplaşma yeniden gündeme geldi.",
+  ],
+  [
+    "08bfd151",
+    H24_08BF,
+    "İsrail uzmanı Doç. Dr. Ferit Belder değerlendirdi: Netanyahu iktidarda kalabilir mi, aşırı sağ geriledi mi, Filistinliler için ne değişecek?",
+  ],
+];
+
+describe("tidySummaryText Medyascope footer (h24-feeds-2)", () => {
+  it.each(H24_MEDYA_ROWS)("%s: the echoed headline and the site name go", (_id, raw, expected) => {
+    const out = tidySummaryText(raw);
+    expect(out).toBe(expected);
+    expect(out).not.toContain("Medyascope");
+  });
+
+  it("a one-line 'headline Medyascope' summary keeps its text (line 0 is never a footer)", () => {
+    expect(tidySummaryText("Erken seçim ne zaman? Medyascope")).toBe("Erken seçim ne zaman? Medyascope");
+  });
+
+  it("the name inside a sentence is text", () => {
+    const s = "Medyascope'a konuşan uzman seçimlerin yakın olduğunu söyledi.\nİkinci satır.";
+    expect(tidySummaryText(s)).toBe("Medyascope'a konuşan uzman seçimlerin yakın olduğunu söyledi. İkinci satır.");
+  });
+
+  it("the footer goes together with a trailing newline or blanks", () => {
+    expect(tidySummaryText("Gövde cümlesi.\nBaşlık Medyascope \n")).toBe("Gövde cümlesi.");
+    expect(tidySummaryText("Gövde cümlesi.\nBaşlık Medyascope")).toBe("Gövde cümlesi.");
+  });
+
+  it("a Medyascope footer and a leading ticker are both removed", () => {
+    expect(tidySummaryText("Son dakika | seçim kararı alındı.\nSeçim kararı Medyascope")).toBe(
+      "Seçim kararı alındı.",
+    );
+  });
+
+  it("is idempotent", () => {
+    for (const [, raw, expected] of H24_MEDYA_ROWS) {
+      expect(tidySummaryText(expected), expected).toBe(expected);
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once)).toBe(once);
+    }
+  });
+});
+
+describe("tidySummaryText leading openers (h24)", () => {
+  it("3de687a6: 'Son dakika haberine göre,' goes and the sentence starts upper-case", () => {
+    const out = tidySummaryText(H24_3DE6);
+    expect(out).toBe(
+      "Tasfiyesine karar verilen bazı yatırım fonları hakkında kanun, Resmi Gazete'de yayımlanarak yürürlüğe girdi.",
+    );
+    expect(out.startsWith("Son dakika")).toBe(false);
+  });
+
+  it("f567ccc7: 'Son dakika gelişmesi...' goes", () => {
+    const out = tidySummaryText(H24_F567);
+    expect(out).toBe(
+      "Avukat Akın Atalay, Üsküdar Belediye Başkanı Sinem Dedetaş'ın tahliye başvurusunun kabul edildiğini duyurdu. Atalay, Dedetaş'ın ev hapsi şeklindeki adli kontrol tedbiri uygulanarak cezaevinden tahliyesine karar verildiğini açıkladı.",
+    );
+    expect(out.startsWith("Son dakika")).toBe(false);
+  });
+
+  const OPENER_CHANGES: ReadonlyArray<readonly [string, string]> = [
+    // A comma is a separator after 'haberine göre' only; the next word is capitalised (tr-TR).
+    ["Son dakika haberine göre, kentte yangın çıktı.", "Kentte yangın çıktı."],
+    ["Son dakika haberine göre, işçiler greve çıktı.", "İşçiler greve çıktı."],
+    ["Son dakika haberine göre, ılık hava geliyor.", "Ilık hava geliyor."],
+    ["Son dakika haberine göre, çocuklar okula başladı.", "Çocuklar okula başladı."],
+    ["Son dakika haberine göre, öğrenciler sınava girdi.", "Öğrenciler sınava girdi."],
+    ["Son dakika haberine göre, şehir sular altında.", "Şehir sular altında."],
+    ["Son dakika haberine göre , kentte yangın çıktı.", "Kentte yangın çıktı."],
+    ["SON DAKİKA HABERİNE GÖRE, kentte yangın çıktı.", "Kentte yangın çıktı."],
+    ["Son dakika haberine göre,kentte yangın çıktı.", "Kentte yangın çıktı."],
+    ["Son dakika haberine göre, Kentte yangın çıktı.", "Kentte yangın çıktı."],
+    ["Son dakika haberine göre, istanbul'da yangın çıktı.", "İstanbul'da yangın çıktı."],
+    ["Son dakika haberine göre; kentte yangın çıktı.", "Kentte yangın çıktı."],
+    ["Son dakika haberine göre: kentte yangın çıktı.", "Kentte yangın çıktı."],
+    ["Son dakika haberine göre... kentte yangın çıktı.", "Kentte yangın çıktı."],
+    // 'gelişmesi' with every separator the other tickers take.
+    ["Son dakika gelişmesi: Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi... Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi! Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi | Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi; Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi… Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi. Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi!!! Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelismesi: Deprem oldu.", "Deprem oldu."],
+    ["SON DAKİKA GELİŞMESİ: Deprem oldu.", "Deprem oldu."],
+    ["Son Dakika Gelişmesi! Deprem oldu.", "Deprem oldu."],
+    ["Son  dakika   gelişmesi  ... Deprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi:\nDeprem oldu.", "Deprem oldu."],
+    ["Son dakika gelişmesi: deprem oldu.", "Deprem oldu."],
+    // The first word is upper-cased after any stripped ticker, not only after the new ones.
+    ["Son dakika | deprem oldu.", "Deprem oldu."],
+    ["Son dakika haberi: deprem oldu.", "Deprem oldu."],
+    ["SON DAKİKA: ışık yandı.", "Işık yandı."],
+    // A ticker and a list marker, in either order.
+    ["Son dakika | - deprem oldu.", "Deprem oldu."],
+    ["- Son dakika: deprem oldu.", "Deprem oldu."],
+    // Stacked tickers.
+    ["Son dakika haberine göre, son dakika gelişmesi: deprem oldu.", "Deprem oldu."],
+    // A word with an inner capital, a digit, a quote or a non-lower-case letter is never upper-cased.
+    ["Son dakika | iPhone 18 satışa çıktı", "iPhone 18 satışa çıktı"],
+    ["Son dakika gelişmesi: eBay satışı durduruldu", "eBay satışı durduruldu"],
+    ["Son dakika: iOS 20 yayında", "iOS 20 yayında"],
+    ["Son dakika: 5 kişi yaralandı", "5 kişi yaralandı"],
+    ["Son dakika: \"deprem\" dedi", "\"deprem\" dedi"],
+    ["Son dakika: ABD açıkladı", "ABD açıkladı"],
+    ["Son dakika: ßtest açıklandı", "ßtest açıklandı"],
+    // A word glued to a hyphen, a dot, a digit or a combining mark is a name or an
+    // address, not the start of a sentence.
+    ["Son dakika: e-devlet sistemi çöktü", "e-devlet sistemi çöktü"],
+    ["Son dakika: tayfhaber.com yayında", "tayfhaber.com yayında"],
+    ["Son dakika: iphone17 çıktı", "iphone17 çıktı"],
+    ["Son dakika: i\u0307stanbul", "i\u0307stanbul"],
+    // A one-letter word is still a word.
+    ["Son dakika haberine göre, o gün kentte yangın çıktı.", "O gün kentte yangın çıktı."],
+    // Other scripts follow the same lower-case rule.
+    ["Son dakika: élysée açıklaması", "Élysée açıklaması"],
+  ];
+
+  it.each(OPENER_CHANGES)("rewrites %j -> %j", (input, expected) => {
+    expect(tidySummaryText(input)).toBe(expected);
+  });
+
+  it.each([
+    "Son dakika golüyle Galatasaray kazandı.",
+    "Son dakikada gelen golle Galatasaray kazandı.",
+    "Son dakika haberi olarak duyuruldu.",
+    "Son dakika gelişmesi olarak duyuruldu.",
+    "Son dakika haberine göre kentte yangın çıktı.",
+    "Son dakika gelişmesi kentte yangın çıkardı.",
+    "Son dakika gelişmeleri: kentte yangın çıktı.",
+    "Son dakika gelişmesinde yangın çıktı.",
+    "Son dakika haberine göre",
+    "Son dakika gelişmesi",
+    // The comma is a separator after 'haberine göre' only.
+    "Son dakika, kentte yangın çıktı.",
+    "Son dakika haberi, kentte yangın çıktı.",
+    "Son dakika gelişmesi, kentte yangın çıktı.",
+    "Deprem oldu. Son dakika gelişmesi: yeni açıklama",
+  ])("leaves %j untouched (no separator, or not a ticker)", (input) => {
+    expect(tidySummaryText(input)).toBe(input);
+  });
+
+  it("a list marker alone does not change the case of the first word", () => {
+    expect(tidySummaryText("- kadınların toplumdaki yeri")).toBe("kadınların toplumdaki yeri");
+    expect(tidySummaryText("• ılık hava")).toBe("ılık hava");
+  });
+
+  it("a ticker and nothing else gives ''", () => {
+    expect(tidySummaryText("Son dakika haberine göre,")).toBe("");
+    expect(tidySummaryText("Son dakika gelişmesi...")).toBe("");
+  });
+
+  it("is idempotent on every opener case", () => {
+    const all = [
+      H24_3DE6,
+      H24_F567,
+      ...OPENER_CHANGES.map(([input]) => input),
+      ...OPENER_CHANGES.map(([, expected]) => expected),
+    ];
+    for (const x of all) {
+      const once = tidySummaryText(x);
+      expect(tidySummaryText(once), JSON.stringify(x)).toBe(once);
+    }
+  });
+
+  it("linear time: long runs of blanks and commas finish quickly", () => {
+    const inputs = [
+      "Son dakika haberine".concat(" ".repeat(100_000), "göre, x"),
+      "Son dakika haberine göre".concat(",".repeat(100_000)),
+      "Son dakika gelişmesi".concat(" ".repeat(100_000), "x"),
+      "Son dakika gelişmesi: ".repeat(5_000),
+      "Son dakika haberine göre, ".repeat(5_000),
+    ];
+    const start = performance.now();
+    for (const s of inputs) tidySummaryText(s);
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+});
+
+describe("tidySummaryText clamp word-cut at a line break (h24, 4ca344b8)", () => {
+  // 11 characters, no sentence mark: every cut below falls on a word.
+  const UNIT = "bir iki üç ";
+  const w = (n: number) => "w".repeat(n);
+
+  it("4ca344b8: the cut stops at the paragraph end, 'Trump' (first word of the next paragraph) is gone", () => {
+    expect(RAW_4CA3).toHaveLength(500);
+    const out = tidySummaryText(RAW_4CA3);
+    expect(out.endsWith("Vefa: Ahmed-i Hânî…")).toBe(true);
+    expect(out).not.toContain("Trump");
+    expect(out).not.toContain("...");
+    expect(out).toBe(
+      "Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪️ Bilim ve Kültür: Sabri Koz▪️ Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪️ Edebiyat: Sibel Eraslan▪️ Sinema: Burçak Evren▪️ Müzik: Prof. Dr. Gönül Paçacı▪️ Vefa: Ahmed-i Hânî…",
+    );
+  });
+
+  it("the whole cut paragraph goes, not only its first word", () => {
+    // 'Trump söyledi k' is the clamped last line: the word cut alone kept 'Trump söyledi'.
+    const raw = clamp(`${w(480)}\n\nTrump söyledi ki konuşma sürdü`);
+    expect(raw).toHaveLength(500);
+    expect(tidySummaryText(raw)).toBe(`${w(480)}…`);
+  });
+
+  describe("the 60% bar: the last line break must keep at least 60% of the clamped text", () => {
+    // 0.6 * 497 = 298.2: a break at index 298 is too early, a break at 299 is enough.
+    it("a break at index 298 keeps today's word cut", () => {
+      const out = tidySummaryText(clamp(`${w(298)}\n${UNIT.repeat(40)}`));
+      expect(out).toBe(`${w(298)} ${UNIT.repeat(17)}bir iki üç…`);
+    });
+
+    it("a break at index 299 is the cut", () => {
+      expect(tidySummaryText(clamp(`${w(299)}\n${UNIT.repeat(40)}`))).toBe(`${w(299)}…`);
+    });
+
+    it("a break at index 300 is the cut", () => {
+      expect(tidySummaryText(clamp(`${w(300)}\n${UNIT.repeat(40)}`))).toBe(`${w(300)}…`);
+    });
+
+    it("a break late in the text is the cut, a clamp that ends in a blank included", () => {
+      expect(tidySummaryText(clamp(`${w(400)}\n${UNIT.repeat(40)}`))).toBe(`${w(400)}…`);
+      expect(tidySummaryText(clamp(`${w(450)}\n${UNIT.repeat(40)}`))).toBe(`${w(450)}…`);
+    });
+
+    it("a synthetic 500-char clamp whose last break is before 60% keeps today's word cut", () => {
+      const raw = clamp(`${w(100)}\n${UNIT.repeat(40)}`);
+      expect(raw).toHaveLength(500);
+      expect(tidySummaryText(raw)).toBe(`${w(100)} ${UNIT.repeat(35)}bir iki üç…`);
+    });
+
+    it("an early break and a late break: only the LAST break counts, and the cut keeps the earlier lines", () => {
+      const raw = clamp(`${w(100)}\n${w(250)}\n${UNIT.repeat(40)}`);
+      expect(tidySummaryText(raw)).toBe(`${w(100)} ${w(250)}…`);
+    });
+
+    it("two early breaks (both before 60%): today's word cut", () => {
+      const raw = clamp(`${w(100)}\n${w(100)}\n${UNIT.repeat(40)}`);
+      expect(tidySummaryText(raw)).toBe(`${w(100)} ${w(100)} ${UNIT.repeat(26)}bir iki…`);
+    });
+  });
+
+  describe("the line the cut would end on must be a paragraph (hand review of the 7-day corpus)", () => {
+    // e345d54d, 9c4dc3ea, 3da4c962 and 307cf42b: a short unpunctuated line in front of the
+    // break is a heading, a related headline or a "Name:" label. Cutting there ended the
+    // summary on that line and dropped the real text after it, so the word cut stays.
+    const HEADLINE = "İstanbul'da kuvvetli yağış: Yollar göle döndü";
+    const LABEL = "Kırgızistan Cumhurbaşkanı Sadır Caparov'un eşi Aygül Caparova:";
+    const HEADING = "İSTANBUL'DA İKİ SİLAHLI SALDIRI AYDINLATILDI";
+
+    it("a related headline in front of the break: today's word cut", () => {
+      const raw = clamp(`${w(270)}\n${HEADLINE}\n${UNIT.repeat(40)}`);
+      expect(tidySummaryText(raw)).toBe(`${w(270)} ${HEADLINE} ${UNIT.repeat(16)}bir…`);
+    });
+
+    it("a 'Name:' label in front of the break: today's word cut", () => {
+      const raw = clamp(`${w(250)}\n${LABEL}\n${UNIT.repeat(40)}`);
+      expect(tidySummaryText(raw)).toBe(`${w(250)} ${LABEL} ${UNIT.repeat(16)}bir…`);
+    });
+
+    it("a heading in capitals in front of the break: today's word cut", () => {
+      const raw = clamp(`${w(270)}\n${HEADING}\n${UNIT.repeat(40)}`);
+      expect(tidySummaryText(raw)).toBe(`${w(270)} ${HEADING} ${UNIT.repeat(16)}bir…`);
+    });
+
+    it("120 characters is still a short line, 121 is a paragraph", () => {
+      expect(tidySummaryText(clamp(`${w(200)}\n${w(120)}\n${UNIT.repeat(40)}`))).toBe(
+        `${w(200)} ${w(120)} ${UNIT.repeat(15)}bir iki…`,
+      );
+      expect(tidySummaryText(clamp(`${w(200)}\n${w(121)}\n${UNIT.repeat(40)}`))).toBe(`${w(200)} ${w(121)}…`);
+    });
+
+    it("a long quoted paragraph (closing quote, no sentence mark) in front of the break is the cut", () => {
+      const raw = clamp(`${w(200)}\n"${w(150)}"\n${UNIT.repeat(40)}`);
+      expect(tidySummaryText(raw)).toBe(`${w(200)} "${w(150)}"…`);
+    });
+
+    it("a short line that ends in a sentence mark is a sentence end, which wins as before", () => {
+      const raw = clamp(`${w(300)}\nKısa ama noktalı satır.\n${UNIT.repeat(40)}`);
+      expect(tidySummaryText(raw)).toBe(`${w(300)} Kısa ama noktalı satır.`);
+    });
+  });
+
+  it("a clamp with no line break is unchanged from HEAD", () => {
+    const raw = clamp(UNIT.repeat(60));
+    expect(raw).toHaveLength(500);
+    expect(tidySummaryText(raw)).toBe(`${UNIT.repeat(44)}bir iki üç…`);
+  });
+
+  it("a complete last paragraph (the clamp fell inside the FIRST word after its line break) is kept", () => {
+    // 473 + "\n" + 19 + "\n" + "Tru": nothing of the stub survives the word cut, so the
+    // paragraph before it is complete and stays, exactly as at HEAD.
+    const raw = clamp(`${w(473)}\nikinci paragraf tam\nTrump söyledi`);
+    expect(raw).toHaveLength(500);
+    expect(tidySummaryText(raw)).toBe(`${w(473)} ikinci paragraf tam…`);
+  });
+
+  it("a clamp that fell right after a line break keeps the paragraph before it", () => {
+    const raw = clamp(`${w(473)}\nikinci paragraf tam\n\n\nTrump söyledi`);
+    expect(raw).toHaveLength(500);
+    expect(tidySummaryText(raw)).toBe(`${w(473)} ikinci paragraf tam…`);
+  });
+
+  it("a sentence end that keeps 60% still wins over the line break", () => {
+    const raw = clamp(`${w(299)}. ${UNIT.repeat(5)}\n${UNIT.repeat(40)}`);
+    expect(tidySummaryText(raw)).toBe(`${w(299)}.`);
+  });
+
+  it("never turns a clamp into ''", () => {
+    // Everything in front of the break is blank: the cut would be empty, so the
+    // clamp repair steps aside and the text is tidied as it is.
+    const raw = clamp(`${" ".repeat(300)}\n${"word ".repeat(60)}`);
+    expect(raw).toHaveLength(500);
+    const out = tidySummaryText(raw);
+    expect(out).not.toBe("");
+    expect(out.startsWith("word word")).toBe(true);
+  });
+
+  it("is idempotent on every clamp case", () => {
+    const raws = [
+      RAW_4CA3,
+      clamp(`${w(480)}\n\nTrump söyledi ki konuşma sürdü`),
+      clamp(`${w(298)}\n${UNIT.repeat(40)}`),
+      clamp(`${w(299)}\n${UNIT.repeat(40)}`),
+      clamp(`${w(100)}\n${UNIT.repeat(40)}`),
+      clamp(`${w(100)}\n${w(250)}\n${UNIT.repeat(40)}`),
+      clamp(`${w(100)}\n${w(100)}\n${UNIT.repeat(40)}`),
+      clamp(`${w(270)}\n${"İstanbul'da kuvvetli yağış: Yollar göle döndü"}\n${UNIT.repeat(40)}`),
+      clamp(`${w(200)}\n"${w(150)}"\n${UNIT.repeat(40)}`),
+      clamp(`${" ".repeat(300)}\n${"word ".repeat(60)}`),
+      clamp(UNIT.repeat(60)),
+      clamp(`${w(473)}\nikinci paragraf tam\nTrump söyledi`),
+      clamp(`${w(299)}. ${UNIT.repeat(5)}\n${UNIT.repeat(40)}`),
+    ];
+    for (const raw of raws) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once), once.slice(-40)).toBe(once);
     }
   });
 });

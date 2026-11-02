@@ -10,6 +10,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { CLUSTER_FEED_TAGS, clusterMembershipTags } from "@/lib/clusters/merge";
@@ -38,7 +39,7 @@ const adminPostLimit = createRateLimiter("admin-post", {
 // A source id is a uuid; anything else never reaches the delete_source RPC.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const GET = withApiErrors(async () => {
+export const GET = withAdminNoStore(withApiErrors(async () => {
   // Real auth boundary for admin data. The /admin page also calls
   // requireAdminSession(), but this route is the one a malicious client
   // could hit directly — so don't rely on the page gate.
@@ -80,9 +81,9 @@ export const GET = withApiErrors(async () => {
     missingImages: noImageCount ?? 0,
     sourcesList: sourcesList ?? [],
   });
-});
+}));
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -463,4 +464,4 @@ export const POST = withApiErrors(async (request: Request) => {
     default:
       return apiBadRequest("Unknown action");
   }
-});
+}));

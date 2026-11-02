@@ -46,6 +46,32 @@ import { createServerClient } from "@/lib/supabase/server";
  * is recorded, so it never leaves the server. A real 5xx keeps its own status.
  * The table accepts 100-599 (migration 136), so no schema change is needed.
  *
+ * What each of the five routes counts (the guard in
+ * tests/guards/cron-route-outcome.test.ts pins every `if (<name>) {` branch):
+ *  - headline: the swallowed database failures of the pick (`memberErr`,
+ *    `writeErr`, `rejectErr`, `repickErr`). LLM vendor failures, empty or
+ *    rejected rewrites and pick throws are not counted.
+ *  - fact-checks: the cluster search (`clusterErr`), member titles
+ *    (`memberErr`), existing links (`existingErr`), the promote update
+ *    (`promoteErr`) and the new-links upsert (`insertErr`). A publisher feed that
+ *    fails to fetch is a vendor failure and is not counted.
+ *  - alerts-webhooks: the fresh blindspot re-read (`freshError`), the enqueue
+ *    upsert (`upsertError`), the exhausted-delivery update (`exhaustedError`),
+ *    the unknown-keys read (`extraError`), the delivery-outcome update
+ *    (`updateError`) and the webhook-health update (`hookUpdateError`). A webhook
+ *    POST that fails is the subscriber's endpoint, not ours, and is not counted.
+ *  - social: the fresh re-read (`freshError`), the ledger read (`ledgerError`,
+ *    which also fails closed with a "ledger unavailable" skip), the claim rpc
+ *    (`claimError`) and every `social_post_finish` rpc (`finishError`, one local
+ *    helper). A Telegram or Bluesky post that fails is not counted.
+ *  - digest: the `last_sent_at` write after a successful send (`updateError`) and
+ *    a failed rights-gated summary member lookup (`memberLookupFailed`: the
+ *    summaries are hidden, fail closed, but the run is degraded). A Resend send
+ *    that fails is not counted.
+ * A route builds its response init with `substepErrorsInit(count, init)` and puts
+ * `substepErrors: <n>` in the body, plus a success flag of `substepErrors === 0`
+ * where the body already had one. Status codes do not change (still 200).
+ *
  * Wrap OUTSIDE `withApiErrors`: that turns a thrown error into a 500 response,
  * which is the status this records. Every `/api/cron/<name>/route.ts` must do
  * `export const GET = withCronOutcome("<name>", withApiErrors(...))`
@@ -95,6 +121,24 @@ function errorName(error: unknown): string {
 export function substepErrorCount(response: Response): number {
   const value = response.headers.get(CRON_SUBSTEP_ERRORS_HEADER);
   return value !== null && /^\d{1,6}$/.test(value) ? Number(value) : 0;
+}
+
+/** The largest count the header carries; `substepErrorCount` reads 1 to 6 digits. */
+const MAX_SUBSTEP_ERRORS = 999_999;
+
+/**
+ * The `ResponseInit` of a cron route that counted `count` swallowed failures: the
+ * caller's `init` plus the internal header `x-cron-substep-errors: <count>`. A count
+ * that is not a positive finite integer (0, NaN, negative, fractional, infinite)
+ * adds nothing and returns `init` itself (possibly `undefined`). The count is
+ * clamped to 999999, the largest value `substepErrorCount` accepts. The caller's
+ * `init` and its headers are not mutated.
+ */
+export function substepErrorsInit(count: number, init?: ResponseInit): ResponseInit | undefined {
+  if (!Number.isInteger(count) || count < 1) return init;
+  const headers = new Headers(init?.headers);
+  headers.set(CRON_SUBSTEP_ERRORS_HEADER, String(Math.min(count, MAX_SUBSTEP_ERRORS)));
+  return { ...init, headers };
 }
 
 /** The same response without the internal header; a response that never had it is returned as is. */
