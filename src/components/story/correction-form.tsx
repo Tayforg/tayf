@@ -138,7 +138,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
           defaultValue={defaultUrl}
           autoComplete="off"
           placeholder="https://..."
-          className="min-h-[44px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-base sm:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+          className="min-h-[44px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-base sm:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring"
         />
       </div>
 
@@ -155,7 +155,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
           rows={5}
           autoComplete="off"
           placeholder={messagePlaceholder}
-          className="min-h-[110px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-base sm:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+          className="min-h-[110px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-base sm:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring"
         />
       </div>
 
@@ -170,7 +170,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
           autoComplete="email"
           maxLength={254}
           placeholder="ornek@eposta.com"
-          className="min-h-[44px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-base sm:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50"
+          className="min-h-[44px] w-full rounded-lg border border-input bg-transparent px-3 py-2 text-base sm:text-sm outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring"
         />
       </div>
 
@@ -192,7 +192,7 @@ export function CorrectionForm({ clusterId: clusterIdProp, defaultUrl: defaultUr
       <button
         type="submit"
         disabled={status === "submitting"}
-        className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50"
+        className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:ring-3 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50"
       >
         {status === "submitting" ? "Gönderiliyor..." : "Gönder"}
       </button>

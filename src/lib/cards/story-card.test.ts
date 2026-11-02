@@ -1,6 +1,11 @@
 import { describe, it, expect } from "vitest";
 
-import { selectStoryCard } from "./story-card";
+import {
+  hasStoryCardCoverage,
+  isStoryCardTitleEligible,
+  selectStoryCard,
+  storyCardHref,
+} from "./story-card";
 import { zoneOf } from "@/lib/bias/config";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import type { ZoneFeedHealth, ZoneHealth } from "@/lib/clusters/feed-health";
@@ -380,5 +385,116 @@ describe("selectStoryCard", () => {
 
     expect(card!.coverage.muhalefet.degraded).toBe(true);
     expect(card!.coverage.iktidar.degraded).toBe(false);
+  });
+});
+
+// h21-journeys-1: the cluster page offers "Kartı indir" only when the card
+// route would answer 200. The route's two 404 reasons (no voting member, a
+// title the KVKK filter rejects) are the two pure predicates below; the page
+// and the route both call them, so they cannot drift.
+describe("hasStoryCardCoverage", () => {
+  const OUTLET = mkSource({ id: "gov1", bias: "pro_government" });
+  const WIRE = mkSource({ id: "wire1", bias: "center", kind: "wire" });
+  const AGGREGATOR = mkSource({ id: "agg1", bias: "center", kind: "aggregator" });
+  const NICHE = mkSource({ id: "niche1", bias: "opposition", kind: "niche" });
+
+  it("is false for an empty member list", () => {
+    expect(hasStoryCardCoverage([])).toBe(false);
+  });
+
+  it("is false when every member is an aggregator or niche source", () => {
+    const members = [
+      mkMember("n1", AGGREGATOR, "Toplayıcı başlığı", "2026-09-10T08:00:00Z"),
+      mkMember("n2", NICHE, "Niş kaynak başlığı", "2026-09-10T09:00:00Z"),
+    ];
+    expect(hasStoryCardCoverage(members)).toBe(false);
+  });
+
+  it("is true for a single outlet member, and for a single wire member", () => {
+    expect(
+      hasStoryCardCoverage([mkMember("a1", OUTLET, "Haber bir", "2026-09-10T08:00:00Z")]),
+    ).toBe(true);
+    expect(
+      hasStoryCardCoverage([mkMember("w1", WIRE, "Ajans haberi", "2026-09-10T08:00:00Z")]),
+    ).toBe(true);
+  });
+
+  it("is true when one voting member sits among non-voting ones", () => {
+    const members = [
+      mkMember("n1", AGGREGATOR, "Toplayıcı başlığı", "2026-09-10T08:00:00Z"),
+      mkMember("a1", OUTLET, "Haber bir", "2026-09-10T09:00:00Z"),
+    ];
+    expect(hasStoryCardCoverage(members)).toBe(true);
+  });
+
+  it("agrees with selectStoryCard(m, null) !== null for every fixture", () => {
+    const fixtures: ClusterDetailMember[][] = [
+      [],
+      [mkMember("n1", AGGREGATOR, "Toplayıcı başlığı", "2026-09-10T08:00:00Z")],
+      [mkMember("n1", NICHE, "Niş kaynak başlığı", "2026-09-10T08:00:00Z")],
+      [
+        mkMember("n1", AGGREGATOR, "Toplayıcı başlığı", "2026-09-10T08:00:00Z"),
+        mkMember("n2", NICHE, "Niş kaynak başlığı", "2026-09-10T09:00:00Z"),
+      ],
+      [mkMember("a1", OUTLET, "Haber bir", "2026-09-10T08:00:00Z")],
+      [mkMember("w1", WIRE, "Ajans haberi", "2026-09-10T08:00:00Z")],
+      [
+        mkMember("n1", AGGREGATOR, "Toplayıcı başlığı", "2026-09-10T08:00:00Z"),
+        mkMember("a1", OUTLET, "Haber bir", "2026-09-10T09:00:00Z"),
+      ],
+      // A voting member whose own headline is PII-filtered still has coverage:
+      // the card renders, just without that zone's headline.
+      [mkMember("a1", OUTLET, "17 yaşındaki çocuk gözaltına alındı", "2026-09-10T08:00:00Z")],
+      // A kind-less member votes (isVotingKind's default).
+      [mkMember("k1", mkSource({ id: "k1", bias: "opposition" }), "Haber iki", "2026-09-10T08:00:00Z")],
+    ];
+    expect(fixtures.length).toBeGreaterThan(5);
+    for (const members of fixtures) {
+      expect(hasStoryCardCoverage(members)).toBe(selectStoryCard(members, null) !== null);
+    }
+  });
+});
+
+describe("isStoryCardTitleEligible", () => {
+  it("is false for null, undefined and non-string input", () => {
+    expect(isStoryCardTitleEligible(null)).toBe(false);
+    expect(isStoryCardTitleEligible(undefined)).toBe(false);
+    expect(isStoryCardTitleEligible(42 as unknown as string)).toBe(false);
+  });
+
+  it("is false for titles the KVKK private-individual filter rejects", () => {
+    expect(isStoryCardTitleEligible("32 ilde FETÖ operasyonu: 41 şüpheli tutuklandı")).toBe(false);
+    expect(isStoryCardTitleEligible("22 supheli gozaltina alindi")).toBe(false);
+  });
+
+  it("is true for a neutral title", () => {
+    expect(isStoryCardTitleEligible("Cumhurbaşkanı Erdoğan, Güney Kore'ye geldi")).toBe(true);
+  });
+});
+
+describe("storyCardHref", () => {
+  const ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+
+  it.each([
+    "32 ilde FETÖ operasyonu: 41 şüpheli tutuklandı",
+    "İçişleri Bakanı 22 şüphelinin gözaltına alındığını açıkladı",
+    "22 supheli gozaltina alindi",
+  ])("is null for the KVKK-ineligible title %j even when the card has coverage", (title) => {
+    expect(storyCardHref(ID, title, true)).toBeNull();
+  });
+
+  it("is null for a null or undefined title", () => {
+    expect(storyCardHref(ID, null, true)).toBeNull();
+    expect(storyCardHref(ID, undefined, true)).toBeNull();
+  });
+
+  it("is null when the card has no coverage, even for a neutral title", () => {
+    expect(storyCardHref(ID, "Cumhurbaşkanı Erdoğan, Güney Kore'ye geldi", false)).toBeNull();
+  });
+
+  it("is the card route for a neutral title with coverage", () => {
+    expect(storyCardHref(ID, "Cumhurbaşkanı Erdoğan, Güney Kore'ye geldi", true)).toBe(
+      `/cluster/${ID}/kart`,
+    );
   });
 });

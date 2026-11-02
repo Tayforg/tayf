@@ -7,6 +7,7 @@ import { buildChannelShareHref, buildShareUrl, SHARE_LINK_CHANNELS } from "@/lib
 import { siteUrl } from "@/lib/site-url";
 import { buildEmbedSnippet } from "@/lib/cards/badge-embed";
 import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
+import { runNativeShare } from "@/lib/share/native-share";
 
 // Literal chip classes shared by every pill in this component (the
 // original "Paylaş"/"Kartı indir" buttons and the 4 channel chips below) —
@@ -121,6 +122,51 @@ export function ManualCopyBox({ label, value }: { label: string; value: string }
   );
 }
 
+// What one click on "Paylaş" amounted to. `shared` and `aborted` change no
+// UI state (the label stays "Paylaş"); `copied` / `failed` drive the existing
+// "Kopyalandı" / "Kopyalanamadı" feedback.
+export type ShareStoryResult =
+  | { kind: "shared" }
+  | { kind: "aborted" }
+  | { kind: "copied" }
+  | { kind: "failed"; manual: string };
+
+interface ShareStoryInput {
+  clusterId: string;
+  title: string;
+  text?: string;
+  url: string;
+}
+
+// The whole "Paylaş" decision, extracted so it is unit-testable without a DOM.
+// Native share first (mobile). A dismissed sheet (AbortError) is the reader's
+// decision, not a failure: nothing is tracked and the clipboard stays
+// untouched (h21-journeys-2). Any other native failure, or no Web Share API at
+// all, falls back to copying the link.
+export async function shareStory({
+  clusterId,
+  title,
+  text,
+  url,
+}: ShareStoryInput): Promise<ShareStoryResult> {
+  // Bound on purpose: a detached `navigator.share` throws "Illegal
+  // invocation" in browsers, which runNativeShare would swallow as a
+  // fallback and turn every share into a copy.
+  const shareFn =
+    typeof navigator !== "undefined" && typeof navigator.share === "function"
+      ? (d: ShareData) => navigator.share(d)
+      : undefined;
+  const outcome = await runNativeShare(shareFn, text ? { title, text, url } : { title, url });
+  if (outcome === "shared") {
+    track("share", { clusterId, kind: "native" });
+    return { kind: "shared" };
+  }
+  if (outcome === "aborted") return { kind: "aborted" };
+  track("share", { clusterId, kind: "clipboard" });
+  const r = await resolveShareCopy(url, text);
+  return r.ok ? { kind: "copied" } : { kind: "failed", manual: r.manual };
+}
+
 interface ShareButtonProps {
   clusterId: string;
   title: string;
@@ -129,9 +175,15 @@ interface ShareButtonProps {
   // rides along with both the native share sheet and the clipboard
   // fallback so the story argues itself before the recipient clicks.
   text?: string;
+  // Href of the "Kartı indir" link. Undefined keeps the default
+  // `/cluster/<id>/kart`; null renders no link at all (the cluster page passes
+  // null when /kart would answer 404, so no dead download is offered). A plain
+  // string rather than a helper import: this 'use client' file must not pull
+  // story-card.ts and its server dependencies into the browser bundle.
+  cardHref?: string | null;
 }
 
-export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
+export function ShareButton({ clusterId, title, text, cardHref }: ShareButtonProps) {
   const [copied, setCopied] = useState(false);
   const [embedCopied, setEmbedCopied] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
@@ -145,31 +197,21 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
   const canEmbed = buildEmbedSnippet(siteUrl(), clusterId) !== null;
   const canEmbedIframe = buildIframeSnippet(siteUrl(), clusterId) !== null;
   const body = text ? `${title}\n${text}` : title;
+  const cardLink = cardHref === undefined ? `/cluster/${clusterId}/kart` : cardHref;
 
   async function handleShare() {
     const url = `${window.location.origin}/cluster/${clusterId}`;
-    // Try native share first (mobile)
-    if (navigator.share) {
-      try {
-        await navigator.share(text ? { title, text, url } : { title, url });
-        track("share", { clusterId, kind: "native" });
-        return;
-      } catch {
-        // user cancelled; fall through to clipboard
-      }
-    }
-    track("share", { clusterId, kind: "clipboard" });
-    // Clipboard fallback
-    const r = await resolveShareCopy(url, text);
-    if (r.ok) {
+    const r = await shareStory({ clusterId, title, text, url });
+    if (r.kind === "copied") {
       setCopied(true);
       setShareManual(null);
       setTimeout(() => setCopied(false), 2000);
-    } else {
+    } else if (r.kind === "failed") {
       setShareFailed(true);
       setShareManual(r.manual);
       setTimeout(() => setShareFailed(false), 2000);
     }
+    // shared / aborted: nothing to show — the label stays "Paylaş".
   }
 
   async function handleEmbed() {
@@ -212,17 +254,19 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
         )}
         <span>{copied ? "Kopyalandı" : shareFailed ? "Kopyalanamadı" : "Paylaş"}</span>
       </button>
-      <a
-        href={`/cluster/${clusterId}/kart`}
-        // Explicit filename: the route answers `Content-Disposition:
-        // inline` (the card stays viewable at its own URL), and the URL's
-        // last segment is "kart" with no extension, so a valueless
-        // `download` would save an extensionless file. KART-06.
-        download="tayf-kart.png"
-        className={CHIP_CLASS}
-      >
-        Kartı indir
-      </a>
+      {cardLink && (
+        <a
+          href={cardLink}
+          // Explicit filename: the route answers `Content-Disposition:
+          // inline` (the card stays viewable at its own URL), and the URL's
+          // last segment is "kart" with no extension, so a valueless
+          // `download` would save an extensionless file. KART-06.
+          download="tayf-kart.png"
+          className={CHIP_CLASS}
+        >
+          Kartı indir
+        </a>
+      )}
       {canEmbed && (
         <button
           type="button"

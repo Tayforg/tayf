@@ -96,7 +96,11 @@
      (3.10); it was 1.35 and 1.29. Fills use --input-subtle, the old value. */
   --input: oklch(0.65 0.008 80);
   --input-subtle: oklch(0.90 0.008 80);
-  --ring: oklch(0.72 0.06 75);
+  /* Focus indicator (WCAG 1.4.11, h21-a11y-1): needs 3:1 on the page and the
+     card. 0.72 was 2.4:1 on the light background; 0.6 is about 3.8 / 4.0. The
+     base `*` rule now applies it at full opacity (it was /50, 2.73:1 in dark).
+     Pinned by tests/styles/focus-ring-contrast.test.ts. */
+  --ring: oklch(0.6 0.06 75);
   --brand: oklch(0.76 0.12 75);
   --brand-foreground: oklch(0.16 0.01 60);
   --chart-1: oklch(0.76 0.12 75);
@@ -167,7 +171,7 @@
 
 @layer base {
   * {
-    @apply border-border outline-ring/50;
+    @apply border-border outline-ring;
   }
 
   body {

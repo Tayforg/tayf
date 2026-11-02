@@ -26,9 +26,9 @@ interface OyunModesProps {
 }
 
 const ACTIVE_TAB_CLASS =
-  "min-h-[44px] rounded-lg border px-4 py-2 text-sm font-medium transition-colors bg-primary text-primary-foreground border-primary focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50";
+  "min-h-[44px] rounded-lg border px-4 py-2 text-sm font-medium transition-colors bg-primary text-primary-foreground border-primary focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring";
 const INACTIVE_TAB_CLASS =
-  "min-h-[44px] rounded-lg border px-4 py-2 text-sm font-medium transition-colors border-border/60 hover:bg-accent focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50";
+  "min-h-[44px] rounded-lg border px-4 py-2 text-sm font-medium transition-colors border-border/60 hover:bg-accent focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring";
 
 /**
  * "use client" mode switch between /oyun's three games: Bölge (zone-guess,

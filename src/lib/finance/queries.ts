@@ -41,6 +41,24 @@ import {
 //
 // tests/guards/cache-life-after-attempt.test.ts pins the order inside the
 // cache body; tests/guards/cache-retry-prerender.test.ts pins the call shape.
+//
+// Remote cache (h21-perf-2): the eight public fetchers behind /ekonomi and
+// /ekonomi/[ticker] (and getQuote in quotes.ts) use `"use cache: remote"`, like
+// the cluster readers, not the plain `"use cache"`. The plain directive is a
+// per-function-instance memo, and /ekonomi reads inside a post-connection() dynamic hole, so most
+// views landed on an instance without the entry and re-queried PostgREST
+// (rpc/econ_feed, kap_disclosures, bist_quote_stats, feed_reference_prices)
+// well inside the FEED_CACHE window. The remote handler shares the entry across
+// instances. A failure is still never served as data: `attemptCached` returns
+// `{ ok: false }` instead of throwing across the remote boundary, the entry
+// then lives for `minutes` only, and `resolveCachedOrThrow` retries live
+// outside the cache and surfaces the error to error.tsx. Only the three
+// admin-only readers (fetchFinanceHealthCached, fetchSignalsCached,
+// fetchLagHistogramCached) stay instance-local; tests/guards/
+// finance-remote-cache.test.ts pins both lists. `next start` serves remote
+// entries from an in-memory handler, so cross-instance reuse can only be
+// verified on a real deployment (count rpc/econ_feed in Supabase edge_logs).
+//
 // Input normalisation and empty-input short-circuits (fetchQuoteStats,
 // fetchReferencePrices) live in the exported function, so the cached function
 // only ever sees the normalised argument and an empty request makes no cache
@@ -286,7 +304,7 @@ async function readEconFeed(limit: number): Promise<FeedItem[]> {
 }
 
 async function fetchEconFeedCached(limit: number) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-feed");
   const r = await attemptCached("finance-econ-feed", () => readEconFeed(limit));
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
@@ -446,7 +464,7 @@ async function readTopTickers(days: number, limit: number): Promise<TickerAttent
 }
 
 async function fetchTopTickersCached(days: number, limit: number) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-feed");
   const r = await attemptCached("finance-top-tickers", () => readTopTickers(days, limit));
   if (r.ok) cacheLife(FEED_CACHE);
@@ -566,7 +584,7 @@ async function readRecentDisclosures(limit: number, ticker: string | undefined):
 }
 
 async function fetchRecentDisclosuresCached(limit: number, ticker: string | undefined) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-feed");
   const r = await attemptCached("finance-recent-disclosures", () => readRecentDisclosures(limit, ticker));
   if (r.ok) cacheLife(FEED_CACHE);
@@ -597,7 +615,7 @@ async function readCircuitBreakers(limit: number): Promise<Disclosure[]> {
 }
 
 async function fetchCircuitBreakersCached(limit: number) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-feed");
   const r = await attemptCached("finance-circuit-breakers", () => readCircuitBreakers(limit));
   if (r.ok) cacheLife(FEED_CACHE);
@@ -644,7 +662,7 @@ async function readQuoteStats(unique: string[]): Promise<Record<string, QuoteSta
 }
 
 async function fetchQuoteStatsCached(unique: string[]) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-bars");
   const r = await attemptCached("finance-quote-stats", () => readQuoteStats(unique));
   if (r.ok) cacheLife(FEED_CACHE);
@@ -677,7 +695,7 @@ async function readReferencePrices(ids: string[]): Promise<Record<string, number
 }
 
 async function fetchReferencePricesCached(ids: string[]) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-bars");
   const r = await attemptCached("finance-reference-prices", () => readReferencePrices(ids));
   if (r.ok) cacheLife(FEED_CACHE);
@@ -727,7 +745,7 @@ async function readIntraday(ticker: string): Promise<{ day: string | null; bars:
 }
 
 async function fetchIntradayCached(ticker: string) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-bars", `finance-ticker:${ticker}`);
   const r = await attemptCached("finance-intraday", () => readIntraday(ticker));
   if (r.ok) cacheLife(FEED_CACHE);
@@ -1025,7 +1043,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
 }
 
 async function fetchTickerPageCached(ticker: string) {
-  "use cache";
+  "use cache: remote";
   cacheTag("finance-feed", `finance-ticker:${ticker}`);
   const r = await attemptCached("finance-ticker-page", () => readTickerPage(ticker));
   if (r.ok) cacheLife(FEED_CACHE);
@@ -1064,6 +1082,10 @@ async function readFinanceHealth(): Promise<FinanceHealth> {
   };
 }
 
+// Admin-only reader: serves /admin/ekonomi under ADMIN_CACHE (300 s expiry),
+// behind requireAdminSession(). A few operator requests an hour do not
+// justify a remote round trip, so this one stays on the instance-local
+// "use cache" (allow-listed in tests/guards/finance-remote-cache.test.ts).
 async function fetchFinanceHealthCached() {
   "use cache";
   const r = await attemptCached("finance-health", readFinanceHealth);
@@ -1093,6 +1115,10 @@ async function readSignals(limit: number): Promise<Signal[]> {
   }));
 }
 
+// Admin-only reader: serves /admin/ekonomi under ADMIN_CACHE (300 s expiry),
+// behind requireAdminSession(). A few operator requests an hour do not
+// justify a remote round trip, so this one stays on the instance-local
+// "use cache" (allow-listed in tests/guards/finance-remote-cache.test.ts).
 async function fetchSignalsCached(limit: number) {
   "use cache";
   const r = await attemptCached("finance-signals", () => readSignals(limit));
@@ -1180,6 +1206,10 @@ async function readLagHistogram(days: number): Promise<LagBucket[]> {
   return bucketLags(((data ?? []) as Array<{ lag_minutes: number }>).map((r) => Number(r.lag_minutes)));
 }
 
+// Admin-only reader: serves /admin/ekonomi under ADMIN_CACHE (300 s expiry),
+// behind requireAdminSession(). A few operator requests an hour do not
+// justify a remote round trip, so this one stays on the instance-local
+// "use cache" (allow-listed in tests/guards/finance-remote-cache.test.ts).
 async function fetchLagHistogramCached(days: number) {
   "use cache";
   const r = await attemptCached("finance-lag-histogram", () => readLagHistogram(days));

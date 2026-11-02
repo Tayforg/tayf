@@ -224,7 +224,7 @@ export function defaultQuoteSource(): QuoteSource {
  * invocation, after the attempt.
  */
 async function getQuote(ticker: string): Promise<Quote | null> {
-  "use cache";
+  "use cache: remote";
   const r = await attemptCached("quote", () => defaultQuoteSource().getQuotes([ticker]));
   const quote = r.ok ? (r.data[0] ?? null) : null;
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.

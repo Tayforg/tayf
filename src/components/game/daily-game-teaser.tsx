@@ -20,7 +20,7 @@ export function DailyGameTeaser({ puzzleNumber }: DailyGameTeaserProps) {
       <p className="text-sm text-muted-foreground">5 manşet, 3 taraf. Hangisi hangi bölgeden?</p>
       <Link
         href="/oyun?mod=gunluk"
-        className="inline-flex min-h-[44px] items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+        className="inline-flex min-h-[44px] items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring"
       >
         Oyna
       </Link>

@@ -419,17 +419,21 @@ export function topicDescription(slug: TopicSlug): string {
 export function topicMetadata(slug: TopicSlug, page = 1): Metadata {
   const label = TOPIC_LABELS_TR[slug];
   const path = `/konu/${slug}`;
+  const clamped = clampTopicPage(page);
 
   // Plain title — the root layout's `title.template = "%s — Tayf"` adds the
   // suffix automatically, rendering "Dünya haberleri — Tayf" (og:/twitter:
-  // titles get the suffix from staticPageMetadata itself).
+  // titles get the suffix from staticPageMetadata itself). Pages 2+ name the
+  // page ("Dünya haberleri — Sayfa 3"): every ?sayfa=N is its own canonical,
+  // and sharing page 1's title made them indistinguishable in search results
+  // and share previews. The description stays page 1's.
   const meta = staticPageMetadata({
-    title: `${label} haberleri`,
+    title:
+      clamped === 1 ? `${label} haberleri` : `${label} haberleri — Sayfa ${clamped}`,
     description: topicDescription(slug),
     path,
   });
 
-  const clamped = clampTopicPage(page);
   if (clamped === 1) return meta;
 
   // staticPageMetadata's PATH_RE forbids a query string, so the paged URL is

@@ -27,7 +27,7 @@ export function sourceProfileHref(slug: unknown): string | null {
 }
 
 export const SOURCE_PROFILE_LINK_CLASS =
-  "inline-flex items-center max-sm:min-h-11 rounded-sm font-mono text-[10px] uppercase tracking-wider text-foreground/80 underline decoration-dotted underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+  "inline-flex items-center min-h-6 max-sm:min-h-11 rounded-sm font-mono text-[10px] uppercase tracking-wider text-foreground/80 underline decoration-dotted underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 export const SOURCE_NAME_TEXT_CLASS =
   "font-mono text-[10px] uppercase tracking-wider text-foreground/80";

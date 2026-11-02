@@ -222,3 +222,46 @@ describe("MediaDna narrowed sources", () => {
     expect(narrow).toContain("Tüm 3 kaynağı göster");
   });
 });
+
+// WCAG 2.5.8 (h21-a11y-2): the 'Tüm N kaynağı göster' toggle is a standalone
+// button, not inline text, and measured 117x17 px with only `text-[11px]`. It
+// needs a 24 px box on desktop (min-h-6) and the 44 px size on narrow screens
+// like the share chips. The copy itself is unchanged.
+describe("MediaDna show-all toggle (target size)", () => {
+  const rows = [
+    source({ id: "g", slug: "gov", name: "Gov Outlet", bias: "pro_government", kind: "outlet" }),
+    source({ id: "c", slug: "mid", name: "Mid Outlet", bias: "center", kind: "outlet" }),
+    source({ id: "o", slug: "opp", name: "Opp Outlet", bias: "opposition", kind: "outlet" }),
+  ];
+
+  /** Class tokens and label of the one <button> in `html` (character scan, no tag-stripping regex). */
+  function toggleOf(html: string): { tokens: string[]; label: string } {
+    const open = html.indexOf("<button");
+    expect(open).toBeGreaterThanOrEqual(0);
+    const close = html.indexOf(">", open);
+    const tag = html.slice(open, close + 1);
+    const classAt = tag.indexOf('class="');
+    expect(classAt).toBeGreaterThanOrEqual(0);
+    const classEnd = tag.indexOf('"', classAt + 'class="'.length);
+    const tokens = tag
+      .slice(classAt + 'class="'.length, classEnd)
+      .split(" ")
+      .filter((t) => t !== "");
+    const label = html.slice(close + 1, html.indexOf("</button>", close));
+    return { tokens, label };
+  }
+
+  it("is a 24 px (desktop) / 44 px (mobile) box with the label centred", () => {
+    const html = renderToStaticMarkup(<MediaDna sources={rows} highlightSlugs={new Set(["gov"])} />);
+    const { tokens, label } = toggleOf(html);
+    for (const t of ["inline-flex", "items-center", "min-h-6", "max-sm:min-h-11", "text-[11px]"]) {
+      expect(tokens).toContain(t);
+    }
+    expect(label).toBe("Tüm 3 kaynağı göster");
+  });
+
+  it("renders no toggle when there is no highlight filter to collapse to", () => {
+    const html = renderToStaticMarkup(<MediaDna sources={rows} />);
+    expect(html).not.toContain("<button");
+  });
+});

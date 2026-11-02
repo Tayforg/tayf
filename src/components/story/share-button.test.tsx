@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { buildEmbedSnippet } from "@/lib/cards/badge-embed";
 import { buildIframeSnippet } from "@/lib/embed/embed-snippet";
@@ -589,5 +591,211 @@ describe("ShareButton — mobile tap targets (h16-mobile-2)", () => {
       "hover:text-foreground",
       "transition-colors",
     ]);
+  });
+});
+
+// h21-journeys-1: the cluster page passes `cardHref` (a plain string computed
+// by storyCardHref) so the link disappears for stories whose /kart route
+// answers 404. The prop is optional so every other call site keeps today's
+// link.
+describe("ShareButton — cardHref (h21-journeys-1)", () => {
+  const UUID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+
+  // Counts opening-tag prefixes by splitting; no regex over markup.
+  const count = (html: string, needle: string) => html.split(needle).length - 1;
+
+  it("renders no 'Kartı indir' link and no /kart href when cardHref is null", () => {
+    const html = renderToStaticMarkup(
+      <ShareButton clusterId={UUID} title="t" cardHref={null} />,
+    );
+    expect(html).not.toContain("Kartı indir");
+    expect(html).not.toContain("/kart");
+    expect(html).not.toContain("tayf-kart.png");
+    // 3 buttons (Paylaş, Sitenize ekle, Gömme kodu) + the 4 channel anchors.
+    expect(count(html, "<button")).toBe(3);
+    expect(count(html, "<a ")).toBe(4);
+  });
+
+  it("keeps the other chips and the live region when the card link is hidden", () => {
+    const html = renderToStaticMarkup(
+      <ShareButton clusterId={UUID} title="t" cardHref={null} />,
+    );
+    expect(html).toContain("<span>Paylaş</span>");
+    expect(html).toContain("Sitenize ekle");
+    expect(html).toContain("Gömme kodu");
+    for (const label of ["WhatsApp", "Telegram", "X", "Bluesky"]) {
+      expect(html).toContain(`aria-label="${label} ile paylaş"`);
+    }
+    expect(count(html, 'role="status"')).toBe(1);
+  });
+
+  it("renders today's anchor, byte for byte, for an explicit href equal to the default", () => {
+    const explicit = renderToStaticMarkup(
+      <ShareButton clusterId={UUID} title="t" cardHref={`/cluster/${UUID}/kart`} />,
+    );
+    const implicit = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
+    expect(explicit).toBe(implicit);
+    expect(count(explicit, "<button")).toBe(3);
+    expect(count(explicit, "<a ")).toBe(5);
+    expect(explicit).toContain(`href="/cluster/${UUID}/kart"`);
+    expect(explicit).toContain('download="tayf-kart.png"');
+    expect(explicit).toContain("Kartı indir");
+  });
+
+  it("uses an explicit href verbatim and keeps the download name and chip class", () => {
+    const html = renderToStaticMarkup(
+      <ShareButton clusterId={UUID} title="t" cardHref="/baska/kart" />,
+    );
+    expect(html).toContain('href="/baska/kart"');
+    expect(html).not.toContain(`href="/cluster/${UUID}/kart"`);
+    expect(html).toContain('download="tayf-kart.png"');
+    expect(html).toContain("Kartı indir");
+  });
+
+  it("does not import story-card.ts into the 'use client' module (public-client-weight)", () => {
+    const src = readFileSync(resolve(process.cwd(), "src/components/story/share-button.tsx"), "utf8");
+    expect(src).not.toContain("cards/story-card");
+  });
+});
+
+// h21-journeys-2: dismissing the native share sheet is a decision, not a
+// failure. The click handler needs a DOM, so the whole decision is the pure
+// async `shareStory`; handleShare only maps its result onto state.
+describe("ShareButton — shareStory (h21-journeys-2)", () => {
+  const CLUSTER_ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
+  const URL_ = `https://tayf.test/cluster/${CLUSTER_ID}`;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.doUnmock("@/lib/track");
+  });
+
+  async function load() {
+    vi.resetModules();
+    const trackMock = vi.fn();
+    vi.doMock("@/lib/track", () => ({ track: trackMock }));
+    const mod = await import("./share-button");
+    return { shareStory: mod.shareStory, trackMock };
+  }
+
+  it("aborted: a dismissed sheet writes no clipboard and records no share", async () => {
+    const { shareStory, trackMock } = await load();
+    const writeText = vi.fn(async (_value: string) => {});
+    vi.stubGlobal("navigator", {
+      share: vi.fn(async () => {
+        throw new DOMException("Share canceled", "AbortError");
+      }),
+      clipboard: { writeText },
+    });
+
+    const result = await shareStory({ clusterId: CLUSTER_ID, title: "t", text: "text", url: URL_ });
+
+    expect(result).toEqual({ kind: "aborted" });
+    expect(writeText).not.toHaveBeenCalled();
+    expect(trackMock).not.toHaveBeenCalled();
+  });
+
+  it("shared: a completed sheet tracks only the native share", async () => {
+    const { shareStory, trackMock } = await load();
+    const writeText = vi.fn(async (_value: string) => {});
+    const share = vi.fn(async (_d: ShareData) => {});
+    vi.stubGlobal("navigator", { share, clipboard: { writeText } });
+
+    const result = await shareStory({ clusterId: CLUSTER_ID, title: "t", text: "text", url: URL_ });
+
+    expect(result).toEqual({ kind: "shared" });
+    expect(share).toHaveBeenCalledTimes(1);
+    expect(share.mock.calls[0]![0]).toStrictEqual({ title: "t", text: "text", url: URL_ });
+    expect(writeText).not.toHaveBeenCalled();
+    expect(trackMock).toHaveBeenCalledTimes(1);
+    expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "native" });
+  });
+
+  it("shared: leaves text out of the payload when none is given", async () => {
+    const { shareStory } = await load();
+    const share = vi.fn(async (_d: ShareData) => {});
+    vi.stubGlobal("navigator", { share, clipboard: { writeText: vi.fn(async (_v: string) => {}) } });
+
+    await shareStory({ clusterId: CLUSTER_ID, title: "t", url: URL_ });
+
+    expect(share.mock.calls[0]![0]).toStrictEqual({ title: "t", url: URL_ });
+  });
+
+  it("copied: a NotAllowedError falls back to the clipboard and tracks a clipboard share", async () => {
+    const { shareStory, trackMock } = await load();
+    const writeText = vi.fn(async (_value: string) => {});
+    vi.stubGlobal("navigator", {
+      share: vi.fn(async () => {
+        throw new DOMException("denied", "NotAllowedError");
+      }),
+      clipboard: { writeText },
+    });
+
+    const result = await shareStory({ clusterId: CLUSTER_ID, title: "t", text: "text", url: URL_ });
+
+    expect(result).toEqual({ kind: "copied" });
+    expect(writeText).toHaveBeenCalledWith(`text\n${URL_}`);
+    expect(trackMock).toHaveBeenCalledTimes(1);
+    expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "clipboard" });
+  });
+
+  it("copied: with no navigator.share the link is copied and tracked as a clipboard share", async () => {
+    const { shareStory, trackMock } = await load();
+    const writeText = vi.fn(async (_value: string) => {});
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+
+    const result = await shareStory({ clusterId: CLUSTER_ID, title: "t", url: URL_ });
+
+    expect(result).toEqual({ kind: "copied" });
+    expect(writeText).toHaveBeenCalledWith(URL_);
+    expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "clipboard" });
+  });
+
+  it("failed: a denied clipboard hands back the url to copy by hand", async () => {
+    const { shareStory } = await load();
+    vi.stubGlobal("navigator", {
+      clipboard: {
+        writeText: vi.fn(async (_value: string) => {
+          throw new Error("denied");
+        }),
+      },
+    });
+
+    const result = await shareStory({ clusterId: CLUSTER_ID, title: "t", text: "text", url: URL_ });
+
+    expect(result).toEqual({ kind: "failed", manual: URL_ });
+  });
+
+  it("calls navigator.share bound to navigator (an unbound call throws 'Illegal invocation' in browsers)", async () => {
+    const { shareStory, trackMock } = await load();
+    const writeText = vi.fn(async (_value: string) => {});
+    const nav: {
+      share: (this: unknown, d: ShareData) => Promise<void>;
+      clipboard: { writeText: typeof writeText };
+    } = {
+      share(this: unknown) {
+        if (this !== nav) throw new TypeError("Illegal invocation");
+        return Promise.resolve();
+      },
+      clipboard: { writeText },
+    };
+    vi.stubGlobal("navigator", nav);
+
+    const result = await shareStory({ clusterId: CLUSTER_ID, title: "t", url: URL_ });
+
+    expect(result).toEqual({ kind: "shared" });
+    expect(writeText).not.toHaveBeenCalled();
+    expect(trackMock).toHaveBeenCalledWith("share", { clusterId: CLUSTER_ID, kind: "native" });
+  });
+
+  it("handleShare delegates to shareStory and never calls navigator.share itself", () => {
+    const src = readFileSync(resolve(process.cwd(), "src/components/story/share-button.tsx"), "utf8");
+    const start = src.indexOf("async function handleShare()");
+    const end = src.indexOf("async function handleEmbed()");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+    expect(body).toContain("shareStory(");
+    expect(body).not.toContain("navigator.share(");
   });
 });
