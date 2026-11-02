@@ -3990,3 +3990,452 @@ describe("wave AZ (hunt-22) review fixes", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Wave BD (hunt-25): named politicians and the İBB trial in the headline
+// ---------------------------------------------------------------------------
+//
+// #167 moved 'cumhurbaşkan' / 'bakan' to the title-only list. A headline that
+// NAMES the person without the office word ('Cevdet Yılmaz: Diplomasi ve
+// diyalogdan asla vazgeçilmemelidir', the office 'Cumhurbaşkanı Yardımcısı' is
+// in the description only) stopped being politics, and the story stayed
+// unclustered. Read-only SQL, 2026-11-02: 23 Cevdet Yılmaz titles created
+// before 06:00Z were 96% politika / son_dakika, the 10 created after 06:00Z are
+// 30%. Seven rows from six outlets sat in dunya / ekonomi beside clustered
+// siblings. The İBB trial went the same way: 'İBB davasında 102. gün' (sozcu,
+// dokuz8, medyascope = genel; son-dakika = ekonomi) next to 11 clustered
+// siblings, because 'ibb' is a COMPOUND_BODY word that needs an action word and
+// 'dava' is not one. The hunt's 7-day replay was 2,216 rows, 111 entering, 0
+// leaving; the replay of this wave is in the PR.
+//
+// The four stems are TITLE-only (POLITIKA_TITLE_RE): in a description a name is
+// a mention ('İYİ Partili Usta: Cevdet Yılmaz'ın aklanacağı tek yer Yüce
+// Divan' is political for other reasons; a Haberport summary that quotes him
+// under an unrelated headline is not). 'fuat oktay' and 'mehmet simsek' are
+// deliberately NOT stems: the wave-AX meta test pins that the bare titles of
+// its rows are not enough, and 'Mehmet Şimşek' headlines are economy wraps
+// ('Bakan Şimşek' already admits through 'bakan').
+//
+// Every row below is a real row, exactly as stored in `articles` (read-only
+// SELECTs, 2026-11-02). `stored` is the category production gave it.
+
+const MUST_ENTER_H25: GateRow[] = [
+  // Cevdet Yılmaz rows: the office ('Cumhurbaşkanı Yardımcısı') is in the description only
+  {
+    id: "82729bce",
+    source: "bha",
+    title: "Cevdet Yılmaz'dan enerji fiyatları uyarısı: Küresel ekonomiler baskı altında",
+    description: "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, Orta Doğu'daki savaşların küresel enerji fiyatları üzerinden ekonomiler üzerinde baskı oluşturduğunu belirtti. İstanbul'da düzenlenen 42. İSEDAK Bakanlar Toplantısı'nda konuşan Yılmaz, enerji güvenliğinde kaynak çeşitliliği ve bölgesel iş birliğinin önemine dikkat çekerek İslam ülkeleri arasındaki ticaretin güçlendirilmesi çağrısında bulundu.",
+    url: "https://www.bha.net.tr/gundem/cevdet-yilmazdan-enerji-fiyatlari-uyarisi-kuresel-ekonomiler-baski-altinda/468430",
+    stored: "dunya",
+  },
+  {
+    id: "6baf9d61",
+    source: "haber-com",
+    title: "Cevdet Yılmaz'dan Enerji Krizi ve Ticaret Vurgusu",
+    description: "İslam İşbirliği Teşkilatı (İİT) Ekonomik ve Ticari İşbirliği Daimi Komitesi’nin (İSEDAK) 42. Bakanlar Toplantısı, İstanbul Kongre Merkezi Üsküdar Salonu'nda düzenlenen açılış oturumuyla başladı.",
+    url: "https://www.haber.com/ekonomi/cevdet-yilmazdan-enerji-krizi-ve-ticaret-vurgusu-30654",
+    stored: "ekonomi",
+  },
+  {
+    id: "5986bb6f",
+    source: "indyturk",
+    title: "Cevdet Yılmaz: Diplomasi ve diyalogdan asla vazgeçilmemelidir",
+    description: "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, \"İsrail'in kışkırtmalarıyla başlayan savaşlar neticesinde, dünya enerji fiyatlarının ekonomilerimiz üzerinde oluşturduğu baskıya şahitlik ediyoruz. Bu durum, bilhassa enerji güvenliğinin sağlanmasında kaynak ve güzergah çeşitlendirmesinin ve bölgesel işbirliğinin güçlendirilmesinin önemini bir kez daha ortaya koymuştur.\" dedi.\n\nYılmaz, İstanbul Kongre Merkezi Üsküdar Salonu'nda düzenlenen, İslam İşbirliği Teşkilatı (İİT) Ekonomik ve Ticari İşbirliği Dai...",
+    url: "https://www.indyturk.com/node/784657/haber/cevdet-y%C4%B1lmaz-diplomasi-ve-diyalogdan-asla-vazge%C3%A7ilmemelidir",
+    stored: "dunya",
+  },
+  {
+    id: "0f36d2ae",
+    source: "yenicag",
+    title: "Cevdet Yılmaz'dan Gazze açıklaması: Bölgesel işbirliğini güçlendirmeliyiz",
+    description: "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, İstanbul Kongre Merkezi'nde düzenlenen İslam İşbirliği Teşkilatı (İİT) Ekonomik ve Ticari İşbirliği Daimi Komitesi (İSEDAK) 42. Bakanlar Toplantısı'nın açılış oturumuna katılarak bölgesel ve küresel ekonomik gelişmelere ilişkin değerlendirmelerde bulundu.",
+    url: "https://www.yenicaggazetesi.com/cevdet-yilmazdan-gazze-aciklamasi-bolgesel-isbirligini-guclendirmeliyiz-1087383h.htm",
+    stored: "dunya",
+  },
+  {
+    id: "f1b2b344",
+    source: "haberler-com",
+    title: "Cevdet Yılmaz: Diplomasi ve diyalogdan asla vazgeçilmemelidir",
+    description: "İSEDAK 42’nci Bakanlar Toplantısı Açılış Oturumu’nda konuşan Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, \"İsrail’in kışkırtmalarıyla İran’a yönelik saldırılar ve özellikle Hürmüz Boğazı’ndaki gerilim günümüzde hem bölgemizin istikrarı ve refahını hem de küresel refahı tehdit etmeye devam ediyor.",
+    url: "https://www.haberler.com/guncel/cevdet-yilmaz-diplomasi-ve-diyalogdan-asla-20387596-haberi/",
+    stored: "dunya",
+  },
+  {
+    id: "299d8164",
+    source: "yeni-safak",
+    title: "Cevdet Yılmaz'dan İSEDAK Toplantısı'nda küresel enerji ve bölgesel kriz mesajları",
+    description: "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, İSEDAK 42. Bakanlar Toplantısı'nda yaptığı konuşmada, İsrail'in kışkırtmalarıyla başlayan savaşların küresel enerji fiyatları üzerinde ciddi baskı oluşturduğunu vurguladı. Yılmaz; Filistin, Suriye, Yemen ve Afrika'daki bölgesel gelişmelere değinerek enerji güvenliği ile İslam ülkeleri arasındaki ticari iş birliğinin önemine dikkat çekti.",
+    url: "https://www.yenisafak.com/gundem/cevdet-yilmazdan-isedak-toplantisinda-kuresel-enerji-ve-bolgesel-kriz-mesajlari-4869098",
+    stored: "dunya",
+  },
+  {
+    id: "b0171825",
+    source: "yeni-safak",
+    title: "İslam dünyasının ortak meseleleri masada: Cevdet Yılmaz İİT Genel Sekreteri ile görüştü",
+    description: "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz, İİT Genel Sekreteri İsmail Vild eş-Şeyh Ahmed ile İstanbul’da bir araya geldi. Görüşmede Gazze’den Kıbrıs Türklerinin haklarına, ekonomik iş birliğinden Batı Trakya’daki Müslüman azınlığın sorunlarına kadar önemli başlıklar gündeme geldi.",
+    url: "https://www.yenisafak.com/gundem/islam-dunyasinin-ortak-meseleleri-masada-cevdet-yilmaz-iit-genel-sekreteri-ile-gorustu-4869075",
+    stored: "dunya",
+  },
+  // İBB trial rows: 'İBB davası' in the headline, no action word
+  {
+    id: "04786ee1",
+    source: "sozcu",
+    title: "İBB davasında 102. gün: Müştekiler ve tanıklar dinlendi",
+    description: "İBB davasının 102. gününde tutuklu KİPTAŞ Yönetim Kurulu Başkanı Ali Kurt, müşteki Bahattin Uçar'a kendisinden dükkan al...",
+    url: "https://www.sozcu.com.tr/ibb-davasinda-102-gun-mustekiler-ve-taniklar-dinlendi-p375238",
+    stored: "genel",
+  },
+  {
+    id: "ce36b488",
+    source: "dokuz8-haber",
+    title: "İBB Davası'nın 102'inci gününde müştekiler ve tanıklar dinleniyor",
+    description: "Tanık Arzu Uçar, eşinin Beylikdüzü Belediyesi'nde çalıştığı dönemde maruz kaldığı mobbing nedeniyle intihar ettiğini öne sürdü, eşinin ölümü sonrasında tazminat karşılığında kendilerine verildiğini belirttiği dairenin tapusunun hala teslim edilmediğini savundu.",
+    url: "https://dokuz8haber.net/ibb-davasinin-102inci-gununde-mustekiler-ve-taniklar-dinleniyor",
+    stored: "genel",
+  },
+  {
+    id: "be6d35d4",
+    source: "medyascope",
+    title: "İBB davasında 3. duruşma: Müştekiler ve tanıklar dinleniyor",
+    description: "İBB davasının üçüncü duruşmasında tanıkların ve müştekilerin ifadeleri alınıyor. Müştekilerden bazıları şikayetçi olmadıklarını söyledi. \nİBB davasında 3. duruşma: Müştekiler ve tanıklar dinleniyor Medyascope",
+    url: "https://medyascope.tv/2026/11/02/ibb-davasinin-ucuncu-durusmasi-basladi-mustekiler-ve-taniklar-dinleniyor/",
+    stored: "genel",
+  },
+  {
+    id: "7c8bb200",
+    source: "son-dakika",
+    title: "İBB davasında ünlü AVM'nin yöneticileri konuştu! \"5 milyon dolar talep edildi\"",
+    description: "İBB davasının üçüncü duruşmasında müştekiler dinlendi. Capacity AVM yöneticileri Alaattin Kameroğlu ve Selahattin Özgül, Gül İnşaat ortaklarından Çetin Gül ile Abdi İbrahim Yönetim Kurulu Başkanı Nezih Barut sanıklardan şikayetçi olduklarını söyledi. Kameroğlu’nun iddianamedeki ifadesinde kendilerinden 5 milyon dolar talep edildiğini öne sürdüğü belirtildi.",
+    url: "https://www.sondakika.com/3-sayfa/haber-imamoglu-davasinda-is-insanlari-sikayetci-oldu-197-20387836/",
+    stored: "ekonomi",
+  },
+  // Feridun Sinirlioğlu, Turkey's UN Secretary-General candidate
+  {
+    id: "5f87ac35",
+    source: "cnn-turk",
+    title: "Yunanistan'da Feridun Sinirlioğlu alarmı! Türkiye'den adaylık Atina'yı karıştırdı",
+    description: "Türkiye'nin Birleşmiş Milletler Genel Sekreterliği için deneyimli diplomat Feridun Sinirlioğlu'nu aday göstermesi, Atina'da büyük yankı uyandırdı. 2024'te Sinirlioğlu'nun AGİT Genel Sekreterliği'ne onay veren Yunanistan, bu kez Doğu Akdeniz ve Kıbrıs dengeleri nedeniyle teyakkuza geçti.",
+    url: "https://www.cnnturk.com/video/dunya/yunanistanda-feridun-sinirlioglu-alarmi-turkiyeden-adaylik-atinayi-karistirdi-3487864",
+    stored: "dunya",
+  },
+  // Hakan Fidan without 'Dışişleri Bakanı' (the foreign minister)
+  {
+    id: "72aae245",
+    source: "f5-haber",
+    title: "Hakan Fidan'dan Ürdün ile kritik Filistin görüşmesi",
+    description: "Dışişleri Bakanı Hakan Fidan, Ürdünlü mevkidaşı Eymen es-Safedi ile telefon görüşmesi gerçekleştirdi. Görüşmenin gündeminde Filistin'deki durum ve bölgesel gelişmeler vardı.",
+    url: "https://www.f5haber.com/dunya/hakan-fidandan-urdun-ile-kritik-filistin-gorusmesi-6993267",
+    stored: "dunya",
+  },
+];
+
+const MUST_LEAVE_H25: GateRow[] = [
+  // 'Şimşekspor' is a club: 'mehmet simsek' is NOT a stem
+  {
+    id: "e2ce6054",
+    source: "haberport",
+    title: "Kocasinan Şimşekspor, Battalgazi'de 2-0 galibiyetle döndü",
+    description: "Kocasinan Şimşekspor deplasmanda 2-0 kazandıProfesyonelliğe Geçiş Ligi (PGL) 3. Grup 3. hafta mücadelesinde Kocasinan Şimşekspor, Malatya temsilcisi Battalgazi Belediyespor'u 2-0 mağlup etti. Maç Batt...",
+    url: "https://www.haberport.com/haber/kocasinan-simsekspor-battalgazide-2-0-galibiyetle-dondu/60234",
+    stored: "spor",
+  },
+  {
+    id: "82b541ad",
+    source: "haberport",
+    title: "Kocasinan Şimşekspor Malatya sınavına hazırlanıyor",
+    description: "maç öncesi hazırlıklar:\nKocasinan Şimşekspor, Profesyonelliğe Geçiş Ligi (PGL) 3. Grup 3. hafta mücadelesi öncesinde son idmanlarını tamamlayacak. Kulüp, kaynak metne göre antrenmanı yarın bitirip kar...",
+    url: "https://www.haberport.com/haber/kocasinan-simsekspor-malatya-sinavina-hazirlaniyor/59128",
+    stored: "spor",
+  },
+  // a provincial governor named Yılmaz Şimşek
+  {
+    id: "3c10822b",
+    source: "haberler-com",
+    title: "Sivas Valisi Yılmaz Şimşek'ten 29 Ekim Cumhuriyet Bayramı mesajı",
+    description: "Sivas Valisi Yılmaz Şimşek, 29 Ekim Cumhuriyet Bayramı dolayısıyla mesaj yayımladı.",
+    url: "https://www.haberler.com/guncel/sivas-valisi-yilmaz-simsek-ten-29-ekim-cumhuriyet-20372558-haberi/",
+    stored: "genel",
+  },
+  // İBB without 'dava': a cinema programme (the 1 TL student pass and İBB Kültür A.Ş. rows are the same shape)
+  {
+    id: "13c2d179",
+    source: "birgun",
+    title: "İBB Beyoğlu Sineması’nda kasım seçkisi",
+    description: null,
+    url: "https://www.birgun.net/haber/ibb-beyoglu-sinemasinda-kasim-seckisi-744098",
+    stored: "yasam",
+  },
+  {
+    id: "acba02b2",
+    source: "muhalif",
+    title: "İBB'nin 1 TL'lik öğrenci abonman kampanyasından 1 milyon 225 bin öğrenci yararlandı",
+    description: "İstanbul'da öğrencilerin ulaşım masraflarını azaltmayı amaçlayan kampanyada 455 bin öğrenci, 2026 yılındaki ilk abonmanını yalnızca 1 TL'ye aldı.",
+    url: "https://www.muhalif.com.tr/gundem/ibbnin-1-tllik-ogrenci-abonman-kampanyasindan-1-milyon-225-bin-ogrenci-yararlandi/747393",
+    stored: "ekonomi",
+  },
+  {
+    id: "f72b26b3",
+    source: "odatv",
+    title: "İBB Kültür A.Ş. Genel Müdür Yardımcısına film gibi fidye pususu... Odatv iddianameye ulaştı: Darp edildi, tırnakları çekildi, '300 kilo altın' istendi",
+    description: "Odatv, İBB Kültür A.Ş. Genel Müdür Yardımcısı Erhan Karaal'ın kaçırılmasına ilişkin iddianameye ulaştı. 24 şüpheli hakkında \"Nitelikli Yağma\", \"Kişiyi Hürriyetinden Yoksun Kılma\", \"Eziyet Etme\" ve \"Özel Hayatın Gizliliğini İhlal\" suçlarından onlarca yıla kadar hapis cezası istendi.",
+    url: "https://www.odatv.com/guncel/erhan-karaal-kacirilma-iddianamesi-ibb-kultur-as-ihale-rusvet-iddialari-120169348",
+    stored: "yasam",
+  },
+  // Cevdet Yılmaz in the DESCRIPTION only: the new stems are title-only
+  {
+    id: "dde761ce",
+    source: "haberport",
+    title: "Diplomasi anahtar: gerilimlerin bölgesel ve küresel etkilerine karşı arabuluculuk",
+    description: "İSEDAK açılışında diplomasi ve arabuluculukCumhurbaşkanı Yardımcısı Cevdet Yılmaz İstanbul’da düzenlenen 42. İslam İşbirliği Teşkilatı Ekonomik ve Ticari İşbirliği Daimi Komitesi (İSEDAK) Bakanlar Top...",
+    url: "https://www.haberport.com/haber/diplomasi-anahtar-gerilimlerin-bolgesel-ve-kuresel-etkilerine-karsi-arabuluculuk/60703",
+    stored: "dunya",
+  },
+  {
+    id: "d7c50be0",
+    source: "haberport",
+    title: "Diplomasi ve dayanışma: yılmaz ile İİT genel sekreteri arasında ekonomik iş birliği öne çıktı",
+    description: "Diplomasi ve dayanışma: yılmaz ile İİT genel sekreteri arasında ekonomik iş birliği öne çıktıCumhurbaşkanı Yardımcısı Cevdet Yılmaz, 42’nci Ekonomik ve Ticari İşbirliği Daimi Komitesi (İSEDAK) Toplant...",
+    url: "https://www.haberport.com/haber/diplomasi-ve-dayanisma-yilmaz-ile-iit-genel-sekreteri-arasinda-ekonomik-is-birligi-one-cikti/60624",
+    stored: "ekonomi",
+  },
+  {
+    id: "58f520c4",
+    source: "daily-sabah",
+    title: "'Israeli-provoked conflicts exert pressure on global energy prices'",
+    description: "Wars triggered by Israeli provocations are exerting increased pressure on global energy prices and national economies, Vice President Cevdet Yılmaz said Monday. \"As a result of the...",
+    url: "https://www.dailysabah.com/business/economy/israeli-provoked-conflicts-exert-pressure-on-global-energy-prices",
+    stored: "ekonomi",
+  },
+];
+
+describe("wave BD (hunt-25): named politicians and the İBB trial in the headline", () => {
+  describe("the verbatim rows that fell out of the gate are politika again", () => {
+    it.each(MUST_ENTER_H25)("$id ($source) is politika", (row) => {
+      expect(classifyRow(row)).toBe("politika");
+    });
+
+    it.each(MUST_ENTER_H25)("$id ($source): the headline alone carries it", (row) => {
+      expect(cls(row.title, null, row.url)).toBe("politika");
+    });
+
+    it("is not vacuous: 13 distinct rows, none of them was in the gate in production", () => {
+      expect(MUST_ENTER_H25).toHaveLength(13);
+      expect(new Set(MUST_ENTER_H25.map((r) => r.id)).size).toBe(13);
+      expect(MUST_ENTER_H25.filter((r) => GATE.has(r.stored))).toHaveLength(0);
+    });
+
+    it("covers the named rows of the idea: the İSEDAK headline, the İBB trial, Sinirlioğlu and Hakan Fidan", () => {
+      const byId = (id: string): GateRow => {
+        const row = MUST_ENTER_H25.find((r) => r.id === id);
+        if (!row) throw new Error(`missing fixture ${id}`);
+        return row;
+      };
+      expect(byId("5986bb6f").title).toBe("Cevdet Yılmaz: Diplomasi ve diyalogdan asla vazgeçilmemelidir");
+      // haberler-com files the same headline with the İSEDAK description.
+      expect(byId("f1b2b344").title).toBe(byId("5986bb6f").title);
+      expect(byId("f1b2b344").description).toContain("İSEDAK");
+      expect(byId("04786ee1").title).toBe("İBB davasında 102. gün: Müştekiler ve tanıklar dinlendi");
+      expect(byId("5f87ac35").title).toContain("Sinirlioğlu");
+      expect(byId("72aae245").title).toContain("Hakan Fidan");
+    });
+  });
+
+  describe("rows that must stay out of the gate", () => {
+    it.each(MUST_LEAVE_H25)("$id ($source) is neither politika nor son_dakika", (row) => {
+      const got = classifyRow(row);
+      expect(got).not.toBe("politika");
+      expect(got).not.toBe("son_dakika");
+    });
+
+    it("is not vacuous: 9 distinct rows, none of them was in the gate in production", () => {
+      expect(MUST_LEAVE_H25).toHaveLength(9);
+      expect(new Set(MUST_LEAVE_H25.map((r) => r.id)).size).toBe(9);
+      expect(MUST_LEAVE_H25.filter((r) => GATE.has(r.stored))).toHaveLength(0);
+    });
+
+    it("a sports club keeps its category", () => {
+      for (const id of ["e2ce6054", "82b541ad"]) {
+        const row = MUST_LEAVE_H25.find((r) => r.id === id);
+        expect(row, id).toBeDefined();
+        expect(classifyRow(row!), id).toBe("spor");
+      }
+    });
+
+    it("the description-only Cevdet Yılmaz rows stay out, and the same name moved into the headline admits them", () => {
+      // The three rows name him in the description and not in the title. They
+      // stay out because the stems are title-only.
+      for (const id of ["dde761ce", "d7c50be0", "58f520c4"]) {
+        const row = MUST_LEAVE_H25.find((r) => r.id === id);
+        expect(row, id).toBeDefined();
+        expect(row!.description, id).toContain("Cevdet Yılmaz");
+        expect(classifyRow(row!), id).not.toBe("politika");
+        expect(cls(`${row!.title} Cevdet Yılmaz`, row!.description, row!.url), id).toBe("politika");
+      }
+    });
+  });
+
+  describe("synthetic headlines that name the person or the trial", () => {
+    it.each([
+      ["Cevdet Yılmaz açıkladı"],
+      ["Cevdet Yılmaz'dan yeni açıklama"],
+      ["Cevdet Yılmaz: Enflasyonla mücadele sürecek"],
+      ["Hakan Fidan Moskova'ya gidiyor"],
+      ["Hakan Fidan'dan Ürdün ile kritik Filistin görüşmesi"],
+      ["Hakan Fidan, mevkidaşıyla telefonda görüştü"],
+      ["Sinirlioğlu BM Genel Sekreterliği için aday"],
+      ["Feridun Sinirlioğlu kimdir?"],
+      ["İBB davasında karar duruşması ertelendi"],
+      ["İBB davası: Tanık ifadeleri sürüyor"],
+      ["İBB Davası'nda 103. gün başladı"],
+      ["İBB davasının dördüncü celsesi ne zaman?"],
+    ])("%s is politika", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+
+    it("the name in the headline beats a sport word and a non-political URL section", () => {
+      expect(cls("Cevdet Yılmaz maçı tribünden izledi")).toBe("politika");
+      expect(cls("Hakan Fidan'dan gol sevinci", null, "https://example.test/spor/futbol/1")).toBe("politika");
+      expect(cls("Cevdet Yılmaz'dan enerji uyarısı", null, "https://example.test/dunya/1")).toBe("politika");
+      expect(cls("Hakan Fidan'dan ekonomi mesajı", null, "https://example.test/ekonomi/1")).toBe("politika");
+      expect(cls("İBB davasında 102. gün", null, "https://example.test/ekonomi/1")).toBe("politika");
+    });
+
+    it("the breaking-news prefix still turns a political remainder into son_dakika", () => {
+      expect(cls("Son dakika: Cevdet Yılmaz açıkladı")).toBe("son_dakika");
+      expect(cls("SON DAKİKA | Hakan Fidan telefonda görüştü")).toBe("son_dakika");
+      expect(cls("Flaş haber: İBB davasında karar çıktı")).toBe("son_dakika");
+      // dunya at the base classifier ('İsrail'e'): the prefix must not hide it
+      expect(cls("Son dakika: Cevdet Yılmaz İsrail'e tepki gösterdi")).toBe("son_dakika");
+      expect(cls("Son dakika | Sinirlioğlu adaylığını açıkladı")).toBe("son_dakika");
+    });
+
+    it.each([
+      ["Okul bahçesine 500 fidan dikildi"],
+      ["Fidan dikim şenliği düzenlendi"],
+      ["Hakan Çalhanoğlu attı, İnter kazandı"],
+      ["Yılmaz Özdil'in yeni kitabı çıktı"],
+      ["Yılmaz Vural Kasımpaşa'dan ayrıldı"],
+      ["Cevdet Sunay Caddesi'nde çalışma"],
+      ["İBB kültür sanat sezonunu açtı"],
+      ["İBB'nin 1 TL'lik öğrenci abonman kampanyasına büyük ilgi"],
+      ["İBB Beyoğlu Sineması'nda kasım seçkisi"],
+      ["Tazminat davası açıldı"],
+      ["Kira davası kazandı"],
+      ["Mehmet Şimşek'in doğum günü kutlandı"],
+    ])("%s is neither politika nor son_dakika", (title) => {
+      notInGate(title);
+    });
+
+    it("'Hakan Çalhanoğlu' stays a sports headline", () => {
+      expect(cls("Hakan Çalhanoğlu Inter'de gol attı")).toBe("spor");
+    });
+  });
+
+  describe("the stems are title-only", () => {
+    it.each([
+      ["Cevdet Yılmaz, Cumhurbaşkanı Yardımcısı olarak konuştu."],
+      ["Dışişleri'nden Hakan Fidan konuştu."],
+      ["Feridun Sinirlioğlu aday gösterildi."],
+      ["İBB davasının üçüncü duruşması başladı."],
+    ])("a mention in the description alone does not admit: %s", (description) => {
+      // 'Dışişleri' in the description is a title-only word too: the sentence
+      // that has none of the unambiguous names in it must stay out.
+      notInGate("Piyasalarda gün sonu", description);
+    });
+
+    it("the module keeps the four stems out of POLITIKA_STEMS and in POLITIKA_TITLE_RE", () => {
+      const src = readFileSync(
+        resolve(__dirname, "..", "..", "..", "supabase", "functions", "_shared", "rss", "category.ts"),
+        "utf8",
+      );
+      const sliceBetween = (open: string, close: string): string => {
+        const from = src.indexOf(open);
+        expect(from, open).toBeGreaterThanOrEqual(0);
+        const to = src.indexOf(close, from);
+        expect(to, close).toBeGreaterThan(from);
+        return src.slice(from, to);
+      };
+      const stems = sliceBetween("const POLITIKA_STEMS = [", "];");
+      const titleList = sliceBetween("const POLITIKA_TITLE_RE = compile(", "\n);");
+      for (const stem of ["cevdet yilmaz", "hakan fidan", "sinirlioglu", "ibb davas"]) {
+        expect(stems.includes(`"${stem}"`), `${stem} must not be in POLITIKA_STEMS`).toBe(false);
+        expect(titleList.includes(`"${stem}"`), `${stem} must be in POLITIKA_TITLE_RE`).toBe(true);
+      }
+    });
+  });
+
+  describe("not admitted from a bare title: the surnames the wave-AX meta test pins", () => {
+    it.each([
+      ["Fuat Oktay konuştu"],
+      ["Mehmet Şimşek konuştu"],
+      ["Mehmet Şimşek'ten yeni açıklama"],
+      ["Kocasinan Şimşekspor iç sahada kazandı"],
+      ["Sivas Valisi Yılmaz Şimşek mesaj yayımladı"],
+    ])("%s", (title) => {
+      notInGate(title);
+    });
+  });
+
+  describe("folding: case, apostrophes and suffixes", () => {
+    it.each([
+      ["CEVDET YILMAZ"],
+      ["cevdet yılmaz"],
+      ["Cevdet Yılmaz’dan açıklama"],
+      ["Cevdet Yılmaz'a tepki"],
+      ["Cevdet Yılmaz açıkladı"],
+      ["Hakan Fidan'ın ziyareti"],
+      ["HAKAN FİDAN: Gazze için çağrı"],
+      ["hakan fidan görüştü"],
+      ["Sinirlioğlu"],
+      ["SİNİRLİOĞLU'NUN adaylığı"],
+      ["İBB Davası'nda üçüncü gün"],
+      ["İBB DAVASI BAŞLADI"],
+      ["ibb davasında tanık"],
+      ["İbb Davasında kritik gün"],
+    ])("%s is politika", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+  });
+
+  describe("linear time on large inputs (200k characters)", () => {
+    const BUDGET_MS = 100;
+    const inputs: Array<[string, string]> = [
+      ["200k 'cevdet yılmaz' repeated", "cevdet yılmaz ".repeat(14_300).slice(0, 200_000)],
+      ["200k 'hakan fidan' repeated", "hakan fidan ".repeat(16_700).slice(0, 200_000)],
+      ["200k 'sinirlioğlu' repeated", "sinirlioğlu ".repeat(18_200).slice(0, 200_000)],
+      ["200k 'ibb davası' repeated", "ibb davası ".repeat(18_200).slice(0, 200_000)],
+      ["200k 'cevdet ' repeated (no surname)", "cevdet ".repeat(28_600).slice(0, 200_000)],
+      ["200k 'hakan ' repeated (no surname)", "hakan ".repeat(33_400).slice(0, 200_000)],
+      ["200k 'ibb ' repeated (no trial)", "ibb ".repeat(50_000)],
+      ["'cevdet' then 200k blanks then 'yılmaz'", "cevdet" + " ".repeat(199_980) + "yılmaz"],
+      ["'hakan' then 200k blanks then 'fidan'", "hakan" + " ".repeat(199_980) + "fidan"],
+      ["'ibb' then 200k blanks then 'davası'", "ibb" + " ".repeat(199_980) + "davası"],
+      ["'cevdet' then 200k blanks", "cevdet" + " ".repeat(199_990)],
+      ["200k 'cevdet yılmaz' with NBSP", "cevdet yılmaz ".repeat(14_300).slice(0, 200_000)],
+      ["200k letters, one word", "a".repeat(200_000)],
+    ];
+
+    it.each(inputs)("%s classifies in under 100 ms", (_name, text) => {
+      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
+      const started = performance.now();
+      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
+      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
+      const elapsed = performance.now() - started;
+      expect(ALL.has(viaTitle)).toBe(true);
+      expect(ALL.has(viaDescription)).toBe(true);
+      expect(elapsed).toBeLessThan(BUDGET_MS * 2);
+    });
+
+    it("a 200k-character title that names the person is politika", () => {
+      const title = "cevdet yılmaz ".repeat(14_300).slice(0, 200_000);
+      const started = performance.now();
+      expect(classifyCategory(title, null, NEUTRAL_URL)).toBe("politika");
+      expect(performance.now() - started).toBeLessThan(BUDGET_MS);
+    });
+  });
+
+  it.todo(
+    "fon soruşturması / Takasbank / fon stems: founder decision (h25-clusters-2), deliberately not added",
+  );
+});

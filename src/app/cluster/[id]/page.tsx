@@ -857,7 +857,10 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                   title={m.article.title}
                   className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground hover:text-foreground underline decoration-dotted underline-offset-2"
                 >
-                  <span className="font-mono text-[10px] uppercase tracking-wider">
+                  <span
+                    lang={sourceLang({ slug: m.source.slug, name: m.source.name })}
+                    className="font-mono text-[10px] uppercase tracking-wider"
+                  >
                     {m.source.name}
                   </span>
                   <span className="rounded-full border border-border/50 px-1.5 text-[10px]">

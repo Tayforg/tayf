@@ -13,6 +13,9 @@
 //      (DLQ-lite — the payload survives in pgmq.a_cluster_work for audit)
 //   4. cap total wall-clock work at MAX_INVOCATION_MS so we never hit the
 //      Edge Functions 400s limit
+//   5. (hunt-25 W3, migration 151) once cluster_work ran dry, read at most
+//      ATTACH_MAX_PER_DRAIN messages of the separate `cluster_attach` queue and
+//      run the deterministic, attach-only probe on them (see processAttach)
 //
 // In-memory caches (cluster context, source lookup) survive between dequeues
 // within the same Edge Function instance, so warm invocations skip the
@@ -20,6 +23,7 @@
 
 import {
   archive,
+  deleteMessage,
   type PgmqMessage,
   queueDepth,
   readBatch,
@@ -93,13 +97,25 @@ import {
 } from "../_shared/cluster/jev-verify.ts";
 import {
   admissionMode,
+  ATTACH_MODE_ENV,
+  attachMode,
   claimArgs,
   isPoliticsMember,
   JEV_ADMISSION_POLICY,
   parseAdmitTag,
   routeMessage,
   type AdmissionMode,
+  type AttachMode,
 } from "../_shared/cluster/politics-admission.ts";
+import {
+  ATTACH_MAX_PER_DRAIN,
+  attachDecision,
+  planAttachRead,
+  type AttachArticle,
+  type AttachCandidate,
+  type AttachDecision,
+  type AttachMember,
+} from "../_shared/cluster/attach.ts";
 import { admissionEffect } from "../_shared/cluster/admission-effect.ts";
 
 // ---------------------------------------------------------------------------
@@ -107,6 +123,10 @@ import { admissionEffect } from "../_shared/cluster/admission-effect.ts";
 // ---------------------------------------------------------------------------
 
 const QUEUE_NAME = "cluster_work";
+// The attach-only probe's queue (hunt-25 W3, migration 151). Separate from
+// cluster_work: ~174 messages an hour against cluster_work's ~78, so on one FIFO
+// queue they would delay politika work and trip 150's lag checks.
+const ATTACH_QUEUE_NAME = "cluster_attach";
 // Messages processed per invocation. Kept small because each article is
 // scored against the full cluster context, so large batches push a single
 // invocation past the Edge compute limit. The cluster-drain pg_cron fires
@@ -268,6 +288,9 @@ interface HeadlineMember {
   // is tight): sameSourceDupEvidence compares folded titles from it.
   title: string;
   tokens: HeadlineTokens;
+  // The member's stored strict fingerprint (null when it never had one): the
+  // attach probe's second kind of evidence.
+  fingerprint: string | null;
 }
 
 interface ClusterContext {
@@ -276,6 +299,15 @@ interface ClusterContext {
   seedByCluster: Map<string, ClusterMemberArticle>;
   latestByCluster: Map<string, ClusterMemberArticle>;
   sourceIdsByCluster: Map<string, Set<string>>;
+  // Hunt-25 W3 (attach probe). Share of each loaded cluster's members -- ALL of
+  // them, from cluster_articles -- that count as politics (isPoliticsMember), the
+  // same ratio src/lib/clusters/politics-query.ts gates on. Computed from rows
+  // loadClusterContext already fetched; no extra query.
+  politicsShareByCluster: Map<string, number>;
+  // Every source with a member in the cluster, politics or not. sourceIdsByCluster
+  // only knows the politics members, but a non-politics member's source must block
+  // an attach too.
+  allSourceIdsByCluster: Map<string, Set<string>>;
   // Recent member headlines per cluster, newest first, at most
   // HEADLINE_MEMBER_SCAN_MAX. Built from the member rows loadClusterContext
   // already fetched (no extra query) and extended by addMemberToIndices. An
@@ -585,6 +617,8 @@ async function loadClusterContext(): Promise<ClusterContext> {
     seedByCluster: new Map(),
     latestByCluster: new Map(),
     sourceIdsByCluster: new Map(),
+    politicsShareByCluster: new Map(),
+    allSourceIdsByCluster: new Map(),
     headlinesByCluster: new Map(),
     indices: { byFingerprint: new Map(), byEntity: new Map(), byBand: new Map(), byToken: new Map() },
     tfidf,
@@ -635,6 +669,24 @@ async function loadClusterContext(): Promise<ClusterContext> {
       sourceIdsByCluster.set(row.cluster_id, set);
     }
     set.add(art.source_id);
+  }
+
+  // Attach-probe inputs (hunt-25 W3), from the rows already in hand: the share of
+  // ALL members (caRows, via memberIdsByCluster) that are politics members
+  // (memberArticles), and every member's source.
+  const sourceOfArticle = new Map<string, string | null>(articleRows.map((a) => [a.id, a.source_id ?? null]));
+  const politicsShareByCluster = new Map<string, number>();
+  const allSourceIdsByCluster = new Map<string, Set<string>>();
+  for (const [clusterId, ids] of memberIdsByCluster.entries()) {
+    let politics = 0;
+    const sources = new Set<string>();
+    for (const id of ids) {
+      if (memberArticles.has(id)) politics += 1;
+      const sid = sourceOfArticle.get(id);
+      if (sid) sources.add(sid);
+    }
+    politicsShareByCluster.set(clusterId, ids.length === 0 ? 0 : politics / ids.length);
+    allSourceIdsByCluster.set(clusterId, sources);
   }
 
   const seedByCluster = new Map<string, ClusterMemberArticle>();
@@ -728,6 +780,7 @@ async function loadClusterContext(): Promise<ClusterContext> {
         sourceId: art.source_id,
         title: art.title,
         tokens: headlineTokens(art.title),
+        fingerprint: art.fingerprint ?? null,
       })),
     );
   }
@@ -738,6 +791,8 @@ async function loadClusterContext(): Promise<ClusterContext> {
     seedByCluster,
     latestByCluster,
     sourceIdsByCluster,
+    politicsShareByCluster,
+    allSourceIdsByCluster,
     headlinesByCluster,
     indices,
     tfidf,
@@ -819,6 +874,7 @@ function addMemberToIndices(
     sourceId: article.source_id,
     title: article.title,
     tokens: headlineTokens(article.title),
+    fingerprint: article.fingerprint ?? null,
   });
   if (article.fingerprint) {
     const list = idx.byFingerprint.get(article.fingerprint) || [];
@@ -862,6 +918,12 @@ function markClusterHasSource(clusterId: string, sourceId: string | null) {
     clusterContextCache.sourceIdsByCluster.set(clusterId, set);
   }
   set.add(sourceId);
+  let all = clusterContextCache.allSourceIdsByCluster.get(clusterId);
+  if (!all) {
+    all = new Set();
+    clusterContextCache.allSourceIdsByCluster.set(clusterId, all);
+  }
+  all.add(sourceId);
 }
 
 function registerNewClusterInCache(clusterId: string, seed: ClusterMemberArticle) {
@@ -875,6 +937,12 @@ function registerNewClusterInCache(clusterId: string, seed: ClusterMemberArticle
     clusterId,
     new Set(seed.source_id ? [seed.source_id] : []),
   );
+  clusterContextCache.allSourceIdsByCluster.set(
+    clusterId,
+    new Set(seed.source_id ? [seed.source_id] : []),
+  );
+  // A cluster the clusterer just opened holds one politics member.
+  clusterContextCache.politicsShareByCluster.set(clusterId, 1);
   clusterContextCache.clusters.push({
     id: clusterId,
     title_tr: seed.title,
@@ -1069,6 +1137,15 @@ async function loadProbeCluster(ctx: ClusterContext, row: ClusterRow): Promise<b
   ctx.sourceIdsByCluster.set(
     row.id,
     new Set(members.map((m) => m.art.source_id).filter((x): x is string => Boolean(x))),
+  );
+  // Attach-probe inputs for the probed cluster, from the rows just read.
+  ctx.allSourceIdsByCluster.set(
+    row.id,
+    new Set(articleRows.map((a) => a.source_id).filter((x): x is string => Boolean(x))),
+  );
+  ctx.politicsShareByCluster.set(
+    row.id,
+    articleRows.filter((a) => isPoliticsMember(a)).length / articleIds.length,
   );
   ctx.tfidf.addDoc(seed.id, memberTfidfText(seed));
   if (latest) ctx.tfidf.addDoc(latest.id, memberTfidfText(latest));
@@ -1478,7 +1555,8 @@ function fallbackEligibleScore(res: {
 async function addArticleToCluster(
   sourceLookup: Map<string, SourceRow>,
   clusterId: string,
-  article: EnrichedArticle,
+  // Only the id and the source are read; the attach probe links an article it never enriched.
+  article: Pick<EnrichedArticle, "id" | "source_id">,
 ): Promise<AddResult> {
   if (article.source_id) {
     const cached = clusterContextCache?.sourceIdsByCluster.get(clusterId);
@@ -1664,6 +1742,12 @@ async function processArticle(
         return { result: "disabled", articleSourceId: raw.source_id };
       case "rejected":
         return { result: "rejected", articleSourceId: raw.source_id };
+      // The attach routes belong to processAttach: processArticle is never given an
+      // "attach" tag (drainQueue maps a stray one to null), so these cannot occur
+      // here; if they ever do, the message is not politics work.
+      case "attach":
+      case "in-gate":
+        return { result: "not-politics", articleSourceId: raw.source_id };
     }
   } catch (err) {
     // Stamp the article URL onto the error so drainQueue's msg-error log
@@ -2284,6 +2368,370 @@ async function clusterArticle(
 }
 
 // ---------------------------------------------------------------------------
+// Attach-only probe (hunt-25 W3, h25-clusters-3, migration 151)
+// ---------------------------------------------------------------------------
+//
+// The politics gate is decided per article, so one story can split: identical
+// headlines filed under genel sat next to a 13-member politika cluster. Migration
+// 151's trigger sends such articles (genel, ekonomi, dunya, yasam, teknoloji of an
+// outlet or a wire) to the separate cluster_attach queue; this section decides, for
+// each, whether an EXISTING politics cluster of the in-memory context already holds
+// its story. Evidence is attachDecision()'s and nothing else: the identical folded
+// headline, an equal strict fingerprint, or the headline lane, against clusters
+// with >= 60% politics members and without the article's source.
+//
+//   CLUSTER_ATTACH_MODE   off     the queue is not read
+//                         shadow  (default) the decision is recorded in
+//                                 cluster_attach_shadow, nothing is clustered
+//                         live    the article is stamped politics_admitted_at (the
+//                                 reader's 60% politics share counts the stamp) and
+//                                 linked through cluster_link_atomic
+//
+// A successful message is DELETED, not archived: the queue carries ~4k messages a
+// day and 037's archive retention only covers the two older queues. A message past
+// MAX_READS is archived as in cluster_work. Reading happens only after cluster_work
+// ran dry and with the read-budget floor left (planAttachRead), so attach work can
+// never take the time politika work needs.
+
+// Best-effort like the skip log: the first failure of each kind in an isolate
+// warns, later ones stay quiet.
+let attachShadowWarned = false;
+
+function warnAttachShadowOnce(detail: string) {
+  if (attachShadowWarned) return;
+  attachShadowWarned = true;
+  console.warn(`[cluster-consumer] cluster_attach_shadow insert failed, continuing: ${detail}`);
+}
+
+let attachReadWarned = false;
+
+function warnAttachReadOnce(detail: string) {
+  if (attachReadWarned) return;
+  attachReadWarned = true;
+  console.warn(`[cluster-consumer] cluster_attach read failed, continuing: ${detail}`);
+}
+
+interface AttachSummary {
+  mode: AttachMode;
+  read: number;
+  would_attach: number;
+  attached: number;
+  // Messages that threw (transient retry or poison archive).
+  failed: number;
+  // Work done, but the acknowledging delete failed (the redelivery is idempotent).
+  delete_errors: number;
+  // Everything that was not an attach, by reason (no-match, same-source, in-gate, ...).
+  by_reason: Record<string, number>;
+  // Best-effort queue depth after the phase (null when unknown).
+  depth_after: number | null;
+  oldest_age_after_s: number | null;
+}
+
+function newAttachSummary(mode: AttachMode): AttachSummary {
+  return {
+    mode,
+    read: 0,
+    would_attach: 0,
+    attached: 0,
+    failed: 0,
+    delete_errors: 0,
+    by_reason: {},
+    depth_after: null,
+    oldest_age_after_s: null,
+  };
+}
+
+interface AttachOutcome {
+  result: "would_attach" | "attached" | "skipped" | "not-found" | "in-gate" | "disabled";
+  reason?: string;
+  clusterId?: string;
+}
+
+// The candidate list is rebuilt from the context once per batch (and after a live
+// attach changed the context), not once per message.
+interface AttachState {
+  candidates: AttachCandidate[] | null;
+}
+
+// The clusters of the in-memory context as attach candidates: the headlines the
+// context already scans, plus seed and latest, with the politics share and every
+// member source. A cluster without a known share is not a candidate.
+function buildAttachCandidates(ctx: ClusterContext): AttachCandidate[] {
+  const out: AttachCandidate[] = [];
+  const seen = new Set<string>();
+  for (const cluster of ctx.clusters) {
+    if (seen.has(cluster.id)) continue;
+    seen.add(cluster.id);
+    const share = ctx.politicsShareByCluster.get(cluster.id);
+    if (share === undefined) continue;
+    const members = new Map<string, AttachMember>();
+    for (const m of ctx.headlinesByCluster.get(cluster.id) ?? []) {
+      members.set(m.id, {
+        id: m.id,
+        sourceId: m.sourceId,
+        title: m.title,
+        tokens: m.tokens,
+        publishedMs: m.publishedMs,
+        fingerprint: m.fingerprint,
+      });
+    }
+    for (const m of [ctx.seedByCluster.get(cluster.id), ctx.latestByCluster.get(cluster.id)]) {
+      if (!m || members.has(m.id)) continue;
+      members.set(m.id, {
+        id: m.id,
+        sourceId: m.source_id,
+        title: m.title,
+        tokens: headlineTokens(m.title),
+        publishedMs: Date.parse(m.published_at),
+        fingerprint: m.fingerprint ?? null,
+      });
+    }
+    if (members.size === 0) continue;
+    out.push({
+      clusterId: cluster.id,
+      politicsShare: share,
+      sourceIds: ctx.allSourceIdsByCluster.get(cluster.id) ?? ctx.sourceIdsByCluster.get(cluster.id) ?? [],
+      articleCount: Number(cluster.article_count) || members.size,
+      members: [...members.values()],
+    });
+  }
+  return out;
+}
+
+async function recordAttach(
+  articleId: string,
+  decision: { clusterId: string; score: number; lane: string },
+  mode: "shadow" | "live",
+): Promise<void> {
+  try {
+    const res = await supabase.from("cluster_attach_shadow").upsert(
+      [
+        {
+          article_id: articleId,
+          cluster_id: decision.clusterId,
+          score: decision.score,
+          lane: decision.lane,
+          mode,
+        },
+      ],
+      { onConflict: "article_id", ignoreDuplicates: true },
+    );
+    if (res.error) warnAttachShadowOnce(res.error.message);
+  } catch (err) {
+    warnAttachShadowOnce(err instanceof Error ? err.message : String(err));
+  }
+}
+
+// Removes the stamp THIS attempt set (and only that value) after a failed link.
+async function clearAttachStamp(articleId: string, stampedAt: string): Promise<void> {
+  try {
+    const res = await supabase
+      .from("articles")
+      .update({ politics_admitted_at: null })
+      .eq("id", articleId)
+      .eq("politics_admitted_at", stampedAt);
+    if (res.error) {
+      console.warn(`[cluster-consumer] clearing the attach stamp of ${articleId} failed: ${res.error.message}`);
+    }
+  } catch (err) {
+    console.warn(
+      `[cluster-consumer] clearing the attach stamp of ${articleId} failed: ${err instanceof Error ? err.message : err}`,
+    );
+  }
+}
+
+interface AttachArticleRow {
+  id: string;
+  source_id: string | null;
+  title: string | null;
+  description: string | null;
+  url: string | null;
+  published_at: string;
+  category: string | null;
+  politics_admitted_at: string | null;
+}
+
+async function processAttach(
+  articleId: string,
+  mode: AttachMode,
+  state: AttachState,
+): Promise<AttachOutcome> {
+  const artRes = await supabase
+    .from("articles")
+    .select("id, source_id, title, description, url, published_at, category, politics_admitted_at")
+    .eq("id", articleId)
+    .maybeSingle();
+  if (artRes.error) throw new Error(`processAttach fetch: ${artRes.error.message}`);
+  if (!artRes.data) return { result: "not-found" };
+  const raw = artRes.data as AttachArticleRow;
+
+  try {
+    const route = routeMessage(raw, "attach", "off", mode);
+    if (route === "disabled") return { result: "disabled" };
+    if (route === "in-gate") return { result: "in-gate" };
+    if (route !== "attach") return { result: "skipped", reason: `route-${route}` };
+
+    // The strict fingerprint of title + cleaned description: a SHA-1 of the folded
+    // text, exactly what the clusterer stores for its members.
+    const fingerprint = strictFingerprint(raw.title || "", cleanDescription(raw.description) || "");
+    const article: AttachArticle = {
+      id: raw.id,
+      sourceId: raw.source_id,
+      title: raw.title || "",
+      tokens: headlineTokens(raw.title),
+      publishedMs: Date.parse(raw.published_at),
+      fingerprint,
+    };
+    // The context warmed at the top of the drain is used as it is: reloading it here
+    // is the expensive step the 546 CPU limit is about.
+    const ctx = clusterContextCache ?? (await getClusterContext());
+    if (state.candidates === null) state.candidates = buildAttachCandidates(ctx);
+    const decision: AttachDecision = attachDecision(article, state.candidates, { nowMs: Date.now() });
+    if ("reason" in decision) return { result: "skipped", reason: decision.reason };
+
+    if (mode === "shadow") {
+      await recordAttach(raw.id, decision, "shadow");
+      return { result: "would_attach", clusterId: decision.clusterId };
+    }
+
+    // live: the stamp first, so the cluster never holds a member the reader's
+    // politics share does not count; then the existing atomic link.
+    const stampedAt = new Date().toISOString();
+    const stampRes = await supabase
+      .from("articles")
+      .update({ politics_admitted_at: stampedAt })
+      .eq("id", raw.id)
+      .is("politics_admitted_at", null)
+      .select("id");
+    if (stampRes.error) throw new Error(`attach stamp: ${stampRes.error.message}`);
+    const stamped = Array.isArray(stampRes.data) ? stampRes.data.length : stampRes.data ? 1 : 0;
+    if (stamped === 0) return { result: "skipped", reason: "stamp-lost" };
+    try {
+      const linked = await addArticleToCluster(await getSourceLookup(), decision.clusterId, {
+        id: raw.id,
+        source_id: raw.source_id,
+      });
+      if (linked.skipped) {
+        await clearAttachStamp(raw.id, stampedAt);
+        return { result: "skipped", reason: "same-source" };
+      }
+    } catch (err) {
+      await clearAttachStamp(raw.id, stampedAt);
+      throw err;
+    }
+    addMemberToIndices(decision.clusterId, {
+      id: raw.id,
+      published_at: raw.published_at,
+      source_id: raw.source_id,
+      fingerprint,
+      title: raw.title || "",
+      entities: null,
+      signature: null,
+    });
+    state.candidates = null;
+    await recordAttach(raw.id, decision, "live");
+    return { result: "attached", clusterId: decision.clusterId };
+  } catch (err) {
+    // The URL for the msg-error log, as processArticle does (audit O14).
+    if (err instanceof Error) {
+      (err as Error & { article_url?: string }).article_url = raw.url ?? undefined;
+    }
+    throw err;
+  }
+}
+
+// One read of the attach queue (qty from planAttachRead), then one decision per
+// message. Never throws: a failure here must not touch the cluster_work summary.
+async function drainAttach(
+  qty: number,
+  mode: AttachMode,
+  startedAt: number,
+  summary: AttachSummary,
+  touchedClusterIds: Set<string>,
+): Promise<void> {
+  let messages: PgmqMessage<QueueMessage>[];
+  try {
+    messages = await readBatch<QueueMessage>(supabase, ATTACH_QUEUE_NAME, VT_SECONDS, qty);
+  } catch (err) {
+    warnAttachReadOnce(err instanceof Error ? err.message : String(err));
+    return;
+  }
+  summary.read = messages.length;
+  const state: AttachState = { candidates: null };
+  const tally = (key: string) => {
+    summary.by_reason[key] = (summary.by_reason[key] ?? 0) + 1;
+  };
+  const archiveQuietly = async (msgId: number) => {
+    try {
+      await archive(supabase, ATTACH_QUEUE_NAME, msgId);
+    } catch (archErr) {
+      console.warn(
+        `[cluster-consumer] archive of attach msg ${msgId} failed: ${archErr instanceof Error ? archErr.message : archErr}`,
+      );
+    }
+  };
+
+  for (const msg of messages) {
+    // Same deadline rule as cluster_work: leave the rest untouched, the visibility
+    // timeout returns them to the queue.
+    if (Date.now() - startedAt >= MAX_INVOCATION_MS) break;
+    const articleId = msg.message?.article_id;
+    if (!articleId || typeof articleId !== "string") {
+      await archiveQuietly(msg.msg_id);
+      tally("malformed");
+      continue;
+    }
+    if (parseAdmitTag(msg.message?.admit) !== "attach") {
+      await archiveQuietly(msg.msg_id);
+      tally("bad-tag");
+      continue;
+    }
+
+    let outcome: AttachOutcome;
+    try {
+      outcome = await processAttach(articleId, mode, state);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const url = (err as { article_url?: string } | null | undefined)?.article_url ?? null;
+      console.error(
+        "[cluster-consumer] attach msg-error",
+        JSON.stringify({ msg_id: msg.msg_id, read_ct: msg.read_ct, article_id: articleId, url, error: errMsg }),
+      );
+      summary.failed += 1;
+      // Poison contract (shared with cluster_work): archive once read_ct EXCEEDS
+      // MAX_READS; otherwise leave the message for the visibility timeout.
+      if (msg.read_ct > MAX_READS) await archiveQuietly(msg.msg_id);
+      continue;
+    }
+
+    switch (outcome.result) {
+      case "would_attach":
+        summary.would_attach += 1;
+        break;
+      case "attached":
+        summary.attached += 1;
+        if (outcome.clusterId) touchedClusterIds.add(outcome.clusterId);
+        break;
+      default:
+        tally(outcome.reason ?? outcome.result);
+    }
+
+    try {
+      await deleteMessage(supabase, ATTACH_QUEUE_NAME, msg.msg_id);
+    } catch (delErr) {
+      summary.delete_errors += 1;
+      console.warn(
+        `[cluster-consumer] delete of attach msg ${msg.msg_id} failed: ${delErr instanceof Error ? delErr.message : delErr}`,
+      );
+    }
+  }
+
+  const depth = await queueDepth(supabase, ATTACH_QUEUE_NAME);
+  summary.depth_after = depth.depth;
+  summary.oldest_age_after_s = depth.oldest_msg_age_sec;
+}
+
+// ---------------------------------------------------------------------------
 // Top-level invocation handler
 // ---------------------------------------------------------------------------
 
@@ -2336,6 +2784,8 @@ interface InvocationSummary {
   budgeted_out: boolean;
   jev_live: JevLiveState;
   admission: AdmissionSummary;
+  // hunt-25 W3: the attach-only probe's block ({mode, read, would_attach, attached, by_reason, ...}).
+  attach: AttachSummary;
 }
 
 // /api/revalidate rejects payloads over MAX_TAGS; reserve room for the two
@@ -2482,6 +2932,8 @@ async function drainQueue(): Promise<InvocationSummary> {
   // load) so the Deno-env polyfill test harness keeps working, same
   // discipline as jevLive above.
   const admissionModeValue = admissionMode(Deno.env.get(JEV_ADMISSION_POLICY.envFlag) ?? undefined);
+  // Hunt-25 W3: unset is SHADOW, only the exact strings "off" and "live" differ.
+  const attachModeValue = attachMode(Deno.env.get(ATTACH_MODE_ENV) ?? undefined);
 
   const startedAt = Date.now();
   const summary: InvocationSummary = {
@@ -2499,6 +2951,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     budgeted_out: false,
     jev_live: jevLive,
     admission: newAdmissionSummary(admissionModeValue),
+    attach: newAttachSummary(attachModeValue),
   };
 
   // Best-effort depth sample for the drain summary log (audit O13).
@@ -2540,6 +2993,10 @@ async function drainQueue(): Promise<InvocationSummary> {
     }
   }
 
+  // True only when a cluster_work read came back short (nothing more visible): the
+  // gate for the attach phase. A read error, the deadline or the budget leave it false.
+  let clusterWorkEmpty = false;
+
   while (true) {
     // Lease a new batch only while enough budget remains to actually
     // process it. pgmq bumps read_ct on every read, so a read that only
@@ -2564,7 +3021,10 @@ async function drainQueue(): Promise<InvocationSummary> {
       summary.failedTransient += 1;
       break;
     }
-    if (messages.length === 0) break;
+    if (messages.length === 0) {
+      clusterWorkEmpty = true;
+      break;
+    }
 
     for (const msg of messages) {
       if (Date.now() - startedAt >= MAX_INVOCATION_MS) {
@@ -2589,7 +3049,10 @@ async function drainQueue(): Promise<InvocationSummary> {
         continue;
       }
 
-      const admitTag = parseAdmitTag(msg.message?.admit);
+      // "attach" belongs to the cluster_attach queue; a stray one on cluster_work is
+      // not a Jev claim.
+      const parsedTag = parseAdmitTag(msg.message?.admit);
+      const admitTag = parsedTag === "attach" ? null : parsedTag;
 
       try {
         const outcome = await processArticle(articleId, admitTag, admissionModeValue);
@@ -2698,10 +3161,36 @@ async function drainQueue(): Promise<InvocationSummary> {
     if (summary.budgeted_out) break;
     // If the batch came back smaller than BATCH_SIZE, the queue is drained
     // for now — exit the loop instead of paging on more empty reads.
-    if (messages.length < BATCH_SIZE) break;
+    if (messages.length < BATCH_SIZE) {
+      clusterWorkEmpty = true;
+      break;
+    }
   }
 
-  if (summary.matched + summary.created > 0) {
+  // Hunt-25 W3: the attach-only probe, strictly after cluster_work. planAttachRead
+  // is 0 unless cluster_work ran dry AND the read-budget floor is left, and never
+  // more than ATTACH_MAX_PER_DRAIN: the attach queue cannot starve politika work.
+  // Best-effort end to end -- nothing in here may fail the drain.
+  if (attachModeValue !== "off") {
+    const attachQty = planAttachRead({
+      clusterWorkEmpty,
+      elapsedMs: Date.now() - startedAt,
+      budgetMs: MAX_INVOCATION_MS,
+      cap: ATTACH_MAX_PER_DRAIN,
+      floorMs: READ_BUDGET_FLOOR_MS,
+    });
+    if (attachQty > 0) {
+      try {
+        await drainAttach(attachQty, attachModeValue, startedAt, summary.attach, touchedClusterIds);
+      } catch (err) {
+        console.warn(
+          `[cluster-consumer] attach phase failed, continuing: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  if (summary.matched + summary.created + summary.attach.attached > 0) {
     await triggerRevalidation([...touchedClusterIds]);
   }
 

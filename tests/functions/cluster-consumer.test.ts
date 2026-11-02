@@ -81,16 +81,52 @@ interface PgmqMessage {
   message: { article_id: string };
 }
 
+interface AttachPgmqMessage {
+  msg_id: number;
+  read_ct: number;
+  message: { article_id?: unknown; admit?: unknown };
+}
+
 const pgmqState: {
   pending: PgmqMessage[];
   archived: number[];
   deleted: number[];
-} = { pending: [], archived: [], deleted: [] };
+  // hunt-25 W3: the cluster_attach queue (migration 151). The mock is queue-aware:
+  // reads of 'cluster_attach' draw from attachPending, everything else from
+  // pending, exactly as before. `reads` records every readBatch (queue + qty),
+  // `attachArchived` / `attachDeleted` the acknowledgements of that queue only.
+  attachPending: AttachPgmqMessage[];
+  attachArchived: number[];
+  attachDeleted: number[];
+  reads: Array<{ queue: string; qty: number }>;
+  attachReadError: string | null;
+  attachDeleteError: string | null;
+  // Called after each cluster_work read, so a test can move the clock mid-drain.
+  afterWorkRead: (() => void) | null;
+} = {
+  pending: [],
+  archived: [],
+  deleted: [],
+  attachPending: [],
+  attachArchived: [],
+  attachDeleted: [],
+  reads: [],
+  attachReadError: null,
+  attachDeleteError: null,
+  afterWorkRead: null,
+};
 
 function resetPgmqState() {
   pgmqState.pending = [];
   pgmqState.archived = [];
   pgmqState.deleted = [];
+  pgmqState.attachPending = [];
+  pgmqState.attachArchived = [];
+  pgmqState.attachDeleted = [];
+  pgmqState.reads = [];
+  pgmqState.attachReadError = null;
+  pgmqState.attachDeleteError = null;
+  pgmqState.afterWorkRead = null;
 }
 
 // Mock the shared pgmq wrapper. The exported names here MUST match the
@@ -105,21 +141,35 @@ function resetPgmqState() {
 // instead of being absorbed by JS's lenient positional binding.
 vi.mock("../../supabase/functions/_shared/pgmq.ts", () => ({
   readBatch: vi.fn(
-    async (_client: unknown, _queue: string, _vt: number, qty: number) => {
+    async (_client: unknown, queue: string, _vt: number, qty: number) => {
+      pgmqState.reads.push({ queue, qty });
+      if (queue === "cluster_attach") {
+        if (pgmqState.attachReadError) throw new Error(pgmqState.attachReadError);
+        const attachBatch = pgmqState.attachPending.slice(0, qty);
+        pgmqState.attachPending = pgmqState.attachPending.slice(qty);
+        return attachBatch;
+      }
       const batch = pgmqState.pending.slice(0, qty);
       pgmqState.pending = pgmqState.pending.slice(qty);
+      pgmqState.afterWorkRead?.();
       return batch;
     },
   ),
   archive: vi.fn(
-    async (_client: unknown, _queue: string, msgId: number) => {
-      pgmqState.archived.push(msgId);
+    async (_client: unknown, queue: string, msgId: number) => {
+      if (queue === "cluster_attach") pgmqState.attachArchived.push(msgId);
+      else pgmqState.archived.push(msgId);
       return true;
     },
   ),
   deleteMessage: vi.fn(
-    async (_client: unknown, _queue: string, msgId: number) => {
-      pgmqState.deleted.push(msgId);
+    async (_client: unknown, queue: string, msgId: number) => {
+      if (queue === "cluster_attach") {
+        if (pgmqState.attachDeleteError) throw new Error(pgmqState.attachDeleteError);
+        pgmqState.attachDeleted.push(msgId);
+      } else {
+        pgmqState.deleted.push(msgId);
+      }
       return true;
     },
   ),
@@ -164,6 +214,7 @@ const {
   clusterArticleEqReads,
   skipLogFake,
   twinBridgeFake,
+  attachShadowFake,
   supabaseFakeClient,
   supabaseFakeCalls,
 } = await vi.hoisted(
@@ -232,6 +283,12 @@ const {
     // makes the write fail with an error envelope or a throw, `upsertOptions`
     // keeps the second argument of each upsert.
     const twinBridgeFakeState: {
+      mode: "ok" | "error" | "throw";
+      upsertOptions: unknown[];
+    } = { mode: "ok", upsertOptions: [] };
+    // hunt-25 W3: the cluster_attach_shadow record table (migration 151), same
+    // recording as the skip log and the twin bridges.
+    const attachShadowFakeState: {
       mode: "ok" | "error" | "throw";
       upsertOptions: unknown[];
     } = { mode: "ok", upsertOptions: [] };
@@ -319,6 +376,13 @@ const {
           }
           return { data: [], error: null };
         },
+        cluster_attach_shadow: () => {
+          if (attachShadowFakeState.mode === "throw") throw new Error("attach shadow unreachable");
+          if (attachShadowFakeState.mode === "error") {
+            return { data: null, error: { message: "attach shadow down" } };
+          }
+          return { data: [], error: null };
+        },
         cluster_twin_bridges: () => {
           if (twinBridgeFakeState.mode === "throw") throw new Error("twin bridges unreachable");
           if (twinBridgeFakeState.mode === "error") {
@@ -379,6 +443,7 @@ const {
       clusterArticleEqReads: clusterArticleEqReadsState,
       skipLogFake: skipLogFakeState,
       twinBridgeFake: twinBridgeFakeState,
+      attachShadowFake: attachShadowFakeState,
       supabaseFakeClient: {
         ...fake.client,
         from: (table: string) => {
@@ -390,7 +455,9 @@ const {
               ? skipLogFakeState.upsertOptions
               : table === "cluster_twin_bridges"
                 ? twinBridgeFakeState.upsertOptions
-                : null;
+                : table === "cluster_attach_shadow"
+                  ? attachShadowFakeState.upsertOptions
+                  : null;
           if (optionsLog === null) return builder;
           return new Proxy(builder, {
             get(target, prop, receiver) {
@@ -473,6 +540,8 @@ beforeEach(() => {
   skipLogFake.upsertOptions.length = 0;
   twinBridgeFake.mode = "ok";
   twinBridgeFake.upsertOptions.length = 0;
+  attachShadowFake.mode = "ok";
+  attachShadowFake.upsertOptions.length = 0;
   admissionRows.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
@@ -481,6 +550,8 @@ beforeEach(() => {
   delete process.env.CRON_SECRET;
   // Migration 089 ("ADMIT"): off unless a test opts in.
   delete process.env.JEV_POLITICS_ADMISSION;
+  // Hunt-25 W3: unset means shadow; a test opts into off / live.
+  delete process.env.CLUSTER_ATTACH_MODE;
   // Opt-in flags other describes set; never inherited from a previous test.
   delete process.env.JEV_LIVE_PAIRS;
   delete process.env.AI_GATEWAY_API_KEY;
@@ -4515,6 +4586,610 @@ describe("cluster-consumer Edge Function", () => {
         });
       }
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-25 W3 (h25-clusters-3, migration 151): the deterministic, attach-only probe.
+//
+// After cluster_work ran dry the consumer reads at most ATTACH_MAX_PER_DRAIN messages
+// of the cluster_attach queue. For each article it asks attachDecision() (headline
+// evidence only) against the clusters already in the in-memory context; SHADOW (the
+// default) records the decision in cluster_attach_shadow, LIVE stamps
+// articles.politics_admitted_at and links through cluster_link_atomic. It never
+// creates a cluster, never scores with the ensemble, never calls Jev.
+// ---------------------------------------------------------------------------
+describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", () => {
+  const TITLE = "32 ilde FETÖ operasyonu: 41 şüpheli tutuklandı";
+  const ATTACH_ID = "art-attach-hurriyet";
+  const CLUSTER = "cluster-feto-attach";
+  const SRC_HURRIYET = "src-hurriyet";
+  const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+
+  interface SeedMember {
+    id: string;
+    source: string;
+    title: string;
+    category?: string;
+    admitted?: boolean;
+    minutes?: number;
+  }
+
+  function seedCluster(id: string, members: SeedMember[]) {
+    clusterRows.push({
+      id,
+      title_tr: members[0]?.title ?? "",
+      title_tr_neutral: members[0]?.title ?? "",
+      first_published: minutesAgo(40),
+      updated_at: minutesAgo(5),
+      article_count: members.length,
+    });
+    for (const m of members) {
+      clusterArticleRows.push({ cluster_id: id, article_id: m.id });
+      fakeArticles[m.id] = {
+        id: m.id,
+        source_id: m.source,
+        title: m.title,
+        description: `Ayrıntı ${m.id}`,
+        published_at: minutesAgo(m.minutes ?? 12),
+        fingerprint: `fp-${m.id}`,
+        entities: [],
+        category: m.category ?? "politika",
+        politics_admitted_at: m.admitted ? minutesAgo(10) : null,
+        minhash_sig: null,
+        minhash_version: null,
+      };
+    }
+  }
+
+  const politicsMembers = (prefix: string): SeedMember[] => [
+    { id: `${prefix}-aksam`, source: "src-aksam", title: TITLE },
+    { id: `${prefix}-star`, source: "src-star", title: "32 ilde FETÖ operasyonu! 72 şüpheli yakalandı", minutes: 14 },
+    { id: `${prefix}-haber7`, source: "src-haber7", title: "32 ilde FETÖ operasyonu: 72 şüpheli yakalandı, 41’i tutuklandı", minutes: 16 },
+  ];
+
+  function seedIncoming(over: Record<string, unknown> = {}) {
+    fakeArticles[ATTACH_ID] = {
+      id: ATTACH_ID,
+      source_id: SRC_HURRIYET,
+      title: TITLE,
+      description: "İçişleri Bakanlığı duyurdu",
+      url: "https://example.com/attach-hurriyet",
+      content_hash: "h-attach",
+      category: "genel",
+      politics_admitted_at: null,
+      published_at: minutesAgo(3),
+      ...over,
+    };
+  }
+
+  function queueAttach(msgId = 7001, over: Partial<AttachPgmqMessage> = {}) {
+    pgmqState.attachPending.push({
+      msg_id: msgId,
+      read_ct: 1,
+      message: { article_id: ATTACH_ID, admit: "attach" },
+      ...over,
+    });
+  }
+
+  interface AttachBody {
+    drained: number;
+    matched: number;
+    created: number;
+    failedTransient: number;
+    failedPermanent: number;
+    budgeted_out: boolean;
+    attach: {
+      mode: string;
+      read: number;
+      would_attach: number;
+      attached: number;
+      failed: number;
+      delete_errors: number;
+      by_reason: Record<string, number>;
+    };
+  }
+
+  async function drain(): Promise<AttachBody> {
+    const handler = await importHandler();
+    if (!handler) throw new Error("unreachable");
+    const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as AttachBody;
+  }
+
+  const shadowWrites = () => supabaseFakeCalls.upsert("cluster_attach_shadow");
+  const attachReads = () => pgmqState.reads.filter((r) => r.queue === "cluster_attach");
+
+  // The probe's invariants, asserted by every test that drains attach messages.
+  function expectNoClusterMachinery() {
+    expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+    expect(supabaseFakeCalls.insert("cluster_articles")).toHaveLength(0);
+    expect(vi.mocked(scoreMock)).not.toHaveBeenCalled();
+    for (const call of supabaseFakeCalls.rpc) {
+      expect(["cluster_link_atomic"]).toContain(call.name); // no probe, no claim, no admission record, no Jev
+    }
+  }
+
+  it("SHADOW (the default, CLUSTER_ATTACH_MODE unset): records the decision, deletes the message, writes nothing else", async () => {
+    seedCluster(CLUSTER, politicsMembers("s"));
+    seedIncoming();
+    queueAttach();
+
+    const body = await drain();
+
+    expect(attachReads()).toEqual([{ queue: "cluster_attach", qty: 25 }]);
+    expect(body.attach).toMatchObject({ mode: "shadow", read: 1, would_attach: 1, attached: 0, by_reason: {} });
+    // A successful attach message is DELETED, not archived (037's retention covers only the two old queues).
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+    expect(pgmqState.attachArchived).toEqual([]);
+    expect(shadowWrites()).toHaveLength(1);
+    expect(shadowWrites()[0]!.patch).toEqual([
+      { article_id: ATTACH_ID, cluster_id: CLUSTER, score: 1, lane: "exact-title", mode: "shadow" },
+    ]);
+    expect(attachShadowFake.upsertOptions).toEqual([{ onConflict: "article_id", ignoreDuplicates: true }]);
+    // Shadow never touches the article or the cluster.
+    expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
+    expect(supabaseFakeCalls.rpc).toHaveLength(0);
+    expectNoClusterMachinery();
+    expect(body.matched + body.created).toBe(0);
+  });
+
+  it("explicit shadow behaves like the default", async () => {
+    process.env.CLUSTER_ATTACH_MODE = "shadow";
+    seedCluster(CLUSTER, politicsMembers("s2"));
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.mode).toBe("shadow");
+    expect(body.attach.would_attach).toBe(1);
+  });
+
+  for (const junk of ["LIVE", " live", "on", "1", "yes", ""]) {
+    it(`CLUSTER_ATTACH_MODE=${JSON.stringify(junk)} is shadow: garbage never means live`, async () => {
+      process.env.CLUSTER_ATTACH_MODE = junk;
+      seedCluster(CLUSTER, politicsMembers("g"));
+      seedIncoming();
+      queueAttach();
+      const body = await drain();
+      expect(body.attach.mode).toBe("shadow");
+      expect(body.attach.attached).toBe(0);
+      expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
+      expect(supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic")).toHaveLength(0);
+    });
+  }
+
+  it("OFF: the cluster_attach queue is not read at all", async () => {
+    process.env.CLUSTER_ATTACH_MODE = "off";
+    seedCluster(CLUSTER, politicsMembers("o"));
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(attachReads()).toHaveLength(0);
+    expect(pgmqState.attachPending).toHaveLength(1);
+    expect(body.attach).toMatchObject({ mode: "off", read: 0, would_attach: 0, attached: 0 });
+    expect(shadowWrites()).toHaveLength(0);
+  });
+
+  it("LIVE: stamps politics_admitted_at (only where it is null), links through cluster_link_atomic, records a live row", async () => {
+    process.env.CLUSTER_ATTACH_MODE = "live";
+    seedCluster(CLUSTER, politicsMembers("l"));
+    seedIncoming();
+    queueAttach();
+
+    const body = await drain();
+
+    expect(body.attach).toMatchObject({ mode: "live", read: 1, would_attach: 0, attached: 1, by_reason: {} });
+    const stamps = supabaseFakeCalls.update("articles");
+    expect(stamps).toHaveLength(1);
+    expect(stamps[0]!.patch).toEqual({ politics_admitted_at: expect.any(String) });
+    expect(Number.isNaN(Date.parse((stamps[0]!.patch as { politics_admitted_at: string }).politics_admitted_at))).toBe(false);
+    expect(stamps[0]!.state.eq).toEqual([{ col: "id", val: ATTACH_ID }]);
+    expect(stamps[0]!.state.is).toEqual([{ col: "politics_admitted_at", val: null }]);
+    const links = supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_link_atomic");
+    expect(links).toHaveLength(1);
+    expect(links[0]!.args).toMatchObject({ p_cluster_id: CLUSTER, p_article_id: ATTACH_ID });
+    expect(shadowWrites()[0]!.patch).toEqual([
+      { article_id: ATTACH_ID, cluster_id: CLUSTER, score: 1, lane: "exact-title", mode: "live" },
+    ]);
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+    expectNoClusterMachinery();
+    // The attach is not a politika "match": the classic counters stay at zero.
+    expect(body.matched + body.created).toBe(0);
+  });
+
+  it("LIVE: the touched cluster is revalidated once", async () => {
+    process.env.CLUSTER_ATTACH_MODE = "live";
+    process.env.REVALIDATE_URL = "https://example.test/api/revalidate";
+    process.env.CRON_SECRET = "test-cron-secret";
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    seedCluster(CLUSTER, politicsMembers("r"));
+    seedIncoming();
+    queueAttach();
+
+    await drain();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect((JSON.parse(init.body as string) as { tags: string[] }).tags).toContain(`cluster-detail:${CLUSTER}`);
+  });
+
+  it("SHADOW: nothing is revalidated", async () => {
+    process.env.REVALIDATE_URL = "https://example.test/api/revalidate";
+    process.env.CRON_SECRET = "test-cron-secret";
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    seedCluster(CLUSTER, politicsMembers("r2"));
+    seedIncoming();
+    queueAttach();
+    await drain();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("LIVE link error: the stamp this attempt set is cleared, the message stays for a retry, no shadow row", async () => {
+    process.env.CLUSTER_ATTACH_MODE = "live";
+    rpcFixtures.cluster_link_atomic = { data: null, error: { message: "link boom" } };
+    const errLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    seedCluster(CLUSTER, politicsMembers("e"));
+    seedIncoming();
+    queueAttach(7002, { read_ct: 1 });
+
+    const body = await drain();
+
+    expect(body.attach).toMatchObject({ read: 1, attached: 0, failed: 1 });
+    const updates = supabaseFakeCalls.update("articles");
+    expect(updates.map((u) => u.patch)).toEqual([
+      { politics_admitted_at: expect.any(String) },
+      { politics_admitted_at: null },
+    ]);
+    // The clear only removes the stamp it set.
+    const stamp = (updates[0]!.patch as { politics_admitted_at: string }).politics_admitted_at;
+    expect(updates[1]!.state.eq).toEqual([
+      { col: "id", val: ATTACH_ID },
+      { col: "politics_admitted_at", val: stamp },
+    ]);
+    expect(pgmqState.attachDeleted).toEqual([]);
+    expect(pgmqState.attachArchived).toEqual([]);
+    expect(shadowWrites()).toHaveLength(0);
+    expect(errLog).toHaveBeenCalledWith("[cluster-consumer] attach msg-error", expect.stringContaining("link boom"));
+    errLog.mockRestore();
+  });
+
+  it("LIVE link error on a message past MAX_READS: archived (poison), never deleted", async () => {
+    process.env.CLUSTER_ATTACH_MODE = "live";
+    rpcFixtures.cluster_link_atomic = { data: null, error: { message: "link boom" } };
+    const errLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    seedCluster(CLUSTER, politicsMembers("p"));
+    seedIncoming();
+    queueAttach(7003, { read_ct: 4 });
+    const body = await drain();
+    expect(pgmqState.attachArchived).toEqual([7003]);
+    expect(pgmqState.attachDeleted).toEqual([]);
+    expect(body.attach.failed).toBe(1);
+    errLog.mockRestore();
+  });
+
+  it("a politika article already inside the gate is skipped 'in-gate' and the message is deleted", async () => {
+    seedCluster(CLUSTER, politicsMembers("ig"));
+    seedIncoming({ category: "politika" });
+    queueAttach();
+    const body = await drain();
+    expect(body.attach).toMatchObject({ would_attach: 0, attached: 0, by_reason: { "in-gate": 1 } });
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+    expect(shadowWrites()).toHaveLength(0);
+  });
+
+  it("an article that already carries politics_admitted_at is 'in-gate' too (a redelivery after a live attach)", async () => {
+    process.env.CLUSTER_ATTACH_MODE = "live";
+    seedCluster(CLUSTER, politicsMembers("ig2"));
+    seedIncoming({ politics_admitted_at: minutesAgo(1) });
+    queueAttach();
+    const body = await drain();
+    expect(body.attach).toMatchObject({ attached: 0, by_reason: { "in-gate": 1 } });
+    expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
+    expect(supabaseFakeCalls.rpc).toHaveLength(0);
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+  });
+
+  it("an article older than HEADLINE_LANE_MAX_HOURS is 'stale': nothing is written, the message is deleted", async () => {
+    seedCluster(CLUSTER, politicsMembers("st"));
+    seedIncoming({ published_at: minutesAgo((HEADLINE_LANE_MAX_HOURS + 1) * 60) });
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.by_reason).toEqual({ stale: 1 });
+    expect(shadowWrites()).toHaveLength(0);
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+  });
+
+  it("an unrelated headline is 'no-match'", async () => {
+    seedCluster(CLUSTER, politicsMembers("nm"));
+    seedIncoming({ title: "Merkez Bankası faiz kararını açıkladı", description: "Faiz sabit" });
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.by_reason).toEqual({ "no-match": 1 });
+    expect(shadowWrites()).toHaveLength(0);
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+  });
+
+  it("a vanished article is 'not-found' and its message is deleted", async () => {
+    seedCluster(CLUSTER, politicsMembers("nf"));
+    queueAttach(); // no article row
+    const body = await drain();
+    expect(body.attach.by_reason).toEqual({ "not-found": 1 });
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+  });
+
+  it("a target cluster below 60% politics members is refused 'below-share' (the share is computed from ALL members, no extra query)", async () => {
+    seedCluster(CLUSTER, [
+      { id: "bs-aksam", source: "src-aksam", title: TITLE },
+      { id: "bs-star", source: "src-star", title: "32 ilde FETÖ operasyonu! 72 şüpheli yakalandı", minutes: 14 },
+      { id: "bs-g1", source: "src-g1", title: "Başka bir genel haber", category: "genel" },
+      { id: "bs-g2", source: "src-g2", title: "Bir diğer genel haber", category: "genel" },
+    ]);
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.by_reason).toEqual({ "below-share": 1 });
+    expect(shadowWrites()).toHaveLength(0);
+  });
+
+  it("admitted (stamped) members count as politics: 3 of 4 members is 75% and the article attaches", async () => {
+    seedCluster(CLUSTER, [
+      { id: "ad-aksam", source: "src-aksam", title: TITLE },
+      { id: "ad-g1", source: "src-g1", title: "Başka bir genel haber", category: "genel", admitted: true },
+      { id: "ad-g2", source: "src-g2", title: "Bir diğer genel haber", category: "genel", admitted: true },
+      { id: "ad-g3", source: "src-g3", title: "Üçüncü genel haber", category: "genel" },
+    ]);
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach).toMatchObject({ would_attach: 1, by_reason: {} });
+  });
+
+  it("a source already in the cluster is refused 'same-source', even through a non-politics member", async () => {
+    seedCluster(CLUSTER, [
+      ...politicsMembers("ss"),
+      { id: "ss-hurriyet-old", source: SRC_HURRIYET, title: "Hürriyet'ten eski bir genel haber", category: "genel" },
+    ]);
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.by_reason).toEqual({ "same-source": 1 });
+    expect(shadowWrites()).toHaveLength(0);
+  });
+
+  it("two clusters holding the same headline are 'ambiguous'", async () => {
+    seedCluster(CLUSTER, politicsMembers("a1"));
+    seedCluster("cluster-feto-twin", [{ id: "a2-milliyet", source: "src-milliyet", title: TITLE, minutes: 20 }]);
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.by_reason).toEqual({ ambiguous: 1 });
+  });
+
+  it("the headline lane attaches a near-identical headline (not only the exact title)", async () => {
+    seedCluster(CLUSTER, politicsMembers("hl"));
+    seedIncoming({ title: "32 ilde FETÖ operasyonu: 72 şüpheli yakalandı, 41 kişi tutuklandı" });
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.would_attach).toBe(1);
+    expect(shadowWrites()[0]!.patch).toEqual([
+      expect.objectContaining({ article_id: ATTACH_ID, cluster_id: CLUSTER, lane: "headline", mode: "shadow" }),
+    ]);
+  });
+
+  it("a malformed payload (no article id) and an untagged one are archived, not deleted", async () => {
+    seedCluster(CLUSTER, politicsMembers("m"));
+    pgmqState.attachPending.push(
+      { msg_id: 7101, read_ct: 1, message: { admit: "attach" } },
+      { msg_id: 7102, read_ct: 1, message: { article_id: ATTACH_ID } },
+      { msg_id: 7103, read_ct: 1, message: { article_id: ATTACH_ID, admit: "live" } },
+    );
+    seedIncoming();
+    const body = await drain();
+    expect(pgmqState.attachArchived).toEqual([7101, 7102, 7103]);
+    expect(pgmqState.attachDeleted).toEqual([]);
+    expect(body.attach.by_reason).toEqual({ malformed: 1, "bad-tag": 2 });
+    expect(shadowWrites()).toHaveLength(0);
+  });
+
+  it("a pgmq read error on the attach queue never fails the drain: politika work is done, one warning", async () => {
+    pgmqState.attachReadError = "relation pgmq.q_cluster_attach does not exist";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fakeArticles["art-work"] = {
+      id: "art-work",
+      source_id: "src-outlet",
+      title: "Politika haberi",
+      description: "Detay",
+      url: "https://example.com/work",
+      category: "politika",
+      published_at: minutesAgo(1),
+    };
+    pgmqState.pending = [{ msg_id: 1, read_ct: 1, message: { article_id: "art-work" } }];
+
+    const body = await drain();
+    await drain(); // a second drain: the warning is once per isolate
+
+    expect(body.created + body.matched).toBe(1);
+    expect(body.attach.read).toBe(0);
+    const warnings = warn.mock.calls.filter((c) => String(c[0]).includes("cluster_attach read failed"));
+    expect(warnings).toHaveLength(1);
+    expect(String(warnings[0]![0])).toContain("does not exist");
+    warn.mockRestore();
+  });
+
+  it("a failing shadow write warns once, never fails the message, and the decision still counts", async () => {
+    attachShadowFake.mode = "error";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    seedCluster(CLUSTER, politicsMembers("w"));
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.would_attach).toBe(1);
+    expect(body.attach.failed).toBe(0);
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+    expect(warn.mock.calls.filter((c) => String(c[0]).includes("cluster_attach_shadow insert failed"))).toHaveLength(1);
+    expect(String(warn.mock.calls.find((c) => String(c[0]).includes("cluster_attach_shadow insert failed"))![0])).toContain("attach shadow down");
+    warn.mockRestore();
+  });
+
+  it("a throwing shadow write is swallowed the same way", async () => {
+    attachShadowFake.mode = "throw";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    seedCluster(CLUSTER, politicsMembers("wt"));
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach.would_attach).toBe(1);
+    expect(pgmqState.attachDeleted).toEqual([7001]);
+    warn.mockRestore();
+  });
+
+  it("a failing delete is a warning: the work is done and the redelivery is idempotent", async () => {
+    pgmqState.attachDeleteError = "delete failed";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    seedCluster(CLUSTER, politicsMembers("d"));
+    seedIncoming();
+    queueAttach();
+    const body = await drain();
+    expect(body.attach).toMatchObject({ would_attach: 1, failed: 0, delete_errors: 1 });
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("delete of attach msg 7001 failed"))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("reads at most ATTACH_MAX_PER_DRAIN (25) per drain, in ONE read", async () => {
+    seedCluster(CLUSTER, politicsMembers("c"));
+    for (let i = 0; i < 40; i++) {
+      const id = `art-cap-${i}`;
+      fakeArticles[id] = {
+        id,
+        source_id: `src-cap-${i}`,
+        title: `Bambaşka bir konu ${i} hakkında uzun bir başlık`,
+        description: "Detay",
+        url: `https://example.com/${id}`,
+        category: "genel",
+        published_at: minutesAgo(2),
+      };
+      pgmqState.attachPending.push({ msg_id: 8000 + i, read_ct: 1, message: { article_id: id, admit: "attach" } });
+    }
+    const body = await drain();
+    expect(attachReads()).toEqual([{ queue: "cluster_attach", qty: 25 }]);
+    expect(body.attach.read).toBe(25);
+    expect(pgmqState.attachDeleted).toHaveLength(25);
+    expect(pgmqState.attachPending).toHaveLength(15);
+  });
+
+  describe("starvation: the attach queue never takes the time politika work needs", () => {
+    let nowSpy: ReturnType<typeof vi.spyOn> | null = null;
+    let offsetMs = 0;
+    afterEach(() => {
+      nowSpy?.mockRestore();
+      nowSpy = null;
+      offsetMs = 0;
+    });
+    function moveClockAfterWorkRead(ms: number) {
+      const realNow = Date.now.bind(Date);
+      nowSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offsetMs);
+      pgmqState.afterWorkRead = () => {
+        offsetMs = ms;
+      };
+    }
+    function seedWork(n: number) {
+      for (let i = 0; i < n; i++) {
+        fakeArticles[`art-w-${i}`] = {
+          id: `art-w-${i}`,
+          source_id: "src-outlet",
+          title: `Politika haberi sayı ${i} farklı konu`,
+          description: "Detay",
+          url: `https://example.com/w${i}`,
+          category: "politika",
+          published_at: minutesAgo(1),
+        };
+        pgmqState.pending.push({ msg_id: 100 + i, read_ct: 1, message: { article_id: `art-w-${i}` } });
+      }
+    }
+
+    it("control: cluster_work empty and the whole budget left reads the attach queue", async () => {
+      seedCluster(CLUSTER, politicsMembers("sv"));
+      seedIncoming();
+      queueAttach();
+      seedWork(1);
+      const body = await drain();
+      expect(attachReads()).toHaveLength(1);
+      expect(body.attach.read).toBe(1);
+      // cluster_work was read first, the attach queue after it.
+      expect(pgmqState.reads.map((r) => r.queue)).toEqual(["cluster_work", "cluster_attach"]);
+    });
+
+    it("cluster_work came back empty but less than the read-budget floor remains: no attach read", async () => {
+      seedCluster(CLUSTER, politicsMembers("sv2"));
+      seedIncoming();
+      queueAttach();
+      seedWork(1);
+      moveClockAfterWorkRead(26_000); // 4 s of the 30 s budget are left, the floor is 5 s
+      const body = await drain();
+      expect(attachReads()).toHaveLength(0);
+      expect(pgmqState.attachPending).toHaveLength(1);
+      expect(body.attach.read).toBe(0);
+      expect(body.created + body.matched).toBe(1); // the politika message was still processed
+    });
+
+    it("cluster_work still holds messages when the budget runs out: no attach read, the rest stays queued", async () => {
+      seedCluster(CLUSTER, politicsMembers("sv3"));
+      seedIncoming();
+      queueAttach();
+      seedWork(3);
+      moveClockAfterWorkRead(26_000);
+      const body = await drain();
+      expect(body.budgeted_out).toBe(true);
+      expect(attachReads()).toHaveLength(0);
+      expect(pgmqState.attachPending).toHaveLength(1);
+      expect(pgmqState.pending).toHaveLength(1); // the third politika message was never leased by the attach queue
+    });
+
+    it("a cluster_work read error means the queue is not known to be empty: no attach read", async () => {
+      seedCluster(CLUSTER, politicsMembers("sv4"));
+      seedIncoming();
+      queueAttach();
+      const readBatchMock = (await import("../../supabase/functions/_shared/pgmq.ts")).readBatch as unknown as ReturnType<typeof vi.fn>;
+      readBatchMock.mockImplementationOnce(async () => {
+        throw new Error("pgmq.read(cluster_work): boom");
+      });
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      const body = await drain();
+      err.mockRestore();
+      expect(body.failedTransient).toBe(1);
+      expect(attachReads()).toHaveLength(0);
+    });
+  });
+
+  it("a stray admit:'attach' on cluster_work is not a Jev claim: the politika article clusters as usual", async () => {
+    fakeArticles["art-stray"] = {
+      id: "art-stray",
+      source_id: "src-outlet",
+      title: "Politika haberi stray",
+      description: "Detay",
+      url: "https://example.com/stray",
+      category: "politika",
+      published_at: minutesAgo(1),
+    };
+    pgmqState.pending = [{ msg_id: 55, read_ct: 1, message: { article_id: "art-stray", admit: "attach" } } as unknown as PgmqMessage];
+    const body = await drain();
+    expect(body.created + body.matched).toBe(1);
+    expect(pgmqState.archived).toContain(55);
+  });
+
+  it("the attach path is wired to the cluster_attach queue and nothing else in the source (static)", () => {
+    const src = readFileSync(resolve(__dirname, "../../supabase/functions/cluster-consumer/index.ts"), "utf8");
+    expect(src).toContain('const ATTACH_QUEUE_NAME = "cluster_attach";');
+    expect(src).toContain("attachMode(Deno.env.get(ATTACH_MODE_ENV)");
+    expect(src).toContain("planAttachRead(");
+    expect(src).toContain("deleteMessage(");
+    // processAttach is the only consumer of attachDecision, and createCluster is still only called from clusterArticle.
+    expect([...src.matchAll(/\bcreateCluster\(/g)]).toHaveLength(2); // the definition and its single call
+    const attachFn = src.slice(src.indexOf("async function processAttach("), src.indexOf("async function drainAttach("));
+    expect(attachFn).not.toMatch(/createCluster|\.query\(|cosineQuery|clusterArticle\(|recordAdmission|evaluateJev|enrichArticleInMemory|persistEnrichment/);
   });
 });
 

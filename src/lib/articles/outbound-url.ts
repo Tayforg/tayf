@@ -11,6 +11,9 @@
 //     rest a fragment ('038;utm_medium=rss').
 //   - Evrensel (and others) tag every link with utm_* params, which shows up as
 //     the publisher's own RSS traffic in their analytics.
+//   - BBC Türkçe tags every link with 'at_medium=RSS&at_campaign=rss' and DW
+//     with 'maca=tur-rss-...' for the same purpose (hunt 25, h25-api-1); both
+//     are dropped by exact key.
 //
 // Pure string operations, no URL re-serialisation: the path, the surviving
 // params (byte for byte) and a real fragment are returned exactly as stored.
@@ -19,18 +22,25 @@
 
 const ENTITY_AMP = ["&#038;", "&#38;", "&amp;"] as const;
 
-/** A query segment that is tracking, not content: `utm_*`, `fbclid`, `gclid`
+/** Exact keys of the publisher RSS-attribution params: BBC Türkçe's
+ * `at_medium` and `at_campaign`, DW's `maca`. Exact, not a prefix: 'at',
+ * 'at_mediumx', 'xmaca' and 'macaron' are content keys and stay. */
+const AT_TRACKING_KEYS: ReadonlySet<string> = new Set(["at_medium", "at_campaign", "maca"]);
+
+/** A query segment that is tracking, not content: `utm_*`, `fbclid`, `gclid`,
+ * and the exact keys `at_medium`, `at_campaign` (BBC Türkçe) and `maca` (DW)
  * (the key is the text before the first '=', compared case-insensitively). */
 function isTrackingSegment(segment: string): boolean {
   const eq = segment.indexOf("=");
   const key = (eq === -1 ? segment : segment.slice(0, eq)).toLowerCase();
-  return key.startsWith("utm_") || key === "fbclid" || key === "gclid";
+  return key.startsWith("utm_") || key === "fbclid" || key === "gclid" || AT_TRACKING_KEYS.has(key);
 }
 
 /**
  * The href for an article's stored `url`:
  *   - '&#038;', '&#38;' and '&amp;' in the query become '&';
- *   - empty segments and utm_*, fbclid and gclid params are dropped;
+ *   - empty segments and utm_*, fbclid, gclid, at_medium, at_campaign (BBC
+ *     Türkçe) and maca (DW) params are dropped;
  *   - everything else (path, other params, a real '#fragment') is kept as is;
  *   - a '?' left with no params is removed.
  * A value that is not a string, is not a parseable absolute http(s) url, or has

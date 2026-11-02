@@ -19,7 +19,12 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 //                            adresinde yayınlanmıştır." (Serbestiyet) and
 //                            "<body>\n<headline> Medyascope" (Medyascope)
 //   - raw newlines
-//   - a text the ingest clamp cut mid-word (500 characters ending "...")
+//   - a text the ingest clamp cut mid-word (500 characters ending "...") or an
+//     outlet's own feed cap cut mid-word (Haberport 202/203, Sözcü 123, Daily
+//     Sabah 183 characters ending "...")
+//   - a repaired cut that would end inside an open quotation
+//   - a sub-heading glued onto the body ("odaklı ziyaretİçişleri Bakanı",
+//     "ziyaretin önemi:Cumhurbaşkanı Erdoğan")
 //   - a leading "Son dakika |" / "Son dakika haberi:" / "Son dakika haberine
 //     göre," / "Son dakika gelişmesi..." ticker and a leading list marker
 //     ("- ", "• ", "▪️ ")
@@ -168,8 +173,30 @@ function stripTrailingCta(s: string): string | null {
 
 const CLAMP_SUFFIX = "...";
 const CLAMP_LENGTHS: readonly number[] = [499, 500];
+/**
+ * Outlet feed caps (h25-live-1): a few feeds cut their own description at a
+ * fixed length and add "..." (200 characters of text for Haberport, 120 for
+ * Sözcü, 180 for Daily Sabah), so the text ends mid-word: "açtığı kuaför salo...".
+ * Eight days of `articles` (2026-10-26 to 2026-11-02, the last day partial),
+ * descriptions ending a letter or digit + "...": haberport 203: 3569 rows,
+ * sozcu 123: 1494, haberport 202: 483, daily-sabah 183: 352. Every other (source, length) pair is below 50 rows
+ * (daily-sabah 182: 41, tele1 303: 31, muhalif 152-162: 3-27 per length) and the
+ * 500-character rows are the ingest clamp above. No row held an astral
+ * character, so the length PostgreSQL counts is the JS .length. Unlike the
+ * ingest clamp these lengths are shared by texts that merely end in "...", so a
+ * feed cap counts only when the "..." follows a letter or a digit: a cut inside
+ * a word. A "..." after a blank or a punctuation mark is the outlet's own
+ * ellipsis and stays with the CTA logic.
+ */
+const FEED_CAP_LENGTHS: readonly number[] = [123, 183, 202, 203];
 /** A sentence-end cut must keep at least this share of the clamped text. */
 const CLAMP_MIN_KEPT_SHARE = 0.6;
+/**
+ * The cut in front of an open quotation keeps at least this share of the clamped
+ * text. Lower than {@link CLAMP_MIN_KEPT_SHARE}: the alternative is a cut that
+ * ends inside the quotation, and e5d77d31 keeps 50.3% in front of its quotation.
+ */
+const CLAMP_QUOTE_MIN_KEPT_SHARE = 0.5;
 const SENTENCE_MARKS = new Set([".", "!", "?", "…"]);
 /** Quotes and brackets that may close a sentence right after its mark. */
 const CLOSERS = new Set(['"', "”", "»", "’", "'", ")", "]"]);
@@ -257,9 +284,15 @@ function unpunctuatedLineRanges(body: string): SkipRange[] {
  * closing quote or bracket and then whitespace, or the end of the text. Decimals
  * ("3.5"), domains, initials ("K. Sarıgül"), ordinals ("13."), title
  * abbreviations ("Prof. Dr.") and a mark inside one of the `skip` ranges (sorted,
- * disjoint) are not sentence ends.
+ * disjoint) are not sentence ends. When `accept` is given, a sentence end it
+ * rejects (called with the index the text would be cut at) is passed over and
+ * the search goes on with the one before it.
  */
-function lastSentenceEnd(body: string, skip: readonly SkipRange[] = []): number {
+function lastSentenceEnd(
+  body: string,
+  skip: readonly SkipRange[] = [],
+  accept?: (end: number) => boolean,
+): number {
   let r = skip.length - 1;
   for (let i = body.length - 1; i >= 0; i--) {
     if (!SENTENCE_MARKS.has(body.charAt(i))) continue;
@@ -271,18 +304,71 @@ function lastSentenceEnd(body: string, skip: readonly SkipRange[] = []): number 
     while (q < body.length && CLOSERS.has(body.charAt(q))) q++;
     if (q < body.length && !isBlankChar(body.charAt(q))) continue;
     if (isNonSentenceDot(body, i)) continue;
+    if (accept !== undefined && !accept(q)) continue;
     return q;
   }
   return -1;
 }
 
 /**
- * Repair a text the ingest clamp cut. When the clamped text holds an appended
+ * `balanced(end)` for a clamped `body`: true when `body.slice(0, end)` leaves no
+ * quotation open. Four running balances are built once, so each call is O(1):
+ * the straight quote '"' must occur an even number of times, and the openers
+ * “ « ‘ must not outnumber the closers ” » ’. The apostrophe ’ (U+2019) is also a
+ * closer, which only ever makes the check let a text pass, never reject one.
+ */
+function quoteBalance(body: string): (end: number) => boolean {
+  const n = body.length;
+  const straight = new Int32Array(n + 1);
+  const curly = new Int32Array(n + 1);
+  const angle = new Int32Array(n + 1);
+  const single = new Int32Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    const ch = body.charAt(i);
+    straight[i + 1] = (straight[i] ?? 0) + (ch === '"' ? 1 : 0);
+    curly[i + 1] = (curly[i] ?? 0) + (ch === "\u201C" ? 1 : ch === "\u201D" ? -1 : 0);
+    angle[i + 1] = (angle[i] ?? 0) + (ch === "\u00AB" ? 1 : ch === "\u00BB" ? -1 : 0);
+    single[i + 1] = (single[i] ?? 0) + (ch === "\u2018" ? 1 : ch === "\u2019" ? -1 : 0);
+  }
+  return (end) =>
+    ((straight[end] ?? 0) & 1) === 0 &&
+    (curly[end] ?? 0) <= 0 &&
+    (angle[end] ?? 0) <= 0 &&
+    (single[end] ?? 0) <= 0;
+}
+
+/** `end` moved back over dangling ", ; : – — -" and blanks. */
+function trimDanglingEnd(s: string, end: number): number {
+  let stop = end;
+  while (stop > 0 && (CLAMP_DANGLING.has(s.charAt(stop - 1)) || isBlankChar(s.charAt(stop - 1)))) stop--;
+  return stop;
+}
+
+/** True for a clamped text: the 499/500 ingest clamp or an outlet feed cap. */
+function hasClampSignature(raw: string): boolean {
+  if (!raw.endsWith(CLAMP_SUFFIX)) return false;
+  if (CLAMP_LENGTHS.includes(raw.length)) return true;
+  return (
+    FEED_CAP_LENGTHS.includes(raw.length) &&
+    isLetterOrDigit(raw.charAt(raw.length - CLAMP_SUFFIX.length - 1))
+  );
+}
+
+/**
+ * Repair a text the ingest clamp or an outlet feed cap cut ({@link
+ * hasClampSignature}). When the clamped text holds an appended
  * ticker ({@link cutAppendedTicker}: another story's headline, never ours) the
  * repair is that cut, whatever share it keeps and with no "…". Otherwise keep up
  * to the last sentence end when that keeps at least {@link CLAMP_MIN_KEPT_SHARE}
  * of the text, else cut at the last word boundary, drop dangling ", ; : – — -"
- * and add one "…". When the word cut still leaves part of a paragraph that the
+ * and add one "…". A sentence end that leaves a quotation open (an odd number of
+ * '"', more “ « ‘ than ” » ’; see {@link quoteBalance}) is passed over for the
+ * one before it, and a word cut that still ends inside a quotation moves back in
+ * front of the opener when that keeps at least {@link CLAMP_QUOTE_MIN_KEPT_SHARE}
+ * of the text (e5d77d31). When no cut can be made without leaving a quotation
+ * open (the opener is too early: c526f480, a whole speech), the text is repaired
+ * as if quotations did not matter: the last sentence end, balanced or not, else
+ * the word cut. When the word cut still leaves part of a paragraph that the
  * clamp cut (the text after its last line break), the cut moves back to that
  * line break if it keeps at least {@link CLAMP_MIN_KEPT_SHARE} of the text and
  * the line it then ends on is not a short unpunctuated one (a heading, a label,
@@ -291,13 +377,15 @@ function lastSentenceEnd(body: string, skip: readonly SkipRange[] = []): number 
  * word).
  */
 function repairClamp(raw: string): string | null {
-  if (!CLAMP_LENGTHS.includes(raw.length) || !raw.endsWith(CLAMP_SUFFIX)) return null;
+  if (!hasClampSignature(raw)) return null;
   const body = raw.slice(0, raw.length - CLAMP_SUFFIX.length);
 
   const withoutTicker = cutAppendedTicker(body);
   if (withoutTicker !== body && withoutTicker.trim() !== "") return withoutTicker.trimEnd();
 
-  const end = lastSentenceEnd(body, unpunctuatedLineRanges(body));
+  const balanced = quoteBalance(body);
+  const lines = unpunctuatedLineRanges(body);
+  const end = lastSentenceEnd(body, lines, balanced);
   if (end > 0) {
     const kept = body.slice(0, end).trimEnd();
     if (kept.length >= CLAMP_MIN_KEPT_SHARE * body.length) return kept;
@@ -330,10 +418,24 @@ function repairClamp(raw: string): string | null {
       cut = kept;
     }
   }
-  let stop = cut.length;
-  while (stop > 0 && (CLAMP_DANGLING.has(cut.charAt(stop - 1)) || isBlankChar(cut.charAt(stop - 1)))) stop--;
-  cut = cut.slice(0, stop);
+  cut = cut.slice(0, trimDanglingEnd(cut, cut.length));
   if (cut === "") return null;
+  // The cut ends inside an open quotation (e5d77d31): end in front of the opener
+  // instead, the largest prefix that leaves nothing open, when it keeps enough.
+  if (!balanced(cut.length)) {
+    let at = cut.length;
+    while (at > 0 && !balanced(at)) at--;
+    const before = body.slice(0, trimDanglingEnd(body, at));
+    if (before !== "" && before.length >= CLAMP_QUOTE_MIN_KEPT_SHARE * body.length) {
+      cut = before;
+    } else {
+      // Nothing balanced is long enough: repair as if quotations did not matter
+      // (the sentence ends the quote check passed over count again).
+      const anyEnd = lastSentenceEnd(body, lines);
+      const kept = anyEnd > 0 ? body.slice(0, anyEnd).trimEnd() : "";
+      if (kept.length >= CLAMP_MIN_KEPT_SHARE * body.length) return kept;
+    }
+  }
   return SENTENCE_MARKS.has(cut.charAt(cut.length - 1)) ? cut : cut + "…";
 }
 
@@ -448,9 +550,65 @@ function dropDanglingColon(s: string): string {
 }
 
 /**
+ * `s` without the trailing CTAs, to a fixed point bounded by
+ * {@link MAX_CTA_PASSES}; a ":" a strip leaves dangling goes with it.
+ */
+function peelTrailingCtas(s: string): string {
+  let out = s;
+  for (let pass = 0; pass < MAX_CTA_PASSES; pass++) {
+    const stripped = stripTrailingCta(out);
+    if (stripped === null) break;
+    out = dropDanglingColon(stripped);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Glued sub-headings (h25-live-2). Haberport ships "<sub-heading><body>" with the
+// block separator dropped by the tag stripper: "odaklı ziyaretİçişleri Bakanı",
+// "yenilendiBüyükçekmece Belediye Meclisi", or "<label>:<body>" ("ziyaretin
+// önemi:Cumhurbaşkanı Erdoğan ..."). Turkish letters only; a case map would also
+// fold "İ"/"ı" and the circumflex vowels the wrong way for this scan.
+// Scan of live cluster summaries (10,794 clusters, 2026-10-26 to 2026-11-02):
+// 329 distinct tokens hold a lower->Upper join. 203 are the glue of a Turkish
+// word and a place or title, and all 203 are split here. About 20 more are glues
+// this step leaves alone on purpose (an acronym behind the word: "toplantısıTBMM",
+// "ettiAK"; a capital start: "TürkçedeFaddey"). The remaining ~106 are brands and
+// names that start upper case (MasterChef, YouTube, BirGün, VakıfBank,
+// EuroLeague, ...) or lower case with at most two letters in front of the capital
+// (iPhone, iMac, iPad, kWh, mRNA, mAh, eVTOL, beIN). No lower-case brand has
+// three letters before its capital, so there is no exception list.
+// ---------------------------------------------------------------------------
+
+const TR_LOWER = "a-zçğıöşüâîû";
+const TR_UPPER = "A-ZÇĞİÖŞÜÂÎÛ";
+/**
+ * A whitespace-delimited token that STARTS with three or more lower-case letters
+ * and then a capital followed by a lower-case letter: the run is a word, the
+ * rest the next sentence. "iPhone" (one letter in front), "BirGün" and "MasterChef"
+ * (upper case start), "@YelizzKoray", "#yerelSeçim" and URLs never match. The
+ * lookbehind starts a match only at the beginning of a token, and the run is
+ * consumed once, so a very long token costs O(n).
+ */
+const GLUED_WORD = new RegExp(`(?<=^|\\s)([${TR_LOWER}]{3,})(?=[${TR_UPPER}][${TR_LOWER}])`, "gu");
+/** A lower-case label of at most 81 characters, no sentence mark, glued to a capital: "ziyaretin önemi:Cumhurbaşkanı". */
+const GLUED_LABEL = new RegExp(`^[${TR_LOWER}][^.!?…:]{0,80}:(?=[${TR_UPPER}])`, "u");
+/** A lower-case letter, a colon and a capital: "önemi:Cumhurbaşkanı". Digits are not matched, so "10:30" stays. */
+const GLUED_COLON = new RegExp(`([${TR_LOWER}]):(?=[${TR_UPPER}])`, "gu");
+
+/** Step 4c of {@link tidySummaryText}. */
+function splitGluedHeadings(s: string): string {
+  return s
+    .replace(GLUED_WORD, "$1. ")
+    .replace(GLUED_LABEL, "")
+    .replace(GLUED_COLON, "$1: ");
+}
+
+/**
  * Tidy a summary for display. Steps, in order:
- *   0. repair a text the ingest clamp cut ({@link repairClamp}); keyed on the
- *      raw input, so it runs before anything changes the length;
+ *   0. repair a text the ingest clamp or an outlet feed cap cut
+ *      ({@link repairClamp}); keyed on the raw input, so it runs before anything
+ *      changes the length;
  *   1. drop whole lines that are a widget heading ("İlginizi Çekebilir");
  *   1b. strip the Diken header ("<title> dd.mm.yyyy Diken"), the WordPress /
  *      Yoast footers ("The post ... appeared first on ...", "... yazısı ilk
@@ -482,13 +640,23 @@ function dropDanglingColon(s: string): string {
  *      before the mark counts, so "T.C.", "A.Ş." and "U.S." are untouched, and
  *      the next character must be an upper-case letter, so decimals and
  *      domains ("3.5", "tayfhaber.com") are untouched;
+ *   4c. undo a sub-heading glued onto the body (Haberport), see
+ *      {@link splitGluedHeadings}: a whitespace-delimited token that starts with
+ *      three or more lower-case letters and then "Upper+lower" is split with
+ *      ". " ("ziyaretİçişleri" -> "ziyaret. İçişleri"); a leading lower-case
+ *      label of up to 81 characters with no sentence mark, glued by a ":" to a
+ *      capital, is dropped ("ziyaretin önemi:Cumhurbaşkanı" -> "Cumhurbaşkanı");
+ *      a lower-case letter, ":" and a capital elsewhere gets a space ("önemi:
+ *      Cumhurbaşkanı"). A split can put a CTA phrase behind a sentence mark
+ *      ("tamamlandıDevamını oku"), so step 3 runs again when 4c changed the text;
  *   4b. collapse every whitespace run to one space;
  *   5. trim.
  *
  * Step 0 repairs a clamp with {@link cutAppendedTicker} first: foreign text is
  * never kept, so a clamped text that holds a ticker line ends where the ticker
  * block starts, with no "…". A clamp that holds a line break late in the text
- * ends there when no sentence end does (see {@link repairClamp}).
+ * ends there when no sentence end does (see {@link repairClamp}). A cut never
+ * ends inside an open quotation when it can end in front of it.
  *
  * Returns "" when nothing but residue was there (a footer-only text included);
  * the caller then hides the summary. Idempotent for any input with at most
@@ -497,7 +665,11 @@ function dropDanglingColon(s: string): string {
  * any, is not followed by a CTA (a footer is recognised only at the very end of
  * the text), and which has no Diken-style header after its first line (the
  * header is found before the newlines are collapsed, so such a line is a header
- * only once it has become part of the first line).
+ * only once it has become part of the first line). One more exception, from the
+ * feed caps: the clamp signature is read off the raw input, so an outlet text
+ * that is a 200-character cut + "..." + "Devamı için tıklayınız" (3 in 1000
+ * live summaries) comes back as the cut ("... yeni bir..."), and a second call
+ * sees a feed-cap signature and repairs it. The summary is tidied once.
  */
 export function tidySummaryText(s: string): string {
   // 0. Ingest clamp ("...tedaviye devam edecek şeki..."), on the raw input.
@@ -529,14 +701,15 @@ export function tidySummaryText(s: string): string {
 
   // 3. Trailing CTA, to a fixed point. "Gelişmeler şöyle: Detaylar haberimizde"
   //    would otherwise keep its colon.
-  for (let pass = 0; pass < MAX_CTA_PASSES; pass++) {
-    const stripped = stripTrailingCta(out);
-    if (stripped === null) break;
-    out = dropDanglingColon(stripped);
-  }
+  out = peelTrailingCtas(out);
 
   // 4. Glued sentences.
   out = out.replace(/([a-zçğıöşü])([.!?…])(?=[A-ZÇĞİÖŞÜ])/gu, "$1$2 ");
+
+  // 4c. Sub-heading glued onto the body (h25-live-2). A split can put a CTA
+  //     behind a sentence mark, so the trailing CTA is peeled once more.
+  const unglued = splitGluedHeadings(out);
+  if (unglued !== out) out = peelTrailingCtas(unglued);
 
   // 4b. Whatever whitespace is left (double spaces, NBSP, tabs) becomes one space.
   out = out.replace(/\s+/g, " ");

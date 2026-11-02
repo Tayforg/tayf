@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   headlineLane,
+  headlineOnlyScore,
   isMatch,
   score,
 } from "../../../supabase/functions/_shared/cluster/ensemble.ts";
@@ -100,6 +101,41 @@ describe("headline lane: real same-story pairs fire", () => {
   });
 });
 
+describe("headline lane: the hunt-25 W3 attach cases fire (verbatim production titles of 2026-11-02)", () => {
+  it("FETÖ identical title: hurriyet 2f93603f is character-identical to aksam 26ede371 and differs from milliyet d8f1612a only in '!' for ':' (Jaccard 1.0, 7 shared)", () => {
+    const hurriyet = "32 ilde FETÖ operasyonu: 41 şüpheli tutuklandı"; // genel, unclustered
+    const aksam = "32 ilde FETÖ operasyonu: 41 şüpheli tutuklandı"; // politika, cluster 304a47ce
+    const milliyet = "32 ilde FETÖ operasyonu! 41 şüpheli tutuklandı"; // politika, cluster 304a47ce
+    const r = lane(hurriyet, aksam, 0.05);
+    expect(r.fired).toBe(true);
+    expect(r.kind).toBe("jaccard");
+    expect(r.sim).toBe(1);
+    expect(r.shared).toBeGreaterThanOrEqual(HEADLINE_LANE_MIN_SHARED);
+    expect(lane(hurriyet, milliyet, 0.15).fired).toBe(true);
+    // Through the headline-only scorer too (what the attach probe ranks by).
+    expect(headlineOnlyScore(headlineTokens(hurriyet), headlineTokens(aksam), 0.05)).toBeGreaterThan(0.99);
+  });
+
+  it("cancer-drug pair: ajans-haber d30f18fb vs cnn-turk d10c433e in cluster 50f441fa (Jaccard 0.91)", () => {
+    const ajans = "Tarihi geçmiş kanser ilaçlarını yeniden piyasaya sürenlere operasyon: 22 gözaltı";
+    const cnn = "Tarihi geçmiş kanser ilaçlarını yeniden piyasaya süren şebekeye operasyon: 22 gözaltı";
+    const r = lane(ajans, cnn, 2.57);
+    expect(r.fired).toBe(true);
+    expect(r.kind).toBe("jaccard");
+    expect(r.sim).toBeGreaterThan(0.9);
+    expect(r.shared).toBe(10);
+  });
+
+  it("AA 292c13a1 vs birgun ee8be731 in cluster 2e973096 (Carlson / Netanyahu / Trump): Jaccard 0.85", () => {
+    const aa = "ABD'li gazeteci Carlson'a göre Netanyahu Trump'a, İran'a nükleer saldırı yapması için baskı yapıyor";
+    const birgun = "ABD'li gazeteci Tucker Carlson: Netanyahu Trump'a, İran'a nükleer saldırı yapması için baskı yapıyor";
+    const r = lane(aa, birgun, 0.1);
+    expect(r.fired).toBe(true);
+    expect(r.kind).toBe("jaccard");
+    expect(r.shared).toBe(11);
+  });
+});
+
 describe("headline lane: lookalikes stay apart", () => {
   it("same slot, different number: '40 tutuklama talebi' vs '39 kişi tutuklandı'", () => {
     const r = lane(
@@ -116,6 +152,33 @@ describe("headline lane: lookalikes stay apart", () => {
       "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı",
     );
     expect(r.fired).toBe(false);
+  });
+
+  it("hunt-25 W3: '61 şüpheli adliyeye sevk edildi' (sozcu 59339b75) vs '39 kişi tutuklandı' (turkiye-gazetesi f25a86a2) are two developments of one investigation", () => {
+    const a = "Bakırköy Belediyesi soruşturmasında 61 şüpheli adliyeye sevk edildi";
+    const b = "Bakırköy Belediyesi soruşturmasında 39 kişi tutuklandı";
+    for (const hours of [0.1, 1, 5.9]) {
+      const r = lane(a, b, hours);
+      expect(r.fired).toBe(false);
+      expect(r.kind).toBeNull();
+      expect(r.score).toBe(0);
+      expect(headlineOnlyScore(headlineTokens(a), headlineTokens(b), hours)).toBe(0);
+    }
+    // Same investigation, same numeral: the pair does fire (control).
+    expect(lane(a, "Bakırköy Belediyesi soruşturmasında 61 şüpheli adliyede", 1).fired).toBe(true);
+  });
+
+  it("hunt-25 W3: the cumhuriyet film-plot template pair (#152) does not fire against the 'Suikast Treni' headlines", () => {
+    const train = [
+      "Suikast Treni filminin konusu nedir? Suikast Treni filminin oyuncuları kimler?",
+      "Suikast Treni filminin konusu ne? Suikast Treni filminin oyuncuları kim?",
+    ];
+    for (const incoming of [
+      "Muhbir filminin konusu ne? Muhbir filminin oyuncuları kim?",
+      "Eller Yukarı filminin konusu ne? Eller Yukarı filminin oyuncuları kim?",
+    ]) {
+      for (const member of train) expect(lane(incoming, member, 1.5).fired).toBe(false);
+    }
   });
 
   it("a digit-length class shift needs at least one numeral on each side and no shared value", () => {

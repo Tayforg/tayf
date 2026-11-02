@@ -35,6 +35,8 @@ vi.mock("@/lib/quality/snapshots", () => ({
   getQualitySnapshots: () => Promise.resolve(mockSnapshots.value),
 }));
 
+import { formatTurkishDate } from "@/lib/time";
+
 import QualityPage, { metadata } from "./page";
 
 /**
@@ -115,6 +117,39 @@ function findByClass(node: unknown, needle: string, out: Array<{ props: Record<s
       out.push(el as { props: Record<string, unknown> });
     }
     if (el.props?.children !== undefined) findByClass(el.props.children, needle, out);
+  }
+  return out;
+}
+
+type El = { type?: unknown; props: Record<string, unknown> };
+
+/**
+ * Every element of the tree (function components expanded, see collectText)
+ * with the element that directly contains it, in document order.
+ */
+function allElements(
+  node: unknown,
+  parent: El | null = null,
+  out: Array<{ el: El; parent: El | null }> = [],
+): Array<{ el: El; parent: El | null }> {
+  if (Array.isArray(node)) {
+    for (const child of node) allElements(child, parent, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: Record<string, unknown> };
+    if (typeof el.type === "function") {
+      return allElements(
+        (el.type as (props: Record<string, unknown>) => unknown)(el.props ?? {}),
+        parent,
+        out,
+      );
+    }
+    if (el.props) {
+      const self = el as El;
+      out.push({ el: self, parent });
+      if (el.props.children !== undefined) allElements(el.props.children, self, out);
+    }
   }
   return out;
 }
@@ -238,7 +273,7 @@ describe("QualityPage — data present", () => {
     expect(svg!.props.viewBox).toBeDefined();
   });
 
-  it("makes the chart wrapper and the table wrapper keyboard-reachable named regions with a visible focus ring (WCAG 2.1.1)", async () => {
+  it("keeps the table wrapper as the one keyboard-reachable named scroll region with a visible focus ring (WCAG 2.1.1)", async () => {
     mockSnapshots.value = [
       snapshot({ id: 2, takenAt: "2026-09-18T03:00:00.000Z", singletonRate: 0.9 }),
       snapshot({ id: 1, takenAt: "2026-09-17T03:00:00.000Z", singletonRate: 0.85 }),
@@ -247,17 +282,126 @@ describe("QualityPage — data present", () => {
     const tree = await QualityPage();
     const scrollers = findByClass(tree, "overflow-x-auto");
 
-    // the chart wrapper (min-w-[360px] svg overflows a 390 px phone) and the table
-    expect(scrollers).toHaveLength(2);
-    for (const { props } of scrollers) {
-      expect(props.tabIndex).toBe(0);
-      expect(props.role).toBe("region");
-      expect(String(props.className)).toContain("focus-visible:ring-2");
-      expect(String(props.className)).toContain("focus-visible:ring-ring");
-    }
-    const [chart, table] = scrollers;
-    expect(chart!.props["aria-label"]).toBe("Tekil küme oranı grafiği");
+    // Only the table scrolls on a 390 px phone; the chart is fluid (h25-visual-2).
+    expect(scrollers).toHaveLength(1);
+    const [table] = scrollers;
+    expect(table!.props.tabIndex).toBe(0);
+    expect(table!.props.role).toBe("region");
+    expect(String(table!.props.className)).toContain("focus-visible:ring-2");
+    expect(String(table!.props.className)).toContain("focus-visible:ring-ring");
     expect(table!.props["aria-labelledby"]).toBe("kalite-tablo");
+  });
+
+  describe("the singleton-rate chart is fluid, with HTML labels (h25-visual-2)", () => {
+    const rows = () => [
+      snapshot({ id: 2, takenAt: "2026-09-18T03:00:00.000Z", singletonRate: 0.9 }),
+      snapshot({ id: 1, takenAt: "2026-09-17T03:00:00.000Z", singletonRate: 0.85 }),
+    ];
+
+    it("gives the svg no minimum width, so it never scrolls or clips the end date", async () => {
+      mockSnapshots.value = rows();
+
+      const svg = findSvg(await QualityPage());
+
+      expect(svg).not.toBeNull();
+      const cls = String(svg!.props.className);
+      expect(cls).not.toContain("min-w-[");
+      expect(cls).toContain("w-full");
+    });
+
+    it("leaves the chart wrapper a plain box: not a scroller, not focusable, not a region", async () => {
+      mockSnapshots.value = rows();
+
+      const els = allElements(await QualityPage());
+      const svgEntry = els.find((e) => e.el.type === "svg");
+      expect(svgEntry).toBeDefined();
+      const wrapper = svgEntry!.parent!;
+
+      expect(wrapper.props.tabIndex).toBeUndefined();
+      expect(wrapper.props.role).toBeUndefined();
+      expect(wrapper.props["aria-label"]).toBeUndefined();
+      expect(String(wrapper.props.className)).not.toContain("overflow");
+    });
+
+    it("keeps role=img on the svg and names the date range as well as the rates", async () => {
+      mockSnapshots.value = rows();
+
+      const svg = findSvg(await QualityPage());
+      const first = formatTurkishDate("2026-09-17T03:00:00.000Z");
+      const last = formatTurkishDate("2026-09-18T03:00:00.000Z");
+
+      expect(svg!.props.role).toBe("img");
+      const label = String(svg!.props["aria-label"]);
+      expect(label).toContain(`${first}–${last}`);
+      expect(label).toContain("%85");
+      expect(label).toContain("%90");
+      expect(label).toContain("Son 2 gecelik");
+    });
+
+    it("draws no SVG <text>: the svg holds only gridlines and the polyline", async () => {
+      mockSnapshots.value = rows();
+
+      const els = allElements(await QualityPage());
+      const svgEntry = els.find((e) => e.el.type === "svg");
+      const inside = els.filter(({ el }) => el !== svgEntry!.el).map(({ el }) => el.type);
+      expect(inside).not.toContain("text");
+      expect(els.some(({ el }) => el.props.fontSize !== undefined)).toBe(false);
+    });
+
+    it("renders the four labels as aria-hidden HTML spans: %max, %min, first date, last date", async () => {
+      mockSnapshots.value = rows();
+
+      const labels = allElements(await QualityPage()).filter(
+        ({ el }) => el.props["data-chart-label"] !== undefined,
+      );
+      expect(labels).toHaveLength(4);
+      for (const { el } of labels) {
+        expect(el.type).toBe("span");
+        expect(el.props["aria-hidden"]).toBe("true");
+        expect(String(el.props.className)).toContain("text-[11px]");
+      }
+      const texts = labels.map(({ el }) => collectText(el.props.children).join(""));
+      expect(texts).toEqual([
+        "%90",
+        "%85",
+        formatTurkishDate("2026-09-17T03:00:00.000Z"),
+        formatTurkishDate("2026-09-18T03:00:00.000Z"),
+      ]);
+    });
+
+    it("places the %max label at the top gridline and the %min label at the bottom one", async () => {
+      mockSnapshots.value = rows();
+
+      const labels = allElements(await QualityPage()).filter(
+        ({ el }) => el.props["data-chart-label"] !== undefined,
+      );
+      const top = (i: number) => parseFloat(String((labels[i]!.el.props.style as { top?: string }).top));
+      expect(top(0)).toBeGreaterThan(0);
+      expect(top(0)).toBeLessThan(top(1));
+      expect(top(1)).toBeLessThan(100);
+    });
+
+    it("renders no chart labels when there is a single snapshot", async () => {
+      mockSnapshots.value = [snapshot({ id: 1 })];
+
+      const labels = allElements(await QualityPage()).filter(
+        ({ el }) => el.props["data-chart-label"] !== undefined,
+      );
+      expect(labels).toHaveLength(0);
+    });
+
+    it("keeps a flat series (min == max) readable: both rates equal, no NaN geometry", async () => {
+      mockSnapshots.value = [
+        snapshot({ id: 2, takenAt: "2026-09-18T03:00:00.000Z", singletonRate: 0.9 }),
+        snapshot({ id: 1, takenAt: "2026-09-17T03:00:00.000Z", singletonRate: 0.9 }),
+      ];
+
+      const tree = await QualityPage();
+      const svg = findSvg(tree);
+      const poly = allElements(tree).find(({ el }) => el.type === "polyline");
+      expect(String(poly!.el.props.points).includes("NaN")).toBe(false);
+      expect(svg!.props.role).toBe("img");
+    });
   });
 
   it("does not crash with only a single snapshot (no divide-by-zero in the chart)", async () => {

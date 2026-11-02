@@ -16,6 +16,9 @@ const read = (rel: string) => readFileSync(join(ROOT, rel), "utf8");
 
 const INTRADAY = read("src/components/finance/intraday-chart.tsx");
 const SPARKLINE = read("src/components/finance/sparkline.tsx");
+// /kalite singleton-rate chart (h25-visual-2): same bug class, 9 viewBox units
+// in a 640-unit viewBox with a 360 px minimum width rendered at about 5 px.
+const KALITE = read("src/app/kalite/page.tsx");
 
 /** Every pixel size N of a `text-[Npx]` token in `source`, found by scanning characters. */
 function textPxSizes(source: string): number[] {
@@ -68,5 +71,27 @@ describe("chart label size (390 px phone)", () => {
   it("the stale '~13px' note about viewBox scaling is gone", () => {
     expect(INTRADAY.includes("~13px")).toBe(false);
     expect(INTRADAY.includes("FONT")).toBe(false);
+  });
+});
+
+describe("chart label size: /kalite singleton-rate chart (390 px phone)", () => {
+  it("draws no SVG text and no viewBox font size", () => {
+    expect(KALITE.includes("<text")).toBe(false);
+    expect(KALITE.includes("fontSize=")).toBe(false);
+  });
+
+  it("labels with real pixel sizes, each at least 10", () => {
+    const sizes = textPxSizes(KALITE);
+    expect(sizes.length).toBeGreaterThan(0);
+    expect(sizes.every((px) => px >= 10)).toBe(true);
+  });
+
+  it("hides the labels from assistive tech and marks them for the size probe", () => {
+    expect(KALITE.includes("data-chart-label")).toBe(true);
+    expect(KALITE.includes('aria-hidden="true"')).toBe(true);
+  });
+
+  it("no longer forces a 360 px minimum width on the chart", () => {
+    expect(KALITE.includes("min-w-[360px]")).toBe(false);
   });
 });

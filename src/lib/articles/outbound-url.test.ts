@@ -79,6 +79,67 @@ describe("cleanOutboundUrl: which params go and which stay", () => {
   });
 });
 
+// h25-api-1: BBC Türkçe (at_medium, at_campaign) and DW (maca) tag every RSS
+// link with attribution params, the same reason utm_* goes: the publisher
+// counts the click as its own RSS traffic.
+describe("cleanOutboundUrl: BBC Türkçe and DW RSS attribution", () => {
+  const BBC_BARE = "https://www.bbc.com/turkce/articles/x";
+  const DW_BARE = "https://www.dw.com/tr/x/a-1";
+
+  it("drops BBC's at_medium and at_campaign", () => {
+    expect(cleanOutboundUrl(`${BBC_BARE}?at_medium=RSS&at_campaign=rss`)).toBe(BBC_BARE);
+  });
+
+  it("drops DW's maca", () => {
+    expect(cleanOutboundUrl(`${DW_BARE}?maca=tur-rss-tur-all-1495-rdf`)).toBe(DW_BARE);
+  });
+
+  it("keeps a real param next to the attribution, in order", () => {
+    expect(cleanOutboundUrl("https://x.test/a?id=5&at_medium=RSS")).toBe("https://x.test/a?id=5");
+    expect(cleanOutboundUrl("https://x.test/a?at_medium=RSS&id=5&at_campaign=rss&page=2")).toBe(
+      "https://x.test/a?id=5&page=2",
+    );
+    expect(cleanOutboundUrl("https://x.test/a?maca=tur-rss&id=5")).toBe("https://x.test/a?id=5");
+  });
+
+  it("cleans the '&amp;' form of the BBC url", () => {
+    expect(cleanOutboundUrl(`${BBC_BARE}?at_medium=RSS&amp;at_campaign=rss`)).toBe(BBC_BARE);
+  });
+
+  it("keeps a real fragment when the whole query is attribution", () => {
+    expect(cleanOutboundUrl(`${BBC_BARE}?at_medium=RSS&at_campaign=rss#yorumlar`)).toBe(`${BBC_BARE}#yorumlar`);
+    expect(cleanOutboundUrl(`${DW_BARE}?maca=tur-rss#yorumlar`)).toBe(`${DW_BARE}#yorumlar`);
+  });
+
+  it("matches the keys case-insensitively", () => {
+    expect(cleanOutboundUrl(`${BBC_BARE}?AT_MEDIUM=RSS&At_Campaign=rss`)).toBe(BBC_BARE);
+    expect(cleanOutboundUrl(`${DW_BARE}?MACA=tur-rss`)).toBe(DW_BARE);
+    expect(cleanOutboundUrl(`${DW_BARE}?Maca=tur-rss&id=5`)).toBe(`${DW_BARE}?id=5`);
+  });
+
+  it("drops an attribution key with no value", () => {
+    expect(cleanOutboundUrl("https://x.test/a?at_medium&maca&id=5")).toBe("https://x.test/a?id=5");
+  });
+
+  it("keeps keys that merely resemble the attribution keys", () => {
+    const url = "https://x.test/a?at_mediumx=1&xmaca=2&at=3&macaron=1&at_medium_2=4&at_campaigns=5&q=at_medium";
+    expect(cleanOutboundUrl(url)).toBe(url);
+  });
+
+  it("is idempotent on the real BBC and DW urls", () => {
+    for (const url of [
+      "https://www.bbc.com/turkce/articles/cwe9l7g8z9d7o?at_medium=RSS&at_campaign=rss",
+      `${DW_BARE}?maca=tur-rss-tur-all-1495-rdf`,
+      `${BBC_BARE}?at_medium=RSS&amp;at_campaign=rss#yorumlar`,
+    ]) {
+      const once = cleanOutboundUrl(url);
+      expect(cleanOutboundUrl(once)).toBe(once);
+      expect(once.includes("at_medium")).toBe(false);
+      expect(once.includes("maca")).toBe(false);
+    }
+  });
+});
+
 describe("cleanOutboundUrl: fragments", () => {
   it("leaves a url whose query is clean and fragment real exactly as it was", () => {
     expect(cleanOutboundUrl("https://x.test/a?id=5#yorumlar")).toBe("https://x.test/a?id=5#yorumlar");

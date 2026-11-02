@@ -1192,8 +1192,12 @@ describe("tidySummaryText ordinals and title abbreviations at a clamp (h23-live-
   it("4327f6d8: does not end on 'Konseyi 13.'; the previous sentence is too short, so it cuts at the word with '…'", () => {
     const out = tidySummaryText(RAW_4327);
     expect(out).not.toMatch(/\d{1,3}\.$/);
-    expect(out).toBe("Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu. Konuşmasına katılımcıları selamlayarak başlayan Erdoğan, \"Dün Cumhuriyetimizin 103'üncü yıl dönümünü sizlerin katılımıyla…");
-    expect(out.endsWith("sizlerin katılımıyla…")).toBe(true);
+    // h25-live-1: the word cut used to end inside the open quotation
+    // ('..., "Dün Cumhuriyetimizin 103'üncü yıl dönümünü sizlerin katılımıyla…'); it now
+    // ends in front of it, which keeps 80% of the text.
+    expect(out).toBe("Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu. Konuşmasına katılımcıları selamlayarak başlayan Erdoğan…");
+    expect(out.endsWith("selamlayarak başlayan Erdoğan…")).toBe(true);
+    expect(countChar(out, '"') % 2).toBe(0);
   });
 
   it("2328a68d: does not end on 'Cumhuriyetimizin 103.'; it ends at the previous real sentence end", () => {
@@ -1318,7 +1322,10 @@ describe("tidySummaryText leading ticker with 'haber' and list markers (h23-live
     const out = tidySummaryText(RAW_4F1B);
     expect(out.startsWith("- ")).toBe(false);
     expect(out.startsWith('"Kadınların toplum hayatında')).toBe(true);
-    expect(out).toBe("\"Kadınların toplum hayatında güçlü ve etkin konumları olması, medeniyet coğrafyamıza yabancı bir tecrübe değildir. Yapmamız gereken, bu tecrübeyi toplumlarımızın kültürel hassasiyetleriyle, öncelikleriyle ve sosyal gerçeklikleriyle örtüşen, Türk dünyasına özgü bir perspektife dönüştürmektir\" \"Konseyimizin kalıcı bir işbirliği zemini olmasını hedefliyoruz. Bugün Ankara'da Konseyimizin ilk adımlarını sizlerle birlikte atmış olduk.");
+    // h25-live-1: the sentence end "... atmış olduk." used to be the cut, inside the
+    // second quotation (never closed); the cut is now in front of it (56% of the text).
+    expect(out).toBe("\"Kadınların toplum hayatında güçlü ve etkin konumları olması, medeniyet coğrafyamıza yabancı bir tecrübe değildir. Yapmamız gereken, bu tecrübeyi toplumlarımızın kültürel hassasiyetleriyle, öncelikleriyle ve sosyal gerçeklikleriyle örtüşen, Türk dünyasına özgü bir perspektife dönüştürmektir\"…");
+    expect(countChar(out, '"') % 2).toBe(0);
   });
 
   describe("tickers", () => {
@@ -2012,5 +2019,711 @@ describe("tidySummaryText clamp word-cut at a line break (h24, 4ca344b8)", () =>
       const once = tidySummaryText(raw);
       expect(tidySummaryText(once), once.slice(-40)).toBe(once);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h25-live-1 / h25-live-2 (hunt 25, 2026-11-02): outlet feed caps that leave a
+// summary mid-word, a clamp repair that ends inside an open quote, and a
+// Haberport sub-heading glued onto the body. The rows below are the live
+// texts (read-only SELECT on clusters.summary_tr / articles.description).
+//
+// Feed caps: Haberport 202/203, Sözcü 123 and Daily Sabah 183 characters (120
+// or 180 or 200 of text plus "..."), 7-day count of descriptions ending
+// letter-or-digit + "..." in the articles table: haberport 203: 3569, sozcu 123:
+// 1494, haberport 202: 483, daily-sabah 183: 352. No row held an astral
+// character, so the PostgreSQL length is the JS .length.
+// ---------------------------------------------------------------------------
+
+/** Occurrences of the single character `ch` in `s` (no regex). */
+function countChar(s: string, ch: string): number {
+  let n = 0;
+  for (const c of s) if (c === ch) n++;
+  return n;
+}
+
+// 63232d42 / e245d316 (Haberport, 203): a heading line, then the body, cut mid-word.
+const HP_KUAFOR =
+  "Antakya Açıkdere'de mor eviyle fark yarattı:\nHatay'ın Antakya ilçesi Açıkdere Mahallesi'nde yaşayan Lütfiye Sönmez, en sevdiği renk olan mora boyattığı 3 katlı evinin ikinci katında açtığı kuaför salo...";
+// ed3f958f / f1b9797f (Haberport, 203): "ziyaret" glued to "İçişleri", cut after "ziyaret".
+const HP_ZIYARET =
+  "Selçuklu'da yerel yönetim ve hizmet odaklı ziyaretİçişleri Bakanı Mustafa Çiftçi, Konya programı çerçevesinde Selçuklu Belediyesi ile Selçuklu Otizmli Bireyler Eğitim Vakfı (SOBE) merkezlerini ziyaret...";
+// fca0a270 / 53586f51 (Haberport, 203): "label:Body", cut after "Resm".
+const HP_ONEM =
+  "ziyaretin önemi:Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor. Bu ziyaret, iki ülke arasındaki diplomasi ve ekonomik ilişkilerin detaylı şekilde ele alınacağı bir platform olarak değerlendiriliyor. Resm...";
+// d06b4a01 (Haberport, 202): a heading line and a body with one sentence end.
+const HP_GAZIANTEP =
+  "Gaziantep'te ulaşım hizmetlerinde dijital adım\nGaziantep Büyükşehir Belediyesi, ulaşım hizmetlerinde dijital dönüşümü genişletmeye devam ediyor. Ulaşım Daire Başkanlığı tarafından geliştirilen GURTAS...";
+// e8af07db (Haberport, 202): lower-case "label:Body" and a sentence end after the label.
+const HP_KAZA =
+  "kaza anı ve müdahale:Erzincan'ın Yavuz Selim Mahallesi'nde meydana gelen kazada, ara yoldan ana yola bisikletiyle çıkan E.S.'ye bir otomobil çarptı. Çevredeki vatandaşların ihbarı üzerine olay yerine...";
+// afd1a0be (Haberport, 202): lower-case label, then a sentence end.
+const HP_MAC =
+  "maç özeti:Nazilli Şehir Spor, 2. haftada sahasında konuk ettiği Sazlı Gençlikspor ile taraftarları önünde 0-0 berabere kaldı. Tribünlerin dolu olduğu karşılaşmada iki ekip de aradığı golü bulamayınca...";
+// afb9c9dd (Sözcü, 123): no sentence end.
+const SOZCU_RUTUBET =
+  "Kış aylarında dış cepheye bakan soğuk duvarlarda oluşan yoğuşma, zamanla gri küf lekelerine ve yoğun rutubet kokusuna yo...";
+// 6d20e07b (Sözcü, 123): one sentence end that keeps most of the text.
+const SOZCU_BALIK =
+  "Polonya'da düzenlenen balıkçılık turnuvasında oltaya takılan dev yayın balığı, büyüklüğüyle herkesi şaşkına çevirdi. Tam...";
+// fb5aff13 (Sözcü, 123): the cap fell inside an open quotation.
+const SOZCU_TIRNAK =
+  "Sermaye piyasalarındaki işlemlere yönelik yürütülen fon soruşturması kapsamında, \"suç işlemek amacıyla kurulan örgüte üy...";
+// 732cacbd (Daily Sabah, 183): no sentence end.
+const DS_BULGARIA =
+  "Incumbent Iliana Iotova has won Bulgaria's presidential runoff by a clear margin, according to official results published Monday, making her the country's first elected woman presi...";
+// 58f520c4 (Daily Sabah, 183): a sentence end, then an opened quotation.
+const DS_WARS =
+  "Wars triggered by Israeli provocations are exerting increased pressure on global energy prices and national economies, Vice President Cevdet Yılmaz said Monday. \"As a result of the...";
+// e5d77d31 (500 characters): the ingest clamp fell inside an open quotation.
+const E5D7_CLAMPED =
+  "\"Ekrem İmamoğlu çıkar amaçlı suç örgütü\" davasında beyanda bulunan iş insanları Nezih Barut, Alaattin Kameroğlu, Çetin Gül ve Selahattin Özgül şikayetçi oldu. Özgül, Bakırköy'deki bir alışveriş merkezinin yönetim kurulu başkanı olduğunu ifade ederek, \"Bakırköy Belediyesinin Bülent Kerimoğlu zamanında başlayan ve yaşatılan ıstırapları söylemek istiyorum. İstanbul Cumhuriyet Başsavcılığına hem mekanik hem dijital ortamda evrakı verdik. Bunlar hiç verilmemiş gibi uygulama yaptılar ve '197 milyon...";
+
+const H25_LIVE_RAW: ReadonlyArray<readonly [string, string]> = [
+  ["63232d42 haberport kuaför", HP_KUAFOR],
+  ["ed3f958f haberport ziyaret", HP_ZIYARET],
+  ["fca0a270 haberport önemi", HP_ONEM],
+  ["d06b4a01 haberport Gaziantep", HP_GAZIANTEP],
+  ["e8af07db haberport kaza", HP_KAZA],
+  ["afd1a0be haberport maç", HP_MAC],
+  ["afb9c9dd sözcü rutubet", SOZCU_RUTUBET],
+  ["6d20e07b sözcü balık", SOZCU_BALIK],
+  ["fb5aff13 sözcü tırnak", SOZCU_TIRNAK],
+  ["732cacbd daily sabah Bulgaria", DS_BULGARIA],
+  ["58f520c4 daily sabah wars", DS_WARS],
+  ["e5d77d31 clamp", E5D7_CLAMPED],
+];
+
+/** `len` characters of "kelime kelime ...": every cut falls inside a word. */
+function kelimeText(len: number): string {
+  return "kelime ".repeat(Math.ceil(len / 7)).slice(0, len);
+}
+
+/** `kelimeText(len)` whose last character is a letter (never a blank). */
+function midWord(len: number): string {
+  const text = kelimeText(len);
+  return text.endsWith(" ") ? text.slice(0, -1) + "x" : text;
+}
+
+/** A feed-capped text: `body` cut to `len - 3` characters, then "...". */
+function feedCapped(body: string, len: number): string {
+  expect(body.length).toBeGreaterThanOrEqual(len - 3);
+  return body.slice(0, len - 3) + "...";
+}
+
+describe("tidySummaryText outlet feed caps (h25-live-1)", () => {
+  it("the live fixtures have the lengths the outlets cap at", () => {
+    expect(HP_KUAFOR).toHaveLength(203);
+    expect(HP_ZIYARET).toHaveLength(203);
+    expect(HP_ONEM).toHaveLength(203);
+    expect(HP_GAZIANTEP).toHaveLength(202);
+    expect(HP_KAZA).toHaveLength(202);
+    expect(HP_MAC).toHaveLength(202);
+    expect(SOZCU_RUTUBET).toHaveLength(123);
+    expect(SOZCU_BALIK).toHaveLength(123);
+    expect(SOZCU_TIRNAK).toHaveLength(123);
+    expect(DS_BULGARIA).toHaveLength(183);
+    expect(DS_WARS).toHaveLength(183);
+  });
+
+  describe("live rows", () => {
+    it("63232d42: no sentence end, so the partial word goes and one ellipsis is added", () => {
+      const out = tidySummaryText(HP_KUAFOR);
+      expect(out).toBe(
+        "Antakya Açıkdere'de mor eviyle fark yarattı: Hatay'ın Antakya ilçesi Açıkdere Mahallesi'nde yaşayan Lütfiye Sönmez, en sevdiği renk olan mora boyattığı 3 katlı evinin ikinci katında açtığı kuaför…",
+      );
+      expect(out.endsWith("açtığı kuaför…")).toBe(true);
+      expect(countChar(out, "…")).toBe(1);
+      expect(out).not.toContain("...");
+    });
+
+    it("Sözcü 123 characters: 'rutubet kokusuna yo...' ends on the last whole word", () => {
+      expect(tidySummaryText(SOZCU_RUTUBET)).toBe(
+        "Kış aylarında dış cepheye bakan soğuk duvarlarda oluşan yoğuşma, zamanla gri küf lekelerine ve yoğun rutubet kokusuna…",
+      );
+    });
+
+    it("Sözcü 123 characters: the sentence end keeps most of the text, so the cut is there", () => {
+      expect(tidySummaryText(SOZCU_BALIK)).toBe(
+        "Polonya'da düzenlenen balıkçılık turnuvasında oltaya takılan dev yayın balığı, büyüklüğüyle herkesi şaşkına çevirdi.",
+      );
+    });
+
+    it("Daily Sabah 183 characters: no sentence end, partial word dropped", () => {
+      expect(tidySummaryText(DS_BULGARIA)).toBe(
+        "Incumbent Iliana Iotova has won Bulgaria's presidential runoff by a clear margin, according to official results published Monday, making her the country's first elected woman…",
+      );
+    });
+
+    it("Daily Sabah 183 characters: the sentence end before the opened quotation is the cut", () => {
+      expect(tidySummaryText(DS_WARS)).toBe(
+        "Wars triggered by Israeli provocations are exerting increased pressure on global energy prices and national economies, Vice President Cevdet Yılmaz said Monday.",
+      );
+    });
+
+    it("Haberport 202 characters: the sentence end after the heading line is the cut", () => {
+      expect(tidySummaryText(HP_GAZIANTEP)).toBe(
+        "Gaziantep'te ulaşım hizmetlerinde dijital adım Gaziantep Büyükşehir Belediyesi, ulaşım hizmetlerinde dijital dönüşümü genişletmeye devam ediyor.",
+      );
+    });
+
+    it("Sözcü 123 characters: the cap inside an open quotation cuts in front of the quotation", () => {
+      const out = tidySummaryText(SOZCU_TIRNAK);
+      expect(out).toBe("Sermaye piyasalarındaki işlemlere yönelik yürütülen fon soruşturması kapsamında…");
+      expect(countChar(out, '"') % 2).toBe(0);
+    });
+  });
+
+  describe("every cap length (synthetic)", () => {
+    // [length, whole words kept by the word cut, filler words in front of the sentence end,
+    //  whole words kept after a sentence end that is too early]
+    const CAPS: ReadonlyArray<readonly [number, number, number, number]> = [
+      [123, 17, 14, 16],
+      [183, 25, 22, 24],
+      [202, 28, 24, 27],
+      [203, 28, 24, 27],
+    ];
+
+    it.each(CAPS)("%i characters: the word cut drops the partial word and adds one ellipsis", (len, words) => {
+      const raw = feedCapped(kelimeText(len), len);
+      expect(raw).toHaveLength(len);
+      expect(raw.endsWith("...")).toBe(true);
+      expect(tidySummaryText(raw)).toBe("kelime ".repeat(words).trimEnd() + "…");
+    });
+
+    it.each(CAPS)("%i characters: a late sentence end wins over the word cut", (len, _w, filler) => {
+      const raw = feedCapped("kelime ".repeat(filler) + "Bitti. " + "kelime ".repeat(40), len);
+      expect(raw).toHaveLength(len);
+      expect(tidySummaryText(raw)).toBe("kelime ".repeat(filler) + "Bitti.");
+    });
+
+    it.each(CAPS)("%i characters: a sentence end under 60% does not count", (len, _w, _f, after) => {
+      const raw = feedCapped("Bitti. " + "kelime ".repeat(40), len);
+      expect(tidySummaryText(raw)).toBe("Bitti. " + "kelime ".repeat(after).trimEnd() + "…");
+    });
+
+    it.each(CAPS)("%i characters: a digit in front of the '...' is a cut as well", (len) => {
+      const raw = feedCapped("kelime ".repeat(40), len - 1).slice(0, len - 4) + "2...";
+      expect(raw).toHaveLength(len);
+      const out = tidySummaryText(raw);
+      expect(out.endsWith("…")).toBe(true);
+      expect(out).not.toContain("2");
+      expect(out).not.toContain("...");
+    });
+
+    it("the 60% bar is exact at a feed cap: 72 of 120 characters passes, 71 fails", () => {
+      const tail = " " + "kelime ".repeat(40);
+      // k characters through the full stop; the body is 120 characters long.
+      const kept = (k: number) => "a".repeat(k - 1) + "." + tail;
+      expect(tidySummaryText(feedCapped(kept(72), 123))).toBe("a".repeat(71) + ".");
+      const below = tidySummaryText(feedCapped(kept(71), 123));
+      expect(below.endsWith("…")).toBe(true);
+      expect(below.startsWith("a".repeat(70) + ". kelime")).toBe(true);
+    });
+  });
+
+  describe("left alone", () => {
+    it("a 150-character text ending 'Detaylar...' is not a cap length", () => {
+      const lead = "Yeni düzenleme bugün Resmi Gazete'de yayımlandı ve yürürlüğe girdi, ";
+      const raw = lead + "x".repeat(150 - lead.length - " Detaylar...".length) + " Detaylar...";
+      expect(raw).toHaveLength(150);
+      expect(tidySummaryText(raw)).toBe(raw);
+    });
+
+    it.each([100, 122, 124, 150, 182, 184, 201, 204, 300, 498, 501])(
+      "a %i-character text ending letter + '...' is not a signature",
+      (len) => {
+        const raw = midWord(len - 3) + "...";
+        expect(raw).toHaveLength(len);
+        expect(tidySummaryText(raw)).toBe(raw);
+      },
+    );
+
+    it.each([123, 183, 202, 203])(
+      "a %i-character text whose '...' follows a blank or punctuation is left to the CTA path (HEAD output)",
+      (len) => {
+        for (const before of [" ", ",", "?", "!", ")", ":", '"', "”", "-", "…"]) {
+          const raw = midWord(len - 3 - before.length) + before + "...";
+          expect(raw).toHaveLength(len);
+          // HEAD returned these as they are: no CTA phrase, no glue, no clamp.
+          expect(tidySummaryText(raw), JSON.stringify(before)).toBe(raw);
+        }
+      },
+    );
+
+    it.each([123, 183, 202, 203])("a %i-character text that does not end in '...' is left alone", (len) => {
+      for (const tail of ["xyz", "..", "…", "kelime.", "kelime.."]) {
+        const raw = kelimeText(len - tail.length) + tail;
+        expect(raw).toHaveLength(len);
+        expect(tidySummaryText(raw), tail).toBe(raw);
+      }
+    });
+
+    it("a 200-character cut followed by a CTA keeps the cut as the outlet wrote it (the signature is read off the raw input)", () => {
+      const cut =
+        "Libya Temsilciler Meclisinin, Türkiye ile imzalanan deniz yetki alanlarının sınırlandırılmasına ilişkin mutabakatı onaylayarak 2020 yılında aldığı boykot kararını kaldırması, Doğu Akdeniz'de yeni bir...";
+      expect(cut).toHaveLength(202);
+      expect(tidySummaryText(cut + "Devamı için tıklayınız")).toBe(cut);
+    });
+
+    it("a text of a cap length with a single-character ellipsis is left alone", () => {
+      const raw = kelimeText(202) + "…";
+      expect(raw).toHaveLength(203);
+      expect(tidySummaryText(raw)).toBe(raw);
+    });
+
+    it("the 499/500 clamp keeps its behaviour (word cut and sentence end)", () => {
+      expect(tidySummaryText(clamp("kelimeler ".repeat(60)))).toBe("kelimeler ".repeat(49).trimEnd() + "…");
+      expect(tidySummaryText(clamp("kelimeler ".repeat(40) + "Bitti. " + "yarımkalan ".repeat(20)))).toBe(
+        "kelimeler ".repeat(40) + "Bitti.",
+      );
+    });
+  });
+
+  it("is idempotent on every live row and every synthetic cap", () => {
+    for (const [id, raw] of H25_LIVE_RAW) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once), id).toBe(once);
+    }
+    for (const len of [123, 183, 202, 203]) {
+      for (const body of ["kelime ".repeat(40), "kelime ".repeat(20) + "Bitti. " + "kelime ".repeat(40)]) {
+        const once = tidySummaryText(feedCapped(body, len));
+        expect(tidySummaryText(once), `${len}`).toBe(once);
+      }
+    }
+  });
+});
+
+describe("tidySummaryText clamp repair and open quotes (h25-live-1, e5d77d31)", () => {
+  // 300 characters, "Bitti." ends at 306: 61.6% of the 497-character body.
+  const EARLY = "kelimeler ".repeat(30) + "Bitti. ";
+  const EARLY_OUT = "kelimeler ".repeat(30) + "Bitti.";
+
+  it("e5d77d31: the repair does not end inside the open quotation", () => {
+    expect(E5D7_CLAMPED).toHaveLength(500);
+    const out = tidySummaryText(E5D7_CLAMPED);
+    expect(countChar(out, '"') % 2).toBe(0);
+    expect(countChar(out, "“") + countChar(out, "«")).toBeLessThanOrEqual(countChar(out, "”") + countChar(out, "»"));
+    // The sentence end in front of the quotation keeps 31.8% of the text, too little,
+    // so the cut is in front of the quotation, with its dangling comma gone.
+    expect(out).toBe(E5D7_CLAMPED.slice(0, E5D7_CLAMPED.indexOf(', "Bakırköy Belediyesinin')) + "…");
+    expect(out.endsWith("ifade ederek…")).toBe(true);
+    expect(out).not.toContain("istiyorum");
+  });
+
+  describe("a sentence end inside an open quotation is not a cut", () => {
+    it.each([
+      ["“ ”", "“", "”"],
+      ["« »", "«", "»"],
+      ["‘ ’", "‘", "’"],
+    ])("%s: the sentence end in front of the opener wins", (_label, open) => {
+      const raw = clamp(EARLY + "kelimeler ".repeat(8) + `Dedi ki ${open}hazırız. Sonra ` + "yarımkalan ".repeat(20));
+      expect(tidySummaryText(raw)).toBe(EARLY_OUT);
+    });
+
+    it("a straight quotation is judged by parity", () => {
+      const raw = clamp(EARLY + "kelimeler ".repeat(8) + 'Dedi ki "hazırız. Sonra ' + "yarımkalan ".repeat(20));
+      expect(tidySummaryText(raw)).toBe(EARLY_OUT);
+    });
+
+    it("walks back over several rejected sentence ends", () => {
+      const raw = clamp(
+        EARLY + "kelimeler ".repeat(8) + 'Dedi ki “bir. İki. Üç. Dört ' + "yarımkalan ".repeat(20),
+      );
+      expect(tidySummaryText(raw)).toBe(EARLY_OUT);
+    });
+
+    it("a closed quotation followed by a sentence end still cuts at that end", () => {
+      for (const [open, close] of [
+        ["“", "”"],
+        ["«", "»"],
+        ["‘", "’"],
+        ['"', '"'],
+      ]) {
+        const raw = clamp(
+          "kelimeler ".repeat(30) + `Dedi ki ${open}hazırız${close} ve gitti. Sonra ` + "yarımkalan ".repeat(20),
+        );
+        expect(tidySummaryText(raw), open).toBe(
+          "kelimeler ".repeat(30) + `Dedi ki ${open}hazırız${close} ve gitti.`,
+        );
+      }
+    });
+
+    it("a sentence end that closes its quotation keeps the closing mark", () => {
+      for (const [open, close] of [
+        ["“", "”"],
+        ["«", "»"],
+        ['"', '"'],
+      ]) {
+        const raw = clamp(
+          "kelimeler ".repeat(30) + `Dedi ki ${open}hazırız.${close} Sonra ` + "yarımkalan ".repeat(20),
+        );
+        expect(tidySummaryText(raw), open).toBe("kelimeler ".repeat(30) + `Dedi ki ${open}hazırız.${close}`);
+      }
+    });
+
+    it("a quotation that opened and closed before the cut does not matter", () => {
+      const raw = clamp(
+        'Başlık "kapalı alıntı" burada. ' + "kelimeler ".repeat(40) + "Bitti. " + "yarımkalan ".repeat(20),
+      );
+      expect(tidySummaryText(raw)).toBe('Başlık "kapalı alıntı" burada. ' + "kelimeler ".repeat(40) + "Bitti.");
+    });
+  });
+
+  describe("the word cut does not end inside an open quotation either", () => {
+    it.each([
+      ["“", "”"],
+      ["«", "»"],
+      ["‘", "’"],
+      ['"', '"'],
+    ])("%s: cuts in front of the opener when that keeps enough, dropping the dangling comma", (open) => {
+      const raw = clamp("kelimeler ".repeat(30) + `Dedi ki, ${open}hazırız ` + "yarımkalan ".repeat(40));
+      expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(30) + "Dedi ki…");
+    });
+
+    it("a sentence end in front of the opener ends the cut without an ellipsis", () => {
+      const raw = clamp("kelimeler ".repeat(30) + 'Bitti. "hazırız ' + "yarımkalan ".repeat(40));
+      expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(30) + "Bitti.");
+    });
+
+    it("an opener too early to cut in front of keeps the word cut", () => {
+      const raw = clamp('Dedi ki "hazırız ' + "kelimeler ".repeat(60));
+      const out = tidySummaryText(raw);
+      expect(out.startsWith('Dedi ki "hazırız kelimeler')).toBe(true);
+      expect(out.endsWith("kelimeler…")).toBe(true);
+    });
+
+    it("the bar for the cut in front of an opener is 50%: 249 of 497 characters passes, 248 fails", () => {
+      const at = (n: number) => "a".repeat(n) + ' "' + "kelimeler ".repeat(40);
+      expect(tidySummaryText(clamp(at(249)))).toBe("a".repeat(249) + "…");
+      const below = tidySummaryText(clamp(at(248)));
+      expect(below.startsWith("a".repeat(248) + ' "kelimeler')).toBe(true);
+      expect(below.endsWith("kelimeler…")).toBe(true);
+    });
+
+    it("a balanced quotation in front of the cut is not an opener", () => {
+      const raw = clamp("kelimeler ".repeat(30) + 'Dedi ki "hazırız" ve ' + "yarımkalan ".repeat(40));
+      const out = tidySummaryText(raw);
+      expect(out.startsWith('kelimeler kelimeler')).toBe(true);
+      expect(out).toContain('"hazırız" ve yarımkalan');
+      expect(out.endsWith("yarımkalan…")).toBe(true);
+    });
+
+    it("two openers: the cut leaves a balanced text", () => {
+      const raw = clamp("kelimeler ".repeat(30) + "Dedi ki “bir ve “iki " + "yarımkalan ".repeat(40));
+      expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(30) + "Dedi ki…");
+    });
+
+    it("when no cut leaves the quotation closed and long enough, the repair is the one without the quote check (c526f480)", () => {
+      // The whole speech is one quotation that opens at 27% of the text: nothing
+      // balanced is long enough, so the last sentence end of the clamp stays.
+      const out = tidySummaryText(C526_CLAMPED);
+      expect(out.endsWith("sağlayacağız.")).toBe(true);
+      expect(countChar(out, '"') % 2).toBe(1);
+      // The same holds when the clamp holds no sentence end that keeps 60%.
+      const raw = clamp('Dedi ki "hazırız ' + "kelimeler ".repeat(60));
+      expect(tidySummaryText(raw)).toBe('Dedi ki "hazırız ' + "kelimeler ".repeat(48).trimEnd() + "…");
+    });
+  });
+
+  it("is idempotent on every quote case", () => {
+    const raws = [
+      E5D7_CLAMPED,
+      clamp(EARLY + "kelimeler ".repeat(8) + "Dedi ki “hazırız. Sonra " + "yarımkalan ".repeat(20)),
+      clamp(EARLY + "kelimeler ".repeat(8) + "Dedi ki «hazırız. Sonra " + "yarımkalan ".repeat(20)),
+      clamp(EARLY + "kelimeler ".repeat(8) + 'Dedi ki "hazırız. Sonra ' + "yarımkalan ".repeat(20)),
+      clamp("kelimeler ".repeat(30) + "Dedi ki, “hazırız " + "yarımkalan ".repeat(40)),
+      clamp("kelimeler ".repeat(30) + 'Bitti. "hazırız ' + "yarımkalan ".repeat(40)),
+      clamp('Dedi ki "hazırız ' + "kelimeler ".repeat(60)),
+      clamp("kelimeler ".repeat(30) + "Dedi ki “bir ve “iki " + "yarımkalan ".repeat(40)),
+      SOZCU_TIRNAK,
+    ];
+    for (const raw of raws) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once), once.slice(-40)).toBe(once);
+    }
+  });
+
+  it("a 500-character text of quotation marks only finishes at once and stays non-empty", () => {
+    const raw = clamp('"“«‘'.repeat(125));
+    const start = performance.now();
+    const out = tidySummaryText(raw);
+    expect(performance.now() - start).toBeLessThan(100);
+    expect(out).not.toBe("");
+  });
+});
+
+describe("tidySummaryText glued sub-headings (h25-live-2)", () => {
+  describe("a lower-case word glued to a capitalised one", () => {
+    it.each([
+      [
+        "Selçuklu'da yerel yönetim ve hizmet odaklı ziyaretİçişleri Bakanı Mustafa Çiftçi, Konya programı çerçevesinde merkezleri gezdi.",
+        "Selçuklu'da yerel yönetim ve hizmet odaklı ziyaret. İçişleri Bakanı Mustafa Çiftçi, Konya programı çerçevesinde merkezleri gezdi.",
+      ],
+      [
+        "Meclis komisyon üyelikleri yenilendiBüyükçekmece Belediye Meclisi toplandı.",
+        "Meclis komisyon üyelikleri yenilendi. Büyükçekmece Belediye Meclisi toplandı.",
+      ],
+      [
+        "Ortaköy'de çıkan yangınıÇorum'un ilçesinde bir ev kullanılamaz hale geldi.",
+        "Ortaköy'de çıkan yangını. Çorum'un ilçesinde bir ev kullanılamaz hale geldi.",
+      ],
+      [
+        "Savcılık yeni bir soruşturmaİstanbul Cumhuriyet Başsavcılığı tarafından başlatıldı.",
+        "Savcılık yeni bir soruşturma. İstanbul Cumhuriyet Başsavcılığı tarafından başlatıldı.",
+      ],
+      [
+        "Polis uyuşturucu operasyonMersin'de düzenlendi, 5 kişi gözaltına alındı.",
+        "Polis uyuşturucu operasyon. Mersin'de düzenlendi, 5 kişi gözaltına alındı.",
+      ],
+      ["gerilimSilivri'de yaşandı", "gerilim. Silivri'de yaşandı"],
+      ["değişimUlaştırma Bakanlığı açıkladı", "değişim. Ulaştırma Bakanlığı açıkladı"],
+      ["sonuçlarıErzurum’un en büyük", "sonuçları. Erzurum’un en büyük"],
+      ["hamlesiBodrum'da", "hamlesi. Bodrum'da"],
+    ])("splits %j", (input, expected) => {
+      expect(tidySummaryText(input)).toBe(expected);
+    });
+
+    it("splits every glue of one text, not only the first", () => {
+      expect(tidySummaryText("kaldırıldıYenişehir açıldıKayseri başladıKonya")).toBe(
+        "kaldırıldı. Yenişehir açıldı. Kayseri başladı. Konya",
+      );
+    });
+
+    it("splits when the lower-case word is the whole first token and after a line break", () => {
+      expect(tidySummaryText("ziyaretİçişleri Bakanı")).toBe("ziyaret. İçişleri Bakanı");
+      expect(tidySummaryText("Birinci satır.\nziyaretİçişleri Bakanı")).toBe("Birinci satır. ziyaret. İçişleri Bakanı");
+    });
+
+    it("needs three lower-case letters in front of the capital", () => {
+      for (const s of ["ab Cde", "iPhone 17", "eBay", "iMac", "iPad", "kWh", "mRNA", "mAh", "eVTOL", "beIN Sports"]) {
+        expect(tidySummaryText(s), s).toBe(s);
+      }
+    });
+
+    it("needs a lower-case letter after the capital, so an acronym is left alone", () => {
+      for (const s of ["toplantısıTBMM", "ettiAK Parti", "kutlamaCHP", "simgelerUNESCO", "çıkardıG20"]) {
+        expect(tidySummaryText(s), s).toBe(s);
+      }
+    });
+
+    it("the lower-case run must start the token: a capitalised word, a hashtag, a quote or a path is left alone", () => {
+      for (const s of [
+        "TürkçedeFaddey",
+        "#yerelSeçim",
+        '"ankaraBüyükşehir"',
+        "(açtıTürkiye)",
+        "@YelizzKoray",
+        "https://x.com/abcDef",
+        "tayfhaber.com/haberDetay",
+        "www.tayfhaber.com/haberDetay",
+        "dosya_adıDeğer",
+        "e-DevletKapısı",
+      ]) {
+        expect(tidySummaryText(s), s).toBe(s);
+      }
+    });
+
+    it("a CTA that was glued to the last word is stripped in the same call (idempotent)", () => {
+      const once = tidySummaryText("Toplantı tamamlandıDevamını oku");
+      expect(once).toBe("Toplantı tamamlandı.");
+      expect(tidySummaryText(once)).toBe(once);
+    });
+  });
+
+  describe("a leading lower-case label glued to its body", () => {
+    it("ziyaretin önemi:Cumhurbaşkanı ... drops the label", () => {
+      expect(tidySummaryText("ziyaretin önemi:Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor.")).toBe(
+        "Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor.",
+      );
+    });
+
+    it("drops a label of up to 81 characters and keeps one that is longer", () => {
+      const label = (n: number) => "a" + "b".repeat(n - 1);
+      expect(tidySummaryText(`${label(81)}:Bakan açıkladı`)).toBe("Bakan açıkladı");
+      expect(tidySummaryText(`${label(82)}:Bakan açıkladı`)).toBe(`${label(82)}: Bakan açıkladı`);
+    });
+
+    it.each([
+      ["ilk cümle. ikinci:Bakan açıkladı", "ilk cümle. ikinci: Bakan açıkladı"],
+      ["soru? cevap:Bakan açıkladı", "soru? cevap: Bakan açıkladı"],
+      ["dedi! sonra:Bakan açıkladı", "dedi! sonra: Bakan açıkladı"],
+      ["bekle… sonra:Bakan açıkladı", "bekle… sonra: Bakan açıkladı"],
+    ])("keeps a label that holds a sentence mark: %j", (input, expected) => {
+      expect(tidySummaryText(input)).toBe(expected);
+    });
+
+    it("keeps a text that starts with a capital or a digit", () => {
+      expect(tidySummaryText("Ziyaretin önemi:Cumhurbaşkanı Erdoğan gidiyor")).toBe(
+        "Ziyaretin önemi: Cumhurbaşkanı Erdoğan gidiyor",
+      );
+      expect(tidySummaryText("2026 bütçesi:Maliye Bakanı açıkladı")).toBe("2026 bütçesi: Maliye Bakanı açıkladı");
+    });
+
+    it("needs a capital right after the colon", () => {
+      for (const s of ["ziyaretin önemi: Cumhurbaşkanı Erdoğan", "ziyaretin önemi:cumhurbaşkanı", "saat 10:30'da"]) {
+        expect(tidySummaryText(s), s).toBe(s);
+      }
+    });
+  });
+
+  describe("a lower-case word, a colon and a capital in the middle of a text", () => {
+    it("önemi:Cumhurbaşkanı -> önemi: Cumhurbaşkanı", () => {
+      expect(tidySummaryText("Ziyaretin önemi:Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor.")).toBe(
+        "Ziyaretin önemi: Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor.",
+      );
+      expect(tidySummaryText("Marmaris'te kasım ayı kruvaziyer programı açıklandı:Muğla'nın turizm merkezleri")).toBe(
+        "Marmaris'te kasım ayı kruvaziyer programı açıklandı: Muğla'nın turizm merkezleri",
+      );
+    });
+
+    it("leaves digits, times and scores alone", () => {
+      for (const s of ["Maç saat 10:30'da", "Saat 14:30", "Skor 2:1", "Skor 2:Bir", "TBMM'de", "NOT:Bu"]) {
+        expect(tidySummaryText(s), s).toBe(s);
+      }
+    });
+  });
+
+  describe("live rows", () => {
+    it("ed3f958f: the cap and the glue are both repaired", () => {
+      expect(tidySummaryText(HP_ZIYARET)).toBe(
+        "Selçuklu'da yerel yönetim ve hizmet odaklı ziyaret. İçişleri Bakanı Mustafa Çiftçi, Konya programı çerçevesinde Selçuklu Belediyesi ile Selçuklu Otizmli Bireyler Eğitim Vakfı (SOBE) merkezlerini…",
+      );
+    });
+
+    it("fca0a270: the cap keeps the last sentence and the label goes", () => {
+      expect(tidySummaryText(HP_ONEM)).toBe(
+        "Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor. Bu ziyaret, iki ülke arasındaki diplomasi ve ekonomik ilişkilerin detaylı şekilde ele alınacağı bir platform olarak değerlendiriliyor.",
+      );
+    });
+
+    it("e8af07db: a lower-case label in front of a body with a sentence end", () => {
+      expect(tidySummaryText(HP_KAZA)).toBe(
+        "Erzincan'ın Yavuz Selim Mahallesi'nde meydana gelen kazada, ara yoldan ana yola bisikletiyle çıkan E.S.'ye bir otomobil çarptı.",
+      );
+    });
+
+    it("afd1a0be: a lower-case label whose body keeps its sentence end", () => {
+      const out = tidySummaryText(HP_MAC);
+      expect(out.startsWith("Nazilli Şehir Spor, 2. haftada")).toBe(true);
+      expect(out).not.toContain("özeti:");
+      expect(out).not.toContain("...");
+    });
+
+    it("e245d316: a sub-heading followed by a line break is untouched by the glue steps", () => {
+      expect(tidySummaryText("Antakya Açıkdere'de mor eviyle fark yarattı:\nHatay'ın Antakya ilçesi")).toBe(
+        "Antakya Açıkdere'de mor eviyle fark yarattı: Hatay'ın Antakya ilçesi",
+      );
+    });
+  });
+
+  describe("brands, names, URLs and times stay byte-identical", () => {
+    const NEGATIVES: readonly string[] = [
+      // From the 7-day scan of live cluster summaries (hand-classified as brands).
+      "BirGün",
+      "BirGün gazetesi bugün yayımlandı.",
+      "BirGün’ün haberine göre",
+      "YouTube",
+      "YouTube'da yayınlanan video",
+      "“YouTube'da paylaştı”",
+      "MasterChef'te",
+      "MasterChef’te yarışan",
+      "“MasterChef Türkiye” finali",
+      "VakıfBank,",
+      "VakıfBank, Halkbank'ı geçti.",
+      "EuroLeague",
+      "EuroLeague'in 10. haftası",
+      "iPhone",
+      "iPhone 17 satışa çıktı",
+      "iPhone'un yeni modeli",
+      "BioWare'i satın aldı",
+      "ChildGen'i geliştirdi",
+      "TraderTraitor saldırısı",
+      '"TraderTraitor" grubu',
+      "@YelizzKoray",
+      "@YelizzKoray, dedi",
+      "WhatsApp, TikTok ve ChatGPT",
+      "PlayStation 5, MacBook Air ve PlayStation",
+      "beIN Sports yayınladı",
+      "BeIN Sports",
+      "AstraZeneca, BioNTech ve BlackRock",
+      "OpenAI’nin ChatGPT'si",
+      "SpaceX roketi fırlattı",
+      "GmbH'nin",
+      "McGinnis, dedi",
+      "ShiftDelete.net'in haberi",
+      "BayraktarTB2’den atış yapıldı",
+      "NeodraDynamics, açıkladı",
+      "DevOps ekibi",
+      "iMac, iPad ve kWh",
+      "mRNA aşısı 5000 mAh pil eVTOL",
+      "SözcüTV’nin",
+      // URLs and paths.
+      "https://x.com/abcDef",
+      "Detaylar https://x.com/abcDef adresinde",
+      "tayfhaber.com/haberDetay",
+      "Bkz. tayfhaber.com/haberDetay sayfası",
+      "https://t.co/g5McIyrZt3",
+      "https://t.co/g5McIyrZt3—",
+      // Times, scores, abbreviations, hashtags.
+      "saat 10:30'da",
+      "Maç saat 10:30'da başlayacak",
+      "14:30",
+      "2:1",
+      "TBMM'de",
+      "T.C.",
+      "T.C. Cumhurbaşkanlığı",
+      "A.Ş.",
+      "A.Ş.'nin",
+      "#yerelSeçim",
+      "#yerelSeçim hakkında",
+      "#MilliTeknolojiHamlesi",
+    ];
+
+    it.each(NEGATIVES)("leaves %j untouched", (s) => {
+      expect(tidySummaryText(s)).toBe(s);
+    });
+  });
+
+  it("is idempotent on every glue fixture and every output", () => {
+    const inputs = [
+      "Selçuklu'da yerel yönetim ve hizmet odaklı ziyaretİçişleri Bakanı Mustafa Çiftçi, Konya",
+      "Meclis komisyon üyelikleri yenilendiBüyükçekmece Belediye Meclisi toplandı.",
+      "Ortaköy'de çıkan yangınıÇorum'un ilçesinde bir ev kullanılamaz hale geldi.",
+      "Savcılık yeni bir soruşturmaİstanbul Cumhuriyet Başsavcılığı",
+      "Polis uyuşturucu operasyonMersin'de düzenlendi",
+      "ziyaretin önemi:Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor.",
+      "Ziyaretin önemi:Cumhurbaşkanı Erdoğan Güney Kore'ye gidiyor.",
+      "a:B c:D e:F",
+      "abcDef ghi:Jkl mnoPqr:Stu",
+      "abc:Def:Ghi",
+      "Toplantı tamamlandıDevamını oku",
+      "kaldırıldıYenişehir açıldıKayseri başladıKonya",
+      "odaklıZiyaret:Cumhurbaşkanı Erdoğan",
+      ...H25_LIVE_RAW.map(([, raw]) => raw),
+    ];
+    for (const x of inputs) {
+      const once = tidySummaryText(x);
+      expect(tidySummaryText(once), JSON.stringify(x)).toBe(once);
+    }
+  });
+
+  it("runs in linear time on 200k-character inputs", () => {
+    const inputs = [
+      "a".repeat(200_000),
+      "a".repeat(200_000) + "Bc",
+      "ab:".repeat(66_667),
+      "ab:A ".repeat(40_000),
+      "aaaB ".repeat(40_000),
+      "abcdefghij".repeat(20_000),
+      "a ".repeat(100_000),
+      "a:".repeat(100_000),
+      "ç".repeat(100_000) + "İ" + "ç".repeat(100_000),
+      "a" + " ".repeat(200_000) + "bcD",
+    ];
+    const start = performance.now();
+    for (const s of inputs) tidySummaryText(s);
+    expect(performance.now() - start).toBeLessThan(1500);
+    expect(tidySummaryText("a".repeat(200_000) + "Bc")).toBe("a".repeat(200_000) + ". Bc");
   });
 });
