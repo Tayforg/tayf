@@ -30,6 +30,17 @@ const ACTIVE_TAB_CLASS =
 const INACTIVE_TAB_CLASS =
   "min-h-[44px] rounded-lg border px-4 py-2 text-sm font-medium transition-colors border-border/60 hover:bg-accent focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring";
 
+// One-line explainer under the tab group for the active mode (h28-journey-2:
+// these used to be two paragraphs in a card above the tabs, which pushed
+// "Başla" below the fold on a phone). Bölge has none: its round explains
+// itself. Informal "sen" register, like the rest of /oyun.
+const MODE_CAPTION: Partial<Record<OyunMode, string>> = {
+  cerceve:
+    "Çerçeve modunda kaynağı değil, başlığın kendisini değerlendiriyorsun: bu başlık kimin lehine yazılmış?",
+  gunluk:
+    "Günün Tayf\u2019ı modunda herkes aynı 5 manşeti görür: dünün kapanmış penceresinden seçilen, günün başında herkes için sabit bir bulmaca.",
+};
+
 /**
  * "use client" mode switch between /oyun's three games: Bölge (zone-guess,
  * existing), Çerçeve (framing-vote, R10) and Günün Tayf'ı (daily 5-headline
@@ -63,33 +74,47 @@ export function OyunModes({
     setOpened((prev) => (prev.has(m) ? prev : new Set([...prev, m])));
   };
 
+  const caption = MODE_CAPTION[mode];
+
   return (
     <div className="space-y-6">
-      <div role="group" aria-label="Oyun modu" className="grid grid-cols-3 gap-2">
-        <button
-          type="button"
-          aria-pressed={mode === "bolge"}
-          onClick={() => selectMode("bolge")}
-          className={mode === "bolge" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
+      <div className="space-y-2">
+        <div
+          role="group"
+          aria-label="Oyun modu"
+          aria-describedby={caption ? "oyun-mod-aciklama" : undefined}
+          className="grid grid-cols-3 gap-2"
         >
-          Bölge
-        </button>
-        <button
-          type="button"
-          aria-pressed={mode === "cerceve"}
-          onClick={() => selectMode("cerceve")}
-          className={mode === "cerceve" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
-        >
-          Çerçeve
-        </button>
-        <button
-          type="button"
-          aria-pressed={mode === "gunluk"}
-          onClick={() => selectMode("gunluk")}
-          className={mode === "gunluk" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
-        >
-          Günün Tayf&rsquo;ı
-        </button>
+          <button
+            type="button"
+            aria-pressed={mode === "bolge"}
+            onClick={() => selectMode("bolge")}
+            className={mode === "bolge" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
+          >
+            Bölge
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === "cerceve"}
+            onClick={() => selectMode("cerceve")}
+            className={mode === "cerceve" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
+          >
+            Çerçeve
+          </button>
+          <button
+            type="button"
+            aria-pressed={mode === "gunluk"}
+            onClick={() => selectMode("gunluk")}
+            className={mode === "gunluk" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
+          >
+            Günün Tayf&rsquo;ı
+          </button>
+        </div>
+        {caption ? (
+          <p id="oyun-mod-aciklama" className="text-[12px] leading-snug text-muted-foreground">
+            {caption}
+          </p>
+        ) : null}
       </div>
 
       {opened.has("bolge") && (

@@ -14,6 +14,7 @@ import {
   isExtractiveModelId,
   isGenericTitle,
   loadedPenalty,
+  lowerCaseSourced,
   lowercaseLeak,
   pickNeutralTitle,
   recaseFromSiblings,
@@ -2139,18 +2140,21 @@ describe("h27-copy-2: siblingCapitalForms", () => {
 });
 
 describe("h27-copy-2: recaseFromSiblings", () => {
+  // h28: the siblings of these tests name the two countries with a comma, not
+  // 'Türkiye ve Japonya': a pair joined by 've' is a bridged run and no longer
+  // counts as capital evidence (see "h28-live-2: capital evidence ...").
   it("recases the stem of a lower-case word and keeps the suffix after an apostrophe", () => {
     expect(
-      recaseFromSiblings("Heyet türkiye’yi ziyaret etti", ["Heyet Türkiye ve Japonya'yı ziyaret etti"]),
+      recaseFromSiblings("Heyet türkiye’yi ziyaret etti", ["Heyet Türkiye, Japonya'yı ziyaret etti"]),
     ).toBe("Heyet Türkiye’yi ziyaret etti");
     expect(
-      recaseFromSiblings("Heyet türkiye'yi ziyaret etti", ["Heyet Türkiye ve Japonya'yı ziyaret etti"]),
+      recaseFromSiblings("Heyet türkiye'yi ziyaret etti", ["Heyet Türkiye, Japonya'yı ziyaret etti"]),
     ).toBe("Heyet Türkiye'yi ziyaret etti");
   });
 
   it("keeps the suffix's own case ('türkiye’YI' stays 'Türkiye’YI') and the edge punctuation", () => {
     expect(
-      recaseFromSiblings("Heyet (türkiye’YI), japonya: gitti", ["Heyet Türkiye ve Japonya gitti"]),
+      recaseFromSiblings("Heyet (türkiye’YI), japonya: gitti", ["Heyet Türkiye, Japonya gitti"]),
     ).toBe("Heyet (Türkiye’YI), Japonya: gitti");
   });
 
@@ -2160,7 +2164,7 @@ describe("h27-copy-2: recaseFromSiblings", () => {
 
   it("recases every part of a hyphenated compound", () => {
     expect(
-      recaseFromSiblings("Heyet türkiye-japonya ilişkilerini görüştü", ["Heyet Türkiye ve Japonya gitti"]),
+      recaseFromSiblings("Heyet türkiye-japonya ilişkilerini görüştü", ["Heyet Türkiye, Japonya gitti"]),
     ).toBe("Heyet Türkiye-Japonya ilişkilerini görüştü");
   });
 
@@ -2326,10 +2330,240 @@ describe("h27-copy-2: hostile input stays cheap", () => {
     expect(performance.now() - t0).toBeLessThan(1000);
   });
 
+  it("2 MB of quote openers, bridged runs and exclamation runs is read only up to a bound", () => {
+    const t0 = performance.now();
+    siblingCapitalForms([
+      `Heyet ${'"Soyut '.repeat(250_000)}`,
+      `Heyet ${"Aile ve Kadın ".repeat(150_000)}`,
+      `Heyet ${"Net Mesaj! ".repeat(200_000)}`,
+      `Heyet ${"Berlin ".repeat(300_000)}Mesaj!`,
+    ]);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+
   it("a title over 1000 characters is returned as written (never an acceptable headline)", () => {
     const long = `Heyet türkiye’yi ziyaret etti ${"x ".repeat(600)}`;
     expect(long.length).toBeGreaterThan(1000);
-    expect(recaseFromSiblings(long, ["Heyet Türkiye ve Japonya gitti"])).toBe(long);
-    expect(lowercaseLeak(long, ["Heyet Türkiye ve Japonya gitti"])).toBe(false);
+    expect(recaseFromSiblings(long, ["Heyet Türkiye, Japonya gitti"])).toBe(long);
+    expect(lowercaseLeak(long, ["Heyet Türkiye, Japonya gitti"])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h28-live-2: #176 capitalised common nouns on neutral titles
+// ---------------------------------------------------------------------------
+// Six clusters (member titles read-only from cluster_articles x articles,
+// 2026-11-02; the full sets are in tests/fixtures/neutral-title-h28-recase.json)
+// whose candidate opens with a capital and was never lower-case-sourced still
+// shipped "Net Mesaj", "Kadın ... Aile", "Soyut Resim", "Acil Sağlık": the
+// second isOddOneOut branch (two disagreeing words and more than agreeing ones)
+// recased a sentence-case title from a Title Case or quoted sibling. For 85deda69
+// the recasing made the candidate odd, the leak guard rejected it, and a more
+// sensational member won. The rule is now: only a title the outlet wrote in
+// lower case (or a speaker label followed by a lower-case body) is recased.
+
+const TDT_SIBLING = "TDT Aile ve Kadın Konseyi için anlamlı adım! Lider eşleri destek verdi";
+const TDT_OWN = "Türk dünyasının kadın liderlerinden aile ve kadın için ortak vizyon";
+
+describe("h28-live-2: lowerCaseSourced", () => {
+  it.each([
+    ["a title that opens in lower case", "avrupa, türkiye’yi stratejik ortak olarak görmeli çağrısı berlinden yükseldi"],
+    ["a speaker label followed by a lower-case body", TOKYO_LOWER],
+    ["a shouted label followed by a lower-case body", "SON DAKİKA: türkiye ile japonya ilişkileri güçleniyor"],
+    ["a one-word label", "Erdoğan: türkiye ile japonya ilişkileri güçleniyor"],
+    ["a three-word label", "Dışişleri Bakanı Fidan: türkiye ile japonya ilişkileri güçleniyor"],
+    ["leading whitespace", "   avrupa türkiye’yi ortak görmeli"],
+  ])("is true for %s", (_name, title) => {
+    expect(lowerCaseSourced(title)).toBe(true);
+  });
+
+  it.each([
+    ["a label followed by a capital", "İddia: Vali yardımcısının intihar sebebi yasak aşk"],
+    ["a number first", "378 acil sağlık ekibi sahada"],
+    ["a sentence-case title", "Vali yardımcısının ölümünde yeni iddia: Başsavcı vekili açığa alındı"],
+    ["a sentence-case title with no colon", "Türk dünyasının kadın liderlerinden aile ve kadın için ortak vizyon"],
+    ["a label of four words", "Vali yardımcısının ölümünde yeni iddia: başsavcı vekili açığa alındı"],
+    ["a label with a lower-case word", "Bilal erdoğan: türkiye ile japonya ilişkileri güçleniyor"],
+    ["a colon after the 40th character", "Abcdefghijklmnopqrstuvwxyz Abcdefghijklmnopqrstuvwxyz: türkiye ile japonya"],
+    ["a number after the colon", "Erdoğan: 39 şüpheli gözaltına alındı"],
+    ["a label with nothing after it", "Erdoğan:"],
+    ["an empty title", ""],
+    ["a blank title", "   "],
+  ])("is false for %s", (_name, title) => {
+    expect(lowerCaseSourced(title)).toBe(false);
+  });
+});
+
+describe("h28-live-2: capital evidence skips bridged runs, exclamation runs and quotes", () => {
+  it("a run bridged by 've' is not evidence: 'TDT Aile ve Kadın Konseyi' says nothing about 'aile' or 'kadın'", () => {
+    const forms = siblingCapitalForms([TDT_SIBLING]);
+    expect(forms.has("aile")).toBe(false);
+    expect(forms.has("kadın")).toBe(false);
+  });
+
+  it.each(["ve", "ile", "için", "veya"])("a run bridged by '%s' is not evidence", (connector) => {
+    const forms = siblingCapitalForms([`Heyet gitti Berlin ${connector} Roma yolunda`]);
+    expect(forms.has("berlin")).toBe(false);
+    expect(forms.has("roma")).toBe(false);
+  });
+
+  it("a bridged run does not hide a name elsewhere in the title", () => {
+    const forms = siblingCapitalForms(["TDT Aile ve Kadın Konseyi toplandı, Berlin'de ortak vizyon açıkladı"]);
+    expect(forms.get("berlin")).toBe("Berlin");
+    expect(forms.has("aile")).toBe(false);
+  });
+
+  it("two capitalised words with no connector between them stay evidence", () => {
+    const forms = siblingCapitalForms(["Fuat Oktay Berlin'de Avrupa'dan Türkiye'yi stratejik ortak görmesini istedi"]);
+    expect(forms.get("berlin")).toBe("Berlin");
+    expect(forms.get("avrupa")).toBe("Avrupa");
+    expect(forms.get("türkiye")).toBe("Türkiye");
+    expect(forms.get("oktay")).toBe("Oktay");
+  });
+
+  it("a connector next to a lower-case word bridges nothing", () => {
+    const forms = siblingCapitalForms(["Heyet gitti Berlin ve ankara yolunda"]);
+    expect(forms.get("berlin")).toBe("Berlin");
+  });
+
+  it("a run that ends with '!' is not evidence: \"Erdoğan'dan Net Mesaj!\"", () => {
+    const forms = siblingCapitalForms(["Erdoğan'dan Net Mesaj!"]);
+    expect(forms.has("net")).toBe(false);
+    expect(forms.has("mesaj")).toBe(false);
+    const live = siblingCapitalForms(['Cumhurbaşkanı Erdoğan\'dan Net Mesaj! "Büyük milletlerin imtihanı büyük olur"']);
+    expect(live.has("net")).toBe(false);
+    expect(live.has("mesaj")).toBe(false);
+  });
+
+  it("a single capitalised word before '!' is still evidence", () => {
+    expect(siblingCapitalForms(["Heyet gitti Berlin! Gerçekten güzel"]).get("berlin")).toBe("Berlin");
+  });
+
+  it("a run that ends with ':' stays evidence, so a speaker label keeps its name", () => {
+    const forms = siblingCapitalForms(["Heyet toplandı. Bilal Erdoğan: stratejik ortaklık dedi"]);
+    expect(forms.get("erdoğan")).toBe("Erdoğan");
+  });
+
+  it("a comma splits runs: the '!' only judges its own run", () => {
+    const forms = siblingCapitalForms(["Heyet gitti Roma'ya, Berlin Ankara Net Mesaj! verdi diye haber çıktı"]);
+    expect(forms.has("net")).toBe(false);
+    expect(forms.has("berlin")).toBe(false);
+    expect(forms.get("roma")).toBe("Roma");
+  });
+
+  it("words inside a quoted span are not evidence, a name outside it still is", () => {
+    const sibling =
+      "\"Hikayenin En Güzel Yeri: Türkiye'de Soyut Resim\" sergisi İstanbul'da sanatseverlerle buluştu";
+    const forms = siblingCapitalForms([sibling]);
+    expect(forms.has("soyut")).toBe(false);
+    expect(forms.has("resim")).toBe(false);
+    expect(forms.has("türkiye")).toBe(false);
+    expect(forms.get("istanbul")).toBe("İstanbul");
+
+    const outside = siblingCapitalForms([
+      "Heyet Türkiye'de \"Hikayenin En Güzel Yeri: Soyut Resim\" sergisini gezdi",
+    ]);
+    expect(outside.get("türkiye")).toBe("Türkiye");
+    expect(outside.has("soyut")).toBe(false);
+    expect(outside.has("resim")).toBe(false);
+  });
+
+  it.each([
+    ["curly double quotes", "Heyet “Soyut Resim” sergisini gezdi"],
+    ["guillemets", "Heyet «Soyut Resim» sergisini gezdi"],
+    ["curly single quotes", "Heyet ‘Soyut Resim’ sergisini gezdi"],
+    ["straight single quotes", "Heyet 'Soyut Resim' sergisini gezdi"],
+    ["a closing quote followed by a comma", 'Heyet "Soyut Resim", dedi, sergiyi gezdi'],
+    ["a closing quote followed by a full stop", 'Heyet gitti "Soyut Resim". Sergiyi gezdi'],
+  ])("a span in %s is skipped", (_name, title) => {
+    const forms = siblingCapitalForms([title]);
+    expect(forms.has("soyut")).toBe(false);
+    expect(forms.has("resim")).toBe(false);
+  });
+
+  it("a name after a closed span is evidence again", () => {
+    expect(siblingCapitalForms(['Heyet "Soyut Resim" sergisini Berlin\'de gezdi']).get("berlin")).toBe("Berlin");
+    expect(siblingCapitalForms(['Heyet "Soyut Resim", dedi ve sonra Berlin\'de gezdi']).get("berlin")).toBe("Berlin");
+  });
+
+  it("an unclosed span runs to the end of the title; a mid-token apostrophe does not close it", () => {
+    const forms = siblingCapitalForms(["Heyet Berlin'de \"Soyut Resim Hikayesi'ni izledi sonra Roma'da konuştu"]);
+    expect(forms.get("berlin")).toBe("Berlin");
+    expect(forms.has("soyut")).toBe(false);
+    expect(forms.has("resim")).toBe(false);
+    expect(forms.has("roma")).toBe(false);
+  });
+
+  it("lower-case evidence inside a quote still counts", () => {
+    const forms = siblingCapitalForms(["Heyet Berlin'de gezdi", 'Heyet "dedi ki berlin yolunda" gitti']);
+    expect(forms.has("berlin")).toBe(false);
+  });
+
+  it("an apostrophe inside a word is not a quote: \"Erdoğan'dan Berlin'de ...\" opens no span", () => {
+    const forms = siblingCapitalForms(["Heyet geçen hafta Erdoğan'dan sonra Berlin'de Roma'da Madrid'e konuştu"]);
+    expect(forms.get("berlin")).toBe("Berlin");
+    expect(forms.get("roma")).toBe("Roma");
+  });
+});
+
+describe("h28-live-2: a title that opens with a capital is not recased", () => {
+  it("a lower-case variant of the TDT title is not recased from the Title Case sibling", () => {
+    const lower = "türk dünyasının kadın liderlerinden aile ve kadın için ortak vizyon";
+    expect(recaseFromSiblings(lower, [TDT_SIBLING])).toBe(lower);
+    expect(recaseFromSiblings(cleanHeadline(lower), [TDT_SIBLING])).toBe(cleanHeadline(lower));
+    for (const members of [asTitles([lower, TDT_SIBLING]), asTitles([TDT_SIBLING, lower])]) {
+      for (const opts of [{}, { floor: true }]) {
+        const picked = pickNeutralTitle(members, opts);
+        expect(picked).not.toBeNull();
+        expect(picked).not.toMatch(/Kadın liderlerinden|Aile ve Kadın için/);
+      }
+    }
+  });
+
+  it("the sentence-case TDT title ships exactly as written", () => {
+    expect(pickNeutralTitle(asTitles([TDT_OWN, TDT_SIBLING]), { floor: true })).toBe(TDT_OWN);
+    expect(pickNeutralTitle(asTitles([TDT_SIBLING, TDT_OWN]), { floor: true })).toBe(TDT_OWN);
+  });
+
+  it("a candidate that opens with a capital keeps two lower-case words a sibling capitalises", () => {
+    // Not a speaker label and not lower-case-sourced: the old second branch
+    // (two disagreeing words, none agreeing) recased 'japonya' and 'türkiye'.
+    const own = "Türkiye ile japonya ilişkileri tokyo ziyaretinde stratejik ortaklığa doğru ilerliyor";
+    const picked = pickNeutralTitle(asTitles([own, TOKYO_PROPER]));
+    expect(picked).toBe(own);
+    expect(pickNeutralTitle(asTitles([own, TOKYO_PROPER]), { floor: true })).toBe(own);
+  });
+
+  it("a long label is not a speaker label: the body is left as the outlet wrote it", () => {
+    const own = "Vali yardımcısının ölümünde yeni iddia: başsavcı vekili açığa alındı";
+    const sibling = "Afyon Vali Yardımcısı’nın intiharı sonrası Başsavcı Vekili açığa alındı";
+    expect(pickNeutralTitle(asTitles([own, sibling]))).toBe(cleanHeadline(own));
+  });
+
+  it("85deda69: a recased candidate no longer makes the leak guard swap in a more sensational member", () => {
+    const own = "Vali yardımcısının ölümünde yeni iddia: Başsavcı vekili açığa alındı";
+    const members = asTitles([
+      "İddia: Vali yardımcısının intihar sebebi yasak aşk",
+      "İhsan Ayrancı Eşi Sevgi Ayrancı kimdir? Afyonkarahisar Vali Yardımcısı neden öldü?",
+      "Afyonkarahisar Vali Yardımcısı İhsan Ayrancı'nın intiharının ardından dikkat çeken iddia!",
+      own,
+      "Afyon Vali Yardımcısı’nın intiharının nedeni yasak ilişki mi?: Eşi cenazeye katılmadı, Başsavcı Vekili açığa alındı",
+    ]);
+    expect(pickNeutralTitle(members, { floor: true })).toBe(own);
+  });
+
+  it("27421789: a sibling's 'Sağlık Bakanı Osmonov:' does not capitalise 'sağlık' in the sentence-case title", () => {
+    // Found in the hunter's second replay set (read-only, 2026-11-02): HEAD shipped
+    // 'Kırgız Sağlık bakanının Türkiye yolculuğu: ...'.
+    const own = "Kırgız sağlık bakanının Türkiye yolculuğu: öğrencilikten onura uzanan hikâye";
+    const sibling =
+      'Kırgızistan Sağlık Bakanı Osmonov: "Türkiye topraklarında bu kez Kırgızistan Sağlık Bakanı olarak bulunmak beni gururlandırdı"';
+    expect(pickNeutralTitle(asTitles([own, sibling]), { floor: true })).toBe(own);
+    expect(pickNeutralTitle(asTitles([own, sibling]))).toBe(own);
+  });
+
+  it("the h27 rule is intact: a speaker label with a lower-case body is recased from the sibling", () => {
+    expect(pickNeutralTitle(asTitles([TOKYO_LOWER, TOKYO_PROPER]))).toBe(TOKYO_RECASED);
+    expect(pickNeutralTitle(asTitles([TOKYO_PROPER, TOKYO_LOWER]), { floor: true })).toBe(TOKYO_PROPER);
   });
 });

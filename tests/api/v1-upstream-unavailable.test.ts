@@ -142,6 +142,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+/** What postgrest-js builds when AbortSignal.timeout fires while res.text() is reading. */
+const TIMEOUT_MESSAGE = "TimeoutError: The operation was aborted due to timeout";
+
 async function expectUnavailableBody(res: Response) {
   expect(res.status).toBe(503);
   expect(res.headers.get("Retry-After")).toBe("30");
@@ -231,6 +234,21 @@ describe("GET /api/v1/clusters: a database outage is a 503", () => {
     await expectUnavailableBody(res);
   });
 
+  it("a body-phase timeout ('TimeoutError: ...', status 0, empty code) answers 503", async () => {
+    state.clustersResult = {
+      data: null,
+      error: { message: TIMEOUT_MESSAGE, details: "", hint: "", code: "" },
+      status: 0,
+    };
+    const { GET } = await import("@/app/api/v1/clusters/route");
+
+    const res = await GET(clustersRequest());
+
+    await expectUnavailableBody(res);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("X-Tayf-Tier")).toBe("free");
+  });
+
   it("any other read error stays a sanitised 500 with the v1 headers", async () => {
     state.clustersResult = {
       data: null,
@@ -292,6 +310,46 @@ describe("a gateway answer with no PostgREST code is a 503 on every keyed read",
       await expectUnavailableBody(res);
     },
   );
+
+  it("GET /api/v1/clusters/[id], merged_into lookup after a miss: a body-phase 'TimeoutError: ...' (status 0) is a 503, never a 404", async () => {
+    state.clustersQueue = [
+      { data: null, error: null, status: 200 },
+      { data: null, error: { message: TIMEOUT_MESSAGE, details: "", hint: "", code: "" }, status: 0 },
+    ];
+    const { GET } = await import("@/app/api/v1/clusters/[id]/route");
+
+    const res = await GET(keyedRequest(`/api/v1/clusters/${CLUSTER_ID}`), {
+      params: Promise.resolve({ id: CLUSTER_ID }),
+    });
+
+    await expectUnavailableBody(res);
+    expect(res.headers.get("Location")).toBeNull();
+    expect(res.headers.get("X-Tayf-Tier")).toBe("free");
+  });
+
+  it("GET /api/v1/clusters/[id], merged_into lookup after a miss: an 'AbortError: ...' (the header-phase cap) stays a 503", async () => {
+    state.clustersQueue = [
+      { data: null, error: null, status: 200 },
+      {
+        data: null,
+        error: {
+          message: "AbortError: Supabase request exceeded 4000 ms",
+          details: "",
+          hint: "Request was aborted (timeout or manual cancellation)",
+          code: "",
+        },
+        status: 0,
+      },
+    ];
+    const { GET } = await import("@/app/api/v1/clusters/[id]/route");
+
+    const res = await GET(keyedRequest(`/api/v1/clusters/${CLUSTER_ID}`), {
+      params: Promise.resolve({ id: CLUSTER_ID }),
+    });
+
+    await expectUnavailableBody(res);
+    expect(res.headers.get("Location")).toBeNull();
+  });
 
   it("a merged_into lookup that fails for another reason (missing column) is still a 404", async () => {
     state.clustersQueue = [

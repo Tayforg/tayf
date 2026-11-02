@@ -157,9 +157,14 @@ const UPSTREAM_CAUSE_DEPTH = 3;
  *   - a `status` of 502, 503, 504 or 520-524 (every keyed v1 read passes the
  *     PostgREST response status along with the error object:
  *     `{ ...error, status }`);
- *   - a postgrest-js transport error: when `fetch` itself rejects it builds
- *     `${name}: ${message}` with an empty `code`, so the message STARTS with
- *     "AbortError:" or "TypeError: fetch failed";
+ *   - a postgrest-js transport error: when `fetch` itself rejects (or the
+ *     body read rejects) it builds `${name}: ${message}` with an empty `code`
+ *     and status 0, so the message STARTS with "AbortError:", "TimeoutError: "
+ *     (an `AbortSignal.timeout()` that fired while `res.text()` was still
+ *     reading the body: `withFetchTimeout` relabels that case as an
+ *     AbortError, but an unwrapped client still produces this text) or
+ *     "TypeError: fetch failed". The prefix must be exact, so the plain word
+ *     "TimeoutError is a word" is not an outage;
  *   - any of the above found through `err.cause`, up to depth 3 (a getter that
  *     wraps the Supabase error in an `Error` keeps it as the cause).
  * False for a plain `Error`, PGRST116 (no rows), 23505 (unique violation),
@@ -181,7 +186,9 @@ export function isUpstreamUnavailable(err: unknown): boolean {
     if (typeof e.status === "number" && UPSTREAM_UNAVAILABLE_STATUSES.has(e.status)) return true;
     if (
       typeof e.message === "string" &&
-      (e.message.startsWith("AbortError:") || e.message.startsWith("TypeError: fetch failed"))
+      (e.message.startsWith("AbortError:") ||
+        e.message.startsWith("TimeoutError: ") ||
+        e.message.startsWith("TypeError: fetch failed"))
     ) {
       return true;
     }

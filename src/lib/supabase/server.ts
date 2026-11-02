@@ -21,6 +21,10 @@ export interface ServerClientOptions {
   timeoutMs?: number;
 }
 
+// Statuses whose response can never carry a body (fetch spec "null body
+// status", plus 101): withFetchTimeout returns those untouched.
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([101, 204, 205, 304]);
+
 /**
  * Wrap `fetch` so a request that outlives `timeoutMs` is aborted.
  *
@@ -43,22 +47,92 @@ export interface ServerClientOptions {
  * caller abort propagates with the caller's own reason (never relabelled
  * as a timeout). `globalThis.fetch` is resolved at call time so tests can
  * stub it.
+ *
+ * BODY PHASE (h28-errors-2). `AbortSignal.timeout()` stays attached to the
+ * response body after `fetch` has resolved with the headers. A timer that
+ * fires while `res.text()` is still reading rejects the body stream with a
+ * `TimeoutError` DOMException OUTSIDE the try/catch above; postgrest-js then
+ * surfaced `{ message: "TimeoutError: The operation was aborted due to
+ * timeout", code: "", status: 0 }`, which `isUpstreamUnavailable` did not
+ * recognise, so the keyed /api/v1 routes answered a 500 for what is an outage.
+ * The body is therefore re-wrapped: a pull-based `ReadableStream` that reads
+ * the original body and, when a read rejects because OUR timer fired (and the
+ * caller's signal did not), errors with the same relabelled `AbortError` as the
+ * header phase. Any other body error (a caller abort, a reset connection) is
+ * passed through untouched, and `cancel(reason)` is forwarded so a consumer
+ * that stops early still releases the connection. Nothing is buffered
+ * (`highWaterMark: 0`: a chunk is read only when the consumer asks for one), so
+ * streaming and backpressure are preserved. The wrap is skipped, and the very
+ * same `Response` returned, when there is no body to wrap (`res.body === null`,
+ * i.e. a HEAD answer or `new Response(null)`) or the status forbids one (101,
+ * 204, 205, 304). The rebuilt `Response` carries `status`, `statusText` and
+ * `headers`; `url` and `redirected` are NOT carried over (a constructed
+ * `Response` cannot set them), which is fine because postgrest-js and
+ * supabase-js read neither.
+ *
+ * Each relabel logs ONE line, `[supabase] request exceeded <ms> ms (phase:
+ * headers|body, elapsed: <n> ms)`, so a stall can be told apart from a slow
+ * query in the logs. The URL and headers are never logged (they can carry
+ * filters and keys). The clock is `performance.now()`, not `Date.now()`:
+ * Next 16 cacheComponents treats `Date.now()` as prerender IO and fails the
+ * build when an uncached prerender path reads it; `performance.now()` is the
+ * monotonic interval clock the Next docs point to for measuring durations.
  */
 export function withFetchTimeout(timeoutMs: number): typeof fetch {
   return async (input, init) => {
     const t = AbortSignal.timeout(timeoutMs);
     const signal = init?.signal ? AbortSignal.any([init.signal, t]) : t;
+    const startedAt = performance.now();
+    /** True when the abort came from OUR timer, not from the caller. */
+    const isOurTimeout = () => t.aborted && !init?.signal?.aborted;
+    const relabel = (phase: "headers" | "body") => {
+      console.warn(
+        "[supabase] request exceeded " +
+          timeoutMs +
+          " ms (phase: " +
+          phase +
+          ", elapsed: " +
+          Math.round(performance.now() - startedAt) +
+          " ms)",
+      );
+      return new DOMException(`Supabase request exceeded ${timeoutMs} ms`, "AbortError");
+    };
+
+    let res: Response;
     try {
-      return await globalThis.fetch(input, { ...init, signal });
+      res = await globalThis.fetch(input, { ...init, signal });
     } catch (err) {
-      if (t.aborted && !init?.signal?.aborted) {
-        throw new DOMException(
-          `Supabase request exceeded ${timeoutMs} ms`,
-          "AbortError",
-        );
-      }
+      if (isOurTimeout()) throw relabel("headers");
       throw err;
     }
+
+    if (res.body === null || NULL_BODY_STATUSES.has(res.status)) return res;
+
+    const reader = res.body.getReader();
+    const wrapped = new ReadableStream<Uint8Array>(
+      {
+        async pull(controller) {
+          let chunk: ReadableStreamReadResult<Uint8Array>;
+          try {
+            chunk = await reader.read();
+          } catch (err) {
+            controller.error(isOurTimeout() ? relabel("body") : err);
+            return;
+          }
+          if (chunk.done) controller.close();
+          else controller.enqueue(chunk.value);
+        },
+        cancel(reason) {
+          return reader.cancel(reason);
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(wrapped, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   };
 }
 

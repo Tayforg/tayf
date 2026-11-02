@@ -2,10 +2,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { connection } from "next/server";
 
+import { BreakerStrip } from "@/components/finance/breaker-strip";
 import { DataNote } from "@/components/finance/data-note";
 import { Panel, PanelEmpty } from "@/components/finance/panel";
 import { TickerChip, TickerTape } from "@/components/finance/ticker-chip";
-import { fmtClock, fmtWhen, pctChange } from "@/lib/finance/format";
+import { fmtWhen, pctChange } from "@/lib/finance/format";
 import {
   fetchCircuitBreakers,
   fetchEconFeed,
@@ -102,21 +103,7 @@ export default async function EkonomiPage() {
 
       <TickerTape items={top} quotes={quotes} stats={stats} staleTickers={staleTickers} />
 
-      {breakers.length > 0 ? (
-        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border border-border bg-black/25 px-3 py-1.5 font-mono text-[11px]">
-          <span className="text-amber-400">devre kesici bugün</span>
-          {breakers.map((b) => (
-            <span key={b.disclosureIndex} className="flex items-baseline gap-1.5">
-              {b.stockCodes.slice(0, 1).map((c) => (
-                <Link key={c} href={`/ekonomi/${c}`} className="inline-flex min-h-6 items-center text-brand hover:underline">
-                  {c}
-                </Link>
-              ))}
-              <span className="tabular-nums text-muted-foreground">{fmtClock(b.publishedAt)}</span>
-            </span>
-          ))}
-        </div>
-      ) : null}
+      <BreakerStrip breakers={breakers} />
 
       <div className="grid gap-3 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
         <Panel title="Haber akışı" meta={`${feed.length} haber, hisse eşleşmeli`} className="lg:row-span-2">

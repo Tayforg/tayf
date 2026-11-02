@@ -257,6 +257,9 @@ describe("copy register: the /oyun exception", () => {
     // The exception is deliberate: the sen forms it covers are still there.
     const words = new Set(wordsOf(text));
     expect(words.has("okuyabilirsin")).toBe(true);
-    expect(words.has("değerlendiriyorsun")).toBe(true);
+    // The Çerçeve explainer moved from the page's disclaimer card into the
+    // mode caption under the tabs (h28-journey-2); it keeps the sen register.
+    const modeWords = new Set(wordsOf(readRepoFile("src/components/game/oyun-modes.tsx")));
+    expect(modeWords.has("değerlendiriyorsun")).toBe(true);
   });
 });

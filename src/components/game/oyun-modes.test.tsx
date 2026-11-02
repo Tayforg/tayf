@@ -139,6 +139,67 @@ describe("OyunModes -- only the initial tab is rendered on the server", () => {
   });
 });
 
+// h28-journey-2: the Çerçeve and Günün Tayf'ı explainers used to sit in a
+// four-paragraph card above the tabs and pushed "Başla" below the fold on a
+// phone. Each now rides as a one-line caption under the tab group, for the
+// active mode only (Bölge has none: its round explains itself).
+describe("OyunModes -- one-line mode caption under the tabs", () => {
+  const CERCEVE_CAPTION =
+    "Çerçeve modunda kaynağı değil, başlığın kendisini değerlendiriyorsun: bu başlık kimin lehine yazılmış?";
+  const GUNLUK_CAPTION =
+    "Günün Tayf’ı modunda herkes aynı 5 manşeti görür: dünün kapanmış penceresinden seçilen, günün başında herkes için sabit bir bulmaca.";
+
+  function countOccurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  it("cerceve: the Çerçeve caption renders exactly once", () => {
+    const markup = renderMode("cerceve");
+
+    expect(countOccurrences(markup, CERCEVE_CAPTION)).toBe(1);
+    expect(markup).not.toContain(GUNLUK_CAPTION);
+  });
+
+  it("gunluk: the daily caption renders exactly once", () => {
+    const markup = renderMode("gunluk");
+
+    expect(countOccurrences(markup, GUNLUK_CAPTION)).toBe(1);
+    expect(markup).not.toContain(CERCEVE_CAPTION);
+  });
+
+  it("bolge: neither caption renders", () => {
+    const markup = renderMode("bolge");
+
+    expect(markup).not.toContain(CERCEVE_CAPTION);
+    expect(markup).not.toContain(GUNLUK_CAPTION);
+    expect(markup).not.toContain("oyun-mod-aciklama");
+  });
+
+  it("the caption sits after the tab group", () => {
+    const groupAt = renderMode("cerceve").indexOf('aria-label="Oyun modu"');
+    expect(groupAt).toBeGreaterThan(-1);
+
+    expect(renderMode("cerceve").indexOf(CERCEVE_CAPTION)).toBeGreaterThan(groupAt);
+    expect(renderMode("gunluk").indexOf(GUNLUK_CAPTION)).toBeGreaterThan(groupAt);
+  });
+
+  it("the caption is a muted one-liner with a stable id, tied to the tab group", () => {
+    const markup = renderMode("gunluk");
+
+    expect(markup).toContain(
+      '<p id="oyun-mod-aciklama" class="text-[12px] leading-snug text-muted-foreground">',
+    );
+    expect(markup).toContain('aria-describedby="oyun-mod-aciklama"');
+  });
+
+  it("keeps the sen register: no dangling 'ise' left from the old paragraph", () => {
+    for (const mode of ["cerceve", "gunluk"] as const) {
+      const markup = renderMode(mode);
+      expect(markup, mode).not.toContain("modunda ise");
+    }
+  });
+});
+
 describe("OyunModes -- source guard: tabs stay mounted once opened", () => {
   const source = readFileSync(resolve(__dirname, "oyun-modes.tsx"), "utf8");
 

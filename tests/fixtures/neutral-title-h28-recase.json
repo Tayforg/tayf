@@ -1,0 +1,74 @@
+[
+  {
+    "cid": "f972e6c1",
+    "stored": "Türk dünyasının kadın liderlerinden aile ve kadın için ortak vizyon",
+    "titles": [
+      "Türk dünyasının kadın liderlerinden aile ve kadın için ortak vizyon",
+      "TDT Aile ve Kadın Konseyi için anlamlı adım! Lider eşleri destek verdi"
+    ],
+    "expected": "Türk dünyasının kadın liderlerinden aile ve kadın için ortak vizyon",
+    "bad": "Türk dünyasının Kadın liderlerinden Aile ve Kadın için ortak vizyon"
+  },
+  {
+    "cid": "ee5b26b1",
+    "stored": "Küra Kolektif'in soyut resim sergisi İstanbul Karaköy'de açıldı, 74 eser görülebilir",
+    "titles": [
+      "\"Hikayenin En Güzel Yeri: Türkiye'de Soyut Resim\" sergisi İstanbul'da sanatseverlerle buluştu",
+      "Küra Kolektif'in soyut resim sergisi İstanbul Karaköy'de açıldı, 74 eser görülebilir"
+    ],
+    "expected": "Küra Kolektif'in soyut resim sergisi İstanbul Karaköy'de açıldı, 74 eser görülebilir",
+    "bad": "Küra Kolektif'in Soyut Resim sergisi İstanbul Karaköy'de açıldı, 74 eser görülebilir"
+  },
+  {
+    "cid": "0cd5d8fd",
+    "stored": "Cumhurbaşkanı Erdoğan: Büyük bir mücadelenin tam göbeğindeyiz",
+    "titles": [
+      "Erdoğan: \"Etrafımız ateş çemberi\"",
+      "Erdoğan'dan kaos isteyenlere net mesaj: Etrafımız ateş çemberi",
+      "Cumhurbaşkanı Erdoğan: Büyük bir mücadelenin tam göbeğindeyiz",
+      "Son dakika | Başkan Erdoğan'dan önemli açıklamalar: Büyük milletlerin imtihanı büyük olur!",
+      "Başkan Erdoğan siyonist nifak tohumlarına karşı uyardı! \"Etrafımız ateş çemberi\" deyip mesajı verdi: Büyük mücadelenin tam göbeğindeyiz",
+      "Başkan Erdoğan'dan Muhtarlar Günü Buluşması'nda önemli açıklamalar",
+      "Cumhurbaşkanı Erdoğan'dan Net Mesaj! \"Büyük milletlerin imtihanı büyük olur\"",
+      "Başkan Erdoğan: Bizimle uğraşmaya devam edecekler",
+      "Cumhurbaşkanı Erdoğan: Büyük bir mücadelenin tam göbeğindeyiz"
+    ],
+    "expected": "Erdoğan'dan kaos isteyenlere net mesaj: Etrafımız ateş çemberi",
+    "bad": "Erdoğan'dan kaos isteyenlere Net Mesaj: Etrafımız ateş çemberi"
+  },
+  {
+    "cid": "44411a81",
+    "stored": "Cizre’de 75. yıl coşkusu: imam hatip okullarının yeniden açılışı anıldı",
+    "titles": [
+      "Cizre'de \"İmam Hatip Okullarının Yeniden Açılışının 75. Yıl Dönümü\" dolayısıyla program düzenlendi",
+      "Cizre’de 75. yıl coşkusu: imam hatip okullarının yeniden açılışı anıldı",
+      "Cizre'de imam hatip okullarının yeniden açılışının 75. yıl dönümü kutlandı"
+    ],
+    "expected": "Cizre'de imam hatip okullarının yeniden açılışının 75. yıl dönümü kutlandı",
+    "bad": "Cizre'de imam hatip okullarının yeniden Açılışının 75. yıl Dönümü kutlandı"
+  },
+  {
+    "cid": "a84aecfc",
+    "stored": "İstanbul’da sağanak alarmı: 378 acil sağlık ekibi sahada",
+    "titles": [
+      "İstanbul’da sağanak alarmı: 378 acil sağlık ekibi sahada",
+      "Sağanağın ardından 112 ve UMKE teyakkuzda: İhbarlara hızla müdahale ediliyor",
+      "İstanbul'da 378 112 Acil Sağlık ekibi ve 5 UMKE ekibi sağanak sonrası görev yapıyor"
+    ],
+    "expected": "İstanbul’da sağanak alarmı: 378 acil sağlık ekibi sahada",
+    "bad": "İstanbul’da sağanak alarmı: 378 Acil Sağlık ekibi sahada"
+  },
+  {
+    "cid": "85deda69",
+    "stored": "Vali yardımcısının ölümünde yeni iddia: Başsavcı vekili açığa alındı",
+    "titles": [
+      "İddia: Vali yardımcısının intihar sebebi yasak aşk",
+      "İhsan Ayrancı Eşi Sevgi Ayrancı kimdir? Afyonkarahisar Vali Yardımcısı neden öldü?",
+      "Afyonkarahisar Vali Yardımcısı İhsan Ayrancı'nın intiharının ardından dikkat çeken iddia!",
+      "Vali yardımcısının ölümünde yeni iddia: Başsavcı vekili açığa alındı",
+      "Afyon Vali Yardımcısı’nın intiharının nedeni yasak ilişki mi?: Eşi cenazeye katılmadı, Başsavcı Vekili açığa alındı"
+    ],
+    "expected": "Vali yardımcısının ölümünde yeni iddia: Başsavcı vekili açığa alındı",
+    "bad": "İddia: Vali yardımcısının intihar sebebi yasak aşk"
+  }
+]
