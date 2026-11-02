@@ -1,13 +1,13 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import Link from "next/link";
 import { AlertTriangle, Bookmark, Users, X } from "lucide-react";
 
 import { useBookmarks } from "@/components/bookmark/use-bookmarks";
 import { SavedMixCard } from "@/components/bookmark/saved-mix-card";
 import { savedUpdatedLabel, toSavedRowView } from "@/components/bookmark/saved-row";
-import { savedRemoveLabel } from "@/components/bookmark/bookmark-label";
+import { savedRemovalAnnouncement, savedRemoveLabel } from "@/components/bookmark/bookmark-label";
 import {
   changeBadgeLabels,
   pruneSnapshots,
@@ -17,6 +17,7 @@ import {
   type SavedChange,
 } from "@/components/bookmark/bookmark-snapshots";
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
+import { focusTargetAfterRemove } from "@/lib/follows/follows";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // saved_clusters_v2 (migration 124; v1 from 116 has the same caps) truncates its
@@ -35,6 +36,59 @@ interface SavedRow {
   is_blindspot?: boolean;
 }
 
+// The one live region of the page (WCAG 4.1.3). SavedList returns this frame on
+// every path -- empty, loading, failed and list -- so the region is mounted
+// before anything is announced and survives every state change (a region
+// inserted together with its text is usually not announced).
+export function SavedFrame({
+  announcement,
+  children,
+}: {
+  announcement: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <p role="status" aria-live="polite" className="sr-only">
+        {announcement}
+      </p>
+      {children}
+    </div>
+  );
+}
+
+export function SavedEmptyState({
+  headingRef,
+}: {
+  headingRef?: Ref<HTMLHeadingElement>;
+}) {
+  return (
+    <div className="rounded-xl border border-dashed border-border/60 bg-card/40 p-8 text-center space-y-4 animate-fade-up">
+      {/* Mini spectrum bar — mirrors the header logo mark */}
+      <div className="flex items-center justify-center gap-1">
+        <div className="h-4 w-1.5 rounded-full bg-red-500/70" />
+        <div className="h-4 w-1.5 rounded-full bg-brand/80" />
+        <div className="h-4 w-1.5 rounded-full bg-emerald-500/70" />
+      </div>
+      {/* tabIndex -1: focusable by script only, so removing the last story can
+          hand focus here instead of dropping it on the document body. */}
+      <h2
+        ref={headingRef}
+        tabIndex={-1}
+        className="font-serif text-lg font-semibold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
+      >
+        Henüz kaydettiğiniz bir hikâye yok
+      </h2>
+      <p className="text-sm text-muted-foreground max-w-md mx-auto">
+        Hikâye kartlarındaki
+        <Bookmark className="mx-1 inline h-3.5 w-3.5 align-[-2px]" />
+        yer imi simgesine dokunarak
+        <span className="text-brand font-medium"> favorilerinizi kaydedin</span>.
+      </p>
+    </div>
+  );
+}
+
 export function SavedList() {
   const { ids, count, toggle } = useBookmarks();
   const idList = useMemo(() => Array.from(ids), [ids]);
@@ -43,10 +97,18 @@ export function SavedList() {
   const [rows, setRows] = useState<SavedRow[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [changes, setChanges] = useState<Record<string, SavedChange>>({});
+  const [announcement, setAnnouncement] = useState("");
+
+  // Focus handoff after a removal. `pendingFocus` is written by the click
+  // handler (undefined = nothing pending, null = the list is now empty) and
+  // consumed by the effect below once the new list has committed.
+  const linkRefs = useRef(new Map<string, HTMLAnchorElement>());
+  const emptyHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const pendingFocus = useRef<string | null | undefined>(undefined);
 
   useEffect(() => {
-    // Nothing to fetch when empty — the count === 0 branch below renders
-    // the empty state without ever consulting `rows`.
+    // Nothing to fetch when empty — the empty branch below renders the empty
+    // state without ever consulting `rows`.
     if (idList.length === 0) return;
     let cancelled = false;
     (async () => {
@@ -100,47 +162,65 @@ export function SavedList() {
     };
   }, [idList]);
 
-  if (count === 0) {
+  // Also the empty state once the last row has been dropped, while the bookmark
+  // store has not caught up yet, so focus always has a target.
+  const emptyNow = count === 0 || (rows !== null && !failed && rows.length === 0);
+
+  // What is on screen, as a string: the effect below runs when the rendered
+  // rows change, not on every render (and not when only the badges change).
+  const shownSig = emptyNow ? "" : rows === null ? "\u0000loading" : rows.map((r) => r.id).join("\n");
+
+  useEffect(() => {
+    const target = pendingFocus.current;
+    if (target === undefined) return;
+    pendingFocus.current = undefined;
+    const el = target === null ? emptyHeadingRef.current : linkRefs.current.get(target);
+    el?.focus();
+  }, [shownSig]);
+
+  function handleRemove(row: SavedRow) {
+    const shownIds = (rows ?? []).map((r) => r.id);
+    pendingFocus.current = focusTargetAfterRemove(shownIds, row.id);
+    setAnnouncement(
+      savedRemovalAnnouncement(row.title_tr_neutral ?? row.title_tr, shownIds.length - 1),
+    );
+    // Drop the row at once, so focus moves now instead of after the lookup
+    // re-runs for the shorter bookmark list.
+    setRows((prev) => prev?.filter((r) => r.id !== row.id) ?? prev);
+    toggle(row.id);
+  }
+
+  if (emptyNow) {
     return (
-      <div className="rounded-xl border border-dashed border-border/60 bg-card/40 p-8 text-center space-y-4 animate-fade-up">
-        {/* Mini spectrum bar — mirrors the header logo mark */}
-        <div className="flex items-center justify-center gap-1">
-          <div className="h-4 w-1.5 rounded-full bg-red-500/70" />
-          <div className="h-4 w-1.5 rounded-full bg-brand/80" />
-          <div className="h-4 w-1.5 rounded-full bg-emerald-500/70" />
-        </div>
-        <h2 className="font-serif text-lg font-semibold tracking-tight">
-          Henüz kaydettiğiniz bir hikâye yok
-        </h2>
-        <p className="text-sm text-muted-foreground max-w-md mx-auto">
-          Hikâye kartlarındaki
-          <Bookmark className="mx-1 inline h-3.5 w-3.5 align-[-2px]" />
-          yer imi simgesine dokunarak
-          <span className="text-brand font-medium"> favorilerinizi kaydedin</span>.
-        </p>
-      </div>
+      <SavedFrame announcement={announcement}>
+        <SavedEmptyState headingRef={emptyHeadingRef} />
+      </SavedFrame>
     );
   }
 
   if (rows === null) {
     // Loading skeleton — one bar per saved id keeps the height stable.
     return (
-      <ul className="space-y-2" aria-busy="true">
-        {idList.map((id) => (
-          <li
-            key={id}
-            className="h-16 animate-pulse rounded-lg bg-card/60 ring-1 ring-border/60"
-          />
-        ))}
-      </ul>
+      <SavedFrame announcement={announcement}>
+        <ul className="space-y-2" aria-busy="true">
+          {idList.map((id) => (
+            <li
+              key={id}
+              className="h-16 animate-pulse rounded-lg bg-card/60 ring-1 ring-border/60"
+            />
+          ))}
+        </ul>
+      </SavedFrame>
     );
   }
 
   if (failed) {
     return (
-      <p className="text-sm text-muted-foreground">
-        Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.
-      </p>
+      <SavedFrame announcement={announcement}>
+        <p className="text-sm text-muted-foreground">
+          Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.
+        </p>
+      </SavedFrame>
     );
   }
 
@@ -149,7 +229,7 @@ export function SavedList() {
   const changedCount = rows.filter((r) => changes[r.id]).length;
 
   return (
-    <>
+    <SavedFrame announcement={announcement}>
     <SavedMixCard rows={rows} />
     {changedCount > 0 && (
       <p className="mb-3 text-xs text-muted-foreground">
@@ -168,6 +248,10 @@ export function SavedList() {
           className={`relative animate-fade-up stagger-${Math.min(i + 1, 8)}`}
         >
           <Link
+            ref={(el) => {
+              if (el) linkRefs.current.set(row.id, el);
+              else linkRefs.current.delete(row.id);
+            }}
             href={`/cluster/${row.id}`}
             className="block rounded-lg ring-1 ring-border/60 hover:ring-border bg-card/60 hover:bg-card/80 transition-all p-4 pr-12 hover-lift"
           >
@@ -211,7 +295,7 @@ export function SavedList() {
           {/* Sibling of the Link (not nested) — button-in-anchor is invalid. */}
           <button
             type="button"
-            onClick={() => toggle(row.id)}
+            onClick={() => handleRemove(row)}
             aria-label={savedRemoveLabel(row.title_tr_neutral ?? row.title_tr)}
             title="Kaydedilenlerden çıkar"
             className="absolute right-3 top-1/2 -translate-y-1/2 inline-flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -222,6 +306,6 @@ export function SavedList() {
         );
       })}
     </ul>
-    </>
+    </SavedFrame>
   );
 }

@@ -1,3 +1,4 @@
+import { normaliseSearchQuery } from "@/lib/clusters/turkish-query";
 import { formatCountTr } from "@/lib/format/number-tr";
 
 // Reader-facing sentences for the home search (h10-a11y-2): the text of the
@@ -9,6 +10,27 @@ import { formatCountTr } from "@/lib/format/number-tr";
 
 /** Longest query, in code points, quoted in an announcement or a title. */
 export const SEARCH_QUERY_DISPLAY_MAX = 60;
+
+/**
+ * The shortest query the archive search runs, after normalising. Mirrors
+ * MIN_QUERY_LENGTH in src/lib/clusters/search-query.ts, which is a 'use cache'
+ * server module and so is not imported here; search-status.test.ts reads that
+ * file and fails if the two numbers drift.
+ */
+export const MIN_QUERY_LENGTH = 2;
+
+/**
+ * True for a query that was typed but is too short to search: its normalised
+ * form (the same cleaning searchClusters applies: control characters out, an
+ * apostrophe suffix dropped, whitespace collapsed) has fewer than
+ * MIN_QUERY_LENGTH characters. A blank or missing q is "no search", not "too
+ * short", so it is false. Callers use it to say "type more" instead of
+ * claiming a search found nothing when none ran.
+ */
+export function isTooShortQuery(q: string | undefined): boolean {
+  const raw = (q ?? "").trim();
+  return raw !== "" && normaliseSearchQuery(raw).length < MIN_QUERY_LENGTH;
+}
 
 /**
  * The query as it is shown back to the reader: trimmed, runs of whitespace
@@ -36,6 +58,8 @@ export interface SearchStatusArgs {
 /**
  * The sentence announced after a search, or "" when there is no search (a
  * blank q has nothing to announce, and an empty live region says nothing).
+ * A too-short query asks for more characters: no search ran, so neither
+ * "no results" nor "not responding" would be true, and it wins over both.
  * `unavailable` wins over `capped`: a failed archive search is never "capped".
  */
 export function searchStatusText({
@@ -46,6 +70,7 @@ export function searchStatusText({
 }: SearchStatusArgs): string {
   const shown = displayQuery(q);
   if (!shown) return "";
+  if (isTooShortQuery(q)) return `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
 
   const results = Number.isFinite(count) && count > 0 ? count : 0;
   if (unavailable) {

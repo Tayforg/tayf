@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  clusterTextLang,
   ENGLISH_SOURCE_NAMES,
   ENGLISH_SOURCE_SLUGS,
   sourceLang,
@@ -124,6 +125,102 @@ describe("sourceLang: precedence and fallbacks", () => {
     expect(
       sourceLang(bad as unknown as Parameters<typeof sourceLang>[0]),
     ).toBeUndefined();
+  });
+});
+
+describe("sourceLang: the cluster-page call shapes (h23-a11y-1)", () => {
+  it("returns 'en' for the daily-sabah slug", () => {
+    expect(sourceLang({ slug: "daily-sabah" })).toBe("en");
+  });
+
+  it("returns undefined for the Turkish 'sabah' slug (not a prefix match)", () => {
+    expect(sourceLang({ slug: "sabah" })).toBeUndefined();
+  });
+
+  it("returns 'en' for the Daily Sabah display name alone", () => {
+    expect(sourceLang({ name: "Daily Sabah" })).toBe("en");
+  });
+
+  it("returns undefined for the Turkish 'Sabah' display name", () => {
+    expect(sourceLang({ name: "Sabah" })).toBeUndefined();
+  });
+});
+
+describe("clusterTextLang", () => {
+  const english = ENGLISH_SLUGS.map((slug) => ({ slug }));
+
+  it("returns 'en' when every source is English (all five slugs)", () => {
+    expect(clusterTextLang(english)).toBe("en");
+  });
+
+  it.each(ENGLISH_SLUGS)("returns 'en' for a single %s source", (slug) => {
+    expect(clusterTextLang([{ slug }])).toBe("en");
+  });
+
+  it("returns 'en' for name-only English sources", () => {
+    expect(
+      clusterTextLang(PROD_NAMES.map((name) => ({ name }))),
+    ).toBe("en");
+  });
+
+  it("accepts the same source more than once (one outlet, several articles)", () => {
+    expect(
+      clusterTextLang([{ slug: "daily-sabah" }, { slug: "daily-sabah" }]),
+    ).toBe("en");
+  });
+
+  it("returns undefined for an empty list (no member, nothing to claim)", () => {
+    expect(clusterTextLang([])).toBeUndefined();
+  });
+
+  it("returns undefined when a single Turkish source is mixed in", () => {
+    expect(
+      clusterTextLang([...english, { slug: "sozcu", name: "Sözcü" }]),
+    ).toBeUndefined();
+    expect(
+      clusterTextLang([{ slug: "sozcu" }, { slug: "daily-sabah" }]),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined when the only source is Turkish", () => {
+    expect(clusterTextLang([{ slug: "sozcu" }])).toBeUndefined();
+  });
+
+  it("returns undefined when any entry is null or undefined", () => {
+    expect(clusterTextLang([{ slug: "daily-sabah" }, null])).toBeUndefined();
+    expect(clusterTextLang([undefined, { slug: "daily-sabah" }])).toBeUndefined();
+    expect(clusterTextLang([null])).toBeUndefined();
+  });
+
+  it("returns undefined when an entry carries neither a slug nor a name", () => {
+    expect(clusterTextLang([{ slug: "daily-sabah" }, {}])).toBeUndefined();
+    expect(
+      clusterTextLang([{ slug: "daily-sabah" }, { slug: null, name: null }]),
+    ).toBeUndefined();
+  });
+
+  it("decides each entry the way sourceLang does: a Turkish slug beats an English name", () => {
+    expect(
+      clusterTextLang([{ slug: "sozcu", name: "Daily Sabah" }]),
+    ).toBeUndefined();
+    expect(
+      clusterTextLang([{ slug: "", name: "Daily Sabah" }]),
+    ).toBe("en");
+  });
+
+  it("never throws on a non-array smuggled past the types", () => {
+    expect(() =>
+      clusterTextLang(null as unknown as Parameters<typeof clusterTextLang>[0]),
+    ).not.toThrow();
+    expect(
+      clusterTextLang(null as unknown as Parameters<typeof clusterTextLang>[0]),
+    ).toBeUndefined();
+  });
+
+  it("handles a large mega-cluster (10k members)", () => {
+    const big = Array.from({ length: 10_000 }, () => ({ slug: "trt-world" }));
+    expect(clusterTextLang(big)).toBe("en");
+    expect(clusterTextLang([...big, { slug: "sozcu" }])).toBeUndefined();
   });
 });
 

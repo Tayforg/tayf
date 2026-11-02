@@ -214,3 +214,99 @@ describe("ReadAcrossSpectrum — CTA accessible name (WCAG 2.5.3 label-in-name)"
   });
 });
 
+
+// h23-a11y-1 (WCAG 3.1.2): the CTA line reads "<zone> · <source name>". When the
+// picked article comes from an English outlet its name is English text inside
+// <html lang="tr">. The component renders no article title, so the source name
+// is the only English text it can show.
+describe("ReadAcrossSpectrum — lang on an English outlet's name (h23-a11y-1)", () => {
+  function mkNamed(
+    id: string,
+    slug: string,
+    name: string,
+    bias: Source["bias"],
+    publishedAt: string,
+  ): ClusterDetailMember {
+    const base = mkMember(id, bias, publishedAt);
+    return { ...base, source: { ...base.source, slug, name } };
+  }
+
+  /** The anchor markup (everything from `<a ` to the last `</a>`). */
+  function anchorOf(markup: string): string {
+    const start = markup.indexOf("<a ");
+    const end = markup.lastIndexOf("</a>");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return markup.slice(start, end + "</a>".length);
+  }
+
+  // One iktidar + one muhalefet member: a tie sends the reader to muhalefet.
+  const GOV = mkMember("gov1", "pro_government", "2026-07-01T10:00:00Z");
+
+  it("wraps a Daily Sabah pick's name in <span lang=\"en\"> inside the 'Karşı tarafı oku' link", () => {
+    // Daily Sabah is the thinner pole here (one iktidar vs two muhalefet).
+    const sabah = mkNamed("ds", "daily-sabah", "Daily Sabah", "pro_government", "2026-07-01T11:00:00Z");
+    const members = [
+      sabah,
+      mkMember("opp1", "opposition", "2026-07-01T11:00:00Z"),
+      mkMember("opp2", "opposition", "2026-07-01T09:00:00Z"),
+    ];
+    const anchor = anchorOf(
+      renderToStaticMarkup(<ReadAcrossSpectrum members={members} isBlindspot={false} />),
+    );
+    expect(anchor).toContain("Karşı tarafı oku");
+    expect(anchor).toContain('İktidar · <span lang="en">Daily Sabah</span>');
+  });
+
+  it("tags a Daily Sabah pick on the muhalefet pole too (tie goes to muhalefet)", () => {
+    const sabah = mkNamed("ds", "daily-sabah", "Daily Sabah", "opposition", "2026-07-01T11:00:00Z");
+    const anchor = anchorOf(
+      renderToStaticMarkup(<ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />),
+    );
+    expect(anchor).toContain('Muhalefet · <span lang="en">Daily Sabah</span>');
+  });
+
+  it("puts lang only on the name: the heading, zone label and time-ago stay Turkish", () => {
+    const sabah = mkNamed("ds", "daily-sabah", "Daily Sabah", "opposition", "2026-07-01T11:00:00Z");
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />,
+    );
+    expect(markup.split("lang=").length - 1).toBe(1);
+    const anchorOpen = markup.slice(0, markup.indexOf(">") + 1);
+    expect(anchorOpen.startsWith("<a ")).toBe(true);
+    expect(anchorOpen).not.toContain("lang=");
+  });
+
+  it("puts no lang on a Turkish pick", () => {
+    const sozcu = mkNamed("sz", "sozcu", "Sözcü", "opposition", "2026-07-01T11:00:00Z");
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={[GOV, sozcu]} isBlindspot={false} />,
+    );
+    expect(markup).toContain("Sözcü");
+    expect(markup).not.toContain("lang=");
+  });
+
+  it("does not mistake the Turkish 'Sabah' for Daily Sabah", () => {
+    const sabah = mkNamed("sb", "sabah", "Sabah", "opposition", "2026-07-01T11:00:00Z");
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />,
+    );
+    expect(markup).toContain("Sabah");
+    expect(markup).not.toContain("lang=");
+  });
+
+  it("renders no article title, so the source name is the only English text in the link", () => {
+    const sabah = mkNamed("ds", "daily-sabah", "Daily Sabah", "opposition", "2026-07-01T11:00:00Z");
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={[GOV, sabah]} isBlindspot={false} />,
+    );
+    expect(markup).not.toContain("Headline ds");
+  });
+
+  it("never tags the empty-state copy", () => {
+    const markup = renderToStaticMarkup(
+      <ReadAcrossSpectrum members={ZERO_MUHALEFET_MEMBERS} isBlindspot={true} />,
+    );
+    expect(markup).not.toContain("lang=");
+  });
+});

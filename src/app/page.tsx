@@ -12,6 +12,7 @@ import { ClusterCard } from "@/components/story/cluster-card";
 import { FollowButton } from "@/components/follow/follow-button";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
 import { NewSinceLastVisit } from "@/components/home/new-since-last-visit";
+import { SearchEcho } from "@/components/search/search-echo";
 import { PageHero } from "@/components/ui/page-hero";
 import { RetryButton } from "@/components/ui/retry-button";
 import {
@@ -28,7 +29,13 @@ import { searchClusters } from "@/lib/clusters/search-query";
 import { composeSearchView } from "@/lib/clusters/search-view";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { groupByDayBucket } from "@/lib/home/day-buckets";
-import { searchStatusText, searchTitle } from "@/lib/search/search-status";
+import {
+  MIN_QUERY_LENGTH,
+  displayQuery,
+  isTooShortQuery,
+  searchStatusText,
+  searchTitle,
+} from "@/lib/search/search-status";
 import {
   HOME_PAGE_SIZE,
   homeCanonicalPath,
@@ -244,13 +251,21 @@ export async function HomeFeed({
   const q = firstQuery(qRaw);
   const page = parseHomePage(pageRaw);
 
+  // A typed query that normalises to fewer than MIN_QUERY_LENGTH characters is
+  // "too short": no search runs for it, so the page asks for more characters
+  // instead of claiming there are no results (isTooShortQuery uses the same
+  // normalisation as searchClusters; a raw q.length would count a lone
+  // control character or an apostrophe suffix).
+  const tooShort = isTooShortQuery(q);
+  const searchable = q !== undefined && displayQuery(q) !== "" && !tooShort;
+
   // Neither fetch depends on the other — run them in parallel. `search` is
-  // only attempted once `q` reaches the 2-character floor (searchClusters
-  // itself also enforces this, but skipping the call entirely here avoids
-  // an unnecessary await on a query too short to ever match).
+  // only attempted for a searchable query (searchClusters itself also
+  // enforces the floor, but skipping the call entirely here avoids an
+  // unnecessary await on a query too short to ever match).
   const [feed, search] = await Promise.all([
     loadFeed(),
-    q && q.length >= 2 ? searchClusters(q) : Promise.resolve(null),
+    searchable ? searchClusters(q) : Promise.resolve(null),
   ]);
 
   if (feed === null) {
@@ -405,10 +420,12 @@ export async function HomeFeed({
         targetId={HOME_FEED_ID}
       />
 
-      {q && q.length >= 2 && (
+      {/* The echo is capped and wrapped (SearchEcho): a pasted URL of 170
+          unbroken characters used to push the page to 1193 px at 390 px. */}
+      {searchable && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-xs text-muted-foreground">
-            “{q}” için {formatCountTr(resultCount)} sonuç
+          <p className="min-w-0 text-xs text-muted-foreground break-words [overflow-wrap:anywhere]">
+            <SearchEcho q={q} /> için {formatCountTr(resultCount)} sonuç
           </p>
           <FollowButton kind="q" value={q} />
         </div>
@@ -502,7 +519,7 @@ export async function HomeFeed({
               <SearchUnavailable />
             ))}
 
-          {view.emptySearch && <EmptySearch query={q} />}
+          {view.emptySearch && <EmptySearch query={q} tooShort={tooShort} />}
         </>
       )}
     </>
@@ -566,22 +583,34 @@ function FeedUnavailable() {
   );
 }
 
-function EmptySearch({ query }: { query?: string }) {
+function EmptySearch({
+  query,
+  tooShort = false,
+}: {
+  query?: string;
+  /** The query is below MIN_QUERY_LENGTH: no search ran, so nothing "was not found". */
+  tooShort?: boolean;
+}) {
+  const echoed = displayQuery(query) !== "";
   return (
     <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-16 text-center">
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted/60 text-muted-foreground">
         <SearchX className="h-7 w-7" aria-hidden="true" />
       </div>
-      <p className="font-serif text-sm font-medium text-foreground">
-        Hiç haber bulunamadı
+      <p className="min-w-0 max-w-full font-serif text-sm font-medium text-foreground">
+        {tooShort ? "Aramak için biraz daha yazın" : "Hiç haber bulunamadı"}
       </p>
-      {query ? (
-        <p className="max-w-md text-xs text-muted-foreground leading-relaxed">
-          <span className="text-foreground">&ldquo;{query}&rdquo;</span>{" "}
+      {tooShort ? (
+        <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed">
+          {`En az ${MIN_QUERY_LENGTH} karakter yazın.`}
+        </p>
+      ) : echoed ? (
+        <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed break-words [overflow-wrap:anywhere]">
+          <SearchEcho q={query} className="text-foreground" />{" "}
           için sonuç yok. Farklı bir kelime deneyin.
         </p>
       ) : (
-        <p className="max-w-md text-xs text-muted-foreground leading-relaxed">
+        <p className="min-w-0 max-w-full sm:max-w-md text-xs text-muted-foreground leading-relaxed">
           Aramanıza uyan bir küme yok. Farklı bir kelime deneyin.
         </p>
       )}

@@ -5,6 +5,7 @@ import { SourceLogo } from "@/components/source/source-logo";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { groupMembersByZone } from "@/lib/clusters/framing";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
+import { sourceLang } from "@/lib/sources/source-language";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { MediaDnaZone } from "@/types";
 
@@ -53,6 +54,10 @@ function HeadlineEntry({
   zone: MediaDnaZone;
 }) {
   const meta = ZONE_META[zone];
+  // WCAG 3.1.2: English outlets' names and headlines inside <html lang="tr">.
+  // The name span is CSS-uppercased, and under lang=tr that renders 'Daily
+  // Sabah' as 'DAİLY SABAH'; lang="en" fixes the glyphs as well.
+  const lang = sourceLang({ slug: member.source.slug, name: member.source.name });
   return (
     <li className="border-b border-border/30 last:border-0">
       <TrackedLink
@@ -78,7 +83,10 @@ function HeadlineEntry({
               className={`h-1.5 w-1.5 rounded-full shrink-0 ${meta.dot}`}
             />
           )}
-          <span className="font-mono text-[10px] uppercase tracking-wider text-foreground/80">
+          <span
+            lang={lang}
+            className="font-mono text-[10px] uppercase tracking-wider text-foreground/80"
+          >
             {member.source.name}
           </span>
           <ExternalLink
@@ -90,6 +98,7 @@ function HeadlineEntry({
           </span>
         </span>
         <span
+          lang={lang}
           className={`mt-1 block font-serif text-sm font-medium leading-snug text-foreground/90 decoration-2 underline-offset-2 group-hover/entry:underline ${HOVER_DECORATION[zone]}`}
         >
           {member.article.title}

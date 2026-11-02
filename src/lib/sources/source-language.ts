@@ -14,13 +14,29 @@
 //   - Story cards project `sources ( id, name, bias, logo_url )` WITHOUT a
 //     slug, so they match on the display name.
 //
-// Follow-up surfaces NOT wired in this wave (a cluster-page branch is in
-// flight and owns these files): the per-article rows in
-// src/components/story/story-timeline.tsx and
-// src/components/story/framing-comparison.tsx, and the hero image alt in
-// src/app/cluster/[id]/page.tsx (better served by the Turkish cluster headline
-// than by an English article title). Each should call sourceLang() once that
-// branch lands.
+// Wired call sites (WCAG 3.1.2, h17-a11y-2 and h23-a11y-1):
+//   - /source/[slug]: title and excerpt, by slug.
+//   - Home story cards: by display name (no slug in their projection).
+//   - Cluster page (src/app/cluster/[id]/page.tsx): the <h1> and the "Özgün
+//     başlık" disclosure when EVERY member is English (clusterTextLang; the
+//     <h1> is skipped when title_method is 'llm', because that neutral rewrite
+//     is Turkish), and the summary <p> by the seed outlet's display name. The
+//     hero image alt is the cluster headline (never a member's own title), so
+//     ClusterCardImage gets the <h1>'s lang: 'en' for an all-English cluster
+//     whose headline is extractive, nothing for a mixed cluster, the LLM
+//     rewrite or the "Haber" fallback.
+//   - src/components/story/framing-comparison.tsx: each entry's source name and
+//     headline, by slug. The name span is CSS-uppercased, and under lang=tr that
+//     turns 'Daily Sabah' into 'DAİLY SABAH'; lang="en" fixes the glyphs too.
+//   - src/components/story/story-timeline.tsx: the 'Tüm sıra' rows' source name
+//     and title, by display name (timeline points carry no slug).
+//   - src/components/story/read-across-spectrum.tsx: the picked outlet's name.
+//
+// NOT wired: the /timeline rows (src/app/timeline/page.tsx). Its ClusterRow
+// (src/lib/clusters/timeline-query.ts) carries no member sources, so
+// clusterTextLang has nothing to look at; wiring it needs a timeline-query
+// join from clusters to their members' sources. Until then those headlines
+// keep the inherited lang="tr".
 
 /** Slugs of the registered English-language outlets (exactly five). */
 export const ENGLISH_SOURCE_SLUGS: ReadonlySet<string> = new Set([
@@ -85,4 +101,26 @@ export function sourceLang(
   return foldName(name).some((n) => ENGLISH_SOURCE_NAMES.has(n))
     ? "en"
     : undefined;
+}
+
+/**
+ * `'en'` only when the list is non-empty and EVERY entry is an English outlet
+ * (`sourceLang(entry) === 'en'`), otherwise `undefined`.
+ *
+ * It answers "is the text a cluster shows in the document's language an
+ * English article title?". The extractive cluster headline is one member's own
+ * title, and any Turkish member can be the one that supplied it, so a single
+ * Turkish (or unknown, or null) entry means the headline cannot be claimed as
+ * English. An empty list says nothing and gives `undefined`. Never throws.
+ */
+export function clusterTextLang(
+  sources: ReadonlyArray<
+    { slug?: string | null; name?: string | null } | null | undefined
+  >,
+): "en" | undefined {
+  if (!Array.isArray(sources) || sources.length === 0) return undefined;
+  for (const src of sources) {
+    if (sourceLang(src) !== "en") return undefined;
+  }
+  return "en";
 }

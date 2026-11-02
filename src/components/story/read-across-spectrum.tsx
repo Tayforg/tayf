@@ -3,6 +3,7 @@ import { ExternalLink } from "lucide-react";
 import { ZONE_META } from "@/lib/bias/config";
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { pickOtherSide } from "@/lib/clusters/read-across";
+import { sourceLang } from "@/lib/sources/source-language";
 import type { ClusterDetailMember } from "@/lib/clusters/cluster-detail-query";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { MediaDnaZone } from "@/types";
@@ -97,6 +98,20 @@ export function ReadAcrossSpectrum({
     );
   }
 
+  // WCAG 3.1.2: an English outlet's name inside <html lang="tr">. The link
+  // renders no article title, so the name is the only English text here. A
+  // Turkish name is left bare, so its markup is unchanged.
+  const nameLang = sourceLang({
+    slug: member.source.slug,
+    name: member.source.name,
+  });
+  const sourceName =
+    nameLang === undefined ? (
+      member.source.name
+    ) : (
+      <span lang={nameLang}>{member.source.name}</span>
+    );
+
   return (
     <TrackedLink
       event="cta_other_side"
@@ -112,7 +127,7 @@ export function ReadAcrossSpectrum({
           Karşı tarafı oku
         </span>
         <span className="block truncate text-[11px] font-medium">
-          {zoneLabel} · {member.source.name}
+          {zoneLabel} · {sourceName}
         </span>
       </span>
       <span className="shrink-0 text-[10px] tabular-nums">

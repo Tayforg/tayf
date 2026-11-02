@@ -11,6 +11,7 @@ import {
   NAME_STOP,
   ROLE_TOKENS,
   cleanDescription,
+  cutAppendedTicker,
   descriptionNamesSwap,
   foldNameToken,
   personNames,
@@ -1219,5 +1220,252 @@ describe("stripFeedWrappers has one implementation", () => {
       const src = stripTsComments(readFileSync(resolve(dir, f), "utf8"));
       expect(src, `${f} must not use stripFeedWrappers`).not.toMatch(/stripFeedWrappers/);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h23-live-2 (hunt 23, 2026-11-02): cutAppendedTicker.
+//
+// Milliyet appends a "related news" headline (unpunctuated, one line) and then
+// its "Son dakika..." ticker to the description of an unrelated story. The
+// shown summary of 4c8e7533 ended "... her gayrete hazırız Son dakika...
+// Rusya için 3 fırsat!" because summary-tidy.ts never applied the ticker cut
+// that cleanDescription applies to the clustering text. cutAppendedTicker is
+// the pure helper both use: it cuts at the first ticker line after line 0 and
+// also drops up to two short, unpunctuated lines right before it. The first
+// line is never dropped. cleanDescription's own output does not change (the
+// tests above are the byte-identical proof).
+//
+// H23_1F02 is the real cluster 1f0261af (ingest clamp, a mid-text short
+// unpunctuated line with a "!" in it and no ticker).
+// ---------------------------------------------------------------------------
+
+const H23_1F02 =
+  "Partiden yapılan açıklamaya göre, AK Parti Kültür ve Sanat Politikaları Başkanlığı ile Teşkilat Başkanlığı işbirliğinde \"Kuruluşunun 25. İktidara Gelişinin 24. Yılında AK Parti\" paneli yapılacak. AK Parti Genel Merkezi'nde 3 Kasım Salı günü gerçekleştirilecek panelin moderatörlüğünü Genel Başkan Yardımcısı ve Kültür ve Sanat Politikaları Başkanı Hüseyin Yayman üstlenecek.\n11 ilde sahte kanser ilacı operasyonu! 22 gözaltı\nPanele, Genel Başkanvekilleri Efkan Ala ve Mustafa Elitaş ile Genel Başk...";
+
+const H23_TICKER = "Son dakika... Başka bir haberin başlığı";
+
+/** The line at `index` of `s` (split on "\n"). */
+function lineAt(s: string, index: number): string {
+  return s.split("\n")[index] ?? "";
+}
+
+/** Every description text this file knows: real rows, wrapper rows, the clamp row. */
+const H23_TEXTS: readonly string[] = [
+  ...FIXTURES.map((f) => f.description),
+  H23_1F02,
+  ...WRAPPER_CASES.map(([, input]) => input),
+  C2A9_BODY,
+  ON_HABER_BODY,
+];
+
+describe("cutAppendedTicker (h23-live-2)", () => {
+  describe("the real milliyet rows", () => {
+    it("c51ea9b0: the Zelenskiy headline (unpunctuated, ~96 chars) and the ticker both go; the result is exactly the first line", () => {
+      const f = byId("c51ea9b0");
+      const related = lineAt(f.description, 1);
+      expect(related.startsWith("Zelenskiy ile")).toBe(true);
+      expect(related.length).toBeGreaterThan(90);
+      expect(related.length).toBeLessThan(100);
+      expect(related.endsWith("hazırız")).toBe(true);
+      const out = cutAppendedTicker(f.description);
+      expect(out).toBe(lineAt(f.description, 0));
+      expect(out.endsWith("Meksika Dışişleri Bakanı Roberto Velasco Álvarez ile görüştü.")).toBe(true);
+      expect(out).not.toContain("Zelenskiy");
+      expect(out).not.toContain("Son dakika");
+    });
+
+    it("cleanDescription itself is unchanged: it still keeps the related headline", () => {
+      const f = byId("c51ea9b0");
+      const cleaned = cleanDescription(f.description);
+      expect(cleaned).toBe(f.description.slice(0, f.description.indexOf("\nSon dakika")));
+      expect(cleaned).toContain("Zelenskiy ile görüşen Cumhurbaşkanı Erdoğan");
+    });
+
+    it("942d7061 gives '...harekete geçebilir.'", () => {
+      const f = byId("942d7061");
+      const out = cutAppendedTicker(f.description);
+      expect(out.endsWith("harekete geçebilir.")).toBe(true);
+      expect(out).toBe(lineAt(f.description, 0));
+    });
+
+    it("ee413c82 gives the first line (the first line is never dropped)", () => {
+      const f = byId("ee413c82");
+      expect(cutAppendedTicker(f.description)).toBe(lineAt(f.description, 0));
+    });
+
+    it("9732e9a9 gives the first line", () => {
+      const f = byId("9732e9a9");
+      expect(cutAppendedTicker(f.description)).toBe(lineAt(f.description, 0));
+    });
+
+    it("a585983b keeps line 2, because it ends with '.'", () => {
+      const f = byId("a585983b");
+      const out = cutAppendedTicker(f.description);
+      expect(out).toBe(`${lineAt(f.description, 0)}\n${lineAt(f.description, 1)}`);
+      expect(out.endsWith("gözaltına alındı.")).toBe(true);
+      expect(out).toBe(cleanDescription(f.description));
+    });
+  });
+
+  describe("which related lines go", () => {
+    it.each([".", "!", "?", "…", ".”", '."', ".»", ".’", ".'", ".)", ".]", "?)", "!”", "…\""])(
+      "a related line ending in %j is kept",
+      (end) => {
+        const text = `Birinci satır.\nİlgili satır sonu${end}\n${H23_TICKER}`;
+        expect(cutAppendedTicker(text)).toBe(`Birinci satır.\nİlgili satır sonu${end}`);
+      },
+    );
+
+    it("a closing quote after a letter is not a sentence mark: that line is dropped", () => {
+      expect(cutAppendedTicker(`Birinci satır.\nİlgili satır sonu”\n${H23_TICKER}`)).toBe("Birinci satır.");
+      expect(cutAppendedTicker(`Birinci satır.\nİlgili (satır)\n${H23_TICKER}`)).toBe("Birinci satır.");
+    });
+
+    it("a related line of 120 characters goes, one of 121 stays", () => {
+      const l120 = "a".repeat(120);
+      const l121 = "a".repeat(121);
+      expect(cutAppendedTicker(`Birinci satır.\n${l120}\n${H23_TICKER}`)).toBe("Birinci satır.");
+      expect(cutAppendedTicker(`Birinci satır.\n${l121}\n${H23_TICKER}`)).toBe(`Birinci satır.\n${l121}`);
+      // The length is the trimmed length.
+      expect(cutAppendedTicker(`Birinci satır.\n   ${l120}   \n${H23_TICKER}`)).toBe("Birinci satır.");
+    });
+
+    it("drops at most 2 related lines", () => {
+      expect(cutAppendedTicker(`A.\nr1\n${H23_TICKER}`)).toBe("A.");
+      expect(cutAppendedTicker(`A.\nr1\nr2\n${H23_TICKER}`)).toBe("A.");
+      expect(cutAppendedTicker(`A.\nr1\nr2\nr3\n${H23_TICKER}`)).toBe("A.\nr1");
+      expect(cutAppendedTicker(`A.\nr1\nr2\nr3\nr4\n${H23_TICKER}`)).toBe("A.\nr1\nr2");
+    });
+
+    it("stops at the first line that ends in a mark", () => {
+      expect(cutAppendedTicker(`A.\nB.\nr2\n${H23_TICKER}`)).toBe("A.\nB.");
+      expect(cutAppendedTicker(`A.\nr1\nB.\nr3\n${H23_TICKER}`)).toBe("A.\nr1\nB.");
+      expect(cutAppendedTicker(`A.\nB.\n${H23_TICKER}`)).toBe("A.\nB.");
+    });
+
+    it("never drops the first line, however short and unpunctuated", () => {
+      expect(cutAppendedTicker(`ilk satır\n${H23_TICKER}`)).toBe("ilk satır");
+      expect(cutAppendedTicker(`ilk satır\nr1\n${H23_TICKER}`)).toBe("ilk satır");
+      expect(cutAppendedTicker(`ilk satır\nr1\nr2\n${H23_TICKER}`)).toBe("ilk satır");
+      expect(cutAppendedTicker(`ilk satır\nr1\nr2\nr3\n${H23_TICKER}`)).toBe("ilk satır\nr1");
+    });
+
+    it("an empty first line gives '' (same as cleanDescription)", () => {
+      expect(cutAppendedTicker(`\n${H23_TICKER}`)).toBe("");
+      expect(cutAppendedTicker(`\n${H23_TICKER}`)).toBe(cleanDescription(`\n${H23_TICKER}`));
+    });
+
+    it("cuts at the first ticker line when there are several", () => {
+      expect(cutAppendedTicker(`A.\nr1\nSon dakika: x\nr2\nSon dakika: y`)).toBe("A.");
+      expect(cutAppendedTicker(`A.\nB.\nSon dakika: x\nC.\nSon dakika: y`)).toBe("A.\nB.");
+    });
+
+    it("a ticker on the first line is the article's own text; a later one still cuts", () => {
+      expect(cutAppendedTicker("Son dakika... A\nB\nSon dakika... C")).toBe("Son dakika... A");
+    });
+
+    it.each([
+      "Son dakika...",
+      "Son dakika..",
+      "Son dakika.",
+      "Son dakika…",
+      "Son dakika:",
+      "Son dakika!",
+      "Son Dakika:",
+      "SON DAKİKA!",
+      "  Son dakika... başka haber",
+      "Son dakika ... boşluklu",
+    ])("recognises the ticker %j (same line shape as cleanDescription)", (ticker) => {
+      expect(cutAppendedTicker(`A.\nr1\n${ticker}\nsonraki`)).toBe("A.");
+    });
+
+    it("handles CRLF and blank lines (blank lines are skipped and do not count)", () => {
+      expect(cutAppendedTicker("A.\r\nr1\r\nr2\r\nSon dakika... x")).toBe("A.");
+      expect(cutAppendedTicker("A.\r\nr1\r\n\r\nr2\r\n\r\nSon dakika... x")).toBe("A.");
+      expect(cutAppendedTicker("A.\r\nr1\r\n\r\n\r\nr2\r\nr3\r\nSon dakika... x")).toBe("A.\r\nr1");
+      expect(cutAppendedTicker("A.\n\n\nr1\n \n\t\nr2\n\n\nSon dakika... x")).toBe("A.");
+      // A blank line is not a related line: the sentence before it stays.
+      expect(cutAppendedTicker("A.\n\nB.\n\n\nSon dakika... x")).toBe("A.\n\nB.");
+    });
+
+    it("trims the end of what is left", () => {
+      expect(cutAppendedTicker("A.   \nr1  \n  \nSon dakika... x")).toBe("A.");
+      expect(cutAppendedTicker("A. \n\nSon dakika... x")).toBe("A.");
+    });
+  });
+
+  describe("no ticker line after line 0: the SAME string comes back", () => {
+    const SAME: ReadonlyArray<readonly [string, string]> = [
+      ["empty", ""],
+      ["single line", "Tek satırlık açıklama"],
+      ["two sentences", "Birinci satır.\nİkinci satır."],
+      ["trailing newline", "Haber metni.\n"],
+      ["'Son dakika...' on line 0 only", "Son dakika... ilk satır\nikinci satır"],
+      ["'Son dakika' without punctuation", "Haber\nSon dakika haberi olarak duyuruldu."],
+      ["a word that starts with it", "Haber\nSon dakikaya kadar bekledi."],
+      ["lower-case line start", "Haber\nson dakika: küçük harf"],
+      ["'Son dakika' mid-line", "Haber\nBu satırda Son dakika... geçiyor."],
+      ["short unpunctuated lines", "kısa satır\nbaşka kısa satır\nüçüncü kısa satır"],
+      ["1f0261af: a mid-text short unpunctuated line with a '!'", H23_1F02],
+    ];
+    it.each(SAME)("%s", (_label, text) => {
+      expect(Object.is(cutAppendedTicker(text), text)).toBe(true);
+    });
+
+    it("every wrapper / excerpt fixture of this file that has no ticker line", () => {
+      for (const x of H23_TEXTS) {
+        const wrapped = stripFeedWrappers(x);
+        if (/\nSon dakika/.test(wrapped)) continue;
+        expect(Object.is(cutAppendedTicker(wrapped), wrapped), x.slice(0, 40)).toBe(true);
+      }
+    });
+  });
+
+  describe("agreement with cleanDescription", () => {
+    it("for every fixture x: cleanDescription(x) starts with cutAppendedTicker(stripFeedWrappers(x))", () => {
+      for (const x of H23_TEXTS) {
+        const cut = cutAppendedTicker(stripFeedWrappers(x));
+        expect(cleanDescription(x).startsWith(cut), x.slice(0, 40)).toBe(true);
+        expect(cut.length).toBeLessThanOrEqual(cleanDescription(x).length);
+      }
+    });
+
+    it("and cutAppendedTicker is idempotent on every fixture and on its own output", () => {
+      for (const x of H23_TEXTS) {
+        const once = cutAppendedTicker(x);
+        expect(cutAppendedTicker(once), x.slice(0, 40)).toBe(once);
+      }
+    });
+
+    it("cleanDescription output is unchanged for texts whose related line is punctuated or absent", () => {
+      expect(cleanDescription("A.\nr1\nSon dakika... x")).toBe("A.\nr1");
+      expect(cleanDescription("A.\nSon dakika... x")).toBe("A.");
+    });
+  });
+
+  describe("robustness", () => {
+    it("100k-character adversarial inputs finish in under 50 ms each", () => {
+      const inputs = [
+        "\nSon dakika...".repeat(7_200),
+        "\nx".repeat(50_000),
+        "x\n".repeat(50_000) + "Son dakika...",
+        "\n".repeat(100_000) + "Son dakika... x",
+        ("\n" + " ".repeat(50_000)).repeat(2) + "\nSon dakika... x",
+        "a.\nr\n".repeat(20_000) + "Son dakika... x",
+        "\r\n".repeat(50_000) + "Son dakika... x",
+      ];
+      for (const s of inputs) {
+        const start = performance.now();
+        cutAppendedTicker(s);
+        expect(performance.now() - start, `${s.length} chars`).toBeLessThan(50);
+      }
+    });
+
+    it("never throws on odd input", () => {
+      for (const s of ["\n", "\n\n", "\nSon dakika", "\r", "\u0000", "😀\n😀", "\ud83d\nSon dakika..."]) {
+        expect(() => cutAppendedTicker(s), JSON.stringify(s)).not.toThrow();
+      }
+    });
   });
 });

@@ -135,6 +135,15 @@ interface ClusterCardImageProps {
    * <img> `alt=""`. Any other value keeps today's named-image behaviour.
    */
   alt: string;
+  /**
+   * BCP 47 language of `alt` / the logo caption, for the rare caller whose
+   * accessible name is not in the document's language (the cluster page hero,
+   * when the extractive headline is an English outlet's own title; WCAG 3.1.2,
+   * h23-a11y-1). Forwarded to the <img> (tier 1) and to the role="img" wrapper
+   * (tiers 2 and 3), which also covers the logo's own alt and caption. Omit it
+   * (the default) and no `lang` attribute is emitted.
+   */
+  lang?: string;
   className?: string;
   /** True for above-the-fold cards so the browser preloads the asset. */
   priority?: boolean;
@@ -260,6 +269,7 @@ export function ClusterCardImage({
   logoAlt,
   credits,
   alt,
+  lang,
   className,
   priority = false,
   fetchPriority,
@@ -332,6 +342,7 @@ export function ClusterCardImage({
         {...(decorative
           ? { "aria-hidden": "true" as const }
           : { role: "img", "aria-label": alt })}
+        lang={lang}
         className={`${className ?? ""} relative rounded-lg overflow-hidden ${GRADIENT_CLASSES} flex items-center justify-center`}
       >
         <Newspaper
@@ -361,6 +372,7 @@ export function ClusterCardImage({
               role: "img",
               "aria-label": logoAlt ? `${alt} — ${logoAlt}` : alt,
             })}
+        lang={lang}
         className={`${className ?? ""} relative rounded-lg overflow-hidden ${GRADIENT_CLASSES} flex flex-col items-center justify-center gap-2 p-3`}
       >
         {/* Plain <img> (not next/image): the src is built by
@@ -412,6 +424,7 @@ export function ClusterCardImage({
           key={currentSrc}
           src={currentSrc}
           alt={alt}
+          lang={lang}
           width={width}
           height={height}
           sizes={sizes}

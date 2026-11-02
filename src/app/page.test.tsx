@@ -1,4 +1,5 @@
-import { Suspense } from "react";
+import { Suspense, createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ---------------------------------------------------------------------------
@@ -54,6 +55,7 @@ vi.mock("@/lib/time", async (importOriginal) => {
 
 import HomePage, { HomeFeed, generateMetadata } from "./page";
 import { FocusFeedOnPageChange } from "@/components/home/focus-feed-on-page-change";
+import { FollowButton } from "@/components/follow/follow-button";
 import type { PoliticsClustersResult } from "@/lib/clusters/politics-query";
 
 type Elementish = { type?: unknown; props?: Record<string, unknown> };
@@ -91,6 +93,77 @@ function textOf(node: unknown): string {
     return textOf((node as Elementish).props?.children);
   }
   return "";
+}
+
+/** Display name of a function component element, or undefined for a DOM tag. */
+function typeName(el: Elementish): string | undefined {
+  return typeof el.type === "function"
+    ? (el.type as { name?: string }).name
+    : undefined;
+}
+
+/**
+ * Like collectElements, but also renders the named PURE function components
+ * (no hooks, no async) inline, so what they output is part of the walk.
+ */
+function collectRendered(
+  node: unknown,
+  expand: ReadonlySet<string>,
+  out: Elementish[] = [],
+): Elementish[] {
+  if (Array.isArray(node)) {
+    for (const child of node) collectRendered(child, expand, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as Elementish;
+    if (el.type === undefined) return out;
+    out.push(el);
+    const name = typeName(el);
+    if (name !== undefined && expand.has(name)) {
+      collectRendered((el.type as (p: unknown) => unknown)(el.props), expand, out);
+    } else if (el.props?.children !== undefined) {
+      collectRendered(el.props.children, expand, out);
+    }
+  }
+  return out;
+}
+
+// SearchEcho (the quoted query) and EmptySearch (the card) are pure, so the
+// reader-visible text can be read without a renderer. SearchStatus is left
+// alone on purpose: it is the sr-only live region, read through its `text`.
+const VISIBLE_VIEWS = new Set(["SearchEcho", "EmptySearch"]);
+
+/** Text a sighted reader gets: textOf, with SearchEcho and EmptySearch rendered. */
+function visibleText(node: unknown): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(visibleText).join("");
+  if (node && typeof node === "object") {
+    const el = node as Elementish;
+    const name = typeName(el);
+    if (name !== undefined && VISIBLE_VIEWS.has(name)) {
+      return visibleText((el.type as (p: unknown) => unknown)(el.props));
+    }
+    return visibleText(el.props?.children);
+  }
+  return "";
+}
+
+/** The live region's text (SearchStatus's `text` prop). */
+function liveRegionText(tree: unknown): string {
+  const el = collectElements(tree).find((e) => typeName(e) === "SearchStatus");
+  return String(el?.props?.text);
+}
+
+/** Longest run of one repeated character (character scan, no regex). */
+function longestRun(text: string, ch: string): number {
+  let best = 0;
+  let run = 0;
+  for (const c of text) {
+    run = c === ch ? run + 1 : 0;
+    if (run > best) best = run;
+  }
+  return best;
 }
 
 /** Ids of every ClusterCard element in the tree, in render order. */
@@ -316,7 +389,7 @@ describe("HomeFeed — result count is the same on every page of one search", ()
   it("page 1 lists 15 feed cards plus the archive and reports 38 results", async () => {
     const tree = await renderPage("1");
     expect(clusterCardIds(tree)).toHaveLength(15 + 22);
-    expect(textOf(tree)).toContain("“deprem” için 38 sonuç");
+    expect(visibleText(tree)).toContain("“deprem” için 38 sonuç");
     expect(statusText(tree)).toBe(
       "“deprem” için en ilgili 38 sonuç gösteriliyor.",
     );
@@ -325,7 +398,7 @@ describe("HomeFeed — result count is the same on every page of one search", ()
   it("page 2 shows the last feed card, no archive rows, and the same 38 results", async () => {
     const tree = await renderPage("2");
     expect(clusterCardIds(tree)).toEqual(["f16"]);
-    expect(textOf(tree)).toContain("“deprem” için 38 sonuç");
+    expect(visibleText(tree)).toContain("“deprem” için 38 sonuç");
     expect(statusText(tree)).toBe(
       "“deprem” için en ilgili 38 sonuç gösteriliyor.",
     );
@@ -333,10 +406,183 @@ describe("HomeFeed — result count is the same on every page of one search", ()
 
   it("a page past the end is clamped and still reports the same total", async () => {
     const tree = await renderPage("99");
-    expect(textOf(tree)).toContain("“deprem” için 38 sonuç");
+    expect(visibleText(tree)).toContain("“deprem” için 38 sonuç");
     expect(statusText(tree)).toBe(
       "“deprem” için en ilgili 38 sonuç gösteriliyor.",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h23-a11y-4: the search echo. A pasted 170-character URL used to overflow the
+// page at 390 px (WCAG 1.4.10), and a 1-character query said 'için sonuç yok'
+// and announced 'sonuç bulunamadı' although no search ran (searchClusters
+// needs two characters).
+// ---------------------------------------------------------------------------
+
+describe("HomeFeed: a one-character query (no search ran)", () => {
+  beforeEach(() => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("ak", "AK Parti")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+  });
+
+  it("does not call searchClusters", async () => {
+    await HomeFeed({ searchParams: Promise.resolve({ q: "a" }) });
+    expect(searchClusters).not.toHaveBeenCalled();
+  });
+
+  it("asks for more characters instead of claiming 'no results'", async () => {
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "a" }) });
+    const text = visibleText(tree);
+    expect(text).toContain("En az 2 karakter yazın.");
+    expect(text).toContain("Aramak için biraz daha yazın");
+    expect(text).not.toContain("için sonuç yok");
+    expect(text).not.toContain("sonuç bulunamadı");
+    expect(text).not.toContain("Hiç haber bulunamadı");
+    expect(text).not.toContain("Farklı bir kelime deneyin");
+    // The reader has to type more, so the way out is still offered.
+    expect(text).toContain("Aramayı temizle");
+  });
+
+  it("announces the same hint in the live region, not 'sonuç bulunamadı'", async () => {
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "a" }) });
+    expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
+  });
+
+  it("shows no result-count line and no follow button for it", async () => {
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "a" }) });
+    expect(visibleText(tree)).not.toMatch(/için \d+ sonuç/);
+    expect(visibleText(tree)).not.toContain("“a”");
+    expect(collectElements(tree).some((e) => e.type === FollowButton)).toBe(false);
+  });
+
+  it("treats a padded or control-character one-character query the same way", async () => {
+    for (const q of ["  a  ", "\u0001a", "ş"]) {
+      searchClusters.mockClear();
+      const tree = await HomeFeed({ searchParams: Promise.resolve({ q }) });
+      expect(searchClusters, JSON.stringify(q)).not.toHaveBeenCalled();
+      expect(liveRegionText(tree), JSON.stringify(q)).toBe("En az 2 karakter yazın.");
+      expect(visibleText(tree), JSON.stringify(q)).not.toContain("için sonuç yok");
+    }
+  });
+
+  it("keeps the hint when the feed itself failed to load", async () => {
+    getPoliticsClusters.mockRejectedValue(new Error("db down"));
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "a" }) });
+    expect(liveRegionText(tree)).toBe("En az 2 karakter yazın.");
+  });
+
+  it("still hands the query to FocusFeedOnPageChange (focus handoff unchanged)", async () => {
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "a" }) });
+    const focusEl = collectElements(tree).find((e) => e.type === FocusFeedOnPageChange);
+    expect(focusEl?.props?.query).toBe("a");
+  });
+});
+
+describe("HomeFeed: a two-character query behaves as before", () => {
+  it("searches, counts and says 'için sonuç yok' when nothing matches", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("b", "Başbakan açıkladı")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "ak" }) });
+
+    expect(searchClusters).toHaveBeenCalledTimes(1);
+    expect(searchClusters).toHaveBeenCalledWith("ak");
+    const text = visibleText(tree);
+    expect(text).toContain("“ak” için 0 sonuç");
+    expect(text).toContain("“ak” için sonuç yok. Farklı bir kelime deneyin.");
+    expect(text).toContain("Hiç haber bulunamadı");
+    expect(text).not.toContain("En az 2 karakter");
+    expect(liveRegionText(tree)).toBe("“ak” için sonuç bulunamadı.");
+    expect(collectElements(tree).some((e) => e.type === FollowButton)).toBe(true);
+  });
+
+  it("counts an in-feed match", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("ak", "AK Parti açıkladı")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+
+    const tree = await HomeFeed({ searchParams: Promise.resolve({ q: "ak" }) });
+
+    expect(clusterCardIds(tree)).toEqual(["ak"]);
+    expect(visibleText(tree)).toContain("“ak” için 1 sonuç");
+    expect(visibleText(tree)).not.toContain("için sonuç yok");
+  });
+
+  it("still searches 'a b' (three characters once normalised)", async () => {
+    getPoliticsClusters.mockResolvedValue(feedOf());
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    await HomeFeed({ searchParams: Promise.resolve({ q: "a b" }) });
+    expect(searchClusters).toHaveBeenCalledWith("a b");
+  });
+});
+
+describe("HomeFeed: a 300 character query does not overflow", () => {
+  const long = "a".repeat(300);
+
+  async function longTree() {
+    getPoliticsClusters.mockResolvedValue(feedOf(bundle("b", "Başbakan açıkladı")));
+    searchClusters.mockResolvedValue({ ok: true, bundles: [] });
+    return HomeFeed({ searchParams: Promise.resolve({ q: long }) });
+  }
+
+  it("echoes at most 60 code points of the query anywhere in the visible text", async () => {
+    const tree = await longTree();
+    const text = visibleText(tree);
+    expect(text).toContain("için sonuç yok");
+    expect(longestRun(text, "a")).toBeLessThanOrEqual(60);
+    expect(text).not.toContain("a".repeat(61));
+    expect(text).toContain(`“${"a".repeat(59)}…”`);
+  });
+
+  it("echoes it through SearchEcho in BOTH the count line and the empty card", async () => {
+    const tree = await longTree();
+    const echoes = collectRendered(tree, new Set(["EmptySearch"])).filter(
+      (e) => typeName(e) === "SearchEcho",
+    );
+    expect(echoes).toHaveLength(2);
+    for (const echo of echoes) {
+      const markup = renderToStaticMarkup(
+        createElement(echo.type as never, echo.props as never),
+      );
+      expect(markup).toContain("break-words");
+      expect(markup).toContain("[overflow-wrap:anywhere]");
+      expect(longestRun(markup, "a")).toBe(59);
+    }
+  });
+
+  it("lets the count line and the empty card paragraphs shrink and wrap", async () => {
+    const tree = await longTree();
+    const paragraphs = collectRendered(tree, new Set(["EmptySearch"])).filter(
+      (e) => e.type === "p",
+    );
+    const holdingEcho = paragraphs.filter((p) =>
+      collectRendered(p.props?.children, new Set()).some(
+        (e) => typeName(e) === "SearchEcho",
+      ),
+    );
+    expect(holdingEcho).toHaveLength(2);
+    for (const p of holdingEcho) {
+      const cls = String(p.props?.className);
+      expect(cls).toContain("min-w-0");
+      expect(cls).toContain("break-words");
+    }
+    // The empty card's paragraph can also never outgrow its column.
+    const emptyP = holdingEcho.find((p) =>
+      String(p.props?.className).includes("leading-relaxed"),
+    );
+    expect(emptyP, "the empty card paragraph").toBeDefined();
+    expect(String(emptyP?.props?.className)).toContain("max-w-full");
+  });
+
+  it("keeps the live region and the title at 60 code points as before", async () => {
+    const tree = await longTree();
+    expect(liveRegionText(tree)).toBe(
+      `“${"a".repeat(59)}…” için sonuç bulunamadı.`,
+    );
+    expect(await generateMetadata({ searchParams: Promise.resolve({ q: long }) })).toEqual({
+      title: { absolute: `“${"a".repeat(59)}…” araması — Tayf` },
+      robots: { index: false, follow: true },
+    });
   });
 });
 

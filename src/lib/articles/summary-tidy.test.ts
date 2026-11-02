@@ -948,3 +948,680 @@ describe("tidySummaryText h22 residue robustness", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// h23 (hunt 23, 2026-11-02): residue that survived the #169 clamp repair. The
+// rows are the verbatim clusters.summary_tr of fifteen live clusters (read-only
+// SELECT on 2026-11-02; every id is the 8-character prefix of the cluster id):
+//   h23-live-1  ticker / bullet / CTA residue: abae2026 18d67e3b 55cc9990
+//               (Son dakika haberi...), 4f1b3e56 (leading "- "), da55a291
+//               af529f2a 869ffc17 (CTA sentence), 3a46fc27 (placeholder)
+//   h23-live-2  a different story's headline at the end: 9e83921e 4c8e7533
+//               (Milliyet ticker / related line), 1f0261af (mid-text line)
+//   h23-live-3  the clamp repair ended on an ordinal or a title: 4327f6d8
+//               2328a68d dec5e1a6 (13. / 103.), 4ca344b8 (Prof. Dr.)
+// ---------------------------------------------------------------------------
+
+// 9e83921e (500 chars)
+const RAW_9E83 =
+  "Türkiye'de 15 yaşını doldurmamış çocuklara yönelik sosyal medya düzenlemesinin yürürlüğe girmesiyle birlikte gözler yaş doğrulama sürecine çevrildi. Ancak kullanıcıları bekleyen tehlike yalnızca yeni kurallar değil. Dolandırıcılar, \"Hesabınız kapatılacak\" ve \"Yaşınızı doğrulayın\" mesajlarıyla vatandaşların dijital bilgilerini ele geçirmek için harekete geçebilir.\nSon dakika... MHP lideri Bahçeli'den 100 il 1000 ilçe açıklaması! Türkiye'de 19 yeni il, 78 yeni ilçe önerisi\nE-Devlet veya sosyal ...";
+
+// 4c8e7533 (314 chars)
+const RAW_4C8E =
+  "Dışişleri Bakanı Hakan Fidan, Atlanta'da G20 Dışişleri Bakanları Toplantısı marjında Meksika Dışişleri Bakanı Roberto Velasco Álvarez ile görüştü.\nZelenskiy ile görüşen Cumhurbaşkanı Erdoğan: Barışa giden yolu açmak için her gayrete hazırız\nSon dakika... Rusya için 3 fırsat! Polonya'daki kriz Avrupa'yı sarsabilir";
+
+// 1f0261af (500 chars)
+const RAW_1F02 =
+  "Partiden yapılan açıklamaya göre, AK Parti Kültür ve Sanat Politikaları Başkanlığı ile Teşkilat Başkanlığı işbirliğinde \"Kuruluşunun 25. İktidara Gelişinin 24. Yılında AK Parti\" paneli yapılacak. AK Parti Genel Merkezi'nde 3 Kasım Salı günü gerçekleştirilecek panelin moderatörlüğünü Genel Başkan Yardımcısı ve Kültür ve Sanat Politikaları Başkanı Hüseyin Yayman üstlenecek.\n11 ilde sahte kanser ilacı operasyonu! 22 gözaltı\nPanele, Genel Başkanvekilleri Efkan Ala ve Mustafa Elitaş ile Genel Başk...";
+
+// 4327f6d8 (500 chars)
+const RAW_4327 =
+  "Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu.Konuşmasına katılımcıları selamlayarak başlayan Erdoğan, \"Dün Cumhuriyetimizin 103'üncü yıl dönümünü sizlerin katılımıyla büy...";
+
+// 2328a68d (500 chars)
+const RAW_2328 =
+  "Cumhurbaşkanı Recep Tayyip Erdoğan, Beştepe Millet Sergi Salonu'nda 29 Ekim Cumhuriyet Bayramı ve TDT Zirvesi dolayısıyla konuk devlet başkanlarını ağırladı.\nCumhurbaşkanı Erdoğan'ın açıklamalarından satır başları:\nMustafa Kemal Atatürk başta olmak üzere milli mücadeleyi sevk ve idare eden tüm kadroları, tüm şehitlerimizi, gazilerimizi, Meclisimizin o dönemdeki muhterem mensuplarını rahmetle, minnetle yâd ediyorum. Cumhuriyetimizin 103. yıl dönümünü millet olarak bu sene çok farklı idrak ediy...";
+
+// dec5e1a6 (500 chars)
+const RAW_DEC5 =
+  "HABER MERKEZİ - Başkent Ankara, Türk Devletleri Teşkilatı'nın (TDT) 13. zirvesine ev sahipliği yapıyor. Cumhurbaşkanı Erdoğan'ın \"Türk dünyası olarak sarsılmaz kardeşliğimize dinamit koymak isteyenlerin karşısına inanıyorum ki yine birlik ve beraberlikle dikileceğiz.\" sözleriyle dikkat çektiği Türk Devletleri Teşkilatı 13. Zirvesi'ne katılacak liderler Türkiye'ye geldi.\nDIŞİŞLERİ BAKANLARI KONSEYİ TOPLANDI\nTürk Devletleri Teşkilatı (TDT) 13. Zirvesi kapsamında Ankara'da düzenlenen TDT Dışişle...";
+
+// 4ca344b8 (500 chars)
+const RAW_4CA3 =
+  "Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum\n▪\uFE0F Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî\n\nTrump ...";
+
+// abae2026 (152 chars)
+const RAW_ABAE =
+  "Son dakika haberi... AFAD verilerine göre Ege Denizi'nde 3.7 büyüklüğünde bir deprem meydana geldi. Depremin derinliği 8.83 kilometre olarak kaydedildi.";
+
+// 18d67e3b (94 chars)
+const RAW_18D6 =
+  "Son dakika haberi: Türkiye ve Özbekistan arasında iş birliği anlaşmalarının imzaları atılıyor.";
+
+// 55cc9990 (228 chars)
+const RAW_55CC =
+  "Son dakika haberine göre; Milli İstihbarat Teşkilatı Başkanlığı tarafından, terör örgütü DEAŞ’ın Horasan Vilayeti’ne yönelik bir operasyon gerçekleştirdi. Operasyonda yakalanan DEAŞ’lı terörist Uğur Bahadır Türkiye'ye getirildi.";
+
+// 4f1b3e56 (500 chars)
+const RAW_4F1B =
+  "- \"Kadınların toplum hayatında güçlü ve etkin konumları olması, medeniyet coğrafyamıza yabancı bir tecrübe değildir. Yapmamız gereken, bu tecrübeyi toplumlarımızın kültürel hassasiyetleriyle, öncelikleriyle ve sosyal gerçeklikleriyle örtüşen, Türk dünyasına özgü bir perspektife dönüştürmektir\"\n\"Konseyimizin kalıcı bir işbirliği zemini olmasını hedefliyoruz. Bugün Ankara'da Konseyimizin ilk adımlarını sizlerle birlikte atmış olduk. Konseyimizin ilk resmi toplantısını inşallah önümüzdeki sene T...";
+
+// da55a291 (445 chars)
+const RAW_DA55 =
+  "8 Eylül 1999 sonrasında sigortalı olan ve emeklilikte yaş şartına takılan milyonlarca çalışanı ilgilendiren yeni bir kanun teklifi Meclis'e geldi. Kademeli emeklilik beklentisini yeniden gündeme taşıyan teklif, gerekli sigortalılık süresini ve prim gün sayısını tamamlayanlara yaş şartı aranmaksızın emekli aylığı bağlanmasını öngörüyor. Üç maddeden oluşan düzenleme, TBMM Plan ve Bütçe Komisyonuna sevk edildi. İşte merak edilen tüm detaylar...";
+
+// af529f2a (440 chars)
+const RAW_AF52 =
+  "Dijital mecralara yönelik düzenlemede geri sayım bitti. Kamuoyunda sosyal medya düzenlemesi olarak da bilinen 15-17 yaş aralığındakilerin sosyal medya hesaplarının yarın itibarıyla tek tek silinmesi bekleniyor. Velilerinin rızası olsa dahi bu yaş grubu kişilerin hiçbir mecrada hesap açamaması sağlanacak. Sosyal medya düzenlemesinin milyonlarca kişiyi kapsadığı öğrenilirken, platformlar için ağır cezalar da gündemde... İşte tüm detaylar!";
+
+// 869ffc17 (365 chars)
+const RAW_869F =
+  "2026-2027 eğitim öğretim yılı KYK burs ve öğrenim kredisi başvuru sonuçları için öğrencilerin bekleyişi sürüyor. Gençlik ve Spor Bakanlığı tarafından başvuru sürecinin tamamlanmasının ardından gözler sonuçların açıklanacağı tarihe çevrildi. Peki, 2026 KYK burs sonuçları açıklandı mı, ne zaman açıklanacak? KYK burs ve kredi başvurularına dair detaylar haberimizde.";
+
+// 3a46fc27 (22 chars)
+const RAW_3A46 =
+  "Ayrıntılar birazdan...";
+
+/** The text up to (not including) the first occurrence of `marker`. */
+function before(text: string, marker: string): string {
+  const at = text.indexOf(marker);
+  expect(at, marker).toBeGreaterThan(0);
+  return text.slice(0, at);
+}
+
+const H23_RAW_ALL: ReadonlyArray<readonly [string, string]> = [
+  ["9e83921e", RAW_9E83],
+  ["4c8e7533", RAW_4C8E],
+  ["1f0261af", RAW_1F02],
+  ["4327f6d8", RAW_4327],
+  ["2328a68d", RAW_2328],
+  ["dec5e1a6", RAW_DEC5],
+  ["4ca344b8", RAW_4CA3],
+  ["abae2026", RAW_ABAE],
+  ["18d67e3b", RAW_18D6],
+  ["55cc9990", RAW_55CC],
+  ["4f1b3e56", RAW_4F1B],
+  ["da55a291", RAW_DA55],
+  ["af529f2a", RAW_AF52],
+  ["869ffc17", RAW_869F],
+  ["3a46fc27", RAW_3A46],
+];
+
+describe("tidySummaryText h23 live rows: the fixtures are the live raw texts", () => {
+  it("the clamped rows have the clamp signature (500 characters, ending '...')", () => {
+    for (const raw of [RAW_9E83, RAW_1F02, RAW_4327, RAW_2328, RAW_DEC5, RAW_4CA3, RAW_4F1B]) {
+      expect(raw).toHaveLength(500);
+      expect(raw.endsWith("...")).toBe(true);
+    }
+  });
+});
+
+describe("tidySummaryText appended ticker (h23-live-2)", () => {
+  it("9e83921e: the Milliyet ticker and the related headline go; the summary ends '... harekete geçebilir.'", () => {
+    const out = tidySummaryText(RAW_9E83);
+    expect(out.endsWith(" harekete geçebilir.")).toBe(true);
+    expect(out).toBe(before(RAW_9E83, "\nSon dakika"));
+    expect(out).not.toMatch(/son dakika/i);
+    expect(out).not.toContain("Bahçeli");
+    expect(out).not.toContain("E-Devlet");
+    expect(out).not.toContain("…");
+  });
+
+  it("4c8e7533: the Zelenskiy headline and the ticker go; the summary ends '... Roberto Velasco Álvarez ile görüştü.'", () => {
+    const out = tidySummaryText(RAW_4C8E);
+    expect(out.endsWith(" Roberto Velasco Álvarez ile görüştü.")).toBe(true);
+    expect(out).toBe(before(RAW_4C8E, "\nZelenskiy"));
+    expect(out).not.toContain("Zelenskiy");
+    expect(out).not.toMatch(/son dakika/i);
+    expect(out).not.toContain("Polonya");
+  });
+
+  it("1f0261af: the short unpunctuated line in the middle is not a sentence end; the summary ends '... Hüseyin Yayman üstlenecek.'", () => {
+    const out = tidySummaryText(RAW_1F02);
+    expect(out.endsWith(" Hüseyin Yayman üstlenecek.")).toBe(true);
+    expect(out).toBe("Partiden yapılan açıklamaya göre, AK Parti Kültür ve Sanat Politikaları Başkanlığı ile Teşkilat Başkanlığı işbirliğinde \"Kuruluşunun 25. İktidara Gelişinin 24. Yılında AK Parti\" paneli yapılacak. AK Parti Genel Merkezi'nde 3 Kasım Salı günü gerçekleştirilecek panelin moderatörlüğünü Genel Başkan Yardımcısı ve Kültür ve Sanat Politikaları Başkanı Hüseyin Yayman üstlenecek.");
+    expect(out).not.toContain("sahte kanser ilacı");
+    expect(out).not.toContain("22 gözaltı");
+  });
+
+  it("a non-clamped text is cut too (4c8e7533 is 314 characters, so the clamp repair never ran)", () => {
+    expect(RAW_4C8E.length).toBeLessThan(499);
+    expect(tidySummaryText("Birinci cümle.\nSon dakika... Başka haber")).toBe("Birinci cümle.");
+  });
+
+  it("a related line that ends in a sentence mark is a real line of the article and stays", () => {
+    expect(tidySummaryText("Birinci cümle.\nİkinci cümle de bitti.\nSon dakika... Başka haber")).toBe(
+      "Birinci cümle. İkinci cümle de bitti.",
+    );
+  });
+
+  it("a ticker that is the only thing after an empty first line does not empty the summary", () => {
+    expect(tidySummaryText("\nSon dakika... Deprem oldu")).toBe("Deprem oldu");
+    expect(tidySummaryText("\nSon dakika:")).toBe("");
+  });
+
+  it("a ticker on the first line is still the leading-ticker rule's business", () => {
+    expect(tidySummaryText("Son dakika... Deprem oldu\nİkinci satır.")).toBe("Deprem oldu İkinci satır.");
+  });
+
+  describe("clamp repair with a ticker line (repairClamp)", () => {
+    const FIRST = "Bakan açıklama yaptı ve kararı duyurdu.";
+
+    it("cuts at the first line whatever share that keeps, and adds no ellipsis", () => {
+      const raw = clamp(`${FIRST}\nSon dakika... ${"Başka haber ".repeat(60)}`);
+      expect(FIRST.length / 497).toBeLessThan(0.6);
+      expect(tidySummaryText(raw)).toBe(FIRST);
+    });
+
+    it("drops the related headline that precedes the ticker", () => {
+      const raw = clamp(`${FIRST}\nİlgili haber başlığı bitmeden\nSon dakika... ${"Başka haber ".repeat(60)}`);
+      expect(tidySummaryText(raw)).toBe(FIRST);
+    });
+
+    it("keeps a related line that ends in a sentence mark", () => {
+      const raw = clamp(`${FIRST}\nİlgili cümle bitti.\nSon dakika... ${"Başka haber ".repeat(60)}`);
+      expect(tidySummaryText(raw)).toBe(`${FIRST} İlgili cümle bitti.`);
+    });
+
+    it("an empty first line falls back to the ordinary repair, and the ticker is still removed", () => {
+      const raw = clamp(`\nSon dakika... ${"kelimeler ".repeat(60)}`);
+      expect(raw).toHaveLength(500);
+      const out = tidySummaryText(raw);
+      expect(out).toBe("kelimeler ".repeat(48).trimEnd() + "…");
+    });
+
+    it("a ticker on the first line only is not cut by the ticker rule", () => {
+      const raw = clamp(`Son dakika... ${"kelimeler ".repeat(60)}`);
+      const out = tidySummaryText(raw);
+      expect(out).toBe("kelimeler ".repeat(48).trimEnd() + "…");
+    });
+  });
+
+  describe("clamp repair skips a short unpunctuated later line", () => {
+    const FIRST_LINE = "kelimeler ".repeat(30) + "Bitti.";
+    const TAIL = "yarımkalan ".repeat(20);
+
+    it("a '!' inside it is not a sentence end", () => {
+      const raw = clamp(`${FIRST_LINE}\nYeni bir haber! 22 gözaltı\n${TAIL}`);
+      expect(tidySummaryText(raw)).toBe(FIRST_LINE);
+    });
+
+    it("a '?' or '…' inside it is not a sentence end either", () => {
+      expect(tidySummaryText(clamp(`${FIRST_LINE}\nNe oldu? Bilinmiyor\n${TAIL}`))).toBe(FIRST_LINE);
+      expect(tidySummaryText(clamp(`${FIRST_LINE}\nDevamı var… sonra\n${TAIL}`))).toBe(FIRST_LINE);
+    });
+
+    it("a line longer than 120 characters is not skipped", () => {
+      const mid = `Yeni bir haber! ${"x".repeat(110)}`;
+      expect(mid.length).toBeGreaterThan(120);
+      const raw = clamp(`${FIRST_LINE}\n${mid}\n${TAIL}`);
+      expect(tidySummaryText(raw)).toBe(`${FIRST_LINE} Yeni bir haber!`);
+    });
+
+    it("a line of exactly 120 characters is skipped", () => {
+      const mid = `Yeni bir haber! ${"x".repeat(104)}`;
+      expect(mid).toHaveLength(120);
+      const raw = clamp(`${FIRST_LINE}\n${mid}\n${TAIL}`);
+      expect(tidySummaryText(raw)).toBe(FIRST_LINE);
+    });
+
+    it("a line that ends in a sentence mark is not skipped", () => {
+      const raw = clamp(`${FIRST_LINE}\nYeni bir haber! 22 gözaltı.\n${TAIL}`);
+      expect(tidySummaryText(raw)).toBe(`${FIRST_LINE} Yeni bir haber! 22 gözaltı.`);
+    });
+
+    it("the clamped last line is never skipped, even when it is short", () => {
+      const raw = clamp(`${"kelimeler ".repeat(44)}Bitti.\nKısa haber! ${TAIL}`);
+      expect(tidySummaryText(raw)).toBe(`${"kelimeler ".repeat(44)}Bitti. Kısa haber!`);
+    });
+
+    it("the first line is never skipped", () => {
+      // 60% of 497 is 299 characters, more than a skippable line can hold, so
+      // a first line is only testable as a unit: a short first line with a '!'
+      // keeps ending at that '!' once nothing later qualifies.
+      const raw = clamp(`Kısa! ilk satır\n${"kelimeler ".repeat(60)}`);
+      const out = tidySummaryText(raw);
+      expect(out.startsWith("Kısa! ilk satır kelimeler")).toBe(true);
+      expect(out.endsWith("…")).toBe(true);
+    });
+  });
+});
+
+describe("tidySummaryText ordinals and title abbreviations at a clamp (h23-live-3)", () => {
+  it("4327f6d8: does not end on 'Konseyi 13.'; the previous sentence is too short, so it cuts at the word with '…'", () => {
+    const out = tidySummaryText(RAW_4327);
+    expect(out).not.toMatch(/\d{1,3}\.$/);
+    expect(out).toBe("Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu. Konuşmasına katılımcıları selamlayarak başlayan Erdoğan, \"Dün Cumhuriyetimizin 103'üncü yıl dönümünü sizlerin katılımıyla…");
+    expect(out.endsWith("sizlerin katılımıyla…")).toBe(true);
+  });
+
+  it("2328a68d: does not end on 'Cumhuriyetimizin 103.'; it ends at the previous real sentence end", () => {
+    const out = tidySummaryText(RAW_2328);
+    expect(out).not.toMatch(/\d{1,3}\.$/);
+    expect(out).toBe("Cumhurbaşkanı Recep Tayyip Erdoğan, Beştepe Millet Sergi Salonu'nda 29 Ekim Cumhuriyet Bayramı ve TDT Zirvesi dolayısıyla konuk devlet başkanlarını ağırladı. Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları: Mustafa Kemal Atatürk başta olmak üzere milli mücadeleyi sevk ve idare eden tüm kadroları, tüm şehitlerimizi, gazilerimizi, Meclisimizin o dönemdeki muhterem mensuplarını rahmetle, minnetle yâd ediyorum.");
+    expect(out.endsWith("minnetle yâd ediyorum.")).toBe(true);
+  });
+
+  it("dec5e1a6: does not end on '(TDT) 13.'; it ends at the previous real sentence end", () => {
+    const out = tidySummaryText(RAW_DEC5);
+    expect(out).not.toMatch(/\d{1,3}\.$/);
+    expect(out).toBe("HABER MERKEZİ - Başkent Ankara, Türk Devletleri Teşkilatı'nın (TDT) 13. zirvesine ev sahipliği yapıyor. Cumhurbaşkanı Erdoğan'ın \"Türk dünyası olarak sarsılmaz kardeşliğimize dinamit koymak isteyenlerin karşısına inanıyorum ki yine birlik ve beraberlikle dikileceğiz.\" sözleriyle dikkat çektiği Türk Devletleri Teşkilatı 13. Zirvesi'ne katılacak liderler Türkiye'ye geldi.");
+    expect(out.endsWith("liderler Türkiye'ye geldi.")).toBe(true);
+  });
+
+  it("4ca344b8: does not end on 'Prof. Dr.' or 'Dr.'", () => {
+    const out = tidySummaryText(RAW_4CA3);
+    expect(out.endsWith("Dr.")).toBe(false);
+    expect(out.endsWith("Prof. Dr.")).toBe(false);
+    expect(out).toBe("Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪\uFE0F Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî Trump…");
+  });
+
+  describe("synthetic clamps", () => {
+    const PRE = "kelimeler ".repeat(40) + "Bitti. ";
+    const PREV = "kelimeler ".repeat(40) + "Bitti.";
+    const REST = "yarımkalan ".repeat(20);
+    const build = (mid: string) => clamp(`${PRE}${mid} ${REST}`);
+
+    it.each(["1", "9", "13", "99", "103", "999", "1899", "2100", "9999", "0"])(
+      "a 1-4 digit run '%s' before '.' is an ordinal, not a sentence end",
+      (digits) => {
+        expect(tidySummaryText(build(`Zirve ${digits}. Yeni dönem başlıyor`))).toBe(PREV);
+      },
+    );
+
+    it.each(["1900", "1999", "2000", "2026", "2099"])(
+      "the year rule: '%s' before '.' IS a sentence end",
+      (year) => {
+        expect(tidySummaryText(build(`Etkinlik ${year}. Yeni dönem başlıyor`))).toBe(
+          `${PRE}Etkinlik ${year}.`,
+        );
+      },
+    );
+
+    it.each([
+      "Dr", "DR", "Prof", "PROF", "Doç", "DOÇ", "Doc", "Av", "Op", "Uzm", "Yrd",
+      "Öğr", "ÖĞR", "Arş", "ARŞ", "Gör", "Org", "Korg", "Tümg", "Tuğg", "Alb",
+      "Sn", "Mah", "Cad", "Sok", "No", "vs", "vb", "Bkz", "Örn",
+    ])("the abbreviation '%s.' is not a sentence end", (abbr) => {
+      expect(tidySummaryText(build(`Konuşmacı ${abbr}. Ali Veli`))).toBe(PREV);
+    });
+
+    it("Prof. Dr. and Öğr. Gör. stack: every dot of the title is skipped", () => {
+      expect(tidySummaryText(build("Konuşmacı Prof. Dr. Ali Veli"))).toBe(PREV);
+      expect(tidySummaryText(build("Konuşmacı Öğr. Gör. Dr. Ali Veli"))).toBe(PREV);
+    });
+
+    it.each(["kararı", "ev", "Cumhurbaşkanlığı", "abcdr", "Kahramanmaraşdr", "XXXXXXXXdr", "profesör"])(
+      "an ordinary word '%s' before '.' is a sentence end (an abbreviation counts only as a whole word)",
+      (word) => {
+        expect(tidySummaryText(build(`Konuşmacı ${word}. Ali Veli`))).toBe(`${PRE}Konuşmacı ${word}.`);
+      },
+    );
+
+    it("a single letter is still an initial, and a decimal is still not an end", () => {
+      expect(tidySummaryText(build("Konuşmacı Mustafa K. Sarıgül"))).toBe(PREV);
+      expect(tidySummaryText(build("Oran 3.5 puan oldu"))).toBe(PREV);
+    });
+
+    it("the bar is on the sentence end that remains: an ordinal skipped, the real end kept at 60% or more", () => {
+      const raw = clamp(`${"a".repeat(299)}. Zirve 13. ${"kelimeler ".repeat(20)}`);
+      expect(tidySummaryText(raw)).toBe(`${"a".repeat(299)}.`);
+    });
+
+    it("an ordinal is also not a sentence end for the CTA rule", () => {
+      expect(tidySummaryText("Toplantı 13. Zirvesi'nde yapıldı işte detaylar")).toBe(
+        "Toplantı 13. Zirvesi'nde yapıldı işte detaylar",
+      );
+    });
+  });
+
+  it("unchanged: 'K. Sarıgül', '3.5', a year sentence and a real final sentence", () => {
+    for (const s of [
+      "Mustafa K. Sarıgül açıkladı",
+      "K. Sarıgül",
+      "Oran 3.5 puan oldu",
+      "Etkinlik 2026. Yeni dönem başlıyor ...",
+      "Bakan kararı açıkladı.",
+      "Zam geldi. Bakan kararı açıkladı.",
+      "Prof. Dr. Ahmet Yılmaz açıkladı",
+    ]) {
+      expect(tidySummaryText(s), s).toBe(s);
+    }
+  });
+});
+
+describe("tidySummaryText leading ticker with 'haber' and list markers (h23-live-1)", () => {
+  it("abae2026: 'Son dakika haberi...' goes", () => {
+    const out = tidySummaryText(RAW_ABAE);
+    expect(out).not.toMatch(/^son dakika/i);
+    expect(out).toBe(
+      "AFAD verilerine göre Ege Denizi'nde 3.7 büyüklüğünde bir deprem meydana geldi. Depremin derinliği 8.83 kilometre olarak kaydedildi.",
+    );
+  });
+
+  it("18d67e3b: 'Son dakika haberi:' goes", () => {
+    const out = tidySummaryText(RAW_18D6);
+    expect(out).not.toMatch(/^son dakika/i);
+    expect(out).toBe("Türkiye ve Özbekistan arasında iş birliği anlaşmalarının imzaları atılıyor.");
+  });
+
+  it("55cc9990: 'Son dakika haberine göre;' goes", () => {
+    const out = tidySummaryText(RAW_55CC);
+    expect(out).not.toMatch(/^son dakika/i);
+    expect(out).toBe(RAW_55CC.slice(RAW_55CC.indexOf("Milli İstihbarat")));
+  });
+
+  it("4f1b3e56: the leading '- ' goes (and the clamp is repaired first)", () => {
+    const out = tidySummaryText(RAW_4F1B);
+    expect(out.startsWith("- ")).toBe(false);
+    expect(out.startsWith('"Kadınların toplum hayatında')).toBe(true);
+    expect(out).toBe("\"Kadınların toplum hayatında güçlü ve etkin konumları olması, medeniyet coğrafyamıza yabancı bir tecrübe değildir. Yapmamız gereken, bu tecrübeyi toplumlarımızın kültürel hassasiyetleriyle, öncelikleriyle ve sosyal gerçeklikleriyle örtüşen, Türk dünyasına özgü bir perspektife dönüştürmektir\" \"Konseyimizin kalıcı bir işbirliği zemini olmasını hedefliyoruz. Bugün Ankara'da Konseyimizin ilk adımlarını sizlerle birlikte atmış olduk.");
+  });
+
+  describe("tickers", () => {
+    it.each([
+      ["Son dakika haberi... AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberi: AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberi! AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberi | AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberi. AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberi… AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberi; AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberine göre; AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberine göre: AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberine göre... AFAD açıkladı", "AFAD açıkladı"],
+      ["SON DAKİKA HABERİ: AFAD açıkladı", "AFAD açıkladı"],
+      ["SON DAKİKA HABERİNE GÖRE; AFAD açıkladı", "AFAD açıkladı"],
+      ["Son Dakika Haberi! AFAD açıkladı", "AFAD açıkladı"],
+      ["Son  dakika   haberi  ... AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberine  göre ; AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika haberi:\nAFAD açıkladı", "AFAD açıkladı"],
+      // Two stacked tickers, one of each shape.
+      ["Son dakika haberi: Son dakika | AFAD açıkladı", "AFAD açıkladı"],
+      ["Son dakika: Son dakika haberine göre; AFAD açıkladı", "AFAD açıkladı"],
+    ])("rewrites %j -> %j", (input, expected) => {
+      expect(tidySummaryText(input)).toBe(expected);
+    });
+
+    it.each([
+      "Son dakika haberi olarak duyuruldu",
+      "Son dakika haberine göre karar verildi",
+      "Son dakika haberleri geldi",
+      "Son dakika haberi",
+      "Son dakika haberine göre",
+      "Son dakika golüyle Galatasaray kazandı",
+      "Son dakikada gelen golle Galatasaray kazandı",
+      "Son dakika haberiyle ilgili açıklama",
+      "Son dakikalar haberi: çok sayıda",
+      "Deprem oldu. Son dakika haberi: yeni gelişme",
+    ])("leaves %j untouched (no separator right after the ticker)", (input) => {
+      expect(tidySummaryText(input)).toBe(input);
+    });
+
+    it("peels at most two tickers in total, whatever their shape", () => {
+      expect(tidySummaryText("Son dakika haberi: Son dakika: Son dakika! Deprem oldu")).toBe(
+        "Son dakika! Deprem oldu",
+      );
+    });
+
+    it("a ticker and nothing else gives ''", () => {
+      expect(tidySummaryText("Son dakika haberi...")).toBe("");
+      expect(tidySummaryText("SON DAKİKA HABERİNE GÖRE;")).toBe("");
+    });
+  });
+
+  describe("list markers", () => {
+    it.each([
+      ["- Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ["– Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ["• Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ["* Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ["▪ Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ["▪️ Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ["-   Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ['- "Kadınların" dedi', '"Kadınların" dedi'],
+      ["- Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      ["- \n Kadınların toplumdaki yeri", "Kadınların toplumdaki yeri"],
+      // A marker and a ticker, either way round.
+      ["Son dakika | - Deprem oldu", "Deprem oldu"],
+      ["- Son dakika: Deprem oldu", "Deprem oldu"],
+      ["- Son dakika haberi: - Deprem oldu", "Deprem oldu"],
+      // At most two markers in total.
+      ["- - Deprem oldu", "Deprem oldu"],
+      ["- - - Deprem oldu", "- Deprem oldu"],
+    ])("rewrites %j -> %j", (input, expected) => {
+      expect(tidySummaryText(input)).toBe(expected);
+    });
+
+    it.each([
+      "-5 derece",
+      "–5 derece",
+      "*önemli* not",
+      "•madde",
+      "Galatasaray - Fenerbahçe maçı bugün oynanacak",
+      "Maç sonucu 2 - 1 bitti",
+      "Not: - madde",
+      "— tırnak",
+      "Bakan açıkladı - detaylar sonra gelecek",
+    ])("leaves %j untouched (no marker followed by blanks at the start)", (input) => {
+      expect(tidySummaryText(input)).toBe(input);
+    });
+
+    it("a marker and nothing else is left as it is", () => {
+      expect(tidySummaryText("-")).toBe("-");
+      expect(tidySummaryText("•")).toBe("•");
+    });
+  });
+});
+
+describe("tidySummaryText CTA sentences and the placeholder (h23-live-1)", () => {
+  it("da55a291: 'İşte merak edilen tüm detaylar...' goes", () => {
+    const out = tidySummaryText(RAW_DA55);
+    expect(out).not.toMatch(/detaylar/i);
+    expect(out).toBe(before(RAW_DA55, " İşte merak edilen"));
+    expect(out.endsWith("Komisyonuna sevk edildi.")).toBe(true);
+  });
+
+  it("af529f2a: 'İşte tüm detaylar!' goes, the stored ellipsis before it stays", () => {
+    const out = tidySummaryText(RAW_AF52);
+    expect(out).not.toMatch(/detaylar/i);
+    expect(out).toBe(before(RAW_AF52, " İşte tüm detaylar"));
+    expect(out.endsWith("ağır cezalar da gündemde...")).toBe(true);
+  });
+
+  it("869ffc17: the WHOLE sentence 'KYK burs ve kredi başvurularına dair detaylar haberimizde.' goes", () => {
+    const out = tidySummaryText(RAW_869F);
+    expect(out).toBe(before(RAW_869F, " KYK burs ve kredi başvurularına"));
+    expect(out.endsWith("açıklanacak?")).toBe(true);
+    expect(out).not.toContain("başvurularına");
+    expect(out).not.toContain("dair");
+    expect(out).not.toContain("haberimizde");
+  });
+
+  it("3a46fc27: 'Ayrıntılar birazdan...' alone gives ''", () => {
+    expect(tidySummaryText(RAW_3A46)).toBe("");
+  });
+
+  it.each([
+    ["Zam geldi. İşte merak edilen tüm detaylar...", "Zam geldi."],
+    ["Zam geldi. İşte merak edilen tüm detaylar", "Zam geldi."],
+    ["Zam geldi. İŞTE MERAK EDİLEN TÜM DETAYLAR!", "Zam geldi."],
+    ["Zam geldi. İşte tüm detaylar!", "Zam geldi."],
+    ["Zam geldi. İşte merak edilenler", "Zam geldi."],
+    ["Zam geldi. İşte merak edilenler...", "Zam geldi."],
+    ["Zam geldi… İşte tüm detaylar", "Zam geldi…"],
+    ["Zam geldi. Ayrıntılar birazdan...", "Zam geldi."],
+    ["Zam geldi. AYRINTILAR BİRAZDAN", "Zam geldi."],
+    ["Gelişmeler şöyle: İşte tüm detaylar", "Gelişmeler şöyle"],
+    ["Bakan açıklama yaptı İşte tüm detaylar", "Bakan açıklama yaptı"],
+    ["Bakan açıklama yaptı Ayrıntılar birazdan", "Bakan açıklama yaptı"],
+    ["Zam geldi. İşte  merak edilen   tüm detaylar", "Zam geldi."],
+  ])("strips the tail of %j", (input, expected) => {
+    expect(tidySummaryText(input)).toBe(expected);
+  });
+
+  it.each([
+    "İşte merak edilen tüm detaylar...",
+    "İşte tüm detaylar!",
+    "İşte merak edilenler",
+    "Ayrıntılar birazdan...",
+    "AYRINTILAR BİRAZDAN",
+  ])("a CTA-only summary %j gives ''", (input) => {
+    expect(tidySummaryText(input)).toBe("");
+  });
+
+  it.each([
+    "İşte tüm detaylar ve rakamlar",
+    "İşte merak edilenleri açıkladı",
+    "İşte merak edilen tüm detaylarıyla",
+    "Ayrıntılar birazdan açıklanacak",
+    "Ayrıntılar birazdan sonra gelecek.",
+    "Bakan açıklama yaptı ayrıntılar birazdan",
+  ])("does not strip %j", (input) => {
+    expect(tidySummaryText(input)).toBe(input);
+  });
+
+  describe("a lower-case CTA phrase ends a short last sentence", () => {
+    it("the whole trailing sentence goes back to the previous sentence mark", () => {
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı, detaylar haberimizde")).toBe("Zam geldi.");
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı, detaylar haberimizde.")).toBe("Zam geldi.");
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı, detaylar haberimizde...")).toBe("Zam geldi.");
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı, işte detaylar")).toBe("Zam geldi.");
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı işte ayrıntılar!")).toBe("Zam geldi.");
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı, işte tüm detaylar")).toBe("Zam geldi.");
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı, işte merak edilen tüm detaylar")).toBe("Zam geldi.");
+      expect(tidySummaryText("Zam geldi. Bakan açıklama yaptı, işte merak edilenler")).toBe("Zam geldi.");
+    });
+
+    it("the previous mark may be a question mark, an exclamation mark, an ellipsis or a quote", () => {
+      expect(tidySummaryText("Zam gelecek mi? KYK burs sonuçlarına dair detaylar haberimizde.")).toBe("Zam gelecek mi?");
+      expect(tidySummaryText("Zam geldi! KYK burs sonuçlarına dair detaylar haberimizde.")).toBe("Zam geldi!");
+      expect(tidySummaryText("Zam geldi… KYK burs sonuçlarına dair detaylar haberimizde.")).toBe("Zam geldi…");
+      expect(tidySummaryText("Dedi ki “hazırız.” KYK burs sonuçlarına dair detaylar haberimizde.")).toBe(
+        "Dedi ki “hazırız.”",
+      );
+    });
+
+    it("the trailing sentence is at most 90 characters (code points): 90 goes, 91 stays", () => {
+      const tail = " detaylar haberimizde.";
+      expect(tail).toHaveLength(22);
+      const at90 = `Zam geldi. ${"a".repeat(68)}${tail}`;
+      const at91 = `Zam geldi. ${"a".repeat(69)}${tail}`;
+      expect(tidySummaryText(at90)).toBe("Zam geldi.");
+      expect(tidySummaryText(at91)).toBe(at91);
+    });
+
+    it("the length is counted in code points, not UTF-16 units", () => {
+      const sentence = `${"😀".repeat(50)} detaylar haberimizde.`;
+      expect(sentence.length).toBeGreaterThan(90);
+      expect([...sentence].length).toBeLessThanOrEqual(90);
+      expect(tidySummaryText(`Zam geldi. ${sentence}`)).toBe("Zam geldi.");
+    });
+
+    it("with no earlier sentence mark the text is left alone (the cut would empty it)", () => {
+      expect(tidySummaryText("Bakan açıklama yaptı, detaylar haberimizde")).toBe(
+        "Bakan açıklama yaptı, detaylar haberimizde",
+      );
+      expect(tidySummaryText("Bakan açıklama yaptı işte detaylar")).toBe("Bakan açıklama yaptı işte detaylar");
+    });
+
+    it("stacked: a CTA after punctuation goes first, then the lower-case sentence", () => {
+      expect(tidySummaryText("Zam geldi. Bakan açıkladı, detaylar haberimizde. Devamını oku")).toBe("Zam geldi.");
+    });
+
+    it("the English and older Turkish phrases never take this path", () => {
+      for (const s of [
+        "Fire broke out. experts say you can read more",
+        "Fire broke out. you can click to continue",
+        "Zam geldi. daha fazlası için devamını oku",
+        "Zam geldi. ayrıntılar için devamı için tıklayın",
+        "Zam geldi. bu konuda ayrıntılar birazdan",
+      ]) {
+        expect(tidySummaryText(s), s).toBe(s);
+      }
+    });
+
+    it("a lower-case phrase that is followed by more text is not a tail", () => {
+      expect(tidySummaryText("Zam geldi. Bakan dedi ki detaylar haberimizde yer alıyor")).toBe(
+        "Zam geldi. Bakan dedi ki detaylar haberimizde yer alıyor",
+      );
+    });
+  });
+});
+
+describe("tidySummaryText h23 idempotence and robustness", () => {
+  const OUTPUT_FIXTURES: readonly string[] = [
+    "Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu. Konuşmasına katılımcıları selamlayarak başlayan Erdoğan, \"Dün Cumhuriyetimizin 103'üncü yıl dönümünü sizlerin katılımıyla…",
+    "Cumhurbaşkanı Recep Tayyip Erdoğan, Beştepe Millet Sergi Salonu'nda 29 Ekim Cumhuriyet Bayramı ve TDT Zirvesi dolayısıyla konuk devlet başkanlarını ağırladı. Cumhurbaşkanı Erdoğan'ın açıklamalarından satır başları: Mustafa Kemal Atatürk başta olmak üzere milli mücadeleyi sevk ve idare eden tüm kadroları, tüm şehitlerimizi, gazilerimizi, Meclisimizin o dönemdeki muhterem mensuplarını rahmetle, minnetle yâd ediyorum.",
+    "HABER MERKEZİ - Başkent Ankara, Türk Devletleri Teşkilatı'nın (TDT) 13. zirvesine ev sahipliği yapıyor. Cumhurbaşkanı Erdoğan'ın \"Türk dünyası olarak sarsılmaz kardeşliğimize dinamit koymak isteyenlerin karşısına inanıyorum ki yine birlik ve beraberlikle dikileceğiz.\" sözleriyle dikkat çektiği Türk Devletleri Teşkilatı 13. Zirvesi'ne katılacak liderler Türkiye'ye geldi.",
+    "Cumhurbaşkanı Recep Tayyip Erdoğan şu açıklamada bulundu: 2026 Cumhurbaşkanlığı Kültür ve Sanat Büyük Ödülü’ne layık görülen çok kıymetli ilim, kültür ve sanat erbabımıza ülkemize yaptıkları eşsiz katkılar için şükranlarımı sunuyor, gönül ve fikir dünyamızın yıldızlarından Ahmed-i Hânî'yi rahmetle yad ediyorum ▪\uFE0F Bilim ve Kültür: Sabri Koz▪\uFE0F Geleneksel Sanatlar: Prof. Dr. İlhami Turan▪\uFE0F Edebiyat: Sibel Eraslan▪\uFE0F Sinema: Burçak Evren▪\uFE0F Müzik: Prof. Dr. Gönül Paçacı▪\uFE0F Vefa: Ahmed-i Hânî Trump…",
+    "\"Kadınların toplum hayatında güçlü ve etkin konumları olması, medeniyet coğrafyamıza yabancı bir tecrübe değildir. Yapmamız gereken, bu tecrübeyi toplumlarımızın kültürel hassasiyetleriyle, öncelikleriyle ve sosyal gerçeklikleriyle örtüşen, Türk dünyasına özgü bir perspektife dönüştürmektir\" \"Konseyimizin kalıcı bir işbirliği zemini olmasını hedefliyoruz. Bugün Ankara'da Konseyimizin ilk adımlarını sizlerle birlikte atmış olduk.",
+    "Partiden yapılan açıklamaya göre, AK Parti Kültür ve Sanat Politikaları Başkanlığı ile Teşkilat Başkanlığı işbirliğinde \"Kuruluşunun 25. İktidara Gelişinin 24. Yılında AK Parti\" paneli yapılacak. AK Parti Genel Merkezi'nde 3 Kasım Salı günü gerçekleştirilecek panelin moderatörlüğünü Genel Başkan Yardımcısı ve Kültür ve Sanat Politikaları Başkanı Hüseyin Yayman üstlenecek.",
+  ];
+
+  it("tidy(tidy(x)) === tidy(x) over every new fixture and every output", () => {
+    for (const [id, raw] of H23_RAW_ALL) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once), id).toBe(once);
+    }
+    for (const out of OUTPUT_FIXTURES) {
+      expect(tidySummaryText(out), out.slice(0, 40)).toBe(out);
+    }
+  });
+
+  it("is idempotent on the synthetic inputs of this block", () => {
+    const FIRST = "Bakan açıklama yaptı ve kararı duyurdu.";
+    const FIRST_LINE = "kelimeler ".repeat(30) + "Bitti.";
+    const TAIL = "yarımkalan ".repeat(20);
+    for (const x of [
+      "\nSon dakika... Deprem oldu",
+      "Birinci cümle.\nİlgili satır\nSon dakika... Başka haber",
+      "Son dakika haberine göre; - Deprem oldu",
+      "- - Deprem oldu",
+      "Zam geldi. Bakan açıklama yaptı, detaylar haberimizde.",
+      "Zam geldi. Bakan açıkladı, detaylar haberimizde. Devamını oku",
+      "Zam geldi. İşte merak edilenler",
+      clamp(`${FIRST}\nİlgili haber başlığı bitmeden\nSon dakika... ${"Başka haber ".repeat(60)}`),
+      clamp(`${FIRST_LINE}\nYeni bir haber! 22 gözaltı\n${TAIL}`),
+      clamp("kelimeler ".repeat(40) + "Bitti. Zirve 13. Yeni dönem " + TAIL),
+      clamp("kelimeler ".repeat(40) + "Bitti. Konuşmacı Prof. Dr. Ali " + TAIL),
+    ]) {
+      const once = tidySummaryText(x);
+      expect(tidySummaryText(once), x.slice(0, 40)).toBe(once);
+    }
+  });
+
+  it("linear time on 100k-character inputs built from the new anchors", () => {
+    const inputs = [
+      "\nSon dakika...".repeat(7_200),
+      "\nx".repeat(50_000),
+      "x\n".repeat(50_000) + "Son dakika... x",
+      "Son dakika haberi | ".repeat(5_000),
+      "- ".repeat(50_000),
+      "Son dakika haberi".concat(" ".repeat(100_000), "x"),
+      "Son dakika haberine".concat(" ".repeat(100_000), "göre;"),
+      "a. ".concat("Bakan açıkladı detaylar haberimizde. ".repeat(3_000)),
+      "a. ".concat("x işte detaylar ".repeat(8_000)),
+      "a. ".concat("işte merak edilen tüm detaylar. ".repeat(3_000), "işte tüm detaylar"),
+      "x\n".repeat(248) + "a...",
+      "a!\n".repeat(165) + "ab...",
+      "1. ".repeat(165) + "ab...",
+      "Dr. ".repeat(124) + "ab...",
+    ];
+    const start = performance.now();
+    for (const s of inputs) tidySummaryText(s);
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
+  it("never throws on a clamp-shaped text of odd characters with newlines and marks", () => {
+    for (const s of [
+      "😀\n".repeat(166) + "..",
+      "\ud83d\n".repeat(249) + "...",
+      "!\n".repeat(249) + "...",
+      ".\n".repeat(249) + "...",
+      "1.\n".repeat(166) + "ab...",
+    ]) {
+      expect(() => tidySummaryText(s)).not.toThrow();
+    }
+  });
+});

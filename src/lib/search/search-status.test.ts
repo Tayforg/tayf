@@ -1,8 +1,13 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  MIN_QUERY_LENGTH,
   SEARCH_QUERY_DISPLAY_MAX,
   displayQuery,
+  isTooShortQuery,
   searchStatusText,
   searchTitle,
 } from "./search-status";
@@ -13,6 +18,8 @@ import {
 // Next escapes metadata titles, so nothing here may build HTML.
 
 const base = { q: "seçim", count: 0, capped: false, unavailable: false };
+
+const here = dirname(fileURLToPath(import.meta.url));
 
 describe("searchStatusText", () => {
   it.each([undefined, "", "   ", "\t\n "])("is empty when q is %j (nothing to announce)", (q) => {
@@ -146,6 +153,100 @@ describe("displayQuery", () => {
   });
 });
 
+describe("MIN_QUERY_LENGTH", () => {
+  it("is 2", () => {
+    expect(MIN_QUERY_LENGTH).toBe(2);
+  });
+
+  // search-query.ts is a 'use cache' server module (Supabase, next/cache), so
+  // it is read as text instead of imported: the two constants must not drift,
+  // or the page would announce 'at least N characters' for a number the
+  // search does not actually enforce.
+  it("matches the floor searchClusters enforces (src/lib/clusters/search-query.ts)", () => {
+    const source = readFileSync(
+      resolve(here, "../clusters/search-query.ts"),
+      "utf8",
+    );
+    const m = /const MIN_QUERY_LENGTH = (\d+);/.exec(source);
+    expect(m, "MIN_QUERY_LENGTH declaration in search-query.ts").not.toBeNull();
+    expect(Number(m![1])).toBe(MIN_QUERY_LENGTH);
+  });
+});
+
+describe("isTooShortQuery", () => {
+  it.each(["a", " a ", "ş", "\ta\n", "9", "-"])(
+    "is true for the one-character query %j",
+    (q) => {
+      expect(isTooShortQuery(q)).toBe(true);
+    },
+  );
+
+  it.each(["ak", "a b", "--", "seçim", "Erdoğan'ın", "  ak  "])(
+    "is false for %j (reaches the search floor)",
+    (q) => {
+      expect(isTooShortQuery(q)).toBe(false);
+    },
+  );
+
+  it.each([undefined, "", "   ", "\t\n "])(
+    "is false for the blank query %j (no search is not a too-short search)",
+    (q) => {
+      expect(isTooShortQuery(q)).toBe(false);
+    },
+  );
+
+  it("judges the NORMALISED query, like searchClusters does", () => {
+    // A control character becomes a space and is trimmed away; an apostrophe
+    // suffix after a letter is dropped: both leave a single character.
+    expect(isTooShortQuery("\u0001a")).toBe(true);
+    expect(isTooShortQuery("a\u0000")).toBe(true);
+    expect(isTooShortQuery("a'ın")).toBe(true);
+    // Whitespace inside the query still counts as one separator character.
+    expect(isTooShortQuery("a\u0001b")).toBe(false);
+  });
+});
+
+describe("searchStatusText: a too-short query", () => {
+  it("says 'En az 2 karakter yazın.' instead of claiming there are no results", () => {
+    expect(
+      searchStatusText({ q: "a", count: 0, capped: false, unavailable: false }),
+    ).toBe("En az 2 karakter yazın.");
+    expect(
+      searchStatusText({ q: " a ", count: 0, capped: false, unavailable: false }),
+    ).toBe("En az 2 karakter yazın.");
+  });
+
+  it("never says 'sonuç bulunamadı' or 'yanıt vermiyor' for it", () => {
+    for (const unavailable of [false, true]) {
+      const text = searchStatusText({ ...base, q: "a", unavailable });
+      expect(text).not.toContain("sonuç bulunamadı");
+      expect(text).not.toContain("yanıt vermiyor");
+    }
+  });
+
+  it("wins over a failed archive search and over a stale count", () => {
+    expect(
+      searchStatusText({ q: "a", count: 0, capped: false, unavailable: true }),
+    ).toBe("En az 2 karakter yazın.");
+    expect(
+      searchStatusText({ q: "a", count: 7, capped: true, unavailable: false }),
+    ).toBe("En az 2 karakter yazın.");
+  });
+
+  it("stays empty for a blank q (nothing to announce)", () => {
+    expect(searchStatusText({ ...base, q: "  " })).toBe("");
+  });
+
+  it("does not touch a query that reaches the floor", () => {
+    expect(searchStatusText({ ...base, q: "ak" })).toBe(
+      "“ak” için sonuç bulunamadı.",
+    );
+    expect(searchStatusText({ ...base, q: "a b", count: 2 })).toBe(
+      "“a b” için 2 sonuç bulundu.",
+    );
+  });
+});
+
 describe("searchTitle", () => {
   it("quotes the trimmed query and adds the 'araması' suffix (the layout adds ' — Tayf')", () => {
     expect(searchTitle("  seçim  ")).toBe("“seçim” araması");
@@ -163,6 +264,10 @@ describe("searchTitle", () => {
 
   it("returns a q containing markup verbatim as a plain string", () => {
     expect(searchTitle("<script>")).toBe("“<script>” araması");
+  });
+
+  it("keeps quoting a one-character query (the title is not a status claim)", () => {
+    expect(searchTitle("a")).toBe("“a” araması");
   });
 
   it("falls back to a plain 'Arama' for a blank query rather than an empty quote pair", () => {
