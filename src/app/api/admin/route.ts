@@ -17,6 +17,7 @@ import { CLUSTER_FEED_TAGS, clusterMembershipTags } from "@/lib/clusters/merge";
 import {
   isBiasCategory,
   isSourceKindValue,
+  isWritableSourceBias,
   isValidIsoDate,
   isValidRater,
   isValidSourceName,
@@ -140,7 +141,9 @@ export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
       if (!isValidSourceSlug(slug)) return apiBadRequest("Invalid slug");
       if (!isValidSourceUrl(url)) return apiBadRequest("Invalid url");
       if (!isValidSourceUrl(rss_url)) return apiBadRequest("Invalid rss_url");
-      if (!isBiasCategory(bias)) return apiBadRequest("Invalid bias");
+      // Only the five keys production's sources_alignment_check stores; a
+      // legacy key would be a 23514 from the insert (a 500 here).
+      if (!isWritableSourceBias(bias)) return apiBadRequest("Invalid bias");
       if (kind !== undefined && !isSourceKindValue(kind)) {
         return apiBadRequest("Invalid kind");
       }
@@ -369,7 +372,10 @@ export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
     case "set_source_bias": {
       const { slug, bias, reason, rater } = body;
       if (!isValidSourceSlug(slug)) return apiBadRequest("Invalid slug");
-      if (!isBiasCategory(bias)) return apiBadRequest("Invalid bias");
+      // Same five keys as add_source: refusing a legacy key here keeps the
+      // RPC's 23514 (which names sources_alignment_check) from reaching the
+      // client as a raw Postgres message.
+      if (!isWritableSourceBias(bias)) return apiBadRequest("Invalid bias");
       // A bias change can never be recorded without a stated reason.
       if (!isValidZoneChangeReason(reason)) {
         return apiBadRequest("reason must be 10..500 chars");

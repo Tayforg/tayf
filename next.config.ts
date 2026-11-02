@@ -4,6 +4,7 @@ import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs/config";
 // Relative path on purpose: the config loader cannot resolve the '@/' alias.
 import { HTML_LIMITED_BOTS } from "./src/lib/seo/html-limited-bots";
+import { API_FALLBACK_REWRITES } from "./src/lib/api/fallback-rewrites";
 import { IMAGE_REMOTE_PATTERNS } from "./src/lib/images/remote-image-hosts";
 import { SITE_REDIRECTS } from "./src/lib/seo/redirects";
 import { buildSecurityHeaders } from "./src/lib/security/headers";
@@ -160,6 +161,13 @@ const nextConfig: NextConfig = {
   // Permanent (308) site redirects; the list lives in src/lib/seo/redirects.ts.
   async redirects() {
     return [...SITE_REDIRECTS];
+  },
+  // Unknown /api/* paths outside /api/v1 answer a JSON 404 instead of the HTML
+  // not-found page. A fallback rewrite runs only after every filesystem and
+  // dynamic route has failed, so it cannot shadow a real endpoint; the rule
+  // lives in src/lib/api/fallback-rewrites.ts.
+  async rewrites() {
+    return API_FALLBACK_REWRITES;
   },
 };
 

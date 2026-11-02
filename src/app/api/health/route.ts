@@ -1,7 +1,13 @@
 import { connection, NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
+import {
+  ALLOW_GET_ONLY,
+  apiMethodNotAllowed,
+  apiOptionsAllow,
+  apiTooManyRequests,
+  withApiErrors,
+} from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { isVotingKind } from "@/lib/bias/config";
 import {
@@ -760,4 +766,19 @@ function respond(
 
   const body: AnonymousHealthBody = { status: verdict, timestamp };
   return NextResponse.json(body, { status, headers });
+}
+
+// Every other method gets the JSON 405 with `Allow` (RFC 9110 15.5.6) instead of
+// Next's bodyless default, and OPTIONS is explicit: without it Next's automatic
+// OPTIONS would advertise POST, PUT, PATCH and DELETE. HEAD is derived from GET.
+// The refusals read no request state and open no connection, so the GET keeps
+// its own (dynamic) rendering.
+const refuse = async () => apiMethodNotAllowed(ALLOW_GET_ONLY);
+export const POST = refuse;
+export const PUT = refuse;
+export const PATCH = refuse;
+export const DELETE = refuse;
+
+export function OPTIONS(): Response {
+  return apiOptionsAllow(ALLOW_GET_ONLY);
 }

@@ -57,6 +57,33 @@ export function isBiasCategory(value: unknown): value is BiasCategory {
   return typeof value === "string" && (BIAS_ORDER as readonly string[]).includes(value);
 }
 
+/**
+ * The bias keys a WRITE to `sources.bias` may carry. Mirrors production's live
+ * CHECK `sources_alignment_check` (read 2026-11-02), which allows five of the
+ * ten `BiasCategory` keys; the other five (state_media, islamist_conservative,
+ * international, pro_kurdish, nationalist) still parse as a `BiasCategory` so
+ * legacy rows render, but the database refuses to store them (23514).
+ * `add_source` and `set_source_bias` check this list BEFORE any DB call;
+ * `update_source` keeps `isBiasCategory` because it never writes a changed bias.
+ *
+ * Widening this list (and the CHECK) to the ten keys the app knows is a
+ * founder decision: it would move sources between Medya DNA zones.
+ * Migration 152 pins the same five values.
+ */
+export const WRITABLE_SOURCE_BIAS = [
+  "pro_government",
+  "gov_leaning",
+  "center",
+  "opposition_leaning",
+  "opposition",
+] as const satisfies readonly BiasCategory[];
+
+export type WritableSourceBias = (typeof WRITABLE_SOURCE_BIAS)[number];
+
+export function isWritableSourceBias(value: unknown): value is WritableSourceBias {
+  return typeof value === "string" && (WRITABLE_SOURCE_BIAS as readonly string[]).includes(value);
+}
+
 export function isSourceKindValue(value: unknown): value is SourceKind {
   return typeof value === "string" && (SOURCE_KINDS as readonly string[]).includes(value);
 }

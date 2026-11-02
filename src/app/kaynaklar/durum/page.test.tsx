@@ -795,6 +795,133 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
       expect(src).toContain("Diğer sütunlar için tabloyu yana kaydırın.");
     });
   });
+
+  // W4-kaynaklar-durum-mobile: at 390 px "Son HTTP durumu" and "7 günlük gün
+  // başına haber" wrapped onto 3-5 lines each (tall header row, ragged table).
+  // Every th is now whitespace-nowrap; the two long ones render a short label
+  // on phones ("HTTP", "Haber/gün") from a data attribute via ::before, while
+  // the full label stays in the DOM (visually hidden below sm, visible from sm
+  // up) so the accessible name and the column-order test keep the full text.
+  describe("phone header labels (W4-kaynaklar-durum-mobile)", () => {
+    const classOf = (el: El | undefined): string => String(el?.props?.className);
+    const tokens = (cls: string) => cls.split(/\s+/);
+
+    const LONG_HEADERS = [
+      { full: "Son HTTP durumu", short: "HTTP" },
+      { full: "7 günlük gün başına haber", short: "Haber/gün" },
+    ] as const;
+
+    const heads = () => elements(body(fixtures())).filter((e) => e.type === "th");
+    const headOf = (full: string): El => {
+      const th = heads().find((h) => textOf(h) === full);
+      if (!th) throw new Error(`no <th> for ${full}`);
+      return th;
+    };
+    /** The <span> elements below a header (the th itself is not one). */
+    const spansOf = (th: El) => elements(th).filter((e) => e.type === "span");
+
+    it("renders seven column headers", () => {
+      expect(heads()).toHaveLength(7);
+    });
+
+    it("every th is whitespace-nowrap so no header wraps onto a second line", () => {
+      for (const th of heads()) {
+        expect(tokens(classOf(th)), textOf(th)).toContain("whitespace-nowrap");
+      }
+    });
+
+    it("keeps the pr-4 rule (all but the last th) and Kaynak's sticky opaque classes", () => {
+      const all = heads();
+      for (const th of all.slice(0, 6)) expect(tokens(classOf(th)), textOf(th)).toContain("pr-4");
+      expect(tokens(classOf(all[6]))).not.toContain("pr-4");
+      expect(classOf(all[0])).toContain("sticky left-0 z-10 bg-card");
+    });
+
+    for (const { full, short } of LONG_HEADERS) {
+      describe(`"${full}" header`, () => {
+        it("holds the full label, exactly, in a span that is visually hidden only below sm", () => {
+          const fullSpans = spansOf(headOf(full)).filter((s) =>
+            tokens(classOf(s)).includes("max-sm:sr-only"),
+          );
+          expect(fullSpans).toHaveLength(1);
+          expect(textOf(fullSpans[0])).toBe(full);
+          // not aria-hidden: the screen-reader name is the full label at every width
+          expect(fullSpans[0]!.props?.["aria-hidden"]).toBeUndefined();
+        });
+
+        it(`holds an empty aria-hidden span that shows "${short}" from data-short below sm`, () => {
+          const shortSpans = spansOf(headOf(full)).filter(
+            (s) => s.props?.["data-short"] !== undefined,
+          );
+          expect(shortSpans).toHaveLength(1);
+          const span = shortSpans[0]!;
+          expect(span.props?.["aria-hidden"]).toBe("true");
+          expect(span.props?.["data-short"]).toBe(short);
+          // no text node: the short label is painted by ::before, so textOf(th)
+          // (and the accessible name) stays the full label
+          expect(span.props?.children).toBeUndefined();
+          expect(textOf(span)).toBe("");
+          const cls = tokens(classOf(span));
+          expect(cls).toContain("sm:hidden");
+          expect(cls).toContain("before:content-[attr(data-short)]");
+        });
+
+        it("has exactly the two spans, full label first", () => {
+          const spans = spansOf(headOf(full));
+          expect(spans).toHaveLength(2);
+          expect(tokens(classOf(spans[0]))).toContain("max-sm:sr-only");
+          expect(spans[1]!.props?.["data-short"]).toBe(short);
+        });
+
+        it("keeps the text of the th equal to the full label", () => {
+          expect(textOf(headOf(full))).toBe(full);
+        });
+      });
+    }
+
+    it("the five short columns have no short-label span", () => {
+      const longLabels: readonly string[] = LONG_HEADERS.map((h) => h.full);
+      for (const th of heads().filter((h) => !longLabels.includes(textOf(h)))) {
+        expect(
+          elements(th).filter((e) => e.props?.["data-short"] !== undefined),
+          textOf(th),
+        ).toHaveLength(0);
+      }
+    });
+
+    it("pins the short-label and sr-only literals in the page source (Tailwind 4 reads the source)", () => {
+      const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+      expect(src).toContain("before:content-[attr(data-short)]");
+      expect(src).toContain("max-sm:sr-only");
+      expect(src).toContain('data-short="HTTP"');
+      expect(src).toContain('data-short="Haber/gün"');
+    });
+
+    // Measured at 390 px: without a positioned ancestor the absolutely
+    // positioned sr-only span of the LAST column (static position x ~ 600) has
+    // the viewport as containing block, so the scroller neither clips it nor
+    // counts it, and documentElement.scrollWidth grew to 600 (the page scrolled
+    // sideways). A positioned region keeps that overflow inside the scroller.
+    it("the scroll region is a positioned box, so the sr-only header spans cannot widen the page", () => {
+      const region = elements(body(fixtures())).find((e) => e.props?.role === "region");
+      expect(tokens(classOf(region))).toContain("relative");
+      expect(tokens(classOf(region))).toContain("overflow-x-auto");
+    });
+
+    it("keeps the scroll region labelled, described, focusable and ringed (#171)", () => {
+      const region = elements(body(fixtures())).find((e) => e.props?.role === "region");
+      expect(region, "scroll region").toBeDefined();
+      expect(region!.props?.role).toBe("region");
+      expect(region!.props?.tabIndex).toBe(0);
+      expect(region!.props?.["aria-labelledby"]).toBe("durum-tablo");
+      expect(region!.props?.["aria-describedby"]).toBe("durum-kaydir");
+      const cls = tokens(classOf(region));
+      expect(cls).toContain("overflow-x-auto");
+      expect(cls).toContain("focus-visible:outline-none");
+      expect(cls).toContain("focus-visible:ring-2");
+      expect(cls).toContain("focus-visible:ring-ring");
+    });
+  });
 });
 
 describe("ItemsPerDayCell", () => {

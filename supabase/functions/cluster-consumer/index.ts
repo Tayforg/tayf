@@ -117,6 +117,7 @@ import {
   type AttachMember,
 } from "../_shared/cluster/attach.ts";
 import { admissionEffect } from "../_shared/cluster/admission-effect.ts";
+import { isRoundupTitle, ROUNDUP_SKIP_REASON } from "../_shared/cluster/roundup-title.ts";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -1778,6 +1779,17 @@ async function clusterArticle(
     await persistEnrichment(article);
   }
 
+  // Wave BF / W3: a daily roundup ("Resmi Gazete'de bugün: 2 Kasım 2026 Resmi Gazete
+  // kararları", "Gündem özeti", ...) lists every item of the day, so its title is
+  // similar to whichever single story the day's headlines share and it was attached to
+  // unrelated clusters (85700dfa, 8f0bb5b8). It is skipped here: AFTER the enrichment
+  // is stored, BEFORE the cluster context and any scoring. No cluster_skip_log row: its
+  // cluster_id is NOT NULL and there is no cluster.
+  if (isRoundupTitle(raw.title)) {
+    console.log(`[cluster-consumer] roundup-title skip article=${raw.id}${dryRun ? " dry-run" : ""}`);
+    return { result: "skipped", reason: ROUNDUP_SKIP_REASON };
+  }
+
   const ctx = await getClusterContext();
   const sourceLookup = await getSourceLookup();
   const { seedByCluster, latestByCluster, headlinesByCluster, indices } = ctx;
@@ -2570,6 +2582,8 @@ async function processAttach(
     if (route === "disabled") return { result: "disabled" };
     if (route === "in-gate") return { result: "in-gate" };
     if (route !== "attach") return { result: "skipped", reason: `route-${route}` };
+    // Wave BF / W3: a roundup title never attaches (see isRoundupTitle). Counted in by_reason.
+    if (isRoundupTitle(raw.title)) return { result: "skipped", reason: ROUNDUP_SKIP_REASON };
 
     // The strict fingerprint of title + cleaned description: a SHA-1 of the folded
     // text, exactly what the clusterer stores for its members.
@@ -2772,6 +2786,8 @@ interface InvocationSummary {
   matched: number;
   created: number;
   skipped: number;
+  // Wave BF / W3: the part of `skipped` that was a roundup title (reason "roundup-title").
+  roundupSkipped: number;
   notFound: number;
   notPolitics: number;
   failedTransient: number;
@@ -2941,6 +2957,7 @@ async function drainQueue(): Promise<InvocationSummary> {
     matched: 0,
     created: 0,
     skipped: 0,
+    roundupSkipped: 0,
     notFound: 0,
     notPolitics: 0,
     failedTransient: 0,
@@ -3069,6 +3086,7 @@ async function drainQueue(): Promise<InvocationSummary> {
             break;
           case "skipped":
             summary.skipped += 1;
+            if (outcome.reason === ROUNDUP_SKIP_REASON) summary.roundupSkipped += 1;
             break;
           case "not-found":
             summary.notFound += 1;

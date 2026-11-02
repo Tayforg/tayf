@@ -199,8 +199,12 @@ export function KaynakDurumBody({
             <p id="durum-kaydir" className="text-[11px] text-muted-foreground md:hidden">
               Diğer sütunlar için tabloyu yana kaydırın.
             </p>
+            {/* `relative` makes the scroller the containing block of the
+                absolutely positioned sr-only header labels below. Without it
+                the label of the last column (x ~ 600) escapes the scroller
+                and widens the page past a 390 px viewport. */}
             <div
-              className="overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              className="relative overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               role="region"
               aria-labelledby="durum-tablo"
               aria-describedby="durum-kaydir"
@@ -211,27 +215,61 @@ export function KaynakDurumBody({
                   <tr className="border-b border-border/60 text-[11px] uppercase tracking-[0.12em] text-muted-foreground">
                     <th
                       scope="col"
-                      className="sticky left-0 z-10 bg-card py-2 pr-4 font-medium"
+                      className="sticky left-0 z-10 bg-card py-2 pr-4 font-medium whitespace-nowrap"
                     >
                       Kaynak
                     </th>
-                    <th scope="col" className="py-2 pr-4 font-medium">
+                    <th
+                      scope="col"
+                      className="py-2 pr-4 font-medium whitespace-nowrap"
+                    >
                       Sessiz
                     </th>
-                    <th scope="col" className="py-2 pr-4 font-medium">
+                    <th
+                      scope="col"
+                      className="py-2 pr-4 font-medium whitespace-nowrap"
+                    >
                       Tür
                     </th>
-                    <th scope="col" className="py-2 pr-4 font-medium">
+                    <th
+                      scope="col"
+                      className="py-2 pr-4 font-medium whitespace-nowrap"
+                    >
                       Bölge
                     </th>
-                    <th scope="col" className="py-2 pr-4 font-medium">
+                    <th
+                      scope="col"
+                      className="py-2 pr-4 font-medium whitespace-nowrap"
+                    >
                       Son haber
                     </th>
-                    <th scope="col" className="py-2 pr-4 font-medium">
-                      Son HTTP durumu
+                    {/* The two long headers wrapped onto 3-5 lines at 390 px.
+                        Below sm the full label stays in the DOM for screen
+                        readers (max-sm:sr-only) and an empty aria-hidden span
+                        paints the short label from its data attribute through
+                        ::before; from sm up the full label shows and the short
+                        one is hidden. The label is not a text node, so the
+                        th's text content stays the full label. */}
+                    <th
+                      scope="col"
+                      className="py-2 pr-4 font-medium whitespace-nowrap"
+                    >
+                      <span className="max-sm:sr-only">Son HTTP durumu</span>
+                      <span
+                        aria-hidden="true"
+                        data-short="HTTP"
+                        className="sm:hidden before:content-[attr(data-short)]"
+                      />
                     </th>
-                    <th scope="col" className="py-2 font-medium">
-                      7 günlük gün başına haber
+                    <th scope="col" className="py-2 font-medium whitespace-nowrap">
+                      <span className="max-sm:sr-only">
+                        7 günlük gün başına haber
+                      </span>
+                      <span
+                        aria-hidden="true"
+                        data-short="Haber/gün"
+                        className="sm:hidden before:content-[attr(data-short)]"
+                      />
                     </th>
                   </tr>
                 </thead>

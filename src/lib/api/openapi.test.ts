@@ -1,6 +1,8 @@
 import { describe, it, expect } from "vitest";
 
 import { buildOpenApiDocument } from "@/lib/api/openapi";
+import { V1_ENDPOINTS } from "@/lib/api/v1-docs";
+import { REGISTRY_LICENCE } from "@/lib/sources/registry";
 
 describe("buildOpenApiDocument", () => {
   it("is deterministic: two calls with the same serverUrl are deep-equal", () => {
@@ -56,18 +58,48 @@ describe("buildOpenApiDocument", () => {
     expect(clustersGet429).toBeDefined();
   });
 
-  it("declares the X-Tayf-Tier response header on every 200", () => {
+  it("declares X-Tayf-Tier on the 200 of every keyed operation and only there", () => {
     const doc = buildOpenApiDocument("https://x.test");
-    for (const [, operations] of Object.entries(doc.paths)) {
-      for (const [, op] of Object.entries(operations)) {
-        const ok = op.responses["200"] as { headers?: Record<string, unknown> } | undefined;
-        if (ok) {
-          expect(ok.headers?.["X-Tayf-Tier"]).toBeDefined();
+    let keyed200 = 0;
+    for (const endpoint of V1_ENDPOINTS) {
+      const op = doc.paths[endpoint.path]?.[endpoint.method.toLowerCase()];
+      expect(op, `${endpoint.method} ${endpoint.path} missing from the document`).toBeDefined();
+      for (const resp of endpoint.responses) {
+        const built = op?.responses[String(resp.status)] as
+          | { headers?: Record<string, unknown> }
+          | undefined;
+        expect(built, `${endpoint.method} ${endpoint.path} ${resp.status}`).toBeDefined();
+        const label = `${endpoint.method} ${endpoint.path} ${resp.status}`;
+        if (resp.status === 200 && endpoint.auth !== "none") {
+          keyed200 += 1;
+          expect(built?.headers?.["X-Tayf-Tier"], label).toBeDefined();
+        } else {
+          // Declared only where a key resolved to a tier. GET openapi.json
+          // never sends it; the OPTIONS 204s send a constant `free` that the
+          // header description explains (tests/api/v1-tier-header-contract.test.ts
+          // calls the handlers). A non-200 may fail before the key resolves.
+          expect(built?.headers, label).toBeUndefined();
         }
       }
     }
-    // At least one 200 actually exists so the loop above is not vacuous.
-    expect(doc.paths["/api/v1/clusters"]?.get?.responses["200"]).toBeDefined();
+    // The loop is not vacuous: six keyed GETs have a 200.
+    expect(keyed200).toBe(6);
+    expect(doc.paths["/api/v1/clusters"]?.get?.responses["200"]).toHaveProperty("headers");
+  });
+
+  it("getOpenApi's 200 declares no headers (the keyless route never sends X-Tayf-Tier)", () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    const ok = doc.paths["/api/v1/openapi.json"]?.get?.responses["200"] as
+      | { headers?: unknown }
+      | undefined;
+    expect(ok).toBeDefined();
+    expect(ok).not.toHaveProperty("headers");
+  });
+
+  it("declares the licence by SPDX identifier with no url (OpenAPI 3.1: the two are mutually exclusive)", () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    expect(doc.info.license).toEqual({ name: REGISTRY_LICENCE, identifier: "CC-BY-SA-4.0" });
+    expect(doc.info.license).not.toHaveProperty("url");
   });
 
   it("names the alert operations and offers RSS beside JSON on the alerts 200", () => {

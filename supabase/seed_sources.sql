@@ -1,4 +1,11 @@
--- Seed Turkish news sources (145 outlets) with full bias taxonomy and source kind.
+-- Seed Turkish news sources (145 outlets) with their bias and source kind.
+-- bias is one of the five keys production's sources_alignment_check stores
+-- (pro_government, gov_leaning, center, opposition_leaning, opposition; see
+-- WRITABLE_SOURCE_BIAS in src/lib/validation/source-input.ts and migration 152).
+-- The 31 rows once labelled state_media / nationalist / islamist_conservative /
+-- pro_kurdish / international carry the label production holds for that slug
+-- today (read 2026-11-02), so re-running this seed is a no-op on bias instead of
+-- a 23514. Widening the CHECK to the ten legacy keys is a founder decision.
 -- kind is one of 'outlet' | 'aggregator' | 'wire' | 'niche' — see
 -- supabase/functions/_shared/cluster/source-kind.ts. Only outlet and wire vote
 -- toward bias_distribution / blindspot / trends; the rest default to 'outlet'
@@ -47,13 +54,13 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('NTV Spor', 'ntv-spor', 'https://www.ntvspor.net', 'https://www.ntvspor.net/rss/anasayfa', 'gov_leaning', 'niche', true),
   ('BigPara', 'bigpara', 'http://bigpara.hurriyet.com.tr', 'http://bigpara.hurriyet.com.tr/rss/', 'gov_leaning', 'niche', true),
 
-  -- State Media
-  ('Anadolu Ajansı', 'anadolu-ajansi', 'https://www.aa.com.tr', 'https://www.aa.com.tr/tr/rss/default?cat=guncel', 'state_media', 'wire', true),
-  ('TRT Haber', 'trt-haber', 'http://www.trthaber.com', 'http://www.trthaber.com/sondakika.rss', 'state_media', 'outlet', true),
-  ('TRT World', 'trt-world', 'https://www.trtworld.com', 'https://www.trtworld.com/feed/rss.xml', 'state_media', 'outlet', true),
-  ('A News', 'a-news', 'https://www.anews.com.tr', 'https://www.anews.com.tr/rss/news.xml', 'state_media', 'outlet', true),
-  ('Daily Sabah', 'daily-sabah', 'https://www.dailysabah.com', 'https://www.dailysabah.com/rss/home-page', 'state_media', 'outlet', true),
-  ('MFA Turkey', 'mfa-turkey', 'https://www.mfa.gov.tr', 'https://www.mfa.gov.tr/en.rss.mfa?ad9093da-8e71-4678-a1b6-05f297baadc4', 'state_media', 'niche', true),
+  -- State media (prod stores pro_government for all six)
+  ('Anadolu Ajansı', 'anadolu-ajansi', 'https://www.aa.com.tr', 'https://www.aa.com.tr/tr/rss/default?cat=guncel', 'pro_government', 'wire', true),
+  ('TRT Haber', 'trt-haber', 'http://www.trthaber.com', 'http://www.trthaber.com/sondakika.rss', 'pro_government', 'outlet', true),
+  ('TRT World', 'trt-world', 'https://www.trtworld.com', 'https://www.trtworld.com/feed/rss.xml', 'pro_government', 'outlet', true),
+  ('A News', 'a-news', 'https://www.anews.com.tr', 'https://www.anews.com.tr/rss/news.xml', 'pro_government', 'outlet', true),
+  ('Daily Sabah', 'daily-sabah', 'https://www.dailysabah.com', 'https://www.dailysabah.com/rss/home-page', 'pro_government', 'outlet', true),
+  ('MFA Turkey', 'mfa-turkey', 'https://www.mfa.gov.tr', 'https://www.mfa.gov.tr/en.rss.mfa?ad9093da-8e71-4678-a1b6-05f297baadc4', 'pro_government', 'niche', true),
 
   -- Center / Independent
   ('T24', 't24', 'https://t24.com.tr', 'https://t24.com.tr/rss', 'center', 'outlet', true),
@@ -137,38 +144,38 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('Ekol TV', 'ekol-tv', 'https://www.ekoltv.com.tr', 'https://www.ekoltv.com.tr/service/rss.php', 'opposition', 'outlet', true),
   ('İşçi Haber', 'isci-haber', 'https://www.iscihaber.net', 'https://www.iscihaber.net/rss/news', 'opposition', 'niche', true),
 
-  -- Nationalist
-  ('Yeniçağ', 'yenicag', 'http://www.yenicaggazetesi.com.tr', 'http://www.yenicaggazetesi.com.tr/rss', 'nationalist', 'outlet', true),
-  ('Aydınlık', 'aydinlik', 'https://www.aydinlik.com.tr', 'https://www.aydinlik.com.tr/feed', 'nationalist', 'outlet', true),
-  ('Ortadoğu', 'ortadogu', 'https://www.ortadogugazetesi.com', 'https://www.ortadogugazetesi.com/rss', 'nationalist', 'outlet', false),
-  ('Ulusal Kanal', 'ulusal-kanal', 'http://www.ulusalkanal.com.tr', 'http://www.ulusalkanal.com.tr/rss.php', 'nationalist', 'outlet', false),
-  ('Bengütürk', 'benguturk', 'https://www.benguturk.com', 'https://www.benguturk.com/rss', 'nationalist', 'outlet', true),
+  -- Nationalist press (prod's per-slug label)
+  ('Yeniçağ', 'yenicag', 'http://www.yenicaggazetesi.com.tr', 'http://www.yenicaggazetesi.com.tr/rss', 'opposition_leaning', 'outlet', true),
+  ('Aydınlık', 'aydinlik', 'https://www.aydinlik.com.tr', 'https://www.aydinlik.com.tr/feed', 'gov_leaning', 'outlet', true),
+  ('Ortadoğu', 'ortadogu', 'https://www.ortadogugazetesi.com', 'https://www.ortadogugazetesi.com/rss', 'gov_leaning', 'outlet', false),
+  ('Ulusal Kanal', 'ulusal-kanal', 'http://www.ulusalkanal.com.tr', 'http://www.ulusalkanal.com.tr/rss.php', 'gov_leaning', 'outlet', false),
+  ('Bengütürk', 'benguturk', 'https://www.benguturk.com', 'https://www.benguturk.com/rss', 'center', 'outlet', true),
 
-  -- Islamist / Conservative
-  ('Milli Gazete', 'milli-gazete', 'https://www.milligazete.com.tr', 'https://www.milligazete.com.tr/rss', 'islamist_conservative', 'outlet', true),
-  ('Yeni Asya', 'yeni-asya', 'https://www.yeniasya.com.tr', 'https://www.yeniasya.com.tr/rss', 'islamist_conservative', 'outlet', false),
-  ('Yeni Mesaj', 'yeni-mesaj', 'http://www.yenimesaj.com.tr', 'https://www.yenimesaj.com.tr/rss.xml', 'islamist_conservative', 'outlet', true),
-  ('Diyanet Haber', 'diyanet-haber', 'https://www.diyanethaber.com.tr', 'https://www.diyanethaber.com.tr/rss', 'islamist_conservative', 'niche', true),
-  ('Doğru Haber', 'dogru-haber', 'https://dogruhaber.com.tr', 'https://dogruhaber.com.tr/rss', 'islamist_conservative', 'outlet', true),
-  ('İlke TV', 'ilke-tv', 'https://ilketv.com.tr', 'https://ilketv.com.tr/feed/', 'islamist_conservative', 'outlet', true),
+  -- Islamist / conservative press (prod's per-slug label)
+  ('Milli Gazete', 'milli-gazete', 'https://www.milligazete.com.tr', 'https://www.milligazete.com.tr/rss', 'opposition_leaning', 'outlet', true),
+  ('Yeni Asya', 'yeni-asya', 'https://www.yeniasya.com.tr', 'https://www.yeniasya.com.tr/rss', 'opposition_leaning', 'outlet', false),
+  ('Yeni Mesaj', 'yeni-mesaj', 'http://www.yenimesaj.com.tr', 'https://www.yenimesaj.com.tr/rss.xml', 'opposition_leaning', 'outlet', true),
+  ('Diyanet Haber', 'diyanet-haber', 'https://www.diyanethaber.com.tr', 'https://www.diyanethaber.com.tr/rss', 'gov_leaning', 'niche', true),
+  ('Doğru Haber', 'dogru-haber', 'https://dogruhaber.com.tr', 'https://dogruhaber.com.tr/rss', 'center', 'outlet', true),
+  ('İlke TV', 'ilke-tv', 'https://ilketv.com.tr', 'https://ilketv.com.tr/feed/', 'opposition_leaning', 'outlet', true),
 
-  -- Pro-Kurdish
-  ('Mezopotamya Ajansı', 'mezopotamya', 'https://mezopotamyaajansi43.com', 'https://mezopotamyaajansi43.com/feed/', 'pro_kurdish', 'wire', false),
-  ('BHA', 'bha', 'https://bha.net.tr', 'https://bha.net.tr/rss', 'pro_kurdish', 'wire', true),
-  ('Rûdaw Türkçe', 'rudaw-turkce', 'http://rudaw.net', 'http://rudaw.net/turkish/rss?type=top', 'pro_kurdish', 'outlet', true),
+  -- Kurdish press (prod's per-slug label)
+  ('Mezopotamya Ajansı', 'mezopotamya', 'https://mezopotamyaajansi43.com', 'https://mezopotamyaajansi43.com/feed/', 'opposition', 'wire', false),
+  ('BHA', 'bha', 'https://bha.net.tr', 'https://bha.net.tr/rss', 'opposition', 'wire', true),
+  ('Rûdaw Türkçe', 'rudaw-turkce', 'http://rudaw.net', 'http://rudaw.net/turkish/rss?type=top', 'center', 'outlet', true),
 
-  -- International
-  ('BBC Türkçe', 'bbc-turkce', 'https://www.bbc.com/turkce', 'https://feeds.bbci.co.uk/turkce/rss.xml', 'international', 'outlet', true),
-  ('DW Türkçe', 'dw-turkce', 'https://www.dw.com/tr', 'https://rss.dw.com/rdf/rss-tur-all', 'international', 'outlet', true),
-  ('Euronews Türkçe', 'euronews-turkce', 'https://tr.euronews.com', 'https://tr.euronews.com/rss', 'international', 'outlet', true),
-  ('VOA Türkçe', 'voa-turkce', 'https://www.voaturkce.com', 'https://www.voaturkce.com/api/zr$ymetqvi', 'international', 'outlet', false),
-  ('Sputnik Türkçe', 'sputnik-turkce', 'https://tr.sputniknews.com', 'https://tr.sputniknews.com/export/rss2/archive/index.xml', 'international', 'outlet', true),
-  ('CGTN Türk', 'cgtn-turk', 'https://www.cgtnturk.com', 'https://www.cgtnturk.com/rss', 'international', 'outlet', true),
-  ('Al Ain Türkçe', 'al-ain-turkce', 'https://tr.al-ain.com', 'https://tr.al-ain.com/feed', 'international', 'outlet', true),
-  ('Al Jazeera Turk', 'al-jazeera-turk', 'http://aljazeera.com.tr', 'http://aljazeera.com.tr/rss.xml', 'international', 'outlet', false),
-  ('Ahval News', 'ahval-news', 'https://ahvalnews.com', 'https://ahvalnews.com/rss.xml', 'international', 'outlet', false),
-  ('Hürriyet Daily News', 'hurriyet-daily-news', 'https://www.hurriyetdailynews.com', 'https://www.hurriyetdailynews.com/rss/news', 'international', 'outlet', true),
-  ('Türkiye Today', 'turkiye-today', 'https://www.turkiyetoday.com', 'https://www.turkiyetoday.com/feed/', 'international', 'outlet', false)
+  -- International press (prod's per-slug label)
+  ('BBC Türkçe', 'bbc-turkce', 'https://www.bbc.com/turkce', 'https://feeds.bbci.co.uk/turkce/rss.xml', 'center', 'outlet', true),
+  ('DW Türkçe', 'dw-turkce', 'https://www.dw.com/tr', 'https://rss.dw.com/rdf/rss-tur-all', 'center', 'outlet', true),
+  ('Euronews Türkçe', 'euronews-turkce', 'https://tr.euronews.com', 'https://tr.euronews.com/rss', 'center', 'outlet', true),
+  ('VOA Türkçe', 'voa-turkce', 'https://www.voaturkce.com', 'https://www.voaturkce.com/api/zr$ymetqvi', 'center', 'outlet', false),
+  ('Sputnik Türkçe', 'sputnik-turkce', 'https://tr.sputniknews.com', 'https://tr.sputniknews.com/export/rss2/archive/index.xml', 'center', 'outlet', true),
+  ('CGTN Türk', 'cgtn-turk', 'https://www.cgtnturk.com', 'https://www.cgtnturk.com/rss', 'center', 'outlet', true),
+  ('Al Ain Türkçe', 'al-ain-turkce', 'https://tr.al-ain.com', 'https://tr.al-ain.com/feed', 'center', 'outlet', true),
+  ('Al Jazeera Turk', 'al-jazeera-turk', 'http://aljazeera.com.tr', 'http://aljazeera.com.tr/rss.xml', 'center', 'outlet', false),
+  ('Ahval News', 'ahval-news', 'https://ahvalnews.com', 'https://ahvalnews.com/rss.xml', 'center', 'outlet', false),
+  ('Hürriyet Daily News', 'hurriyet-daily-news', 'https://www.hurriyetdailynews.com', 'https://www.hurriyetdailynews.com/rss/news', 'gov_leaning', 'outlet', true),
+  ('Türkiye Today', 'turkiye-today', 'https://www.turkiyetoday.com', 'https://www.turkiyetoday.com/feed/', 'center', 'outlet', false)
 on conflict (slug) do update set
   name = excluded.name,
   url = excluded.url,

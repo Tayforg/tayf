@@ -325,6 +325,29 @@ describe("POST /api/admin", () => {
       expect(writes.length).toBe(0);
     });
 
+    // Prod's sources_alignment_check allows five of the ten BiasCategory keys.
+    // add_source used to let the other five through to the insert, which the
+    // database refused with 23514 and the route flattened into a 500.
+    it.each(["state_media", "islamist_conservative", "international", "pro_kurdish", "nationalist"])(
+      "rejects the non-writable bias %s with 400 'Invalid bias' before any insert",
+      async (bias) => {
+        const res = await postAdmin({ ...validAddSource, bias });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "Invalid bias" });
+        expect(writes.length).toBe(0);
+      },
+    );
+
+    it.each(["pro_government", "gov_leaning", "center", "opposition_leaning", "opposition"])(
+      "accepts the writable bias %s",
+      async (bias) => {
+        const res = await postAdmin({ ...validAddSource, bias });
+        expect(res.status).toBe(200);
+        expect(writes.length).toBe(1);
+        expect((writes[0]?.payload as Record<string, unknown>).bias).toBe(bias);
+      },
+    );
+
     it("rejects an unknown kind with no write", async () => {
       const res = await postAdmin({ ...validAddSource, kind: "spy" });
       expect(res.status).toBe(400);
@@ -404,6 +427,22 @@ describe("POST /api/admin", () => {
         "Bias changes go through set_source_bias with a reason",
       );
       expect(writes.length).toBe(0);
+    });
+
+    // update_source keeps isBiasCategory on purpose: a legacy row (state_media
+    // and friends) must still round-trip through the edit dialog, where the
+    // bias select is disabled and the unchanged label is posted back.
+    it("drops an unchanged legacy bias from the update instead of erroring", async () => {
+      setTableResponse("sources", { data: { bias: "state_media" }, error: null });
+      const res = await postAdmin({
+        action: "update_source",
+        id: "s1",
+        name: "New name",
+        bias: "state_media",
+      });
+      expect(res.status).toBe(200);
+      expect(writes.length).toBe(1);
+      expect(writes[0]?.payload).toEqual({ name: "New name" });
     });
 
     it("drops an unchanged bias from the update instead of erroring", async () => {
@@ -723,6 +762,41 @@ describe("POST /api/admin", () => {
       });
       expect(res.status).toBe(400);
       expect(rpcCalls.length).toBe(0);
+    });
+
+    // The RPC would answer 23514 naming sources_alignment_check, which the
+    // route maps to a 400 carrying the raw Postgres text. The route refuses
+    // a non-writable key itself, before the RPC, with a fixed message.
+    it.each(["state_media", "islamist_conservative", "international", "pro_kurdish", "nationalist"])(
+      "rejects the non-writable bias %s with 400 'Invalid bias' and no rpc call",
+      async (bias) => {
+        const res = await postAdmin({
+          action: "set_source_bias",
+          slug: "test-source",
+          bias,
+          reason: "Redaksiyon kararı ile güncellendi.",
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toEqual({ error: "Invalid bias" });
+        expect(rpcCalls.length).toBe(0);
+      },
+    );
+
+    it("still calls rpc('set_source_bias') for a writable bias (center)", async () => {
+      setRpcResponse("set_source_bias", {
+        data: { id: "hist-c", old_bias: "gov_leaning", new_bias: "center", reason: "Redaksiyon kararı ile güncellendi.", rater: "tayf-admin", changed_at: "2026-01-01T00:00:00.000Z" },
+        error: null,
+      });
+      const res = await postAdmin({
+        action: "set_source_bias",
+        slug: "test-source",
+        bias: "center",
+        reason: "Redaksiyon kararı ile güncellendi.",
+      });
+      expect(res.status).toBe(200);
+      expect(rpcCalls.length).toBe(1);
+      expect(rpcCalls[0]?.name).toBe("set_source_bias");
+      expect(rpcCalls[0]?.args).toMatchObject({ p_slug: "test-source", p_bias: "center" });
     });
 
     it("rejects a missing reason with no rpc call", async () => {

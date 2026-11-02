@@ -3183,3 +3183,51 @@ delete from supabase_migrations.schema_migrations where version = '151';
 ```
 
 The consumer tolerates the missing queue and table (one warning per isolate each); revert the function only if you want the warnings gone. A `live` run leaves `politics_admitted_at` stamps and `cluster_articles` rows behind; revert those by hand from `cluster_attach_shadow` before dropping it.
+
+## 152 — schema parity (`sources.tradition` / `source_type` / `sources_alignment_check`): APPLY 152 only, no deploy-order constraint
+
+Production's `public.sources` carries objects no migration declared: `tradition` and `source_type` (text, not null, defaults `'mainstream'` / `'general'`) with `sources_tradition_check` and `sources_source_type_check`, indexes `idx_sources_tradition` / `idx_sources_source_type`, and `sources_alignment_check`, which lets `bias` be one of **five** keys (`pro_government`, `gov_leaning`, `center`, `opposition_leaning`, `opposition`). The 001-151 chain has none of those and keeps the ten-key `sources_bias_check`. The app accepted ten keys, so admin `add_source` answered 500 and `set_source_bias` answered 400 with the raw Postgres text for `state_media`, `islamist_conservative`, `international`, `pro_kurdish`, `nationalist`.
+
+152 re-declares production's objects **additively**; every step is guarded on the object's absence, so on production it writes only the ledger row and takes no table lock. The app now refuses the five legacy keys on write (`WRITABLE_SOURCE_BIAS`, `400 {"error":"Invalid bias"}` before any DB call), the add dialog only lists the five, and `supabase/seed_sources.sql` carries production's current label for its 31 legacy rows.
+
+**Apply:** once, in the Supabase SQL editor or `supabase db push` (one transaction, `lock_timeout` 5 s, `statement_timeout` 60 s). Re-running is a no-op. No PRE-BUILD (about 150 `sources` rows, no `articles` index). No edge function or cron change. Deploy the app in any order.
+
+**Not in 152 (deferred, operator decision):** `articles_content_hash_length_chk` and the `026` ledger row. Step 0 found one violating row of 1,391,507 (`6f038461-536a-4a7b-9547-0f0a3a8e7f32`, created 2026-04-17, `content_hash` = its URL, written before the raw-URL fallback was replaced by `sha1(url)` on 2026-06-07). A NOT VALID check still fires on every UPDATE of an old row, so adding it would turn that row's later writes (image backfill, enrichment, admission stamps) into 23514. The follow-up, in its own migration after the row is repaired, is in the header of `152_schema_parity.sql`.
+
+**Founder decision, not made here:** widening the bias CHECK to the ten keys the app knows would move zones; 152 keeps production's five.
+
+**Verify** (read-only; production expects 6 rows, 2 rows, 2 rows, then `152` only):
+
+```sql
+select conname, convalidated from pg_constraint
+ where conrelid = 'public.sources'::regclass order by 1;
+-- sources_alignment_check, sources_kind_check, sources_pkey, sources_slug_key,
+-- sources_source_type_check, sources_tradition_check   (all convalidated = t)
+select column_name, is_nullable, column_default from information_schema.columns
+ where table_schema = 'public' and table_name = 'sources'
+   and column_name in ('tradition', 'source_type') order by 1;
+-- source_type NO 'general'::text / tradition NO 'mainstream'::text
+select indexname from pg_indexes where schemaname = 'public' and tablename = 'sources'
+   and indexname in ('idx_sources_tradition', 'idx_sources_source_type') order by 1;
+select version, name from supabase_migrations.schema_migrations
+ where version in ('026', '152') order by 1;                    -- 152 only
+```
+
+**Rollback:**
+
+```sql
+-- Production: only the ledger row is new. Do NOT drop the constraints, columns or indexes:
+-- they are production's own and 152 created none of them there.
+delete from supabase_migrations.schema_migrations where version = '152';
+
+-- A rebuild or branch database where 152 added them:
+alter table public.sources drop constraint if exists sources_alignment_check;
+alter table public.sources drop constraint if exists sources_tradition_check;
+alter table public.sources drop constraint if exists sources_source_type_check;
+drop index if exists public.idx_sources_tradition;
+drop index if exists public.idx_sources_source_type;
+alter table public.sources drop column if exists tradition, drop column if exists source_type;
+delete from supabase_migrations.schema_migrations where version = '152';
+```
+
+On a branch database that already holds a legacy-key `sources` row, 152 skips `sources_alignment_check` with `NOTICE: 152: sources_alignment_check skipped, N existing sources row(s) ...` (a NOT VALID check would fail every later UPDATE of that row, such as ingest fetch-state writes); the chain's ten-key `sources_bias_check` is never dropped. Dry runs: `tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql` and `...-chain-shape-dryrun.sql` (local PostgreSQL 15 only, never production).
