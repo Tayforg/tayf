@@ -326,18 +326,19 @@ within the 24 h window without ever knowing `ADMIN_PASSWORD` or touching
 `/admin/login` — full `/admin` access (source management, corrections
 review, admin actions) with no login event to notice. Treat this as
 equally severe as a leaked `ADMIN_PASSWORD`, not a lesser one. The `pwd`
-tag in a captured cookie is a 64-bit HMAC of the password under this
-secret, so someone holding both the secret and a cookie could also test
-password guesses offline against it; rotate both after a leak.
+tag in a captured cookie is a 64-bit PBKDF2 (100,000 iterations) derivation
+of the password salted with this secret, so someone holding both the secret
+and a cookie could also test password guesses offline against it (each guess
+costs one PBKDF2 run); rotate both after a leak.
 
 ### Rotating `ADMIN_PASSWORD`
 
-The `admin_session` payload carries `pwd`, the first 16 hex chars of
-`HMAC-SHA256(ADMIN_SESSION_SECRET, "pwd:" + ADMIN_PASSWORD)`. Both
-`requireAdminSession()` and the edge middleware recompute it from the
-current `ADMIN_PASSWORD` on every request, so **rotating `ADMIN_PASSWORD`
-ends every admin session** (a session also ends 24 h after login, or at once
-if `ADMIN_PASSWORD` is unset). Rotation steps:
+The `admin_session` payload carries `pwd`, 16 hex chars (8 bytes) of
+`PBKDF2-HMAC-SHA256(ADMIN_PASSWORD, salt = "tayf-admin-pwd-tag:" + ADMIN_SESSION_SECRET, 100000 iterations)`.
+Both `requireAdminSession()` and the edge middleware compute it from the
+current `ADMIN_PASSWORD` (once per process / isolate, then reused), so
+**rotating `ADMIN_PASSWORD` ends every admin session** (a session also ends
+24 h after login, or at once if `ADMIN_PASSWORD` is unset). Rotation steps:
 
 ```bash
 vercel env rm ADMIN_PASSWORD production

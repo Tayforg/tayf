@@ -156,9 +156,14 @@ describe("createHeroStopProbe: stop semantics", () => {
   });
 });
 
-describe("createHeroStopProbe: total cost across chunks [hunt-26 security-3]", () => {
-  const BUDGET_MS = 100;
+// Wall-clock budget for the 200 KB hostile-page tests below. They cost ~20-30 ms
+// on a laptop and 100+ ms on a GitHub runner (CI measured 106 and 103 ms against
+// the old 100 ms budget), while the pre-fix probe rescanned the whole body on
+// every chunk and cost 3.9-6.7 s. 750 ms is 5x+ the CI cost and still more than
+// 5x below the regression it guards, so it keeps its teeth on any hardware.
+const BUDGET_MS = 750;
 
+describe("createHeroStopProbe: total cost across chunks [hunt-26 security-3]", () => {
   // '<meta a=<meta a=...' groups, a '>' every ~1.9 KB: each start is parsed and
   // the 1M-unit scan budget is used up by a full scan of 200 KB.
   const GROUP = "<meta a=".repeat(237) + ">";
@@ -213,7 +218,7 @@ describe("fetchHeroImage: the real wiring, driven through a stand-in safeFetch",
     expect(state.readChunks).toBeLessThan(5);
   });
 
-  it("a hostile 200 KB body in 200-byte chunks costs < 100 ms end to end", async () => {
+  it(`a hostile 200 KB body in 200-byte chunks costs < ${BUDGET_MS} ms end to end`, async () => {
     const group = "<meta a=".repeat(237) + ">";
     const page = ("<html><head></head><body>" + group.repeat(120)).slice(0, 200_000);
     state.chunks = split(page, 200);
@@ -223,7 +228,7 @@ describe("fetchHeroImage: the real wiring, driven through a stand-in safeFetch",
     const ms = performance.now() - t0;
     expect(hero).toBeNull();
     expect(state.probeCalls).toBeGreaterThan(900);
-    expect(ms).toBeLessThan(100);
+    expect(ms).toBeLessThan(BUDGET_MS);
   });
 
   it("reads the full 200 KB window and still finds a late og:image after the probe gave up", async () => {

@@ -450,10 +450,53 @@ function toHex(bytes: Uint8Array): string {
 }
 
 // Keep in sync with src/lib/admin/session.ts (24 h sessions, 60 s clock skew,
-// 16 lower-hex chars of HMAC-SHA256(secret, "pwd:" + password)).
+// 16 lower-hex chars of PBKDF2-HMAC-SHA256 over the admin password; see
+// derivePasswordTag there and adminPasswordTag below).
 const ADMIN_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ADMIN_CLOCK_SKEW_MS = 60_000;
 const ADMIN_PWD_TAG_RE = /^[0-9a-f]{16}$/;
+const ADMIN_PWD_TAG_SALT_LABEL = "tayf-admin-pwd-tag:";
+const ADMIN_PWD_TAG_ITERATIONS = 100_000;
+const ADMIN_PWD_TAG_BITS = 64;
+
+// The last (secret, password) pair and its tag. PBKDF2 at 100k iterations costs
+// tens of milliseconds and every admin request needs the same value, so it is
+// derived once per isolate. The promise is cached, not the result, so concurrent
+// requests share one derivation; a failed derivation is dropped and retried.
+// In memory only (the inputs are already in process.env); never logged.
+let cachedAdminPwdTag: { secret: string; password: string; tag: Promise<string> } | null = null;
+
+/**
+ * Web Crypto twin of derivePasswordTag in src/lib/admin/session.ts:
+ * PBKDF2-HMAC-SHA256(password = utf8(ADMIN_PASSWORD),
+ * salt = utf8("tayf-admin-pwd-tag:" + ADMIN_SESSION_SECRET), 100 000 iterations),
+ * 8 bytes as lower hex. The password never goes through a fast hash.
+ */
+function adminPasswordTag(secret: string, password: string): Promise<string> {
+  const hit = cachedAdminPwdTag;
+  if (hit && hit.secret === secret && hit.password === password) return hit.tag;
+  const tag = (async () => {
+    const enc = new TextEncoder();
+    const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        salt: enc.encode(ADMIN_PWD_TAG_SALT_LABEL + secret),
+        iterations: ADMIN_PWD_TAG_ITERATIONS,
+      },
+      key,
+      ADMIN_PWD_TAG_BITS,
+    );
+    return toHex(new Uint8Array(bits));
+  })();
+  const entry = { secret, password, tag };
+  cachedAdminPwdTag = entry;
+  tag.catch(() => {
+    if (cachedAdminPwdTag === entry) cachedAdminPwdTag = null;
+  });
+  return tag;
+}
 
 /** Mirrors src/lib/admin/session.ts's parseToken, minus the cookie I/O. */
 async function verifyAdminToken(
@@ -500,7 +543,7 @@ async function verifyAdminToken(
   if (expiresAt - iat > ADMIN_SESSION_MAX_AGE_MS) return false;
 
   // 6. Password binding.
-  const expectedTag = toHex(await hmacSha256(secret, `pwd:${password}`)).slice(0, 16);
+  const expectedTag = await adminPasswordTag(secret, password);
   return timingSafeEqualStr(pwd, expectedTag);
 }
 

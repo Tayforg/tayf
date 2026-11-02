@@ -1753,7 +1753,11 @@ describe("normalize.ts hostile markup is linear-time [h26-security-2]", () => {
   // the whole feed, parse 5 ms). So these tests time the whole feed.
   describe("a whole hostile feed is bounded in aggregate [h26-security-2]", () => {
     const FEED_ITEMS = 160;
-    const FEED_BUDGET_MS = 300;
+    // Whole-feed wall clock: 3-70 ms locally (the '<img' + 49 KB of '=' feed is the
+    // slowest), so ~375 ms on a shared CI runner, against 22-123 s for the pre-fix
+    // code. 1200 ms keeps 3x+ CI headroom, stays 18x+ below the regression and
+    // under the 2 s isolate CPU budget the feed must fit in.
+    const FEED_BUDGET_MS = 1200;
 
     const BODIES: ReadonlyArray<readonly [string, string]> = [
       ["12,500 x '<img'", "<img".repeat(12_500)],

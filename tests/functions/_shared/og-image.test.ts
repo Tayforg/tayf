@@ -476,7 +476,18 @@ describe("extractOgImage", () => {
 
 describe("hostile pages: no super-linear backtracking", () => {
   const GOOD = "https://cdn.test/photos/good.jpg";
-  const BUDGET_MS = 100;
+  // Wall-clock budget, sized for a shared CI runner (~5x slower than a laptop,
+  // where every case below costs < 10 ms except the JSON-LD x 20k page at ~25 ms)
+  // and at least 3x below the pre-fix cost of the cheapest regression it guards
+  // (the 1.6 KB page: 1.1 s; the 5,000-space pages: 18-52 s).
+  const BUDGET_MS = 300;
+  // The JSON-LD x 20k page is the one case that costs ~25 ms locally (~125 ms on
+  // CI) and whose pre-fix cost is only 1.3 s, so it gets the widest window that
+  // is still 3x below that.
+  const BUDGET_OVERRIDES_MS: Readonly<Record<string, number>> = {
+    "JSON-LD '\"image\":{' x 20k": 400,
+  };
+  const budgetFor = (label: string): number => BUDGET_OVERRIDES_MS[label] ?? BUDGET_MS;
 
   function timed<T>(fn: () => T): { value: T; ms: number } {
     const t0 = performance.now();
@@ -502,16 +513,16 @@ describe("hostile pages: no super-linear backtracking", () => {
   ];
 
   for (const [label, html] of hostile) {
-    it(`extractHeroImageFromHtml returns null in < ${BUDGET_MS} ms: ${label}`, () => {
+    it(`extractHeroImageFromHtml returns null in < ${budgetFor(label)} ms: ${label}`, () => {
       const { value, ms } = timed(() => extractHeroImageFromHtml(html));
       expect(value).toBeNull();
-      expect(ms).toBeLessThan(BUDGET_MS);
+      expect(ms).toBeLessThan(budgetFor(label));
     });
 
-    it(`extractOgImage returns null in < ${BUDGET_MS} ms: ${label}`, () => {
+    it(`extractOgImage returns null in < ${budgetFor(label)} ms: ${label}`, () => {
       const { value, ms } = timed(() => extractOgImage(html));
       expect(value).toBeNull();
-      expect(ms).toBeLessThan(BUDGET_MS);
+      expect(ms).toBeLessThan(budgetFor(label));
     });
   }
 

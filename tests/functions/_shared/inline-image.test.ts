@@ -181,7 +181,11 @@ describe("findInlineImgSrc: picks what the bounded regex picked", () => {
 
 describe("findInlineImgSrc: linear time on hostile bodies", () => {
   const CAP = 50_000;
-  const BUDGET_MS = 25;
+  // 10 bodies per case: 0.1-7 ms locally (~35 ms on a shared CI runner at the
+  // worst). The bounded regex this scanner replaced needed 140-170 ms for the same
+  // 10 bodies, so 100 ms keeps ~3x CI headroom and still fails the regression; the
+  // whole-feed budget in normalize.test.ts is the hard guard (22 s+ pre-fix).
+  const BUDGET_MS = 100;
 
   function timed<T>(fn: () => T): { value: T; ms: number } {
     const t0 = performance.now();
@@ -209,7 +213,7 @@ describe("findInlineImgSrc: linear time on hostile bodies", () => {
       const { ms } = timed(() => {
         for (let i = 0; i < 10; i++) findInlineImgSrc(body, CAP);
       });
-      // 10 bodies in the budget => < 2.5 ms per body; the regex needed 14-17 ms.
+      // 10 bodies in the budget => < 10 ms per body; the regex needed 14-17 ms.
       expect(ms).toBeLessThan(BUDGET_MS);
     });
   }

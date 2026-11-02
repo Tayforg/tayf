@@ -66,6 +66,12 @@ function randomString(rand: () => number): string {
   return s;
 }
 
+// Wall-clock budget for the 1 MB hostile inputs. They cost 0.2-5 ms on a laptop
+// (~25 ms on a GitHub runner at the worst); the quadratic fixpoint they replace
+// needed seconds at 80 KB and minutes at 1 MB, so 150 ms keeps 5x+ CI headroom
+// and is still orders of magnitude below the regression.
+const BUDGET_MS = 150;
+
 function timed(fn: () => unknown): number {
   const start = performance.now();
   fn();
@@ -133,24 +139,24 @@ describe("stripTagsLinear", () => {
     expect(stripTagsLinear('a<img\nsrc="x">b')).toBe("ab");
   });
 
-  it("strips 1 MB of '<' in under 50 ms (no quadratic scan)", () => {
+  it(`strips 1 MB of '<' in under ${BUDGET_MS} ms (no quadratic scan)`, () => {
     const hostile = "<".repeat(1_000_000);
     const ms = timed(() => stripTagsLinear(hostile));
-    expect(ms).toBeLessThan(50);
+    expect(ms).toBeLessThan(BUDGET_MS);
     expect(stripTagsLinear(hostile)).toBe(hostile);
   });
 
-  it("strips 1 MB of '<a ' and of '<a<a' in under 50 ms", () => {
+  it(`strips 1 MB of '<a ' and of '<a<a' in under ${BUDGET_MS} ms`, () => {
     for (const unit of ["<a ", "<a<a", "<<<a"]) {
       const hostile = unit.repeat(Math.ceil(1_000_000 / unit.length));
-      expect(timed(() => stripTagsLinear(hostile))).toBeLessThan(50);
+      expect(timed(() => stripTagsLinear(hostile))).toBeLessThan(BUDGET_MS);
     }
   });
 
-  it("strips 1 MB of well-formed tags in under 50 ms", () => {
+  it(`strips 1 MB of well-formed tags in under ${BUDGET_MS} ms`, () => {
     const text = "<p>kelime</p>".repeat(80_000);
     const ms = timed(() => stripTagsLinear(text, " "));
-    expect(ms).toBeLessThan(50);
+    expect(ms).toBeLessThan(BUDGET_MS);
   });
 });
 

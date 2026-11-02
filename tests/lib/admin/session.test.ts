@@ -51,6 +51,7 @@ import {
   checkAdminPassword,
   createAdminSession,
   deleteAdminSession,
+  derivePasswordTag,
   hasAdminSession,
   requireAdminSession,
 } from "@/lib/admin/session";
@@ -63,13 +64,13 @@ const NOW = new Date("2026-11-02T12:00:00.000Z").getTime();
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
-/** The documented pwd tag: first 16 hex chars of HMAC-SHA256(secret, "pwd:" + password). */
+/**
+ * The pwd tag as session.ts derives it: PBKDF2-HMAC-SHA256, never a fast hash of
+ * the password (see the derivePasswordTag block below for the documented
+ * parameters and the fixed vectors).
+ */
 function pwdTag(password: string, secret = SECRET): string {
-  return crypto
-    .createHmac("sha256", secret)
-    .update("pwd:" + password)
-    .digest("hex")
-    .slice(0, 16);
+  return derivePasswordTag(secret, password);
 }
 
 /** Same wire shape as session.ts: base64url(JSON payload) "." base64url(HMAC(body)). */
@@ -415,20 +416,104 @@ describe("admin session", () => {
   });
 
   describe("pwd tag domain separation", () => {
-    // HMAC(ADMIN_SESSION_SECRET, "pwd:" + password) must never equal another
-    // derivation keyed on the same secret. Those use fixed labels that start
-    // with "tayf" and a token body is base64url (no ':'), so "pwd:" is unique.
-    it("no other HMAC label in the repo starts with 'pwd:'", () => {
-      const files = [
+    // The tag is PBKDF2-HMAC-SHA256 keyed on the admin password, salted with
+    // "tayf-admin-pwd-tag:" + ADMIN_SESSION_SECRET. The other derivations that use
+    // the secret are HMACs keyed on the secret over fixed "tayf..." labels, and a
+    // token body is base64url (no ':'), so the two can never yield the same value.
+    // Pin the salt label to its two owners so nothing else reuses it.
+    it("only session.ts and middleware.ts use the pwd-tag salt label", () => {
+      const label = "tayf-admin-pwd-tag:";
+      const owners = ["src/lib/admin/session.ts", "src/middleware.ts"];
+      const others = [
         "src/lib/api/db-throttle.ts",
         "src/lib/admin/login-throttle.ts",
         "src/lib/game/framing-session.ts",
       ];
-      for (const rel of files) {
+      for (const rel of owners) {
         const src = readFileSync(resolve(__dirname, "../../..", rel), "utf8");
-        expect(src.includes('"pwd:'), rel).toBe(false);
-        expect(src.includes("'pwd:"), rel).toBe(false);
+        expect(src.includes(label), rel).toBe(true);
       }
+      for (const rel of others) {
+        const src = readFileSync(resolve(__dirname, "../../..", rel), "utf8");
+        expect(src.includes(label), rel).toBe(false);
+      }
+    });
+  });
+
+  describe("derivePasswordTag", () => {
+    // Documented derivation: PBKDF2-HMAC-SHA256, password = utf8(ADMIN_PASSWORD),
+    // salt = utf8("tayf-admin-pwd-tag:" + ADMIN_SESSION_SECRET), 100_000
+    // iterations, 8 bytes, lower hex (16 chars). Vectors computed independently
+    // with crypto.pbkdf2Sync; src/middleware.ts must reproduce them with Web Crypto
+    // (tests/app/middleware-routing.test.ts uses the same three inputs).
+    const VECTORS: Array<[string, string, string]> = [
+      ["unit-test-session-secret-0123456789", "correct horse battery staple", "89166a88751eff7c"],
+      ["test-secret", "test-password", "00849fb04b81aa7f"],
+      ["ünïcode-secret-0123456789-ğüşiçö", "pä55 wörd 🔑 ÇŞĞ", "bc114dba05f96308"],
+    ];
+
+    for (const [secret, password, expected] of VECTORS) {
+      it(`matches the fixed vector for secret ${JSON.stringify(secret)}`, () => {
+        expect(derivePasswordTag(secret, password)).toBe(expected);
+        const independent = crypto
+          .pbkdf2Sync(
+            Buffer.from(password, "utf8"),
+            Buffer.from("tayf-admin-pwd-tag:" + secret, "utf8"),
+            100_000,
+            8,
+            "sha256",
+          )
+          .toString("hex");
+        expect(derivePasswordTag(secret, password)).toBe(independent);
+      });
+    }
+
+    it("returns 16 lower-case hex chars and changes with either input", () => {
+      const base = derivePasswordTag(SECRET, PASSWORD_A);
+      expect(base).toMatch(/^[0-9a-f]{16}$/);
+      expect(derivePasswordTag(SECRET, PASSWORD_B)).not.toBe(base);
+      expect(derivePasswordTag("another-secret-value-123", PASSWORD_A)).not.toBe(base);
+      // Back to the first pair: same value again (deterministic).
+      expect(derivePasswordTag(SECRET, PASSWORD_A)).toBe(base);
+    });
+
+    it("does not leak the password or the secret into the tag", () => {
+      const tag = derivePasswordTag(SECRET, PASSWORD_A);
+      expect(tag).not.toContain(PASSWORD_A);
+      expect(tag).not.toContain(SECRET);
+    });
+
+    it("memoizes: a repeated (secret, password) pair does not run PBKDF2 again", () => {
+      const spy = vi.spyOn(crypto, "pbkdf2Sync");
+      const secret = "memo-test-secret-value-000111222";
+      const password = "memo-test-password-xyz";
+
+      const first = derivePasswordTag(secret, password);
+      expect(spy).toHaveBeenCalledTimes(1);
+      const second = derivePasswordTag(secret, password);
+      const third = derivePasswordTag(secret, password);
+      expect(second).toBe(first);
+      expect(third).toBe(first);
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // A different pair is derived afresh (and is not served from the cache).
+      const other = derivePasswordTag(secret, password + "!");
+      expect(other).not.toBe(first);
+      expect(spy).toHaveBeenCalledTimes(2);
+    });
+
+    it("memoizes across hasAdminSession calls: one derivation for many verifications", async () => {
+      const secret = "memo-session-secret-value-333444";
+      const password = "memo-session-password-abc";
+      vi.stubEnv("ADMIN_SESSION_SECRET", secret);
+      vi.stubEnv("ADMIN_PASSWORD", password);
+      const spy = vi.spyOn(crypto, "pbkdf2Sync");
+
+      await createAdminSession();
+      expect(await hasAdminSession()).toBe(true);
+      expect(await hasAdminSession()).toBe(true);
+      expect(await hasAdminSession()).toBe(true);
+      expect(spy).toHaveBeenCalledTimes(1);
     });
   });
 });

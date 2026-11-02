@@ -17,8 +17,9 @@ import { redirect } from "next/navigation";
  *   1. User POSTs password to the login Server Action.
  *   2. Password is compared in constant time against ADMIN_PASSWORD.
  *   3. On match we set `admin_session` — an HMAC-signed `{expiresAt, iat, pwd}`
- *      token. `pwd` is a short tag derived from ADMIN_PASSWORD (see
- *      `passwordTag`), so the token is bound to the password it was minted under.
+ *      token. `pwd` is a short tag derived from ADMIN_PASSWORD with PBKDF2 (see
+ *      `derivePasswordTag`), so the token is bound to the password it was
+ *      minted under without the password ever going through a fast hash.
  *   4. Every admin page / route calls `requireAdminSession()` which verifies
  *      the signature, the lifetime and the password tag, redirecting to
  *      /admin/login on failure. src/middleware.ts mirrors the same checks with
@@ -42,9 +43,15 @@ const SESSION_MAX_AGE_MS = SESSION_MAX_AGE_SECONDS * 1000;
 // A token minted by another instance may carry an iat slightly ahead of this
 // instance's clock; anything further ahead than this is forged or broken.
 const CLOCK_SKEW_MS = 60_000;
-// 16 lower-case hex chars = 64 bits of the password HMAC (see passwordTag).
+// 16 lower-case hex chars = the 8 bytes PBKDF2 derives (see derivePasswordTag).
 const PASSWORD_TAG_LENGTH = 16;
+const PASSWORD_TAG_BYTES = PASSWORD_TAG_LENGTH / 2;
 const PASSWORD_TAG_PATTERN = /^[0-9a-f]{16}$/;
+// Salt label + cost of the tag derivation. src/middleware.ts repeats both for
+// its Web Crypto copy; tests/lib/admin/session.test.ts pins fixed vectors that
+// the middleware tests reproduce, so the two cannot drift apart unnoticed.
+const PASSWORD_TAG_SALT_LABEL = "tayf-admin-pwd-tag:";
+const PASSWORD_TAG_ITERATIONS = 100_000;
 
 function getSessionSecret(): string {
   const secret = process.env.ADMIN_SESSION_SECRET;
@@ -87,21 +94,42 @@ function sign(body: string): string {
   );
 }
 
+// The last (secret, password) pair and its tag. PBKDF2 at 100k iterations costs
+// tens of milliseconds, and every verification of every admin request needs the
+// same value, so it is derived once per process and then reused. Held in memory
+// only (the inputs are already in process.env); never logged or serialised.
+let cachedPasswordTag: { secret: string; password: string; tag: string } | null =
+  null;
+
 /**
  * Binds a token to the password it was minted under:
- * HMAC-SHA256(ADMIN_SESSION_SECRET, "pwd:" + ADMIN_PASSWORD), hex, first 16
- * chars. "pwd:" is unique among the HMAC labels keyed on the same secret (the
- * throttles and the Çerçeve session use fixed "tayf..." labels, and a token body
- * is base64url, which has no ":"). Rotating ADMIN_PASSWORD changes the tag, so
- * every older token stops verifying. src/middleware.ts computes the same value
- * with Web Crypto.
+ * PBKDF2-HMAC-SHA256(password = utf8(ADMIN_PASSWORD),
+ * salt = utf8("tayf-admin-pwd-tag:" + ADMIN_SESSION_SECRET), 100 000 iterations)
+ * truncated to 8 bytes and rendered as 16 lower-case hex chars. A password is
+ * never fed to a fast hash or a bare HMAC: the work factor is what makes the tag
+ * costly to brute-force from a leaked cookie. The secret in the salt keeps tags
+ * from one deployment from matching another's, and rotating either ADMIN_PASSWORD
+ * or ADMIN_SESSION_SECRET changes the tag, so every older token stops verifying.
+ * The label is unique to this derivation (the throttles and the Çerçeve session
+ * HMAC fixed "tayf..." labels *keyed on* the secret, a different construction).
+ * src/middleware.ts computes the same value with Web Crypto.
+ *
+ * Memoized for the last (secret, password) pair.
  */
-function passwordTag(secret: string, password: string): string {
-  return crypto
-    .createHmac("sha256", secret)
-    .update("pwd:" + password)
-    .digest("hex")
-    .slice(0, PASSWORD_TAG_LENGTH);
+export function derivePasswordTag(secret: string, password: string): string {
+  const hit = cachedPasswordTag;
+  if (hit && hit.secret === secret && hit.password === password) return hit.tag;
+  const tag = crypto
+    .pbkdf2Sync(
+      Buffer.from(password, "utf8"),
+      Buffer.from(PASSWORD_TAG_SALT_LABEL + secret, "utf8"),
+      PASSWORD_TAG_ITERATIONS,
+      PASSWORD_TAG_BYTES,
+      "sha256",
+    )
+    .toString("hex");
+  cachedPasswordTag = { secret, password, tag };
+  return tag;
 }
 
 interface SessionPayload {
@@ -165,7 +193,7 @@ function parseToken(token: string | undefined): SessionPayload | null {
   // 6. Password binding. No ADMIN_PASSWORD means no session can be valid.
   const password = process.env.ADMIN_PASSWORD;
   if (!password) return null;
-  const expectedTag = Buffer.from(passwordTag(getSessionSecret(), password));
+  const expectedTag = Buffer.from(derivePasswordTag(getSessionSecret(), password));
   const actualTag = Buffer.from(payload.pwd);
   if (actualTag.length !== expectedTag.length) return null;
   if (!crypto.timingSafeEqual(actualTag, expectedTag)) return null;
@@ -195,7 +223,7 @@ export async function createAdminSession(): Promise<void> {
   const token = makeToken({
     expiresAt,
     iat,
-    pwd: passwordTag(getSessionSecret(), getAdminPassword()),
+    pwd: derivePasswordTag(getSessionSecret(), getAdminPassword()),
   });
   const store = await cookies();
   store.set(COOKIE_NAME, token, {
