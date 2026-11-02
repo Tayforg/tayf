@@ -1,5 +1,6 @@
 import { cacheLife, cacheTag } from "next/cache";
 
+import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { READER_TIMEOUT_MS, createFinanceServerClient } from "@/lib/supabase/server";
 import {
@@ -248,7 +249,7 @@ export function toFeedItem(row: ArticleRow): FeedItem {
   return {
     id: row.id,
     title: row.title,
-    url: row.url,
+    url: cleanOutboundUrl(row.url),
     publishedAt: row.published_at,
     category: row.category,
     source: one(row.source),
@@ -292,7 +293,7 @@ async function readEconFeed(limit: number): Promise<FeedItem[]> {
   const items = ((data ?? []) as EconFeedRow[]).map((r) => ({
     id: r.id,
     title: r.title,
-    url: r.url,
+    url: cleanOutboundUrl(r.url),
     publishedAt: r.published_at,
     category: r.category,
     source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,
@@ -1025,7 +1026,7 @@ async function readTickerPage(ticker: string): Promise<TickerPage> {
       .map((r) => ({
         id: r.id,
         title: r.title,
-        url: r.url,
+        url: cleanOutboundUrl(r.url),
         publishedAt: r.published_at,
         category: r.category,
         source: r.source_slug ? { name: r.source_name ?? r.source_slug, slug: r.source_slug } : null,

@@ -107,6 +107,23 @@ export async function getRegistryRows(): Promise<RegistryRow[]> {
   return fetchRegistryRows();
 }
 
+/**
+ * The slugs of every active source, or `null` when the cached read failed.
+ *
+ * For pages that print a count over the live registry (/metodoloji's "N kaynak
+ * etiketli" must match /sources, which counts the active slugs). It reads the
+ * same cached entry as `getRegistryRows` but keeps the NULL contract of
+ * `getNeutralizedStatus` instead of that getter's retry-then-throw: no live
+ * retry and no `connection()`, so it is prerender-safe and never throws, and
+ * the caller leaves the number out rather than print one it cannot stand
+ * behind. A failed attempt is memoised for `minutes`, so the next request after
+ * that reads again.
+ */
+export async function getActiveSourceSlugs(): Promise<string[] | null> {
+  const r = await getRegistryRowsCached();
+  return r.ok ? r.data.map((row) => row.slug) : null;
+}
+
 // ---------------------------------------------------------------------------
 // One source's detail
 // ---------------------------------------------------------------------------

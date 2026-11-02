@@ -8,6 +8,17 @@ import type { MediaDnaZone } from "@/types";
 // surfaces for a zone only when it is *over-represented* there relative to
 // the rest of the week's coverage; under-use is never reported ("side X
 // avoids word Y" is not a claim this method can support).
+//
+// A term must also be spread across the zone's outlets, not just present in
+// several: when one outlet supplies more than `maxSourceShare` of the zone's
+// docs containing the term, the term is that outlet's house wording and not
+// how the zone writes, so it is skipped. `minSources` alone does not catch
+// this, because two or three stray headlines from other outlets satisfy it.
+// Measured on /hafta, 2026-11-02 (bagimsiz): of the week's distinct titles
+// containing "coşkusu", 231 of 239 (97%) came from Haberport, and of those
+// containing "dakikada", 88 of 102 (86%) came from Haber.com; both were
+// listed (z 5.6 for "coşkusu") because a few stray headlines from other
+// outlets satisfied minSources 3.
 
 export const FW_DEFAULTS = {
   minCount: 5,
@@ -16,9 +27,16 @@ export const FW_DEFAULTS = {
   topK: 8,
   minTermsToShow: 2,
   priorScale: 0.1,
+  /**
+   * Largest share of a term's zone docs one source may supply. The test is
+   * strictly `>`: a source at exactly this share is kept. The denominator is
+   * the zone's docs containing the term, not all of the zone's docs.
+   */
+  maxSourceShare: 0.5,
 } as const;
 
-export type FwOptions = typeof FW_DEFAULTS;
+/** Every default is a plain number; `as const` would otherwise pin each to its literal type. */
+export type FwOptions = { readonly [K in keyof typeof FW_DEFAULTS]: number };
 
 /**
  * Closed-form log-odds-ratio z-score for one term, zone i vs. zone j, with
@@ -68,6 +86,8 @@ interface TermStats {
   countByZone: Record<MediaDnaZone, number>;
   /** Per-zone distinct source-id set containing this term. */
   sourcesByZone: Record<MediaDnaZone, Set<string>>;
+  /** Per-zone, per-source count of docs containing this term (once per doc and term). */
+  docsBySourceByZone: Record<MediaDnaZone, Map<string, number>>;
 }
 
 /** Sort by z desc, then count desc, then term by code-unit comparison. */
@@ -117,7 +137,7 @@ export function fightinWords(
   docs: readonly FwDoc[],
   opts: Partial<FwOptions> = {},
 ): Record<MediaDnaZone, FwTerm[]> {
-  const { minCount, minSources, zMin, topK, minTermsToShow, priorScale } = {
+  const { minCount, minSources, zMin, topK, minTermsToShow, priorScale, maxSourceShare } = {
     ...FW_DEFAULTS,
     ...opts,
   };
@@ -143,11 +163,18 @@ export function fightinWords(
             bagimsiz: new Set<string>(),
             muhalefet: new Set<string>(),
           },
+          docsBySourceByZone: {
+            iktidar: new Map<string, number>(),
+            bagimsiz: new Map<string, number>(),
+            muhalefet: new Map<string, number>(),
+          },
         };
         stats.set(term, s);
       }
       s.countByZone[doc.zone] += 1;
       s.sourcesByZone[doc.zone].add(doc.sourceId);
+      const bySource = s.docsBySourceByZone[doc.zone];
+      bySource.set(doc.sourceId, (bySource.get(doc.sourceId) ?? 0) + 1);
     }
   }
 
@@ -165,6 +192,14 @@ export function fightinWords(
       if (yI === 0) continue;
       if (yI < minCount) continue;
       if (s.sourcesByZone[zoneI].size < minSources) continue;
+
+      // One outlet's house wording: its docs are more than `maxSourceShare`
+      // of this zone's docs containing the term (yI, not the whole zone).
+      let top = 0;
+      for (const n of s.docsBySourceByZone[zoneI].values()) {
+        if (n > top) top = n;
+      }
+      if (top / yI > maxSourceShare) continue;
 
       const yJ = others.reduce((sum, z) => sum + s.countByZone[z], 0);
 

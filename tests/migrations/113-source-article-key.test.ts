@@ -433,14 +433,17 @@ describe("migration 113_source_article_key.sql (SQL contract)", () => {
 // ---------------------------------------------------------------------------
 // Live parity (opt-in): the SQL twin must agree with the TS module on the
 // shared truth table, and the backfill must key twins and skip excluded
-// sources. Needs a throwaway Postgres with 113 applied and the stub schema
-// (public.sources / public.articles with created_at); TAYF_PSQL is the psql
-// binary and PGHOST/PGPORT/PGUSER/PGDATABASE select the server. Everything
-// the backfill block writes is rolled back.
+// sources. Needs a throwaway Postgres with 113 applied AND the newest
+// re-creation of public.source_article_key (migration 149, the host-anchored
+// parent-segment rules: the shared truth table now contains rows that only 149
+// keys) and the stub schema (public.sources / public.articles with created_at);
+// TAYF_PSQL is the psql binary and PGHOST/PGPORT/PGUSER/PGDATABASE select the
+// server. Everything the backfill block writes is rolled back. The static 113
+// checks above still read 113's own file and are unchanged.
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))(
-  "migration 113: public.source_article_key() / articles_source_key_backfill() (live Postgres)",
+  "migration 113 + 149 (newest source_article_key): public.source_article_key() / articles_source_key_backfill() (live Postgres)",
   () => {
     function lit(tag: string, value: string): string {
       // Unique dollar-quote tag per literal; never occurs inside the value.

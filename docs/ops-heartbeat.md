@@ -1,6 +1,6 @@
-# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122, 131, 136, 145)
+# Ops heartbeat (077, 100, 103, 108, 114, 115, 119, 122, 131, 136, 145, 150)
 
-`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119, 122, 136 and 145) plus `.github/workflows/ops-heartbeat.yml`
+`public.ops_health_report()` (migrations 077, 100, 103, 108, 114, 115, 119, 122, 136, 145 and 150) plus `.github/workflows/ops-heartbeat.yml`
 close a real gap: `cron.job_run_details` reports `'succeeded'` for an
 http-poking pg_cron job the instant `net.http_post` queues the request — it
 never waits for the response. Direct production evidence over a ~6 h window
@@ -41,10 +41,10 @@ workflow needs the new secret, so it is deliberately not part of migration 131.
 
 ## What it checks
 
-17 fixed-order rows (the first ten from migration 077, the eleventh added by
+19 fixed-order rows (the first ten from migration 077, the eleventh added by
 migration 100, the twelfth by migration 103, the thirteenth by migration 114,
-the fourteenth by migration 122, the fifteenth and sixteenth by migration 136
-and the seventeenth by migration 145;
+the fourteenth by migration 122, the fifteenth and sixteenth by migration 136,
+the seventeenth by migration 145 and the eighteenth and nineteenth by migration 150;
 rows 7, 9 and 12 were reworked by migration 108, and row 13 by migration 115,
 which widened its silence window from 12 h to 24 h, and by migration 119, which
 added a reason label to every source it names), `status` one of
@@ -62,7 +62,9 @@ migration 114 header, the 24 h window of the migration 115 header, and
 and the disk headroom gap of 2026-10-31/11-01 (see "Cron rotası sonuçları ve
 veritabanı boyutu (migration 136)" below); row 17 is the runtime check of the
 anon surface that the migration-text guard cannot give (see "Anon yüzeyi
-(migration 145, row 17)" below).
+(migration 145, row 17)" below); rows 18 and 19 close the clustering-queue and
+cron-liveness blind spots of hunt 24 (see "Kuyruk ve cron canlılığı (migration
+150, rows 18 and 19)" below).
 
 | # | check_name | What it measures | Threshold | Where the number came from |
 |---|---|---|---|---|
@@ -81,15 +83,17 @@ anon surface that the migration-text guard cannot give (see "Anon yüzeyi
 | 15 | `cron_route_failures_30m` | Outcomes of the Vercel cron routes (`headline`, `digest`, `fact-checks`, `social`, `alerts-webhooks`) recorded in `public.ops_cron_route_runs` over the last 30 min. Each **authenticated** run writes one row (route, HTTP status, duration) through `ops_cron_route_run_record` from `withCronOutcome` (`src/lib/ops/cron-route-outcome.ts`, scheduled with `after()`). `observed` is the number of runs with status >= 500 (599 included: a 200 with a failed sub-step, see the Row 15 section) plus the number of silent routes (below). **Fail** when one route has at least 2 failures that are at least half of its runs in the window, or when `headline` / `alerts-webhooks` has been silent beyond its fail gap; **warn** on any other failure or silence; **warn** with `observed` empty and `son 30 dakikada cron rotası kaydı yok` when the window holds no run and no listed route is silent (the app is not recording, or every cron is stuck); pass reads `son 30 dakikada n çalışma, başarısız yok`. **Silence:** a run that Vercel kills at `maxDuration` writes no row, so the two sub-hourly routes are also compared with a gap on their newest row: `headline` (every 5 min) warn above 15 min, fail above 30 min; `alerts-webhooks` (every 10 min) warn above 25 min, fail above 60 min; only for a route that has a row within the 7 day retention. `detail` on warn/fail: `son 30 dakikada başarısız: headline 6/6, social 1/2` (route, failures/runs, worst first), then ` · kayıt gelmiyor: headline 31 dk` for each silent route (whole minutes since its newest row, longest first), cut at 500 characters. `'unknown'` with `ops_cron_route_runs yok` if the table is missing, or with the error text if the query fails | fail: a route with >= 2 failures and >= 50% of its runs; warn: any failure (threshold 1) | 2026-10-31 16:10 UTC to 2026-11-01 10:30 UTC: 189 `canceling statement due to statement timeout` from the headline pick query, each one a 500 from `/api/cron/headline` (`apiServerError`), and all 14 rows read green. The root cause is fixed (migration 127, #147), but nothing app-side was watched. The "at least 2" keeps one blip in a daily route (`digest`, `social`) at warn; the headline outage reads 6/6 and fails inside a single window. Added by migration 136 |
 | 16 | `db_size_mb` | `pg_database_size(current_database())` in whole MB against the two limits of `public.ops_db_size_limits()` (default **warn 7000, fail 7600**). `threshold` is the warn limit. `detail`: `veritabanı n MB · uyarı w MB · kritik f MB · en büyük: rel mb MB, …` (the three biggest relations in `public`, by `pg_total_relation_size`). `'unknown'` with the error text if the read fails | warn >= `warn_mb`; fail >= `fail_mb` (7000 / 7600) | 2026-11-01: 6252 MB (`jev_shadow_predictions` 3142 MB, `articles` 2016 MB, `clusters` about 533 MB) and no check on it anywhere. The defaults are for the 8 GB Pro allowance; set them to 70% / 85% of the disk you actually provisioned (see "Cron rotası sonuçları ve veritabanı boyutu"). The top-three read costs about 14 ms on 68 public relations. Added by migration 136 |
 | 17 | `anon_surface` | What the roles `anon` and `authenticated` can actually do in schema `public`, read from the catalogue at run time (`has_table_privilege`, `has_sequence_privilege`, `has_function_privilege` and the relation ACLs), not from migration text. `observed` is the number of exposed tables/views/sequences plus the SECURITY DEFINER functions and the invoker functions that either role can execute (the five allowlisted RPCs `saved_clusters`, `merged_cluster_map`, `source_slugs`, `source_slug_exists` and `saved_clusters_v2`, each exempt by its full signature, name and argument types, so an overload of one of those names is counted; trigger functions and extension members are not counted). **Fail** when any table, view, materialized view, foreign table, partitioned table or sequence carries a privilege for either role (an ACL entry counts too, which catches PG17 `MAINTAIN`), or either role can execute a SECURITY DEFINER function outside the allowlist; **warn** when either role can execute an invoker function (a `PUBLIC` execute is enough), or `auth.users` holds a row (someone signed up); **skip** (`anon/authenticated rolü yok`) when a role is missing; `'unknown'` with the error text if the query fails. `detail` (Turkish, counts only, never an object name or user data, cut at 500 characters): `anon/authenticated yetkisi yok: tablo/dizi 0, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · auth.users 0` on pass; otherwise the same counts (`yetkisi var:`), then ` · adlar için: docs/ops-heartbeat.md (Anon yüzeyi)` when a relation, sequence or function was found, and ` · auth.users n`. The heartbeat output is public, so the names are not in it: list them with the service-role query in "Anon yüzeyi" below, then revoke | fail >= 1 exposed relation/sequence or definer function; warn >= 1 invoker function or >= 1 `auth.users` row (threshold 1) | Added by migration 145 (2026-11-02, h19-security-1). Step 0 (migration 145 header, production, read-only): 0 of 102 relations and 0 of 137 functions exposed, `auth.users` 0 rows, so the expected status is `pass`; the query runs in 6-9 ms (`explain (analyze)`, three runs). `tests/guards/anon-surface.test.ts` scans migration text only, so a dashboard grant or a `supabase_admin` default-ACL privilege reached nothing before this row |
+| 18 | `queue_lag` | The pgmq queues `cluster_work` (feeds the home and cluster pages) and `image_backfill` (article images), read from `pgmq.q_cluster_work` and `pgmq.q_image_backfill` and their archives `pgmq.a_cluster_work` and `pgmq.a_image_backfill`: the depth (`count(*)`), the age in seconds of the oldest **visible** message (`vt <= now()`; an in-flight message is not waiting), and the **poison** count, the messages archived in the last 24 hours with `read_ct >= 3` (the consumer gave up on them). `observed` is the oldest `cluster_work` age in seconds. **Fail** when the oldest `cluster_work` message is older than 900 s or the oldest `image_backfill` message older than 3600 s; **warn** when the oldest `cluster_work` message is older than 300 s, its depth is above 300, the oldest `image_backfill` message is older than 1800 s, or one poison message exists; `'unknown'` (`pgmq kuyruğu yok`) without the pgmq tables, or with the error text if the read fails. `detail` (Turkish, counts and ages only, never a message body or id): `cluster_work: 0 mesaj, en eski 0 sn · image_backfill: 62 mesaj, en eski 620 sn · zehirli (24 sa): 0` | fail > 900 s (`cluster_work`) or > 3600 s (`image_backfill`); warn > 300 s, depth > 300, `image_backfill` > 1800 s, poison ≥ 1 | Baselines over 48 h to 2026-11-02, from the archives (`archived_at - enqueued_at`): `cluster_work` wait p95 60 s, max 86.5 s; `image_backfill` p95 721 s, max 803 s (re-measured on 2026-11-02 13:00 UTC: 59.9 / 86.5 s over 3,792 messages and 729.5 / 1024.4 s over 5,203). The warn limits sit well above both maxima (300 s against 86.5 s; 1800 s against 1024 s), the fail limits at 3× and 2× the warn limits. 0 poison messages in the 8 days to 2026-11-02, so a poison warn is a real signal. Nothing watched clustering before: the report held no `pgmq` row, so a dead consumer read green while ingest kept rows 3-6 green |
+| 19 | `cron_jobs_stalled` | The pg_cron jobs listed in `public.ops_cron_expected` (20 seeded, each with its own `max_gap`), read from `cron.job` and the newest `cron.job_run_details` row of each job inside the newest 7000 run ids (the table has no `start_time` index, so the run-id window is the bound, as in row 1; 7000 is about 1.5 × the 4600 runs of 26 hours). Each listed job is counted once as **missing** (no `cron.job` row), **inactive** (`active` false), **stale** (no run in the window, or the newest `start_time` older than `max_gap`; any run status counts as a run) or **failed** (the newest run has status `failed`). **Fail** when missing + inactive + stale ≥ 1 (`observed` is that count); **warn** when only failed jobs exist (`observed` is the failed count); `'unknown'` (`pg_cron yok` or `ops_cron_expected yok`) without pg_cron or the table, or with the error text if the read fails. `detail` (Turkish, job names and counts only): `yok: a, b · pasif: c · koşu yok: d · son koşu başarısız: e`, only the kinds that occur, or `20 iş izleniyor` on pass, cut at 500 characters. It never reads `cron.job.command` or a run's `command` / `return_message` | fail ≥ 1 (missing, inactive or stale job); warn ≥ 1 (failed newest run) | Row 1 counts only `failed` runs of the last 30 minutes, so an unscheduled or deactivated job produced no row (migration 131's header records a 6-day archive hole nothing flagged). The 20 seeded jobs are the ones active on `cron.job` on 2026-11-02 (42 jobs, all active) that run all day; `max_gap` is at least 3 ticks and at least 10 minutes for sub-hourly jobs, 3 h for hourly, tick + 1 h for every-few-hours and 26 h for daily jobs. Weekday-only (`quotes-*`) and weekly jobs are not listed |
 
 The heartbeat script adds two rows of its own to this table and to the step
-summary, on top of the 17: `archive_gap_days` (see "Arşiv boşlukları") and, when
+summary, on top of the 19: `archive_gap_days` (see "Arşiv boşlukları") and, when
 the snapshot read fails, `snapshot_backstop` (`unknown`). They are not part of
 `ops_health_report()`.
 
 Missing `pg_cron` or `pg_net` (or any query erroring) yields `'unknown'` for
 the affected row instead of raising — the function always returns exactly
-17 rows. (Row 12 degrades gracefully: with only one of the two present it
+19 rows. (Row 12 degrades gracefully: with only one of the two present it
 counts that half and treats the other as zero.)
 
 **Stage-budget alerts (`jev_alerts.kind = 'stage_budget'`, counted by row 9).**
@@ -519,6 +523,142 @@ migration 131) and turns such a privilege into a `fail`.
   `select attrelid::regclass, attname, attacl from pg_attribute where attacl is not null and attrelid in (select oid from pg_class where relnamespace = 'public'::regnamespace);`.
 - **Cost.** About 5-11 ms per report (two catalogue scans), measured on production
   on 2026-11-02.
+
+## Kuyruk ve cron canlılığı (migration 150, rows 18 and 19)
+
+Until migration 150 the report could not see the product's core pipeline stall. Nothing
+read the pgmq queues, so an undeployed or renamed `cluster-consumer` (a 404, which row 2
+does not count), a poison message or a dead consumer left the home and cluster pages
+frozen while ingest kept rows 3-6 green; and row 1 counts only runs with status
+`failed`, so a job that was unscheduled or deactivated produced no row at all
+(`cluster-drain`, `image-drain`, `prune-nightly` and `ops-health-snapshot` itself were
+unwatched; the 6-day archive hole in the migration 131 header went unnoticed the same
+way). Migration 150 adds two rows and one table, `public.ops_cron_expected`.
+
+### What each status means
+
+**Row 18 `queue_lag`** (threshold 900, `observed` is the oldest `cluster_work` age in seconds):
+
+- `pass`: the oldest visible message of `cluster_work` is at most 300 s old with at most
+  300 messages queued, the oldest `image_backfill` message is at most 1800 s old, and no
+  message was archived in the last 24 hours with `read_ct >= 3`.
+- `warn`: one of those limits is crossed (`cluster_work` older than 300 s or deeper than
+  300, `image_backfill` older than 1800 s, or one or more poison messages, `zehirli`).
+  A poison message stays a warn for 24 hours after it was archived; look at the
+  consumer's logs (`cluster-consumer`, `image-consumer`) for the message that kept
+  failing.
+- `fail`: the oldest `cluster_work` message is older than 900 s or the oldest
+  `image_backfill` message older than 3600 s: the consumer is not draining. Check that
+  the `cluster-drain` / `image-drain` jobs run (row 19), that the Edge Function is
+  deployed, and `net._http_response` for its answers.
+- `unknown`: no pgmq tables (`pgmq kuyruğu yok`) or the read failed (the first 200
+  characters of the error).
+- `detail`: `cluster_work: N mesaj, en eski S sn · image_backfill: N mesaj, en eski S sn
+  · zehirli (24 sa): K`. `en eski` is the age of the oldest message that is visible
+  (`vt <= now()`); a message a consumer has read and not yet archived is invisible and
+  does not age the queue, but it counts toward the depth.
+
+**Row 19 `cron_jobs_stalled`** (threshold 1):
+
+- `pass`: every job in `public.ops_cron_expected` exists in `cron.job`, is active, and
+  has a run (any status) that started within its `max_gap`; the newest run did not fail.
+  `detail` is `N iş izleniyor`.
+- `fail`: `observed` jobs are missing, inactive or stale. `detail` lists them by kind,
+  only the kinds that occur: `yok: a, b` (no `cron.job` row: unscheduled),
+  `pasif: c` (`active` is false), `koşu yok: d` (no run in the window, or the newest run
+  started more than `max_gap` ago), and, if some other job's newest run failed too,
+  `son koşu başarısız: e`.
+- `warn`: no job is missing, inactive or stale, but the newest run of `observed` jobs
+  has status `failed` (`son koşu başarısız: e`). Row 1 already fails for a `failed` run
+  in the last 30 minutes; row 19 keeps the warn while the newest run is still the
+  failed one, so a nightly job that failed at 04:10 stays visible until it runs again.
+- `unknown`: no `cron.job_run_details` / `cron.job` (`pg_cron yok`), no
+  `public.ops_cron_expected` table (`ops_cron_expected yok`), or the read failed.
+- An empty `ops_cron_expected` is a pass with `0 iş izleniyor`: nothing is watched.
+- The newest run is read inside the newest 7000 run ids of `cron.job_run_details`
+  (`job_run_details` has no `start_time` index; the window is the same device as row 1's
+  5000). On 2026-11-02 the table gained 4600 runs per 26 hours, so 7000 ids cover about
+  39 hours and a daily job's last run stays inside. If the number of jobs or their
+  frequency grows a lot, re-measure with
+  `select max(runid) - min(runid) from cron.job_run_details where runid > (select max(runid) from cron.job_run_details) - 60000 and start_time >= now() - interval '26 hours'`
+  and widen the literal with a new `create or replace` of the function. Known limit:
+  `ops_cron_log_compact()` (job `cron-log-compact`, migration 101) truncates the table
+  down to the last day when it grows above 150 MiB (79 MB on 2026-11-02, and the 081
+  retention keeps it small), so right after such a compaction a daily job whose last run
+  is 24-26 hours old can read `koşu yok` until it runs again.
+
+### The thresholds
+
+Baselines over 48 h to 2026-11-02 (the archives, `archived_at - enqueued_at`):
+`cluster_work` wait p95 60 s, max 86.5 s; `image_backfill` wait p95 721 s, max 803 s
+(re-measured 2026-11-02 13:00 UTC: 59.9 / 86.5 s over 3,792 messages and 729.5 / 1024.4 s
+over 5,203). `image_backfill` is slow by design (the hourly `image-backfill-requeue`, the
+5 minute `image-drain`), hence 1800 / 3600 s there and 300 / 900 s for `cluster_work`.
+The `max_gap` values follow the schedule of each job: at least 3 ticks and at least 10
+minutes for a sub-hourly job, 3 h for an hourly one, tick + 1 h for an every-few-hours
+one, 26 h for a daily one. Weekday-only (`quotes-*`) and weekly jobs are not listed.
+
+### Tuning the job list
+
+The list is the table `public.ops_cron_expected` (`jobname`, `max_gap`, `note` = the
+schedule the gap was derived from). Change it as the table owner (`postgres`, in the
+SQL editor); `service_role` can only read it, `anon` and `authenticated` have no
+privilege on it and row level security is on without a policy:
+
+```sql
+-- loosen or tighten one job
+update public.ops_cron_expected set max_gap = interval '40 minutes' where jobname = 'cluster-drain';
+-- stop watching a job (a job you retired on purpose)
+delete from public.ops_cron_expected where jobname = 'framing-candidate-pool-refresh';
+-- watch another one
+insert into public.ops_cron_expected (jobname, max_gap, note) values ('jev-shadow', interval '30 minutes', '*/10 * * * *');
+```
+
+Migration 150 seeds the table with `insert ... on conflict (jobname) do nothing`, so
+re-applying the file keeps a tuned `max_gap` (it does put back a seed row you deleted).
+When a migration schedules a new always-on job, add a row for it in that migration with
+the same statement. The rows are job names and intervals only: never a command, a token
+or a URL.
+
+To see every watched job with its newest run, in the SQL editor or any role that can read
+the `cron` schema (the report itself runs as the function owner and is read by
+`service_role`; the `cron` schema is not exposed over PostgREST). It selects no
+`command` or `return_message` column, because those carry vault secrets:
+
+```sql
+select e.jobname, e.max_gap, j.active, r.status, r.start_time,
+       pg_catalog.now() - r.start_time as age
+  from public.ops_cron_expected e
+  left join cron.job j on j.jobname = e.jobname
+  left join lateral (
+    select d.status, d.start_time
+      from cron.job_run_details d
+     where d.jobid = j.jobid
+       and d.runid > (select coalesce(max(x.runid), 0) - 7000 from cron.job_run_details x)
+     order by d.runid desc
+     limit 1) r on true
+ order by (r.start_time is null or r.start_time < now() - e.max_gap) desc, e.jobname;
+```
+
+To bring a `pasif` job back: `select cron.alter_job((select jobid from cron.job where
+jobname = 'cluster-drain'), active := true);`. A `yok` job needs the `cron.schedule`
+call of the migration that defines it (see `docs/migration-guide.md`).
+
+### The details are public
+
+`scripts/ops-heartbeat.mjs` prints every detail to stdout and to `$GITHUB_STEP_SUMMARY`,
+and `Tayforg/tayf` is a public repository, so the details of rows 18 and 19 are public.
+They carry counts and job names only: no message body, id or payload, no URL, and
+nothing from `cron.job.command` or `cron.job_run_details.command` / `return_message`
+(neither column is read). A job name tells a reader that the job exists, nothing more.
+
+### Cost and rollback
+
+Measured on production on 2026-11-02 (read-only, `explain (analyze)`): row 18 about 7 ms
+of execution (2.5 ms planning), row 19 about 4 ms (1.2 ms planning): the two rows add
+about 15 ms to a report. Rollback: the header of migration 150 (re-run only 145's
+`ops_health_report()` section, `drop table public.ops_cron_expected;`, delete ledger row
+150).
 
 ## Twin bridges (147, shadow)
 

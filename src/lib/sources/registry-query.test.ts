@@ -79,7 +79,11 @@ const agreement = vi.hoisted(() => ({ getSourceAgreement: vi.fn() }));
 vi.mock("@/lib/game/agreement", () => agreement);
 
 import { cacheLife, cacheTag } from "next/cache";
-import { getRegistryDetail, getRegistryRows } from "./registry-query";
+import {
+  getActiveSourceSlugs,
+  getRegistryDetail,
+  getRegistryRows,
+} from "./registry-query";
 
 const ROWS = [
   {
@@ -232,6 +236,73 @@ describe("getRegistryRows", () => {
     // The real factory (wrapped by the spy) throws on a missing key.
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
     await expect(getRegistryRows()).rejects.toThrow(/Missing NEXT_PUBLIC_SUPABASE_URL/);
+  });
+});
+
+// /metodoloji counts its tagged sources from the ACTIVE slugs (the same set
+// /sources counts), through this getter. Unlike getRegistryRows it keeps a
+// null contract and has no live retry, so it never reads the clock or the
+// request scope and stays prerender-safe (same shape as getNeutralizedStatus).
+describe("getActiveSourceSlugs", () => {
+  const TWO_ROWS = [
+    { ...ROWS[0], id: "src-1", slug: "indyturk" },
+    { ...ROWS[0], id: "src-2", slug: "sabah" },
+  ];
+
+  it("returns the active source slugs in the registry's order", async () => {
+    fixture.sources = [ok(TWO_ROWS)];
+
+    expect(await getActiveSourceSlugs()).toEqual(["indyturk", "sabah"]);
+  });
+
+  it("returns [] (not null) for a registry that read fine but holds no active source", async () => {
+    fixture.sources = [ok(null)];
+
+    expect(await getActiveSourceSlugs()).toEqual([]);
+  });
+
+  it("reuses the cached registry read: reader client, active-only filter, one cacheLife", async () => {
+    await getActiveSourceSlugs();
+
+    expect(clients.reader).toHaveBeenCalledTimes(1);
+    expect(clients.plain).not.toHaveBeenCalled();
+    expect(fixture.served.sources).toBe(1);
+    expect((fixture.sourcesStates[0] as State).eq).toEqual([{ col: "active", val: true }]);
+    expect(cacheTag).toHaveBeenCalledWith("sources");
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("source-directory");
+  });
+
+  it("returns null on a failed attempt and does NOT retry live (a null contract)", async () => {
+    fixture.sources = [fail("canceling statement due to statement timeout"), ok(TWO_ROWS)];
+
+    expect(await getActiveSourceSlugs()).toBeNull();
+
+    // One read only: the healthy second envelope was never consumed.
+    expect(fixture.served.sources).toBe(1);
+    // The blip is memoised for 'minutes' only.
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("never throws: a sustained outage and a missing Supabase env var both come back as null", async () => {
+    fixture.sources = [fail("boom")];
+    await expect(getActiveSourceSlugs()).resolves.toBeNull();
+
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    await expect(getActiveSourceSlugs()).resolves.toBeNull();
+  });
+
+  it("is exported from a module that keeps connection() out of it (prerender-safe)", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const source = readFileSync(resolve(__dirname, "registry-query.ts"), "utf8");
+    const start = source.indexOf("export async function getActiveSourceSlugs");
+    expect(start).toBeGreaterThan(-1);
+    const body = source.slice(start, source.indexOf("\n}\n", start));
+    expect(body).not.toContain("connection(");
+    expect(body).not.toContain("fetchRegistryRows");
+    expect(body).not.toContain("Date.now");
   });
 });
 

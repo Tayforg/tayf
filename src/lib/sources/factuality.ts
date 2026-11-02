@@ -290,7 +290,7 @@ export const SOURCE_METADATA: Record<string, SourceFactualityMetadata> = {
     ownership: "CGTN (Çin devleti)",
     ownerGroup: "foreign-state",
   },
-  "independent-turkce": {
+  indyturk: {
     factuality: "mixed",
     ownership: "Independent Türkçe (SRMG lisansı)",
     ownerGroup: "srmg",

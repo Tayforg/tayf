@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 
 vi.mock("@/components/story/correction-form", () => ({
@@ -18,6 +18,14 @@ let mockNeutralStatus: { neutralized: number; eligible: number } | null = {
 
 vi.mock("@/lib/headline/status", () => ({
   getNeutralizedStatus: vi.fn(async () => mockNeutralStatus),
+}));
+
+// The slugs of the ACTIVE sources, as registry-query's cached read returns
+// them (null when that read failed). Mutable per test, same shape as above.
+let mockActiveSlugs: string[] | null = ["sabah", "anadolu-ajansi", "bilinmeyen-kaynak"];
+
+vi.mock("@/lib/sources/registry-query", () => ({
+  getActiveSourceSlugs: vi.fn(async () => mockActiveSlugs),
 }));
 
 import { BIAS_LABELS, BLINDSPOT, SURPRISE, ZONE_META } from "@/lib/bias/config";
@@ -42,6 +50,8 @@ import {
   KARNE_STALE_AFTER_HOURS,
   KARNE_WINDOW_DAYS,
 } from "@/lib/sources/karne";
+import { countClassifiedSources } from "@/lib/sources/classification";
+import { getSourceMetadata } from "@/lib/sources/factuality";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
 import {
   HEADLINE_MIN_ARTICLE_COUNT,
@@ -126,6 +136,7 @@ function collectStringProps(node: unknown, out: string[] = []): string[] {
 describe("/metodoloji page", () => {
   beforeEach(() => {
     mockNeutralStatus = { neutralized: 0, eligible: 12 };
+    mockActiveSlugs = ["sabah", "anadolu-ajansi", "bilinmeyen-kaynak"];
   });
 
   it("renders every bias-zone contract number and label from the shared config", async () => {
@@ -674,5 +685,99 @@ describe("/metodoloji page: changelog order", () => {
       "2026-10-22",
     ]);
     expect([...dates].sort().at(-1)).toBe(dates[0]);
+  });
+});
+
+// The tagged-source sentence counts the ACTIVE registry (the same slugs /sources
+// feeds to countClassifiedSources), not every key of SOURCE_METADATA: the two
+// pages used to print 41 and 37 for the same fact (h24-scores-1).
+describe("/metodoloji page: tagged-source counts follow the active registry", () => {
+  const highOf = (slugs: readonly string[]) =>
+    slugs.filter((slug) => getSourceMetadata(slug)?.factuality === "high").length;
+  const lowOf = (slugs: readonly string[]) =>
+    slugs.filter((slug) => getSourceMetadata(slug)?.factuality === "low").length;
+
+  beforeEach(() => {
+    mockNeutralStatus = { neutralized: 0, eligible: 12 };
+  });
+
+  afterEach(() => {
+    mockActiveSlugs = ["sabah", "anadolu-ajansi", "bilinmeyen-kaynak"];
+  });
+
+  it("prints countClassifiedSources(activeSlugs) and the high/low counts of those same slugs", async () => {
+    const slugs = ["indyturk", "sabah", "anadolu-ajansi", "bilinmeyen-kaynak"];
+    mockActiveSlugs = slugs;
+
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    const tagged = countClassifiedSources(slugs);
+    const high = highOf(slugs);
+    const low = lowOf(slugs);
+    expect(text).toContain(`Şu anda ${tagged} kaynak etiketli`);
+    expect(text).toContain(`${high} tanesi Yüksek`);
+    expect(text).toContain(`${low} tanesi Düşük`);
+    expect(text).toContain(
+      `Şu anda ${tagged} kaynak etiketli, ${high} tanesi Yüksek, ${low} tanesi Düşük; geri kalan kaynaklar henüz derecelendirilmemiştir.`,
+    );
+    // Pin the values themselves too, so the helpers above cannot drift with the code:
+    // indyturk (mixed), sabah (mixed), anadolu-ajansi (high); the unknown slug is untagged.
+    expect(tagged).toBe(3);
+    expect(high).toBe(1);
+    expect(low).toBe(0);
+  });
+
+  it("counts indyturk: the renamed registry key now matches the live slug", async () => {
+    mockActiveSlugs = ["indyturk"];
+
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain("Şu anda 1 kaynak etiketli, 0 tanesi Yüksek, 0 tanesi Düşük;");
+  });
+
+  it("does not count a tagged key that is not an active source (inactive outlets, an unknown slug)", async () => {
+    // fotomac, fanatik and tgrt-haber stay in the registry but are inactive.
+    expect(getSourceMetadata("fotomac")).not.toBeNull();
+    mockActiveSlugs = ["sabah"];
+
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain("Şu anda 1 kaynak etiketli");
+    expect(text).not.toContain("Şu anda 2 kaynak etiketli");
+  });
+
+  it("prints zero counts for an empty (but successfully read) registry", async () => {
+    mockActiveSlugs = [];
+
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).toContain("Şu anda 0 kaynak etiketli, 0 tanesi Yüksek, 0 tanesi Düşük;");
+  });
+
+  it("leaves the numbers out and says only that untagged sources are unrated when the registry read failed", async () => {
+    mockActiveSlugs = null;
+
+    const { default: MethodologyPage } = await import("./page");
+    const text = collectText(await MethodologyPage()).join("");
+
+    expect(text).not.toContain("kaynak etiketli");
+    expect(text).not.toContain("Şu anda");
+    expect(text).not.toContain("tanesi Yüksek");
+    expect(text).toContain("Etiketlenmemiş kaynaklar henüz derecelendirilmemiştir.");
+    // The rest of the page is unaffected by the missing counts.
+    expect(text).toContain("Sahiplik, kaynakları holding/grup bazında toplayan bir başka sinyaldir");
+  });
+
+  it("no longer counts the module-level SOURCE_METADATA table", () => {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const pageSource = readFileSync(join(here, "page.tsx"), "utf8");
+
+    expect(pageSource).not.toContain("taggedSources");
+    expect(pageSource).not.toContain("SOURCE_METADATA");
+    expect(pageSource).toContain('from "@/lib/sources/registry-query"');
   });
 });

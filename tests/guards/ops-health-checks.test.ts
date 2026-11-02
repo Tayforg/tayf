@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // ---------------------------------------------------------------------------
 // Permanent CI guard (ops heartbeat): public.ops_health_report() is re-created,
 // whole, by every migration that changes one check (077, 100, 103, 108, 114,
-// 115, 119, 122, 136, 145).
+// 115, 119, 122, 136, 145, 150).
 // Each re-creation is a copy-paste of the previous body, so the easy mistake is
 // a check that silently drops out of the copy: the report still returns rows,
 // the heartbeat still runs, and nobody learns that, say, jev_shadow_cron_
@@ -26,7 +26,11 @@ import { fileURLToPath } from "node:url";
 // newest version carries them in that order, after ingest_gaps.
 // 145 (h19-security-1) appended row 17 (`anon_surface`, a runtime check of what anon and
 // authenticated can do, read from the catalogue; tests/guards/anon-surface.test.ts only reads
-// migration text): the newest version carries it as the LAST row, after db_size_mb.
+// migration text): the newest version carries it after db_size_mb.
+// 150 (h24-ops-1) appended rows 18 (`queue_lag`, the age and depth of the pgmq queues cluster_work and
+// image_backfill plus poison messages) and 19 (`cron_jobs_stalled`, the jobs listed in
+// public.ops_cron_expected against cron.job and cron.job_run_details): the newest version carries them in that
+// order, cron_jobs_stalled LAST, and keeps rows 1-17 byte for byte as 145 wrote them.
 //
 // Only literal names are compared (`check_name := 'name';`). The three
 // per-zone freshness rows are built in a loop (`'ingest_fresh_' || v_zone ||
@@ -40,7 +44,13 @@ const NEWEST_CHECK = "sources_newly_dark";
 const GAPS_CHECK = "ingest_gaps";
 const ROUTE_CHECK = "cron_route_failures_30m";
 const SIZE_CHECK = "db_size_mb";
-const LAST_CHECK = "anon_surface";
+const ANON_CHECK = "anon_surface";
+const QUEUE_CHECK = "queue_lag";
+const LAST_CHECK = "cron_jobs_stalled";
+const MIGRATION_145 = resolve(MIGRATIONS_DIR, "145_ops_anon_surface_check.sql");
+const CREATE_LINE = "create or replace function public.ops_health_report()";
+/** What follows the last row's `return next;` in every version. */
+const FN_END = "\n\n  return;\nend\n$fn$;";
 
 function stripSqlComments(sql: string): string {
   return sql.replace(/--[^\n]*/g, "");
@@ -82,10 +92,10 @@ beforeAll(() => {
 });
 
 describe("ops_health_report(): versions across migrations", () => {
-  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145) in number order", () => {
-    expect(versions.length).toBeGreaterThanOrEqual(10);
+  it("finds every re-creation (077, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150) in number order", () => {
+    expect(versions.length).toBeGreaterThanOrEqual(11);
     expect(versions[0]?.num).toBe(77);
-    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145]));
+    expect(versions.map((v) => v.num)).toEqual(expect.arrayContaining([77, 100, 103, 108, 114, 115, 119, 122, 136, 145, 150]));
     const nums = versions.map((v) => v.num);
     expect([...nums].sort((a, b) => a - b)).toEqual(nums);
   });
@@ -165,14 +175,43 @@ describe("ops_health_report(): the newest version", () => {
     expect(after).toMatch(/\|\|\s*v\.reason/);
   });
 
-  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136) and ${LAST_CHECK} (migration 145) in that order, ${LAST_CHECK} LAST`, () => {
-    expect(newest.num).toBeGreaterThanOrEqual(145);
-    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
+  it(`contains ${GAPS_CHECK} (migration 122), ${ROUTE_CHECK} and ${SIZE_CHECK} (migration 136), ${ANON_CHECK} (migration 145), ${QUEUE_CHECK} and ${LAST_CHECK} (migration 150) in that order, ${LAST_CHECK} LAST`, () => {
+    expect(newest.num).toBeGreaterThanOrEqual(150);
+    for (const name of [GAPS_CHECK, ROUTE_CHECK, SIZE_CHECK, ANON_CHECK, QUEUE_CHECK, LAST_CHECK]) expect(newest.names).toContain(name);
     expect(newest.names[newest.names.length - 1]).toBe(LAST_CHECK);
     expect(newest.names.indexOf(GAPS_CHECK)).toBeGreaterThan(newest.names.indexOf(NEWEST_CHECK));
     expect(newest.names.indexOf(ROUTE_CHECK)).toBeGreaterThan(newest.names.indexOf(GAPS_CHECK));
     expect(newest.names.indexOf(SIZE_CHECK)).toBeGreaterThan(newest.names.indexOf(ROUTE_CHECK));
-    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(SIZE_CHECK));
+    expect(newest.names.indexOf(ANON_CHECK)).toBeGreaterThan(newest.names.indexOf(SIZE_CHECK));
+    expect(newest.names.indexOf(QUEUE_CHECK)).toBeGreaterThan(newest.names.indexOf(ANON_CHECK));
+    expect(newest.names.indexOf(LAST_CHECK)).toBeGreaterThan(newest.names.indexOf(QUEUE_CHECK));
+  });
+
+  it("keeps rows 1-17 byte for byte as 145 wrote them (raw text, comments included) and appends the queue_lag marker right after row 17", () => {
+    const raw145 = readFileSync(MIGRATION_145, "utf8");
+    // the last occurrence: a header may quote the create line in a comment (145's rollback paragraph does)
+    const from145 = raw145.lastIndexOf(CREATE_LINE);
+    const end145 = raw145.indexOf(FN_END, from145);
+    expect(from145, "145 create line").toBeGreaterThan(0);
+    expect(end145, "145 function end").toBeGreaterThan(from145);
+    const rows145 = raw145.slice(from145, end145);
+    expect(rows145.endsWith("  return next;")).toBe(true);
+    expect(rows145.length).toBeGreaterThan(30000);
+
+    const rawNewest = readFileSync(resolve(MIGRATIONS_DIR, newest.file), "utf8");
+    const at = rawNewest.lastIndexOf(CREATE_LINE);
+    expect(at, `${newest.file} create line`).toBeGreaterThanOrEqual(0);
+    // the executable create line is in the file once (comments are stripped before counting)
+    expect(newest.code.indexOf(CREATE_LINE)).toBeGreaterThanOrEqual(0);
+    expect(newest.code.indexOf(CREATE_LINE, newest.code.indexOf(CREATE_LINE) + 1), "the create line is executable once").toBe(-1);
+    expect(rawNewest.slice(at, at + rows145.length)).toBe(rows145);
+    // the next non-blank line is the row-18 marker comment
+    const rest = rawNewest.slice(at + rows145.length);
+    const nextLine = rest.split("\n").find((l) => l.trim() !== "");
+    expect(nextLine?.trimStart().startsWith("-- 18. queue_lag (migration 150).")).toBe(true);
+    expect(rest.startsWith("\n\n  -- 18. queue_lag (migration 150).")).toBe(true);
+    // and the function ends after the last row's `return next;`
+    expect(rawNewest.indexOf(FN_END, at)).toBeGreaterThan(at + rows145.length);
   });
 
   /** The text of one check: from its `check_name :=` up to the next one (or the end of the body). */
@@ -269,7 +308,7 @@ describe("ops_health_report(): the newest version", () => {
   });
 
   it("anon_surface reads the catalogue for anon/authenticated privileges and can fail (a dashboard grant must page), warn and skip", () => {
-    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    const seg = slice(ANON_CHECK).replace(/\s+/g, " ");
     for (const fn of ["has_table_privilege", "has_sequence_privilege", "has_function_privilege", "aclexplode"]) {
       expect(seg, fn).toContain(fn);
     }
@@ -284,6 +323,94 @@ describe("ops_health_report(): the newest version", () => {
       .filter((_, i) => i % 2 === 0)
       .join(" ");
     expect(outsideLiterals).not.toMatch(/\b(insert|update|delete|truncate)\b/i);
+  });
+
+  /** Empties every single-quoted literal (a character scan, no regular expression over SQL text). */
+  function blankLiterals(sql: string): string {
+    let out = "";
+    let i = 0;
+    while (i < sql.length) {
+      if (sql.charAt(i) === "'") {
+        let j = i + 1;
+        while (j < sql.length) {
+          if (sql.charAt(j) === "'") {
+            if (sql.charAt(j + 1) === "'") {
+              j += 2;
+              continue;
+            }
+            break;
+          }
+          j += 1;
+        }
+        out += "''";
+        i = j + 1;
+      } else {
+        out += sql.charAt(i);
+        i += 1;
+      }
+    }
+    return out;
+  }
+
+  /** Identifier-like words of the text, lower case, in order. */
+  function wordsOf(text: string): string[] {
+    const out: string[] = [];
+    let cur = "";
+    for (const ch of text.toLowerCase()) {
+      if ((ch >= "a" && ch <= "z") || ch === "_" || (ch >= "0" && ch <= "9")) {
+        cur += ch;
+      } else if (cur) {
+        out.push(cur);
+        cur = "";
+      }
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  it("queue_lag reads the two pgmq queues and their archives, the 24 h poison window, and can fail, warn and answer unknown", () => {
+    const seg = slice(QUEUE_CHECK).replace(/\s+/g, " ");
+    for (const rel of ["pgmq.q_cluster_work", "pgmq.q_image_backfill", "pgmq.a_cluster_work", "pgmq.a_image_backfill"]) {
+      expect(seg, rel).toContain(rel);
+    }
+    expect(seg).toContain("read_ct >= 3");
+    expect(seg).toContain("interval '24 hours'");
+    for (const limit of ["300", "900", "1800", "3600"]) expect(seg, limit).toContain(limit);
+    expect(seg).toContain("threshold := 900");
+    expect(seg).toContain("qc_depth > 300");
+    expect(seg).toMatch(/then 'fail'/i);
+    expect(seg).toMatch(/then 'warn'/i);
+    expect(seg).toMatch(/status\s*:=\s*'unknown'/i);
+    expect(seg).toContain("pgmq kuyruğu yok");
+  });
+
+  it("queue_lag only reads: no write keyword outside the string literals", () => {
+    const outside = wordsOf(blankLiterals(slice(QUEUE_CHECK)));
+    for (const w of ["insert", "update", "delete", "truncate", "drop", "alter", "create", "perform"]) {
+      expect(outside, w).not.toContain(w);
+    }
+    expect(outside).toContain("pgmq");
+  });
+
+  it("cron_jobs_stalled joins public.ops_cron_expected to cron.job and cron.job_run_details and can fail, warn and answer unknown", () => {
+    const seg = slice(LAST_CHECK).replace(/\s+/g, " ");
+    expect(seg).toContain("public.ops_cron_expected");
+    expect(seg).toContain("cron.job ");
+    expect(seg).toContain("cron.job_run_details");
+    expect(seg).toMatch(/then 'fail'/i);
+    expect(seg).toMatch(/then 'warn'/i);
+    expect(seg).toMatch(/status\s*:=\s*'unknown'/i);
+    expect(seg).toContain("threshold := 1");
+  });
+
+  it("cron_jobs_stalled never mentions the secret-bearing pg_cron columns `command` and `return_message` outside string literals", () => {
+    const outside = wordsOf(blankLiterals(slice(LAST_CHECK)));
+    expect(outside).not.toContain("command");
+    expect(outside).not.toContain("return_message");
+    // the scan is not vacuous: it sees the words that are there, and skips the ones inside literals
+    expect(outside).toContain("jobname");
+    expect(outside).toContain("start_time");
+    expect(wordsOf(blankLiterals("select command from t where x = 'return_message'"))).toEqual(["select", "command", "from", "t", "where", "x"]);
   });
 
   it("revokes from public, anon and authenticated, and grants execute only to service_role", () => {

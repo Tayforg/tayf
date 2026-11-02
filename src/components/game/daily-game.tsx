@@ -12,6 +12,7 @@ import {
 } from "react";
 import Link from "next/link";
 
+import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
 import { ZONE_META } from "@/lib/bias/config";
 import { markAnswered } from "@/lib/game/answered-headlines";
 import {
@@ -418,7 +419,7 @@ export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
               </div>
               <div className="flex flex-wrap gap-3 text-[11px] pt-1">
                 <a
-                  href={h.url}
+                  href={cleanOutboundUrl(h.url)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="underline underline-offset-2 hover:text-foreground"

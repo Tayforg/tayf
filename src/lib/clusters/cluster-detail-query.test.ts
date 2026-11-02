@@ -758,6 +758,46 @@ describe("gif-filter article image_url (http-1)", () => {
   });
 });
 
+describe("outbound article url (h24-feeds-3)", () => {
+  // The stored articles.url is the upsert key and stays untouched in the
+  // database; the page gets the cleaned href (a literal '&#038;' would turn
+  // the publisher query into a '#038;utm_medium=...' fragment).
+  it("hands the page a cleaned url: '&#038;' and utm tags gone, the path and real params kept", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = {
+      returns: {
+        data: [
+          mkEmbeddedMember("a-diken", "s-diken", "2026-04-17T10:00:00Z", {
+            article: {
+              url: "https://www.diken.com.tr/dem-parti-ibb-meclisinde/?utm_source=rss&#038;utm_medium=rss&#038;utm_campaign=dem-parti-ibb-meclisinde",
+            },
+          }),
+          mkEmbeddedMember("a-evrensel", "s-evrensel", "2026-04-17T09:30:00Z", {
+            article: {
+              url: "https://www.evrensel.net/haber/6007631/akaryakita-zam?utm_source=rss_feed&utm_medium=rss&utm_campaign=rss_syndication",
+            },
+          }),
+          mkEmbeddedMember("a-keep", "s-keep", "2026-04-17T09:00:00Z", {
+            article: { url: "https://example.com/a?id=5&utm_source=rss#yorumlar" },
+          }),
+          mkEmbeddedMember("a-plain", "s-plain", "2026-04-17T08:30:00Z"),
+        ],
+        error: null,
+      },
+    };
+    responses.sources = { returns: { data: [], error: null } };
+
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    const byArticle = Object.fromEntries(
+      result!.members.map((m) => [m.article.id, m.article]),
+    );
+    expect(byArticle["a-diken"].url).toBe("https://www.diken.com.tr/dem-parti-ibb-meclisinde/");
+    expect(byArticle["a-evrensel"].url).toBe("https://www.evrensel.net/haber/6007631/akaryakita-zam");
+    expect(byArticle["a-keep"].url).toBe("https://example.com/a?id=5#yorumlar");
+    expect(byArticle["a-plain"].url).toBe("https://example.com/a-plain");
+  });
+});
+
 describe("pack G3 trustee plumbing", () => {
   it("threads trustee_since/trustee_note through to each member's source, defaulting missing fields to null", async () => {
     responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };

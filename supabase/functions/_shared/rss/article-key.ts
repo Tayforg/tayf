@@ -9,10 +9,13 @@
 // check both miss it, because the url and the title changed).
 //
 // Pure, no imports: Deno- and vitest-importable. The SQL twin is
-// public.source_article_key(text) in migration 113; every regex below is the
-// JS `.source` that migration copies verbatim, and
-// tests/migrations/113-source-article-key.test.ts fails the build on drift.
-// The shared truth table is tests/fixtures/source-article-key-cases.ts.
+// public.source_article_key(text), created in migration 113 and re-created in
+// migration 149 (the newest definition); every regex below is the JS `.source`
+// that those migrations copy verbatim, and
+// tests/migrations/113-source-article-key.test.ts and
+// tests/migrations/149-source-article-key-parent-segment.test.ts fail the
+// build on drift. The shared truth table is
+// tests/fixtures/source-article-key-cases.ts.
 
 /** Skips the scheme and authority and captures the path (query and fragment
  * never reach it). A regex rather than `new URL` so the SQL twin can run the
@@ -41,6 +44,29 @@ export const KEY_MIN_DIGITS = 6;
 /** Longer runs are phone numbers, hashes and tracking ids. */
 export const KEY_MAX_DIGITS = 20;
 
+/**
+ * Outlets whose CMS id sits in a PARENT path segment, followed by a slug that
+ * changes with every headline edit (migration 149, hunt 24 on 2026-11-02):
+ *   - evrensel.net   /haber/<id>/<slug>
+ *   - indyturk.com   /node/<id>/[<section>/]<slug>
+ * The last-segment rule below gives these urls no key, so a re-titled article
+ * was inserted as a second row (76 evrensel and 7 indyturk ids with 2 or more
+ * rows in 7 days). Each regex is anchored on the scheme, the host (the host
+ * itself, optionally with `www.`; `evrensel.net.evil.test`, `notevrensel.net`
+ * and a user-info prefix do not match) and the literal path prefix, and
+ * captures only a 6..20 digit id that ends the segment. The case-insensitive
+ * flag is the same `'i'` the SQL twin passes to regexp_match. The capture still
+ * has to pass the date-shape and round-number guards (isKeyRun).
+ *
+ * Ordered, first match wins, and an entry is added only with evidence for that
+ * outlet: a generic "any parent segment" rule would key /kategori/123456/slug
+ * and merge a whole section into one article.
+ */
+export const PARENT_SEGMENT_KEY_RES: readonly RegExp[] = [
+  /^https?:\/\/(?:www\.)?evrensel\.net\/haber\/([0-9]{6,20})(?:\/|$)/i,
+  /^https?:\/\/(?:www\.)?indyturk\.com\/node\/([0-9]{6,20})(?:\/|$)/i,
+];
+
 // Run lengths a date-shaped number can have: yyyymmdd and the same plus
 // hh, hhmm, hhmmss.
 const DATE_RUN_LENGTHS: ReadonlySet<number> = new Set([8, 10, 12, 14]);
@@ -64,25 +90,42 @@ export const ARTICLE_KEY_EXCLUDED_SLUGS: readonly string[] = ["a-news", "daily-s
 
 const EXCLUDED: ReadonlySet<string> = new Set(ARTICLE_KEY_EXCLUDED_SLUGS);
 
+/** True when a run of digits can be an article id: 6..20 digits, not
+ * date-shaped (8, 10, 12 or 14 digits that start like a calendar date) and not
+ * round. Shared by the last-segment rule and the parent-segment rules. */
+function isKeyRun(run: string): boolean {
+  if (run.length < KEY_MIN_DIGITS || run.length > KEY_MAX_DIGITS) return false;
+  if (DATE_RUN_LENGTHS.has(run.length) && KEY_DATE_PREFIX_RE.test(run)) return false;
+  if (KEY_ROUND_RE.test(run)) return false;
+  return true;
+}
+
 /**
  * Returns the article key of `url`, or null when the url has none.
  *
- *   1. Match URL_PATH_RE; no match (relative url, no scheme, not a string)
- *      returns null.
+ *   0. Not a string: null. Then each PARENT_SEGMENT_KEY_RES entry, in order,
+ *      is tried on the whole url: the first whose captured id passes isKeyRun
+ *      returns that id. A captured id that fails the guards (a date, a round
+ *      number) falls through to the steps below.
+ *   1. Match URL_PATH_RE; no match (relative url, no scheme) returns null.
  *   2. Strip trailing slashes, take the LAST path segment, strip a file
  *      extension (KEY_FILE_EXT_RE).
  *   3. Collect every maximal run of digits in that segment and keep the runs
- *      of KEY_MIN_DIGITS..KEY_MAX_DIGITS digits that are neither date-shaped
- *      (a run of 8, 10, 12 or 14 digits that matches KEY_DATE_PREFIX_RE) nor
- *      round (KEY_ROUND_RE).
+ *      that pass isKeyRun (KEY_MIN_DIGITS..KEY_MAX_DIGITS digits, neither
+ *      date-shaped nor round).
  *   4. Return the LAST kept run, as written, or null.
  *
- * Only the last segment counts. An id in a parent segment
+ * Only the last segment counts, except host-anchored parent ids
+ * (PARENT_SEGMENT_KEY_RES). Any other id in a parent segment
  * (/kategori/123456/slug) is a section or category id: keying on it would
  * merge every story of that section into one article.
  */
 export function sourceArticleKey(url: string | null | undefined): string | null {
   if (typeof url !== "string") return null;
+  for (const re of PARENT_SEGMENT_KEY_RES) {
+    const parent = re.exec(url);
+    if (parent !== null && parent[1] !== undefined && isKeyRun(parent[1])) return parent[1];
+  }
   const m = URL_PATH_RE.exec(url);
   if (!m) return null;
   // Trailing slashes off by hand, not with /\/+$/: on a long run of slashes
@@ -97,10 +140,7 @@ export function sourceArticleKey(url: string | null | undefined): string | null 
 
   let key: string | null = null;
   for (const run of segment.match(/[0-9]+/g) ?? []) {
-    if (run.length < KEY_MIN_DIGITS || run.length > KEY_MAX_DIGITS) continue;
-    if (DATE_RUN_LENGTHS.has(run.length) && KEY_DATE_PREFIX_RE.test(run)) continue;
-    if (KEY_ROUND_RE.test(run)) continue;
-    key = run;
+    if (isKeyRun(run)) key = run;
   }
   return key;
 }

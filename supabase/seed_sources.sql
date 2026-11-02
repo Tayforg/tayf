@@ -64,7 +64,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('Bianet', 'bianet', 'https://bianet.org', 'https://bianet.org/biamag.rss', 'center', 'outlet', true),
   ('Ekonomim', 'ekonomim', 'https://www.ekonomim.com', 'https://www.ekonomim.com/export/rss', 'center', 'niche', true),
   ('Dünya', 'dunya', 'https://www.dunya.com', 'https://www.dunya.com/rss?dunya', 'center', 'niche', true),
-  ('Independent Türkçe', 'independent-turkce', 'https://www.indyturk.com', 'https://www.indyturk.com/rss.xml', 'center', 'outlet', true),
+  ('Independent Türkçe', 'indyturk', 'https://www.indyturk.com', 'https://www.indyturk.com/rss.xml', 'center', 'outlet', true),
   ('Karar', 'karar', 'https://www.karar.com', 'https://www.karar.com/service/rss.php', 'center', 'outlet', true),
   ('Dokuz8 Haber', 'dokuz8-haber', 'https://www.dokuz8haber.net', 'https://www.dokuz8haber.net/rss', 'center', 'outlet', true),
   ('Fayn', 'fayn', 'https://www.fayn.press', 'https://www.fayn.press/rss/', 'center', 'outlet', true),

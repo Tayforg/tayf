@@ -34,8 +34,10 @@ import {
   KARNE_STALE_AFTER_HOURS,
   KARNE_WINDOW_DAYS,
 } from "@/lib/sources/karne";
+import { countClassifiedSources } from "@/lib/sources/classification";
+import { getSourceMetadata, type Factuality } from "@/lib/sources/factuality";
 import { OWNER_GROUPS } from "@/lib/sources/ownership";
-import { SOURCE_METADATA } from "@/lib/sources/factuality";
+import { getActiveSourceSlugs } from "@/lib/sources/registry-query";
 import {
   HEADLINE_MIN_ARTICLE_COUNT,
   HEADLINE_PROMPT_TEMPLATE,
@@ -170,25 +172,34 @@ function SectionHeading({
   );
 }
 
-const taggedSources = Object.values(SOURCE_METADATA);
+/** How many of `slugs` are hand-tagged with factuality `level`. */
+function countFactuality(slugs: readonly string[], level: Factuality): number {
+  return slugs.filter((slug) => getSourceMetadata(slug)?.factuality === level).length;
+}
 
 export default async function MethodologyPage() {
   // Honesty gate (Pack B): the status line below must never claim
   // AI-neutralization without live evidence. getNeutralizedStatus() never
   // throws; a null (unknown) status renders nothing, same as the footer's
   // ActiveSourceCount rule ("a number we cannot stand behind is worse than
-  // no number").
-  const neutralStatus = await getNeutralizedStatus();
+  // no number"). getActiveSourceSlugs() has the same null contract.
+  const [neutralStatus, activeSlugs] = await Promise.all([
+    getNeutralizedStatus(),
+    getActiveSourceSlugs(),
+  ]);
   const contactEmail = process.env.NEXT_PUBLIC_CONTACT_EMAIL;
   const dominantSharePct = Math.round(BLINDSPOT.dominantShare * 100);
   const surpriseSharePct = Math.round(SURPRISE.dominantShare * 100);
   const nearBlindspotPct = Math.round(NEAR_BLINDSPOT_MIN_SHARE * 100);
   const wireRatioPct = Math.round(WIRE_UNIQUE_HASH_RATIO * 100);
-  // Computed, not asserted: if entries are added/removed from
-  // SOURCE_METADATA these counts move with them instead of going stale.
-  const taggedCount = taggedSources.length;
-  const highCount = taggedSources.filter((m) => m.factuality === "high").length;
-  const lowCount = taggedSources.filter((m) => m.factuality === "low").length;
+  // Computed, not asserted, and over the ACTIVE sources only: /sources counts
+  // the same slugs through countClassifiedSources, so both pages print the same
+  // number (registry keys of inactive outlets must not inflate this one). When
+  // the registry read failed (null) no count is printed at all.
+  const taggedSentence =
+    activeSlugs === null
+      ? "Etiketlenmemiş kaynaklar henüz derecelendirilmemiştir."
+      : `Şu anda ${countClassifiedSources(activeSlugs)} kaynak etiketli, ${countFactuality(activeSlugs, "high")} tanesi Yüksek, ${countFactuality(activeSlugs, "low")} tanesi Düşük; geri kalan kaynaklar henüz derecelendirilmemiştir.`;
 
   return (
     <div className="container mx-auto px-4 py-8 max-w-4xl space-y-10">
@@ -498,9 +509,7 @@ export default async function MethodologyPage() {
               güvenilirlik notu taşır. Bu notlar da yanlılık kategorileri
               gibi Tayf ekibi tarafından, kaynağın yayın geçmişine
               bakılarak elle atanır; dış bir derecelendirme kuruluşunun
-              verisi değildir. Şu anda {taggedCount} kaynak etiketli,{" "}
-              {highCount} tanesi Yüksek, {lowCount} tanesi Düşük; geri
-              kalan kaynaklar henüz derecelendirilmemiştir.
+              verisi değildir. {taggedSentence}
             </p>
             <ul className="divide-y divide-border/30 overflow-hidden rounded-lg ring-1 ring-border/50 bg-muted/20">
               <li className="px-3 py-2 text-sm text-muted-foreground leading-relaxed">

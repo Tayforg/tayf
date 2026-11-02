@@ -23,6 +23,7 @@
 
 import { isPoliticsMember, zoneOf } from "@/lib/bias/config";
 import { sourceKindOf } from "@/lib/sources/kind";
+import { ENGLISH_SOURCE_SLUGS } from "@/lib/sources/source-language";
 import { isGameEligibleTitle } from "./pii-filter";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
@@ -48,6 +49,15 @@ export const DAILY_POLITICS_MIN_PROB = 0.7;
 // is therefore gated on the puzzle key, never on the wall clock, and keys
 // before this date keep the pre-gate rules untouched.
 export const DAILY_POLITICS_GATE_FROM = "2026-11-04";
+// From this puzzle date onward the daily set draws no English-language outlet
+// (ENGLISH_SOURCE_SLUGS): the language gives the zone away, so it is not a fair
+// "which camp framed this" question. Same replay contract as the politics gate
+// above, so the rule is gated on the puzzle key, never on the clock, and every
+// EARLIER key keeps the pre-gate rules and recomputes byte-identically. It MUST
+// be a key no player has seen when this deploys (every key up to today is
+// replayable and recomputes from a cold cache): bump it before merge if the
+// deploy date is on or after it.
+export const DAILY_ENGLISH_GATE_FROM = "2026-11-05";
 export const DAILY_MAX_PER_ZONE = 2;
 export const DAILY_TITLE_MIN = 25;
 export const DAILY_TITLE_MAX = 180;
@@ -357,6 +367,11 @@ function isWithinWindow(candidate: DailyCandidate, window: PuzzleWindow): boolea
  * (`isPoliticsMember`: own category politika/son_dakika, or a non-null
  * politics_admitted_at). Per-candidate, so prefix-consistency is unaffected.
  *
+ * `opts.englishGate` (on for keys >= DAILY_ENGLISH_GATE_FROM) additionally
+ * rejects the registered English-language outlets (ENGLISH_SOURCE_SLUGS):
+ * their language gives the zone away. Also per-candidate, so also
+ * prefix-consistent; it is an opt-in so earlier puzzles recompute unchanged.
+ *
  * Does NOT check the article_title_versions ("edited headline") exclusion
  * or the jev_prob threshold — both are applied earlier, at the query
  * layer (daily-query.ts), before a row ever becomes a `DailyCandidate`.
@@ -364,11 +379,12 @@ function isWithinWindow(candidate: DailyCandidate, window: PuzzleWindow): boolea
 export function isDailyEligible(
   candidate: DailyCandidate,
   window: PuzzleWindow,
-  opts?: { politicsGate?: boolean },
+  opts?: { politicsGate?: boolean; englishGate?: boolean },
 ): boolean {
   const { source } = candidate;
   if (!source.active) return false;
   if (sourceKindOf({ kind: source.kind ?? undefined }) !== "outlet") return false;
+  if (opts?.englishGate && ENGLISH_SOURCE_SLUGS.has(source.slug)) return false;
   if (!isGameEligibleTitle(candidate.title)) return false;
   const len = candidate.title.length;
   if (len < DAILY_TITLE_MIN || len > DAILY_TITLE_MAX) return false;
@@ -399,8 +415,9 @@ function zoneOfCandidate(candidate: DailyCandidate): MediaDnaZone {
  *
  * 1. Filters `candidates` to the eligible subset (`isDailyEligible`) for
  *    `key`'s window; from DAILY_POLITICS_GATE_FROM onward that includes the
- *    politics-member requirement (earlier keys are filtered exactly as
- *    before the gate existed, so past puzzles recompute identically).
+ *    politics-member requirement, and from DAILY_ENGLISH_GATE_FROM onward the
+ *    no-English-outlet requirement (earlier keys are filtered exactly as
+ *    before each gate existed, so past puzzles recompute identically).
  * 2. Sorts that subset ascending by `dailyHash(key, articleId)` (ties
  *    broken by articleId so the sort is a strict total order).
  * 3. Phase 1: for each zone in the fixed order iktidar, bagimsiz,
@@ -418,7 +435,7 @@ function zoneOfCandidate(candidate: DailyCandidate): MediaDnaZone {
  * state (used sources/clusters/zone counts) built only from candidates
  * already visited — so the result is "prefix-consistent": once the scan
  * has produced 5 picks, appending more candidates after that point in
- * hash order can never change the answer (eligibility, politics gate
+ * hash order can never change the answer (eligibility, both gates
  * included, is decided per candidate, so it cannot reorder the scan). This lets the caller
  * (daily-query.ts) fetch candidate details in chunks and stop as soon as
  * `pickDailySet` returns non-null.
@@ -429,7 +446,10 @@ export function pickDailySet(
 ): DailyHeadline[] | null {
   const window = puzzleWindow(key);
   const politicsGate = key >= DAILY_POLITICS_GATE_FROM;
-  const eligible = candidates.filter((c) => isDailyEligible(c, window, { politicsGate }));
+  const englishGate = key >= DAILY_ENGLISH_GATE_FROM;
+  const eligible = candidates.filter((c) =>
+    isDailyEligible(c, window, { politicsGate, englishGate }),
+  );
 
   const sorted = [...eligible].sort((a, b) => {
     const ha = dailyHash(key, a.articleId);
