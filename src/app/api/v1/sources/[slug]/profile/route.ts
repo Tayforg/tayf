@@ -36,14 +36,15 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
   }
 
   const supabase = createReaderClient();
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from("sources")
     .select(V1_PROFILE_SOURCE_COLUMNS)
     .eq("slug", slug)
     .eq("active", true)
     .maybeSingle();
 
-  if (error) return withApiV1Headers(apiServerError(error), auth.tier);
+  // `status` rides along so a code-less gateway answer is still a 503.
+  if (error) return withApiV1Headers(apiServerError({ ...error, status }), auth.tier);
   if (!data) return withApiV1Headers(apiNotFound("Source not found"), auth.tier);
   const row = data as unknown as RegistrySourceRow & { id: string };
 
@@ -52,7 +53,9 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
     .select(V1_PROFILE_KARNE_COLUMNS)
     .eq("source_id", row.id)
     .maybeSingle();
-  if (karne.error) return withApiV1Headers(apiServerError(karne.error), auth.tier);
+  if (karne.error) {
+    return withApiV1Headers(apiServerError({ ...karne.error, status: karne.status }), auth.tier);
+  }
 
   const parsed = karne.data ? toSourceKarne(karne.data) : null;
   const profile = parsed ? toV1SourceProfile(parsed) : null;

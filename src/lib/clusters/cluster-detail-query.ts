@@ -6,7 +6,11 @@ import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { normalizeSourceKind } from "@/lib/bias/config";
 import { zoneCountsOf } from "@/lib/bias/zone-summary";
 import { cleanOutboundUrl } from "@/lib/articles/outbound-url";
-import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import {
+  attemptCached,
+  resolveCachedOrRetry,
+  resolveCachedOrThrow,
+} from "@/lib/cache-resilience";
 import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
   degradedSilentZone,
@@ -125,6 +129,12 @@ export interface ClusterDetail {
   };
   members: ClusterDetailMember[];
   allSources: Source[]; // all 144, for MediaDNA rendering
+  // True when the source-directory read FAILED, so `allSources` is `[]`
+  // because of an error and not because the directory is empty (a live
+  // directory never is). Such a detail is cached for `minutes` only, never
+  // for the cluster-feed window, and is never remembered as a last-good
+  // value. Optional so pre-existing fixtures compile.
+  sourcesUnavailable?: boolean;
   wire: WireSignal;
   // True only when the feed-health gate withdrew this cluster's blindspot
   // claim for this render (see the suppression block below) — lets the
@@ -324,7 +334,9 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
     }
     if (sourcesRes.error) {
       // Supplemental only (MediaDna source-directory dimming) — degrade to
-      // an empty list rather than failing the whole page.
+      // an empty list rather than failing the whole page. The result carries
+      // `sourcesUnavailable: true`, which keeps it out of the long cache
+      // window (getClusterDetailCached) and lets the page say so.
       console.warn(
         "[cluster-detail] sources query error:",
         sourcesRes.error.message
@@ -526,6 +538,7 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       },
       members: dedupedMembers,
       allSources: sourcesRes.data ?? [],
+      sourcesUnavailable: sourcesRes.error !== null,
       wire: wireSignalOf(
         dedupedMembers.map((m) => ({
           id: m.article.id,
@@ -555,16 +568,27 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
 // Cache lifetime follows the outcome (same shape as daily-zones.ts): a
 // success keeps the `cluster-feed` window, a failed attempt is memoised for
 // `minutes` only, so a cold-read timeout is retried within a minute instead
-// of being pinned for the whole window. Exactly one `cacheLife` call per
-// invocation; `cacheTag` comes first so the entry is tagged on every path.
+// of being pinned for the whole window. A detail whose sources-directory read
+// failed (`sourcesUnavailable`) is a degraded success: it gets `minutes` too,
+// so a transient blip in that one query is not pinned as "no sources" for the
+// whole `cluster-feed` window. Exactly one `cacheLife` call per invocation;
+// `cacheTag` comes first so the entry is tagged on every path.
+//
+// The one piece of new logic in this body is the `at` stamp: the epoch ms of
+// the database read, so a cache hit can be remembered as a last-good value
+// without reading the clock on the hit path (cache-resilience.ts, section 4).
+// It is stamped only for a real, complete detail: not for a missing cluster
+// (`null`) and not for a degraded one.
 async function getClusterDetailCached(id: string) {
   "use cache: remote";
   cacheTag(`cluster-detail:${id}`, "clusters");
   const r = await attemptCached("cluster-detail", () => fetchClusterDetail(id));
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
-  if (r.ok) cacheLife("cluster-feed");
+  if (r.ok && !r.data?.sourcesUnavailable) cacheLife("cluster-feed");
   else cacheLife("minutes");
-  return r;
+  return r.ok && r.data !== null && !r.data.sourcesUnavailable
+    ? { ...r, at: Date.now() }
+    : r;
 }
 
 // UUID guard (reader-queries E3): `clusters.id` is a Postgres `uuid`
@@ -577,6 +601,14 @@ async function getClusterDetailCached(id: string) {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// What may be remembered as a last-good detail (cache-resilience.ts, section
+// 4): a real cluster whose sources-directory read worked. A `sourcesUnavailable`
+// detail is served to the request that fetched it, but a newer degraded copy
+// must never replace the complete one that an outage would later serve.
+function isCompleteDetail(detail: ClusterDetail | null): boolean {
+  return detail !== null && !detail.sourcesUnavailable;
+}
+
 // Public entry point. With Cache Components the `id` argument is
 // automatically part of the cache key — no per-id wrapper Map needed.
 // Callers / workers can invalidate a single cluster with
@@ -584,14 +616,17 @@ const UUID_RE =
 //
 // On a cache-attempt failure this retries the query live once (so a
 // transient Supabase blip does not pin a false 404 for the whole
-// `cluster-feed` cacheLife window) before falling back to `null`; never
-// throws.
+// `cluster-feed` cacheLife window) before falling back to the last good
+// detail this instance saw for the id (under 60 min old), and only then to
+// `null`; never throws. Concurrent live retries for one id share one read
+// (key `cluster-detail:<id>`; the id is a validated UUID, so the key space
+// is bounded).
 export async function getClusterDetail(
   id: string
 ): Promise<ClusterDetail | null> {
   if (!UUID_RE.test(id)) return null;
   return resolveCachedOrRetry(
-    "cluster-detail",
+    { label: "cluster-detail", key: `cluster-detail:${id}`, remember: isCompleteDetail },
     () => getClusterDetailCached(id),
     () => fetchClusterDetail(id),
     null,
@@ -606,7 +641,11 @@ export async function getClusterDetail(
  * This variant resolves `null` ONLY for a malformed id or a row that is
  * genuinely absent, and otherwise REJECTS: the cached attempt failed and the
  * live retry did too, so the error propagates to `error.tsx` (noindex) and
- * `generateMetadata` answers with a noindex "unavailable" shell.
+ * `generateMetadata` answers with a noindex "unavailable" shell. The one
+ * exception is a last good detail this instance saw for the id less than
+ * 60 min ago, which is served instead of the rejection (stale-if-error); the
+ * live retry waits for a request scope first, so a prerender postpones
+ * rather than reading live.
  *
  * Wrapped in React `cache` so `generateMetadata` and the page body in one
  * request share a single result (and a single live retry) per id. Never call
@@ -620,9 +659,11 @@ export async function getClusterDetail(
 export const getClusterDetailOrThrow = cache(
   async (id: string): Promise<ClusterDetail | null> => {
     if (!UUID_RE.test(id)) return null;
-    const cached = await getClusterDetailCached(id);
-    if (cached.ok) return cached.data;
-    return fetchClusterDetail(id);
+    return resolveCachedOrThrow(
+      { label: "cluster-detail", key: `cluster-detail:${id}`, remember: isCompleteDetail },
+      () => getClusterDetailCached(id),
+      () => fetchClusterDetail(id),
+    );
   },
 );
 

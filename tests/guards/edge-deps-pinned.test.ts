@@ -30,9 +30,22 @@ import { resolve, dirname, join, relative, sep, basename } from "node:path";
 // not positively recognise (bare names, `@2`, ^, ~, *, x-ranges, `latest`,
 // unknown hosts, plain http) is a failure.
 //
+// An exact pin of the TOP-LEVEL specifier is not enough on esm.sh: the entry
+// module re-imports its dependencies by RANGE (`/strnum@^1.0.5`), and esm.sh
+// re-resolves a range every ten minutes, so a floating transitive would still
+// ship into the isolate that holds the service-role key (h27-supply-2). Guard
+// (e) therefore requires every esm.sh pin to carry a `?deps=` pin for each
+// dependency the package declares, at the version package-lock.json resolves
+// (the lockfile is what the unit tests and the app's own build run against).
+// Guard (f) keeps the import maps free of dead aliases: an unused
+// `"supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4"` is a trap, an
+// idiomatic `from "supabase-js"` would silently pull the stale stack.
+//
 // Bump procedure (kept next to the guard so the next person finds it): change
 // the exact pin deliberately (monthly), run `deno check --no-lock index.ts` in
-// all 7 functions, then `npm test`, then redeploy with --no-verify-jwt.
+// all 7 functions, then `npm test`, then redeploy with --no-verify-jwt. A
+// fast-xml-parser bump moves the `?deps=` pins to the package-lock.json
+// versions in the same commit (guard e).
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -183,16 +196,20 @@ describe("(a) every remote Edge Function dependency is pinned to an exact versio
     expect(entrypoints.length).toBeGreaterThanOrEqual(7);
   });
 
-  it("reads the per-function deno.json files (the config sweep is not blind)", () => {
+  it("reads and parses the per-function deno.json files (the config sweep is not blind)", () => {
+    // No import map holds a remote specifier any more (h27-supply-2 removed
+    // the dead aliases), so the configs contribute nothing to CHECKED; the
+    // sweep still has to find and parse every one, so a future remote alias
+    // is judged by (a) the day somebody adds it.
     expect(DENO_CONFIGS.length).toBeGreaterThanOrEqual(6);
-    const configSpecs = FOUND.filter((f) => DENO_CONFIG.test(basename(f.file)));
-    expect(configSpecs.some((f) => needsPin(f.spec))).toBe(true);
+    for (const file of DENO_CONFIGS) {
+      expect(() => parseDenoConfig(file), relFn(file)).not.toThrow();
+    }
   });
 
-  it("actually checks remote specifiers from both source files and configs", () => {
-    expect(CHECKED.length).toBeGreaterThanOrEqual(8);
+  it("actually checks remote specifiers from the source files", () => {
+    expect(CHECKED.length).toBeGreaterThanOrEqual(3);
     expect(CHECKED.some((f) => SOURCE_FILE.test(f.file))).toBe(true);
-    expect(CHECKED.some((f) => DENO_CONFIG.test(basename(f.file)))).toBe(true);
   });
 });
 
@@ -237,7 +254,7 @@ describe("(b) deno.lock is never committed", () => {
 // on it is the XMLBuilder one (GHSA-gh4j), and ingest never builds XML. Never
 // 5.x: the parser option surface differs and was not evaluated for the ingest.
 // Every pin of the parser in supabase/functions must sit at or above this tuple
-// (the import in fetcher.ts and the import map in ingest/deno.json).
+// (the import in _shared/rss/fetcher.ts; ingest/deno.json no longer maps it).
 // ---------------------------------------------------------------------------
 const FXP_MIN: readonly [number, number, number] = [4, 5, 7];
 const FXP_SPEC = /fast-xml-parser@(\d+)\.(\d+)\.(\d+)/;
@@ -245,10 +262,9 @@ const FXP_SPEC = /fast-xml-parser@(\d+)\.(\d+)\.(\d+)/;
 describe("(c) fast-xml-parser is at or above the CVE-fixed release", () => {
   const hits = FOUND.filter((f) => f.spec.includes("fast-xml-parser@"));
 
-  it("finds the parser pin in fetcher.ts and in ingest/deno.json (the sweep is not blind)", () => {
-    expect(hits.length).toBeGreaterThanOrEqual(2);
+  it("finds the parser pin in fetcher.ts (the sweep is not blind)", () => {
+    expect(hits.length).toBeGreaterThanOrEqual(1);
     expect(hits.some((h) => h.file === "_shared/rss/fetcher.ts")).toBe(true);
-    expect(hits.some((h) => h.file === "ingest/deno.json")).toBe(true);
   });
 
   it("pins every use to the 4.x line at or above the fixed release", () => {
@@ -269,11 +285,310 @@ describe("(c) fast-xml-parser is at or above the CVE-fixed release", () => {
     expect(tooOld).toEqual([]);
   });
 
-  it("uses one single version everywhere (the import map and the import agree)", () => {
+  it("uses one single version everywhere (every use of the parser agrees)", () => {
     const versions = new Set(
       hits.map((h) => (FXP_SPEC.exec(h.spec) ?? [])[0] ?? h.spec),
     );
     expect([...versions]).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (e) h27-supply-2: an exact esm.sh pin of the entry module does not pin what
+// it imports. `https://esm.sh/fast-xml-parser@4.5.7` answers with
+// `import "/strnum@^1.0.5?target=es2022"`, a range esm.sh re-resolves every ten
+// minutes (max-age=600), so each `supabase functions deploy ingest` bundled
+// whatever strnum 1.x was newest into the isolate holding the service-role key.
+// `?deps=strnum@1.1.2` makes the entry module import `/strnum@1.1.2/...`.
+//
+// For every `https://esm.sh/<pkg>@<x.y.z>` specifier:
+//   * package-lock.json must resolve <pkg> to exactly that version (so the
+//     version the unit tests run against is the version the isolate runs),
+//   * the URL's `deps` search param must list `<dep>@<locked version>` for each
+//     key of the package's own `dependencies`, and
+//   * <pkg> and each of those dependencies must be a PRODUCTION entry of the
+//     lockfile (no `"dev": true`). They run inside the isolate that holds the
+//     service-role key, and .github/workflows/dep-audit.yml audits with
+//     `--omit=dev`: a dev-only entry would be the one package parsing untrusted
+//     network input that no advisory can ever turn red (h27-supply-1).
+// ---------------------------------------------------------------------------
+interface LockEntry {
+  version?: string;
+  dependencies?: Record<string, string>;
+  /** npm marks an entry reachable only from devDependencies; `npm audit --omit=dev` skips it. */
+  dev?: boolean;
+}
+interface Lock {
+  packages: Record<string, LockEntry | undefined>;
+}
+
+const REAL_LOCK = JSON.parse(
+  readFileSync(resolve(ROOT, "package-lock.json"), "utf8"),
+) as Lock;
+
+interface EsmShPin {
+  pkg: string;
+  version: string;
+  /** The comma-separated entries of the `deps` search param. */
+  deps: string[];
+}
+
+/** Splits an esm.sh specifier into package, exact version and `deps` entries. */
+function parseEsmShPin(spec: string): EsmShPin | null {
+  let url: URL;
+  try {
+    url = new URL(spec);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || url.hostname !== "esm.sh") return null;
+  const segments = url.pathname.slice(1).split("/");
+  const head =
+    segments[0]?.startsWith("@") === true ? `${segments[0]}/${segments[1] ?? ""}` : (segments[0] ?? "");
+  const at = head.lastIndexOf("@");
+  if (at <= 0) return null;
+  const version = head.slice(at + 1);
+  if (!new RegExp(`^${SEMVER}$`).test(version)) return null;
+  const deps = (url.searchParams.get("deps") ?? "").split(",").filter((d) => d !== "");
+  return { pkg: head.slice(0, at), version, deps };
+}
+
+/** What is wrong with one esm.sh pin against a lockfile; empty when it is sound. */
+function esmShProblems(spec: string, lock: Lock): string[] {
+  const pin = parseEsmShPin(spec);
+  if (pin === null) return [`${spec}: not an exact esm.sh pin (cannot parse package@version)`];
+  const entry = lock.packages[`node_modules/${pin.pkg}`];
+  if (entry === undefined) {
+    return [`${pin.pkg}: not in package-lock.json, so the pin cannot be checked (add it as a devDependency)`];
+  }
+  const problems: string[] = [];
+  if (entry.version !== pin.version) {
+    problems.push(`${pin.pkg}: pinned ${pin.version} but package-lock.json resolves ${entry.version ?? "nothing"}`);
+  }
+  if (entry.dev === true) {
+    problems.push(
+      `${pin.pkg}: package-lock.json marks it dev-only, so \`npm audit --omit=dev\` (dep-audit.yml) never checks the package that runs in the edge isolate (move it to dependencies)`,
+    );
+  }
+  for (const dep of Object.keys(entry.dependencies ?? {})) {
+    const locked =
+      lock.packages[`node_modules/${pin.pkg}/node_modules/${dep}`] ?? lock.packages[`node_modules/${dep}`];
+    if (locked?.version === undefined) {
+      problems.push(`${pin.pkg}: dependency ${dep} is not in package-lock.json`);
+      continue;
+    }
+    if (locked.dev === true) {
+      problems.push(
+        `${pin.pkg}: dependency ${dep} is dev-only in package-lock.json, so \`npm audit --omit=dev\` skips it (list it in dependencies)`,
+      );
+    }
+    const want = `${dep}@${locked.version}`;
+    if (!pin.deps.includes(want)) {
+      problems.push(`${pin.pkg}@${pin.version}: ?deps= must contain ${want} (found: ${pin.deps.join(",") || "none"})`);
+    }
+  }
+  return problems;
+}
+
+describe("(e) esm.sh pins carry their dependencies at the package-lock.json versions", () => {
+  const isEsmSh = (spec: string): boolean => {
+    try {
+      return new URL(spec).hostname === "esm.sh";
+    } catch {
+      return false;
+    }
+  };
+  const esmSh = FOUND.filter((f) => isEsmSh(f.spec));
+
+  it("finds the esm.sh pins (the sweep is not blind)", () => {
+    expect(esmSh.length).toBeGreaterThanOrEqual(1);
+    expect(esmSh.some((f) => f.file === "_shared/rss/fetcher.ts")).toBe(true);
+  });
+
+  it("every pin matches the lockfile and pins each dependency (file: problem)", () => {
+    const problems = esmSh.flatMap((f) => esmShProblems(f.spec, REAL_LOCK).map((p) => `${f.file}: ${p}`));
+    expect([...new Set(problems)].sort()).toEqual([]);
+  });
+
+  it("the parser and strnum are production entries of the lockfile (dep-audit.yml's --omit=dev covers them)", () => {
+    expect(REAL_LOCK.packages["node_modules/fast-xml-parser"]?.dev).not.toBe(true);
+    expect(REAL_LOCK.packages["node_modules/strnum"]?.dev).not.toBe(true);
+  });
+
+  it("the parser's own dependency really is in the lockfile (the check has teeth)", () => {
+    const fxp = REAL_LOCK.packages["node_modules/fast-xml-parser"];
+    expect(Object.keys(fxp?.dependencies ?? {})).toContain("strnum");
+    expect(REAL_LOCK.packages["node_modules/strnum"]?.version).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe("(e) the pin matcher's own tests", () => {
+  const LOCK: Lock = {
+    packages: {
+      "node_modules/fxp": { version: "4.5.7", dependencies: { strnum: "^1.0.5" } },
+      "node_modules/strnum": { version: "1.1.2" },
+      "node_modules/@scope/pkg": { version: "1.2.3" },
+      "node_modules/nested": { version: "2.0.0", dependencies: { inner: "^1.0.0" } },
+      "node_modules/nested/node_modules/inner": { version: "1.4.0" },
+    },
+  };
+
+  it("fails an entry pin that names no dependencies", () => {
+    expect(esmShProblems("https://esm.sh/fxp@4.5.7", LOCK)).toEqual([
+      "fxp@4.5.7: ?deps= must contain strnum@1.1.2 (found: none)",
+    ]);
+  });
+
+  it("fails a dependency pinned to another version than the lockfile", () => {
+    expect(esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.1", LOCK)).toHaveLength(1);
+    expect(esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.20", LOCK)).toHaveLength(1);
+    expect(esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@^1.0.5", LOCK)).toHaveLength(1);
+  });
+
+  it("passes the lockfile's dependency version, alone or among others", () => {
+    expect(esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.2", LOCK)).toEqual([]);
+    expect(esmShProblems("https://esm.sh/fxp@4.5.7?deps=other@9.9.9,strnum@1.1.2&target=es2022", LOCK)).toEqual([]);
+  });
+
+  it("fails a pinned package the lockfile marks dev-only, and a dev-only dependency", () => {
+    const devLock: Lock = {
+      packages: {
+        "node_modules/fxp": { version: "4.5.7", dev: true, dependencies: { strnum: "^1.0.5" } },
+        "node_modules/strnum": { version: "1.1.2", dev: true },
+      },
+    };
+    const problems = esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.2", devLock);
+    expect(problems).toHaveLength(2);
+    expect(problems[0]).toContain("fxp: package-lock.json marks it dev-only");
+    expect(problems[1]).toContain("dependency strnum is dev-only");
+    // Only the dependency dev-only, or only the package:
+    expect(
+      esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.2", {
+        packages: { ...devLock.packages, "node_modules/fxp": { version: "4.5.7", dependencies: { strnum: "^1.0.5" } } },
+      }),
+    ).toHaveLength(1);
+    expect(
+      esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.2", {
+        packages: { ...devLock.packages, "node_modules/strnum": { version: "1.1.2" } },
+      }),
+    ).toHaveLength(1);
+  });
+
+  it("passes production entries (the 'dev' flag absent or false)", () => {
+    expect(esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.2", LOCK)).toEqual([]);
+    expect(
+      esmShProblems("https://esm.sh/fxp@4.5.7?deps=strnum@1.1.2", {
+        packages: { ...LOCK.packages, "node_modules/fxp": { version: "4.5.7", dev: false, dependencies: { strnum: "^1.0.5" } } },
+      }),
+    ).toEqual([]);
+  });
+
+  it("fails an entry pin that differs from the lockfile version", () => {
+    expect(esmShProblems("https://esm.sh/fxp@4.5.6?deps=strnum@1.1.2", LOCK)).toHaveLength(1);
+  });
+
+  it("fails a package the lockfile does not know", () => {
+    expect(esmShProblems("https://esm.sh/unknown@1.0.0", LOCK)).toHaveLength(1);
+  });
+
+  it("fails a floating or unparseable specifier", () => {
+    expect(esmShProblems("https://esm.sh/fxp", LOCK)).toHaveLength(1);
+    expect(esmShProblems("https://esm.sh/fxp@4", LOCK)).toHaveLength(1);
+    expect(esmShProblems("https://esm.sh/fxp@^4.5.7", LOCK)).toHaveLength(1);
+    expect(esmShProblems("https://cdn.example.com/fxp@4.5.7", LOCK)).toHaveLength(1);
+  });
+
+  it("parses a scoped package with a sub-path", () => {
+    expect(parseEsmShPin("https://esm.sh/@scope/pkg@1.2.3/sub")).toEqual({
+      pkg: "@scope/pkg",
+      version: "1.2.3",
+      deps: [],
+    });
+    expect(esmShProblems("https://esm.sh/@scope/pkg@1.2.3/sub", LOCK)).toEqual([]);
+  });
+
+  it("parses the deps param of a pin with several query parameters", () => {
+    expect(parseEsmShPin("https://esm.sh/fxp@4.5.7?target=es2022&deps=a@1.0.0,b@2.0.0")).toEqual({
+      pkg: "fxp",
+      version: "4.5.7",
+      deps: ["a@1.0.0", "b@2.0.0"],
+    });
+  });
+
+  it("prefers a nested lockfile entry over the hoisted one", () => {
+    expect(esmShProblems("https://esm.sh/nested@2.0.0?deps=inner@1.4.0", LOCK)).toEqual([]);
+    expect(esmShProblems("https://esm.sh/nested@2.0.0", LOCK)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// (f) h27-supply-2: no dead import-map aliases. Four functions kept
+// `"supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4"` (and ingest a
+// `fast-xml-parser` alias) that no source file imports. They are inert until
+// somebody writes the idiomatic `from "supabase-js"`, which would silently pull
+// a 14-month-old client into a service-role function. Every import-map key that
+// does not end in "/" must be imported (exactly, or as `key/...`) by at least
+// one source file of its function folder or of _shared/.
+// ---------------------------------------------------------------------------
+
+/** The keys of a deno.json `imports` map. */
+function importMapKeys(config: unknown): string[] {
+  if (typeof config !== "object" || config === null) return [];
+  const imports = (config as Record<string, unknown>).imports;
+  if (typeof imports !== "object" || imports === null) return [];
+  return Object.keys(imports as Record<string, unknown>);
+}
+
+/** Exact-match aliases (no trailing "/") that no specifier imports. */
+function deadAliases(keys: string[], specifiers: string[]): string[] {
+  return keys.filter(
+    (key) => !key.endsWith("/") && !specifiers.some((s) => s === key || s.startsWith(`${key}/`)),
+  );
+}
+
+describe("(f) every import-map alias is imported by its function or _shared/", () => {
+  const SHARED = join(FUNCTIONS, "_shared");
+  const specifiersOf = new Map<string, string[]>(
+    SOURCES.map((file) => [file, extractSpecifiers(blankComments(readFileSync(file, "utf8")))]),
+  );
+
+  function inScope(configFile: string): string[] {
+    const dir = dirname(configFile);
+    const roots = dir === FUNCTIONS ? [FUNCTIONS] : [dir, SHARED];
+    return SOURCES.filter((file) => roots.some((root) => file.startsWith(root + sep))).flatMap(
+      (file) => specifiersOf.get(file) ?? [],
+    );
+  }
+
+  it("lists no dead alias (config: key)", () => {
+    const dead: string[] = [];
+    for (const config of DENO_CONFIGS) {
+      const keys = importMapKeys(parseDenoConfig(config));
+      for (const key of deadAliases(keys, inScope(config))) dead.push(`${relFn(config)}: ${key}`);
+    }
+    expect(dead).toEqual([]);
+  });
+
+  it("scans the sources of every function (the sweep is not blind)", () => {
+    expect(inScope(resolve(FUNCTIONS, "ingest/deno.json")).length).toBeGreaterThan(20);
+    expect(inScope(resolve(FUNCTIONS, "cluster-consumer/deno.json")).length).toBeGreaterThan(5);
+  });
+
+  it("reads the keys of a real import map", () => {
+    expect(importMapKeys(parseDenoConfig(resolve(FUNCTIONS, "cluster-consumer/deno.json")))).toContain("_shared/");
+  });
+
+  it("flags an alias nobody imports, accepts exact and sub-path imports, skips prefix maps", () => {
+    const keys = ["live", "sub", "dead", "_shared/", "@scope/pkg"];
+    const specs = ["live", "sub/deep/mod.ts", "@scope/pkg-extra", "../x.ts", "dead-ish"];
+    expect(deadAliases(keys, specs)).toEqual(["dead", "@scope/pkg"]);
+  });
+
+  it("tolerates a config with no import map", () => {
+    expect(importMapKeys({ tasks: {} })).toEqual([]);
+    expect(importMapKeys({ imports: null })).toEqual([]);
+    expect(importMapKeys("x")).toEqual([]);
+    expect(deadAliases([], ["a"])).toEqual([]);
   });
 });
 
@@ -313,7 +628,7 @@ describe("(d) the guard's own matchers", () => {
     "npm:@supabase/supabase-js@2.115.0",
     "npm:@sentry/deno@10.73.0",
     "https://esm.sh/@supabase/supabase-js@2.45.4",
-    "https://esm.sh/fast-xml-parser@4.5.7",
+    "https://esm.sh/fast-xml-parser@4.5.7?deps=strnum@1.1.2",
     // other legitimate exact shapes
     "npm:x@1.2.3-beta.1",
     "npm:@scope/pkg@0.0.1/subpath/mod.ts",
@@ -378,11 +693,11 @@ describe("(d) the guard's own matchers", () => {
     const src = [
       "// the `npm:ai` package is deliberately NOT imported here",
       "/* import x from 'npm:@sentry/deno'; */",
-      'import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.7";',
+      'import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.7?deps=strnum@1.1.2";',
       'const mod = await import("npm:@sentry/deno@10.73.0"); // pinned',
     ].join("\n");
     expect(extractSpecifiers(blankComments(src))).toEqual([
-      "https://esm.sh/fast-xml-parser@4.5.7",
+      "https://esm.sh/fast-xml-parser@4.5.7?deps=strnum@1.1.2",
       "npm:@sentry/deno@10.73.0",
     ]);
   });

@@ -35,7 +35,7 @@ const { xmlParseCalls, xmlParseOverride } = vi.hoisted(() => ({
   xmlParseOverride: { value: undefined as Record<string, unknown> | undefined },
 }));
 
-vi.mock("https://esm.sh/fast-xml-parser@4.5.7", () => ({
+vi.mock("https://esm.sh/fast-xml-parser@4.5.7?deps=strnum@1.1.2", () => ({
   XMLParser: class {
     parse(xml: string) {
       xmlParseCalls.push(xml);

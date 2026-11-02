@@ -18,8 +18,14 @@
 // refuses DOCTYPE entity declarations outright. See XML_PARSER_OPTIONS.
 // The pin is bumped deliberately; tests/guards/edge-deps-pinned.test.ts holds
 // the floor.
+//
+// `?deps=strnum@1.1.2` pins the parser's one dependency too. Without it the
+// entry module re-imports `/strnum@^1.0.5`, a range esm.sh re-resolves every
+// ten minutes, so each deploy would bundle whatever strnum 1.x is newest into
+// the isolate that holds the service-role key (h27-supply-2). The value is the
+// package-lock.json version, and the same guard fails when the two drift.
 
-import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.7";
+import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.7?deps=strnum@1.1.2";
 import { decodeRssBody } from "./charset.ts";
 import { safeResponse, SafeFetchError } from "../safe-fetch.ts";
 import { pickItemLink } from "./items.ts";
@@ -59,12 +65,21 @@ export interface FetchResult {
   notModified?: boolean;
   etag?: string | null;
   lastModified?: string | null;
-  /** SHA-256 hex digest of the raw (pre-decode) response body on a 2xx. */
+  /** SHA-256 hex digest of the raw (pre-decode) response body on a 2xx that
+   * parsed (or was recognised as unchanged). NOT returned with `error`: a body
+   * the fetcher refused or could not parse must never become the stored
+   * validators, or the next poll of the same bytes would count as a healthy
+   * "not modified" (h27-live-1). Same for `etag` and `lastModified`. */
   bodyHash?: string;
+  /** Set (without etag, lastModified or bodyHash) when the request failed, the
+   * status was not 2xx, the body was too large, or a 2xx body was refused:
+   * `not a feed: ...` (notAFeed) or `parse error: ...`. In both 2xx cases the
+   * conditional cache is back at its pre-request value. */
   error?: string;
-  /** Set when the parsed body had none of the recognised feed roots (rss,
-   * feed, rdf:RDF, RDF) -- an HTML/plain-text/404 body masquerading as a
-   * 2xx feed response (ingest-health). `error` is set alongside this. */
+  /** Set when the body is not a feed: an HTML page (recognised from its first
+   * bytes, or from a parsed body with none of the recognised feed roots rss,
+   * feed, rdf:RDF, RDF), a plain-text or a 404 body masquerading as a 2xx feed
+   * response (ingest-health). `error` is set alongside this. */
   notAFeed?: boolean;
   /** Count of items whose (isoDate ?? pubDate) is absent or fails
    * `isParseableFeedDate` after `cleanFeedDate` -- ingest-health. */
@@ -404,18 +419,22 @@ export async function fetchFeed(
   try {
     items = parseFeed(xml);
   } catch (err) {
+    // A refused 2xx body, whatever the reason: restore the conditional cache to
+    // its pre-request value. `cache.set(...)` above already stamped this
+    // fetch's (bad body's) etag/lastModified, and persisting THOSE would turn
+    // next cycle's re-fetch of the same bad body (or a 304 on its ETag) into a
+    // spurious "not modified" success that resets fetch_fail_streak instead of
+    // advancing it toward quarantine. For the same reason NO validator or body
+    // hash is returned with the error (h27-live-1): ingest keeps the source's
+    // previous ones.
+    if (cache) {
+      if (cached) cache.set(source.id, cached);
+      else cache.delete(source.id);
+    }
     if (err instanceof NotAFeedError) {
-      // ingest-health: an HTML/plain-text/404 body parsed by fast-xml-parser
-      // into SOMETHING, but nothing with a recognised feed root. Restore the
-      // conditional cache to its pre-request value -- `cache.set(...)` above
-      // already stamped this fetch's (bad body's) etag/lastModified, and
-      // persisting THOSE would turn next cycle's re-fetch of the same bad
-      // body into a spurious "not modified" success that resets
-      // fetch_fail_streak instead of advancing it toward quarantine.
-      if (cache) {
-        if (cached) cache.set(source.id, cached);
-        else cache.delete(source.id);
-      }
+      // ingest-health: an HTML/plain-text/404 body -- recognised from its
+      // first bytes, or parsed by fast-xml-parser into SOMETHING with no
+      // recognised feed root.
       return {
         source,
         items: [],
@@ -429,9 +448,6 @@ export async function fetchFeed(
       items: [],
       status: response.status,
       charset,
-      etag,
-      lastModified,
-      bodyHash,
       error: err instanceof Error ? `parse error: ${err.message}` : "parse error",
     };
   }
@@ -492,6 +508,190 @@ export class NotAFeedError extends Error {
   }
 }
 
+// How much of a body the HTML sniff reads. A page's `<html>` / doctype comes
+// within the first few hundred bytes; anything later is left to the parser.
+const HTML_SNIFF_CHARS = 1024;
+
+function isXmlSpace(ch: string | undefined): boolean {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
+}
+
+/**
+ * Throws `NotAFeedError("html")` for a body that is an HTML page, judged from
+ * its first 1,024 characters: after a BOM, whitespace, one `<?xml ... ?>`
+ * declaration and any closed `<!-- -->` comments, the body starts with
+ * `<!doctype html` or `<html` (any case) followed by whitespace, `>` or `/`.
+ *
+ * Why before the parser: fast-xml-parser 4.5.7 throws "Maximum nested tags
+ * exceeded" on a real HTML page (nested deeper than 100 tags), which used to
+ * surface as a 2xx `parse error` instead of `not a feed: html` (h27-live-1).
+ * Recognising the page here also saves parsing up to 8 MB of markup. A feed
+ * that merely CONTAINS `<html>` (CDATA, a comment) never starts with it.
+ */
+function sniffHtml(xml: string): void {
+  const limit = Math.min(xml.length, HTML_SNIFF_CHARS);
+  let i = 0;
+  const skipSpace = () => {
+    while (i < limit && (xml[i] === "\uFEFF" || isXmlSpace(xml[i]))) i++;
+  };
+  skipSpace();
+  if (xml.startsWith("<?xml", i) && isXmlSpace(xml[i + 5])) {
+    const end = xml.indexOf("?>", i);
+    if (end === -1 || end + 2 > limit) return;
+    i = end + 2;
+    skipSpace();
+  }
+  while (xml.startsWith("<!--", i)) {
+    const end = xml.indexOf("-->", i + 4);
+    if (end === -1 || end + 3 > limit) return;
+    i = end + 3;
+    skipSpace();
+  }
+  if (i >= limit) return;
+  const head = xml.slice(i, i + 16).toLowerCase();
+  for (const opener of ["<!doctype html", "<html"]) {
+    if (!head.startsWith(opener)) continue;
+    const next = xml[i + opener.length];
+    if (next === undefined || next === ">" || next === "/" || isXmlSpace(next)) {
+      throw new NotAFeedError("html");
+    }
+  }
+}
+
+/** True when `xml` has a `<!ENTITY` declaration anywhere from `from` on, skipping nothing. */
+function hasEntityToken(xml: string, from: number): boolean {
+  for (let p = xml.indexOf("<!", from); p !== -1; p = xml.indexOf("<!", p + 2)) {
+    if (xml.slice(p + 2, p + 8).toLowerCase() === "entity") return true;
+  }
+  return false;
+}
+
+/**
+ * Index of the character that closes the tag read from `from`, honouring quotes
+ * exactly like fast-xml-parser's own tag reader (so a `>` or a `<![CDATA[` inside
+ * an attribute value does not end it); -1 when it never closes. `close` is ">"
+ * or "?>" (the index of its last character is returned).
+ */
+function tagEnd(xml: string, from: number, close: ">" | "?>"): number {
+  let quote = "";
+  for (let k = from; k < xml.length; k++) {
+    const ch = xml[k] as string;
+    if (quote !== "") {
+      if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (ch === close[0] && (close.length === 1 || xml[k + 1] === close[1])) {
+      return k + close.length - 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * True when `xml` carries a `<!ENTITY` declaration the parser could act on:
+ * one linear scan that walks the markup the way fast-xml-parser's main loop
+ * does and returns true on `<!ENTITY` (any case) anywhere it does not skip.
+ *
+ * Skipped, because the parser skips them too: a CLOSED `<![CDATA[...]]>`
+ * section and a CLOSED `<!--...-->` comment (an item that QUOTES an entity
+ * declaration in its CDATA is not a hostile feed: h27-live-1), the closing tag
+ * `</...>`, and any tag or processing instruction, read quote-aware, so an
+ * opener written inside an attribute value cannot swallow a real DOCTYPE
+ * behind it. An unterminated opener is not skipped (the parser throws on those
+ * anyway; the body stays refused, as it was). A DOCTYPE with an internal
+ * subset (`[`), or any `<` in its head before the first `>`, switches to a
+ * plain search of everything after it: the parser's DOCTYPE reader has its own
+ * rules for quotes and comments, so nothing there is trusted to be inert. The
+ * parser's entity limits (10,000 chars each, 100 declarations, 100,000 chars
+ * expanded) stay as a second layer.
+ *
+ * Linear: every skip moves forward, a closer that was not found once is not
+ * searched for again (a later opener cannot find one either), and the DOCTYPE
+ * look-ahead stops at the first `>`, which the scan then moves past (a
+ * `<!D>` x 500,000 body takes milliseconds, not seconds).
+ */
+export function hasDeclaredEntity(xml: string): boolean {
+  const n = xml.length;
+  let noCommentEnd = false;
+  let noCdataEnd = false;
+  let noClosingGt = false;
+  let i = 0;
+  while (i < n) {
+    const lt = xml.indexOf("<", i);
+    if (lt === -1 || lt + 1 >= n) return false;
+    const c = xml[lt + 1];
+
+    if (c === "!") {
+      if (xml.startsWith("--", lt + 2)) {
+        // Comment: the parser looks for "-->" from lt + 4.
+        if (!noCommentEnd) {
+          const end = xml.indexOf("-->", lt + 4);
+          if (end !== -1) {
+            i = end + 3;
+            continue;
+          }
+          noCommentEnd = true;
+        }
+        i = lt + 4;
+        continue;
+      }
+      if (xml[lt + 2] === "[") {
+        // CDATA (the parser reads any `<![` this way): up to the next "]]>".
+        if (!noCdataEnd) {
+          const end = xml.indexOf("]]>", lt);
+          if (end !== -1) {
+            i = end + 3;
+            continue;
+          }
+          noCdataEnd = true;
+        }
+        i = lt + 3;
+        continue;
+      }
+      if (xml.slice(lt + 2, lt + 8).toLowerCase() === "entity") return true;
+      const kind = xml[lt + 2];
+      if (kind === "D" || kind === "d") {
+        // DOCTYPE. The parser's reader counts `<` and `>` itself (and ends a
+        // comment at any `>` after `--`, so `<!-->` is a whole comment there):
+        // only when NO `[` or `<` precedes the first `>` is it certain that the
+        // reader stops at that `>` with nothing declared. Anything else is a
+        // head this scan cannot follow, so it falls back to a plain search of
+        // the rest of the body. The look-ahead never passes that `>`, and a
+        // skip lands after it, so the scan stays linear.
+        const close = xml.indexOf(">", lt + 3);
+        if (close === -1) return hasEntityToken(xml, lt);
+        for (let k = lt + 3; k < close; k++) {
+          if (xml[k] === "[" || xml[k] === "<") return hasEntityToken(xml, lt);
+        }
+        // The parser only reads `<!D` (upper case) as a DOCTYPE; `<!d` is an
+        // ordinary tag to it, closed quote-aware, so it is read that way below.
+        if (kind === "D") {
+          i = close + 1;
+          continue;
+        }
+      }
+      // Any other `<!X ...>` is an ordinary tag to the parser: read it below.
+    } else if (c === "/") {
+      if (!noClosingGt) {
+        const end = xml.indexOf(">", lt + 2);
+        if (end !== -1) {
+          i = end + 1;
+          continue;
+        }
+        noClosingGt = true;
+      }
+      i = lt + 2;
+      continue;
+    }
+
+    // Opening tag, `<!X` declaration or processing instruction.
+    const end = tagEnd(xml, lt + 1, c === "?" ? "?>" : ">");
+    if (end === -1) return hasEntityToken(xml, lt + 1);
+    i = end + 1;
+  }
+  return false;
+}
+
 /**
  * Parse one feed body into raw items. Throws `NotAFeedError` for a body with no
  * recognised feed root and any other Error for a body the parser (or the
@@ -499,14 +699,18 @@ export class NotAFeedError extends Error {
  * per-feed `parse error`, so one bad feed is skipped and the cycle survives.
  */
 export function parseFeed(xml: string): RawFeedItem[] {
+  sniffHtml(xml);
   // h26-security-1: an entity can only be declared in a DOCTYPE internal
   // subset, and a feed has no use for one: no captured feed fixture declares
   // any, and the entity references real feeds use (`&amp;`, `&#305;`...) are
   // predefined or numeric, never declared. A declared entity is the entity-bomb
   // lever (one 200 KB entity x 2,000 references = a 400 MB title), so refuse
-  // the whole body before the parser reads it. One literal, a single linear
-  // scan; the throw becomes the existing `parse error` of this one feed.
-  if (/<!ENTITY/i.test(xml)) {
+  // the whole body before the parser reads it. One linear scan; the throw
+  // becomes the existing `parse error` of this one feed. The scan reads
+  // markup, not text (h27-live-1): a `<!ENTITY` that an item QUOTES inside a
+  // CDATA section or a comment is not a declaration, and used to silence the
+  // whole feed.
+  if (hasDeclaredEntity(xml)) {
     throw new Error("DOCTYPE entity declarations are not accepted");
   }
   const parsed = xmlParser.parse(xml) as XmlNode;

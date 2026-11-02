@@ -28,7 +28,7 @@ vi.mock("@/lib/clusters/timeline-query", () => ({
 
 import { NewClustersPill } from "@/components/timeline/new-clusters-pill";
 import { PageHero } from "@/components/ui/page-hero";
-import TimelinePage from "./page";
+import TimelinePage, { timelineSubtitle } from "./page";
 
 const UNAVAILABLE_COPY =
   "Zaman çizelgesi şu anda yüklenemiyor. Birkaç dakika içinde tekrar deneyin.";
@@ -123,7 +123,50 @@ beforeEach(() => {
   mocks.result = null;
 });
 
+describe("timelineSubtitle", () => {
+  it("groups four-digit counts with the tr-TR dot", () => {
+    expect(timelineSubtitle(1234, 1234)).toBe(
+      "Son 24 saatte oluşturulan 1.234 haber kümesi, saat saat sıralandı.",
+    );
+    expect(timelineSubtitle(1000, 2500)).toBe(
+      "Son 24 saatte oluşturulan 2.500 haber kümesinin en yeni 1.000 tanesi, saat saat sıralandı.",
+    );
+    expect(timelineSubtitle(1234, null)).toBe(
+      "Son 24 saatte oluşturulan en yeni 1.234 küme, saat saat sıralandı.",
+    );
+  });
+
+  it("leaves counts below 1.000 as they are", () => {
+    expect(timelineSubtitle(200, 234)).toBe(
+      "Son 24 saatte oluşturulan 234 haber kümesinin en yeni 200 tanesi, saat saat sıralandı.",
+    );
+    expect(timelineSubtitle(0, null)).toBe(
+      "Son 24 saatte oluşturulan 0 haber kümesi, saat saat sıralandı.",
+    );
+  });
+});
+
 describe("/timeline", () => {
+  it("groups an hour bucket's four-digit cluster count", async () => {
+    mocks.result = {
+      rows: Array.from({ length: 1234 }, (_, i) => ({
+        id: `b${i}`,
+        title_tr: `Küme ${i}`,
+        title_tr_neutral: null,
+        article_count: 2,
+        first_published: new Date(Date.UTC(2026, 8, 18, 10, 0, 0) + i * 1000).toISOString(),
+      })),
+      total: 1234,
+    };
+
+    const tree = await TimelinePage();
+
+    // A boolean, not toContain: a failure would otherwise print 1,234 titles.
+    const text = collectText(tree).join("");
+    expect(text.includes("1.234 küme")).toBe(true);
+    expect(text.includes("1234 küme")).toBe(false);
+  });
+
   it("null (read failed): unavailable copy, count-free subtitle, no noindex", async () => {
     mocks.result = null;
 

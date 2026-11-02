@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createSlowReaderClient } from "@/lib/supabase/server";
 
 // Live "has the neutralizer actually produced anything?" readout, reused by
 // every reader-facing surface that would otherwise assert AI-neutralization
@@ -44,9 +44,9 @@ export interface NeutralizedStatus {
 }
 
 async function readNeutralizedStatus(): Promise<NeutralizedStatus> {
-  // createServerClient() throws when Supabase env vars are missing; that is
+  // createSlowReaderClient() throws when Supabase env vars are missing; that is
   // still a "do not claim" condition, handled by attemptCached.
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
 
   const { data, error } = await supabase.rpc("headline_neutral_counts");
 

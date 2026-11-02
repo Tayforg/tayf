@@ -141,6 +141,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 // Import AFTER mocks are declared.
 import { cacheLife, cacheTag } from "next/cache";
 import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
+import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 import {
   getClusterDetail,
   getClusterDetailOrThrow,
@@ -207,6 +208,9 @@ function mkEmbeddedMember(
 }
 
 beforeEach(() => {
+  // Last-good values and cooldowns are per-process module state; a test must
+  // never see another test's success (or outage).
+  __resetCacheResilienceForTests();
   callLog = [];
   responses = {};
   events = [];
@@ -939,7 +943,20 @@ describe("getClusterDetail error handling", () => {
     const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
     expect(result).not.toBeNull();
     expect(result!.allSources).toEqual([]);
+    // The empty directory is a FAILED read, not an empty directory: the flag
+    // lets the page say so instead of printing "Hiç kaynak yok".
+    expect(result!.sourcesUnavailable).toBe(true);
     expect(result!.cluster.id).toBe("11111111-1111-4111-8111-111111111111");
+  });
+
+  it("a healthy sources read leaves sourcesUnavailable false", async () => {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = {
+      returns: { data: [mkSource("s1")], error: null },
+    };
+    const result = await getClusterDetail("11111111-1111-4111-8111-111111111111");
+    expect(result!.sourcesUnavailable).toBe(false);
   });
 
   it("gracefully handles empty member + source results", async () => {
@@ -1533,5 +1550,239 @@ describe("getClusterDetailOrThrow (a timeout is not a 404)", () => {
     responses.sources = { returns: { data: [], error: null } };
 
     await expect(getClusterDetail(GOOD_ID)).resolves.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3 (h27-resilience-2): a failed sources-directory read must not be cached
+// as a successful detail for the whole cluster-feed window, and a failed
+// attempt plus a failed live retry serves the last good detail this instance
+// saw (stale-if-error), with concurrent live retries sharing one read.
+// ---------------------------------------------------------------------------
+
+describe("cluster detail: sources-directory failure (partial read)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  function seedSourcesDown() {
+    responses.clusters = { maybeSingle: { data: mkClusterRow(), error: null } };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = {
+      returns: { data: null, error: { message: "sources boom" } },
+    };
+  }
+
+  it("a sources error caches for 'minutes' only, never for the cluster-feed window", async () => {
+    seedSourcesDown();
+    const detail = await getClusterDetail(GOOD_ID);
+    expect(detail!.sourcesUnavailable).toBe(true);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+    expect(cacheLife).not.toHaveBeenCalledWith("cluster-feed");
+    // The detail itself was a successful read: no live retry.
+    expect(clustersQueryCount()).toBe(1);
+  });
+
+  it("a healthy detail still caches for cluster-feed, with sourcesUnavailable false", async () => {
+    seedHealthyDetail();
+    const detail = await getClusterDetail(GOOD_ID);
+    expect(detail!.sourcesUnavailable).toBe(false);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("a genuinely missing cluster stays a cluster-feed answer (null has no sourcesUnavailable)", async () => {
+    responses.clusters = { maybeSingle: { data: null, error: null } };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = {
+      returns: { data: null, error: { message: "sources boom" } },
+    };
+    await expect(getClusterDetailOrThrow(GOOD_ID)).resolves.toBeNull();
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("cluster-feed");
+  });
+
+  it("getClusterDetailOrThrow also caches a sources error for 'minutes'", async () => {
+    seedSourcesDown();
+    const detail = await getClusterDetailOrThrow(GOOD_ID);
+    expect(detail!.sourcesUnavailable).toBe(true);
+    expect(cacheLife).toHaveBeenCalledTimes(1);
+    expect(cacheLife).toHaveBeenCalledWith("minutes");
+  });
+
+  it("a sourcesUnavailable hit is not recorded as last-good", async () => {
+    seedSourcesDown();
+    await getClusterDetail(GOOD_ID);
+    // Now the cluster read dies too: nothing good was remembered.
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    await expect(getClusterDetail(GOOD_ID)).resolves.toBeNull();
+    await expect(getClusterDetailOrThrow(GOOD_ID)).rejects.toThrow(/AbortError/);
+  });
+});
+
+describe("cluster detail: a degraded live copy never replaces the last good detail", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  /**
+   * A complete detail is remembered from a cache hit; then the cache entry is
+   * replaced by `{ ok: false }` (the cached attempt's clusters read times out
+   * once) while the LIVE retry reads the cluster fine but loses the sources
+   * directory: `sourcesUnavailable: true`, served to this request.
+   */
+  async function rememberGoodThenDegradedLive(read: typeof getClusterDetail) {
+    seedHealthyDetail();
+    const good = await read(GOOD_ID);
+    expect(good!.sourcesUnavailable).toBe(false);
+
+    responses.clusters = {
+      maybeSingleOnce: [TIMEOUT_RESULT],
+      maybeSingle: { data: mkClusterRow(), error: null },
+    };
+    responses.sources = { returns: { data: null, error: { message: "sources boom" } } };
+    const degraded = await read(GOOD_ID);
+    expect(degraded!.sourcesUnavailable).toBe(true);
+    return good;
+  }
+
+  it("getClusterDetail still serves the complete detail when the outage turns total", async () => {
+    const good = await rememberGoodThenDegradedLive(getClusterDetail);
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    const during = await getClusterDetail(GOOD_ID);
+    expect(during).toBe(good);
+    expect(during!.sourcesUnavailable).toBe(false);
+  });
+
+  it("getClusterDetailOrThrow still serves the complete detail when the outage turns total", async () => {
+    const good = await rememberGoodThenDegradedLive(getClusterDetailOrThrow);
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    const during = await getClusterDetailOrThrow(GOOD_ID);
+    expect(during).toBe(good);
+    expect(during!.sourcesUnavailable).toBe(false);
+  });
+
+  it("a degraded live copy is not remembered when nothing good was", async () => {
+    responses.clusters = {
+      maybeSingleOnce: [TIMEOUT_RESULT],
+      maybeSingle: { data: mkClusterRow(), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: null, error: { message: "sources boom" } } };
+    const degraded = await getClusterDetail(GOOD_ID);
+    expect(degraded!.sourcesUnavailable).toBe(true);
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    await expect(getClusterDetail(GOOD_ID)).resolves.toBeNull();
+  });
+
+  it("a complete live copy is still remembered", async () => {
+    responses.clusters = {
+      maybeSingleOnce: [TIMEOUT_RESULT],
+      maybeSingle: { data: mkClusterRow(), error: null },
+    };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    const live = await getClusterDetail(GOOD_ID);
+    expect(live!.sourcesUnavailable).toBe(false);
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    await expect(getClusterDetail(GOOD_ID)).resolves.toBe(live);
+  });
+});
+
+describe("cluster detail: stale-if-error and single-flight", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  const OTHER_ID = "22222222-2222-4222-8222-222222222222";
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("getClusterDetail serves the last good detail when the attempt and the live retry both fail", async () => {
+    seedHealthyDetail();
+    const good = await getClusterDetail(GOOD_ID);
+    expect(good!.cluster.id).toBe(GOOD_ID);
+
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    const during = await getClusterDetail(GOOD_ID);
+    expect(during).toBe(good);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[cluster-detail] serving last-good"),
+    );
+  });
+
+  it("getClusterDetailOrThrow serves the last good detail instead of rejecting", async () => {
+    seedHealthyDetail();
+    const good = await getClusterDetailOrThrow(GOOD_ID);
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    await expect(getClusterDetailOrThrow(GOOD_ID)).resolves.toBe(good);
+  });
+
+  it("the last good detail is per cluster id", async () => {
+    seedHealthyDetail();
+    await getClusterDetail(GOOD_ID);
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    await expect(getClusterDetail(OTHER_ID)).resolves.toBeNull();
+    await expect(getClusterDetailOrThrow(OTHER_ID)).rejects.toThrow(/AbortError/);
+  });
+
+  it("a genuinely missing cluster is never remembered and never served in place of an outage", async () => {
+    responses.clusters = { maybeSingle: { data: null, error: null } };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    await expect(getClusterDetailOrThrow(GOOD_ID)).resolves.toBeNull();
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    await expect(getClusterDetailOrThrow(GOOD_ID)).rejects.toThrow(/AbortError/);
+  });
+
+  it("an outage with nothing remembered still gives getClusterDetail null and getClusterDetailOrThrow a rejection", async () => {
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    await expect(getClusterDetail(GOOD_ID)).resolves.toBeNull();
+    await expect(getClusterDetailOrThrow(GOOD_ID)).rejects.toThrow(/AbortError/);
+  });
+
+  it("10 concurrent callers of one id make ONE live retry", async () => {
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => getClusterDetail(GOOD_ID)),
+    );
+    expect(results.every((r) => r === null)).toBe(true);
+    // 10 cached attempts + 1 shared live retry.
+    expect(clustersQueryCount()).toBe(11);
+  });
+
+  it("different cluster ids never share a live retry", async () => {
+    responses.clusters = { maybeSingle: TIMEOUT_RESULT };
+    responses.cluster_articles = { returns: { data: [], error: null } };
+    responses.sources = { returns: { data: [], error: null } };
+    await Promise.all([getClusterDetail(GOOD_ID), getClusterDetail(OTHER_ID)]);
+    // 2 cached attempts + 2 live retries.
+    expect(clustersQueryCount()).toBe(4);
   });
 });

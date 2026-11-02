@@ -124,6 +124,88 @@ export const apiBadRequest = (
 /** 404 — resource not found. */
 export const apiNotFound = (what = "Not found") => apiError(404, what);
 
+// PostgREST / Postgres codes that mean "the database cannot answer right now",
+// not "this request is wrong": PGRST000 (cannot connect), PGRST001 (internal
+// connection error), PGRST002 (schema cache not loaded / connection
+// unavailable), PGRST003 (pool acquire timeout) and 57014 (query_canceled,
+// i.e. the 8 s statement_timeout).
+const UPSTREAM_UNAVAILABLE_CODES: ReadonlySet<string> = new Set([
+  "PGRST000",
+  "PGRST001",
+  "PGRST002",
+  "PGRST003",
+  "57014",
+]);
+// Gateway statuses that mean "the origin cannot answer": 502/503/504, and the
+// gateway's own 520 (unknown origin error; postgrest-js retries it with 503),
+// 521 (origin down), 522 (connection timed out), 523 (origin unreachable) and
+// 524 (timeout). A gateway answer has an HTML or empty body, which postgrest-js
+// turns into `{ message: <body> }` with NO PostgREST code, so the status is
+// the only signal.
+const UPSTREAM_UNAVAILABLE_STATUSES: ReadonlySet<number> = new Set([
+  502, 503, 504, 520, 521, 522, 523, 524,
+]);
+// How many `cause` links are followed (the error itself is depth 0).
+const UPSTREAM_CAUSE_DEPTH = 3;
+
+/**
+ * True when `err` says the database (or the network path to it) could not
+ * answer, as opposed to a bug in this request. Recognises:
+ *   - `name` AbortError / TimeoutError (the reader client's fetch timeout, or
+ *     an `AbortSignal.timeout()`);
+ *   - a `code` in PGRST000-PGRST003 or 57014;
+ *   - a `status` of 502, 503, 504 or 520-524 (every keyed v1 read passes the
+ *     PostgREST response status along with the error object:
+ *     `{ ...error, status }`);
+ *   - a postgrest-js transport error: when `fetch` itself rejects it builds
+ *     `${name}: ${message}` with an empty `code`, so the message STARTS with
+ *     "AbortError:" or "TypeError: fetch failed";
+ *   - any of the above found through `err.cause`, up to depth 3 (a getter that
+ *     wraps the Supabase error in an `Error` keeps it as the cause).
+ * False for a plain `Error`, PGRST116 (no rows), 23505 (unique violation),
+ * `null` and `undefined`. Pure: never reads `message` out to a caller.
+ */
+export function isUpstreamUnavailable(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth <= UPSTREAM_CAUSE_DEPTH; depth += 1) {
+    if (current === null || typeof current !== "object") return false;
+    const e = current as {
+      name?: unknown;
+      code?: unknown;
+      status?: unknown;
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (e.name === "AbortError" || e.name === "TimeoutError") return true;
+    if (typeof e.code === "string" && UPSTREAM_UNAVAILABLE_CODES.has(e.code)) return true;
+    if (typeof e.status === "number" && UPSTREAM_UNAVAILABLE_STATUSES.has(e.status)) return true;
+    if (
+      typeof e.message === "string" &&
+      (e.message.startsWith("AbortError:") || e.message.startsWith("TypeError: fetch failed"))
+    ) {
+      return true;
+    }
+    current = e.cause;
+  }
+  return false;
+}
+
+/**
+ * 503 — the database cannot answer right now (see `isUpstreamUnavailable`).
+ * A partner client can tell "retry shortly" from a bug: `Retry-After: 30`
+ * (seconds) and `Cache-Control: no-store` so a CDN never pins the outage. The
+ * body is the stable `{error, code: "upstream_unavailable", details:
+ * {request_id}}` and nothing else; the raw error is never serialised.
+ */
+export function apiUnavailable(requestId: string = crypto.randomUUID()) {
+  return apiError(
+    503,
+    "Service temporarily unavailable",
+    { code: "upstream_unavailable", details: { request_id: requestId } },
+    { headers: { "Retry-After": "30", "Cache-Control": "no-store" } },
+  );
+}
+
 /**
  * 500 — unexpected server error. Logs the raw error (with stack) to stderr
  * under an `[api]` prefix tagged with a per-invocation `request_id`, and
@@ -134,10 +216,15 @@ export const apiNotFound = (what = "Not found") => apiError(404, what);
  * Operators correlate a user-visible `request_id` to the matching stderr
  * line for triage. Swap the logger here if we ever wire up a real
  * observability stack.
+ *
+ * A database outage (`isUpstreamUnavailable`) is answered by `apiUnavailable`
+ * instead: 503 + `Retry-After: 30` + `no-store`, same `request_id` in the log
+ * line and the body. Everything else stays a 500.
  */
 export const apiServerError = (err: unknown, code?: string) => {
   const requestId = crypto.randomUUID();
   console.error("[api]", requestId, err);
+  if (isUpstreamUnavailable(err)) return apiUnavailable(requestId);
   return apiError(
     500,
     "Internal server error",
@@ -150,8 +237,9 @@ export const apiServerError = (err: unknown, code?: string) => {
  *
  * Next.js route handlers have varied signatures (`()`, `(req)`, `(req, ctx)`),
  * so the generic is intentionally permissive. Any handler that returns a
- * `Promise<Response>` is accepted; thrown errors become a 500 via
- * `apiServerError` instead of Next's default HTML error page.
+ * `Promise<Response>` is accepted; thrown errors become a 500 (a database
+ * outage becomes the 503 `apiUnavailable`) via `apiServerError` instead of
+ * Next's default HTML error page.
  *
  * `unstable_rethrow` is called before treating an error as a 500 because
  * Next.js uses thrown errors as control-flow signals — `redirect()`,

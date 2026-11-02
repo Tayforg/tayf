@@ -193,11 +193,12 @@ export function reliabilityCountLine(rel: SourceReliability): string {
 const RATE_FORMAT = new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 1 });
 
 function share(num: number, den: number): string {
-  return `%${pct(num, den) ?? 0} (${num}/${den})`;
+  return `%${pct(num, den) ?? 0} (${formatCountTr(num)}/${formatCountTr(den)})`;
 }
 
-function insufficient(n: number, min: number): string {
-  return `Yeterli örnek yok (n = ${n}, en az ${min}).`;
+/** Exported for the unit test: no live row can reach a four-digit n below a floor. */
+export function insufficient(n: number, min: number): string {
+  return `Yeterli örnek yok (n = ${formatCountTr(n)}, en az ${formatCountTr(min)}).`;
 }
 
 function cadenceValue(rel: SourceReliability): string {
@@ -271,7 +272,7 @@ export function buildReliabilityView(
     label: "Bölge çeşitliliği",
     value:
       diversityOpen && diversity
-        ? `Ortalama Denge puanı ${diversity.meanScore}/100 (n = ${diversity.n} küme)`
+        ? `Ortalama Denge puanı ${diversity.meanScore}/100 (n = ${formatCountTr(diversity.n)} küme)`
         : null,
     note: diversityOpen
       ? null

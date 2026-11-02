@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { ReactNode } from "react";
 
@@ -5,8 +8,9 @@ import type { ReactNode } from "react";
 // A-M4: no test file existed for /blindspots before. Keeps `getBlindspotsSafe`
 // resolving zero bundles (the page's own empty-state branch) so this test
 // doesn't need to mock ClusterCard's full dependency chain — the point here
-// is PERF-01 (parallel fetch) and the DenominatorNote wiring, not the
-// bundle-rendering path (already covered by blindspots-query.test.ts).
+// is the DenominatorNote wiring (now its own Suspense slot, hunt-27
+// resilience-1), not the bundle-rendering path (already covered by
+// blindspots-query.test.ts).
 //
 // reader-queries D2: the page's data-dependent body now lives in the inner
 // async `BlindspotsFeed` component, streamed behind a <Suspense> boundary —
@@ -134,9 +138,42 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
+type SlotElement = { type?: unknown; props?: Record<string, unknown> };
+
+/**
+ * The `<Suspense>` element whose only child is the named async component.
+ * `BlindspotsDenominator` is module-private (a page file only exports the
+ * route API plus the two feed components the tests already use), so it is
+ * located by function name.
+ */
+function findSuspenseAround(
+  tree: unknown,
+  componentName: string,
+): SlotElement | undefined {
+  return collectElements(tree).find((el) => {
+    if (el.type !== Suspense) return false;
+    const child = el.props?.children as SlotElement | undefined;
+    return (
+      typeof child?.type === "function" &&
+      (child.type as { name?: string }).name === componentName
+    );
+  });
+}
+
+/** Awaits the named async slot the way React would, with the props it was given. */
+async function renderSlot(tree: unknown, componentName: string): Promise<unknown> {
+  const child = findSuspenseAround(tree, componentName)?.props?.children as
+    | SlotElement
+    | undefined;
+  if (!child || typeof child.type !== "function") {
+    throw new Error(`no <Suspense> around ${componentName}`);
+  }
+  return (child.type as (props: unknown) => Promise<unknown>)(child.props);
+}
+
 describe("/blindspots page", () => {
   it("A-M4: links to /kaynaklar/durum via the DenominatorNote, with the voting-kind pair from getFeedStatusSummary", async () => {
-    const tree = await BlindspotsFeed();
+    const tree = await renderSlot(await BlindspotsFeed(), "BlindspotsDenominator");
     const hrefs = collectHrefs(tree);
     const text = collectText(tree).join(" ");
 
@@ -145,37 +182,86 @@ describe("/blindspots page", () => {
     expect(text).toContain("96");
   });
 
-  it("PERF-01: fetches getBlindspots and getFeedStatusSummary in parallel (both start before either resolves)", async () => {
-    const order: string[] = [];
-    getBlindspots.mockImplementation(async () => {
-      order.push("blindspots:start");
-      await new Promise((r) => setTimeout(r, 0));
-      order.push("blindspots:end");
-      return { ok: true, bundles: [] };
-    });
-    getFeedStatusSummary.mockImplementation(async () => {
-      order.push("summary:start");
-      await new Promise((r) => setTimeout(r, 0));
-      order.push("summary:end");
-      return { delivering: 1, total: 2 };
-    });
+  it("hunt-27: the DenominatorNote is the FIRST child of the feed, in its own null-fallback Suspense", async () => {
+    const tree = (await BlindspotsFeed()) as Elementish;
 
-    await BlindspotsFeed();
+    const boundary = findSuspenseAround(tree, "BlindspotsDenominator");
+    expect(boundary).toBeDefined();
+    expect(boundary?.props?.fallback).toBeNull();
+    const children = tree.props?.children as unknown[];
+    expect(children[0]).toBe(boundary);
+  });
 
-    // Both "start" markers must precede both "end" markers — impossible
-    // under two serial `await`s, which would fully finish one call before
-    // the other's body even begins.
-    expect(order.indexOf("blindspots:start")).toBeLessThan(order.indexOf("summary:end"));
-    expect(order.indexOf("summary:start")).toBeLessThan(order.indexOf("blindspots:end"));
+  it("hunt-27: BlindspotsFeed neither calls nor awaits getFeedStatusSummary (an optional widget cannot hold the feed)", async () => {
+    // A summary read that never settles must not delay the feed.
+    getFeedStatusSummary.mockImplementation(() => new Promise(() => {}));
+
+    const tree = await BlindspotsFeed();
+
+    expect(getBlindspots).toHaveBeenCalledTimes(1);
+    expect(getFeedStatusSummary).not.toHaveBeenCalled();
+    expect(collectText(tree).join(" ")).toContain("belirgin bir kör nokta yok");
+  });
+
+  it("hunt-27: the denominator slot reads getFeedStatusSummary exactly once", async () => {
+    const feed = await BlindspotsFeed();
+    await renderSlot(feed, "BlindspotsDenominator");
+
+    expect(getFeedStatusSummary).toHaveBeenCalledTimes(1);
   });
 
   it("degrades DenominatorNote to wording-without-numbers when the summary is unknown", async () => {
     getFeedStatusSummary.mockResolvedValueOnce(null);
 
-    const tree = await BlindspotsFeed();
+    const tree = await renderSlot(await BlindspotsFeed(), "BlindspotsDenominator");
     const text = collectText(tree).join(" ");
 
     expect(text).toContain("yanlılık dağılımına sayılan");
+  });
+});
+
+describe("/blindspots page source — the feed-status read stays out of BlindspotsFeed (hunt-27)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = readFileSync(join(here, "page.tsx"), "utf8");
+
+  /** Blanks // and block comments (offsets kept) so prose cannot trip a match. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p1: string) =>
+        p1 + " ".repeat(m.length - p1.length),
+      );
+  }
+
+  /** Text from the function's declaration up to its closing brace at column 0. */
+  function functionSource(code: string, declaration: string): string {
+    const start = code.indexOf(declaration);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = code.indexOf("\n}\n", start);
+    expect(end).toBeGreaterThan(start);
+    return code.slice(start, end + 2);
+  }
+
+  const code = stripComments(source);
+
+  it("BlindspotsFeed awaits getBlindspotsSafe() only: no Promise.all, no getFeedStatusSummary", () => {
+    const feed = functionSource(code, "export async function BlindspotsFeed");
+    expect(feed).toContain("await getBlindspotsSafe()");
+    expect(feed).not.toContain("getFeedStatusSummary");
+    expect(feed).not.toContain("Promise.all");
+  });
+
+  it("BlindspotsDenominator is a module-private async component that awaits getFeedStatusSummary()", () => {
+    expect(code).not.toMatch(/export\s+(?:async\s+)?function\s+BlindspotsDenominator\b/);
+    const slot = functionSource(code, "async function BlindspotsDenominator");
+    expect(slot).toContain("await getFeedStatusSummary()");
+    expect(slot).toContain("<DenominatorNote");
+  });
+
+  it("the slot is rendered inside <Suspense fallback={null}>", () => {
+    expect(code).toMatch(
+      /<Suspense fallback=\{null\}>\s*<BlindspotsDenominator \/>\s*<\/Suspense>/,
+    );
   });
 });
 

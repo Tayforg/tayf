@@ -5,6 +5,7 @@ import { NewClustersPill } from "@/components/timeline/new-clusters-pill";
 import { PageHero } from "@/components/ui/page-hero";
 import { TIMELINE_HEAD_LIMIT } from "@/lib/clusters/timeline-head";
 import { getRecentClusters, type ClusterRow } from "@/lib/clusters/timeline-query";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // Own metadata so the page doesn't inherit the root layout's title and
@@ -74,14 +75,15 @@ const HOUR_LABEL_FORMAT = new Intl.DateTimeFormat("tr-TR", {
 
 // Subtitle honesty: `n` is what the list shows, `total` what the count read
 // found (null = the count failed). Never present a capped length as the total.
-function timelineSubtitle(n: number, total: number | null): string {
+// Exported for the unit test. Counts go through formatCountTr ("1.234").
+export function timelineSubtitle(n: number, total: number | null): string {
   if (n === 0 || total === n) {
-    return `Son 24 saatte oluşturulan ${n} haber kümesi, saat saat sıralandı.`;
+    return `Son 24 saatte oluşturulan ${formatCountTr(n)} haber kümesi, saat saat sıralandı.`;
   }
   if (total === null) {
-    return `Son 24 saatte oluşturulan en yeni ${n} küme, saat saat sıralandı.`;
+    return `Son 24 saatte oluşturulan en yeni ${formatCountTr(n)} küme, saat saat sıralandı.`;
   }
-  return `Son 24 saatte oluşturulan ${total} haber kümesinin en yeni ${n} tanesi, saat saat sıralandı.`;
+  return `Son 24 saatte oluşturulan ${formatCountTr(total)} haber kümesinin en yeni ${formatCountTr(n)} tanesi, saat saat sıralandı.`;
 }
 
 function formatHourLabel(hourISO: string): string {
@@ -167,7 +169,7 @@ export default async function TimelinePage() {
                   {formatHourLabel(bucket.hourISO)}
                 </h2>
                 <span className="text-[11px] text-muted-foreground">
-                  {bucket.rows.length} küme
+                  {formatCountTr(bucket.rows.length)} küme
                 </span>
               </div>
               <ul className="space-y-2">

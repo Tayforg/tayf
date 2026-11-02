@@ -23,7 +23,7 @@ import { XMLParser } from "fast-xml-parser";
 // tests/guards/edge-deps-pinned.test.ts keeps both versions in step).
 // ---------------------------------------------------------------------------
 
-vi.mock("https://esm.sh/fast-xml-parser@4.5.7", async () => await import("fast-xml-parser"));
+vi.mock("https://esm.sh/fast-xml-parser@4.5.7?deps=strnum@1.1.2", async () => await import("fast-xml-parser"));
 
 const { fetchFeed, parseFeed, XML_PARSER_OPTIONS } = await import(
   "../../../supabase/functions/_shared/rss/fetcher.ts"

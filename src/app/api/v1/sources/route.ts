@@ -32,13 +32,14 @@ export const GET = withApiErrors(async (request: Request) => {
   if (!auth.ok) return auth.response;
 
   const supabase = createReaderClient();
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from("sources")
     .select(REGISTRY_COLUMNS)
     .eq("active", true)
     .order("name");
 
-  if (error) return withApiV1Headers(apiServerError(error), auth.tier);
+  // `status` rides along so a code-less gateway answer is still a 503.
+  if (error) return withApiV1Headers(apiServerError({ ...error, status }), auth.tier);
 
   const rows = (data ?? []) as unknown as RegistrySourceRow[];
   const sources = rows.map(toRegistryRecord);

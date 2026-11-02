@@ -9,6 +9,7 @@ import {
   TOPIC_NOTE_PREFIX,
   TOPIC_SLUGS,
 } from "@/lib/clusters/topic-query";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { staticPageMetadata } from "@/lib/seo/page-metadata";
 
 // /konu — Pack C ("Konu") index. Lists the six reader-facing topic hubs
@@ -58,7 +59,7 @@ export default async function TopicIndexPage() {
                 {TOPIC_LABELS_TR[slug]}
               </Link>
               {counts !== null ? (
-                <span className={metaClass}>{`son 7 günde ${counts[slug]} küme`}</span>
+                <span className={metaClass}>{`son 7 günde ${formatCountTr(counts[slug])} küme`}</span>
               ) : null}
             </li>
           ))}

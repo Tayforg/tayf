@@ -56,6 +56,7 @@ import {
   buildReliabilityView,
   diversityFromZoneMix,
   getSourceReliability,
+  insufficient,
   reliabilityCountLine,
   toSourceReliability,
   type SourceReliability,
@@ -210,6 +211,13 @@ describe("toSourceReliability", () => {
     ["one bad entry among good ones", [[2, 2, 1, 10], [1, 2]]],
   ])("rejects a malformed zone_mix: %s", (_name, zoneMix) => {
     expect(toSourceReliability(raw({ zone_mix: zoneMix }))).toBeNull();
+  });
+});
+
+describe("insufficient", () => {
+  it("groups both numbers with the tr-TR dot", () => {
+    expect(insufficient(19, 20)).toBe("Yeterli örnek yok (n = 19, en az 20).");
+    expect(insufficient(1234, 2000)).toBe("Yeterli örnek yok (n = 1.234, en az 2.000).");
   });
 });
 
@@ -388,6 +396,11 @@ describe("buildReliabilityView", () => {
       const row = byKey(buildReliabilityView(rel(), null)).wire!;
       expect(row.value).toBe("%12 (12/100)");
     });
+
+    it("groups four-digit counts: %3 (48/1.749)", () => {
+      const row = byKey(buildReliabilityView(rel({ nClusters: 1749, nWireCopy: 48 }), karneRow())).wire!;
+      expect(row.value).toBe("%3 (48/1.749)");
+    });
   });
 
   describe("Kör nokta kümelerindeki payı", () => {
@@ -412,6 +425,17 @@ describe("buildReliabilityView", () => {
       expect(below.note).toBe("Yeterli örnek yok (n = 19, en az 20).");
       const at = byKey(buildReliabilityView(rel(), karneRow({ n_clusters: 20, n_multi: 5, co_iktidar: 1, co_bagimsiz: 1, co_muhalefet: 1, n_blindspot: 1, n_blindspot_same_side: 0 }))).blindspot!;
       expect(at.value).toBe("%5 (1/20)");
+    });
+
+    it("groups the karne's four-digit counts in the share and the basis", () => {
+      const row = byKey(
+        buildReliabilityView(
+          rel(),
+          karneRow({ n_clusters: 1749, n_multi: 1055, co_iktidar: 1, co_bagimsiz: 1, co_muhalefet: 1, n_blindspot: 1048, n_blindspot_same_side: 1002 }),
+        ),
+      ).blindspot!;
+      expect(row.value).toBe("%60 (1.048/1.749)");
+      expect(row.basis).toContain("1.749 haber kümesi");
     });
 
     it("shows 0 blindspot clusters as %0", () => {
@@ -495,6 +519,11 @@ describe("buildReliabilityView", () => {
       expect(row.how).toBe(
         "En az 5 oy veren kaynağı olan kümelerin Denge puanı ortalaması (0 tek bölge, 100 üç bölgeye eşit).",
       );
+    });
+
+    it("groups a four-digit cluster count: n = 1.234 küme", () => {
+      const row = byKey(buildReliabilityView(rel({ zoneMix: [[2, 2, 2, 1234]] }), null)).diversity!;
+      expect(row.value).toBe("Ortalama Denge puanı 100/100 (n = 1.234 küme)");
     });
 
     it("is gated at 9 clusters and open at 10", () => {

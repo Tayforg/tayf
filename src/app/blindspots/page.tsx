@@ -108,26 +108,21 @@ export async function BlindspotsFeed() {
   // fallback covers the wait.
   await connection();
 
-  // PERF-01: fetched in parallel, not two serial awaits — neither depends
-  // on the other. DenominatorNote wants one directory-wide, voting-kind
-  // N/M pair, not a per-zone breakdown (a blindspot bundle can span either
-  // pole), so this reads the cheap `getFeedStatusSummary()` existence-probe
-  // from src/lib/sources/feed-status.ts rather than A1's
-  // `getZoneFeedHealth()`/`zoneYieldDenominator`.
-  const [result, feedSummary] = await Promise.all([
-    getBlindspotsSafe(),
-    getFeedStatusSummary(),
-  ]);
+  // The feed awaits ONLY the blindspot read. The DenominatorNote's
+  // feed-status summary is an optional widget and lives in its own Suspense
+  // slot (BlindspotsDenominator below): a slow or stalled summary read can
+  // delay or hide that one line, never the feed (hunt-27 resilience-1; it used
+  // to share a Promise.all with this read).
+  const result = await getBlindspotsSafe();
 
   // eslint-disable-next-line react-hooks/purity
   const nowMs = Date.now();
 
   return (
     <>
-      <DenominatorNote
-        delivering={feedSummary?.delivering ?? null}
-        total={feedSummary?.total ?? null}
-      />
+      <Suspense fallback={null}>
+        <BlindspotsDenominator />
+      </Suspense>
 
       {!result.ok ? (
         <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-border/60 bg-card/40 px-6 py-16 text-center">
@@ -206,6 +201,26 @@ export async function BlindspotsFeed() {
         <NearBlindspotsSection />
       </Suspense>
     </>
+  );
+}
+
+// The "N of M sources counted" line above the feed. DenominatorNote wants one
+// directory-wide, voting-kind N/M pair, not a per-zone breakdown (a blindspot
+// bundle can span either pole), so this reads the cheap
+// `getFeedStatusSummary()` existence probe from src/lib/sources/feed-status.ts
+// rather than A1's `getZoneFeedHealth()`/`zoneYieldDenominator`. Rendered by
+// BlindspotsFeed in its own `<Suspense fallback={null}>` at the position the
+// note always had; `getFeedStatusSummary()` never throws (null degrades the
+// note to wording without numbers). Module-private on purpose: tests locate
+// it by name (page.test.tsx).
+async function BlindspotsDenominator() {
+  await connection();
+  const feedSummary = await getFeedStatusSummary();
+  return (
+    <DenominatorNote
+      delivering={feedSummary?.delivering ?? null}
+      total={feedSummary?.total ?? null}
+    />
   );
 }
 

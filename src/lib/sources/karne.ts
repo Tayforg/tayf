@@ -187,7 +187,7 @@ export function pct(num: number, den: number): number | null {
 }
 
 function share(num: number, den: number): string {
-  return `%${pct(num, den) ?? 0} (${num}/${den})`;
+  return `%${pct(num, den) ?? 0} (${formatCountTr(num)}/${formatCountTr(den)})`;
 }
 
 export interface KarneZoneRow {
@@ -229,9 +229,9 @@ export function buildKarneView(k: SourceKarne): KarneView {
         }))
       : null;
 
-  let blindspotText = `Kör nokta işaretli haberler: ${k.nBlindspot}`;
+  let blindspotText = `Kör nokta işaretli haberler: ${formatCountTr(k.nBlindspot)}`;
   if (k.nBlindspot > 0) {
-    blindspotText += ` · ${k.nBlindspotSameSide} tanesinde haberi ağırlıkla yazan bölgedeydi`;
+    blindspotText += ` · ${formatCountTr(k.nBlindspotSameSide)} tanesinde haberi ağırlıkla yazan bölgedeydi`;
   }
 
   return {
@@ -239,10 +239,10 @@ export function buildKarneView(k: SourceKarne): KarneView {
     multiText: share(k.nMulti, k.nClusters),
     soloText: share(k.nSolo, k.nClusters),
     zones,
-    zoneHeader: `Aynı haberi yazan diğer kaynakların bölgesi (${k.nMulti} çok kaynaklı haber)`,
+    zoneHeader: `Aynı haberi yazan diğer kaynakların bölgesi (${formatCountTr(k.nMulti)} çok kaynaklı haber)`,
     zoneNote:
       "Bir haber birden çok bölgeden kaynak içerebilir; oranların toplamı %100 değildir.",
-    zonesInsufficientText: `Bölge dağılımı için yeterli çok kaynaklı haber yok (n = ${k.nMulti}, en az ${KARNE_MIN_MULTI_FOR_ZONES}).`,
+    zonesInsufficientText: `Bölge dağılımı için yeterli çok kaynaklı haber yok (n = ${formatCountTr(k.nMulti)}, en az ${formatCountTr(KARNE_MIN_MULTI_FOR_ZONES)}).`,
     blindspotText,
   };
 }

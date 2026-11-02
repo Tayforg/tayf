@@ -5,7 +5,7 @@ import { attemptCached } from "@/lib/cache-resilience";
 import { normalizeSourceKind } from "@/lib/sources/kind";
 import { classifySilence, type SilenceReason } from "@/lib/sources/silence-reason";
 import { FEED_YIELD_WINDOW_MS } from "@/lib/clusters/feed-health";
-import { createServerClient } from "@/lib/supabase/server";
+import { createSlowReaderClient } from "@/lib/supabase/server";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 
 // /kaynaklar/durum — the public evidence page behind every "N/M kaynak"
@@ -312,7 +312,7 @@ const FEED_STATUS_SELECT =
 // read below stays within the cache scope.
 async function fetchSourceFeedStatuses(): Promise<SourceFeedStatus[]> {
   const nowMs = Date.now();
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
   const nowIso = new Date(nowMs).toISOString();
 
   const query = (columns: string) =>
@@ -421,7 +421,7 @@ export function toItemsPerDayMapFromRpc(
 // reached while migration 137 is not applied (PGRST202). THROWS on a Supabase
 // error (see `fetchSourceFeedStatuses`).
 async function fetchSourceItemsPerDayLegacy(): Promise<Record<string, number>> {
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
   const sevenDaysAgoIso = new Date(
     Date.now() - 7 * 24 * 60 * 60 * 1000,
   ).toISOString();
@@ -442,7 +442,7 @@ async function fetchSourceItemsPerDayLegacy(): Promise<Record<string, number>> {
 
 // Raw read: THROWS on a Supabase error (see `fetchSourceFeedStatuses`).
 async function fetchSourceItemsPerDay(): Promise<Record<string, number>> {
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
 
   const { data, error } = await supabase.rpc("source_items_7d");
 
@@ -496,7 +496,7 @@ export interface FeedStatusSummaryCounts {
 
 // Raw read: THROWS on a Supabase error (see `fetchSourceFeedStatuses`).
 async function fetchFeedStatusSummary(): Promise<FeedStatusSummaryCounts> {
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
   const yieldSince = new Date(nowMs - FEED_YIELD_WINDOW_MS).toISOString();

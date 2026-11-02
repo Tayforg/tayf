@@ -19,6 +19,10 @@ type CallEntry = { table: string; steps: Step[] };
 
 let callLog: CallEntry[] = [];
 let response: FakeResult = { data: [], error: null };
+// Every clusters query waits on the gate that is current WHEN IT IS ISSUED, so
+// a test can hold the cached attempts open, swap in a fresh gate, and then hold
+// the live retries open separately.
+let gate: Promise<void> = Promise.resolve();
 
 function makeFakeClient() {
   return {
@@ -34,9 +38,10 @@ function makeFakeClient() {
       }
       builder.returns = (...args: unknown[]) => {
         steps.push({ method: "returns", args });
+        const issuedUnder = gate;
         return {
           then: (fn: (v: FakeResult) => unknown) =>
-            Promise.resolve(response).then(fn),
+            issuedUnder.then(() => response).then(fn),
         };
       };
       return builder;
@@ -80,6 +85,7 @@ import {
 } from "./politics-query";
 import type { ZoneFeedHealth } from "./feed-health";
 import { createReaderClient, createServerClient } from "@/lib/supabase/server";
+import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -163,8 +169,12 @@ function mkCluster(opts: MkClusterOpts) {
 }
 
 beforeEach(() => {
+  // Last-good values and cooldowns are per-process module state; a test must
+  // never see another test's success (or outage).
+  __resetCacheResilienceForTests();
   callLog = [];
   response = { data: [], error: null };
+  gate = Promise.resolve();
   vi.mocked(createReaderClient).mockClear();
   vi.mocked(createServerClient).mockClear();
   vi.mocked(cacheLife).mockClear();
@@ -1336,5 +1346,171 @@ describe("getPoliticsClusters parallel health + select (E2)", () => {
 
     resolveHealth(null);
     await pending;
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3 (h27-resilience-2): stale-if-error and single-flight for the reader
+// profile. A failed cached attempt plus a failed live fetch serves the last
+// good feed this instance saw (at most 60 min old); concurrent live retries
+// share one fetch; a failed flight cools down for 5 s. The batch profile
+// (crons) gets none of it: a cron must never send stale data.
+// ---------------------------------------------------------------------------
+
+describe("getPoliticsClusters stale-if-error and single-flight", () => {
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  const DOWN: FakeResult = { data: null, error: { message: "db down" } };
+
+  function goodFeed() {
+    return {
+      data: [
+        mkCluster({
+          id: "c-good",
+          members: [
+            { id: "a1", sourceId: "s1", category: "politika" },
+            { id: "a2", sourceId: "s2", category: "politika" },
+          ],
+        }),
+      ],
+      error: null,
+    } satisfies FakeResult;
+  }
+
+  const clustersQueries = () => callLog.filter((c) => c.table === "clusters").length;
+
+  /** A promise the test releases by hand, to hold queries open. */
+  function holdOpen() {
+    let release!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  }
+
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("reader: serves the last good feed when the attempt and the live fetch both fail", async () => {
+    response = goodFeed();
+    const first = await getPoliticsClusters();
+    expect(first.bundles).toHaveLength(1);
+
+    vi.setSystemTime(NOW_MS + 10 * 60_000);
+    response = DOWN;
+    const during = await getPoliticsClusters();
+    expect(during).toBe(first);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[politics-query] serving last-good"),
+    );
+  });
+
+  it("reader: never serves a feed older than 60 minutes", async () => {
+    response = goodFeed();
+    await getPoliticsClusters();
+    vi.setSystemTime(NOW_MS + 61 * 60_000);
+    response = DOWN;
+    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
+  });
+
+  it("reader: with no earlier success a sustained outage still throws", async () => {
+    response = DOWN;
+    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
+  });
+
+  it("reader: a live retry that succeeds after a failed attempt is returned (and remembered)", async () => {
+    // The cached attempt reads a dead database; by the time the live retry
+    // reads, the database is back.
+    const attemptGate = holdOpen();
+    const liveGate = holdOpen();
+    response = DOWN;
+    gate = attemptGate.promise;
+    const pending = getPoliticsClusters();
+    await vi.advanceTimersByTimeAsync(0);
+    gate = liveGate.promise;
+    attemptGate.release();
+    await vi.advanceTimersByTimeAsync(0);
+    response = goodFeed();
+    liveGate.release();
+    const feed = await pending;
+    expect(feed.bundles).toHaveLength(1);
+    expect(clustersQueries()).toBe(2);
+
+    // The live success is the new last-good for a later outage.
+    vi.setSystemTime(NOW_MS + 6_000);
+    response = DOWN;
+    expect(await getPoliticsClusters()).toBe(feed);
+  });
+
+  it("batch: success then failure still throws and serves nothing stale", async () => {
+    response = goodFeed();
+    await getPoliticsClusters({ profile: "batch" });
+    response = DOWN;
+    await expect(getPoliticsClusters({ profile: "batch" })).rejects.toThrow(/db down/);
+  });
+
+  it("batch: a reader success is never served to a batch caller", async () => {
+    response = goodFeed();
+    await getPoliticsClusters();
+    response = DOWN;
+    await expect(getPoliticsClusters({ profile: "batch" })).rejects.toThrow(/db down/);
+  });
+
+  it("reader: 20 concurrent live retries make ONE live fetch and all get the last good feed", async () => {
+    response = goodFeed();
+    const first = await getPoliticsClusters();
+    callLog = [];
+
+    // Hold the 20 cached attempts open, fail them, then hold the live retries
+    // open too: only one of them may reach the database.
+    response = DOWN;
+    const attemptGate = holdOpen();
+    const liveGate = holdOpen();
+    gate = attemptGate.promise;
+    const calls = Array.from({ length: 20 }, () => getPoliticsClusters());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clustersQueries()).toBe(20);
+
+    gate = liveGate.promise;
+    attemptGate.release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(clustersQueries()).toBe(21);
+
+    liveGate.release();
+    const results = await Promise.all(calls);
+    expect(results.every((r) => r === first)).toBe(true);
+    expect(clustersQueries()).toBe(21);
+  });
+
+  it("batch: concurrent live retries never coalesce (every caller reads for itself)", async () => {
+    response = DOWN;
+    const calls = Array.from({ length: 3 }, () =>
+      getPoliticsClusters({ profile: "batch" }).catch((e: unknown) => e),
+    );
+    const results = await Promise.all(calls);
+    expect(results.every((r) => r instanceof Error)).toBe(true);
+    // 3 cached attempts + 3 live retries.
+    expect(clustersQueries()).toBe(6);
+  });
+
+  it("reader: after a failed live flight the next calls within 5 s do not hit the database", async () => {
+    response = DOWN;
+    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
+    expect(clustersQueries()).toBe(2);
+
+    vi.setSystemTime(NOW_MS + 4_000);
+    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
+    // Only the cached attempt ran again; the live retry sat out the cooldown.
+    expect(clustersQueries()).toBe(3);
+
+    vi.setSystemTime(NOW_MS + 5_001);
+    await expect(getPoliticsClusters()).rejects.toThrow(/db down/);
+    expect(clustersQueries()).toBe(5);
   });
 });

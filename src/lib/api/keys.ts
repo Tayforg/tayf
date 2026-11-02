@@ -41,6 +41,58 @@ export const API_TIER_LIMITS: Record<ApiTier, { perMinute: number; perDay: numbe
 // reference for "the licence string v1 promises."
 export const API_V1_LICENCE_NOTE: string = REGISTRY_LICENCE;
 
+/**
+ * Time budget for EACH of requireApiKey's three database reads (the
+ * `api_key_touch` RPC, the revoked-key lookup, the `api_key_usage_daily` read).
+ * Just under the 4 s reader cap, so a stalled database answers a 503 well
+ * inside a partner client's own timeout instead of hanging the auth step. It is
+ * a client-side race, not a cancellation: a touch that overruns the budget may
+ * STILL commit its counter increment server-side (the request is not aborted),
+ * so a 503 here can cost the key one call of daily quota. Documented, accepted:
+ * the gate fails closed either way.
+ */
+export const API_KEY_DB_BUDGET_MS = 3500;
+
+class ApiKeyBudgetError extends Error {
+  constructor() {
+    super("api key database read exceeded its budget");
+    // "TimeoutError" is one of the names isUpstreamUnavailable() maps to 503.
+    this.name = "TimeoutError";
+  }
+}
+
+/**
+ * Race `promise` against the budget; the timer is always cleared (pattern of
+ * db-throttle.ts withTimeout). `PromiseLike` because a Supabase builder is a
+ * thenable, not a Promise.
+ */
+async function withBudget<T>(promise: PromiseLike<T>, ms: number = API_KEY_DB_BUDGET_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ApiKeyBudgetError()), ms);
+  });
+  try {
+    return await Promise.race([Promise.resolve(promise), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * The refusal for a failed key-resolution read, fail-CLOSED either way: an
+ * upstream outage or a budget overrun (`isUpstreamUnavailable`) is the 503
+ * `apiUnavailable` (Retry-After: 30), anything else the sanitised 500. Both are
+ * logged with the raw error by `apiServerError`, wrapped with the v1 headers
+ * and carry no tier (the key was not resolved).
+ */
+function keyReadFailure(err: unknown, status?: number): Response {
+  // A thrown value (budget overrun, rejected fetch) carries its own name; a
+  // returned Supabase error is a plain object, and a gateway answer has no
+  // PostgREST code, so the response status rides along with it.
+  const failure = status !== undefined && typeof err === "object" && err !== null ? { ...err, status } : err;
+  return withApiV1Headers(apiServerError(failure));
+}
+
 /** "tayf_" + 20 random bytes as hex = 45 chars total. */
 export function generateApiKey(): string {
   return `${API_KEY_PREFIX}${crypto.randomBytes(20).toString("hex")}`;
@@ -311,6 +363,16 @@ interface ApiKeyTouchRow {
  * The anonymous bucket is never charged for a valid key, so a partner sharing
  * an egress IP with noisy keyless traffic is not throttled by it.
  *
+ * DATABASE BUDGET (hunt-27 resilience-3): the touch RPC, the revoked lookup and
+ * the usage read each race `API_KEY_DB_BUDGET_MS` (3.5 s). The gate stays
+ * FAIL-CLOSED: no database error and no overrun ever admits a request. A budget
+ * overrun or a classified upstream error (`isUpstreamUnavailable`: PGRST000-003,
+ * 57014, AbortError, 502/503/504, a postgrest-js transport error) answers
+ * `withApiV1Headers(apiUnavailable())`, a 503 with `Retry-After: 30`; any other
+ * error stays the sanitised 500. A timed-out touch is NOT cancelled and may
+ * still commit its counter increment server-side, so a 503 can cost the key one
+ * call of daily quota.
+ *
  * Never logs, returns, or Sentry-captures the presented key or its hash
  * anywhere in this function or its error paths.
  */
@@ -349,11 +411,15 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
 
   const supabase = createServerClient();
 
-  const { data: touchData, error: touchError } = await supabase.rpc("api_key_touch", {
-    p_key_hash: hash,
-  });
-  if (touchError) {
-    return { ok: false, response: withApiV1Headers(apiServerError(touchError)) };
+  let touchData: unknown;
+  try {
+    const touch = await withBudget(
+      supabase.rpc("api_key_touch", { p_key_hash: hash }),
+    );
+    if (touch.error) return { ok: false, response: keyReadFailure(touch.error, touch.status) };
+    touchData = touch.data;
+  } catch (err) {
+    return { ok: false, response: keyReadFailure(err) };
   }
 
   const touchRows: ApiKeyTouchRow[] = Array.isArray(touchData)
@@ -371,14 +437,20 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
     if (!anonRl.allowed) {
       return { ok: false, response: v1TooManyRequests(anonRl.retryAfterMs, "ip_floor") };
     }
-    const { data: revokedRow, error: revokedError } = await supabase
-      .from("api_keys")
-      .select("id")
-      .eq("key_hash", hash)
-      .not("revoked_at", "is", null)
-      .maybeSingle();
-    if (revokedError) {
-      return { ok: false, response: withApiV1Headers(apiServerError(revokedError)) };
+    let revokedRow: unknown;
+    try {
+      const revoked = await withBudget(
+        supabase
+          .from("api_keys")
+          .select("id")
+          .eq("key_hash", hash)
+          .not("revoked_at", "is", null)
+          .maybeSingle(),
+      );
+      if (revoked.error) return { ok: false, response: keyReadFailure(revoked.error, revoked.status) };
+      revokedRow = revoked.data;
+    } catch (err) {
+      return { ok: false, response: keyReadFailure(err) };
     }
     if (revokedRow) {
       return { ok: false, response: withApiV1Headers(apiError(403, V1_ERROR.keyRevoked)) };
@@ -405,14 +477,20 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
   }
 
   const now = new Date();
-  const { data: usageRow, error: usageError } = await supabase
-    .from("api_key_usage_daily")
-    .select("calls")
-    .eq("key_id", keyId)
-    .eq("day", utcDayString(now))
-    .maybeSingle();
-  if (usageError) {
-    return { ok: false, response: withApiV1Headers(apiServerError(usageError)) };
+  let usageRow: unknown;
+  try {
+    const usage = await withBudget(
+      supabase
+        .from("api_key_usage_daily")
+        .select("calls")
+        .eq("key_id", keyId)
+        .eq("day", utcDayString(now))
+        .maybeSingle(),
+    );
+    if (usage.error) return { ok: false, response: keyReadFailure(usage.error, usage.status) };
+    usageRow = usage.data;
+  } catch (err) {
+    return { ok: false, response: keyReadFailure(err) };
   }
   const calls = Number((usageRow as { calls?: number | string } | null)?.calls ?? 0);
   const perDay = API_TIER_LIMITS[tier].perDay;

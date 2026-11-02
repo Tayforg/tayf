@@ -44,6 +44,8 @@ const EXPOSE = "X-Tayf-Tier, Retry-After";
 const dbState = vi.hoisted(() => ({
   dailyUsage: {} as Record<number, number>,
   touchError: false,
+  // When set, the forced touch error carries this code (hunt-27: 57014 -> 503).
+  touchErrorCode: null as string | null,
   revokedLookupError: false,
   usageError: false,
   touchAsObject: false,
@@ -80,7 +82,13 @@ const supabaseFake = await vi.hoisted(async () => {
     rpc: {
       api_key_touch: (args) => {
         if (dbState.touchError) {
-          return { data: null, error: { message: "function api_key_touch exploded" } };
+          return {
+            data: null,
+            error: {
+              message: "function api_key_touch exploded",
+              ...(dbState.touchErrorCode ? { code: dbState.touchErrorCode } : {}),
+            },
+          };
         }
         const { p_key_hash } = args as { p_key_hash: string };
         const found = KEYS_DB.find((k) => k.hash === p_key_hash && !k.revoked);
@@ -120,6 +128,7 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SITE_URL = "https://tayfhaber.com";
   dbState.dailyUsage = {};
   dbState.touchError = false;
+  dbState.touchErrorCode = null;
   dbState.revokedLookupError = false;
   dbState.usageError = false;
   dbState.touchAsObject = false;
@@ -585,6 +594,26 @@ describe("upstream failures keep the v1 contract", () => {
     dbState.usageError = true;
     const { GET } = await import("@/app/api/v1/sources/route");
     await expectSanitised500(await GET(sourcesRequest({ authorization: bearer(FREE_KEY) })));
+  });
+
+  it("an api_key_touch statement timeout (57014) is a 503 with Retry-After: 30 and the v1 contract (hunt-27)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.touchError = true;
+    dbState.touchErrorCode = "57014";
+    const { GET } = await import("@/app/api/v1/sources/route");
+
+    const res = await GET(sourcesRequest({ authorization: bearer(FREE_KEY) }));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Expose-Headers")).toBe(EXPOSE);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // The key was never resolved on this path: no tier header.
+    expect(res.headers.get("X-Tayf-Tier")).toBeNull();
+    const text = await res.text();
+    expect(JSON.parse(text).code).toBe("upstream_unavailable");
+    expect(text).not.toContain("exploded");
   });
 
   it("accepts api_key_touch returning a single object instead of a row array", async () => {

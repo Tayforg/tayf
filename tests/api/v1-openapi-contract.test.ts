@@ -12,7 +12,7 @@ import {
 } from "@/lib/api/v1-docs";
 import { V1_DEFAULT_LIMIT, V1_MAX_LIMIT, toV1ClusterRecord, type V1ClusterRow } from "@/lib/api/v1-clusters";
 import { API_TIER_LIMITS } from "@/lib/api/keys";
-import { apiError } from "@/lib/api/errors";
+import { apiError, apiUnavailable } from "@/lib/api/errors";
 import { toRegistryRecord, type RegistrySourceRow } from "@/lib/sources/registry";
 import { toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
 import { toV1SourceProfile } from "@/lib/api/v1-source-profile";
@@ -655,5 +655,73 @@ describe("GET /api/v1/openapi.json", () => {
     >;
     expect(Object.keys(errorSchema.properties).sort()).toEqual(Object.keys(emitted).sort());
     expect(errorSchema.required).toEqual(["error"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hunt-27 resilience-3: a database outage is a 503 + Retry-After: 30, so every
+// endpoint that documents the generic 500 documents the 503 right after it,
+// and the generated OpenAPI declares the Retry-After header on it.
+// ---------------------------------------------------------------------------
+describe("503 upstream_unavailable is documented wherever 500 is", () => {
+  const doc = buildOpenApiDocument("https://x.test");
+  const withServerError = V1_ENDPOINTS.filter((e) => e.responses.some((r) => r.status === 500));
+
+  it("finds the endpoints that list a 500 (the sweep is not vacuous)", () => {
+    expect(withServerError.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it.each(withServerError.map((e) => [`${e.method} ${e.path}`, e] as const))(
+    "%s lists the 503 straight after the 500",
+    (_label, endpoint) => {
+      const statuses = endpoint.responses.map((r) => r.status);
+      const i500 = statuses.indexOf(500);
+      expect(statuses[i500 + 1]).toBe(503);
+      expect(statuses.filter((st) => st === 503)).toHaveLength(1);
+    },
+  );
+
+  it("endpoints with no 500 do not gain a 503", () => {
+    for (const endpoint of V1_ENDPOINTS) {
+      if (endpoint.responses.some((r) => r.status === 500)) continue;
+      expect(endpoint.responses.some((r) => r.status === 503)).toBe(false);
+    }
+  });
+
+  it("the shared 503 text names Retry-After, upstream_unavailable and details.request_id in both languages", () => {
+    const resp = V1_ENDPOINTS.find((e) => e.path === "/api/v1/clusters" && e.method === "GET")!.responses.find(
+      (r) => r.status === 503,
+    )!;
+    expect(resp.schema).toBe("Error");
+    for (const text of [resp.descriptionTr, resp.descriptionEn]) {
+      expect(text).toContain("Retry-After");
+      expect(text).toContain("upstream_unavailable");
+      expect(text).toContain("details.request_id");
+    }
+  });
+
+  it("the generated OpenAPI names Retry-After in every 503 description, the way the 429 does (no headers object: src/lib/api/openapi.test.ts pins that)", () => {
+    let seen = 0;
+    for (const [routePath, ops] of Object.entries(doc.paths)) {
+      for (const [method, op] of Object.entries(ops)) {
+        const responses = (op as {
+          responses: Record<string, { description?: string; headers?: unknown }>;
+        }).responses;
+        const r503 = responses["503"];
+        if (!r503) continue;
+        seen += 1;
+        expect(r503.description, `${method} ${routePath} 503`).toContain("Retry-After");
+        expect(r503.headers, `${method} ${routePath} 503`).toBeUndefined();
+        const r429 = responses["429"];
+        if (r429) expect(r429.description, `${method} ${routePath} 429`).toContain("Retry-After");
+      }
+    }
+    expect(seen).toBe(withServerError.length);
+  });
+
+  it("the header the docs promise is one apiUnavailable() really sends, in whole seconds", () => {
+    const res = apiUnavailable("x");
+    expect(Number.isInteger(Number(res.headers.get("Retry-After")))).toBe(true);
+    expect(Number(res.headers.get("Retry-After"))).toBeGreaterThan(0);
   });
 });

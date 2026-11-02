@@ -206,13 +206,13 @@ const supabaseFixture = vi.hoisted(() => ({
     limit: number | null;
   }>,
   // Order of the reads the page starts: "directory" is pushed by the
-  // directory read's createServerClient() call, "counts" by a stubbed
+  // directory read's createSlowReaderClient() call, "counts" by a stubbed
   // getSourceItemsPerDay (see the overlap test below).
   calls: [] as string[],
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
-  createServerClient: () => {
+  createSlowReaderClient: () => {
     supabaseFixture.calls.push("directory");
     if (supabaseFixture.fail) throw new Error("supabase unavailable");
     return makeFakeClient();
@@ -1050,7 +1050,7 @@ describe("/sources page source -- the first hit after a deploy must be a prerend
   });
 
   it("finds the cached reader (so the clock guard below is not vacuous)", () => {
-    expect(reader).toContain("createServerClient()");
+    expect(reader).toContain("createSlowReaderClient()");
     expect(reader).toMatch(/\bDate\.now\s*\(\s*\)/);
   });
 

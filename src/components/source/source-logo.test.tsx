@@ -403,8 +403,17 @@ describe("sourceInitials", () => {
     expect(sourceInitials("")).toBe("");
   });
 
-  it("does not apply locale-specific casing (matches String#toUpperCase)", () => {
-    expect(sourceInitials("ıi")).toBe("ıi".slice(0, 2).toUpperCase());
+  it("upper-cases with Turkish rules (same locale as sourceMonogram): i -> İ, ı -> I", () => {
+    expect(sourceInitials("Diken")).toBe("Dİ");
+    expect(sourceInitials("BirGün")).toBe("Bİ");
+    expect(sourceInitials("Kısa Dalga")).toBe("KI");
+    expect(sourceInitials("İlke TV")).toBe("İL");
+  });
+
+  it("trims the name and never cuts a surrogate pair in half", () => {
+    expect(sourceInitials("  ntv")).toBe("NT");
+    expect(sourceInitials("\u{1F600}x")).toBe("\u{1F600}X");
+    expect(sourceInitials("   ")).toBe("");
   });
 });
 

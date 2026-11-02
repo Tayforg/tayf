@@ -25,9 +25,11 @@ import { createReaderClient } from "@/lib/supabase/server";
 // the cache boundary (a throw there fails `next build`'s prerender even when
 // the caller catches; see src/lib/cache-resilience.ts), then ONE live retry in
 // the uncached public getter, then a THROW. The registry is a contract, not
-// decoration: a sustained outage must surface as the route's 500, never as a
+// decoration: a sustained outage must surface as the route's error, never as a
 // 200 with an empty `sources` array that a consumer would take at face value
-// (and that the CDN would then hold for an hour).
+// (and that the CDN would then hold for an hour). A database outage is that
+// route's 503 + Retry-After, not a 500: both throws keep the Supabase error as
+// `cause`, which `isUpstreamUnavailable` (src/lib/api/errors.ts) inspects.
 //
 // Exactly ONE `cacheLife` per cached invocation, chosen after the attempt: a
 // failed attempt (typically the 4 s reader abort on a cold database) is
@@ -73,14 +75,18 @@ const ZONE_HISTORY_LIMIT = 50;
 // Uncached implementation. THROWS on a read error.
 async function fetchRegistryRows(): Promise<RegistryRow[]> {
   const supabase = createReaderClient();
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from("sources")
     .select(REGISTRY_COLUMNS)
     .eq("active", true)
     .order("name");
 
   if (error) {
-    throw new Error(`[registry] sources read failed: ${error.message}`);
+    // `status` rides along in the cause: a gateway answer (HTML or empty body)
+    // has no PostgREST code, so only the status says "outage".
+    throw new Error(`[registry] sources read failed: ${error.message}`, {
+      cause: { ...error, status },
+    });
   }
   return (data ?? []) as unknown as RegistryRow[];
 }
@@ -148,6 +154,7 @@ async function fetchRegistryDetail(sourceId: string): Promise<RegistryDetail> {
   if (history.error) {
     throw new Error(
       `[registry] zone history read failed: ${history.error.message}`,
+      { cause: { ...history.error, status: history.status } },
     );
   }
 

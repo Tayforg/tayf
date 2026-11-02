@@ -31,7 +31,7 @@ import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
 import { weeklyCountFromPerDay, sortGroupedByActivity } from "@/lib/sources/directory";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
-import { createServerClient } from "@/lib/supabase/server";
+import { createSlowReaderClient } from "@/lib/supabase/server";
 import { buildRegistryDataset, serializeJsonLd } from "@/lib/seo/json-ld";
 import {
   CLICKBAIT_PRECISION_CHECK,
@@ -210,7 +210,7 @@ export function deriveDirectoryStats(
 // there fails `next build` as soon as this read succeeds (see
 // tests/guards/static-page-clock.test.ts for the same trap).
 async function readSourcesDirectory(): Promise<SourcesDirectory> {
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
 
   // Window: last 7 days, anchored to "now" at cache-fill time — only used for
   // the cheap `latest` existence probe now.

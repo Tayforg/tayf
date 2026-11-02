@@ -285,6 +285,54 @@ describe("buildKarneView", () => {
     );
     expect(none.blindspotText).toBe("Kör nokta işaretli haberler: 0");
   });
+
+  // Counts of four digits or more are grouped the way the subtitle already
+  // groups the cluster count ("1.749 haber kümesi"); the shares used to print
+  // raw "1055/1749" in the same card.
+  describe("groups four-digit counts with the tr-TR dot", () => {
+    const big = karne({
+      nClusters: 1749,
+      nMulti: 1055,
+      nSolo: 694,
+      co: { iktidar: 900, bagimsiz: 500, muhalefet: 1000 },
+      nBlindspot: 1048,
+      nBlindspotSameSide: 1002,
+    });
+
+    it("writes the multi and solo shares as %60 (1.055/1.749) and %40 (694/1.749)", () => {
+      const v = buildKarneView(big);
+      if (v.state !== "ok") throw new Error("expected ok");
+      expect(v.multiText).toBe("%60 (1.055/1.749)");
+      expect(v.soloText).toBe("%40 (694/1.749)");
+    });
+
+    it("groups the zone shares, header and insufficient text", () => {
+      const v = buildKarneView(big);
+      if (v.state !== "ok") throw new Error("expected ok");
+      expect(v.zones!.map((z) => z.text)).toEqual([
+        "%85 (900/1.055)",
+        "%47 (500/1.055)",
+        "%95 (1.000/1.055)",
+      ]);
+      expect(v.zoneHeader).toContain("(1.055 çok kaynaklı haber)");
+      expect(v.zonesInsufficientText).toContain("n = 1.055");
+      expect(v.zonesInsufficientText).toContain("en az 10");
+    });
+
+    it("groups both blindspot counts", () => {
+      const v = buildKarneView(big);
+      if (v.state !== "ok") throw new Error("expected ok");
+      expect(v.blindspotText).toBe(
+        "Kör nokta işaretli haberler: 1.048 · 1.002 tanesinde haberi ağırlıkla yazan bölgedeydi",
+      );
+    });
+
+    it("keeps counts below 1.000 ungrouped", () => {
+      const v = buildKarneView(karne({ nClusters: 999, nMulti: 500, nSolo: 499 }));
+      if (v.state !== "ok") throw new Error("expected ok");
+      expect(v.multiText).toBe("%50 (500/999)");
+    });
+  });
 });
 
 describe("getSourceKarne", () => {

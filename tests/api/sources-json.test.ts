@@ -121,6 +121,11 @@ const RAW_HISTORY: RawHistoryRow[] = Array.from({ length: 60 }, (_, i) => ({
 
 const dbState = vi.hoisted(() => ({
   forceListError: false,
+  // When set, the forced list error carries this message (default "boom").
+  listErrorMessage: null as string | null,
+  // When set, the forced list error comes back with this HTTP status (a
+  // gateway answer: no PostgREST code, only the status says "outage").
+  listErrorStatus: undefined as number | undefined,
   lastSourcesSelectArgs: [] as unknown[],
   // U-03 reader agreement: the `zone_guesses` rows the detail route counts
   // (it issues `count: "exact", head: true` queries, so the fake answers
@@ -138,7 +143,11 @@ const supabaseFake = await vi.hoisted(async () => {
       sources: (state) => {
         dbState.lastSourcesSelectArgs = state.selectArgs;
         if (dbState.forceListError) {
-          return { data: null, error: { message: "boom" } };
+          return {
+            data: null,
+            error: { message: dbState.listErrorMessage ?? "boom" },
+            ...(dbState.listErrorStatus === undefined ? {} : { status: dbState.listErrorStatus }),
+          };
         }
         const activeEq = state.eq.find((e) => e.col === "active");
         const slugEq = state.eq.find((e) => e.col === "slug");
@@ -242,6 +251,8 @@ beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   dbState.forceListError = false;
+  dbState.listErrorMessage = null;
+  dbState.listErrorStatus = undefined;
   dbState.guessRows = [];
   dbState.forceGuessError = false;
   dbState.guessStates = [];
@@ -412,6 +423,55 @@ describe("GET /api/sources", () => {
     expect(Array.isArray(body.sources)).toBe(false);
   });
 
+  // hunt-27 resilience-3: the registry throws `new Error(msg, { cause: error })`,
+  // so a reader-cap abort or a gateway/transport failure that Supabase reports
+  // in `error` is found through the cause and answered 503 + Retry-After.
+  it.each([
+    ["the 4 s reader abort", "AbortError: Supabase request exceeded 4000 ms"],
+    ["a dropped connection", "TypeError: fetch failed"],
+  ])("returns 503 + Retry-After: 30 (never 500) when the Supabase query fails with %s", async (_label, message) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.forceListError = true;
+    dbState.listErrorMessage = message;
+    const { GET } = await import("@/app/api/sources/route");
+    const res = await GET(listRequest());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const body = await res.json();
+    expect(body.code).toBe("upstream_unavailable");
+    expect(Array.isArray(body.sources)).toBe(false);
+  });
+
+  // A gateway answer (HTML or empty body) reaches postgrest-js as
+  // `{ message: <body> }` with NO code: only the response status classifies it.
+  it.each([
+    [520, "<html>origin error</html>"],
+    [503, ""],
+    [522, "Connection timed out"],
+  ])("returns 503 + Retry-After: 30 for a code-less gateway answer with status %i", async (status, message) => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.forceListError = true;
+    dbState.listErrorMessage = message;
+    dbState.listErrorStatus = status;
+    const { GET } = await import("@/app/api/sources/route");
+    const res = await GET(listRequest());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect((await res.json()).code).toBe("upstream_unavailable");
+  });
+
+  it("keeps a code-less 400 a sanitised 500", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.forceListError = true;
+    dbState.listErrorMessage = "bad request";
+    dbState.listErrorStatus = 400;
+    const { GET } = await import("@/app/api/sources/route");
+    const res = await GET(listRequest());
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Retry-After")).toBeNull();
+  });
+
   // B-SEC-05: 60-token bucket, 1/sec refill, keyed on clientKey(request).
   it("returns 429 with the standard error envelope after 60 requests from the same client", async () => {
     const { GET } = await import("@/app/api/sources/route");
@@ -553,6 +613,16 @@ describe("GET /api/sources/[slug]", () => {
     const { GET } = await import("@/app/api/sources/[slug]/route");
     const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
     expect(res.status).toBe(500);
+  });
+
+  it("returns 503 + Retry-After: 30 on the detail route when the registry read is aborted", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.forceListError = true;
+    dbState.listErrorMessage = "AbortError: Supabase request exceeded 4000 ms";
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    const res = await GET(detailRequest("haberturk"), paramsFor("haberturk"));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
   });
 
   // B-SEC-05: same 60-token bucket / 1-per-second refill as the list route.

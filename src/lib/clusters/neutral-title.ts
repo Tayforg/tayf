@@ -60,6 +60,20 @@
 // ("AK Parti çalışmaları tamamladı... Yeni anayasa takvimi belli oldu") into a
 // sentence break unless it ends a comma list or sits inside a quote.
 
+// extractive-v4 (hunt 27, h27-copy-2; still extractive-v4, NO model bump: new
+// picks only, no backfill): a member title written in all lower case no longer
+// ships as "Avrupa, türkiye’yi ... berlinden yükseldi" while a sibling writes
+// "Türkiye" and "Berlin". cleanHeadline only upper-cases the first letter, so
+// the pick recases a lower-case word that the sibling titles capitalise
+// mid-sentence, and only when that is unambiguous (recaseFromSiblings). A
+// candidate that still has a lower-case word starting with such a name
+// ('berlinden', which cannot be recased without guessing the stem) is not eligible
+// while another acceptable candidate exists (lowercaseLeak); with { floor: true }
+// it can still ship when nothing else is usable. Both apply only to the odd one
+// out on capitalisation (isOddOneOut): the first version applied the sibling forms
+// to every candidate and turned 'ilk olağan kurultayı' into 'ilk olağan Kurultayı'
+// (a sibling capitalises part of an event name) in 2 of 150 replayed clusters.
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
@@ -812,6 +826,308 @@ function sentenceCaseShout(shouted: string, memberTitles: readonly string[]): st
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Lower-case-sourced candidates (extractive-v4, hunt 27).
+// ---------------------------------------------------------------------------
+//
+// Some outlets publish headlines in all lower case ("avrupa, türkiye’yi ...
+// berlinden yükseldi"); cleanHeadline only restores the first letter. The
+// sibling titles of the cluster say how the names are written, so the evidence
+// is read back from them, the way sentenceCaseShout reads it for a shouted
+// title, and only when it is unambiguous.
+
+// A sibling is read up to this many characters and words: real headlines are far
+// shorter, and a hostile feed title must not cost more than a counter.
+const EVIDENCE_MAX_CHARS = 1000;
+const EVIDENCE_MAX_TOKENS = 200;
+/** A word of this many letters or more can be part of a Title Case run. */
+const TITLE_CASE_MIN_LETTERS = 3;
+/** Title Case is judged on at least this many such words ... */
+const TITLE_CASE_MIN_WORDS = 4;
+/** ... of which at least this share start with a capital. */
+const TITLE_CASE_SHARE = 0.8;
+/** The shortest sibling name that makes a lower-case word starting with it a leak. */
+const LEAK_MIN_LETTERS = 4;
+/** The longest name checked as a prefix of a word (a real name is far shorter). */
+const LEAK_MAX_NAME_CHARS = 40;
+
+const SENTENCE_END_CHARS = new Set([".", ":", "!", "?", "…"]);
+const OPENING_QUOTES = new Set(['"', "“", "‘", "«", "'"]);
+// Hyphens, dashes and the slash join two words ("Türkiye-Japonya"). One
+// character class under +, so the split is linear.
+const WORD_JOINERS = /[\s\-–—/]+/u;
+const WORD_JOINERS_KEPT = /([\s\-–—/]+)/u;
+
+/** What one sibling title says about how its words are written. */
+interface CaseEvidence {
+  /** Tr-lower-cased word -> the distinct upper-case spellings it appeared in ("berlin" -> {"Berlin"}). */
+  spellings: Map<string, Set<string>>;
+  /** Tr-lower-cased words it writes entirely in lower case. */
+  lower: Set<string>;
+}
+
+function hasDigit(s: string): boolean {
+  return /\p{N}/u.test(s);
+}
+
+function startsUpper(word: string): boolean {
+  const first = word.charAt(0);
+  return first !== first.toLocaleLowerCase("tr");
+}
+
+/**
+ * Reads one sibling title. The evidence skips the title's first word and any
+ * word right after '.', ':', '!', '?', '…' or an opening quote (a capital
+ * there says nothing about the word), keeps the stem before an apostrophe
+ * ("Türkiye'yi" -> "Türkiye"), and splits on whitespace, hyphens, dashes and
+ * the slash ("Türkiye-Japonya" is evidence for both). A shouted title, or one
+ * with a run of shouted words, has lost its case. A Title Case title (at least
+ * TITLE_CASE_SHARE of its words of TITLE_CASE_MIN_LETTERS or more letters start
+ * with a capital, over at least TITLE_CASE_MIN_WORDS of them) capitalises
+ * common nouns too, so it adds no capital evidence; its lower-case words still count.
+ */
+function caseEvidence(title: string): CaseEvidence {
+  const evidence: CaseEvidence = { spellings: new Map(), lower: new Set() };
+  const text = title.trim().slice(0, EVIDENCE_MAX_CHARS);
+  if (text === "" || isAllCaps(text) || hasShoutedRun(text)) return evidence;
+
+  const tokens = text.split(WORD_JOINERS).filter((t) => t !== "").slice(0, EVIDENCE_MAX_TOKENS);
+  let long = 0;
+  let longCapitalised = 0;
+  const words: string[] = [];
+  tokens.forEach((token, i) => {
+    const [a, b] = coreRange(token);
+    if (a >= b) return;
+    const [stem] = splitSuffix(token.slice(a, b));
+    if (stem === "" || hasDigit(stem)) return;
+    const letters = letterCount(stem);
+    if (letters >= TITLE_CASE_MIN_LETTERS) {
+      long++;
+      if (startsUpper(stem)) longCapitalised++;
+    }
+    const prev = i > 0 ? tokens[i - 1]! : "";
+    const skipped =
+      i === 0 || SENTENCE_END_CHARS.has(prev.charAt(prev.length - 1)) || OPENING_QUOTES.has(token.charAt(0));
+    if (!skipped && letters >= 2) words.push(stem);
+  });
+  const titleCase = long >= TITLE_CASE_MIN_WORDS && longCapitalised / long >= TITLE_CASE_SHARE;
+
+  for (const stem of words) {
+    const lowered = stem.toLocaleLowerCase("tr");
+    if (stem === lowered) {
+      evidence.lower.add(lowered);
+      continue;
+    }
+    if (titleCase) continue;
+    if (stem === stem.toLocaleUpperCase("tr")) {
+      // A shouted cue ("ŞOK", "SON") is the outlet's emphasis, not an acronym.
+      if (STOP.has(asciiLower(stem)) || framingPenalty(lowered) > 0) continue;
+    } else if (stem !== lowered.charAt(0).toLocaleUpperCase("tr") + lowered.slice(1)) {
+      continue; // "iPhone", "McDonald": mixed case says nothing
+    }
+    let set = evidence.spellings.get(lowered);
+    if (set === undefined) {
+      set = new Set();
+      evidence.spellings.set(lowered, set);
+    }
+    set.add(stem);
+  }
+  return evidence;
+}
+
+/** True for an upper-case spelling that stands for an acronym, not a shouted word. */
+function isAcronymSpelling(spelling: string): boolean {
+  return letterCount(spelling) <= ACRONYM_MAX_LETTERS || ACRONYMS.has(spelling);
+}
+
+/**
+ * Tr-lower-cased word -> its capitalised spelling, over the given evidence:
+ * kept only when exactly one upper-case spelling exists (two spellings, "Roma"
+ * and "ROMA", are a conflict) and no sibling writes the word in lower case. An
+ * all-capitals spelling maps only when it is short (ACRONYM_MAX_LETTERS) or an
+ * ACRONYMS member; a longer shouted word is not evidence of a name.
+ */
+function capitalFormsFrom(list: readonly CaseEvidence[]): Map<string, string> {
+  const spellings = new Map<string, Set<string>>();
+  const lower = new Set<string>();
+  for (const evidence of list) {
+    for (const word of evidence.lower) lower.add(word);
+    for (const [word, set] of evidence.spellings) {
+      let merged = spellings.get(word);
+      if (merged === undefined) {
+        merged = new Set();
+        spellings.set(word, merged);
+      }
+      for (const spelling of set) merged.add(spelling);
+    }
+  }
+  const forms = new Map<string, string>();
+  for (const [word, set] of spellings) {
+    if (set.size !== 1 || lower.has(word)) continue;
+    const [spelling] = set;
+    if (spelling === undefined) continue;
+    if (spelling === spelling.toLocaleUpperCase("tr") && !isAcronymSpelling(spelling)) continue;
+    forms.set(word, spelling);
+  }
+  return forms;
+}
+
+/**
+ * How the sibling titles capitalise their words: tr-lower-cased word -> the
+ * spelling to restore ("türkiye" -> "Türkiye", "epdk" -> "EPDK"). Pure; `others`
+ * are the cluster's other titles (cleaned or raw: the first word of each is
+ * skipped either way). See caseEvidence for what counts as evidence.
+ */
+export function siblingCapitalForms(others: readonly string[]): Map<string, string> {
+  return capitalFormsFrom(others.map(caseEvidence));
+}
+
+function recaseWith(forms: ReadonlyMap<string, string>, text: string): string {
+  if (forms.size === 0 || text === "" || text.length > EVIDENCE_MAX_CHARS) return text;
+  const parts = text.split(WORD_JOINERS_KEPT);
+  let seenWord = false;
+  // Even indices are words, odd ones the separators that were kept.
+  for (let i = 0; i < parts.length; i += 2) {
+    const token = parts[i]!;
+    const [a, b] = coreRange(token);
+    if (a >= b) continue;
+    if (!seenWord) {
+      seenWord = true; // the first word: cleanHeadline already capitalised it
+      continue;
+    }
+    const [stem, suffix] = splitSuffix(token.slice(a, b));
+    if (letterCount(stem) === 0 || stem !== stem.toLocaleLowerCase("tr")) continue;
+    const form = forms.get(stem);
+    if (form === undefined) continue;
+    parts[i] = token.slice(0, a) + form + suffix + token.slice(b);
+  }
+  return parts.join("");
+}
+
+/**
+ * Restores the capital letter of every word after the first that is written in
+ * lower case here but that the sibling titles capitalise mid-sentence, when that
+ * is unambiguous (see siblingCapitalForms): "türkiye’yi" -> "Türkiye’yi", the
+ * suffix after the apostrophe and the edge punctuation untouched. A word with
+ * no entry stays as written; no stem is guessed ('berlinden' stays lower case
+ * when a sibling only has "Berlin'de").
+ */
+export function recaseFromSiblings(cleaned: string, others: readonly string[]): string {
+  return recaseWith(siblingCapitalForms(others), cleaned);
+}
+
+/** The sibling names (tr-lower-cased) a lower-case word may leak: LEAK_MIN_LETTERS or more letters. */
+function leakNames(forms: ReadonlyMap<string, string>): Set<string> {
+  const names = new Set<string>();
+  for (const word of forms.keys()) {
+    if (word.length <= LEAK_MAX_NAME_CHARS && letterCount(word) >= LEAK_MIN_LETTERS) names.add(word);
+  }
+  return names;
+}
+
+/** True when `stem` starts with one of `names`. One set lookup per prefix length, so no scan of the names. */
+function startsWithName(stem: string, names: ReadonlySet<string>): boolean {
+  const longest = Math.min(stem.length, LEAK_MAX_NAME_CHARS);
+  for (let k = LEAK_MIN_LETTERS; k <= longest; k++) if (names.has(stem.slice(0, k))) return true;
+  return false;
+}
+
+/**
+ * The title's tokens that candidate checks look at: a title longer than
+ * EVIDENCE_MAX_CHARS (never an acceptable headline) is not read at all, and
+ * only its first EVIDENCE_MAX_TOKENS tokens are.
+ */
+function candidateTokens(text: string): string[] {
+  if (text.length > EVIDENCE_MAX_CHARS) return [];
+  return text.split(WORD_JOINERS).slice(0, EVIDENCE_MAX_TOKENS);
+}
+
+function leaksWith(forms: ReadonlyMap<string, string>, text: string): boolean {
+  const names = leakNames(forms);
+  if (names.size === 0) return false;
+  let seenWord = false;
+  for (const token of candidateTokens(text)) {
+    const [a, b] = coreRange(token);
+    if (a >= b) continue;
+    if (!seenWord) {
+      seenWord = true;
+      continue;
+    }
+    const [stem] = splitSuffix(token.slice(a, b));
+    if (letterCount(stem) === 0 || stem !== stem.toLocaleLowerCase("tr")) continue;
+    if (startsWithName(stem, names)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when a word after the first is still all lower case and starts with a
+ * name of LEAK_MIN_LETTERS or more letters that the sibling titles capitalise:
+ * 'berlinden' against "Berlin'de". Run it on the recased text: what recasing
+ * could fix is gone, so what is left is a suffixed form whose stem would have
+ * to be guessed. Such a title would ship a lower-case name.
+ */
+export function lowercaseLeak(text: string, others: readonly string[]): boolean {
+  return leaksWith(siblingCapitalForms(others), text);
+}
+
+/**
+ * How a candidate's words after the first stand against the sibling forms:
+ *   - `disagree`: lower-case words the siblings capitalise, or lower-case words
+ *     that start with a name they capitalise (the words recaseWith restores and
+ *     leaksWith reports), each word once;
+ *   - `agree`: words the candidate itself capitalises exactly as the siblings do.
+ */
+function caseAgreement(forms: ReadonlyMap<string, string>, text: string): { agree: number; disagree: number } {
+  const names = leakNames(forms);
+  let agree = 0;
+  let disagree = 0;
+  let seenWord = false;
+  for (const token of candidateTokens(text)) {
+    const [a, b] = coreRange(token);
+    if (a >= b) continue;
+    if (!seenWord) {
+      seenWord = true;
+      continue;
+    }
+    const [stem] = splitSuffix(token.slice(a, b));
+    if (letterCount(stem) === 0) continue;
+    const lowered = stem.toLocaleLowerCase("tr");
+    if (stem === lowered) {
+      if (forms.has(stem) || startsWithName(stem, names)) disagree++;
+    } else if (forms.get(lowered) === stem) {
+      agree++;
+    }
+  }
+  return { agree, disagree };
+}
+
+/**
+ * True when the title, as the outlet wrote it, opens with a lower-case letter.
+ * A number first ("5 kişi gözaltına alındı") says nothing, so it is false.
+ */
+function startsLowerCase(title: string): boolean {
+  const first = title.match(/[\p{L}\p{N}]/u)?.[0];
+  return first !== undefined && first !== first.toLocaleUpperCase("tr");
+}
+
+/**
+ * Whether the candidate is the odd one out on capitalisation, i.e. the sibling
+ * forms should be applied to it. A title the outlet wrote in lower case (it
+ * opens with a lower-case letter) takes them as soon as one word disagrees. A
+ * title that opens with a capital already capitalises its own names, so its
+ * remaining lower-case words are the outlet's choice ("kurultayı" in "Yeni
+ * Parti’nin ilk olağan kurultayı ..." against a sibling's "Olağan Kurultayı'na",
+ * "savunma ittifakına" against "Mekke Ortak Savunma Anlaşması"): it takes them
+ * only when at least two words disagree and more disagree than agree, as in
+ * "Bilal Erdoğan: türkiye ile japonya ..." (two against one).
+ */
+function isOddOneOut(forms: ReadonlyMap<string, string>, rawTitle: string, cleaned: string): boolean {
+  const { agree, disagree } = caseAgreement(forms, cleaned);
+  if (startsLowerCase(rawTitle.trim())) return disagree >= 1;
+  return disagree >= 2 && disagree > agree;
+}
+
 export interface PickOptions {
   /**
    * First pick of a cluster that has no neutral title yet. When no candidate
@@ -904,6 +1220,11 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
   }
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
 
+  // How each member title writes its words, read once and only when a candidate
+  // is reached (h27-copy-2). Sibling evidence comes from the cleaned titles, so
+  // an outlet prefix or a "SON DAKİKA" lead-in is not mistaken for a name.
+  let evidence: CaseEvidence[] | null = null;
+
   let best: { cleaned: string; score: number } | null = null;
   let floorSoft: string | null = null;
   let floorAny: string | null = null;
@@ -912,16 +1233,23 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
     // A lead-in that survived cleaning (an odd Unicode case) must not ship.
     if (cleaned === "" || LEAD_IN.test(foldTr(cleaned))) continue;
     const others = items.filter((_, j) => j !== index).map((m) => m.title);
-    if (isAcceptableNeutral(cleaned, others)) {
-      best = { cleaned, score };
+    // A lower-case-sourced title gets its names back from the siblings; one
+    // that still has a lower-case name it cannot restore ('berlinden') is not
+    // eligible for a normal pick, but can still be a floor candidate.
+    evidence ??= items.map((m) => caseEvidence(cleanHeadline(m.title.slice(0, EVIDENCE_MAX_CHARS))));
+    const forms = capitalFormsFrom(evidence.filter((_, j) => j !== index));
+    const oddOneOut = forms.size > 0 && isOddOneOut(forms, items[index]!.title, cleaned);
+    const shown = oddOneOut ? recaseWith(forms, cleaned) : cleaned;
+    if (!(oddOneOut && leaksWith(forms, shown)) && isAcceptableNeutral(shown, others)) {
+      best = { cleaned: shown, score };
       break;
     }
     if (!opts.floor) continue;
     // Shouting is a hard defect, but a floor title is shown: sentence-case it
     // first, so "NEV'İN MİRASI GÜNDEM OLDU" ships as "Nev'in mirası gündem oldu".
-    const shown = isAllCaps(cleaned) ? sentenceCaseShout(cleaned, others) : cleaned;
-    floorAny ??= shown;
-    if (floorSoft === null && !hasHardDefect(shown, others, {})) floorSoft = shown;
+    const floorTitle = isAllCaps(shown) ? sentenceCaseShout(shown, others) : shown;
+    floorAny ??= floorTitle;
+    if (floorSoft === null && !hasHardDefect(floorTitle, others, {})) floorSoft = floorTitle;
   }
 
   const incumbent = opts.incumbent;

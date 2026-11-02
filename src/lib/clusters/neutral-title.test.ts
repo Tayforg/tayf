@@ -14,7 +14,10 @@ import {
   isExtractiveModelId,
   isGenericTitle,
   loadedPenalty,
+  lowercaseLeak,
   pickNeutralTitle,
+  recaseFromSiblings,
+  siblingCapitalForms,
 } from "./neutral-title";
 
 // Member titles are real prod headlines from the Sept-2026 replay corpus and
@@ -1950,5 +1953,383 @@ describe("957cdb46: a verdict word every member shares", () => {
   it("the stored title stays on a re-pick: no member is better, so the penalty cannot swap it", () => {
     const c = h26("957cdb46");
     expect(h26Incumbent(c)).toBe(c.stored);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h27-copy-2: a candidate sourced from an all-lowercase title
+// ---------------------------------------------------------------------------
+// Two live clusters (read-only SELECT of cluster_articles x articles, 2026-11-02)
+// were titled from Haberport's all-lowercase headline while Haberler.com's
+// sibling capitalised the proper nouns: 7a9ac17b 'Avrupa, türkiye’yi ... berlinden
+// yükseldi' and 65cb64f9 'Bilal Erdoğan: türkiye ile japonya ...'. Apostrophes
+// are exactly as stored: Haberport writes U+2019, Haberler.com a straight '.
+
+const BERLIN_LOWER =
+  "avrupa, türkiye’yi stratejik ortak olarak görmeli çağrısı berlinden yükseldi";
+const BERLIN_PROPER = "Fuat Oktay Berlin'de Avrupa'dan Türkiye'yi stratejik ortak görmesini istedi";
+const TOKYO_LOWER =
+  "Bilal Erdoğan: türkiye ile japonya ilişkileri stratejik ortaklığa doğru ilerliyor";
+const TOKYO_PROPER = "Bilal Erdoğan Tokyo'da Türkiye-Japonya ilişkilerine stratejik ortaklık dedi";
+const TOKYO_RECASED =
+  "Bilal Erdoğan: Türkiye ile Japonya ilişkileri stratejik ortaklığa doğru ilerliyor";
+
+const asTitles = (titles: string[]) => titles.map((title) => ({ title }));
+
+/** The names the siblings capitalise, in the lower case the picker must not ship. */
+const SIBLING_NAMES = ["türkiye", "japonya", "berlin", "avrupa", "tokyo", "oktay", "erdoğan"];
+
+/** Words after the first that are still all lower case but start with a name a sibling capitalises. */
+function lowercasedNames(title: string): string[] {
+  const words = title.split(/[^\p{L}]+/u).filter((w) => w !== "");
+  return words
+    .slice(1)
+    .filter((w) => w === w.toLocaleLowerCase("tr") && SIBLING_NAMES.some((n) => w.startsWith(n)));
+}
+
+describe("h27-copy-2: pickNeutralTitle over the two live lowercase-sourced clusters", () => {
+  const variants: Array<[string, { floor?: boolean }]> = [
+    ["no options", {}],
+    ["{ floor: true }", { floor: true }],
+  ];
+
+  describe.each(variants)("7a9ac17b (%s)", (_name, opts) => {
+    it.each([
+      ["lowercase title first", [BERLIN_LOWER, BERLIN_PROPER]],
+      ["lowercase title last", [BERLIN_PROPER, BERLIN_LOWER]],
+    ])("%s: never ships a lowercased name, and takes the sibling's title", (_o, titles) => {
+      const picked = pickNeutralTitle(asTitles(titles), opts);
+      expect(picked).not.toBeNull();
+      expect(lowercasedNames(picked!)).toEqual([]);
+      // 'berlinden' cannot be recased unambiguously (the sibling only has
+      // 'Berlin'de'), so the Haberport title is not the pick.
+      expect(picked).toBe(BERLIN_PROPER);
+    });
+  });
+
+  describe.each(variants)("65cb64f9 (%s)", (_name, opts) => {
+    it.each([
+      ["lowercase title first", [TOKYO_LOWER, TOKYO_PROPER]],
+      ["lowercase title last", [TOKYO_PROPER, TOKYO_LOWER]],
+    ])("%s: never ships a lowercased name", (_o, titles) => {
+      const picked = pickNeutralTitle(asTitles(titles), opts);
+      expect(picked).not.toBeNull();
+      expect(lowercasedNames(picked!)).toEqual([]);
+      expect([TOKYO_RECASED, TOKYO_PROPER]).toContain(picked);
+    });
+
+    it("recases the lowercase candidate when it ties on score and comes first", () => {
+      // Equal centrality and no penalties on either title: the order decides.
+      expect(pickNeutralTitle(asTitles([TOKYO_LOWER, TOKYO_PROPER]), opts)).toBe(TOKYO_RECASED);
+      expect(pickNeutralTitle(asTitles([TOKYO_PROPER, TOKYO_LOWER]), opts)).toBe(TOKYO_PROPER);
+    });
+  });
+
+  it("a leaking candidate is not eligible for a normal pick, but a first-pick floor can still ship it", () => {
+    // The only sibling has a hard defect (a '|' left in the middle), so no
+    // candidate is acceptable; the leaking Haberport title has no hard defect.
+    const defect = "Fuat Oktay Berlin'de konuştu | Avrupa'dan Türkiye'yi ortak görmesini istedi";
+    const members = asTitles([BERLIN_LOWER, defect]);
+    expect(pickNeutralTitle(members)).toBeNull();
+    expect(pickNeutralTitle(members, { floor: true })).toBe(
+      "Avrupa, Türkiye’yi stratejik ortak olarak görmeli çağrısı berlinden yükseldi",
+    );
+  });
+
+  it("the incumbent path is untouched: a stored title that passes the gate is kept as written", () => {
+    const stored = "Avrupa, türkiye’yi stratejik ortak olarak görmeli çağrısı berlinden yükseldi";
+    expect(pickNeutralTitle(asTitles([BERLIN_LOWER, BERLIN_PROPER]), { incumbent: stored })).toBe(stored);
+  });
+});
+
+describe("h27-copy-2: siblingCapitalForms", () => {
+  it("maps the Turkish-lower-cased word to the sibling's capitalised spelling", () => {
+    const forms = siblingCapitalForms(["Heyet İstanbul'da Iğdır Valisi ile görüştü"]);
+    expect(forms.get("istanbul")).toBe("İstanbul");
+    expect(forms.get("ığdır")).toBe("Iğdır");
+    expect(forms.get("valisi")).toBe("Valisi");
+    expect(forms.has("görüştü")).toBe(false);
+  });
+
+  it("a sibling's first word is not evidence", () => {
+    expect(siblingCapitalForms(["Stratejik ortaklık görüşüldü"]).has("stratejik")).toBe(false);
+    expect(siblingCapitalForms(["Stratejik ortaklık görüşüldü"]).size).toBe(0);
+  });
+
+  it("the word right after . : ! ? or an opening quote is not evidence either", () => {
+    for (const sibling of [
+      "Heyet toplandı. Stratejik ortaklık konuşuldu",
+      "Heyet dedi ki: Stratejik ortaklık konuşuldu",
+      "Heyet toplandı! Stratejik ortaklık konuşuldu",
+      "Heyet toplandı? Stratejik ortaklık konuşuldu",
+      'Heyet "Stratejik ortaklık" dedi',
+      "Heyet “Stratejik ortaklık” dedi",
+      "Heyet ‘Stratejik ortaklık’ dedi",
+    ]) {
+      expect(siblingCapitalForms([sibling]).has("stratejik"), sibling).toBe(false);
+    }
+  });
+
+  it("splits on a hyphen, an en dash, an em dash and a slash: 'Türkiye-Japonya' is evidence for both parts", () => {
+    for (const sep of ["-", "–", "—", "/"]) {
+      const forms = siblingCapitalForms([`Heyet Türkiye${sep}Japonya ilişkilerini görüştü`]);
+      expect(forms.get("türkiye"), sep).toBe("Türkiye");
+      expect(forms.get("japonya"), sep).toBe("Japonya");
+    }
+  });
+
+  it("a word that any sibling writes in lower case is dropped, whatever the others say", () => {
+    const forms = siblingCapitalForms([
+      "Heyet Türkiye ziyaretinde",
+      "Heyet türkiye ziyaretinde",
+    ]);
+    expect(forms.has("türkiye")).toBe(false);
+    // The lower-case evidence can come from an apostrophe form too.
+    const viaSuffix = siblingCapitalForms(["Heyet Türkiye gitti", "Heyet türkiye'ye gitti"]);
+    expect(viaSuffix.has("türkiye")).toBe(false);
+  });
+
+  it("two different capitalised spellings of one word map to nothing", () => {
+    const forms = siblingCapitalForms(["Heyet Roma'ya gitti", "Heyet ROMA'ya gitti"]);
+    expect(forms.has("roma")).toBe(false);
+    // The same spelling twice is still one spelling.
+    expect(siblingCapitalForms(["Heyet Roma'ya gitti", "Bakan Roma'da konuştu"]).get("roma")).toBe("Roma");
+  });
+
+  it("a short word a sibling writes in capitals maps to its upper form", () => {
+    const forms = siblingCapitalForms(["Heyet EPDK'dan zam istedi", "Heyet CHP ile görüştü"]);
+    expect(forms.get("epdk")).toBe("EPDK");
+    expect(forms.get("chp")).toBe("CHP");
+  });
+
+  it("a long shouted word is not an acronym and maps to nothing", () => {
+    expect(siblingCapitalForms(["Bakan açıkladı KRİTİK karar"]).has("kritik")).toBe(false);
+  });
+
+  it("a word that is a framing cue or a stop word is never an acronym", () => {
+    const forms = siblingCapitalForms(["Bakan açıkladı ŞOK karar", "Bakan dedi SON durum"]);
+    expect(forms.has("şok")).toBe(false);
+    expect(forms.has("son")).toBe(false);
+  });
+
+  it("ignores words with a digit and single letters", () => {
+    const forms = siblingCapitalForms(["Heyet G20 zirvesinde A takımı ile 3'Ü görüştü"]);
+    expect(forms.has("g20")).toBe(false);
+    expect(forms.has("a")).toBe(false);
+  });
+
+  it("a shouted sibling gives no evidence (its capitals are the outlet's, not the words')", () => {
+    expect(siblingCapitalForms(["HEYET BERLİN'DE ÇAĞRI YAPTI"]).size).toBe(0);
+  });
+
+  it("a Title Case sibling gives no capital evidence (every word is capitalised)", () => {
+    const forms = siblingCapitalForms([
+      "Belediyeye Yönelik Yolsuzluk Soruşturmasında Yeni Tutuklama Kararı",
+    ]);
+    expect(forms.size).toBe(0);
+  });
+
+  it("an empty list, empty titles and hostile input are harmless", () => {
+    expect(siblingCapitalForms([]).size).toBe(0);
+    expect(siblingCapitalForms(["", "   "]).size).toBe(0);
+    const t0 = performance.now();
+    siblingCapitalForms([`Heyet ${"Berlin ".repeat(200_000)}`]);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+});
+
+describe("h27-copy-2: recaseFromSiblings", () => {
+  it("recases the stem of a lower-case word and keeps the suffix after an apostrophe", () => {
+    expect(
+      recaseFromSiblings("Heyet türkiye’yi ziyaret etti", ["Heyet Türkiye ve Japonya'yı ziyaret etti"]),
+    ).toBe("Heyet Türkiye’yi ziyaret etti");
+    expect(
+      recaseFromSiblings("Heyet türkiye'yi ziyaret etti", ["Heyet Türkiye ve Japonya'yı ziyaret etti"]),
+    ).toBe("Heyet Türkiye'yi ziyaret etti");
+  });
+
+  it("keeps the suffix's own case ('türkiye’YI' stays 'Türkiye’YI') and the edge punctuation", () => {
+    expect(
+      recaseFromSiblings("Heyet (türkiye’YI), japonya: gitti", ["Heyet Türkiye ve Japonya gitti"]),
+    ).toBe("Heyet (Türkiye’YI), Japonya: gitti");
+  });
+
+  it("recases the live 65cb64f9 title, after a colon and inside the word run", () => {
+    expect(recaseFromSiblings(TOKYO_LOWER, [TOKYO_PROPER])).toBe(TOKYO_RECASED);
+  });
+
+  it("recases every part of a hyphenated compound", () => {
+    expect(
+      recaseFromSiblings("Heyet türkiye-japonya ilişkilerini görüştü", ["Heyet Türkiye ve Japonya gitti"]),
+    ).toBe("Heyet Türkiye-Japonya ilişkilerini görüştü");
+  });
+
+  it("uses Turkish casing: i -> İ, ı -> I", () => {
+    expect(recaseFromSiblings("Heyet istanbul’da buluştu", ["Heyet İstanbul'da buluştu"])).toBe(
+      "Heyet İstanbul’da buluştu",
+    );
+    expect(recaseFromSiblings("Heyet ılgaz’da buluştu", ["Heyet Ilgaz'da buluştu"])).toBe(
+      "Heyet Ilgaz’da buluştu",
+    );
+  });
+
+  it("never touches the first word", () => {
+    expect(recaseFromSiblings("türkiye heyeti geldi", ["Heyet Türkiye'ye gitti"])).toBe("türkiye heyeti geldi");
+  });
+
+  it("a sibling's sentence-initial word is not evidence: 'Stratejik ortaklık...' does not recase 'stratejik'", () => {
+    expect(
+      recaseFromSiblings("Heyet stratejik ortaklık görüştü", ["Stratejik ortaklık anlaşması imzalandı"]),
+    ).toBe("Heyet stratejik ortaklık görüştü");
+  });
+
+  it("a word that any sibling writes in lower case is never recased", () => {
+    expect(
+      recaseFromSiblings("Heyet türkiye ziyaretinde", [
+        "Heyet Türkiye ziyaretinde",
+        "Bakan Heyet türkiye'de konuştu",
+      ]),
+    ).toBe("Heyet türkiye ziyaretinde");
+  });
+
+  it("two different capitalised spellings mean no recasing", () => {
+    expect(recaseFromSiblings("Heyet roma'ya gitti", ["Heyet Roma'ya gitti", "Heyet ROMA'ya gitti"])).toBe(
+      "Heyet roma'ya gitti",
+    );
+  });
+
+  it("recases to an acronym's upper form when a sibling writes it in capitals", () => {
+    expect(recaseFromSiblings("Heyet epdk'dan zam istedi", ["Heyet EPDK'dan zam istedi"])).toBe(
+      "Heyet EPDK'dan zam istedi",
+    );
+  });
+
+  it("leaves a word that is already capitalised or mixed-case alone", () => {
+    expect(recaseFromSiblings("Heyet Berlin’de iPhone sattı", ["Heyet Berlin'de konuştu"])).toBe(
+      "Heyet Berlin’de iPhone sattı",
+    );
+  });
+
+  it("returns the title unchanged without siblings or evidence", () => {
+    expect(recaseFromSiblings("Heyet türkiye’yi gezdi", [])).toBe("Heyet türkiye’yi gezdi");
+    expect(recaseFromSiblings("Heyet türkiye’yi gezdi", ["Heyet bir şey yaptı"])).toBe("Heyet türkiye’yi gezdi");
+    expect(recaseFromSiblings("", ["Heyet Berlin'de"])).toBe("");
+  });
+
+  it("preserves whitespace runs and separators exactly", () => {
+    expect(recaseFromSiblings("Heyet  türkiye –  japonya", ["Heyet Türkiye Japonya"])).toBe(
+      "Heyet  Türkiye –  Japonya",
+    );
+  });
+});
+
+describe("h27-copy-2: lowercaseLeak", () => {
+  it("is true for a lower-case word that starts with a name a sibling capitalises (4+ letters)", () => {
+    expect(lowercaseLeak(BERLIN_LOWER, [BERLIN_PROPER])).toBe(true);
+    // The word may be exactly the name too (an un-recased candidate).
+    expect(lowercaseLeak("Heyet türkiye’yi gezdi", ["Heyet Türkiye'yi gezdi"])).toBe(true);
+  });
+
+  it("is false once the word is capitalised or recased", () => {
+    expect(lowercaseLeak("Avrupa, Türkiye’yi ortak görmeli Berlin’den yükseldi", [BERLIN_PROPER])).toBe(false);
+  });
+
+  it("never counts the first word", () => {
+    expect(lowercaseLeak("berlinden haber geldi", ["Heyet Berlin'de konuştu"])).toBe(false);
+  });
+
+  it("ignores sibling names shorter than 4 letters", () => {
+    expect(lowercaseLeak("Heyet alihan geldi", ["Heyet Ali geldi"])).toBe(false);
+    expect(lowercaseLeak("Heyet aliye geldi", ["Heyet Ali geldi"])).toBe(false);
+  });
+
+  it("is false when a sibling also writes the word in lower case (ambiguous)", () => {
+    expect(
+      lowercaseLeak("Heyet berlinden geldi", ["Heyet Berlin'de konuştu", "Heyet berlin yolunda"]),
+    ).toBe(false);
+  });
+
+  it("is false without siblings", () => {
+    expect(lowercaseLeak(BERLIN_LOWER, [])).toBe(false);
+  });
+});
+
+// A title the outlet wrote in lower case takes the siblings' capitals; a title
+// that already capitalises its own names keeps its lower-case words (they are the
+// outlet's choice: 'kurultayı' against a sibling's 'Olağan Kurultayı'na').
+describe("h27-copy-2: only the odd one out on capitalisation is recased", () => {
+  it("a title that opens in lower case takes the sibling's capital for a single word", () => {
+    const lower = "avrupa, türkiye’yi ortak görmeli çağrısı yükseldi";
+    const proper = "Fuat Oktay Berlin'de Avrupa'dan Türkiye'yi ortak görmesini istedi";
+    expect(pickNeutralTitle(asTitles([lower, proper]))).toBe(
+      "Avrupa, Türkiye’yi ortak görmeli çağrısı yükseldi",
+    );
+  });
+
+  it("a title that opens with a number does not count as lower-case-sourced", () => {
+    const own = "39 şüpheli türkiye’de gözaltına alındı, savcılık açıklama yaptı";
+    const sibling = "Savcılık açıkladı: Türkiye'de 39 şüpheli gözaltına alındı";
+    // One disagreeing word, no capitalised name of its own: left as written.
+    expect(pickNeutralTitle(asTitles([own, sibling]))).toBe(cleanHeadline(own));
+  });
+
+  it("a sentence-case title with one disagreeing word keeps it", () => {
+    const own = "Yeni Parti’nin ilk olağan kurultayı 14-15 Kasım’da yapılacak";
+    const sibling = "YENİ Parti 1. Olağan Kurultayı'na hazırlanıyor: Takvim nasıl işleyecek?";
+    const picked = pickNeutralTitle(asTitles([own, sibling]));
+    expect(picked).toBe(own);
+  });
+
+  it("a sentence-case title keeps two disagreeing words when it agrees on as many names", () => {
+    // 'Yerlikaya' and 'Kalın' agree (two); 'meclis' and 'komisyon' disagree (two).
+    const own = "Ankara’da Yerlikaya ve Kalın açıkladı: meclis komisyon kararı bugün netleşecek";
+    const sibling = "Bakan Ankara’da Yerlikaya ile Kalın ve Meclis Komisyon kararını duyurdu";
+    const picked = pickNeutralTitle(asTitles([own, sibling]));
+    expect(picked).toBe(cleanHeadline(own));
+  });
+
+  it("a sentence-case title that disagrees on more names than it agrees on takes the sibling's capitals", () => {
+    // The live 65cb64f9 shape: one capitalised name of its own, two lower-cased ones.
+    expect(pickNeutralTitle(asTitles([TOKYO_LOWER, TOKYO_PROPER]))).toBe(TOKYO_RECASED);
+  });
+});
+
+describe("h27-copy-2: hostile input stays cheap", () => {
+  // Letters only (a digit would exclude the word from the evidence): 0 -> "a", 27 -> "bb" ...
+  const nameOf = (n: number): string => {
+    let out = "";
+    let v = n;
+    do {
+      out = String.fromCharCode(97 + (v % 26)) + out;
+      v = Math.floor(v / 26);
+    } while (v > 0);
+    return `Nam${out}`;
+  };
+
+  it("150 siblings with 150 distinct names each, none acceptable, finish within 3 s", () => {
+    // Every member is a question, so no candidate is acceptable and the loop
+    // visits all of them: each one merges the evidence of the other 149.
+    const members = Array.from({ length: 150 }, (_, i) => ({
+      title: `avrupa ${Array.from({ length: 150 }, (_, j) => nameOf(i * 150 + j).toLocaleLowerCase("tr")).join(" ")} ${nameOf(i * 150)} mi?`,
+    }));
+    const t0 = performance.now();
+    pickNeutralTitle(members, { floor: true });
+    expect(performance.now() - t0).toBeLessThan(3000);
+  });
+
+  it("a 2 MB title and a 2 MB sibling are read only up to a bound", () => {
+    const big = `avrupa ${"türkiye ".repeat(250_000)}`;
+    const t0 = performance.now();
+    siblingCapitalForms([big, `Heyet ${"Berlin ".repeat(250_000)}`]);
+    recaseFromSiblings(big, [`Heyet ${"Türkiye ".repeat(250_000)}`]);
+    lowercaseLeak(big, [`Heyet ${"Türkiye ".repeat(250_000)}`]);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+
+  it("a title over 1000 characters is returned as written (never an acceptable headline)", () => {
+    const long = `Heyet türkiye’yi ziyaret etti ${"x ".repeat(600)}`;
+    expect(long.length).toBeGreaterThan(1000);
+    expect(recaseFromSiblings(long, ["Heyet Türkiye ve Japonya gitti"])).toBe(long);
+    expect(lowercaseLeak(long, ["Heyet Türkiye ve Japonya gitti"])).toBe(false);
   });
 });

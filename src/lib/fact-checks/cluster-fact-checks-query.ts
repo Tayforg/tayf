@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createSlowReaderClient } from "@/lib/supabase/server";
 import { FACT_CHECK_PUBLISHERS, type FactCheckPublisherKey } from "./feeds";
 import { isAllowedFactCheckUrl } from "./normalize";
 
@@ -67,7 +67,7 @@ function normalizeEmbed(embed: FactCheckEmbed | FactCheckEmbed[]): FactCheckEmbe
 async function readClusterFactChecks(
   clusterId: string,
 ): Promise<ClusterFactCheck[]> {
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
 
   const { data, error } = await supabase
     .from("cluster_fact_checks")

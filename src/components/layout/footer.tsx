@@ -90,7 +90,7 @@ export function Footer() {
         {/* Bottom rule */}
         <div className="mt-8 pt-5 border-t border-border/20 flex items-center justify-between">
           <span className="text-[10px] text-muted-foreground">
-            2026 Tayf
+            © Tayf
           </span>
           <div className="h-[1px] flex-1 mx-6 bg-gradient-to-r from-red-500/10 via-brand/15 to-emerald-500/10" />
           <Suspense fallback={null}>

@@ -1,7 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached } from "@/lib/cache-resilience";
-import { createServerClient } from "@/lib/supabase/server";
+import { createSlowReaderClient } from "@/lib/supabase/server";
 
 // The live number behind the footer's "N kaynak" figure: active sources that
 // delivered at least one article in the last 7 days.
@@ -45,7 +45,7 @@ export function countDeliveringSources(
 // Raw read: THROWS on a Supabase error so a failure can never be mistaken for
 // "0 sources delivered".
 async function fetchDeliveringSourceCount(): Promise<number> {
-  const supabase = createServerClient();
+  const supabase = createSlowReaderClient();
 
   const sevenDaysAgoIso = new Date(
     Date.now() - ACTIVE_SOURCE_WINDOW_DAYS * 24 * 60 * 60 * 1000,

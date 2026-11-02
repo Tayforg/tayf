@@ -167,7 +167,7 @@ export default function HomePage({
       <PageHero
         kicker="Türkiye haber takibi"
         title="Haberler"
-        subtitle="Aynı olayı kaç farklı kaynak, hangi bakış açısıyla ele alıyor? Ensemble kümeleme ile birleştirilmiş güncel politika haberleri."
+        subtitle="Aynı olayı kaç farklı kaynak, hangi bakış açısıyla ele alıyor? Otomatik kümelenmiş güncel politika haberleri."
       />
 
       <Suspense fallback={<SearchBarPlaceholder />}>
