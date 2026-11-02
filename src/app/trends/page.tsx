@@ -18,6 +18,7 @@ export const metadata: Metadata = staticPageMetadata({
 import { ZONE_META } from "@/lib/bias/config";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { niceScale } from "@/lib/format/nice-scale";
+import { chartTableRows } from "@/lib/trends/chart-table";
 import { fetchIstanbulTimeline, WINDOW_DAYS } from "@/lib/trends/daily-zones";
 import { getRisingEntities } from "@/lib/trends/rising-query";
 import type { MediaDnaZone } from "@/types";
@@ -180,7 +181,10 @@ export default async function TrendsPage() {
           </ul>
         </div>
 
-        <ScrollToEnd className="w-full overflow-x-auto spectrum-glow">
+        <ScrollToEnd
+          className="w-full overflow-x-auto spectrum-glow"
+          label={`Son ${WINDOW_DAYS} gün grafiği (yatay kaydırılabilir)`}
+        >
           <svg
             viewBox={`0 0 ${CHART_W} ${CHART_H}`}
             role="img"
@@ -289,6 +293,48 @@ export default async function TrendsPage() {
             </g>
           </svg>
         </ScrollToEnd>
+
+        {/* Text alternative to the chart (WCAG 1.1.1 / 1.3.1): the per-day
+            counts otherwise exist only as <title>s inside a role="img" svg.
+            Deliberately NOT wrapped in an overflow container: five short
+            columns fit a 324px viewport, and a second scrollable region would
+            need its own tab stop (axe scrollable-region-focusable). */}
+        {totalArticles > 0 ? (
+          <details className="text-xs">
+            <summary className="cursor-pointer select-none rounded py-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              Günlük sayıları tablo olarak göster
+            </summary>
+            <table className="mt-3 w-full text-xs tabular-nums">
+              <caption className="sr-only">
+                {`Son ${WINDOW_DAYS} günde Medya DNA bölgesine göre günlük haber sayısı (günler Türkiye saatine göre)`}
+              </caption>
+              <thead className="[&_th]:px-1.5 [&_th]:py-1 [&_th]:text-right [&_th]:font-medium [&_th:first-child]:text-left">
+                <tr>
+                  <th scope="col">Gün</th>
+                  {ZONES.map((z) => (
+                    <th key={z} scope="col">
+                      {ZONE_META[z].label}
+                    </th>
+                  ))}
+                  <th scope="col">Toplam</th>
+                </tr>
+              </thead>
+              <tbody>
+                {chartTableRows(buckets).map((row) => (
+                  <tr key={row.day}>
+                    <th scope="row" className="px-1.5 py-1 text-left font-normal">
+                      {row.label}
+                    </th>
+                    <td className="px-1.5 py-1 text-right">{formatCountTr(row.iktidar)}</td>
+                    <td className="px-1.5 py-1 text-right">{formatCountTr(row.bagimsiz)}</td>
+                    <td className="px-1.5 py-1 text-right">{formatCountTr(row.muhalefet)}</td>
+                    <td className="px-1.5 py-1 text-right">{formatCountTr(row.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </details>
+        ) : null}
 
         {totalArticles === 0 ? (
           <p className="text-xs text-muted-foreground text-center pt-2">

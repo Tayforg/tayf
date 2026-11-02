@@ -426,3 +426,46 @@ describe("cluster-card.tsx bookmark position (h11-mobile-1)", () => {
     expect(src).not.toContain('className="absolute right-3 top-3 z-10"');
   });
 });
+
+describe("cluster-card.tsx English headline language (h17-a11y-2, WCAG 3.1.2)", () => {
+  // Interface body of `ClusterCardSource`, so the slug assertion cannot be
+  // satisfied by a `slug` declared on some other interface in the file.
+  function interfaceBody(name: string): string {
+    const start = src.indexOf(`export interface ${name}`);
+    expect(start).toBeGreaterThan(-1);
+    const open = src.indexOf("{", start);
+    const close = src.indexOf("\n}", open);
+    expect(close).toBeGreaterThan(open);
+    return src.slice(open, close);
+  }
+
+  it("imports sourceLang from @/lib/sources/source-language", () => {
+    expect(src).toMatch(
+      /import\s*\{[^}]*\bsourceLang\b[^}]*\}\s*from\s*["']@\/lib\/sources\/source-language["']/,
+    );
+  });
+
+  it("ClusterCardSource declares an optional, nullable slug (callers' projections may omit it)", () => {
+    expect(interfaceBody("ClusterCardSource")).toMatch(
+      /\bslug\?:\s*string\s*\|\s*null\s*;/,
+    );
+  });
+
+  it("resolves title_lang from the slug with the source name as the fallback", () => {
+    expect(count(src, "title_lang: sourceLang(")).toBe(1);
+    expect(src).toMatch(
+      /title_lang:\s*sourceLang\(\s*\{\s*slug:\s*src\?\.slug,\s*name:\s*source_name\s*\}\s*\)/,
+    );
+  });
+
+  it("the article title span carries lang={a.title_lang}", () => {
+    expect(count(src, "lang={a.title_lang}")).toBe(1);
+    expect(src).toMatch(
+      /<span\s+lang=\{a\.title_lang\}\s+className="text-muted-foreground text-xs"\s*>\s*\{a\.title\}\s*<\/span>/,
+    );
+  });
+
+  it("no other lang= appears in the file (source name and chrome stay Turkish)", () => {
+    expect(src.match(/\blang=/g)).toHaveLength(1);
+  });
+});

@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { SHORTCUT_PREF_KEY } from "@/lib/a11y/shortcut-pref";
 import { isSearchShortcut } from "./search-shortcut";
 
 // h10-a11y-2: the global "/" shortcut used to fire for any "/" keydown whose
@@ -9,6 +10,17 @@ import { isSearchShortcut } from "./search-shortcut";
 // a handful of fields and never touches the DOM.
 
 const body = { tagName: "BODY" };
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+/** A window whose localStorage holds the shortcut preference `value`. */
+function stubPref(value: string | null) {
+  const getItem = vi.fn((k: string) => (k === SHORTCUT_PREF_KEY ? value : null));
+  vi.stubGlobal("window", { localStorage: { getItem, setItem: vi.fn() } });
+  return getItem;
+}
 
 describe("isSearchShortcut", () => {
   it("is true for a plain '/' whose target is the page body", () => {
@@ -74,5 +86,55 @@ describe("isSearchShortcut", () => {
     expect(isSearchShortcut({ key: "/", target: 42 })).toBe(true);
     expect(isSearchShortcut({ key: "/", target: {} })).toBe(true);
     expect(isSearchShortcut({ key: "/", target: { tagName: 7 } })).toBe(true);
+  });
+
+  // h17-a11y-3 (WCAG 2.1.4): readers can switch single-key shortcuts off, and
+  // "/" has to honour that too.
+  describe("shortcut preference", () => {
+    it("is false when shortcuts are explicitly disabled", () => {
+      expect(isSearchShortcut({ key: "/", target: body }, false)).toBe(false);
+    });
+
+    it("is true when shortcuts are explicitly enabled", () => {
+      expect(isSearchShortcut({ key: "/", target: body }, true)).toBe(true);
+    });
+
+    it("reads the stored preference by default: '0' turns it off", () => {
+      stubPref("0");
+      expect(isSearchShortcut({ key: "/", target: body })).toBe(false);
+    });
+
+    it("reads the stored preference by default: '1' keeps it on", () => {
+      stubPref("1");
+      expect(isSearchShortcut({ key: "/", target: body })).toBe(true);
+    });
+
+    it("stays on when nothing is stored", () => {
+      stubPref(null);
+      expect(isSearchShortcut({ key: "/", target: body })).toBe(true);
+    });
+
+    it("an explicit argument wins over the stored preference", () => {
+      stubPref("0");
+      expect(isSearchShortcut({ key: "/", target: body }, true)).toBe(true);
+      stubPref("1");
+      expect(isSearchShortcut({ key: "/", target: body }, false)).toBe(false);
+    });
+
+    it("does not touch storage for keys that are not '/' or already excluded", () => {
+      const getItem = stubPref("1");
+      isSearchShortcut({ key: "a", target: body });
+      isSearchShortcut({ key: "/", ctrlKey: true, target: body });
+      isSearchShortcut({ key: "/", target: { tagName: "INPUT" } });
+      isSearchShortcut({ key: "/", isComposing: true, target: body });
+      expect(getItem).not.toHaveBeenCalled();
+    });
+
+    it("reads storage once for a real '/'", () => {
+      const getItem = stubPref("1");
+      isSearchShortcut({ key: "/", target: body });
+      expect(getItem).toHaveBeenCalledTimes(1);
+      expect(getItem).toHaveBeenCalledWith(SHORTCUT_PREF_KEY);
+    });
   });
 });

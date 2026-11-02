@@ -10,6 +10,7 @@ import { formatTurkishTimeAgo } from "@/lib/time";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { isBoilerplateDescription } from "@/lib/articles/description-boilerplate";
 import { articleExcerptEligible, articleImageEligible } from "@/lib/sources/rights";
+import { sourceLang } from "@/lib/sources/source-language";
 import { optimizedThumbSrcSet } from "@/lib/images/image-url";
 import { LabelCard } from "@/components/source/label-card";
 import { ClickbaitKarneLine } from "@/components/source/clickbait-karne";
@@ -147,6 +148,11 @@ export default async function SourceProfilePage({ params }: PageProps) {
       getSourceReliability(source.id),
       isClickbaitPublic() ? getClickbaitKarne() : Promise.resolve(null),
     ]);
+
+  // WCAG 3.1.2: the English outlets' headlines and excerpts are marked
+  // lang="en" so a screen reader does not read them with Turkish phonetics;
+  // undefined (every other source) renders no attribute and inherits "tr".
+  const articleLang = sourceLang({ slug: source.slug, name: source.name });
 
   // S-17: BreadcrumbList JSON-LD (Anasayfa → Kaynaklar → this source).
   const breadcrumbs = buildBreadcrumbs([
@@ -302,14 +308,20 @@ export default async function SourceProfilePage({ params }: PageProps) {
                       <div className="h-16 w-16 sm:h-20 sm:w-20 rounded shrink-0 bg-muted/60" />
                     )}
                     <div className="min-w-0 flex-1 space-y-1">
-                      <p className="text-sm font-semibold leading-snug line-clamp-2 group-hover:text-foreground">
+                      <p
+                        lang={articleLang}
+                        className="text-sm font-semibold leading-snug line-clamp-2 group-hover:text-foreground"
+                      >
                         {article.title}
                       </p>
                       {/* RSS call-to-action stubs ("Click to continue",
                           "Devamını oku") are not summaries: hide them. */}
                       {articleExcerptEligible(article, source) &&
                       !isBoilerplateDescription(article.description) ? (
-                        <p className="text-xs text-muted-foreground leading-snug line-clamp-2">
+                        <p
+                          lang={articleLang}
+                          className="text-xs text-muted-foreground leading-snug line-clamp-2"
+                        >
                           {article.description}
                         </p>
                       ) : null}

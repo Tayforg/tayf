@@ -159,12 +159,14 @@ describe("editable public fields keep a 16 px font on phones (iOS focus zoom)", 
     expect(checked.length).toBeGreaterThanOrEqual(5);
   });
 
-  it("exempts only the honeypots and the read-only copy box (no field hides behind an exemption)", () => {
+  it("exempts only the honeypots, the read-only copy box and the shortcuts switch (no field hides behind an exemption)", () => {
     const exempt = allTags
       .filter(({ tag }) => exemption(tag) !== null)
       .map(({ file, kind }) => `${file} <${kind}>`)
       .sort();
+    // kbd-shortcuts.tsx: the role="switch" checkbox has no text entry, so no focus zoom.
     expect(exempt).toEqual([
+      "src/components/kbd-shortcuts.tsx <input>",
       "src/components/newsletter/newsletter-form.tsx <input>",
       "src/components/story/correction-form.tsx <input>",
       "src/components/story/share-button.tsx <textarea>",

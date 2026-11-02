@@ -63,12 +63,20 @@ export function ScrollHint() {
   );
 }
 
+// h17-a11y-1 (WCAG 2.1.1): the scroller is a tab stop (tabIndex 0) with a
+// region role and a name, so a keyboard or switch user can focus it and scroll
+// to the off-screen days with the arrow keys (native behaviour on a focused
+// overflow container, no JS). Every focus-visible class below is a literal
+// token; Tailwind 4 drops computed class names.
 export function ScrollToEnd({
   children,
   className,
+  label,
 }: {
   children: React.ReactNode;
   className: string;
+  /** Accessible name of the scrollable region, e.g. "Son 30 gün grafiği". */
+  label: string;
 }) {
   const [overflowing, setOverflowing] = useState(false);
   const [atStart, setAtStart] = useState(false);
@@ -83,7 +91,10 @@ export function ScrollToEnd({
     <div className="relative">
       <div
         ref={ref}
-        className={className}
+        tabIndex={0}
+        role="region"
+        aria-label={label}
+        className={`${className} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background`}
         onScroll={(e) => setAtStart(isAtStart(e.currentTarget))}
       >
         {children}

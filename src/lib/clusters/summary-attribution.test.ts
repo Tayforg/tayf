@@ -424,3 +424,172 @@ describe("entity residue repair", () => {
     expect(a?.text).toBe("AT&T ve Fenerbahçe 50% & fazlası");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Feed residue (read-time tidy). summary_tr is the seed's raw description, so
+// it can carry glued sentences ("dedi.Y"), an outlet CTA tail ("Devamı için
+// tıklayınız"), widget heading lines and raw newlines. The text that is SHOWN
+// (page, meta/og/JSON-LD, rss.xml, digest) is tidied; the text that is
+// COMPARED (seed match, BL-13 gate, wire majority) stays the untidied,
+// entity-repaired one so those checks remain exact.
+// ---------------------------------------------------------------------------
+describe("feed residue tidy", () => {
+  const notWire = { isWireRedistribution: false };
+  const wire = { isWireRedistribution: true };
+  const DIRTY = "X dedi.Y geldi. Devamı için tıklayınız";
+  const TIDY = "X dedi. Y geldi.";
+
+  it("(a) still finds the seed by the untidied text and returns tidied text attributed to it", () => {
+    const m = member("a", T0, DIRTY);
+    expect(findSeedMember([m], DIRTY)).toBe(m);
+    expect(summaryAttribution({ summary: DIRTY, members: [m], wire: notWire })).toEqual({
+      text: TIDY,
+      source: m.source,
+    });
+  });
+
+  it("(a) does not attribute to a member that only matches the TIDIED text", () => {
+    // The member holds the clean form; the summary holds the dirty form. They
+    // are different strings, so (as before this change) no member is the seed.
+    const m = member("a", T0, TIDY);
+    expect(findSeedMember([m], DIRTY)).toBeNull();
+    expect(summaryAttribution({ summary: DIRTY, members: [m], wire: notWire })).toEqual({
+      text: TIDY,
+      source: null,
+    });
+  });
+
+  it("(b) BL-13: still hides the excerpt when the only literal match is rights-blocked", () => {
+    const blocked = member("blocked", T0, DIRTY);
+    blocked.source.excerpt_allowed = false;
+    expect(summaryAttribution({ summary: DIRTY, members: [blocked], wire: notWire })).toBeNull();
+  });
+
+  it("(b) BL-13: falls back to the next allowed literal match and tidies its text", () => {
+    const blocked = member("blocked", "2026-09-06T09:59:20.000Z", DIRTY);
+    blocked.source.excerpt_allowed = false;
+    const allowed = member("allowed", "2026-09-06T10:00:40.000Z", DIRTY);
+    expect(
+      summaryAttribution({ summary: DIRTY, members: [blocked, allowed], wire: notWire }),
+    ).toEqual({ text: TIDY, source: allowed.source });
+  });
+
+  it("(c) hides a summary that is nothing but a CTA, even with a matching allowed member", () => {
+    const m = member("a", T0, "Devamı için tıklayınız");
+    expect(
+      summaryAttribution({ summary: "Devamı için tıklayınız", members: [m], wire: notWire }),
+    ).toBeNull();
+    expect(
+      summaryAttribution({ summary: "  Read more ›  ", members: [], wire: notWire }),
+    ).toBeNull();
+  });
+
+  it("(c) hides a summary that is nothing but a widget heading", () => {
+    expect(
+      summaryAttribution({ summary: "İlginizi Çekebilir", members: [], wire: notWire }),
+    ).toBeNull();
+  });
+
+  it("(d) summaryAttributionWithoutMembers returns tidied text and collapses newlines", () => {
+    expect(summaryAttributionWithoutMembers({ summary: DIRTY, wire: notWire })).toEqual({
+      text: TIDY,
+      source: null,
+    });
+    expect(
+      summaryAttributionWithoutMembers({
+        summary: "belirtti.\nİlginizi Çekebilir\nToplantıya\n\n katıldı.",
+        wire: notWire,
+      }),
+    ).toEqual({ text: "belirtti. Toplantıya katıldı.", source: null });
+  });
+
+  it("(d) summaryAttributionWithoutMembers hides a CTA-only summary and still hides wire copies", () => {
+    expect(
+      summaryAttributionWithoutMembers({ summary: "Devamı için tıklayınız", wire: notWire }),
+    ).toBeNull();
+    expect(summaryAttributionWithoutMembers({ summary: DIRTY, wire })).toBeNull();
+  });
+
+  it("(d) resolveSummaryAttribution returns tidied text on both the member-aware and degraded paths", () => {
+    const m = member("a", T0, DIRTY);
+    expect(
+      resolveSummaryAttribution({
+        summary: DIRTY,
+        members: [m],
+        lookupFailed: false,
+        wire: notWire,
+      }),
+    ).toEqual({ text: TIDY, source: m.source });
+    expect(
+      resolveSummaryAttribution({
+        summary: DIRTY,
+        members: undefined,
+        lookupFailed: false,
+        wire: notWire,
+      }),
+    ).toEqual({ text: TIDY, source: null });
+    // A failed lookup still hides everything: tidy must not reopen that door.
+    expect(
+      resolveSummaryAttribution({
+        summary: DIRTY,
+        members: undefined,
+        lookupFailed: true,
+        wire: notWire,
+      }),
+    ).toBeNull();
+  });
+
+  it("(d) collapses raw newlines in the member-aware path too", () => {
+    const raw = "Birinci cümle.\nİkinci cümle.\r\nÜçüncü cümle.";
+    const m = member("a", T0, raw);
+    expect(summaryAttribution({ summary: raw, members: [m], wire: notWire })).toEqual({
+      text: "Birinci cümle. İkinci cümle. Üçüncü cümle.",
+      source: m.source,
+    });
+  });
+
+  it("(e) describeForMeta built from a CTA-tailed summary has no 'Devamı' and no newline", () => {
+    const raw = "Yangın çıktı.Ekipler geldi.\nDevamı için tıklayınız";
+    const m = member("a", T0, raw);
+    const attribution = summaryAttribution({ summary: raw, members: [m], wire: notWire });
+    const meta = describeForMeta({ count: 2, attribution });
+    expect(meta).not.toContain("Devamı");
+    expect(meta).not.toContain("\n");
+    expect(meta).toBe("2 kaynak. a: Yangın çıktı. Ekipler geldi.");
+  });
+
+  it("(f) a wire dispatch whose seed only matches the UNTIDIED text is still hidden on a hash majority", () => {
+    const seed = member("a", T0, DIRTY, "h1");
+    const members = [seed, member("b", "2026-09-06T10:10:00Z", null, "h1")];
+    expect(summaryAttribution({ summary: DIRTY, members, wire })).toBeNull();
+  });
+
+  it("(f) the same wire dispatch is shown (tidied) when the seed's hash is not the majority", () => {
+    const seed = member("a", T0, DIRTY, "h1");
+    const members = [
+      seed,
+      member("b", "2026-09-06T10:10:00Z", null, "h2"),
+      member("c", "2026-09-06T10:20:00Z", null, "h2"),
+    ];
+    expect(summaryAttribution({ summary: DIRTY, members, wire })).toEqual({
+      text: TIDY,
+      source: seed.source,
+    });
+  });
+
+  it("composes with entity repair: residue is decoded first, then tidied, and the seed still matches", () => {
+    const raw = "O &quot;geldi&quot; dedi.Sonra gitti. Devamını oku";
+    const m = member("a", T0, raw);
+    expect(summaryAttribution({ summary: raw, members: [m], wire: notWire })).toEqual({
+      text: 'O "geldi" dedi. Sonra gitti.',
+      source: m.source,
+    });
+  });
+
+  it("leaves an already-clean summary exactly as before", () => {
+    const m = member("a", T0, "Temiz bir özet.");
+    expect(
+      summaryAttribution({ summary: "Temiz bir özet.", members: [m], wire: notWire }),
+    ).toEqual({ text: "Temiz bir özet.", source: m.source });
+  });
+});

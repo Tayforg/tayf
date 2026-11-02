@@ -4,6 +4,7 @@ import { Suspense } from "react";
 import { NewsletterForm } from "@/components/newsletter/newsletter-form";
 import { isMailConfigured } from "@/lib/email/resend";
 import { getDeliveringSourceCount } from "@/lib/sources/active-count";
+import { ShortcutsHelpButton } from "./shortcuts-help-button";
 
 const NAV_LINKS = [
   { href: "/", label: "Haberler" },
@@ -82,6 +83,7 @@ export function Footer() {
             >
               RSS
             </a>
+            <ShortcutsHelpButton />
           </nav>
         </div>
 
