@@ -486,6 +486,8 @@ describe("zone-parity: no undeclared zone-map copy exists in the migrations dire
       "132_legacy_bias_range_tools.sql",
       // 136 re-creates ops_health_report() with 122's body verbatim (rows 1-14) plus rows 15 (cron_route_failures_30m) and 16 (db_size_mb), repeating its VALUES-list copy of BIAS_TO_ZONE in row 4; pinned by tests/migrations/136-ops-heartbeat-app-side.test.ts
       "136_ops_heartbeat_app_side.sql",
+      // 143's weekly_words_sample_refresh() carries a VALUES-list copy of BIAS_TO_ZONE (zmap CTE, same shape as 092's) to bucket the weekly-words sample by zone; pinned by tests/migrations/143-weekly-words-sample.test.ts
+      "143_weekly_words_sample.sql",
     ]);
     const files = readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith(".sql"))

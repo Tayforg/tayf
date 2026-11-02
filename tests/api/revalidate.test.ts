@@ -209,6 +209,15 @@ describe("POST /api/revalidate", () => {
     expect(revalidateTagMock).toHaveBeenCalledWith("finance-ticker:THYAO", "max");
   });
 
+  it("allows the weekly-words tag so a takedown can clear /hafta's example headlines at once (migration 143)", async () => {
+    process.env.CRON_SECRET = "shhh";
+    const mod = await import("@/app/api/revalidate/route");
+    const res = await mod.POST(makeRequest({ tags: ["weekly-words"] }, { auth: "Bearer shhh" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revalidated: 1 });
+    expect(revalidateTagMock).toHaveBeenCalledWith("weekly-words", "max");
+  });
+
   it("rejects a finance-ticker tag whose symbol fails the ticker shape, and an unrelated unlisted tag", async () => {
     process.env.CRON_SECRET = "shhh";
     const mod = await import("@/app/api/revalidate/route");

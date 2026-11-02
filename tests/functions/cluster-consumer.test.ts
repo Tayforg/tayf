@@ -17,6 +17,8 @@ import {
   normalizeTurkish,
   strictFingerprint,
 } from "../../supabase/functions/_shared/cluster/fingerprint.ts";
+import { cleanDescription } from "../../supabase/functions/_shared/cluster/description-clean.ts";
+import { extractEntities } from "../../supabase/functions/_shared/cluster/entities.ts";
 
 // ---------------------------------------------------------------------------
 // Contract tests for the cluster-consumer Edge Function.
@@ -2710,6 +2712,8 @@ describe("cluster-consumer Edge Function", () => {
       created: number;
       skipped: number;
       failedTransient: number;
+      descriptionSwapSuspects: number;
+      descriptionSwapSamples: string[];
       admission: { would_create: number; would_match: number };
     }
     async function drain(): Promise<DrainBody> {
@@ -3232,6 +3236,180 @@ describe("cluster-consumer Edge Function", () => {
 
         expect(seen).toContain(strictFingerprint(TITLE, CLEAN));
         expect(seen).not.toContain(strictFingerprint(TITLE, RAW));
+      });
+    });
+
+    // ---- h16-precision-2: log-only description-swap counter --------------------
+    //
+    // sabah 1bf7ab12 ("Erdogan, KKTC Cumhurbaskani Erhurman ile gorustu") carries
+    // the Berdimuhammedov RSS description. The consumer counts such title/
+    // description name swaps per drain and logs them (DESCRIPTION_SWAP_GUARD =
+    // 'log'); the clustering inputs, the persisted enrichment and every cluster
+    // write stay exactly as they were. Real public text, read-only SELECT on
+    // 2026-11-02.
+    describe("h16-precision-2: description-swap counter is log-only", () => {
+      const SWAP_ID = "sabah-1bf7ab12";
+      const TITLE =
+        "Son dakika | Başkan Erdoğan, KKTC Cumhurbaşkanı Erhürman ile görüştü: Türkiye, her zaman Kıbrıs'ın yanında olacak";
+      const DESC =
+        "Son dakika haberi: Başkan Recep Tayyip Erdoğan, Türk Devletleri Teşkilatı 13. Liderler Zirvesi için Ankara’da bulunan Türkmenistan Devlet Başkanı Serdar Berdimuhammedov’la Cumhurbaşkanlığı Külliyesi’nde...Devamı için tıklayınız";
+      // yeni-safak da284792, same cluster 575fc5eb: its own title and its own description.
+      const MATCH_TITLE = "Külliye'de kritik kabul: Erdoğan, Berdimuhammedov'la görüştü";
+      const MATCH_DESC =
+        "Cumhurbaşkanı Recep Tayyip Erdoğan, Türk Devletleri Teşkilatı 13. Zirvesi Devlet Başkanları Konseyi Toplantısı için Ankara'ya gelen Türkmenistan Devlet Başkanı Serdar Berdimuhammedov ile Cumhurbaşkanlığı Külliyesi'nde bir araya geldi.";
+
+      const persisted = () =>
+        supabaseFakeCalls.update("articles").map(
+          (c) => c.patch as { fingerprint: string; entities: string[] },
+        );
+      const drainLog = () => {
+        const call = logSpy.mock.calls.find((c) => c[0] === "[cluster-consumer] drain");
+        expect(call, "the '[cluster-consumer] drain' line").toBeDefined();
+        return JSON.parse(String(call![1])) as { descriptionSwapSuspects: number; descriptionSwapSamples: string[] };
+      };
+
+      it("the 1bf7ab12 fixture is counted once and its sample id is reported; enrichment is unchanged", async () => {
+        queueIncoming({ id: SWAP_ID, sourceId: "src-outlet", title: TITLE, description: DESC });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(body.descriptionSwapSuspects).toBe(1);
+        expect(body.descriptionSwapSamples).toEqual([SWAP_ID]);
+        const patches = persisted();
+        expect(patches).toHaveLength(1);
+        // Log-only: the clustering inputs are what they were before the counter existed.
+        expect(patches[0]?.fingerprint).toBe(strictFingerprint(TITLE, cleanDescription(DESC)));
+        expect(patches[0]?.entities).toEqual(extractEntities(`${TITLE} ${cleanDescription(DESC)}`));
+        // The swapped description still feeds the entities (that is the measured problem, not fixed here).
+        expect(patches[0]?.entities).toContain("cumhurbaskanligi");
+      });
+
+      it("the same counters land in the '[cluster-consumer] drain' JSON log line", async () => {
+        queueIncoming({ id: SWAP_ID, sourceId: "src-outlet", title: TITLE, description: DESC });
+        scoreBy({});
+
+        await drain();
+
+        const line = drainLog();
+        expect(line.descriptionSwapSuspects).toBe(1);
+        expect(line.descriptionSwapSamples).toEqual([SWAP_ID]);
+      });
+
+      it("a swap changes no cluster write: one cluster insert, summary and title from the stored text", async () => {
+        queueIncoming({ id: SWAP_ID, sourceId: "src-outlet", title: TITLE, description: DESC });
+        scoreBy({});
+
+        await drain();
+
+        const inserts = supabaseFakeCalls.insert("clusters");
+        expect(inserts).toHaveLength(1);
+        const patch = inserts[0]?.patch as { summary_tr: string; title_tr: string };
+        expect(patch.title_tr).toBe(TITLE);
+        expect(patch.summary_tr).toBe(DESC);
+        // Counting never writes to an existing cluster.
+        expect(supabaseFakeCalls.update("clusters")).toHaveLength(0);
+      });
+
+      it("a matching title/description pair gives 0 and []", async () => {
+        queueIncoming({ id: "yeni-safak-da284792", sourceId: "src-outlet", title: MATCH_TITLE, description: MATCH_DESC });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(body.descriptionSwapSuspects).toBe(0);
+        expect(body.descriptionSwapSamples).toEqual([]);
+        expect(drainLog().descriptionSwapSuspects).toBe(0);
+      });
+
+      it("4 suspects in one drain: counter 4, only the first 3 ids sampled", async () => {
+        const titles = [
+          "Başkan Erdoğan, KKTC Cumhurbaşkanı Erhürman ile görüştü",
+          "Cumhurbaşkanı Erdoğan, Kırgızistan Cumhurbaşkanı Caparov ile görüştü",
+          "Erdoğan Macron ile telefonda görüştü",
+          "Başkan Erdoğan, Rusya Devlet Başkanı Putin ile görüştü",
+        ];
+        titles.forEach((title, i) => {
+          queueIncoming({ id: `swap-${i + 1}`, sourceId: "src-outlet", title, description: DESC });
+        });
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.descriptionSwapSuspects).toBe(4);
+        expect(body.descriptionSwapSamples).toHaveLength(3);
+        expect(body.descriptionSwapSamples).toEqual(["swap-1", "swap-2", "swap-3"]);
+        expect(body.failedTransient).toBe(0);
+      });
+
+      it("the next drain starts from 0 and []", async () => {
+        queueIncoming({ id: SWAP_ID, sourceId: "src-outlet", title: TITLE, description: DESC });
+        scoreBy({});
+        const first = await drain();
+        expect(first.descriptionSwapSuspects).toBe(1);
+        expect(first.descriptionSwapSamples).toEqual([SWAP_ID]);
+
+        queueIncoming({ id: "yeni-safak-da284792", sourceId: "src-outlet", title: MATCH_TITLE, description: MATCH_DESC });
+        const second = await drain();
+
+        expect(second.descriptionSwapSuspects).toBe(0);
+        expect(second.descriptionSwapSamples).toEqual([]);
+        // The first body still holds the first drain's numbers (no shared references).
+        expect(first.descriptionSwapSuspects).toBe(1);
+        expect(first.descriptionSwapSamples).toEqual([SWAP_ID]);
+      });
+
+      it("a drain with a swap suspect followed by another swap suspect counts 1, not 2", async () => {
+        queueIncoming({ id: SWAP_ID, sourceId: "src-outlet", title: TITLE, description: DESC });
+        scoreBy({});
+        await drain();
+
+        queueIncoming({ id: "swap-again", sourceId: "src-outlet", title: "Cumhurbaşkanı Erdoğan, Kırgızistan Cumhurbaşkanı Caparov ile görüştü", description: DESC });
+        const second = await drain();
+
+        expect(second.descriptionSwapSuspects).toBe(1);
+        expect(second.descriptionSwapSamples).toEqual(["swap-again"]);
+      });
+
+      it("null and empty descriptions are not suspects and do not fail the message", async () => {
+        queueIncoming({ id: "no-desc-1", sourceId: "src-outlet", title: TITLE, description: "" });
+        queueIncoming({ id: "no-desc-2", sourceId: "src-wire", title: "Başkan Erdoğan, Rusya Devlet Başkanı Putin ile görüştü" });
+        (fakeArticles["no-desc-2"] as { description: string | null }).description = null;
+        scoreBy({});
+
+        const body = await drain();
+
+        expect(body.failedTransient).toBe(0);
+        expect(body.created).toBe(2);
+        expect(body.descriptionSwapSuspects).toBe(0);
+        expect(body.descriptionSwapSamples).toEqual([]);
+      });
+
+      it("if the detector throws, nothing is counted and the message still clusters", async () => {
+        vi.doMock("../../supabase/functions/_shared/cluster/description-clean.ts", async (importOriginal) => {
+          const actual = await importOriginal<typeof import("../../supabase/functions/_shared/cluster/description-clean.ts")>();
+          return {
+            ...actual,
+            descriptionNamesSwap: () => {
+              throw new Error("detector exploded");
+            },
+          };
+        });
+        try {
+          queueIncoming({ id: SWAP_ID, sourceId: "src-outlet", title: TITLE, description: DESC });
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(body.failedTransient).toBe(0);
+          expect(body.descriptionSwapSuspects).toBe(0);
+          expect(body.descriptionSwapSamples).toEqual([]);
+        } finally {
+          vi.doUnmock("../../supabase/functions/_shared/cluster/description-clean.ts");
+        }
       });
     });
 
