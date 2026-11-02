@@ -87,8 +87,10 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
 function zeroBuckets(): Bucket[] {
   const buckets: Bucket[] = [];
   for (let i = 0; i < WINDOW_DAYS; i++) {
+    // 30 distinct, consecutive days (2024-01-01 .. 2024-01-30) like the real
+    // timeline, so the data table's per-day <tr key> never collides.
     buckets.push({
-      day: `2024-01-${String((i % 28) + 1).padStart(2, "0")}`,
+      day: `2024-01-${String(i + 1).padStart(2, "0")}`,
       counts: { iktidar: 0, bagimsiz: 0, muhalefet: 0 },
       total: 0,
     });
@@ -251,6 +253,10 @@ describe("/trends page — chart scroller opens on the newest days (browser-5)",
     // The scroller keeps the original overflow container classes.
     expect(scroller.props?.className).toBe(
       "w-full overflow-x-auto spectrum-glow",
+    );
+    // h17-a11y-1: and is a named, keyboard-reachable region.
+    expect(scroller.props?.label).toBe(
+      "Son 30 gün grafiği (yatay kaydırılabilir)",
     );
     // The chart stays server-rendered as the scroller's children.
     const svgInside = collectElements(scroller.props?.children).filter(
@@ -511,5 +517,167 @@ describe("/trends page — nice-number y-axis", () => {
     expect(src).toContain("formatCountTr(t)");
     expect(src).not.toContain("gridSteps");
     expect(src).not.toContain("Math.round(yMax * step)");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h17-a11y-1 (WCAG 2.1.1 / 1.1.1 / 1.3.1): the chart scroller is a named,
+// focusable region and the per-day numbers are also offered as a real table.
+// ---------------------------------------------------------------------------
+
+/** The element tree's direct parent of `child`, found by identity. */
+function parentOf(tree: unknown, child: unknown): Elementish | null {
+  for (const el of collectElements(tree)) {
+    const kids = el.props?.children;
+    if (kids === child) return el;
+    if (Array.isArray(kids) && kids.includes(child)) return el;
+  }
+  return null;
+}
+
+function tableDetails(tree: unknown): Elementish[] {
+  return collectElements(tree).filter((el) => el.type === "details");
+}
+
+async function detailsMarkup(buckets: Bucket[]): Promise<string> {
+  mockBuckets = buckets;
+  const tree = await TrendsPage();
+  const details = tableDetails(tree);
+  expect(details).toHaveLength(1);
+  return renderToStaticMarkup(details[0] as unknown as React.ReactElement);
+}
+
+/** Text of every <td> in each tbody row, plus the row header. */
+function bodyRows(markup: string): { header: string; cells: string[] }[] {
+  const tbody = markup.match(/<tbody[^>]*>([\s\S]*)<\/tbody>/)?.[1] ?? "";
+  return [...tbody.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => ({
+    header: m[1]!.match(/<th[^>]*>([^<]*)<\/th>/)?.[1] ?? "",
+    cells: [...m[1]!.matchAll(/<td[^>]*>([^<]*)<\/td>/g)].map((c) => c[1]!),
+  }));
+}
+
+describe("/trends page — keyboard-reachable chart and data table (h17-a11y-1)", () => {
+  it("names the scroller region and keeps the svg's role=img summary", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const tree = await TrendsPage();
+
+    const scroller = collectElements(tree).find((el) => el.type === ScrollToEnd);
+    expect(scroller?.props?.label).toBe("Son 30 gün grafiği (yatay kaydırılabilir)");
+    expect(scroller?.props?.className).toBe("w-full overflow-x-auto spectrum-glow");
+    const svg = collectElements(scroller?.props?.children).find((el) => el.type === "svg");
+    expect(svg?.props?.role).toBe("img");
+    expect(String(svg?.props?.["aria-label"])).toContain("Toplam");
+  });
+
+  it("renders exactly one <details>, a later sibling of the scroller", async () => {
+    mockBuckets = seededBuckets().buckets;
+
+    const tree = await TrendsPage();
+
+    const details = tableDetails(tree);
+    expect(details).toHaveLength(1);
+    const scroller = collectElements(tree).find((el) => el.type === ScrollToEnd)!;
+    const parent = parentOf(tree, scroller);
+    expect(parent).not.toBeNull();
+    expect(parentOf(tree, details[0])).toBe(parent);
+    const kids = parent!.props!.children as unknown[];
+    expect(kids.indexOf(details[0])).toBeGreaterThan(kids.indexOf(scroller));
+  });
+
+  it("the <details> has the Turkish summary and a caption", async () => {
+    const html = await detailsMarkup(seededBuckets().buckets);
+
+    expect(html).toContain("<summary");
+    expect(html).toContain("Günlük sayıları tablo olarak göster");
+    expect(html).toContain("<caption");
+    expect(html).toContain(
+      "Son 30 günde Medya DNA bölgesine göre günlük haber sayısı (günler Türkiye saatine göre)",
+    );
+  });
+
+  it("has five column headers in order: Gün, İktidar, Bağımsız, Muhalefet, Toplam", async () => {
+    const html = await detailsMarkup(seededBuckets().buckets);
+
+    const cols = [...html.matchAll(/<th scope="col">([^<]*)<\/th>/g)].map((m) => m[1]);
+    expect(cols).toEqual(["Gün", "İktidar", "Bağımsız", "Muhalefet", "Toplam"]);
+    expect(html.match(/<th scope="col"/g)).toHaveLength(5);
+  });
+
+  it("has one body row per day, each starting with a row header", async () => {
+    const html = await detailsMarkup(seededBuckets().buckets);
+
+    const tbody = html.match(/<tbody[^>]*>([\s\S]*)<\/tbody>/)?.[1] ?? "";
+    const rows = [...tbody.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/g)].map((m) => m[1]!);
+    expect(rows).toHaveLength(WINDOW_DAYS);
+    for (const row of rows) expect(row.startsWith('<th scope="row"')).toBe(true);
+    // 3 zone counts + the total per row.
+    for (const { cells } of bodyRows(html)) expect(cells).toHaveLength(4);
+  });
+
+  it("lists the days oldest first with a Turkish day label", async () => {
+    const html = await detailsMarkup(seededBuckets().buckets);
+
+    const headers = bodyRows(html).map((r) => r.header);
+    expect(headers[0]).toBe("1 Ocak");
+    expect(headers[WINDOW_DAYS - 1]).toBe("30 Ocak");
+  });
+
+  it("the seeded last day reads 4, 0, 1, 5", async () => {
+    const html = await detailsMarkup(seededBuckets().buckets);
+
+    const rows = bodyRows(html);
+    expect(rows[rows.length - 1]!.cells).toEqual(["4", "0", "1", "5"]);
+    // Every other day is a quiet zero row.
+    for (const row of rows.slice(0, -1)) {
+      expect(row.cells).toEqual(["0", "0", "0", "0"]);
+    }
+  });
+
+  it("formats counts with the tr-TR grouping (2.198, 8.791)", async () => {
+    const html = await detailsMarkup(busiestDayBuckets());
+
+    const cells = bodyRows(html).flatMap((r) => r.cells);
+    expect(cells).toContain("2.198");
+    expect(cells).toContain("8.791");
+    expect(cells).toContain("5.000");
+    expect(cells).not.toContain("8791");
+  });
+
+  it("does not wrap the table in a second overflow container (axe scrollable-region-focusable)", async () => {
+    const html = await detailsMarkup(seededBuckets().buckets);
+
+    expect(html).not.toContain("overflow");
+    expect(html).not.toContain("tabindex");
+  });
+
+  it("renders no <details> on the all-zero branch", async () => {
+    mockBuckets = zeroBuckets();
+
+    const tree = await TrendsPage();
+
+    expect(tableDetails(tree)).toHaveLength(0);
+    expect(collectText(tree).join(" ")).toContain(EMPTY_COPY);
+  });
+
+  it("renders no <details> on the unavailable (null) branch", async () => {
+    mockBuckets = null;
+
+    const tree = await TrendsPage();
+
+    expect(tableDetails(tree)).toHaveLength(0);
+  });
+
+  it("leaves the svg's <title> children and role untouched", async () => {
+    const { buckets, lastDay } = seededBuckets();
+    mockBuckets = buckets;
+
+    const tree = await TrendsPage();
+
+    const titles = collectElements(tree).filter((el) => el.type === "title");
+    expect(titles.map((t) => t.props?.children)).toEqual([
+      `${lastDay} · ${ZONE_META.iktidar.label}: 4`,
+      `${lastDay} · ${ZONE_META.muhalefet.label}: 1`,
+    ]);
   });
 });

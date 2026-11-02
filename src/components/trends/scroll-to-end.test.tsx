@@ -96,15 +96,39 @@ describe("isAtStart", () => {
 });
 
 describe("<ScrollToEnd> — server markup", () => {
+  const className = "w-full overflow-x-auto spectrum-glow";
   const markup = renderToStaticMarkup(
-    <ScrollToEnd className="w-full overflow-x-auto spectrum-glow">
+    <ScrollToEnd className={className} label="Son 30 gün grafiği">
       <svg />
     </ScrollToEnd>,
   );
+  const scrollerTag = markup.match(/<div [^>]*role="region"[^>]*>/)?.[0] ?? "";
+  const scrollerClass = scrollerTag.match(/class="([^"]*)"/)?.[1] ?? "";
 
-  it("renders the scroller div with exactly the given className around the child", () => {
-    expect(markup).toContain('<div class="w-full overflow-x-auto spectrum-glow">');
+  it("renders the scroller around the child", () => {
+    expect(scrollerTag).not.toBe("");
     expect(markup).toContain("<svg></svg>");
+  });
+
+  // h17-a11y-1 (WCAG 2.1.1): a scrollable region needs a tab stop, otherwise a
+  // keyboard / switch user cannot scroll to the off-screen days.
+  it("makes the scroller a focusable, named region", () => {
+    expect(scrollerTag).toContain('tabindex="0"');
+    expect(scrollerTag).toContain('role="region"');
+    expect(scrollerTag).toContain('aria-label="Son 30 gün grafiği"');
+  });
+
+  it("keeps the given className and adds a literal focus-visible ring", () => {
+    expect(scrollerClass).toContain(className);
+    expect(scrollerClass.startsWith(className)).toBe(true);
+    expect(scrollerClass).toContain("focus-visible:ring-2");
+    expect(scrollerClass).toContain("focus-visible:ring-ring");
+    expect(scrollerClass).toContain("focus-visible:outline-none");
+  });
+
+  it("puts tabindex, role and name on the same element as the overflow class", () => {
+    expect(scrollerClass).toContain("overflow-x-auto");
+    expect(scrollerTag).toContain("tabindex");
   });
 
   it("renders no hint on the server (initial state is not overflowing; SSR must match the first client render)", () => {
@@ -159,5 +183,26 @@ describe("scroll-to-end.tsx — source guard", () => {
 
   it("renders the hint only while overflowing and not at the start", () => {
     expect(source).toContain("overflowing && !atStart");
+  });
+
+  // Tailwind 4 only emits classes it can see as literal tokens; a computed
+  // class name would silently drop the focus ring.
+  it("spells the focus ring classes out literally", () => {
+    expect(source).toContain("focus-visible:outline-none");
+    expect(source).toContain("focus-visible:ring-2");
+    expect(source).toContain("focus-visible:ring-ring");
+    expect(source).toContain("focus-visible:ring-offset-2");
+    expect(source).toContain("focus-visible:ring-offset-background");
+  });
+
+  it("declares label as a required string prop", () => {
+    expect(source).toMatch(/\blabel: string;/);
+    expect(source).not.toMatch(/\blabel\?:/);
+  });
+
+  it("makes the scroller focusable and a named region", () => {
+    expect(source).toContain("tabIndex={0}");
+    expect(source).toContain('role="region"');
+    expect(source).toContain("aria-label={label}");
   });
 });

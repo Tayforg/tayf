@@ -1,6 +1,26 @@
 import { describe, expect, it } from "vitest";
 
-import { isBoilerplateDescription } from "./description-boilerplate";
+import {
+  BOILERPLATE_PHRASES,
+  isBoilerplateDescription,
+} from "./description-boilerplate";
+
+describe("BOILERPLATE_PHRASES", () => {
+  it("is exported and holds the known call-to-action phrases", () => {
+    expect(BOILERPLATE_PHRASES.has("devamı için tıklayınız")).toBe(true);
+    expect(BOILERPLATE_PHRASES.has("read more")).toBe(true);
+    expect(BOILERPLATE_PHRASES.size).toBe(8);
+  });
+
+  it("stores every entry lower-case and trimmed (the matchers fold the input, not the Set)", () => {
+    for (const phrase of BOILERPLATE_PHRASES) {
+      expect(phrase, phrase).toBe(phrase.trim());
+      expect(phrase, phrase).toBe(phrase.toLowerCase());
+      expect(phrase, phrase).toBe(phrase.toLocaleLowerCase("tr-TR"));
+      expect(phrase.length, phrase).toBeGreaterThan(0);
+    }
+  });
+});
 
 describe("isBoilerplateDescription", () => {
   it.each([

@@ -33,3 +33,38 @@ describe("footer.tsx /oyun link", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// h17-a11y-3 (WCAG 2.1.4): single-key shortcuts can be switched off, and the
+// switch lives in the "?" help dialog. A reader who has never heard of "?" (or
+// who has turned the shortcuts off) still needs a way to open that dialog, so
+// the footer carries a "Klavye kısayolları" button. The button is a tiny client
+// component; the footer itself stays a Server Component.
+// ---------------------------------------------------------------------------
+
+describe("footer.tsx keyboard-shortcuts button", () => {
+  it("imports ShortcutsHelpButton from the layout folder", () => {
+    expect(footerSrc).toMatch(
+      /import\s*\{\s*ShortcutsHelpButton\s*\}\s*from\s*"(\.\/shortcuts-help-button|@\/components\/layout\/shortcuts-help-button)"/,
+    );
+  });
+
+  it("renders <ShortcutsHelpButton /> inside the 'Alt menü' nav", () => {
+    const nav = /<nav aria-label="Alt menü"[\s\S]*?<\/nav>/.exec(footerSrc)?.[0] ?? "";
+    expect(nav).toContain("<ShortcutsHelpButton />");
+  });
+
+  it("places it right after the RSS link", () => {
+    const nav = /<nav aria-label="Alt menü"[\s\S]*?<\/nav>/.exec(footerSrc)?.[0] ?? "";
+    const rssEnd = nav.indexOf("</a>", nav.indexOf('href="/rss.xml"'));
+    const button = nav.indexOf("<ShortcutsHelpButton />");
+    expect(rssEnd).toBeGreaterThan(-1);
+    expect(button).toBeGreaterThan(rssEnd);
+    expect(nav.slice(rssEnd + "</a>".length, button).trim()).toBe("");
+  });
+
+  it("stays a Server Component (no 'use client' directive)", () => {
+    expect(footerSrc.trimStart().startsWith('"use client"')).toBe(false);
+    expect(footerSrc.trimStart().startsWith("'use client'")).toBe(false);
+  });
+});

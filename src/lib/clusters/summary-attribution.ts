@@ -1,4 +1,5 @@
 import { repairEntityResidue } from "../../../supabase/functions/_shared/rss/entities";
+import { tidySummaryText } from "@/lib/articles/summary-tidy";
 import type { WireSignal } from "./wire";
 import type { BiasCategory } from "@/types";
 
@@ -16,6 +17,16 @@ import type { BiasCategory } from "@/types";
 // the member description the same way, so the comparison still holds whether
 // the stored text is raw, already clean, or one of each. The repair is
 // idempotent and can never create '<' or '>'.
+//
+// Read-time tidy for feed residue (glued sentences, "Devamı için tıklayınız"
+// tails, widget heading lines, raw newlines): `tidySummaryText` is applied
+// ONLY to the `text` placed in the returned SummaryAttribution. Matching
+// (`matchingCandidates`, `findSeedMember`), the BL-13 rights gate and the wire
+// majority check all compare the repaired but UNTIDIED text, because that is
+// what a member's stored description looks like; comparing tidied text would
+// let a rights-blocked or wire-copied description slip past those checks.
+// Tidied text that comes out empty (the summary was only a CTA or a widget
+// heading) hides the summary, like a blank one.
 
 // Structural subset of ClusterDetailMember (cluster-detail-query.ts): the
 // cluster page's members satisfy this shape as-is, and lighter callers
@@ -138,7 +149,9 @@ export function summaryAttribution({
     }
   }
 
-  return { text, source: seedMember ? seedMember.source : null };
+  const shown = tidySummaryText(text);
+  if (shown.length === 0) return null;
+  return { text: shown, source: seedMember ? seedMember.source : null };
 }
 
 const ELLIPSIS = "…";
@@ -250,5 +263,7 @@ export function summaryAttributionWithoutMembers({
   const text = repairEntityResidue(summary).trim();
   if (text.length === 0) return null;
   if (wire.isWireRedistribution) return null;
-  return { text, source: null };
+  const shown = tidySummaryText(text);
+  if (shown.length === 0) return null;
+  return { text: shown, source: null };
 }

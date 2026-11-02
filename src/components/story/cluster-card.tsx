@@ -7,6 +7,7 @@ import { BiasSpectrum } from "@/components/story/bias-spectrum";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
 import { SourceLogo } from "@/components/source/source-logo";
 import { balanceFromDistribution, type BalanceScore } from "@/lib/bias/balance";
+import { sourceLang } from "@/lib/sources/source-language";
 import { formatTurkishTimeAgo } from "@/lib/time";
 import type { BiasCategory, BiasDistribution } from "@/types";
 
@@ -64,6 +65,8 @@ export interface ClusterCardSource {
   name: string;
   bias: BiasCategory;
   logo_url?: string | null;
+  /** Optional: callers' projections may omit it; sourceLang falls back to name. */
+  slug?: string | null;
 }
 
 interface ClusterCardProps {
@@ -238,7 +241,15 @@ export function ClusterCard({
       const src = sourceById.get(a.source_id);
       const source_name = a.source_name ?? src?.name;
       if (!source_name) return null;
-      return { ...a, source_name, source_logo_url: src?.logo_url ?? null };
+      return {
+        ...a,
+        source_name,
+        source_logo_url: src?.logo_url ?? null,
+        // WCAG 3.1.2: English outlets' headlines get lang="en" (undefined =
+        // no attribute). The card projection carries no slug, so this
+        // usually resolves from the name.
+        title_lang: sourceLang({ slug: src?.slug, name: source_name }),
+      };
     })
     .filter(
       (
@@ -246,6 +257,7 @@ export function ClusterCard({
       ): a is ClusterCardArticle & {
         source_name: string;
         source_logo_url: string | null;
+        title_lang: "en" | undefined;
       } => a !== null
     );
 
@@ -434,7 +446,10 @@ export function ClusterCard({
                       {a.source_name}
                     </span>
                     <span className="sr-only">: </span>
-                    <span className="text-muted-foreground text-xs">
+                    <span
+                      lang={a.title_lang}
+                      className="text-muted-foreground text-xs"
+                    >
                       {a.title}
                     </span>
                   </span>

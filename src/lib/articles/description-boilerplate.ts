@@ -11,7 +11,12 @@
 // a real, truncated summary and must keep showing. No regex fuzziness, no
 // substring matching.
 
-const BOILERPLATE = new Set([
+/**
+ * The call-to-action phrases, each lower-case and trimmed. Exported so
+ * `summary-tidy.ts` can strip the same phrases as a TAIL of a longer summary;
+ * this module keeps using them for the exact whole-string check below.
+ */
+export const BOILERPLATE_PHRASES: ReadonlySet<string> = new Set([
   "click to continue",
   "click here to continue",
   "read more",
@@ -39,7 +44,7 @@ export function isBoilerplateDescription(s: string | null | undefined): boolean 
   // phrases), the tr-TR fold turns "I" into "ı" and "İ" into "i" (right for
   // "DEVAMI İÇİN TIKLAYIN"). Either one hitting the Set is a match.
   return (
-    BOILERPLATE.has(normalised.toLowerCase()) ||
-    BOILERPLATE.has(normalised.toLocaleLowerCase("tr-TR"))
+    BOILERPLATE_PHRASES.has(normalised.toLowerCase()) ||
+    BOILERPLATE_PHRASES.has(normalised.toLocaleLowerCase("tr-TR"))
   );
 }
