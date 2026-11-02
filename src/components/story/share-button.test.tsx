@@ -140,14 +140,14 @@ describe("ShareButton — SSR without window", () => {
   });
 });
 
-describe("ShareButton — Sitene ekle (embed snippet)", () => {
+describe("ShareButton — Sitenize ekle (embed snippet)", () => {
   const CLUSTER_ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
 
   it("renders the chip with its title, outside the live region", () => {
     const html = renderToStaticMarkup(<ShareButton clusterId={CLUSTER_ID} title="t" />);
     const m = html.match(/<button[^>]*title="Bu haberin yelpaze rozetini sitenize ekleyin"[^>]*>[^<]*<\/button>/);
     expect(m).not.toBeNull();
-    expect(m![0]).toContain("Sitene ekle");
+    expect(m![0]).toContain("Sitenize ekle");
     expect(m![0]).toContain('type="button"');
     // exactly one live region
     expect(html.match(/role="status"/g)).toHaveLength(1);
@@ -155,7 +155,7 @@ describe("ShareButton — Sitene ekle (embed snippet)", () => {
 
   it("hides the chip when the id is not a uuid", () => {
     const html = renderToStaticMarkup(<ShareButton clusterId="c1" title="t" />);
-    expect(html).not.toContain("Sitene ekle");
+    expect(html).not.toContain("Sitenize ekle");
   });
 
   it("copyEmbedCode copies the html snippet for the uuid and tracks kind 'embed'", async () => {
@@ -185,7 +185,7 @@ describe("ShareButton — Sitene ekle (embed snippet)", () => {
 describe("ShareButton — Gömme kodu (live iframe widget)", () => {
   const CLUSTER_ID = "3f1e4b2a-7c8d-4e5f-9a0b-1c2d3e4f5a6b";
 
-  it("renders the chip next to 'Sitene ekle' without touching the badge chip", () => {
+  it("renders the chip next to 'Sitenize ekle' without touching the badge chip", () => {
     const html = renderToStaticMarkup(<ShareButton clusterId={CLUSTER_ID} title="t" />);
     const m = html.match(
       /<button[^>]*title="Canlı yelpaze kutusunu \(iframe\) sitenize ekleyin"[^>]*>[^<]*<\/button>/,
@@ -194,7 +194,7 @@ describe("ShareButton — Gömme kodu (live iframe widget)", () => {
     expect(m![0]).toContain("Gömme kodu");
     expect(m![0]).toContain('type="button"');
     // the original badge chip is still there, unchanged
-    expect(html).toMatch(/<button[^>]*title="Bu haberin yelpaze rozetini sitenize ekleyin"[^>]*>Sitene ekle<\/button>/);
+    expect(html).toMatch(/<button[^>]*title="Bu haberin yelpaze rozetini sitenize ekleyin"[^>]*>Sitenize ekle<\/button>/);
     // exactly one live region, still outside both buttons
     expect(html.match(/role="status"/g)).toHaveLength(1);
   });
@@ -484,7 +484,7 @@ describe("ShareButton — clipboard failure fallback", () => {
       const html = renderToStaticMarkup(<ShareButton clusterId={UUID} title="t" />);
       expect(html.match(/role="status"/g)).toHaveLength(1);
       expect(html).toMatch(/<span[^>]*role="status"[^>]*><\/span>/);
-      expect(html).toMatch(/<button[^>]*>[^<]*Sitene ekle[^<]*<\/button>/);
+      expect(html).toMatch(/<button[^>]*>[^<]*Sitenize ekle[^<]*<\/button>/);
       expect(html).toContain("<span>Paylaş</span>");
       expect(html).not.toContain("Kopyalanamadı");
     });

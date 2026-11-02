@@ -1,4 +1,4 @@
-// Pure, client-safe builder for the "Sitene ekle" embed snippet.
+// Pure, client-safe builder for the "Sitenize ekle" embed snippet.
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ALT = "Tayf yelpazesi: bu haberi hangi medya bölgeleri yazdı";

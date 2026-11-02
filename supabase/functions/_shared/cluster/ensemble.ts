@@ -433,7 +433,7 @@ function subjectOf(title: string): HeadlineSubject {
  * word of either side occurs anywhere in the other headline ("Lavrov, Japon
  * mevkidasi ..." vs "Fidan, Atlanta'da Japon mevkidasiyla ...").
  */
-function subjectVetoFires(aTitle: string, bTitle: string): boolean {
+export function subjectVetoFires(aTitle: string, bTitle: string): boolean {
   const a = subjectOf(aTitle);
   const b = subjectOf(bTitle);
   if (a.span.size === 0 || b.span.size === 0) return false;
@@ -453,7 +453,7 @@ function subjectVetoFires(aTitle: string, bTitle: string): boolean {
  * names no province ("Anadolu Otoyolu'nda ... kaza") never vetoes, and a side
  * that names two provinces vetoes only when neither is the other side's.
  */
-function incidentVetoFires(aTitle: string, bTitle: string): boolean {
+export function incidentVetoFires(aTitle: string, bTitle: string): boolean {
   const a = aTitle.slice(0, HEADLINE_TITLE_MAX_CHARS);
   const b = bTitle.slice(0, HEADLINE_TITLE_MAX_CHARS);
   if (!hasIncidentWord(a) || !hasIncidentWord(b)) return false;

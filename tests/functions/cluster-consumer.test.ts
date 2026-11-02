@@ -161,7 +161,9 @@ const {
   admissionRows,
   rpcFixtures,
   clusterArticlesFailure,
+  clusterArticleEqReads,
   skipLogFake,
+  twinBridgeFake,
   supabaseFakeClient,
   supabaseFakeCalls,
 } = await vi.hoisted(
@@ -201,11 +203,17 @@ const {
       cluster_title_probe:
         | (() => { data: unknown; error: { message: string } | null })
         | null;
+      // h19-recall-2: the stem-overlap probe (migration 146). Same shape as
+      // cluster_title_probe: a function so a test can make the call throw.
+      cluster_stem_probe:
+        | (() => { data: unknown; error: { message: string } | null })
+        | null;
     } = {
       cluster_link_atomic: null,
       jev_politics_admission_claim: null,
       jev_politics_admission_record: null,
       cluster_title_probe: null,
+      cluster_stem_probe: null,
     };
     // h12-cluster-1: makes the per-cluster member read (the probe's
     // loadProbeCluster) fail for one cluster id.
@@ -219,6 +227,19 @@ const {
       mode: "ok" | "error" | "throw";
       upsertOptions: unknown[];
     } = { mode: "ok", upsertOptions: [] };
+    // h19-recall-3: the cluster_twin_bridges evidence table (migration 147),
+    // same recording as the skip log: writes land in the mutation log, `mode`
+    // makes the write fail with an error envelope or a throw, `upsertOptions`
+    // keeps the second argument of each upsert.
+    const twinBridgeFakeState: {
+      mode: "ok" | "error" | "throw";
+      upsertOptions: unknown[];
+    } = { mode: "ok", upsertOptions: [] };
+    // h19-recall-2: every `cluster_articles ... .eq("cluster_id", X)` member
+    // read, in order. loadProbeCluster is the only reader of that shape before a
+    // join (the context loader uses .in()), so a cluster that was not reloaded
+    // leaves no entry here.
+    const clusterArticleEqReadsState: string[] = [];
     const fake = helper.createSupabaseFake({
       tables: {
         articles: (state) => {
@@ -268,6 +289,7 @@ const {
             | string
             | undefined;
           if (eqClusterId !== undefined) {
+            clusterArticleEqReadsState.push(eqClusterId);
             if (clusterArticlesFailureState.clusterId === eqClusterId) {
               return { data: null, error: { message: "cluster_articles read failed" } };
             }
@@ -294,6 +316,13 @@ const {
           if (skipLogFakeState.mode === "throw") throw new Error("skip log unreachable");
           if (skipLogFakeState.mode === "error") {
             return { data: null, error: { message: "skip log down" } };
+          }
+          return { data: [], error: null };
+        },
+        cluster_twin_bridges: () => {
+          if (twinBridgeFakeState.mode === "throw") throw new Error("twin bridges unreachable");
+          if (twinBridgeFakeState.mode === "error") {
+            return { data: null, error: { message: "twin bridges down" } };
           }
           return { data: [], error: null };
         },
@@ -330,6 +359,11 @@ const {
           rpcFixturesState.cluster_title_probe
             ? rpcFixturesState.cluster_title_probe()
             : { data: [], error: null },
+        // h19-recall-2: default = no live cluster shares enough stems.
+        cluster_stem_probe: () =>
+          rpcFixturesState.cluster_stem_probe
+            ? rpcFixturesState.cluster_stem_probe()
+            : { data: [], error: null },
       },
     });
     return {
@@ -342,17 +376,27 @@ const {
       admissionRows,
       rpcFixtures: rpcFixturesState,
       clusterArticlesFailure: clusterArticlesFailureState,
+      clusterArticleEqReads: clusterArticleEqReadsState,
       skipLogFake: skipLogFakeState,
+      twinBridgeFake: twinBridgeFakeState,
       supabaseFakeClient: {
         ...fake.client,
         from: (table: string) => {
           const builder = fake.client.from(table) as Record<string, unknown>;
-          if (table !== "cluster_skip_log") return builder;
+          // The shared fake records only the patch of an upsert; these two audit
+          // tables also keep its options (onConflict / ignoreDuplicates).
+          const optionsLog =
+            table === "cluster_skip_log"
+              ? skipLogFakeState.upsertOptions
+              : table === "cluster_twin_bridges"
+                ? twinBridgeFakeState.upsertOptions
+                : null;
+          if (optionsLog === null) return builder;
           return new Proxy(builder, {
             get(target, prop, receiver) {
               if (prop === "upsert") {
                 return (patch: unknown, options?: unknown) => {
-                  skipLogFakeState.upsertOptions.push(options);
+                  optionsLog.push(options);
                   return (target.upsert as (p: unknown) => unknown)(patch);
                 };
               }
@@ -422,9 +466,13 @@ beforeEach(() => {
   rpcFixtures.jev_politics_admission_claim = null;
   rpcFixtures.jev_politics_admission_record = null;
   rpcFixtures.cluster_title_probe = null;
+  rpcFixtures.cluster_stem_probe = null;
   clusterArticlesFailure.clusterId = null;
+  clusterArticleEqReads.length = 0;
   skipLogFake.mode = "ok";
   skipLogFake.upsertOptions.length = 0;
+  twinBridgeFake.mode = "ok";
+  twinBridgeFake.upsertOptions.length = 0;
   admissionRows.length = 0;
   process.env.SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = TEST_SERVICE_ROLE_KEY;
@@ -3805,6 +3853,667 @@ describe("cluster-consumer Edge Function", () => {
           expect(skipLogWrites()).toHaveLength(0);
         });
       });
+    });
+
+    // ---- h19-recall-2: stem-overlap probe (migration 146) ----------------------
+    //
+    // The exact-title probe (T4) keys on md5(tayf_search_fold(title)), which keeps
+    // punctuation: 'İsrail’de Arap partilerinden Netanyahu karşıtı bloğa destek
+    // mesajı' and the same title with a trailing '!' (singletons 8947d162 and
+    // bb7517ca, 4.4 h apart) never met, nor did 'Mutlu bir yuva önceliğimdi' and
+    // its quoted twin (f3f6c1c4 / 69df216b). Once per article, and only when no
+    // candidate reached FALLBACK_FLOOR, the consumer now sends the headline stems
+    // to public.cluster_stem_probe (migration 146), loads what it returns into the
+    // context and scores it normally: the 0.40 bar is unchanged.
+    describe("h19-recall-2: stem-overlap probe reaches older clusters past punctuation differences", () => {
+      const ISRAIL = "İsrail’de Arap partilerinden Netanyahu karşıtı bloğa destek mesajı";
+      const MUTLU = "Mutlu bir yuva önceliğimdi";
+      const OTHER_TITLE = "Bakanlar Kurulu toplantısı sona erdi, kararlar açıklandı";
+
+      const stemCalls = () => supabaseFakeCalls.rpc.filter((r) => r.name === "cluster_stem_probe");
+      const stemWarnings = () =>
+        warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("cluster_stem_probe"));
+      const stemJoinLogs = () =>
+        logSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("stem-probe join"));
+      const scoredAgainst = () =>
+        vi.mocked(scoreMock).mock.calls.map((c) => (c[1] as { strict?: string | null } | null | undefined)?.strict);
+      const skipLogRows = () =>
+        supabaseFakeCalls
+          .upsert("cluster_skip_log")
+          .flatMap((m) => m.patch as Array<Record<string, unknown>>);
+
+      type StemRow = {
+        id: string;
+        title_tr: string;
+        title_tr_neutral: null;
+        first_published: string;
+        updated_at: string;
+        article_count: number;
+      };
+      function stemRow(id: string, title: string, ageMs: number, articleCount = 1): StemRow {
+        return {
+          id,
+          title_tr: title,
+          title_tr_neutral: null,
+          first_published: ago(ageMs),
+          updated_at: ago(ageMs),
+          article_count: articleCount,
+        };
+      }
+      /** An out-of-context singleton (not among the context fixtures) and the row the rpc would return for it. */
+      function seedStemHit(id: string, title: string, fp: string, sourceId = "src-wire", ageMs = 4.4 * H): StemRow {
+        seedCluster(id, 1, [{ id: `${id}-m`, sourceId, fp, ageMs, title }], {
+          title,
+          updatedAgoMs: ageMs,
+          inContext: false,
+        });
+        return stemRow(id, title, ageMs);
+      }
+      function stemProbeReturns(...rows: unknown[]) {
+        rpcFixtures.cluster_stem_probe = () => ({ data: rows, error: null });
+      }
+
+      describe("joins", () => {
+        it("Israel: the '!' title joins the out-of-context singleton titled without it (0.82); rpc args are (stems, ~24 h ago, 3)", async () => {
+          const title = `${ISRAIL}!`;
+          stemProbeReturns(seedStemHit("cl-israil", ISRAIL, "fp-israil"));
+          queueIncoming({ id: "israil-new", sourceId: "src-outlet", title });
+          scoreBy({ "fp-israil": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(body.created).toBe(0);
+          expect(body.failedTransient).toBe(0);
+          expect(linkedClusters()).toEqual(["cl-israil"]);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          // Premise: the exact-title probe asked first and found nothing (the '!' changes its key).
+          expect(probeCalls()).toHaveLength(1);
+
+          const calls = stemCalls();
+          expect(calls).toHaveLength(1);
+          const args = calls[0]?.args as { p_stems: string[]; p_since: string; p_limit: number };
+          expect(args.p_stems).toEqual([...headlineTokens(title).tokens]);
+          expect(args.p_stems.length).toBeGreaterThanOrEqual(3);
+          expect(args.p_limit).toBe(3);
+          expect(Math.abs(Date.parse(args.p_since) - (Date.now() - 24 * H))).toBeLessThan(5 * 60_000);
+
+          const logs = stemJoinLogs();
+          expect(logs).toHaveLength(1);
+          const line = String(logs[0]?.[0]);
+          expect(line).toContain("[cluster-consumer] stem-probe join");
+          expect(line).toContain("article=israil-new");
+          expect(line).toContain("cluster=cl-israil");
+          expect(line).toContain("score=0.820");
+        });
+
+        it("the loaded cluster is scored against the corpus that now holds it (tf-idf cosine > 0 for an identical text)", async () => {
+          stemProbeReturns(seedStemHit("cl-israil", ISRAIL, "fp-israil"));
+          queueIncoming({ id: "israil-new", sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({ "fp-israil": 0.82 });
+
+          await drain();
+
+          const call = vi.mocked(scoreMock).mock.calls.find(
+            (c) => (c[1] as { strict?: string | null } | null | undefined)?.strict === "fp-israil",
+          );
+          expect(call, "the stem hit was scored").toBeDefined();
+          // 5th argument of score(): the tf-idf cosine of the incoming text against the cluster's seed.
+          expect(call?.[4] as number).toBeGreaterThan(0.5);
+        });
+
+        it("'Mutlu bir yuva' (quoted against unquoted) joins in the same way", async () => {
+          const title = `"${MUTLU}"`;
+          expect(headlineTokens(title).tokens.size).toBe(3);
+          stemProbeReturns(seedStemHit("cl-mutlu", MUTLU, "fp-mutlu", "src-posta", 21 * H));
+          queueIncoming({ id: "mutlu-new", sourceId: "src-cnn-turk", title });
+          scoreBy({ "fp-mutlu": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(body.created).toBe(0);
+          expect(linkedClusters()).toEqual(["cl-mutlu"]);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(stemCalls()).toHaveLength(1);
+          expect((stemCalls()[0]?.args as { p_stems: string[] }).p_stems).toEqual(["mutlu", "yuva", "onceligim"]);
+        });
+
+        it("the loaded cluster stays in the context: a second article of the same drain joins it without another probe", async () => {
+          stemProbeReturns(seedStemHit("cl-israil", ISRAIL, "fp-israil"));
+          queueIncoming({ id: "israil-a", sourceId: "src-outlet", title: `${ISRAIL}!` });
+          queueIncoming({ id: "israil-b", sourceId: "src-cnn-turk", title: `${ISRAIL}?` });
+          scoreBy({ "fp-israil": 0.82 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(2);
+          expect(body.created).toBe(0);
+          expect(linkedClusters()).toEqual(["cl-israil", "cl-israil"]);
+          expect(stemCalls()).toHaveLength(1);
+        });
+
+        for (const s of [0.4, 0.41]) {
+          it(`a stem hit at ${s} (MATCH_THRESHOLD or better) joins`, async () => {
+            stemProbeReturns(seedStemHit("cl-x", ISRAIL, "fp-x"));
+            queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+            scoreBy({ "fp-x": s });
+
+            const body = await drain();
+
+            expect(body.matched).toBe(1);
+            expect(linkedClusters()).toEqual(["cl-x"]);
+          });
+        }
+
+        it("only the first 3 rows of the rpc are considered, in the order the database ranked them", async () => {
+          const rows = ["cl-1", "cl-2", "cl-3", "cl-4", "cl-5"].map((id, i) =>
+            seedStemHit(id, ISRAIL, `fp-${id}`, "src-wire", (3 + i) * H),
+          );
+          stemProbeReturns(...rows);
+          queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(clusterArticleEqReads).toEqual(["cl-1", "cl-2", "cl-3"]);
+        });
+
+        it("the larger of two near-equal hits wins (sizes of clusters loaded by the probe count)", async () => {
+          const small = seedStemHit("cl-small", ISRAIL, "fp-small", "src-wire", 4 * H);
+          const big = { ...seedStemHit("cl-big", ISRAIL, "fp-big", "src-agg", 5 * H), article_count: 18 };
+          stemProbeReturns(small, big);
+          queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({ "fp-small": 0.85, "fp-big": 0.8 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["cl-big"]);
+        });
+      });
+
+      describe("no join: the 0.40 bar is unchanged", () => {
+        for (const s of [0.3, 0.38, 0.399]) {
+          it(`a stem hit scoring ${s} is loaded and scored but not joined: the article opens a cluster`, async () => {
+            stemProbeReturns(seedStemHit("cl-x", ISRAIL, "fp-x"));
+            queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+            scoreBy({ "fp-x": s });
+
+            const body = await drain();
+
+            expect(clusterArticleEqReads).toContain("cl-x"); // loaded
+            expect(scoredAgainst()).toContain("fp-x"); // scored
+            expect(body.created).toBe(1);
+            expect(body.matched).toBe(0);
+            expect(body.skipped).toBe(0);
+            expect(linkedClusters()).toEqual([]);
+            expect(supabaseFakeCalls.insert("clusters")).toHaveLength(1);
+            expect(stemJoinLogs()).toHaveLength(0);
+          });
+        }
+
+        it("an empty rpc result changes nothing: the article opens a cluster", async () => {
+          queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(stemCalls()).toHaveLength(1);
+          expect(body.created).toBe(1);
+          expect(stemWarnings()).toHaveLength(0);
+        });
+
+        it("a null / non-array payload and malformed rows are treated as no hit, without a warning", async () => {
+          rpcFixtures.cluster_stem_probe = () => ({ data: null, error: null });
+          queueIncoming({ id: "a", sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({});
+          let body = await drain();
+          expect(body.created).toBe(1);
+
+          rpcFixtures.cluster_stem_probe = () => ({ data: [null, {}, { id: 7 }, "x"], error: null });
+          queueIncoming({ id: "b", sourceId: "src-outlet", title: OTHER_TITLE, msgId: 4999 });
+          body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(stemWarnings()).toHaveLength(0);
+          expect(clusterArticleEqReads).toEqual([]);
+        });
+
+        it("a hit whose members cannot be read warns and is skipped; the article still gets a cluster", async () => {
+          stemProbeReturns(seedStemHit("cl-broken", ISRAIL, "fp-broken"));
+          clusterArticlesFailure.clusterId = "cl-broken";
+          queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({ "fp-broken": 0.9 });
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(body.failedTransient).toBe(0);
+          expect(linkedClusters()).toEqual([]);
+          expect(
+            warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("cl-broken")),
+          ).toHaveLength(1);
+        });
+
+        it("a hit with no politics members is ignored (nothing to score)", async () => {
+          seedCluster("cl-eko", 1, [{ id: "eko-m", sourceId: "src-wire", fp: "fp-eko", title: ISRAIL, category: "ekonomi" }], {
+            title: ISRAIL,
+            inContext: false,
+          });
+          stemProbeReturns(stemRow("cl-eko", ISRAIL, H));
+          queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({ "fp-eko": 0.9 });
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(linkedClusters()).toEqual([]);
+        });
+      });
+
+      describe("rpc failures degrade silently", () => {
+        for (const mode of ["error envelope", "throw"] as const) {
+          it(`an rpc ${mode}: one warning per isolate naming cluster_stem_probe, both articles are created, none fails`, async () => {
+            rpcFixtures.cluster_stem_probe =
+              mode === "throw"
+                ? () => {
+                    throw new Error("network down");
+                  }
+                : () => ({ data: null, error: { message: "canceling statement due to statement timeout" } });
+            queueIncoming({ id: "isr-a", sourceId: "src-cnn-turk", title: `${ISRAIL}!` });
+            queueIncoming({ id: "other-b", sourceId: "src-posta", title: OTHER_TITLE });
+            scoreBy({});
+
+            const body = await drain();
+
+            expect(stemCalls()).toHaveLength(2);
+            expect(stemWarnings()).toHaveLength(1);
+            expect(String(stemWarnings()[0]?.[0])).toContain("continuing without it");
+            expect(body.created).toBe(2);
+            expect(body.failedTransient).toBe(0);
+          });
+        }
+
+        it("the warning names the failure", async () => {
+          rpcFixtures.cluster_stem_probe = () => ({ data: null, error: { message: "function public.cluster_stem_probe does not exist" } });
+          queueIncoming({ sourceId: "src-cnn-turk", title: `${ISRAIL}!` });
+          scoreBy({});
+
+          await drain();
+
+          expect(String(stemWarnings()[0]?.[0])).toContain("does not exist");
+        });
+      });
+
+      describe("when the probe is NOT called", () => {
+        for (const [s, field] of [
+          [0.37, "created"],
+          [0.85, "matched"],
+        ] as const) {
+          it(`a candidate at ${s} reached FALLBACK_FLOOR (0.36): the article ${field === "created" ? "opens a cluster" : "joins"} and the stem probe is not asked`, async () => {
+            seedCluster("c1", 3, [{ id: "c1-m", sourceId: "src-wire", fp: "fp-c1" }]);
+            queueIncoming({ sourceId: "src-outlet" });
+            scoreBy({ "fp-c1": s });
+
+            const body = await drain();
+
+            expect(body[field]).toBe(1);
+            expect(stemCalls()).toHaveLength(0);
+          });
+        }
+
+        it("boundary: a candidate at 0.35 is below FALLBACK_FLOOR, so the probe is asked once", async () => {
+          seedCluster("c1", 3, [{ id: "c1-m", sourceId: "src-wire", fp: "fp-c1" }]);
+          queueIncoming({ sourceId: "src-outlet" });
+          scoreBy({ "fp-c1": 0.35 });
+
+          const body = await drain();
+
+          expect(body.created).toBe(1);
+          expect(stemCalls()).toHaveLength(1);
+        });
+
+        it("a dry run (admission shadow) never asks, and still reports would_create", async () => {
+          process.env.JEV_POLITICS_ADMISSION = "shadow";
+          stemProbeReturns(seedStemHit("cl-israil", ISRAIL, "fp-israil"));
+          queueIncoming({ id: "isr-dry", sourceId: "src-outlet", title: `${ISRAIL}!`, category: "ekonomi", admit: "shadow" });
+          scoreBy({ "fp-israil": 0.9 });
+
+          const body = await drain();
+
+          expect(stemCalls()).toHaveLength(0);
+          expect(body.admission.would_create).toBe(1);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(clusterArticleEqReads).toEqual([]);
+        });
+
+        for (const title of ["CANLI", "Meclis tatilde", "Mutlu yuva"]) {
+          it(`a headline with fewer than ${3} tokens ("${title}") never asks`, async () => {
+            expect(headlineTokens(title).tokens.size).toBeLessThan(3);
+            queueIncoming({ sourceId: "src-outlet", title });
+            scoreBy({});
+
+            const body = await drain();
+
+            expect(stemCalls()).toHaveLength(0);
+            expect(body.created).toBe(1);
+          });
+        }
+
+        it("the strict-fingerprint fast path joined the article: neither probe is asked", async () => {
+          seedCluster("c1", 3, [{ id: "c1-m", sourceId: "src-wire", fp: strictFingerprint(HEADLINE, "Detay") }]);
+          queueIncoming({ sourceId: "src-outlet" });
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(linkedClusters()).toEqual(["c1"]);
+          expect(stemCalls()).toHaveLength(0);
+          expect(probeCalls()).toHaveLength(0);
+        });
+
+        it("a same-source duplicate skip (fast path, nothing else to join) decided the article: the stem probe is not asked", async () => {
+          stemProbeReturns(seedStemHit("cl-other", HEADLINE, "fp-other"));
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: strictFingerprint(HEADLINE, "Detay") }]);
+          queueIncoming({ sourceId: "src-outlet", msgId: 4401 });
+          scoreBy({});
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(stemCalls()).toHaveLength(0);
+          expect(clusterArticleEqReads).toEqual([]);
+        });
+
+        it("a same-source duplicate skip by score (0.87 against a cluster holding the source): not asked", async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          queueIncoming({ sourceId: "src-outlet", msgId: 4402 });
+          scoreBy({ "fp-c1": 0.87 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(stemCalls()).toHaveLength(0);
+        });
+
+        it("a stem hit that is already in ctx.clusters is not reloaded or scored a second time", async () => {
+          // In the context, but its score (0.30) is below FALLBACK_FLOOR, so the probe runs and returns it again.
+          seedCluster("c-ctx", 1, [{ id: "ctx-m", sourceId: "src-wire", fp: "fp-ctx", title: ISRAIL }], { title: ISRAIL });
+          stemProbeReturns(stemRow("c-ctx", ISRAIL, H));
+          queueIncoming({ sourceId: "src-outlet", title: `${ISRAIL}!` });
+          scoreBy({ "fp-ctx": 0.3 });
+
+          const body = await drain();
+
+          expect(stemCalls()).toHaveLength(1);
+          expect(clusterArticleEqReads).not.toContain("c-ctx");
+          expect(scoredAgainst().filter((fp) => fp === "fp-ctx")).toHaveLength(1);
+          expect(body.created).toBe(1);
+        });
+      });
+
+      describe("same-source duplicates found by the probe are skipped, not twinned", () => {
+        it("the hit already holds the article's source: skipped, logged with exact-title evidence, nothing created", async () => {
+          stemProbeReturns(seedStemHit("cl-israil", ISRAIL, "fp-israil", "src-posta"));
+          queueIncoming({ id: "isr-posta-2", sourceId: "src-posta", title: `${ISRAIL}!`, msgId: 4411 });
+          scoreBy({ "fp-israil": 0.82 });
+
+          const body = await drain();
+
+          expect(body.skipped).toBe(1);
+          expect(body.created).toBe(0);
+          expect(body.matched).toBe(0);
+          expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+          expect(linkedClusters()).toEqual([]);
+          expect(pgmqState.archived).toContain(4411);
+          expect(skipLogs()).toHaveLength(1);
+          expect(String(skipLogs()[0]?.[0])).toContain("evidence=exact-title");
+          expect(skipLogRows()).toMatchObject([
+            { article_id: "isr-posta-2", cluster_id: "cl-israil", reason: "same-source-duplicate/exact-title" },
+          ]);
+          expect(stemJoinLogs()).toHaveLength(0);
+        });
+
+        it("a blocked first hit does not stop the second: it joins the hit that does not hold the source", async () => {
+          const blocked = seedStemHit("cl-posta", ISRAIL, "fp-posta", "src-posta", 4 * H);
+          const free = seedStemHit("cl-wire", ISRAIL, "fp-wire", "src-wire", 5 * H);
+          stemProbeReturns(blocked, free);
+          queueIncoming({ sourceId: "src-posta", title: `${ISRAIL}!` });
+          scoreBy({ "fp-posta": 0.9, "fp-wire": 0.8 });
+
+          const body = await drain();
+
+          expect(body.matched).toBe(1);
+          expect(body.skipped).toBe(0);
+          expect(linkedClusters()).toEqual(["cl-wire"]);
+          expect(skipLogs()).toHaveLength(0);
+        });
+      });
+    });
+
+    // ---- h19-recall-3: twin-bridge evidence (migration 147) --------------------
+    //
+    // rankCandidates already sees a twin pair as a multi-candidate decision and
+    // used to throw that information away. When two or more candidates score at
+    // least TWIN_BRIDGE_MIN_SCORE (0.55) for one article, the consumer records the
+    // pairs in cluster_twin_bridges (best-effort, awaited, shadow evidence only: no
+    // merge). It never changes the join / skip / create decision.
+    describe("h19-recall-3: twin bridges are recorded for multi-candidate articles", () => {
+      const bridgeWrites = () => supabaseFakeCalls.forTable("cluster_twin_bridges");
+      const bridgeRows = () =>
+        supabaseFakeCalls
+          .upsert("cluster_twin_bridges")
+          .flatMap((m) => m.patch as Array<Record<string, unknown>>);
+      const bridgeWarnings = () =>
+        warnSpy.mock.calls.filter((c) => typeof c[0] === "string" && c[0].includes("cluster_twin_bridges"));
+      const BRIDGE_OPTIONS = { onConflict: "article_id,cluster_a,cluster_b", ignoreDuplicates: true };
+      const byPair = (rows: Array<Record<string, unknown>>) =>
+        [...rows].sort((x, y) =>
+          `${x.cluster_a}|${x.cluster_b}` < `${y.cluster_a}|${y.cluster_b}` ? -1 : 1,
+        );
+
+      it("TWIN_BRIDGE_MIN_SCORE equals TWIN_MERGE_MIN_BRIDGE_SCORE of _shared/cluster/twin-merge.ts (that decision reads these rows)", () => {
+        const read = (rel: string) => readFileSync(resolve(__dirname, "..", "..", rel), "utf8");
+        const consumer = /const\s+TWIN_BRIDGE_MIN_SCORE\s*=\s*([0-9.]+)\s*;/.exec(
+          read("supabase/functions/cluster-consumer/index.ts"),
+        );
+        const merge = /export\s+const\s+TWIN_MERGE_MIN_BRIDGE_SCORE\s*=\s*([0-9.]+)\s*;/.exec(
+          read("supabase/functions/_shared/cluster/twin-merge.ts"),
+        );
+        expect(consumer, "TWIN_BRIDGE_MIN_SCORE not found in the consumer").not.toBeNull();
+        expect(merge, "TWIN_MERGE_MIN_BRIDGE_SCORE not found in twin-merge.ts").not.toBeNull();
+        expect(Number((consumer as RegExpExecArray)[1])).toBe(0.55);
+        expect(Number((consumer as RegExpExecArray)[1])).toBe(Number((merge as RegExpExecArray)[1]));
+      });
+
+      it("0.87 and 0.83: exactly one upsert with the ordered pair and the lower score; the join outcome is T1b's", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+        seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.87, "fp-c2": 0.83 });
+
+        const body = await drain();
+
+        // unchanged outcome (T1b)
+        expect(body.matched).toBe(1);
+        expect(body.skipped).toBe(0);
+        expect(body.created).toBe(0);
+        expect(linkedClusters()).toEqual(["c2"]);
+        expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+        expect(skipLogs()).toHaveLength(0);
+        // the evidence
+        expect(bridgeWrites()).toHaveLength(1);
+        expect(bridgeWrites()[0]?.op).toBe("upsert");
+        expect(bridgeRows()).toEqual([{ article_id: "art-twin", cluster_a: "c1", cluster_b: "c2", score: 0.83 }]);
+        expect(twinBridgeFake.upsertOptions).toEqual([BRIDGE_OPTIONS]);
+        expect(bridgeWarnings()).toHaveLength(0);
+      });
+
+      it("cluster_a is the smaller id whichever cluster scored higher", async () => {
+        seedCluster("c9", 18, [{ id: "c9-m", sourceId: "src-outlet", fp: "fp-c9" }]);
+        seedCluster("c3", 7, [{ id: "c3-m", sourceId: "src-wire", fp: "fp-c3" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c9": 0.87, "fp-c3": 0.83 });
+
+        await drain();
+
+        expect(bridgeRows()).toEqual([{ article_id: "art-twin", cluster_a: "c3", cluster_b: "c9", score: 0.83 }]);
+      });
+
+      it("ids are lower-cased before they are ordered (the join keeps the id it was given)", async () => {
+        seedCluster("CL-B", 18, [{ id: "clb-m", sourceId: "src-outlet", fp: "fp-clb" }]);
+        seedCluster("cl-a", 7, [{ id: "cla-m", sourceId: "src-wire", fp: "fp-cla" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-clb": 0.87, "fp-cla": 0.83 });
+
+        await drain();
+
+        expect(bridgeRows()).toEqual([{ article_id: "art-twin", cluster_a: "cl-a", cluster_b: "cl-b", score: 0.83 }]);
+        expect(linkedClusters()).toEqual(["cl-a"]);
+      });
+
+      it("three candidates at or above 0.55: three pair rows, each carrying the lower score of its pair", async () => {
+        seedCluster("c1", 5, [{ id: "c1-m", sourceId: "src-agg", fp: "fp-c1" }]);
+        seedCluster("c2", 5, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+        seedCluster("c3", 5, [{ id: "c3-m", sourceId: "src-posta", fp: "fp-c3" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.9, "fp-c2": 0.8, "fp-c3": 0.7 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(linkedClusters()).toEqual(["c1"]);
+        expect(bridgeWrites()).toHaveLength(1);
+        expect(byPair(bridgeRows())).toEqual([
+          { article_id: "art-twin", cluster_a: "c1", cluster_b: "c2", score: 0.8 },
+          { article_id: "art-twin", cluster_a: "c1", cluster_b: "c3", score: 0.7 },
+          { article_id: "art-twin", cluster_a: "c2", cluster_b: "c3", score: 0.7 },
+        ]);
+        expect(twinBridgeFake.upsertOptions).toEqual([BRIDGE_OPTIONS]);
+      });
+
+      it("only the top 3 candidates by score are paired (a fourth at 0.6 is left out)", async () => {
+        seedCluster("c1", 5, [{ id: "c1-m", sourceId: "src-agg", fp: "fp-c1" }]);
+        seedCluster("c2", 5, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+        seedCluster("c3", 5, [{ id: "c3-m", sourceId: "src-posta", fp: "fp-c3" }]);
+        seedCluster("c4", 5, [{ id: "c4-m", sourceId: "src-cnn-turk", fp: "fp-c4" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.9, "fp-c2": 0.8, "fp-c3": 0.7, "fp-c4": 0.6 });
+
+        await drain();
+
+        const rows = bridgeRows();
+        expect(rows).toHaveLength(3);
+        expect(rows.some((r) => r.cluster_a === "c4" || r.cluster_b === "c4")).toBe(false);
+      });
+
+      it("0.87 and exactly 0.55: the boundary is inclusive", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+        seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-wire" });
+        scoreBy({ "fp-c1": 0.87, "fp-c2": 0.55 });
+
+        await drain();
+
+        expect(bridgeRows()).toEqual([{ article_id: "art-twin", cluster_a: "c1", cluster_b: "c2", score: 0.55 }]);
+      });
+
+      for (const [name, scores] of [
+        ["0.87 and 0.549 (second just under the bar)", { "fp-c1": 0.87, "fp-c2": 0.549 }],
+        ["a single candidate at 0.87", { "fp-c1": 0.87 }],
+        ["two candidates below the bar (0.54, 0.50)", { "fp-c1": 0.54, "fp-c2": 0.5 }],
+      ] as const) {
+        it(`${name}: no write`, async () => {
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-wire", fp: "fp-c1" }]);
+          seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-agg", fp: "fp-c2" }]);
+          queueIncoming({ sourceId: "src-outlet" });
+          scoreBy(scores);
+
+          await drain();
+
+          expect(bridgeWrites()).toHaveLength(0);
+        });
+      }
+
+      it("an article that opens a cluster (nothing reached the join bar) writes no bridge for a single weak candidate", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-wire", fp: "fp-c1" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c1": 0.2 });
+
+        const body = await drain();
+
+        expect(body.created).toBe(1);
+        expect(bridgeWrites()).toHaveLength(0);
+      });
+
+      it("evidence is recorded even when the article is then skipped as a same-source duplicate", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+        seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-outlet", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet", msgId: 4421 });
+        scoreBy({ "fp-c1": 0.87, "fp-c2": 0.83 });
+
+        const body = await drain();
+
+        expect(body.skipped).toBe(1);
+        expect(body.created).toBe(0);
+        expect(pgmqState.archived).toContain(4421);
+        expect(bridgeRows()).toEqual([{ article_id: "art-twin", cluster_a: "c1", cluster_b: "c2", score: 0.83 }]);
+      });
+
+      it("dry run (admission shadow): no write, the would_match outcome is unchanged", async () => {
+        process.env.JEV_POLITICS_ADMISSION = "shadow";
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-wire", fp: "fp-c1" }]);
+        seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-agg", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet", category: "ekonomi", admit: "shadow" });
+        scoreBy({ "fp-c1": 0.87, "fp-c2": 0.83 });
+
+        const body = await drain();
+
+        expect(body.admission.would_match).toBe(1);
+        expect(bridgeWrites()).toHaveLength(0);
+        expect(twinBridgeFake.upsertOptions).toEqual([]);
+      });
+
+      it("the strict-fingerprint fast path returns before ranking: no write", async () => {
+        seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-wire", fp: strictFingerprint(HEADLINE, "Detay") }]);
+        seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-agg", fp: "fp-c2" }]);
+        queueIncoming({ sourceId: "src-outlet" });
+        scoreBy({ "fp-c2": 0.83 });
+
+        const body = await drain();
+
+        expect(body.matched).toBe(1);
+        expect(bridgeWrites()).toHaveLength(0);
+      });
+
+      for (const mode of ["error", "throw"] as const) {
+        it(`a write ${mode}: one warning per isolate, the outcome is unchanged, nothing fails`, async () => {
+          twinBridgeFake.mode = mode;
+          seedCluster("c1", 18, [{ id: "c1-m", sourceId: "src-outlet", fp: "fp-c1" }]);
+          seedCluster("c2", 7, [{ id: "c2-m", sourceId: "src-wire", fp: "fp-c2" }]);
+          queueIncoming({ id: "art-a", sourceId: "src-outlet", msgId: 4431 });
+          // A different description: an identical title + description would hit the strict-fingerprint fast path of art-a's join.
+          queueIncoming({ id: "art-b", sourceId: "src-posta", msgId: 4432, description: "Farklı bir ayrıntı metni" });
+          scoreBy({ "fp-c1": 0.87, "fp-c2": 0.83 });
+
+          const body = await drain();
+
+          expect(bridgeWrites()).toHaveLength(2); // both articles tried
+          expect(bridgeWarnings()).toHaveLength(1);
+          expect(String(bridgeWarnings()[0]?.[0])).toContain(mode === "error" ? "twin bridges down" : "twin bridges unreachable");
+          expect(body.failedTransient).toBe(0);
+          expect(body.matched).toBe(2);
+          expect(body.created).toBe(0);
+          expect(pgmqState.archived).toEqual(expect.arrayContaining([4431, 4432]));
+          // art-a: c1 holds src-outlet, so it joins c2 (T1b), exactly as with a healthy table
+          expect(linkedClusters()).toHaveLength(2);
+          expect(linkedClusters()[0]).toBe("c2");
+        });
+      }
     });
   });
 });

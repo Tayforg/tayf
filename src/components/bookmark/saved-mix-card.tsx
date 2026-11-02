@@ -10,7 +10,7 @@ const ZONES: readonly MediaDnaZone[] = ["iktidar", "bagimsiz", "muhalefet"];
 const HINT_CLASS = "mb-3 text-xs text-muted-foreground";
 
 /**
- * "Okuma diyetin" -- the zone mix of the saved stories. Hook-free; rendered by
+ * "Okuma diyetiniz" -- the zone mix of the saved stories. Hook-free; rendered by
  * the client SavedList from rows it already holds. Copy stays descriptive: no
  * advice about what to read next.
  */
@@ -18,12 +18,12 @@ export function SavedMixCard({ rows }: { rows: ReadonlyArray<SavedMixRow> }) {
   const mix = savedMix(rows);
 
   if (mix.status === "too-few") {
-    return <p className={HINT_CLASS}>En az 3 hikâye kaydedince okuma diyetin burada görünür.</p>;
+    return <p className={HINT_CLASS}>En az 3 hikâye kaydedince okuma diyetiniz burada görünür.</p>;
   }
   if (mix.status === "no-votes") {
     return (
       <p className={HINT_CLASS}>
-        Kaydettiğin hikâyelerde henüz sınıflandırılmış kaynak yok; okuma diyetin hesaplanamıyor.
+        Kaydettiğiniz hikâyelerde henüz sınıflandırılmış kaynak yok; okuma diyetiniz hesaplanamıyor.
       </p>
     );
   }
@@ -33,14 +33,14 @@ export function SavedMixCard({ rows }: { rows: ReadonlyArray<SavedMixRow> }) {
 
   return (
     <section
-      aria-labelledby="okuma-diyetin"
+      aria-labelledby="okuma-diyetiniz"
       className="mb-4 rounded-xl border border-border/60 bg-card/40 p-4 space-y-2"
     >
-      <h2 id="okuma-diyetin" className="font-serif text-sm font-semibold">
-        Okuma diyetin
+      <h2 id="okuma-diyetiniz" className="font-serif text-sm font-semibold">
+        Okuma diyetiniz
       </h2>
       <p className="text-[12px] text-muted-foreground">
-        {`Kaydettiğin ${stories} hikâyeyi yazan ${total} sınıflandırılmış kaynağın dağılımı`}
+        {`Kaydettiğiniz ${stories} hikâyeyi yazan ${total} sınıflandırılmış kaynağın dağılımı`}
       </p>
       <div
         role="img"

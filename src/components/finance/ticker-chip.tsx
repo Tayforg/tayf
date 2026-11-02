@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 //
 // A move is only shown when it is known: a quote without a baseline
 // (hasBaseline === false, so changePct is a 0 placeholder) or one the page
-// flagged stale renders an em dash instead of "+0,00%" and never a limit
+// flagged stale renders an em dash instead of "%0,00" and never a limit
 // tag. The dash is hidden from assistive tech and followed by a sr-only
 // "değişim bilinmiyor", because a bare "—" is read as nothing or as "dash".
 // `hasBaseline` undefined (a cache entry from before the field existed)

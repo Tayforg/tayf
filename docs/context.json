@@ -64,11 +64,25 @@
         ]
       },
       {
-        "path": "src/lib/rss/normalize.ts",
-        "purpose": "Normalizes raw RSS items into articles with category classification, image extraction, and content hashing",
+        "path": "supabase/functions/_shared/rss/normalize.ts",
+        "purpose": "Normalizes raw RSS items into articles with image extraction and content hashing (Deno edge shared module; the category comes from ./category.ts)",
         "exports": [
+          "normalizeItem",
           "normalizeArticles",
+          "prepareArticles",
+          "completeArticles",
+          "canonicalizeUrl",
           "NormalizedArticle"
+        ]
+      },
+      {
+        "path": "supabase/functions/_shared/rss/category.ts",
+        "purpose": "Pure ingest category classifier: folds Turkish text to ASCII, matches word-bounded keywords on title + description (a few politika words on the title only), reads the URL path for its section only; decides which stories reach clustering (politika / son_dakika)",
+        "exports": [
+          "classifyCategory",
+          "foldForCategory",
+          "detectCategoryFromUrl",
+          "NewsCategory"
         ]
       },
       {
@@ -581,27 +595,55 @@
       ]
     },
     {
-      "path": "src/lib/rss/normalize.ts",
-      "purpose": "Normalizes raw RSS items into structured articles with URL normalization, HTML entity decoding, image extraction, content hashing, and keyword-based category classification",
+      "path": "supabase/functions/_shared/rss/normalize.ts",
+      "purpose": "Normalizes raw RSS items into structured articles with URL normalization, HTML entity decoding, image extraction and content hashing (strictFingerprint); the category is delegated to ./category.ts",
       "exports": [
+        "normalizeItem",
         "normalizeArticles",
+        "prepareArticles",
+        "completeArticles",
+        "canonicalizeUrl",
         "NormalizedArticle"
       ],
       "dependencies": [
-        "crypto-js/sha256",
-        "@/types",
-        "./fetcher"
+        "../cluster/fingerprint.ts",
+        "./category.ts",
+        "./entities.ts",
+        "./fetcher.ts"
       ],
       "keyFunctions": [
         {
           "name": "normalizeArticles",
           "purpose": "Batch normalizes RSS items for a source",
-          "signature": "normalizeArticles(source: Source, items: RawFeedItem[]): NormalizedArticle[]"
-        },
+          "signature": "normalizeArticles(source: RssSource, items: RawFeedItem[], nowMs?: number, counters?: NormalizeCounters): NormalizedArticle[]"
+        }
+      ]
+    },
+    {
+      "path": "supabase/functions/_shared/rss/category.ts",
+      "purpose": "Pure ingest category classifier (no imports): ASCII-folded, word-bounded keywords on title + description, son_dakika from the title alone, the URL read for its path section only. The cluster trigger fires only for politika / son_dakika, so this decides what is ever clustered",
+      "exports": [
+        "classifyCategory",
+        "foldForCategory",
+        "detectCategoryFromUrl",
+        "NewsCategory"
+      ],
+      "dependencies": [],
+      "keyFunctions": [
         {
           "name": "classifyCategory",
-          "purpose": "Keyword + URL-based Turkish news category classification",
-          "signature": "classifyCategory(title, description, url): NewsCategory"
+          "purpose": "Turkish news category classification: son_dakika, politika, URL section, spor, dunya, ekonomi, teknoloji, yasam, genel",
+          "signature": "classifyCategory(title: string, description: string | null, url: string): NewsCategory"
+        },
+        {
+          "name": "foldForCategory",
+          "purpose": "Folds Turkish letters to ASCII before lowercasing, so YENİ becomes yeni and never yeni plus U+0307",
+          "signature": "foldForCategory(s: string): string"
+        },
+        {
+          "name": "detectCategoryFromUrl",
+          "purpose": "The section a publisher filed the article under, from the URL path only",
+          "signature": "detectCategoryFromUrl(url: string): NewsCategory | null"
         }
       ]
     },

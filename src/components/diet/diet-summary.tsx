@@ -42,7 +42,7 @@ export function DietSummary() {
   if (!available) {
     return (
       <p className="text-sm text-muted-foreground">
-        Tarayıcın yerel depolamaya izin vermiyor (ör. bazı gizli sekmeler). Haber diyetin bu
+        Tarayıcınız yerel depolamaya izin vermiyor (ör. bazı gizli sekmeler). Haber diyetiniz bu
         cihazda tutulamıyor; Tayf&apos;ın geri kalanı normal çalışır.
       </p>
     );
@@ -55,7 +55,7 @@ export function DietSummary() {
       <div className="space-y-2">
         <p className="text-sm text-muted-foreground">
           Henüz kayıt yok. Bir haber sayfasında &quot;Aynı Haber, Farklı Dünyalar&quot;
-          başlıklarına ya da &quot;Karşı tarafı oku&quot; bağlantısına tıkladığında, o haberin
+          başlıklarına ya da &quot;Karşı tarafı oku&quot; bağlantısına tıkladığınızda, o haberin
           tarafı burada sayılır.
         </p>
         <ZoneLink />

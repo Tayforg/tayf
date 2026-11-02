@@ -293,7 +293,7 @@ Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 
 
 There is no `script-src`, so nothing can execute even if the markup were ever injected, and there is no `X-Frame-Options` header on those paths. The copy-paste snippet adds `sandbox="allow-popups allow-popups-to-escape-sandbox"` (no scripts, no same-origin) as defence in depth.
 
-Snippet (the "Gömme kodu" chip on the cluster page copies this; the older "Sitene ekle" chip still copies the static `<a><img>` rozet badge):
+Snippet (the "Gömme kodu" chip on the cluster page copies this; the older "Sitenize ekle" chip still copies the static `<a><img>` rozet badge):
 
 ```html
 <iframe src="https://www.tayfhaber.com/embed/cluster/{id}" width="560" height="200" title="Tayf yelpazesi: bu haberi hangi medya bölgeleri yazdı" loading="lazy" style="border:0;max-width:100%" sandbox="allow-popups allow-popups-to-escape-sandbox"></iframe>

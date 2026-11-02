@@ -520,6 +520,81 @@ migration 131) and turns such a privilege into a `fail`.
 - **Cost.** About 5-11 ms per report (two catalogue scans), measured on production
   on 2026-11-02.
 
+## Twin bridges (147, shadow)
+
+Twin clusters are never repaired: `cluster_merge_log` has 0 rows ever and
+`cluster_merge_dismissals` 0 (2026-11-02), while two clusters of one story keep
+absorbing articles in parallel (Antalya-Alanya otoyolu 2c9941bd / 8ab93bbd, the
+Seoul trip 9b7c7c35 / dcdf1c8e). The cluster consumer already scores every new
+article against all of its context clusters and used to discard that evidence.
+Migration 147 adds `public.cluster_twin_bridges` (service role only, RLS on, no
+policy, no foreign keys): one row per `(article_id, cluster_a, cluster_b)` with
+`cluster_a < cluster_b`, written best-effort when an article scores >= 0.55
+against a cluster other than its own. **Nothing merges.** The table is shadow
+evidence, and merges stay manual in `/admin/birlestir`.
+
+The would-merge verdict is `twinMergeDecision()` in
+`supabase/functions/_shared/cluster/twin-merge.ts`: at least 2 distinct articles
+from at least 2 distinct sources scoring >= 0.55, no `cluster_merge_dismissals` row,
+merged size <= 60, target = the larger cluster. It also applies the subject veto
+and the incident (province) veto to the two seed titles, **and only that function
+applies them**: the SQL below cannot see headlines the way `ensemble.ts` does, so
+a Duzce / Bolu style pair can show up here and still be a `incident_veto` in the
+function. Read the list as candidates, not as decisions.
+
+Read-only query for the last 48 hours (run it with the service role or in the SQL
+editor; it writes nothing):
+
+```sql
+select b.cluster_a,
+       b.cluster_b,
+       ca.title_tr                  as title_a,
+       cb.title_tr                  as title_b,
+       ca.article_count             as size_a,
+       cb.article_count             as size_b,
+       count(distinct b.article_id) as articles,
+       count(distinct a.source_id)  as sources,
+       max(b.score)                 as best_score,
+       (d.cluster_a is not null)    as dismissed
+  from public.cluster_twin_bridges b
+  join public.articles a on a.id = b.article_id
+  join public.clusters ca on ca.id = b.cluster_a and ca.merged_into is null
+  join public.clusters cb on cb.id = b.cluster_b and cb.merged_into is null
+  left join public.cluster_merge_dismissals d
+         on d.cluster_a = b.cluster_a and d.cluster_b = b.cluster_b
+ where b.seen_at >= now() - interval '48 hours'
+   and b.score >= 0.55
+ group by b.cluster_a, b.cluster_b, ca.title_tr, cb.title_tr,
+          ca.article_count, cb.article_count, d.cluster_a
+having count(distinct b.article_id) >= 2
+   and count(distinct a.source_id) >= 2
+   and ca.article_count + cb.article_count <= 60
+ order by articles desc, best_score desc
+ limit 50;
+```
+
+- **Reading it.** `dismissed = true` rows are the ones an admin already decided not
+  to merge: the function says `dismissed` for them, so they are the disagreements
+  to look at when judging precision. `cluster_a < cluster_b` is the stored order of
+  the pair, not a hint about which side survives (the larger one does). Both
+  clusters must still be live (`merged_into is null`); a merged-away side drops
+  out. `articles.source_id` is the source key the consumer logs per article.
+- **When it has rows.** Until 147 is applied the table does not exist and the
+  query fails with `relation "public.cluster_twin_bridges" does not exist`. After
+  147 and before the consumer that writes the bridges is deployed it returns 0 rows;
+  that is the expected state, and it is also the syntax check. After the
+  deploy expect a few hundred bridge rows a day (see the RETENTION note in the
+  migration), so the 48 h list is short.
+- **What to do with it.** Compare the list with what the operator merges or
+  dismisses in `/admin/birlestir` for 48 h. An automatic merge is NOT part of this
+  change: it would need a `'twin'` origin in the check constraint of migration 099
+  (`cluster_merge_dismissals.origin` and the merge log), a merge call in the
+  consumer, and the vetoes above in the same transaction. It is proposed only
+  after the shadow list and the manual decisions agree.
+- **Retention.** No prune job. A `delete ... where seen_at < now() - interval '30 days'`
+  cron is a founder decision and would need `grant delete` on the table to
+  `service_role` (migration 147 grants select and insert only).
+
 ## Susan kaynaklar (baseline)
 
 Row 13 (`sources_newly_dark`, migration 114; silence window 24 h since

@@ -71,7 +71,7 @@ describe("TickerChip", () => {
 
   it("renders the signed move and the taban flag for a known move", () => {
     const text = textOf(TickerChip({ ticker: "OZATD", quote }));
-    expect(text).toContain("-10,00%");
+    expect(text).toContain("-%10,00");
     expect(text).toContain("taban");
     expect(text).not.toContain("—");
   });
@@ -112,7 +112,7 @@ describe("TickerChip", () => {
     const { hasBaseline: _drop, ...legacy } = quote;
     void _drop;
     const text = textOf(TickerChip({ ticker: "OZATD", quote: legacy as Quote }));
-    expect(text).toContain("-10,00%");
+    expect(text).toContain("-%10,00");
     expect(text).not.toContain("—");
   });
 
@@ -138,13 +138,13 @@ describe("TickerChip", () => {
 
     it("INFO 0.66 -> 0.60 (-9.09 %) reads taban: 0.594 steps up to the 0.01 tick", () => {
       const text = textOf(TickerChip({ ticker: "INFO", quote: at(0.66, 0.6) }));
-      expect(text).toContain("-9,09%");
+      expect(text).toContain("-%9,09");
       expect(text).toContain("taban");
     });
 
     it("6.98 -> 6.30 (-9.74 %) shows no tag: 6.29 would still have been a valid price", () => {
       const text = textOf(TickerChip({ ticker: "AAAA", quote: at(6.98, 6.3) }));
-      expect(text).toContain("-9,74%");
+      expect(text).toContain("-%9,74");
       expect(text).not.toContain("taban");
       expect(text).not.toContain("tavan");
     });
@@ -176,7 +176,7 @@ describe("TickerTape", () => {
   it("renders the percentage for a known move", () => {
     const el = TickerTape({ items, quotes: { OZATD: quote }, stats });
     const text = textOf(el);
-    expect(text).toContain("-10,00%");
+    expect(text).toContain("-%10,00");
     expect(text).toContain("taban");
   });
 
@@ -272,15 +272,15 @@ describe("TickerTape", () => {
         staleTickers,
       });
       const text = textOf(el);
-      expect(text).toContain("+10,00%");
+      expect(text).toContain("+%10,00");
       expect(text).toContain("tavan");
       expect(text).toContain("hacim");
-      expect(text).not.toContain("-10,00%");
+      expect(text).not.toContain("-%10,00");
     });
 
     it("without staleTickers nothing is stale (existing behaviour)", () => {
       const text = textOf(TickerTape({ items, quotes: { OZATD: quote }, stats: rvolStats }));
-      expect(text).toContain("-10,00%");
+      expect(text).toContain("-%10,00");
       expect(text).toContain("hacim");
     });
   });

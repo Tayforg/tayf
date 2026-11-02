@@ -135,7 +135,7 @@ describe("NavLinks — accessible names", () => {
 
     const cases: Array<[string, string]> = [
       ["/", "Haberler"],
-      ["/blindspots", "Kör Noktalar"],
+      ["/blindspots", "Kör noktalar"],
       ["/saved", "Kaydedilenler"],
     ];
 
@@ -163,6 +163,17 @@ describe("NavLinks — accessible names", () => {
       .map((span) => collectText(span.props?.children).join(""))
       .join("");
     expect(adminText).toBe("Admin");
+  });
+
+  it("writes the visible and the screen-reader label of /blindspots in sentence case, like the footer (h19-copy-2)", () => {
+    const link = findByHref(NavLinks({ showAdmin: false }), "/blindspots");
+    expect(link).toBeDefined();
+    const visible = collectByClassSubstring(link, "hidden sm:inline");
+    expect(visible).toHaveLength(1);
+    expect(collectText(visible[0]?.props?.children).join("")).toBe("Kör noktalar");
+    const screenReader = collectByClassSubstring(link, "sr-only");
+    expect(screenReader).toHaveLength(1);
+    expect(collectText(screenReader[0]?.props?.children).join("")).toBe("Kör noktalar");
   });
 
   it("gives every nav link a visible focus ring", () => {

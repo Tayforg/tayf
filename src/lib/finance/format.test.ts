@@ -1,6 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import { articleCountLabel, coverageScopeNote, disclosureWindowLabel, limitFlag, priceTickKurus } from "./format";
+import { articleCountLabel, coverageScopeNote, disclosureWindowLabel, fmtPct, limitFlag, priceTickKurus } from "./format";
+
+describe("fmtPct (Turkish prefix form: sign, then %, then the number)", () => {
+  it("writes the /ekonomi moves of h19-copy-2 as -%4,73 / +%9,95 / -%3,21", () => {
+    expect(fmtPct(-4.73)).toBe("-%4,73");
+    expect(fmtPct(9.95)).toBe("+%9,95");
+    expect(fmtPct(-3.21)).toBe("-%3,21");
+  });
+
+  it("writes the limit moves with two decimals", () => {
+    expect(fmtPct(-10)).toBe("-%10,00");
+    expect(fmtPct(10)).toBe("+%10,00");
+  });
+
+  it("writes a flat move without a sign", () => {
+    expect(fmtPct(0)).toBe("%0,00");
+    expect(fmtPct(-0.001)).toBe("%0,00");
+  });
+});
 
 describe("disclosureWindowLabel", () => {
   it("says 'son 30 gün' only when the list is NOT cut at the cap", () => {

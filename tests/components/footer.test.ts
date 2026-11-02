@@ -23,13 +23,64 @@ describe("footer.tsx /oyun link", () => {
     expect(matches).toHaveLength(1);
   });
 
-  it("labels it with the page's own Turkish name", () => {
-    expect(footerSrc).toMatch(/\{\s*href:\s*"\/oyun",\s*label:\s*"Tarafı Tahmin Et"\s*\}/);
+  it("labels it with the sentence case of the page name", () => {
+    expect(footerSrc).toMatch(/\{\s*href:\s*"\/oyun",\s*label:\s*"Tarafı tahmin et"\s*\}/);
   });
 
   it("keeps the existing links (no accidental removal)", () => {
     for (const href of ["/", "/blindspots", "/sources", "/konu", "/metodoloji"]) {
       expect(footerSrc).toContain(`href: "${href}"`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h19-copy-2: one name per destination, in sentence case. /timeline's page
+// title and H1 are "Zaman çizelgesi", so the footer says the same instead of
+// "Zaman Akışı"; "Kör Noktalar" and "Tarafı Tahmin Et" were the only Title
+// Case labels among sentence-case ones. The last link goes to the correction
+// form, so it is named for that.
+// ---------------------------------------------------------------------------
+
+/** The `label: "..."` values of NAV_LINKS, found by scanning (no regex over source). */
+function navLabels(): string[] {
+  const nav = footerSrc.slice(footerSrc.indexOf("const NAV_LINKS"), footerSrc.indexOf("] as const"));
+  const labels: string[] = [];
+  const key = 'label: "';
+  let from = nav.indexOf(key);
+  while (from !== -1) {
+    const start = from + key.length;
+    const end = nav.indexOf('"', start);
+    labels.push(nav.slice(start, end));
+    from = nav.indexOf(key, end);
+  }
+  return labels;
+}
+
+describe("footer.tsx labels (h19-copy-2)", () => {
+  it("finds every NAV_LINKS label", () => {
+    expect(navLabels()).toHaveLength(12);
+  });
+
+  it("names /timeline like its page H1", () => {
+    expect(footerSrc).toContain('{ href: "/timeline", label: "Zaman çizelgesi" }');
+    expect(footerSrc).not.toContain("Zaman Akışı");
+  });
+
+  it("names the /blindspots link in sentence case", () => {
+    expect(footerSrc).toContain('{ href: "/blindspots", label: "Kör noktalar" }');
+  });
+
+  it("names the correction link for what it opens, keeping its anchor", () => {
+    expect(footerSrc).toContain('{ href: "/metodoloji#duzeltme", label: "Düzeltme ve iletişim" }');
+  });
+
+  it("writes every label in sentence case: only the first word may be capitalized", () => {
+    for (const label of navLabels()) {
+      const rest = label.split(" ").slice(1);
+      for (const word of rest) {
+        expect(word).toBe(word.toLocaleLowerCase("tr"));
+      }
     }
   });
 });

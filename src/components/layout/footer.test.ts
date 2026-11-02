@@ -37,7 +37,7 @@ describe("footer.tsx contrast + landmarks", () => {
 
 // /durum ("Sistem durumu") is a public transparency page; the footer is the
 // only site-wide nav that links to it, placed with the other trust links and
-// ahead of the "İletişim" entry that closes the list.
+// ahead of the "Düzeltme ve iletişim" entry that closes the list.
 describe("footer.tsx Sistem durumu link", () => {
   const src = readFileSync(join(__dirname, "footer.tsx"), "utf8");
 
@@ -46,10 +46,10 @@ describe("footer.tsx Sistem durumu link", () => {
     expect(src).toContain('{ href: "/durum", label: "Sistem durumu" }');
   });
 
-  it("sits in NAV_LINKS before İletişim, and only once", () => {
+  it("sits in NAV_LINKS before Düzeltme ve iletişim, and only once", () => {
     const nav = src.slice(src.indexOf("const NAV_LINKS"), src.indexOf("] as const"));
     expect(nav.indexOf('href: "/durum"')).toBeGreaterThan(-1);
-    expect(nav.indexOf('href: "/durum"')).toBeLessThan(nav.indexOf('label: "İletişim"'));
+    expect(nav.indexOf('href: "/durum"')).toBeLessThan(nav.indexOf('label: "Düzeltme ve iletişim"'));
     expect(src.split('href: "/durum"')).toHaveLength(2);
   });
 });

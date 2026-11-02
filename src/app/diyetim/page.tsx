@@ -12,7 +12,7 @@ import { noindexPageMetadata } from "@/lib/seo/page-metadata";
 export const metadata: Metadata = noindexPageMetadata({
   title: "Haber diyetim",
   description:
-    "Tayf'ta hangi medya dünyasından haber okuduğunu yalnızca bu cihazda gösteren sayfa.",
+    "Tayf'ta hangi medya dünyasından haber okuduğunuzu yalnızca bu cihazda gösteren sayfa.",
   path: "/diyetim",
   follow: false,
 });
@@ -24,7 +24,7 @@ export default function DiyetimPage() {
         Haber diyetim
       </h1>
       <p className="text-sm text-muted-foreground">
-        Tayf&apos;ta tıkladığın haber bağlantılarının hangi medya dünyasından geldiğini
+        Tayf&apos;ta tıkladığınız haber bağlantılarının hangi medya dünyasından geldiğini
         gösterir. Bu bir ayna, karne değil: tıklamak okumak demek değildir.
       </p>
       <DietSummary />
@@ -36,12 +36,12 @@ export default function DiyetimPage() {
         <h2 className="text-sm font-semibold">Gizlilik</h2>
         <ol className="list-decimal space-y-2 pl-5 text-sm text-muted-foreground">
           <li>
-            Haber diyetin yalnızca bu tarayıcının yerel depolamasında (localStorage) tutulur;
+            Haber diyetiniz yalnızca bu tarayıcının yerel depolamasında (localStorage) tutulur;
             Tayf sunucularına gönderilmez, bir hesaba ya da başka bir cihaza bağlanmaz.
           </li>
           <li>
             Her tıklamada yalnızca iki bilgi yazılır: haberin tarafı (İktidar / Bağımsız /
-            Muhalefet) ve zamanı. Haber başlığı, adresi, kaynağın adı ya da kimliğin
+            Muhalefet) ve zamanı. Haber başlığı, adresi, kaynağın adı ya da kimliğiniz
             kaydedilmez.
           </li>
           <li>

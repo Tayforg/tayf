@@ -42,7 +42,7 @@ export function NewsletterForm() {
   if (status === "sent") {
     return (
       <p role="status" aria-live="polite" className="text-sm text-emerald-600 dark:text-emerald-400">
-        Onay bağlantısı e-postana gönderildi.
+        Onay bağlantısı e-posta adresinize gönderildi.
       </p>
     );
   }
@@ -90,7 +90,7 @@ export function NewsletterForm() {
 
       {status === "error" && (
         <p role="alert" className="text-sm text-destructive">
-          Bir şeyler ters gitti, tekrar dene.
+          Bir şeyler ters gitti, lütfen tekrar deneyin.
         </p>
       )}
     </form>

@@ -31,7 +31,7 @@ export function trackChannelShare(
   track("share", { clusterId, kind: channel });
 }
 
-// Copies the "Sitene ekle" <a><img></a> snippet for the cluster's spectrum
+// Copies the "Sitenize ekle" <a><img></a> snippet for the cluster's spectrum
 // badge. Exported for the same DOM-less testability reason as above.
 // Resolves false when the id is not a uuid or the clipboard is unavailable.
 export async function copyEmbedCode(clusterId: string): Promise<boolean> {
@@ -73,7 +73,7 @@ export async function copyText(value: string): Promise<boolean> {
   }
 }
 
-// "Sitene ekle" outcome. On failure `manual` is the html snippet the reader
+// "Sitenize ekle" outcome. On failure `manual` is the html snippet the reader
 // can select and copy by hand (null when the id is not a uuid, i.e. there is
 // no snippet to show).
 export async function resolveEmbedCopy(
@@ -230,7 +230,7 @@ export function ShareButton({ clusterId, title, text }: ShareButtonProps) {
           title="Bu haberin yelpaze rozetini sitenize ekleyin"
           className={CHIP_CLASS}
         >
-          {embedCopied ? "Kod kopyalandı" : embedFailed ? "Kopyalanamadı" : "Sitene ekle"}
+          {embedCopied ? "Kod kopyalandı" : embedFailed ? "Kopyalanamadı" : "Sitenize ekle"}
         </button>
       )}
       {canEmbedIframe && (
