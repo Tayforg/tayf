@@ -47,6 +47,18 @@
 // possessor) and the framing penalty ranks the title down, as before. A
 // first-pick floor candidate that is all capitals is sentence-cased instead of
 // shipped shouting (09f152ec).
+//
+// extractive-v4 (hunt 26, h26-editorial-1; still extractive-v4, NO model bump:
+// the rules below change new picks only and migration 141 must not re-offer the
+// last 14 days): eight more loaded wordings ('görkemli', 'vurgun', 'dayatma',
+// 'korku dolu', 'savaş alanına çevir', 'soğuk duş', 'perde arkası', 'önemli
+// açıklama|mesaj|çağrı') cost 0.25 each; an acting appointment's qualifier
+// ('vekaleten', 'vekalet', 'vekil...') that at least 40% of three or more members
+// carry costs a title that drops it QUALIFIER_LOSS_PENALTY (0.30; 4433b6f7 was
+// titled "Genel Müdürü Atila Türeli oldu" while its members wrote 'vekaleten' and
+// 'Vekilliğine'); and cleanHeadline turns a teaser pause in the middle of a title
+// ("AK Parti çalışmaları tamamladı... Yeni anayasa takvimi belli oldu") into a
+// sentence break unless it ends a comma list or sits inside a quote.
 
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
@@ -165,6 +177,17 @@ const LOADED_FOLDED: RegExp[] = [
   new RegExp(`${L}rezil`, "u"),
   // Was a framing unit (0.12) until extractive-v4.
   new RegExp(`${L}çarp[iı]c[iı]${R}`, "u"),
+  // Hype and content-free wording (hunt 26, h26-editorial-1). 'vurgun' has no
+  // right edge on purpose (vurgunu, vurgunlar) and does not match 'vurgu' /
+  // 'vurgusu'; the multi-word entries are the outlet's cliché, not the event.
+  new RegExp(`${L}görkemli${R}`, "u"),
+  new RegExp(`${L}vurgun`, "u"),
+  new RegExp(`${L}dayatma`, "u"),
+  new RegExp(`${L}korku\\s+dolu${R}`, "u"),
+  new RegExp(`${L}savaş\\s+alanına\\s+çevir`, "u"),
+  new RegExp(`${L}soğuk\\s+duş`, "u"),
+  new RegExp(`${L}perde\\s+arkas[ıi]`, "u"),
+  new RegExp(`${L}önemli\\s+(?:açıklama|mesaj|çağrı)`, "u"),
 ];
 
 // Words that attribute a claim instead of asserting it. Tested on foldTr(title).
@@ -185,6 +208,30 @@ function carriesHedge(title: string): boolean {
   return HEDGE.test(foldTr(title));
 }
 
+// The qualifier of an acting appointment: 'vekaleten' (by proxy), 'vekalet',
+// 'vekil' / 'vekili' / 'vekilliğine' (acting, deputy). The left word edge keeps
+// 'milletvekili' and 'başkanvekili' out: a member of parliament is not an
+// acting anything. Tested on foldTr(title); [aâ] and [iı] because the tr-locale
+// lower case of "VEKİL" is 'vekil' but a typed "vekâleten" keeps its circumflex.
+const QUALIFIER = new RegExp(`${L}(?:vek[aâ]leten|vek[aâ]let|vek[iı]l)`, "u");
+
+/**
+ * What a title pays for dropping the qualifier its cluster's members carry (the
+ * hedge rule's twin, charged more because an acting appointment shown as a full
+ * one is a different fact, not a softer verb): when three or more (deduplicated)
+ * members exist and at least QUALIFIED_SHARE of them carry 'vekaleten' /
+ * 'vekalet' / 'vekil...', a title without it is asserting a full appointment.
+ * Charged to a member's score and to the stored title's score alike. Separate
+ * from HEDGE_LOSS_PENALTY (0.15), which stays below the 0.20 re-pick margin.
+ */
+export const QUALIFIER_LOSS_PENALTY = 0.3;
+const QUALIFIED_MIN_MEMBERS = 3;
+const QUALIFIED_SHARE = 0.4;
+
+function carriesQualifier(title: string): boolean {
+  return QUALIFIER.test(foldTr(title));
+}
+
 export function framingPenalty(title: string): number {
   const folded = foldTr(title);
   let n = 0;
@@ -193,7 +240,8 @@ export function framingPenalty(title: string): number {
   return n;
 }
 
-function loadedPenalty(title: string): number {
+/** Number of loaded-wording rules the title trips (0.25 each in scoreTitle). */
+export function loadedPenalty(title: string): number {
   const folded = foldTr(title);
   let n = 0;
   for (const re of LOADED_FOLDED) if (re.test(folded)) n++;
@@ -247,6 +295,152 @@ function stripMidSonDakika(title: string): string {
   return (out + title.slice(at)).replace(/\s{2,}/g, " ").trim();
 }
 
+// A teaser pause in the middle of a title: '...' or '…' directly after a letter,
+// then whitespace and an upper-case letter or a digit ("AK Parti çalışmaları
+// tamamladı... Yeni anayasa takvimi belli oldu"). Lower case after the dots is a
+// continuation and stays.
+const TEASER_PAUSE = /(?<=\p{L})(?:\.{3}|…)\s+(?=[\p{Lu}\p{Nd}])/gu;
+const TEASER_MIN_WORDS = 2;
+
+// A question after which the pause stays a pause. "Emekliye ara zam var mı...
+// Bakan açıkladı" would become "var mı. Bakan": a full stop after a question is
+// wrong Turkish punctuation and the title loses its question form. A segment is a
+// question when it holds the question particle (mı / mi / mu / mü, with the
+// person and tense suffixes that can follow it: miyim, misin, miyiz, misiniz,
+// midir, miydi(m/n/k/niz), mıymış) or a question word. Whole tokens only, so
+// "mimar", "muhtar", "kimse", "nehir", "MI6" are not questions. A false positive
+// merely leaves the pause as the outlet wrote it (what HEAD did); a false
+// negative would put a full stop after a question.
+const QUESTION_PARTICLE =
+  /^m[ıiuü](?:y[ıiuü]m|s[ıiuü]n|y[ıiuü]z|s[ıiuü]n[ıiuü]z|d[ıiuü]r|yd[ıiuü](?:m|n|k|n[ıiuü]z)?|ym[ıiuü]ş)?$/u;
+const QUESTION_WORDS: ReadonlySet<string> = new Set([
+  "ne", "neler", "nedir", "neyi", "neye", "neden", "niçin", "niye", "nasıl",
+  "nasıldır", "kim", "kimin", "kimler", "kimdir", "nerede", "nereye", "nereden",
+  "nerde", "neresi", "hangi", "hangisi", "hangileri", "kaç", "kaçı", "kaçıncı",
+]);
+// The longest form above is 8 letters; a longer token is never a question token,
+// so the scan does not even collect it (a 100 KB token costs a counter, not a
+// string).
+const QUESTION_TOKEN_MAX = 10;
+
+function isQuestionToken(token: string): boolean {
+  const w = token.toLocaleLowerCase("tr");
+  return QUESTION_WORDS.has(w) || QUESTION_PARTICLE.test(w);
+}
+
+/**
+ * Turns a teaser pause into a sentence break ('. '), but only when the segment
+ * before it (since the start or the previous '.', '!', '?', ':' or '…') has at
+ * least TEASER_MIN_WORDS words and no comma (a comma list's dots end an
+ * enumeration, not a sentence), is not a question (see QUESTION_PARTICLE) and no
+ * quote is open there: an unpaired '"', a '“' / '‘' / '«' without its closer, or
+ * a straight single quote that opens a word and was not closed (an apostrophe
+ * sits inside a word and is not a quote).
+ * One left-to-right scan: the replace callback only advances the counters, so
+ * the cost is linear in the title however many pauses it has.
+ */
+function breakTeaserPauses(t: string): string {
+  let at = 0;
+  let straightDouble = 0;
+  let curlyOpen = 0;
+  let curlyClose = 0;
+  let guillemetOpen = 0;
+  let guillemetClose = 0;
+  let singleOpen = 0; // ‘
+  let singleClose = 0; // ’
+  let straightOpen = 0; // ' at a word start
+  let straightClose = 0; // ' after a letter, before a non-letter
+  let words = 0;
+  let comma = false;
+  let inWord = false;
+  let question = false;
+  // The letters of the current whitespace-delimited token, collected only while
+  // it can still be a question token. A digit anywhere spoils it ("MI6").
+  let token = "";
+  let tokenLength = 0;
+  let tokenSpoiled = false;
+  const endToken = (): void => {
+    if (tokenLength > 0 && tokenLength <= QUESTION_TOKEN_MAX && !tokenSpoiled && isQuestionToken(token)) {
+      question = true;
+    }
+    token = "";
+    tokenLength = 0;
+    tokenSpoiled = false;
+  };
+  const advance = (to: number): void => {
+    for (; at < to; at++) {
+      const ch = t.charAt(at);
+      switch (ch) {
+        case '"': straightDouble++; break;
+        case "“": curlyOpen++; break;
+        case "”": curlyClose++; break;
+        case "«": guillemetOpen++; break;
+        case "»": guillemetClose++; break;
+        case "‘": singleOpen++; break;
+        case "’": singleClose++; break;
+        case "'": {
+          const before = at > 0 ? t.charAt(at - 1) : "";
+          const after = at + 1 < t.length ? t.charAt(at + 1) : "";
+          const beforeLetter = before !== "" && /[\p{L}\p{N}]/u.test(before);
+          const afterLetter = after !== "" && /[\p{L}\p{N}]/u.test(after);
+          if (!beforeLetter && afterLetter) straightOpen++;
+          else if (beforeLetter && !afterLetter) straightClose++;
+          break;
+        }
+        default:
+      }
+      if (ch === "." || ch === "!" || ch === "?" || ch === ":" || ch === "…") {
+        words = 0;
+        comma = false;
+        inWord = false;
+        question = false;
+        token = "";
+        tokenLength = 0;
+        tokenSpoiled = false;
+      } else if (/\s/.test(ch)) {
+        endToken();
+        inWord = false;
+      } else {
+        if (!inWord) words++;
+        inWord = true;
+        if (ch === ",") comma = true;
+        if (/\p{L}/u.test(ch)) {
+          tokenLength++;
+          if (tokenLength <= QUESTION_TOKEN_MAX) token += ch;
+        } else if (/\p{N}/u.test(ch)) {
+          tokenSpoiled = true;
+        }
+      }
+    }
+  };
+  return t.replace(TEASER_PAUSE, (match: string, offset: number) => {
+    advance(offset);
+    endToken(); // the word that ends right where the dots begin
+    const quotesOpen =
+      straightDouble % 2 !== 0 ||
+      curlyOpen > curlyClose ||
+      guillemetOpen > guillemetClose ||
+      singleOpen > singleClose ||
+      straightOpen > straightClose;
+    if (words < TEASER_MIN_WORDS || comma || question || quotesOpen) return match;
+    return ". ";
+  });
+}
+
+const TRAILING_PUNCTUATION = new Set([".", ":", "…", "-", "–", "—"]);
+
+// The old `/[\s.:…\-–—]+$/` strip, as one right-to-left scan: the regex was
+// retried from every position of a long run that something else follows (k^2).
+function trimTrailingPunctuation(t: string): string {
+  let end = t.length;
+  while (end > 0) {
+    const ch = t.charAt(end - 1);
+    if (!TRAILING_PUNCTUATION.has(ch) && !/\s/.test(ch)) break;
+    end--;
+  }
+  return end === t.length ? t : t.slice(0, end);
+}
+
 export function cleanHeadline(title: string): string {
   let t = title.trim();
   // Outlet prefixes ("Halk TV | ...") and "Son dakika" lead-ins, repeatedly:
@@ -261,9 +455,12 @@ export function cleanHeadline(title: string): string {
     "Cumhurbaşkanı Erdoğan",
   );
   // Exclamation marks: sentence break inside, dropped at the end.
-  t = t.replace(/!+\s+/g, ". ").replace(/!+$/g, "");
+  // (?<!!) starts a match only at the head of a run: without it a run of k '!'
+  // that no whitespace or end follows is retried from every position (k^2).
+  t = t.replace(/(?<!!)!+\s+/g, ". ").replace(/(?<!!)!+$/g, "");
+  t = breakTeaserPauses(t);
   // Trailing ellipsis / colon / dash.
-  t = t.replace(/[\s.:…\-–—]+$/g, "");
+  t = trimTrailingPunctuation(t);
   // Wrapping quotes around the whole headline.
   t = t.replace(/^["'“‘](.+)["'”’]$/, "$1");
   t = t.replace(/\s{2,}/g, " ").trim();
@@ -640,14 +837,23 @@ export interface PickOptions {
   incumbent?: string | null;
 }
 
+/** What the members of one cluster say about their own wording. */
+interface ScoreContext {
+  /** Enough members hedge ('iddia', 'öne sürdü', 'ifade'): dropping it costs HEDGE_LOSS_PENALTY. */
+  hedged: boolean;
+  /** Enough members carry an acting qualifier ('vekaleten', 'vekil...'): dropping it costs QUALIFIER_LOSS_PENALTY. */
+  qualified: boolean;
+}
+
 // One formula for a member candidate and for the stored title it competes with.
 // The title is the text as written (a member's raw title, the stored title).
-function scoreTitle(title: string, centrality: number, hedged: boolean): number {
+function scoreTitle(title: string, centrality: number, ctx: ScoreContext): number {
   return (
     centrality -
     0.12 * framingPenalty(title) -
     0.25 * loadedPenalty(title) -
-    (hedged && !carriesHedge(title) ? HEDGE_LOSS_PENALTY : 0) -
+    (ctx.hedged && !carriesHedge(title) ? HEDGE_LOSS_PENALTY : 0) -
+    (ctx.qualified && !carriesQualifier(title) ? QUALIFIER_LOSS_PENALTY : 0) -
     0.002 * Math.max(0, title.length - 90) -
     0.008 * Math.max(0, FULL_LENGTH_TITLE_CHARS - title.length)
   );
@@ -679,9 +885,14 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
 
   const toks = items.map((m) => tokens(m.title));
   const outliers = numeralOutliers(items.map((m) => numsOf(m.title)));
-  const hedged =
-    items.length >= HEDGED_MIN_MEMBERS &&
-    items.filter((m) => carriesHedge(m.title)).length / items.length >= HEDGED_SHARE;
+  const ctx: ScoreContext = {
+    hedged:
+      items.length >= HEDGED_MIN_MEMBERS &&
+      items.filter((m) => carriesHedge(m.title)).length / items.length >= HEDGED_SHARE,
+    qualified:
+      items.length >= QUALIFIED_MIN_MEMBERS &&
+      items.filter((m) => carriesQualifier(m.title)).length / items.length >= QUALIFIED_SHARE,
+  };
 
   const scored: Array<{ index: number; score: number }> = [];
   for (let i = 0; i < items.length; i++) {
@@ -689,7 +900,7 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
     let sim = 0;
     for (let j = 0; j < items.length; j++) if (j !== i) sim += jaccard(toks[i]!, toks[j]!);
     const centrality = items.length > 1 ? sim / (items.length - 1) : 0;
-    scored.push({ index: i, score: scoreTitle(items[i]!.title, centrality, hedged) });
+    scored.push({ index: i, score: scoreTitle(items[i]!.title, centrality, ctx) });
   }
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
 
@@ -731,7 +942,7 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
         sim += jaccard(incToks, toks[j]!);
         n++;
       }
-      const incScore = scoreTitle(inc, n > 0 ? sim / n : 0, hedged);
+      const incScore = scoreTitle(inc, n > 0 ? sim / n : 0, ctx);
       const margin = inc.length >= FULL_LENGTH_TITLE_CHARS ? REPICK_MARGIN_FULL_LENGTH : REPICK_MARGIN;
       return best.score - incScore < margin ? incumbent : best.cleaned;
     }

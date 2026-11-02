@@ -198,3 +198,73 @@ describe("re-pick replay: the hunt-22 clusters", () => {
     expect(CLUSTERS).toHaveLength(150);
   });
 });
+
+// Hunt 26 (h26-editorial-1, 2026-11-02): eight clusters the extractive-v4 picker
+// titled with hype ('görkemli', 'önemli mesajlar'), a verdict ('vurgun'), a full
+// appointment where the members wrote 'vekaleten', or a teaser '...' (member
+// titles read-only from cluster_articles x articles). They live in their own
+// fixture because the count of the 150-cluster file above is pinned.
+const H26: ReplayCluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "../../../tests/fixtures/neutral-title-h26-flips.json"), "utf8"),
+) as ReplayCluster[];
+
+// The twelve clusters the 150-cluster corpus changed BEFORE the h26 rules
+// (measured on HEAD 5bbc2c3: 12/150 = 0.08). The h26 word list, the qualifier
+// penalty and the teaser-pause rule change none of the 150 picks, so this set
+// is the same after them: a rule that moves it is not as conservative as h26
+// claims.
+const CORPUS_CHANGED_BEFORE_H26 = [
+  "144cfc04",
+  "ce49387a",
+  "2c15fdcf",
+  "f0afcdef",
+  "9088bea9",
+  "b04edded",
+  "e81b94fd",
+  "1e96c356",
+  "7148f645",
+  "8262e836",
+  "c26c8c14",
+  "2cc0838e",
+];
+
+describe("re-pick replay: the hunt-26 rules", () => {
+  it("change none of the 150 corpus picks beyond the twelve that changed before (churn 12/150)", () => {
+    const changed = CLUSTERS.filter((c) => {
+      const next = repick(c);
+      return next !== null && next !== c.stored;
+    }).map((c) => c.cid);
+    expect(changed.sort()).toEqual([...CORPUS_CHANGED_BEFORE_H26].sort());
+    expect(changed.length / CLUSTERS.length).toBeLessThan(0.1);
+  });
+
+  it("the h26 fixture is intact (8 clusters, none of them in the 150 corpus)", () => {
+    expect(H26).toHaveLength(8);
+    for (const c of H26) {
+      expect(CLUSTERS.some((x) => x.cid === c.cid), c.cid).toBe(false);
+      expect(c.titles.length, c.cid).toBeGreaterThanOrEqual(2);
+    }
+    expect(CLUSTERS).toHaveLength(150);
+  });
+
+  it("re-picks replace the stored hype, content-free and full-appointment titles", () => {
+    for (const cid of ["0b5eee69", "388a7dac", "806ae4e8", "7fa63071", "4433b6f7"]) {
+      const c = H26.find((x) => x.cid === cid)!;
+      const picked = repick(c);
+      expect(picked, cid).not.toBeNull();
+      expect(picked, cid).not.toBe(c.stored);
+    }
+  });
+
+  it("re-picks keep the stored titles no member beats (957cdb46: every member says 'vurgun')", () => {
+    const c = H26.find((x) => x.cid === "957cdb46")!;
+    expect(repick(c)).toBe(c.stored);
+  });
+
+  it("is idempotent: re-picking with the pick as incumbent returns it", () => {
+    for (const c of H26) {
+      const picked = repick(c);
+      expect(pickNeutralTitle(c.titles.map((title) => ({ title })), { incumbent: picked }), c.cid).toBe(picked);
+    }
+  });
+});

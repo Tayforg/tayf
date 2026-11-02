@@ -26,6 +26,7 @@ and how to prove the new value works while the old one is dead.
 | `CRON_SECRET` | Vercel env, Supabase Edge Function secret (`cluster-consumer` only) | Yes | Vercel cron routes, `/api/revalidate` caller |
 | `REVALIDATE_URL` | Supabase Edge Function secret (`cluster-consumer` only) | Yes | Nothing (not a credential; a destination URL) |
 | `ADMIN_SESSION_SECRET` | Vercel env | Yes | Every logged-in admin browser |
+| `ADMIN_PASSWORD` | Vercel env | Yes | Every logged-in admin browser (the session cookie is bound to it) |
 | `RESEND_API_KEY` | Vercel env | **No** | Outbound mail (feature is fail-closed while unset) |
 | `ANTHROPIC_API_KEY` | Vercel env, GitHub Actions secret | **No** | Headline-neutralization cron + audit's neutral-title check (both soft no-op while unset) |
 | `SENTRY_AUTH_TOKEN` | Vercel env (build-time only) | Optional | Sourcemap upload on the next build only |
@@ -272,8 +273,13 @@ checking Edge Function logs for `cluster-consumer` after the next drain tick
 ## Admin session secret — `ADMIN_SESSION_SECRET`
 
 **Where it lives:** Vercel env only (and `.env.local` for local dev). Read
-by `src/lib/admin/session.ts`'s `getSessionSecret()`, which HMAC-SHA256
-signs a `{expiresAt}` payload into the `admin_session` cookie. No Edge
+by `src/lib/admin/session.ts`'s `getSessionSecret()`, which (together with
+`ADMIN_PASSWORD`) derives the HMAC key that signs a bare `{expiresAt, iat}`
+payload into the `admin_session` cookie: `signingKey =
+PBKDF2-HMAC-SHA256(ADMIN_PASSWORD, salt = "tayf-admin-session-key:" +
+ADMIN_SESSION_SECRET, 100000 iterations, 32 bytes)`, signature =
+`HMAC-SHA256(signingKey, body)` (see "Rotating `ADMIN_PASSWORD`" below).
+`src/middleware.ts` verifies the same token with Web Crypto. No Edge
 Function, GitHub Actions, or Vault copy exists — this is a single-copy
 secret.
 
@@ -281,8 +287,8 @@ Note the related-but-distinct `ADMIN_PASSWORD` (also Vercel env, same
 file): that is the literal login password compared in
 `checkAdminPassword()`. Rotating `ADMIN_PASSWORD` changes what you type at
 `/admin/login`; rotating `ADMIN_SESSION_SECRET` changes what signs the
-cookie you get *after* typing it. They rotate independently and this
-runbook covers the session secret only.
+cookie you get *after* typing it. Either rotation now logs every admin out;
+this section covers the session secret, the subsection below the password.
 
 **How to generate:** `openssl rand -base64 32` (the repo's own
 `.env.local.example` documents this convention; `getSessionSecret()`
@@ -301,7 +307,8 @@ config, it does not read the dashboard's stored value live per-request.
 
 **Rotating this logs every admin out, on purpose.** Every existing
 `admin_session` cookie fails HMAC verification the instant the new secret
-is live, because the signature was computed with the old key. There is
+is live, because the signature was computed with the old signing key (the
+secret is part of the PBKDF2 salt, so the key changes). There is
 exactly one admin today, so this is a non-event as long as you can
 immediately re-authenticate with `ADMIN_PASSWORD` afterward — confirm you
 still have that before you rotate.
@@ -317,12 +324,58 @@ still have that before you rotate.
   signs and verifies correctly). No SQL check applies; the session is
   stateless by design.
 
-**Blast radius if leaked:** an attacker who obtains `ADMIN_SESSION_SECRET`
-can *mint* a validly-signed `admin_session` cookie for any `expiresAt`
-within the 7-day window without ever knowing `ADMIN_PASSWORD` or touching
-`/admin/login` — full `/admin` access (source management, corrections
-review, admin actions) with no login event to notice. Treat this as
-equally severe as a leaked `ADMIN_PASSWORD`, not a lesser one.
+**Blast radius if leaked:** minting a validly-signed `admin_session` cookie
+needs BOTH `ADMIN_SESSION_SECRET` and `ADMIN_PASSWORD` (the signing key is
+derived from the pair). An attacker with the secret alone cannot mint one, but
+with the secret plus one captured cookie can test password guesses offline —
+and with both values gets full `/admin` access (source management, corrections
+review, admin actions) with no login event to notice. Treat a leaked secret as
+equally severe as a leaked `ADMIN_PASSWORD`, not a lesser one, and rotate both. The cookie
+itself carries nothing derived from the password, but its signature is an
+HMAC under a key derived from the password (PBKDF2, 100,000 iterations,
+salted with this secret), so someone holding both the secret and a cookie
+could still test password guesses offline against that signature (each guess
+costs one PBKDF2 run); rotate both after a leak.
+
+### Rotating `ADMIN_PASSWORD`
+
+The `admin_session` token binds to the password through the **signing key**,
+not the payload. The payload is only `{expiresAt, iat}`; the HMAC-SHA256
+signature is computed with
+`PBKDF2-HMAC-SHA256(ADMIN_PASSWORD, salt = "tayf-admin-session-key:" + ADMIN_SESSION_SECRET, 100000 iterations, 32 bytes)`.
+Both `requireAdminSession()` and the edge middleware recompute that key from
+the current `ADMIN_PASSWORD` and `ADMIN_SESSION_SECRET` (once per process /
+isolate per pair, then reused; cheap structural checks run first, so junk
+cookies never trigger the derivation) and compare the signature in constant
+time, so **rotating `ADMIN_PASSWORD` ends every admin session**: a token
+minted under the old password was signed under a different key and no longer
+verifies (a session also ends 24 h after login, or at once if
+`ADMIN_PASSWORD` is unset). Rotation steps:
+
+```bash
+vercel env rm ADMIN_PASSWORD production
+vercel env add ADMIN_PASSWORD production
+vercel --prod
+```
+
+The migration 086 leak runbook — rotate `ADMIN_PASSWORD`, redeploy, then
+`delete from public.admin_login_attempts` to clear the login throttle — is
+therefore enough to kill a stolen cookie; rotating `ADMIN_SESSION_SECRET`
+as well is no longer required for that (rotate it too if the secret itself
+may have leaked).
+
+Limits worth knowing:
+
+- Logout (`deleteAdminSession()`) only deletes the cookie in the browser
+  that clicked it. A copy of the cookie made earlier stays valid until it
+  expires (24 h after login) or until one of the two rotations above.
+  Server-side revocation is not implemented; it would need an
+  `admin_session_epoch` row bumped on logout, i.e. a migration.
+- Tokens issued before this change are refused, so the deploy that ships it
+  logs every admin out once: the original `{expiresAt}`-only tokens (7-day
+  lifetime) lack `iat`, and tokens of the interim `{expiresAt, iat, pwd}`
+  format were signed with the bare secret instead of the derived key, so their
+  signature no longer verifies. Unknown payload fields are ignored.
 
 ---
 

@@ -28,7 +28,7 @@ import { miniParseRss } from "../_helpers/mini-rss-parse";
 // the future.
 // ---------------------------------------------------------------------------
 
-vi.mock("https://esm.sh/fast-xml-parser@4.5.0", async () => {
+vi.mock("https://esm.sh/fast-xml-parser@4.5.7", async () => {
   const { miniParseRss: parse } = await import("../_helpers/mini-rss-parse");
   return {
     XMLParser: class {

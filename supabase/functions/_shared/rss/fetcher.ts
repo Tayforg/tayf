@@ -10,8 +10,16 @@
 // natively. We map the parsed object back into the same `RawFeedItem`
 // shape that the legacy normalizer expects so the port can stay
 // near-mechanical.
+//
+// A feed body is attacker-controlled input (a compromised outlet, or anyone on
+// the path to the plain-http feeds), so the parser is pinned to 4.5.7 (4.5.0
+// expanded DOCTYPE entities without a limit: a 210 KB feed became a 400+ MB
+// <title> and killed the isolate every cycle, h26-security-1) and `parseFeed`
+// refuses DOCTYPE entity declarations outright. See XML_PARSER_OPTIONS.
+// The pin is bumped deliberately; tests/guards/edge-deps-pinned.test.ts holds
+// the floor.
 
-import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.0";
+import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.7";
 import { decodeRssBody } from "./charset.ts";
 import { safeResponse, SafeFetchError } from "../safe-fetch.ts";
 import { pickItemLink } from "./items.ts";
@@ -199,7 +207,7 @@ const SOURCE_HEADERS: Record<string, Record<string, string>> = {
   },
 };
 
-const xmlParser = new XMLParser({
+export const XML_PARSER_OPTIONS = {
   ignoreAttributes: false,
   attributeNamePrefix: "",
   // Keep tag content (CDATA + raw text) as strings without auto-coercion;
@@ -209,14 +217,40 @@ const xmlParser = new XMLParser({
   // Important: media:content is allowed multiple times per item. Force
   // the parser to keep arrays for repeated tags so we don't silently
   // drop one of two thumbnails.
-  isArray: (name) =>
+  isArray: (name: string) =>
     name === "item" ||
     name === "entry" ||
     name === "media:content" ||
     name === "media:thumbnail" ||
     name === "enclosure",
   trimValues: true,
-});
+  // Entities (h26-security-1). `&amp;` / `&lt;` / `&gt;` / `&quot;` / `&apos;`
+  // (and their numeric forms) must still decode here, so entity processing
+  // stays ON; HTML entities (`&nbsp;`, `&#305;`, `&ccedil;`...) stay LITERAL
+  // for normalize.ts's own decoder, exactly as before. DOCTYPE entities are
+  // refused before parsing (see parseFeed) and are, as a second layer, capped
+  // by the pinned release: one entity <= 10,000 chars, <= 100 declarations,
+  // and at most 100,000 chars of DOCTYPE-entity expansion per document.
+  //
+  // `maxTotalExpansions` is raised on purpose. With the plain `true` form the
+  // library budgets 1,000 built-in references (`&lt;` `&gt;` `&quot;` `&apos;`
+  // and `&#39;` `&#60;`...) per DOCUMENT and throws once a feed passes it; a
+  // 100-item feed whose descriptions carry entity-escaped HTML (a dozen
+  // `&lt;p&gt;` per item) would then turn into a `parse error` and the outlet
+  // would go silent. A built-in reference costs one linear replace, so the
+  // count needs no cap; the size caps above are the real bound.
+  processEntities: {
+    enabled: true,
+    maxEntitySize: 10_000,
+    maxExpansionDepth: 10,
+    maxExpandedLength: 100_000,
+    maxEntityCount: 100,
+    maxTotalExpansions: 10_000_000,
+  },
+  htmlEntities: false,
+};
+
+const xmlParser = new XMLParser(XML_PARSER_OPTIONS);
 
 /**
  * Fetch a single RSS source. On HTTP 304 returns `{ notModified: true, items: [] }`
@@ -458,7 +492,23 @@ export class NotAFeedError extends Error {
   }
 }
 
-function parseFeed(xml: string): RawFeedItem[] {
+/**
+ * Parse one feed body into raw items. Throws `NotAFeedError` for a body with no
+ * recognised feed root and any other Error for a body the parser (or the
+ * hostile-input guard below) refuses; `fetchFeed` turns the latter into the
+ * per-feed `parse error`, so one bad feed is skipped and the cycle survives.
+ */
+export function parseFeed(xml: string): RawFeedItem[] {
+  // h26-security-1: an entity can only be declared in a DOCTYPE internal
+  // subset, and a feed has no use for one: no captured feed fixture declares
+  // any, and the entity references real feeds use (`&amp;`, `&#305;`...) are
+  // predefined or numeric, never declared. A declared entity is the entity-bomb
+  // lever (one 200 KB entity x 2,000 references = a 400 MB title), so refuse
+  // the whole body before the parser reads it. One literal, a single linear
+  // scan; the throw becomes the existing `parse error` of this one feed.
+  if (/<!ENTITY/i.test(xml)) {
+    throw new Error("DOCTYPE entity declarations are not accepted");
+  }
   const parsed = xmlParser.parse(xml) as XmlNode;
 
   // RSS 2.0: rss > channel > item[]

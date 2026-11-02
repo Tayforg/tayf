@@ -1,8 +1,11 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   EXTRACTIVE_MODEL_ID,
   FULL_LENGTH_TITLE_CHARS,
   HEDGE_LOSS_PENALTY,
+  QUALIFIER_LOSS_PENALTY,
   REPICK_MARGIN,
   REPICK_MARGIN_FULL_LENGTH,
   cleanHeadline,
@@ -10,6 +13,7 @@ import {
   isAcceptableNeutral,
   isExtractiveModelId,
   isGenericTitle,
+  loadedPenalty,
   pickNeutralTitle,
 } from "./neutral-title";
 
@@ -1486,5 +1490,465 @@ describe("pickNeutralTitle floor: shouted candidates are sentence-cased (h22-edi
       "İzmir'de elektrik kesintisi ne zaman bitecek, Gediz Elektrik ne açıkladı?",
     ]);
     expect(picked).toBe("İzmir'de elektrik kesintisi ne zaman bitecek, Gediz Elektrik ne açıkladı?");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hunt 26 (h26-editorial-1, 2026-11-02): the picker kept hype and content-free
+// wording ('görkemli', 'vurgun', 'önemli mesajlar'), dropped the 'vekaleten'
+// qualifier of an acting appointment and kept a teaser '...' in the middle of a
+// title. The member titles live in tests/fixtures/neutral-title-h26-flips.json
+// (read-only SELECT on cluster_articles x articles, oldest first); `stored` is
+// the extractive-v4 title the cluster carried then. EXTRACTIVE_MODEL_ID stays
+// 'extractive-v4': the new rules change new picks only.
+// ---------------------------------------------------------------------------
+
+interface H26Cluster {
+  cid: string;
+  stored: string;
+  titles: string[];
+}
+
+const H26: H26Cluster[] = JSON.parse(
+  readFileSync(resolve(__dirname, "../../../tests/fixtures/neutral-title-h26-flips.json"), "utf8"),
+) as H26Cluster[];
+
+const h26 = (cid: string): H26Cluster => {
+  const c = H26.find((x) => x.cid === cid);
+  if (!c) throw new Error(`h26 fixture cluster ${cid} missing`);
+  return c;
+};
+
+const h26Floor = (c: H26Cluster) => pickNeutralTitle(asMembers(c.titles), { floor: true });
+const h26Incumbent = (c: H26Cluster) => pickNeutralTitle(asMembers(c.titles), { incumbent: c.stored });
+
+describe("h26 fixture", () => {
+  it("holds the eight clusters, each with members and a stored extractive-v4 title", () => {
+    expect(H26.map((c) => c.cid)).toEqual([
+      "0b5eee69",
+      "388a7dac",
+      "806ae4e8",
+      "7fa63071",
+      "4433b6f7",
+      "957cdb46",
+      "c3dcfa27",
+      "0f516356",
+    ]);
+    for (const c of H26) {
+      expect(c.titles.length, c.cid).toBeGreaterThanOrEqual(2);
+      expect(c.stored.trim().length, c.cid).toBeGreaterThan(0);
+      // The stored title is one of the member titles after cleaning (v4 picks copy a member).
+      const cleaned = c.titles.map((t) => cleanHeadline(t));
+      expect(cleaned.includes(c.stored) || c.titles.includes(c.stored), c.cid).toBe(true);
+    }
+  });
+
+  it("EXTRACTIVE_MODEL_ID is not bumped by h26 (new picks only)", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v4");
+  });
+});
+
+describe("h26: hype and content-free wording loses to a plain member (floor and incumbent)", () => {
+  // The member sets are today's: 0b5eee69, 806ae4e8 and 7fa63071 have grown plain
+  // members since their stored titles were picked, so their floor pick is already
+  // the plain member on HEAD. What the new word list fixes for them is the re-pick
+  // (incumbent mode), where the stored hype title used to survive the margin;
+  // 388a7dac flips in both modes.
+  const FLIPS: Array<[string, string]> = [
+    ["0b5eee69", "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nın şampiyonu Enka oldu"],
+    // The '!' of the member is dropped by cleanHeadline.
+    ["388a7dac", "Freni boşalan özel halk otobüsü 2 otomobile ve manav dükkanına çarptı"],
+    ["806ae4e8", "İçişleri Bakanı Çiftçi, Konya'da muhtarlara çalınmadık kapı bırakmamalarını söyledi"],
+    ["7fa63071", "Cumhurbaşkanı Erdoğan'dan Güney Kore ile iş birliği vurgusu"],
+  ];
+
+  it.each(FLIPS)("%s: the first pick (floor) is the plain member", (cid, expected) => {
+    const c = h26(cid);
+    expect(h26Floor(c)).toBe(expected);
+    expect(h26Floor(c)).not.toBe(c.stored);
+  });
+
+  it.each(FLIPS)("%s: a re-pick with the stored title as incumbent flips to it too", (cid, expected) => {
+    const c = h26(cid);
+    expect(h26Incumbent(c)).toBe(expected);
+  });
+
+  it.each(FLIPS)("%s: the new pick is a fixed point as incumbent", (cid, expected) => {
+    expect(pickNeutralTitle(asMembers(h26(cid).titles), { incumbent: expected })).toBe(expected);
+  });
+
+  it("7fa63071 does not keep the 'Önemli Mesajlar' title", () => {
+    const c = h26("7fa63071");
+    expect(h26Floor(c)).not.toMatch(/önemli/i);
+    expect(h26Incumbent(c)).not.toMatch(/önemli/i);
+  });
+});
+
+describe("h26: loadedPenalty on the new wording", () => {
+  it("957cdb46: 'Vurgunu' is loaded wording (every member says it, so only the word list can demote it)", () => {
+    expect(loadedPenalty("Gölge Müdürle İhale Vurgunu. 585 Milyon Liralık Kamu Zararı Oluştu")).toBeGreaterThanOrEqual(1);
+  });
+
+  it("'vurgu' / 'vurgusu' is not 'vurgun'", () => {
+    expect(loadedPenalty("Erdoğan'dan Güney Kore ile iş birliği vurgusu")).toBe(0);
+    expect(loadedPenalty("Bakan, kadına şiddete vurgu yaptı")).toBe(0);
+  });
+
+  it.each([
+    "Yat Yarışları'nda görkemli kapanış",
+    "Görkemli açılış töreni yapıldı",
+    "Belediyede 585 milyonluk vurgun",
+    "Gölge müdürle ihale vurgunu",
+    "Vurgunculara operasyon",
+    "Meclis'e dayatma geldi",
+    "Dayatması kabul edilmedi",
+    "Bursa'da korku dolu anlar yaşandı",
+    "Freni boşalan minibüs ortalığı savaş alanına çevirdi",
+    "Fiyatlar vatandaşa soğuk duş etkisi yaptı",
+    "Perde arkası ortaya çıktı",
+    "Anlaşmanın perde arkasında neler var",
+    "Erdoğan'dan Güney Kore'de önemli mesajlar",
+    "Bakan Çiftçi'den önemli çağrı",
+    "Bakan muhtarlar buluşmasında önemli açıklamalar yaptı",
+    "Cumhurbaşkanı önemli mesaj verdi",
+  ])("%j is loaded wording", (title) => {
+    expect(loadedPenalty(title)).toBeGreaterThanOrEqual(1);
+  });
+
+  it.each([
+    "Borsa tarihi zirve yaptı",
+    "Eski bakanın yolsuzluğunu ifşa etti",
+    "Savaş sona erdi, ateşkes yürürlükte",
+    "Savaş alanı olarak seçilen bölgede mayın temizliği başladı",
+    "Önemli gelişme: ateşkes imzalandı",
+    "Önemli bir adım atıldı",
+    "Bakan açıklama yaptı",
+    "Cumhurbaşkanı mesaj yayımladı",
+    "Soğuk hava dalgası geliyor",
+    "Perde kapandı, oyun bitti",
+    "Korku filmi gişede rekor kırdı",
+    "Milletvekili Ahmet Yılmaz açıklama yaptı",
+    "TBMM Başkanvekili Bozdağ açıkladı",
+  ])("%j is a legitimate use: no loaded penalty", (title) => {
+    expect(loadedPenalty(title)).toBe(0);
+  });
+
+  it("the new words cost like the other loaded words (0.25 each, counted once per rule)", () => {
+    expect(loadedPenalty("Görkemli kapanış")).toBe(1);
+    expect(loadedPenalty("Görkemli vurgun")).toBe(2);
+  });
+
+  it("görkemli and korku dolu need a word end", () => {
+    expect(loadedPenalty("görkemlileşme")).toBe(0);
+    expect(loadedPenalty("korku dolunay")).toBe(0);
+  });
+
+  it("a left word edge is required: 'ödayatma' is not 'dayatma'", () => {
+    expect(loadedPenalty("ödayatma")).toBe(0);
+  });
+});
+
+describe("h26: the 'vekaleten' qualifier (4433b6f7)", () => {
+  it("exports a 0.30 penalty and leaves the hedge penalty at 0.15", () => {
+    expect(QUALIFIER_LOSS_PENALTY).toBe(0.3);
+    expect(HEDGE_LOSS_PENALTY).toBe(0.15);
+  });
+
+  it("the first pick (floor) keeps the acting appointment: 'Genel Müdür Vekilliğine'", () => {
+    expect(h26Floor(h26("4433b6f7"))).toBe("Borsa İstanbul Genel Müdür Vekilliğine Atila Türeli getirildi");
+  });
+
+  it("the re-pick against the stored 'Genel Müdürü ... oldu' title replaces it", () => {
+    const c = h26("4433b6f7");
+    expect(c.stored).toBe("Borsa İstanbul Genel Müdürü Atila Türeli oldu");
+    expect(h26Incumbent(c)).toBe("Borsa İstanbul Genel Müdür Vekilliğine Atila Türeli getirildi");
+  });
+
+  it("the replacement is a fixed point as incumbent", () => {
+    const c = h26("4433b6f7");
+    const picked = h26Incumbent(c);
+    expect(pickNeutralTitle(asMembers(c.titles), { incumbent: picked })).toBe(picked);
+  });
+
+  // 46 to 55 characters each (no short-title penalty), one differing word and no
+  // shared variant token, so every pair has the same centrality and the first
+  // title wins unless a penalty moves it.
+  const BASE = "Borsa İstanbul Genel Müdürlüğü görevine Atila Türeli";
+  const PLAIN = `${BASE} getirildi`;
+  const ACTING = `${BASE} vekaleten`;
+  const OTHER = `${BASE} atandı`;
+
+  it("a title that drops the qualifier loses when 2 of 3 members carry it", () => {
+    expect(pickNeutralTitle(asMembers([PLAIN, ACTING, `${BASE} vekilliği`]))).toBe(ACTING);
+  });
+
+  it.each(["vekaleten", "Vekaleten", "VEKALETEN", "vekâleten", "vekalet", "vekâlet", "vekil", "Vekil", "vekili", "vekilliğine", "VEKİLLİĞİNE"])(
+    "%j counts as the qualifier",
+    (word) => {
+      const carrier = `${BASE} ${word}`;
+      expect(pickNeutralTitle(asMembers([PLAIN, carrier, `${carrier} bugün`]))).toBe(carrier);
+    },
+  );
+
+  // Two members carry the word under test (2 of 3 would be enough for the
+  // qualifier) with different tokens, so every pair keeps the same centrality
+  // and the first title wins unless a penalty moves it.
+  it.each([
+    ["milletvekili", "başkanvekili"],
+    ["Milletvekili", "TBMM Başkanvekili"],
+    ["MİLLETVEKİLİ", "BAŞKANVEKİLİ"],
+    ["milletvekilleri", "başkanvekillerinden"],
+  ])("%j and %j are not the qualifier (left word edge): the first of equals wins", (a, b) => {
+    expect(pickNeutralTitle(asMembers([PLAIN, `${BASE} ${a}`, `${BASE} ${b}`]))).toBe(PLAIN);
+  });
+
+  it("needs three deduplicated members: two are not enough", () => {
+    expect(pickNeutralTitle(asMembers([PLAIN, ACTING]))).toBe(PLAIN);
+    // A duplicate counts once, so [PLAIN, ACTING, ACTING] is two members.
+    expect(pickNeutralTitle(asMembers([PLAIN, ACTING, ACTING]))).toBe(PLAIN);
+    expect(pickNeutralTitle(asMembers([PLAIN, ACTING, "Kısa haberler"]))).toBe(PLAIN);
+  });
+
+  it("needs 40% of the members to carry the qualifier", () => {
+    const plain = [PLAIN, OTHER, `${BASE} duyuruldu`, `${BASE} açıklandı`];
+    // 1 of 5 (20%): no loss; the first of equals leads.
+    expect(pickNeutralTitle(asMembers([...plain, ACTING]))).toBe(plain[0]);
+    // 2 of 5 (40%) is the threshold itself: a title with the qualifier wins.
+    expect(pickNeutralTitle(asMembers([...plain.slice(0, 3), ACTING, `${BASE} vekilliği`]))).toBe(ACTING);
+  });
+
+  it("the stored title pays the penalty too (re-pick)", () => {
+    // The stored title is 59 characters, so the 0.20 full-length margin applies:
+    // only the 0.30 qualifier loss lets the member overtake it.
+    const incumbent = `${BASE} getirilmiş oldu`;
+    expect(incumbent.length).toBeGreaterThanOrEqual(FULL_LENGTH_TITLE_CHARS);
+    const picked = pickNeutralTitle(asMembers([PLAIN, ACTING, `${BASE} vekilliği`, incumbent]), { incumbent });
+    expect(picked).toBe(ACTING);
+  });
+
+  it("a qualifier share under 40% leaves the stored title alone (1 of 3)", () => {
+    const incumbent = `${BASE} getirilmiş oldu`;
+    expect(pickNeutralTitle(asMembers([PLAIN, ACTING, incumbent]), { incumbent })).toBe(incumbent);
+  });
+
+  it("a stored title that carries the qualifier pays nothing", () => {
+    const incumbent = `${BASE} vekaleten getirildi`;
+    expect(pickNeutralTitle(asMembers([PLAIN, ACTING, `${BASE} vekilliği`, incumbent]), { incumbent })).toBe(incumbent);
+  });
+});
+
+describe("cleanHeadline: a teaser '...' in the middle of a title (h26)", () => {
+  it.each([
+    [
+      "AK Parti çalışmaları tamamladı... Yeni anayasa takvimi belli oldu",
+      "AK Parti çalışmaları tamamladı. Yeni anayasa takvimi belli oldu",
+    ],
+    [
+      "İçişleri duyurdu... 11 ilde 'siber' operasyon: 86 tutuklama",
+      "İçişleri duyurdu. 11 ilde 'siber' operasyon: 86 tutuklama",
+    ],
+    [
+      "AK Parti çalışmaları tamamladı… Yeni anayasa takvimi belli oldu",
+      "AK Parti çalışmaları tamamladı. Yeni anayasa takvimi belli oldu",
+    ],
+    [
+      "İçişleri duyurdu… 11 ilde 'siber' operasyon: 86 tutuklama",
+      "İçişleri duyurdu. 11 ilde 'siber' operasyon: 86 tutuklama",
+    ],
+    // Several pauses: each is judged on its own segment.
+    [
+      "Güney Kore'den milli teknolojiye yoğun ilgi! Başkan Erdoğan duyurdu... Masada dev iş birliği var",
+      "Güney Kore'den milli teknolojiye yoğun ilgi. Cumhurbaşkanı Erdoğan duyurdu. Masada dev iş birliği var",
+    ],
+    ["Bakan duyurdu...   Yeni dönem başlıyor", "Bakan duyurdu. Yeni dönem başlıyor"],
+  ])("%j -> %j", (input, expected) => {
+    expect(cleanHeadline(input)).toBe(expected);
+  });
+
+  it.each([
+    // A comma list: the dots end an enumeration, not a sentence.
+    ["Polatlı, Ahlat, Alanya, Tarsus, Fethiye... Bahçeli ...", "Polatlı, Ahlat, Alanya, Tarsus, Fethiye... Bahçeli"],
+    // Inside quotes.
+    ['"Biz bekliyoruz... Sonra gelsinler" dedi', '"Biz bekliyoruz... Sonra gelsinler" dedi'],
+    ["“Biz bekliyoruz… Sonra gelsinler” dedi", "“Biz bekliyoruz… Sonra gelsinler” dedi"],
+    ["«Biz bekliyoruz... Sonra gelsinler» dedi", "«Biz bekliyoruz... Sonra gelsinler» dedi"],
+    // One-word segment.
+    ["Bekle... Gör", "Bekle... Gör"],
+    // A lower-case continuation is not a new sentence.
+    ["Bakan duyurdu... yeni dönem başlıyor", "Bakan duyurdu... yeni dönem başlıyor"],
+    // Not directly after a letter.
+    ["Bakan duyurdu 11... Yeni dönem başlıyor", "Bakan duyurdu 11... Yeni dönem başlıyor"],
+    // No space after the dots.
+    ["Bakan duyurdu...Yeni dönem başlıyor", "Bakan duyurdu...Yeni dönem başlıyor"],
+    // Four dots are not an ellipsis.
+    ["Bakan duyurdu.... Yeni dönem başlıyor", "Bakan duyurdu.... Yeni dönem başlıyor"],
+  ])("%j is left alone", (input, expected) => {
+    expect(cleanHeadline(input)).toBe(expected);
+  });
+
+  it("quotes opened before the dots and not closed keep the dots (single quotes and curly quotes too)", () => {
+    expect(cleanHeadline("Bakan 'Biz bekliyoruz... Sonra gelsinler' dedi")).toBe(
+      "Bakan 'Biz bekliyoruz... Sonra gelsinler' dedi",
+    );
+    expect(cleanHeadline("Bakan ‘Biz bekliyoruz... Sonra gelsinler’ dedi")).toBe(
+      "Bakan ‘Biz bekliyoruz... Sonra gelsinler’ dedi",
+    );
+  });
+
+  it("a closed quote before the dots does not block the rewrite; apostrophes are not quotes", () => {
+    expect(cleanHeadline('"Hazırız" dedi Bakan... Yeni dönem başlıyor')).toBe('"Hazırız" dedi Bakan. Yeni dönem başlıyor');
+    expect(cleanHeadline("Bahçeli'den Ankara'da yeni çıkış... Yeni dönem başlıyor")).toBe(
+      "Bahçeli'den Ankara'da yeni çıkış. Yeni dönem başlıyor",
+    );
+  });
+
+  // Review round 2: a pause after a QUESTION is not a sentence end. Turning it
+  // into '. ' is wrong Turkish punctuation and drops the question form of a title
+  // ("var mı. Bakan"). Two real stored titles had this shape (d51306cf, 5d8baf97)
+  // and HEAD left both alone, so the segment-level guard keeps them as written.
+  it.each([
+    // d51306cf, verbatim: the particle "mı", then a question word ("neler").
+    [
+      "Ankara Abisi gözaltında mı... İddialar neler... Odatv yakın çevresine ulaştı",
+      "Ankara Abisi gözaltında mı... İddialar neler... Odatv yakın çevresine ulaştı",
+    ],
+    // 5d8baf97 shape: the particle sits mid-segment, after an abbreviation-like "16.".
+    // The first pause follows a plain statement and still becomes a sentence break.
+    [
+      "Telefon kayıtları tamam... 16. kattan biri mi itti... Üç telefon ayrıntısı",
+      "Telefon kayıtları tamam. 16. kattan biri mi itti... Üç telefon ayrıntısı",
+    ],
+    ["Emekliye ara zam var mı... Bakan Işıkhan açıkladı", "Emekliye ara zam var mı... Bakan Işıkhan açıkladı"],
+    // The four particle vowels, upper case, and the person / tense suffixes.
+    ["Zam var mi... Bakan açıkladı", "Zam var mi... Bakan açıkladı"],
+    ["Karar çıktı mu... Bakan açıkladı", "Karar çıktı mu... Bakan açıkladı"],
+    ["Yeni dönem başladı mü... Bakan açıkladı", "Yeni dönem başladı mü... Bakan açıkladı"],
+    ["ZAM VAR MI... BAKAN AÇIKLADI", "ZAM VAR MI... BAKAN AÇIKLADI"],
+    ["Biz hazır mıyız... Büyük gün yarın", "Biz hazır mıyız... Büyük gün yarın"],
+    ["Siz hazır mısınız... Büyük gün yarın", "Siz hazır mısınız... Büyük gün yarın"],
+    ["Bu doğru mudur... Uzmanlar anlattı", "Bu doğru mudur... Uzmanlar anlattı"],
+    ["Gerçekten öyle miydi... Yeni belgeler çıktı", "Gerçekten öyle miydi... Yeni belgeler çıktı"],
+    ["Kaza mıymış... Yetkililer açıkladı", "Kaza mıymış... Yetkililer açıkladı"],
+    // Question words.
+    ["Ne zaman başlayacak... Tarih belli oldu", "Ne zaman başlayacak... Tarih belli oldu"],
+    ["Neden istifa etti... Perde arkası ortaya çıktı", "Neden istifa etti... Perde arkası ortaya çıktı"],
+    ["Kim kazandı... Sonuçlar açıklandı", "Kim kazandı... Sonuçlar açıklandı"],
+    ["Hangi ilde patladı... Yetkililer açıkladı", "Hangi ilde patladı... Yetkililer açıkladı"],
+    ["Olay nasıl yaşandı... Saat saat anlattı", "Olay nasıl yaşandı... Saat saat anlattı"],
+    ["Kaç kişi öldü... Bilanço ağırlaştı", "Kaç kişi öldü... Bilanço ağırlaştı"],
+    ["Patlama nerede oldu... Görüntüler ortaya çıktı", "Patlama nerede oldu... Görüntüler ortaya çıktı"],
+    // The question mark of a finished question resets the segment.
+    ["Zam var mı? Bakan açıkladı... Yeni oranlar belli oldu", "Zam var mı? Bakan açıkladı. Yeni oranlar belli oldu"],
+    ["Ne oldu: Bakan açıkladı... Yeni oranlar belli oldu", "Ne oldu: Bakan açıkladı. Yeni oranlar belli oldu"],
+  ])("a question keeps its pause: %j -> %j", (input, expected) => {
+    expect(cleanHeadline(input)).toBe(expected);
+  });
+
+  it.each([
+    // Words that merely LOOK like a particle or a question word.
+    ["Mimar Sinan müzesi açıldı... Ziyaretçi akını sürüyor", "Mimar Sinan müzesi açıldı. Ziyaretçi akını sürüyor"],
+    ["Muhtarlar toplandı... Gündem yoğun", "Muhtarlar toplandı. Gündem yoğun"],
+    ["MI6 başkanı konuştu... Yeni açıklama geldi", "MI6 başkanı konuştu. Yeni açıklama geldi"],
+    ["Kimse konuşmadı... Sessizlik sürüyor", "Kimse konuşmadı. Sessizlik sürüyor"],
+    ["Nehir taştı... Köyler su altında kaldı", "Nehir taştı. Köyler su altında kaldı"],
+    ["Mide ameliyatı oldu... Taburcu edildi", "Mide ameliyatı oldu. Taburcu edildi"],
+    ["Müzik festivali başladı... Biletler tükendi", "Müzik festivali başladı. Biletler tükendi"],
+    ["Kaçak yapı yıkıldı... Mahalle sakinleri tepkili", "Kaçak yapı yıkıldı. Mahalle sakinleri tepkili"],
+  ])("a statement is still rewritten: %j -> %j", (input, expected) => {
+    expect(cleanHeadline(input)).toBe(expected);
+  });
+
+  it("a question title is a fixed point", () => {
+    for (const input of [
+      "Ankara Abisi gözaltında mı... İddialar neler... Odatv yakın çevresine ulaştı",
+      "Telefon kayıtları tamam... 16. kattan biri mi itti... Üç telefon ayrıntısı",
+      "Emekliye ara zam var mı... Bakan Işıkhan açıkladı",
+    ]) {
+      const once = cleanHeadline(input);
+      expect(cleanHeadline(once), input).toBe(once);
+    }
+  });
+
+  it("is linear on a title of 100 KB of one long token followed by a pause", () => {
+    const hostile = `${"mı".repeat(50_000)}... Bakan açıkladı`;
+    const t0 = performance.now();
+    cleanHeadline(hostile);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+
+  it("a trailing ellipsis is removed, as before", () => {
+    expect(cleanHeadline("Bakan duyurdu yeni dönemi...")).toBe("Bakan duyurdu yeni dönemi");
+    expect(cleanHeadline("Bakan duyurdu yeni dönemi…")).toBe("Bakan duyurdu yeni dönemi");
+  });
+
+  it("is idempotent", () => {
+    for (const input of [
+      "AK Parti çalışmaları tamamladı... Yeni anayasa takvimi belli oldu",
+      "İçişleri duyurdu… 11 ilde 'siber' operasyon: 86 tutuklama",
+      "Güney Kore'den milli teknolojiye yoğun ilgi! Başkan Erdoğan duyurdu... Masada dev iş birliği var",
+      "Polatlı, Ahlat, Alanya, Tarsus, Fethiye... Bahçeli ...",
+      '"Biz bekliyoruz... Sonra gelsinler" dedi',
+      "Bekle... Gör",
+    ]) {
+      const once = cleanHeadline(input);
+      expect(cleanHeadline(once), input).toBe(once);
+    }
+  });
+
+  it("c3dcfa27 and 0f516356: a first pick (floor) ships the cleaned teaser title", () => {
+    expect(h26Floor(h26("c3dcfa27"))).toBe("AK Parti çalışmaları tamamladı. Yeni anayasa takvimi belli oldu");
+    expect(h26Floor(h26("0f516356"))).toBe("İçişleri duyurdu. 11 ilde 'siber' operasyon: 86 tutuklama");
+  });
+
+  it("the cleaned title is a fixed point as incumbent", () => {
+    for (const cid of ["c3dcfa27", "0f516356"]) {
+      const c = h26(cid);
+      const cleaned = h26Floor(c);
+      expect(pickNeutralTitle(asMembers(c.titles), { incumbent: cleaned }), cid).toBe(cleaned);
+    }
+  });
+
+  // Found while timing h26: the '!' and trailing-punctuation steps were quadratic
+  // on a long run of the same character that does not end the title (100 KB cost
+  // 4 s on HEAD). Titles are attacker-served feed text, so the cron must not be
+  // stallable by one.
+  it.each(["!", ".", ":", "-", "…"])("cleanHeadline is linear on a 100 KB run of %j inside a title", (ch) => {
+    const hostile = `${ch.repeat(100_000)}x`;
+    const t0 = performance.now();
+    cleanHeadline(hostile);
+    expect(performance.now() - t0).toBeLessThan(1000);
+  });
+
+  it("trailing punctuation, spaces and '!' runs are still stripped (the linear scan keeps the old behaviour)", () => {
+    expect(cleanHeadline("Bakan duyurdu yeni dönemi!!!")).toBe("Bakan duyurdu yeni dönemi");
+    expect(cleanHeadline("Bakan duyurdu yeni dönemi !!! ")).toBe("Bakan duyurdu yeni dönemi");
+    expect(cleanHeadline("Bakan duyurdu yeni dönemi.:…-–— ")).toBe("Bakan duyurdu yeni dönemi");
+    expect(cleanHeadline("Bakan duyurdu!!!   Yeni dönem başlıyor")).toBe("Bakan duyurdu. Yeni dönem başlıyor");
+    expect(cleanHeadline("Bakan duyurdu!!!Yeni dönem başlıyor")).toBe("Bakan duyurdu!!!Yeni dönem başlıyor");
+    expect(cleanHeadline("Bakan duyurdu yeni dönemi\u00a0\u2003.")).toBe("Bakan duyurdu yeni dönemi");
+  });
+
+  it("is linear on a hostile title: thousands of pauses and quotes finish within 3 s", () => {
+    // ~200 ms locally for this 2.2 MB title (the pre-fix code took ~13 ms here),
+    // so a 1 s budget left no headroom on a ~5x slower CI runner.
+    const hostile = `${"a b... C ".repeat(5000)}"“«'‘`.repeat(50);
+    const t0 = performance.now();
+    cleanHeadline(hostile);
+    expect(performance.now() - t0).toBeLessThan(3000);
+  });
+});
+
+describe("957cdb46: a verdict word every member shares", () => {
+  it("every member says 'vurgun', so the word list lowers every candidate alike and the pick stays acceptable", () => {
+    const c = h26("957cdb46");
+    for (const t of c.titles) expect(loadedPenalty(t), t).toBeGreaterThanOrEqual(1);
+    const picked = h26Floor(c);
+    expect(picked).not.toBeNull();
+    expect(isAcceptableNeutral(picked!, c.titles)).toBe(true);
+  });
+
+  it("the stored title stays on a re-pick: no member is better, so the penalty cannot swap it", () => {
+    const c = h26("957cdb46");
+    expect(h26Incumbent(c)).toBe(c.stored);
   });
 });

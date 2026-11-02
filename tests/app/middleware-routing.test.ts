@@ -1,9 +1,18 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { NextRequest } from "next/server";
 import { middleware, config } from "@/middleware";
+import {
+  deriveSessionSigningKey,
+  mintSessionTokenForTest,
+  signSessionBody,
+} from "@/lib/admin/session";
+
+// session.ts is `server-only`; the tests mint admin cookies with its helpers
+// (mintSessionTokenForTest, deriveSessionSigningKey + signSessionBody), so no
+// test here computes an HMAC over data derived from a password variable.
+vi.mock("server-only", () => ({}));
 
 const ORIGIN = "https://www.tayfhaber.com";
 
@@ -141,12 +150,33 @@ describe("middleware — /source/:slug gate", () => {
 describe("middleware — admin scope", () => {
   const fetchMock = vi.fn();
   const SECRET = "test-secret";
+  const PASSWORD = "test-password";
+  const HOUR = 60 * 60 * 1000;
 
-  /** Same token shape as src/lib/admin/session.ts: base64url(body).hmac. */
-  function mintToken(expiresAt: number, secret = SECRET): string {
-    const body = Buffer.from(JSON.stringify({ expiresAt })).toString("base64url");
-    const sig = createHmac("sha256", secret).update(body).digest("base64url");
-    return `${body}.${sig}`;
+  /**
+   * Same wire shape as src/lib/admin/session.ts: base64url(JSON payload) "."
+   * base64url(HMAC-SHA256(PBKDF2 signing key, body)), the key derived from
+   * (secret, password). Minted with node:crypto while the middleware verifies
+   * with Web Crypto, so a passing valid-cookie case is also a node-vs-WebCrypto
+   * parity check.
+   */
+  function signPayload(payload: unknown, secret = SECRET, password = PASSWORD): string {
+    return mintSessionTokenForTest(payload, secret, password);
+  }
+
+  function mintToken(
+    expiresAt: number,
+    secret = SECRET,
+    password = PASSWORD,
+    iat = Date.now(),
+  ): string {
+    return signPayload({ expiresAt, iat }, secret, password);
+  }
+
+  /** A token as the previous release minted it: HMAC keyed directly on the secret. */
+  function legacyToken(payload: unknown, secret = SECRET): string {
+    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    return `${body}.${signSessionBody(secret, body)}`;
   }
 
   beforeEach(() => {
@@ -216,6 +246,7 @@ describe("middleware — admin scope", () => {
 
   it("passes /admin/settings with a valid signed session cookie", async () => {
     vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
     const cookie = `admin_session=${mintToken(Date.now() + 60_000)}`;
     const res = await middleware(req("/admin/settings", cookie));
     expect(res.headers.get("x-middleware-next")).toBe("1");
@@ -223,6 +254,7 @@ describe("middleware — admin scope", () => {
 
   it("does not let a valid admin cookie turn a non-admin path into a pass", async () => {
     vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
     const cookie = `admin_session=${mintToken(Date.now() + 60_000)}`;
     const res = await middleware(req("/Konu/dunya", cookie));
     expect(res.headers.get("x-middleware-rewrite")).toContain("/__tayf-not-found");
@@ -231,6 +263,7 @@ describe("middleware — admin scope", () => {
 
   it("rejects a tampered signature, an expired token and a foreign-secret token on /admin/settings", async () => {
     vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
     const valid = mintToken(Date.now() + 60_000);
     const tampered = `${valid.slice(0, -2)}${valid.endsWith("AA") ? "BB" : "AA"}`;
     for (const token of [
@@ -245,6 +278,268 @@ describe("middleware — admin scope", () => {
     }
   });
 
+  async function expectLoginRedirect(token: string, label: string): Promise<void> {
+    const res = await middleware(req("/admin/settings", `admin_session=${token}`));
+    expect(res.status, label).toBe(307);
+    expect(res.headers.get("location"), label).toBe(`${ORIGIN}/admin/login`);
+    expect(res.headers.get("x-middleware-next"), label).toBeNull();
+  }
+
+  it("rejects a token minted under the previous ADMIN_PASSWORD", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", "rotated-password");
+    await expectLoginRedirect(
+      mintToken(Date.now() + HOUR, SECRET, PASSWORD),
+      "old-password token",
+    );
+    // ... while a token minted under the new password passes.
+    const res = await middleware(
+      req("/admin/settings", `admin_session=${mintToken(Date.now() + HOUR, SECRET, "rotated-password")}`),
+    );
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("rejects a legacy {expiresAt}-only token signed under the old scheme", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    await expectLoginRedirect(
+      legacyToken({ expiresAt: Date.now() + HOUR }),
+      "legacy token",
+    );
+  });
+
+  it("rejects a legacy token (payload with a pwd field, HMAC keyed on the bare secret)", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    const now = Date.now();
+    await expectLoginRedirect(
+      legacyToken({ expiresAt: now + HOUR, iat: now, pwd: "00849fb04b81aa7f" }),
+      "legacy pwd token",
+    );
+  });
+
+  it("rejects a correctly keyed token with no iat", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    await expectLoginRedirect(
+      signPayload({ expiresAt: Date.now() + HOUR }),
+      "no iat",
+    );
+  });
+
+  it("ignores unknown payload fields: a pwd field neither helps nor hurts a correctly keyed token", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    const now = Date.now();
+    const ok = await middleware(
+      req(
+        "/admin/settings",
+        `admin_session=${signPayload({ expiresAt: now + HOUR, iat: now, pwd: "00849fb04b81aa7f" })}`,
+      ),
+    );
+    expect(ok.headers.get("x-middleware-next")).toBe("1");
+    // A pwd field cannot make a token minted under another password pass.
+    await expectLoginRedirect(
+      signPayload({ expiresAt: now + HOUR, iat: now, pwd: "00849fb04b81aa7f" }, SECRET, "other-password"),
+      "pwd field under another password",
+    );
+  });
+
+  it("rejects a token minted under the previous ADMIN_SESSION_SECRET (secret rotation)", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", "rotated-secret-value-0123456789");
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    await expectLoginRedirect(
+      mintToken(Date.now() + HOUR, SECRET, PASSWORD),
+      "old-secret token",
+    );
+    const res = await middleware(
+      req(
+        "/admin/settings",
+        `admin_session=${mintToken(Date.now() + HOUR, "rotated-secret-value-0123456789", PASSWORD)}`,
+      ),
+    );
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("rejects a token whose iat is 25 h old or lies more than 60 s in the future", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    await expectLoginRedirect(
+      mintToken(Date.now() + HOUR, SECRET, PASSWORD, Date.now() - 25 * HOUR),
+      "iat 25 h old",
+    );
+    await expectLoginRedirect(
+      mintToken(Date.now() + HOUR, SECRET, PASSWORD, Date.now() + 5 * 60_000),
+      "iat in the future",
+    );
+    // expiresAt - iat above 24 h (the old 7-day lifetime) is refused too.
+    await expectLoginRedirect(
+      mintToken(Date.now() + 7 * 24 * HOUR, SECRET, PASSWORD, Date.now()),
+      "7-day lifetime",
+    );
+  });
+
+  it("rejects an otherwise valid token when ADMIN_PASSWORD is unset or empty", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    const valid = mintToken(Date.now() + HOUR);
+    // Control: the same token passes while the password is set.
+    const ok = await middleware(req("/admin/settings", `admin_session=${valid}`));
+    expect(ok.headers.get("x-middleware-next")).toBe("1");
+    vi.stubEnv("ADMIN_PASSWORD", undefined);
+    await expectLoginRedirect(valid, "ADMIN_PASSWORD unset");
+    vi.stubEnv("ADMIN_PASSWORD", "");
+    await expectLoginRedirect(valid, "ADMIN_PASSWORD empty");
+  });
+
+  it("rejects an otherwise valid token when ADMIN_SESSION_SECRET is unset", async () => {
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    const valid = mintToken(Date.now() + HOUR);
+    vi.stubEnv("ADMIN_SESSION_SECRET", undefined);
+    await expectLoginRedirect(valid, "secret unset");
+  });
+
+  // Node (session.ts, crypto.pbkdf2Sync + createHmac) and the Edge middleware
+  // (Web Crypto PBKDF2 deriveBits + HMAC sign) must derive the same signing key
+  // and so the same signature. The literals are the fixed vectors from
+  // tests/lib/admin/session.test.ts, computed independently; the body is
+  // base64url({"expiresAt":1793624400000,"iat":1793620800000}) and Date is
+  // pinned to its iat so the middleware's lifetime checks accept it.
+  const PARITY_NOW = new Date("2026-11-02T12:00:00.000Z").getTime();
+  const PARITY_BODY = "eyJleHBpcmVzQXQiOjE3OTM2MjQ0MDAwMDAsImlhdCI6MTc5MzYyMDgwMDAwMH0";
+  const PARITY_VECTORS: Array<[string, string, string]> = [
+    ["unit-test-session-secret-0123456789", "correct horse battery staple", "gc052KVHWUNCzdSt9jBLApzZeIaOiToPGMzBxKTzS2g"],
+    ["test-secret", "test-password", "EVFudx1Y_xIYGQOQkQHXM2YBgXf7az6_1uam-ACX_0s"],
+    ["ünïcode-secret-0123456789-ğüşiçö", "pä55 wörd 🔑 ÇŞĞ", "1GJbjGuzS4Hzs2K98sTXb9fCxwnzAMzGapt0IdiN7B8"],
+  ];
+
+  for (const [secret, password, signature] of PARITY_VECTORS) {
+    it(`node and Web Crypto produce the same signature for secret ${JSON.stringify(secret)}`, async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(PARITY_NOW);
+      try {
+        // The node side reproduces the literal ...
+        expect(signSessionBody(deriveSessionSigningKey(secret, password), PARITY_BODY)).toBe(
+          signature,
+        );
+        vi.stubEnv("ADMIN_SESSION_SECRET", secret);
+        vi.stubEnv("ADMIN_PASSWORD", password);
+
+        // ... which the Web Crypto verifier accepts ...
+        const ok = await middleware(
+          req("/admin/settings", `admin_session=${PARITY_BODY}.${signature}`),
+        );
+        expect(ok.headers.get("x-middleware-next")).toBe("1");
+
+        // ... while a signature differing in one character is refused.
+        const first = signature[0] === "A" ? "B" : "A";
+        await expectLoginRedirect(
+          `${PARITY_BODY}.${first}${signature.slice(1)}`,
+          "one-character signature change",
+        );
+        // And the same body signed for another password is refused.
+        await expectLoginRedirect(
+          `${PARITY_BODY}.${signSessionBody(deriveSessionSigningKey(secret, password + "x"), PARITY_BODY)}`,
+          "signature under another password",
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
+  it("memoizes the Web Crypto derivation: many verifications, concurrent or not, run PBKDF2 once", async () => {
+    const secret = "memo-edge-secret-value-555666777";
+    const password = "memo-edge-password-xyz";
+    vi.stubEnv("ADMIN_SESSION_SECRET", secret);
+    vi.stubEnv("ADMIN_PASSWORD", password);
+    const spy = vi.spyOn(crypto.subtle, "deriveBits");
+    try {
+      const cookie = () => `admin_session=${mintToken(Date.now() + HOUR, secret, password)}`;
+      const results = await Promise.all([
+        middleware(req("/admin/settings", cookie())),
+        middleware(req("/admin/settings", cookie())),
+        middleware(req("/admin/settings", cookie())),
+      ]);
+      for (const res of results) expect(res.headers.get("x-middleware-next")).toBe("1");
+      const later = await middleware(req("/admin/settings", cookie()));
+      expect(later.headers.get("x-middleware-next")).toBe("1");
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      // A rotated password is a different pair: derived afresh, old tokens refused.
+      vi.stubEnv("ADMIN_PASSWORD", password + "-rotated");
+      await expectLoginRedirect(
+        mintToken(Date.now() + HOUR, secret, password),
+        "old password after rotation",
+      );
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("misses the cache when only the secret changes: (S1,P) -> (S2,P) derives again and refuses S1 tokens", async () => {
+    const s1 = "memo-edge-secret-one-aaaabbbbcccc";
+    const s2 = "memo-edge-secret-two-ddddeeeeffff";
+    const password = "memo-edge-shared-password";
+    const spy = vi.spyOn(crypto.subtle, "deriveBits");
+    try {
+      vi.stubEnv("ADMIN_SESSION_SECRET", s1);
+      vi.stubEnv("ADMIN_PASSWORD", password);
+      const tokenS1 = mintToken(Date.now() + HOUR, s1, password);
+      const ok1 = await middleware(req("/admin/settings", `admin_session=${tokenS1}`));
+      expect(ok1.headers.get("x-middleware-next")).toBe("1");
+      expect(spy).toHaveBeenCalledTimes(1);
+
+      vi.stubEnv("ADMIN_SESSION_SECRET", s2);
+      await expectLoginRedirect(tokenS1, "token minted under the old secret");
+      expect(spy).toHaveBeenCalledTimes(2);
+      const ok2 = await middleware(
+        req("/admin/settings", `admin_session=${mintToken(Date.now() + HOUR, s2, password)}`),
+      );
+      expect(ok2.headers.get("x-middleware-next")).toBe("1");
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("runs no PBKDF2 for a structurally broken cookie or a wrong-length signature (fresh pair)", async () => {
+    const secret = "structural-edge-secret-0011223344";
+    const password = "structural-edge-password";
+    vi.stubEnv("ADMIN_SESSION_SECRET", secret);
+    vi.stubEnv("ADMIN_PASSWORD", password);
+    const spy = vi.spyOn(crypto.subtle, "deriveBits");
+    try {
+      const good = mintToken(Date.now() + HOUR, secret, password);
+      for (const value of ["", "abc", ".abc", "abc.", good + "AAAA", good.slice(0, -4)]) {
+        await expectLoginRedirect(value, `cookie ${JSON.stringify(value)}`);
+      }
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("drops a failed derivation: it fails closed to the login page, and the next request derives again", async () => {
+    const secret = "memo-edge-fail-secret-9988776655";
+    const password = "memo-edge-fail-password";
+    vi.stubEnv("ADMIN_SESSION_SECRET", secret);
+    vi.stubEnv("ADMIN_PASSWORD", password);
+    const spy = vi
+      .spyOn(crypto.subtle, "deriveBits")
+      .mockRejectedValueOnce(new Error("simulated deriveBits failure"));
+    try {
+      const valid = mintToken(Date.now() + HOUR, secret, password);
+      await expectLoginRedirect(valid, "derivation failure");
+      const ok = await middleware(req("/admin/settings", `admin_session=${valid}`));
+      expect(ok.headers.get("x-middleware-next")).toBe("1");
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("source: the admin-scope check sits after the /gundem gate and before the session check", () => {
     const code = blankComments(
       readFileSync(resolve(__dirname, "../../src/middleware.ts"), "utf8"),
@@ -252,9 +547,12 @@ describe("middleware — admin scope", () => {
     const gundemIdx = code.indexOf('pathname.startsWith("/gundem/")');
     const scopeIdx = code.indexOf('lower.startsWith("/admin/")');
     const secretIdx = code.indexOf("ADMIN_SESSION_SECRET");
+    const passwordIdx = code.indexOf("ADMIN_PASSWORD");
     expect(gundemIdx).toBeGreaterThan(-1);
     expect(scopeIdx).toBeGreaterThan(gundemIdx);
     expect(secretIdx).toBeGreaterThan(scopeIdx);
+    // The password is read next to the secret, behind the same scope check.
+    expect(passwordIdx).toBeGreaterThan(scopeIdx);
 
     // Exactly one login redirect, and it is behind the admin-scope check.
     const redirectNeedle = 'NextResponse.redirect(new URL("/admin/login"';

@@ -228,7 +228,56 @@ describe("(b) deno.lock is never committed", () => {
   });
 });
 
-describe("(c) the guard's own matchers", () => {
+// ---------------------------------------------------------------------------
+// h26-security-1: the ingest feed parser is fast-xml-parser, fed by feeds that
+// outlets (or a man in the middle on the plain-http ones) control. 4.5.0 had a
+// DOCTYPE entity-expansion DoS (a 210 KB feed expanded to a 473 MB title and
+// killed the ingest isolate every cycle) plus the later numeric-entity and
+// entity-name bypasses. 4.5.7 is the newest 4.x release; the only advisory left
+// on it is the XMLBuilder one (GHSA-gh4j), and ingest never builds XML. Never
+// 5.x: the parser option surface differs and was not evaluated for the ingest.
+// Every pin of the parser in supabase/functions must sit at or above this tuple
+// (the import in fetcher.ts and the import map in ingest/deno.json).
+// ---------------------------------------------------------------------------
+const FXP_MIN: readonly [number, number, number] = [4, 5, 7];
+const FXP_SPEC = /fast-xml-parser@(\d+)\.(\d+)\.(\d+)/;
+
+describe("(c) fast-xml-parser is at or above the CVE-fixed release", () => {
+  const hits = FOUND.filter((f) => f.spec.includes("fast-xml-parser@"));
+
+  it("finds the parser pin in fetcher.ts and in ingest/deno.json (the sweep is not blind)", () => {
+    expect(hits.length).toBeGreaterThanOrEqual(2);
+    expect(hits.some((h) => h.file === "_shared/rss/fetcher.ts")).toBe(true);
+    expect(hits.some((h) => h.file === "ingest/deno.json")).toBe(true);
+  });
+
+  it("pins every use to the 4.x line at or above the fixed release", () => {
+    const tooOld: string[] = [];
+    for (const h of hits) {
+      const m = FXP_SPEC.exec(h.spec);
+      if (!m) {
+        tooOld.push(`${h.file}: ${h.spec} (unparseable)`);
+        continue;
+      }
+      const v = [Number(m[1]), Number(m[2]), Number(m[3])] as const;
+      const [maj, min, pat] = v;
+      const atLeast =
+        maj === FXP_MIN[0] &&
+        (min > FXP_MIN[1] || (min === FXP_MIN[1] && pat >= FXP_MIN[2]));
+      if (!atLeast) tooOld.push(`${h.file}: ${h.spec}`);
+    }
+    expect(tooOld).toEqual([]);
+  });
+
+  it("uses one single version everywhere (the import map and the import agree)", () => {
+    const versions = new Set(
+      hits.map((h) => (FXP_SPEC.exec(h.spec) ?? [])[0] ?? h.spec),
+    );
+    expect([...versions]).toHaveLength(1);
+  });
+});
+
+describe("(d) the guard's own matchers", () => {
   it.each([
     "npm:@supabase/supabase-js@2",
     "npm:@sentry/deno",
@@ -264,7 +313,7 @@ describe("(c) the guard's own matchers", () => {
     "npm:@supabase/supabase-js@2.115.0",
     "npm:@sentry/deno@10.73.0",
     "https://esm.sh/@supabase/supabase-js@2.45.4",
-    "https://esm.sh/fast-xml-parser@4.5.0",
+    "https://esm.sh/fast-xml-parser@4.5.7",
     // other legitimate exact shapes
     "npm:x@1.2.3-beta.1",
     "npm:@scope/pkg@0.0.1/subpath/mod.ts",
@@ -329,11 +378,11 @@ describe("(c) the guard's own matchers", () => {
     const src = [
       "// the `npm:ai` package is deliberately NOT imported here",
       "/* import x from 'npm:@sentry/deno'; */",
-      'import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.0";',
+      'import { XMLParser } from "https://esm.sh/fast-xml-parser@4.5.7";',
       'const mod = await import("npm:@sentry/deno@10.73.0"); // pinned',
     ].join("\n");
     expect(extractSpecifiers(blankComments(src))).toEqual([
-      "https://esm.sh/fast-xml-parser@4.5.0",
+      "https://esm.sh/fast-xml-parser@4.5.7",
       "npm:@sentry/deno@10.73.0",
     ]);
   });
