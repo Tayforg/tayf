@@ -2914,3 +2914,29 @@ update public.clusters c
   from snap s
  where c.id = s.id and c.updated_at = s.updated_at;
 ```
+
+## 143 — /hafta "Ayrışan Kelimeler" sample (`weekly_words_sample`, cron `weekly-words-sample`): APPLY 143, BACKFILL ONCE, DEPLOY IN ANY ORDER
+
+**Why:** a cold `/hafta` fill read 21 (zone x day) article samples and could pass the 4 s reader cap. 143 precomputes the 300-article sample per Istanbul day and zone every hour into a tiny table (at most 32,400 rows, about 12 MB; no index on any large table), and the app reads that table, falling back to the old article reads for any day it has no row for.
+
+**What 143 does** (additive, safe to re-apply, one transaction): table `public.weekly_words_sample` (RLS on, no policy, `service_role` select only, nothing for `anon`/`authenticated`), function `public.weekly_words_sample_refresh(p_days)` (`service_role` only), pg_cron job `weekly-words-sample` at `38 * * * *` that calls it with 2 days. Details and dry-run records are in the file header.
+
+**Order:** apply 143 (the first job run is the next :38), run the one-off backfill below, deploy the app whenever. Until the table exists the page logs one `[weekly-words] weekly_words_sample is not available` warning and reads the articles directly.
+
+```sql
+set statement_timeout = '120s'; select public.weekly_words_sample_refresh(8);
+```
+
+**Deleted articles (orphan sweep):** the table keeps its own copy of title, url and source id and has no foreign key on `article_id`, and the hourly job rewrites only today and yesterday. So each run ends with an orphan sweep: it deletes the rows of the page window (today and the 6 days before it) whose article is no longer in `public.articles` (one primary-key lookup per row, at most 6,300 an hour). A deleted article therefore leaves `/hafta` at the next :38 tick, plus the 6 h cache.
+
+**Takedown, to remove an article from `/hafta` at once:** after deleting it from `public.articles`, delete its sample copy and drop the cache tag:
+
+```sql
+delete from public.weekly_words_sample where article_id = '<id>';
+```
+
+then clear the cache: `POST /api/revalidate` with `Authorization: Bearer $CRON_SECRET` and body `{"tags":["weekly-words"]}` (the tag is on the route's allowlist).
+
+**Verify:** `select jobname, schedule from cron.job where jobname = 'weekly-words-sample';` (one row), `select day, zone, count(*) from public.weekly_words_sample group by 1, 2 order by 1 desc, 2;` (300 per cell for past days), `select pg_size_pretty(pg_total_relation_size('public.weekly_words_sample'));` (never above about 12 MB).
+
+**Rollback** (nothing else depends on 143): `select cron.unschedule('weekly-words-sample'); drop function public.weekly_words_sample_refresh(integer); drop table public.weekly_words_sample; delete from supabase_migrations.schema_migrations where version = '143';`. The reader tolerates the missing table (one warning per fill, then the article reads).

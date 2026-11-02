@@ -17,6 +17,7 @@ import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { CompareButton } from "@/components/compare/compare-button";
 import { SourceChips } from "@/components/source/source-chips";
 import { SourceBadge } from "@/components/story/source-badge";
+import { SourceProfileLink } from "@/components/story/source-profile-link";
 import { OwnershipLine } from "@/components/story/ownership-line";
 import { StoryTimeline } from "@/components/story/story-timeline";
 import { FactCheckBox } from "@/components/story/fact-check-box";
@@ -743,9 +744,7 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                       key={source.id}
                       className={`flex flex-wrap items-center gap-1.5 min-w-0 max-w-full animate-fade-up stagger-${i}`}
                     >
-                      <span className="font-mono text-[10px] uppercase tracking-wider text-foreground/80">
-                        {source.name}
-                      </span>
+                      <SourceProfileLink slug={source.slug} name={source.name} />
                       <SourceChips slug={source.slug} />
                       <SourceBadge trusteeSince={source.trustee_since} />
                     </li>

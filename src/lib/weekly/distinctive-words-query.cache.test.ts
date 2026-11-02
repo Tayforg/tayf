@@ -133,6 +133,81 @@ describe("weekly-words article read fan-out", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// h14-perf-1 (second step): the fill reads the precomputed public.weekly_words_sample
+// table (migration 143) and pools the article reads only for days it lacks. The
+// pins read the code (comments blanked) so prose can never satisfy them.
+// ---------------------------------------------------------------------------
+describe("weekly-words sample table read", () => {
+  it("names the table and caps the paging at 8 requests", () => {
+    expect(code).toMatch(/\bWEEKLY_WORDS_SAMPLE_TABLE\s*=\s*"weekly_words_sample"/);
+    expect(code).toMatch(/\bWEEKLY_WORDS_SAMPLE_MAX_PAGES\s*=\s*8\b/);
+    expect(code).toMatch(/\.from\(\s*WEEKLY_WORDS_SAMPLE_TABLE\s*\)/);
+  });
+
+  it("pages with readAllPages (the table can hold more than the 1,000-row PostgREST cap)", () => {
+    expect(code).toMatch(/from\s+"@\/lib\/db\/paging"/);
+    expect(code).toMatch(/\breadAllPages(?:<[^>]*>)?\(/);
+    expect(code).toMatch(/maxPages:\s*WEEKLY_WORDS_SAMPLE_MAX_PAGES\b/);
+    expect(code).toMatch(/\.range\(\s*from\s*,\s*to\s*\)/);
+  });
+
+  it("orders by the primary key (day, zone, article_id) so pages never skip or repeat a row", () => {
+    const orders = [...code.matchAll(/\.order\(\s*"([a-z_]+)"\s*\)/g)].map((m) => m[1]);
+    expect(orders).toEqual(["day", "zone", "article_id"]);
+  });
+
+  it("keeps the table read in the uncached fetch, never inside the cached body", () => {
+    const body = cachedBody();
+    expect(body).not.toContain("readAllPages");
+    expect(body).not.toContain("WEEKLY_WORDS_SAMPLE_TABLE");
+    expect(body).not.toContain("WEEKLY_WORDS_SAMPLE_MAX_PAGES");
+    expect(body).not.toContain("istanbulDay");
+    // ... and the uncached side of the module is where they live: the table read in its
+    // helper, called (with the pooled fallback) from the uncached fetch.
+    const fetchStart = code.indexOf("export async function fetchWeeklyDistinctiveWords()");
+    const cachedStart = code.indexOf("async function getCachedWeeklyDistinctiveWords()");
+    expect(fetchStart).toBeGreaterThanOrEqual(0);
+    const uncached = code.slice(0, cachedStart);
+    expect(uncached).toContain("readAllPages<");
+    expect(uncached).toMatch(/\.from\(\s*WEEKLY_WORDS_SAMPLE_TABLE\s*\)/);
+    const fetchBody = code.slice(fetchStart, cachedStart);
+    expect(fetchBody).toContain("readSampleTable(");
+    expect(fetchBody).toContain("istanbulDayKeys(");
+    expect(fetchBody).toContain("runWithConcurrency(");
+  });
+
+  it("reads the clock once (one Date.now per fetch) and never in a helper", () => {
+    expect(code.match(/\bDate\.now\(\)/g) ?? []).toHaveLength(1);
+    expect(code).not.toMatch(/\bnew Date\(\s*\)/);
+  });
+
+  it("handles a missing table by code (PGRST205, 42P01), not by message text", () => {
+    expect(code).toContain('"PGRST205"');
+    expect(code).toContain('"42P01"');
+    expect(code).toMatch(/console\.warn\(/);
+  });
+
+  it("does not import the trends module for the day keys (Turkiye is fixed UTC+3 since 2016)", () => {
+    expect(code).not.toMatch(/from\s+["']@\/lib\/trends/);
+    expect(code).not.toMatch(/from\s+["']\.\.\/trends/);
+  });
+
+  it("has no .limit(N) above PostgREST's 1,000-row cap (the table is paged with .range)", () => {
+    const consts = new Map<string, number>();
+    for (const m of code.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(\d[\d_]*)\s*;/g)) {
+      consts.set(m[1]!, Number(m[2]!.replace(/_/g, "")));
+    }
+    const limits = [...code.matchAll(/\.limit\(\s*([^()]*?)\s*\)/g)].map((m) => m[1]!);
+    expect(limits.length).toBeGreaterThan(0);
+    for (const arg of limits) {
+      const value = /^\d[\d_]*$/.test(arg) ? Number(arg.replace(/_/g, "")) : consts.get(arg);
+      expect(value, `.limit(${arg}) must resolve to a number in this file`).toBeDefined();
+      expect(value!).toBeLessThanOrEqual(1000);
+    }
+  });
+});
+
 describe("next.config.ts cacheLife 'weekly-words' profile", () => {
   function profile(name: string): { stale: number; revalidate: number; expire: number } {
     const m = new RegExp(`['"]${name}['"]\\s*:\\s*\\{([^}]*)\\}`).exec(blankComments(configSrc));

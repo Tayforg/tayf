@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type {
@@ -20,6 +20,8 @@ import { ReadAcrossSpectrum } from "@/components/story/read-across-spectrum";
 import { BalanceChip } from "@/components/story/balance-chip";
 import { ShareButton } from "@/components/story/share-button";
 import { ClusterCardImage } from "@/components/story/cluster-card-image";
+import { SourceProfileLink } from "@/components/story/source-profile-link";
+import { SourceChips } from "@/components/source/source-chips";
 import { BookmarkButton } from "@/components/bookmark/bookmark-button";
 import { CompareButton } from "@/components/compare/compare-button";
 import {
@@ -1858,6 +1860,109 @@ describe("ClusterDetailPage — Kaynak künyesi wrap (B)", () => {
     expect(liClass).toContain("flex-wrap");
     expect(liClass).toContain("min-w-0");
     expect(liClass).toContain("max-w-full");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h16-mobile-3 — each "Kaynak künyesi" source name links to /source/<slug>, so
+// a reader can reach an outlet's bias karne from the story. SourceChips and
+// SourceBadge stay non-interactive; outbound article links are untouched.
+// ---------------------------------------------------------------------------
+describe("ClusterDetailPage — Kaynak künyesi kaynak profiline bağlanır (h16-mobile-3)", () => {
+  async function renderKunye() {
+    // sabah and trt-haber are both in SOURCE_METADATA; the niche slug is not,
+    // so it never reaches the künye list, only the Toplayıcı / niş section.
+    const sabah = makeSource({ id: "sabah", slug: "sabah", name: "Sabah" });
+    const trt = makeSource({ id: "trt-haber", slug: "trt-haber", name: "TRT Haber" });
+    const niche = makeSource({
+      id: "niche-x",
+      slug: "niche-x",
+      name: "Niş Kaynak",
+      bias: "opposition",
+      kind: "niche",
+    });
+
+    const members: ClusterDetailMember[] = [
+      makeMember("a-sabah-1", sabah),
+      makeMember("a-sabah-2", sabah),
+      makeMember("a-trt", trt),
+      makeMember("a-niche", niche),
+    ];
+    const detail: ClusterDetail = {
+      cluster: makeCluster({ bias_distribution: emptyDistribution() }),
+      members,
+      allSources: [sabah, trt, niche],
+      wire: { isWireRedistribution: false, effectiveArticleCount: 4, memberCount: 4 },
+      blindspotSuppressed: false,
+      blindspotRecallVetoed: false,
+    };
+    getClusterDetail.mockResolvedValue(detail);
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const kunyeUl = findAllElements(
+      tree,
+      (el) =>
+        el.type === "ul" &&
+        typeof el.props.className === "string" &&
+        el.props.className.includes("gap-x-3") &&
+        el.props.className.includes("min-w-0"),
+    )[0];
+    return { tree, kunyeUl, nicheMember: members[3]! };
+  }
+
+  it("renders one SourceProfileLink per unique rated source, in künye order", async () => {
+    const { tree } = await renderKunye();
+
+    const links = findAllElements(tree, (el) => el.type === SourceProfileLink);
+    expect(links).toHaveLength(2);
+    expect(links.map((l) => ({ slug: l.props.slug, name: l.props.name }))).toEqual([
+      { slug: "sabah", name: "Sabah" },
+      { slug: "trt-haber", name: "TRT Haber" },
+    ]);
+  });
+
+  it("keeps each SourceProfileLink in the same <li> as the SourceChips of that slug", async () => {
+    const { kunyeUl } = await renderKunye();
+    expect(kunyeUl).toBeDefined();
+
+    const lis = findAllElements(kunyeUl, (el) => el.type === "li");
+    expect(lis).toHaveLength(2);
+    for (const li of lis) {
+      const kids = childList(li as TreeElement) as TreeElement[];
+      const link = kids.find((k) => k?.type === SourceProfileLink);
+      const chips = kids.find((k) => k?.type === SourceChips);
+      expect(link).toBeDefined();
+      expect(chips).toBeDefined();
+      expect(chips!.props.slug).toBe(link!.props.slug);
+    }
+  });
+
+  it("renders exactly one profile anchor per source in the künye markup, no target", async () => {
+    const { kunyeUl } = await renderKunye();
+    expect(kunyeUl).toBeDefined();
+
+    const html = renderToStaticMarkup(kunyeUl as unknown as ReactElement);
+    expect(html.split('href="/source/sabah"')).toHaveLength(2);
+    expect(html.split('href="/source/trt-haber"')).toHaveLength(2);
+    expect(html).not.toContain("target=");
+
+    const anchorText = (slug: string) =>
+      new RegExp(`<a [^>]*href="/source/${slug}"[^>]*>([^<]*)</a>`).exec(html)?.[1];
+    expect(anchorText("sabah")).toBe("Sabah");
+    expect(anchorText("trt-haber")).toBe("TRT Haber");
+  });
+
+  it("leaves the niche member's outbound article link untouched", async () => {
+    const { tree, nicheMember } = await renderKunye();
+
+    const outbound = findAllElements(
+      tree,
+      (el) => el.type === "a" && el.props.href === nicheMember.article.url,
+    );
+    expect(outbound).toHaveLength(1);
+    expect(outbound[0]!.props.href).toBe(nicheMember.article.url);
+    expect(outbound[0]!.props.target).toBe("_blank");
+    expect(outbound[0]!.props.rel).toBe("noopener noreferrer");
   });
 });
 

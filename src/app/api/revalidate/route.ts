@@ -31,6 +31,9 @@ const STATIC_TAG_ALLOWLIST = new Set([
   "corrections",
   "finance-feed",
   "finance-bars",
+  // /hafta distinctive words (migration 143): after a takedown delete, clears
+  // the example headlines at once instead of at the 6 h cache expiry.
+  "weekly-words",
 ]);
 const CLUSTER_DETAIL_TAG_RE = /^cluster-detail:[0-9a-f-]{36}$/;
 const FINANCE_TICKER_TAG_RE = /^finance-ticker:[A-Z0-9]{2,6}$/;

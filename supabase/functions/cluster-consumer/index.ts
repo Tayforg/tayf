@@ -66,7 +66,11 @@ import {
   selectContextClusterIds,
   stickyUpperBound,
 } from "../_shared/cluster/context-select.ts";
-import { cleanDescription } from "../_shared/cluster/description-clean.ts";
+import {
+  cleanDescription,
+  DESCRIPTION_SWAP_GUARD,
+  descriptionNamesSwap,
+} from "../_shared/cluster/description-clean.ts";
 import {
   BIAS_KEYS,
   type BiasKey,
@@ -299,6 +303,13 @@ let jevLive: JevLiveState = newJevLiveState(false);
 // drainQueue() so a timeout/5xx-only gateway outage still hard-stops at
 // JEV_LIVE_POLICY.maxCallsPerDrain instead of never budgeting out.
 let jevLiveAttempts = 0;
+// h16-precision-2 (log-only): articles whose title and description name
+// different people (see noteDescriptionSwap). Reset at the top of every
+// drainQueue() next to jevLiveAttempts; at most 3 ids are kept as samples so
+// the drain line stays small.
+let descriptionSwapSuspects = 0;
+let descriptionSwapSamples: string[] = [];
+const DESCRIPTION_SWAP_SAMPLE_MAX = 3;
 // Guards against two overlapping POST /drainQueue invocations in the same
 // warm isolate: drainQueue() resets jevLive/jevLiveAttempts as its first
 // statements, so a second concurrent drain would zero the first drain's
@@ -1112,6 +1123,32 @@ function enrichArticleInMemory(article: ArticleRow): EnrichedArticle {
   };
 }
 
+// h16-precision-2: counts articles whose title names someone the description
+// does not (sabah 1bf7ab12 carried the Berdimuhammedov description under an
+// Erhurman title). LOG-ONLY: it reads the cleaned description the clustering
+// already uses and changes none of it -- enrichment, entities, fingerprint,
+// tf-idf, scoring and cluster writes are untouched. 'drop-description' is
+// NOT wired in this wave; it counts like 'log'. A detector error counts
+// nothing and never fails the message.
+function noteDescriptionSwap(
+  id: string,
+  title: string | null,
+  clusteringDescription: string | null,
+): void {
+  if (DESCRIPTION_SWAP_GUARD === "off") return;
+  let suspect = false;
+  try {
+    suspect = descriptionNamesSwap(title, clusteringDescription);
+  } catch {
+    return;
+  }
+  if (!suspect) return;
+  descriptionSwapSuspects += 1;
+  if (descriptionSwapSamples.length < DESCRIPTION_SWAP_SAMPLE_MAX) {
+    descriptionSwapSamples.push(id);
+  }
+}
+
 async function persistEnrichment(article: EnrichedArticle): Promise<void> {
   // Only patch the columns we recompute; never touch the immutable fields.
   const update = {
@@ -1500,6 +1537,7 @@ async function clusterArticle(
   // short-circuit on a pre-existing cluster_articles row anymore.
 
   const article = enrichArticleInMemory(raw);
+  noteDescriptionSwap(raw.id, raw.title, article.clusteringDescription);
   if (!dryRun) {
     await persistEnrichment(article);
   }
@@ -2051,6 +2089,10 @@ interface InvocationSummary {
   notPolitics: number;
   failedTransient: number;
   failedPermanent: number;
+  // h16-precision-2 (log-only): title/description name swaps seen this drain,
+  // plus up to 3 sample article ids.
+  descriptionSwapSuspects: number;
+  descriptionSwapSamples: string[];
   duration_ms: number;
   budgeted_out: boolean;
   jev_live: JevLiveState;
@@ -2194,6 +2236,8 @@ async function drainQueue(): Promise<InvocationSummary> {
     ),
   );
   jevLiveAttempts = 0;
+  descriptionSwapSuspects = 0;
+  descriptionSwapSamples = [];
 
   // Migration 089 ("ADMIT"): read the flag inside drainQueue (not at module
   // load) so the Deno-env polyfill test harness keeps working, same
@@ -2210,6 +2254,8 @@ async function drainQueue(): Promise<InvocationSummary> {
     notPolitics: 0,
     failedTransient: 0,
     failedPermanent: 0,
+    descriptionSwapSuspects: 0,
+    descriptionSwapSamples: [],
     duration_ms: 0,
     budgeted_out: false,
     jev_live: jevLive,
@@ -2428,6 +2474,10 @@ async function drainQueue(): Promise<InvocationSummary> {
   // HTTP body/log line built here would silently pick up the later drain's
   // numbers instead of this invocation's own.
   summary.jev_live = { ...jevLive };
+  // Copies, for the same reason: the module bindings are reassigned by the
+  // next drain.
+  summary.descriptionSwapSuspects = descriptionSwapSuspects;
+  summary.descriptionSwapSamples = [...descriptionSwapSamples];
   summary.duration_ms = Date.now() - startedAt;
   const after = await queueDepth(supabase, QUEUE_NAME);
   // One JSON-shaped summary line per drain (audit O13) — depth + oldest-age
