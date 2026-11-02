@@ -33,18 +33,23 @@ export function serializeJsonLd(value: unknown): string {
 
 export interface RegistryDatasetOptions {
   /**
-   * ISO timestamp for `dateModified`. The caller supplies "now" (or a
-   * DB-derived last-modified) rather than this function reading the clock
-   * itself, so it stays a pure function that's trivial to test.
+   * ISO timestamp of the registry's last change, derived by the caller from
+   * the database (see registryModifiedAt in src/app/sources/page.tsx). It is
+   * never "now": a cache-fill instant tells a crawler nothing about when the
+   * registry changed, and moves on every revalidation. Null or omitted when
+   * the change time is unknown, in which case `dateModified` is left out of
+   * the Dataset entirely rather than guessed. This function never reads the
+   * clock, so it stays pure and trivial to test.
    */
-  dateModified: string;
+  dateModified?: string | null;
 }
 
 /**
  * Dataset JSON-LD describing Tayf's public source registry (S-17):
  * name, description, licence (CC BY-SA 4.0, matching /metodoloji's stated
- * licence), the machine-readable distribution (`/api/sources`), and
- * `dateModified`. Rendered on /sources.
+ * licence), the machine-readable distribution (`/api/sources`), and, when
+ * known, `dateModified` (the registry's last change time). Rendered on
+ * /sources.
  */
 export function buildRegistryDataset(options: RegistryDatasetOptions) {
   return {
@@ -59,7 +64,7 @@ export function buildRegistryDataset(options: RegistryDatasetOptions) {
       encodingFormat: "application/json",
       contentUrl: `${siteUrl()}/api/sources`,
     },
-    dateModified: options.dateModified,
+    ...(options.dateModified ? { dateModified: options.dateModified } : {}),
   };
 }
 

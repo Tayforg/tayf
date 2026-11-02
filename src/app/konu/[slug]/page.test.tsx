@@ -504,6 +504,72 @@ describe("/konu/[slug] kaynak dağılımı", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Structured data: a hub with at least one bundle ships ONE ld+json script that
+// holds the CollectionPage and a BreadcrumbList (Anasayfa > Konular > <label>),
+// the same pair /gundem/[key] ships. No bundle, no script.
+// ---------------------------------------------------------------------------
+
+function ldJsonScripts(tree: unknown) {
+  const out: Array<{ type?: unknown; props?: Record<string, unknown> }> = [];
+  walk(tree, (el) => {
+    if (el.type === "script" && el.props?.type === "application/ld+json") out.push(el);
+  });
+  return out;
+}
+
+function ldJsonPayload(script: { props?: Record<string, unknown> } | undefined): unknown {
+  const inner = script?.props?.dangerouslySetInnerHTML as { __html: string } | undefined;
+  return JSON.parse(String(inner?.__html));
+}
+
+describe("/konu/[slug] structured data", () => {
+  it("ships one ld+json script: the CollectionPage first, then the BreadcrumbList", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 1 };
+
+    const tree = await TopicHubPage({
+      params: Promise.resolve({ slug: "spor" }),
+      searchParams: Promise.resolve({}),
+    });
+    const scripts = ldJsonScripts(tree);
+
+    expect(scripts).toHaveLength(1);
+    const payload = ldJsonPayload(scripts[0]) as Array<Record<string, unknown>>;
+    expect(Array.isArray(payload)).toBe(true);
+    expect(payload).toHaveLength(2);
+    expect(payload[0]?.["@type"]).toBe("CollectionPage");
+    expect(payload[1]?.["@type"]).toBe("BreadcrumbList");
+  });
+
+  it("the breadcrumb reads Anasayfa > Konular > <label> and the last item is the hub URL", async () => {
+    mocks.result = { bundles: [bundle("c1")], hasMore: false, page: 1 };
+
+    const tree = await TopicHubPage({
+      params: Promise.resolve({ slug: "spor" }),
+      searchParams: Promise.resolve({}),
+    });
+    const payload = ldJsonPayload(ldJsonScripts(tree)[0]) as Array<{
+      itemListElement?: Array<{ name: string; item: string; position: number }>;
+    }>;
+    const items = payload[1]?.itemListElement ?? [];
+
+    expect(items.map((i) => i.name)).toEqual(["Anasayfa", "Konular", "Spor"]);
+    expect(items.map((i) => i.position)).toEqual([1, 2, 3]);
+    expect(items[2]?.item.endsWith("/konu/spor")).toBe(true);
+    expect(items[1]?.item.endsWith("/konu")).toBe(true);
+  });
+
+  it.each([
+    ["no bundles on page 1", { bundles: [], hasMore: false, page: 1 }],
+    ["no bundles past the last page", { bundles: [], hasMore: false, page: 3 }],
+    ["a failed read", null],
+  ])("renders no ld+json script for %s", async (_label, result) => {
+    mocks.result = result;
+
+    expect(ldJsonScripts(await render())).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // generateMetadata: the share/canonical identity of each hub page. The real
 // topicMetadata runs (only the fetcher is mocked above), so this pins the
 // wiring: slug + parsed ?sayfa= -> canonical and og:url agree, and the RSS
@@ -536,6 +602,17 @@ describe("/konu/[slug] generateMetadata", () => {
     expect(m.title).toBe("Spor haberleri");
     expect(m.openGraph?.title).toBe("Spor haberleri — Tayf");
     expect(m.robots).toBeUndefined();
+  });
+
+  it("the description is the jargon-free copy on page 1 and on a paged URL alike", async () => {
+    const first = await meta("spor");
+    const paged = await meta("spor", "2");
+
+    expect(first.description).toBe(
+      "Son 7 günün spor haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+    );
+    expect(paged.description).toBe(first.description);
+    expect(String(first.description)).not.toMatch(/jev|eşik|0,8/i);
   });
 
   it('?sayfa=2: canonical and og:url both carry "?sayfa=2"', async () => {

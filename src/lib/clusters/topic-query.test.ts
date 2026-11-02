@@ -105,6 +105,7 @@ import {
   getTopicCounts,
   isTopicSlug,
   buildTopicCollectionPage,
+  topicDescription,
   topicMetadata,
   TOPIC_SLUGS,
   TOPIC_LABELS_TR,
@@ -643,13 +644,37 @@ describe("topicMetadata", () => {
 
     expect(meta.title).toBe("Dünya haberleri");
     expect(meta.robots).toBeUndefined();
-    expect(typeof meta.description).toBe("string");
-    expect(String(meta.description)).toContain("0,8");
-    expect(String(meta.description)).toContain("Dünya");
+    expect(meta.description).toBe(
+      "Son 7 günün dünya haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+    );
   });
 
   describe.each(TOPIC_SLUGS)("share metadata for %s", (slug) => {
     const label = TOPIC_LABELS_TR[slug];
+
+    // The hub's meta/og/twitter description is reader-facing search-result
+    // copy. The classifier's name and threshold stay in the on-page note
+    // (TOPIC_NOTE_PREFIX), never here.
+    it("description names the topic in lowercase Turkish, fits a snippet, and carries no classifier jargon", () => {
+      const description = String(topicMetadata(slug).description);
+      expect(description.length).toBeLessThanOrEqual(155);
+      expect(description).toContain(label.toLocaleLowerCase("tr-TR"));
+      expect(description).not.toMatch(/jev/i);
+      expect(description).not.toContain("eşik");
+      expect(description).not.toContain("0,8");
+      expect(description).not.toContain("etiket");
+    });
+
+    it("description, og:description and twitter:description are one and the same string", () => {
+      const meta = topicMetadata(slug);
+      expect(typeof meta.description).toBe("string");
+      expect(meta.openGraph?.description).toBe(meta.description);
+      expect(meta.twitter?.description).toBe(meta.description);
+    });
+
+    it("description equals topicDescription(slug)", () => {
+      expect(topicMetadata(slug).description).toBe(topicDescription(slug));
+    });
 
     it("canonical equals og:url equals /konu/<slug>", () => {
       const meta = topicMetadata(slug);
@@ -679,6 +704,27 @@ describe("topicMetadata", () => {
     it("leaves robots undefined", () => {
       expect(topicMetadata(slug).robots).toBeUndefined();
     });
+  });
+
+  it("the six hub descriptions are pairwise distinct (no duplicate meta descriptions across hubs)", () => {
+    const descriptions = TOPIC_SLUGS.map((slug) => String(topicMetadata(slug).description));
+    expect(new Set(descriptions).size).toBe(6);
+  });
+
+  it("a paged hub keeps page 1's description (og and twitter included)", () => {
+    const first = topicMetadata("spor");
+    const paged = topicMetadata("spor", 3);
+    expect(paged.description).toBe(first.description);
+    expect(paged.openGraph?.description).toBe(first.description);
+    expect(paged.twitter?.description).toBe(first.description);
+  });
+
+  it("topicDescription fills the template with the lowercase label (tr-TR), and the longest one still fits a snippet", () => {
+    expect(topicDescription("yasam")).toBe(
+      "Son 7 günün yaşam haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.",
+    );
+    // The longest label (Teknoloji) is the worst case for the snippet budget.
+    expect(topicDescription("teknoloji").length).toBeLessThanOrEqual(155);
   });
 
   it("page 1 and an omitted page carry no query string", () => {

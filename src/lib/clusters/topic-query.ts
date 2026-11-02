@@ -389,6 +389,19 @@ export function buildTopicCollectionPage(args: {
   };
 }
 
+/** Pure. The meta / og / twitter description of one hub.
+ *
+ *  Search-result and share-card copy, so it describes what the reader gets and
+ *  names neither the classifier nor its threshold: that disclosure lives in
+ *  the on-page note (TOPIC_NOTE_PREFIX), which the CT-3 parity guard pins.
+ *  The label is lowercased with the Turkish locale ("Yaşam" -> "yaşam"). The
+ *  longest hub (teknoloji) comes to 140 characters, inside a 155-character
+ *  snippet. Paged hubs (?sayfa=N) share it. */
+export function topicDescription(slug: TopicSlug): string {
+  const lower = TOPIC_LABELS_TR[slug].toLocaleLowerCase("tr-TR");
+  return `Son 7 günün ${lower} haberleri, olaylara göre gruplanmış: iktidar, bağımsız ve muhalefet medyasının her olaya ne kadar yer verdiğini görün.`;
+}
+
 /** Pure. The exact Metadata object /konu/[slug] exports.
  *
  *  Built with staticPageMetadata() so the hub has its own og:* / twitter:*
@@ -412,7 +425,7 @@ export function topicMetadata(slug: TopicSlug, page = 1): Metadata {
   // titles get the suffix from staticPageMetadata itself).
   const meta = staticPageMetadata({
     title: `${label} haberleri`,
-    description: `Son 7 günde ${label} başlığı altında kümelenen haberler. Konu etiketleri otomatik atanır (Jev, eşik 0,8).`,
+    description: topicDescription(slug),
     path,
   });
 

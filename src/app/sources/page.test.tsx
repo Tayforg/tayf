@@ -70,6 +70,15 @@ function makeFakeClient() {
     const publishedAt = supabaseFixture.latestBySlug[slug];
     return publishedAt ? [{ published_at: publishedAt }] : [];
   };
+  // `created_at` / `zone_rationale_at` feed the dataset's dateModified. A slug
+  // missing from createdAtBySlug gets DEFAULT_CREATED_AT; an explicit null
+  // models a NULL column. zone_rationale_at is NULL unless a test sets it.
+  const createdAtOf = (slug: string) =>
+    slug in supabaseFixture.createdAtBySlug
+      ? (supabaseFixture.createdAtBySlug[slug] ?? null)
+      : "2025-01-01T00:00:00Z";
+  const rationaleAtOf = (slug: string) =>
+    supabaseFixture.rationaleBySlug[slug] ?? null;
   const sourceRows = [
     {
       id: "s-outlet",
@@ -83,6 +92,8 @@ function makeFakeClient() {
       kind: "outlet",
       stats: [{ count: 2 }],
       latest: latestOf("s-outlet"),
+      created_at: createdAtOf("s-outlet"),
+      zone_rationale_at: rationaleAtOf("s-outlet"),
     },
     {
       id: "s-aggregator",
@@ -96,6 +107,8 @@ function makeFakeClient() {
       kind: "aggregator",
       stats: [{ count: 2 }],
       latest: latestOf("s-aggregator"),
+      created_at: createdAtOf("s-aggregator"),
+      zone_rationale_at: rationaleAtOf("s-aggregator"),
     },
     {
       id: "s-wire",
@@ -109,9 +122,64 @@ function makeFakeClient() {
       kind: "wire",
       stats: [{ count: 2 }],
       latest: latestOf("s-wire"),
+      created_at: createdAtOf("s-wire"),
+      zone_rationale_at: rationaleAtOf("s-wire"),
     },
   ];
-  return createSupabaseFake({ tables: { sources: sourceRows } }).client;
+  return createSupabaseFake({
+    tables: {
+      // Like PostgREST, return only the columns the query selects: a page that
+      // forgets `created_at, zone_rationale_at` in its select string must not
+      // be rescued by a fake that hands them over anyway.
+      sources: (state) => {
+        if (supabaseFixture.sourcesError) {
+          return { data: null, error: { message: supabaseFixture.sourcesError } };
+        }
+        const selected = String(state.selectArgs[0] ?? "")
+          .split(",")
+          .map((column) => column.trim());
+        return {
+          data: sourceRows.map((row) => {
+            const out: Record<string, unknown> = { ...row };
+            for (const column of ["created_at", "zone_rationale_at"]) {
+              if (!selected.includes(column)) delete out[column];
+            }
+            return out;
+          }),
+          error: null,
+        };
+      },
+      // Append-only zone history (migration 055). Mirrors the query it is
+      // given: ordered by changed_at when asked, cut to `.limit(n)`.
+      source_zone_history: (state) => {
+        supabaseFixture.historyQueries.push({
+          select: String(state.selectArgs[0] ?? ""),
+          order: state.order.map((o) => ({
+            col: o.col,
+            ascending:
+              (o.opts as { ascending?: boolean } | undefined)?.ascending ?? true,
+          })),
+          limit: state.limit,
+        });
+        if (supabaseFixture.historyError) {
+          return { data: null, error: { message: supabaseFixture.historyError } };
+        }
+        let rows = supabaseFixture.history.map((h) => ({ changed_at: h.changed_at }));
+        const byChangedAt = state.order.find((o) => o.col === "changed_at");
+        if (byChangedAt) {
+          const ascending =
+            (byChangedAt.opts as { ascending?: boolean } | undefined)?.ascending ?? true;
+          rows = rows.sort(
+            (a, b) =>
+              (Date.parse(a.changed_at) - Date.parse(b.changed_at)) *
+              (ascending ? 1 : -1),
+          );
+        }
+        if (state.limit !== null) rows = rows.slice(0, state.limit);
+        return { data: rows, error: null };
+      },
+    },
+  }).client;
 }
 
 // ingest-hygiene (handed over from seo-error-states): flips the mocked
@@ -121,6 +189,22 @@ const supabaseFixture = vi.hoisted(() => ({
   fail: false,
   /** slug -> ISO published_at of the source's newest article in the window. */
   latestBySlug: {} as Record<string, string>,
+  /** slug -> created_at; a slug that is absent gets a fixed old default, null models a NULL column. */
+  createdAtBySlug: {} as Record<string, string | null>,
+  /** slug -> zone_rationale_at; an absent slug is NULL. */
+  rationaleBySlug: {} as Record<string, string | null>,
+  /** Rows of source_zone_history (the reader asks for the newest one). */
+  history: [] as Array<{ changed_at: string }>,
+  /** When set, the source_zone_history read resolves { data: null, error: { message } }. */
+  historyError: null as string | null,
+  /** When set, the sources directory read resolves { data: null, error: { message } }. */
+  sourcesError: null as string | null,
+  /** What each source_zone_history query asked for (select, order, limit). */
+  historyQueries: [] as Array<{
+    select: string;
+    order: Array<{ col: string; ascending: boolean }>;
+    limit: number | null;
+  }>,
   // Order of the reads the page starts: "directory" is pushed by the
   // directory read's createServerClient() call, "counts" by a stubbed
   // getSourceItemsPerDay (see the overlap test below).
@@ -140,6 +224,7 @@ import SourcesPage, {
   SourceDirectory,
   SourceDirectoryWithCounts,
   deriveDirectoryStats,
+  registryModifiedAt,
 } from "./page";
 import { SOURCE_SKELETON_CARDS, SourceDirectorySkeleton } from "./source-directory-skeleton";
 import { getSourceItemsPerDay } from "@/lib/sources/feed-status";
@@ -236,6 +321,13 @@ async function collectHrefs(node: unknown, out: string[] = []): Promise<string[]
 beforeEach(() => {
   supabaseFixture.fail = false;
   supabaseFixture.latestBySlug = {};
+  // Old stamps on every row, one rationale: well before any date a test asserts.
+  supabaseFixture.createdAtBySlug = {};
+  supabaseFixture.rationaleBySlug = { "s-aggregator": "2025-06-15T00:00:00Z" };
+  supabaseFixture.history = [];
+  supabaseFixture.historyError = null;
+  supabaseFixture.sourcesError = null;
+  supabaseFixture.historyQueries.length = 0;
   supabaseFixture.calls.length = 0;
   clickbaitFixture.public = false;
   clickbaitFixture.karne = null;
@@ -796,6 +888,61 @@ function statsRow(slug: string, kind: string, lastPublishedAt: string | null): S
   return { ...GZT, id: slug, slug, kind, lastPublishedAt } as unknown as StatsRow;
 }
 
+describe("registryModifiedAt -- the registry's last change time", () => {
+  it("returns the ISO form of the latest value", () => {
+    expect(
+      registryModifiedAt([
+        "2026-09-01T00:00:00Z",
+        "2026-10-20T08:00:00.000Z",
+        "2026-10-05T00:00:00Z",
+      ]),
+    ).toBe("2026-10-20T08:00:00.000Z");
+  });
+
+  it("ignores null, undefined and unparseable values", () => {
+    expect(
+      registryModifiedAt([
+        null,
+        undefined,
+        "not-a-date",
+        "",
+        "2026-10-05T00:00:00Z",
+        "2026-13-45",
+      ]),
+    ).toBe("2026-10-05T00:00:00.000Z");
+  });
+
+  it("returns null for an empty input and for input with nothing usable", () => {
+    expect(registryModifiedAt([])).toBeNull();
+    expect(registryModifiedAt([null, undefined, "junk", ""])).toBeNull();
+  });
+
+  it("compares instants, not strings: offsets and Postgres microseconds normalise to UTC", () => {
+    // 03:00+03:00 is 00:00Z -- earlier than 01:00Z although "03" > "01" as text.
+    expect(registryModifiedAt(["2026-10-20T03:00:00+03:00", "2026-10-20T01:00:00Z"])).toBe(
+      "2026-10-20T01:00:00.000Z",
+    );
+    expect(registryModifiedAt(["2026-10-20T08:00:00.123456+00:00"])).toBe(
+      "2026-10-20T08:00:00.123Z",
+    );
+  });
+
+  it("does not depend on the clock or on input order", () => {
+    const values = ["2026-10-01T00:00:00Z", "2026-10-02T00:00:00Z", null];
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.parse("2026-11-01T00:00:00.000Z"));
+      const first = registryModifiedAt(values);
+      vi.setSystemTime(Date.parse("2030-01-01T00:00:00.000Z"));
+      const second = registryModifiedAt([...values].reverse());
+      expect(first).toBe("2026-10-02T00:00:00.000Z");
+      expect(second).toBe(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("deriveDirectoryStats -- the yield denominator, from fill-time rows", () => {
   const grouped = (rows: Partial<Record<string, StatsRow[]>>) =>
     rows as unknown as Parameters<typeof deriveDirectoryStats>[0];
@@ -961,12 +1108,157 @@ describe("/sources page -- clock values are stamped when the directory is read",
     return null;
   }
 
-  it("dateModified in the dataset JSON-LD is the instant the directory was read", async () => {
+  // dateModified is the registry's last change time, derived from the database:
+  // the latest of every active row's created_at, every active row's
+  // zone_rationale_at and the newest source_zone_history.changed_at. It used to
+  // be the instant the cache was filled, so three fetches 20 s apart reported
+  // three different "now" stamps (hunt-17).
+  it("(a) dateModified is the latest of the row stamps and the zone history, not the clock", async () => {
     vi.setSystemTime(Date.parse("2026-11-01T09:30:00.000Z"));
+    supabaseFixture.createdAtBySlug = { "s-outlet": "2026-09-01T00:00:00Z" };
+    supabaseFixture.rationaleBySlug = { "s-aggregator": "2026-10-05T00:00:00Z" };
+    supabaseFixture.history = [
+      { changed_at: "2026-08-01T00:00:00.000Z" },
+      { changed_at: "2026-10-20T08:00:00.000Z" },
+      { changed_at: "2026-10-10T00:00:00.000Z" },
+    ];
 
     const dataset = jsonLdOf(await SourcesPage());
 
-    expect(dataset.dateModified).toBe("2026-11-01T09:30:00.000Z");
+    expect(dataset.dateModified).toBe("2026-10-20T08:00:00.000Z");
+  });
+
+  it.each<{
+    name: string;
+    createdAt: Record<string, string | null>;
+    rationale: Record<string, string | null>;
+    history: Array<{ changed_at: string }>;
+    expected: string;
+  }>([
+    {
+      name: "a source's created_at",
+      createdAt: { "s-wire": "2026-10-25T10:00:00Z" },
+      rationale: { "s-aggregator": "2026-10-05T00:00:00Z" },
+      history: [{ changed_at: "2026-10-20T08:00:00.000Z" }],
+      expected: "2026-10-25T10:00:00.000Z",
+    },
+    {
+      name: "a source's zone_rationale_at",
+      createdAt: { "s-outlet": "2026-09-01T00:00:00Z" },
+      rationale: { "s-wire": "2026-10-28T12:30:00Z" },
+      history: [{ changed_at: "2026-10-20T08:00:00.000Z" }],
+      expected: "2026-10-28T12:30:00.000Z",
+    },
+    {
+      name: "the newest zone-history row",
+      createdAt: { "s-outlet": "2026-09-01T00:00:00Z" },
+      rationale: { "s-aggregator": "2026-10-05T00:00:00Z" },
+      history: [{ changed_at: "2026-10-30T23:59:59.000Z" }],
+      expected: "2026-10-30T23:59:59.000Z",
+    },
+  ])("(a) each of the three inputs can be the latest: $name", async (c) => {
+    supabaseFixture.createdAtBySlug = c.createdAt;
+    supabaseFixture.rationaleBySlug = c.rationale;
+    supabaseFixture.history = c.history;
+
+    const dataset = jsonLdOf(await SourcesPage());
+
+    expect(dataset.dateModified).toBe(c.expected);
+  });
+
+  it("asks the database for the single newest zone-history row, not the whole table", async () => {
+    supabaseFixture.history = [{ changed_at: "2026-10-20T08:00:00.000Z" }];
+
+    await SourcesPage();
+
+    expect(supabaseFixture.historyQueries).toEqual([
+      {
+        select: "changed_at",
+        order: [{ col: "changed_at", ascending: false }],
+        limit: 1,
+      },
+    ]);
+  });
+
+  it("(b) two renders under different system clocks report the same dateModified", async () => {
+    supabaseFixture.history = [{ changed_at: "2026-10-20T08:00:00.000Z" }];
+
+    vi.setSystemTime(Date.parse("2026-11-01T09:30:00.000Z"));
+    const first = jsonLdOf(await SourcesPage());
+    vi.setSystemTime(Date.parse("2026-11-01T09:30:20.000Z"));
+    const second = jsonLdOf(await SourcesPage());
+
+    expect(first.dateModified).toBe("2026-10-20T08:00:00.000Z");
+    expect(second.dateModified).toBe(first.dateModified);
+  });
+
+  it("(c) an unreadable zone history leaves dateModified out but still renders the directory", async () => {
+    supabaseFixture.historyError = "statement timeout";
+    // A partial max (rows only) would understate the change time: it must not be used.
+    supabaseFixture.createdAtBySlug = { "s-outlet": "2026-09-01T00:00:00Z" };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const tree = await SourcesPage();
+    const dataset = jsonLdOf(tree);
+    const text = (await collectText(tree)).join(" ");
+    const hrefs = await collectHrefs(tree);
+
+    expect("dateModified" in dataset).toBe(false);
+    expect(dataset["@type"]).toBe("Dataset");
+    expect(text).toContain("Yanlılık dağılımına sayılan");
+    expect(text).not.toContain("Kaynak listesi şu an yüklenemedi");
+    expect(findElementProps(tree, "meta")).toBeNull();
+    expect(hrefs.filter((h) => h.startsWith("/source/"))).toHaveLength(3);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("[sources] zone history unreadable");
+    expect(String(warn.mock.calls[0]?.[0])).toContain("statement timeout");
+  });
+
+  it("(d) an empty history and no row stamps leave dateModified out", async () => {
+    supabaseFixture.createdAtBySlug = {
+      "s-outlet": null,
+      "s-aggregator": null,
+      "s-wire": null,
+    };
+    supabaseFixture.rationaleBySlug = {};
+    supabaseFixture.history = [];
+
+    const tree = await SourcesPage();
+    const dataset = jsonLdOf(tree);
+
+    expect("dateModified" in dataset).toBe(false);
+    expect(dataset["@type"]).toBe("Dataset");
+    expect(findElementProps(tree, "meta")).toBeNull();
+  });
+
+  it("a history row alone is enough when every row stamp is NULL", async () => {
+    supabaseFixture.createdAtBySlug = {
+      "s-outlet": null,
+      "s-aggregator": null,
+      "s-wire": null,
+    };
+    supabaseFixture.rationaleBySlug = {};
+    supabaseFixture.history = [{ changed_at: "2026-10-20T08:00:00.000Z" }];
+
+    const dataset = jsonLdOf(await SourcesPage());
+
+    expect(dataset.dateModified).toBe("2026-10-20T08:00:00.000Z");
+  });
+
+  it("a failing directory read is still the error state, whatever the history says", async () => {
+    supabaseFixture.sourcesError = "canceling statement due to statement timeout";
+    supabaseFixture.history = [{ changed_at: "2026-10-20T08:00:00.000Z" }];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const tree = await SourcesPage();
+    const text = (await collectText(tree)).join(" ");
+
+    expect(text).toContain("Kaynak listesi şu an yüklenemedi");
+    expect(findElementProps(tree, "meta")).toMatchObject({
+      name: "robots",
+      content: "noindex",
+    });
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("[sources] unavailable"));
   });
 
   it("the DenominatorNote pair comes from the fill-time clock: fresh voting sources deliver, aggregators and stale ones do not", async () => {
