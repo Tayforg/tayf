@@ -332,3 +332,227 @@ describe("sub-step failures are reported by the cron routes (h18-jobs-1)", () =>
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// W3 (hunt-23/24 follow-ups): the other four cron routes report swallowed
+// database failures too. fact-checks, alerts-webhooks, social and digest used to
+// log a failed read or write and answer 200 with a success flag, so a run that
+// lost its writes looked healthy to Vercel and to ops_health_report row 15. They
+// now count each swallowed DATABASE or RPC failure in `substepErrors`, answer
+// 200 with `substepErrors: <n>` and a success flag of `substepErrors === 0` in the
+// body, and build the response init with substepErrorsInit() so the wrapper
+// records 599 (docs of the header: src/lib/ops/cron-route-outcome.ts).
+//
+// Counted: Supabase reads and writes and RPCs. Not counted, on purpose: vendor and
+// external failures (fact-check feed fetches, Telegram and Bluesky posts, Resend
+// sends, webhook POSTs), like the headline rule above.
+//
+// Each counted branch is written exactly `if (<name>) { ... substepErrors++ ... }`
+// with braces, because this finder (ifBlocks) matches that shape; a one-line
+// `if (x) console.warn(...)` or a merged `if (a || b)` would escape it.
+// ---------------------------------------------------------------------------
+
+interface RouteSubstepSpec {
+  folder: string;
+  /** `if (<name>) {` branches: each must count a substepErrors, and there must be at least this many. */
+  branches: Record<string, number>;
+  /** The exact number of `substepErrorsInit(substepErrors` calls (one per response that can end a degraded run). */
+  initCalls: number;
+  /** Source text that must occur exactly `count` times (code only, comments blanked). */
+  literals?: Array<{ text: string; count: number }>;
+}
+
+const ROUTE_SUBSTEP_SPECS: RouteSubstepSpec[] = [
+  {
+    folder: "fact-checks",
+    // cluster search, member titles, existing-links read, promote update, new-links upsert
+    branches: { clusterErr: 1, memberErr: 1, existingErr: 1, promoteErr: 1, insertErr: 1 },
+    initCalls: 1,
+  },
+  {
+    folder: "alerts-webhooks",
+    // fresh blindspot re-read, enqueue upsert, exhausted-delivery update, unknown-keys read,
+    // delivery-outcome update, webhook-health update
+    branches: { freshError: 1, upsertError: 1, exhaustedError: 1, extraError: 1, updateError: 1, hookUpdateError: 1 },
+    initCalls: 1,
+  },
+  {
+    folder: "social",
+    // fresh re-read, ledger read (fail closed), claim rpc, social_post_finish (through one local helper)
+    branches: { freshError: 1, ledgerError: 1, claimError: 1, finishError: 1 },
+    // the "ledger unavailable" skip, the dry-run body and the final body
+    initCalls: 3,
+    literals: [{ text: '"social_post_finish"', count: 1 }],
+  },
+  {
+    folder: "digest",
+    // last_sent_at write after a send, and the rights-gated summary member lookup
+    branches: { updateError: 1, memberLookupFailed: 1 },
+    initCalls: 1,
+  },
+];
+
+const INIT_CALL_MARKER = "substepErrorsInit(substepErrors";
+
+/** Violations of the W3 sub-step contract for one route source; empty means compliant. */
+function routeSubstepViolations(spec: RouteSubstepSpec, source: string): string[] {
+  const code = blankComments(source);
+  const out: string[] = [];
+
+  const importRe = new RegExp(
+    `import\\s*\\{[^}]*\\b(?:substepErrorsInit|CRON_SUBSTEP_ERRORS_HEADER)\\b[^}]*\\}\\s*from\\s*["']${escapeRegExp(WRAPPER_MODULE)}["']`,
+  );
+  if (!importRe.test(code)) out.push(`does not import substepErrorsInit from ${WRAPPER_MODULE}`);
+
+  if (!code.includes("let substepErrors = 0;")) out.push("substepErrors is not declared with `let substepErrors = 0;`");
+
+  for (const [name, min] of Object.entries(spec.branches)) {
+    const blocks = ifBlocks(code, name);
+    if (blocks.length < min) out.push(`expected at least ${min} \`if (${name}) {\` branches, found ${blocks.length}`);
+    blocks.forEach((block, i) => {
+      if (!COUNTS_A_SUBSTEP.test(block)) out.push(`\`if (${name}) {\` branch ${i + 1} does not count a substepErrors`);
+    });
+  }
+
+  const initCalls = code.split(INIT_CALL_MARKER).length - 1;
+  if (initCalls !== spec.initCalls) {
+    out.push(`expected ${INIT_CALL_MARKER} in exactly ${spec.initCalls} responses, found ${initCalls}`);
+  }
+
+  for (const { text, count } of spec.literals ?? []) {
+    const found = code.split(text).length - 1;
+    if (found !== count) out.push(`expected ${text} exactly ${count} time(s), found ${found}`);
+  }
+  return out;
+}
+
+describe("fact-checks, alerts-webhooks, social and digest report swallowed database failures (W3)", () => {
+  it("the wrapper module exports substepErrorsInit", () => {
+    const code = blankComments(readFileSync(WRAPPER_FILE, "utf8"));
+    expect(code).toMatch(/export\s+function\s+substepErrorsInit\b/);
+  });
+
+  it("is not vacuous: the four routes exist", () => {
+    for (const { folder } of ROUTE_SUBSTEP_SPECS) {
+      expect(existsSync(resolve(CRON_DIR, folder, "route.ts")), folder).toBe(true);
+    }
+    expect(ROUTE_SUBSTEP_SPECS.map((s) => s.folder).sort()).toEqual(["alerts-webhooks", "digest", "fact-checks", "social"]);
+  });
+
+  for (const spec of ROUTE_SUBSTEP_SPECS) {
+    it(`${spec.folder}: every swallowed database failure is counted and the response carries the header`, () => {
+      const file = resolve(CRON_DIR, spec.folder, "route.ts");
+      expect(routeSubstepViolations(spec, readFileSync(file, "utf8")), `src/app/api/cron/${spec.folder}/route.ts`).toEqual([]);
+    });
+  }
+
+  it("the route table counts the branches the spec names", () => {
+    const byFolder = Object.fromEntries(ROUTE_SUBSTEP_SPECS.map((s) => [s.folder, Object.keys(s.branches).sort()]));
+    expect(byFolder).toEqual({
+      "fact-checks": ["clusterErr", "existingErr", "insertErr", "memberErr", "promoteErr"],
+      "alerts-webhooks": ["exhaustedError", "extraError", "freshError", "hookUpdateError", "updateError", "upsertError"],
+      social: ["claimError", "freshError", "finishError", "ledgerError"].sort(),
+      digest: ["memberLookupFailed", "updateError"],
+    });
+  });
+
+  describe("the finder itself (mutation checks on synthetic sources)", () => {
+    const spec: RouteSubstepSpec = {
+      folder: "demo",
+      branches: { aErr: 1, bErr: 2 },
+      initCalls: 1,
+      literals: [{ text: '"only_once"', count: 1 }],
+    };
+    // Built from lines, so each mutation swaps a whole line (no string-pattern replace).
+    const goodLines = [
+      'import { substepErrorsInit, withCronOutcome } from "@/lib/ops/cron-route-outcome";',
+      "let substepErrors = 0;",
+      'run("only_once");',
+      "if (aErr) { log(1); substepErrors++; }",
+      "if (bErr) { log(2); substepErrors += 1; }",
+      "if (bErr) { log(3); substepErrors++; }",
+      "return NextResponse.json({ ok: substepErrors === 0, substepErrors }, substepErrorsInit(substepErrors));",
+    ];
+    const build = (lines: string[]): string => `${lines.join("\n")}\n`;
+    const swap = (from: string, to: string[]): string[] => goodLines.flatMap((l) => (l === from ? to : [l]));
+    const good = build(goodLines);
+
+    it("accepts a compliant source", () => {
+      expect(routeSubstepViolations(spec, good)).toEqual([]);
+    });
+
+    it("accepts the header constant as the import", () => {
+      const lines = swap(goodLines[0]!, ['import { CRON_SUBSTEP_ERRORS_HEADER } from "@/lib/ops/cron-route-outcome";']);
+      expect(routeSubstepViolations(spec, build(lines))).toEqual([]);
+    });
+
+    it("flags a branch that does not count", () => {
+      const bad = build(swap("if (aErr) { log(1); substepErrors++; }", ["if (aErr) { log(1); }"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("aErr")]);
+    });
+
+    it("flags the second of two branches of the same name when only it does not count", () => {
+      const bad = build(swap("if (bErr) { log(3); substepErrors++; }", ["if (bErr) { log(3); }"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("branch 2")]);
+    });
+
+    it("flags a missing branch (fewer than the route has)", () => {
+      const bad = build(swap("if (bErr) { log(3); substepErrors++; }", []));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("bErr")]);
+    });
+
+    it("flags a one-line branch without braces", () => {
+      const bad = build(swap("if (aErr) { log(1); substepErrors++; }", ["if (aErr) log(1);", "substepErrors++;"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("expected at least 1 `if (aErr) {`")]);
+    });
+
+    it("flags a merged condition (the finder matches `if (<name>) {` only)", () => {
+      const bad = build(swap("if (aErr) { log(1); substepErrors++; }", ["if (aErr || other) { log(1); substepErrors++; }"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("aErr")]);
+    });
+
+    it("flags a counter that sits outside the branch (in the else)", () => {
+      const bad = build(swap("if (aErr) { log(1); substepErrors++; }", ["if (aErr) { log(1); } else { substepErrors++; }"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("aErr")]);
+    });
+
+    it("flags a counter that only appears in a comment", () => {
+      const bad = build(swap("if (aErr) { log(1); substepErrors++; }", ["if (aErr) { log(1); /* substepErrors++ */ }"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("aErr")]);
+    });
+
+    it("flags a missing import", () => {
+      expect(routeSubstepViolations(spec, build(goodLines.slice(1)))).toEqual([expect.stringContaining("does not import")]);
+    });
+
+    it("flags an import of something else from the wrapper module", () => {
+      const lines = swap(goodLines[0]!, ['import { withCronOutcome } from "@/lib/ops/cron-route-outcome";']);
+      expect(routeSubstepViolations(spec, build(lines))).toEqual([expect.stringContaining("does not import")]);
+    });
+
+    it("flags a missing declaration", () => {
+      const bad = build(swap("let substepErrors = 0;", []));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("is not declared")]);
+    });
+
+    it("flags a body without the init", () => {
+      const bad = build(swap(goodLines[goodLines.length - 1]!, ["return NextResponse.json({ ok: substepErrors === 0, substepErrors });"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("exactly 1")]);
+    });
+
+    it("flags a second init call when the route should have one", () => {
+      const bad = build([...goodLines, "return NextResponse.json({}, substepErrorsInit(substepErrors));"]);
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("exactly 1")]);
+    });
+
+    it("flags an init call that only appears in a comment", () => {
+      const bad = build(swap(goodLines[goodLines.length - 1]!, ["// return NextResponse.json({}, substepErrorsInit(substepErrors));", "return NextResponse.json({});"]));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("exactly 1")]);
+    });
+
+    it("flags a literal that occurs more often than allowed", () => {
+      const bad = build(swap('run("only_once");', ['run("only_once");', 'run("only_once");']));
+      expect(routeSubstepViolations(spec, bad)).toEqual([expect.stringContaining("exactly 1 time(s), found 2")]);
+    });
+  });
+});

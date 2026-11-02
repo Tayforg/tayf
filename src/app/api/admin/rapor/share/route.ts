@@ -24,6 +24,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { createShareLink, normalizeShareDays, shareUrl } from "@/lib/reports/share";
@@ -39,7 +40,7 @@ const adminRaporShareLimit = createRateLimiter("admin-rapor-share", {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -97,4 +98,4 @@ export const POST = withApiErrors(async (request: Request) => {
     },
     { status: 201 },
   );
-});
+}));

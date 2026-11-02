@@ -29,6 +29,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { isCorrectionStatus } from "@/lib/corrections/status";
@@ -49,7 +50,7 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
-export const PATCH = withApiErrors(
+export const PATCH = withAdminNoStore(withApiErrors(
   async (request: Request, ctx: RouteContext) => {
     if (!(await hasAdminSession())) {
       return apiUnauthorized();
@@ -106,9 +107,9 @@ export const PATCH = withApiErrors(
 
     return NextResponse.json({ ok: true, status }, { status: 200 });
   },
-);
+));
 
-export const DELETE = withApiErrors(
+export const DELETE = withAdminNoStore(withApiErrors(
   async (request: Request, ctx: RouteContext) => {
     if (!(await hasAdminSession())) {
       return apiUnauthorized();
@@ -145,4 +146,4 @@ export const DELETE = withApiErrors(
 
     return NextResponse.json({ ok: true }, { status: 200 });
   },
-);
+));

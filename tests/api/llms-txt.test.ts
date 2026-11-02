@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 // ---------------------------------------------------------------------------
 
 import { GET } from "@/app/llms.txt/route";
+import { GET as GET_ROBOTS } from "@/app/robots.txt/route";
 
 const ORIGINAL_ENV = { ...process.env };
 const CONTACT_KEY = "NEXT_PUBLIC_CONTACT_EMAIL";
@@ -155,5 +156,168 @@ describe("GET /llms.txt", () => {
     const body = await (await GET()).text();
     expect(body).not.toContain("mailto:");
     delete process.env[CONTACT_KEY];
+  });
+});
+
+// ---------------------------------------------------------------------------
+// llms.txt <-> robots.txt consistency. llms.txt is read by crawlers, so every
+// absolute link in it that does not hold a `{placeholder}` must be crawlable
+// under /robots.txt. The OpenAPI link used to sit under `Disallow: /api/`.
+//
+// The evaluator below is the RFC 9309 subset these two files use: group
+// selection by exact user-agent token (falling back to `*`), prefix rules,
+// the longest matching rule wins and Allow wins a tie. Plain startsWith and
+// indexOf only: no regular expression ever runs over robots or llms text.
+// ---------------------------------------------------------------------------
+
+interface RobotsRule {
+  allow: boolean;
+  path: string;
+}
+
+function parseRobots(body: string): Map<string, RobotsRule[]> {
+  const groups = new Map<string, RobotsRule[]>();
+  // Consecutive User-agent lines share the rule lines that follow them.
+  let tokens: string[] = [];
+  let previousWasAgent = false;
+  for (const rawLine of body.split("\n")) {
+    const hash = rawLine.indexOf("#");
+    const line = (hash === -1 ? rawLine : rawLine.slice(0, hash)).trim();
+    if (line === "") continue;
+    const colon = line.indexOf(":");
+    if (colon === -1) continue;
+    const key = line.slice(0, colon).trim().toLowerCase();
+    const value = line.slice(colon + 1).trim();
+    if (key === "user-agent") {
+      if (!previousWasAgent) tokens = [];
+      const token = value.toLowerCase();
+      tokens.push(token);
+      if (!groups.has(token)) groups.set(token, []);
+      previousWasAgent = true;
+      continue;
+    }
+    previousWasAgent = false;
+    // `Disallow:` with an empty value allows everything: no rule to record.
+    if ((key === "allow" || key === "disallow") && value !== "") {
+      for (const token of tokens) groups.get(token)!.push({ allow: key === "allow", path: value });
+    }
+  }
+  return groups;
+}
+
+function rulesFor(groups: Map<string, RobotsRule[]>, crawler: string): RobotsRule[] {
+  return groups.get(crawler.toLowerCase()) ?? groups.get("*") ?? [];
+}
+
+function isCrawlAllowed(rules: RobotsRule[], path: string): boolean {
+  let best: RobotsRule | null = null;
+  for (const rule of rules) {
+    if (!path.startsWith(rule.path)) continue;
+    if (
+      best === null ||
+      rule.path.length > best.path.length ||
+      (rule.path.length === best.path.length && rule.allow && !best.allow)
+    ) {
+      best = rule;
+    }
+  }
+  return best === null ? true : best.allow;
+}
+
+/** URLs of every `[text](url)` link, found by scanning for "](" rather than a pattern. */
+function markdownLinkUrls(text: string): string[] {
+  const urls: string[] = [];
+  let from = 0;
+  for (;;) {
+    const open = text.indexOf("](", from);
+    if (open === -1) break;
+    const close = text.indexOf(")", open + 2);
+    if (close === -1) break;
+    urls.push(text.slice(open + 2, close));
+    from = close + 1;
+  }
+  return urls;
+}
+
+describe("llms.txt links are crawlable under /robots.txt", () => {
+  const BASE = "https://tayf.test";
+  const CRAWLERS = ["*", "Googlebot", "ClaudeBot"];
+
+  async function loadFiles() {
+    const llms = await (await GET()).text();
+    const robots = await (await GET_ROBOTS()).text();
+    return { llms, groups: parseRobots(robots) };
+  }
+
+  /** Paths of the links that point at this site and hold no `{placeholder}`. */
+  function internalLinkPaths(llms: string): string[] {
+    const paths: string[] = [];
+    for (const url of markdownLinkUrls(llms)) {
+      if (!url.startsWith(`${BASE}/`) || url.includes("{")) continue;
+      const hash = url.indexOf("#");
+      paths.push(url.slice(BASE.length, hash === -1 ? url.length : hash));
+    }
+    return paths;
+  }
+
+  it("the evaluator follows RFC 9309: longest match wins, Allow wins a tie, no match is allowed", () => {
+    const rules: RobotsRule[] = [
+      { allow: true, path: "/" },
+      { allow: true, path: "/api/sources" },
+      { allow: false, path: "/api/" },
+      { allow: false, path: "/same" },
+      { allow: true, path: "/same" },
+    ];
+    expect(isCrawlAllowed(rules, "/blindspots")).toBe(true);
+    expect(isCrawlAllowed(rules, "/api/sources/foo")).toBe(true);
+    expect(isCrawlAllowed(rules, "/api/health")).toBe(false);
+    expect(isCrawlAllowed(rules, "/same")).toBe(true);
+    expect(isCrawlAllowed([], "/anything")).toBe(true);
+    expect(isCrawlAllowed([{ allow: false, path: "/api/" }], "/api/sources")).toBe(false);
+  });
+
+  it("the parser reads one group per user-agent and ignores comments and Sitemap", async () => {
+    const { groups } = await loadFiles();
+    for (const crawler of CRAWLERS) {
+      const rules = groups.get(crawler.toLowerCase());
+      expect(rules, `no robots group for ${crawler}`).toBeDefined();
+      expect(rules!.length).toBeGreaterThanOrEqual(5);
+      for (const rule of rules!) {
+        // The evaluator does plain prefix matching, so no wildcard syntax may sneak in.
+        expect(rule.path.includes("*") || rule.path.includes("$"), rule.path).toBe(false);
+      }
+    }
+  });
+
+  it("every same-site link in llms.txt (placeholders skipped) is allowed for *, Googlebot and ClaudeBot", async () => {
+    const { llms, groups } = await loadFiles();
+    const paths = internalLinkPaths(llms);
+
+    // Non-vacuous: the list covers the registry, the OpenAPI file and the pages.
+    expect(paths.length).toBeGreaterThanOrEqual(10);
+    for (const expected of ["/metodoloji", "/sources", "/api/sources", "/api/v1/openapi.json", "/sitemap.xml"]) {
+      expect(paths, "llms.txt link list").toContain(expected);
+    }
+    // The templated registry and RSS links are skipped, not judged.
+    expect(paths.some((p) => p.includes("{"))).toBe(false);
+
+    for (const crawler of CRAWLERS) {
+      const rules = rulesFor(groups, crawler);
+      for (const path of paths) {
+        expect(isCrawlAllowed(rules, path), `${path} is disallowed for ${crawler} in /robots.txt`).toBe(true);
+      }
+    }
+  });
+
+  it("the keyed API and the rest of /api/ stay disallowed", async () => {
+    const { groups } = await loadFiles();
+    for (const crawler of CRAWLERS) {
+      const rules = rulesFor(groups, crawler);
+      for (const path of ["/api/v1/clusters", "/api/v1/clusters?limit=10", "/api/v1/", "/api/health", "/api/admin"]) {
+        expect(isCrawlAllowed(rules, path), `${path} must stay disallowed for ${crawler}`).toBe(false);
+      }
+      expect(isCrawlAllowed(rules, "/admin"), `/admin for ${crawler}`).toBe(false);
+      expect(isCrawlAllowed(rules, "/embed/x"), `/embed/x for ${crawler}`).toBe(false);
+    }
   });
 });

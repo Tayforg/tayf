@@ -775,7 +775,7 @@ After this deploy, Vercel's Cron Jobs page should list `/api/cron/headline` (eve
    ```
    Expect `HTTP/2 200` and `{"success":true}` (with the key unset, expect `503` and a body containing `"Newsletter is not configured"`, and no row inserted).
 4. **Exactly one row.** In Supabase SQL: `select count(*) from newsletter_subscribers where email = 'you@example.com';` — expect `1`.
-5. **Confirmation mail received.** A "Tayf bültenine kaydını onayla" email arrives in the inbox used above within a few seconds.
+5. **Confirmation mail received.** A "Tayf bültenine kaydınızı onaylayın" email arrives in the inbox used above within a few seconds.
 6. **Confirm link sets `confirmed_at`.** Click the link; it must redirect to `/?bulten=onaylandi` (not `/?bulten=gecersiz` — a mismatch there usually means `NEXT_PUBLIC_SITE_URL` doesn't match the domain you're testing against, so the link points at the wrong host). Then: `select confirmed_at from newsletter_subscribers where email = 'you@example.com';` — expect a non-null timestamp. (Before clicking, the same query must return exactly one row with `confirmed_at` null — that is the double opt-in precondition.)
 7. **Authenticated digest call succeeds, not a skip.**
    ```bash

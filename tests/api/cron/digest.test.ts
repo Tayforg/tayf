@@ -24,19 +24,21 @@ const supabaseFake = await vi.hoisted(async () => {
     subscribers: SubscriberFixture[];
     /** When set, a subscriber page whose range starts at or after this row fails. */
     errorFromRow: number | null;
+    /** When set, every last_sent_at UPDATE fails with it (W3). */
+    updateError: { message: string; code?: string } | null;
     /** One entry per subscriber SELECT (one per page), recorded from the builder state. */
     pages: Array<{
       range: { from: number; to: number } | null;
       order: Array<{ col: string; opts: unknown }>;
       not: Array<{ col: string; op: string; val: unknown }>;
     }>;
-  } = { subscribers: [], errorFromRow: null, pages: [] };
+  } = { subscribers: [], errorFromRow: null, updateError: null, pages: [] };
   const fake = helper.createSupabaseFake({
     tables: {
       // Range-aware like PostgREST: rows from..to inclusive of the ordered table.
       newsletter_subscribers: (s) => {
         // A last_sent_at UPDATE resolves through the same handler; only SELECTs are pages.
-        if (s.selectArgs.length === 0) return { data: state.subscribers, error: null };
+        if (s.selectArgs.length === 0) return { data: state.subscribers, error: state.updateError };
         state.pages.push({ range: s.range, order: s.order, not: s.not });
         if (state.errorFromRow !== null && (s.range?.from ?? 0) >= state.errorFromRow) {
           return { data: null, error: { message: "statement timeout" } };
@@ -136,6 +138,7 @@ beforeEach(async () => {
   delete process.env.CRON_SECRET;
   supabaseFake.state.subscribers = [];
   supabaseFake.state.errorFromRow = null;
+  supabaseFake.state.updateError = null;
   supabaseFake.state.pages = [];
   supabaseFake.fake.calls.mutations.length = 0;
   supabaseFake.fake.calls.rpc.length = 0;
@@ -240,7 +243,7 @@ describe("GET /api/cron/digest", () => {
     const res = await mod.GET(req("shhh"));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body).toEqual({ sent: 2, skipped: 0 });
+    expect(body).toEqual({ sent: 2, skipped: 0, substepErrors: 0 });
 
     // Only the two due subscribers were handed to sendBatch.
     const sentTo = (sendBatch as unknown as Mock).mock.calls[0]![0].map(
@@ -283,7 +286,7 @@ describe("GET /api/cron/digest", () => {
       const res = await mod.GET(req("shhh"));
 
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ sent: 1001, skipped: 0 });
+      expect(await res.json()).toEqual({ sent: 1001, skipped: 0, substepErrors: 0 });
 
       // Page 1 is full, so page 2 is read; the 1,001st subscriber is on it.
       expect(supabaseFake.state.pages.map((p) => p.range)).toEqual([
@@ -334,7 +337,7 @@ describe("GET /api/cron/digest", () => {
       const mod = await importRoute();
       const res = await mod.GET(req("shhh"));
 
-      expect(await res.json()).toEqual({ sent: 3, skipped: 0 });
+      expect(await res.json()).toEqual({ sent: 3, skipped: 0, substepErrors: 0 });
       expect(supabaseFake.state.pages).toHaveLength(1);
     });
 
@@ -405,7 +408,7 @@ describe("GET /api/cron/digest", () => {
     const mod = await importRoute();
     const res = await mod.GET(req("shhh"));
     const body = await res.json();
-    expect(body).toEqual({ sent: 1, skipped: 1 });
+    expect(body).toEqual({ sent: 1, skipped: 1, substepErrors: 0 });
 
     const updates = supabaseFake.fake.calls.update("newsletter_subscribers");
     expect(updates).toHaveLength(1);
@@ -645,7 +648,7 @@ describe("GET /api/cron/digest", () => {
       const mod = await importRoute();
       const res = await mod.GET(req("shhh"));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ sent: 1, skipped: 1 });
+      expect(await res.json()).toEqual({ sent: 1, skipped: 1, substepErrors: 0 });
 
       const loggedText = JSON.stringify([...errSpy.mock.calls, ...warnSpy.mock.calls]);
       expect(loggedText).not.toContain("@");
@@ -681,7 +684,7 @@ describe("GET /api/cron/digest", () => {
       const mod = await importRoute();
       const res = await mod.GET(req("shhh"));
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ sent: 1, skipped: 1 });
+      expect(await res.json()).toEqual({ sent: 1, skipped: 1, substepErrors: 0 });
 
       const loggedText = JSON.stringify(errSpy.mock.calls);
       expect(loggedText).not.toContain("fails@example.com");
@@ -728,7 +731,7 @@ describe("GET /api/cron/digest", () => {
 
       const mod = await importRoute();
       const res = await mod.GET(req("shhh"));
-      expect(await res.json()).toEqual({ sent: 1, skipped: 0 });
+      expect(await res.json()).toEqual({ sent: 1, skipped: 0, substepErrors: 0 });
 
       expect(warnSpy).not.toHaveBeenCalled();
     });
@@ -755,7 +758,7 @@ describe("GET /api/cron/digest", () => {
 
       const mod = await importRoute();
       const res = await mod.GET(req("shhh"));
-      expect(await res.json()).toEqual({ sent: 1, skipped: 1 });
+      expect(await res.json()).toEqual({ sent: 1, skipped: 1, substepErrors: 0 });
 
       expect(captureServerException).toHaveBeenCalledTimes(1);
       const [, context] = (captureServerException as unknown as Mock).mock.calls[0]!;
@@ -778,9 +781,139 @@ describe("GET /api/cron/digest", () => {
 
       const mod = await importRoute();
       const res = await mod.GET(req("shhh"));
-      expect(await res.json()).toEqual({ sent: 1, skipped: 0 });
+      expect(await res.json()).toEqual({ sent: 1, skipped: 0, substepErrors: 0 });
 
       expect(captureServerException).not.toHaveBeenCalled();
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3: a Supabase failure that the digest swallows used to leave the run at 200 with a
+// plain `{ sent, skipped }`, so a tick that mailed subscribers but could not stamp
+// last_sent_at (they would be mailed again next tick) looked healthy. The route now
+// counts it (`updateError`) and a failed rights-gated summary member lookup
+// (`memberLookupFailed`: the summaries are hidden, fail closed, but the run is
+// degraded), reports `substepErrors` in the final body, and sets the internal header;
+// withCronOutcome records 599 and strips it. A Resend send that fails is a vendor
+// failure and is not counted.
+// ---------------------------------------------------------------------------
+describe("GET /api/cron/digest: sub-step failures are recorded as 599, answered as 200 (W3)", () => {
+  const SUBSTEP_HEADER = "x-cron-substep-errors";
+  let errSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.CRON_SECRET = "shhh";
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "ok@example.com", unsubscribe_token: "t1", last_sent_at: null },
+    ];
+  });
+
+  afterEach(() => {
+    errSpy.mockRestore();
+  });
+
+  async function sendsOk() {
+    const { sendBatch } = await import("@/lib/email/resend");
+    (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+      list.map(() => ({ ok: true, id: "resend-id" })),
+    );
+  }
+
+  /** Runs the pending after() callbacks once, the way Next does once the response is on its way. */
+  const flush = () => Promise.all(afterCallbacks.splice(0).map((cb) => cb()));
+  /** Every `ops_cron_route_run_record` call (withCronOutcome's row for ops_health_report row 15). */
+  const outcomeCalls = () => supabaseFake.fake.calls.rpc.filter((c) => c.name === "ops_cron_route_run_record");
+
+  async function runRecorded() {
+    const mod = await importRoute();
+    const res = await mod.GET(req("shhh"));
+    const body = await res.json();
+    await flush();
+    return { res, body };
+  }
+
+  it("a clean run records 200 and reports substepErrors 0", async () => {
+    await sendsOk();
+    const { res, body } = await runRecorded();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(body).toEqual({ sent: 1, skipped: 0, substepErrors: 0 });
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "digest", p_status: 200 });
+  });
+
+  it("a failed last_sent_at update records 599 and answers 200 without the header", async () => {
+    await sendsOk();
+    supabaseFake.state.updateError = { message: "update boom", code: "57014" };
+    const { res, body } = await runRecorded();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(body).toEqual({ sent: 1, skipped: 0, substepErrors: 1 });
+    expect(body.substepErrors).toBeGreaterThanOrEqual(1);
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "digest", p_status: 599 });
+  });
+
+  it("counts one failure per subscriber whose last_sent_at could not be stamped", async () => {
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "a@example.com", unsubscribe_token: "t1", last_sent_at: null },
+      { id: "s2", email: "b@example.com", unsubscribe_token: "t2", last_sent_at: null },
+      { id: "s3", email: "c@example.com", unsubscribe_token: "t3", last_sent_at: null },
+    ];
+    await sendsOk();
+    supabaseFake.state.updateError = { message: "update boom" };
+    const { body } = await runRecorded();
+    expect(body).toEqual({ sent: 3, skipped: 0, substepErrors: 3 });
+  });
+
+  it("a failed summary member lookup records 599: the summaries stay hidden (fail closed) and the mail still goes out", async () => {
+    await sendsOk();
+    const { getRssSummaryMembers } = await import("@/lib/clusters/rss-summary-attribution");
+    (getRssSummaryMembers as unknown as Mock).mockResolvedValue({ members: {}, lookupFailed: true });
+    const { sendBatch } = await import("@/lib/email/resend");
+
+    const { res, body } = await runRecorded();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(body).toEqual({ sent: 1, skipped: 0, substepErrors: 1 });
+    const html = (sendBatch as unknown as Mock).mock.calls[0]![0][0].html as string;
+    expect(html).not.toContain("Test summary");
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "digest", p_status: 599 });
+  });
+
+  it("a lookup failure and a failed stamp add up", async () => {
+    await sendsOk();
+    const { getRssSummaryMembers } = await import("@/lib/clusters/rss-summary-attribution");
+    (getRssSummaryMembers as unknown as Mock).mockResolvedValue({ members: {}, lookupFailed: true });
+    supabaseFake.state.updateError = { message: "update boom" };
+    const { body } = await runRecorded();
+    expect(body.substepErrors).toBe(2);
+  });
+
+  it("a send that fails at Resend (a vendor failure) is not counted: 200 recorded", async () => {
+    const { sendBatch } = await import("@/lib/email/resend");
+    (sendBatch as unknown as Mock).mockImplementation(async (list: Array<{ to: string }>) =>
+      list.map(() => ({ ok: false, error: "Resend 500" })),
+    );
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { body } = await runRecorded();
+    warnSpy.mockRestore();
+
+    expect(body).toEqual({ sent: 0, skipped: 1, substepErrors: 0 });
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "digest", p_status: 200 });
+  });
+
+  it("the 'nobody is due' body is the plain { sent: 0, skipped: 0 } and records 200", async () => {
+    supabaseFake.state.subscribers = [
+      { id: "s1", email: "recent@example.com", unsubscribe_token: "t1", last_sent_at: new Date().toISOString() },
+    ];
+    const { body } = await runRecorded();
+    expect(body).toEqual({ sent: 0, skipped: 0 });
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "digest", p_status: 200 });
   });
 });

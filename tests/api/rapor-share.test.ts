@@ -322,7 +322,7 @@ describe("POST /api/admin/rapor/share", () => {
     const res = await POST(shareRequest({ cluster_id: CLUSTER_ID }, ip));
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
-    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     const body = await res.json();
     expect(typeof body.details?.retryAfterMs).toBe("number");
   });
@@ -411,5 +411,72 @@ describe("GET /rapor/[token]/markdown", () => {
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3: both admin rapor routes answer with `Cache-Control: private, no-store`. The
+// share answer carries a live token and URL that opens the report without a login;
+// a shared cache or the browser history must not keep it. The wrapper
+// (src/lib/api/admin-no-store.ts) sets the header on every path.
+// ---------------------------------------------------------------------------
+describe("Cache-Control: private, no-store on the admin rapor answers (W3)", () => {
+  const NO_STORE = "private, no-store";
+
+  it("share: the 401 carries it", async () => {
+    __adminAuthed = false;
+    const { POST } = await import("@/app/api/admin/rapor/share/route");
+    const res = await POST(shareRequest({ cluster_id: CLUSTER_ID }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+  });
+
+  it("share: the 400 and the 404 carry it", async () => {
+    const { POST } = await import("@/app/api/admin/rapor/share/route");
+    const bad = await POST(shareRequest({ cluster_id: "not-a-uuid" }));
+    expect(bad.status).toBe(400);
+    expect(bad.headers.get("Cache-Control")).toBe(NO_STORE);
+
+    const missing = await POST(shareRequest({ cluster_id: UNKNOWN_CLUSTER_ID }));
+    expect(missing.status).toBe(404);
+    expect(missing.headers.get("Cache-Control")).toBe(NO_STORE);
+  });
+
+  it("share: the 201 with the live token carries it", async () => {
+    const { POST } = await import("@/app/api/admin/rapor/share/route");
+    const res = await POST(shareRequest({ cluster_id: CLUSTER_ID }));
+    expect(res.status).toBe(201);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect((await res.json()).token).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("share: the 429 carries private, no-store (not the bare no-store) and keeps Retry-After", async () => {
+    const { POST } = await import("@/app/api/admin/rapor/share/route");
+    const ip = nextIp();
+    let last: Response | null = null;
+    for (let i = 0; i < 21; i++) {
+      last = await POST(shareRequest({ cluster_id: CLUSTER_ID }, ip));
+    }
+    expect(last!.status).toBe(429);
+    expect(last!.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect(last!.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+  });
+
+  it("revoke: the 401, the 400 and the 200 carry it", async () => {
+    const { POST } = await import("@/app/api/admin/rapor/revoke/route");
+
+    __adminAuthed = false;
+    const unauthed = await POST(revokeRequest({ token: LIVE_TOKEN }));
+    expect(unauthed.status).toBe(401);
+    expect(unauthed.headers.get("Cache-Control")).toBe(NO_STORE);
+
+    __adminAuthed = true;
+    const malformed = await POST(revokeRequest({ token: "not-a-token" }));
+    expect(malformed.status).toBe(400);
+    expect(malformed.headers.get("Cache-Control")).toBe(NO_STORE);
+
+    const ok = await POST(revokeRequest({ token: LIVE_TOKEN }));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("Cache-Control")).toBe(NO_STORE);
   });
 });

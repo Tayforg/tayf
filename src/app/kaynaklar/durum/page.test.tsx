@@ -51,8 +51,11 @@ vi.mock("@/lib/supabase/server", () => ({
 import KaynakDurumPage, {
   KaynakDurumBody,
   ItemsPerDayCell,
+  metadata,
 } from "./page";
+import { PageHero } from "@/components/ui/page-hero";
 import { SOURCE_KIND_META } from "@/lib/sources/kind";
+import { SILENCE_REASON_LABEL } from "@/lib/sources/silence-reason";
 import { ZONE_META } from "@/lib/bias/config";
 import {
   toFeedStatusRows,
@@ -123,6 +126,35 @@ describe("KaynakDurumPage (default export)", () => {
   });
 });
 
+describe("KaynakDurumPage metadata (h24-pages-3)", () => {
+  it("the <title>, og:title and twitter:title read 'Kaynak durumu' (sentence case)", () => {
+    expect(metadata.title).toBe("Kaynak durumu");
+    expect(metadata.openGraph?.title).toBe("Kaynak durumu — Tayf");
+    expect(metadata.twitter?.title).toBe("Kaynak durumu — Tayf");
+  });
+
+  it("the H1 (PageHero title) agrees with the <title>", async () => {
+    fixture.data = [rawRow()];
+    fixture.error = null;
+    const tree = await KaynakDurumPage();
+
+    function heroTitles(node: unknown, out: unknown[] = []): unknown[] {
+      if (Array.isArray(node)) {
+        for (const child of node) heroTitles(child, out);
+        return out;
+      }
+      if (node && typeof node === "object") {
+        const el = node as { type?: unknown; props?: Record<string, unknown> };
+        if (el.type === PageHero) out.push(el.props?.title);
+        if (el.props?.children !== undefined) heroTitles(el.props.children, out);
+      }
+      return out;
+    }
+
+    expect(heroTitles(tree)).toEqual(["Kaynak durumu"]);
+  });
+});
+
 describe("KaynakDurumBody", () => {
   function shapedRows(raw: SourceFeedStatusRawRow[]) {
     return toFeedStatusRows(raw, NOW);
@@ -181,6 +213,37 @@ describe("KaynakDurumBody", () => {
     expect(region).not.toBeNull();
     expect(region!.props.tabIndex).toBe(0);
     expect(region!.props["aria-labelledby"]).toBe("durum-tablo");
+  });
+
+  it("the focusable scroll region shows a keyboard focus ring", () => {
+    const rows = shapedRows([rawRow()]);
+    const tree = KaynakDurumBody({
+      rows,
+      itemsPerDayPromise: Promise.resolve({}),
+    });
+
+    function regionClass(node: unknown): string | null {
+      if (Array.isArray(node)) {
+        for (const child of node) {
+          const found = regionClass(child);
+          if (found !== null) return found;
+        }
+        return null;
+      }
+      if (node && typeof node === "object") {
+        const el = node as { props?: Record<string, unknown> };
+        if (el.props?.role === "region") return String(el.props.className ?? "");
+        if (el.props?.children !== undefined) return regionClass(el.props.children);
+      }
+      return null;
+    }
+
+    const className = regionClass(tree);
+    expect(className).not.toBeNull();
+    const classes = (className ?? "").split(" ");
+    expect(classes).toContain("focus-visible:outline-none");
+    expect(classes).toContain("focus-visible:ring-2");
+    expect(classes).toContain("focus-visible:ring-ring");
   });
 
   it("A-M1: renders an explicit empty state instead of a headers-only table when rows is []", () => {
@@ -320,6 +383,43 @@ describe("KaynakDurumBody silence reasons [migration 119]", () => {
     expect(textOf(rowOf(tree, "donmus"))).not.toMatch(/erişim yok|sessiz/);
     expect(textOf(rowOf(tree, "engelli"))).not.toMatch(/akış donmuş|sessiz/);
     expect(textOf(rowOf(tree, "sakin"))).not.toMatch(/akış donmuş|erişim yok/);
+  });
+
+  it("a row whose fetch_last_status is 0 shows a dash in the HTTP cell and the erişim yok label", () => {
+    // 0 means "no HTTP answer" (DNS failure, timeout), not an HTTP status: a
+    // bare "0" in the "Son HTTP durumu" column read as a status code.
+    const tree = body([
+      rawRow({
+        slug: "cevapsiz",
+        name: "Cevapsız Haber",
+        latest: stale,
+        fetch_last_status: 0,
+      }),
+    ]);
+    const cells = elements(rowOf(tree, "cevapsiz")).filter((e) => e.type === "td");
+    const cellTexts = cells.map((cell) => textOf(cell));
+
+    // columns: Kaynak, Sessiz, Tür, Bölge, Son haber, Son HTTP durumu, 7 gün
+    expect(cellTexts[1]).toContain(SILENCE_REASON_LABEL.erisim_yok);
+    expect(cellTexts[1]).toContain("erişim yok");
+    expect(cellTexts[5]).toBe("—");
+    expect(cellTexts[5]).not.toContain("0");
+  });
+
+  it("a row with a real error status still shows its digits in the HTTP cell", () => {
+    const tree = body([
+      rawRow({ slug: "engelli", name: "Engelli Haber", latest: stale, fetch_last_status: 403 }),
+    ]);
+    const cells = elements(rowOf(tree, "engelli")).filter((e) => e.type === "td");
+    expect(textOf(cells[5])).toBe("403");
+  });
+
+  it("a row that has never been fetched shows a dash in the HTTP cell", () => {
+    const tree = body([
+      rawRow({ slug: "yeni", name: "Yeni Haber", fetch_last_status: null }),
+    ]);
+    const cells = elements(rowOf(tree, "yeni")).filter((e) => e.type === "td");
+    expect(textOf(cells[5])).toBe("—");
   });
 
   it("a row that is not silent shows a dash and no label", () => {

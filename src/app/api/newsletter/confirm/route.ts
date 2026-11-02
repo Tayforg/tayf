@@ -45,9 +45,9 @@ function redirectTo(flag: "onaylandi" | "gecersiz", status: 302 | 303): NextResp
 
 function confirmPageHtml(token: string): string {
   return interstitialPage({
-    title: "Bülten aboneliğini onayla — Tayf",
-    heading: "Tayf bültenine aboneliğini onaylıyor musun?",
-    body: "Onayladığında haftalık bülteni bu adrese göndermeye başlayacağız.",
+    title: "Bülten aboneliğinizi onaylayın — Tayf",
+    heading: "Tayf bültenine aboneliğinizi onaylıyor musunuz?",
+    body: "Onayladığınızda haftalık bülteni bu adrese göndermeye başlayacağız.",
     action: "/api/newsletter/confirm",
     token,
     submitLabel: "Evet, aboneliğimi onayla",

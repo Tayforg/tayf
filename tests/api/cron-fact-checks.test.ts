@@ -9,9 +9,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // + sentry.
 // ---------------------------------------------------------------------------
 
+// withCronOutcome schedules its outcome row with after(); outside a request scope it throws.
+// Capture the callbacks instead, so a test can run them and read the recorded status.
+const afterCallbacks = vi.hoisted(() => [] as Array<() => unknown>);
+
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
-  return { ...actual, connection: async () => {} };
+  return {
+    ...actual,
+    connection: async () => {},
+    after: (callback: () => unknown) => {
+      afterCallbacks.push(callback);
+    },
+  };
 });
 
 const { revalidateTagMock } = vi.hoisted(() => ({ revalidateTagMock: vi.fn() }));
@@ -54,8 +64,13 @@ const fixture = vi.hoisted(() => ({
   factChecksData: [] as unknown[],
   factChecksUpsertError: null as { message: string } | null,
   clustersData: [] as unknown[],
+  clustersError: null as { message: string } | null,
   clusterArticlesData: [] as unknown[],
+  clusterArticlesError: null as { message: string } | null,
   existingLinksData: [] as unknown[],
+  existingLinksError: null as { message: string } | null,
+  promoteError: null as { message: string } | null,
+  insertError: null as { message: string } | null,
   lastTextSearch: null as { col: string; query: string; opts: unknown } | null,
   lastFactChecksUpsertPatch: null as unknown,
 }));
@@ -73,12 +88,17 @@ const supabaseFake = await vi.hoisted(async () => {
       },
       clusters: (state) => {
         fixture.lastTextSearch = state.textSearch[0] ?? null;
-        return { data: fixture.clustersData, error: null };
+        return { data: fixture.clustersData, error: fixture.clustersError };
       },
-      cluster_articles: () => ({ data: fixture.clusterArticlesData, error: null }),
+      cluster_articles: () => ({ data: fixture.clusterArticlesData, error: fixture.clusterArticlesError }),
       cluster_fact_checks: (state) => {
-        if (state.mutation) return { data: null, error: null };
-        return { data: fixture.existingLinksData, error: null };
+        // A read always calls select(); the two writes never do. Of the writes, the
+        // promote update filters on its key (eq) and the new-links upsert has no filter.
+        // (The helper clears `state.mutation` before it resolves a fixture.)
+        if (state.selectArgs.length > 0) {
+          return { data: fixture.existingLinksData, error: fixture.existingLinksError };
+        }
+        return { data: null, error: state.eq.length > 0 ? fixture.promoteError : fixture.insertError };
       },
     },
   });
@@ -120,12 +140,18 @@ beforeEach(() => {
   fixture.factChecksData = [];
   fixture.factChecksUpsertError = null;
   fixture.clustersData = [];
+  fixture.clustersError = null;
   fixture.clusterArticlesData = [];
+  fixture.clusterArticlesError = null;
   fixture.existingLinksData = [];
+  fixture.existingLinksError = null;
+  fixture.promoteError = null;
+  fixture.insertError = null;
   fixture.lastTextSearch = null;
   fixture.lastFactChecksUpsertPatch = null;
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
+  afterCallbacks.length = 0;
   revalidateTagMock.mockClear();
   captureServerExceptionMock.mockClear();
 
@@ -151,6 +177,39 @@ afterEach(() => {
 async function importRoute() {
   return await import("@/app/api/cron/fact-checks/route");
 }
+
+// One fact-check that matches one cluster: the fixtures of the link-writing tests below and
+// of the sub-step failure tests (W3) at the end of this file.
+const FACT_CHECK_ROW = {
+  id: "fc-1",
+  publisher: "teyit",
+  url: "https://teyit.org/analiz/mekke-iha",
+  title: "Video Mekke'ye yapılan İHA saldırısını mı gösteriyor?",
+  published_at: new Date().toISOString(),
+};
+
+const CLUSTER_ROW = {
+  id: "cluster-1",
+  title_tr: "Mekke'ye alçak saldırı girişimi: İçişleri Bakanı Çiftçi'den tepki",
+  title_tr_neutral: null,
+};
+
+const MEMBER_ROWS = [
+  {
+    cluster_id: "cluster-1",
+    articles: {
+      title:
+        "AK Parti Sözcüsü Çelik, Mekke çevresinde önlenen Husilerin İHA saldırısını lanetledi",
+    },
+  },
+  {
+    cluster_id: "cluster-1",
+    articles: {
+      title:
+        "İletişim Başkanı Duran, Mekke çevresinde önlenen Husilerin İHA saldırısını lanetledi",
+    },
+  },
+];
 
 describe("GET /api/cron/fact-checks", () => {
   it("returns 503 without CRON_SECRET", async () => {
@@ -241,37 +300,6 @@ describe("GET /api/cron/fact-checks", () => {
   });
 
   describe("matching + link writes", () => {
-    const FACT_CHECK_ROW = {
-      id: "fc-1",
-      publisher: "teyit",
-      url: "https://teyit.org/analiz/mekke-iha",
-      title: "Video Mekke'ye yapılan İHA saldırısını mı gösteriyor?",
-      published_at: new Date().toISOString(),
-    };
-
-    const CLUSTER_ROW = {
-      id: "cluster-1",
-      title_tr: "Mekke'ye alçak saldırı girişimi: İçişleri Bakanı Çiftçi'den tepki",
-      title_tr_neutral: null,
-    };
-
-    const MEMBER_ROWS = [
-      {
-        cluster_id: "cluster-1",
-        articles: {
-          title:
-            "AK Parti Sözcüsü Çelik, Mekke çevresinde önlenen Husilerin İHA saldırısını lanetledi",
-        },
-      },
-      {
-        cluster_id: "cluster-1",
-        articles: {
-          title:
-            "İletişim Başkanı Duran, Mekke çevresinde önlenen Husilerin İHA saldırısını lanetledi",
-        },
-      },
-    ];
-
     beforeEach(() => {
       fixture.factChecksData = [FACT_CHECK_ROW];
       fixture.clustersData = [CLUSTER_ROW];
@@ -473,8 +501,9 @@ describe("feed failure reporting (h10-silent-3)", () => {
     expect(body.feeds.dogrulukpayi).toEqual({ status: "ok", items: 0 });
     expect(body.feeds.malumatfurus).toEqual({ status: "ok", items: 0 });
     expect(Object.keys(body).sort()).toEqual(
-      ["feeds", "matched", "published", "shadow", "success", "timestamp", "upserted"].sort(),
+      ["feeds", "matched", "published", "shadow", "substepErrors", "success", "timestamp", "upserted"].sort(),
     );
+    expect(body.substepErrors).toBe(0);
     expect(body.upserted).toBe(0);
   });
 
@@ -630,5 +659,115 @@ describe("feed failure reporting (h10-silent-3)", () => {
       expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
       expect(body.feeds.teyit).toEqual({ status: "error", items: 0, error: "rejected" });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3: a database step that fails inside the per-item loop is logged, captured and
+// skipped, and the run answers 200 with `success: true`, so a run that lost its
+// link writes looked healthy. The route now counts each swallowed Supabase failure
+// (clusterErr, memberErr, existingErr, promoteErr, insertErr) in `substepErrors`,
+// answers the same 200 with `success: substepErrors === 0` and the count in the
+// body, and sets the internal header; withCronOutcome records 599 and strips it.
+// A feed that fails to fetch is a vendor failure and stays uncounted.
+// ---------------------------------------------------------------------------
+describe("sub-step failures are recorded as 599, answered as 200 (W3)", () => {
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+  const SUBSTEP_HEADER = "x-cron-substep-errors";
+
+  beforeEach(() => {
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fixture.factChecksData = [FACT_CHECK_ROW];
+    fixture.clustersData = [CLUSTER_ROW];
+    fixture.clusterArticlesData = MEMBER_ROWS;
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+  });
+
+  /** Runs the after() callbacks, the way Next does once the response is on its way. */
+  const flush = () => Promise.all(afterCallbacks.map((cb) => cb()));
+  /** Every `ops_cron_route_run_record` call (withCronOutcome's row for ops_health_report row 15). */
+  const outcomeCalls = () => supabaseFake.calls.rpc.filter((c) => c.name === "ops_cron_route_run_record");
+
+  async function runCron() {
+    const { GET } = await importRoute();
+    const res = await GET(
+      new Request("http://example.com/api/cron/fact-checks", {
+        headers: { Authorization: "Bearer shhh" },
+      }),
+    );
+    const body = await res.json();
+    await flush();
+    return { res, body };
+  }
+
+  it("a clean run records 200, reports substepErrors 0 and success true", async () => {
+    const { res, body } = await runCron();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(body.matched).toBeGreaterThanOrEqual(1);
+    expect(body.success).toBe(true);
+    expect(body.substepErrors).toBe(0);
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "fact-checks", p_status: 200 });
+  });
+
+  const failing: Array<{ name: string; arrange: () => void }> = [
+    { name: "the cluster search (clusterErr)", arrange: () => { fixture.clustersError = { message: "search boom" }; } },
+    { name: "the member titles fetch (memberErr)", arrange: () => { fixture.clusterArticlesError = { message: "member boom" }; } },
+    { name: "the existing links read (existingErr)", arrange: () => { fixture.existingLinksError = { message: "existing boom" }; } },
+    {
+      name: "the shadow-row promote update (promoteErr)",
+      arrange: () => {
+        fixture.existingLinksData = [
+          { cluster_id: "cluster-1", fact_check_id: "fc-1", is_published: false, decided_by: "auto" },
+        ];
+        fixture.promoteError = { message: "promote boom" };
+      },
+    },
+    { name: "the new links upsert (insertErr)", arrange: () => { fixture.insertError = { message: "insert boom" }; } },
+  ];
+
+  it.each(failing)("$name failing records 599, answers 200 without the header and reports success false", async ({ arrange }) => {
+    arrange();
+    const { res, body } = await runCron();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(body.substepErrors).toBeGreaterThanOrEqual(1);
+    expect(body.success).toBe(false);
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "fact-checks", p_status: 599 });
+  });
+
+  it("counts one failure for one failed step", async () => {
+    fixture.existingLinksError = { message: "existing boom" };
+    const { body } = await runCron();
+    expect(body.substepErrors).toBe(1);
+  });
+
+  it("counts a failure for every fact-check that hits the failing step (two recent items, two failures)", async () => {
+    fixture.clustersError = { message: "search boom" };
+    fixture.factChecksData = [FACT_CHECK_ROW, { ...FACT_CHECK_ROW, id: "fc-2", url: "https://teyit.org/analiz/second" }];
+    const { body } = await runCron();
+    expect(body.substepErrors).toBe(2);
+    expect(body.success).toBe(false);
+  });
+
+  it("a failing feed alone (a vendor failure) stays uncounted: 200 recorded, success true", async () => {
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      return xmlResponse("server error", { status: 500, url });
+    });
+    const { res, body } = await runCron();
+
+    expect(res.status).toBe(200);
+    expect(Object.values(body.feeds).every((f) => (f as { status: string }).status === "error")).toBe(true);
+    expect(body.success).toBe(true);
+    expect(body.substepErrors).toBe(0);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "fact-checks", p_status: 200 });
   });
 });

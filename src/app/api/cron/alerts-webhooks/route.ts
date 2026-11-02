@@ -12,7 +12,7 @@ import {
 } from "@/lib/alerts/webhook-deliver";
 import { buildWebhookHeaders, WEBHOOK_EVENT } from "@/lib/alerts/webhook-sign";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
+import { substepErrorsInit, withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { apiServerError, withApiErrors } from "@/lib/api/errors";
 import { getZoneFeedHealth } from "@/lib/clusters/feed-health";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
@@ -29,6 +29,15 @@ import { createServerClient } from "@/lib/supabase/server";
 // stored once, so a retry resends identical bytes.
 //
 // Logging: counts only. Never a URL path, a secret, a payload or a header.
+//
+// Sub-step failures (W3): a Supabase read, write or rpc that fails after the claim
+// is logged and skipped, and the run still answers 200. Each such swallowed
+// database failure (freshError, upsertError, exhaustedError, extraError,
+// updateError, hookUpdateError) is counted in `substepErrors`; the body carries the
+// count, `ok` is `substepErrors === 0`, and the internal x-cron-substep-errors
+// header makes withCronOutcome record 599 (src/lib/ops/cron-route-outcome.ts). The
+// claim rpc error stays a real 500, and a webhook POST that fails (the subscriber's
+// endpoint) is a vendor failure and is NOT counted.
 
 export const maxDuration = 60;
 
@@ -127,6 +136,8 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
   }
 
   const supabase = createServerClient();
+  // Swallowed database failures of this run (see "Sub-step failures" above).
+  let substepErrors = 0;
 
   // Webhook rows are read WITHOUT url or secret here; the claim RPC hands
   // those out per delivery, so they never sit in this function's scope longer.
@@ -183,6 +194,7 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
       .returns<FreshRow[]>();
     if (freshError) {
       console.warn("[alerts-webhooks] fresh blindspot re-read failed; skipping blindspots this tick");
+      substepErrors++;
     } else {
       for (const r of freshRows ?? []) fresh.set(r.id, r);
     }
@@ -218,6 +230,7 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
       .select("id");
     if (upsertError) {
       console.warn("[alerts-webhooks] enqueue failed for one webhook");
+      substepErrors++;
       continue;
     }
     enqueued += Array.isArray(inserted) ? inserted.length : 0;
@@ -240,7 +253,10 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
       .update({ status: "failed", last_error: "attempts_exceeded" })
       .eq("id", Number(row.id))
       .eq("status", "sending");
-    if (exhaustedError) console.warn("[alerts-webhooks] could not fail an exhausted delivery");
+    if (exhaustedError) {
+      console.warn("[alerts-webhooks] could not fail an exhausted delivery");
+      substepErrors++;
+    }
   }
 
   const outcomes: Outcome[] = await mapConcurrent(claimed, CONCURRENCY, async (row) => {
@@ -261,10 +277,15 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
   for (const h of hooks) streaks.set(Number(h.key_id), h.fail_streak ?? 0);
   const unknownKeys = [...new Set(claimed.map((r) => Number(r.key_id)))].filter((k) => !streaks.has(k));
   if (unknownKeys.length > 0) {
-    const { data: extra } = await supabase
+    const { data: extra, error: extraError } = await supabase
       .from("api_key_webhooks")
       .select("key_id, fail_streak")
       .in("key_id", unknownKeys);
+    if (extraError) {
+      // The streaks stay at 0 for these keys: a failed delivery then restarts their count.
+      console.warn("[alerts-webhooks] could not read the fail streak of an unlisted webhook");
+      substepErrors++;
+    }
     for (const r of (extra ?? []) as Array<{ key_id: number | string; fail_streak: number | null }>) {
       streaks.set(Number(r.key_id), r.fail_streak ?? 0);
     }
@@ -332,7 +353,10 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
       .update(deliveryPatch)
       .eq("id", Number(row.id))
       .eq("status", "sending");
-    if (updateError) console.warn("[alerts-webhooks] could not record a delivery outcome");
+    if (updateError) {
+      console.warn("[alerts-webhooks] could not record a delivery outcome");
+      substepErrors++;
+    }
   }
 
   for (const [keyId, patch] of keyPatches) {
@@ -340,11 +364,17 @@ export const GET = withCronOutcome("alerts-webhooks", withApiErrors(async (reque
       .from("api_key_webhooks")
       .update(patch)
       .eq("key_id", keyId);
-    if (hookUpdateError) console.warn("[alerts-webhooks] could not record webhook health");
+    if (hookUpdateError) {
+      console.warn("[alerts-webhooks] could not record webhook health");
+      substepErrors++;
+    }
   }
 
   console.log(
-    `[alerts-webhooks] enqueued=${enqueued} claimed=${claimedAll.length} delivered=${delivered} retried=${retried} failed=${failed}`,
+    `[alerts-webhooks] enqueued=${enqueued} claimed=${claimedAll.length} delivered=${delivered} retried=${retried} failed=${failed} substepErrors=${substepErrors}`,
   );
-  return NextResponse.json({ ok: true, enqueued, delivered, retried, failed });
+  return NextResponse.json(
+    { ok: substepErrors === 0, enqueued, delivered, retried, failed, substepErrors },
+    substepErrorsInit(substepErrors),
+  );
 }));

@@ -1,7 +1,7 @@
 import { connection, NextResponse } from "next/server";
 
 import { requireCronBearer } from "@/lib/api/bearer";
-import { withCronOutcome } from "@/lib/ops/cron-route-outcome";
+import { substepErrorsInit, withCronOutcome } from "@/lib/ops/cron-route-outcome";
 import { withApiErrors } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { getBlindspots, type BlindspotBundle } from "@/lib/clusters/blindspots-query";
@@ -38,6 +38,17 @@ import { createBlueskySession, postToBluesky, type BlueskySession } from "@/lib/
 // before claiming (never trusts the 5-minute-cached bundle alone for a
 // public blindspot claim), and never posts without a non-null claim id
 // from `social_post_claim` (migration 079).
+//
+// Sub-step failures (W3): a Supabase read or rpc that fails is logged and the run
+// still answers 200. Each such swallowed database failure is counted in
+// `substepErrors`: the fresh re-read (`freshError`; blindspots then fail closed on
+// the missing row), the ledger read (`ledgerError`; FAIL CLOSED, see below), the
+// claim rpc (`claimError`) and every `social_post_finish` rpc (`finishError`, one
+// local helper in runChannel). The body carries the count, `ok` is
+// `substepErrors === 0`, and the internal x-cron-substep-errors header makes
+// withCronOutcome record 599 (src/lib/ops/cron-route-outcome.ts). A Telegram or
+// Bluesky post that fails is a vendor failure and a claim that returns no id (daily
+// cap, already claimed) is normal; neither is counted.
 
 export const maxDuration = 60;
 
@@ -195,11 +206,27 @@ async function runChannel(
   supabase: ReturnType<typeof createServerClient>,
   telegramCfg: TelegramConfig | null,
   blueskyCfg: BlueskyConfig | null,
-): Promise<{ posted: number; skipped: Record<string, number> }> {
+): Promise<{ posted: number; skipped: Record<string, number>; substepErrors: number }> {
   let posted = 0;
+  let substepErrors = 0;
   const skipped: Record<string, number> = {};
   const bump = (reason: string) => {
     skipped[reason] = (skipped[reason] ?? 0) + 1;
+  };
+
+  // The one place `social_post_finish` is called: a failed write leaves the ledger
+  // row stuck on 'claimed', which is a swallowed database failure to report.
+  const finish = async (args: {
+    p_id: unknown;
+    p_status: "posted" | "failed";
+    p_external_id: string | null;
+    p_error: string | null;
+  }): Promise<void> => {
+    const { error: finishError } = await supabase.rpc("social_post_finish", args);
+    if (finishError) {
+      console.warn("[social] could not record a post outcome");
+      substepErrors++;
+    }
   };
 
   let blueskySession: BlueskySession | null = null;
@@ -215,7 +242,15 @@ async function runChannel(
       p_daily_cap: SOCIAL_DAILY_CAP,
     });
 
-    if (claimError || claimId === null || claimId === undefined) {
+    if (claimError) {
+      console.warn("[social] claim rpc failed");
+      substepErrors++;
+      bump("claim_failed");
+      continue;
+    }
+
+    // No error and no id: the daily cap is reached or another run holds the claim.
+    if (claimId === null || claimId === undefined) {
       bump("claim_failed");
       continue;
     }
@@ -224,7 +259,7 @@ async function runChannel(
       const result = await postToTelegram(telegramCfg, { text: post.text, url: post.postUrl });
       if (result.ok) {
         posted++;
-        await supabase.rpc("social_post_finish", {
+        await finish({
           p_id: claimId,
           p_status: "posted",
           p_external_id: result.externalId,
@@ -232,7 +267,7 @@ async function runChannel(
         });
       } else {
         bump("post_failed");
-        await supabase.rpc("social_post_finish", {
+        await finish({
           p_id: claimId,
           p_status: "failed",
           p_external_id: null,
@@ -253,7 +288,7 @@ async function runChannel(
         });
         if (result.ok) {
           posted++;
-          await supabase.rpc("social_post_finish", {
+          await finish({
             p_id: claimId,
             p_status: "posted",
             p_external_id: result.externalId,
@@ -261,7 +296,7 @@ async function runChannel(
           });
         } else {
           bump("post_failed");
-          await supabase.rpc("social_post_finish", {
+          await finish({
             p_id: claimId,
             p_status: "failed",
             p_external_id: null,
@@ -271,7 +306,7 @@ async function runChannel(
       } catch (err) {
         bump("post_failed");
         const message = err instanceof Error ? err.message : String(err);
-        await supabase.rpc("social_post_finish", {
+        await finish({
           p_id: claimId,
           p_status: "failed",
           p_external_id: null,
@@ -283,7 +318,7 @@ async function runChannel(
     }
   }
 
-  return { posted, skipped };
+  return { posted, skipped, substepErrors };
 }
 
 // withCronOutcome is the outermost wrapper: each authenticated run is recorded in
@@ -342,6 +377,8 @@ export const GET = withCronOutcome("social", withApiErrors(async (request: Reque
 
   const supabase = createServerClient();
   const nowMs = Date.now();
+  // Swallowed database failures of this run (see "Sub-step failures" above).
+  let substepErrors = 0;
 
   const candidateIds = Array.from(
     new Set([
@@ -350,17 +387,32 @@ export const GET = withCronOutcome("social", withApiErrors(async (request: Reque
     ]),
   );
 
-  const { data: freshRows } = candidateIds.length
+  const { data: freshRows, error: freshError } = candidateIds.length
     ? await supabase.from("clusters").select(FRESH_SELECT).in("id", candidateIds).returns<FreshClusterRow[]>()
-    : { data: [] as FreshClusterRow[] };
-  const fresh = new Map((freshRows ?? []).map((r) => [r.id, r]));
+    : { data: [] as FreshClusterRow[], error: null };
+  if (freshError) {
+    // Carry on: a blindspot with no fresh row is skipped (fail closed in selectBlindspotsToPost).
+    console.warn("[social] fresh cluster re-read failed; blindspots are skipped this tick");
+    substepErrors++;
+  }
+  const fresh = new Map((freshError ? [] : (freshRows ?? [])).map((r) => [r.id, r]));
 
   const sinceIso = new Date(nowMs - LEDGER_WINDOW_MS).toISOString();
-  const { data: ledgerRows } = await supabase
+  const { data: ledgerRows, error: ledgerError } = await supabase
     .from("social_posts")
     .select("channel, cluster_id, kind, created_at")
     .gte("created_at", sinceIso)
     .returns<LedgerRow[]>();
+  if (ledgerError) {
+    // FAIL CLOSED: without the ledger postedIds would be empty and a cluster that was
+    // already posted could be planned again. Plan nothing this tick.
+    console.warn("[social] ledger read failed; skipping this tick");
+    substepErrors++;
+    return NextResponse.json(
+      { skipped: true, reason: "ledger unavailable", substepErrors },
+      substepErrorsInit(substepErrors),
+    );
+  }
   const ledger = ledgerRows ?? [];
 
   const plans = channels.flatMap((channel) =>
@@ -368,15 +420,19 @@ export const GET = withCronOutcome("social", withApiErrors(async (request: Reque
   );
 
   if (cfg.dryRun) {
-    return NextResponse.json({
-      dryRun: true,
-      previews: plans.map((p) => ({
-        channel: p.channel,
-        kind: p.kind,
-        clusterId: p.clusterId,
-        text: p.text,
-      })),
-    });
+    return NextResponse.json(
+      {
+        dryRun: true,
+        previews: plans.map((p) => ({
+          channel: p.channel,
+          kind: p.kind,
+          clusterId: p.clusterId,
+          text: p.text,
+        })),
+        substepErrors,
+      },
+      substepErrorsInit(substepErrors),
+    );
   }
 
   const results = await Promise.all(
@@ -395,10 +451,14 @@ export const GET = withCronOutcome("social", withApiErrors(async (request: Reque
   const skipped: Record<string, number> = {};
   for (const result of results) {
     posted += result.posted;
+    substepErrors += result.substepErrors;
     for (const [reason, count] of Object.entries(result.skipped)) {
       skipped[reason] = (skipped[reason] ?? 0) + count;
     }
   }
 
-  return NextResponse.json({ ok: true, posted, skipped });
+  return NextResponse.json(
+    { ok: substepErrors === 0, posted, skipped, substepErrors },
+    substepErrorsInit(substepErrors),
+  );
 }));

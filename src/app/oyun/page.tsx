@@ -15,7 +15,7 @@ import { staticPageMetadata } from "@/lib/seo/page-metadata";
 // `canonical: "/"` (which would mark this page a duplicate of the homepage).
 // staticPageMetadata also sets its own og:* / twitter:* url, title and image.
 export const metadata: Metadata = staticPageMetadata({
-  title: "Tarafı Tahmin Et",
+  title: "Tarafı tahmin et",
   description:
     "60 saniyede 10 manşet: hangi taraf yazdı, tahmin et. Tayf'ın 118 kaynak etiketi için oyuncuların ilk dış çapraz kontrolü.",
   path: "/oyun",
@@ -88,7 +88,7 @@ export default async function OyunPage({
     <div className="container mx-auto px-4 py-8 max-w-3xl space-y-6">
       <PageHero
         kicker="60 saniyelik oyun"
-        title="Tarafı Tahmin Et"
+        title="Tarafı tahmin et"
         subtitle="10 manşet, 3 seçenek: İktidar, Bağımsız, Muhalefet. Hangi kaynağın hangi tarafta yazdığını tahmin et."
       />
 

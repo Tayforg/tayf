@@ -105,6 +105,15 @@ describe("buildDigestHtml", () => {
     expect(html).toContain(BASE.unsubscribeUrl);
   });
 
+  it("addresses the reader as siz in the footer", () => {
+    const html = buildDigestHtml(BASE);
+    expect(html).toContain("Bu e-postayı Tayf bültenine kaydolduğunuz için alıyorsunuz.");
+    expect(html).not.toContain("kaydolduğun için");
+    expect(html).not.toContain("alıyorsun.");
+    // The unsubscribe link is a bare imperative and stays.
+    expect(html).toContain("Bültenden çık");
+  });
+
   it("escapes HTML in titles and summaries so a story can never inject markup", () => {
     const malicious: DigestClusterItem = {
       ...CLUSTER,

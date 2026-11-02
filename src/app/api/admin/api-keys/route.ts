@@ -7,6 +7,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import {
   generateApiKey,
   hashApiKey,
@@ -31,7 +32,7 @@ const adminApiKeysLimit = createRateLimiter("admin-api-keys", {
   refillPerSecond: 0.2,
 });
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -90,4 +91,4 @@ export const POST = withApiErrors(async (request: Request) => {
     },
     { status: 201 },
   );
-});
+}));

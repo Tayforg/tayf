@@ -1256,3 +1256,83 @@ describe("404 handling", () => {
     expect(typeof mod.default).toBe("function");
   });
 });
+
+// ---------------------------------------------------------------------------
+// W3: every answer of /api/admin carries `Cache-Control: private, no-store`: the
+// stat tiles, the source table and every action result are admin-only data that a
+// shared cache or the browser history must not keep. The wrapper
+// (src/lib/api/admin-no-store.ts, withAdminNoStore around withApiErrors) sets it on
+// success, 401, 429, validation 400 and the 500 of a thrown error alike.
+// ---------------------------------------------------------------------------
+describe("Cache-Control: private, no-store on every admin answer (W3)", () => {
+  const NO_STORE = "private, no-store";
+
+  async function postRaw(body: string, ip = "198.51.100.77") {
+    const mod = await import("@/app/api/admin/route");
+    return mod.POST(
+      new Request("http://example.com/api/admin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-forwarded-for": ip },
+        body,
+      }),
+    );
+  }
+
+  it("GET without a session: the 401 carries it", async () => {
+    __adminAuthed = false;
+    const mod = await import("@/app/api/admin/route");
+    const res = await mod.GET();
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+  });
+
+  it("GET success: the 200 carries it and keeps its JSON body", async () => {
+    setTableResponse("articles", { count: 5, data: [], error: null });
+    const mod = await import("@/app/api/admin/route");
+    const res = await mod.GET();
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect(res.headers.get("Content-Type")).toContain("application/json");
+    expect((await res.json()).articles).toBe(5);
+  });
+
+  it("POST 'Unknown action': the 400 carries it", async () => {
+    const res = await postRaw(JSON.stringify({ action: "definitely_not_a_real_action" }));
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect((await res.json()).error).toBeTruthy();
+  });
+
+  it("POST without a session: the 401 carries it", async () => {
+    __adminAuthed = false;
+    const res = await postRaw(JSON.stringify({ action: "toggle_source" }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+  });
+
+  it("POST success (toggle_source): the 200 carries it", async () => {
+    const res = await postRaw(JSON.stringify({ action: "toggle_source", slug: "test-source", active: false }));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+  });
+
+  it("POST over the rate limit: the 429 carries private, no-store (not the bare no-store) and keeps Retry-After", async () => {
+    const ip = "198.51.100.99";
+    let last: Response | null = null;
+    for (let i = 0; i < 21; i++) {
+      last = await postRaw(JSON.stringify({ action: "definitely_not_a_real_action" }), ip);
+    }
+    expect(last!.status).toBe(429);
+    expect(last!.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect(last!.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+  });
+
+  it("POST with a body that throws inside the handler: the 500 of withApiErrors carries it", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await postRaw("{not json");
+    errorSpy.mockRestore();
+    expect(res.status).toBe(500);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect((await res.json()).error).toBe("Internal server error");
+  });
+});

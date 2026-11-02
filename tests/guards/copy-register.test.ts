@@ -82,7 +82,74 @@ const FILES: readonly Entry[] = [
     required: ["misiniz", "verileriniz"],
     phrases: ["Emin misiniz?", "Haber diyeti verileriniz bu cihazdan silindi."],
   },
+  {
+    // h24 follow-up: the newsletter surfaces still spoke "sen". The button
+    // "Evet, aboneliğimi onayla" is first person and stays, so "onayla" is not banned.
+    path: "src/app/api/newsletter/confirm/route.ts",
+    banned: ["aboneliğini", "musun", "onayladığında"],
+    required: ["aboneliğinizi", "musunuz", "onayladığınızda"],
+    phrases: [
+      "Bülten aboneliğinizi onaylayın — Tayf",
+      "Tayf bültenine aboneliğinizi onaylıyor musunuz?",
+      "Onayladığınızda haftalık bülteni bu adrese göndermeye başlayacağız.",
+    ],
+  },
+  {
+    // The title "Bültenden ayrıl — Tayf" and the button are bare imperatives and stay.
+    path: "src/app/api/newsletter/unsubscribe/route.ts",
+    banned: ["musun", "onayladığında"],
+    required: ["musunuz", "onayladığınızda"],
+    phrases: [
+      "Tayf bülteninden ayrılmak istiyor musunuz?",
+      "Onayladığınızda haftalık bülteni bu adrese bir daha göndermeyiz.",
+    ],
+  },
+  {
+    path: "src/app/api/newsletter/route.ts",
+    banned: ["kaydolduğun", "kaydını", "tıkla", "sen", "yapmadıysan", "gelebilirsin"],
+    required: ["kaydolduğunuz", "kaydınızı", "tıklayın", "siz", "yapmadıysanız", "gelebilirsiniz"],
+    phrases: [
+      "Tayf haftalık bültenine kaydolduğunuz için teşekkürler.",
+      "Kaydınızı onaylamak için buraya tıklayın",
+      "Bu isteği siz yapmadıysanız bu e-postayı görmezden gelebilirsiniz.",
+      // Both send sites (the existing-subscriber re-send and the fresh signup).
+      'subject: "Tayf bültenine kaydınızı onaylayın"',
+    ],
+  },
+  {
+    // The footer link "Bültenden çık" is a bare imperative and stays.
+    path: "src/lib/digest/template.ts",
+    banned: ["kaydolduğun", "alıyorsun"],
+    required: ["kaydolduğunuz", "alıyorsunuz"],
+    phrases: ["Bu e-postayı Tayf bültenine kaydolduğunuz için alıyorsunuz."],
+  },
+  {
+    // The homepage ?bulten= banner left behind by the confirm/unsubscribe redirects.
+    path: "src/lib/newsletter/status.ts",
+    banned: ["kaydın", "kutunda", "ayrıldın", "sana"],
+    required: ["kaydınız", "kutunuzda", "ayrıldınız", "size"],
+    phrases: [
+      "Bülten kaydınız onaylandı. Haftalık bülten cumartesi sabahları gelen kutunuzda olacak.",
+      "Bültenden ayrıldınız. Size artık bülten göndermeyeceğiz.",
+    ],
+  },
 ];
+
+describe("copy register: the newsletter subject at both send sites", () => {
+  it("uses the siz subject at exactly two sendEmail call sites", () => {
+    const text = readRepoFile("src/app/api/newsletter/route.ts");
+    const subject = 'subject: "Tayf bültenine kaydınızı onaylayın"';
+    let count = 0;
+    let from = 0;
+    for (;;) {
+      const at = text.indexOf(subject, from);
+      if (at === -1) break;
+      count += 1;
+      from = at + subject.length;
+    }
+    expect(count).toBe(2);
+  });
+});
 
 function isLetter(ch: string): boolean {
   return /\p{L}/u.test(ch);

@@ -20,7 +20,7 @@ describe("NewsletterStatusBanner", () => {
     expect(markup).toContain('role="status"');
     expect(markup).toContain('aria-live="polite"');
     expect(markup).toContain(
-      "Bülten kaydın onaylandı. Haftalık bülten cumartesi sabahları gelen kutunda olacak.",
+      "Bülten kaydınız onaylandı. Haftalık bülten cumartesi sabahları gelen kutunuzda olacak.",
     );
     expect(markup).toContain('aria-label="Bildirimi kapat"');
     expect(markup).toContain("Kapat");
@@ -29,7 +29,7 @@ describe("NewsletterStatusBanner", () => {
   it("renders the ayrildi message", () => {
     searchParamsValue = new URLSearchParams("bulten=ayrildi");
     const markup = renderToStaticMarkup(<NewsletterStatusBanner />);
-    expect(markup).toContain("Bültenden ayrıldın. Sana artık bülten göndermeyeceğiz.");
+    expect(markup).toContain("Bültenden ayrıldınız. Size artık bülten göndermeyeceğiz.");
   });
 
   it("renders the gecersiz message", () => {

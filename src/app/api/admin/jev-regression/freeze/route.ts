@@ -18,6 +18,7 @@
 import { NextResponse } from "next/server";
 import { createServerClient } from "@/lib/supabase/server";
 import { apiTooManyRequests, apiServerError, apiUnauthorized, withApiErrors } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 
@@ -31,7 +32,7 @@ interface JevRegressionFreezeRow {
   pairs_inserted?: unknown;
 }
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -67,4 +68,4 @@ export const POST = withApiErrors(async (request: Request) => {
     },
     { status: 200 },
   );
-});
+}));

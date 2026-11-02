@@ -15,6 +15,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { hasAdminSession } from "@/lib/admin/session";
 import { isShareToken, revokeShareLink } from "@/lib/reports/share";
@@ -24,7 +25,7 @@ const adminRaporShareLimit = createRateLimiter("admin-rapor-share", {
   refillPerSecond: 0.2,
 });
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -53,4 +54,4 @@ export const POST = withApiErrors(async (request: Request) => {
   const revoked = await revokeShareLink(supabase, token);
 
   return NextResponse.json({ ok: true, revoked }, { status: 200 });
-});
+}));

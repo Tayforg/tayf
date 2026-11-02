@@ -29,6 +29,13 @@
 // marker is not text: stripFeedWrappers() turns it into one "…" (or drops it after
 // a sentence mark). A marker anywhere else is left alone.
 //
+// Medyascope ends every description with its own headline again and the site name
+// ("<body>\n<headline> Medyascope"; hunt 24, h24-feeds-2: 428 of 430 articles in 14
+// days, 5 cluster summaries, the live /rss.xml item of 6e2ecaea). That last line is
+// not text either: stripSiteNameFooter() drops it. Only the cluster consumer and the
+// read side use stripFeedWrappers(); rss/normalize.ts has its own cleaner, so the
+// ingested description and content_hash stay byte-identical.
+//
 // Milliyet also puts a "related news" headline on the line right before the ticker
 // ("...her gayrete hazırız\nSon dakika... Rusya için 3 fırsat!", hunt 23,
 // h23-live-2). cutAppendedTicker() is the pure cut the READ side uses
@@ -66,6 +73,12 @@ const YOAST_FOOTER_MAX_TITLE = 300;
 const DIKEN_HEADER = / \d{2}\.\d{2}\.\d{4} Diken(?!\p{Ll})/u;
 const DIKEN_HEADER_WINDOW = 340;
 const DIKEN_HEADER_MAX_INDEX = 300;
+
+// Site-name footer (h24-feeds-2): "<body>\n<headline> Medyascope". The list is
+// deliberately a single name; a publisher is added only with evidence.
+const SITE_NAME_FOOTERS = ["Medyascope"] as const;
+/** The footer's "<headline>" line is at most this long (trimmed); a longer line is text. */
+const SITE_FOOTER_MAX_LINE = 300;
 
 // WordPress excerpt marker, in the four spellings feeds ship it in: the literal
 // ellipsis, three dots, and the two HTML entities for the ellipsis.
@@ -132,6 +145,40 @@ function stripDikenHeader(text: string): string {
 }
 
 /**
+ * "<headline> Medyascope" as the LAST line (hunt 24, h24-feeds-2): the site name
+ * at the very end of the text, a blank (space, tab, NBSP) or a newline right in
+ * front of it, and the line it ends at most {@link SITE_FOOTER_MAX_LINE}
+ * characters long once trimmed. The whole last line goes, together with the
+ * blanks and newlines in front of it. The SAME string is returned when
+ *  - the text does not end with the name (blanks and newlines after it are
+ *    ignored), or the name is glued to the previous word ("XMedyascope"), or
+ *    written in another case, or followed by anything ("Medyascope.");
+ *  - the footer would be on line 0: the first line is the article's own text,
+ *    so a one-line "<headline> Medyascope" stays (a headline-only description
+ *    is never emptied);
+ *  - the last line is longer than the limit, or what is left of the text is
+ *    blank ("\nMedyascope" alone).
+ * Only trim / trimEnd / endsWith / lastIndexOf and character checks: linear, no regex.
+ */
+function stripSiteNameFooter(text: string): string {
+  const t = text.trimEnd();
+  for (const name of SITE_NAME_FOOTERS) {
+    if (!t.endsWith(name)) continue;
+    const start = t.length - name.length;
+    if (start <= 0) continue;
+    const before = t.charCodeAt(start - 1);
+    if (!isBlank(before) && before !== 10) continue;
+    const nl = t.lastIndexOf("\n", start - 1);
+    if (nl <= 0) continue; // line 0 is never a footer
+    if (t.slice(nl + 1, start).trim().length > SITE_FOOTER_MAX_LINE) continue;
+    const head = t.slice(0, nl).trimEnd();
+    if (head.trim() === "") continue;
+    return head;
+  }
+  return text;
+}
+
+/**
  * A WordPress excerpt marker ("[…]", "[...]", "[&#8230;]", "[&hellip;]") at the
  * very end, blanks and newlines after it allowed: it stands for "the text goes
  * on", so it becomes one "…" glued to the last word. After a sentence mark (. ! ?
@@ -153,19 +200,23 @@ function stripExcerptMarker(text: string): string {
 }
 
 /**
- * Remove the Diken header, the WordPress / Yoast footers and the trailing
- * WordPress excerpt marker ("[…]") that feeds wrap around a description. The
- * footers go first, then the header, then the marker (a marker that sat in front
- * of a footer is trailing once the footer is gone). Returns the SAME string when
- * nothing matches, '' when the text was only a footer or a marker, and is
- * idempotent (the rules are re-applied until nothing changes, at most
- * {@link MAX_WRAPPER_PASSES} times).
+ * Remove the Diken header, the WordPress / Yoast footers, the Medyascope
+ * site-name footer ("<headline> Medyascope" as the last line, hunt 24: 428 of 430
+ * articles) and the trailing WordPress excerpt marker ("[…]") that feeds wrap
+ * around a description. The footers go first (the site-name footer innermost, so
+ * a WordPress / Yoast footer or a marker in front of it is trailing once it is
+ * gone), then the header, then the marker. Returns the SAME string when nothing
+ * matches, '' when the text was only a footer or a marker, and is idempotent (the
+ * rules are re-applied until nothing changes, at most {@link MAX_WRAPPER_PASSES}
+ * times).
  */
 export function stripFeedWrappers(text: string): string {
   if (!text) return text;
   let out = text;
   for (let pass = 0; pass < MAX_WRAPPER_PASSES; pass++) {
-    const next = stripExcerptMarker(stripDikenHeader(stripYoastFooter(stripWordPressFooter(out))));
+    const next = stripExcerptMarker(
+      stripDikenHeader(stripYoastFooter(stripWordPressFooter(stripSiteNameFooter(out)))),
+    );
     if (next === out) break;
     out = next;
   }

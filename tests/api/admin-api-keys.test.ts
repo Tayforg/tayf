@@ -151,7 +151,7 @@ describe("POST /api/admin/api-keys", () => {
     const res = await POST(createRequest({ label: "one-too-many", tier: "free" }, ip));
     expect(res.status).toBe(429);
     expect(res.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
-    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 });
 
@@ -203,5 +203,68 @@ describe("both admin routes check the session before the rate limiter and before
 
     expect(supabaseFake.calls.mutations).toHaveLength(0);
     expect(supabaseFake.calls.rpc).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3: both routes answer with `Cache-Control: private, no-store`. The create answer
+// carries the plaintext API key exactly once; a shared cache or the browser history
+// must never keep it. The wrapper (src/lib/api/admin-no-store.ts) sets the header on
+// every path: 401, 400, 404, the 201/200 success and the 429.
+// ---------------------------------------------------------------------------
+describe("Cache-Control: private, no-store on the api-keys answers (W3)", () => {
+  const NO_STORE = "private, no-store";
+
+  it("create: the 401 carries it", async () => {
+    __adminAuthed = false;
+    const { POST } = await import("@/app/api/admin/api-keys/route");
+    const res = await POST(createRequest({ label: "smoke", tier: "free" }));
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+  });
+
+  it("create: the 400 carries it", async () => {
+    const { POST } = await import("@/app/api/admin/api-keys/route");
+    const res = await POST(createRequest({ label: "", tier: "free" }));
+    expect(res.status).toBe(400);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+  });
+
+  it("create: the 201 that returns the plaintext key carries it", async () => {
+    const { POST } = await import("@/app/api/admin/api-keys/route");
+    const res = await POST(createRequest({ label: "smoke", tier: "free" }));
+    expect(res.status).toBe(201);
+    expect(res.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect((await res.json()).api_key).toMatch(/^tayf_[0-9a-f]{40}$/);
+  });
+
+  it("create: the 429 carries private, no-store (not the bare no-store) and keeps Retry-After", async () => {
+    const { POST } = await import("@/app/api/admin/api-keys/route");
+    const ip = "198.51.103.50";
+    let last: Response | null = null;
+    for (let i = 0; i < 21; i++) {
+      last = await POST(createRequest({ label: `k${i}`, tier: "free" }, ip));
+    }
+    expect(last!.status).toBe(429);
+    expect(last!.headers.get("Cache-Control")).toBe(NO_STORE);
+    expect(last!.headers.get("Retry-After")).toMatch(/^[1-9]\d*$/);
+  });
+
+  it("revoke: the 401, the 404 and the 200 carry it", async () => {
+    const { POST } = await import("@/app/api/admin/api-keys/revoke/route");
+
+    __adminAuthed = false;
+    const unauthed = await POST(revokeRequest({ id: 7 }));
+    expect(unauthed.status).toBe(401);
+    expect(unauthed.headers.get("Cache-Control")).toBe(NO_STORE);
+
+    __adminAuthed = true;
+    const unknown = await POST(revokeRequest({ id: 999 }));
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get("Cache-Control")).toBe(NO_STORE);
+
+    const ok = await POST(revokeRequest({ id: 7 }));
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("Cache-Control")).toBe(NO_STORE);
   });
 });

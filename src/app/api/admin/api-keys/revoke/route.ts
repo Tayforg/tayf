@@ -8,6 +8,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { hasAdminSession } from "@/lib/admin/session";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { createServerClient } from "@/lib/supabase/server";
@@ -25,7 +26,7 @@ const adminApiKeysLimit = createRateLimiter("admin-api-keys", {
   refillPerSecond: 0.2,
 });
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   if (!(await hasAdminSession())) {
     return apiUnauthorized();
   }
@@ -73,4 +74,4 @@ export const POST = withApiErrors(async (request: Request) => {
     { ok: true, id: rawId, revoked_at: revokedAt },
     { status: 200 },
   );
-});
+}));

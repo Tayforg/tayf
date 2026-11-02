@@ -410,6 +410,12 @@ describe("/trends page — Yükselen Konular section", () => {
     expect(fetchIstanbulTimeline).toHaveBeenCalledTimes(1);
   });
 
+  it("h24-pages-3: the <title>, og:title and twitter:title read 'Medya DNA trendi' (sentence case)", () => {
+    expect(metadata.title).toBe("Medya DNA trendi");
+    expect(metadata.openGraph?.title).toBe("Medya DNA trendi — Tayf");
+    expect(metadata.twitter?.title).toBe("Medya DNA trendi — Tayf");
+  });
+
   it("the page description mentions today's rising topics", () => {
     expect(String(metadata.description)).toContain("bugün yükselen konular");
   });

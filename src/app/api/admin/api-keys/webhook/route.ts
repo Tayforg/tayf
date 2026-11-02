@@ -11,6 +11,7 @@ import {
   apiUnauthorized,
   withApiErrors,
 } from "@/lib/api/errors";
+import { withAdminNoStore } from "@/lib/api/admin-no-store";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { createServerClient } from "@/lib/supabase/server";
 
@@ -31,6 +32,9 @@ const adminApiKeysLimit = createRateLimiter("admin-api-keys", {
   refillPerSecond: 0.2,
 });
 
+// The 200s carry the signing secret, so they keep their own header. withAdminNoStore
+// (below, around each method) sets the same value on every other path too: 401, 400,
+// 404, 429 and the 500 of withApiErrors.
 const NO_STORE = { "Cache-Control": "private, no-store" };
 
 async function readBody(request: Request): Promise<Record<string, unknown> | Response> {
@@ -59,7 +63,7 @@ async function gate(request: Request): Promise<Response | null> {
   return null;
 }
 
-export const POST = withApiErrors(async (request: Request) => {
+export const POST = withAdminNoStore(withApiErrors(async (request: Request) => {
   const refused = await gate(request);
   if (refused) return refused;
 
@@ -108,9 +112,9 @@ export const POST = withApiErrors(async (request: Request) => {
     { ok: true, key_id: keyId, host: syntax.host, secret },
     { status: 200, headers: NO_STORE },
   );
-});
+}));
 
-export const DELETE = withApiErrors(async (request: Request) => {
+export const DELETE = withAdminNoStore(withApiErrors(async (request: Request) => {
   const refused = await gate(request);
   if (refused) return refused;
 
@@ -134,4 +138,4 @@ export const DELETE = withApiErrors(async (request: Request) => {
   if (queueError) return apiServerError(queueError);
 
   return NextResponse.json({ ok: true, key_id: keyId }, { status: 200, headers: NO_STORE });
-});
+}));

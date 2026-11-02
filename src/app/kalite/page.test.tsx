@@ -96,6 +96,29 @@ function findSvg(node: unknown): { props: Record<string, unknown> } | null {
   return null;
 }
 
+/** Every descendant element whose className holds `needle` (function components are expanded, see collectText). */
+function findByClass(node: unknown, needle: string, out: Array<{ props: Record<string, unknown> }> = []) {
+  if (Array.isArray(node)) {
+    for (const child of node) findByClass(child, needle, out);
+    return out;
+  }
+  if (node && typeof node === "object") {
+    const el = node as { type?: unknown; props?: Record<string, unknown> };
+    if (typeof el.type === "function") {
+      return findByClass(
+        (el.type as (props: Record<string, unknown>) => unknown)(el.props ?? {}),
+        needle,
+        out,
+      );
+    }
+    if (typeof el.props?.className === "string" && el.props.className.includes(needle)) {
+      out.push(el as { props: Record<string, unknown> });
+    }
+    if (el.props?.children !== undefined) findByClass(el.props.children, needle, out);
+  }
+  return out;
+}
+
 function snapshot(overrides: Partial<NonNullable<typeof mockSnapshots.value>[number]> = {}) {
   return {
     id: 1,
@@ -213,6 +236,28 @@ describe("QualityPage — data present", () => {
 
     expect(svg).not.toBeNull();
     expect(svg!.props.viewBox).toBeDefined();
+  });
+
+  it("makes the chart wrapper and the table wrapper keyboard-reachable named regions with a visible focus ring (WCAG 2.1.1)", async () => {
+    mockSnapshots.value = [
+      snapshot({ id: 2, takenAt: "2026-09-18T03:00:00.000Z", singletonRate: 0.9 }),
+      snapshot({ id: 1, takenAt: "2026-09-17T03:00:00.000Z", singletonRate: 0.85 }),
+    ];
+
+    const tree = await QualityPage();
+    const scrollers = findByClass(tree, "overflow-x-auto");
+
+    // the chart wrapper (min-w-[360px] svg overflows a 390 px phone) and the table
+    expect(scrollers).toHaveLength(2);
+    for (const { props } of scrollers) {
+      expect(props.tabIndex).toBe(0);
+      expect(props.role).toBe("region");
+      expect(String(props.className)).toContain("focus-visible:ring-2");
+      expect(String(props.className)).toContain("focus-visible:ring-ring");
+    }
+    const [chart, table] = scrollers;
+    expect(chart!.props["aria-label"]).toBe("Tekil küme oranı grafiği");
+    expect(table!.props["aria-labelledby"]).toBe("kalite-tablo");
   });
 
   it("does not crash with only a single snapshot (no divide-by-zero in the chart)", async () => {

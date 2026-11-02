@@ -22,11 +22,11 @@ describe("NEWSLETTER_STATUS_COPY", () => {
   it("has the exact Turkish copy and tone for each status", () => {
     expect(NEWSLETTER_STATUS_COPY.onaylandi).toEqual({
       tone: "success",
-      text: "Bülten kaydın onaylandı. Haftalık bülten cumartesi sabahları gelen kutunda olacak.",
+      text: "Bülten kaydınız onaylandı. Haftalık bülten cumartesi sabahları gelen kutunuzda olacak.",
     });
     expect(NEWSLETTER_STATUS_COPY.ayrildi).toEqual({
       tone: "info",
-      text: "Bültenden ayrıldın. Sana artık bülten göndermeyeceğiz.",
+      text: "Bültenden ayrıldınız. Size artık bülten göndermeyeceğiz.",
     });
     expect(NEWSLETTER_STATUS_COPY.gecersiz).toEqual({
       tone: "warning",

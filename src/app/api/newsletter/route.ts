@@ -57,9 +57,9 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 function confirmEmailHtml(confirmUrl: string): string {
   return (
     `<!doctype html><html><body style="font-family:sans-serif;color:#111;max-width:480px;margin:0 auto;padding:24px">` +
-    `<p>Tayf haftalık bültenine kaydolduğun için teşekkürler.</p>` +
-    `<p><a href="${confirmUrl}" style="color:#0a58ca">Kaydını onaylamak için buraya tıkla</a></p>` +
-    `<p style="color:#666;font-size:13px">Bu isteği sen yapmadıysan bu e-postayı görmezden gelebilirsin.</p>` +
+    `<p>Tayf haftalık bültenine kaydolduğunuz için teşekkürler.</p>` +
+    `<p><a href="${confirmUrl}" style="color:#0a58ca">Kaydınızı onaylamak için buraya tıklayın</a></p>` +
+    `<p style="color:#666;font-size:13px">Bu isteği siz yapmadıysanız bu e-postayı görmezden gelebilirsiniz.</p>` +
     `</body></html>`
   );
 }
@@ -142,7 +142,7 @@ export const POST = withApiErrors(async (request: Request) => {
       after(async () => {
         const r = await sendEmail({
           to: email,
-          subject: "Tayf bültenine kaydını onayla",
+          subject: "Tayf bültenine kaydınızı onaylayın",
           html: confirmEmailHtml(confirmUrl),
         });
         if ("ok" in r && !r.ok) console.error("[newsletter] confirm mail failed", r.error);
@@ -181,7 +181,7 @@ export const POST = withApiErrors(async (request: Request) => {
     after(async () => {
       const r = await sendEmail({
         to: email,
-        subject: "Tayf bültenine kaydını onayla",
+        subject: "Tayf bültenine kaydınızı onaylayın",
         html: confirmEmailHtml(confirmUrl),
       });
       if ("ok" in r && !r.ok) console.error("[newsletter] confirm mail failed", r.error);

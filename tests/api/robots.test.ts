@@ -133,6 +133,41 @@ describe("GET /robots.txt", () => {
     expect([...disallows].sort()).toEqual(["Disallow: /admin", "Disallow: /api/", "Disallow: /embed/"]);
   });
 
+  it("carves out Allow: /api/v1/openapi.json in every User-agent group (llms.txt links to it; the contract file is keyless and public)", async () => {
+    const body = await (await GET()).text();
+    const lines = body.split("\n");
+    const userAgents = lines.filter((l) => l.startsWith("User-agent:"));
+    expect(userAgents.length).toBe(2 + AI_BOTS.length + 1);
+    let seen = 0;
+    for (const ua of userAgents) {
+      const startIdx = lines.indexOf(ua);
+      let endIdx = lines.findIndex((l, i) => i > startIdx && l.startsWith("User-agent:"));
+      if (endIdx === -1) endIdx = lines.length;
+      const group = lines.slice(startIdx, endIdx);
+      expect(group, `group for ${ua}`).toContain("Allow: /api/v1/openapi.json");
+      seen += 1;
+    }
+    expect(seen).toBe(userAgents.length);
+    expect(lines.filter((l) => l === "Allow: /api/v1/openapi.json")).toHaveLength(userAgents.length);
+  });
+
+  it("opens only the three Allow paths and keeps the Disallow set exactly /admin, /api/ and /embed/ (the carve-out is a longer match, not a removal)", async () => {
+    const body = await (await GET()).text();
+    const lines = body.split("\n");
+    const allows = new Set(lines.filter((l) => l.startsWith("Allow:")));
+    expect([...allows]).toEqual([
+      "Allow: /",
+      "Allow: /api/sources",
+      "Allow: /api/v1/openapi.json",
+    ]);
+    const disallows = new Set(lines.filter((l) => l.startsWith("Disallow:")));
+    expect([...disallows].sort()).toEqual([
+      "Disallow: /admin",
+      "Disallow: /api/",
+      "Disallow: /embed/",
+    ]);
+  });
+
   it("builds the Sitemap line from NEXT_PUBLIC_SITE_URL", async () => {
     const body = await (await GET()).text();
     expect(body).toContain("Sitemap: https://tayf.test/sitemap.xml");

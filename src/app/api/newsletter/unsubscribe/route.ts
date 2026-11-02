@@ -23,8 +23,8 @@ const newsletterUnsubscribeLimit = createRateLimiter("newsletter-unsubscribe", {
 function confirmPageHtml(token: string): string {
   return interstitialPage({
     title: "Bültenden ayrıl — Tayf",
-    heading: "Tayf bülteninden ayrılmak istiyor musun?",
-    body: "Onayladığında haftalık bülteni bu adrese bir daha göndermeyiz.",
+    heading: "Tayf bülteninden ayrılmak istiyor musunuz?",
+    body: "Onayladığınızda haftalık bülteni bu adrese bir daha göndermeyiz.",
     action: "/api/newsletter/unsubscribe",
     token,
     submitLabel: "Evet, bültenden ayrıl",
