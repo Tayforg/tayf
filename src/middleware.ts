@@ -180,11 +180,16 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 // session.ts's admin_session verifier imports `server-only` and
 // `node:crypto`, so it cannot be imported into Edge middleware as-is. This
 // re-implements the same verification with Web Crypto (`crypto.subtle`)
-// against the identical `${body}.${signature}` token shape: the HMAC-SHA256
-// signature, the `{expiresAt, iat, pwd}` payload shape, the 24 h lifetime and
-// the `pwd` tag bound to ADMIN_PASSWORD (so rotating the password ends every
-// session here too, exactly as in requireAdminSession) — not a weaker
-// cookie-presence check. Either env var missing means not authenticated.
+// against the identical `${body}.${signature}` token shape: the payload is a
+// bare `{expiresAt, iat}`, the signature is HMAC-SHA256(signingKey, body), and
+// signingKey = PBKDF2-HMAC-SHA256(ADMIN_PASSWORD, salt = "tayf-admin-session-key:"
+// + ADMIN_SESSION_SECRET, 100 000 iterations, 32 bytes). The session is bound to
+// the password through that KEY, not through a payload field, so rotating the
+// password (or the secret) ends every session here too, exactly as in
+// requireAdminSession — not a weaker cookie-presence check. Either env var
+// missing means not authenticated. The key is derived once per isolate per
+// (secret, password) pair and only after cheap structural checks (cookie shape,
+// signature length), so junk cookies never trigger a PBKDF2 run.
 
 export const config = {
   matcher: [
@@ -428,13 +433,6 @@ function base64UrlDecodeToString(input: string): string {
   return new TextDecoder().decode(bytes);
 }
 
-async function hmacSha256(secret: string, message: string): Promise<Uint8Array> {
-  const enc = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
-  return new Uint8Array(sig);
-}
-
 /** Constant-time string compare (no node:crypto timingSafeEqual on Edge). */
 function timingSafeEqualStr(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
@@ -443,59 +441,58 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return diff === 0;
 }
 
-function toHex(bytes: Uint8Array): string {
-  let out = "";
-  for (const b of bytes) out += b.toString(16).padStart(2, "0");
-  return out;
-}
-
 // Keep in sync with src/lib/admin/session.ts (24 h sessions, 60 s clock skew,
-// 16 lower-hex chars of PBKDF2-HMAC-SHA256 over the admin password; see
-// derivePasswordTag there and adminPasswordTag below).
+// 43-char base64url signature, signing key = PBKDF2-HMAC-SHA256 with the salt
+// label, cost and length below; see deriveSessionSigningKey there and
+// adminSigningKey below).
 const ADMIN_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const ADMIN_CLOCK_SKEW_MS = 60_000;
-const ADMIN_PWD_TAG_RE = /^[0-9a-f]{16}$/;
-const ADMIN_PWD_TAG_SALT_LABEL = "tayf-admin-pwd-tag:";
-const ADMIN_PWD_TAG_ITERATIONS = 100_000;
-const ADMIN_PWD_TAG_BITS = 64;
+const ADMIN_SIGNATURE_LENGTH = 43;
+const ADMIN_KEY_SALT_LABEL = "tayf-admin-session-key:";
+const ADMIN_KEY_ITERATIONS = 100_000;
+const ADMIN_KEY_BITS = 256;
 
-// The last (secret, password) pair and its tag. PBKDF2 at 100k iterations costs
-// tens of milliseconds and every admin request needs the same value, so it is
-// derived once per isolate. The promise is cached, not the result, so concurrent
-// requests share one derivation; a failed derivation is dropped and retried.
-// In memory only (the inputs are already in process.env); never logged.
-let cachedAdminPwdTag: { secret: string; password: string; tag: Promise<string> } | null = null;
+// The last (secret, password) pair and its HMAC key. PBKDF2 at 100k iterations
+// costs tens of milliseconds and every admin request needs the same key, so it
+// is derived once per isolate per pair. The promise is cached, not the result,
+// so concurrent requests share one derivation; a failed derivation is dropped
+// and retried. A single slot suffices (the pair only changes with the env), and
+// the two strings are compared separately. In memory only (the inputs are
+// already in process.env); never logged.
+let cachedAdminSigningKey: { secret: string; password: string; key: Promise<CryptoKey> } | null = null;
 
 /**
- * Web Crypto twin of derivePasswordTag in src/lib/admin/session.ts:
+ * Web Crypto twin of deriveSessionSigningKey in src/lib/admin/session.ts:
  * PBKDF2-HMAC-SHA256(password = utf8(ADMIN_PASSWORD),
- * salt = utf8("tayf-admin-pwd-tag:" + ADMIN_SESSION_SECRET), 100 000 iterations),
- * 8 bytes as lower hex. The password never goes through a fast hash.
+ * salt = utf8("tayf-admin-session-key:" + ADMIN_SESSION_SECRET), 100 000
+ * iterations, 256 bits), imported as a non-extractable HMAC-SHA-256 key. The
+ * password only ever feeds the PBKDF2 key material; the HMAC input is the token
+ * body, which holds nothing derived from it.
  */
-function adminPasswordTag(secret: string, password: string): Promise<string> {
-  const hit = cachedAdminPwdTag;
-  if (hit && hit.secret === secret && hit.password === password) return hit.tag;
-  const tag = (async () => {
+function adminSigningKey(secret: string, password: string): Promise<CryptoKey> {
+  const hit = cachedAdminSigningKey;
+  if (hit && hit.secret === secret && hit.password === password) return hit.key;
+  const key = (async () => {
     const enc = new TextEncoder();
-    const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
+    const material = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]);
     const bits = await crypto.subtle.deriveBits(
       {
         name: "PBKDF2",
         hash: "SHA-256",
-        salt: enc.encode(ADMIN_PWD_TAG_SALT_LABEL + secret),
-        iterations: ADMIN_PWD_TAG_ITERATIONS,
+        salt: enc.encode(ADMIN_KEY_SALT_LABEL + secret),
+        iterations: ADMIN_KEY_ITERATIONS,
       },
-      key,
-      ADMIN_PWD_TAG_BITS,
+      material,
+      ADMIN_KEY_BITS,
     );
-    return toHex(new Uint8Array(bits));
+    return crypto.subtle.importKey("raw", bits, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   })();
-  const entry = { secret, password, tag };
-  cachedAdminPwdTag = entry;
-  tag.catch(() => {
-    if (cachedAdminPwdTag === entry) cachedAdminPwdTag = null;
+  const entry = { secret, password, key };
+  cachedAdminSigningKey = entry;
+  key.catch(() => {
+    if (cachedAdminSigningKey === entry) cachedAdminSigningKey = null;
   });
-  return tag;
+  return key;
 }
 
 /** Mirrors src/lib/admin/session.ts's parseToken, minus the cookie I/O. */
@@ -510,8 +507,21 @@ async function verifyAdminToken(
   const body = token.slice(0, dot);
   const sig = token.slice(dot + 1);
 
-  // 1. Signature.
-  const expected = base64UrlEncode(await hmacSha256(secret, body));
+  // 0. Cheap structural check before any key derivation: a signature of the
+  // wrong length can never match.
+  if (sig.length !== ADMIN_SIGNATURE_LENGTH) return false;
+
+  // 1. Signature. This needs the signing key, so the (memoized) PBKDF2
+  // derivation happens here: one per isolate per (secret, password) pair. Any
+  // crypto failure fails closed (unauthenticated), never as a thrown 500.
+  let expected: string;
+  try {
+    const key = await adminSigningKey(secret, password);
+    const mac = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body));
+    expected = base64UrlEncode(new Uint8Array(mac));
+  } catch {
+    return false;
+  }
   if (!timingSafeEqualStr(sig, expected)) return false;
 
   let parsed: unknown;
@@ -521,16 +531,15 @@ async function verifyAdminToken(
     return false;
   }
 
-  // 2. Shape (a legacy `{expiresAt}` token fails here).
+  // 2. Shape (a legacy `{expiresAt}` token fails here). Unknown fields, such as
+  // the old `pwd`, are ignored: the key binds the session to the password.
   if (!parsed || typeof parsed !== "object") return false;
-  const { expiresAt, iat, pwd } = parsed as Record<string, unknown>;
+  const { expiresAt, iat } = parsed as Record<string, unknown>;
   if (
     typeof expiresAt !== "number" ||
     !Number.isFinite(expiresAt) ||
     typeof iat !== "number" ||
-    !Number.isFinite(iat) ||
-    typeof pwd !== "string" ||
-    !ADMIN_PWD_TAG_RE.test(pwd)
+    !Number.isFinite(iat)
   ) {
     return false;
   }
@@ -542,9 +551,7 @@ async function verifyAdminToken(
   if (now - iat > ADMIN_SESSION_MAX_AGE_MS) return false;
   if (expiresAt - iat > ADMIN_SESSION_MAX_AGE_MS) return false;
 
-  // 6. Password binding.
-  const expectedTag = await adminPasswordTag(secret, password);
-  return timingSafeEqualStr(pwd, expectedTag);
+  return true;
 }
 
 export async function middleware(req: NextRequest, event?: NextFetchEvent): Promise<NextResponse> {

@@ -273,12 +273,15 @@ checking Edge Function logs for `cluster-consumer` after the next drain tick
 ## Admin session secret — `ADMIN_SESSION_SECRET`
 
 **Where it lives:** Vercel env only (and `.env.local` for local dev). Read
-by `src/lib/admin/session.ts`'s `getSessionSecret()`, which HMAC-SHA256
-signs a `{expiresAt, iat, pwd}` payload into the `admin_session` cookie
-(`pwd` is a tag derived from `ADMIN_PASSWORD`, see "Rotating
-`ADMIN_PASSWORD`" below). `src/middleware.ts` verifies the same token with
-Web Crypto. No Edge Function, GitHub Actions, or Vault copy exists — this is
-a single-copy secret.
+by `src/lib/admin/session.ts`'s `getSessionSecret()`, which (together with
+`ADMIN_PASSWORD`) derives the HMAC key that signs a bare `{expiresAt, iat}`
+payload into the `admin_session` cookie: `signingKey =
+PBKDF2-HMAC-SHA256(ADMIN_PASSWORD, salt = "tayf-admin-session-key:" +
+ADMIN_SESSION_SECRET, 100000 iterations, 32 bytes)`, signature =
+`HMAC-SHA256(signingKey, body)` (see "Rotating `ADMIN_PASSWORD`" below).
+`src/middleware.ts` verifies the same token with Web Crypto. No Edge
+Function, GitHub Actions, or Vault copy exists — this is a single-copy
+secret.
 
 Note the related-but-distinct `ADMIN_PASSWORD` (also Vercel env, same
 file): that is the literal login password compared in
@@ -304,7 +307,8 @@ config, it does not read the dashboard's stored value live per-request.
 
 **Rotating this logs every admin out, on purpose.** Every existing
 `admin_session` cookie fails HMAC verification the instant the new secret
-is live, because the signature was computed with the old key. There is
+is live, because the signature was computed with the old signing key (the
+secret is part of the PBKDF2 salt, so the key changes). There is
 exactly one admin today, so this is a non-event as long as you can
 immediately re-authenticate with `ADMIN_PASSWORD` afterward — confirm you
 still have that before you rotate.
@@ -320,25 +324,33 @@ still have that before you rotate.
   signs and verifies correctly). No SQL check applies; the session is
   stateless by design.
 
-**Blast radius if leaked:** an attacker who obtains `ADMIN_SESSION_SECRET`
-can *mint* a validly-signed `admin_session` cookie for any `expiresAt`
-within the 24 h window without ever knowing `ADMIN_PASSWORD` or touching
-`/admin/login` — full `/admin` access (source management, corrections
-review, admin actions) with no login event to notice. Treat this as
-equally severe as a leaked `ADMIN_PASSWORD`, not a lesser one. The `pwd`
-tag in a captured cookie is a 64-bit PBKDF2 (100,000 iterations) derivation
-of the password salted with this secret, so someone holding both the secret
-and a cookie could also test password guesses offline against it (each guess
+**Blast radius if leaked:** minting a validly-signed `admin_session` cookie
+needs BOTH `ADMIN_SESSION_SECRET` and `ADMIN_PASSWORD` (the signing key is
+derived from the pair). An attacker with the secret alone cannot mint one, but
+with the secret plus one captured cookie can test password guesses offline —
+and with both values gets full `/admin` access (source management, corrections
+review, admin actions) with no login event to notice. Treat a leaked secret as
+equally severe as a leaked `ADMIN_PASSWORD`, not a lesser one, and rotate both. The cookie
+itself carries nothing derived from the password, but its signature is an
+HMAC under a key derived from the password (PBKDF2, 100,000 iterations,
+salted with this secret), so someone holding both the secret and a cookie
+could still test password guesses offline against that signature (each guess
 costs one PBKDF2 run); rotate both after a leak.
 
 ### Rotating `ADMIN_PASSWORD`
 
-The `admin_session` payload carries `pwd`, 16 hex chars (8 bytes) of
-`PBKDF2-HMAC-SHA256(ADMIN_PASSWORD, salt = "tayf-admin-pwd-tag:" + ADMIN_SESSION_SECRET, 100000 iterations)`.
-Both `requireAdminSession()` and the edge middleware compute it from the
-current `ADMIN_PASSWORD` (once per process / isolate, then reused), so
-**rotating `ADMIN_PASSWORD` ends every admin session** (a session also ends
-24 h after login, or at once if `ADMIN_PASSWORD` is unset). Rotation steps:
+The `admin_session` token binds to the password through the **signing key**,
+not the payload. The payload is only `{expiresAt, iat}`; the HMAC-SHA256
+signature is computed with
+`PBKDF2-HMAC-SHA256(ADMIN_PASSWORD, salt = "tayf-admin-session-key:" + ADMIN_SESSION_SECRET, 100000 iterations, 32 bytes)`.
+Both `requireAdminSession()` and the edge middleware recompute that key from
+the current `ADMIN_PASSWORD` and `ADMIN_SESSION_SECRET` (once per process /
+isolate per pair, then reused; cheap structural checks run first, so junk
+cookies never trigger the derivation) and compare the signature in constant
+time, so **rotating `ADMIN_PASSWORD` ends every admin session**: a token
+minted under the old password was signed under a different key and no longer
+verifies (a session also ends 24 h after login, or at once if
+`ADMIN_PASSWORD` is unset). Rotation steps:
 
 ```bash
 vercel env rm ADMIN_PASSWORD production
@@ -359,8 +371,11 @@ Limits worth knowing:
   expires (24 h after login) or until one of the two rotations above.
   Server-side revocation is not implemented; it would need an
   `admin_session_epoch` row bumped on logout, i.e. a migration.
-- Tokens issued before this change (`{expiresAt}` only, 7-day lifetime) are
-  refused, so the deploy that ships it logs every admin out once.
+- Tokens issued before this change are refused, so the deploy that ships it
+  logs every admin out once: the original `{expiresAt}`-only tokens (7-day
+  lifetime) lack `iat`, and tokens of the interim `{expiresAt, iat, pwd}`
+  format were signed with the bare secret instead of the derived key, so their
+  signature no longer verifies. Unknown payload fields are ignored.
 
 ---
 
