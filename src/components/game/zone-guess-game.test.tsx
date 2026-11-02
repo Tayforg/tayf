@@ -121,3 +121,102 @@ describe("OyunModes empty pool branch [source guard]", () => {
     expect(pageSource).toContain("Şu an oynanacak başlık yok");
   });
 });
+
+/**
+ * Every `useEffect(...)` call in `src`, as its full source text, found by
+ * scanning for the closing parenthesis (a character scan, not a regex).
+ */
+function useEffectCalls(src: string): string[] {
+  const calls: string[] = [];
+  let from = 0;
+  for (;;) {
+    const at = src.indexOf("useEffect(", from);
+    if (at === -1) return calls;
+    const open = at + "useEffect".length;
+    let depth = 0;
+    let close = -1;
+    for (let i = open; i < src.length; i++) {
+      const ch = src[i];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          close = i;
+          break;
+        }
+      }
+    }
+    if (close === -1) return calls;
+    calls.push(src.slice(at, close + 1));
+    from = close + 1;
+  }
+}
+
+describe("ZoneGuessGame — source guard: every new headline is announced to screen readers", () => {
+  const handlerBody = (name: string, nextMarker: string): string => {
+    const start = source.indexOf(`const ${name} = useCallback(`);
+    const end = source.indexOf(nextMarker, start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return source.slice(start, end);
+  };
+
+  it("handleStart announces headline 1 of the round instead of clearing the region", () => {
+    const body = handlerBody("handleStart", "const handleGuess = useCallback(");
+    expect(body).toContain("headlineAnnouncement(1, headlines.length, headlines[0]?.title)");
+    expect(body).toContain("setAnnouncement(headlineAnnouncement(");
+    expect(body).not.toContain('setAnnouncement("")');
+  });
+
+  it("handleNext announces the next headline right after moving the index", () => {
+    const body = handlerBody("handleNext", "// Always mounted regardless of phase");
+    const setIndexAt = body.indexOf("setIndex(nextIndex);");
+    const announceAt = body.indexOf(
+      "headlineAnnouncement(nextIndex + 1, headlines.length, headlines[nextIndex]?.title)",
+    );
+    expect(setIndexAt).toBeGreaterThan(-1);
+    expect(announceAt).toBeGreaterThan(setIndexAt);
+    expect(body.slice(setIndexAt, announceAt)).toContain("setAnnouncement(");
+  });
+
+  it("the handlers depend on `headlines` itself (they read its items), not just its length", () => {
+    for (const [name, marker] of [
+      ["handleStart", "const handleGuess = useCallback("],
+      ["handleNext", "// Always mounted regardless of phase"],
+    ] as const) {
+      const body = handlerBody(name, marker);
+      const deps = body.slice(body.lastIndexOf("}, ["));
+      expect(deps, name).toContain("headlines");
+      expect(deps, name).not.toContain("headlines.length");
+    }
+  });
+
+  it("no useEffect body announces a headline (set-state-in-effect is a lint error here)", () => {
+    const effects = useEffectCalls(source);
+    // The timer effect and the focus effect.
+    expect(effects.length).toBeGreaterThanOrEqual(2);
+    for (const call of effects) {
+      expect(call).not.toContain("setAnnouncement(headlineAnnouncement");
+    }
+  });
+
+  it("describes the guess group by the headline", () => {
+    expect(source.split("aria-describedby={headlineId}")).toHaveLength(2);
+    expect(source.split("id={headlineId}")).toHaveLength(2);
+    expect(source).toContain("const headlineId = useId();");
+    expect(source).toContain('aria-label="Taraf tahmini"');
+  });
+
+  it("keeps the live region permanently mounted", () => {
+    expect(source).toContain('<div className="sr-only" role="status" aria-live="polite">');
+    expect(source).toMatch(/\{announcementRegion\}/);
+  });
+
+  it("useEffectCalls finds every effect and only effects", () => {
+    const sample = "a(); useEffect(() => { if (x) { y(`${z}`); } }, [x]); b(); useEffect(() => {}, []);";
+    expect(useEffectCalls(sample)).toEqual([
+      "useEffect(() => { if (x) { y(`${z}`); } }, [x])",
+      "useEffect(() => {}, [])",
+    ]);
+  });
+});

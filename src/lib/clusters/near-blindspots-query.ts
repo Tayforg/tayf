@@ -73,6 +73,8 @@ export type NearBlindspotItem = {
   dominantZone: MediaDnaZone;
   /** Dominant zone's share of the VOTING sources, in [0.70, 0.80). */
   dominantShare: number;
+  /** Members after same-source dedupe, every kind (the cluster page's "N kaynak"). */
+  memberCount: number;
   /** Voting sources (outlet, wire) after same-source dedupe. */
   votingTotal: number;
   balance: BalanceScore | null;
@@ -141,6 +143,7 @@ function toNearItem(
     title: c.title_tr_neutral ?? c.title_tr,
     dominantZone,
     dominantShare: tally.dominantShare,
+    memberCount: deduped.length,
     votingTotal: tally.total,
     balance: balanceFromZoneCounts(tally.counts),
     updatedAt: c.updated_at,

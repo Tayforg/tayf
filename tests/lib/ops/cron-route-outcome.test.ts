@@ -351,6 +351,200 @@ describe("withCronOutcome: a failing outcome write never hurts the route", () =>
   });
 });
 
+// ---------------------------------------------------------------------------
+// h18-jobs-1: a cron route can swallow a failed sub-step and still answer 200
+// (the headline re-pick RPC failed with 42501 on 9 ticks in a row, 2026-11-01
+// 23:15-23:55 UTC, and ops_health_report row 15 stayed green because every
+// tick was recorded as 200). The route now says so in an internal response
+// header; the wrapper records 599 for it (row 15 counts status >= 500) and
+// strips the header, so Vercel still sees the real status, normally 200.
+// ---------------------------------------------------------------------------
+describe("withCronOutcome: sub-step failures", () => {
+  const HEADER = "x-cron-substep-errors";
+
+  function responseWith(value: string | null, init: { status?: number; body?: string | null } = {}): Response {
+    const headers = new Headers({ "content-type": "text/plain" });
+    if (value !== null) headers.set(HEADER, value);
+    const body = init.body === undefined ? "ok" : init.body;
+    return new Response(body, { status: init.status ?? 200, statusText: "Fine", headers });
+  }
+
+  /** Runs the wrapper once with an authed request and returns the response and the recorded statuses. */
+  async function runOnce(response: Response, auth = `Bearer ${SECRET}`) {
+    const { withCronOutcome } = await load();
+    const wrapped = withCronOutcome("headline", async (_r: Request) => response);
+    const out = await wrapped(req(auth));
+    await flushAfter();
+    const statuses = rpc.mock.calls.map((c) => (c[1] as { p_status: number }).p_status);
+    return { out, statuses };
+  }
+
+  it("the constants are 'x-cron-substep-errors' and 599", async () => {
+    const mod = await load();
+    expect(mod.CRON_SUBSTEP_ERRORS_HEADER).toBe("x-cron-substep-errors");
+    expect(mod.CRON_SUBSTEP_FAILURE_STATUS).toBe(599);
+  });
+
+  it("a 200 with the header '2' is recorded as 599, while the caller still gets a 200 without the header", async () => {
+    const { out, statuses } = await runOnce(responseWith("2"));
+
+    expect(statuses).toEqual([599]);
+    expect(rpc).toHaveBeenCalledWith("ops_cron_route_run_record", {
+      p_route: "headline",
+      p_status: 599,
+      p_duration_ms: expect.any(Number),
+    });
+    expect(out.status).toBe(200);
+    expect(out.headers.get(HEADER)).toBeNull();
+    expect(await out.text()).toBe("ok");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("the stripped copy keeps the status text, the other headers and the body", async () => {
+    const response = responseWith("4");
+    response.headers.append("x-request-id", "abc123");
+    const { out } = await runOnce(response);
+
+    expect(out.status).toBe(200);
+    expect(out.statusText).toBe("Fine");
+    expect(out.headers.get("content-type")).toBe("text/plain");
+    expect(out.headers.get("x-request-id")).toBe("abc123");
+    expect(out.headers.has(HEADER)).toBe(false);
+    expect(await out.text()).toBe("ok");
+  });
+
+  it("a JSON body from NextResponse.json survives the copy", async () => {
+    const { NextResponse } = await import("next/server");
+    const { out, statuses } = await runOnce(
+      NextResponse.json({ success: true, reason: "no candidates" }, { headers: { [HEADER]: "1" } }),
+    );
+    expect(statuses).toEqual([599]);
+    expect(out.status).toBe(200);
+    expect(out.headers.get(HEADER)).toBeNull();
+    expect(out.headers.get("content-type")).toContain("application/json");
+    expect(await out.json()).toEqual({ success: true, reason: "no candidates" });
+  });
+
+  it("the header '1' is recorded as 599", async () => {
+    const { statuses } = await runOnce(responseWith("1"));
+    expect(statuses).toEqual([599]);
+  });
+
+  it("the largest accepted count (6 digits) is recorded as 599, 7 digits are not a count", async () => {
+    expect((await runOnce(responseWith("999999"))).statuses).toEqual([599]);
+    rpc.mockClear();
+    afterMock.mockClear();
+    expect((await runOnce(responseWith("1000000"))).statuses).toEqual([200]);
+  });
+
+  it.each(["0", "abc", "-1", "1.5", "", "+1", "1e3", "0x10", "1 2"])(
+    "the header %j is not a positive count: recorded as 200, and the header is stripped",
+    async (value) => {
+      const { out, statuses } = await runOnce(responseWith(value));
+
+      expect(statuses).toEqual([200]);
+      expect(out.status).toBe(200);
+      expect(out.headers.has(HEADER)).toBe(false);
+      expect(await out.text()).toBe("ok");
+    },
+  );
+
+  it("a missing header records 200 and returns the very same response object", async () => {
+    const response = responseWith(null);
+    const { out, statuses } = await runOnce(response);
+
+    expect(statuses).toEqual([200]);
+    expect(out).toBe(response);
+  });
+
+  it("a real 5xx keeps its own status even with the header", async () => {
+    const { out, statuses } = await runOnce(responseWith("1", { status: 500, body: "{}" }));
+    expect(statuses).toEqual([500]);
+    expect(out.status).toBe(500);
+    expect(out.headers.has(HEADER)).toBe(false);
+
+    rpc.mockClear();
+    afterMock.mockClear();
+    const gateway = await runOnce(responseWith("2", { status: 503, body: "down" }));
+    expect(gateway.statuses).toEqual([503]);
+    expect(gateway.out.status).toBe(503);
+  });
+
+  it("a status below 500 other than 200 (an empty 204, a 429) is also recorded as 599", async () => {
+    const empty = await runOnce(responseWith("1", { status: 204, body: null }));
+    expect(empty.statuses).toEqual([599]);
+    expect(empty.out.status).toBe(204);
+    expect(empty.out.headers.has(HEADER)).toBe(false);
+
+    rpc.mockClear();
+    afterMock.mockClear();
+    const limited = await runOnce(responseWith("1", { status: 429, body: "slow down" }));
+    expect(limited.statuses).toEqual([599]);
+    expect(limited.out.status).toBe(429);
+  });
+
+  it("an unauthenticated 401 with the header is not scheduled, and the header is stripped", async () => {
+    const { out, statuses } = await runOnce(responseWith("3", { status: 401, body: "no" }), "Bearer not-the-secret");
+
+    expect(statuses).toEqual([]);
+    expect(afterMock).not.toHaveBeenCalled();
+    expect(rpc).not.toHaveBeenCalled();
+    expect(createServerClientMock).not.toHaveBeenCalled();
+    expect(out.status).toBe(401);
+    expect(out.headers.has(HEADER)).toBe(false);
+    expect(await out.text()).toBe("no");
+  });
+
+  it("an authenticated request is not recorded when the secret is unset, and the header is still stripped", async () => {
+    delete process.env.CRON_SECRET;
+    const { out, statuses } = await runOnce(responseWith("2", { status: 503, body: "x" }));
+    expect(statuses).toEqual([]);
+    expect(afterMock).not.toHaveBeenCalled();
+    expect(out.headers.has(HEADER)).toBe(false);
+  });
+
+  it("the sub-step status survives a failing outcome write: the response is still the stripped 200", async () => {
+    rpc.mockRejectedValueOnce(new Error("fetch failed"));
+    const { out } = await runOnce(responseWith("2"));
+    expect(out.status).toBe(200);
+    expect(out.headers.has(HEADER)).toBe(false);
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  describe("substepErrorCount", () => {
+    const countOf = async (value: string | null): Promise<number> => {
+      const { substepErrorCount } = await load();
+      return substepErrorCount(responseWith(value));
+    };
+
+    it("is 0 without the header", async () => {
+      expect(await countOf(null)).toBe(0);
+    });
+
+    it("returns the number for 1 to 6 digits", async () => {
+      expect(await countOf("1")).toBe(1);
+      expect(await countOf("2")).toBe(2);
+      expect(await countOf("42")).toBe(42);
+      expect(await countOf("999999")).toBe(999999);
+      expect(await countOf("007")).toBe(7);
+    });
+
+    it("is 0 for zero, for 7 or more digits and for anything that is not plain digits", async () => {
+      for (const value of ["0", "000", "1000000", "abc", "-1", "1.5", "", "+1", "1e3", "0x10", "1,2", "1 2", "NaN"]) {
+        expect(await countOf(value), JSON.stringify(value)).toBe(0);
+      }
+    });
+
+    it("reads the header case-insensitively and does not consume the body", async () => {
+      const { substepErrorCount } = await load();
+      const response = new Response("body", { headers: { "X-Cron-Substep-Errors": "3" } });
+      expect(substepErrorCount(response)).toBe(3);
+      expect(response.bodyUsed).toBe(false);
+      expect(await response.text()).toBe("body");
+    });
+  });
+});
+
 describe("withCronOutcome: client and route validation", () => {
   it("(g) the client is created with the 2 s timeout, and CRON_OUTCOME_TIMEOUT_MS is 2000", async () => {
     const mod = await load();

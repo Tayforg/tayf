@@ -275,7 +275,9 @@ describe("GET /rss.xml", () => {
     expect(byId("c1").description).toBe("3 kaynaktan haberler. Anadolu Ajansı: AA metni");
     expect(byId("c1").description).not.toContain("Kaynak açıklaması");
 
-    expect(byId("c2").description).toBe("1 kaynaktan haberler. Tek kaynaktan 5 kopya.");
+    expect(byId("c2").description).toBe(
+      "1 kaynaktan haberler. Tek kaynaktan dağıtıldı · 5 kopya.",
+    );
     expect(byId("c2").description).not.toContain("Kopya metin");
 
     expect(byId("c3").description).toBe("3 kaynaktan haberler. Kaynak açıklaması: Eşleşmeyen özet");
@@ -298,6 +300,29 @@ describe("GET /rss.xml", () => {
         expect(desc).toMatch(new RegExp(`: ${escapeRegExp(text)}$`));
       }
     }
+  });
+
+  it("does not claim a single source for a wire cluster with several distinct texts (6 members, 3 texts)", async () => {
+    // Empty summary: no member lookup, so the memberLookupCalls pin above is
+    // unaffected by this fixture.
+    mockBundles = [
+      bundle({
+        id: "multi",
+        summary: "",
+        articleCount: 6,
+        effectiveArticleCount: 3,
+        isWireRedistribution: true,
+      }),
+    ];
+
+    const { GET } = await import("@/app/rss.xml/route");
+    const xml = await (await GET()).text();
+    const desc = parseItems(xml)[0]!.description;
+
+    expect(desc).toBe("3 kaynaktan haberler. Ajans ağırlıklı · 6 haber, 3 farklı metin.");
+    expect(desc).not.toContain("Tek kaynaktan");
+    // Blank-summary clusters are excluded from the batched member lookup.
+    expect(memberLookupCalls.flat()).toEqual([]);
   });
 
   it("escapes & and < in the composed description and never leaks raw XML-unsafe characters", async () => {

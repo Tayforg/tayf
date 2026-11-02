@@ -17,6 +17,11 @@ import { EXTRACTIVE_MODEL_ID } from "@/lib/clusters/neutral-title";
 //     the member count only,
 //   * never writes updated_at (it orders the home feed) and never touches a
 //     row whose title_neutral_at is set (an LLM title).
+// A database read or write that failed and was swallowed (the re-pick rpc, a
+// member fetch, a title write) leaves the run at HTTP 200 for Vercel, but the
+// route marks it with an internal header and withCronOutcome records status 599
+// (h18-jobs-1: the re-pick rpc failed with 42501 on 9 ticks in a row, every tick
+// recorded as 200, and ops_health_report row 15 stayed green).
 // ---------------------------------------------------------------------------
 
 const { revalidateTagMock } = vi.hoisted(() => ({ revalidateTagMock: vi.fn() }));
@@ -26,6 +31,9 @@ const { captureServerExceptionMock } = vi.hoisted(() => ({
   captureServerExceptionMock: vi.fn(),
 }));
 vi.mock("@/lib/sentry/server", () => ({ captureServerException: captureServerExceptionMock }));
+
+/** Callbacks handed to after() by withCronOutcome (the outcome write), in order. */
+const hoistedAfter = vi.hoisted(() => [] as Array<() => unknown>);
 
 interface ClusterRow {
   id: string;
@@ -52,6 +60,8 @@ const dbState = vi.hoisted(() => ({
   membersByCluster: {} as Record<string, MemberTitle[]>,
   repickRows: [] as RepickRow[],
   repickError: false,
+  /** Fail the IS NULL pick query itself (a real 500). */
+  pickError: false,
   memberFetchErrorFor: new Set<string>(),
   updateErrorFor: new Map<string, { message: string; code?: string }>(),
   /** Reject any update whose patch carries the stamp column (migration 141 not applied). */
@@ -82,6 +92,7 @@ const supabaseFake = await vi.hoisted(async () => {
           if (forced) return { data: null, error: forced };
           return { data: null, error: null };
         }
+        if (dbState.pickError) return { data: null, error: { message: "pick boom" } };
         if (dbState.slowAfterPick) dbState.clockOffsetActive = true;
         return { data: dbState.clusters, error: null };
       },
@@ -116,7 +127,13 @@ vi.mock("@supabase/supabase-js", () => ({
 
 vi.mock("next/server", async (importOriginal) => {
   const actual = await importOriginal<typeof import("next/server")>();
-  return { ...actual, connection: async () => {} };
+  return {
+    ...actual,
+    connection: async () => {},
+    after: (cb: () => unknown) => {
+      hoistedAfter.push(cb);
+    },
+  };
 });
 
 const ORIGINAL_ENV = { ...process.env };
@@ -133,6 +150,7 @@ beforeEach(() => {
   dbState.membersByCluster = {};
   dbState.repickRows = [];
   dbState.repickError = false;
+  dbState.pickError = false;
   dbState.memberFetchErrorFor = new Set();
   dbState.updateErrorFor = new Map();
   dbState.stampColumnMissing = false;
@@ -143,6 +161,7 @@ beforeEach(() => {
 
   supabaseFake.calls.mutations.length = 0;
   supabaseFake.calls.rpc.length = 0;
+  hoistedAfter.length = 0;
   revalidateTagMock.mockClear();
   captureServerExceptionMock.mockClear();
   vi.spyOn(Date, "now").mockImplementation(() => realNow() + (dbState.clockOffsetActive ? dbState.clockOffsetMs : 0));
@@ -226,6 +245,12 @@ async function run(ip?: string): Promise<{ res: Response; body: Body }> {
   return { res, body: (await res.json()) as Body };
 }
 
+/** Runs the after() callbacks, the way Next does once the response is on its way. */
+const flush = () => Promise.all(hoistedAfter.map((cb) => cb()));
+/** Every `ops_cron_route_run_record` call (withCronOutcome's row for ops_health_report row 15). */
+const outcomeCalls = () => supabaseFake.calls.rpc.filter((c) => c.name === "ops_cron_route_run_record");
+const SUBSTEP_HEADER = "x-cron-substep-errors";
+
 const clusterUpdates = () => supabaseFake.calls.update("clusters");
 const repickCalls = () => supabaseFake.calls.rpc.filter((c) => c.name === "neutral_title_repick_candidates");
 const patchOf = (u: { patch: unknown }) => u.patch as Record<string, unknown>;
@@ -301,6 +326,12 @@ describe("extractive re-pick: the rpc call", () => {
     expect(errorSpy).toHaveBeenCalled();
     expect(captureServerExceptionMock).toHaveBeenCalledTimes(1);
     expect(revalidateTagMock).toHaveBeenCalledWith("cluster-detail:c1", "max");
+
+    // Vercel sees a plain 200; the heartbeat sees 599 (h18-jobs-1).
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    await flush();
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "headline", p_status: 599 });
   });
 
   it("an rpc error with nothing else to do still answers 200 with the 'no candidates' body", async () => {
@@ -310,6 +341,12 @@ describe("extractive re-pick: the rpc call", () => {
     const { res, body } = await run("203.0.113.56");
     expect(res.status).toBe(200);
     expect(body.reason).toBe("no candidates");
+
+    // The 2026-11-01 outage took this path (84-110 ms ticks): 200 to Vercel, 599 to the heartbeat.
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    await flush();
+    expect(outcomeCalls()).toHaveLength(1);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "headline", p_status: 599 });
   });
 
   it("skips the re-pick once the run is older than 40 s", async () => {
@@ -322,6 +359,136 @@ describe("extractive re-pick: the rpc call", () => {
     expect(res.status).toBe(200);
     expect(repickCalls()).toHaveLength(0);
     expect(updateFor("c1")).toBeDefined();
+  });
+});
+
+describe("sub-step failures are recorded as 599, answered as 200 (h18-jobs-1)", () => {
+  /** The statuses withCronOutcome recorded for the run(s) so far. */
+  async function recordedStatuses(): Promise<number[]> {
+    await flush();
+    return outcomeCalls().map((c) => (c.args as { p_status: number }).p_status);
+  }
+
+  async function expectSwallowed(res: Response, expectedStatus: number[]): Promise<void> {
+    expect(res.status).toBe(200);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(await recordedStatuses()).toEqual(expectedStatus);
+    expect(outcomeCalls()[0]!.args).toMatchObject({ p_route: "headline" });
+  }
+
+  it("a healthy run (one cluster, no errors) records 200", async () => {
+    dbState.clusters = [cluster("c1")];
+    members("c1", TWO_GOOD);
+
+    const { res, body } = await run("203.0.113.101");
+    expect(body.rewrote).toBe(1);
+    await expectSwallowed(res, [200]);
+  });
+
+  it("a healthy run with a re-pick row records 200", async () => {
+    dbState.repickRows = [repickRow("r1")];
+    members("r1", TWO_GOOD);
+
+    const { res, body } = await run("203.0.113.102");
+    expect(body.repicked).toBe(1);
+    await expectSwallowed(res, [200]);
+  });
+
+  it("an idle run (nothing to pick, nothing to re-pick) records 200", async () => {
+    const { res, body } = await run("203.0.113.103");
+    expect(body.reason).toBe("no candidates");
+    await expectSwallowed(res, [200]);
+  });
+
+  it("a re-pick member-fetch error records 599 and the other re-pick rows still run", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.repickRows = [repickRow("r1"), repickRow("r2")];
+    members("r1", TWO_GOOD);
+    members("r2", TWO_GOOD);
+    dbState.memberFetchErrorFor.add("r1");
+
+    const { res, body } = await run("203.0.113.104");
+    expect(body.clusters!.r1).toEqual({ status: "errored", error: "member-fetch-failed" });
+    expect(body.clusters!.r2!.status).toBe("repicked");
+    await expectSwallowed(res, [599]);
+  });
+
+  it("an IS NULL member-fetch error records 599", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.clusters = [cluster("c1")];
+    members("c1", TWO_GOOD);
+    dbState.memberFetchErrorFor.add("c1");
+
+    const { res, body } = await run("203.0.113.105");
+    expect(body.clusters!.c1).toEqual({ status: "errored", error: "member-fetch-failed" });
+    await expectSwallowed(res, [599]);
+  });
+
+  it("an IS NULL title-write error records 599", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.clusters = [cluster("c1")];
+    members("c1", TWO_GOOD);
+    dbState.updateErrorFor.set("c1", { message: "update failed", code: "23505" });
+
+    const { res, body } = await run("203.0.113.106");
+    expect(body.clusters!.c1).toEqual({ status: "errored", error: "write-failed" });
+    await expectSwallowed(res, [599]);
+  });
+
+  it("a re-pick title-write error records 599", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.repickRows = [repickRow("r1")];
+    members("r1", TWO_GOOD);
+    dbState.updateErrorFor.set("r1", { message: "update failed" });
+
+    const { res, body } = await run("203.0.113.107");
+    expect(body.clusters!.r1).toEqual({ status: "errored", error: "write-failed" });
+    await expectSwallowed(res, [599]);
+  });
+
+  it("a failed write in llm mode (the ineligible-cluster extractive fallback) records 599", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.ANTHROPIC_API_KEY = "sk-ant-test";
+    dbState.clusters = [cluster("c1")];
+    members("c1", TWO_GOOD);
+    dbState.updateErrorFor.set("c1", { message: "update failed" });
+
+    const { res, body } = await run("203.0.113.108");
+    expect(body.clusters!.c1).toEqual({ status: "errored", error: "write-failed" });
+    await expectSwallowed(res, [599]);
+  });
+
+  it("an empty rewrite is not a sub-step failure: the run records 200", async () => {
+    // Only placeholder titles: the picker has nothing to return. No database call failed.
+    dbState.clusters = [cluster("c1", { article_count: 2 })];
+    members("c1", ["Kısa haberler", "Son dakika"]);
+
+    const { res, body } = await run("203.0.113.109");
+    expect(body.clusters!.c1).toEqual({ status: "errored", error: "empty rewrite" });
+    await expectSwallowed(res, [200]);
+  });
+
+  it("several failures in one run still make exactly one outcome row", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.clusters = [cluster("c1"), cluster("c2")];
+    members("c1", TWO_GOOD);
+    members("c2", TWO_GOOD);
+    dbState.memberFetchErrorFor.add("c1");
+    dbState.updateErrorFor.set("c2", { message: "update failed" });
+    dbState.repickError = true;
+
+    const { res } = await run("203.0.113.110");
+    await expectSwallowed(res, [599]);
+  });
+
+  it("a rejected pick query is a real 500: it keeps its own status and carries no header", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    dbState.pickError = true;
+
+    const { res } = await run("203.0.113.111");
+    expect(res.status).toBe(500);
+    expect(res.headers.get(SUBSTEP_HEADER)).toBeNull();
+    expect(await recordedStatuses()).toEqual([500]);
   });
 });
 

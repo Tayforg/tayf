@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 
 import {
@@ -19,6 +19,7 @@ import {
   fetchDrawResponse,
   startRoundClock,
 } from "@/lib/game/framing-draw";
+import { headlineAnnouncement } from "@/lib/game/headline-announcement";
 
 type Phase = "idle" | "loading" | "playing" | "revealed" | "finished" | "error";
 
@@ -78,6 +79,12 @@ export function FramingGame() {
   // when it still matches the vote's own headline — otherwise a late
   // response for a since-replaced headline would paint the wrong tally.
   const headlineIdRef = useRef<string | null>(null);
+  // How many headlines this round has drawn so far: the "n." in the headline
+  // announcement. The round has no fixed size, so there is no "/total".
+  const drawnCountRef = useRef(0);
+  // Ties the headline <p> to the vote group (aria-describedby), so a screen
+  // reader reads the headline together with the choices.
+  const headlineId = useId();
 
   const firstVoteRef = useRef<HTMLButtonElement | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
@@ -118,6 +125,10 @@ export function FramingGame() {
       setSecondsLeft(Math.max(0, Math.ceil((endsAtRef.current - Date.now()) / 1000)));
       setHeadline({ articleId: outcome.articleId, title: outcome.title });
       headlineIdRef.current = outcome.articleId;
+      // The headline <p> sits outside the live region, so say it here. The
+      // title is only known once the draw lands (handleStart cannot do it).
+      drawnCountRef.current += 1;
+      setAnnouncement(headlineAnnouncement(drawnCountRef.current, null, outcome.title));
       setLastVote(null);
       setLastTally(null);
       setPhase("playing");
@@ -148,6 +159,7 @@ export function FramingGame() {
     setEntries([]);
     setPoolEmpty(false);
     setVoted(0);
+    drawnCountRef.current = 0;
     endsAtRef.current = 0;
     announcedThresholdsRef.current = new Set();
     setSecondsLeft(FRAMING_ROUND_SECONDS);
@@ -334,12 +346,15 @@ export function FramingGame() {
         </div>
 
         <p className="text-sm text-muted-foreground">Bu başlık kimin lehine yazılmış?</p>
-        <p className="font-serif text-lg sm:text-xl leading-snug">{headline.title}</p>
+        <p id={headlineId} className="font-serif text-lg sm:text-xl leading-snug">
+          {headline.title}
+        </p>
 
         {phase === "playing" && (
           <div
             role="group"
             aria-label="Çerçeve oylaması"
+            aria-describedby={headlineId}
             className="grid grid-cols-1 sm:grid-cols-3 gap-2"
           >
             {FRAMING_VOTES.map((vote, voteIndex) => (

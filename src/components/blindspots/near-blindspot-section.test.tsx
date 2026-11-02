@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 // House pattern: see silence-digest-band.test.tsx. The list is a plain server
 // component (no client hooks), so renderToStaticMarkup needs no mocking.
-import { NearBlindspotList } from "./near-blindspot-section";
+import { NearBlindspotList, nearBlindspotCountLabel } from "./near-blindspot-section";
 import { balanceFromZoneCounts } from "@/lib/bias/balance";
 import { BLINDSPOT, ZONE_META } from "@/lib/bias/config";
 import type { NearBlindspotItem } from "@/lib/clusters/near-blindspots-query";
@@ -14,6 +14,7 @@ function mkItem(overrides: Partial<NearBlindspotItem> = {}): NearBlindspotItem {
     title: "Örnek yakın haber",
     dominantZone: "iktidar",
     dominantShare: 0.7,
+    memberCount: 10,
     votingTotal: 10,
     balance: balanceFromZoneCounts({ iktidar: 7, bagimsiz: 0, muhalefet: 3 }),
     updatedAt: "2026-10-21T10:00:00.000Z",
@@ -83,6 +84,15 @@ describe("NearBlindspotList", () => {
     expect(markup).toContain("10 kaynak");
   });
 
+  it("prints member count and voting count when aggregators or niche sources are members", () => {
+    const markup = renderToStaticMarkup(
+      <NearBlindspotList items={[mkItem({ memberCount: 13, votingTotal: 10 })]} />,
+    );
+    expect(markup).toContain("13 kaynak · 10 sayıldı");
+    // Explains the gap on hover instead of leaving two numbers unexplained.
+    expect(markup).toContain('title="Toplayıcı ve niş kaynaklar spektruma sayılmaz."');
+  });
+
   it("omits the balance chip when the cluster has no score", () => {
     const markup = renderToStaticMarkup(
       <NearBlindspotList items={[mkItem({ balance: null })]} />,
@@ -121,5 +131,19 @@ describe("NearBlindspotList", () => {
     );
     expect(markup).not.toContain("<script>");
     expect(markup).toContain("&lt;script&gt;");
+  });
+});
+
+describe("nearBlindspotCountLabel", () => {
+  it("names both numbers when members outnumber the voting sources", () => {
+    expect(nearBlindspotCountLabel(27, 23)).toBe("27 kaynak · 23 sayıldı");
+  });
+
+  it("prints a single number when every member votes", () => {
+    expect(nearBlindspotCountLabel(23, 23)).toBe("23 kaynak");
+  });
+
+  it("falls back to the voting total when the member count is somehow smaller", () => {
+    expect(nearBlindspotCountLabel(10, 12)).toBe("12 kaynak");
   });
 });

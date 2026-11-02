@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useId,
   useRef,
   useState,
   useSyncExternalStore,
@@ -16,16 +17,28 @@ import {
   STREAK_STORAGE_KEY,
   applyDailyResult,
   buildShareText,
+  isShareAbort,
+  liveStreak,
   parseDailyStore,
   type DailyStore,
 } from "@/lib/game/daily-share";
-import type { DailyHeadline, DailyPuzzle } from "@/lib/game/daily-set";
+import {
+  dailyIntroText,
+  puzzleFallbackNotice,
+  type DailyHeadline,
+  type DailyPuzzle,
+  type PuzzleDateFallback,
+} from "@/lib/game/daily-set";
+import { headlineAnnouncement } from "@/lib/game/headline-announcement";
 import { track } from "@/lib/track";
 import type { MediaDnaZone } from "@/types";
 
 interface DailyGameProps {
   puzzle: DailyPuzzle | null;
   todayKey: string;
+  /** Why `?gun=` did not give the puzzle it named (see oyun/page.tsx); a
+   * one-line notice is shown for "expired" and "future". */
+  fellBack?: PuzzleDateFallback | null;
 }
 
 export type Phase = "idle" | "playing" | "revealed" | "finished";
@@ -141,7 +154,7 @@ function getServerSnapshot(): string | null {
  * render (`resolveDailyPhase`), because the first client render still sees
  * the null server snapshot.
  */
-export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
+export function DailyGame({ puzzle, todayKey, fellBack }: DailyGameProps) {
   const rawStore = useSyncExternalStore(subscribeStore, readRawStore, getServerSnapshot);
   const store = useMemo(() => parseDailyStore(rawStore), [rawStore]);
 
@@ -169,23 +182,33 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
   // "finished", which makes handleGuess's `phase !== "playing"` bail out.
   const openedAlreadyPlayed = Boolean(existingResult) && !playedThisSession;
 
+  // Ties the headline <p> to the guess group (aria-describedby), so a screen
+  // reader reads the headline together with the choices.
+  const headlineId = useId();
+
   const startRef = useRef<HTMLButtonElement | null>(null);
   const nextRef = useRef<HTMLButtonElement | null>(null);
   const firstZoneRef = useRef<HTMLButtonElement | null>(null);
+  const shareRef = useRef<HTMLButtonElement | null>(null);
 
   // Keyboard-only play: move focus to the control that matters for the
   // phase just entered, since each phase swaps in a different button
   // group and the browser would otherwise reset focus to <body> — same
-  // pattern as zone-guess-game.tsx.
+  // pattern as zone-guess-game.tsx. The result screen only takes focus when
+  // THIS session just finished the round (the final Sonraki unmounts the
+  // focused button); a visitor who opens the page with a stored result keeps
+  // the focus where it was.
   useEffect(() => {
     if (phase === "revealed") {
       nextRef.current?.focus();
     } else if (phase === "playing") {
       firstZoneRef.current?.focus();
+    } else if (phase === "finished" && playedThisSession) {
+      shareRef.current?.focus();
     }
-  }, [phase, index]);
+  }, [phase, index, playedThisSession]);
 
-  const headlines: DailyHeadline[] = puzzle?.headlines ?? [];
+  const headlines = useMemo<DailyHeadline[]>(() => puzzle?.headlines ?? [], [puzzle]);
   const current = headlines[index] ?? null;
   const finalMarks = resolveFinalMarks({
     storedMarks: existingResult?.marks,
@@ -198,9 +221,11 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
     setIndex(0);
     setMarks([]);
     setGuessedZone(null);
-    setAnnouncement("");
+    // The headline <p> sits outside the live region, so say it here: a screen
+    // reader user would otherwise only hear the zone buttons.
+    setAnnouncement(headlineAnnouncement(1, headlines.length, headlines[0]?.title));
     setLocalPhase("playing");
-  }, []);
+  }, [headlines]);
 
   const handleGuess = useCallback(
     (zone: MediaDnaZone) => {
@@ -262,8 +287,11 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
       return;
     }
     setIndex(nextIndex);
+    setAnnouncement(
+      headlineAnnouncement(nextIndex + 1, headlines.length, headlines[nextIndex]?.title),
+    );
     setLocalPhase("playing");
-  }, [index, headlines.length, finishRound, marks]);
+  }, [index, headlines, finishRound, marks]);
 
   const copyToClipboard = useCallback((text: string) => {
     try {
@@ -297,8 +325,11 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
     if (shareFn) {
       shareFn
         .call(navigator, { text })
-        .catch(() => {
-          // Cancelled or unsupported mid-call — fall back to clipboard.
+        .catch((err) => {
+          // Dismissing the share sheet is a decision, not a failure: leave
+          // the clipboard alone. Anything else (unsupported, blocked) still
+          // falls back to copying.
+          if (isShareAbort(err)) return;
           copyToClipboard(text);
         });
       return;
@@ -326,8 +357,12 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
     content = (
       <div className="rounded-xl border border-border/60 bg-card/40 p-6 text-center space-y-4">
         <p className="text-sm text-muted-foreground">
-          Dünün ({puzzle.windowLabel}) 5 siyasi manşeti. Her biri hangi bölgedeki bir kaynaktan?
-          Herkes aynı 5 manşeti görür. Günün Tayf&rsquo;ı #{puzzle.number}.
+          {dailyIntroText({
+            dateKey: puzzle.dateKey,
+            todayKey,
+            number: puzzle.number,
+            windowLabel: puzzle.windowLabel,
+          })}
         </p>
         <button
           ref={startRef}
@@ -350,9 +385,10 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
         <div className="text-center space-y-2">
           <p className="font-serif text-2xl">Tayf&rsquo;ın etiketiyle {score}/5 aynı</p>
           <p className="text-[11px] text-muted-foreground">
-            Seri: {store.streak} gün · En iyi: {store.best}
+            Seri: {liveStreak(store, todayKey)} gün · En iyi: {store.best}
           </p>
           <button
+            ref={shareRef}
             type="button"
             onClick={handleShare}
             className="min-h-[44px] inline-flex items-center justify-center rounded-lg bg-primary px-6 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
@@ -417,12 +453,15 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
           <span aria-label={`${score} kaynakla aynı`}>{score} aynı</span>
         </div>
 
-        <p className="font-serif text-lg sm:text-xl leading-snug">{current.title}</p>
+        <p id={headlineId} className="font-serif text-lg sm:text-xl leading-snug">
+          {current.title}
+        </p>
 
         {phase === "playing" && (
           <div
             role="group"
             aria-label="Taraf tahmini"
+            aria-describedby={headlineId}
             className="grid grid-cols-1 sm:grid-cols-3 gap-2"
           >
             {ZONES.map((zone, zoneIndex) => {
@@ -468,9 +507,14 @@ export function DailyGame({ puzzle, todayKey }: DailyGameProps) {
     );
   }
 
+  const fallbackNotice = puzzleFallbackNotice(fellBack);
+
   return (
     <>
       {announcementRegion}
+      {fallbackNotice && (
+        <p className="text-[11px] text-muted-foreground text-center">{fallbackNotice}</p>
+      )}
       {content}
     </>
   );

@@ -57,7 +57,7 @@ function summaryWith(blindspots: WeeklyBlindspot[]): WeeklySummary {
 describe("blindspotShareText", () => {
   it("share exactly 1 keeps the 'Sadece' claim, copy unchanged", () => {
     expect(blindspotShareText(blindspot({ side: "iktidar", articleCount: 13, share: 1, sharePct: 100 }))).toBe(
-      "Sadece İktidar tarafında · 13 haber",
+      "Sadece İktidar tarafında · 13 kaynak",
     );
   });
 
@@ -66,31 +66,109 @@ describe("blindspotShareText", () => {
       blindspot({ side: "iktidar", articleCount: 20, share: 15 / 17, sharePct: 88 }),
     );
 
-    expect(text).toBe("%88 İktidar · 20 haber");
+    expect(text).toBe("%88 İktidar · 20 kaynak");
     expect(text).not.toContain("Sadece");
   });
 
   it("a clamped near-total share reads %99, not 'Sadece' and not %100", () => {
     const text = blindspotShareText(blindspot({ share: 0.995, sharePct: 99, articleCount: 200 }));
 
-    expect(text).toBe("%99 İktidar · 200 haber");
+    expect(text).toBe("%99 İktidar · 200 kaynak");
   });
 
   it("a stored side with no zone evidence makes no 'Sadece' and no percentage claim", () => {
     const text = blindspotShareText(blindspot({ side: "iktidar", articleCount: 13, share: null, sharePct: null }));
 
-    expect(text).toBe("İktidar tarafında · 13 haber");
+    expect(text).toBe("İktidar tarafında · 13 kaynak");
     expect(text).not.toContain("Sadece");
     expect(text).not.toContain("%");
   });
 
   it("names the other zones from ZONE_META and groups four-digit counts the Turkish way", () => {
     expect(blindspotShareText(blindspot({ side: "muhalefet", articleCount: 1200 }))).toBe(
-      "Sadece Muhalefet tarafında · 1.200 haber",
+      "Sadece Muhalefet tarafında · 1.200 kaynak",
     );
     expect(
       blindspotShareText(blindspot({ side: "bagimsiz", articleCount: 1500, share: 0.8, sharePct: 80 })),
-    ).toBe("%80 Bağımsız · 1.500 haber");
+    ).toBe("%80 Bağımsız · 1.500 kaynak");
+  });
+});
+
+describe("<ZoneShares> zone rows (h18-numbers-1)", () => {
+  const props = { summary: summaryWith([]), health: null, feedStatus: null };
+
+  it("count voting-source records, not articles: each row says 'kaynak kaydı'", () => {
+    const html = renderToStaticMarkup(<ZoneShares {...props} truncated={false} />);
+
+    // summaryWith(): iktidar 6, bagimsiz 3, muhalefet 1.
+    expect(html).toContain("6 kaynak kaydı");
+    expect(html).toContain("3 kaynak kaydı");
+    expect(html).toContain("1 kaynak kaydı");
+    expect(html).not.toContain("6 haber");
+  });
+
+  it("states the basis per variant in 'kaynak kaydı' (rolling, live, closed)", () => {
+    const rolling = renderToStaticMarkup(
+      <ZoneShares {...props} truncated={false} variant="rolling" />,
+    );
+    const live = renderToStaticMarkup(<ZoneShares {...props} truncated={false} />);
+    const closed = renderToStaticMarkup(<ZoneShares {...props} truncated={false} archive />);
+
+    expect(rolling).toContain(
+      "Yüzdeler son 7 günün çok kaynaklı kümelerindeki 10 kaynak kaydı üzerinden hesaplanır.",
+    );
+    expect(rolling).toContain("(son 7 günün 10 kaynak kaydı içinde)");
+    expect(live).toContain(
+      "Yüzdeler bu haftanın çok kaynaklı kümelerindeki 10 kaynak kaydı üzerinden hesaplanır.",
+    );
+    expect(live).toContain("(haftanın 10 kaynak kaydı içinde)");
+    expect(closed).toContain(
+      "Yüzdeler o haftanın çok kaynaklı kümelerindeki 10 kaynak kaydı üzerinden hesaplanır.",
+    );
+    expect(closed).toContain("(haftanın 10 kaynak kaydı içinde)");
+    for (const html of [rolling, live, closed]) {
+      expect(html).not.toContain("toplam");
+      expect(html).not.toContain("haberi");
+    }
+  });
+});
+
+describe("<WidestSpectrum> (h18-numbers-1)", () => {
+  it("labels a cluster's member count 'kaynak', the same word /blindspots uses", () => {
+    const summary: WeeklySummary = {
+      ...summaryWith([]),
+      topClusters: [
+        {
+          id: "wide-1",
+          title: "Geniş yelpaze",
+          articleCount: 9,
+          zonesCovered: 3,
+          zoneCounts: { iktidar: 4, bagimsiz: 3, muhalefet: 2 },
+        },
+      ],
+    };
+    const html = renderToStaticMarkup(<WidestSpectrum summary={summary} variant="rolling" />);
+
+    expect(html).toContain("9 kaynak · 3 bölge");
+    expect(html).not.toContain("9 haber");
+  });
+
+  it("groups four-digit counts the Turkish way", () => {
+    const summary: WeeklySummary = {
+      ...summaryWith([]),
+      topClusters: [
+        {
+          id: "wide-2",
+          title: "Çok geniş",
+          articleCount: 1500,
+          zonesCovered: 3,
+          zoneCounts: { iktidar: 600, bagimsiz: 500, muhalefet: 400 },
+        },
+      ],
+    };
+    expect(renderToStaticMarkup(<WidestSpectrum summary={summary} />)).toContain(
+      "1.500 kaynak · 3 bölge",
+    );
   });
 });
 
@@ -107,9 +185,9 @@ describe("<Blindspots>", () => {
       />,
     );
 
-    expect(html).toContain("Sadece İktidar tarafında · 13 haber");
-    expect(html).toContain("%88 İktidar · 20 haber");
-    expect(html).toContain("İktidar tarafında · 4 haber");
+    expect(html).toContain("Sadece İktidar tarafında · 13 kaynak");
+    expect(html).toContain("%88 İktidar · 20 kaynak");
+    expect(html).toContain("İktidar tarafında · 4 kaynak");
     // "Sadece" appears exactly once: on the 100% row.
     expect(html.match(/Sadece/g) ?? []).toHaveLength(1);
   });
@@ -123,7 +201,7 @@ describe("<Blindspots>", () => {
       />,
     );
 
-    expect(html).toContain("%88 İktidar · 20 haber");
+    expect(html).toContain("%88 İktidar · 20 kaynak");
     expect(html).not.toContain("Sadece");
   });
 });
@@ -164,10 +242,11 @@ describe("variant=\"rolling\" (/hafta)", () => {
     );
 
     expect(html).toContain("Son 7 günde kim neyi öne çıkardı");
-    expect(html).toContain("Yüzdeler son 7 günün toplam 10 haberi üzerinden hesaplanır.");
-    expect(html.match(/\(son 7 günün 10 haberi içinde\)/g) ?? []).toHaveLength(3);
+    expect(html).toContain("Yüzdeler son 7 günün çok kaynaklı kümelerindeki 10 kaynak kaydı üzerinden hesaplanır.");
+    expect(html.match(/\(son 7 günün 10 kaynak kaydı içinde\)/g) ?? []).toHaveLength(3);
     expect(html.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
     expect(html).not.toContain("haftanın 10 haberi");
+    expect(html).not.toContain("haftanın 10 kaynak kaydı");
   });
 
   it("<ZoneShares> keeps the live source-health line under rolling", () => {
@@ -195,7 +274,7 @@ describe("variant=\"rolling\" (/hafta)", () => {
       <BasisNote total={6989} feedStatus={null} variant="rolling" />,
     );
 
-    expect(html).toContain("Yüzdeler son 7 günün toplam 6.989 haberi üzerinden hesaplanır.");
+    expect(html).toContain("Yüzdeler son 7 günün çok kaynaklı kümelerindeki 6.989 kaynak kaydı üzerinden hesaplanır.");
     expect(html.toLocaleLowerCase("tr-TR")).not.toContain("bu hafta");
   });
 
@@ -238,7 +317,7 @@ describe("variant=\"rolling\" (/hafta)", () => {
     const spots = renderToStaticMarkup(<Blindspots summary={summaryWith([])} health={null} />);
 
     expect(zones).toContain("Bu hafta kim neyi öne çıkardı");
-    expect(zones).toContain("(haftanın 10 haberi içinde)");
+    expect(zones).toContain("(haftanın 10 kaynak kaydı içinde)");
     expect(spots).toContain("Bu hafta kör nokta yok.");
   });
 
@@ -246,6 +325,6 @@ describe("variant=\"rolling\" (/hafta)", () => {
     const zones = renderToStaticMarkup(<ZoneShares {...props} truncated={false} archive />);
 
     expect(zones).toContain("O hafta kim neyi öne çıkardı");
-    expect(zones).toContain("(haftanın 10 haberi içinde)");
+    expect(zones).toContain("(haftanın 10 kaynak kaydı içinde)");
   });
 });

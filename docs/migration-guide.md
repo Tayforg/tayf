@@ -31,6 +31,24 @@ export PROJECT_REF
 
 ---
 
+## A migration that adds an RPC the app calls: APPLY, VERIFY THE GRANT, THEN DEPLOY
+
+Whenever a migration creates a function that application code calls (`supabase.rpc("...")`), the order is fixed:
+
+1. **Apply the migration** before the app deploy that first calls the function (the ordering invariant above, applied to RPCs).
+2. **Verify the grant, read-only,** before that deploy reaches Production. For migration 141's `neutral_title_repick_candidates`:
+
+   ```sql
+   select has_function_privilege('service_role', 'public.neutral_title_repick_candidates(text, integer)', 'execute');
+   ```
+
+   It must be `true`. The same check with `'anon'` in place of `'service_role'` must be `false` (and `'authenticated'` too): the function is `SECURITY DEFINER` and executable by `service_role` only. Use the function's real signature, with the argument types in the parentheses.
+3. **Then** let the Vercel deploy go to Production.
+
+Why this is a rule and not a courtesy: on 2026-11-01 23:15-23:55 UTC `/api/cron/headline` got `42501 permission denied for function neutral_title_repick_candidates` from its first call to the migration 141 function on 9 ticks in a row (the grants read correctly afterwards: `service_role` true, `anon` false). The route logs that and answers 200 on purpose, so all 9 ticks were recorded as 200 and `ops_health_report()` stayed green. Since then a swallowed sub-step failure is recorded as 599 and row 15 warns on the first bad tick and fails on the third (the fourth when the window holds 7 runs; a 30 minute window of a 5 minute cron holds 6 or 7 runs, and the row needs at least 2 failures that are at least half of them; see `docs/ops-heartbeat.md`, "599 = 200 with a failed sub-step"), but that is a net, not a substitute for the order above.
+
+---
+
 ## 0. Pre-flight
 
 Confirm you have:

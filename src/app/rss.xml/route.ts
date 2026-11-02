@@ -6,6 +6,7 @@ import {
   describeForMeta,
   resolveSummaryAttribution,
 } from "@/lib/clusters/summary-attribution";
+import { wireBadgeLabel } from "@/lib/clusters/wire";
 import {
   buildRssXml,
   rssUnavailableResponse,
@@ -98,7 +99,7 @@ export async function GET(): Promise<Response> {
     const link = `${base}/cluster/${b.cluster.id}`;
     const honestCount = b.effectiveArticleCount ?? b.cluster.article_count;
     const wireNote = b.isWireRedistribution
-      ? ` Tek kaynaktan ${b.cluster.article_count} kopya.`
+      ? ` ${wireBadgeLabel(b.cluster.article_count, honestCount)}.`
       : "";
     const wire = { isWireRedistribution: b.isWireRedistribution === true };
     const members = membersByCluster[b.cluster.id];

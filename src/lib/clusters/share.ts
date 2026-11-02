@@ -1,5 +1,6 @@
 import { tallyZones, zoneOf } from "@/lib/bias/config";
 import { isOnlyZone, zoneCountsOf, zonePercents } from "@/lib/bias/zone-summary";
+import { wireBadgeShort } from "@/lib/clusters/wire";
 import type { BiasCategory, BiasDistribution, MediaDnaZone } from "@/types";
 
 // Lowercase Turkish zone labels for share text. `ZONE_META` labels
@@ -57,7 +58,9 @@ export function buildShareText(input: {
   }
 
   if (wire?.isWireRedistribution) {
-    text += ` · tek kaynaktan ${wire.memberCount} kopya`;
+    // `articleCount` is the honest (distinct-text) count, so it doubles as the
+    // number of distinct texts here; see wireBadgeShort.
+    text += ` · ${wireBadgeShort(wire.memberCount, articleCount)}`;
   }
 
   return text;
