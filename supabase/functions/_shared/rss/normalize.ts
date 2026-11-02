@@ -37,6 +37,8 @@ import {
 } from "../image-url.ts";
 import type { RawFeedItem, RssSource } from "./fetcher.ts";
 import { isLegalNotice } from "./legal-notice.ts";
+import { findInlineImgSrc } from "./inline-image.ts";
+import { clampForScan, stripTagsLinear } from "./strip-tags.ts";
 import { classifyCategory } from "./category.ts";
 import type { NewsCategory } from "./category.ts";
 
@@ -185,8 +187,16 @@ function extractImage(item: RawFeedItem): string | null {
 
   const htmlContent = item.contentEncoded ?? item.content ?? "";
   if (htmlContent) {
-    const m = htmlContent.match(/<img[^>]+src=["']([^"']+)["']/i);
-    const inline = normalizeImageUrl(m?.[1]);
+    // h26-security-2: the unbounded `[^>]+` rescanned the rest of the body from
+    // every '<img' that had no '>' behind it (20,000 x '<img' = 1.5 s), and the
+    // bounded `[^>]{1,1000}` that replaced it was still ~1000x super-linear
+    // (50 KB of '<img' = 15 ms per item, 160 such items = 2.9 s against the 2 s
+    // isolate limit). findInlineImgSrc (./inline-image.ts) is a linear scanner
+    // with the same pick: the first '<img' with a usable src, the LAST src= in
+    // its tag, looking at the first IMAGE_SCAN_CAP units only (a lead image sits
+    // at the top of the body).
+    const src = findInlineImgSrc(htmlContent, IMAGE_SCAN_CAP);
+    const inline = normalizeImageUrl(src);
     if (inline && isValidImageUrl(inline) && !isVideoUrl(inline)) {
       return upgradeThumbnailUrl(inline);
     }
@@ -197,6 +207,19 @@ function extractImage(item: RawFeedItem): string | null {
 // ---------------------------------------------------------------------------
 // Text helpers
 // ---------------------------------------------------------------------------
+
+// h26-security-2: feed text is attacker-controlled and the only length bound on
+// it is the 8 MB body cap, so every regex pass below first sees a clamped copy
+// (clampForScan, ./strip-tags.ts). A title of 80,000 '<' cost 2.1 s of CPU in
+// the old fixpoint strip and a 1 MB description proportionally more, against a
+// 2 s isolate limit. The caps sit far above any real value: a headline is
+// < 300 chars (the clean title is stored up to 2,000), and the stored
+// description is cut to 500 chars of CLEANED text, so 20,000 raw units is a
+// 40x margin for markup-heavy snippets. The inline-image scanner looks at the
+// first 50,000 units of the body.
+const TITLE_SCAN_CAP = 2_000;
+const DESCRIPTION_SCAN_CAP = 20_000;
+const IMAGE_SCAN_CAP = 50_000;
 
 const NAMED_ENTITIES: Record<string, string> = {
   amp: "&",
@@ -236,39 +259,39 @@ function decodeEntities(text: string): string {
 // The first pass above is single-pass on purpose, so a feed that double-encodes
 // ("&amp;quot;") used to leave a literal "&quot;" in the stored text. The
 // callers below therefore run ONE bounded extra pass, `decodeResidualEntities`
-// (./entities.ts), AFTER `stripTags`. Running it after the strip is what keeps
+// (./entities.ts), AFTER `stripTagsLinear`. Running it after the strip is what keeps
 // the anti-markup guarantee: that pass never emits '<' or '>' ("&lt;" / "&gt;"
 // and numeric references to them are left as they are), so it cannot
 // reintroduce a tag the strip already removed. It is one level, not a loop:
 // "&amp;amp;quot;" ends up as "&quot;".
 
-// Strip HTML tags repeatedly until the string stops changing. A single
-// `/<[^>]*>/` pass can leave a tag behind for crafted input like
-// "<<script>script>", so loop to a fixpoint.
-function stripTags(text: string): string {
-  let prev: string;
-  let out = text;
-  do {
-    prev = out;
-    out = out.replace(/<[^>]*>/g, "");
-  } while (out !== prev);
-  return out;
-}
+// Tag stripping lives in ./strip-tags.ts (`stripTagsLinear`). The old code here
+// looped `/<[^>]*>/g` to a fixpoint to catch crafted input like
+// "<<script>script>", but one pass already IS the fixpoint (after a pass every
+// remaining '<' has no '>' after it), and that pass was O(n^2) on a text with
+// no '>' (h26-security-2). The scanner copies the single regex pass exactly, so
+// the stored title / description and the content_hash are byte-identical.
 
 function cleanDescription(raw?: string | null): string | null {
   if (!raw) return null;
-  // Decode FIRST so entity-encoded markup becomes real angle brackets, then
-  // strip tags to a fixpoint so reintroduced or nested markup can't survive.
+  // Clamp FIRST (h26-security-2), so the decode and the strip below never see
+  // more than DESCRIPTION_SCAN_CAP units of attacker-controlled text.
+  //
+  // Decode so entity-encoded markup becomes real angle brackets, then strip
+  // tags (one linear pass is the fixpoint) so reintroduced or nested markup
+  // can't survive.
   //
   // Then ONE extra residue pass (double-encoded feeds), after the strip so it
-  // cannot bring markup back; see the note above `stripTags`.
+  // cannot bring markup back; see the note above (the residue-pass paragraph).
   //
   // Raw characters XML 1.0 forbids (C0 controls, U+FFFE / U+FFFF, lone
   // surrogates) are removed AFTER the residue pass and BEFORE the trim and the
   // 500-character clamp, so they can neither survive (the pass can reveal one,
   // e.g. "&amp;#11;") nor shift the clamp, which counts decoded text.
   const text = stripInvalidXmlChars(
-    decodeResidualEntities(stripTags(decodeEntities(raw))),
+    decodeResidualEntities(
+      stripTagsLinear(decodeEntities(clampForScan(raw, DESCRIPTION_SCAN_CAP))),
+    ),
   ).trim();
   if (!text) return null;
   if (text.length <= 500) return text;
@@ -501,12 +524,15 @@ export function prepareItem(
     return null;
   }
 
-  // Titles are short plain text; decode entities then strip any (possibly
-  // reintroduced or nested) markup to a fixpoint, then one bounded residue
+  // Titles are short plain text; clamp first (h26-security-2: an 80 KB title
+  // of '<' cost 2.1 s here, before the known-url skip), decode entities, strip
+  // any (possibly reintroduced or nested) markup, then one bounded residue
   // pass for double-encoded feeds. Same discipline and order as
   // `cleanDescription`.
   const title = stripInvalidXmlChars(
-    decodeResidualEntities(stripTags(decodeEntities(rawTitle))),
+    decodeResidualEntities(
+      stripTagsLinear(decodeEntities(clampForScan(rawTitle, TITLE_SCAN_CAP))),
+    ),
   ).trim();
   // A title that decodes to nothing readable ('&nbsp', '-', '…') is not a
   // headline. Before the legal-notice check: a notice is not counted here.

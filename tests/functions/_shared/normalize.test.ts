@@ -1639,3 +1639,251 @@ describe("normalize.ts category wiring [hunt-20]", () => {
     expect(row!.category).toBe("politika");
   });
 });
+
+// ---------------------------------------------------------------------------
+// h26-security-2: hostile markup must cost linear time.
+//
+// `stripTags` used to loop `/<[^>]*>/g` to a fixpoint. With no '>' in the text
+// every '<' scans to the end of the string, so ONE pass was already O(n^2): an
+// 80 KB title of '<' cost 2.1 s of CPU in `normalizeItem` (`prepareItem` strips
+// every title BEFORE the known-url skip), and the Edge isolate is killed at
+// 2 s, every cycle, for as long as the feed serves the item. `extractImage` ran
+// `/<img[^>]+src=.../i` over an uncapped contentEncoded, the same class (a
+// string of '<img' costs the same). One feed item is attacker-controlled input
+// for a compromised outlet or anyone on path to the plain-http feeds.
+//
+// The assertions are wall-clock bounds an order of magnitude above the linear
+// cost and far below the quadratic one (HEAD: 2,000+ ms), plus the invariant
+// the old fixpoint guaranteed: nothing that still looks like a tag survives.
+// ---------------------------------------------------------------------------
+
+/** True when some '<' is followed later by a '>' -- a character scan on purpose
+ *  (test code never strips or matches tags with a regex). Checking the FIRST
+ *  '<' is enough: if it has no '>' after it, no later '<' has one either. */
+function hasTagShape(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const lt = text.indexOf("<");
+  return lt !== -1 && text.indexOf(">", lt + 1) !== -1;
+}
+
+describe("normalize.ts hostile markup is linear-time [h26-security-2]", () => {
+  const NOW = Date.parse("2026-11-02T06:00:00Z");
+  const PUB = "Mon, 02 Nov 2026 05:00:00 GMT";
+  const LINK = "https://example.test/haber/hostile-1";
+  const GOOD_TITLE = "Merkez Bankası faiz kararını bugün açıkladı";
+  const BUDGET_MS = 200;
+
+  // beforeAll (the module loader at the top of this file) has already run.
+  beforeAll(() => {
+    // Warm up: the first call pays for lazy regex compilation and JIT.
+    mod!.normalizeItem(
+      source,
+      { title: GOOD_TITLE, link: LINK, contentSnippet: "kısa", pubDate: PUB },
+      NOW,
+    );
+  });
+
+  const PAYLOADS: ReadonlyArray<readonly [string, string]> = [
+    ["80,000 x '<'", "<".repeat(80_000)],
+    ["20,000 x '<<<a'", "<<<a".repeat(20_000)],
+    ["20,000 x '<a<a'", "<a<a".repeat(20_000)],
+    ["unterminated comment", "<!--" + "x".repeat(80_000)],
+    ["20,000 x '&lt;'", "&lt;".repeat(20_000)],
+    ["60,000 x '&lt;'", "&lt;".repeat(60_000)],
+    ["30,000 x '<a '", "<a ".repeat(30_000)],
+  ];
+
+  const FIELDS: ReadonlyArray<
+    readonly [string, (payload: string) => Record<string, string>]
+  > = [
+    ["title", (p) => ({ title: p })],
+    [
+      "contentSnippet + content",
+      (p) => ({ title: GOOD_TITLE, contentSnippet: p, content: p }),
+    ],
+    ["contentEncoded", (p) => ({ title: GOOD_TITLE, contentEncoded: p })],
+  ];
+
+  function runTimed(fields: Record<string, string>) {
+    const start = performance.now();
+    const row = mod!.normalizeItem(
+      source,
+      { link: LINK, pubDate: PUB, ...fields } as Parameters<
+        NormalizeModule["normalizeItem"]
+      >[1],
+      NOW,
+    );
+    return { row, ms: performance.now() - start };
+  }
+
+  function expectBounded(row: ReturnType<typeof runTimed>["row"]) {
+    if (row === null) return;
+    expect(row.title.length).toBeLessThanOrEqual(2000);
+    expect((row.description ?? "").length).toBeLessThanOrEqual(500);
+    expect(hasTagShape(row.title)).toBe(false);
+    expect(hasTagShape(row.description)).toBe(false);
+  }
+
+  for (const [fieldName, build] of FIELDS) {
+    for (const [payloadName, payload] of PAYLOADS) {
+      it(`${payloadName} in ${fieldName} is handled in under ${BUDGET_MS} ms`, () => {
+        const { row, ms } = runTimed(build(payload));
+        expect(ms).toBeLessThan(BUDGET_MS);
+        expectBounded(row);
+      });
+    }
+  }
+
+  it("20,000 x '<img' in contentEncoded is handled in under 200 ms", () => {
+    const { row, ms } = runTimed({
+      title: GOOD_TITLE,
+      contentEncoded: "<img".repeat(20_000),
+    });
+    expect(ms).toBeLessThan(BUDGET_MS);
+    expect(row).not.toBeNull();
+    expectBounded(row);
+    expect(row!.image_url ?? null).toBeNull();
+  });
+
+  // A per-item bound is not a per-feed bound: the ingest isolate has ONE 2 s CPU
+  // budget for the whole feed, a single feed is always admitted on a fresh
+  // isolate, the cycle budget is 8,000,000 bytes and there is no item cap. A
+  // regex that costs "only" 14-17 ms on a 50 KB body therefore kills the
+  // isolate when ~160 items carry it (HEAD of the first h26 fix: 1.9-2.9 s for
+  // the whole feed, parse 5 ms). So these tests time the whole feed.
+  describe("a whole hostile feed is bounded in aggregate [h26-security-2]", () => {
+    const FEED_ITEMS = 160;
+    const FEED_BUDGET_MS = 300;
+
+    const BODIES: ReadonlyArray<readonly [string, string]> = [
+      ["12,500 x '<img'", "<img".repeat(12_500)],
+      ["10,000 x '<img '", "<img ".repeat(10_000)],
+      ["8,000 x '<img a'", "<img a".repeat(8_000)],
+      ["5,000 x '<img src=\"'", '<img src="'.repeat(5_000)],
+      ["8,000 x '<img src='", "<img src=".repeat(8_000)],
+      ["8,000 x '<img src=\"x'", "<img src=\"x'".repeat(4_000)],
+      ["'<img ' + 'src=' x 12,000", "<img " + "src=".repeat(12_000)],
+      ["'<img' + 49 KB of '=' ", "<img" + "=".repeat(49_000)],
+      ["'<img a' + 49 KB of '<'", "<img a" + "<".repeat(49_000)],
+    ];
+
+    for (const [label, body] of BODIES) {
+      it(`${FEED_ITEMS} items with ${label} in contentEncoded stay under ${FEED_BUDGET_MS} ms in total`, () => {
+        const start = performance.now();
+        let stored = 0;
+        for (let i = 0; i < FEED_ITEMS; i++) {
+          const row = mod!.normalizeItem(
+            source,
+            {
+              title: GOOD_TITLE,
+              link: `https://example.test/haber/hostile-feed-${i}`,
+              pubDate: PUB,
+              contentEncoded: body,
+            } as Parameters<NormalizeModule["normalizeItem"]>[1],
+            NOW,
+          );
+          if (row !== null) stored++;
+        }
+        const ms = performance.now() - start;
+        expect(stored).toBe(FEED_ITEMS);
+        expect(ms).toBeLessThan(FEED_BUDGET_MS);
+      });
+    }
+
+    it("a 'content' (non-encoded) body gets the same aggregate bound", () => {
+      const start = performance.now();
+      for (let i = 0; i < FEED_ITEMS; i++) {
+        mod!.normalizeItem(
+          source,
+          {
+            title: GOOD_TITLE,
+            link: `https://example.test/haber/hostile-content-${i}`,
+            pubDate: PUB,
+            content: "<img".repeat(12_500),
+          } as Parameters<NormalizeModule["normalizeItem"]>[1],
+          NOW,
+        );
+      }
+      expect(performance.now() - start).toBeLessThan(FEED_BUDGET_MS);
+    });
+  });
+
+  it("'<img src' followed by 80,000 spaces in contentEncoded is handled in under 200 ms", () => {
+    const { row, ms } = runTimed({
+      title: GOOD_TITLE,
+      contentEncoded: "<img src" + " ".repeat(80_000),
+    });
+    expect(ms).toBeLessThan(BUDGET_MS);
+    expect(row).not.toBeNull();
+    expect(row!.image_url ?? null).toBeNull();
+  });
+
+  it("a hostile description cannot starve a later, ordinary item", () => {
+    const hostile = runTimed({ title: "<".repeat(80_000) });
+    const ordinary = runTimed({
+      title: "Normal bir haber başlığı",
+      contentSnippet: "<p>Kısa özet.</p>",
+    });
+    expect(hostile.ms + ordinary.ms).toBeLessThan(BUDGET_MS);
+    expect(ordinary.row).not.toBeNull();
+    expect(ordinary.row!.description).toBe("Kısa özet.");
+  });
+
+  it("still finds an <img> src inside the first 50 KB of a large body", () => {
+    const body =
+      "<p>" + "metin ".repeat(2000) + "</p>" +
+      '<img class="lead" src="https://cdn.example.test/foto/lead.jpg" alt="x">' +
+      "<p>" + "devam ".repeat(20_000) + "</p>";
+    const { row, ms } = runTimed({ title: GOOD_TITLE, contentEncoded: body });
+    expect(ms).toBeLessThan(BUDGET_MS);
+    expect(row!.image_url).toBe("https://cdn.example.test/foto/lead.jpg");
+  });
+
+  it("an <img> whose attributes put src after other attributes still matches (the last src= in the tag wins, as before)", () => {
+    const { row } = runTimed({
+      title: GOOD_TITLE,
+      contentEncoded:
+        '<img data-src="https://cdn.example.test/lazy.jpg" src="https://cdn.example.test/real.jpg">',
+    });
+    expect(row!.image_url).toBe("https://cdn.example.test/real.jpg");
+  });
+
+  it("keeps the one-pass strip semantics: tags go, a lone '<' stays", () => {
+    const { row } = runTimed({
+      title: GOOD_TITLE,
+      contentSnippet: "x <b>kalın</b> y < z",
+    });
+    expect(row!.description).toBe("x kalın y < z");
+  });
+
+  it("clamps an over-long title and an over-long description", () => {
+    const longTitle = "Başlık kelimesi ".repeat(500);
+    const longDescription = "<p>kelime</p> ".repeat(3000);
+    const { row } = runTimed({
+      title: longTitle,
+      contentSnippet: longDescription,
+    });
+    expect(row).not.toBeNull();
+    expect(row!.title.length).toBeLessThanOrEqual(2000);
+    expect(row!.description!.length).toBeLessThanOrEqual(500);
+    expect(hasTagShape(row!.description)).toBe(false);
+  });
+
+  describe("the anti-markup guarantee still holds after the rewrite", () => {
+    it.each([
+      "<<script>script>alert(1)",
+      "<<<b>b>b>içerik",
+      "<scr<script>ipt>alert(1)</scr</script>ipt>",
+      "&lt;&lt;script&gt;script&gt;alert(1)",
+      "&lt;b&gt;kalın&lt;/b&gt; metin",
+      "a<b>c</b>d<!-- yorum -->e",
+      "<a href=\"x\">bağlantı</a>",
+      "<<<<>>>>içerik",
+    ])("%j comes out tag-free in the title and the description", (input) => {
+      const { row } = runTimed({ title: "Başlık " + input, contentSnippet: input });
+      expect(row).not.toBeNull();
+      expect(hasTagShape(row!.title)).toBe(false);
+      expect(hasTagShape(row!.description)).toBe(false);
+    });
+  });
+});

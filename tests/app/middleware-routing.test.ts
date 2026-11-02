@@ -141,12 +141,33 @@ describe("middleware — /source/:slug gate", () => {
 describe("middleware — admin scope", () => {
   const fetchMock = vi.fn();
   const SECRET = "test-secret";
+  const PASSWORD = "test-password";
+  const HOUR = 60 * 60 * 1000;
 
-  /** Same token shape as src/lib/admin/session.ts: base64url(body).hmac. */
-  function mintToken(expiresAt: number, secret = SECRET): string {
-    const body = Buffer.from(JSON.stringify({ expiresAt })).toString("base64url");
+  /** Same wire shape as src/lib/admin/session.ts: base64url(JSON).hmac. */
+  function signPayload(payload: object, secret = SECRET): string {
+    const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
     const sig = createHmac("sha256", secret).update(body).digest("base64url");
     return `${body}.${sig}`;
+  }
+
+  /**
+   * Same token as session.ts: {expiresAt, iat, pwd}, pwd = the first 16 hex
+   * chars of HMAC-SHA256(secret, "pwd:" + password). Minted with node:crypto
+   * while the middleware verifies with Web Crypto, so a passing valid-cookie
+   * case is also the node-vs-WebCrypto parity check.
+   */
+  function mintToken(
+    expiresAt: number,
+    secret = SECRET,
+    password = PASSWORD,
+    iat = Date.now(),
+  ): string {
+    const pwd = createHmac("sha256", secret)
+      .update("pwd:" + password)
+      .digest("hex")
+      .slice(0, 16);
+    return signPayload({ expiresAt, iat, pwd }, secret);
   }
 
   beforeEach(() => {
@@ -216,6 +237,7 @@ describe("middleware — admin scope", () => {
 
   it("passes /admin/settings with a valid signed session cookie", async () => {
     vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
     const cookie = `admin_session=${mintToken(Date.now() + 60_000)}`;
     const res = await middleware(req("/admin/settings", cookie));
     expect(res.headers.get("x-middleware-next")).toBe("1");
@@ -223,6 +245,7 @@ describe("middleware — admin scope", () => {
 
   it("does not let a valid admin cookie turn a non-admin path into a pass", async () => {
     vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
     const cookie = `admin_session=${mintToken(Date.now() + 60_000)}`;
     const res = await middleware(req("/Konu/dunya", cookie));
     expect(res.headers.get("x-middleware-rewrite")).toContain("/__tayf-not-found");
@@ -231,6 +254,7 @@ describe("middleware — admin scope", () => {
 
   it("rejects a tampered signature, an expired token and a foreign-secret token on /admin/settings", async () => {
     vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
     const valid = mintToken(Date.now() + 60_000);
     const tampered = `${valid.slice(0, -2)}${valid.endsWith("AA") ? "BB" : "AA"}`;
     for (const token of [
@@ -245,6 +269,98 @@ describe("middleware — admin scope", () => {
     }
   });
 
+  async function expectLoginRedirect(token: string, label: string): Promise<void> {
+    const res = await middleware(req("/admin/settings", `admin_session=${token}`));
+    expect(res.status, label).toBe(307);
+    expect(res.headers.get("location"), label).toBe(`${ORIGIN}/admin/login`);
+    expect(res.headers.get("x-middleware-next"), label).toBeNull();
+  }
+
+  it("rejects a token minted under the previous ADMIN_PASSWORD", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", "rotated-password");
+    await expectLoginRedirect(
+      mintToken(Date.now() + HOUR, SECRET, PASSWORD),
+      "old-password token",
+    );
+    // ... while a token minted under the new password passes.
+    const res = await middleware(
+      req("/admin/settings", `admin_session=${mintToken(Date.now() + HOUR, SECRET, "rotated-password")}`),
+    );
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("rejects a legacy {expiresAt}-only token even though its signature is valid", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    await expectLoginRedirect(
+      signPayload({ expiresAt: Date.now() + HOUR }),
+      "legacy token",
+    );
+  });
+
+  it("rejects a token whose iat is 25 h old or lies more than 60 s in the future", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    await expectLoginRedirect(
+      mintToken(Date.now() + HOUR, SECRET, PASSWORD, Date.now() - 25 * HOUR),
+      "iat 25 h old",
+    );
+    await expectLoginRedirect(
+      mintToken(Date.now() + HOUR, SECRET, PASSWORD, Date.now() + 5 * 60_000),
+      "iat in the future",
+    );
+    // expiresAt - iat above 24 h (the old 7-day lifetime) is refused too.
+    await expectLoginRedirect(
+      mintToken(Date.now() + 7 * 24 * HOUR, SECRET, PASSWORD, Date.now()),
+      "7-day lifetime",
+    );
+  });
+
+  it("rejects a malformed pwd claim (wrong value, upper-case, wrong length, number, missing)", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    const now = Date.now();
+    const goodPwd = createHmac("sha256", SECRET)
+      .update("pwd:" + PASSWORD)
+      .digest("hex")
+      .slice(0, 16);
+    const claims: Array<[string, unknown]> = [
+      ["wrong", "0123456789abcdef"],
+      ["upper-case", goodPwd.toUpperCase()],
+      ["short", goodPwd.slice(0, 15)],
+      ["long", goodPwd + "0"],
+      ["number", 1234567890123456],
+    ];
+    for (const [label, pwd] of claims) {
+      await expectLoginRedirect(
+        signPayload({ expiresAt: now + HOUR, iat: now, pwd }),
+        `pwd ${label}`,
+      );
+    }
+    await expectLoginRedirect(signPayload({ expiresAt: now + HOUR, iat: now }), "pwd missing");
+  });
+
+  it("rejects an otherwise valid token when ADMIN_PASSWORD is unset or empty", async () => {
+    vi.stubEnv("ADMIN_SESSION_SECRET", SECRET);
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    const valid = mintToken(Date.now() + HOUR);
+    // Control: the same token passes while the password is set.
+    const ok = await middleware(req("/admin/settings", `admin_session=${valid}`));
+    expect(ok.headers.get("x-middleware-next")).toBe("1");
+    vi.stubEnv("ADMIN_PASSWORD", undefined);
+    await expectLoginRedirect(valid, "ADMIN_PASSWORD unset");
+    vi.stubEnv("ADMIN_PASSWORD", "");
+    await expectLoginRedirect(valid, "ADMIN_PASSWORD empty");
+  });
+
+  it("rejects an otherwise valid token when ADMIN_SESSION_SECRET is unset", async () => {
+    vi.stubEnv("ADMIN_PASSWORD", PASSWORD);
+    const valid = mintToken(Date.now() + HOUR);
+    vi.stubEnv("ADMIN_SESSION_SECRET", undefined);
+    await expectLoginRedirect(valid, "secret unset");
+  });
+
   it("source: the admin-scope check sits after the /gundem gate and before the session check", () => {
     const code = blankComments(
       readFileSync(resolve(__dirname, "../../src/middleware.ts"), "utf8"),
@@ -252,9 +368,12 @@ describe("middleware — admin scope", () => {
     const gundemIdx = code.indexOf('pathname.startsWith("/gundem/")');
     const scopeIdx = code.indexOf('lower.startsWith("/admin/")');
     const secretIdx = code.indexOf("ADMIN_SESSION_SECRET");
+    const passwordIdx = code.indexOf("ADMIN_PASSWORD");
     expect(gundemIdx).toBeGreaterThan(-1);
     expect(scopeIdx).toBeGreaterThan(gundemIdx);
     expect(secretIdx).toBeGreaterThan(scopeIdx);
+    // The password is read next to the secret, behind the same scope check.
+    expect(passwordIdx).toBeGreaterThan(scopeIdx);
 
     // Exactly one login redirect, and it is behind the admin-scope check.
     const redirectNeedle = 'NextResponse.redirect(new URL("/admin/login"';

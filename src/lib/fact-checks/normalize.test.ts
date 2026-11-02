@@ -78,6 +78,25 @@ describe("cleanTitle", () => {
     expect(cleanTitle("  çok    boşluklu   \n\n başlık  ")).toBe("çok boşluklu başlık");
   });
 
+  // h26-security-2: the tag strip used to be `/<[^>]*>/g`, which is quadratic
+  // when the text has no '>' (80 KB of '<' = 2.1 s of CPU). The three fact-check
+  // feeds are fixed publishers, but the Vercel cron parses whatever they serve.
+  it("strips hostile unclosed markup in linear time", () => {
+    for (const hostile of ["<".repeat(80_000), "<a".repeat(40_000), "<a ".repeat(30_000)]) {
+      const start = performance.now();
+      const cleaned = cleanTitle(hostile);
+      const ms = performance.now() - start;
+      expect(ms).toBeLessThan(200);
+      expect(cleaned === null || cleaned.length <= 301).toBe(true);
+    }
+  });
+
+  it("keeps a lone '<' with no '>' after it, replaces each tag with one space", () => {
+    expect(cleanTitle("a < b")).toBe("a < b");
+    expect(cleanTitle("x<b>y</b>z")).toBe("x y z");
+    expect(cleanTitle("<<script>script>alert(1)")).toBe("script>alert(1)");
+  });
+
   it("caps at 300 chars on a word boundary with an ellipsis", () => {
     const long = "kelime ".repeat(80).trim();
     const cleaned = cleanTitle(long);

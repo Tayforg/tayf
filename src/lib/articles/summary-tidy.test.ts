@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import h26Fixtures from "../../../tests/fixtures/summary-tidy-h26.json";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
 import { tidySummaryText, WIDGET_HEADINGS } from "./summary-tidy";
 
@@ -1189,14 +1190,15 @@ describe("tidySummaryText appended ticker (h23-live-2)", () => {
 });
 
 describe("tidySummaryText ordinals and title abbreviations at a clamp (h23-live-3)", () => {
-  it("4327f6d8: does not end on 'Konseyi 13.'; the previous sentence is too short, so it cuts at the word with '…'", () => {
+  it("4327f6d8: does not end on 'Konseyi 13.'; it ends at the glued sentence end 'konuştu.' (h26-live-1)", () => {
     const out = tidySummaryText(RAW_4327);
     expect(out).not.toMatch(/\d{1,3}\.$/);
-    // h25-live-1: the word cut used to end inside the open quotation
-    // ('..., "Dün Cumhuriyetimizin 103'üncü yıl dönümünü sizlerin katılımıyla…'); it now
-    // ends in front of it, which keeps 80% of the text.
-    expect(out).toBe("Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu. Konuşmasına katılımcıları selamlayarak başlayan Erdoğan…");
-    expect(out.endsWith("selamlayarak başlayan Erdoğan…")).toBe(true);
+    // h25-live-1: the word cut used to end inside the open quotation; h26-live-1:
+    // the raw text glues its last complete sentence ("... Zirvesi'nde konuştu.Konuşmasına
+    // katılımcıları ..."), which is a sentence end now, so the cut keeps that sentence
+    // instead of the half sentence "Konuşmasına katılımcıları selamlayarak başlayan Erdoğan…".
+    expect(out).toBe("Cumhurbaşkanı Erdoğan, \"Türk dünyasının aile fotoğrafında ayrılığa, gayrılığa, ihtilafa yer yoktur. Hepimiz biriz, beraberiz, ezelden ebede kadar inşallah kardeşiz\" dedi Cumhurbaşkanı Erdoğan, Beştepe Millet Sergi Salonu'nda \"Türk Yüzyılı: Dilde, Fikirde, İşte Birlik\" temasıyla düzenlenen Türk Devletleri Teşkilatı (TDT) Devlet Başkanları Konseyi 13. Zirvesi'nde konuştu.");
+    expect(out.endsWith("Zirvesi'nde konuştu.")).toBe(true);
     expect(countChar(out, '"') % 2).toBe(0);
   });
 
@@ -2501,9 +2503,15 @@ describe("tidySummaryText glued sub-headings (h25-live-2)", () => {
       }
     });
 
-    it("needs a lower-case letter after the capital, so an acronym is left alone", () => {
-      for (const s of ["toplantısıTBMM", "ettiAK Parti", "kutlamaCHP", "simgelerUNESCO", "çıkardıG20"]) {
-        expect(tidySummaryText(s), s).toBe(s);
+    it("an acronym behind the word is split too (h26-live-1: it used to be left alone)", () => {
+      for (const [input, expected] of [
+        ["toplantısıTBMM", "toplantısı. TBMM"],
+        ["ettiAK Parti", "etti. AK Parti"],
+        ["kutlamaCHP", "kutlama. CHP"],
+        ["simgelerUNESCO", "simgeler. UNESCO"],
+        ["çıkardıG20", "çıkardı. G20"],
+      ] as const) {
+        expect(tidySummaryText(input), input).toBe(expected);
       }
     });
 
@@ -2725,5 +2733,335 @@ describe("tidySummaryText glued sub-headings (h25-live-2)", () => {
     for (const s of inputs) tidySummaryText(s);
     expect(performance.now() - start).toBeLessThan(1500);
     expect(tidySummaryText("a".repeat(200_000) + "Bc")).toBe("a".repeat(200_000) + ". Bc");
+  });
+});
+
+describe("tidySummaryText clamp repair: abbreviation dots, glued final sentence, acronym glue (h26-live-1, regression of #173)", () => {
+  // The raw clusters.summary_tr of the 12 hunt-26 ids (read-only SELECT,
+  // 2026-11-02), kept verbatim in tests/fixtures/summary-tidy-h26.json.
+  const H26: ReadonlyMap<string, string> = new Map(
+    (h26Fixtures as ReadonlyArray<{ id8: string; raw: string }>).map((f) => [f.id8, f.raw]),
+  );
+  const raw26 = (id8: string): string => {
+    const raw = H26.get(id8);
+    if (raw === undefined) throw new Error(`missing fixture ${id8}`);
+    return raw;
+  };
+
+  // Every output below was read by hand against its raw text.
+  const EXPECTED: ReadonlyArray<readonly [string, string]> = [
+    // (a) a cut that used to end on an abbreviation dot.
+    [
+      "7765376d",
+      "President Recep Tayyip Erdoğan sent a congratulatory message to Azerbaijani President Ilham Aliyev and the Azerbaijani people ahead of the country's Nov. 8 Victory Day while…",
+    ],
+    [
+      "65cb64f9",
+      "İbn Haldun Üniversitesi Mütevelli Heyeti Başkan Vekili Necmeddin Bilal Erdoğan, Tokyo'da düzenlenen 'Sultan II. Abdülhamid Döneminde Türk-Japon İlişkileri ve…",
+    ],
+    [
+      "40a6fa6e",
+      "Eski Millî Eğitim Bakanı Prof. Dr. Hüseyin Çelik, Sultan II. Abdülhamid üzerine yaptığı akademik araştırmalar ve doktora tez sürecine dair çarpıcı açıklamalarda bulundu Eski Millî Eğitim Bakanı Prof. Dr. Hüseyin Çelik, Sultan II. Abdülhamid üzerine yaptığı akademik araştırmalar ve doktora tez sürecine dair çarpıcı açıklamalarda bulundu.",
+    ],
+    [
+      "d3592ddc",
+      "MV Aroyat'ın boğaz geçişi: Karadeniz'de Eylül ayı sonlarında Ukrayna'ya ait bir insansız hava aracı tarafından hedef alınarak ağır hasar gören Palau bayraklı, Kiva Marine Ltd. işletmesindeki MV…",
+    ],
+    // (b) a glued final sentence is a sentence end.
+    [
+      "db625c4a",
+      "Olayın gelişimi. Çorum'un Alaca ilçesinde Yıldızhan Mahallesi Orhun Sokak'ta çıkan yangında, Fahrettin Maaşlı'ya ait bir tandır ve depo zarar gördü. Yangının çıkış nedeni henüz belirlenemedi.",
+    ],
+    [
+      "91a4d62a",
+      "Polonya Anayasa Mahkemesi'nin yeni üyelerinin atanması konusunda cumhurbaşkanı ile hükümet arasında yaşanan gerilim AB gündemine taşındı. Avrupa Komisyonu, 8 yeni üyenin atanmasının parlamentonun anayasal yetkileri kapsamında olduğunu açıkladı Polonya Anayasa Mahkemesi'nin yeni üyelerinin atanması konusunda cumhurbaşkanı ile hükümet arasında yaşanan gerilim AB gündemine taşındı. Avrupa Komisyonu, 8 yeni üyenin atanmasının parlamentonun anayasal yetkileri kapsamında olduğunu açıkladı.",
+    ],
+    [
+      "1b58d142",
+      "İran ile Batı arasındaki gerilim enerji cephesinde de büyüyor İran ile Batı arasındaki gerilim enerji cephesinde de büyüyor. Almanya Başbakanı Friedrich Merz, İran'a karşı savaşın Avrupa'ya enerji maliyetleri üzerinden 100 milyar euronun üzerinde ek yük getirdiğini açıklarken, İran Dışişleri Bakanı Abbas Arakçi'den sert yanıt geldi. Tahran, yeni bir saldırının çok daha ağır sonuçlar doğurabileceği mesajını verdi.",
+    ],
+    // (c) an acronym glued behind a lower-case word.
+    [
+      "6a397264",
+      "ASELSAN LIFELINE HLM ile TÜSEB prestij ödülünü aldı. ASELSAN, geliştirdiği LIFELINE HLM Kalp Akciğer Makinesi ile TÜSEB tarafından verilen prestij ödülüne değer bulundu.",
+    ],
+    [
+      "dfa18eca",
+      "Fon mağdurlarının ödemesi devletten değil manipülasyon yapanlardan karşılanacak. TBMM Başkanvekili ve AK Parti Tokat Milletvekili Yusuf Beyazıt, Tokat'ta basın mensuplarıyla bir araya gelerek fonlarla…",
+    ],
+    [
+      "00ddca16",
+      "Rubio'nun açıklamaları Karadeniz gündemini öne çıkardı. G20 Dışişleri Bakanları Toplantısı'nın ardından Atlanta'da basın mensuplarının sorularını yanıtlayan ABD Dışişleri Bakanı Marco Rubio…",
+    ],
+    [
+      "0dfe7899",
+      "Ekim ayı danışma meclisi toplantısı. AK Parti Erzincan teşkilatı, Ekim ayı Danışma Meclisi Toplantısı'nı gerçekleştirdi. Toplantıda öncelikli olarak teşkilat çalışmaları ele alınırken, birlik ve…",
+    ],
+    [
+      "cfdf076d",
+      "AK Parti Mersin teşkilatlarından eski yöneticilere vefa ziyareti. AK Parti Mersin İl Başkanı Adem Aldemir, partinin kuruluşundan bu yana teşkilatlarda görev almış isimlere yönelik kapsamlı bir vefa…",
+    ],
+  ];
+
+  it("holds the 12 live rows, each a clamp or feed-cap signature", () => {
+    expect(H26.size).toBe(12);
+    for (const [id8, raw] of H26) {
+      expect(raw.endsWith("..."), id8).toBe(true);
+      expect([183, 202, 203, 499, 500], id8).toContain(raw.length);
+    }
+  });
+
+  it.each(EXPECTED)("%s: the exact output", (id8, expected) => {
+    expect(tidySummaryText(raw26(id8))).toBe(expected);
+  });
+
+  describe("(a) the cut does not end on an abbreviation dot", () => {
+    it.each(["7765376d", "65cb64f9", "40a6fa6e", "d3592ddc"])("%s", (id8) => {
+      const out = tidySummaryText(raw26(id8));
+      for (const tail of ["Nov.", "II.", "Ltd."]) expect(out.endsWith(tail), tail).toBe(false);
+      expect(out.endsWith(".") || out.endsWith("…")).toBe(true);
+    });
+
+    it("7765376d, 65cb64f9 and d3592ddc end on a word cut, 40a6fa6e on the previous real sentence end", () => {
+      for (const id8 of ["7765376d", "65cb64f9", "d3592ddc"]) {
+        expect(tidySummaryText(raw26(id8)).endsWith("…"), id8).toBe(true);
+      }
+      expect(tidySummaryText(raw26("40a6fa6e")).endsWith("çarpıcı açıklamalarda bulundu.")).toBe(true);
+    });
+  });
+
+  describe("(b) a glued final sentence is kept", () => {
+    it("db625c4a keeps 'Yangının çıkış nedeni henüz belirlenemedi.'", () => {
+      const out = tidySummaryText(raw26("db625c4a"));
+      expect(out.endsWith(" Yangının çıkış nedeni henüz belirlenemedi.")).toBe(true);
+      expect(out).not.toContain("Müdahale");
+    });
+
+    it("91a4d62a keeps the 'Avrupa Komisyonu, 8 yeni üyenin atanmasının ... açıkladı.' sentence", () => {
+      const out = tidySummaryText(raw26("91a4d62a"));
+      expect(
+        out.endsWith(
+          "Avrupa Komisyonu, 8 yeni üyenin atanmasının parlamentonun anayasal yetkileri kapsamında olduğunu açıkladı.",
+        ),
+      ).toBe(true);
+      expect(out).not.toContain("Avrupa Ko…");
+    });
+
+    it("1b58d142 keeps 'Tahran, ... mesajını verdi.' and drops the glued heading behind it", () => {
+      const out = tidySummaryText(raw26("1b58d142"));
+      expect(out.endsWith(" Tahran, yeni bir saldırının çok daha ağır sonuçlar doğurabileceği mesajını verdi.")).toBe(true);
+      expect(out).not.toContain("ARAKÇİ");
+    });
+
+    it("a synthetic glued last sentence is a candidate cut (the 60% bar is on the unglued text)", () => {
+      const raw = clamp("kelimeler ".repeat(30) + "Bitti.Son cümle bitti.Yarım " + "kalan ".repeat(40));
+      expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(30) + "Bitti. Son cümle bitti.");
+    });
+
+    it("the clamp signature stays on the raw length: gluing is not a way into the repair", () => {
+      // 498 characters ending "...", two glued sentence marks: the glue adds 2 and
+      // would make 500, but the raw text is not a clamp. It keeps its "...".
+      const raw = "kelimeler ".repeat(30) + "Bitti.Son cümle bitti.Yarım " + "kalan ".repeat(27) + "kalan...";
+      expect(raw).toHaveLength(498);
+      expect(tidySummaryText(raw)).toBe(
+        "kelimeler ".repeat(30) + "Bitti. Son cümle bitti. Yarım " + "kalan ".repeat(27) + "kalan...",
+      );
+    });
+
+    it("the appended-ticker repair is still the cut at the first line, with no ellipsis", () => {
+      const first = "Bakan açıklama yaptı.Karar duyuruldu.";
+      const raw = clamp(`${first}\nSon dakika... ${"Başka haber ".repeat(60)}`);
+      expect(tidySummaryText(raw)).toBe("Bakan açıklama yaptı. Karar duyuruldu.");
+    });
+  });
+
+  describe("(c) an acronym glued behind a lower-case word is split", () => {
+    it.each([
+      ["6a397264", "aldı. ASELSAN,"],
+      ["dfa18eca", "karşılanacak. TBMM Başkanvekili"],
+      ["00ddca16", "çıkardı. G20 Dışişleri"],
+      ["0dfe7899", "toplantısı. AK Parti"],
+      ["cfdf076d", "ziyareti. AK Parti"],
+    ])("%s has %j", (id8, expected) => {
+      expect(tidySummaryText(raw26(id8))).toContain(expected);
+    });
+
+    it.each([
+      ["Meclis toplantısıTBMM Başkanı konuştu.", "Meclis toplantısı. TBMM Başkanı konuştu."],
+      ["Parti etkinliği düzenlediAK Parti il başkanı", "Parti etkinliği düzenledi. AK Parti il başkanı"],
+      ["zirve sonrası açıklamaG20 liderleri", "zirve sonrası açıklama. G20 liderleri"],
+      ["bakan konuştuABD ile görüştü", "bakan konuştu. ABD ile görüştü"],
+    ])("splits %j", (input, expected) => {
+      expect(tidySummaryText(input)).toBe(expected);
+    });
+
+    it("an acronym-glued CTA is peeled in the same call (idempotent)", () => {
+      const once = tidySummaryText("Toplantı tamamlandıDEVAMI İÇİN TIKLAYIN");
+      expect(once).toBe("Toplantı tamamlandı.");
+      expect(tidySummaryText(once)).toBe(once);
+    });
+  });
+
+  describe("abbreviation dots in a synthetic clamp", () => {
+    const PRE = "kelimeler ".repeat(40) + "Bitti. ";
+    const PREV = "kelimeler ".repeat(40) + "Bitti.";
+    const REST = "yarımkalan ".repeat(20);
+    const build = (mid: string) => clamp(`${PRE}${mid} ${REST}`);
+
+    it.each(["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XIV", "XIX", "XX", "XXIX", "XXXIX"])(
+      "the Roman numeral '%s.' is not a sentence end",
+      (roman) => {
+        expect(tidySummaryText(build(`Sultan ${roman}. Abdülhamid döneminde`))).toBe(PREV);
+      },
+    );
+
+    it.each(["ABD", "NATO", "VIP", "XL", "CD", "MIX", "XXXX", "ii", "iv", "Mart"])(
+      "'%s.' is not a Roman numeral: it ends the sentence",
+      (word) => {
+        expect(tidySummaryText(build(`Konuşmacı ${word}. Ali Veli`))).toBe(`${PRE}Konuşmacı ${word}.`);
+      },
+    );
+
+    it.each([
+      "Jan", "Feb", "Mar", "Apr", "Jun", "Jul", "Aug", "Sep", "Sept", "Oct", "Nov", "Dec",
+      "Ltd", "Inc", "Co", "Corp", "Şti", "Mr", "Mrs", "Ms", "Jr", "St",
+      "NOV", "LTD", "INC", "ŞTİ", "ltd", "inc",
+    ])("the abbreviation '%s.' is not a sentence end", (abbr) => {
+      expect(tidySummaryText(build(`Şirket ${abbr}. Yeni dönem başlıyor`))).toBe(PREV);
+    });
+
+    it.each(["Novel", "Decor", "Incir", "Stop", "Cold", "Nova", "Aralık", "Ocak"])(
+      "an ordinary word '%s' before '.' still ends the sentence (an abbreviation counts only as a whole word)",
+      (word) => {
+        expect(tidySummaryText(build(`Şirket ${word}. Yeni dönem başlıyor`))).toBe(`${PRE}Şirket ${word}.`);
+      },
+    );
+
+    it("'II.' in the middle of a 500-character clamp: the text after it survives and the cut is not on it", () => {
+      const raw = clamp(`${"kelimeler ".repeat(30)}Sultan II. Abdülhamid döneminde ${"yarımkalan ".repeat(40)}`);
+      const out = tidySummaryText(raw);
+      expect(out).toBe(
+        "kelimeler ".repeat(30) + "Sultan II. Abdülhamid döneminde " + "yarımkalan ".repeat(15).trimEnd() + "…",
+      );
+      expect(out).toContain("II. Abdülhamid döneminde yarımkalan");
+      expect(out).not.toMatch(/II\.…?$/);
+    });
+
+    it("the #170 year rule: a last sentence that ends '... 2026.' still cuts there", () => {
+      expect(tidySummaryText(build("Etkinlik 2026. Yeni dönem başlıyor"))).toBe(`${PRE}Etkinlik 2026.`);
+      expect(tidySummaryText(build("Sultan II. Abdülhamid 2026. Yeni dönem başlıyor"))).toBe(
+        `${PRE}Sultan II. Abdülhamid 2026.`,
+      );
+    });
+  });
+
+  describe("must not change, standalone and inside a sentence", () => {
+    const GUARDS: readonly string[] = [
+      "macOS",
+      "macOS'un",
+      "watchOS",
+      "iPadOS",
+      "visionOS",
+      "webOS",
+      "iPhone",
+      "iPad",
+      "iMac",
+      "eVTOL",
+      "beIN Sports",
+      "kWh",
+      "mRNA",
+      "mAh",
+      "BirGün",
+      "T.C.",
+      "A.Ş.",
+      "U.S.",
+      "3.5",
+      "tayfhaber.com",
+      // Currency glue stays: the capitals are a currency code, not an acronym.
+      "5 milyarTL",
+      "5 milyarTL'lik",
+      "5 milyonYTL",
+      "3 milyonUSD",
+      "2 milyarEUR",
+      "7 milyarGBP",
+      "9 milyonCHF",
+    ];
+    const FRAMES: ReadonlyArray<(g: string) => string> = [
+      (g) => g,
+      (g) => `${g} hakkında açıklama yaptı.`,
+      (g) => `Şirket ${g} hakkında açıklama yaptı.`,
+    ];
+
+    it.each(GUARDS)("%j", (g) => {
+      for (const frame of FRAMES) expect(tidySummaryText(frame(g)), frame(g)).toBe(frame(g));
+    });
+
+    it("a lower-case brand that would match the new rule is excluded by its core, before the apostrophe", () => {
+      for (const s of ["macOS'un", "macOS’un yeni sürümü", "webOS'ta", "watchOS 26", "ipadOS", "visionOS'ta"]) {
+        expect(tidySummaryText(s), s).toBe(s);
+        expect(tidySummaryText(`Apple ${s} duyurdu.`), s).toBe(`Apple ${s} duyurdu.`);
+      }
+    });
+
+    it("fewer than three lower-case letters in front, a lower-case start and a prefix are left alone", () => {
+      for (const s of [
+        "ab Cde",
+        "abCDE",
+        "xAI",
+        "iOS 26",
+        "tvOS",
+        "TürkçedeFaddey",
+        "TBMMBaşkanı",
+        "#yerelSeçim",
+        "#yerelTBMM",
+        "@kullaniciABC",
+        "https://x.com/abcDEF",
+        "tayfhaber.com/haberDETAY",
+        "dosya_adıDEĞER",
+        "e-DevletKAPI",
+      ]) {
+        expect(tidySummaryText(s), s).toBe(s);
+      }
+    });
+
+    it("a currency code followed by a lower-case letter is not the currency word, so it is split", () => {
+      expect(tidySummaryText("yaptıTLeri")).toBe("yaptı. TLeri");
+    });
+  });
+
+  describe("idempotency and time", () => {
+    it("tidy(tidy(x)) === tidy(x) for every new fixture and every pinned output", () => {
+      for (const [id8, expected] of EXPECTED) {
+        const once = tidySummaryText(raw26(id8));
+        expect(once, id8).toBe(expected);
+        expect(tidySummaryText(once), id8).toBe(once);
+      }
+    });
+
+    it("tidy(tidy(x)) === tidy(x) for the synthetic cases", () => {
+      const inputs = [
+        clamp("kelimeler ".repeat(30) + "Bitti.Son cümle bitti.Yarım " + "kalan ".repeat(40)),
+        clamp(`${"kelimeler ".repeat(30)}Sultan II. Abdülhamid döneminde ${"yarımkalan ".repeat(40)}`),
+        clamp("kelimeler ".repeat(40) + "Bitti. Şirket Ltd. Yeni dönem " + "yarımkalan ".repeat(20)),
+        "Meclis toplantısıTBMM Başkanı konuştu.",
+        "Toplantı tamamlandıDEVAMI İÇİN TIKLAYIN",
+        "Apple macOS'un yeni sürümünü duyurdu. 5 milyarTL gelir.",
+      ];
+      for (const x of inputs) {
+        const once = tidySummaryText(x);
+        expect(tidySummaryText(once), JSON.stringify(x)).toBe(once);
+      }
+    });
+
+    it.each([
+      ["'a' x 100000 + 'B'", () => "a".repeat(100_000) + "B"],
+      ["'aB' x 50000", () => "aB".repeat(50_000)],
+      ["a 500-character clamp of 'x.Y' repeats", () => clamp("x.Y".repeat(170))],
+    ])("%s finishes in under 100 ms", (_name, make) => {
+      const input = make();
+      const start = performance.now();
+      tidySummaryText(input);
+      expect(performance.now() - start).toBeLessThan(100);
+    });
   });
 });

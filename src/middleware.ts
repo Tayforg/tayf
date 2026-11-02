@@ -179,9 +179,12 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //
 // session.ts's admin_session verifier imports `server-only` and
 // `node:crypto`, so it cannot be imported into Edge middleware as-is. This
-// re-implements the same HMAC-SHA256 verification with Web Crypto
-// (`crypto.subtle`) against the identical `${body}.${signature}` token
-// shape and `expiresAt` check — not a weaker cookie-presence check.
+// re-implements the same verification with Web Crypto (`crypto.subtle`)
+// against the identical `${body}.${signature}` token shape: the HMAC-SHA256
+// signature, the `{expiresAt, iat, pwd}` payload shape, the 24 h lifetime and
+// the `pwd` tag bound to ADMIN_PASSWORD (so rotating the password ends every
+// session here too, exactly as in requireAdminSession) — not a weaker
+// cookie-presence check. Either env var missing means not authenticated.
 
 export const config = {
   matcher: [
@@ -440,26 +443,65 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   return diff === 0;
 }
 
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+// Keep in sync with src/lib/admin/session.ts (24 h sessions, 60 s clock skew,
+// 16 lower-hex chars of HMAC-SHA256(secret, "pwd:" + password)).
+const ADMIN_SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const ADMIN_CLOCK_SKEW_MS = 60_000;
+const ADMIN_PWD_TAG_RE = /^[0-9a-f]{16}$/;
+
 /** Mirrors src/lib/admin/session.ts's parseToken, minus the cookie I/O. */
-async function verifyAdminToken(token: string | undefined, secret: string): Promise<boolean> {
+async function verifyAdminToken(
+  token: string | undefined,
+  secret: string,
+  password: string,
+): Promise<boolean> {
   if (!token) return false;
   const dot = token.indexOf(".");
   if (dot <= 0 || dot === token.length - 1) return false;
   const body = token.slice(0, dot);
   const sig = token.slice(dot + 1);
 
+  // 1. Signature.
   const expected = base64UrlEncode(await hmacSha256(secret, body));
   if (!timingSafeEqualStr(sig, expected)) return false;
 
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(base64UrlDecodeToString(body)) as unknown;
-    if (!parsed || typeof parsed !== "object" || typeof (parsed as { expiresAt?: unknown }).expiresAt !== "number") {
-      return false;
-    }
-    return (parsed as { expiresAt: number }).expiresAt >= Date.now();
+    parsed = JSON.parse(base64UrlDecodeToString(body));
   } catch {
     return false;
   }
+
+  // 2. Shape (a legacy `{expiresAt}` token fails here).
+  if (!parsed || typeof parsed !== "object") return false;
+  const { expiresAt, iat, pwd } = parsed as Record<string, unknown>;
+  if (
+    typeof expiresAt !== "number" ||
+    !Number.isFinite(expiresAt) ||
+    typeof iat !== "number" ||
+    !Number.isFinite(iat) ||
+    typeof pwd !== "string" ||
+    !ADMIN_PWD_TAG_RE.test(pwd)
+  ) {
+    return false;
+  }
+
+  // 3-5. Lifetime.
+  const now = Date.now();
+  if (expiresAt < now) return false;
+  if (iat > now + ADMIN_CLOCK_SKEW_MS) return false;
+  if (now - iat > ADMIN_SESSION_MAX_AGE_MS) return false;
+  if (expiresAt - iat > ADMIN_SESSION_MAX_AGE_MS) return false;
+
+  // 6. Password binding.
+  const expectedTag = toHex(await hmacSha256(secret, `pwd:${password}`)).slice(0, 16);
+  return timingSafeEqualStr(pwd, expectedTag);
 }
 
 export async function middleware(req: NextRequest, event?: NextFetchEvent): Promise<NextResponse> {
@@ -586,8 +628,10 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
   }
 
   const secret = process.env.ADMIN_SESSION_SECRET;
+  const password = process.env.ADMIN_PASSWORD;
   const token = req.cookies.get(ADMIN_COOKIE_NAME)?.value;
-  const authenticated = secret ? await verifyAdminToken(token, secret) : false;
+  const authenticated =
+    secret && password ? await verifyAdminToken(token, secret, password) : false;
   if (!authenticated) {
     return NextResponse.redirect(new URL("/admin/login", req.url), 307);
   }

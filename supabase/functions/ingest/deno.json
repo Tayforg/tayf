@@ -1,6 +1,6 @@
 {
   "imports": {
-    "fast-xml-parser": "https://esm.sh/fast-xml-parser@4.5.0",
+    "fast-xml-parser": "https://esm.sh/fast-xml-parser@4.5.7",
     "supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4"
   },
   "tasks": {

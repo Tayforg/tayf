@@ -1,4 +1,5 @@
 import { codePointToString } from "../../../supabase/functions/_shared/rss/entities";
+import { stripTagsLinear } from "../../../supabase/functions/_shared/rss/strip-tags";
 import type { FactCheckPublisher, FactCheckPublisherKey } from "./feeds";
 
 /**
@@ -60,7 +61,9 @@ const MAX_TITLE_LENGTH = 300;
 export function cleanTitle(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   let t = decodeEntities(raw);
-  t = t.replace(/<[^>]*>/g, " ");
+  // Linear scan, same result as the one-pass tag regex it replaces; the regex
+  // was O(n^2) on a title with no '>' (h26-security-2).
+  t = stripTagsLinear(t, " ");
   t = t.replace(/\s+/g, " ").trim();
   if (t.length === 0) return null;
   if (t.length > MAX_TITLE_LENGTH) {

@@ -207,14 +207,37 @@ function isBlankChar(ch: string): boolean {
   return ch.trim() === "";
 }
 
+/**
+ * A sentence mark glued to the next sentence ("kaldırıldı.Yangın"): a lower-case
+ * letter, the mark, and an upper-case letter right behind it. Only a lower-case
+ * letter before the mark counts, so "T.C.", "A.Ş." and "U.S." are untouched, and
+ * the next character must be an upper-case letter, so decimals and domains
+ * ("3.5", "tayfhaber.com") are untouched. Step 4 of {@link tidySummaryText} and
+ * {@link repairClamp} (h26-live-1) both put a space after the mark with it.
+ */
+const GLUED_SENTENCE = /([a-zçğıöşü])([.!?…])(?=[A-ZÇĞİÖŞÜ])/gu;
+
 // Title and street abbreviations that end in a dot without ending the sentence
-// ("Prof. Dr. Gönül Paçacı", "Öğr. Gör. Ali", "Atatürk Cad. No. 5"). Compared on
-// the tr-TR fold of the whole letter run before the dot.
+// ("Prof. Dr. Gönül Paçacı", "Öğr. Gör. Ali", "Atatürk Cad. No. 5"), and the
+// English month and company abbreviations that turn up in the English feeds
+// ("ahead of the country's Nov. 8 Victory Day", "Kiva Marine Ltd. işletmesi";
+// h26-live-1). Compared on the tr-TR fold of the whole letter run before the dot,
+// and on the plain fold too: the tr-TR fold turns the "I" of "Inc" into "ı".
+// Each entry only makes lastSentenceEnd more conservative.
 const NON_SENTENCE_ABBREVIATIONS: ReadonlySet<string> = new Set([
   "dr", "prof", "doç", "doc", "av", "op", "uzm", "yrd", "öğr", "arş", "gör",
   "org", "korg", "tümg", "tuğg", "alb", "sn", "mah", "cad", "sok", "no", "vs",
   "vb", "bkz", "örn",
+  "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov",
+  "dec", "ltd", "inc", "co", "corp", "şti", "mr", "mrs", "ms", "jr", "st",
 ]);
+/**
+ * An upper-case Roman numeral, 1 to 39 ("Sultan II. Abdülhamid", "XIV. Louis"):
+ * the run before a dot is never empty when this is tested. Upper case only, so
+ * "ii." and "iv." are ordinary words; a run of other capitals ("ABD", "NATO",
+ * "VIP") does not match. Linear: at most 8 characters are ever tested.
+ */
+const ROMAN_NUMERAL = /^X{0,3}(?:IX|IV|V?I{0,3})$/;
 /** Longest letter/digit run before a dot that is looked at; a longer run is a word. */
 const MAX_RUN_BEFORE_DOT = 8;
 /** A digit run of 1 to this many digits before a dot is a Turkish ordinal ("13. Zirve"). */
@@ -234,8 +257,10 @@ function isLetterOrDigit(ch: string): boolean {
  *   - a single letter, an initial ("K. Sarıgül");
  *   - 1-4 digits, a Turkish ordinal ("Konseyi 13. Zirvesi"), except a 4-digit
  *     year from 1900 to 2099, which DOES end a sentence ("... 2026. Yeni dönem");
- *   - a title or street abbreviation ({@link NON_SENTENCE_ABBREVIATIONS}), as a
- *     whole word ("Prof.", "DR.", but not "abcdr.").
+ *   - an upper-case Roman numeral ({@link ROMAN_NUMERAL}: "Sultan II.");
+ *   - a title, street, month or company abbreviation
+ *     ({@link NON_SENTENCE_ABBREVIATIONS}), as a whole word ("Prof.", "DR.",
+ *     "Nov.", "Ltd.", but not "abcdr.").
  */
 function isNonSentenceDot(body: string, markIndex: number): boolean {
   if (body.charAt(markIndex) !== ".") return false;
@@ -251,7 +276,11 @@ function isNonSentenceDot(body: string, markIndex: number): boolean {
     const n = Number(run);
     return run.length !== 4 || n < FIRST_YEAR || n > LAST_YEAR;
   }
-  return NON_SENTENCE_ABBREVIATIONS.has(run.toLocaleLowerCase("tr-TR"));
+  if (ROMAN_NUMERAL.test(run)) return true;
+  return (
+    NON_SENTENCE_ABBREVIATIONS.has(run.toLocaleLowerCase("tr-TR")) ||
+    NON_SENTENCE_ABBREVIATIONS.has(run.toLowerCase())
+  );
 }
 
 /** `[start, end)` of a stretch of text in which no mark counts as a sentence end. */
@@ -368,11 +397,16 @@ function hasClampSignature(raw: string): boolean {
  * of the text (e5d77d31). When no cut can be made without leaving a quotation
  * open (the opener is too early: c526f480, a whole speech), the text is repaired
  * as if quotations did not matter: the last sentence end, balanced or not, else
- * the word cut. When the word cut still leaves part of a paragraph that the
- * clamp cut (the text after its last line break), the cut moves back to that
- * line break if it keeps at least {@link CLAMP_MIN_KEPT_SHARE} of the text and
- * the line it then ends on is not a short unpunctuated one (a heading, a label,
- * a related headline): the few words of the next paragraph are not a sentence.
+ * the word cut. A sentence mark glued to the next sentence
+ * ("belirlenemedi.Müdahale") is a sentence end: the repair works on the text
+ * with the space that step 4 of {@link tidySummaryText} would put there
+ * ({@link GLUED_SENTENCE}), so a complete glued last sentence is not dropped
+ * (h26-live-1); the clamp signature and the ticker cut stay on the raw text.
+ * When the word cut still leaves part of a paragraph that the clamp cut (the
+ * text after its last line break), the cut moves back to that line break if it
+ * keeps at least {@link CLAMP_MIN_KEPT_SHARE} of the text and the line it then
+ * ends on is not a short unpunctuated one (a heading, a label, a related
+ * headline): the few words of the next paragraph are not a sentence.
  * Returns null when the text is not a clamp or nothing can be cut (a single long
  * word).
  */
@@ -383,21 +417,25 @@ function repairClamp(raw: string): string | null {
   const withoutTicker = cutAppendedTicker(body);
   if (withoutTicker !== body && withoutTicker.trim() !== "") return withoutTicker.trimEnd();
 
-  const balanced = quoteBalance(body);
-  const lines = unpunctuatedLineRanges(body);
-  const end = lastSentenceEnd(body, lines, balanced);
+  // h26-live-1: lastSentenceEnd needs a blank after the mark, and step 4 (which
+  // un-glues "lower.Upper") runs after this repair, so a glued last sentence was
+  // never a candidate. Un-glue first; every index and share below is in `text`.
+  const text = body.replace(GLUED_SENTENCE, "$1$2 ");
+  const balanced = quoteBalance(text);
+  const lines = unpunctuatedLineRanges(text);
+  const end = lastSentenceEnd(text, lines, balanced);
   if (end > 0) {
-    const kept = body.slice(0, end).trimEnd();
-    if (kept.length >= CLAMP_MIN_KEPT_SHARE * body.length) return kept;
+    const kept = text.slice(0, end).trimEnd();
+    if (kept.length >= CLAMP_MIN_KEPT_SHARE * text.length) return kept;
   }
 
-  let cut = body.trimEnd();
-  if (cut.length === body.length) {
+  let cut = text.trimEnd();
+  if (cut.length === text.length) {
     // The clamp fell inside a word: drop it.
-    let at = body.length - 1;
-    while (at >= 0 && !isBlankChar(body.charAt(at))) at--;
+    let at = text.length - 1;
+    while (at >= 0 && !isBlankChar(text.charAt(at))) at--;
     if (at <= 0) return null;
-    cut = body.slice(0, at);
+    cut = text.slice(0, at);
   }
   // 4ca344b8 (h24): "...Vefa: Ahmed-i Hânî\n\nTrump ..." kept "Trump", the first word
   // of the next paragraph. When what the word cut kept still ends in a paragraph
@@ -409,10 +447,10 @@ function repairClamp(raw: string): string | null {
   // 3da4c962, 307cf42b: the cut would have ended on "...Yollar göle döndü"), so
   // the word cut stays.
   const lastBreak = cut.lastIndexOf("\n");
-  if (lastBreak > 0 && !body.slice(cut.length).includes("\n")) {
+  if (lastBreak > 0 && !text.slice(cut.length).includes("\n")) {
     const kept = cut.slice(0, lastBreak).trimEnd();
     if (
-      kept.length >= CLAMP_MIN_KEPT_SHARE * body.length &&
+      kept.length >= CLAMP_MIN_KEPT_SHARE * text.length &&
       !isUnpunctuatedShortLine(kept.slice(kept.lastIndexOf("\n") + 1))
     ) {
       cut = kept;
@@ -425,15 +463,15 @@ function repairClamp(raw: string): string | null {
   if (!balanced(cut.length)) {
     let at = cut.length;
     while (at > 0 && !balanced(at)) at--;
-    const before = body.slice(0, trimDanglingEnd(body, at));
-    if (before !== "" && before.length >= CLAMP_QUOTE_MIN_KEPT_SHARE * body.length) {
+    const before = text.slice(0, trimDanglingEnd(text, at));
+    if (before !== "" && before.length >= CLAMP_QUOTE_MIN_KEPT_SHARE * text.length) {
       cut = before;
     } else {
       // Nothing balanced is long enough: repair as if quotations did not matter
       // (the sentence ends the quote check passed over count again).
-      const anyEnd = lastSentenceEnd(body, lines);
-      const kept = anyEnd > 0 ? body.slice(0, anyEnd).trimEnd() : "";
-      if (kept.length >= CLAMP_MIN_KEPT_SHARE * body.length) return kept;
+      const anyEnd = lastSentenceEnd(text, lines);
+      const kept = anyEnd > 0 ? text.slice(0, anyEnd).trimEnd() : "";
+      if (kept.length >= CLAMP_MIN_KEPT_SHARE * text.length) return kept;
     }
   }
   return SENTENCE_MARKS.has(cut.charAt(cut.length - 1)) ? cut : cut + "…";
@@ -572,25 +610,82 @@ function peelTrailingCtas(s: string): string {
 // Scan of live cluster summaries (10,794 clusters, 2026-10-26 to 2026-11-02):
 // 329 distinct tokens hold a lower->Upper join. 203 are the glue of a Turkish
 // word and a place or title, and all 203 are split here. About 20 more are glues
-// this step leaves alone on purpose (an acronym behind the word: "toplantısıTBMM",
-// "ettiAK"; a capital start: "TürkçedeFaddey"). The remaining ~106 are brands and
-// names that start upper case (MasterChef, YouTube, BirGün, VakıfBank,
-// EuroLeague, ...) or lower case with at most two letters in front of the capital
-// (iPhone, iMac, iPad, kWh, mRNA, mAh, eVTOL, beIN). No lower-case brand has
-// three letters before its capital, so there is no exception list.
+// of a word and an acronym ("toplantısıTBMM", "ettiAK", "aldıASELSAN",
+// "çıkardıG20"); h25 left them alone, h26-live-1 splits them. A replay of 10,859
+// summaries (2026-10-26 to 2026-11-02) found 15 tokens of that shape, all of them
+// real glue (AK, TBMM, CHP, UNESCO, G20, ASELSAN), and no macOS-style or currency
+// token. A capital start ("TürkçedeFaddey") is not a glue. The remaining ~106 are brands and names that
+// start upper case (MasterChef, YouTube, BirGün, VakıfBank, EuroLeague, ...) or
+// lower case with at most two letters in front of the capital (iPhone, iMac,
+// iPad, kWh, mRNA, mAh, eVTOL, beIN); none of those can match, because the run
+// needs three lower-case letters. The lower-case brands that DO have three or
+// more letters in front of their capitals (macOS, watchOS, visionOS, webOS, ...)
+// are listed in {@link LOWER_PREFIX_BRANDS}, and a currency amount glued to its
+// code ("5 milyarTL") is {@link CURRENCY_CODES}: both stay as they are.
 // ---------------------------------------------------------------------------
 
 const TR_LOWER = "a-zçğıöşüâîû";
 const TR_UPPER = "A-ZÇĞİÖŞÜÂÎÛ";
 /**
  * A whitespace-delimited token that STARTS with three or more lower-case letters
- * and then a capital followed by a lower-case letter: the run is a word, the
- * rest the next sentence. "iPhone" (one letter in front), "BirGün" and "MasterChef"
- * (upper case start), "@YelizzKoray", "#yerelSeçim" and URLs never match. The
- * lookbehind starts a match only at the beginning of a token, and the run is
- * consumed once, so a very long token costs O(n).
+ * and then a capital that is followed by a lower-case letter (a word, "ziyaretİçişleri"),
+ * another capital or a digit (an acronym, "toplantısıTBMM", "çıkardıG20"): the
+ * run is a word, the rest the next sentence. "iPhone" (one letter in front),
+ * "BirGün" and "MasterChef" (upper case start), "@YelizzKoray", "#yerelSeçim" and
+ * URLs never match. The lookbehind starts a match only at the beginning of a
+ * token, and the run is consumed once, so a very long token costs O(n).
  */
-const GLUED_WORD = new RegExp(`(?<=^|\\s)([${TR_LOWER}]{3,})(?=[${TR_UPPER}][${TR_LOWER}])`, "gu");
+const GLUED_WORD = new RegExp(
+  `(?<=^|\\s)([${TR_LOWER}]{3,})(?=[${TR_UPPER}](?:[${TR_LOWER}]|[${TR_UPPER}0-9]))`,
+  "gu",
+);
+/**
+ * Brands that start with three or more lower-case letters and then capitals, so
+ * {@link GLUED_WORD} would split them; compared on the lower-cased core of the
+ * token (its leading run of letters and digits, "macOS'un" -> "macos"). Brands
+ * with at most two letters in front of the capital (iPhone, kWh, ...) never
+ * match and are listed only to document the rule.
+ */
+const LOWER_PREFIX_BRANDS: ReadonlySet<string> = new Set([
+  "macos", "watchos", "visionos", "tvos", "ipados", "webos", "iphone", "ipad",
+  "imac", "ios", "evtol", "bein", "kwh", "mrna", "mah", "chatgpt",
+]);
+/**
+ * Currency codes that stay glued to an amount in a feed ("5 milyarTL"): the
+ * capitals behind the word are exactly one of these and no lower-case letter
+ * follows them.
+ */
+const CURRENCY_CODES: ReadonlySet<string> = new Set(["TL", "YTL", "USD", "EUR", "GBP", "CHF"]);
+const UPPER_TR_LETTER = new RegExp(`^[${TR_UPPER}]$`, "u");
+const LOWER_ANY_LETTER = /^\p{Ll}$/u;
+
+/**
+ * Replacement for a {@link GLUED_WORD} match: the lower-case run plus ". ", or
+ * the run itself when the token is a lower-case-prefix brand or the capitals
+ * behind the run are a currency code. Each match scans its own token once (the
+ * lookbehind allows one match per token), so the pass stays linear.
+ */
+function splitGluedWord(_match: string, run: string, offset: number, whole: string): string {
+  // The core of the token: the run of letters and digits before the first
+  // apostrophe, punctuation or blank ("macOS'un" -> "macOS").
+  let coreEnd = offset + run.length;
+  while (coreEnd < whole.length && isLetterOrDigit(whole.charAt(coreEnd))) coreEnd++;
+  if (LOWER_PREFIX_BRANDS.has(whole.slice(offset, coreEnd).toLowerCase())) return run;
+
+  // The capitals right behind the run: a currency code is not an acronym unless
+  // a lower-case letter follows it.
+  const upperStart = offset + run.length;
+  let upperEnd = upperStart;
+  while (upperEnd < whole.length && UPPER_TR_LETTER.test(whole.charAt(upperEnd))) upperEnd++;
+  if (
+    CURRENCY_CODES.has(whole.slice(upperStart, upperEnd)) &&
+    !LOWER_ANY_LETTER.test(whole.charAt(upperEnd))
+  ) {
+    return run;
+  }
+  return run + ". ";
+}
+
 /** A lower-case label of at most 81 characters, no sentence mark, glued to a capital: "ziyaretin önemi:Cumhurbaşkanı". */
 const GLUED_LABEL = new RegExp(`^[${TR_LOWER}][^.!?…:]{0,80}:(?=[${TR_UPPER}])`, "u");
 /** A lower-case letter, a colon and a capital: "önemi:Cumhurbaşkanı". Digits are not matched, so "10:30" stays. */
@@ -599,7 +694,7 @@ const GLUED_COLON = new RegExp(`([${TR_LOWER}]):(?=[${TR_UPPER}])`, "gu");
 /** Step 4c of {@link tidySummaryText}. */
 function splitGluedHeadings(s: string): string {
   return s
-    .replace(GLUED_WORD, "$1. ")
+    .replace(GLUED_WORD, splitGluedWord)
     .replace(GLUED_LABEL, "")
     .replace(GLUED_COLON, "$1: ");
 }
@@ -636,19 +731,23 @@ function splitGluedHeadings(s: string): string {
  *      lower-case last sentence takes that sentence with it; a ":" the strip
  *      leaves dangling goes with it;
  *   4. put a space after a sentence mark glued to the next sentence
- *      ("kaldırıldı.Yangın" -> "kaldırıldı. Yangın"). Only a lower-case letter
- *      before the mark counts, so "T.C.", "A.Ş." and "U.S." are untouched, and
- *      the next character must be an upper-case letter, so decimals and
- *      domains ("3.5", "tayfhaber.com") are untouched;
+ *      ("kaldırıldı.Yangın" -> "kaldırıldı. Yangın", {@link GLUED_SENTENCE}).
+ *      Only a lower-case letter before the mark counts, so "T.C.", "A.Ş." and
+ *      "U.S." are untouched, and the next character must be an upper-case
+ *      letter, so decimals and domains ("3.5", "tayfhaber.com") are untouched;
  *   4c. undo a sub-heading glued onto the body (Haberport), see
  *      {@link splitGluedHeadings}: a whitespace-delimited token that starts with
- *      three or more lower-case letters and then "Upper+lower" is split with
- *      ". " ("ziyaretİçişleri" -> "ziyaret. İçişleri"); a leading lower-case
- *      label of up to 81 characters with no sentence mark, glued by a ":" to a
- *      capital, is dropped ("ziyaretin önemi:Cumhurbaşkanı" -> "Cumhurbaşkanı");
- *      a lower-case letter, ":" and a capital elsewhere gets a space ("önemi:
- *      Cumhurbaşkanı"). A split can put a CTA phrase behind a sentence mark
- *      ("tamamlandıDevamını oku"), so step 3 runs again when 4c changed the text;
+ *      three or more lower-case letters and then "Upper+lower" or an acronym
+ *      ("Upper+Upper" or "Upper+digit") is split with ". " ("ziyaretİçişleri" ->
+ *      "ziyaret. İçişleri", "toplantısıTBMM" -> "toplantısı. TBMM"), except a
+ *      lower-case-prefix brand ("macOS'un", {@link LOWER_PREFIX_BRANDS}) and an
+ *      amount glued to its currency code ("5 milyarTL", {@link CURRENCY_CODES});
+ *      a leading lower-case label of up to 81 characters with no sentence mark,
+ *      glued by a ":" to a capital, is dropped ("ziyaretin önemi:Cumhurbaşkanı"
+ *      -> "Cumhurbaşkanı"); a lower-case letter, ":" and a capital elsewhere gets
+ *      a space ("önemi: Cumhurbaşkanı"). A split can put a CTA phrase behind a
+ *      sentence mark ("tamamlandıDevamını oku"), so step 3 runs again when 4c
+ *      changed the text;
  *   4b. collapse every whitespace run to one space;
  *   5. trim.
  *
@@ -704,7 +803,7 @@ export function tidySummaryText(s: string): string {
   out = peelTrailingCtas(out);
 
   // 4. Glued sentences.
-  out = out.replace(/([a-zçğıöşü])([.!?…])(?=[A-ZÇĞİÖŞÜ])/gu, "$1$2 ");
+  out = out.replace(GLUED_SENTENCE, "$1$2 ");
 
   // 4c. Sub-heading glued onto the body (h25-live-2). A split can put a CTA
   //     behind a sentence mark, so the trailing CTA is peeled once more.
