@@ -1,6 +1,7 @@
 import { TrackedLink } from "@/components/ui/tracked-link";
 import { ZONE_META } from "@/lib/bias/config";
 import type { DistinctiveTerm, WeeklyDistinctiveWords } from "@/lib/weekly/distinctive-words";
+import { ZONE_MEDIA_HEADING, ZONE_MEDIA_LOCATIVE } from "@/lib/weekly/zone-media-label";
 import type { MediaDnaZone } from "@/types";
 
 // "Aynı hafta, farklı kelimeler" — the LLM-free companion to /hafta's
@@ -72,9 +73,9 @@ function ZoneColumn({
 
   return (
     <div className="space-y-2">
-      <h3 className={`text-sm font-semibold ${meta.zoneLabel}`}>{`${meta.label} medyası`}</h3>
+      <h3 className={`text-sm font-semibold ${meta.zoneLabel}`}>{ZONE_MEDIA_HEADING[zone]}</h3>
       <p className={metaClass}>
-        {`Son 7 günde ${meta.label} medyasında belirgin şekilde daha sık geçen kelimeler`}
+        {`Son 7 günde ${ZONE_MEDIA_LOCATIVE[zone]} belirgin şekilde daha sık geçen kelimeler`}
       </p>
       {terms.length === 0 ? (
         <p className={metaClass}>{EMPTY_ZONE_COPY}</p>

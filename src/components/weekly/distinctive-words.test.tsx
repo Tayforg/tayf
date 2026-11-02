@@ -112,3 +112,46 @@ describe("DistinctiveWords z legend", () => {
     }
   });
 });
+
+describe("DistinctiveWords zone headings (h19-copy-1)", () => {
+  // The zone label is an adjective for "Bağımsız": "Bağımsız medya" /
+  // "Bağımsız medyada", never "Bağımsız medyası" / "Bağımsız medyasında".
+  it("renders the grammatical heading and locative line for each zone", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+
+    expect(markup).toContain("Bağımsız medya");
+    expect(markup).toContain(">Bağımsız medya</h3>");
+    expect(markup).toContain(
+      "Son 7 günde Bağımsız medyada belirgin şekilde daha sık geçen kelimeler",
+    );
+    expect(markup).toContain(">İktidar medyası</h3>");
+    expect(markup).toContain("İktidar medyası");
+    expect(markup).toContain(">Muhalefet medyası</h3>");
+    expect(markup).toContain("Muhalefet medyasında");
+    expect(markup).toContain(
+      "Son 7 günde İktidar medyasında belirgin şekilde daha sık geçen kelimeler",
+    );
+    expect(markup).toContain(
+      "Son 7 günde Muhalefet medyasında belirgin şekilde daha sık geçen kelimeler",
+    );
+  });
+
+  it("never renders the ungrammatical 'Bağımsız medyası' (heading or locative)", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+
+    expect(markup.includes("Bağımsız medyası")).toBe(false);
+    expect(markup.includes("Bağımsız medyasında")).toBe(false);
+  });
+
+  it("keeps one heading and one locative line per zone", () => {
+    const markup = renderToStaticMarkup(<DistinctiveWords data={okData()} />);
+
+    expect(countOccurrences(markup, "<h3")).toBe(3);
+    for (const zone of ["İktidar medyasında", "Bağımsız medyada", "Muhalefet medyasında"]) {
+      expect(
+        countOccurrences(markup, `Son 7 günde ${zone} belirgin şekilde daha sık geçen kelimeler`),
+        zone,
+      ).toBe(1);
+    }
+  });
+});

@@ -57,7 +57,12 @@ interface ClusterSide {
     bEnts: Iterable<string>,
     tfidfCosine: number,
     hoursDelta: number,
-    opts?: { aTitle?: string | null; bTitle?: string | null },
+    opts?: {
+      aTitle?: string | null;
+      bTitle?: string | null;
+      aSourceSlug?: string | null;
+      bSourceSlug?: string | null;
+    },
   ): { score: number; components: Record<string, unknown> };
   titleTokens(title: string | null | undefined, minLen?: number): Set<string>;
   headlineTokens(title: string | null | undefined): {
@@ -340,6 +345,9 @@ beforeAll(async () => {
       zelenskiy: "zelenski",
       zelenskyy: "zelenski",
     });
+    // h19-recall-1: entity-sparse pairs are scored on text alone, at tfidf x factor.
+    expect(portConstants.ENTITY_SPARSE_TEXT_FACTOR).toBe(legacyConstants.ENTITY_SPARSE_TEXT_FACTOR);
+    expect(legacyConstants.ENTITY_SPARSE_TEXT_FACTOR).toBe(0.9);
   } catch (err) {
     loadError = err;
   }
@@ -532,6 +540,124 @@ describe("cluster-libs golden-vector parity (scripts/lib/cluster ↔ supabase/fu
         }
       }
       expect(mismatches).toEqual([]);
+    });
+  });
+
+  describe("entity-sparse text factor (h19-recall-1)", () => {
+    it("ENTITY_SPARSE_TEXT_FACTOR: the port equals the legacy value, pinned at 0.9", async () => {
+      const legacyConstants = await import("../../../scripts/lib/cluster/constants.mjs");
+      const portConstants = await import("../../../supabase/functions/_shared/cluster/constants.ts");
+      expect(portConstants.ENTITY_SPARSE_TEXT_FACTOR).toBe(legacyConstants.ENTITY_SPARSE_TEXT_FACTOR);
+      expect(legacyConstants.ENTITY_SPARSE_TEXT_FACTOR).toBe(0.9);
+      expect(portConstants.ENTITY_SPARSE_TEXT_FACTOR).toBe(0.9);
+    });
+
+    // Golden vectors. The first three have a side without any entity (the new
+    // branch), the rest are controls: a non-empty pair keeps the weighted
+    // formula, and the caps / lanes sit on top of either.
+    const vectors: Array<{
+      name: string;
+      ea: string[];
+      eb: string[];
+      tfidf: number;
+      hours: number;
+      opts?: {
+        aTitle?: string;
+        bTitle?: string;
+        aSourceSlug?: string;
+        bSourceSlug?: string;
+      };
+      sparse: boolean;
+    }> = [
+      { name: "a side empty", ea: [], eb: ["tbmm", "chp"], tfidf: 0.6, hours: 1, sparse: true },
+      { name: "b side empty", ea: ["tbmm"], eb: [], tfidf: 0.6, hours: 1, sparse: true },
+      {
+        // Replay pair haberler-com 2d95f57c vs anadolu-ajansi db167c9c.
+        name: "both sides empty, titles, haberler-com penalty",
+        ea: [],
+        eb: [],
+        tfidf: 0.6579567037103748,
+        hours: 0.042777777777777776,
+        opts: {
+          aTitle: "Trakya'daki çifte vatandaşlar Bulgaristan seçiminin 2. turunda 15 sandıkta oy veriyor",
+          bTitle: "Trakya'daki çifte vatandaşlar Bulgaristan'daki cumhurbaşkanı seçiminin ikinci turu için sandık başına gitti",
+          aSourceSlug: "haberler-com",
+          bSourceSlug: "anadolu-ajansi",
+        },
+        sparse: true,
+      },
+      { name: "sparse below the text floor", ea: [], eb: ["abd"], tfidf: 0.15, hours: 2, sparse: true },
+      {
+        name: "sparse under the subject veto",
+        ea: [],
+        eb: ["fidan"],
+        tfidf: 0.9,
+        hours: 1,
+        opts: {
+          aTitle: "Lavrov, Japon mevkidaşı Motegi ile görüştü",
+          bTitle: "Fidan, Atlanta'da Japon mevkidaşıyla yatırım ve üçüncü ülke iş birliğini görüştü",
+        },
+        sparse: true,
+      },
+      { name: "control: one shared entity", ea: ["tbmm"], eb: ["tbmm", "chp"], tfidf: 0.6, hours: 1, sparse: false },
+      { name: "control: no shared entity", ea: ["tbmm"], eb: ["chp"], tfidf: 0.6, hours: 1, sparse: false },
+    ];
+
+    it("score() and every component are byte-equivalent on the golden vectors", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const noFp = { strict: null, signature: null };
+      const mismatches: string[] = [];
+      for (const v of vectors) {
+        const l = legacy.score(noFp, noFp, v.ea, v.eb, v.tfidf, v.hours, v.opts);
+        const r = port.score(noFp, noFp, v.ea, v.eb, v.tfidf, v.hours, v.opts);
+        if (l.score !== r.score) mismatches.push(`${v.name}: score ${l.score} vs ${r.score}`);
+        const lk = Object.keys(l.components).sort();
+        const rk = Object.keys(r.components).sort();
+        if (lk.join(",") !== rk.join(",")) {
+          mismatches.push(`${v.name}: keys [${lk}] vs [${rk}]`);
+          continue;
+        }
+        for (const k of lk) {
+          const lv = (l.components as Record<string, unknown>)[k];
+          const rv = (r.components as Record<string, unknown>)[k];
+          if (lv !== rv) mismatches.push(`${v.name}: ${k} ${String(lv)} vs ${String(rv)}`);
+        }
+      }
+      expect(mismatches).toEqual([]);
+    });
+
+    it("both implementations take the new branch exactly when a side has no entity", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const noFp = { strict: null, signature: null };
+      expect(vectors.filter((v) => v.sparse).length).toBeGreaterThanOrEqual(3);
+      expect(vectors.filter((v) => !v.sparse).length).toBeGreaterThanOrEqual(2);
+      const wrong: string[] = [];
+      for (const v of vectors) {
+        for (const [name, side] of [["legacy", legacy], ["port", port]] as const) {
+          const c = side.score(noFp, noFp, v.ea, v.eb, v.tfidf, v.hours, v.opts).components;
+          const tfidfScore = c.tfidfScore as number;
+          const expected = v.sparse
+            ? Math.min(1, Math.max(0, tfidfScore * 0.9))
+            : 0.7 * tfidfScore + 0.3 * (c.entityRatio as number);
+          if (c.primary !== expected) wrong.push(`${name} ${v.name}: primary ${String(c.primary)} !== ${expected}`);
+        }
+      }
+      expect(wrong).toEqual([]);
+    });
+
+    it("the caps still win over the factor on both implementations", () => {
+      if (!legacy || !port) expect.fail("cluster libs not loaded");
+      const noFp = { strict: null, signature: null };
+      const veto = vectors.find((v) => v.name === "sparse under the subject veto")!;
+      const floor = vectors.find((v) => v.name === "sparse below the text floor")!;
+      for (const side of [legacy, port]) {
+        const sv = side.score(noFp, noFp, veto.ea, veto.eb, veto.tfidf, veto.hours, veto.opts);
+        expect(sv.components.subjectVeto).toBe(true);
+        expect(sv.score).toBeLessThan(0.36);
+        const tf = side.score(noFp, noFp, floor.ea, floor.eb, floor.tfidf, floor.hours, floor.opts);
+        expect(tf.components.textFloorCapped).toBe(true);
+        expect(tf.score).toBeLessThan(0.4);
+      }
     });
   });
 

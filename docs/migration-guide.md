@@ -2993,3 +2993,38 @@ select count(*) as runs,
 select cron.alter_job((select jobid from cron.job where jobname = 'blindspot-recall-veto'), schedule := '7-59/10 * * * *');
 delete from supabase_migrations.schema_migrations where version = '144';
 ```
+
+## 145 — ops_health_report row 17 `anon_surface`: APPLY 145 only, no deploy
+
+**Why:** `tests/guards/anon-surface.test.ts` scans migration *text* only, so a privilege that anon or authenticated gets from a dashboard change, or through the `supabase_admin` default ACL (tables `arwdDxtm`, sequences `rwU`, functions `X`; `postgres` cannot alter it), is invisible to CI and to every row of `ops_health_report()`. Today nothing is exposed (0 table grants to either role; every anon read goes through the five allowlisted RPCs), but Supabase Auth signup is open although the app never uses it (`auth.users` holds 0 rows) and 13 dormant `USING (true)` SELECT policies sit on `public`: one stray privilege would make articles, clusters or sources public. Row 17 turns such a privilege into a `fail` within minutes (hunt 19, h19-security-1).
+
+**What 145 does** (additive, one transaction, safe to re-apply): re-creates `ops_health_report()` with 136's text verbatim through row 16 (the test compares the raw text) and appends row 17, `anon_surface` (threshold 1). `fail` when `anon` or `authenticated` holds any privilege on a table, view, materialized view, foreign or partitioned table or sequence of `public` (`has_table_privilege` / `has_sequence_privilege` and the relation ACLs, which also catches PG17 `MAINTAIN`), or can execute a SECURITY DEFINER function there other than the five allowlisted RPCs (`saved_clusters(uuid[])`, `merged_cluster_map()`, `source_slugs()`, `source_slug_exists(text)`, `saved_clusters_v2(uuid[])`, each exempt by its full signature, so an anon-executable overload of one of those names is counted; trigger functions and extension members are not counted). `warn` when either role can execute an invoker function, or `auth.users` holds a row (signup abuse). `skip` without the roles, `unknown` on an error. The detail carries counts only, never an object name or user data: the heartbeat prints every detail to the job log and `$GITHUB_STEP_SUMMARY` of a public repository, so the names come from the service-role query in `docs/ops-heartbeat.md`, "Anon yüzeyi". The function returns 17 rows; `service_role` only; no table, no policy, no grant, no data change (the 13 policies and the platform default ACL stay as they are). The heartbeat, `/durum` and `/api/health` do not depend on the row count or the names. The dry-run records, the production Step 0 numbers and the mutation checks are in the file header. **Production reads `pass` today** (0 of 102 relations and 0 of 137 functions exposed, all five allowlisted signatures present once, 0 users, 6-9 ms).
+
+**Order:** none. Apply 145 with `supabase db push`; nothing to deploy (no app, no edge function). The next heartbeat run (30 minutes), or the next 10 minute snapshot (131), shows the row.
+
+**FOUNDER STEP (about one minute, not code, any order relative to 145):** in the Supabase Dashboard, Authentication, Sign In / Providers, turn off `Allow new users to sign up` and disable the Email provider (unused: no code calls Supabase Auth). Verify (read-only; never paste the key anywhere):
+
+```bash
+curl -s "$SUPABASE_URL/auth/v1/settings" -H "apikey: $SUPABASE_ANON_KEY"
+# expect "disable_signup":true
+```
+
+Until you do, row 17 stays `pass` while `auth.users` is empty and turns `warn` on the first signup.
+
+**Verify** (read-only):
+
+```sql
+select count(*) from public.ops_health_report();   -- 17
+select check_name, status, observed, threshold, detail from public.ops_health_report() where check_name = 'anon_surface';
+-- expect pass / 0 / 1 / anon/authenticated yetkisi yok: tablo/dizi 0, definer fonksiyon 0, invoker fonksiyon 0 (5 izinli RPC hariç) · auth.users 0
+-- service_role only (expect f, f, t)
+select has_function_privilege('anon', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('authenticated', 'public.ops_health_report()', 'execute'),
+       has_function_privilege('service_role', 'public.ops_health_report()', 'execute');
+-- md5(prosrc) should be fa5581a2e5edd98ce214b9621ecef7a4 (30,774 characters)
+select md5(prosrc), length(prosrc) from pg_proc where oid = 'public.ops_health_report()'::regprocedure;
+```
+
+When it fails or warns, `docs/ops-heartbeat.md`, "Anon yüzeyi (migration 145, row 17)", has the two read-only queries that name the exposed objects (the report itself carries counts only) and the revoke for each kind of object. The `warn` rows add one snapshot row every 10 minutes (131) until the cause is fixed.
+
+**Rollback** (nothing else depends on 145): re-run ONLY 136's `ops_health_report()` section, the text of `136_ops_heartbeat_app_side.sql` from `create or replace function public.ops_health_report()` through `grant execute on function public.ops_health_report() to service_role;` (about 525 lines; it re-creates the function with its comment, revoke and grant, which returns the report to 16 rows, md5 `a2b0b84c193022c78547beb0296e5f0c`), then `notify pgrst, 'reload schema';`, then remove ledger row 145: `delete from supabase_migrations.schema_migrations where version = '145';`. Do NOT re-apply `136_ops_heartbeat_app_side.sql` as a whole file: its section 2 re-creates `public.ops_db_size_limits()` with the defaults `7000 / 7600`, which silently overwrites the limits you set with `create or replace` (70% / 85% of the provisioned disk) and can mute a real disk-size warn or fail (or raise a false one), and its section 4 re-schedules the `ops-cron-route-runs-prune` job.

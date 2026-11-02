@@ -14,12 +14,14 @@ import {
   descriptionNamesSwap,
   foldNameToken,
   personNames,
+  stripFeedWrappers,
 } from "../../../supabase/functions/_shared/cluster/description-clean.ts";
 import { GENERIC_ENTITIES } from "../../../supabase/functions/_shared/cluster/constants.ts";
 import { extractEntities } from "../../../supabase/functions/_shared/cluster/entities.ts";
 import {
   fingerprint,
   foldTurkishWord,
+  normalizeTurkish,
   strictFingerprint,
 } from "../../../supabase/functions/_shared/cluster/fingerprint.ts";
 
@@ -742,6 +744,295 @@ describe("DESCRIPTION_SWAP_GUARD and its consumer wiring", () => {
     for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts") && n !== "description-clean.ts")) {
       const src = stripTsComments(readFileSync(resolve(dir, f), "utf8"));
       expect(src, `${f} must not use the swap detector`).not.toMatch(/descriptionNamesSwap|DESCRIPTION_SWAP/);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h19-ingest-2 (hunt 19, 2026-11-02): Diken and Serbestiyet feed wrappers.
+//
+// Diken ships "<title> dd.mm.yyyy Diken<body>\nThe post <title> appeared first
+// on #site_linkat dd.mm.yyyy ." and Serbestiyet ships "<body>\n<title> yazısı
+// ilk önce Serbestiyet adresinde yayınlanmıştır.". Fed into the fingerprint, the
+// entities and tf-idf they gave every item the tokens post / appeared / first /
+// site_linkat (Diken) and a copy of the title. stripFeedWrappers() removes them
+// at clustering time (cleanDescription calls it first, then the ticker cut) and
+// at read time (src/lib/articles/summary-tidy.ts imports the same function).
+// The stored description and content_hash are untouched.
+//
+// Fixtures are real rows (read-only SELECT on 2026-11-02): Diken a3be851f and
+// dab0eb01, Serbestiyet a6a2f0bd and 9cab88ae.
+// ---------------------------------------------------------------------------
+
+const DIKEN_A3BE_TITLE = "ABD'de özel bir jet otoyola düştü";
+const DIKEN_A3BE =
+  "ABD'de özel bir jet otoyola düştü 02.11.2026 DikenABD'nin Florida eyaletinde dokuz kişiyi taşıyan özel jet otoyola düştü.\nThe post ABD'de özel bir jet otoyola düştü appeared first on #site_linkat 02.11.2026 .";
+const DIKEN_A3BE_BODY = "ABD'nin Florida eyaletinde dokuz kişiyi taşıyan özel jet otoyola düştü.";
+
+const DIKEN_DAB0 =
+  "Üç il için şiddetli yağış uyarısı 31.10.2026 Dikenİzmir, Aydın ve Muğla'da şiddetli yağış bekleniyor.\nThe post Üç il için şiddetli yağış uyarısı appeared first on #site_linkat 31.10.2026 .";
+const DIKEN_DAB0_BODY = "İzmir, Aydın ve Muğla'da şiddetli yağış bekleniyor.";
+
+const SERBESTIYET_A6A2 =
+  "Fon soruşturmasında şüpheli sıfatıyla ifade veren Takasbank Genel Müdürü Yunus Arıncı, yurt dışına çıkış yasağı ve adli kontrol şartıyla serbest bırakıldıktan sonra görevinden istifa etti. \nTakasbank Genel Müdürü, fon soruşturmasında şüpheli olarak ifade verip istifa etti: Meclis’te Tera’ya finansmanı savunmuştu yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.";
+const SERBESTIYET_A6A2_BODY =
+  "Fon soruşturmasında şüpheli sıfatıyla ifade veren Takasbank Genel Müdürü Yunus Arıncı, yurt dışına çıkış yasağı ve adli kontrol şartıyla serbest bırakıldıktan sonra görevinden istifa etti.";
+
+const SERBESTIYET_9CAB =
+  "DEM Parti İmralı Heyeti Üyesi Pervin Buldan, Abdullah Öcalan’ın İmralı Cezaevi'ndeki yeni bir bölüme kalıcı olarak geçtiğini açıkladı\nPervin Buldan: “Öcalan yeni yerine taşındı ama bu ona statü kazandırmıyor, süreçte tıkanma var” yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.";
+const SERBESTIYET_9CAB_BODY =
+  "DEM Parti İmralı Heyeti Üyesi Pervin Buldan, Abdullah Öcalan’ın İmralı Cezaevi'ndeki yeni bir bölüme kalıcı olarak geçtiğini açıkladı";
+
+const WRAPPER_CASES: ReadonlyArray<readonly [string, string, string]> = [
+  ["Diken a3be851f (header + footer)", DIKEN_A3BE, DIKEN_A3BE_BODY],
+  ["Diken dab0eb01 (header + footer)", DIKEN_DAB0, DIKEN_DAB0_BODY],
+  ["Serbestiyet a6a2f0bd (footer on its own line, blank before the newline)", SERBESTIYET_A6A2, SERBESTIYET_A6A2_BODY],
+  ["Serbestiyet 9cab88ae (colon and curly quotes in the title)", SERBESTIYET_9CAB, SERBESTIYET_9CAB_BODY],
+  [
+    "Serbestiyet footer after a sentence mark, no newline",
+    "Gövde metni. Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.",
+    "Gövde metni.",
+  ],
+  [
+    "Serbestiyet footer without the final dot",
+    "Gövde metni.\nBaşlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır",
+    "Gövde metni.",
+  ],
+  [
+    "Serbestiyet footer, trailing blanks",
+    "Gövde metni.\nBaşlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.  \n ",
+    "Gövde metni.",
+  ],
+  [
+    "Serbestiyet footer after '!' and '…'",
+    "Gövde metni! İkinci cümle… Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.",
+    "Gövde metni! İkinci cümle…",
+  ],
+  [
+    "Serbestiyet footer, publisher name up to 40 characters",
+    "Gövde metni.\nBaşlık yazısı ilk önce Ankara Haber Ajansı Yayın Grubu adresinde yayınlanmıştır.",
+    "Gövde metni.",
+  ],
+  [
+    "WordPress footer (any site name)",
+    "Gövde metni.\nThe post Başlık appeared first on Site Adı.",
+    "Gövde metni.",
+  ],
+  [
+    "WordPress footer glued to the body",
+    "Gövde metni.The post Başlık appeared first on Site Adı.",
+    "Gövde metni.",
+  ],
+  [
+    "WordPress footer, CRLF line ends",
+    "Gövde metni.\r\nThe post Başlık appeared first on Site Adı.",
+    "Gövde metni.",
+  ],
+  [
+    "Diken header only (footer missing or truncated)",
+    "Başlık metni 31.10.2026 DikenGövde metni burada.",
+    "Gövde metni burada.",
+  ],
+  [
+    "Diken header, body starts with a capital Turkish letter",
+    "Başlık 01.11.2026 DikenÜlke genelinde yağış var.",
+    "Ülke genelinde yağış var.",
+  ],
+  [
+    "Diken header, a space after Diken",
+    "Başlık 01.11.2026 Diken Gövde metni.",
+    "Gövde metni.",
+  ],
+];
+
+// Wrapper-shaped text that must come back as the SAME string (===).
+const WRAPPER_SAME: ReadonlyArray<readonly [string, string]> = [
+  ["'The post-election' (a hyphen, not a space)", "The post-election period was long"],
+  ["a mid-text 'ilk önce'", "Gazete ilk önce haberi duyurdu, sonra yalanladı."],
+  ["'yazısı ilk önce' mid-text, no 'adresinde yayınlanmıştır' tail", "Kitabın yazısı ilk önce Meclis'te okundu, sonra basıldı."],
+  [
+    "a Serbestiyet footer followed by more text",
+    "Gövde.\nBaşlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır. Devamı burada.",
+  ],
+  [
+    "a truncated Serbestiyet footer",
+    "Gövde metni.\nÇakma Japon kuruluş fon vurguncularına nasıl bol keseden not dağıttı? yazısı ilk önce Serbestiyet ad...",
+  ],
+  ["a WordPress footer whose tail is longer than 80 characters", `Gövde.\nThe post Başlık appeared first on ${"x".repeat(81)}`],
+  ["a WordPress footer whose tail holds a newline", "Gövde.\nThe post Başlık appeared first on Site Adı.\nBaşka satır"],
+  ["a WordPress footer whose title is longer than 300 characters", `The post ${"x".repeat(300)} appeared first on Site Adı.`],
+  ["'Dikenli' is not 'Diken'", "Sınırda tel örgü 02.11.2026 Dikenli teller çekildi."],
+  ["a date and 'Diken' at the very start", "02.11.2026 DikenGövde metni."],
+  ["a header-shaped text on the second line", "Birinci satır.\nBaşlık 02.11.2026 DikenGövde metni."],
+  [
+    "a date followed by 'Diken' deep in a long text",
+    `${"Uzun gövde metni burada. ".repeat(20)}Başlık 02.11.2026 DikenGövde metni.`,
+  ],
+  [
+    "a long title before the footer and no boundary within 300 characters",
+    `${"x".repeat(400)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
+  ],
+  ["a Serbestiyet footer-shaped tail with a 41-character publisher", `Gövde.\nBaşlık yazısı ilk önce ${"p".repeat(41)} adresinde yayınlanmıştır.`],
+];
+
+describe("stripFeedWrappers (h19-ingest-2)", () => {
+  it.each(WRAPPER_CASES)("strips %s", (_label, input, expected) => {
+    expect(stripFeedWrappers(input)).toBe(expected);
+  });
+
+  it.each(WRAPPER_SAME)("returns the SAME string for %s", (_label, input) => {
+    expect(stripFeedWrappers(input) === input).toBe(true);
+  });
+
+  it("returns the same string for '' and for the older ticker-only inputs", () => {
+    expect(stripFeedWrappers("") === "").toBe(true);
+    for (const t of ["Birinci sat\u0131r.\nİkinci sat\u0131r.", "Haber\nSon dakika... x", "Haber metni.\n"]) {
+      expect(stripFeedWrappers(t) === t).toBe(true);
+    }
+  });
+
+  it("a text that is only a footer gives ''", () => {
+    expect(stripFeedWrappers("Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.")).toBe("");
+    expect(stripFeedWrappers("The post Başlık appeared first on #site_linkat 02.11.2026 .")).toBe("");
+    expect(stripFeedWrappers("\nThe post Başlık appeared first on Site Adı.")).toBe("");
+  });
+
+  it("is idempotent on every fixture, its result, and a doubled footer", () => {
+    const doubled = "Gövde.\nThe post A appeared first on S\nThe post B appeared first on S";
+    const all = [
+      ...WRAPPER_CASES.map(([, input]) => input),
+      ...WRAPPER_CASES.map(([, , expected]) => expected),
+      ...WRAPPER_SAME.map(([, input]) => input),
+      doubled,
+    ];
+    for (const x of all) {
+      const once = stripFeedWrappers(x);
+      expect(stripFeedWrappers(once), JSON.stringify(x)).toBe(once);
+    }
+    expect(stripFeedWrappers(doubled)).toBe("Gövde.");
+  });
+
+  it("the footers go before the header: the header is found in the footer-less text", () => {
+    // The footer tail ends in a date; only the HEADER date is followed by 'Diken'.
+    expect(stripFeedWrappers("T 02.11.2026 DikenGövde.\nThe post T appeared first on #site_linkat 02.11.2026 .")).toBe(
+      "Gövde.",
+    );
+  });
+
+  it("a 100k-character adversarial input finishes in under 100 ms", () => {
+    const inputs = [
+      "The post ".repeat(11_200),
+      `${"The post ".repeat(5_000)}${" ".repeat(55_000)}appeared first on`,
+      `The post ${" ".repeat(100_000)} appeared first on x`,
+      " yazısı ilk önce ".repeat(6_000),
+      `x yazısı ilk önce ${" ".repeat(100_000)} adresinde yayınlanmıştır.`,
+      "01.01.2026 Diken ".repeat(6_000),
+      `${" ".repeat(100_000)}01.01.2026 Diken`,
+      `\n${"a".repeat(100_000)} yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.`,
+    ];
+    for (const s of inputs) {
+      const start = performance.now();
+      stripFeedWrappers(s);
+      expect(performance.now() - start, `${s.length} chars`).toBeLessThan(100);
+    }
+  });
+});
+
+describe("cleanDescription with feed wrappers (h19-ingest-2)", () => {
+  it("a3be851f: the stored Diken text is cleaned to the body, with no wrapper token left", () => {
+    const cleaned = cleanDescription(DIKEN_A3BE);
+    expect(cleaned).toBe(DIKEN_A3BE_BODY);
+    for (const token of ["The post", "appeared", "#site_link", "02.11.2026 Diken", "Diken"]) {
+      expect(cleaned.includes(token), token).toBe(false);
+    }
+  });
+
+  it.each(WRAPPER_CASES)("cleans %s", (_label, input, expected) => {
+    expect(cleanDescription(input)).toBe(expected);
+  });
+
+  it("Serbestiyet: the footer title and sentence are gone", () => {
+    const cleaned = cleanDescription(SERBESTIYET_A6A2);
+    expect(cleaned).toBe(SERBESTIYET_A6A2_BODY);
+    expect(cleaned.includes("yazısı ilk önce")).toBe(false);
+    expect(cleaned.includes("yayınlanmıştır")).toBe(false);
+    expect(cleaned.includes("Meclis")).toBe(false);
+  });
+
+  it("a footer-only description becomes ''", () => {
+    expect(cleanDescription("Başlık yazısı ilk önce Serbestiyet adresinde yayınlanmıştır.")).toBe("");
+  });
+
+  it("a Milliyet ticker before a footer: both go", () => {
+    expect(
+      cleanDescription("Gövde metni.\nSon dakika... Başka haber başlığı\nThe post Başlık appeared first on Site Adı."),
+    ).toBe("Gövde metni.");
+  });
+
+  it("a Diken header and a Milliyet-style ticker on a later line: both go", () => {
+    expect(cleanDescription("Başlık 01.11.2026 DikenGövde metni.\nSon dakika... Başka haber")).toBe("Gövde metni.");
+  });
+
+  it("the ticker rules alone behave as before when no wrapper is present", () => {
+    expect(cleanDescription("A\nB\nSon dakika: x\nC\nSon dakika: y")).toBe("A\nB");
+    expect(cleanDescription("\nSon dakika... x")).toBe("");
+  });
+
+  it.each(WRAPPER_SAME)("returns %s byte-identical", (_label, input) => {
+    expect(cleanDescription(input) === input).toBe(true);
+  });
+
+  it("is idempotent on every wrapper fixture", () => {
+    for (const [, input] of [...WRAPPER_CASES, ...WRAPPER_SAME]) {
+      const once = cleanDescription(input);
+      expect(cleanDescription(once), JSON.stringify(input)).toBe(once);
+    }
+  });
+
+  it("the wrapper tokens stop feeding the strict fingerprint and the normalised text", () => {
+    const raw = normalizeTurkish(`${DIKEN_A3BE_TITLE} ${DIKEN_A3BE}`).split(" ");
+    const cleaned = normalizeTurkish(`${DIKEN_A3BE_TITLE} ${cleanDescription(DIKEN_A3BE)}`).split(" ");
+    for (const word of ["appeared", "post", "linkat"]) {
+      expect(raw, word).toContain(word);
+      expect(cleaned, word).not.toContain(word);
+    }
+    // "DikenABD'nin" is glued in the feed, so the site name is a prefix of a token.
+    expect(raw.some((t) => t.startsWith("diken"))).toBe(true);
+    expect(cleaned.some((t) => t.startsWith("diken"))).toBe(false);
+    expect(strictFingerprint(DIKEN_A3BE_TITLE, cleanDescription(DIKEN_A3BE))).not.toBe(
+      strictFingerprint(DIKEN_A3BE_TITLE, DIKEN_A3BE),
+    );
+  });
+
+  it("two Diken items on different stories no longer share the wrapper tokens", () => {
+    const tokens = (title: string, description: string) => normalizeTurkish(`${title} ${description}`).split(" ");
+    const wrapperWords = ["post", "appeared", "linkat"];
+    const rawA = tokens(DIKEN_A3BE_TITLE, DIKEN_A3BE);
+    const rawB = tokens("Üç il için şiddetli yağış uyarısı", DIKEN_DAB0);
+    const cleanA = tokens(DIKEN_A3BE_TITLE, cleanDescription(DIKEN_A3BE));
+    const cleanB = tokens("Üç il için şiddetli yağış uyarısı", cleanDescription(DIKEN_DAB0));
+    for (const w of wrapperWords) {
+      expect(rawA.includes(w) && rawB.includes(w), `raw ${w}`).toBe(true);
+      expect(cleanA.includes(w) || cleanB.includes(w), `cleaned ${w}`).toBe(false);
+    }
+  });
+});
+
+describe("stripFeedWrappers has one implementation", () => {
+  const read = (...parts: string[]) => readFileSync(resolve(__dirname, "..", "..", "..", ...parts), "utf8");
+
+  it("summary-tidy.ts imports it from the shared cluster module and does not redefine it", () => {
+    const src = stripTsComments(read("src", "lib", "articles", "summary-tidy.ts"));
+    expect(src).toContain('from "../../../supabase/functions/_shared/cluster/description-clean"');
+    expect(src).toMatch(/\bstripFeedWrappers\(/);
+    expect(src).not.toMatch(/function\s+stripFeedWrappers/);
+  });
+
+  it("rss/normalize.ts and the other rss modules still do not import it (content_hash stays byte-identical)", () => {
+    const dir = resolve(__dirname, "..", "..", "..", "supabase", "functions", "_shared", "rss");
+    for (const f of readdirSync(dir).filter((n) => n.endsWith(".ts"))) {
+      const src = stripTsComments(readFileSync(resolve(dir, f), "utf8"));
+      expect(src, `${f} must not use stripFeedWrappers`).not.toMatch(/stripFeedWrappers/);
     }
   });
 });

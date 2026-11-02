@@ -14,6 +14,9 @@
 // behind a strict-fingerprint auto-accept and a 48h time-window decay.
 //
 //   primary = 0.7*tfidf + 0.3*entityRatio
+//   entity-sparse pairs (either side has no whitelist entity, h19-recall-1):
+//     primary = clip01(tfidf * ENTITY_SPARSE_TEXT_FACTOR) -- scored on text
+//     alone instead of at most 0.70 of it; the caps below still apply
 //   entityRatio numerator: generic whitelist entities (bakan, fidan, abd, ...)
 //     weigh GENERIC_ENTITY_WEIGHT each, with a floor of one when anything is
 //     shared (h12-cluster-2)
@@ -40,6 +43,7 @@
 import {
   ENTITY_DENOM_MIN,
   ENTITY_FRESHNESS_HOURS,
+  ENTITY_SPARSE_TEXT_FACTOR,
   ENTITY_TEXT_FLOOR,
   ENTITY_WEIGHT,
   GENERIC_ENTITIES,
@@ -569,8 +573,15 @@ export function score(
   }
 
   // 6. Combine. `primary` keeps its computed value; the text floor only
-  // limits what it contributes to `raw`.
-  const primary = TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
+  // limits what it contributes to `raw`. A pair where either side has no
+  // whitelist entity cannot earn anything on the entity lane (nothing can be
+  // shared), so it is scored on text alone at ENTITY_SPARSE_TEXT_FACTOR
+  // instead of being capped at 0.70 of its tf-idf (h19-recall-1). This comes
+  // BEFORE the text floor and the vetoes below, which still win.
+  const entitySparse = Math.min(aEntities.size, bEntities.size) === 0;
+  const primary = entitySparse
+    ? clip01(tfidfScore * ENTITY_SPARSE_TEXT_FACTOR)
+    : TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
   const textFloorCapped = !headlineFired && tfidfScore < ENTITY_TEXT_FLOOR;
   let primaryForRaw = textFloorCapped
     ? Math.min(primary, MATCH_THRESHOLD - 0.01)

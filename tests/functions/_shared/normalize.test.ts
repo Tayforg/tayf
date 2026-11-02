@@ -1510,3 +1510,57 @@ describe("normalize.ts hunt-15 A-image-url-hygiene: stored image_url", () => {
     expect(a!.content_hash).toBe(b!.content_hash);
   });
 });
+
+// ---------------------------------------------------------------------------
+// hunt-19 (2026-11-02): the category classifier moved to rss/category.ts (see
+// tests/functions/_shared/classify-category.test.ts for the golden table).
+// Smoke tests only: normalizeItem still wires it, and the sports-source
+// override still wins.
+// ---------------------------------------------------------------------------
+
+describe("normalize.ts category wiring [hunt-19]", () => {
+  const NOW = Date.parse("2026-11-02T06:00:00Z");
+
+  it("a headline naming the President under a /dunya/ URL is politika, not dunya", () => {
+    const row = mod!.normalizeItem(
+      { ...source, slug: "cnn-turk", url: "https://www.cnnturk.com" },
+      {
+        title: "Cumhurbaşkanı Erdoğan Güney Kore'ye gitti",
+        link: "https://www.cnnturk.com/dunya/cumhurbaskani-erdogan-guney-koreye-gitti-3487551",
+        contentSnippet: "Cumhurbaşkanı Recep Tayyip Erdoğan, Seul'e hareket etti.",
+        pubDate: "Mon, 02 Nov 2026 05:00:00 GMT",
+      },
+      NOW,
+    );
+    expect(row).not.toBeNull();
+    expect(row!.category).toBe("politika");
+  });
+
+  it("a fotomac item is still spor, whatever the words say", () => {
+    const row = mod!.normalizeItem(
+      { ...source, slug: "fotomac", url: "https://www.fotomac.com.tr" },
+      {
+        title: "Erdoğan seçim kararını açıkladı",
+        link: "https://www.fotomac.com.tr/gundem/erdogan-secim-karari-1",
+        contentSnippet: "CHP ve MHP tepki gösterdi.",
+        pubDate: "Mon, 02 Nov 2026 05:00:00 GMT",
+      },
+      NOW,
+    );
+    expect(row).not.toBeNull();
+    expect(row!.category).toBe("spor");
+  });
+
+  it("the classifier sees the canonical url: a query string never decides the category", () => {
+    const row = mod!.normalizeItem(
+      source,
+      {
+        title: "Bir başlık",
+        link: "https://example.test/haber/1?next=/spor/futbol&utm_source=rss",
+        pubDate: "Mon, 02 Nov 2026 05:00:00 GMT",
+      },
+      NOW,
+    );
+    expect(row!.category).toBe("genel");
+  });
+});

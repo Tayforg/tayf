@@ -1,3 +1,4 @@
+import { stripFeedWrappers } from "../../../supabase/functions/_shared/cluster/description-clean";
 import { BOILERPLATE_PHRASES } from "./description-boilerplate";
 
 // Read-time tidy for feed residue in a cluster summary.
@@ -8,6 +9,10 @@ import { BOILERPLATE_PHRASES } from "./description-boilerplate";
 //   - glued sentences        "hastaneye kaldırıldı.Yangın, Ortaköy"
 //   - an outlet CTA tail     "... Sistemi (ILS)...Devamı için tıklayınız"
 //   - widget heading lines   "belirtti.\nİlginizi Çekebilir\nToplantıya"
+//   - feed wrappers          "<title> 02.11.2026 Diken<body>\nThe post <title>
+//                            appeared first on #site_linkat 02.11.2026 ." (Diken)
+//                            and "<body>\n<title> yazısı ilk önce Serbestiyet
+//                            adresinde yayınlanmıştır." (Serbestiyet)
 //   - raw newlines
 //
 // The ingest side must not change (content_hash and the corpus-equality test
@@ -110,6 +115,12 @@ function stripTrailingCta(s: string): string | null {
 /**
  * Tidy a summary for display. Steps, in order:
  *   1. drop whole lines that are a widget heading ("İlginizi Çekebilir");
+ *   1b. strip the Diken header ("<title> dd.mm.yyyy Diken") and the WordPress /
+ *      Yoast footers ("The post ... appeared first on ...", "... yazısı ilk
+ *      önce ... adresinde yayınlanmıştır.") with {@link stripFeedWrappers},
+ *      the same function the cluster consumer applies to the clustering text.
+ *      It runs here, while the newlines are still present, because a footer
+ *      starts at a line boundary;
  *   2. collapse every whitespace run that contains a newline to one space;
  *   3. strip a trailing "Devamı için tıklayınız" / "Read more »" style CTA,
  *      repeatedly (at most {@link MAX_CTA_PASSES} times);
@@ -120,9 +131,13 @@ function stripTrailingCta(s: string): string | null {
  *      domains ("3.5", "tayfhaber.com") are untouched;
  *   5. trim.
  *
- * Returns "" when nothing but residue was there; the caller then hides the
- * summary. Idempotent for any input with at most {@link MAX_CTA_PASSES}
- * stacked CTAs.
+ * Returns "" when nothing but residue was there (a footer-only text included);
+ * the caller then hides the summary. Idempotent for any input with at most
+ * {@link MAX_CTA_PASSES} stacked CTAs, whose footer, if any, is not followed
+ * by a CTA (a footer is recognised only at the very end of the text), and
+ * which has no Diken-style header after its first line (the header is found
+ * before the newlines are collapsed, so such a line is a header only once it
+ * has become part of the first line).
  */
 export function tidySummaryText(s: string): string {
   // 1. Widget heading lines.
@@ -130,6 +145,10 @@ export function tidySummaryText(s: string): string {
     .split(/\r?\n/)
     .filter((line) => !isWidgetLine(line))
     .join("\n");
+
+  // 1b. Diken / Serbestiyet feed wrappers (h19-ingest-2). The text still holds
+  //     its newlines here: the footers are found by them.
+  out = stripFeedWrappers(out);
 
   // 2. Newlines (and the blanks around them) become one space. The lookbehind
   //    starts a match only at the beginning of a run of blanks, so a very long

@@ -75,6 +75,12 @@
 //     kazada" vs "Bolu Dagi'nda ... kaza"), the primary and MinHash lanes are
 //     capped at SUBJECT_VETO_CAP, like the subject veto (see provinces.mjs).
 //
+//   - Entity-sparse pairs (h19-recall-1): when either side has no whitelist
+//     entity, primary = clip01(tfidf * ENTITY_SPARSE_TEXT_FACTOR) instead of
+//     0.7*tfidf + 0.3*entityRatio (which could only reach 0.70 of the text
+//     similarity). Applied before the text floor and the vetoes, which still
+//     win.
+//
 //     raw = max(jaccardScore, primary (text-floor capped), headlineScore)
 //
 // Usage:
@@ -106,6 +112,7 @@ import {
   ENTITY_WEIGHT,
   ENTITY_DENOM_MIN,
   ENTITY_FRESHNESS_HOURS,
+  ENTITY_SPARSE_TEXT_FACTOR,
   ENTITY_TEXT_FLOOR,
   HEADLINE_CONTAIN_BLOCK_PREFIXES,
   HEADLINE_CONTAIN_MIN,
@@ -666,8 +673,15 @@ export function score(
   // Primary lane is the weighted sum (tfidf heavy, entity tiebreaker). The
   // MinHash and headline lanes are parallel ceilings — whichever is largest
   // wins. `primary` keeps its computed value; the text floor only limits
-  // what it contributes to `raw`.
-  const primary = TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
+  // what it contributes to `raw`. A pair where either side has no whitelist
+  // entity cannot earn anything on the entity lane (nothing can be shared), so
+  // it is scored on text alone at ENTITY_SPARSE_TEXT_FACTOR instead of being
+  // capped at 0.70 of its tf-idf (h19-recall-1). This comes BEFORE the text
+  // floor and the vetoes below, which still win.
+  const entitySparse = Math.min(aEntities.size, bEntities.size) === 0;
+  const primary = entitySparse
+    ? clip01(tfidfScore * ENTITY_SPARSE_TEXT_FACTOR)
+    : TFIDF_WEIGHT * tfidfScore + ENTITY_WEIGHT * entityRatio;
   const textFloorCapped = !headlineFired && tfidfScore < ENTITY_TEXT_FLOOR;
   let primaryForRaw = textFloorCapped
     ? Math.min(primary, MATCH_THRESHOLD - 0.01)
