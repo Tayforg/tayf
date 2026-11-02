@@ -5,10 +5,12 @@ import {
   POLITICS_CATEGORIES,
   JEV_ADMISSION_POLICY,
   admissionMode,
+  attachMode,
   parseAdmitTag,
   isPoliticsMember,
   claimArgs,
   routeMessage,
+  ATTACH_MODE_ENV,
 } from "../../supabase/functions/_shared/cluster/politics-admission";
 import { admissionEffect } from "../../supabase/functions/_shared/cluster/admission-effect";
 import {
@@ -35,6 +37,42 @@ describe("admissionMode (strict parse)", () => {
   });
 });
 
+describe("attachMode (CLUSTER_ATTACH_MODE, strict parse; hunt-25 W3)", () => {
+  // The attach probe ships in SHADOW: unset is shadow, only the exact string
+  // "off" disables it and only the exact string "live" lets it write clusters.
+  // Garbage, a stray case or a stray space NEVER means live.
+  it.each([
+    ["off", "off"],
+    ["shadow", "shadow"],
+    ["live", "live"],
+    [undefined, "shadow"],
+    [null, "shadow"],
+    ["", "shadow"],
+    ["LIVE", "shadow"],
+    ["Live", "shadow"],
+    [" live", "shadow"],
+    ["live ", "shadow"],
+    ["OFF", "shadow"],
+    ["on", "shadow"],
+    ["1", "shadow"],
+    ["true", "shadow"],
+    ["attach", "shadow"],
+  ] as const)("attachMode(%o) === %s", (input, expected) => {
+    expect(attachMode(input)).toBe(expected);
+  });
+
+  it("only the exact string 'live' ever yields live", () => {
+    for (const junk of ["LIVE", "Live", " live", "live ", "live\n", "yes", "on", "1", "true", "liv", "lives", "\u200blive"]) {
+      expect(attachMode(junk)).not.toBe("live");
+    }
+    expect(attachMode("live")).toBe("live");
+  });
+
+  it("names its environment variable", () => {
+    expect(ATTACH_MODE_ENV).toBe("CLUSTER_ATTACH_MODE");
+  });
+});
+
 describe("parseAdmitTag", () => {
   it.each([
     [undefined, null],
@@ -42,9 +80,14 @@ describe("parseAdmitTag", () => {
     ["", null],
     ["shadow", "shadow"],
     ["live", "live"],
+    ["attach", "attach"],
     ["LIVE", null],
+    ["ATTACH", null],
+    [" attach", null],
+    ["attach ", null],
     [1, null],
     [{}, null],
+    [["attach"], null],
   ] as const)("parseAdmitTag(%o) === %o", (input, expected) => {
     expect(parseAdmitTag(input as unknown)).toBe(expected);
   });
@@ -89,6 +132,75 @@ describe("routeMessage", () => {
 
   it.each(rows.map((r, i) => [i, r] as const))("row %i", (_i, row) => {
     expect(routeMessage(row.article, row.admit, row.mode)).toBe(row.expected);
+  });
+
+  it("every existing row is unchanged whatever the attach mode is (the attach rule applies only to admit === 'attach')", () => {
+    for (const attach of ["off", "shadow", "live"] as const) {
+      for (const row of rows) {
+        expect(routeMessage(row.article, row.admit, row.mode, attach)).toBe(row.expected);
+      }
+    }
+  });
+});
+
+describe("routeMessage: the attach tag (hunt-25 W3)", () => {
+  const attachRows: Array<{
+    name: string;
+    article: { category: string | null; politics_admitted_at?: string | null };
+    jev: "off" | "shadow" | "live";
+    attach: "off" | "shadow" | "live";
+    expected: string;
+  }> = [
+    { name: "genel, attach shadow", article: { category: "genel" }, jev: "off", attach: "shadow", expected: "attach" },
+    { name: "genel, attach live", article: { category: "genel" }, jev: "off", attach: "live", expected: "attach" },
+    { name: "ekonomi, attach shadow", article: { category: "ekonomi" }, jev: "off", attach: "shadow", expected: "attach" },
+    { name: "null category, attach shadow", article: { category: null }, jev: "off", attach: "shadow", expected: "attach" },
+    { name: "genel, attach off", article: { category: "genel" }, jev: "off", attach: "off", expected: "disabled" },
+    { name: "genel, attach off, even with live Jev", article: { category: "genel" }, jev: "live", attach: "off", expected: "disabled" },
+    { name: "politika is in the gate", article: { category: "politika" }, jev: "off", attach: "shadow", expected: "in-gate" },
+    { name: "son_dakika is in the gate", article: { category: "son_dakika" }, jev: "off", attach: "live", expected: "in-gate" },
+    {
+      name: "an admitted (stamped) genel article is in the gate",
+      article: { category: "genel", politics_admitted_at: "2026-11-02T08:00:00Z" },
+      jev: "off",
+      attach: "live",
+      expected: "in-gate",
+    },
+    {
+      name: "a null stamp is not in the gate",
+      article: { category: "genel", politics_admitted_at: null },
+      jev: "off",
+      attach: "shadow",
+      expected: "attach",
+    },
+    { name: "the Jev mode does not matter: live", article: { category: "dunya" }, jev: "live", attach: "shadow", expected: "attach" },
+    { name: "the Jev mode does not matter: shadow", article: { category: "yasam" }, jev: "shadow", attach: "live", expected: "attach" },
+    { name: "off wins over in-gate", article: { category: "politika" }, jev: "off", attach: "off", expected: "disabled" },
+  ];
+
+  it.each(attachRows.map((r) => [r.name, r] as const))("%s", (_name, row) => {
+    expect(routeMessage(row.article, "attach", row.jev, row.attach)).toBe(row.expected);
+  });
+
+  it("without an attach mode the tag fails closed (disabled), never attach", () => {
+    expect(routeMessage({ category: "genel" }, "attach", "live")).toBe("disabled");
+    expect(routeMessage({ category: "genel" }, "attach", "shadow")).toBe("disabled");
+  });
+
+  it("the attach route is never 'cluster', 'dry-run' or 'rejected': the attach queue cannot reach clusterArticle", () => {
+    for (const category of ["genel", "politika", "son_dakika", "ekonomi", null]) {
+      for (const jev of ["off", "shadow", "live"] as const) {
+        for (const attach of ["off", "shadow", "live"] as const) {
+          const route = routeMessage({ category }, "attach", jev, attach);
+          expect(["attach", "in-gate", "disabled"]).toContain(route);
+        }
+      }
+    }
+  });
+
+  it("a Jev claim tag is untouched by the attach mode: 'live' stays rejected without a stamp", () => {
+    expect(routeMessage({ category: "genel" }, "live", "live", "off")).toBe("rejected");
+    expect(routeMessage({ category: "genel" }, "shadow", "shadow", "off")).toBe("dry-run");
   });
 });
 

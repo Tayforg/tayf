@@ -6,9 +6,10 @@ import { describe, expect, it } from "vitest";
 // ---------------------------------------------------------------------------
 // WCAG 2.1.1 (Keyboard): a horizontally scrolling element that holds no
 // focusable child cannot be scrolled with the keyboard, because browsers only
-// scroll a scroller that has focus. On /kalite and /gelistirici the chart
-// wrapper, the data tables and the code samples overflow at a 390 px viewport,
-// so each one needs to be a focus stop: tabIndex={0}, a region role with an
+// scroll a scroller that has focus. On /kalite the data table and on
+// /gelistirici the data tables and the code samples overflow at a 390 px
+// viewport (the /kalite chart no longer scrolls: its labels are HTML around a
+// fluid svg), so each one needs to be a focus stop: tabIndex={0}, a region role with an
 // accessible name (so a screen reader announces what took focus), and a
 // visible focus ring (the same `focus-visible:ring-2` the rest of the site
 // uses).
@@ -292,7 +293,7 @@ export function scanScrollRegions(rawSource: string): ScanResult {
 }
 
 const GUARDED_PAGES = [
-  { file: "src/app/kalite/page.tsx", minRegions: 2 },
+  { file: "src/app/kalite/page.tsx", minRegions: 1 },
   { file: "src/app/gelistirici/page.tsx", minRegions: 6 },
 ] as const;
 

@@ -300,6 +300,26 @@ const POLITIKA_DESC_RE = compile(
 //     one hour were admitted by them alone ('Bakan Gürlek' on a cancer-drug raid,
 //     'İçişleri Bakanlığı' on a rain warning, 'ABD seçimleri' on a gold wrap,
 //     'doğru kestane seçiminden' on a recipe).
+//   * named office holders and the İBB trial (wave BD, hunt-25): a headline
+//     that NAMES the person without the office word ('Cevdet Yılmaz: Diplomasi
+//     ve diyalogdan asla vazgeçilmemelidir', the 'Cumhurbaşkanı Yardımcısı' is
+//     in the description) fell out of the gate when #167 moved 'cumhurbaşkan' /
+//     'bakan' here. Read-only SQL, 2026-11-02: 23 'Cevdet Yılmaz' titles
+//     created before 06:00Z (the old classifier) were 96% politika / son_dakika,
+//     the 10 created after it are 30%; seven rows from six outlets sat in
+//     dunya / ekonomi beside clustered siblings. 'ibb davas' is the same loss
+//     for the trial: 'ibb' is only a COMPOUND_BODY word that needs an action,
+//     'dava' is not one, and 4 'İBB davasında ...' rows (sozcu, dokuz8,
+//     medyascope = genel; son-dakika = ekonomi) stood next to 11 clustered
+//     siblings. 'hakan fidan' (the foreign minister without 'Dışişleri
+//     Bakanı') and 'sinirlioglu' (Feridun Sinirlioğlu, Turkey's UN candidate)
+//     are the same shape. They are title-only like the office words: in a
+//     description the name is a mention. 'fuat oktay' and 'mehmet simsek' are
+//     NOT stems: the wave-AX meta test pins that its rows need more than a
+//     bare name, and 'Mehmet Şimşek' headlines are economy wraps ('Bakan
+//     Şimşek' already admits through 'bakan'; 'Şimşekspor' is a club and 'Vali
+//     Yılmaz Şimşek' a governor). The 7-day replay (stored rows, read-only) put
+//     every entering row on a political story and moved none out.
 const POLITIKA_TITLE_RE = compile(
   [],
   [
@@ -308,6 +328,7 @@ const POLITIKA_TITLE_RE = compile(
     "bakan", "basbakan", "hukumet",
     "belediye baskan", "icisleri", "disisleri", "kabine",
     "sarigul",
+    "cevdet yilmaz", "hakan fidan", "sinirlioglu", "ibb davas",
   ],
 );
 

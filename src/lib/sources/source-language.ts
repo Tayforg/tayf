@@ -31,6 +31,12 @@
 //   - src/components/story/story-timeline.tsx: the 'Tüm sıra' rows' source name
 //     and title, by display name (timeline points carry no slug).
 //   - src/components/story/read-across-spectrum.tsx: the picked outlet's name.
+//   - src/components/story/source-profile-link.tsx (the cluster page's "Kaynak
+//     künyesi"): the name is CSS-uppercased too, so it carries lang="en" for an
+//     English outlet (by slug, name as the fallback) on the link and on the
+//     plain-text fallback (h25-visual-1).
+//   - The cluster page's "Toplayıcı / niş kaynaklar" list (the uppercase name
+//     span of each non-voting member), by slug.
 //
 // NOT wired: the /timeline rows (src/app/timeline/page.tsx). Its ClusterRow
 // (src/lib/clusters/timeline-query.ts) carries no member sources, so

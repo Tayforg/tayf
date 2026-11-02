@@ -162,14 +162,38 @@ function StatTiles({ latest }: { latest: QualitySnapshot }) {
 // SVG geometry — constants so the layout is trivial to reason about.
 // viewBox is unitless so the parent container can scale it via CSS
 // (mirrors src/app/trends/page.tsx and src/components/finance/sparkline.tsx).
+//
+// The SVG draws only geometry (two gridlines and the line). Every label is
+// HTML around it: text inside the SVG is sized in viewBox units, so in a
+// 640-unit viewBox on a 390 px phone a 9-unit label rendered at about 5 px,
+// while an HTML label stays at its real 11 px (h25-visual-2; the same fix as
+// the intraday chart on /ekonomi, #169). The chart is fluid and never needs a
+// minimum width, so it neither scrolls nor clips the end date.
+//
+// The percent labels sit in a gutter to the left of the plot box, placed from
+// the same PAD_TOP / PLOT_H the gridlines use, so a label cannot drift off its
+// line. The dates sit in a row under the plot, inset by the same padding as
+// the plot's left and right edges.
 const CHART_W = 640;
 const CHART_H = 160;
-const PAD_LEFT = 40;
-const PAD_RIGHT = 8;
+// Only enough room to keep the 2-unit line and its round caps inside the viewBox.
+const PAD_LEFT = 4;
+const PAD_RIGHT = 4;
 const PAD_TOP = 12;
-const PAD_BOTTOM = 24;
+const PAD_BOTTOM = 12;
 const PLOT_W = CHART_W - PAD_LEFT - PAD_RIGHT;
 const PLOT_H = CHART_H - PAD_TOP - PAD_BOTTOM;
+
+/** Vertical anchors of the %max and %min labels, in percent of the svg height. */
+const MAX_LABEL_TOP_PCT = (PAD_TOP / CHART_H) * 100;
+const MIN_LABEL_TOP_PCT = ((PAD_TOP + PLOT_H) / CHART_H) * 100;
+
+// Literal class strings only (Tailwind 4 has no runtime scanner). right-full
+// puts a rate label just left of the plot box, inside the pl-10 gutter.
+const RATE_LABEL_CLASS =
+  "absolute right-full mr-1 -translate-y-1/2 whitespace-nowrap font-mono text-[11px] leading-none tabular-nums text-muted-foreground";
+const DATE_LABEL_CLASS =
+  "whitespace-nowrap font-mono text-[11px] leading-none tabular-nums text-muted-foreground";
 
 function SingletonRateChart({ snapshots }: { snapshots: QualitySnapshot[] }) {
   // `snapshots` is newest-first (the fetcher's contract); the chart reads
@@ -201,62 +225,80 @@ function SingletonRateChart({ snapshots }: { snapshots: QualitySnapshot[] }) {
 
   const first = chrono[0]!;
   const last = chrono[n - 1]!;
+  const firstDate = formatTurkishDate(first.takenAt);
+  const lastDate = formatTurkishDate(last.takenAt);
 
   return (
     <section className={cardClass + " space-y-2"}>
       <h2 className="text-[11px] uppercase tracking-[0.1em] text-muted-foreground">
         Tekil küme oranı — son {n} gece
       </h2>
-      <div
-        className="w-full overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        role="region"
-        aria-label="Tekil küme oranı grafiği"
-        tabIndex={0}
-      >
-        <svg
-          viewBox={`0 0 ${CHART_W} ${CHART_H}`}
-          role="img"
-          aria-label={`Son ${n} gecelik kayıtta tekil küme oranı %${Math.round(minRate * 100)} ile %${Math.round(maxRate * 100)} arasında değişti; en son değer %${Math.round(last.singletonRate * 100)}.`}
-          className="w-full h-auto min-w-[360px]"
-        >
-          <g
-            className="text-muted-foreground"
-            stroke="currentColor"
-            strokeOpacity={0.15}
-            strokeWidth={1}
+      {/* pl-10 is the gutter the percent labels sit in (right-full of the plot box). */}
+      <div className="w-full pl-10">
+        <div className="relative w-full">
+          <svg
+            viewBox={`0 0 ${CHART_W} ${CHART_H}`}
+            role="img"
+            aria-label={`Son ${n} gecelik kayıtta (${firstDate}–${lastDate}) tekil küme oranı %${Math.round(minRate * 100)} ile %${Math.round(maxRate * 100)} arasında değişti; en son değer %${Math.round(last.singletonRate * 100)}.`}
+            className="block h-auto w-full"
           >
-            <line x1={PAD_LEFT} x2={CHART_W - PAD_RIGHT} y1={PAD_TOP} y2={PAD_TOP} />
-            <line
-              x1={PAD_LEFT}
-              x2={CHART_W - PAD_RIGHT}
-              y1={PAD_TOP + PLOT_H}
-              y2={PAD_TOP + PLOT_H}
+            <g
+              className="text-muted-foreground"
+              stroke="currentColor"
+              strokeOpacity={0.15}
+              strokeWidth={1}
+            >
+              <line x1={PAD_LEFT} x2={CHART_W - PAD_RIGHT} y1={PAD_TOP} y2={PAD_TOP} />
+              <line
+                x1={PAD_LEFT}
+                x2={CHART_W - PAD_RIGHT}
+                y1={PAD_TOP + PLOT_H}
+                y2={PAD_TOP + PLOT_H}
+              />
+            </g>
+            <polyline
+              points={points.join(" ")}
+              fill="none"
+              className="text-brand"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
             />
-          </g>
-          <g className="text-muted-foreground" fill="currentColor" fontSize={9}>
-            <text x={PAD_LEFT - 4} y={PAD_TOP + 3} textAnchor="end">
-              %{Math.round(maxRate * 100)}
-            </text>
-            <text x={PAD_LEFT - 4} y={PAD_TOP + PLOT_H + 3} textAnchor="end">
-              %{Math.round(minRate * 100)}
-            </text>
-            <text x={PAD_LEFT} y={CHART_H - 6} textAnchor="start">
-              {formatTurkishDate(first.takenAt)}
-            </text>
-            <text x={CHART_W - PAD_RIGHT} y={CHART_H - 6} textAnchor="end">
-              {formatTurkishDate(last.takenAt)}
-            </text>
-          </g>
-          <polyline
-            points={points.join(" ")}
-            fill="none"
-            className="text-brand"
-            stroke="currentColor"
-            strokeWidth={2}
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
-        </svg>
+          </svg>
+          <span
+            aria-hidden="true"
+            data-chart-label
+            className={RATE_LABEL_CLASS}
+            style={{ top: `${MAX_LABEL_TOP_PCT.toFixed(2)}%` }}
+          >
+            %{Math.round(maxRate * 100)}
+          </span>
+          <span
+            aria-hidden="true"
+            data-chart-label
+            className={RATE_LABEL_CLASS}
+            style={{ top: `${MIN_LABEL_TOP_PCT.toFixed(2)}%` }}
+          >
+            %{Math.round(minRate * 100)}
+          </span>
+        </div>
+        {/* Percent padding is of this row's containing block, the plot's own width. */}
+        <div
+          className="mt-1 flex justify-between gap-2"
+          style={{
+            paddingLeft: `${((PAD_LEFT / CHART_W) * 100).toFixed(2)}%`,
+            paddingRight: `${((PAD_RIGHT / CHART_W) * 100).toFixed(2)}%`,
+          }}
+        >
+          <span aria-hidden="true" data-chart-label className={DATE_LABEL_CLASS}>
+            {firstDate}
+          </span>
+          <span aria-hidden="true" data-chart-label className={DATE_LABEL_CLASS}>
+            {lastDate}
+          </span>
+        </div>
       </div>
     </section>
   );

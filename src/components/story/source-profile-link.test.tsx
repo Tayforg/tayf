@@ -116,6 +116,52 @@ describe("SourceProfileLink — invalid or missing slug", () => {
   });
 });
 
+// WCAG 3.1.2 (h25-visual-1): the künye name is CSS-uppercased under <html
+// lang="tr">, which turns 'Daily Sabah' into 'DAİLY SABAH'. An English outlet
+// carries lang="en" so the glyphs and the screen-reader voice are right; the
+// slug decides, and the display name is only the fallback for a missing slug.
+describe("SourceProfileLink — lang for English outlets", () => {
+  it("puts lang=en on the link of Daily Sabah", () => {
+    const html = render("daily-sabah", "Daily Sabah");
+    expect(html).toMatch(/<a [^>]*lang="en"[^>]*>Daily Sabah<\/a>/);
+    expect(html).toContain('href="/source/daily-sabah"');
+  });
+
+  it("puts lang=en on the link of Hürriyet Daily News", () => {
+    const html = render("hurriyet-daily-news", "Hürriyet Daily News");
+    expect(html).toMatch(/<a [^>]*lang="en"[^>]*>Hürriyet Daily News<\/a>/);
+  });
+
+  it("renders no lang attribute for a Turkish outlet", () => {
+    const html = render("sozcu", "Sözcü");
+    expect(html).not.toContain("lang=");
+    expect(html).toContain('href="/source/sozcu"');
+  });
+
+  it("puts lang=en on the plain-text fallback when the slug is blank (name fallback)", () => {
+    const html = render("", "Daily Sabah");
+    expect(html).not.toContain("<a");
+    expect(html).toMatch(/^<span [^>]*lang="en"[^>]*>Daily Sabah<\/span>$/);
+    expect(html).toContain(`class="${SOURCE_NAME_TEXT_CLASS}"`);
+  });
+
+  it("renders no lang on the fallback span of a Turkish outlet", () => {
+    expect(render("", "Sözcü")).toBe(`<span class="${SOURCE_NAME_TEXT_CLASS}">Sözcü</span>`);
+    expect(render(null, "Sözcü")).not.toContain("lang=");
+  });
+
+  it("lets the slug decide: a Turkish slug with an English-looking name gets no lang", () => {
+    const html = render("sozcu", "Daily Sabah");
+    expect(html).not.toContain("lang=");
+  });
+
+  it("keeps the class and the link target intact next to the lang attribute", () => {
+    const html = render("daily-sabah", "Daily Sabah");
+    expect(html).toContain(`class="${SOURCE_PROFILE_LINK_CLASS}"`);
+    expect(html.match(/<a[\s>]/g)).toHaveLength(1);
+  });
+});
+
 describe("SourceProfileLink — name handling", () => {
   it("escapes a hostile name in the link", () => {
     const html = render("sabah", "<img src=x>");

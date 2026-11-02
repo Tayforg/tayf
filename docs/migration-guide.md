@@ -3105,3 +3105,81 @@ select s.slug, count(*) filter (where a.source_article_key is not null) keyed, c
 ```
 
 **Rollback** (the TS rules ship with the ingest function, this only restores the SQL twin): redeploy the previous ingest function if the TypeScript rules must go too; re-run ONLY 113's `source_article_key` section (the `create or replace function public.source_article_key(p_url text)` block, its comment, revoke and grant; not the column, index or backfill pieces), which restores the body with md5 `dbbba7e0e939036ef5c4298b593b7474`; then remove ledger row 149: `delete from supabase_migrations.schema_migrations where version = '149';`.
+
+## 151 — attach-only admission, SHADOW (`cluster_attach` queue, `cluster_attach_shadow`, trigger `articles_cluster_attach_probe`): APPLY 151, THEN DEPLOY cluster-consumer, REVIEW 48 H, THEN DECIDE `CLUSTER_ATTACH_MODE`
+
+**Why:** the politics gate is decided per article. On 2026-11-02 the "32 ilde FETÖ operasyonu" story had 13 clustered rows (18 now) in `304a47ce`, and nine rows with the same or a near-identical headline sat unclustered in `genel` next to it (hurriyet `2f93603f` is character-identical to aksam `26ede371`). `enqueue_cluster_work` (025) only enqueues `politika` / `son_dakika`, so those articles never reach the clusterer and the cluster's bias bar misses TRT Haber, CNN Türk, Hürriyet, Karar and BirGün (hunt 25, h25-clusters-3). 148's sibling veto only hides the false-blindspot symptom.
+
+**What 151 does** (additive, ONE short transaction, safe to re-apply): the new pgmq queue `cluster_attach` (024's guard) with every privilege on its two tables revoked from `public`, `anon`, `authenticated`; `public.cluster_attach_shadow` (`article_id` primary key and foreign key `on delete cascade`, `cluster_id` with no foreign key, `score`, `lane`, `mode`, `created_at`; RLS on, no policy, `service_role` select + insert only, 140's model); `public.enqueue_cluster_attach_probe()` (SECURITY DEFINER, `search_path = ''`, owner postgres, execute revoked from anon/authenticated/public, a swallowed exception: a probe never fails an ingest insert) and the trigger `articles_cluster_attach_probe` (after insert, WHEN category in genel, ekonomi, dunya, yasam, teknoloji; the function also requires an outlet or wire source, so aggregators, niche sources, spor and null categories never enqueue). **025's function and trigger are not touched**: the politika path stays byte-identical (the dry run gates on production's body, md5 `858efd334d1586fdf340af3835c2ca9f`, which is 025's body without its comments). No cron job, no data rewrite, no backfill.
+
+**Why a new queue:** `cluster_work` carries ~78 messages an hour, the attach candidates ~174 an hour (467 at the peak hour). One FIFO queue would delay politika work and trip 150's `queue_lag` warning, and a per-drain cap on it would push over-cap messages toward the poison threshold. The consumer reads `cluster_attach` only after `cluster_work` ran dry, once, at most 25 messages (`planAttachRead`), and deletes a successful message instead of archiving it (037's retention covers only the two older queues).
+
+**Order:** apply 151 (`supabase db push`; the trigger step takes an ACCESS EXCLUSIVE lock on `public.articles` under `lock_timeout = '5s'`: if the table is busy it fails fast and rolls back, run it again at a quieter minute), then `npx supabase functions deploy cluster-consumer --no-verify-jwt`. Either order is safe: a function deployed before the migration warns once per isolate (`cluster_attach read failed`) and drains politika as before; a migration applied before the function lets about 3 messages a minute wait, and the consumer deletes the ones older than 6 hours as stale.
+
+**`CLUSTER_ATTACH_MODE`** (a Supabase function secret; strict parse, `supabase secrets set CLUSTER_ATTACH_MODE=<value>`):
+
+| value | meaning |
+|---|---|
+| unset, `shadow`, or anything not listed below (`""`, `LIVE`, ` live`, `on`, `1`, ...) | **shadow (the default)**: each decision is written to `cluster_attach_shadow` with mode `shadow`; no cluster or article change, the processed message is deleted |
+| `off` (the exact string) | the `cluster_attach` queue is not read at all; messages wait (and expire as stale once read later) |
+| `live` (the exact string) | the article is stamped `politics_admitted_at` (so the reader's 60% politics share, `isPoliticsMember`, keeps counting the cluster) and linked through `cluster_link_atomic`; a row with mode `live` is written; the cluster page is revalidated. A failed link clears the stamp it set |
+
+Garbage never means live. **Nothing in this change sets `live`.** The evidence is only the identical folded headline, an equal strict fingerprint, or the headline lane (identical numerals, >= 4 shared stems, within 6 hours), against a cluster with >= 60% politics members that does not hold the article's source and has no twin within 0.05; it never creates a cluster and never calls the ensemble, tf-idf, MinHash, entities or Jev.
+
+**Acceptance (read-only, before this PR):** the last 24 h of unclustered non-gate outlet/wire rows (4,412) replayed against the 48 h politics clusters (1,938): 73 would attach (18 exact-title, 55 headline), 4,325 no-match, 10 stale, 2 same-source, 2 ambiguous; all 73 read by hand against the cluster and the evidence member, **0 wrong**. Of the finding's nine rows, three attach (hurriyet `2f93603f`, aydinlik `2ae4c098`, birgun `5401d734`); five with different stems ("41 tutuklama", "72 gözaltı") stay unclustered by design and one is a niche source.
+
+**Verify** (read-only):
+
+```sql
+select to_regclass('public.cluster_attach_shadow');                                          -- the table
+select relrowsecurity from pg_class where oid = 'public.cluster_attach_shadow'::regclass;   -- t
+select has_table_privilege('anon', 'public.cluster_attach_shadow', 'select'),
+       has_table_privilege('authenticated', 'public.cluster_attach_shadow', 'insert'),
+       has_table_privilege('service_role', 'public.cluster_attach_shadow', 'insert'),
+       has_table_privilege('service_role', 'public.cluster_attach_shadow', 'update');       -- f, f, t, f
+select count(*) from pgmq.list_queues() q where q.queue_name = 'cluster_attach';            -- 1
+-- 025's trigger and function are unchanged (expect 858efd334d1586fdf340af3835c2ca9f)
+select md5(prosrc) from pg_proc where oid = 'public.enqueue_cluster_work()'::regprocedure;
+select tgname, pg_get_triggerdef(oid) from pg_trigger
+ where tgname in ('articles_cluster_enqueue', 'articles_cluster_attach_probe') and not tgisinternal;
+-- the queue stays shallow (a few messages, oldest seconds)
+select count(*), min(enqueued_at) from pgmq.q_cluster_attach;
+select count(*) from supabase_migrations.schema_migrations where version = '151';           -- 1
+```
+
+**The 48-hour review** (read every row before flipping to `live`; expect about 75 rows a day, nearly all `headline` or `exact-title`; `fingerprint` should be rare):
+
+```sql
+select s.created_at, s.lane, round(s.score::numeric, 3) score, src.slug, a.category,
+       a.title as article_title, c.title_tr as cluster_title, c.article_count, s.cluster_id, s.article_id
+  from public.cluster_attach_shadow s
+  join public.articles a on a.id = s.article_id
+  join public.sources src on src.id = a.source_id
+  left join public.clusters c on c.id = s.cluster_id
+ where s.created_at >= now() - interval '48 hours'
+ order by s.created_at desc;
+-- the evidence for one row: the cluster's members
+select a.published_at, src.slug, a.category, a.title
+  from public.cluster_articles ca join public.articles a on a.id = ca.article_id
+  join public.sources src on src.id = a.source_id
+ where ca.cluster_id = '<cluster_id>' order by a.published_at;
+-- how the decisions split
+select lane, mode, count(*) from public.cluster_attach_shadow group by 1, 2 order by 3 desc;
+```
+
+Also read the function logs: the drain summary line carries `attach {mode, read, would_attach, attached, by_reason, failed, delete_errors, depth_after, oldest_age_after_s}`. `by_reason` shows why articles were NOT attached (`no-match`, `stale`, `same-source`, `ambiguous`, `below-share`, `in-gate`, `not-found`). A growing `depth_after` means the cap of 25 a drain is not enough at peak (measured peak 7.8 a minute) or `cluster_work` never runs dry.
+
+**After the decision:** flip with `supabase secrets set CLUSTER_ATTACH_MODE=live` (or `off`). In `live`, a wrong attach is undone by removing the `cluster_articles` row and clearing the article's `politics_admitted_at`; the `cluster_attach_shadow` row (mode `live`) names both. Once the decisions have been reviewed the operator empties `public.cluster_attach_shadow` (`service_role` cannot).
+
+**Rollback** (nothing else depends on 151):
+
+```sql
+-- first: supabase secrets set CLUSTER_ATTACH_MODE=off  (the consumer stops reading the queue)
+drop trigger if exists articles_cluster_attach_probe on public.articles;
+drop function if exists public.enqueue_cluster_attach_probe();
+drop table if exists public.cluster_attach_shadow;
+select pgmq.drop_queue('cluster_attach');
+delete from supabase_migrations.schema_migrations where version = '151';
+```
+
+The consumer tolerates the missing queue and table (one warning per isolate each); revert the function only if you want the warnings gone. A `live` run leaves `politics_admitted_at` stamps and `cluster_articles` rows behind; revert those by hand from `cluster_attach_shadow` before dropping it.

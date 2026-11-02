@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { sourceLang } from "@/lib/sources/source-language";
 import { isValidSourceSlug } from "@/lib/validation/source-input";
 
 /**
@@ -19,6 +20,12 @@ import { isValidSourceSlug } from "@/lib/validation/source-input";
  *
  * The accessible name is the visible source name: no aria-label / title.
  * Tailwind classes are literal strings so the JIT picks them up.
+ *
+ * Language (WCAG 3.1.2, h25-visual-1): the name is CSS-uppercased under
+ * <html lang="tr">, which turns 'Daily Sabah' into 'DAİLY SABAH'. English
+ * outlets get lang="en" (`sourceLang`: the slug decides, the display name is
+ * the fallback for a blank slug) on both the link and the plain-text fallback;
+ * a Turkish outlet renders no lang attribute.
  */
 
 /** Profile URL for `slug`, or null when the profile route would reject it. */
@@ -41,13 +48,18 @@ export function SourceProfileLink({
 }) {
   if (typeof name !== "string" || name.trim() === "") return null;
 
+  const lang = sourceLang({ slug, name });
   const href = sourceProfileHref(slug);
   if (href === null) {
-    return <span className={SOURCE_NAME_TEXT_CLASS}>{name}</span>;
+    return (
+      <span lang={lang} className={SOURCE_NAME_TEXT_CLASS}>
+        {name}
+      </span>
+    );
   }
 
   return (
-    <Link href={href} prefetch={false} className={SOURCE_PROFILE_LINK_CLASS}>
+    <Link href={href} prefetch={false} lang={lang} className={SOURCE_PROFILE_LINK_CLASS}>
       {name}
     </Link>
   );

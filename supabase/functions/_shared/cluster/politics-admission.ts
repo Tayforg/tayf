@@ -10,6 +10,10 @@
 //   * Next: src/lib/bias/config.ts re-exports isPoliticsMember /
 //     POLITICS_CATEGORIES / JEV_ADMISSION_POLICY / AdmissionPin.
 //
+// Hunt-25 W3 adds a third kind of message, admit === "attach": the deterministic,
+// attach-only probe of migration 151 (queue cluster_attach). It is routed by its
+// own rule, applies ONLY to that tag, and leaves every Jev case below untouched.
+//
 // Keep this module dependency-free — it has to compile under tsc (Next,
 // vitest) and deno with no import map, and NEVER via a `./x.ts`-extension
 // relative import under `moduleResolution: bundler` (TS5097).
@@ -50,11 +54,33 @@ export function admissionMode(flag?: string | null): AdmissionMode {
   return "off";
 }
 
+/** Mode of the attach-only probe (hunt-25 W3, migration 151):
+ *   off     the cluster_attach queue is not read at all;
+ *   shadow  decisions are recorded in cluster_attach_shadow, nothing is clustered;
+ *   live    the article is stamped politics_admitted_at and linked to the cluster. */
+export type AttachMode = "off" | "shadow" | "live";
+
+/** The environment variable that selects the attach mode. */
+export const ATTACH_MODE_ENV = "CLUSTER_ATTACH_MODE";
+
+/** Strict parse, but with the opposite default of admissionMode: the attach
+ * probe SHIPS IN SHADOW, so unset means shadow. Only the exact string "off"
+ * disables it and only the exact string "live" lets it write clusters;
+ * undefined, '', 'LIVE', ' live', 'on', '1' and every other string mean shadow.
+ * Garbage NEVER means live. */
+export function attachMode(flag?: string | null): AttachMode {
+  if (flag === "off") return "off";
+  if (flag === "live") return "live";
+  return "shadow";
+}
+
 /** The `admit` field of a claimed pgmq message. Only the exact strings
- * "shadow" and "live" are recognised; anything else (including undefined,
- * '', or a stray extra field) parses to null -- "not an admission claim". */
-export function parseAdmitTag(value: unknown): "shadow" | "live" | null {
-  if (value === "shadow" || value === "live") return value;
+ * "shadow", "live" and "attach" are recognised; anything else (including
+ * undefined, '', or a stray extra field) parses to null -- "not an admission
+ * claim". "shadow"/"live" come from the Jev claim RPC on cluster_work; "attach"
+ * only from the migration-151 trigger on cluster_attach. */
+export function parseAdmitTag(value: unknown): "shadow" | "live" | "attach" | null {
+  if (value === "shadow" || value === "live" || value === "attach") return value;
   return null;
 }
 
@@ -100,15 +126,40 @@ export function claimArgs(mode: AdmissionMode): {
   };
 }
 
-export type AdmitRoute = "cluster" | "dry-run" | "not-politics" | "disabled" | "rejected";
+export type AdmitRoute =
+  | "cluster"
+  | "dry-run"
+  | "not-politics"
+  | "disabled"
+  | "rejected"
+  | "attach"
+  | "in-gate";
 
 /** Routes a (fetched) article + an admit-tagged message's `admit` field
- * under the current mode. Order matters -- see the numbered rules below. */
+ * under the current mode. Order matters -- see the numbered rules below.
+ *
+ * `attach` is the CLUSTER_ATTACH_MODE of the attach probe and is read ONLY for
+ * admit === "attach" (rule 0); it defaults to "off" so a caller that forgets it
+ * fails closed. Rules 1-7 are the Jev rules of migration 089, unchanged. */
 export function routeMessage(
   article: { category: string | null | undefined; politics_admitted_at?: string | null },
-  admit: "shadow" | "live" | null,
+  admit: "shadow" | "live" | "attach" | null,
   mode: AdmissionMode,
+  attach: AttachMode = "off",
 ): AdmitRoute {
+  // 0. admit "attach" (migration 151): its own rule, never "cluster".
+  //    mode off -> "disabled"; an article already inside the politics gate
+  //    (politika/son_dakika, or admitted) -> "in-gate"; otherwise -> "attach".
+  if (admit === "attach") {
+    if (attach === "off") return "disabled";
+    if (
+      (article.category != null && (POLITICS_CATEGORIES as readonly string[]).includes(article.category)) ||
+      article.politics_admitted_at != null
+    ) {
+      return "in-gate";
+    }
+    return "attach";
+  }
   // 1. category politika/son_dakika -> "cluster" (the trigger path is untouched).
   if (article.category != null && (POLITICS_CATEGORIES as readonly string[]).includes(article.category)) {
     return "cluster";
