@@ -1,0 +1,61 @@
+# Live-Postgres migration tests: one entry per test file that has a live block.
+#
+# Read by tests/migrations/sql/run-live.sh (and checked by tests/migrations/live-harness.test.ts).
+# '#' starts a comment; fields are separated by ' | '.
+#
+#   run     | <test file in tests/migrations/> | <setup files> | <env> | <allowed skips>
+#   pending | <test file in tests/migrations/> | <reason, at least 20 characters>
+#
+# A 'run' entry gets a FRESH database: tests/migrations/sql/stub.sql is loaded, then each setup
+# file in order (repo-relative paths, space-separated; '-' for none, because the live block applies
+# its own migration), then vitest runs the one test file with TAYF_PSQL and PGDATABASE set (plus the
+# KEY=VAL pairs of the env field, '-' for none). The run fails when a setup file errors, a test
+# fails, no test passes, or more tests skip than the last field allows (normally 0).
+#
+# A 'pending' entry is a live suite that cannot run in the harness yet; the reason is the first real
+# error seen or what it needs. The runner lists them at the end of every run so they stay visible.
+# Promote one to 'run' once its setup exists.
+#
+# --- stub only: the live block applies its own migration ---------------------------------------
+run | 137-source-items-7d.test.ts | - | - | 0
+# the throwaway guard at the top of stub.sql: it makes its own scratch databases
+run | stub-guard.test.ts | - | - | 0
+# --- raw migrations as setup (what the live block's header says is applied) ----------------------
+run | 107-legal-notice-articles.test.ts | supabase/migrations/107_legal_notice_articles.sql | - | 0
+run | 114-sources-newly-dark.test.ts | supabase/migrations/114_sources_newly_dark.sql | - | 0
+run | 115-sources-newly-dark-24h.test.ts | supabase/migrations/114_sources_newly_dark.sql supabase/migrations/115_sources_newly_dark_24h.sql | - | 0
+run | 132-legacy-bias-range-tools.test.ts | supabase/migrations/132_legacy_bias_range_tools.sql | - | 0
+run | 136-ops-heartbeat-app-side.test.ts | supabase/migrations/122_ops_ingest_gaps.sql supabase/migrations/136_ops_heartbeat_app_side.sql | - | 0
+run | 140-cluster-skip-log.test.ts | supabase/migrations/140_cluster_skip_log.sql | - | 0
+run | 143-weekly-words-sample.test.ts | supabase/migrations/143_weekly_words_sample.sql | - | 0
+run | 147-cluster-twin-bridges.test.ts | supabase/migrations/147_cluster_twin_bridges.sql | - | 0
+# --- earlier migrations of the production chain that the stub does not carry --------------------
+# 122: the block expects 122 applied (twice) and public.ingest_cycles, which 039 creates.
+run | 122-ops-ingest-gaps.test.ts | supabase/migrations/039_quality_telemetry.sql supabase/migrations/122_ops_ingest_gaps.sql supabase/migrations/122_ops_ingest_gaps.sql | - | 0
+# 119: 114, 115, 119 (twice) need sources.fetch_* (041, 074) and public.ingest_cycles (039).
+run | 119-feed-freshness.test.ts | supabase/migrations/039_quality_telemetry.sql supabase/migrations/041_source_fetch_state.sql supabase/migrations/074_ingest_fixes.sql supabase/migrations/114_sources_newly_dark.sql supabase/migrations/115_sources_newly_dark_24h.sql supabase/migrations/119_feed_freshness.sql supabase/migrations/119_feed_freshness.sql | - | 0
+# 120: the function reads clusters.merged_into (099) and articles.source_article_key (113).
+run | 120-twin-cluster-pairs.test.ts | supabase/migrations/099_cluster_merge.sql supabase/migrations/113_source_article_key.sql supabase/migrations/120_twin_cluster_pairs.sql | - | 0
+# 121: 027, 064, 121; 064 needs the jev_shadow tables of 061.
+run | 121-cluster-link-recompute.test.ts | supabase/migrations/061_jev_shadow.sql supabase/migrations/027_cluster_link_atomic.sql supabase/migrations/064_jev_cluster_live.sql supabase/migrations/121_cluster_link_recompute.sql | - | 0
+# --- a dry-run script as setup: it applies the migration(s) and leaves the database behind -------
+run | 113-source-article-key.test.ts | tests/migrations/sql/149-source-article-key-parent-segment-dryrun.sql | - | 0
+run | 138-saved-clusters-veto.test.ts | tests/migrations/sql/138-saved-clusters-veto-dryrun.sql | - | 0
+run | 139-content-twin-candidates.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql | - | 0
+run | 149-source-article-key-parent-segment.test.ts | tests/migrations/sql/149-source-article-key-parent-segment-dryrun.sql | - | 0
+run | 150-ops-queue-cron-liveness.test.ts | tests/migrations/sql/150-ops-queue-cron-liveness-dryrun.sql | - | 0
+run | 151-cluster-attach-probe.test.ts | tests/migrations/sql/151-cluster-attach-probe-dryrun.sql | - | 0
+run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-prod-shape-dryrun.sql | TAYF_SHAPE=prod | 0
+run | 152-schema-parity.test.ts | tests/migrations/sql/152-schema-parity-chain-shape-dryrun.sql | TAYF_SHAPE=chain | 0
+run | 153-worker-metrics-named-queues.test.ts | tests/migrations/sql/153-worker-metrics-named-queues-dryrun.sql | - | 0
+run | 154-image-requeue-stagger.test.ts | tests/migrations/sql/154-image-requeue-stagger-dryrun.sql | - | 0
+# 135 and 146 apply their own migration but need clusters.merged_into / summary_tr and
+# public.tayf_search_fold (129), none of which the stub has; the 139 dry-run builds exactly that
+# state (129 applied, those columns), so it is the setup.
+run | 135-cluster-title-key-idx.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql | - | 0
+run | 146-cluster-stem-probe.test.ts | tests/migrations/sql/139-content-twin-candidates-dryrun.sql | - | 0
+# --- pending: not runnable in the harness yet -----------------------------------------------------
+pending | 128-delete-source-recompute.test.ts | setup 061+064+128 loads and 4 of 14 live tests pass, then 3 nested suites fail with: update or delete on table sources violates foreign key constraint articles_source_id_fkey on table articles (the stub FKs lack ON DELETE CASCADE as in production), which skips 10 tests
+pending | 024-028.test.ts | needs a full local Supabase stack (SUPABASE_LOCAL_URL)
+pending | 058-finance-hardening.test.ts | needs a full local Supabase stack (SUPABASE_LOCAL_URL)
+pending | 081-ops-retention.test.ts | needs a full local Supabase stack (SUPABASE_LOCAL_URL)

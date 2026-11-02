@@ -13,6 +13,7 @@ import {
   SILENCE_REASON_LABEL,
   type SilenceReason,
 } from "../../src/lib/sources/silence-reason";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 119 ("feed-freshness").
@@ -759,6 +760,8 @@ describe("119 fixtures: the TypeScript classifier agrees with the labels the SQL
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("119 feed freshness against fixtures (live Postgres)", () => {
+  assertLiveReady("119", { ledger: ["114", "115", "119"], functions: ["public.ops_health_report()", "public.ingest_set_source_fetch_state(jsonb)"] });
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

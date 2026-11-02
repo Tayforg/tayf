@@ -1,7 +1,14 @@
 import { after, NextResponse } from "next/server";
 import { revalidateTag } from "next/cache";
 import { requireCronBearer } from "@/lib/api/bearer";
-import { apiBadRequest, apiTooManyRequests, withApiErrors } from "@/lib/api/errors";
+import {
+  ALLOW_POST_ONLY,
+  apiBadRequest,
+  apiMethodNotAllowed,
+  apiOptionsAllow,
+  apiTooManyRequests,
+  withApiErrors,
+} from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { clusterIdsFromTags, pingIndexNowForClusters } from "@/lib/seo/indexnow";
 
@@ -102,3 +109,18 @@ export const POST = withApiErrors(async (request: Request) => {
 
   return NextResponse.json({ revalidated: uniqueTags.length });
 });
+
+// Every method this route does not serve gets the JSON 405 with `Allow` (RFC 9110
+// 15.5.6) instead of Next's bodyless default, and OPTIONS is explicit: without it
+// Next's automatic OPTIONS would advertise the refused methods too. HEAD derives
+// from GET. The refusals read no request state and open no connection, so the
+// POST keeps its own (dynamic) rendering.
+const refuse = async () => apiMethodNotAllowed(ALLOW_POST_ONLY);
+export const GET = refuse; // HEAD derives from GET
+export const PUT = refuse;
+export const PATCH = refuse;
+export const DELETE = refuse;
+
+export function OPTIONS(): Response {
+  return apiOptionsAllow(ALLOW_POST_ONLY);
+}

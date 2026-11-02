@@ -38,6 +38,12 @@ export function apiError(
 /** The method list of a read-only public endpoint (HEAD is derived from GET by Next). */
 export const ALLOW_GET_ONLY = "GET, HEAD, OPTIONS";
 
+/** The method list of a write-only public endpoint (a route that exports POST and no GET). */
+export const ALLOW_POST_ONLY = "POST, OPTIONS";
+
+/** The method list of the newsletter token links: GET (interstitial) and POST (the confirmation), HEAD derived from GET. */
+export const ALLOW_GET_POST = "GET, HEAD, POST, OPTIONS";
+
 /**
  * 405 for the public, non-v1 endpoints that only serve GET. Next's own answer
  * to an unexported method is a bodyless 405 with no `Allow` header, which RFC

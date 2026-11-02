@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { WRITABLE_SOURCE_BIAS } from "@/lib/validation/source-input";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 152 ("schema_parity"), hunt-26 W1.
@@ -511,11 +512,13 @@ describe("152 schema_parity: dry-run scripts", () => {
 // ---------------------------------------------------------------------------
 // Live block (opt-in). TAYF_PSQL is the psql binary and PGHOST/PGPORT/PGUSER/
 // PGDATABASE point at the THROWAWAY database a dry-run script leaves behind
-// (jevtest/qa/stub.sql, then the prod-shape or the chain-shape script).
+// (tests/migrations/sql/stub.sql, then the prod-shape or the chain-shape script).
 // TAYF_SHAPE = "prod" (default) | "chain". Every check that writes runs inside
 // a transaction that is rolled back.
 // ---------------------------------------------------------------------------
 describe.runIf(Boolean(process.env.TAYF_PSQL))("152 against a live Postgres (152 applied)", () => {
+  assertLiveReady("152", { ledger: ["152"] });
+
   const SHAPE: "prod" | "chain" = process.env.TAYF_SHAPE === "chain" ? "chain" : "prod";
 
   const EXPECTED = {

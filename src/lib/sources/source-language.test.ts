@@ -7,6 +7,7 @@ import {
   clusterTextLang,
   ENGLISH_SOURCE_NAMES,
   ENGLISH_SOURCE_SLUGS,
+  headlineLang,
   sourceLang,
 } from "./source-language";
 
@@ -221,6 +222,116 @@ describe("clusterTextLang", () => {
     const big = Array.from({ length: 10_000 }, () => ({ slug: "trt-world" }));
     expect(clusterTextLang(big)).toBe("en");
     expect(clusterTextLang([...big, { slug: "sozcu" }])).toBeUndefined();
+  });
+});
+
+// h27/h29: a story card's <h2> is the cluster headline, and an extractive
+// headline IS one member's own title. When that member is an English outlet the
+// h2 reads English inside <html lang="tr">. headlineLang answers 'en' only when
+// the headline can be traced to an English member and to no Turkish one.
+describe("headlineLang", () => {
+  const EN = "Turkish President Erdogan arrives in South Korea for official visit";
+  const TR = "Cumhurbaşkanı Erdoğan Güney Kore'ye gitti";
+
+  it("returns 'en' when the headline is an English member's title verbatim", () => {
+    expect(
+      headlineLang(EN, [
+        { title: TR, lang: undefined },
+        { title: EN, lang: "en" },
+      ]),
+    ).toBe("en");
+  });
+
+  it("returns undefined for a Turkish neutral title that no member carries", () => {
+    expect(
+      headlineLang("Erdoğan Güney Kore'de", [
+        { title: EN, lang: "en" },
+        { title: TR, lang: undefined },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined when a Turkish source carries the same title (a tie is not English)", () => {
+    expect(
+      headlineLang(EN, [
+        { title: EN, lang: "en" },
+        { title: EN, lang: undefined },
+      ]),
+    ).toBeUndefined();
+    // Order does not matter.
+    expect(
+      headlineLang(EN, [
+        { title: EN, lang: undefined },
+        { title: EN, lang: "en" },
+      ]),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined when the only identical title is a Turkish source's", () => {
+    expect(headlineLang(TR, [{ title: TR, lang: undefined }])).toBeUndefined();
+  });
+
+  it("still matches when the two sides differ only in whitespace", () => {
+    expect(
+      headlineLang(`  ${EN}\n`, [{ title: EN.replace(/ /g, "  "), lang: "en" }]),
+    ).toBe("en");
+    expect(
+      headlineLang("Drone strike\thits   power station", [
+        { title: " Drone strike hits power station ", lang: "en" },
+      ]),
+    ).toBe("en");
+  });
+
+  it("does not match a title that merely contains or extends the headline", () => {
+    expect(headlineLang("Drone strike", [{ title: "Drone strike hits power station", lang: "en" }])).toBeUndefined();
+    expect(headlineLang("Drone strike hits power station", [{ title: "Drone strike", lang: "en" }])).toBeUndefined();
+  });
+
+  it("is case-sensitive: only an identical title counts", () => {
+    expect(headlineLang(EN, [{ title: EN.toUpperCase(), lang: "en" }])).toBeUndefined();
+  });
+
+  it("returns undefined for an empty member list", () => {
+    expect(headlineLang(EN, [])).toBeUndefined();
+  });
+
+  it("returns undefined for an empty or blank headline, even against an empty English title", () => {
+    expect(headlineLang("", [{ title: "", lang: "en" }])).toBeUndefined();
+    expect(headlineLang("   \t ", [{ title: "  ", lang: "en" }])).toBeUndefined();
+    expect(headlineLang("", [{ title: EN, lang: "en" }])).toBeUndefined();
+  });
+
+  it("only ever returns 'en' or undefined", () => {
+    for (const lang of ["en", undefined] as const) {
+      const out = headlineLang(EN, [{ title: EN, lang }]);
+      expect(out === "en" || out === undefined).toBe(true);
+    }
+  });
+
+  it("never throws on null, non-string or non-array input smuggled past the types", () => {
+    const call = (h: unknown, m: unknown) =>
+      headlineLang(h as string, m as Parameters<typeof headlineLang>[1]);
+    expect(() => call(null, null)).not.toThrow();
+    expect(call(null, [{ title: EN, lang: "en" }])).toBeUndefined();
+    expect(call(EN, null)).toBeUndefined();
+    expect(call(EN, [null, undefined, { title: 42, lang: "en" }, { lang: "en" }])).toBeUndefined();
+    expect(call(EN, [null, { title: EN, lang: "en" }])).toBe("en");
+  });
+
+  it("handles a large mega-cluster (10k members) with one English match", () => {
+    const members = Array.from({ length: 10_000 }, (_, i) => ({
+      title: `Başlık ${i}`,
+      lang: undefined as "en" | undefined,
+    }));
+    members.push({ title: EN, lang: "en" });
+    expect(headlineLang(EN, members)).toBe("en");
+    members.push({ title: EN, lang: undefined });
+    expect(headlineLang(EN, members)).toBeUndefined();
+  });
+
+  it("copes with special characters and emoji in a title", () => {
+    const title = "Fire at ‘Café Ünal’ — “10,000” evacuated 🔥 <b>&amp;</b>";
+    expect(headlineLang(title, [{ title, lang: "en" }])).toBe("en");
   });
 });
 

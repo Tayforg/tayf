@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 150 ("ops-queue-cron-liveness"), h24-ops-1.
@@ -1176,6 +1177,8 @@ describe("150 docs/ops-heartbeat.md", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("150 rows 18 and 19 against fixtures (live Postgres, every case rolled back)", () => {
+  assertLiveReady("150", { ledger: ["145", "150"], relations: ["public.ops_cron_expected"], functions: ["public.ops_health_report()"] });
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 140 ("cluster_skip_log"), h14-cluster-1.
@@ -163,11 +164,13 @@ describe("140 cluster_skip_log: additive shape", () => {
 // ---------------------------------------------------------------------------
 // Live block (opt-in). TAYF_PSQL is the psql binary and PGHOST/PGPORT/PGUSER/
 // PGDATABASE point at a THROWAWAY database with the shared stub schema
-// (jevtest/qa/stub.sql: the three roles, public.articles, supabase_migrations),
+// (tests/migrations/sql/stub.sql: the three roles, public.articles, supabase_migrations),
 // service_role created with BYPASSRLS as Supabase has it, and 140 applied. Every
 // check runs inside a transaction that is rolled back.
 // ---------------------------------------------------------------------------
 describe.runIf(Boolean(process.env.TAYF_PSQL))("140 against a live Postgres (140 applied)", () => {
+  assertLiveReady("140", { ledger: ["140"], relations: ["public.cluster_skip_log"] });
+
   const A1 = "aaaaaaaa-0000-0000-0000-00000000a001";
   const A2 = "aaaaaaaa-0000-0000-0000-00000000a002";
   const CLUSTER = "cccccccc-0000-0000-0000-00000000c001";

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 151 ("cluster_attach_probe"), hunt-25 W3
@@ -363,11 +364,13 @@ describe("151 cluster_attach_probe: the dry-run script", () => {
 // ---------------------------------------------------------------------------
 // Live block (opt-in). TAYF_PSQL is the psql binary and PGHOST/PGPORT/PGUSER/
 // PGDATABASE point at the THROWAWAY database the dry-run script leaves behind
-// (jevtest/qa/stub.sql, the pgmq stub of the dry-run script, 025's function and
+// (tests/migrations/sql/stub.sql, the pgmq stub of the dry-run script, 025's function and
 // trigger as in production, 151 applied). Every check that writes runs inside a
 // transaction that is rolled back.
 // ---------------------------------------------------------------------------
 describe.runIf(Boolean(process.env.TAYF_PSQL))("151 against a live Postgres (151 applied)", () => {
+  assertLiveReady("151", { ledger: ["151"], relations: ["public.cluster_attach_shadow"], functions: ["public.enqueue_cluster_attach_probe()"] });
+
   const A1 = "aaaaaaaa-0000-0000-0000-00000000b001";
   const A2 = "aaaaaaaa-0000-0000-0000-00000000b002";
   const CLUSTER = "cccccccc-0000-0000-0000-00000000c001";

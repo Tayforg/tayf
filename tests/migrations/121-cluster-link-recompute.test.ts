@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 
 import { BLINDSPOT } from "../../supabase/functions/_shared/cluster/blindspot";
 import { VOTING_SOURCE_KINDS } from "../../supabase/functions/_shared/cluster/source-kind";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 121 ("cluster-link-recompute").
@@ -420,6 +421,8 @@ describe("121 mirrors the TypeScript contracts", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("121 cluster_link_atomic against fixtures (live Postgres)", () => {
+  assertLiveReady("121", { ledger: ["064", "121"], functions: ["public.cluster_link_atomic(uuid,uuid,jsonb,boolean,text,timestamptz)"] });
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

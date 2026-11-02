@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 
 import { BIAS_KEYS, BLINDSPOT } from "../../supabase/functions/_shared/cluster/blindspot";
 import { VOTING_SOURCE_KINDS } from "../../supabase/functions/_shared/cluster/source-kind";
+import { assertLiveReady } from "../_helpers/live-db";
 
 // ---------------------------------------------------------------------------
 // Static SQL-contract test for migration 132 ("legacy-bias-range-tools").
@@ -592,6 +593,8 @@ describe("132 scripts and runbook call these functions by these names", () => {
 // ---------------------------------------------------------------------------
 
 describe.runIf(Boolean(process.env.TAYF_PSQL))("132 legacy bias range tools against fixtures (live Postgres)", () => {
+  assertLiveReady("132", { ledger: ["132"], functions: ["public.legacy_bias_voter_dists(timestamptz,timestamptz)"] });
+
   function runPsql(input: string): string {
     return execFileSync(process.env.TAYF_PSQL as string, ["-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-f", "-"], {
       input,

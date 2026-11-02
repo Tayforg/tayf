@@ -6,7 +6,7 @@ import {
   V1_POLITICS_THRESHOLD,
 } from "@/lib/api/v1-clusters";
 import { V1_PICKUP_DEFAULT_DAYS, V1_PICKUP_MAX_DAYS } from "@/lib/api/v1-kap-pickup";
-import { PICKUP_WINDOW_HOURS } from "@/lib/finance/kap-pickup";
+import { PICKUP_WINDOW_HOURS, TICKER_RELEVANCE_MIN } from "@/lib/finance/kap-pickup";
 import { SILENT_MIN_AGE_H, SILENT_MIN_SOURCES } from "@/lib/alerts/alert-feed";
 import { BLINDSPOT } from "@/lib/bias/config";
 
@@ -27,6 +27,14 @@ import { BLINDSPOT } from "@/lib/bias/config";
 export const V1_PROFILE_WINDOW_DAYS = 30;
 export const V1_PROFILE_MIN_CLUSTERS = 20;
 export const V1_PROFILE_MIN_MULTI = 10;
+
+// The relevance cut-off as Turkish copy writes a decimal ("0,2", never "0.2").
+// Derived from the constant the pickup query filters on, so the note cannot
+// drift from the behaviour. The English text and the JSON values keep the ASCII
+// point.
+const TICKER_RELEVANCE_MIN_TR = new Intl.NumberFormat("tr-TR", {
+  maximumFractionDigits: 2,
+}).format(TICKER_RELEVANCE_MIN);
 
 export interface V1ParamDoc {
   name: string;
@@ -462,7 +470,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
     notesTr: [
       `"/ekonomi/[ticker]" sayfasındaki "Medyada yankı" panelinin anahtarlı yansımasıdır: her KAP bildirimi için, bildirimden sonraki ${PICKUP_WINDOW_HOURS} saat içinde hangi bölgeden (iktidar/bağımsız/muhalefet) ne kadar basın yankısı oluştuğunu döner.`,
       "Pencere kuralı harfiyendir: her bildirim, kendi [bildirim_zamanı, bildirim_zamanı+48s) penceresinde yayınlanan her haberi sayar; bildirimden önceki bir haber asla yankı sayılmaz. İki bildirim 48 saat içine düşerse aynı haber her ikisine de sayılabilir — bu, her kayıttaki overlapping_disclosures alanıyla görünür kılınır, sessizce tekilleştirilmez.",
-      "relevance_filter: Jev'in ticker_relevance gölge modelinin 0.2 altında puanladığı haberler dışlanır (ör. aynı adlı bir siyasi parti-hisse kodu çakışması); puanlanmamış haberler her zaman tutulur. İlgi puanı sorgusu başarısız olursa uç nokta 500 dönmek yerine relevance_filter.applied: false ile açık başarısız olur.",
+      `relevance_filter: Jev'in ticker_relevance gölge modelinin ${TICKER_RELEVANCE_MIN_TR} altında puanladığı haberler dışlanır (ör. aynı adlı bir siyasi parti-hisse kodu çakışması); puanlanmamış haberler her zaman tutulur. İlgi puanı sorgusu başarısız olursa uç nokta 500 dönmek yerine relevance_filter.applied: false ile açık başarısız olur.`,
       "disclosure_coverage görünümü asla sorgulanmaz (üretimde 60 saniyede zaman aşımına uğradı); sorgu her zaman kap_disclosures / article_tickers üzerinden hisse kodu ve zaman sınırlıdır.",
       "`capped: true`: liste `limit` sınırına ulaştı; penceredeki daha eski bildirimler listede yok. `total_disclosures`: penceredeki tüm bildirimlerin sayısı (sayım başarısız olursa null). `truncated`: haber eşleşmelerinin sayfa sınırına ulaşıldı.",
     ],
