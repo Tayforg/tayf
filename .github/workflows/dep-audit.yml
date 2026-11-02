@@ -1,0 +1,58 @@
+name: Dependency Audit
+
+# Advisory gate for the PRODUCTION dependency tree (h27-supply-1). Dependabot
+# alerts are off on this repo, and nothing else ran `npm audit`, so a published
+# advisory on a runtime dependency (Next.js, React, Supabase, Sentry) went
+# unnoticed until someone looked.
+#
+# A separate workflow on purpose: ci.yml installs with --no-audit because npm
+# ci's built-in audit request stalled PR runs for npm's full 300 s fetch
+# timeout (2026-10-22). Here a stalled registry can only hold THIS check (10
+# minute cap), never the CI check, and it runs only when the dependency
+# manifests change plus once a week, so a new advisory on an unchanged
+# lockfile still turns it red.
+#
+# --omit=dev: only what runs in production is gated (the dev-only toolchain
+# has its own, build-time advisories). That includes the edge runtime:
+# fast-xml-parser (and its strnum dependency) parses untrusted feeds inside the
+# ingest edge function, which holds the service-role key. The function imports
+# it from esm.sh, so the npm copy exists to be audited and to run the unit
+# tests against the same version; it is therefore listed under `dependencies`,
+# not `devDependencies`, or this gate would skip it (tests/guards/ci-dep-audit
+# and edge-deps-pinned pin both). --ignore-scripts: audit needs the lockfile
+# only, so no dependency lifecycle script runs in this job.
+on:
+  schedule:
+    # Mondays 04:17 UTC, clear of the 03:00 cluster audit and the :00/:30
+    # heartbeat.
+    - cron: "17 4 * * 1"
+  workflow_dispatch: {}
+  pull_request:
+    branches: [main]
+    paths: [package.json, package-lock.json]
+  push:
+    branches: [main]
+    paths: [package.json, package-lock.json]
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          # Match ci.yml's pin to the Node 24 family.
+          node-version: 24
+          cache: npm
+
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+      # Fails on a high or critical advisory in a production dependency.
+      - run: npm audit --omit=dev --audit-level=high

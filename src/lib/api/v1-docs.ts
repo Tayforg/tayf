@@ -132,6 +132,16 @@ const RESP_500: V1ResponseDoc = {
   descriptionEn: "Unexpected server error.",
   schema: "Error",
 };
+// A database outage (timeout, abort, PGRST000-003, 57014, a gateway 502/503/504)
+// is told apart from a bug: src/lib/api/errors.ts `apiUnavailable`.
+const RESP_503: V1ResponseDoc = {
+  status: 503,
+  descriptionTr:
+    "Veritabanı geçici olarak yanıt vermiyor. Retry-After başlığındaki süre (saniye) kadar bekleyip yeniden deneyin; gövde yalnızca code: upstream_unavailable ve details.request_id taşır.",
+  descriptionEn:
+    "The database is temporarily unavailable. Retry after the Retry-After header (seconds); the body carries only code: upstream_unavailable and details.request_id.",
+  schema: "Error",
+};
 
 const SINCE_PARAM: V1ParamDoc = {
   name: "since",
@@ -293,6 +303,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_405,
       RESP_429,
       RESP_500,
+      RESP_503,
     ],
   },
   {
@@ -336,6 +347,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_405,
       RESP_429,
       RESP_500,
+      RESP_503,
     ],
   },
   {
@@ -374,6 +386,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_405,
       RESP_429,
       RESP_500,
+      RESP_503,
     ],
   },
   {
@@ -421,6 +434,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_405,
       RESP_429,
       RESP_500,
+      RESP_503,
     ],
   },
   {
@@ -466,6 +480,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_405,
       RESP_429,
       RESP_500,
+      RESP_503,
     ],
   },
   {
@@ -506,6 +521,7 @@ export const V1_ENDPOINTS: V1EndpointDoc[] = [
       RESP_405,
       RESP_429,
       RESP_500,
+      RESP_503,
     ],
   },
   {

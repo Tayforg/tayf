@@ -6,7 +6,7 @@ import type {
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { BLINDSPOT } from "@/lib/bias/config";
-import { attemptCached } from "@/lib/cache-resilience";
+import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
   dedupeBySource,
@@ -364,6 +364,13 @@ async function fetchBlindspots(
 // attempt (typically the 4 s reader abort on a cold database) is memoised for
 // `minutes` only, so a blip cannot park the `{ ok: false }` sentinel for a
 // whole `cluster-feed` window; a success keeps the normal lifetime.
+//
+// The `{ ok: false }` result replaces the previous good entry under the same
+// key and Next does not serve that entry past it: the public entry's live
+// retry and its per-instance last-good result cover the gap. The one piece of
+// new logic in this body is the `at` stamp: the epoch ms of the database read,
+// so a cache hit can be remembered as a last-good value without reading the
+// clock on the hit path (cache-resilience.ts, section 4).
 async function getBlindspotsCached(profile: ReadProfile) {
   "use cache: remote";
   cacheTag("clusters", "clusters-politics");
@@ -373,7 +380,7 @@ async function getBlindspotsCached(profile: ReadProfile) {
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
   if (r.ok) cacheLife("cluster-feed");
   else cacheLife("minutes");
-  return r;
+  return r.ok ? { ...r, at: Date.now() } : r;
 }
 
 // Public cached entry point. The /blindspots page and the weekly digest
@@ -381,15 +388,32 @@ async function getBlindspotsCached(profile: ReadProfile) {
 // from the call site. Still THROWS on failure (unchanged contract): the
 // digest cron, the social cron and rss/[topic] depend on that — they each
 // catch it themselves. On a cache-attempt failure this retries the query
-// live once (bypassing the cache boundary, the live result is not memoised; the cached ok:false sentinel is)
-// before letting a genuine, still-failing outage propagate as a throw.
+// live once (bypassing the cache boundary; the live result is not memoised,
+// the cached ok:false result is) before letting a genuine, still-failing
+// outage propagate as a throw.
+//
+// Reader calls (pages, feeds) are additionally stale-if-error and
+// single-flight, keyed "blindspots:reader": when the attempt AND the live
+// retry both fail, the last good result this instance saw (under 60 min old)
+// is served instead of the throw, concurrent live retries share one read,
+// and a failed read cools down for 5 s. Batch calls (the crons) pass no key:
+// they never get stale data and never coalesce.
+//
+// The live retry waits for a request scope first (resolveCachedOrThrow ->
+// awaitRequestScope): during a prerender it postpones instead of fetching
+// live, which is safe because crons and route handlers already have one.
 export async function getBlindspots(
   opts?: { profile?: ReadProfile },
 ): Promise<{ bundles: BlindspotBundle[] }> {
   const profile = opts?.profile ?? "reader";
-  const attempt = await getBlindspotsCached(profile);
-  if (attempt.ok) return attempt.data;
-  return fetchBlindspots(profile);
+  return resolveCachedOrThrow(
+    {
+      label: "blindspots-query",
+      key: profile === "reader" ? "blindspots:reader" : undefined,
+    },
+    () => getBlindspotsCached(profile),
+    () => fetchBlindspots(profile),
+  );
 }
 
 export type BlindspotsResult =

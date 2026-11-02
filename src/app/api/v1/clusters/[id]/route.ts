@@ -1,6 +1,13 @@
 import { NextResponse } from "next/server";
 
-import { apiBadRequest, apiError, apiNotFound, apiServerError, withApiErrors } from "@/lib/api/errors";
+import {
+  apiBadRequest,
+  apiError,
+  apiNotFound,
+  apiServerError,
+  isUpstreamUnavailable,
+  withApiErrors,
+} from "@/lib/api/errors";
 import {
   apiV1Headers,
   methodNotAllowed,
@@ -37,7 +44,7 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
   }
 
   const supabase = createReaderClient();
-  const { data, error } = await supabase
+  const { data, error, status } = await supabase
     .from("clusters")
     .select(V1_CLUSTER_SELECT)
     .eq("id", id)
@@ -47,21 +54,31 @@ export const GET = withApiErrors(async (request: Request, ctx: RouteContext) => 
     .eq("is_archived", false)
     .maybeSingle<V1ClusterRow>();
 
-  if (error) return withApiV1Headers(apiServerError(error), auth.tier);
+  // `status` rides along: a gateway answer (502/503/504/520-524) has no
+  // PostgREST code, and only the status says "outage" (503 + Retry-After).
+  if (error) return withApiV1Headers(apiServerError({ ...error, status }), auth.tier);
   if (!data) {
     // Miss path only (the hot path above is one query): an archived cluster
     // may have been merged into another (migration 099). A lookup error, e.g.
-    // the column not existing yet, stays a plain 404 -- EXCEPT a timeout
-    // (the 4 s reader cap aborts with an `AbortError: ...` message): that
-    // says nothing about whether the cluster exists, so it is the generic 500,
-    // never a 404 a client would cache or act on.
-    const { data: mergedRow, error: mergedError } = await supabase
+    // the column not existing yet, stays a plain 404 -- EXCEPT an outage (the
+    // 4 s reader cap aborts with an `AbortError: ...` message, or the gateway
+    // answers 502/503/504/520-524): that says nothing about whether the
+    // cluster exists, so it is the 503 (500 if it were not classified), never
+    // a 404 a client would cache or act on.
+    const {
+      data: mergedRow,
+      error: mergedError,
+      status: mergedStatus,
+    } = await supabase
       .from("clusters")
       .select("merged_into")
       .eq("id", id)
       .maybeSingle<{ merged_into: string | null }>();
-    if (mergedError?.message.startsWith("AbortError")) {
-      return withApiV1Headers(apiServerError(mergedError), auth.tier);
+    if (mergedError) {
+      const mergedFailure = { ...mergedError, status: mergedStatus };
+      if (mergedError.message.startsWith("AbortError") || isUpstreamUnavailable(mergedFailure)) {
+        return withApiV1Headers(apiServerError(mergedFailure), auth.tier);
+      }
     }
     const mergedInto = mergedError ? null : mergedRow?.merged_into;
     if (typeof mergedInto === "string" && UUID_RE.test(mergedInto)) {

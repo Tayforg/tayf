@@ -1478,7 +1478,7 @@ describe("ingest conditional-fetch state [migration 041]", () => {
     expect(row?.fetch_last_modified).toBe("Tue, 31 Dec 2024 00:00:00 GMT");
   });
 
-  it("keeps memory and DB in sync when a 2xx response fails to parse [migration 041 F5]", async () => {
+  it("keeps the stored validators and advances the fail streak when a 2xx response fails to parse [h27-live-1]", async () => {
     const handler = await importIngestHandler();
     if (!handler) throw new Error("unreachable: handler tripwire above must throw");
 
@@ -1490,21 +1490,18 @@ describe("ingest conditional-fetch state [migration 041]", () => {
       rss_url: "https://example.com/parseerror.rss",
       active: true,
       fetch_etag: 'W/"old"',
-      fetch_last_modified: null,
-      fetch_body_hash: null,
+      fetch_last_modified: "Tue, 31 Dec 2024 00:00:00 GMT",
+      fetch_body_hash: "old-hash",
+      fetch_fail_streak: 3,
     });
-    // The fetcher can return `etag`/`lastModified`/`bodyHash` ALONGSIDE
-    // `error` on a 2xx whose body failed to parse (fetcher.ts refreshes its
-    // cache before attempting the parse) — the persisted row must pick
-    // those up too, so a warm instance (which already moved to the new
-    // ETag) and the DB don't disagree about which validators produced this
-    // unparseable body.
+    // The real fetcher.ts returns `error` WITHOUT etag/lastModified/bodyHash for
+    // a 2xx body it could not parse and puts its own conditional cache back
+    // (the refused body's validators must never become the stored ones: the
+    // next poll of the same bytes, or a 304 on the stored ETag, would then be
+    // counted as a healthy "not modified" and clear the quarantine).
     fetcherResultOverrides["https://example.com/parseerror.rss"] = {
       error: "parse error: unexpected end of input",
       status: 200,
-      etag: '"new-etag"',
-      lastModified: "Wed, 02 Jan 2025 00:00:00 GMT",
-      bodyHash: "new-hash",
     };
 
     const res = await handler(
@@ -1518,10 +1515,50 @@ describe("ingest conditional-fetch state [migration 041]", () => {
       (r) => r.id === "src-041-parseerror",
     );
     expect(row).toBeDefined();
-    expect(row?.fetch_etag).toBe('"new-etag"');
-    expect(row?.fetch_last_modified).toBe("Wed, 02 Jan 2025 00:00:00 GMT");
-    expect(row?.fetch_body_hash).toBe("new-hash");
+    // The previous validators survive untouched...
+    expect(row?.fetch_etag).toBe('W/"old"');
+    expect(row?.fetch_last_modified).toBe("Tue, 31 Dec 2024 00:00:00 GMT");
+    expect(row?.fetch_body_hash).toBe("old-hash");
+    // ...the status is the wire status, and the streak moves toward quarantine.
     expect(row?.fetch_last_status).toBe(200);
+    expect(row?.fetch_fail_streak).toBe(4);
+  });
+
+  it("never adopts validators that ride along with a 2xx parse error, even from an older fetcher [h27-live-1]", async () => {
+    const handler = await importIngestHandler();
+    if (!handler) throw new Error("unreachable: handler tripwire above must throw");
+
+    fakeSources.push({
+      id: "src-h27-parseerror-legacy",
+      name: "Parse Error Legacy Fixture",
+      slug: "parseerror-legacy-fixture",
+      url: "https://example.com",
+      rss_url: "https://example.com/parseerror-legacy.rss",
+      active: true,
+      fetch_etag: 'W/"old"',
+      fetch_last_modified: null,
+      fetch_body_hash: null,
+      fetch_fail_streak: 0,
+    });
+    fetcherResultOverrides["https://example.com/parseerror-legacy.rss"] = {
+      error: "parse error: unexpected end of input",
+      status: 200,
+      etag: '"new-etag"',
+      lastModified: "Wed, 02 Jan 2025 00:00:00 GMT",
+      bodyHash: "new-hash",
+    };
+
+    await handler(authedRequest("http://localhost/ingest", { method: "POST" }));
+
+    const row = sourceFetchStateWrites
+      .find((w) => w.fn === "ingest_set_source_fetch_state")
+      ?.rows.find((r) => r.id === "src-h27-parseerror-legacy");
+    expect(row).toBeDefined();
+    expect(row?.fetch_etag).toBe('W/"old"');
+    expect(row?.fetch_last_modified).toBeNull();
+    expect(row?.fetch_body_hash).toBeNull();
+    expect(row?.fetch_last_status).toBe(200);
+    expect(row?.fetch_fail_streak).toBe(1);
   });
 
   it("counts an HTML/not-a-feed 2xx body as a failure and advances fetch_fail_streak without adopting new validators [ingest-health]", async () => {

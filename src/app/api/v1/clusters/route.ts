@@ -88,9 +88,12 @@ export const GET = withApiErrors(async (request: Request) => {
       `updated_at.lt."${cursor.u}",and(updated_at.eq."${cursor.u}",id.lt."${cursor.i}")`,
     );
   }
-  const { data, error } = await query.limit(candidateLimit).returns<V1ClusterRow[]>();
+  const { data, error, status } = await query.limit(candidateLimit).returns<V1ClusterRow[]>();
 
-  if (error) return withApiV1Headers(apiServerError(error), auth.tier);
+  // `status` rides along so apiServerError can classify a gateway answer
+  // (502/503/504) that carries no PostgREST code: a database outage is a 503
+  // + Retry-After: 30, any other read error stays the sanitised 500.
+  if (error) return withApiV1Headers(apiServerError({ ...error, status }), auth.tier);
 
   const scanned = data ?? [];
   const politics = scanned.filter(isPoliticsMajority);

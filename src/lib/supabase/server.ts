@@ -9,6 +9,13 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
  */
 export const READER_TIMEOUT_MS = 4000;
 
+/**
+ * Budget for the "slow reader" set (see `createSlowReaderClient`): just above
+ * PostgREST's 8 s `statement_timeout`, so a black-holed connection is bounded
+ * without cutting a statement Postgres would still have finished.
+ */
+export const READER_SLOW_TIMEOUT_MS = 9000;
+
 export interface ServerClientOptions {
   /** Abort any single Supabase HTTP request that takes longer than this. */
   timeoutMs?: number;
@@ -17,14 +24,20 @@ export interface ServerClientOptions {
 /**
  * Wrap `fetch` so a request that outlives `timeoutMs` is aborted.
  *
- * The re-throw as an `AbortError` below is mandatory, not cosmetic.
- * postgrest-js's `fetchWithRetry` (node_modules/@supabase/postgrest-js/dist/
- * index.cjs, ~l.199-235) retries GET/HEAD up to 3 times with 1 s / 2 s / 4 s
- * backoff when `fetch` rejects with anything other than an `AbortError` /
- * `ABORT_ERR`; a `TimeoutError` (what `AbortSignal.timeout()` rejects with)
- * only counts as an abort when the BUILDER's own signal aborted, and ours
- * is a different signal. Without the rename the 4 s cap silently becomes
- * about 4 + 1 + 4 + 2 + 4 + 4 + 4 = 23 s.
+ * Capped clients (`createServerClient({ timeoutMs })`) are built with
+ * `db: { retry: false }`, so postgrest-js's `fetchWithRetry`
+ * (node_modules/@supabase/postgrest-js/dist/index.cjs, ~l.199-235) never
+ * retries them: it would otherwise retry GET/HEAD up to 3 times with 1 s /
+ * 2 s / 4 s backoff (or the response's `Retry-After`, uncapped) on a 503 or
+ * 520 and on any fetch rejection that is not an abort, which turned a
+ * Supabase outage into about 7 s per request under a 4 s cap.
+ *
+ * The re-throw as an `AbortError` below stays as a SECOND guard (belt and
+ * braces if a client is ever built without `retry: false`): a `TimeoutError`
+ * (what `AbortSignal.timeout()` rejects with) only counts as an abort for
+ * `fetchWithRetry` when the BUILDER's own signal aborted, and ours is a
+ * different signal. Without the rename a retrying client's 4 s cap silently
+ * becomes about 4 + 1 + 4 + 2 + 4 + 4 + 4 = 23 s.
  *
  * A caller-supplied `init.signal` is combined with the timeout, and a
  * caller abort propagates with the caller's own reason (never relabelled
@@ -61,7 +74,11 @@ function createRealServerClient(opts?: ServerClientOptions): SupabaseClient {
   }
 
   if (opts?.timeoutMs !== undefined) {
+    // `retry: false`: a capped client fails fast. The caller's own retry
+    // (resolveCachedOrRetry's one live retry, the "Tekrar dene" button) is the
+    // only retry; postgrest-js's 3 x (1/2/4 s) loop would multiply the cap.
     return createClient(supabaseUrl, supabaseServiceKey, {
+      db: { retry: false },
       global: { fetch: withFetchTimeout(opts.timeoutMs) },
     });
   }
@@ -96,6 +113,15 @@ export type ReadProfile = "reader" | "batch";
  * is aborted after `READER_TIMEOUT_MS` so a cold read fails fast and the
  * caller's retry/fallback path can run.
  *
+ * Capped clients never retry inside the client (`db: { retry: false }`): a
+ * 503, a 520 or a connection failure surfaces as a single `error` straight
+ * away. The one retry per request comes from `resolveCachedOrRetry`'s live
+ * retry (src/lib/cache-resilience.ts) or the page's "Tekrar dene" path, so a
+ * Supabase outage costs a visitor about one cap, not about 14 s. Capped
+ * finance readers (`createFinanceServerClient({ timeoutMs })`) and
+ * cron-route-outcome's capped RPC inherit `retry: false`; RPC POSTs were never
+ * retried by postgrest-js in the first place.
+ *
  * Crons, admin pages, webhooks and RPC writers must keep plain
  * `createServerClient()`: a write that is aborted client-side may still
  * commit server-side, and long admin scans legitimately need the full 8 s.
@@ -122,19 +148,41 @@ export type ReadProfile = "reader" | "batch";
  * src/lib/sources/registry-query.ts), and `getZoneFeedHealth` /
  * `getRssSummaryMembers` (both `ReadProfile`, "reader" by default).
  *
- * Deliberately uncapped (keep `createServerClient()`):
+ * Slow readers (`createSlowReaderClient()`, 9 s, no retry): visitor-only
+ * widgets whose query legitimately runs close to the 8 s `statement_timeout`
+ * on a cold cache: the source feed-status summary (feed-status.ts: /sources,
+ * /kaynaklar/durum, /blindspots, /hafta), the footer's active-source count
+ * (active-count.ts), the /sources directory page (src/app/sources/page.tsx),
+ * the headline status (headline/status.ts: /rss.xml, /metodoloji) and the
+ * cluster page's fact-check box (cluster-fact-checks-query.ts). Guarded by
+ * tests/guards/user-facing-reads-bounded.test.ts.
+ *
+ * Deliberately uncapped (keep `createServerClient()`, postgrest-js retries
+ * stay on):
  *   - crons, admin pages, webhooks and writers (see above);
  *   - /api/health;
- *   - the /sources directory (feed-status.ts, active-count.ts);
- *   - flag-gated readers: clickbait.ts, framing-receipt.ts,
- *     cluster-fact-checks-query.ts;
- *   - low-traffic readers: corrections/public-log.ts, quality/snapshots.ts,
- *     headline/status.ts;
+ *   - the remaining low-traffic readers: clickbait.ts, framing-receipt.ts,
+ *     corrections/public-log.ts, quality/snapshots.ts;
  *   - /rapor/[token];
  *   - /api/oyun*, the newsletter and corrections routes.
+ *
+ * (The fact-check box is NOT flag-gated off: `isFactCheckBoxEnabled()` is
+ * `FACT_CHECK_BOX !== "off"`, so it is ON by default, which is why its read
+ * is a bounded visitor path.)
  */
 export function createReaderClient(): SupabaseClient {
   return createServerClient({ timeoutMs: READER_TIMEOUT_MS });
+}
+
+/**
+ * Client for the slow-reader set listed on `createReaderClient`: same
+ * fail-fast, no-retry behaviour with `READER_SLOW_TIMEOUT_MS` (9 s) so a
+ * black-holed connection is bounded but a statement Postgres would finish
+ * within its 8 s `statement_timeout` is not cut. Visitor paths only: crons,
+ * admin and writers keep plain `createServerClient()`.
+ */
+export function createSlowReaderClient(): SupabaseClient {
+  return createServerClient({ timeoutMs: READER_SLOW_TIMEOUT_MS });
 }
 
 let warnedFakeFinance = false;

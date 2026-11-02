@@ -1,8 +1,4 @@
 {
-  "imports": {
-    "fast-xml-parser": "https://esm.sh/fast-xml-parser@4.5.7",
-    "supabase-js": "https://esm.sh/@supabase/supabase-js@2.45.4"
-  },
   "tasks": {
     "serve": "deno run --allow-net --allow-env --allow-read index.ts",
     "check": "deno check index.ts"

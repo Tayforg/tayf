@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { Suspense } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -1561,6 +1562,50 @@ function findElementOfType(
   return null;
 }
 
+type SlotNode = { type?: unknown; props?: Record<string, unknown> };
+
+/**
+ * The `<Suspense>` element whose only child is the named async component.
+ * The page keeps ClusterThreadSlot / ClusterFactCheckSlot module-private (a
+ * page file only exports the route API), so they are located by function name.
+ */
+function findSuspenseAround(node: unknown, componentName: string): SlotNode | null {
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findSuspenseAround(child, componentName);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (node && typeof node === "object") {
+    const el = node as SlotNode;
+    if (el.type === Suspense) {
+      const child = el.props?.children as SlotNode | undefined;
+      if (
+        typeof child?.type === "function" &&
+        (child.type as { name?: string }).name === componentName
+      ) {
+        return el;
+      }
+    }
+    if (el.props?.children !== undefined) {
+      return findSuspenseAround(el.props.children, componentName);
+    }
+  }
+  return null;
+}
+
+/** Awaits the named async slot the way React would, with the props it was given. */
+async function renderSlot(tree: unknown, componentName: string): Promise<unknown> {
+  const child = findSuspenseAround(tree, componentName)?.props?.children as
+    | SlotNode
+    | undefined;
+  if (!child || typeof child.type !== "function") {
+    throw new Error(`no <Suspense> around ${componentName}`);
+  }
+  return (child.type as (props: unknown) => Promise<unknown>)(child.props);
+}
+
 describe("ClusterDetailPage — Kim önce yazdı? story timeline", () => {
   function detailFor(members: ClusterDetailMember[]): ClusterDetail {
     const distribution = emptyDistribution();
@@ -1747,9 +1792,10 @@ describe("ClusterDetailPage — Bu konuda doğrulama (fact-check box)", () => {
     ]);
 
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const slot = await renderSlot(tree, "ClusterFactCheckSlot");
     expect(getClusterFactChecks).toHaveBeenCalledWith("c1");
 
-    const el = findElementOfType(tree, FactCheckBox);
+    const el = findElementOfType(slot, FactCheckBox);
     expect(el).not.toBeNull();
     const html = renderToStaticMarkup(
       el as unknown as Parameters<typeof renderToStaticMarkup>[0],
@@ -1764,8 +1810,32 @@ describe("ClusterDetailPage — Bu konuda doğrulama (fact-check box)", () => {
     getClusterFactChecks.mockResolvedValue([]);
 
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const slot = await renderSlot(tree, "ClusterFactCheckSlot");
+    expect(slot).toBeNull();
     expect(hasElementOfType(tree, FactCheckBox)).toBe(false);
     expect(collectText(tree).join("")).not.toContain("Bu konuda doğrulama");
+  });
+
+  it("hunt-27: the slot sits in its own null-fallback Suspense and the page body never calls the fetcher", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    const boundary = findSuspenseAround(tree, "ClusterFactCheckSlot");
+    expect(boundary).not.toBeNull();
+    expect(boundary?.props?.fallback).toBeNull();
+    expect(getClusterFactChecks).not.toHaveBeenCalled();
+  });
+
+  it("hunt-27: a fact-check read that never settles cannot hold the article", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+    getClusterFactChecks.mockImplementation(() => new Promise(() => {}));
+
+    // Resolves although the fetcher never does: the page does not await it.
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(findSuspenseAround(tree, "ClusterFactCheckSlot")).not.toBeNull();
+    expect(collectText(tree).join(" ")).toContain("Test kümesi");
   });
 });
 
@@ -1798,9 +1868,10 @@ describe("ClusterDetailPage — Bu hikayenin devamı (story thread link)", () =>
     });
 
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const slot = await renderSlot(tree, "ClusterThreadSlot");
     expect(getPublishedThreadForCluster).toHaveBeenCalledWith("c1");
 
-    const el = findElementOfType(tree, ThreadLink);
+    const el = findElementOfType(slot, ThreadLink);
     expect(el).not.toBeNull();
     const html = renderToStaticMarkup(
       el as unknown as Parameters<typeof renderToStaticMarkup>[0],
@@ -1814,8 +1885,76 @@ describe("ClusterDetailPage — Bu hikayenin devamı (story thread link)", () =>
     getClusterDetail.mockResolvedValue(simpleDetail());
 
     const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+    const slot = await renderSlot(tree, "ClusterThreadSlot");
+    expect(slot).toBeNull();
     expect(hasElementOfType(tree, ThreadLink)).toBe(false);
     expect(collectText(tree).join("")).not.toContain("Bu hikayenin devamı");
+  });
+
+  it("hunt-27: the slot sits in its own null-fallback Suspense and the page body never calls the fetcher", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    const boundary = findSuspenseAround(tree, "ClusterThreadSlot");
+    expect(boundary).not.toBeNull();
+    expect(boundary?.props?.fallback).toBeNull();
+    expect(getPublishedThreadForCluster).not.toHaveBeenCalled();
+  });
+
+  it("hunt-27: a thread read that never settles cannot hold the article", async () => {
+    getClusterDetail.mockResolvedValue(simpleDetail());
+    getPublishedThreadForCluster.mockImplementation(() => new Promise(() => {}));
+
+    const tree = await ClusterDetailPage({ params: Promise.resolve({ id: "c1" }) });
+
+    expect(findSuspenseAround(tree, "ClusterThreadSlot")).not.toBeNull();
+  });
+});
+
+describe("cluster/[id]/page.tsx source — optional widgets stay out of the article's await chain (hunt-27)", () => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  const raw = readFileSync(join(here, "page.tsx"), "utf8");
+
+  /** Blanks // and block comments (offsets kept) so prose cannot trip a match. */
+  function stripComments(src: string): string {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
+      .replace(/(^|[^:])\/\/[^\n]*/gm, (m, p1: string) =>
+        p1 + " ".repeat(m.length - p1.length),
+      );
+  }
+  const code = stripComments(raw);
+
+  it("no longer awaits the two fetchers together before the body", () => {
+    expect(code).not.toMatch(/await\s+Promise\.all\(\s*\[\s*getClusterFactChecks/);
+    expect(code).not.toMatch(/const\s+\[\s*factChecks\s*,\s*thread\s*\]/);
+  });
+
+  it("calls each fetcher only inside its own module-private async slot", () => {
+    for (const [slot, fetcher] of [
+      ["ClusterThreadSlot", "getPublishedThreadForCluster"],
+      ["ClusterFactCheckSlot", "getClusterFactChecks"],
+    ] as const) {
+      expect(code).toContain(`async function ${slot}(`);
+      expect(code).not.toContain(`export async function ${slot}`);
+      expect(code).not.toContain(`export function ${slot}`);
+      const start = code.indexOf(`async function ${slot}`);
+      const end = code.indexOf("\n}\n", start);
+      const body = code.slice(start, end + 2);
+      expect(body).toContain(`await ${fetcher}(id)`);
+      // The fetcher is called exactly once in the file: inside its slot.
+      expect(code.split(`${fetcher}(`).length - 1).toBe(1);
+    }
+  });
+
+  it("renders each slot inside <Suspense fallback={null}>", () => {
+    expect(code).toMatch(
+      /<Suspense fallback=\{null\}>\s*<ClusterThreadSlot id=\{id\} \/>\s*<\/Suspense>/,
+    );
+    expect(code).toMatch(
+      /<Suspense fallback=\{null\}>\s*<ClusterFactCheckSlot id=\{id\} \/>\s*<\/Suspense>/,
+    );
   });
 });
 

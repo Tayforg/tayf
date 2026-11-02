@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { Suspense } from "react";
 import { notFound, permanentRedirect } from "next/navigation";
 import { AlertTriangle, ArrowLeft, Copy } from "lucide-react";
 
@@ -98,6 +99,23 @@ async function loadStoryTimeline(
     health,
     timelineMembersFrom(nonVotingMembers),
   );
+}
+
+// "Bu hikayenin devamı" pill. Rendered inside <Suspense fallback={null}> so the
+// published-thread read can never hold the article. `getPublishedThreadForCluster`
+// never throws (null when off, unthreaded or on an outage). Module-private: a
+// page file may only export the Next.js route API (tests locate it by name).
+async function ClusterThreadSlot({ id }: { id: string }) {
+  const thread = await getPublishedThreadForCluster(id);
+  return thread ? <ThreadLink slug={thread.slug} title={thread.title} /> : null;
+}
+
+// "Bu konuda doğrulama" box, in its own <Suspense fallback={null}> for the same
+// reason. `getClusterFactChecks` never throws (a failed read logs and resolves
+// to []). Module-private like ClusterThreadSlot.
+async function ClusterFactCheckSlot({ id }: { id: string }) {
+  const factChecks = await getClusterFactChecks(id);
+  return factChecks.length > 0 ? <FactCheckBox items={factChecks} /> : null;
 }
 
 // A cluster whose stored title has no letter or digit once decoded ('&nbsp',
@@ -445,10 +463,11 @@ export default async function ClusterDetailPage({ params }: PageProps) {
   // can be first or make a zone "join" (an aggregator reposting first must
   // not); non-voting members are just plotted as hollow rings.
   const storyTimeline = await loadStoryTimeline(id, votingMembers, nonVotingMembers);
-  const [factChecks, thread] = await Promise.all([
-    getClusterFactChecks(id),
-    getPublishedThreadForCluster(id),
-  ]);
+  // The story-thread pill and the fact-check box are optional widgets: each is
+  // read by its own async slot (ClusterThreadSlot / ClusterFactCheckSlot) inside
+  // its own <Suspense fallback={null}>, so a slow or stalled read can delay or
+  // hide that one widget, never the article (hunt-27 resilience-1; both used to
+  // be awaited here before the body).
 
   // Schema.org NewsArticle structured data. Lets Google surface the
   // cluster in news-rich results and gives social previews a clean
@@ -722,7 +741,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
 
             {storyTimeline && <StoryTimeline timeline={storyTimeline} />}
 
-            {thread && <ThreadLink slug={thread.slug} title={thread.title} />}
+            <Suspense fallback={null}>
+              <ClusterThreadSlot id={id} />
+            </Suspense>
 
             <OwnershipLine members={members} />
 
@@ -763,7 +784,9 @@ export default async function ClusterDetailPage({ params }: PageProps) {
                 </p>
               </div>
             )}
-            {factChecks.length > 0 && <FactCheckBox items={factChecks} />}
+            <Suspense fallback={null}>
+              <ClusterFactCheckSlot id={id} />
+            </Suspense>
 
             {/* A1-CHIPWIRE: factuality + ownership lineage per participating
                 source. Renders nothing when no member source has been tagged,

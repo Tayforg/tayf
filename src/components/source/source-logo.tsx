@@ -36,9 +36,15 @@ export function isBrokenImage(img: {
   return img.complete && img.naturalWidth === 0 && img.currentSrc !== "";
 }
 
-/** First two characters, upper-cased. No locale handling (kept as-is). */
+/**
+ * The outlet's first two code points, upper-cased with Turkish rules like
+ * sourceMonogram ("Diken" -> "Dİ", "Kısa Dalga" -> "KI"): the bare
+ * String#toUpperCase gave "DI", so one outlet showed "İ" on the /sources tile
+ * and "I" on the card badge. Trimmed, and by code point so an emoji is never cut
+ * in half. Pure (server and client agree).
+ */
 export function sourceInitials(name: string): string {
-  return name.slice(0, 2).toUpperCase();
+  return Array.from(name.trim()).slice(0, 2).join("").toLocaleUpperCase("tr-TR");
 }
 
 /**

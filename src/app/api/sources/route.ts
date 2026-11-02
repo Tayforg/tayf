@@ -21,7 +21,9 @@ import { getRegistryRows } from "@/lib/sources/registry-query";
  * depend on the query string. This handler never reads the URL for that
  * reason: a `?cb=<random>` cache-buster must not mint a cache entry or a
  * Supabase read. A sustained read failure throws and `withApiErrors` answers
- * 500; it is never a 200 with an empty list.
+ * 503 + Retry-After when the database is unavailable (a timeout, an abort or a
+ * PGRST00x/57014 error, found through the thrown error's `cause`) and 500
+ * otherwise; it is never a 200 with an empty list.
  *
  * Cache-Control is set explicitly on the `NextResponse` rather than via a
  * route-segment `revalidate` export — this is a Route Handler, not a

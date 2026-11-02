@@ -7,7 +7,7 @@ import type {
 } from "@/components/story/cluster-card";
 import { emptyBiasDistribution } from "@/lib/bias/analyzer";
 import { isPoliticsMember, isVotingKind, tallyZones, zoneOf } from "@/lib/bias/config";
-import { attemptCached } from "@/lib/cache-resilience";
+import { attemptCached, resolveCachedOrThrow } from "@/lib/cache-resilience";
 import { isOptimizableImageUrl, isPlaceholderImageUrl } from "@/lib/images/image-url";
 import {
   createReaderClient,
@@ -272,7 +272,8 @@ export const CLUSTER_EMBED_SELECT = `id, title_tr, title_tr_neutral, summary_tr,
          )`;
 
 // Internal (uncached) implementation. The exported `getPoliticsClusters`
-// wraps this with `unstable_cache` below.
+// reads it through the `"use cache: remote"` wrapper below and runs it live
+// (uncached) when that attempt failed.
 async function fetchPoliticsClusters(
   profile: ReadProfile,
 ): Promise<PoliticsClustersResult> {
@@ -314,8 +315,12 @@ async function fetchPoliticsClusters(
       // Throw — never return an empty result for a failed query. The
       // caller is wrapped in `"use cache"`, and a returned empty would be
       // cached as truth for the full cluster-feed window (empty homepage
-      // for minutes after one Supabase blip). A throw keeps the bad value
-      // out of the cache and lets Next serve the last good entry.
+      // for minutes after one Supabase blip). `attemptCached` turns this
+      // throw into a `{ ok: false }` result that the cache body returns and
+      // caches for `minutes`, so Next does NOT serve the previous (good)
+      // entry past it. The recovery is in `getPoliticsClusters`: one live
+      // retry, then the per-instance last-good feed (stale-if-error, at most
+      // 60 min old) for reader calls.
       throw new Error(`[clusters] embedded select error: ${error.message}`);
     }
     const clusterRows = data ?? [];
@@ -849,8 +854,9 @@ function scoreCluster(
 //
 // Build-safety: this never throws — `attemptCached` swallows whatever
 // `fetchPoliticsClusters` throws and reports `{ ok: false }` instead
-// (that sentinel IS cached for the cacheLife window; the public entry's
-// live retry heals it). A
+// (that sentinel IS cached for the cacheLife window, and it replaces the
+// previous good entry under the same key; the public entry's live retry and
+// its per-instance last-good feed cover the gap). A
 // throw that crosses this `"use cache: remote"` boundary fails `next
 // build`'s prerender even though `getPoliticsClusters` below wraps every
 // call (see src/lib/cache-resilience.ts's file header for the incident
@@ -864,6 +870,10 @@ function scoreCluster(
 // attempt (typically the 4 s reader abort on a cold database) is memoised for
 // `minutes` only, so a blip cannot park the `{ ok: false }` sentinel for a
 // whole `cluster-feed` window; a success keeps the normal lifetime.
+//
+// The one piece of new logic in this body is the `at` stamp: the epoch ms of
+// the database read, so a cache hit can be remembered as a last-good value
+// without reading the clock on the hit path (cache-resilience.ts, section 4).
 async function getPoliticsClustersCached(profile: ReadProfile) {
   "use cache: remote";
   cacheTag("clusters-politics");
@@ -873,7 +883,7 @@ async function getPoliticsClustersCached(profile: ReadProfile) {
   // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
   if (r.ok) cacheLife("cluster-feed");
   else cacheLife("minutes");
-  return r;
+  return r.ok ? { ...r, at: Date.now() } : r;
 }
 
 // Public entry point. The page component (and the RSS/cron consumers)
@@ -885,11 +895,27 @@ async function getPoliticsClustersCached(profile: ReadProfile) {
 // this retries the query live once (the cached `{ ok: false }` sentinel
 // is memoised for the cacheLife window, and this retry is what heals it)
 // before letting a genuine, still-failing outage propagate.
+//
+// Reader calls (pages, RSS) are additionally stale-if-error and
+// single-flight, keyed "politics:reader": when the attempt AND the live
+// retry both fail, the last good feed this instance saw (under 60 min old)
+// is served instead of the throw, concurrent live retries share one
+// 200-row read, and a failed read cools down for 5 s. Batch calls (the
+// crons) pass no key: they never get stale data and never coalesce.
+//
+// The live retry waits for a request scope first (resolveCachedOrThrow ->
+// awaitRequestScope): during a prerender it postpones instead of fetching
+// live, which is safe because crons and route handlers already have one.
 export async function getPoliticsClusters(
   opts?: { profile?: ReadProfile },
 ): Promise<PoliticsClustersResult> {
   const profile = opts?.profile ?? "reader";
-  const attempt = await getPoliticsClustersCached(profile);
-  if (attempt.ok) return attempt.data;
-  return fetchPoliticsClusters(profile);
+  return resolveCachedOrThrow(
+    {
+      label: "politics-query",
+      key: profile === "reader" ? "politics:reader" : undefined,
+    },
+    () => getPoliticsClustersCached(profile),
+    () => fetchPoliticsClusters(profile),
+  );
 }

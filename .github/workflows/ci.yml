@@ -17,9 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # Match the project's declared engines and README ("Node.js 24+").
           # Next 16 + React 19 require >=18.18 to run, but the worker-stream
@@ -29,7 +31,12 @@ jobs:
           cache: npm
 
       # --no-audit: npm ci's built-in audit request stalled PR runs for npm's
-      # full 300 s fetch timeout (2026-10-22); Dependabot + `npm audit` cover it.
+      # full 300 s fetch timeout (2026-10-22); the advisory gate is the separate
+      # dep-audit.yml workflow.
+      #
+      # No --ignore-scripts here: the lint step needs unrs-resolver's install
+      # script (it fetches its native binding), and this job is given no
+      # repository secret to steal.
       - run: npm ci --no-audit --no-fund --prefer-offline
 
       - name: Lint
@@ -48,23 +55,28 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: denoland/setup-deno@v2
+      # setup-deno@v2 is a BRANCH, never a tag: pin the release commit.
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           # Match supabase/config.toml's deno_version (Deno 2 major) — the
           # Edge Functions run on whatever the Supabase platform ships for
           # that major, so pin the same one here rather than "latest".
           deno-version: "2"
 
-      - name: deno check ingest
-        working-directory: supabase/functions/ingest
-        run: deno check index.ts
-
-      - name: deno check cluster-consumer
-        working-directory: supabase/functions/cluster-consumer
-        run: deno check index.ts
-
-      - name: deno check image-consumer
-        working-directory: supabase/functions/image-consumer
-        run: deno check index.ts
+      # Every function, not a hand-kept list: a new folder with an index.ts is
+      # checked from its first commit. `--no-lock` because deno.lock is never
+      # committed (repo rule); each function is checked from its own folder so
+      # its deno.json import map applies, exactly as the deploy bundles it.
+      - name: deno check every edge function
+        run: |
+          set -euo pipefail
+          for entry in supabase/functions/*/index.ts; do
+            dir="$(dirname "$entry")"
+            name="$(basename "$dir")"
+            echo "deno check: $name"
+            (cd "$dir" && deno check --no-lock index.ts)
+          done

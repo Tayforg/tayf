@@ -187,7 +187,8 @@ describe("GET /api/v1/clusters/[id] — merged clusters", () => {
 });
 
 // Cold-read resilience: the data reads run on the 4 s capped client, and a
-// timeout is a 500 -- never a 404 ("this cluster does not exist").
+// timeout is a 503 + Retry-After (hunt-27: an aborted read is a database
+// outage, not a bug) -- never a 404 ("this cluster does not exist").
 describe("GET /api/v1/clusters/[id] — timeouts are not 404s", () => {
   it("reads through the capped reader client", async () => {
     const res = await get(LIVE);
@@ -197,30 +198,33 @@ describe("GET /api/v1/clusters/[id] — timeouts are not 404s", () => {
     expect(dbState.clientOpts.some(isCappedClientOpts)).toBe(true);
   });
 
-  it("a primary cluster read that times out is the generic 500", async () => {
+  it("a primary cluster read that times out is the stable 503", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       dbState.primaryAbort = true;
       const res = await get(LIVE);
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("Retry-After")).toBe("30");
       const body = await res.json();
-      expect(body.error).toBe("Internal server error");
+      expect(body.error).toBe("Service temporarily unavailable");
+      expect(body.code).toBe("upstream_unavailable");
       expect(JSON.stringify(body)).not.toContain("AbortError");
     } finally {
       errorSpy.mockRestore();
     }
   });
 
-  it("primary row missing + merged_into lookup AbortError is a 500, not a 404", async () => {
+  it("primary row missing + merged_into lookup AbortError is a 503, not a 404", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       dbState.lookupAbort = true;
       const res = await get(MISSING);
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("Retry-After")).toBe("30");
       expect(res.headers.get("Location")).toBeNull();
       expect(res.headers.get("X-Tayf-Tier")).toBe("free");
       const body = await res.json();
-      expect(body.error).toBe("Internal server error");
+      expect(body.error).toBe("Service temporarily unavailable");
       // The raw timeout text must never reach the caller.
       expect(JSON.stringify(body)).not.toContain("AbortError");
     } finally {
@@ -228,12 +232,13 @@ describe("GET /api/v1/clusters/[id] — timeouts are not 404s", () => {
     }
   });
 
-  it("an archived cluster whose merged_into lookup times out is a 500, not a 404", async () => {
+  it("an archived cluster whose merged_into lookup times out is a 503, not a 404", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       dbState.lookupAbort = true;
       const res = await get(MERGED);
-      expect(res.status).toBe(500);
+      expect(res.status).toBe(503);
+      expect(res.headers.get("Retry-After")).toBe("30");
       expect(res.headers.get("Location")).toBeNull();
     } finally {
       errorSpy.mockRestore();

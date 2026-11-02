@@ -63,12 +63,19 @@ const supabaseFake = await vi.hoisted(async () => {
   });
 });
 
+// Every `createClient(url, key, options)` call, so a test can prove the read
+// goes through createSlowReaderClient() (9 s cap, no postgrest-js retry).
+const clientArgs = vi.hoisted(() => [] as unknown[][]);
+
 vi.mock("@supabase/supabase-js", () => ({
-  createClient: () => ({
-    ...supabaseFake.client,
-    from: (table: string) =>
-      tracker.wrapTracking(supabaseFake.client.from(table)),
-  }),
+  createClient: (...args: unknown[]) => {
+    clientArgs.push(args);
+    return {
+      ...supabaseFake.client,
+      from: (table: string) =>
+        tracker.wrapTracking(supabaseFake.client.from(table)),
+    };
+  },
 }));
 
 import { cacheLife, cacheTag } from "next/cache";
@@ -81,10 +88,34 @@ import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 
 const ORIGINAL_ENV = { ...process.env };
 
+/**
+ * Asserts a captured `createClient(url, key, options)` call came from
+ * `createSlowReaderClient()`: postgrest-js retries off and a fetch wrapper
+ * that caps every request at READER_SLOW_TIMEOUT_MS (9 s).
+ */
+async function expectSlowReaderBuild(args: unknown[]): Promise<void> {
+  const opts = args[2] as
+    | { db?: { retry?: boolean }; global?: { fetch?: typeof fetch } }
+    | undefined;
+  expect(opts?.db?.retry).toBe(false);
+  expect(typeof opts?.global?.fetch).toBe("function");
+
+  const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+  vi.stubGlobal("fetch", async () => new Response("[]"));
+  try {
+    await opts!.global!.fetch!("https://example.supabase.co/rest/v1/t");
+    expect(timeoutSpy).toHaveBeenCalledWith(9000);
+  } finally {
+    vi.unstubAllGlobals();
+    timeoutSpy.mockRestore();
+  }
+}
+
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.data = [];
+  clientArgs.length = 0;
   fixture.error = null;
   fixture.lastState = null;
   fixture.throwOnQuery = false;
@@ -246,5 +277,13 @@ describe("getDeliveringSourceCount cache lifetime", () => {
     expect(vi.mocked(cacheTag).mock.invocationCallOrder[0]!).toBeLessThan(
       vi.mocked(cacheLife).mock.invocationCallOrder[0]!,
     );
+  });
+});
+
+describe("getDeliveringSourceCount is bounded (hunt-27 resilience-1)", () => {
+  it("builds its client with the slow-reader cap and no retry", async () => {
+    await getDeliveringSourceCount();
+    expect(clientArgs.length).toBeGreaterThan(0);
+    for (const args of clientArgs) await expectSlowReaderBuild(args);
   });
 });

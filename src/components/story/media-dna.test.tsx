@@ -265,3 +265,51 @@ describe("MediaDna show-all toggle (target size)", () => {
     expect(html).not.toContain("<button");
   });
 });
+
+// h27-resilience-2: the cluster page passes `allSources: []` when the source
+// directory read failed (a live directory is never empty). The chart must say
+// so instead of printing "Hiç kaynak yok" three times and "Tüm 0 kaynağı göster".
+describe("MediaDna with an unavailable source directory", () => {
+  const html = renderToStaticMarkup(
+    <MediaDna sources={[]} highlightSlugs={new Set(["gov", "mid"])} />,
+  );
+
+  it("keeps the header and says the source information could not be loaded", () => {
+    expect(html).toContain("Medya DNA&#x27;sı");
+    expect(html).toContain(
+      "Kaynak bilgisi şu an alınamadı. Sayfayı birkaç dakika sonra yenileyebilirsiniz.",
+    );
+  });
+
+  it("never shows the empty-zone label or the show-all toggle", () => {
+    expect(html).not.toContain("Hiç kaynak yok");
+    expect(html).not.toContain("kaynağı göster");
+    expect(html).not.toContain("<button");
+  });
+
+  it("renders none of the bar, the zone cards or the legend", () => {
+    expect(html).not.toContain("bg-emerald-500");
+    expect(html).not.toContain("bg-zinc-400");
+    expect(html).not.toContain("bg-red-500");
+    expect(html).not.toContain("0 kaynak");
+    expect(html).not.toContain("Kesikli çerçeveyle");
+    for (const zone of Object.values(ZONE_META)) {
+      expect(html).not.toContain(zone.label);
+    }
+  });
+
+  it("is the same without a highlight set", () => {
+    const bare = renderToStaticMarkup(<MediaDna sources={[]} />);
+    expect(bare).toContain("Kaynak bilgisi şu an alınamadı");
+    expect(bare).not.toContain("Hiç kaynak yok");
+    expect(bare).not.toContain("kaynağı göster");
+  });
+
+  it("still renders the normal chart for a non-empty directory", () => {
+    const normal = renderToStaticMarkup(
+      <MediaDna sources={[source({ id: "m", slug: "mid", bias: "center" })]} />,
+    );
+    expect(normal).not.toContain("Kaynak bilgisi şu an alınamadı");
+    expect(normal).toContain("bg-zinc-400");
+  });
+});

@@ -25,7 +25,7 @@ const fixture = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
-  createServerClient: () => ({
+  createSlowReaderClient: () => ({
     from: (_table: string) => {
       const builder = {
         select: () => builder,

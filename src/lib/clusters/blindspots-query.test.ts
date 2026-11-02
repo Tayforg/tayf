@@ -74,6 +74,7 @@ vi.mock("@/lib/clusters/feed-health", async (importOriginal) => {
 
 import { cacheLife } from "next/cache";
 import { getBlindspots, getBlindspotsSafe } from "./blindspots-query";
+import { __resetCacheResilienceForTests } from "@/lib/cache-resilience";
 import { votingZoneCounts } from "@/lib/feeds/zone-line";
 import type { BuilderState } from "../../../tests/_helpers/supabase-fake";
 import type { BiasCategory, SourceKind } from "@/types";
@@ -154,6 +155,9 @@ function seedRows(rows: Array<{ id: string }>) {
 }
 
 beforeEach(() => {
+  // Last-good values and cooldowns are per-process module state; a test must
+  // never see another test's success (or outage).
+  __resetCacheResilienceForTests();
   process.env.NEXT_PUBLIC_SUPABASE_URL = "https://example.supabase.co";
   process.env.SUPABASE_SERVICE_ROLE_KEY = "test-service-role-key";
   fixture.candidateIds = [];
@@ -835,5 +839,140 @@ describe("getBlindspotsSafe", () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W3 (h27-resilience-2): stale-if-error and single-flight for the reader
+// profile. A failed cached attempt plus a failed live fetch serves the last
+// good result this instance saw (at most 60 min old); concurrent live retries
+// share one fetch; a failed flight cools down for 5 s. The batch profile
+// (crons) gets none of it: a cron must never send stale data.
+// ---------------------------------------------------------------------------
+
+describe("getBlindspots stale-if-error and single-flight", () => {
+  let errSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  const MIN = 60_000;
+
+  function deferred() {
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<null>((_, rej) => {
+      reject = rej;
+    });
+    return { promise, reject };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("reader: serves the last good result when the attempt and the live fetch both fail", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    const first = await getBlindspots();
+    expect(first.bundles).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() + 10 * MIN);
+    fixture.candidateError = { message: "db down" };
+    const during = await getBlindspots();
+    expect(during).toBe(first);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("[blindspots-query] serving last-good"),
+    );
+  });
+
+  it("reader: never serves a result older than 60 minutes", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots();
+    vi.setSystemTime(Date.now() + 61 * MIN);
+    fixture.candidateError = { message: "db down" };
+    await expect(getBlindspots()).rejects.toThrow("[blindspots] candidate select error");
+  });
+
+  it("reader: with no earlier success a sustained outage still throws", async () => {
+    fixture.candidateError = { message: "db down" };
+    await expect(getBlindspots()).rejects.toThrow("[blindspots] candidate select error");
+  });
+
+  it("batch: success then failure still throws and serves nothing stale", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots({ profile: "batch" });
+    fixture.candidateError = { message: "db down" };
+    await expect(getBlindspots({ profile: "batch" })).rejects.toThrow(
+      "[blindspots] candidate select error",
+    );
+  });
+
+  it("batch: a reader success is never served to a batch caller", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    await getBlindspots();
+    fixture.candidateError = { message: "db down" };
+    await expect(getBlindspots({ profile: "batch" })).rejects.toThrow(
+      "[blindspots] candidate select error",
+    );
+  });
+
+  it("reader: 20 concurrent live retries make ONE live fetch and all get the last good result", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    const first = await getBlindspots();
+    feedHealthMock.getZoneFeedHealth.mockClear();
+
+    // The health read is the second leg of every fetch: hold the 20 cached
+    // attempts open on it, fail them, then hold the live retries open too.
+    const attempts = deferred();
+    const live = deferred();
+    let healthReads = 0;
+    feedHealthMock.getZoneFeedHealth.mockImplementation(() =>
+      ++healthReads <= 20 ? attempts.promise : live.promise,
+    );
+    const calls = Array.from({ length: 20 }, () => getBlindspots());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(healthReads).toBe(20);
+
+    attempts.reject(new Error("db down"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(healthReads).toBe(21);
+
+    live.reject(new Error("db down"));
+    const results = await Promise.all(calls);
+    expect(results.every((r) => r === first)).toBe(true);
+    expect(healthReads).toBe(21);
+  });
+
+  it("batch: concurrent live retries never coalesce (every caller reads for itself)", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    feedHealthMock.getZoneFeedHealth.mockRejectedValue(new Error("db down"));
+    const results = await Promise.all(
+      Array.from({ length: 3 }, () =>
+        getBlindspots({ profile: "batch" }).catch((e: unknown) => e),
+      ),
+    );
+    expect(results.every((r) => r instanceof Error)).toBe(true);
+    // 3 cached attempts + 3 live retries.
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(6);
+  });
+
+  it("reader: after a failed live flight the next calls within 5 s do not hit the database", async () => {
+    seedRows([mkBlindspotClusterRow("b1", "pro_government")]);
+    feedHealthMock.getZoneFeedHealth.mockRejectedValue(new Error("db down"));
+    const start = Date.now();
+    await expect(getBlindspots()).rejects.toThrow("db down");
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(2);
+
+    vi.setSystemTime(start + 4_000);
+    await expect(getBlindspots()).rejects.toThrow("db down");
+    // Only the cached attempt ran again; the live retry sat out the cooldown.
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(3);
+
+    vi.setSystemTime(start + 5_001);
+    await expect(getBlindspots()).rejects.toThrow("db down");
+    expect(feedHealthMock.getZoneFeedHealth).toHaveBeenCalledTimes(5);
   });
 });

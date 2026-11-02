@@ -1669,12 +1669,15 @@ async function runCycleBody(
       }
 
       if (result.error) {
-        // A parse error can still land on a 2xx response (fetcher.ts
-        // returns etag/lastModified/bodyHash alongside `error` in that
-        // case) — pass `fresh` then so a warm instance's memory and the
-        // DB agree on the validators that produced this unparseable body,
-        // instead of the DB replaying a stale ETag that gets a 200 (and
-        // another parse failure) every cycle while memory already moved on.
+        // A failure keeps the source's previous validators (etag,
+        // last-modified, body hash): `buildFetchStateUpdate` without a `fresh`
+        // argument stores what the row already holds. That includes an
+        // unparseable 2xx (HTML page, parse error, refused DOCTYPE entity),
+        // for which fetcher.ts returns no validators and puts its conditional
+        // cache back: adopting the refused body's validators would let the
+        // next poll of the same bytes (body-hash short-circuit) or a 304 on its
+        // ETag count as a healthy "not modified" and clear the quarantine
+        // instead of advancing fetch_fail_streak (h27-live-1).
         stats.failed++;
         // ingest-health: an HTML/plain-text/404 body -- already counted in
         // `failed` above; broken out separately so this failure reason is
@@ -1682,19 +1685,7 @@ async function runCycleBody(
         // way any other fetch failure does).
         if (result.notAFeed) stats.notAFeed++;
         console.error(`[ingest] ${source.slug} fetch failed: ${result.error}`);
-        const isParseError2xx = result.status >= 200 && result.status < 300;
-        const failState = buildFetchStateUpdate(
-          source,
-          result.status,
-          false,
-          isParseError2xx
-            ? {
-                etag: result.etag ?? source.fetch_etag,
-                lastModified: result.lastModified ?? source.fetch_last_modified,
-                bodyHash: result.bodyHash ?? source.fetch_body_hash,
-              }
-            : undefined,
-        );
+        const failState = buildFetchStateUpdate(source, result.status, false);
         fetchStateUpdates.set(source.id, failState);
         if (
           failState.fetch_quarantined_until &&

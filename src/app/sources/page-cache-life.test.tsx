@@ -72,7 +72,7 @@ function makeFakeClient() {
 }
 
 vi.mock("@/lib/supabase/server", () => ({
-  createServerClient: () => {
+  createSlowReaderClient: () => {
     supabaseFixture.builds += 1;
     if (supabaseFixture.blips > 0) {
       supabaseFixture.blips -= 1;

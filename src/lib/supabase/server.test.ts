@@ -12,10 +12,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 // ---------------------------------------------------------------------------
 
 import {
+  READER_SLOW_TIMEOUT_MS,
   READER_TIMEOUT_MS,
   createFinanceServerClient,
   createReaderClient,
   createServerClient,
+  createSlowReaderClient,
   withFetchTimeout,
 } from "./server";
 
@@ -73,6 +75,13 @@ describe("READER_TIMEOUT_MS", () => {
   });
 });
 
+describe("READER_SLOW_TIMEOUT_MS", () => {
+  it("is 9 seconds — just above PostgREST's 8 s statement_timeout", () => {
+    expect(READER_SLOW_TIMEOUT_MS).toBe(9000);
+    expect(READER_SLOW_TIMEOUT_MS).toBeGreaterThan(8000);
+  });
+});
+
 describe("createServerClient({ timeoutMs })", () => {
   it("aborts a hung request and surfaces an AbortError WITHOUT postgrest-js retrying it", async () => {
     const fetchMock = hangingFetch();
@@ -87,9 +96,9 @@ describe("createServerClient({ timeoutMs })", () => {
     expect(result.data).toBeNull();
     expect(result.error?.message).toMatch(/AbortError/);
     expect(elapsedMs).toBeLessThan(1000);
-    // postgrest-js retries GET up to 3x (1/2/4 s backoff) when fetch rejects
-    // with anything but an AbortError. Exactly one call proves the timeout
-    // was re-thrown as an AbortError and the retry loop never engaged.
+    // Exactly one call: a capped client has `db: { retry: false }`, and the
+    // timeout is also re-thrown as an AbortError (second guard), so
+    // postgrest-js's retry loop never engages.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -143,6 +152,26 @@ describe("createServerClient() without options", () => {
   });
 });
 
+describe("createServerClient() without options keeps postgrest-js retries", () => {
+  it("a non-abort failure stays retryable on the UNCAPPED client (1 attempt + 3 retries)", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchMock = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+      vi.stubGlobal("fetch", fetchMock);
+
+      // The builder is lazy: the request starts when it is awaited.
+      const pending = (async () => await createServerClient().from("t").select("id"))();
+      await vi.advanceTimersByTimeAsync(8000);
+      const result = await pending;
+
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      expect(result.error?.message).toMatch(/fetch failed/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("createReaderClient()", () => {
   it("applies READER_TIMEOUT_MS (4000) to every request", async () => {
     vi.stubGlobal("fetch", okFetch());
@@ -152,6 +181,25 @@ describe("createReaderClient()", () => {
 
     expect(result.error).toBeNull();
     expect(timeoutSpy).toHaveBeenCalledWith(4000);
+  });
+});
+
+describe("createSlowReaderClient()", () => {
+  it("applies READER_SLOW_TIMEOUT_MS (9000) to every request", async () => {
+    vi.stubGlobal("fetch", okFetch());
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
+
+    const result = await createSlowReaderClient().from("t").select("id");
+
+    expect(result.error).toBeNull();
+    expect(timeoutSpy).toHaveBeenCalledWith(9000);
+  });
+
+  it("throws a readable error when the Supabase env vars are missing", () => {
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+    expect(() => createSlowReaderClient()).toThrow(/Missing NEXT_PUBLIC_SUPABASE_URL/);
   });
 });
 
@@ -192,7 +240,7 @@ describe("withFetchTimeout", () => {
     expect(err).toBe(reason);
   });
 
-  it("does NOT rewrite non-abort failures (they stay retryable for postgrest-js)", async () => {
+  it("does NOT rewrite non-abort failures (the wrapper passes them through untouched)", async () => {
     const boom = new TypeError("fetch failed");
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(boom));
 

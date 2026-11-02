@@ -139,7 +139,7 @@ export async function GET(): Promise<Response> {
     title: "Tayf — Türkiye Haber Analizi",
     link: `${base}/`,
     selfUrl: `${base}/rss.xml`,
-    description: `Aynı haber, farklı dünyalar. Türkiye haber kaynaklarından otomatik kümelenmiş haberler.${neutralSentence}`,
+    description: `Aynı haber, farklı dünyalar. Türk haber kaynaklarından otomatik kümelenmiş haberler.${neutralSentence}`,
     items,
   });
 

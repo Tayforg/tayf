@@ -9,7 +9,7 @@ Turkish news-bias analyzer: Next.js 16 App Router + Supabase (Postgres, pgmq, pg
 - `npm run lint` — eslint
 - `npm test` — vitest (node env; run one file with `npx vitest run <path-substring>`, never a literal `[id]` path)
 - `npm run build` — `next build`
-- `cd supabase/functions/<fn> && deno check index.ts` — type-check an Edge Function (ingest, cluster-consumer, image-consumer)
+- every function: `cd supabase/functions/<fn> && deno check --no-lock index.ts` — type-check an Edge Function (CI loops over every `supabase/functions/*/index.ts`; `deno.lock` is never created or committed)
 
 ## Conventions
 

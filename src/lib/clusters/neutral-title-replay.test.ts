@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { isAcceptableNeutral, pickNeutralTitle } from "./neutral-title";
+import { cleanHeadline, isAcceptableNeutral, pickNeutralTitle } from "./neutral-title";
 
 // Replay of the headline cron's re-pick over production data. The fixture is
 // 150 clusters (article_count >= 4, the most recently updated) captured on
@@ -266,5 +266,91 @@ describe("re-pick replay: the hunt-26 rules", () => {
       const picked = repick(c);
       expect(pickNeutralTitle(c.titles.map((title) => ({ title })), { incumbent: picked }), c.cid).toBe(picked);
     }
+  });
+});
+
+// Hunt 27 (h27-copy-2, 2026-11-02): recasing a lower-case-sourced candidate from
+// its siblings. The first version of the rule applied the sibling forms to every
+// candidate and changed three fresh picks of the 150-cluster corpus, two of them
+// for the worse ('olağan Kurultayı', 'Mekke Savunma ittifakına': a sibling
+// capitalises part of an event name and the sentence-case candidate got half of it).
+// The rule now applies only to the odd one out on capitalisation (a title the
+// outlet wrote in lower case, or one that disagrees on more names than it
+// agrees on), and over the corpus and the h26 clusters it changes no pick, with
+// or without an incumbent and with or without { floor: true }.
+describe("re-pick replay: the hunt-27 lower-case-sourced rule", () => {
+  const fresh = (c: ReplayCluster, floor = false): string | null =>
+    pickNeutralTitle(c.titles.map((title) => ({ title })), floor ? { floor: true } : {});
+
+  it("every fresh pick of the 150 corpus clusters is some member's cleaned title (nothing was recased)", () => {
+    for (const c of CLUSTERS) {
+      const picked = fresh(c);
+      expect(picked, c.cid).not.toBeNull();
+      expect(
+        c.titles.some((t) => cleanHeadline(t) === picked),
+        `${c.cid}: ${picked}`,
+      ).toBe(true);
+    }
+  });
+
+  it("the three clusters the first version recased keep their sentence-case wording", () => {
+    expect(fresh(byId("d3af1551"))).toBe("Yeni Parti’nin ilk olağan kurultayı 14-15 Kasım’da yapılacak");
+    expect(fresh(byId("73d2638e"))).toBe("Suriye, Mekke savunma ittifakına katılımı değerlendiriyor");
+    expect(fresh(byId("9e5b27cb"))).toBe(
+      "Cenazeye giderken Bolu Dağı tüneli'nde takla attılar, kaçan tır aranıyor",
+    );
+  });
+
+  it("a first pick (floor) over the corpus is the same title whenever a normal pick exists", () => {
+    for (const c of CLUSTERS) {
+      const picked = fresh(c);
+      if (picked !== null) expect(fresh(c, true), c.cid).toBe(picked);
+    }
+  });
+
+  it("the h26 clusters are unaffected: the fresh pick is a member's cleaned title", () => {
+    for (const c of H26) {
+      const picked = fresh(c);
+      if (picked === null) continue;
+      expect(
+        c.titles.some((t) => cleanHeadline(t) === picked),
+        `${c.cid}: ${picked}`,
+      ).toBe(true);
+    }
+  });
+
+  // The two live clusters, member titles as stored (Haberport writes U+2019,
+  // Haberler.com a straight apostrophe). The stored neutral titles are the
+  // lower-case ones the picker shipped.
+  const LIVE: ReplayCluster[] = [
+    {
+      cid: "7a9ac17b",
+      stored: "Avrupa, türkiye’yi stratejik ortak olarak görmeli çağrısı berlinden yükseldi",
+      titles: [
+        "avrupa, türkiye’yi stratejik ortak olarak görmeli çağrısı berlinden yükseldi",
+        "Fuat Oktay Berlin'de Avrupa'dan Türkiye'yi stratejik ortak görmesini istedi",
+      ],
+    },
+    {
+      cid: "65cb64f9",
+      stored: "Bilal Erdoğan: türkiye ile japonya ilişkileri stratejik ortaklığa doğru ilerliyor",
+      titles: [
+        "Bilal Erdoğan: türkiye ile japonya ilişkileri stratejik ortaklığa doğru ilerliyor",
+        "Bilal Erdoğan Tokyo'da Türkiye-Japonya ilişkilerine stratejik ortaklık dedi",
+      ],
+    },
+  ];
+
+  it("a fresh pick of the live clusters ships properly cased names", () => {
+    expect(fresh(LIVE[0]!)).toBe("Fuat Oktay Berlin'de Avrupa'dan Türkiye'yi stratejik ortak görmesini istedi");
+    expect(fresh(LIVE[1]!)).toBe(
+      "Bilal Erdoğan: Türkiye ile Japonya ilişkileri stratejik ortaklığa doğru ilerliyor",
+    );
+    expect(fresh(LIVE[0]!, true)).toBe(fresh(LIVE[0]!));
+    expect(fresh(LIVE[1]!, true)).toBe(fresh(LIVE[1]!));
+  });
+
+  it("a re-pick leaves the stored rows alone (no backfill: the incumbent path is untouched)", () => {
+    for (const c of LIVE) expect(repick(c), c.cid).toBe(c.stored);
   });
 });

@@ -157,6 +157,8 @@ const dbState = vi.hoisted(() => ({
   clustersQueryCount: 0,
   dailyUsage: {} as Record<number, number>,
   forceClustersError: false,
+  // When set, the forced clusters error carries this PostgREST code.
+  clustersErrorCode: null as string | null,
   // When set, replaces CLUSTERS as the table contents (the paging suites).
   clusterRows: null as Array<Record<string, unknown>> | null,
   // Every clusters query that carried an .order() (i.e. the list query).
@@ -192,7 +194,13 @@ const supabaseFake = await vi.hoisted(async () => {
       clusters: (state) => {
         dbState.clustersQueryCount += 1;
         if (dbState.forceClustersError) {
-          return { data: null, error: { message: "boom" } };
+          return {
+            data: null,
+            error: {
+              message: "boom",
+              ...(dbState.clustersErrorCode ? { code: dbState.clustersErrorCode } : {}),
+            },
+          };
         }
         const idEq = state.eq.find((e) => e.col === "id");
         const archivedEq = state.eq.find((e) => e.col === "is_archived");
@@ -284,6 +292,7 @@ beforeEach(() => {
   dbState.clustersQueryCount = 0;
   dbState.dailyUsage = {};
   dbState.forceClustersError = false;
+  dbState.clustersErrorCode = null;
   dbState.clusterRows = null;
   dbState.listQueries = [];
   supabaseFake.calls.rpc.length = 0;
@@ -466,6 +475,19 @@ describe("GET /api/v1/clusters", () => {
     expect(res.status).toBe(500);
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("a PGRST002 read error yields 503 + Retry-After: 30 with the same v1 headers (hunt-27)", async () => {
+    dbState.forceClustersError = true;
+    dbState.clustersErrorCode = "PGRST002";
+    const { GET } = await import("@/app/api/v1/clusters/route");
+    const res = await GET(listRequest({ key: FREE_KEY }));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("X-Tayf-Tier")).toBe("free");
+    expect((await res.json()).code).toBe("upstream_unavailable");
   });
 });
 

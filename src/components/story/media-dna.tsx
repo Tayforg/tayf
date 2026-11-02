@@ -28,6 +28,11 @@ import { isVotingSource, sourceKindOf, SOURCE_KIND_META } from "@/lib/sources/ki
  * The proportional 3-segment top bar always reflects the FULL directory
  * distribution regardless of toggle state.
  *
+ * An EMPTY `sources` list means the directory read failed (a live directory is
+ * never empty; the detail query reports it as `sourcesUnavailable`). Then the
+ * component renders the header and one honest line instead of an empty bar,
+ * three "Hiç kaynak yok" cards and a "Tüm 0 kaynağı göster" toggle.
+ *
  * Non-voting kinds (toplayıcı / niş) still get highlighted like any other
  * participating source, but carry a dashed border and a small kind label —
  * a visual reminder that they're cluster members without being counted in
@@ -105,6 +110,22 @@ export function MediaDna({ sources, highlightSlugs }: MediaDnaProps) {
   }
 
   const total = sources.length;
+
+  // Directory read failed (see the component doc): say so, show nothing else.
+  // After every hook above, so the hook order never changes between renders.
+  if (total === 0) {
+    return (
+      <div className="space-y-3">
+        <div>
+          <h2 className="text-sm font-semibold">Medya DNA&apos;sı</h2>
+          <p className="text-[11px] text-muted-foreground mt-0.5">
+            Kaynak bilgisi şu an alınamadı. Sayfayı birkaç dakika sonra
+            yenileyebilirsiniz.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   // Only show the legend when a non-voting chip is actually rendered: in
   // collapsed mode that means a participating aggregator/niche source; in
