@@ -84,7 +84,10 @@ export function TickerChip({
 
 // The masthead strip: the most-mentioned tickers with move, relative
 // volume and how unusual today's attention is. One horizontal band that
-// scrolls sideways on narrow screens instead of wrapping.
+// scrolls sideways on narrow screens instead of wrapping. overflow-x-auto
+// clips anything painted outside a link's box, so the focus ring is inset
+// (drawn inside the link); the standalone chip has no clipping ancestor and
+// keeps its outside ring.
 //
 // `staleTickers` are the tickers whose last trade is too old to call a move
 // (the page's isStale). Like the chip, the tape then keeps the price but shows
@@ -114,7 +117,7 @@ export function TickerTape({
           <Link
             key={t.ticker}
             href={`/ekonomi/${t.ticker}`}
-            className="flex shrink-0 flex-col gap-1.5 border-r border-border px-3 py-2 transition-colors hover:bg-foreground/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="flex shrink-0 flex-col gap-1.5 border-r border-border px-3 py-2 transition-colors hover:bg-foreground/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
           >
             <span className="flex items-baseline gap-2">
               <span className="text-brand">{t.ticker}</span>

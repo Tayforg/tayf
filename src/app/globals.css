@@ -205,8 +205,11 @@
     @apply font-sans;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    /* Keep the sticky h-14 header from covering a focused/anchored target (WCAG 2.2 SC 2.4.11) */
-    scroll-padding-top: 3.5rem;
+    /* Keep the sticky 59 px header (2 px accent line + h-14 row + 1 px border)
+       from covering a focused/anchored target (WCAG 2.2 SC 2.4.11), plus
+       0.75rem of air. Pages must not add their own scroll-mt on top. Pinned to
+       header.tsx by tests/styles/anchor-offset.test.ts. */
+    scroll-padding-top: calc(59px + 0.75rem);
   }
 
   /* Editorial heading typography */

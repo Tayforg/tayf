@@ -838,4 +838,71 @@ describe("buildTopicCollectionPage", () => {
     });
     expect(String(items[1]!.url)).toContain("/cluster/c2");
   });
+
+  // Page 1 is the byte-for-byte output captured from HEAD before the page
+  // argument existed (origin pinned, because siteUrl() reads the environment):
+  // the paged JSON-LD must not move it.
+  it("page 1 (page omitted or 1) is byte-identical to the pre-paging output", () => {
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://tayf.test");
+    try {
+      const bundles = [
+        { cluster: { id: "c1", title_tr: "Birinci" } },
+        { cluster: { id: "c2", title_tr: "İkinci" } },
+      ] as unknown as ClusterBundle[];
+      const SNAPSHOT =
+        '{"@context":"https://schema.org","@type":"CollectionPage","name":"Dünya haberleri","url":"https://tayf.test/konu/dunya","isPartOf":{"@type":"WebSite","name":"Tayf","url":"https://tayf.test"},"mainEntity":{"@type":"ItemList","numberOfItems":2,"itemListElement":[{"@type":"ListItem","position":1,"name":"Birinci","url":"https://tayf.test/cluster/c1"},{"@type":"ListItem","position":2,"name":"İkinci","url":"https://tayf.test/cluster/c2"}]}}';
+
+      expect(JSON.stringify(buildTopicCollectionPage({ slug: "dunya", bundles }))).toBe(SNAPSHOT);
+      expect(JSON.stringify(buildTopicCollectionPage({ slug: "dunya", bundles, page: 1 }))).toBe(SNAPSHOT);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  describe("a paged hub (?sayfa=N) describes its own page", () => {
+    const bundles = [
+      { cluster: { id: "c31", title_tr: "Otuz birinci" } },
+      { cluster: { id: "c32", title_tr: "Otuz ikinci" } },
+    ] as unknown as ClusterBundle[];
+
+    it("page 2: the url carries ?sayfa=2", () => {
+      const jsonLd = buildTopicCollectionPage({ slug: "dunya", bundles, page: 2 });
+      expect(String(jsonLd.url).endsWith("/konu/dunya?sayfa=2")).toBe(true);
+    });
+
+    it("page 2: the name is the page <title> (Dünya haberleri — Sayfa 2)", () => {
+      const jsonLd = buildTopicCollectionPage({ slug: "dunya", bundles, page: 2 });
+      expect(jsonLd.name).toBe("Dünya haberleri — Sayfa 2");
+      const title = topicMetadata("dunya", 2).title;
+      expect(String(title)).toBe(String(jsonLd.name));
+    });
+
+    it("page 2: positions continue after the previous page (TOPIC_PAGE_SIZE + 1, + 2, ...)", () => {
+      const jsonLd = buildTopicCollectionPage({ slug: "dunya", bundles, page: 2 });
+      const items = (jsonLd.mainEntity as Record<string, unknown>).itemListElement as Array<Record<string, unknown>>;
+      expect(items.map((i) => i.position)).toEqual([TOPIC_PAGE_SIZE + 1, TOPIC_PAGE_SIZE + 2]);
+      expect(String(items[0]!.url)).toContain("/cluster/c31");
+    });
+
+    it("page 3 starts at 2 * TOPIC_PAGE_SIZE + 1 and numberOfItems stays the length of this page", () => {
+      const jsonLd = buildTopicCollectionPage({ slug: "spor", bundles, page: 3 });
+      const mainEntity = jsonLd.mainEntity as Record<string, unknown>;
+      const items = mainEntity.itemListElement as Array<Record<string, unknown>>;
+      expect(items[0]!.position).toBe(2 * TOPIC_PAGE_SIZE + 1);
+      expect(mainEntity.numberOfItems).toBe(2);
+      expect(String(jsonLd.url).endsWith("/konu/spor?sayfa=3")).toBe(true);
+      expect(jsonLd.name).toBe("Spor haberleri — Sayfa 3");
+    });
+
+    it("clamps the page like the rest of the hub: a nonsense page reads as page 1, a huge one as TOPIC_MAX_PAGE", () => {
+      const first = buildTopicCollectionPage({ slug: "dunya", bundles, page: 0 });
+      expect(String(first.url).endsWith("/konu/dunya")).toBe(true);
+      expect(first.name).toBe("Dünya haberleri");
+
+      const last = buildTopicCollectionPage({ slug: "dunya", bundles, page: 999 });
+      expect(String(last.url).endsWith(`/konu/dunya?sayfa=${TOPIC_MAX_PAGE}`)).toBe(true);
+      const items = (last.mainEntity as Record<string, unknown>).itemListElement as Array<Record<string, unknown>>;
+      expect(items[0]!.position).toBe((TOPIC_MAX_PAGE - 1) * TOPIC_PAGE_SIZE + 1);
+    });
+  });
 });

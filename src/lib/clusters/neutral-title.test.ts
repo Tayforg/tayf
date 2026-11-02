@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   EXTRACTIVE_MODEL_ID,
   FULL_LENGTH_TITLE_CHARS,
+  HEDGE_LOSS_PENALTY,
   REPICK_MARGIN,
   REPICK_MARGIN_FULL_LENGTH,
   cleanHeadline,
@@ -174,7 +175,7 @@ describe("cleanHeadline Başkan Erdoğan rewrite", () => {
 });
 
 describe("framingPenalty", () => {
-  it.each(["Flaş gelişme", "canlı yayın", "ŞOK haber", "çarpıcı detay"])(
+  it.each(["Flaş gelişme", "canlı yayın", "ŞOK haber", "Altın fiyatlarında son dakika"])(
     "scores %j as at least one framing hit",
     (title) => {
       expect(framingPenalty(title)).toBeGreaterThanOrEqual(1);
@@ -752,10 +753,9 @@ describe("pickNeutralTitle first-pick floor ({ floor: true })", () => {
     }
   });
 
-  it("prefers a candidate that is only a question over shouting or an English headline", () => {
+  it("prefers a candidate that is only a question over an English headline", () => {
     const picked = pickNeutralTitle(
       asMembers([
-        "BAKIRKÖY BELEDİYESİ SORUŞTURMASINDA 39 KİŞİ TUTUKLANDI",
         "Bakırköy soruşturmasında kimler tutuklandı, süreç nasıl işleyecek?",
         "Bakirkoy municipality probe ends with 39 arrests in the city",
       ]),
@@ -764,9 +764,21 @@ describe("pickNeutralTitle first-pick floor ({ floor: true })", () => {
     expect(picked).toBe("Bakırköy soruşturmasında kimler tutuklandı, süreç nasıl işleyecek?");
   });
 
-  it("falls back to a shouted candidate rather than nothing", () => {
+  it("a shouted title is sentence-cased and then competes like any other (extractive-v4)", () => {
+    // It used to lose to the question: shouting was a hard defect, a question a soft one.
+    const picked = pickNeutralTitle(
+      asMembers([
+        "BAKIRKÖY BELEDİYESİ SORUŞTURMASINDA 39 KİŞİ TUTUKLANDI",
+        "Bakirkoy municipality probe ends with 39 arrests in the city",
+      ]),
+      { floor: true },
+    );
+    expect(picked).toBe("Bakırköy belediyesi soruşturmasında 39 kişi tutuklandı");
+  });
+
+  it("falls back to a shouted candidate rather than nothing (sentence-cased since extractive-v4)", () => {
     expect(pickNeutralTitle(asMembers(["POLİS BİLE ŞAŞKINA DÖNDÜ", "POLİS BİLE ŞAŞKINA DÖNDÜ"]), { floor: true })).toBe(
-      "POLİS BİLE ŞAŞKINA DÖNDÜ",
+      "Polis bile şaşkına döndü",
     );
   });
 
@@ -777,14 +789,15 @@ describe("pickNeutralTitle first-pick floor ({ floor: true })", () => {
 });
 
 describe("EXTRACTIVE_MODEL_ID and isExtractiveModelId", () => {
-  it("is extractive-v3", () => {
-    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v3");
+  it("is extractive-v4", () => {
+    expect(EXTRACTIVE_MODEL_ID).toBe("extractive-v4");
   });
 
   it("recognises every extractive-* version and nothing else", () => {
     expect(isExtractiveModelId("extractive-v1")).toBe(true);
     expect(isExtractiveModelId("extractive-v2")).toBe(true);
     expect(isExtractiveModelId("extractive-v3")).toBe(true);
+    expect(isExtractiveModelId("extractive-v4")).toBe(true);
     expect(isExtractiveModelId(EXTRACTIVE_MODEL_ID)).toBe(true);
     expect(isExtractiveModelId("claude-haiku-4-5-20251001")).toBe(false);
     expect(isExtractiveModelId("extractive")).toBe(false);
@@ -1082,5 +1095,396 @@ describe("pickNeutralTitle { incumbent }: a re-pick is conservative", () => {
       expect(p, label).not.toBeNull();
       expect(pickNeutralTitle(asMembers(set), { incumbent: p }), label).toBe(p);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hunt 22 (h22-editorial-3, 2026-11-02): verdict words over hedged members, a
+// mid-title "Son dakika", shouted floor titles. The member titles of 310aedf3
+// and 80bfb011 are the stored ones (read-only SELECT on cluster_articles x
+// articles, newest first as the cron fetches them).
+// ---------------------------------------------------------------------------
+
+const SARIGUL_310A = [
+  "Emir Sarıgül savcılığa konuştu! İfadesinde Özgür Özel de var",
+  "Emir Sarıgül'den babası ve Özgür Özel hakkında \"350 bin dolar\" iddiası: Aracına koydu",
+  "Emir Sarıgül'ün ifadesi CNN Türk'te: \"Babam, Özgür Özel'e 350 bin dolar rüşvet verdi\"",
+  "Emir Sarıgül'den babası Mustafa Sarıgül ve Özgür Özel hakkında çok çarpıcı itiraf",
+  "Son dakika... Emir Sarıgül'ün ek ifadesi ortaya çıktı! 'Babam Özgür Özel'e rüşvet verdi'",
+  "Emir Sarıgül itiraf etti: Babam, Özgür Özel'e 350 bin dolar verdi",
+  "Emir Sarıgül'ün ek ifadesi gündeme oturdu: ‘Babam, Özgür Özel’e 350 bin dolar verdi’",
+  "Mustafa Sarıgül'ün oğlu Emir Sarıgül: 'Babam Özgür Özel'e 350 bin dolar verdi'",
+  "Emir Sarıgül’ün ifadesi ortaya çıktı! 350 bin dolarlık itiraf: Babam Özel’in arabasına bıraktı",
+];
+const SARIGUL_310A_STORED = "Emir Sarıgül itiraf etti: Babam, Özgür Özel'e 350 bin dolar verdi";
+
+const ALTIN_80BF = [
+  "2 Kasım altın ne kadar oldu, daha düşecek mi? SON DAKİKA! Altın fiyatları yükseldi mi, düştü mü? Güncel altın fiyatları!",
+  "Altın yeni haftaya yükselişle başladı: Gözler kritik verilerde",
+  "Altın Fiyatlarında Son Dakika! 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti",
+];
+const ALTIN_80BF_STORED = "Altın Fiyatlarında Son Dakika. 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti";
+
+describe("pickNeutralTitle loaded wording (h22-editorial-3)", () => {
+  // Three titles that share six of eight tokens pairwise (equal centrality);
+  // the first carries the word under test, the others are plain.
+  const withWord = (word: string) => [
+    { title: `Bakan Yerlikaya ${word} Gazze ateşkesi toplantısı sonrası` },
+    { title: "Bakan Yerlikaya Gazze ateşkesi toplantısı sonrası konuştu" },
+    { title: "Bakan Yerlikaya Gazze ateşkesi toplantısı sonrası açıkladı" },
+  ];
+
+  it.each(["itiraf etti", "itirafı", "yalan", "yalanı", "rezil", "çarpıcı", "Çarpıcı"])(
+    "a member with %j loses to a plain one at equal centrality",
+    (word) => {
+      const picked = pickNeutralTitle(withWord(word));
+      expect(picked).not.toBeNull();
+      expect(picked!.toLocaleLowerCase("tr")).not.toContain(word.toLocaleLowerCase("tr"));
+    },
+  );
+
+  it.each(["yalanladı", "yalanlama", "yalanlamasına", "çarpıcılığı", "itibar"])(
+    "%j is not a loaded word (a denial or another word): the first of equals wins",
+    (word) => {
+      expect(pickNeutralTitle(withWord(word))).toBe(`Bakan Yerlikaya ${word} Gazze ateşkesi toplantısı sonrası`);
+    },
+  );
+
+  it("çarpıcı costs more than one framing unit (it moved from framing to loaded)", () => {
+    expect(framingPenalty("çarpıcı detay")).toBe(0);
+    // Equal centrality: before, çarpıcı and the '!' were one framing unit each and the first won.
+    const picked = pickNeutralTitle([
+      { title: "Bakan Yerlikaya çarpıcı Gazze ateşkesi toplantısı sonrası" },
+      { title: "Bakan Yerlikaya Gazze ateşkesi toplantısı sonrası konuştu!" },
+    ]);
+    expect(picked).toBe("Bakan Yerlikaya Gazze ateşkesi toplantısı sonrası konuştu");
+  });
+
+  it("loaded words only count at a word start", () => {
+    // 'zitiraf' / 'sezil' are not words that start with itiraf / rezil.
+    expect(pickNeutralTitle(withWord("zitiraf"))).toBe("Bakan Yerlikaya zitiraf Gazze ateşkesi toplantısı sonrası");
+    expect(pickNeutralTitle(withWord("sezil"))).toBe("Bakan Yerlikaya sezil Gazze ateşkesi toplantısı sonrası");
+  });
+});
+
+describe("pickNeutralTitle hedge loss (h22-editorial-3)", () => {
+  it("exports a 0.15 penalty", () => {
+    expect(HEDGE_LOSS_PENALTY).toBe(0.15);
+  });
+
+  // 46 to 51 characters each (no short-title penalty), one differing word. M1
+  // shares the most tokens with the others, so it leads on centrality alone.
+  const BASE = "Netanyahu Trump ile Gazze ateşkesinin uzatılması";
+  const M1 = `${BASE} görüştü`;
+  const M2 = `${BASE} iddiası`;
+  const M3 = `${BASE} ifadesi`;
+
+  it("a title that drops the hedge loses when 2 of 3 members carry it", () => {
+    expect(pickNeutralTitle(asMembers([M1, M2, M3]))).toBe(M2);
+  });
+
+  it.each(["iddiası", "iddiasını", "ifadesi", "İfadesinde", "öne sürdü", "ÖNE SÜRDÜ"])(
+    "%j counts as a hedge",
+    (word) => {
+      const hedged = `${BASE} ${word}`;
+      expect(pickNeutralTitle(asMembers([M1, hedged, `${hedged} bugün`]))).toBe(hedged);
+    },
+  );
+
+  it("needs three deduplicated members: two are not enough", () => {
+    expect(pickNeutralTitle(asMembers([M1, M2]))).toBe(M1);
+    // A duplicate counts once, so [M1, M2, M2] is two members.
+    expect(pickNeutralTitle(asMembers([M1, M2, M2]))).toBe(M1);
+    expect(pickNeutralTitle(asMembers([M1, M2, "Kısa haberler"]))).toBe(M1);
+  });
+
+  it("needs 40% of the members to carry a hedge", () => {
+    const plain = [`${BASE} görüştü`, `${BASE} açıkladı`, `${BASE} belirtti`, `${BASE} bildirdi`];
+    // 1 of 5 (20%): no loss; the plain title with the most shared tokens leads.
+    expect(pickNeutralTitle(asMembers([...plain, M2]))).toBe(plain[0]);
+    // 2 of 5 (40%) is the threshold itself: hedged, so a title with the hedge wins.
+    const picked = pickNeutralTitle(asMembers([...plain.slice(0, 3), M2, M3]));
+    expect(picked).toBe(M2);
+  });
+
+  it("a hedge word inside a longer word does not count", () => {
+    // 'kifade' and 'sönemiddia' contain a hedge stem but do not start with it.
+    expect(pickNeutralTitle(asMembers([M1, `${BASE} kifade`, `${BASE} sönemiddia`]))).toBe(M1);
+  });
+
+  it("the stored title pays the penalty too (re-pick)", () => {
+    // Without the penalty the best member leads the stored title by less than the
+    // 0.20 full-length margin; with it on the stored title only, by more.
+    const incumbent = `${BASE} görüştüğünü açıkladı`;
+    const members = [M1, M2, M3, incumbent];
+    expect(incumbent.length).toBeGreaterThanOrEqual(FULL_LENGTH_TITLE_CHARS);
+    const picked = pickNeutralTitle(asMembers(members), { incumbent });
+    expect(picked).toBe(M2);
+  });
+
+  it("a hedge share under 40% leaves the stored title alone (1 of 3)", () => {
+    const incumbent = `${BASE} görüştüğünü açıkladı`;
+    expect(pickNeutralTitle(asMembers([M1, M2, incumbent]), { incumbent })).toBe(incumbent);
+  });
+});
+
+describe("310aedf3: a verdict word over hedged members (h22-editorial-3)", () => {
+  it("the fresh pick is not the 'itiraf etti' title", () => {
+    const picked = pickNeutralTitle(asMembers(SARIGUL_310A));
+    expect(picked).not.toBeNull();
+    expect(picked).not.toMatch(/itiraf/i);
+  });
+
+  it("the re-pick with the stored title as incumbent replaces it", () => {
+    const picked = pickNeutralTitle(asMembers(SARIGUL_310A), { incumbent: SARIGUL_310A_STORED });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toMatch(/itiraf/i);
+    expect(picked).not.toBe(SARIGUL_310A_STORED);
+  });
+
+  it("the first-pick floor agrees with the strict pick", () => {
+    expect(pickNeutralTitle(asMembers(SARIGUL_310A), { floor: true })).toBe(pickNeutralTitle(asMembers(SARIGUL_310A)));
+  });
+
+  it("the pick carries a hedge word and no ticker", () => {
+    const picked = pickNeutralTitle(asMembers(SARIGUL_310A))!;
+    expect(picked).toMatch(/iddia|ifade|öne sürd/i);
+    expect(picked).not.toMatch(/son dakika|!/i);
+  });
+
+  it("is idempotent", () => {
+    const picked = pickNeutralTitle(asMembers(SARIGUL_310A));
+    expect(pickNeutralTitle(asMembers(SARIGUL_310A), { incumbent: picked })).toBe(picked);
+  });
+});
+
+describe("cleanHeadline mid-title 'son dakika' (h22-editorial-3)", () => {
+  it("8088059e: drops the token and keeps the quote", () => {
+    const out = cleanHeadline("Meteoroloji'den son dakika 'kırmızı alarm': Gökyüzü bu gece kararıyor");
+    expect(out.toLocaleLowerCase("tr")).not.toContain("son dakika");
+    expect(out).toBe("Meteoroloji'den 'kırmızı alarm': Gökyüzü bu gece kararıyor");
+  });
+
+  it("80bfb011: drops 'Son Dakika.' with its full stop", () => {
+    expect(cleanHeadline("Altın Fiyatlarında Son Dakika. 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti")).toBe(
+      "Altın Fiyatlarında 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti",
+    );
+    expect(cleanHeadline("Altın Fiyatlarında Son Dakika! 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti")).toBe(
+      "Altın Fiyatlarında 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti",
+    );
+  });
+
+  it.each([
+    ["Deprem oldu SON DAKİKA: Ankara'da sallandı", "Deprem oldu Ankara'da sallandı"],
+    ["Ankara'da şiddetli deprem oldu SON DAKIKA | AFAD açıkladı", "Ankara'da şiddetli deprem oldu AFAD açıkladı"],
+    ["Ankara'da deprem… son dakika…", "Ankara'da deprem"],
+    ["Ankara'da deprem son dakika", "Ankara'da deprem"],
+    ["Borsa son dakika: düştü, döviz SON DAKİKA | yükseldi", "Borsa düştü, döviz yükseldi"],
+  ])("rewrites %j -> %j", (input, expected) => {
+    expect(cleanHeadline(input)).toBe(expected);
+  });
+
+  // The label licenses a possessive on the noun after it ("son dakika
+  // açıklaması"): removing only the two words leaves "açıklaması" without a
+  // possessor. Only a label that stands alone (separator, quote or end of the
+  // title after it) is removed; these are the prod shapes of a 7-day scan.
+  it.each([
+    ["Meteoroloji'den son dakika uyarısı: Sağanak geliyor", "Meteoroloji'den son dakika uyarısı: Sağanak geliyor"],
+    ["Fenerbahçe'den son dakika transferi", "Fenerbahçe'den son dakika transferi"],
+    ["AB ile son dakika anlaşması sağlandı", "AB ile son dakika anlaşması sağlandı"],
+    ["MEB'den son dakika açıklaması: Okullar tatil mi?", "MEB'den son dakika açıklaması: Okullar tatil mi?"],
+    ["Akın Gürlek'ten son dakika açıklaması!", "Akın Gürlek'ten son dakika açıklaması"],
+    ["Mustafa Sarıgül'den son dakika kararı", "Mustafa Sarıgül'den son dakika kararı"],
+    ["Netanyahu'dan son dakika hamlesi", "Netanyahu'dan son dakika hamlesi"],
+    ["Trump'tan Netanyahu'ya son dakika desteği", "Trump'tan Netanyahu'ya son dakika desteği"],
+    ["Krizde son dakika sürprizi", "Krizde son dakika sürprizi"],
+    ["YENİ Parti'den son dakika açıklaması", "YENİ Parti'den son dakika açıklaması"],
+    ["Borsa son dakika ve son dakika düştü", "Borsa son dakika ve son dakika düştü"],
+  ])("keeps the grammar of %j (a possessive or a word follows the label)", (input, expected) => {
+    expect(cleanHeadline(input)).toBe(expected);
+  });
+
+  it("a possessive 'son dakika X-sı' title is acceptable (the framing penalty demotes it, it is not a hard defect)", () => {
+    expect(isAcceptableNeutral("MEB'den son dakika açıklaması: Okullar yarın tatil", [])).toBe(true);
+    expect(isAcceptableNeutral("Krizde son dakika sürprizi yaşandı", [])).toBe(true);
+  });
+
+  it("members of the possessive shape keep a grammatical headline, with and without the floor", () => {
+    const members = [
+      { title: "MEB'den son dakika açıklaması: Okullar yarın tatil" },
+      { title: "MEB'den son dakika açıklaması: Okullar yarın tatil edildi" },
+      { title: "MEB'den son dakika açıklaması! Okullar yarın tatil oldu" },
+      { title: "MEB'den son dakika açıklaması: Okullar yarın kapalı" },
+    ];
+    for (const floor of [false, true]) {
+      const picked = pickNeutralTitle(members, { floor });
+      expect(picked, `floor=${floor}`).not.toBeNull();
+      expect(picked, `floor=${floor}`).toMatch(/açıklaması/);
+      expect(picked, `floor=${floor}`).toMatch(/son dakika/i);
+    }
+  });
+
+  it.each([
+    "Son dakikada gelen golle kazandı",
+    "Galatasaray son dakika golüyle kazandı",
+    "Galatasaray son dakika penaltısıyla kazandı",
+    "Fenerbahçe son dakika kurtarışıyla yenilmedi",
+    "Beşiktaş son dakika frikiğiyle öne geçti",
+    "Trabzonspor son dakika kornerinde yıkıldı",
+    "Konyaspor son dakika uzatmalarında güldü",
+    "Samsunspor son dakika şutuyla galip geldi",
+    "Antalyaspor son dakika hamlesiyle transfer etti",
+    "Başakşehir son dakika değişikliğiyle skoru buldu",
+    "Rizespor son dakika sut ve gol ile kazandı",
+    "Son dakikalar boyunca sıkıntı yaşadılar",
+  ])("leaves %j alone", (input) => {
+    expect(cleanHeadline(input)).toBe(input);
+  });
+
+  it("a leading ticker is still handled by the lead-in rule", () => {
+    expect(cleanHeadline("SON DAKİKA | Meclis'te kavga çıktı")).toBe("Meclis'te kavga çıktı");
+  });
+
+  it("the cleaned headline is a fixed point", () => {
+    for (const t of [
+      "Meteoroloji'den son dakika 'kırmızı alarm': Gökyüzü bu gece kararıyor",
+      "Altın Fiyatlarında Son Dakika. 1 Yılın Dibini Gördü",
+      "Deprem oldu SON DAKİKA: Ankara'da sallandı",
+    ]) {
+      expect(cleanHeadline(cleanHeadline(t)), t).toBe(cleanHeadline(t));
+    }
+  });
+});
+
+describe("isAcceptableNeutral mid-title 'son dakika' (h22-editorial-3)", () => {
+  it("80bfb011: the stored 'Altın Fiyatlarında Son Dakika. ...' is rejected as an incumbent", () => {
+    expect(isAcceptableNeutral(ALTIN_80BF_STORED, ALTIN_80BF)).toBe(false);
+    expect(isAcceptableNeutral("Meteoroloji'den son dakika 'kırmızı alarm': Gökyüzü bu gece kararıyor", [])).toBe(false);
+  });
+
+  it("the same titles without the token pass", () => {
+    expect(isAcceptableNeutral("Altın Fiyatlarında 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti", [])).toBe(true);
+    expect(isAcceptableNeutral("Meteoroloji'den 'kırmızı alarm': Gökyüzü bu gece kararıyor", [])).toBe(true);
+  });
+
+  it("a sport 'son dakika gol' headline is still acceptable", () => {
+    expect(isAcceptableNeutral("Galatasaray son dakika golüyle Konyaspor'u yendi", [])).toBe(true);
+  });
+
+  it("applies to generated (LLM) text too", () => {
+    expect(isAcceptableNeutral("Altın Fiyatlarında Son Dakika. 1 Yılın Dibini Gördü", [], { generated: true })).toBe(false);
+  });
+
+  it("is not tripped by a title that merely starts with the words (the lead-in rule owns that)", () => {
+    expect(isAcceptableNeutral("Son dakikada gelen golle Galatasaray Konyaspor'u yendi", [])).toBe(true);
+  });
+});
+
+describe("80bfb011: a mid-title 'Son Dakika' no longer ships (h22-editorial-3)", () => {
+  it("the stored title is replaced, the re-pick is clean and stable", () => {
+    const picked = pickNeutralTitle(asMembers(ALTIN_80BF), { incumbent: ALTIN_80BF_STORED });
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(ALTIN_80BF_STORED);
+    expect(picked!.toLocaleLowerCase("tr")).not.toContain("son dakika");
+    expect(pickNeutralTitle(asMembers(ALTIN_80BF), { incumbent: picked })).toBe(picked);
+  });
+
+  it("the fresh pick has no ticker either", () => {
+    const picked = pickNeutralTitle(asMembers(ALTIN_80BF));
+    expect(picked).not.toBeNull();
+    expect(picked!.toLocaleLowerCase("tr")).not.toContain("son dakika");
+  });
+});
+
+describe("pickNeutralTitle floor: shouted candidates are sentence-cased (h22-editorial-3)", () => {
+  const floor = (titles: readonly string[]) => pickNeutralTitle(asMembers(titles), { floor: true });
+
+  it("09f152ec: \"NEV'İN MİRASI GÜNDEM OLDU\" becomes Turkish sentence case", () => {
+    expect(floor(["NEV'İN MİRASI GÜNDEM OLDU"])).toBe("Nev'in mirası gündem oldu");
+  });
+
+  it("an allowlisted acronym keeps its capitals and loses the suffix capitals", () => {
+    expect(floor(["AFAD'DAN DEPREM UYARISI GELDİ"])).toBe("AFAD'dan deprem uyarısı geldi");
+  });
+
+  it.each([
+    ["TBMM'DE KAVGA ÇIKTI SABAH SAATLERİNDE", "TBMM'de kavga çıktı sabah saatlerinde"],
+    ["CHP VE AKP GRUBU TOPLANDI BUGÜN", "CHP ve AKP grubu toplandı bugün"],
+    ["ABD VE AB ARASINDA TİCARET GÖRÜŞMESİ BAŞLADI", "ABD ve AB arasında ticaret görüşmesi başladı"],
+    ["İBB MECLİSİ BÜTÇEYİ KABUL ETTİ BUGÜN", "İBB meclisi bütçeyi kabul etti bugün"],
+    ["THY YENİ UÇAK SİPARİŞİ VERDİ BUGÜN", "THY yeni uçak siparişi verdi bugün"],
+    ["MİT'TEN YENİ OPERASYON AÇIKLAMASI GELDİ", "MİT'ten yeni operasyon açıklaması geldi"],
+    ["YSK KARARI AÇIKLADI VE SANDIKLAR KAPANDI", "YSK kararı açıkladı ve sandıklar kapandı"],
+  ])("the allowlist keeps %j readable: %j", (input, expected) => {
+    expect(floor([input])).toBe(expected);
+  });
+
+  it("a short word stays upper-case when a member that is not shouting writes it in upper case", () => {
+    const picked = floor(["EPDK'DAN ELEKTRİĞE ZAM KARARI ÇIKTI", "EPDK'dan elektriğe zam geldi mi, ne kadar?"]);
+    // The second title is a question (soft defect), so the floor returns the sentence-cased first one.
+    expect(picked).toBe("EPDK'dan elektriğe zam kararı çıktı");
+  });
+
+  it("an unknown short word is lower-cased when no member writes it in upper case", () => {
+    expect(floor(["EPDK'DAN ELEKTRİĞE ZAM KARARI ÇIKTI"])).toBe("Epdk'dan elektriğe zam kararı çıktı");
+  });
+
+  it("a word of more than five letters is lower-cased even if a member shouts it", () => {
+    const picked = floor(["ERDOĞAN KONUŞTU VE AÇIKLAMA YAPTI", "ERDOĞAN konuştu"]);
+    expect(picked).toBe("Erdoğan konuştu ve açıklama yaptı");
+  });
+
+  it("only members that are not all-caps count as evidence", () => {
+    // The second title is shouting too, so its 'EPDK' says nothing.
+    expect(floor(["EPDK'DAN ELEKTRİĞE ZAM KARARI ÇIKTI", "EPDK ELEKTRİKTE ZAM KARARI VERDİ"])).toBe(
+      "Epdk'dan elektriğe zam kararı çıktı",
+    );
+  });
+
+  it("keeps digits and punctuation: 'F-16', quotes and a trailing mark", () => {
+    expect(floor(["F-16'LAR YENİ GÖREVE BAŞLADI BUGÜN"])).toBe("F-16'lar yeni göreve başladı bugün");
+    expect(floor(["\"BORSA GÜNÜ DÜŞÜŞLE KAPATTI\", DEDİ UZMAN"])).toBe("\"Borsa günü düşüşle kapattı\", dedi uzman");
+  });
+
+  it("a name keeps its capital when a member that is not shouting writes it that way", () => {
+    // The second member has a residual pipe (a hard defect), so only the shouted
+    // title can be the floor pick; it still tells how the words are written.
+    const picked = floor([
+      "ABD VE İRAN GÖRÜŞMESİ ANKARA'DA YAPILDI",
+      "Ankara'da ABD ile İran görüşmesi yapıldı |Haber",
+    ]);
+    expect(picked).toBe("ABD ve İran görüşmesi Ankara'da yapıldı");
+  });
+
+  it("a name is lower-cased when a member also writes the word in lower case (a common word)", () => {
+    const picked = floor([
+      "BAKAN ERDOĞAN KONUŞTU VE ANKARA'DA AÇIKLAMA YAPTI",
+      "Ankara'da bakan açıklaması |Haber",
+      "Bakan Erdoğan ankara'da konuştu |Haber",
+    ]);
+    // 'Bakan' opens a member title and 'bakan' is lower case in another: a common word.
+    expect(picked).toBe("Bakan Erdoğan konuştu ve ankara'da açıklama yaptı");
+  });
+
+  it("is a fixed point: the sentence-cased title is not shouting, so a re-run leaves it", () => {
+    const once = floor(["NEV'İN MİRASI GÜNDEM OLDU"])!;
+    expect(floor([once])).toBe(once);
+  });
+
+  it("non-floor picks are unchanged: a shouted candidate is still rejected, not re-cased", () => {
+    expect(pickNeutralTitle(asMembers(["NEV'İN MİRASI GÜNDEM OLDU"]))).toBeNull();
+    expect(pickNeutralTitle(asMembers(["NEV'İN MİRASI GÜNDEM OLDU"]), { incumbent: "Kısa haberler" })).toBeNull();
+  });
+
+  it("a mixed-case floor candidate is not touched", () => {
+    expect(floor(["Nev'in mirası gündem oldu mu?"])).toBe("Nev'in mirası gündem oldu mu?");
+  });
+
+  it("the hard rules still apply to the sentence-cased text (a residual pipe stays a hard defect)", () => {
+    const picked = floor([
+      "İZMİR ELEKTRİK KESİNTİSİ 20 EKİM SALI |GEDİZ UYARDI: İzmir'de 24 ilçede şalterler iniyor",
+      "İzmir'de elektrik kesintisi ne zaman bitecek, Gediz Elektrik ne açıkladı?",
+    ]);
+    expect(picked).toBe("İzmir'de elektrik kesintisi ne zaman bitecek, Gediz Elektrik ne açıkladı?");
   });
 });

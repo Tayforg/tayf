@@ -162,7 +162,9 @@ function truncateWords(full: string, max: number): string {
   const truncated = full.slice(0, Math.max(0, max - 1));
   const lastSpace = truncated.lastIndexOf(" ");
   const cut = lastSpace > 0 ? truncated.slice(0, lastSpace) : truncated;
-  return cut + ELLIPSIS;
+  // A double space at the boundary would leave one blank in front of the
+  // ellipsis ("geçirilecek. …").
+  return cut.trimEnd() + ELLIPSIS;
 }
 
 /**

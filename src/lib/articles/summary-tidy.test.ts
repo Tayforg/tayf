@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { BOILERPLATE_PHRASES } from "./description-boilerplate";
+import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
 import { tidySummaryText, WIDGET_HEADINGS } from "./summary-tidy";
 
 // [input, expected] — every row is an exact `toBe`.
@@ -149,8 +149,8 @@ describe("tidySummaryText", () => {
       expect(tidySummaryText(eight)).toBe("Devamını oku. Devamını oku. Devamını oku.");
     });
 
-    it("every phrase in the shared boilerplate set is stripped as a tail", () => {
-      for (const phrase of BOILERPLATE_PHRASES) {
+    it("every phrase in the shared boilerplate sets is stripped as a tail", () => {
+      for (const phrase of [...BOILERPLATE_PHRASES, ...TRAILING_CTA_PHRASES]) {
         const cta = phrase.charAt(0).toLocaleUpperCase("tr-TR") + phrase.slice(1);
         expect(tidySummaryText(`Haber metni. ${cta}`), phrase).toBe("Haber metni.");
         expect(tidySummaryText(`Haber metni ${cta}`), phrase).toBe("Haber metni");
@@ -195,10 +195,12 @@ describe("tidySummaryText", () => {
       expect(tidySummaryText("  merhaba dünya \n")).toBe("merhaba dünya");
     });
 
-    it("collapses every whitespace run that contains a newline, and only those", () => {
+    it("collapses every whitespace run to one space, newline or not (h22-editorial-2)", () => {
       expect(tidySummaryText("bir  \n  iki\r\n\r\nüç\rdört")).toBe("bir iki üç dört");
-      // A run of spaces with no newline is the feed's own spacing: left alone.
-      expect(tidySummaryText("bir  iki")).toBe("bir  iki");
+      // A run of spaces with no newline used to be left alone; it left
+      // "geçirilecek. …" in the meta description (c2a97d0a).
+      expect(tidySummaryText("bir  iki")).toBe("bir iki");
+      expect(tidySummaryText("bir\u00a0\u00a0iki\t\tüç \u2003dört")).toBe("bir iki üç dört");
     });
 
     it("recognises a CTA whose words are separated by NBSP or double spaces", () => {
@@ -606,6 +608,343 @@ describe("tidySummaryText trailing WordPress excerpt marker (h20-live-4)", () =>
       const start = performance.now();
       tidySummaryText(s);
       expect(performance.now() - start, `${s.length} chars`).toBeLessThan(100);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h22-editorial-2 (hunt 22, 2026-11-02): four kinds of residue in a rendered
+// summary. The ingest clamp (normalize.ts: 497 UTF-16 units + "...") cut
+// c526f480 mid-word; "Son dakika |" tickers opened d8c49a89, 4433b6f7 and
+// a81379a9; "Detaylar haberimizde..." / "İşte ayrıntılar..." closed f097fa3e
+// and a65f404a; double spaces left "geçirilecek. …" in the meta description of
+// c2a97d0a. The rows below are real (read-only SELECT on clusters.summary_tr).
+// ---------------------------------------------------------------------------
+
+const C526_CLAMPED =
+  "Sağlık Bakanı Prof. Dr. Kemal Memişoğlu, Düzce'de yapımı tamamlanan 50 yataklı Akçakoca Devlet Hastanesi'nin açılış töreninde yaptığı açıklamada, \"Evde sağlık, uzaktan sağlık hizmetlerini birbirine entegre ederek yeni bir model oluşturuyoruz. Evde Sağlık Hizmetleri Koordinasyon Merkezi projemizi başlattık. Evde sağlık hizmeti alacak olan vatandaşlarımızın hizmete kolay ulaşmasını sağlayacağız. Hastanede tedavi gören hastalarımızın taburcu olduktan sonra evlerinde de tedaviye devam edecek şeki...";
+
+const E5FD_CLAMPED =
+  "Sanayi ve Teknoloji Bakanı Mehmet Fatih Kacır, 2027 Yılı Merkezi Yönetim Bütçe Kanunu Teklifi görüşmelerinin yapıldığı TBMM Plan ve Bütçe Komisyonu’na, millî otomobil Togg ile geldi.\nBakan Kacır, makam aracı olarak kullandığı T10F oltu rengi ile TBMM’ye giriş yaptı.\nKacır’a, Bakan Yardımcıları Çetin Ali Dönmez, Oruç Baba İnan, Zekeriya Çoştu ile Muhammet Kasım Gönüllü de Togg araçlarıyla eşlik etti.\nASELSAN’IN GELİŞTİRDİĞİ KALP AKCİĞER MAKİNESİ MECLİS SALONUNDA\nBütçe salonundaki ASELSAN’ın ge...";
+
+const C2A9_STORED =
+  "Türkiye’nin demiryolu yatırımları kapsamında Erzincan, Erzurum ve Kars’ı kapsayan yeni bir hızlı tren projesi hayata geçirilecek.  Ulaştırma ve Altyapı Bakanı Abdulkadir Uraloğlu, projenin Londra’dan Orta Asya’ya uzanan demiryolu koridorunun önemli bir parçası olacağını söyledi.  Projenin aşamalarına ilişkin bilgi veren Bakan Uraloğlu, ilk olarak mevcut demiryolu hattının elektrikli ve sinyalli hale getirileceğini açıkladı. Bu çalışmaların ardından […]";
+
+const F097_STORED =
+  "Kasım ara tatili için geri sayım başladı. Birinci ve ikinci ara tatil tarihleri Milli Eğitim Bakanlığı (MEB) 2026-2027 takvimi ile belli oldu. Milyonlarca öğrenci ve veli ara tatil başlangıç ve bitiş tarihlerini sorguluyor. Ara tatil ile öğrenciler dinlenme fırsatı bulacak. Peki kasım ara tatili ne zaman? 1. ve 2. ara tatil hangi tarihte yapılacak? Detaylar haberimizde...";
+const F097_TIDY = F097_STORED.slice(0, F097_STORED.indexOf(" Detaylar haberimizde"));
+
+const A65F_STORED =
+  "BDDK Başkanı Şahap Kavcıoğlu'nun Emre Tezmen’den 20 milyar TL talep ettiği iddialarını gündeme getiren AKP'li Savcı Sayan'dan yeni paylaşım geldi. İşte ayrıntılar...";
+const A65F_TIDY = A65F_STORED.slice(0, A65F_STORED.indexOf(" İşte ayrıntılar"));
+
+/** What the ingest clamp does to a long text: 497 UTF-16 units, then "...". */
+function clamp(text: string, keep = 497): string {
+  expect(text.length).toBeGreaterThanOrEqual(keep);
+  return text.slice(0, keep) + "...";
+}
+
+describe("tidySummaryText ingest-clamp repair (h22-editorial-2)", () => {
+  it("c526f480: the real clamped summary no longer ends mid-word", () => {
+    expect(C526_CLAMPED).toHaveLength(500);
+    const out = tidySummaryText(C526_CLAMPED);
+    expect(out).not.toContain("şeki");
+    expect(out).not.toContain("...");
+    // The last sentence end keeps 79.7% of the text, so the cut is there.
+    expect(out).toBe(C526_CLAMPED.slice(0, C526_CLAMPED.indexOf(" Hastanede tedavi gören")));
+    expect(out.endsWith("sağlayacağız.")).toBe(true);
+  });
+
+  it("e5fd4c5b: a clamp that lands in a new paragraph is cut at the sentence before the heading line", () => {
+    expect(E5FD_CLAMPED).toHaveLength(500);
+    const out = tidySummaryText(E5FD_CLAMPED);
+    expect(out.endsWith("Togg araçlarıyla eşlik etti.")).toBe(true);
+    expect(out).not.toContain("ASELSAN");
+    expect(out).not.toContain("\n");
+  });
+
+  it("without a late sentence end it cuts at the last word and adds one ellipsis", () => {
+    const raw = clamp("kelimeler ".repeat(60));
+    expect(raw).toHaveLength(500);
+    expect(raw.endsWith("kelimel...")).toBe(true);
+    expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(49).trimEnd() + "…");
+  });
+
+  it("a sentence end that keeps under 60% of the text does not count", () => {
+    const raw = clamp("Bir cümle bitti şimdi. " + "kelimeler ".repeat(60));
+    expect(tidySummaryText(raw)).toBe(
+      "Bir cümle bitti şimdi. " + "kelimeler ".repeat(47).trimEnd() + "…",
+    );
+  });
+
+  it("the 60% bar is exact: 298 of 497 characters fails, 299 passes", () => {
+    const tail = " " + "kelimeler ".repeat(60);
+    // k characters through the full stop; the body is 497 characters long.
+    const kept = (k: number) => "a".repeat(k - 1) + "." + tail;
+    expect(tidySummaryText(clamp(kept(299)))).toBe("a".repeat(298) + ".");
+    const below = tidySummaryText(clamp(kept(298)));
+    expect(below.endsWith("…")).toBe(true);
+    expect(below.startsWith("a".repeat(297) + ". kelimeler")).toBe(true);
+  });
+
+  it("a late sentence end wins over the word cut", () => {
+    const raw = clamp("kelimeler ".repeat(40) + "Bitti. " + "yarımkalan ".repeat(20));
+    expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(40) + "Bitti.");
+  });
+
+  it("keeps a closing quote that follows the full stop", () => {
+    const raw = clamp("kelimeler ".repeat(40) + "Dedi ki “hazırız.” Sonra " + "yarımkalan ".repeat(20));
+    expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(40) + "Dedi ki “hazırız.”");
+  });
+
+  it("a full stop right before the stored '...' is a sentence end (no ellipsis added)", () => {
+    const raw = clamp("kelimeler ".repeat(49) + "Bittii." + " devam");
+    expect(raw.endsWith("Bittii....")).toBe(true);
+    expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(49) + "Bittii.");
+  });
+
+  it("an initial or a decimal is not a sentence end", () => {
+    const raw = clamp("kelimeler ".repeat(35) + "Mustafa K. Sarıgül 3.5 puan " + "yarımkalan ".repeat(20));
+    const out = tidySummaryText(raw);
+    // "K." sits at 72% of the text: if it counted, the cut would be there.
+    expect(out.endsWith("yarımkalan…")).toBe(true);
+    expect(out).toContain("Mustafa K. Sarıgül 3.5 puan yarımkalan");
+  });
+
+  it("trims ',;:–—-' before the ellipsis", () => {
+    const raw = clamp("kelime, ".repeat(70));
+    expect(raw.endsWith("k...")).toBe(true);
+    expect(tidySummaryText(raw)).toBe("kelime, ".repeat(61) + "kelime…");
+    for (const sep of [";", ":", " –", " —", " -"]) {
+      const out = tidySummaryText(clamp(`kelime${sep} `.repeat(70)));
+      expect(out.endsWith("kelime…"), JSON.stringify(sep)).toBe(true);
+    }
+  });
+
+  it("a clamp that landed on a word boundary keeps the last word", () => {
+    const raw = clamp("kelime ".repeat(80)); // 497 = 71 * 7: the body ends with a blank
+    expect(raw.endsWith("kelime ...")).toBe(true);
+    expect(tidySummaryText(raw)).toBe("kelime ".repeat(71).trimEnd() + "…");
+  });
+
+  it("repairs a 499-character clamp as well", () => {
+    const raw = clamp("kelimeler ".repeat(60), 496);
+    expect(raw).toHaveLength(499);
+    expect(tidySummaryText(raw)).toBe("kelimeler ".repeat(49).trimEnd() + "…");
+  });
+
+  it("is keyed on the signature: other lengths, a one-character ellipsis or no blank are left alone", () => {
+    const words = "kelimeler ".repeat(60);
+    for (const keep of [495, 498]) {
+      const raw = clamp(words, keep);
+      expect([498, 501]).toContain(raw.length);
+      expect(tidySummaryText(raw), `${raw.length}`).toBe(raw);
+    }
+    const oneChar = words.slice(0, 499) + "…";
+    expect(oneChar).toHaveLength(500);
+    expect(tidySummaryText(oneChar)).toBe(oneChar);
+    const noBlank = "a".repeat(497) + "...";
+    expect(tidySummaryText(noBlank)).toBe(noBlank);
+  });
+
+  it("a 120-character text ending 'Detaylar...' is not the signature and stays untouched", () => {
+    const lead = "Yeni düzenleme bugün Resmi Gazete'de yayımlandı ve yürürlüğe girdi, ";
+    const raw = lead + "x".repeat(120 - lead.length - " Detaylar...".length) + " Detaylar...";
+    expect(raw).toHaveLength(120);
+    expect(tidySummaryText(raw)).toBe(raw);
+  });
+
+  it("every clamp output is shorter than the signature and a fixed point", () => {
+    for (const raw of [
+      C526_CLAMPED,
+      E5FD_CLAMPED,
+      clamp("kelimeler ".repeat(60)),
+      clamp("kelime ".repeat(80)),
+      clamp("kelime, ".repeat(70)),
+      clamp("kelimeler ".repeat(40) + "Bitti. " + "yarımkalan ".repeat(20)),
+      clamp("kelimeler ".repeat(60), 496),
+    ]) {
+      const once = tidySummaryText(raw);
+      expect(once.length).toBeLessThan(499);
+      expect(tidySummaryText(once)).toBe(once);
+    }
+  });
+});
+
+describe("tidySummaryText leading ticker (h22-editorial-2)", () => {
+  const TICKER_CHANGES: ReadonlyArray<readonly [string, string]> = [
+    // d8c49a89, 4433b6f7 and a81379a9, as stored.
+    [
+      "Son dakika | Galatasaray'da Abdullah Kavukcu istifa etti",
+      "Galatasaray'da Abdullah Kavukcu istifa etti",
+    ],
+    [
+      "Son dakika! Borsa İstanbul Genel Müdürlüğü'ne vekaleten Atila Türeli getirildi",
+      "Borsa İstanbul Genel Müdürlüğü'ne vekaleten Atila Türeli getirildi",
+    ],
+    [
+      "Son dakika... Fenerbahçe yönetimi, Göztepe maçında alınan 2-1'lik yenilgi sonrasında bugün saat 14:00'te istifa ve birçok gündem ile ilgili acil toplanıyor.",
+      "Fenerbahçe yönetimi, Göztepe maçında alınan 2-1'lik yenilgi sonrasında bugün saat 14:00'te istifa ve birçok gündem ile ilgili acil toplanıyor.",
+    ],
+    ["SON DAKİKA: Deprem oldu", "Deprem oldu"],
+    ["SON DAKIKA: Deprem oldu", "Deprem oldu"],
+    ["Son Dakika… Deprem oldu", "Deprem oldu"],
+    ["Son dakika|Deprem oldu", "Deprem oldu"],
+    ["Son dakika. Deprem oldu", "Deprem oldu"],
+    ["Son  dakika !!! Deprem oldu", "Deprem oldu"],
+    ["Son dakika ...... Deprem oldu", "Deprem oldu"],
+    ["Son dakika:\nDeprem oldu", "Deprem oldu"],
+    ["  Son dakika | Deprem oldu", "Deprem oldu"],
+    // Two stacked tickers.
+    ["Son dakika | Son dakika! Deprem oldu", "Deprem oldu"],
+  ];
+
+  const TICKER_UNCHANGED: readonly string[] = [
+    "Son dakikada gelen golle Galatasaray kazandı",
+    "Son dakika golüyle Galatasaray kazandı",
+    "Son dakika haberi olarak duyuruldu",
+    "Son dakikalar boyunca bekledi",
+    "Maçın son dakika golüyle kazanıldı",
+    "Galatasaray son dakika | tartışma çıktı",
+    "Deprem oldu. Son dakika: yeni gelişme",
+    "Son dakika",
+  ];
+
+  it.each(TICKER_CHANGES)("rewrites %j -> %j", (input, expected) => {
+    expect(tidySummaryText(input)).toBe(expected);
+  });
+
+  it.each(TICKER_UNCHANGED)("leaves %j untouched", (input) => {
+    expect(tidySummaryText(input)).toBe(input);
+  });
+
+  it("peels at most two tickers", () => {
+    expect(tidySummaryText("Son dakika: Son dakika: Son dakika: Deprem oldu")).toBe(
+      "Son dakika: Deprem oldu",
+    );
+  });
+
+  it("a ticker and nothing else gives '' (the caller hides the summary)", () => {
+    expect(tidySummaryText("Son dakika |")).toBe("");
+    expect(tidySummaryText("SON DAKİKA...")).toBe("");
+  });
+
+  it("is idempotent on every fixture and on its result", () => {
+    for (const [input, expected] of TICKER_CHANGES) {
+      const once = tidySummaryText(input);
+      expect(tidySummaryText(once), input).toBe(once);
+      expect(tidySummaryText(expected), expected).toBe(expected);
+    }
+    for (const x of TICKER_UNCHANGED) expect(tidySummaryText(tidySummaryText(x))).toBe(x);
+  });
+});
+
+describe("tidySummaryText trailing CTA sentence (h22-editorial-2)", () => {
+  it("f097fa3e: 'Detaylar haberimizde...' goes, the question before it stays", () => {
+    expect(tidySummaryText(F097_STORED)).toBe(F097_TIDY);
+    expect(F097_TIDY.endsWith("hangi tarihte yapılacak?")).toBe(true);
+  });
+
+  it("a65f404a: 'İşte ayrıntılar...' goes", () => {
+    expect(tidySummaryText(A65F_STORED)).toBe(A65F_TIDY);
+    expect(A65F_TIDY.endsWith("yeni paylaşım geldi.")).toBe(true);
+  });
+
+  it.each([
+    ["Peki, neden? Detaylar haberimizde.", "Peki, neden?"],
+    ["Zam geldi. İşte detaylar", "Zam geldi."],
+    ["Zam geldi. İŞTE DETAYLAR…", "Zam geldi."],
+    ["Zam geldi… DETAYLAR HABERİMİZDE", "Zam geldi…"],
+    ["Zam geldi. İşte ayrıntılar!", "Zam geldi."],
+    ["Zam geldi (kesin) İşte ayrıntılar", "Zam geldi (kesin)"],
+    // After a plain space only a capitalised CTA is a tail.
+    ["Bakan açıklama yaptı Detaylar haberimizde", "Bakan açıklama yaptı"],
+    ["Bakan açıklama yaptı işte detaylar", "Bakan açıklama yaptı işte detaylar"],
+    // A colon left dangling by the strip goes with it.
+    ["Gelişmeler şöyle: Detaylar haberimizde", "Gelişmeler şöyle"],
+    ["Neler oldu: İşte ayrıntılar...", "Neler oldu"],
+    // Stacked with an older CTA.
+    ["Zam geldi. İşte detaylar. Devamını oku", "Zam geldi."],
+  ])("strips the tail of %j", (input, expected) => {
+    expect(tidySummaryText(input)).toBe(expected);
+  });
+
+  it("a colon is kept when no CTA was stripped", () => {
+    expect(tidySummaryText("Gelişmeler şöyle:")).toBe("Gelişmeler şöyle:");
+  });
+
+  it.each(["Detaylar haberimizde", "İşte ayrıntılar...", "işte detaylar", "  İŞTE DETAYLAR  "])(
+    "a CTA-only summary %j gives ''",
+    (input) => {
+      expect(tidySummaryText(input)).toBe("");
+    },
+  );
+
+  it.each([
+    "İşte detaylarıyla yeni düzenleme",
+    "Detaylar haberimizde yer alıyor",
+    "İşte ayrıntılar ve yeni kurallar",
+    "Detaylar haberimizdeki yazıda",
+  ])("does not strip %j (the phrase is not the end)", (input) => {
+    expect(tidySummaryText(input)).toBe(input);
+  });
+
+  it("is idempotent", () => {
+    for (const x of [
+      F097_STORED,
+      A65F_STORED,
+      "Peki, neden? Detaylar haberimizde.",
+      "Gelişmeler şöyle: Detaylar haberimizde",
+      "Zam geldi. İşte detaylar. Devamını oku",
+      "Detaylar haberimizde",
+    ]) {
+      const once = tidySummaryText(x);
+      expect(tidySummaryText(once), x).toBe(once);
+    }
+  });
+});
+
+describe("tidySummaryText inner whitespace (h22-editorial-2)", () => {
+  it("c2a97d0a: the double spaces between sentences collapse and the marker becomes one ellipsis", () => {
+    expect(C2A9_STORED).toContain("  ");
+    const out = tidySummaryText(C2A9_STORED);
+    expect(out).not.toMatch(/\s{2,}/);
+    expect(out).toContain("hayata geçirilecek. Ulaştırma");
+    expect(out.endsWith("ardından…")).toBe(true);
+  });
+
+  it("collapses after the ticker and the CTA strip, so no seam is left behind", () => {
+    expect(tidySummaryText("Son dakika |   Zam  geldi.   İşte   detaylar")).toBe("Zam geldi.");
+  });
+
+  it("is idempotent", () => {
+    for (const x of [C2A9_STORED, "a  b\t\tc  d", "  a  "]) {
+      const once = tidySummaryText(x);
+      expect(tidySummaryText(once)).toBe(once);
+    }
+  });
+});
+
+describe("tidySummaryText h22 residue robustness", () => {
+  it("linear time on 100k-character inputs built from the new anchors", () => {
+    const inputs = [
+      "Son dakika | ".repeat(8_000),
+      "Son dakika".concat(" ".repeat(100_000), "x"),
+      "Son dakika".concat("!".repeat(100_000)),
+      "a. ".concat("İşte detaylar ".repeat(8_000)),
+      "a. ".concat("İşte detaylar. ".repeat(8_000), "Detaylar haberimizde"),
+      " ".repeat(497) + "...",
+      "a ".repeat(247) + "abc" + "...",
+      ". ".repeat(247) + "abc" + "...",
+    ];
+    const start = performance.now();
+    for (const s of inputs) tidySummaryText(s);
+    expect(performance.now() - start).toBeLessThan(1500);
+  });
+
+  it("never throws on a clamp-shaped text of odd characters", () => {
+    for (const s of ["😀".repeat(249) + "...", "\ud83d".repeat(497) + "...", "ı İ ".repeat(124) + "...", "\n".repeat(497) + "..."]) {
+      expect(() => tidySummaryText(s)).not.toThrow();
     }
   });
 });

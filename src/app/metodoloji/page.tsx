@@ -159,7 +159,7 @@ function SectionHeading({
     <div className="flex items-baseline justify-between gap-4 border-b border-border/60 pb-2">
       <h2
         id={id}
-        className="scroll-mt-24 font-serif text-xl sm:text-2xl font-normal tracking-tight"
+        className="font-serif text-xl sm:text-2xl font-normal tracking-tight"
       >
         {title}
       </h2>
@@ -219,7 +219,7 @@ export default async function MethodologyPage() {
         </p>
       </div>
 
-      <section aria-labelledby="kaynaklar" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="kaynaklar" className="space-y-3">
         <SectionHeading
           id="kaynaklar"
           title="Kaynaklar nasıl etiketleniyor"
@@ -294,7 +294,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="kor-nokta" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="kor-nokta" className="space-y-3">
         <SectionHeading id="kor-nokta" title="Kör nokta nedir" meta="Eşikler" />
         <div className={cardClass + " space-y-3"}>
           <p className={proseClass}>
@@ -343,7 +343,7 @@ export default async function MethodologyPage() {
           </p>
           <h3
             id="kor-noktaya-yakin"
-            className="scroll-mt-24 font-serif text-base font-semibold tracking-tight"
+            className="font-serif text-base font-semibold tracking-tight"
           >
             Kör noktaya yakın
           </h3>
@@ -353,7 +353,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="surpriz" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="surpriz" className="space-y-3">
         <SectionHeading id="surpriz" title="Sürpriz kesişimler" meta="Eşikler" />
         <div className={cardClass + " space-y-3"}>
           <p className={proseClass}>
@@ -390,7 +390,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="denge-puani" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="denge-puani" className="space-y-3">
         <SectionHeading id="denge-puani" title="Denge puanı" meta="0–100" />
         <div className={cardClass + " space-y-3"}>
           <p className={proseClass}>
@@ -447,7 +447,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="tek-kaynak" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="tek-kaynak" className="space-y-3">
         <SectionHeading
           id="tek-kaynak"
           title="Tek kaynaktan dağıtım"
@@ -485,7 +485,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="guvenilirlik" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="guvenilirlik" className="space-y-3">
         <SectionHeading
           id="guvenilirlik"
           title="Güvenilirlik ve sahiplik"
@@ -547,7 +547,7 @@ export default async function MethodologyPage() {
 
       <section
         aria-labelledby="kaynak-gostergeleri"
-        className="scroll-mt-24 space-y-3"
+        className="space-y-3"
       >
         <SectionHeading
           id="kaynak-gostergeleri"
@@ -597,7 +597,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="basliklar" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="basliklar" className="space-y-3">
         <SectionHeading
           id="basliklar"
           title="Başlıklar nasıl tarafsızlaştırılıyor"
@@ -650,7 +650,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="konu" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="konu" className="space-y-3">
         <SectionHeading id="konu" title="Konu etiketleri nasıl atanıyor" meta="Eşikler" />
         <div className={cardClass + " space-y-3"}>
           <p className={proseClass}>
@@ -673,7 +673,7 @@ export default async function MethodologyPage() {
         </div>
       </section>
 
-      <section aria-labelledby="duzeltme" className="scroll-mt-24 space-y-3">
+      <section aria-labelledby="duzeltme" className="space-y-3">
         <SectionHeading id="duzeltme" title="Düzeltme ve itiraz" meta="Size açık" />
         <div className={cardClass + " space-y-4"}>
           <p className={proseClass}>

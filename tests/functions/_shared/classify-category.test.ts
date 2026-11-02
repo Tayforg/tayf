@@ -3052,3 +3052,941 @@ describe("category.ts is a pure module", () => {
     expect(typeof foldForCategory).toBe("function");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Wave AZ (hunt-22): the politics gate still admitted deterministic
+// non-political stories
+// ---------------------------------------------------------------------------
+//
+// hunt-22 replayed the gate over 286 rows since 08:05Z and found 21 clear
+// non-political rows (7.3%), several of them 12-13 article clusters:
+//
+//   * a club or chamber ELECTION: 'Galatasaray ... Seçim fırtınası' and the
+//     Şanlıurfa Ticaret ve Sanayi Odası (ŞUTSO) cluster 234657e4 (13 rows,
+//     'sandık görevlisi' dies of a heart attack) entered through the bare title
+//     stem 'seçim'; 'doğru ürün seçimiyle' (a cleaning-paper maker) is the
+//     choice sense of the same stem;
+//   * 'Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları' (a sailing regatta that
+//     carries the presidency's name) entered through the bare stem
+//     'cumhurbaşkan';
+//   * 'hava muhalefeti' ('muhalefet' as a weather excuse for a power cut) in a
+//     description;
+//   * a venue named after the president: 'Recep Tayyip Erdoğan Millet Bahçesi';
+//   * 'şair, yazar ve siyasetçi Yahya Kemal Beyatlı' in a description: the
+//     OCCUPATION 'siyasetçi' in a biography is not politics;
+//   * the compound rule's bare 'parti' next to 'operasyon': the US Republican
+//     party ('Cumhuriyetçi Parti') in an oil-price story that mentions the
+//     American operations against Iran (cluster dc6ea7f2).
+//
+// AZ_ROWS is the table of REAL rows (title, description and url exactly as
+// stored, read-only SELECTs on 2026-11-02 over the last 48 h). Every one was
+// politika in production (`stored`) and must leave the gate.
+
+interface AzRow {
+  id: string;
+  source: string;
+  shape: string;
+  title: string;
+  description: string | null;
+  url: string;
+  stored: NewsCategory;
+}
+
+const AZ_ROWS: AzRow[] = [
+  {
+    id: "c57f1b0e",
+    source: "yeni-mesaj",
+    shape: "club election (the choice of a club board, Galatasaray)",
+    title: "Galatasaray bir anda karıştı! Seçim fırtınası esiyor",
+    description: "Şampiyonlar Ligi'nde Lille zaferi geldi, umutlar arttı Her şey tam da güllük gülistanlık denirken, yüz kızartan bir kavga sonrasında gelen Asbaşkan Metin Öztürk ve Abdullah Kavukçu'nun istifaları Galatasaray'da bir anda seçim ve sandık gündemi yarattı.[31]Şampiyonlar Ligi'nde Lille zaferi geldi, umutlar arttı. Fenerbahçe yenildi, aradaki fark 9 oldu ve 5. şampiyonluk yolunda güçlü bir engel kalktı. Ancak Galatasaray'a tüm bunlara rağmen rahat yok. [41]27 Ekim'de yapılan yönetim kurulu toplant...",
+    url: "https://www.yenimesaj.com.tr/galatasaray-bir-anda-karisti-secim-firtinasi-esiyor-H1620635.htm",
+    stored: "politika",
+  },
+  {
+    id: "38eb711c",
+    source: "dunya",
+    shape: "Cumhurbaşkanlığı yacht race",
+    title: "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nın şampiyonu Enka oldu",
+    description: "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları, İstanbul'da düzenlenen ödül töreniyle sona erdi. İstanbul Boğazı'nda 650'yi aşkın sporcunun mücadele ettiği Cumhuriyet Kupası'nın ardından sezonun genel klasman şampiyonu, Levent Peynirci yönetimindeki Cheese IV teknesiyle yarışan Enka takımı oldu.",
+    url: "https://www.dunya.com/spor/cumhurbaskanligi-7-uluslararasi-yat-yarislarinin-sampiyonu-enka-oldu-haberi-846087",
+    stored: "politika",
+  },
+  {
+    id: "79358522",
+    source: "aksam",
+    shape: "Cumhurbaşkanlığı yacht race",
+    title: "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nda görkemli kapanış",
+    description: "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları, Cumhuriyet'in 103. yılı coşkusu ve İstanbul Boğazı'ndaki nefes kesen final müsabakalarının ardından Fişekhane'de düzenlenen görkemli törenle sona erdi. Sezon boyunca sergiledikleri üstün performansla adını zirveye yazdıran takımlar kupalarına kavuştu. Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nın tüm etaplarında büyük başarı gösteren Enka takımı bu yılın şampiyonu oldu.",
+    url: "https://www.aksam.com.tr/spor/cumhurbaskanligi-7-uluslararasi-yat-yarislarinda-gorkemli-kapanis/haber-1711094",
+    stored: "politika",
+  },
+  {
+    id: "9eaa66a0",
+    source: "star",
+    shape: "Cumhurbaşkanlığı yacht race",
+    title: "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nda görkemli Kapanış",
+    description: "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları, Cumhuriyet'in 103. yılı coşkusu ve İstanbul Boğazı'ndaki nefes kesen final müsabakalarının ardından Fişekhane'de düzenlenen görkemli törenle sona erdi. Sezon boyunca sergiledikleri üstün performansla adını zirveye yazdıran takımlar kupalarına kavuştu. Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nın tüm etaplarında büyük başarı gösteren Enka takımı bu yılın şampiyonu oldu.",
+    url: "https://www.star.com.tr/spor/cumhurbaskanligi-7-uluslararasi-yat-yarislarinda-gorkemli-kapanis-haber-2050635/",
+    stored: "politika",
+  },
+  {
+    id: "3d94f501",
+    source: "haber-com",
+    shape: "Cumhurbaşkanlığı yacht race",
+    title: "Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları'nda Kazanan ENKA Oldu",
+    description: "Cumhurbaşkanlığı himayelerinde, Kültür ve Turizm Bakanlığı ile Gençlik ve Spor Bakanlığı’nın katkıları, İstanbul Valiliği ve Türkiye Turizm Tanıtım ve Geliştirme Ajansı (TGA) iş birliğiyle İstanbul Açık Deniz Yat Yarış Kulübü tarafından düzenlenen Cumhurbaşkanlığı 7. Uluslararası Yat Yarışları, Fişekhane’de gerçekleştirilen görkemli ödül töreniyle perdesini kapattı.",
+    url: "https://www.haber.com/spor/cumhurbaskanligi-7-uluslararasi-yat-yarislarinda-kazanan-enka-oldu-30643",
+    stored: "politika",
+  },
+  {
+    id: "4aea26d3",
+    source: "haberler-com",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "ŞUTSO seçimlerinde kalp krizi geçiren sandık görevlisi hastanede yaşamını yitirdi",
+    description: "ŞUTSO seçimlerinde sandık görevlisi olarak bulunan kişi seçim sırasında kalp krizi geçirdi; çevredekilerin ilk müdahalesinin ardından kaldırıldığı hastanede tüm müdahalelere rağmen hayatını kaybetti. Cenazesi otopsi için Şanlıurfa Adli Tıp Kurumu morguna kaldırıldı, soruşturma sürüyor.",
+    url: "https://www.haberler.com/3-sayfa/sutso-secimlerinde-kalp-krizi-geciren-sandik-20386272-haberi/",
+    stored: "politika",
+  },
+  {
+    id: "a23b0b7f",
+    source: "cumhuriyet",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "Ticaret odası seçiminde acı olay: Kalp krizi geçiren sandık görevlisi hayatını kaybetti",
+    description: "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde kalp krizi geçiren sandık görevlisi, kaldırıldığı hastanede hayatını kaybetti.",
+    url: "https://www.cumhuriyet.com.tr/turkiye/ticaret-odasi-seciminde-aci-olay-kalp-krizi-geciren-sandik-gorevlisi-hayatini-kaybetti-2552351",
+    stored: "politika",
+  },
+  {
+    id: "140e51c9",
+    source: "odatv",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "ŞUTSO seçimlerinde acı olay",
+    description: "Şanlıurfa Ticaret ve Sanayi Odası (ŞUTSO) seçimlerinde kalp krizi geçiren sandık görevlisi, kaldırıldığı hastanede hayatını kaybetti.",
+    url: "https://www.odatv.com/guncel/sutso-secimlerinde-aci-olay-120169233",
+    stored: "politika",
+  },
+  {
+    id: "f6437abc",
+    source: "haberport",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "ŞUTSO seçiminde sandık görevlisi kalp krizi sonucu yaşamını yitirdi",
+    description: "Şanlıurfa'da seçim sırasında acı olay\nŞanlıurfa Ticaret ve Sanayi Odası (ŞUTSO) seçimleri esnasında sandık görevlisi olarak bulunan Ali Ağlamış (64), oy kullanma işlemlerinin sürdüğü sırada aniden rah...",
+    url: "https://www.haberport.com/haber/sutso-seciminde-sandik-gorevlisi-kalp-krizi-sonucu-yasamini-yitirdi/60326",
+    stored: "politika",
+  },
+  {
+    id: "48fe1e01",
+    source: "haber7",
+    shape: "ŞUTSO chamber election (234657e4), chamber only in the description",
+    title: "Seçimde acı olay! Sandık görevlisi hayatını kaybetti",
+    description: "Şanlıurfa Ticaret ve Sanayi Odası (ŞUTSO) seçimlerinde kalp krizi geçiren sandık görevlisi, kaldırıldığı hastanede hayatını kaybetti.",
+    url: "https://www.haber7.com/guncel/haber/3673370-secimde-aci-olay-sandik-gorevlisi-hayatini-kaybetti",
+    stored: "politika",
+  },
+  {
+    id: "fa0f82de",
+    source: "hurriyet",
+    shape: "ŞUTSO chamber election (234657e4), chamber only in the description",
+    title: "Şanlıurfa'daki seçimde kalp krizi geçiren sandık görevlisi kurtarılamadı",
+    description: "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde acı bir olay yaşandı. Seçimde sandık görevlisi olan Ali Ağlamış, kalp krizi geçirdi. Hastaneye kaldırılan Ağlamış, yapılan tüm müdahalelere rağmen kurtarılamadı.",
+    url: "https://www.hurriyet.com.tr/gundem/sanliurfadaki-secimde-kalp-krizi-geciren-sandik-gorevlisi-kurtarilamadi-43363004",
+    stored: "politika",
+  },
+  {
+    id: "185a0c4e",
+    source: "yenicag",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde kalp krizi geçiren sandık görevlisi hayatını kaybetti",
+    description: "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde sandık görevlisi olarak çalışan 64 yaşındaki Ali Ağlamış, oy verme işlemi sırasında geçirdiği kalp krizi sonucu hastanede hayatını kaybetti, olayla ilgili soruşturma başlatıldı.",
+    url: "https://www.yenicaggazetesi.com/sanliurfa-ticaret-ve-sanayi-odasi-secimlerinde-kalp-krizi-geciren-sandik-gorevlisi-hayatini-kaybetti-1087322h.htm",
+    stored: "politika",
+  },
+  {
+    id: "bb465a58",
+    source: "isci-haber",
+    shape: "ŞUTSO chamber election (234657e4), chamber only in the description",
+    title: "Şanlıurfa'daki Seçimde Kalp Krizi Geçiren Sandık Görevlisi Hayatını Kaybetti",
+    description: "Şanlıurfa'da gerçekleştirilen ŞUTSO seçimlerinde sandık görevlisi olarak bulunan 64 yaşındaki Ali Ağlamış, oy verme işlemi sırasında ani bir rahatsızlık geçirdi. Kalp krizi geçirdiği belirlenen ve hastaneye kaldırılan Ağlamış, doktorların tüm müdahalelerine rağmen kurtarılamayarak hayatını kaybetti.",
+    url: "https://www.iscihaber.net/sanliurfa/sanliurfadaki-secimde-kalp-krizi-geciren-sandik-gorevlisi-hayatini-kaybetti/277709",
+    stored: "politika",
+  },
+  {
+    id: "6edd4ead",
+    source: "elips-haber",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde kalp krizi geçiren sandık görevlisi öldü",
+    description: "Şanlıurfa Ticaret ve Sanayi Odası (ŞUTSO) seçimlerinde sandık görevlisi olarak görev yapan Ali Ağlamış (64) kalp krizi sonucu yaşamını yitirdi.",
+    url: "https://www.elipshaber.com/sanliurfa-ticaret-ve-sanayi-odasi-secimlerinde-kalp-krizi-geciren-sandik-gorevlisi-oldu",
+    stored: "politika",
+  },
+  {
+    id: "466999bb",
+    source: "sozcu",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde sandık görevlisi hayatını kaybetti",
+    description: "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde sandık görevlisi olarak bulunan 64 yaşındaki Ali Ağlamış, oy verme işlemi...",
+    url: "https://www.sozcu.com.tr/sanliurfa-ticaret-ve-sanayi-odasi-secimlerinde-sandik-gorevlisi-hayatini-kaybetti-p375126",
+    stored: "politika",
+  },
+  {
+    id: "b20eaac7",
+    source: "haberler-com",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "ŞUTSO seçiminde görevli Ali Ağlamış (64) kalp krizinden hayatını kaybetti",
+    description: "ŞUTSO seçimlerinde sandık görevlisi olarak çalışan Ali Ağlamış (64), oy verme işlemi sırasında kalp krizi geçirerek hayatını kaybetti. Hastaneye kaldırılan Ağlamış doktorların müdahalesine rağmen kurtarılamadı, olayla ilgili soruşturma başlatıldı.",
+    url: "https://www.haberler.com/guncel/sutso-seciminde-gorevli-ali-aglamis-64-kalp-20386828-haberi/",
+    stored: "politika",
+  },
+  {
+    id: "bc2f13c9",
+    source: "korkusuz",
+    shape: "ŞUTSO chamber election (234657e4)",
+    title: "Şanlıurfa Ticaret Odası seçiminde sandık görevlisi hayatını kaybetti",
+    description: "Şanlıurfa Ticaret Odası seçiminde sandık görevlisi hayatını kaybetti",
+    url: "https://www.korkusuz.com.tr/sanliurfa-ticaret-odasi-seciminde-sandik-gorevlisi-hayatini-kaybetti-p56836",
+    stored: "politika",
+  },
+  {
+    id: "c53cecd0",
+    source: "cumhuriyet",
+    shape: "oil reserves, US Cumhuriyetçi Parti + military operasyon (dc6ea7f2)",
+    title: "Stratejik petrol rezervleri 1982'den beri en düşük seviyede: Benzin fiyatları neden düşmüyor?",
+    description: "Petrol fiyatları, ABD ve İsrail'in İran'a yönelik operasyonlarının ardından yüzde 56 artışla 113 doların üzerine çıktı. ABD'de rekor kıran akaryakıt fiyatlarının, 3 Kasım ara seçimlerinde Donald Trump ve Cumhuriyetçi Parti'ye ağır bir siyasi fatura kesebileceği belirtiliyor.",
+    url: "https://www.cumhuriyet.com.tr/ekonomi/stratejik-petrol-rezervleri-1982-den-beri-en-dusuk-seviyede-benzin-fiyatlari-neden-dusmuyor-2552471",
+    stored: "politika",
+  },
+  {
+    id: "b61fdfb4",
+    source: "yeni-safak",
+    shape: "description \"hava muhalefeti\"",
+    title: "15 ayda 81 kez elektrik kesilmişti: Kütahya'da bir mahallenin çilesi son buldu",
+    description: "Kütahya'daki bir mahallede \"hava muhalefeti, üçüncü şahıs müdahalesi ve arıza\" gerekçeleriyle 15 ayda 81 kez elektrik kesintisi yaşanması nedeniyle mağdur olan bir vatandaş, konuyu KDK'ye taşıdı. KDK'nin yetkililerle görüşmesi üzerine, şebekedeki arıza risklerini azaltmaya yönelik bakım ve yenileme çalışmaları yapıldı. Ayrıca, ilçe merkezinin elektrik besleme yapısının güçlendirilmesi için yatırım kararı alındı.",
+    url: "https://www.yenisafak.com/gundem/15-ayda-81-kez-elektrik-kesintisi-yasayan-mahallelinin-magduriyetini-kdk-cozdu-4869074",
+    stored: "politika",
+  },
+  {
+    id: "5a774ff8",
+    source: "isci-haber",
+    shape: "description \"Recep Tayyip Erdoğan Millet Bahçesi\"",
+    title: "Kayseri Büyükşehir Belediyesi'nden bisiklet sporuna büyük destek",
+    description: "Kayseri'de Büyükşehir Belediyesi Spor A.Ş. ve Özgür Pedallar Kayseri Bisiklet Topluluğu iş birliğiyle düzenlenen Türkiye Pedallıyor Cumhuriyet Sürüşü'nde 250 bisikletsever pedal çevirdi. Cumhuriyet Meydanı'ndan başlayıp Recep Tayyip Erdoğan Millet Bahçesi'nde sona eren 10 kilometrelik etkinlikte renkli görüntüler oluştu.",
+    url: "https://www.iscihaber.net/kayseri/kayseri-buyuksehir-belediyesinden-bisiklet-sporuna-buyuk-destek/277768",
+    stored: "politika",
+  },
+  {
+    id: "d80b2612",
+    source: "haberler-com",
+    shape: "description \"şair, yazar ve siyasetçi\" (Yahya Kemal)",
+    title: "Tekirdağ Valisi Soytürk, Yahya Kemal Beyatlı için 68. yıl dönümü mesajı yayımladı",
+    description: "Tekirdağ Valisi Recep Soytürk, şair, yazar ve siyasetçi Yahya Kemal Beyatlı'nın vefatının 68. yıl dönümü dolayısıyla mesaj yayımladı. Soytürk mesajında Beyatlı'nın Türk edebiyatı ve kültür tarihindeki yerine dikkati çekerek onu rahmet ve minnetle andı.",
+    url: "https://www.haberler.com/guncel/tekirdag-valisi-soyturk-yahya-kemal-beyatli-icin-20387297-haberi/",
+    stored: "politika",
+  },
+  {
+    id: "d2da9e89",
+    source: "ekonomim",
+    shape: "\"ürün seçimiyle\" (the choice sense)",
+    title: "Tem-Pa/ Tenekecioğlu “Temizlik, doğru ürün seçimiyle işletmelerin maliyetini düşürüyor”",
+    description: "Eskişehir ve çevresinin ilk endüstriyel temizlik kâğıdı üreticisi Eskişehir Tem-Pa Temizlik Malzemeleri, ESTEK-AL markasıyla işletmelere kullanım alanına uygun ve verimli ürünler sunuyor. Eskişehir Tem-Pa Temizlik Malzemeleri Genel Müdürü Didem Tenekecioğlu, üretim kapasitesini artırmaya hazırlandıklarını belirterek, “dijital altyapımızı güçlendirerek yurt içi ve ihracat pazarındaki payını büyütmeyi hedefliyoruz” dedi.",
+    url: "https://www.ekonomim.com/sehirler/tem-pa-tenekecioglu-temizlik-dogru-urun-secimiyle-isletmelerin-maliyetini-dusuruyor-haberi-928529",
+    stored: "politika",
+  },
+];
+
+// Further rows of the 48 h replay that leave the gate with the same rules. The
+// base classifier (ec94980) put every one of them in the gate and none is
+// political; `stored` is the category the row has in production, which for a
+// row ingested before that classifier shipped can already be outside the gate.
+const AZ_ALSO_LEAVE: AzRow[] = [
+  {
+    id: "3453bdae",
+    source: "ekonomim",
+    shape: "chamber election named only in the description (Gebze Ticaret Odası)",
+    title: "MÜSİAD Gebze seçim süreci öncesi üyeleriyle bir araya geldi",
+    description: "Gebze Ticaret Odası seçimleri öncesinde istişare toplantısı düzenleyen MÜSİAD Gebze, üyelerinin meslek komitelerindeki çalışmaları ve seçim sürecine ilişkin görüş alışverişinde bulundu.",
+    url: "https://www.ekonomim.com/sehirler/musiad-gebze-secim-sureci-oncesi-uyeleriyle-bir-araya-geldi-haberi-928243",
+    stored: "politika",
+  },
+  {
+    id: "4a06a6c4",
+    source: "yenicag",
+    shape: "federation general assembly, \"oy birliğiyle\"",
+    title: "Türkiye Hokey Federasyonunda Mali Genel Kurul toplantısı Ankara'da sona erdi",
+    description: "Türkiye Hokey Federasyonunun Ankara'da düzenlediği 9. Olağan Mali Genel Kurulu'nda faaliyet ve denetim raporları oy birliğiyle ibra edildi. Toplantıda ayrıca federasyonun 2027 ve 2028 yıllarına ait tahmini bütçeleri de karara bağlandı.",
+    url: "https://www.yenicaggazetesi.com/turkiye-hokey-federasyonunda-mali-genel-kurul-toplantisi-ankarada-sona-erdi-1086765h.htm",
+    stored: "politika",
+  },
+  {
+    id: "5b5b5152",
+    source: "cnn-turk",
+    shape: "Cumhurbaşkanlığı horse race",
+    title: "88. Cumhurbaşkanlığı Koşusu ve 46. Cumhuriyet Koşusu’nda kazananlar belli oldu",
+    description: "88. Cumhurbaşkanlığı Koşusu'nda şampiyon, Jokeyi Ayhan Kurşun ile Etsuko oldu.",
+    url: "https://www.cnnturk.com/spor/binicilik/88-cumhurbaskanligi-kosusunda-sampiyon-etsuko-3487148",
+    stored: "spor",
+  },
+  {
+    id: "fccc4805",
+    source: "haberler-com",
+    shape: "Cumhurbaşkanlığı horse race",
+    title: "Ankara'da Cumhuriyet Koşusu'nu Özmen Bey, Cumhurbaşkanlığı Koşusu'nu Etsuko kazandı",
+    description: "Ankara 75. Yıl Hipodromu'ndaki yarışlarda 46. Cumhuriyet Koşusu'nu Selim Kaya'nın bindiği Özmen Bey, 88. Cumhurbaşkanlığı Koşusu'nu Ayhan Kurşun'un bindiği Etsuko kazandı. Cumhuriyet Koşusu'nun birincilik ikramiyesi 14 milyon, Cumhurbaşkanlığı Koşusu'nun ise 10 milyon lira oldu.",
+    url: "https://www.haberler.com/spor/ankara-da-cumhuriyet-kosusu-nu-ozmen-bey-20383800-haberi/",
+    stored: "spor",
+  },
+  {
+    id: "cf7ee301",
+    source: "haberler-com",
+    shape: "Cumhurbaşkanlığı horse race",
+    title: "Ankara'da Cumhurbaşkanlığı Kupası'nı Etsuko, Cumhuriyet Koşusu'nu Özmen Bey kazandı",
+    description: "Cumhuriyet Haftası'nda 75'inci Yıl Ankara Hipodromu'nda koşulan 88'inci Cumhurbaşkanlığı Kupası'nı Etsuko isimli safkanla Ayhan Kurşun, 46'ncı Cumhuriyet Koşusu'nu ise Selim Kaya idaresindeki Özmen Bey kazandı. Koşuların ardından törende kazananlara ödülleri verildi.",
+    url: "https://www.haberler.com/spor/ankara-da-cumhurbaskanligi-kupasi-ni-etsuko-20383782-haberi/",
+    stored: "spor",
+  },
+  {
+    id: "6f3a7e52",
+    source: "posta",
+    shape: "Cumhurbaşkanlığı horse race",
+    title: "Safkanlardan muhteşem sezon finali! Cumhurbaşkanlığı Kupası ve Cumhuriyet Koşusu’nda heyecan doruğa çıktı",
+    description: "Cumhurbaşkanlığı Kupası ve Cumhuriyet Koşusu’nda heyecan doruğa çıktı. 88’inci Cumhurbaşkanlığı Kupası’nı, Ayhan Kurşun’un jokeyliğini yaptığı Etsuko isimli kısrak kazandı.  46’ncı Cumhuriyet Koşusu’nda finişi ilk gören ise Selim Kaya idaresindeki Özmen Bey oldu.\nANKARALILARDAN BÜYÜK İLGİ\nTürk atçılığına damgasını vuran iki önemli yarış, başkentte düzenlendi. Her yaştan yarış severi hipodromda buluşturan koşulara, Ankaralılar büyük ilgi gösterdi.\n\nEN PRESTİJLİ YARIŞLARDAN\nGazi Koşusu’ndan son...",
+    url: "https://www.posta.com.tr/spor/safkanlardan-muhtesem-sezon-finali-cumhurbaskanligi-kupasi-ve-cumhuriyet-kosusunda-heyecan-doruga-cikti-3059195",
+    stored: "spor",
+  },
+  {
+    id: "abc67f7c",
+    source: "haberler-com",
+    shape: "Halloween party brawl, bare \"parti\" + \"gözaltı\"",
+    title: "Bolu'da AVM'deki Cadılar Bayramı partisi kavgayla bitti! Araya giren güvenlik görevlisi darp edildi, 4 gözaltı",
+    description: "Bolu'da 14 Burda AVM içindeki alkollü mekanda düzenlenen Cadılar Bayramı partisinde iki grup arasında çıkan kavgada 4 kişi gözaltına alındı. Kavgayı ayırmaya çalışan bir AVM güvenlik görevlisi darp edildi, alkolden etkilenen bir kişi hastaneye kaldırıldı.",
+    url: "https://www.haberler.com/3-sayfa/bolu-da-14-burda-avm-deki-cadilar-bayrami-20384442-haberi/",
+    stored: "dunya",
+  },
+  {
+    id: "b5fa3df3",
+    source: "haberport",
+    shape: "Halloween party brawl, bare \"parti\" + \"gözaltı\"",
+    title: "Cadılar Bayramı partisi sonrası 14 Burda AVM'de kavga: dört gözaltı",
+    description: "olayın meydana geldiği nokta ve ilk bilgiler:Bolu D-100 Karayolu Paşaköy Mahallesi mevkiindeki 14 Burda AVM içindeki alkollü bir mekânda düzenlenen Cadılar Bayramı partisi sonunda iki grup arasında sö...",
+    url: "https://www.haberport.com/haber/cadilar-bayrami-partisi-sonrasi-14-burda-avmde-kavga-dort-gozalti/59928",
+    stored: "dunya",
+  },
+  {
+    id: "1280a8c4",
+    source: "son-dakika",
+    shape: "Halloween party brawl, bare \"parti\" + \"gözaltı\"",
+    title: "Halloween partisinin çıkışında arbede: Bolu'da AVM güvenlikçisi darp edildi, 4 kişi gözaltında",
+    description: "Bolu'da 14 Burda AVM içindeki alkollü mekanda düzenlenen Cadılar Bayramı partisinde iki grup arasında çıkan kavgada 4 kişi gözaltına alındı. Kavgayı ayırmaya çalışan bir AVM güvenlik görevlisi darp edildi, alkolden etkilenen bir kişi hastaneye kaldırıldı.",
+    url: "https://www.sondakika.com/3-sayfa/haber-bolu-da-cadilar-bayrami-partisinde-kavgada-4-kisi--20384444/",
+    stored: "son_dakika",
+  },
+  {
+    id: "b44426f0",
+    source: "haberler-com",
+    shape: "TSO election",
+    title: "Van TSO'da organ seçimleri yönetim kurulunu ve TOBB delegelerini belirledi",
+    description: "Van TSO organ seçimleri, yönetim kurulu başkanı ve üyeleri, TOBB Genel Kurul delegeleri ile disiplin kurulu üyelerinin belirlenmesiyle tamamlandı. Oda, seçimlerin huzur ve güven ortamında geçtiğini belirterek emniyet personeli, seçim kurulları, basın ve üyelere teşekkür etti.",
+    url: "https://www.haberler.com/ekonomi/van-tso-da-organ-secimleri-yonetim-kurulunu-ve-20385077-haberi/",
+    stored: "ekonomi",
+  },
+  {
+    id: "53b9285f",
+    source: "haberport",
+    shape: "TSO election",
+    title: "Van TSO seçimleri tamamlandı",
+    description: "Van TSO seçimleri tamamlandıVan Ticaret ve Sanayi Odası (Van TSO) organ seçimleri, bugün gerçekleştirilen Yönetim Kurulu Başkanı ve üyeleri, Türkiye Odalar ve Borsalar Birliği (TOBB) Genel Kurul Deleg...",
+    url: "https://www.haberport.com/haber/van-tso-secimleri-tamamlandi/60083",
+    stored: "politika",
+  },
+  {
+    id: "73cad9c0",
+    source: "haberler-com",
+    shape: "TSO election",
+    title: "Erzincan TSO seçimlerinde Ahmet Tanoğlu yeniden başkanlığa seçildi",
+    description: "Erzincan Ticaret ve Sanayi Odasının yargı gözetiminde tamamlanan seçimlerinde Ahmet Tanoğlu yeniden yönetim kurulu başkanlığına seçildi. Seçimlerde odanın yeni dönem yönetim kurulu, genel kurul delegeleri ve disiplin kurulu üyeleri de belirlendi.",
+    url: "https://www.haberler.com/yerel/erzincan-tso-secimlerinde-ahmet-tanoglu-yeniden-20386103-haberi/",
+    stored: "politika",
+  },
+  {
+    id: "7af4e785",
+    source: "isci-haber",
+    shape: "TSO election",
+    title: "Erzincan Ticaret ve Sanayi Odası Seçimleri Tamamlandı",
+    description: "Erzincan Ticaret ve Sanayi Odası seçimleri yargı gözetiminde tamamlandı ve mevcut başkan Ahmet Tanoğlu yeniden başkanlığa seçildi. Seçimlerin ardından yeni yönetim, disiplin kurulu ve genel kurul delegeleri de netleşti.",
+    url: "https://www.iscihaber.net/erzincan/erzincan-ticaret-ve-sanayi-odasi-secimleri-tamamlandi/277476",
+    stored: "politika",
+  },
+  {
+    id: "f8a390b5",
+    source: "elips-haber",
+    shape: "club election remark, the club only in the description",
+    title: "Hakan Safi'den damga vuracak Aziz Yıldırım ve seçim açıklaması",
+    description: "Fenerbahçe eski başkan adayı Hakan Safi, zor günlerden geçilen bu dönemde kulübün etrafında kenetlenilmesi gerektiğini belirtti.",
+    url: "https://www.elipshaber.com/hakan-safiden-damga-vuracak-aziz-yildirim-ve-secim-aciklamasi",
+    stored: "spor",
+  },
+  {
+    id: "56c51777",
+    source: "haberler-com",
+    shape: "club election remark",
+    title: "Hakan Safi'den güne damga vuracak Aziz Yıldırım ve seçim açıklaması",
+    description: "Fenerbahçe eski başkan adayı Hakan Safi, zor günlerden geçilen bu dönemde kulübün etrafında kenetlenilmesi gerektiğini belirtti. Aziz Yıldırım'ın sözlerine güven duyulmasını isteyen Safi, eleştirilerin dozunda yapılmasını ve seçilmiş yönetime sene sonuna kadar destek olunmasını istedi. Safi, gündemin seçim değil, önümüzdeki önemli maçlar olması gerektiğini vurguladı.",
+    url: "https://www.haberler.com/spor/hakan-safiden-gune-damga-vuracak-aziz-yildirim-ve-20386132-haberi/",
+    stored: "spor",
+  },
+];
+
+// Political rows that a looser variant of a rule dropped in the replay. They
+// stay politika: a foreign election, a Turkish party leader's detention.
+const AZ_MUST_STAY: AzRow[] = [
+  {
+    id: "a60b5513",
+    source: "haberler-com",
+    shape: "Bulgarian presidential vote cast at an association (dernek) in Sakarya",
+    title: "Kocaeli ve Sakarya'da çifte vatandaşlar Bulgaristan seçimi ikinci turunda oy kullandı",
+    description: "Kocaeli ve Sakarya'da yaşayan çifte vatandaşlar, Bulgaristan'daki cumhurbaşkanı ve cumhurbaşkanı yardımcısı seçiminin ikinci turu için oy kullandı. İzmit ve Gebze'de 2 sandık kurulurken Sakarya Serdivan'da dernekte oy verme işlemi saat 20.00'ye kadar sürecek.",
+    url: "https://www.haberler.com/guncel/kocaeli-ve-sakarya-da-cifte-vatandaslar-20385153-haberi/",
+    stored: "politika",
+  },
+  {
+    id: "6bf6d844",
+    source: "birgun",
+    shape: "Brazilian election essay, \"sendikal örgütlenme\"",
+    title: "Bir seçimden fazlası: Brezilya’da örgütlü halkın zaferi",
+    description: "Brezilya’da Lula’nın yeniden seçilmesini bir sosyal medya başarısına indirgeyen anlatı, solun ülkedeki onlarca yıllık mücadele birikimini görünmez kılıyor. İşçi grevlerinden toprak işgallerine, sendikal örgütlenmelerden, mahalle hareketlerine uzanan bu tarih, seçim sandığında ortaya çıkan sonucun çok daha ötesinde bir toplumsal zemine sahip. Onu yaratan, yıllar boyunca sabırla örülen örgütlü halk mücadelesidir.",
+    url: "https://www.birgun.net/makale/bir-secimden-fazlasi-brezilyada-orgutlu-halkin-zaferi-743772",
+    stored: "politika",
+  },
+  {
+    id: "8290809b",
+    source: "birgun",
+    shape: "Serbian parliamentary election essay, \"siyasetçi\" in the description",
+    title: "Sırp Öğrenciler ve Sınıf",
+    description: "Sırbistan’da, hiçbir profesyonel siyasetçiyi barındırmayan bir seçim listesi – Öğrenci Listesi – parlamento seçimlerini kazandı. Seçim bildirgesi sadece birkaç hafta önce açıklanmış olmasına rağmen, liste on dört yıldır iktidarda olan SNS’yi (Sırp İlerleme Partisi) geride bırakmayı başardı. Kazananlar, bu seçim zaferini Sırbistan tarihinde yeni bir sayfa olarak görüyor.",
+    url: "https://www.birgun.net/makale/sirp-ogrenciler-ve-sinif-743780",
+    stored: "politika",
+  },
+  {
+    id: "fd649da2",
+    source: "fayn",
+    shape: "Turkish party leader detained, the party only spelled out in the description",
+    title: "Serkan Öz'e 'Erlik' gözaltısı: Akın Gürlek ile ilgili video çeken Erlik ile irtibatı sorulacak",
+    description: "Cumhuriyetçi Vatanseverler Partisi Genel Başkanı Serkan Öz gözaltına alındı. Partisi, Öz’ün \"Erlik ile irtibatı olduğu\" gerekçesiyle gözaltına alındığını duyurdu. Erlik, Youtube’da yayın yapan bir hesap. Son videosu Adalet Bakanı Akın Gürlek hakkındaki birtakım iddialar üzerineydi.",
+    url: "https://www.fayn.press/serkan-oze-erlik-gozaltisi-akin-gurlek-ile-ilgili-video-ceken-erlik-ile-irtibati-sorulacak/",
+    stored: "politika",
+  },
+];
+
+// The one row that ENTERED the gate in the first cut of the compound rule: 'Tip'
+// (type) read as the party TİP, next to 'operasyonel'. Stored dunya.
+const AZ_TIP_ROW: AzRow = {
+  id: "bd723bb8",
+  source: "on-haber",
+  shape: "North Korean cluster-bomb test: 'Standart Tip 2' and 'operasyonel'",
+  title: "Tehlike provası: Kuzey Kore misket bombası başlığı test etti",
+  description: "Kuzey Kore Merkezi Haber Ajansına (KCNA) göre dün düzenlenen denemede misket bombası başlığının muharebe koşullarına uyarlanabilirliği ve tahrip gücü değerlendirildi. “Standart Tip 2” misket bombası başlığının, “en yüksek yoğunluklu gücüyle 12 ila 13 hektarlık hedef alanını küle çevirebileceği” savunuldu. KCNA’ya göre Kuzey Kore, bu yılın sonuna kadar askeri birliklerinin operasyonel amaçlarına bağlı olarak bu silahların […]",
+  url: "https://10haber.net/dunya/tehlike-provasi-kuzey-kore-misket-bombasi-basligi-test-etti-750940/",
+  stored: "dunya",
+};
+
+function notInGate(title: string, description: string | null = null, url: string = NEUTRAL_URL): void {
+  const got = cls(title, description, url);
+  expect(got, `${title} | ${description ?? ""}`).not.toBe("politika");
+  expect(got, `${title} | ${description ?? ""}`).not.toBe("son_dakika");
+}
+
+describe("wave AZ (hunt-22)", () => {
+  describe("the real rows of the hunt leave the gate", () => {
+    it.each(AZ_ROWS)("$id ($source, $shape) is neither politika nor son_dakika", (row) => {
+      notInGate(row.title, row.description, row.url);
+    });
+
+    it("is not vacuous: 22 distinct rows, all politika in production, 12 ŞUTSO members and 4 regatta rows", () => {
+      expect(AZ_ROWS).toHaveLength(22);
+      expect(new Set(AZ_ROWS.map((r) => r.id)).size).toBe(22);
+      expect(AZ_ROWS.every((r) => r.stored === "politika")).toBe(true);
+      expect(AZ_ROWS.filter((r) => r.shape.startsWith("ŞUTSO"))).toHaveLength(12);
+      expect(AZ_ROWS.filter((r) => r.shape === "Cumhurbaşkanlığı yacht race")).toHaveLength(4);
+    });
+
+    it.each(AZ_ALSO_LEAVE)("$id ($source, $shape) leaves the gate too", (row) => {
+      notInGate(row.title, row.description, row.url);
+    });
+
+    it.each(AZ_MUST_STAY)("$id ($source, $shape) stays politika", (row) => {
+      expect(cls(row.title, row.description, row.url)).toBe("politika");
+    });
+
+    it("the 'Standart Tip 2' cluster-bomb row stays out of the gate (a compound rule must not read 'tip' as the party TİP)", () => {
+      expect(AZ_TIP_ROW.stored).toBe("dunya");
+      expect(cls(AZ_TIP_ROW.title, AZ_TIP_ROW.description, AZ_TIP_ROW.url)).toBe("dunya");
+    });
+
+    it("the extra tables are not vacuous: 15 leavers, 4 political stayers, all in production politika", () => {
+      expect(AZ_ALSO_LEAVE).toHaveLength(15);
+      expect(AZ_MUST_STAY).toHaveLength(4);
+      expect(AZ_MUST_STAY.every((r) => r.stored === "politika")).toBe(true);
+      // at least the chamber, federation and brawl rows were in the gate in production
+      expect(AZ_ALSO_LEAVE.filter((r) => r.stored === "politika").length).toBeGreaterThanOrEqual(5);
+      const ids = [...AZ_ROWS, ...AZ_ALSO_LEAVE, ...AZ_MUST_STAY].map((r) => r.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it("the Galatasaray club election is a sports story, the regatta rows filed under /spor/ are spor", () => {
+      const byId = (id: string) => AZ_ROWS.find((r) => r.id === id)!;
+      const galatasaray = byId("c57f1b0e");
+      expect(cls(galatasaray.title, galatasaray.description, galatasaray.url)).toBe("spor");
+      const regatta = byId("38eb711c");
+      expect(cls(regatta.title, regatta.description, regatta.url)).toBe("spor");
+    });
+
+    it("the ŞUTSO rows that never name the chamber in the title leave too (the description names it)", () => {
+      // Title alone: 'Seçimde acı olay! Sandık görevlisi hayatını kaybetti'.
+      const bare = AZ_ROWS.filter((r) => r.shape.endsWith("only in the description"));
+      expect(bare.map((r) => r.id).sort()).toEqual(["48fe1e01", "bb465a58", "fa0f82de"]);
+      for (const r of bare) {
+        expect(cls(r.title, null, r.url), r.title).toBe("politika");
+        notInGate(r.title, r.description, r.url);
+      }
+    });
+
+    it("known residual: the 13th member of the ŞUTSO cluster names no chamber anywhere, so it stays in the gate", () => {
+      // haberturk 440cdf85, stored politika. Title 'Sandık görevlisi seçimde
+      // hayatını kaybetti', description 'Şanlıurfa'da seçimde sandık görevlisi
+      // olarak görev yapan 64 yaşındaki Ali Ağlamış, ...': nothing in the text
+      // says the election was a chamber's, and a poll worker's death at a
+      // general election is politics. Pinned so a change is noticed.
+      expect(
+        cls(
+          "Sandık görevlisi seçimde hayatını kaybetti",
+          "Şanlıurfa'da seçimde sandık görevlisi olarak görev yapan 64 yaşındaki Ali Ağlamış, seçim sırasında geçirdiği kalp krizi sonucu yaşamını yitirdi. Olayla ilgili soruşturma sürüyor",
+          "https://www.haberturk.com/gundem/son-dakika-haberler-sanliurfa-da-sandik-gorevlisi-64-yasindaki-ali-aglamis-se",
+        ),
+      ).toBe("politika");
+    });
+  });
+
+  describe("synthetic shapes: expected NOT politika and NOT son_dakika", () => {
+    it.each([
+      ["Ticaret Odası seçimi yapıldı", null],
+      ["Ticaret ve Sanayi Odası seçimlerinde oy sayımı sürüyor", null],
+      ["Eczacı Odası seçimleri yapıldı", null],
+      ["Kulüp seçimi öncesi adaylar belli oldu", null],
+      ["Spor kulübünde seçim heyecanı", null],
+      ["Futbol Federasyonu seçimi ertelendi", null],
+      ["Dernek seçimi yapıldı", null],
+      ["Sendika seçimi sonuçlandı", null],
+      ["Fenerbahçe'de seçim tarihi belli oldu", null],
+      ["Doğru ürün seçimi maliyeti düşürüyor", null],
+      ["Renk seçimi ev dekorasyonunda belirleyici", null],
+      ["Okul seçimi yapan veliler dikkat", null],
+      ["Cumhurbaşkanlığı Bisiklet Turu başladı", null],
+      ["Cumhurbaşkanlığı Kupası finali yarın oynanacak", null],
+      ["Cumhurbaşkanlığı Yelken Yarışları sona erdi", null],
+      ["Cumhurbaşkanlığı Satranç Turnuvası başladı", null],
+      ["Cumhurbaşkanlığı Golf Turnuvası'nda şampiyon belli oldu", null],
+      ["Atletizmde Cumhurbaşkanlığı Kupası heyecanı", null],
+      ["Cumhurbaşkanlığı 8. Uluslararası Yat Yarışları başladı", null],
+      ["Kütahya'da elektrik kesintisi", "Hava muhalefeti nedeniyle enerji nakil hattında arıza oluştu."],
+      ["Kütahya'da elektrik kesintisi", "Hava  muhalefeti nedeniyle enerji nakil hattında arıza oluştu."],
+      ["Kütahya'da elektrik kesintisi", "Aşırı HAVA MUHALEFETİ nedeniyle enerji nakil hattında arıza oluştu."],
+      ["Kayseri'de bisiklet etkinliği", "Katılımcılar Recep Tayyip Erdoğan Millet Bahçesi'nde başladı."],
+      ["Kayseri'de bisiklet etkinliği", "Etkinlik Recep Tayyip Erdoğan Millet Bahçesi'nde başladı."],
+      ["Trafik kazası", "Erdoğan Bulvarı'nda kaza yaşandı, iki araç çarpıştı."],
+      ["Kültür etkinliği", "Etkinlik Erdoğan Kongre ve Kültür Merkezi'nde yapılacak."],
+      ["Kongre", "Toplantı Erdoğan Kongre Merkezi'nde yapıldı."],
+      ["Mahalle haberi", "Erdoğan Parkı'nda piknik düzenlendi."],
+      ["Mahalle haberi", "Erdoğan Caddesi'nde yol çalışması başladı."],
+      ["Hastane haberi", "Erdoğan Hastanesi'nde yeni poliklinik açıldı."],
+      ["Mahalle haberi", "Erdoğan Camii'nde bayram namazı kılındı."],
+      ["Spor haberi", "Erdoğan Spor Salonu'nda maç oynandı."],
+      ["Eğitim haberi", "Erdoğan Lisesi öğrencileri mezun oldu."],
+      ["Kültür haberi", "Erdoğan Külliyesi'nde sergi açıldı."],
+      ["Edebiyat gündemi", "Şair, yazar ve siyasetçi Yahya Kemal Beyatlı'nın vefatının 68. yıl dönümü."],
+      ["Edebiyat gündemi", "Ressam, şair ve siyasetçi Ali Veli'nin sergisi açıldı."],
+      ["Edebiyat gündemi", "Avukat ve siyasetçi Ayşe Yılmaz'ın vefatının yıl dönümü."],
+      [
+        "Stratejik petrol rezervleri 1982'den beri en düşük seviyede: Benzin fiyatları neden düşmüyor?",
+        "Petrol fiyatları, ABD ve İsrail'in İran'a yönelik operasyonlarının ardından yüzde 56 artışla 113 doların üzerine çıktı. ABD'de rekor kıran akaryakıt fiyatlarının Cumhuriyetçi Parti'ye ağır bir siyasi fatura kesebileceği belirtiliyor.",
+      ],
+      ["Petrol fiyatları fırladı", "Cumhuriyetçi Parti yönetimi İran'a yönelik operasyonları sürdürüyor."],
+      ["Villaya baskın", "Uyuşturucu partisine yapılan operasyonda 20 kişi gözaltına alındı."],
+      ["Ev partisinde kavga", "Doğum günü partisinde çıkan kavgada 3 kişi gözaltına alındı."],
+      ["Limanda yeni dönem", "DP World liman operasyonlarını genişletiyor."],
+      ["Misket bombası testi", "Kuzey Kore'nin 'Standart Tip 2' başlığı operasyonel kullanıma hazır."],
+    ] as Array<[string, string | null]>)("%s | %s", (title, description) => {
+      notInGate(title, description);
+    });
+
+    it("'Brezilya' style singular 'yarış' is an election race and stays politika (no regression of the sports-event guard)", () => {
+      expect(cls("Brezilya'da cumhurbaşkanlığı yarışı ikinci tura kaldı")).toBe("politika");
+    });
+  });
+
+  describe("GREEN controls: still politika", () => {
+    it.each([
+      ["CHP Genel Başkanı Özel"],
+      ["Cumhurbaşkanı Erdoğan kabine toplantısı"],
+      ["YSK seçim takvimini açıkladı"],
+      ["Yerel seçim için geri sayım"],
+      ["Meclis'te bütçe görüşmeleri"],
+      ["Bahçeli"],
+      ["Belediyeye operasyon: CHP'li başkan gözaltında"],
+      ["Muhalefet partileri ortak açıklama yaptı"],
+      ["AK Parti il başkanı istifa etti"],
+    ])("%s", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+
+    it.each([
+      // singular 'yarış' is an election race; 'yatırım' is not 'yat'
+      ["Brezilya'da cumhurbaşkanlığı yarışı ikinci tura kaldı"],
+      ["Cumhurbaşkanı Yardımcısı Yılmaz yatırım programını açıkladı"],
+      ["Cumhurbaşkanlığı seçimi ikinci tura kaldı"],
+      ["Cumhurbaşkanlığı Kabinesi toplandı"],
+      // only the NAMED venue suffix is a venue: the president stays the president
+      ["Erdoğan camiden çıkışta soruları yanıtladı"],
+      ["Erdoğan kongrede konuştu"],
+      ["Erdoğan parkta vatandaşlarla buluştu"],
+      ["Erdoğan, Millet Bahçesi'nde konuştu"],
+      ["DSP il başkanına gözaltı"],
+      ["BTP Genel Başkanı Hüseyin Baş İstanbul Barosu seçiminde oy kullandı"],
+      // a general election is not a club or a chamber one
+      ["Erken seçim çağrısı yapıldı"],
+      ["Seçim sonuçları belli oldu"],
+      ["ABD'de ara seçim heyecanı"],
+      ["Seçimde oy kullanma işlemi başladı"],
+    ])("%s", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+
+    it.each([
+      // the descriptions: a bare political word, a party, a leader
+      ["Yeni düzenleme", "Muhalefet partileri toplandı"],
+      ["Yeni düzenleme", "Muhalefet liderleri sokağa çağırdı"],
+      ["Yeni düzenleme", "İktidar ve muhalefet milletvekilleri tartıştı"],
+      ["Yeni düzenleme", "Siyaset kulislerinde hareketlilik"],
+      ["Yeni düzenleme", "Siyasetin gündemi yoğun"],
+      ["Yeni düzenleme", "Cumhurbaşkanı Erdoğan'ın mesajı"],
+      ["Yeni düzenleme", "Erdoğan Stadyumu'nda Erdoğan konuştu"],
+      ["Yeni düzenleme", "Erdoğan camiden çıkışta konuştu"],
+      ["Yeni gelişme", "Belediyeye yönelik soruşturmada 5 gözaltı kararı"],
+      ["Yeni gelişme", "İBB'ye yönelik soruşturma genişledi"],
+      ["Yeni gelişme", "BBP il başkanlığına operasyon düzenlendi"],
+      ["Yeni gelişme", "Yeni Parti'ye operasyon düzenlendi"],
+      ["Yeni gelişme", "HÜDA PAR yöneticilerine gözaltı"],
+      ["Yeni gelişme", "Cumhuriyetçi Vatanseverler Partisi Genel Başkanı gözaltına alındı"],
+      ["Yeni gelişme", "Anavatan Partisi il başkanlığına operasyon düzenlendi"],
+      ["Yeni gelişme", "Hür Dava Partisi Genel Başkanı hakkında soruşturma başlatıldı"],
+      ["Yeni gelişme", "Berlin'de Sol Parti ile koalisyon görüşmeleri sürüyor"],
+      // 'siyasetçi' outside an occupation list is still a politics word
+      ["Yeni gelişme", "Hiçbir profesyonel siyasetçiyi barındırmayan seçim listesi kazandı"],
+      ["Yeni gelişme", "Siyasetçilerin tepkisi sürüyor"],
+      ["Yeni gelişme", "Siyasetçi Ali Veli açıklama yaptı"],
+    ] as Array<[string, string]>)("description of %s: %s", (title, description) => {
+      expect(cls(title, description)).toBe("politika");
+    });
+
+    it("a title with the Turkish party acronym and an enforcement action is still carried by the party marker", () => {
+      expect(cls("Yeni gelişme", "DP il başkanlığına operasyon düzenlendi")).toBe("politika");
+      expect(cls("Yeni gelişme", "EMEP üyelerine gözaltı")).toBe("politika");
+      expect(cls("Yeni gelişme", "UBP binasına soruşturma")).toBe("politika");
+    });
+
+    it("a party office together with a party word carries an action, anywhere in the text", () => {
+      expect(cls("Yeni gelişme", "Vatan Partisi Genel Başkanı hakkında soruşturma başlatıldı")).toBe("politika");
+      expect(cls("Yeni gelişme", "Doğru Yol Partisi il başkanı gözaltına alındı")).toBe("politika");
+      // an office without a party word is an association's
+      expect(cls("Yeni gelişme", "Tüketici Hakları Derneği Genel Başkanı hakkında soruşturma başlatıldı")).not.toBe("politika");
+      // a party word without an office is a party in the social or foreign sense
+      expect(cls("Yeni gelişme", "Doğum günü partisinde çıkan kavgada 3 kişi gözaltına alındı")).not.toBe("politika");
+    });
+
+    it("'DP' is the Demokrat Parti, 'DP World' the port operator", () => {
+      expect(cls("Yeni gelişme", "DP il başkanlığına operasyon düzenlendi")).toBe("politika");
+      expect(cls("Yeni gelişme", "DP World operasyonları genişletiyor")).not.toBe("politika");
+    });
+
+    it("a 'parti binası' is the office of a domestic party: the bare noun still carries an action", () => {
+      expect(cls("Parti binasına operasyon")).toBe("politika");
+      expect(cls("Yeni gelişme", "Parti binasına operasyon düzenlendi")).toBe("politika");
+    });
+  });
+
+  describe("the election rule: what counts and what does not", () => {
+    it("a sports title does not count a bare 'seçim'; a club leader or a party in the title still does", () => {
+      expect(cls("Galatasaray'da seçim kararı")).toBe("spor");
+      expect(cls("Beşiktaş'ta seçim heyecanı")).toBe("spor");
+      expect(cls("Özgür Özel Galatasaray seçimine değindi")).toBe("politika");
+      expect(cls("CHP'den Fenerbahçe seçimi yorumu")).toBe("politika");
+    });
+
+    it("a chamber named only in the description does not count either", () => {
+      expect(cls("Seçimde acı olay", "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde kalp krizi geçiren sandık görevlisi öldü.")).not.toBe("politika");
+      expect(cls("Seçim sonuçları belli oldu", "Ticaret Odası seçimlerinde yeni başkan belli oldu.")).not.toBe("politika");
+    });
+
+    it("a vote ('oy') in a chamber or club election is not politics either; a party in the same text still is", () => {
+      expect(cls("Seçimde acı olay", "Şanlıurfa Ticaret ve Sanayi Odası seçimlerinde oy verme işlemi sürüyordu.")).not.toBe("politika");
+      expect(cls("Yeni gelişme", "Oda seçiminde oy kullanma işlemi tamamlandı.")).not.toBe("politika");
+      expect(cls("Yeni gelişme", "Kulüp kongresinde oy sayımı sürüyor.")).not.toBe("politika");
+      expect(cls("Yeni gelişme", "Oy sayımı sürüyor")).toBe("politika");
+      expect(cls("Yeni gelişme", "CHP'li üyeler Baro seçiminde oy kullandı")).toBe("politika");
+    });
+
+    it("'dernek', 'sendika' and 'federasyon' count only in the title: a description that names one is not a veto", () => {
+      expect(cls("Seçim sonuçları belli oldu", "Sakarya'da dernekte oy verme işlemi sürdü.")).toBe("politika");
+      expect(cls("Seçim sonuçları belli oldu", "Sendikal örgütlenmenin tarihi anlatıldı.")).toBe("politika");
+      expect(cls("Rusya Federasyonu'nda seçim sonuçları")).toBe("politika");
+      expect(cls("Türkiye Hokey Federasyonu seçimi yapıldı")).not.toBe("politika");
+      expect(cls("Dernek seçimi yapıldı")).not.toBe("politika");
+    });
+
+    it("'oda' inside another word is not a chamber ('Odatv', 'Odak')", () => {
+      expect(cls("Odatv seçim anketini açıkladı")).toBe("politika");
+      expect(cls("Odak noktasında seçim var")).toBe("politika");
+    });
+
+    it("the NON_STATE_ELECTORATE words are whole word starts", () => {
+      expect(cls("TOBB seçimi yapıldı")).not.toBe("politika");
+      expect(cls("Barış seçimi için çağrı")).toBe("politika");
+      expect(cls("Kulüpler Birliği seçimi yapıldı")).not.toBe("politika");
+    });
+  });
+
+  describe("the Cumhurbaşkanlığı rule: a sporting-event noun AFTER the stem", () => {
+    it("a sporting noun BEFORE the stem does not drop it", () => {
+      expect(cls("Kupa töreninde Cumhurbaşkanı Yardımcısı konuştu")).toBe("politika");
+      expect(cls("Maraton sonrası Cumhurbaşkanı açıklama yaptı")).toBe("politika");
+    });
+
+    it("the president named in the same title is still the president", () => {
+      expect(cls("Cumhurbaşkanı Erdoğan Cumhurbaşkanlığı Kupası'nı verdi")).toBe("politika");
+      expect(cls("Erdoğan, Cumhurbaşkanlığı Bisiklet Turu'nu başlattı")).toBe("politika");
+    });
+
+    it("a Cumhurbaşkanlığı decree or office is politics", () => {
+      expect(cls("Cumhurbaşkanlığı kararnamesi yayımlandı")).toBe("politika");
+      expect(cls("Cumhurbaşkanlığı İletişim Başkanlığı açıklama yaptı")).toBe("politika");
+      expect(cls("Cumhurbaşkanlığı Kabinesi bugün toplanıyor")).toBe("politika");
+    });
+  });
+
+  describe("the 'hava muhalefeti' guard", () => {
+    it("'muhalefet' after 'hava' is the weather; anywhere else it is the opposition", () => {
+      expect(cls("Uçuşlar iptal", "Hava muhalefeti nedeniyle seferler yapılamadı.")).not.toBe("politika");
+      expect(cls("Uçuşlar iptal", "Hava muhalefetinden dolayı seferler yapılamadı.")).not.toBe("politika");
+      expect(cls("Yeni gelişme", "Muhalefet hava saldırısını kınadı")).toBe("politika");
+      expect(cls("Yeni gelişme", "Muhalefet lideri açıkladı")).toBe("politika");
+      expect(cls("Hava muhalefeti nedeniyle seferler iptal edildi")).not.toBe("politika");
+      expect(cls("Muhalefetten hava harekâtı tepkisi")).toBe("politika");
+    });
+
+    it("the guard is the lookbehind only: 'havalimanı muhalefet' is still the opposition", () => {
+      expect(cls("Yeni gelişme", "Havalimanı muhalefet açıklaması")).toBe("politika");
+    });
+  });
+
+  describe("linear time on large inputs (the new lookbehind and venue guard)", () => {
+    const BUDGET_MS = 50;
+    const inputs: Array<[string, string]> = [
+      ["100k blanks after hava, then muhalefet", "hava" + " ".repeat(99_980) + "muhalefet"],
+      ["100k blanks and a trailing hava", " ".repeat(99_990) + "hava"],
+      ["100k 'hava ' repeated", "hava ".repeat(20_000)],
+      ["100k 'hava muhalefet' repeated", "hava muhalefet ".repeat(6_700).slice(0, 100_000)],
+      ["100k 'erdoğan kongre' repeated", "erdoğan kongre ".repeat(6_700).slice(0, 100_000)],
+      ["100k 'erdoğan' + blanks + 'kongre ve kültür'", "erdoğan" + " ".repeat(99_950) + "kongre ve kültür"],
+      ["100k 'cumhurbaşkan' repeated", "cumhurbaşkan ".repeat(7_700).slice(0, 100_000)],
+      ["100k 'seçim' repeated", "seçim ".repeat(16_600).slice(0, 100_000)],
+      ["100k 'oda' repeated", "oda ".repeat(25_000)],
+      ["100k 'ürün' blanks 'seçim'", "ürün" + " ".repeat(99_990) + "seçim"],
+      ["100k 'parti' repeated", "parti ".repeat(16_600).slice(0, 100_000)],
+      ["'parti' then 100k blanks", "parti" + " ".repeat(99_990)],
+      ["'parti' then 100k blanks then 'uye'", "parti" + " ".repeat(99_980) + "uye"],
+      ["100k 'partisi ' repeated", "partisi ".repeat(12_500)],
+      ["100k 'partiiiii' letters", "p" + "arti".repeat(1) + "i".repeat(99_990)],
+      ["100k 'tip ' repeated", "tip ".repeat(25_000)],
+      ["'tip' then 100k blanks then 'uye'", "tip" + " ".repeat(99_980) + "uye"],
+      // the 'rusya federasyon' lookbehind runs only where 'seçim' or 'oy' matched
+      ["'seçim' then 100k blanks", "seçim" + " ".repeat(99_990)],
+      ["'oy' then 100k blanks", "oy" + " ".repeat(99_990)],
+      ["'seçim rusya' then 100k blanks then 'federasyon'", "seçim rusya" + " ".repeat(99_950) + "federasyon"],
+      ["100k 'seçim rusya ' repeated", "seçim rusya ".repeat(8_400).slice(0, 100_000)],
+      ["100k 'oy ' repeated", "oy ".repeat(33_300).slice(0, 100_000)],
+      ["'ve' then 100k blanks then 'siyasetçi'", "ve" + " ".repeat(99_980) + "siyasetçi"],
+      ["100k 've siyasetçi ' repeated", "ve siyasetçi ".repeat(7_700).slice(0, 100_000)],
+    ];
+
+    it.each(inputs)("%s classifies in under 50 ms", (_name, text) => {
+      classifyCategory("Isınma", "Isınma metni", NEUTRAL_URL);
+      const started = performance.now();
+      const viaTitle = classifyCategory(text, null, NEUTRAL_URL);
+      const viaDescription = classifyCategory("Başlık", text, NEUTRAL_URL);
+      const elapsed = performance.now() - started;
+      expect(ALL.has(viaTitle)).toBe(true);
+      expect(ALL.has(viaDescription)).toBe(true);
+      expect(elapsed).toBeLessThan(BUDGET_MS * 2);
+    });
+  });
+});
+
+// Review fixes (7-day read-only replay of base ec94980 against the hunt-22
+// module, 71,162 rows of 2026-10-26 .. 2026-11-02). The first cut of the
+// election veto read 'baro' and 'borsa' on the whole text and dropped political
+// rows: bar elections are contested along political lines (the İstanbul and
+// İzmir Bar elections, the prosecutor's investigation of a candidate over his
+// speech), and a stock exchange is no electorate at all (an Israeli general
+// election story was vetoed by 'Tel Aviv Borsası'). The compound rule dropped
+// bare 'parti', which also dropped party stories whose party is in no table.
+const AZ_REVIEW_KEEP: AzRow[] = [
+  {
+    id: "6ca8ee6e",
+    source: "prod",
+    shape: "Kanadoğlu investigation over a bar-election speech",
+    title: "Baro seçimindeki konuşması nedeniyle Av. Kanadoğlu hakkında resen soruşturma başlatıldı",
+    description: "İstanbul Cumhuriyet Başsavcılığı, İstanbul Barosunun Olağan Genel Kurulu'ndaki konuşması nedeniyle Avukat Hakları Grubu'nun adayı Osman Korkut Kanadoğlu hakkında resen soruşturma başlattı.",
+    url: "https://dokuz8haber.net/baro-secimindeki-konusmasi-nedeniyle-av-kanadoglu-hakkinda-resen-sorusturma-baslatildi",
+    stored: "politika",
+  },
+  {
+    id: "b7e34095",
+    source: "prod",
+    shape: "Kanadoğlu investigation over a bar-election speech",
+    title: "İstanbul Barosu seçimindeki konuşması nedeniyle Prof. Dr. Kanadoğlu hakkında soruşturma başlatıldı",
+    description: "Av. Prof. Dr. Osman Korkut Kanadoğlu hakkında İstanbul Barosu'nun Olağan Genel Kurulu'ndaki konuşması nedeniyle soruşturma başlatıldı.",
+    url: "https://www.birgun.net/haber/istanbul-barosu-secimindeki-konusmasi-nedeniyle-prof-dr-kanadoglu-hakkinda-sorusturma-baslatildi-742641",
+    stored: "politika",
+  },
+  {
+    id: "db33aa33",
+    source: "prod",
+    shape: "Kanadoğlu investigation over a bar-election speech",
+    title: "Osman Korkut Kanadoğlu ne demişti, neden soruşturma açıldı? İstanbul Barosu seçimlerinde kaç oy aldı?",
+    description: "İstanbul Barosu başkan adayı Prof. Dr. Osman Korkut Kanadoğlu hakkında soruşturma başlatıldı. Kanadoğlu hakkında hangi sözleri nedeniyle soruşturma açıldığı, baro seçimlerinde kaç oy aldığı araştırılmaya başlandı.",
+    url: "https://www.ekonomim.com/gundem/osman-korkut-kanadoglu-ne-demisti-neden-sorusturma-acildi-istanbul-barosu-secimlerinde-kac-oy-aldi-haberi-927170",
+    stored: "politika",
+  },
+  {
+    id: "15832d4a",
+    source: "prod",
+    shape: "column on the Brazil, Serbia and İstanbul Bar elections",
+    title: "Kemal Can yazdı: Seçimler, tren garları ve umut",
+    description: "Kemal Can \"Seçimler, tren garları ve umut\" başlıklı yazısında Brezilya, Sırbistan ve İstanbul Barosu seçimlerini ele aldı.\nKemal Can yazdı: Seçimler, tren garları ve umut Medyascope",
+    url: "https://medyascope.tv/2026/10/26/kemal-can-yazdi-secimler-tren-garlari-ve-umut/",
+    stored: "politika",
+  },
+  {
+    id: "3f571809",
+    source: "prod",
+    shape: "bar elections won by nationalist-secularist slates",
+    title: "Baro seçimleri: Milliyetçi-ulusalcı avukatlar neden yükselişte?",
+    description: "İzmir Barosu'nun ardından İstanbul Barosu seçimlerini de milliyetçi-ulusalcı çizgideki adaylar kazandı. Peki avukatların tercihi neden bu yönde oldu?",
+    url: "https://www.dw.com/tr/baro-seçimleri-milliyetçi-ulusalcı-avukatlar-neden-yükselişte/a-79764200?maca=tur-rss-tur-all-1495-rdf",
+    stored: "politika",
+  },
+  {
+    id: "1309e6c4",
+    source: "prod",
+    shape: "Israeli general election, vetoed only by 'Tel Aviv Borsası'",
+    title: "İsrail seçim sonuçlarında belirsizlik sürerken borsa geriledi, şekel değer kaybetti",
+    description: "İsrail'de seçim sonuçlarının hükümetin kurulmasına ilişkin belirsizliği artırmasıyla Tel Aviv Borsası'nda düşüş yaşandı. Şekel dolar karşısında yüzde 1 değer kaybetti. TSİ ile 15.00 civarı oyların yüzde 84'ü sayılırken belirsizlik sürüyor.",
+    url: "https://anlatilaninotesi.com.tr/20261028/israil-secim-sonuclarinda-belirsizlik-surerken-borsa-geriledi-sekel-deger-kaybetti-1109934900.html",
+    stored: "politika",
+  },
+  {
+    id: "3f4bd704",
+    source: "prod",
+    shape: "TİP students jailed over a banner against Bakan Tekin",
+    title: "Tutuklu üniversite öğrencileri Nehir ve Nevin tahliye edildi:",
+    description: "Bakan Tekin'in okul ziyareti öncesi astıkları protesto pankartı nedeniyle tutuklanan TİP'li üniversite öğrencileri Nevin Tekin ve Nehir Dizdar tahliye oldu. Parti yöneticileri ve arkadaşları tarafından karşılanan öğrenciler, eğitim hakkı ve çocukların güvenliği için mücadeleye edeceklerini belirtti.",
+    url: "https://www.odatv.com/guncel/tutuklu-ogrenciler-nehir-ve-nevin-tahliye-edildi-120168671",
+    stored: "politika",
+  },
+  {
+    id: "7e0624b6",
+    source: "prod",
+    shape: "CPI(M) and the Indian voter-roll purge, youth leaders detained",
+    title: "Milyonlarca seçmenin kaydı silindi: CPI(M)'den Modi'ye sert çıkış",
+    description: "Hindistan'da yaklaşık 130 milyon seçmenin kütüklerden silindiği iddiaları başkenti kilitledi; polis gençlik liderlerini gözaltına alıp interneti askıya aldı. Tartışmalar devam ederken Hindistan Komünist Partisi (Marksist) Politbüro üyesi Arun Kumar, uygulamanın özellikle yoksulları, dini azınlıkları ve kadınları etkilediğini söyledi. Kumar, Başbakan Narendra Modi’nin partisi BJP’yi ve Seçim Komisyonu’nu eleştirerek Baş Seçim Komiseri’nin istifasını isteyen protestoların büyütülmesi çağrısı yaptı",
+    url: "https://www.cgtnturk.com/milyonlarca-secmenin-kaydi-silindi-cpimden-modiye-sert-cikis",
+    stored: "politika",
+  },
+  {
+    id: "5383b5b2",
+    source: "prod",
+    shape: "Israeli Arab party leaders: detention demanded",
+    title: "Ben-Gvir, Şin-Bet'ten Arap partisi liderlerinin gözaltına alınmasını istedi",
+    description: "İsrail Ulusal Güvenlik Bakanı Ben-Gvir, Şin-Bet'ten Ortak Liste ve Raam Partisi liderlerinin gözaltına alınmasını istedi. Maliye Bakanı Smotrich de liderlerin sorgulanmasını isterken, Netanyahu polisin mesnetsiz bulduğu 'seçimlerin çalındığı' iddiasını yineledi.",
+    url: "https://www.haberler.com/guncel/ben-gvir-sin-bet-ten-arap-partisi-liderlerinin-20376981-haberi/",
+    stored: "politika",
+  },
+];
+
+describe("wave AZ (hunt-22) review fixes", () => {
+  describe("rows the first cut dropped from the gate stay politika", () => {
+    it.each(AZ_REVIEW_KEEP)("$id ($shape) is politika", (row) => {
+      expect(cls(row.title, row.description, row.url)).toBe("politika");
+    });
+
+    it("is not vacuous: 9 distinct rows, all politika in production", () => {
+      expect(AZ_REVIEW_KEEP).toHaveLength(9);
+      expect(new Set(AZ_REVIEW_KEEP.map((r) => r.id)).size).toBe(9);
+      expect(AZ_REVIEW_KEEP.every((r) => r.stored === "politika")).toBe(true);
+    });
+  });
+
+  describe("bar and stock exchange are not electorates; chambers and clubs still are", () => {
+    it.each([
+      ["Baro seçimi tamamlandı"],
+      ["İstanbul Barosu seçimlerinde zafer Kocasakal'ın oldu"],
+      ["Barolar Birliği seçimi yapıldı"],
+      ["Ticaret Borsası seçimi yapıldı"],
+      ["Borsa İstanbul'da seçim sonrası düşüş"],
+    ])("%s", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+
+    it("a bar or an exchange named in the description is no veto", () => {
+      expect(cls("Seçim sonuçları belli oldu", "Baro seçimlerinde yeni başkan belli oldu.")).toBe("politika");
+      expect(cls("Yeni gelişme", "Baro seçiminde oy kullanma işlemi tamamlandı.")).toBe("politika");
+      expect(cls("Seçim sonuçları belli oldu", "Tel Aviv Borsası'nda düşüş yaşandı.")).toBe("politika");
+    });
+
+    it("a chamber or a club in the same text is still a veto", () => {
+      expect(cls("Seçim sonuçları belli oldu", "Ticaret Odası seçimlerinde yeni başkan belli oldu.")).not.toBe("politika");
+      expect(cls("Seçim sonuçları belli oldu", "Van TSO'da oylama sürdü.")).not.toBe("politika");
+      expect(cls("Seçim sonuçları belli oldu", "TOBB delegeleri belirlendi.")).not.toBe("politika");
+      expect(cls("Kulüp seçimi öncesi adaylar belli oldu")).not.toBe("politika");
+    });
+  });
+
+  describe("a party that is in no table still carries an enforcement action", () => {
+    it.each([
+      ["Emek Partisi üyelerine operasyon"],
+      ["SOL Parti üyelerine gözaltı"],
+      ["TKP üyesi 5 kişi gözaltına alındı"],
+      ["TİP'li gençlere gözaltı"],
+      ["TİP üyesi öğrenciler tutuklandı"],
+      ["Raam Partisi liderlerine soruşturma"],
+      ["Partili gençlere gözaltı"],
+      ["Parti yöneticilerine operasyon"],
+      ["Hindistan Komünist Partisi (Marksist) üyelerine gözaltı"],
+    ])("%s", (title) => {
+      expect(cls(title)).toBe("politika");
+    });
+
+    it("the same shapes in a description", () => {
+      expect(cls("Yeni gelişme", "Emek Partisi üyelerine operasyon düzenlendi")).toBe("politika");
+      expect(cls("Yeni gelişme", "TİP'li öğrenciler tutuklandı")).toBe("politika");
+      expect(cls("Yeni gelişme", "Partisinin yöneticileri gözaltına alındı")).toBe("politika");
+    });
+
+    it("an event party, a foreign party named in passing and a type are still not politics", () => {
+      notInGate("Villaya baskın", "Uyuşturucu partisine yapılan operasyonda 20 kişi gözaltına alındı.");
+      notInGate("Ev partisinde kavga", "Doğum günü partisinde çıkan kavgada 3 kişi gözaltına alındı.");
+      notInGate("Halloween partisinin çıkışında arbede", "Bolu'da AVM güvenlikçisi darp edildi, 4 kişi gözaltında");
+      notInGate("Cadılar Bayramı partisi sonrası AVM'de kavga", "Dört kişi gözaltına alındı.");
+      notInGate("Kuzey Kore misket bombası", AZ_TIP_ROW.description);
+      notInGate("Tıp fakültesi öğrencilerine operasyon", "Tıp öğrencileri gözaltına alındı.");
+    });
+  });
+});

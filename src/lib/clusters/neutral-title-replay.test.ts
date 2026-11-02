@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { pickNeutralTitle } from "./neutral-title";
+import { isAcceptableNeutral, pickNeutralTitle } from "./neutral-title";
 
 // Replay of the headline cron's re-pick over production data. The fixture is
 // 150 clusters (article_count >= 4, the most recently updated) captured on
@@ -120,5 +120,81 @@ describe("re-pick replay over 150 production clusters", () => {
       expect(c.stored.length, cid).toBeGreaterThanOrEqual(45);
       expect(repick(c), cid).not.toBe(c.stored);
     }
+  });
+});
+
+// Hunt 22 (h22-editorial-3, 2026-11-02): two clusters the extractive-v3 picker
+// titled with a verdict word and with a mid-title ticker. Their member titles are
+// the stored ones (read-only SELECT, newest first). They live here and not in the
+// fixture above because that file's count of 150 is pinned.
+const HUNT22: ReplayCluster[] = [
+  {
+    cid: "310aedf3",
+    stored: "Emir Sarıgül itiraf etti: Babam, Özgür Özel'e 350 bin dolar verdi",
+    titles: [
+      "Emir Sarıgül savcılığa konuştu! İfadesinde Özgür Özel de var",
+      "Emir Sarıgül'den babası ve Özgür Özel hakkında \"350 bin dolar\" iddiası: Aracına koydu",
+      "Emir Sarıgül'ün ifadesi CNN Türk'te: \"Babam, Özgür Özel'e 350 bin dolar rüşvet verdi\"",
+      "Emir Sarıgül'den babası Mustafa Sarıgül ve Özgür Özel hakkında çok çarpıcı itiraf",
+      "Son dakika... Emir Sarıgül'ün ek ifadesi ortaya çıktı! 'Babam Özgür Özel'e rüşvet verdi'",
+      "Emir Sarıgül itiraf etti: Babam, Özgür Özel'e 350 bin dolar verdi",
+      "Emir Sarıgül'ün ek ifadesi gündeme oturdu: ‘Babam, Özgür Özel’e 350 bin dolar verdi’",
+      "Mustafa Sarıgül'ün oğlu Emir Sarıgül: 'Babam Özgür Özel'e 350 bin dolar verdi'",
+      "Emir Sarıgül’ün ifadesi ortaya çıktı! 350 bin dolarlık itiraf: Babam Özel’in arabasına bıraktı",
+    ],
+  },
+  {
+    cid: "80bfb011",
+    stored: "Altın Fiyatlarında Son Dakika. 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti",
+    titles: [
+      "2 Kasım altın ne kadar oldu, daha düşecek mi? SON DAKİKA! Altın fiyatları yükseldi mi, düştü mü? Güncel altın fiyatları!",
+      "Altın yeni haftaya yükselişle başladı: Gözler kritik verilerde",
+      "Altın Fiyatlarında Son Dakika! 1 Yılın Dibini Gördü, Yeniden Yükselişe Geçti",
+    ],
+  },
+];
+
+describe("re-pick replay: the hunt-22 clusters", () => {
+  const byHunt22 = (cid: string): ReplayCluster => {
+    const c = HUNT22.find((x) => x.cid === cid);
+    if (!c) throw new Error(`hunt-22 cluster ${cid} missing`);
+    return c;
+  };
+
+  it("310aedf3: the stored verdict title is replaced by a title that neither says 'itiraf' nor drops the hedge", () => {
+    const c = byHunt22("310aedf3");
+    const picked = repick(c);
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect(picked).not.toMatch(/itiraf/i);
+    expect(picked).toMatch(/iddia|ifade|öne sürd/i);
+    expect(isAcceptableNeutral(picked!, c.titles)).toBe(true);
+  });
+
+  it("80bfb011: the stored title with a mid-title 'Son Dakika.' is replaced by one without a ticker", () => {
+    const c = byHunt22("80bfb011");
+    const picked = repick(c);
+    expect(picked).not.toBeNull();
+    expect(picked).not.toBe(c.stored);
+    expect(picked!.toLocaleLowerCase("tr")).not.toContain("son dakika");
+    expect(isAcceptableNeutral(picked!, c.titles)).toBe(true);
+  });
+
+  it("is idempotent: re-picking with the pick as incumbent returns it", () => {
+    for (const c of HUNT22) {
+      const picked = repick(c);
+      expect(pickNeutralTitle(c.titles.map((title) => ({ title })), { incumbent: picked }), c.cid).toBe(picked);
+    }
+  });
+
+  it("the fresh pick (no incumbent) is the same title", () => {
+    for (const c of HUNT22) {
+      expect(pickNeutralTitle(c.titles.map((title) => ({ title }))), c.cid).toBe(repick(c));
+    }
+  });
+
+  it("the fixture's count stays pinned: these clusters are not in it", () => {
+    for (const c of HUNT22) expect(CLUSTERS.some((x) => x.cid === c.cid)).toBe(false);
+    expect(CLUSTERS).toHaveLength(150);
   });
 });

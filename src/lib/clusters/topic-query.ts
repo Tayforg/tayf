@@ -357,20 +357,29 @@ export async function getTopicCounts(): Promise<Record<
   );
 }
 
-/** Pure. schema.org CollectionPage + ItemList of absolute /cluster/<id> URLs. */
+/** Pure. schema.org CollectionPage + ItemList of absolute /cluster/<id> URLs.
+ *
+ *  `page` (default 1, clamped like the route) makes the node describe the page
+ *  the reader is on: pages 2+ carry `?sayfa=N` in the url, the same
+ *  "<label> haberleri — Sayfa N" name as the <title>, and ListItem positions
+ *  that continue after the previous page. Page 1 is byte-identical to the
+ *  pre-paging output. */
 export function buildTopicCollectionPage(args: {
   slug: TopicSlug;
   bundles: ClusterBundle[];
+  page?: number;
 }): Record<string, unknown> {
   const { slug, bundles } = args;
+  const page = clampTopicPage(args.page ?? 1);
   const base = siteUrl();
   const label = TOPIC_LABELS_TR[slug];
+  const offset = (page - 1) * TOPIC_PAGE_SIZE;
 
   return {
     "@context": "https://schema.org",
     "@type": "CollectionPage",
-    name: `${label} haberleri`,
-    url: `${base}/konu/${slug}`,
+    name: page === 1 ? `${label} haberleri` : `${label} haberleri — Sayfa ${page}`,
+    url: page === 1 ? `${base}/konu/${slug}` : `${base}/konu/${slug}?sayfa=${page}`,
     isPartOf: {
       "@type": "WebSite",
       name: "Tayf",
@@ -381,7 +390,7 @@ export function buildTopicCollectionPage(args: {
       numberOfItems: bundles.length,
       itemListElement: bundles.map((b, i) => ({
         "@type": "ListItem",
-        position: i + 1,
+        position: offset + i + 1,
         name: b.cluster.title_tr,
         url: `${base}/cluster/${b.cluster.id}`,
       })),

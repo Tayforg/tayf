@@ -99,6 +99,39 @@ describe("describeForMeta", () => {
     expect(describeForMeta({ count: 2, attribution: { text: "bir iki üç dört", source: null } }, 40)).toBe("2 kaynak. Kaynak açıklaması: bir iki…");
   });
 });
+
+describe("describeForMeta whitespace at the cut boundary (h22-editorial-2)", () => {
+  // c2a97d0a: "... hayata geçirilecek.  Ulaştırma ..." (two spaces). The cut lands
+  // on the last space of the window; with the double space that was the second
+  // one, so the first stayed in front of the ellipsis: "geçirilecek. …".
+  const prefix = "2 kaynak. Kaynak açıklaması: ";
+  const text = "Yeni proje hayata geçirilecek.  Ulaştırma Bakanı açıkladı";
+
+  it("never leaves a blank in front of the ellipsis", () => {
+    // max - 1 characters = prefix + "Yeni proje hayata geçirilecek.  " (both spaces in the window).
+    const max = prefix.length + "Yeni proje hayata geçirilecek.  ".length + 1;
+    const out = describeForMeta({ count: 2, attribution: { text, source: null } }, max);
+    expect(out).not.toMatch(/\s…$/);
+    expect(out).toBe(`${prefix}Yeni proje hayata geçirilecek.…`);
+  });
+
+  it("holds for every cut position over a text full of double spaces", () => {
+    const spaced = "bir  iki  üç   dört    beş  altı";
+    for (let max = prefix.length + 2; max < prefix.length + spaced.length; max++) {
+      const out = describeForMeta({ count: 2, attribution: { text: spaced, source: null } }, max);
+      expect(out, `max=${max}`).not.toMatch(/\s…$/);
+      expect(out.length, `max=${max}`).toBeLessThanOrEqual(max);
+    }
+  });
+
+  it("the title fallback gets the same trim", () => {
+    // 26 characters in the window: "3 kaynak, tek haber: Bir  " (both spaces).
+    const out = describeForMeta({ count: 3, attribution: null, title: "Bir  iki  üç dört" }, 27);
+    expect(out).not.toMatch(/\s…$/);
+    expect(out).toBe("3 kaynak, tek haber: Bir…");
+  });
+});
+
 describe("describeForMeta base override", () => {
   it("uses base as the leading sentence instead of '{count} kaynak.'", () => {
     expect(

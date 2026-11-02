@@ -33,13 +33,28 @@
 // it drops at 0.15-0.20 were mostly lateral or a different sub-event. Picking again with the pick as
 // incumbent returns it.
 
+// extractive-v4 (hunt 22): a verdict word no longer survives over members that
+// hedge. 'itiraf', 'yalan' (not 'yalanla...': a denial is reporting), 'rezil' and
+// 'çarpıcı' join the loaded words; when at least 40% of three or more members say
+// 'iddia' / 'öne sürdü' / 'ifade', a title that drops the hedge pays
+// HEDGE_LOSS_PENALTY (310aedf3 was titled "Emir Sarıgül itiraf etti: ..." while
+// its members wrote 'iddiası' and 'ifadesi'). A "Son dakika" in the middle of a
+// title that STANDS ALONE (a separator, a quote or the end of the title follows
+// it) is removed by cleanHeadline and is a hard defect (80bfb011 'Altın
+// Fiyatlarında Son Dakika. ...'). When a noun follows it ('son dakika
+// açıklaması', 'son dakika golüyle') the label licenses that noun's possessive,
+// so the words are left alone (deleting them leaves 'açıklaması' without a
+// possessor) and the framing penalty ranks the title down, as before. A
+// first-pick floor candidate that is all capitals is sentence-cased instead of
+// shipped shouting (09f152ec).
+
 // Written to clusters.title_neutral_model so readers can tell an extractive
 // pick from an LLM rewrite. Bump the suffix when the selection or cleaning
 // rules change in a way that alters output; the headline cron then re-picks
 // the last 14 days of older-version titles (neutral_title_repick_candidates,
 // migration 141). Readers must not compare against this constant: use
 // isExtractiveModelId, which recognises every version.
-export const EXTRACTIVE_MODEL_ID = "extractive-v3";
+export const EXTRACTIVE_MODEL_ID = "extractive-v4";
 
 /** True for any extractive pick, whatever rule version wrote it. */
 export function isExtractiveModelId(model: unknown): boolean {
@@ -124,7 +139,7 @@ const FRAMING_FOLDED: RegExp[] = [
   /son\s*dak[iı]ka/u,
   new RegExp(`${L}(?:flaş|flas|canlı|canli)${R}`, "u"),
   new RegExp(
-    `${L}(?:bomba|şok|sok|skandal|rezalet|çarp[iı]c[iı]|olay|dev|kritik|müjde|mujde)${R}`,
+    `${L}(?:bomba|şok|sok|skandal|rezalet|olay|dev|kritik|müjde|mujde)${R}`,
     "u",
   ),
   /dikkat çeken|dikkat ceken|işte o|iste o|işte detaylar|iste detaylar|bakın|bakin/u,
@@ -143,7 +158,32 @@ const LOADED_FOLDED: RegExp[] = [
   new RegExp(`${L}vahşet${R}`, "u"),
   new RegExp(`${L}dev\\s+operasyon${R}`, "u"),
   new RegExp(`${L}işte${R}`, "u"),
+  // A verdict where the members report an allegation (hunt 22, 310aedf3).
+  // 'yalanla...' (to deny) is reporting, so only 'yalan' not followed by 'la'.
+  new RegExp(`${L}itiraf`, "u"),
+  new RegExp(`${L}yalan(?!la)`, "u"),
+  new RegExp(`${L}rezil`, "u"),
+  // Was a framing unit (0.12) until extractive-v4.
+  new RegExp(`${L}çarp[iı]c[iı]${R}`, "u"),
 ];
+
+// Words that attribute a claim instead of asserting it. Tested on foldTr(title).
+const HEDGE = new RegExp(`${L}(?:iddia|öne\\s+sürd|ifade)`, "u");
+
+/**
+ * What a title pays for dropping the hedge its cluster's members carry: when
+ * three or more (deduplicated) members exist and at least HEDGED_SHARE of them
+ * say 'iddia' / 'öne sürdü' / 'ifade', a title without any of those words is
+ * asserting what the sources only allege. Charged to a member's score and to the
+ * stored title's score alike.
+ */
+export const HEDGE_LOSS_PENALTY = 0.15;
+const HEDGED_MIN_MEMBERS = 3;
+const HEDGED_SHARE = 0.4;
+
+function carriesHedge(title: string): boolean {
+  return HEDGE.test(foldTr(title));
+}
 
 export function framingPenalty(title: string): number {
   const folded = foldTr(title);
@@ -180,12 +220,40 @@ function stripLeadIns(title: string): string {
   return t;
 }
 
+// A "son dakika" that does not open the title and STANDS ALONE: a separator, an
+// opening quote or the end of the title follows it ("Altın Fiyatlarında Son
+// Dakika. 1 Yılın Dibini Gördü", "Meteoroloji'den son dakika 'kırmızı alarm': ...",
+// "Ankara'da deprem son dakika"). That is a bulletin label, not part of the
+// event. When a word follows it directly ("son dakika açıklaması", "son dakika
+// transferi", "son dakika golüyle") the label licenses a possessive on that
+// noun, so deleting the two words would leave "açıklaması" without a possessor;
+// such a title is left as written (the framing penalty ranks it down) and is
+// not a defect. `(?<=.)` makes the match non-leading. Tested on foldTr(title).
+const MID_SON_DAKIKA_SOURCE = String.raw`(?<=.)${L}son\s+dak[iı]ka${R}(?=\s*(?:$|[.:!…|])|\s+['"‘“])`;
+const MID_SON_DAKIKA = new RegExp(MID_SON_DAKIKA_SOURCE, "u");
+// The label with the separators that trail it ("Son Dakika." "son dakika:" "SON DAKİKA |").
+const MID_SON_DAKIKA_STRIP = new RegExp(`${MID_SON_DAKIKA_SOURCE}(?:\\s*[.:!…|]+)?`, "gu");
+
+function stripMidSonDakika(title: string): string {
+  const folded = foldTr(title);
+  if (folded.length !== title.length) return title; // cannot splice safely
+  let out = "";
+  let at = 0;
+  for (const m of folded.matchAll(MID_SON_DAKIKA_STRIP)) {
+    out += title.slice(at, m.index);
+    at = m.index + m[0].length;
+  }
+  if (at === 0) return title;
+  return (out + title.slice(at)).replace(/\s{2,}/g, " ").trim();
+}
+
 export function cleanHeadline(title: string): string {
   let t = title.trim();
   // Outlet prefixes ("Halk TV | ...") and "Son dakika" lead-ins, repeatedly:
   // "SON DAKİKA | FLAŞ! x" is "x".
   t = t.replace(/^[^|│]{0,25}[|│]\s*/, "");
   t = stripLeadIns(t);
+  t = stripMidSonDakika(t);
   // House style. Not before a capitalised name: "Başkan Erdoğan Tosun" is a
   // different person than the president.
   t = t.replace(
@@ -336,6 +404,8 @@ function hasHardDefect(t: string, memberTitles: readonly string[], opts: AcceptO
   // characters) or a separator inside the text: "... SALI |GEDİZ UYARDI: ...".
   if (/[|│]/.test(t)) return true;
   if (hasShoutedRun(t)) return true;
+  // A bulletin label in the middle of the title (the lead-in is cleanHeadline's).
+  if (MID_SON_DAKIKA.test(foldTr(t))) return true;
   if (isGenericTitle(t)) return true;
   if (looksEnglish(t)) return true;
   if (!opts.generated && looksTruncated(t, memberTitles)) return true;
@@ -428,15 +498,133 @@ export const REPICK_MARGIN = 0.05;
  */
 export const REPICK_MARGIN_FULL_LENGTH = 0.2;
 
+// ---------------------------------------------------------------------------
+// Sentence case for a shouted floor title (extractive-v4).
+// ---------------------------------------------------------------------------
+
+/** Short all-caps words that are acronyms whatever the other members write. */
+const ACRONYMS: ReadonlySet<string> = new Set([
+  "TBMM", "AFAD", "CHP", "AKP", "MHP", "DEM", "ABD", "AB", "BM", "NATO", "YSK",
+  "PKK", "İBB", "TÜİK", "SGK", "MEB", "MİT", "TSK", "THY",
+]);
+/** A word of at most this many letters may be an acronym; longer ones are words. */
+const ACRONYM_MAX_LETTERS = 5;
+const APOSTROPHES = new Set(["'", "’", "ʼ", "‘"]);
+
+function isAllCaps(t: string): boolean {
+  return /\p{L}/u.test(t) && t === t.toLocaleUpperCase("tr");
+}
+
+function isWordChar(ch: string): boolean {
+  return /[\p{L}\p{N}]/u.test(ch);
+}
+
+/** Start and end (exclusive) of the word inside `token`, without edge punctuation. */
+function coreRange(token: string): [number, number] {
+  let a = 0;
+  let b = token.length;
+  while (a < b && !isWordChar(token.charAt(a))) a++;
+  while (b > a && !isWordChar(token.charAt(b - 1))) b--;
+  return [a, b];
+}
+
+/** Splits "AFAD'DAN" into the stem "AFAD" and the suffix "'DAN" (suffix "" when there is no apostrophe). */
+function splitSuffix(word: string): [string, string] {
+  for (let i = 0; i < word.length; i++) {
+    if (APOSTROPHES.has(word.charAt(i))) return [word.slice(0, i), word.slice(i)];
+  }
+  return [word, ""];
+}
+
+function letterCount(s: string): number {
+  return s.match(/\p{L}/gu)?.length ?? 0;
+}
+
+interface WordForms {
+  /** Short words some non-shouting member writes in upper case ("EPDK'dan zam" -> "EPDK"). */
+  upper: Set<string>;
+  /** Tr-lower-cased word -> how a non-shouting member writes it with a capital ("ankara" -> "Ankara"). */
+  capitalised: Map<string, string>;
+  /** Words some non-shouting member writes entirely in lower case. */
+  lower: Set<string>;
+}
+
+/**
+ * How the non-shouting member titles write their words. A shouted title has lost
+ * that information, so it is read back from the members: an acronym stays in
+ * capitals, a name keeps its capital letter ("ankara" is not what "Ankara'da"
+ * means), unless some member also writes the word in lower case (then it is a
+ * common word that merely opened a sentence).
+ */
+function memberWordForms(memberTitles: readonly string[]): WordForms {
+  const forms: WordForms = { upper: new Set(), capitalised: new Map(), lower: new Set() };
+  for (const title of memberTitles) {
+    if (isAllCaps(title)) continue;
+    for (const token of title.split(/\s+/)) {
+      const [a, b] = coreRange(token);
+      const [stem] = splitSuffix(token.slice(a, b));
+      const letters = letterCount(stem);
+      if (letters < 2) continue;
+      const lowered = stem.toLocaleLowerCase("tr");
+      if (stem === stem.toLocaleUpperCase("tr")) {
+        if (letters <= ACRONYM_MAX_LETTERS) forms.upper.add(stem);
+      } else if (stem === lowered) {
+        forms.lower.add(lowered);
+      } else if (stem === lowered.charAt(0).toLocaleUpperCase("tr") + lowered.slice(1)) {
+        forms.capitalised.set(lowered, stem);
+      }
+    }
+  }
+  return forms;
+}
+
+/**
+ * Tr-TR lower case with the first letter upper, except
+ *   - short acronyms (the ACRONYMS allowlist, or a word of at most
+ *     ACRONYM_MAX_LETTERS letters that a non-shouting member writes in upper
+ *     case), which keep their capitals ("AFAD'DAN" -> "AFAD'dan");
+ *   - a name that a non-shouting member writes with a capital and no member
+ *     writes in lower case ("ANKARA'DA" -> "Ankara'da").
+ * Pure; `memberTitles` are the other raw titles of the cluster.
+ */
+function sentenceCaseShout(shouted: string, memberTitles: readonly string[]): string {
+  const forms = memberWordForms(memberTitles);
+  const out = shouted
+    .split(/(\s+)/)
+    .map((token) => {
+      if (token.trim() === "") return token;
+      const [a, b] = coreRange(token);
+      const [stem, suffix] = splitSuffix(token.slice(a, b));
+      const lowered = stem.toLocaleLowerCase("tr");
+      let kept: string | undefined;
+      if (letterCount(stem) <= ACRONYM_MAX_LETTERS && (ACRONYMS.has(stem) || forms.upper.has(stem))) kept = stem;
+      else if (!forms.lower.has(lowered)) kept = forms.capitalised.get(lowered);
+      if (kept === undefined) return token.toLocaleLowerCase("tr");
+      return (
+        token.slice(0, a).toLocaleLowerCase("tr") +
+        kept +
+        suffix.toLocaleLowerCase("tr") +
+        token.slice(b).toLocaleLowerCase("tr")
+      );
+    })
+    .join("");
+  // The first letter, not the first character: a title can open with a quote.
+  for (let i = 0; i < out.length; i++) {
+    if (/\p{L}/u.test(out.charAt(i))) return out.slice(0, i) + out.charAt(i).toLocaleUpperCase("tr") + out.slice(i + 1);
+  }
+  return out;
+}
+
 export interface PickOptions {
   /**
    * First pick of a cluster that has no neutral title yet. When no candidate
    * passes isAcceptableNeutral, return the cleaned best-scored candidate that
    * has no hard defect (shouting, placeholder, English, feed cut), else the
    * cleaned best-scored one, instead of null: the alternative is the raw
-   * `title_tr` with its lead-ins and '!' on every surface. A re-pick leaves
-   * this off: it already has a title and keeps it unless the new one is
-   * better.
+   * `title_tr` with its lead-ins and '!' on every surface. A candidate that is
+   * all capitals is sentence-cased first (extractive-v4), so shouting alone no
+   * longer ranks it below a title with a soft defect. A re-pick leaves this
+   * off: it already has a title and keeps it unless the new one is better.
    */
   floor?: boolean;
   /**
@@ -454,11 +642,12 @@ export interface PickOptions {
 
 // One formula for a member candidate and for the stored title it competes with.
 // The title is the text as written (a member's raw title, the stored title).
-function scoreTitle(title: string, centrality: number): number {
+function scoreTitle(title: string, centrality: number, hedged: boolean): number {
   return (
     centrality -
     0.12 * framingPenalty(title) -
     0.25 * loadedPenalty(title) -
+    (hedged && !carriesHedge(title) ? HEDGE_LOSS_PENALTY : 0) -
     0.002 * Math.max(0, title.length - 90) -
     0.008 * Math.max(0, FULL_LENGTH_TITLE_CHARS - title.length)
   );
@@ -490,6 +679,9 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
 
   const toks = items.map((m) => tokens(m.title));
   const outliers = numeralOutliers(items.map((m) => numsOf(m.title)));
+  const hedged =
+    items.length >= HEDGED_MIN_MEMBERS &&
+    items.filter((m) => carriesHedge(m.title)).length / items.length >= HEDGED_SHARE;
 
   const scored: Array<{ index: number; score: number }> = [];
   for (let i = 0; i < items.length; i++) {
@@ -497,7 +689,7 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
     let sim = 0;
     for (let j = 0; j < items.length; j++) if (j !== i) sim += jaccard(toks[i]!, toks[j]!);
     const centrality = items.length > 1 ? sim / (items.length - 1) : 0;
-    scored.push({ index: i, score: scoreTitle(items[i]!.title, centrality) });
+    scored.push({ index: i, score: scoreTitle(items[i]!.title, centrality, hedged) });
   }
   scored.sort((a, b) => b.score - a.score || a.index - b.index);
 
@@ -514,8 +706,11 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
       break;
     }
     if (!opts.floor) continue;
-    floorAny ??= cleaned;
-    if (floorSoft === null && !hasHardDefect(cleaned, others, {})) floorSoft = cleaned;
+    // Shouting is a hard defect, but a floor title is shown: sentence-case it
+    // first, so "NEV'İN MİRASI GÜNDEM OLDU" ships as "Nev'in mirası gündem oldu".
+    const shown = isAllCaps(cleaned) ? sentenceCaseShout(cleaned, others) : cleaned;
+    floorAny ??= shown;
+    if (floorSoft === null && !hasHardDefect(shown, others, {})) floorSoft = shown;
   }
 
   const incumbent = opts.incumbent;
@@ -536,7 +731,7 @@ export function pickNeutralTitle(members: MemberTitle[], opts: PickOptions = {})
         sim += jaccard(incToks, toks[j]!);
         n++;
       }
-      const incScore = scoreTitle(inc, n > 0 ? sim / n : 0);
+      const incScore = scoreTitle(inc, n > 0 ? sim / n : 0, hedged);
       const margin = inc.length >= FULL_LENGTH_TITLE_CHARS ? REPICK_MARGIN_FULL_LENGTH : REPICK_MARGIN;
       return best.score - incScore < margin ? incumbent : best.cleaned;
     }

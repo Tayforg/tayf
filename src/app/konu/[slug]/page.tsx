@@ -158,11 +158,14 @@ export default async function TopicHubPage({
           type="application/ld+json"
           dangerouslySetInnerHTML={{
             __html: serializeJsonLd([
-              buildTopicCollectionPage({ slug, bundles: result.bundles }),
+              buildTopicCollectionPage({ slug, bundles: result.bundles, page }),
               buildBreadcrumbs([
                 { name: "Anasayfa", path: "/" },
                 { name: "Konular", path: "/konu" },
-                { name: label, path: `/konu/${slug}` },
+                // Page N is its own canonical URL, so its leaf is page N too.
+                page > 1
+                  ? { name: `${label} — Sayfa ${page}`, path: `/konu/${slug}?sayfa=${page}` }
+                  : { name: label, path: `/konu/${slug}` },
               ]),
             ]),
           }}
