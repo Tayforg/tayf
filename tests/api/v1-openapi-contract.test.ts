@@ -12,6 +12,7 @@ import {
 } from "@/lib/api/v1-docs";
 import { V1_DEFAULT_LIMIT, V1_MAX_LIMIT, toV1ClusterRecord, type V1ClusterRow } from "@/lib/api/v1-clusters";
 import { API_TIER_LIMITS } from "@/lib/api/keys";
+import { apiError } from "@/lib/api/errors";
 import { toRegistryRecord, type RegistrySourceRow } from "@/lib/sources/registry";
 import { toV1AlertRecord, type AlertItem } from "@/lib/alerts/alert-feed";
 import { toV1SourceProfile } from "@/lib/api/v1-source-profile";
@@ -622,5 +623,37 @@ describe("GET /api/v1/openapi.json", () => {
         "/api/v1/sources/{slug}/profile",
       ].sort(),
     );
+  });
+
+  it("every header declared on getOpenApi's 200 is actually sent by GET()", async () => {
+    const { GET } = await import("@/app/api/v1/openapi.json/route");
+    const res = GET();
+    const doc = buildOpenApiDocument("https://x.test");
+    const ok = doc.paths["/api/v1/openapi.json"]?.get?.responses["200"] as
+      | { headers?: Record<string, unknown> }
+      | undefined;
+    expect(ok).toBeDefined();
+    const declared = Object.keys(ok?.headers ?? {});
+    for (const name of declared) {
+      expect(res.headers.has(name), `GET() never sends the declared header ${name}`).toBe(true);
+    }
+    // Today the keyless contract file declares none (it never resolves a key,
+    // so it cannot send X-Tayf-Tier); a header added to the doc must be sent.
+    expect(declared).toEqual([]);
+    expect(res.headers.has("X-Tayf-Tier")).toBe(false);
+  });
+
+  it("the Error schema's top-level properties equal the keys apiError() can emit", async () => {
+    const doc = buildOpenApiDocument("https://x.test");
+    const errorSchema = doc.components.schemas.Error as {
+      required: string[];
+      properties: Record<string, unknown>;
+    };
+    const emitted = (await apiError(400, "x", { code: "c", details: {} }).json()) as Record<
+      string,
+      unknown
+    >;
+    expect(Object.keys(errorSchema.properties).sort()).toEqual(Object.keys(emitted).sort());
+    expect(errorSchema.required).toEqual(["error"]);
   });
 });

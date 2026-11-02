@@ -19,8 +19,21 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Loader2 } from "lucide-react";
+import { isWritableSourceBias } from "@/lib/validation/source-input";
 import { BIAS_MAP } from "./bias-map";
 import type { SourceItem } from "./source-row";
+
+/**
+ * The bias values the dialog's select lists, in the admin display order.
+ * Add mode offers only the keys production's sources_alignment_check stores
+ * (WRITABLE_SOURCE_BIAS). Edit mode renders the select disabled, so it keeps
+ * all ten: a legacy row (state_media, nationalist, ...) must still show its
+ * current label rather than a blank trigger.
+ */
+export function biasOptionValues(mode: "add" | "edit"): string[] {
+  const all = Object.keys(BIAS_MAP);
+  return mode === "add" ? all.filter(isWritableSourceBias) : all;
+}
 
 export function SourceDialog({
   open,
@@ -113,14 +126,17 @@ export function SourceDialog({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {Object.entries(BIAS_MAP).map(([value, meta]) => (
-                  <SelectItem key={value} value={value}>
-                    <span className="flex items-center gap-2">
-                      <span className={`h-2 w-2 rounded-full ${meta.dot}`} />
-                      {meta.label}
-                    </span>
-                  </SelectItem>
-                ))}
+                {biasOptionValues(mode).map((value) => {
+                  const meta = BIAS_MAP[value as keyof typeof BIAS_MAP];
+                  return (
+                    <SelectItem key={value} value={value}>
+                      <span className="flex items-center gap-2">
+                        <span className={`h-2 w-2 rounded-full ${meta.dot}`} />
+                        {meta.label}
+                      </span>
+                    </SelectItem>
+                  );
+                })}
               </SelectContent>
             </Select>
             <p className="text-[11px] text-muted-foreground">

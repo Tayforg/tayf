@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { BIAS_ORDER, SOURCE_KINDS } from "@/lib/bias/config";
 import {
   MAX_SOURCE_URL_LENGTH,
+  WRITABLE_SOURCE_BIAS,
   isValidSourceUrl,
   isBiasCategory,
+  isWritableSourceBias,
   isSourceKindValue,
   isValidSourceSlug,
   isValidSourceName,
@@ -75,6 +79,98 @@ describe("isBiasCategory", () => {
 
   it.each(rejected)("rejects %s", (_label, value) => {
     expect(isBiasCategory(value)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// WRITABLE_SOURCE_BIAS mirrors production's live CHECK on sources.bias
+// (sources_alignment_check, 2026-11-02): five of the ten BiasCategory keys.
+// The other five parse as a BiasCategory (legacy rows still render) but a
+// write of them is a 23514 in the database, so the admin API must refuse
+// them before any DB call.
+// ---------------------------------------------------------------------------
+describe("WRITABLE_SOURCE_BIAS / isWritableSourceBias", () => {
+  const FIVE = ["pro_government", "gov_leaning", "center", "opposition_leaning", "opposition"];
+  const LEGACY = ["state_media", "islamist_conservative", "international", "pro_kurdish", "nationalist"];
+
+  it("is exactly prod's five alignment keys, in spectrum order", () => {
+    expect([...WRITABLE_SOURCE_BIAS]).toEqual(FIVE);
+  });
+
+  it.each(FIVE)("accepts writable key %s", (bias) => {
+    expect(isWritableSourceBias(bias)).toBe(true);
+  });
+
+  it.each(LEGACY)("rejects legacy key %s (a BiasCategory, but not writable)", (bias) => {
+    expect(isBiasCategory(bias)).toBe(true);
+    expect(isWritableSourceBias(bias)).toBe(false);
+  });
+
+  it("the writable and legacy sets partition BIAS_ORDER", () => {
+    expect([...FIVE, ...LEGACY].sort()).toEqual([...BIAS_ORDER].sort());
+  });
+
+  const rejected: Array<[string, unknown]> = [
+    ["empty string", ""],
+    ["null", null],
+    ["undefined", undefined],
+    ["a number", 3],
+    ["an object", { bias: "center" }],
+    ["upper-case", "CENTER"],
+    ["leading space", " center"],
+    ["trailing space", "center "],
+  ];
+
+  it.each(rejected)("rejects %s", (_label, value) => {
+    expect(isWritableSourceBias(value)).toBe(false);
+  });
+
+  it("every writable key is also a BiasCategory", () => {
+    for (const bias of WRITABLE_SOURCE_BIAS) expect(isBiasCategory(bias)).toBe(true);
+  });
+
+  /** The quoted literals of one seed tuple line; '' inside a literal is an escaped quote. */
+  function literals(line: string): string[] {
+    const out: string[] = [];
+    let i = 0;
+    while (i < line.length) {
+      if (line[i] !== "'") {
+        i += 1;
+        continue;
+      }
+      let value = "";
+      i += 1;
+      while (i < line.length) {
+        if (line[i] === "'") {
+          if (line[i + 1] === "'") {
+            value += "'";
+            i += 2;
+            continue;
+          }
+          break;
+        }
+        value += line[i];
+        i += 1;
+      }
+      out.push(value);
+      i += 1;
+    }
+    return out;
+  }
+
+  it("every bias in supabase/seed_sources.sql is writable (the seed must run against prod's CHECK)", () => {
+    const seed = readFileSync(resolve(__dirname, "../../../supabase/seed_sources.sql"), "utf8");
+    const biases: string[] = [];
+    for (const line of seed.split("\n")) {
+      if (!line.trimStart().startsWith("('")) continue;
+      const lits = literals(line);
+      // ('name', 'slug', 'url', 'rss_url', 'bias', 'kind', active)
+      expect(lits.length, line).toBeGreaterThanOrEqual(6);
+      biases.push(lits[4] as string);
+    }
+    expect(biases.length).toBeGreaterThan(100);
+    const offenders = biases.filter((b) => !isWritableSourceBias(b));
+    expect(offenders).toEqual([]);
   });
 });
 

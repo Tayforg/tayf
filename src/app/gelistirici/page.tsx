@@ -9,6 +9,7 @@ import {
   V1_ENDPOINTS,
   type V1EndpointDoc,
 } from "@/lib/api/v1-docs";
+import { V1_ERROR, V1_ERROR_ROWS } from "@/lib/api/v1-errors";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { REGISTRY_LICENCE } from "@/lib/sources/registry";
 import { siteUrl } from "@/lib/site-url";
@@ -71,15 +72,6 @@ const SECTIONS = [
   { id: "anahtar", short: "Anahtar alma" },
   { id: "openapi", short: "OpenAPI" },
 ] as const;
-
-const ERROR_ROWS: Array<{ status: number; message: string; meaning: string }> = [
-  { status: 400, message: "Invalid since / Invalid limit / Invalid cluster id", meaning: "İstek parametresi geçersiz." },
-  { status: 401, message: "Missing or invalid API key", meaning: "Authorization başlığı eksik, biçimsiz veya bilinmeyen anahtar." },
-  { status: 403, message: "API key revoked", meaning: "Anahtar iptal edilmiş." },
-  { status: 404, message: "Cluster not found", meaning: "Küme yok veya arşivlenmiş." },
-  { status: 429, message: "Too many requests / Daily limit exceeded", meaning: "Anonim taban, dakikalık veya günlük sınır aşıldı." },
-  { status: 500, message: "Internal server error", meaning: "Beklenmeyen sunucu hatası." },
-];
 
 // "Yer" column: where the parameter goes in the request. The OpenAPI document
 // keeps the raw `query` / `path`; the Turkish page names them in Turkish and
@@ -247,11 +239,11 @@ for (const cluster of data.clusters) {
           <ul className="space-y-1.5">
             <li className={proseClass}>
               <span className="font-mono text-xs text-foreground">401</span> — başlık eksik,
-              biçimsiz veya anahtar bilinmiyor: <em>Missing or invalid API key</em>.
+              biçimsiz veya anahtar bilinmiyor: <em>{V1_ERROR.missingKey}</em>.
             </li>
             <li className={proseClass}>
               <span className="font-mono text-xs text-foreground">403</span> — anahtar iptal
-              edilmiş: <em>API key revoked</em>.
+              edilmiş: <em>{V1_ERROR.keyRevoked}</em>.
             </li>
           </ul>
           <p className={noteClass}>
@@ -347,11 +339,11 @@ for (const cluster of data.clusters) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/30">
-                {ERROR_ROWS.map((row) => (
+                {V1_ERROR_ROWS.map((row) => (
                   <tr key={row.status}>
                     <td className="py-2.5 pr-4 font-mono text-xs text-foreground">{row.status}</td>
-                    <td className="py-2.5 pr-4 font-mono text-xs text-muted-foreground">{row.message}</td>
-                    <td className="py-2.5 text-muted-foreground">{row.meaning}</td>
+                    <td className="py-2.5 pr-4 font-mono text-xs text-muted-foreground">{row.messages.join(" / ")}</td>
+                    <td className="py-2.5 text-muted-foreground">{row.meaningTr}</td>
                   </tr>
                 ))}
               </tbody>

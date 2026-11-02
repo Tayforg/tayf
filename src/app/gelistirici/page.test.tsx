@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { API_PLANS, V1_COMMON_NOTES_TR, V1_ENDPOINTS } from "@/lib/api/v1-docs";
 import { API_TIER_LIMITS } from "@/lib/api/keys";
+import { V1_ERROR, V1_ERROR_ROWS } from "@/lib/api/v1-errors";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { CorrectionForm } from "@/components/story/correction-form";
 
@@ -190,6 +191,56 @@ describe("/gelistirici page", () => {
     expect(html).toContain('<td class="py-2.5 pr-4 text-muted-foreground">yol</td>');
     expect(html).not.toContain('text-muted-foreground">query</td>');
     expect(html).not.toContain('text-muted-foreground">path</td>');
+  });
+
+  it("renders the Hatalar table from V1_ERROR_ROWS: status, messages joined with ' / ', Turkish meaning", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+
+    // Inner text of every <tr> cell in the errors table body, found by index
+    // scans (the cells hold plain text, so the next '</td>' closes the cell).
+    const section = html.slice(html.indexOf('aria-label="Hata kodları tablosu"'));
+    const body = section.slice(section.indexOf("<tbody"), section.indexOf("</tbody>"));
+    const rows: string[][] = [];
+    for (let at = body.indexOf("<tr"); at !== -1; at = body.indexOf("<tr", at + 1)) {
+      const end = body.indexOf("</tr>", at);
+      const cells: string[] = [];
+      for (let c = body.indexOf("<td", at); c !== -1 && c < end; c = body.indexOf("<td", c + 1)) {
+        cells.push(body.slice(body.indexOf(">", c) + 1, body.indexOf("</td>", c)));
+      }
+      rows.push(cells);
+    }
+
+    // React's text escaping for the characters that can occur in the copy.
+    const escapeHtml = (text: string): string =>
+      [...text]
+        .map((ch) =>
+          ch === "&" ? "&amp;" : ch === "<" ? "&lt;" : ch === ">" ? "&gt;" : ch === '"' ? "&quot;" : ch === "'" ? "&#x27;" : ch,
+        )
+        .join("");
+
+    expect(rows).toHaveLength(V1_ERROR_ROWS.length);
+    expect(rows).toEqual(
+      V1_ERROR_ROWS.map((row) => [
+        String(row.status),
+        escapeHtml(row.messages.join(" / ")),
+        escapeHtml(row.meaningTr),
+      ]),
+    );
+    // The page no longer keeps its own copy of the table.
+    const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+    expect(src).not.toContain("ERROR_ROWS: Array");
+    expect(src).toContain("V1_ERROR_ROWS.map(");
+  });
+
+  it("quotes the 401 and 403 wire messages from V1_ERROR in the Kimlik doğrulama section", async () => {
+    delete process.env.NEXT_PUBLIC_CONTACT_EMAIL;
+    const html = await renderPage();
+    expect(html).toContain(`<em>${V1_ERROR.missingKey}</em>`);
+    expect(html).toContain(`<em>${V1_ERROR.keyRevoked}</em>`);
+    const src = readFileSync(join(__dirname, "page.tsx"), "utf8");
+    expect(src).toContain("<em>{V1_ERROR.missingKey}</em>");
+    expect(src).toContain("<em>{V1_ERROR.keyRevoked}</em>");
   });
 
   it("keeps the quoted API wire messages and the JSON field name verbatim", async () => {

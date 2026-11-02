@@ -5194,6 +5194,449 @@ describe("cluster_attach: the attach-only probe (hunt-25 W3, migration 151)", ()
 });
 
 // ---------------------------------------------------------------------------
+// Wave BF / W3 (2026-11-02): daily Resmi Gazete roundups are never clustered.
+//
+// bha's "Resmi Gazete'de bugun: 1 Kasim 2026 Resmi Gazete kararlari" sat inside the
+// 16-article appointments cluster 85700dfa and the 2 Kasim one inside the 15-article
+// Cevdet Yilmaz vekalet cluster 8f0bb5b8: a roundup lists every decision of the day,
+// so its title is similar to whichever single story the day's headlines share.
+// isRoundupTitle() (supabase/functions/_shared/cluster/roundup-title.ts) recognises
+// those whole-title shapes; clusterArticle and processAttach skip them, AFTER the
+// enrichment is stored and BEFORE any cluster context or scoring. No cluster_skip_log
+// row is written (its cluster_id is NOT NULL and there is no cluster).
+// ---------------------------------------------------------------------------
+describe("roundup titles are never clustered (Resmi Gazete roundups, wave BF W3)", () => {
+  const ROUNDUP = "Resmi Gazete'de bugün: 2 Kasım 2026 Resmi Gazete kararları";
+  const STORY = "Resmi Gazete'de yayımlandı: Cumhurbaşkanlığına Cevdet Yılmaz vekalet edecek";
+  const SEEDED = "c-roundup-target";
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+    vi.restoreAllMocks();
+  });
+
+  /** An existing cluster whose seed carries `title` and a src-outlet member: an
+   * incoming src-wire article with the same title joins it unless it is skipped. */
+  function seedTarget(title: string) {
+    clusterRows.push({
+      id: SEEDED,
+      title_tr: title,
+      title_tr_neutral: title,
+      first_published: ago(40 * 60_000),
+      updated_at: ago(60_000),
+      article_count: 1,
+    });
+    clusterArticleRows.push({ cluster_id: SEEDED, article_id: "seed-member" });
+    fakeArticles["seed-member"] = {
+      id: "seed-member",
+      source_id: "src-outlet",
+      title,
+      description: "Detay",
+      published_at: ago(30 * 60_000),
+      fingerprint: "fp-seed-member",
+      entities: [],
+      category: "politika",
+      minhash_sig: null,
+      minhash_version: null,
+    };
+  }
+
+  function queueWork(opts: { id: string; msgId: number; title: string; category?: string; admit?: "shadow" | "live" }) {
+    const message: { article_id: string; admit?: string } = { article_id: opts.id };
+    if (opts.admit) message.admit = opts.admit;
+    (pgmqState.pending as unknown as Array<{ msg_id: number; read_ct: number; message: unknown }>).push({
+      msg_id: opts.msgId,
+      read_ct: 1,
+      message,
+    });
+    fakeArticles[opts.id] = {
+      id: opts.id,
+      source_id: "src-wire",
+      title: opts.title,
+      description: "Detay",
+      url: `https://example.com/${opts.id}`,
+      category: opts.category ?? "politika",
+      published_at: new Date().toISOString(),
+    };
+  }
+
+  interface RoundupBody {
+    drained: number;
+    matched: number;
+    created: number;
+    skipped: number;
+    roundupSkipped: number;
+    failedTransient: number;
+    failedPermanent: number;
+    admission: { would_match: number; would_create: number; disabled: number; rejected: number };
+    attach: {
+      mode: string;
+      read: number;
+      would_attach: number;
+      attached: number;
+      failed: number;
+      by_reason: Record<string, number>;
+    };
+  }
+
+  async function drain(): Promise<RoundupBody> {
+    const handler = await importHandler();
+    if (!handler) throw new Error("unreachable");
+    const res = await handler(authedRequest("http://localhost/cluster-consumer", { method: "POST" }));
+    expect(res.status).toBe(200);
+    return (await res.json()) as RoundupBody;
+  }
+
+  const linkedClusters = () =>
+    supabaseFakeCalls.rpc
+      .filter((r) => r.name === "cluster_link_atomic")
+      .map((r) => (r.args as { p_cluster_id: string }).p_cluster_id);
+  const skipLogWrites = () => supabaseFakeCalls.forTable("cluster_skip_log");
+  const roundupLogs = () =>
+    (logSpy.mock.calls as unknown[][])
+      .map((c) => c[0])
+      .filter((m): m is string => typeof m === "string" && m.includes("roundup-title skip"));
+  const enrichmentWrites = () =>
+    supabaseFakeCalls
+      .update("articles")
+      .filter((m) => m.patch !== null && typeof m.patch === "object" && "fingerprint" in (m.patch as object));
+
+  /** No cluster was created, no article was linked, nothing was scored, no skip row. */
+  function expectNothingClustered() {
+    expect(linkedClusters()).toEqual([]);
+    expect(supabaseFakeCalls.insert("clusters")).toHaveLength(0);
+    expect(supabaseFakeCalls.insert("cluster_articles")).toHaveLength(0);
+    expect(supabaseFakeCalls.upsert("cluster_articles")).toHaveLength(0);
+    expect(skipLogWrites()).toHaveLength(0);
+    expect(vi.mocked(scoreMock)).not.toHaveBeenCalled();
+  }
+
+  describe("cluster_work, live (politika)", () => {
+    it("a politika article titled as a roundup is skipped 'roundup-title': no link, no cluster, no skip-log row, message archived", async () => {
+      seedTarget(ROUNDUP);
+      queueWork({ id: "art-rg-live", msgId: 8101, title: ROUNDUP });
+
+      const body = await drain();
+
+      expect(body.skipped).toBe(1);
+      expect(body.roundupSkipped).toBe(1);
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(0);
+      expect(body.failedTransient).toBe(0);
+      expect(body.failedPermanent).toBe(0);
+      expect(body.drained).toBe(1);
+      expectNothingClustered();
+      expect(pgmqState.archived).toContain(8101);
+      expect(roundupLogs()).toEqual(["[cluster-consumer] roundup-title skip article=art-rg-live"]);
+    });
+
+    it("the enrichment is still stored (the skip comes AFTER persistEnrichment)", async () => {
+      seedTarget(ROUNDUP);
+      queueWork({ id: "art-rg-enrich", msgId: 8102, title: ROUNDUP });
+
+      await drain();
+
+      const writes = enrichmentWrites();
+      expect(writes).toHaveLength(1);
+      expect(Object.keys(writes[0]!.patch as object).sort()).toEqual([
+        "entities",
+        "fingerprint",
+        "minhash_sig",
+        "minhash_version",
+      ]);
+    });
+
+    it("control: the same article with a single-story Resmi Gazete headline joins the cluster (the skip is the only reason the roundup did not)", async () => {
+      seedTarget(STORY);
+      queueWork({ id: "art-rg-story", msgId: 8103, title: STORY });
+
+      const body = await drain();
+
+      expect(body.roundupSkipped).toBe(0);
+      expect(body.skipped).toBe(0);
+      expect(body.matched).toBe(1);
+      expect(linkedClusters()).toEqual([SEEDED]);
+      expect(roundupLogs()).toEqual([]);
+      expect(pgmqState.archived).toContain(8103);
+    });
+
+    it.each([
+      "Resmi Gazete'de yayımlandı: Asgari ücret desteği uzatıldı",
+      "Atama kararları Resmi Gazete'de: Ankara Valiliğine Vasip Şahin atandı",
+      "Merkez Bankası Başkan Yardımcısı atandı: Resmi Gazete'de yayımlandı",
+      "Resmi Gazete'de bugün yayımlanan kararla emekli ikramiyesi yükseldi",
+      "Erdoğan imzaladı, Resmi Gazete'de yayımlandı: 3 üniversiteye rektör",
+      "Gündem özeti: Erdoğan ile Bahçeli görüştü",
+    ])("a must-keep headline still clusters: %s", async (title) => {
+      queueWork({ id: "art-rg-keep", msgId: 8104, title });
+
+      const body = await drain();
+
+      expect(body.roundupSkipped).toBe(0);
+      expect(body.skipped).toBe(0);
+      expect(body.created + body.matched).toBe(1);
+      expect(roundupLogs()).toEqual([]);
+    });
+
+    it("a mixed batch: only the roundups are skipped, in order, and the summary counts them", async () => {
+      queueWork({ id: "art-mix-1", msgId: 8111, title: ROUNDUP });
+      queueWork({ id: "art-mix-2", msgId: 8112, title: STORY });
+      queueWork({ id: "art-mix-3", msgId: 8113, title: "Resmi Gazete'de bugün (02.11.2026)" });
+      queueWork({ id: "art-mix-4", msgId: 8114, title: "Günün önemli gelişmeleri" });
+
+      const body = await drain();
+
+      expect(body.drained).toBe(4);
+      expect(body.roundupSkipped).toBe(3);
+      expect(body.skipped).toBe(3);
+      expect(body.created + body.matched).toBe(1);
+      expect(roundupLogs()).toEqual([
+        "[cluster-consumer] roundup-title skip article=art-mix-1",
+        "[cluster-consumer] roundup-title skip article=art-mix-3",
+        "[cluster-consumer] roundup-title skip article=art-mix-4",
+      ]);
+      expect(pgmqState.archived).toEqual(expect.arrayContaining([8111, 8112, 8113, 8114]));
+    });
+
+    it("roundupSkipped is part of every summary and starts at 0 (an empty drain, a drain with no roundup)", async () => {
+      const empty = await drain();
+      expect(empty.roundupSkipped).toBe(0);
+      expect(empty.skipped).toBe(0);
+    });
+
+    it("other skip reasons do not count as roundup skips", async () => {
+      // h12-cluster-1: a same-source twin is skipped with reason same-source-duplicate.
+      clusterRows.push({
+        id: "c-twin",
+        title_tr: STORY,
+        title_tr_neutral: STORY,
+        first_published: ago(40 * 60_000),
+        updated_at: ago(60_000),
+        article_count: 18,
+      });
+      clusterArticleRows.push({ cluster_id: "c-twin", article_id: "twin-member" });
+      fakeArticles["twin-member"] = {
+        id: "twin-member",
+        source_id: "src-wire",
+        title: STORY,
+        description: "Detay",
+        published_at: ago(30 * 60_000),
+        fingerprint: "fp-twin-member",
+        entities: [],
+        category: "politika",
+        minhash_sig: null,
+        minhash_version: null,
+      };
+      queueWork({ id: "art-twin-skip", msgId: 8121, title: STORY });
+
+      const body = await drain();
+
+      expect(body.skipped).toBe(1);
+      expect(body.roundupSkipped).toBe(0);
+      expect(roundupLogs()).toEqual([]);
+    });
+  });
+
+  describe("cluster_work, dry-run (admit 'shadow')", () => {
+    beforeEach(() => {
+      process.env.JEV_POLITICS_ADMISSION = "shadow";
+    });
+
+    it("an admitted roundup is skipped in the dry-run too: nothing recorded, nothing written, no would_match / would_create", async () => {
+      seedTarget(ROUNDUP);
+      queueWork({ id: "art-rg-shadow", msgId: 8201, title: ROUNDUP, category: "ekonomi", admit: "shadow" });
+
+      const body = await drain();
+
+      expect(body.skipped).toBe(1);
+      expect(body.roundupSkipped).toBe(1);
+      expect(body.admission.would_match).toBe(0);
+      expect(body.admission.would_create).toBe(0);
+      expect(body.matched).toBe(0);
+      expect(body.created).toBe(0);
+      expectNothingClustered();
+      // A dry-run never persists enrichment, and a skipped outcome is not an admission outcome.
+      expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
+      expect(supabaseFakeCalls.rpc.filter((r) => r.name === "jev_politics_admission_record")).toHaveLength(0);
+      expect(pgmqState.archived).toContain(8201);
+      expect(roundupLogs()).toEqual(["[cluster-consumer] roundup-title skip article=art-rg-shadow dry-run"]);
+    });
+
+    it("control: the same admitted article with a story headline is a would_match", async () => {
+      seedTarget(STORY);
+      queueWork({ id: "art-rg-shadow-story", msgId: 8202, title: STORY, category: "ekonomi", admit: "shadow" });
+
+      const body = await drain();
+
+      expect(body.roundupSkipped).toBe(0);
+      expect(body.skipped).toBe(0);
+      expect(body.admission.would_match).toBe(1);
+      expect(linkedClusters()).toEqual([]); // a dry-run never links
+      expect(roundupLogs()).toEqual([]);
+    });
+  });
+
+  describe("cluster_attach (processAttach)", () => {
+    const ATTACH_ID = "art-rg-attach";
+    const CLUSTER = "c-attach-target";
+
+    /** A 3-member politics cluster whose headline is `title`: an incoming genel article
+     * with the same title attaches by the exact-title lane. */
+    function seedAttachTarget(title: string) {
+      clusterRows.push({
+        id: CLUSTER,
+        title_tr: title,
+        title_tr_neutral: title,
+        first_published: ago(40 * 60_000),
+        updated_at: ago(5 * 60_000),
+        article_count: 3,
+      });
+      for (const [i, src] of ["src-aksam", "src-star", "src-haber7"].entries()) {
+        const id = `att-m${i}`;
+        clusterArticleRows.push({ cluster_id: CLUSTER, article_id: id });
+        fakeArticles[id] = {
+          id,
+          source_id: src,
+          title,
+          description: `Ayrıntı ${id}`,
+          published_at: ago((12 + 2 * i) * 60_000),
+          fingerprint: `fp-${id}`,
+          entities: [],
+          category: "politika",
+          politics_admitted_at: null,
+          minhash_sig: null,
+          minhash_version: null,
+        };
+      }
+    }
+
+    function seedIncoming(title: string) {
+      fakeArticles[ATTACH_ID] = {
+        id: ATTACH_ID,
+        source_id: "src-hurriyet",
+        title,
+        description: "Detay",
+        url: "https://example.com/attach-rg",
+        content_hash: "h-attach-rg",
+        category: "genel",
+        politics_admitted_at: null,
+        published_at: ago(3 * 60_000),
+      };
+      pgmqState.attachPending.push({
+        msg_id: 8301,
+        read_ct: 1,
+        message: { article_id: ATTACH_ID, admit: "attach" },
+      });
+    }
+
+    it("SHADOW: a roundup is skipped 'roundup-title': by_reason counts it, no shadow row, message deleted", async () => {
+      seedAttachTarget(ROUNDUP);
+      seedIncoming(ROUNDUP);
+
+      const body = await drain();
+
+      expect(body.attach).toMatchObject({ mode: "shadow", read: 1, would_attach: 0, attached: 0, failed: 0 });
+      expect(body.attach.by_reason).toEqual({ "roundup-title": 1 });
+      expect(supabaseFakeCalls.upsert("cluster_attach_shadow")).toHaveLength(0);
+      expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
+      expectNothingClustered();
+      expect(pgmqState.attachDeleted).toEqual([8301]);
+      // The cluster_work counters are not touched by an attach message.
+      expect(body.skipped).toBe(0);
+      expect(body.roundupSkipped).toBe(0);
+    });
+
+    it("LIVE: a roundup is skipped before the stamp: no politics_admitted_at, no link, no shadow row", async () => {
+      process.env.CLUSTER_ATTACH_MODE = "live";
+      seedAttachTarget(ROUNDUP);
+      seedIncoming(ROUNDUP);
+
+      const body = await drain();
+
+      expect(body.attach).toMatchObject({ mode: "live", read: 1, would_attach: 0, attached: 0, failed: 0 });
+      expect(body.attach.by_reason).toEqual({ "roundup-title": 1 });
+      expect(supabaseFakeCalls.update("articles")).toHaveLength(0);
+      expect(supabaseFakeCalls.upsert("cluster_attach_shadow")).toHaveLength(0);
+      expectNothingClustered();
+      expect(pgmqState.attachDeleted).toEqual([8301]);
+    });
+
+    it("control: the same article with a story headline attaches (SHADOW would_attach, LIVE attached)", async () => {
+      seedAttachTarget(STORY);
+      seedIncoming(STORY);
+      const shadow = await drain();
+      expect(shadow.attach).toMatchObject({ mode: "shadow", would_attach: 1, by_reason: {} });
+      expect(supabaseFakeCalls.upsert("cluster_attach_shadow")).toHaveLength(1);
+    });
+
+    it("control: LIVE attaches the story headline through cluster_link_atomic", async () => {
+      process.env.CLUSTER_ATTACH_MODE = "live";
+      seedAttachTarget(STORY);
+      seedIncoming(STORY);
+      const live = await drain();
+      expect(live.attach).toMatchObject({ mode: "live", attached: 1, by_reason: {} });
+      expect(linkedClusters()).toEqual([CLUSTER]);
+    });
+
+    it("an attach roundup is checked after the route (an article already in the gate is 'in-gate', not 'roundup-title')", async () => {
+      seedAttachTarget(ROUNDUP);
+      seedIncoming(ROUNDUP);
+      (fakeArticles[ATTACH_ID] as Record<string, unknown>).category = "politika";
+
+      const body = await drain();
+
+      expect(body.attach.by_reason).toEqual({ "in-gate": 1 });
+    });
+  });
+
+  describe("wiring (static)", () => {
+    const src = readFileSync(resolve(__dirname, "../../supabase/functions/cluster-consumer/index.ts"), "utf8");
+
+    it("imports isRoundupTitle and ROUNDUP_SKIP_REASON from the shared module, with the .ts relative import the other cluster helpers use", () => {
+      expect(src).toContain('from "../_shared/cluster/roundup-title.ts"');
+      expect(src).toContain("isRoundupTitle");
+      expect(src).toContain("ROUNDUP_SKIP_REASON");
+    });
+
+    it("clusterArticle skips right after persistEnrichment and before getClusterContext", () => {
+      const fn = src.slice(src.indexOf("async function clusterArticle("), src.indexOf("async function clusterArticle(") + 4000);
+      const persisted = fn.indexOf("await persistEnrichment(article)");
+      const check = fn.indexOf("isRoundupTitle(raw.title)");
+      const context = fn.indexOf("await getClusterContext()");
+      expect(persisted).toBeGreaterThan(0);
+      expect(check).toBeGreaterThan(persisted);
+      expect(context).toBeGreaterThan(check);
+      expect(fn).toContain("reason: ROUNDUP_SKIP_REASON");
+    });
+
+    it("processAttach skips after the route checks and before fingerprinting", () => {
+      const start = src.indexOf("async function processAttach(");
+      const fn = src.slice(start, src.indexOf("async function drainAttach(", start));
+      const route = fn.indexOf('if (route !== "attach")');
+      const check = fn.indexOf("isRoundupTitle(raw.title)");
+      const fingerprint = fn.indexOf("strictFingerprint(");
+      expect(route).toBeGreaterThan(0);
+      expect(check).toBeGreaterThan(route);
+      expect(fingerprint).toBeGreaterThan(check);
+      expect(fn).toContain("reason: ROUNDUP_SKIP_REASON");
+    });
+
+    it("never writes cluster_skip_log for a roundup (its cluster_id is NOT NULL and there is no cluster)", () => {
+      const start = src.indexOf("isRoundupTitle(raw.title)");
+      const around = src.slice(start, start + 600);
+      expect(around).not.toContain("cluster_skip_log");
+      expect(around).not.toContain("recordSkip");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Contract reminder: every test asserts `expect(handler).toBeDefined()` so
 // a missing or mis-imported SUT fails loud rather than silently passing as
 // a no-op. The suite no longer skips when the handler cannot be loaded.

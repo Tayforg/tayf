@@ -9,6 +9,7 @@ import {
 } from "@/lib/api/errors";
 import { clientKey, createRateLimiter } from "@/lib/rate-limit";
 import { createServerClient } from "@/lib/supabase/server";
+import { V1_ERROR } from "@/lib/api/v1-errors";
 import { REGISTRY_LICENCE } from "@/lib/sources/registry";
 
 /**
@@ -138,7 +139,7 @@ function v1TooManyRequests(
   code: V1RateLimitCode,
   tier?: ApiTier,
 ): Response {
-  const message = code === "key_day" ? "Daily limit exceeded" : "Too many requests";
+  const message = code === "key_day" ? V1_ERROR.dailyLimit : V1_ERROR.tooManyRequests;
   return withApiV1Headers(apiTooManyRequests(retryAfterMs, { message, code }), tier);
 }
 
@@ -150,7 +151,7 @@ function v1TooManyRequests(
  * either way.
  */
 function v1Unauthorized(invalidToken: boolean): Response {
-  const res = withApiV1Headers(apiUnauthorized("Missing or invalid API key"));
+  const res = withApiV1Headers(apiUnauthorized(V1_ERROR.missingKey));
   res.headers.set(
     "WWW-Authenticate",
     invalidToken ? 'Bearer realm="tayf-api", error="invalid_token"' : 'Bearer realm="tayf-api"',
@@ -167,14 +168,14 @@ function v1Unauthorized(invalidToken: boolean): Response {
  * touches no key, database or limiter.
  */
 export async function methodNotAllowed(): Promise<Response> {
-  const res = withApiV1Headers(apiError(405, "Method not allowed"));
+  const res = withApiV1Headers(apiError(405, V1_ERROR.methodNotAllowed));
   res.headers.set("Allow", "GET, HEAD, OPTIONS");
   return res;
 }
 
 /** 404 for an unknown /api/v1/* path (used by the `[...path]` catch-all). */
 export async function v1NotFound(): Promise<Response> {
-  return withApiV1Headers(apiNotFound("Not found"));
+  return withApiV1Headers(apiNotFound(V1_ERROR.notFound));
 }
 
 // Strict per-IP floor for callers WITHOUT a working key: keyed by
@@ -380,7 +381,7 @@ export async function requireApiKey(request: Request): Promise<ApiKeyAuth> {
       return { ok: false, response: withApiV1Headers(apiServerError(revokedError)) };
     }
     if (revokedRow) {
-      return { ok: false, response: withApiV1Headers(apiError(403, "API key revoked")) };
+      return { ok: false, response: withApiV1Headers(apiError(403, V1_ERROR.keyRevoked)) };
     }
     return { ok: false, response: v1Unauthorized(true) };
   }

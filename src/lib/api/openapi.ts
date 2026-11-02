@@ -17,7 +17,7 @@ export interface OpenApiDocument {
     title: string;
     version: string;
     description: string;
-    license: { name: string };
+    license: { name: string; identifier?: string };
   };
   servers: Array<{ url: string }>;
   security: Array<Record<string, string[]>>;
@@ -488,7 +488,8 @@ function buildSchemas(): Record<string, unknown> {
 }
 
 const TIER_HEADER = {
-  description: "Only present once the API key has been resolved to a tier.",
+  description:
+    "The caller's plan tier, sent on the 200 of every keyed operation. GET /api/v1/openapi.json never resolves a key and never sends it. The CORS preflights (OPTIONS) carry no key, so they always send the constant 'free'.",
   schema: { type: "string", enum: ["free", "partner"] },
 };
 
@@ -497,7 +498,7 @@ function schemaRefFor(schema: V1ResponseDoc["schema"]): Record<string, unknown> 
   return { $ref: `#/components/schemas/${schema}` };
 }
 
-function buildResponse(resp: V1ResponseDoc): Record<string, unknown> {
+function buildResponse(resp: V1ResponseDoc, endpoint: V1EndpointDoc): Record<string, unknown> {
   const out: Record<string, unknown> = {
     description: `${resp.descriptionEn} / ${resp.descriptionTr}`,
   };
@@ -507,7 +508,13 @@ function buildResponse(resp: V1ResponseDoc): Record<string, unknown> {
     if (resp.alsoRss) content["application/rss+xml"] = { schema: { type: "string" } };
     out.content = content;
   }
-  if (resp.status === 200) {
+  // Only a keyed 200 resolved a key to a tier. getOpenApi (auth "none") is
+  // answered without one, so declaring the header there promised a header
+  // GET /api/v1/openapi.json never sends. The OPTIONS 204s DO send a constant
+  // `free` (a preflight carries no key); TIER_HEADER's description says so
+  // instead of declaring it per preflight. Both facts are pinned against the
+  // real handlers by tests/api/v1-tier-header-contract.test.ts.
+  if (resp.status === 200 && endpoint.auth !== "none") {
     out.headers = { "X-Tayf-Tier": TIER_HEADER };
   }
   return out;
@@ -522,7 +529,7 @@ function buildOperation(endpoint: V1EndpointDoc): OpenApiOperation {
 
   const responses: Record<string, Record<string, unknown>> = {};
   for (const resp of endpoint.responses) {
-    responses[String(resp.status)] = buildResponse(resp);
+    responses[String(resp.status)] = buildResponse(resp, endpoint);
   }
 
   const parameters = endpoint.params.map((param) => ({
@@ -580,7 +587,10 @@ export function buildOpenApiDocument(serverUrl: string): OpenApiDocument {
         "photographs remain the property of the publishing outlet). There is no SLA. / " +
         "Salt okunur, anahtarlı bir JSON API. Sadece Tayf'ın kendi çıktısı lisanslıdır; " +
         "hizmet düzeyi taahhüdü (SLA) yoktur.",
-      license: { name: REGISTRY_LICENCE },
+      // OpenAPI 3.1 makes `identifier` (SPDX) and `url` mutually exclusive, and
+      // the repo ships no LICENSE file to point a url at; the site states
+      // CC BY-SA 4.0 in json-ld.ts, llms.txt and robots.txt.
+      license: { name: REGISTRY_LICENCE, identifier: "CC-BY-SA-4.0" },
     },
     servers: [{ url: serverUrl }],
     security: [{ bearerAuth: [] }],
