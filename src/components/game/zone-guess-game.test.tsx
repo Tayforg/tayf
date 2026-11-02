@@ -32,15 +32,21 @@ const MODES_PATH = resolve(__dirname, "oyun-modes.tsx");
 
 const source = readFileSync(SOURCE_PATH, "utf8");
 
-const fixtureHeadlines: GameHeadline[] = Array.from({ length: 10 }, (_, i) => ({
-  articleId: `article-${i}`,
-  sourceId: `source-${i}`,
-  title: `Başlık ${i}`,
-  sourceName: `Kaynak ${i}`,
-  sourceSlug: `kaynak-${i}`,
-  bias: "center",
-  zone: "bagimsiz",
-}));
+function makeFixture(count: number): GameHeadline[] {
+  return Array.from({ length: count }, (_, i) => ({
+    articleId: `article-${i}`,
+    clusterId: `cluster-${i}`,
+    sourceId: `source-${i}`,
+    title: `Başlık ${i}`,
+    sourceName: `Kaynak ${i}`,
+    sourceSlug: `kaynak-${i}`,
+    bias: "center",
+    zone: "bagimsiz",
+  }));
+}
+
+// A page session holds 30 headlines; a round plays 10 of them.
+const fixtureHeadlines: GameHeadline[] = makeFixture(30);
 
 describe("ZoneGuessGame — static render (idle phase)", () => {
   const html = renderToStaticMarkup(<ZoneGuessGame headlines={fixtureHeadlines} />);
@@ -68,6 +74,22 @@ describe("ZoneGuessGame — static render (idle phase)", () => {
 
   it("renders nothing that sets a cookie", () => {
     expect(html.toLowerCase()).not.toContain("cookie");
+  });
+
+  it("with a 30-headline session the idle copy promises one round: '10 manşet, 60 saniye'", () => {
+    expect(html).toContain("10 manşet, 60 saniye. Hazır mısın?");
+    expect(html).not.toContain("30 manşet");
+  });
+
+  it("with fewer headlines than a round the idle copy counts the headlines it has", () => {
+    const few = renderToStaticMarkup(<ZoneGuessGame headlines={makeFixture(4)} />);
+    expect(few).toContain("4 manşet, 60 saniye. Hazır mısın?");
+    expect(few).not.toContain("10 manşet");
+  });
+
+  it("with exactly a round of headlines the idle copy says 10", () => {
+    const ten = renderToStaticMarkup(<ZoneGuessGame headlines={makeFixture(10)} />);
+    expect(ten).toContain("10 manşet, 60 saniye. Hazır mısın?");
   });
 });
 
@@ -152,6 +174,24 @@ function useEffectCalls(src: string): string[] {
   }
 }
 
+/**
+ * The tokens of the dependency array that closes a `useCallback` (the last
+ * `[...]` in its source), e.g. `}, [index, round, finishRound, score]);` ->
+ * ["index", "round", "finishRound", "score"]. Token-exact, so "round" is never
+ * confused with "finishRound".
+ */
+function depsOf(body: string): string[] {
+  const open = body.lastIndexOf("[");
+  expect(open).toBeGreaterThan(-1);
+  const close = body.indexOf("]", open);
+  expect(close).toBeGreaterThan(open);
+  return body
+    .slice(open + 1, close)
+    .split(",")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
 describe("ZoneGuessGame — source guard: every new headline is announced to screen readers", () => {
   const handlerBody = (name: string, nextMarker: string): string => {
     const start = source.indexOf(`const ${name} = useCallback(`);
@@ -161,34 +201,33 @@ describe("ZoneGuessGame — source guard: every new headline is announced to scr
     return source.slice(start, end);
   };
 
-  it("handleStart announces headline 1 of the round instead of clearing the region", () => {
+  it("handleStart announces headline 1 of the round it just drew instead of clearing the region", () => {
     const body = handlerBody("handleStart", "const handleGuess = useCallback(");
-    expect(body).toContain("headlineAnnouncement(1, headlines.length, headlines[0]?.title)");
+    expect(body).toContain("headlineAnnouncement(1, next.length, next[0]?.title)");
     expect(body).toContain("setAnnouncement(headlineAnnouncement(");
     expect(body).not.toContain('setAnnouncement("")');
   });
 
-  it("handleNext announces the next headline right after moving the index", () => {
+  it("handleNext announces the next headline of the round right after moving the index", () => {
     const body = handlerBody("handleNext", "// Always mounted regardless of phase");
     const setIndexAt = body.indexOf("setIndex(nextIndex);");
     const announceAt = body.indexOf(
-      "headlineAnnouncement(nextIndex + 1, headlines.length, headlines[nextIndex]?.title)",
+      "headlineAnnouncement(nextIndex + 1, round.length, round[nextIndex]?.title)",
     );
     expect(setIndexAt).toBeGreaterThan(-1);
     expect(announceAt).toBeGreaterThan(setIndexAt);
     expect(body.slice(setIndexAt, announceAt)).toContain("setAnnouncement(");
   });
 
-  it("the handlers depend on `headlines` itself (they read its items), not just its length", () => {
-    for (const [name, marker] of [
-      ["handleStart", "const handleGuess = useCallback("],
-      ["handleNext", "// Always mounted regardless of phase"],
-    ] as const) {
-      const body = handlerBody(name, marker);
-      const deps = body.slice(body.lastIndexOf("}, ["));
-      expect(deps, name).toContain("headlines");
-      expect(deps, name).not.toContain("headlines.length");
-    }
+  it("handleStart depends on `headlines` (the pool it draws from), handleNext on `round` (the headlines it reads)", () => {
+    const start = depsOf(handlerBody("handleStart", "const handleGuess = useCallback("));
+    expect(start).toContain("headlines");
+    expect(start).not.toContain("headlines.length");
+
+    const next = depsOf(handlerBody("handleNext", "// Always mounted regardless of phase"));
+    expect(next).toContain("round");
+    expect(next).not.toContain("round.length");
+    expect(next).not.toContain("headlines");
   });
 
   it("no useEffect body announces a headline (set-state-in-effect is a lint error here)", () => {
@@ -218,5 +257,140 @@ describe("ZoneGuessGame — source guard: every new headline is announced to scr
       "useEffect(() => { if (x) { y(`${z}`); } }, [x])",
       "useEffect(() => {}, [])",
     ]);
+  });
+});
+
+describe("ZoneGuessGame — source guard: a guess is POSTed only the first time a headline is answered", () => {
+  const start = source.indexOf("const handleGuess = useCallback(");
+  const end = source.indexOf("const handleNext = useCallback(");
+  const body = source.slice(start, end);
+
+  it("handleGuess gates the fetch with markAnswered(current.articleId)", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const gateAt = body.indexOf("if (markAnswered(current.articleId)) {");
+    const fetchAt = body.indexOf('fetch("/api/oyun"');
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(fetchAt).toBeGreaterThan(gateAt);
+    expect(body.slice(fetchAt)).toContain("}).catch(() => {});");
+  });
+
+  it("the local score and the reveal do not depend on the gate (they run before it)", () => {
+    const gateAt = body.indexOf("if (markAnswered(current.articleId)) {");
+    for (const call of ["setGuessedZone(zone)", "setScore(nextScore)", 'setPhase("revealed")']) {
+      const at = body.indexOf(call);
+      expect(at, call).toBeGreaterThan(-1);
+      expect(at, call).toBeLessThan(gateAt);
+    }
+  });
+
+  it("the only /api/oyun call in the file sits behind the gate", () => {
+    expect(source.split('fetch("/api/oyun"')).toHaveLength(2);
+  });
+});
+
+describe("ZoneGuessGame — source guard: a round is drawn from the headlines not yet answered", () => {
+  const start = source.indexOf("const handleStart = useCallback(");
+  const end = source.indexOf("const handleGuess = useCallback(");
+  const body = source.slice(start, end);
+
+  it("handleStart draws the next round from the unanswered headlines and no longer reads headlines[0]", () => {
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expect(body).toContain("nextRound(headlines, readAnsweredIds(), GAME_ROUND_SIZE)");
+    expect(body).not.toContain("headlines[0]");
+    expect(body).toContain("setRound(next)");
+  });
+
+  it("handleStart goes to the empty phase (no timer) when nothing unanswered is left", () => {
+    const emptyAt = body.indexOf('setPhase("empty")');
+    const timerAt = body.indexOf("endsAtRef.current = ");
+    expect(emptyAt).toBeGreaterThan(-1);
+    expect(timerAt).toBeGreaterThan(emptyAt);
+    expect(body).toContain("next.length === 0");
+  });
+
+  it("every in-round read moves from `headlines` to `round`", () => {
+    expect(source).toContain("const current = round[index] ?? null;");
+    expect(source).not.toContain("headlines[index]");
+    expect(source).not.toContain("headlines[nextIndex]");
+    expect(source).toContain("`${index + 1}. manşet, toplam ${round.length}`");
+    expect(source).toContain("{index + 1} / {round.length}");
+    expect(source).toContain("{score} / {round.length}");
+    expect(source).toContain("`Oyun bitti. ${finalScore} / ${round.length} doğru.`");
+    expect(source).toContain("nextIndex >= round.length");
+  });
+
+  it("the round size comes from round-size.ts, the same constant the sampler uses", () => {
+    expect(source).toContain('import { GAME_ROUND_SIZE } from "@/lib/game/round-size";');
+    expect(source).toContain("Math.min(GAME_ROUND_SIZE, headlines.length)");
+  });
+
+  it("headline-pool is imported type-only: a value import would pull next/cache and a \"use cache\" function into the client bundle and break `next build`", () => {
+    const poolImports = source
+      .split("\n")
+      .filter((line) => line.startsWith("import ") && line.includes("@/lib/game/headline-pool"));
+    expect(poolImports).toEqual(['import type { GameHeadline } from "@/lib/game/headline-pool";']);
+  });
+
+  it("answered ids are read from handlers only, never during render or in an effect body", () => {
+    for (const call of useEffectCalls(source)) {
+      expect(call).not.toContain("readAnsweredIds");
+      expect(call).not.toContain("markAnswered");
+    }
+    const renderStart = source.indexOf("const announcementRegion = (");
+    expect(renderStart).toBeGreaterThan(-1);
+    expect(source.slice(renderStart)).not.toContain("readAnsweredIds");
+    expect(source.slice(renderStart)).not.toContain("nextRound(");
+  });
+});
+
+describe("ZoneGuessGame — source guard: finished and empty screens", () => {
+  const FINISHED_ALL = "Bu sayfadaki manşetlerin hepsini oynadın.";
+  const FRESH_BUTTON = "Yeni manşetlerle oyna";
+  const EMPTY = "Şimdilik oynamadığın manşet kalmadı. Biraz sonra tekrar dene.";
+
+  it("has the all-played copy, the fresh-sample button and the empty-phase copy", () => {
+    expect(source).toContain(FINISHED_ALL);
+    expect(source).toContain(FRESH_BUTTON);
+    expect(source).toContain(EMPTY);
+    expect(source).toContain("Yeniden Oyna");
+  });
+
+  it("finishRound works out whether a further unanswered headline exists", () => {
+    const start = source.indexOf("const finishRound = useCallback(");
+    const end = source.indexOf("// Single 60s countdown");
+    expect(start).toBeGreaterThan(-1);
+    const body = source.slice(start, end);
+    expect(body).toContain("setHasMore(nextRound(headlines, readAnsweredIds(), 1).length > 0);");
+    expect(depsOf(body)).toEqual(["headlines", "round.length"]);
+  });
+
+  it("'Yeni manşetlerle oyna' loads a fresh server sample of /oyun", () => {
+    expect(source).toContain('window.location.assign("/oyun")');
+  });
+
+  it("the empty phase renders no button and starts no timer", () => {
+    const emptyBranchAt = source.indexOf('phase === "empty"');
+    expect(emptyBranchAt).toBeGreaterThan(-1);
+    const nextBranchAt = source.indexOf("} else if", emptyBranchAt);
+    const branch = source.slice(emptyBranchAt, nextBranchAt === -1 ? undefined : nextBranchAt);
+    expect(branch).toContain("EMPTY_COPY");
+    expect(branch).not.toContain("<button");
+    const timerEffect = useEffectCalls(source).find((call) => call.includes("setInterval"));
+    expect(timerEffect).toContain('phase !== "playing" && phase !== "revealed"');
+  });
+
+  it("replayRef sits on whichever finished-screen button is shown (one per branch)", () => {
+    expect(source.split("ref={replayRef}")).toHaveLength(3);
+  });
+});
+
+describe("/oyun page — samples a whole page session, not a single round", () => {
+  it("draws GAME_SESSION_SIZE headlines per request and keeps the pinned strings", () => {
+    const pageSource = readFileSync(resolve(__dirname, "../../app/oyun/page.tsx"), "utf8");
+    expect(pageSource).toContain("sampleHeadlines(pool, GAME_SESSION_SIZE)");
+    expect(pageSource).toContain('import { GAME_SESSION_SIZE } from "@/lib/game/round-size";');
+    expect(pageSource).toContain("searchParams: Promise<{ mod?: string; gun?: string | string[] }>;");
   });
 });

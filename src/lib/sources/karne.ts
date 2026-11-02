@@ -1,6 +1,7 @@
 import { cacheLife, cacheTag } from "next/cache";
 
 import { attemptCached, resolveCachedOrRetry } from "@/lib/cache-resilience";
+import { formatCountTr } from "@/lib/format/number-tr";
 import { createReaderClient } from "@/lib/supabase/server";
 import type { MediaDnaZone } from "@/types";
 
@@ -137,6 +138,46 @@ export function karneFreshness(
     isStale: ageMs > KARNE_STALE_AFTER_HOURS * HOUR_MS,
     ageDays: Math.floor(ageMs / DAY_MS),
   };
+}
+
+const AS_OF_FORMAT = new Intl.DateTimeFormat("tr-TR", {
+  timeZone: "Europe/Istanbul",
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+  hourCycle: "h23",
+});
+
+/**
+ * "dd.mm.yyyy HH:mm" in Europe/Istanbul for an ISO instant, or "" when it does
+ * not parse. Composed from the formatter's parts so the separators do not
+ * depend on the ICU build. Pure: the instant comes from the row.
+ */
+export function formatAsOfTr(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = AS_OF_FORMAT.formatToParts(date);
+  const part = (type: Intl.DateTimeFormatPartTypes): string =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("day")}.${part("month")}.${part("year")} ${part("hour")}:${part("minute")}`;
+}
+
+/**
+ * The cluster-count subtitle shared by the karne and the reliability card.
+ * Each row is computed at its own instant (migration 111 refreshes the two
+ * parts independently), so the line names that instant and says exactly what
+ * is counted instead of presenting two counts under one "Son 30 gün".
+ */
+export function clusterCountLine(
+  windowDays: number,
+  windowEnd: string,
+  nClusters: number,
+): string {
+  const asOf = formatAsOfTr(windowEnd);
+  const when = asOf === "" ? "" : ` · ${asOf} itibarıyla`;
+  return `Son ${windowDays} gün${when} · bu kaynağın en az bir haberinin bulunduğu ${formatCountTr(nClusters)} haber kümesi`;
 }
 
 /** Rounded whole percent, or null when the denominator is 0. */

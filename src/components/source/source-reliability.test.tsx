@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createElement } from "react";
 
+import { SourceKarneCard } from "./source-karne";
 import { SourceReliabilityCard } from "./source-reliability";
 import { toSourceKarne, type SourceKarneRead } from "@/lib/sources/karne";
 import {
@@ -66,29 +67,70 @@ function html(
   );
 }
 
+// Character scan (not a tag regex): every tag becomes one space.
+function stripTags(markup: string): string {
+  let out = "";
+  let inTag = false;
+  for (const ch of markup) {
+    if (ch === "<") {
+      inTag = true;
+      out += " ";
+    } else if (ch === ">" && inTag) {
+      inTag = false;
+    } else if (!inTag) {
+      out += ch;
+    }
+  }
+  return out;
+}
+
 // renderToStaticMarkup HTML-escapes apostrophes; compare on decoded text.
 function text(
   r: SourceReliabilityRead | null,
   k: SourceKarneRead | null = karne(),
   slug = "sozcu",
 ): string {
-  return html(r, k, slug)
-    .replace(/<[^>]+>/g, " ")
+  return stripTags(html(r, k, slug))
     .replace(/&#x27;/g, "'")
     .replace(/&amp;/g, "&")
     .replace(/\s+/g, " ");
 }
 
 describe("SourceReliabilityCard", () => {
+  it("prints the karne basis under the blindspot value, in the muted 11px style", () => {
+    const h = html(reliability());
+    const basis =
+      '<p class="text-[11px] text-muted-foreground">Oran, Kapsama karnesinin 29.09.2026 15:00 itibarıyla saydığı 120 haber kümesi üzerinden hesaplanır.</p>';
+    expect(h).toContain(basis);
+    // Exactly one row carries a basis, and it sits under the blindspot value
+    // (after the value paragraph, before the disclosure of the next row).
+    expect(h.split("Oran, Kapsama karnesinin").length - 1).toBe(1);
+    const value = h.indexOf("%5 (6/120)");
+    expect(value).toBeGreaterThan(-1);
+    expect(h.indexOf(basis)).toBeGreaterThan(value);
+    expect(h.indexOf(basis)).toBeLessThan(h.indexOf("Bölge çeşitliliği"));
+  });
+
+  it("prints no basis line when the karne row is missing", () => {
+    const h = html(reliability(), null);
+    expect(h).not.toContain("Oran, Kapsama karnesinin");
+    expect(h).not.toContain("saydığı 120");
+    expect(text(reliability(), null)).toContain("Kapsama karnesi henüz hesaplanmadı.");
+  });
+
   it("renders nothing for a null reliability row (even with a karne row)", () => {
     expect(html(null)).toBe("");
     expect(html(null, null)).toBe("");
   });
 
-  it("renders the title and the window subtitle", () => {
+  it("renders the title and a subtitle that says what is counted and as of when", () => {
     const t = text(reliability());
     expect(t).toContain("Kaynak göstergeleri");
-    expect(t).toContain("Son 30 gün · Tayf’ın yayın akışından hesaplanan sayılar");
+    // window_end 2026-09-29T12:00:00Z is 15:00 in Istanbul.
+    expect(t).toContain(
+      "Son 30 gün · 29.09.2026 15:00 itibarıyla · bu kaynağın en az bir haberinin bulunduğu 100 haber kümesi",
+    );
+    expect(t).not.toContain("Tayf’ın yayın akışından hesaplanan sayılar");
     expect(html(reliability())).toContain("<h2");
   });
 
@@ -102,7 +144,8 @@ describe("SourceReliabilityCard", () => {
     const r = reliability({ isStale: true, ageDays: 9 });
     const t = text(r);
     expect(t).toContain("Son hesaplama 9 gün önce — veriler güncel değil");
-    expect(t).not.toContain("Tayf’ın yayın akışından hesaplanan sayılar");
+    expect(t).not.toContain("bu kaynağın en az bir haberinin bulunduğu");
+    expect(t).not.toContain("Son 30 gün ·");
     expect(html(r)).toContain(
       '<p class="text-[11px] font-medium text-amber-700 dark:text-amber-400">Son hesaplama 9 gün önce — veriler güncel değil</p>',
     );
@@ -206,9 +249,64 @@ describe("SourceReliabilityCard", () => {
       html(reliability({ nArticles: 0, activeDays: 0, nClusters: 0, nWireCopy: 0, zoneMix: [] })),
     ];
     for (const v of variants) {
-      const t = v.replace(/<[^>]+>/g, " ");
+      const t = stripTags(v);
       expect(t).not.toMatch(/güvenilmez|intihal|kopyacı|yalan|taraflı/i);
     }
+  });
+
+  // h18-numbers-3 (2026-11-02): /source/medya-gazete printed "n = 149 haber
+  // kümesi" (karne, window_end 2026-11-01T22:45Z) next to a reliability card
+  // whose own clusters were counted at 2026-11-01T06:45Z (n = 244), both under
+  // the same "Son 30 gün". Both counts use one definition; the cards must say
+  // which instant each belongs to and what is counted.
+  describe("h18 regression: two cluster counts, two labelled instants", () => {
+    const karneProd = karne({
+      nClusters: 149,
+      windowStart: "2026-10-02T22:45:00.000Z",
+      windowEnd: "2026-11-01T22:45:00.000Z",
+      computedAt: "2026-11-01T22:45:00.000Z",
+    });
+    const reliabilityProd = reliability({
+      nClusters: 244,
+      windowStart: "2026-10-02T06:45:00.000Z",
+      windowEnd: "2026-11-01T06:45:00.000Z",
+      computedAt: "2026-11-01T06:45:00.000Z",
+    });
+    const karneHtml = renderToStaticMarkup(
+      createElement(SourceKarneCard, { karne: karneProd, slug: "medya-gazete" }),
+    );
+    const reliabilityHtml = html(reliabilityProd, karneProd, "medya-gazete");
+
+    it("the karne card names its own instant and count", () => {
+      const t = stripTags(karneHtml).replace(/\s+/g, " ");
+      expect(t).toContain(
+        "02.11.2026 01:45 itibarıyla · bu kaynağın en az bir haberinin bulunduğu 149 haber kümesi",
+      );
+      expect(t).not.toContain("n = 149 haber kümesi");
+    });
+
+    it("the reliability card names its own instant and count, and the karne basis it divides by", () => {
+      const t = stripTags(reliabilityHtml).replace(/\s+/g, " ");
+      expect(t).toContain(
+        "01.11.2026 09:45 itibarıyla · bu kaynağın en az bir haberinin bulunduğu 244 haber kümesi",
+      );
+      expect(t).toContain(
+        "Oran, Kapsama karnesinin 02.11.2026 01:45 itibarıyla saydığı 149 haber kümesi üzerinden hesaplanır.",
+      );
+      expect(t).not.toContain("n = 149 haber kümesi");
+      expect(t).not.toContain("n = 244 haber kümesi");
+    });
+
+    it("no card prints the old window start or the bare n = form for the cluster count", () => {
+      for (const markup of [karneHtml, reliabilityHtml]) {
+        const t = stripTags(markup);
+        expect(t).not.toContain("n = 149 haber");
+        // The window start dates (03.10.2026 / 02.10.2026) are not printed.
+        expect(t).not.toContain("03.10.2026");
+        expect(t).not.toContain("02.10.2026");
+        expect(t).not.toContain("Tayf’ın yayın akışından hesaplanan sayılar");
+      }
+    });
   });
 
   it("uses literal Tailwind classes with no opacity-modified text tokens", () => {

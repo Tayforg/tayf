@@ -5,6 +5,10 @@ import { sourceKindOf } from "@/lib/sources/kind";
 import { createReaderClient } from "@/lib/supabase/server";
 import type { BiasCategory, MediaDnaZone, SourceKind } from "@/types";
 import { isGameEligibleTitle } from "./pii-filter";
+// The round and session sizes live in round-size.ts, a module with no server
+// imports, because the client game needs GAME_ROUND_SIZE and must not pull this
+// file (next/cache, "use cache") into the client bundle. Import them from there.
+import { GAME_ROUND_SIZE } from "./round-size";
 
 // /oyun's headline pool — the pick. Mirrors the embedded-select shape
 // blindspots-query.ts / politics-query.ts already use (clusters →
@@ -16,9 +20,17 @@ import { isGameEligibleTitle } from "./pii-filter";
 // `selectGameHeadlines` below — same "fetch broad, filter in JS" split
 // blindspots-query.ts uses, so this is unit-testable without Supabase and
 // the async wrapper stays a thin fetch + delegate.
+//
+// A SIXTH rule lives in `sampleHeadlines`, not here: a drawn list holds at
+// most one headline per cluster (per story). It is a per-draw rule on
+// purpose: the cached pool keeps every outlet's headline, and each request
+// picks which outlet represents a cluster at random.
 
 export interface GameHeadline {
   articleId: string;
+  /** The cluster (story) the headline belongs to; `sampleHeadlines` keeps one
+   * headline per cluster. */
+  clusterId: string;
   sourceId: string;
   title: string;
   sourceName: string;
@@ -49,12 +61,13 @@ export interface GameClusterArticleRow {
 }
 
 export interface GameClusterRow {
+  id: string;
   article_count: number;
   cluster_articles: GameClusterArticleRow[] | null;
 }
 
 const WINDOW_HOURS = 48;
-const DEFAULT_LIMIT = 10;
+const DEFAULT_LIMIT = GAME_ROUND_SIZE;
 // Broad DB-side candidate window — same order of magnitude as
 // blindspots-query.ts's CANDIDATE_LIMIT — so a cheap `article_count >= 3`
 // prefilter doesn't drag in the entire clusters table.
@@ -107,6 +120,7 @@ export function selectGameHeadlines(
       seenSourceIds.add(source.id);
       candidates.push({
         articleId: article.id,
+        clusterId: cluster.id,
         sourceId: source.id,
         title: article.title,
         sourceName: source.name,
@@ -121,11 +135,21 @@ export function selectGameHeadlines(
 }
 
 /**
- * PURE. Shuffles the full eligible candidate list (Fisher-Yates) and caps
- * it at `limit`. Call this OUTSIDE the cached call graph — per request, not
+ * PURE. Shuffles the full eligible candidate list (Fisher-Yates), then walks
+ * the shuffled list keeping only the FIRST headline of each cluster until
+ * `limit` are kept. Call this OUTSIDE the cached call graph — per request, not
  * per cache window — so every visitor (and every replay within a 5-minute
  * cache window) gets their own draw instead of the whole window sharing one
  * `Math.random()` call. No cryptographic requirement.
+ *
+ * Why one per cluster: the candidate list keeps every outlet's headline
+ * (selectGameHeadlines only applies the outlet rule), so one story covered by
+ * four outlets would otherwise fill four slots of a ten-headline round. The
+ * cut runs on a uniform shuffle, so which outlet represents a cluster is
+ * random and no zone gets extra weight.
+ *
+ * With fewer distinct clusters than `limit` the result is shorter: it is
+ * never padded with a second headline of a cluster already in the list.
  */
 export function sampleHeadlines(
   candidates: readonly GameHeadline[],
@@ -136,7 +160,19 @@ export function sampleHeadlines(
     const j = Math.floor(Math.random() * (i + 1));
     [copy[i], copy[j]] = [copy[j] as GameHeadline, copy[i] as GameHeadline];
   }
-  return copy.slice(0, limit);
+
+  const seenClusters = new Set<string>();
+  const picked: GameHeadline[] = [];
+  for (const headline of copy) {
+    if (picked.length >= limit) break;
+    // `|| articleId`: a pool cached before clusterId existed (or a row without
+    // an id) still dedupes per article instead of collapsing into one key.
+    const key = headline.clusterId || headline.articleId;
+    if (seenClusters.has(key)) continue;
+    seenClusters.add(key);
+    picked.push(headline);
+  }
+  return picked;
 }
 
 /**
@@ -152,7 +188,7 @@ async function fetchGameHeadlinePool(): Promise<GameHeadline[] | null> {
     const { data, error } = await supabase
       .from("clusters")
       .select(
-        `article_count,
+        `id, article_count,
          cluster_articles (
            articles (
              id, title, published_at, source_id,
@@ -183,10 +219,10 @@ async function fetchGameHeadlinePool(): Promise<GameHeadline[] | null> {
 }
 
 // Cached entry point. Caches the ELIGIBLE POOL (every candidate that passes
-// `selectGameHeadlines`'s five rules), not the game's final 10. The
-// per-request sample (which 10, in which order) is drawn by the caller via
-// `sampleHeadlines`, so it rotates on every request even while this pool
-// stays cached.
+// `selectGameHeadlines`'s five rules), not the game's final list. The
+// per-request sample (which headlines, in which order, one per cluster) is
+// drawn by the caller via `sampleHeadlines`, so it rotates on every request
+// even while this pool stays cached.
 //
 // The cache lifetime depends on the outcome (Next's "conditional cache
 // lifetimes": exactly one `cacheLife` call per invocation). A pool,

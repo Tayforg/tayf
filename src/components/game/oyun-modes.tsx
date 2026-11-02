@@ -38,6 +38,14 @@ const INACTIVE_TAB_CLASS =
  * independently. Tab order and the default tab are fixed here: Bölge,
  * Çerçeve, Günün Tayf'ı — Bölge stays the default unless `initialMode`
  * says otherwise (driven by the URL, one level up in oyun/page.tsx).
+ *
+ * A tab is mounted the first time it is opened and then stays mounted, hidden
+ * with the `hidden` attribute while another tab is active: switching tabs must
+ * not unmount a game mid-round (a restart would replay headlines whose answers
+ * were already revealed). The server render holds only the initial tab, so a
+ * visitor who never opens Çerçeve never mounts it either (its fetch, on
+ * "Başla", is what sets that game's cookie). A Bölge round in a hidden tab
+ * keeps its wall-clock timer running.
  */
 export function OyunModes({
   headlines,
@@ -47,6 +55,13 @@ export function OyunModes({
   initialMode = "bolge",
 }: OyunModesProps) {
   const [mode, setMode] = useState<OyunMode>(initialMode);
+  // Tabs opened so far: each is rendered once and kept (see the doc comment).
+  const [opened, setOpened] = useState<ReadonlySet<OyunMode>>(() => new Set([initialMode]));
+
+  const selectMode = (m: OyunMode) => {
+    setMode(m);
+    setOpened((prev) => (prev.has(m) ? prev : new Set([...prev, m])));
+  };
 
   return (
     <div className="space-y-6">
@@ -54,7 +69,7 @@ export function OyunModes({
         <button
           type="button"
           aria-pressed={mode === "bolge"}
-          onClick={() => setMode("bolge")}
+          onClick={() => selectMode("bolge")}
           className={mode === "bolge" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
         >
           Bölge
@@ -62,7 +77,7 @@ export function OyunModes({
         <button
           type="button"
           aria-pressed={mode === "cerceve"}
-          onClick={() => setMode("cerceve")}
+          onClick={() => selectMode("cerceve")}
           className={mode === "cerceve" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
         >
           Çerçeve
@@ -70,32 +85,40 @@ export function OyunModes({
         <button
           type="button"
           aria-pressed={mode === "gunluk"}
-          onClick={() => setMode("gunluk")}
+          onClick={() => selectMode("gunluk")}
           className={mode === "gunluk" ? ACTIVE_TAB_CLASS : INACTIVE_TAB_CLASS}
         >
           Günün Tayf&rsquo;ı
         </button>
       </div>
 
-      {mode === "bolge" ? (
-        headlines === null ? (
-          <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-            <p className="text-sm text-muted-foreground">Başlıklar şu an yüklenemedi.</p>
-            <RetryButton />
-          </div>
-        ) : headlines.length === 0 ? (
-          <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
-            <p className="text-sm text-muted-foreground">
-              Şu an oynanacak başlık yok. Birazdan tekrar dene.
-            </p>
-          </div>
-        ) : (
-          <ZoneGuessGame headlines={headlines} />
-        )
-      ) : mode === "cerceve" ? (
-        <FramingGame />
-      ) : (
-        <DailyGame puzzle={daily} todayKey={todayKey} fellBack={dailyFellBack} />
+      {opened.has("bolge") && (
+        <div hidden={mode !== "bolge"}>
+          {headlines === null ? (
+            <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
+              <p className="text-sm text-muted-foreground">Başlıklar şu an yüklenemedi.</p>
+              <RetryButton />
+            </div>
+          ) : headlines.length === 0 ? (
+            <div className="rounded-xl border border-border/60 bg-card/40 p-8 text-center">
+              <p className="text-sm text-muted-foreground">
+                Şu an oynanacak başlık yok. Birazdan tekrar dene.
+              </p>
+            </div>
+          ) : (
+            <ZoneGuessGame headlines={headlines} />
+          )}
+        </div>
+      )}
+      {opened.has("cerceve") && (
+        <div hidden={mode !== "cerceve"}>
+          <FramingGame />
+        </div>
+      )}
+      {opened.has("gunluk") && (
+        <div hidden={mode !== "gunluk"}>
+          <DailyGame puzzle={daily} todayKey={todayKey} fellBack={dailyFellBack} />
+        </div>
       )}
     </div>
   );

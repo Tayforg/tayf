@@ -5,6 +5,7 @@ import Link from "next/link";
 import { PageHero } from "@/components/ui/page-hero";
 import { OyunModes } from "@/components/game/oyun-modes";
 import { loadGameHeadlines, sampleHeadlines } from "@/lib/game/headline-pool";
+import { GAME_SESSION_SIZE } from "@/lib/game/round-size";
 import { getDailyPuzzle } from "@/lib/game/daily-query";
 import { istanbulDateKey, resolvePuzzleDateWithReason } from "@/lib/game/daily-set";
 import { currentTimeMs } from "@/lib/time";
@@ -78,7 +79,7 @@ export default async function OyunPage({
 
   const [headlines, daily] = await Promise.all([
     loadGameHeadlines().then((pool) =>
-      pool === null ? null : sampleHeadlines(pool),
+      pool === null ? null : sampleHeadlines(pool, GAME_SESSION_SIZE),
     ),
     getDailyPuzzle(dateKey),
   ]);

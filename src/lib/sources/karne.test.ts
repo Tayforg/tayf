@@ -45,6 +45,8 @@ import {
   KARNE_STALE_AFTER_HOURS,
   KARNE_WINDOW_DAYS,
   buildKarneView,
+  clusterCountLine,
+  formatAsOfTr,
   getSourceKarne,
   karneFreshness,
   pct,
@@ -181,6 +183,53 @@ describe("karneFreshness", () => {
       expect(karneFreshness(input, NOW)).toEqual({ isStale: false, ageDays: 0 });
     },
   );
+});
+
+describe("formatAsOfTr", () => {
+  it("renders dd.mm.yyyy HH:mm in Europe/Istanbul (UTC+3)", () => {
+    expect(formatAsOfTr("2026-11-01T22:45:00.000Z")).toBe("02.11.2026 01:45");
+    expect(formatAsOfTr("2026-11-01T06:45:00Z")).toBe("01.11.2026 09:45");
+  });
+
+  it("uses a 24-hour clock: midnight is 00, not 24", () => {
+    expect(formatAsOfTr("2026-11-01T21:05:00Z")).toBe("02.11.2026 00:05");
+  });
+
+  it("follows the Istanbul calendar day across the UTC date line", () => {
+    expect(formatAsOfTr("2026-12-31T21:30:00Z")).toBe("01.01.2027 00:30");
+  });
+
+  it("returns an empty string for unparseable or empty input", () => {
+    expect(formatAsOfTr("x")).toBe("");
+    expect(formatAsOfTr("")).toBe("");
+  });
+});
+
+describe("clusterCountLine", () => {
+  it("states the window, the as-of instant and exactly what is counted", () => {
+    expect(clusterCountLine(30, "2026-11-01T22:45:00.000Z", 1200)).toBe(
+      "Son 30 gün · 02.11.2026 01:45 itibarıyla · bu kaynağın en az bir haberinin bulunduğu 1.200 haber kümesi",
+    );
+  });
+
+  it("groups the count the Turkish way and never writes n =", () => {
+    const small = clusterCountLine(30, "2026-11-01T22:45:00.000Z", 149);
+    expect(small).toContain("bulunduğu 149 haber kümesi");
+    expect(small).not.toContain("n =");
+    expect(clusterCountLine(30, "2026-11-01T22:45:00.000Z", 10000)).toContain(
+      "bulunduğu 10.000 haber kümesi",
+    );
+  });
+
+  it("uses the row's own windowDays", () => {
+    expect(clusterCountLine(14, "2026-11-01T22:45:00.000Z", 5).startsWith("Son 14 gün · ")).toBe(true);
+  });
+
+  it("drops the itibarıyla segment when the date is unparseable", () => {
+    expect(clusterCountLine(30, "x", 7)).toBe(
+      "Son 30 gün · bu kaynağın en az bir haberinin bulunduğu 7 haber kümesi",
+    );
+  });
 });
 
 describe("pct", () => {

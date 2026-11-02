@@ -3,6 +3,7 @@ import Link from "next/link";
 import type { SourceKarneRead } from "@/lib/sources/karne";
 import {
   buildReliabilityView,
+  reliabilityCountLine,
   type SourceReliabilityRead,
 } from "@/lib/sources/reliability";
 
@@ -42,7 +43,7 @@ export function SourceReliabilityCard({
           </p>
         ) : (
           <p className="text-[11px] text-muted-foreground">
-            {`Son ${reliability.windowDays} gün · Tayf’ın yayın akışından hesaplanan sayılar`}
+            {reliabilityCountLine(reliability)}
           </p>
         )}
       </div>
@@ -57,6 +58,9 @@ export function SourceReliabilityCard({
               ) : (
                 <p className="text-xs text-muted-foreground">{row.note}</p>
               )}
+              {row.basis !== null ? (
+                <p className="text-[11px] text-muted-foreground">{row.basis}</p>
+              ) : null}
               <details>
                 <summary className="text-[11px] cursor-pointer text-muted-foreground hover:text-foreground transition-colors">
                   Nasıl hesaplanır?

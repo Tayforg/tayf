@@ -56,6 +56,7 @@ import {
   buildReliabilityView,
   diversityFromZoneMix,
   getSourceReliability,
+  reliabilityCountLine,
   toSourceReliability,
   type SourceReliability,
 } from "./reliability";
@@ -262,6 +263,28 @@ describe("diversityFromZoneMix", () => {
   });
 });
 
+describe("reliabilityCountLine", () => {
+  it("is the shared count line over the reliability row's own window and n", () => {
+    expect(
+      reliabilityCountLine(
+        rel({ nClusters: 244, windowEnd: "2026-11-01T06:45:00.000Z" }),
+      ),
+    ).toBe(
+      "Son 30 gün · 01.11.2026 09:45 itibarıyla · bu kaynağın en az bir haberinin bulunduğu 244 haber kümesi",
+    );
+  });
+
+  it("uses the row's windowDays and groups thousands", () => {
+    expect(
+      reliabilityCountLine(
+        rel({ windowDays: 14, nClusters: 1689, windowEnd: "2026-11-01T22:45:00.000Z" }),
+      ),
+    ).toBe(
+      "Son 14 gün · 02.11.2026 01:45 itibarıyla · bu kaynağın en az bir haberinin bulunduğu 1.689 haber kümesi",
+    );
+  });
+});
+
 describe("buildReliabilityView", () => {
   const byKey = (rows: ReturnType<typeof buildReliabilityView>) =>
     Object.fromEntries(rows.map((r) => [r.key, r]));
@@ -394,6 +417,68 @@ describe("buildReliabilityView", () => {
     it("shows 0 blindspot clusters as %0", () => {
       const row = byKey(buildReliabilityView(rel(), karneRow({ n_blindspot: 0, n_blindspot_same_side: 0 }))).blindspot!;
       expect(row.value).toBe("%0 (0/120)");
+    });
+
+    it("names the karne snapshot it divides by: window_end in Istanbul time and its cluster count", () => {
+      const row = byKey(buildReliabilityView(rel(), karneRow())).blindspot!;
+      expect(row.basis).toBe(
+        "Oran, Kapsama karnesinin 29.09.2026 03:00 itibarıyla saydığı 120 haber kümesi üzerinden hesaplanır.",
+      );
+    });
+
+    it("uses the karne's own count and window, not the reliability row's (the h18 prod shape)", () => {
+      const row = byKey(
+        buildReliabilityView(
+          rel({ nClusters: 244, windowEnd: "2026-11-01T06:45:00.000Z" }),
+          karneRow({ n_clusters: 149, window_end: "2026-11-01T22:45:00.000Z" }),
+        ),
+      ).blindspot!;
+      expect(row.basis).toBe(
+        "Oran, Kapsama karnesinin 02.11.2026 01:45 itibarıyla saydığı 149 haber kümesi üzerinden hesaplanır.",
+      );
+    });
+
+    it("groups a four-digit karne count the Turkish way", () => {
+      const row = byKey(buildReliabilityView(rel(), karneRow({ n_clusters: 1200, n_multi: 60 }))).blindspot!;
+      expect(row.basis).toContain("saydığı 1.200 haber kümesi üzerinden");
+    });
+
+    it("keeps the basis next to the insufficient-sample note (karne present, below the floor)", () => {
+      const row = byKey(buildReliabilityView(rel(), karneRow({ n_clusters: 19, n_multi: 5, co_iktidar: 1, co_bagimsiz: 1, co_muhalefet: 1 }))).blindspot!;
+      expect(row.value).toBeNull();
+      expect(row.basis).toBe(
+        "Oran, Kapsama karnesinin 29.09.2026 03:00 itibarıyla saydığı 19 haber kümesi üzerinden hesaplanır.",
+      );
+    });
+
+    it("drops the itibarıyla segment instead of printing an empty date", () => {
+      const row = byKey(
+        buildReliabilityView(rel(), { ...karneRow(), windowEnd: "x" }),
+      ).blindspot!;
+      expect(row.basis).toBe(
+        "Oran, Kapsama karnesinin saydığı 120 haber kümesi üzerinden hesaplanır.",
+      );
+    });
+
+    it("has no basis when the karne row is missing", () => {
+      expect(byKey(buildReliabilityView(rel(), null)).blindspot!.basis).toBeNull();
+    });
+  });
+
+  describe("basis on the other rows", () => {
+    it("is null on cadence, wire and diversity, with or without a karne", () => {
+      for (const k of [karneRow(), null]) {
+        const rows = byKey(buildReliabilityView(rel(), k));
+        expect(rows.cadence!.basis).toBeNull();
+        expect(rows.wire!.basis).toBeNull();
+        expect(rows.diversity!.basis).toBeNull();
+      }
+    });
+
+    it("every row carries the field explicitly (string or null, never undefined)", () => {
+      for (const r of buildReliabilityView(rel(), karneRow())) {
+        expect(r.basis === null || typeof r.basis === "string").toBe(true);
+      }
     });
   });
 
