@@ -317,6 +317,44 @@ describe("GET /api/health", () => {
     expect(body.checks.clustering.ok).toBe(true);
   });
 
+  // h33-api-4: every other JSON surface (docs/api.md pins it) sends
+  // `application/json; charset=utf-8`; the health route sent a bare
+  // `application/json` because respond() set only Cache-Control.
+  describe("Content-Type [h33-api-4]", () => {
+    const JSON_UTF8 = "application/json; charset=utf-8";
+
+    it("the bearer (detailed) response is application/json; charset=utf-8 and stays no-store", async () => {
+      const { status, body, headers } = await callGet();
+      expect(status).toBe(200);
+      expect(body.checks).toBeDefined();
+      expect(headers.get("Content-Type")).toBe(JSON_UTF8);
+      expect(headers.get("Cache-Control")).toBe("no-store");
+    });
+
+    it("the anonymous response is application/json; charset=utf-8 and stays no-store", async () => {
+      const { status, body, headers } = await callGet(
+        new Request("http://localhost/api/health", {
+          headers: { "x-forwarded-for": "203.0.113.41" },
+        }),
+      );
+      expect(status).toBe(200);
+      expect(Object.keys(body).sort()).toEqual(["status", "timestamp"]);
+      expect(headers.get("Content-Type")).toBe(JSON_UTF8);
+      expect(headers.get("Cache-Control")).toBe("no-store");
+    });
+
+    it("an unhealthy (503) response carries the charset too", async () => {
+      responders.sourcesSelect = async () => ({
+        data: null,
+        error: { message: "connection refused" },
+      });
+      const { status, headers } = await callGet();
+      expect(status).toBe(503);
+      expect(headers.get("Content-Type")).toBe(JSON_UTF8);
+      expect(headers.get("Cache-Control")).toBe("no-store");
+    });
+  });
+
   it("returns 503 unhealthy when required env vars are missing", async () => {
     delete process.env.NEXT_PUBLIC_SUPABASE_URL;
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;

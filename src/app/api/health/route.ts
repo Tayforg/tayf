@@ -757,7 +757,10 @@ function respond(
 ): Response {
   const timestamp = new Date().toISOString();
 
-  const headers = { "Cache-Control": "no-store" };
+  const headers = {
+    "Cache-Control": "no-store",
+    "Content-Type": "application/json; charset=utf-8",
+  };
 
   if (authed) {
     const body: DetailedHealthBody = { status: verdict, timestamp, checks };

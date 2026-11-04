@@ -145,3 +145,55 @@ select s.slug, s.fetch_last_status, s.fetch_fail_streak, max(a.created_at)
 ```
 
 If a repointed source still fails from the datacenter, it is IP-blocked: roll that row back and add a `SOURCE_HEADERS` override as a follow-up.
+
+## 8. Repointed 2026-11 (hunt 33): bianet and medya-gazete, founder SQL (no migration)
+
+Two more sources have a verified working feed on their own site. Production is repointed by the statements below, run once by the founder (service_role or postgres): a migration that rewrites `public.sources` rows is out of bounds for this repo. `supabase/seed_sources.sql` and the research CSV already carry the new URLs, so re-running the seed (`on conflict (slug) do update set rss_url = excluded.rss_url`) does not put the old ones back. `tests/guards/seed-source-feeds.test.ts` pins the seed, the CSV and the statements in this section, including the column names.
+
+Each statement resets the fetch validators (`fetch_etag`, `fetch_last_modified`, `fetch_body_hash`) and `fetch_items_count`. A row with `fetch_items_count` null skips the hydration of the warm conditional cache in `supabase/functions/ingest/index.ts`, so the next cycle fetches the new URL unconditionally instead of asking it for a 304 against the old feed's validators.
+
+Do NOT add either slug to `ops_dark_source_baseline`: a repointed feed should leave `sources_newly_dark` by delivering, not be acknowledged as dark.
+
+### bianet (h33-ops-1)
+
+Checked 2026-11-04 from a residential network, one GET each. The stored feed `https://bianet.org/biamag.rss` redirects (301) to `https://bianet.org/rss/biamag`, the weekly magazine feed: 50 items, every pubDate a Saturday (about 10 a week), so the source delivered 52 articles in 30 days and 2 in the last 72 hours, with `fetch_last_status` 304 and a fail streak of 0 (valid but stale, which no ops row flags). `https://bianet.org/bianet.rss` redirects to `https://bianet.org/rss/bianet`: 200 `text/xml`, 50 Turkish news items, 20 dated 3 Nov and 30 dated 4 Nov, about 30 a day. The canonical target is used so each cycle saves one redirect. No other source row uses a bianet.org feed (`bha` is a different agency, `bha.net.tr`).
+
+```sql
+update public.sources
+   set rss_url = 'https://bianet.org/rss/bianet',
+       fetch_etag = null,
+       fetch_last_modified = null,
+       fetch_body_hash = null,
+       fetch_items_count = null
+ where slug = 'bianet';
+```
+
+Check after the next 3-minute ingest cycle: `fetch_last_status` is 200 and `fetch_newest_item_at` is within the last hour; expect about 30 new articles a day.
+
+### medya-gazete (h33-ops-2)
+
+Checked 2026-11-04. The stored feed `https://www.medyagazete.com/rss/genel-0` returns 404 `text/html` (the path moved): `fetch_fail_streak` 32, quarantined until 2026-11-05 19:06Z, last article 2026-10-25, none in the last 72 hours (392 in the 30 days before). `https://www.medyagazete.com/rss.xml` on the same host returns 200 `application/rss+xml` with 50 items, newest 4 Nov 2026, item links already on `https://www.medyagazete.com/haber/<slug>`. Every item is newer than the last stored article, so there is no overlap. Migration 114's header names this source as one to repoint, not to acknowledge.
+
+Clearing the quarantine is required: without it the row is skipped until `fetch_quarantined_until` passes.
+
+```sql
+update public.sources
+   set rss_url = 'https://www.medyagazete.com/rss.xml',
+       fetch_etag = null,
+       fetch_last_modified = null,
+       fetch_body_hash = null,
+       fetch_items_count = null,
+       fetch_fail_streak = 0,
+       fetch_quarantined_until = null
+ where slug = 'medya-gazete';
+```
+
+Check: `fetch_last_status` is 200 on the next cycle, and `medya-gazete` leaves `sources_newly_dark` within 24 hours.
+
+Verify (read-only), expect `fetch_last_status` 200 and streak 0 for both rows:
+
+```sql
+select slug, rss_url, fetch_last_status, fetch_fail_streak, fetch_quarantined_until, fetch_newest_item_at
+  from public.sources
+ where slug in ('bianet', 'medya-gazete');
+```

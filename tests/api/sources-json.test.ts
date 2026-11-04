@@ -499,6 +499,15 @@ describe("GET /api/sources/[slug]", () => {
     expect(typeof body.error).toBe("string");
   });
 
+  it("sends application/json; charset=utf-8 on the unknown-slug 404, keeping its short public Cache-Control (h33-api-4)", async () => {
+    const { GET } = await import("@/app/api/sources/[slug]/route");
+    const res = await GET(detailRequest("does-not-exist"), paramsFor("does-not-exist"));
+    expect(res.status).toBe(404);
+    expect(res.headers.get("Content-Type")).toBe("application/json; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toBe("public, s-maxage=300");
+    expect(await res.json()).toEqual({ error: "Source not found" });
+  });
+
   it("returns 400 for a malformed slug and never calls Supabase", async () => {
     const fromSpy = vi.spyOn(supabaseFake.client, "from");
     fromSpy.mockClear();

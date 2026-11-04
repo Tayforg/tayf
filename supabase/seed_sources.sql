@@ -68,7 +68,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('Medyascope', 'medyascope', 'https://medyascope.tv', 'https://medyascope.tv/feed/', 'center', 'outlet', true),
   ('Journo', 'journo', 'https://journo.com.tr', 'https://journo.com.tr/feed', 'center', 'niche', true),
   ('Gazete Duvar', 'gazete-duvar', 'https://www.gazeteduvar.com.tr', 'https://www.gazeteduvar.com.tr/export/rss', 'center', 'outlet', true),
-  ('Bianet', 'bianet', 'https://bianet.org', 'https://bianet.org/biamag.rss', 'center', 'outlet', true),
+  ('Bianet', 'bianet', 'https://bianet.org', 'https://bianet.org/rss/bianet', 'center', 'outlet', true),
   ('Ekonomim', 'ekonomim', 'https://www.ekonomim.com', 'https://www.ekonomim.com/export/rss', 'center', 'niche', true),
   ('Dünya', 'dunya', 'https://www.dunya.com', 'https://www.dunya.com/rss?dunya', 'center', 'niche', true),
   ('Independent Türkçe', 'indyturk', 'https://www.indyturk.com', 'https://www.indyturk.com/rss.xml', 'center', 'outlet', true),
@@ -130,7 +130,7 @@ insert into sources (name, slug, url, rss_url, bias, kind, active) values
   ('Artı Bir TV', 'arti-bir-tv', 'http://www.haberartibir.com.tr', 'http://www.haberartibir.com.tr/rss.php', 'opposition_leaning', 'outlet', false),
   ('İleri Haber', 'ileri-haber', 'http://ilerihaber.org', 'http://ilerihaber.org/rss.xml', 'opposition_leaning', 'outlet', false),
   ('En Politik', 'en-politik', 'https://www.enpolitik.com', 'https://www.enpolitik.com/rss.xml', 'opposition_leaning', 'outlet', true),
-  ('Medya Gazete', 'medya-gazete', 'https://www.medyagazete.com', 'https://www.medyagazete.com/rss/genel-0', 'opposition_leaning', 'outlet', true),
+  ('Medya Gazete', 'medya-gazete', 'https://www.medyagazete.com', 'https://www.medyagazete.com/rss.xml', 'opposition_leaning', 'outlet', true),
   ('Muhalif', 'muhalif', 'https://www.muhalif.com.tr', 'https://www.muhalif.com.tr/rss/news', 'opposition_leaning', 'outlet', true),
   ('Elips Haber', 'elips-haber', 'https://www.elipshaber.com', 'https://www.elipshaber.com/rss', 'opposition_leaning', 'outlet', true),
 
