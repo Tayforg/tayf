@@ -7,11 +7,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   HOST_QUERY_SQL,
   PUBLIC_SUFFIXES,
+  QUERY_SHARE_SQL,
+  QUERY_WINDOW_DAYS,
   SHARED_PLATFORM_DOMAINS,
   SOURCES_QUERY_SQL,
   collapseHosts,
   isPublicSuffix,
   parseHostLines,
+  queryShareSql,
   registrableDomain,
   renderDataFile,
   run,
@@ -428,6 +431,32 @@ describe("SQL helpers", () => {
   });
 });
 
+describe("QUERY_SHARE_SQL (h30-abuse-4)", () => {
+  it("is the read-only per-host query-share SELECT over the 7-day window", () => {
+    expect(QUERY_WINDOW_DAYS).toBe(7);
+    expect(QUERY_SHARE_SQL).toBe(queryShareSql(QUERY_WINDOW_DAYS));
+    expect(QUERY_SHARE_SQL).toMatch(/^\s*select\b/i);
+    expect(QUERY_SHARE_SQL).toMatch(/from public\.articles/i);
+    expect(QUERY_SHARE_SQL).toContain("interval '7 days'");
+    expect(QUERY_SHARE_SQL).toContain("position('?' in image_url)");
+    expect(QUERY_SHARE_SQL).toContain("n_query");
+    expect(QUERY_SHARE_SQL).not.toMatch(/\b(insert|update|delete|truncate|drop|alter|grant)\b/i);
+    expect(QUERY_SHARE_SQL.trimEnd().endsWith(";")).toBe(false);
+  });
+
+  it("takes the window as a parameter", () => {
+    expect(queryShareSql(1)).toContain("interval '1 days'");
+    expect(queryShareSql(30)).toContain("interval '30 days'");
+    expect(queryShareSql(1)).not.toContain("interval '7 days'");
+  });
+
+  it("refuses a window that is not a positive integer (it is spliced into SQL)", () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "7", "7 days'; drop", null, undefined, 400]) {
+      expect(() => queryShareSql(bad), String(bad)).toThrow(RangeError);
+    }
+  });
+});
+
 describe("run (CLI)", () => {
   let dir;
   beforeEach(() => {
@@ -454,6 +483,16 @@ describe("run (CLI)", () => {
     const text = out.join("\n");
     expect(text).toContain(HOST_QUERY_SQL);
     expect(text).toContain(SOURCES_QUERY_SQL);
+    expect(text).toContain(QUERY_SHARE_SQL);
+  });
+
+  it("--print-sql prints the three statements in runbook order, each terminated", () => {
+    const { out, io } = capture();
+    expect(run(["--print-sql"], io)).toBe(0);
+    const text = out.join("\n");
+    const at = [HOST_QUERY_SQL, SOURCES_QUERY_SQL, QUERY_SHARE_SQL].map((q) => text.indexOf(`${q};`));
+    expect(at.every((i) => i >= 0)).toBe(true);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
   });
 
   it("writes the data file from --hosts and --source-urls", () => {

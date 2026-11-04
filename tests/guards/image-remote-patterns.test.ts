@@ -10,7 +10,10 @@ import {
   isPublicSuffix,
 } from "../../scripts/gen-image-hosts.mjs";
 import { GENERATED_IMAGE_HOSTS } from "../../src/lib/images/remote-image-hosts.data";
-import { IMAGE_REMOTE_PATTERNS } from "../../src/lib/images/remote-image-hosts";
+import {
+  IMAGE_REMOTE_PATTERNS,
+  QUERY_HOSTS,
+} from "../../src/lib/images/remote-image-hosts";
 
 // ---------------------------------------------------------------------------
 // Permanent CI guard (api-1): /_next/image must never be an open proxy again.
@@ -34,7 +37,11 @@ import { IMAGE_REMOTE_PATTERNS } from "../../src/lib/images/remote-image-hosts";
 //       `images`);
 //   (e) every producer of a /_next/image request in src/ applies the same
 //       allowlist predicate: next/image THROWS in dev for an unlisted host, so
-//       a new `<Image src={remote}>` that skips the filter would crash pages.
+//       a new `<Image src={remote}>` that skips the filter would crash pages;
+//   (f) h30-abuse-4: a host allows NO query string unless it is in QUERY_HOSTS
+//       (`?cb=N` on an allowlisted host was a fresh origin fetch + transform
+//       per variant), and next.config.ts images has no catch-all and caps the
+//       origin response size.
 // ---------------------------------------------------------------------------
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -81,6 +88,34 @@ function membersOf(hostname: string): Members {
   return { wildcard: m[1] !== undefined, hosts: list.split(",") };
 }
 
+/**
+ * The text between the braces of the first `<key>: {` in `src` (a character
+ * scan, so nested braces are counted and no regex backtracks over the file), or
+ * null when the key or its closing brace is missing.
+ */
+function objectBody(src: string, key: string): string | null {
+  const marker = `${key}: {`;
+  const at = src.indexOf(marker);
+  if (at === -1) return null;
+  const start = at + marker.length;
+  let depth = 1;
+  for (let i = start; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return src.slice(start, i);
+    }
+  }
+  return null;
+}
+
+/** The generator-form entries a pattern's hostname stands for. */
+const entriesOf = (hostname: string): string[] => {
+  const { wildcard, hosts } = membersOf(hostname);
+  return hosts.map((h) => (wildcard ? `**.${h}` : h));
+};
+
 const underShared = (host: string): boolean =>
   SHARED_PLATFORM_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
 
@@ -119,6 +154,36 @@ describe("next.config.ts images.remotePatterns (api-1)", () => {
     expect(blanked).not.toContain("protocol");
     expect(blanked).toContain("const a = 1;");
     expect(blanked.split("\n")).toHaveLength(3);
+  });
+});
+
+describe("next.config.ts images block (h30-abuse-4)", () => {
+  const imagesBody = objectBody(configSource, "images");
+
+  it("is found by the guard's own brace scan", () => {
+    expect(imagesBody).not.toBeNull();
+    expect(imagesBody).toContain("remotePatterns: IMAGE_REMOTE_PATTERNS");
+    expect(imagesBody).toContain("minimumCacheTTL");
+  });
+
+  it("the brace scan counts nested braces and returns null for a missing key", () => {
+    expect(objectBody("a: { b: { c: 1 }, d: 2 }, e: 3", "a")).toBe(" b: { c: 1 }, d: 2 ");
+    expect(objectBody("a: { b: 1", "a")).toBeNull();
+    expect(objectBody("x: 1", "images")).toBeNull();
+  });
+
+  it("has no catch-all: no hostname, domains, wildcard string or search wildcard of its own", () => {
+    const body = imagesBody ?? "";
+    expect(body).not.toMatch(/\bhostname\b/);
+    expect(body).not.toMatch(/\bdomains\b/);
+    expect(body).not.toMatch(/\bsearch\b/);
+    expect(body).not.toContain('"**"');
+    expect(body).not.toContain("'**'");
+    expect(body).not.toContain("`**`");
+  });
+
+  it("caps the origin response body at 10 MB (Next's default is 50 MB)", () => {
+    expect(imagesBody ?? "").toMatch(/maximumResponseBody:\s*10_000_000\b/);
   });
 });
 
@@ -203,6 +268,53 @@ describe("IMAGE_REMOTE_PATTERNS", () => {
         expect(hosts, `${p.hostname} lists ${suffix}`).not.toContain(suffix);
       }
     }
+  });
+
+  it("QUERY_HOSTS is a non-empty subset of GENERATED_IMAGE_HOSTS", () => {
+    expect(QUERY_HOSTS.size).toBeGreaterThan(0);
+    for (const entry of QUERY_HOSTS) {
+      expect(GENERATED_IMAGE_HOSTS, `${entry} is not a generated entry`).toContain(entry);
+    }
+  });
+
+  it("every generated pattern has search '' unless its hostname group holds only QUERY_HOSTS members", () => {
+    const generated = IMAGE_REMOTE_PATTERNS.filter((p) => p.pathname === undefined);
+    expect(generated.length).toBeGreaterThan(20);
+    let queryGroups = 0;
+    for (const p of generated) {
+      const entries = entriesOf(p.hostname);
+      const onlyQuery = entries.every((e) => QUERY_HOSTS.has(e));
+      const anyQuery = entries.some((e) => QUERY_HOSTS.has(e));
+      const search = (p as { search?: string }).search;
+      if (onlyQuery) {
+        queryGroups++;
+        expect(search, `${p.hostname}: a query-host group must not constrain search`).toBeUndefined();
+      } else {
+        expect(anyQuery, `${p.hostname} mixes query and non-query hosts in one group`).toBe(false);
+        expect(search, `${p.hostname}: must allow no query string`).toBe("");
+      }
+    }
+    expect(queryGroups).toBeGreaterThanOrEqual(1);
+  });
+
+  it("every QUERY_HOSTS entry is reachable through a query-free-search group, and only those", () => {
+    const withoutSearch = new Set<string>();
+    for (const p of IMAGE_REMOTE_PATTERNS) {
+      if (p.pathname !== undefined) continue;
+      if ((p as { search?: string }).search !== undefined) continue;
+      for (const e of entriesOf(p.hostname)) withoutSearch.add(e);
+    }
+    expect([...withoutSearch].sort()).toEqual([...QUERY_HOSTS].sort());
+  });
+
+  it("the Google S2 patterns have no search (their URLs are the query)", () => {
+    const s2 = IMAGE_REMOTE_PATTERNS.filter((p) => p.pathname !== undefined);
+    expect(s2).toHaveLength(2);
+    for (const p of s2) expect("search" in p, p.hostname).toBe(false);
+  });
+
+  it("has no more than 50 patterns in total (Next's fatal schema cap)", () => {
+    expect(IMAGE_REMOTE_PATTERNS.length).toBeLessThanOrEqual(50);
   });
 
   it("only the Google S2 favicon hosts carry a pathname, and it is /s2/favicons", () => {

@@ -27,6 +27,7 @@ import {
 } from "@/lib/clusters/in-feed-match";
 import { searchClusters } from "@/lib/clusters/search-query";
 import { composeSearchView } from "@/lib/clusters/search-view";
+import { canonicalSearchQuery } from "@/lib/clusters/turkish-query";
 import { formatCountTr } from "@/lib/format/number-tr";
 import { groupByDayBucket } from "@/lib/home/day-buckets";
 import {
@@ -251,13 +252,25 @@ export async function HomeFeed({
   const q = firstQuery(qRaw);
   const page = parseHomePage(pageRaw);
 
-  // A typed query that normalises to fewer than MIN_QUERY_LENGTH characters is
-  // "too short": no search runs for it, so the page asks for more characters
-  // instead of claiming there are no results (isTooShortQuery uses the same
-  // normalisation as searchClusters; a raw q.length would count a lone
-  // control character or an apostrophe suffix).
-  const tooShort = isTooShortQuery(q);
-  const searchable = q !== undefined && displayQuery(q) !== "" && !tooShort;
+  // A typed query that is too short is not searched: the page asks for more
+  // characters instead of claiming there are no results. "Too short" means the
+  // CANONICAL form (the cache key and RPC input of searchClusters: control
+  // characters out, an apostrophe suffix dropped, lower-cased, edge punctuation
+  // cut) has fewer than MIN_QUERY_LENGTH characters, so "!!" is too short
+  // although it is two characters raw. isTooShortQuery is the normalised-text
+  // floor (the one searchStatusText applies); the canonical floor is never
+  // laxer, but both are checked so the two can't disagree. The raw q is still
+  // what searchClusters receives and what the echo shows; only the decision is
+  // canonical.
+  const typed = q !== undefined && displayQuery(q) !== "";
+  const tooShort =
+    isTooShortQuery(q) ||
+    (typed && canonicalSearchQuery(q).length < MIN_QUERY_LENGTH);
+  const searchable = typed && !tooShort;
+  // searchStatusText only knows the normalised floor, so a punctuation-only
+  // query would be announced as "no results" while the page says "type more":
+  // the canonical decision wins in the live region too.
+  const tooShortStatus = `En az ${MIN_QUERY_LENGTH} karakter yazın.`;
 
   // Neither fetch depends on the other — run them in parallel. `search` is
   // only attempted for a searchable query (searchClusters itself also
@@ -278,12 +291,16 @@ export async function HomeFeed({
     return (
       <>
         <SearchStatus
-          text={searchStatusText({
-            q,
-            count: 0,
-            capped: false,
-            unavailable: true,
-          })}
+          text={
+            tooShort
+              ? tooShortStatus
+              : searchStatusText({
+                  q,
+                  count: 0,
+                  capped: false,
+                  unavailable: true,
+                })
+          }
         />
         <NewSinceLastVisit timestamps={[]} />
         <FeedUnavailable />
@@ -404,12 +421,16 @@ export async function HomeFeed({
           debounced router.replace swaps the feed, which is what makes a
           screen reader announce it. */}
       <SearchStatus
-        text={searchStatusText({
-          q,
-          count: resultCount,
-          capped: view.archiveCappedTotal,
-          unavailable: view.archiveUnavailable,
-        })}
+        text={
+          tooShort
+            ? tooShortStatus
+            : searchStatusText({
+                q,
+                count: resultCount,
+                capped: view.archiveCappedTotal,
+                unavailable: view.archiveUnavailable,
+              })
+        }
       />
 
       <NewSinceLastVisit timestamps={renderedTimestamps} />

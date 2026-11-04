@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import h26Fixtures from "../../../tests/fixtures/summary-tidy-h26.json";
 import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerplate";
-import { backOffOpenQuote, tidySummaryText, WIDGET_HEADINGS } from "./summary-tidy";
+import { backOffOpenQuote, tidySummaryText, trimDanglingEnd, WIDGET_HEADINGS } from "./summary-tidy";
 
 // [input, expected] — every row is an exact `toBe`.
 const CHANGES: ReadonlyArray<readonly [string, string]> = [
@@ -2163,9 +2163,12 @@ describe("tidySummaryText outlet feed caps (h25-live-1)", () => {
       );
     });
 
-    it("Haberport 202 characters: the sentence end after the heading line is the cut", () => {
+    it("Haberport 202 characters: the sentence end after the heading line is the cut, and the heading line goes (h30-live-1)", () => {
+      // h25 pinned "Gaziantep'te ulaşım hizmetlerinde dijital adım Gaziantep Büyükşehir
+      // Belediyesi, ...": the heading run on into the first sentence. The body
+      // is 97 characters, so the heading line is dropped.
       expect(tidySummaryText(HP_GAZIANTEP)).toBe(
-        "Gaziantep'te ulaşım hizmetlerinde dijital adım Gaziantep Büyükşehir Belediyesi, ulaşım hizmetlerinde dijital dönüşümü genişletmeye devam ediyor.",
+        "Gaziantep Büyükşehir Belediyesi, ulaşım hizmetlerinde dijital dönüşümü genişletmeye devam ediyor.",
       );
     });
 
@@ -3331,5 +3334,359 @@ describe("backOffOpenQuote (h29-regress-1)", () => {
       tidySummaryText(input);
       expect(performance.now() - start).toBeLessThan(100);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h30-live-1: an ASCII apostrophe closes an open U+2018 (c5627cb9 stores
+// "‘100 il 1000 ilçe' projesini": U+2018 opener, ASCII closer), and a summary
+// that starts with a heading line no longer runs on into the body (3158fd7a,
+// 6c2af39b, bef94c53, d298d680). clusters.summary_tr values below are the live
+// rows, verbatim (read-only query, 2026-11-03).
+// ---------------------------------------------------------------------------
+
+// c5627cb9-4000-471c-9c42-0be5f29e62b3
+const H30_C5627 =
+  "MHP Genel Başkanı Devlet Bahçeli, ‘100 il 1000 ilçe' projesini kamuoyuyla paylaştı. Bahçeli, artan nüfus ve ihtiyaçlara dikkat çekerek 9 yeni il ve 78 yeni ilçe kurulması gerektiğini belirtti.";
+// 3158fd7a-ce5b-4b34-b528-49683b3706d9 (203 characters: an outlet feed cap)
+const H30_3158 =
+  "Bolat ve Buşıha ikili ilişkileri ve ticaret hedefini ele aldı\nTicaret Bakanı Ömer Bolat ile Libya Milli Birlik Hükümeti Ekonomi ve Ticaret Bakanı Süheyl Abdülmüttalib Buşıha İstanbul'da gerçekleştiril...";
+// 6c2af39b-3b40-4d17-af18-1a2befe33e5e
+const H30_6C2A =
+  "Düzce valiliği kadın masa tenisinde il şampiyonu oldu\nKamu Spor Oyunları çerçevesinde düzenlenen masa tenisi müsabakalarında Düzce Valiliği kadın masa tenisi takımı il birinciliğini elde ederek kentte...";
+// bef94c53-cc15-45e7-b904-617663e098aa
+const H30_BEF9 =
+  "Genel provanın akışı\nSinop'ta 29 Ekim Cumhuriyet Bayramı'nın 103. yıl dönümü kutlama programı öncesinde genel bir prova yapıldı. Öğrenciler, bando eşliğinde Hükümet Konağı önünden başlayarak kortej ha...";
+// d298d680-f9db-4136-be6b-fb36c7867b2a
+const H30_D298 =
+  "Yılmaz'ın değerlendirmesi\nCumhurbaşkanı Yardımcısı Cevdet Yılmaz tarafından yapılan değerlendirmede, Türkmenistan'ın zengin doğal kaynakları ve jeostratejik konumunun yanında halkın gayretiyle ekonomi...";
+
+/** A character-scan check that `s` has no newline (never a regex over the text). */
+function hasNoNewline(s: string): boolean {
+  for (const ch of s) if (ch === "\n" || ch === "\r") return false;
+  return true;
+}
+
+describe("trimDanglingEnd (h30-live-1)", () => {
+  it("is exported and moves the end back over ', ; : – — -' and blanks", () => {
+    expect(trimDanglingEnd("abc, ", 5)).toBe(3);
+    expect(trimDanglingEnd("abc;", 4)).toBe(3);
+    expect(trimDanglingEnd("abc :- ", 7)).toBe(3);
+    expect(trimDanglingEnd("abc –— x", 6)).toBe(3);
+  });
+
+  it("leaves a clean end where it is", () => {
+    expect(trimDanglingEnd("abc", 3)).toBe(3);
+    expect(trimDanglingEnd("abc.", 4)).toBe(4);
+    expect(trimDanglingEnd("abc…", 4)).toBe(4);
+    expect(trimDanglingEnd("", 0)).toBe(0);
+  });
+
+  it("honours an end in the middle of the text and never goes below 0", () => {
+    expect(trimDanglingEnd("ab, cd", 3)).toBe(2);
+    expect(trimDanglingEnd(" , - ", 5)).toBe(0);
+  });
+});
+
+describe("quoteBalance: an ASCII apostrophe closes an open U+2018 (h30-live-1)", () => {
+  it("c5627cb9 (U+2018 + ASCII closer) is balanced, so the text comes back as the same string", () => {
+    expect(backOffOpenQuote(H30_C5627)).toBe(H30_C5627);
+    expect(backOffOpenQuote(H30_C5627, { floor: 10, minShare: 0.9 })).toBe(H30_C5627);
+  });
+
+  it("an apostrophe followed by a letter does not close: \"‘İsrail'in tutumu\" stays open", () => {
+    expect(backOffOpenQuote("Bakan Yılmaz ‘İsrail'in tutumu")).toBe("Bakan Yılmaz…");
+    expect(backOffOpenQuote("Bu bir cümle. Bakan ‘Ali'ye dedi")).toBe("Bu bir cümle.");
+  });
+
+  it.each([
+    ["end of the text", "Dedi ki ‘tamam'"],
+    ["a space", "Dedi ki ‘tamam' ve gitti"],
+    ["a comma", "Dedi ki ‘tamam', sonra gitti"],
+    ["a full stop", "Dedi ki ‘tamam'. Sonra gitti"],
+    ["a closing bracket", "(Dedi ki ‘tamam') ve gitti"],
+    ["a digit", "Dedi ki ‘tamam'2 kez"],
+  ])("closes when the next character is not a letter: %s", (_label, input) => {
+    expect(backOffOpenQuote(input), input).toBe(input);
+  });
+
+  it("an ASCII apostrophe with no open U+2018 changes nothing", () => {
+    const apostrophes = "İsrail'de sandıktan koalisyon belirsizliğinin çıktığı 27 Ekim'deki genel seçimlerin ardından Partisi' destekledi";
+    expect(backOffOpenQuote(apostrophes)).toBe(apostrophes);
+    // ... and it does not close a different kind of quotation.
+    expect(backOffOpenQuote("O' sözü Bakanlığa gelen son açıklama oldu. Bakan “Biz")).toBe(
+      "O' sözü Bakanlığa gelen son açıklama oldu.",
+    );
+    expect(backOffOpenQuote("Sonuç' dedi ve toplantıdan çıktı bugün. Bakan «Biz")).toBe(
+      "Sonuç' dedi ve toplantıdan çıktı bugün.",
+    );
+  });
+
+  it("one apostrophe closes one opener: a second apostrophe is ignored, a second opener stays open", () => {
+    expect(backOffOpenQuote("Dedi ki ‘a' b' c")).toBe("Dedi ki ‘a' b' c");
+    expect(backOffOpenQuote("Dedi ki ‘a ‘b' c")).toBe("Dedi ki…");
+  });
+
+  it("the typographic closer still closes, as before", () => {
+    expect(backOffOpenQuote("Dedi ki ‘merhaba’ ve gitti.")).toBe("Dedi ki ‘merhaba’ ve gitti.");
+    expect(backOffOpenQuote("Dedi ki ‘merhaba ve gitti")).toBe("Dedi ki…");
+  });
+
+  it("the clamp repair reads the same balance: a sentence end after \"‘…'\" is a valid cut", () => {
+    // The sentence holding the pair ends at about 70% of the clamped text. With
+    // the pair read as open, that sentence end was passed over (an unbalanced
+    // cut) and the repair fell back to a word cut ending in "…".
+    const filler = "enerji güvenliği ve nüfus artışı ";
+    const sentence = `Bahçeli, ${filler.repeat(9)}‘100 il 1000 ilçe' projesini paylaştı.`;
+    let body = `${sentence} `;
+    const tail = "yeni il ve ilçeler kurulması gerektiğini belirten açıklamada ";
+    while (body.length < 497) body += tail;
+    const raw = body.slice(0, 497) + "...";
+    expect(raw).toHaveLength(500);
+    expect(sentence.length).toBeGreaterThan(0.6 * 497);
+    const out = tidySummaryText(raw);
+    expect(out).toBe(sentence);
+    expect(tidySummaryText(out)).toBe(out);
+  });
+});
+
+describe("tidySummaryText heading line (h30-live-1)", () => {
+  const BODY = "Ticaret Bakanı Ömer Bolat ile Libya Milli Birlik Hükümeti Ekonomi ve Ticaret Bakanı Süheyl Abdülmüttalib Buşıha İstanbul'da…";
+
+  it.each([
+    [
+      "3158fd7a",
+      H30_3158,
+      "Ticaret Bakanı Ömer Bolat ile Libya Milli Birlik Hükümeti Ekonomi ve Ticaret Bakanı Süheyl Abdülmüttalib Buşıha İstanbul'da…",
+    ],
+    [
+      "6c2af39b",
+      H30_6C2A,
+      "Kamu Spor Oyunları çerçevesinde düzenlenen masa tenisi müsabakalarında Düzce Valiliği kadın masa tenisi takımı il birinciliğini elde ederek…",
+    ],
+    [
+      "bef94c53",
+      H30_BEF9,
+      "Sinop'ta 29 Ekim Cumhuriyet Bayramı'nın 103. yıl dönümü kutlama programı öncesinde genel bir prova yapıldı.",
+    ],
+    [
+      "d298d680",
+      H30_D298,
+      "Cumhurbaşkanı Yardımcısı Cevdet Yılmaz tarafından yapılan değerlendirmede, Türkmenistan'ın zengin doğal kaynakları ve jeostratejik konumunun yanında halkın gayretiyle…",
+    ],
+  ])("%s: the heading line goes and the body stays", (_id, raw, expected) => {
+    const out = tidySummaryText(raw);
+    expect(out).toBe(expected);
+    expect(out.length).toBeGreaterThanOrEqual(80);
+  });
+
+  it("3158fd7a keeps its body whole (the heading is the only thing dropped)", () => {
+    expect(tidySummaryText(H30_3158)).toBe(BODY);
+  });
+
+  it("a body shorter than 80 characters is joined to the heading with '. '", () => {
+    expect(tidySummaryText("Yeni tebliğ yayımlandı\nBakanlık düzenlemeyi duyurdu.")).toBe(
+      "Yeni tebliğ yayımlandı. Bakanlık düzenlemeyi duyurdu.",
+    );
+  });
+
+  describe("the 80-character bar counts the body with its blanks collapsed", () => {
+    const HEAD = "Başlık satırı burada yazılı";
+    const body = (n: number) => "B" + "a".repeat(n - 2) + ".";
+
+    it("80 characters: the heading goes", () => {
+      expect(tidySummaryText(`${HEAD}\n${body(80)}`)).toBe(body(80));
+    });
+
+    it("79 characters: heading and body are joined", () => {
+      expect(tidySummaryText(`${HEAD}\n${body(79)}`)).toBe(`${HEAD}. ${body(79)}`);
+    });
+
+    it("blank runs count once: 90 raw characters that collapse to 79 are joined", () => {
+      // "B" + 38 x "a" + 12 blanks + 38 x "a" + "." = 90 raw, 79 collapsed.
+      const raw = `B${"a".repeat(38)}${" ".repeat(12)}${"a".repeat(38)}.`;
+      expect(raw).toHaveLength(90);
+      expect(tidySummaryText(`${HEAD}\n${raw}`)).toBe(`${HEAD}. B${"a".repeat(38)} ${"a".repeat(38)}.`);
+    });
+
+    it("a body of several lines is counted whole: its line breaks are blanks, counted once", () => {
+      // "B" + 38 x "a" + a line break + 38 x "a" + "." = 79 collapsed; one more "a" makes 80.
+      const two = (n: number) => `B${"a".repeat(n)}\n${"a".repeat(38)}.`;
+      expect(tidySummaryText(`${HEAD}\n${two(38)}`)).toBe(`${HEAD}. B${"a".repeat(38)} ${"a".repeat(38)}.`);
+      expect(tidySummaryText(`${HEAD}\n${two(39)}`)).toBe(`B${"a".repeat(39)} ${"a".repeat(38)}.`);
+    });
+  });
+
+  describe("length of the first line: 15 to 140 characters", () => {
+    const rest = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+    const head = (n: number) => "B".padEnd(n, "k");
+
+    it.each([15, 16, 100, 140])("%i characters: dropped", (n) => {
+      expect(head(n)).toHaveLength(n);
+      expect(tidySummaryText(`${head(n)}\n${rest}`)).toBe(rest);
+    });
+
+    it.each([1, 14, 141, 300])("%i characters: untouched, only the line break becomes a blank", (n) => {
+      expect(head(n)).toHaveLength(n);
+      expect(tidySummaryText(`${head(n)}\n${rest}`)).toBe(`${head(n)} ${rest}`);
+    });
+  });
+
+  describe("untouched", () => {
+    const rest = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+
+    it.each([
+      [".", "Başlık satırı burada biter."],
+      ["!", "Başlık satırı burada biter!"],
+      ["?", "Başlık satırı burada biter mi?"],
+      [":", "Başlık satırı burada biter:"],
+      ["…", "Başlık satırı burada biter…"],
+      [",", "Başlık satırı burada biter,"],
+      [";", "Başlık satırı burada biter;"],
+      ["–", "Başlık satırı burada biter –"],
+      ["—", "Başlık satırı burada biter —"],
+      ["-", "Başlık satırı burada biter -"],
+    ])("a first line ending in %s", (_mark, head) => {
+      expect(tidySummaryText(`${head}\n${rest}`)).toBe(`${head} ${rest}`);
+    });
+
+    it.each([
+      ["a full stop", "Prof. Dr. Ali açıkladı yeni kararı"],
+      ["a colon", "Saat 10:30 itibarıyla başladı bile"],
+      ["a question mark", "Neden böyle oldu? kimse bilmiyor"],
+      ["an exclamation mark", "Vay canına! gerçekten oldu burada"],
+      ["an ellipsis", "Başlık… devamı yazılmış burada"],
+    ])("a first line with %s in the middle", (_label, head) => {
+      expect(tidySummaryText(`${head}\n${rest}`)).toBe(`${head} ${rest}`);
+    });
+
+    it("a single-line text", () => {
+      const one = "Başlık gibi görünen ama tek satırlık bir metin burada";
+      expect(tidySummaryText(one)).toBe(one);
+      expect(tidySummaryText("")).toBe("");
+    });
+
+    it.each([
+      ["lower case", "küçük harfle başlayan satır devam ediyor"],
+      ["a digit", "29 Ekim kutlamaları kapsamında program yapıldı"],
+      ["a quote", "“Tam bir başarıydı” diyen yetkili konuştu"],
+      ["a bracket", "(Fotoğraf: AA) görüntüler yayımlandı bugün"],
+    ])("a second line that starts with %s", (_label, second) => {
+      expect(tidySummaryText(`Başlık gibi bir satır var burada\n${second}`)).toBe(
+        `Başlık gibi bir satır var burada ${second}`,
+      );
+    });
+
+    // f85bc48e-692d-41be-8f6b-0d0ecd1d2281, verbatim: three bullet lines (the later
+    // ones lost their markers in the feed). The replay of 8,488 live summaries
+    // found it as a false cut of step 1d: the first bullet is a sentence of the
+    // story, not a heading.
+    const H30_F85B =
+      '- Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti\nKoreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti\nEmine Erdoğan: \n"Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"';
+
+    it("f85bc48e: a first line that is a list item is not a heading", () => {
+      expect(tidySummaryText(H30_F85B)).toBe(
+        'Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti Koreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan, konuşmalarını beğendiği öğrencileri alkışlayarak tebrik etti Emine Erdoğan: "Türkçemize ilgi duyan öğrencilerimizle buluşmak, dilimizin ve kültürümüzün uzak coğrafyalarda nasıl güzel karşılıklar bulduğuna şahit olmak çok kıymetli"',
+      );
+    });
+
+    it.each(["- ", "– ", "• ", "* ", "\u25AA\uFE0F "])("a first line that starts with the list marker %j", (marker) => {
+      const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+      expect(tidySummaryText(`${marker}Başlık satırı burada yazılı\n${body}`)).toBe(`Başlık satırı burada yazılı ${body}`);
+    });
+
+    it("a dash glued to a digit is not a list marker: '-5 derece ...' can still be a heading", () => {
+      const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+      expect(tidySummaryText(`-5 derece hava sıcaklığı bekleniyor\n${body}`)).toBe(body);
+    });
+
+    it("a heading with nothing behind it", () => {
+      expect(tidySummaryText("Başlık gibi bir satır var burada\n")).toBe("Başlık gibi bir satır var burada");
+      expect(tidySummaryText("Başlık gibi bir satır var burada\n   \n")).toBe("Başlık gibi bir satır var burada");
+    });
+  });
+
+  it("works through CRLF line breaks and leading blank lines", () => {
+    expect(
+      tidySummaryText(
+        "Genel provanın akışı\r\nSinop'ta 29 Ekim Cumhuriyet Bayramı'nın 103. yıl dönümü kutlama programı öncesinde genel bir prova yapıldı.",
+      ),
+    ).toBe("Sinop'ta 29 Ekim Cumhuriyet Bayramı'nın 103. yıl dönümü kutlama programı öncesinde genel bir prova yapıldı.");
+    expect(tidySummaryText("\n\n  Başlık satırı burada yazılı\nGövde metni başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.")).toBe(
+      "Gövde metni başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.",
+    );
+  });
+
+  it("only the first line is looked at: a second heading line stays in the body", () => {
+    const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+    expect(tidySummaryText(`Birinci başlık satırı yazılı\nİkinci başlık satırı yazılı\n${body}`)).toBe(
+      `İkinci başlık satırı yazılı ${body}`,
+    );
+  });
+
+  it("a widget heading line is dropped first, then the real heading line", () => {
+    const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+    expect(tidySummaryText(`İlginizi Çekebilir\nBaşlık satırı burada yazılı\n${body}`)).toBe(body);
+  });
+
+  it("the Medyascope footer still goes, and the heading line with it", () => {
+    const body = "Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.";
+    const out = tidySummaryText(`Başlık satırı burada yazılı\n${body}\nBaşka bir haberin başlığı Medyascope`);
+    expect(out).toBe(body);
+  });
+
+  it("a leading ticker behind the heading line is peeled afterwards", () => {
+    expect(
+      tidySummaryText(
+        "Başlık satırı burada yazılı\nSon dakika | Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.",
+      ),
+    ).toBe("Gövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.");
+  });
+
+  it("no newline is left in any output", () => {
+    for (const raw of [H30_3158, H30_6C2A, H30_BEF9, H30_D298]) {
+      expect(hasNoNewline(tidySummaryText(raw))).toBe(true);
+    }
+  });
+
+  it("is idempotent on every new fixture, input and output", () => {
+    const inputs = [
+      H30_C5627,
+      H30_3158,
+      H30_6C2A,
+      H30_BEF9,
+      H30_D298,
+      '- Koreli öğrencilere Türkçe öğretilen sınıfı ziyaret eden Emine Erdoğan, öğrencilerle sohbet etti\nKoreli iki öğrencinin Türkçe diyaloglarını dinleyen Emine Erdoğan',
+      "Yeni tebliğ yayımlandı\nBakanlık düzenlemeyi duyurdu.",
+      "Başlık satırı burada yazılı\nGövde.",
+      "Birinci başlık satırı yazılı\nİkinci başlık satırı yazılı\nGövde metni burada başlıyor ve devam ediyor, ayrıntılar ise haberin sonraki bölümlerinde yer alıyor.",
+      "Başlık satırı burada biter.\nGövde metni.",
+      "Dedi ki ‘tamam' ve gitti. Başlık satırı burada yazılı\nGövde.",
+    ];
+    for (const raw of inputs) {
+      const once = tidySummaryText(raw);
+      expect(tidySummaryText(once), raw).toBe(once);
+      for (const line of [raw, once]) {
+        const again = tidySummaryText(line);
+        expect(tidySummaryText(again), line).toBe(again);
+      }
+    }
+  });
+
+  it("is linear: a 100k-character text with an early heading line finishes in under 1000 ms", () => {
+    // Measured at under 100 ms on a development machine; the bound leaves 10x.
+    const input = `Başlık satırı burada yazılı\nGövde ${"kelime ".repeat(16_000)}sonu.`;
+    expect(input.length).toBeGreaterThan(95_000);
+    const start = performance.now();
+    const out = tidySummaryText(input);
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(out.startsWith("Gövde kelime")).toBe(true);
+  });
+
+  it("is linear on a line that is mostly newlines", () => {
+    const input = `Başlık satırı burada yazılı\n${"\n".repeat(50_000)}Gövde metni.`;
+    const start = performance.now();
+    tidySummaryText(input);
+    expect(performance.now() - start).toBeLessThan(1000);
   });
 });

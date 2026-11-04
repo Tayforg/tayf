@@ -204,10 +204,54 @@ describe("optimizedThumbUrl", () => {
     expect(optimizedThumbUrl("file://localhost/x.jpg", 128)).toBeNull();
   });
 
-  it("encodes a query string into the url parameter", () => {
-    expect(optimizedThumbUrl("https://img.piri.net/a.jpg?w=1&h=2", 160)).toBe(
-      "/_next/image?url=https%3A%2F%2Fimg.piri.net%2Fa.jpg%3Fw%3D1%26h%3D2&w=160&q=75",
+  // h30-abuse-4: only the QUERY_HOSTS families may carry a query string.
+  it("encodes a query string into the url parameter on a QUERY_HOSTS host", () => {
+    expect(optimizedThumbUrl("https://cdn.img.anlatilaninotesi.com.tr/a.jpg?w=1&h=2", 160)).toBe(
+      "/_next/image?url=https%3A%2F%2Fcdn.img.anlatilaninotesi.com.tr%2Fa.jpg%3Fw%3D1%26h%3D2&w=160&q=75",
     );
+    const resizer =
+      "https://ia.tmgrup.com.tr/a15c1e/385/228/0/0/1216/720?u=https://i.tmgrup.com.tr/anews/v1/2026/10/21/14-20-1792586090125.jpeg";
+    expect(optimizedThumbUrl(resizer, 128)).toBe(
+      `/_next/image?url=${encodeURIComponent(resizer)}&w=128&q=75`,
+    );
+  });
+
+  it("returns null (the placeholder path) for a query-bearing URL on a host that is not a QUERY_HOSTS family", () => {
+    // Not a broken /_next/image URL the optimizer would answer 400 for.
+    expect(optimizedThumbUrl("https://img.piri.net/a.jpg?w=1&h=2", 160)).toBeNull();
+    expect(optimizedThumbUrl("https://cdn.karar.com/news/1945775.jpg?cb=1", 128)).toBeNull();
+    // ...while the same image without the query still gets an optimizer URL.
+    expect(optimizedThumbUrl("https://cdn.karar.com/news/1945775.jpg", 128)).toBe(
+      "/_next/image?url=https%3A%2F%2Fcdn.karar.com%2Fnews%2F1945775.jpg&w=128&q=75",
+    );
+    expect(optimizedThumbUrl("https://cdn.karar.com/news/1945775.jpg?", 128)).not.toBeNull();
+  });
+
+  // h30-abuse-4 follow-up: the edge (src/middleware.ts, gate 10) 400s a `url`
+  // containing '#', so the render side must not build one.
+  it("returns null for a URL with a fragment, on any host, and keeps an encoded %23 path", () => {
+    for (const u of [
+      "https://cdn.karar.com/news/1945775.jpg#1",
+      "https://cdn.karar.com/news/1945775.jpg?#1",
+      "https://cdn.img.anlatilaninotesi.com.tr/a.jpg?w=1#1",
+    ]) {
+      expect(optimizedThumbUrl(u, 128), u).toBeNull();
+    }
+    expect(optimizedThumbUrl("https://cdn.karar.com/news/foto%2312.jpg", 128)).toBe(
+      "/_next/image?url=https%3A%2F%2Fcdn.karar.com%2Fnews%2Ffoto%252312.jpg&w=128&q=75",
+    );
+  });
+
+  it("agrees with isAllowedRemoteImageUrl on whether a query URL gets an optimizer URL", () => {
+    for (const u of [
+      "https://cdn.karar.com/news/1945775.jpg?cb=1",
+      "https://cdn.img.anlatilaninotesi.com.tr/a.jpg?w=1",
+      "https://www.indyturk.com/a.jpg?w=1",
+      "https://d341l694dl30ad.cloudfront.net/a.jpg?w=1",
+      "https://d111.cloudfront.net/a.jpg?w=1",
+    ]) {
+      expect(optimizedThumbUrl(u, 128) !== null, u).toBe(isAllowedRemoteImageUrl(u));
+    }
   });
 
   it.each([
@@ -319,8 +363,16 @@ describe("optimizedThumbSrcSet", () => {
     ["a placeholder", "https://img.piri.net/son-dakika.jpg"],
     ["an unlisted host", "https://cdn.x/a.jpg"],
     ["plain http", "http://img.piri.net/a.jpg"],
+    ["a cache-busting query on a non-query host", "https://cdn.karar.com/news/1945775.jpg?cb=1"],
   ])("returns null for %s", (_label, input) => {
     expect(optimizedThumbSrcSet(input)).toBeNull();
+  });
+
+  it("still returns a srcSet for a query URL on a QUERY_HOSTS host", () => {
+    const u = "https://cdn.img.anlatilaninotesi.com.tr/a.jpg?w=1";
+    const t = optimizedThumbSrcSet(u);
+    expect(t).not.toBeNull();
+    expect(t?.srcSet).toContain(`${encodeURIComponent(u)}&w=256&q=75 256w`);
   });
 
   it("never contains a raw publisher URL", () => {

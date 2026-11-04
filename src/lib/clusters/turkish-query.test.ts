@@ -3,8 +3,11 @@ import { describe, it, expect } from "vitest";
 import { RISING_FOLD_FROM, RISING_FOLD_TO } from "@/lib/trends/rising-entities";
 import {
   MAX_QUERY_VARIANTS,
+  MAX_SEARCH_QUERY_LENGTH,
+  MAX_SEARCH_TERMS,
   SEARCH_FOLD_FROM,
   SEARCH_FOLD_TO,
+  canonicalSearchQuery,
   foldTr,
   normaliseSearchQuery,
   pgLower,
@@ -217,5 +220,267 @@ describe("foldTr", () => {
   it("uses the house fold of migrations 112/125/126 (rising-entities)", () => {
     expect(SEARCH_FOLD_FROM).toBe(RISING_FOLD_FROM);
     expect(SEARCH_FOLD_TO).toBe(RISING_FOLD_TO);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// canonicalSearchQuery: the cache key and RPC input of the home search
+// (h30-abuse-1). One key per case/punctuation family, bounded in size, and
+// deliberately NOT Turkish-folded (see turkish-query.ts for why).
+// ---------------------------------------------------------------------------
+
+/** True when `s` holds a UTF-16 surrogate that is not half of a valid pair (code-unit scan). */
+function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff) {
+      const next = s.charCodeAt(i + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      i++;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
+describe("canonicalSearchQuery", () => {
+  it("exports the caps: 6 terms, 64 characters", () => {
+    expect(MAX_SEARCH_TERMS).toBe(6);
+    expect(MAX_SEARCH_QUERY_LENGTH).toBe(64);
+  });
+
+  it.each([
+    "Erdoğan",
+    "ERDOĞAN!",
+    " erdoğan ",
+    "erdoğan.",
+    "\u201cErdoğan\u201d",
+    "Erdoğan\u2019ın",
+    "\u00bfErdoğan?",
+  ])("%j has the canonical key 'erdoğan'", (q) => {
+    expect(canonicalSearchQuery(q)).toBe("erdoğan");
+  });
+
+  it("keeps the ASCII spelling apart from the Turkish one (their results differ today)", () => {
+    expect(canonicalSearchQuery("ERDOGAN")).toBe("erdogan");
+    expect(canonicalSearchQuery("erdogan")).not.toBe(canonicalSearchQuery("erdoğan"));
+  });
+
+  it("lower-cases with Turkish rules: IŞIK, Işık and ışık share the key 'ışık'", () => {
+    for (const q of ["IŞIK", "Işık", "ışık"]) {
+      expect(canonicalSearchQuery(q)).toBe("ışık");
+    }
+  });
+
+  it("does not fold Turkish letters to ASCII", () => {
+    expect(canonicalSearchQuery("Şişli")).toBe("şişli");
+    expect(canonicalSearchQuery("ÇAĞRI")).toBe("çağrı");
+  });
+
+  it("keeps the double quotes of a phrase search", () => {
+    expect(canonicalSearchQuery('"Devlet Bahçeli"')).toBe('"devlet bahçeli"');
+  });
+
+  it("keeps a leading '-' (negation) and a trailing quote", () => {
+    expect(canonicalSearchQuery("-chp seçim")).toBe("-chp seçim");
+    expect(canonicalSearchQuery("seçim -CHP")).toBe("seçim -chp");
+  });
+
+  it("strips punctuation at the edge of every term, not only of the query", () => {
+    expect(canonicalSearchQuery("a, b; c")).toBe("a b c");
+    expect(canonicalSearchQuery("(deprem) [son] {dakika}")).toBe("deprem son dakika");
+  });
+
+  it("keeps punctuation inside a term", () => {
+    expect(canonicalSearchQuery("ak-parti")).toBe("ak-parti");
+    expect(canonicalSearchQuery("1.5 milyon")).toBe("1.5 milyon");
+    expect(canonicalSearchQuery("a.b")).toBe("a.b");
+  });
+
+  it("strips symbols (\\p{S}) at the edges too, emoji included", () => {
+    expect(canonicalSearchQuery("$dolar")).toBe("dolar");
+    expect(canonicalSearchQuery("\u{1F525}deprem\u{1F525}")).toBe("deprem");
+  });
+
+  it("a query of punctuation only is ''", () => {
+    expect(canonicalSearchQuery("!!!")).toBe("");
+    expect(canonicalSearchQuery("!!")).toBe("");
+    expect(canonicalSearchQuery("\u201c\u201d")).toBe("");
+    expect(canonicalSearchQuery("... ,,, ;;;")).toBe("");
+    expect(canonicalSearchQuery("\u{1F600}\u{1F600}")).toBe("");
+  });
+
+  it("empty, whitespace-only and control-only input is ''", () => {
+    expect(canonicalSearchQuery("")).toBe("");
+    expect(canonicalSearchQuery("   ")).toBe("");
+    expect(canonicalSearchQuery("\u0000\u0001")).toBe("");
+  });
+
+  it("applies the existing normalisation first (control chars, apostrophe suffix, whitespace)", () => {
+    expect(canonicalSearchQuery("a\u0000b")).toBe("a b");
+    expect(canonicalSearchQuery("Özel'den   Bahçeli\u2019nin sözleri")).toBe("özel bahçeli sözleri");
+  });
+
+  it("a 40-term query keeps exactly 6 terms", () => {
+    const q = Array.from({ length: 40 }, (_, i) => `kelime${i}`).join(" ");
+    const out = canonicalSearchQuery(q);
+    expect(out.split(" ")).toEqual([
+      "kelime0",
+      "kelime1",
+      "kelime2",
+      "kelime3",
+      "kelime4",
+      "kelime5",
+    ]);
+  });
+
+  it("terms that are only punctuation do not use up one of the 6 slots", () => {
+    const q = "! a ? b , c ; d . e : f + g h";
+    expect(canonicalSearchQuery(q)).toBe("a b c d e f");
+  });
+
+  it("a 500-character single token is cut to 64 characters", () => {
+    const out = canonicalSearchQuery("a".repeat(500));
+    expect(out).toHaveLength(MAX_SEARCH_QUERY_LENGTH);
+    expect(out).toBe("a".repeat(64));
+  });
+
+  it("never exceeds 64 characters for any input shape", () => {
+    for (const q of [
+      "ab ".repeat(300),
+      "\u015f".repeat(500),
+      "x-".repeat(200),
+      ("kelime ").repeat(6) + "z".repeat(100),
+    ]) {
+      expect(canonicalSearchQuery(q).length, q.slice(0, 20)).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it("an emoji straddling the 64-character boundary leaves no lone surrogate", () => {
+    // 63 letters, then an emoji (two code units) and a letter: the cut at 64
+    // lands between the surrogates.
+    const cut = canonicalSearchQuery("a".repeat(63) + "\u{1F600}" + "b");
+    expect(hasLoneSurrogate(cut)).toBe(false);
+    expect(cut).toBe("a".repeat(63));
+    // The emoji still fits whole here (62 + 2 = 64).
+    const fits = canonicalSearchQuery("a".repeat(62) + "\u{1F600}" + "b");
+    expect(hasLoneSurrogate(fits)).toBe(false);
+    expect(fits.length).toBeLessThanOrEqual(64);
+    // And with an emoji in every position of a long run.
+    for (let pad = 55; pad <= 64; pad++) {
+      const out = canonicalSearchQuery("a".repeat(pad) + "\u{1F600}".repeat(5) + "b");
+      expect(hasLoneSurrogate(out), `pad ${pad}`).toBe(false);
+      expect(out.length, `pad ${pad}`).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it("a lone surrogate in the input never reaches the key", () => {
+    expect(hasLoneSurrogate(canonicalSearchQuery("a\ud83db"))).toBe(false);
+    expect(hasLoneSurrogate(canonicalSearchQuery("a\udc00b"))).toBe(false);
+  });
+
+  it("is idempotent over every fixture", () => {
+    const fixtures = [
+      "Erdoğan",
+      "ERDOĞAN!",
+      " erdoğan ",
+      "\u201cErdoğan\u201d",
+      "Erdoğan\u2019ın açıklaması",
+      "IŞIK",
+      "İstanbul",
+      '"Devlet Bahçeli"',
+      "-chp seçim",
+      "a, b; c",
+      "!!!",
+      "",
+      "a",
+      "ab",
+      Array.from({ length: 40 }, (_, i) => `kelime${i}`).join(" "),
+      "a".repeat(500),
+      // The 64-character cut can leave punctuation at the end: it is stripped
+      // again, so a second pass finds nothing left to do.
+      "a".repeat(63) + ".b",
+      "a".repeat(62) + "\u{1F600}b",
+      "a".repeat(63) + "\u{1F600}b",
+      "x ".repeat(100),
+    ];
+    for (const q of fixtures) {
+      const once = canonicalSearchQuery(q);
+      expect(canonicalSearchQuery(once), JSON.stringify(q.slice(0, 30))).toBe(once);
+    }
+  });
+
+  it("is idempotent, bounded and surrogate-safe over 3000 seeded random queries", () => {
+    // Small deterministic PRNG (mulberry32): the same inputs on every run.
+    let state = 0x9e3779b9;
+    const next = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    // No apostrophes: normaliseSearchQuery's apostrophe rule peels one
+    // apostrophe per pass from a stacked run ("ş''z" -> "ş'z" -> "ş"), so it is
+    // not idempotent on that input. That predates this function and does not
+    // matter for the key (searchClusters applies it once), but it would make
+    // this property fail for a reason unrelated to the canonical form.
+    const alphabet = [
+      "a", "b", "z", "I", "İ", "ı", "ş", "Ğ", "1", " ", " ", " ", ".", ",", "!", "?",
+      "“", "-", '"', "(", ")", "$", "\u{1F600}", "\u{1F525}", "\u0000", "\ud83d", "\t",
+    ];
+    for (let n = 0; n < 3000; n++) {
+      const len = Math.floor(next() * 140);
+      let q = "";
+      for (let i = 0; i < len; i++) q += alphabet[Math.floor(next() * alphabet.length)]!;
+      const once = canonicalSearchQuery(q);
+      const label = JSON.stringify(q);
+      expect(canonicalSearchQuery(once), label).toBe(once);
+      expect(once.length, label).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+      expect(once.split(" ").filter(Boolean).length, label).toBeLessThanOrEqual(MAX_SEARCH_TERMS);
+      expect(hasLoneSurrogate(once), label).toBe(false);
+      expect(once, label).toBe(once.trim());
+    }
+  });
+
+  describe("parity with the uncanonicalised query (the RPC args stay byte-identical)", () => {
+    const parity = [
+      "IŞIK",
+      "Işık",
+      "ışık",
+      "İstanbul",
+      "ISTANBUL",
+      "istanbul",
+      "Erdoğan",
+      "ERDOĞAN",
+      "ÇAĞRI",
+      "Çağrı",
+      "Şişli",
+      "ŞİŞLİ",
+      "Devlet BAHÇELİ",
+    ];
+
+    it.each(parity)("%s: same p_variants and same p_folded", (x) => {
+      const canonical = canonicalSearchQuery(x);
+      const normalised = normaliseSearchQuery(x);
+      expect(turkishQueryVariants(canonical)).toEqual(turkishQueryVariants(normalised));
+      expect(foldTr(canonical)).toBe(foldTr(normalised));
+    });
+  });
+
+  it("is linear: 100k characters of alternating '!a' finish at once", () => {
+    const started = performance.now();
+    const out = canonicalSearchQuery("!a".repeat(50_000));
+    const elapsedMs = performance.now() - started;
+    expect(out.length).toBeLessThanOrEqual(MAX_SEARCH_QUERY_LENGTH);
+    expect(out.startsWith("a!a")).toBe(true);
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it("is linear: 100k punctuation characters and 100k spaces finish at once", () => {
+    const started = performance.now();
+    expect(canonicalSearchQuery("!".repeat(100_000))).toBe("");
+    expect(canonicalSearchQuery("a ".repeat(50_000))).toBe("a a a a a a");
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

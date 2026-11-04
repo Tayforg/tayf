@@ -24,7 +24,7 @@
 // is unlisted, so its photos show the logo tier until this has been re-run):
 //
 //   1. node scripts/gen-image-hosts.mjs --print-sql
-//        prints the two read-only SELECTs.
+//        prints the three read-only SELECTs (hosts, sources, query share).
 //   2. Run each against production with any read-only runner and save the
 //      result OUTSIDE the repo (a scratch directory). Accepted formats, one
 //      record per line: `host`, `https://host/path`, `host<TAB>count`,
@@ -37,8 +37,19 @@
 //   4. Review `git diff src/lib/images/remote-image-hosts.data.ts`. Every new
 //      line is a host the image optimizer will now fetch from; a line you do
 //      not recognise is a reason to stop, not to commit.
-//   5. npx vitest run scripts/gen-image-hosts src/lib/images tests/guards/image-remote-patterns
-//   6. Commit the regenerated data file.
+//   5. Re-measure the QUERY_HOSTS set (h30-abuse-4) in the same sitting: run
+//      statement 3/3 (QUERY_SHARE_SQL, the last 7 days) against production. It
+//      lists each host whose image_url carries a `?`. Map each host to its
+//      allowlist entry (collapseHosts([host]) gives the `**.domain` / exact
+//      form), sum n and n_query per entry, and make QUERY_HOSTS in
+//      src/lib/images/remote-image-hosts.ts equal the entries with
+//      n_query >= 3. Update the per-entry n / n_query / share numbers and the
+//      date in the comment above it. Every entry in QUERY_HOSTS lets `?cb=N`
+//      variants through /_next/image (each one an origin fetch + transform), so
+//      the set stays as small as the data allows; a new member needs a reason.
+//      The generated data file itself needs no change for this.
+//   6. npx vitest run scripts/gen-image-hosts src/lib/images tests/guards/image-remote-patterns
+//   7. Commit the regenerated data file and the QUERY_HOSTS update.
 //
 // Safety rules (pinned by scripts/gen-image-hosts.test.mjs and
 // tests/guards/image-remote-patterns.test.ts):
@@ -76,6 +87,34 @@ export const HOST_QUERY_SQL =
 
 /** Step 0, query 2: the active sources' own hosts (their images often live there). */
 export const SOURCES_QUERY_SQL = "select url from public.sources where active";
+
+/** The look-back window of the query-share statement, in days (h30-abuse-4). */
+export const QUERY_WINDOW_DAYS = 7;
+
+/**
+ * Step 0, query 3 (h30-abuse-4): which hosts' https image URLs carry a query
+ * string, and how many of each host's images that is. The operator sums n and
+ * n_query per allowlist entry and keeps QUERY_HOSTS (remote-image-hosts.ts) equal
+ * to the entries with n_query >= 3. `windowDays` is spliced into the statement,
+ * so it must be a positive integer of at most a year; if the statement times out
+ * on a read-only runner, run it again for one day at a time and add the rows up.
+ */
+export function queryShareSql(windowDays) {
+  if (!Number.isInteger(windowDays) || windowDays < 1 || windowDays > 366) {
+    throw new RangeError(`windowDays must be an integer from 1 to 366, got ${String(windowDays)}`);
+  }
+  return (
+    "select lower(substring(image_url from '^https://([^/:?#]+)')) host, " +
+    "count(*) n, count(*) filter (where position('?' in image_url) > 0) n_query " +
+    "from public.articles " +
+    `where published_at >= now() - interval '${windowDays} days' and image_url like 'https://%' ` +
+    "group by 1 " +
+    "having count(*) filter (where position('?' in image_url) > 0) > 0 " +
+    "order by 3 desc"
+  );
+}
+
+export const QUERY_SHARE_SQL = queryShareSql(QUERY_WINDOW_DAYS);
 
 /**
  * Hosting platforms where one hostname pattern covers unrelated tenants
@@ -494,8 +533,12 @@ export function run(argv, io = {}) {
     return 0;
   }
   if (opts.printSql) {
-    stdout(`-- 1/2: hosts (save the result as the --hosts file)\n${HOST_QUERY_SQL};`);
-    stdout(`-- 2/2: active sources (save the result as the --source-urls file)\n${SOURCES_QUERY_SQL};`);
+    stdout(`-- 1/3: hosts (save the result as the --hosts file)\n${HOST_QUERY_SQL};`);
+    stdout(`-- 2/3: active sources (save the result as the --source-urls file)\n${SOURCES_QUERY_SQL};`);
+    stdout(
+      `-- 3/3: query share, last ${QUERY_WINDOW_DAYS} days (runbook step 5: keep QUERY_HOSTS in ` +
+        `remote-image-hosts.ts equal to the entries with n_query >= 3)\n${QUERY_SHARE_SQL};`,
+    );
     return 0;
   }
   const missing = ["hosts", "source-urls"].filter((k) => !opts[k]);

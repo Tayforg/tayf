@@ -26,6 +26,8 @@ import { BOILERPLATE_PHRASES, TRAILING_CTA_PHRASES } from "./description-boilerp
 //     cut inside a quotation before its trailing "[…]" (h29-regress-1)
 //   - a sub-heading glued onto the body ("odaklı ziyaretİçişleri Bakanı",
 //     "ziyaretin önemi:Cumhurbaşkanı Erdoğan")
+//   - a heading line on top of the body ("Genel provanın akışı\nSinop'ta 29
+//     Ekim ..."), which the newline collapse would run on into the first sentence
 //   - a leading "Son dakika |" / "Son dakika haberi:" / "Son dakika haberine
 //     göre," / "Son dakika gelişmesi..." ticker and a leading list marker
 //     ("- ", "• ", "▪️ ")
@@ -346,6 +348,13 @@ function lastSentenceEnd(
  * the straight quote '"' must occur an even number of times, and the openers
  * “ « ‘ must not outnumber the closers ” » ’. The apostrophe ’ (U+2019) is also a
  * closer, which only ever makes the check let a text pass, never reject one.
+ *
+ * h30-live-1: some feeds close a U+2018 with the ASCII apostrophe (c5627cb9
+ * stores "‘100 il 1000 ilçe' projesini"). An ASCII "'" therefore closes an open
+ * ‘ (it counts -1 on the same balance) when one is open and the next character
+ * is not a letter (the end of the text counts as not a letter). "‘İsrail'in
+ * tutumu" stays open: an apostrophe in front of a letter is a Turkish suffix
+ * apostrophe. An ASCII "'" with no open ‘ is never a closer and changes nothing.
  */
 function quoteBalance(body: string): (end: number) => boolean {
   const n = body.length;
@@ -358,7 +367,9 @@ function quoteBalance(body: string): (end: number) => boolean {
     straight[i + 1] = (straight[i] ?? 0) + (ch === '"' ? 1 : 0);
     curly[i + 1] = (curly[i] ?? 0) + (ch === "\u201C" ? 1 : ch === "\u201D" ? -1 : 0);
     angle[i + 1] = (angle[i] ?? 0) + (ch === "\u00AB" ? 1 : ch === "\u00BB" ? -1 : 0);
-    single[i + 1] = (single[i] ?? 0) + (ch === "\u2018" ? 1 : ch === "\u2019" ? -1 : 0);
+    const open = single[i] ?? 0;
+    const closesAscii = ch === "'" && open > 0 && !ANY_LETTER.test(body.charAt(i + 1));
+    single[i + 1] = open + (ch === "\u2018" ? 1 : ch === "\u2019" || closesAscii ? -1 : 0);
   }
   return (end) =>
     ((straight[end] ?? 0) & 1) === 0 &&
@@ -367,8 +378,12 @@ function quoteBalance(body: string): (end: number) => boolean {
     (single[end] ?? 0) <= 0;
 }
 
-/** `end` moved back over dangling ", ; : – — -" and blanks. */
-function trimDanglingEnd(s: string, end: number): number {
+/**
+ * `end` moved back over dangling ", ; : – — -" and blanks: the index a cut of
+ * `s` should end at so that it does not leave one of them in front of an
+ * ellipsis. Exported for the word cut of describeForMeta (summary-attribution.ts).
+ */
+export function trimDanglingEnd(s: string, end: number): number {
   let stop = end;
   while (stop > 0 && (CLAMP_DANGLING.has(s.charAt(stop - 1)) || isBlankChar(s.charAt(stop - 1)))) stop--;
   return stop;
@@ -750,6 +765,70 @@ function splitGluedHeadings(s: string): string {
     .replace(GLUED_COLON, "$1: ");
 }
 
+// ---------------------------------------------------------------------------
+// Heading line (h30-live-1). Haberport and a few other feeds ship
+// "<heading>\n<body>": a short unpunctuated line, then the body. Step 2 of
+// tidySummaryText turns the line break into a blank, so the summary read
+// "Genel provanın akışı Sinop'ta 29 Ekim Cumhuriyet Bayramı'nın ..." (bef94c53,
+// 3158fd7a, 6c2af39b, d298d680) and the meta description repeated the heading as
+// if it were the first words of the sentence. The first line is a heading when it
+// is 15 to 140 characters, has no sentence mark and no colon, does not end in a
+// dash or a comma (it is a sentence that goes on in the next line), does not
+// start with a list marker (a bullet is a sentence of the story), and the
+// next line starts with a capital. The heading goes when what is left is a body
+// of its own (80 characters, blanks collapsed); a shorter body keeps the heading
+// as its first sentence, joined with ". ".
+// ---------------------------------------------------------------------------
+
+const MIN_HEADING_LINE = 15;
+const MAX_HEADING_LINE = 140;
+/** A body shorter than this (blanks collapsed) keeps its heading line, as a first sentence. */
+const MIN_BODY_AFTER_HEADING = 80;
+/** A first line holding one of these is a sentence, a label or a time, not a heading. */
+const HEADING_LINE_MARKS: ReadonlySet<string> = new Set([".", "!", "?", ":", "\u2026"]);
+/** A first line ending in one of these goes on in the next line. */
+const HEADING_LINE_OPEN_ENDS: ReadonlySet<string> = new Set([",", ";", "\u2013", "\u2014", "-"]);
+
+/** True when `s` (without its trailing blanks) is at least `min` characters long with every run of blanks counted once. One pass, stops at `min`. */
+function collapsedLengthReaches(s: string, min: number): boolean {
+  let end = s.length;
+  while (end > 0 && isBlankChar(s.charAt(end - 1))) end--;
+  let n = 0;
+  let inBlank = false;
+  for (let i = 0; i < end; i++) {
+    const blank = isBlankChar(s.charAt(i));
+    if (!blank || !inBlank) n++;
+    inBlank = blank;
+    if (n >= min) return true;
+  }
+  return false;
+}
+
+/**
+ * Step 1d of {@link tidySummaryText}: `s` (line breaks still in place) without a
+ * heading first line, or with the heading joined to the body as a first sentence
+ * when the body alone is shorter than {@link MIN_BODY_AFTER_HEADING}. Only the
+ * first line is looked at, once; any text that does not have the shape comes back
+ * as the same string. Linear: one scan of the first line, one bounded scan of the
+ * body, no regular expression over the text.
+ */
+function dropHeadingLine(s: string): string {
+  const t = s.trimStart();
+  const nl = t.indexOf("\n");
+  if (nl < 0) return s;
+  const head = t.slice(0, nl).trim();
+  if (head.length < MIN_HEADING_LINE || head.length > MAX_HEADING_LINE) return s;
+  for (const ch of head) if (HEADING_LINE_MARKS.has(ch)) return s;
+  if (HEADING_LINE_OPEN_ENDS.has(head.charAt(head.length - 1))) return s;
+  // A bullet ("- X", "• X") is a sentence of the story, not a heading: the replay
+  // of 8,488 live summaries found two bullet lists (f85bc48e, 307cf42b) whose
+  // first bullet this step would have dropped. `head` is at most 140 characters.
+  if (LEADING_LIST_MARKER.test(head)) return s;
+  const rest = t.slice(nl + 1).trimStart();
+  if (!UPPER_TR_LETTER.test(rest.charAt(0))) return s;
+  return collapsedLengthReaches(rest, MIN_BODY_AFTER_HEADING) ? rest : `${head}. ${rest}`;
+}
+
 /**
  * Tidy a summary for display. Steps, in order:
  *   0. repair a text the ingest clamp or an outlet feed cap cut
@@ -773,6 +852,13 @@ function splitGluedHeadings(s: string): string {
  *      için 3 fırsat!"), also while the newlines are present. A cut that would
  *      leave nothing is not made, so a text that is only "\nSon dakika... X"
  *      still shows its X;
+ *   1d. drop a heading first line ({@link dropHeadingLine}, h30-live-1): 15 to
+ *      140 characters, none of ". ! ? : …", not ending in ", ; – — -", not
+ *      starting with a list marker, with a next line that starts with a capital
+ *      letter. The heading goes when the
+ *      rest is at least {@link MIN_BODY_AFTER_HEADING} characters long (blanks
+ *      collapsed), otherwise it stays as the first sentence ("<heading>. <rest>").
+ *      Only the first line is looked at, in one pass;
  *   2. collapse every whitespace run that contains a newline to one space;
  *   2b. peel leading noise: a "Son dakika |" / "Son dakika haberi:" / "Son dakika
  *      gelişmesi..." / "Son dakika haberine göre;" (or "göre,") ticker (at most
@@ -855,6 +941,10 @@ export function tidySummaryText(s: string): string {
   //     the text down to nothing.
   const withoutTicker = cutAppendedTicker(out);
   if (withoutTicker.trim() !== "") out = withoutTicker;
+
+  // 1d. A heading line on top of the body (h30-live-1), while the line breaks
+  //     are still there.
+  out = dropHeadingLine(out);
 
   // 2. Newlines (and the blanks around them) become one space. The lookbehind
   //    starts a match only at the beginning of a run of blanks, so a very long

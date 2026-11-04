@@ -74,17 +74,32 @@ function dominantZoneOf(distribution: BiasDistribution): MediaDnaZone | null {
 //   (with their sources), and the full 144-source directory for the
 //   MediaDNA grid. A naive implementation would do 4 sequential round-
 //   trips (cluster → cluster_articles → articles → sources). This module
-//   collapses that to two parallel round-trips by using a PostgREST
-//   embedded select for members (cluster_articles → articles → sources
-//   in one shot) and firing the sources directory query alongside it
-//   with Promise.all. Both selects also carry `kind` (aggregator/wire/
+//   collapses that to two round-trips by using a PostgREST embedded select
+//   for members (cluster_articles → articles → sources in one shot): the
+//   cluster row is read FIRST, then the members and the sources directory
+//   run in parallel. Both selects also carry `kind` (aggregator/wire/
 //   niche/outlet) so the page can partition voting vs non-voting members
 //   without a third round-trip; `allSources[i].kind` passes through the
 //   raw CHECK-constrained column, while every member's `source.kind` is
 //   normalized via `normalizeSourceKind` so it's always a real `SourceKind`.
 //
-//   Wrapped in `unstable_cache` with a 30s TTL keyed per cluster id so
-//   repeat hits within the TTL skip Supabase entirely.
+//   Why the cluster row goes first (h30-abuse-2): the route accepts any
+//   well-formed UUID, so an unknown id (or a flood of random ones) used to
+//   cost three PostgREST reads, including the 41 kB sources directory. A
+//   missing row now ends after ONE clusters read; a real-cluster miss pays
+//   one extra round-trip (row before members), which buys that single-read
+//   unknown path. The id is also lower-cased before it becomes a cache key,
+//   tag or filter, so `ABC…` and `abc…` share one remote-cache entry.
+//
+//   The sources directory is the same for every cluster, so it lives in its
+//   own parameterless `"use cache: remote"` body (getActiveSourceDirectoryCached,
+//   tag `sources`, `source-directory` life): it is read once per cache life,
+//   not once per cluster id. Nested inside the detail body, it also means a
+//   `revalidateTag("sources")` invalidates every cluster-detail entry that
+//   embedded the directory.
+//
+//   The detail body is wrapped in `"use cache: remote"` keyed per cluster id,
+//   so repeat hits skip Supabase entirely.
 //
 //   Reads run on the capped reader client (4 s, see createReaderClient):
 //   on a cold database a visitor gets a fast failure instead of an 8 s
@@ -269,47 +284,66 @@ type EmbeddedClusterArticleRow = {
   article: EmbeddedArticleRow | null;
 };
 
+// Columns of the sources directory read (see fetchActiveSourceDirectory).
+const SOURCE_DIRECTORY_COLUMNS =
+  "id, name, slug, url, rss_url, bias, logo_url, active, kind";
+
+// Raw, uncached read of the active sources directory (the MediaDNA grid's
+// "who exists" list). It THROWS on a query error so the cache body below can
+// pick a lifetime from the outcome via `attemptCached`; it is never called
+// from anywhere else.
+async function fetchActiveSourceDirectory(): Promise<Source[]> {
+  const supabase = createReaderClient();
+  const { data, error } = await supabase
+    .from("sources")
+    .select(SOURCE_DIRECTORY_COLUMNS)
+    .eq("active", true)
+    .order("name")
+    .returns<Source[]>();
+  if (error) {
+    throw new Error(`sources query failed: ${error.message}`);
+  }
+  return data ?? [];
+}
+
+// The active sources directory in its OWN cache entry (h30-abuse-2). It is the
+// same list for every cluster, so it must not be re-read (41 kB) per cluster id
+// or per cache variant of one. Parameterless on purpose: one remote-cache entry,
+// whatever the id. `cacheTag` first, then `attemptCached` (never rejects, so
+// nothing crosses the cache boundary), then exactly one `cacheLife`, picked from
+// the outcome: a directory keeps `source-directory`, a failed read is memoised
+// for `minutes` only. NO live retry of the directory: the failure marks the
+// detail `sourcesUnavailable`, which is itself cached for `minutes` only.
+// tests/guards/cache-life-after-attempt.test.ts pins this shape.
+async function getActiveSourceDirectoryCached() {
+  "use cache: remote";
+  cacheTag("sources");
+  const r = await attemptCached("cluster-detail-sources", fetchActiveSourceDirectory);
+  // One literal per call: Next 16.4 types cacheLife as single-literal overloads.
+  if (r.ok) cacheLife("source-directory");
+  else cacheLife("minutes");
+  return r;
+}
+
 // Internal (uncached) implementation. The exported `getClusterDetail`
 // wraps this with `unstable_cache` below.
 async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
   try {
     const supabase = createReaderClient();
 
-    // Two parallel round-trips:
-    //   (a) cluster row + its members (embedded articles + sources)
-    //   (b) full sources directory for MediaDNA
-    //
-    // (a) is actually two PostgREST calls fired in parallel inside the
-    // outer Promise.all — one for the cluster row and one for the
-    // embedded cluster_articles tree. We keep them split because a
-    // single embed from `clusters` would pull the same cluster columns
-    // back in every member row, and because a missing cluster needs to
-    // short-circuit with a `null` return before we render.
-    const [clusterRes, membersRes, sourcesRes] = await Promise.all([
-      supabase
-        .from("clusters")
-        .select(
-          "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived, merged_into"
-        )
-        .eq("id", id)
-        .maybeSingle<ClusterRow>(),
-      supabase
-        .from("cluster_articles")
-        .select(
-          `article:articles (
-             id, title, url, published_at, image_url, content_hash, description,
-             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, trustee_since, trustee_note )
-           )`
-        )
-        .eq("cluster_id", id)
-        .returns<EmbeddedClusterArticleRow[]>(),
-      supabase
-        .from("sources")
-        .select("id, name, slug, url, rss_url, bias, logo_url, active, kind")
-        .eq("active", true)
-        .order("name")
-        .returns<Source[]>(),
-    ]);
+    // Round-trip 1: the cluster row alone. A missing cluster must end here
+    // (h30-abuse-2): reading the members and the sources directory alongside
+    // it made an unknown UUID cost three reads. We keep the row and the
+    // embedded cluster_articles tree as separate calls because a single embed
+    // from `clusters` would pull the same cluster columns back in every
+    // member row.
+    const clusterRes = await supabase
+      .from("clusters")
+      .select(
+        "id, title_tr, title_tr_neutral, title_neutral_model, summary_tr, article_count, bias_distribution, is_blindspot, blindspot_side, blindspot_recall_veto, first_published, updated_at, is_archived, merged_into"
+      )
+      .eq("id", id)
+      .maybeSingle<ClusterRow>();
 
     if (clusterRes.error) {
       // Throw — returning null here reads as "no such cluster", the page
@@ -321,9 +355,26 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
       );
     }
     if (!clusterRes.data) {
-      // No such cluster — let the page call `notFound()`.
+      // No such cluster — let the page call `notFound()`. This is the whole
+      // cost of an unknown id: one clusters read.
       return null;
     }
+
+    // Round-trip 2: the members (embedded articles + sources) in parallel
+    // with the sources directory, which is its own cache entry.
+    const [membersRes, dir] = await Promise.all([
+      supabase
+        .from("cluster_articles")
+        .select(
+          `article:articles (
+             id, title, url, published_at, image_url, content_hash, description,
+             source:sources ( id, name, slug, url, rss_url, bias, logo_url, active, kind, image_allowed, excerpt_allowed, trustee_since, trustee_note )
+           )`
+        )
+        .eq("cluster_id", id)
+        .returns<EmbeddedClusterArticleRow[]>(),
+      getActiveSourceDirectoryCached(),
+    ]);
 
     if (membersRes.error) {
       // Members are the page's content — a memberless detail must not be
@@ -332,15 +383,12 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
         `[cluster-detail] members query error: ${membersRes.error.message}`
       );
     }
-    if (sourcesRes.error) {
+    if (!dir.ok) {
       // Supplemental only (MediaDna source-directory dimming) — degrade to
       // an empty list rather than failing the whole page. The result carries
       // `sourcesUnavailable: true`, which keeps it out of the long cache
       // window (getClusterDetailCached) and lets the page say so.
-      console.warn(
-        "[cluster-detail] sources query error:",
-        sourcesRes.error.message
-      );
+      console.warn("[cluster-detail] sources query error:", dir.error);
     }
 
     const clusterRow = clusterRes.data;
@@ -537,8 +585,8 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
             : null,
       },
       members: dedupedMembers,
-      allSources: sourcesRes.data ?? [],
-      sourcesUnavailable: sourcesRes.error !== null,
+      allSources: dir.ok ? dir.data : [],
+      sourcesUnavailable: !dir.ok,
       wire: wireSignalOf(
         dedupedMembers.map((m) => ({
           id: m.article.id,
@@ -571,8 +619,10 @@ async function fetchClusterDetail(id: string): Promise<ClusterDetail | null> {
 // of being pinned for the whole window. A detail whose sources-directory read
 // failed (`sourcesUnavailable`) is a degraded success: it gets `minutes` too,
 // so a transient blip in that one query is not pinned as "no sources" for the
-// whole `cluster-feed` window. Exactly one `cacheLife` call per invocation;
-// `cacheTag` comes first so the entry is tagged on every path.
+// whole `cluster-feed` window. Exactly one `cacheLife` call per invocation
+// (the nested directory body, getActiveSourceDirectoryCached, makes its own
+// one call on its own entry); `cacheTag` comes first so the entry is tagged on
+// every path. The nested directory body also tags this entry `sources`.
 //
 // The one piece of new logic in this body is the `at` stamp: the epoch ms of
 // the database read, so a cache hit can be remembered as a last-good value
@@ -625,10 +675,14 @@ export async function getClusterDetail(
   id: string
 ): Promise<ClusterDetail | null> {
   if (!UUID_RE.test(id)) return null;
+  // Fold case before the id becomes a cache key, tag, last-good key or filter:
+  // UUID_RE is case-insensitive, and `ABC…` / `abc…` are the same row
+  // (h30-abuse-2), so they must share one remote-cache entry.
+  const key = id.toLowerCase();
   return resolveCachedOrRetry(
-    { label: "cluster-detail", key: `cluster-detail:${id}`, remember: isCompleteDetail },
-    () => getClusterDetailCached(id),
-    () => fetchClusterDetail(id),
+    { label: "cluster-detail", key: `cluster-detail:${key}`, remember: isCompleteDetail },
+    () => getClusterDetailCached(key),
+    () => fetchClusterDetail(key),
     null,
   );
 }
@@ -659,10 +713,12 @@ export async function getClusterDetail(
 export const getClusterDetailOrThrow = cache(
   async (id: string): Promise<ClusterDetail | null> => {
     if (!UUID_RE.test(id)) return null;
+    // Same case fold as getClusterDetail (h30-abuse-2).
+    const key = id.toLowerCase();
     return resolveCachedOrThrow(
-      { label: "cluster-detail", key: `cluster-detail:${id}`, remember: isCompleteDetail },
-      () => getClusterDetailCached(id),
-      () => fetchClusterDetail(id),
+      { label: "cluster-detail", key: `cluster-detail:${key}`, remember: isCompleteDetail },
+      () => getClusterDetailCached(key),
+      () => fetchClusterDetail(key),
     );
   },
 );

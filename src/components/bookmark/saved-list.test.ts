@@ -6,13 +6,25 @@ import { describe, expect, it } from "vitest";
 
 import { BiasSpectrum } from "@/components/story/bias-spectrum";
 
-import { SavedEmptyState, SavedFrame, SavedList } from "./saved-list";
+import { SAVED_LOAD_FAILED_TEXT, SavedEmptyState, SavedFrame, SavedList, SavedLoadFailed } from "./saved-list";
 import { toSavedRowView } from "./saved-row";
 
 // Source guard (same approach as framing-game.test.tsx): saved-list.tsx must
 // not statically import supabase-js into the /saved route's bundle — it
 // should be pulled in lazily, inside the effect, only when there are
 // bookmarked ids to look up.
+/** Text content of static markup: a character scan, never a regular expression over the markup. */
+function textOf(markup: string): string {
+  let out = "";
+  let inTag = false;
+  for (const ch of markup) {
+    if (ch === "<") inTag = true;
+    else if (ch === ">") inTag = false;
+    else if (!inTag) out += ch;
+  }
+  return out.split(/\s+/).join(" ").trim();
+}
+
 describe("saved-list.tsx source", () => {
   const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
 
@@ -258,7 +270,86 @@ describe("SavedFrame / live region", () => {
   });
 });
 
+describe("SavedLoadFailed (h30-live-1)", () => {
+  it("exports the failure copy unchanged", () => {
+    expect(SAVED_LOAD_FAILED_TEXT).toBe("Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.");
+  });
+
+  it("renders a role=\"status\" element containing the failure copy", () => {
+    const markup = renderToStaticMarkup(createElement(SavedLoadFailed));
+    expect(markup).toContain(
+      '<p role="status" aria-live="polite" class="sr-only">Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.</p>',
+    );
+  });
+
+  it("shows the copy once visually and hides the duplicate from assistive technology", () => {
+    const markup = renderToStaticMarkup(createElement(SavedLoadFailed));
+    expect(markup).toContain(
+      '<p aria-hidden="true" class="text-sm text-muted-foreground">Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.</p>',
+    );
+    // The region and the visible paragraph: the text is in the markup twice.
+    expect(textOf(markup).split(SAVED_LOAD_FAILED_TEXT)).toHaveLength(3);
+    // Exactly one live region, and it is not the visible paragraph.
+    expect(markup.split('role="status"')).toHaveLength(2);
+  });
+
+  it("is the same markup as the SavedFrame the loading branch renders, with the copy as its announcement", () => {
+    expect(renderToStaticMarkup(createElement(SavedLoadFailed))).toBe(
+      renderToStaticMarkup(
+        createElement(
+          SavedFrame,
+          { announcement: SAVED_LOAD_FAILED_TEXT },
+          createElement("p", { "aria-hidden": "true", className: "text-sm text-muted-foreground" }, SAVED_LOAD_FAILED_TEXT),
+        ),
+      ),
+    );
+  });
+
+  it("called as a function it returns an element of type SavedFrame: the loading and the failed branch share a root, so React keeps the region mounted", () => {
+    const element = SavedLoadFailed();
+    expect(element.type).toBe(SavedFrame);
+    expect(element.props.announcement).toBe(SAVED_LOAD_FAILED_TEXT);
+    // A component element would have a different type and remount the region.
+    expect(createElement(SavedLoadFailed).type).not.toBe(SavedFrame);
+  });
+
+  it("contains no link or button", () => {
+    expect(renderToStaticMarkup(createElement(SavedLoadFailed))).not.toMatch(/<(a|button)[\s>]/i);
+  });
+});
+
 describe("SavedEmptyState", () => {
+  it("reads 'kartlarındaki yer imi simgesine' with the icon between two spaces (h30-live-1)", () => {
+    const markup = renderToStaticMarkup(createElement(SavedEmptyState, {}));
+    const paragraph = markup.slice(markup.indexOf("<p "));
+    expect(textOf(paragraph)).toBe("Hikâye kartlarındaki yer imi simgesine dokunarak favorilerinizi kaydedin.");
+    // The spaces are text around the icon, not margins on it.
+    expect(markup).toContain("Hikâye kartlarındaki <svg");
+    expect(markup).toContain("</svg> yer imi simgesine dokunarak");
+  });
+
+  it("hides the bookmark icon from assistive technology and drops the margin class", () => {
+    const markup = renderToStaticMarkup(createElement(SavedEmptyState, {}));
+    const svgAt = markup.indexOf("<svg");
+    expect(svgAt).toBeGreaterThan(-1);
+    const openTag = markup.slice(svgAt, markup.indexOf(">", svgAt) + 1);
+    expect(openTag).toContain('aria-hidden="true"');
+    expect(openTag).toContain("inline");
+    expect(openTag).toContain("h-3.5");
+    expect(openTag).toContain("w-3.5");
+    expect(openTag).toContain("align-[-2px]");
+    expect(openTag).not.toContain("mx-1");
+    expect(markup.split("<svg")).toHaveLength(2);
+  });
+
+  it("source: the icon sits between {\" \"} spaces with literal Tailwind classes", () => {
+    const src = readFileSync(join(__dirname, "saved-list.tsx"), "utf8");
+    expect(src).toContain('Hikâye kartlarındaki{" "}');
+    expect(src).toContain('<Bookmark aria-hidden="true" className="inline h-3.5 w-3.5 align-[-2px]" />');
+    expect(src).toMatch(/\/>\{" "\}\s*yer imi simgesine dokunarak/);
+    expect(src).not.toContain("mx-1");
+  });
+
   it("renders the heading as a script-focusable target (tabindex -1)", () => {
     const markup = renderToStaticMarkup(createElement(SavedEmptyState, {}));
     expect(markup).toMatch(/<h2 tabindex="-1"[^>]*>Henüz kaydettiğiniz bir hikâye yok<\/h2>/);
@@ -333,7 +424,7 @@ describe("saved-list.tsx focus handoff and announcements", () => {
     expect(component.match(/\btoggle\(/g)).toHaveLength(1);
   });
 
-  it("every return path of SavedList is wrapped in SavedFrame, so the live region never remounts", () => {
+  it("every JSX return path of SavedList is wrapped in SavedFrame, so the live region never remounts", () => {
     const lines = component.split("\n");
     // JSX returns of the component itself (indent <= 4: top level or one if-block
     // deep). The row callback's own return sits deeper, and `return;` / the
@@ -344,13 +435,43 @@ describe("saved-list.tsx focus handoff and announcements", () => {
       const t = line.trim();
       if (indent <= 4 && (t === "return (" || t.startsWith("return <"))) jsxReturns.push(i);
     });
-    // empty, loading, failed and list
-    expect(jsxReturns).toHaveLength(4);
+    // empty, loading and list; the failed branch returns SavedLoadFailed() (below).
+    expect(jsxReturns).toHaveLength(3);
     for (const i of jsxReturns) {
       expect(`${lines[i]}\n${lines[i + 1]}`).toContain("<SavedFrame announcement={announcement}>");
     }
-    expect(component.match(/<SavedFrame/g)).toHaveLength(4);
+    expect(component.match(/<SavedFrame/g)).toHaveLength(3);
     expect(component).not.toMatch(/return null/);
+  });
+
+  it("the failed branch returns SavedLoadFailed() in the SavedFrame position of the loading branch (h30-live-1)", () => {
+    const failedAt = component.indexOf("  if (failed) {");
+    expect(failedAt).toBeGreaterThan(-1);
+    const loadingAt = component.indexOf("  if (rows === null) {");
+    expect(loadingAt).toBeGreaterThan(-1);
+    // Loading comes first: the failed branch is reached from it.
+    expect(failedAt).toBeGreaterThan(loadingAt);
+    const body = component.slice(failedAt, component.indexOf("\n  }\n", failedAt));
+    // A plain call, not <SavedLoadFailed />: the element React compares against
+    // the loading branch is then a SavedFrame, the same type, so the status
+    // region is updated in place and the text is announced. An element of a new
+    // component type would unmount the region and mount it again with its text.
+    expect(body).toContain("return SavedLoadFailed();");
+    expect(body).not.toContain("<SavedLoadFailed");
+    expect(body).not.toContain("<p");
+    expect(body).not.toContain("<SavedFrame");
+  });
+
+  it("SavedLoadFailed itself returns the SavedFrame element, the one place the failure copy is rendered", () => {
+    const failedAt = code.indexOf("export function SavedLoadFailed");
+    expect(failedAt).toBeGreaterThan(-1);
+    const end = code.indexOf("\n}\n", failedAt);
+    const fn = code.slice(failedAt, end);
+    expect(fn).toContain("<SavedFrame announcement={SAVED_LOAD_FAILED_TEXT}>");
+    expect(fn).toContain('<p aria-hidden="true" className="text-sm text-muted-foreground">');
+    // The declaration, the announcement and the visible paragraph: one text, one constant.
+    expect(code.match(/SAVED_LOAD_FAILED_TEXT/g)).toHaveLength(3);
+    expect(src).toContain('export const SAVED_LOAD_FAILED_TEXT = "Kaydedilenler yüklenemedi. Lütfen sayfayı yenileyin.";');
   });
 
   it("has exactly one live region (inside SavedFrame)", () => {

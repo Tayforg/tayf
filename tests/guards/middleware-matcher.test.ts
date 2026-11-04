@@ -80,6 +80,17 @@ function staticHandlerBases(): string[] {
 }
 
 const STATIC_BASES = staticHandlerBases();
+
+/** The one non-string matcher shape in use: `{ source, has }` (gate 10, /_next/image). */
+interface MatcherObject {
+  source: string;
+  has?: readonly { type: string; key?: string; value?: string }[];
+}
+type MatcherEntry = string | MatcherObject;
+/** The plain-path entries; every rule below that reads a string runs over these. */
+const PATH_MATCHERS: string[] = config.matcher.filter((m): m is string => typeof m === "string");
+/** The only source an object entry may have, and why: it exists to carry a `has`. */
+const OBJECT_SOURCES = ["/_next/image"];
 /** The last segment of a static-handler entry after its base: '%' + a path-to-regexp param. */
 const SUFFIX = ":suffix";
 const ENTRY_TAIL = "%" + SUFFIX;
@@ -132,13 +143,33 @@ function findStartsWith(code: string, prefix: string): number {
 }
 
 /** Every rule violation for a (matcher, middleware source) pair. */
-function matcherViolations(matcher: readonly string[], source: string): string[] {
+function matcherViolations(matcher: readonly MatcherEntry[], source: string): string[] {
   const out: string[] = [];
   const code = blankComments(source);
   const adminIdx = code.indexOf(ADMIN_SCOPE_NEEDLE);
   if (adminIdx === -1) out.push(`admin-scope line ${ADMIN_SCOPE_NEEDLE} not found`);
 
-  for (const entry of matcher) {
+  for (const raw of matcher) {
+    if (typeof raw !== "string") {
+      // An object entry exists only to attach a `has` condition to /_next/image.
+      // Without one the middleware would run for every optimized image on the site
+      // (the CDN-cached hot path), so a missing `has` is a violation. It still
+      // needs its startsWith branch above the admin-scope line like any entry.
+      if (!OBJECT_SOURCES.includes(raw.source)) {
+        out.push(`${raw.source}: only ${OBJECT_SOURCES.join(", ")} may be an object entry`);
+      }
+      if (!Array.isArray(raw.has) || raw.has.length === 0) {
+        out.push(`${raw.source}: an object entry without a non-empty \`has\` matches every request`);
+      }
+      const idx = findStartsWith(code, raw.source);
+      if (idx === -1) {
+        out.push(`${raw.source}: no pathname.startsWith("${raw.source}") branch in middleware.ts`);
+      } else if (adminIdx !== -1 && idx > adminIdx) {
+        out.push(`${raw.source}: pathname.startsWith("${raw.source}") sits after the admin-scope line`);
+      }
+      continue;
+    }
+    const entry = raw;
     if (!entry.startsWith("/")) out.push(`${entry}: not an absolute literal path`);
     if (/[()?+{}]/.test(entry.replace(":path*", ""))) {
       out.push(`${entry}: uses regexp/modifier syntax`);
@@ -197,9 +228,9 @@ describe("middleware matcher — every entry has a gate", () => {
   });
 
   it("every entry is a literal path with single-segment params; :path* only in DECODE_ONLY_WILDCARDS", () => {
-    const wildcards = config.matcher.filter((m) => m.includes("*"));
+    const wildcards = PATH_MATCHERS.filter((m) => m.includes("*"));
     expect([...wildcards].sort()).toEqual([...DECODE_ONLY_WILDCARDS].sort());
-    for (const m of config.matcher) {
+    for (const m of PATH_MATCHERS) {
       expect(m.startsWith("/"), m).toBe(true);
       expect(m, m).not.toMatch(/[()?+{}]/);
     }
@@ -270,7 +301,7 @@ describe("middleware matcher — behaviour under Next's own matcher (getPathMatc
   });
 
   it("the real matcher list leaves the bare list/index routes alone", () => {
-    const hit = (path: string) => config.matcher.some((m) => matches(m, path));
+    const hit = (path: string) => PATH_MATCHERS.some((m) => matches(m, path));
     for (const path of ["/hafta", "/api/sources", "/rss", "/rozet", "/sitemaps", "/rapor", "/hikaye"]) {
       expect(hit(path), path).toBe(false);
     }
@@ -306,7 +337,7 @@ describe("middleware matcher — behaviour under Next's own matcher (getPathMatc
       "/embed",
     ]) {
       expect(
-        config.matcher.some((m) => matches(m, path)),
+        PATH_MATCHERS.some((m) => matches(m, path)),
         path,
       ).toBe(true);
       const res = await middleware(new NextRequest(`https://www.tayfhaber.com${path}`));
@@ -328,7 +359,7 @@ describe("middleware matcher — behaviour under Next's own matcher (getPathMatc
 });
 
 describe("middleware matcher — static route handlers (h17-contracts-1)", () => {
-  const suffixEntries = config.matcher.filter((m) => m.endsWith(SUFFIX));
+  const suffixEntries = PATH_MATCHERS.filter((m) => m.endsWith(SUFFIX));
   const isHandlerEntry = (m: string) => m.endsWith(ENTRY_TAIL);
 
   it("walks a non-vacuous set of static handlers, /api/v1 children excluded", () => {
@@ -372,7 +403,7 @@ describe("middleware matcher — static route handlers (h17-contracts-1)", () =>
       // The suffix entries never match a nested path or the bare handler. (Other
       // entries may: '/api/sources/:slug' matches '/api/sources/x', and the
       // '/api/v1/:path*' wildcard matches the bare /api/v1.)
-      const own = config.matcher.filter(isHandlerEntry);
+      const own = PATH_MATCHERS.filter(isHandlerEntry);
       expect(own.some((m) => getPathMatch(m)(base + "/x") !== false), base + "/x").toBe(false);
       expect(own.some((m) => getPathMatch(m)(base) !== false), base).toBe(false);
       if (base === "/api/v1") {
@@ -407,6 +438,67 @@ describe("middleware matcher — static route handlers (h17-contracts-1)", () =>
       expect(m.split(":").length, `${m}: exactly one param`).toBe(2);
       expect(m, m).not.toMatch(/[()?+{}*]/);
     }
+  });
+});
+
+describe("middleware matcher — /_next/image fragment gate (h30-abuse-4 follow-up)", () => {
+  const imageUrl = (url: string, extra = "") =>
+    `${ORIGIN}/_next/image?url=${encodeURIComponent(url)}&w=640&q=75${extra}`;
+  const doesMatch = (url: string) =>
+    unstable_doesMiddlewareMatch({ config, url, nextConfig: {} });
+
+  it("is the single object entry, on /_next/image, with a query `has` on url", () => {
+    const objects = config.matcher.filter((m): m is Exclude<typeof m, string> => typeof m !== "string");
+    expect(objects).toHaveLength(1);
+    const [entry] = objects;
+    expect(entry?.source).toBe("/_next/image");
+    expect(entry?.has).toHaveLength(1);
+    expect(entry?.has?.[0]).toMatchObject({ type: "query", key: "url" });
+  });
+
+  it("matches only an image request whose decoded url contains '#'", () => {
+    for (const url of [
+      "https://a.sozcucdn.com/a.jpg#1",
+      "https://a.sozcucdn.com/a.jpg#2",
+      "https://img.piri.net/x.jpg#frag",
+      "https://a.sozcucdn.com/a.jpg?cb=1#1",
+      "https://a.sozcucdn.com/a.jpg#",
+      "/logo.png#1",
+      // a newline before the '#' must not hide it from the value regexp
+      "https://a.sozcucdn.com/a.jpg\n#1",
+    ]) {
+      expect(doesMatch(imageUrl(url)), url).toBe(true);
+    }
+  });
+
+  it("leaves every ordinary image request alone (the CDN-cached hot path never pays for the middleware)", () => {
+    for (const url of [
+      "https://a.sozcucdn.com/a.jpg",
+      "https://ia.tmgrup.com.tr/a/1/2?u=https://i.tmgrup.com.tr/x.jpeg",
+      "https://www.google.com/s2/favicons?domain=x&sz=64",
+      "https://a.sozcucdn.com/a.jpg?",
+      "/logo.png",
+    ]) {
+      expect(doesMatch(imageUrl(url)), url).toBe(false);
+    }
+    expect(doesMatch(`${ORIGIN}/_next/image`)).toBe(false);
+    expect(doesMatch(`${ORIGIN}/_next/image?w=640&q=75`)).toBe(false);
+  });
+
+  it("a '#' in another query key or on another path does not reach it", () => {
+    // `w` and `q` are not `url`; the optimizer rejects them itself.
+    expect(doesMatch(`${ORIGIN}/_next/image?url=${encodeURIComponent("https://a.sozcucdn.com/a.jpg")}&w=640%23&q=75`)).toBe(false);
+    // The object entry's source is exactly /_next/image: no other path gets the gate.
+    expect(doesMatch(`${ORIGIN}/_next/static/chunks/a.js?url=${encodeURIComponent("x#1")}`)).toBe(false);
+    expect(doesMatch(`${ORIGIN}/hakkinda?url=${encodeURIComponent("x#1")}`)).toBe(false);
+    expect(doesMatch(`${ORIGIN}/_next/image/extra?url=${encodeURIComponent("x#1")}`)).toBe(false);
+  });
+
+  it("answers the matched requests with the 400, and nothing else is changed for the unmatched ones", async () => {
+    const hit = await middleware(new NextRequest(imageUrl("https://a.sozcucdn.com/a.jpg#1")));
+    expect(hit.status).toBe(400);
+    const miss = await middleware(new NextRequest(imageUrl("https://a.sozcucdn.com/a.jpg")));
+    expect(miss.headers.get("x-middleware-next")).toBe("1");
   });
 });
 
@@ -546,6 +638,58 @@ describe("middleware matcher guard — the finder itself (mutation tests)", () =
       // The one shared call covers every suffix entry; no branch for '/rss.xml' exists.
       expect(WITH_CALL).not.toContain('startsWith("/rss.xml")');
       expect(matcherViolations(["/admin/:path*", "/rss.xml:suffix", "/sitemap.xml:suffix"], WITH_CALL)).toEqual([]);
+    });
+  });
+
+  describe("object entries ({ source, has })", () => {
+    const WITH_IMAGE = [
+      "export async function middleware(req) {",
+      '  if (pathname.startsWith("/_next/image")) return NextResponse.next();',
+      '  const lower = pathname.toLowerCase();',
+      '  if (lower !== "/admin" && !lower.startsWith("/admin/")) return notFoundRewrite(req);',
+      "}",
+    ].join("\n");
+    const HAS = [{ type: "query", key: "url", value: "[\\s\\S]*#[\\s\\S]*" }];
+
+    it("accepts /_next/image with a has and its startsWith branch above the admin-scope line", () => {
+      expect(
+        matcherViolations(["/admin/:path*", { source: "/_next/image", has: HAS }], WITH_IMAGE),
+      ).toEqual([]);
+    });
+
+    it("flags an object entry with no has (it would run the middleware for every image)", () => {
+      for (const entry of [{ source: "/_next/image" }, { source: "/_next/image", has: [] }]) {
+        const v = matcherViolations(["/admin/:path*", entry], WITH_IMAGE);
+        expect(v).toHaveLength(1);
+        expect(v[0]).toContain("without a non-empty `has`");
+      }
+    });
+
+    it("flags an object entry on any other source", () => {
+      const v = matcherViolations(
+        ["/admin/:path*", { source: "/foo", has: HAS }],
+        WITH_IMAGE.replace("/_next/image", "/foo"),
+      );
+      expect(v).toHaveLength(1);
+      expect(v[0]).toContain("may be an object entry");
+    });
+
+    it("flags a missing, commented-out or late startsWith branch", () => {
+      const entry = { source: "/_next/image", has: HAS };
+      const missing = WITH_IMAGE.replace('  if (pathname.startsWith("/_next/image")) return NextResponse.next();\n', "");
+      expect(matcherViolations(["/admin/:path*", entry], missing).join("|")).toContain(
+        'no pathname.startsWith("/_next/image") branch',
+      );
+      const commented = WITH_IMAGE.replace(
+        '  if (pathname.startsWith("/_next/image")) return NextResponse.next();',
+        '  // if (pathname.startsWith("/_next/image")) return NextResponse.next();',
+      );
+      expect(matcherViolations(["/admin/:path*", entry], commented)).toHaveLength(1);
+      const lines = WITH_IMAGE.split("\n");
+      const moved = [lines[0], lines[2], lines[3], lines[1], lines[4]].join("\n");
+      expect(matcherViolations(["/admin/:path*", entry], moved).join("|")).toContain(
+        "after the admin-scope line",
+      );
     });
   });
 

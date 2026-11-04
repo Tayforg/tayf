@@ -119,9 +119,64 @@ describe("middleware — /source/:slug gate", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("leaves nested /source/<slug>/opengraph-image alone", async () => {
-    const res = await middleware(req("/source/cnn-turk/opengraph-image"));
+  // h30-abuse-5: the social-image routes under /source/<slug>/ render a PNG on
+  // demand for ANY slug, so they now answer through the same slug gate as the
+  // page; the 404 is an empty, briefly cacheable response (no rewrite to the
+  // not-found sink, which would render a full page for an image URL).
+  it.each(["opengraph-image", "twitter-image"])(
+    "answers 404 with an empty cacheable body for /source/<unknown>/%s, no rewrite",
+    async (sub) => {
+      const res = await middleware(req(`/source/nonexistent-src/${sub}`));
+      expect(res.status).toBe(404);
+      expect(await res.text()).toBe("");
+      expect(res.headers.get("cache-control")).toBe("public, s-maxage=300");
+      expect(res.headers.get("x-middleware-rewrite")).toBeNull();
+      expect(res.headers.get("x-middleware-next")).toBeNull();
+    },
+  );
+
+  it.each(["opengraph-image", "twitter-image"])(
+    "passes /source/<known>/%s through",
+    async (sub) => {
+      const res = await middleware(req(`/source/cnn-turk/${sub}`));
+      expect(res.headers.get("x-middleware-next")).toBe("1");
+      expect(res.status).toBe(200);
+    },
+  );
+
+  it("404s a malformed slug under the image routes without the slug lookup", async () => {
+    const res = await middleware(req("/source/Bad_Slug!/opengraph-image"));
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("public, s-maxage=300");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves any other nested /source/<slug>/<sub> decode-only, with no fetch", async () => {
+    for (const path of ["/source/cnn-turk/other-sub", "/source/nonexistent-src/other-sub"]) {
+      const res = await middleware(req(path));
+      expect(res.headers.get("x-middleware-next"), path).toBe("1");
+      expect(res.status, path).toBe(200);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a longer sub-path as an image route (/opengraph-image/extra stays decode-only)", async () => {
+    const res = await middleware(req("/source/nonexistent-src/opengraph-image/extra"));
     expect(res.headers.get("x-middleware-next")).toBe("1");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("a malformed encoding under an image route is still the 400 from decodeOnly, with no fetch", async () => {
+    for (const path of [
+      "/source/cnn-turk/opengraph-image%E0%A4%A",
+      "/source/%ff/opengraph-image",
+      "/source/cnn-turk%ff/twitter-image",
+    ]) {
+      const res = await middleware(req(path));
+      expect(res.status, path).toBe(400);
+      expect(res.headers.get("cache-control"), path).toBe("no-store");
+      expect(await res.text(), path).toBe("Bad request: malformed URL encoding");
+    }
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -134,6 +189,20 @@ describe("middleware — /source/:slug gate", () => {
     const res = await fresh(req("/source/some-other-src"));
     expect(res.headers.get("x-middleware-next")).toBe("1");
   });
+
+  it.each(["opengraph-image", "twitter-image"])(
+    "fails open on the %s route when the lookup errors (verdict 'unknown')",
+    async (sub) => {
+      fetchMock.mockReset();
+      fetchMock.mockRejectedValue(new Error("down"));
+      vi.resetModules();
+      const { middleware: fresh } = await import("@/middleware");
+      const res = await fresh(req(`/source/some-other-src/${sub}`));
+      expect(res.headers.get("x-middleware-next")).toBe("1");
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalled();
+    },
+  );
 
   it("matcher has /source/:slug and never /source/:path*", () => {
     expect(config.matcher).toContain("/source/:slug");
@@ -558,5 +627,85 @@ describe("middleware — admin scope", () => {
     const redirectNeedle = 'NextResponse.redirect(new URL("/admin/login"';
     expect(code.split(redirectNeedle).length - 1).toBe(1);
     expect(code.indexOf(redirectNeedle)).toBeGreaterThan(scopeIdx);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// h30-abuse-4 follow-up: Next's remotePatterns cannot see a URL fragment
+// (`URL.search` is "" for `#N`), and the optimizer keeps it in the href that
+// becomes the cache key. `/_next/image?url=<allowed>/a.jpg%23N` was therefore a
+// fresh origin fetch + transform + cache write per N, although fetch() drops the
+// fragment and the origin serves the same bytes. The matcher entry
+// `{ source: '/_next/image', has: [{ query url contains '#' }] }` sends only
+// those requests to the middleware, which refuses them before the optimizer.
+// ---------------------------------------------------------------------------
+describe("middleware — /_next/image URL fragment gate", () => {
+  const image = (url: string) =>
+    `/_next/image?url=${encodeURIComponent(url)}&w=640&q=75`;
+
+  it.each([
+    "https://a.sozcucdn.com/a.jpg#1",
+    "https://a.sozcucdn.com/a.jpg#2",
+    "https://img.piri.net/x.jpg#frag",
+    "https://a.sozcucdn.com/a.jpg?cb=1#1",
+    "https://a.sozcucdn.com/a.jpg#",
+    "/logo.png#1",
+  ])("answers an uncacheable 400 for a fragment in url: %s", async (url) => {
+    const res = await middleware(req(image(url)));
+    expect(res.status).toBe(400);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(res.headers.get("content-type")).toContain("text/plain");
+    expect(res.headers.get("x-middleware-next")).toBeNull();
+    await expect(res.text()).resolves.toContain("fragment");
+  });
+
+  it("refuses a fragment even when a newline hides it from a dot-regexp", async () => {
+    const res = await middleware(req(image("https://a.sozcucdn.com/a.jpg\n#1")));
+    expect(res.status).toBe(400);
+  });
+
+  it("refuses when any repeated url value carries a fragment", async () => {
+    const res = await middleware(
+      req(`/_next/image?url=${encodeURIComponent("https://a.sozcucdn.com/a.jpg")}&url=${encodeURIComponent("https://a.sozcucdn.com/b.jpg#1")}&w=640&q=75`),
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("passes a fragment-free image URL through untouched (query hosts keep their ?query)", async () => {
+    for (const url of [
+      "https://a.sozcucdn.com/a.jpg",
+      "https://ia.tmgrup.com.tr/a/1/2?u=https://i.tmgrup.com.tr/x.jpeg",
+      "https://www.google.com/s2/favicons?domain=x&sz=64",
+    ]) {
+      const res = await middleware(req(image(url)));
+      expect(res.headers.get("x-middleware-next"), url).toBe("1");
+      expect(res.status, url).toBe(200);
+    }
+  });
+
+  it("passes a request with no url param through (the optimizer answers its own 400)", async () => {
+    const res = await middleware(req("/_next/image?w=640&q=75"));
+    expect(res.headers.get("x-middleware-next")).toBe("1");
+  });
+
+  it("does no I/O", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      await middleware(req(image("https://a.sozcucdn.com/a.jpg#1")));
+      await middleware(req(image("https://a.sozcucdn.com/a.jpg")));
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("the branch sits above the admin-scope line (a bare /_next/image can never reach the 404 sink)", () => {
+    const code = blankComments(
+      readFileSync(resolve(__dirname, "../../src/middleware.ts"), "utf8"),
+    );
+    const at = code.indexOf('pathname.startsWith("/_next/image")');
+    expect(at).toBeGreaterThan(-1);
+    expect(at).toBeLessThan(code.indexOf('lower.startsWith("/admin/")'));
   });
 });

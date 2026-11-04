@@ -221,11 +221,13 @@ describe("middleware config — encoding gate matchers", () => {
   });
 
   it("allows a wildcard only for the admin scope and the two catch-all route dirs", () => {
-    for (const m of config.matcher) {
+    // The one object entry (gate 10, /_next/image + has) is a plain path with no wildcard.
+    const paths = config.matcher.filter((m): m is string => typeof m === "string");
+    for (const m of paths) {
       if (DECODE_ONLY_WILDCARDS.includes(m)) continue;
       expect(m, m).not.toContain("*");
     }
-    expect(config.matcher.filter((m) => m.includes("*")).sort()).toEqual([...DECODE_ONLY_WILDCARDS].sort());
+    expect(paths.filter((m) => m.includes("*")).sort()).toEqual([...DECODE_ONLY_WILDCARDS].sort());
   });
 });
 

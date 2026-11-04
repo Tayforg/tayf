@@ -62,9 +62,15 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     added via /admin never 404s off a stale set) and negative-caches
 //     misses for 60 s. Any lookup failure ("unknown") fails open to the
 //     page's own soft 404 with noindex. The gate's matcher is the literal
-//     segment "/source/:slug" — never ":path*" — so /source/<slug>/
-//     opengraph-image and /twitter-image never reach the slug check; they are
-//     matched by '/source/:slug/:sub' and only get gate 8's decode-only answer.
+//     segment "/source/:slug" — never ":path*" — so the nested routes are
+//     matched by '/source/:slug/:sub' instead. Of those, only the two social
+//     images (/source/<slug>/opengraph-image and /twitter-image, the exact path
+//     Next puts in og:image; its content hash is a query string) use the slug
+//     check, because they render a PNG on demand for ANY slug (h30-abuse-5): an
+//     unknown slug gets an empty 404 with `public, s-maxage=300` (no rewrite: an
+//     image URL must not render a page), a lookup failure fails open to the
+//     route. Every other nested path stays on gate 8's decode-only answer, with
+//     no lookup.
 //
 //  5. /admin/:path* (except /admin/login) — unauthenticated requests get a
 //     real 307 to /admin/login here. The (protected) layout's own
@@ -149,6 +155,23 @@ import { isServableWeekKey } from "@/lib/weekly/week-key";
 //     hot gates above never pay for it. tests/guards/middleware-matcher.test.ts
 //     walks src/app and fails when a static handler is not listed, and proves the
 //     compiled matcher with Next's own unstable_doesMiddlewareMatch.
+//
+// 10. /_next/image with a '#' in its `url` (h30-abuse-4 follow-up). Next's
+//     remotePatterns compare `URL.search` and cannot see a fragment, and the
+//     optimizer hashes the URL WITH its fragment into the cache key, so
+//     `?url=<allowed host>/a.jpg%23N` was a fresh origin fetch + transform +
+//     cache write per N (fetch() drops the fragment: the origin serves the same
+//     bytes every time). The matcher entry is the one object entry,
+//     `{ source: '/_next/image', has: [{ type: 'query', key: 'url', value: <any
+//     string containing '#'> }] }`, so the middleware runs for those requests
+//     ONLY: an ordinary image request (the CDN-cached hot path) never pays for
+//     it. Such a request answers an uncacheable 400 before the optimizer. No
+//     I/O. isAllowedRemoteImageUrl (src/lib/images/remote-image-hosts.ts)
+//     refuses a '#' too, so the render side never emits one. The value regexp
+//     is [\s\S]*#[\s\S]*, not .*#.*: a '.' does not match a newline, which
+//     the URL parser strips, and `a.jpg\n#1` would otherwise slip past.
+//     tests/guards/middleware-matcher.test.ts pins the entry under Next's own
+//     matcher.
 //
 // The only clock read is Date.now() in gate 7. It runs per request in the Edge
 // middleware, never during prerender, and nothing here does any I/O.
@@ -276,6 +299,15 @@ export const config = {
     "/rss.xml%:suffix",
     "/sitemap.xml%:suffix",
     "/sw.js%:suffix",
+    // Gate 10: the one object entry. `has` keeps the middleware off every ordinary
+    // /_next/image request; only a `url` containing '#' reaches it. The value is a
+    // regexp matched against the whole decoded `url`; [\s\S] (not '.') so a
+    // newline before the '#' cannot hide it. A literal object on purpose: Next
+    // analyses this config statically.
+    {
+      source: "/_next/image",
+      has: [{ type: "query", key: "url", value: "[\\s\\S]*#[\\s\\S]*" }],
+    },
   ],
 };
 
@@ -418,17 +450,39 @@ function badEncoding(kind: BadEncodingKind): NextResponse {
   });
 }
 
+const IMAGE_FRAGMENT_MESSAGE = "Bad request: image URL must not contain a fragment";
+
+/**
+ * Gate 10's answer: an uncacheable 400, so the refusal is never stored under a
+ * URL the next variant would not hit anyway. No I/O.
+ */
+function imageFragmentRefused(): NextResponse {
+  return new NextResponse(IMAGE_FRAGMENT_MESSAGE, {
+    status: 400,
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Robots-Tag": "noindex",
+    },
+  });
+}
+
 /**
  * Gate 8 for a route that has no other edge gate: the path decodes (and passes
  * through untouched) or it answers 400. No I/O, no auth, no other work.
  */
 function decodeOnly(pathname: string, kind: BadEncodingKind): NextResponse {
+  return pathDecodes(pathname) ? NextResponse.next() : badEncoding(kind);
+}
+
+/** True when the whole pathname percent-decodes (no malformed '%' escape). */
+function pathDecodes(pathname: string): boolean {
   try {
     decodeURIComponent(pathname);
+    return true;
   } catch {
-    return badEncoding(kind);
+    return false;
   }
-  return NextResponse.next();
 }
 
 function base64UrlEncode(bytes: Uint8Array): string {
@@ -569,6 +623,14 @@ async function verifyAdminToken(
 export async function middleware(req: NextRequest, event?: NextFetchEvent): Promise<NextResponse> {
   const { pathname } = req.nextUrl;
 
+  // Gate 10. The matcher sends only a `url` containing '#' here; a request that
+  // somehow arrives without one passes through to the optimizer untouched.
+  if (pathname.startsWith("/_next/image")) {
+    return req.nextUrl.searchParams.getAll("url").some((u) => u.includes("#"))
+      ? imageFragmentRefused()
+      : NextResponse.next();
+  }
+
   if (pathname.startsWith("/konu/")) {
     const slug = pathname.slice("/konu/".length);
     if (slug === "politika") return NextResponse.redirect(new URL("/", req.url), 308);
@@ -607,11 +669,34 @@ export async function middleware(req: NextRequest, event?: NextFetchEvent): Prom
   }
 
   if (pathname.startsWith("/source/")) {
-    const slug = pathname.slice("/source/".length);
-    // /source/<slug>/opengraph-image and /twitter-image: decode-only, no slug lookup.
-    if (slug.includes("/")) return decodeOnly(pathname, "text");
+    const rest = pathname.slice("/source/".length);
+    const slash = rest.indexOf("/");
+    if (slash !== -1) {
+      // A nested path: /source/<slug>/<sub>. Only the two social-image routes
+      // are gated (h30-abuse-5): they render a PNG on demand for ANY slug, so
+      // an unknown one is answered here, before the render. Everything else
+      // stays decode-only with no lookup.
+      const head = rest.slice(0, slash);
+      const sub = rest.slice(slash + 1);
+      if (sub !== "opengraph-image" && sub !== "twitter-image") {
+        return decodeOnly(pathname, "text");
+      }
+      // A malformed escape is the 400 of gate 8, whatever the slug is: check it
+      // first, so a bad encoding never reaches the lookup.
+      if (!pathDecodes(pathname)) return badEncoding("text");
+      // An image URL has no page chrome to show: an empty 404, cacheable for a
+      // few minutes so a flood of one bad slug is answered by the CDN. Fail
+      // open as the page does: "unknown" (lookup failed) and "exists" both
+      // continue to the image route.
+      return (await sourceGate.check(head)) === "missing"
+        ? new NextResponse(null, {
+            status: 404,
+            headers: { "cache-control": "public, s-maxage=300" },
+          })
+        : NextResponse.next();
+    }
     // Fail open: "unknown" falls through to the page's own soft 404.
-    return (await sourceGate.check(slug)) === "missing"
+    return (await sourceGate.check(rest)) === "missing"
       ? notFoundRewrite(req)
       : NextResponse.next();
   }
